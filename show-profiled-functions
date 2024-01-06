@@ -1,0 +1,43 @@
+#!/usr/bin/env python
+# coding=utf8
+
+import argparse
+import subprocess
+import os
+
+def pad(string, maxLength):
+    if len(string) > maxLength:
+        return string[:maxLength - 1] + u"…"
+    return string.ljust(maxLength)
+
+def shell(command):
+    process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return process.communicate()[0].strip()
+
+def shortened(name):
+    return name if len(name) < 200 else name[0:99] + u"…" + name[-98:]
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Dumps function names in a given .profraw file, sorted in descending order by function count")
+    parser.add_argument("file", help="Path to the .profraw file")
+    args = parser.parse_args()
+    if os.path.isfile(args.file):
+        profilePath = args.file
+    else:
+        print("No file at %s" % args.file)
+        exit()
+
+    rawOutput = shell("xcrun -sdk macosx llvm-profdata show --all-functions --value-cutoff=10 %s | c++filt -n" % args.file)
+    lines = rawOutput.split(b"\n")
+    countsAndFunctions = []
+
+    for lineNumber in range(len(lines)):
+        line = lines[lineNumber].strip()
+        if line.startswith(b"Function count: "):
+            functionCount = int(line.split()[-1])
+            functionSymbol = lines[lineNumber - 3].strip()[:-1].decode("utf-8")
+            countsAndFunctions.append((functionCount, functionSymbol))
+
+    countsAndFunctions.sort(reverse=True)
+    for count, name in countsAndFunctions:
+        print("%s%s" % (pad(str(count), 15), shortened(name)))

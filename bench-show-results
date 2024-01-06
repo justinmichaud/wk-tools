@@ -1,0 +1,3 @@
+cd /Volumes/WebKit/ReleaseVersion/OpenSource/
+
+./Tools/Scripts/compare-results -a ~/Desktop/ToT*.result -b ~/Desktop/Patched*.result --detailed-breakdown

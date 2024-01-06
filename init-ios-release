@@ -1,0 +1,6 @@
+#!/bin/bash
+
+export BUILDDIR="/Volumes/WebKit/iOSRelease/OpenSource"
+export CONFIG="Release"
+export PATH=$HOME/bin:$BUILDDIR/Tools/Scripts:$BUILDDIR/../Internal/Tools/Scripts:$PATH
+cd $BUILDDIR/../Internal

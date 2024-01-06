@@ -1,0 +1,6 @@
+#!/bin/bash
+
+export BUILDDIR="/home/justin/WebKit/DebugVersion/OpenSource"
+export CONFIG="Debug"
+export PATH=$HOME/bin:$BUILDDIR/Tools/Scripts:$BUILDDIR/Tools/Scripts:${HOME}/.jsvu:/Volumes/WebKit/wabt/bin/:$PATH
+cd $BUILDDIR

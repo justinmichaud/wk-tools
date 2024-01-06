@@ -1,0 +1,12 @@
+rm -rf ~/Desktop/Patched*
+rm -rf ~/Desktop/ToT*
+
+cd /Volumes/WebKit/ReleaseVersion/OpenSource/
+
+for ((i = 0; i < 10; i++)); do
+    rm bench.result
+    ./Tools/Scripts/run-benchmark --plan jetstream2 --out bench.result --build-directory /Volumes/WebKit/ReleaseVersion/OpenSource/WebKitBuild/Release
+    mv bench.result ~/Desktop/Patched$i.result
+    ./Tools/Scripts/run-benchmark --plan jetstream2  --out bench.result --build-directory /Volumes/WebKit/ReleaseVersion/OpenSource/WebKitBuildBaseline/Release
+    mv bench.result ~/Desktop/ToT$i.result
+done

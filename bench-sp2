@@ -1,0 +1,12 @@
+rm -rf ~/Desktop/Patched*
+rm -rf ~/Desktop/ToT*
+
+cd /Volumes/WebKit/ReleaseVersion/OpenSource/
+
+for ((i = 0; i < 2; i++)); do
+    rm speedometer2.result
+    ./Tools/Scripts/run-benchmark --plan speedometer2 --build-directory /Volumes/WebKit/ReleaseVersion/OpenSource/WebKitBuild/Release --local-copy /Volumes/WebKit/ReleaseVersion/OpenSource/PerformanceTests/Speedometer/
+    mv speedometer2.result ~/Desktop/Patched$i.result
+    ./Tools/Scripts/run-benchmark --plan speedometer2  --build-directory /Volumes/WebKit/ReleaseVersion/OpenSource/WebKitBuildBaseline/Release --local-copy /Volumes/WebKit/ReleaseVersion/OpenSource/PerformanceTests/Speedometer/
+    mv speedometer2.result ~/Desktop/ToT$i.result
+done

@@ -1,0 +1,3 @@
+#!/bin/bash
+
+git fetch justinmichaud && git fetch origin && git checkout main && git rebase justinmichaud/main && git push justinmichaud main && git status

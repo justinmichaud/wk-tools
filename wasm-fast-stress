@@ -1,0 +1,3 @@
+export VM=$BUILDDIR/WebKitBuild/$CONFIG/
+export CONFIG_LOW=`echo $CONFIG | tr "[:upper:]" "[:lower:]"`
+DYLD_FRAMEWORK_PATH=$VM $BUILDDIR/Tools/Scripts/run-jsc-stress-tests --$CONFIG_LOW JSTests/wasm.yaml "$@" 2>&1 | sed 's/\\//g'

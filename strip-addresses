@@ -1,0 +1,3 @@
+#!/bin/bash
+# usage: jscr blah.js --useConcurrentJIT=0 --dumpDisassembly=1 2>&1 | strip-addresses > ~/Desktop/out.out
+sed -e 's/0x[0-9a-f]*//g' -e 's/\$[0-9a-f]*//g' -e 's/<[0-9a-f]*>//g' 

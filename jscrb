@@ -1,0 +1,3 @@
+export VM=$BUILDDIR/WebKitBuildBaseline/$CONFIG/
+#DYLD_FRAMEWORK_PATH=$VM $VM/jsc --jitAllowlist=/Volumes/WebKit/Custom/whitelist --useConcurrentGC=0 --useConcurrentJIT=0 --reportCompileTimes=1 "$@"
+DYLD_FRAMEWORK_PATH=$VM $VM/jsc --validateOptions=1 "$@"

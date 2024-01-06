@@ -1,0 +1,4 @@
+export VM=$BUILDDIR/WebKitBuild/$CONFIG/
+export TESTROOT=$BUILDDIR/JSTests/wasm/stress
+cd $TESTROOT
+v8 --module ../../../"$@" 

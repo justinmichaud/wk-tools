@@ -1,0 +1,16 @@
+#!/bin/bash
+
+cd $BUILDDIR
+
+echo $BUILDDIR
+
+if [[ "$CONFIG" == "Release" ]]
+then
+    echo "Building release"
+    ./Tools/Scripts/set-webkit-configuration --release
+    ./Tools/Scripts/build-jsc --release --export-compile-commands | filter-build-webkit
+else
+    echo "Building debug"
+    ./Tools/Scripts/set-webkit-configuration --debug
+    ./Tools/Scripts/build-webkit --jsc-only --debug --export-compile-commands  | filter-build-webkit
+fi

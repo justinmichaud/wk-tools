@@ -1,0 +1,29 @@
+rm -rf ~/Desktop/Patched*
+rm -rf ~/Desktop/ToT*
+rm -f ~/Desktop/bench.result
+
+TOT=/Volumes/WebKit/ReleaseVersion/OpenSource/
+JS2TESTS="dumpJSONResults=true; testList = ['8bitbench-wasm'];"
+cd $TOT/../Internal/Tests/InternalJSTests/JetStream3/
+
+for ((i = 0; i < 20; i++)); do
+    echo "Iteration $i"
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --minCasesForTable=7 -e "$JS2TESTS" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/A_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --minCasesForTable=10 -e "$JS2TESTS" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/B_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --minCasesForTable=4 -e "$JS2TESTS" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/C_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --minCasesForDenseTable=2 -e "$JS2TESTS" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/D_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --minCasesForDenseTable=4 -e "$JS2TESTS" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/E_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --minCasesForDenseTable=3 --minDensityForTable=10 -e "$JS2TESTS" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/F_$i.result
+    rm ~/Desktop/bench.result
+done

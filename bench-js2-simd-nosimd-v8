@@ -1,0 +1,19 @@
+rm -rf ~/Desktop/Patched*
+rm -rf ~/Desktop/ToT*
+rm -f ~/Desktop/bench.result
+
+TOT=/Volumes/WebKit/ReleaseVersion/OpenSource/
+JS2TESTS="dumpJSONResults=true; testList = ['tfjs-wasm'];"
+cd $TOT/../Internal/PerformanceTestsInternal/JetStream3/
+
+echo "A is SIMD, b is no SIMD"
+
+for ((i = 0; i < 2; i++)); do
+    echo "Iteration $i"
+    ~/.jsvu/v8 -e "$JS2TESTS USE_SIMD=0" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/Patched$i.result
+    rm ~/Desktop/bench.result
+    ~/.jsvu/v8 -e "$JS2TESTS USE_SIMD=1" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/ToT$i.result
+    rm ~/Desktop/bench.result
+done

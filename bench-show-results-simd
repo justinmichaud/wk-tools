@@ -1,0 +1,16 @@
+cd /Volumes/WebKit/ReleaseVersion/OpenSource/
+
+echo "SIMD off SIMD unused vs SIMD on SIMD used; expected large progression"
+./Tools/Scripts/compare-results -a ~/Desktop/simd_disabled_simd_unused_*.result -b ~/Desktop/simd_enabled_simd_used_*.result --detailed-breakdown
+
+echo "SIMD off SIMD unused vs SIMD on SIMD unused; expected neutral"
+./Tools/Scripts/compare-results -a ~/Desktop/simd_disabled_simd_unused_*.result -b ~/Desktop/simd_enabled_simd_unused_*.result --detailed-breakdown
+
+echo "SIMD off SIMD unused vs SIMD on SIMD unused Force all functions to have SIMD overhead; expected small regression"
+./Tools/Scripts/compare-results -a ~/Desktop/simd_disabled_simd_unused_*.result -b ~/Desktop/simd_enabled_simd_unused_force_simd_*.result --detailed-breakdown
+
+echo "SIMD on SIMD unused NO BBQ Force all functions to have SIMD overhead vs SIMD on SIMD used NO BBQ Force all functions to have SIMD overhead; expected large progression"
+./Tools/Scripts/compare-results -a ~/Desktop/simd_enabled_simd_unused_no_bbq_force_simd_*.result -b ~/Desktop/simd_enabled_simd_used_no_bbq_force_simd_*.result --detailed-breakdown
+
+echo "SIMD on SIMD unused Force all functions to have SIMD overhead vs SIMD on SIMD used Force all functions to have SIMD overhead; expected large progression"
+./Tools/Scripts/compare-results -a ~/Desktop/simd_enabled_simd_unused_force_simd_*.result -b ~/Desktop/simd_enabled_simd_used_force_simd_*.result --detailed-breakdown

@@ -1,0 +1,8 @@
+cd /Volumes/WebKit/ReleaseVersion/OpenSource/
+
+echo "A-F with baseline as ToT"
+./Tools/Scripts/compare-results -a ~/Desktop/A_*.result -b ~/Desktop/B_*.result --detailed-breakdown
+./Tools/Scripts/compare-results -a ~/Desktop/A_*.result -b ~/Desktop/C_*.result --detailed-breakdown
+./Tools/Scripts/compare-results -a ~/Desktop/A_*.result -b ~/Desktop/D_*.result --detailed-breakdown
+./Tools/Scripts/compare-results -a ~/Desktop/A_*.result -b ~/Desktop/E_*.result --detailed-breakdown
+./Tools/Scripts/compare-results -a ~/Desktop/A_*.result -b ~/Desktop/F_*.result --detailed-breakdown

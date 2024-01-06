@@ -1,0 +1,1 @@
+jscr "$@" -p /tmp/profile.json ; ./Tools/Scripts/display-profiler-output /tmp/profile.json

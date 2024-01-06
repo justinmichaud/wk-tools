@@ -1,0 +1,35 @@
+rm -rf ~/Desktop/Patched*
+rm -rf ~/Desktop/ToT*
+rm -f ~/Desktop/bench.result
+
+TOT=/Volumes/WebKit/ReleaseVersion/OpenSource/
+JS2TESTS="dumpJSONResults=true; testList = ['tfjs-wasm'];"
+cd $TOT/../Internal/PerformanceTestsInternal/JetStream3/
+
+for ((i = 0; i < 8; i++)); do
+    echo "Iteration $i"
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --useWebAssemblySIMD=1 -e "$JS2TESTS USE_SIMD=1" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/simd_enabled_simd_used_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --useWebAssemblySIMD=1 -e "$JS2TESTS USE_SIMD=0" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/simd_enabled_simd_unused_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --useWebAssemblySIMD=0 -e "$JS2TESTS USE_SIMD=0" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/simd_disabled_simd_unused_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --useWebAssemblySIMD=1 --forceAllFunctionsToUseSIMD=1 -e "$JS2TESTS USE_SIMD=0" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/simd_enabled_simd_unused_force_simd_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --useWebAssemblySIMD=1 --useBBQJIT=0 --forceAllFunctionsToUseSIMD=1 -e "$JS2TESTS USE_SIMD=1" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/simd_enabled_simd_used_no_bbq_force_simd_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --useWebAssemblySIMD=1 --useBBQJIT=0 --forceAllFunctionsToUseSIMD=1 -e "$JS2TESTS USE_SIMD=0" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/simd_enabled_simd_unused_no_bbq_force_simd_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --useWebAssemblySIMD=1 --forceAllFunctionsToUseSIMD=1 -e "$JS2TESTS USE_SIMD=1" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/simd_enabled_simd_used_force_simd_$i.result
+    rm ~/Desktop/bench.result
+    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc --useWebAssemblySIMD=1 --forceAllFunctionsToUseSIMD=1 -e "$JS2TESTS USE_SIMD=0" cli.js > ~/Desktop/bench.result
+    tail -n 3 ~/Desktop/bench.result > ~/Desktop/simd_enabled_simd_unused_force_simd$i.result
+    rm ~/Desktop/bench.result
+done

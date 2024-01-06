@@ -1,0 +1,4 @@
+#!/bin/bash
+
+cd $BUILDDIR/../Internal
+make release SDKROOT=iphoneos.internal ARCHS=arm64e
