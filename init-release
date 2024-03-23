@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export BUILDDIR="/Volumes/WebKit/ReleaseVersion/OpenSource"
+export BUILDDIR="/home/justin/WebKit/ReleaseVersion/OpenSource"
 export CONFIG="Release"
 export PATH=$HOME/bin:$BUILDDIR/Tools/Scripts:$BUILDDIR/../Internal/Tools/Scripts:$PATH
 cd $BUILDDIR
