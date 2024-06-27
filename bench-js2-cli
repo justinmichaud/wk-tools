@@ -2,16 +2,16 @@ rm -rf ~/Desktop/Patched*
 rm -rf ~/Desktop/ToT*
 rm -f ~/Desktop/bench.result
 
-TOT=/Volumes/WebKit/ReleaseVersion/OpenSource/
-JS2TESTS="dumpJSONResults=true; testList = ['cdjs'];"
+TOT=~/WebKit/ReleaseVersion/OpenSource/
+JS2TESTS="dumpJSONResults=true; testList=['HashSet-wasm', 'tsf-wasm', 'quicksort-wasm', 'gcc-loops-wasm', 'richards-wasm'];"
 cd $TOT/PerformanceTests/JetStream2/
 
-for ((i = 0; i < 10; i++)); do
+for ((i = 0; i < 60; i++)); do
     echo "Iteration $i"
-    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/Release/ $TOT/WebKitBuild/Release/jsc -e "$JS2TESTS" cli.js > ~/Desktop/bench.result
+    JSC_useInterpretedJSEntryWrappers=1 DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/JSCOnly/Release/ $TOT/WebKitBuild/JSCOnly/Release/bin/jsc -e "$JS2TESTS" cli.js > ~/Desktop/bench.result
     tail -n 3 ~/Desktop/bench.result > ~/Desktop/Patched$i.result
     rm ~/Desktop/bench.result
-    DYLD_FRAMEWORK_PATH=$TOT/WebKitBuildBaseline/Release/ $TOT/WebKitBuildBaseline/Release/jsc -e "$JS2TESTS" cli.js > ~/Desktop/bench.result
+    JSC_useInterpretedJSEntryWrappers=0 DYLD_FRAMEWORK_PATH=$TOT/WebKitBuild/JSCOnly/Release/ $TOT/WebKitBuild/JSCOnly/Release/bin/jsc -e "$JS2TESTS" cli.js > ~/Desktop/bench.result
     tail -n 3 ~/Desktop/bench.result > ~/Desktop/ToT$i.result
     rm ~/Desktop/bench.result
 done

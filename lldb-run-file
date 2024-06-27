@@ -1,0 +1,2 @@
+process launch --stop-at-entry
+process handle SIGUSR1 -n false -p true -s false

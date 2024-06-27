@@ -1,7 +1,7 @@
 rm -rf ~/Desktop/Patched*
 rm -rf ~/Desktop/ToT*
 
-cd /Volumes/WebKit/ReleaseVersion/OpenSource/
+cd ~/WebKit/ReleaseVersion/OpenSource/
 
 for ((i = 0; i < 10; i++)); do
     rm bench.result
