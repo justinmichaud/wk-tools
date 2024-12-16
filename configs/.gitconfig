@@ -1,0 +1,7 @@
+[safe]
+	directory = /WebKit/buildroot
+	directory = /WebKit/Yokto/OpenSource
+	directory = /WebKit/Yokto/OpenSource
+[user]
+	email = jmichaud@igalia.com
+	name = Justin Michaud

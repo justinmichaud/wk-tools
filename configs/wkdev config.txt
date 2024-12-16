@@ -1,0 +1,72 @@
+wkdev config:
+
+~/.bashrc:
+
+source /WebKit/wk-tools/bashrc
+
+~/.lldbinit:
+
+command script import /WebKit/DebugVersion/OpenSource/Tools/lldb/lldb_webkit.py
+command script import /WebKit/wk-tools/lldbinit.py
+
+---
+
+
+jmichaud@justin-darter-pro:~/WebKit$ cat /etc/fstab
+# /etc/fstab: static file system information.
+#
+# Use 'blkid' to print the universally unique identifier for a
+# device; this may be used with UUID= as a more robust way to name devices
+# that works even if disks are added and removed. See fstab(5).
+#
+# <file system>  <mount point>  <type>  <options>  <dump>  <pass>
+PARTUUID=6cdbb174-c51f-4c29-b61b-8f22a318db6b  /boot/efi  vfat  umask=0077  0  0
+/dev/mapper/cryptswap  none  swap  defaults  0  0
+UUID=45b2773d-35cc-4092-be20-20ecb414a694  /wkdev-home/WebKit  btrfs  defaults  0  0
+UUID=0b8563fc-1f85-491f-b033-03a7b0950168  /  btrfs  defaults  0  1
+
+----
+
+sudo chmod 777 /wkdev-home
+sudo chown jmichaud /wkdev-home/WebKit/
+sudo ln -s /wkdev-home/WebKit/ /
+wkdev-create --name wkdev --create-home --home "/wkdev-home/"
+ln -s /WebKit ~/WebKit
+
+---
+
+VSCode:
+
+clangd: -header-insertion=never
+Terminal: scrollback, allow-chords
+Whitespace: trailing
+
+{
+    "workbench.colorTheme": "Visual Studio Light",
+    "clangd.arguments": [
+        "-header-insertion=never"
+    ],
+    "security.workspace.trust.untrustedFiles": "open",
+    "vim.useCtrlKeys": false,
+    "window.menuBarVisibility": "toggle",
+    "editor.renderWhitespace": "trailing",
+    "editor.experimentalWhitespaceRendering": "off",
+    "workbench.colorCustomizations": {
+    "editorWhitespace.foreground": "#FF0000", 
+    "editorWhitespace.background": "#FF0000"
+},
+"diffEditor.maxComputationTime": 0,
+"sync.gist": "0f31e19fcd459e25cd9ee04284d2f2a0",
+"editor.minimap.enabled": false,
+"terminal.integrated.allowChords": false,
+"editor.accessibilitySupport": "off",
+"workbench.startupEditor": "none",
+"terminal.integrated.cursorStyle": "line",
+"terminal.integrated.localEchoLatencyThreshold": 0,
+"terminal.integrated.localEchoEnabled": "on",
+"workbench.activityBar.location": "bottom",
+"terminal.integrated.scrollback": 100000,
+"editor.fontSize": 18,
+"debug.console.fontSize": 0,
+"terminal.integrated.fontSize": 16
+}

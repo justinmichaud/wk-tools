@@ -1,8 +1,5 @@
 #!/bin/bash
 
-export CC=clang-18
-export CXX=clang++-18
-
 cd $BUILDDIR
 
 echo $BUILDDIR

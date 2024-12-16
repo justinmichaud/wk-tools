@@ -1,0 +1,23 @@
+Host igalia.com
+User jmichaud
+Port 6789
+
+Host arm
+  HostName devbox-armhf-2
+  User jmichaud
+  ProxyCommand ssh -q -W %h:%p igalia.com
+
+Host arm64
+  HostName bbox-12-arm64
+  User jmichaud
+  ProxyCommand ssh -q -W %h:%p igalia.com
+  
+Host rpi4
+  HostName rpi4-compilers-0
+  User root
+  ProxyJump arm
+
+Host buildroot
+  HostName 192.168.1.10
+  User root
+  UserKnownHostsFile=/dev/null
