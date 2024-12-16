@@ -1,5 +1,8 @@
 #!/bin/bash
 
+export CC=clang-18
+export CXX=clang++-18
+
 cd $BUILDDIR
 
 echo $BUILDDIR
@@ -12,5 +15,5 @@ then
 else
     echo "Building debug"
     ./Tools/Scripts/set-webkit-configuration --debug
-    ./Tools/Scripts/build-webkit --jsc-only --debug --export-compile-commands --use-libbacktrace --fuse-ld=mold  | filter-build-webkit
+    ./Tools/Scripts/build-webkit --jsc-only --debug --export-compile-commands --cmakeargs="-DUSE_LIBBACKTRACE=yes" --fuse-ld=mold  | filter-build-webkit
 fi

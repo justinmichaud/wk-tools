@@ -1,2 +1,2 @@
 export VM=$BUILDDIR/WebKitBuild/JSCOnly/$CONFIG/
-LD_LIBRARY_PATH=$VM lldb -s /home/justin/WebKit/wk-tools/lldb-run-file $VM/bin/jsc -- --validateOptions=1 "$@"
+LD_LIBRARY_PATH=$VM lldb -s ~/WebKit/wk-tools/lldb-run-file $VM/bin/jsc -- --validateOptions=1 "$@"
