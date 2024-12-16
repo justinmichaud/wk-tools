@@ -1,2 +1,2 @@
-git shortlog --all --summary --since "Jan 1st 2024" | sort -n -k 1
+git shortlog --summary --since "1 year" | sort -n -k 1
 
