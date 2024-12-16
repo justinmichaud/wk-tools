@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export BUILDDIR="~/WebKit/ReleaseVersion/OpenSource"
+export BUILDDIR="$HOME/WebKit/ReleaseVersion/OpenSource"
 export CONFIG="Release"
 export PATH=$HOME/bin:$BUILDDIR/Tools/Scripts:$BUILDDIR/../Internal/Tools/Scripts:$PATH
 cd $BUILDDIR
