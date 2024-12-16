@@ -1,0 +1,2 @@
+git shortlog --all --summary --since "Jan 1st 2024" | sort -k 1 > ~/Downloads/commits.txt
+
