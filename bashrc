@@ -2,7 +2,8 @@ export VISUAL="codium --wait"
 export EDITOR="codium --wait"
 source /WebKit/webkit-container-sdk/register-sdk-on-host.sh
 
-PATH="$PATH:/WebKit/wk-tools/"
+export TMPDIR=$HOME/tmp
+export PATH="$PATH:/WebKit/wk-tools/"
 
 export CC=clang-18
 export CXX=clang++-18
