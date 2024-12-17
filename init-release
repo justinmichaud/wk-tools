@@ -2,5 +2,5 @@
 
 export BUILDDIR="$HOME/WebKit/ReleaseVersion/OpenSource"
 export CONFIG="Release"
-export PATH=$HOME/bin:$BUILDDIR/Tools/Scripts:$BUILDDIR/../Internal/Tools/Scripts:$PATH
+export PATH=$HOME/bin:$BUILDDIR/Tools/Scripts:$BUILDDIR/Tools/Scripts:${HOME}/.jsvu:/$HOME/wabt/bin/:$PATH
 cd $BUILDDIR
