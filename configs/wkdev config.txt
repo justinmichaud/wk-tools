@@ -2,7 +2,7 @@ wkdev config:
 
 ~/.bashrc:
 
-source /WebKit/wk-tools/bashrc
+source ~/WebKit/wk-tools/bashrc
 
 ~/.lldbinit:
 
