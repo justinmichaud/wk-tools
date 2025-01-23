@@ -21,5 +21,6 @@ elif [ $TO_WORKSPACE -eq 0 ]; then
     TO_WORKSPACE=10
 fi
 
+swaymsg move container to workspace number $TO_WORKSPACE
 swaymsg workspace number $TO_WORKSPACE
 

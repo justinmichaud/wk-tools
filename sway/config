@@ -8,7 +8,7 @@
 #
 # Logo key. Use Mod1 for Alt.
 set $mod Mod1
-set $mod2 Super_R
+set $mod2 Mod4
 # Home row direction keys, like vim
 set $left h
 set $down j
@@ -122,9 +122,9 @@ output * bg /usr/share/backgrounds/default.png fill
 #
 
  bindsym Ctrl+Right exec ~/Development/wk-tools/sway/workspace.sh next
- bindsym Ctrl+Shift+Right move container to workspace next
+ bindsym Ctrl+Shift+Right exec ~/Development/wk-tools/sway/moveworkspace.sh next
  bindsym Ctrl+Left exec ~/Development/wk-tools/sway/workspace.sh prev
- bindsym Ctrl+Shift+Left move container to workspace prev
+ bindsym Ctrl+Shift+Left exec ~/Development/wk-tools/sway/moveworkspace.sh prev
 
     # Switch to workspace
     bindsym $mod+1 workspace number 1
@@ -150,6 +150,8 @@ output * bg /usr/share/backgrounds/default.png fill
     bindsym $mod+Shift+0 move container to workspace number 10
     # Note: workspaces can have any name you want, not just numbers.
     # We just use 1-10 as the default.
+
+workspace_layout tabbed
 #
 # Layout stuff:
 #
@@ -250,5 +252,32 @@ input type:pointer {
 
 output DP-1 scale 1.5
 
-bindsym --no-repeat --release $mod2 exec pkill $menu || $menu
+bindsym --no-repeat --release Super_R exec pkill $menu || $menu
+bindsym --no-repeat --release Super_L exec pkill $menu || $menu
+
+for_window [title = "About Mozilla Firefox"] floating enable
+for_window [window_role = "About"] floating enable
+for_window [app_id="firefox" title="Library"] floating enable, border pixel 1, sticky enable
+
+for_window [window_role = "pop-up"] floating enable
+for_window [window_role = "bubble"] floating enable
+for_window [window_role = "dialog"] floating enable
+for_window [window_type = "dialog"] floating enable
+for_window [window_role = "task_dialog"] floating enable
+for_window [window_type = "menu"] floating enable
+for_window [app_id = "floating"] floating enable
+for_window [app_id = "floating_update"] floating enable, resize set width 1000px height 600px
+for_window [class = "(?i)pinentry"] floating enable
+for_window [title = "Administrator privileges required"] floating enable
+
+for_window [title = "Firefox - Sharing Indicator"] kill
+for_window [title = "Firefox — Sharing Indicator"] kill
+
+default_border none
+for_window [title="^.*"] title_format ""
+default_border normal 0
+default_floating_border normal 0
+font pango:monospace 5
+titlebar_border_thickness 0
+titlebar_padding 0
 
