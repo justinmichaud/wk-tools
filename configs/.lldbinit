@@ -1,2 +1,2 @@
-command script import /WebKit/DebugVersion/OpenSource/Tools/lldb/lldb_webkit.py
-command script import /WebKit/lldbinit.py
+command script import ~/Development/DebugVersion/OpenSource/Tools/lldb/lldb_webkit.py
+command script import ~/Development/lldbinit.py

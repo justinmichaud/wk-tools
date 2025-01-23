@@ -17,7 +17,14 @@ Host rpi4
   User root
   ProxyJump arm
 
-Host buildroot
-  HostName 192.168.1.10
+Host raspberrypi3
+  HostName raspberrypi3
   User root
+  StrictHostKeyChecking no
+  UserKnownHostsFile=/dev/null
+
+ Host raspberrypi4
+  HostName raspberrypi4
+  User root
+  StrictHostKeyChecking no
   UserKnownHostsFile=/dev/null

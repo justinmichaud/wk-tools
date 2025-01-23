@@ -1,0 +1,52 @@
+[org/gnome/desktop/peripherals/mouse]
+natural-scroll=true
+
+[org/gnome/desktop/peripherals/touchpad]
+two-finger-scrolling-enabled=true
+
+[org/gnome/desktop/wm/keybindings]
+switch-input-source=@as []
+switch-input-source-backward=@as []
+switch-to-workspace-left=['<Control>Left']
+switch-to-workspace-right=['<Control>Right']
+
+[org/gnome/shell]
+favorite-apps=['org.mozilla.firefox.desktop', 'org.gnome.Nautilus.desktop', 'com.visualstudio.code.desktop', 'org.gnome.Ptyxis.desktop']
+last-selected-power-profile='performance'
+
+[org/gnome/shell/keybindings]
+toggle-overview=['<Super>space', 'Super_L', 'Super_R']
+
+[org/gnome/desktop/notifications]
+show-in-lock-screen=false
+
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+
+[org/gnome/desktop/calendar]
+show-weekdate=true
+
+[org/gnome/desktop/datetime]
+automatic-timezone=true
+
+[org/gnome/desktop/interface]
+clock-format='12h'
+clock-show-seconds=false
+clock-show-weekday=true
+color-scheme='default'
+
+[org/gnome/desktop/privacy]
+remember-recent-files=false
+
+[org/gnome/desktop/screensaver]
+color-shading-type='solid'
+lock-enabled=false
+
+[org/gnome/desktop/session]
+idle-delay=uint32 600
+
+[org/gnome/nautilus/preferences]
+default-folder-viewer='list-view'
+
+[org/gtk/settings/file-chooser]
+clock-format='12h'
