@@ -121,9 +121,9 @@ output * bg /usr/share/backgrounds/default.png fill
 # Workspaces:
 #
 
- bindsym Ctrl+Right exec ~/.config/sway/workspace.sh next
+ bindsym Ctrl+Right exec ~/Development/wk-tools/sway/workspace.sh next
  bindsym Ctrl+Shift+Right move container to workspace next
- bindsym Ctrl+Left exec ~/.config/sway/workspace.sh prev
+ bindsym Ctrl+Left exec ~/Development/wk-tools/sway/workspace.sh prev
  bindsym Ctrl+Shift+Left move container to workspace prev
 
     # Switch to workspace
