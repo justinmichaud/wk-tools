@@ -4,6 +4,10 @@
 #
 # Read `man 5 sway` for a complete reference.
 
+output DP-1 scale 1.5 position 0 0 resolution 3840x2160 
+output HDMI-A-1 scale 1.5 position 0 0 resolution 3840x2160 
+output HDMI-A-2 scale 1.5 position 0 0 resolution 3840x2160 
+
 ### Variables
 #
 # Logo key. Use Mod1 for Alt.
@@ -249,8 +253,6 @@ bindsym F1 exec cat ~/.config/sway/config |grep bindsym |grep -v "#"| sed 's/^[[
 input type:pointer {
     natural_scroll enabled
 }
-
-output DP-1 scale 1.5
 
 bindsym --no-repeat --release Super_R exec pkill $menu || $menu
 bindsym --no-repeat --release Super_L exec pkill $menu || $menu
