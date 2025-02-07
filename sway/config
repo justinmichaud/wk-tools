@@ -5,8 +5,10 @@
 # Read `man 5 sway` for a complete reference.
 
 output DP-1 scale 1.5 position 0 0 resolution 3840x2160 
+output DP-2 scale 1.5 position 0 0 resolution 3840x2160 
 output HDMI-A-1 scale 1.5 position 0 0 resolution 3840x2160 
 output HDMI-A-2 scale 1.5 position 0 0 resolution 3840x2160 
+output eDP-1 disable 
 
 ### Variables
 #
