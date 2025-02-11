@@ -11,10 +11,10 @@ export TERM=vt100
 export TMPDIR=${HOME}/tmp
 export PATH="$PATH:${HOME}/Development/wk-tools/"
 
-export CC=clang-18
-export CXX=clang++-18
-export LLDB=lldb-18
-alias lldb=lldb-18
+export CC=clang-19
+export CXX=clang++-19
+export LLDB=lldb-19
+alias lldb=lldb-19
 
 # Export shared directories for yocto caches
 export DL_DIR="${HOME}/Development/.cache/yocto/downloads"
