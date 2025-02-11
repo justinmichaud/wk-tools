@@ -1,5 +1,8 @@
 #!/bin/bash
 
+#echo "performance" | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+#sudo wrmsr 0x1FC "$(printf '0x%x' "$(( 0x$(sudo rdmsr 0x1FC) & 0xFFFFFFFE ))")"
+
 export BUILDDIR="$HOME/Development/DebugVersion/OpenSource"
 export CONFIG="Debug"
 export PATH=$HOME/bin:$BUILDDIR/Tools/Scripts:$BUILDDIR/Tools/Scripts:${HOME}/.jsvu:/Volumes/WebKit/wabt/bin/:$PATH

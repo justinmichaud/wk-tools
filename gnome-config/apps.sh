@@ -3,7 +3,9 @@
 echo "Check for allow_discards on every line here:"
 sudo dmsetup table
 
-rpm-ostree kargs --append=rd.luks.options=discard
+# Enable luks
+# Disable lockdown for https://github.com/erpalma/throttled/
+rpm-ostree kargs --append=rd.luks.options=discard --append=lsm=capability,yama,selinux,bpf,landlock,ipe,ima,evm
 
 sudo systemctl enable fstrim.service
 

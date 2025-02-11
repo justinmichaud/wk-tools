@@ -2,6 +2,8 @@ export VISUAL="codium --wait"
 export EDITOR="codium --wait"
 source ~/Development/webkit-container-sdk/register-sdk-on-host.sh
 
+export LC_ALL=C
+
 alias clear="clear && echo -e '\e[3J' && clear"
 
 export TERM=vt100 
