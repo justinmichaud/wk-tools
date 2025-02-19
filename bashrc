@@ -11,7 +11,7 @@ alias clear="clear && echo -e '\e[3J' && clear"
 export TERM=vt100 
 
 export TMPDIR=${HOME}/tmp
-export PATH="$PATH:${HOME}/Development/wk-tools/"
+export PATH="${HOME}/codium/bin:$PATH:${HOME}/Development/wk-tools/"
 
 export CC=clang-19
 export CXX=clang++-19
@@ -22,3 +22,10 @@ alias lldb=lldb-19
 export DL_DIR="${HOME}/Development/.cache/yocto/downloads"
 export SSTATE_DIR="${HOME}/Development/.cache/yocto/sstate"
 export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS} DL_DIR SSTATE_DIR"
+
+export GOCACHE="$(mktemp -d)"
+export GOPATH="${HOME}/Development/go/packaged"
+export GOROOT="${HOME}/Development/go/"   
+export PATH=$GOPATH/bin:$PATH
+
+
