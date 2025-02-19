@@ -21,7 +21,8 @@ alias lldb=lldb-19
 # Export shared directories for yocto caches
 export DL_DIR="${HOME}/Development/.cache/yocto/downloads"
 export SSTATE_DIR="${HOME}/Development/.cache/yocto/sstate"
-export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS} DL_DIR SSTATE_DIR"
+export PARALLEL_MAKE="40"
+export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS} DL_DIR SSTATE_DIR PARALLEL_MAKE"
 
 export GOCACHE="$(mktemp -d)"
 export GOPATH="${HOME}/Development/go/packaged"
