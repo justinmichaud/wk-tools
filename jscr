@@ -1,4 +1,4 @@
 export VM=$BUILDDIR/WebKitBuild/JSCOnly/$CONFIG/
 #DYLD_FRAMEWORK_PATH=$VM $VM/jsc --jitAllowlist=/Volumes/WebKit/Custom/whitelist --useConcurrentGC=0 --useConcurrentJIT=0 --reportCompileTimes=1 "$@"
 #DYLD_FRAMEWORK_PATH=$VM $VM/jsc --validateOptions=1 "$@"
-LD_LIBRARY_PATH=$VM $VM/bin/jsc --validateOptions=1 "$@"
+JSC_validateOptions=1 LD_LIBRARY_PATH=$VM $VM/bin/jsc --validateOptions=1 "$@"
