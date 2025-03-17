@@ -1,6 +1,6 @@
-export VISUAL="codium --wait"
+#export VISUAL="codium --wait"
 #export VISUAL="zed --wait"
-export EDITOR="codium --wait"
+#export EDITOR="codium --wait"
 #export EDITOR="zed --wait"
 source ~/Development/webkit-container-sdk/register-sdk-on-host.sh
 
