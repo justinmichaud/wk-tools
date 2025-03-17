@@ -15,10 +15,10 @@ fi
 if [[ "$CONFIG" == "Release" ]]
 then
     echo "Building release"
-    ./Tools/Scripts/set-webkit-configuration --release
-    ./Tools/Scripts/build-webkit --release --export-compile-commands --jsc-only --fuse-ld=mold --cmakeargs="-DUSE_LIBBACKTRACE=no -DDEVELOPER_MODE=ON" $MACHINE_ARGS | filter-build-webkit
+    ./Tools/Scripts/set-webkit-configuration --release --no-asan
+    mold -run ./Tools/Scripts/build-webkit --release --export-compile-commands --jsc-only --cmakeargs="-DUSE_LIBBACKTRACE=no -DDEVELOPER_MODE=ON" $MACHINE_ARGS | filter-build-webkit
 else
     echo "Building debug"
-    ./Tools/Scripts/set-webkit-configuration --debug --no-asan
-    ./Tools/Scripts/build-webkit --jsc-only --debug --export-compile-commands --cmakeargs="-DUSE_LIBBACKTRACE=no -DDEVELOPER_MODE=ON" --fuse-ld=mold $MACHINE_ARGS | filter-build-webkit
+    ./Tools/Scripts/set-webkit-configuration --debug --asan
+    mold -run ./Tools/Scripts/build-webkit --debug --export-compile-commands --jsc-only  --cmakeargs="-DUSE_LIBBACKTRACE=no -DDEVELOPER_MODE=ON" $MACHINE_ARGS | filter-build-webkit
 fi
