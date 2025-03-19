@@ -7,8 +7,8 @@ two-finger-scrolling-enabled=true
 [org/gnome/desktop/wm/keybindings]
 switch-input-source=@as []
 switch-input-source-backward=@as []
-switch-to-workspace-left=['<Control>Left']
-switch-to-workspace-right=['<Control>Right']
+switch-to-workspace-left=['<Alt>Left']
+switch-to-workspace-right=['<Alt>Right']
 
 [org/gnome/shell]
 favorite-apps=['org.mozilla.firefox.desktop', 'org.gnome.Nautilus.desktop', 'com.visualstudio.code.desktop', 'org.gnome.Ptyxis.desktop']
