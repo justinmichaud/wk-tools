@@ -24,6 +24,8 @@
 
 "bindings": {
   "ctrl-`": "workspace::ToggleBottomDock" // match vscode behavior`
+  "alt-c": "terminal::Copy",
+  "alt-v": "terminal::Paste"
 }
 
 }
