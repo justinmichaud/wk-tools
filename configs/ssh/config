@@ -6,6 +6,16 @@ Host workstation
   HostName 418-im-a-teapot.tail4236a7.ts.net
   User jmichaud
 
+Host workstation64
+  HostName localhost
+  Port 2264
+  ProxyCommand ssh -q -W %h:%p workstation
+
+Host workstation32
+  HostName localhost
+  Port 2200
+  ProxyCommand ssh -q -W %h:%p workstation
+
 Host arm
   HostName devbox-armhf-2
   User jmichaud

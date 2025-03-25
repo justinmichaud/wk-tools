@@ -23,9 +23,10 @@
 "context": "Terminal",
 
 "bindings": {
-  "ctrl-`": "workspace::ToggleBottomDock" // match vscode behavior`
+  "ctrl-`": "workspace::ToggleBottomDock", // match vscode behavior`
+  "alt-`": "workspace::ToggleBottomDock", // match vscode behavior`
   "alt-c": "terminal::Copy",
-  "alt-v": "terminal::Paste"
+  "alt-v": "terminal::Paste",
 }
 
 }

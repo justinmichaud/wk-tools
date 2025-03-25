@@ -1,4 +1,5 @@
 {
+  "show_whitespaces": "boundary",
   "format_on_save": "off",
   "remove_trailing_whitespace_on_save": false,
   "file_scan_exclusions": [
@@ -23,26 +24,58 @@
       "host": "arm64",
       "projects": [
         {
-          "paths": ["~/Development/DebugVersion/OpenSource"]
+          "paths": [
+            "~/Development/DebugVersion/OpenSource"
+          ]
         },
         {
-          "paths": ["~/Development/ReleaseVersion/OpenSource"]
+          "paths": [
+            "~/Development/ReleaseVersion/OpenSource"
+          ]
         },
         {
-          "paths": ["~/Development/Yocto/OpenSource"]
+          "paths": [
+            "~/Development/Yocto/OpenSource"
+          ]
         }
       ]
     },
     {
-      "host": "arm",
+      "host": "workstation32",
       "projects": [
         {
-          "paths": ["~/Development/DebugVersion/OpenSource"]
+          "paths": [
+            "~/Development/DebugVersion/OpenSource"
+          ]
         },
         {
-          "paths": ["~/Development/ReleaseVersion/OpenSource"]
+          "paths": [
+            "~/Development/ReleaseVersion/OpenSource"
+          ]
         }
-      ]
+      ],
+      "nickname": "wkdev-32"
+    },
+    {
+      "host": "workstation64",
+      "projects": [
+        {
+          "paths": [
+            "~/Development/DebugVersion/OpenSource"
+          ]
+        },
+        {
+          "paths": [
+            "~/Development/ReleaseVersion/OpenSource"
+          ]
+        },
+        {
+          "paths": [
+            "~/Development/Yocto/OpenSource"
+          ]
+        }
+      ],
+      "nickname": "wkdev-64"
     }
   ],
   "ui_font_size": 16,
@@ -56,7 +89,7 @@
   "lsp": {
     "clangd": {
       "binary": {
-        "arguments": ["--header-insertion=never"]
+        "arguments": ["--header-insertion=never", "-j=1"]
       }
     }
   }
