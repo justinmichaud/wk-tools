@@ -1,6 +1,6 @@
 Host igalia.com
-User jmichaud
-Port 6789
+  User jmichaud
+  Port 6789
 
 Host workstation
   HostName 418-im-a-teapot.tail4236a7.ts.net
@@ -13,7 +13,7 @@ Host arm
 
 Host arm4
   HostName devbox-armhf-4
-  User justin
+  User jmichaud
   ProxyCommand ssh -q -W %h:%p jmichaud@igalia.com
 
 Host arm64
