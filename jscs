@@ -1,0 +1,3 @@
+#!/bin/bash
+export VM=$BUILDDIR/WebKitBuild/JSCOnly/$CONFIG/
+JSC_validateOptions=1 LD_LIBRARY_PATH=$VM samply record $VM/bin/jsc --useJITDump=1 --useTextMarkers=1 --exposeProfilersOnGlobalObject=1 --alwaysComputeHash=1 "$@"
