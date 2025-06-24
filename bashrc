@@ -16,7 +16,7 @@ export PATH="${HOME}/codium/bin:$PATH:${HOME}/Development/wk-tools/"
 export CC=clang-19
 export CXX=clang++-19
 export LLDB=lldb-19
-alias lldb=lldb-19
+#alias lldb=lldb-19
 
 # Export shared directories for yocto caches
 export DL_DIR="${HOME}/Development/.cache/yocto/downloads"
