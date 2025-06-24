@@ -23,12 +23,12 @@ Host arm
 
 Host arm-bothost-5
   HostName arm-bothost-5
-  User jmichaud
+  User root
   ProxyCommand ssh -q -W %h:%p igalia.com
 
 Host arm-bothost-2
   HostName arm-bothost-2
-  User jmichaud
+  User root
   ProxyCommand ssh -q -W %h:%p igalia.com
 
 Host arm4
