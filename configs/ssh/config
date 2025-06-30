@@ -13,7 +13,7 @@ Host workstation64
 
 Host workstation32
   HostName localhost
-  Port 2200
+  Port 2232
   ProxyCommand ssh -q -W %h:%p workstation
 
 Host arm
