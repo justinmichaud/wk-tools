@@ -1,0 +1,27 @@
+#!/bin/bash
+
+cd $BUILDDIR
+
+echo $BUILDDIR
+
+MACHINE_BITS=`getconf LONG_BIT`
+if [[ $MACHINE_BITS == "32" ]]
+then
+    MACHINE_ARGS=" --32-bit "
+else
+    MACHINE_ARGS=""
+fi
+
+if [[ "$CONFIG" == "Release" ]]
+then
+    echo "Building release"
+    ./Tools/Scripts/set-webkit-configuration --release --no-asan
+    mold -run ./Tools/Scripts/build-webkit --release --export-compile-commands --jsc-only --no-use-ccache --generate-project-only --cmakeargs="-DUSE_LIBBACKTRACE=ON -DDEVELOPER_MODE=ON -DENABLE_OFFLINE_ASM_ALT_ENTRY=1" $MACHINE_ARGS | filter-build-webkit
+    ln -s -f WebKitBuild/JSCOnly/Release/compile_commands.json compile_commands.json
+else
+    echo "Building debug"
+    ./Tools/Scripts/set-webkit-configuration --debug --no-asan
+    mold -run ./Tools/Scripts/build-webkit --debug --export-compile-commands --jsc-only --no-use-ccache --generate-project-only --cmakeargs="-DUSE_LIBBACKTRACE=ON -DDEVELOPER_MODE=ON -DENABLE_OFFLINE_ASM_ALT_ENTRY=1" $MACHINE_ARGS | filter-build-webkit
+    ln -s -f WebKitBuild/JSCOnly/Debug/compile_commands.json compile_commands.json
+    echo "Done"
+fi

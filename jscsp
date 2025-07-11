@@ -1,4 +1,4 @@
 #!/bin/bash
 echo '-1' | sudo tee /proc/sys/kernel/perf_event_paranoid
 export VM=$BUILDDIR/WebKitBuild/JSCOnly/$CONFIG/
-JSC_validateOptions=1 LD_LIBRARY_PATH=$VM sysprof-cli --gjs -- $VM/bin/jsc --useJITDump=1 --useTextMarkers=1 --exposeProfilersOnGlobalObject=1 "$@"
+JSC_validateOptions=1 LD_LIBRARY_PATH=$VM sudo sysprof-cli --gjs -- $VM/bin/jsc --useJITDump=1 --useTextMarkers=1 --exposeProfilersOnGlobalObject=1 "$@"

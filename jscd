@@ -1,6 +1,6 @@
 export VM=$BUILDDIR/WebKitBuild/JSCOnly/$CONFIG/
 export LD_LIBRARY_PATH=$VM
 export JSC_validateOptions=1
-$LLDB -s ~/Development/wk-tools/lldb-run-file $VM/bin/jsc -- --validateOptions=1 "$@"
+lldb -s ~/Development/wk-tools/lldb-run-file $VM/bin/jsc -- --validateOptions=1 "$@"
 #gdb -ex="set disassemble-next-line off" -ex="handle SIGUSR1 nostop noprint" -ex="handle SIGILL stop ignore" -ex="run" --args $VM/bin/jsc --validateOptions=1 "$@"
 
