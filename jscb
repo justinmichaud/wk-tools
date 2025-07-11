@@ -8,5 +8,5 @@ if [[ "$CONFIG" == "Release" ]]
 then
     cd WebKitBuild/JSCOnly/Release/ && time mold -run ninja -k 0 jsc
 else
-    cd WebKitBuild/JSCOnly/Debug/ && time mold -run ninja -k 0 -j79 jsc
+    cd WebKitBuild/JSCOnly/Debug/ && time ninja -k 0 -j70 jsc
 fi
