@@ -1,6 +1,6 @@
-if command -v codium &> /dev/null; then
-    export EDITOR="codium --wait"
-    export VISUAL="codium --wait"
+if command -v hx &> /dev/null; then
+    export EDITOR="hx"
+    export VISUAL="hx"
 else
     export EDITOR="vim"
     export VISUAL="vim"
