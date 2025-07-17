@@ -1,27 +1,86 @@
-[org/gnome/desktop/peripherals/mouse]
-natural-scroll=true
+[org/gnome/Disks]
+image-dir-uri='file:///home/jmichaud/Downloads'
 
-[org/gnome/desktop/peripherals/touchpad]
-two-finger-scrolling-enabled=true
+[org/gnome/Ptyxis]
+default-profile-uuid='725fb03483141f706fae4544685adade'
+interface-style='light'
+profile-uuids=['725fb03483141f706fae4544685adade']
+window-size=(uint32 212, uint32 49)
 
-[org/gnome/desktop/wm/keybindings]
-switch-input-source=@as []
-switch-input-source-backward=@as []
-switch-to-workspace-left=['<Ctrl>Left']
-switch-to-workspace-right=['<Ctrl>Right']
+[org/gnome/Ptyxis/Profiles/491ed247d466382ed0bf24e467c9d78e]
+opacity=1.0
 
-[org/gnome/shell]
-favorite-apps=['org.mozilla.firefox.desktop', 'org.gnome.Nautilus.desktop', 'com.visualstudio.code.desktop', 'org.gnome.Ptyxis.desktop']
-last-selected-power-profile='performance'
+[org/gnome/Ptyxis/Shortcuts]
+copy-clipboard='<Shift><Control>c'
+paste-clipboard='<Shift><Control>v'
 
-[org/gnome/shell/keybindings]
-toggle-overview=['<Super>space', 'Super_L', 'Super_R']
+[org/gnome/TextEditor]
+last-save-directory='file:///home/jmichaud/Downloads'
 
-[org/gnome/desktop/notifications]
-show-in-lock-screen=false
+[org/gnome/Totem]
+active-plugins=['save-file', 'screenshot', 'movie-properties', 'variable-rate', 'mpris', 'recent', 'screensaver', 'open-directory', 'apple-trailers', 'rotation', 'vimeo', 'skipto', 'autoload-subtitles']
+subtitle-encoding='UTF-8'
 
-[org/gnome/settings-daemon/plugins/power]
-sleep-inactive-ac-type='nothing'
+[org/gnome/Weather]
+locations=[<(uint32 2, <('Edmonton', 'CYED', true, [(0.93666003772138751, -1.9803669304139968)], [(0.93462381444296339, -1.9809487010135638)])>)>]
+window-height=494
+window-maximized=false
+window-width=439
+
+[org/gnome/baobab/ui]
+is-maximized=false
+window-size=(960, 600)
+
+[org/gnome/calculator]
+base=10
+button-mode='basic'
+source-currency=''
+source-units='degree'
+target-currency=''
+target-units='radian'
+window-maximized=false
+window-size=(360, 616)
+
+[org/gnome/calendar]
+active-view='week'
+window-maximized=true
+window-size=(768, 600)
+
+[org/gnome/clocks/state/window]
+maximized=false
+panel-id='world'
+size=(870, 690)
+
+[org/gnome/control-center]
+last-panel='keyboard'
+window-state=(980, 640, false)
+
+[org/gnome/desktop/app-folders]
+folder-children=['Utilities', 'YaST', 'Pardus']
+
+[org/gnome/desktop/app-folders/folders/Pardus]
+categories=['X-Pardus-Apps']
+name='X-Pardus-Apps.directory'
+translate=true
+
+[org/gnome/desktop/app-folders/folders/Utilities]
+apps=['org.freedesktop.GnomeAbrt.desktop', 'nm-connection-editor.desktop', 'org.gnome.baobab.desktop', 'org.gnome.Connections.desktop', 'org.gnome.DejaDup.desktop', 'org.gnome.DiskUtility.desktop', 'org.gnome.Evince.desktop', 'org.gnome.FileRoller.desktop', 'org.gnome.font-viewer.desktop', 'org.gnome.Loupe.desktop', 'org.freedesktop.MalcontentControl.desktop', 'org.gnome.seahorse.Application.desktop', 'org.gnome.tweaks.desktop', 'org.gnome.Usage.desktop']
+categories=['X-GNOME-Utilities']
+name='X-GNOME-Utilities.directory'
+translate=true
+
+[org/gnome/desktop/app-folders/folders/YaST]
+categories=['X-SuSE-YaST']
+name='suse-yast.directory'
+translate=true
+
+[org/gnome/desktop/background]
+color-shading-type='solid'
+picture-options='zoom'
+picture-uri='file:///usr/share/backgrounds/gnome/amber-l.jxl'
+picture-uri-dark='file:///usr/share/backgrounds/gnome/amber-d.jxl'
+primary-color='#ff7800'
+secondary-color='#000000'
 
 [org/gnome/desktop/calendar]
 show-weekdate=true
@@ -29,11 +88,68 @@ show-weekdate=true
 [org/gnome/desktop/datetime]
 automatic-timezone=true
 
+[org/gnome/desktop/input-sources]
+sources=[('xkb', 'us')]
+
 [org/gnome/desktop/interface]
 clock-format='12h'
 clock-show-seconds=false
 clock-show-weekday=true
 color-scheme='default'
+
+[org/gnome/desktop/notifications]
+application-children=['org-gnome-ptyxis', 'org-mozilla-firefox', 'gnome-power-panel', 'org-gnome-software', 'org-freedesktop-problems-applet', 'dev-zed-zed', 'org-gnome-nautilus', 'com-nextcloud-desktopclient-nextcloud', 'org-gnome-baobab', 'libreoffice-calc', 'org-gnome-evolution-alarm-notify', 'org-gnome-texteditor', 'net-thunderbird-thunderbird', 'tilda']
+show-banners=false
+show-in-lock-screen=false
+
+[org/gnome/desktop/notifications/application/com-nextcloud-desktopclient-nextcloud]
+application-id='com.nextcloud.desktopclient.nextcloud.desktop'
+
+[org/gnome/desktop/notifications/application/dev-zed-zed]
+application-id='dev.zed.Zed.desktop'
+
+[org/gnome/desktop/notifications/application/gnome-power-panel]
+application-id='gnome-power-panel.desktop'
+
+[org/gnome/desktop/notifications/application/libreoffice-calc]
+application-id='libreoffice-calc.desktop'
+
+[org/gnome/desktop/notifications/application/net-thunderbird-thunderbird]
+application-id='net.thunderbird.Thunderbird.desktop'
+
+[org/gnome/desktop/notifications/application/org-freedesktop-problems-applet]
+application-id='org.freedesktop.problems.applet.desktop'
+
+[org/gnome/desktop/notifications/application/org-gnome-baobab]
+application-id='org.gnome.baobab.desktop'
+
+[org/gnome/desktop/notifications/application/org-gnome-evolution-alarm-notify]
+application-id='org.gnome.Evolution-alarm-notify.desktop'
+
+[org/gnome/desktop/notifications/application/org-gnome-nautilus]
+application-id='org.gnome.Nautilus.desktop'
+
+[org/gnome/desktop/notifications/application/org-gnome-ptyxis]
+application-id='org.gnome.Ptyxis.desktop'
+
+[org/gnome/desktop/notifications/application/org-gnome-software]
+application-id='org.gnome.Software.desktop'
+
+[org/gnome/desktop/notifications/application/org-gnome-texteditor]
+application-id='org.gnome.TextEditor.desktop'
+
+[org/gnome/desktop/notifications/application/org-mozilla-firefox]
+application-id='org.mozilla.firefox.desktop'
+
+[org/gnome/desktop/notifications/application/tilda]
+application-id='tilda.desktop'
+
+[org/gnome/desktop/peripherals/mouse]
+natural-scroll=true
+speed=-0.90000000000000002
+
+[org/gnome/desktop/peripherals/touchpad]
+two-finger-scrolling-enabled=true
 
 [org/gnome/desktop/privacy]
 remember-recent-files=false
@@ -41,12 +157,169 @@ remember-recent-files=false
 [org/gnome/desktop/screensaver]
 color-shading-type='solid'
 lock-enabled=false
+picture-options='zoom'
+picture-uri='file:///usr/share/backgrounds/gnome/amber-l.jxl'
+primary-color='#ff7800'
+secondary-color='#000000'
+
+[org/gnome/desktop/search-providers]
+sort-order=['org.gnome.Settings.desktop', 'org.gnome.Contacts.desktop', 'org.gnome.Nautilus.desktop']
 
 [org/gnome/desktop/session]
 idle-delay=uint32 600
 
+[org/gnome/desktop/wm/keybindings]
+switch-input-source=@as []
+switch-input-source-backward=@as []
+switch-to-workspace-left=['<Ctrl>Left']
+switch-to-workspace-right=['<Ctrl>Right']
+
+[org/gnome/epiphany]
+ask-for-default=false
+
+[org/gnome/epiphany/state]
+is-maximized=false
+window-size=(1024, 768)
+
+[org/gnome/evince/default]
+continuous=true
+dual-page=false
+dual-page-odd-left=false
+enable-spellchecking=true
+fullscreen=false
+inverted-colors=false
+show-sidebar=true
+sidebar-page='thumbnails'
+sidebar-size=182
+sizing-mode='automatic'
+window-ratio=(0.87254901960784315, 0.38762626262626265)
+
+[org/gnome/evolution-data-server]
+migrated=true
+
+[org/gnome/evolution-data-server/calendar]
+reminders-past=@as []
+
+[org/gnome/gnome-system-monitor]
+cpu-colors=[(uint32 0, '#e01b24'), (1, '#ff7800'), (2, '#f6d32d'), (3, '#33d17a'), (4, '#26a269'), (5, '#62a0ea'), (6, '#1c71d8'), (7, '#613583'), (8, '#9141ac'), (9, '#c061cb'), (10, '#ffbe6f'), (11, '#f9f06b'), (12, '#8ff0a4'), (13, '#2ec27e'), (14, '#1a5fb4'), (15, '#c061cb'), (16, '#f332a4cd7999'), (17, '#81517999f332'), (18, '#955bf3327999'), (19, '#f3327999b8d7'), (20, '#7999dc52f332'), (21, '#f332e6967999'), (22, '#c31b7999f332'), (23, '#7999f3329f9f'), (24, '#f3327c247999'), (25, '#79999a89f332'), (26, '#be04f3327999'), (27, '#f3327999e17f'), (28, '#7999f332e169'), (29, '#f332bdee7999'), (30, '#9a727999f332'), (31, '#7c3af3327999'), (32, '#f33279999fb6'), (33, '#7999c331f332'), (34, '#e6adf3327999'), (35, '#dc3c7999f332'), (36, '#7999f332b8c0'), (37, '#f33295457999'), (38, '#79998168f332'), (39, '#a4e3f3327999'), (40, '#f3327999c85e'), (41, '#7999ebdaf332'), (42, '#f332d70e7999'), (43, '#b3937999f332'), (44, '#7999f3329018'), (45, '#f33279998695'), (46, '#7999aa10f332'), (47, '#cd8cf3327999'), (48, '#f3327999f107'), (49, '#7999f332d1e1'), (50, '#f332ae667999'), (51, '#8aea7999f332'), (52, '#8bc2f3327999'), (53, '#f3327999af3e'), (54, '#7999d2b9f332'), (55, '#f332f02f7999'), (56, '#ccb47999f332'), (57, '#7999f332a939'), (58, '#f33285bd7999'), (59, '#799990eff332'), (60, '#b46bf3327999'), (61, '#f3327999d7e6'), (62, '#7999f332eb02'), (63, '#f332c7877999'), (64, '#a40b7999f332'), (65, '#7999f3328090'), (66, '#f3327999961d'), (67, '#7999b998f332'), (68, '#dd13f3327999'), (69, '#e5d57999f332'), (70, '#7999f332c259'), (71, '#f3329ede7999'), (72, '#7b637999f332'), (73, '#9b4af3327999'), (74, '#f3327999bec5'), (75, '#7999e241f332'), (76, '#f332e0a87999'), (77, '#bd2c7999f332'), (78, '#7999f33299b1'), (79, '#f33279997cfc')]
+current-tab='processes'
+maximized=false
+show-dependencies=false
+show-whose-processes='user'
+window-height=982
+window-width=1399
+
+[org/gnome/gnome-system-monitor/proctree]
+col-26-visible=false
+col-26-width=0
+columns-order=[0, 12, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+sort-col=8
+sort-order=0
+
+[org/gnome/login-screen]
+enable-fingerprint-authentication=true
+enable-smartcard-authentication=false
+
 [org/gnome/nautilus/preferences]
 default-folder-viewer='list-view'
+fts-enabled=false
+migrated-gtk-settings=true
+search-filter-time-type='last_modified'
+
+[org/gnome/nautilus/window-state]
+initial-size=(890, 550)
+initial-size-file-chooser=(890, 550)
+maximized=true
+
+[org/gnome/nm-applet/eap/2adb305e-1792-35eb-b747-173983745914]
+ignore-ca-cert=false
+ignore-phase2-ca-cert=false
+
+[org/gnome/nm-applet/eap/3c233e8c-bc6d-451c-818f-404d79033c27]
+ignore-ca-cert=false
+ignore-phase2-ca-cert=false
+
+[org/gnome/nm-applet/eap/5ea61f86-c877-4c68-aede-42f86be7a539]
+ignore-ca-cert=false
+ignore-phase2-ca-cert=false
+
+[org/gnome/portal/filechooser/code]
+last-folder-path='/home/jmichaud/Development/32/Development/DebugVersion/OpenSource'
+
+[org/gnome/portal/filechooser/codium]
+last-folder-path='/home/jmichaud/Development/webkit-container-sdk'
+
+[org/gnome/portal/filechooser/com.vscodium.codium]
+last-folder-path='/home/jmichaud/Development/webkit-container-sdk'
+
+[org/gnome/portal/filechooser/org.gnome.Sysprof]
+last-folder-path='/home/jmichaud/Downloads'
+
+[org/gnome/settings-daemon/plugins/color]
+night-light-schedule-automatic=false
+
+[org/gnome/settings-daemon/plugins/media-keys]
+custom-keybindings=['/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/']
+
+[org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0]
+binding='F1'
+command="bash -c 'xdotool key ctrl+c && sleep 0.1 && KITTYHELIX=\"--to unix:/tmp/mykitty\" ~/hx-open.sh \"$(wl-paste)\"'"
+name='open file'
+
+[org/gnome/settings-daemon/plugins/power]
+power-button-action='nothing'
+sleep-inactive-ac-type='nothing'
+
+[org/gnome/shell]
+enabled-extensions=['background-logo@fedorahosted.org', 'drop-down-terminal@gs-extensions.zzrough.org']
+favorite-apps=['org.mozilla.firefox.desktop', 'org.gnome.Nautilus.desktop', 'codium.desktop', 'hx.desktop']
+last-selected-power-profile='performance'
+remember-mount-password=false
+welcome-dialog-last-shown-version='47.4'
+
+[org/gnome/shell/keybindings]
+toggle-overview=['<Super>space', 'Super_L', 'Super_R']
+
+[org/gnome/shell/weather]
+automatic-location=true
+locations=[<(uint32 2, <('Edmonton', 'CYED', true, [(0.93666003772138751, -1.9803669304139968)], [(0.93462381444296339, -1.9809487010135638)])>)>]
+
+[org/gnome/shell/world-clocks]
+locations=@av []
+
+[org/gnome/software]
+check-timestamp=int64 1752771726
+first-run=false
+flatpak-purge-timestamp=int64 1752714277
+install-timestamp=int64 1751058460
+packagekit-historical-updates-timestamp=uint64 1751058460
+security-timestamp=int64 1750707094690286
+update-notification-timestamp=int64 1752771909
+upgrade-notification-timestamp=int64 1750707092
+
+[org/gtk/gtk4/settings/file-chooser]
+date-format='regular'
+location-mode='path-bar'
+show-hidden=false
+sidebar-width=140
+sort-column='name'
+sort-directories-first=false
+sort-order='ascending'
+type-format='category'
+view-type='list'
+window-size=(857, 372)
 
 [org/gtk/settings/file-chooser]
 clock-format='12h'
+date-format='regular'
+location-mode='path-bar'
+show-hidden=false
+show-size-column=true
+show-type-column=true
+sidebar-width=167
+sort-column='name'
+sort-directories-first=false
+sort-order='ascending'
+type-format='category'
+window-position=(26, 23)
+window-size=(1231, 902)

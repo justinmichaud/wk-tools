@@ -16,7 +16,7 @@ Comment[wa]=Asspougnî des fitchîs tecses
 Comment[zh_CN]=编辑文本文件
 Comment[zh_TW]=編輯文字檔
 TryExec=hx
-Exec=bash -c 'kitty -- kitten @ launch --title=KittyHelix'
+Exec=bash -c 'kitty $(socat -u OPEN:/dev/null UNIX-CONNECT:/tmp/mykitty && echo "" || echo "--listen-on unix:/tmp/mykitty") -- kitten @ launch --title=KittyHelix'
 Terminal=false
 Type=Application
 Keywords=Text;editor;
