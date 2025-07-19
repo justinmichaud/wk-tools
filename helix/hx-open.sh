@@ -17,5 +17,6 @@ sleep 0.1
 kitty @ $KITTYHELIX send-text --match title:$window_title ' f'
 kitty @ $KITTYHELIX send-text --match title:$window_title "$file_path"
 kitty @ $KITTYHELIX focus-tab --match title:$window_title
-sleep 0.3
+sleep 3
 kitty @ $KITTYHELIX send-text --match title:$window_title "\rg${line_num}g"
+

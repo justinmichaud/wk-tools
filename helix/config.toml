@@ -1,2 +1,16 @@
 [keys.insert]
 S-tab = "unindent"
+
+[editor]
+true-color = true
+
+[editor.whitespace]
+render = "all"
+
+[editor.whitespace.characters]
+space = "·"
+nbsp = "⍽"
+nnbsp = "␣"
+tab = "→"
+newline = "⏎"
+tabpad = "·"
