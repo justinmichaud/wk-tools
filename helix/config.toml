@@ -1,3 +1,5 @@
+theme = "catppuccin_mocha"
+
 [keys.insert]
 S-tab = "unindent"
 
@@ -14,3 +16,8 @@ nnbsp = "␣"
 tab = "→"
 newline = "⏎"
 tabpad = "·"
+
+[editor.auto-save]
+after-delay.enable = true
+after-delay.timeout = 3000
+
