@@ -2,6 +2,11 @@ theme = "catppuccin_mocha"
 
 [keys.insert]
 S-tab = "unindent"
+tab = "indent"
+
+[keys.normal]
+S-tab = "unindent"
+tab = "indent"
 
 [editor]
 true-color = true
