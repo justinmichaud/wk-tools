@@ -10,13 +10,12 @@ source ~/Development/webkit-container-sdk/register-sdk-on-host.sh
 
 export LC_ALL=
 
+export LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf:$LD_LIBRARY_PATH
+
 alias clear="clear && echo -e '\e[3J' && clear"
 
 export TMPDIR=${HOME}/tmp
 export PATH="${HOME}/codium/bin:$PATH:${HOME}/Development/wk-tools/"
-
-export CC=clang-19
-export CXX=clang++-19
 
 # Export shared directories for yocto caches
 export DL_DIR="${HOME}/Development/.cache/yocto/downloads"
