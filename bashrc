@@ -10,7 +10,7 @@ source ~/Development/webkit-container-sdk/register-sdk-on-host.sh
 
 export LC_ALL=
 
-export LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$lD_LIBRARY_PATH:/usr/lib/arm-linux-gnueabihf
 
 alias clear="clear && echo -e '\e[3J' && clear"
 
