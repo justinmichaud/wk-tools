@@ -6,7 +6,7 @@ echo $BUILDDIR
 
 if [[ "$CONFIG" == "Release" ]]
 then
-    cd WebKitBuild/JSCOnly/Release/ && time ninja -k 0 -j60 jsc
+    cd WebKitBuild/JSCOnly/Release/ && time ninja -k 0 -j`echo $jobs` jsc
 else
-    cd WebKitBuild/JSCOnly/Debug/ && time ninja -k 0 -j60 jsc
+    cd WebKitBuild/JSCOnly/Debug/ && time ninja -k 0 -j`echo $jobs` jsc
 fi
