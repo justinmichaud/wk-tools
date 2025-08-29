@@ -1,0 +1,9 @@
+
+[language-server.clangd]
+command = "clangd"
+args = ["--header-insertion=never"]
+
+[[language]]
+name = "cpp"
+language-servers = ["clangd"]
+roots = [".git", "CMakeLists.txt"]
