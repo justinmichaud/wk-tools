@@ -1,3 +1,11 @@
+[language-server.solargraph]
+config.diagnostics=false
+config.formatting=false
+
+[[language]]
+name = "ruby"
+auto-format = false
+language-servers=[{name="solargraph"}]
 
 [language-server.clangd]
 command = "clangd"

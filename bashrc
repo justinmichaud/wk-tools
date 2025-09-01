@@ -22,8 +22,8 @@ export DL_DIR="${HOME}/Development/.cache/yocto/downloads"
 export SSTATE_DIR="${HOME}/Development/.cache/yocto/sstate"
 export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS} DL_DIR SSTATE_DIR PARALLEL_MAKE"
 
-# We run out of memory otherwise; Let's give each thread 2000mb
-export jobs=$(( ($(awk '/MemFree/ {print $2}' /proc/meminfo) - 8 * 1000000) / (1000 * 1000)))
+# We run out of memory otherwise;
+export jobs=$(( ($(awk '/MemFree/ {print $2}' /proc/meminfo) - 10 * 1000000) / (2000 * 1000)))
 export PARALLEL_MAKE="-j${jobs}"
 export CMAKE_BUILD_PARALLEL_LEVEL=${jobs}
 
