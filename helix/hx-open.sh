@@ -8,7 +8,7 @@ fi
 
 file_path=$(echo "$1" | sed 's/.*Source\///' | sed 's/:.*//')
 file_path=$(echo "$file_path" | sed 's/.*PrivateHeaders\/JavaScriptCore\///' | sed 's/:.*//')
-line_num=$(echo "$1" | grep -Po '(?<=:).*')
+line_num=$(echo "$1" | grep -Po '(?<=:)[0-9]*')
 window_title="^KittyHelix"
 
 notify-send "Got $file_path line $line_num"
