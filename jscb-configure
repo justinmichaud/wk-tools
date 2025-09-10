@@ -21,7 +21,7 @@ then
 else
     echo "Building debug"
     ./Tools/Scripts/set-webkit-configuration --debug --no-asan
-    ./Tools/Scripts/build-webkit --debug --export-compile-commands --jsc-only --no-use-ccache --generate-project-only --cmakeargs="-DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DENABLE_OFFLINE_ASM_ALT_ENTRY=1" $MACHINE_ARGS | filter-build-webkit
+    ./Tools/Scripts/build-webkit --no-fatal-warnings --debug --export-compile-commands --jsc-only --no-use-ccache --generate-project-only --cmakeargs="-DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DENABLE_OFFLINE_ASM_ALT_ENTRY=1" $MACHINE_ARGS | filter-build-webkit
     ln -s -f WebKitBuild/JSCOnly/Debug/compile_commands.json compile_commands.json
     echo "Done"
 fi

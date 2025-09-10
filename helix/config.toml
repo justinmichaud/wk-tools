@@ -10,6 +10,11 @@ display-inlay-hints = true
 S-tab = "unindent"
 tab = "indent"
 
+[keys.select]
+S-tab = "unindent"
+tab = "indent"
+
+
 [keys.normal]
 S-tab = "unindent"
 tab = "indent"
