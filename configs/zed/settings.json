@@ -1,4 +1,6 @@
 {
+  "helix_mode": true,
+  "soft_wrap": "editor_width",
   "show_whitespaces": "boundary",
   "format_on_save": "off",
   "remove_trailing_whitespace_on_save": false,
@@ -14,10 +16,9 @@
   ],
   "agent": {
     "default_model": {
-      "provider": "ollama",
-      "model": "llama3.2:latest"
+      "provider": "zed.dev",
+      "model": "claude-sonnet-4"
     },
-    "version": "2"
   },
   "ssh_connections": [
     {
@@ -45,6 +46,31 @@
       "projects": [
         {
           "paths": [
+            "/home/jmichaud/Development/framehop"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/linux-perf-data"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/samply"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/sysprof"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/testjitunwind"
+          ]
+        },
+        {
+          "paths": [
             "~/Development/DebugVersion/OpenSource"
           ]
         },
@@ -59,6 +85,16 @@
     {
       "host": "workstation64",
       "projects": [
+        {
+          "paths": [
+            "/home/jmichaud/Development/framehop"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/testjitunwind"
+          ]
+        },
         {
           "paths": [
             "~/Development/DebugVersion/OpenSource"
@@ -89,9 +125,22 @@
   "lsp": {
     "clangd": {
       "binary": {
-        "arguments": ["--header-insertion=never", "-j=1"]
+        "arguments": ["--header-insertion=never"],
+        "path": "clangd"
       }
+    },
+    "solargraph": {
+          "initialization_options": {
+            "diagnostics": false,
+            "formatting": false
+          }
+        }
+  },
+"languages": {
+    "Ruby": {
+      "language_servers": ["solargraph", "!rubocop"],
+      "formatter": null,
+      "format_on_save": "off"
     }
   }
 }
-

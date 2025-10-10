@@ -10,12 +10,14 @@
     "context": "Workspace",
     "bindings": {
       // "shift shift": "file_finder::Toggle"
+      "ctrl-q": null
     }
   },
   {
     "context": "Editor",
     "bindings": {
       // "j k": ["workspace::SendKeystrokes", "escape"]
+      "ctrl-q": null
     }
   },
 {
@@ -25,6 +27,7 @@
 "bindings": {
   "ctrl-`": "workspace::ToggleBottomDock", // match vscode behavior`
   "alt-`": "workspace::ToggleBottomDock", // match vscode behavior`
+  "ctrl-q": null
 }
 
 }
