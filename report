@@ -1,0 +1,33 @@
+#!/bin/bash
+export GH_PAGER=cat
+# Setup
+SINCE_DATE=$(date -d '7 days ago' +%Y-%m-%d) # macOS; use `-d` for GNU
+REPO_FULL=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+USER=$(gh api user --jq .login)
+echo "📊 Weekly GitHub Activity Summary for @$USER in $REPO_FULL since $SINCE_DATE (Week $(date +"%V"))"
+echo "📅 Date range: $SINCE_DATE → $(date +%Y-%m-%d)"
+echo "📁 Repository: $REPO_FULL"
+echo ""
+##########################
+# ✅ PRs authored
+##########################
+echo "✅ Pull Requests created:"
+gh pr list --author "@me" --search "created:>=$SINCE_DATE" --state all 
+echo ""
+
+echo "✅ Pull Requests updated:"
+gh pr list --author "@me" --search "updated:>=$SINCE_DATE" --state all 
+echo ""
+
+
+##########################
+# 🔍 Reviews & Comments
+##########################
+echo "🔍 Reviews & Comments:"
+total_comments=0
+
+# Get PRs with review/comment counts
+echo "PRs reviewed/commented:"
+gh search prs --repo="$REPO_FULL" --commenter="@me" --updated=">=$SINCE_DATE" 
+echo ""
+
