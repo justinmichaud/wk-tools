@@ -1,5 +1,4 @@
 {
-  "helix_mode": true,
   "soft_wrap": "editor_width",
   "show_whitespaces": "boundary",
   "format_on_save": "off",
@@ -14,106 +13,7 @@
     "resources",
     ".git"
   ],
-  "agent": {
-    "default_model": {
-      "provider": "zed.dev",
-      "model": "claude-sonnet-4"
-    },
-  },
-  "ssh_connections": [
-    {
-      "host": "arm64",
-      "projects": [
-        {
-          "paths": [
-            "~/Development/DebugVersion/OpenSource"
-          ]
-        },
-        {
-          "paths": [
-            "~/Development/ReleaseVersion/OpenSource"
-          ]
-        },
-        {
-          "paths": [
-            "~/Development/Yocto/OpenSource"
-          ]
-        }
-      ]
-    },
-    {
-      "host": "workstation32",
-      "projects": [
-        {
-          "paths": [
-            "/home/jmichaud/Development/framehop"
-          ]
-        },
-        {
-          "paths": [
-            "/home/jmichaud/Development/linux-perf-data"
-          ]
-        },
-        {
-          "paths": [
-            "/home/jmichaud/Development/samply"
-          ]
-        },
-        {
-          "paths": [
-            "/home/jmichaud/Development/sysprof"
-          ]
-        },
-        {
-          "paths": [
-            "/home/jmichaud/Development/testjitunwind"
-          ]
-        },
-        {
-          "paths": [
-            "~/Development/DebugVersion/OpenSource"
-          ]
-        },
-        {
-          "paths": [
-            "~/Development/ReleaseVersion/OpenSource"
-          ]
-        }
-      ],
-      "nickname": "wkdev-32"
-    },
-    {
-      "host": "workstation64",
-      "projects": [
-        {
-          "paths": [
-            "/home/jmichaud/Development/framehop"
-          ]
-        },
-        {
-          "paths": [
-            "/home/jmichaud/Development/testjitunwind"
-          ]
-        },
-        {
-          "paths": [
-            "~/Development/DebugVersion/OpenSource"
-          ]
-        },
-        {
-          "paths": [
-            "~/Development/ReleaseVersion/OpenSource"
-          ]
-        },
-        {
-          "paths": [
-            "~/Development/Yocto/OpenSource"
-          ]
-        }
-      ],
-      "nickname": "wkdev-64"
-    }
-  ],
+  "ssh_connections": [],
   "ui_font_size": 16,
   "buffer_font_size": 16,
   "theme": {
@@ -123,20 +23,20 @@
   },
   "use_system_path_prompts": false, // Use in-container paths instead of host paths
   "lsp": {
-    "clangd": {
-      "binary": {
-        "arguments": ["--header-insertion=never"],
-        "path": "clangd"
-      }
-    },
-    "solargraph": {
-          "initialization_options": {
-            "diagnostics": false,
-            "formatting": false
-          }
+      "clangd": {
+        "binary": {
+          "arguments": ["--header-insertion=never"],
+          "path": "clangd"
         }
-  },
-"languages": {
+      },
+      "solargraph": {
+            "initialization_options": {
+              "diagnostics": false,
+              "formatting": false
+            }
+          }
+    },
+  "languages": {
     "Ruby": {
       "language_servers": ["solargraph", "!rubocop"],
       "formatter": null,

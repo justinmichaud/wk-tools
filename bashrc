@@ -1,4 +1,4 @@
-if command -v hx &> /dev/null; then
+if command -v hx > /dev/null; then
     export EDITOR="hx"
     export VISUAL="hx"
 else
@@ -23,7 +23,11 @@ export SSTATE_DIR="${HOME}/Development/.cache/yocto/sstate"
 export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS} DL_DIR SSTATE_DIR PARALLEL_MAKE"
 
 # We run out of memory otherwise;
-export jobs=$(( ($(awk '/MemFree/ {print $2}' /proc/meminfo) - 10 * 1000000) / (2000 * 1000)))
+if [ -f /proc/meminfo ]; then
+    export jobs=$(( ($(awk '/MemFree/ {print $2}' /proc/meminfo) - 10 * 1000000) / (2000 * 1000)))
+else
+    export jobs=8
+fi
 export PARALLEL_MAKE="-j${jobs}"
 export CMAKE_BUILD_PARALLEL_LEVEL=${jobs}
 

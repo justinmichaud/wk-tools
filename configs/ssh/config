@@ -2,16 +2,27 @@ Host igalia.com
   User jmichaud
   Port 6789
 
-Host workstation
-  HostName 418-im-a-teapot.tail4236a7.ts.net
-  User jmichaud
+Host home
+  HostName fbi-surveillance-gateway.tail4236a7.ts.net
+  User root
 
-Host workstation64
+Host moose
+  HostName 192.168.1.40
+  User jmichaud
+  ProxyCommand ssh -q -W %h:%p home
+
+Host moosebmc
+  HostName 192.168.1.41
+  Port 2200
+  User root
+  ProxyCommand ssh -q -W %h:%p home
+
+Host moose64
   HostName localhost
   Port 2264
-  ProxyCommand ssh -q -W %h:%p workstation
+  ProxyCommand ssh -q -W %h:%p moose
 
-Host workstation32
+Host moose32
   HostName localhost
   Port 2232
   ProxyCommand ssh -q -W %h:%p workstation

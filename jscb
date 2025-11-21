@@ -4,9 +4,22 @@ cd $BUILDDIR
 
 echo $BUILDDIR
 
+if [ "$(uname)" == "Darwin" ]; then
+
+if [[ "$CONFIG" == "Release" ]]
+then
+    build-jsc --release
+else
+    build-jsc --debug
+fi
+
+else
+
 if [[ "$CONFIG" == "Release" ]]
 then
     cd WebKitBuild/JSCOnly/Release/ && time ninja -k 0 -j`echo $jobs` jsc
 else
     cd WebKitBuild/JSCOnly/Debug/ && time ninja -k 0 -j`echo $jobs` jsc
+fi
+
 fi

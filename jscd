@@ -1,6 +1,14 @@
+if [ "$(uname)" == "Darwin" ]; then
+export VM=$BUILDDIR/WebKitBuild/$CONFIG/
+export JSC=$VM/jsc
+else
 export VM=$BUILDDIR/WebKitBuild/JSCOnly/$CONFIG/
+export JSC=$VM/bin/jsc
+fi
+
 export LD_LIBRARY_PATH=$VM
+export DYLD_FRAMEWORK_PATH=$VM
 export JSC_validateOptions=1
-lldb -s ~/Development/wk-tools/lldb-run-file $VM/bin/jsc -- --validateOptions=1 --useGDBJITInfo=0 "$@"
+lldb -s ~/Development/wk-tools/lldb-run-file $JSC -- --validateOptions=1 --useGDBJITInfo=0 "$@"
 #gdb -ex="set disassemble-next-line off" -ex="handle SIGUSR1 nostop noprint" -ex="handle SIGILL stop ignore" -ex="run" --args $VM/bin/jsc --validateOptions=1 "$@"
 
