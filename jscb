@@ -8,9 +8,9 @@ if [ "$(uname)" == "Darwin" ]; then
 
 if [[ "$CONFIG" == "Release" ]]
 then
-    build-jsc --release
+    build-jsc --release --export-compile-commands
 else
-    build-jsc --debug
+    build-jsc --debug --export-compile-commands
 fi
 
 else

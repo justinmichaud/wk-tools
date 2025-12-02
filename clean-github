@@ -1,0 +1,6 @@
+#!/bin/bash
+for k in $(git branch -a | sed /\*/d); do 
+  if [ -z "$(git log -1 --since='2 months ago' -s $k)" ]; then
+    git push -d fork --delete `echo $k | sed 's/remotes\/fork\///g'`
+  fi
+done

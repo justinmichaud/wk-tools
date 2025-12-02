@@ -19,13 +19,15 @@ Host moosebmc
 
 Host moose64
   HostName localhost
+  User jmichaud
   Port 2264
   ProxyCommand ssh -q -W %h:%p moose
 
 Host moose32
   HostName localhost
+  User jmichaud
   Port 2232
-  ProxyCommand ssh -q -W %h:%p workstation
+  ProxyCommand ssh -q -W %h:%p moose
 
 Host arm
   HostName devbox-armhf-2
