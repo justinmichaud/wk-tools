@@ -65,13 +65,13 @@ Host rpi4
   ProxyJump arm
 
 Host raspberrypi3
-  HostName raspberrypi3
+  HostName 192.168.1.10
   User root
   StrictHostKeyChecking no
   UserKnownHostsFile=/dev/null
 
  Host raspberrypi4
-  HostName raspberrypi4
+  HostName 192.168.1.11
   User root
   StrictHostKeyChecking no
   UserKnownHostsFile=/dev/null
