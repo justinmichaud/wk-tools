@@ -1,4 +1,22 @@
 {
+  "agent_servers": {
+    "claude-acp": {
+      "type": "registry"
+    }
+  },
+  "agent": {
+    "tool_permissions": {
+      "default": "allow"
+    },
+    "default_model": {
+      "provider": "zed.dev",
+      "model": "claude-sonnet-4-5"
+    },
+    "model_parameters": []
+  },
+  "terminal": {
+    "dock": "bottom"
+  },
   "soft_wrap": "editor_width",
   "show_whitespaces": "boundary",
   "format_on_save": "off",
@@ -22,6 +40,32 @@
           "paths": [
             "/home/jmichaud/Development/DebugVersion/OpenSource/./"
           ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/ReleaseVersion/OpenSource"
+          ]
+        }
+      ]
+    },
+    {
+      "host": "moose64",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/jmichaud/Development/DebugVersion/OpenSource/./"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/ReleaseVersion/OpenSource/./"
+          ]
+        },
+        {
+          "paths": [
+            "/usr/lib/aarch64-linux-gnu/gobject-introspection/giscanner/./"
+          ]
         }
       ]
     }
@@ -30,7 +74,7 @@
   "buffer_font_size": 16,
   "theme": {
     "mode": "system",
-    "light": "One Dark",
+    "light": "One Light",
     "dark": "One Dark"
   },
   "use_system_path_prompts": false, // Use in-container paths instead of host paths

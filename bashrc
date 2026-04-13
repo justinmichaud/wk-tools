@@ -15,7 +15,7 @@ export LC_ALL=
 alias clear="clear && echo -e '\e[3J' && clear"
 
 export TMPDIR=${HOME}/tmp
-export PATH="${HOME}/codium/bin:$PATH:${HOME}/Development/wk-tools/:${HOME}/"
+export PATH="`echo ${HOME}/.rustup/toolchains/*/bin/`:${HOME}/codium/bin:$PATH:${HOME}/Development/wk-tools/:${HOME}/:${HOME}/Development/wabt/bin/:${HOME}/Development/samply/target/release/"
 
 # Export shared directories for yocto caches
 export DL_DIR="${HOME}/Development/.cache/yocto/downloads"

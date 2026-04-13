@@ -9,6 +9,7 @@ fi
 export LD_LIBRARY_PATH=$VM
 export DYLD_FRAMEWORK_PATH=$VM
 export JSC_validateOptions=1
+#/Applications/Xcode.app/Contents/SharedFrameworks/LLDB.framework/Versions/A/Resources/debugserver localhost:5123 $JSC -- --validateOptions=1 --useGDBJITInfo=0 "$@"
 lldb -s ~/Development/wk-tools/lldb-run-file $JSC -- --validateOptions=1 --useGDBJITInfo=0 "$@"
 #gdb -ex="set disassemble-next-line off" -ex="handle SIGUSR1 nostop noprint" -ex="handle SIGILL stop ignore" -ex="run" --args $VM/bin/jsc --validateOptions=1 "$@"
 

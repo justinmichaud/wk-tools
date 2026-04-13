@@ -1,4 +1,5 @@
 Host igalia.com
+  ForwardAgent yes
   User jmichaud
   Port 6789
 
@@ -49,6 +50,11 @@ Host arm-bothost-3
   User root
   ProxyCommand ssh -q -W %h:%p igalia.com
 
+Host buildbox3
+  HostName buildbox3
+  User jmichaud
+  ProxyJump igalia.com
+
 Host arm4
   HostName devbox-armhf-4
   User jmichaud
@@ -71,7 +77,7 @@ Host raspberrypi3
   UserKnownHostsFile=/dev/null
 
  Host raspberrypi4
-  HostName 192.168.1.11
+  HostName 192.168.1.182
   User root
   StrictHostKeyChecking no
   UserKnownHostsFile=/dev/null
