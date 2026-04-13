@@ -5,11 +5,15 @@ cd $BUILDDIR
 echo $BUILDDIR
 
 MACHINE_BITS=`getconf LONG_BIT`
-if [[ $MACHINE_BITS == "32" ]]
-then
+MACHINE_ARCH=$(uname -m)
+
+if [[ $MACHINE_BITS == "32" ]]; then
     MACHINE_ARGS=(--32-bit)
-else
+elif [[ $MACHINE_ARCH == "aarch64" || $MACHINE_ARCH == "arm64" ]]; then
     MACHINE_ARGS=(--cmakeargs="-DCMAKE_C_FLAGS='-moutline-atomics' -DCMAKE_CXX_FLAGS='-moutline-atomics'")
+else
+    # x86_64 — no special flags needed
+    MACHINE_ARGS=()
 fi
 
 if [[ "$CONFIG" == "Release" ]]

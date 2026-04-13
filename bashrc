@@ -5,10 +5,7 @@ else
     export EDITOR="vim"
     export VISUAL="vim"
 fi
-
-source ~/Development/webkit-container-sdk/register-sdk-on-host.sh
-
-export LC_ALL=
+source $HOME/Development/webkit-container-sdk/register-sdk-on-host.sh
 
 #export LD_LIBRARY_PATH=$lD_LIBRARY_PATH:/usr/lib/arm-linux-gnueabihf
 
