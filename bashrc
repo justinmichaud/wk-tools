@@ -11,7 +11,7 @@ source $HOME/Development/webkit-container-sdk/register-sdk-on-host.sh
 
 alias clear="clear && echo -e '\e[3J' && clear"
 
-export TMPDIR=${HOME}/tmp
+#export TMPDIR=${HOME}/tmp
 export PATH="`echo ${HOME}/.rustup/toolchains/*/bin/`:${HOME}/codium/bin:$PATH:${HOME}/Development/wk-tools/:${HOME}/:${HOME}/Development/wabt/bin/:${HOME}/Development/samply/target/release/"
 
 # Export shared directories for yocto caches
