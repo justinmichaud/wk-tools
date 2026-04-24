@@ -1,0 +1,38 @@
+#!/bin/bash
+set -e
+
+rm -rf /tmp/ion
+mkdir -p /tmp/ion
+
+jscr "$@" --dumpIonGraph=1 --ionGraphDirectory=/tmp/ion
+
+# 3. Setup cleanup for background processes
+trap "kill 0" EXIT
+
+(cd /tmp/ion && python3 -m http.server 8080) &
+
+# Ensure $BUILDDIR is defined or use a relative path to the tool
+if [ -d "$BUILDDIR/Tools/IonGraph" ]; then
+    (cd "$BUILDDIR/Tools/IonGraph" && bun serve) &
+else
+    echo "Error: BUILDDIR/Tools/IonGraph not found."
+    exit 1
+fi
+
+sleep 2
+
+# 5. Process files
+shopt -s nullglob
+for file in /tmp/ion/*; do
+    base=$(basename "$file")
+    url="http://localhost:8080/$base"
+    
+    # Use -j to avoid newlines and -Rr for raw input
+    encoded=$(echo -n "$url" | jq -sRr @uri)
+    
+    echo "Opening visualization for $base..."
+    xdg-open "http://localhost:8000/?file=$encoded"
+done
+
+# Keep the script alive so the background servers don't die immediately
+wait

@@ -21,7 +21,7 @@ export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS} DL_DIR SSTA
 
 # We run out of memory otherwise;
 if [ -f /proc/meminfo ]; then
-    export jobs=$(( ($(awk '/MemFree/ {print $2}' /proc/meminfo) - 10 * 1000000) / (2000 * 1000)))
+    export jobs=$(( ($(awk '/MemAvailable/ {print $2}' /proc/meminfo) - 10 * 1000 * 1000) / (4 * 1000 * 1000)))
 else
     export jobs=8
 fi
