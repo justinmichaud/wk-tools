@@ -1,0 +1,262 @@
+#!/bin/bash
+# Check out a fork branch in GitHub PR head syntax (user:branch).
+#
+# - Fetches `fork` and `origin`.
+# - If `user` is not the owner of `fork`, looks for an existing remote pointing
+#   at that user; if none exists, offers to add one.
+# - Checks out the branch, confirms its upstream, and (if local diverges from
+#   the remote) writes a diff to a temp file, opens it in VS Code if `code` is
+#   on PATH, and offers to force-reset to the remote.
+#
+# Every git command is printed and confirmed before running. Destructive
+# operations (remote add, set-upstream changes, reset --hard) are flagged.
+
+set -u
+
+if [ $# -lt 1 ] || [[ "$1" != *:* ]]; then
+    echo "Usage: $(basename "$0") <user>:<branch>" >&2
+    exit 1
+fi
+
+INPUT="$1"
+PR_USER="${INPUT%%:*}"
+BRANCH="${INPUT#*:}"
+
+if [ -z "$PR_USER" ] || [ -z "$BRANCH" ]; then
+    echo "Invalid argument: '$INPUT' (expected user:branch)" >&2
+    exit 1
+fi
+
+# Extract the github user/org from a remote URL.
+# Handles git@host:USER/REPO(.git) and https://host/USER/REPO(.git).
+remote_user_from_url() {
+    local url="$1"
+    echo "$url" | sed -E 's#(\.git)?$##; s#.*[:/]([^/:]+)/[^/]+$#\1#'
+}
+
+# Extract the repo name from a remote URL.
+remote_repo_from_url() {
+    local url="$1"
+    echo "$url" | sed -E 's#(\.git)?$##; s#.*/([^/]+)$#\1#'
+}
+
+ask() {
+    # ask "prompt" -> returns 0 if yes, 1 if no. Default is yes (empty -> yes).
+    local prompt="$1"
+    local reply
+    read -r -p "$prompt [Y/n] " reply
+    case "$reply" in
+        ""|[Yy]|[Yy][Ee][Ss]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+confirm_run() {
+    # Print the command, ask, then run it. Returns the command's exit status,
+    # or 130 if the user declined.
+    echo
+    echo "  \$ $*"
+    if ask "Run this?"; then
+        "$@"
+        return $?
+    fi
+    echo "  (skipped)"
+    return 130
+}
+
+run_silent() {
+    # Print and run a read-only/non-destructive command, no prompt.
+    echo
+    echo "  \$ $*"
+    "$@"
+    return $?
+}
+
+confirm_run_destructive() {
+    echo
+    echo "  DESTRUCTIVE:"
+    echo "  \$ $*"
+    if ask "Run this?"; then
+        "$@"
+        return $?
+    fi
+    echo "  (skipped)"
+    return 130
+}
+
+require() {
+    # Run a confirm_run; abort if the user declines or the command fails.
+    confirm_run "$@"
+    local rc=$?
+    if [ $rc -eq 130 ]; then
+        echo "Required step declined; aborting." >&2
+        exit 1
+    fi
+    if [ $rc -ne 0 ]; then
+        echo "Command failed (exit $rc); aborting." >&2
+        exit $rc
+    fi
+}
+
+# --- Identify the fork remote and its owner -----------------------------------
+
+if ! git remote get-url fork >/dev/null 2>&1; then
+    echo "No 'fork' remote configured." >&2
+    exit 1
+fi
+FORK_URL=$(git remote get-url fork)
+FORK_USER=$(remote_user_from_url "$FORK_URL")
+
+if ! git remote get-url origin >/dev/null 2>&1; then
+    echo "No 'origin' remote configured." >&2
+    exit 1
+fi
+ORIGIN_URL=$(git remote get-url origin)
+ORIGIN_REPO=$(remote_repo_from_url "$ORIGIN_URL")
+
+echo "fork    : $FORK_URL  (user: $FORK_USER)"
+echo "origin  : $ORIGIN_URL  (repo: $ORIGIN_REPO)"
+echo "request : user=$PR_USER  branch=$BRANCH"
+
+# --- Fetch fork and origin ----------------------------------------------------
+
+run_silent git fetch fork || exit $?
+run_silent git fetch origin || exit $?
+
+# --- Pick the remote that owns the requested branch ---------------------------
+
+if [ "$PR_USER" = "$FORK_USER" ]; then
+    REMOTE="fork"
+else
+    REMOTE=""
+    for r in $(git remote); do
+        url=$(git remote get-url "$r")
+        ruser=$(remote_user_from_url "$url")
+        if [ "$ruser" = "$PR_USER" ]; then
+            REMOTE="$r"
+            echo "Found existing remote '$REMOTE' for user '$PR_USER'."
+            break
+        fi
+    done
+    if [ -z "$REMOTE" ]; then
+        NEW_URL="git@github.com:$PR_USER/$ORIGIN_REPO.git"
+        REMOTE="$PR_USER"
+        echo
+        echo "No remote exists for user '$PR_USER'."
+        echo "Proposed: remote='$REMOTE' url='$NEW_URL'"
+        confirm_run_destructive git remote add "$REMOTE" "$NEW_URL"
+        rc=$?
+        if [ $rc -ne 0 ]; then
+            echo "Cannot continue without remote." >&2
+            exit 1
+        fi
+    fi
+    run_silent git fetch "$REMOTE" || exit $?
+fi
+
+# --- Check out the branch -----------------------------------------------------
+
+EXPECTED_UPSTREAM="$REMOTE/$BRANCH"
+
+if ! git rev-parse --verify --quiet "refs/remotes/$EXPECTED_UPSTREAM" >/dev/null; then
+    echo "Remote ref '$EXPECTED_UPSTREAM' not found after fetch." >&2
+    exit 1
+fi
+
+if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    echo
+    echo "Local branch '$BRANCH' already exists."
+    require git checkout "$BRANCH"
+else
+    require git checkout -b "$BRANCH" --track "$EXPECTED_UPSTREAM"
+fi
+
+# --- Verify upstream ----------------------------------------------------------
+
+CURRENT_UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
+echo
+echo "Upstream check:"
+echo "  current : ${CURRENT_UPSTREAM:-<none>}"
+echo "  expected: $EXPECTED_UPSTREAM"
+
+if [ "$CURRENT_UPSTREAM" != "$EXPECTED_UPSTREAM" ]; then
+    echo "Upstream does not match."
+    confirm_run_destructive git branch --set-upstream-to="$EXPECTED_UPSTREAM" "$BRANCH" || true
+else
+    echo "Upstream OK."
+fi
+
+# --- Status & divergence check ------------------------------------------------
+
+run_silent git status
+
+LOCAL_SHA=$(git rev-parse HEAD)
+REMOTE_SHA=$(git rev-parse "$EXPECTED_UPSTREAM")
+
+if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
+    echo
+    echo "Local '$BRANCH' matches '$EXPECTED_UPSTREAM'. Nothing more to do."
+    exit 0
+fi
+
+echo
+echo "Local '$BRANCH' ($LOCAL_SHA) differs from '$EXPECTED_UPSTREAM' ($REMOTE_SHA)."
+
+# Determine an upstream base so we can exclude origin-only commits (e.g. when
+# the remote branch was rebased onto a newer origin/main). We compare the
+# patch series from each branch's merge-base with origin/main.
+UPSTREAM_BASE_BRANCH="origin/main"
+if ! git rev-parse --verify --quiet "$UPSTREAM_BASE_BRANCH" >/dev/null; then
+    UPSTREAM_BASE_BRANCH=""
+fi
+
+LOCAL_BASE=""
+REMOTE_BASE=""
+if [ -n "$UPSTREAM_BASE_BRANCH" ]; then
+    LOCAL_BASE=$(git merge-base "$BRANCH" "$UPSTREAM_BASE_BRANCH" 2>/dev/null || true)
+    REMOTE_BASE=$(git merge-base "$EXPECTED_UPSTREAM" "$UPSTREAM_BASE_BRANCH" 2>/dev/null || true)
+fi
+
+DIFF_FILE=$(mktemp --suffix=.diff -t "gpr.XXXXXX")
+{
+    echo "# Comparing local '$BRANCH' vs '$EXPECTED_UPSTREAM'"
+    echo "# Local : $LOCAL_SHA"
+    echo "# Remote: $REMOTE_SHA"
+    if [ -n "$LOCAL_BASE" ] && [ -n "$REMOTE_BASE" ]; then
+        echo "# Excluding $UPSTREAM_BASE_BRANCH commits."
+        echo "# Local  base: $LOCAL_BASE"
+        echo "# Remote base: $REMOTE_BASE"
+        echo
+        echo "# git log --oneline $LOCAL_BASE..$BRANCH  (local PR commits)"
+        git log --oneline "$LOCAL_BASE..$BRANCH" || true
+        echo
+        echo "# git log --oneline $REMOTE_BASE..$EXPECTED_UPSTREAM  (remote PR commits)"
+        git log --oneline "$REMOTE_BASE..$EXPECTED_UPSTREAM" || true
+        echo
+        echo "# git range-diff $LOCAL_BASE..$BRANCH $REMOTE_BASE..$EXPECTED_UPSTREAM"
+        git range-diff "$LOCAL_BASE..$BRANCH" "$REMOTE_BASE..$EXPECTED_UPSTREAM" || true
+    else
+        echo "# (no $UPSTREAM_BASE_BRANCH found; falling back to full diff)"
+        echo
+        echo "# git log --oneline --left-right $BRANCH...$EXPECTED_UPSTREAM"
+        git log --oneline --left-right "$BRANCH...$EXPECTED_UPSTREAM" || true
+        echo
+        echo "# git diff $BRANCH..$EXPECTED_UPSTREAM"
+        git diff "$BRANCH..$EXPECTED_UPSTREAM"
+    fi
+} > "$DIFF_FILE"
+
+echo "Wrote diff to: $DIFF_FILE"
+
+if command -v code >/dev/null 2>&1; then
+    run_silent code "$DIFF_FILE" || true
+else
+    echo "(VS Code 'code' CLI not on PATH; open the file manually)"
+fi
+
+echo
+echo "Offer to force-update local '$BRANCH' to match '$EXPECTED_UPSTREAM'."
+confirm_run_destructive git reset --hard "$EXPECTED_UPSTREAM" || true
+
+echo
+echo "Done."

@@ -9,6 +9,8 @@ jscr "$@" --dumpIonGraph=1 --ionGraphDirectory=/tmp/ion
 # 3. Setup cleanup for background processes
 trap "kill 0" EXIT
 
+ls -al /tmp/ion
+
 (cd /tmp/ion && python3 -m http.server 8080) &
 
 # Ensure $BUILDDIR is defined or use a relative path to the tool
@@ -31,6 +33,7 @@ for file in /tmp/ion/*; do
     encoded=$(echo -n "$url" | jq -sRr @uri)
     
     echo "Opening visualization for $base..."
+    echo "http://localhost:8000/?file=$encoded"
     xdg-open "http://localhost:8000/?file=$encoded"
 done
 
