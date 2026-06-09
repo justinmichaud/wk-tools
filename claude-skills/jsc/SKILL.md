@@ -16,6 +16,7 @@ These override defaults and apply to every change, anywhere in WebKit.
 - **Never commit, amend, or push without explicit in-turn authorization.** "Fix X", "make this work", "fix the EWS issues" is *not* permission to touch git. Stop at the working tree, show `git status` / `git diff`, and let the user decide.
 - **No unrelated changes.** Especially whitespace: only touch whitespace on a line you are already editing for another reason. Never introduce trailing-whitespace or tab/space errors. Leave surrounding formatting alone.
 - **Always run `Tools/Scripts/check-webkit-style`** on your diff before considering a change done, and fix what it reports.
+- **Always do the comment pass before considering a change done.** Re-read every comment you added or touched and apply the test in [Comment style](#comment-style). This is not optional and not covered by `check-webkit-style`.
 - **No new safer-cpp exceptions.** Do not add entries to the safer-cpp / `-Wunsafe-buffer-usage` exception lists. Fix the code to be safe instead.
 - **Run the project's real test harness, not hand-rolled binaries.** For JSC specifically, use `Tools/Scripts/run-jsc-stress-tests`, never a bare `jsc test.js` — the harness honors each test's `//@ runDefault(...)` directives, applies the standard flag matrix, and reports like EWS does. Use the analogous script for other components (`run-webkit-tests` for layout tests, `run-api-tests` for API tests).
 
@@ -51,7 +52,26 @@ Examples of good, succinct WebKit comments to imitate:
 
 Each is one line (or two), states a constraint or invariant a fresh reader needs, and uses plain ASCII.
 
-## Tier-up (the optimization pipeline)
+A comment must make sense to someone reading the final code who never saw the previous version. Do not phrase the *why* as a contrast against what *this* code used to be, or against an alternative you rejected *while editing it* -- those only parse if you know the edit history. State the standalone invariant the current code must satisfy instead.
+
+The one legitimate exception is a **footgun warning**: telling the reader not to reach for a different construct *they might independently choose*, when that choice silently breaks something. That is self-contained (the reader needs no history -- the comment explains why the alternative is wrong) and is idiomatic WebKit, e.g. `// Never use jsCast here. It is possible that this value is "Dead" but not "Finalized" yet.` The test is not "does it name an alternative" but "does understanding it require knowing what this code used to be." Bad, then fixed:
+
+```cpp
+// BAD -- "rather than RELEASE_ASSERT_WITH_MESSAGE" only means something if you know it used to be one:
+// Report misuse via dataLogLn before crashing rather than RELEASE_ASSERT_WITH_MESSAGE,
+// whose message is compiled out in release builds, so mustCrashWith! matching works everywhere.
+
+// ALSO BAD -- "not an assertion macro that compiles them out" still names the rejected alternative:
+// The stress tests match these reasons via mustCrashWith!, so they must print in
+// release builds: report with dataLogLn, not an assertion macro that compiles them out.
+
+// GOOD -- states only the invariant; the reader needs no history to use it:
+// The stress tests match these messages in the crash output via mustCrashWith!.
+```
+
+**The comment pass (do this on every change, as a distinct step).** After the code is written and before you call the change done, go over every comment you added or edited, one at a time, reading each in isolation from the diff. For each, ask: *would this make sense to someone who only sees the final code and never saw what it replaced?* If understanding it requires knowing the prior version or which alternative you rejected, rewrite it as a standalone invariant or delete it.
+
+It is faster to grep your own diff for the giveaway words than to eyeball it. Treat any of these in an added comment as suspect until you have checked it: `rather than`, `instead of`, `used to`, `no longer`, `previously`, `formerly`, `now `, `changed to`, `not a`/`not an`, `we switched`, `was a`. For each hit, apply the test above: if the comment is narrating your edit, rewrite it; if it is a self-contained footgun warning, keep it. Do the same on the output of the `code-review` and `simplify` skills.
 
 JSC runs JavaScript through four tiers, promoting hot code upward and demoting it on bad speculation. The whole point is: start cheap, get faster only where it pays, and stay correct by being able to fall back.
 
@@ -209,6 +229,8 @@ JSC is built with the Safer C++ checkers on, and **no new exceptions may be adde
 - **RefCounted subclasses** give their constructors `private` visibility and expose a public `static Ref<T> create(...)`. A non-final ref-counted class needs a virtual destructor (`RefCntblBaseVirtualDtor` enforces this).
 - Prefer `enum class` (with an explicit underlying type) over plain enums, `std::variant` over unions, and strongly-typed `ObjectIdentifier<>` over bare `uint64_t`.
 - **Cross-thread:** pass data with `crossThreadCopy(WTFMove(data))`. Guard shared state with the `<wtf/ThreadSafetyAnalysis.h>` macros `WTF_GUARDED_BY_LOCK(...)` and `WTF_REQUIRES_LOCK(...)` so the analyzer verifies locking at build time.
+- **Fixing `UncountedCallArgsChecker` on a member RefPtr/Ref** (e.g. `m_foo->bar(...)` flagged "Call argument for 'this' parameter is uncounted and unsafe"): the idiomatic fix is `protect(m_foo)->bar(...)`. `protect()` is a WTF free function (`Source/WTF/wtf/RefPtr.h`, `Source/WTF/wtf/Ref.h`) that copies the smart pointer for the call's duration — 338+ call sites across the tree. Use it only at flagged sites; locals constructed from `Foo::create()` are already protected by their stack `Ref`/`RefPtr`, so the checker doesn't warn there.
+- **`NODELETE` is a contract, not a suppression.** Defined in `wtf/Compiler.h` as `[[clang::annotate_type("webkit.nodelete")]]`; the comment on the macro is the spec: *"the function does not run any destructor or free memory"* — **any**, not just `this`. Clang's `TrivialFunctionAnalysis` enforces it: every parameter must have a trivial destructor, and the body may not call un-annotated/un-trivial functions, `delete`, or `free`. So before annotating: a method that overwrites a stored `Ref` (`HashMap::set` on an existing key) or grows a `Vector<Ref<...>>` (the old buffer is `fastFree`d) is *not* NODELETE-safe even if it "feels trivial." When in doubt, use `protect(m_member)->...` at the call site instead — it actually adds a refcount rather than asserting a guarantee you haven't verified. `SUPPRESS_NODELETE` and `SUPPRESS_UNCOUNTED_*` *are* suppressions and fall under the no-new-exceptions rule.
 - Recent JSC reviews enforce these directly: reviewers asked for `std::span` over pointer+length and for deriving state from an existing object instead of threading extra raw parameters through.
 
 ## Naming conventions

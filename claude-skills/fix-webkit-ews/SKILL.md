@@ -14,6 +14,8 @@ allowed-tools:
 
 # Fix WebKit EWS Issues
 
+**Before doing anything else, invoke the `jsc` skill.** Any fix you apply lands in WebKit, which means it is bound by the WebKit/JSC house rules (no unrelated changes, comment style, smart-pointer/Safer-CPP discipline, `protect()` vs `NODELETE`, test conventions like `testLoopCount`, the no-commit-without-authorization rule, etc.). Loading `jsc` first puts those rules in context so you don't, for example, "fix" a safer-cpp warning by adding a NODELETE annotation that doesn't actually hold, or paper over a style error in a way that violates the comment guide. If `jsc` is already loaded in the current conversation, do not re-invoke it — proceed directly.
+
 When the user asks to fix EWS issues on the current branch's WebKit PR, follow this workflow. It is built around the observation that **most red EWS bots are not the PR's fault** — they are infra hiccups (jhbuild storage errors, worker timeouts, flaky tests, pre-existing failures). Spending the user's time on those is wasteful. The goal is: triage fast, fix what's real, summarize the rest cleanly.
 
 > **HARD CONSTRAINT — never act on the user's behalf.** This skill is strictly read-from-EWS and edit-locally. NEVER run `git commit`, `git push`, `git commit --amend`, or `gh pr comment` — and never any other command that publishes, pushes, or posts. Apply fixes to the working tree only and stop. Leave committing, pushing, and PR comments entirely to the user. If you ever think a push or comment is warranted, describe what you would do and let the user do it themselves.
