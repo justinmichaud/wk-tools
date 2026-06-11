@@ -14,6 +14,7 @@ This file guides work anywhere in the WebKit repo. It has two parts: **conventio
 These override defaults and apply to every change, anywhere in WebKit.
 
 - **Never commit, amend, or push without explicit in-turn authorization.** "Fix X", "make this work", "fix the EWS issues" is *not* permission to touch git. Stop at the working tree, show `git status` / `git diff`, and let the user decide.
+- **Never ask whether to commit, amend, or push.** Do not end a turn with "Want me to commit?" or any variant. The user initiates git themselves; finish at the working tree and stop. Only act on git when the user explicitly tells you to in that turn.
 - **No unrelated changes.** Especially whitespace: only touch whitespace on a line you are already editing for another reason. Never introduce trailing-whitespace or tab/space errors. Leave surrounding formatting alone.
 - **Always run `Tools/Scripts/check-webkit-style`** on your diff before considering a change done, and fix what it reports.
 - **Always do the comment pass before considering a change done.** Re-read every comment you added or touched and apply the test in [Comment style](#comment-style). This is not optional and not covered by `check-webkit-style`.
@@ -113,6 +114,8 @@ Tools/Scripts/run-javascriptcore-tests     # full suite
 Tools/Scripts/run-jsc-stress-tests         # stress tests (most common for JSC dev)
 Tools/Scripts/run-api-tests                # C / Objective-C API
 ```
+
+**Always pass `-c <N>` to `run-jsc-stress-tests`, and size N to memory, not cores.** Its default worker count comes from `numberOfProcessors`, which both (a) under-detects in cgroup-limited/containerized environments (e.g. reports ~3 while `nproc` shows 80), making the default run ~10-25x too slow, and (b) on a big box would launch far more workers than RAM allows. Each worker is a full VM that can spike to several GB, so a high `-c` OOM-kills the run: `-c 40` OOM-killed everything on a 125 GB host; `-c 20` was safe there. Pick `-c` from available memory (budget a few GB per worker), then cap by cores. On a well-fed box a full `JSTests/stress` run should finish in well under an hour; if it is crawling, the worker count is the cause, not the test load. Pass a directory (`JSTests/stress`), not individual files — the per-file path hits a collection-YAML parse bug. On Linux set `LD_LIBRARY_PATH=$WEBKIT_ROOT/WebKitBuild/JSCOnly/Release/lib` and `--jsc <abs path>/bin/jsc`.
 
 For `testmasm` / `testb3` / `testair`, check the exit code for failure. The library path differs by platform — defer to `/build-webkit` for the exact path:
 - macOS: `DYLD_FRAMEWORK_PATH=$WEBKIT_ROOT/WebKitBuild/Release $WEBKIT_ROOT/WebKitBuild/Release/testb3 <target>`
