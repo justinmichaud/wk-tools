@@ -119,9 +119,10 @@ full build the first time (then cached per sha). It is large; if space is tight 
 Don't silently launch a long **full-suite** loop the user didn't ask for — but if they named subtests
 (Step 0), just run them. `run-benchmark` runs the plan in one browser/build per invocation, so
 **interleave the two builds across rounds** (cancel thermal/background drift), writing one JSON per
-round. The `jetstream3` plan
-fetches upstream JetStream3.0 (network on first run; use `--local-copy <dir>` to point at a local
-checkout). List names with `run-benchmark --plan jetstream3 --list-subtests` (the plan's set differs
+round. **Quiesce first** (`./quiesce.sh on` — see the Determinism checklist) and use the
+`JS3_LOCAL_COPY` it prints as `--local-copy "$JS3_LOCAL_COPY"` below: the `jetstream3` plan otherwise
+re-clones upstream JetStream3.0 from GitHub every invocation (network + disk noise, and the upstream
+commit can shift mid-experiment). List names with `run-benchmark --plan jetstream3 --list-subtests` (the plan's set differs
 from the in-tree `PerformanceTests/JetStream3` — e.g. it has `bigint-noble-ed25519`, not `-secp256k1`).
 
 > **⚠️ The Bash tool runs `zsh`, which does NOT word-split unquoted variables.** `--subtests $SUB`
@@ -135,10 +136,12 @@ from the in-tree `PerformanceTests/JetStream3` — e.g. it has `bigint-noble-ed2
 J3=/tmp/js3-runs; mkdir -p "$J3"
 CACHE=/tmp/js3-builds/$(git rev-parse HEAD)     # baseline (or the chosen base sha)
 PATCHED="$WEBKIT_ROOT/WebKitBuild/Release"
+LOCAL_COPY=/tmp/js3-builds/jetstream3-localcopy # the path quiesce.sh seeds & prints as JS3_LOCAL_COPY
 # Pass subtests literally (zsh!). Drop the --subtests line entirely for the full suite.
 run_one(){ # $1=build-dir  $2=out.json
   Tools/Scripts/run-benchmark --plan jetstream3 --browser minibrowser \
     --build-directory "$1" --output-file "$2" --count 1 \
+    --local-copy "$LOCAL_COPY" \
     --subtests delta-blue bigint-noble-ed25519; }
 for i in $(seq 1 8); do k=$(printf %02d $i)
   if [ $((i%2)) -eq 0 ]; then
@@ -262,9 +265,21 @@ than forcing a culprit.**
 
 The single biggest lever is **interleaving** baseline/patched every round; everything else trims noise.
 
+- **Quiescing helper — run this first.** `./quiesce.sh on` (a symlink in this skill's directory to the
+  top-level `wk-tools/quiesce.sh` tool) automates the
+  machine/OS and network-determinism items below: it checks AC power / thermal throttle / display-asleep,
+  disables Spotlight indexing (sudo), stops an in-flight Time Machine backup, starts `caffeinate`, reports
+  contending CPU hogs (cloud-sync/indexing daemons) to quit, settles thermals, and seeds a **pinned local
+  JetStream3 checkout**. It prints `JS3_LOCAL_COPY=<path>` on its last line — capture it and pass
+  `--local-copy "$JS3_LOCAL_COPY"` to every `run-benchmark` invocation so each round copies a fixed
+  checkout instead of re-cloning from GitHub (kills per-run network/disk variance and pins the commit so
+  upstream can't shift mid-experiment). Run `./quiesce.sh off` afterward to re-enable Spotlight and stop
+  `caffeinate`. ProMotion/variable-refresh rate is the one item it can only *warn* about — set a fixed
+  display refresh rate by hand, since rAF-driven browser runs inherit refresh jitter.
 - **Machine state:** plug into AC power; quit other apps and browser tabs; let the machine sit idle a
   minute to settle thermals; `caffeinate -dimsu &` during a run (note: `caffeinate` does NOT wake an
-  asleep display — see Gotchas). Don't run two benchmark loops at once.
+  asleep display — see Gotchas). Don't run two benchmark loops at once. (`./quiesce.sh on` does all of
+  this.)
 - **Interleave** base/patched within each round (the loops above alternate by parity). Never run
   all-baseline-then-all-patched (time-of-day / thermal drift aliases into the result).
 - **Same build config** both sides: Release, non-ASan, same compiler. The baseline cache guarantees
