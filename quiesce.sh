@@ -3,8 +3,15 @@
 # Cuts JetStream3 benchmarking noise via (1) machine/OS quiescing and (3) input/network determinism.
 #
 #   ./quiesce.sh on       quiesce the machine, then seed a pinned local JS3 copy and settle thermals
-#   ./quiesce.sh off       undo: re-enable Spotlight indexing, stop caffeinate
+#   ./quiesce.sh off       undo: re-enable Spotlight + Software Update, stop caffeinate + raiser,
+#                          restore App Nap, and resume the paused background daemons
 #   ./quiesce.sh status    report quiescing-relevant state; change nothing
+#
+# `on` also keeps MiniBrowser frontmost for the run: a custom-build MiniBrowser is launched by
+# the benchmark driver via raw exec (to inject DYLD_FRAMEWORK_PATH), which never activates it, so it
+# can sit occluded behind the terminal — and an occluded/hidden page has its requestAnimationFrame
+# throttled, which stalls or adds noise to the rAF-driven JetStream3 loop. We disable App Nap for
+# MiniBrowser and run a tiny background "raiser" that re-activates it whenever it loses focus.
 #
 # `on` and `status` print `JS3_LOCAL_COPY=<path>` on the last line — capture it and pass
 # `--local-copy "$JS3_LOCAL_COPY"` to run-benchmark so every round copies a fixed checkout instead of
@@ -18,6 +25,23 @@ set -u
 STATE_DIR=/tmp/js3-quiesce
 CAF_PID_FILE=$STATE_DIR/caffeinate.pid
 SPOTLIGHT_FLAG=$STATE_DIR/spotlight_disabled
+RAISER_PID_FILE=$STATE_DIR/raiser.pid
+RAISER_PY=$STATE_DIR/raiser.py
+APPNAP_FLAG=$STATE_DIR/appnap_disabled
+DAEMONS_FLAG=$STATE_DIR/daemons_paused
+SWUPDATE_FLAG=$STATE_DIR/swupdate_disabled
+MB_BUNDLE=org.webkit.MiniBrowser
+
+# Discretionary background daemons that schedule themselves during idle+on-charger time — exactly the
+# benchmark window. We SIGSTOP them for the run and SIGCONT on 'off' (killall -STOP/-CONT: no sudo,
+# fully reversible, nothing persisted across reboot). Grouped so the list is easy to trim.
+PAUSE_DAEMONS=(
+  photoanalysisd mediaanalysisd                       # Photos face/object/Live-Text ML (biggest idle CPU/GPU spikes)
+  suggestd knowledgeconstructiond parsecd proactived  # Siri / proactive / suggestions
+  AMPLibraryAgent                                     # Music/media library scan
+  bird cloudd                                         # iCloud Drive + CloudKit sync
+  ReportCrash                                         # crash reporter
+)
 LOCALCOPY=/tmp/js3-builds/jetstream3-localcopy        # pinned JS3 checkout for --local-copy
 JS3_REPO=https://github.com/WebKit/JetStream.git      # matches the jetstream3.plan git_repository
 JS3_BRANCH=JetStream3.0
@@ -59,6 +83,14 @@ check_machine() {
       warn "background: '$p' active — quit/pause it (indexing/cloud-sync/backup aliases into subtests)"
     fi
   done
+
+  # Notifications: macOS 26 has no reliable CLI to set Focus/Do Not Disturb, so we can only warn.
+  # A banner (iMessage/Apple-ID) or a modal alert steals focus mid-run and perturbs the rAF loop.
+  if pgrep -x UserNotificationCenter >/dev/null 2>&1; then
+    warn "modal alert on screen (UserNotificationCenter) — dismiss it; it steals focus during a run"
+  fi
+  warn "notifications: enable Do Not Disturb by hand (Control Center > Focus) — can't be set from the"
+  warn "               CLI on modern macOS; iMessage / Apple-ID banners otherwise alias into subtests"
 }
 
 seed_local_copy() {
@@ -89,9 +121,118 @@ start_caffeinate() {
   if [ -f "$CAF_PID_FILE" ] && kill -0 "$(cat "$CAF_PID_FILE")" 2>/dev/null; then
     note "caffeinate already running (pid $(cat "$CAF_PID_FILE"))"
   else
-    caffeinate -dimsu &
+    caffeinate -dimsu >/dev/null 2>&1 &
     echo $! > "$CAF_PID_FILE"
     note "caffeinate started (pid $(cat "$CAF_PID_FILE")) — note: does NOT wake an asleep display"
+  fi
+}
+
+disable_appnap() {
+  if defaults write "$MB_BUNDLE" NSAppSleepDisabled -bool YES >/dev/null 2>&1; then
+    note "App Nap: disabled for MiniBrowser (prevents background rAF/timer throttling)"
+    touch "$APPNAP_FLAG"
+  else
+    warn "could not disable App Nap for MiniBrowser (defaults write failed)"
+  fi
+}
+
+restore_appnap() {
+  if [ -f "$APPNAP_FLAG" ]; then
+    defaults delete "$MB_BUNDLE" NSAppSleepDisabled >/dev/null 2>&1
+    note "App Nap: restored for MiniBrowser"
+    rm -f "$APPNAP_FLAG"
+  fi
+}
+
+write_raiser() {
+  cat > "$RAISER_PY" <<'PY'
+#!/usr/bin/python3
+# Keep MiniBrowser frontmost so its page isn't marked hidden (which throttles
+# requestAnimationFrame — JetStream3's run loop). Only activates when it isn't
+# already frontmost, to minimize WindowServer churn. No-op when MiniBrowser
+# isn't running, so it's safe to run for the whole quiesced window. It picks up
+# each round's relaunched instance by bundle id, and activateIgnoringOtherApps
+# pulls it into the current Space if the terminal is fullscreen.
+import sys, time
+from AppKit import (NSRunningApplication, NSWorkspace,
+                    NSApplicationActivateIgnoringOtherApps)
+BID = "org.webkit.MiniBrowser"
+INTERVAL = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
+while True:
+    f = NSWorkspace.sharedWorkspace().frontmostApplication()
+    if f is None or f.bundleIdentifier() != BID:
+        for a in NSRunningApplication.runningApplicationsWithBundleIdentifier_(BID):
+            a.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+    time.sleep(INTERVAL)
+PY
+}
+
+start_raiser() {
+  if [ -f "$RAISER_PID_FILE" ] && kill -0 "$(cat "$RAISER_PID_FILE")" 2>/dev/null; then
+    note "raiser already running (pid $(cat "$RAISER_PID_FILE"))"
+    return
+  fi
+  if ! /usr/bin/python3 -c "import AppKit" >/dev/null 2>&1; then
+    warn "python3 AppKit unavailable — raiser disabled; MiniBrowser may stay backgrounded (rAF throttled)"
+    return
+  fi
+  write_raiser
+  /usr/bin/python3 "$RAISER_PY" 1 >"$STATE_DIR/raiser.log" 2>&1 &
+  echo $! > "$RAISER_PID_FILE"
+  note "raiser started (pid $(cat "$RAISER_PID_FILE")) — keeps MiniBrowser frontmost during runs"
+}
+
+stop_raiser() {
+  if [ -f "$RAISER_PID_FILE" ]; then
+    kill "$(cat "$RAISER_PID_FILE")" 2>/dev/null && note "raiser stopped"
+    rm -f "$RAISER_PID_FILE"
+  fi
+}
+
+pause_daemons() {
+  killall -STOP "${PAUSE_DAEMONS[@]}" >/dev/null 2>&1
+  touch "$DAEMONS_FLAG"
+  note "paused ${#PAUSE_DAEMONS[@]} discretionary daemons (Photos/Siri/iCloud ML + crash reporter) — resumed by 'off'"
+}
+
+resume_daemons() {
+  if [ -f "$DAEMONS_FLAG" ]; then
+    killall -CONT "${PAUSE_DAEMONS[@]}" >/dev/null 2>&1
+    note "resumed background daemons"
+    rm -f "$DAEMONS_FLAG"
+  fi
+}
+
+# Low Power Mode caps P-core frequency on Apple Silicon — must be off for benchmarking.
+# (Power Nap is a no-op on M-series, so we don't touch it.)
+ensure_full_power() {
+  local lpm
+  lpm=$(pmset -g 2>/dev/null | awk '/lowpowermode/{print $2}')
+  if [ "$lpm" = "1" ]; then
+    if sudo -n pmset -a lowpowermode 0 >/dev/null 2>&1 || sudo pmset -a lowpowermode 0 >/dev/null 2>&1; then
+      note "Low Power Mode: was ON — set OFF (it caps P-core frequency)"
+    else
+      warn "Low Power Mode is ON — disable it: sudo pmset -a lowpowermode 0 (caps P-core clock)"
+    fi
+  else
+    note "Low Power Mode: off ✓"
+  fi
+}
+
+disable_swupdate() {
+  if sudo -n softwareupdate --schedule off >/dev/null 2>&1 || sudo softwareupdate --schedule off >/dev/null 2>&1; then
+    note "Software Update: scheduled checks/downloads OFF (restored by 'off')"
+    touch "$SWUPDATE_FLAG"
+  else
+    warn "could not disable scheduled Software Update checks"
+  fi
+}
+
+restore_swupdate() {
+  if [ -f "$SWUPDATE_FLAG" ]; then
+    sudo -n softwareupdate --schedule on >/dev/null 2>&1 || sudo softwareupdate --schedule on >/dev/null 2>&1
+    note "Software Update: scheduled checks restored"
+    rm -f "$SWUPDATE_FLAG"
   fi
 }
 
@@ -99,9 +240,14 @@ case "${1:-status}" in
   on)
     note "=== quiescing for a benchmarking run ==="
     check_machine
+    ensure_full_power
     disable_spotlight
     sudo -n tmutil stopbackup >/dev/null 2>&1 && note "Time Machine: stopped in-flight backup"
+    disable_swupdate
+    pause_daemons
     start_caffeinate
+    disable_appnap
+    start_raiser
     seed_local_copy
     note "display refresh: if this is a ProMotion/variable-refresh panel, set a FIXED rate in"
     note "                 System Settings > Displays — rAF-driven runs inherit refresh jitter (manual step)"
@@ -123,10 +269,22 @@ case "${1:-status}" in
       kill "$(cat "$CAF_PID_FILE")" 2>/dev/null && note "caffeinate stopped"
       rm -f "$CAF_PID_FILE"
     fi
+    stop_raiser
+    restore_appnap
+    resume_daemons
+    restore_swupdate
     note "=== restored ==="
     ;;
   status)
     check_machine
+    if [ -f "$RAISER_PID_FILE" ] && kill -0 "$(cat "$RAISER_PID_FILE")" 2>/dev/null; then
+      note "raiser: running (pid $(cat "$RAISER_PID_FILE")) — MiniBrowser kept frontmost"
+    else
+      note "raiser: not running"
+    fi
+    [ -f "$APPNAP_FLAG" ] && note "App Nap: disabled for MiniBrowser"
+    [ -f "$DAEMONS_FLAG" ] && note "background daemons: paused (Photos/Siri/iCloud ML + crash reporter)"
+    [ -f "$SWUPDATE_FLAG" ] && note "Software Update: scheduled checks paused"
     if [ -d "$LOCALCOPY/.git" ]; then
       print -r -- "JS3_LOCAL_COPY=$LOCALCOPY"
     else
