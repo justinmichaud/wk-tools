@@ -14,122 +14,89 @@ allowed-tools:
   - Bash(ls:*)
   - Bash(rm -rf:*)
   - Bash(uname:*)
+  - Bash(git rev-parse:*)
+  - Bash(wkdev-enter:*)
 ---
 
 # Building JavaScriptCore / WebKit
 
-When the user asks to build JSC, WebKit, or any WebKit subproject, follow this skill exactly.
+Every command runs from `$WEBKIT_ROOT`, the repository root. Resolve it with `git rev-parse --show-toplevel`. Default to a **release** build and the **JavaScriptCore** target unless the user says otherwise; swap `release` for `debug` when they ask.
 
-Throughout this document, `$WEBKIT_ROOT` refers to the WebKit repository root directory. This CLAUDE.md file lives at `$WEBKIT_ROOT/Source/JavaScriptCore/CLAUDE.md`, so the WebKit root is `../..` relative to this file's directory. Resolve the actual path at runtime (e.g. via `git rev-parse --show-toplevel` or by navigating from the current working directory).
+Pick the platform with `uname -s`: **Darwin** is macOS and uses `make`; **anything else** (Linux) uses `Tools/Scripts/build-webkit`. The `make` wrapper and ASan file checks apply to macOS only.
 
-## Step 1: Detect Platform
-
-Run `uname -s` and branch:
-
-- **Darwin** → follow the macOS path below.
-- **Anything else** (Linux, etc.) → follow the non-macOS path below.
-
----
-
-## macOS / iOS (Darwin) — uses `make`
-
-### Pre-build: ASan check
-
-1. Check whether the file `$WEBKIT_ROOT/WebKitBuild/ASan` exists.
-2. **If the user asked for ASan** and the file does NOT exist: run `Tools/Scripts/set-webkit-configuration --asan` from `$WEBKIT_ROOT`.
-3. **If the user did NOT ask for ASan** and the file DOES exist: warn the user that ASan is currently enabled. Offer to clean the build by removing `$WEBKIT_ROOT/WebKitBuild`. This is destructive — confirm with the user before proceeding. If the user declines, proceed anyway but note the build will be ASan-enabled.
-
-### Run the build
-
-Always run `make` from `$WEBKIT_ROOT`, passing `SCHEME=` explicitly. This avoids CWD-dependent behavior.
-
-| What to build | Command (from `$WEBKIT_ROOT`) |
-|---------------|-------------------------------|
-| JavaScriptCore only | `make release SCHEME="Everything up to JavaScriptCore"` |
-| Full WebKit / Safari | `make release` |
-| Another subproject (e.g. WTF) | `make release SCHEME="Everything up to WTF"` |
+## macOS (Darwin) — `make`
 
 ```bash
-cd $WEBKIT_ROOT
-make release SCHEME="Everything up to JavaScriptCore"   # or: make debug SCHEME=...
+make release SCHEME="Everything up to JavaScriptCore"   # JSC only (debug: make debug)
+make release SCHEME="Everything up to WTF"              # another subproject
+make release                                            # full WebKit / Safari, no SCHEME
 ```
 
-- Use `make release` unless the user asks for a debug build.
-- If the user says "build" without specifying release/debug, default to **release**.
-- The `"Everything up to X"` scheme builds X and all its dependencies (WTF, bmalloc, etc.).
+`"Everything up to X"` builds X plus its dependencies (WTF, bmalloc, etc.). Pass `SCHEME=` explicitly so behavior does not depend on the current directory.
 
-### Build artifacts (macOS)
+**ASan check before building** (looks for the marker file `$WEBKIT_ROOT/WebKitBuild/ASan`):
+- User asked for ASan, marker absent: run `Tools/Scripts/set-webkit-configuration --asan` first.
+- User did not ask for ASan, marker present: warn ASan is enabled. Offer to clean by removing `$WEBKIT_ROOT/WebKitBuild` (destructive — confirm first). If declined, build anyway and note it will be ASan-enabled.
 
-The macOS `make` build produces a flat framework layout:
-
-| Artifact | Path |
-|----------|------|
-| JSC shell | `$WEBKIT_ROOT/WebKitBuild/Release/jsc` (or `Debug/jsc`) |
-| Test binaries | `$WEBKIT_ROOT/WebKitBuild/Release/testmasm`, `testb3`, `testair` |
-| Frameworks | `$WEBKIT_ROOT/WebKitBuild/Release/JavaScriptCore.framework/`, etc. |
-| Generated headers | `$WEBKIT_ROOT/WebKitBuild/Release/DerivedSources/JavaScriptCore/` |
-
-To run binaries, set `DYLD_FRAMEWORK_PATH` to the build output directory:
+Run binaries with `DYLD_FRAMEWORK_PATH` set to the build output:
 ```bash
 DYLD_FRAMEWORK_PATH=$WEBKIT_ROOT/WebKitBuild/Release $WEBKIT_ROOT/WebKitBuild/Release/jsc test.js
 ```
 
----
+Artifacts (flat framework layout):
+| Artifact | Path |
+|----------|------|
+| JSC shell | `$WEBKIT_ROOT/WebKitBuild/Release/jsc` (or `Debug/jsc`) |
+| Test binaries | `$WEBKIT_ROOT/WebKitBuild/Release/{testmasm,testb3,testair}` |
+| Frameworks | `$WEBKIT_ROOT/WebKitBuild/Release/JavaScriptCore.framework/`, etc. |
+| Generated headers | `$WEBKIT_ROOT/WebKitBuild/Release/DerivedSources/JavaScriptCore/` |
 
-## Other Platforms (Linux, etc.) — uses `build-webkit`
+## Linux — `Tools/Scripts/build-webkit`
 
-Run from `$WEBKIT_ROOT`:
+```bash
+Tools/Scripts/build-webkit --jsc-only --release   # JSC only (debug: --debug)
+Tools/Scripts/build-webkit --release              # full WebKit
+```
 
-| What to build | Command |
-|---------------|---------|
-| JavaScriptCore only | `Tools/Scripts/build-webkit --jsc-only --release` |
-| Full WebKit | `Tools/Scripts/build-webkit --release` |
-
-- Replace `--release` with `--debug` if the user asks for a debug build.
-- The macOS-specific `make` wrapper and ASan file checks do NOT apply here.
-
-### Build artifacts (Linux / CMake)
-
-The CMake build uses a standard `bin/`/`lib/` layout:
-
+Artifacts (standard `bin/`/`lib/` layout):
 | Artifact | Path |
 |----------|------|
 | JSC shell | `$WEBKIT_ROOT/WebKitBuild/Release/bin/jsc` |
-| Test binaries | `$WEBKIT_ROOT/WebKitBuild/Release/bin/testmasm`, `testb3`, `testair` |
+| Test binaries | `$WEBKIT_ROOT/WebKitBuild/Release/bin/{testmasm,testb3,testair}` |
 | Shared libraries | `$WEBKIT_ROOT/WebKitBuild/Release/lib/` |
 | Generated headers | `$WEBKIT_ROOT/WebKitBuild/Release/DerivedSources/JavaScriptCore/` |
 
----
+A JSCOnly `bin/jsc` runs in place — it links its sibling `lib/` via **RPATH**, so just
+`"$DIR/bin/jsc" …`, no env var. Because that is RPATH (not RUNPATH), `LD_LIBRARY_PATH` does **not**
+redirect it to a different `libJavaScriptCore.so`; to run an alternate or saved lib, copy it over the
+in-place file (back it up first).
 
-## Checking Build Results
+### 32-bit ARMv7 (wkdev32 container)
 
-- **Exit code**: `make` and `build-webkit` return non-zero on failure. Always check the exit code to determine success or failure.
-- **On failure**: Read the build output to identify the error. Common causes:
-  - Compilation errors — fix the source code and rebuild.
-  - Missing generated files — try a clean build (`make clean` then rebuild, or nuclear reset as last resort).
-  - Xcode version mismatch (macOS) — check that the selected Xcode version is compatible.
-- **On success**: The exit code is 0. Binaries are available at the platform-specific paths listed above.
+Build and run 32-bit inside the container: `wkdev-enter --name wkdev32 --exec -- bash -lc '<cmd>'`
+(interactive: `wkdev-enter --name wkdev32`). In-container `/home/<u>/Development` maps to host
+`/home/<u>/Development/32/Development`. The build is `linux32 Tools/Scripts/build-webkit --jsc-only
+--release --no-unified-builds` with `-march=armv7-a -mthumb -mfpu=neon -mfloat-abi=hard` in
+`CMAKE_{C,CXX}_FLAGS`, `-DCMAKE_BUILD_TYPE=RelWithDebInfo`, and `-DUSE_LD_LLD=OFF`. The full recipe is
+saved at `WebKitBuild/build-jsc-32.sh` (incremental ~11-17 min); output is
+`WebKitBuild/JSCOnly/Release/bin/jsc`.
 
----
+When a 32-bit build/link fails or the JIT comes up disabled, verify the target arch first — this is
+ARM32 (ARMv7/Thumb-2), not x86 or `linux32`; assuming x86 sends the diagnosis the wrong way. A common
+real cause of a disabled JIT is **Thumb-2 detection failing at CMake configure time** (check the
+configure output), not a bug in the code.
 
-## Nuclear Reset
+## Checking results
 
-If the user asks to clean everything or a build is hopelessly broken:
+`make` and `build-webkit` return 0 on success, non-zero on failure — always check the exit code. On failure, read the output and fix the cause:
+- Compilation error: fix the source and rebuild.
+- Missing generated files: clean and rebuild (`make clean`, then rebuild).
+- Xcode version mismatch (macOS): confirm the selected Xcode is compatible.
 
-1. **Confirm with the user** — removing `WebKitBuild` deletes all build artifacts, ASan config, and the Configuration file.
-2. `rm -rf $WEBKIT_ROOT/WebKitBuild`
-3. Rebuild from scratch.
+## Nuclear reset
 
-Use only as a last resort.
-
----
-
-## Quick Reference
-
-| User says | Action |
-|-----------|--------|
-| "build JSC" / "build JavaScriptCore" | `make release SCHEME="Everything up to JavaScriptCore"` from `$WEBKIT_ROOT` |
-| "build JSC debug" | `make debug SCHEME="Everything up to JavaScriptCore"` from `$WEBKIT_ROOT` |
-| "build WebKit" / "build Safari" | `make release` from `$WEBKIT_ROOT` (no SCHEME needed) |
-| "build with ASan" | Enable ASan config first, then build |
-| "clean build" | Remove WebKitBuild, then rebuild |
+Last resort, when a build is hopelessly broken. Removing `WebKitBuild` deletes all artifacts, the ASan config, and the Configuration file — confirm with the user first, then:
+```bash
+rm -rf $WEBKIT_ROOT/WebKitBuild
+```
+Then rebuild from scratch.

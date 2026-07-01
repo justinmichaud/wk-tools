@@ -13,13 +13,20 @@ This file guides work anywhere in the WebKit repo. It has two parts: **conventio
 
 These override defaults and apply to every change, anywhere in WebKit.
 
-- **Never commit, amend, or push without explicit in-turn authorization.** "Fix X", "make this work", "fix the EWS issues" is *not* permission to touch git. Stop at the working tree, show `git status` / `git diff`, and let the user decide.
-- **Never ask whether to commit, amend, or push.** Do not end a turn with "Want me to commit?" or any variant. The user initiates git themselves; finish at the working tree and stop. Only act on git when the user explicitly tells you to in that turn.
+- **The only git commands that may change the tree are `git stash push` and `git stash apply`, and only to build a baseline for perf testing.** Never run `git checkout`, `commit`, `amend`, `push`, `reset`, `rebase`, `add`, or `restore`. Finish at the working tree, show `git status` / `git diff`, and let the user drive git. Never ask "Want me to commit?" — the user initiates git themselves.
+- **Always `git stash apply`, never `git stash pop`.** Apply keeps the stash, so a conflict on restore cannot lose the change.
+- **Never draft, suggest, or write a commit message, PR description, or any review/issue/PR comment.** This is a firm boundary with no exceptions. Say in one plain sentence what a change does if that helps; never produce commit-message or comment text.
+- **Never search for, read, or transmit credentials, secrets, tokens, or keys, and never post or send anything on the user's behalf** (GitHub, Bugzilla, EWS, anywhere). Reading bot status and logs is fine; publishing is the user's job.
+- **Say plainly what a thing does or guarantees — name the concrete mechanism, never a stock idiom or metaphor standing in for it** (in any output, chat included). When you are about to reach for a ready-made figure of speech for "critical/depended-on" or for "a redundant safeguard," write the literal fact instead; stock idioms read as filler here.
+- **Put durable, general preferences (voice, conventions, workflow) in this skill, not project memory.** The user works across multiple workstations and checkouts, and project memory is keyed to a single checkout path — so an always-apply rule belongs here where it travels with them.
 - **No unrelated changes.** Especially whitespace: only touch whitespace on a line you are already editing for another reason. Never introduce trailing-whitespace or tab/space errors. Leave surrounding formatting alone.
 - **Always run `Tools/Scripts/check-webkit-style`** on your diff before considering a change done, and fix what it reports.
 - **Always do the comment pass before considering a change done.** Re-read every comment you added or touched and apply the test in [Comment style](#comment-style). This is not optional and not covered by `check-webkit-style`.
 - **No new safer-cpp exceptions.** Do not add entries to the safer-cpp / `-Wunsafe-buffer-usage` exception lists. Fix the code to be safe instead.
 - **Run the project's real test harness, not hand-rolled binaries.** For JSC specifically, use `Tools/Scripts/run-jsc-stress-tests`, never a bare `jsc test.js` — the harness honors each test's `//@ runDefault(...)` directives, applies the standard flag matrix, and reports like EWS does. Use the analogous script for other components (`run-webkit-tests` for layout tests, `run-api-tests` for API tests).
+- **Use the matching `jsc-*` skill and its canonical pipeline; never reinvent one.** Benchmarking uses jsc-jetstream-compare / jsc-microbenchmark (the official `compare-results` statistics); profiling uses jsc-profile; building uses build-webkit; review uses jsc-review; EWS triage uses fix-webkit-ews. Do not hand-roll an ad-hoc harness or your own statistics — a bespoke comparison is untrustworthy and its results get thrown away.
+- **A long context or auto-compaction is never a reason to stop or to call a task done.** Continue until the task's real stopping condition is met (the benchmark decision rule, every EWS bot triaged, the loop's target). Persist progress to disk as you go — result JSONs, the current best option deltas, the build fingerprint — so compaction or a restart cannot lose the run. Keep each response bounded: write large output to files under the scratch dir, not into the chat, so no session is lost to an output-token limit.
+- **On long or exploration-heavy tasks, delegate to subagents to keep the main context clean.** Spawn a subagent for read-heavy investigation — tracing where something is emitted, mapping a subsystem, reading the code around a large diff — and keep only its conclusion, not the file dumps, in the main thread. Fan out genuinely independent work in parallel (one agent per EWS bot, per option-matrix cell, per subsystem). But keep a *sequential* measurement or interleaving loop in one context — its correctness depends on shared state, so delegate the analysis around it, never the loop itself.
 
 ## Comment style
 
@@ -29,7 +36,7 @@ Rules:
 - **Concise. Comments are rarely longer than one line.** Go past a line only to explain a genuinely new theoretical concept. Litmus test: if every comment in the file were written like this one, would it be a wall of text? If yes, cut it down.
 - Write for a fresh reader with zero knowledge of this session, the bug, the PR, or CI/EWS. Cut investigation narrative, platform-by-platform enumeration, bug/PR references, and justification for *why the change was made* — that belongs in the commit message.
 - **Only use characters reachable on a keyboard.** Plain ASCII. No em-dashes, arrows, or other Unicode glyphs in comments or code.
-- **Do not use idioms like "belt-and-suspenders" or "load-bearing."** Say plainly what the code guarantees.
+- **Say plainly what the code guarantees** — name the mechanism rather than reaching for a stock idiom (the banned-phrase rule in House rules applies here too).
 - **If you can make it impossible to use incorrectly, do that instead of documenting the correct usage.** Prefer a type, an assertion, a private constructor, or a `static_assert` over a comment warning people not to misuse something.
 - `FIXME:` convention is `// FIXME: <description> https://bugs.webkit.org/show_bug.cgi?id=NNNN` (a bug URL when one exists).
 
@@ -53,26 +60,30 @@ Examples of good, succinct WebKit comments to imitate:
 
 Each is one line (or two), states a constraint or invariant a fresh reader needs, and uses plain ASCII.
 
-A comment must make sense to someone reading the final code who never saw the previous version. Do not phrase the *why* as a contrast against what *this* code used to be, or against an alternative you rejected *while editing it* -- those only parse if you know the edit history. State the standalone invariant the current code must satisfy instead.
-
-The one legitimate exception is a **footgun warning**: telling the reader not to reach for a different construct *they might independently choose*, when that choice silently breaks something. That is self-contained (the reader needs no history -- the comment explains why the alternative is wrong) and is idiomatic WebKit, e.g. `// Never use jsCast here. It is possible that this value is "Dead" but not "Finalized" yet.` The test is not "does it name an alternative" but "does understanding it require knowing what this code used to be." Bad, then fixed:
+Write the standalone invariant the current code satisfies, for a reader who never saw the prior version or your review. Two failure modes recur; study the good/bad pairs -- they teach the line faster than the rule does:
 
 ```cpp
-// BAD -- "rather than RELEASE_ASSERT_WITH_MESSAGE" only means something if you know it used to be one:
-// Report misuse via dataLogLn before crashing rather than RELEASE_ASSERT_WITH_MESSAGE,
-// whose message is compiled out in release builds, so mustCrashWith! matching works everywhere.
+// 1. Narrating the edit -- only parses if you saw the diff.
+// BAD:  Report via dataLogLn rather than RELEASE_ASSERT_WITH_MESSAGE, whose message compiles out.
+// GOOD: The stress tests match these messages in the crash output via mustCrashWith!.
 
-// ALSO BAD -- "not an assertion macro that compiles them out" still names the rejected alternative:
-// The stress tests match these reasons via mustCrashWith!, so they must print in
-// release builds: report with dataLogLn, not an assertion macro that compiles them out.
+// 2. Answering the reviewer -- justifies the spelling, names an API absent from the code.
+// BAD:  sizeof(void*) == 4 is the WTF-level equivalent of is32Bit(), which WTF cannot include.
+// GOOD: (delete it; the condition documents itself)
 
-// GOOD -- states only the invariant; the reader needs no history to use it:
-// The stress tests match these messages in the crash output via mustCrashWith!.
+// Over-explaining -- a paragraph where a line does; enumerates arms the code already shows.
+// BAD:  On 32-bit there is no horizontal reduce so findFirstNonZeroIndex lowers to per-lane vmov;
+//       on short strings (JSON tokens) that loses to a scalar scan. On 64-bit keep the vector scan.
+// GOOD: No efficient SIMD horizontal reduce on 32-bit; a scalar scan wins on short inputs.
+
+// The one to KEEP -- a footgun warning: self-contained, names an alternative the reader might
+// independently reach for, and says why it breaks. Idiomatic WebKit.
+// GOOD: Never use jsCast here. This value may be "Dead" but not "Finalized" yet.
 ```
 
-**The comment pass (do this on every change, as a distinct step).** After the code is written and before you call the change done, go over every comment you added or edited, one at a time, reading each in isolation from the diff. For each, ask: *would this make sense to someone who only sees the final code and never saw what it replaced?* If understanding it requires knowing the prior version or which alternative you rejected, rewrite it as a standalone invariant or delete it.
+Two tells that a comment is aimed at your reviewer, not the next reader (neither shows up in the giveaway-word grep below): it names an API/type/header **not in the surrounding code**, or it explains a choice between two ways of writing the *same* thing. For contrast, WebKit leaves width gates uncommented (`if (sizeof(void*) == 8)` in `ftl/FTLOutput.h`) and comments a branch only with a bare constraint (`// this instruction is only selectable on 64-bit platforms`).
 
-It is faster to grep your own diff for the giveaway words than to eyeball it. Treat any of these in an added comment as suspect until you have checked it: `rather than`, `instead of`, `used to`, `no longer`, `previously`, `formerly`, `now `, `changed to`, `not a`/`not an`, `we switched`, `was a`. For each hit, apply the test above: if the comment is narrating your edit, rewrite it; if it is a self-contained footgun warning, keep it. Do the same on the output of the `code-review` and `simplify` skills.
+**The comment pass (a distinct step on every change).** Re-read each comment you added in isolation from the diff: would it make sense to someone who only sees the final code? If it needs the prior version or a rejected alternative to parse, rewrite it as a standalone invariant or delete it. Grep the diff for giveaways -- `rather than`, `instead of`, `used to`, `no longer`, `previously`, `now `, `not a`/`not an`, `equivalent`, `cannot`/`can't`, `lives in`, `in practice`, `we use` -- and treat each hit as guilty until cleared; a self-contained footgun warning is the one acquittal. Do the same on `code-review`/`simplify` output.
 
 JSC runs JavaScript through four tiers, promoting hot code upward and demoting it on bad speculation. The whole point is: start cheap, get faster only where it pays, and stay correct by being able to fall back.
 
@@ -80,6 +91,9 @@ JSC runs JavaScript through four tiers, promoting hot code upward and demoting i
 LLInt  ->  Baseline JIT  ->  DFG JIT  ->  FTL JIT
 interp     fast compile     speculative   B3/Air, aggressive
 ```
+
+**FTL is 64-bit only.** On 32-bit targets (e.g. ARMv7) DFG is the top tier and the DFG-to-FTL
+transition below does not exist — a `--useDFGJIT=0` run there is effectively LLInt + Baseline only.
 
 **How promotion happens.** Each tier carries an `ExecutionCounter` (`bytecode/ExecutionCounter.h`) that starts negative and counts up toward a threshold; crossing zero triggers compilation of the next tier. Counters live in the code's data (`m_llintExecuteCounter` for LLInt, `DFG::JITData::m_tierUpCounter` for DFG to FTL). Thresholds are JSC options in `runtime/OptionsList.h`:
 
@@ -203,6 +217,15 @@ Assert with GoogleTest macros (`EXPECT_TRUE`, `EXPECT_EQ`, `EXPECT_WK_STREQ`). A
 - `EXCEPTION_ASSERT(!scope.exception());` to assert an invariant about exception state.
 - The exception-check validator runs in debug builds and will fire if a throwing call is not followed by a check — do not silence it by reordering; fix the missing check.
 
+Declare the scope once, then check immediately after each throwing call, before touching its result:
+
+```cpp
+auto scope = DECLARE_THROW_SCOPE(vm);
+auto key = argument.toPropertyKey(globalObject);
+RETURN_IF_EXCEPTION(scope, { });                            // check before using `key`
+RELEASE_AND_RETURN(scope, target->get(globalObject, key));  // throwing tail call, no extra check
+```
+
 **Prefer WTF types over `std`.** `Vector`, `HashMap`, `HashSet`, `String`, `Ref`/`RefPtr`, `std::unique_ptr` via `makeUnique<T>()`. String literals are `"..."_s` (builds an `ASCIILiteral`/`String` without a strlen). Move with `WTFMove(x)`, not `std::move`. Allocate owned objects with `makeUnique`/`makeUniqueWithoutFastMallocCheck`, not bare `new`.
 
 **Assertions.** `ASSERT(cond)` and `ASSERT_NOT_REACHED()` compile out in release. `RELEASE_ASSERT(cond)` / `RELEASE_ASSERT_NOT_REACHED()` stay in release — use them for security-relevant or correctness-critical invariants. `ASSERT_UNUSED(var, cond)` when the variable is only used by the assert.
@@ -222,18 +245,27 @@ Source: the WebKit code style guide and Safer C++ guidelines. These hold across 
 - Use `std::exchange(ptr, nullptr)` rather than `WTFMove(ptr)` when the moved-from variable is read again later.
 - **Casting:** in JSC, cast `JSCell`s with `jsCast<T>()` (asserts) and `jsDynamicCast<T>()` (null on mismatch). The WebCore equivalents are `downcast<T>()` / `dynamicDowncast<T>()`; prefer the dynamic form over `is<T>()` then a cast. Never `jsCast` a value that may be Dead-but-not-Finalized inside a GC callback.
 
+The canonical shapes (the good form is what to write; the flagged form follows `//`):
+
+```cpp
+Ref<Node> m_node;                         // owning member is a smart pointer, not Node* m_node
+Ref protectedThis { *this };              // hold a heap object on the stack across a call on it
+protect(m_controller)->didFinish();       // protect a member Ref/RefPtr at a flagged call site
+loader->load([protectedThis = Ref { *this }] { ... });   // async lambda captures a protector
+```
+
 ## Safer C++
 
 JSC is built with the Safer C++ checkers on, and **no new exceptions may be added** to the suppression lists. Fix the code, do not exempt it.
 
-- **`std::span` instead of pointer + length**, and `std::array` instead of C arrays. Container and view `operator[]` carry `RELEASE_ASSERT(index < length())`; the span work relies on hardened libc++ (`-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE`).
+- **`std::span` instead of pointer + length**, and `std::array` instead of C arrays: `void write(std::span<const uint8_t>)`, not `void write(const uint8_t*, size_t)`. Container and view `operator[]` carry `RELEASE_ASSERT(index < length())`; the span work relies on hardened libc++ (`-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE`).
 - `-Wunsafe-buffer-usage` flags raw pointer arithmetic and unchecked indexing.
 - Clang static-analyzer checkers enforce the lifetime rules: `alpha.webkit.UncountedCallArgsChecker`, `RefCntblBaseVirtualDtor`, `NoUncountedMemberChecker`. They are what fail your EWS build when a raw pointer to a ref-counted object slips in.
 - **RefCounted subclasses** give their constructors `private` visibility and expose a public `static Ref<T> create(...)`. A non-final ref-counted class needs a virtual destructor (`RefCntblBaseVirtualDtor` enforces this).
 - Prefer `enum class` (with an explicit underlying type) over plain enums, `std::variant` over unions, and strongly-typed `ObjectIdentifier<>` over bare `uint64_t`.
 - **Cross-thread:** pass data with `crossThreadCopy(WTFMove(data))`. Guard shared state with the `<wtf/ThreadSafetyAnalysis.h>` macros `WTF_GUARDED_BY_LOCK(...)` and `WTF_REQUIRES_LOCK(...)` so the analyzer verifies locking at build time.
 - **Fixing `UncountedCallArgsChecker` on a member RefPtr/Ref** (e.g. `m_foo->bar(...)` flagged "Call argument for 'this' parameter is uncounted and unsafe"): the idiomatic fix is `protect(m_foo)->bar(...)`. `protect()` is a WTF free function (`Source/WTF/wtf/RefPtr.h`, `Source/WTF/wtf/Ref.h`) that copies the smart pointer for the call's duration — 338+ call sites across the tree. Use it only at flagged sites; locals constructed from `Foo::create()` are already protected by their stack `Ref`/`RefPtr`, so the checker doesn't warn there.
-- **`NODELETE` is a contract, not a suppression.** Defined in `wtf/Compiler.h` as `[[clang::annotate_type("webkit.nodelete")]]`; the comment on the macro is the spec: *"the function does not run any destructor or free memory"* — **any**, not just `this`. Clang's `TrivialFunctionAnalysis` enforces it: every parameter must have a trivial destructor, and the body may not call un-annotated/un-trivial functions, `delete`, or `free`. So before annotating: a method that overwrites a stored `Ref` (`HashMap::set` on an existing key) or grows a `Vector<Ref<...>>` (the old buffer is `fastFree`d) is *not* NODELETE-safe even if it "feels trivial." When in doubt, use `protect(m_member)->...` at the call site instead — it actually adds a refcount rather than asserting a guarantee you haven't verified. `SUPPRESS_NODELETE` and `SUPPRESS_UNCOUNTED_*` *are* suppressions and fall under the no-new-exceptions rule.
+- **`NODELETE` is a contract, not a suppression.** Defined in `wtf/Compiler.h` as `[[clang::annotate_type("webkit.nodelete")]]`; the comment on the macro is the spec: *"the function does not run any destructor or free memory"* — **any**, not just `this`. Clang's `TrivialFunctionAnalysis` enforces it: every parameter must have a trivial destructor, and the body may not call un-annotated/un-trivial functions, `delete`, or `free`. So before annotating: a method that overwrites a stored `Ref` (`HashMap::set` on an existing key) or grows a `Vector<Ref<...>>` (the old buffer is `fastFree`d) is *not* NODELETE-safe even if it "feels trivial." When in doubt, use `protect(m_member)->...` at the call site instead — it actually adds a refcount rather than asserting a guarantee you haven't verified. **Never add `SUPPRESS_NODELETE`** (nor `SUPPRESS_UNCOUNTED_*`) — they are suppressions, barred by the no-new-exceptions house rule. And do not rewrite idiomatic `std::tuple`/`std::optional`/lambda code just to satisfy the checker: use the `NODELETE` annotation when the function genuinely frees nothing, or `protect(m_x)->` at the call site; if neither a clean annotation nor a real fix applies, stop and raise it with the user — never suppress and never mangle the idiom.
 - Recent JSC reviews enforce these directly: reviewers asked for `std::span` over pointer+length and for deriving state from an existing object instead of threading extra raw parameters through.
 
 ## Naming conventions

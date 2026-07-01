@@ -14,13 +14,15 @@ allowed-tools:
 
 # Fix WebKit EWS Issues
 
-**Before doing anything else, invoke the `jsc` skill.** Any fix you apply lands in WebKit, which means it is bound by the WebKit/JSC house rules (no unrelated changes, comment style, smart-pointer/Safer-CPP discipline, `protect()` vs `NODELETE`, test conventions like `testLoopCount`, the no-commit-without-authorization rule, etc.). Loading `jsc` first puts those rules in context so you don't, for example, "fix" a safer-cpp warning by adding a NODELETE annotation that doesn't actually hold, or paper over a style error in a way that violates the comment guide. If `jsc` is already loaded in the current conversation, do not re-invoke it — proceed directly.
+**Before doing anything else, invoke the `jsc` skill** (skip only if it is already loaded this conversation). Every fix lands in WebKit and is bound by its house rules — comment style, smart-pointer/Safer-CPP discipline, `protect()` vs `NODELETE`, `testLoopCount`, no-commit-without-authorization. Loading `jsc` first keeps you from "fixing" a safer-cpp warning with a NODELETE annotation that doesn't hold, or papering over a style error against the comment guide.
 
-When the user asks to fix EWS issues on the current branch's WebKit PR, follow this workflow. It is built around the observation that **most red EWS bots are not the PR's fault** — they are infra hiccups (jhbuild storage errors, worker timeouts, flaky tests, pre-existing failures). Spending the user's time on those is wasteful. The goal is: triage fast, fix what's real, summarize the rest cleanly.
+The workflow: triage fast, fix what's real, summarize the rest cleanly. **Most red EWS bots are not the PR's fault** — infra hiccups (jhbuild storage, worker timeouts, flaky/pre-existing tests) waste the user's time.
 
-> **HARD CONSTRAINT — never act on the user's behalf.** This skill is strictly read-from-EWS and edit-locally. NEVER run `git commit`, `git push`, `git commit --amend`, or `gh pr comment` — and never any other command that publishes, pushes, or posts. Apply fixes to the working tree only and stop. Leave committing, pushing, and PR comments entirely to the user. If you ever think a push or comment is warranted, describe what you would do and let the user do it themselves.
+With several red bots, triage them **in parallel — one subagent per bot** — each reproducing and classifying its own failure and returning a one-line verdict plus evidence; you merge the results. That keeps each bot's logs out of your main context.
 
-> **HARD CONSTRAINT — prove "unrelated" before claiming it.** Most EWS failures ARE caused by the patch. Do not default to "infra" or "pre-existing." Before bucketing any failure as infra/pre-existing/flaky, you must present evidence: either (a) find another PR (or a main-branch/post-landing build) exhibiting the *same* error, or (b) show the same test/bot is flaky (e.g. it passed on a re-run of this same PR, or has a documented flaky history). Cite the specific build/PR URL or log line as proof. If you cannot find such proof, treat the failure as PR-caused and dig deeper — assume it is your fault until evidence says otherwise.
+> **HARD CONSTRAINT — read-from-EWS and edit-locally only.** Apply fixes to the working tree and stop. Committing, pushing, amending, and posting are the user's job: never run `git commit`, `git push`, `git commit --amend`, `gh pr comment`, `gh pr edit`, or anything that publishes, and never POST/PATCH via `gh api` or `curl`. **Never draft a commit message, PR description, or comment — a firm boundary with no exceptions.** Never search for or read credentials or tokens. If a push or comment is warranted, say so in one sentence and let the user write and send it.
+
+> **HARD CONSTRAINT — prove "unrelated" before claiming it.** Assume every failure is PR-caused until evidence says otherwise. To bucket one as infra/pre-existing/flaky, cite proof: either (a) another PR or a main-branch/post-landing build with the *same* error, or (b) the same test/bot passing on a re-run of this PR or a documented flaky history. Quote the build/PR URL or log line. No proof means dig deeper.
 
 ## Step 1: Identify the PR
 
@@ -36,17 +38,17 @@ If there is no PR for the current branch, stop and tell the user.
 gh pr checks <pr-number>
 ```
 
-Each failing row has a URL like `https://ews-build.webkit.org/#/builders/<BUILDER_ID>/builds/<BUILD_NUMBER>`. **The number in the URL is the per-builder build number, not the global build id.** The API endpoint to use is:
+Each failing row has a URL like `https://ews-build.webkit.org/#/builders/<BUILDER_ID>/builds/<BUILD_NUMBER>`. That number is the per-builder build number. Query the build through the builder:
 
 ```
 https://ews-build.webkit.org/api/v2/builders/<BUILDER_ID>/builds/<BUILD_NUMBER>
 ```
 
-Not `/api/v2/builds/<BUILD_NUMBER>` — that uses a different (global) id and will give you an unrelated build.
+`/api/v2/builds/<BUILD_NUMBER>` uses a different (global) id and returns an unrelated build.
 
-## Step 2.5: Don't trust `gh pr checks` to show every bot — sweep in-progress builds too
+## Step 2.5: Sweep in-progress builds — `gh pr checks` under-reports
 
-`gh pr checks` / `statusCheckRollup` only report the bots that have already posted a GitHub status. WebKit's EWS runs **many more builders than GitHub surfaces at any moment** — the slow Linux ones (GTK, WPE) and others may still be compiling and simply haven't reported. A bot that is *currently* building can already be doomed: if it has reached the `compile-webkit-without-change` step, it has **already failed `compile-webkit` with the PR** and is rebuilding without it to confirm the PR is at fault. That is the "retrying without changes" signal — treat it as a failure-in-progress, diagnose it now, don't wait for it to go red.
+`gh pr checks` / `statusCheckRollup` show only bots that have already posted a GitHub status; EWS runs many more, and the slow Linux ones (GTK, WPE) may still be compiling. A bot that has reached the `compile-webkit-without-change` step has **already failed `compile-webkit` with the PR** and is rebuilding without it to confirm fault. That "retrying without changes" signal is a failure-in-progress — diagnose it now rather than waiting for red.
 
 Sweep all in-progress builds for this PR and find their current step:
 
@@ -69,7 +71,7 @@ curl -s "https://ews-build.webkit.org/api/v2/builders/<BUILDER_ID>/builds/<BUILD
   | python3 -c "import json,sys; d=json.load(sys.stdin); s=d.get('steps',[]); print(s[-1].get('name'),'=>',s[-1].get('state_string')); print('HAS_RETRY' if any('without' in (x.get('name') or '') for x in s) else '')"
 ```
 
-Any bot showing `compile-webkit-without-change` (HAS_RETRY) has a real with-change compile failure — fetch its `compile-webkit` (the *first* compile step, not the without-change one) log per Step 4 and diagnose it. Bots still on their *first* `compile-webkit` are not yet proven failures, but if they share a toolchain with a bot you've already diagnosed (e.g. GTK/WPE all use the same wkdev SDK as gtk3-libwebrtc), predict the same failure and confirm your fix covers them.
+Any bot showing `compile-webkit-without-change` (HAS_RETRY) has a real with-change compile failure — fetch its `compile-webkit` log (the *first* compile step, not the without-change one) per Step 4 and diagnose it. Bots still on their first `compile-webkit` are not yet proven failures, but if they share a toolchain with a bot you already diagnosed (GTK/WPE all use the same wkdev SDK as gtk3-libwebrtc), predict the same failure and confirm your fix covers them.
 
 ## Step 3: For each failing bot, find the failing step
 
@@ -84,8 +86,7 @@ Look for the step whose `state_string` contains `failure`, `(failure)`, `Failed`
 - `layout-tests`, `re-run-layout-tests`, `layout-tests-site-isolation` — layout test failure
 - `api-tests`, `run-api-tests` — API test failure
 - `jhbuild` — Linux dependency build failure (almost always infra)
-- `check-change-relevance` — if this step says "Pull request doesn't have relevant changes" but other steps still ran, the failures are pre-existing, not yours
-- `find-modified-layout-tests` — same idea for layout tests; "doesn't have relevant changes" means failures are pre-existing
+- `check-change-relevance`, `find-modified-layout-tests` — a "Pull request doesn't have relevant changes" message here while other steps still ran means those failures are pre-existing, not yours
 
 ## Step 4: Fetch the log for the failing step
 
@@ -104,9 +105,9 @@ For long compile logs, filter:
 curl -s "https://ews-build.webkit.org/api/v2/logs/<LOG_ID>/raw" | grep -i -E "error:|fatal|undefined|undeclared|cannot find" | head -30
 ```
 
-For layout test failures, look at the `test-failures` slug log specifically — it lists just the failing test names. Then check whether `find-modified-layout-tests` said the PR has relevant changes; if not, the failures are pre-existing.
+For layout test failures, read the `test-failures` slug log — it lists just the failing test names. Then check whether `find-modified-layout-tests` said the PR has relevant changes; if not, the failures are pre-existing.
 
-## Step 5: Triage each failure into one of these buckets
+## Step 5: Triage each failure into a bucket
 
 ### A. Real PR-caused failure — fix it
 
@@ -123,40 +124,36 @@ Diagnose from the log and apply the fix. Common WebKit EWS failure patterns:
 - **Type/member declared under too-broad a platform guard** — symptom on a non-mainstream POSIX bot (e.g. PlayStation): `error: unknown type name '<Type>'` where `<Type>` is defined only for certain platforms. Cause: the PR moved a member/typedef into a generic `#else` (all non-DARWIN) branch, but the type is defined only for, say, `OS(LINUX)`/`OS(WINDOWS)` (check where the `using <Type> = ...` lives, often in `ThreadingPrimitives.h`). The build reaches a platform that takes the broad branch but lacks the type. Fix: narrow the guard to exactly the platforms where the type exists *and* is used (grep for the member's read/write sites and their guards) — e.g. `#if OS(LINUX) || OS(WINDOWS)`. Confirm the member is never *used* on the excluded platform before removing it there.
 - **A real layout/API test regression**: only treat as a real regression if `find-modified-layout-tests` said the PR has relevant changes AND the failing tests overlap with the PR's diff. Otherwise treat as pre-existing.
 
-### B. Infrastructure failure — leave it, do not "fix" (but PROVE it first)
+### B. Infrastructure failure — leave it, cite proof
 
-Mark as infra and move on. Do not commit fake changes to placate these. **You must back the "infra" label with proof** — a matching error on another PR or a main-branch build, or evidence the step is a known infra flake (per the "prove unrelated" constraint above). The patterns below are strong *hints*, not a free pass; still cite the proof. Examples:
+Back the "infra" label with proof (a matching error on another PR or a main-branch build, or evidence of a known flake). The patterns below are strong *hints*, not a free pass:
 
-- `jhbuild` step failing with `Error: configure storage: open /var/lib/shared-sdk-images/overlay-images/images.json: permission denied` — wkdev container storage. Common on WPE bots.
-- `run-webkit-tests` exiting non-zero in under ~5 seconds with no captured output — worker spawning issue, especially on win-tests.
+- `jhbuild` failing with `Error: configure storage: open /var/lib/shared-sdk-images/overlay-images/images.json: permission denied` — wkdev container storage, common on WPE bots.
+- `run-webkit-tests` exiting non-zero in under ~5 seconds with no captured output — worker spawning, especially on win-tests.
 - `worker_preparation` failing or step stuck on `Killed old processes` — worker state, not your code.
-- `Unexpected infrastructure issue: ... retrying with the hope it was a random infrastructure error` already present in the step state — the system already knows.
-- `analyze-compile-webkit-results => Unable to build WebKit without PR, retrying build (failure)` — the bot couldn't even build main without the PR; not the PR's fault.
+- `Unexpected infrastructure issue: ... retrying with the hope it was a random infrastructure error` already in the step state — the system already knows.
+- `analyze-compile-webkit-results => Unable to build WebKit without PR, retrying build (failure)` — the bot couldn't build main even without the PR.
 
-### C. Pre-existing failure — leave it, note it (but PROVE it first)
+### C. Pre-existing failure — leave it, cite proof
 
-Same evidence bar as bucket B: cite the proof, don't assume.
+Same evidence bar as bucket B:
 
-- Any bot where `find-modified-layout-tests` or `check-change-relevance` says "Pull request doesn't have relevant changes" but tests still ran and reported failures. (This message *is* the proof — quote it.)
-- API/layout tests already marked as pre-existing in passing bots' "Ignored pre-existing failure: ..." messages — cross-reference: if the same test name appears in passing-bot ignored-failures AND in the failing bot's results, it is pre-existing. (Cite both bots.)
-- Otherwise: find another PR or a main-branch build hitting the same failure and cite its URL.
+- A `find-modified-layout-tests` / `check-change-relevance` "Pull request doesn't have relevant changes" message with tests still failing — quote it; the message *is* the proof.
+- A test name appearing both in a passing bot's `Ignored pre-existing failure: ...` and in the failing bot's results — cite both bots.
+- Otherwise: cite another PR or main-branch build hitting the same failure.
 
-## Step 6: Apply fixes locally — do NOT commit or push
+## Step 6: Apply fixes locally
 
-Edit the files in the working tree to apply each real fix. **Stop there.** Do not stage, commit, amend, or push — that is the user's job.
-
-WebKit convention is one commit per PR, so when the user is ready they will typically `git commit --amend --no-edit` and force-push to their fork themselves. Do not do this for them. When your local edits are done, tell the user exactly which files you changed so they can review and commit.
+Edit the working tree to apply each real fix, then stop. When done, tell the user exactly which files you changed so they can review and commit. WebKit uses one commit per PR; the user does the `git commit --amend --no-edit` and force-push themselves.
 
 ## Step 7: Report back
 
-In the final message to the user, list each failing bot in one line and bucket it as **fixed (locally)**, **infra**, or **pre-existing**. For real fixes, name the file changed and the one-sentence reason. Keep it short — the user wants the result, not a play-by-play.
-
-Do not post a PR comment. If a summary on the PR would genuinely help reviewers, draft the text in your message to the user and let them post it themselves.
+List each failing bot on one line, bucketed **fixed (locally)**, **infra**, or **pre-existing**. For real fixes, name the file changed and the one-sentence reason. Keep it short — the result, not a play-by-play. Do not draft PR-summary or comment text; the user writes anything that gets posted.
 
 ## Anti-patterns
 
-- **Don't fetch every passing bot's log.** Filter to failing/in-progress rows first. (Sweeping the *steps* of in-progress builds per Step 2.5 is cheap and expected — it's full *logs* of green bots you should skip.)
-- **Don't conclude from `gh pr checks` alone that you've seen every bot.** It only shows what GitHub has been told so far; do the Step 2.5 in-progress sweep before declaring the PR triaged.
-- **Don't add fallback / defensive code** to paper over an infra failure. If the bot is broken, say so.
-- **Don't open subagents for each bot in parallel** unless the bots represent genuinely independent root causes. Most Apple-platform compile failures share one root cause across mac/tv/vision/watch — diagnose one, the rest follow.
-- **Don't commit, push, or comment.** Ever. Edits go to the working tree and stop. The user commits, pushes, and posts comments themselves.
+- **Fetch only failing/in-progress bot logs, not passing ones.** Sweeping the *steps* of in-progress builds (Step 2.5) is cheap and expected; skip full *logs* of green bots.
+- **Run the Step 2.5 in-progress sweep before declaring the PR triaged** — `gh pr checks` alone shows only what GitHub has been told so far.
+- **Diagnose one bot per shared root cause.** Most Apple-platform compile failures share one cause across mac/tv/vision/watch — fix one, the rest follow. Open parallel subagents only for genuinely independent root causes.
+- **Leave a broken bot broken and say so** — no fallback/defensive code to paper over infra.
+- **Never commit, push, amend, or comment.** Edits go to the working tree and stop.

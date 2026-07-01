@@ -10,53 +10,52 @@ allowed-tools:
 
 # Adding Files to WebKit Projects
 
-When adding source or header files to a WebKit subproject, multiple build system files must be updated in a coordinated way. The rules vary by project and file type. Follow the instructions below exactly.
+Adding a file means updating several build-system files in a coordinated way; the exact set depends on the project and file type. Which files to touch is driven by one question: **is the file listed in a `Sources.txt`?** If yes, unified builds compile it and CMake/Xcode-sources entries are skipped; if no (all of WTF, plus special cases), it must be listed directly.
 
 ## Source Files (.cpp, .c, .mm, .m)
 
-### Step 1: Sources.txt (if project uses unified builds)
+### Step 1: Sources.txt (JavaScriptCore, WebCore, WebKit; skip for WTF)
 
-- JavaScriptCore, WebCore, and WebKit use `Sources.txt` for unified builds.
-- Platform-specific variants exist: `SourcesCocoa.txt`, `SourcesGLib.txt`, etc.
-- Sort entries alphabetically within each directory section; blank lines separate directories.
-- Annotations:
-  - `@no-unify` — file should compile separately (not bundled into a unified source).
-  - `@nonARC` — non-ARC Objective-C file.
-- **WTF does NOT have Sources.txt** — skip this step for WTF.
+Add the file to the platform-appropriate `Sources.txt` (`SourcesCocoa.txt`, `SourcesGLib.txt`, ...), sorted alphabetically within its directory section, blank lines separating directories:
+
+```
+runtime/JSCConfig.cpp
+runtime/JSCJSValue.cpp
+runtime/JSCallee.cpp @no-unify        # compile separately, not bundled into a unified source
+```
+
+Use `@nonARC` on a non-ARC Objective-C file.
 
 ### Step 2: Xcode project file (`<Project>.xcodeproj/project.pbxproj`)
 
-- Add a `PBXFileReference` entry with a unique 24-character uppercase hex ID.
-- Add the file reference to the correct `PBXGroup` matching the directory structure.
-- **If the file is listed in Sources.txt**: do NOT add it to `PBXSourcesBuildPhase` (unified builds handle compilation).
-- **If the file is NOT in Sources.txt** (e.g. WTF, or special cases): also add a `PBXBuildFile` entry and list it in `PBXSourcesBuildPhase`.
-- Run `Tools/Scripts/sort-Xcode-project-file <path-to-project.pbxproj>` after editing.
+Add a `PBXFileReference` with a unique 24-char uppercase hex ID (see [ID generation](#id-generation)) and place the reference in the `PBXGroup` matching the file's directory. Then, keyed on Step 1:
 
-### Step 3: CMakeLists.txt (only if NOT in Sources.txt)
+- File **is** in a `Sources.txt`: stop here. Unified builds compile it; do not add it to `PBXSourcesBuildPhase`.
+- File is **not** in a `Sources.txt` (WTF, or a `@no-unify` special case): also add a `PBXBuildFile` entry and list it in `PBXSourcesBuildPhase`.
 
-- WTF sources must be listed in `CMakeLists.txt` directly.
-- For projects using Sources.txt, this step is not needed for source files.
+Run `Tools/Scripts/sort-Xcode-project-file <path-to-project.pbxproj>` (see [Post-edit](#post-edit)).
 
----
+### Step 3: CMakeLists.txt (only when the file is not in a Sources.txt)
+
+WTF sources go directly in `CMakeLists.txt`. For a project using `Sources.txt`, its unified build already covers the source, so nothing to add here.
 
 ## Header Files (.h)
 
 ### Step 1: Xcode project file
 
-- Add a `PBXFileReference` entry with a unique 24-character uppercase hex ID.
-- Add the file reference to the correct `PBXGroup`.
-- Add a `PBXBuildFile` entry in `PBXHeadersBuildPhase` with the correct visibility:
-  - **Public**: `settings = {ATTRIBUTES = (Public, ); };` — Official API headers only (e.g., `API/JSValueRef.h`).
-  - **Private**: `settings = {ATTRIBUTES = (Private, ); };` — Headers used by other projects in the workspace (most WTF headers, JSC headers needed by WebCore).
-  - **Project**: No settings attribute — Internal headers, only used within the project.
-- Run `Tools/Scripts/sort-Xcode-project-file <path-to-project.pbxproj>` after editing.
+Add a `PBXFileReference` with a unique 24-char uppercase hex ID, place the reference in the matching `PBXGroup`, and add a `PBXBuildFile` in `PBXHeadersBuildPhase` with visibility matching the header's audience:
 
-### Step 2: CMakeLists.txt (only for Private headers)
+```
+settings = {ATTRIBUTES = (Public, ); };    # official API only, e.g. API/JSValueRef.h
+settings = {ATTRIBUTES = (Private, ); };   # used by other workspace projects (most WTF; JSC headers WebCore needs)
+                                           # internal (Project): omit the settings attribute entirely
+```
 
-- Add to the `PRIVATE_FRAMEWORK_HEADERS` list (or equivalent section).
-- Not needed for Project-visibility headers.
+Run `Tools/Scripts/sort-Xcode-project-file <path-to-project.pbxproj>` (see [Post-edit](#post-edit)).
 
----
+### Step 2: CMakeLists.txt (Private headers only)
+
+Add a Private header to the `PRIVATE_FRAMEWORK_HEADERS` list (or equivalent section). Project-visibility headers need nothing here.
 
 ## Per-Project Reference
 
@@ -67,32 +66,18 @@ When adding source or header files to a WebKit subproject, multiple build system
 | WebKit | Yes | WebKit.xcodeproj | Only if not in Sources.txt | Private headers only |
 | WTF | **No** | WTF.xcodeproj | **Yes, always** | Private headers (most are Private) |
 
----
+## ID generation
 
-## Xcode Project ID Generation
-
-Generate unique 24-character uppercase hex strings for each new entry. Use:
+Every `PBXFileReference` and `PBXBuildFile` entry needs its own unique 24-char uppercase hex ID:
 
 ```bash
-python3 -c "import uuid; print(str(uuid.uuid4()).upper().replace('-','')[:24])"
+python3 -c "import uuid; print(str(uuid.uuid4()).upper().replace('-','')[:24])"   # or: uuidgen
 ```
 
-or:
+## Post-edit
 
-```bash
-uuidgen
-```
-
-Each `PBXFileReference` and `PBXBuildFile` entry needs its own unique ID.
-
----
-
-## Post-Edit
-
-Always run after modifying any `.pbxproj` file:
+After modifying any `.pbxproj`, sort it into canonical order:
 
 ```bash
 Tools/Scripts/sort-Xcode-project-file <path-to-project.pbxproj>
 ```
-
-This sorts all sections of the Xcode project file into a canonical order.

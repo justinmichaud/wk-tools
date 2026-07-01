@@ -7,7 +7,6 @@ allowed-tools:
   - Bash(Tools/Scripts/run-benchmark:*)
   - Bash(Tools/Scripts/compare-results:*)
   - Bash(git stash:*)
-  - Bash(git checkout:*)
   - Bash(git rev-parse:*)
   - Bash(git log:*)
   - Bash(git merge-base:*)
@@ -16,133 +15,151 @@ allowed-tools:
   - Bash(mkdir:*)
   - Bash(ls:*)
   - Bash(cat:*)
+  # Linux / headless / 32-bit container path:
+  - Bash(wkdev-enter:*)
+  - Bash(taskset:*)
+  - Bash(python3:*)
+  - Bash(grep:*)
+  - Bash(shuf:*)
+  - Bash(seq:*)
+  - Bash(printf:*)
+  # Linux browser-run quiescing (display blanking / suspend):
+  - Bash(gsettings:*)
+  - Bash(systemd-inhibit:*)
+  - Bash(xset:*)
 ---
 
 # Measuring a JSC change on JetStream3 (statistically)
 
-Quantify the performance effect of a JavaScriptCore/WebKit change on **JetStream3** and compare two
-builds per-subtest with `Tools/Scripts/compare-results` (Welch's t-test + FDR). Two ways to run it:
+Compare two builds of a JSC/WebKit change per-subtest with `Tools/Scripts/compare-results` (Welch's
+t-test + FDR). `$WEBKIT_ROOT` is the repo root; run every `Tools/Scripts/*` from there. **baseline** =
+before the change (ToT); **patched** = after. JetStream3 is **bigger-is-better**: `b/a > 1` means
+patched is faster, `b/a < 1` is a regression.
 
-- **Browser (official, representative):** drive the real benchmark in **MiniBrowser** via
-  `Tools/Scripts/run-benchmark --plan jetstream3`. Real engine config, the upstream JetStream3.0 the
-  plan fetches; matches how regressions are validated. Needs a **full `make release` (MiniBrowser)
-  build** per side and an **awake, attached display** (see Gotchas).
-- **Headless (jsc shell):** run `PerformanceTests/JetStream3/cli.js` directly in `jsc`. No display
-  needed, faster to iterate, jsc-only build is enough. Slightly different harness/engine config than
-  the browser but the right tool when there's no display or you're iterating on root-cause.
+## Pick a run mode first — it decides which build and commands you use
 
-Terminology: **baseline** = the "before" build (ToT); **patched** = the "after" build (with the
-change). `$WEBKIT_ROOT` is the repo root; all `Tools/Scripts/*` run from there.
+| | Browser | Headless (jsc shell) |
+| --- | --- | --- |
+| Platform | **macOS** with an awake display | any platform; **the only option on Linux**, and **required on 32-bit ARM** |
+| Runner | `Tools/Scripts/run-benchmark` + MiniBrowser | `PerformanceTests/JetStream3/cli.js` in `jsc` |
+| Build needed | full `make release` (both sides) | a `jsc` build is enough |
+| Fidelity | official; matches how regressions are validated | same driver, same output JSON, slightly different engine config |
+| Follow | [Browser rounds (macOS)](#browser-rounds-macos) | [Headless rounds (any platform)](#headless-rounds-any-platform) |
 
-> ## ⚠️ What counts as a regression — read this before reporting
-> JetStream3 scores aggregate ~60 subtests, so the **overall geomean is extremely stable**.
-> - **Overall score: a 0.1% FDR-significant regression is HUGE.** The overall noise floor is ≈ ±0.1%,
->   so a *statistically significant* 0.1% drop is a real, ship-blocking regression — not noise. 0.2%
->   overall is routinely validated and taken seriously. Do not dismiss sub-1% overall moves.
-> - **Per-subtest: anything over 1% is significant** on a non-noisy subtest. Treat a >1% FDR-flagged
->   per-subtest move as a real regression worth root-causing.
-> - **The noisy subtests** (json-parse-inspector, doxbee, Babylon, splay, tsf, async-fs, and other
->   GC-/startup-dominated ones) swing ±2–5% regardless of N; only believe large, FDR-flagged moves
->   there, and never gate an equivalence bound on them.
-> Apply this scale in **every** report. "Not significant" ≠ "no effect" until the CI is tight enough
-> to rule out the standing equivalence targets: **0.02% overall / 0.5% per (non-noisy) subtest** — see
-> Step 5. Keep running rounds until you either find a significant mover or hit those bounds.
+Default to **browser on macOS-with-display, headless everywhere else**. Prefer headless to iterate
+fast or to root-cause — the `jsc-profile` and `jsc-microbenchmark` skills both build on the headless
+jsc run.
 
-## Step 0 — Scope: run exactly the subtests the user named (don't make them wait)
+Everything except the "run the rounds" step is **identical across modes**: scoping, choosing
+baseline/patched, `compare-results`, the decision rule, root-causing, and reporting are shared and
+platform-neutral. Only the two run-mode sections differ.
 
-The point of limiting subtests is to **avoid waiting for a full run**, so don't turn scoping into a
-wait of its own:
+## What counts as a regression — read before reporting
 
-- **If the user named subtests** — in the slash-command args (`/jsc-jetstream-compare delta-blue
-  bigint-noble-ed25519`) or in their message ("focus on delta-blue") — **use exactly those and start
-  immediately.** No confirmation prompt; that's the fast path.
-- **If they asked for a full run / "is this safe to land"** — run the full suite (the only way to get
-  the **overall geomean**, which most regressions are judged on; ~60+ subtests, each round a
-  multi-minute browser run).
-- **Only if scope is genuinely unspecified**, use the **AskUserQuestion tool** once — offering a quick
-  named-subtest subset (recommended for iteration) vs the full suite — then proceed without further
-  gating. The choice changes runtime by ~30×, so it's worth the single question, but never block on it
-  when the user already told you what to run.
+JetStream3 aggregates ~60 subtests, so the **overall geomean is extremely stable**. Apply this scale
+in *every* report:
 
-`--subtests a b c` is the limiter; pass the names literally (zsh — see the word-splitting trap). Also
-pick **browser vs headless** (default: browser if a display is available, else headless — see Gotchas);
-don't ask unless it's ambiguous.
+- **Overall score: a 0.1% FDR-significant regression is HUGE.** The overall noise floor is ~±0.1%, so
+  a statistically significant 0.1% drop is a real, ship-blocking regression. 0.2% overall is routinely
+  taken seriously. Do not dismiss sub-1% overall moves.
+- **Per-subtest: a >1% FDR-flagged move on a non-noisy subtest is real** and worth root-causing.
+- **Noisy subtests** (json-parse-inspector, doxbee, Babylon, splay, tsf, async-fs, and other GC-/
+  startup-dominated ones) swing ±2-5% regardless of N. Believe only large, FDR-flagged moves there,
+  and never gate an equivalence bound on them.
 
-## Step 1 — Identify baseline vs patched
+"Not significant" is not "no effect" until the CI is tight enough to rule out the standing equivalence
+targets (**0.02% overall, 0.5% per non-noisy subtest** — see [Decide](#iterate-to-a-decision)). Keep
+running rounds until you find a significant mover or hit those bounds.
 
-- **Uncommitted working-tree change:** patched = working tree, baseline = `HEAD`. Base sha =
-  `git rev-parse HEAD`.
-- **A commit/PR:** patched = `HEAD`, baseline = `HEAD~1` (or `git merge-base HEAD main` for the whole
-  branch vs trunk). Base sha = the baseline commit.
+## Scope: run exactly what the user named
 
-The base sha keys the cached baseline build (Step 2). Note which baseline you chose in the summary.
+Limiting subtests exists to avoid waiting for a full run, so don't turn scoping into its own wait:
 
-## Step 2 — Build both sides (baseline cached by sha)
+- **User named subtests** (in the command args `/jsc-jetstream-compare delta-blue bigint-noble-ed25519`
+  or in prose "focus on delta-blue"): run exactly those, start immediately, no confirmation.
+- **User asked for a full run / "is this safe to land"**: run the full suite. It is the only way to
+  get the overall geomean, which most regressions are judged on (~60 subtests, each round multi-minute).
+- **Scope genuinely unspecified**: ask once with the AskUserQuestion tool (named subset for iteration
+  vs full suite), then proceed. The choice changes runtime ~30x, so the one question is worth it; never
+  block further.
 
-Confirm Release / non-ASan first (`cat $WEBKIT_ROOT/WebKitBuild/Configuration` → `Release`; no
-`WebKitBuild/ASan` dir), **or the numbers are meaningless.** `make release` builds full WebKit incl.
-MiniBrowser and the `jsc` shell. **The patched build lives in `WebKitBuild/Release`; the baseline
-(ToT) build is built natively into `/tmp/js3-builds/<base-sha>/` via `WEBKIT_OUTPUTDIR`** so repeat
-runs at the same base sha skip rebuilding it.
+## Baseline vs patched
 
-> **Do NOT copy/rsync a build to another directory and run it.** A relocated WebKit build can't launch
-> its multi-process XPC services — MiniBrowser logs `WebContent process crashed; reloading` in a loop
-> (`launchd: failed lookup: name = com.apple.WebKit.WebContent, error = 3`) and the run times out.
-> Copying the frameworks, adding the top-level `*.xpc` bundles, and ad-hoc re-signing all fail to fix
-> it. The baseline must be a *native* build at its own location. (The jsc shell has the analogous trap
-> — see the `DYLD_FRAMEWORK_PATH` gotcha.)
+- **Uncommitted working-tree change:** patched = working tree, baseline = `HEAD`. Base sha `git rev-parse HEAD`.
+- **A different commit / PR:** patched = `HEAD`, baseline = `HEAD~1` (or `git merge-base HEAD main` for
+  a whole branch vs trunk). Base sha = the baseline commit. The skill does **not** switch the tree to
+  build this — check out and build the baseline yourself and point the run at its build dir.
+
+The base sha keys the cached baseline build. Note which baseline you chose in the report.
+
+These skills change the git tree only with `git stash push` / `git stash apply` (never `pop`, never
+`checkout`), and only to build a baseline from your working-tree change. They never commit, amend,
+push, post, or draft a commit message or comment.
+
+**Before reporting any number, confirm the binary you measured actually contains the patch** — its mtime
+is newer than your last edit, a symbol or string you added greps out of it, or a build fingerprint
+matches. A number from a stale or baseline binary is worse than no number. Do not stash the user's
+working-tree patch except to build the baseline, and always `git stash apply` it back.
+
+---
+
+## Browser rounds (macOS)
+
+The official, representative path. Everything in this section is **macOS-only**.
+
+### Build both sides
+
+Confirm Release / non-ASan first, or the numbers are meaningless: `cat
+$WEBKIT_ROOT/WebKitBuild/Configuration` reads `Release` and there is no `WebKitBuild/ASan` dir. Build
+the patched side into `WebKitBuild/Release` and the baseline natively into a per-sha cache via
+`WEBKIT_OUTPUTDIR`, so repeat runs at the same base sha skip the rebuild:
 
 ```bash
 cd "$WEBKIT_ROOT"
 BASE_SHA=$(git rev-parse HEAD)                  # or the baseline commit
-CACHE=/tmp/js3-builds/$BASE_SHA                 # baseline build dir is $CACHE/Release
+CACHE=/tmp/js3-builds/$BASE_SHA                 # baseline build lands in $CACHE/Release
 
-# 1. Patched (change in tree) → WebKitBuild/Release (incremental; first full WebKit build is long).
-make release
+make release                                     # patched (change in tree); first build is long
 
-# 2. Baseline: reuse the cache if present, else build ToT natively into its own output dir.
-if [ ! -d "$CACHE/Release" ]; then
-  git stash push -- <changed paths>            # or: git checkout <baseline-sha>
-  WEBKIT_OUTPUTDIR="$CACHE" make release        # full native build at $CACHE/Release (long)
-  git stash pop                                # or: git checkout <branch>  (restores the change)
+if [ ! -d "$CACHE/Release" ]; then               # baseline: build ToT once, then cached per sha
+  git stash push -- <changed paths>              # the only git mutation these skills make
+  WEBKIT_OUTPUTDIR="$CACHE" make release          # full native build at $CACHE/Release
+  git stash apply                                # restore the change; apply (never pop) keeps the stash safe
 fi
-# WebKitBuild/Release is untouched (still patched); WEBKIT_OUTPUTDIR redirected the baseline build.
+ls WebKitBuild/Release/{MiniBrowser.app,jsc} "$CACHE/Release/"{MiniBrowser.app,jsc}   # sanity-check
 ```
 
-A separate `WEBKIT_OUTPUTDIR` build does not share artifacts with `WebKitBuild`, so the baseline is a
-full build the first time (then cached per sha). It is large; if space is tight you can delete
-`$CACHE/<*.build dirs>` afterward, keeping `$CACHE/Release/` in place (don't move it). Sanity-check:
-`ls WebKitBuild/Release/{MiniBrowser.app,jsc} "$CACHE/Release/"{MiniBrowser.app,jsc}`.
+**Build each side natively at its own path; never copy/rsync a build elsewhere and run it.** A
+relocated WebKit build cannot launch its XPC services — MiniBrowser loops `WebContent process crashed;
+reloading` (`launchd: failed lookup: name = com.apple.WebKit.WebContent, error = 3`) and the run times
+out. Re-signing and copying `*.xpc` bundles do not fix it. If space is tight, delete `$CACHE/*.build`
+afterward but keep `$CACHE/Release/` in place.
 
-## Step 3 — Run JetStream3, interleaved
+### Quiesce, then run interleaved
 
-Don't silently launch a long **full-suite** loop the user didn't ask for — but if they named subtests
-(Step 0), just run them. `run-benchmark` runs the plan in one browser/build per invocation, so
-**interleave the two builds across rounds** (cancel thermal/background drift), writing one JSON per
-round. **Quiesce first** (`./quiesce.sh on` — see the Determinism checklist) and use the
-`JS3_LOCAL_COPY` it prints as `--local-copy "$JS3_LOCAL_COPY"` below: the `jetstream3` plan otherwise
-re-clones upstream JetStream3.0 from GitHub every invocation (network + disk noise, and the upstream
-commit can shift mid-experiment). List names with `run-benchmark --plan jetstream3 --list-subtests` (the plan's set differs
-from the in-tree `PerformanceTests/JetStream3` — e.g. it has `bigint-noble-ed25519`, not `-secp256k1`).
+Run `./quiesce.sh on` first (a symlink here to `wk-tools/quiesce.sh`). It handles the macOS determinism
+items: checks AC power / thermal / display-asleep, disables Spotlight indexing (sudo), stops an
+in-flight Time Machine backup, starts `caffeinate`, reports CPU-hog daemons to quit, settles thermals,
+and seeds a pinned local JetStream3 checkout. It prints `JS3_LOCAL_COPY=<path>` on its last line — pass
+that as `--local-copy` to every round so each run copies a fixed checkout instead of re-cloning
+upstream JetStream3.0 from GitHub (which adds network/disk noise and can shift the commit
+mid-experiment). Run `./quiesce.sh off` afterward. Set a fixed display refresh rate by hand —
+ProMotion/VRR is the one thing quiesce.sh can only warn about, and rAF-driven runs inherit its jitter.
 
-> **⚠️ The Bash tool runs `zsh`, which does NOT word-split unquoted variables.** `--subtests $SUB`
-> where `SUB="delta-blue bigint-noble-ed25519"` passes the *whole string as one argument* → run fails
-> with `... is not a valid subtest, skipping` / `No valid subtests were specified`. The same bug bites
-> `for x in $list` (iterates once over the whole string). **Always pass list args literally**
-> (`--subtests delta-blue bigint-noble-ed25519`) or build an explicit `if/else`; never rely on
-> word-splitting. This silently wasted a whole run in practice.
+`run-benchmark` runs the plan once per invocation, so **interleave the two builds across rounds** to
+cancel thermal/background drift, one JSON per round. List names with `run-benchmark --plan jetstream3
+--list-subtests` (this plan's set differs from the in-tree `PerformanceTests/JetStream3` — e.g. it has
+`bigint-noble-ed25519`, not `-secp256k1`).
 
 ```bash
 J3=/tmp/js3-runs; mkdir -p "$J3"
-CACHE=/tmp/js3-builds/$(git rev-parse HEAD)     # baseline (or the chosen base sha)
+CACHE=/tmp/js3-builds/$(git rev-parse HEAD)
 PATCHED="$WEBKIT_ROOT/WebKitBuild/Release"
-LOCAL_COPY=/tmp/js3-builds/jetstream3-localcopy # the path quiesce.sh seeds & prints as JS3_LOCAL_COPY
-# Pass subtests literally (zsh!). Drop the --subtests line entirely for the full suite.
+LOCAL_COPY="$JS3_LOCAL_COPY"                      # printed by quiesce.sh
 run_one(){ # $1=build-dir  $2=out.json
   Tools/Scripts/run-benchmark --plan jetstream3 --browser minibrowser \
-    --build-directory "$1" --output-file "$2" --count 1 \
-    --local-copy "$LOCAL_COPY" \
-    --subtests delta-blue bigint-noble-ed25519; }
+    --build-directory "$1" --output-file "$2" --count 1 --local-copy "$LOCAL_COPY" \
+    --subtests delta-blue bigint-noble-ed25519; }   # omit --subtests for the full suite
 for i in $(seq 1 8); do k=$(printf %02d $i)
   if [ $((i%2)) -eq 0 ]; then
     run_one "$CACHE/Release" "$J3/base_$k.json";    run_one "$PATCHED" "$J3/patched_$k.json"
@@ -152,170 +169,210 @@ for i in $(seq 1 8); do k=$(printf %02d $i)
 done
 ```
 
-**Full suite:** delete the `--subtests …` line. Each round is a full multi-minute run; start with ~6–8
-rounds and add more. Run in the **background** and await/poll — foreground `sleep` is unavailable; full
-passes are long. (A short targeted-subtest round can fail in seconds — see the zsh trap above — so
-**verify the first round actually wrote a valid JSON** before waiting on the whole loop.)
+**Pass list arguments literally** (`--subtests delta-blue bigint-noble-ed25519`), never through an
+unquoted variable. The macOS Bash tool runs **zsh**, which does not word-split, so `--subtests $SUB`
+passes the whole string as one arg and the run fails with `... is not a valid subtest`. Literal args
+are correct on every shell. For the full suite, drop `--subtests`, run ~6-8 rounds in the background,
+and **verify the first round wrote a valid JSON** before waiting on the loop (a mis-typed subtest run
+fails in seconds).
 
-## Step 3b — Headless alternative (jsc shell, no display)
+### macOS run requirements
 
-When there's no awake display, or to iterate fast, run the benchmark headless in the `jsc` shell.
-`cli.js` runs the plan and prints scores; run one build per invocation and compare the printed scores,
-or capture per-subtest scores and feed them to your own stats. **`jsc` must use its own framework** —
-see the `DYLD_FRAMEWORK_PATH` gotcha.
+- **Awake, attached display, required.** MiniBrowser renders in a real window and JetStream3 is
+  rAF-driven; on a headless/asleep display it logs `Running <subtest>:`, stalls, and times out.
+  `caffeinate` does not wake the display. Check with
+  `python3 -c "import Quartz; print(Quartz.CGDisplayIsAsleep(Quartz.CGMainDisplayID()))"` (1 = asleep).
+  No live display → use headless instead.
+- **First run needs pyobjc:** if it dies with `No module named 'objc'`, run
+  `python3 -m pip install --user pyobjc-core pyobjc-framework-Cocoa pyobjc-framework-Quartz`.
+- **Benign `Error:` log lines** (e.g. `lsof ... Port not found yet, retrying`) will trip a Monitor that
+  greps `Error`. Match precise terminal states (`Traceback`) and confirm scores are appearing.
+
+---
+
+## Headless rounds (any platform)
+
+Run the benchmark directly in the `jsc` shell — no display, faster to iterate, and the only option on
+Linux (and required on 32-bit). `cli.js` runs the real `JetStreamDriver`.
+
+### Launch jsc correctly
+
+- **Select subtests with the `testList` global, not argv** — `cli.js` never reads `arguments`. Set it
+  with `-e` before the driver loads, and run from the JetStream3 dir (the driver `load()`s
+  `./JetStreamDriver.js` and the benchmarks by relative path). Subtest names are the `name:` fields in
+  `JetStreamDriver.js` (e.g. `crypto`, `hash-map`, `stanford-crypto-*`, `bigint-noble-*`).
+- **Emit the exact JSON `run-benchmark` produces** by setting `dumpJSONResults=true`, then grep the
+  result line — this is what keeps the headless path on the official methodology (see
+  [Compare](#compare-with-compare-results)).
+- **Library path:** a Linux JSCOnly `bin/jsc` is statically linked to its sibling `lib*` and runs in
+  place; if a build ever needs it, use `LD_LIBRARY_PATH=$DIR/lib`. On macOS prefix
+  `DYLD_FRAMEWORK_PATH=$DIR` (a bare `WebKitBuild/Release/jsc` otherwise links the *system*
+  JavaScriptCore and dies with `dyld: Symbol not found`). **Never use `Tools/Scripts/run-jsc`** — it
+  injects `--useDollarVM=1` and may wrap jsc in lldb, both of which perturb timing.
 
 ```bash
 cd "$WEBKIT_ROOT/PerformanceTests/JetStream3"
-PATCHED="$WEBKIT_ROOT/WebKitBuild/Release"
-# Single subtest or comma-list after `--`; omit for the full suite.
-DYLD_FRAMEWORK_PATH="$PATCHED" "$PATCHED/jsc" cli.js -- bigint-noble-ed25519
-# Baseline: same with $CACHE/Release. Interleave invocations and compare the printed "Score" lines.
+DIR="$WEBKIT_ROOT/WebKitBuild/JSCOnly/Release"                       # Linux JSCOnly example
+"$DIR/bin/jsc" -e 'var dumpJSONResults=true; var testList=["hash-map"];' cli.js \
+  | grep '^{"JetStream3.0"' > /tmp/js3-runs/patched_r01_hash-map.json
+# prints {"JetStream3.0":{"metrics":{"Score":["Geometric"]},"tests":{...}}}
 ```
 
-This is the path the `jsc-profile` skill builds on (you profile the headless jsc run, not the
-browser). For statistically-rigorous headless comparison of a single subtest's kernel, extract a
-**microbenchmark** and use `run-jsc-benchmarks` (see the `jsc-microbenchmark` skill) — it interleaves
-and does the stats for you.
+### Compare engine configs in one build
 
-## Step 4 — Compare with compare-results
+Pass jsc flags to sweep tiers: `--useDFGJIT=`, `--useConcurrentJIT=`, `--useFTLJIT=`. A bogus flag is
+rejected with `ERROR: invalid option`, so a typo can't silently pass. On **32-bit ARM there is no FTL**
+(64-bit only), so DFG is the top tier and a `--useDFGJIT=0` config is LLInt+baseline only — it scores
+far lower, which is expected, not a regression.
 
-`-a` = baseline, `-b` = patched; pass all rounds (they're merged). JetStream3 is **bigger-is-better**,
-so `b/a > 1` means patched is **faster**, `b/a < 1` means patched is **slower** (a regression).
+### 32-bit ARM specifics
+
+- **Run one subtest per `jsc` process, then assemble per-round JSONs.** A shared-process full-suite
+  `cli.js` run OOMs on 32-bit: the shell driver never disposes each benchmark's global (only the
+  browser/iframe and d8/`Realm.dispose` paths free it — `JetStreamDriver.js` ~line 684), so memory
+  climbs and the suite dies with `RangeError: Out of memory` after ~24 tests. One process per subtest
+  is the faithful equivalent of run-benchmark's per-iframe isolation (fresh realm, freed after) and
+  lets each benchmark complete.
+  1. Per (round, cell, subtest): one `jsc` invocation with `dumpJSONResults=true` and a single-element
+     `testList`; save the result line to `<cell>_r<NN>_<subtest>.json`. Interleave cells per subtest,
+     randomize subtest order each round (`shuf`), pin with `taskset -c 2-9`.
+  2. Assemble each (cell, round)'s per-subtest JSONs into one round JSON whose `JetStream3.0.tests` is
+     the **union** of the per-test score objects, copied verbatim (no stats). `benchmark_json_merge.py`
+     (`mergeJSONs`/`deepAppend`) cannot do this — it requires identical test sets and `KeyError`s
+     otherwise — so combine structurally, and restrict every emitted round to the **intersection** of
+     subtests that succeeded in all cells/rounds.
+  3. Compare with `python3 Tools/Scripts/compare-results ...` (invoke via `python3`; the script's
+     `#!/usr/bin/env python3 -u` shebang fails on Linux).
+  A reusable implementation is at `~/Development/.../OpenSource/js3_runloop.sh` + `js3_combine.py`.
+- **Skip tests that can't run headless on 32-bit, excluded equally from both cells.** Large/SIMD wasm
+  tests crash (`tfjs-wasm`, `tfjs-wasm-simd`, `argon2-wasm`, `argon2-wasm-simd`, `8bitbench-wasm`);
+  `gcc-loops-wasm`, `HashSet-wasm`, `quicksort-wasm`, `richards-wasm`, `tsf-wasm` run fine.
+  `Worker`-based tests (`segmentation`, `bomb-workers`) throw `ReferenceError: Can't find variable:
+  Worker` in the shell. A failing subtest just drops out of the intersection — note which you skipped.
+
+### Linux quiescing
+
+A server-class box is usually already quiet — check, don't assume:
+
+```bash
+nproc
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor   # want performance (often already set,
+                                                            # and not writable inside a container)
+cat /proc/loadavg                                           # want it low
+cat /sys/class/thermal/thermal_zone0/temp                   # server ARM idles ~35C, no throttling
+```
+
+- **Pin every run with `taskset -c <lo-hi>`** (e.g. `taskset -c 2-9`) so placement is identical across
+  cells; give concurrent-JIT threads room (don't pin to a single core when `--useConcurrentJIT=1`).
+- **`caffeinate` and `quiesce.sh` do not exist on Linux.** For a headless jsc run, screen blanking is
+  irrelevant (no display dependency); only a full system suspend matters. Check
+  `gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type` — if `'nothing'`, the
+  box never idle-suspends on AC. Otherwise hold `systemd-inhibit --what=idle:sleep --mode=block
+  --why=bench sleep <dur>` in the background. (A *browser* run on Linux does need blanking stopped —
+  Wayland: `gsettings set org.gnome.desktop.session idle-delay 0` and `... power idle-dim false`; X11:
+  `xset s off; xset -dpms`. `systemd-inhibit`'s idle lock alone does not stop GNOME blanking.)
+- The **Bash tool here runs bash** (unquoted variables *do* word-split), but still build `shuf` lists
+  and arrays explicitly rather than relying on it.
+
+### wkdev container access
+
+Interactive `wkdev-enter --name <ctr>`; batch `wkdev-enter --name <ctr> --exec -- bash -lc '<cmd>'`.
+Paths are in-container; the host sees them under the mapped prefix (container `/home/<u>/Development`
+= host `/home/<u>/Development/32/Development`). Write results under the mapped prefix so you can read
+logs from the host while the loop runs inside.
+
+---
+
+## Compare with compare-results
+
+Shared across modes. `-a` = baseline, `-b` = patched; pass all rounds (they merge). Always use this
+script — never hand-roll Welch/CI, which changes the methodology and makes results non-comparable.
 
 ```bash
 Tools/Scripts/compare-results -a /tmp/js3-runs/base_*.json -b /tmp/js3-runs/patched_*.json \
                               --breakdown --sort --csv /tmp/js3-runs/breakdown.csv
+# Linux: prefix `python3` (the script's shebang fails there).
 ```
 
 - `--breakdown` — per-subtest table with FDR-corrected `(significant)` flags. **Trust only flagged
-  rows** (FDR corrects across subtests).
+  rows.**
 - `--sort` — order by `b/a`.
-- `--category-breakdown` — split startup / worst / average. Use it to tell a **compile-time/startup**
-  cost (shows in First/Worst) from a **steady-state** regression (shows in Average). A regression
-  weighted toward First/Worst with a small Average is diffuse codegen / compile cost, not a hot loop.
+- `--category-breakdown` — split startup / worst / average. A move weighted toward First/Worst with a
+  small Average is a **compile-time/startup** or diffuse-codegen cost, not a hot steady-state loop.
 
-## Step 5 — Iterate to a decision (sequential)
+## Iterate to a decision
 
-Run more rounds until **either**:
-- **Significant mover** — a subtest is FDR-`(significant)`, OR the overall geomean move is significant.
-  Apply the thresholds at the top: **0.1% significant overall is a real regression**; **>1% on a
-  non-noisy subtest** is real. Report it; done.
-- **Equivalence** — the CI rules out a move bigger than the **standing margins `θ`: 0.02% on the
-  overall geomean, 0.5% per non-noisy subtest.** These are fixed targets, not per-run choices: always
-  keep running rounds until every non-noisy subtest's 95% CI rules out a >0.5% regression AND (for a
-  full-suite run) the overall geomean rules out a >0.02% move — unless a significant mover ends it first.
+Run more rounds until one of these ends it:
 
-To check the bound, compute the **95% CI on `b/a`** per subtest (and on the geomean) from the per-round
-scores — `compare-results` gives significance, not the CI, so compute it yourself (two-sample/Welch on
-the per-round subtest scores; the smallest regression ruled out is `1 − lowerCI`). Stop a subtest once
-`1 − lowerCI ≤ 0.5%` (overall `≤ 0.02%`).
+- **Significant mover** — a subtest is FDR-`(significant)`, or the overall geomean move is significant.
+  Apply the scale above (0.1% overall significant = real; >1% non-noisy subtest = real). Report; done.
+- **Equivalence** — the 95% CI rules out a move bigger than the standing margins: **0.02% overall,
+  0.5% per non-noisy subtest.** Keep running until every non-noisy subtest's CI rules out a >0.5%
+  regression and (full-suite only) the overall geomean rules out >0.02%.
 
-**Margin feasibility — these targets are aggressive; budget for it.** CI half-width shrinks as `1/√N`,
-so reaching margin `θ` from current half-width `w` costs ≈ `(w/θ)²` more samples. JetStream3 noise is
-heterogeneous: the **overall geomean** reaches ≈ ±0.1% with modest N, so **0.02% overall needs ~25×
-more rounds than ±0.1%** — many tens of full-suite rounds; run them in the background and expect a long
-loop. **Per-subtest** noise ranges from ≈ ±0.05% (float-mm) to ≈ ±5%; **0.5% is reachable for quiet
-subtests but the noisy list (json-parse-inspector, doxbee, Babylon, splay, tsf, async-fs, …) cannot get
-there at any practical N.** So:
-- **Never gate the loop on a noisy subtest.** Exempt them from the 0.5% rule; report their floor and
-  state it is noise-gated, not equivalence.
-- **Two important caveats that no amount of N fixes:** (1) if a subtest's point estimate already sits
-  below `1 − θ` (e.g. b/a = 0.989, a 1.1% slowdown, vs a 0.5% target), more rounds will *confirm a
-  regression*, not rule one out — the CI tightens around the slowdown and crosses into significance.
-  (2) Targeted subsets give no overall geomean; the 0.02% target only applies to a full-suite run.
-- **Always set a compute budget** and `log()` progress (current `1 − lowerCI` per subtest each batch);
-  on hitting the budget, report the tightest bound achieved and which subtests still gate it.
+`compare-results` gives significance, not the CI, so compute the **95% CI on `b/a`** yourself
+(two-sample/Welch on the per-round subtest scores; the smallest regression ruled out is `1 - lowerCI`).
+Stop a subtest once `1 - lowerCI <= 0.5%` (overall `<= 0.02%`).
 
-## Step 6 — Root-cause a confirmed regression (optional, on request)
+**Budget for the margins — they are aggressive.** CI half-width shrinks as `1/sqrt(N)`, so reaching
+margin `θ` from half-width `w` costs ~`(w/θ)^2` more samples. The overall geomean hits ~±0.1% with
+modest N, so **0.02% overall needs ~25x more rounds** — many tens of full-suite rounds; run them in the
+background. Per-subtest noise ranges from ~±0.05% (float-mm) to ~±5%.
 
-Once a subtest is confirmed slower, narrow it to a loop:
+- **Never gate the loop on a noisy subtest.** Exempt the noisy list; report its floor as noise-gated,
+  not equivalence.
+- **Two things no amount of N fixes:** (1) if a point estimate already sits below `1 - θ` (e.g.
+  b/a = 0.989 vs a 0.5% target), more rounds *confirm a regression*, not rule one out. (2) A targeted
+  subset gives no overall geomean, so the 0.02% target applies only to a full-suite run.
+- **Set a compute budget** and log progress (current `1 - lowerCI` per subtest each batch); on hitting
+  it, report the tightest bound achieved and which subtests still gate it.
 
-1. **Profile the headless jsc run** of that subtest (`jsc-profile` skill). The first decision is the
-   **tier breakdown** from `jsc --sample`:
-   - cost in **FTL/DFG/Baseline** (generated JS) → use the **JSC bytecode profiler** to find the hot
-     CodeBlock/bytecode.
-   - cost in **C/C++** → use **samply** to find the hot native function.
-2. **Decompose by phase.** Split the subtest's work into its sub-operations and time each on both
-   builds (interleaved, many reps, with a per-phase t-test). The phase(s) that move localize the code.
-   Beware multiple-comparison: with k phases, require BH/Bonferroni-corrected significance, not raw p.
-3. **Extract a microbenchmark** of the suspect loop and measure it directly on both builds
-   (`jsc-microbenchmark` skill). If it reproduces the regression, that's the locus; if it doesn't, the
-   regression is elsewhere or **diffuse** (a thin, broad codegen change across many functions — common
-   for optimizer changes; shows as a small same-direction shift across many subtests + a First/Worst
-   category weighting).
+## Root-cause a confirmed regression (on request)
 
-Real example: a DFG IntegerRangeOptimization change gave a confirmed −0.54% on bigint-noble-ed25519,
-but **no single loop reproduced it** — SHA-512 (the obvious typed-array candidate) was inert because
-its `Uint32Array[i] | 0` reads truncate immediately, killing the removed range fact; per-phase and
-the isolated scalar-mult loop both came back non-significant; the category breakdown was First-weighted.
-Conclusion: diffuse codegen cost, not a hot loop. **Report "diffuse / not localizable" honestly rather
-than forcing a culprit.**
+Narrow a confirmed-slower subtest to a loop. Delegate the code-tracing parts (where is this loop, what
+changed between the two builds) to a subagent so the main context stays on the measurement state — but
+run the interleaved measurement loop itself in one context.
 
-## Step 7 — Report
+1. **Profile the headless jsc run** (`jsc-profile` skill). Start from the tier breakdown: cost in
+   FTL/DFG/Baseline (generated JS) → use the bytecode profiler to find the hot CodeBlock; cost in
+   C/C++ → use samply to find the hot native function.
+2. **Decompose by phase.** Split the subtest into sub-operations and time each on both builds
+   (interleaved, many reps). Require BH/Bonferroni-corrected significance across the k phases, not raw p.
+3. **Extract a microbenchmark** of the suspect loop (`jsc-microbenchmark` skill). If it reproduces the
+   regression, that's the locus; if not, the cost is elsewhere or **diffuse** — a thin, broad codegen
+   change across many functions, which shows as a small same-direction shift on many subtests plus a
+   First/Worst category weighting.
+
+Example: a DFG IntegerRangeOptimization change gave a confirmed -0.54% on bigint-noble-ed25519, but no
+single loop reproduced it — SHA-512 was inert because its `Uint32Array[i] | 0` reads truncate
+immediately, killing the removed range fact; per-phase and the isolated scalar-mult loop were both
+non-significant; the category breakdown was First-weighted. Conclusion: diffuse codegen cost. **Report
+"diffuse / not localizable" honestly rather than forcing a culprit.**
+
+## Report
 
 - Trust per-subtest claims only where `compare-results` marks `(significant)`.
-- State results against the thresholds at the top (0.1% overall significant = real; >1% subtest = real).
-- **Watch for a broad, same-direction shift across nearly all subtests** — including ones the change
-  can't touch (crypto, wasm) — that's machine drift or a uniform compile-time cost; use
-  `--category-breakdown` to distinguish.
-- Report: baseline used (HEAD~1 vs main vs working tree), browser-vs-headless, rounds run, overall
-  `b/a` + pValue, the FDR-significant movers, and (if root-caused) the loop or the diffuse finding.
+- State results against the regression scale (0.1% overall significant = real; >1% subtest = real).
+- **A broad same-direction shift across nearly all subtests** — including ones the change can't touch
+  (crypto, wasm) — is machine drift or a uniform compile-time cost; use `--category-breakdown` to tell
+  them apart.
+- Report: baseline used (HEAD~1 vs main vs working tree), run mode (browser/headless), rounds run,
+  overall `b/a` + pValue, the FDR-significant movers, and (if root-caused) the loop or the diffuse finding.
 
-## Determinism checklist (do these to reduce run-to-run variation)
+## Shared determinism principles
 
-The single biggest lever is **interleaving** baseline/patched every round; everything else trims noise.
+The single biggest lever is **interleaving baseline/patched every round** (the loops above alternate by
+parity); never run all-baseline-then-all-patched, which aliases time-of-day/thermal drift into the
+result. Beyond that:
 
-- **Quiescing helper — run this first.** `./quiesce.sh on` (a symlink in this skill's directory to the
-  top-level `wk-tools/quiesce.sh` tool) automates the
-  machine/OS and network-determinism items below: it checks AC power / thermal throttle / display-asleep,
-  disables Spotlight indexing (sudo), stops an in-flight Time Machine backup, starts `caffeinate`, reports
-  contending CPU hogs (cloud-sync/indexing daemons) to quit, settles thermals, and seeds a **pinned local
-  JetStream3 checkout**. It prints `JS3_LOCAL_COPY=<path>` on its last line — capture it and pass
-  `--local-copy "$JS3_LOCAL_COPY"` to every `run-benchmark` invocation so each round copies a fixed
-  checkout instead of re-cloning from GitHub (kills per-run network/disk variance and pins the commit so
-  upstream can't shift mid-experiment). Run `./quiesce.sh off` afterward to re-enable Spotlight and stop
-  `caffeinate`. ProMotion/variable-refresh rate is the one item it can only *warn* about — set a fixed
-  display refresh rate by hand, since rAF-driven browser runs inherit refresh jitter.
-- **Machine state:** plug into AC power; quit other apps and browser tabs; let the machine sit idle a
-  minute to settle thermals; `caffeinate -dimsu &` during a run (note: `caffeinate` does NOT wake an
-  asleep display — see Gotchas). Don't run two benchmark loops at once. (`./quiesce.sh on` does all of
-  this.)
-- **Interleave** base/patched within each round (the loops above alternate by parity). Never run
-  all-baseline-then-all-patched (time-of-day / thermal drift aliases into the result).
-- **Same build config** both sides: Release, non-ASan, same compiler. The baseline cache guarantees
-  the ToT build is byte-stable across re-runs at one sha.
-- **Deterministic inputs:** the `jetstream3` plan already sets `deterministicRandom: true`. For your
-  own harnesses, seed a PRNG; never use `Math.random()` / `Date.now()` for inputs.
-- **Warm up to steady tier before timing**, then take **median (and min) of many samples**; many outer
-  invocations beat many inner iterations for cancelling drift (this is exactly what `run-jsc-benchmarks`
-  does — prefer it for microbenchmarks).
-- **Quote everything and pass lists literally** (zsh word-splitting trap above) so a run does what you
-  think it does.
+- **Same build config both sides:** Release, non-ASan, same compiler. The per-sha baseline cache keeps
+  the ToT build byte-stable across re-runs.
+- **Deterministic inputs:** the `jetstream3` plan sets `deterministicRandom: true`; for your own
+  harnesses seed a PRNG — never `Math.random()` / `Date.now()`.
+- **Warm up to steady tier, then take median (and min) of many samples.** Many outer invocations beat
+  many inner iterations for cancelling drift — exactly what `run-jsc-benchmarks` does, so prefer it for
+  microbenchmarks.
 - Keep raw JSONs/CSVs under `/tmp/js3-runs/` so the user can inspect every number.
-
-## Gotchas / workarounds (all hit in practice)
-
-- **`jsc` needs `DYLD_FRAMEWORK_PATH` = its build dir.** Running `WebKitBuild/Release/jsc` directly
-  fails with `dyld: Symbol not found: __Z20WTFCrashWithInfoImpl…  Expected in: …/JavaScriptCore.framework`
-  because it links the *system* JavaScriptCore. Fix: `DYLD_FRAMEWORK_PATH="$DIR" "$DIR/jsc" …` (same for
-  the baseline build's jsc). **Do NOT use `Tools/Scripts/run-jsc` for measurement** — it injects
-  `--useDollarVM=1` and may wrap jsc in `lldb`, both of which perturb timing; it also only targets the
-  default `WebKitBuild` dir, not the baseline cache.
-- **Browser run needs an awake, attached display.** MiniBrowser renders in a real window and
-  JetStream3's loop is `requestAnimationFrame`-driven; on a headless/asleep display
-  (`python3 -c "import Quartz; print(Quartz.CGDisplayIsAsleep(Quartz.CGMainDisplayID()))"` → `1`) it
-  logs `Running <subtest>:` then stalls and times out (black diagnostic screenshot). `caffeinate` and
-  `--local-copy` don't fix it — only a live display does. **No display → use the headless jsc path
-  (Step 3b).**
-- **First `run-benchmark` run needs `objc` (pyobjc).** If it dies with `No module named 'objc'`:
-  `python3 -m pip install --user pyobjc-core pyobjc-framework-Cocoa pyobjc-framework-Quartz`.
-- **`run-benchmark` drives MiniBrowser → needs a full `make release`**, not jsc-only. The headless path
-  needs only `jsc` (still produced by `make release`).
-- **Baseline cache is keyed by base sha** — change the baseline commit and it rebuilds. Delete
-  `/tmp/js3-builds/<sha>` to force a fresh baseline.
-- **Monitor/grep false positives:** benign log lines contain `Error:` (e.g. `lsof … returned non-zero
-  … Port not found yet, retrying`). A Monitor that greps `Error` fires on these. Match precise terminal
-  states (`Traceback`, `No valid subtests`) and treat a single benign `Error:` as noise — but confirm
-  the run is actually progressing (scores appearing) before trusting it.
-- Use `--local-copy <JetStream-checkout>` to avoid re-fetching the benchmark from GitHub each run.
-- Confirm Release / non-ASan before building, or the numbers are meaningless.
+- **Long / overnight runs:** write each round's JSON the moment it finishes so the run survives a restart or context compaction, and never stop because the context grew long or was compacted — the only stop is the decision rule. Kill leftover `jsc`/profiler processes between and after rounds (a hung profiler times out the whole suite — `exit 124`, no JSON), pin with `taskset`, and give each round a timeout.
+- Platform quiescing lives with each run mode: `quiesce.sh` under [Browser](#quiesce-then-run-interleaved),
+  `taskset`/governor under [Linux quiescing](#linux-quiescing).
