@@ -3,7 +3,8 @@
 WebKit / JavaScriptCore skills for Claude Code. These are the real files; on each machine
 `~/.claude/skills` is a symlink to *this* folder, so the repo is the single source of truth
 and Claude Code edits land here directly. `jsc` is the main skill and cross-references the
-others, so they live together.
+others, so they live together. The sibling `../claude-settings.json` and `../claude-hooks/`
+are shared the same way (symlinked to `~/.claude/settings.json` and `~/.claude/hooks`).
 
 ## Fresh install on a new machine
 
@@ -19,6 +20,11 @@ git clone git@github.com:justinmichaud/wk-tools.git ~/Development/wk-tools
 mkdir -p ~/.claude
 [ -e ~/.claude/skills ] && [ ! -L ~/.claude/skills ] && mv ~/.claude/skills ~/.claude/skills.bak
 ln -sfn ~/Development/wk-tools/claude-skills ~/.claude/skills
+
+# 2b. Same one-liner idea for the shared settings.json and hooks (works on machines and
+#     containers -- the hook command uses $HOME, not a hardcoded path).
+ln -sfn ~/Development/wk-tools/claude-settings.json ~/.claude/settings.json
+ln -sfn ~/Development/wk-tools/claude-hooks ~/.claude/hooks
 
 # 3. Verify: this should list jsc, build-webkit, etc.
 ls ~/.claude/skills

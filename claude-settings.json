@@ -1,0 +1,82 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(//tmp/**)",
+      "Read(//private/tmp/**)",
+      "WebFetch(domain:github.com)",
+      "WebSearch",
+      "WebFetch(domain:isocpp.org)",
+      "WebFetch(domain:www.open-std.org)",
+      "Read(//Users/justinmichaud/clang-p2996/build/include/c++/v1/**)",
+      "Read(//Users/justinmichaud/clang-p2996/libcxx/test/std/experimental/reflection/**)",
+      "Read(//Users/justinmichael/Development/**)",
+      "Read(//Users/justinmichael/Development/ReleaseVersion/OpenSource/Source/JavaScriptCore/domjit/**)",
+      "Read(//Users/justinmichaud/Development/ReleaseVersion/heap/**)",
+      "Read(//Users/justicmichaud/Development/ReleaseVersion/OpenSource/Source/JavaScriptCore/jit/**)",
+      "Read(//Users/justichmichaud/Development/ReleaseVersion/OpenSource/Source/JavaScriptCore/wasm/js/**)",
+      "Read(//Users/justinmichaud/Development/ReleaseVersion/OpenCore/Source/WebCore/dom/**)",
+      "Read(//Users/justinmichaud/Development/ReleaseVersion/OpenCore/Source/WebCore/Modules/streams/**)",
+      "Skill(build-webkit)",
+      "Skill(build-webkit:*)",
+      "Read(//Users/justinmichaud/Library/Logs/DiagnosticReports/**)",
+      "Read(//Users/justinmichaud/clang-p2996/libcxx/include/__memory/**)",
+      "Skill(add-file-to-webkit)",
+      "Skill(add-file-to-webkit:*)",
+      "Bash(grep -E --line-buffered \"error:|warning: |BUILD SUCCEEDED|BUILD FAILED|Error|FAILED|error$|fatal error\")",
+      "Bash(kill -0 13924)",
+      "Bash(kill -0 20996)",
+      "Bash(kill -0 22311)",
+      "Bash(kill -0 70021)",
+      "Bash(kill -0 70053)",
+      "Bash(kill -0 32209)",
+      "WebFetch(domain:bugs.webkit.org)",
+      "WebFetch(domain:ews-build.webkit.org)",
+      "Read(//Users/justinmichaud/.claude/skills/build-webkit/**)",
+      "Edit(~/.claude/skills/fix-webkit-ews/**)",
+      "Read(//Users/justinmichaud/.claude/projects/-Users-justinmichaud-Development-DebugVersion-OpenSource/memory/**)",
+      "Skill(fix-webkit-ews)",
+      "Skill(fix-webkit-ews:*)",
+      "Read(//Users/justinmichaud/.claude/skills/fix-webkit-ews/**)",
+      "Bash(python3 -c ' *)",
+      "Read(//Users/justinmichaud/.claude/skills/jsc-jetstream-compare/**)",
+      "Edit(~/.claude/skills/jsc-jetstream-compare/**)",
+      "WebFetch(domain:www.justwatch.com)",
+      "Read(//Users/justinmichaud/.claude/skills/jsc/**)",
+      "Read(//Users/justinmichaud/Development/wk-tools/claude-skills/jsc/**)",
+      "Edit(~/.claude/skills/jsc/**)",
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Bash(set -e)",
+      "Bash(mkdir -p __TRACKED_VAR__/claude-hooks)",
+      "Bash(mv /Users/justinmichaud/.claude/hooks/webkit-jsc-skill-reminder.sh __TRACKED_VAR__/claude-hooks/)",
+      "Bash(rmdir /Users/justinmichaud/.claude/hooks)",
+      "Bash(ln -sfn __TRACKED_VAR__/claude-hooks /Users/justinmichaud/.claude/hooks)"
+    ],
+    "additionalDirectories": [
+      "/Users/justinmichaud/Library/Developer/Toolchains/p2996.xctoolchain",
+      "/tmp",
+      "/private/tmp",
+      "/Users/justinmichaud/.claude/plans",
+      "/Users/justinmichaud/.claude",
+      "/Users/justinmichaud/Development/wk-tools"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.claude/hooks/webkit-jsc-skill-reminder.sh\""
+          }
+        ]
+      }
+    ]
+  },
+  "effortLevel": "xhigh",
+  "theme": "dark",
+  "autoCompactEnabled": false,
+  "precomputeCompactionEnabled": false
+}

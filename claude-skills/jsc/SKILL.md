@@ -76,6 +76,15 @@ Write the standalone invariant the current code satisfies, for a reader who neve
 //       on short strings (JSON tokens) that loses to a scalar scan. On 64-bit keep the vector scan.
 // GOOD: No efficient SIMD horizontal reduce on 32-bit; a scalar scan wins on short inputs.
 
+// Narrating a mechanism the type/annotation/assert already enforces -- redundant to the reader,
+// and it rots when the mechanism moves. WebKit does not comment members this way; the field name
+// and its use sites carry it. Trust the reader to read the types (you would not comment an int).
+// BAD:  // Bumped by resume() so a captured SuspendedThreadRegisters view traps if read after the
+//       // suspension ends.   (on: unsigned m_suspendGeneration)
+// GOOD: (delete it)
+// BAD:  Returns a view valid only while suspended; scratch must outlive it; LIFETIME_BOUND flags escapes.
+// GOOD: Returns a view of the suspended thread's registers, using the suspended thread's stack or scratch as storage.
+
 // The one to KEEP -- a footgun warning: self-contained, names an alternative the reader might
 // independently reach for, and says why it breaks. Idiomatic WebKit.
 // GOOD: Never use jsCast here. This value may be "Dead" but not "Finalized" yet.
