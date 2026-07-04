@@ -24,32 +24,60 @@ we have the standing to push it. If accepted, enabling NUMA becomes just:
 ## Path B (do-it-now): rebuild the raspi kernel with the flag on
 No patching needed on 26.04 — just toggle one Kconfig. 26.04's **A/B boot** auto-
 reverts a bad kernel, so this is far safer than it was on 24.04.
+
+**Turnkey:** run the bundled script (idempotent, resumable, verifies the flag
+*before* the compile so you never waste hours on a bad build):
+```bash
+bash ~/rpi5-tune/rpi5-numa-kernel.sh      # prompts for sudo; builds a -numa kernel .debs
+```
+It: enables `deb-src` (26.04 ships it off), installs the toolchain, fetches the
+real `linux-raspi` kernel source (resolving past the `linux-meta-raspi` decoy),
+runs `debian.raspi/reconstruct` + fixes the arm64 dts-overlays symlink (else
+`make dtbs` fails), derives `.config` from the running kernel, hard-checks
+`CONFIG_NUMA_EMU=y`, builds `bindeb-pkg`, and (optionally) `dpkg -i` the result.
+The stock kernel stays as the A/B fallback.
+
+Two env knobs, both **on by default**:
+- `LEAN=yes` — `make localmodconfig`: build only currently-loaded modules
+  (~130 vs thousands) → **~10-20 min instead of 1-2h**. Boots on *this* Pi;
+  drivers for hardware not plugged in at build time are omitted. `LEAN=no` for a
+  full driver-parity kernel (slow).
+- `MAXPERF=yes` — throughput tuning: `HZ=100`, default cpufreq governor =
+  performance, `-O2`. Preemption is left at **`PREEMPT_LAZY`** (the modern
+  throughput model): on arm64 `ARCH_HAS_PREEMPT_LAZY=y` makes `PREEMPT_NONE`
+  (needs `ARCH_NO_PREEMPT`) and `PREEMPT_VOLUNTARY` unbuildable, and forcing the
+  choice only yields full `PREEMPT` (worse). Also keeps **BTF + `SCHED_CLASS_EXT`
+  (sched_ext)** so Meta's SCX schedulers (`scx_lavd`, `scx_bpfland`,
+  `scx_rusty`/`scx_layered`) and `bpftrace` work — do **not** set `DEBUG_INFO_NONE`,
+  which strips BTF and breaks all of that.
+
+<details><summary>What it does, by hand</summary>
+
 ```bash
 sudo apt-get update
-sudo apt-get build-dep -y linux-raspi              # or: linux-source + build tools
-sudo apt-get install -y libncurses-dev flex bison libssl-dev bc kmod cpio
+sudo apt-get build-dep -y linux-raspi
+sudo apt-get install -y build-essential fakeroot dpkg-dev libncurses-dev flex bison libssl-dev bc kmod cpio libelf-dev dwarves zstd
 mkdir -p ~/kbuild && cd ~/kbuild
 apt-get source linux-raspi                         # needs deb-src in sources
 cd linux-raspi-*/
-# enable the flag in the raspi flavour config:
-scripts/config --file debian.raspi/config/annotations 2>/dev/null || true
-# simplest: set it in the running-config-derived .config and rebuild
 cp /boot/config-$(uname -r) .config
-scripts/config --enable NUMA --enable NUMA_EMU --enable NUMA_MEMBLKS
+scripts/config --enable NUMA --enable NUMA_EMU --enable NUMA_MEMBLKS --set-str LOCALVERSION "-numa"
 make olddefconfig
-grep CONFIG_NUMA_EMU .config                       # confirm =y
+grep CONFIG_NUMA_EMU .config                       # MUST show =y before building
 make -j$(nproc) bindeb-pkg                          # ~1-2h on the Pi
-sudo dpkg -i ../linux-image-*.deb ../linux-headers-*.deb
-# ensure /boot/firmware kernel + DTBs updated per Ubuntu raspi packaging, then reboot
+sudo dpkg -i ../linux-image-*-numa_*.deb ../linux-headers-*-numa_*.deb
+# confirm /boot/firmware kernel + DTBs updated (sudo flash-kernel if not), then reboot
 ```
+</details>
 
 ## After a NUMA_EMU kernel is running
 ```bash
-NUMA_FAKE=4 bash ~/rpi5-tune/rpi5-setup.sh    # adds numa=fake=4 to cmdline.txt (guarded)
+NUMA_FAKE=4 bash ~/rpi5-tune/rpi5-setup.sh    # adds numa=fake=4 (+ preempt=none) to cmdline.txt (guarded)
 sudo reboot
 # verify:
-dmesg | grep -i numa        # expect: interleave policy overridden to 'interleave:0-3'
-numactl --hardware          # expect 4 nodes
+dmesg | grep -i numa                     # expect: interleave policy overridden to 'interleave:0-3'
+numactl --hardware                        # expect 4 nodes
+cat /sys/kernel/debug/sched/preempt       # expect (none) selected — max-perf preemption
 # benchmark:
 numactl --interleave=all <your workload>
 ```

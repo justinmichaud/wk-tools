@@ -81,6 +81,25 @@ ok "governor -> $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/d
 # bare PWM write gets reclaimed by the thermal governor on trip crossings. The
 # reliable method: lower all *active* fan trips so the governor pins max state,
 # then set full PWM. Critical (110C) trip is left intact for CPU safety.
+#
+# The logic lives in a standalone script rather than inline in ExecStart: systemd
+# performs its OWN ${...} expansion on ExecStart lines before running them, which
+# mangles bash param-expansions like ${t%_temp} (invalid systemd var name) and
+# silently broke the trip-lowering loop, leaving the fan governor-controlled.
+sudo tee /usr/local/sbin/rpi5-fan-max >/dev/null <<'EOF'
+#!/bin/bash
+# Pin thermal state to max (lower all active trips) + full PWM. Run by fan-max.service.
+n=1
+for t in /sys/class/thermal/thermal_zone*/trip_point_*_temp; do
+  ty="${t%_temp}_type"
+  [ "$(cat "$ty" 2>/dev/null)" = active ] && { echo $((n*1000)) > "$t" 2>/dev/null; n=$((n+1)); }
+done
+for h in /sys/class/hwmon/hwmon*; do
+  [ "$(cat "$h/name" 2>/dev/null)" = pwmfan ] && { echo 1 > "$h/pwm1_enable"; echo 255 > "$h/pwm1"; }
+done
+exit 0
+EOF
+sudo chmod 755 /usr/local/sbin/rpi5-fan-max
 sudo tee /etc/systemd/system/fan-max.service >/dev/null <<'EOF'
 [Unit]
 Description=Force PWM fan to 100% (pin thermal state to max + full PWM)
@@ -88,13 +107,13 @@ After=multi-user.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'n=1; for t in /sys/class/thermal/thermal_zone*/trip_point_*_temp; do ty="${t%_temp}_type"; [ "$(cat "$ty" 2>/dev/null)" = active ] && { echo $((n*1000)) > "$t" 2>/dev/null; n=$((n+1)); }; done; for h in /sys/class/hwmon/hwmon*; do [ "$(cat "$h/name" 2>/dev/null)" = pwmfan ] && { echo 1 > "$h/pwm1_enable"; echo 255 > "$h/pwm1"; }; done'
+ExecStart=/usr/local/sbin/rpi5-fan-max
 [Install]
 WantedBy=multi-user.target
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now fan-max.service >/dev/null 2>&1 || true
-ok "fan-max.service (100%)"
+ok "fan-max.service (100%) via /usr/local/sbin/rpi5-fan-max"
 
 #-------------------------------------------------------------------------------
 log "3  Swap OFF (16GB box)"
@@ -107,7 +126,7 @@ sudo sed -i '/^[^#].*\sswap\s/s/^/#/' /etc/fstab || true
 ok "swap devices active: $(swapon --show | grep -c /)"
 
 #-------------------------------------------------------------------------------
-log "4  Disable unneeded services (keeping bluetooth, unattended-upgrades, NM)"
+log "4  Disable unneeded services + AUTOMATIC UPDATES (keeping bluetooth, NetworkManager)"
 # attempt disable; `systemctl disable` returns non-zero only if the unit doesn't
 # exist (sysv units redirect & succeed) — pipefail-safe, no grep pipe.
 disable_sys(){
@@ -117,7 +136,17 @@ for u in NetworkManager-wait-online.service ModemManager.service switcheroo-cont
          kerneloops.service cups.service cups-browsed.service cups.socket \
          gnome-remote-desktop.service avahi-daemon.service avahi-daemon.socket \
          fwupd-refresh.timer apport.service power-profiles-daemon.service \
-         rsyslog.service colord.service; do disable_sys "$u"; done
+         rsyslog.service colord.service \
+         unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+         man-db.timer motd-news.timer update-notifier-download.timer; do disable_sys "$u"; done
+# Automatic-update / background-refresh units that a plain `disable` can't stop
+# because they're static or purely timer-triggered — mask them so nothing can pull
+# them in and spike CPU/IO mid-benchmark. Manual updates still work any time:
+#   sudo apt update && sudo apt full-upgrade
+for m in apt-daily.service apt-daily-upgrade.service packagekit.service \
+         packagekit-offline-update.service motd-news.service; do
+  sudo systemctl mask "$m" >/dev/null 2>&1 && ok "masked $m" || skip "$m n/a"
+done
 sudo touch /etc/cloud/cloud-init.disabled 2>/dev/null && ok "cloud-init disabled" || skip "no cloud-init"
 
 #-------------------------------------------------------------------------------
@@ -207,15 +236,27 @@ esac
 log "10  NUMA emulation (numa=fake) — only if the kernel supports it"
 CL=/boot/firmware/cmdline.txt; [ -f "$CL" ] || CL=/boot/cmdline.txt
 KCONF=/boot/config-$(uname -r)
+# Idempotently ensure a single-token kernel arg is on the (single-line) cmdline.
+ensure_cmdline_token(){ # $1 = token e.g. preempt=none  (key = part before '=')
+  local tok="$1" key="${1%%=*}"
+  grep -qw -- "$tok" "$CL" && return 0
+  if grep -qE "(^|[[:space:]])$key=" "$CL"; then
+    sudo sed -i -E "s#(^|[[:space:]])$key=[^[:space:]]+#\1$tok#" "$CL"   # replace existing value
+  else
+    sudo sed -i "s/\brootwait\b/$tok rootwait/" "$CL"                     # else insert before rootwait
+  fi
+  ok "cmdline: $tok"
+}
 if [ "$NUMA_FAKE" != 0 ] && [ -f "$CL" ]; then
   if grep -q '^CONFIG_NUMA_EMU=y' "$KCONF" 2>/dev/null; then
     sudo cp -a "$CL" "$CL.bak-$(date +%Y%m%d-%H%M%S)"
-    if grep -q 'numa=fake=' "$CL"; then
-      sudo sed -i -E "s/numa=fake=[0-9]+/numa=fake=$NUMA_FAKE/" "$CL"
-    else
-      sudo sed -i "s/\brootwait\b/numa=fake=$NUMA_FAKE rootwait/" "$CL"
-    fi
-    ok "numa=fake=$NUMA_FAKE set in cmdline.txt (reboot, then: dmesg | grep -i numa)"
+    ensure_cmdline_token "numa=fake=$NUMA_FAKE"
+    # NB: do NOT add preempt=none here — on this arm64 kernel (ARCH_HAS_PREEMPT_LAZY)
+    # 'none' is not a supported preempt mode; the kernel rejects it and dumps it to
+    # userspace. PREEMPT_LAZY (built-in default) is the throughput model on arm64.
+    # (On Pi 5, numa=fake + interleave also come from firmware /chosen/bootargs, so
+    # this token is usually redundant but harmless.)
+    ok "cmdline updated (reboot, then: dmesg | grep -i numa ; numactl --hardware)"
   else
     skip "kernel lacks CONFIG_NUMA_EMU — NOT enabling. See rpi5-numa-README.md to build a kernel with it."
   fi
