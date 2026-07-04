@@ -11,9 +11,13 @@
 # Tunables (override via env, e.g.  BROWSER=vivaldi bash rpi5-setup.sh):
 BROWSER="${BROWSER:-flatpak-chromium}"   # flatpak-chromium | vivaldi | brave | none
 REMOVE_FIREFOX="${REMOVE_FIREFOX:-yes}"  # yes | no
-ARM_FREQ="${ARM_FREQ:-2800}"             # 2800 safe / 3000 needs good silicon+cooling
-V3D_FREQ="${V3D_FREQ:-1200}"             # GPU: 960 stock / 1100 proven / 1200 conservative try
-OVER_VOLTAGE_DELTA="${OVER_VOLTAGE_DELTA:-0}"  # µV; set 25000/50000 if 3.0GHz unstable
+# CPU baseline: 2900 @ +50mV validated STABLE via 10-min stress-ng --verify torture
+# (2026-07-04, worst 76.8C, throttled 0x0). 3.0GHz is UNSTABLE on this specific chip
+# even at +50mV — and +50mV already pins VDD_CORE at the ~1.0V hardware cap (measured
+# 1.000V under load), so more over_voltage_delta buys nothing. 2.9GHz is this unit's wall.
+ARM_FREQ="${ARM_FREQ:-2900}"             # 2900 = validated stable ceiling for this chip
+V3D_FREQ="${V3D_FREQ:-1000}"             # 960 stock; 1000 current; 1200 ran earlier — re-test w/ glmark2 before raising
+OVER_VOLTAGE_DELTA="${OVER_VOLTAGE_DELTA:-50000}"  # µV; 50mV = at the ~1.0V core cap; higher adds no real voltage
 NUMA_FAKE="${NUMA_FAKE:-0}"               # 0=off; 4 or 8 = emulated NUMA nodes (needs CONFIG_NUMA_EMU kernel — see rpi5-numa-README.md)
 #===============================================================================
 set -euo pipefail
