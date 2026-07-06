@@ -205,6 +205,17 @@ if systemctl --user show-environment >/dev/null 2>&1; then
   gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing' 2>/dev/null || true
 fi
 
+# Keep AUTOMATIC DATE & TIME on. A perf box still needs a correct clock (TLS
+# handshakes, benchmark timestamps, log correlation), and none of the disables
+# above touch NTP — but pin it explicitly so a tuning run always ends with time
+# sync enabled. set-ntp true enables+starts whichever NTP daemon is installed
+# (chrony on this box, systemd-timesyncd on stock Ubuntu). Idempotent.
+if command -v timedatectl >/dev/null; then
+  sudo timedatectl set-ntp true 2>/dev/null \
+    && ok "automatic date/time ON (NTP=$(timedatectl show -p NTP --value 2>/dev/null))" \
+    || skip "could not enable NTP via timedatectl"
+else skip "timedatectl absent — leaving clock config untouched"; fi
+
 #-------------------------------------------------------------------------------
 log "5  apport OFF but keep core dumps (systemd-coredump)"
 sudo sed -i 's/^enabled=1/enabled=0/' /etc/default/apport 2>/dev/null || true
