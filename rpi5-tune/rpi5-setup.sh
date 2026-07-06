@@ -16,9 +16,17 @@ REMOVE_FIREFOX="${REMOVE_FIREFOX:-yes}"  # yes | no
 # even at +50mV — and +50mV already pins VDD_CORE at the ~1.0V hardware cap (measured
 # 1.000V under load), so more over_voltage_delta buys nothing. 2.9GHz is this unit's wall.
 ARM_FREQ="${ARM_FREQ:-2900}"             # 2900 = validated stable ceiling for this chip
-V3D_FREQ="${V3D_FREQ:-1000}"             # 960 stock; 1000 current; 1200 ran earlier — re-test w/ glmark2 before raising
+V3D_FREQ="${V3D_FREQ:-1200}"             # 960 stock; 1000 current; 1200 ran earlier — re-test w/ glmark2 before raising
 OVER_VOLTAGE_DELTA="${OVER_VOLTAGE_DELTA:-50000}"  # µV; 50mV = at the ~1.0V core cap; higher adds no real voltage
-NUMA_FAKE="${NUMA_FAKE:-0}"               # 0=off; 4 or 8 = emulated NUMA nodes (needs CONFIG_NUMA_EMU kernel — see rpi5-numa-README.md)
+# NUMA emulation is FIRMWARE-DRIVEN on Pi 5: with SDRAM_BANKLOW set, the bootloader banks the
+# SDRAM and auto-appends the OPTIMAL numa=fake=N (RPi rule: log2(N)=high-bank-bits → 8 on this
+# 16GB dual-rank board) whenever numa_policy is present. So the real levers are the EEPROM bank
+# split + the interleave policy, NOT a hardcoded node count. Validated ON here: 8 nodes,
+# interleave:0-7 (2026-07-04, kernel 7.0.6-numa). The oft-quoted "numa=fake=4 → +6%/+18%" was
+# early 8GB testing; 8 is correct for 16GB. Requires a CONFIG_NUMA_EMU kernel — see rpi5-numa-README.md.
+NUMA_FAKE="${NUMA_FAKE:-auto}"            # auto = let the bootloader pick optimal N; a number forces numa=fake=N; 0/off disables
+NUMA_POLICY="${NUMA_POLICY:-interleave}"  # round-robin allocations across nodes — the actual memory-bandwidth win
+SDRAM_BANKLOW="${SDRAM_BANKLOW:-1}"       # Pi5 EEPROM memory banking (Pi4=3). Enables NUMA auto-split + best mem perf. Empty = leave EEPROM as-is
 #===============================================================================
 set -euo pipefail
 log(){ printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -130,28 +138,72 @@ sudo sed -i '/^[^#].*\sswap\s/s/^/#/' /etc/fstab || true
 ok "swap devices active: $(swapon --show | grep -c /)"
 
 #-------------------------------------------------------------------------------
-log "4  Disable unneeded services + AUTOMATIC UPDATES (keeping bluetooth, NetworkManager)"
+log "4  Disable unneeded services + AUTOMATIC UPDATES (keeping WiFi/NetworkManager; Bluetooth OFF)"
 # attempt disable; `systemctl disable` returns non-zero only if the unit doesn't
 # exist (sysv units redirect & succeed) — pipefail-safe, no grep pipe.
+#
+# What we now kill here (background CPU/IO noise not covered before):
+#  - ua-timer (Ubuntu Pro/ESM poll), sysstat-collect/rotate/summary (sadc every
+#    10 min — NOT used by any script in this repo), dpkg-db-backup, anacron
+#    (fires cron.daily/weekly maintenance mid-benchmark), update-notifier-motd,
+#    apport-autoreport: all periodic wake-ups that can spike load during a run.
+#  - systemd-oomd: the *proactive*, pressure-based OOM killer. On this 16GB
+#    swap-off box it can kill a heavy-but-healthy benchmark under transient memory
+#    pressure. Disabling it leaves the in-kernel OOM killer as the real safety net,
+#    so a genuine runaway is still reaped — we just stop the daemon second-guessing
+#    a legitimately memory-hungry workload. Verified safe for browser perf work:
+#    oomd only exposes org.freedesktop.oom1 (a KILL API), it does NOT broadcast
+#    memory-pressure warnings to apps. WebKit/Chrome read pressure themselves from
+#    PSI (/proc/pressure/memory) / cgroup memory.pressure, which stay available.
+#  - bluetooth: not needed on this box (WiFi via NetworkManager is kept).
+#  - anacron runs cron.daily/weekly (apport, apt-compat, dpkg backup, man-db
+#    reindex, logrotate) — none load-bearing here (logrotate also has its own
+#    systemd timer). Crucially, SSD TRIM is NOT a cron job: it runs via
+#    fstrim.timer (step 7), so trim is UNAFFECTED by disabling anacron.
 disable_sys(){
   if sudo systemctl disable --now "$1" >/dev/null 2>&1; then ok "disabled $1"
   else skip "$1 absent"; fi; }
-for u in NetworkManager-wait-online.service ModemManager.service switcheroo-control.service \
+for u in bluetooth.service \
+         NetworkManager-wait-online.service ModemManager.service switcheroo-control.service \
          kerneloops.service cups.service cups-browsed.service cups.socket \
          gnome-remote-desktop.service avahi-daemon.service avahi-daemon.socket \
-         fwupd-refresh.timer apport.service power-profiles-daemon.service \
-         rsyslog.service colord.service \
+         fwupd-refresh.timer apport.service \
+         rsyslog.service \
          unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
-         man-db.timer motd-news.timer update-notifier-download.timer; do disable_sys "$u"; done
-# Automatic-update / background-refresh units that a plain `disable` can't stop
-# because they're static or purely timer-triggered — mask them so nothing can pull
-# them in and spike CPU/IO mid-benchmark. Manual updates still work any time:
+         man-db.timer motd-news.timer update-notifier-download.timer \
+         update-notifier-motd.timer apport-autoreport.timer \
+         ua-timer.timer dpkg-db-backup.timer anacron.timer anacron.service \
+         sysstat.service sysstat-collect.timer sysstat-rotate.timer sysstat-summary.timer \
+         systemd-oomd.service; do disable_sys "$u"; done
+# Units a plain `disable` can't stop because they're static or get dbus/bus-
+# reactivated on demand — mask them so nothing can pull them in and spike CPU/IO
+# mid-benchmark. Manual updates still work any time:
 #   sudo apt update && sudo apt full-upgrade
+#
+# power-profiles-daemon: `disable` leaves it enabled=disabled but it comes back
+#   active because GNOME's SettingsDaemon.Power dbus-activates it. It's redundant
+#   here (CPU governor is already pinned to `performance` above) and can fight the
+#   governor, so it must be MASKED, not just disabled.
+# colord: `static` (can't be disabled) colour-management daemon, dbus-activated by
+#   GNOME — useless on a headless/perf box.
 for m in apt-daily.service apt-daily-upgrade.service packagekit.service \
-         packagekit-offline-update.service motd-news.service; do
+         packagekit-offline-update.service motd-news.service \
+         power-profiles-daemon.service colord.service; do
   sudo systemctl mask "$m" >/dev/null 2>&1 && ok "masked $m" || skip "$m n/a"
 done
 sudo touch /etc/cloud/cloud-init.disabled 2>/dev/null && ok "cloud-init disabled" || skip "no cloud-init"
+
+# Never suspend/sleep/hibernate — a perf box must stay awake for long runs and be
+# reachable over SSH. Masking the sleep targets hard-blocks every path into them
+# (GNOME idle, logind lid/idle, `systemctl suspend`), which is stronger and more
+# robust than only flipping the GNOME gsettings timeout.
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 \
+  && ok "suspend/sleep/hibernate masked (box stays awake)" || skip "sleep targets n/a"
+# Belt-and-suspenders: also tell GNOME (if a user session exists) not to auto-sleep.
+if systemctl --user show-environment >/dev/null 2>&1; then
+  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' 2>/dev/null || true
+  gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type 'nothing' 2>/dev/null || true
+fi
 
 #-------------------------------------------------------------------------------
 log "5  apport OFF but keep core dumps (systemd-coredump)"
@@ -161,7 +213,7 @@ if ! dpkg -l systemd-coredump 2>/dev/null | grep -q '^ii'; then
 ok "core_pattern: $(cat /proc/sys/kernel/core_pattern)"
 
 #-------------------------------------------------------------------------------
-log "6  Disable GNOME bloat (tracker indexer + Evolution calendar/contacts)"
+log "6  Disable GNOME bloat (tracker indexer + Evolution + gvfs/SettingsDaemon helpers)"
 if systemctl --user show-environment >/dev/null 2>&1; then
   # Version-robust: GNOME <=45 = tracker-*, GNOME 46+/50 (Ubuntu 26.04) renamed
   # the indexer to localsearch-* / tinysparql-*. Discover & mask whatever exists,
@@ -180,6 +232,21 @@ if systemctl --user show-environment >/dev/null 2>&1; then
   done
   (localsearch3 reset -s -r || tracker3 reset --filesystem || tracker reset --hard) >/dev/null 2>&1 || true
   ok "file indexer + Evolution masked"
+
+  # gvfs volume monitors + SettingsDaemon helpers for hardware this box won't use.
+  # These are dbus-activated user services that idle-poll for hotplug (phones,
+  # cameras, MTP, online accounts) or manage absent hardware (smartcard, cellular,
+  # printers, Wacom) — background wake-ups + RAM with zero benefit here. Masking
+  # them does NOT affect browser/WebKit perf testing or WiFi. NVMe/USB storage still
+  # mounts (udisks2 kept); this only drops the phone/camera/MTP *monitors*.
+  for u in gvfs-afc-volume-monitor.service gvfs-gphoto2-volume-monitor.service \
+           gvfs-mtp-volume-monitor.service gvfs-goa-volume-monitor.service \
+           org.gnome.SettingsDaemon.Smartcard.service org.gnome.SettingsDaemon.Wwan.service \
+           org.gnome.SettingsDaemon.PrintNotifications.service org.gnome.SettingsDaemon.Wacom.service; do
+    systemctl --user stop "$u" 2>/dev/null || true
+    systemctl --user mask "$u" 2>/dev/null || true
+  done
+  ok "gvfs volume monitors + unused SettingsDaemon helpers masked"
 else skip "no user session bus — run this from inside the GNOME session"; fi
 
 #-------------------------------------------------------------------------------
@@ -237,11 +304,11 @@ case "$BROWSER" in
 esac
 
 #-------------------------------------------------------------------------------
-log "10  NUMA emulation (numa=fake) — only if the kernel supports it"
+log "10  NUMA emulation (Pi 5: EEPROM SDRAM banking + interleave; firmware picks optimal N)"
 CL=/boot/firmware/cmdline.txt; [ -f "$CL" ] || CL=/boot/cmdline.txt
 KCONF=/boot/config-$(uname -r)
-# Idempotently ensure a single-token kernel arg is on the (single-line) cmdline.
-ensure_cmdline_token(){ # $1 = token e.g. preempt=none  (key = part before '=')
+# Idempotently ensure a single-token kernel arg is on the (single-line) cmdline.txt.
+ensure_cmdline_token(){ # $1 = token e.g. numa_policy=interleave  (key = part before '=')
   local tok="$1" key="${1%%=*}"
   grep -qw -- "$tok" "$CL" && return 0
   if grep -qE "(^|[[:space:]])$key=" "$CL"; then
@@ -251,20 +318,63 @@ ensure_cmdline_token(){ # $1 = token e.g. preempt=none  (key = part before '=')
   fi
   ok "cmdline: $tok"
 }
-if [ "$NUMA_FAKE" != 0 ] && [ -f "$CL" ]; then
-  if grep -q '^CONFIG_NUMA_EMU=y' "$KCONF" 2>/dev/null; then
-    sudo cp -a "$CL" "$CL.bak-$(date +%Y%m%d-%H%M%S)"
-    ensure_cmdline_token "numa=fake=$NUMA_FAKE"
-    # NB: do NOT add preempt=none here — on this arm64 kernel (ARCH_HAS_PREEMPT_LAZY)
-    # 'none' is not a supported preempt mode; the kernel rejects it and dumps it to
-    # userspace. PREEMPT_LAZY (built-in default) is the throughput model on arm64.
-    # (On Pi 5, numa=fake + interleave also come from firmware /chosen/bootargs, so
-    # this token is usually redundant but harmless.)
-    ok "cmdline updated (reboot, then: dmesg | grep -i numa ; numactl --hardware)"
+numa_nodes(){ numactl --hardware 2>/dev/null | grep -c '^node[[:space:]][0-9]* cpus' || true; }
+
+if [ "$NUMA_FAKE" = 0 ] || [ "$NUMA_FAKE" = off ]; then
+  skip "NUMA disabled (NUMA_FAKE=$NUMA_FAKE)"
+elif ! grep -q '^CONFIG_NUMA_EMU=y' "$KCONF" 2>/dev/null; then
+  skip "kernel $(uname -r) lacks CONFIG_NUMA_EMU — NOT enabling. Build a -numa kernel first (rpi5-numa-kernel.sh / rpi5-numa-README.md)."
+else
+  ok "kernel supports NUMA emulation (CONFIG_NUMA_EMU=y, $(uname -r))"
+
+  # (a) EEPROM SDRAM banking — the ROOT lever. On Pi 5 the bootloader only splits the SDRAM into
+  #     banks AND auto-appends the optimal numa=fake=N when SDRAM_BANKLOW is set (1 = best perf on
+  #     BCM2712; regresses only NON-numa kernels' SW H264 decode, which doesn't apply here). Pin it
+  #     explicitly so a future bootloader default change can't silently undo NUMA. Idempotent:
+  #     once written, the value matches and we skip. --apply schedules the reflash for next reboot.
+  if [ -n "$SDRAM_BANKLOW" ] && command -v rpi-eeprom-config >/dev/null; then
+    cur_bl="$(sudo rpi-eeprom-config 2>/dev/null | sed -n 's/^SDRAM_BANKLOW=//p' || true)"
+    if [ "$cur_bl" = "$SDRAM_BANKLOW" ]; then
+      ok "EEPROM SDRAM_BANKLOW=$SDRAM_BANKLOW already pinned"
+    else
+      conf="$(mktemp)"; sudo rpi-eeprom-config > "$conf" 2>/dev/null || true
+      if grep -q '^SDRAM_BANKLOW=' "$conf"; then
+        sed -i "s/^SDRAM_BANKLOW=.*/SDRAM_BANKLOW=$SDRAM_BANKLOW/" "$conf"
+      else
+        printf 'SDRAM_BANKLOW=%s\n' "$SDRAM_BANKLOW" >> "$conf"
+      fi
+      if sudo rpi-eeprom-config --apply "$conf" >/dev/null 2>&1; then
+        ok "EEPROM SDRAM_BANKLOW=$SDRAM_BANKLOW scheduled (was '${cur_bl:-bootloader-default}'; applies on reboot)"
+      else
+        skip "could not write EEPROM (bootloader default is banklow=1 on 2712 — NUMA still works)"
+      fi
+      rm -f "$conf"
+    fi
   else
-    skip "kernel lacks CONFIG_NUMA_EMU — NOT enabling. See rpi5-numa-README.md to build a kernel with it."
+    skip "SDRAM_BANKLOW empty or rpi-eeprom-config absent — relying on bootloader default (banklow=1 on 2712)"
   fi
-else skip "NUMA_FAKE=0 (off). Ubuntu stock raspi kernels (incl. 26.04's 7.0) ship CONFIG_NUMA_EMU OFF — see rpi5-numa-README.md"; fi
+
+  # (b) Boot args. If a cmdline.txt exists, pin numa_policy (this is what triggers the bootloader's
+  #     optimal-N auto-add) and, only when a specific count was requested, an explicit numa=fake=N.
+  #     On THIS box there is no cmdline.txt — the Pi firmware assembles /chosen/bootargs itself and
+  #     already injects numa_policy=interleave + numa=fake=8, so there is nothing to edit; we verify (c).
+  if [ -f "$CL" ]; then
+    sudo cp -a "$CL" "$CL.bak-$(date +%Y%m%d-%H%M%S)"
+    ensure_cmdline_token "numa_policy=$NUMA_POLICY"
+    if [ "$NUMA_FAKE" != auto ]; then ensure_cmdline_token "numa=fake=$NUMA_FAKE"; fi
+  else
+    skip "no cmdline.txt — boot args come from Pi firmware (/proc/device-tree/chosen/bootargs)"
+  fi
+
+  # (c) Report the EFFECTIVE state on the running kernel (levers above are firmware/EEPROM, take
+  #     effect on reboot). This is the authoritative on/off; rpi5-verify.sh checks the same.
+  n="$(numa_nodes)"
+  if grep -q 'numa_policy=' /proc/cmdline || grep -q 'numa=fake' /proc/cmdline; then
+    ok "active now: ${n:-?} NUMA node(s) — boot args: $(grep -oE 'numa[_a-z]*=[^ ]+' /proc/cmdline | tr '\n' ' ')"
+  else
+    skip "NUMA not yet in effect on the running kernel — reboot, then: sudo bash rpi5-verify.sh"
+  fi
+fi
 
 log "11  Notes (informational)"
 skip "EEPROM: keep current (benefits NVMe boot); update via: sudo rpi-eeprom-update -a"

@@ -70,15 +70,33 @@ sudo dpkg -i ../linux-image-*-numa_*.deb ../linux-headers-*-numa_*.deb
 ```
 </details>
 
+## Best configuration (researched 2026-07-04) — let the firmware pick, don't hardcode 4
+NUMA on the Pi 5 is **firmware-driven**, and the running box is already at the optimum:
+```
+8 NUMA nodes, mempolicy 'interleave:0-7', SDRAM_BANKLOW=1 (bootloader default on 2712)
+```
+- **Node count:** the RPi bootloader auto-selects the optimal `numa=fake=N` — the rule is
+  `log2(N) = number of high SDRAM bank bits`. On this **16GB dual-rank** BCM2712 with
+  `SDRAM_BANKLOW=1` that is **8**, and it chose 8. The widely-quoted "`numa=fake=4` → +6%/+18%
+  Geekbench" figure was **early 8GB testing** — 4 would *under-split* a 16GB board and leave
+  memory bandwidth unused. Do **not** hardcode a count; `NUMA_FAKE=auto` lets the firmware decide.
+- **The two real levers** are (1) `SDRAM_BANKLOW=1` in the EEPROM (banks the DRAM + lets the
+  bootloader auto-add `numa=fake=N`; regresses only *non-NUMA* kernels' SW-H264 decode, N/A here),
+  and (2) `numa_policy=interleave` on the cmdline (round-robin allocs across banks — the actual
+  bandwidth win). `rpi5-setup.sh` pins both; on a box with no `cmdline.txt` the firmware already
+  injects `numa_policy=interleave` + `numa=fake=8` into `/proc/device-tree/chosen/bootargs`.
+
 ## After a NUMA_EMU kernel is running
 ```bash
-NUMA_FAKE=4 bash ~/rpi5-tune/rpi5-setup.sh    # adds numa=fake=4 (+ preempt=none) to cmdline.txt (guarded)
-sudo reboot
-# verify:
-dmesg | grep -i numa                     # expect: interleave policy overridden to 'interleave:0-3'
-numactl --hardware                        # expect 4 nodes
-cat /sys/kernel/debug/sched/preempt       # expect (none) selected — max-perf preemption
-# benchmark:
+bash ~/rpi5-tune/rpi5-setup.sh            # NUMA_FAKE=auto default: pins SDRAM_BANKLOW=1, verifies interleave
+sudo reboot                               # only needed if it scheduled an EEPROM/cmdline change
+sudo bash ~/rpi5-tune/rpi5-verify.sh      # RESULT: NUMA ON — 8 nodes, interleave policy active ✅
+# manual spot-checks:
+numactl --hardware                        # expect 8 nodes
+dmesg | grep -i numa                      # expect: default policy overridden to 'interleave:0-7'
+# benchmark a workload pinned to interleaved memory:
 numactl --interleave=all <your workload>
 ```
-Start with `numa=fake=4`; `8` sometimes scores higher — benchmark both.
+To force a specific split for A/B benchmarking: `NUMA_FAKE=4 bash rpi5-setup.sh` (needs a
+`cmdline.txt`; on firmware-bootargs boxes, set it in the EEPROM cmdline instead). `auto`/8 is the
+validated optimum here — only override to measure.

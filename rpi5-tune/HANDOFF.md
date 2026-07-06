@@ -21,16 +21,21 @@ Adjust via env vars if needed: `ARM_FREQ`, `V3D_FREQ`, `OVER_VOLTAGE_DELTA`, `BR
 - GNOME 50 indexer is `localsearch`/`tinysparql` (script already handles this dynamically).
 - swapfile unit name / whether swap exists by default.
 
-## Step 2 — START THE NUMA PROCESS (the main ask)
-Goal: enable NUMA emulation for the ~6–18%+ gain. **Full procedure in `rpi5-numa-README.md`.**
-Quick status check first:
-```bash
-grep CONFIG_NUMA_EMU /boot/config-$(uname -r)   # stock 26.04 = "not set"
-```
-- If it's **not set** (expected): do **Path A** (Launchpad request to enable `CONFIG_NUMA_EMU`
-  in linux-raspi — Igalia authored the feature) and/or **Path B** (config-only kernel rebuild;
-  safe thanks to 26.04 A/B boot). See README.
-- Once a `CONFIG_NUMA_EMU=y` kernel is running: `NUMA_FAKE=4 bash ~/rpi5-tune/rpi5-setup.sh` → reboot → verify with `dmesg | grep -i numa` and `numactl --hardware`.
+## Step 2 — NUMA: DONE ✅ (Path B completed 2026-07-04)
+The custom **`7.0.6-numa`** kernel (`CONFIG_NUMA_EMU=y`, built via `rpi5-numa-kernel.sh`) is
+installed and running. NUMA is **ON and optimal**: **8 nodes**, `mempolicy interleave:0-7`,
+`SDRAM_BANKLOW=1` (bootloader default). Confirm any time with `sudo bash rpi5-verify.sh`
+(RESULT line) or `numactl --hardware`.
+
+Key facts for the next agent (see `rpi5-numa-README.md` → "Best configuration"):
+- NUMA is **firmware-driven** here. There is **no `cmdline.txt`** — boot args come from
+  `/proc/device-tree/chosen/bootargs`, into which the firmware injects `numa_policy=interleave`
+  + `numa=fake=8`. `rpi5-setup.sh` Section 10 now pins `SDRAM_BANKLOW=1` in the EEPROM and, on
+  boxes that *do* have a `cmdline.txt`, `numa_policy=interleave`. `NUMA_FAKE=auto` (default) lets
+  the firmware pick the optimal node count — **do not hardcode 4** (that was 8GB-era guidance;
+  8 is correct for this 16GB board).
+- Still open (optional): **Path A** — Launchpad request to enable `CONFIG_NUMA_EMU` in stock
+  linux-raspi so the custom kernel isn't needed long-term (Igalia authored the feature).
 
 ## Known-good tuning summary (validated on the prior 24.04 install)
 2.8GHz CPU (3.0 was UNSTABLE — SIGILL), v3d=1200 GPU, PCIe Gen3, perf governor, swap OFF,
