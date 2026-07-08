@@ -40,14 +40,15 @@ patched is faster, `b/a < 1` is a regression.
 
 | | Browser | Headless (jsc shell) |
 | --- | --- | --- |
-| Platform | **macOS** with an awake display | any platform; **the only option on Linux**, and **required on 32-bit ARM** |
-| Runner | `Tools/Scripts/run-benchmark` + MiniBrowser | `PerformanceTests/JetStream3/cli.js` in `jsc` |
+| Platform | **macOS** with an awake display, or **Linux/WPE with a Wayland display** (works in a wkdev container) | any platform; needs no display |
+| Runner | `Tools/Scripts/run-benchmark` + MiniBrowser (macOS) or Cog (WPE) | `PerformanceTests/JetStream3/cli.js` in `jsc` |
 | Build needed | full `make release` (both sides) | a `jsc` build is enough |
 | Fidelity | official; matches how regressions are validated | same driver, same output JSON, slightly different engine config |
-| Follow | [Browser rounds (macOS)](#browser-rounds-macos) | [Headless rounds (any platform)](#headless-rounds-any-platform) |
+| Follow | [Browser rounds (macOS)](#browser-rounds-macos) or [Browser rounds (Linux/WPE)](#browser-rounds-linuxwpe-cog-in-a-wkdev-container) | [Headless rounds (any platform)](#headless-rounds-any-platform) |
 
-Default to **browser on macOS-with-display, headless everywhere else**. Prefer headless to iterate
-fast or to root-cause — the `jsc-profile` and `jsc-microbenchmark` skills both build on the headless
+**Default to browser mode with the official harness (`run-benchmark`) whenever a display is
+available — on Linux/WPE too.** Use headless only when there is no display at all, or to iterate
+fast / root-cause — the `jsc-profile` and `jsc-microbenchmark` skills both build on the headless
 jsc run.
 
 Everything except the "run the rounds" step is **identical across modes**: scoping, choosing
@@ -190,10 +191,47 @@ fails in seconds).
 
 ---
 
+## Browser rounds (Linux/WPE: Cog, in a wkdev container)
+
+`run-benchmark` browser rounds work on Linux WPE builds — including 32-bit ARM builds inside a wkdev
+container — with `--browser cog`. This is the official harness; prefer it over headless when the
+container has a Wayland display (`ls /run/user/$(id -u)/wayland-*`). Speedometer3 and MotionMark run
+this way too (they have no headless mode at all).
+
+- **Launch Cog, never WPE MiniBrowser, when there is no GPU.** With no `/dev/dri` in the container the
+  WebProcess software-renders into SHM buffers; MiniBrowser's `WindowViewBackend` logs
+  `cannot yet handle wpe_fdo_shm_exported_buffer`, presents nothing, and **rAF never fires** — pages
+  load (network activity, `fetch` works) but every rAF-driven benchmark stalls forever at ~0% CPU.
+  Cog's `--platform=wl` presents SHM buffers fine. (`run-minibrowser --wpe` may default Cog to
+  `--platform=gtk4`, which can segfault in a container — force `wl`.) Verify rAF first with a tick
+  page: `requestAnimationFrame` loop that `fetch()`es every 60 frames; watch the server log.
+- **Pin each side with a PATH wrapper.** The Linux drivers search cwd then `$PATH` for
+  `Tools/Scripts/run-minibrowser`, then `cog`. Run `run-benchmark` from a **neutral cwd** (not a WebKit
+  checkout) and prepend a dir containing an executable `cog` wrapper per side:
+  `exec env LD_LIBRARY_PATH=$COGB/core:$BUILD/lib:<deps>/lib COG_MODULEDIR=$COGB/platform \
+   WEBKIT_EXEC_PATH=$BUILD/bin WEBKIT_INJECTED_BUNDLE_PATH=$BUILD/lib \
+   $COGB/launcher/cog --platform=wl "$@"` where `COGB=$BUILD/Tools/cog-prefix/src/cog-build` (each
+  build has its own Cog; they are not interchangeable across WPE API versions) and `<deps>` is where
+  libWPEBackend-fdo etc. live (wkdev: `/jhbuild/install`). Without `WEBKIT_EXEC_PATH` Cog dies
+  spawning `/usr/local/libexec/wpe-webkit-*/WPENetworkProcess`.
+- **Export `XDG_RUNTIME_DIR=/run/user/$(id -u)` and `WAYLAND_DISPLAY=wayland-0`** before
+  `run-benchmark`; batch container shells have neither set.
+- **Old branches' python tooling may not run on the container's python** (e.g. a 2.38-era
+  `run-minibrowser`/autoinstaller dies on python 3.12). Drive everything from the newer tree's
+  `Tools/Scripts/run-benchmark` and pin builds via the wrappers; never mix per-tree runners.
+- **Plans:** old branches may lack `jetstream3.plan` — the one from `main` works verbatim (drop it into
+  `Tools/Scripts/webkitpy/benchmark_runner/data/plans/`). Pre-clone each plan's repo at its pinned
+  rev and pass `--local-copy` so rounds don't re-download.
+- The comparison includes the whole WPE stack (compositor, launcher version), not just JSC — expect
+  rAF-bound suites (MotionMark) to reflect that; note it when reporting.
+
+---
+
 ## Headless rounds (any platform)
 
-Run the benchmark directly in the `jsc` shell — no display, faster to iterate, and the only option on
-Linux (and required on 32-bit). `cli.js` runs the real `JetStreamDriver`.
+Run the benchmark directly in the `jsc` shell — no display, faster to iterate. Use it only when no
+display is available or for root-causing loops; with a display, prefer the official `run-benchmark`
+browser mode (see the macOS and Linux/WPE sections above). `cli.js` runs the real `JetStreamDriver`.
 
 ### Launch jsc correctly
 
@@ -280,6 +318,30 @@ Interactive `wkdev-enter --name <ctr>`; batch `wkdev-enter --name <ctr> --exec -
 Paths are in-container; the host sees them under the mapped prefix (container `/home/<u>/Development`
 = host `/home/<u>/Development/32/Development`). Write results under the mapped prefix so you can read
 logs from the host while the loop runs inside.
+
+### Browser runs on Linux: find the Wayland display (wkdev container)
+
+A browser round on Linux (MiniBrowser GTK, Chrome) needs a live display, and inside a wkdev
+container `WAYLAND_DISPLAY`/`DISPLAY`/`XDG_RUNTIME_DIR` are usually **unset** even though the
+sockets are mounted. Discover and export them:
+
+```bash
+ls /run/user/$(id -u)/            # look for wayland-* sockets; in wkdev they are symlinks
+                                  # to the host compositor, e.g. wayland-0 -> /host/run/wayland-0
+ls /tmp/.X11-unix/                # X fallback: Xn means DISPLAY=:n (Xwayland)
+export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0
+```
+
+- Both vars are required — GTK/Chromium resolve the socket as `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`.
+- `wayland-info` is typically not installed; verify by launching the actual browser under
+  `timeout 10` with a URL: exit 124 (still alive when the timeout fires, no display error on
+  stderr) means the connection works. An immediate exit means it didn't.
+- Chromium needs `--ozone-platform=wayland` or it tries X11.
+- `run-benchmark`'s Linux drivers pass the invoking environment through to the browser (only
+  `HOME` is swapped for a temp profile), so exporting the two vars before `run-benchmark` is
+  sufficient. The drivers find the binary by searching **cwd then `$PATH`** for a fixed name list
+  (`chrome`/`chromium`/..., `MiniBrowser`, or `Tools/Scripts/run-minibrowser` relative to cwd) —
+  to pin a specific build, prepend a wrapper dir to `PATH` and run from outside the WebKit tree.
 
 ---
 
