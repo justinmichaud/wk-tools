@@ -170,9 +170,38 @@ if [ ! -f .config ] || [ "${RECONFIG:-}" = 1 ]; then
     ok "max-perf knobs applied (HZ=100, gov=performance, -O2, sched_ext+BTF kept, lazy preempt)"
   fi
 
+  # Removable storage + USB — PIN EXPLICITLY. localmodconfig (LEAN=yes) disables
+  # any module not loaded AT BUILD TIME, so anything not plugged in when you build
+  # gets silently dropped. On this box that killed USB_STORAGE/USB_UAS (no USB disk
+  # attached) and MMC_BLOCK (empty microSD slot) — leaving the numa kernel unable
+  # to see USB drives OR create /dev/mmcblk* for the SD reader. Core USB (USB,
+  # USB_XHCI_HCD, USB_DWC2, USB_HID) usually survives via the keyboard/mouse being
+  # present, but pin it too so a headless build can't strip it.
+  #   USB core stays =y (built-in, matches stock); leaf drivers are =m (modular),
+  #   which is fine since root is on NVMe so none are needed at early boot.
+  #   olddefconfig (below) resolves deps — SCSI/BLK_DEV_SD/MMC/SDHCI are already =y.
+  scripts/config \
+    --enable USB_SUPPORT --enable USB --enable USB_XHCI_HCD --enable USB_DWC2 \
+    --module USB_HID --module HID_GENERIC \
+    --module USB_STORAGE --module USB_UAS \
+    --module MMC_BLOCK --module MMC_SDHCI_BRCMSTB --module MMC_SDHCI_OF_DWCMSHC \
+    --module EXFAT_FS --module NTFS3_FS --module NLS_ISO8859_1
+  ok "storage/USB pinned (USB_STORAGE, USB_UAS, MMC_BLOCK, exFAT/NTFS) — survives LEAN"
+
   # Localversion so the kernel is clearly ours and won't clash with the stock
   # 7.0.0-10xx-raspi package (A/B boot keeps the stock one as fallback).
-  scripts/config --set-str LOCALVERSION "-numa" --disable LOCALVERSION_AUTO
+  # CRITICAL: the name MUST be <version>-<ABInum>-<flavour>, i.e. include a
+  # NUMERIC ABI field ("-1-numa", not "-numa"). Ubuntu boots via flash-kernel's
+  # pi-try method, whose latest-kernel selection is:
+  #   linux-version list | include_only_flavors raspi raspi-realtime numa | linux-version sort | tail -1
+  # include_only_flavors only recognises the Debian/Ubuntu VERSION-ABINUM-FLAVOUR
+  # form. A bare "-numa" (no numeric ABI) is silently dropped by that filter, so
+  # flash-kernel decides the stock kernel is "latest", prints "Ignoring old or
+  # unknown version <kver>", exit 0 — and NEVER stages our kernel into
+  # /boot/firmware/new/. Result: reboots keep landing on stock and numa=fake is
+  # ignored. The "-1-" makes the name parseable and (7.0.x release > stock's
+  # 7.0.0) rank newest, so flash-kernel stages + tryboots it.
+  scripts/config --set-str LOCALVERSION "-1-numa" --disable LOCALVERSION_AUTO
   # Out-of-tree module signing / debian cert paths break a bare `make`.
   scripts/config --disable SYSTEM_TRUSTED_KEYS   --disable SYSTEM_REVOCATION_KEYS 2>/dev/null || true
   scripts/config --set-str SYSTEM_TRUSTED_KEYS "" --set-str SYSTEM_REVOCATION_KEYS "" 2>/dev/null || true
@@ -191,6 +220,25 @@ if ! grep -q '^CONFIG_NUMA_EMU=y' .config; then
 fi
 grep -E '^CONFIG_NUMA(_EMU|_MEMBLKS)?=y' .config | sed 's/^/   /'
 ok "CONFIG_NUMA_EMU=y confirmed"
+
+# Removable storage / USB must survive localmodconfig — a kernel that can't see
+# USB drives or the SD reader is a bad build. Assert the essentials are set (as
+# =y or =m) before the long compile. olddefconfig can silently drop any whose
+# dependency it couldn't satisfy, so check the *resolved* .config, not our intent.
+MISSING=""
+for sym in USB USB_XHCI_HCD USB_STORAGE USB_UAS MMC_BLOCK MMC_SDHCI_BRCMSTB; do
+  grep -qE "^CONFIG_$sym=[ym]$" .config || MISSING="$MISSING $sym"
+done
+if [ -n "$MISSING" ]; then
+  echo "   storage/USB state in resolved .config:"
+  grep -E '^(CONFIG_USB=|CONFIG_USB_STORAGE|CONFIG_USB_UAS|CONFIG_MMC_BLOCK|CONFIG_MMC_SDHCI_BRCMSTB)' .config | sed 's/^/     /'
+  die "these storage/USB symbols did not stick:$MISSING
+     A build without them can't mount USB drives or the SD card reader. They are
+     pinned in step 4; if one won't set, its dependency (SCSI/MMC/SDHCI) may have
+     been trimmed by localmodconfig — enable that dep too, or build with LEAN=no."
+fi
+grep -E '^CONFIG_(USB=|USB_STORAGE|USB_UAS|MMC_BLOCK|MMC_SDHCI_BRCMSTB|EXFAT_FS|NTFS3_FS)' .config | sed 's/^/   /'
+ok "USB mass storage + SD card reader (MMC_BLOCK) + exFAT/NTFS confirmed"
 if [ "$MAXPERF" = yes ]; then
   echo "   max-perf knobs (as resolved by olddefconfig):"
   grep -E '^CONFIG_(PREEMPT_LAZY|PREEMPT_DYNAMIC|HZ|NO_HZ_IDLE|CPU_FREQ_DEFAULT_GOV_PERFORMANCE|CC_OPTIMIZE_FOR_PERFORMANCE|SCHED_CLASS_EXT|DEBUG_INFO_BTF)=' .config | sed 's/^/     /'
@@ -238,17 +286,119 @@ esac
 if [ "$DO_INSTALL" = yes ]; then
   sudo dpkg -i "$IMG_DEB" ${HDR_DEB:+"$HDR_DEB"} || die "dpkg -i failed"
   ok "installed: $(basename "$IMG_DEB")"
+
+  # Derive the kernel version (uname -r style) from the deb name:
+  #   linux-image-7.0.6-numa_7.0.6-1_arm64.deb -> 7.0.6-numa
+  KVER="$(basename "$IMG_DEB")"; KVER="${KVER#linux-image-}"; KVER="${KVER%%_*}"
+  [ -f "/boot/vmlinuz-$KVER" ] || die "dpkg installed but /boot/vmlinuz-$KVER is missing"
+
+  # Pi 5 firmware GATEKEEPER: os_check. By default (os_check=1) the Pi 5 bootloader
+  # refuses to boot a kernel it can't confirm is Pi5-compatible ("...OS does not
+  # support..."). Ubuntu's official raspi images carry a trailer that satisfies it;
+  # a locally-built bindeb-pkg kernel does NOT. So under the pi-try scheme the
+  # firmware rejects our kernel during the one-shot tryboot, piboot marks new/ as
+  # 'bad', and it falls back to stock — the kernel never boots. Disable os_check so
+  # the firmware will load our kernel. (Idempotent; inserted globally, before the
+  # first section, so it applies to both the normal and [tryboot] paths.)
+  CFG=/boot/firmware/config.txt
+  if [ -f "$CFG" ]; then
+    if grep -qE '^\s*os_check\s*=\s*0' "$CFG"; then
+      skip "os_check=0 already set in $CFG"
+    elif grep -qE '^\s*os_check\s*=' "$CFG"; then
+      sudo sed -i -E 's/^\s*os_check\s*=.*/os_check=0/' "$CFG"
+      ok "set os_check=0 in $CFG (was non-zero — Pi5 firmware would reject the custom kernel)"
+    else
+      sudo sed -i '1i os_check=0' "$CFG"
+      ok "added os_check=0 to $CFG (Pi5 firmware would otherwise reject the custom kernel)"
+    fi
+  else
+    skip "no $CFG found — if boot fails with an 'OS does not support' error, set os_check=0 there"
+  fi
+
+  # THE STEP THAT ACTUALLY MAKES IT BOOT. On RPi Ubuntu the firmware boots the
+  # image under /boot/firmware/ (os_prefix, e.g. current/vmlinuz) — NOT
+  # /boot/vmlinuz-*. dpkg's zz-flash-kernel hook is supposed to promote it there,
+  # but it is unreliable for a bindeb-pkg kernel and can be clobbered by a later
+  # flash-kernel run against the stock kernel. So promote it EXPLICITLY, by
+  # version, rather than trusting the hook.
+  if command -v flash-kernel >/dev/null; then
+    log "7b Promote $KVER into /boot/firmware (flash-kernel)"
+    # flash-kernel's pi-try method only STAGES the kernel it considers "latest"
+    # among the accepted flavours; a version it can't rank it dismisses with
+    # "Ignoring old or unknown version ... (latest is ...)" AND STILL EXITS 0.
+    # So capture the output and treat that message as a hard failure — otherwise
+    # the numa kernel is never staged and the reboot lands back on stock.
+    FK_OUT="$(sudo flash-kernel "$KVER" 2>&1)"; printf '%s\n' "$FK_OUT" | sed 's/^/   /'
+    if printf '%s' "$FK_OUT" | grep -q 'Ignoring old or unknown version'; then
+      die "flash-kernel refused to stage $KVER (see 'Ignoring old or unknown version' above).
+     Its flavour filter (include_only_flavors) needs a numeric ABI in the name
+     — build with LOCALVERSION='-1-numa' (not '-numa'). Check:
+        linux-version list | . /usr/share/flash-kernel/functions; include_only_flavors raspi raspi-realtime numa"
+    fi
+  else
+    skip "flash-kernel not installed — cannot promote to /boot/firmware automatically"
+  fi
+
+  # DEVICE TREE FIX (pi-try + bindeb-pkg). flash-kernel's pi-try method copies the
+  # board DTB + overlays into new/ by searching /usr/lib/firmware/$KVER/device-tree/
+  # — where Ubuntu's PACKAGED kernels put them. A bindeb-pkg kernel instead ships
+  # them at /usr/lib/linux-image-$KVER/{broadcom/*.dtb,overlays/*.dtbo}, so the
+  # search finds nothing (watch for "find: ... device-tree: No such file" in 7b) and
+  # new/ ends up with NO DTB and an EMPTY overlays/. The Pi5 firmware cannot boot
+  # without bcm2712-rpi-5-b.dtb from the os_prefix dir → the tryboot is marked 'bad'
+  # and falls back to stock, WITHOUT the kernel ever executing (nothing in the
+  # journal). So copy the kernel's own device trees into new/ ourselves.
+  NEWDIR=/boot/firmware/new
+  if [ -d "$NEWDIR" ]; then
+    log "7b+ Stage device tree(s) + overlays into $NEWDIR (flash-kernel's pi-try misses them)"
+    DTB_SRC="/usr/lib/linux-image-$KVER/broadcom"; [ -d "$DTB_SRC" ] || DTB_SRC="/boot/dtbs/$KVER"
+    OVL_SRC="/usr/lib/linux-image-$KVER/overlays"
+    if ls "$DTB_SRC"/*.dtb >/dev/null 2>&1; then
+      sudo cp "$DTB_SRC"/*.dtb "$NEWDIR"/ && ok "copied $(ls "$DTB_SRC"/*.dtb | wc -l) board DTB(s) from $DTB_SRC"
+    else
+      die "no board DTB found for $KVER (looked in $DTB_SRC) — cannot make new/ bootable"
+    fi
+    if [ -d "$OVL_SRC" ]; then
+      sudo mkdir -p "$NEWDIR"/overlays
+      sudo cp "$OVL_SRC"/*.dtbo "$NEWDIR"/overlays/ 2>/dev/null
+      # bring the overlay_map/README too if present (config.txt overlay resolution)
+      sudo cp "$OVL_SRC"/overlay_map.dtb "$OVL_SRC"/README "$NEWDIR"/overlays/ 2>/dev/null || true
+      ok "copied $(ls "$NEWDIR"/overlays/*.dtbo 2>/dev/null | wc -l) overlays into new/overlays"
+    fi
+    # The board DTB MUST now be present in new/ or the firmware won't boot it.
+    DTB_ID="bcm2712-rpi-5-b.dtb"
+    sudo test -e "$NEWDIR/$DTB_ID" || die "$NEWDIR/$DTB_ID still missing after copy — tryboot would fail at the firmware"
+    ok "$NEWDIR/$DTB_ID present — firmware has a device tree to boot"
+  fi
+
+  # HARD-VERIFY the numa image actually reached the firmware boot dir. Compare by
+  # content: find any vmlinuz under /boot/firmware whose md5 matches our image.
+  # Without this a silent promotion failure sails straight through to DONE and you
+  # reboot back into the stock kernel (numa=fake is then silently ignored).
+  log "7c Verify the firmware boot image IS the numa kernel"
+  NUMA_MD5="$(md5sum "/boot/vmlinuz-$KVER" | awk '{print $1}')"
+  FW_MATCH="$(find /boot/firmware -maxdepth 2 -type f -name 'vmlinuz*' 2>/dev/null | while read -r f; do
+    [ "$(md5sum "$f" 2>/dev/null | awk '{print $1}')" = "$NUMA_MD5" ] && echo "$f"
+  done)"
+  if [ -n "$FW_MATCH" ]; then
+    printf '%s\n' "$FW_MATCH" | sed 's/^/   /'
+    ok "firmware boot image matches vmlinuz-$KVER — reboot will land on the numa kernel"
+  else
+    echo "   /boot/firmware vmlinuz images and their md5s:"
+    find /boot/firmware -maxdepth 2 -type f -name 'vmlinuz*' -exec md5sum {} \; 2>/dev/null | sed 's/^/     /'
+    echo "   expected (vmlinuz-$KVER): $NUMA_MD5"
+    die "no /boot/firmware vmlinuz matches the numa kernel — promotion did NOT take.
+     A reboot now would boot the STOCK kernel and silently ignore numa=fake.
+     Try: sudo flash-kernel $KVER   (then re-run this script; build is cached).
+     26.04 A/B boot means fixing this is safe — a bad kernel auto-reverts."
+  fi
   echo
-  echo "   IMPORTANT — before reboot, confirm the raspi boot integration picked it up:"
-  echo "     ls -l /boot/vmlinuz-*-numa           # kernel image present"
-  echo "     ls /boot/firmware/                    # Ubuntu raspi flash-kernel copies here"
-  echo "     grep -R numa /boot/firmware/*.txt 2>/dev/null"
-  echo "   If /boot/firmware wasn't updated automatically, run: sudo flash-kernel"
   echo "   26.04 A/B boot will auto-revert to the stock kernel if this one fails to boot."
 else
   echo
   echo "   Skipping install. To install later:"
   echo "     sudo dpkg -i $IMG_DEB${HDR_DEB:+ $HDR_DEB}"
+  echo "     sudo flash-kernel <version>   # e.g. 7.0.6-numa — promote into /boot/firmware, else it won't boot"
 fi
 
 #-------------------------------------------------------------------------------
@@ -256,15 +406,17 @@ log "DONE"
 cat <<EOF
    Next:
      1) (if not done above) sudo dpkg -i $KBUILD_DIR/linux-image-*-numa_*.deb
-     2) verify raspi boot integration (see notes above), then: sudo reboot
+        then promote it:            sudo flash-kernel <version>   # e.g. 7.0.6-numa
+     2) reboot (step 7c above confirmed the firmware image is the numa kernel):
+          sudo reboot
      3) after reboot, confirm the new kernel + flag:
           uname -r                                   # ...-numa
           grep CONFIG_NUMA_EMU /boot/config-\$(uname -r)   # =y
      4) enable emulation and reboot again:
-          NUMA_FAKE=4 bash "$(dirname "$0")/rpi5-setup.sh"
+          NUMA_FAKE=auto bash "$(dirname "$0")/rpi5-setup.sh"   # let firmware pick N (16GB Pi5 -> 8); do NOT hardcode 4
           sudo reboot
      5) verify NUMA is live:
-          dmesg | grep -i numa      # expect interleave policy 'interleave:0-3'
-          numactl --hardware        # expect 4 nodes (install: sudo apt install numactl)
-   Benchmark numa=fake=4 vs =8 with:  numactl --interleave=all <workload>
+          dmesg | grep -i numa      # expect interleave policy 'interleave:0-7'
+          numactl --hardware        # expect 8 nodes (install: sudo apt install numactl)
+   Benchmark with:  numactl --interleave=all <workload>   (A/B a forced split via NUMA_FAKE=4 only to measure)
 EOF

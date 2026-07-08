@@ -163,8 +163,10 @@ log "4  Disable unneeded services + AUTOMATIC UPDATES (keeping WiFi/NetworkManag
 disable_sys(){
   if sudo systemctl disable --now "$1" >/dev/null 2>&1; then ok "disabled $1"
   else skip "$1 absent"; fi; }
+# NOTE: NetworkManager-wait-online.service is intentionally NOT disabled here —
+# see step 4b. On WiFi it must stay enabled so boot waits for the link.
 for u in bluetooth.service \
-         NetworkManager-wait-online.service ModemManager.service switcheroo-control.service \
+         ModemManager.service switcheroo-control.service \
          kerneloops.service cups.service cups-browsed.service cups.socket \
          gnome-remote-desktop.service avahi-daemon.service avahi-daemon.socket \
          fwupd-refresh.timer apport.service \
@@ -215,6 +217,33 @@ if command -v timedatectl >/dev/null; then
     && ok "automatic date/time ON (NTP=$(timedatectl show -p NTP --value 2>/dev/null))" \
     || skip "could not enable NTP via timedatectl"
 else skip "timedatectl absent — leaving clock config untouched"; fi
+
+#-------------------------------------------------------------------------------
+log "4b  WiFi stability (disable power-save + wait for network at boot)"
+# Two independent WiFi failure modes on this Pi 5 (brcmfmac built-in radio) both
+# surface in GNOME as "network unavailable":
+#  - after the box sits idle: brcmfmac power-save idles the radio down and doesn't
+#    cleanly re-associate. NetworkManager defaults wifi.powersave=3 (on); pin it
+#    OFF (2) via a conf.d drop-in.
+#  - right after boot: WiFi authenticates slower than ethernet, so if
+#    NetworkManager-wait-online is disabled, network-online.target is reached
+#    before wlan0 associates and early consumers see no network. Keep wait-online
+#    ENABLED (it is deliberately absent from the step-4 disable list).
+if [ -d /etc/NetworkManager ]; then
+  sudo install -d /etc/NetworkManager/conf.d
+  printf '[connection]\nwifi.powersave = 2\n' \
+    | sudo tee /etc/NetworkManager/conf.d/wifi-powersave-off.conf >/dev/null
+  ok "wifi.powersave=2 (off) drop-in written"
+  # SIGHUP reload re-reads conf.d without dropping the active link (safe over SSH);
+  # takes full effect on the next reconnect / reboot.
+  sudo systemctl reload NetworkManager >/dev/null 2>&1 || true
+else
+  skip "no /etc/NetworkManager — WiFi powersave drop-in not written"
+fi
+# Undo any prior run that disabled wait-online; make boot wait for the link.
+sudo systemctl enable --now NetworkManager-wait-online.service >/dev/null 2>&1 \
+  && ok "NetworkManager-wait-online enabled (boot waits for network)" \
+  || skip "NetworkManager-wait-online n/a"
 
 #-------------------------------------------------------------------------------
 log "5  apport OFF but keep core dumps (systemd-coredump)"

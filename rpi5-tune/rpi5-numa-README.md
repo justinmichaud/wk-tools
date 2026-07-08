@@ -61,12 +61,26 @@ mkdir -p ~/kbuild && cd ~/kbuild
 apt-get source linux-raspi                         # needs deb-src in sources
 cd linux-raspi-*/
 cp /boot/config-$(uname -r) .config
-scripts/config --enable NUMA --enable NUMA_EMU --enable NUMA_MEMBLKS --set-str LOCALVERSION "-numa"
+# LOCALVERSION MUST carry a NUMERIC ABI: "-1-numa", never "-numa". Ubuntu boots
+# via flash-kernel's pi-try; its latest-kernel filter (include_only_flavors)
+# only recognises <version>-<ABInum>-<flavour>, so a bare "-numa" name is
+# silently dropped, flash-kernel calls the stock kernel "latest", prints
+# "Ignoring old or unknown version ...", and NEVER stages ours into
+# /boot/firmware/new/ — every reboot lands back on stock.
+scripts/config --enable NUMA --enable NUMA_EMU --enable NUMA_MEMBLKS --set-str LOCALVERSION "-1-numa"
 make olddefconfig
 grep CONFIG_NUMA_EMU .config                       # MUST show =y before building
 make -j$(nproc) bindeb-pkg                          # ~1-2h on the Pi
 sudo dpkg -i ../linux-image-*-numa_*.deb ../linux-headers-*-numa_*.deb
-# confirm /boot/firmware kernel + DTBs updated (sudo flash-kernel if not), then reboot
+# Pi 5 firmware rejects locally-built kernels ("...OS does not support...") because
+# they lack the trailer Ubuntu's official images carry. Disable os_check or the
+# tryboot below is marked 'bad' and falls back to stock:
+grep -qE '^os_check=0' /boot/firmware/config.txt || sudo sed -i '1i os_check=0' /boot/firmware/config.txt
+KVER=$(ls /boot/vmlinuz-*-numa | sed 's|.*/vmlinuz-||' | tail -1)
+sudo flash-kernel "$KVER"                          # STAGES into /boot/firmware/new/
+sudo flash-kernel "$KVER" 2>&1 | grep -q 'Ignoring old or unknown' && echo "FAIL: bad kernel name — see LOCALVERSION note above"
+# next reboot tryboots new/; if it boots+validates it's promoted to current/, else auto-reverts to stock
+sudo reboot
 ```
 </details>
 
