@@ -343,6 +343,42 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0
   (`chrome`/`chromium`/..., `MiniBrowser`, or `Tools/Scripts/run-minibrowser` relative to cwd) —
   to pin a specific build, prepend a wrapper dir to `PATH` and run from outside the WebKit tree.
 
+### GPU rendering is MANDATORY — never accept software rendering
+
+Every browser round (**Speedometer and MotionMark especially**) must render on the GPU. **Never
+permit software rendering** — it is not just noisier, it produces a *different, meaningless* score
+(MotionMark ≈ **1050 on the GPU vs ≈ 2.6 on llvmpipe** — a ~400× gap; Speedometer is also depressed).
+A "quiet, low-variance" software number is worthless. Enforce this:
+
+- **Detect the fallback and reject the round.** After each run, grep its log for
+  `libEGL.*fd -1`, `llvmpipe`, `swrast`, `SwiftShader` — any hit means the WebProcess software-rendered;
+  delete that JSON and re-run. Bake this guard into the loop (a round that silently fell back to
+  software otherwise pollutes the comparison).
+- **On a workstation with a real GPU, use the real desktop compositor `wayland-0`** (mutter, backed by
+  the discrete GPU). Confirm real HW with `nvidia-smi` (util climbs, `fd -1` absent) — a bare
+  `WAYLAND_DISPLAY=wayland-0` is not proof by itself.
+- **The display must stay awake for the whole experiment.** mutter throttles `requestAnimationFrame`
+  frame-callbacks for any surface it isn't presenting — a **blanked/asleep monitor, a locked session,
+  or an occluded/unfocused window all stall every rAF-driven benchmark** (SP3/MM/JS3 hang, then
+  time out). Symptom: the page loads (resources fetched) but never posts results. Keep the display on
+  (`gsettings set org.gnome.desktop.session idle-delay 0`, screensaver off) — this is the Linux analog
+  of macOS quiesce.sh's App-Nap-off + "raiser".
+- **A headless Weston (`--backend=headless`) is a trap for MM/SP3.** Its default renderer is
+  **pixman = software** (→ the 400× -low score above); rAF *does* fire (good for JS3), but the numbers
+  are software. `weston --renderer=gl` runs on the GPU and is offscreen (doesn't steal the screen, no
+  display-awake dependency), but its offscreen presentation gives an **unrepresentative** MM score
+  (≈ 33 vs 1050 on the real desktop) — fine only as a last-resort rAF unblocker for JS3, never for a
+  real MM/SP3 number. Prefer `wayland-0`.
+- **Run GPU browser rounds UNCONTENDED.** Sustained GPU + CPU contention (e.g. a second benchmark loop
+  on other cores, or parallel GPU experiments) makes the WebKitGTK+NVIDIA WebProcess **crash mid-run**
+  (`WebProcess CRASHED`, no JSON) at varying points. The identical MM run that crashes under contention
+  completes cleanly on an idle machine. Never run two GPU rounds (or a debug experiment) at once, and
+  never overlap a GPU loop with another measurement loop — the overlap both crashes runs and
+  contaminates the concurrent one's variance.
+- **Beware self-terminating `pkill`.** `pkill -f 'run-benchmark'` (or any pattern that appears in the
+  cleanup command's own line) kills the very shell running it (exit ~143/144, nothing runs). Match the
+  actual binary (`bin/MiniBrowser`, `WebKitWebProcess`) instead.
+
 ---
 
 ## Compare with compare-results
