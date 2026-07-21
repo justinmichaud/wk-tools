@@ -41,6 +41,51 @@ directory.
    - macOS: `make release` (JSC-only after a marker-only change: `make release
      SCHEME="Everything up to JavaScriptCore"`).
    - Linux/GTK: `Tools/Scripts/build-webkit --gtk --release`.
+   - **Build for faithful unwinding (frame pointers + no frameless fragments).** samply
+     unwinds with framehop, which needs a reliable frame chain at *every* PC. A default
+     Release JSC binary defeats this, producing phantom caller frames (see the "Phantom
+     caller frames" gotcha): frame pointers aren't forced on macOS (only the Linux/CMake
+     path and macOS-under-sanitizer pass `-fno-omit-frame-pointer`), and Apple clang at -O3
+     runs the AArch64 **MachineOutliner** + IR **hot/cold-splitting**, emitting tens of
+     thousands of *frameless* `OUTLINED_FUNCTION_*` and `.cold` fragments (a stock arm64 JSC
+     has ~16k and ~35k). Around a `bl` into one of those, framehop unwinds via the (stale)
+     link register and duplicates the caller frame. Add three flags — **all verified against
+     the real binary; the `.cold` one is the load-bearing fix** (Apple clang 21):
+     - `-fno-omit-frame-pointer` — keep the frame record in every function.
+     - `-mllvm -enable-machine-outliner=never` — kills `OUTLINED_FUNCTION_*` (16616 -> 653).
+     - `-Xclang -fno-split-cold-code` — kills the `.cold.N` splits (35176 -> 1650). This is the
+       one that removed the observed `isRope()`->`sweep()` phantom. Beware near-miss flags that
+       do *nothing*: `-fno-split-machine-functions` and `-mllvm -hot-cold-split=false` are both
+       accepted but leave `.cold` untouched (wrong pass). `-Xclang -fno-split-cold-code` is the
+       frontend flag that actually disables the IR HotColdSplit pass.
+
+     macOS -- the reliable way to inject flags with correct `$(inherited)` chaining is to
+     append them to `OTHER_CFLAGS` in `Source/JavaScriptCore/Configurations/BaseTarget.xcconfig`
+     (covers C and C++), build, then `git checkout --` the file (the built binary is unaffected
+     by reverting afterward). A codegen-flag change recompiles all of JSC (~4 min here; WTF/
+     bmalloc are untouched, so it's effectively JSC-only). Passing them via `make ... ARGS=`
+     is fragile because the `-mllvm`/`-Xclang` pairs contain spaces.
+     ```
+     -fno-omit-frame-pointer -mllvm -enable-machine-outliner=never -Xclang -fno-split-cold-code
+     ```
+     Linux/GTK (frame pointers already on; add the other two):
+     ```sh
+     Tools/Scripts/build-webkit --gtk --release \
+       --cmakeargs="-DCMAKE_CXX_FLAGS='-mllvm -enable-machine-outliner=never -Xclang -fno-split-cold-code'"
+     ```
+     **Verify before trusting the trace** (don't assume the flags took): re-count the symbols
+     and re-run the phantom-frame diagnostic (see the gotcha). Expect the specific
+     `isRope`->`sweep` seam to hit 0%.
+     ```sh
+     JSC=WebKitBuild/Release/JavaScriptCore.framework/Versions/A/JavaScriptCore
+     $(xcrun -f llvm-objdump) --syms "$JSC" | grep -cE 'OUTLINED_FUNCTION|\.cold'   # ~2300, was ~52k
+     ```
+     Caveat: this fixes the reported artifact and roughly halves total frame-duplication, but
+     is **not** a complete cure. A residual ~10% of sweep stacks still duplicate for cell types
+     whose destructor is a genuine out-of-line `bl` (`~PropertyTable`, `~SymbolTable`,
+     `JSDestructibleObject`) -- same stale-`LR` mechanism, which no build flag reaches because
+     the call can't be inlined away. Pair the build fix with the splitter dedupe (gotcha) for
+     the remainder.
 2. **samply** built from `~/Development/samply` (or on PATH). On macOS run `samply setup`
    once (codesign). On Linux set `sudo sysctl kernel.perf_event_paranoid=1`.
 3. The workload served somewhere (e.g. the user's app at `http://localhost:8080`). Use
@@ -221,3 +266,32 @@ The scripts branch on `uname -s`.
   just build the JSC-only scheme.
 - samply samples on-CPU threads, not every thread at the full rate, so a 10-min 1 kHz
   run of a mostly-idle app is ~1.2M samples (a ~7 MB gzipped profile), not tens of millions.
+- **Phantom caller frames (e.g. `isRope()` appearing to call `sweep()`).** In a default
+  Release build, some stacks contain an impossible caller edge: a non-recursive function
+  shows up twice in a row, so at the seam the *innermost inline frame of the upper copy*
+  (`isRope`) sits directly beneath the *outer function of the lower copy* (`specializedSweep`),
+  reading as "isRope calls sweep." This is a **stack-unwinding artifact, not inlining and not
+  recursion.** Mechanism: a hot loop body ends in `bl <frameless fragment>` (an
+  `OUTLINED_FUNCTION_*` or `.cold` split); the `bl` leaves the *next* instruction's address in
+  `lr`; on the following iteration, while sampling a PC a couple of instructions *before* that
+  `bl`, framehop can't establish the frame (the fragment is frameless) and unwinds via the
+  now-stale `lr`, fabricating a second frame in the same function whose return address
+  de-inlines to the same inline fan. Tell-tale: the two frames share the *same* function and
+  their addresses are a handful of bytes apart (the phantom one is `retaddr-1`, i.e. the
+  instruction right after a `bl`). **Attack it in the build first, then dedupe the remainder in
+  the splitter** — this was measured, not assumed:
+  - The Prerequisite-1 build flags remove the frameless fragments; empirically the observed
+    `isRope`->`sweep` seam went **25.3% -> 0%** and total sweep-frame duplication roughly
+    halved. Frame pointers alone are *not* the fix (the parent function already keeps its fp);
+    `-Xclang -fno-split-cold-code` is what mattered, because it lets the hot destroy path inline
+    back into the loop so there's no `bl` to a frameless fragment.
+  - A residual ~10% still duplicates for cell types whose destructor is a genuine out-of-line
+    `bl` that can't be inlined (`~PropertyTable`, `~SymbolTable`, `JSDestructibleObject`) — no
+    build flag reaches those, so **also dedupe consecutive same-function physical frames in the
+    splitter** (collapse adjacent `inlineDepth == 0` frames with the same func whose addresses
+    are within one function's span). Doing both is belt-and-suspenders.
+  Function *attribution* and self-time stay correct even with the artifact (both frames are the
+  same function), so only call-tree *edges* around such frames are untrustworthy. Detect it by
+  walking the shared `stackTable`/`frameTable` and flagging any stack where a `sweep` frame is
+  nested leaf-ward of an `isRope` frame, or, generally, two adjacent physical frames (distinct
+  `frameTable.address`, `inlineDepth == 0`) resolve to the same function.
