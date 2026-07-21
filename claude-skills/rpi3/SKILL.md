@@ -40,7 +40,13 @@ ssh root@<ip> 'systemctl stop netdata; systemctl start weston; sleep 4; pidof we
 If `/WebKit` isn't mounted: `sudo mkdir -p /WebKit && sudo mount /dev/sda1 /WebKit`.
 
 ### Deploying a build (only if you uploaded a fresh archive)
-The checkout lives at `/WebKit/WebKit`. To extract an uploaded product archive:
+The checkout lives at `/WebKit/WebKit`. If you ever need to (re)create it, the checkout was
+originally cloned as (adjust the branch to the WPE release you want):
+```
+git clone --depth 1 --branch wpe-2.46 https://github.com/WebPlatformForEmbedded/WPEWebKit.git
+cd /WebKit/WebKit && mkdir -p WebKitBuild
+```
+To extract an uploaded product archive (upload it from the host first):
 ```
 cd /WebKit/WebKit && Tools/CISupport/built-product-archive --platform=wpe --release extract
 ```
@@ -58,13 +64,19 @@ cog aborts at startup without an input seat:
 Cog-Wayland:ERROR ... cog_wl_platform_create_im_context: assertion failed: (display->seat_default)
 ```
 Create a virtual uinput device and leave it running for the whole session. Use
-`scripts/fakeseat.py` (scp it over), or the one-liner from the board runbook:
+`scripts/fakeseat.py` (scp it over):
 ```
 scp scripts/fakeseat.py root@<ip>:/tmp/
 ssh root@<ip> 'setsid python3 /tmp/fakeseat.py < /dev/null > /tmp/fakeseat.log 2>&1 & sleep 2; pgrep -f fakeseat.py && echo seat-alive'
 ```
 Verify with `pgrep -f fakeseat.py`. Clean up with `pkill -f fakeseat.py`. The seat survives
 across benchmark runs — start it once per session.
+
+Equivalent self-contained one-liner (same thing, no file to copy — cleanup is
+`pkill -f "signal.pause"`):
+```
+python3 -c "import fcntl,os,struct,signal; IOC=lambda d,t,nr,size:(d<<30)|(size<<16)|(t<<8)|nr; U=ord('U'); fd=os.open('/dev/uinput',os.O_WRONLY|os.O_NONBLOCK); fcntl.ioctl(fd,IOC(1,U,100,4),1); fcntl.ioctl(fd,IOC(1,U,101,4),1); os.write(fd,struct.pack('=80s4HI256i',b'cog-fake-seat',3,1,1,1,0,*([0]*256))); fcntl.ioctl(fd,IOC(0,U,1,0),0); signal.pause()" &
+```
 
 ## 3. Get weston's wayland env
 
