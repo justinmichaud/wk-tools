@@ -11,11 +11,15 @@
 # Tunables (override via env, e.g.  BROWSER=vivaldi bash rpi5-setup.sh):
 BROWSER="${BROWSER:-flatpak-chromium}"   # flatpak-chromium | vivaldi | brave | none
 REMOVE_FIREFOX="${REMOVE_FIREFOX:-yes}"  # yes | no
-# CPU baseline: 2900 @ +50mV validated STABLE via 10-min stress-ng --verify torture
-# (2026-07-04, worst 76.8C, throttled 0x0). 3.0GHz is UNSTABLE on this specific chip
-# even at +50mV — and +50mV already pins VDD_CORE at the ~1.0V hardware cap (measured
-# 1.000V under load), so more over_voltage_delta buys nothing. 2.9GHz is this unit's wall.
-ARM_FREQ="${ARM_FREQ:-2900}"             # 2900 = validated stable ceiling for this chip
+# CPU baseline: 2800 @ +50mV. 2900 passed a 10-min stress-ng --verify torture
+# (2026-07-04, worst 76.8C, throttled 0x0) but proved UNSTABLE in real use: the box
+# hard-locked with NO kernel log twice on 2026-07-14 — once right after a kernel
+# build and once at near-idle — so 2900 is not a safe 24/7 clock on this chip.
+# Dropped to 2800 for headroom. 3.0GHz is UNSTABLE even at +50mV, and +50mV already
+# pins VDD_CORE at the ~1.0V hardware cap (measured 1.000V under load), so more
+# over_voltage_delta buys nothing. Re-validate any higher clock with a LONG sustained
+# all-core load (a full kernel build), not just a 10-min stress-ng, before trusting it.
+ARM_FREQ="${ARM_FREQ:-2800}"             # 2800 = stable after 2900 hard-locked in real use (2026-07-14)
 V3D_FREQ="${V3D_FREQ:-1200}"             # 960 stock; 1000 current; 1200 ran earlier — re-test w/ glmark2 before raising
 OVER_VOLTAGE_DELTA="${OVER_VOLTAGE_DELTA:-50000}"  # µV; 50mV = at the ~1.0V core cap; higher adds no real voltage
 # NUMA emulation is FIRMWARE-DRIVEN on Pi 5: with SDRAM_BANKLOW set, the bootloader banks the
@@ -78,7 +82,11 @@ log "2  CPU governor = performance"
 sudo tee /etc/systemd/system/cpu-performance.service >/dev/null <<'EOF'
 [Unit]
 Description=Set CPU governor to performance
-After=multi-user.target
+# After basic.target (NOT multi-user.target): plymouth-quit-wait can hang on this
+# box, stalling multi-user.target indefinitely, which would leave this oneshot
+# stuck 'waiting' and the governor never pinned. basic.target is reached early and
+# is not gated behind the boot splash. (WantedBy=multi-user.target still pulls it in.)
+After=basic.target
 [Service]
 Type=oneshot
 ExecStart=/bin/bash -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g"; done'
@@ -115,7 +123,11 @@ sudo chmod 755 /usr/local/sbin/rpi5-fan-max
 sudo tee /etc/systemd/system/fan-max.service >/dev/null <<'EOF'
 [Unit]
 Description=Force PWM fan to 100% (pin thermal state to max + full PWM)
-After=multi-user.target
+# After basic.target (NOT multi-user.target): plymouth-quit-wait can hang on this
+# box, stalling multi-user.target indefinitely — that left this service stuck
+# 'waiting' so the fan was never pinned to 100% (governor-controlled, near-silent
+# at idle). basic.target is early and not gated behind the boot splash.
+After=basic.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
@@ -218,6 +230,30 @@ if command -v timedatectl >/dev/null; then
     || skip "could not enable NTP via timedatectl"
 else skip "timedatectl absent — leaving clock config untouched"; fi
 
+# fake-hwclock — make time sync work automatically ACROSS REBOOTS. This Pi 5 has no
+# battery-backed RTC, so at every boot the clock resets to 1970. On 26.04 that breaks
+# time sync outright: chrony syncs via NTS (NTP-over-TLS), and a 1970 clock makes the
+# NTS TLS handshake fail certificate validation ("certificate is not yet valid") — so
+# the clock never corrects itself, AND every HTTPS site (apt, browsers, claude.ai)
+# fails the same way. fake-hwclock breaks that chicken-and-egg: it saves the time
+# periodically + on shutdown and restores it at boot, so the clock comes up recent
+# enough for the NTS TLS certs to validate, after which chrony steps it to the exact
+# time on its own. (A real RTC-battery on the Pi5 header is the hardware fix; this is
+# the software one.) Idempotent.
+if ! dpkg -l fake-hwclock 2>/dev/null | grep -q '^ii'; then
+  sudo apt-get install -y fake-hwclock >/dev/null 2>&1 || true
+fi
+if dpkg -l fake-hwclock 2>/dev/null | grep -q '^ii'; then
+  # enable load-at-boot + save-on-shutdown + periodic-save timer (real unit names;
+  # the bare "fake-hwclock" alias is a masked SysV shim, so enable the -load/-save units).
+  sudo systemctl enable fake-hwclock-load.service fake-hwclock-save.service \
+                        fake-hwclock-save.timer >/dev/null 2>&1 || true
+  sudo fake-hwclock save 2>/dev/null || true
+  ok "fake-hwclock installed + enabled (clock survives reboot → NTS/TLS time sync auto-recovers)"
+else
+  skip "fake-hwclock unavailable (apt offline?) — install later so the clock survives reboots"
+fi
+
 #-------------------------------------------------------------------------------
 log "4b  WiFi stability (disable power-save + wait for network at boot)"
 # Two independent WiFi failure modes on this Pi 5 (brcmfmac built-in radio) both
@@ -244,6 +280,73 @@ fi
 sudo systemctl enable --now NetworkManager-wait-online.service >/dev/null 2>&1 \
   && ok "NetworkManager-wait-online enabled (boot waits for network)" \
   || skip "NetworkManager-wait-online n/a"
+
+# Wi-Fi auto-recovery watchdog. Even with powersave off, this Pi's brcmfmac radio
+# intermittently drops the link (the box stays up; only this radio drops, and it
+# can take many minutes to re-associate on its own — other clients on the same AP
+# are unaffected, so it is Pi-side, not the router). This watchdog pings the default
+# gateway and re-associates wlan0 after ~3 consecutive failures, so the rig recovers
+# in ~45s instead of going dark until a manual reset.
+sudo tee /usr/local/sbin/rpi5-wifi-watchdog >/dev/null <<'WDEOF'
+#!/bin/bash
+# PATIENT then ESCALATING: let NetworkManager's own reconnect try first (~100s),
+# then nudge, then networking off/on, then reload the driver as a last resort.
+# Deliberately NO 'nmcli device disconnect' — that blocks autoconnect and fights
+# NM's own recovery (the bug in the first version, which bounced every ~2min and
+# actually prevented reconnection).
+IFACE="${IFACE:-wlan0}"; INTERVAL="${INTERVAL:-20}"; THRESHOLD="${THRESHOLD:-5}"; COOLDOWN="${COOLDOWN:-40}"
+connected() { local gw; gw="$(ip route | awk '/^default/{print $3; exit}')"; [ -n "$gw" ] && ping -c1 -W2 "$gw" >/dev/null 2>&1; }
+fails=0; step=0
+while true; do
+  if connected; then
+    fails=0; step=0
+  else
+    fails=$((fails+1))
+    if [ "$fails" -ge "$THRESHOLD" ]; then
+      step=$((step+1))
+      case "$step" in
+        1) logger -t wifi-watchdog "down ~$((fails*INTERVAL))s - nudge: reactivate $IFACE"; nmcli device connect "$IFACE" >/dev/null 2>&1 ;;
+        2) logger -t wifi-watchdog "still down - networking off/on"; nmcli networking off >/dev/null 2>&1; sleep 3; nmcli networking on >/dev/null 2>&1 ;;
+        *) logger -t wifi-watchdog "still down - reloading brcmfmac (last resort)"; modprobe -r brcmfmac brcmutil >/dev/null 2>&1; sleep 3; modprobe brcmfmac >/dev/null 2>&1; step=0 ;;
+      esac
+      fails=0; sleep "$COOLDOWN"
+    fi
+  fi
+  sleep "$INTERVAL"
+done
+WDEOF
+sudo chmod 755 /usr/local/sbin/rpi5-wifi-watchdog
+sudo tee /etc/systemd/system/rpi5-wifi-watchdog.service >/dev/null <<'WDSVC'
+[Unit]
+Description=Wi-Fi watchdog: re-associate wlan0 when the network drops (brcmfmac flakiness)
+# After NetworkManager (NOT multi-user.target) so it is not gated by the plymouth stall.
+After=NetworkManager.service
+Wants=network.target
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/rpi5-wifi-watchdog
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=multi-user.target
+WDSVC
+sudo systemctl daemon-reload
+sudo systemctl enable --now rpi5-wifi-watchdog.service >/dev/null 2>&1 || true
+ok "wifi watchdog installed + enabled (auto re-associate wlan0 on drop)"
+
+#-------------------------------------------------------------------------------
+log "4c  Boot reliability: bound plymouth-quit-wait (headless must not stall multi-user.target)"
+# plymouth-quit-wait ships TimeoutStartUSec=infinity and is Before=multi-user.target.
+# With a display, gdm starts and plymouth quits at once, so it finishes in <1s. But
+# HEADLESS (no display manager to trigger the quit) it waits FOREVER, hanging
+# multi-user.target -- which strands every 'After=multi-user.target' service (this is
+# the bug that left the fan/governor unset on headless boots). Bound it to 20s so a
+# headless boot always proceeds; a no-op when a monitor is attached.
+sudo install -d /etc/systemd/system/plymouth-quit-wait.service.d
+printf '[Service]\nTimeoutStartSec=20s\n' \
+  | sudo tee /etc/systemd/system/plymouth-quit-wait.service.d/10-timeout.conf >/dev/null
+sudo systemctl daemon-reload
+ok "plymouth-quit-wait bounded to 20s (boot works headless AND with a display)"
 
 #-------------------------------------------------------------------------------
 log "5  apport OFF but keep core dumps (systemd-coredump)"

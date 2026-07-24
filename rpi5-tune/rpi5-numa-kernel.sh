@@ -188,6 +188,33 @@ if [ ! -f .config ] || [ "${RECONFIG:-}" = 1 ]; then
     --module EXFAT_FS --module NTFS3_FS --module NLS_ISO8859_1
   ok "storage/USB pinned (USB_STORAGE, USB_UAS, MMC_BLOCK, exFAT/NTFS) — survives LEAN"
 
+  # Tailscale / VPN networking — PIN EXPLICITLY. Tailscale runs a userspace
+  # WireGuard tunnel over a TUN device ('tailscale0'); without the TUN driver
+  # tailscaled dies at startup with 'CreateTUN("tailscale0") failed; /dev/net/tun
+  # does not exist' and systemd gives up after 5 rapid restarts. The stock raspi
+  # config ships TUN as =m, but this box's base config has "# CONFIG_TUN is not
+  # set" AND localmodconfig (LEAN=yes) drops any module not loaded at build time —
+  # so pin it. Build TUN *in* (=y) so /dev/net/tun always exists with no module
+  # autoload needed: this is exactly the failure we're fixing, so make it
+  # unrecurrable. The netfilter/iptables/nftables + masquerade modules let
+  # tailscaled install its packet-filter rules and enable subnet-router / exit-node
+  # operation (the matching IP-forwarding sysctl is a userspace setting tailscaled
+  # configures itself on `tailscale up --advertise-routes/--exit-node`, not a kernel
+  # option — nothing to set here).
+  # WIREGUARD (kernel) is optional for tailscale (it ships its own userspace impl)
+  # but cheap to keep for wg-quick / kernel-mode use.
+  scripts/config --enable TUN
+  scripts/config \
+    --module WIREGUARD \
+    --module NF_TABLES --module NFT_COMPAT --module NFT_NAT --module NFT_MASQ \
+    --module IP_NF_IPTABLES --module IP_NF_FILTER --module IP_NF_MANGLE \
+    --module IP_NF_NAT --module IP_NF_TARGET_MASQUERADE \
+    --module IP6_NF_IPTABLES --module IP6_NF_NAT \
+    --module NF_NAT \
+    --module NETFILTER_XT_MATCH_COMMENT --module NETFILTER_XT_MATCH_MARK \
+    --module NETFILTER_XT_TARGET_MASQUERADE
+  ok "tailscale networking pinned (TUN builtin; iptables/nftables + masquerade for subnet-router/exit-node)"
+
   # Localversion so the kernel is clearly ours and won't clash with the stock
   # 7.0.0-10xx-raspi package (A/B boot keeps the stock one as fallback).
   # CRITICAL: the name MUST be <version>-<ABInum>-<flavour>, i.e. include a
@@ -239,6 +266,27 @@ if [ -n "$MISSING" ]; then
 fi
 grep -E '^CONFIG_(USB=|USB_STORAGE|USB_UAS|MMC_BLOCK|MMC_SDHCI_BRCMSTB|EXFAT_FS|NTFS3_FS)' .config | sed 's/^/   /'
 ok "USB mass storage + SD card reader (MMC_BLOCK) + exFAT/NTFS confirmed"
+
+# TUN is the hard requirement for tailscale (userspace WireGuard over /dev/net/tun).
+# It must be BUILT IN (=y) so the device always exists — assert that before the long
+# compile, else tailscaled fails with 'CreateTUN(...) /dev/net/tun does not exist'.
+if ! grep -q '^CONFIG_TUN=y' .config; then
+  echo "   current TUN state:"; grep -E '^(# )?CONFIG_TUN\b' .config | sed 's/^/     /'
+  die "CONFIG_TUN is not built in (=y) — refusing to build a kernel tailscale can't
+     use. It is pinned via 'scripts/config --enable TUN' in step 4; if it won't
+     stick, its dependency (NET/INET) may have been trimmed by localmodconfig."
+fi
+# Netfilter bits (needed for subnet-router / exit-node use + tailscaled's firewall
+# rules) are modules; warn rather than abort if any didn't stick — a plain client
+# node works with TUN alone.
+TS_MISSING=""
+for sym in NF_TABLES IP_NF_IPTABLES NFT_MASQ NETFILTER_XT_MATCH_MARK; do
+  grep -qE "^CONFIG_$sym=[ym]$" .config || TS_MISSING="$TS_MISSING $sym"
+done
+[ -z "$TS_MISSING" ] || skip "tailscale netfilter extras missing (client OK; exit-node/subnet-router may not work):$TS_MISSING"
+grep -E '^CONFIG_(TUN|WIREGUARD|NF_TABLES|NFT_MASQ|IP_NF_IPTABLES|IP_NF_TARGET_MASQUERADE|NETFILTER_XT_MATCH_(COMMENT|MARK))=' .config | sed 's/^/   /'
+ok "TUN (built-in) + tailscale netfilter support confirmed"
+
 if [ "$MAXPERF" = yes ]; then
   echo "   max-perf knobs (as resolved by olddefconfig):"
   grep -E '^CONFIG_(PREEMPT_LAZY|PREEMPT_DYNAMIC|HZ|NO_HZ_IDLE|CPU_FREQ_DEFAULT_GOV_PERFORMANCE|CC_OPTIMIZE_FOR_PERFORMANCE|SCHED_CLASS_EXT|DEBUG_INFO_BTF)=' .config | sed 's/^/     /'

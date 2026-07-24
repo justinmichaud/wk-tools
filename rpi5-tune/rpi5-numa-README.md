@@ -41,7 +41,12 @@ Two env knobs, both **on by default**:
 - `LEAN=yes` — `make localmodconfig`: build only currently-loaded modules
   (~130 vs thousands) → **~10-20 min instead of 1-2h**. Boots on *this* Pi;
   drivers for hardware not plugged in at build time are omitted. `LEAN=no` for a
-  full driver-parity kernel (slow).
+  full driver-parity kernel (slow). Essentials that `localmodconfig` would drop
+  because they weren't loaded at build time are re-pinned explicitly: USB mass
+  storage + SD reader (exFAT/NTFS), and **`TUN` (built-in) plus iptables/nftables
+  + masquerade for tailscale / WireGuard** — without `TUN`, `tailscaled` fails to
+  start (`/dev/net/tun does not exist`). The build aborts pre-compile if `TUN=y`
+  didn't stick.
 - `MAXPERF=yes` — throughput tuning: `HZ=100`, default cpufreq governor =
   performance, `-O2`. Preemption is left at **`PREEMPT_LAZY`** (the modern
   throughput model): on arm64 `ARCH_HAS_PREEMPT_LAZY=y` makes `PREEMPT_NONE`
