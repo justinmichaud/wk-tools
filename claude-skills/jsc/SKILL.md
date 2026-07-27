@@ -32,6 +32,8 @@ These override defaults and apply to every change, anywhere in WebKit.
 
 Match the surrounding code's comment density and idiom. WebKit comments explain the non-obvious **why** — a subtle invariant, a footgun, a reason a check is safe to skip — never what the code already plainly says, and never the story of how the change came to be.
 
+**Comments** Comments explain why code does something, or what's hard to understand locally. Keep them future-proof and standalone — they must make sense to a reader who opens the file later with no knowledge of this change, PR, or conversation. A comment that narrates the change rather than the code ("migrated", "new", "now", "previously", "this patch", "mirror X here", before/after framing) is commit-message material, not a code comment: rewrite it to the durable reason or delete it. This test applies when reviewing or editing existing comments too, not just writing new ones — when a comment fails it, fix or delete it, don't just flag it and move on.
+
 Rules:
 - **Concise. Comments are rarely longer than one line.** Go past a line only to explain a genuinely new theoretical concept. Litmus test: if every comment in the file were written like this one, would it be a wall of text? If yes, cut it down.
 - Write for a fresh reader with zero knowledge of this session, the bug, the PR, or CI/EWS. Cut investigation narrative, platform-by-platform enumeration, bug/PR references, and justification for *why the change was made* — that belongs in the commit message.

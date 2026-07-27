@@ -84,6 +84,28 @@
           ]
         }
       ]
+    },
+    {
+      "host": "buildbox4",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/igalia/jmichaud/Development/DebugVersion/OpenSource"
+          ]
+        }
+      ]
+    },
+    {
+      "host": "rpi5",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/jmichaud/Development/32/Development/DebugVersion/OpenSource/./"
+          ]
+        }
+      ]
     }
   ],
   "ui_font_size": 16,
