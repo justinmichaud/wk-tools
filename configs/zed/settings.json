@@ -113,7 +113,7 @@
   "theme": {
     "mode": "system",
     "light": "One Light",
-    "dark": "One Dark"
+    "dark": "Gruvbox Dark Hard"
   },
   "use_system_path_prompts": false, // Use in-container paths instead of host paths
   "lsp": {

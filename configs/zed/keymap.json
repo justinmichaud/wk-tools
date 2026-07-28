@@ -10,14 +10,20 @@
     "context": "Workspace",
     "bindings": {
       // "shift shift": "file_finder::Toggle"
-      "ctrl-q": null
+      "ctrl-q": null,
+      "ctrl-`": "workspace::ToggleBottomDock", // match vscode behavior`
+      "alt-`": "workspace::ToggleBottomDock", // match vscode behavior`
+      "super-`": "workspace::ToggleBottomDock"
     }
   },
   {
     "context": "Editor",
     "bindings": {
       // "j k": ["workspace::SendKeystrokes", "escape"]
-      "ctrl-q": null
+      "ctrl-q": null,
+      "ctrl-`": "workspace::ToggleBottomDock", // match vscode behavior`
+      "alt-`": "workspace::ToggleBottomDock", // match vscode behavior`
+      "super-`": "workspace::ToggleBottomDock"
     }
   },
 {
@@ -27,9 +33,9 @@
 "bindings": {
   "ctrl-`": "workspace::ToggleBottomDock", // match vscode behavior`
   "alt-`": "workspace::ToggleBottomDock", // match vscode behavior`
+  "super-`": "workspace::ToggleBottomDock", // match vscode behavior`
   "ctrl-q": null
 }
 
 }
 ]
-
