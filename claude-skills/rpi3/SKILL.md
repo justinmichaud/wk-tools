@@ -57,6 +57,14 @@ Build lives at `/WebKit/WebKit/WebKitBuild/WPE/Release/{bin,lib}`. The `jsc` she
 > version** compiled against — it is NOT a code-version indicator. To tell builds apart,
 > use **file timestamps** (`ls -l .../bin/jsc`), not the SONAME.
 
+> **GOTCHA — the pi's `/WebKit/WebKit/Source` tree is usually STALE vs the running binary.**
+> The binary is deployed from a host cross-build (`built-product-archive extract`), and the
+> pi checkout is not a git repo. Its `Source/*.cpp` can be many months older than the binary
+> (`stat -c %y Source/… bin/jsc` to compare). Do NOT read source constants/behavior from the
+> pi tree and assume they match what's running — read the **host checkout that built the
+> archive**, or disassemble the binary. (Real example: pi source said the memory-pressure
+> threshold was 90%, but the running WPE binary used 80% from a newer branch.)
+
 ## 2. Fake input seat (REQUIRED before launching cog)
 
 cog aborts at startup without an input seat:
@@ -234,6 +242,7 @@ COG_MODULEDIR=/WebKit/WebKit/WebKitBuild/WPE/Release/Tools/cog-prefix/src/cog-bu
 - `run-cog.sh <log> <url> [--debug]` — launch a benchmark in cog with console capture.
 - `monitor.sh <log> <maxsecs>` — watch a run; emit CRASH_OR_ASSERT / WEBPROC_GONE / IDLE_DONE / TIMEOUT.
 - `attach-gdb.sh <url> [bt_log] [console_log]` — sandbox-off launch + gdb attach → fatal backtrace.
-- `jsc-gdb.sh <jsfile> [env JSC_*=…]` — run a JS file in `jsc` under gdb for fast repro attempts.
+- `jsc-gdb.sh <jsfile> [env JSC_*=…]` — run a JS file in `jsc` under gdb for fast repro attempts. Add `handle SIGUSR1/USR2 nostop noprint pass` (GC thread-suspension signals) so gdb traps only the real fault.
+- `oom-ool.js` — reliable OOM microbenchmark: grows unbounded LIVE out-of-line (butterfly) property storage until `JSObject::allocateMoreOutOfLineStorage` fails, hitting the `RELEASE_ASSERT` in `CompleteSubspace::allocateSlow` (`WTFCrash`, si_addr `0xbbadbeef`) in ~100s. Run under `jsc-gdb.sh` (with the SIGUSR1 handling). Deterministic repro of the JS2 crash. NOTE: this 32-bit build uses **bmalloc** (not system malloc) — `USE_SYSTEM_MALLOC=OFF` for ARM-Thumb2-Linux; verify from the binary (`fastMalloc` = bmalloc fast path), not assumptions.
 
 Copy scripts over with `scp scripts/* root@<ip>:/tmp/` and `chmod +x`.

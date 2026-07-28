@@ -12,12 +12,15 @@ so the examples call them by full path. `SKILL=~/.claude/skills/jsc-marker-trace
 ## Prerequisites
 
 - A **Release WebKit build** with the GC text-marker patch (adds `recordGCPhaseMarker`
-  driven by `JSC_useTextMarkers`; `Heap.cpp`, `Heap.h`, `HeapInlines.h`).
-  macOS: `make release`. Linux/GTK: `Tools/Scripts/build-webkit --gtk --release`.
+  driven by `JSC_useTextMarkers`; `Heap.cpp`, `Heap.h`, `HeapInlines.h`). For faithful
+  unwinding, pass explicit codegen flags (see SKILL.md prereq 1) -- they differ by compiler:
+  - GCC (Linux/GTK default): `--cmakeargs="-DCMAKE_CXX_FLAGS='-fno-omit-frame-pointer -fno-reorder-blocks-and-partition'"`
+  - clang (macOS, or a clang GTK build): `-fno-omit-frame-pointer -mllvm -enable-machine-outliner=never -Xclang -fno-split-cold-code`
 - **samply** built from `~/Development/samply` (or on `PATH`).
 - The workload served somewhere (e.g. `http://localhost:8080`).
 - A display (MiniBrowser renders; headless throttles timers).
-- Linux only: `sudo sysctl kernel.perf_event_paranoid=1` (samply uses perf).
+- Linux only: `sudo sysctl kernel.perf_event_paranoid=1` (samply uses perf). In a container
+  this is non-namespaced -- set it on the host.
 
 ## 1. Capture
 
@@ -27,9 +30,10 @@ so the examples call them by full path. `SKILL=~/.claude/skills/jsc-marker-trace
 ```
 
 Sets `useFixedIntervalGCOnly` (a full GC every `periodMS`, all other GC/incremental
-sweeping blocked), `useTextMarkers` (coarse per-phase marker spans), and `useJITDump`,
-then records with `samply record --presymbolicate`. Env overrides: `WEBKIT_ROOT`,
-`WEBKIT_BUILD`, `SAMPLY`, `TRACE_AUX`.
+sweeping blocked) and `useTextMarkers` (coarse per-phase marker spans), then records with
+`samply record --presymbolicate`. `useJITDump` is on for macOS but **off on Linux** (it
+segfaults the WebKitGTK process in ~2s; `JITDUMP=1` forces it). Env overrides: `WEBKIT_ROOT`,
+`WEBKIT_BUILD`, `SAMPLY`, `TRACE_AUX`, `JITDUMP`.
 
 The marker/jitdump files land in `TRACE_AUX` (default `/tmp/jsc-trace-aux`). On macOS
 the web process is XPC, so JSC options are forwarded with the `__XPC_` prefix and the
@@ -54,6 +58,23 @@ Open a section in the profiler for the full call tree:
 ```sh
 samply load /tmp/jsc-trace/trace-gc-parallelmarking.json.gz
 ```
+
+## Hardware counters (perf): IPC and cache misses per section
+
+Linux only. Same split, but with `perf` PMU counters instead of wall-clock stacks, to see
+IPC / cache-miss / memory-stall behaviour per GC phase (needs `linux-perf`):
+
+```sh
+"$SKILL"/capture-perf.sh 60000 1200 /tmp/jsc-trace/perf.data http://localhost:8080
+TRACE_AUX=/tmp/jsc-trace-aux perf script -i /tmp/jsc-trace/perf.data -s "$SKILL"/split-perf.py
+```
+
+Records `cycles,instructions,l1d_cache_refill,ll_cache_miss_rd,stall_backend` (override
+`PERF_EVENTS`) on `--clockid=monotonic` (matches the marker clock). `split-perf.py` runs as
+a perf script (perf's Python API parses `perf.data`), pools per phase, and prints per-phase
+IPC, L1D/LL miss rates (MPKI), backend-stall %, and per-function tables ranked by cache
+misses. Call graphs are off by default (huge/slow); set `CALLGRAPH=fp` for `.folded`
+cache-miss flamegraphs. See SKILL.md "Hardware counters with perf".
 
 ## Notes / limits
 

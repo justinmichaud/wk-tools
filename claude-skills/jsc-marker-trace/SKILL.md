@@ -16,6 +16,17 @@ allowed-tools:
   - Bash(grep:*)
   - Bash(python3:*)
   - Bash(pkill:*)
+  - Bash(nohup:*)
+  - Bash(ps:*)
+  - Bash(find:*)
+  - Bash(uname:*)
+  - Bash(nm:*)
+  - Bash(objdump:*)
+  - Bash(~/.claude/skills/jsc-marker-trace/capture-perf.sh:*)
+  - Bash(perf:*)
+  - Bash(perf script:*)
+  - Bash(perf record:*)
+  - Bash(perf stat:*)
 ---
 
 # Per-section samply traces for JavaScriptCore
@@ -29,11 +40,13 @@ throughout is the garbage collector (a fixed-interval full GC every N seconds, s
 ParallelMarking / Sweeping / Finalizers); the mechanism is general -- see "Extending to
 another kind of tracing".
 
-Two tools live in this skill's directory (`~/.claude/skills/jsc-marker-trace/`, symlinked to
-`wk-tools/claude-skills/jsc-marker-trace/`): `capture.sh` (record) and
-`split-trace.py` (split). They are not on PATH, so invoke them by full path as below;
-`README.md` in the same directory is a shorter quickstart. `$SKILL` below is that
-directory.
+Tools live in this skill's directory (`~/.claude/skills/jsc-marker-trace/`, symlinked to
+`wk-tools/claude-skills/jsc-marker-trace/`): `capture.sh` + `split-trace.py` for samply
+wall-clock stacks (where time goes), and `capture-perf.sh` + `split-perf.py` for Linux
+`perf` hardware counters (why -- IPC, cache misses, memory stalls; see "Hardware counters
+with perf"). `phantom-check.py` diagnoses unwinding artifacts. They are not on PATH, so
+invoke them by full path as below; `README.md` is a shorter quickstart. `$SKILL` below is
+that directory.
 
 ## Prerequisites
 
@@ -68,10 +81,33 @@ directory.
      ```
      -fno-omit-frame-pointer -mllvm -enable-machine-outliner=never -Xclang -fno-split-cold-code
      ```
-     Linux/GTK (frame pointers already on; add the other two):
+     Linux/GTK -- the toolchain may be **GCC or clang**; the flag sets differ and must not be
+     mixed (GCC rejects `-mllvm`/`-Xclang`/`-fno-split-cold-code`; clang has no
+     `-fno-reorder-blocks-and-partition`). Frame pointers are already forced on
+     (`WebKitCompilerFlags.cmake` adds `-fno-omit-frame-pointer` under `DEVELOPER_MODE OR ARM`),
+     but list it anyway to be safe. Check the compiler first (`grep CMAKE_CXX_COMPILER
+     WebKitBuild/GTK/Release/CMakeCache.txt`; `/usr/bin/c++` is GCC here), then pass the flags
+     explicitly through `CMAKE_CXX_FLAGS`:
+     - **GCC** -- no MachineOutliner; its hot/cold splitter is `-freorder-blocks-and-partition`
+       (on at -O2+), which emits the frameless `.cold` fragments (a stock JSC here had ~1003,
+       not to be confused with GCC's benign `.part.N` partial-inlining clones):
+       ```sh
+       Tools/Scripts/build-webkit --gtk --release \
+         --cmakeargs="-DCMAKE_CXX_FLAGS='-fno-omit-frame-pointer -fno-reorder-blocks-and-partition'"
+       ```
+     - **clang** -- same passes as macOS:
+       ```sh
+       Tools/Scripts/build-webkit --gtk --release \
+         --cmakeargs="-DCMAKE_CXX_FLAGS='-fno-omit-frame-pointer -mllvm -enable-machine-outliner=never -Xclang -fno-split-cold-code'"
+       ```
+     Always pass these globally via `CMAKE_CXX_FLAGS` (a full JSC + WebCore/WebKit rebuild). Do
+     **not** scope them to the JavaScriptCore target only: the sweep phase runs many WebCore DOM
+     destructors, so a JSC-only build leaves WebCore-side frameless fragments and their phantom
+     edges in the trace. The global build covers those too.
+     Verify the flags took (don't assume): the `.cold` count should hit 0.
      ```sh
-     Tools/Scripts/build-webkit --gtk --release \
-       --cmakeargs="-DCMAKE_CXX_FLAGS='-mllvm -enable-machine-outliner=never -Xclang -fno-split-cold-code'"
+     JSC=WebKitBuild/GTK/Release/lib/libjavascriptcoregtk-6.0.so.1.8.3
+     nm "$JSC" | grep -cE '\.cold'   # 0 after the flag (GCC .part.N clones are separate and benign)
      ```
      **Verify before trusting the trace** (don't assume the flags took): re-count the symbols
      and re-run the phantom-frame diagnostic (see the gotcha). Expect the specific
@@ -85,9 +121,23 @@ directory.
      whose destructor is a genuine out-of-line `bl` (`~PropertyTable`, `~SymbolTable`,
      `JSDestructibleObject`) -- same stale-`LR` mechanism, which no build flag reaches because
      the call can't be inlined away. Pair the build fix with the splitter dedupe (gotcha) for
-     the remainder.
+     the remainder. Measured on Linux/GCC/aarch64 (small sample, sweeping split): the
+     `isRope`->`sweep` seam went to **0.0%**, and the residual adjacent-same-func duplication
+     was **~10.9%**, all destructors (`~ShadowRoot`, `~SVGSVGElement`, `~SimpleDateFormat`,
+     `InlineCacheHandler` destroying-delete) -- these are covered once the flags are applied
+     globally (the sweep phase runs many WebCore DOM destructors, which is why the flags go on
+     the whole build, not just JSC). Self-time attribution is correct regardless (both duplicated
+     frames are the same function); only call-tree *edges* around those destructors are fabricated,
+     so the per-function summaries the analysis relies on stay trustworthy. A ready-made diagnostic
+     is `phantom-check.py` in this dir: `phantom-check.py trace-gc-sweeping.json.gz` reports the
+     seam and the adjacent-same-func share.
 2. **samply** built from `~/Development/samply` (or on PATH). On macOS run `samply setup`
-   once (codesign). On Linux set `sudo sysctl kernel.perf_event_paranoid=1`.
+   once (codesign). On Linux set `sudo sysctl kernel.perf_event_paranoid=1` (samply refuses
+   to start at the default `2` with "Permission denied ... currently set to 2").
+   **Inside a container (the wkdev docker box), this sysctl is non-namespaced and cannot be
+   written from within** -- even `sudo` returns `permission denied on key`, and a `!`-prefixed
+   command runs in-container and fails the same way. It must be set on the **host**; ask the
+   user to run `echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid` there.
 3. The workload served somewhere (e.g. the user's app at `http://localhost:8080`). Use
    the user's real server; do not roll your own unless asked.
 4. A real display -- MiniBrowser renders, and a headless/occluded window throttles the
@@ -132,12 +182,26 @@ The GC time breakdown already existed (`Options::useFixedIntervalGCOnly` -> a
 - `Heap::recordGCPhaseMarker(phase, start, end)` (public, in `Heap.cpp`) buffers a span
   into a file-static `GCPhaseMarkerAccumulator`; at the end of `collectNow(Sync)` it
   merges each phase's spans (500us tolerance) and writes only the merged intervals via
-  `ProfilerSupport::markInterval` (names `"GC ParallelMarking"` / `"GC Sweeping"` /
-  `"GC Finalizers"`). Merging is essential: `drain()` runs thousands of times per GC, so
-  one marker per call floods the file (142 MB in 6 min); merged coarse spans give ~2/phase.
+  `ProfilerSupport::markInterval`. The `GCTimeBreakdownPhase` enum has four values
+  (`ParallelMarking`, `Sweeping`, `DestructorSweeping`, `Finalizers`), but only three become
+  marker names -- `"GC ParallelMarking"` / `"GC Sweeping"` / `"GC Finalizers"`. `DestructorSweeping`
+  is a *counter-only* subset of Sweeping (fed by `noteGCTimeBreakdown` in `MarkedBlock.cpp`), never
+  `add()`ed as a marker, so the split still yields three sections. Merging is essential: `drain()`
+  runs thousands of times per GC, so one marker per call floods the file (142 MB in 6 min); merged
+  coarse spans give ~2/phase.
 - `GCTimeBreakdownScope` (HeapInlines.h) emits a marker in its destructor when
   `useTextMarkers` is set; a marker-only `GCMarkerScope` wraps `m_objectSpace.sweepBlocks()`
   in `Heap::sweepSynchronously` (the bulk block sweep isn't inside any counting scope).
+- **Covering all GC time.** Marking (`SlotVisitor::drain`/`drainFromShared`/`performIncrementOfDraining`,
+  plus `executeConvergence` in `runFixpointPhase`) and the synchronous sweep are scoped, but
+  `runEndPhase`'s post-marking work (`updateObjectCounts`, `endMarking`, `deleteUnmarkedCompiledCode`,
+  `clearCurrentlyExecutingAndRemoveDeadCodeBlocks`, `updateAllocationLimits`) was left unscoped --
+  only `reapWeakHandles`/`finalizeUnconditionalFinalizers` inside it were. Measured, that gap was
+  ~36% of a GC's wall time. A marker-only `GCMarkerScope(Finalizers)` now wraps the whole end phase,
+  placed *after* `m_helperClient.finish()` so it can't overlap a still-running ParallelMarking helper
+  span (the accumulator merges same-phase spans, so the inner Finalizers scopes don't double count).
+  With it, the marker union covers ~99% of GC wall time; the only residual is a sub-millisecond
+  sliver between marking increments (drain-to-drain phase transitions).
 - **Markers are decoupled from the timing/logging.** `useFixedIntervalGCOnly` no longer
   auto-enables `logGCTimeBreakdown`, and `performFixedIntervalGC` early-returns (silent GC)
   unless `logGCTimeBreakdown` is set. Reason: the breakdown counter does 3 per-block
@@ -219,8 +283,47 @@ appendToMarkStack,noteLiveAuxiliaryCell}` and `MarkedBlock::{noteMarked,candidat
 on the helper/collector threads; Sweeping by `MarkedBlock::Handle::specializedSweep<...>`,
 destructors (`~Node`, `~CallLinkInfo`) and libpas frees on the main thread; Finalizers by
 `AccessCase::visitWeak`, `Structure::finalizeUnconditionally`, `finalizeCodeBlockEdge`,
-`WeakBlock::reap`. Active-sample ratios track the time breakdown (marking >> sweeping >
-finalizers).
+`WeakBlock::reap`. Active-sample ratios track the time breakdown; which phase dominates is
+workload-dependent (a churn-heavy, small-live-set app is sweep-dominated, not mark-dominated).
+
+## Hardware counters with perf (IPC and cache misses per section)
+
+samply gives wall-clock stacks (where time goes). To ask *why* a section is slow -- its
+instructions-per-cycle, cache-miss rate, memory stalls -- use `perf` instead, split by the
+same markers. Two Linux-only tools do this: `capture-perf.sh` (record) and `split-perf.py`
+(split; run as a perf script so perf's own Python API parses `perf.data`, not a regex).
+
+```sh
+# capture-perf.sh <periodMS> <durationSec> <out.data> [url] [freqHz]
+"$SKILL"/capture-perf.sh 60000 1200 /tmp/jsc-trace/perf.data http://localhost:8080
+TRACE_AUX=/tmp/jsc-trace-aux perf script -i /tmp/jsc-trace/perf.data -s "$SKILL"/split-perf.py
+```
+
+How it works and the load-bearing details:
+- **Event group** (`PERF_EVENTS`, default `cycles,instructions,l1d_cache_refill,ll_cache_miss_rd,
+  stall_backend`). Sampled as *independent* events (not a leader-sampled `{...}:S` group):
+  `perf script`/its Python API expose only the group *leader's* value per sample, so member
+  counters can't be read back. With independent events each sample carries one event's name +
+  `period`, and summing `period` per event over a marker window gives that window's total
+  cycles/instructions/misses. Five events fit the Neoverse-N1 PMU with no multiplexing (cycles
+  on the fixed counter + 4 of 6 programmable). On another uarch, set `PERF_EVENTS`.
+- **Clock:** `perf record --clockid=monotonic` puts sample timestamps on `CLOCK_MONOTONIC`, the
+  same base as JSC's `MonotonicTime` markers, so `split-perf.py` matches samples to spans with
+  no conversion. (`monotonic`, not `monotonic_raw` -- WTF `MonotonicTime` uses `CLOCK_MONOTONIC`.)
+- **Call graphs are off by default.** Per-function attribution needs only the leaf symbol;
+  recording a callchain per sample makes `perf.data` ~7x larger (1.1 GB vs 165 MB for 150 s) and
+  the `perf script` Python pass minutes-long (it symbolizes every frame of every sample; a 1.1 GB
+  file timed out at 5 min, the 165 MB one split in 43 s). Set `CALLGRAPH=fp` only when you want
+  `split-perf.py`'s cache-miss flamegraph (`.folded`) output; leaf-only folded stacks are written
+  regardless.
+- **split-perf.py** reads the marker files from `TRACE_AUX`, keeps only GC-thread samples of the
+  marker-emitting process (same rule as split-trace.py), assigns each to the phase whose span
+  contains its timestamp, and per phase prints **IPC**, **L1D-refill MPKI**, **LL-read-miss MPKI**,
+  **backend-stall %cycles**, plus per-function tables ranked by each miss event (with each
+  function's local IPC). Env: `GC_PREFIX`, `PERF_OUTDIR`, `ALL_THREADS`.
+- **Symbols:** user-space JSC symbolizes (the `.so` has them); kernel frames are `[unknown]`
+  (`kptr_restrict`), and JIT code is `[unknown]` because JIT dump is off -- irrelevant for the
+  C++ GC phases. Low-IPC + high-miss functions are the memory-access hotspots to attack.
 
 ## macOS vs Linux
 
@@ -235,7 +338,9 @@ The scripts branch on `uname -s`.
 | stop patterns | `com.apple.WebKit.{WebContent,GPU,Networking}` | `WebKit{Web,GPU,Network}Process` |
 | GC thread names | full (`"Heap Helper Thread"`) | truncated to 15 chars by `prctl(PR_SET_NAME)` (`"Heap Helper Thr"`) -- the splitter matches by shared prefix |
 | idle-wait leaves | `__psynch_cvwait`, `semaphore_wait_*`, `mach_msg2_trap` | `futex`, `__futex_abstimed_wait_*`, `poll`, `nanosleep` -- both sets are in the splitter |
-| prereq | `samply setup` | `perf_event_paranoid <= 1` |
+| JIT dump | `useJITDump=1` (default on) | `useJITDump=0` (default off) -- `useJITDump=1` segfaults the process in ~2s here; C++ GC needs no JIT symbols anyway |
+| faithful-unwind codegen | Apple clang: `-mllvm -enable-machine-outliner=never -Xclang -fno-split-cold-code` via `BaseTarget.xcconfig` | GCC: `-fno-reorder-blocks-and-partition`; clang: as macOS. Passed via `--cmakeargs="-DCMAKE_CXX_FLAGS='...'"` (frame pointers already on) |
+| prereq | `samply setup` | `perf_event_paranoid <= 1` (set on the **host** if in a container) |
 
 ## Debug info: what you get
 
@@ -251,9 +356,39 @@ The scripts branch on `uname -s`.
 
 ## Gotchas
 
+- **perf install on this box.** `perf` is not preinstalled and the running kernel is a custom
+  System76 build (`7.0.11-76070011-generic`); the AWS `linux-tools` variant present ships only
+  `cpupower`/`usbip`, no `perf`. Install `linux-perf` (`sudo apt-get update && sudo apt-get install
+  -y linux-perf`) -- it provides `/usr/bin/perf` (7.0.x, close enough to the kernel; perf tolerates
+  a minor-version skew). samply worked before this because it calls `perf_event_open` directly and
+  needs no `perf` binary. `perf data convert --to-json` is NOT usable for the split -- it omits the
+  per-sample event name and period; use the `perf script -s` Python API (what `split-perf.py` does).
+- **Linux/GTK: `JSC_useJITDump=1` crashes the MiniBrowser *UI* process on startup.** Root-caused
+  with gdb: `WTFCrash()` inside `WTF::initializeMainThread()`'s `call_once` body (MainThread.cpp),
+  during `WebKit::InitializeWebKit2()` -- *not* the PerfLog `mmap(PROT_EXEC)`, and *not* a samply
+  interaction (a direct MiniBrowser run crashes identically; the no-JITDump control runs fine).
+  Disabling the sandbox (`WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1`) and setting `jitDumpDirectory`
+  are necessary but **not sufficient** -- the UI-process init crash remains. What *does* work:
+  - the **jsc shell** with `JSC_useJITDump=1 JSC_jitDumpDirectory=<dir>` writes a valid jitdump and
+    does not crash (use this for JS/JIT symbols when profiling the shell, e.g. a JS3 subtest);
+  - the browser's **web process** writes its jitdump too (confirmed under `WEB_PROCESS_CMD_PREFIX`
+    gdb) -- it is only the UI process that dies, taking the capture down with it.
+  So `capture.sh` defaults JIT dump **off** on Linux (`JITDUMP` env: auto = on for Darwin, off for
+  Linux; `JITDUMP=1` forces it, at the cost of the UI-process crash). GC sections are C++, so no JIT
+  symbols are lost for GC work. If a Linux capture comes back tiny and web-process-free, a dead web
+  process or an accidental `JITDUMP=1` is why -- check for a non-empty `marker-<webpid>-<webpid>.txt`.
+- **`pkill -f <WebKit-process-name>` self-kill footgun.** `capture.sh`'s `stop_browser` runs
+  `pkill -f WebKitWebProcess` etc. `pkill -f` matches against the *full command line*, so any
+  *other* shell you have running whose argv contains that literal string (e.g. a `pgrep -af
+  WebKitWebProcess` or a `grep WebKitWebProcess` you launched to watch progress) gets killed too
+  -- observed as a spurious exit 144 on the watcher shell. When monitoring a running capture, do
+  not put the process names literally in the watching command: use `ps -e -o comm= | grep -c -e
+  Mini -e WebKit`, or match by build path (`pkill -f "$DIR/bin/Web"`), or just read the aux dir.
 - Marker phase name lives in `markers.data[j]["name"]` (a stringArray index), NOT the
   `markers.name` column (which samply sets to the type `"SimpleMarker"`). The splitter
   reads `data.name`.
+- Launch captures detached (`nohup capture.sh ... &`) and watch via the aux dir / a bounded
+  background poll, not a foreground `sleep` -- this harness blocks standalone foreground sleeps.
 - samply has no per-thread sampling filter: `--main-thread-only` drops the marking helper
   threads, and `-p PID` attaches without the preload so markers/jitdump vanish. Filter in
   the splitter instead. The dominant noise thread (`RemoteAudioDestinationProxy render

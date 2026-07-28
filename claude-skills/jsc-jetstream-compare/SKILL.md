@@ -301,7 +301,9 @@ cat /sys/class/thermal/thermal_zone0/temp                   # server ARM idles ~
 ```
 
 - **Pin every run with `taskset -c <lo-hi>`** (e.g. `taskset -c 2-9`) so placement is identical across
-  cells; give concurrent-JIT threads room (don't pin to a single core when `--useConcurrentJIT=1`).
+  cells; give concurrent-JIT threads room (don't pin to a single core when `--useConcurrentJIT=1`). To
+  pin down to a small core count on purpose (a 2-core device simulation), `taskset` alone is not
+  sufficient — see [Simulating a small device](#simulating-a-small-device-pinning-to-exactly-n-cores-eg-2).
 - **`caffeinate` and `quiesce.sh` do not exist on Linux.** For a headless jsc run, screen blanking is
   irrelevant (no display dependency); only a full system suspend matters. Check
   `gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type` — if `'nothing'`, the
@@ -311,6 +313,73 @@ cat /sys/class/thermal/thermal_zone0/temp                   # server ARM idles ~
   `xset s off; xset -dpms`. `systemd-inhibit`'s idle lock alone does not stop GNOME blanking.)
 - The **Bash tool here runs bash** (unquoted variables *do* word-split), but still build `shuf` lists
   and arrays explicitly rather than relying on it.
+
+### Simulating a small device: pinning to exactly N cores (e.g. 2)
+
+Asked to measure "on 2 cores" (mobile/embedded-like contention), `taskset` alone is **not enough** and
+will silently produce a nonsense configuration. Four things are required; verify each at runtime, never
+assume.
+
+**1. Pin the browser, not the harness.** Put `taskset -c 4,5` in a per-cell wrapper that `exec`s the
+browser, so the UI process and everything it spawns (WebProcess, GPUProcess, NetworkProcess, even
+`gst-plugin-scanner`) inherits the mask, while `run-benchmark`'s python driver and its http server stay
+on the other cores and don't steal measured CPU. `run-benchmark` finds the browser by searching cwd then
+`$PATH` for a fixed name, so a dir containing an executable named `MiniBrowser` (or `cog`), prepended to
+`PATH`, pins the round to one build. Run from a neutral cwd so a checkout's
+`./Tools/Scripts/run-minibrowser` isn't picked up instead. Avoid core 0 (more IRQ work).
+
+**2. Override the core count — mandatory.** `WTF::numberOfProcessorCores()` on Linux is
+`sysconf(_SC_NPROCESSORS_ONLN)` (`Source/WTF/wtf/NumberOfCores.cpp`) and **ignores the affinity mask**,
+so JSC sizes its thread pools for the whole machine. Measured on an 80-core box pinned to 2 cores:
+
+| | GC markers | DFG | FTL | Wasm | Baseline |
+|---|---|---|---|---|---|
+| unpinned | 8 | 2 | 7 | 79 | 3 |
+| `taskset -c 4,5` only | 8 | 2 | 7 | **79** | 3 |
+| `taskset` + `WTF_numberOfProcessorCores=2` | 2 | 1 | 1 | 1 | 2 |
+
+Always export `WTF_numberOfProcessorCores=<N>` (its own env override, same file) in the wrapper so it
+reaches every child. Confirm with `jsc --dumpOptions=2 -e '' | grep -E 'numberOf(GCMarkers|.*CompilerThreads)'`.
+
+**3. Verify in the WebProcess, not just the UI process**, while a round is in flight:
+
+```bash
+for p in $(pgrep -f 'bin/(MiniBrowser|WebKitWebProcess|WebKitGPUProcess)'); do
+    grep -E '^Cpus_allowed_list' /proc/$p/status              # must be your core list
+    tr '\0' '\n' < /proc/$p/environ | grep WTF_numberOfProc   # must be present
+    ps -L -o tid=,ni=,cls=,comm= -p $p                        # nice + SCHED class per thread
+done
+```
+Thread nice/scheduling class is also the cheapest **build fingerprint** for an A/B: if the patch changes
+thread priorities, seeing them live proves which build a round actually measured, independently of paths.
+
+**4. Pin the CPU governor — on 2 mostly-idle cores, DVFS will dominate.** This is the trap that ruins
+core-constrained browser runs. With `schedutil` over a wide range (e.g. 1.0–3.0 GHz), a workload leaving
+half of two cores idle drops to the **minimum** frequency, so you measure the governor, not the code.
+Worse, it is not symmetric between cells: on kernels with
+`/proc/sys/kernel/sched_util_clamp_min_rt_default = 1024`, **any `SCHED_RR`/`SCHED_FIFO` thread that is
+merely *runnable* forces the policy maximum** (`uclamp_min`), so a build that creates RT threads
+(WebKitGTK does, via RealtimeKit — `EventDispatcher`, `Core: Scrolling`, `ReceiveQueue`) runs at a much
+higher clock than one that doesn't. A real case: MotionMark `Suits` scored 208 @ 1.84 GHz vs 126 @
+1.10 GHz across two builds — a "47% regression" that was **entirely clock**; score/GHz was flat at
+113.2 vs 115.4.
+
+- Set `performance` (or raise `scaling_min_freq`) **on the host** — `/sys` is typically read-only inside
+  a container, and `sudo` there cannot write it.
+- If you cannot pin the governor, **measure the clock alongside every round** and report score/GHz, not
+  just score: sample `/sys/devices/system/cpu/cpu<N>/cpufreq/scaling_cur_freq` (with `cppc_cpufreq` this
+  is a counter-derived average, not just the request) every 200 ms and average over the run. A clock gap
+  between cells invalidates the comparison; a flat score/GHz across cells means you found a DVFS
+  artifact, not a code change.
+- Suspect this whenever a regression is concentrated in one low-utilisation subtest while CPU-saturating
+  ones are flat, or when per-thread CPU time and work distribution are identical between cells yet the
+  score differs. `voluntary_ctxt_switches`/`nonvoluntary_ctxt_switches` from `/proc/<pid>/status` plus
+  per-thread CPU time are high-signal and far cheaper than a sampled profile for scheduling-shaped
+  effects — and in a container `samply`/`perf` may only manage ~18 Hz with unsymbolicatable leaves,
+  so counters may be all you get.
+
+Same-build-different-env cells (e.g. sweeping a tuning env var) share the RT/DVFS regime and stay
+comparable; only comparisons against a build whose *thread scheduling* differs are confounded.
 
 ### wkdev container access
 

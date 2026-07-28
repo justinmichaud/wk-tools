@@ -29,16 +29,26 @@ AUX="${TRACE_AUX:-/tmp/jsc-trace-aux}"
 mkdir -p "$AUX" "$(dirname "$OUT")"
 rm -f "$AUX"/marker-*.txt "$AUX"/jit-*.dump
 
-# JSC options: periodic full GC only, emit coarse GC-section markers + JIT dump,
-# to a fixed dir (so the file names are deterministic and samply can read them).
+# JSC options: periodic full GC only, emit coarse GC-section markers to a fixed dir
+# (so the file names are deterministic and samply can read them).
 JSC_OPTS=(
     "useFixedIntervalGCOnly=1"
     "fixedIntervalGCPeriodMS=$PERIOD_MS"
     "useTextMarkers=1"
-    "useJITDump=1"
     "textMarkersDirectory=$AUX"
-    "jitDumpDirectory=$AUX"
 )
+
+# JIT dump gives JS/JIT frame symbols. On Linux/GTK, JSC_useJITDump=1 makes the web
+# process exit within ~2s under samply (its perf jitdump mmap collides with samply's
+# own perf session), taking the whole capture with it, so it is off by default there.
+# GC sections run in C++ and need no JIT symbols. macOS keeps it on (validated, and
+# its JIT symbolication path differs). Force with JITDUMP=1 / disable with JITDUMP=0.
+if [ -z "${JITDUMP:-}" ]; then
+    [ "$OS" = "Darwin" ] && JITDUMP=1 || JITDUMP=0
+fi
+if [ "$JITDUMP" = 1 ]; then
+    JSC_OPTS+=("useJITDump=1" "jitDumpDirectory=$AUX")
+fi
 
 if [ "$OS" = "Darwin" ]; then
     DIR="${WEBKIT_BUILD:-$ROOT/WebKitBuild/Release}"
