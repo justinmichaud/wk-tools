@@ -1,6 +1,7 @@
 # Claude Code skills
 
-WebKit / JavaScriptCore skills for Claude Code. These are the real files; on each machine
+WebKit / JavaScriptCore skills for Claude Code (plus a few adjacent ones, e.g. Chromium build
+flags). These are the real files; on each machine
 `~/.claude/skills` is a symlink to *this* folder, so the repo is the single source of truth
 and Claude Code edits land here directly. `jsc` is the main skill and cross-references the
 others, so they live together. The sibling `../claude-settings.json` and `../claude-hooks/`

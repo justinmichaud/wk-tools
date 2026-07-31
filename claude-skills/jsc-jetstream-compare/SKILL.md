@@ -1,6 +1,6 @@
 ---
 name: jsc-jetstream-compare
-description: Use when measuring the JetStream3 performance impact of a JavaScriptCore (or WebKit) change — e.g. "run JetStream3 to measure this PR", "is there a regression on delta-blue", "compare perf of two commits". Builds before/after, runs JetStream3 either in MiniBrowser (official, Tools/Scripts/run-benchmark) or headless in the jsc shell (PerformanceTests/JetStream3/cli.js), compares per-subtest with Tools/Scripts/compare-results (Welch + FDR), and can narrow a regression to a loop via profiling and microbenchmarks.
+description: Use when measuring the JetStream3 (or Speedometer/MotionMark) performance impact of a JavaScriptCore or WebKit change — e.g. "run JetStream3 to measure this PR", "is there a regression on delta-blue", "compare perf of two commits", "benchmark this on 2 cores". Builds before/after, runs JetStream3 either in MiniBrowser (official, Tools/Scripts/run-benchmark) or headless in the jsc shell (PerformanceTests/JetStream3/cli.js), compares per-subtest with Tools/Scripts/compare-results (Welch + FDR), and can narrow a regression to a loop via profiling and microbenchmarks. Every run pins the CPU frequency unless told otherwise. Also covers core-constrained (small-device / N-core) runs, the DVFS traps that invalidate them, and the mandatory-GPU rules for Speedometer and MotionMark rounds.
 user-invocable: true
 allowed-tools:
   - Bash(make release:*)
@@ -27,6 +27,16 @@ allowed-tools:
   - Bash(gsettings:*)
   - Bash(systemd-inhibit:*)
   - Bash(xset:*)
+  # Core-constrained runs: config inspection, live verification, clock measurement:
+  - Bash(nproc:*)
+  - Bash(pgrep:*)
+  - Bash(ps:*)
+  - Bash(uclampset:*)
+  - Bash(perf stat:*)
+  - Bash(nvidia-smi:*)
+  - Bash(comm:*)
+  - Bash(sort:*)
+  - Bash(diff:*)
 ---
 
 # Measuring a JSC change on JetStream3 (statistically)
@@ -35,6 +45,35 @@ Compare two builds of a JSC/WebKit change per-subtest with `Tools/Scripts/compar
 t-test + FDR). `$WEBKIT_ROOT` is the repo root; run every `Tools/Scripts/*` from there. **baseline** =
 before the change (ToT); **patched** = after. JetStream3 is **bigger-is-better**: `b/a > 1` means
 patched is faster, `b/a < 1` is a regression.
+
+## Pin the CPU frequency before every run (required)
+
+**Every performance run in this skill pins the CPU frequency, unless the user explicitly asks otherwise.**
+Do this before the first round, for every suite (JS3, SP3, MotionMark) and both run modes — not just
+core-constrained runs. An unpinned clock is the most common way to produce a *confident, low-variance,
+completely wrong* number: DVFS responds to how much idle time a workload leaves, so it varies **between
+cells**, and the resulting delta looks exactly like a code change.
+
+```bash
+# Linux — do this on the HOST (see below), then verify:
+sudo cpupower frequency-set -g performance          # or: write 'performance' to each policy's
+                                                    # scaling_governor, or raise scaling_min_freq to max
+for p in /sys/devices/system/cpu/cpufreq/policy*; do cat $p/scaling_governor; done | sort -u  # want only 'performance'
+```
+
+- **`/sys` is typically read-only inside a container, and `sudo` there cannot write it** — pin on the
+  host. If you have no host access, use the `uclamp` fallback in
+  [Pinning the clock from inside a container](#pinning-the-clock-from-inside-a-container-uclamp),
+  which needs no privileges at all.
+- **Verify the clock you actually got, and don't trust `scaling_cur_freq` to tell you** — it is the
+  governor *setpoint* on some drivers, so an idle core reads the policy max (see
+  [the clock-measurement notes](#simulating-a-small-device-pinning-to-exactly-n-cores-eg-2)).
+- **macOS has no governor knob.** The analogous requirements are AC power, settled thermals, no
+  competing load, and a **fixed display refresh rate** (ProMotion/VRR jitters rAF-driven runs) — all
+  handled or warned about by `quiesce.sh`.
+- **If you cannot pin it, DO NOT PROCEED!**
+- If the user *does* ask for the machine's default governor (e.g. to reproduce a user-visible effect),
+  that's fine — state the governor and range in the report so the number isn't mistaken for a pinned one.
 
 ## Pick a run mode first — it decides which build and commands you use
 
@@ -87,9 +126,15 @@ Limiting subtests exists to avoid waiting for a full run, so don't turn scoping 
 ## Baseline vs patched
 
 - **Uncommitted working-tree change:** patched = working tree, baseline = `HEAD`. Base sha `git rev-parse HEAD`.
-- **A different commit / PR:** patched = `HEAD`, baseline = `HEAD~1` (or `git merge-base HEAD main` for
-  a whole branch vs trunk). Base sha = the baseline commit. The skill does **not** switch the tree to
+- **A different commit / PR:** patched = `HEAD`, baseline = `HEAD~1` (or the branch point for a whole
+  branch vs trunk). Base sha = the baseline commit. The skill does **not** switch the tree to
   build this — check out and build the baseline yourself and point the run at its build dir.
+- **`git merge-base HEAD main` is only the branch point if local `main` is current — verify it.** A
+  stale local `main` silently gives a baseline hundreds or thousands of commits too old (a real case
+  here: 2860 commits / 23k files, WebKitGTK 2.53.3 vs 2.53.4), so you measure release drift, not the
+  patch. Check `git log --oneline -1 main` against the remote, or just use `HEAD~<N>` / the actual
+  parent when the branch's commit count is known. Sanity-check the diff size:
+  `git diff --stat <baseline>..HEAD` should look like the change under test.
 
 The base sha keys the cached baseline build. Note which baseline you chose in the report.
 
@@ -151,6 +196,19 @@ ProMotion/VRR is the one thing quiesce.sh can only warn about, and rAF-driven ru
 cancel thermal/background drift, one JSON per round. List names with `run-benchmark --plan jetstream3
 --list-subtests` (this plan's set differs from the in-tree `PerformanceTests/JetStream3` — e.g. it has
 `bigint-noble-ed25519`, not `-secp256k1`).
+
+**The plan's `subtests` list is incomplete — it gates `--subtests`, not the suite.** `jetstream3.plan`
+enumerates only **74 of the 77 subtests JetStream3.0 actually runs**; `bomb-workers` and `segmentation`
+are among the missing ones. Consequences, both silent-ish:
+
+- With **no** `--subtests` flag the full 77 run regardless — the list only declares what `--subtests`
+  *may* select. So a full-suite comparison is unaffected.
+- `--subtests bomb-workers` prints `... is not a valid subtest, skipping` and produces an **empty run**.
+  If you need one of the missing names, copy the plan, add the names to its `subtests` list, and pass
+  the **path** to `--plan` (`_find_plan_file()` accepts an existing path) — no need to dirty the tree.
+
+Both missing names are `Worker`-driven, and they are also the ones the headless jsc path cannot run at
+all — so check whether they are present before concluding a change is Worker-neutral.
 
 ```bash
 J3=/tmp/js3-runs; mkdir -p "$J3"
@@ -294,11 +352,14 @@ A server-class box is usually already quiet — check, don't assume:
 
 ```bash
 nproc
-cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor   # want performance (often already set,
-                                                            # and not writable inside a container)
 cat /proc/loadavg                                           # want it low
 cat /sys/class/thermal/thermal_zone0/temp                   # server ARM idles ~35C, no throttling
 ```
+
+**The CPU frequency must already be pinned before you get here** — that is a hard prerequisite for every
+run, not a Linux nicety; see
+[Pin the CPU frequency before every run](#pin-the-cpu-frequency-before-every-run-required). Confirm it
+rather than assuming a server-class box is set up that way (this box defaults to `schedutil` 1.0–3.0 GHz).
 
 - **Pin every run with `taskset -c <lo-hi>`** (e.g. `taskset -c 2-9`) so placement is identical across
   cells; give concurrent-JIT threads room (don't pin to a single core when `--useConcurrentJIT=1`). To
@@ -314,11 +375,22 @@ cat /sys/class/thermal/thermal_zone0/temp                   # server ARM idles ~
 - The **Bash tool here runs bash** (unquoted variables *do* word-split), but still build `shuf` lists
   and arrays explicitly rather than relying on it.
 
-### Simulating a small device: pinning to exactly N cores (e.g. 2)
+---
+
+## Simulating a small device: pinning to exactly N cores (e.g. 2)
+
+Applies to **both** run modes — the browser sections above and the headless one. Read it in full before
+the first round; most of these mistakes are only detectable while a round is in flight.
 
 Asked to measure "on 2 cores" (mobile/embedded-like contention), `taskset` alone is **not enough** and
-will silently produce a nonsense configuration. Four things are required; verify each at runtime, never
-assume.
+will silently produce a nonsense configuration. Six things are required; verify each at runtime, never
+assume. Items 5–6 are about keeping the two cells honest and are not 2-core-specific, but a
+core-constrained A/B is where they bite hardest (small deltas, long rounds, many rebuilds).
+
+Every one of these was hit in real work here and each produced *plausible* numbers while being wrong —
+that is the hazard. Budget for a **preflight step that asserts the two cells differ only by the patch**
+(same lib set, same core count, same core list, same governor, correct RPATH) and re-assert it after
+every round, rather than trusting setup done once at the start.
 
 **1. Pin the browser, not the harness.** Put `taskset -c 4,5` in a per-cell wrapper that `exec`s the
 browser, so the UI process and everything it spawns (WebProcess, GPUProcess, NetworkProcess, even
@@ -341,45 +413,125 @@ so JSC sizes its thread pools for the whole machine. Measured on an 80-core box 
 Always export `WTF_numberOfProcessorCores=<N>` (its own env override, same file) in the wrapper so it
 reaches every child. Confirm with `jsc --dumpOptions=2 -e '' | grep -E 'numberOf(GCMarkers|.*CompilerThreads)'`.
 
-**3. Verify in the WebProcess, not just the UI process**, while a round is in flight:
+**3. Verify in the WebProcess, not just the UI process**, while a round is in flight. **Never identify
+WebKit's auxiliary processes by `/proc/<pid>/comm` — the kernel truncates it to 15 characters**, so
+`WebKitWebProcess` appears as `WebKitWebProces` and `WebKitNetworkProcess` as `WebKitNetworkPr`. An
+exact-comm match therefore finds only `MiniBrowser` and **silently reports a plausible-looking subset**
+(here: 27 threads instead of 734, missing every JIT/GC/marking thread — i.e. all the interesting ones).
+Match `argv[0]`'s basename from `/proc/<pid>/cmdline` instead, and sanity-check that all the process
+kinds you expect actually appear before believing any per-thread summary. `pgrep -f` is also required
+for these names, and warns when given a >15-char pattern:
 
 ```bash
 for p in $(pgrep -f 'bin/(MiniBrowser|WebKitWebProcess|WebKitGPUProcess)'); do
     grep -E '^Cpus_allowed_list' /proc/$p/status              # must be your core list
     tr '\0' '\n' < /proc/$p/environ | grep WTF_numberOfProc   # must be present
-    ps -L -o tid=,ni=,cls=,comm= -p $p                        # nice + SCHED class per thread
+    ps -L -o tid=,cls=,comm= -p $p                            # thread list, for a cell-vs-cell diff
 done
 ```
-Thread nice/scheduling class is also the cheapest **build fingerprint** for an A/B: if the patch changes
-thread priorities, seeing them live proves which build a round actually measured, independently of paths.
+Capture this for both cells and diff it: identical thread inventories are cheap evidence that the cells
+differ only by the patch, and any live per-process property the patch changes doubles as a **build
+fingerprint** proving which build a round actually measured, independently of paths.
 
-**4. Pin the CPU governor — on 2 mostly-idle cores, DVFS will dominate.** This is the trap that ruins
-core-constrained browser runs. With `schedutil` over a wide range (e.g. 1.0–3.0 GHz), a workload leaving
-half of two cores idle drops to the **minimum** frequency, so you measure the governor, not the code.
-Worse, it is not symmetric between cells: on kernels with
-`/proc/sys/kernel/sched_util_clamp_min_rt_default = 1024`, **any `SCHED_RR`/`SCHED_FIFO` thread that is
-merely *runnable* forces the policy maximum** (`uclamp_min`), so a build that creates RT threads
-(WebKitGTK does, via RealtimeKit — `EventDispatcher`, `Core: Scrolling`, `ReceiveQueue`) runs at a much
-higher clock than one that doesn't. A real case: MotionMark `Suits` scored 208 @ 1.84 GHz vs 126 @
-1.10 GHz across two builds — a "47% regression" that was **entirely clock**; score/GHz was flat at
-113.2 vs 115.4.
+**4. Pin the CPU frequency — mandatory everywhere, and doubly so here.** Follow
+[Pin the CPU frequency before every run](#pin-the-cpu-frequency-before-every-run-required); this section
+only adds what is specific to a core-constrained run. Two cores running a benchmark leave a *lot* of idle
+time, and DVFS reacts to exactly that: with `schedutil` over a wide range (e.g. 1.0–3.0 GHz) a workload
+leaving half of two cores idle sinks toward the **minimum** frequency, so an unpinned core-constrained
+run measures the governor rather than the code. The effect is large enough to swamp any plausible code
+delta — a real case: MotionMark `Suits` scored 208 @ 1.84 GHz in one cell vs 126 @ 1.10 GHz in the other,
+a "47% regression" that was **entirely clock** (score/GHz flat at 113.2 vs 115.4).
 
-- Set `performance` (or raise `scaling_min_freq`) **on the host** — `/sys` is typically read-only inside
-  a container, and `sudo` there cannot write it.
-- If you cannot pin the governor, **measure the clock alongside every round** and report score/GHz, not
-  just score: sample `/sys/devices/system/cpu/cpu<N>/cpufreq/scaling_cur_freq` (with `cppc_cpufreq` this
-  is a counter-derived average, not just the request) every 200 ms and average over the run. A clock gap
-  between cells invalidates the comparison; a flat score/GHz across cells means you found a DVFS
-  artifact, not a code change.
+Because the clock is the dominant term, **verify the achieved frequency per cell even after pinning**,
+and treat any cross-cell clock gap as invalidating that comparison.
+
+- **`scaling_cur_freq` is the governor *setpoint* on some drivers, not an achieved clock.** With
+  `cppc_cpufreq` under `performance` an entirely idle core reads the policy max (3000000), so sampling
+  it "confirms" a clock that was never delivered. Measure the **effective** clock instead, per browser
+  PID: `perf stat -e cycles` divided by `task-clock` over the sampled window. Report score/GHz, not just
+  score. A clock gap between cells invalidates the comparison; a **flat score/GHz across cells means
+  you found a DVFS artifact, not a code change.**
+- **When `perf` is unavailable, use the ACPI CPPC feedback counters.** In a container the PMU is often
+  not exposed at all (`perf stat -e cycles:u` → `EINVAL`, "No supported events found") even at
+  `perf_event_paranoid=2`. On a CPPC platform (`scaling_driver` = `cppc_cpufreq`, common on server ARM)
+  `/sys/devices/system/cpu/cpu*/acpi_cppc/` is world-readable and needs no privileges:
+  `feedback_ctrs` gives `ref:<N> del:<N>`, and
+  `MHz = reference_perf * (Δdel/Δref) * nominal_freq/nominal_perf`. Snapshot before and after and diff;
+  the counters are cumulative, so a slow sampling rate costs only trajectory resolution, not accuracy.
+- **Calibrate any clock metric against known duty cycles before trusting it, and state which average
+  it is.** Pin busy loops at 100/50/25% duty and check what the metric reads. The CPPC pair measured
+  here is **wall-clock referenced** (100% → 3000 MHz, 50% → 2185, 25% → 1282), i.e. a *time*-weighted
+  average that **includes idle time** — not "the clock while executing". Consequences: on a many-core
+  box a few-thread benchmark leaves every core mostly idle, so the per-core average sits near the
+  policy floor and the machine-wide figure says more about idleness than about the workload. Report the
+  machine-wide average *and* a busy-time-weighted one, and do not try to invert
+  `M = busy·f_busy + (1−busy)·f_idle` for `f_busy` — at low busy fractions the inversion amplifies
+  `/proc/stat` tick error and returns impossible values (>policy max). To get the clock the work
+  actually ran at, `taskset` the browser to a few cores so the busy fraction is high and the metric
+  reads it directly.
+- **Measure the clock in dedicated rounds, excluded from scored data — the probe perturbs the run.**
+  Attaching a `perf` clock probe every 8 s stretched one JS3 round from the normal 220–247 s to
+  **1028 s** at 53% CPU. Never score a round you instrumented.
 - Suspect this whenever a regression is concentrated in one low-utilisation subtest while CPU-saturating
   ones are flat, or when per-thread CPU time and work distribution are identical between cells yet the
   score differs. `voluntary_ctxt_switches`/`nonvoluntary_ctxt_switches` from `/proc/<pid>/status` plus
   per-thread CPU time are high-signal and far cheaper than a sampled profile for scheduling-shaped
   effects — and in a container `samply`/`perf` may only manage ~18 Hz with unsymbolicatable leaves,
   so counters may be all you get.
+- **Which comparisons survive an unpinned clock:** cells built from the same source that differ only in
+  their environment (a tuning env var, a variant worktree) share whatever DVFS regime the machine is in
+  and stay comparable, whereas a baseline-vs-patched delta does not. So if pinning is genuinely
+  unavailable, restructure the question into same-build cells rather than trusting a baseline delta.
 
-Same-build-different-env cells (e.g. sweeping a tuning env var) share the RT/DVFS regime and stay
-comparable; only comparisons against a build whose *thread scheduling* differs are confounded.
+**5. Keep each cell loading its own libraries** (GTK/container builds — the highest-severity trap here,
+because it produces scores from the *wrong build*). In a webkit-container-sdk setup `/sdk/webkit` is a
+**single symlink shared by every tree**, and all binaries carry the absolute RPATH
+`/sdk/webkit/WebKitBuild/GTK/Release/lib`. `build-webkit` repoints that symlink, so **after building
+tree B, tree A's MiniBrowser loads B's libraries** — or the *system* WebKitGTK, which at least fails
+loudly (`symbol lookup error`). `LD_LIBRARY_PATH` cannot fix it: `DT_RPATH` wins. Either:
+
+- point the symlink per round and assert it —
+  `WEBKIT_SOURCE_DIR=<tree> Tools/Scripts/container-sdk-rootdir-wrapper --create-symlink`, check the
+  target inside the wrapper immediately before `exec`, and re-check after the round finished; or
+- run each cell under that wrapper's default mode (a private mount namespace bind-mounting the cell's
+  own tree at `/sdk/webkit`) — hermetic, and the better default.
+
+Keep the baseline in a `git worktree` rather than stashing back and forth, so both trees exist
+simultaneously and can be rebuilt independently.
+
+**6. Build the *same* target set in both cells, then diff the outputs.** Trimming the build to save time
+is how cells silently diverge: `--makeargs="MiniBrowser WebKitWebProcess ..."` does **not** build
+`webkitgtkinjectedbundle`, so one cell logged `Error loading the injected bundle`, ran without it, **and
+still produced scores** while the other loaded it. Name `webkitgtkinjectedbundle` explicitly in both,
+then diff `lib/*.so*` and `bin/` between the trees (`LC_ALL=C sort` the listings — unsorted input makes
+`comm` lie). Grep every round's log for `Error loading the injected bundle` and discard the round.
+
+#### Building two trees on one box
+
+- **Don't run two `-j40` WebKit builds concurrently on a ~125 GB box — it global-OOMs** (`cc1plus` on
+  `JSDOMWindow.cpp` peaks ~4.5 GB RSS). Build the cells **sequentially at `-j32`**.
+- **GCC 15.2 `-Werror=uninitialized` false positives** break `TestWebKitAPI/Tests/WTF/HashSet.cpp` in
+  any tree (and WebCore `UnifiedSource-css-18.cpp` on older `main`).
+  `-DDEVELOPER_MODE_FATAL_WARNINGS=OFF` is the clean escape — diagnostics only, **no codegen change**,
+  so it does not affect the comparison. Prefer it over patching source in one cell only.
+- A 5 GiB ccache is too small for two WebKit trees (~22% hit rate); raise it or expect full rebuilds.
+
+#### Pinning the clock from inside a container (`uclamp`)
+
+When `/sys` is read-only and you have no host access, prompt the user. DO NOT TRY TO WORK AROUND THIS!
+
+#### Sandboxing, budget, and what to report
+
+- **bwrap does not work inside a podman container** ("Bubblewrap does not work inside of this container")
+  regardless of launcher, so **all numbers from such a container are unsandboxed** — state that in the
+  report, since the sandbox has its own cost.
+- **Budget:** on 2 pinned cores a full 77-subtest JS3 round is ≈ **4 min**; a 6-subtest subset ≈ **48 s**.
+  Interleaved, that is ~8 min per JS3 round-pair — so 6 rounds/cell is roughly an hour, and SP3 rounds
+  (12/cell is a reasonable target for a ~1% effect) dominate a session. Plan the round count against the
+  equivalence margins *before* starting.
+- **A change can move two suites in opposite directions**, so when the user cares about more than JS3,
+  run each suite they named and report them separately with their movers named — an overall geomean from
+  one suite is not evidence about another.
 
 ### wkdev container access
 
@@ -416,16 +568,23 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0
 
 Every browser round (**Speedometer and MotionMark especially**) must render on the GPU. **Never
 permit software rendering** — it is not just noisier, it produces a *different, meaningless* score
-(MotionMark ≈ **1050 on the GPU vs ≈ 2.6 on llvmpipe** — a ~400× gap; Speedometer is also depressed).
+(MotionMark ≈ **1050 on the GPU vs ≈ 2.6 on llvmpipe** — a ~400× gap; Speedometer ≈ **7.2 vs 6.8**).
 A "quiet, low-variance" software number is worthless. Enforce this:
+
+**JS3 is the exception:** it is JS-bound and GPU-invariant, so a software compositor is acceptable for
+JetStream3 (it only needs rAF to fire at all). SP3 and MotionMark are not — never accept software there.
+Do not assume the box is headless because you reached it over ssh: a wkdev container commonly has a real
+mutter/GNOME Wayland desktop and a discrete GPU mounted through.
 
 - **Detect the fallback and reject the round.** After each run, grep its log for
   `libEGL.*fd -1`, `llvmpipe`, `swrast`, `SwiftShader` — any hit means the WebProcess software-rendered;
   delete that JSON and re-run. Bake this guard into the loop (a round that silently fell back to
   software otherwise pollutes the comparison).
 - **On a workstation with a real GPU, use the real desktop compositor `wayland-0`** (mutter, backed by
-  the discrete GPU). Confirm real HW with `nvidia-smi` (util climbs, `fd -1` absent) — a bare
-  `WAYLAND_DISPLAY=wayland-0` is not proof by itself.
+  the discrete GPU): `export WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland
+  XDG_RUNTIME_DIR=/run/user/$(id -u)` and **`unset DISPLAY`** so GTK cannot quietly fall back to
+  Xwayland (which reintroduces software paths). Confirm real HW with `nvidia-smi` (util climbs,
+  `fd -1` absent) — a bare `WAYLAND_DISPLAY=wayland-0` is not proof by itself.
 - **The display must stay awake for the whole experiment.** mutter throttles `requestAnimationFrame`
   frame-callbacks for any surface it isn't presenting — a **blanked/asleep monitor, a locked session,
   or an occluded/unfocused window all stall every rAF-driven benchmark** (SP3/MM/JS3 hang, then
@@ -444,9 +603,42 @@ A "quiet, low-variance" software number is worthless. Enforce this:
   completes cleanly on an idle machine. Never run two GPU rounds (or a debug experiment) at once, and
   never overlap a GPU loop with another measurement loop — the overlap both crashes runs and
   contaminates the concurrent one's variance.
-- **Beware self-terminating `pkill`.** `pkill -f 'run-benchmark'` (or any pattern that appears in the
-  cleanup command's own line) kills the very shell running it (exit ~143/144, nothing runs). Match the
-  actual binary (`bin/MiniBrowser`, `WebKitWebProcess`) instead.
+- **Beware self-terminating `pkill`/`pgrep`.** `pkill -f 'run-benchmark'` — or `pgrep -f <pat> | xargs
+  kill`, or an `until ! pgrep -f <pat>` wait loop — kills the very shell running it whenever the pattern
+  appears in that command's own `/proc/self/cmdline` (exit ~143/144, nothing runs). Naming the binary
+  (`bin/MiniBrowser`) does **not** help: the string is still in your command line. Always bracket a
+  character so the pattern cannot match itself: `pgrep -f 'MiniBrow[s]er'`, `pgrep -f 'run-benchmar[k]'`.
+  **Bracketing is not sufficient inside a harness.** `pkill -f 'MiniBrow[s]er'` still matches any *other*
+  shell whose command line contains the literal string — including the tool call that launched the
+  harness, if that command merely `cat`s or `grep`s a wrapper named `MiniBrowser`. Killing browsers from
+  inside a script must therefore match on **`/proc/<pid>/exe`**, which only a real browser process has
+  pointing into a build dir, and skip `$$`:
+  ```bash
+  kill_browsers() { local pid exe; for pid in $(ls /proc | grep -E '^[0-9]+$'); do
+      [ "$pid" = $$ ] && continue
+      exe=$(readlink -f /proc/$pid/exe 2>/dev/null) || continue
+      case "$exe" in */WebKitBuild/*/bin/MiniBrowser|*/WebKitBuild/*/bin/WebKit*Process) kill -9 "$pid";; esac
+    done; }
+  ```
+- **Launch every long-running job with `setsid`, and have the launching tool call return immediately.**
+  A backgrounded `nohup ... &` is still in the tool call's process group, so when that call hits its
+  timeout the whole group gets SIGTERM — a 20-minute build died at `ninja: build stopped: interrupted by
+  user` because the launching call slept past its limit. `setsid nohup cmd >log 2>&1 </dev/null & disown`
+  survives, and the wait belongs in a *separate* backgrounded call.
+- **Verify only one instance of a sweep/loop is running before trusting its output.** A killed tool call
+  does not necessarily kill the script it launched: an earlier `sweep.sh 0 0` survived its parent's death
+  and ran concurrently with a freshly launched `sweep.sh 1 1`, two browsers at a time, each killing the
+  other's processes. The tell was a cycle number in the log that no live invocation could have produced.
+  `pgrep -af <script>` before every launch, and treat an unexpected cycle/round label as contamination.
+- **Don't gate a wait loop on a process that hasn't started yet.** `until ! pgrep -f 'run-benchmar[k]';
+  do sleep 15; done` right after launching the runner in the background exits immediately — the runner
+  needs a second or two to exec. Wait for the output file to appear, or sleep once before the loop.
+- **Never read build progress from a `tail` of a piped ninja log.** The wrapper buffers in multi-KB
+  chunks, so the last line lags by minutes and makes a healthy build look stalled (and then look like it
+  leapt forward). Measure throughput from ground truth instead — `find <builddir> -name '*.o' | wc -l`
+  over a fixed interval — and use an **absolute** builddir path: a `cd` inside a previous tool call does
+  not persist, so a relative `find .` silently counts a different directory and manufactures a phantom
+  stall.
 
 ---
 
@@ -525,6 +717,27 @@ non-significant; the category breakdown was First-weighted. Conclusion: diffuse 
   them apart.
 - Report: baseline used (HEAD~1 vs main vs working tree), run mode (browser/headless), rounds run,
   overall `b/a` + pValue, the FDR-significant movers, and (if root-caused) the loop or the diffuse finding.
+- Say which frequency regime you measured in (pinned, or the governor and its range), and note anything
+  that makes the numbers non-comparable to a default desktop (unsandboxed container, pinned core subset,
+  overridden core count).
+
+## Record what you learn here, not in project memory
+
+Benchmarking sessions produce durable knowledge — a new trap, a verification step, a threshold, a tool
+invocation that finally worked. **Any of it that would still be true on another machine or in another
+checkout belongs in this file, edited in place. Never store a global rule in project memory:** memory is
+keyed to one checkout path on one workstation and the user works across several, so a rule left there
+silently fails to travel with them. Add the general form to the right section here, and let the example
+that taught it stay an example.
+
+Project memory is for what genuinely does not generalise: this box's hardware and paths, in-flight
+project state, and *measured results* for a particular branch (those belong in memory, not here — this
+file must stay a methodology, not a findings log). If you find a global rule sitting in memory, move it
+here and delete it there.
+
+Deliberately **out of scope for this skill**: thread-priority and scheduling tuning guidance (nice
+levels, RT policies, priority brokers). Do not add it back — `uclamp` appears here only as a way to pin
+the clock. Suite-specific tuning findings for a given branch go in the report or project memory.
 
 ## Shared determinism principles
 
@@ -541,5 +754,10 @@ result. Beyond that:
   microbenchmarks.
 - Keep raw JSONs/CSVs under `/tmp/js3-runs/` so the user can inspect every number.
 - **Long / overnight runs:** write each round's JSON the moment it finishes so the run survives a restart or context compaction, and never stop because the context grew long or was compacted — the only stop is the decision rule. Kill leftover `jsc`/profiler processes between and after rounds (a hung profiler times out the whole suite — `exit 124`, no JSON), pin with `taskset`, and give each round a timeout.
-- Platform quiescing lives with each run mode: `quiesce.sh` under [Browser](#quiesce-then-run-interleaved),
-  `taskset`/governor under [Linux quiescing](#linux-quiescing).
+- **A pinned CPU frequency is a prerequisite for every run** — see
+  [Pin the CPU frequency before every run](#pin-the-cpu-frequency-before-every-run-required). The rest of
+  the platform quiescing lives with each run mode: `quiesce.sh` under
+  [Browser](#quiesce-then-run-interleaved), `taskset` under [Linux quiescing](#linux-quiescing). For a
+  core-constrained run (`taskset` + core-count override + pinned clock + hermetic cells) see
+  [Simulating a small device](#simulating-a-small-device-pinning-to-exactly-n-cores-eg-2) — `taskset`
+  alone silently produces a wrong configuration.

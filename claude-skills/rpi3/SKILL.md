@@ -97,6 +97,20 @@ The helper scripts hard-code `/run/user/1000` + `wayland-1`; update them if west
 
 ## 4. Launching benchmarks
 
+**Pin the CPU frequency first, unless the user says otherwise** — required for every perf run, and this
+board throttles readily. Check and pin over ssh before the first round, and re-check after (a thermal or
+under-voltage event can knock it back):
+
+```sh
+for p in /sys/devices/system/cpu/cpufreq/policy*; do cat $p/scaling_governor; done | sort -u   # want 'performance'
+echo performance | tee /sys/devices/system/cpu/cpufreq/policy*/scaling_governor                # as root
+vcgencmd measure_clock arm; vcgencmd get_throttled                                             # 0x0 = never throttled
+```
+
+`get_throttled` non-zero means the score is thermal/voltage-limited, not a code result — report it rather
+than comparing across it. If the governor is not writable on this image, say so and report the observed
+clock alongside every score.
+
 Benchmark URLs (browserbench.org):
 | Bench | URL |
 |-------|-----|

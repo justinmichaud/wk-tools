@@ -22,6 +22,28 @@ allowed-tools:
 
 Every command runs from `$WEBKIT_ROOT`, the repository root. Resolve it with `git rev-parse --show-toplevel`. Default to a **release** build and the **JavaScriptCore** target unless the user says otherwise; swap `release` for `debug` when they ask.
 
+## Parallelism: size `-j` to memory, and always `nice` the build
+
+**A WebKit build is a memory hog, not just a CPU hog, and it usually shares the machine with the
+user's desktop.** WebCore/WebKit unified sources routinely take **3-6 GB of RSS per `cc1plus`**, so the
+core count is the wrong budget: `-j32` on an 80-core / 125 GB host was measured at 28-29 concurrent
+compilers, 76 GB resident, and 3 GB of swap in use, with load pinned at 30-32 for hours. Cores were
+free the whole time; memory and interactive responsiveness were not.
+
+- **Budget `-j` from RAM at ~4-5 GB per job, then cap by cores** — the same rule the `jsc` skill applies
+  to `run-jsc-stress-tests -c N`. It is the same box and the same failure mode; do not apply it only to
+  test workers. Leave headroom for the desktop: on a 125 GB workstation that is roughly `-j16`, not `-j32`.
+- **Always `nice -n 10` the build.** Job count protects memory; niceness is what keeps the user's editor,
+  browser, and LSP responsive while 16+ compilers saturate their cores. It costs the build almost
+  nothing because the build is throughput-bound, not latency-bound.
+- **Ask before taking a big share of a machine you know is in use**, and say what you intend to take.
+  Check first: `ps -eo pcpu,comm --sort=-pcpu | head` showing firefox/an editor/clangd means someone is
+  working on it. Several multi-hour builds back to back is a much bigger ask than one.
+
+```bash
+nice -n 10 Tools/Scripts/build-webkit --gtk --release -j16   # shared workstation default
+```
+
 Pick the platform with `uname -s`: **Darwin** is macOS and uses `make`; **anything else** (Linux) uses `Tools/Scripts/build-webkit`. The `make` wrapper and ASan file checks apply to macOS only.
 
 ## macOS (Darwin) — `make`

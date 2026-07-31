@@ -189,6 +189,15 @@ For an async/promise kernel, add `.catch(e => print("ERROR: " + (e && e.stack ||
 
 ## Determinism checklist
 
+- **Pin the CPU frequency before every run, unless the user explicitly says otherwise.** This applies to
+  every perf test, microbenchmarks included: an unpinned clock varies with how much idle time the
+  workload leaves, so it differs *between* the two cells and forges a code-shaped delta. On Linux set the
+  `performance` governor (or raise `scaling_min_freq` to max) and verify —
+  `for p in /sys/devices/system/cpu/cpufreq/policy*; do cat $p/scaling_governor; done | sort -u`. `/sys`
+  is usually read-only inside a container and `sudo` there cannot write it, so pin on the **host**; with
+  no host access, `uclampset -m 1024 -- <cmd>` is an unprivileged substitute. macOS has no governor knob —
+  rely on AC power and settled thermals. If you could not pin it, say so in the report. The
+  `jsc-jetstream-compare` skill has the full rationale and the clock-verification method.
 - One run at a time, other apps quit, thermals settled, AC power (macOS: `caffeinate -dimsu &`).
 - Prefer `run-jsc-benchmarks` (random-interleaved) over hand loops; if hand-rolling, interleave
   base/patched, never batch one side.
