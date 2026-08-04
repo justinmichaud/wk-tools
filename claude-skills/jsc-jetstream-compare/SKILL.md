@@ -106,6 +106,17 @@ in *every* report:
 - **Noisy subtests** (json-parse-inspector, doxbee, Babylon, splay, tsf, async-fs, and other GC-/
   startup-dominated ones) swing ±2-5% regardless of N. Believe only large, FDR-flagged moves there,
   and never gate an equivalence bound on them.
+- **FDR controls error *within* one block, not across blocks — replicate a single-subtest finding in an
+  independent block before reporting it as real.** Interleaving cancels drift inside a block; it does
+  nothing about a level shift between blocks run hours apart, so a noisy subtest can come out flagged in
+  one block and dead flat in the next. A measured case: MotionMark `Canvas Lines` (per-round CoV ~4-5%)
+  gave b/a 0.958 with p=0.0019, robust to median/trimmed-mean/Mann-Whitney, and reproduced neither when
+  that subtest was run alone (1.003, p=0.70, with CPU and context-switch counters identical between
+  cells) nor in a fresh full-suite block hours later (0.995, p=0.77). Pooling the two blocks still reads
+  0.976 p=0.017, which is how a one-block artifact survives into a report if you only ever pool. Two
+  cheap guards: check whether the two blocks disagree by more than noise
+  (`z = (r2-r1)/sqrt(se1^2+se2^2)`; near or above 2 means do not pool), and re-run the finding as its
+  own experiment. Treat a lone flagged noisy subtest as a hypothesis, never a result.
 
 "Not significant" is not "no effect" until the CI is tight enough to rule out the standing equivalence
 targets (**0.02% overall, 0.5% per non-noisy subtest** — see [Decide](#iterate-to-a-decision)). Keep
@@ -496,6 +507,18 @@ loudly (`symbol lookup error`). `LD_LIBRARY_PATH` cannot fix it: `DT_RPATH` wins
 - run each cell under that wrapper's default mode (a private mount namespace bind-mounting the cell's
   own tree at `/sdk/webkit`) — hermetic, and the better default.
 
+**Assert the cell from inside the namespace, and never identify a cell by `/proc/<pid>/exe`.** The
+browser's `exe` link reads `/sdk/webkit/WebKitBuild/GTK/Release/bin/MiniBrowser`, so `readlink -f`
+run *outside* the namespace resolves it through the **host's** `/sdk/webkit` symlink — which
+`build-webkit` last repointed at whichever tree was built most recently. Every cell therefore appears
+to be running that one tree's binary, which looks exactly like the shared-symlink bug you are trying
+to rule out (a real false alarm here: the host symlink pointed at the baseline, so both cells' browsers
+resolved to baseline paths while actually running the right builds). The authoritative check is the
+**inode of the loaded library, `stat`ed inside the round's own mount namespace**, compared against the
+cell's expected inode — have the in-namespace wrapper append it to a per-round meta file before
+`exec`ing the browser, and verify every round afterwards. `readlink -f` is still fine for *killing*
+browsers, since any resolution lands on a `WebKitBuild/*/bin/*` path.
+
 Keep the baseline in a `git worktree` rather than stashing back and forth, so both trees exist
 simultaneously and can be rebuilt independently.
 
@@ -630,6 +653,21 @@ mutter/GNOME Wayland desktop and a discrete GPU mounted through.
   and ran concurrently with a freshly launched `sweep.sh 1 1`, two browsers at a time, each killing the
   other's processes. The tell was a cycle number in the log that no live invocation could have produced.
   `pgrep -af <script>` before every launch, and treat an unexpected cycle/round label as contamination.
+  **But `pgrep -af 'harnes[s].sh'` cannot do this check**: bracketing stops the *pattern* from matching
+  itself, yet the launch command contains the literal target string (`$S/harness.sh`), so the guard
+  matches the very tool call performing it and reports "already running" every time. Test **argv
+  position** instead — for a shebang script, `argv[1]` is its path — which no launcher command line can
+  spoof:
+  ```bash
+  running() { local p a1; for p in $(ls /proc | grep -E '^[0-9]+$'); do
+      a1=$(tr '\0' '\n' < /proc/$p/cmdline 2>/dev/null | sed -n 2p)
+      [ "$a1" = "$SCRIPT" ] && echo "$p"; done; }
+  ```
+- **Never wait on a completion marker in a log a previous run also wrote to.** `until grep -q 'HARNESS
+  COMPLETE' progress.log` fires instantly when an earlier smoke-test run left that line in the shared
+  log, so the "run finished" notification arrives hours early and the analysis reads a half-empty
+  results dir. Gate on something unique to *this* run (`CYCLE DONE <config> <last-cycle>`, or an
+  expected JSON count), or truncate/rotate the log at launch.
 - **Don't gate a wait loop on a process that hasn't started yet.** `until ! pgrep -f 'run-benchmar[k]';
   do sleep 15; done` right after launching the runner in the background exits immediately — the runner
   needs a second or two to exec. Wait for the output file to appear, or sleep once before the loop.
