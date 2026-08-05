@@ -108,6 +108,66 @@ ARM32 (ARMv7/Thumb-2), not x86 or `linux32`; assuming x86 sends the diagnosis th
 real cause of a disabled JIT is **Thumb-2 detection failing at CMake configure time** (check the
 configure output), not a bug in the code.
 
+`linux32` is not optional: without it `uname -m` reports the 64-bit host and CMake configures
+`WTF_CPU_ARM64` for what is actually an ARM32 build.
+
+**Debug 32-bit: put `-fuse-ld=gold` in the *linker* flags, not just `CMAKE_CXX_FLAGS`.** Otherwise the
+link dies with `ld.gold: fatal error: libJavaScriptCore.so.1.0.0: pread failed: Invalid argument` — the
+library exceeds the 2 GB a 32-bit gold can `pread`. Cause: developer-mode debug builds enable debug
+fission, and GCC's `-gsplit-dwarf` forces `-ggnu-pubnames` unconditionally (`-gno-pubnames` cannot turn
+it back off). Those `.debug_gnu_pubnames`/`.debug_gnu_pubtypes` tables stay in the objects instead of
+moving into the `.dwo`, and their only consumer is a linker building `.gdb_index`.
+`Source/cmake/OptionsCommon.cmake` does pass `-Wl,--gdb-index`, but it probes the linker with
+`${CMAKE_EXE_LINKER_FLAGS}`, so `-fuse-ld=gold` hidden in `CMAKE_CXX_FLAGS` makes it probe BFD ld
+(which has no `--gdb-index`) and disable the flag, while the real link still uses gold. Add
+`-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold`: CMake then reports
+`Linker variant in use: GOLD`, gold folds the tables into a compact `.gdb_index`, and
+libJavaScriptCore drops from ~2.6 GB to ~166 MB. Link-flag-only, so nothing recompiles.
+
+**A `--debug --no-unified-builds` JSC build also trips missing `*Inlines.h` includes** that no other
+configuration reaches, because the uses sit behind `ASSERT`/`ENABLE(...)`. `undefined reference` to an
+inline (`JSValue::decode`, `JSCell::structure`, `Heap::vm`, `CodeBlock::wasDestructed`) means the TU
+included the declaring header but not the defining `*Inlines.h`. gold names the header, not the object,
+so find the culprit with
+`nm -C -u <each .o in CMakeFiles/JavaScriptCore.rsp> | grep <symbol>`.
+
+**Unaligned-access SIGBUS here is the container, not WebKit.** A 32-bit ARM userland on a 64-bit
+kernel gets no alignment-fault fixup: `CONFIG_ALIGNMENT_TRAP` and its `/proc/cpu/alignment` knob exist
+only in 32-bit ARM kernels, so an AArch32 `ldrd`/`strd` to an unaligned address raises SIGBUS instead
+of being emulated. A real ARMv7 device running a 32-bit kernel fixes those up. So discount
+unaligned-load/store SIGBUS failures seen in this container (exit code 135) as environmental — confirm
+on real hardware before filing them against WebKit.
+
+#### Full browser (WPE) on 32-bit ARM
+
+For anything needing a browser rather than the jsc shell (Speedometer, MotionMark — neither has a
+headless runner), build the whole WPE port: `linux32 Tools/Scripts/build-webkit --wpe --release`, same
+arch flags, plus these three, none of which change codegen:
+
+- **`-DENABLE_WPE_PLATFORM=OFF`** — it defaults ON in developer mode and CMake hard-errors
+  `ENABLE_WPE_PLATFORM conflicts with ENABLE_WPE_1_1_API`. Turning it off keeps the libwpe /
+  wpebackend-fdo path.
+- **`-DDEVELOPER_MODE_FATAL_WARNINGS=OFF`** — WebKit enables `-Wcast-align` globally
+  (`WebKitCompilerFlags.cmake`) and developer mode adds `-Werror`. On ARM32 GCC that fires on every
+  cast to an over-aligned type it cannot prove is aligned, including bmalloc's `IsoPageInlines.h` /
+  `IsoDirectoryPageInlines.h`, which most of WebCore includes. Do not chase these one at a time.
+- **`-DENABLE_API_TESTS=OFF -DENABLE_LAYOUT_TESTS=OFF -DENABLE_WEBDRIVER=OFF`** when only the browser
+  is needed — ~360 of 3451 objects.
+
+Leave **unified builds ON** for the full port (`--no-unified-builds` is a jsc-iteration convenience;
+non-unified WebCore is far too slow here). Cog is built automatically as an ExternalProject
+(`ENABLE_COG` defaults ON in developer mode) into
+`WebKitBuild/WPE/Release/Tools/cog-prefix/src/cog-build` — it clones from GitHub, so the build needs
+network.
+
+**A changed compiler flag invalidates every object.** Adding `-DDEVELOPER_MODE_FATAL_WARNINGS=OFF`
+part-way through discards the whole ninja cache, so decide the warning/flag configuration *before*
+starting a multi-hour build rather than after the first `-Werror` failure.
+
+`g-ir-scanner` runs with `--warn-error`, so a gtk-doc comment whose `@param` name disagrees with the
+header fails the build at the very end, after every link. That failure is not arch-specific; it will
+also fail on 64-bit.
+
 ## Checking results
 
 `make` and `build-webkit` return 0 on success, non-zero on failure — always check the exit code. On failure, read the output and fix the cause:
