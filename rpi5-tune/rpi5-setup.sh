@@ -255,7 +255,7 @@ else
 fi
 
 #-------------------------------------------------------------------------------
-log "4b  WiFi stability (disable power-save + wait for network at boot)"
+log "4b  WiFi stability (disable power-save + roaming, pin BSSID, wait for network at boot)"
 # Two independent WiFi failure modes on this Pi 5 (brcmfmac built-in radio) both
 # surface in GNOME as "network unavailable":
 #  - after the box sits idle: brcmfmac power-save idles the radio down and doesn't
@@ -276,6 +276,33 @@ if [ -d /etc/NetworkManager ]; then
 else
   skip "no /etc/NetworkManager — WiFi powersave drop-in not written"
 fi
+# Disable the CYW43455 firmware's own roam engine. It periodically scans off-channel
+# and on this box that wedges the radio: wlan0 stays associated but stops passing
+# traffic (gateway ping dead), and re-association then fails with
+# CTRL-EVENT-ASSOC-REJECT status_code=16 for 10-15 min until the driver is reloaded.
+# NetworkManager misreads those rejects as a bad password (state -> failed, reason
+# 'no-secrets') and stops retrying, so only the watchdog below keeps going.
+# The AP here offers just two BSSIDs and BOTH are DFS channels (ch52 / ch132, flagged
+# 'no IR, radar detection'), which is the weakest path in this firmware — and phy#0's
+# own regdomain is 'country 99: DFS-UNSET'. Hence: no roaming, one pinned BSS.
+printf '%s\n' 'options brcmfmac roamoff=1' \
+  | sudo tee /etc/modprobe.d/brcmfmac-roamoff.conf >/dev/null
+ok "brcmfmac roamoff=1 written (takes effect on driver reload / reboot)"
+
+# Pin the connection to a single BSS so it cannot ping-pong between the AP's two
+# radios. Set WIFI_PIN_BSSID='' to skip. Pinning the BSSID (not the channel) is
+# deliberate: a DFS radar-vacate changes the AP's channel but keeps its BSSID, so
+# this survives a channel switch.
+WIFI_SSID="${WIFI_SSID:-Ducky0138}"
+WIFI_PIN_BSSID="${WIFI_PIN_BSSID-e4:75:dc:3e:45:a2}"   # 5260 MHz / ch52
+if [ -n "$WIFI_PIN_BSSID" ] && nmcli -g name connection show 2>/dev/null | grep -qx "$WIFI_SSID"; then
+  sudo nmcli connection modify "$WIFI_SSID" 802-11-wireless.bssid "$WIFI_PIN_BSSID" \
+    && ok "connection '$WIFI_SSID' pinned to BSSID $WIFI_PIN_BSSID" \
+    || skip "could not pin BSSID on '$WIFI_SSID'"
+else
+  skip "no '$WIFI_SSID' connection (or WIFI_PIN_BSSID empty) — BSSID not pinned"
+fi
+
 # Undo any prior run that disabled wait-online; make boot wait for the link.
 sudo systemctl enable --now NetworkManager-wait-online.service >/dev/null 2>&1 \
   && ok "NetworkManager-wait-online enabled (boot waits for network)" \

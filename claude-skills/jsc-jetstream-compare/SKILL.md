@@ -158,6 +158,25 @@ is newer than your last edit, a symbol or string you added greps out of it, or a
 matches. A number from a stale or baseline binary is worse than no number. Do not stash the user's
 working-tree patch except to build the baseline, and always `git stash apply` it back.
 
+**Checking the files on disk is not enough: confirm what each process actually loads.** On Linux a
+WebKit-built `bin/jsc` carries **DT_RPATH** naming its own build directory, and DT_RPATH is searched
+*before* `LD_LIBRARY_PATH`, so a staged copy of `bin/jsc` silently loads the library from the build dir
+no matter what you set. Both cells of an A/B then run the same library and every delta is noise —
+which looks exactly like "no regression", so it does not announce itself. Fingerprinting the staged
+`.so` files proves nothing here; they were never loaded. Before any A/B, per cell:
+
+```bash
+readelf -d "$CELL/bin/jsc" | grep -E 'RPATH|RUNPATH'          # RPATH pointing at a build dir = trap
+patchelf --set-rpath '$ORIGIN/../lib' "$CELL/bin/jsc"         # make it self-relative, once per cell
+ldd "$CELL/bin/jsc" | grep JavaScriptCore                     # MUST name $CELL's own lib, not the build dir
+```
+
+Then prove the two cells differ *at runtime*, not just on disk: a symbol only one side imports
+(`nm -D` for e.g. `sched_yield` vs `nanosleep`), a constant folded into an immediate that differs
+(`objdump -d` the function you changed), or distinct `.so` md5s **plus** the `ldd` check above. A cell
+whose `jsc` was built against a different member layout than the `.so` it loads will often segfault
+instead of lying — treat any crash of a staged binary as a staging bug, not a flaky test.
+
 ---
 
 ## Browser rounds (macOS)
@@ -311,8 +330,11 @@ browser mode (see the macOS and Linux/WPE sections above). `cli.js` runs the rea
 - **Emit the exact JSON `run-benchmark` produces** by setting `dumpJSONResults=true`, then grep the
   result line — this is what keeps the headless path on the official methodology (see
   [Compare](#compare-with-compare-results)).
-- **Library path:** a Linux JSCOnly `bin/jsc` is statically linked to its sibling `lib*` and runs in
-  place; if a build ever needs it, use `LD_LIBRARY_PATH=$DIR/lib`. On macOS prefix
+- **Library path:** a Linux JSCOnly `bin/jsc` runs in place against its sibling `lib*`; if a build ever
+  needs it, use `LD_LIBRARY_PATH=$DIR/lib`. **In place is the operative word** — it finds that `lib*` by
+  DT_RPATH, so a copy of `bin/jsc` elsewhere keeps loading the original build dir and `LD_LIBRARY_PATH`
+  cannot override it. Stage `bin/` and `lib/` together and repoint the rpath (see the verification block
+  above) whenever you run A/B cells from copies. On macOS prefix
   `DYLD_FRAMEWORK_PATH=$DIR` (a bare `WebKitBuild/Release/jsc` otherwise links the *system*
   JavaScriptCore and dies with `dyld: Symbol not found`). **Never use `Tools/Scripts/run-jsc`** — it
   injects `--useDollarVM=1` and may wrap jsc in lldb, both of which perturb timing.
