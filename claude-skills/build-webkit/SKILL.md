@@ -117,12 +117,25 @@ library exceeds the 2 GB a 32-bit gold can `pread`. Cause: developer-mode debug 
 fission, and GCC's `-gsplit-dwarf` forces `-ggnu-pubnames` unconditionally (`-gno-pubnames` cannot turn
 it back off). Those `.debug_gnu_pubnames`/`.debug_gnu_pubtypes` tables stay in the objects instead of
 moving into the `.dwo`, and their only consumer is a linker building `.gdb_index`.
-`Source/cmake/OptionsCommon.cmake` does pass `-Wl,--gdb-index`, but it probes the linker with
-`${CMAKE_EXE_LINKER_FLAGS}`, so `-fuse-ld=gold` hidden in `CMAKE_CXX_FLAGS` makes it probe BFD ld
-(which has no `--gdb-index`) and disable the flag, while the real link still uses gold. Add
-`-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold`: CMake then reports
-`Linker variant in use: GOLD`, gold folds the tables into a compact `.gdb_index`, and
-libJavaScriptCore drops from ~2.6 GB to ~166 MB. Link-flag-only, so nothing recompiles.
+`Source/cmake/OptionsCommon.cmake` does pass `-Wl,--gdb-index`, but it probes the linker by running
+`${CMAKE_C_COMPILER} ${CMAKE_EXE_LINKER_FLAGS} -Wl,--help`, so `-fuse-ld=gold` hidden in
+`CMAKE_CXX_FLAGS` makes it probe BFD ld (which has no `--gdb-index`) and disable the flag, while the
+real link still uses gold. Add exactly one thing: **`-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold`**. CMake
+then reports `Linker variant in use: GOLD`, gold discards the pubnames tables, and libJavaScriptCore
+drops from ~2.6 GB to ~159 MB. Link-flag-only, so nothing recompiles.
+
+Do **not** also pass `-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold`. It is redundant (the `-fuse-ld=gold`
+already in `CMAKE_CXX_FLAGS` selects the linker) and it overwrites the default shared-linker flags,
+dropping `-L/jhbuild/install/lib`. Verified both ways: with it, the link line carries `-fuse-ld=gold`
+twice and no jhbuild `-L`; without it, one `-fuse-ld=gold`, `--gdb-index` still present once, jhbuild
+`-L` restored, same 159 MB library. Read the real link line with
+`ninja -t commands lib/libJavaScriptCore.so.1.0.0 | tail -1` — a successful ninja run never echoes it.
+
+Separately, `OptionsCommon.cmake` seeds the shared flags from the exe flags
+(`set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--gdb-index")`), discarding any real
+`CMAKE_SHARED_LINKER_FLAGS`. That is a genuine bug worth fixing, but it is **not** required for the
+build to work: unfixed, the shared link inherits the exe flags and lands `--gdb-index` twice, which
+links fine. Counting `--gdb-index` on the link line tells you which version is in play.
 
 **A `--debug --no-unified-builds` JSC build also trips missing `*Inlines.h` includes** that no other
 configuration reaches, because the uses sit behind `ASSERT`/`ENABLE(...)`. `undefined reference` to an
@@ -131,12 +144,79 @@ included the declaring header but not the defining `*Inlines.h`. gold names the 
 so find the culprit with
 `nm -C -u <each .o in CMakeFiles/JavaScriptCore.rsp> | grep <symbol>`.
 
-**Unaligned-access SIGBUS here is the container, not WebKit.** A 32-bit ARM userland on a 64-bit
-kernel gets no alignment-fault fixup: `CONFIG_ALIGNMENT_TRAP` and its `/proc/cpu/alignment` knob exist
-only in 32-bit ARM kernels, so an AArch32 `ldrd`/`strd` to an unaligned address raises SIGBUS instead
-of being emulated. A real ARMv7 device running a 32-bit kernel fixes those up. So discount
-unaligned-load/store SIGBUS failures seen in this container (exit code 135) as environmental — confirm
-on real hardware before filing them against WebKit.
+**A rebuilt object that comes back byte-identical was not rebuilt — that is a ccache hit.** CMake wires
+ccache in through the ninja rule's `${LAUNCHER}` (`LAUNCHER = /usr/bin/ccache`, in
+`CMakeFiles/rules.ninja`), and `compile_commands.json` does **not** record it. So a compile replayed from
+`compile_commands.json` bypasses ccache and can succeed while the build keeps failing on the same file.
+Grepping `build.ninja` for `ccache` finds nothing; grep for `LAUNCHER` instead. A truncated cache entry
+shows up as a link error, not a compile error: gold reported
+`multiple definition of ''` 52 times for one object whose 185 COMDAT group signature symbols all had
+empty names (`readelf -gW obj.o | grep '^COMDAT group'` shows `` `.group' [] `` instead of a mangled
+name; a healthy sibling object is the contrast to check). Confirm by compiling the file by hand without
+the launcher, then fix with `CCACHE_RECACHE=1 <build command>` to overwrite just that entry. Check
+`ccache -s` **as the build user** — `podman exec --user 1000:1000`, since a plain `podman exec` runs as
+root and reports root's empty cache, which reads as "ccache is not involved." A cache over its size
+limit with many cleanups and nonzero `Errors` is how entries get truncated in the first place: this one
+sat at 7.7 GB against a 5 GB ceiling with 1359 cleanups, and the constant eviction also held the hit
+rate to 7.6%. Raise the ceiling (`ccache -M 25G`, persisted to `~/.config/ccache/ccache.conf`) and
+purge once (`ccache -C`) to clear any other truncated entries; at that hit rate the purge costs almost
+nothing. `ccache -z` afterwards so the next `Errors` count is meaningful.
+
+Corollary for the whole class: **a killed build leaves damage that survives into later builds.** Two
+kinds seen here — zero-byte objects (the debug-fission `objcopy` GCC runs for `-gsplit-dwarf` then
+fails with `input file is empty`) and truncated ccache entries. Neither is fixed by re-running the
+build, because ninja and ccache both consider the bad artifact up to date.
+
+**Unaligned-access SIGBUS here is usually the container, but check the faulting instruction first.**
+A 32-bit ARM userland on a 64-bit kernel gets no alignment-fault fixup: `CONFIG_ALIGNMENT_TRAP` and
+its `/proc/cpu/alignment` knob exist only in 32-bit ARM kernels, so a single-register access
+(`ldr`/`str`/`ldrh`/`strh`) to an unaligned address raises SIGBUS instead of being emulated. A real
+ARMv7 device running a 32-bit kernel fixes those up, so discount those (exit code 135) as
+environmental.
+
+**`ldrd`/`strd` are the exception and are always a real bug.** ARMv7 unaligned-access support
+(SCTLR.A=0) covers single-register loads and stores only; it explicitly excludes the pair and
+multiple forms (`ldrd`/`strd`, `ldm`/`stm`, `vldm`/`vstm`). Those fault on any non-word-aligned
+address on real silicon, with no kernel fixup anywhere. So a SIGBUS whose faulting instruction is
+`ldrd` or `strd` reproduces on hardware and must be fixed, not discounted. Disassemble before
+concluding:
+
+```
+gdb -batch -ex 'handle SIGUSR1 SIGUSR2 SIGSEGV nostop noprint pass' \
+    -ex 'handle SIGBUS stop print nopass' -ex run -ex 'x/1i $pc' --args <jsc> <args>
+```
+
+This matters for wasm: a linear-memory alignment immediate is only a hint, so an `i64.load` /
+`f64.load` may land on any address, and lowering it to `ldrd` is wrong. Upstream removed the `strd`
+fast path from `MacroAssemblerARMv7::storePair32` for this reason (`5e2002044e76`); the matching
+load side is still unfixed upstream.
+
+#### Getting a C++ backtrace out of a wkdev32 crash
+
+Both obvious routes fail here. In-container `gdb` is a 32-bit process and exhausts its address space
+loading the debug build's split DWARF (`virtual memory exhausted` while reading `.dwo`s), and
+`WTFReportBacktrace` prints `no stacktrace available` because `WTFGetBacktrace` cannot walk ARM32
+Thumb-2 frames. Assertion output therefore arrives with no stack at all.
+
+What works is the **host's 64-bit gdb on a core dump**, since the host is aarch64 and has the address
+space the in-container debugger lacks:
+
+1. `coredumpctl dump <pid> --output=jsc.core` (cores land in systemd-coredump, zstd-compressed).
+2. Make debug-stripped copies **inside the container** so gdb reads `.symtab` and never touches the
+   split DWARF: `objcopy --strip-debug bin/jsc nodebug/jsc` and the same for
+   `lib/libJavaScriptCore.so.1.0.0`. Ubuntu gdb 17.1 dies with heap corruption on the
+   `DW_TAG_skeleton_unit` records otherwise, so this step is required, not an optimization.
+3. Add the SONAME symlink `libJavaScriptCore.so.1 -> libJavaScriptCore.so.1.0.0`; gdb looks the
+   library up by SONAME and silently gives up without it.
+4. Stage a sysroot with the container's `libc.so.6`, `libstdc++.so.6`, `libgcc_s.so.1`, `libm.so.6`,
+   `ld-linux-armhf.so.3` and the ICU libs, and place the stripped JSC libraries at the path recorded
+   in the core. Without libc symbols the unwind stops inside `abort` and you see nothing above it.
+5. `gdb -q -batch -iex 'set debuginfod enabled off' -iex "set sysroot <root>" -ex 'bt 40' nodebug/jsc jsc.core`
+
+Symbol names come from `.symtab` so frames resolve without line numbers, which is enough to identify
+the failing operation. When you need line numbers or values instead, a `dataLogLn` in the one relevant
+`.cpp` is far cheaper than fighting the debugger: a single-file edit plus relink is a few minutes even
+in the debug build.
 
 #### Full browser (WPE) on 32-bit ARM
 

@@ -51,7 +51,9 @@
       "Bash(mkdir -p __TRACKED_VAR__/claude-hooks)",
       "Bash(mv /Users/justinmichaud/.claude/hooks/webkit-jsc-skill-reminder.sh __TRACKED_VAR__/claude-hooks/)",
       "Bash(rmdir /Users/justinmichaud/.claude/hooks)",
-      "Bash(ln -sfn __TRACKED_VAR__/claude-hooks /Users/justinmichaud/.claude/hooks)"
+      "Bash(ln -sfn __TRACKED_VAR__/claude-hooks /Users/justinmichaud/.claude/hooks)",
+      "Bash(setsid *)",
+      "Bash(nohup *)"
     ],
     "additionalDirectories": [
       "/Users/justinmichaud/Library/Developer/Toolchains/p2996.xctoolchain",
