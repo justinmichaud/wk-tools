@@ -142,6 +142,8 @@ Tools/Scripts/run-api-tests                # C / Objective-C API
 
 **Always pass `-c <N>` to `run-jsc-stress-tests`, and size N to memory, not cores.** Its default worker count comes from `numberOfProcessors`, which both (a) under-detects in cgroup-limited/containerized environments (e.g. reports ~3 while `nproc` shows 80), making the default run ~10-25x too slow, and (b) on a big box would launch far more workers than RAM allows. Each worker is a full VM that can spike to several GB, so a high `-c` OOM-kills the run: `-c 40` OOM-killed everything on a 125 GB host; `-c 20` was safe there. Pick `-c` from available memory (budget a few GB per worker), then cap by cores. On a well-fed box a full `JSTests/stress` run should finish in well under an hour; if it is crawling, the worker count is the cause, not the test load. Pass a directory (`JSTests/stress`), not individual files — the per-file path hits a collection-YAML parse bug. On Linux set `LD_LIBRARY_PATH=$WEBKIT_ROOT/WebKitBuild/JSCOnly/Release/lib` and `--jsc <abs path>/bin/jsc`.
 
+**`run-jsc-stress-tests` returns 0 even when tests fail — its exit code is not a pass signal.** A failing configuration prints `stress/<test>.<config>: ERROR: Unexpected exit code: N` and the final progress token becomes `N/M (failed K)`, while the script still exits 0. Grep the output for `(failed ` and `Unexpected exit code`, and pipe through `tr '\r' '\n'` first: the progress display is one long `\r`-updated line, so a plain `tail` shows `38104/38107` and hides the `(failed 50)` summary sitting on the same line.
+
 For `testmasm` / `testb3` / `testair`, check the exit code for failure. The library path differs by platform — defer to `/build-webkit` for the exact path:
 - macOS: `DYLD_FRAMEWORK_PATH=$WEBKIT_ROOT/WebKitBuild/Release $WEBKIT_ROOT/WebKitBuild/Release/testb3 <target>`
 - Linux: `LD_LIBRARY_PATH=$WEBKIT_ROOT/WebKitBuild/Release/lib $WEBKIT_ROOT/WebKitBuild/Release/bin/testb3 <target>`
@@ -154,6 +156,15 @@ For `testmasm` / `testb3` / `testair`, check the exit code for failure. The libr
 - **Confirm the test actually tests something.** Revert your source change, compile, and run the test — it must fail. Then restore the change and confirm it passes. A test that passes against the unfixed code proves nothing.
 - **Think about how the test can be fragile** before finalizing: does it depend on a specific tier being reached, on iteration counts, on GC timing, on platform-specific behavior, on object-property order? Make the assertion robust to those.
 - **Use the built-in `testLoopCount` (and `wasmTestLoopCount`) global instead of a hardcoded loop bound.** The jsc shell sets `testLoopCount` to the smallest count that still reaches the top enabled tier under the current flag matrix (`jsc.cpp` clamps it to the warm-up thresholds, smaller when higher tiers are disabled). Writing `for (let i = 0; i < testLoopCount; i++)` makes the test reach tier-up yet run fast across the whole matrix, where a fixed `1000000` would be needlessly slow.
+
+#### Layout tests that probe a decoder or renderer
+
+Two traps make such a test silently prove nothing — both look like a pass:
+
+- **An unterminated `<script>` is never executed.** EOF in the HTML "script data" state is a parse error, so the block is dropped, the page still renders, and the run reports a plain text/render-tree diff rather than an error. Easy to hit writing a test through a shell heredoc. Confirm the file ends with `</script>` before trusting a green run.
+- **`drawImage()` alone does not force a decode.** Canvas rendering is deferred, and `run-webkit-tests` without `--pixel-tests` never paints, so the image bytes may never reach the decoder. Follow the draw with a `getImageData()` readback, and assert on a pixel value so an all-transparent result cannot pass.
+
+To see which decoder path actually ran, instrument to a **file** (`fopen("/tmp/...", "a")` with `getpid()`), not `stderr`: the harness captures only the web process's stderr, and on GTK the pixel decode can land in the GPU process.
 
 ### jsc shell test helpers
 
@@ -297,6 +308,45 @@ From the WebKit code style guide. `check-webkit-style` catches some, not all.
 - Comment style is covered above. The style guide also requires: sentences start capitalized and end with a period; one space before an end-of-line comment; `FIXME:` with no attribution (no `FIXME(name)`, no `TODO`).
 - **Every file edited substantively should carry an Igalia copyright line.** Add `Copyright (C) <year> Igalia S.L.` to the header when doing real work in a file (matching the existing header format).
 - **Never remove or alter an existing copyright attribution.** Add ours alongside theirs; leave Apple's and every other party's lines intact.
+
+## Reading a type's real memory layout
+
+**Never hand-compute a field offset or a `sizeof` from the header.** Alignment holes make it wrong, and the failure is silent: a struct whose members are all 4 bytes still gets padded before an 8-byte-aligned member, and a base class you assumed was 12 bytes may be 16, which shifts every derived class. Measure it.
+
+If the build has full debug info, `gdb -q -batch -ex "ptype /o JSC::Foo" <binary>` is the whole answer. If it does not (`-g1`, line tables only), recompile **one** translation unit with `-g` using that file's own command, so every `-D` and `-I` matches:
+
+```bash
+# take the file's entry from WebKitBuild/<Port>/<Config>/compile_commands.json,
+# drop -g1 and any --coverage/-fprofile-update flags, add -g, send -o to /tmp
+gdb -q -batch -ex "ptype /o JSC::Structure" /tmp/foo-g.o
+```
+
+That is a couple of minutes for one file, versus a full rebuild, and it prints every offset, every hole, and the total size.
+
+## Chasing a dangling-cell bug (a keep-alive that does not hold)
+
+When a JSC data structure holds a bare `JSCell*` and the symptom is an assertion about that cell's
+*type* rather than a wild crash, suspect a dropped keep-alive: the cell was swept and its slot reused
+by a live object of a different shape. A worked case: an inline cache buffered a property-key string as
+a `JSCell*` marked only when the owning CodeBlock happened to be traced, and the recycled slot came
+back as a fresh `JSRopeString` in the same subspace, so the only visible symptom was
+`ASSERTION FAILED: !isRope()` deep in an unrelated compare.
+
+- **`--useZombieMode=1` is the reproducer knob.** It sweeps synchronously and scribbles dead cells, so
+  a rare recycle window becomes prompt and repeatable. Pair it with a real workload (JetStream2 in the
+  jsc shell) rather than a synthetic loop, which may never buffer enough to matter.
+- **Put the detector where the value is used, or in the marking pass — never in
+  `visitWeakReferences`.** That runs only for CodeBlocks `finalizeUnconditionally` visits, which are
+  exactly the ones whose `visitAggregate` already marked their children, so an `isMarked` check there
+  is vacuous and its silence proves nothing.
+- **Print the subspace, cell type and cell state when the detector fires.** `IsoSpace JSRopeString` plus
+  `DefinitelyWhite` is what tells you "collected and recycled" rather than "never valid", and it
+  identifies which allocator's reuse produced the disguise.
+- **Prefer removing the dependency to fixing the trace.** If the consumer only ever needed the uid,
+  store `RefPtr<UniquedStringImpl>` and delete the marking (`MegamorphicCache` already does this);
+  refcounting a uid is safe where all writers are mutator-side and the GC-side writer runs in
+  `Heap::runEndPhase` after the parallel markers exit. A test for a corrected trace tends to pass
+  against the unfixed code, so say plainly when your test covers the path without reproducing the bug.
 
 ## Environment note
 

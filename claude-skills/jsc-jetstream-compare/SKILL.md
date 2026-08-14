@@ -304,6 +304,24 @@ this way too (they have no headless mode at all).
   spawning `/usr/local/libexec/wpe-webkit-*/WPENetworkProcess`.
 - **Export `XDG_RUNTIME_DIR=/run/user/$(id -u)` and `WAYLAND_DISPLAY=wayland-0`** before
   `run-benchmark`; batch container shells have neither set.
+- **Isolate every Cog from the session bus: `export DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`.**
+  Cog is a single-instance GApplication (`com.igalia.Cog`), so a second Cog that can reach the bus
+  hands its URL to the first one and exits 0 — the benchmark then runs in the *other* build's browser
+  (or another container's, since they share `/run/user/$(id -u)`), and `run-benchmark` waits out its
+  full timeout with no output. Unsetting the variable is not enough: GDBus still finds
+  `$XDG_RUNTIME_DIR/bus` by convention. The tell is a Cog that exits 0 instantly and prints nothing.
+- **`--platform=headless` needs `--platform-params=60`, or MotionMark scores 1.0 on every subtest.**
+  The headless plug-in paces frames with a `g_timeout` at `max_fps`, and its default is 30 — under
+  MotionMark's 60fps target, so the ramp controller never raises complexity and every subtest parks at
+  the floor. That one flag moved a real measurement from 1.01 to 231. (`--platform-params` for this
+  plug-in is the refresh rate, not geometry; anything else logs `Invalid refresh rate value`.)
+- **Prefer `headless` over `wl` for rAF-bound suites, and reach for it when the onscreen platforms
+  break.** It is GPU-accelerated when `/dev/dri` is present (check with `ls -l /proc/<WebProcess>/fd |
+  grep dri` and look for `libEGL_nvidia`/mesa in `/proc/<pid>/maps`), it takes its frame clock from the
+  flag above rather than the host compositor, and it sidesteps two failures seen on modern desktops:
+  `--platform=wl` asserts on `s_eglCreateWaylandBufferFromImageWL` where the compositor no longer
+  advertises `wl_drm`, and `--platform=x11` can kill the WebProcess inside
+  `libnvidia-egl-wayland`'s `dmabuf_feedback_check_main_device`.
 - **Old branches' python tooling may not run on the container's python** (e.g. a 2.38-era
   `run-minibrowser`/autoinstaller dies on python 3.12). Drive everything from the newer tree's
   `Tools/Scripts/run-benchmark` and pin builds via the wrappers; never mix per-tree runners.
