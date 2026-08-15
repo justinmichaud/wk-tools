@@ -142,6 +142,17 @@
           ]
         }
       ]
+    },
+    {
+      "host": "devbox-arm64-2",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/igalia/jmichaud/Development/ReleaseVersion/OpenSource/./"
+          ]
+        }
+      ]
     }
   ],
   "ui_font_size": 16,
