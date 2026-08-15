@@ -197,7 +197,7 @@ unset _wk_hb_dir _wk_f
 fi  # _WK_INTERACTIVE
 unset _WK_INTERACTIVE
 
-
+export TERM=xterm-256color
 
 if command -v hx > /dev/null; then
     export EDITOR="hx"
