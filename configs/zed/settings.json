@@ -106,6 +106,42 @@
           ]
         }
       ]
+    },
+    {
+      "host": "moose",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/jmichaud/Development/32/Development/DebugVersion/OpenSource"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/32/Development/ReleaseVersion/OpenSource/./"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/DebugVersion/OpenSource/./"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/comcast-invalid-handle/./"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/webkit-container-sdk"
+          ]
+        },
+        {
+          "paths": [
+            "/home/jmichaud/Development/wk-tools"
+          ]
+        }
+      ]
     }
   ],
   "ui_font_size": 16,

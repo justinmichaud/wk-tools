@@ -33,6 +33,16 @@ Host buildbox4
   User jmichaud
   ProxyJump igalia.com
 
+Host buildbox4
+  HostName buildbox4
+  User jmichaud
+  ProxyJump igalia.com
+
+Host bbox-12-arm64
+  HostName bbox-12-arm64
+  User jmichaud
+  ProxyJump igalia.com
+
 Host raspberrypi3
   HostName 192.168.1.159
   User root

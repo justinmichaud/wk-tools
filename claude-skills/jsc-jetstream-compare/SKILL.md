@@ -193,7 +193,8 @@ the patched side into `WebKitBuild/Release` and the baseline natively into a per
 ```bash
 cd "$WEBKIT_ROOT"
 BASE_SHA=$(git rev-parse HEAD)                  # or the baseline commit
-CACHE=/tmp/js3-builds/$BASE_SHA                 # baseline build lands in $CACHE/Release
+CACHE=~/js3-builds/$BASE_SHA                    # baseline build lands in $CACHE/Release
+                                                 # NOT /tmp: macOS sweeps it nightly, see below
 
 make release                                     # patched (change in tree); first build is long
 
@@ -211,6 +212,40 @@ reloading` (`launchd: failed lookup: name = com.apple.WebKit.WebContent, error =
 out. Re-signing and copying `*.xpc` bundles do not fix it. If space is tight, delete `$CACHE/*.build`
 afterward but keep `$CACHE/Release/` in place.
 
+**macOS sweeps `/tmp` daily, and the sweep itself wrecks a run in progress.** `/etc/periodic/daily/
+110.clean-tmps` runs as root around midnight and walks all of `/tmp` with
+
+```
+find -dx . -fstype local -type f -atime +3 -mtime +3 -ctime +3 ... -delete -print
+```
+
+Two distinct hazards, and the second is the one that bites first:
+
+- **It steals the machine.** Point several WebKit build trees at `/tmp` (each ~30 GB) and that find
+  runs for *hours* at ~80% of a core, hammering the disk, and its `-delete` traffic spikes
+  `fseventsd` past 100% CPU as a side effect. Measured here: a full build that normally takes ~40 min
+  was still unfinished after 3 hours, throughput down from ~590 objects/min to ~4. Any benchmark round
+  overlapping it is contaminated. It runs as **root**, so you cannot kill it without the user's sudo.
+- **It can delete a cached build**, but only files older than 3 days in atime *and* mtime *and*
+  ctime, so a per-sha baseline cache you keep across a week is exactly the thing at risk. Builds made
+  during the session are safe.
+
+**This is why `$CACHE` above defaults to `~/js3-builds` and not `/tmp` — do not move it back.** The
+same goes for `git worktree` trees built for variant cells: put them under `~/js3-builds/<name>/src`.
+Result JSONs can stay in `/tmp/js3-runs` (small, and recreated each session); it is the multi-GB build
+trees that make the sweep pathological.
+
+Add the sweep to your list of suspects whenever a build or round is inexplicably slow on macOS:
+
+```bash
+ps -A -o pid,%cpu,etime,args | grep 'find -d[x]'     # the sweep, if it is running
+```
+
+Then **stamp the times before discarding data** — compare the sweep's `etime` against when each block
+ran. A sweep that started after your last round did not affect it, and rounds that predate it stay
+valid. If it is running and you need the machine, it is root-owned: ask the user to
+`sudo kill <pid>` rather than trying to work around it.
+
 ### Quiesce, then run interleaved
 
 Run `./quiesce.sh on` first (a symlink here to `wk-tools/quiesce.sh`). It handles the macOS determinism
@@ -221,6 +256,30 @@ that as `--local-copy` to every round so each run copies a fixed checkout instea
 upstream JetStream3.0 from GitHub (which adds network/disk noise and can shift the commit
 mid-experiment). Run `./quiesce.sh off` afterward. Set a fixed display refresh rate by hand —
 ProMotion/VRR is the one thing quiesce.sh can only warn about, and rAF-driven runs inherit its jitter.
+(A MacBook Air panel is a fixed 60 Hz with no ProMotion, so that warning is moot there — check
+`system_profiler SPDisplaysDataType` rather than assuming every Mac needs the manual step.)
+
+**quiesce.sh will hang a non-interactive shell on its `sudo` fallback, and `< /dev/null` does not
+stop it** — `sudo` reads the passphrase from the TTY, not stdin, so a tool call that cannot
+authenticate blocks forever on `sudo mdutil -a -i off` (the script tries `sudo -n` first, then a bare
+`sudo`). Check `sudo -n true` first. If sudo would prompt, either have the user run the script
+themselves, or put a fail-fast shim first on `PATH` so every `sudo` returns non-zero and the script
+degrades its sudo steps to warnings while still doing all the non-sudo work (caffeinate, App Nap,
+daemon SIGSTOP, the rAF "raiser", thermal settle — which are the ones that matter most):
+
+```bash
+mkdir -p /tmp/nosudo && printf '#!/bin/sh\nexit 1\n' > /tmp/nosudo/sudo && chmod +x /tmp/nosudo/sudo
+PATH=/tmp/nosudo:$PATH ./quiesce.sh on < /dev/null
+```
+
+Before doing that, check whether the sudo-gated items are *already* in the desired state —
+`mdutil -s /` (Spotlight), `pmset -g | grep lowpowermode`, `tmutil currentphase`. Often they are, and
+the warnings are then cosmetic rather than a real loss of quiescing.
+
+**`timeout` does not exist on macOS** (it is GNU coreutils; `gtimeout` only if you installed it). A
+round wrapper written as `timeout 3000 Tools/Scripts/run-benchmark ...` dies instantly with
+`command not found`, which a loop can mistake for a failed round. Rely on the plan's own
+`"timeout": 1200` per iteration instead, or install coreutils.
 
 `run-benchmark` runs the plan once per invocation, so **interleave the two builds across rounds** to
 cancel thermal/background drift, one JSON per round. List names with `run-benchmark --plan jetstream3
@@ -242,7 +301,7 @@ all — so check whether they are present before concluding a change is Worker-n
 
 ```bash
 J3=/tmp/js3-runs; mkdir -p "$J3"
-CACHE=/tmp/js3-builds/$(git rev-parse HEAD)
+CACHE=~/js3-builds/$(git rev-parse HEAD)
 PATCHED="$WEBKIT_ROOT/WebKitBuild/Release"
 LOCAL_COPY="$JS3_LOCAL_COPY"                      # printed by quiesce.sh
 run_one(){ # $1=build-dir  $2=out.json
@@ -257,6 +316,18 @@ for i in $(seq 1 8); do k=$(printf %02d $i)
   fi
 done
 ```
+
+**Validate each round on its scores, not just on the JSON parsing.** A check like "the `tests` dict is
+non-empty" passes on a run that produced structure but no useful measurement. Assert the subtests you
+asked for are all present and each has a plausible `Score`, and discard the round otherwise.
+
+Conversely, **do not treat a fast round as a broken one.** A targeted subset is genuinely quick — 10
+subtests on an M4 laptop complete in ~17 s per cell (~35 s per interleaved pair), against ~4 min for
+the full 77. Before suspecting a no-op run, look at a subtest's `First`/`Worst`/`Average` block: real
+JetStream3 output has an `Average` over many iterations (the repeating decimal gives the iteration
+count away), which a stub or failed run does not. Cheap subsets are an opportunity — at 35 s a pair,
+60 round-pairs across two blocks costs about half an hour, so budget for the replication block below
+rather than settling for one block's N.
 
 **Pass list arguments literally** (`--subtests delta-blue bigint-noble-ed25519`), never through an
 unquoted variable. The macOS Bash tool runs **zsh**, which does not word-split, so `--subtests $SUB`
@@ -276,6 +347,26 @@ fails in seconds).
   `python3 -m pip install --user pyobjc-core pyobjc-framework-Cocoa pyobjc-framework-Quartz`.
 - **Benign `Error:` log lines** (e.g. `lsof ... Port not found yet, retrying`) will trip a Monitor that
   greps `Error`. Match precise terminal states (`Traceback`) and confirm scores are appearing.
+- **A fanless Mac (MacBook Air) throttles across a long block — check every block for drift.** The
+  laptop is fine for short subset rounds and then quietly degrades once rounds are long and
+  back-to-back. Measured on an M4 Air: a 10-round full-suite block run straight after another
+  full-suite block plus a build decayed monotonically, 422 → 392 overall geomean in both cells
+  together (~7.5%), taking per-cell CoV from **0.69% to 3.2%** and the equivalence bound from 0.204%
+  to 2.6%. Nothing warned: `pmset -g therm` reported no thermal level the whole time, so *absence of
+  a recorded thermal warning is not evidence of no throttling.*
+
+  Interleaving still protects the point estimate (both cells decay together), so this corrupts the
+  *bound*, not the direction — but the bound is usually what you are trying to earn.
+
+  1. **Always print the per-round series, not just the mean.** A monotonic slide across rounds is
+     throttling; scatter without a trend is ordinary noise. A mean and CoV alone hide the difference.
+  2. **Analyse interleaved rounds paired** — per-round `log(patched/base)`, then a one-sample t on
+     those. Common-mode drift cancels within a round. On the block above this recovered the bound
+     from 2.56% to 1.36%.
+  3. **Pairing is a repair, not a fix.** 1.36% was still 7x worse than the healthy block. Cool the
+     machine (20+ min idle) between long blocks and re-run rather than shipping the degraded bound.
+  4. Budget for it: back-to-back full-suite blocks on a fanless machine need idle gaps, so plan
+     wall-clock accordingly instead of queueing blocks one after another.
 
 ---
 
