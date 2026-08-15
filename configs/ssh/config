@@ -33,7 +33,7 @@ Host buildbox4
   User jmichaud
   ProxyJump igalia.com
 
-Host bbox-12-arm64
+Host devbox-arm64-2
   HostName bbox-12-arm64
   User jmichaud
   ProxyJump igalia.com

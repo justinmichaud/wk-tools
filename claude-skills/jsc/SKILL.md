@@ -306,7 +306,7 @@ From the WebKit code style guide. `check-webkit-style` catches some, not all.
 ## Comments and copyright headers
 
 - Comment style is covered above. The style guide also requires: sentences start capitalized and end with a period; one space before an end-of-line comment; `FIXME:` with no attribution (no `FIXME(name)`, no `TODO`).
-- **Every file edited substantively should carry an Igalia copyright line.** Add `Copyright (C) <year> Igalia S.L.` to the header when doing real work in a file (matching the existing header format).
+- **Every file edited substantively should carry an Igalia copyright line.** Add `Copyright (C) <year> Igalia S.L.` to the header when doing real work in a file (matching the existing header format). Changes should be at least 10 lines per file before they need a header.
 - **Never remove or alter an existing copyright attribution.** Add ours alongside theirs; leave Apple's and every other party's lines intact.
 
 ## Reading a type's real memory layout
