@@ -38,6 +38,11 @@ Host devbox-arm64-2
   User jmichaud
   ProxyJump igalia.com
 
+Host devbox-armhf-2
+  HostName bbox-12-armhf
+  User jmichaud
+  ProxyJump igalia.com
+
 Host raspberrypi3
   HostName 192.168.1.159
   User root
