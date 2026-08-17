@@ -1,0 +1,120 @@
+---
+# Provisioning for the wk podman machine, run by podman after first boot.
+#
+# Scope is deliberately narrow: only OS-level state that has no dependency on
+# wk-tools itself. Anything that needs the repo -- the nftables policy, the
+# workspace tooling -- is installed afterwards by host/macos/vmtools.sh, which
+# copies the *local* working tree into the VM. Cloning from GitHub here would
+# mean nothing could be tested until it was pushed.
+#
+# Recovering from `podman machine rm` is still one `./setup`.
+
+- name: Provision the wk podman machine
+  hosts: localhost
+  become: true
+  vars:
+    wk_root: /var/lib/wk
+
+  tasks:
+    - name: Create the workspace storage tree
+      # Everything lives on the VM's native filesystem. Hardlinks between base
+      # snapshots only work within one filesystem, and compiling over virtiofs
+      # would dominate build time -- neither is possible on a host mount, and
+      # this machine deliberately has none.
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: core
+        group: core
+        mode: "0755"
+      loop:
+        - "{{ wk_root }}"
+        - "{{ wk_root }}/git"
+        - "{{ wk_root }}/base"
+        - "{{ wk_root }}/ws"
+        - "{{ wk_root }}/cache/ccache"
+        - "{{ wk_root }}/cache/yocto/downloads"
+        - "{{ wk_root }}/cache/yocto/sstate"
+        - "{{ wk_root }}/cache/buildroot/dl"
+        - "{{ wk_root }}/cache/buildroot/ccache"
+        - "{{ wk_root }}/tools"
+        - /opt/wk-tools
+
+    - name: Create the Pi allowlist file
+      # Read back by ./setup when it regenerates the firewall, so the test
+      # devices survive a policy rebuild. Empty is the correct initial state.
+      ansible.builtin.file:
+        path: "{{ wk_root }}/pi-hosts"
+        state: touch
+        owner: core
+        group: core
+        mode: "0644"
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Mark this machine as headless
+      # Read by lib/resources.sh. The VM has no desktop to protect, and the
+      # macOS host already subtracted its own reserve when sizing the VM;
+      # applying the desktop reserve again here would leave containers with a
+      # fraction of the memory that is actually free.
+      ansible.builtin.file:
+        path: "{{ wk_root }}/.headless"
+        state: touch
+        owner: core
+        group: core
+        mode: "0644"
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Lock down the secrets directory
+      # Holds the build deploy key and the shared Claude credentials.
+      ansible.builtin.file:
+        path: "{{ wk_root }}/secrets"
+        state: directory
+        owner: core
+        group: core
+        mode: "0700"
+
+    - name: Let core own the tooling directory
+      ansible.builtin.file:
+        path: /opt/wk-tools
+        state: directory
+        owner: core
+        group: core
+        mode: "0755"
+
+    - name: Install packages needed to host workspaces
+      # rpm-ostree, not dnf: the machine image is ostree-based. --apply-live
+      # avoids a reboot; --idempotent makes re-runs free.
+      ansible.builtin.command:
+        cmd: >
+          rpm-ostree install --idempotent --apply-live --allow-inactive
+          nftables git jq rsync python3
+      register: pkgs
+      changed_when: "'No packages requested' not in pkgs.stdout"
+      failed_when:
+        - pkgs.rc != 0
+        - "'already requested' not in (pkgs.stderr | default(''))"
+
+    - name: Create the workspace bridge network
+      # A real bridge, so traffic traverses the forward chain and can be
+      # filtered. Rootless podman's pasta backend cannot be firewalled this way,
+      # which is why this machine is rootful.
+      ansible.builtin.command:
+        cmd: >
+          podman network create
+          --interface-name wk0
+          --subnet 10.89.7.0/24
+          --gateway 10.89.7.1
+          wk
+      register: netcreate
+      changed_when: netcreate.rc == 0
+      failed_when:
+        - netcreate.rc != 0
+        - "'already used' not in (netcreate.stderr | default(''))"
+
+    - name: Enable nftables at boot
+      ansible.builtin.systemd_service:
+        name: nftables
+        enabled: true
+      failed_when: false

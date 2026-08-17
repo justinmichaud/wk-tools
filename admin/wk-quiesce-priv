@@ -1,0 +1,98 @@
+#!/bin/bash
+#
+# The privileged half of `wk quiesce`. Runs as root via a NOPASSWD sudoers rule
+# that names this exact path.
+#
+# Everything here must be safe to grant unconditionally, because granting it is
+# equivalent to granting it forever:
+#
+#   - The command set is a fixed allowlist. There is no passthrough, no eval,
+#     and no argument that becomes part of a command.
+#   - Nothing is read from the environment. sudo's env_reset plus the explicit
+#     PATH below means a hostile environment cannot redirect any binary.
+#   - Every action is reversible with `off`, and `off` is what runs if the
+#     argument is unrecognised.
+#
+# Linux cannot make a #! script setuid -- the kernel ignores the bit -- so a
+# sudoers rule is the mechanism, not a shell wrapper around a setuid binary.
+
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+[ "$(id -u)" -eq 0 ] || { echo "wk-quiesce-priv: must run as root" >&2; exit 1; }
+
+os=$(uname -s)
+action="${1:-off}"
+
+# --- macOS -------------------------------------------------------------------
+macos_on() {
+    # Spotlight indexing is the single largest source of benchmark noise.
+    mdutil -a -i off >/dev/null 2>&1 || true
+    # Time Machine can start mid-run.
+    tmutil stopbackup >/dev/null 2>&1 || true
+    # Software update checks and downloads.
+    softwareupdate --schedule off >/dev/null 2>&1 || true
+    # Low power mode throttles the CPU unpredictably.
+    pmset -a lowpowermode 0 >/dev/null 2>&1 || true
+    echo "quiesced: spotlight off, backups stopped, updates off, low-power off"
+}
+
+macos_off() {
+    mdutil -a -i on >/dev/null 2>&1 || true
+    softwareupdate --schedule on >/dev/null 2>&1 || true
+    echo "restored: spotlight on, updates on"
+}
+
+macos_status() {
+    printf 'spotlight: %s\n' "$(mdutil -a -s 2>/dev/null | tr '\n' ' ')"
+    printf 'lowpower:  %s\n' "$(pmset -g | awk '/lowpowermode/ {print $2}')"
+}
+
+# --- Linux -------------------------------------------------------------------
+linux_on() {
+    # Pin every CPU to the performance governor.
+    for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [ -w "$g" ] && echo performance > "$g" || true
+    done
+    # Disable turbo so clocks are steady rather than merely high.
+    [ -w /sys/devices/system/cpu/intel_pstate/no_turbo ] && \
+        echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo || true
+    [ -w /sys/devices/system/cpu/cpufreq/boost ] && \
+        echo 0 > /sys/devices/system/cpu/cpufreq/boost || true
+    # Allow perf without restriction, for profiling runs.
+    sysctl -q -w kernel.perf_event_paranoid=-1 || true
+    # Keep address layout stable between runs.
+    sysctl -q -w kernel.randomize_va_space=0 || true
+    # Stop the indexer if one is installed.
+    systemctl stop packagekit.service >/dev/null 2>&1 || true
+    echo "quiesced: performance governor, turbo off, perf unrestricted, ASLR off"
+}
+
+linux_off() {
+    for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [ -w "$g" ] && echo schedutil > "$g" || true
+    done
+    [ -w /sys/devices/system/cpu/intel_pstate/no_turbo ] && \
+        echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo || true
+    [ -w /sys/devices/system/cpu/cpufreq/boost ] && \
+        echo 1 > /sys/devices/system/cpu/cpufreq/boost || true
+    sysctl -q -w kernel.perf_event_paranoid=2 || true
+    sysctl -q -w kernel.randomize_va_space=2 || true
+    echo "restored: schedutil governor, turbo on, perf restricted, ASLR on"
+}
+
+linux_status() {
+    printf 'governor:  %s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo n/a)"
+    printf 'paranoid:  %s\n' "$(sysctl -n kernel.perf_event_paranoid 2>/dev/null || echo n/a)"
+    printf 'aslr:      %s\n' "$(sysctl -n kernel.randomize_va_space 2>/dev/null || echo n/a)"
+}
+
+case "$os:$action" in
+    Darwin:on)     macos_on ;;
+    Darwin:status) macos_status ;;
+    Darwin:*)      macos_off ;;
+    Linux:on)      linux_on ;;
+    Linux:status)  linux_status ;;
+    Linux:*)       linux_off ;;
+    *) echo "wk-quiesce-priv: unsupported OS $os" >&2; exit 1 ;;
+esac

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# wk claude <workspace> -- run Claude inside a workspace.
+#
+# Permissions are relaxed because the workspace is the blast radius, not the
+# machine. That is only a defensible trade if the boundary actually holds, so
+# this checks it before handing over control rather than trusting that setup
+# ran correctly at some point in the past.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+
+NAME="${1:-}"; shift || true
+require_name "$NAME"
+
+TARGET="${WK_TARGET:-container}"
+. "$WK_ROOT/targets/$TARGET.sh"
+
+[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+
+# --- verify the sandbox ------------------------------------------------------
+# Each of these is a property the relaxed permissions depend on. If one has
+# regressed -- a hand-edited container, a firewall that failed to load -- the
+# right response is to stop, not to run an autonomous agent anyway.
+
+if [ "$TARGET" = container ]; then
+    net=$(podman inspect "wk-$NAME" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null || echo "")
+    case "$net" in
+        *host*) die "workspace '$NAME' is on the host network -- the egress firewall cannot apply. Recreate it." ;;
+        "")     warn "could not determine the workspace network" ;;
+        *)      debug "network: $net" ;;
+    esac
+
+    if have nft && ! sudo nft list table inet wk_egress >/dev/null 2>&1; then
+        die "the wk_egress firewall table is not loaded; refusing to run unattended.
+    Load it with:  sudo nft -f $WK_ROOT/container/nftables/wk-egress.nft"
+    fi
+fi
+
+info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
+
+# --dangerously-skip-permissions is the point of the sandbox: inside a
+# disposable container with a filtered network and no host filesystem, prompting
+# for each edit buys nothing and prevents unattended work.
+t_exec "$NAME" env WK_WORKSPACE="$NAME" \
+    bash -lc "cd /src/WebKit && exec claude --dangerously-skip-permissions $*"

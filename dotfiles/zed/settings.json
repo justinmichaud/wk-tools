@@ -1,0 +1,92 @@
+{
+  "ssh_connections": [
+    {
+      "host": "devbox-armhf-2",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/igalia/jmichaud/Development/ReleaseVersion/OpenSource"
+          ]
+        }
+      ]
+    }
+  ],
+  "project_panel": {
+    "dock": "left"
+  },
+  "outline_panel": {
+    "dock": "left"
+  },
+  "collaboration_panel": {
+    "dock": "left"
+  },
+  "git_panel": {
+    "dock": "left"
+  },
+  "agent_servers": {
+    "claude-acp": {
+      "default_config_options": {
+        "mode": "auto"
+      },
+      "type": "registry"
+    }
+  },
+  "agent": {
+    "dock": "right",
+    "tool_permissions": {
+      "default": "allow"
+    },
+    "default_model": {
+      "provider": "zed.dev",
+      "model": "claude-sonnet-4-5"
+    },
+    "model_parameters": []
+  },
+  "terminal": {
+    "dock": "bottom"
+  },
+  "soft_wrap": "editor_width",
+  "show_whitespaces": "boundary",
+  "format_on_save": "off",
+  "remove_trailing_whitespace_on_save": false,
+  "file_scan_exclusions": [
+    "WebKitBuild",
+    "LayoutTests",
+    "PerformanceTests",
+    "ManualTests",
+    "Websites",
+    "metadata",
+    "resources",
+    ".git"
+  ],
+  "ui_font_size": 16,
+  "buffer_font_size": 16,
+  "theme": {
+    "mode": "system",
+    "light": "One Light",
+    "dark": "Gruvbox Dark Hard"
+  },
+  "use_system_path_prompts": false, // Use in-container paths instead of host paths
+  "lsp": {
+      "clangd": {
+        "binary": {
+          "arguments": ["--header-insertion=never"],
+          "path": "clangd"
+        }
+      },
+      "solargraph": {
+            "initialization_options": {
+              "diagnostics": false,
+              "formatting": false
+            }
+          }
+    },
+  "languages": {
+    "Ruby": {
+      "language_servers": ["solargraph", "!rubocop"],
+      "formatter": null,
+      "format_on_save": "off"
+    }
+  }
+}

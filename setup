@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+#
+# Bootstrap this machine. Idempotent: running it twice in a row must report no
+# changes the second time, and it must never install software the host does not
+# strictly need. Everything mutable belongs in a workspace, not here.
+#
+#   ./setup              everything for this OS
+#   ./setup --stage X    just one stage (tools, settings, dotfiles, claude,
+#                        machine, quiesce)
+#   ./setup --dry-run    report what would change
+
+set -euo pipefail
+
+WK_ROOT="$(cd "$(dirname "$0")" && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+
+STAGE=all
+export WK_DRY_RUN=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --stage) STAGE="${2:-}"; shift 2 ;;
+        --dry-run) WK_DRY_RUN=1; shift ;;
+        -h|--help) sed -n '2,12p' "$0" >&2; exit 0 ;;
+        *) die "unknown option: $1" ;;
+    esac
+done
+
+run_stage() {
+    local name="$1" script="$2"
+    case "$STAGE" in
+        all|"$name") ;;
+        *) return 0 ;;
+    esac
+    [ -f "$script" ] || { debug "no $name stage for this OS"; return 0; }
+    info "stage: $name"
+    # shellcheck disable=SC1090
+    . "$script"
+}
+
+OS="$(wk_os)"
+info "wk-tools setup on $OS ($(host_cores) cores, $(host_mem_mb) MB)"
+
+HOST_DIR="$WK_ROOT/host/$OS"
+
+run_stage tools    "$HOST_DIR/tools.sh"
+run_stage settings "$HOST_DIR/settings.sh"
+run_stage dotfiles "$WK_ROOT/host/dotfiles.sh"
+run_stage claude   "$WK_ROOT/claude/install.sh"
+run_stage mcp      "$HOST_DIR/mcp.sh"
+run_stage machine  "$HOST_DIR/machine.sh"
+run_stage vmtools  "$HOST_DIR/vmtools.sh"
+run_stage quiesce  "$WK_ROOT/admin/install.sh"
+
+echo >&2
+if [ "$WK_CHANGES" -eq 0 ]; then
+    info "no changes -- this machine is already set up"
+else
+    info "$WK_CHANGES change(s) applied"
+    log  "re-run ./setup to confirm it now reports no changes"
+fi

@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+#
+# wk sync -- fetch every upstream and publish a new base snapshot.
+#
+# Safe to run at any time, including while workspaces are building. Running
+# workspaces stay pinned to the snapshot they were created from and are never
+# touched; only workspaces created after this runs pick up the new one.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+
+store_init
+
+MIRROR=$(wk_mirror)
+
+# --- 1. the mirror -----------------------------------------------------------
+# Always safe: the mirror is bare and is never an overlay lower layer, so
+# nothing a workspace has mounted can be affected by fetching into it.
+
+if [ -d "$MIRROR" ]; then
+    unchanged "mirror exists"
+else
+    info "creating bare mirror (first run: this clones all of WebKit)"
+    git init --bare "$MIRROR"
+    # Repacking mid-fetch would rewrite packs that snapshots share inodes with.
+    # GC runs only from `wk gc`, and only when no workspace is running.
+    git -C "$MIRROR" config gc.auto 0
+fi
+
+wk_remotes | while read -r name url; do
+    [ -n "$name" ] || continue
+    if git -C "$MIRROR" remote get-url "$name" >/dev/null 2>&1; then
+        git -C "$MIRROR" remote set-url "$name" "$url"
+    else
+        git -C "$MIRROR" remote add "$name" "$url"
+        info "added remote $name"
+    fi
+
+    # origin's branches become the mirror's OWN heads; every other upstream is
+    # namespaced under refs/remotes/<name>/.
+    #
+    # This asymmetry is load-bearing. `git clone` copies refs/heads and ignores
+    # refs/remotes, so a mirror that filed origin under refs/remotes/origin/
+    # would have an empty refs/heads and clone into a repository with no
+    # branches at all.
+    #
+    # Only the branches from wk_mirror_branches are carried: mirroring all ~920
+    # of WebKit's branches costs tens of gigabytes for histories that are never
+    # checked out.
+    if [ "$name" = origin ]; then
+        git -C "$MIRROR" config --unset-all "remote.$name.fetch" 2>/dev/null || true
+        for _b in $(wk_mirror_branches); do
+            git -C "$MIRROR" config --add "remote.$name.fetch" \
+                "+refs/heads/$_b:refs/heads/$_b"
+        done
+    else
+        git -C "$MIRROR" config --replace-all "remote.$name.fetch" \
+            "+refs/heads/*:refs/remotes/$name/*"
+    fi
+done
+
+# Tags carry their own history and WebKit has a great many; they are not needed
+# to build a snapshot and would undo the saving above.
+git -C "$MIRROR" config remote.origin.tagOpt --no-tags
+
+# Only origin by default. The other remotes are registered above so they are
+# there when wanted, but fetching every branch of WPEWebKit and both forks
+# multiplies the mirror's size for histories that are almost never checked out.
+# `wk sync --all` fetches them; a workspace can also fetch any of them straight
+# from GitHub, which the egress policy allows.
+if [ "${1:-}" = --all ]; then
+    _to_fetch=$(wk_remotes | awk '{print $1}')
+    info "fetching all upstreams"
+else
+    _to_fetch=origin
+    info "fetching origin ($(wk_mirror_branches)) -- 'wk sync --all' for every remote"
+fi
+
+# Fetch each remote separately rather than `remote update`: one unreachable
+# fork (renamed, made private, network blip) would otherwise abort the whole
+# sync after a long download and leave no new snapshot. --prune keeps deleted
+# upstream branches from accumulating forever.
+for name in $_to_fetch; do
+    printf '  %-8s ' "$name" >&2
+    if git -C "$MIRROR" fetch --prune --quiet "$name" 2>/dev/null; then
+        echo "ok" >&2
+    else
+        echo "FAILED (continuing)" >&2
+    fi
+done
+
+# origin is the only remote a snapshot actually needs; the rest are conveniences.
+# Checked as refs/heads/main because of the refspec asymmetry above.
+git -C "$MIRROR" rev-parse --verify --quiet refs/heads/main >/dev/null \
+    || die "main was not fetched into the mirror; cannot publish a snapshot"
+
+# --- 2. the snapshot ---------------------------------------------------------
+
+BRANCH="${WK_BRANCH:-origin/main}"
+NEW_ID=$(date -u +%Y%m%dT%H%M%SZ)
+NEW_DIR="$(wk_base_dir)/$NEW_ID"
+NEW_TREE="$NEW_DIR/WebKit"
+
+PREV_ID=$(current_base 2>/dev/null || true)
+
+if [ -n "$PREV_ID" ]; then
+    PREV_TREE=$(base_path "$PREV_ID")
+    info "snapshotting $PREV_ID -> $NEW_ID"
+    ensure_dir "$NEW_DIR"
+    # Hardlinks: one filesystem, so this is effectively free in time and space.
+    # It is safe against the previous snapshot because everything that follows
+    # either creates a new file or renames over an old one -- git never writes
+    # in place -- so the previous snapshot's inodes keep their contents.
+    cp -al "$PREV_TREE" "$NEW_TREE"
+    git -C "$NEW_TREE" remote set-url origin "$MIRROR" 2>/dev/null || true
+    git -C "$NEW_TREE" fetch --all --prune --quiet
+else
+    info "no previous snapshot; checking out $BRANCH (this takes a few minutes)"
+    ensure_dir "$NEW_DIR"
+    git clone --quiet "$MIRROR" "$NEW_TREE"
+fi
+
+# Point the snapshot's remotes at GitHub rather than at the mirror it was
+# cloned from. The mirror lives at $MIRROR in the VM and is deliberately NOT
+# mounted into workspaces, so a snapshot that kept it as origin would give
+# every workspace a remote it cannot reach.
+#
+# The fork gets an HTTPS fetch URL and an SSH push URL: fetching stays
+# anonymous, while pushing goes over the deploy key that firstrun.sh installs.
+# The key is scoped by GitHub to justinmichaud/WebKit alone, so this is the
+# only place a workspace can write.
+info "wiring snapshot remotes for workspace use"
+git -C "$NEW_TREE" remote set-url origin https://github.com/WebKit/WebKit.git
+
+if git -C "$NEW_TREE" remote get-url fork >/dev/null 2>&1; then
+    git -C "$NEW_TREE" remote set-url fork https://github.com/justinmichaud/WebKit.git
+else
+    git -C "$NEW_TREE" remote add fork https://github.com/justinmichaud/WebKit.git
+fi
+git -C "$NEW_TREE" remote set-url --push fork git@github.com:justinmichaud/WebKit.git
+
+info "checking out $BRANCH"
+git -C "$NEW_TREE" checkout --quiet --detach "$BRANCH"
+# A snapshot must be pristine: a stray file left in the lower layer appears in
+# every workspace built from it and cannot be deleted from any of them.
+git -C "$NEW_TREE" reset --hard --quiet
+git -C "$NEW_TREE" clean -qfdx
+
+printf '%s\n' "$BRANCH" > "$NEW_DIR/branch"
+git -C "$NEW_TREE" rev-parse HEAD > "$NEW_DIR/sha"
+
+info "published base $NEW_ID ($(cut -c1-10 < "$NEW_DIR/sha"))"
+
+_running=$(list_workspaces | wc -l | tr -d ' ')
+if [ "$_running" -gt 0 ]; then
+    log "note: $_running existing workspace(s) stay on their pinned snapshot and are unaffected"
+    log "      run 'wk gc' to reclaim snapshots once nothing references them"
+fi

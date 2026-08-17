@@ -1,7 +1,0 @@
-if [ "$(uname)" == "Darwin" ]; then
-export VM=$BUILDDIR/WebKitBuild/$CONFIG/
-DYLD_FRAMEWORK_PATH=$VM $VM/jsc --validateOptions=1 "$@"
-else
-export VM=$BUILDDIR/WebKitBuild/JSCOnly/$CONFIG/
-JSC_validateOptions=1 LD_LIBRARY_PATH=$VM/lib $VM/bin/jsc --validateOptions=1 "$@"
-fi

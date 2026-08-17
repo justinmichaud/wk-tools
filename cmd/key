@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+#
+# wk key -- the build key workspaces push with.
+#
+# Deliberately one key, shared by every workspace, registered on GitHub as a
+# *deploy key* on justinmichaud/WebKit. Deploy keys are scoped to a single
+# repository, which is what makes "write to my fork and nowhere else" an
+# enforced property rather than a convention: even a workspace that rewrote all
+# its git config could not push anywhere else with it.
+#
+# Reads need no credential at all -- the repositories are public and fetch over
+# HTTPS anonymously -- so this key is only ever used for pushing.
+#
+#   wk key show      print the public key to register
+#   wk key ensure    create it if missing (idempotent; run by setup)
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+
+KEY="$WK_STORE/secrets/build_key"
+ACTION="${1:-show}"
+
+ensure_key() {
+    ensure_dir "$(dirname "$KEY")" 0700
+    if [ -f "$KEY" ]; then
+        unchanged "build key exists"
+        return 0
+    fi
+    # No passphrase: it is used unattended by agents inside workspaces, and a
+    # passphrase that must be typed would simply be stored next to the key.
+    # The scoping to one repository is the actual control here.
+    ssh-keygen -t ed25519 -N '' -C "wk build key (deploy key for justinmichaud/WebKit)" -f "$KEY" >/dev/null
+    chmod 0600 "$KEY"
+    changed "generated build key"
+}
+
+case "$ACTION" in
+ensure)
+    ensure_key
+    ;;
+show)
+    [ -f "$KEY.pub" ] || die "no build key yet -- run: wk key ensure"
+    cat "$KEY.pub"
+    ;;
+register)
+    ensure_key
+    cat >&2 <<EOF
+
+Register this as a deploy key WITH WRITE ACCESS on justinmichaud/WebKit:
+
+  https://github.com/justinmichaud/WebKit/settings/keys/new
+
+  Title:        wk build key
+  Key:          (below)
+  Allow write:  YES  -- required, or workspaces can read but not push
+
+EOF
+    cat "$KEY.pub"
+    cat >&2 <<'EOF'
+
+GitHub refuses to reuse one deploy key across repositories, so a second fork
+(WPEWebKit, say) needs its own key. Nothing else in the tailnet or the host
+grants a workspace any other push destination.
+EOF
+    ;;
+*)
+    die "usage: wk key show|ensure|register"
+    ;;
+esac

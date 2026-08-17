@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+#
+# wk logs <workspace> [--follow] -- the build log, with the noise stripped.
+#
+# ninja writes progress with carriage returns, so a raw `tail` shows one
+# unreadable smear. This normalises that and, by default, shows the parts worth
+# reading rather than the last N lines -- after a failure the tail is usually
+# unrelated, because compilers keep going past the first error.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/watchdog.sh"
+
+NAME="${1:-}"; shift || true
+require_name "$NAME"
+LOG="$(wk_ws_dir "$NAME")/build.log"
+[ -f "$LOG" ] || die "no build log for '$NAME' -- has it been built?"
+
+case "${1:-}" in
+--follow|-f) exec tail -f "$LOG" ;;
+--all|-a)    exec tr '\r' '\n' < "$LOG" ;;
+esac
+
+log "errors:"
+first_error "$LOG" | sed 's/^/  /' || log "  (none)"
+log ""
+log "last output:"
+tr '\r' '\n' < "$LOG" | grep -v '^$' | tail -15 | sed 's/^/  /'
+log ""
+log "  wk logs $NAME --all     full log"
+log "  wk logs $NAME --follow  live"

@@ -1,0 +1,48 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:bugs.webkit.org)",
+      "WebFetch(domain:ews-build.webkit.org)",
+      "WebFetch(domain:isocpp.org)",
+      "WebFetch(domain:www.open-std.org)",
+      "Read(//tmp/**)",
+      "Read(//private/tmp/**)",
+      "Skill(build-webkit)",
+      "Skill(build-webkit:*)",
+      "Skill(add-file-to-webkit)",
+      "Skill(add-file-to-webkit:*)",
+      "Skill(fix-webkit-ews)",
+      "Skill(fix-webkit-ews:*)",
+      "Skill(update-config)",
+      "Skill(update-config:*)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/private/tmp"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.claude/hooks/webkit-jsc-skill-reminder.sh\""
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "clangd-lsp@claude-plugins-official": true
+  },
+  "theme": "dark",
+  "autoCompactEnabled": false,
+  "precomputeCompactionEnabled": false,
+  "agentPushNotifEnabled": true,
+  "remoteControlAtStartup": true
+}

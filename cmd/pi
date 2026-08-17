@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+#
+# wk pi setup <host> -- put a Raspberry Pi test device on the tailnet.
+#
+# Works against a running device over SSH and requires no image rebuild. That
+# constraint is what shapes the whole script: the rpi4 runs a buildroot image,
+# and rebuilding it to add a package is not an option.
+#
+# Tailscale ships pure-Go static binaries with no libc dependency, including a
+# 32-bit ARM build, so provisioning is: copy two binaries to a writable
+# partition, add an init script, and bring the node up tagged.
+#
+# The Pis are expected to sit on an isolated guest network with no route to the
+# main LAN, so the tailnet is the only path to them -- which is exactly what
+# lets a workspace reach them without being able to reach anything else.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+
+TS_VERSION="${TS_VERSION:-1.102.2}"
+TAG="${WK_PI_TAG:-tag:wk}"
+
+ACTION="${1:-}"; HOST="${2:-}"
+[ "$ACTION" = setup ] && [ -n "$HOST" ] || die "usage: wk pi setup <ssh-host>"
+
+rsh() { ssh -o BatchMode=yes "$HOST" "$@"; }
+
+info "probing $HOST"
+ARCH=$(rsh 'uname -m') || die "cannot ssh to $HOST"
+KERNEL=$(rsh 'uname -r')
+
+case "$ARCH" in
+    aarch64|arm64) TS_ARCH=arm64 ;;
+    armv7l|armv6l) TS_ARCH=arm ;;
+    x86_64)        TS_ARCH=amd64 ;;
+    *) die "unsupported architecture: $ARCH" ;;
+esac
+log "  arch=$ARCH kernel=$KERNEL -> tailscale_${TS_VERSION}_${TS_ARCH}"
+
+# A buildroot rootfs is often read-only or tiny, so find somewhere durable to
+# put the binaries and the node state rather than assuming /usr/local exists.
+DEST=$(rsh 'for d in /opt /data /usr/local /home/root /root; do
+              if [ -d "$d" ] && touch "$d/.wk-probe" 2>/dev/null; then
+                rm -f "$d/.wk-probe"; echo "$d"; exit 0
+              fi
+            done
+            echo /tmp')
+log "  writable prefix: $DEST"
+
+# Kernel-mode Tailscale needs /dev/net/tun. Userspace mode is the fallback and
+# needs no kernel support at all, which is what keeps the no-image-change
+# promise honest on a buildroot device.
+if rsh 'test -c /dev/net/tun'; then
+    TS_MODE=kernel
+    log "  /dev/net/tun present -> kernel networking"
+else
+    TS_MODE=userspace
+    warn "/dev/net/tun absent -> userspace networking"
+    warn "  verify inbound ssh over the tailnet works on this device;"
+    warn "  if it does not, fall back to a Pi-originated reverse tunnel (still no image change)"
+fi
+
+info "installing tailscale $TS_VERSION on $HOST"
+rsh "set -e
+    cd '$DEST'
+    if [ ! -x '$DEST/tailscaled' ]; then
+        url=https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz
+        (command -v curl >/dev/null && curl -fsSL \"\$url\" || wget -qO- \"\$url\") \
+            | tar xz --strip-components=1 \
+                  'tailscale_${TS_VERSION}_${TS_ARCH}/tailscale' \
+                  'tailscale_${TS_VERSION}_${TS_ARCH}/tailscaled'
+        chmod +x tailscale tailscaled
+    fi
+    mkdir -p '$DEST/tailscale-state'"
+
+# BusyBox init: an S-script is the portable option, since buildroot images
+# usually have neither systemd nor a service manager with a unit format.
+FLAGS="--state=$DEST/tailscale-state/tailscaled.state --socket=$DEST/tailscale-state/tailscaled.sock"
+[ "$TS_MODE" = userspace ] && FLAGS="$FLAGS --tun=userspace-networking"
+
+rsh "cat > '$DEST/tailscale-up.sh' <<'EOF'
+#!/bin/sh
+# Installed by wk pi setup. Starts tailscaled with state on a writable
+# partition so nothing in the read-only rootfs has to change.
+DEST=$DEST
+[ -S \"\$DEST/tailscale-state/tailscaled.sock\" ] && exit 0
+\"\$DEST/tailscaled\" $FLAGS >/var/log/tailscaled.log 2>&1 &
+EOF
+chmod +x '$DEST/tailscale-up.sh'
+'$DEST/tailscale-up.sh'"
+
+sleep 2
+
+info "bringing the node up as $TAG"
+log "  an auth key is required; generate a tagged one at:"
+log "  https://login.tailscale.com/admin/settings/keys  (tags: $TAG)"
+printf 'tailscale auth key (tskey-auth-...): ' >&2
+read -r AUTHKEY
+[ -n "$AUTHKEY" ] || die "no auth key given"
+
+rsh "'$DEST/tailscale' --socket='$DEST/tailscale-state/tailscaled.sock' up \
+        --authkey='$AUTHKEY' --advertise-tags='$TAG' --hostname='$(basename "$HOST")'"
+
+TSIP=$(rsh "'$DEST/tailscale' --socket='$DEST/tailscale-state/tailscaled.sock' ip -4" | head -1)
+info "$HOST is on the tailnet at $TSIP"
+
+# Add the address to the workspace egress allowlist. Individual addresses, not
+# the whole CGNAT range: the workstation is itself an unrestricted tailnet node,
+# so allowing 100.64.0.0/10 would let a workspace reach everything it can.
+#
+# Recorded in a file as well as loaded live. ./setup regenerates the firewall
+# from the repo on every run, which would otherwise drop these addresses and
+# silently cut the test devices off.
+PI_FILE="$WK_STORE/pi-hosts"
+ensure_dir "$(dirname "$PI_FILE")"
+if ! grep -qxF "$TSIP" "$PI_FILE" 2>/dev/null; then
+    printf '%s\n' "$TSIP" >> "$PI_FILE"
+    info "recorded $TSIP in $PI_FILE"
+fi
+
+if have nft && sudo nft list table inet wk_egress >/dev/null 2>&1; then
+    sudo nft add element inet wk_egress pi_hosts "{ $TSIP }"
+    info "allowed $TSIP in the workspace egress policy"
+else
+    log "note: the firewall is not loaded here; $TSIP is recorded and will be"
+    log "      applied the next time the policy is regenerated."
+fi
+
+cat >&2 <<EOF
+
+Remaining manual step -- the tailnet ACL. In the admin console, grant tag:wk
+full access to itself so workspaces and Pis can reach each other:
+
+  "tagOwners": { "tag:wk": ["autogroup:admin"] },
+  "grants": [
+    { "src": ["tag:wk"], "dst": ["tag:wk"], "ip": ["*"] },
+    { "src": ["autogroup:member"], "dst": ["*"], "ip": ["*"] }
+  ]
+
+Note the existing tag:server covers moose, nextcloud, immich, overleaf and the
+gateway -- do not reuse it here, or workspaces get all of them.
+EOF

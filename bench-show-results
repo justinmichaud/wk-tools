@@ -1,3 +1,0 @@
-cd ~/WebKit/ReleaseVersion/OpenSource/
-
-python3 ./Tools/Scripts/compare-results -a ~/Desktop/ToT*.result -b ~/Desktop/Patched*.result --detailed-breakdown

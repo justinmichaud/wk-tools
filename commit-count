@@ -1,2 +1,0 @@
-git shortlog --summary --since "1 year" | sort -n -k 1
-

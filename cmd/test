@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#
+# wk test <workspace> [--config C] [args] -- run the JSC or layout test suites.
+#
+# --memory-limited is passed by default: the test harness otherwise sizes its
+# own parallelism from core count alone, which is exactly the behaviour that
+# makes a machine unusable mid-run.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/build/configs.sh"
+
+NAME="${1:-}"; shift || true
+require_name "$NAME"
+
+CONFIG="${WK_CONFIG:-jsc-release}"
+SUITE=jsc
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --config) CONFIG="${2:-}"; shift 2 ;;
+        --layout) SUITE=layout; shift ;;
+        --)       shift; break ;;
+        *)        break ;;
+    esac
+done
+
+config_load "$CONFIG" || die "unknown config '$CONFIG'"
+
+TARGET="${WK_TARGET:-container}"
+. "$WK_ROOT/targets/$TARGET.sh"
+[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+
+lower=$(echo "$CFG_TYPE" | tr '[:upper:]' '[:lower:]')
+JOBS=$(build_jobs)
+
+case "$SUITE" in
+jsc)
+    info "running JSC tests ($CONFIG, -j$JOBS)"
+    t_exec "$NAME" env WK_JOBS="$JOBS" bash -lc \
+        "cd /src/WebKit && nice -n 10 Tools/Scripts/run-javascriptcore-tests \
+            --$lower ${CFG_PORT} --no-build --no-fail-fast --memory-limited $* "
+    ;;
+layout)
+    info "running layout tests ($CONFIG, -j$JOBS)"
+    t_exec "$NAME" bash -lc \
+        "cd /src/WebKit && nice -n 10 Tools/Scripts/run-webkit-tests \
+            --$lower ${CFG_PORT} --no-build --child-processes=$JOBS $* "
+    ;;
+esac

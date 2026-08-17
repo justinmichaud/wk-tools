@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+#
+# wk quiesce on|off|status -- quiet the machine for benchmarking.
+#
+# Split in two: the privileged actions go through the sudoers-allowlisted
+# helper, and everything that needs no privilege stays here. Keeping the
+# unprivileged half out of the root helper is what lets the root helper stay a
+# short, auditable, fixed allowlist.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+
+PRIV=/usr/local/libexec/wk-quiesce-priv
+ACTION="${1:-status}"
+STATE="${TMPDIR:-/tmp}/wk-quiesce"
+
+run_priv() {
+    if [ -x "$PRIV" ]; then
+        sudo -n "$PRIV" "$1" 2>/dev/null && return 0
+        warn "passwordless sudo unavailable; re-run ./setup to install the sudoers rule"
+        sudo "$PRIV" "$1"
+    else
+        warn "$PRIV is not installed; run ./setup. Continuing with unprivileged steps only."
+    fi
+}
+
+case "$ACTION" in
+on)
+    run_priv on
+    mkdir -p "$STATE"
+
+    if is_macos; then
+        # Keep the machine awake for the whole run without touching power
+        # settings permanently.
+        if [ ! -f "$STATE/caffeinate.pid" ]; then
+            caffeinate -dimsu &
+            echo $! > "$STATE/caffeinate.pid"
+            info "caffeinate started"
+        fi
+        # Background analysis daemons are the largest remaining noise source
+        # and need no privilege to pause.
+        killall -STOP photoanalysisd mediaanalysisd suggestd \
+            knowledgeconstructiond parsecd proactived \
+            AMPLibraryAgent bird cloudd ReportCrash 2>/dev/null || true
+        touch "$STATE/daemons_paused"
+        info "background daemons paused"
+        warn "set Do Not Disturb by hand -- it cannot be scripted reliably"
+    fi
+
+    sleep "${WK_SETTLE_SECONDS:-30}"
+    info "quiesced; settle time elapsed"
+    ;;
+
+off)
+    if is_macos; then
+        if [ -f "$STATE/caffeinate.pid" ]; then
+            kill "$(cat "$STATE/caffeinate.pid")" 2>/dev/null || true
+            rm -f "$STATE/caffeinate.pid"
+            info "caffeinate stopped"
+        fi
+        if [ -f "$STATE/daemons_paused" ]; then
+            killall -CONT photoanalysisd mediaanalysisd suggestd \
+                knowledgeconstructiond parsecd proactived \
+                AMPLibraryAgent bird cloudd ReportCrash 2>/dev/null || true
+            rm -f "$STATE/daemons_paused"
+            info "background daemons resumed"
+        fi
+    fi
+    run_priv off
+    ;;
+
+status)
+    run_priv status
+    [ -f "$STATE/caffeinate.pid" ] && log "caffeinate: running" || log "caffeinate: no"
+    [ -f "$STATE/daemons_paused" ] && log "daemons:    paused" || log "daemons:    running"
+    ;;
+
+*)
+    die "usage: wk quiesce on|off|status"
+    ;;
+esac

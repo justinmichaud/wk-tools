@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# wk gc -- reclaim disk.
+#
+# Covers every place data accumulates, because the design promises that nothing
+# grows silently. In particular it runs fstrim: the VM's disk image is sparse
+# and never shrinks on its own, so deleting files inside the VM returns exactly
+# zero bytes to the host until the guest discards those blocks.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+
+TARGET="${WK_TARGET:-container}"
+. "$WK_ROOT/targets/$TARGET.sh"
+
+REFRESH_NET=""
+[ "${1:-}" = --refresh-net ] && REFRESH_NET=1
+
+# --- unreferenced base snapshots --------------------------------------------
+for base in $(unreferenced_bases); do
+    # Keep the newest snapshot even when unreferenced: it is what the next
+    # `wk new` will use, and re-fetching it is expensive.
+    [ "$base" = "$(current_base)" ] && continue
+    info "removing unreferenced snapshot $base"
+    rm -rf "$(wk_base_dir)/$base"
+done
+
+# --- podman ------------------------------------------------------------------
+if have podman; then
+    podman image prune -f >/dev/null 2>&1 || true
+    podman volume prune -f >/dev/null 2>&1 || true
+    info "pruned dangling images and volumes"
+fi
+
+# --- the mirror --------------------------------------------------------------
+# Repacking rewrites pack files that snapshots share inodes with via cp -al, so
+# it is only safe when nothing is using them.
+active=$(list_workspaces | wc -l | tr -d ' ')
+if [ "$active" -eq 0 ]; then
+    info "repacking the mirror"
+    git -C "$(wk_mirror)" gc --auto --quiet || true
+else
+    log "skipping mirror repack: $active workspace(s) still reference snapshots"
+fi
+
+# --- ccache ------------------------------------------------------------------
+if have ccache; then
+    CCACHE_DIR="$WK_STORE/cache/ccache" ccache --max-size="${WK_CCACHE_MAXSIZE:-50G}" >/dev/null
+    CCACHE_DIR="$WK_STORE/cache/ccache" ccache --cleanup >/dev/null 2>&1 || true
+    info "ccache trimmed to ${WK_CCACHE_MAXSIZE:-50G}"
+fi
+
+# --- firewall address sets ---------------------------------------------------
+# GitHub rotates its ranges occasionally; a stale set shows up as git hanging
+# rather than as an obvious firewall error, so refresh on request.
+if [ -n "$REFRESH_NET" ] && have nft; then
+    info "refreshing GitHub ranges from api.github.com/meta"
+    ranges=$(curl -fsS https://api.github.com/meta | jq -r '.git[] | select(test(":") | not)')
+    if [ -n "$ranges" ]; then
+        sudo nft flush set inet wk_egress github_v4
+        for r in $ranges; do
+            sudo nft add element inet wk_egress github_v4 "{ $r }"
+        done
+        info "loaded $(echo "$ranges" | wc -l | tr -d ' ') GitHub ranges"
+    else
+        warn "could not fetch GitHub ranges; leaving the existing set in place"
+    fi
+fi
+
+# --- hostnames without published ranges --------------------------------------
+if [ -n "$REFRESH_NET" ] && have nft; then
+    # Resolved fresh each time rather than pinned: these are load-balancer
+    # addresses that can move, and a stale entry shows up as a mysterious
+    # download hang rather than a firewall error.
+    info "resolving hosts that publish no stable range"
+    sudo nft flush set inet wk_egress resolved_hosts 2>/dev/null || true
+    for host in downloads.claude.ai; do
+        for ip in $(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u); do
+            sudo nft add element inet wk_egress resolved_hosts "{ $ip }" 2>/dev/null \
+                && log "  $host -> $ip"
+        done
+    done
+fi
+
+# --- return free space to the host ------------------------------------------
+if [ -n "${WK_IN_VM:-}" ] || is_linux; then
+    sudo fstrim -av 2>/dev/null || warn "fstrim failed; freed space may not return to the host"
+fi
+
+info "gc complete"
+df -h "$WK_STORE" 2>/dev/null | tail -1 || true

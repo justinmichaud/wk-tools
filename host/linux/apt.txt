@@ -1,0 +1,27 @@
+# Host packages, Ubuntu 26.04. Stock archive only -- no third-party repos.
+# Anything a build needs lives in the workspace image, not here.
+
+# Containers and the workspace firewall
+podman
+nftables
+uidmap
+slirp4netns
+
+# Sources and caches
+git
+git-lfs
+ccache
+
+# Used by wk and its hooks
+jq
+curl
+python3
+
+# Benchmarking and profiling on the host side
+linux-tools-generic
+
+# GPU / graphical session for benchmark runs on the attached monitor.
+# From Ubuntu's own components, not a third-party repository.
+mesa-utils
+mesa-vulkan-drivers
+cage

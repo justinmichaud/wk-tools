@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# wk vm <sub> -- disposable macOS VMs for building the Apple ports.
+#
+# macOS has no container primitive for macOS userspace -- Apple's `container`
+# CLI runs Linux containers -- so isolation for Apple-port builds means a VM.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/targets/vm.sh"
+
+SUB="${1:-ls}"; shift || true
+
+case "$SUB" in
+ls)
+    printf '%-20s %s\n' NAME STATE
+    t_list || true
+    ;;
+new)
+    NAME="${1:-}"; require_name "$NAME"
+    t_create "$NAME"
+    info "created; start it with: wk vm start $NAME"
+    ;;
+start)
+    NAME="${1:-}"; require_name "$NAME"
+    ip=$(t_start "$NAME")
+    info "$NAME is up at $ip"
+    log  "  zed ssh://admin@$ip/Users/admin/WebKit"
+    ;;
+stop)
+    NAME="${1:-}"; require_name "$NAME"
+    tart stop "wk-$NAME"
+    info "stopped $NAME"
+    ;;
+enter)
+    NAME="${1:-}"; require_name "$NAME"
+    t_enter "$NAME"
+    ;;
+rm)
+    NAME="${1:-}"; require_name "$NAME"
+    confirm "delete macOS VM '$NAME'?" || die "aborted"
+    t_destroy "$NAME"
+    ;;
+*)
+    die "usage: wk vm ls|new|start|stop|enter|rm [name]"
+    ;;
+esac

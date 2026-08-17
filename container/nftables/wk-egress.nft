@@ -1,0 +1,151 @@
+#!/usr/sbin/nft -f
+#
+# Egress policy for wk workspaces.
+#
+# This table lives in the VM's root network namespace (or the Linux host's).
+# Workspaces run in their own network namespace on the wk0 bridge and have no
+# capability to modify anything here -- CAP_NET_ADMIN is checked against the
+# owning user namespace of the netns, which a workspace does not own. That is
+# what makes this a boundary rather than a suggestion.
+#
+# Scope: only traffic arriving from the workspace bridge is policed. The host
+# and the VM itself are deliberately unrestricted -- they are workstations and
+# must keep full access to the tailnet and the LAN.
+#
+# Sets are populated at runtime rather than baked in:
+#   pi_hosts   by `wk pi setup`   (tailnet addresses of the test devices)
+#   github_v4  by `wk gc --refresh-net` (from https://api.github.com/meta)
+
+table inet wk_egress {
+
+    # Anthropic publishes fixed ranges and documents that they do not change
+    # without notice, so no DNS-following proxy is required.
+    set anthropic_v4 {
+        type ipv4_addr
+        flags interval
+        elements = { 160.79.104.0/23 }
+    }
+
+    set anthropic_v6 {
+        type ipv6_addr
+        flags interval
+        elements = { 2607:6bc0::/48 }
+    }
+
+    # From api.github.com/meta, "git" key: covers github.com and ssh.github.com,
+    # i.e. both HTTPS and SSH clones. Refreshed periodically; these are the
+    # ranges as of writing.
+    set github_v4 {
+        type ipv4_addr
+        flags interval
+        elements = {
+            192.30.252.0/22,
+            185.199.108.0/22,
+            140.82.112.0/20,
+            143.55.64.0/20
+        }
+    }
+
+    # PyPI, for WebKit's Python build dependencies.
+    #
+    # build-webkit autoinstalls setuptools and friends on every clean build, so
+    # this is a real build dependency rather than an escape hatch -- without it
+    # the build fails at "Failed to download setuptools" before compiling
+    # anything. PyPI is Fastly-hosted, so the allowlist is Fastly's published
+    # range list (19 CIDRs), refreshed by `wk gc --refresh-net`. Verified to
+    # cover both pypi.org and files.pythonhosted.org.
+    set pypi_v4 {
+        type ipv4_addr
+        flags interval
+        elements = {
+            23.235.32.0/20,
+            43.249.72.0/22,
+            103.244.50.0/24,
+            103.245.222.0/23,
+            103.245.224.0/24,
+            104.156.80.0/20,
+            140.248.64.0/18,
+            140.248.128.0/17,
+            146.75.0.0/17,
+            151.101.0.0/16,
+            157.52.64.0/18,
+            167.82.0.0/17,
+            167.82.128.0/20,
+            167.82.160.0/20,
+            167.82.224.0/20,
+            172.111.64.0/18,
+            185.31.16.0/22,
+            199.27.72.0/21,
+            199.232.0.0/16
+        }
+    }
+
+    # Hostnames whose addresses are not published as stable ranges.
+    #
+    # downloads.claude.ai is the redirect target of claude.ai/install.sh and
+    # lives on Google Cloud (35.190.x), so it is covered by neither Anthropic's
+    # published /23 nor Cloudflare's list. Populated by `wk gc --refresh-net`,
+    # which resolves each name and loads the result.
+    #
+    # This is the weakest part of the policy: a load-balancer address can rotate
+    # and the symptom is a failed download rather than an obvious firewall
+    # error. The durable fix is dnsmasq --nftset, which adds each resolved
+    # address to the set before the client ever sees the answer; worth doing if
+    # this list needs touching more than occasionally.
+    set resolved_hosts {
+        type ipv4_addr
+        flags interval
+    }
+
+    # Tailnet addresses of the Raspberry Pi test devices. Individual addresses,
+    # not the whole 100.64.0.0/10 CGNAT range: the Linux workstation is itself
+    # an unrestricted tailnet node, so allowing the full range would let a
+    # workspace reach every machine the workstation can.
+    # Starts empty and is filled in by `wk pi setup`. Note there is deliberately
+    # no `elements = { }` line: nft rejects an empty element list as a syntax
+    # error, so an empty set is declared by omitting it entirely.
+    set pi_hosts {
+        type ipv4_addr
+    }
+
+    chain forward {
+        type filter hook forward priority filter - 10; policy drop;
+
+        # Police only the workspace bridge; everything else on this host is
+        # none of our business.
+        iifname != "wk0" accept
+
+        ct state invalid drop
+        ct state established,related accept
+
+        ip  daddr @anthropic_v4 tcp dport 443 accept
+        ip6 daddr @anthropic_v6 tcp dport 443 accept
+        ip  daddr @github_v4    tcp dport { 22, 443 } accept
+        ip  daddr @pypi_v4      tcp dport 443 accept
+        ip  daddr @resolved_hosts tcp dport 443 accept
+        ip  daddr @pi_hosts     tcp dport 22 accept
+
+        # Everything else, explicitly including RFC1918, is dropped. Logged at
+        # a low rate so a blocked fetch is diagnosable without filling the
+        # journal when something retries in a loop.
+        limit rate 10/minute log prefix "wk-egress-drop " level info
+        counter drop
+    }
+
+    chain input {
+        type filter hook input priority filter - 10; policy accept;
+
+        # Not optional. Without it a workspace can reach the VM's own sshd and
+        # podman socket and pivot straight out onto the LAN, making the forward
+        # chain above pointless.
+        iifname != "wk0" accept
+
+        ct state established,related accept
+
+        # DNS only, served by aardvark-dns on the bridge gateway.
+        udp dport 53 accept
+        tcp dport 53 accept
+
+        counter drop
+    }
+}

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# wk ls -- workspaces, what they are pinned to, and what they cost on disk.
+#
+# Disk is shown because the overlay layers are the one thing that grows without
+# bound between `wk gc` runs, and they are invisible to `podman ps`.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+
+TARGET="${WK_TARGET:-container}"
+. "$WK_ROOT/targets/$TARGET.sh"
+
+printf '%-20s %-12s %-20s %8s\n' NAME STATE BASE CHANGES
+
+found=0
+for ws in $(list_workspaces); do
+    found=1
+    state=$(t_info "$ws")
+    base=$(ws_base_id "$ws" 2>/dev/null || echo '?')
+    size=$(du -sh "$(wk_ws_dir "$ws")/changes" 2>/dev/null | cut -f1 || echo -)
+    printf '%-20s %-12s %-20s %8s\n' "$ws" "$state" "$base" "$size"
+done
+
+[ "$found" -eq 1 ] || log "(no workspaces -- 'wk new <name>' to create one)"
+
+echo
+cur=$(current_base 2>/dev/null || echo none)
+log "current base: $cur"
+
+unref=$(unreferenced_bases | wc -l | tr -d ' ')
+[ "$unref" -gt 0 ] && log "$unref unreferenced snapshot(s) reclaimable with 'wk gc'"
+exit 0

@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+#
+# wk backup -- write live desktop settings back into the repo.
+#
+# The inverse of ./setup, so the pair is a real round trip. Two rules make the
+# output restorable rather than merely complete:
+#
+#   Only settings that were deliberate choices are captured. macOS reports 574
+#   preference domains, nearly all of them window positions and per-app state;
+#   dumping everything produces a file that cannot be applied to another
+#   machine and that changes on every run.
+#
+#   Credentials are never captured. ~/.config/gh holds an OAuth token, and the
+#   dconf tree contains WiFi 802.1X entries. Both are excluded explicitly here,
+#   not by hoping the filters happen to miss them.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+
+case "$(wk_os)" in
+macos)
+    conf="$WK_ROOT/host/macos/defaults.conf"
+    tmp=$(mktemp)
+
+    # Preserve the file's comments and ordering, refreshing only the values.
+    # A regenerated-from-scratch file would lose the rationale for each choice,
+    # which is most of what makes the file worth keeping.
+    while IFS= read -r line; do
+        case "$line" in
+            ''|'#'*) printf '%s\n' "$line" >> "$tmp"; continue ;;
+        esac
+        set -- $line
+        domain="$1"; key="$2"; type="$3"
+        cur=$(defaults read "$domain" "$key" 2>/dev/null || echo "")
+        if [ -z "$cur" ]; then
+            warn "$domain $key is no longer set; keeping the recorded value"
+            printf '%s\n' "$line" >> "$tmp"
+            continue
+        fi
+        case "$type" in
+            bool) case "$cur" in 1) cur=true ;; 0) cur=false ;; esac ;;
+        esac
+        printf '%s %s %s %s\n' "$domain" "$key" "$type" "$cur" >> "$tmp"
+    done < "$conf"
+
+    if cmp -s "$tmp" "$conf"; then
+        unchanged "defaults.conf"
+        rm -f "$tmp"
+    else
+        mv "$tmp" "$conf"
+        changed "defaults.conf updated"
+    fi
+
+    # Keyboard shortcuts: a whole domain, exported as XML so the diff is
+    # reviewable rather than an opaque binary blob.
+    hk="$WK_ROOT/host/macos/symbolichotkeys.plist"
+    tmp2=$(mktemp -t wk-hk).plist
+    defaults export com.apple.symbolichotkeys "$tmp2"
+    plutil -convert xml1 "$tmp2" >/dev/null
+    if cmp -s "$tmp2" "$hk"; then
+        unchanged "symbolichotkeys.plist"
+    else
+        mv "$tmp2" "$hk"
+        changed "symbolichotkeys.plist updated"
+    fi
+    rm -f "$tmp2"
+    ;;
+
+linux)
+    out="$WK_ROOT/host/linux/config.dconf"
+    tmp=$(mktemp)
+
+    # Filter machine-specific and secret entries. Without this the dump carries
+    # WiFi 802.1X UUIDs, a weather location, terminal profile UUIDs, a GTK
+    # last-folder path and assorted timestamps -- none of which belong in a
+    # repo, and all of which make the file differ on every single run.
+    dconf dump / | awk '
+        /^\[org\/gnome\/shell\/weather/            { skip = 1 }
+        /^\[org\/gnome\/desktop\/interface\/clock/ { skip = 0 }
+        /^\[/ {
+            skip = 0
+            if ($0 ~ /nm-applet/)                   skip = 1
+            if ($0 ~ /Ptyxis.*Profiles/)            skip = 1
+            if ($0 ~ /org\/gnome\/shell\/weather/)  skip = 1
+        }
+        skip { next }
+        /^last-folder-path=/       { next }
+        /^welcome-dialog-last-shown-version=/ { next }
+        /^last-selected-power-profile=/ { next }
+        /^looking-glass-history=/  { next }
+        /^command-history=/        { next }
+        { print }
+    ' > "$tmp"
+
+    if cmp -s "$tmp" "$out"; then
+        unchanged "config.dconf"
+        rm -f "$tmp"
+    else
+        mv "$tmp" "$out"
+        changed "config.dconf updated"
+    fi
+    ;;
+esac
+
+echo >&2
+if [ "$WK_CHANGES" -eq 0 ]; then
+    info "no settings changed since the last backup"
+else
+    info "$WK_CHANGES file(s) updated -- review with 'git diff' before committing"
+fi

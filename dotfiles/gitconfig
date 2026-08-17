@@ -1,0 +1,30 @@
+# Included from ~/.gitconfig by `./setup`, so machine-local settings and
+# credentials can live alongside it without being committed here.
+
+[user]
+	name = Justin Michaud
+	email = jmichaud@igalia.com
+
+[core]
+	excludesFile = ~/.gitignore
+
+[init]
+	defaultBranch = main
+
+[pull]
+	rebase = true
+
+[fetch]
+	prune = true
+
+[diff]
+	# Better function-context headers in C++ and Objective-C hunks.
+	algorithm = histogram
+	colorMoved = zebra
+
+[rerere]
+	# WebKit rebases are long; remember conflict resolutions.
+	enabled = true
+
+[push]
+	default = current

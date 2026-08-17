@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+#
+# wk build <workspace> <config> -- build WebKit or JSC.
+#
+# The reason to use this rather than calling build-webkit directly: the job
+# count is derived from memory actually available right now, and the build runs
+# where the scheduler and the OOM killer will pick it over your desktop
+# session. A plain `ninja -j$(nproc)` on a WebKit link step is the reliable way
+# to make a machine stop responding.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/watchdog.sh"
+. "$WK_ROOT/build/configs.sh"
+
+if [ "${1:-}" = --list ]; then
+    log "available configs:"
+    config_list | sed 's/^/  /'
+    exit 0
+fi
+
+NAME="${1:-}"; CONFIG="${2:-}"; shift 2 2>/dev/null || true
+require_name "$NAME"
+[ -n "$CONFIG" ] || { log "usage: wk build <workspace> <config>"; config_list | sed 's/^/  /'; exit 2; }
+
+config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
+
+TARGET="${WK_TARGET:-container}"
+. "$WK_ROOT/targets/$TARGET.sh"
+
+[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+
+# Shared boxes get the polite calculation: other people are building too.
+POLITE=""
+NICE=10
+if [ "$TARGET" = remote ]; then POLITE=1; NICE=19; fi
+
+# Size the build from the *container's* memory cap, not the VM's free memory.
+# Inside a container the kernel still reports the whole machine's MemAvailable,
+# so deriving jobs from it picks a number the cgroup will OOM-kill mid-link.
+if [ "$TARGET" = container ]; then
+    WK_CGROUP_MB=$(envelope_mem_mb)
+    export WK_CGROUP_MB
+fi
+JOBS=$(explain_jobs "$POLITE")
+
+WS=$(wk_ws_dir "$NAME")
+LOG="$WS/build.log"
+STATUS="$WS/build.status"
+
+STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+START_EPOCH=$(date +%s)
+
+write_status() {
+    cat > "$STATUS" <<EOF
+state=$1
+config=$CONFIG
+exit=${2:-}
+started=$STARTED
+finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+seconds=$(( $(date +%s) - START_EPOCH ))
+log=$LOG
+EOF
+}
+printf 'state=running\nconfig=%s\nstarted=%s\nlog=%s\n' "$CONFIG" "$STARTED" "$LOG" > "$STATUS"
+
+# ccache is on. jscb-configure used to pass --no-use-ccache unconditionally,
+# which meant the shared cache never did anything for JSC builds.
+info "building $CONFIG in '$NAME' with -j$JOBS (nice $NICE)"
+log  "  log: $LOG"
+log  "  stall warning after ${WK_STALL_SECONDS}s of silence; abort after ${WK_ABORT_SECONDS}s"
+
+set +e
+run_watched "$LOG" -- \
+    t_exec "$NAME" env \
+        CCACHE_DIR=/ccache \
+        NUMBER_OF_PROCESSORS="$JOBS" \
+        CMAKE_BUILD_PARALLEL_LEVEL="$JOBS" \
+        WK_JOBS="$JOBS" \
+        WK_NICE="$NICE" \
+        WK_BUILD_ARGS="$CFG_PORT $CFG_ARGS" \
+        WK_BUILD_CMAKE="$CFG_CMAKE" \
+        CC="$CFG_CC" CXX="$CFG_CXX" \
+        WK_MB_PER_JOB="$WK_MB_PER_JOB" \
+        /opt/wk-tools/container/build-in-workspace.sh "$@"
+rc=$?
+set -e
+
+ELAPSED=$(( $(date +%s) - START_EPOCH ))
+MINS=$(( ELAPSED / 60 )); SECS=$(( ELAPSED % 60 ))
+
+echo >&2
+case $rc in
+0)
+    write_status ok 0
+    info "BUILD OK  $CONFIG in '$NAME'  (${MINS}m${SECS}s)"
+    ;;
+124)
+    write_status stalled 124
+    die "BUILD STALLED  $CONFIG in '$NAME'  (killed after ${MINS}m${SECS}s with no output)
+    log: $LOG
+    A stall is usually memory pressure -- check 'wk status $NAME' for OOM kills."
+    ;;
+*)
+    write_status failed "$rc"
+    warn "BUILD FAILED  $CONFIG in '$NAME'  (exit $rc after ${MINS}m${SECS}s)"
+    log "first error(s):"
+    first_error "$LOG" | sed 's/^/  /' || true
+    log ""
+    log "  full log: $LOG"
+    exit "$rc"
+    ;;
+esac

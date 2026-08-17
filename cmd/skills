@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+#
+# wk skills -- manage the shared, mutable skills directory.
+#
+# Every workspace mounts the same writable /skills, so an agent that improves a
+# skill improves it for all of them and the change outlives the workspace. The
+# risk with that is silent drift: edits accumulate in the VM and never reach
+# the repo, so they are neither reviewed nor backed up.
+#
+# This command closes that loop.
+#
+#   wk skills status   what differs between the shared copy and the repo
+#   wk skills diff     the actual diff
+#   wk skills pull     shared -> repo, so `git diff` shows it and you can commit
+#   wk skills push     repo -> shared, discarding workspace edits
+#
+# Direction matters: pull is the common case, because the shared copy is where
+# work happens. push is destructive and asks first.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+
+SHARED="$WK_STORE/skills"
+REPO="$WK_ROOT/claude/skills"
+
+# On macOS the shared copy lives in the VM, so operate over the machine's ssh.
+# On Linux (and inside the VM) both paths are local.
+if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+    die "run this inside the VM: wk skills $* (the shared copy lives there)"
+fi
+
+[ -d "$SHARED" ] || { ensure_dir "$SHARED"; cp -a "$REPO/." "$SHARED/" 2>/dev/null || true; }
+
+ACTION="${1:-status}"
+
+case "$ACTION" in
+status)
+    if diff -rq "$REPO" "$SHARED" >/dev/null 2>&1; then
+        info "skills are in sync with the repo"
+    else
+        warn "the shared skills differ from the repo:"
+        diff -rq "$REPO" "$SHARED" 2>&1 | sed 's/^/  /' || true
+        log ""
+        log "  wk skills diff   see the changes"
+        log "  wk skills pull   bring them into the repo to review and commit"
+    fi
+    ;;
+
+diff)
+    diff -ru "$REPO" "$SHARED" || true
+    ;;
+
+pull)
+    if diff -rq "$REPO" "$SHARED" >/dev/null 2>&1; then
+        info "nothing to pull; already in sync"
+        exit 0
+    fi
+    # --delete so a skill deleted in a workspace is deleted in the repo too;
+    # otherwise the repo slowly fills with skills nothing uses any more.
+    rsync -a --delete "$SHARED/" "$REPO/"
+    changed "pulled shared skills into $REPO"
+    log "review with: git -C $WK_ROOT diff claude/skills"
+    ;;
+
+push)
+    if diff -rq "$REPO" "$SHARED" >/dev/null 2>&1; then
+        info "nothing to push; already in sync"
+        exit 0
+    fi
+    warn "this discards any skill edits made in workspaces:"
+    diff -rq "$REPO" "$SHARED" 2>&1 | sed 's/^/  /' || true
+    confirm "overwrite the shared skills with the repo copy?" || die "aborted"
+    rsync -a --delete "$REPO/" "$SHARED/"
+    changed "pushed repo skills to $SHARED"
+    ;;
+
+*)
+    die "usage: wk skills status|diff|pull|push"
+    ;;
+esac

@@ -1,0 +1,13 @@
+# Host ~/.lldbinit.
+#
+# Deliberately generic. WebKit's own lldb helpers live in the checkout and
+# differ per workspace, so container/firstrun.sh appends the right
+# `command script import <workspace>/Tools/lldb/lldb_webkit.py` inside each
+# workspace rather than pinning one checkout here -- the previous version
+# hardcoded ~/Development/DebugVersion/OpenSource and broke everywhere else.
+
+settings set plugin.jit-loader.gdb.enable on
+settings set target.process.follow-fork-mode child
+
+# Do not stop on the signals JSC uses internally.
+settings set target.process.stop-on-sharedlibrary-events false

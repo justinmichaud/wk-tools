@@ -1,2 +1,0 @@
-export VM=$BUILDDIR/WebKitBuild/JSCOnly/$CONFIG/
-LD_LIBRARY_PATH=$VM rr record -F $VM/bin/jsc --validateOptions=1 "$@"

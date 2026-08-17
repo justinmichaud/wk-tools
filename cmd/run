@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# wk run <workspace> [config] -- run jsc from a workspace build.
+#
+# Replaces jscr/jscd/jscrb and friends, which each hardcoded a different
+# WebKitBuild path and a different notion of where the checkout lived.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/build/configs.sh"
+
+NAME="${1:-}"; shift || true
+require_name "$NAME"
+
+CONFIG="${WK_CONFIG:-jsc-release}"
+DEBUGGER=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --config) CONFIG="${2:-}"; shift 2 ;;
+        --lldb)   DEBUGGER=lldb; shift ;;
+        --)       shift; break ;;
+        *)        break ;;
+    esac
+done
+
+config_load "$CONFIG" || die "unknown config '$CONFIG'"
+
+TARGET="${WK_TARGET:-container}"
+. "$WK_ROOT/targets/$TARGET.sh"
+[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+
+# JSCOnly and the full ports lay their build trees out differently.
+case "$CFG_PORT" in
+    --jsc-only) VM_DIR="/src/WebKit/WebKitBuild/JSCOnly/$CFG_TYPE" ;;
+    *)          VM_DIR="/src/WebKit/WebKitBuild/$CFG_TYPE" ;;
+esac
+
+# validateOptions catches typo'd JSC flags, which otherwise fail silently and
+# make a benchmark look like it changed when it never ran the intended path.
+if [ -n "$DEBUGGER" ]; then
+    t_exec "$NAME" env LD_LIBRARY_PATH="$VM_DIR/lib" \
+        lldb -s /opt/wk-tools/container/lldb/run-file "$VM_DIR/bin/jsc" -- --validateOptions=1 "$@"
+else
+    t_exec "$NAME" env LD_LIBRARY_PATH="$VM_DIR/lib" JSC_validateOptions=1 \
+        "$VM_DIR/bin/jsc" --validateOptions=1 "$@"
+fi

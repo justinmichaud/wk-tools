@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""
+wk mcp -- an MCP server exposing workspace management to the Claude Desktop app.
+
+This is what lets the desktop app spin up a workspace on its own, the way the
+cloud container feature does: ask it to look at a bug, and it creates a named
+workspace and works inside it.
+
+Two properties matter more than features here, because unlike `wk claude` this
+process runs on the *host*, outside the sandbox:
+
+  Only the driver contract is exposed. There is no generic exec tool, no
+  argument that becomes a host path, and no way to name a directory outside a
+  workspace. Every call bottoms out in `wk <subcommand> <validated-name>`, and
+  the name is checked against a strict pattern before it is used.
+
+  Creation is bounded. An agent that can make workspaces can fill a disk, so
+  there is a ceiling on how many can exist at once.
+
+No third-party dependencies: raw JSON-RPC over stdio, so the host needs nothing
+installed beyond the python3 that ships with the Xcode command line tools.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+WK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wk")
+WK = os.path.normpath(WK)
+
+MAX_WORKSPACES = int(os.environ.get("WK_MCP_MAX_WORKSPACES", "6"))
+
+# Deliberately strict. This value becomes a container name, a directory name
+# and an ssh host alias, so anything exotic is a bug at best.
+NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
+
+
+def run_wk(args, timeout=1800):
+    """Run a wk subcommand. Never invoked with a shell, so nothing in the
+    arguments can be interpreted as a command."""
+    try:
+        p = subprocess.run(
+            [WK] + args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ, "WK_YES": "1"},
+        )
+        out = (p.stdout or "") + (p.stderr or "")
+        return p.returncode, out.strip()
+    except subprocess.TimeoutExpired:
+        return 1, f"timed out after {timeout}s"
+    except FileNotFoundError:
+        return 1, f"wk not found at {WK}"
+
+
+def check_name(name):
+    if not isinstance(name, str) or not NAME_RE.match(name):
+        raise ValueError(
+            "invalid workspace name: use letters, digits, dot, dash or "
+            "underscore, starting with a letter or digit"
+        )
+    return name
+
+
+def count_workspaces():
+    rc, out = run_wk(["ls"], timeout=60)
+    if rc != 0:
+        return 0
+    # Skip the header and the trailing summary lines.
+    return sum(
+        1
+        for line in out.splitlines()[1:]
+        if line.strip() and not line.startswith(("current base", "(no workspaces"))
+        and not line.endswith("reclaimable with 'wk gc'")
+    )
+
+
+TOOLS = [
+    {
+        "name": "workspace_create",
+        "description": (
+            "Create a new disposable WebKit workspace, named after the task. "
+            "Instant regardless of checkout size. Use one workspace per task."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Task name, e.g. 'wasm-simd' or 'bug-238'",
+                }
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "workspace_list",
+        "description": "List workspaces, their state, pinned base snapshot and disk use.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "workspace_build",
+        "description": (
+            "Build in a workspace. The job count is derived from available "
+            "memory and the build is niced, so it will not hang the machine."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "config": {
+                    "type": "string",
+                    "description": "jsc-debug, jsc-release, gtk-debug, gtk-release-asan, ...",
+                    "default": "jsc-release",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "workspace_exec",
+        "description": (
+            "Run a command inside a workspace. Confined to the workspace: it "
+            "has no access to the host filesystem and restricted network egress."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "command": {"type": "string", "description": "Command to run in /src/WebKit"},
+            },
+            "required": ["name", "command"],
+        },
+    },
+    {
+        "name": "workspace_status",
+        "description": (
+            "State of a workspace and its last build: running, ok, failed or "
+            "stalled, with the first error if it failed. Use this instead of "
+            "inspecting processes -- a build between phases has no compiler "
+            "running while being perfectly healthy."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        },
+    },
+    {
+        "name": "workspace_destroy",
+        "description": "Destroy a workspace and everything it created. Shared caches survive.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+]
+
+
+def call_tool(name, args):
+    if name == "workspace_list":
+        rc, out = run_wk(["ls"], timeout=60)
+        return out or "(no workspaces)"
+
+    if name == "workspace_create":
+        ws = check_name(args.get("name", ""))
+        n = count_workspaces()
+        if n >= MAX_WORKSPACES:
+            return (
+                f"refusing to create: {n} workspaces already exist (limit "
+                f"{MAX_WORKSPACES}). Destroy one first with workspace_destroy."
+            )
+        rc, out = run_wk(["new", ws], timeout=900)
+        return out if rc == 0 else f"failed: {out}"
+
+    if name == "workspace_build":
+        ws = check_name(args.get("name", ""))
+        config = args.get("config", "jsc-release")
+        if not re.match(r"^[a-z0-9-]{1,32}$", str(config)):
+            raise ValueError("invalid config name")
+        rc, out = run_wk(["build", ws, config], timeout=14400)
+        # `wk build` already reports a verdict, extracts the first error, and
+        # detects stalls, so pass its summary through rather than dumping a log
+        # tail the model then has to interpret. Exit 124 means the watchdog
+        # killed a job that had gone silent -- worth naming, because otherwise
+        # it is indistinguishable from a slow build.
+        summary = "\n".join(out.splitlines()[-40:])
+        if rc == 0:
+            return f"BUILD OK\n{summary}"
+        if rc == 124:
+            return f"BUILD STALLED - killed after no output.\n{summary}"
+        return f"BUILD FAILED (exit {rc})\n{summary}"
+
+    if name == "workspace_exec":
+        ws = check_name(args.get("name", ""))
+        cmd = args.get("command", "")
+        if not isinstance(cmd, str) or not cmd.strip():
+            raise ValueError("command must be a non-empty string")
+        # The command is passed as a single argument to the workspace's own
+        # shell, inside the container. It cannot reach the host: `wk` execs
+        # podman, and the workspace has no host mounts.
+        rc, out = run_wk(["enter", ws, "bash", "-lc", cmd], timeout=3600)
+        tail = "\n".join(out.splitlines()[-200:])
+        return tail if rc == 0 else f"exit {rc}:\n{tail}"
+
+    if name == "workspace_status":
+        args_list = ["status"]
+        if args.get("name"):
+            args_list.append(check_name(args["name"]))
+        rc, out = run_wk(args_list, timeout=120)
+        return out or "(no workspaces)"
+
+    if name == "workspace_destroy":
+        ws = check_name(args.get("name", ""))
+        rc, out = run_wk(["rm", ws], timeout=300)
+        return out if rc == 0 else f"failed: {out}"
+
+    raise ValueError(f"unknown tool: {name}")
+
+
+def respond(rid, result=None, error=None):
+    msg = {"jsonrpc": "2.0", "id": rid}
+    if error is not None:
+        msg["error"] = error
+    else:
+        msg["result"] = result
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        method = req.get("method")
+        rid = req.get("id")
+
+        # Notifications have no id and must not be answered.
+        if rid is None:
+            continue
+
+        if method == "initialize":
+            respond(rid, {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "wk", "version": "1.0.0"},
+            })
+        elif method == "tools/list":
+            respond(rid, {"tools": TOOLS})
+        elif method == "tools/call":
+            params = req.get("params") or {}
+            try:
+                text = call_tool(params.get("name"), params.get("arguments") or {})
+                respond(rid, {"content": [{"type": "text", "text": str(text)}]})
+            except Exception as e:  # surfaced to the model, not swallowed
+                respond(rid, {
+                    "content": [{"type": "text", "text": f"error: {e}"}],
+                    "isError": True,
+                })
+        else:
+            respond(rid, error={"code": -32601, "message": f"unknown method: {method}"})
+
+
+if __name__ == "__main__":
+    main()

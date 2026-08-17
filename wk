@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+#
+# wk -- WebKit development workspaces.
+#
+# On Linux (and inside the podman VM) this dispatches straight to cmd/<name>.
+# On macOS most commands have nothing to act on locally, because workspaces
+# live inside the VM; those are forwarded over `podman machine ssh`. This file
+# must therefore stay bash 3.2 compatible -- macOS ships bash 3.2 and the whole
+# point of the design is that the host installs nothing extra.
+
+set -euo pipefail
+
+WK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$WK_ROOT/lib/common.sh"
+
+WK_MACHINE="${WK_MACHINE:-wk}"
+
+usage() {
+    cat >&2 <<'EOF'
+usage: wk <command> [args]
+
+workspaces
+  new <name> [--target T]   create a workspace from the current base snapshot
+  ls                        list workspaces
+  enter <name>              interactive shell (GPU/desktop integration on Linux)
+  build <name> <config>     build, with derived job count and nice level
+  status [name]             build/container state; exit code is machine-readable
+  logs <name> [--follow]    build log, errors first
+  run <name> [args]         run jsc from the workspace build
+  test <name> [args]        run tests
+  claude <name>             launch Claude inside the workspace, sandboxed
+  rm <name>                 destroy a workspace and everything it created
+
+sources and disk
+  sync                      fetch all upstreams, publish a new base snapshot
+  skills <sub>              status|diff|pull|push the shared, mutable skills
+  key <sub>                 show|ensure|register the fork push key
+  gc                        prune snapshots, images and caches; reclaim disk
+
+hosts and machines
+  setup                     idempotent host bootstrap (also: ./setup)
+  backup                    write live desktop settings back into the repo
+  vm <sub>                  macOS VM lifecycle for Apple-port builds
+  pi <sub>                  provision a Raspberry Pi onto the tailnet
+  quiesce on|off|status     quiet the machine for benchmarking
+  mcp                       MCP server, for the Claude Desktop app
+
+  WK_DEBUG=1 for verbose output.
+EOF
+    exit 2
+}
+
+# Commands that act on the host itself and are never forwarded into the VM.
+is_host_command() {
+    case "$1" in
+        setup|backup|vm|mcp|quiesce|pi|help|-h|--help) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Quote arguments for safe reconstruction inside the VM's shell.
+shell_quote() {
+    local arg out=''
+    for arg in "$@"; do
+        out="$out '$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")'"
+    done
+    printf '%s' "$out"
+}
+
+forward_to_vm() {
+    require podman "podman is required; install the official pkg from podman.io"
+
+    podman machine inspect "$WK_MACHINE" >/dev/null 2>&1 \
+        || die "podman machine '$WK_MACHINE' does not exist -- run ./setup first"
+
+    if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" != running ]; then
+        info "starting podman machine '$WK_MACHINE'"
+        podman machine start "$WK_MACHINE" >&2
+    fi
+
+    # -- separates our args from ssh's. WK_IN_VM stops the VM-side wk from
+    # trying to forward again if anything is ever misconfigured.
+    exec podman machine ssh "$WK_MACHINE" -- \
+        "WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_CONFIG:+WK_CONFIG=$WK_CONFIG }/opt/wk-tools/wk$(shell_quote "$@")"
+}
+
+main() {
+    [ $# -ge 1 ] || usage
+    local cmd="$1"; shift
+
+    case "$cmd" in
+        help|-h|--help) usage ;;
+    esac
+
+    local impl="$WK_ROOT/cmd/$cmd"
+
+    # Validate before forwarding. Otherwise a typo starts the VM and then fails
+    # inside it, which is slow and reports the wrong problem.
+    [ -x "$impl" ] || { warn "unknown command: $cmd"; usage; }
+
+    if is_macos && [ -z "${WK_IN_VM:-}" ] && ! is_host_command "$cmd"; then
+        forward_to_vm "$cmd" "$@"
+    fi
+
+    exec "$impl" "$@"
+}
+
+main "$@"
