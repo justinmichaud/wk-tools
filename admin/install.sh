@@ -127,4 +127,41 @@ case "$_perm" in
 esac
 unchanged "quiesce helper permissions ($_perm)"
 
+# --- keep the benchmark session's VT to itself -------------------------------
+# WK_SESSION_TTY (tty2, hardcoded in wk-quiesce-priv's own default -- sudo's
+# env_reset means an override can never actually reach it) is meant to be
+# cage's alone while a session is running, and nobody's the rest of the time.
+# systemd doesn't know that: logind auto-spawns a getty on any of its first
+# few VTs the moment nothing else is using them, and the moment cage lets go
+# of tty2, a getty and its login prompt showed up there instead. That's a
+# console write, and any console write auto-unblanks the VT -- which is why
+# `wk session off` blanking the screen and a getty immediately re-lighting it
+# with a login prompt looked exactly like blanking not working at all.
+#
+# Both unit names, not just one: /usr/lib/systemd/system/autovt@.service is a
+# symlink to the very same getty@.service template, but it is a *different
+# unit name* to systemd's mask bookkeeping -- and logind's on-demand VT
+# allocation instantiates gettys through the autovt@ name specifically, not
+# getty@, so masking only getty@tty2.service leaves logind free to start
+# autovt@tty2.service right past it. Confirmed live: masking just getty@
+# still left a login prompt lighting tty2 back up every time.
+#
+# `systemctl is-enabled` is not the idempotency check here, and using it was
+# its own bug: for an aliased template instance it reports the *resolved*
+# template file's mask state, not this specific instance's own -- so it
+# printed "masked" for autovt@tty2.service, and the mask this loop exists to
+# create was silently skipped, even though the unit was demonstrably still
+# starting. /etc/systemd/system/<unit> -> /dev/null is what masking actually
+# is, so that symlink is the fact this checks instead.
+for _u in getty@tty2.service autovt@tty2.service; do
+    _link="/etc/systemd/system/$_u"
+    if [ -L "$_link" ] && [ "$(readlink "$_link")" = /dev/null ]; then
+        unchanged "$_u already masked"
+    else
+        sudo systemctl mask --now "$_u"
+        changed "masked $_u -- tty2 is wk session's VT, not a login prompt's"
+    fi
+done
+unset _u _link
+
 unset _libexec _target _source _sudoers _needs_install _owner _rule _sudoers_ok _tmp _perm _sessenv _sessline _tmp2

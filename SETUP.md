@@ -99,12 +99,14 @@ before it goes in, so `wk quiesce on` never asks for a password again.
 
 On Linux the same helper carries the benchmark session: `wk session on` stops
 the display manager and starts a `cage` compositor on seat0, which is what
-gives a workspace a real GPU session on the attached monitor. The command set
-is a fixed allowlist — quiesce on/off/status, and one session verb per session
-configuration (`session-on`, `session-on-bmc`, `session-on-bmc-only`,
-`session-off`, `session-status`) — with no argument that becomes part of a
-command, and the user the compositor runs as is read from a root-owned file
-rather than passed in.
+gives a workspace a real GPU session on the attached monitor. `wk session gdm`
+starts the actual display manager and a real desktop instead, for debugging
+that needs more than a kiosk's one window. The command set is a fixed
+allowlist — quiesce on/off/status, and one session verb per session
+configuration (`session-on`, `session-on-bmc`, `session-gdm`,
+`session-gdm-bmc`, `session-off`, `session-status`) — with no argument that
+becomes part of a command, and the user the compositor runs as is read from a
+root-owned file rather than passed in.
 
 Skip this if you are not benchmarking. Everything else works without it.
 
@@ -214,7 +216,45 @@ by `host/linux/gpu.sh`, at workspace creation.
 
 `wk session on` stops the display manager and starts `cage` on seat0 —
 deliberately not a desktop, so there is no compositing work in the numbers that
-is not the browser's. `wk session off` puts the display manager back.
+is not the browser's. `wk session off` stops everything, including the display
+manager, and leaves the screen dark rather than restoring it; getting a
+desktop back afterwards is `wk session gdm`, covered below, not `off` and a
+wait.
+
+"Dark" takes two things, and for a while it only did one of them.
+
+Stopping the compositor and trusting the kernel's own console to blank a
+now-masterless output was the original design, and this machine's NVIDIA driver
+doesn't implement that -- `fb_blank` stops the console being redrawn without
+reaching real hardware DPMS, so whatever was on screen when the compositor
+stopped just stays there, frozen, which reads as "off" failed to anyone watching
+sysfs and as "off" doing nothing to anyone looking at the monitor. So `off`
+holds a placeholder compositor on the GPU instead of releasing it.
+
+That part was right, and on its own it is not enough: a compositor that holds an
+output and paints it black is still scanning out a real mode, so the monitor has
+a perfectly good signal and stays lit. The screen was black and the backlight
+was on, which is what "`off` doesn't turn the display off" turned out to mean.
+`cage` has no DPMS option and no `wlr-output-power-management`, but it does
+export `wlr-output-management`, and disabling a head through that protocol is a
+real atomic modeset with the CRTC off: the connector goes `enabled` ->
+`disabled`, `dpms` `On` -> `Off`, the signal stops, and the monitor sleeps for
+want of one. It reaches hardware precisely because it is ordinary modesetting
+rather than `fb_blank`. `wlr-randr` is the client that sends it, which is why it
+is in `host/linux/apt.txt` for an 11 kB package that nothing else uses.
+
+Neither half substitutes for the other: the modeset is what darkens the monitor,
+and the held device is what stops the console being repainted over the top of
+it. `wk session status` prints a `lit:` line -- the connected outputs still
+being scanned out -- so "black" and "off" can be told apart from a shell instead
+of from a chair in front of the monitor.
+
+One gap is left on purpose. The placeholder covers one DRM device, not both:
+wlroots takes the first entry in `WLR_DRM_DEVICES` as primary and needs a
+renderer that can copy frames to any secondary, which `pixman` cannot do for a
+device with no render node. Naming both got one head and no warning, so `off`
+darkens the GPU's outputs and leaves the `ast` showing whatever was last latched
+into it; the BMC console keeps its last frame, and the `lit:` line says so.
 
 The compositor's DRM device is named explicitly, and that is the point. This
 machine has two: the GPU, and the ASPEED BMC's display-only `ast` chip, whose
@@ -234,23 +274,69 @@ wk session on                # back to a measurable session
 `--bmc` is the opposite trade, and it says so every time it is used. The BMC's
 chip becomes the compositor's only modesetting device — so the monitor goes
 dark, the session *moves* to the BMC rather than being duplicated onto it, and
-there is exactly one output, which is the one the BMC serves. Rendering still
-happens on the GPU: `WLR_RENDER_DRM_DEVICE` points the renderer at the GPU's
-render node and wlroots copies each finished frame across (`mode: bmc`).
+there is exactly one output, which is the one the BMC serves. The `ast` chip
+has no render node of its own, so this session is software-rendered (`mode:
+bmc`) — slower than a real session, and never a number to compare with
+anything.
 
-Whether the two drivers will do that copy is not something a configuration can
-promise, so it is arranged to fail loudly. `WLR_RENDERER` is pinned and
-`WLR_RENDERER_ALLOW_SOFTWARE` is left out, which makes wlroots refuse to start
-rather than fall back to llvmpipe — so a refusal is a compositor that does not
-come up, and `wk session on --bmc` then falls back to a BMC-only session
-(`mode: bmc-only`, software) and says which one you got. That is also the mode
-you get with nothing plugged into the GPU at all: no GPU output, nothing to
-render on.
+Rendering on the GPU and having wlroots copy each finished frame across to the
+`ast` was tried and dropped: on an NVIDIA GPU it doesn't fail loudly the way a
+refused renderer does — the compositor comes up, the socket appears, and every
+frame just fails to produce something the `ast` connector can show, forever.
+Software rendering is slower still, but it actually shows something.
 
 The mode is recorded in `/run/wk-session-mode`, and `wk bench` refuses to run
 against anything but `gpu`: neither the socket nor the GPU probe can tell the
 difference, because the probe asks the *client* which EGL vendor it got and the
 answer is still NVIDIA when the compositor behind it is llvmpipe.
+
+### A real desktop remotely
+
+`on` and `on --bmc` are a kiosk: cage, one window, nothing to log into.
+`wk session gdm [--bmc]` starts the actual display manager and desktop instead
+-- for debugging that needs more than a single browser window.
+
+```sh
+wk session gdm --bmc         # a real, loggable-into desktop, forced onto the BMC
+wk session off                # outputs modeset off, nothing hidden
+```
+
+cage gets its one device from `WLR_DRM_DEVICES`; gdm's compositor (mutter) has
+no equivalent, so pinning it works the other way around. `wk session gdm --bmc`
+strips the GPU of the udev tags that make it a member of any seat -- the same
+tags that would come off if it were physically unplugged -- so it is on
+neither seat0 nor anywhere else, and mutter has nothing left to pick but the
+`ast`. Retagging it onto a *different* seat instead of off every seat was the
+first attempt, and the wrong one: logind creates a real seat for wherever it's
+retagged to, and gdm starts a greeter on every seat it finds, so that produced
+two live desktops -- one per chip -- instead of the one that was asked for.
+Plain `wk session gdm` hides the `ast` instead, so the desktop can't land on
+the management chip by mistake. Either way the hide is undone by
+`wk session off` or by starting any other session mode; nothing here leaves a
+device permanently missing.
+
+The hide only reaches a compositor that asks logind for its devices, and that
+caveat is load-bearing rather than theoretical. `wk session gdm --bmc` used to
+hide the GPU successfully and put the desktop on the monitor anyway: Ubuntu's
+`61-gdm.rules` sends this machine to `gdm_prefer_xorg` the moment it sees
+`nvidia_drm` with `modeset=Y` — the branch ends in an unconditional `GOTO`, so
+every driver version takes it — and NVIDIA's Xorg driver never opens
+`/dev/dri/cardN`. It drives the card through `/dev/nvidia0`, `/dev/nvidiactl`
+and `/dev/nvidia-modeset`: character devices, mode `0666`, carrying no udev
+properties and no seat tags for `TAG-="seat"` to remove. The hide was real and
+irrelevant, and it failed in the most convincing way available — reporting the
+mode it had just been unable to enforce. (It is also why an Xorg greeter makes
+the `lit:` line under-report: NVKMS modesets outside DRM, so the connector's
+sysfs `enabled` never changes.)
+
+So both gdm modes force the greeter onto Wayland, where `mutter` goes through
+`libseat` and the hide is real. The override goes through gdm's own
+`gdm-runtime-config` — the same tool `61-gdm.rules` uses to state its preference
+— so it lands in `/run` and is gone at the next boot, the same crash-safety the
+seat rule gets from living there. Afterwards the greeter's session type is
+checked rather than assumed: `wk session status` prints a `greeter:` line, and
+an `x11` greeter there means the `desktop:` line above it is a statement of
+intent rather than of fact.
 
 Payloads are seeded once into `~/.local/share/wk/cache/bench` and pinned by
 commit, so a run does not clone Speedometer or pull MotionMark file by file

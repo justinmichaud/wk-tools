@@ -198,25 +198,64 @@ display path of a measured run.
 
 For debugging a GUI from somewhere else, `wk session on --bmc` makes the
 opposite trade: the session *moves* to the BMC's output — the monitor goes dark,
-because the BMC's chip becomes the compositor's only modesetting device — while
-the GPU keeps doing the rendering and wlroots copies each frame across. If the
-two drivers refuse that copy, or nothing is plugged into the GPU at all, the
-session falls back to software rendering and says which one you got. Both modes
-are slow, both are recorded in `/run/wk-session-mode`, and `wk bench`,
-`wk test --gpu`, `wk enter` and `wk gui` all warn — the socket looks identical
-either way, and so does the GPU probe, which asks the client's EGL vendor and
-gets NVIDIA even when the compositor behind it is llvmpipe.
+because the BMC's chip becomes the compositor's only modesetting device. The
+`ast` has no render node of its own, so this session is software-rendered
+(rendering on the GPU and copying frames across to the `ast` was tried and
+dropped: on this board's NVIDIA + ast pairing the copy never works, and it
+doesn't fail loudly — the compositor comes up but never produces a frame the
+`ast` can show). It's slow, it's recorded in `/run/wk-session-mode`, and
+`wk bench`, `wk test --gpu`, `wk enter` and `wk gui` all warn — the socket
+looks identical either way, and so does the GPU probe, which asks the client's
+EGL vendor and gets NVIDIA even when the compositor behind it is llvmpipe.
 
 ```sh
 wk session on --bmc        # watchable over KVM-over-IP; never for numbers
 wk gui bug-238 [url]       # MiniBrowser in the seat, launched as perf runs do
 ```
 
+`on` is a kiosk: one compositor, one window, nothing to log into. For anything
+that needs more than that — a terminal next to the browser, a second app —
+`wk session gdm` starts the actual display manager and desktop instead.
+Nothing like `WLR_DRM_DEVICES` reaches gdm's compositor, so pinning it to one
+chip works the other way around: `wk session gdm --bmc` strips the GPU of the
+udev tags that make it a seat member at all, so it isn't on seat0 or on any
+other seat, and the desktop has nothing left to land on but the `ast`.
+Moving it to a *different* seat instead of off every seat was tried first,
+and gdm — being seat-aware — promptly started a second greeter on that seat
+too: one session per chip instead of one. Plain `wk session gdm` hides the
+`ast` instead, so the desktop can't land on the management chip by mistake.
+
+Both gdm modes also force the greeter onto Wayland, because the hide only
+constrains a compositor that asks logind for its devices. Ubuntu's
+`61-gdm.rules` prefers Xorg on sight of `nvidia_drm` with `modeset=Y`, and
+NVIDIA's Xorg driver drives the card through `/dev/nvidia*` — character
+devices with no seat tags to strip — so `gdm --bmc` used to hide the GPU
+successfully and land the desktop on the monitor regardless. `wk session
+status` prints a `greeter:` line; `x11` there means the mode is not being
+enforced.
+`wk session off` stops all of it — kiosk, desktop, display manager — and then
+does two things rather than one: it modesets the outputs off through
+`wlr-output-management`, which is what actually darkens the monitor, and it
+keeps a placeholder compositor on the device, which is what stops the console
+being repainted over the top. Neither half works alone. Trusting the kernel to
+blank a masterless output was the original design and this machine's NVIDIA
+driver doesn't reach hardware DPMS that way — `fb_blank` stops the console being
+redrawn and leaves whatever was on screen frozen there. Holding the device and
+painting it black was the fix for that, and it left the screen black with the
+backlight on, because a held CRTC is still scanning out a real mode. `wk session
+status` prints a `lit:` line so the two can be told apart without a monitor.
+Getting a desktop back is `wk session gdm`, not `off` and a wait.
+
+```sh
+wk session gdm --bmc       # a real desktop, forced onto the BMC's chip
+wk session off             # outputs modeset off, nothing hidden
+```
+
 Linux cannot make a `#!` script setuid — the kernel ignores the bit — so the
 privileged half is a `NOPASSWD` rule naming one root-owned path, installed only
 after `visudo -c` validates it, and re-checked for writability on every setup
 run. The command set behind it is a fixed allowlist with no passthrough:
-quiesce on/off/status, and session on/off/status.
+quiesce on/off/status, and session on/on-bmc/gdm/gdm-bmc/off/status.
 
 `wk bench` wraps `run-benchmark` and `compare-results` rather than replacing
 them. What it adds is the part that decides whether a number means anything:

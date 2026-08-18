@@ -43,7 +43,7 @@ else
 fi
 
 # --- Claude Code: likewise ---------------------------------------------------
-if have claude; then
+if have claude || [ -x "$HOME/.local/bin/claude" ]; then
     unchanged "claude"
 else
     info "installing Claude Code into ~/.local"

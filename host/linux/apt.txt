@@ -27,8 +27,16 @@ linux-tools-generic
 # GPU and the benchmark session on the attached monitor. cage is a one-client
 # kiosk compositor: a real DRM session for benchmark runs without a desktop's
 # worth of background compositing noise. mesa-utils/wayland-utils are how the
-# session is verified to be real rather than software-rendered.
+# session is verified to be real rather than software-rendered. grim captures
+# what the session is actually showing, for debugging it without a monitor.
+#
+# wlr-randr is what makes `wk session off` an output that is off rather than an
+# output painted black: cage exports wlr-output-management but ships no client
+# for it, and disabling a head through that protocol is the only modeset path
+# this driver honours. 11 kB, libc and libwayland-client and nothing else.
 cage
 mesa-utils
 wayland-utils
 mesa-vulkan-drivers
+grim
+wlr-randr

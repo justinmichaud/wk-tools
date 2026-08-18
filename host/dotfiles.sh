@@ -48,8 +48,14 @@ EOF
 
 # shell: source the shared rc from whichever startup files exist. Guarded so
 # re-running never appends a second copy.
+#
+# .bash_profile is in this list for the same reason .bashrc and .zshrc are:
+# it's exactly the file a login shell (what ssh starts) reads, so a stale
+# `wk-tools/bashrc` reference here after this restructure moved that file
+# means every ssh session lands in bash and never even reaches the rest of
+# this rc, let alone the bash -> zsh switch it's supposed to make.
 _rc_line=". \"$WK_ROOT/shell/bashrc\""
-for _rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+for _rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
     [ -f "$_rc" ] || touch "$_rc"
 
     # Drop references to paths this restructure moved. Left in place they

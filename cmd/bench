@@ -225,13 +225,11 @@ preflight() {
     #
     #    The socket says a compositor is there, not what it is drawing on. `wk
     #    session on --bmc` puts the session on the BMC's display chip so it can
-    #    be watched over KVM-over-IP, which copies every frame between devices,
-    #    and with no monitor attached that session is software-rendered
-    #    outright. Neither is visible from the socket, and neither is visible in
-    #    the GPU probe above either: the probe asks the *client* which EGL
-    #    vendor it got, and the answer is still NVIDIA when the compositor
-    #    behind it is llvmpipe. The mode `wk session` recorded is the only place
-    #    the difference shows.
+    #    be watched over KVM-over-IP, and that session is software-rendered --
+    #    not visible from the socket, and not visible in the GPU probe above
+    #    either: the probe asks the *client* which EGL vendor it got, and the
+    #    answer is still NVIDIA when the compositor behind it is llvmpipe. The
+    #    mode `wk session` recorded is the only place the difference shows.
     local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
     SESSION_MODE=$(session_mode)
     if [ -n "$SOFTWARE" ]; then
@@ -380,8 +378,8 @@ json.dump({
     "count": g("WK_M_COUNT"), "local_copy": g("WK_M_LOCAL"),
     "forced": bool(g("WK_M_FORCED")), "software": bool(g("WK_M_SOFTWARE")),
     "preflight_notes": g("WK_M_NOTES"), "gpu_renderer": g("WK_M_RENDERER"),
-    # Which chip the compositor was on: gpu, bmc (GPU renders, the BMC's chip
-    # scans out), bmc-only (software), or none for somebody's own desktop.
+    # Which chip the compositor was on: gpu, bmc (the BMC's chip, software
+    # rendered), or none for somebody's own desktop.
     "session_mode": g("WK_M_SESSION_MODE"),
     # MotionMark scores scale with the size of the surface being animated, and a
     # fullscreen browser's surface is the display mode -- so two runs on

@@ -23,6 +23,28 @@ esac
 if [ -n "$_WK_INTERACTIVE" ]; then
 
 # =============================================================================
+# 0b. Unknown TERM fallback (kitty and friends, over ssh)
+# =============================================================================
+# kitty (also wezterm, alacritty in some configs) sets TERM to its own name
+# locally. ssh forwards that string as-is, and unless the remote got that
+# terminal's terminfo installed -- `kitten ssh` does this automatically, a
+# plain `ssh` never does -- the remote's terminfo database has no entry for
+# it. Every program that asks terminfo for a key's escape sequence instead of
+# hardcoding one, zsh's line editor among them, gets nothing back and falls
+# through to some default that generally isn't the right one. That's the
+# whole "Backspace prints ^H", "Delete does nothing" family of complaints, and
+# it hits every workspace and Pi this rc gets sourced on, not just this host.
+#
+# xterm-256color ships on essentially everything and is close enough to what
+# these terminals actually speak (they all still understand the classic xterm
+# escape sequences unless you've turned on a terminal-specific protocol) that
+# falling back to it fixes every such program at once, rather than one
+# bindkey at a time.
+if ! infocmp "$TERM" >/dev/null 2>&1; then
+  export TERM=xterm-256color
+fi
+
+# =============================================================================
 # 1. Switch bash -> zsh
 # =============================================================================
 # Skipped entirely under zsh (no $BASH_VERSION), which is what keeps `shopt`
@@ -129,6 +151,22 @@ if [ -n "$ZSH_VERSION" ]; then
   # through what you typed in another. Nothing is lost either way. To switch:
   #     unsetopt INC_APPEND_HISTORY_TIME; setopt SHARE_HISTORY
   unsetopt SHARE_HISTORY
+
+  # Backspace and Delete, bound explicitly rather than left to zle's
+  # terminfo-derived defaults. The TERM fallback above covers "no entry at
+  # all"; this covers the other failure mode, a terminfo entry that's present
+  # but wrong for what the terminal actually sends -- e.g. a remote where
+  # `kbs` is still the historical ^H while kitty (and every other terminal in
+  # practice) sends ^? for Backspace. `bindkey` here always wins over
+  # whatever zle picked from terminfo at startup, so this is redundant with a
+  # correct terminfo entry and load-bearing without one.
+  bindkey "^?"    backward-delete-char  # Backspace
+  bindkey "^H"    backward-delete-char  # Backspace, terminals/ttys still on kbs=^H
+  bindkey "^[[3~" delete-char           # Delete
+  bindkey "^[[H"  beginning-of-line     # Home
+  bindkey "^[[1~" beginning-of-line     # Home, older xterm encoding
+  bindkey "^[[F"  end-of-line           # End
+  bindkey "^[[4~" end-of-line           # End, older xterm encoding
 
 fi
 

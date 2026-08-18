@@ -75,17 +75,30 @@ if is_linux; then
     session_mode_warn || true
 fi
 
-# In a BMC-only session the compositor itself is software-rendered, and it cannot
+# In a BMC session the compositor itself is software-rendered, and it cannot
 # import a dmabuf the NVIDIA driver allocated. Left alone, the browser picks the
 # NVIDIA EGL vendor anyway -- the render node is still there -- and the result is
 # a window that stays black, which reads as a WebKit bug rather than as a display
 # path that cannot work. Pinning the client to Mesa and turning the dmabuf
 # renderer off is what makes the picture appear.
+#
+# That's the GL/EGL side. WPE also runs its own, separate DRM device inference
+# for its display backend, independent of which renderer ends up drawing --
+# left alone it says so on stderr ("Infered DRM device ... but multiple were
+# found") and picks by enumeration order, which is the GPU exactly as often as
+# the ast. WPE_DRM_DEVICE is its own explicit override for that guess.
 RUN_ENV=""
-if [ "$(session_mode)" = bmc-only ]; then
+if [ "$(session_mode)" = bmc ]; then
     RUN_ENV="WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe"
     RUN_ENV="$RUN_ENV __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json"
-    info "software session: pinning the browser to Mesa and disabling the dmabuf renderer"
+    if _bmc_dev=$(bmc_drm_device); then
+        RUN_ENV="$RUN_ENV WPE_DRM_DEVICE=$_bmc_dev"
+    else
+        warn "could not identify the ast DRM device -- WPE may still infer the GPU"
+    fi
+    unset _bmc_dev
+    info "software session: pinning the browser to Mesa, disabling the dmabuf renderer,"
+    log  "  and pointing WPE's own DRM device inference at the ast"
 fi
 
 TYPE_FLAG="--$(printf '%s' "$CFG_TYPE" | tr 'A-Z' 'a-z')"

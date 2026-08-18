@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
-# wk session on [--bmc] | off | status -- a real graphical session for runs.
+# wk session on [--bmc] | gdm [--bmc] | off | status -- a real graphical
+# session for runs, or a real desktop, on real hardware.
 #
 # GPU benchmarks need a real DRM session on real hardware. Speedometer and
 # MotionMark under llvmpipe are not slow results, they are a different
 # measurement, and a headless run has no display cadence for MotionMark to
 # measure at all.
 #
-# Three cases, in the order they are checked:
+# `on` is the benchmark session: a single-client kiosk compositor (cage),
+# nothing else running on seat0. Three cases, in the order they are checked:
 #
 #   Someone is logged in at the machine. Nothing to do -- the compositor is
 #   already there; wk uses its socket.
@@ -16,6 +18,33 @@
 #
 #   Nobody is logged in. Stop the display manager and start cage on seat0.
 #   That is the unattended case, and the only one that needs privilege.
+#
+# `gdm` is the opposite of `on`: a real, loggable-into desktop instead of a
+# benchmark kiosk, for when debugging needs more than one window. `off` stops
+# both and leaves the screen dark -- it does not bring anything back, so
+# getting a desktop back is `wk session gdm`, not `wk session off` followed by
+# waiting.
+#
+# `off` is two things, and it was broken for as long as it was only one of
+# them:
+#
+#   The outputs are modeset off -- the CRTC disabled, not painted black. A
+#   compositor holding an output and drawing black is still scanning out a real
+#   mode, so the monitor has a signal and stays lit; the screen was black and
+#   the backlight was on, which is what "off doesn't turn off the display"
+#   turned out to mean. cage has no DPMS knob of its own, but it does export
+#   wlr-output-management, and disabling a head there is a real modeset.
+#
+#   A placeholder compositor keeps holding the device afterwards. Releasing DRM
+#   master and trusting the kernel's own fbcon to blank the now-masterless
+#   outputs was the first design, and on this board's NVIDIA driver that trust
+#   doesn't pay off -- fb_blank stops the console being redrawn without reaching
+#   real hardware, so whatever was on screen stays there, frozen, looking
+#   exactly like a working blank failed.
+#
+# Neither half substitutes for the other: the modeset is what darkens the
+# monitor, the placeholder is what stops fbcon lighting it back up. See
+# admin/wk-quiesce-priv's `session_on off` and `outputs_off` for the mechanics.
 #
 # The compositor's Wayland socket lives in a directory of its own
 # ($XDG_RUNTIME_DIR/wk/display), not in the user's runtime directory, so that a
@@ -33,12 +62,50 @@
 # --bmc is the opposite trade, for debugging a GUI from somewhere else: it moves
 # the session to where the BMC can see it. The BMC's chip becomes the only
 # modesetting device the compositor has, so the monitor goes dark and the one
-# output is the one served over KVM-over-IP -- while the GPU still does the
-# rendering, through WLR_RENDER_DRM_DEVICE, and wlroots copies each finished
-# frame across. With nothing plugged into the GPU there is nothing to render on
-# either, and the session falls back to software. Both are slower than a real
-# session, both are recorded in /run/wk-session-mode, and everything that could
-# produce a number from them says so.
+# output is the one served over KVM-over-IP. The ast has no render node of its
+# own, so this is a software-rendered session -- slower than a real one, and
+# never a number to compare with anything.
+#
+# Rendering on the GPU and letting wlroots copy each finished frame across to
+# the ast was tried and dropped: on this board's NVIDIA + ast pairing the copy
+# never works, and it doesn't fail loudly -- the compositor comes up, the
+# socket appears, and it just never produces a frame the ast connector can
+# show, forever. Software rendering is slower still, but it actually shows
+# something. The mode is recorded in /run/wk-session-mode, and everything that
+# could produce a number from it says so.
+#
+# --- what gdm mode is for ----------------------------------------------------
+# `on` and `on --bmc` are a kiosk: cage, one window, nothing to log into. `gdm`
+# starts the actual display manager and desktop instead, for debugging that
+# needs more than a single browser window -- a terminal next to it, a second
+# app, anything a real session can do that a kiosk can't.
+#
+# cage gets its one device from WLR_DRM_DEVICES; gdm's compositor (mutter) has
+# no equivalent knob, so `gdm --bmc` reaches for the only lever that actually
+# constrains it: the GPU is stripped of the udev tags that make it a seat
+# member at all (the same tags that removing it would strip), so it isn't on
+# seat0 or on any other seat either -- moving it to a different seat instead
+# of off every seat was tried first, and gdm promptly started a second
+# greeter there, one session per chip instead of one. With the GPU gone from
+# every seat, mutter has nothing left to pick but the ast. `gdm` without
+# --bmc does the same in reverse, hiding the ast so the desktop can't land on
+# the management chip by mistake. `off` clears whichever hide is in effect
+# along with everything else -- the seat is never left with a device
+# missing.
+#
+# That lever reaches mutter and nothing else, which took a while to notice
+# because it fails silently in the most convincing way available: `gdm --bmc`
+# hid the GPU successfully and the desktop appeared on the monitor anyway.
+# Ubuntu's 61-gdm.rules sends this machine to `gdm_prefer_xorg` on sight of
+# nvidia_drm with modeset=Y -- that branch ends in an unconditional GOTO, so
+# every driver version takes it -- and NVIDIA's Xorg driver never opens
+# /dev/dri/cardN at all. It drives the card through /dev/nvidia0,
+# /dev/nvidiactl and /dev/nvidia-modeset: character devices, mode 0666, with no
+# udev properties and no seat tags for TAG-="seat" to remove. The hide was
+# real and irrelevant. So both gdm modes now force the greeter onto Wayland
+# (gdm's own runtime config, so the override lives in /run) and then check the
+# greeter's session type, because a mode that isn't being enforced should say
+# so rather than be believed.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -53,7 +120,7 @@ BMC=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --bmc|--mirror) BMC=1; shift ;;
-        *) die "usage: wk session on [--bmc] | off | status" ;;
+        *) die "usage: wk session on [--bmc] | gdm [--bmc] | off | status" ;;
     esac
 done
 
@@ -122,18 +189,37 @@ _connectors() {
     done
 }
 
-# Is a monitor actually plugged into the GPU? Only the GPU can be asked: the ast
-# reports `connected` with no EDID whether or not a cable exists, because as far
-# as the BMC is concerned a display is always attached.
+# Connected connectors that are still being driven, by name -- the difference
+# between "black" and "off", and the only way to tell them apart without a
+# monitor in front of you. Both files are needed: `dpms` reads On for a
+# connector whose CRTC was never enabled at all, so `enabled` is what says
+# whether anything is being scanned out to it.
 #
-# Matched against a captured string rather than piped into `grep -q`: grep exits
-# at the first match, the producer takes SIGPIPE, and under `set -o pipefail`
-# the whole pipeline then reports failure -- so the branch is silently never
-# taken. The same trap as `lsmod | grep -q` in host/linux/gpu.sh.
-gpu_display_attached() {
-    local out; out=$(_connectors not-ast)
-    case "$out" in *" connected"*) return 0 ;; esac
-    return 1
+# $1 selects a chip, same vocabulary as _connectors: all, not-ast, ast. `off`
+# asks about not-ast, because the GPU's outputs are the ones it can reach; the
+# status line asks about all of them, because overstating that reach is how this
+# went unnoticed in the first place.
+_lit_connectors() {
+    local which="${1:-all}" card drv conn name out=""
+    for card in /sys/class/drm/card[0-9]*; do
+        [ -d "$card" ] || continue
+        card=$(basename "$card")
+        case "$card" in *-*) continue ;; esac
+        drv=$(drm_driver "$card")
+        case "$which" in
+            ast)     [ "$drv" = ast ] || continue ;;
+            not-ast) case "$drv" in ast|none) continue ;; esac ;;
+        esac
+        for conn in "/sys/class/drm/$card"-*; do
+            [ -d "$conn" ] || continue
+            [ "$(cat "$conn/status" 2>/dev/null)" = connected ] || continue
+            [ "$(cat "$conn/enabled" 2>/dev/null)" = enabled ] || continue
+            [ "$(cat "$conn/dpms" 2>/dev/null)" = On ] || continue
+            name=$(basename "$conn")
+            out="${out:+$out }${name#"$card"-}"
+        done
+    done
+    printf '%s' "$out"
 }
 
 # The outputs the running compositor actually took, by connector name. This is
@@ -152,6 +238,41 @@ session_display_mode() {
         | head -1
 }
 
+# The display manager greeter's session type on seat0, or nothing if there isn't
+# one yet. This is the fact that decides whether `gdm --bmc` means anything: see
+# the note on gdm modes above.
+# $1: how many quarter-seconds to keep looking. Starting gdm wants to wait for
+# the greeter to appear; `status` wants today's answer and no pause at all.
+_greeter_type() {
+    have loginctl || return 1
+    local i sid class typ
+    for i in $(seq 1 "${1:-40}"); do
+        for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '$4 == "seat0" {print $1}'); do
+            class=$(loginctl show-session "$sid" -p Class --value 2>/dev/null || echo)
+            [ "$class" = greeter ] || continue
+            typ=$(loginctl show-session "$sid" -p Type --value 2>/dev/null || echo)
+            [ -n "$typ" ] && { printf '%s' "$typ"; return 0; }
+        done
+        sleep 0.25
+    done
+    return 1
+}
+
+# Our own compositor's logind session leader, or nothing if it isn't running.
+#
+# This is the only thing that tells our session apart from a person's. cage gets
+# its seat from PAMName=login, which is not a detail we can drop -- without it
+# libseat cannot take DRM master and the compositor exits on the spot -- and the
+# session it produces is Class=user, Type=wayland, on seat0: a logged-in desktop
+# in every field logind exposes. What differs is which process leads it, and
+# because the unit's ExecStart `exec`s cage, the unit's MainPID *is* that leader.
+wk_session_leader() {
+    local pid
+    pid=$(systemctl show wk-session -p MainPID --value 2>/dev/null || true)
+    case "$pid" in ''|0) return 1 ;; esac
+    printf '%s' "$pid"
+}
+
 # A graphical session belonging to a logged-in *person*, which we neither own
 # nor should disturb.
 #
@@ -160,13 +281,25 @@ session_display_mode() {
 # by the gdm user -- and treating it as somebody's desktop means `wk session on`
 # politely declines to do the one thing it exists for, on exactly the machine
 # state it was written for: nobody logged in, a greeter waiting.
+#
+# And our own compositor has to be excluded by name, because no field on it says
+# "not a person" -- see wk_session_leader. Leaving it in is not a cosmetic bug:
+# `wk session off` leaves a placeholder compositor running by design, so every
+# later `wk session gdm` found a "foreign desktop", declined, and advised
+# running `wk session off` first -- the one command guaranteed to put the
+# session it was complaining about back.
 foreign_session() {
     have loginctl || return 1
-    local sid typ class
+    local sid typ class leader ours=""
+    ours=$(wk_session_leader) || ours=""
     for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '$0 ~ /seat0/ {print $1}'); do
         typ=$(loginctl show-session "$sid" -p Type --value 2>/dev/null || echo)
         class=$(loginctl show-session "$sid" -p Class --value 2>/dev/null || echo)
         [ "$class" = user ] || continue
+        if [ -n "$ours" ]; then
+            leader=$(loginctl show-session "$sid" -p Leader --value 2>/dev/null || echo)
+            [ "$leader" = "$ours" ] && continue
+        fi
         case "$typ" in
             wayland|x11) echo "$sid $typ"; return 0 ;;
         esac
@@ -186,13 +319,13 @@ on)
         # how a whole afternoon of numbers turns out to have measured llvmpipe.
         wanted=gpu; [ -n "$BMC" ] && wanted=bmc
         running=$(session_mode)
-        if [ "$wanted" = "$running" ] || { [ "$wanted" = bmc ] && [ "$running" = bmc-only ]; }; then
+        if [ "$wanted" = "$running" ]; then
             info "wk session already running ($SOCKET, mode $running)"
             session_mode_warn || true
             exit 0
         fi
         info "a '$running' session is running; restarting it as '$wanted'"
-        run_priv session-off
+        run_priv session-stop
     elif [ -S "$SOCKET" ]; then
         warn "stale compositor socket at $SOCKET -- starting a new session"
     fi
@@ -212,37 +345,11 @@ on)
         # The session moves to the BMC's output, it is not duplicated onto it:
         # the BMC's chip becomes the compositor's only modesetting device, so
         # there is exactly one output and no question about which one the window
-        # is on. The monitor goes dark for the duration. Showing both at once
-        # would need a second client (wl-mirror) and a compositor that accepts
-        # one -- cage is a kiosk -- and it would still rest on the same
-        # GPU-to-ast frame copy this does.
+        # is on. The monitor goes dark for the duration.
         log "  the monitor goes dark: the session moves to the BMC, it is not duplicated"
-
-        started=""
-        if gpu_display_attached; then
-            info "starting a BMC session on seat0 (GPU renders, BMC scans out)"
-            # Allowed to fail. wlroots has to copy every finished frame from the
-            # GPU to a device with no renderer of its own, and whether it can is
-            # a property of the two drivers rather than of this configuration.
-            # With WLR_RENDERER pinned and software rendering disallowed, a
-            # refusal shows up as a compositor that does not come up -- which is
-            # the failure we want, instead of a session that quietly renders on
-            # llvmpipe and looks fine.
-            if run_priv session-on-bmc && [ -S "$SOCKET" ]; then
-                started=1
-            else
-                warn "the GPU could not render for the BMC's display chip"
-                log  "  wlroots would not drive the ast from the GPU's render node."
-                log  "  Falling back to a BMC-only session, which is software-rendered."
-            fi
-        else
-            info "nothing plugged into the GPU -- starting a BMC-only session"
-        fi
-
-        if [ -z "$started" ]; then
-            run_priv session-on-bmc-only || die "the compositor did not start; journalctl -u wk-session"
-            [ -S "$SOCKET" ] || die "no Wayland socket at $SOCKET after start"
-        fi
+        info "starting a BMC session on seat0 (software-rendered)"
+        run_priv session-on-bmc || die "the compositor did not start; journalctl -u wk-session"
+        [ -S "$SOCKET" ] || die "no Wayland socket at $SOCKET after start"
 
         # The compositor coming up is not by itself proof that the output it took
         # is the BMC's, and a blank remote console is the one failure this mode
@@ -264,8 +371,82 @@ on)
     session_mode_warn || true
     ;;
 
+gdm)
+    if session=$(foreign_session); then
+        info "a graphical session is already active on seat0 (session $session)"
+        log  "  leaving it alone; run 'wk session off' first if you want a clean start"
+        exit 0
+    fi
+
+    if systemctl is-active --quiet wk-session 2>/dev/null; then
+        info "stopping the benchmark compositor to start a desktop instead"
+    fi
+
+    if [ -z "$BMC" ]; then
+        info "starting gdm on seat0 (GPU only, the BMC's chip hidden from seat0)"
+        run_priv session-gdm || die "gdm did not start; journalctl -u gdm"
+    else
+        log "  the monitor goes dark: the GPU is hidden from seat0, not just idle"
+        info "starting gdm on seat0 (BMC only, software-rendered)"
+        run_priv session-gdm-bmc || die "gdm did not start; journalctl -u gdm"
+    fi
+
+    # Which chip the desktop lands on is only enforced if the greeter is a
+    # compositor that takes its devices from logind. On Xorg it is not enforced
+    # at all -- NVIDIA's DDX drives the card through /dev/nvidia*, which carries
+    # no seat tags to strip -- so the type is checked rather than assumed.
+    greeter=$(_greeter_type) || greeter=""
+    case "$greeter" in
+        wayland)
+            info "gdm is up on seat0 (wayland greeter) -- log in at the console"
+            ;;
+        "")
+            warn "gdm was started but no greeter session appeared on seat0"
+            log  "  journalctl -u gdm"
+            ;;
+        *)
+            warn "the greeter came up on $greeter, not wayland -- the mode is not enforced"
+            log  "  hiding a device from seat0 constrains a compositor that asks logind for"
+            log  "  its devices. NVIDIA's Xorg driver doesn't: it drives the card through"
+            log  "  /dev/nvidia0 and /dev/nvidia-modeset, character devices with no udev"
+            log  "  properties and no seat tags for the hide to remove. So the desktop is"
+            log  "  wherever that driver put it, whichever mode was asked for."
+            log  "  gdm chose Xorg via 61-gdm.rules (nvidia_drm + modeset=Y falls through"
+            log  "  to gdm_prefer_xorg); wk overrides it, so this means the override"
+            log  "  didn't take -- check: sudo $PRIV session-status"
+            ;;
+    esac
+    [ -n "$BMC" ] && log "  or over the BMC's KVM-over-IP console" || true
+    ;;
+
 off)
-    run_priv session-off || die "the helper failed to stop the session"
+    run_priv session-off || die "the helper failed to turn the screen off"
+
+    # Two separate claims, and they used to be conflated: the placeholder
+    # compositor is running (so fbcon can't repaint the console over the top),
+    # *and* its outputs have been modeset off (so the monitor has no signal and
+    # sleeps). The second is the one that used to be missing entirely, which is
+    # why it is now checked from sysfs rather than announced.
+    lit=$(_lit_connectors not-ast)
+    if [ -n "$lit" ]; then
+        warn "the screen is black but still lit: $lit"
+        log  "  a compositor holding an output and painting it black is not an"
+        log  "  output that is off -- the CRTC keeps scanning out, so the monitor"
+        log  "  keeps its signal. The modeset that darkens it needs wlr-randr:"
+        log  "    ./setup --stage tools   (then: wk session off)"
+    else
+        info "screen off -- outputs modeset off, placeholder compositor holding the seat"
+        log  "  both halves are load-bearing: disabling the outputs is what darkens"
+        log  "  the monitor, holding the device is what stops fbcon repainting the"
+        log  "  console over the top of it"
+    fi
+
+    # The placeholder covers one DRM device (see the helper's `off` mode), so the
+    # BMC's chip keeps whatever was last drawn on it. Said out loud rather than
+    # left for someone to find on a KVM console.
+    bmc_lit=$(_lit_connectors ast)
+    [ -n "$bmc_lit" ] && log "  still lit on the BMC's chip: $bmc_lit (its console keeps its last frame)"
+    log  "  a desktop back:  wk session gdm      a benchmark session:  wk session on"
     ;;
 
 status)
@@ -282,17 +463,34 @@ status)
     printf 'socket:    %s\n' "$([ -S "$SOCKET" ] && echo "$SOCKET" || echo none)"
     printf 'dm:        %s\n' "${dm:-unknown}"
 
-    # The one root-only fact, and not worth a password: nvidia-drm without
-    # modesetting has no KMS for a compositor to drive, which is worth knowing
-    # when the compositor refuses to start.
-    modeset=$(sudo -n "$PRIV" session-status 2>/dev/null | awk '/^modeset:/ {print $2}' || true)
+    # A few root-only facts, and not worth a password for any of them: nvidia-drm
+    # without modesetting has no KMS for a compositor to drive; which device (if
+    # any) is hidden from seat0 is invisible from anywhere else.
+    priv_status=$(sudo -n "$PRIV" session-status 2>/dev/null || true)
+    modeset=$(printf '%s\n' "$priv_status" | awk '/^modeset:/ {print $2}')
+    desktop=$(printf '%s\n' "$priv_status" | awk '/^desktop:/ {print $2}')
+    seathide=$(printf '%s\n' "$priv_status" | awk '/^seat-hide:/ {print $2}')
     printf 'modeset:   %s\n' "${modeset:-unknown}"
 
     # Which chip the session is on, and therefore whether anything measured
     # against it can be believed.
     printf 'mode:      %s\n' "$(session_mode)"
+    # Which connected outputs are actually lit. In `off` mode this must be empty;
+    # anything listed here while the mode says off is the bug this line exists to
+    # make visible from a shell instead of from a chair in front of the monitor.
+    lit=$(_lit_connectors)
+    printf 'lit:       %s\n' "${lit:-none}"
     printf 'gpu:       %s\n' "$(_connectors not-ast | tr '\n' ' ' | sed 's/ *$//')"
     printf 'bmc:       %s\n' "$(_connectors ast | tr '\n' ' ' | sed 's/ *$//')"
+    printf 'desktop:   %s\n' "${desktop:-none}"
+
+    # A desktop mode is only enforced when the greeter is a compositor that takes
+    # its devices from logind, which on this machine means Wayland. `x11` here
+    # means `desktop:` above is intent rather than fact.
+    greeter=$(_greeter_type 1) || greeter=""
+    [ -n "$greeter" ] && printf 'greeter:   %s%s\n' "$greeter" \
+        "$([ "$greeter" = wayland ] || echo '  (mode NOT enforced -- see gdm notes)')"
+    [ -n "$seathide" ] && printf 'seat-hide: %s (hidden from seat0)\n' "$seathide"
 
     if [ -S "$SOCKET" ]; then
         printf 'outputs:   %s\n' "$(session_outputs | tr '\n' ' ')"

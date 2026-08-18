@@ -156,44 +156,62 @@ confirm() {
     case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
 
+# --- the BMC's DRM device -----------------------------------------------------
+# The kernel driver is the discriminator, never the card number: which
+# /dev/dri/cardN happens to be the ast is a property of PCI enumeration order,
+# not something to hardcode. Shared by cmd/session (which points the benchmark
+# compositor at it) and cmd/gui (which points a browser client's own DRM/EGL
+# device inference at it -- left to guess, it picks the GPU, which is a device
+# a software-rendered compositor never handed it and the picture stays blank).
+bmc_drm_device() {
+    local d c drv
+    for d in /sys/class/drm/card[0-9]*; do
+        [ -d "$d" ] || continue
+        c=$(basename "$d")
+        case "$c" in *-*) continue ;; esac
+        drv=$(readlink -f "$d/device/driver" 2>/dev/null) || continue
+        [ "$(basename "$drv" 2>/dev/null)" = ast ] && { echo "/dev/dri/$c"; return 0; }
+    done
+    return 1
+}
+
 # --- the graphical session's mode --------------------------------------------
-# `wk session` can start the compositor three ways, and from the Wayland socket
-# alone they are indistinguishable -- which is exactly the problem, because two
-# of the three make every number that comes out of them meaningless. The
-# privileged helper records which one it started in a file under /run, and this
-# is where everything else reads it.
+# `wk session` can start the compositor a few ways, and from the Wayland
+# socket alone they are indistinguishable -- which is exactly the problem,
+# because none of them but one make a number that comes out meaningful. The
+# privileged helper records which one it started in a file under /run, and
+# this is where everything else reads it.
 #
 # Linux-only, and absent-means-none: on macOS, and before the first session of
 # a boot, there is no file and nothing to warn about.
 WK_SESSION_MODE_FILE="${WK_SESSION_MODE_FILE:-/run/wk-session-mode}"
 
-# gpu | bmc | bmc-only | none
+# gpu | bmc | off | none
 session_mode() {
     local m=""
     [ -r "$WK_SESSION_MODE_FILE" ] && m=$(head -1 "$WK_SESSION_MODE_FILE" 2>/dev/null | tr -dc 'a-z-')
     printf '%s' "${m:-none}"
 }
 
-# Say so, loudly, when the session in front of us is one of the slow ones.
-# Returns 0 when there is nothing to warn about, 1 when it warned -- so a caller
-# that must refuse (the benchmark runner) and a caller that only has to inform
-# (wk enter, wk gui) can share one wording.
+# Say so, loudly, when the session in front of us is the slow one, or is not
+# meant to have anything running against it at all. Returns 0 when there is
+# nothing to warn about, 1 when it warned -- so a caller that must refuse (the
+# benchmark runner) and a caller that only has to inform (wk enter, wk gui)
+# can share one wording.
 session_mode_warn() {
     case "$(session_mode)" in
         bmc)
-            warn "SLOW SESSION: rendering on the GPU, scanning out on the BMC"
-            log  "  Every frame is copied from the GPU to the BMC's display chip so the"
-            log  "  session can be watched over KVM-over-IP, and the display cadence is"
-            log  "  the BMC's 1024x768, not the monitor's. Good for debugging a GUI"
-            log  "  remotely; not a number to compare with anything."
-            log  "  measurable session again:  wk session on"
-            return 1
-            ;;
-        bmc-only)
             warn "SLOW SESSION: SOFTWARE RENDERING -- the BMC display chip, no GPU at all"
             log  "  llvmpipe is not a slow GPU, it is a different measurement: MotionMark"
             log  "  differs by ~400x. Nothing measured here means anything."
-            log  "  measurable session again:  plug the monitor in, then wk session on"
+            log  "  measurable session again:  wk session on"
+            return 1
+            ;;
+        off)
+            warn "SESSION IS OFF -- this socket is the screen-off placeholder, not a session"
+            log  "  its outputs are modeset off on purpose and it has no head to draw on;"
+            log  "  nothing rendered into it will show up anywhere."
+            log  "  a real session:  wk session on"
             return 1
             ;;
     esac

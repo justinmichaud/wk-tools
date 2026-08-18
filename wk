@@ -49,9 +49,14 @@ hosts and machines
   vm <sub>                  macOS VM lifecycle: ls|new|start|stop|ip|enter|sync|base|rm
   pi <sub>                  provision a Raspberry Pi onto the tailnet
   quiesce on|off|status     quiet the machine for benchmarking
-  session on|off|status     a real GPU session on the attached monitor (Linux)
-    session on --bmc        put that session on the BMC instead, to watch it
-                            over KVM-over-IP; slower, and never for numbers
+  session on|gdm|off|status a real GPU session, or a real desktop (Linux)
+    session on [--bmc]      benchmark kiosk; --bmc moves it to the BMC to
+                            watch over KVM-over-IP -- slower, never for numbers
+    session gdm [--bmc]     the actual display manager and desktop instead;
+                            --bmc hides the GPU from seat0 so it lands on the BMC
+    session off             screen held dark on every output (not literally
+                            nothing running -- some drivers won't blank for
+                            real otherwise); nothing restarts on its own
   mcp                       MCP server, for the Claude Desktop app
 
   WK_DEBUG=1 for verbose output.
