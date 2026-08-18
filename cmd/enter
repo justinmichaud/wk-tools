@@ -32,9 +32,12 @@ if [ $# -gt 0 ]; then
     exec t_exec "$NAME" "$@"
 fi
 
-if is_linux && [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
-    warn "no graphical session detected; GPU-accelerated tests will fall back to software rendering"
-    log  "  host/linux/session.sh can start one on the attached monitor"
+# The workspace sees the compositor at a fixed path, so what matters is whether
+# a session is running here -- not whether this particular shell has one, which
+# it never does over ssh.
+if is_linux && [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0" ]; then
+    warn "no benchmark session running; GPU-accelerated tests fall back to software rendering"
+    log  "  start one with:  wk session on"
 fi
 
 exec t_enter "$NAME"

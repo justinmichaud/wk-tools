@@ -18,7 +18,23 @@
 # Git creates and renames files rather than writing in place, so the previous
 # snapshot's inodes are untouched and workspaces pinned to it keep working.
 
-WK_STORE="${WK_STORE:-/var/lib/wk}"
+# Where everything lives. /var/lib/wk inside the macOS VM, which is provisioned
+# for it and has no other user; under the user's own data directory on a Linux
+# workstation, because nothing here needs to be system-owned and a store that
+# needs root to create is a store that needs root to repair. An existing
+# /var/lib/wk still wins if it is ours, so a machine set up before this change
+# keeps working without moving a hundred gigabytes.
+_wk_default_store() {
+    if [ -n "${WK_IN_VM:-}" ] || [ "$(uname -s)" = Darwin ]; then
+        echo /var/lib/wk
+    elif [ -d /var/lib/wk ] && [ -w /var/lib/wk ]; then
+        echo /var/lib/wk
+    else
+        echo "${XDG_DATA_HOME:-$HOME/.local/share}/wk"
+    fi
+}
+
+WK_STORE="${WK_STORE:-$(_wk_default_store)}"
 
 # ccache ceiling, shared by every workspace.
 #
@@ -91,10 +107,20 @@ store_init() {
     ensure_dir "$WK_STORE/base"
     ensure_dir "$WK_STORE/ws"
     ensure_dir "$WK_STORE/cache/ccache"
+    # Recorded in the cache's own config as well as passed as an environment
+    # variable, so `ccache -s` reports the real limit from the host too rather
+    # than the 5 GB default.
+    [ -f "$WK_STORE/cache/ccache/ccache.conf" ] || \
+        printf 'max_size = %s\n' "${WK_CCACHE_MAXSIZE:-50G}" > "$WK_STORE/cache/ccache/ccache.conf"
     ensure_dir "$WK_STORE/cache/yocto/downloads"
     ensure_dir "$WK_STORE/cache/yocto/sstate"
     ensure_dir "$WK_STORE/cache/buildroot/dl"
     ensure_dir "$WK_STORE/cache/buildroot/ccache"
+    ensure_dir "$WK_STORE/cache/bench"
+    # Benchmark results. Created here rather than by `wk bench`, because it is
+    # bind-mounted at container creation and podman refuses to start a
+    # container whose mount source does not exist.
+    ensure_dir "$WK_STORE/bench"
     ensure_dir "$WK_STORE/skills"
     ensure_dir "$WK_STORE/secrets" 0700
 }

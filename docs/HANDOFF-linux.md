@@ -1,197 +1,293 @@
-# Handoff: the Linux portion
+# The Linux port: what it is now
 
-You are picking up `wk-tools` to finish the Linux workstation support. The macOS
-side is built and working; Linux is scaffolded but has never been run.
+The Linux side is built and running. This document replaces the original
+handoff: it records what changed, what was verified, and what is left.
 
-Read `SETUP.md` first for what the system does, and `README.md` for why the
-design is shaped the way it is. This document covers only what is specific to
-finishing Linux.
-
----
-
-## What already exists
-
-The whole `wk` CLI, the storage model, the firewall, the build pipeline and the
-Claude integration are done and verified **on macOS**, where they run inside a
-podman VM. On Linux there is no VM: everything runs directly on the workstation,
-which removes a layer but changes several assumptions.
-
-Working and tested end to end (on macOS):
-
-- `./setup` — idempotent, seven stages, second run reports no changes
-- `wk sync` / `wk new` / `wk build` / `wk run` / `wk test` / `wk rm` / `wk gc`
-- `wk status` / `wk logs` — build state with a machine-readable exit code
-- `wk skills` — the shared mutable skills directory
-- The overlay snapshot model, the nftables egress policy, the SDK patches
-
-Written but **never executed**: `host/linux/*`, `targets/remote.sh`,
-`host/linux/session.sh`, `cmd/pi`, `cmd/vm`.
+Read `SETUP.md` for how to use it and `README.md` for why the design is shaped
+the way it is. Everything below is Linux-specific.
 
 ---
 
-## The Linux-specific work
+## The one big change: no root, and no firewall
 
-### 1. `./setup` on Ubuntu 26.04
+The original design made rootful podman mandatory, because the egress policy is
+nftables in the forward chain and rootless podman's traffic never reaches it.
+That reasoning is correct, and it was the wrong trade: it puts root in the daily
+path, so a container escape becomes a root escape, and every `wk` command needs
+a password or a NOPASSWD rule that is root-equivalent in practice.
 
-`host/linux/tools.sh`, `settings.sh` and `apt.txt` exist and are plausible but
-unrun. Expect small breakage. The rule to preserve: **stock apt only**, plus
-exactly one third-party repository (Tailscale). Zed and Claude Code install via
-their own scripts into `~/.local`; do not add repositories for them, and do not
-install anything to a path the upstream tool does not choose itself — Claude
-Code self-updates into `~/.local/share/claude/versions/` and a binary parked
-elsewhere can never update.
+Rootless podman turned out to be able to do everything the design needs. All
+three of the things believed to require root were tested and do not:
 
-`host/linux/config.dconf` is a raw dump from the old setup and still contains
-machine-specific junk: a weather location, four `nm-applet` 802.1X WiFi UUIDs, a
-GTK last-folder path, Ptyxis profile UUIDs, timestamps. `cmd/backup` has filters
-for these but they have not been exercised. Verify a `wk backup` → `./setup`
-round trip is clean before trusting it.
+| claimed to need root | measured |
+|---|---|
+| overlay `:O,upperdir=` | works rootless; files land owned by the invoking user |
+| GPU passthrough | `--device nvidia.com/gpu=all` works rootless |
+| egress filtering | genuinely impossible rootless -- see below |
 
-### 2. There is no VM, so several things move
+Only the firewall was real. Rootless podman's network helper terminates
+container traffic and re-emits it from the init namespace, in a cgroup scope
+named `rootless-netns-<random-hash>.scope`. There is no stable selector for
+nftables to match on: not an interface, not a uid, not a cgroup path.
 
-On macOS the podman VM is the isolation boundary and `wk` forwards into it over
-`podman machine ssh`. On Linux `wk` runs directly. Check every place that
-assumes the VM:
+So the boundary changed instead of the privilege model. A workspace now runs
+with **`--network none`** -- its namespace has loopback and nothing else -- and
+reaches the outside through a single unix socket to `container/proxy/
+wk-proxy.py`, an ordinary `systemd --user` service that allowlists by hostname.
+There is nothing to filter because there is no interface, and nothing to bypass
+because there is no second path.
 
-- `lib/store.sh` defaults `WK_STORE=/var/lib/wk`. On Linux that is fine but the
-  ownership assumptions differ — the container uid/gid are derived from
-  `stat` on `$WK_STORE`, so whoever owns it determines the workspace user.
-- `lib/resources.sh` keys off `/var/lib/wk/.headless`. **Do not create that
-  marker on the workstation.** It selects a 2 GB reserve instead of 12 GB, which
-  is right for a headless VM and wrong for a machine with a desktop — the whole
-  point is that the GUI stays interactive.
-- `wk` forwards non-host commands into the VM on Darwin only, so this should
-  already be correct, but verify `is_host_command` behaves on Linux.
-- `host/macos/vmtools.sh` has no Linux equivalent. On Linux the SDK still needs
-  patching — write `host/linux/sdk.sh` doing the same clone + `git reset --hard`
-  + `container/sdk-patches/apply.sh`, and load the nftables policy.
+What this bought:
 
-### 3. Rootful podman is mandatory
+- `wk` never calls `sudo` on Linux. Builds, benchmarks and `wk claude` run
+  unattended with no privileged component at all.
+- The allowlist is by hostname and port, so the GitHub, Fastly/PyPI and
+  Anthropic CIDR lists, `resolved_hosts`, and `wk gc --refresh-net` are all
+  gone. `github.com` replaces four ranges that had to be refreshed by hand.
+- A name that resolves into RFC1918 or the tailnet range is refused *after*
+  resolution, which the address-based policy could not express.
+- It is testable: `wk verify` measures the properties from inside a workspace.
 
-Not a preference. Rootless podman uses pasta, which terminates container traffic
-and re-emits it as ordinary sockets from the init namespace; that traffic
-reaches `output`/`postrouting` and **never `forward`**, so the egress policy has
-nothing to filter and would silently enforce nothing. `targets/container.sh`
-already calls podman through `sudo`.
+`docs/HANDOFF-macos-proxy.md` covers moving the macOS VM to the same model.
 
-Consequence: `--userns keep-id` is unavailable, so the container user is created
-inside the image by the patched `.wkdev-init`, with uid/gid taken from the owner
-of the mounted home. Do not hardcode 1000 — on the macOS VM the user is uid 501.
+## The other thing that was open, and worse
 
-### 4. The firewall must allowlist the Pis by tailnet address
+wkdev's whole premise is host integration, and `wkdev-create` mounts the
+session D-Bus socket, the system bus, the keyring, dconf, X11, PulseAudio, the
+journal, `$HOME` at `/host/home`, and all of `$XDG_RUNTIME_DIR` at `/host/run`.
 
-`container/nftables/wk-egress.nft` drops all RFC1918 and allows only Anthropic,
-GitHub, PyPI, `resolved_hosts`, and the specific Pi tailnet addresses in
-`pi_hosts`.
+The session bus alone is a complete host escape: `StartTransientUnit` on it runs
+any command outside the container as the user. It is not a network problem, so
+no firewall of any kind would have caught it, and on the macOS VM it was
+invisible because the VM's session has nothing in it.
 
-On Linux this matters more than on macOS: **the workstation is itself an
-unrestricted tailnet node**. If you allow the whole `100.64.0.0/10` CGNAT range
-instead of individual addresses, a workspace reaches every machine the
-workstation can, and the boundary is gone. Keep it to individual addresses.
+SDK patch 11 adds `--isolated`, which turns that whole group off, and `wk`
+passes it. Display integration is deliberately *not* in the group: benchmarks
+need the GPU and a compositor socket, and `wk` passes those itself -- one
+socket, in one directory -- rather than by sharing the runtime directory.
 
-`/var/lib/wk/pi-hosts` holds them and is replayed after every policy rebuild.
-
-### 5. GPU and the graphical session — the genuinely new work
-
-This is the part with no macOS equivalent and the most room for surprise.
-
-Benchmarks need real GPU acceleration; llvmpipe results are meaningless. The
-machine has a monitor attached. `wk enter` keeps the SDK's existing desktop
-integration (`--device /dev/dri`, the Wayland socket from `$XDG_RUNTIME_DIR`,
-`WAYLAND_DISPLAY`) while dropping only the network and capability flags —
-display and network are orthogonal, which is what makes this possible.
-
-`host/linux/session.sh` is written but unrun. It handles two cases: someone
-logged in at the machine (nothing to do), and nobody logged in (start `cage` on
-seat0 so there is a real DRM session). Verify:
-
-- `/dev/dri/renderD128` is passed through and usable from inside a workspace
-- `glxinfo`/`eglinfo` inside the container reports the real GPU, not llvmpipe
-- A workspace can run MiniBrowser/WPE against the real compositor
-- The unattended path actually works with no user logged in
-
-Note `XDG_RUNTIME_DIR` was a live bug on macOS: `wkdev-create` derived it from
-the invoking uid, which is 0 under sudo, so containers got `/run/user/0` which
-does not exist. Patch 10 in `container/sdk-patches/apply.sh` fixes it. On Linux
-with a real session this matters more, because the Wayland socket lives there.
-
-### 6. 32-bit containers come back
-
-Dead on Apple Silicon (no AArch32 at EL0, no published armhf image), so the
-macOS path refuses. On Linux `--arch arm` with the `24.04_arm32` tag should
-work as it did in the old wiki setup. `wk new --arch 32` is not implemented —
-add it to `targets/container.sh`.
-
-### 7. `remote.sh` — shared build machines
-
-Written, never run. No containers on those boxes: a plain checkout in your home
-directory. The properties that matter are politeness, because they are other
-people's machines: job count from live load average rather than `nproc`,
-`nice 19`, `ionice -c3`, and a `flock` so two of your own builds cannot stack.
-Per-target config goes in `~/.config/wk/targets/<name>.conf`.
-
-`wk claude` deliberately refuses on remote targets — there is no sandbox there.
+`wk verify` checks for `/host/home`, `/host/run` and both D-Bus sockets on
+every run.
 
 ---
 
-## Traps that cost time on macOS
+## What was verified on this machine
 
-Each of these was found the hard way. They are fixed, but the same class of
-problem will recur.
+Ampere Altra (80x Neoverse-N1), 125 GB, NVIDIA RTX A400, Ubuntu 24.04 with
+podman 4.9. The target is 26.04 with podman 5; the design deliberately does not
+depend on the network backend, which is most of why `--network none` was chosen
+over trying to make nftables work rootless.
 
-**Build state must never be inferred from a process list.** `pgrep -f "ninja"`
-matches its own command line, and a build between phases has no compiler running
-while being perfectly healthy. Both mistakes were made here. Use `wk status`
-(exit 0 ok, 1 failed, 2 running, 3 stalled) and `wk logs`. `wk build` has a
-watchdog: heartbeat every 60 s, warning after 300 s of silence with diagnostics,
-kill after 1800 s.
+| | |
+|---|---|
+| `./setup --stage machine\|sdk\|claude` | unprivileged; second run reports no changes |
+| `wk sync` | 13 GB mirror, snapshot published |
+| `wk new` | 2.4 s (macOS: ~30 s) |
+| `wk build jsc-release` | 4m0s cold, 3m45s after the ccache fix, **1m0s in a fresh workspace** |
+| `wk build wpe-release` | 20m17s |
+| `wk build gtk-release` | 20m32s |
+| `wk verify` | every check green, including a hardware renderer |
+| `wk bench speedometer3` | ran end to end on WPE MiniBrowser |
+| `wk bench motionmark1.3.1` | ran end to end on WPE MiniBrowser |
+| `wk bench compare` | compare-results breakdown, with provenance warnings |
 
-**WebKit needs clang.** GCC fails on aarch64 in
-`JSObject::crashDueToEmptyValueAtValidOffset` with
-`-Werror=volatile-register-var`. `build/configs.sh` sets it and records why.
+The GPU, from inside a rootless workspace with no network interface:
+`renderer=NVIDIA RTX A400/PCIe | version=OpenGL ES 3.2 NVIDIA 580.173.02`.
 
-**Size builds from the container's cgroup limit, not the machine's free
-memory.** Inside a container the kernel still reports the whole host's
-`MemAvailable`; deriving `-j` from it picks a number the cgroup OOM-kills
-mid-link. That killed the first JSC build here.
+The shared ccache is what makes the third build number possible: a fresh
+workspace building jsc-release took **752/752 direct hits** from the cache the
+previous workspace filled -- one minute against four.
 
-**Mutating a live overlay lower layer is undefined behaviour.** `wk sync` never
-touches a tree in use; it publishes a new snapshot and existing workspaces stay
-pinned. Do not "optimise" this into a shared checkout.
+## The GPU benchmarks, confirmed
 
-**`podman` does not delete a user-managed overlay upperdir.** `wk rm` must, or
-workspaces leak.
+With `wk quiesce on` and `wk session on` (cage on seat0, gdm stopped), every
+preflight gate passes and the workspace renders on the real card:
 
-**The workspace cannot reach the Ubuntu archive.** `.wkdev-init`'s apt tasks are
-skipped via `WKDEV_OFFLINE=1`. If something genuinely needs a package, put it in
-the image rather than widening the firewall to Ubuntu's CDNs.
+| | |
+|---|---|
+| Speedometer 3 | 6.419pt (count 4, 40 iterations) |
+| MotionMark 1.3.1, Multiply + CanvasArcs | 1163.4pt geometric |
+| MotionMark, Triangles (WebGL) | **3119.7pt on the GPU vs 1665.2pt software** |
+
+The EGL probe reports the card on all three platforms from inside the
+workspace -- wayland, gbm and device -- and the direct evidence is `nvidia-smi`
+during a run:
+
+```
+|    0   N/A  N/A   298912   G   /usr/bin/cage                      1MiB |
+|    0   N/A  N/A   315789   G   ...WPE/Release/bin/WPEWebProcess    1MiB |
+|    0   N/A  N/A   315825   G   ...WPE/Release/bin/WPEWebProcess   61MiB |
+```
+
+A workspace with no network interface, running rootless, rendering through the
+host's NVIDIA card on the attached monitor.
+
+Two things worth knowing about these numbers. The panel's preferred mode is
+**1024x600 @ 59.8 Hz**, and MotionMark scores scale with surface size, so they
+are not comparable with a 1080p run -- `wk session status` reports the mode and
+`wk bench` records it. And `wk session on` is enough for GPU access even
+without a re-login: logind grants an ACL on `/dev/dri/*` to the seat's active
+user, and the workspace runs as that same uid under `--userns keep-id`.
+
+## NVIDIA, and 26.04
+
+The container needs userspace libraries matching the host driver exactly.
+`nvidia-container-toolkit` generates a CDI spec that does this and works
+rootless -- but it is **not in Ubuntu 26.04**. Verified against Launchpad:
+`nvidia-container-toolkit 1.19.0+dfsg-0ubuntu1` is published in universe for
+26.10 (stonking) only; resolute (26.04), questing and noble have nothing.
+
+So `host/linux/gpu.sh` does both. It uses `/etc/cdi/nvidia.yaml` when present,
+and otherwise derives the same set from `ldconfig` -- the versioned libraries
+and their SONAME symlinks, the GBM backend, the glvnd and EGL vendor JSONs, and
+the `/dev/nvidia*` nodes -- and bind-mounts each at its own path. A stock 26.04
+install benchmarks without adding NVIDIA's repository; adding it just makes the
+first branch win.
+
+---
+
+## What is left
+
+Three things, each with its own document:
+
+- `docs/HANDOFF-linux-arm32.md` -- `wk new --arch 32`, which only this machine
+  can run (the Ampere supports AArch32 at EL0; Apple Silicon does not)
+- `docs/HANDOFF-linux-remote.md` -- the never-run remote target
+- `docs/HANDOFF-linux-pi.md` -- provisioning the test devices, now that the
+  proxy rather than nftables consumes `pi-hosts`
+- `docs/HANDOFF-macos-proxy.md` -- collapsing the two boundaries into one
+
+Also unfinished: `host/linux/config.dconf` is still a raw dump with
+machine-specific junk in it (a weather location, four nm-applet WiFi UUIDs, a
+GTK last-folder path, Ptyxis profile UUIDs, timestamps). `cmd/backup` has
+filters for these and they have not been exercised; verify a
+`wk backup` -> `./setup` round trip before trusting it.
+
+---
+
+## Traps
+
+The originals still apply: build state must never be inferred from a process
+list (`wk status`, exit 0/1/2/3), WebKit needs clang on aarch64, size builds
+from the cgroup limit rather than free memory, never mutate a live overlay
+lower layer, `wk rm` must delete the upperdir, and the workspace cannot reach
+the Ubuntu archive (`WKDEV_OFFLINE=1`).
+
+These are new, and each cost real time here:
+
+**`set -o pipefail` plus `grep -q` silently inverts a test.** `lsmod | grep -q
+'^nvidia'` fails: grep exits at the first match, lsmod dies of SIGPIPE, and
+pipefail reports the pipeline as failed. The GPU branch was never taken and
+workspaces got llvmpipe with no error anywhere. Capture into a variable and
+test that.
+
+**The same pipefail trap bites command substitution.**
+`busy=$(for f in ...; do grep -q ... && echo x; done | wc -l)` aborts the whole
+script when nothing matches: the loop's status is grep's, pipefail promotes it
+to the pipeline's, and `set -e` takes it from there -- with no message, because
+nothing failed loudly. Count in a loop instead of piping into `wc -l`.
+
+**And a trailing `x && y` at the end of a function.** The function returns
+non-zero when the test is false, and the caller -- a plain command under
+`set -e` -- dies. Fine mid-function; fatal as the last statement.
+
+**wkdev-enter prints its own chatter on stdout.** Its banner and host
+integration notes land in front of the command's output, so anything that
+captures the result of `t_exec` gets the SDK's text mixed into its data.
+`--quiet` exists upstream for exactly this; `t_exec` passes it.
+
+**`--userns keep-id` makes container-root a subordinate uid.** Everything
+`.wkdev-init` writes is owned by 100000 on the host, and plain `rm -rf` cannot
+remove it -- `wk rm` reported success and left the workspace behind. `t_destroy`
+uses `podman unshare rm -rf` when rootless.
+
+**`wkdev-create --shell` defaults to the host's `$SHELL`.** That path need not
+exist in the image; with zsh on the host, `.wkdev-init` fails with `su: failed
+to execute /usr/bin/zsh` and the workspace comes up with no git identity, no
+push key and no Claude CLI. Pass `--shell` explicitly.
+
+**A CONNECT proxy must drain the client's request headers.** Leaving them
+buffered forwards them into the tunnel as the first bytes of the TLS stream,
+and the error is `SSL routines::wrong version number` -- which looks like a TLS
+version problem and is not.
+
+**`wk sync` trusted the previous snapshot to be a git checkout.** A directory
+that was not one made it fail after all the copying, leaving a second broken
+snapshot for the next run to trip over. It now checks, and refuses to publish a
+snapshot that did not complete.
+
+**WebKit's own bwrap sandbox is off inside a workspace.** SDK patch 3 gates
+`--security-opt unmask=ALL` and `seccomp=unconfined` behind `--unsafe-caps`,
+and bubblewrap needs both, so MiniBrowser prints "Bubblewrap does not work
+inside of this container, sandboxing will be disabled". That is the intended
+trade -- the workspace is the sandbox, and re-enabling those two options would
+let a workspace reach the host's `/proc` and `/sys` and drop the syscall filter
+-- but it means a WebKit sandbox bug cannot be reproduced in here. Use
+`--unsafe-caps` deliberately for that, in a workspace you then throw away.
+
+**`compare-results` cannot be executed directly on Linux.** Its shebang is
+`#!/usr/bin/env python3 -u`, and Linux `env` does not split arguments in a
+shebang line, so running it gives `env: 'python3 -u': No such file or
+directory`. It works on macOS, which is presumably why it is still there.
+`wk bench compare` invokes it as `python3 -u Tools/Scripts/compare-results`.
+It also needs scipy, which the SDK image does not carry; `wk bench` installs it
+into the workspace on demand through the proxy.
+
+**Software rendering is not what `LIBGL_ALWAYS_SOFTWARE=1` makes it.** That
+variable, and `GALLIUM_DRIVER=llvmpipe`, only steer Mesa. With the NVIDIA
+vendor still listed in `/usr/share/glvnd/egl_vendor.d`, glvnd loads it for the
+GBM and device platforms and the run is hardware-accelerated while calling
+itself software -- which is worse than no software mode at all, because the
+result carries a label saying otherwise. `__EGL_VENDOR_LIBRARY_FILENAMES`
+pinned to the Mesa vendor is the one that decides it. Measured: the WebGL
+subtest scored 2592pt with the incomplete environment and 1665pt with the
+complete one, against 3120pt on the GPU.
+
+**compare-results needs at least two iterations.** With `--count 1` every
+p-value is NaN and it dies inside its own significance sort with a bare
+`AssertionError`. `wk bench compare` warns first.
+
+**`stat -f` does not fail on Linux, it means something else.** `admin/install.sh`
+tried the BSD form first -- `stat -f '%Su' FILE || stat -c '%U' FILE` -- and on
+Linux `-f` is "file system status", so it printed a block of filesystem
+statistics instead of failing over. Two consequences: the owner never equalled
+"root" so the helper was reinstalled on every run, and the mode check that is
+the entire argument for the NOPASSWD rule being safe was comparing its patterns
+against that blob, so **it had never actually run on Linux**. GNU form first,
+BSD as the fallback, and an unreadable mode is now a refusal rather than a pass.
+
+**The dconf stage could never report "no changes".** It compared the whole live
+tree against a dump holding only the captured subtrees, so they never matched
+and every run reloaded and reported a change -- defeating the one signal
+`./setup` exists to give. It now applies and then compares before and after.
+
+**`grep -v` exits 1 when it prints nothing.** `host/dotfiles.sh` filtered stale
+`source` lines out of `~/.zshrc`; on a `.zshrc` that contained *only* a stale
+line, the filter emptied the file, returned 1, and `set -e` killed the stage --
+and, before stages were independent, the four stages after it.
+
+**iproute2 is not in the SDK image.** A check written with `ip` reports nothing
+and looks like a pass. `wk verify` reads `/proc/net/dev`.
 
 ---
 
 ## Verification
 
 ```sh
-./setup && ./setup            # second run: no changes
+./setup && ./setup                  # second run: no changes
 wk sync
 wk new smoke && wk build smoke jsc-release && wk run smoke -- -e 'print(1+1)'
-wk status smoke               # exit 0
+wk verify smoke                     # the sandbox, measured from inside
 wk rm smoke
 ```
 
-Then the Linux-specific checks:
+Then the parts that need the monitor:
 
 ```sh
-# GPU reaches the workspace
-wk enter smoke -- sh -c 'ls /dev/dri && eglinfo | grep -i renderer'
-
-# the firewall holds
-wk enter smoke -- sh -c 'curl -sS -m5 https://github.com >/dev/null && echo github ok'
-wk enter smoke -- sh -c 'curl -sS -m5 http://192.168.1.1 || echo LAN correctly blocked'
-wk enter smoke -- sh -c 'ssh rpi5 uname -m'     # after wk pi setup
-
-# the desktop survives a full build
-wk build smoke gtk-release    # keep using the machine while this runs
+wk quiesce on
+wk session on                       # cage on seat0; stops the display manager
+wk verify smoke --gpu               # refuses on a software renderer
+wk bench smoke speedometer3
+wk bench smoke motionmark1.3.1
+wk bench compare <run-a> <run-b>
 ```
-
-Measured on macOS (M4, VM at 8 cores / 20 GB), for comparison: `wk new` ~30 s,
-JSC release ~5 min cold / ~3 min warm ccache. Native Linux should beat this.

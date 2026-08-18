@@ -58,7 +58,10 @@ for _rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
     # SDK now runs inside the VM rather than on the host.
     if grep -qE 'wk-tools/bashrc|register-sdk-on-host\.sh' "$_rc"; then
         _tmp="$(mktemp)"
-        grep -vE '(^|[[:space:]])(source|\.)[[:space:]]+.*(wk-tools/bashrc|register-sdk-on-host\.sh)' "$_rc" > "$_tmp"
+        # `|| true`: grep exits 1 when it prints nothing, which is exactly the
+        # case here if the file contains *only* stale lines -- and under
+        # `set -e` that aborts the whole stage rather than emptying the file.
+        grep -vE '(^|[[:space:]])(source|\.)[[:space:]]+.*(wk-tools/bashrc|register-sdk-on-host\.sh)' "$_rc" > "$_tmp" || true
         mv "$_tmp" "$_rc"
         changed "removed stale source lines from $_rc"
     fi

@@ -31,11 +31,9 @@ TARGET="${WK_TARGET:-container}"
 . "$WK_ROOT/targets/$TARGET.sh"
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
-# JSCOnly and the full ports lay their build trees out differently.
-case "$CFG_PORT" in
-    --jsc-only) VM_DIR="/src/WebKit/WebKitBuild/JSCOnly/$CFG_TYPE" ;;
-    *)          VM_DIR="/src/WebKit/WebKitBuild/$CFG_TYPE" ;;
-esac
+# JSCOnly and the full ports lay their build trees out differently; each port
+# has its own directory. See config_build_dir in build/configs.sh.
+VM_DIR=$(config_build_dir)
 
 # validateOptions catches typo'd JSC flags, which otherwise fail silently and
 # make a benchmark look like it changed when it never ran the intended path.

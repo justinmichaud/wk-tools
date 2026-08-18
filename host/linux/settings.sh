@@ -13,19 +13,27 @@ elif [ ! -f "$_dconf" ]; then
 elif [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     warn "no session bus; run ./setup from inside a graphical session to apply GNOME settings"
 else
-    # Compare against the live tree so a second run reports no change.
-    _live=$(mktemp)
-    dconf dump / > "$_live" 2>/dev/null || true
+    # Comparing the whole live tree against the captured file can never match:
+    # the dump holds only the subtrees `wk backup` captures, while the live tree
+    # holds everything this desktop has ever set. That made the stage report a
+    # change on every single run, which is exactly the signal the "second run
+    # reports no changes" rule exists to give.
+    #
+    # So apply it and then ask whether anything actually moved. `dconf load`
+    # without -f merges, so this is safe to run when nothing changes.
+    _before=$(mktemp)
+    _after=$(mktemp)
+    dconf dump / > "$_before" 2>/dev/null || true
 
-    if diff -q "$_live" "$_dconf" >/dev/null 2>&1; then
+    dconf load / < "$_dconf"
+
+    dconf dump / > "$_after" 2>/dev/null || true
+    if cmp -s "$_before" "$_after"; then
         unchanged "dconf settings"
     else
-        # No -f: merge rather than replace, so settings outside the captured
-        # subtrees survive.
-        dconf load / < "$_dconf"
         changed "loaded dconf settings"
     fi
-    rm -f "$_live"
+    rm -f "$_before" "$_after"
 fi
 
-unset _dconf _live
+unset _dconf _before _after

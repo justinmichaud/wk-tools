@@ -1,0 +1,541 @@
+#!/usr/bin/env bash
+#
+# wk bench -- run a browser benchmark and keep the result defensible.
+#
+#   wk bench <workspace> <plan> [--config C] [--count N] [--subtests "A B"]
+#                                [--software] [--force] [--browser-args "..."]
+#   wk bench seed <workspace> <plan>       fetch the benchmark payload only
+#   wk bench compare <run-a> <run-b>       compare-results on two saved runs
+#   wk bench ls                            saved runs
+#
+# The work is done by Tools/Scripts/run-benchmark and Tools/Scripts/
+# compare-results. Everything this script adds is around them, and it is the
+# part that decides whether a number means anything:
+#
+#   the environment is checked before the run, not explained afterwards. A
+#   Speedometer score from llvmpipe, or from a machine with another build
+#   running on it, is not a slow result -- it is a different measurement, and
+#   the only way to tell later is to have refused at the time.
+#
+#   the payload is seeded once and pinned. run-benchmark otherwise clones
+#   Speedometer, or fetches MotionMark file by file from the GitHub API, on
+#   every single run: minutes of variance, and a benchmark that can silently
+#   change under you between two runs you meant to compare.
+#
+#   the environment is recorded with the result. Kernel, driver, governor,
+#   compositor, WebKit sha, container limits. Two JSONs with no provenance are
+#   not a comparison.
+#
+# Preflight failures are fatal by design. --force downgrades them to warnings
+# and records that in the run's metadata, because a result taken under protest
+# should say so.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/watchdog.sh"
+. "$WK_ROOT/build/configs.sh"
+
+# A benchmark is legitimately silent for much longer than a build: MotionMark
+# reports once per subtest and a subtest can run for minutes. The build
+# watchdog's 1800 s abort would kill a healthy full-suite run, so raise both
+# thresholds here rather than teaching the watchdog about benchmarks.
+WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
+WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
+
+BENCH_DIR="$WK_STORE/bench"
+SEED_DIR="$WK_STORE/cache/bench"
+
+TARGET="${WK_TARGET:-container}"
+. "$WK_ROOT/targets/$TARGET.sh"
+
+CONFIG="${WK_CONFIG:-wpe-release}"
+# Defaulted from the config's port below rather than fixed: the two ports have
+# different run-benchmark drivers (minibrowser-wpe, minibrowser-gtk) and picking
+# the wrong one launches the wrong browser against the right build directory,
+# which fails in a way that looks like a broken build.
+BROWSER="${WK_BENCH_BROWSER:-}"
+COUNT=""
+FORCE=""
+SUBTESTS=""
+SOFTWARE=""
+BROWSER_ARGS=""
+
+usage() {
+    sed -n '3,12p' "$0" >&2
+    exit 2
+}
+
+# --- saved runs --------------------------------------------------------------
+cmd_ls() {
+    [ -d "$BENCH_DIR" ] || { log "(no runs yet)"; return 0; }
+    local d
+    for d in $(ls -1 "$BENCH_DIR" 2>/dev/null | sort); do
+        local meta="$BENCH_DIR/$d/env.json"
+        printf '%-40s' "$d"
+        if [ -f "$meta" ]; then
+            python3 -c "
+import json,sys
+m=json.load(open('$meta'))
+print('%-14s %-12s %s%s' % (m.get('plan','?'), m.get('config','?'),
+      (m.get('webkit_sha') or '?')[:10], '  [FORCED]' if m.get('forced') else ''))"
+        else
+            echo
+        fi
+    done
+}
+
+# --- the payload -------------------------------------------------------------
+# Read the plan from the workspace's own checkout rather than from the repo:
+# a workspace may be testing a change to the plan itself, and seeding a
+# different payload than the one the run will use is a silent lie.
+plan_json() {
+    local ws="$1" plan="$2" body seen=0
+    while [ "$seen" -lt 5 ]; do
+        body=$(t_exec "$ws" cat "/src/WebKit/Tools/Scripts/webkitpy/benchmark_runner/data/plans/${plan}.plan" 2>/dev/null) \
+            || die "no such plan: $plan (wk bench <ws> --list)"
+        # A plan file may contain nothing but the name of another plan.
+        case "$(printf '%s' "$body" | head -c 1)" in
+            '{') printf '%s' "$body"; return 0 ;;
+            *)   plan=$(printf '%s' "$body" | tr -d ' \n' | sed 's/\.plan$//'); seen=$((seen + 1)) ;;
+        esac
+    done
+    die "plan $plan indirects too many times"
+}
+
+# Seeded copies are keyed by the exact commit, so a moved upstream branch
+# produces a new directory rather than quietly changing an existing one.
+seed_payload() {
+    local ws="$1" plan="$2" json
+    json=$(plan_json "$ws" "$plan")
+
+    local spec
+    spec=$(printf '%s' "$json" | python3 -c "
+import json,sys,re
+p = json.load(sys.stdin)
+if 'git_repository' in p:
+    g = p['git_repository']
+    print('git', g['url'], g.get('branch', 'main'), '.')
+elif 'github_source' in p:
+    m = re.match(r'https://github.com/([^/]+/[^/]+)/tree/([0-9a-f]+)/?(.*)', p['github_source'])
+    if not m:
+        sys.exit('unparseable github_source: ' + p['github_source'])
+    print('git', 'https://github.com/%s.git' % m.group(1), m.group(2), m.group(3) or '.')
+elif 'local_copy' in p:
+    print('local', p['local_copy'], '', '')
+else:
+    sys.exit('plan has no fetchable source; run-benchmark will handle it')
+" 2>/dev/null) || { warn "cannot pre-seed $plan; run-benchmark will fetch it itself"; echo ""; return 0; }
+
+    # shellcheck disable=SC2086
+    set -- $spec
+    local kind="$1" url="$2" ref="$3" subdir="$4"
+    [ "$kind" = git ] || { echo ""; return 0; }
+
+    # Resolve the ref to a commit before deciding whether the cache is current.
+    local sha
+    sha=$(git ls-remote "$url" "$ref" 2>/dev/null | awk '{print $1; exit}')
+    [ -n "$sha" ] || sha="$ref"     # already a commit
+
+    local dest="$SEED_DIR/$plan-${sha:0:12}"
+    if [ -d "$dest/.wk-seeded" ]; then
+        debug "payload cached: $dest"
+        echo "$dest"; return 0
+    fi
+
+    info "seeding $plan payload from $url@${sha:0:12}"
+    local tmp; tmp=$(mktemp -d "$SEED_DIR/.tmp-XXXXXX")
+    if ! git clone -q "$url" "$tmp/repo" 2>/dev/null; then
+        rm -rf "$tmp"
+        warn "could not clone $url; run-benchmark will fetch the payload itself"
+        echo ""; return 0
+    fi
+    git -C "$tmp/repo" checkout -q "$sha" 2>/dev/null || git -C "$tmp/repo" checkout -q "$ref"
+
+    rm -rf "$dest"
+    if [ "$subdir" = "." ]; then
+        mv "$tmp/repo" "$dest"
+    else
+        mv "$tmp/repo/$subdir" "$dest"
+    fi
+    rm -rf "$tmp"
+    mkdir -p "$dest/.wk-seeded"
+    printf 'url=%s\nref=%s\nsha=%s\nsubdir=%s\n' "$url" "$ref" "$sha" "$subdir" > "$dest/.wk-seeded/origin"
+    info "seeded $dest"
+    echo "$dest"
+}
+
+# --- preflight ---------------------------------------------------------------
+# Each check answers one question that would otherwise be answered by "the
+# number looked odd, I wonder why".
+PREFLIGHT_FAILS=0
+PREFLIGHT_NOTES=""
+
+check() {
+    local ok="$1" what="$2" detail="${3:-}"
+    if [ "$ok" = yes ]; then
+        printf '  \033[32mok\033[0m    %-34s %s\n' "$what" "$detail" >&2
+    else
+        printf '  \033[31mFAIL\033[0m  %-34s %s\n' "$what" "$detail" >&2
+            PREFLIGHT_FAILS=$((PREFLIGHT_FAILS + 1))
+        # Quotes and backslashes would land inside generated JSON.
+        PREFLIGHT_NOTES="$PREFLIGHT_NOTES$what: $(printf '%s' "$detail" | tr -d '"\\'); "
+    fi
+}
+
+preflight() {
+    local ws="$1" build_dir="$2"
+
+    info "preflight"
+
+    # 1. the build exists, and is the one we are about to measure
+    if t_exec "$ws" test -x "$build_dir/bin/MiniBrowser" 2>/dev/null \
+       || t_exec "$ws" test -x "$build_dir/bin/WPEWebProcess" 2>/dev/null; then
+        check yes "build present" "$build_dir"
+    else
+        check no  "build present" "no MiniBrowser in $build_dir -- wk build $ws $CONFIG"
+    fi
+
+    # 2. the sandbox, and with it the GPU. --gpu makes a software renderer fatal
+    #    rather than a footnote: MotionMark on llvmpipe measures llvmpipe.
+    #
+    #    --software is the exception, and exists for one narrow purpose: proving
+    #    the runner itself works when there is no display to be had. It skips
+    #    this check and the compositor check, and the run is recorded as
+    #    software so it can never be mistaken for a comparable result.
+    if [ -n "$SOFTWARE" ]; then
+        check yes "sandbox (software rendering)" "not comparable with a GPU run"
+        "$WK_ROOT/cmd/verify" "$ws" >/dev/null 2>&1 \
+            || check no "sandbox intact" "wk verify $ws"
+        PREFLIGHT_NOTES="${PREFLIGHT_NOTES}software rendering; "
+    elif "$WK_ROOT/cmd/verify" "$ws" --gpu >/tmp/.wk-bench-verify.$$ 2>&1; then
+        check yes "sandbox and GPU" "$(awk -F'renderer=' '/renderer=/{print substr($2,1,44); exit}' /tmp/.wk-bench-verify.$$)"
+    else
+        check no  "sandbox and GPU" "$(grep FAIL /tmp/.wk-bench-verify.$$ | head -2 | tr '\n' ' ')"
+    fi
+    # awk rather than grep|head: a pipeline whose reader exits early trips
+    # `set -o pipefail`, and this is inside a command substitution under
+    # `set -e`, so it would abort the run rather than leave a field blank.
+    GPU_RENDERER=$(awk -F'renderer=' '/renderer=/{sub(/ *\|.*/,"",$2); print $2; exit}' /tmp/.wk-bench-verify.$$ 2>/dev/null || true)
+    rm -f /tmp/.wk-bench-verify.$$
+
+    # 3. a real compositor on the real monitor
+    local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
+    if [ -n "$SOFTWARE" ]; then
+        :
+    elif [ -S "$sock" ]; then
+        check yes "graphical session" "$sock"
+    else
+        check no  "graphical session" "no compositor -- wk session on"
+    fi
+
+    # 4. quiesced. The governor is the one that actually moves scores; the rest
+    #    is recorded so a surprising result can be explained later.
+    local gov
+    gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)
+    if [ "$gov" = performance ]; then
+        check yes "cpu governor" "$gov"
+    else
+        check no  "cpu governor" "$gov -- wk quiesce on"
+    fi
+
+    # 5. the machine is actually idle. A build in another workspace is the
+    #    single most likely reason a benchmark run is quietly wrong here.
+    local load busy f
+    load=$(awk '{print $1}' /proc/loadavg)
+
+    # Counted in a loop rather than `... | wc -l` in a command substitution:
+    # with `set -o pipefail`, a grep that matches nothing makes the pipeline
+    # fail, the assignment fails, and `set -e` aborts the whole run before
+    # printing anything. The same trap as `lsmod | grep -q` in host/linux/gpu.sh.
+    busy=0
+    for f in "$WK_STORE"/ws/*/build.status; do
+        [ -f "$f" ] || continue
+        if grep -q '^state=running' "$f"; then
+            busy=$((busy + 1))
+        fi
+    done
+    if [ "$busy" != 0 ]; then
+        check no "no builds running" "$busy build(s) in progress"
+    elif [ "$(printf '%.0f' "$load")" -gt "${WK_BENCH_MAX_LOAD:-4}" ]; then
+        check no "machine idle" "1-minute load average is $load"
+    else
+        check yes "machine idle" "load $load, no wk builds"
+    fi
+
+    # 6. thermals, informational: an aarch64 workstation under a long
+    #    MotionMark run is the case where this matters.
+    local temp=""
+    for z in /sys/class/thermal/thermal_zone*/temp; do
+        [ -r "$z" ] || continue
+        temp="$(( $(cat "$z") / 1000 ))C"
+        break
+    done
+    # An `x && y` as the last statement of a function is a `set -e` landmine:
+    # this board exposes no thermal zones, the test is false, and the non-zero
+    # status aborts the whole run with no message at all.
+    if [ -n "$temp" ]; then
+        PREFLIGHT_NOTES="${PREFLIGHT_NOTES}temp $temp; "
+    fi
+
+    echo >&2
+    if [ "$PREFLIGHT_FAILS" -eq 0 ]; then
+        info "preflight clean"
+        return 0
+    fi
+    if [ -n "$FORCE" ]; then
+        warn "$PREFLIGHT_FAILS preflight check(s) failed -- continuing because --force was given"
+        warn "the run will be recorded as forced, and is not comparable with a clean run"
+        return 0
+    fi
+    die "$PREFLIGHT_FAILS preflight check(s) failed -- refusing to produce a number that cannot be defended.
+    Fix the above, or re-run with --force to record a result anyway."
+}
+
+# --- the run -----------------------------------------------------------------
+cmd_run() {
+    local ws="$1" plan="$2"
+    require_name "$ws"
+    [ "$(t_info "$ws")" != absent ] || die "no such workspace: $ws"
+
+    config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
+    case "$CFG_PORT" in
+        --jsc-only) die "$CONFIG builds no browser; use a gtk or wpe config" ;;
+    esac
+    local build_dir; build_dir=$(config_build_dir)
+
+    if [ -z "$BROWSER" ]; then
+        case "$CFG_PORT" in
+            --wpe) BROWSER=minibrowser-wpe ;;
+            --gtk) BROWSER=minibrowser-gtk ;;
+            *)     die "no benchmark browser for port $CFG_PORT" ;;
+        esac
+    fi
+
+    preflight "$ws" "$build_dir"
+
+    # The seeded payload and the run directory are both host paths under the
+    # store, and the container sees the same trees at /cache/bench and /bench.
+    local seeded seeded_ctr
+    seeded=$(seed_payload "$ws" "$plan")
+    seeded_ctr=""
+    [ -n "$seeded" ] && seeded_ctr="/cache/bench/$(basename "$seeded")"
+
+    local id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$ws"
+    local out="$BENCH_DIR/$id"
+    ensure_dir "$out"
+
+    local sha; sha=$(t_exec "$ws" git -C /src/WebKit rev-parse HEAD 2>/dev/null | tr -d '\r\n')
+
+    # Everything needed to judge the result later, written before the run so it
+    # exists even if the run dies.
+    #
+    # Values are collected in the shell and handed to python through the
+    # environment rather than interpolated into the script text: an unquoted
+    # heredoc expands $c and $d in the snippets below, which under `set -u` is
+    # not a mangled string but an abort.
+    local display cpu_model
+    display=$(for c in /sys/class/drm/*/status; do
+                  [ "$(cat "$c" 2>/dev/null)" = connected ] || continue
+                  d=$(dirname "$c")
+                  printf '%s %s; ' "$(basename "$d")" "$(head -1 "$d/modes" 2>/dev/null)"
+              done)
+    cpu_model=$(awk -F: '/Model name/ {gsub(/^ +/,"",$2); print $2; exit}' <(lscpu) 2>/dev/null || true)
+
+    WK_M_PLAN="$plan" WK_M_WS="$ws" WK_M_CONFIG="$CONFIG" WK_M_BROWSER="$BROWSER" \
+    WK_M_SHA="$sha" WK_M_COUNT="$COUNT" WK_M_LOCAL="$seeded" \
+    WK_M_FORCED="$FORCE" WK_M_SOFTWARE="$SOFTWARE" WK_M_NOTES="$PREFLIGHT_NOTES" \
+    WK_M_RENDERER="${GPU_RENDERER:-}" WK_M_DISPLAY="$display" WK_M_CPU="$cpu_model" \
+    WK_M_KERNEL="$(uname -r)" WK_M_CORES="$(host_cores)" \
+    WK_M_GOV="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)" \
+    WK_M_DRIVER="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)" \
+    WK_M_CPUS="$(envelope_cores)" WK_M_MEM="$(envelope_mem_mb)" \
+    python3 - "$out/env.json" <<'PYEOF'
+import json, os, sys
+g = os.environ.get
+json.dump({
+    "plan": g("WK_M_PLAN"), "workspace": g("WK_M_WS"), "config": g("WK_M_CONFIG"),
+    "browser": g("WK_M_BROWSER"), "webkit_sha": g("WK_M_SHA"),
+    "count": g("WK_M_COUNT"), "local_copy": g("WK_M_LOCAL"),
+    "forced": bool(g("WK_M_FORCED")), "software": bool(g("WK_M_SOFTWARE")),
+    "preflight_notes": g("WK_M_NOTES"), "gpu_renderer": g("WK_M_RENDERER"),
+    # MotionMark scores scale with the size of the surface being animated, and a
+    # fullscreen browser's surface is the display mode -- so two runs on
+    # different modes are not comparable and nothing else here would record why.
+    "display": g("WK_M_DISPLAY"),
+    "host": {
+        "kernel": g("WK_M_KERNEL"), "cpu": g("WK_M_CPU"), "cores": g("WK_M_CORES"),
+        "governor": g("WK_M_GOV"), "nvidia_driver": g("WK_M_DRIVER"),
+        "container_cpus": g("WK_M_CPUS"), "container_mem_mb": g("WK_M_MEM"),
+    },
+}, open(sys.argv[1], "w"), indent=2)
+PYEOF
+
+    info "running $plan in '$ws' ($CONFIG, $BROWSER)"
+    log  "  results: $out"
+
+    # Software rendering: llvmpipe through Mesa, the dmabuf renderer off, and no
+    # Wayland display -- so WPE and GTK both fall back to their headless paths
+    # instead of failing to connect to a compositor that is not there.
+    local run_env=""
+    local browser_args="$BROWSER_ARGS"
+    if [ -n "$SOFTWARE" ]; then
+        # __EGL_VENDOR_LIBRARY_FILENAMES is the one that actually decides it.
+        # LIBGL_ALWAYS_SOFTWARE and GALLIUM_DRIVER only steer Mesa; with the
+        # NVIDIA vendor still listed in /usr/share/glvnd/egl_vendor.d, glvnd
+        # loads it for the GBM and device platforms and the run is quietly
+        # hardware-accelerated while calling itself software. Pinning glvnd to
+        # the Mesa vendor is what makes the label true -- verified with
+        # container/gpu/gpu-probe.sh, which then reports llvmpipe.
+        run_env="WAYLAND_DISPLAY= WEBKIT_DISABLE_DMABUF_RENDERER=1"
+        run_env="$run_env LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe"
+        run_env="$run_env __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+        browser_args="--headless $browser_args"
+    fi
+
+    local args="--plan $plan --browser $BROWSER --build-directory $build_dir"
+    args="$args --output-file /bench/$id/result.json --no-adjust-unit --show-iteration-values"
+    [ -n "$COUNT" ] && args="$args --count $COUNT"
+    [ -n "$seeded_ctr" ] && args="$args --local-copy $seeded_ctr"
+    [ -n "$SUBTESTS" ] && args="$args --subtests $SUBTESTS"
+    # Positional, and after everything else: run-benchmark passes these straight
+    # to the browser, and anything starting with a dash needs the -- separator.
+    [ -n "$browser_args" ] && args="$args -- $browser_args"
+
+    set +e
+    run_watched "$out/run.log" -- \
+        t_exec "$ws" bash -lc "cd /src/WebKit && \
+            WK_BENCH_RUN=$id $run_env Tools/Scripts/run-benchmark $args"
+    local rc=$?
+    set -e
+
+    if [ "$rc" -ne 0 ]; then
+        warn "run-benchmark exited $rc"
+        first_error "$out/run.log" | sed 's/^/  /' >&2 || true
+        log "  full log: $out/run.log"
+        exit "$rc"
+    fi
+
+    info "BENCH OK  $plan -> $out/result.json"
+    # run-benchmark prints its own summary table; surface the score line rather
+    # than making it be looked up.
+    tr '\r' '\n' < "$out/run.log" | grep -iE '^(Score|Total|.*Score:)' | tail -5 | sed 's/^/  /' >&2 || true
+    log ""
+    log "  compare with:  wk bench compare <other-run> $id"
+}
+
+# --- comparison --------------------------------------------------------------
+# compare-results does the statistics; this only resolves run ids to files and
+# refuses comparisons that are not like for like.
+cmd_compare() {
+    local a="$1" b="$2" ws="${3:-}"
+    local fa="$BENCH_DIR/$a/result.json" fb="$BENCH_DIR/$b/result.json"
+    [ -f "$fa" ] || fa="$a"
+    [ -f "$fb" ] || fb="$b"
+    [ -f "$fa" ] || die "no such run: $a"
+    [ -f "$fb" ] || die "no such run: $b"
+    # Inside the workspace the run directory is /bench, not the store path.
+    local ca="${fa/#$BENCH_DIR//bench}" cb="${fb/#$BENCH_DIR//bench}"
+
+    # Comparing a forced run, or two different plans, is almost never what was
+    # meant. Say so rather than printing a confident p-value.
+    python3 - "$BENCH_DIR/$a/env.json" "$BENCH_DIR/$b/env.json" <<'PYEOF' >&2 || true
+import json, sys, os
+def load(p):
+    try:
+        return json.load(open(p))
+    except Exception:
+        return {}
+a, b = load(sys.argv[1]), load(sys.argv[2])
+if not a or not b:
+    sys.exit(0)
+if a.get("plan") != b.get("plan"):
+    print("warning: different plans (%s vs %s)" % (a.get("plan"), b.get("plan")))
+if a.get("config") != b.get("config"):
+    print("warning: different build configs (%s vs %s)" % (a.get("config"), b.get("config")))
+if a.get("gpu_renderer") != b.get("gpu_renderer"):
+    print("warning: different renderers (%s vs %s)" % (a.get("gpu_renderer"), b.get("gpu_renderer")))
+if bool(a.get("software")) != bool(b.get("software")):
+    print("warning: one run is software-rendered and the other is not -- these are not comparable")
+if a.get("forced") or b.get("forced"):
+    print("warning: at least one run was taken with failing preflight checks (--force)")
+if a.get("local_copy") != b.get("local_copy"):
+    print("warning: different benchmark payloads (%s vs %s)" % (a.get("local_copy"), b.get("local_copy")))
+PYEOF
+
+    # compare-results is a WebKit script and needs webkitpy, so it runs in the
+    # workspace like everything else.
+    if [ -z "$ws" ]; then
+        ws=$(python3 -c "
+import json,sys
+try: print(json.load(open('$BENCH_DIR/$b/env.json'))['workspace'])
+except Exception: print('')")
+    fi
+    [ -n "$ws" ] && [ "$(t_info "$ws")" != absent ] \
+        || die "cannot find a workspace to run compare-results in (pass one as the third argument)"
+
+    # A single-iteration run has no variance, so every p-value is NaN and
+    # compare-results dies inside its own significance sort with a bare
+    # AssertionError. Say so here rather than letting a traceback be the
+    # explanation.
+    for r in "$a" "$b"; do
+        if [ "$(python3 -c "
+import json
+try: print(json.load(open('$BENCH_DIR/$r/env.json')).get('count') or '')
+except Exception: print('')" 2>/dev/null)" = 1 ]; then
+            warn "run '$r' has count=1: compare-results cannot compute significance"
+            log  "  re-run with --count 2 or more for a comparison with statistics"
+        fi
+    done
+
+    # compare-results needs scipy for its significance test, and the SDK image
+    # does not carry it. Installed on demand rather than in firstrun.sh: it is
+    # a 30 MB download that most workspaces never need, and the egress policy
+    # already allows PyPI because build-webkit depends on it.
+    if ! t_exec "$ws" python3 -c 'import scipy' >/dev/null 2>&1; then
+        info "installing scipy for compare-results (once per workspace)"
+        t_exec "$ws" bash -lc 'pip3 install --user --quiet scipy' \
+            || die "could not install scipy; compare-results cannot run"
+    fi
+
+    # Invoked through python3 rather than executed: compare-results' shebang is
+    # `#!/usr/bin/env python3 -u`, and Linux env does not split arguments in a
+    # shebang, so running it directly fails with "env: 'python3 -u': No such
+    # file or directory". It works on macOS, which is presumably why it is
+    # still there.
+    t_exec "$ws" bash -lc "cd /src/WebKit && python3 -u Tools/Scripts/compare-results \
+        -a '$ca' -b '$cb' --breakdown"
+}
+
+# --- dispatch ----------------------------------------------------------------
+case "${1:-}" in
+    ls)      shift; cmd_ls; exit 0 ;;
+    compare) shift; [ $# -ge 2 ] || usage; cmd_compare "$@"; exit 0 ;;
+    seed)    shift
+             [ $# -ge 2 ] || usage
+             ensure_dir "$SEED_DIR"
+             seed_payload "$1" "$2" >/dev/null; exit 0 ;;
+    ''|-h|--help) usage ;;
+esac
+
+WS="$1"; PLAN="${2:-}"; shift 2 2>/dev/null || usage
+[ -n "$PLAN" ] || usage
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --config)   CONFIG="${2:-}"; shift 2 ;;
+        --count)    COUNT="${2:-}"; shift 2 ;;
+        --browser)  BROWSER="${2:-}"; shift 2 ;;
+        --subtests) SUBTESTS="${2:-}"; shift 2 ;;
+        --force)    FORCE=1; shift ;;
+        --software) SOFTWARE=1; shift ;;
+        --browser-args) BROWSER_ARGS="${2:-}"; shift 2 ;;
+        *) die "unknown option: $1" ;;
+    esac
+done
+
+ensure_dir "$BENCH_DIR"
+ensure_dir "$SEED_DIR"
+cmd_run "$WS" "$PLAN"

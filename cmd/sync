@@ -61,6 +61,12 @@ wk_remotes | while read -r name url; do
     fi
 done
 
+# A bare mirror has no HEAD by default, and `git clone` then warns "remote HEAD
+# refers to nonexistent ref, unable to checkout" and produces a repository with
+# nothing checked out. Harmless here, because the snapshot is detached to an
+# explicit branch below -- but it looks exactly like the failure mode it is not.
+git -C "$MIRROR" symbolic-ref HEAD "refs/heads/$(wk_mirror_branches | awk '{print $1}')" 2>/dev/null || true
+
 # Tags carry their own history and WebKit has a great many; they are not needed
 # to build a snapshot and would undo the saving above.
 git -C "$MIRROR" config remote.origin.tagOpt --no-tags
@@ -105,6 +111,17 @@ NEW_TREE="$NEW_DIR/WebKit"
 
 PREV_ID=$(current_base 2>/dev/null || true)
 
+# A previous snapshot is only useful if it is a working checkout. If it is not
+# -- a half-published snapshot from an interrupted sync, or a directory that was
+# never one -- hardlinking it and then fetching into it fails with "not a git
+# repository" *after* doing all the copying, and leaves a second broken snapshot
+# behind for the next run to trip over in the same way.
+if [ -n "$PREV_ID" ] && [ ! -d "$(base_path "$PREV_ID")/.git" ]; then
+    warn "previous snapshot $PREV_ID is not a git checkout; ignoring it"
+    log  "  (remove it with: rm -rf $(wk_base_dir)/$PREV_ID)"
+    PREV_ID=""
+fi
+
 if [ -n "$PREV_ID" ]; then
     PREV_TREE=$(base_path "$PREV_ID")
     info "snapshotting $PREV_ID -> $NEW_ID"
@@ -147,6 +164,11 @@ git -C "$NEW_TREE" checkout --quiet --detach "$BRANCH"
 # every workspace built from it and cannot be deleted from any of them.
 git -C "$NEW_TREE" reset --hard --quiet
 git -C "$NEW_TREE" clean -qfdx
+
+# Publication is only complete once the tree is checked out and pristine. Until
+# then a failure must not leave something that `current_base` will hand to the
+# next `wk new`.
+[ -d "$NEW_TREE/.git" ] || { rm -rf "$NEW_DIR"; die "snapshot $NEW_ID was not published"; }
 
 printf '%s\n' "$BRANCH" > "$NEW_DIR/branch"
 git -C "$NEW_TREE" rev-parse HEAD > "$NEW_DIR/sha"

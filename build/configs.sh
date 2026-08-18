@@ -42,6 +42,24 @@ EOF
 WK_CC="${WK_CC:-clang}"
 WK_CXX="${WK_CXX:-clang++}"
 
+# Where a config's build tree lands, relative to the checkout.
+#
+# Each port gets its own directory -- WebKitBuild/JSCOnly/Release,
+# WebKitBuild/WPE/Release, WebKitBuild/GTK/Release -- so a workspace can hold a
+# JSC build and a browser build at once without one clobbering the other. This
+# is derived rather than assumed because getting it wrong is quiet: `wk run`
+# reports "no such file", and `wk bench` reports "no MiniBrowser", both of which
+# read as "the build failed" rather than "you looked in the wrong place".
+config_build_dir() {
+    local root="${1:-/src/WebKit}"
+    case "$CFG_PORT" in
+        --jsc-only) echo "$root/WebKitBuild/JSCOnly/$CFG_TYPE" ;;
+        --wpe)      echo "$root/WebKitBuild/WPE/$CFG_TYPE" ;;
+        --gtk)      echo "$root/WebKitBuild/GTK/$CFG_TYPE" ;;
+        *)          echo "$root/WebKitBuild/$CFG_TYPE" ;;
+    esac
+}
+
 config_load() {
     CFG_PORT=""; CFG_TYPE=""; CFG_ARGS=""; CFG_CMAKE=""
     CFG_CC="$WK_CC"; CFG_CXX="$WK_CXX"

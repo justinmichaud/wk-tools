@@ -53,8 +53,14 @@ if have ccache; then
 fi
 
 # --- firewall address sets ---------------------------------------------------
-# GitHub rotates its ranges occasionally; a stale set shows up as git hanging
-# rather than as an obvious firewall error, so refresh on request.
+# Only the macOS VM filters by address. The Linux boundary allowlists by
+# hostname in the egress proxy, so there is no set to refresh and no CIDR list
+# to go stale -- which was most of the reason for moving to it.
+if [ -n "$REFRESH_NET" ] && [ -z "${WK_IN_VM:-}" ] && is_linux; then
+    warn "--refresh-net does nothing here: the egress policy is by hostname"
+    REFRESH_NET=""
+fi
+
 if [ -n "$REFRESH_NET" ] && have nft; then
     info "refreshing GitHub ranges from api.github.com/meta"
     ranges=$(curl -fsS https://api.github.com/meta | jq -r '.git[] | select(test(":") | not)')

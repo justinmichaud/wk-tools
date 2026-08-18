@@ -16,6 +16,17 @@ SRC=/src/WebKit
 
 log() { printf '[firstrun] %s\n' "$*"; }
 
+# --- egress ------------------------------------------------------------------
+# This runs during container init, before any wk command has had a chance to
+# start the loopback bridge -- and the first thing below that needs the network
+# is the Claude installer. Without this the workspace comes up with no CLI and a
+# confusing "could not connect to 127.0.0.1:3128" in the init log.
+if [ -S /run/wk/proxy.sock ]; then
+    /opt/wk-tools/container/proxy/ensure-bridge.sh true && log "egress bridge up"
+else
+    log "WARNING: no egress proxy socket at /run/wk/proxy.sock -- no network"
+fi
+
 # --- identity ----------------------------------------------------------------
 git config --global user.name  "Justin Michaud"
 git config --global user.email "jmichaud@igalia.com"
@@ -29,6 +40,20 @@ git config --global --add safe.directory "$SRC"
 install -d -m 0700 "$HOME/.ssh"
 : > "$HOME/.ssh/config"
 chmod 0600 "$HOME/.ssh/config"
+
+# ssh has no network to reach: the workspace has no interface at all, so every
+# connection goes through the egress proxy's unix socket. Written first and for
+# every host, because ssh takes the first value it sees for each keyword and the
+# per-fork blocks below deliberately do not set ProxyCommand. %h expands to the
+# resolved HostName, so an alias still arrives at the proxy as github.com -- and
+# the proxy refuses anything not in its allowlist, which makes this a path
+# rather than a permission. It also covers the Pi test devices, which are
+# reachable by address and nothing else.
+cat >> "$HOME/.ssh/config" <<'PROXYEOF'
+Host *
+    ProxyCommand /opt/wk-tools/container/proxy/ssh-proxy.py %h %p
+
+PROXYEOF
 
 # Comma-separated, not space-separated: the value reaches the container through
 # wkdev-create's --additional-flags, which word-splits, so a space would break

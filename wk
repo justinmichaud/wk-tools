@@ -28,6 +28,8 @@ workspaces
   logs <name> [--follow]    build log, errors first
   run <name> [args]         run jsc from the workspace build
   test <name> [args]        run tests
+  bench <name> <plan>       run a benchmark, with preflight and provenance
+  verify <name> [--gpu]     prove the sandbox holds, by testing it
   claude <name>             launch Claude inside the workspace, sandboxed
   rm <name>                 destroy a workspace and everything it created
   stop [--keep-vm]          shut down all containers and the VM; nothing is lost
@@ -45,6 +47,7 @@ hosts and machines
   vm <sub>                  macOS VM lifecycle for Apple-port builds
   pi <sub>                  provision a Raspberry Pi onto the tailnet
   quiesce on|off|status     quiet the machine for benchmarking
+  session on|off|status     a real GPU session on the attached monitor (Linux)
   mcp                       MCP server, for the Claude Desktop app
 
   WK_DEBUG=1 for verbose output.
@@ -55,7 +58,7 @@ EOF
 # Commands that act on the host itself and are never forwarded into the VM.
 is_host_command() {
     case "$1" in
-        setup|backup|vm|mcp|quiesce|pi|key|stop|start|help|-h|--help) return 0 ;;
+        setup|backup|vm|mcp|quiesce|session|pi|key|stop|start|help|-h|--help) return 0 ;;
         *) return 1 ;;
     esac
 }

@@ -57,14 +57,51 @@ so a read-only base would force every working copy read-only too.
 A workspace cannot reach the host filesystem, and this is structural rather
 than a convention. On macOS the podman machine is created with no virtiofs
 mounts at all, so the VM cannot see `/Users`; `setup` verifies this on every
-run and refuses to continue if it is not true.
+run and refuses to continue if it is not true. On Linux there is no VM, so the
+equivalent is the container's own mount set: the SDK's host-session integration
+— the host home directory, the session D-Bus socket, the keyring, the whole
+runtime directory — is turned off with `--isolated`, and the workspace is given
+the few trees it actually needs. That matters more than it sounds: the session
+bus alone is a full host escape, and it is not a network problem, so no
+firewall addresses it.
 
-Network egress is restricted to the Anthropic API, GitHub, and the two
-Raspberry Pi test devices over Tailscale. Everything else, including the whole
-local network, is dropped. Enforcement is nftables in the VM's root network
-namespace — which the workspace does not own and cannot modify. Tailscale ACLs
-are defence in depth, never the boundary: Tailscale's own documentation notes
-that ACLs "don't affect local network traffic".
+Network egress is restricted to the Anthropic API, GitHub, PyPI and the
+Raspberry Pi test devices. Everything else, including the whole local network,
+is refused. *How* that is enforced differs by host, and the difference is the
+most important thing in this file.
+
+**Linux: there is no network interface.** A workspace runs with
+`--network none`. Its namespace has loopback and nothing else — no address, no
+route, no resolver — so there is nothing to filter and nothing to bypass. Its
+one channel is a unix socket to an egress proxy running as an ordinary
+`systemd --user` service, which allowlists by hostname and refuses anything
+resolving into RFC1918 or the tailnet range. Nothing in the daily path needs a
+privilege: `wk` never calls `sudo` on Linux.
+
+**macOS: nftables in the VM.** Rootful podman on a bridge, with the policy in
+the forward chain. That is the original design and what macOS is verified
+against; `docs/HANDOFF-macos-proxy.md` covers moving it to the proxy model.
+
+Linux does not copy the macOS design because it cannot. Rootless podman has no
+filterable forward path — its network helper re-emits container traffic from
+the init namespace, in a cgroup scope with a random name — so nftables would
+have meant keeping rootful podman, and under rootful podman a container escape
+is a root escape. Removing the interface removes the need for the filter.
+
+Either way the claim is checked by testing it, never by reading the
+configuration that was supposed to produce it:
+
+```sh
+wk verify bug-238    # from inside the workspace: no interface, allowlist
+                     # enforced, no path with the proxy bypassed, no host files
+```
+
+`wk claude` runs that first and refuses to start if anything fails. A firewall
+that failed to load and a proxy that is not running both look perfectly fine
+from the host's config files, and both fail open.
+
+Tailscale ACLs are defence in depth, never the boundary: Tailscale's own
+documentation notes that ACLs "don't affect local network traffic".
 
 Workstations are never sandboxed. They join the tailnet normally and keep full
 access to everything.
@@ -89,7 +126,7 @@ Every command runs against a target, behind one driver contract:
 
 | Target | Isolation | Notes |
 |---|---|---|
-| `container` | overlay + nftables + no host mounts | the default |
+| `container` | overlay + no network interface + no host mounts | the default |
 | `vm` | macOS VM (Tart) | Apple ports; Apple permits 2 per host |
 | `remote` | **none** | shared build boxes; polite, no containers |
 
@@ -102,8 +139,8 @@ of your own builds from stacking.
 ## Claude
 
 `wk claude <name>` runs the agent inside a workspace with permissions relaxed,
-because the workspace is the blast radius. It verifies the sandbox first and
-refuses to start if the network is host-mode or the firewall is not loaded.
+because the workspace is the blast radius. It runs `wk verify` first and
+refuses to start unless the boundary measurably holds.
 
 Claude Desktop can create and drive workspaces itself through the MCP server
 registered by `setup` (`cmd/mcp`). That server exposes only the driver
@@ -121,16 +158,36 @@ wk                 the CLI                       cmd/       one file per subcomm
 host/              per-OS setup and settings     targets/   container, vm, remote
 dotfiles/          host dotfiles (Zed only)      claude/    settings, skills, hooks, CLAUDE.md
 container/         workspace-side setup          build/     named build configs
-admin/             quiesce helper + sudoers      vm/        macOS VM support
+container/proxy/   the egress boundary           container/gpu/  the EGL probe
+admin/             quiesce + session helper      docs/      handoffs
 ```
 
 ## Benchmarking
 
 ```sh
-wk quiesce on      # no password: setup installs a validated sudoers rule
-wk quiesce off
+wk quiesce on              # no password: setup installs a validated sudoers rule
+wk session on              # a real GPU session on the attached monitor (Linux)
+wk bench bug-238 speedometer3
+wk bench compare <run-a> <run-b>
 ```
 
-Linux cannot make a `#!` script setuid — the kernel ignores the bit — so this
-is a `NOPASSWD` rule naming one root-owned path, installed only after
-`visudo -c` validates it, and re-checked for writability on every setup run.
+Linux cannot make a `#!` script setuid — the kernel ignores the bit — so the
+privileged half is a `NOPASSWD` rule naming one root-owned path, installed only
+after `visudo -c` validates it, and re-checked for writability on every setup
+run. The command set behind it is a fixed allowlist with no passthrough:
+quiesce on/off/status, and session on/off/status.
+
+`wk bench` wraps `run-benchmark` and `compare-results` rather than replacing
+them. What it adds is the part that decides whether a number means anything:
+
+- **it checks the environment before the run, not after.** Hardware renderer
+  (a MotionMark score from llvmpipe is not a slow result, it is a different
+  measurement), a real compositor, the performance governor, no other build
+  running, an idle machine. A failed check refuses the run; `--force` records
+  the result as forced so it can never be quietly compared with a clean one.
+- **it pins the payload.** run-benchmark otherwise clones Speedometer, or
+  fetches MotionMark file by file from the GitHub API, on every run. Seeded
+  once into the shared cache and keyed by commit.
+- **it records provenance.** Kernel, driver version, governor, container caps,
+  WebKit sha and renderer land next to the result, because two JSONs with no
+  provenance are not a comparison.

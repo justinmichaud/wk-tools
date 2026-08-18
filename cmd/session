@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+#
+# wk session on|off|status -- a real graphical session for benchmark runs.
+#
+# GPU benchmarks need a real DRM session on real hardware. Speedometer and
+# MotionMark under llvmpipe are not slow results, they are a different
+# measurement, and a headless run has no display cadence for MotionMark to
+# measure at all.
+#
+# Three cases, in the order they are checked:
+#
+#   Someone is logged in at the machine. Nothing to do -- the compositor is
+#   already there; wk uses its socket.
+#
+#   A wk session is already running. Nothing to do.
+#
+#   Nobody is logged in. Stop the display manager and start cage on seat0.
+#   That is the unattended case, and the only one that needs privilege.
+#
+# The compositor's Wayland socket lives in a directory of its own
+# ($XDG_RUNTIME_DIR/wk/display), not in the user's runtime directory, so that a
+# workspace can be handed the socket without being handed the session D-Bus
+# socket that sits next to it.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+
+is_linux || die "wk session is Linux-only (macOS workspaces have no GPU to reach)"
+
+PRIV=/usr/local/libexec/wk-quiesce-priv
+ACTION="${1:-status}"
+RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display"
+SOCKET="$RUNTIME/wayland-0"
+
+run_priv() {
+    [ -x "$PRIV" ] || die "$PRIV is not installed -- run: ./setup --stage quiesce"
+    sudo -n "$PRIV" "$1" 2>/dev/null && return 0
+    warn "passwordless sudo unavailable for the helper; re-run ./setup --stage quiesce"
+    sudo "$PRIV" "$1"
+}
+
+# A graphical session belonging to a logged-in *person*, which we neither own
+# nor should disturb.
+#
+# Class matters as much as Type here. The display manager's greeter is itself a
+# graphical session on seat0 -- gdm's shows up as Type=x11, Class=greeter, owned
+# by the gdm user -- and treating it as somebody's desktop means `wk session on`
+# politely declines to do the one thing it exists for, on exactly the machine
+# state it was written for: nobody logged in, a greeter waiting.
+foreign_session() {
+    have loginctl || return 1
+    local sid typ class
+    for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '$0 ~ /seat0/ {print $1}'); do
+        typ=$(loginctl show-session "$sid" -p Type --value 2>/dev/null || echo)
+        class=$(loginctl show-session "$sid" -p Class --value 2>/dev/null || echo)
+        [ "$class" = user ] || continue
+        case "$typ" in
+            wayland|x11) echo "$sid $typ"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+case "$ACTION" in
+on)
+    # The socket file outliving the compositor is the normal case after a
+    # crash or an unclean stop, and treating its presence as "already running"
+    # means `wk session on` silently does nothing on exactly the machine that
+    # needs it most. The unit's state is the fact; the socket is a hint.
+    if [ -S "$SOCKET" ] && systemctl is-active --quiet wk-session 2>/dev/null; then
+        info "wk session already running ($SOCKET)"
+        exit 0
+    fi
+    if [ -S "$SOCKET" ]; then
+        warn "stale compositor socket at $SOCKET -- starting a new session"
+    fi
+
+    if session=$(foreign_session); then
+        info "a graphical session is already active on seat0 (session $session)"
+        log  "  leaving it alone; run 'wk session off' first if you want a clean"
+        log  "  benchmark compositor instead of a full desktop"
+        exit 0
+    fi
+
+    info "starting the benchmark compositor on seat0"
+    run_priv session-on
+    [ -S "$SOCKET" ] || die "no Wayland socket at $SOCKET after start"
+    info "session up: $SOCKET"
+    log  "  workspaces see it at /run/wk/display/wayland-0"
+    ;;
+
+off)
+    run_priv session-off
+    ;;
+
+status)
+    # Everything here is readable without privilege -- unit state, the socket,
+    # the display manager, the compositor's mode -- so status does not go
+    # through the helper at all. It used to, and a failure inside the helper
+    # then meant no status output whatsoever, which is the opposite of what a
+    # status command is for.
+    unit=$(systemctl is-active wk-session 2>/dev/null | head -1 || true)
+    dm=$(systemctl is-active gdm3 2>/dev/null | head -1 || true)
+    [ -n "$dm" ] || dm=$(systemctl is-active gdm 2>/dev/null | head -1 || true)
+
+    printf 'session:   %s\n' "${unit:-unknown}"
+    printf 'socket:    %s\n' "$([ -S "$SOCKET" ] && echo "$SOCKET" || echo none)"
+    printf 'dm:        %s\n' "${dm:-unknown}"
+
+    # The one root-only fact, and not worth a password: nvidia-drm without
+    # modesetting has no KMS for a compositor to drive, which is worth knowing
+    # when the compositor refuses to start.
+    modeset=$(sudo -n "$PRIV" session-status 2>/dev/null | awk '/^modeset:/ {print $2}' || true)
+    printf 'modeset:   %s\n' "${modeset:-unknown}"
+
+    # The mode matters: a fullscreen browser's surface is the display mode, and
+    # MotionMark scores scale with surface size -- so two runs on different
+    # modes are not comparable. cage takes the connector's preferred mode, which
+    # is not always the largest one it supports.
+    if [ -S "$SOCKET" ] && have wayland-info; then
+        mode=$(WAYLAND_DISPLAY="$SOCKET" wayland-info 2>/dev/null \
+               | sed -n 's/.*width: \([0-9]*\) px, height: \([0-9]*\) px, refresh: \([0-9.]*\) Hz.*/\1x\2 @ \3Hz/p' \
+               | head -1 || true)
+        if [ -n "$mode" ]; then
+            printf 'mode:      %s\n' "$mode"
+        fi
+    fi
+
+    # Our own compositor is a logind session too -- PAMName=login is what gives
+    # it the seat -- so it matches foreign_session exactly. If our socket is
+    # there, the session on seat0 is ours and calling it foreign is just wrong.
+    if [ ! -S "$SOCKET" ] && session=$(foreign_session); then
+        printf 'foreign:   session %s\n' "$session"
+    fi
+    exit 0
+    ;;
+
+*)
+    die "usage: wk session on|off|status"
+    ;;
+esac

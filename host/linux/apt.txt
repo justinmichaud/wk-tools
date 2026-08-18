@@ -1,18 +1,17 @@
 # Host packages, Ubuntu 26.04. Stock archive only -- no third-party repos.
 # Anything a build needs lives in the workspace image, not here.
 
-# Containers and the workspace firewall
+# Containers. Rootless: uidmap provides newuidmap/newgidmap, without which no
+# user namespace can be mapped and --userns keep-id cannot work.
 podman
-nftables
 uidmap
-slirp4netns
 
 # Sources and caches
 git
 git-lfs
 ccache
 
-# Used by wk and its hooks
+# Used by wk, its hooks, and the egress proxy (stdlib only, no pip)
 jq
 curl
 python3
@@ -20,8 +19,11 @@ python3
 # Benchmarking and profiling on the host side
 linux-tools-generic
 
-# GPU / graphical session for benchmark runs on the attached monitor.
-# From Ubuntu's own components, not a third-party repository.
-mesa-utils
-mesa-vulkan-drivers
+# GPU and the benchmark session on the attached monitor. cage is a one-client
+# kiosk compositor: a real DRM session for benchmark runs without a desktop's
+# worth of background compositing noise. mesa-utils/wayland-utils are how the
+# session is verified to be real rather than software-rendered.
 cage
+mesa-utils
+wayland-utils
+mesa-vulkan-drivers

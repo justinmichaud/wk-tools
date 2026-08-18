@@ -21,23 +21,14 @@ TARGET="${WK_TARGET:-container}"
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
 # --- verify the sandbox ------------------------------------------------------
-# Each of these is a property the relaxed permissions depend on. If one has
-# regressed -- a hand-edited container, a firewall that failed to load -- the
-# right response is to stop, not to run an autonomous agent anyway.
-
-if [ "$TARGET" = container ]; then
-    net=$(podman inspect "wk-$NAME" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' 2>/dev/null || echo "")
-    case "$net" in
-        *host*) die "workspace '$NAME' is on the host network -- the egress firewall cannot apply. Recreate it." ;;
-        "")     warn "could not determine the workspace network" ;;
-        *)      debug "network: $net" ;;
-    esac
-
-    if have nft && ! sudo nft list table inet wk_egress >/dev/null 2>&1; then
-        die "the wk_egress firewall table is not loaded; refusing to run unattended.
-    Load it with:  sudo nft -f $WK_ROOT/container/nftables/wk-egress.nft"
-    fi
-fi
+# Relaxed permissions are defensible only while the boundary holds, so this
+# tests the boundary rather than trusting that setup ran correctly at some point
+# in the past. `wk verify` measures the properties from inside the workspace:
+# no network interface, egress refused outside the allowlist, no path with the
+# proxy bypassed, no host filesystem. If any of that has regressed -- a
+# hand-edited container, a proxy that is not running -- the right response is to
+# stop, not to start an autonomous agent anyway.
+"$WK_ROOT/cmd/verify" "$NAME" || die "refusing to run: the sandbox is not intact (see above)"
 
 info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
 

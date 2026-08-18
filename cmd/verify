@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+#
+# wk verify <workspace> -- prove the sandbox is what it claims to be.
+#
+# Every property here is checked by testing it from inside the workspace, not by
+# reading the configuration that was supposed to produce it. That distinction is
+# the whole point: a firewall that failed to load, a container recreated by hand
+# with different flags, or a proxy that is not running all look perfectly fine
+# from the host's config files, and all of them fail open. The only honest
+# question is "can this workspace reach something it must not", and that has an
+# answer you can measure.
+#
+#   0  every check passed
+#   1  a check failed -- the sandbox is not intact
+#
+# `wk claude` runs this before handing over control, because relaxed permissions
+# are only defensible while these hold.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+
+NAME="${1:-}"; shift || true
+require_name "$NAME"
+
+WANT_GPU=""
+[ "${1:-}" = --gpu ] && WANT_GPU=1
+
+TARGET="${WK_TARGET:-container}"
+. "$WK_ROOT/targets/$TARGET.sh"
+
+[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+
+fails=0
+pass() { printf '  \033[32mok\033[0m    %s\n' "$*" >&2; }
+fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$*" >&2; fails=$((fails + 1)); }
+note() { printf '        %s\n' "$*" >&2; }
+
+# Run a command inside the workspace, capturing output, never failing the script.
+inside() { t_exec "$NAME" bash -lc "$*" 2>/dev/null || true; }
+
+info "verifying workspace '$NAME' ($WK_SANDBOX)"
+
+# --- the container is running ------------------------------------------------
+state=$(t_info "$NAME")
+[ "$state" = running ] && pass "container running" || fail "container state: $state"
+
+if [ "$WK_SANDBOX" = rootless-proxy ]; then
+    # --- no privilege ---------------------------------------------------------
+    # A rootful container would mean a container escape is a root escape, and
+    # the whole no-sudo design would be a fiction.
+    # Captured rather than piped into `grep -q`: under `set -o pipefail` a
+    # `grep -q` that exits early makes the whole pipeline report failure.
+    rootless=$(_podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || echo unknown)
+    if [ "$rootless" = true ]; then
+        pass "podman is rootless"
+    else
+        fail "podman is NOT rootless -- an escape from this container is an escape as root"
+    fi
+
+    # --- no network interface -------------------------------------------------
+    # The boundary itself. Anything other than loopback means there is a path
+    # the egress policy does not see.
+    # /proc/net/dev rather than `ip`: iproute2 is not in the SDK image, and a
+    # check that silently reports nothing because its tool is missing is worse
+    # than no check at all -- it fails in the direction that looks fine.
+    ifaces=$(inside "awk -F: 'NR>2 {gsub(/ /,\"\",\$1); printf \"%s \", \$1}' /proc/net/dev")
+    case "$(echo "$ifaces" | tr -d ' ')" in
+        lo) pass "no network interface but loopback ($ifaces)" ;;
+        "") fail "could not enumerate interfaces inside the workspace" ;;
+        *)  fail "workspace has network interfaces: $ifaces" ;;
+    esac
+
+    # --- the proxy is up ------------------------------------------------------
+    if systemctl --user is-active --quiet wk-proxy.service; then
+        pass "egress proxy running"
+    else
+        fail "egress proxy is not running (systemctl --user status wk-proxy)"
+    fi
+
+    # --- egress, measured -----------------------------------------------------
+    # Allowed: the API the agent needs. Denied: a host that is not on the list,
+    # and the local network. Direct: with the proxy bypassed there must be no
+    # path at all.
+    code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
+    [ "$code" = 200 ] && pass "github reachable through the proxy (HTTP $code)" \
+                      || fail "github unreachable through the proxy (got '${code:-nothing}')"
+
+    denied=$(inside "curl -sS -m 15 -o /dev/null https://example.com/ 2>&1")
+    if printf '%s' "$denied" | grep -qi '403'; then
+        pass "a host outside the allowlist is refused"
+    else
+        fail "example.com was NOT refused -- the allowlist is not being enforced"
+    fi
+
+    lan=$(inside "curl -sS -m 10 -o /dev/null -w '%{http_code}' http://192.168.1.1/ 2>&1 | tail -1")
+    case "$lan" in
+        *403*|*000*|*"Received HTTP code 403"*) pass "the local network is refused" ;;
+        *) fail "reaching the LAN gateway returned '$lan'" ;;
+    esac
+
+    direct=$(inside "curl -sS --noproxy '*' -m 8 -o /dev/null -w '%{http_code}' https://1.1.1.1/ 2>&1 | tail -1")
+    case "$direct" in
+        *000*|*"Could not resolve"*|*"Failed to connect"*|*"Network is unreachable"*|"")
+            pass "no direct egress with the proxy bypassed" ;;
+        *)  fail "direct egress succeeded, bypassing the proxy: '$direct'" ;;
+    esac
+
+    # --- no host filesystem ---------------------------------------------------
+    # wkdev mounts the host home at /host/home and the whole runtime directory
+    # (session D-Bus socket included) at /host/run. --isolated turns both off;
+    # this is where that is confirmed rather than assumed.
+    for path in /host/home /host/run /run/user/*/bus /run/dbus/system_bus_socket; do
+        found=$(inside "ls -d $path 2>/dev/null | head -1")
+        if [ -n "$found" ]; then
+            fail "host path visible inside the workspace: $found"
+        fi
+    done
+    [ "$fails" -eq 0 ] && pass "no host home, runtime directory or D-Bus socket" || true
+
+    # --- the tooling tree is read-only ---------------------------------------
+    probe_write=$(inside "touch /opt/wk-tools/.wk-write-probe 2>&1")
+    if printf '%s' "$probe_write" | grep -qi 'read-only\|permission denied'; then
+        pass "/opt/wk-tools is read-only"
+    else
+        inside "rm -f /opt/wk-tools/.wk-write-probe" >/dev/null
+        fail "/opt/wk-tools is writable from inside the workspace"
+    fi
+fi
+
+# --- GPU ---------------------------------------------------------------------
+# Informational unless --gpu is given, which is what the benchmark runner uses:
+# a Speedometer or MotionMark number from llvmpipe is not a slow result, it is a
+# different measurement.
+# The probe's exit status is the answer: 0 hardware, 1 software only, 2 no EGL
+# at all, 3 it would not build. Parsing renderer strings here would just
+# duplicate the judgement it already made.
+set +e
+probe=$(t_exec "$NAME" bash -lc "/opt/wk-tools/container/gpu/gpu-probe.sh" 2>&1)
+prc=$?
+set -e
+[ -n "$probe" ] && printf '%s\n' "$probe" | sed 's/^/        /' >&2
+
+case "$prc" in
+    0) pass "GPU acceleration available" ;;
+    1) [ -n "$WANT_GPU" ] && fail "only software rendering inside the workspace" \
+                          || note "software rendering only -- benchmarks would measure llvmpipe" ;;
+    *) [ -n "$WANT_GPU" ] && fail "no usable EGL inside the workspace (probe exit $prc)" \
+                          || note "no usable EGL inside the workspace (probe exit $prc)" ;;
+esac
+
+echo >&2
+if [ "$fails" -eq 0 ]; then
+    info "sandbox intact"
+    exit 0
+fi
+warn "$fails check(s) failed -- the sandbox is not intact"
+exit 1

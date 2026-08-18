@@ -15,6 +15,13 @@
 #
 # Linux cannot make a #! script setuid -- the kernel ignores the bit -- so a
 # sudoers rule is the mechanism, not a shell wrapper around a setuid binary.
+#
+# The session verbs follow the same rules. They exist because a GPU benchmark
+# needs a real DRM session on the monitor, and taking the seat means stopping
+# the display manager -- neither of which an unprivileged user may do. The user
+# to run the compositor as is read from a root-owned file written at install
+# time, never from an argument or the environment: an argument would turn this
+# into "run a compositor as anyone", which is a very different grant.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -87,10 +94,150 @@ linux_status() {
     printf 'aslr:      %s\n' "$(sysctl -n kernel.randomize_va_space 2>/dev/null || echo n/a)"
 }
 
+# --- Linux: the benchmark session -------------------------------------------
+# cage is a one-client kiosk compositor: a real DRM session on the real device,
+# without a desktop's worth of background compositing to show up in the numbers.
+#
+# It is started through systemd-run with PAMName=login and a TTY, which is what
+# gives it a logind session on seat0 -- without that, libseat cannot take DRM
+# master and the compositor exits immediately. Running it as root instead would
+# work and is what most kiosk setups do; it is avoided here because the Wayland
+# socket is the one host socket a workspace can see, and a compositor running as
+# root would make that a much more interesting thing to talk to.
+WK_SESSION_CONF=/usr/local/libexec/wk-session.env
+WK_SESSION_UNIT=wk-session
+WK_SESSION_TTY=${WK_SESSION_TTY:-/dev/tty2}
+
+session_user() {
+    [ -r "$WK_SESSION_CONF" ] || return 1
+    # shellcheck disable=SC1090
+    . "$WK_SESSION_CONF"
+    [ -n "${WK_SESSION_USER:-}" ] || return 1
+    id -u "$WK_SESSION_USER" >/dev/null 2>&1 || return 1
+    echo "$WK_SESSION_USER"
+}
+
+session_on() {
+    local user uid runtime
+    user=$(session_user) || { echo "wk-quiesce-priv: no session user configured in $WK_SESSION_CONF" >&2; exit 1; }
+    uid=$(id -u "$user")
+    runtime="/run/user/$uid/wk/display"
+
+    # The display manager holds seat0 through its greeter, and two things
+    # cannot own DRM master at once. Stopped rather than disabled, so `off`
+    # puts the machine back exactly as it was.
+    if systemctl is-active --quiet gdm3 2>/dev/null || systemctl is-active --quiet gdm 2>/dev/null; then
+        systemctl stop gdm3 2>/dev/null || systemctl stop gdm 2>/dev/null || true
+        touch /run/wk-session-stopped-dm
+        echo "stopped the display manager"
+    fi
+
+    # nvidia-drm without modesetting has no KMS for a compositor to drive, and
+    # the failure is a bare "no DRM device" that says nothing about why.
+    if [ -r /sys/module/nvidia_drm/parameters/modeset ]; then
+        if [ "$(cat /sys/module/nvidia_drm/parameters/modeset)" != Y ]; then
+            echo "warning: nvidia-drm modeset is off; the compositor cannot take the display" >&2
+            echo "         add 'options nvidia-drm modeset=1' to /etc/modprobe.d and reboot" >&2
+        fi
+    fi
+
+    install -d -o "$user" -m 0700 "/run/user/$uid/wk" 2>/dev/null || true
+    install -d -o "$user" -m 0700 "$runtime" 2>/dev/null || true
+
+    systemctl stop "$WK_SESSION_UNIT" 2>/dev/null || true
+
+    # A dedicated XDG_RUNTIME_DIR for the compositor, so the workspace can be
+    # given the Wayland socket by sharing one directory instead of the user's
+    # whole runtime directory -- which is where the session D-Bus socket lives.
+    #
+    # Exported inside the ExecStart shell rather than passed with --setenv:
+    # PAMName=login runs pam_systemd, which sets XDG_RUNTIME_DIR=/run/user/<uid>
+    # itself, and relying on which of the two wins would be relying on a detail
+    # that is not documented to go our way. If PAM won, the socket would appear
+    # in the user's runtime directory -- where the workspace deliberately cannot
+    # see it -- and the failure would look like "the compositor started but the
+    # benchmark cannot find a display".
+    systemd-run --unit="$WK_SESSION_UNIT" --collect \
+        --description="wk benchmark compositor" \
+        --uid="$user" \
+        --property=PAMName=login \
+        --property=TTYPath="$WK_SESSION_TTY" \
+        --property=StandardInput=tty-force \
+        --property=StandardOutput=journal \
+        --property=StandardError=journal \
+        --property=Restart=no \
+        --setenv=XDG_SESSION_TYPE=wayland \
+        --setenv=WLR_NO_HARDWARE_CURSORS=1 \
+        --setenv=WLR_RENDERER=gles2 \
+        /bin/sh -c "export XDG_RUNTIME_DIR='$runtime'; exec /usr/bin/cage -d -- /usr/bin/sleep infinity" \
+        >/dev/null
+
+    # The socket appearing is the only evidence that matters.
+    for _ in $(seq 1 40); do
+        [ -S "$runtime/wayland-0" ] && break
+        sleep 0.25
+    done
+
+    if [ -S "$runtime/wayland-0" ]; then
+        echo "compositor up: $runtime/wayland-0"
+    else
+        echo "compositor did not come up; journalctl -u $WK_SESSION_UNIT" >&2
+        exit 1
+    fi
+}
+
+session_off() {
+    local user uid runtime
+    systemctl stop "$WK_SESSION_UNIT" 2>/dev/null || true
+
+    # Remove the socket the compositor leaves behind. Left in place it looks
+    # exactly like a running session to anything that checks for the file.
+    if user=$(session_user); then
+        uid=$(id -u "$user")
+        runtime="/run/user/$uid/wk/display"
+        rm -f "$runtime/wayland-0" "$runtime/wayland-0.lock"
+    fi
+    if [ -f /run/wk-session-stopped-dm ]; then
+        systemctl start gdm3 2>/dev/null || systemctl start gdm 2>/dev/null || true
+        rm -f /run/wk-session-stopped-dm
+        echo "restored the display manager"
+    fi
+    echo "session stopped"
+}
+
+session_status() {
+    local user uid runtime
+    user=$(session_user) || { echo "session:   no user configured"; return 0; }
+    uid=$(id -u "$user")
+    runtime="/run/user/$uid/wk/display"
+    # Each of these is captured into a single value first. `systemctl is-active`
+    # prints its answer *and* exits non-zero when the unit is inactive, so a
+    # chain of `||` fallbacks contributes one line each and printf then repeats
+    # its format once per line -- which reads as three mystery status lines.
+    local unit_state dm_state
+    # `|| true` on each: systemctl is-active exits 3 for an inactive unit, and
+    # under `set -o pipefail` that fails the assignment and `set -e` ends the
+    # function before it prints anything -- so asking for status while the
+    # display manager was stopped produced no output and exit 3.
+    unit_state=$(systemctl is-active "$WK_SESSION_UNIT" 2>/dev/null | head -1 || true)
+    [ -n "$unit_state" ] || unit_state=unknown
+    dm_state=$(systemctl is-active gdm3 2>/dev/null | head -1 || true)
+    [ -n "$dm_state" ] || dm_state=$(systemctl is-active gdm 2>/dev/null | head -1 || true)
+    [ -n "$dm_state" ] || dm_state=unknown
+
+    printf 'session:   %s\n' "$unit_state"
+    printf 'socket:    %s\n' "$([ -S "$runtime/wayland-0" ] && echo "$runtime/wayland-0" || echo none)"
+    printf 'dm:        %s\n' "$dm_state"
+    printf 'modeset:   %s\n' "$(cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null || echo n/a)"
+}
+
 case "$os:$action" in
     Darwin:on)     macos_on ;;
     Darwin:status) macos_status ;;
     Darwin:*)      macos_off ;;
+    Linux:session-on)     session_on ;;
+    Linux:session-off)    session_off ;;
+    Linux:session-status) session_status ;;
     Linux:on)      linux_on ;;
     Linux:status)  linux_status ;;
     Linux:*)       linux_off ;;

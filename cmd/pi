@@ -119,9 +119,14 @@ if ! grep -qxF "$TSIP" "$PI_FILE" 2>/dev/null; then
     info "recorded $TSIP in $PI_FILE"
 fi
 
-if have nft && sudo nft list table inet wk_egress >/dev/null 2>&1; then
+# On Linux the file *is* the policy: the egress proxy re-reads it on every
+# request, so a device added here is reachable immediately with nothing to
+# reload. In the macOS VM the same file is replayed into an nftables set.
+if [ -n "${WK_IN_VM:-}" ] && have nft && sudo nft list table inet wk_egress >/dev/null 2>&1; then
     sudo nft add element inet wk_egress pi_hosts "{ $TSIP }"
     info "allowed $TSIP in the workspace egress policy"
+elif is_linux; then
+    info "allowed $TSIP (the egress proxy re-reads $PI_FILE per request)"
 else
     log "note: the firewall is not loaded here; $TSIP is recorded and will be"
     log "      applied the next time the policy is regenerated."

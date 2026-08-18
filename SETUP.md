@@ -26,6 +26,20 @@ Homebrew is deliberately not used and not required.
 (the one third-party repository); Zed and Claude Code install into `~/.local`
 via their own scripts.
 
+Root is needed in exactly three places on Linux, all of them during setup and
+all of them interactive:
+
+| | |
+|---|---|
+| `apt-get install` | the stock package list in `host/linux/apt.txt` |
+| `usermod -aG render,video` | so an ssh session can open `/dev/dri` |
+| the quiesce/session helper | one root-owned path plus a validated sudoers rule |
+
+Nothing else ever needs it. Workspaces are rootless podman, the storage tree
+lives under `~/.local/share/wk`, and the egress boundary is a `systemd --user`
+service — so `wk new`, `wk build`, `wk run`, `wk bench` and `wk claude` never
+prompt for a password and work unattended.
+
 ---
 
 ## 1. Clone and run setup
@@ -53,7 +67,12 @@ What it does:
 - Syncs this repo into the VM, clones and patches the container SDK, and loads
   the workspace firewall.
 
-Individual stages: `./setup --stage <tools|settings|dotfiles|claude|mcp|machine|vmtools|quiesce>`.
+Individual stages:
+`./setup --stage <tools|settings|dotfiles|claude|mcp|machine|sdk|vmtools|quiesce>`.
+
+On Linux the interesting ones are `tools` (apt), `machine` (the storage tree),
+`sdk` (the container SDK plus the egress proxy service) and `quiesce` (the
+privileged helper).
 
 > **It will offer to delete `podman-machine-default`.** Say yes unless you have
 > containers in it you care about. applehv runs only one VM at a time, so a
@@ -68,7 +87,7 @@ and `~/.ssh/config` in place by appending a single guarded line each.
 
 ---
 
-## 2. The quiesce helper (one sudo prompt)
+## 2. The quiesce and session helper (one sudo prompt)
 
 ```sh
 ./setup --stage quiesce
@@ -77,6 +96,13 @@ and `~/.ssh/config` in place by appending a single guarded line each.
 Needs a terminal, because sudo has to prompt. Installs a root-owned helper and
 a `NOPASSWD` sudoers rule scoped to that one path, validated with `visudo`
 before it goes in, so `wk quiesce on` never asks for a password again.
+
+On Linux the same helper carries the benchmark session: `wk session on` stops
+the display manager and starts a `cage` compositor on seat0, which is what
+gives a workspace a real GPU session on the attached monitor. The command set
+is a fixed allowlist — quiesce on/off/status and session on/off/status — with
+no argument that becomes part of a command, and the user the compositor runs as
+is read from a root-owned file rather than passed in.
 
 Skip this if you are not benchmarking. Everything else works without it.
 
@@ -151,9 +177,49 @@ wk rm    bug-238             # reclaims everything it created
 `wk build --list` shows the configs. `zed ssh://wk-bug-238/src/WebKit` opens it
 in Zed.
 
+Before trusting a workspace with an agent, or with a benchmark, check that the
+sandbox is what it claims:
+
+```sh
+wk verify bug-238          # tests the boundary from inside the workspace
+wk verify bug-238 --gpu    # and requires a hardware renderer
+```
+
 ---
 
-## 6. Optional: Raspberry Pi test devices
+## 6. Benchmarking on Linux
+
+Benchmarks need three things beyond a build, and `wk bench` refuses to run
+without them rather than producing a number that cannot be defended:
+
+```sh
+wk quiesce on                          # performance governor, no indexer
+wk session on                          # a real compositor on the monitor
+wk bench bug-238 speedometer3          # preflight, then run-benchmark
+wk bench bug-238 motionmark1.3.1
+wk bench ls
+wk bench compare <run-a> <run-b>       # compare-results, with provenance checks
+```
+
+The NVIDIA driver itself comes from Ubuntu's own packages (`ubuntu-drivers
+install`, or the `nvidia-driver-*` metapackage) and is not something `./setup`
+manages — it is a kernel driver for the machine, not a workspace dependency.
+Everything the *container* needs is derived from whatever driver is installed,
+by `host/linux/gpu.sh`, at workspace creation.
+
+`wk session on` stops the display manager and starts `cage` on seat0 —
+deliberately not a desktop, so there is no compositing work in the numbers that
+is not the browser's. `wk session off` puts the display manager back.
+
+Payloads are seeded once into `~/.local/share/wk/cache/bench` and pinned by
+commit, so a run does not clone Speedometer or pull MotionMark file by file
+from the GitHub API every time. Results land in `~/.local/share/wk/bench/<run>`
+with an `env.json` recording kernel, driver, governor, container caps, WebKit
+sha and the renderer that was actually used.
+
+---
+
+## 7. Optional: Raspberry Pi test devices
 
 Only if you run benchmarks on real hardware.
 
@@ -185,7 +251,7 @@ itself:
 
 ---
 
-## 7. Optional: macOS VMs for Apple-port builds
+## 8. Optional: macOS VMs for Apple-port builds
 
 ```sh
 wk vm new mac-rel

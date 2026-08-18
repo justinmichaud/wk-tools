@@ -6,7 +6,7 @@
 #
 #   ./setup              everything for this OS
 #   ./setup --stage X    just one stage (tools, settings, dotfiles, claude,
-#                        machine, quiesce)
+#                        machine, sdk, quiesce)
 #   ./setup --dry-run    report what would change
 
 set -euo pipefail
@@ -27,6 +27,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Stages are independent, so one failing must not skip the rest.
+#
+# They used to be sourced directly, which meant `set -e` inside a stage aborted
+# the whole script -- and the stages that need a password (packages, the group
+# membership, the privileged helper) are the last three. A machine could come
+# back from ./setup with no quiesce helper and no indication that a stage had
+# been skipped rather than run.
+#
+# Each stage now runs in a subshell so a failure is contained, and the failures
+# are collected and reported together at the end. The change count survives via
+# an EXIT trap, so it is right even for a stage that died partway.
+WK_FAILED_STAGES=""
+
 run_stage() {
     local name="$1" script="$2"
     case "$STAGE" in
@@ -35,8 +48,33 @@ run_stage() {
     esac
     [ -f "$script" ] || { debug "no $name stage for this OS"; return 0; }
     info "stage: $name"
+
+    local tmp rc sub
+    tmp="$(mktemp)"
+
+    set +e
     # shellcheck disable=SC1090
-    . "$script"
+    # `set -e` is re-enabled inside: the subshell inherits the parent's state,
+    # and the `set +e` above would otherwise let a stage run on past its own
+    # failure -- turning a contained failure into a stage that does half its
+    # work and reports success.
+    # The path is expanded now, the count when the trap fires: a local of this
+    # function is not reliably still in scope by the time an errexit-killed
+    # subshell runs its EXIT trap, and "tmp: unbound variable" at that point is
+    # a confusing way to learn it.
+    ( set -e; trap "echo \$WK_CHANGES > $tmp" EXIT; . "$script" )
+    rc=$?
+    set -e
+
+    sub=$(cat "$tmp" 2>/dev/null || echo "$WK_CHANGES")
+    rm -f "$tmp"
+    case "$sub" in ''|*[!0-9]*) sub="$WK_CHANGES" ;; esac
+    WK_CHANGES="$sub"
+
+    if [ "$rc" -ne 0 ]; then
+        warn "stage '$name' failed (exit $rc) -- continuing with the remaining stages"
+        WK_FAILED_STAGES="$WK_FAILED_STAGES $name"
+    fi
 }
 
 OS="$(wk_os)"
@@ -51,12 +89,49 @@ run_stage claude   "$WK_ROOT/claude/install.sh"
 run_stage mcp      "$HOST_DIR/mcp.sh"
 run_stage machine  "$HOST_DIR/machine.sh"
 run_stage vmtools  "$HOST_DIR/vmtools.sh"
+run_stage sdk      "$HOST_DIR/sdk.sh"
 run_stage quiesce  "$WK_ROOT/admin/install.sh"
 
 echo >&2
+if [ -n "$WK_FAILED_STAGES" ]; then
+    warn "stage(s) failed:$WK_FAILED_STAGES"
+    log  "  re-run ./setup, or a single stage with: ./setup --stage <name>"
+fi
+
 if [ "$WK_CHANGES" -eq 0 ]; then
     info "no changes -- this machine is already set up"
 else
     info "$WK_CHANGES change(s) applied"
     log  "re-run ./setup to confirm it now reports no changes"
 fi
+
+# Linux: say plainly what is still missing, rather than leaving it to be
+# discovered when a benchmark refuses to run.
+if is_linux && [ "$STAGE" = all ]; then
+    _todo=""
+    have cage || _todo="$_todo\n  - cage is not installed; 'wk session on' cannot start a compositor"
+    [ -x /usr/local/libexec/wk-quiesce-priv ] \
+        || _todo="$_todo\n  - the privileged helper is missing; 'wk quiesce' and 'wk session' will not work"
+    # Two different questions: is the account configured, and does *this*
+    # shell have the group yet. Group membership only reaches a process at
+    # login, so reporting "not in the render group" right after adding it is
+    # true of the shell and false of the machine, which reads as setup having
+    # failed when it succeeded.
+    case " $(id -nG "$(id -un)") " in
+        *" render "*)
+            case " $(id -nG) " in
+                *" render "*) ;;
+                *) _todo="$_todo\n  - the 'render' group is configured but not active in this shell;"
+                   _todo="$_todo\n    log out and back in (or 'wk session on' grants access via logind's ACL)" ;;
+            esac ;;
+        *) _todo="$_todo\n  - not in the 'render' group; /dev/dri is unreachable from an ssh session" ;;
+    esac
+    if [ -n "$_todo" ]; then
+        echo >&2
+        warn "still to do before GPU benchmarks:"
+        printf "%b\n" "$_todo" >&2
+    fi
+    unset _todo
+fi
+
+[ -z "$WK_FAILED_STAGES" ]

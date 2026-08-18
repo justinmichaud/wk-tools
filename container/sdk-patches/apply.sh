@@ -299,13 +299,17 @@ import sys
 path = sys.argv[1]
 src = open(path).read()
 old = '    arguments+=("--mount" "type=bind,source=/etc/resolv.conf,destination=/etc/resolv.conf,ro")'
+# The replacement re-indents the line it replaces, so the original text is still
+# a substring of the result: without a marker check this section re-applies to
+# its own output on every run. `git reset --hard` before patching hid that.
+already = "wk: host networking only" in src
 new = (
     '    # wk: host networking only -- see sdk-patches/apply.sh section 8.\n'
     '    if [ "${program_options["network"]:-host}" = "host" ]; then\n'
     '        arguments+=("--mount" "type=bind,source=/etc/resolv.conf,destination=/etc/resolv.conf,ro")\n'
     '    fi'
 )
-if old in src:
+if old in src and not already:
     src = src.replace(old, new, 1)
     print("resolv.conf mount limited to host networking", file=sys.stderr)
     open(path, "w").write(src)
@@ -367,9 +371,80 @@ if old in src:
     open(path, "w").write(src)
 PYEOF
 
+# --- 11: --isolated, for a workspace that is not a desktop session ----------
+# wkdev's premise is tight integration: the container is handed the session and
+# system D-Bus sockets, the keyring, dconf, the X11 socket, PulseAudio, the
+# journal, and -- via ${XDG_RUNTIME_DIR} mounted at /host/run -- everything else
+# in the user's runtime directory. That is exactly right for the tool's intended
+# use, where the container is a nicer place to run your own desktop apps from.
+#
+# It is exactly wrong for an unattended agent. The session bus alone is a full
+# host escape: org.freedesktop.systemd1's StartTransientUnit runs any command
+# outside the container, as the user, whatever the container's network policy
+# says. Mounting ${HOME} at /host/home hands over the home directory the design
+# claims a workspace cannot see. Neither is a network problem, so neither is
+# addressed by any firewall.
+#
+# --isolated turns the whole group off. Display integration is deliberately NOT
+# in it -- benchmarks need the GPU and a compositor socket, and wk passes those
+# itself, one socket at a time, rather than by sharing a directory.
+py "$CREATE" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+
+if "isolated" not in src:
+    anchor = 'argsparse_use_option unsafe-caps'
+    line = src[src.index(anchor):].split("\n")[0]
+    src = src.replace(line, line + "\n" +
+        'argsparse_use_option isolated "Do not share the host session with the container '
+        '(no D-Bus, keyring, dconf, journal, X11, PulseAudio, host home or runtime dir)"',
+        1)
+    print("added --isolated", file=sys.stderr)
+
+# Host-session integration, one call per line in a single block.
+for task in ("try_process_coredump_directory", "try_process_journal",
+             "try_process_keyring", "try_process_system_bus",
+             "try_process_session_bus", "try_process_dconf",
+             "try_process_accessibility", "try_process_x11",
+             "try_process_pulseaudio", "try_process_dri",
+             "try_process_nvidia_gpu"):
+    old = "    %s ${1}" % task
+    new = '    argsparse_is_option_set "isolated" || %s ${1}' % task
+    if old in src and new not in src:
+        src = src.replace(old, new, 1)
+
+# The home directory mount is still wanted -- that is the workspace's own home.
+# What must go is the second mount, of the *host* home, and the systemd user
+# unit directory that comes with it.
+old_home = '    podman_argument+=("--mount" "type=bind,source=${HOME},destination=/host/home/${container_user_name},rslave")'
+new_home = ('    # wk: the host home directory is not the workspace\'s business.\n'
+            '    argsparse_is_option_set "isolated" || \\\n'
+            + old_home)
+if old_home in src and "not the workspace's business" not in src:
+    src = src.replace(old_home, new_home, 1)
+
+old_sysd = '    [ -d "${HOME}/.config/systemd/user" ] && podman_argument+=("--mount" "type=bind,source=${HOME}/.config/systemd/user,destination=/home/${container_user_name}/.config/systemd/user,rslave")'
+if old_sysd in src and "isolated-systemd-user" not in src:
+    src = src.replace(old_sysd,
+        '    # wk: isolated-systemd-user -- writing host unit files is a host escape.\n'
+        '    argsparse_is_option_set "isolated" || \\\n' + old_sysd, 1)
+
+# ${XDG_RUNTIME_DIR} at /host/run: the session bus, the keyring socket, the
+# pipewire sockets and whatever else the session happens to keep there.
+old_run = '    arguments+=("--mount" "type=bind,source=${XDG_RUNTIME_DIR},destination=/host/run,bind-propagation=rslave")'
+new_run = ('    # wk: sharing the whole runtime directory shares the session bus with it.\n'
+           '    argsparse_is_option_set "isolated" || \\\n' + old_run)
+if old_run in src and "shares the session bus" not in src:
+    src = src.replace(old_run, new_run, 1)
+
+open(path, "w").write(src)
+print("gated host-session integration behind --isolated", file=sys.stderr)
+PYEOF
+
 # --- verify ------------------------------------------------------------------
 fail=0
-for token in "additional-flags" "unsafe-caps" 'program_options\["network"\]'; do
+for token in "additional-flags" "unsafe-caps" "isolated" 'program_options\["network"\]'; do
     grep -q "$token" "$CREATE" || { echo "verify failed: $token missing from wkdev-create" >&2; fail=1; }
 done
 bash -n "$CREATE" || fail=1
