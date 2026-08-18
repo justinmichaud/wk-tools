@@ -115,6 +115,34 @@ WK_VM_BASE_PREBUILD="${WK_VM_BASE_PREBUILD:-mac-release}"
 # overcommit the *host*, which _check_host_disk is for.
 WK_VM_DISK_GB="${WK_VM_DISK_GB:-320}"
 
+# Guest display size. The stock image is 1024x768, which is too small to do any
+# real browser work in, and nothing ever changed it -- t_create set cpu, memory,
+# mac and serial and left the display alone, so every workspace inherited it.
+# Points, not pixels: tart defaults the unit to "pt" for a macOS guest.
+#
+# Deliberately SMALLER than the host desktop, and this is the whole trick.
+# Tart pins the window's *minimum* content size to this resolution
+# (Run.swift, `.frame(minWidth: config.display.width, ...)`), and AppKit drops
+# NSWindowCollectionBehavior.fullScreenPrimary for fullScreenNone the moment a
+# window's minSize exceeds screen.frame. So setting this to the host's own
+# logical size -- 1920x1080 here -- produces a window that can neither shrink
+# nor go full screen, with its resize corner hanging off the bottom of the
+# screen. Measured on this host: 1080 fails, 1048 is the exact threshold.
+# Bigger is emphatically not better; 3840x2160 would be strictly worse.
+#
+# Small instead, and let the guest follow the window up. --display-refit sets
+# VZVirtualMachineView.automaticallyReconfiguresDisplay, so the *guest* tracks
+# the *window* on every live resize -- go full screen and the guest becomes
+# 1920x1080pt at 2x, i.e. a real 3840x2160 Retina desktop, which is the target
+# you actually want for MiniBrowser. That path only exists if the window can be
+# resized in the first place.
+#
+# Upstream considers this working as intended: PR #1086 proposed dropping the
+# minimum and was rejected (issue #1087), the recommendation there being to
+# make the configured display small. Unchanged as of tart 2.35.0, the newest
+# release, so do not expect this to be fixed for you.
+WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
+
 # Host space that must remain for a guest to have somewhere to grow into. A
 # sparse 320 GB disk on a host with 10 GB free is a build failure waiting to
 # happen, and it fails as an I/O error inside the guest rather than as anything
@@ -134,12 +162,30 @@ WK_VM_KEY="$WK_VM_DIR/id_ed25519"
 # entitlement, so it has to stay inside the signed app bundle Cirrus Labs ships
 # rather than being copied to a bare path. ~/.local is where a hand-installed
 # bundle lands; PATH wins if the user installed it some other way.
+#
+# The path is resolved through any symlinks, and that matters more than it
+# looks. `tart` on PATH is normally a symlink into the .app, and launching a
+# bundled app through a path *outside* its bundle means LaunchServices never
+# associates the process with the bundle. The window is then created without
+# NSWindowCollectionBehavior.fullScreenPrimary, so the green button zooms
+# instead of entering full screen and there is no way to get it back at
+# runtime. Measured with an otherwise identical binary: launched by its real
+# path inside Contents/MacOS, fullScreenPrimary is true; launched through a
+# symlink to exactly that file, it is false.
 _tart_bin() {
-    if command -v tart >/dev/null 2>&1; then command -v tart
-    elif [ -x "$HOME/.local/bin/tart" ]; then echo "$HOME/.local/bin/tart"
+    local p
+    if command -v tart >/dev/null 2>&1; then p=$(command -v tart)
+    elif [ -x "$HOME/.local/bin/tart" ]; then p="$HOME/.local/bin/tart"
     elif [ -x "$HOME/.local/share/tart/tart.app/Contents/MacOS/tart" ]; then
-        echo "$HOME/.local/share/tart/tart.app/Contents/MacOS/tart"
+        p="$HOME/.local/share/tart/tart.app/Contents/MacOS/tart"
     else return 1
+    fi
+    # `readlink -f` only grew symlink-chain resolution on recent macOS, and
+    # this file has to keep working under bash 3.2 on an older one.
+    if readlink -f "$p" >/dev/null 2>&1; then readlink -f "$p"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p"
+    else echo "$p"
     fi
 }
 
@@ -226,7 +272,12 @@ t_create() {
     info "cloning $WK_VM_BASE -> $v (APFS copy-on-write)"
     local t0; t0=$(date +%s)
     _tart clone "$WK_VM_BASE" "$v"
-    _tart set "$v" --cpu "$(_vm_cpus)" --memory "$(_vm_mem_mb)" --random-mac --random-serial
+    # --display-refit is repeated on every `tart set`, not just the one that
+    # means to change it: Set.swift assigns displayRefit unconditionally, so any
+    # `tart set` that omits the flag silently clears it (tart issue #1248, still
+    # open on main). Passing it always is cheaper than discovering that later.
+    _tart set "$v" --cpu "$(_vm_cpus)" --memory "$(_vm_mem_mb)" --random-mac --random-serial \
+        --display "$WK_VM_DISPLAY" --display-refit
     debug "clone took $(( $(date +%s) - t0 ))s"
 
     # A clone that took minutes fell back to a real copy instead of using
@@ -349,8 +400,20 @@ _boot() {
         # nohup, not a bare `&`: the VM must outlive the command that started
         # it. A backgrounded child of `wk vm start` dies with the terminal,
         # which looks exactly like the VM crashing on boot.
+        #
+        # Windowed, deliberately -- there is no --no-graphics here and no flag
+        # to put it back. A macOS guest is the one workspace kind that has a
+        # real GPU (Virtualization.framework backs its Metal stack with the
+        # host's; a Linux guest gets no GPU device at all, which is why the
+        # podman machine can never be accelerated -- see SETUP.md). The window
+        # presents that framebuffer directly. --no-graphics does not take the
+        # GPU away, but the only way back to the screen is then VNC or Screen
+        # Sharing, which capture and re-encode every frame: fine for poking at
+        # a UI, worthless for anything measuring rendering. Since interacting
+        # with MiniBrowser is the point of this target, headless is not a mode
+        # worth carrying a second code path for.
         # shellcheck disable=SC2046 -- deliberate word splitting of the flags.
-        nohup "$(_tart_bin)" run --no-graphics $(_softnet_flags) "$v" >"$runlog" 2>&1 &
+        nohup "$(_tart_bin)" run $(_softnet_flags) "$v" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
         info "booting $v (log: $runlog)"
     fi
@@ -476,8 +539,37 @@ _prebuild_base() {
     local cmd
     cmd="env $(sh_quote "${CFG_ENV[@]}") $(sh_quote "$(t_tools "$WK_VM_BASE")/build/build-in-target.sh")"
 
-    local t0; t0=$(date +%s)
-    if _ssh "$ip" "bash -lc $(sh_quote "$cmd")" > "$WK_VM_DIR/base-build.log" 2>&1; then
+    # Detached, and polled -- NOT a foreground `ssh <long command>`.
+    #
+    # This build takes over an hour and it used to run in the foreground of one
+    # ssh session, which meant any blip on that connection killed it. That is
+    # not hypothetical: the last base prebuild died at
+    # "client_loop: send disconnect: Broken pipe" with no BUILD SUCCEEDED, an
+    # hour and a half in, and left a base that looked built but was not. A
+    # build that dies at minute 95 is the slowest possible outcome, so the
+    # build is started with nohup, its exit status is written to a file in the
+    # guest, and this side merely watches for that file. Dropping the poll
+    # connection now costs one retry instead of the whole build.
+    local rlog="/tmp/wk-base-build.log" rrc="/tmp/wk-base-build.rc"
+    local inner="( $cmd ) > $rlog 2>&1; echo \$? > $rrc"
+    _ssh "$ip" "rm -f $rrc; nohup bash -lc $(sh_quote "$inner") >/dev/null 2>&1 </dev/null & disown" \
+        || die "could not start the base prebuild"
+
+    local t0; t0=$(date +%s) rc="" mins=0
+    while [ -z "$rc" ]; do
+        sleep 30
+        # A failed poll means the connection blipped, not that the build died --
+        # keep waiting. The build itself is no longer attached to this ssh.
+        rc=$(_ssh "$ip" "cat $rrc 2>/dev/null" 2>/dev/null | tr -dc '0-9')
+        [ -n "$rc" ] && break
+        mins=$(( ($(date +%s) - t0) / 60 ))
+        [ $(( mins % 10 )) -eq 0 ] && [ "$mins" -gt 0 ] && \
+            info "base prebuild still running (${mins}m)"
+    done
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    scp -q $(_ssh_opts) "$WK_VM_USER@$ip:$rlog" "$WK_VM_DIR/base-build.log" 2>/dev/null || true
+
+    if [ "$rc" = 0 ]; then
         info "base prebuild finished in $(( ($(date +%s) - t0) / 60 ))m"
     else
         warn "base prebuild FAILED after $(( ($(date +%s) - t0) / 60 ))m -- the base is
@@ -752,10 +844,42 @@ _provision_base() {
 
     _wait_ssh "$ip" || die "ssh key was installed but ssh still refuses; see $runlog"
 
+    # Seed the checkout from a clone that already exists on the host, if there
+    # is one. Cloning WebKit from GitHub happens through the egress proxy, and
+    # the same objects are usually sitting on local disk already -- the host's
+    # .git is ~1.8 GB. A bare `git clone --local` hardlinks rather than copies,
+    # so making the seed costs almost nothing, and rsync moves it over the
+    # vmnet bridge rather than the internet.
+    #
+    # Best-effort throughout: if there is no host checkout, or any step fails,
+    # nothing is left behind and provision-base.sh falls back to cloning from
+    # GitHub exactly as before. This must never be the reason a base fails.
+    local hostwk="${WK_HOST_WEBKIT:-$HOME/Development/WebKit}"
+    if [ -d "$hostwk/.git" ]; then
+        local seed; seed=$(mktemp -d)
+        info "seeding the guest checkout from $hostwk"
+        if git clone --bare --quiet --single-branch --branch main \
+               "$hostwk" "$seed/wk-seed.git" 2>/dev/null; then
+            rsync -a -e "ssh $(_ssh_opts)" \
+                "$seed/wk-seed.git/" "$WK_VM_USER@$ip:/tmp/wk-seed.git/" 2>/dev/null \
+                || warn "could not copy the seed to the guest; it will clone from GitHub"
+        else
+            warn "could not make a seed clone from $hostwk; the guest will clone from GitHub"
+        fi
+        rm -rf "$seed"
+    fi
+
     info "provisioning the base VM (Xcode licence, WebKit checkout, Claude CLI)"
     rsync -az -e "ssh $(_ssh_opts)" \
         "$WK_ROOT/vm/provision-base.sh" "$WK_VM_USER@$ip:/tmp/provision-base.sh"
-    _ssh "$ip" "env WK_VM_PROXY_ADDR=$(sh_quote "$WK_VM_PROXY_ADDR") WK_VM_PROXY_PORT=$(sh_quote "$WK_VM_PROXY_PORT") bash /tmp/provision-base.sh" \
+    # _proxy_addr, not $WK_VM_PROXY_ADDR. The variable is normally *unset* --
+    # it is an override, and the address is otherwise derived from the bridge
+    # that only exists once a guest is running. Passing the raw variable sent
+    # an empty value, provision-base.sh fell back to its hardcoded Tart default
+    # of 192.168.64.1, and the guest was left pointing at an address nothing
+    # listens on: every fetch inside the guest timed out, which looks exactly
+    # like the egress filter doing its job rather than a misconfiguration.
+    _ssh "$ip" "env WK_VM_PROXY_ADDR=$(sh_quote "$(_proxy_addr)") WK_VM_PROXY_PORT=$(sh_quote "$WK_VM_PROXY_PORT") WK_VM_DISPLAY=$(sh_quote "$WK_VM_DISPLAY") bash /tmp/provision-base.sh" \
         || die "base provisioning failed"
 
     _prebuild_base "$ip"

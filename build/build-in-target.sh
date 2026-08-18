@@ -6,6 +6,8 @@
 #
 # Environment supplied by cmd/build: WK_JOBS, WK_NICE, WK_BUILD_ARGS,
 # WK_BUILD_CMAKE, WK_BUILDSYS, WK_SRC, plus the ccache and cross-build caches.
+# The Apple configs add WEBKIT_OUTPUTDIR and WK_DERIVED_DATA, which the xcode
+# case below turns into build settings; both are absent for the CMake ports.
 #
 # This runs in two very different places -- a Fedora container and a macOS
 # guest -- so two constraints apply throughout:
@@ -85,6 +87,49 @@ args+=(${WK_BUILD_ARGS:-})
 case "$buildsys" in
 xcode)
     args+=(-jobs "$jobs")
+
+    # Where the products go. build-webkit hands anything it does not recognise
+    # straight to xcodebuild (Getopt::Long is in pass_through mode there, and
+    # buildXcodeScheme appends the leftovers at webkitdirs.pm:2420), so a build
+    # setting written here reaches the build system unchanged.
+    #
+    # WEBKIT_OUTPUTDIR on its own is not enough, and the failure would be
+    # silent. webkitdirs turns it into SYMROOT/OBJROOT (:460) and Xcode then
+    # appends the configuration name to SYMROOT to get the products directory
+    # -- while webkitdirs itself reports the products as being in
+    # WEBKIT_OUTPUTDIR with no configuration subdirectory at all
+    # (:1195-1196). Left alone the two disagree by exactly one level, and every
+    # WebKit script that resolves a path for itself -- run-minibrowser,
+    # run-webkit-tests, webkit-build-directory -- looks one directory above the
+    # frameworks. WK_CONFIGURATION_BUILD_DIR is WebKit's own hook for pinning
+    # that directory (Configurations/WebKitProjectPaths.xcconfig:36-41, which
+    # every project picks up through CommonBase.xcconfig), so setting it makes
+    # the build agree with what webkitdirs already claims -- and with
+    # config_build_dir() on this side.
+    #
+    # SHARED_PRECOMPS_DIR has to be repeated by hand. webkitdirs only passes it
+    # when it computed the product directory itself: :461 sits under the
+    # `if (!defined($baseProductDir))` branch at :401, which WEBKIT_OUTPUTDIR
+    # skips. Without it all four Apple configs would go back to sharing one
+    # precompiled-header directory, which is half of what this change is for.
+    if [ -n "${WEBKIT_OUTPUTDIR:-}" ]; then
+        args+=("WK_CONFIGURATION_BUILD_DIR=$WEBKIT_OUTPUTDIR")
+        args+=("SHARED_PRECOMPS_DIR=$WEBKIT_OUTPUTDIR/PrecompiledHeaders")
+    fi
+
+    # Where the caches go. -derivedDataPath moves the DerivedData root, which
+    # is what the compilation CAS and the module cache hang off; the two
+    # explicit settings pin the only two things in it that are large (9.6 GB
+    # and 1.6 GB measured after one mac-release), so this does not depend on
+    # which of them Xcode chooses to derive from the root in a given release.
+    # Compilation caching itself is already on -- WebKit turns it on in
+    # Configurations/CommonBase.xcconfig:82-83 -- so the cache exists whether or
+    # not anyone decides where it lives.
+    if [ -n "${WK_DERIVED_DATA:-}" ]; then
+        args+=(-derivedDataPath "$WK_DERIVED_DATA")
+        args+=("COMPILATION_CACHE_CAS_PATH=$WK_DERIVED_DATA/CompilationCache.noindex")
+        args+=("MODULE_CACHE_DIR=$WK_DERIVED_DATA/ModuleCache.noindex")
+    fi
     ;;
 *)
     [ -n "$cmakeargs" ] && args+=(--cmakeargs="$cmakeargs")

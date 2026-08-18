@@ -70,12 +70,31 @@ WK_CXX="${WK_CXX:-clang++}"
 # anything embedded (webkitdirs.pm appends it for isEmbeddedWebKit()), so a bare
 # Release/ is only ever right for the Mac itself. The authority for the CMake
 # side is usesPerConfigurationBuildDirectory() in the same file.
+#
+# The `-asan` suffix on the Apple side is ours, not Xcode's. Xcode has no
+# directory for a sanitizer: --asan only adds ENABLE_ADDRESS_SANITIZER=YES to
+# the xcodebuild command line, and webkitdirs.pm:3132-3133 says so outright --
+# "Xcode toggles ASan within Debug/Release, so its path is unchanged". So
+# mac-release and mac-release-asan resolved to the *same* Release/ directory,
+# and building one after the other left a tree that was half instrumented and
+# half not. That is not a build failure; it is a crash a week later in
+# something that was linked against both halves.
+#
+# The suffix only becomes true because config_build_env() exports
+# WEBKIT_OUTPUTDIR to exactly this path -- a name here that the build does not
+# honour would be the same quiet lie in the other direction. It is derived from
+# CFG_ARGS rather than from a separate flag because the --asan in CFG_ARGS *is*
+# what changes the products; a second field could drift out of step with it.
+# CMake is left alone: those ports encode the sanitizer in CMAKE_BUILD_TYPE and
+# their directory names are upstream's, not ours, to choose.
 config_build_dir() {
     local root="${1:-/src/WebKit}"
+    local variant=""
+    case "$CFG_BUILDSYS:$CFG_ARGS" in xcode:*--asan*) variant="-asan" ;; esac
     case "$CFG_BUILDSYS:$CFG_PORT" in
-        xcode:--ios-simulator) echo "$root/WebKitBuild/$CFG_TYPE-iphonesimulator" ;;
-        xcode:--ios-device)    echo "$root/WebKitBuild/$CFG_TYPE-iphoneos" ;;
-        xcode:*)               echo "$root/WebKitBuild/$CFG_TYPE" ;;
+        xcode:--ios-simulator) echo "$root/WebKitBuild/$CFG_TYPE-iphonesimulator$variant" ;;
+        xcode:--ios-device)    echo "$root/WebKitBuild/$CFG_TYPE-iphoneos$variant" ;;
+        xcode:*)               echo "$root/WebKitBuild/$CFG_TYPE$variant" ;;
         cmake:--jsc-only)      echo "$root/WebKitBuild/JSCOnly/$CFG_TYPE" ;;
         cmake:--wpe)           echo "$root/WebKitBuild/WPE/$CFG_TYPE" ;;
         cmake:--gtk)           echo "$root/WebKitBuild/GTK/$CFG_TYPE" ;;
@@ -169,6 +188,44 @@ config_load() {
 # config_load must have run first. Sets CFG_ENV.
 config_build_env() {
     local src="$1" jobs="$2" nice="$3"
+
+    # --- Apple ports: pin where the output and the caches go -----------------
+    # Nothing here used to be set at all, and the defaults are worse than they
+    # look. Xcode's own default puts the content-addressed compilation cache
+    # and the module cache in ~/Library/Developer/Xcode/DerivedData -- one
+    # machine-wide directory per *user*, not per checkout, per config or per
+    # workspace. Measured in a guest after one mac-release: 9.6 GB of
+    # CompilationCache.noindex and 1.6 GB of ModuleCache.noindex there, while
+    # the products sat in the checkout's WebKitBuild. On the macOS remote
+    # target that single directory would be shared by every workspace and every
+    # other person on the box.
+    #
+    # Both paths are derived from $src, which is the target's own checkout
+    # path, so they are per workspace by construction and they stay on the
+    # guest's APFS volume rather than on a virtiofs --dir share, where a CAS
+    # would cost more than it saves. Deriving them from a fixed path also keeps
+    # them stable across `wk vm base --refresh`: provisioning does a `git reset
+    # --hard`, which does not touch untracked WebKitBuild, so a refreshed base
+    # still has its warm cache.
+    #
+    # WEBKIT_OUTPUTDIR is honoured at webkitdirs.pm:399 and becomes
+    # SYMROOT/OBJROOT at :460, which is what finally gives mac-release-asan a
+    # tree of its own, gives each config its own XCBuildData/build.db
+    # (webkitdirs.pm:3149: "build.db is shared across Xcode configurations"),
+    # and -- as a side effect worth knowing about -- makes webkitdirs skip the
+    # whole IDEBuildLocationStyle block at :401-441, so a stray Xcode user
+    # default can no longer silently relocate the output from under us.
+    #
+    # One DerivedData for all configs, deliberately: the CAS is
+    # content-addressed and the module cache is keyed by build settings, so
+    # sharing them across configs is the point of having them. Only the things
+    # that are *not* content-addressed -- products, intermediates, build.db,
+    # precompiled headers -- have to be separated per config.
+    local out=""
+    if [ "$CFG_BUILDSYS" = xcode ]; then
+        out=$(config_build_dir "$src")
+    fi
+
     CFG_ENV=(
         "CCACHE_DIR=/ccache"
         "NUMBER_OF_PROCESSORS=$jobs"
@@ -184,6 +241,18 @@ config_build_env() {
     # Only when the config asks for it: the Apple configs leave these empty on
     # purpose, and `env CC= ` is not the same as not setting CC at all.
     [ -n "$CFG_CC" ] && CFG_ENV+=("CC=$CFG_CC" "CXX=$CFG_CXX")
+    # Xcode only. Setting WEBKIT_OUTPUTDIR on a CMake port would change every
+    # one of those layouts at once -- usesPerConfigurationBuildDirectory()
+    # (webkitdirs.pm:1182-1184) keys off nothing but this variable being
+    # defined, and JSCOnly/Release would flatten to the bare value.
+    #
+    # These are paths, not flags: they stay separate variables rather than
+    # riding in WK_BUILD_ARGS, which is word-split by the build half and would
+    # come apart on a checkout path containing a space. build-in-target.sh
+    # turns them into the xcodebuild settings they have to become.
+    if [ -n "$out" ]; then
+        CFG_ENV+=("WEBKIT_OUTPUTDIR=$out" "WK_DERIVED_DATA=$src/WebKitBuild/DerivedData")
+    fi
     # compile_commands.json is on by default; this only carries the opt-out
     # through to the build half, which runs in the target and cannot see the
     # caller's environment.

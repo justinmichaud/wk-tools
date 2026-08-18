@@ -232,6 +232,24 @@ Each item names the source handoff so detail is not duplicated here.
 
 ---
 
+## Blocking, both lanes — `wk` does not work inside a workspace
+
+**`docs/HANDOFF-wk-in-workspace.md`** — found 2026-08-18. Claude only ever runs
+inside a workspace, so the in-workspace `wk build <config>` / `wk run` /
+`wk test` interface that `CLAUDE.md` documents is load-bearing. It does not
+exist: inside a macOS guest every `wk` command fails with "podman is required",
+because `resolve_target` defaults to `container` when no workspace is named and
+the entrypoint then tries to forward into a podman machine that cannot exist
+there. Verified in the macOS guest; **the Linux-container half is unverified**
+and should be established first.
+
+This is not filler. Until it is fixed, `wk claude` puts Claude in a correctly
+sandboxed guest that cannot build or test — which is the one thing the sandbox
+exists to allow. It also gates `docs/HANDOFF-claude`'s "every skill invokes a
+deterministic tool rather than freehand steps".
+
+---
+
 ## Either machine / process items (no meaningful conflict, pick up as filler)
 
 - **`docs/HANDOFF-testing.md`** — every task above should get a line item in

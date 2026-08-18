@@ -8,5 +8,6 @@ claude overwriting my work
 claude posting on github on my behalf and responding to my reviewers
 claude seaching for ssh keys on my host (throught the container sdk)
 claude making a suid binary then running it to bypass auto mode
+claude searching for a sudo time seat to skip pw auth
 
 Consider which machines can be ssh'd into too.

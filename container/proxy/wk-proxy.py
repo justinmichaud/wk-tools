@@ -55,6 +55,56 @@ ALLOWED_HOSTS = {
     # is a build dependency rather than an escape hatch.
     "pypi.org": (443,),
     "pythonhosted.org": (443,),
+
+    # --- browsing and benchmarking -------------------------------------------
+    # Everything below exists so a workspace can actually drive a browser at
+    # real pages. Port 80 as well as 443 throughout: these are visited by
+    # MiniBrowser, and a site that answers :80 with a redirect to :443 still
+    # needs the first hop to be allowed or the load simply fails.
+    #
+    # This is a real widening of the boundary and it is deliberate. Note for
+    # the sandbox audit (docs/HANDOFF-sandboxing.md): a workspace can now reach
+    # general-purpose sites with user-generated content and ad/analytics
+    # networks, which the Anthropic/GitHub/PyPI list did not permit. The
+    # BLOCKED_NETS check below is unchanged and still keeps any of these names
+    # from resolving onto the LAN or the tailnet.
+
+    # Project and benchmark hosts.
+    "webkit.org": (80, 443),
+    "browserbench.org": (80, 443),     # Speedometer, MotionMark, JetStream
+    "igalia.com": (80, 443),
+    "gnome.org": (80, 443),
+
+    # The top-10 sites by global traffic, as a general-purpose browsing set.
+    # Each is paired with the asset/CDN domain it cannot render without --
+    # allowing only the front door gets a half-loaded page, which is worse than
+    # useless for judging a browser.
+    "google.com": (80, 443),
+    "gstatic.com": (80, 443),          # google's static assets
+    "googleapis.com": (80, 443),
+    "youtube.com": (80, 443),
+    "ytimg.com": (80, 443),            # youtube thumbnails
+    "googlevideo.com": (80, 443),      # youtube media
+    "facebook.com": (80, 443),
+    "fbcdn.net": (80, 443),            # facebook + instagram assets
+    "instagram.com": (80, 443),
+    "cdninstagram.com": (80, 443),
+    "x.com": (80, 443),
+    "twitter.com": (80, 443),          # still redirects here
+    "twimg.com": (80, 443),            # x/twitter assets
+    "wikipedia.org": (80, 443),
+    "wikimedia.org": (80, 443),        # wikipedia images and static
+    "reddit.com": (80, 443),
+    "redditstatic.com": (80, 443),
+    "redditmedia.com": (80, 443),
+    "redd.it": (80, 443),
+    "amazon.com": (80, 443),
+    "media-amazon.com": (80, 443),
+    "ssl-images-amazon.com": (80, 443),
+    "tiktok.com": (80, 443),
+    "tiktokcdn.com": (80, 443),
+    "whatsapp.com": (80, 443),
+    "baidu.com": (80, 443),
 }
 
 # Addresses that are never permitted as a *destination*, whatever resolved to

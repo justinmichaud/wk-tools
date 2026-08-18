@@ -80,6 +80,15 @@ else
     RENDER_ENV="LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1"
 fi
 
+# The Apple configs no longer live where a bare run-webkit-tests would look for
+# them: mac-release-asan builds into Release-asan/, and only WEBKIT_OUTPUTDIR
+# tells webkitdirs so. Without this the runner resolves the *non*-sanitized
+# tree and tests mac-release while reporting mac-release-asan -- a green run
+# for a binary nobody asked about. Same answer config_build_env() gives the
+# build, from the same function, so the two cannot disagree.
+OUT_ENV=""
+[ "$CFG_BUILDSYS" = xcode ] && OUT_ENV="WEBKIT_OUTPUTDIR=$(config_build_dir "$SRC")"
+
 printf 'state=running\nsuite=%s\nconfig=%s\nstarted=%s\nlog=%s\n' \
     "$SUITE" "$CONFIG" "$STARTED" "$LOG" > "$STATUS"
 
@@ -99,14 +108,14 @@ EOF
 case "$SUITE" in
 jsc)
     info "JSC tests ($CONFIG, -j$JOBS)"
-    CMD="cd $SRC && nice -n 10 Tools/Scripts/run-javascriptcore-tests \
+    CMD="cd $SRC && $OUT_ENV nice -n 10 Tools/Scripts/run-javascriptcore-tests \
          --$lower $CFG_PORT --no-build --no-fail-fast --memory-limited $*"
     ;;
 layout)
     info "layout tests ($CONFIG, ${GPU:+GPU}${GPU:-software rendering}, $JOBS processes)"
     # --no-retry-failures: a retry doubles the runtime and hides flakiness,
     # which is the opposite of what an automated check wants.
-    CMD="cd $SRC && $RENDER_ENV nice -n 10 Tools/Scripts/run-webkit-tests \
+    CMD="cd $SRC && $OUT_ENV $RENDER_ENV nice -n 10 Tools/Scripts/run-webkit-tests \
          --$lower $CFG_PORT --no-build --no-retry-failures \
          --child-processes=$JOBS $*"
     ;;

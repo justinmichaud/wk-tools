@@ -95,13 +95,44 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] the guest has no view of the host filesystem
 - [V] `wk claude` reports which of the two it is before starting
 
+### Screen, GPU and egress  (macOS MiniBrowser lane)
+- [V] the guest boots **windowed** -- `tart run` carries no `--no-graphics`
+- [V] a host window exists and is onscreen (1920x1108 incl. title bar)
+- [V] the guest has a real Metal device: `Apple Paravirtual device`,
+      3.6 Gthread/s vs 5.9 on the host -- hardware, not a software rasteriser
+- [!] the paravirtual GPU is feature-capped: families apple1-5 only, **no
+      metal3, no raytracing**. Fine to interact with, NOT a basis for judging
+      WebGPU or rendering performance against bare metal
+- [V] MiniBrowser runs with hardware WebGL: `UNMASKED_RENDERER=Apple GPU`
+- [V] the GPU process loads `AppleParavirtGPUMetalIOGPUFamily` + WebKit's ANGLE
+- [V] all four processes start (MiniBrowser, GPU, Networking, WebContent)
+- [V] the guest reaches 1920x1080, not the stock 1024x768
+- [V] the guest never sleeps: `org.wk.nosleep` holds a power assertion and
+      survives reboot (pmset alone was **not** sufficient -- measured)
+- [V] the guest never locks: `sysadminctl -screenLock off` (a setting separate
+      from both the screen saver and display sleep)
+- [V] the guest comes up on a live desktop with no password prompt
+- [V] guest egress reaches the allowlist: webkit.org, browserbench.org,
+      igalia.com, gnome.org, google.com, wikipedia, reddit -- all answer
+- [V] guest egress still refuses a host outside it (example.com,
+      news.ycombinator.com both fail closed)
+- [V] `webkit.org.evil.com` is refused -- suffix match is on a dot boundary
+- [ ] the tart window resizes / goes fullscreen  **-- KNOWN BROKEN**
+- [ ] the guest runs the latest macOS  **-- 26.4 vs host 26.6.1; no suitable
+      image published, see docs/HANDOFF-mac-minibrowser.md**
+- [ ] `open -a` inside the guest  **-- KNOWN BROKEN**, LaunchServices -10825:
+      the app targets the 26.5 SDK, the guest is 26.4. Use direct bundle exec
+- [ ] a debugger attaches to MiniBrowser / a layout test  -- not started
+
 ### Build and run
 - [V] `wk build <ws> mac-release` succeeds
 - [V] `wk run <ws> --config mac-release` runs jsc via `DYLD_FRAMEWORK_PATH`
 - [ ] a build in a **fresh clone off a warm base** completes in well under 45 min
 - [ ] `wk build <ws> mac-debug`
 - [!] `wk build <ws> ios-sim-release` — config written, never run
-- [ ] `wk test` against an Apple port
+- [ ] `wk test` against an Apple port -- **was impossible until 2026-08-18**:
+      `run-webkit-tests` is python, imports webkitpy, and webkitpy autoinstalls
+      from PyPI, which the guest could not reach (see the egress fix below)
 - [V] the guest disk fits a build (Release tree ~39 GB) with room for a second
 
 ## 3. Remote target
@@ -137,3 +168,7 @@ in the file because each one already cost a debugging session.
 | `wk start` / `wk stop` with a driver loaded | driver defaults evaluated at source time |
 | two `config_build_dir` definitions | a clean merge leaving the wrong one live |
 | guest reaches nothing with the proxy bypassed | softnet actually enforcing, rather than the env vars being politely obeyed |
+| a macOS guest reaches PyPI through the proxy | the proxy address being passed as a raw unset variable, so the guest got a hardcoded 192.168.64.1 that nothing listens on -- indistinguishable from the filter working |
+| a macOS guest's `~/.zprofile` carries the `wk-tools: egress` block | provisioning silently not having run, which looks like a network fault |
+| `mac-release-asan` and `mac-release` resolve to different dirs | Xcode toggling ASan within a configuration without changing the path, so the two builds silently share one tree |
+| the guest desktop is visible after a reboot | three independent things hiding it -- screen saver, display sleep, and the screen *lock* -- where disabling any two is not enough |

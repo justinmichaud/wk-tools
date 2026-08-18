@@ -320,7 +320,7 @@ Measured on the same M4, guest at 9 vCPU / 20 GB:
 Three limits to know about:
 
 - The stock image has no room to build in, so the guest disk is grown to
-  `WK_VM_DISK_GB` (250 GB) before its first boot. Left alone, a build dies
+  `WK_VM_DISK_GB` (320 GB) before its first boot. Left alone, a build dies
   after half an hour with `No space left on device`.
 
 - Apple permits exactly **two running** macOS VMs per host, and
