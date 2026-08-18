@@ -49,9 +49,6 @@ they disagreed. `build/configs.sh:config_build_dir` is now the single authority.
 
 | original | did | now |
 |---|---|---|
-| `jscr` | run jsc, `--validateOptions=1`, right loader var per platform | `wk run <ws> [--config C]` |
-| `jscd` | same under lldb | `wk run <ws> --lldb` |
-| `jscrb` | run the *baseline* build from `WebKitBuildBaseline/` | **gone** — see "Baseline builds" |
 | `jscrr` | run under `rr record` | **gone** (Linux only; `container/lldb/rr.py` is wired for replay) |
 | `jscrrr` | `rr replay` | **gone** |
 | `jscs` | run under `samply`, with `--useJITDump --useTextMarkers` | **gone** — the `jsc-profile` skill documents the invocation |
@@ -66,18 +63,13 @@ the current sandbox a workspace has no such privilege. If profiling comes back
 it should be a `wk` verb that runs the profiler outside and attaches, not a
 script inside that needs root.
 
+We need to support collecting samply, sysprof profiles. Heaptrack too, plus the jsc sampling profiler. This should work on cli jsc builds, gtk, wpe and macos MiniBrowser too, and support jit dump (extra jsc flags, my sysprof patch). Build these from source.
+
 ## Building
 
-| original | did | now |
-|---|---|---|
-| `jscb` | `build-jsc --release --export-compile-commands` (per-platform branches) | `wk build <ws> <config>` |
-| `jscb-configure` | CMake configure with 32/64-bit and arch detection | `build/configs.sh` + `wk build` |
-| `init-debug`/`init-release`/`init-ios-release` | set `BUILDDIR`/`CONFIG`/`PATH`, `cd` | replaced by named configs; see above |
-| `build-safari-ios` | build Safari from the Internal tree | **gone** — needs an Internal checkout |
-| `minibrowser-debug` | `sudo lldb --attach-name ...WebContent.Development` | **gone** |
-
-`init-debug` also carried two commented-out lines that set the CPU governor to
-`performance` and cleared an MSR bit. That intent survives as `wk quiesce`.
+Support running a layout test in the debugger
+Support running a js test in the debugger
+Support collecting and building a PGO profile + build
 
 ## Benchmarking
 
@@ -129,8 +121,6 @@ pulled from `/Volumes/WebKit/wabt/bin`. If they come back they belong in
 | `gpr` | check out a fork branch in `user:branch` PR syntax, adding the remote if needed, confirming every git command, diffing local vs remote before offering `reset --hard` | **gone** — 262 lines, the most substantial helper here |
 | `git-sync-fork` | fetch both remotes, rebase `main` onto upstream | **gone** |
 | `git-clean` | `git reset . && git checkout . && git clean -fd` | **gone** (one line, but destructive-by-design and easy to want) |
-| `git-fuckit` | `git add . && git commit -m . && git push` | **gone** — the commit history in this repo is what it produced |
-| `clean-github` | delete every local branch except the current | **gone** |
 | `commit-count` | `git shortlog --summary --since "1 year"` | **gone** |
 | `report` | weekly GitHub activity summary via `gh` | `wk report` |
 
@@ -142,13 +132,8 @@ running it, and nothing in `wk` covers checking out someone else's PR branch.
 
 | original | did | now |
 |---|---|---|
-| `bashrc`, `zshrc-macos` | history settings, bash→zsh switch, PATH | `shell/bashrc`, sourced from both `~/.bashrc` and `~/.zshrc` |
-| `helix/`, `kitty/`, `sway/` | editor and desktop config | `container/helix/`, `dotfiles/`; sway/kitty **gone** |
 | `lldbinit.py`, `lldb-run-file` | lldb helpers | `dotfiles/lldbinit`, `container/lldb/` |
-| `configs/*` | dumps of dotfiles and machine config | `host/*/`, `dotfiles/` |
 | `rpi5-tune/` | Pi 5 NUMA kernel, overclock sweep, stress and verify | `host/linux/rpi5/` |
-| `claude-skills/`, `claude-hooks/` | agent skills | `claude/skills/`, `claude/hooks/` |
-| `Notes.md` | freeform notes | **gone** |
 
 ---
 
