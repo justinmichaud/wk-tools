@@ -1,7 +1,7 @@
 # Working environment
 
 You are almost certainly running inside a **wk workspace** — a disposable
-container holding one WebKit checkout for one task. Two consequences:
+environment holding one WebKit checkout for one task. Two consequences:
 
 - **The host filesystem is not reachable, by design.** There is no macOS home
   mounted here. Do not look for one, and do not try to reach it.
@@ -9,9 +9,21 @@ container holding one WebKit checkout for one task. Two consequences:
   broken build directories are fine; everything is discarded when the workspace
   is deleted. Prefer making a mess here over being careful.
 
-`/src/WebKit` is your checkout. Its base is a read-only snapshot with a
-copy-on-write layer on top, so edits are yours alone and cannot affect other
-workspaces.
+There are two kinds, and they differ in ways that matter:
+
+| | Linux workspace | macOS workspace |
+|---|---|---|
+| what it is | a podman container | a macOS VM (Tart) |
+| checkout | `/src/WebKit` | `/Users/admin/WebKit` |
+| ports | JSCOnly, GTK, WPE | the Apple ports, via Xcode |
+| egress | filtered, see below | **not filtered** |
+
+`pwd` tells you which one you are in.
+
+In a Linux workspace the checkout's base is a read-only snapshot with a
+copy-on-write layer on top; in a macOS workspace it is an APFS clone of a
+golden image. Either way the edits are yours alone and cannot affect another
+workspace.
 
 ## Commands
 
@@ -20,7 +32,7 @@ from available memory and runs the build at a nice level that keeps the host
 usable. A raw `ninja -j$(nproc)` can hang the machine.
 
 ```
-wk build <config>     # jsc-debug, jsc-release, gtk-debug, gtk-release-asan, ...
+wk build <config>     # jsc-release, gtk-debug, wpe-release, mac-release, ...
 wk run -- <args>      # run jsc from the current build
 wk test <args>        # run tests
 ```
@@ -29,10 +41,17 @@ wk test <args>        # run tests
 
 ## Network
 
-Egress is restricted to the Anthropic API, GitHub, and the two Raspberry Pi
-test devices over Tailscale. Everything else — including the rest of the local
-network — is dropped by a firewall you cannot see or modify. If a fetch fails,
-that is expected: find another way rather than trying to work around it.
+**In a Linux workspace**, egress is restricted to the Anthropic API, GitHub, and
+the two Raspberry Pi test devices over Tailscale. Everything else — including
+the rest of the local network — is dropped by a firewall you cannot see or
+modify. If a fetch fails, that is expected: find another way rather than trying
+to work around it.
+
+**In a macOS workspace there is no such firewall.** A macOS guest cannot be
+confined from outside the way a container in a shared network namespace can, so
+the boundary here is the VM and its disposability — not the network. Treat the
+network as open, and treat that as a reason for more care rather than less:
+reach for the same destinations you would have been restricted to anyway.
 
 The Pis (`rpi4`, `rpi5`) are reachable over SSH for performance testing and
 deploying builds.

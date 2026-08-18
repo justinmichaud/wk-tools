@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+#
+# Runs inside a workspace, invoked by `wk build`. Kept separate from cmd/build
+# because that half runs outside the target and decides policy, while this half
+# runs inside and only carries it out.
+#
+# Environment supplied by cmd/build: WK_JOBS, WK_NICE, WK_BUILD_ARGS,
+# WK_BUILD_CMAKE, WK_BUILDSYS, WK_SRC, plus the ccache and cross-build caches.
+#
+# This runs in two very different places -- a Fedora container and a macOS
+# guest -- so two constraints apply throughout:
+#
+#   bash 3.2. macOS still ships it, and it errors on "${arr[@]}" for an empty
+#   array under `set -u`. Lists are therefore built as strings and split
+#   deliberately, exactly as lib/resources.sh does.
+#
+#   No Linux-only interface may be assumed present. cgroups, ionice and choom
+#   all exist on one side and not the other, so every use is guarded.
+
+set -euo pipefail
+
+SRC=${WK_SRC:-/src/WebKit}
+cd "$SRC"
+
+jobs=${WK_JOBS:-4}
+buildsys=${WK_BUILDSYS:-cmake}
+
+# Authoritative clamp: this half runs *inside* the target, so its own cgroup
+# limit is the real ceiling. Belt and braces against the caller having sized the
+# build from the wrong machine's memory. There is no cgroup on macOS, and no
+# equivalent either -- the guest's memory is fixed at boot by `tart set`, and
+# cmd/build sizes from that, so nothing is lost by skipping this there.
+if [ -r /sys/fs/cgroup/memory.max ]; then
+    limit=$(cat /sys/fs/cgroup/memory.max)
+    if [ "$limit" != max ]; then
+        max_jobs=$(( limit / 1024 / 1024 / ${WK_MB_PER_JOB:-4096} ))
+        [ "$max_jobs" -lt 1 ] && max_jobs=1
+        if [ "$jobs" -gt "$max_jobs" ]; then
+            echo "clamping -j$jobs -> -j$max_jobs (cgroup limit $(( limit / 1024 / 1024 ))MB)" >&2
+            jobs=$max_jobs
+        fi
+    fi
+fi
+nicelevel=${WK_NICE:-10}
+
+cmakeargs=${WK_BUILD_CMAKE:-}
+
+# Arrays, not a flat string: --cmakeargs carries several -D flags as ONE
+# argument, and any unquoted expansion splits it apart -- build-webkit then
+# sees the first -D as the whole value and the rest as unknown options.
+#
+# ${a[@]+"${a[@]}"} is the bash 3.2 workaround for an empty array under
+# `set -u`, which is an error there and not on the Linux side. Both halves have
+# to keep working, so the idiom stays even where the array cannot be empty.
+args=()
+# shellcheck disable=SC2206 -- deliberate word splitting of the config string.
+args+=(${WK_BUILD_ARGS:-})
+
+# --export-compile-commands is free on the CMake ports -- it is one extra
+# -D flag and CMake writes compile_commands.json as a side effect.
+#
+# On the Apple ports it is not free, and it is not obviously so. It expands to
+# four build settings, and one of them is GCC_PRECOMPILE_PREFIX_HEADER=NO --
+# which turns off precompiled prefix headers for WebCore, WebKit and
+# JavaScriptCore, all three of which set it to YES in their own xcconfigs and
+# have prefix headers that every translation unit includes. It also adds
+# -gen-cdb-fragment-path, so each of ~6,300 compiles writes an extra JSON
+# fragment.
+#
+# Measured cold, all else equal: 99 min with it, and that works out at 8.5 s of
+# CPU per translation unit, which is far more than a WebKit TU should cost.
+#
+# So it is opt-in here. Set WK_COMPILE_COMMANDS=1 when you actually want
+# compile_commands.json for clangd, and pay for it deliberately.
+case "$buildsys" in
+xcode) [ -n "${WK_COMPILE_COMMANDS:-}" ] && args+=(--export-compile-commands) ;;
+*)     args+=(--export-compile-commands) ;;
+esac
+
+# How the job count reaches the compiler differs entirely between the two build
+# systems, and neither flag is accepted by the other.
+#
+#   cmake   --makeargs=-jN, which build-webkit forwards to ninja/make.
+#   xcode   -jobs N, which survives build-webkit's pass_through getopt and
+#           reaches xcodebuild. --makeargs is silently ignored on this path, so
+#           using it would leave xcodebuild at its own core-count default -- a
+#           build that looks correct and takes the machine down anyway.
+case "$buildsys" in
+xcode)
+    args+=(-jobs "$jobs")
+    ;;
+*)
+    [ -n "$cmakeargs" ] && args+=(--cmakeargs="$cmakeargs")
+    args+=("--makeargs=-j$jobs")
+    ;;
+esac
+
+# ionice keeps the build off the desktop's I/O path; choom makes the OOM killer
+# choose the build rather than the session. oom_score_adj is inherited, so
+# setting it on the wrapper covers every compiler process underneath. Neither
+# exists on macOS, where `nice` alone is what there is.
+pre=""
+command -v ionice >/dev/null 2>&1 && pre="ionice -c3"
+command -v choom  >/dev/null 2>&1 && pre="$pre choom -n 500 --"
+
+set -x
+# shellcheck disable=SC2086 -- $pre is a deliberate list of bare words.
+exec $pre nice -n "$nicelevel" \
+    Tools/Scripts/build-webkit "${args[@]}" ${@+"$@"}

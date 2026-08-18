@@ -18,6 +18,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/watchdog.sh"
+. "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/build/configs.sh"
 
 NAME="${1:-}"; shift || true
@@ -38,16 +39,20 @@ done
 
 config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
 
-TARGET="${WK_TARGET:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+load_target "$TARGET"
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
 lower=$(echo "$CFG_TYPE" | tr '[:upper:]' '[:lower:]')
-if [ "$TARGET" = container ]; then
-    WK_CGROUP_MB=$(envelope_mem_mb); WK_CGROUP_CORES=$(envelope_cores)
+SRC=$(t_src "$NAME")
+if [ "$TARGET" != remote ]; then
+    WK_CGROUP_MB=$(t_mem_mb "$NAME"); WK_CGROUP_CORES=$(t_cores "$NAME")
     export WK_CGROUP_MB WK_CGROUP_CORES
 fi
 JOBS=$(build_jobs)
+
+# Before the status file, so a failure here cannot leave state=running behind.
+t_sync_tools "$NAME"
 
 WS=$(wk_ws_dir "$NAME")
 LOG="$WS/test.log"
@@ -57,7 +62,14 @@ START_EPOCH=$(date +%s)
 
 # Software rendering. llvmpipe via Mesa's software gallium driver, and the WPE
 # headless backend so no compositor is needed.
-if [ -n "$GPU" ]; then
+#
+# None of it applies to the Apple ports: these are Mesa and WPE variables, and
+# a macOS guest renders through Virtualization.framework's paravirtualised GPU
+# whether you want it to or not. Setting them there would be cargo cult.
+if [ "$CFG_BUILDSYS" = xcode ]; then
+    RENDER_ENV=""
+    [ -n "$GPU" ] && warn "--gpu has no meaning for an Apple port; ignoring"
+elif [ -n "$GPU" ]; then
     RENDER_ENV=""
     info "using the real GPU (requires /dev/dri in the workspace)"
 else
@@ -83,14 +95,14 @@ EOF
 case "$SUITE" in
 jsc)
     info "JSC tests ($CONFIG, -j$JOBS)"
-    CMD="cd /src/WebKit && nice -n 10 Tools/Scripts/run-javascriptcore-tests \
+    CMD="cd $SRC && nice -n 10 Tools/Scripts/run-javascriptcore-tests \
          --$lower $CFG_PORT --no-build --no-fail-fast --memory-limited $*"
     ;;
 layout)
     info "layout tests ($CONFIG, ${GPU:+GPU}${GPU:-software rendering}, $JOBS processes)"
     # --no-retry-failures: a retry doubles the runtime and hides flakiness,
     # which is the opposite of what an automated check wants.
-    CMD="cd /src/WebKit && $RENDER_ENV nice -n 10 Tools/Scripts/run-webkit-tests \
+    CMD="cd $SRC && $RENDER_ENV nice -n 10 Tools/Scripts/run-webkit-tests \
          --$lower $CFG_PORT --no-build --no-retry-failures \
          --child-processes=$JOBS $*"
     ;;

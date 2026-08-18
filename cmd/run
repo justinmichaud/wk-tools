@@ -9,6 +9,7 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/build/configs.sh"
 
 NAME="${1:-}"; shift || true
@@ -27,20 +28,32 @@ done
 
 config_load "$CONFIG" || die "unknown config '$CONFIG'"
 
-TARGET="${WK_TARGET:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+load_target "$TARGET"
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
-# JSCOnly and the full ports lay their build trees out differently; each port
-# has its own directory. See config_build_dir in build/configs.sh.
-VM_DIR=$(config_build_dir)
+# Where the products landed, and what the loader needs to find them, both come
+# from build/configs.sh -- four ports lay their trees out four ways and the
+# Apple build resolves frameworks rather than shared libraries, so hardcoding
+# either here is how the old jscr/jscd scripts each ended up wrong.
+SRC=$(t_src "$NAME")
+JSC=$(config_jsc_path "$SRC")
+VAR=$(config_run_var)
+DIR=$(config_run_dir "$SRC")
+
+# Run through a login shell so the loader variable can be *prepended* to what
+# the environment already provides. Passing `env LD_LIBRARY_PATH=...` instead
+# replaces it, and the wkdev image ships libwpe and the rest of the jhbuild
+# prefix that way -- so the WPE and GTK binaries then fail to start with a
+# missing-library error for a library that was on the path all along.
+PRELUDE="export $VAR=\"$DIR\${${VAR}:+:\${${VAR}}}\""
 
 # validateOptions catches typo'd JSC flags, which otherwise fail silently and
 # make a benchmark look like it changed when it never ran the intended path.
 if [ -n "$DEBUGGER" ]; then
-    t_exec "$NAME" env LD_LIBRARY_PATH="$VM_DIR/lib" \
-        lldb -s /opt/wk-tools/container/lldb/run-file "$VM_DIR/bin/jsc" -- --validateOptions=1 "$@"
+    CMD="$PRELUDE; exec lldb -s $(sh_quote "$(t_tools "$NAME")/container/lldb/run-file") $(sh_quote "$JSC") -- --validateOptions=1 $(sh_quote "$@")"
 else
-    t_exec "$NAME" env LD_LIBRARY_PATH="$VM_DIR/lib" JSC_validateOptions=1 \
-        "$VM_DIR/bin/jsc" --validateOptions=1 "$@"
+    CMD="$PRELUDE; export JSC_validateOptions=1; exec $(sh_quote "$JSC") --validateOptions=1 $(sh_quote "$@")"
 fi
+
+t_exec "$NAME" bash -lc "$CMD"

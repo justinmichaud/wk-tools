@@ -23,10 +23,32 @@ WK_HEARTBEAT_SECONDS="${WK_HEARTBEAT_SECONDS:-60}"
 _now() { date +%s; }
 _fsize() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0; }
 
-# Last line that looks like progress, so the heartbeat says something useful
-# rather than just "still going".
+# Something useful to say in the heartbeat, rather than just "still going".
+#
+# ninja gives a counter, which is the best case: it says how far along the
+# build is. xcodebuild gives no counter at all, so the fallback names the most
+# recent action instead -- that answers "is it moving, and on what", which is
+# the question the heartbeat exists for.
+#
+# Both read only the tail. A verbose xcodebuild log runs to hundreds of
+# megabytes, and re-scanning it every minute would make the watchdog the most
+# expensive thing in the build.
 _progress_line() {
-    tr '\r' '\n' < "$1" 2>/dev/null | grep -oE '^\[[0-9]+/[0-9]+\]' | tail -1
+    local tail_bytes=65536 out
+
+    out=$(tail -c "$tail_bytes" "$1" 2>/dev/null | tr '\r' '\n' \
+          | grep -oE '\[[0-9]+/[0-9]+\]' | tail -1)
+    [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+
+    out=$(tail -c "$tail_bytes" "$1" 2>/dev/null | tr '\r' '\n' \
+          | grep -oE '^(CompileC|CompileSwiftSources|SwiftCompile|SwiftDriver|Ld|Libtool|CodeSign|ScanDependencies|ProcessInfoPlistFile|GenerateDSYMFile) [^ ]+' \
+          | tail -1)
+    if [ -n "$out" ]; then
+        # "CompileC /very/long/path/foo.o" -> "CompileC foo.o"
+        printf '%s %s' "${out%% *}" "$(basename "${out##* }")"
+        return 0
+    fi
+    return 1
 }
 
 # Diagnostics printed when a stall is detected. The point is to answer, in one
@@ -101,12 +123,25 @@ run_watched() {
 
 # Pull the first real error out of a build log.
 #
-# Without this the answer to "why did it fail" is buried in a few hundred KB of
-# progress lines, and the interesting line is near neither end: compilers keep
-# going after the first error, so the tail is usually unrelated.
+# Without this the answer to "why did it fail" is buried in hundreds of
+# megabytes of progress lines, and the interesting line is near neither end:
+# compilers keep going after the first error, so the tail is usually unrelated.
+# On the real macOS build that found "No space left on device" at line 179,295
+# of 180,000, where the tail said only "the Xcode build system has crashed".
+#
+# Two traps, both hit on real logs rather than imagined:
+#
+#   `error:` as a bare substring matches inside message text. An Objective-C
+#   selector in a deprecation warning -- unarchivedObjectOfClass:fromData:error:
+#   -- turned every one of those warnings into a reported error. Hence the
+#   anchors: a diagnostic is at line start or after ": ".
+#
+#   Warnings can contain error-shaped text. Xcode emits
+#   "warning: llvmcas://...: No such file or directory" by the hundred on a
+#   perfectly good build, so warning lines are dropped outright.
 first_error() {
     tr '\r' '\n' < "$1" 2>/dev/null \
-        | grep -nE '(^FAILED:|error:|fatal error:|ninja: build stopped|No such file or directory)' \
-        | grep -vE 'Performing Test|-- Failed|check for working' \
+        | grep -nE '(^FAILED:|^error:|: error:|: fatal error:|ninja: build stopped|No such file or directory)' \
+        | grep -vE 'Performing Test|-- Failed|check for working|(^|[: ])warning:' \
         | head -5
 }

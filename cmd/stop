@@ -11,26 +11,47 @@
 # declared with an explicit upperdir rather than a bare :O, which podman would
 # discard on stop.
 #
-#   wk stop              containers, then the machine
-#   wk stop --keep-vm    containers only, leave the VM running
+# macOS VMs are stopped too, and first: a guest holds its entire allocation
+# whether or not anything is building in it, so it is the largest thing on the
+# machine by some way.
+#
+#   wk stop              macOS VMs, containers, then the machine
+#   wk stop --keep-vm    macOS VMs and containers, leave the machine running
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 KEEP_VM=""
 [ "${1:-}" = --keep-vm ] && KEEP_VM=1
 
-# On macOS this half runs on the host, so reach into the VM for the containers.
-_vm() {
+# On macOS this half runs on the host, so reach into the machine for the
+# containers. Named _in_machine rather than _vm because targets/vm.sh defines
+# its own _vm(), and sourcing that below would otherwise clobber this silently.
+_in_machine() {
     if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         podman machine ssh "$WK_MACHINE" "$@" </dev/null
     else
         bash -c "$*" </dev/null
     fi
 }
+
+# Deliberately before the podman-machine check: if the machine is already
+# stopped, a running macOS VM is *still* holding memory, and exiting early
+# without touching it would report "nothing to do" while 20 GB stayed spoken
+# for.
+if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+    . "$WK_ROOT/lib/target.sh"
+    . "$WK_ROOT/targets/vm.sh"
+    if _tart_bin >/dev/null 2>&1; then
+        for _guest in $(t_list 2>/dev/null | awk -F'\t' '$2 == "running" { print $1 }'); do
+            t_stop "$_guest"
+        done
+    fi
+fi
 
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     state=$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null || echo absent)
@@ -40,12 +61,12 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     fi
 fi
 
-running=$(_vm 'sudo podman ps --filter "name=^wk-" --format "{{.Names}}"' || true)
+running=$(_in_machine 'sudo podman ps --filter "name=^wk-" --format "{{.Names}}"' || true)
 if [ -n "$running" ]; then
     printf '%s\n' "$running" | sed 's/^/  stopping /' >&2
     # A build mid-flight gets SIGTERM and then SIGKILL. ccache and the overlay
     # are both crash-safe, so the worst case is recompiling the current file.
-    _vm 'sudo podman stop --time 30 $(sudo podman ps --filter "name=^wk-" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
+    _in_machine 'sudo podman stop --time 30 $(sudo podman ps --filter "name=^wk-" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
     info "stopped $(printf '%s\n' "$running" | wc -l | tr -d ' ') container(s)"
 else
     info "no running containers"

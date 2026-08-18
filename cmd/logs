@@ -12,9 +12,14 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/watchdog.sh"
+. "$WK_ROOT/lib/target.sh"
 
 NAME="${1:-}"; shift || true
 require_name "$NAME"
+
+# The log lives wherever that workspace's target keeps its state, which is not
+# the same place for a container and a macOS VM.
+load_target "${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
 LOG="$(wk_ws_dir "$NAME")/build.log"
 [ -f "$LOG" ] || die "no build log for '$NAME' -- has it been built?"
 

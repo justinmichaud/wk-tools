@@ -14,6 +14,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/watchdog.sh"
+. "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/build/configs.sh"
 
 if [ "${1:-}" = --list ]; then
@@ -28,8 +29,8 @@ require_name "$NAME"
 
 config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
 
-TARGET="${WK_TARGET:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
@@ -38,15 +39,25 @@ POLITE=""
 NICE=10
 if [ "$TARGET" = remote ]; then POLITE=1; NICE=19; fi
 
-# Size the build from the *container's* memory cap, not the VM's free memory.
-# Inside a container the kernel still reports the whole machine's MemAvailable,
-# so deriving jobs from it picks a number the cgroup will OOM-kill mid-link.
-if [ "$TARGET" = container ]; then
-    WK_CGROUP_MB=$(envelope_mem_mb)
-    WK_CGROUP_CORES=$(envelope_cores)
+# Size the build from what the *target* has, not from this machine's free
+# memory. Inside a container the kernel still reports the whole machine's
+# MemAvailable, so deriving jobs from it picks a number the cgroup will
+# OOM-kill mid-link; and for a macOS VM this half runs on the host, whose
+# memory has nothing to do with what the guest was booted with.
+if [ "$TARGET" != remote ]; then
+    WK_CGROUP_MB=$(t_mem_mb "$NAME")
+    WK_CGROUP_CORES=$(t_cores "$NAME")
     export WK_CGROUP_MB WK_CGROUP_CORES
 fi
 JOBS=$(explain_jobs "$POLITE")
+
+# Push the tooling in before anything else. A no-op for the container, which
+# bind-mounts it; an rsync of differences for a VM.
+#
+# Deliberately ahead of the status file: anything that fails after
+# `state=running` is written but before the build is reaped leaves the
+# workspace looking like it is building forever.
+t_sync_tools "$NAME"
 
 WS=$(wk_ws_dir "$NAME")
 LOG="$WS/build.log"
@@ -74,19 +85,14 @@ info "building $CONFIG in '$NAME' with -j$JOBS (nice $NICE)"
 log  "  log: $LOG"
 log  "  stall warning after ${WK_STALL_SECONDS}s of silence; abort after ${WK_ABORT_SECONDS}s"
 
+# The build environment comes from one place, shared with the golden-base
+# prebuild, so the two cannot drift into building subtly different things.
+config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE"
+
 set +e
 run_watched "$LOG" -- \
-    t_exec "$NAME" env \
-        CCACHE_DIR=/ccache \
-        NUMBER_OF_PROCESSORS="$JOBS" \
-        CMAKE_BUILD_PARALLEL_LEVEL="$JOBS" \
-        WK_JOBS="$JOBS" \
-        WK_NICE="$NICE" \
-        WK_BUILD_ARGS="$CFG_PORT $CFG_ARGS" \
-        WK_BUILD_CMAKE="$CFG_CMAKE" \
-        CC="$CFG_CC" CXX="$CFG_CXX" \
-        WK_MB_PER_JOB="$WK_MB_PER_JOB" \
-        /opt/wk-tools/container/build-in-workspace.sh "$@"
+    t_exec "$NAME" env "${CFG_ENV[@]}" \
+        "$(t_tools "$NAME")/build/build-in-target.sh" "$@"
 rc=$?
 set -e
 

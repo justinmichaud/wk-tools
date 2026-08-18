@@ -160,6 +160,9 @@ Measured on an M4 (10 cores / 32 GB), with the VM at 8 cores / 20 GB:
 | `wk build wpe-release`, full WPE, cold | ~68 min |
 | `wk test --layout`, 3 tests, software rendering | ~15 s |
 
+> The macOS VM figures are recorded in [docs/macos-vm.md](docs/macos-vm.md);
+> they are a separate target and share none of this machinery.
+
 > The WPE figure is a nested-virtualisation cost, not a WebKit one. The
 > container gets 7 of the VM's 8 vCPUs, and the VM gets 8 of the host's 10
 > cores — so a full WPE build has roughly 70% of the machine. Native Linux on
@@ -253,14 +256,46 @@ itself:
 
 ## 8. Optional: macOS VMs for Apple-port builds
 
+Only if you build the Apple ports. Needs [Tart](https://tart.run), which
+`./setup` deliberately does not install — see **[docs/macos-vm.md](docs/macos-vm.md)**
+for why, for the licence position, and for the install command.
+
 ```sh
-wk vm new mac-rel
+wk new mac-rel --target vm     # builds the golden base the first time
 wk vm start mac-rel
+wk build mac-rel mac-release
 ```
 
-Needs [Tart](https://tart.run). Apple permits exactly **two** macOS VMs per
-host and Virtualization.framework enforces it, so `wk vm new` refuses at the
-limit rather than failing opaquely.
+The first run pulls a prepared macOS + Xcode image (**~69 GB compressed**) and
+clones WebKit inside it. Budget about three hours, once. Every workspace
+afterwards is an APFS copy-on-write clone of that: measured at **1 second and
+about a megabyte of real disk**.
+
+Measured on the same M4, guest at 9 vCPU / 20 GB:
+
+| | |
+|---|---|
+| `wk new --target vm` | ~1 s |
+| `wk vm start`, cold boot to ssh | ~10 s |
+| `wk build mac-release`, cold (there is no ccache here) | ~99 min |
+
+Three limits to know about:
+
+- The stock image has no room to build in, so the guest disk is grown to
+  `WK_VM_DISK_GB` (250 GB) before its first boot. Left alone, a build dies
+  after half an hour with `No space left on device`.
+
+- Apple permits exactly **two running** macOS VMs per host, and
+  Virtualization.framework enforces it. `wk vm start` refuses at the limit
+  rather than failing opaquely with `VZErrorDomain` code 6.
+- On a 32 GB machine the podman VM already holds the whole memory envelope, so
+  the two cannot run at once. `wk vm start` refuses with the numbers and tells
+  you what would fit.
+
+> **A macOS workspace is not sandboxed the way a Linux one is.** The host
+> filesystem is unreachable and the guest is disposable, but egress is *not*
+> filtered — a macOS guest cannot be firewalled from outside. `wk claude` warns
+> before it starts.
 
 ---
 

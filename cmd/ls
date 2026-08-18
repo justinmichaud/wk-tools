@@ -9,9 +9,13 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
 
+# BASE and CHANGES are overlay concepts and only mean anything for the
+# container target. A macOS VM has neither -- its equivalents are the golden
+# image and the guest's own disk -- so `wk vm ls` is what lists those.
 TARGET="${WK_TARGET:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+load_target "$TARGET"
 
 printf '%-20s %-12s %-20s %8s\n' NAME STATE BASE CHANGES
 

@@ -30,7 +30,7 @@ With several red bots, triage them **in parallel — one subagent per bot** — 
 gh pr view --json number,title,url,state,headRefName
 ```
 
-If there is no PR for the current branch, stop and tell the user.
+If there is no PR for the current branch, stop and tell the user. Note which repo the PR belongs to: a downstream one such as `WebPlatformForEmbedded/WPEWebKit` has its own EWS on another host whose bots never post GitHub statuses — see the end of Step 2.6.
 
 ## Step 2: List check statuses
 
@@ -72,6 +72,67 @@ curl -s "https://ews-build.webkit.org/api/v2/builders/<BUILDER_ID>/builds/<BUILD
 ```
 
 Any bot showing `compile-webkit-without-change` (HAS_RETRY) has a real with-change compile failure — fetch its `compile-webkit` log (the *first* compile step, not the without-change one) per Step 4 and diagnose it. Bots still on their first `compile-webkit` are not yet proven failures, but if they share a toolchain with a bot you already diagnosed (GTK/WPE all use the same wkdev SDK as gtk3-libwebrtc), predict the same failure and confirm your fix covers them.
+
+## Step 2.6: The bot set is per-PR — build bots trigger the test bots
+
+Most ports schedule one *build* bot on the `pull_request` scheduler; their test bots are `Triggerable` and come into existence only when that build finishes green. So the roster on a PR is not fixed, and a bot that is simply absent is nearly always explained by its parent build rather than by infra. WPE is the clearest case (`Tools/CISupport/ews-build/config.json`, `builders` plus `schedulers`):
+
+| shortname | builder | id | scheduled by |
+| --- | --- | --- | --- |
+| `wpe` | WPE-Build-EWS | 5 | `pull_request`, directly |
+| `wpe-wk2` | WPE-WK2-Tests-EWS | 34 | triggered by `wpe-build-ews` |
+| `api-wpe` | API-Tests-WPE-EWS | 41 | triggered by `wpe-build-ews` |
+| `jsc-wpe` | JSC-Tests-WPE-EWS | 251 | triggered by `wpe-build-ews` |
+
+The same parent/child shape holds for the other ports: `gtk` triggers `gtk-wk2` and `api-gtk`; `win` triggers `win-tests`; `mac` triggers `mac-wk2`, `mac-intel-wk2`, `mac-wk2-stress`, `mac-site-isolation`, `api-mac`, `jsc-x86-64`; `ios-sim`, `vision-sim` and `mac-AS-debug` likewise. Builder ids and the roster both change over time — read ids from `/api/v2/builders` and the trigger graph from `config.json` instead of assuming either.
+
+What that buys you when triaging:
+
+- A red **build** bot (`wpe`) is a compile failure, and its three test bots never ran. Do not go looking for them.
+- A red **test** bot (`wpe-wk2`, `api-wpe`, `jsc-wpe`) proves the build was green, so never hunt a compile error there. Each child carries `parent_builderid` and `parent_buildnumber` in its properties — use them to jump to the build.
+- The parent's `results` code says which case you are in: `0` success, `2` failure (`Hash <sha> for PR <n> does not build`), `3` skipped (`Hash <sha> on PR <n> is outdated`, i.e. superseded by a newer push — nothing is wrong and no children spawn).
+- Old PRs carry green statuses from **retired** WPE builders: `wpe-skia` (52), `wpe-cairo` (65), `wpe-cairo-libwebrtc` (166), `wpe-libwebrtc` (172). Their build history stops around PRs 28k, 54k, 57k and 58k respectively. A stale green from one of those is not a bot you can re-run, and its absence from a new PR is not a regression.
+
+Enumerate the bots that actually have a build for a PR — GitHub statuses lag the buildbot, this does not:
+
+```bash
+for id in 5 34 41 251; do
+  curl -s "https://ews-build.webkit.org/api/v2/builders/$id/builds?limit=150&order=-number&property=github.number" \
+    | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for b in d.get('builds',[]):
+    if str(((b.get('properties') or {}).get('github.number') or [None])[0])=='<PR_NUMBER>':
+        print('builder $id build', b.get('number'), 'results=', b.get('results'), b.get('state_string'))
+"
+done
+```
+
+Two constraints on that scan. `limit` must stay at 150 or below — a larger page comes back truncated mid-JSON and fails to parse. And it only reaches back 150 builds, roughly a day on builder 5, so a PR last built earlier turns up nothing: add `&offset=N` and page back (`offset` is measured in builds from newest, so aim for `newest_build_number - wanted_build_number`). Filtering server-side does not work — `&github.number__eq=71523` is silently ignored and you get the newest builds instead, so always filter client-side.
+
+Given one build, walk the trigger graph instead of scanning. A child names its parent directly in its properties (`parent_builderid`, `parent_buildnumber`). Going the other way, from a parent to its children, uses the global `buildid` (not the per-builder build number):
+
+```bash
+# 1. parent's global buildid:
+curl -s ".../api/v2/builders/5/builds/<BUILD_NUMBER>" | python3 -c "import json,sys; print(json.load(sys.stdin)['builds'][0]['buildid'])"
+# 2. the buildsets it triggered (reason names the Triggerable scheduler):
+curl -s ".../api/v2/buildsets?parent_buildid=<BUILDID>"
+# 3. each buildset's buildrequest, then the build itself:
+curl -s ".../api/v2/buildrequests?buildsetid=<BSID>"      # -> buildrequestid
+curl -s ".../api/v2/builds?buildrequestid=<BRID>"          # -> builderid + number + results
+```
+
+
+**The downstream `WebPlatformForEmbedded/WPEWebKit` repo has its own EWS, on a different host: `https://ews-wpe-rdk.igalia.com`.** Nothing about it reaches the GitHub checks API — `gh pr checks`, `/commits/<sha>/check-runs` and `/commits/<sha>/status` are all empty for those PRs. The bots post their result as an `<!--EWS-Status-Bubble-Start-->` markdown table rendered into the PR page, so the page is the index of bots and their verdicts. Read the links straight out of it:
+
+```bash
+curl -sL "https://github.com/WebPlatformForEmbedded/WPEWebKit/pull/<PR_NUMBER>" \
+  | grep -oE 'https://ews-wpe-rdk\.igalia\.com[^" ]*' | sort -u
+```
+
+Each link's `title` attribute is the verdict (`Hash ed28d251 for PR 1713 does not build (failure)`). From there the API is the same buildbot shape as upstream, just at that host: `/api/v2/builders/<ID>/builds/<N>/steps`, `/steps/<N>/logs`, `/api/v2/logs/<ID>/raw`.
+
+The builder set there depends on the PR's **target branch** — this is where the roster really varies per PR. `curl -s https://ews-wpe-rdk.igalia.com/api/v2/builders` lists 12: `wpe-2.38`, `wpe-2.42` and `wpe-2.46`, each with an x86-64 and an ARM-32 Build bot plus a matching LayoutTests bot. A PR against `wpe-2.46` runs builders 11 (`WPE-246-x86-64-bit-Build-EWS`, worker `ews-rdk-wpe-246-1`) and 12 (`WPE-246-ARM-32-bit-Build-EWS`, worker `ews-rdk-wpe-246-armhf-1`), with 9 and 10 the corresponding LayoutTests bots; silence from the 2.38 and 2.42 bots is expected, not a problem to chase.
 
 ## Step 3: For each failing bot, find the failing step
 
@@ -122,6 +183,7 @@ Diagnose from the log and apply the fix. Common WebKit EWS failure patterns:
 - **`UnretainedCallArgsCheckerExpectations` or other safer-cpp expectation diff** (mac-safer-cpp, ios-safer-cpp): the static analyzer expectations file is now stale. The fix is to delete the now-passing line(s) from the relevant `*Expectations` file.
 - **`<stdatomic.h>` macros leaking into C++** — symptom: `error: no type named '__c11_atomic_thread_fence' in namespace 'std'` and/or `definition or redeclaration of 'memory_order_*' not allowed inside a function`, often as `could not build module 'wtf'`. Cause: a C header that does `#include <stdatomic.h>` (e.g. a libpas `pas_*.h`) became reachable from a C++ header (e.g. the PR made `wtf/Threading.h` include `bmalloc/ThreadSuspend.h` → `pas_thread_suspend.h` → `pas_utils.h`). In C++ TUs `<stdatomic.h>` `#define`s `atomic_thread_fence`/`memory_order_*` to `__c11_atomic_*` builtins, which poison later C++ code using `std::atomic_thread_fence` (e.g. `wtf/SequenceLocked.h`). **Linux-only** (libstdc++/wkdev SDK); Apple bots pass because libc++'s `<stdatomic.h>` is C++-aware — so this looks platform-specific but IS PR-caused (the `compile-webkit-without-change` step passing proves it). Fix: in the offending C header, guard the include with `#ifndef __cplusplus` (C TUs unchanged; only the C++ leak is removed). Verify no C++ consumer actually needs the C atomic *macro* API — `__c11_atomic_*`/`__atomic_*` builtins and the `_Atomic` keyword need no header.
 - **Type/member declared under too-broad a platform guard** — symptom on a non-mainstream POSIX bot (e.g. PlayStation): `error: unknown type name '<Type>'` where `<Type>` is defined only for certain platforms. Cause: the PR moved a member/typedef into a generic `#else` (all non-DARWIN) branch, but the type is defined only for, say, `OS(LINUX)`/`OS(WINDOWS)` (check where the `using <Type> = ...` lives, often in `ThreadingPrimitives.h`). The build reaches a platform that takes the broad branch but lacks the type. Fix: narrow the guard to exactly the platforms where the type exists *and* is used (grep for the member's read/write sites and their guards) — e.g. `#if OS(LINUX) || OS(WINDOWS)`. Confirm the member is never *used* on the excluded platform before removing it there.
+- **A cherry-pick that references a member the branch does not have** — symptom on a downstream `wpe-2.4x` PR: `error: 'class WebCore::StyleInheritedData' has no member named 'fontData'`, same error on every architecture, with `compile-webkit-without-change` green. The upstream commit was written against a later refactor of that class. Fix by rewriting the new code in the branch's own idiom: grep the file for how neighbouring functions reach the same state (here `m_inheritedData.access().fontCascade`, already used a few lines below) rather than backporting the refactor as well.
 - **A real layout/API test regression**: only treat as a real regression if `find-modified-layout-tests` said the PR has relevant changes AND the failing tests overlap with the PR's diff. Otherwise treat as pre-existing.
 
 ### B. Infrastructure failure — leave it, cite proof
@@ -130,6 +192,7 @@ Back the "infra" label with proof (a matching error on another PR or a main-bran
 
 - `jhbuild` failing with `Error: configure storage: open /var/lib/shared-sdk-images/overlay-images/images.json: permission denied` — wkdev container storage, common on WPE bots.
 - `run-webkit-tests` exiting non-zero in under ~5 seconds with no captured output — worker spawning, especially on win-tests.
+- `download-built-product` dying with `curl: (28) Operation too slow. Less than 102400 bytes/sec transferred the last 60 seconds` partway through the ~236 MB archive — the worker's S3 fetch stalled. Check that the parent build bot is green (the archive uploaded fine) and it is infra; common on the `igaliaN-wpe-ews` workers.
 - `worker_preparation` failing or step stuck on `Killed old processes` — worker state, not your code.
 - `Unexpected infrastructure issue: ... retrying with the hope it was a random infrastructure error` already in the step state — the system already knows.
 - `analyze-compile-webkit-results => Unable to build WebKit without PR, retrying build (failure)` — the bot couldn't build main even without the PR.
@@ -154,6 +217,8 @@ List each failing bot on one line, bucketed **fixed (locally)**, **infra**, or *
 
 - **Fetch only failing/in-progress bot logs, not passing ones.** Sweeping the *steps* of in-progress builds (Step 2.5) is cheap and expected; skip full *logs* of green bots.
 - **Run the Step 2.5 in-progress sweep before declaring the PR triaged** — `gh pr checks` alone shows only what GitHub has been told so far.
+- **Never conclude a PR has no bots from `gh pr checks` output.** Enumerate the builders by PR number (Step 2.6) first; a port whose build bot is still running or whose PR-relevance check skipped it has no statuses yet, and a triggered test bot does not exist until its build goes green.
+- **When a PR's bots are missing from `gh pr checks`, read the PR page HTML before concluding anything.** `curl -sL <pr-url> | grep -oE 'https?://[^" ]*ews[^" ]*'` finds the status bubble's links, including EWS instances that never post GitHub statuses. Guessing hostnames does not find them; the page always names them.
 - **Diagnose one bot per shared root cause.** Most Apple-platform compile failures share one cause across mac/tv/vision/watch — fix one, the rest follow. Open parallel subagents only for genuinely independent root causes.
 - **Leave a broken bot broken and say so** — no fallback/defensive code to paper over infra.
 - **Never commit, push, amend, or comment.** Edits go to the working tree and stop.

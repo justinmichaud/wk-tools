@@ -11,29 +11,56 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
 
 NAME="${1:-}"; shift || true
 require_name "$NAME"
 
-TARGET="${WK_TARGET:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
 # --- verify the sandbox ------------------------------------------------------
-# Relaxed permissions are defensible only while the boundary holds, so this
-# tests the boundary rather than trusting that setup ran correctly at some point
-# in the past. `wk verify` measures the properties from inside the workspace:
-# no network interface, egress refused outside the allowlist, no path with the
-# proxy bypassed, no host filesystem. If any of that has regressed -- a
-# hand-edited container, a proxy that is not running -- the right response is to
-# stop, not to start an autonomous agent anyway.
-"$WK_ROOT/cmd/verify" "$NAME" || die "refusing to run: the sandbox is not intact (see above)"
+# Relaxed permissions are defensible only while the boundary holds, and what the
+# boundary *is* differs by target -- so this dispatches on the target rather
+# than applying one test everywhere.
+
+if [ "$TARGET" = remote ]; then
+    die "refusing to run Claude against a remote target: it is a shared machine
+    with no isolation at all. Use a container or vm workspace."
+fi
+
+if [ "$TARGET" = container ]; then
+    # `wk verify` measures the properties from inside the workspace: no network
+    # interface, egress refused outside the allowlist, no path with the proxy
+    # bypassed, no host filesystem. If any of that has regressed -- a
+    # hand-edited container, a proxy that is not running -- the right response
+    # is to stop, not to start an autonomous agent anyway.
+    "$WK_ROOT/cmd/verify" "$NAME" || die "refusing to run: the sandbox is not intact (see above)"
+fi
+
+if [ "$TARGET" = vm ]; then
+    # Deliberately NOT `wk verify`. Every property that check measures is a
+    # container property -- no network interface, an egress proxy, a filtered
+    # allowlist -- and a macOS guest has none of them by construction, so
+    # running it here would fail every time and say the sandbox was broken when
+    # it is merely different.
+    #
+    # What a macOS guest actually gives you is a VM boundary and disposability:
+    # the host filesystem is unreachable, and `wk rm` destroys the guest. Egress
+    # is not confined, because there is no netns to filter from outside and pf
+    # inside the guest is writable by whatever runs as root there -- which
+    # includes whatever is being sandboxed. Saying so is the point.
+    warn "'$NAME' is a macOS VM: the host filesystem is unreachable and the guest is
+  disposable, but egress is NOT filtered the way a container workspace's is.
+  Anything running here can reach the whole network."
+fi
 
 info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
 
 # --dangerously-skip-permissions is the point of the sandbox: inside a
-# disposable container with a filtered network and no host filesystem, prompting
-# for each edit buys nothing and prevents unattended work.
-t_exec "$NAME" env WK_WORKSPACE="$NAME" \
-    bash -lc "cd /src/WebKit && exec claude --dangerously-skip-permissions $*"
+# disposable workspace with no host filesystem, prompting for each edit buys
+# nothing and prevents unattended work.
+t_exec_tty "$NAME" env WK_WORKSPACE="$NAME" \
+    bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $*"

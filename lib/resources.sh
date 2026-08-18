@@ -46,7 +46,7 @@ reserve_mb()    { is_headless && echo "$WK_HEADLESS_RESERVE_MB"    || echo "$WK_
 # too pessimistic: it caps an 18 GB container at 4 jobs on an 8-core machine,
 # leaving half the CPU idle for the whole build. Typical WebKit TUs peak nearer
 # 1-1.5 GB, so 1.5 GB keeps the cap honest without throttling the common case;
-# the cgroup clamp in build-in-workspace.sh is the real safety net.
+# the cgroup clamp in build/build-in-target.sh is the real safety net.
 WK_MB_PER_JOB="${WK_MB_PER_JOB:-1536}"
 
 host_cores() {
@@ -161,7 +161,10 @@ build_jobs() {
 explain_jobs() {
     local polite="${1:-}" jobs
     jobs=$(build_jobs "$polite")
-    log "resources: ${jobs} jobs (cores=$(host_cores) avail=$(avail_mem_mb)MB @ ${WK_MB_PER_JOB}MB/job${polite:+, polite})"
+    # Report the cores the job count was actually derived from. When the caller
+    # supplied a cap -- a cgroup limit, or a guest's vCPU count -- printing the
+    # host's core count instead makes the derivation look wrong every time.
+    log "resources: ${jobs} jobs (cores=${WK_CGROUP_CORES:-$(host_cores)} avail=$(avail_mem_mb)MB @ ${WK_MB_PER_JOB}MB/job${polite:+, polite})"
     echo "$jobs"
 }
 

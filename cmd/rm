@@ -12,12 +12,13 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
 
 NAME="${1:-}"
 require_name "$NAME"
 
-TARGET="${2:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+TARGET="${2:-${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}}"
+load_target "$TARGET"
 
 ws=$(wk_ws_dir "$NAME")
 [ -d "$ws" ] || [ "$(t_info "$NAME")" != absent ] \
@@ -33,17 +34,7 @@ confirm "destroy workspace '$NAME' and all its changes?" || die "aborted"
 
 t_destroy "$NAME"
 
-# Drop the generated ssh alias.
-ssh_conf="$HOME/.ssh/config.d/wk"
-if [ -f "$ssh_conf" ] && grep -q "^Host wk-$NAME\$" "$ssh_conf"; then
-    tmp=$(mktemp)
-    awk -v h="Host wk-$NAME" '
-        $0 == h { skip = 1; next }
-        /^Host / { skip = 0 }
-        !skip { print }
-    ' "$ssh_conf" > "$tmp"
-    mv "$tmp" "$ssh_conf"
-    info "removed ssh alias wk-$NAME"
-fi
+ssh_alias_remove "$NAME"
+target_forget "$NAME"
 
 info "workspace '$NAME' destroyed"

@@ -43,4 +43,21 @@ if [ "$_missing" -gt 0 ]; then
     die "$_missing required tool(s) missing; install them and re-run ./setup"
 fi
 
+# --- optional: macOS VMs for the Apple ports ---------------------------------
+# Not in the required list, and deliberately not installed here. Two reasons:
+# it is only needed if you build the Apple ports, and its licence is not OSI
+# (FSL-1.1-ALv2), which is a decision for a person rather than a setup script.
+#
+# It also cannot simply be copied to a bare path: the binary needs the
+# com.apple.security.virtualization entitlement, which lives in the signed .app
+# bundle. Extracting the executable out of the bundle produces something that
+# fails at runtime with an unhelpful error.
+if have tart || [ -x "$HOME/.local/bin/tart" ]; then
+    unchanged "tart present (macOS VM target available)"
+elif [ -d "$HOME/.tart" ]; then
+    warn "~/.tart exists but tart is not on PATH -- 'wk vm' will not work"
+else
+    debug "tart not installed; 'wk vm' unavailable (see docs/macos-vm.md)"
+fi
+
 unset _missing

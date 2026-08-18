@@ -9,11 +9,13 @@
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
-_vm() {
+# Named _in_machine because targets/vm.sh, sourced below, defines its own _vm().
+_in_machine() {
     if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         podman machine ssh "$WK_MACHINE" "$@" </dev/null
     else
@@ -32,13 +34,28 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     fi
 fi
 
-stopped=$(_vm 'sudo podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"' || true)
+stopped=$(_in_machine 'sudo podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"' || true)
 if [ -n "$stopped" ]; then
     printf '%s\n' "$stopped" | sed 's/^/  starting /' >&2
-    _vm 'sudo podman start $(sudo podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
+    _in_machine 'sudo podman start $(sudo podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
     info "started $(printf '%s\n' "$stopped" | wc -l | tr -d ' ') container(s)"
 else
     info "no stopped containers"
+fi
+
+# macOS VMs are deliberately NOT started here. They do not share the podman
+# machine's memory -- they compete with it -- so bringing both up unattended is
+# how the desktop ends up swapping. Say they are there and let the choice be
+# made explicitly.
+if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+    . "$WK_ROOT/lib/target.sh"
+    . "$WK_ROOT/targets/vm.sh"
+    if _tart_bin >/dev/null 2>&1; then
+        _guests=$(t_list 2>/dev/null | awk -F'\t' '$2 != "running" { print $1 }' | tr '\n' ' ')
+        [ -n "${_guests// /}" ] && \
+            log "macOS VM(s) not started (they compete with the machine for memory): $_guests
+  wk vm start <name>"
+    fi
 fi
 
 exec "$WK_ROOT/wk" status

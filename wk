@@ -12,6 +12,7 @@ set -euo pipefail
 
 WK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/target.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
@@ -20,7 +21,7 @@ usage() {
 usage: wk <command> [args]
 
 workspaces
-  new <name> [--target T]   create a workspace from the current base snapshot
+  new <name> [--target T]   create a workspace (container | vm | remote)
   ls                        list workspaces
   enter <name>              interactive shell (GPU/desktop integration on Linux)
   build <name> <config>     build, with derived job count and nice level
@@ -44,7 +45,7 @@ sources and disk
 hosts and machines
   setup                     idempotent host bootstrap (also: ./setup)
   backup                    write live desktop settings back into the repo
-  vm <sub>                  macOS VM lifecycle for Apple-port builds
+  vm <sub>                  macOS VM lifecycle: ls|new|start|stop|ip|enter|sync|base|rm
   pi <sub>                  provision a Raspberry Pi onto the tailnet
   quiesce on|off|status     quiet the machine for benchmarking
   session on|off|status     a real GPU session on the attached monitor (Linux)
@@ -55,21 +56,45 @@ EOF
     exit 2
 }
 
+# Which target a command will act on.
+#
+# This has to be answered *before* anything is forwarded, because only the
+# container target lives inside the podman VM. A vm or remote workspace is
+# driven from the host -- forwarding it would run tart or ssh from inside a
+# Linux guest that has neither, and the resulting error would point at the
+# wrong machine entirely.
+#
+# The order matters: an explicit WK_TARGET wins, then a `--target` on this
+# command line (which is how `wk new` chooses), then what the workspace was
+# registered as when it was created. Anything unregistered is a container,
+# because that is both the default and what every workspace predating the
+# registry is.
+resolve_target() {
+    local prev='' a name=''
+
+    [ -n "${WK_TARGET:-}" ] && { printf '%s' "$WK_TARGET"; return 0; }
+
+    for a in "$@"; do
+        if [ "$prev" = --target ]; then printf '%s' "$a"; return 0; fi
+        prev="$a"
+        case "$a" in
+            -*) ;;
+            *)  [ -z "$name" ] && name="$a" ;;
+        esac
+    done
+
+    if [ -n "$name" ] && target_of "$name" 2>/dev/null; then
+        return 0
+    fi
+    printf '%s' container
+}
+
 # Commands that act on the host itself and are never forwarded into the VM.
 is_host_command() {
     case "$1" in
         setup|backup|vm|mcp|quiesce|session|pi|key|stop|start|help|-h|--help) return 0 ;;
         *) return 1 ;;
     esac
-}
-
-# Quote arguments for safe reconstruction inside the VM's shell.
-shell_quote() {
-    local arg out=''
-    for arg in "$@"; do
-        out="$out '$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")'"
-    done
-    printf '%s' "$out"
 }
 
 forward_to_vm() {
@@ -86,7 +111,7 @@ forward_to_vm() {
     # -- separates our args from ssh's. WK_IN_VM stops the VM-side wk from
     # trying to forward again if anything is ever misconfigured.
     exec podman machine ssh "$WK_MACHINE" -- \
-        "WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_CONFIG:+WK_CONFIG=$WK_CONFIG }/opt/wk-tools/wk$(shell_quote "$@")"
+        "WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_CONFIG:+WK_CONFIG=$WK_CONFIG }/opt/wk-tools/wk $(sh_quote "$@")"
 }
 
 main() {
@@ -104,7 +129,9 @@ main() {
     [ -x "$impl" ] || { warn "unknown command: $cmd"; usage; }
 
     if is_macos && [ -z "${WK_IN_VM:-}" ] && ! is_host_command "$cmd"; then
-        forward_to_vm "$cmd" "$@"
+        if [ "$(resolve_target "$@")" = container ]; then
+            forward_to_vm "$cmd" "$@"
+        fi
     fi
 
     exec "$impl" "$@"

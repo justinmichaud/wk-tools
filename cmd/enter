@@ -11,6 +11,7 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
 
 NAME="${1:-}"; shift || true
 require_name "$NAME"
@@ -18,18 +19,22 @@ require_name "$NAME"
 ZED=""
 [ "${1:-}" = --zed ] && { ZED=1; shift; }
 
-TARGET="${WK_TARGET:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
 if [ -n "$ZED" ]; then
     have zed || die "zed is not on PATH"
-    exec zed "ssh://wk-$NAME/src/WebKit"
+    host=$(t_ssh_host "$NAME") || die "'$NAME' is not running"
+    exec zed "ssh://$host$(t_src "$NAME")"
 fi
 
+# No `exec`: t_exec is a shell function, and exec can only replace the process
+# with a real program. `exec t_exec ...` fails with "t_exec: not found".
 if [ $# -gt 0 ]; then
-    exec t_exec "$NAME" "$@"
+    t_exec "$NAME" "$@"
+    exit $?
 fi
 
 # The workspace sees the compositor at a fixed path, so what matters is whether

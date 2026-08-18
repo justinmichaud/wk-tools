@@ -19,9 +19,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/watchdog.sh"
-
-TARGET="${WK_TARGET:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+. "$WK_ROOT/lib/target.sh"
 
 worst=0
 
@@ -46,9 +44,9 @@ report_one() {
     fi
 
     if [ "$kind" = build ]; then
-        printf '%-18s container=%-10s %s=%s' "$ws" "$(t_info "$ws")" "$kind" "${state:-none}"
+        printf '%-18s %-8s %-10s %s=%s' "$ws" "$TARGET" "$(t_info "$ws")" "$kind" "${state:-none}"
     else
-        printf '%-18s %-21s %s=%s' "" "" "$kind" "${state:-none}"
+        printf '%-18s %-8s %-10s %s=%s' "" "" "" "$kind" "${state:-none}"
     fi
     [ -n "$config" ] && printf ' (%s)' "$config"
     [ -n "$secs" ] && printf ' %sm%ss' "$(( secs / 60 ))" "$(( secs % 60 ))"
@@ -84,12 +82,21 @@ report_one() {
     esac
 }
 
+# One named workspace resolves to its own target; the bare listing walks every
+# target there is. Loading one target and reporting everything through it --
+# which is what this used to do -- silently reported vm workspaces as absent,
+# because the container driver has never heard of them.
 if [ -n "${1:-}" ]; then
     require_name "$1"
+    TARGET="${WK_TARGET:-$(target_of "$1" 2>/dev/null || echo container)}"
+    load_target "$TARGET"
     report "$1"
 else
     found=0
-    for ws in $(list_workspaces); do found=1; report "$ws"; done
+    for TARGET in ${WK_TARGET:-$(target_all)}; do
+        load_target "$TARGET"
+        for ws in $(list_workspaces); do found=1; report "$ws"; done
+    done
     [ "$found" -eq 1 ] || log "(no workspaces)"
 fi
 

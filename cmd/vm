@@ -3,47 +3,115 @@
 # wk vm <sub> -- disposable macOS VMs for building the Apple ports.
 #
 # macOS has no container primitive for macOS userspace -- Apple's `container`
-# CLI runs Linux containers -- so isolation for Apple-port builds means a VM.
+# CLI runs Linux containers -- so isolation for an Apple-port build means a
+# virtual machine, and there is no lighter option.
+#
+# This is lifecycle only. Everything else -- build, test, run, claude, rm --
+# goes through the ordinary commands, because `wk new <name> --target vm`
+# registers the target and they resolve it from there. `wk vm new` is a
+# shorthand for that one case.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
-. "$WK_ROOT/targets/vm.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+load_target vm
+
+is_macos || die "macOS VMs need a macOS host (Virtualization.framework)"
+
+# The address changes on every boot, so the alias is rewritten at start rather
+# than written once at creation. Zed and plain `ssh wk-<name>` then both work
+# without anyone having to look an IP up.
+_write_alias() {
+    ssh_alias_set "$1" "$2" "$WK_VM_USER" "$WK_VM_KEY"
+    info "ssh alias wk-$1 -> $WK_VM_USER@$2"
+}
 
 SUB="${1:-ls}"; shift || true
 
 case "$SUB" in
 ls)
     printf '%-20s %s\n' NAME STATE
-    t_list || true
+    # t_list is tab-separated so it stays machine-readable; the columns are a
+    # presentation concern and belong here, not in the driver.
+    t_list 2>/dev/null | awk -F'\t' '{printf "%-20s %s\n", $1, $2}' || true
     ;;
 new)
     NAME="${1:-}"; require_name "$NAME"
     t_create "$NAME"
+    target_register "$NAME" vm
     info "created; start it with: wk vm start $NAME"
     ;;
 start)
     NAME="${1:-}"; require_name "$NAME"
     ip=$(t_start "$NAME")
+    _write_alias "$NAME" "$ip"
     info "$NAME is up at $ip"
-    log  "  zed ssh://admin@$ip/Users/admin/WebKit"
+    log  "  wk build $NAME mac-release"
+    log  "  zed ssh://wk-$NAME$(t_src "$NAME")"
     ;;
 stop)
     NAME="${1:-}"; require_name "$NAME"
-    tart stop "wk-$NAME"
-    info "stopped $NAME"
+    t_stop "$NAME"
+    ;;
+ip)
+    NAME="${1:-}"; require_name "$NAME"
+    t_ssh_host "$NAME" || die "'$NAME' is not running"
     ;;
 enter)
     NAME="${1:-}"; require_name "$NAME"
     t_enter "$NAME"
     ;;
+sync)
+    # Push the current working tree of wk-tools into a running guest. The same
+    # thing `wk build` does first, exposed on its own for when you are editing
+    # this repo and want the change in the guest without starting a build.
+    NAME="${1:-}"; require_name "$NAME"
+    t_sync_tools "$NAME"
+    info "synced wk-tools into $NAME"
+    ;;
+base)
+    # The golden image: pulled, provisioned and shut down once, then cloned for
+    # every workspace. Nothing here is ever repeated per workspace, which is
+    # what makes `wk vm new` fast.
+    case "${1:-}" in
+    --rebuild)
+        # Throws away the guest and re-pulls nothing -- the OCI cache is still
+        # there -- but does redo the WebKit clone and the installers.
+        confirm "delete and rebuild the golden base VM '$WK_VM_BASE'?" || die "aborted"
+        _tart delete "$WK_VM_BASE" 2>/dev/null || true
+        _ensure_base
+        ;;
+    --refresh)
+        # The cheap one, and the one you actually want week to week: boot the
+        # existing base, fast-forward its checkout, shut it down. New
+        # workspaces then start from current main instead of from whenever the
+        # base was first built. Existing workspaces are unaffected -- they are
+        # already independent clones.
+        _base_exists || die "no golden base yet -- run 'wk vm base'"
+        _provision_base
+        ;;
+    "")
+        _ensure_base
+        ;;
+    *)
+        die "usage: wk vm base [--refresh|--rebuild]"
+        ;;
+    esac
+    info "golden base '$WK_VM_BASE' is ready"
+    ;;
 rm)
     NAME="${1:-}"; require_name "$NAME"
     confirm "delete macOS VM '$NAME'?" || die "aborted"
     t_destroy "$NAME"
+    ssh_alias_remove "$NAME"
+    target_forget "$NAME"
     ;;
 *)
-    die "usage: wk vm ls|new|start|stop|enter|rm [name]"
+    die "usage: wk vm ls|new|start|stop|ip|enter|sync|rm <name>
+       wk vm base [--refresh|--rebuild]"
     ;;
 esac

@@ -78,9 +78,11 @@ one channel is a unix socket to an egress proxy running as an ordinary
 resolving into RFC1918 or the tailnet range. Nothing in the daily path needs a
 privilege: `wk` never calls `sudo` on Linux.
 
-**macOS: nftables in the VM.** Rootful podman on a bridge, with the policy in
-the forward chain. That is the original design and what macOS is verified
-against; `docs/HANDOFF-macos-proxy.md` covers moving it to the proxy model.
+**macOS: nftables in the podman VM.** Rootful podman on a bridge, with the
+policy in the forward chain. (That is the Linux VM the containers run inside —
+not the macOS VMs of the `vm` target below, which are a different thing.)
+That is the original design and what macOS is verified against;
+`docs/HANDOFF-macos-proxy.md` covers moving it to the proxy model.
 
 Linux does not copy the macOS design because it cannot. Rootless podman has no
 filterable forward path — its network helper re-emits container traffic from
@@ -96,12 +98,22 @@ wk verify bug-238    # from inside the workspace: no interface, allowlist
                      # enforced, no path with the proxy bypassed, no host files
 ```
 
-`wk claude` runs that first and refuses to start if anything fails. A firewall
+`wk claude` runs that first for container workspaces and refuses to start if
+anything fails. A firewall
 that failed to load and a proxy that is not running both look perfectly fine
 from the host's config files, and both fail open.
 
 Tailscale ACLs are defence in depth, never the boundary: Tailscale's own
 documentation notes that ACLs "don't affect local network traffic".
+
+All of that describes the `container` target. **A macOS VM workspace gets none
+of it**, and implying otherwise would be the worst outcome here: a macOS guest
+has no shared network namespace to filter from outside, and `pf` inside it is
+writable by whatever runs as root there — which includes whatever you were
+sandboxing. Its boundary is the VM and its disposability: the host filesystem
+is unreachable by construction, and `wk rm` destroys the guest. That is the
+whole of it, and `wk claude` says so before it hands over control.
+
 
 Workstations are never sandboxed. They join the tailnet normally and keep full
 access to everything.
@@ -127,10 +139,20 @@ Every command runs against a target, behind one driver contract:
 | Target | Isolation | Notes |
 |---|---|---|
 | `container` | overlay + no network interface + no host mounts | the default |
-| `vm` | macOS VM (Tart) | Apple ports; Apple permits 2 per host |
+| `vm` | VM boundary only — **egress is not filtered** | Apple ports, Tart; 2 running guests per host |
+
 | `remote` | **none** | shared build boxes; polite, no containers |
 
 There is no `local` target: work never runs directly on a workstation.
+
+A workspace remembers the target it was created with, so only `wk new` ever
+needs `--target`. On macOS that also decides whether a command is forwarded
+into the podman VM at all: only container workspaces live there.
+
+The macOS VM target is a genuinely weaker boundary than the other two claim —
+a macOS guest cannot be firewalled from outside, so the isolation is the VM and
+its disposability, not the network. [docs/macos-vm.md](docs/macos-vm.md) is
+explicit about it, and so is `wk claude`.
 
 Shared build machines are treated as someone else's machine too — job count
 comes from live load average, builds run at `nice 19`, and a `flock` stops two
@@ -148,7 +170,9 @@ contract — no generic host exec — and caps how many workspaces can exist.
 
 Credentials do not transfer from the host: Claude Code uses the macOS Keychain
 on Darwin and `~/.claude/.credentials.json` on Linux. One `claude login` inside
-the first workspace seeds a shared volume for all of them.
+the first container workspace seeds a shared volume for all of them. macOS VM
+workspaces cannot use that volume at all — the Keychain is not a file to share —
+so log in once inside the golden base and every clone inherits it.
 
 ## Layout
 
@@ -157,9 +181,11 @@ setup              host bootstrap                lib/       shared helpers
 wk                 the CLI                       cmd/       one file per subcommand
 host/              per-OS setup and settings     targets/   container, vm, remote
 dotfiles/          host dotfiles (Zed only)      claude/    settings, skills, hooks, CLAUDE.md
-container/         workspace-side setup          build/     named build configs
+container/         workspace-side setup          build/     configs + the in-target build
 container/proxy/   the egress boundary           container/gpu/  the EGL probe
-admin/             quiesce + session helper      docs/      handoffs
+admin/             quiesce + session helper      vm/        macOS guest provisioning
+docs/              handoffs and design notes
+
 ```
 
 ## Benchmarking

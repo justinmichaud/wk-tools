@@ -126,6 +126,18 @@ require_name() {
     valid_name "${1:-}" || die "invalid name '${1:-}': use [a-zA-Z0-9._-], not starting with '-'"
 }
 
+# Quote arguments so they survive reconstruction inside another shell -- ssh
+# concatenates its command arguments with spaces and hands the result to a
+# remote shell, so anything with a space or a quote is mangled without this.
+sh_quote() {
+    local arg out='' sep=''
+    for arg in "$@"; do
+        out="$out$sep'$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")'"
+        sep=' '
+    done
+    printf '%s' "$out"
+}
+
 confirm() {
     local prompt="$1"
     [ -n "${WK_YES:-}" ] && return 0
