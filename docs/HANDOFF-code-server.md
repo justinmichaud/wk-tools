@@ -1,0 +1,1 @@
+Support setting up a remote dev environment like code-server too, so that I can access targets from the web. Add a web interface to spin up or tear down containers via ssh. We can deploy this service via docker on fbi-surveillance-gateway, so that I can do 100% of my development on an iPad remotely via tailscale. Ensure clangd will still be available.

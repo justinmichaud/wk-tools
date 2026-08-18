@@ -1,0 +1,1 @@
+I want helix to work, with dotfiles configured to include most features of zed. In particular, I want an easy way to view and edit git changes across multiple files. This is important becasue zed cannot run on rpi5 with enough perf, but helix can. This would give me a better development experience on the rpi5.
