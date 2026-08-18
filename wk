@@ -30,11 +30,13 @@ workspaces
   test <name> [args]        run tests
   claude <name>             launch Claude inside the workspace, sandboxed
   rm <name>                 destroy a workspace and everything it created
+  stop [--keep-vm]          shut down all containers and the VM; nothing is lost
+  start                     bring them all back
 
 sources and disk
   sync                      fetch all upstreams, publish a new base snapshot
   skills <sub>              status|diff|pull|push the shared, mutable skills
-  key <sub>                 show|ensure|register the fork push key
+  key <sub>                 register|check the fork push keys (uses gh)
   gc                        prune snapshots, images and caches; reclaim disk
 
 hosts and machines
@@ -53,7 +55,7 @@ EOF
 # Commands that act on the host itself and are never forwarded into the VM.
 is_host_command() {
     case "$1" in
-        setup|backup|vm|mcp|quiesce|pi|help|-h|--help) return 0 ;;
+        setup|backup|vm|mcp|quiesce|pi|key|stop|start|help|-h|--help) return 0 ;;
         *) return 1 ;;
     esac
 }

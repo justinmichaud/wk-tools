@@ -47,9 +47,9 @@ fi
 
 # --- ccache ------------------------------------------------------------------
 if have ccache; then
-    CCACHE_DIR="$WK_STORE/cache/ccache" ccache --max-size="${WK_CCACHE_MAXSIZE:-50G}" >/dev/null
+    CCACHE_DIR="$WK_STORE/cache/ccache" ccache --max-size="$WK_CCACHE_MAXSIZE" >/dev/null
     CCACHE_DIR="$WK_STORE/cache/ccache" ccache --cleanup >/dev/null 2>&1 || true
-    info "ccache trimmed to ${WK_CCACHE_MAXSIZE:-50G}"
+    info "ccache trimmed to $WK_CCACHE_MAXSIZE"
 fi
 
 # --- firewall address sets ---------------------------------------------------

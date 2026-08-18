@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# wk start -- bring everything back up after `wk stop`.
+#
+# Starts the podman machine, then every workspace container that exists.
+# Container init does not re-run: .wkdev-init guards its task list behind
+# /run/.wkdev-init-done, so a restart is quick and does not re-provision.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+
+WK_MACHINE="${WK_MACHINE:-wk}"
+
+_vm() {
+    if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+        podman machine ssh "$WK_MACHINE" "$@" </dev/null
+    else
+        bash -c "$*" </dev/null
+    fi
+}
+
+if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+    state=$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null || echo absent)
+    [ "$state" = absent ] && die "no machine '$WK_MACHINE' -- run ./setup"
+    if [ "$state" != running ]; then
+        info "starting machine '$WK_MACHINE'"
+        podman machine start "$WK_MACHINE" >/dev/null
+    else
+        unchanged "machine already running"
+    fi
+fi
+
+stopped=$(_vm 'sudo podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"' || true)
+if [ -n "$stopped" ]; then
+    printf '%s\n' "$stopped" | sed 's/^/  starting /' >&2
+    _vm 'sudo podman start $(sudo podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
+    info "started $(printf '%s\n' "$stopped" | wc -l | tr -d ' ') container(s)"
+else
+    info "no stopped containers"
+fi
+
+exec "$WK_ROOT/wk" status

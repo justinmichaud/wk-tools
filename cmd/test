@@ -43,6 +43,10 @@ TARGET="${WK_TARGET:-container}"
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
 lower=$(echo "$CFG_TYPE" | tr '[:upper:]' '[:lower:]')
+if [ "$TARGET" = container ]; then
+    WK_CGROUP_MB=$(envelope_mem_mb); WK_CGROUP_CORES=$(envelope_cores)
+    export WK_CGROUP_MB WK_CGROUP_CORES
+fi
 JOBS=$(build_jobs)
 
 WS=$(wk_ws_dir "$NAME")
@@ -104,7 +108,10 @@ ELAPSED=$(( $(date +%s) - START_EPOCH ))
 MINS=$(( ELAPSED / 60 )); SECS=$(( ELAPSED % 60 ))
 
 # run-webkit-tests reports its own totals; surface them rather than a raw tail.
-summary=$(tr '\r' '\n' < "$LOG" | grep -iE '^(Ran |Test suite|[0-9]+ test|All [0-9]+ test)' | tail -4)
+# `|| true` is load-bearing: grep exits 1 when it matches nothing, and under
+# `set -e` a failing command substitution aborts the script -- which silently
+# skipped the verdict and left the status file saying "running" forever.
+summary=$(tr '\r' '\n' < "$LOG" | grep -iE '^(Ran |Test suite|[0-9]+ test|All [0-9]+ test)' | tail -4 || true)
 
 echo >&2
 case $rc in

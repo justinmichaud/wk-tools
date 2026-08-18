@@ -131,6 +131,13 @@ Measured on an M4 (10 cores / 32 GB), with the VM at 8 cores / 20 GB:
 | `wk new` | ~30 s, including the Claude CLI install |
 | `wk build jsc-release`, cold ccache | ~5 min |
 | `wk build jsc-release`, warm ccache | ~3 min |
+| `wk build wpe-release`, full WPE, cold | ~68 min |
+| `wk test --layout`, 3 tests, software rendering | ~15 s |
+
+> The WPE figure is a nested-virtualisation cost, not a WebKit one. The
+> container gets 7 of the VM's 8 vCPUs, and the VM gets 8 of the host's 10
+> cores — so a full WPE build has roughly 70% of the machine. Native Linux on
+> the same core count should be substantially faster.
 
 
 ```sh
@@ -203,6 +210,26 @@ and `host/linux/config.dconf`.
 is excluded explicitly.
 
 ---
+
+## Running tests
+
+```sh
+wk test bug-238                              # JSC tests
+wk test bug-238 --layout --config wpe-release -- fast/dom/Element
+wk test bug-238 --layout --gpu -- <paths>    # real GPU (Linux, with a seat)
+```
+
+Layout tests default to **software rendering** (`LIBGL_ALWAYS_SOFTWARE=1`,
+`GALLIUM_DRIVER=llvmpipe`, `WEBKIT_DISABLE_DMABUF_RENDERER=1`). There is no
+`/dev/dri` inside a workspace on macOS — the podman VM has no GPU to pass
+through — so llvmpipe is the only option there. On Linux with a real seat,
+`--gpu` uses the device; anything measuring rendering performance needs it,
+because llvmpipe numbers are meaningless.
+
+`--no-retry-failures` is on by default: a retry doubles the runtime and hides
+flakiness, which is the opposite of what an automated check wants.
+
+Results land in `WebKitBuild/<port>/<config>/layout-test-results`.
 
 ## Knowing whether a build is alive
 

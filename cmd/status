@@ -27,7 +27,13 @@ worst=0
 
 report() {
     local ws="$1"
-    local status_file="$(wk_ws_dir "$ws")/build.status"
+    report_one "$ws" build "$(wk_ws_dir "$ws")/build.status"
+    [ -f "$(wk_ws_dir "$ws")/test.status" ] && report_one "$ws" test "$(wk_ws_dir "$ws")/test.status"
+    return 0
+}
+
+report_one() {
+    local ws="$1" kind="$2" status_file="$3"
     local state=none config="" secs="" rc="" logf=""
 
     if [ -f "$status_file" ]; then
@@ -39,7 +45,11 @@ report() {
         logf=$(awk -F= '/^log=/{print $2}' "$status_file")
     fi
 
-    printf '%-18s container=%-10s build=%s' "$ws" "$(t_info "$ws")" "${state:-none}"
+    if [ "$kind" = build ]; then
+        printf '%-18s container=%-10s %s=%s' "$ws" "$(t_info "$ws")" "$kind" "${state:-none}"
+    else
+        printf '%-18s %-21s %s=%s' "" "" "$kind" "${state:-none}"
+    fi
     [ -n "$config" ] && printf ' (%s)' "$config"
     [ -n "$secs" ] && printf ' %sm%ss' "$(( secs / 60 ))" "$(( secs % 60 ))"
     echo

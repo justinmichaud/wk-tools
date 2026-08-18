@@ -5,7 +5,9 @@
 # repositories, so nothing else can push updates into the base system. The host
 # is meant to stay boring; everything that changes often lives in a workspace.
 
-_pkgs=$(grep -vE '^\s*(#|$)' "$WK_ROOT/host/linux/apt.txt" | tr '\n' ' ')
+# `|| true`: grep exits 1 on no matches, and an unguarded failing command
+# substitution aborts the whole of ./setup under `set -e`.
+_pkgs=$(grep -vE '^\s*(#|$)' "$WK_ROOT/host/linux/apt.txt" | tr '\n' ' ' || true)
 
 _missing=""
 for p in $_pkgs; do

@@ -20,6 +20,19 @@
 
 WK_STORE="${WK_STORE:-/var/lib/wk}"
 
+# ccache ceiling, shared by every workspace.
+#
+# Measured: a full WPE release build plus two JSC release builds came to 364 MB
+# across ~6,200 cached objects. Release objects compress well, so the number is
+# far lower than intuition suggests.
+#
+# Debug builds are the real driver -- unstripped objects with full DWARF run
+# roughly 8-10x release, so a full debug WebKit build is on the order of 3-4 GB
+# of cache. 40 GB therefore holds well over two full builds of any
+# configuration, with room for several ports side by side, and still leaves
+# most of the 200 GB disk for snapshots and workspaces.
+WK_CCACHE_MAXSIZE="${WK_CCACHE_MAXSIZE:-40G}"
+
 wk_mirror()   { echo "$WK_STORE/git/WebKit.git"; }
 wk_base_dir() { echo "$WK_STORE/base"; }
 wk_ws_dir()   { echo "$WK_STORE/ws/$1"; }
@@ -37,6 +50,25 @@ origin   https://github.com/WebKit/WebKit.git
 wpe      https://github.com/WebPlatformForEmbedded/WPEWebKit.git
 fork     https://github.com/justinmichaud/WebKit.git
 forkwpe  https://github.com/justinmichaud/WPEWebKit.git
+EOF
+}
+
+# Forks that workspaces may push to.
+#
+#   <remote>  <owner/repo>  <ssh-host-alias>
+#
+# One deploy key per fork, because GitHub deploy keys are scoped to a single
+# repository and it refuses to accept the same key on a second one. That
+# restriction is the feature: each key can write to exactly one repo, so a
+# compromised workspace can push to these and nowhere else. A personal access
+# token would be one credential for both, but a broader one.
+#
+# Since both forks are on github.com, the keys are selected by ssh host alias
+# (github-webkit, github-wpe) rather than by hostname.
+wk_push_forks() {
+    cat <<'EOF'
+fork     justinmichaud/WebKit      github-webkit
+forkwpe  justinmichaud/WPEWebKit   github-wpe
 EOF
 }
 

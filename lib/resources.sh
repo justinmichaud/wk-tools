@@ -5,16 +5,31 @@
 # fixed constant that could be right on one machine and fatal on another --
 # every number is derived from the machine it runs on.
 
-# Headroom left to the host, never handed to a VM or a build. Sized to keep a
-# desktop responsive under a full build.
-WK_RESERVE_CORES="${WK_RESERVE_CORES:-2}"
+# Headroom left to the host, never handed to a VM or a build.
+#
+# One core. On Apple silicon the intent is "all the performance cores go to the
+# VM, the host keeps one efficiency core" -- on this M4 that is 4P + 6E, so the
+# VM gets 9 and the host keeps 1.
+#
+# Note this is a *count*, not an affinity. Virtualization.framework takes a vCPU
+# count and macOS places those threads itself; there is no way to pin vCPUs to
+# performance cores. It works out in practice because the scheduler puts busy VM
+# threads on P-cores and leaves light host work on an E-core, but do not read
+# this as hard partitioning.
+#
+# Memory reserve stays generous: a desktop that has swapped is unusable in a way
+# that a desktop short of one core is not.
+WK_RESERVE_CORES="${WK_RESERVE_CORES:-1}"
 WK_RESERVE_MB="${WK_RESERVE_MB:-12288}"
 
 # A headless machine needs far less. The wk VM has no GUI to protect, and the
 # macOS host already subtracted its own reserve when it sized the VM -- applying
 # the desktop reserve again inside would double-count it and leave containers
 # with a fraction of the memory actually available.
-WK_HEADLESS_RESERVE_CORES="${WK_HEADLESS_RESERVE_CORES:-1}"
+# Zero cores held back inside the VM: the workspace is the only workload there,
+# and the VM's own kernel and podman are not CPU-bound. Holding one back would
+# cost ~11% of the build for nothing.
+WK_HEADLESS_RESERVE_CORES="${WK_HEADLESS_RESERVE_CORES:-0}"
 WK_HEADLESS_RESERVE_MB="${WK_HEADLESS_RESERVE_MB:-2048}"
 
 # The marker is written by the provisioning playbook, so this is an explicit
@@ -89,6 +104,17 @@ envelope_cores() {
     echo "$c"
 }
 
+# Reported by ./setup so the split is visible rather than implied.
+describe_cores() {
+    if is_macos && [ -n "$(sysctl -n hw.perflevel0.logicalcpu 2>/dev/null)" ]; then
+        printf '%s P + %s E' \
+            "$(sysctl -n hw.perflevel0.logicalcpu)" \
+            "$(sysctl -n hw.perflevel1.logicalcpu)"
+    else
+        printf '%s cores' "$(host_cores)"
+    fi
+}
+
 envelope_mem_mb() {
     local m
     m=$(( $(host_mem_mb) - $(reserve_mb) ))
@@ -107,7 +133,10 @@ build_jobs() {
     local polite="${1:-}"
     local by_mem by_cpu jobs cores
 
-    cores=$(host_cores)
+    # Prefer an explicit CPU cap from the caller. The container is limited to
+    # envelope_cores, which is fewer than the machine reports, so sizing from
+    # nproc oversubscribes: the WPE build ran -j8 against a 7-CPU cgroup.
+    cores=${WK_CGROUP_CORES:-$(host_cores)}
     by_mem=$(( $(avail_mem_mb) / WK_MB_PER_JOB ))
     by_cpu=$cores
 

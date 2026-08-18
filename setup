@@ -40,7 +40,7 @@ run_stage() {
 }
 
 OS="$(wk_os)"
-info "wk-tools setup on $OS ($(host_cores) cores, $(host_mem_mb) MB)"
+info "wk-tools setup on $OS ($(describe_cores), $(host_mem_mb) MB)"
 
 HOST_DIR="$WK_ROOT/host/$OS"
 

@@ -43,7 +43,8 @@ if [ "$TARGET" = remote ]; then POLITE=1; NICE=19; fi
 # so deriving jobs from it picks a number the cgroup will OOM-kill mid-link.
 if [ "$TARGET" = container ]; then
     WK_CGROUP_MB=$(envelope_mem_mb)
-    export WK_CGROUP_MB
+    WK_CGROUP_CORES=$(envelope_cores)
+    export WK_CGROUP_MB WK_CGROUP_CORES
 fi
 JOBS=$(explain_jobs "$POLITE")
 

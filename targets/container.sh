@@ -91,13 +91,14 @@ t_create() {
          --memory $(envelope_mem_mb)m
          --cpus $(envelope_cores)
          --env CCACHE_DIR=/ccache
-         --env CCACHE_MAXSIZE=${WK_CCACHE_MAXSIZE:-50G}
+         --env CCACHE_MAXSIZE=${WK_CCACHE_MAXSIZE:-40G}
          --env DL_DIR=/cache/yocto/downloads
          --env SSTATE_DIR=/cache/yocto/sstate
          --env BR2_DL_DIR=/cache/buildroot/dl
          --env BR2_CCACHE_DIR=/cache/buildroot/ccache
          --env WK_WORKSPACE=$name
-         --env WKDEV_OFFLINE=1"
+         --env WKDEV_OFFLINE=1
+         --env WK_FORKS=$(wk_push_forks | awk '{printf "%s%s:%s:%s", sep, $1, $2, $3; sep=","}')"
     )
 
     info "creating workspace '$name' from base $base_id"

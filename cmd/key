@@ -1,71 +1,170 @@
 #!/usr/bin/env bash
 #
-# wk key -- the build key workspaces push with.
+# wk key -- the deploy keys workspaces push with.
 #
-# Deliberately one key, shared by every workspace, registered on GitHub as a
-# *deploy key* on justinmichaud/WebKit. Deploy keys are scoped to a single
-# repository, which is what makes "write to my fork and nowhere else" an
-# enforced property rather than a convention: even a workspace that rewrote all
-# its git config could not push anywhere else with it.
+# One key per fork, shared by every workspace. GitHub deploy keys are scoped to
+# a single repository and GitHub refuses the same key on a second one, so
+# multiple push targets means multiple keys. That restriction is worth keeping
+# rather than working around: each key writes to exactly one repository, so a
+# compromised workspace can push to the forks in wk_push_forks and nowhere else.
 #
-# Reads need no credential at all -- the repositories are public and fetch over
-# HTTPS anonymously -- so this key is only ever used for pushing.
+# Registration goes through the GitHub API, not a browser. The deploy-key page
+# accepts no query-string prefill, so a "pre-filled form" is not actually
+# possible -- but the API takes the title, the key and read_only=false directly,
+# which is better than a filled form anyway: nothing to paste, and no chance of
+# leaving the write checkbox unticked, which is the easy mistake and one that
+# only shows up much later at push time.
 #
-#   wk key show      print the public key to register
-#   wk key ensure    create it if missing (idempotent; run by setup)
+#   wk key register   create the keys and register them (idempotent)
+#   wk key check      verify each key authenticates with write access
+#   wk key show       print the public keys
+#   wk key ensure     create missing keys without registering them
+#
+# Runs on the host: `gh` and its credentials are here, while the private keys
+# stay in the VM and are never copied out.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 
-KEY="$WK_STORE/secrets/build_key"
-ACTION="${1:-show}"
+WK_MACHINE="${WK_MACHINE:-wk}"
+ACTION="${1:-register}"
 
-ensure_key() {
-    ensure_dir "$(dirname "$KEY")" 0700
-    if [ -f "$KEY" ]; then
-        unchanged "build key exists"
-        return 0
+# The keys live in the VM. Read the *public* halves out; the private halves are
+# never copied to the host.
+in_vm() {
+    # </dev/null is essential, not defensive: both podman-machine-ssh and bash -c
+    # read stdin, and every caller here sits inside a `while read` loop fed by a
+    # heredoc. Without it the first iteration swallows the remaining forks and
+    # only one ever gets processed -- which looked exactly like the second fork
+    # being silently skipped.
+    if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+        podman machine ssh "$WK_MACHINE" "$@" </dev/null
+    else
+        bash -c "$*" </dev/null
     fi
-    # No passphrase: it is used unattended by agents inside workspaces, and a
-    # passphrase that must be typed would simply be stored next to the key.
-    # The scoping to one repository is the actual control here.
-    ssh-keygen -t ed25519 -N '' -C "wk build key (deploy key for justinmichaud/WebKit)" -f "$KEY" >/dev/null
-    chmod 0600 "$KEY"
-    changed "generated build key"
 }
 
+ensure_keys() { in_vm "WK_IN_VM=1 /opt/wk-tools/cmd/key ensure" 2>&1 | sed 's/^/  /'; }
+pub_of()      { in_vm "cat /var/lib/wk/secrets/build_key_$1.pub 2>/dev/null" | tr -d '\r'; }
+
+# --- ensure runs inside the VM, where the secrets are ------------------------
+if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
+    ensure_dir "$WK_STORE/secrets" 0700
+    wk_push_forks | while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        key="$WK_STORE/secrets/build_key_$remote"
+        if [ -f "$key" ]; then
+            unchanged "key for $repo"
+        else
+            # No passphrase: used unattended by agents, and a passphrase stored
+            # beside the key protects nothing. Per-repo scoping is the control.
+            ssh-keygen -t ed25519 -N '' -C "wk deploy key for $repo" -f "$key" >/dev/null
+            chmod 0600 "$key"
+            changed "generated key for $repo"
+        fi
+    done
+    exit 0
+fi
+
 case "$ACTION" in
-ensure)
-    ensure_key
-    ;;
 show)
-    [ -f "$KEY.pub" ] || die "no build key yet -- run: wk key ensure"
-    cat "$KEY.pub"
+    wk_push_forks | while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        printf '# %s\n%s\n' "$repo" "$(pub_of "$remote")"
+    done
     ;;
+
 register)
-    ensure_key
-    cat >&2 <<EOF
+    require gh "gh is required to register deploy keys -- https://cli.github.com"
+    gh auth status >/dev/null 2>&1 || die "gh is not authenticated -- run: gh auth login"
 
-Register this as a deploy key WITH WRITE ACCESS on justinmichaud/WebKit:
+    ensure_keys
 
-  https://github.com/justinmichaud/WebKit/settings/keys/new
+    failed=0
+    while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        pub=$(pub_of "$remote")
+        [ -n "$pub" ] || { warn "no key for $repo"; failed=1; continue; }
 
-  Title:        wk build key
-  Key:          (below)
-  Allow write:  YES  -- required, or workspaces can read but not push
+        title="wk build key ($(hostname -s))"
 
+        # Already registered? Compare the key body, ignoring title and comment.
+        body=$(printf '%s' "$pub" | awk '{print $1" "$2}')
+        if gh api "repos/$repo/keys" --jq '.[].key' </dev/null 2>/dev/null \
+             | awk '{print $1" "$2}' | grep -qxF "$body"; then
+            unchanged "$repo: key already registered"
+            continue
+        fi
+
+        info "registering deploy key on $repo"
+        # read_only=false is the whole point: a key registered read-only looks
+        # fine until the first push fails.
+        if gh api "repos/$repo/keys" \
+             -f "title=$title" \
+             -f "key=$pub" \
+             -F read_only=false </dev/null >/dev/null 2>&1; then
+            changed "$repo: deploy key registered with write access"
+        else
+            warn "$repo: could not register automatically"
+            log  "  add it by hand at https://github.com/$repo/settings/keys/new"
+            log  "  (tick 'Allow write access')"
+            printf '%s\n' "$pub"
+            failed=1
+        fi
+    done <<EOF
+$(wk_push_forks)
 EOF
-    cat "$KEY.pub"
-    cat >&2 <<'EOF'
 
-GitHub refuses to reuse one deploy key across repositories, so a second fork
-(WPEWebKit, say) needs its own key. Nothing else in the tailnet or the host
-grants a workspace any other push destination.
-EOF
+    echo >&2
+    "$0" check
     ;;
+
+check)
+    # Two questions, two sources.
+    #
+    # ssh answers "is this key registered and scoped to the right repo?" -- a
+    # deploy key replies "Hi owner/repo!", a user key replies without a repo.
+    # It says nothing about write access, so that comes from the API where
+    # read_only is explicit. Checking ssh alone would happily pass a read-only
+    # key and fail at the first push instead.
+    rc=0
+    while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        printf '  %-28s ' "$repo"
+        pub=$(pub_of "$remote")
+        [ -n "$pub" ] || { echo "no key -- run: wk key register"; rc=1; continue; }
+
+        out=$(in_vm "ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes \
+                        -o BatchMode=yes -i /var/lib/wk/secrets/build_key_$remote \
+                        -T git@github.com 2>&1 </dev/null || true")
+
+        case "$out" in
+            *"Hi $repo!"*) ;;
+            *"Permission denied"*) echo "not registered on $repo"; rc=1; continue ;;
+            *"successfully authenticated"*)
+                echo "authenticates, but not scoped to $repo"; rc=1; continue ;;
+            *) echo "unexpected: $(printf '%s' "$out" | head -1)"; rc=1; continue ;;
+        esac
+
+        # Registered and correctly scoped. Read-only or writable?
+        # Match on the base64 body, which is unique and jq-safe.
+        b64=$(printf '%s' "$pub" | awk '{print $2}')
+        ro=$(gh api "repos/$repo/keys" </dev/null 2>/dev/null \
+             --jq ".[] | select(.key | contains(\"$b64\")) | .read_only" | head -1)
+        case "$ro" in
+            false) echo "ok (write)" ;;
+            true)  echo "READ-ONLY -- delete it on GitHub and re-run 'wk key register'"; rc=1 ;;
+            *)     echo "registered, but write access could not be confirmed"; rc=1 ;;
+        esac
+    done <<EOF
+$(wk_push_forks)
+EOF
+    exit $rc
+    ;;
+
 *)
-    die "usage: wk key show|ensure|register"
+    die "usage: wk key register|check|show|ensure"
     ;;
 esac

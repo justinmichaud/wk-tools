@@ -21,39 +21,66 @@ git config --global user.name  "Justin Michaud"
 git config --global user.email "jmichaud@igalia.com"
 git config --global --add safe.directory "$SRC"
 
-# The build key is a GitHub deploy key scoped to justinmichaud/WebKit, so
-# pushing anywhere else fails at the server regardless of what the checkout
-# says. Reads are anonymous over HTTPS and need no credential.
-if [ -f /secrets/build_key ]; then
-    install -d -m 0700 "$HOME/.ssh"
-    install -m 0600 /secrets/build_key "$HOME/.ssh/id_ed25519"
-    cat >> "$HOME/.ssh/config" <<'EOF'
-Host github.com
-    IdentityFile ~/.ssh/id_ed25519
+# One deploy key per fork. Both forks are on github.com, so the key is selected
+# by ssh host alias rather than hostname -- that is the only way to use two
+# different keys against the same host.
+#
+# Reads are anonymous over HTTPS and need no credential; these are push-only.
+install -d -m 0700 "$HOME/.ssh"
+: > "$HOME/.ssh/config"
+chmod 0600 "$HOME/.ssh/config"
+
+# Comma-separated, not space-separated: the value reaches the container through
+# wkdev-create's --additional-flags, which word-splits, so a space would break
+# it into separate podman arguments.
+_have_key=0
+_IFS_SAVE=$IFS; IFS=,
+for _spec in ${WK_FORKS:-}; do
+    IFS=$_IFS_SAVE
+    # remote:repo:alias, packed by cmd/new because firstrun has no wk libs.
+    _remote=${_spec%%:*}; _rest=${_spec#*:}
+    _repo=${_rest%%:*}; _alias=${_rest#*:}
+    _src="/secrets/build_key_${_remote}"
+
+    [ -f "$_src" ] || { log "WARNING: no key for $_repo -- pushing there will fail"; continue; }
+
+    install -m 0600 "$_src" "$HOME/.ssh/id_${_remote}"
+    cat >> "$HOME/.ssh/config" <<EOF
+Host ${_alias}
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_${_remote}
     IdentitiesOnly yes
     StrictHostKeyChecking accept-new
 EOF
-    log "installed build deploy key"
-else
-    log "WARNING: no build key at /secrets/build_key -- pushing to the fork will fail"
-    log "         generate and register one with: wk key register"
-fi
+    _have_key=1
+    log "deploy key installed for $_repo (push via $_alias)"
+    IFS=,
+done
+IFS=$_IFS_SAVE
+[ "$_have_key" = 1 ] || log "         generate and register keys with: wk key register"
 
-# The snapshot already carries the right remotes (origin -> WebKit/WebKit,
-# fork -> justinmichaud/WebKit with an SSH push URL), but they live in the
-# read-only lower layer. Re-assert them here so a workspace created from an
-# older snapshot still gets them, and so the push URL is present even if the
-# snapshot predates it.
+# Remotes. The snapshot already carries these, but they live in the read-only
+# lower layer, so re-assert them here: a workspace made from an older snapshot
+# still gets the right push URLs.
 if [ -d "$SRC/.git" ]; then
     git -C "$SRC" remote set-url origin https://github.com/WebKit/WebKit.git 2>/dev/null || true
-    git -C "$SRC" remote add fork https://github.com/justinmichaud/WebKit.git 2>/dev/null \
-        || git -C "$SRC" remote set-url fork https://github.com/justinmichaud/WebKit.git
-    git -C "$SRC" remote set-url --push fork git@github.com:justinmichaud/WebKit.git
-    # Pushing to origin is not possible (no write access upstream) and is
-    # almost always a mistake; make it fail immediately rather than after a
-    # round trip and an auth prompt.
-    git -C "$SRC" remote set-url --push origin no-push://use-the-fork-remote
-    log "remotes: origin=WebKit/WebKit (read), fork=justinmichaud/WebKit (push)"
+    # Pushing to origin is impossible (no upstream write access) and almost
+    # always a mistake; fail immediately rather than after an auth round trip.
+    git -C "$SRC" remote set-url --push origin no-push://use-a-fork-remote 2>/dev/null || true
+
+    IFS=,
+    for _spec in ${WK_FORKS:-}; do
+        IFS=$_IFS_SAVE
+        _remote=${_spec%%:*}; _rest=${_spec#*:}
+        _repo=${_rest%%:*}; _alias=${_rest#*:}
+        git -C "$SRC" remote add "$_remote" "https://github.com/${_repo}.git" 2>/dev/null \
+            || git -C "$SRC" remote set-url "$_remote" "https://github.com/${_repo}.git"
+        git -C "$SRC" remote set-url --push "$_remote" "git@${_alias}:${_repo}.git"
+        log "remote $_remote -> $_repo (fetch https, push ssh)"
+        IFS=,
+    done
+    IFS=$_IFS_SAVE
 fi
 
 # --- claude ------------------------------------------------------------------

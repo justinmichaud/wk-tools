@@ -83,15 +83,30 @@
         group: core
         mode: "0755"
 
-    - name: Install packages needed to host workspaces
-      # rpm-ostree, not dnf: the machine image is ostree-based. --apply-live
-      # avoids a reboot; --idempotent makes re-runs free.
+    - name: Layer the two packages the base image lacks
+      # The machine image is Fedora CoreOS: an ostree-based immutable OS, so
+      # there is no dnf and packages are layered with rpm-ostree. Layering
+      # mutates the base OS, so keep it to what is genuinely missing.
+      #
+      # Only these two are absent from the base image. nftables, jq and rsync
+      # are already there -- asking for them made rpm-ostree resolve
+      # dependencies on every run for no reason.
+      #
+      #   git      the WebKit mirror and the base snapshots live in the VM and
+      #            are maintained by `wk sync`, so git has to run here.
+      #   python3  the SDK patcher (container/sdk-patches/apply.sh) uses it for
+      #            exact-match and regex edits; doing that in sed would be far
+      #            more fragile against an SDK that moves under us.
+      #
+      # --apply-live avoids a reboot; --idempotent makes a re-run free.
       ansible.builtin.command:
-        cmd: >
-          rpm-ostree install --idempotent --apply-live --allow-inactive
-          nftables git jq rsync python3
+        cmd: rpm-ostree install --idempotent --apply-live --allow-inactive git python3
       register: pkgs
-      changed_when: "'No packages requested' not in pkgs.stdout"
+      # rpm-ostree prints "No change." when everything is already layered. The
+      # previous condition tested for a string it never emits, so this task
+      # reported changed on every run and made ./setup look like it had done
+      # work when it had not.
+      changed_when: "'No change.' not in pkgs.stdout"
       failed_when:
         - pkgs.rc != 0
         - "'already requested' not in (pkgs.stderr | default(''))"
@@ -117,4 +132,28 @@
       ansible.builtin.systemd_service:
         name: nftables
         enabled: true
+      failed_when: false
+
+    - name: Layer Tailscale
+      # Runs on the VM, not inside a workspace. That is deliberate: a workspace
+      # then needs no TUN device and no CAP_NET_ADMIN, and `ssh rpi5` works
+      # normally instead of through a SOCKS proxy.
+      #
+      # It is the only way a workspace reaches the Pi test devices, since the
+      # egress policy drops all RFC1918 and the Pis sit on an isolated network.
+      ansible.builtin.command:
+        cmd: rpm-ostree install --idempotent --apply-live --allow-inactive tailscale
+      register: ts
+      changed_when: "'No change.' not in ts.stdout"
+      failed_when: ts.rc != 0 and 'No change.' not in ts.stdout
+
+    - name: Enable tailscaled
+      # `tailscale up --advertise-tags=tag:wk` is deliberately NOT done here: it
+      # needs an auth key, which must not live in this repo. `wk pi setup` does
+      # it, and records the resulting Pi addresses in /var/lib/wk/pi-hosts so
+      # the firewall can allow them.
+      ansible.builtin.systemd_service:
+        name: tailscaled
+        enabled: true
+        state: started
       failed_when: false

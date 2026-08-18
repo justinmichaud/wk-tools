@@ -83,12 +83,19 @@ fi
 #   /var/lib/wk/base     snapshots         /var/lib/wk/cache    ccache et al
 #   /var/lib/wk/skills   mutable skills    /var/lib/wk/secrets  the build key
 
-info "re-applying machine provisioning"
+# Re-applied every run so nothing done by hand in the VM survives, but reported
+# from ansible's own changed-count -- regenerating to an identical result is not
+# a change, and saying it is destroys the signal value of "no changes".
+debug "re-applying machine provisioning"
 scp -q -P "$_ssh_port" -i "$_ssh_key" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     "$WK_ROOT/host/macos/playbook.yaml" "$_ssh_user@localhost:/home/core/playbook.yaml"
-_rsh 'ansible-playbook /home/core/playbook.yaml' >/dev/null 2>&1 \
-    || warn "provisioning playbook reported errors; re-run with WK_DEBUG=1"
+_pb=$(_rsh 'ansible-playbook /home/core/playbook.yaml 2>&1 | grep -oE "changed=[0-9]+" | head -1' || echo "changed=?")
+case "$_pb" in
+    changed=0) unchanged "machine provisioning" ;;
+    changed=\?) warn "provisioning playbook reported errors; re-run with WK_DEBUG=1" ;;
+    *)         changed "machine provisioning ($_pb)" ;;
+esac
 
 # --- the SDK -----------------------------------------------------------------
 # Cloned inside the VM, then patched. The patches are what make a sandboxed
@@ -105,11 +112,34 @@ else
 fi
 
 # Hard reset before patching. Without this an edit made inside the VM would
-# survive forever: the patcher is idempotent and would see its markers already
-# present, so it would leave the tampered file exactly as it found it.
-info "resetting and re-patching the SDK"
+# survive forever: the patcher is idempotent and would see its own markers
+# already present, so it would leave the tampered file exactly as it found it.
+#
+# Because of that reset the patcher always has work to do and always says so.
+# What matters is whether the *result* differs, so hash the patched files either
+# side and report on that; the patcher's own chatter is debug-level.
+debug "resetting and re-patching the SDK"
+_sdk_hash() {
+    _rsh 'cat /opt/webkit-container-sdk/scripts/host-only/wkdev-create \
+              /opt/webkit-container-sdk/scripts/host-only/wkdev-enter \
+              /opt/webkit-container-sdk/scripts/container-only/.wkdev-init \
+              /opt/webkit-container-sdk/scripts/container-only/.wkdev-sync-runtime-state \
+          2>/dev/null | sha256sum | cut -d" " -f1'
+}
+_sdk_before=$(_sdk_hash)
 _rsh 'cd /opt/webkit-container-sdk && git reset --hard --quiet && git clean -qfd'
-_rsh 'bash /opt/wk-tools/container/sdk-patches/apply.sh /opt/webkit-container-sdk'
+if [ -n "${WK_DEBUG:-}" ]; then
+    _rsh 'bash /opt/wk-tools/container/sdk-patches/apply.sh /opt/webkit-container-sdk'
+else
+    _rsh 'bash /opt/wk-tools/container/sdk-patches/apply.sh /opt/webkit-container-sdk' >/dev/null 2>&1 \
+        || die "SDK patching failed; re-run with WK_DEBUG=1"
+fi
+_sdk_after=$(_sdk_hash)
+if [ "$_sdk_before" = "$_sdk_after" ]; then
+    unchanged "SDK patches"
+else
+    changed "SDK patches re-applied (result differs from before)"
+fi
 
 # --- firewall ----------------------------------------------------------------
 # The boundary itself, rebuilt from the repo each run so no rule can be added,
@@ -118,7 +148,10 @@ _rsh 'bash /opt/wk-tools/container/sdk-patches/apply.sh /opt/webkit-container-sd
 # The Pi addresses are the one piece of runtime state in the policy, so they
 # are kept outside it in /var/lib/wk/pi-hosts and replayed after the reload --
 # otherwise regenerating the firewall would silently cut off the test devices.
-info "regenerating the workspace egress policy"
+# Same reasoning: the table is torn down and rebuilt every run so no rule can
+# be added or reordered out from under it, but an identical result is not news.
+debug "regenerating the workspace egress policy"
+_nft_before=$(_rsh 'sudo nft list table inet wk_egress 2>/dev/null | sha256sum | cut -d" " -f1' || echo none)
 _rsh 'sudo install -D -m 0644 /opt/wk-tools/container/nftables/wk-egress.nft /etc/nftables/wk-egress.nft'
 _rsh 'sudo grep -qxF '"'"'include "/etc/nftables/wk-egress.nft"'"'"' /etc/sysconfig/nftables.conf 2>/dev/null ||
       echo '"'"'include "/etc/nftables/wk-egress.nft"'"'"' | sudo tee -a /etc/sysconfig/nftables.conf >/dev/null'
@@ -142,7 +175,12 @@ _rsh 'for h in downloads.claude.ai; do
 
 if _rsh 'sudo nft list table inet wk_egress >/dev/null 2>&1'; then
     _pis=$(_rsh 'cat /var/lib/wk/pi-hosts 2>/dev/null | wc -l' | tr -d ' ')
-    unchanged "egress policy loaded (${_pis} Pi address(es) allowed)"
+    _nft_after=$(_rsh 'sudo nft list table inet wk_egress 2>/dev/null | sha256sum | cut -d" " -f1')
+    if [ "$_nft_before" = "$_nft_after" ]; then
+        unchanged "egress policy (${_pis} Pi address(es) allowed)"
+    else
+        changed "egress policy rebuilt (${_pis} Pi address(es) allowed)"
+    fi
 else
     warn "egress policy is NOT active"
 fi
