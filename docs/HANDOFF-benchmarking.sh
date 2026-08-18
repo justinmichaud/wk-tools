@@ -6,4 +6,6 @@ Then, a benchmark runner on another computer can drive it with no sandboxing and
 
 THis should work for macOS and linux, plus rpi5 (ubuntu), plus rpi5/4/3 (yocto).
 
-Do research on what speed and size drive will be required. Ideally a 32gb flash drive would work.
+Do research on what speed and size drive will be required. Ideally a 32gb flash drive would work, or the bmc image boot option for moose (there should be more than enough ram).
+
+Netboot is another possibility that could work.
