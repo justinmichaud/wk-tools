@@ -4,6 +4,8 @@ Yocto cache should be preserved even if target is destroyed
 
 Also should support uploading new image to target.
 
-I need to be able to flash the sd card from the host, so there should be an easy way to copy the image to the host and instructions for doing that.
+Flashing the built image onto a physical SD card from the host is tracked
+generically in `docs/HANDOFF-sdcard.md` (not yocto-specific) — consume that
+rather than building a separate copy-to-host path here.
 
 Tailscale shoud be able to be installed on the rpi target

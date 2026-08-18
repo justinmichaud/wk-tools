@@ -48,7 +48,7 @@ What this bought:
   resolution, which the address-based policy could not express.
 - It is testable: `wk verify` measures the properties from inside a workspace.
 
-`docs/HANDOFF-macos-proxy.md` covers moving the macOS VM to the same model.
+The macOS VM has since moved to the same allowlist-by-hostname model.
 
 ## The other thing that was open, and worse
 
@@ -148,20 +148,20 @@ first branch win.
 
 ## What is left
 
-Three things, each with its own document:
+Each with its own document:
 
 - `docs/HANDOFF-linux-arm32.md` -- `wk new --arch 32`, which only this machine
   can run (the Ampere supports AArch32 at EL0; Apple Silicon does not)
 - `docs/HANDOFF-linux-remote.md` -- the never-run remote target
 - `docs/HANDOFF-linux-pi.md` -- provisioning the test devices, now that the
   proxy rather than nftables consumes `pi-hosts`
-- `docs/HANDOFF-macos-proxy.md` -- collapsing the two boundaries into one
 
 Also unfinished: `host/linux/config.dconf` is still a raw dump with
 machine-specific junk in it (a weather location, four nm-applet WiFi UUIDs, a
 GTK last-folder path, Ptyxis profile UUIDs, timestamps). `cmd/backup` has
-filters for these and they have not been exercised; verify a
-`wk backup` -> `./setup` round trip before trusting it.
+filters for these and they have not been exercised. This is now tracked as
+the Linux half of `docs/HANDOFF-settings-audit.md`, which covers verifying
+that round trip and auditing what else has drifted.
 
 ---
 

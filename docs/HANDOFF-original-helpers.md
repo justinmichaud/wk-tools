@@ -114,19 +114,9 @@ All five are thin wrappers over `$VM/bin/jsc` plus `wabt`, which the old PATH
 pulled from `/Volumes/WebKit/wabt/bin`. If they come back they belong in
 `container/bin/`, where the workspace can see them.
 
-## Git and GitHub
-
-| original | did | now |
-|---|---|---|
-| `gpr` | check out a fork branch in `user:branch` PR syntax, adding the remote if needed, confirming every git command, diffing local vs remote before offering `reset --hard` | **gone** — 262 lines, the most substantial helper here |
-| `git-sync-fork` | fetch both remotes, rebase `main` onto upstream | **gone** |
-| `git-clean` | `git reset . && git checkout . && git clean -fd` | **gone** (one line, but destructive-by-design and easy to want) |
-| `commit-count` | `git shortlog --summary --since "1 year"` | **gone** |
-| `report` | weekly GitHub activity summary via `gh` | `wk report` |
-
-`gpr` is the one to restore first. It is the only helper here with real logic
-rather than a hardcoded path, it prints and confirms every git command before
-running it, and nothing in `wk` covers checking out someone else's PR branch.
+Git and GitHub helpers (`gpr`, `git-sync-fork`, `git-clean`, `commit-count`,
+`report`) moved out to `docs/HANDOFF-git-tools.md` — they don't share anything
+with the profiling/benchmarking/wasm material in this file.
 
 ## Editor, shell and misc
 
@@ -142,9 +132,10 @@ running it, and nothing in `wk` covers checking out someone else's PR branch.
 1. Decide, once, about each **gone** row: restore it as a `wk` verb, restore it
    as a script in `container/bin/` where the workspace can see it, or record
    that it is deliberately dropped.
-2. The three worth doing first, because nothing covers them and each has real
-   logic: `gpr`, the option-toggle A/B benchmark mode (`bench-js2-cli`,
-   `bench-js3-switch`), and `strip-addresses`.
+2. The two worth doing first, because nothing covers them and each has real
+   logic: the option-toggle A/B benchmark mode (`bench-js2-cli`,
+   `bench-js3-switch`), and `strip-addresses`. (`gpr` is the equivalent
+   priority pick in `docs/HANDOFF-git-tools.md`.)
 3. Verify the two `quiesce.sh` subtleties above survived into `wk quiesce`, and
    that `wk bench` reports per-subtest confidence intervals the way `js3-ci.py`
    did. Both are silent regressions if they did not: the numbers still appear,

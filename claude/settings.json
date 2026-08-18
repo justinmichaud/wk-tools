@@ -43,6 +43,6 @@
   "theme": "dark",
   "autoCompactEnabled": false,
   "precomputeCompactionEnabled": false,
-  "agentPushNotifEnabled": true,
-  "remoteControlAtStartup": true
+  "remoteControlAtStartup": true,
+  "agentPushNotifEnabled": true
 }
