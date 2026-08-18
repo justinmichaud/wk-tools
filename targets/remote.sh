@@ -64,9 +64,13 @@ t_exec() {
     local name="$1"; shift
     # A flock keeps two of your own builds from stacking on a machine you are
     # already sharing with other people.
+    #
+    # sh_quote, not $*: ssh joins its arguments with spaces and hands the
+    # result to the remote shell, so an unquoted argument with a space or a
+    # quote would be re-split there.
     _rsh "cd $WK_REMOTE_ROOT/ws/$name/WebKit && \
           flock -w 3600 $WK_REMOTE_ROOT/.build.lock \
-          nice -n 19 ionice -c3 $*"
+          nice -n 19 ionice -c3 $(sh_quote "$@")"
 }
 
 t_enter() {

@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+#
+# wk doctor -- what is provisioned on this machine, and what is still missing.
+#
+# The reinstall companion: `./setup` is the automated path, but several pieces
+# are deliberately manual (interactive sudo, credentials, hardware) and after a
+# wipe the only record of them was memory. This prints the full checklist with
+# the exact next command for everything missing, so "is this machine ready" is
+# one read-only command instead of archaeology.
+#
+# Read-only by design: it never starts the podman machine, never boots a
+# guest, and never prompts. State it cannot see without starting something is
+# reported as '??' with the command that would reveal it.
+#
+#   0  everything checkable is provisioned
+#   1  something is missing (the lines say what and how)
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+
+WK_MACHINE="${WK_MACHINE:-wk}"
+
+# The store lives where the containers do -- locally on Linux, inside the
+# podman VM on macOS -- so the macOS host asks the VM to run exactly this
+# probe and parses the key=value lines back.
+probe_store() {
+    [ -d "$WK_STORE/git/WebKit.git" ] && echo mirror=ok || echo mirror=no
+    [ -n "$(ls -1 "$WK_STORE/base" 2>/dev/null)" ] && echo base=ok || echo base=no
+    [ -f "$WK_STORE/secrets/build_key_fork" ] && echo key=ok || echo key=no
+    [ -f "$WK_STORE/secrets/claude-credentials.json" ] && echo creds=ok || echo creds=no
+    [ -n "$(ls -1 "$WK_STORE/skills" 2>/dev/null)" ] && echo skills=ok || echo skills=no
+    # The socket is accepted as proof too: systemctl --user over a bare ssh
+    # session can fail to find the user bus even when the service is fine.
+    if systemctl --user is-active --quiet wk-proxy.service 2>/dev/null \
+       || [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/proxy.sock" ]; then
+        echo proxy=ok
+    else
+        echo proxy=no
+    fi
+    [ -s "$WK_STORE/pi-hosts" ] && echo pihosts=ok || echo pihosts=no
+}
+if [ "${1:-}" = --probe-store ]; then
+    probe_store
+    exit 0
+fi
+
+missing=0
+ok()   { printf '  \033[32mok\033[0m    %s\n' "$*" >&2; }
+miss() { printf '  \033[31m--\033[0m    %-46s -> %s\n' "$1" "$2" >&2; missing=$((missing + 1)); }
+unk()  { printf '  \033[33m??\033[0m    %-46s -> %s\n' "$1" "$2" >&2; }
+section() { printf '\n%s\n' "$*" >&2; }
+
+check() { # check <description> <fix> <command...>
+    local what="$1" fix="$2"; shift 2
+    if "$@" >/dev/null 2>&1; then ok "$what"; else miss "$what" "$fix"; fi
+}
+
+link_ok() { [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; }
+
+info "wk doctor on $(wk_os) ($(hostname))"
+
+# --- host tools ----------------------------------------------------------------
+section "host tools"
+if is_macos; then
+    check "Xcode command line tools" "xcode-select --install"     xcode-select -p
+    check "podman"                   "install the official pkg (SETUP.md 0)" have podman
+    check "zed"        "https://zed.dev/download" sh -c 'command -v zed || [ -d /Applications/Zed.app ]'
+    check "tailscale"  "https://tailscale.com/download/macos" \
+        sh -c 'command -v tailscale || [ -d /Applications/Tailscale.app ]'
+else
+    check "podman"     "./setup --stage tools" have podman
+    check "zsh"        "./setup --stage tools" have zsh
+    check "cage (benchmark kiosk)"  "./setup --stage tools" have cage
+    check "wlr-randr (session off)" "./setup --stage tools" have wlr-randr
+fi
+check "jq (claude hook)" "./setup --stage tools" have jq
+check "gh"               "install gh, then: gh auth login" have gh
+if have gh; then
+    check "gh authenticated" "gh auth login   (then: wk key register)" gh auth status
+fi
+
+# --- config links ----------------------------------------------------------------
+section "config (./setup owns these)"
+check "~/.claude/settings.json is the HOST settings" "./setup --stage claude" \
+    link_ok "$HOME/.claude/settings.json" "$WK_ROOT/claude/settings-host.json"
+check "~/.claude/CLAUDE.md is the HOST briefing" "./setup --stage claude" \
+    link_ok "$HOME/.claude/CLAUDE.md" "$WK_ROOT/claude/CLAUDE-host.md"
+check "shell rc sources shell/bashrc" "./setup --stage dotfiles" \
+    sh -c "grep -q 'wk-tools/shell/bashrc' '$HOME/.zshrc' 2>/dev/null || grep -q 'wk-tools/shell/bashrc' '$HOME/.bashrc' 2>/dev/null"
+
+# --- the store: mirror, snapshots, keys, credentials -----------------------------
+# Probed over one `podman machine ssh` on macOS -- and only if the machine is
+# already running, because doctor never starts anything.
+report_store() { # <probe output>
+    local out="$1" v
+    v() { printf '%s' "$out" | sed -n "s/^$1=//p"; }
+    [ "$(v mirror)" = ok ] && ok "WebKit mirror"          || miss "WebKit mirror" "wk sync"
+    [ "$(v base)" = ok ]   && ok "base snapshot"          || miss "base snapshot" "wk sync"
+    [ "$(v key)" = ok ]    && ok "fork push key"          || miss "fork push key" "wk key register  (needs gh auth)"
+    [ "$(v creds)" = ok ]  && ok "shared claude credentials" \
+                           || miss "shared claude credentials" "run 'claude login' once inside a workspace"
+    [ "$(v skills)" = ok ] && ok "shared skills seeded"   || miss "shared skills seeded" "wk skills push"
+    [ "$(v proxy)" = ok ]  && ok "egress proxy running"   || miss "egress proxy running" "./setup --stage sdk, then systemctl --user status wk-proxy"
+    [ "$(v pihosts)" = ok ] && ok "pi-hosts populated"    || miss "pi-hosts populated" "wk pi setup rpi5 / rpi4  (skip if no Pi devices)"
+}
+
+section "workspaces store"
+if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+    if ! have podman || ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
+        miss "podman machine '$WK_MACHINE'" "./setup --stage machine"
+    elif [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" != running ]; then
+        unk "podman machine '$WK_MACHINE' is stopped" "wk start, then re-run wk doctor for the store checks"
+    else
+        ok "podman machine '$WK_MACHINE' running"
+        out=$(podman machine ssh "$WK_MACHINE" -- \
+            "WK_STORE=/var/lib/wk bash /opt/wk-tools/cmd/doctor --probe-store" 2>/dev/null || true)
+        if [ -n "$out" ]; then
+            report_store "$out"
+        else
+            unk "store inside the VM" "/opt/wk-tools missing in the VM? run ./setup --stage sdk"
+        fi
+    fi
+else
+    report_store "$(probe_store)"
+fi
+
+# --- benchmarking (Linux) ----------------------------------------------------------
+if is_linux; then
+    section "benchmarking"
+    check "privileged helper (wk quiesce / wk session)" "./setup --stage quiesce  (interactive sudo)" \
+        test -x /usr/local/libexec/wk-quiesce-priv
+    case " $(id -nG "$(id -un)" 2>/dev/null) " in
+        *" render "*) ok "render group configured" ;;
+        *) miss "render group configured" "./setup --stage tools, then log out and in" ;;
+    esac
+fi
+
+# --- macOS VM target ---------------------------------------------------------------
+if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+    section "macOS VM target (optional -- Apple ports)"
+    if have tart || [ -x "$HOME/.local/bin/tart" ]; then
+        ok "tart installed"
+        if [ -x "${WK_SOFTNET_BIN:-/usr/local/bin/softnet}" ] && [ -u "${WK_SOFTNET_BIN:-/usr/local/bin/softnet}" ]; then
+            ok "softnet installed SUID root"
+        else
+            miss "softnet installed SUID root" "./setup --stage softnet  (interactive sudo)"
+        fi
+        tart_bin=$(command -v tart 2>/dev/null || echo "$HOME/.local/bin/tart")
+        if "$tart_bin" list 2>/dev/null | grep -q "wk-base"; then
+            ok "golden base VM 'wk-base'"
+        else
+            miss "golden base VM 'wk-base'" "wk vm base  (hours: image pull + prebuild)"
+        fi
+    else
+        unk "tart not installed" "SETUP.md section 8 -- only needed for Apple-port builds"
+    fi
+fi
+
+# --- verdict -----------------------------------------------------------------------
+echo >&2
+if [ "$missing" -eq 0 ]; then
+    info "everything checkable is provisioned"
+    exit 0
+fi
+warn "$missing item(s) missing -- each line above names its fix; the order that"
+log  "works from bare metal: ./setup -> the interactive stages it lists ->"
+log  "gh auth login -> wk key register -> wk sync -> (optional) wk pi setup,"
+log  "wk vm base -> claude login in the first workspace. See SETUP.md."
+exit 1

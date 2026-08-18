@@ -21,6 +21,11 @@ would let a workspace reach every machine the workstation can, and the boundary
 would be gone. `wk-proxy.py` blocks that range wholesale precisely so a
 mistake here fails closed.
 
+Fixed 2026-08-18, worth re-proving in step 2: that wholesale block used to
+apply to the Pi addresses themselves, so an allowlisted device was refused as
+"resolved to a blocked address" — the proxy now exempts exact `pi-hosts`
+matches (`Policy.is_pi`) and nothing else in the range.
+
 ## What to do
 
 1. `wk pi setup rpi5` and `wk pi setup rpi4` against running devices. It works
@@ -34,6 +39,10 @@ mistake here fails closed.
 4. The Tailscale ACL grant in SETUP.md still applies, and still must not reuse
    `tag:server` -- that tag covers moose, nextcloud, immich, overleaf and the
    gateway.
+5. Make `wk pi setup rpi5` also deploy `host/linux/rpi5/` to the device. Today
+   that tree (overclock, fan-max.service, verify/stress scripts) is manual
+   state restored from backup -- the one part of a Pi wipe that `./setup`
+   cannot recreate. Mirror how the tailscale install already copies files in.
 
 ## Traps
 

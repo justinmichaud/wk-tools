@@ -125,6 +125,27 @@ else
         echo "warning: Claude CLI install failed; 'wk claude' will not work here" >&2
 fi
 
+# The workspace-side Claude config, same entries container/firstrun.sh links in
+# a container. Without this the guest runs a skip-permissions agent with no
+# CLAUDE.md, no settings and no skills. The caller rsyncs the whole wk-tools
+# tree in before running this script.
+#
+# Skills are a read-only symlink into the synced tree here, unlike a
+# container's shared mutable /skills volume: `wk build` re-rsyncs the tree with
+# --delete on every run, so in-guest skill edits would be silently clobbered --
+# better they fail to write than quietly vanish.
+WK_TOOLS_DIR="$HOME/wk-tools"
+if [ -d "$WK_TOOLS_DIR/claude" ]; then
+    mkdir -p "$HOME/.claude"
+    ln -sfn "$WK_TOOLS_DIR/claude/settings.json" "$HOME/.claude/settings.json"
+    ln -sfn "$WK_TOOLS_DIR/claude/hooks"         "$HOME/.claude/hooks"
+    ln -sfn "$WK_TOOLS_DIR/claude/CLAUDE.md"     "$HOME/.claude/CLAUDE.md"
+    ln -sfn "$WK_TOOLS_DIR/claude/skills"        "$HOME/.claude/skills"
+    say "Claude config linked from $WK_TOOLS_DIR/claude"
+else
+    echo "warning: $WK_TOOLS_DIR/claude missing; ~/.claude not configured" >&2
+fi
+
 # --- egress ---------------------------------------------------------------
 # The guest's only route out is the proxy on the host: Softnet denies
 # everything else. Nothing here resolves names itself -- the proxy does that,

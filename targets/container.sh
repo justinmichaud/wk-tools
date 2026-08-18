@@ -8,18 +8,8 @@
 # One sandbox model, on both hosts: rootless podman, --userns keep-id, and
 # --network none. The workspace has no network interface at all and reaches the
 # outside only through the unix socket of an egress proxy running as the user.
-# Nothing here needs a privilege.
-#
-# The macOS VM used to run a second model -- rootful podman on a bridge, egress
-# policy in nftables' forward chain -- and it was retired for two reasons. A
-# boundary implemented twice is understood once and verified never; and
-# nftables *required* rootful podman, because rootless podman's network helper
-# re-emits container traffic from the init namespace in a randomly named cgroup
-# scope, leaving no stable selector for a packet filter. Under rootful podman a
-# container escape is a root escape. Removing the interface removes the need
-# for the filter, and the privilege with it.
-#
-# See docs/HANDOFF-macos-proxy.md for the migration this completed.
+# Nothing here needs a privilege. (Why not a packet filter: see the WK_SANDBOX
+# comment below.)
 
 if [ -n "${WK_IN_VM:-}" ]; then
     WK_SDK="${WK_SDK:-/opt/webkit-container-sdk}"
@@ -177,7 +167,7 @@ t_create() {
          --memory $(envelope_mem_mb)m
          --cpus $(envelope_cores)
          --env CCACHE_DIR=/ccache
-         --env CCACHE_MAXSIZE=${WK_CCACHE_MAXSIZE:-40G}
+         --env CCACHE_MAXSIZE=$WK_CCACHE_MAXSIZE
          --env CCACHE_BASEDIR=/src/WebKit
          --env CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime
          --env CCACHE_PCH_EXTSUM=true

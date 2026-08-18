@@ -29,6 +29,24 @@ Each item names the source handoff so detail is not duplicated here.
 
 ---
 
+## Blocking, both lanes — `wk` does not work inside a workspace
+
+**`docs/HANDOFF-wk-in-workspace.md`** — found 2026-08-18. Claude only ever runs
+inside a workspace, so the in-workspace `wk build <config>` / `wk run` /
+`wk test` interface that `CLAUDE.md` documents is what the sandbox exists to
+allow — and it does not exist: inside a macOS guest every `wk` command fails
+with "podman is required", because `resolve_target` defaults to `container`
+when no workspace is named and the entrypoint then tries to forward into a
+podman machine that cannot exist there. Verified in the macOS guest; **the
+Linux-container half is unverified** and should be established first.
+
+Until it is fixed, `wk claude` puts Claude in a correctly sandboxed guest that
+cannot build or test. It also gates `docs/HANDOFF-claude.md`'s "every skill
+invokes a deterministic tool rather than freehand steps". Do it before
+anything below on whichever machine frees up first.
+
+---
+
 ## Lane A — Linux workstation
 
 1. **32-bit containers (`wk new --arch 32`)** — `docs/HANDOFF-linux-arm32.md`
@@ -43,6 +61,18 @@ Each item names the source handoff so detail is not duplicated here.
    populates and the proxy allowlist works, and confirm the *negative* (an
    address not in the file is refused).
 
+   **rpi5 role, decided 2026-08-18** (reconciling this with
+   `docs/HANDOFF-benchmarking.md`): the end state is that the rpi5 is a full
+   workstation — its own `./setup`, full tailnet privileges, Claude sandboxed
+   in podman workspaces exactly like moose — and benchmarking happens from a
+   dedicated benchmark image it netboots or USB-boots. The image carries the
+   perf tuning and joins the tailnet under its *own* identity, and that
+   identity is what goes in `pi-hosts`; the workstation identity never does,
+   because an unrestricted tailnet node reachable from inside a workspace
+   would be the boundary gone. Until the benchmark image exists (after step
+   7), the rpi5 stays what it is today — a tuned test device in `pi-hosts` —
+   so there is no gap in benchmarking capability.
+
 3. **RPi5 tuning re-apply** — `host/linux/rpi5/HANDOFF.md`
    Separate machine, reached over SSH from the Linux workstation once step 2
    is done. Re-run `rpi5-setup.sh` → reboot → `rpi5-verify.sh` →
@@ -50,6 +80,13 @@ Each item names the source handoff so detail is not duplicated here.
    re-install, confirm the GPU at v3d=1200 with a sustained load. NUMA (Path B)
    is already done; Path A (upstreaming `CONFIG_NUMA_EMU`) is optional
    follow-up.
+
+   Under the step-2 decision this tree splits: the *stability* half (fan
+   always 100%, WiFi stability, fstab/indexer, the NUMA kernel) belongs to the
+   rpi5 in every role and keeps being applied to the installed OS; the *perf*
+   half (overclock, v3d, perf governor, swap off) moves into the benchmark
+   image definition when `docs/HANDOFF-benchmarking.md` is picked up, so the
+   workstation install never depends on an overclock to be usable.
 
 4. **Remote target** — `docs/HANDOFF-linux-remote.md`
    `targets/remote.sh` has never been run. Write a real
@@ -69,6 +106,9 @@ Each item names the source handoff so detail is not duplicated here.
    transfer helper; confirm debugging and perf testing both work against a
    cross-compiled binary. Natural follow-on to steps 2 and 4 (rpi5 as a
    target, and the "get a binary onto another machine" plumbing).
+   Then `docs/HANDOFF-pi-deploy.md` — `wk pi deploy` and `wk pi bench`, the
+   build-archive-copy-extract loop and the per-session device prep ritual —
+   which consumes this step's transfer path and step 2's provisioning.
 
 7. **SD-card image flashing** — `docs/HANDOFF-sdcard.md`
    Generic copy-image-out-of-workspace + flash-to-card flow (was an empty
@@ -83,22 +123,26 @@ Each item names the source handoff so detail is not duplicated here.
    Tailscale installed on the rpi3 target image itself.
 
 9. **Linux MiniBrowser: debugging + graphical run** —
-   `docs/HANDOFF-linux-minibrower.md`
+   `docs/HANDOFF-linux-minibrower.md`, implemented together with
+   `docs/HANDOFF-debug.md` (`wk debug` and `wk run --until-crash` — the same
+   attach recipes as commands rather than instructions).
    Support running WPE MiniBrowser graphically (interactive) and attaching a
    debugger, including a layout test. Make sure prewarm processes, PSON, and
    site isolation don't get in the way. Reference:
    `Debugging-WPE-Linux-(desktop)` wiki page.
 
-10. **Profiling tooling — Linux half** — `docs/HANDOFF-original-helpers.md`
-    (profiling section only — the wasm section in that file is
-    platform-agnostic filler; the git-tools table has moved to its own
-    document, see step 13). Build samply, sysprof-cli, and heaptrack support
-    from source, wired for cli jsc, GTK, and WPE builds, plus JIT-dump support
-    (extra JSC flags + the sysprof patch) and the JSC sampling profiler.
-    Restore `strip-addresses` and `show-profiled-functions` into
-    `container/bin/`. The macOS-MiniBrowser half of profiling is lane B step 5.
+10. **Profiling tooling — Linux half** — `docs/HANDOFF-profile.md` (which
+    subsumes `docs/HANDOFF-original-helpers.md`'s profiling section the way
+    git-tools was split out earlier). Build samply, sysprof-cli, and heaptrack
+    into the workspace image, and ship `wk profile` as the interface — the
+    env-var walls (JIT dump, sampling profiler, bytecode profiler, heaptrack,
+    strong-ref tracking) become modes of one command instead of wiki
+    copy-paste and skill recitation.
+    (`strip-addresses` and `show-profiled-functions` are already restored in
+    `container/bin/`.) The macOS-MiniBrowser half of profiling is lane B step 5.
 
-11. **Memory charting** — `docs/HANDOFF-memory.md`
+11. **Memory charting** — `docs/HANDOFF-memory.md` (`wk bench mem`; starts by
+    rescuing `plot-memory-log.py` and the experiment patches out of the wiki).
     "All targets" — build the collection/charting mechanism here since Linux
     is the reference target, then it should apply unchanged to WPE/GTK/JSCOnly.
     Fixed-core-count running *and* benchmarking needs to exist for every
@@ -112,13 +156,13 @@ Each item names the source handoff so detail is not duplicated here.
     then confirm it's not blocked on macOS.
 
 13. **Git and GitHub helpers** — `docs/HANDOFF-git-tools.md` (split out of
-    `docs/HANDOFF-original-helpers.md`). Restore `gpr` first (the one with
-    real logic — checks out a PR branch, confirms every git command, diffs
-    before offering `reset --hard`), then `git-sync-fork`; `git-clean` and
-    `commit-count` are trivial one-liners, lowest priority. Machine-agnostic —
-    listed here only because Lane A has more slack after step 12; fine to pick
-    up on macOS instead if that lane is idle first. Note the dependency on
-    step 15's git-push toggle before wiring these to actually push anything.
+    `docs/HANDOFF-original-helpers.md`). `gpr` is already restored as
+    `wk pr`; bring it up to house style, then add `git-sync-fork`; `git-clean`
+    and `commit-count` are trivial one-liners, lowest priority.
+    Machine-agnostic — listed here only because Lane A has more slack after
+    step 12; fine to pick up on macOS instead if that lane is idle first. Note
+    the dependency on step 17's git-push toggle before wiring these to
+    actually push anything.
 
 14. **BMC recovery/streaming** — `docs/HANDOFF-bmc.md`
     Unrelated to the container/VM work — it's about the Librem 5's BMC board.
@@ -232,37 +276,43 @@ Each item names the source handoff so detail is not duplicated here.
 
 ---
 
-## Blocking, both lanes — `wk` does not work inside a workspace
+## Either machine / process items (no meaningful conflict)
 
-**`docs/HANDOFF-wk-in-workspace.md`** — found 2026-08-18. Claude only ever runs
-inside a workspace, so the in-workspace `wk build <config>` / `wk run` /
-`wk test` interface that `CLAUDE.md` documents is load-bearing. It does not
-exist: inside a macOS guest every `wk` command fails with "podman is required",
-because `resolve_target` defaults to `container` when no workspace is named and
-the entrypoint then tries to forward into a podman machine that cannot exist
-there. Verified in the macOS guest; **the Linux-container half is unverified**
-and should be established first.
+Standing rule, not a task: every task above gets a line item in
+`docs/TESTING.md` as it is picked up — apply it inline.
 
-This is not filler. Until it is fixed, `wk claude` puts Claude in a correctly
-sandboxed guest that cannot build or test — which is the one thing the sandbox
-exists to allow. It also gates `docs/HANDOFF-claude`'s "every skill invokes a
-deterministic tool rather than freehand steps".
+Do these two early; each is a single short session:
 
----
+- **`docs/HANDOFF-test-runner.md`** — build `wk selftest`, the autonomous
+  runner for `docs/TESTING.md`. The plan is currently a hand-ticked checklist,
+  so "run the test plan after a re-install" is not actually possible.
+- **`docs/HANDOFF-privacy-scrub.md`** — this repo is public and carries
+  internal hostnames, RFC1918 addresses, and a WiFi SSID/BSSID. Needs user
+  decisions (make private? scrub? rewrite history?), so it is mostly a
+  conversation.
 
-## Either machine / process items (no meaningful conflict, pick up as filler)
+Genuine filler, in no order:
 
-- **`docs/HANDOFF-testing.md`** — every task above should get a line item in
-  `TESTING.md` as it's picked up. This is a standing rule for whoever does the
-  work, not a separate task — apply it inline rather than scheduling it.
-- **`docs/HANDOFF-claude`** — update `CLAUDE.md` and the skills to: drop
-  stale detail, make every skill invoke a deterministic tool/script rather than
-  freehand steps, cap tokens spent quoting benchmark/build output, forbid
-  hand-rolled builds and benchmark methodology (always the script; handle
-  cli/graphical; report GPU rendering; skip SIMD subtests only on ARMv7),
-  never store useful data in `/tmp`, default new Claude threads to RC-enabled
-  and named `<purpose>-<host-os/arch>-<target>`, never push/commit in git.
-  Pure docs/config edit, no sandbox risk — whichever machine is idle first.
+- **`docs/HANDOFF-claude.md`** — rewrite `CLAUDE.md` and the skills so every
+  instruction is executable *from inside a workspace*. Gated on the blocking
+  wk-in-workspace item above; carries the concrete defect list from the
+  2026-08 audit (host-side sudo steps, retired-machine paths, contradictory
+  build guidance, the missing uclamp fallback).
+- **`docs/HANDOFF-benchmarking.md`** — bootable benchmark images on external
+  media / netboot. The rpi5 conflict is resolved (decision recorded in lane A
+  step 2 and in the file itself); pick this up after lane A step 7, whose
+  image-flashing flow it consumes.
+- **`docs/HANDOFF-bench-python.md`** — rewrite `cmd/bench` in Python; it has
+  outgrown bash (four inline Python heredocs, JSON via 16 env vars, a
+  hand-rolled plan parser).
+- **`docs/HANDOFF-code-server.md`** — remote dev via code-server plus a web
+  UI for container lifecycle. Two or three separate tasks bundled; split
+  before picking up.
+- **`docs/HANDOFF-helix.md`** — helix config approaching zed parity
+  (multi-file git review in particular), for rpi5 development where zed is
+  too slow.
+- **`docs/HANDOFF-claude-analysis.md`** — mine local Claude transcripts for
+  automation candidates; runs per device, one machine at a time.
 
 ---
 
@@ -296,13 +346,25 @@ execute all of them — see the doc for the full list and what "done" means.
 
 - **`docs/HANDOFF-sdcard.md` was an empty placeholder** — now scoped (see
   lane A step 7) rather than an orphan zero-byte file.
-- **The macOS-proxy unification is done.** `docs/HANDOFF-linux.md` used to
-  reference a `docs/HANDOFF-macos-proxy.md` that was never written; that file
-  never existed and the underlying work (collapsing the Linux
+- **The macOS-proxy unification is done.** `docs/HANDOFF-macos-proxy.md` was
+  never written and the underlying work (collapsing the Linux
   `--network none`-plus-proxy model and the macOS Softnet boundary into one
-  allowlist-by-hostname design) is complete, so both the missing-file
-  reference and the "what is left" bullet pointing at it have been removed
-  from `docs/HANDOFF-linux.md`.
+  allowlist-by-hostname design) is complete; every reference to the missing
+  file (HANDOFF-linux.md, README.md, targets/container.sh,
+  host/macos/vmtools.sh) is gone.
+- **2026-08-18 review pass.** Fixed in code, no task remains: the proxy's
+  self-blocking of Pi tailnet addresses; `wk vm start`/`wk claude` now fail
+  closed when Softnet is missing; `wk enter` with no command; `wk pi`'s
+  unbound `WK_STORE` crash and its dead nftables branch; `wk verify`/`wk
+  bench` ignoring the target registry; unquoted argument splices in
+  claude/gui/test/remote-exec and the forwarded `WK_CONFIG`; `wk setup`
+  advertised but not dispatchable; `wk gc` now prunes stale bench payload
+  seeds, reports the growth dirs it keeps, and no longer password-prompts for
+  fstrim; `wk skills pull` no longer silently overwrites uncommitted repo
+  edits; host and workspace Claude configs are split (the host no longer gets
+  `Bash(*)` or the "you are in a sandbox" briefing), and macOS guests now get
+  a Claude config at all; sdk-patches verify covers every security-relevant
+  section; the tart install pointer named the wrong GitHub org.
 - **Git and GitHub helpers separated out** into their own document,
   `docs/HANDOFF-git-tools.md` (see lane A step 13) — they shared no tooling
   or machine constraint with the profiling/benchmarking/wasm material in

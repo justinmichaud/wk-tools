@@ -516,6 +516,6 @@ status)
     ;;
 
 *)
-    die "usage: wk session on [--bmc] | off | status"
+    die "usage: wk session on [--bmc] | gdm [--bmc] | off | status"
     ;;
 esac

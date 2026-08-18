@@ -6,7 +6,7 @@
 #
 #   ./setup              everything for this OS
 #   ./setup --stage X    just one stage (tools, settings, dotfiles, claude,
-#                        machine, sdk, quiesce)
+#                        mcp, machine, vmtools, softnet, sdk, quiesce)
 #   ./setup --dry-run    report what would change
 
 set -euo pipefail
@@ -22,7 +22,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --stage) STAGE="${2:-}"; shift 2 ;;
         --dry-run) WK_DRY_RUN=1; shift ;;
-        -h|--help) sed -n '2,12p' "$0" >&2; exit 0 ;;
+        -h|--help) sed -n '2,10p' "$0" >&2; exit 0 ;;
         *) die "unknown option: $1" ;;
     esac
 done
@@ -104,6 +104,24 @@ if [ "$WK_CHANGES" -eq 0 ]; then
 else
     info "$WK_CHANGES change(s) applied"
     log  "re-run ./setup to confirm it now reports no changes"
+fi
+log "wk doctor shows what is provisioned and what still needs a manual step"
+
+# macOS: say plainly what is still missing, rather than leaving it to be
+# discovered when a command refuses to run.
+if is_macos && [ "$STAGE" = all ]; then
+    _todo=""
+    if ! have tart && [ ! -x "$HOME/.local/bin/tart" ]; then
+        _todo="$_todo\n  - tart is not installed; 'wk vm' (Apple ports) is unavailable -- SETUP.md section 8"
+    elif ! [ -x "${WK_SOFTNET_BIN:-/usr/local/bin/softnet}" ]; then
+        _todo="$_todo\n  - softnet is not installed; 'wk vm start' refuses to boot a guest: ./setup --stage softnet"
+    fi
+    if [ -n "$_todo" ]; then
+        echo >&2
+        warn "still to do before macOS VM workspaces:"
+        printf "%b\n" "$_todo" >&2
+    fi
+    unset _todo
 fi
 
 # Linux: say plainly what is still missing, rather than leaving it to be

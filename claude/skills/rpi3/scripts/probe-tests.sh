@@ -16,7 +16,7 @@ for NAME in "$@"; do
   while [ $e -lt $MAX ]; do
     now=$(dmesg 2>/dev/null | grep -c "sig=11")
     if [ "$now" -gt "$base" ]; then verdict="CRASH_SIGSEGV"; break; fi
-    if grep -qi "renderer process crashed|RangeError: Out of memory|Cannot allocate" "$LOG" 2>/dev/null; then verdict="CRASH_OR_OOM"; break; fi
+    if grep -qiE "renderer process crashed|RangeError: Out of memory|Cannot allocate" "$LOG" 2>/dev/null; then verdict="CRASH_OR_OOM"; break; fi
     rss=$(ps -o rss= -C WPEWebProcess 2>/dev/null | awk '{s+=$1} END{print int(s/1024)}')
     cpu=$(ps -o pcpu= -C WPEWebProcess 2>/dev/null | awk '{s+=$1} END{print int(s)}')
     [ "${rss:-0}" -gt "$peak" ] && peak=$rss

@@ -194,10 +194,11 @@ _tart() {
     bin=$(_tart_bin) || die "tart is not installed.
     Install the signed bundle (it needs the virtualization entitlement, so the
     .app must stay intact):
-      curl -fsSLO https://github.com/openai/tart/releases/latest/download/tart.tar.gz
+      mkdir -p ~/.local/share/tart ~/.local/bin
+      curl -fsSLO https://github.com/cirruslabs/tart/releases/latest/download/tart.tar.gz
       tar -xzf tart.tar.gz -C ~/.local/share/tart/
       ln -sfn ~/.local/share/tart/tart.app/Contents/MacOS/tart ~/.local/bin/tart
-    Licence: FSL-1.1-ALv2. Internal use is a Permitted Purpose; see docs/macos-vm.md."
+    Licence: FSL-1.1-ALv2; internal use is a Permitted Purpose (SETUP.md section 8)."
     "$bin" "$@"
 }
 
@@ -316,12 +317,13 @@ _softnet_flags() {
         warn "WK_VM_UNFILTERED=1 -- this guest gets the open network, with no egress filter"
         return 0
     fi
-    if [ ! -x "$WK_SOFTNET_BIN" ]; then
-        warn "softnet is not installed, so this guest's egress is NOT filtered.
-  Install it with:  ./setup --stage softnet   (needs a terminal for sudo)
-  Or set WK_VM_UNFILTERED=1 to say you meant it."
-        return 0
-    fi
+    # Fail closed: a guest booted without the filter has the open network for
+    # its whole lifetime, because Softnet applies at `tart run` and cannot be
+    # added to a running guest. Booting unfiltered is available, but only by
+    # saying so.
+    [ -x "$WK_SOFTNET_BIN" ] || die "softnet is not installed, so this guest's egress would not be filtered.
+    Install it:  ./setup --stage softnet   (needs a terminal for sudo)
+    Or set WK_VM_UNFILTERED=1 to boot with the open network anyway."
     printf '%s\n' --net-softnet \
         "--net-softnet-block=0.0.0.0/0" \
         "--net-softnet-allow=$(_proxy_addr)/32"
@@ -397,6 +399,22 @@ _boot() {
     runlog="$WK_VM_DIR/${v#wk-}.run.log"
 
     if [ "$(_vm_state "$v")" != running ]; then
+        # The flags are computed *before* the tart command line: inside the
+        # $(...) below, a die in _softnet_flags would kill only the subshell and
+        # tart would run anyway -- unfiltered, silently. The separate assignment
+        # is what lets the failure actually stop the boot.
+        local sflags
+        sflags=$(_softnet_flags)
+
+        # Recorded so `wk claude` can tell how this guest was *booted*, which
+        # is what decides whether its egress is filtered -- the binary existing
+        # now says nothing about a guest started before it was installed.
+        if [ -z "$sflags" ]; then
+            : > "$WK_VM_DIR/${v#wk-}.unfiltered"
+        else
+            rm -f "$WK_VM_DIR/${v#wk-}.unfiltered"
+        fi
+
         # nohup, not a bare `&`: the VM must outlive the command that started
         # it. A backgrounded child of `wk vm start` dies with the terminal,
         # which looks exactly like the VM crashing on boot.
@@ -412,8 +430,8 @@ _boot() {
         # a UI, worthless for anything measuring rendering. Since interacting
         # with MiniBrowser is the point of this target, headless is not a mode
         # worth carrying a second code path for.
-        # shellcheck disable=SC2046 -- deliberate word splitting of the flags.
-        nohup "$(_tart_bin)" run $(_softnet_flags) "$v" >"$runlog" 2>&1 &
+        # shellcheck disable=SC2086 -- deliberate word splitting of the flags.
+        nohup "$(_tart_bin)" run $sflags "$v" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
         info "booting $v (log: $runlog)"
     fi
@@ -870,8 +888,11 @@ _provision_base() {
     fi
 
     info "provisioning the base VM (Xcode licence, WebKit checkout, Claude CLI)"
-    rsync -az -e "ssh $(_ssh_opts)" \
-        "$WK_ROOT/vm/provision-base.sh" "$WK_VM_USER@$ip:/tmp/provision-base.sh"
+    # The whole tree, not just the provisioning script: provision-base.sh links
+    # ~/.claude (settings, hooks, CLAUDE.md, skills) out of it, and a guest
+    # without those runs a skip-permissions agent with no policy at all.
+    rsync -az --delete --exclude '.git/' -e "ssh $(_ssh_opts)" \
+        "$WK_ROOT/" "$WK_VM_USER@$ip:$(t_tools "$WK_VM_BASE")/"
     # _proxy_addr, not $WK_VM_PROXY_ADDR. The variable is normally *unset* --
     # it is an override, and the address is otherwise derived from the bridge
     # that only exists once a guest is running. Passing the raw variable sent
@@ -879,7 +900,7 @@ _provision_base() {
     # of 192.168.64.1, and the guest was left pointing at an address nothing
     # listens on: every fetch inside the guest timed out, which looks exactly
     # like the egress filter doing its job rather than a misconfiguration.
-    _ssh "$ip" "env WK_VM_PROXY_ADDR=$(sh_quote "$(_proxy_addr)") WK_VM_PROXY_PORT=$(sh_quote "$WK_VM_PROXY_PORT") WK_VM_DISPLAY=$(sh_quote "$WK_VM_DISPLAY") bash /tmp/provision-base.sh" \
+    _ssh "$ip" "env WK_VM_PROXY_ADDR=$(sh_quote "$(_proxy_addr)") WK_VM_PROXY_PORT=$(sh_quote "$WK_VM_PROXY_PORT") WK_VM_DISPLAY=$(sh_quote "$WK_VM_DISPLAY") bash $(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
         || die "base provisioning failed"
 
     _prebuild_base "$ip"

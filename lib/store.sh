@@ -111,7 +111,7 @@ store_init() {
     # variable, so `ccache -s` reports the real limit from the host too rather
     # than the 5 GB default.
     [ -f "$WK_STORE/cache/ccache/ccache.conf" ] || \
-        printf 'max_size = %s\n' "${WK_CCACHE_MAXSIZE:-50G}" > "$WK_STORE/cache/ccache/ccache.conf"
+        printf 'max_size = %s\n' "$WK_CCACHE_MAXSIZE" > "$WK_STORE/cache/ccache/ccache.conf"
     ensure_dir "$WK_STORE/cache/yocto/downloads"
     ensure_dir "$WK_STORE/cache/yocto/sstate"
     ensure_dir "$WK_STORE/cache/buildroot/dl"

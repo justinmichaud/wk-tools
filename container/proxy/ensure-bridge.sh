@@ -8,7 +8,15 @@
 PIDFILE=/tmp/.wk-bridge.pid
 BRIDGE=/opt/wk-tools/container/proxy/bridge.py
 
-if ! { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }; then
+# The PID alone is not proof: PIDs are recycled, and a match on an unrelated
+# process leaves the workspace with no egress while looking healthy.
+bridge_alive() {
+    local pid
+    pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+    [ -n "$pid" ] && grep -qa "bridge.py" "/proc/$pid/cmdline" 2>/dev/null
+}
+
+if ! bridge_alive; then
     setsid python3 "$BRIDGE" >/tmp/.wk-bridge.log 2>&1 &
     echo $! > "$PIDFILE"
     # The bridge binds before serving; a short wait avoids a spurious first

@@ -57,6 +57,19 @@ pull)
         info "nothing to pull; already in sync"
         exit 0
     fi
+    # A committed repo copy makes pull reversible through git; uncommitted
+    # repo-side edits would be silently overwritten, so those ask first.
+    if git -C "$WK_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+        if [ -n "$(git -C "$WK_ROOT" status --porcelain -- claude/skills 2>/dev/null)" ]; then
+            warn "the repo has uncommitted skill changes that pull would overwrite:"
+            git -C "$WK_ROOT" status --short -- claude/skills | sed 's/^/  /' >&2
+            confirm "overwrite them with the shared copy?" || die "aborted; commit or stash first"
+        fi
+    else
+        # No git here (the rsynced copy in the VM): nothing makes this pull
+        # reversible, so it always asks.
+        confirm "no git repo at $WK_ROOT -- pull cannot be undone; continue?" || die "aborted"
+    fi
     # --delete so a skill deleted in a workspace is deleted in the repo too;
     # otherwise the repo slowly fills with skills nothing uses any more.
     rsync -a --delete "$SHARED/" "$REPO/"

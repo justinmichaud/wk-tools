@@ -17,6 +17,7 @@
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
 
 TS_VERSION="${TS_VERSION:-1.102.2}"
 TAG="${WK_PI_TAG:-tag:wk}"
@@ -108,10 +109,8 @@ info "$HOST is on the tailnet at $TSIP"
 # Add the address to the workspace egress allowlist. Individual addresses, not
 # the whole CGNAT range: the workstation is itself an unrestricted tailnet node,
 # so allowing 100.64.0.0/10 would let a workspace reach everything it can.
-#
-# Recorded in a file as well as loaded live. ./setup regenerates the firewall
-# from the repo on every run, which would otherwise drop these addresses and
-# silently cut the test devices off.
+# The file lives in the store, which ./setup never regenerates, so re-running
+# setup cannot cut the test devices off.
 PI_FILE="$WK_STORE/pi-hosts"
 ensure_dir "$(dirname "$PI_FILE")"
 if ! grep -qxF "$TSIP" "$PI_FILE" 2>/dev/null; then
@@ -119,18 +118,10 @@ if ! grep -qxF "$TSIP" "$PI_FILE" 2>/dev/null; then
     info "recorded $TSIP in $PI_FILE"
 fi
 
-# On Linux the file *is* the policy: the egress proxy re-reads it on every
-# request, so a device added here is reachable immediately with nothing to
-# reload. In the macOS VM the same file is replayed into an nftables set.
-if [ -n "${WK_IN_VM:-}" ] && have nft && sudo nft list table inet wk_egress >/dev/null 2>&1; then
-    sudo nft add element inet wk_egress pi_hosts "{ $TSIP }"
-    info "allowed $TSIP in the workspace egress policy"
-elif is_linux; then
-    info "allowed $TSIP (the egress proxy re-reads $PI_FILE per request)"
-else
-    log "note: the firewall is not loaded here; $TSIP is recorded and will be"
-    log "      applied the next time the policy is regenerated."
-fi
+# The file *is* the policy: the egress proxy re-reads it on every request, so
+# a device added here is reachable immediately with nothing to reload. (The
+# nftables replay this used to do is gone with the packet filter itself.)
+info "allowed $TSIP (the egress proxy re-reads $PI_FILE per request)"
 
 cat >&2 <<EOF
 

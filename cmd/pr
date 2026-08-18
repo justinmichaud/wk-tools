@@ -217,7 +217,10 @@ if [ -n "$UPSTREAM_BASE_BRANCH" ]; then
     REMOTE_BASE=$(git merge-base "$EXPECTED_UPSTREAM" "$UPSTREAM_BASE_BRANCH" 2>/dev/null || true)
 fi
 
-DIFF_FILE=$(mktemp --suffix=.diff -t "gpr.XXXXXX")
+# Portable: --suffix is GNU mktemp only, and this runs on macOS too.
+DIFF_FILE=$(mktemp "${TMPDIR:-/tmp}/gpr.XXXXXX")
+mv "$DIFF_FILE" "$DIFF_FILE.diff"
+DIFF_FILE="$DIFF_FILE.diff"
 {
     echo "# Comparing local '$BRANCH' vs '$EXPECTED_UPSTREAM'"
     echo "# Local : $LOCAL_SHA"

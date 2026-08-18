@@ -1,5 +1,10 @@
 # The Linux port: what it is now
 
+**Status: a completed record, not a pending task.** Kept in the HANDOFF
+namespace because other handoffs cite it; nothing here is waiting to be done.
+Hardware and version details below describe the machine as verified in 2026-08
+(Ubuntu 24.04 at the time, podman 4.9) and will drift.
+
 The Linux side is built and running. This document replaces the original
 handoff: it records what changed, what was verified, and what is left.
 

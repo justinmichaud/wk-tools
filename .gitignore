@@ -7,3 +7,6 @@ __pycache__/
 
 # Machine-local target definitions: these name internal hosts and paths.
 /targets/local/
+
+# Site-local WiFi identity for the rpi5 (this repo is public).
+/host/linux/rpi5/rpi5.conf

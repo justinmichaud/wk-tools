@@ -45,11 +45,21 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 
+. "$WK_ROOT/lib/target.sh"
+
 BENCH_DIR="$WK_STORE/bench"
 SEED_DIR="$WK_STORE/cache/bench"
 
-TARGET="${WK_TARGET:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+# The driver is loaded per workspace, from the registry -- but bench's paths
+# (/bench, /cache/bench, /src/WebKit) are container mounts, so only container
+# workspaces are supported and anything else is refused by name rather than
+# failing on a path that does not exist.
+load_bench_target() {
+    local ws="$1" t
+    t="${WK_TARGET:-$(target_of "$ws" 2>/dev/null || echo container)}"
+    [ "$t" = container ] || die "wk bench supports container workspaces only ('$ws' has target '$t')"
+    load_target "$t"
+}
 
 CONFIG="${WK_CONFIG:-wpe-release}"
 # Defaulted from the config's port below rather than fixed: the two ports have
@@ -95,7 +105,7 @@ plan_json() {
     local ws="$1" plan="$2" body seen=0
     while [ "$seen" -lt 5 ]; do
         body=$(t_exec "$ws" cat "/src/WebKit/Tools/Scripts/webkitpy/benchmark_runner/data/plans/${plan}.plan" 2>/dev/null) \
-            || die "no such plan: $plan (wk bench <ws> --list)"
+            || die "no such plan: $plan (plans live in Tools/Scripts/webkitpy/benchmark_runner/data/plans)"
         # A plan file may contain nothing but the name of another plan.
         case "$(printf '%s' "$body" | head -c 1)" in
             '{') printf '%s' "$body"; return 0 ;;
@@ -314,6 +324,7 @@ preflight() {
 cmd_run() {
     local ws="$1" plan="$2"
     require_name "$ws"
+    load_bench_target "$ws"
     [ "$(t_info "$ws")" != absent ] || die "no such workspace: $ws"
 
     config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
@@ -496,7 +507,9 @@ import json,sys
 try: print(json.load(open('$BENCH_DIR/$b/env.json'))['workspace'])
 except Exception: print('')")
     fi
-    [ -n "$ws" ] && [ "$(t_info "$ws")" != absent ] \
+    [ -n "$ws" ] || die "cannot find a workspace to run compare-results in (pass one as the third argument)"
+    load_bench_target "$ws"
+    [ "$(t_info "$ws")" != absent ] \
         || die "cannot find a workspace to run compare-results in (pass one as the third argument)"
 
     # A single-iteration run has no variance, so every p-value is NaN and
@@ -538,6 +551,7 @@ case "${1:-}" in
     compare) shift; [ $# -ge 2 ] || usage; cmd_compare "$@"; exit 0 ;;
     seed)    shift
              [ $# -ge 2 ] || usage
+             load_bench_target "$1"
              ensure_dir "$SEED_DIR"
              seed_payload "$1" "$2" >/dev/null; exit 0 ;;
     ''|-h|--help) usage ;;

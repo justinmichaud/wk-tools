@@ -109,7 +109,7 @@ case "$SUITE" in
 jsc)
     info "JSC tests ($CONFIG, -j$JOBS)"
     CMD="cd $SRC && $OUT_ENV nice -n 10 Tools/Scripts/run-javascriptcore-tests \
-         --$lower $CFG_PORT --no-build --no-fail-fast --memory-limited $*"
+         --$lower $CFG_PORT --no-build --no-fail-fast --memory-limited $(sh_quote "$@")"
     ;;
 layout)
     info "layout tests ($CONFIG, ${GPU:+GPU}${GPU:-software rendering}, $JOBS processes)"
@@ -117,7 +117,7 @@ layout)
     # which is the opposite of what an automated check wants.
     CMD="cd $SRC && $OUT_ENV $RENDER_ENV nice -n 10 Tools/Scripts/run-webkit-tests \
          --$lower $CFG_PORT --no-build --no-retry-failures \
-         --child-processes=$JOBS $*"
+         --child-processes=$JOBS $(sh_quote "$@")"
     ;;
 *) die "unknown suite: $SUITE" ;;
 esac

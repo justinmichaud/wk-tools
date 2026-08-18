@@ -26,10 +26,21 @@ the work is:
 2. `targets/container.sh` passes `--arch arm` to `wkdev-create` and records the
    architecture in the workspace directory, so `wk build` and `wk run` do not
    have to be told again.
-3. A 32-bit build config in `build/configs.sh`. The compiler question needs
-   answering: the aarch64 clang in the image can target armv7 with a sysroot,
-   but the image's own libraries are the ones that matter, and the arm32 image
-   carries its own toolchain.
+3. 32-bit build configs in `build/configs.sh` (e.g. `jsc-release-32`,
+   `wpe-release-32`). The known-good invocation is copy-pasted across five
+   wiki pages today and should be baked in once:
+   - run under `linux32` (so `uname -m` lies correctly to build scripts),
+   - `-mthumb -march=armv7-a+fp` in C/CXX flags,
+   - the gold-linker low-memory block: `-fuse-ld=gold
+     -Wl,--no-map-whole-files -Wl,--no-keep-memory
+     -Wl,--no-keep-files-mapped -Wl,--no-mmap-output-file`,
+   - `-DUSE_LD_LLD=OFF -DFORCE_32BIT=ON`.
+   The compiler question still needs answering: the aarch64 clang in the image
+   can target armv7 with a sysroot, but the image's own libraries are the ones
+   that matter, and the arm32 image carries its own toolchain. Related
+   provisioning (qemu-user-static/binfmt, the armv7 sdk-image bakery) is on
+   the `WebKit-ARM32-ARM64-workstation-setup` wiki page and belongs in
+   `./setup`/`container/` if it is needed at all — see item 4.
 4. `binfmt_misc` is not needed -- this is native execution, not emulation --
    but confirm that, because the SDK's `wkdev-cross-emulate` exists for the
    case where it is.

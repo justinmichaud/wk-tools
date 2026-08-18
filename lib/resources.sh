@@ -168,24 +168,3 @@ explain_jobs() {
     echo "$jobs"
 }
 
-# --- launching ---------------------------------------------------------------
-# nice_run <nice-level> <command...>
-#
-# Wraps a build so it loses every scheduling contest against the desktop. On
-# Linux this also means the OOM killer reaps the build rather than the session:
-# oom_score_adj is inherited by children, so setting it on the wrapper covers
-# the whole compile tree.
-nice_run() {
-    local level="$1"; shift
-
-    # Built as a string rather than an array: bash 3.2 (still the macOS system
-    # bash) errors on "${arr[@]}" for an empty array under `set -u`.
-    local pre=""
-    if is_linux; then
-        have ionice && pre="ionice -c3"
-        have choom  && pre="$pre choom -n 500 --"
-    fi
-
-    # shellcheck disable=SC2086 -- pre is a deliberate list of bare words.
-    $pre nice -n "$level" "$@"
-}

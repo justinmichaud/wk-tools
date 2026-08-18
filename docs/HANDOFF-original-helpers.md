@@ -47,6 +47,10 @@ they disagreed. `build/configs.sh:config_build_dir` is now the single authority.
 
 ## Running JSC
 
+The profiling rows below are superseded as a work item by
+`docs/HANDOFF-profile.md` (`wk profile` + image provisioning); this table
+stays as the capability inventory it was.
+
 | original | did | now |
 |---|---|---|
 | `jscrr` | run under `rr record` | **gone** (Linux only; `container/lldb/rr.py` is wired for replay) |
@@ -54,8 +58,8 @@ they disagreed. `build/configs.sh:config_build_dir` is now the single authority.
 | `jscs` | run under `samply`, with `--useJITDump --useTextMarkers` | **gone** — the `jsc-profile` skill documents the invocation |
 | `jscsp` | run under `sysprof-cli` | **gone** |
 | `jsc-stress` | run-jsc-stress-tests over the build | `wk test <ws>` |
-| `strip-addresses` | strip hex addresses from disassembly so two dumps diff | **gone** — small and worth restoring; see `container/bin/` |
-| `show-profiled-functions` | parse the bytecode profiler dump | **gone** — `container/bin/` has a copy |
+| `strip-addresses` | strip hex addresses from disassembly so two dumps diff | **done** — restored at `container/bin/strip-addresses` |
+| `show-profiled-functions` | parse the bytecode profiler dump | **done** — restored at `container/bin/show-profiled-functions` (macOS-only: needs `xcrun llvm-profdata`) |
 
 `jscs`/`jscsp` mattered: both set `perf_event_paranoid` to -1 first, which is
 a root operation, and both depend on a profiler that lives on the host. Under

@@ -146,8 +146,8 @@ fi
 # `core`, so nothing in the daily path needs a privilege and nothing inside a
 # workspace can modify it: the workspace sees one unix socket and nothing else.
 #
-# This replaces the nftables policy that used to live here. The reasons are in
-# docs/HANDOFF-macos-proxy.md, but the short version is that nftables required
+# This replaces the nftables policy that used to live here. The short version:
+# nftables required
 # rootful podman -- and under rootful podman a container escape is a root
 # escape -- while the proxy needs no privilege at all and expresses the policy
 # in hostnames rather than hand-refreshed CIDR lists.

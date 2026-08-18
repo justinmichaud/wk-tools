@@ -4,6 +4,13 @@
 on this Raspberry Pi 5 (16GB, NVMe). This folder was restored from backup after the wipe.
 It holds the reproducible performance-tuning setup built over a prior session.
 
+**Role decision (2026-08-18, see `docs/HANDOFF-benchmarking.md`):** this tree
+splits. The stability half (fan-max, WiFi stability, fstab/indexer, NUMA
+kernel) keeps applying to the installed OS in every role; the perf half
+(overclock, v3d, perf governor, swap off) moves into the dedicated benchmark
+image once that exists, and the rpi5 then becomes a full workstation. Until
+then, everything below still applies as written.
+
 ## Step 1 — re-apply the tuning (idempotent, run as the user, NOT sudo)
 ```bash
 bash ~/rpi5-tune/rpi5-setup.sh

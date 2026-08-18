@@ -1,0 +1,14 @@
+# Site-local WiFi identity for rpi5-setup.sh. Copy to rpi5.conf (gitignored --
+# this repo is public and an SSID/BSSID maps the home network).
+#
+# WIFI_SSID: the NetworkManager connection to stabilise.
+#            Default: whatever WiFi connection is active when setup runs.
+#WIFI_SSID=MyNetwork
+#
+# WIFI_PIN_BSSID: which BSS to pin the connection to.
+#   auto              pin to the strongest BSS broadcasting WIFI_SSID at setup
+#                     time (the default; re-run setup after replacing a router)
+#   aa:bb:cc:dd:ee:ff pin this BSS -- honoured only while a scan can see it;
+#                     a vanished BSS clears the pin rather than killing the link
+#   (empty)           never pin
+#WIFI_PIN_BSSID=auto

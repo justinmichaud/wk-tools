@@ -23,11 +23,11 @@ usage: wk <command> [args]
 workspaces
   new <name> [--target T]   create a workspace (container | vm | remote)
   ls                        list workspaces
-  enter <name>              interactive shell (GPU/desktop integration on Linux)
+  enter <name> [--zed|cmd]  interactive shell (GPU/desktop integration on Linux)
   build <name> <config>     build, with derived job count and nice level
   status [name]             build/container state; exit code is machine-readable
-  logs <name> [--follow]    build log, errors first
-  run <name> [args]         run jsc from the workspace build
+  logs <name> [-f|--all]    build log, errors first
+  run <name> [--config C] [--lldb] [args]   run jsc from the workspace build
   gui <name> [url]          MiniBrowser in the seat, launched as perf runs do
   test <name> [args]        run tests
   bench <name> <plan>       run a benchmark, with preflight and provenance
@@ -38,13 +38,16 @@ workspaces
   start                     bring them all back
 
 sources and disk
-  sync                      fetch all upstreams, publish a new base snapshot
+  sync [--all]              fetch all upstreams, publish a new base snapshot
   skills <sub>              status|diff|pull|push the shared, mutable skills
   key <sub>                 register|check the fork push keys (uses gh)
+  pr <user>:<branch>        check out a PR head, confirming every git command
+  report                    weekly GitHub activity summary (uses gh)
   gc                        prune snapshots, images and caches; reclaim disk
 
 hosts and machines
   setup                     idempotent host bootstrap (also: ./setup)
+  doctor                    what is provisioned here and what is missing (read-only)
   backup                    write live desktop settings back into the repo
   vm <sub>                  macOS VM lifecycle: ls|new|start|stop|ip|enter|sync|base|rm
   pi <sub>                  provision a Raspberry Pi onto the tailnet
@@ -100,7 +103,7 @@ resolve_target() {
 # Commands that act on the host itself and are never forwarded into the VM.
 is_host_command() {
     case "$1" in
-        setup|backup|vm|mcp|quiesce|session|pi|key|stop|start|help|-h|--help) return 0 ;;
+        setup|doctor|backup|vm|mcp|quiesce|session|pi|key|stop|start|help|-h|--help) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -119,7 +122,7 @@ forward_to_vm() {
     # -- separates our args from ssh's. WK_IN_VM stops the VM-side wk from
     # trying to forward again if anything is ever misconfigured.
     exec podman machine ssh "$WK_MACHINE" -- \
-        "WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_CONFIG:+WK_CONFIG=$WK_CONFIG }/opt/wk-tools/wk $(sh_quote "$@")"
+        "WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
 }
 
 main() {
@@ -128,6 +131,9 @@ main() {
 
     case "$cmd" in
         help|-h|--help) usage ;;
+        # Advertised in the help but implemented by the top-level script, so it
+        # has no cmd/ file for the dispatch below to find.
+        setup) exec "$WK_ROOT/setup" "$@" ;;
     esac
 
     local impl="$WK_ROOT/cmd/$cmd"

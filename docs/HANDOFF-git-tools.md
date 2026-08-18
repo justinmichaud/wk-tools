@@ -8,7 +8,7 @@ macOS host, whichever is free).
 
 | original | did | now |
 |---|---|---|
-| `gpr` | check out a fork branch in `user:branch` PR syntax, adding the remote if needed, confirming every git command, diffing local vs remote before offering `reset --hard` | **gone** — 262 lines, the most substantial helper here |
+| `gpr` | check out a fork branch in `user:branch` PR syntax, adding the remote if needed, confirming every git command, diffing local vs remote before offering `reset --hard` | **done** — restored as `cmd/pr` (`wk pr <user>:<branch>`) |
 | `git-sync-fork` | fetch both remotes, rebase `main` onto upstream | **gone** |
 | `git-clean` | `git reset . && git checkout . && git clean -fd` | **gone** (one line, but destructive-by-design and easy to want) |
 | `commit-count` | `git shortlog --summary --since "1 year"` | **gone** |
@@ -16,20 +16,23 @@ macOS host, whichever is free).
 
 ## What to do
 
-Restore in this order — `gpr` first, the rest as filler:
-
-1. **`gpr`.** The one worth doing first: it's the only helper here with real
-   logic rather than a hardcoded path, it prints and confirms every git
-   command before running it, and nothing in `wk` covers checking out someone
-   else's PR branch today.
-2. **`git-sync-fork`.** Natural pair with `gpr` — both are fork-branch
-   plumbing — so do it right after, sharing whatever remote-handling code
-   `gpr` ends up with instead of duplicating it.
-3. **`git-clean` and `commit-count`** are one-liners with no logic to design;
+1. **Bring `cmd/pr` up to house style.** It exists and works, but predates the
+   repo's conventions: it does not source `lib/common.sh`, and it assumes VS
+   Code for viewing the diff. Align it rather than rewriting it.
+2. **`git-sync-fork`.** Natural pair with `wk pr` — both are fork-branch
+   plumbing — so share its remote-handling code instead of duplicating it.
+3. **A cherry-pick helper for release-branch maintenance.** The
+   `WebKit-branching` wiki page shows the manual loop: collect commit ids,
+   resolve WebKit `NNNNNN@main` identifiers to ToT shas (today via a
+   re-typed throwaway python snippet; they resolve via commits.webkit.org or
+   a `git log --grep` over the trailer), `git cherry-pick --stdin`. Make it a
+   `wk pick` verb or a script beside `wk pr`, with the same
+   confirm-every-command discipline.
+4. **`git-clean` and `commit-count`** are one-liners with no logic to design;
    restore both as trivial `container/bin/` scripts whenever there's spare
-   time. Consolidating them into a single `gpr`-adjacent helper isn't worth
-   it — they solve unrelated problems (destructive reset vs. a read-only
-   report) and have nothing to share.
+   time. Consolidating them into a single helper isn't worth it — they solve
+   unrelated problems (destructive reset vs. a read-only report) and have
+   nothing to share.
 
 ## Where this connects to sandboxing
 

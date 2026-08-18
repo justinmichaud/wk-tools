@@ -7,27 +7,22 @@
 # survive rebasing the fork onto upstream, and patch fuzz on a moving target is
 # worse than a script that checks what it is editing.
 #
-# Four changes, each independently upstreamable:
+# Eleven numbered sections, each independently upstreamable. The load-bearing
+# ones for the sandbox: 2 (--network selectable, so --network none is possible),
+# 3 (SYS_ADMIN/NET_RAW/seccomp opt-in), 6 (no host podman socket), 11
+# (--isolated: no session D-Bus, keyring, host home or runtime dir). The rest
+# are plumbing (--additional-flags, user creation, offline apt, resolv.conf,
+# runtime-dir ownership, log noise).
 #
-#   1. --additional-flags for wkdev-create. wkdev-enter has had this since
-#      forever (wkdev-enter:22); create has no way to pass extra podman flags
-#      at all, so the overlay mount, cache volumes and resource caps are
-#      impossible without it.
+# Some section comments mention the retired rootful-podman/nftables model they
+# were written against; the sections still apply under the current rootless
+# --network none design, and their guards keep the vestigial ones inert when
+# upstream no longer has the line they patch.
 #
-#   2. --network selectable. wkdev-create hardcodes `--network host`, which
-#      puts the container in the host's network namespace. That defeats any
-#      egress firewall: there is nothing to filter, because the traffic never
-#      crosses a bridge.
-#
-#   3. SYS_ADMIN, NET_RAW, unmask=ALL and seccomp=unconfined become opt-in.
-#      With SYS_ADMIN plus host networking a container can rewrite the very
-#      nftables rules meant to confine it. SYS_PTRACE stays on: gdb and lldb
-#      need it and it is not a network-escape risk.
-#
-#   4. .wkdev-init creates the container user if it is missing. The image
-#      deliberately userdel's uid 1000, and rootful podman cannot use
-#      --userns keep-id to recreate the passwd entry, so init aborts in
-#      usermod without this.
+# Every security-relevant section has a token in the verify list at the bottom.
+# That is not optional: a section whose anchor text drifts upstream silently
+# no-ops, and an unverified hardening patch that no-ops is a sandbox hole that
+# looks exactly like a clean run.
 
 set -euo pipefail
 
@@ -462,10 +457,27 @@ print("gated host-session integration behind --isolated", file=sys.stderr)
 PYEOF
 
 # --- verify ------------------------------------------------------------------
+# One token per section that matters, matching text the section *writes*, so a
+# section that silently no-opped (upstream reformatted its anchor) fails here
+# rather than shipping an unhardened script that looks patched.
 fail=0
-for token in "additional-flags" "unsafe-caps" "isolated" 'program_options\["network"\]'; do
+for token in \
+    "additional-flags" \
+    'program_options\["network"\]' \
+    'egress policy unenforceable' \
+    'argsparse_is_option_set "unsafe-caps"' \
+    'sandbox escape under rootful' \
+    'wk: host networking only' \
+    'WKDEV_CONTAINER_UID' \
+    'argsparse_is_option_set "isolated" || try_process_session_bus' \
+    "not the workspace's business" \
+    'isolated-systemd-user' \
+    'shares the session bus'
+do
     grep -q "$token" "$CREATE" || { echo "verify failed: $token missing from wkdev-create" >&2; fail=1; }
 done
+grep -q "WKDEV_OFFLINE" "$INIT" 2>/dev/null \
+    || { echo "verify failed: WKDEV_OFFLINE missing from .wkdev-init" >&2; fail=1; }
 bash -n "$CREATE" || fail=1
 [ -f "$ENTER" ] && { bash -n "$ENTER" || fail=1; }
 [ -f "$INIT" ] && { bash -n "$INIT" || fail=1; }

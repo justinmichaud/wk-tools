@@ -3,7 +3,12 @@
 **Status: broken, blocking, not started.** Discovered 2026-08-18 while working
 the macOS MiniBrowser lane (`docs/HANDOFF-mac-minibrowser.md`, item group I).
 
-1) wk auto-starts podman when a macos vm is running. It should let me see everything and choose, not auto-start. wk status should show macos vms too.
+Two adjacent host-side defects, same dispatch logic, fix together:
+
+- `wk` auto-starts the podman machine for any container-target command, even
+  when a macOS VM is running (and on a 32 GB host the two cannot coexist).
+  It should report and let the user choose, not auto-start.
+- `wk status` with no argument should show macOS VMs too, not just containers.
 
 ---
 
@@ -42,20 +47,20 @@ breaks the sandbox model rather than serving it.
     $ ./wk build --list
     error: podman is required; install the official pkg from podman.io
 
-The mechanism, in `wk`:
+The mechanism, in `wk` (by function, since line numbers drift):
 
-- `main()` (`wk:120`), dispatch guard at `wk:134`:
+- `main()`'s dispatch guard:
   `if is_macos && [ -z "${WK_IN_VM:-}" ] && ! is_host_command "$cmd"` — then if
   `resolve_target` says `container`, forward.
-- `resolve_target()` (`wk:75-93`) falls through to `printf '%s' container`
+- `resolve_target()` falls through to `printf '%s' container`
   whenever no workspace name resolves — **including when no name was given at
   all**, which is exactly the in-workspace form.
-- `forward_to_vm()` (`wk:103`) opens with
-  `require podman ...` (`wk:104`) and then `podman machine ssh`.
+- `forward_to_vm()` opens with `require podman ...` and then
+  `podman machine ssh`.
 
 So inside a macOS guest, `wk <anything>` tries to forward into a podman machine
 that is not there and never will be. `WK_IN_VM=1` suppresses forwarding
-(`wk:114-117` — it exists so the podman-VM-side `wk` does not re-forward), and
+(it exists so the podman-VM-side `wk` does not re-forward), and
 with it some commands work:
 
     $ WK_IN_VM=1 ./wk build --list     # works, prints the config table
@@ -63,7 +68,7 @@ with it some commands work:
     usage: wk build <workspace> <config>
 
 i.e. even with forwarding suppressed, the **bare `wk build <config>` form is
-unsupported**: `cmd/build:26-28` requires `<workspace> <config>`.
+unsupported**: `cmd/build`'s argument parsing requires `<workspace> <config>`.
 
 The guest also has **no podman, no tart, and `kern.hv_support = 0`** — no
 nested virtualisation — so it can never host a workspace of its own. "Just run
@@ -80,8 +85,8 @@ a target driver in there" is not available.
    (check `container/firstrun.sh`).
 
 2. **A `local` target driver — `targets/local.sh`.** Same contract as
-   `targets/container.sh` / `targets/vm.sh`; the contract is documented at
-   `lib/target.sh:9-27` and defaults live at `lib/target.sh:36-56`. It means
+   `targets/container.sh` / `targets/vm.sh`; the contract and its defaults are
+   documented at the top of `lib/target.sh`. It means
    "the workspace is this machine":
    - `t_src` — from the marker
    - `t_exec` / `t_exec_tty` — run locally through a **login shell** (the
@@ -151,6 +156,6 @@ A claim without evidence is not done.
 - [ ] Does the `remote` target need the same treatment, or is it host-driven by
       definition? (`wk claude` already refuses a remote workspace outright —
       `docs/TESTING.md` §3.)
-- [ ] Once this lands, `docs/HANDOFF-claude` should be revisited: it already
+- [ ] Once this lands, `docs/HANDOFF-claude.md` should be revisited: it already
       calls for making every skill invoke a deterministic tool rather than
       freehand steps, which depends on this interface existing.

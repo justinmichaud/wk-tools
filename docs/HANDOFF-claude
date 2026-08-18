@@ -1,9 +1,0 @@
-Update my claude skills and claude md file.
-
-Remove any detail that should be ignored now. Make sure that everything invokes a deterministic tool. Look for ways to limit the number of tokens wasted on things like benchmark results or build failures.
-
-never make a custom build, always use the script
-never use a custom benchmark methodology. Make sure the script can handle cli / graphical, reports on gpu rendering, and skips simd subtests only on ARMV7
-never store useful data in tmp
-by default, claude threads should have rc enabled and be named according to their purpose + their host os / arch + target name
-never push or commit in git

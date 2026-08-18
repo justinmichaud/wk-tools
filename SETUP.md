@@ -6,6 +6,10 @@ The whole thing is one script plus three manual steps that need credentials or a
 password prompt. Nothing here is order-sensitive except that `./setup` comes
 first.
 
+**`wk doctor` is the checklist.** Run it at any point — after `./setup`, after
+a wipe, after an upgrade — and it prints what is provisioned and the exact
+command for everything that is not, without starting or changing anything.
+
 ---
 
 ## 0. What you need beforehand
@@ -68,7 +72,7 @@ What it does:
   the workspace firewall.
 
 Individual stages:
-`./setup --stage <tools|settings|dotfiles|claude|mcp|machine|sdk|vmtools|quiesce>`.
+`./setup --stage <tools|settings|dotfiles|claude|mcp|machine|vmtools|softnet|sdk|quiesce>`.
 
 On Linux the interesting ones are `tools` (apt), `machine` (the storage tree),
 `sdk` (the container SDK plus the egress proxy service) and `quiesce` (the
@@ -164,8 +168,8 @@ Measured on an M4 (10 cores / 32 GB), with the VM at 8 cores / 20 GB:
 | `wk build wpe-release`, full WPE, cold | ~68 min |
 | `wk test --layout`, 3 tests, software rendering | ~15 s |
 
-> The macOS VM figures are recorded in [docs/macos-vm.md](docs/macos-vm.md);
-> they are a separate target and share none of this machinery.
+> The macOS VM figures are in section 8 below; it is a separate target and
+> shares none of this machinery.
 
 > The WPE figure is a nested-virtualisation cost, not a WebKit one. The
 > container gets 7 of the VM's 8 vCPUs, and the VM gets 8 of the host's 10
@@ -381,8 +385,18 @@ itself:
 ## 8. Optional: macOS VMs for Apple-port builds
 
 Only if you build the Apple ports. Needs [Tart](https://tart.run), which
-`./setup` deliberately does not install — see **[docs/macos-vm.md](docs/macos-vm.md)**
-for why, for the licence position, and for the install command.
+`./setup` deliberately does not install: the binary needs the
+`com.apple.security.virtualization` entitlement, so it only works from inside
+the signed `.app` bundle Cirrus Labs ships — not from a bare copied path — and
+that is a manual decision, not something setup should do quietly. The licence
+is FSL-1.1-ALv2; internal use is a Permitted Purpose.
+
+```sh
+mkdir -p ~/.local/share/tart ~/.local/bin
+curl -fsSLO https://github.com/cirruslabs/tart/releases/latest/download/tart.tar.gz
+tar -xzf tart.tar.gz -C ~/.local/share/tart/
+ln -sfn ~/.local/share/tart/tart.app/Contents/MacOS/tart ~/.local/bin/tart
+```
 
 ```sh
 wk new mac-rel --target vm     # builds the golden base the first time
@@ -401,7 +415,7 @@ Measured on the same M4, guest at 9 vCPU / 20 GB:
 |---|---|
 | `wk new --target vm` | ~1 s |
 | `wk vm start`, cold boot to ssh | ~10 s |
-| `wk build mac-release`, cold (there is no ccache here) | ~99 min |
+| `wk build mac-release`, cold (there is no ccache here) | ~99 min (measured before `--export-compile-commands` was added; re-measure per HANDOFF-mac-minibrowser H3) |
 
 Three limits to know about:
 
@@ -419,8 +433,9 @@ Three limits to know about:
 > **A guest's egress filter needs one extra step.** Run
 > `./setup --stage softnet` (it needs a terminal for sudo) to install Softnet,
 > which default-denies the guest's network on the host side and leaves only the
-> `wk-proxy` address reachable. Until then a guest has the open network, and
-> `wk vm start` says so each time.
+> `wk-proxy` address reachable. Until it is installed, `wk vm start` refuses to
+> boot a guest — booting with the open network takes an explicit
+> `WK_VM_UNFILTERED=1`, and `wk claude` refuses such a guest the same way.
 
 ---
 

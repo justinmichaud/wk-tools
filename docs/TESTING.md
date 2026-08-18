@@ -18,6 +18,11 @@ Two rules make the rest of it worth doing:
 Legend: **[V]** verified working at least once · **[ ]** not yet verified ·
 **[!]** known broken or unimplemented.
 
+There is no runner yet: this is a hand-ticked checklist, which means "run the
+test plan after a re-install" is not actually possible. Building `wk selftest`
+is `docs/HANDOFF-test-runner.md`; until it lands, every [V] is only as fresh
+as the last human pass.
+
 ---
 
 ## 0. Host bootstrap — both platforms
@@ -55,6 +60,17 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] no host home, runtime directory or D-Bus socket is visible
 - [V] `/opt/wk-tools` is read-only inside the workspace
 - [ ] `wk claude <ws>` refuses to start when the proxy is stopped
+- [ ] a Pi address in pi-hosts is reachable on port 22, and only port 22
+- [ ] an address NOT in pi-hosts is refused (the negative, not just the positive)
+- [ ] `sdk-patches/apply.sh` verify fails when a security section no-ops
+      (temporarily break one token to prove the check can fail)
+- [ ] one `claude login` in a workspace seeds `/secrets` and a second
+      workspace inherits it
+
+### Inside the workspace (the interface `wk claude` hands an agent)
+- [!] `wk build <config>` / `wk run` / `wk test` with no workspace name —
+      **does not exist**; see docs/HANDOFF-wk-in-workspace.md (blocking)
+- [ ] `wk build --list` works in a workspace with no podman anywhere
 
 ### Build and run
 - [V] `wk build <ws> jsc-release` succeeds
@@ -129,7 +145,7 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] `wk run <ws> --config mac-release` runs jsc via `DYLD_FRAMEWORK_PATH`
 - [ ] a build in a **fresh clone off a warm base** completes in well under 45 min
 - [ ] `wk build <ws> mac-debug`
-- [!] `wk build <ws> ios-sim-release` — config written, never run
+- [ ] `wk build <ws> ios-sim-release` — config written, never run
 - [ ] `wk test` against an Apple port -- **was impossible until 2026-08-18**:
       `run-webkit-tests` is python, imports webkitpy, and webkitpy autoinstalls
       from PyPI, which the guest could not reach (see the egress fix below)
@@ -146,10 +162,41 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] `wk status` with no argument walks every target
 - [V] `wk build --list` shows all configs
 - [ ] `wk backup` → `./setup` round-trips with no spurious changes
-- [ ] `wk skills` status/diff/pull/push
+- [ ] `wk backup`'s junk filters strip what they claim (weather location,
+      WiFi UUIDs, last-folder paths, timestamps)
+- [ ] `wk skills` status/diff/pull/push; pull refuses over uncommitted repo edits
 - [ ] `wk key register` / `check`
 - [ ] `wk pi setup rpi5`, and a workspace can reach the Pi
+- [ ] `wk enter <ws>` lands in a shell; `wk enter <ws> <cmd>` runs the command
+- [ ] `wk logs <ws> -f` follows a live build
+- [ ] `wk stop --keep-vm` leaves the podman machine running
+- [ ] `wk gc` prunes an unreferenced snapshot, keeps the newest, trims ccache,
+      removes a stale bench payload seed, and reports the dirs it keeps
+- [ ] `wk sync --all` and `WK_MIRROR_BRANCHES` carry the extra branches
+- [ ] `wk pr <user>:<branch>` checks out a PR head, confirming each command
+- [ ] `wk report` prints the weekly summary (needs gh auth)
+- [ ] the MCP server (`wk mcp`) creates and destroys a workspace from Claude
+      Desktop, and refuses past its workspace cap
+- [ ] `wk help` lists every cmd/* entry (no orphan commands, no dead entries)
+- [V] `wk doctor` runs read-only (does not start the podman machine or a
+      guest), reports ok/--/?? per item, and exits 1 when something is missing
+- [ ] `wk doctor` on a freshly set-up machine reports everything ok, and each
+      `--` line's printed fix actually clears that line when run
 - [V] every shell file parses under both bash 5 and bash 3.2
+
+## 5. Host: quiesce, session, gui (Linux)
+- [ ] `wk quiesce on` sets the performance governor with no password;
+      `off` restores; `status` reports
+- [ ] `wk session on` starts the kiosk compositor on the GPU; the socket
+      appears at the fixed path and `/run/wk-session-mode` says `gpu`
+- [ ] `wk session on --bmc` moves the session to the BMC chip, records `bmc`,
+      and `wk bench` refuses to run against it
+- [ ] `wk session gdm` / `gdm --bmc` bring up a desktop on the intended chip;
+      `wk session status` shows `greeter: wayland` (x11 means not enforced)
+- [ ] `wk session off` darkens every GPU output (`lit:` empty) and the console
+      does not repaint over it; `wk session gdm` gets a desktop back
+- [ ] `wk gui <ws>` opens MiniBrowser in the seat; in a bmc session it pins
+      the browser to Mesa and the picture actually appears
 
 ---
 

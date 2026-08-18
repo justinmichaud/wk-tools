@@ -64,10 +64,51 @@ if [ -n "$REFRESH_NET" ]; then
     REFRESH_NET=""
 fi
 
+# --- stale benchmark payload seeds --------------------------------------------
+# Seeds are keyed <plan>-<sha12>, so every upstream move of a benchmark strands
+# the previous clone. They are re-fetchable, so keeping only the newest per
+# plan is safe. Results under $WK_STORE/bench are the provenance record and are
+# never pruned automatically -- their size is reported below instead.
+if [ -d "$WK_STORE/cache/bench" ]; then
+    for seed in "$WK_STORE"/cache/bench/*/; do
+        [ -d "$seed" ] || continue
+        seed="${seed%/}"
+        # Exactly twelve trailing characters: plan names contain dashes too, so
+        # a looser match would let one plan's newer seed delete another's.
+        case "$seed" in
+            *-????????????) ;;
+            *) continue ;;
+        esac
+        plan="${seed%-????????????}"
+        for other in "$plan"-????????????; do
+            [ -d "$other" ] || continue
+            [ "$other" = "$seed" ] && continue
+            if [ "$other" -nt "$seed" ]; then
+                info "removing stale benchmark payload $(basename "$seed")"
+                rm -rf "$seed"
+                break
+            fi
+        done
+    done
+fi
+
 # --- return free space to the host ------------------------------------------
+# Only with passwordless sudo (the podman VM has it; a workstation may not):
+# gc runs unattended, and a command that prompts has stopped being usable by
+# an agent. Skipping is safe -- the space stays reclaimable.
 if [ -n "${WK_IN_VM:-}" ] || is_linux; then
-    sudo fstrim -av 2>/dev/null || warn "fstrim failed; freed space may not return to the host"
+    if sudo -n true 2>/dev/null; then
+        sudo -n fstrim -av 2>/dev/null || warn "fstrim failed; freed space may not return to the host"
+    else
+        log "skipping fstrim (needs a password) -- run 'sudo fstrim -av' yourself to return freed space"
+    fi
 fi
 
 info "gc complete"
 df -h "$WK_STORE" 2>/dev/null | tail -1 || true
+
+# What gc deliberately does not prune, so growth is visible rather than silent.
+for d in bench cache/bench cache/yocto/sstate cache/yocto/downloads cache/buildroot; do
+    [ -d "$WK_STORE/$d" ] || continue
+    du -sh "$WK_STORE/$d" 2>/dev/null | awk -v d="$d" '{printf "  %-8s %s (kept; prune by hand if needed)\n", $1, d}' >&2
+done

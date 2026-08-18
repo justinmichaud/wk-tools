@@ -49,4 +49,6 @@ elif is_linux; then
     session_mode_warn || true
 fi
 
-exec t_enter "$NAME"
+# No `exec` here either: t_enter is a shell function (the vm driver's own
+# t_enter execs ssh itself when that is the right thing).
+t_enter "$NAME"

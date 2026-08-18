@@ -80,7 +80,7 @@ privilege: `wk` never calls `sudo` on Linux.
 
 **macOS uses the same proxy**, running inside the podman VM as a `systemd
 --user` service. It used to be rootful podman plus nftables; that is gone, and
-`docs/HANDOFF-macos-proxy.md` records why.
+the `WK_SANDBOX` comment in `targets/container.sh` records why.
 
 Linux does not copy the macOS design because it cannot. Rootless podman has no
 filterable forward path — its network helper re-emits container traffic from
@@ -138,7 +138,6 @@ Every command runs against a target, behind one driver contract:
 |---|---|---|
 | `container` | overlay + no network interface + no host mounts | the default |
 | `vm` | VM + Softnet default-deny + the same proxy | Apple ports, Tart; 2 running guests per host |
-
 | `remote` | **none** | shared build boxes; polite, no containers |
 
 There is no `local` target: work never runs directly on a workstation.
@@ -190,65 +189,27 @@ wk bench bug-238 speedometer3
 wk bench compare <run-a> <run-b>
 ```
 
-A session names its DRM device explicitly. This machine has two — the GPU, and
-the ASPEED BMC's display-only `ast` chip whose framebuffer the BMC serves over
-KVM-over-IP — and both are on seat0, so a compositor left to enumerate may take
-either. A benchmark session lists the GPU alone; the BMC cannot end up in the
-display path of a measured run.
+A session names its DRM device explicitly, and the mode decides whether a
+number means anything. `on` is a measurable kiosk on the GPU. `on --bmc` moves
+the session to the BMC's display chip so it can be watched over KVM-over-IP —
+software-rendered, recorded in `/run/wk-session-mode`, and never a number to
+compare with anything; `wk bench` refuses it and `wk test --gpu`, `wk enter`
+and `wk gui` warn. `gdm [--bmc]` starts the actual display manager and desktop
+instead, for debugging that needs more than a kiosk's one window. `off`
+modesets every output dark and holds a placeholder compositor so the console
+cannot repaint over it; a desktop comes back with `wk session gdm`, not with
+`off` and a wait. `wk session status` reports the mode, the greeter type and
+whether outputs are still lit.
 
-For debugging a GUI from somewhere else, `wk session on --bmc` makes the
-opposite trade: the session *moves* to the BMC's output — the monitor goes dark,
-because the BMC's chip becomes the compositor's only modesetting device. The
-`ast` has no render node of its own, so this session is software-rendered
-(rendering on the GPU and copying frames across to the `ast` was tried and
-dropped: on this board's NVIDIA + ast pairing the copy never works, and it
-doesn't fail loudly — the compositor comes up but never produces a frame the
-`ast` can show). It's slow, it's recorded in `/run/wk-session-mode`, and
-`wk bench`, `wk test --gpu`, `wk enter` and `wk gui` all warn — the socket
-looks identical either way, and so does the GPU probe, which asks the client's
-EGL vendor and gets NVIDIA even when the compositor behind it is llvmpipe.
+The mechanics — why each mode works the way it does on a machine with an
+NVIDIA GPU and a BMC display chip on the same seat — are in SETUP.md
+section 6.
 
 ```sh
 wk session on --bmc        # watchable over KVM-over-IP; never for numbers
-wk gui bug-238 [url]       # MiniBrowser in the seat, launched as perf runs do
-```
-
-`on` is a kiosk: one compositor, one window, nothing to log into. For anything
-that needs more than that — a terminal next to the browser, a second app —
-`wk session gdm` starts the actual display manager and desktop instead.
-Nothing like `WLR_DRM_DEVICES` reaches gdm's compositor, so pinning it to one
-chip works the other way around: `wk session gdm --bmc` strips the GPU of the
-udev tags that make it a seat member at all, so it isn't on seat0 or on any
-other seat, and the desktop has nothing left to land on but the `ast`.
-Moving it to a *different* seat instead of off every seat was tried first,
-and gdm — being seat-aware — promptly started a second greeter on that seat
-too: one session per chip instead of one. Plain `wk session gdm` hides the
-`ast` instead, so the desktop can't land on the management chip by mistake.
-
-Both gdm modes also force the greeter onto Wayland, because the hide only
-constrains a compositor that asks logind for its devices. Ubuntu's
-`61-gdm.rules` prefers Xorg on sight of `nvidia_drm` with `modeset=Y`, and
-NVIDIA's Xorg driver drives the card through `/dev/nvidia*` — character
-devices with no seat tags to strip — so `gdm --bmc` used to hide the GPU
-successfully and land the desktop on the monitor regardless. `wk session
-status` prints a `greeter:` line; `x11` there means the mode is not being
-enforced.
-`wk session off` stops all of it — kiosk, desktop, display manager — and then
-does two things rather than one: it modesets the outputs off through
-`wlr-output-management`, which is what actually darkens the monitor, and it
-keeps a placeholder compositor on the device, which is what stops the console
-being repainted over the top. Neither half works alone. Trusting the kernel to
-blank a masterless output was the original design and this machine's NVIDIA
-driver doesn't reach hardware DPMS that way — `fb_blank` stops the console being
-redrawn and leaves whatever was on screen frozen there. Holding the device and
-painting it black was the fix for that, and it left the screen black with the
-backlight on, because a held CRTC is still scanning out a real mode. `wk session
-status` prints a `lit:` line so the two can be told apart without a monitor.
-Getting a desktop back is `wk session gdm`, not `off` and a wait.
-
-```sh
 wk session gdm --bmc       # a real desktop, forced onto the BMC's chip
-wk session off             # outputs modeset off, nothing hidden
+wk session off             # outputs modeset off; back with wk session gdm
+wk gui bug-238 [url]       # MiniBrowser in the seat, launched as perf runs do
 ```
 
 Linux cannot make a `#!` script setuid — the kernel ignores the bit — so the

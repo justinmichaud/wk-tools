@@ -1,21 +1,27 @@
-# Deploy the Claude configuration into ~/.claude.
+# Deploy the Claude configuration into ~/.claude, on the HOST.
 #
-# Sourced by ./setup on the host, and by container/firstrun.sh inside a
-# workspace, so the same config follows you everywhere. Symlinks rather than
-# copies: editing a skill in the repo takes effect in the next session with no
-# redeploy step.
+# Sourced only by ./setup. Workspaces get their own copies elsewhere:
+# container/firstrun.sh links the workspace variants inside a container, and
+# vm/provision-base.sh does the same inside a macOS guest.
 #
-# ~/.claude also holds live state (sessions, history, credentials), so only the
-# four config entries are linked. The directory itself is never replaced.
+# The host gets the -host variants deliberately. The workspace settings allow
+# Bash(*) and the workspace CLAUDE.md says "you are inside a sandbox" -- both
+# statements are true only where the workspace is the blast radius, and a host
+# session is exactly where they must not apply.
+#
+# Symlinks rather than copies: editing the repo takes effect in the next
+# session with no redeploy step. ~/.claude also holds live state (sessions,
+# history, credentials), so only the config entries are linked; the directory
+# itself is never replaced.
 
 _claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 ensure_dir "$_claude_dir" 0755
 
-link_config "$WK_ROOT/claude/settings.json" "$_claude_dir/settings.json"
-link_config "$WK_ROOT/claude/skills"        "$_claude_dir/skills"
-link_config "$WK_ROOT/claude/hooks"         "$_claude_dir/hooks"
-link_config "$WK_ROOT/claude/CLAUDE.md"     "$_claude_dir/CLAUDE.md"
+link_config "$WK_ROOT/claude/settings-host.json" "$_claude_dir/settings.json"
+link_config "$WK_ROOT/claude/skills"             "$_claude_dir/skills"
+link_config "$WK_ROOT/claude/hooks"              "$_claude_dir/hooks"
+link_config "$WK_ROOT/claude/CLAUDE-host.md"     "$_claude_dir/CLAUDE.md"
 
 # Hooks must be executable after a fresh clone; git preserves the bit, but a
 # clone with a restrictive umask or a copy over a filesystem that drops it will

@@ -1,23 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(*)",
       "WebSearch",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:bugs.webkit.org)",
       "WebFetch(domain:ews-build.webkit.org)",
-      "WebFetch(domain:isocpp.org)",
-      "WebFetch(domain:www.open-std.org)",
       "Read(//tmp/**)",
-      "Read(//private/tmp/**)",
-      "Skill(jsc)",
-      "Skill(jsc:*)",
-      "Skill(build-webkit)",
-      "Skill(build-webkit:*)",
-      "Skill(add-file-to-webkit)",
-      "Skill(add-file-to-webkit:*)",
-      "Skill(fix-webkit-ews)",
-      "Skill(fix-webkit-ews:*)"
+      "Read(//private/tmp/**)"
     ],
     "additionalDirectories": [
       "/tmp",
@@ -44,5 +33,6 @@
   "autoCompactEnabled": false,
   "precomputeCompactionEnabled": false,
   "remoteControlAtStartup": true,
-  "agentPushNotifEnabled": true
+  "agentPushNotifEnabled": true,
+  "model": "claude-fable-5[1m]"
 }

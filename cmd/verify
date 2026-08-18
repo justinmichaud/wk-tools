@@ -21,6 +21,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
 
 NAME="${1:-}"; shift || true
 require_name "$NAME"
@@ -28,10 +29,21 @@ require_name "$NAME"
 WANT_GPU=""
 [ "${1:-}" = --gpu ] && WANT_GPU=1
 
-TARGET="${WK_TARGET:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+# Resolved from the registry like every other command: with a fixed default a
+# `wk verify <vm-ws>` would load the container driver and report "no such
+# workspace" about a workspace that exists.
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+
+# The vm target's boundary is Softnet on the host; none of the container
+# properties below exist in a guest by construction. `wk claude` carries the
+# vm-side checks; measuring the guest's egress from inside it is future work.
+if [ "$TARGET" = vm ]; then
+    warn "vm workspaces have no in-guest checks yet: the egress filter is Softnet
+  on the host (checked by wk claude); only the GPU probe runs here."
+fi
 
 fails=0
 pass() { printf '  \033[32mok\033[0m    %s\n' "$*" >&2; }
@@ -41,13 +53,13 @@ note() { printf '        %s\n' "$*" >&2; }
 # Run a command inside the workspace, capturing output, never failing the script.
 inside() { t_exec "$NAME" bash -lc "$*" 2>/dev/null || true; }
 
-info "verifying workspace '$NAME' ($WK_SANDBOX)"
+info "verifying workspace '$NAME' (${WK_SANDBOX:-$TARGET})"
 
 # --- the container is running ------------------------------------------------
 state=$(t_info "$NAME")
 [ "$state" = running ] && pass "container running" || fail "container state: $state"
 
-if [ "$WK_SANDBOX" = rootless-proxy ]; then
+if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     # --- no privilege ---------------------------------------------------------
     # A rootful container would mean a container escape is a root escape, and
     # the whole no-sudo design would be a fiction.

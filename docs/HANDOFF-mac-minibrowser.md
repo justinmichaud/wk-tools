@@ -118,7 +118,7 @@ fault, because the base's CAS ships inside the cloned image
 ## Work items
 
 Nothing here is done yet. Each line should end up as a `docs/TESTING.md` entry
-as it is picked up (`docs/HANDOFF-testing.md`).
+as it is picked up (standing rule in `docs/HANDOFF.md`).
 
 ### A. DerivedData and build-output separation
 - [ ] A1 Give each mac config its own output dir so `mac-release-asan` stops
@@ -465,5 +465,6 @@ which read as "the GUI cannot start" rather than "the network is broken".
       whether one is stale.
 
 ### E. Documentation debt found on the way
-- [ ] E1 `SETUP.md:165` and `SETUP.md:298` reference `docs/macos-vm.md`, which
-      was deleted in `8400f49` and does not exist.
+- [x] E1 SETUP.md referenced `docs/macos-vm.md`, deleted in `8400f49` — fixed
+      2026-08-18: the tart install and licence note are inlined in SETUP.md
+      section 8, and every other reference is retargeted.

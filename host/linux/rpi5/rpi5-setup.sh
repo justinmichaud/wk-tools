@@ -290,17 +290,54 @@ printf '%s\n' 'options brcmfmac roamoff=1' \
 ok "brcmfmac roamoff=1 written (takes effect on driver reload / reboot)"
 
 # Pin the connection to a single BSS so it cannot ping-pong between the AP's two
-# radios. Set WIFI_PIN_BSSID='' to skip. Pinning the BSSID (not the channel) is
-# deliberate: a DFS radar-vacate changes the AP's channel but keeps its BSSID, so
-# this survives a channel switch.
-WIFI_SSID="${WIFI_SSID:-Ducky0138}"
-WIFI_PIN_BSSID="${WIFI_PIN_BSSID-e4:75:dc:3e:45:a2}"   # 5260 MHz / ch52
-if [ -n "$WIFI_PIN_BSSID" ] && nmcli -g name connection show 2>/dev/null | grep -qx "$WIFI_SSID"; then
-  sudo nmcli connection modify "$WIFI_SSID" 802-11-wireless.bssid "$WIFI_PIN_BSSID" \
-    && ok "connection '$WIFI_SSID' pinned to BSSID $WIFI_PIN_BSSID" \
-    || skip "could not pin BSSID on '$WIFI_SSID'"
+# radios. Pinning the BSSID (not the channel) is deliberate: a DFS radar-vacate
+# changes the AP's channel but keeps its BSSID, so this survives a channel switch.
+#
+# The identity comes from rpi5.conf next to this script (gitignored: SSID and
+# BSSID are site details, and this repo is public), and the pin is derived at
+# setup time rather than hardcoded. A hardcoded BSSID goes stale the day the
+# router is replaced — and a connection pinned to a BSS that no longer exists
+# never associates at all, which turns a router swap into a dead headless box.
+# So: 'auto' (the default) pins to the strongest BSS currently broadcasting the
+# SSID; a literal BSSID from rpi5.conf is honoured only while a scan can still
+# see it; and a pin whose BSS has vanished is CLEARED, degrading to unpinned
+# roaming (worse stability, still online) instead of no link.
+_conf_dir=$(cd "$(dirname "$0")" && pwd)
+# shellcheck disable=SC1091
+[ -f "$_conf_dir/rpi5.conf" ] && . "$_conf_dir/rpi5.conf"
+WIFI_SSID="${WIFI_SSID:-$(nmcli -t -f NAME,TYPE connection show --active 2>/dev/null \
+                          | awk -F: '$2 ~ /wireless/ {print $1; exit}')}"
+WIFI_PIN_BSSID="${WIFI_PIN_BSSID-auto}"
+
+if [ -z "$WIFI_SSID" ]; then
+  skip "no active WiFi connection and no WIFI_SSID in rpi5.conf — BSSID not pinned"
+elif ! nmcli -g name connection show 2>/dev/null | grep -qx "$WIFI_SSID"; then
+  skip "no '$WIFI_SSID' connection — BSSID not pinned"
 else
-  skip "no '$WIFI_SSID' connection (or WIFI_PIN_BSSID empty) — BSSID not pinned"
+  # Escaped-colon dance: -t output escapes the BSSID's own colons as '\:', so
+  # swap them for '-' before splitting on ':' and swap back at the end.
+  _scan=$(nmcli -t -f SSID,SIGNAL,BSSID dev wifi list --rescan yes 2>/dev/null | sed 's/\\:/-/g')
+  _pin=""
+  case "$WIFI_PIN_BSSID" in
+    '')   ;;   # explicitly disabled in rpi5.conf
+    auto) _pin=$(printf '%s\n' "$_scan" \
+                 | awk -F: -v ssid="$WIFI_SSID" '$1==ssid {print $3, $2}' \
+                 | sort -k2,2nr | awk 'NR==1 {print $1}' | tr -- '-' ':') ;;
+    *)    if printf '%s\n' "$_scan" | tr -- '-' ':' | grep -qiF "$WIFI_PIN_BSSID"; then
+            _pin="$WIFI_PIN_BSSID"
+          else
+            skip "configured BSSID $WIFI_PIN_BSSID is not on the air — clearing the pin instead"
+          fi ;;
+  esac
+  if [ -n "$_pin" ]; then
+    sudo nmcli connection modify "$WIFI_SSID" 802-11-wireless.bssid "$_pin" \
+      && ok "connection '$WIFI_SSID' pinned to BSSID $_pin" \
+      || skip "could not pin BSSID on '$WIFI_SSID'"
+  else
+    sudo nmcli connection modify "$WIFI_SSID" 802-11-wireless.bssid "" 2>/dev/null \
+      && ok "no BSS to pin — '$WIFI_SSID' left unpinned (roaming allowed)" \
+      || skip "could not clear the BSSID pin on '$WIFI_SSID'"
+  fi
 fi
 
 # Undo any prior run that disabled wait-online; make boot wait for the link.

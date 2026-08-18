@@ -50,7 +50,7 @@ ALLOWED_HOSTS = {
     # the raw/codeload hosts that benchmark payloads come from.
     "github.com": (22, 80, 443),
     "githubusercontent.com": (80, 443),
-    "githubassets.com": (443),
+    "githubassets.com": (443,),
     # PyPI. build-webkit autoinstalls setuptools on every clean build, so this
     # is a build dependency rather than an escape hatch.
     "pypi.org": (443,),
@@ -186,6 +186,13 @@ class Policy:
                 return False, f"port {port} not allowed for {suffix}"
         return False, "not in the allowlist"
 
+    def is_pi(self, host):
+        """A Pi's address sits inside the tailnet range that BLOCKED_NETS
+        refuses. The block exists to stop an allowlisted *name* resolving onto
+        the tailnet, not to unlist the device itself -- so a destination that
+        is the allowlisted address must skip the address check."""
+        return host.lower().rstrip(".") in self._pi_hosts()
+
     def address_allowed(self, addr):
         ip = ipaddress.ip_address(addr)
         for net in BLOCKED_NETS:
@@ -209,6 +216,11 @@ class Proxy:
         if now - last > DENY_LOG_INTERVAL:
             self._denials[key] = now
             log(f"DENY {host}:{port} -- {why}")
+        # This service runs for months; one entry per distinct denial would
+        # grow without bound if something enumerates hostnames.
+        if len(self._denials) > 512:
+            self._denials = {k: v for k, v in self._denials.items()
+                             if now - v <= DENY_LOG_INTERVAL}
 
     async def open_upstream(self, host, port):
         """Resolve, check every resolved address, then connect.
@@ -220,10 +232,11 @@ class Proxy:
         loop = asyncio.get_running_loop()
         infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
 
+        pi = self.policy.is_pi(host)
         last_error = None
         for family, socktype, proto, _canon, sockaddr in infos:
             addr = sockaddr[0]
-            ok, why = self.policy.address_allowed(addr)
+            ok, why = (True, "") if pi else self.policy.address_allowed(addr)
             if not ok:
                 self.deny(host, port, f"resolved to a blocked address: {why}")
                 last_error = PermissionError(why)

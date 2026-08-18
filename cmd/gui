@@ -39,7 +39,7 @@ while [ $# -gt 0 ]; do
         --wpe)           CONFIG=wpe-release; shift ;;
         --gtk)           CONFIG=gtk-release; shift ;;
         --no-fullscreen) FULLSCREEN=""; shift ;;
-        --)              shift; EXTRA="$*"; break ;;
+        --)              shift; EXTRA=$(sh_quote "$@"); break ;;
         -*)              die "unknown option: $1" ;;
         *)               URL="$1"; shift ;;
     esac

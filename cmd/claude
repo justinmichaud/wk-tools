@@ -46,19 +46,27 @@ if [ "$TARGET" = vm ]; then
     # macOS guest has none of them by construction. Its egress is filtered from
     # the *host* by Softnet instead, which cannot be measured from in here.
     #
-    # So the check is that the filter exists at all. Without softnet installed
-    # the guest has the open network, and an autonomous agent should not be
-    # handed that without saying so.
+    # Two checks. The filter must exist now, and the guest must not have been
+    # *booted* without it -- Softnet applies at `tart run`, so a binary
+    # installed after boot filters nothing until the guest restarts. The boot
+    # writes the marker; both fail closed, matching the container path above.
+    if [ -f "$WK_VM_DIR/$NAME.unfiltered" ] && [ -z "${WK_VM_UNFILTERED:-}" ]; then
+        die "refusing to run: '$NAME' was booted with NO egress filter.
+    Restart it filtered:  wk vm stop $NAME && wk vm start $NAME
+    Or set WK_VM_UNFILTERED=1 to say you meant it."
+    fi
     if [ -x "${WK_SOFTNET_BIN:-/usr/local/bin/softnet}" ] && [ -z "${WK_VM_UNFILTERED:-}" ]; then
         info "'$NAME' is a macOS VM: egress is filtered on the host by Softnet,
   default-deny except the wk-proxy address. The host filesystem is unreachable
   and the guest is disposable."
+    elif [ -n "${WK_VM_UNFILTERED:-}" ]; then
+        warn "WK_VM_UNFILTERED=1: '$NAME' has the open network. The host filesystem
+  is still unreachable and the guest is still disposable -- but that is the
+  whole of the boundary right now."
     else
-        warn "'$NAME' is a macOS VM with NO egress filter: softnet is not installed
-  (or WK_VM_UNFILTERED is set), so anything running here can reach the whole
-  network. The host filesystem is still unreachable and the guest is still
-  disposable -- but that is the whole of the boundary right now.
-      ./setup --stage softnet     install the filter (needs a terminal)"
+        die "refusing to run: softnet is not installed, so this guest's egress is
+    not filtered. Install it:  ./setup --stage softnet   (needs a terminal)
+    Or set WK_VM_UNFILTERED=1 to say you meant it."
     fi
 fi
 
@@ -68,4 +76,4 @@ info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boun
 # disposable workspace with no host filesystem, prompting for each edit buys
 # nothing and prevents unattended work.
 t_exec_tty "$NAME" env WK_WORKSPACE="$NAME" \
-    bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $*"
+    bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $(sh_quote "$@")"
