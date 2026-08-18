@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# wk session on|off|status -- a real graphical session for benchmark runs.
+# wk session on [--bmc] | off | status -- a real graphical session for runs.
 #
 # GPU benchmarks need a real DRM session on real hardware. Speedometer and
 # MotionMark under llvmpipe are not slow results, they are a different
@@ -21,6 +21,24 @@
 # ($XDG_RUNTIME_DIR/wk/display), not in the user's runtime directory, so that a
 # workspace can be handed the socket without being handed the session D-Bus
 # socket that sits next to it.
+#
+# --- what --bmc is for -------------------------------------------------------
+# This machine has two DRM devices: the GPU, and the ASPEED BMC's display-only
+# `ast` chip whose framebuffer is what the BMC serves over KVM-over-IP. The
+# default session names the GPU alone, so the BMC cannot end up in the display
+# path of a measured run -- that is what "perf runs disable the BMC" means here,
+# and it is enforced by the device list rather than by hoping wlroots enumerates
+# the way it did last time.
+#
+# --bmc is the opposite trade, for debugging a GUI from somewhere else: it moves
+# the session to where the BMC can see it. The BMC's chip becomes the only
+# modesetting device the compositor has, so the monitor goes dark and the one
+# output is the one served over KVM-over-IP -- while the GPU still does the
+# rendering, through WLR_RENDER_DRM_DEVICE, and wlroots copies each finished
+# frame across. With nothing plugged into the GPU there is nothing to render on
+# either, and the session falls back to software. Both are slower than a real
+# session, both are recorded in /run/wk-session-mode, and everything that could
+# produce a number from them says so.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,14 +48,108 @@ is_linux || die "wk session is Linux-only (macOS workspaces have no GPU to reach
 
 PRIV=/usr/local/libexec/wk-quiesce-priv
 ACTION="${1:-status}"
+shift || true
+BMC=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --bmc|--mirror) BMC=1; shift ;;
+        *) die "usage: wk session on [--bmc] | off | status" ;;
+    esac
+done
+
 RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display"
 SOCKET="$RUNTIME/wayland-0"
 
+# Returns the helper's own exit status, and lets its stderr through. That
+# matters here in a way it did not before: `session-on-bmc` is *allowed* to
+# fail -- it is an attempt at something the two drivers may refuse -- and a
+# wrapper that turned any failure into a password prompt, or into a die, could
+# not express that. Whether sudo needs a password is therefore asked once, with
+# a read-only verb, instead of being inferred from a verb that did something.
+PRIV_SUDO=""
 run_priv() {
     [ -x "$PRIV" ] || die "$PRIV is not installed -- run: ./setup --stage quiesce"
-    sudo -n "$PRIV" "$1" 2>/dev/null && return 0
-    warn "passwordless sudo unavailable for the helper; re-run ./setup --stage quiesce"
-    sudo "$PRIV" "$1"
+    if [ -z "$PRIV_SUDO" ]; then
+        if sudo -n "$PRIV" session-status >/dev/null 2>&1; then
+            PRIV_SUDO=-n
+        else
+            warn "passwordless sudo unavailable for the helper; re-run ./setup --stage quiesce"
+            PRIV_SUDO=ask
+        fi
+    fi
+    if [ "$PRIV_SUDO" = -n ]; then
+        sudo -n "$PRIV" "$1"
+    else
+        sudo "$PRIV" "$1"
+    fi
+}
+
+# --- which connector belongs to which chip -----------------------------------
+# The privileged helper asks the same question about device nodes; this asks it
+# about connector names. Deliberately not shared: the helper is root-owned and
+# copied out of this repo at install time, and a root script that sourced a file
+# from a user-writable checkout would be the escalation the whole arrangement is
+# built to avoid.
+#
+# The kernel driver is the discriminator, never the card number -- card1 is the
+# ast here only because of PCI enumeration order.
+drm_driver() {
+    local link
+    link=$(readlink -f "/sys/class/drm/$1/device/driver" 2>/dev/null) || true
+    [ -n "$link" ] && basename "$link" || echo none
+}
+
+# Prints "NAME status" per connector, e.g. "DP-2 connected".
+# $1: ast for the BMC's connectors, not-ast for everything else.
+_connectors() {
+    local which="$1" card drv conn name
+    for card in /sys/class/drm/card[0-9]*; do
+        [ -d "$card" ] || continue
+        card=$(basename "$card")
+        # /sys/class/drm holds cardN and cardN-CONNECTOR-M side by side; only
+        # the former is a device.
+        case "$card" in *-*) continue ;; esac
+        drv=$(drm_driver "$card")
+        case "$which" in
+            ast)     [ "$drv" = ast ] || continue ;;
+            not-ast) case "$drv" in ast|none) continue ;; esac ;;
+        esac
+        for conn in "/sys/class/drm/$card"-*; do
+            [ -d "$conn" ] || continue
+            name=$(basename "$conn")
+            printf '%s %s\n' "${name#"$card"-}" "$(cat "$conn/status" 2>/dev/null || echo unknown)"
+        done
+    done
+}
+
+# Is a monitor actually plugged into the GPU? Only the GPU can be asked: the ast
+# reports `connected` with no EDID whether or not a cable exists, because as far
+# as the BMC is concerned a display is always attached.
+#
+# Matched against a captured string rather than piped into `grep -q`: grep exits
+# at the first match, the producer takes SIGPIPE, and under `set -o pipefail`
+# the whole pipeline then reports failure -- so the branch is silently never
+# taken. The same trap as `lsmod | grep -q` in host/linux/gpu.sh.
+gpu_display_attached() {
+    local out; out=$(_connectors not-ast)
+    case "$out" in *" connected"*) return 0 ;; esac
+    return 1
+}
+
+# The outputs the running compositor actually took, by connector name. This is
+# the only way to know: wlroots is free to drop a device it cannot render for,
+# and it does so without a word.
+session_outputs() {
+    have wayland-info || return 0
+    { WAYLAND_DISPLAY="$SOCKET" wayland-info 2>/dev/null || true; } \
+        | sed -n 's/^[[:space:]]*name: \([A-Za-z][A-Za-z0-9]*-[0-9][0-9]*\)$/\1/p'
+}
+
+session_display_mode() {
+    have wayland-info || return 0
+    { WAYLAND_DISPLAY="$SOCKET" wayland-info 2>/dev/null || true; } \
+        | sed -n 's/.*width: \([0-9]*\) px, height: \([0-9]*\) px, refresh: \([0-9.]*\) Hz.*/\1x\2 @ \3Hz/p' \
+        | head -1
 }
 
 # A graphical session belonging to a logged-in *person*, which we neither own
@@ -69,10 +181,19 @@ on)
     # means `wk session on` silently does nothing on exactly the machine that
     # needs it most. The unit's state is the fact; the socket is a hint.
     if [ -S "$SOCKET" ] && systemctl is-active --quiet wk-session 2>/dev/null; then
-        info "wk session already running ($SOCKET)"
-        exit 0
-    fi
-    if [ -S "$SOCKET" ]; then
+        # ... unless what is running is the other kind of session. Asking for a
+        # benchmark session and getting "already running" for a software one is
+        # how a whole afternoon of numbers turns out to have measured llvmpipe.
+        wanted=gpu; [ -n "$BMC" ] && wanted=bmc
+        running=$(session_mode)
+        if [ "$wanted" = "$running" ] || { [ "$wanted" = bmc ] && [ "$running" = bmc-only ]; }; then
+            info "wk session already running ($SOCKET, mode $running)"
+            session_mode_warn || true
+            exit 0
+        fi
+        info "a '$running' session is running; restarting it as '$wanted'"
+        run_priv session-off
+    elif [ -S "$SOCKET" ]; then
         warn "stale compositor socket at $SOCKET -- starting a new session"
     fi
 
@@ -83,15 +204,68 @@ on)
         exit 0
     fi
 
-    info "starting the benchmark compositor on seat0"
-    run_priv session-on
-    [ -S "$SOCKET" ] || die "no Wayland socket at $SOCKET after start"
-    info "session up: $SOCKET"
+    if [ -z "$BMC" ]; then
+        info "starting the benchmark compositor on seat0 (GPU only, BMC excluded)"
+        run_priv session-on || die "the compositor did not start; journalctl -u wk-session"
+        [ -S "$SOCKET" ] || die "no Wayland socket at $SOCKET after start"
+    else
+        # The session moves to the BMC's output, it is not duplicated onto it:
+        # the BMC's chip becomes the compositor's only modesetting device, so
+        # there is exactly one output and no question about which one the window
+        # is on. The monitor goes dark for the duration. Showing both at once
+        # would need a second client (wl-mirror) and a compositor that accepts
+        # one -- cage is a kiosk -- and it would still rest on the same
+        # GPU-to-ast frame copy this does.
+        log "  the monitor goes dark: the session moves to the BMC, it is not duplicated"
+
+        started=""
+        if gpu_display_attached; then
+            info "starting a BMC session on seat0 (GPU renders, BMC scans out)"
+            # Allowed to fail. wlroots has to copy every finished frame from the
+            # GPU to a device with no renderer of its own, and whether it can is
+            # a property of the two drivers rather than of this configuration.
+            # With WLR_RENDERER pinned and software rendering disallowed, a
+            # refusal shows up as a compositor that does not come up -- which is
+            # the failure we want, instead of a session that quietly renders on
+            # llvmpipe and looks fine.
+            if run_priv session-on-bmc && [ -S "$SOCKET" ]; then
+                started=1
+            else
+                warn "the GPU could not render for the BMC's display chip"
+                log  "  wlroots would not drive the ast from the GPU's render node."
+                log  "  Falling back to a BMC-only session, which is software-rendered."
+            fi
+        else
+            info "nothing plugged into the GPU -- starting a BMC-only session"
+        fi
+
+        if [ -z "$started" ]; then
+            run_priv session-on-bmc-only || die "the compositor did not start; journalctl -u wk-session"
+            [ -S "$SOCKET" ] || die "no Wayland socket at $SOCKET after start"
+        fi
+
+        # The compositor coming up is not by itself proof that the output it took
+        # is the BMC's, and a blank remote console is the one failure this mode
+        # cannot afford to report as success.
+        outs=$(session_outputs)
+        bmc_names=$(_connectors ast | awk '{print $1}')
+        found=""
+        for name in $bmc_names; do
+            case " $(echo "$outs" | tr '\n' ' ') " in *" $name "*) found=1 ;; esac
+        done
+        [ -n "$found" ] || warn "the session is up but not on a BMC connector (outputs: ${outs:-none})"
+    fi
+
+    info "session up: $SOCKET (mode $(session_mode))"
+    log  "  outputs: $(session_outputs | tr '\n' ' ')  display: $(session_display_mode)"
     log  "  workspaces see it at /run/wk/display/wayland-0"
+    log  "  launch a browser in it with:  wk gui <workspace> [url]"
+    [ -n "$BMC" ] && log  "  watch it on the BMC's KVM-over-IP console" || true
+    session_mode_warn || true
     ;;
 
 off)
-    run_priv session-off
+    run_priv session-off || die "the helper failed to stop the session"
     ;;
 
 status)
@@ -114,17 +288,23 @@ status)
     modeset=$(sudo -n "$PRIV" session-status 2>/dev/null | awk '/^modeset:/ {print $2}' || true)
     printf 'modeset:   %s\n' "${modeset:-unknown}"
 
-    # The mode matters: a fullscreen browser's surface is the display mode, and
-    # MotionMark scores scale with surface size -- so two runs on different
-    # modes are not comparable. cage takes the connector's preferred mode, which
-    # is not always the largest one it supports.
-    if [ -S "$SOCKET" ] && have wayland-info; then
-        mode=$(WAYLAND_DISPLAY="$SOCKET" wayland-info 2>/dev/null \
-               | sed -n 's/.*width: \([0-9]*\) px, height: \([0-9]*\) px, refresh: \([0-9.]*\) Hz.*/\1x\2 @ \3Hz/p' \
-               | head -1 || true)
-        if [ -n "$mode" ]; then
-            printf 'mode:      %s\n' "$mode"
-        fi
+    # Which chip the session is on, and therefore whether anything measured
+    # against it can be believed.
+    printf 'mode:      %s\n' "$(session_mode)"
+    printf 'gpu:       %s\n' "$(_connectors not-ast | tr '\n' ' ' | sed 's/ *$//')"
+    printf 'bmc:       %s\n' "$(_connectors ast | tr '\n' ' ' | sed 's/ *$//')"
+
+    if [ -S "$SOCKET" ]; then
+        printf 'outputs:   %s\n' "$(session_outputs | tr '\n' ' ')"
+    fi
+
+    # The display mode matters: a fullscreen browser's surface is the display
+    # mode, and MotionMark scores scale with surface size -- so two runs on
+    # different modes are not comparable. cage takes the connector's preferred
+    # mode, which is not always the largest one it supports.
+    if [ -S "$SOCKET" ]; then
+        mode=$(session_display_mode)
+        [ -n "$mode" ] && printf 'display:   %s\n' "$mode"
     fi
 
     # Our own compositor is a logind session too -- PAMName=login is what gives
@@ -133,10 +313,11 @@ status)
     if [ ! -S "$SOCKET" ] && session=$(foreign_session); then
         printf 'foreign:   session %s\n' "$session"
     fi
+    session_mode_warn || true
     exit 0
     ;;
 
 *)
-    die "usage: wk session on|off|status"
+    die "usage: wk session on [--bmc] | off | status"
     ;;
 esac

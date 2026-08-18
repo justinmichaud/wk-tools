@@ -155,3 +155,47 @@ confirm() {
     read -r reply || return 1
     case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
+
+# --- the graphical session's mode --------------------------------------------
+# `wk session` can start the compositor three ways, and from the Wayland socket
+# alone they are indistinguishable -- which is exactly the problem, because two
+# of the three make every number that comes out of them meaningless. The
+# privileged helper records which one it started in a file under /run, and this
+# is where everything else reads it.
+#
+# Linux-only, and absent-means-none: on macOS, and before the first session of
+# a boot, there is no file and nothing to warn about.
+WK_SESSION_MODE_FILE="${WK_SESSION_MODE_FILE:-/run/wk-session-mode}"
+
+# gpu | bmc | bmc-only | none
+session_mode() {
+    local m=""
+    [ -r "$WK_SESSION_MODE_FILE" ] && m=$(head -1 "$WK_SESSION_MODE_FILE" 2>/dev/null | tr -dc 'a-z-')
+    printf '%s' "${m:-none}"
+}
+
+# Say so, loudly, when the session in front of us is one of the slow ones.
+# Returns 0 when there is nothing to warn about, 1 when it warned -- so a caller
+# that must refuse (the benchmark runner) and a caller that only has to inform
+# (wk enter, wk gui) can share one wording.
+session_mode_warn() {
+    case "$(session_mode)" in
+        bmc)
+            warn "SLOW SESSION: rendering on the GPU, scanning out on the BMC"
+            log  "  Every frame is copied from the GPU to the BMC's display chip so the"
+            log  "  session can be watched over KVM-over-IP, and the display cadence is"
+            log  "  the BMC's 1024x768, not the monitor's. Good for debugging a GUI"
+            log  "  remotely; not a number to compare with anything."
+            log  "  measurable session again:  wk session on"
+            return 1
+            ;;
+        bmc-only)
+            warn "SLOW SESSION: SOFTWARE RENDERING -- the BMC display chip, no GPU at all"
+            log  "  llvmpipe is not a slow GPU, it is a different measurement: MotionMark"
+            log  "  differs by ~400x. Nothing measured here means anything."
+            log  "  measurable session again:  plug the monitor in, then wk session on"
+            return 1
+            ;;
+    esac
+    return 0
+}

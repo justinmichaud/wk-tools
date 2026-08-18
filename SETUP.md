@@ -100,9 +100,11 @@ before it goes in, so `wk quiesce on` never asks for a password again.
 On Linux the same helper carries the benchmark session: `wk session on` stops
 the display manager and starts a `cage` compositor on seat0, which is what
 gives a workspace a real GPU session on the attached monitor. The command set
-is a fixed allowlist — quiesce on/off/status and session on/off/status — with
-no argument that becomes part of a command, and the user the compositor runs as
-is read from a root-owned file rather than passed in.
+is a fixed allowlist — quiesce on/off/status, and one session verb per session
+configuration (`session-on`, `session-on-bmc`, `session-on-bmc-only`,
+`session-off`, `session-status`) — with no argument that becomes part of a
+command, and the user the compositor runs as is read from a root-owned file
+rather than passed in.
 
 Skip this if you are not benchmarking. Everything else works without it.
 
@@ -213,6 +215,42 @@ by `host/linux/gpu.sh`, at workspace creation.
 `wk session on` stops the display manager and starts `cage` on seat0 —
 deliberately not a desktop, so there is no compositing work in the numbers that
 is not the browser's. `wk session off` puts the display manager back.
+
+The compositor's DRM device is named explicitly, and that is the point. This
+machine has two: the GPU, and the ASPEED BMC's display-only `ast` chip, whose
+framebuffer is what the BMC serves over KVM-over-IP. Both are on seat0, so left
+to enumerate, a compositor may take either — and which one it took decides
+whether a number came from the GPU or from a management controller. A benchmark
+session lists the GPU alone.
+
+### Debugging a GUI remotely
+
+```sh
+wk session on --bmc          # put the session where the BMC can see it
+wk gui bug-238 about:blank   # MiniBrowser in the seat, as a perf run launches it
+wk session on                # back to a measurable session
+```
+
+`--bmc` is the opposite trade, and it says so every time it is used. The BMC's
+chip becomes the compositor's only modesetting device — so the monitor goes
+dark, the session *moves* to the BMC rather than being duplicated onto it, and
+there is exactly one output, which is the one the BMC serves. Rendering still
+happens on the GPU: `WLR_RENDER_DRM_DEVICE` points the renderer at the GPU's
+render node and wlroots copies each finished frame across (`mode: bmc`).
+
+Whether the two drivers will do that copy is not something a configuration can
+promise, so it is arranged to fail loudly. `WLR_RENDERER` is pinned and
+`WLR_RENDERER_ALLOW_SOFTWARE` is left out, which makes wlroots refuse to start
+rather than fall back to llvmpipe — so a refusal is a compositor that does not
+come up, and `wk session on --bmc` then falls back to a BMC-only session
+(`mode: bmc-only`, software) and says which one you got. That is also the mode
+you get with nothing plugged into the GPU at all: no GPU output, nothing to
+render on.
+
+The mode is recorded in `/run/wk-session-mode`, and `wk bench` refuses to run
+against anything but `gpu`: neither the socket nor the GPU probe can tell the
+difference, because the probe asks the *client* which EGL vendor it got and the
+answer is still NVIDIA when the compositor behind it is llvmpipe.
 
 Payloads are seeded once into `~/.local/share/wk/cache/bench` and pinned by
 commit, so a run does not clone Speedometer or pull MotionMark file by file

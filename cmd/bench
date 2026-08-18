@@ -221,14 +221,32 @@ preflight() {
     GPU_RENDERER=$(awk -F'renderer=' '/renderer=/{sub(/ *\|.*/,"",$2); print $2; exit}' /tmp/.wk-bench-verify.$$ 2>/dev/null || true)
     rm -f /tmp/.wk-bench-verify.$$
 
-    # 3. a real compositor on the real monitor
+    # 3. a real compositor on the real monitor -- and the right kind of one.
+    #
+    #    The socket says a compositor is there, not what it is drawing on. `wk
+    #    session on --bmc` puts the session on the BMC's display chip so it can
+    #    be watched over KVM-over-IP, which copies every frame between devices,
+    #    and with no monitor attached that session is software-rendered
+    #    outright. Neither is visible from the socket, and neither is visible in
+    #    the GPU probe above either: the probe asks the *client* which EGL
+    #    vendor it got, and the answer is still NVIDIA when the compositor
+    #    behind it is llvmpipe. The mode `wk session` recorded is the only place
+    #    the difference shows.
     local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
+    SESSION_MODE=$(session_mode)
     if [ -n "$SOFTWARE" ]; then
         :
-    elif [ -S "$sock" ]; then
-        check yes "graphical session" "$sock"
-    else
+    elif [ ! -S "$sock" ]; then
         check no  "graphical session" "no compositor -- wk session on"
+    else
+        case "$SESSION_MODE" in
+            # none: a session wk did not start, i.e. somebody's own desktop.
+            # Whether that one is on the GPU is what the renderer check above
+            # answers; there is no recorded mode to judge.
+            gpu|none) check yes "graphical session" "$sock ($SESSION_MODE)" ;;
+            *)        check no  "graphical session" \
+                          "session mode '$SESSION_MODE' -- watchable over the BMC, not measurable; wk session on" ;;
+        esac
     fi
 
     # 4. quiesced. The governor is the one that actually moves scores; the rest
@@ -347,6 +365,7 @@ cmd_run() {
     WK_M_PLAN="$plan" WK_M_WS="$ws" WK_M_CONFIG="$CONFIG" WK_M_BROWSER="$BROWSER" \
     WK_M_SHA="$sha" WK_M_COUNT="$COUNT" WK_M_LOCAL="$seeded" \
     WK_M_FORCED="$FORCE" WK_M_SOFTWARE="$SOFTWARE" WK_M_NOTES="$PREFLIGHT_NOTES" \
+    WK_M_SESSION_MODE="${SESSION_MODE:-$(session_mode)}" \
     WK_M_RENDERER="${GPU_RENDERER:-}" WK_M_DISPLAY="$display" WK_M_CPU="$cpu_model" \
     WK_M_KERNEL="$(uname -r)" WK_M_CORES="$(host_cores)" \
     WK_M_GOV="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)" \
@@ -361,6 +380,9 @@ json.dump({
     "count": g("WK_M_COUNT"), "local_copy": g("WK_M_LOCAL"),
     "forced": bool(g("WK_M_FORCED")), "software": bool(g("WK_M_SOFTWARE")),
     "preflight_notes": g("WK_M_NOTES"), "gpu_renderer": g("WK_M_RENDERER"),
+    # Which chip the compositor was on: gpu, bmc (GPU renders, the BMC's chip
+    # scans out), bmc-only (software), or none for somebody's own desktop.
+    "session_mode": g("WK_M_SESSION_MODE"),
     # MotionMark scores scale with the size of the surface being animated, and a
     # fullscreen browser's surface is the display mode -- so two runs on
     # different modes are not comparable and nothing else here would record why.
@@ -457,6 +479,9 @@ if a.get("config") != b.get("config"):
     print("warning: different build configs (%s vs %s)" % (a.get("config"), b.get("config")))
 if a.get("gpu_renderer") != b.get("gpu_renderer"):
     print("warning: different renderers (%s vs %s)" % (a.get("gpu_renderer"), b.get("gpu_renderer")))
+if a.get("session_mode") != b.get("session_mode"):
+    print("warning: different session modes (%s vs %s) -- only 'gpu' is a measurable display path"
+          % (a.get("session_mode"), b.get("session_mode")))
 if bool(a.get("software")) != bool(b.get("software")):
     print("warning: one run is software-rendered and the other is not -- these are not comparable")
 if a.get("forced") or b.get("forced"):

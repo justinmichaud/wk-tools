@@ -43,6 +43,10 @@ fi
 if is_linux && [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0" ]; then
     warn "no benchmark session running; GPU-accelerated tests fall back to software rendering"
     log  "  start one with:  wk session on"
+elif is_linux; then
+    # There is a session, but it may be one of the slow ones -- and from inside
+    # the workspace the socket looks identical either way.
+    session_mode_warn || true
 fi
 
 exec t_enter "$NAME"

@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+#
+# wk gui <workspace> [url] [--config C] [--wpe|--gtk] [-- browser args]
+#
+# MiniBrowser in the benchmark seat -- the same launch a perf run performs,
+# without the benchmark around it.
+#
+# run-benchmark does not start the browser in any clever way: its Linux drivers
+# (webkitpy/benchmark_runner/browser_driver/linux_minibrowser{wpe,gtk}_driver.py)
+# run `Tools/Scripts/run-minibrowser --wpe -- --fullscreen URL` inside the
+# workspace, and the compositor's socket is already in the container's
+# environment because targets/container.sh puts it there. So this command is
+# thin on purpose: what it buys is the port flag, the build type and the
+# fullscreen spelling all coming from the same config the build did, plus a
+# refusal when there is no session to draw into.
+#
+# The two ports spell fullscreen differently -- WPE takes --fullscreen, GTK
+# takes --full-screen -- which is exactly the kind of thing that turns into ten
+# minutes of "why is it a 800x600 window" when it is typed by hand.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/build/configs.sh"
+
+NAME="${1:-}"; shift || true
+require_name "$NAME"
+
+CONFIG="${WK_CONFIG:-wpe-release}"
+URL=""
+FULLSCREEN=1
+EXTRA=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --config)        CONFIG="${2:-}"; shift 2 ;;
+        --wpe)           CONFIG=wpe-release; shift ;;
+        --gtk)           CONFIG=gtk-release; shift ;;
+        --no-fullscreen) FULLSCREEN=""; shift ;;
+        --)              shift; EXTRA="$*"; break ;;
+        -*)              die "unknown option: $1" ;;
+        *)               URL="$1"; shift ;;
+    esac
+done
+
+config_load "$CONFIG" || die "unknown config '$CONFIG'"
+case "$CFG_PORT" in
+    --wpe) FS_FLAG=--fullscreen ;;
+    --gtk) FS_FLAG=--full-screen ;;
+    *)     die "'$CONFIG' builds no browser -- use a wpe-* or gtk-* config" ;;
+esac
+[ -n "$FULLSCREEN" ] || FS_FLAG=""
+
+# about:blank rather than a real page: a workspace has no route to the internet
+# except the proxy's allowlist, so anything else would fail in a way that looks
+# like the browser is broken.
+[ -n "$URL" ] || URL="about:blank"
+
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+load_target "$TARGET"
+[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+
+BUILD_DIR=$(config_build_dir "$(t_src "$NAME")")
+t_exec "$NAME" test -x "$BUILD_DIR/bin/MiniBrowser" 2>/dev/null \
+    || die "no MiniBrowser in $BUILD_DIR -- wk build $NAME $CONFIG"
+
+# --- the seat ----------------------------------------------------------------
+# The workspace sees the compositor at a fixed path; what matters is whether one
+# is running on the host, not whether this ssh shell has a display.
+if is_linux; then
+    SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
+    [ -S "$SOCK" ] || die "no graphical session -- 'wk session on', or 'wk session on --bmc' to watch it over the BMC"
+    session_mode_warn || true
+fi
+
+# In a BMC-only session the compositor itself is software-rendered, and it cannot
+# import a dmabuf the NVIDIA driver allocated. Left alone, the browser picks the
+# NVIDIA EGL vendor anyway -- the render node is still there -- and the result is
+# a window that stays black, which reads as a WebKit bug rather than as a display
+# path that cannot work. Pinning the client to Mesa and turning the dmabuf
+# renderer off is what makes the picture appear.
+RUN_ENV=""
+if [ "$(session_mode)" = bmc-only ]; then
+    RUN_ENV="WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe"
+    RUN_ENV="$RUN_ENV __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+    info "software session: pinning the browser to Mesa and disabling the dmabuf renderer"
+fi
+
+TYPE_FLAG="--$(printf '%s' "$CFG_TYPE" | tr 'A-Z' 'a-z')"
+
+info "MiniBrowser ($CONFIG) in '$NAME' -> $URL"
+log  "  ctrl-c here closes it"
+
+# WPE_BROWSER is what the benchmark driver sets, and the wkdev image's
+# run-minibrowser consults it to decide which WPE browser to launch.
+t_exec "$NAME" bash -lc "cd /src/WebKit && WPE_BROWSER=minibrowser $RUN_ENV \
+    Tools/Scripts/run-minibrowser $CFG_PORT $TYPE_FLAG -- $FS_FLAG $(sh_quote "$URL") $EXTRA"

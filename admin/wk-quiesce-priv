@@ -12,6 +12,10 @@
 #     PATH below means a hostile environment cannot redirect any binary.
 #   - Every action is reversible with `off`, and `off` is what runs if the
 #     argument is unrecognised.
+#   - The session verbs are one verb per configuration -- session-on,
+#     session-on-bmc, session-on-bmc-only -- rather than one verb taking a
+#     configuration. Each spells a fixed device list and a fixed compositor
+#     command line, so no argument ever reaches a command.
 #
 # Linux cannot make a #! script setuid -- the kernel ignores the bit -- so a
 # sudoers rule is the mechanism, not a shell wrapper around a setuid binary.
@@ -107,6 +111,7 @@ linux_status() {
 WK_SESSION_CONF=/usr/local/libexec/wk-session.env
 WK_SESSION_UNIT=wk-session
 WK_SESSION_TTY=${WK_SESSION_TTY:-/dev/tty2}
+WK_SESSION_MODE_FILE=/run/wk-session-mode
 
 session_user() {
     [ -r "$WK_SESSION_CONF" ] || return 1
@@ -117,11 +122,138 @@ session_user() {
     echo "$WK_SESSION_USER"
 }
 
+# --- which DRM device the compositor is allowed to use ------------------------
+# This board has two, and only one of them is a GPU. The discrete card drives
+# the monitor; the ASPEED BMC exposes a second, display-only `ast` device whose
+# framebuffer is what the BMC serves over KVM-over-IP. Both sit on seat0, so a
+# compositor left to enumerate for itself may pick either -- and which one it
+# picked decides whether a Speedometer number came from the GPU or from a
+# management chip. Every session below therefore names its devices explicitly
+# through WLR_DRM_DEVICES instead of trusting enumeration order.
+#
+# The kernel driver is the discriminator, never the card number: /dev/dri/card1
+# is the ast here only because of PCI enumeration, and adding a card renumbers
+# both.
+drm_driver() {
+    local link
+    link=$(readlink -f "/sys/class/drm/$1/device/driver" 2>/dev/null) || true
+    [ -n "$link" ] && basename "$link" || echo none
+}
+
+# Every card node, connectors excluded: /sys/class/drm holds cardN and
+# cardN-CONNECTOR-M side by side and only the former is a device.
+drm_cards() {
+    local d c
+    for d in /sys/class/drm/card[0-9]*; do
+        [ -d "$d" ] || continue
+        c=$(basename "$d")
+        case "$c" in *-*) continue ;; esac
+        echo "$c"
+    done
+}
+
+bmc_card() {
+    local c
+    for c in $(drm_cards); do
+        [ "$(drm_driver "$c")" = ast ] && { echo "/dev/dri/$c"; return 0; }
+    done
+    return 1
+}
+
+gpu_card() {
+    local c drv
+    for c in $(drm_cards); do
+        drv=$(drm_driver "$c")
+        case "$drv" in ast|none) continue ;; esac
+        [ -e "/dev/dri/$c" ] || continue
+        echo "/dev/dri/$c"
+        return 0
+    done
+    return 1
+}
+
+# The GPU's render node, which is what a renderer wants -- the card node is for
+# modesetting. The ast has no render node at all, which is the whole reason the
+# BMC session has to render somewhere else.
+gpu_render_node() {
+    local card d
+    card=$(gpu_card) || return 1
+    card=$(basename "$card")
+    for d in "/sys/class/drm/$card/device/drm/renderD"*; do
+        [ -d "$d" ] || continue
+        d=$(basename "$d")
+        [ -e "/dev/dri/$d" ] || continue
+        echo "/dev/dri/$d"
+        return 0
+    done
+    return 1
+}
+
+# $1 is a mode set by the dispatch table at the bottom of this file, never by
+# the caller: each verb passes one fixed literal.
+#
+#   gpu       the GPU alone. What a benchmark runs on, and the default.
+#   bmc       scan out on the BMC, render on the GPU. The BMC's chip is the only
+#             modesetting device the compositor gets, so the session has exactly
+#             one output and it is the one the BMC serves over KVM-over-IP;
+#             WLR_RENDER_DRM_DEVICE then points the renderer at the GPU's render
+#             node, and wlroots copies each finished frame across. Slower than
+#             `gpu` by that copy, and the display cadence is the ast's, so it is
+#             a debugging session and never a measurable one.
+#
+#             Naming both devices instead would be the obvious alternative and
+#             is worse: cage would have two outputs and either stretch the one
+#             window across both (-m extend) or pick whichever came up last
+#             (-m last), and "which output has the window" is not something
+#             anything can read back afterwards. One output cannot be ambiguous.
+#   bmc-only  the BMC alone, which means software rendering: the ast has no
+#             render node for anything to render on. The case where nothing is
+#             plugged into the GPU at all.
 session_on() {
-    local user uid runtime
+    local mode="${1:-gpu}"
+    local user uid runtime gpu bmc devices cage_args renderer render_dev allow_sw
     user=$(session_user) || { echo "wk-quiesce-priv: no session user configured in $WK_SESSION_CONF" >&2; exit 1; }
     uid=$(id -u "$user")
     runtime="/run/user/$uid/wk/display"
+
+    gpu=$(gpu_card) || gpu=""
+    bmc=$(bmc_card) || bmc=""
+
+    # WLR_RENDERER is pinned to gles2 for anything meant to render on the GPU,
+    # and that pin is load-bearing rather than decorative: with no
+    # WLR_RENDERER_ALLOW_SOFTWARE in the environment, wlroots refuses to start
+    # if the renderer it ends up with is a software one. So a session that comes
+    # up in `gpu` or `bmc` mode has proven it is rendering on the GPU, instead of
+    # having quietly landed on llvmpipe. The BMC-only session is the one place
+    # that guarantee has to be waived, and it waives it explicitly.
+    renderer=gles2
+    render_dev=""
+    allow_sw=""
+    cage_args="-d"
+    case "$mode" in
+        gpu)
+            [ -n "$gpu" ] || { echo "wk-quiesce-priv: no GPU DRM device found" >&2; exit 1; }
+            devices="$gpu"
+            ;;
+        bmc)
+            [ -n "$bmc" ] || { echo "wk-quiesce-priv: no BMC (ast) DRM device found" >&2; exit 1; }
+            render_dev=$(gpu_render_node) \
+                || { echo "wk-quiesce-priv: no GPU render node; use session-on-bmc-only" >&2; exit 1; }
+            devices="$bmc"
+            ;;
+        bmc-only)
+            [ -n "$bmc" ] || { echo "wk-quiesce-priv: no BMC (ast) DRM device found" >&2; exit 1; }
+            devices="$bmc"
+            renderer=""
+            # Without this wlroots refuses to start at all -- "Software
+            # rendering detected, please use the WLR_RENDERER_ALLOW_SOFTWARE
+            # environment variable to proceed" -- which is the right default
+            # everywhere else and exactly what this mode is asking for.
+            allow_sw=1
+            ;;
+        *)
+            echo "wk-quiesce-priv: unknown session mode $mode" >&2; exit 1 ;;
+    esac
 
     # The display manager holds seat0 through its greeter, and two things
     # cannot own DRM master at once. Stopped rather than disabled, so `off`
@@ -157,6 +289,13 @@ session_on() {
     # in the user's runtime directory -- where the workspace deliberately cannot
     # see it -- and the failure would look like "the compositor started but the
     # benchmark cannot find a display".
+    local setenv=(--setenv=XDG_SESSION_TYPE=wayland
+                  --setenv=WLR_NO_HARDWARE_CURSORS=1
+                  "--setenv=WLR_DRM_DEVICES=$devices")
+    [ -n "$renderer" ]   && setenv+=("--setenv=WLR_RENDERER=$renderer")
+    [ -n "$render_dev" ] && setenv+=("--setenv=WLR_RENDER_DRM_DEVICE=$render_dev")
+    [ -n "$allow_sw" ]   && setenv+=(--setenv=WLR_RENDERER_ALLOW_SOFTWARE=1)
+
     systemd-run --unit="$WK_SESSION_UNIT" --collect \
         --description="wk benchmark compositor" \
         --uid="$user" \
@@ -166,10 +305,8 @@ session_on() {
         --property=StandardOutput=journal \
         --property=StandardError=journal \
         --property=Restart=no \
-        --setenv=XDG_SESSION_TYPE=wayland \
-        --setenv=WLR_NO_HARDWARE_CURSORS=1 \
-        --setenv=WLR_RENDERER=gles2 \
-        /bin/sh -c "export XDG_RUNTIME_DIR='$runtime'; exec /usr/bin/cage -d -- /usr/bin/sleep infinity" \
+        "${setenv[@]}" \
+        /bin/sh -c "export XDG_RUNTIME_DIR='$runtime'; exec /usr/bin/cage $cage_args -- /usr/bin/sleep infinity" \
         >/dev/null
 
     # The socket appearing is the only evidence that matters.
@@ -179,8 +316,15 @@ session_on() {
     done
 
     if [ -S "$runtime/wayland-0" ]; then
+        # The mode is recorded where anything can read it, because the one thing
+        # that must never happen is a benchmark run against a BMC or software
+        # session that looks exactly like a GPU one from the socket alone.
+        printf '%s\n' "$mode" > "$WK_SESSION_MODE_FILE"
+        chmod 0644 "$WK_SESSION_MODE_FILE"
         echo "compositor up: $runtime/wayland-0"
+        echo "mode: $mode  scanout: $devices  render: ${render_dev:-$devices}"
     else
+        rm -f "$WK_SESSION_MODE_FILE"
         echo "compositor did not come up; journalctl -u $WK_SESSION_UNIT" >&2
         exit 1
     fi
@@ -197,6 +341,7 @@ session_off() {
         runtime="/run/user/$uid/wk/display"
         rm -f "$runtime/wayland-0" "$runtime/wayland-0.lock"
     fi
+    rm -f "$WK_SESSION_MODE_FILE"
     if [ -f /run/wk-session-stopped-dm ]; then
         systemctl start gdm3 2>/dev/null || systemctl start gdm 2>/dev/null || true
         rm -f /run/wk-session-stopped-dm
@@ -229,15 +374,20 @@ session_status() {
     printf 'socket:    %s\n' "$([ -S "$runtime/wayland-0" ] && echo "$runtime/wayland-0" || echo none)"
     printf 'dm:        %s\n' "$dm_state"
     printf 'modeset:   %s\n' "$(cat /sys/module/nvidia_drm/parameters/modeset 2>/dev/null || echo n/a)"
+    printf 'mode:      %s\n' "$(cat "$WK_SESSION_MODE_FILE" 2>/dev/null || echo none)"
+    printf 'gpu:       %s\n' "$(gpu_card || echo none)"
+    printf 'bmc:       %s\n' "$(bmc_card || echo none)"
 }
 
 case "$os:$action" in
     Darwin:on)     macos_on ;;
     Darwin:status) macos_status ;;
     Darwin:*)      macos_off ;;
-    Linux:session-on)     session_on ;;
-    Linux:session-off)    session_off ;;
-    Linux:session-status) session_status ;;
+    Linux:session-on)          session_on gpu ;;
+    Linux:session-on-bmc)      session_on bmc ;;
+    Linux:session-on-bmc-only) session_on bmc-only ;;
+    Linux:session-off)         session_off ;;
+    Linux:session-status)      session_status ;;
     Linux:on)      linux_on ;;
     Linux:status)  linux_status ;;
     Linux:*)       linux_off ;;

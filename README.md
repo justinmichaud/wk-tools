@@ -190,6 +190,28 @@ wk bench bug-238 speedometer3
 wk bench compare <run-a> <run-b>
 ```
 
+A session names its DRM device explicitly. This machine has two — the GPU, and
+the ASPEED BMC's display-only `ast` chip whose framebuffer the BMC serves over
+KVM-over-IP — and both are on seat0, so a compositor left to enumerate may take
+either. A benchmark session lists the GPU alone; the BMC cannot end up in the
+display path of a measured run.
+
+For debugging a GUI from somewhere else, `wk session on --bmc` makes the
+opposite trade: the session *moves* to the BMC's output — the monitor goes dark,
+because the BMC's chip becomes the compositor's only modesetting device — while
+the GPU keeps doing the rendering and wlroots copies each frame across. If the
+two drivers refuse that copy, or nothing is plugged into the GPU at all, the
+session falls back to software rendering and says which one you got. Both modes
+are slow, both are recorded in `/run/wk-session-mode`, and `wk bench`,
+`wk test --gpu`, `wk enter` and `wk gui` all warn — the socket looks identical
+either way, and so does the GPU probe, which asks the client's EGL vendor and
+gets NVIDIA even when the compositor behind it is llvmpipe.
+
+```sh
+wk session on --bmc        # watchable over KVM-over-IP; never for numbers
+wk gui bug-238 [url]       # MiniBrowser in the seat, launched as perf runs do
+```
+
 Linux cannot make a `#!` script setuid — the kernel ignores the bit — so the
 privileged half is a `NOPASSWD` rule naming one root-owned path, installed only
 after `visudo -c` validates it, and re-checked for writability on every setup

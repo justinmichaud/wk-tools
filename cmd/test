@@ -72,6 +72,10 @@ if [ "$CFG_BUILDSYS" = xcode ]; then
 elif [ -n "$GPU" ]; then
     RENDER_ENV=""
     info "using the real GPU (requires /dev/dri in the workspace)"
+    # /dev/dri being there is not the whole story: if the seat is a BMC or
+    # software session, the display path is not the GPU's and nothing further
+    # down would mention it.
+    session_mode_warn || true
 else
     RENDER_ENV="LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1"
 fi

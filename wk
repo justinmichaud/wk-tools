@@ -28,6 +28,7 @@ workspaces
   status [name]             build/container state; exit code is machine-readable
   logs <name> [--follow]    build log, errors first
   run <name> [args]         run jsc from the workspace build
+  gui <name> [url]          MiniBrowser in the seat, launched as perf runs do
   test <name> [args]        run tests
   bench <name> <plan>       run a benchmark, with preflight and provenance
   verify <name> [--gpu]     prove the sandbox holds, by testing it
@@ -49,6 +50,8 @@ hosts and machines
   pi <sub>                  provision a Raspberry Pi onto the tailnet
   quiesce on|off|status     quiet the machine for benchmarking
   session on|off|status     a real GPU session on the attached monitor (Linux)
+    session on --bmc        put that session on the BMC instead, to watch it
+                            over KVM-over-IP; slower, and never for numbers
   mcp                       MCP server, for the Claude Desktop app
 
   WK_DEBUG=1 for verbose output.
