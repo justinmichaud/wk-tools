@@ -129,6 +129,15 @@ require_name() {
 confirm() {
     local prompt="$1"
     [ -n "${WK_YES:-}" ] && return 0
+
+    # No tty means nobody can answer. Decline rather than block: a prompt that
+    # waits forever in a script or a background run is worse than a decision
+    # not taken, and every caller treats "no" as the safe outcome.
+    if [ ! -t 0 ]; then
+        warn "$prompt -- declining (no terminal; re-run interactively, or set WK_YES=1)"
+        return 1
+    fi
+
     printf '%s [y/N] ' "$prompt" >&2
     local reply
     read -r reply || return 1

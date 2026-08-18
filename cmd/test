@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 #
-# wk test <workspace> [--config C] [args] -- run the JSC or layout test suites.
+# wk test <workspace> [--layout] [--config C] [paths...]
 #
-# --memory-limited is passed by default: the test harness otherwise sizes its
-# own parallelism from core count alone, which is exactly the behaviour that
-# makes a machine unusable mid-run.
+# Runs the JSC or layout test suites with the same reportability as `wk build`:
+# a watchdog that detects a silent run rather than waiting on it, a status file
+# `wk status` can read, and a summary that says what happened instead of leaving
+# a few hundred KB of output to interpret.
+#
+# Layout tests default to software rendering. There is no GPU inside the
+# workspace on macOS -- the podman VM has no /dev/dri to pass through -- so
+# without llvmpipe the runner either fails to start or silently produces
+# garbage. On Linux with a real seat, pass --gpu to use the real device.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/watchdog.sh"
 . "$WK_ROOT/build/configs.sh"
 
 NAME="${1:-}"; shift || true
@@ -18,16 +25,18 @@ require_name "$NAME"
 
 CONFIG="${WK_CONFIG:-jsc-release}"
 SUITE=jsc
+GPU=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --config) CONFIG="${2:-}"; shift 2 ;;
         --layout) SUITE=layout; shift ;;
+        --gpu)    GPU=1; shift ;;
         --)       shift; break ;;
         *)        break ;;
     esac
 done
 
-config_load "$CONFIG" || die "unknown config '$CONFIG'"
+config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
 
 TARGET="${WK_TARGET:-container}"
 . "$WK_ROOT/targets/$TARGET.sh"
@@ -36,17 +45,86 @@ TARGET="${WK_TARGET:-container}"
 lower=$(echo "$CFG_TYPE" | tr '[:upper:]' '[:lower:]')
 JOBS=$(build_jobs)
 
+WS=$(wk_ws_dir "$NAME")
+LOG="$WS/test.log"
+STATUS="$WS/test.status"
+STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+START_EPOCH=$(date +%s)
+
+# Software rendering. llvmpipe via Mesa's software gallium driver, and the WPE
+# headless backend so no compositor is needed.
+if [ -n "$GPU" ]; then
+    RENDER_ENV=""
+    info "using the real GPU (requires /dev/dri in the workspace)"
+else
+    RENDER_ENV="LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1"
+fi
+
+printf 'state=running\nsuite=%s\nconfig=%s\nstarted=%s\nlog=%s\n' \
+    "$SUITE" "$CONFIG" "$STARTED" "$LOG" > "$STATUS"
+
+write_status() {
+    cat > "$STATUS" <<EOF
+state=$1
+suite=$SUITE
+config=$CONFIG
+exit=${2:-}
+started=$STARTED
+finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+seconds=$(( $(date +%s) - START_EPOCH ))
+log=$LOG
+EOF
+}
+
 case "$SUITE" in
 jsc)
-    info "running JSC tests ($CONFIG, -j$JOBS)"
-    t_exec "$NAME" env WK_JOBS="$JOBS" bash -lc \
-        "cd /src/WebKit && nice -n 10 Tools/Scripts/run-javascriptcore-tests \
-            --$lower ${CFG_PORT} --no-build --no-fail-fast --memory-limited $* "
+    info "JSC tests ($CONFIG, -j$JOBS)"
+    CMD="cd /src/WebKit && nice -n 10 Tools/Scripts/run-javascriptcore-tests \
+         --$lower $CFG_PORT --no-build --no-fail-fast --memory-limited $*"
     ;;
 layout)
-    info "running layout tests ($CONFIG, -j$JOBS)"
-    t_exec "$NAME" bash -lc \
-        "cd /src/WebKit && nice -n 10 Tools/Scripts/run-webkit-tests \
-            --$lower ${CFG_PORT} --no-build --child-processes=$JOBS $* "
+    info "layout tests ($CONFIG, ${GPU:+GPU}${GPU:-software rendering}, $JOBS processes)"
+    # --no-retry-failures: a retry doubles the runtime and hides flakiness,
+    # which is the opposite of what an automated check wants.
+    CMD="cd /src/WebKit && $RENDER_ENV nice -n 10 Tools/Scripts/run-webkit-tests \
+         --$lower $CFG_PORT --no-build --no-retry-failures \
+         --child-processes=$JOBS $*"
+    ;;
+*) die "unknown suite: $SUITE" ;;
+esac
+
+log "  log: $LOG"
+
+set +e
+run_watched "$LOG" -- t_exec "$NAME" bash -lc "$CMD"
+rc=$?
+set -e
+
+ELAPSED=$(( $(date +%s) - START_EPOCH ))
+MINS=$(( ELAPSED / 60 )); SECS=$(( ELAPSED % 60 ))
+
+# run-webkit-tests reports its own totals; surface them rather than a raw tail.
+summary=$(tr '\r' '\n' < "$LOG" | grep -iE '^(Ran |Test suite|[0-9]+ test|All [0-9]+ test)' | tail -4)
+
+echo >&2
+case $rc in
+0)
+    write_status ok 0
+    info "TESTS OK  $SUITE/$CONFIG in '$NAME'  (${MINS}m${SECS}s)"
+    [ -n "$summary" ] && printf '%s\n' "$summary" | sed 's/^/  /' >&2
+    ;;
+124)
+    write_status stalled 124
+    die "TESTS STALLED  $SUITE/$CONFIG in '$NAME' (killed after ${MINS}m${SECS}s with no output)
+    log: $LOG"
+    ;;
+*)
+    write_status failed "$rc"
+    warn "TESTS FAILED  $SUITE/$CONFIG in '$NAME'  (exit $rc after ${MINS}m${SECS}s)"
+    [ -n "$summary" ] && printf '%s\n' "$summary" | sed 's/^/  /' >&2
+    log "failures:"
+    tr '\r' '\n' < "$LOG" | grep -iE 'FAIL|crash|timed out' | head -10 | sed 's/^/  /' || true
+    log "  full log: $LOG"
+    exit "$rc"
     ;;
 esac
