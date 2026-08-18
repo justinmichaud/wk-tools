@@ -184,7 +184,10 @@ config_build_env() {
     # Only when the config asks for it: the Apple configs leave these empty on
     # purpose, and `env CC= ` is not the same as not setting CC at all.
     [ -n "$CFG_CC" ] && CFG_ENV+=("CC=$CFG_CC" "CXX=$CFG_CXX")
-    [ -n "${WK_COMPILE_COMMANDS:-}" ] && CFG_ENV+=("WK_COMPILE_COMMANDS=1")
+    # compile_commands.json is on by default; this only carries the opt-out
+    # through to the build half, which runs in the target and cannot see the
+    # caller's environment.
+    [ -n "${WK_NO_COMPILE_COMMANDS:-}" ] && CFG_ENV+=("WK_NO_COMPILE_COMMANDS=1")
     return 0
 }
 

@@ -14,7 +14,8 @@ set -euo pipefail
 WK_TOOLS=/opt/wk-tools
 SRC=/src/WebKit
 
-log() { printf '[firstrun] %s\n' "$*"; }
+log()  { printf '[firstrun] %s\n' "$*"; }
+warn() { printf '[firstrun] warning: %s\n' "$*" >&2; }
 
 # --- egress ------------------------------------------------------------------
 # This runs during container init, before any wk command has had a chance to
@@ -156,26 +157,39 @@ fi
 # --- editors -----------------------------------------------------------------
 # helix is workspace-only now: it needs the checkout's clangd and compile
 # commands, which only exist here.
-if ! command -v hx >/dev/null 2>&1; then
-    log "installing helix"
-    ver=25.07
+#
+# Wrapped so a failure here cannot cost the workspace anything that matters.
+# An editor is a convenience; the lldb config and the shell rc set up below are
+# not, and `set -e` used to throw both away because a helix tarball did not
+# unpack the way this expected.
+_install_helix() {
+    local ver=25.07 arch hxarch tmp
     arch=$(uname -m)
     case "$arch" in
         aarch64|arm64) hxarch=aarch64 ;;
         x86_64)        hxarch=x86_64 ;;
-        *)             hxarch="" ;;
+        *)             return 0 ;;
     esac
-    if [ -n "$hxarch" ]; then
-        tmp=$(mktemp -d)
-        if curl -fsSL "https://github.com/helix-editor/helix/releases/download/${ver}/helix-${ver}-${hxarch}-linux.tar.xz" \
-             | tar -xJ -C "$tmp" --strip-components=1; then
-            sudo install -m 0755 "$tmp/hx" /usr/local/bin/hx
-            install -d "$HOME/.config"
-            ln -sfn "$WK_TOOLS/container/helix" "$HOME/.config/helix"
-            [ -d "$tmp/runtime" ] && cp -r "$tmp/runtime" "$HOME/.config/helix/runtime"
-        fi
-        rm -rf "$tmp"
-    fi
+
+    tmp=$(mktemp -d)
+    curl -fsSL "https://github.com/helix-editor/helix/releases/download/${ver}/helix-${ver}-${hxarch}-linux.tar.xz" \
+        | tar -xJ -C "$tmp" --strip-components=1 || { rm -rf "$tmp"; return 1; }
+
+    sudo install -m 0755 "$tmp/hx" /usr/local/bin/hx || { rm -rf "$tmp"; return 1; }
+
+    # A real directory, copied -- not a symlink to the repo. helix wants its
+    # runtime/ beside the config, /opt/wk-tools is mounted read-only, and
+    # writing several thousand runtime files into the tooling checkout would be
+    # wrong even if it were writable.
+    install -d "$HOME/.config/helix"
+    cp -R "$WK_TOOLS/container/helix/." "$HOME/.config/helix/" 2>/dev/null || true
+    [ -d "$tmp/runtime" ] && cp -R "$tmp/runtime" "$HOME/.config/helix/runtime"
+    rm -rf "$tmp"
+}
+
+if ! command -v hx >/dev/null 2>&1; then
+    log "installing helix"
+    _install_helix || warn "helix install failed -- continuing without it"
 fi
 
 # --- lldb --------------------------------------------------------------------
@@ -191,5 +205,23 @@ fi
 grep -qF 'wk-tools/shell/bashrc' "$HOME/.bashrc" 2>/dev/null || \
     printf '\n. %s/shell/bashrc\nexport PATH="%s:$PATH"\ncd %s\n' \
         "$WK_TOOLS" "$WK_TOOLS" "$SRC" >> "$HOME/.bashrc"
+
+# bash reads ~/.bashrc for interactive non-login shells and ~/.bash_profile for
+# login shells, and the image ships neither. Without this, `wk enter` gets the
+# history settings, the editor and the PATH -- and anything arriving over ssh
+# as a login shell silently does not.
+[ -f "$HOME/.bash_profile" ] || printf '%s\n' \
+    '# wk: login shells read this, interactive non-login shells read .bashrc.' \
+    '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"' > "$HOME/.bash_profile"
+
+# A completion marker, checked by `wk new`.
+#
+# .wkdev-init runs this hook and then carries on regardless of how it exited,
+# so a failure part-way through is invisible: the container comes up, the
+# creation reports success, and the workspace is quietly missing whatever came
+# after the failing step. That happened -- a root-owned ~/.config aborted the
+# helix install and cost this workspace its lldb config and its shell rc --
+# and the only honest fix is for something downstream to check.
+: > "$HOME/.wk-firstrun-complete"
 
 log "workspace ${WK_WORKSPACE:-?} ready"

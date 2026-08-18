@@ -34,10 +34,11 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     fi
 fi
 
-stopped=$(_in_machine 'sudo podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"' || true)
+# Plain podman, not sudo: see the note in cmd/stop.
+stopped=$(_in_machine 'podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}"' || true)
 if [ -n "$stopped" ]; then
     printf '%s\n' "$stopped" | sed 's/^/  starting /' >&2
-    _in_machine 'sudo podman start $(sudo podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
+    _in_machine 'podman start $(podman ps -a --filter "name=^wk-" --filter "status=exited" --filter "status=created" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
     info "started $(printf '%s\n' "$stopped" | wc -l | tr -d ' ') container(s)"
 else
     info "no stopped containers"

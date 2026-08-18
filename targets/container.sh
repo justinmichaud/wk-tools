@@ -5,24 +5,21 @@
 # functions, never podman directly, so adding a new kind of environment later
 # means adding a file here and nothing else.
 #
-# Two sandbox modes, because the two hosts differ in what they can enforce:
+# One sandbox model, on both hosts: rootless podman, --userns keep-id, and
+# --network none. The workspace has no network interface at all and reaches the
+# outside only through the unix socket of an egress proxy running as the user.
+# Nothing here needs a privilege.
 #
-#   rootless-proxy   Linux workstation. Rootless podman, --userns keep-id, and
-#                    --network none: the workspace has no network interface at
-#                    all and reaches the outside only through the unix socket of
-#                    an egress proxy running as the user. Nothing here needs a
-#                    privilege.
+# The macOS VM used to run a second model -- rootful podman on a bridge, egress
+# policy in nftables' forward chain -- and it was retired for two reasons. A
+# boundary implemented twice is understood once and verified never; and
+# nftables *required* rootful podman, because rootless podman's network helper
+# re-emits container traffic from the init namespace in a randomly named cgroup
+# scope, leaving no stable selector for a packet filter. Under rootful podman a
+# container escape is a root escape. Removing the interface removes the need
+# for the filter, and the privilege with it.
 #
-#   vm-nftables      Inside the macOS podman machine. Rootful podman on a bridge
-#                    network, with the egress policy in nftables' forward chain.
-#
-# The VM path is not a preference either way -- it is what was built first and
-# what macOS is verified against. The Linux path deliberately does not copy it:
-# rootless podman has no filterable forward path (its network helper re-emits
-# traffic from a randomly named cgroup scope in the init namespace), so keeping
-# nftables would have meant keeping rootful podman, and rootful podman means a
-# container escape is a root escape. Removing the interface removes the need for
-# a filter. See docs/HANDOFF-macos-proxy.md for moving the VM to the same model.
+# See docs/HANDOFF-macos-proxy.md for the migration this completed.
 
 if [ -n "${WK_IN_VM:-}" ]; then
     WK_SDK="${WK_SDK:-/opt/webkit-container-sdk}"
@@ -34,44 +31,32 @@ fi
 # register-sdk-on-host.sh, which is a shell-rc thing we deliberately do not use.
 export WKDEV_SDK="$WK_SDK"
 
-if [ -n "${WK_IN_VM:-}" ]; then
-    WK_SANDBOX=vm-nftables
-else
-    WK_SANDBOX=rootless-proxy
-fi
+# One sandbox model, both hosts. The macOS VM used to run a second one --
+# rootful podman on a bridge with the egress policy in nftables -- and a
+# boundary implemented twice is a boundary understood once and verified never.
+#
+# The nftables model also forced rootful podman, because rootless podman has no
+# filterable forward path: its network helper re-emits container traffic from
+# the init namespace in a cgroup scope with a random name, so there is no
+# stable selector to match on. Under rootful podman a container escape is a
+# root escape, which is a far worse trade than a proxy that needs no privilege
+# at all. Removing the interface removes the need for the filter.
+WK_SANDBOX=rootless-proxy
 
-if [ "$WK_SANDBOX" = vm-nftables ]; then
-    WK_NETWORK="${WK_NETWORK:-wk}"
+# Rootless, on both hosts. `sudo` appears nowhere in the daily path, and that
+# is the property to preserve: if a wk command ever needs a password, it has
+# stopped being something an unattended agent can use.
+_sdk() { "$@"; }
+_podman() { podman "$@"; }
 
-    # Rootful, because the egress policy is nftables in the VM's forward chain
-    # and rootless pasta traffic never reaches it.
-    _sdk() { sudo -E "$@"; }
-    _podman() { sudo podman "$@"; }
+# keep-id maps the invoking user through unchanged, so the container user is
+# simply this user. No id derivation, no mismatch between the checkout, the
+# caches and the home directory -- and none of the SDK's in-image user creation,
+# which existed only because rootful podman has no keep-id.
+export WKDEV_CONTAINER_UID="$(id -u)"
+export WKDEV_CONTAINER_GID="$(id -g)"
+export WKDEV_CONTAINER_USER="${WK_CONTAINER_USER:-$(id -un)}"
 
-    # Under rootful podman there is no --userns keep-id, so the user is created
-    # inside the image by the patched .wkdev-init, with ids taken from whoever
-    # owns the storage -- they must match or the container cannot write to its
-    # own home, the caches, or the checkout.
-    export WKDEV_CONTAINER_UID="$(stat -c %u "$WK_STORE" 2>/dev/null || echo 1000)"
-    export WKDEV_CONTAINER_GID="$(stat -c %g "$WK_STORE" 2>/dev/null || echo 1000)"
-    # Must be an account that exists on the VM host: argsparse type-checks
-    # --user/--group with `getent`, so a name that exists only inside the image
-    # fails validation before podman is ever invoked.
-    export WKDEV_CONTAINER_USER="${WK_CONTAINER_USER:-core}"
-else
-    # Rootless. `sudo` appears nowhere in this file's Linux path, and that is
-    # the property to preserve: if a wk command ever needs a password, it has
-    # stopped being something an unattended agent can use.
-    _sdk() { "$@"; }
-    _podman() { podman "$@"; }
-
-    # keep-id maps the invoking user through unchanged, so the container user is
-    # simply this user. No id derivation, no mismatch between the checkout, the
-    # caches and the home directory.
-    export WKDEV_CONTAINER_UID="$(id -u)"
-    export WKDEV_CONTAINER_GID="$(id -g)"
-    export WKDEV_CONTAINER_USER="${WK_CONTAINER_USER:-$(id -un)}"
-fi
 # wkdev-create defaults --shell to ${SHELL}, the *host* user's shell. That path
 # need not exist in the image -- zsh does not -- and when it does not, the
 # firstrun hook silently fails with "su: failed to execute /usr/bin/zsh" and the
@@ -80,7 +65,7 @@ export WKDEV_CONTAINER_SHELL=/bin/bash
 
 # GPU policy lives with the rest of the Linux host support, because what has to
 # be injected depends entirely on the host's driver stack.
-if [ "$WK_SANDBOX" = rootless-proxy ] && [ -f "$WK_ROOT/host/linux/gpu.sh" ]; then
+if [ -f "$WK_ROOT/host/linux/gpu.sh" ]; then
     . "$WK_ROOT/host/linux/gpu.sh"
 else
     gpu_flags() { :; }
@@ -116,24 +101,18 @@ t_info() {
 # -- podman rejects --isolated as an unknown flag, and a --network in both
 # places means the container gets two.
 _sdk_opts() {
-    if [ "$WK_SANDBOX" = vm-nftables ]; then
-        printf '%s\n' --network "$WK_NETWORK"
-    else
-        # --network none is the boundary. Not a filtered interface: no
-        # interface. Loopback still exists inside the namespace, which is all
-        # run-benchmark's local web server needs.
-        #
-        # --isolated drops the host session: no D-Bus, no keyring, no dconf, no
-        # journal, no X11, no host home, no shared runtime directory. The
-        # session bus in particular is a complete host escape and has nothing
-        # to do with the network, so no firewall would have caught it.
-        printf '%s\n' --network none --isolated
-    fi
+    # --network none is the boundary. Not a filtered interface: no interface.
+    # Loopback still exists inside the namespace, which is all run-benchmark's
+    # local web server needs.
+    #
+    # --isolated drops the host session: no D-Bus, no keyring, no dconf, no
+    # journal, no X11, no host home, no shared runtime directory. The session
+    # bus in particular is a complete host escape and has nothing to do with
+    # the network, so no firewall would have caught it.
+    printf '%s\n' --network none --isolated
 }
 
 _sandbox_flags() {
-    [ "$WK_SANDBOX" = vm-nftables ] && return 0
-
     local rt; rt=$(_wk_runtime)
     mkdir -p "$rt"
 
@@ -229,14 +208,37 @@ t_create() {
     install -m 0755 "$WK_ROOT/container/firstrun.sh" "$ws/home/.wkdev-firstrun"
 }
 
+# Creation is asynchronous: wkdev-create returns as soon as the container is
+# started, and .wkdev-init runs the firstrun hook afterwards -- installing the
+# push keys, the Claude CLI, helix, the lldb config and the shell rc.
+#
+# .wkdev-init does not check how that hook exited, so a failure part-way
+# through is silent: the container is up, creation "succeeded", and the
+# workspace is missing everything after the failing step. firstrun.sh writes a
+# marker as its last act; this waits for it and reports honestly when it never
+# appears.
+t_ready() {
+    local name="$1" ws c i=0
+    ws=$(wk_ws_dir "$name"); c=$(_ctr "$name")
+    while [ "$i" -lt 300 ]; do
+        [ -f "$ws/home/.wk-firstrun-complete" ] && return 0
+        _podman container exists "$c" >/dev/null 2>&1 || break
+        sleep 1; i=$((i + 1))
+    done
+
+    # The driver knows where the evidence is, so it prints it rather than
+    # telling the caller to go and find a command that differs per host.
+    warn "initialisation did not complete; last output from the container:"
+    _podman logs "$c" 2>&1 | grep -vE "^\\s*$" | tail -8 | sed "s/^/    /" >&2 || true
+    return 1
+}
+
 # Every exec goes through ensure-bridge, which starts the loopback-to-proxy
 # forwarder if it is not already running. Wrapping rather than checking
 # separately keeps this to one container exec: a second round trip on every
 # `wk run` would be paid forever for something almost always already true.
 _wrap_cmd() {
-    if [ "$WK_SANDBOX" = rootless-proxy ]; then
-        printf '%s\n' /opt/wk-tools/container/proxy/ensure-bridge.sh
-    fi
+    printf '%s\n' /opt/wk-tools/container/proxy/ensure-bridge.sh
 }
 
 # --quiet is not cosmetic. Without it wkdev-enter prints its own banner and
@@ -254,8 +256,7 @@ t_enter() {
     local name="$1"
     local c; c=$(_ctr "$name")
     # Interactive shells do not go through t_exec, so start the bridge first.
-    [ "$WK_SANDBOX" = rootless-proxy ] && \
-        _podman exec -d "$c" /opt/wk-tools/container/proxy/ensure-bridge.sh true 2>/dev/null
+    _podman exec -d "$c" /opt/wk-tools/container/proxy/ensure-bridge.sh true 2>/dev/null || true
     _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --name "$c"
 }
 
@@ -280,11 +281,7 @@ t_destroy() {
     # writes -- is undeletable from outside the namespace. Plain rm -rf fails
     # partway and leaves a workspace that looks removed and is not.
     if [ -d "$ws" ]; then
-        if [ "$WK_SANDBOX" = rootless-proxy ]; then
-            podman unshare rm -rf "$ws" 2>/dev/null || rm -rf "$ws"
-        else
-            rm -rf "$ws"
-        fi
+        podman unshare rm -rf "$ws" 2>/dev/null || rm -rf "$ws"
         [ -d "$ws" ] && warn "could not fully remove $ws" || info "removed $ws"
     fi
 }

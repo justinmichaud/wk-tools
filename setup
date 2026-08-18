@@ -89,6 +89,7 @@ run_stage claude   "$WK_ROOT/claude/install.sh"
 run_stage mcp      "$HOST_DIR/mcp.sh"
 run_stage machine  "$HOST_DIR/machine.sh"
 run_stage vmtools  "$HOST_DIR/vmtools.sh"
+run_stage softnet  "$HOST_DIR/softnet.sh"
 run_stage sdk      "$HOST_DIR/sdk.sh"
 run_stage quiesce  "$WK_ROOT/admin/install.sh"
 

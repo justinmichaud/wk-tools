@@ -56,26 +56,23 @@ args=()
 # shellcheck disable=SC2206 -- deliberate word splitting of the config string.
 args+=(${WK_BUILD_ARGS:-})
 
-# --export-compile-commands is free on the CMake ports -- it is one extra
-# -D flag and CMake writes compile_commands.json as a side effect.
+# compile_commands.json, always. Every build produces it, on every port and
+# every target, because a checkout without it is a checkout where clangd, Zed
+# and every editor-driven jump-to-definition quietly stops working -- and the
+# person who needs it is never the person running the build.
 #
-# On the Apple ports it is not free, and it is not obviously so. It expands to
-# four build settings, and one of them is GCC_PRECOMPILE_PREFIX_HEADER=NO --
-# which turns off precompiled prefix headers for WebCore, WebKit and
-# JavaScriptCore, all three of which set it to YES in their own xcconfigs and
-# have prefix headers that every translation unit includes. It also adds
-# -gen-cdb-fragment-path, so each of ~6,300 compiles writes an extra JSON
-# fragment.
+# It is free on the CMake ports (one -D flag, CMake writes the file as a side
+# effect). On the Apple ports it is not: it expands to four build settings, one
+# of which is GCC_PRECOMPILE_PREFIX_HEADER=NO, and WebCore, WebKit and
+# JavaScriptCore all set that to YES in their own xcconfigs and have prefix
+# headers every translation unit includes. It also adds -gen-cdb-fragment-path,
+# so each of ~6,300 compiles writes an extra JSON fragment.
 #
-# Measured cold, all else equal: 99 min with it, and that works out at 8.5 s of
-# CPU per translation unit, which is far more than a WebKit TU should cost.
-#
-# So it is opt-in here. Set WK_COMPILE_COMMANDS=1 when you actually want
-# compile_commands.json for clangd, and pay for it deliberately.
-case "$buildsys" in
-xcode) [ -n "${WK_COMPILE_COMMANDS:-}" ] && args+=(--export-compile-commands) ;;
-*)     args+=(--export-compile-commands) ;;
-esac
+# Measured cold on a 9-vCPU guest: 99 min, which is 8.5 s of CPU per
+# translation unit -- far more than a WebKit TU should cost. That is the price
+# of the file, it is paid deliberately, and WK_NO_COMPILE_COMMANDS=1 is the
+# escape hatch for a one-off build where it does not matter.
+[ -n "${WK_NO_COMPILE_COMMANDS:-}" ] || args+=(--export-compile-commands)
 
 # How the job count reaches the compiler differs entirely between the two build
 # systems, and neither flag is accepted by the other.

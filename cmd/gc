@@ -53,41 +53,15 @@ if have ccache; then
 fi
 
 # --- firewall address sets ---------------------------------------------------
-# Only the macOS VM filters by address. The Linux boundary allowlists by
-# hostname in the egress proxy, so there is no set to refresh and no CIDR list
-# to go stale -- which was most of the reason for moving to it.
-if [ -n "$REFRESH_NET" ] && [ -z "${WK_IN_VM:-}" ] && is_linux; then
-    warn "--refresh-net does nothing here: the egress policy is by hostname"
+# Gone, along with the packet filter that needed them. The boundary allowlists
+# by hostname in the egress proxy on both hosts now, so there is no CIDR set to
+# refresh and nothing to go stale -- which was most of the reason for moving to
+# it. `--refresh-net` is kept as a no-op rather than an error so that a habit,
+# a script or a stale note does not fail; it says what happened and moves on.
+if [ -n "$REFRESH_NET" ]; then
+    warn "--refresh-net does nothing any more: the egress policy is by hostname,
+  in container/proxy/wk-proxy.py, and needs no periodic refresh."
     REFRESH_NET=""
-fi
-
-if [ -n "$REFRESH_NET" ] && have nft; then
-    info "refreshing GitHub ranges from api.github.com/meta"
-    ranges=$(curl -fsS https://api.github.com/meta | jq -r '.git[] | select(test(":") | not)')
-    if [ -n "$ranges" ]; then
-        sudo nft flush set inet wk_egress github_v4
-        for r in $ranges; do
-            sudo nft add element inet wk_egress github_v4 "{ $r }"
-        done
-        info "loaded $(echo "$ranges" | wc -l | tr -d ' ') GitHub ranges"
-    else
-        warn "could not fetch GitHub ranges; leaving the existing set in place"
-    fi
-fi
-
-# --- hostnames without published ranges --------------------------------------
-if [ -n "$REFRESH_NET" ] && have nft; then
-    # Resolved fresh each time rather than pinned: these are load-balancer
-    # addresses that can move, and a stale entry shows up as a mysterious
-    # download hang rather than a firewall error.
-    info "resolving hosts that publish no stable range"
-    sudo nft flush set inet wk_egress resolved_hosts 2>/dev/null || true
-    for host in downloads.claude.ai; do
-        for ip in $(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u); do
-            sudo nft add element inet wk_egress resolved_hosts "{ $ip }" 2>/dev/null \
-                && log "  $host -> $ip"
-        done
-    done
 fi
 
 # --- return free space to the host ------------------------------------------

@@ -22,27 +22,58 @@
 #
 #   A macOS guest cannot be firewalled from outside. See "isolation" below.
 #
-# --- isolation ---------------------------------------------------------------
+# --- isolation ----------------------------------------------------------------
 #
-# Be precise about what this target gives you, because it is NOT what a Linux
-# workspace gives you:
+# A macOS guest gets the same three properties a container workspace gets, by
+# different means:
 #
-#   yes  a VM boundary. The guest has no view of the host filesystem -- no
-#        --dir mounts are ever passed, so /Users is unreachable by construction.
-#   yes  disposability. `wk rm` deletes the whole guest.
-#   NO   filtered egress. The Linux workspaces are confined by nftables in the
-#        podman VM's root network namespace, which the workspace does not own.
-#        A macOS guest has no equivalent: there is no shared netns to filter
-#        from outside, and pf inside the guest is modifiable by anything
-#        running as root there -- which includes whatever you are sandboxing.
+#   host filesystem   unreachable. No --dir is ever passed, so /Users does not
+#                     exist in the guest by construction.
+#   disposable        `wk rm` deletes the whole guest.
+#   filtered egress   Softnet, a userspace packet filter that Tart runs as a
+#                     subprocess on the HOST. Default-deny, with one address
+#                     allowed: the host's own, where wk-proxy listens. The
+#                     guest therefore reaches the network only through the same
+#                     hostname allowlist a container uses.
 #
-# So a macOS workspace is a blast-radius boundary, not a network boundary.
-# `wk claude` says so out loud rather than implying the Linux guarantees.
+# The filter is deliberately outside the guest. `pf` inside it would not be a
+# boundary at all: anything running as root in the guest can rewrite it, and
+# "root in the guest" is exactly what is being sandboxed.
+#
+# Softnet needs root (vmnet does), so it is installed SUID root once at setup
+# time by host/macos/softnet.sh. That is the same trade the quiesce helper
+# makes; `wk` itself still never calls sudo.
+#
+# WK_VM_UNFILTERED=1 turns the filter off for a guest that needs the open
+# network. It says so loudly, because a workspace that is quietly less confined
+# than it looks is worse than one that is openly unconfined.
 
 WK_VM_IMAGE="${WK_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
 WK_VM_BASE="${WK_VM_BASE:-wk-base}"
 WK_VM_MAX="${WK_VM_MAX:-2}"
 WK_VM_USER="${WK_VM_USER:-admin}"
+
+# The egress boundary for guests. The proxy listens on the host's address on
+# the guest-facing bridge, which is also the one address Softnet lets the guest
+# reach.
+#
+# That address is NOT vmnet's usual 192.168.64.1: Softnet runs its own network
+# and puts the host at 192.168.2.1. Discovered from the live interface where
+# possible, because assuming it is how this was wrong the first time -- the
+# proxy failed to bind an address that did not exist on this machine.
+WK_VM_SUBNET="${WK_VM_SUBNET:-192.168.2}"
+WK_VM_PROXY_PORT="${WK_VM_PROXY_PORT:-3128}"
+
+# The host's address on the guest bridge. Read from the interface when a guest
+# is up (authoritative), otherwise the documented default.
+_proxy_addr() {
+    [ -n "${WK_VM_PROXY_ADDR:-}" ] && { echo "$WK_VM_PROXY_ADDR"; return 0; }
+    local a
+    a=$(ifconfig 2>/dev/null | awk -v net="$WK_VM_SUBNET." '
+        $1 == "inet" && index($2, net) == 1 { print $2; exit }')
+    echo "${a:-${WK_VM_SUBNET}.1}"
+}
+WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 
 # The golden base gets the full envelope, because provisioning it ends in a
 # complete WebKit build (see _prebuild_base) rather than just a clone.
@@ -224,6 +255,87 @@ t_start() {
     _boot "$v" 180
 }
 
+# The tart flags that confine a guest's egress.
+#
+# --net-softnet-block=0.0.0.0/0 is default-deny; the single --net-softnet-allow
+# is the host, where wk-proxy listens. Longest-prefix-match wins in Softnet and
+# a /32 beats the /0, so this is "nothing except the proxy".
+_softnet_flags() {
+    if [ -n "${WK_VM_UNFILTERED:-}" ]; then
+        warn "WK_VM_UNFILTERED=1 -- this guest gets the open network, with no egress filter"
+        return 0
+    fi
+    if [ ! -x "$WK_SOFTNET_BIN" ]; then
+        warn "softnet is not installed, so this guest's egress is NOT filtered.
+  Install it with:  ./setup --stage softnet   (needs a terminal for sudo)
+  Or set WK_VM_UNFILTERED=1 to say you meant it."
+        return 0
+    fi
+    printf '%s\n' --net-softnet \
+        "--net-softnet-block=0.0.0.0/0" \
+        "--net-softnet-allow=$(_proxy_addr)/32"
+}
+
+# The proxy the guest is allowed to reach: the same wk-proxy.py the containers
+# use, with the same allowlist, listening on TCP because a guest cannot see a
+# unix socket across the hypervisor boundary.
+#
+# Started on demand rather than at login. It binds to the vmnet gateway
+# address, and that interface exists only while a VM is running -- a launchd
+# agent at boot would simply fail to bind.
+_proxy_pidfile() { echo "$WK_VM_DIR/proxy.pid"; }
+
+_proxy_running() {
+    local pf; pf=$(_proxy_pidfile)
+    [ -f "$pf" ] && kill -0 "$(cat "$pf" 2>/dev/null)" 2>/dev/null
+}
+
+_start_host_proxy() {
+    [ -n "${WK_VM_UNFILTERED:-}" ] && return 0
+    _proxy_running && { debug "host proxy already running"; return 0; }
+
+    ensure_dir "$WK_VM_DIR"
+    local log="$WK_VM_DIR/proxy.log" addr i=0
+
+    # Wait for the address to actually exist before binding it. The guest
+    # bridge is created as the guest boots and its address is configured a
+    # moment later, so a proxy started the instant `tart ip` answers loses a
+    # race and dies with EADDRNOTAVAIL on an address that appears half a second
+    # afterwards.
+    addr=$(_proxy_addr)
+    while [ "$i" -lt 30 ]; do
+        ifconfig 2>/dev/null | grep -q "inet $addr " && break
+        sleep 0.5; i=$((i + 1))
+    done
+    if ! ifconfig 2>/dev/null | grep -q "inet $addr "; then
+        warn "the guest bridge never got address $addr; not starting the proxy"
+        return 1
+    fi
+
+    # WK_PROXY_UNIX=0: no unix socket here. That one is for containers, lives
+    # in the podman VM, and has nothing to do with this.
+    WK_PROXY_UNIX=0 \
+    WK_PROXY_TCP="$addr:$WK_VM_PROXY_PORT" \
+    WK_STORE="$WK_STORE" \
+    nohup /usr/bin/python3 "$WK_ROOT/container/proxy/wk-proxy.py" >"$log" 2>&1 &
+    echo $! > "$(_proxy_pidfile)"
+    disown 2>/dev/null || true
+
+    i=0
+    while [ "$i" -lt 20 ]; do
+        _proxy_running || break
+        grep -q "listening on $addr" "$log" 2>/dev/null && {
+            info "egress proxy on $addr:$WK_VM_PROXY_PORT"
+            return 0
+        }
+        sleep 0.5; i=$((i + 1))
+    done
+
+    warn "the host egress proxy did not start; the guest will have no egress at all
+  (Softnet denies everything except the proxy address). See $log"
+    return 1
+}
+
 # _boot <vm-name> <seconds> -- start a guest if it is not already up, and echo
 # its address once ssh answers. Shared by t_start and base provisioning, which
 # otherwise grow two subtly different copies of the same waiting logic.
@@ -237,13 +349,25 @@ _boot() {
         # nohup, not a bare `&`: the VM must outlive the command that started
         # it. A backgrounded child of `wk vm start` dies with the terminal,
         # which looks exactly like the VM crashing on boot.
-        nohup "$(_tart_bin)" run --no-graphics "$v" >"$runlog" 2>&1 &
+        # shellcheck disable=SC2046 -- deliberate word splitting of the flags.
+        nohup "$(_tart_bin)" run --no-graphics $(_softnet_flags) "$v" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
         info "booting $v (log: $runlog)"
     fi
 
+    # The default dhcp resolver works behind Softnet -- measured. Tart's
+    # documentation warns that the *arp* resolver does not, which is easy to
+    # over-read; the agent resolver also works but is slower to become
+    # available during boot, and using it here cost a 180 s timeout on a guest
+    # that had in fact started perfectly.
     ip=$(_tart ip "$v" --wait "$wait" 2>/dev/null | grep .) \
         || die "$v did not come up within ${wait}s; see $runlog"
+
+    # Only now can the proxy bind: the guest bridge, and the host address on
+    # it, come into existence with the first running guest. Starting it earlier
+    # fails with EADDRNOTAVAIL on an address that does not exist yet.
+    _start_host_proxy || true
+
     _wait_ssh "$ip" || die "$v is up at $ip but ssh never answered; see $runlog"
     echo "$ip"
 }
@@ -631,7 +755,8 @@ _provision_base() {
     info "provisioning the base VM (Xcode licence, WebKit checkout, Claude CLI)"
     rsync -az -e "ssh $(_ssh_opts)" \
         "$WK_ROOT/vm/provision-base.sh" "$WK_VM_USER@$ip:/tmp/provision-base.sh"
-    _ssh "$ip" "bash /tmp/provision-base.sh" || die "base provisioning failed"
+    _ssh "$ip" "env WK_VM_PROXY_ADDR=$(sh_quote "$WK_VM_PROXY_ADDR") WK_VM_PROXY_PORT=$(sh_quote "$WK_VM_PROXY_PORT") bash /tmp/provision-base.sh" \
+        || die "base provisioning failed"
 
     _prebuild_base "$ip"
 

@@ -6,6 +6,11 @@
 podman
 uidmap
 
+# The interactive shell. shell/bashrc execs zsh when it finds one and silently
+# stays in bash when it does not, so without this the two hosts quietly diverge:
+# macOS ships zsh as the system shell, Ubuntu does not ship it at all.
+zsh
+
 # Sources and caches
 git
 git-lfs

@@ -19,6 +19,11 @@ check_tool() {
     fi
 }
 
+# zsh is the macOS system shell and is expected at /bin/zsh, but shell/bashrc
+# execs it only if it finds one -- and it fails *silently* back to bash, so a
+# missing or unexecutable zsh looks like "my prompt is different today" rather
+# than like an error. On Ubuntu the same file is installed by host/linux/apt.txt.
+check_tool zsh       "zsh"       "it ships with macOS at /bin/zsh -- if this is missing, something is very wrong"
 check_tool podman    "podman"    "https://podman.io/docs/installation#macos (official .pkg, not brew)"
 check_tool git       "git"       "xcode-select --install"
 check_tool tailscale "Tailscale" "https://tailscale.com/download/macos"

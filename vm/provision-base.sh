@@ -113,6 +113,30 @@ else
         echo "warning: Claude CLI install failed; 'wk claude' will not work here" >&2
 fi
 
+# --- egress ---------------------------------------------------------------
+# The guest's only route out is the proxy on the host: Softnet denies
+# everything else. Nothing here resolves names itself -- the proxy does that,
+# on the other side of the boundary -- so no resolver is needed or wanted.
+#
+# Anything that speaks HTTP honours these. What does NOT is ssh, so `git push`
+# over ssh from inside a guest will not work; push over HTTPS, or do it from
+# the host. The Linux workspaces solve this with container/proxy/ssh-proxy.py
+# and the same trick would work here, but it is not wired up yet.
+WK_PROXY="${WK_VM_PROXY_ADDR:-192.168.64.1}:${WK_VM_PROXY_PORT:-3128}"
+for _f in "$HOME/.zprofile" "$HOME/.bash_profile"; do
+    if ! grep -q 'wk-tools: egress' "$_f" 2>/dev/null; then
+        cat >> "$_f" <<EOF
+# wk-tools: egress goes through the proxy on the host; Softnet denies the rest.
+export http_proxy=http://$WK_PROXY
+export https_proxy=http://$WK_PROXY
+export HTTP_PROXY=http://$WK_PROXY
+export HTTPS_PROXY=http://$WK_PROXY
+export no_proxy=localhost,127.0.0.1,::1
+export NO_PROXY=localhost,127.0.0.1,::1
+EOF
+    fi
+done
+
 # ~/.local/bin is not on the default macOS PATH, and `wk build` runs commands
 # through a login shell specifically so this file is read.
 if ! grep -q 'wk-tools: PATH' "$HOME/.zprofile" 2>/dev/null; then

@@ -78,11 +78,9 @@ one channel is a unix socket to an egress proxy running as an ordinary
 resolving into RFC1918 or the tailnet range. Nothing in the daily path needs a
 privilege: `wk` never calls `sudo` on Linux.
 
-**macOS: nftables in the podman VM.** Rootful podman on a bridge, with the
-policy in the forward chain. (That is the Linux VM the containers run inside —
-not the macOS VMs of the `vm` target below, which are a different thing.)
-That is the original design and what macOS is verified against;
-`docs/HANDOFF-macos-proxy.md` covers moving it to the proxy model.
+**macOS uses the same proxy**, running inside the podman VM as a `systemd
+--user` service. It used to be rootful podman plus nftables; that is gone, and
+`docs/HANDOFF-macos-proxy.md` records why.
 
 Linux does not copy the macOS design because it cannot. Rootless podman has no
 filterable forward path — its network helper re-emits container traffic from
@@ -106,14 +104,14 @@ from the host's config files, and both fail open.
 Tailscale ACLs are defence in depth, never the boundary: Tailscale's own
 documentation notes that ACLs "don't affect local network traffic".
 
-All of that describes the `container` target. **A macOS VM workspace gets none
-of it**, and implying otherwise would be the worst outcome here: a macOS guest
-has no shared network namespace to filter from outside, and `pf` inside it is
-writable by whatever runs as root there — which includes whatever you were
-sandboxing. Its boundary is the VM and its disposability: the host filesystem
-is unreachable by construction, and `wk rm` destroys the guest. That is the
-whole of it, and `wk claude` says so before it hands over control.
-
+A macOS VM workspace of the `vm` target is filtered too, by different means:
+Tart runs **Softnet**, a userspace packet filter, as a subprocess on the host,
+default-denying everything except the address where the same `wk-proxy.py`
+listens. The filter is outside the guest on purpose — `pf` inside it would be
+modifiable by whatever is being sandboxed. Softnet needs root, so it is
+installed SUID once at setup time; `wk` still never calls sudo. That path is
+implemented but not yet verified, and until `./setup --stage softnet` has run
+a guest's egress is unfiltered and `wk vm start` says so.
 
 Workstations are never sandboxed. They join the tailnet normally and keep full
 access to everything.
@@ -139,7 +137,7 @@ Every command runs against a target, behind one driver contract:
 | Target | Isolation | Notes |
 |---|---|---|
 | `container` | overlay + no network interface + no host mounts | the default |
-| `vm` | VM boundary only — **egress is not filtered** | Apple ports, Tart; 2 running guests per host |
+| `vm` | VM + Softnet default-deny + the same proxy | Apple ports, Tart; 2 running guests per host |
 
 | `remote` | **none** | shared build boxes; polite, no containers |
 
@@ -148,11 +146,6 @@ There is no `local` target: work never runs directly on a workstation.
 A workspace remembers the target it was created with, so only `wk new` ever
 needs `--target`. On macOS that also decides whether a command is forwarded
 into the podman VM at all: only container workspaces live there.
-
-The macOS VM target is a genuinely weaker boundary than the other two claim —
-a macOS guest cannot be firewalled from outside, so the isolation is the VM and
-its disposability, not the network. [docs/macos-vm.md](docs/macos-vm.md) is
-explicit about it, and so is `wk claude`.
 
 Shared build machines are treated as someone else's machine too — job count
 comes from live load average, builds run at `nice 19`, and a `flock` stops two

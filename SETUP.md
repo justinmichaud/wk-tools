@@ -292,10 +292,11 @@ Three limits to know about:
   the two cannot run at once. `wk vm start` refuses with the numbers and tells
   you what would fit.
 
-> **A macOS workspace is not sandboxed the way a Linux one is.** The host
-> filesystem is unreachable and the guest is disposable, but egress is *not*
-> filtered — a macOS guest cannot be firewalled from outside. `wk claude` warns
-> before it starts.
+> **A guest's egress filter needs one extra step.** Run
+> `./setup --stage softnet` (it needs a terminal for sudo) to install Softnet,
+> which default-denies the guest's network on the host side and leaves only the
+> `wk-proxy` address reachable. Until then a guest has the open network, and
+> `wk vm start` says so each time.
 
 ---
 

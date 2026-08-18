@@ -24,6 +24,7 @@
 #   t_start / t_stop   lifecycle, for targets that have one
 #   t_cores/t_mem_mb   the resources the target actually has
 #   t_store_init       create the host-side directories this target needs
+#   t_ready            block until a new workspace finished initialising
 #
 # t_cores/t_mem_mb are separate from lib/resources.sh on purpose. A build has
 # to be sized from the memory of the machine it runs on, and for a vm target
@@ -40,6 +41,11 @@ t_needs_base() { return 0; }
 t_start()      { :; }
 t_stop()       { :; }
 t_store_init() { store_init; }
+
+# Wait until a freshly created workspace is actually usable, and fail if it
+# never gets there. Defaults to "immediately ready", which is true for targets
+# whose creation is synchronous.
+t_ready()      { :; }
 t_cores()      { envelope_cores; }   # t_cores <name>
 t_mem_mb()     { envelope_mem_mb; }  # t_mem_mb <name>
 

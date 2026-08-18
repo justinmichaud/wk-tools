@@ -424,11 +424,30 @@ new_home = ('    # wk: the host home directory is not the workspace\'s business.
 if old_home in src and "not the workspace's business" not in src:
     src = src.replace(old_home, new_home, 1)
 
+# This one needs an `if`, not the `||` prefix the other two use, and the
+# difference is not cosmetic. The original line is itself a compound:
+#
+#     [ -d ... ] && podman_argument+=(...)
+#
+# and `||` and `&&` have equal precedence in shell, left to right. So
+# `guard || [ -d ... ] && mount` parses as `(guard || [ -d ... ]) && mount`:
+# when --isolated IS set the guard succeeds, the whole left side is true, and
+# the mount is added -- the exact opposite of what the gate is for.
+#
+# The symptom is indirect enough to be worth writing down. The mount makes
+# podman create /home/<user>/.config inside the container as container-root,
+# which under keep-id is an unmapped subordinate uid on the host. The
+# workspace user then cannot chmod its own ~/.config, the helix install in
+# firstrun.sh fails on it, `set -e` aborts the rest of firstrun, and the
+# workspace comes up with no lldb config and no shell rc -- while wkdev-init
+# carries on and reports success.
 old_sysd = '    [ -d "${HOME}/.config/systemd/user" ] && podman_argument+=("--mount" "type=bind,source=${HOME}/.config/systemd/user,destination=/home/${container_user_name}/.config/systemd/user,rslave")'
 if old_sysd in src and "isolated-systemd-user" not in src:
     src = src.replace(old_sysd,
         '    # wk: isolated-systemd-user -- writing host unit files is a host escape.\n'
-        '    argsparse_is_option_set "isolated" || \\\n' + old_sysd, 1)
+        '    if ! argsparse_is_option_set "isolated"; then\n'
+        '    ' + old_sysd + '\n'
+        '    fi', 1)
 
 # ${XDG_RUNTIME_DIR} at /host/run: the session bus, the keyring socket, the
 # pipewire sockets and whatever else the session happens to keep there.

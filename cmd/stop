@@ -61,12 +61,15 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     fi
 fi
 
-running=$(_in_machine 'sudo podman ps --filter "name=^wk-" --format "{{.Names}}"' || true)
+# Plain podman, not sudo: workspaces are rootless containers owned by the
+# machine's own user now. `sudo podman` looks at root's storage, which is empty
+# -- so this reported "no running containers" while two were running.
+running=$(_in_machine 'podman ps --filter "name=^wk-" --format "{{.Names}}"' || true)
 if [ -n "$running" ]; then
     printf '%s\n' "$running" | sed 's/^/  stopping /' >&2
     # A build mid-flight gets SIGTERM and then SIGKILL. ccache and the overlay
     # are both crash-safe, so the worst case is recompiling the current file.
-    _in_machine 'sudo podman stop --time 30 $(sudo podman ps --filter "name=^wk-" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
+    _in_machine 'podman stop --time 30 $(podman ps --filter "name=^wk-" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
     info "stopped $(printf '%s\n' "$running" | wc -l | tr -d ' ') container(s)"
 else
     info "no running containers"

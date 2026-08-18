@@ -327,22 +327,47 @@ async def main():
     sock_dir = os.path.join(runtime, "wk")
     sock_path = os.path.join(sock_dir, "proxy.sock")
 
-    os.makedirs(sock_dir, mode=0o700, exist_ok=True)
-    if os.path.exists(sock_path):
-        os.unlink(sock_path)
-
     proxy = Proxy(Policy(store))
-    server = await asyncio.start_unix_server(proxy.handle, path=sock_path)
-    # The workspace runs as the same uid (--userns keep-id), so 0600 is enough
-    # and is the tightest thing that works.
-    os.chmod(sock_path, 0o600)
+    servers = []
 
-    log(f"listening on {sock_path}")
+    # A unix socket for containers, which have no network interface at all and
+    # reach this only through a bind-mounted socket. Creating its directory is
+    # part of the unix branch, not preamble: a TCP-only run (the macOS host,
+    # serving guest VMs) has no runtime directory to make and would die trying.
+    if os.environ.get("WK_PROXY_UNIX", "1") != "0":
+        os.makedirs(sock_dir, mode=0o700, exist_ok=True)
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+        servers.append(await asyncio.start_unix_server(proxy.handle, path=sock_path))
+        # The workspace runs as the same uid (--userns keep-id), so 0600 is
+        # enough and is the tightest thing that works.
+        os.chmod(sock_path, 0o600)
+        log(f"listening on {sock_path}")
+
+    # A TCP socket for macOS guest VMs, which cannot see a unix socket across
+    # the hypervisor boundary. Their egress is default-denied by Softnet on the
+    # host except to this address, so this listener is the guest's only way
+    # out -- the same structural position the unix socket holds for a
+    # container, reached differently.
+    #
+    # Bind address is explicit and never 0.0.0.0: this speaks for a policy
+    # boundary, and a proxy listening on every interface is an open relay for
+    # anything else that can reach the machine.
+    tcp = os.environ.get("WK_PROXY_TCP")
+    if tcp:
+        host, _, port = tcp.rpartition(":")
+        if not host:
+            raise SystemExit("WK_PROXY_TCP must be <address>:<port>, not just a port")
+        servers.append(await asyncio.start_server(proxy.handle, host=host, port=int(port)))
+        log(f"listening on {host}:{port} (guest VMs)")
+
+    if not servers:
+        raise SystemExit("no listener configured (WK_PROXY_UNIX=0 and no WK_PROXY_TCP)")
+
     log(f"allowlist: {', '.join(sorted(ALLOWED_HOSTS))} (+ pi-hosts from {store})")
     sd_notify("READY=1")
 
-    async with server:
-        await server.serve_forever()
+    await asyncio.gather(*(s.serve_forever() for s in servers))
 
 
 if __name__ == "__main__":

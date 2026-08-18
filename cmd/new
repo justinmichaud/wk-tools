@@ -41,6 +41,15 @@ fi
 
 t_create "$NAME" "$BASE"
 
+# Creation can be asynchronous, and a workspace that is half-initialised looks
+# exactly like a working one until the first thing that needs the missing part.
+if ! t_ready "$NAME"; then
+    warn "workspace '$NAME' was created but its initialisation did not complete.
+  It is usable, but things set up at first start -- the push keys, the Claude
+  CLI, the lldb config, the shell rc -- may be missing. The failing output is
+  above; 'wk rm $NAME && wk new $NAME' retries from scratch."
+fi
+
 # Remember the choice. Every later command -- and, on macOS, the decision about
 # whether to forward into the podman VM at all -- resolves the target from here
 # rather than making the user restate it.

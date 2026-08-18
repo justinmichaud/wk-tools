@@ -59,28 +59,60 @@ already in flight keeps working.
 
 ## Isolation: what you get, and what you do not
 
-Be precise here, because it is **not** what a Linux workspace gives you.
-
-| | Linux workspace | macOS workspace |
+| | container workspace | macOS VM workspace |
 |---|---|---|
 | host filesystem | unreachable | unreachable |
 | disposable | yes | yes |
-| filtered egress | **yes**, nftables | **no** |
+| filtered egress | yes — no interface at all, one unix socket to the proxy | yes — Softnet default-deny plus the same proxy |
 
-The Linux workspaces are confined by nftables in the podman VM's root network
-namespace — a namespace the workspace does not own and cannot modify. A macOS
-guest has no equivalent. There is no shared netns to filter from outside, and
-`pf` inside the guest is writable by anything running as root there, which
-includes whatever you were trying to sandbox.
+A container has no network interface: the boundary is structural, and the proxy
+is reached over a bind-mounted unix socket. A guest cannot be built that way —
+it is a whole operating system and needs an interface — so the filter goes in
+front of it instead.
 
-So a macOS workspace is a blast-radius boundary, not a network boundary.
-`wk claude` says so out loud before it hands over control, and the workspace
-`CLAUDE.md` says so too.
+**Softnet** is a userspace packet filter that Tart runs as a subprocess on the
+*host*. `wk vm start` passes `--net-softnet-block=0.0.0.0/0` (default deny) and
+a single `--net-softnet-allow` for the host address where `wk-proxy.py` is
+listening; longest-prefix-match wins, so a /32 beats the /0. The guest then
+reaches the network only through the same hostname allowlist a container uses,
+enforced somewhere the guest cannot reach.
 
-If you need the network closed as well, the honest options are host-side `pf`
-against the VM's interface, or a restrictive Tailscale ACL — remembering that
-Tailscale's own documentation says ACLs "don't affect local network traffic",
-so that one is defence in depth and never the boundary.
+That last part is the whole point, and it is why `pf` *inside* the guest was
+never an option: pf is modifiable by anything running as root in the guest, and
+"root in the guest" is exactly what is being sandboxed.
+
+Softnet needs root, because vmnet does, so it is installed SUID root once at
+setup time (`./setup --stage softnet`). That is the same trade the quiesce
+helper makes — a privilege granted deliberately to one audited path during
+setup, never taken in the daily path. `wk` itself still never calls sudo.
+
+Verified from inside a guest, which is the only way this is worth believing:
+
+| | |
+|---|---|
+| `github.com` through the proxy | HTTP 200 |
+| a host outside the allowlist, through the proxy | refused |
+| `github.com` **bypassing** the proxy | blocked by Softnet |
+| the LAN (192.168.1.0/24) | unreachable |
+| an external DNS resolver (1.1.1.1) | unreachable |
+
+Until `./setup --stage softnet` has been run, the guest has the open network
+and `wk vm start` says so every time.
+
+Two consequences to know about:
+
+- **The guest keeps a resolver, and a container does not.** Softnet's own DHCP
+  and DNS live at the same address the proxy does, and Softnet's policy is
+  per-CIDR with no port granularity -- so allowing the proxy allows Softnet's
+  resolver too. A guest can therefore still resolve names (external resolvers
+  are blocked; only Softnet's answers). That is a narrow channel a container
+  workspace does not have, since a container has no interface and no resolver
+  at all. Nothing else gets out: name resolution is not a data path, but it is
+  not *nothing*, and it should be written down rather than discovered.
+- **ssh does not go through an HTTP proxy**, so `git push` over ssh from inside
+  a guest will not work. Push over HTTPS, or push from the host. The Linux
+  workspaces solve this with `container/proxy/ssh-proxy.py`; the same trick
+  would work here and is not wired up yet.
 
 ## The two limits that actually bite
 

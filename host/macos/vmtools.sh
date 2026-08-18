@@ -76,7 +76,7 @@ fi
 # drift there is invisible and very hard to debug.
 #
 # What is regenerated: /opt/wk-tools, the SDK checkout and its patches, the
-# nftables policy, the podman network, installed packages.
+# egress proxy, the podman network, installed packages.
 #
 # What is NOT touched, because it is data rather than configuration:
 #   /var/lib/wk/git      the mirror        /var/lib/wk/ws       workspaces
@@ -141,48 +141,100 @@ else
     changed "SDK patches re-applied (result differs from before)"
 fi
 
-# --- firewall ----------------------------------------------------------------
-# The boundary itself, rebuilt from the repo each run so no rule can be added,
-# removed or reordered out from under it.
+# --- the egress proxy --------------------------------------------------------
+# The boundary, and the same one Linux uses. A systemd --user service owned by
+# `core`, so nothing in the daily path needs a privilege and nothing inside a
+# workspace can modify it: the workspace sees one unix socket and nothing else.
 #
-# The Pi addresses are the one piece of runtime state in the policy, so they
-# are kept outside it in /var/lib/wk/pi-hosts and replayed after the reload --
-# otherwise regenerating the firewall would silently cut off the test devices.
-# Same reasoning: the table is torn down and rebuilt every run so no rule can
-# be added or reordered out from under it, but an identical result is not news.
-debug "regenerating the workspace egress policy"
-_nft_before=$(_rsh 'sudo nft list table inet wk_egress 2>/dev/null | sha256sum | cut -d" " -f1' || echo none)
-_rsh 'sudo install -D -m 0644 /opt/wk-tools/container/nftables/wk-egress.nft /etc/nftables/wk-egress.nft'
-_rsh 'sudo grep -qxF '"'"'include "/etc/nftables/wk-egress.nft"'"'"' /etc/sysconfig/nftables.conf 2>/dev/null ||
-      echo '"'"'include "/etc/nftables/wk-egress.nft"'"'"' | sudo tee -a /etc/sysconfig/nftables.conf >/dev/null'
+# This replaces the nftables policy that used to live here. The reasons are in
+# docs/HANDOFF-macos-proxy.md, but the short version is that nftables required
+# rootful podman -- and under rootful podman a container escape is a root
+# escape -- while the proxy needs no privilege at all and expresses the policy
+# in hostnames rather than hand-refreshed CIDR lists.
+#
+# Lingering is already on for `core` in the podman machine, so the service
+# survives with nobody logged in.
+debug "installing the egress proxy in the machine"
 
-_rsh 'sudo nft delete table inet wk_egress 2>/dev/null || true
-      sudo nft -f /etc/nftables/wk-egress.nft
-      sudo systemctl enable --now nftables >/dev/null 2>&1 || true
-      if [ -s /var/lib/wk/pi-hosts ]; then
-          while read -r ip; do
-              [ -n "$ip" ] && sudo nft add element inet wk_egress pi_hosts "{ $ip }" 2>/dev/null || true
-          done < /var/lib/wk/pi-hosts
-      fi' || warn "could not load the egress policy; 'wk claude' will refuse to run until it is"
+_rsh 'mkdir -p ~/.config/systemd/user'
 
-# Seed the hostnames that have no published range, so a fresh machine can
-# install the Claude CLI without a manual gc run.
-_rsh 'for h in downloads.claude.ai; do
-        for ip in $(getent ahostsv4 "$h" 2>/dev/null | awk "{print \$1}" | sort -u); do
-          sudo nft add element inet wk_egress resolved_hosts "{ $ip }" 2>/dev/null || true
-        done
-      done' || true
+# %t expands to the user runtime directory, which is /run/user/501 here -- the
+# machine's `core` is uid 501, not the 1000 the old comments assumed.
+_unit=$(mktemp)
+cat > "$_unit" <<'UNIT'
+[Unit]
+Description=wk workspace egress proxy
+Documentation=file:///opt/wk-tools/container/proxy/wk-proxy.py
 
-if _rsh 'sudo nft list table inet wk_egress >/dev/null 2>&1'; then
-    _pis=$(_rsh 'cat /var/lib/wk/pi-hosts 2>/dev/null | wc -l' | tr -d ' ')
-    _nft_after=$(_rsh 'sudo nft list table inet wk_egress 2>/dev/null | sha256sum | cut -d" " -f1')
-    if [ "$_nft_before" = "$_nft_after" ]; then
-        unchanged "egress policy (${_pis} Pi address(es) allowed)"
-    else
-        changed "egress policy rebuilt (${_pis} Pi address(es) allowed)"
-    fi
+[Service]
+Type=notify
+NotifyAccess=all
+ExecStart=/usr/bin/python3 /opt/wk-tools/container/proxy/wk-proxy.py
+Environment=WK_STORE=/var/lib/wk
+Restart=on-failure
+RestartSec=2
+# Containers bind-mount %t/wk, so systemd must not delete it on stop: every
+# running workspace would be left holding a mount of a deleted directory, and
+# restarting the proxy would not fix it.
+RuntimeDirectory=wk
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target
+UNIT
+
+scp -q -P "$_ssh_port" -i "$_ssh_key" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "$_unit" "$_ssh_user@localhost:/home/core/.config/systemd/user/wk-proxy.service.new"
+rm -f "$_unit"
+
+if _rsh 'cmp -s ~/.config/systemd/user/wk-proxy.service.new ~/.config/systemd/user/wk-proxy.service'; then
+    _rsh 'rm -f ~/.config/systemd/user/wk-proxy.service.new'
+    unchanged "wk-proxy.service"
 else
-    warn "egress policy is NOT active"
+    _rsh 'mv ~/.config/systemd/user/wk-proxy.service.new ~/.config/systemd/user/wk-proxy.service &&
+          systemctl --user daemon-reload'
+    changed "installed wk-proxy.service in the machine"
 fi
 
-unset _ssh_port _ssh_key _ssh_user
+# Restarted only when the policy itself changed. An unconditional restart would
+# fit the "regenerate, never accumulate" rule, but it also drops every
+# workspace's egress for a moment, and ./setup is meant to be runnable while a
+# build is fetching something. The per-device part (pi-hosts) is re-read per
+# request and needs no restart at all.
+_policy_hash=$(cksum < "$WK_ROOT/container/proxy/wk-proxy.py" | awk '{print $1}')
+if _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
+    if [ "$(_rsh 'cat /var/lib/wk/.proxy-policy 2>/dev/null' || true)" = "$_policy_hash" ]; then
+        unchanged "wk-proxy running"
+    else
+        _rsh "systemctl --user restart wk-proxy.service && echo $_policy_hash > /var/lib/wk/.proxy-policy"
+        changed "restarted wk-proxy (policy changed)"
+    fi
+else
+    _rsh 'systemctl --user enable --now wk-proxy.service' >/dev/null 2>&1 \
+        || warn "could not start wk-proxy.service -- workspaces will have no egress"
+    if _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
+        _rsh "echo $_policy_hash > /var/lib/wk/.proxy-policy"
+        changed "started wk-proxy.service in the machine"
+    fi
+fi
+
+# --- retire the nftables policy ----------------------------------------------
+# Removed rather than left dormant. A workspace with an interface *and* a proxy
+# socket has the union of two policies, and the failure is silent: the packet
+# filter allows a connection the proxy would have refused, and nothing logs a
+# decision that was never asked for.
+if _rsh 'sudo nft list table inet wk_egress >/dev/null 2>&1'; then
+    _rsh 'sudo nft delete table inet wk_egress 2>/dev/null || true
+          sudo rm -f /etc/nftables/wk-egress.nft
+          sudo sed -i "/wk-egress.nft/d" /etc/sysconfig/nftables.conf 2>/dev/null || true'
+    changed "removed the old nftables egress policy (the proxy is the boundary now)"
+else
+    unchanged "no nftables egress policy (the proxy is the boundary)"
+fi
+
+unset _ssh_port _ssh_key _ssh_user _unit _policy_hash
