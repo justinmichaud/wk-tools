@@ -112,6 +112,17 @@ ensure_dir() {
 
 # --- misc --------------------------------------------------------------------
 
+# zed's CLI: the PATH entry when the user has run "Install CLI", otherwise the
+# binary inside the app bundle. A drag-installed Zed.app has no symlink and is
+# still installed -- cmd/doctor already accepts it as such, so the commands
+# that launch it have to as well.
+zed_cli() {
+    if have zed; then echo zed; return 0; fi
+    local c=/Applications/Zed.app/Contents/MacOS/cli
+    [ -x "$c" ] && { echo "$c"; return 0; }
+    return 1
+}
+
 # Names become container names, directory names and ssh host aliases, so keep
 # them to a conservative character set.
 valid_name() {

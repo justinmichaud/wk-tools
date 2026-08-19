@@ -312,6 +312,12 @@ reached through a ProxyJump), driven from the macOS host.
       (it used to forward into the podman VM and report containers only —
       which silently hid the `vm` target too)
 - [V] `wk enter <ws> <cmd>` runs the command in the remote checkout
+- [V] `wk enter <ws> --zed` and `wk new <ws> --target <machine> --zed` open the
+      checkout over ssh, and work when Zed.app is installed without the `zed`
+      CLI symlink (the app bundle's own cli is used)
+- [ ] `wk new --zed` warns instead of failing when zed is missing or the
+      workspace has no route yet (a vm before first boot) — the workspace is
+      created either way
 - [V] `wk claude` refuses a remote workspace outright
 - [V] `wk verify` refuses a remote workspace outright, rather than reporting a
       sandbox that does not exist
@@ -342,6 +348,20 @@ reached through a ProxyJump), driven from the macOS host.
 - [V] cleanup candidates are listed with their size and **declined** when there
       is no terminal; nothing is removed unattended
 - [ ] a cleanup candidate accepted at the prompt is actually removed
+- [V] `wk remote setup` works on a machine that has never seen wk: the tools
+      push creates the remote root itself (rsync makes the last path element
+      but not a missing parent — buildbox4, 2026-08-19)
+- [V] `wk remote rm <target>` undoes provisioning: the rc lines go from
+      `~/.zshrc`/`~/.bashrc`/`~/.bash_profile` (the machine's own rc content
+      untouched), the marker and machine-side conf go, the remote root goes
+      only after a size-attached confirm, and the local conf goes last
+- [V] `wk remote rm` then `wk remote setup` round-trips: the box comes back
+      identical (buildbox4, 2026-08-19)
+- [V] `wk remote rm` refuses while workspaces are still registered to the
+      target, naming them and `wk rm`
+- [V] `wk remote rm` against an unreachable machine offers to remove only the
+      local conf and says the machine keeps what it has; declining changes
+      nothing
 - [V] `wk` is on PATH on the box: `ssh box bash -lc 'wk ls'` works
       (a plain `ssh box wk ls` cannot, and needs root to fix)
 - [V] on the box: `wk ls`, `wk status`, `wk build`, `wk run`, `wk logs`,

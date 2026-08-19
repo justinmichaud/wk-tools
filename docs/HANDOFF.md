@@ -498,6 +498,18 @@ alias IP rather than each being named.
 Standing rule, not a task: every task above gets a line item in
 `docs/TESTING.md` as it is picked up — apply it inline.
 
+- **`docs/HANDOFF-workspace-state.md` — new 2026-08-19, and not filler: pick
+  it up before anything else that creates or gates on workspaces.** Workspace
+  lifecycle state (`absent | creating | present`, evidence-at-the-artifact),
+  readiness gating for `wk build` / `--zed` / the babysitter, staged resumable
+  creation, and one detach primitive — all in service of its **core
+  requirement: a `wk status` that stays reliable and clear across wk-tools
+  updates, OS updates, network drops and device corruption, and never asserts
+  what it did not just verify.** Grew out of the 2026-08-19 features
+  (`wk build --babysit`/`--branch`, `wk new --zed`, headless `wk claude`),
+  which are landed and listed there; the readiness/resumability work is the
+  open half. Machine-agnostic; whichever lane is idle first.
+
 - **`docs/HANDOFF-test-runner.md` — started 2026-08-19.** `wk selftest` exists:
   `--quick` is 13 hermetic checks (no workspace, no podman, no ssh), a bare run
   adds the remote section, and every check names the `docs/TESTING.md` line it

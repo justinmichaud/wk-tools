@@ -17,6 +17,11 @@
 # wk-tools clone, a 13 GB mirror that a system-wide one has made redundant,
 # workspaces nobody remembers. Removing any of that is a decision, so it is a
 # question, once, with the size attached -- never a silent tidy-up.
+#
+# wk remote rm <target> -- the inverse. Undoes everything setup left on the
+# machine (the rc lines, the marker, its conf, and -- asked, with the size --
+# the remote root) and forgets the target here. A machine that is already gone
+# can still be forgotten: unreachable degrades to removing the local conf.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,11 +31,91 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 
 ACTION="${1:-}"; TARGET="${2:-}"
-[ "$ACTION" = setup ] && [ -n "$TARGET" ] || die "usage: wk remote setup <target>
+case "$ACTION" in setup|rm) [ -n "$TARGET" ] || ACTION="" ;; esac
+[ -n "$ACTION" ] && [ -n "$TARGET" ] || die "usage: wk remote setup|rm <target>
     <target> is a machine: an ssh destination that already works, which
     becomes the target name. See docs/HANDOFF-linux-remote.md."
 
 require_name "$TARGET"
+
+# --- rm ------------------------------------------------------------------------
+# The mirror image of setup, in reverse order: the machine first (rc lines,
+# marker, its conf, then the root -- the destructive one -- with its size),
+# the local conf last, so an ssh failure partway leaves a target that can
+# still be re-run. Registered workspaces block it outright: `wk rm` is how a
+# workspace dies, and it needs the target conf this command is about to delete.
+if [ "$ACTION" = rm ]; then
+    target_kind "$TARGET" >/dev/null 2>&1 \
+        || die "no target conf for '$TARGET' ($(target_conf "$TARGET")) -- nothing to remove"
+    load_target "$TARGET"
+    [ "$WK_TARGET_KIND" = remote ] \
+        || die "'$TARGET' is a $WK_TARGET_KIND target -- this only removes remote machines"
+
+    regd=""
+    for f in "$(wk_state_dir)/targets"/*; do
+        [ -f "$f" ] || continue
+        [ "$(cat "$f")" = "$TARGET" ] && regd="$regd ${f##*/}"
+    done
+    [ -z "$regd" ] || die "workspaces are still registered to '$TARGET':$regd
+    Remove them first (wk rm <name>) -- that deletes their remote checkouts,
+    which needs the target this command was about to forget."
+
+    conf=$(target_conf "$TARGET")
+
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$WK_REMOTE_HOST" true 2>/dev/null; then
+        warn "cannot reach $WK_REMOTE_HOST -- the machine keeps whatever it has."
+        log  "  (re-run this when it is reachable to deprovision it properly)"
+        confirm "remove the local conf $conf anyway?" || die "aborted -- nothing was changed"
+        rm -f "$conf"
+        changed "removed $conf"
+        exit 0
+    fi
+
+    confirm "deprovision $WK_REMOTE_HOST and remove target '$TARGET'?" \
+        || die "aborted -- nothing was changed"
+
+    # Undo remote/provision.sh: the sourced rc line and its comment, the
+    # marker, the machine-side conf. The same grep-into-mktemp shape
+    # provisioning uses for stale lines, and -F for the same reason: these are
+    # paths, not patterns.
+    tools=$(t_tools '')
+    info "deprovisioning $WK_REMOTE_HOST"
+    _rsh_q "for rc in \"\$HOME/.zshrc\" \"\$HOME/.bashrc\" \"\$HOME/.bash_profile\"; do
+        [ -f \"\$rc\" ] || continue
+        grep -qF $(sh_quote "$tools/shell/bashrc") \"\$rc\" 2>/dev/null || continue
+        tmp=\$(mktemp)
+        grep -vF -e $(sh_quote "$tools/shell/bashrc") \
+                 -e '# wk-tools shared shell configuration' \"\$rc\" > \"\$tmp\" || true
+        mv \"\$tmp\" \"\$rc\"
+        echo \"\$rc\"
+    done
+    rm -f \"\$HOME/.wk-remote\" \"\$HOME/.config/wk/targets/$TARGET.conf\"" \
+        | while read -r rc; do changed "removed the wk-tools line from $rc"; done
+    changed "removed the marker and $TARGET.conf from $WK_REMOTE_HOST"
+
+    # The root: the pushed tools, the caches, the mirror, and any checkouts
+    # this workstation has no record of -- on a shared home those may belong
+    # to another box, which is why this is a question with the contents named,
+    # never part of the sweep above.
+    root=$(_remote_root)
+    if _rsh_q "test -d $(sh_quote "$root")" 2>/dev/null; then
+        others=$(t_list 2>/dev/null | cut -f1 | tr '\n' ' ' || true)
+        [ -z "${others// /}" ] || warn "the root still holds workspaces:$others
+  none are registered here -- a machine sharing this home may own them."
+        sz=$(_rsh_q "du -sh $(sh_quote "$root") 2>/dev/null | cut -f1" || echo '?')
+        if confirm "remove the remote root $root ($sz) from $WK_REMOTE_HOST?"; then
+            _rsh_q "rm -rf $(sh_quote "$root")"
+            changed "removed $root"
+        else
+            log "  left in place: $root"
+        fi
+    fi
+
+    rm -f "$conf"
+    changed "removed $conf"
+    info "'$TARGET' is gone -- 'wk remote setup $TARGET' brings it back"
+    exit 0
+fi
 
 # --- the conf ----------------------------------------------------------------
 # Offered rather than demanded. load_target would refuse an unknown target with

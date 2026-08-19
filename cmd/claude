@@ -83,5 +83,15 @@ info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boun
 # --dangerously-skip-permissions is the point of the sandbox: inside a
 # disposable workspace with no host filesystem, prompting for each edit buys
 # nothing and prevents unattended work.
-t_exec_tty "$NAME" env WK_WORKSPACE="$NAME" \
-    bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $(sh_quote "$@")"
+#
+# Headless when there is no terminal: `wk build --babysit`'s fix loop runs
+# this under nohup with `-p`, and t_exec_tty would demand a tty from a process
+# that owns none. Same sandbox checks either way -- that is why the babysitter
+# comes through here instead of running claude itself.
+if [ -t 0 ] && [ -t 1 ]; then
+    t_exec_tty "$NAME" env WK_WORKSPACE="$NAME" \
+        bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $(sh_quote "$@")"
+else
+    t_exec "$NAME" env WK_WORKSPACE="$NAME" \
+        bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $(sh_quote "$@")"
+fi

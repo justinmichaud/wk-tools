@@ -461,6 +461,10 @@ t_sync_tools() {
     fi
 
     debug "syncing wk-tools -> $WK_REMOTE_HOST"
+    # rsync creates the last path element but not a missing parent, and on a
+    # fresh machine `wk remote setup` gets here before anything has made the
+    # remote root -- t_create's mkdir has never run.
+    _rsh_q "mkdir -p $(sh_quote "$dest")"
     rsync -az --delete --exclude '.git/' \
         -e "ssh $(_ssh_opts)" \
         "$WK_ROOT/" "$WK_REMOTE_HOST:$dest/"

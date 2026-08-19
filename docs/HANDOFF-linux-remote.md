@@ -138,6 +138,16 @@ it found lying around. `flock` is the one hard requirement — without it two of
 your own builds cannot be serialised, which is the one thing a shared machine
 must not allow.
 
+**The inverse exists: `wk remote rm <target>`** (2026-08-19). It undoes
+everything setup left on the machine — the sourced rc lines (the machine's own
+rc content untouched), `~/.wk-remote`, the machine-side conf — asks separately,
+with the size, before removing the remote root (which may hold checkouts
+another box sharing the `$HOME` owns), and forgets the local conf last, so an
+ssh failure partway leaves a target that can be re-run. It refuses while
+workspaces are still registered to the target (`wk rm` needs the conf it was
+about to delete), and a machine that is already gone degrades to removing the
+local conf alone. Verified as a full rm→setup round trip on buildbox4.
+
 **zsh, without root.** `chsh` is the obvious way and the wrong one: it wants a
 password, LDAP often refuses it outright, and on these boxes `$HOME` is shared
 between several machines, so the login shell is one setting for all of them and
@@ -331,6 +341,9 @@ provision nothing there and should not start.
   The declining path is verified (no terminal, nothing removed); nobody has
   answered yes to one yet, because the only real candidate on this machine is
   the user's own older checkout and that is not a decision to make for them.
+  (The *command-level* removal path is a different thing and is done:
+  `wk remote rm <target>`, 2026-08-19, verified as a full rm→setup round trip
+  on buildbox4.)
 - **Delegated output interleaves.** `wk status`/`wk logs` against a machine
   return two streams over one connection, and the report's stdout rows and
   stderr headings can arrive out of order — the error lines before the
@@ -343,9 +356,13 @@ provision nothing there and should not start.
   at the prompt right after it. Questions now go through `_rsh_q` (`ssh -n`)
   and only `t_exec`, `t_exec_tty`, `t_wk` and the status write forward stdin.
   Anything added to this driver has to pick a side.
-- **buildbox4 is configured but not provisioned.** It answered the MOTD probe
-  and the reference check; `wk remote setup buildbox4` has never been run
-  against it, so it has no `~/.wk-remote` and no shell rc of ours.
+- **buildbox4 is provisioned (2026-08-19).** `wk remote setup buildbox4` runs
+  end to end — the first fresh machine it ever met, which found the bug it had
+  been hiding: rsync creates the last path element but not a missing parent,
+  so pushing wk-tools to `~/wk/tools` failed before anything had made `~/wk`
+  (`t_create`'s mkdir had always run first on devbox). `t_sync_tools` now
+  makes the directory itself. buildbox4 advertises no live shared repository
+  (its MOTD path is checked and stale), so a mirror under the root is used.
 - **A shared `$HOME` across boxes is warned about, not handled.** These
   machines say so in the MOTD, and it means a workspace name is the same
   directory on all of them — one build tree, which cannot hold two

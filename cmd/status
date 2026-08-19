@@ -27,7 +27,46 @@ report() {
     local ws="$1"
     report_one "$ws" build "$(wk_ws_dir "$ws")/build.status"
     [ -f "$(wk_ws_dir "$ws")/test.status" ] && report_one "$ws" test "$(wk_ws_dir "$ws")/test.status"
+    [ -f "$(wk_ws_dir "$ws")/babysit.status" ] && report_babysit "$(wk_ws_dir "$ws")/babysit.status"
     return 0
+}
+
+# The babysitter's line. Unlike a build, it has a pid of its own on this host
+# -- the detached loop -- so liveness is the process, not the age of a log: a
+# state that claims to be running with a dead pid is a crash, and saying
+# "fixing" about it would be the status file's word against the process table.
+report_babysit() {
+    local f="$1" state config model attempt max pid report
+    state=$(awk -F= '/^state=/{print $2}' "$f")
+    config=$(awk -F= '/^config=/{print $2}' "$f")
+    model=$(awk -F= '/^model=/{print $2}' "$f")
+    attempt=$(awk -F= '/^attempt=/{print $2}' "$f")
+    max=$(awk -F= '/^max=/{print $2}' "$f")
+    pid=$(awk -F= '/^pid=/{print $2}' "$f")
+    report=$(awk -F= '/^report=/{print $2}' "$f")
+
+    printf '%-18s %-16s %-10s babysit=%s' "" "" "" "${state:-none}"
+    [ -n "$config" ] && printf ' (%s, %s, fix %s/%s)' "$config" "$model" "$attempt" "$max"
+    echo
+
+    case "$state" in
+    starting|building|fixing)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            log "  alive: pid $pid -- follow: tail -f $(dirname "$f")/babysit.log"
+            bump 2
+        else
+            warn "  the babysitter died without writing an outcome -- see $(dirname "$f")/babysit.log"
+            bump 1
+        fi
+        ;;
+    gave-up|error|stalled)
+        warn "  report: $report"
+        bump 1
+        ;;
+    ok)
+        [ "${attempt:-0}" -gt 0 ] 2>/dev/null && log "  fixed $attempt time(s); report: $report"
+        ;;
+    esac
 }
 
 report_one() {

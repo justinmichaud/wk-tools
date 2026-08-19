@@ -25,9 +25,9 @@ load_target "$TARGET"
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
 if [ -n "$ZED" ]; then
-    have zed || die "zed is not on PATH"
+    Z=$(zed_cli) || die "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)"
     host=$(t_ssh_host "$NAME") || die "'$NAME' is not running"
-    exec zed "ssh://$host$(t_src "$NAME")"
+    exec "$Z" "ssh://$host$(t_src "$NAME")"
 fi
 
 # No `exec`: t_exec is a shell function, and exec can only replace the process

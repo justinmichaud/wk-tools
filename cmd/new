@@ -27,6 +27,11 @@ BASE=""
 # are two words and not one.
 ARCH=native
 
+# Open the fresh checkout in zed once it exists -- `wk new` then `wk enter
+# --zed` as one command, for the workflow where a workspace is created *in
+# order to* edit in it.
+ZED=""
+
 NAME="${1:-}"; shift || true
 require_name "$NAME"
 
@@ -35,6 +40,7 @@ while [ $# -gt 0 ]; do
         --target) TARGET="${2:-}"; shift 2 ;;
         --base)   BASE="${2:-}"; shift 2 ;;
         --arch)   ARCH=$(arch_canon "${2:-}"); shift 2 ;;
+        --zed)    ZED=1; shift ;;
         --sysroot)
             die "--sysroot is not implemented (docs/HANDOFF-cross-compile.md).
     It is also not this flag: --arch makes the workspace itself another
@@ -124,3 +130,16 @@ remote)
     log "  zed ssh://wk-$NAME$(t_src "$NAME")"
     ;;
 esac
+
+# The workspace exists either way by here; not opening an editor is a warning,
+# not a failure. A vm workspace has no route until it boots, so zed on it is
+# necessarily a second step.
+if [ -n "$ZED" ]; then
+    if ! Z=$(zed_cli); then
+        warn "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)"
+    elif ! _zhost=$(t_ssh_host "$NAME" 2>/dev/null); then
+        warn "'$NAME' is not reachable yet -- open it later with: wk enter $NAME --zed"
+    else
+        exec "$Z" "ssh://$_zhost$(t_src "$NAME")"
+    fi
+fi

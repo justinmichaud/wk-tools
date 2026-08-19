@@ -79,20 +79,80 @@ load_target "$TARGET"
 # nothing to get wrong per build. The flags it implies are in lib/arch.sh.
 ARCH=$(t_arch "$NAME")
 
-# Reserved, so that the day it exists it cannot be confused with the above.
-# --arch is what the workspace runs; --sysroot would be what a build targets
-# from a native workspace. They are different mechanisms with different flags
-# (see lib/arch.sh), and silently passing this through to build-webkit -- which
-# has no such option -- would fail 40 lines into a perl script.
-for _a in ${@+"$@"}; do
-    case "$_a" in
+# Our own flags are taken off the argument list; everything left is passed
+# through to the build untouched.
+#
+# --sysroot is reserved, so that the day it exists it cannot be confused with
+# --arch: --arch is what the workspace runs; --sysroot would be what a build
+# targets from a native workspace. They are different mechanisms with
+# different flags (see lib/arch.sh), and silently passing this through to
+# build-webkit -- which has no such option -- would fail 40 lines into a perl
+# script.
+BABYSIT=""; BRANCH=""; _PASS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --babysit)   BABYSIT="${WK_BABYSIT_MODEL:-haiku}"; shift ;;
+        --babysit=*) BABYSIT="${1#*=}"; shift ;;
+        --branch)    BRANCH="${2:-}"; [ -n "$BRANCH" ] || die "--branch needs a name"; shift 2 ;;
+        --branch=*)  BRANCH="${1#*=}"; shift ;;
         --sysroot|--sysroot=*)
             die "--sysroot is not implemented (docs/HANDOFF-cross-compile.md).
     This workspace is $ARCH; a --sysroot build would be a *cross* build from a
     native workspace, which is a different mechanism -- an aarch64 clang, -m32,
     CMAKE_LIBRARY_ARCHITECTURE and another rootfs to link against." ;;
+        *) _PASS+=("$1"); shift ;;
     esac
 done
+set -- ${_PASS[@]+"${_PASS[@]}"}
+
+# --babysit: hand the whole thing to a detached loop (build/babysit.sh) that
+# rebuilds after every fix a sandboxed Claude makes, and exit. nohup and no
+# terminal, so the loop belongs to nobody's ssh session; `wk status` renders
+# its state file and the report says afterwards what was done.
+#
+# Refused where `wk claude` would refuse -- the fixer runs through it, so the
+# sandbox rules are its rules -- and refused from inside a workspace, where
+# there is no host store for the state and no second sandbox to start.
+if [ -n "$BABYSIT" ]; then
+    in_workspace && die "--babysit runs on the host: it re-runs 'wk build' and starts
+    Claude in the workspace, neither of which works from in here"
+    case "$WK_TARGET_KIND" in
+        remote) die "refusing to babysit on a remote target: the fixer is Claude, and
+    a shared machine has no sandbox to run it in (the same rule as 'wk claude')" ;;
+        local)  die "already inside a workspace -- run the build and claude directly" ;;
+    esac
+
+    WS=$(wk_ws_dir "$NAME")
+    if [ -f "$WS/babysit.status" ]; then
+        _pid=$(awk -F= '/^pid=/{print $2}' "$WS/babysit.status")
+        _state=$(awk -F= '/^state=/{print $2}' "$WS/babysit.status")
+        case "$_state" in
+            starting|building|fixing)
+                [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null \
+                    && die "a babysitter is already running for '$NAME' (pid $_pid, $_state).
+    Follow it:  tail -f $WS/babysit.log" ;;
+        esac
+    fi
+
+    if [ -n "$DRY" ]; then
+        log "dry run -- nothing was built, no babysitter started."
+        log "  would run detached: build/babysit.sh $NAME $CONFIG $BABYSIT \\"
+        log "    ${WK_BABYSIT_ATTEMPTS:-5} '$BRANCH' $*"
+        exit 0
+    fi
+
+    ensure_dir "$WS" >/dev/null
+    nohup "$WK_ROOT/build/babysit.sh" "$NAME" "$CONFIG" "$BABYSIT" \
+        "${WK_BABYSIT_ATTEMPTS:-5}" "$BRANCH" ${@+"$@"} \
+        > "$WS/babysit.log" 2>&1 < /dev/null &
+    _pid=$!
+    info "babysitter started for $CONFIG in '$NAME' (pid $_pid, model $BABYSIT${BRANCH:+, branch $BRANCH})"
+    log  "  it survives this terminal; up to ${WK_BABYSIT_ATTEMPTS:-5} fixes, then it closes itself"
+    log  "  state:   wk status $NAME"
+    log  "  follow:  tail -f $WS/babysit.log"
+    log  "  report:  $WS/babysit.report"
+    exit 0
+fi
 
 # Shared boxes get the polite calculation: other people are building too.
 POLITE=""
@@ -136,6 +196,7 @@ if [ -n "$DRY" ]; then
     ARCH_LABEL=$(arch_label "$ARCH")
     log "dry run -- nothing was built."
     log "  workspace: $NAME ($TARGET, $(t_info "$NAME")${ARCH_LABEL:+, $ARCH_LABEL})"
+    [ -n "$BRANCH" ] && log "  branch:    $BRANCH (would be checked out first)"
     log "  config:    $CONFIG ($CFG_BUILDSYS${CFG_PORT:+ $CFG_PORT}${CFG_ARGS:+ $CFG_ARGS})"
     [ -n "$ARCH_LABEL" ] && log "  arch:      $ARCH_LABEL, native ($(arch_wrapper "$ARCH") $(arch_cflags "$ARCH"))"
     log "  src:       $(t_src "$NAME")"
@@ -143,6 +204,18 @@ if [ -n "$DRY" ]; then
     log "  jobs:      $JOBS (nice $NICE)"
     log "  would run: env ${CFG_ENV[*]} $(t_tools "$NAME")/build/build-in-target.sh $*"
     exit 0
+fi
+
+# The branch, before anything is recorded about this build. checkout first,
+# fetch only when the name is not already local -- a fetch per build would put
+# a network round trip in front of every offline rebuild.
+if [ -n "$BRANCH" ]; then
+    info "checking out '$BRANCH' in '$NAME'"
+    t_exec "$NAME" bash -c "cd $(sh_quote "$(t_src "$NAME")") && {
+        git checkout -q $(sh_quote "$BRANCH") 2>/dev/null ||
+        { git fetch -q origin $(sh_quote "$BRANCH") &&
+          git checkout -q $(sh_quote "$BRANCH"); }; }" \
+        || die "could not check out '$BRANCH' in '$NAME'"
 fi
 
 # Push the tooling in before anything else. A no-op for the container, which
