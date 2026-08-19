@@ -18,6 +18,55 @@ Profiling comes first of the four, deliberately: it is the least demanding
 consumer (it wants no-sandbox, not perf stability), so it proves the mechanism
 without also having to settle the storage question benchmarking raises.
 
+## State as of 2026-08-19, end of session — read this first
+
+**Proven on hardware, not just designed:**
+
+- The **one-shot USB boot** on the rpi5: `sudo vcmailbox 0x0003808b 4 4 0xf64`
+  then reboot. The stick booted (machine-id written, six ssh host keys generated,
+  NetworkManager state, cloud-init logs — all stamped at the boot minute). No
+  EEPROM write, nothing touched on the workstation's NVMe.
+- The **revert**, both ways: a power cycle and a self-reboot each land back on the
+  NVMe workstation, because `BOOT_ORDER=0xf461` reaches NVMe (6) before USB (4).
+  The perf stick can therefore stay plugged in permanently.
+- The **self-return watchdog**: fired at 420 s and handed the board back with
+  nobody touching it. This is what makes remote arming safe.
+- The **offline diagnostics channel**: a unit dumping radio state to the FAT
+  partition is what turned three blind attempts into one answer, and it is the
+  reason anything above is known rather than guessed.
+
+**Not working, and deliberately parked:** WiFi on the Raspberry Pi OS *test*
+image. Association failed for reasons specific to that distro's
+NetworkManager/netplan secret handling. The real image is Ubuntu-based, matching
+the workstation that connects to this AP on channel 52 with this exact radio, so
+the chase was stopped rather than finished.
+
+**Two claims made during this session and later disproven** — recorded so nobody
+re-derives them: the tailnet ACL was *not* blocking SSH to the rpi5 (that was
+WiFi range; `tailscale ping --icmp`, which is ACL-subject, pongs), and the
+regulatory domain was *not* blocking association (the workstation shows the
+identical `phy#0 country 99: DFS-UNSET` while connected on channel 52).
+
+**Hardware state at session end:** rpi5 is the workstation on `/dev/nvme0n1p2`,
+reachable over the tailnet, WiFi only, `eth0` down with no cable, and the test
+stick still attached with its image intact and armable. moose is WiFi-only with
+all three wired NICs at `carrier=0`. rpi4 and rpi3 are not on the tailnet. moose's
+BMC lives at **10.99.0.2** on the Librem 5's `bmc0` segment, not the stale
+192.168.1.41 in `~/.ssh/config`.
+
+**Next three actions, in order:**
+
+1. `wk image build` on an **Ubuntu** base (the only path to a reachable rpi5 perf
+   image, since that board is never on the LAN — see the topology section). It
+   must bake in: the driving machine's ssh key, the network profile, sshd enabled,
+   an identity marker, the self-return watchdog, the diag dump, **and no
+   first-boot resize-and-reboot step** (that step spends the one-shot).
+2. Re-run the one-shot with that image and confirm it comes up reachable; then
+   `perf_event_paranoid` and the JIT-dump environment, which is the profiling half
+   this whole step exists to unblock.
+3. `wk serve` plus `wk pi netboot-enable rpi4`, trying **proxy DHCP on the LAN**
+   before any cable.
+
 ## The headline: "netboot" is not one mechanism, and one machine cannot do it
 
 Three machines, three last miles, and they do not converge:
@@ -516,15 +565,20 @@ network traffic during boot *or* run, the same one-shot-and-revert behaviour,
 and the workstation install untouched. It also means moose only ever serves the
 rpi3 and rpi4.
 
-### The rpi3's direct cable is exactly what its boot ROM needs
+### The rpi3 needs a real option-43 DHCP reply — but not necessarily a cable
 
-The rpi3 is the one device that *requires* a real DHCP reply carrying option 43
-`"Raspberry Pi Boot"`, because its network boot lives in the boot ROM rather
-than an EEPROM bootloader — the one case where the "no second DHCP server" rule
-would have been a problem. A dedicated cable to moose removes it entirely:
-`dnsmasq` bound to that one interface owns a private segment, hands out DHCP
-with option 43 and serves TFTP, and nothing touches the house LAN. Use moose's
-`igb` port (`enP2p3s0`, plain 1GbE) rather than either `bnxt_en`.
+The rpi3 is the one device that *requires* a DHCP reply carrying option 43
+`"Raspberry Pi Boot"`, because its network boot lives in the boot ROM rather than
+an EEPROM bootloader, and it cannot be told to skip DHCP the way the Pi 4/5
+bootloader can. That looked like it forced a private segment.
+
+**It does not — see "The rpi5's Ethernet is for the private segment, never the
+LAN" below, which supersedes this paragraph.** `dnsmasq` in *proxy* mode supplies
+the PXE bits without assigning addresses, which the boot ROM's flow explicitly
+allows, so the house LAN works with no second address-assigning DHCP server. A
+private segment (a cable from the rpi5's `eth0`, or moose's `igb` port
+`enP2p3s0` — the plain 1GbE, not either `bnxt_en`) is the fallback if the boot
+ROM's DHCP quirks defeat proxy mode.
 
 The trap on this board is *not* booting, it is measuring: **on the Pi 3 the
 Ethernet is behind the USB controller** (LAN7515 on the 3B+), so network root
@@ -614,30 +668,65 @@ The ACL note added to SETUP.md §7 has been rewritten accordingly: the general
 caveat about tagged sources not matching `autogroup:member` is real and worth
 keeping, but the live policy already permits this traffic.
 
-### The rpi5's Ethernet is now free, so it can be the server
+### The rpi5's Ethernet is for the private segment, never the LAN
 
-A consequence of the rpi5 booting locally: its Ethernet port is no longer needed
-for its own boot, so it can serve the other two. That is the "any free device
-serves" requirement satisfied with hardware that is already there, and it takes
-moose out of the loop entirely.
+Clarified by the user 2026-08-19, and it is a constraint rather than a
+preference: **the rpi5 is never on the LAN.** Its WiFi is its only path to the
+house network and the tailnet, and its `eth0` exists to serve the other boards on
+a private segment. Only the rpi3 and rpi4 have LAN drops available.
 
-Three arrangements, depending on how much cable is acceptable:
+So the arrangement is:
 
-- **rpi3 direct to the rpi5's `eth0`.** dnsmasq bound to that one interface owns
-  a private segment and can hand out DHCP with option 43, which is the thing the
-  rpi3's boot ROM insists on. The rpi5 keeps reaching the LAN over WiFi, so
-  nothing is lost by giving its only port away.
-- **A cheap switch on the rpi5's `eth0`, with rpi3 and rpi4 both on it.** The
-  tidiest end state: one isolated benchmark segment, one DHCP+TFTP server, no
-  DHCP on the house LAN at all, and it is also the "isolated guest network"
-  SETUP.md §7 wants before `wk pi setup`.
-- **rpi4 over the house LAN instead**, served by the rpi5 over its WiFi link.
-  Works because the rpi4 skips DHCP entirely (`TFTP_IP` + static IP), so the
-  server only has to be routable, and the transfer is boot-time only.
+- **rpi4 over the house LAN**, served by the rpi5 across its WiFi link. The rpi4
+  skips DHCP entirely (`TFTP_IP` + static IP in its EEPROM bootloader config), so
+  the server only has to be reachable — and since the AP bridges the wireless and
+  wired halves of 192.168.1.0/24, server and client are on one L2 anyway. The
+  transfer is boot-time only. moose can serve this equally well; the roles are
+  interchangeable.
+- **rpi3: try proxy DHCP on the LAN first, and keep the private segment as the
+  fallback.** Correcting a claim made earlier in this session: a private segment
+  is *not* the only way. The boot ROM's documented flow includes an "(optional)
+  Receive DHCP proxy reply" step (`boot-net.adoc`), so `dnsmasq` in proxy mode
+  (`dhcp-range=<net>,proxy`) can supply the PXE bits and option 43 while the house
+  router keeps handing out addresses — no second address-assigning DHCP server,
+  no rogue-DHCP objection, no cable, and the rpi5 need not serve at all. If the
+  boot ROM's DHCP quirks defeat that, *then* fall back to a direct cable from the
+  rpi5's `eth0` with dnsmasq bound to that interface only.
 
-Whichever is used, the serving side is interchangeable with moose — same
-daemons, same files, and the service alias IP means the client's firmware does
-not care which machine is behind it.
+Two prerequisites specific to the rpi3, both worth knowing before it is powered
+up rather than after:
+
+- **Network boot on a Pi 3 needs an OTP bit programmed, and OTP is
+  irreversible.** `boot-net.adoc`: add `program_usb_boot_mode=1` to `config.txt`,
+  reboot from a working SD card, then confirm `vcgencmd otp_dump | grep 17:`
+  reads `3020000a`. A one-way door on that board — decide deliberately.
+- **A plain 3B cannot use a TFTP server on a different subnet** ("Fixed in
+  Raspberry Pi 3 Model B+"), along with broken DHCP relay and several other boot
+  ROM bugs fixed only in the B+. Same-subnet serving satisfies either model — the
+  LAN and a private segment both qualify — but **which model this board is has
+  not been established**, and it decides how much of `boot-net.adoc`'s "Known
+  problems" list applies.
+
+Whichever is used, the serving side is interchangeable with moose — same daemons,
+same files, and the service alias IP means the client's firmware does not care
+which machine is behind it.
+
+Two consequences that follow directly, and the first one is the sharp one:
+
+- **The rpi5's perf image must work over WiFi. There is no wired fallback for
+  that board, ever.** So "the image comes up reachable" is not satisfiable with a
+  cable here, and image WiFi is a first-class requirement of `wk image build`
+  rather than a convenience — which also means the RPi OS WiFi failure could not
+  have been sidestepped by plugging something in. The way through is the Ubuntu
+  base whose network stack is already proven on this exact board and AP. Until an
+  image's WiFi is proven, the only console independent of the network is the
+  UART: `BOOT_UART=1` is already set in this board's EEPROM.
+- **A serving board may have to route, not just serve.** Netboot itself needs
+  nothing beyond the private segment, but `wk pi setup` installs tailscale on the
+  served device, and that needs egress — so the rpi5 needs IP forwarding and NAT
+  from its `eth0` segment out over WiFi for the rpi3 to reach the tailnet at all.
+  Worth building into `wk serve` as an explicit flag rather than discovering it
+  when `wk pi setup rpi3` cannot reach the control plane.
 
 ### First mechanism test, 2026-08-19 — and the lesson it taught
 
@@ -680,13 +769,59 @@ for `rfkill unblock` and the country), `network-config` (netplan v2 wifi with
 SSID and PSK), and `meta-data` (whose `instance-id` must change, or cloud-init
 sees an instance it has already configured and skips every module).
 
+### Attempts 2 and 3, and where the WiFi chase ended
+
+Attempt 2 (cloud-init seed: `user-data` + `network-config` + bumped
+`instance-id`) worked as a *mechanism*: cloud-init ran every module, `bootcmd`
+succeeded, `write_files` installed the watchdog, and it rendered netplan with
+`renderer: NetworkManager`. `wlan0` still never associated.
+
+Attempt 3 added the thing that should have existed first — **an offline
+diagnostics channel**: a unit that dumps `rfkill`, `iw reg`, `nmcli`
+device/connection/scan state, `ip`, and the NetworkManager journal to
+`/boot/firmware/wk-diag.txt` 75 s into the boot, where the host can read it even
+though the board is unreachable. It worked, and it ended the guessing:
+
+- **rfkill: not blocked.** Soft and hard both `no`.
+- **The regulatory theory was wrong.** The image had `global country CA` with
+  `phy#0 country 99: DFS-UNSET` — and so does **the workstation, which is
+  connected to this AP on channel 52 right now**. Identical regulatory state,
+  one works. So neither the country nor DFS was ever the blocker, and
+  `cfg80211.ieee80211_regdom=CA` in `cmdline.txt` was a fix for a non-problem.
+- **The AP was visible the whole time** — `Ducky0138` on channel 52 (signal 67)
+  and again on 100, so scanning was never the issue.
+- **What actually failed was association, twice over, for two different
+  reasons.** NM had *two* competing profiles for the one SSID: the keyfile
+  copied from the workstation, which failed with `no secrets: No agents were
+  available for this request`, and cloud-init's netplan-rendered one, which had
+  its secret ("secrets exist. No new secrets needed") and then looped
+  `associating -> disconnected` until "association took too long".
+
+The keyfile failure is a finding worth keeping: **on Debian/RPi OS trixie an NM
+keyfile is not authoritative.** NM's netplan integration rewrote the dropped-in
+profile as `/etc/netplan/90-NM-<new-uuid>.yaml` under a *different* uuid, and the
+secret did not survive the round trip. Copying a workstation's
+`.nmconnection` into an image is therefore not a reliable way to give it
+credentials on this distro; the cloud-init `network-config` seed is.
+
+**Chase stopped there, deliberately.** The remaining candidates — netplan/NM
+secret round-tripping, or the Pi 5 nvram variant this image selects — are
+properties of *Raspberry Pi OS as a test vehicle*, and the real image will be
+built from the same Ubuntu base as the workstation, which demonstrably drives
+this radio onto this AP. Two conclusions for the deliverable instead: prefer
+**wired** for anything that must be reachable mid-test, and build the perf image
+from the base whose network stack is already proven on the hardware.
+
 Three things this bought, all worth more than the test itself:
 
-1. **An image that cannot be reached must return the machine by itself.** Add a
-   self-return watchdog to every image: a oneshot that reboots after N minutes
-   unless a marker (say `/run/wk-keep-running`) has been created by whoever
-   logged in. Without it, one bad image strands a machine until someone walks to
-   it — and the whole point of the one-shot was that undo is a command.
+1. **An image that cannot be reached must return the machine by itself** — and
+   this is now proven, not just proposed. The self-return watchdog fired at 420 s
+   on attempt 3 and handed the board back to the NVMe workstation with nobody
+   touching it. Every image gets one: a oneshot that reboots after N minutes
+   unless a marker (`/run/wk-keep-running`) has been created by whoever logged
+   in. Note the version that does *not* work: with systemd's default
+   `TimeoutStartSec=90`, a `Type=oneshot` unit sleeping longer than that is
+   killed before it can fire — set `TimeoutStartSec=infinity`.
 2. **`wk image build` must set the WLAN regulatory country** and `rfkill unblock`
    before NetworkManager starts, not rely on a distro's first-run wizard.
 3. **A console is the only ground truth when the network is the thing that
@@ -1021,3 +1156,93 @@ workstation too, which is the exact split this design exists to preserve.
 **The Mac's boot volume cannot be switched by script.** If a plan depends on
 "reboot the MBP into the benchmark install remotely", the plan is wrong — see
 the tier-2 note above. Say so in the docs instead of building it.
+
+## Appendix: the mechanism test, reproducible from this file alone
+
+Recorded because the scripts that ran it were scratch files, and because the next
+person needs the *shape* rather than the scripts — `wk image build` and
+`wk pi flash` are the reproducible versions, and these are what they must
+encapsulate.
+
+**1. Write a throwaway image to the stick** (on the board itself; `/` has 219 GB
+free, `/boot/firmware` has only 366 MB and is the wrong place):
+
+```sh
+cd /var/tmp
+curl -fL -o rpios.img.xz https://downloads.raspberrypi.com/raspios_lite_arm64_latest
+sudo umount /run/media/$USER/*            # the stick automounts
+xz -dc rpios.img.xz | sudo dd of=/dev/sda bs=4M conv=fsync
+sudo partprobe /dev/sda                   # -> sda1 vfat bootfs, sda2 ext4 rootfs
+```
+
+**2. Seed it through cloud-init**, which is what Raspberry Pi OS trixie actually
+honours — three files on the FAT partition, no rootfs surgery. `/boot/firmware/`
+is the NoCloud seed dir:
+
+- `network-config` — netplan v2 (`version: 2`, `wifis: wlan0: access-points:` with
+  SSID and PSK, plus `ethernets: eth0: dhcp4: true` so a cable Just Works).
+  Read the SSID and PSK out of the board's own
+  `/run/NetworkManager/system-connections/*.nmconnection` **on the board**, so the
+  credential never travels through a log or an agent's context.
+- `user-data` — `#cloud-config` with a user carrying the driving machine's public
+  key, `hostname`, and `write_files` for the two units below.
+- `meta-data` — **bump `instance-id`**, and `rm -rf /var/lib/cloud` on the rootfs.
+  Without both, cloud-init recognises an instance it has already configured and
+  skips every module.
+
+**3. The two units every image needs.** Self-return, so an unreachable image hands
+the machine back by itself — note `TimeoutStartSec=infinity`, because systemd's
+default 90 s start timeout kills a `Type=oneshot` that sleeps longer than that
+before it can ever fire:
+
+```ini
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'sleep 420; [ -f /run/wk-keep-running ] || systemctl reboot'
+TimeoutStartSec=infinity
+```
+
+And the diagnostics dump, written where the host can read it offline — this is
+the single highest-value thing in the whole test:
+
+```ini
+[Unit]
+After=NetworkManager.service
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+ExecStart=/bin/sh -c 'sleep 75; { date -Is; rfkill list; iw reg get; \
+  nmcli -f DEVICE,TYPE,STATE,CONNECTION dev; nmcli -f NAME,TYPE,DEVICE con show; \
+  nmcli -f SSID,CHAN,SIGNAL,SECURITY dev wifi list; ip -br addr; \
+  journalctl -u NetworkManager --no-pager | tail -60; } \
+  > /boot/firmware/wk-diag.txt 2>&1; sync'
+```
+
+Make the journal persistent too (`mkdir -p /var/log/journal` plus
+`Storage=persistent`); the stock image's journal is volatile, so the first
+attempt's logs were simply gone.
+
+**4. Arm and go.** The mailbox reply is the confirmation — `0x80000000` in the
+second word means the request succeeded, and `0x80000004` marks the tag processed:
+
+```sh
+sudo vcmailbox 0x0003808b 4 4 0xf64      # USB(4) -> NVMe(6) -> restart(f), one-shot
+sudo systemd-run --on-active=3 --unit=oneshot-reboot /sbin/reboot
+```
+
+Arming with the *current* `BOOT_ORDER` (`0xf461` here) is a safe no-op that proves
+the call works without changing what the next boot does.
+
+**5. Verify without needing the board reachable.** After it returns, mount the
+stick from the workstation and look for artifacts only a real boot produces:
+
+```sh
+sudo mount /dev/sda2 /mnt/r
+sudo cat /mnt/r/etc/machine-id            # populated  = systemd ran
+sudo ls /mnt/r/etc/ssh/ | grep -c ssh_host_   # 6       = first-boot services ran
+sudo mount /dev/sda1 /mnt/b && sudo cat /mnt/b/wk-diag.txt
+```
+
+That sequence is what proved the one-shot works while the board was unreachable,
+and it is why the design does not depend on the network to tell you whether the
+network failed.
