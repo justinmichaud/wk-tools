@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 #
-# wk test <workspace> [--layout] [--config C] [paths...]
+# wk test <workspace> [--layout] [--config C] [--lldb [web|ui]] [paths...]
 #
 # Runs the JSC or layout test suites with the same reportability as `wk build`:
 # a watchdog that detects a silent run rather than waiting on it, a status file
 # `wk status` can read, and a summary that says what happened instead of leaving
 # a few hundred KB of output to interpret.
+#
+# --lldb turns all of that off and debugs one layout test instead: see
+# "debugging one test" below for why a debug run cannot share any of it.
 #
 # Layout tests default to software rendering. There is no GPU inside the
 # workspace on macOS -- the podman VM has no /dev/dri to pass through -- so
@@ -37,11 +40,18 @@ CONFIG="${WK_CONFIG:-$(default_config)}"
 SUITE=jsc
 GPU=""
 DRY=""
+LLDB=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --config)  CONFIG="${2:-}"; shift 2 ;;
         --layout)  SUITE=layout; shift ;;
         --gpu)     GPU=1; shift ;;
+        # Debug one test rather than report on many -- see "a debug run is a
+        # different run" below. `--lldb ui` takes its mode as a separate word,
+        # so it has to be consumed here or the test path would swallow it.
+        --lldb)    LLDB=web
+                   case "${2:-}" in ui|web) LLDB="$2"; shift ;; esac
+                   shift ;;
         # Print the resolved run and stop, for the same reason `wk build` has it:
         # a suite takes long enough that "did it resolve the right tree" needs
         # an answer that is not a full run.
@@ -84,9 +94,11 @@ JOBS=$(build_jobs)
 # whether you want it to or not. Setting them there would be cargo cult.
 if [ "$CFG_BUILDSYS" = xcode ]; then
     RENDER_ENV=""
+    RENDER_DESC="the guest's GPU"
     [ -n "$GPU" ] && warn "--gpu has no meaning for an Apple port; ignoring"
 elif [ -n "$GPU" ]; then
     RENDER_ENV=""
+    RENDER_DESC=GPU
     info "using the real GPU (requires /dev/dri in the workspace)"
     # /dev/dri being there is not the whole story: if the seat is a BMC or
     # software session, the display path is not the GPU's and nothing further
@@ -94,6 +106,37 @@ elif [ -n "$GPU" ]; then
     session_mode_warn || true
 else
     RENDER_ENV="LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1"
+    RENDER_DESC="software rendering"
+fi
+
+# --lldb is a layout-test flow: the JSC suite runs a shell, and `wk run --lldb`
+# already debugs that. It also needs a process name to wait for, which is only
+# known for the Apple ports (build/configs.sh).
+#
+#   --lldb, --lldb web   the web process the test runs in -- its JS, its layout,
+#                        its rendering, and so nearly always the right one
+#   --lldb ui            WebKitTestRunner itself, for the driver side: the
+#                        protocol, the injected bundle, process launching
+if [ -n "$LLDB" ]; then
+    [ "$SUITE" = layout ] || die "--lldb debugs a layout test; for jsc use 'wk run --lldb'"
+    case "$LLDB" in
+        web) ATTACH=$(config_web_process_name) ;;
+        ui)  ATTACH=$(config_test_runner_name) ;;
+    esac
+    [ -n "$ATTACH" ] || die "--lldb is only wired up for the Apple ports (docs/HANDOFF-linux-minibrower.md)"
+    [ $# -gt 0 ] || die "--lldb needs a test to debug, e.g. fast/dom/Element/id-attribute.html"
+    # One driver, so there is exactly one process of either kind to catch.
+    JOBS=1
+
+    # Check the test exists before handing the terminal to a debugger. A
+    # mistyped path is not an error the debug flow can report: the run behind
+    # lldb fails in a log nobody is looking at, while lldb waits for a process
+    # that will now never start -- so the whole thing reads as a hang.
+    for _t in "$@"; do
+        t_exec "$NAME" test -e "$SRC/LayoutTests/${_t%%\?*}" -o -e "$SRC/${_t%%\?*}" 2>/dev/null \
+            || die "no such test in $NAME: $_t"
+    done
+    unset _t
 fi
 
 # The Apple configs no longer live where a bare run-webkit-tests would look for
@@ -112,12 +155,25 @@ jsc)
          --$lower $CFG_PORT --no-build --no-fail-fast --memory-limited $(sh_quote "$@")"
     ;;
 layout)
-    info "layout tests ($CONFIG, ${GPU:+GPU}${GPU:-software rendering}, $JOBS processes)"
+    info "layout tests ($CONFIG, $RENDER_DESC, $JOBS processes)"
+    # A debug run is a different run, not the same run with a flag on it:
+    #
+    #   --no-timeout       the runner's own per-test timeout is 30 s, and a
+    #                      process stopped at a breakpoint is indistinguishable
+    #                      from one that hung -- it kills the driver mid-session
+    #   --additional-env-var  the pause that gives lldb time to attach; it has
+    #                      to reach the web process, which is a child of the
+    #                      driver rather than of this shell
+    #
     # --no-retry-failures: a retry doubles the runtime and hides flakiness,
     # which is the opposite of what an automated check wants.
+    DEBUG_FLAGS=""
+    [ -n "$LLDB" ] && DEBUG_FLAGS="--no-timeout"
+    # The pause is the web process's own, and only that process reads it.
+    [ "$LLDB" = web ] && DEBUG_FLAGS="$DEBUG_FLAGS --additional-env-var=$(config_web_process_pause_env)"
     CMD="cd $SRC && $OUT_ENV $RENDER_ENV $WRAP nice -n 10 Tools/Scripts/run-webkit-tests \
          --$lower $CFG_PORT --no-build --no-retry-failures \
-         --child-processes=$JOBS $(sh_quote "$@")"
+         --child-processes=$JOBS $DEBUG_FLAGS $(sh_quote "$@")"
     ;;
 *) die "unknown suite: $SUITE" ;;
 esac
@@ -128,6 +184,10 @@ if [ -n "$DRY" ]; then
     log "  workspace: $NAME ($TARGET, $(t_info "$NAME")${ARCH_LABEL:+, $ARCH_LABEL})"
     log "  suite:     $SUITE ($CONFIG)"
     log "  would run: bash -lc $(sh_quote "$CMD")"
+    # The debugger is the foreground half of a debug run and the run itself is
+    # the background half; a dry run that showed only the second would describe
+    # a command nobody is about to issue.
+    [ -n "$LLDB" ] && log "  in front of: lldb -o 'process attach --name $ATTACH --waitfor'"
     exit 0
 fi
 
@@ -135,6 +195,27 @@ fi
 # The tooling sync stays ahead of the status file, so a failure in it cannot
 # leave state=running behind.
 t_sync_tools "$NAME"
+
+# --- debugging one test ------------------------------------------------------
+# Everything below this point -- watchdog, status file, failure summary --
+# exists to make an unattended run *reportable*, and all of it is wrong here.
+# The watchdog kills the job after WK_ABORT_SECONDS (1800) of silence, and a
+# process sitting at a breakpoint is silent by definition, so it would end a
+# debugging session with "TESTS STALLED"; the status file would then record a
+# verdict about a run nobody asked for a verdict on.
+#
+# The shape is the same as `wk gui --lldb web`: lldb goes first and waits, the
+# run starts behind it, and the attach lands as the web process is created.
+# Anything else races -- by the time a run has printed enough for a human to
+# type an attach command, the process to attach to has come and gone.
+if [ -n "$LLDB" ]; then
+    info "debugging $* ($CONFIG) in '$NAME', lldb waiting for $ATTACH"
+    log  "  it attaches as that process starts; 'continue' runs the test"
+    log  "  test output: /tmp/wk-test-lldb.log (in the workspace)"
+    t_exec_tty "$NAME" bash -lc "( sleep 2; $CMD >/tmp/wk-test-lldb.log 2>&1 ) & \
+        exec lldb -o $(sh_quote "process attach --name $ATTACH --waitfor")"
+    exit 0
+fi
 
 WS=$(wk_ws_dir "$NAME")
 LOG="$WS/test.log"

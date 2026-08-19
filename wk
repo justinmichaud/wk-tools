@@ -148,6 +148,25 @@ is_host_command() {
     esac
 }
 
+# Commands that report and change nothing. They still forward when the podman
+# machine is already up -- the container store lives in there and nothing on the
+# host can read it -- but they must never *start* it to answer.
+#
+# Starting it costs the whole memory envelope on a macOS host: `wk ls` booted
+# the machine, and `wk vm start` then refused for want of memory, naming a
+# conflict the user had not created. That is a steep price for a listing, and
+# the same fault `wk build --list` had before it became targetless.
+is_readonly_report() {
+    case "$1" in
+        ls|status|logs) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+machine_running() {
+    [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ]
+}
+
 forward_to_vm() {
     require podman "podman is required; install the official pkg from podman.io"
 
@@ -199,6 +218,41 @@ main() {
     elif is_macos && [ -z "${WK_IN_VM:-}" ] && ! is_host_command "$cmd" \
             && ! is_targetless "$cmd" "${1:-}"; then
         if [ "$(resolve_target "$@")" = container ]; then
+            # Answering "there is nothing to say, and here is why" beats both
+            # booting a VM for it and printing an empty table from a store that
+            # is not this machine's.
+            # A container workspace on a macOS host has no seat and never can
+            # have one: the podman machine is a Linux VM with no GPU (SETUP.md
+            # says so as a permanent property), and there is no host compositor
+            # for it to draw into -- macOS has no Wayland socket to pass in.
+            # Forwarded, `wk gui` would run inside the podman VM, where
+            # `is_linux` is true, fail the seat check, and advise `wk session
+            # on`, which refuses on macOS. Better to say the true thing here,
+            # where both facts are known.
+            #
+            # VNC/SPICE into the container is the option not taken. It would
+            # mean a compositor and a VNC server inside the workspace, both
+            # installed through the egress allowlist, to reach a
+            # software-rendered browser -- while the same machine has an
+            # accelerated one a `wk vm new` away. Worth building only if a
+            # container-only workspace ever has to be looked at.
+            if [ "$cmd" = gui ]; then
+                die "a container workspace on a macOS host has no display, and cannot get one:
+    the podman machine has no GPU and there is no compositor to draw into.
+    Use a macOS guest instead -- 'wk vm new <name>', then 'wk gui <name>',
+    which runs MiniBrowser on the guest's own desktop with the real GPU."
+            fi
+
+            if is_readonly_report "$cmd" && ! machine_running; then
+                if command -v podman >/dev/null 2>&1; then
+                    warn "the podman machine '$WK_MACHINE' is stopped, so container workspaces cannot be read"
+                    log  "  'wk start' to bring it up, or 'wk vm ls' for the macOS guests"
+                else
+                    warn "podman is not installed, so there are no container workspaces to read"
+                    log  "  './setup' installs it; 'wk vm ls' lists the macOS guests, which do not need it"
+                fi
+                exit 0
+            fi
             forward_to_vm "$cmd" "$@"
         fi
     fi

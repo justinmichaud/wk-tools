@@ -308,6 +308,38 @@ export PATH="$HOME/.local/bin:$PATH"
 EOF
 fi
 
+# --- webkitpy's autoinstalled packages ----------------------------------------
+# run-webkit-tests is python and imports webkitpy, which downloads its own
+# dependencies from PyPI on first use into Tools/Scripts/libraries/autoinstalled
+# (11 MB, measured). That download lands wherever it first happens -- which,
+# left alone, is inside every new workspace, so each one pays it again, and each
+# one pays it at the worst moment: the first test run.
+#
+# Warming it here puts it in the golden image instead, where the APFS clone
+# makes it free for every workspace.
+#
+# With the proxy variables explicitly *cleared*, which is the opposite of what
+# it looks like it should want. The base is not a workspace: it boots without
+# Softnet (targets/vm.sh passes the filter flags in t_start only), so it has
+# the open network on plain vmnet -- 192.168.64.x, gateway 192.168.64.1 --
+# while the block written above names the Softnet gateway, 192.168.2.1, which
+# exists only while a filtered *workspace* guest is running. That block is
+# written for the clones, and inside the base it points nowhere: the first
+# attempt here died with "No archives for setuptools-59.8 found", which is what
+# an unreachable proxy looks like from inside webkitpy.
+#
+# Best-effort and quiet on failure. This is a cache, not a dependency -- a base
+# that skipped it still works, it just pays the download later.
+if [ -d "$SRC/Tools/Scripts" ]; then
+    say "warming webkitpy's autoinstalled packages"
+    ( cd "$SRC" && env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+        Tools/Scripts/run-webkit-tests --help >/dev/null 2>&1 ) || \
+        echo "warning: could not warm webkitpy's autoinstall; workspaces will do it themselves" >&2
+    if [ -d "$SRC/Tools/Scripts/libraries/autoinstalled" ]; then
+        say "autoinstalled: $(du -sh "$SRC/Tools/Scripts/libraries/autoinstalled" | cut -f1)"
+    fi
+fi
+
 # --- what is deliberately absent ---------------------------------------------
 # ccache. There is no Homebrew here and no signed installer for it, and the
 # Xcode build does not use it unless WK_USE_CCACHE=YES finds one on PATH. A mac

@@ -49,6 +49,24 @@ wk logs [-f|--all]    # the build log, errors first
 wk build <config> --dry-run    # what it would build, and where, without building
 ```
 
+Debugging, in a macOS workspace (the Apple ports; the Linux half is not wired
+up yet). Each needs a terminal, and each gets one:
+
+```
+wk run --lldb -- <args>       # jsc under lldb
+wk gui [url]                  # MiniBrowser on the guest's own desktop
+wk gui [url] --lldb           # ... under lldb, stopped before it starts
+wk gui [url] --lldb web       # ... running, with lldb attached to the web process
+wk test --layout --lldb <test>  # one layout test, no timeout, lldb on the web process
+wk test --layout --lldb ui <test>  # ... on WebKitTestRunner instead
+```
+
+`--lldb web` and `wk test --lldb` both wait for the web process and attach as it
+starts — that is where a page's JS, layout and rendering run, so it is usually
+the process a breakpoint belongs in. Type `continue` once you have set yours.
+`wk test --lldb` writes the run's output to `/tmp/wk-test-lldb.log`, because the
+terminal belongs to the debugger.
+
 No workspace name in any of them: you are inside the workspace, and it is the
 only one there is. `wk build --list` shows the configs, and a bare `wk run` or
 `wk test` uses the config this workspace was built with — so a macOS guest does

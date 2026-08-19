@@ -150,19 +150,54 @@ xcode)
         args+=("SHARED_PRECOMPS_DIR=$WEBKIT_OUTPUTDIR/PrecompiledHeaders")
     fi
 
-    # Where the caches go. -derivedDataPath moves the DerivedData root, which
-    # is what the compilation CAS and the module cache hang off; the two
-    # explicit settings pin the only two things in it that are large (9.6 GB
-    # and 1.6 GB measured after one mac-release), so this does not depend on
-    # which of them Xcode chooses to derive from the root in a given release.
-    # Compilation caching itself is already on -- WebKit turns it on in
-    # Configurations/CommonBase.xcconfig:82-83 -- so the cache exists whether or
-    # not anyone decides where it lives.
+    # Where the caches go: the two big ones by name, and NOT -derivedDataPath.
+    #
+    # The two settings pin what is actually large -- 9.6 GB of compilation CAS
+    # and 1.6 GB of module cache, measured after one mac-release -- and they are
+    # build settings, so every xcodebuild in the build inherits them.
+    #
+    # -derivedDataPath is a *flag*, and that is the problem. build-webkit runs
+    # xcodebuild twice: the scheme build, and then Tools/Scripts/build-imagediff,
+    # which uses buildXCodeProject (webkitdirs.pm:2399) -- `-project`, no
+    # `-scheme`. Every argument we pass reaches both, and xcodebuild refuses:
+    #
+    #   xcodebuild: error: The flag -scheme, -testProductsPath, or -xctestrun
+    #   is required when specifying -derivedDataPath.
+    #
+    # Measured on a full base prebuild: `** BUILD SUCCEEDED ** [5149 sec]`
+    # followed immediately by that error, exit 64, and no ImageDiff -- which
+    # every pixel and reftest comparison needs. A build that reports failure
+    # after succeeding is bad; one that quietly skips a tool the tests need is
+    # worse, and the two arrived together.
+    #
+    # Nothing is lost by dropping it. The products, intermediates and
+    # XCBuildData/build.db already follow WEBKIT_OUTPUTDIR through
+    # SYMROOT/OBJROOT, indexing is off (COMPILER_INDEX_STORE_ENABLE=NO), and
+    # the caches are named above -- so the machine-wide DerivedData root is left
+    # holding nothing that matters.
     if [ -n "${WK_DERIVED_DATA:-}" ]; then
-        args+=(-derivedDataPath "$WK_DERIVED_DATA")
         args+=("COMPILATION_CACHE_CAS_PATH=$WK_DERIVED_DATA/CompilationCache.noindex")
         args+=("MODULE_CACHE_DIR=$WK_DERIVED_DATA/ModuleCache.noindex")
     fi
+
+    # The escape hatch for debugging Swift types, and the reason it exists:
+    #
+    # With caching on -- WebKit's default, CommonBase.xcconfig:82-83 -- the
+    # explicit precompiled modules under WebKitBuild/SwiftExplicitPrecompiledModules
+    # record their dependencies as `llvmcas:/<hash>` rather than as paths, so
+    # the debug info is only as durable as the CAS. Measured in a guest: the
+    # .pcm files were all still on disk, but `llvm-cas --print-kind` reported
+    # "unknown object" for the ids inside them, and lldb printed a hundred
+    # `llvmcas:/... does not exist` warnings while resolving one breakpoint,
+    # ending in "Debugging will be degraded due to missing types". A cache is
+    # entitled to evict; debug info pointing into one is the mistake.
+    #
+    # It costs a full rebuild to switch, because a build with different
+    # settings shares nothing with the cached one, so this is deliberately not
+    # the default: C++ debugging is unaffected either way -- breakpoints,
+    # source lines and WebKit's own lldb summaries all measured working with
+    # caching on -- and only Swift-interop types are degraded.
+    [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && args+=("COMPILATION_CACHE_ENABLE_CACHING=NO")
     ;;
 *)
     [ -n "$cmakeargs" ] && args+=(--cmakeargs="$cmakeargs")

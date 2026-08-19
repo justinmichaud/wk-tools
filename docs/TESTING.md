@@ -198,22 +198,84 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] guest egress still refuses a host outside it (example.com,
       news.ycombinator.com both fail closed)
 - [V] `webkit.org.evil.com` is refused -- suffix match is on a dot boundary
+- [!] the **base VM** provisions with *unfiltered* egress: Softnet's flags are
+      passed in `t_start` only, so the base boots on plain vmnet (192.168.64.x)
+      with the open network -- `curl https://pypi.org` direct answers 200. The
+      egress block it writes names the Softnet gateway and is for the clones.
+      One-shot and host-driven, with no agent in it, but the sandbox audit
+      should record it as a decision rather than find it
+- [V] **MiniBrowser reaches the allowlist too.** It did not until 2026-08-18:
+      the guest's egress was `http_proxy` in `~/.zprofile` and nothing else,
+      which WebKit's network process does not read -- a `--url
+      https://webkit.org/` load produced a blank window and no proxy-log entry
+      at all, while curl from the same guest went through. `wk vm start` now
+      sets the guest's *system* proxy. Verified by the log, not the window:
+      `allow webkit.org:443`, `allow shynet.webkit.org:443`, page rendered
+- [V] the allowlist still applies to the browser: `token.safebrowsing.apple`,
+      `metrics.icloud.com`, `gdmf.apple.com` and the rest of macOS's own
+      traffic are denied (and now appear in the log on every boot)
 - [ ] the tart window resizes / goes fullscreen  **-- KNOWN BROKEN**
-- [ ] the guest runs the latest macOS  **-- 26.4 vs host 26.6.1; no suitable
-      image published, see docs/HANDOFF-mac-minibrowser.md**
+- [!] the guest runs the latest macOS  **-- 26.4 vs host 26.6.1. PARKED: no
+      suitable image exists upstream (re-checked 2026-08-18) and the only
+      symptom is `open -a`, which nothing uses. Do not spend time here; see
+      docs/HANDOFF-mac-minibrowser.md B9 for the one-command tag check**
 - [ ] `open -a` inside the guest  **-- KNOWN BROKEN**, LaunchServices -10825:
       the app targets the 26.5 SDK, the guest is 26.4. Use direct bundle exec
-- [ ] a debugger attaches to MiniBrowser / a layout test  -- not started
+
+### Debugging  (macOS MiniBrowser lane)
+- [V] lldb attaches to an ordinary process in the guest: no `taskgated` prompt,
+      no codesigning work -- SIP is **disabled** in the VZ guest and
+      `DevToolsSecurity` already reports developer mode enabled
+- [V] lldb attaches to the WebContent XPC service and resolves its symbols
+- [V] `~/.lldbinit` is written into the guest by `targets/vm.sh` at start, and
+      registers WebKit's summaries (15 of them: `WTF::String`, `JSC::JSValue`,
+      ...); Xcode's lldb accepts every setting in `dotfiles/lldbinit` unchanged
+- [V] `wk run --lldb -- -e 'print(6*7)'` on `mac-release`: an interactive lldb
+      with a pty, stopped at entry, prints 42 on `continue`
+- [V] `wk gui <ws> [url]` launches MiniBrowser on the guest's desktop -- from
+      the host, and from **inside** the guest with no workspace name
+- [V] `wk gui --lldb` stops in `main` (`main.m:33`) with source, before AppKit
+- [V] `wk gui --lldb web` attaches the web process as it launches
+- [V] `wk test --layout --lldb <test>` attaches the web process WebKitTestRunner
+      spawns, and the run reaches "The test ran as expected." after `continue`
+- [V] `wk test --layout --lldb ui <test>` attaches WebKitTestRunner itself
+- [V] a mistyped test path fails before the debugger starts (`no such test in
+      <ws>`) rather than hanging with lldb waiting for a process that will
+      never launch
+- [V] a breakpoint by name resolves and hits in the layout-test web process:
+      `WebCore::Document::implicitClose` at `Document.cpp:4323`, with source and
+      with WebKit's summary printing `this`
+- [!] ...but resolving it also prints ~100 `llvmcas:/... does not exist`
+      warnings. The explicit Swift `.pcm`s record their inputs as CAS ids that
+      `llvm-cas --print-kind` calls "unknown object" -- **including in a CAS
+      built minutes earlier**, with the same id byte for byte, so it is not
+      eviction: those objects were never in the compilation cache. Not an lldb
+      setting either (`symbols.cas-path` measured, no effect). Only
+      Swift-interop types are degraded
+- [V] `WK_NO_COMPILATION_CACHE=1` clears them completely: 103 -> 0 llvmcas
+      warnings, 5 -> 0 missing modules, breakpoint still hits -- and the cold
+      build is *faster* without the cache, 68.6 min against 85.8 min
 
 ### Build and run
+- [!] a mac build must reach **ImageDiff**, not just `BUILD SUCCEEDED`.
+      `-derivedDataPath` broke the second of build-webkit's two xcodebuild
+      invocations (`build-imagediff`, which has no `-scheme`), so the prebuild
+      ended `** BUILD SUCCEEDED ** [5149 sec]` + exit 64 + no ImageDiff -- and
+      every pixel/reftest comparison needs it. Fixed by dropping the flag;
+      check `WebKitBuild/Release/ImageDiff` exists after a build
 - [V] `wk build <ws> mac-release` succeeds
 - [V] `wk run <ws> --config mac-release` runs jsc via `DYLD_FRAMEWORK_PATH`
 - [ ] a build in a **fresh clone off a warm base** completes in well under 45 min
+- [V] a **cold** base prebuild: 85.8 min (5149 s), -j9, with
+      `--export-compile-commands` on -- against SETUP.md's ~99 min without it,
+      so the flag is not the cost it was feared to be (not a clean A/B: the CAS
+      moved and the tree was newer)
 - [ ] `wk build <ws> mac-debug`
 - [ ] `wk build <ws> ios-sim-release` — config written, never run
-- [ ] `wk test` against an Apple port -- **was impossible until 2026-08-18**:
+- [V] `wk test` against an Apple port -- **was impossible until 2026-08-18**:
       `run-webkit-tests` is python, imports webkitpy, and webkitpy autoinstalls
-      from PyPI, which the guest could not reach (see the egress fix below)
+      from PyPI, which the guest could not reach (see the egress fix below).
+      First real run: one layout test, green, 15 s including webkitpy start-up
 - [V] the guest disk fits a build (Release tree ~39 GB) with room for a second
 
 ## 3. Remote target
@@ -228,6 +290,13 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] `wk build --list` shows all configs
 - [V] `wk build --list` answers on a macOS host **with the podman machine
       stopped**, and leaves it stopped (26 ms; it used to boot the machine)
+- [V] `wk gui` on a macOS host refuses a *container* workspace with the reason
+      and the alternative, instead of forwarding into the podman VM to fail a
+      seat check and advise `wk session on`, which refuses on macOS
+- [V] `wk ls` and `wk status` no longer boot the podman machine on a macOS
+      host -- they say it is stopped and point at `wk start` / `wk vm ls`.
+      Booting it used to cost a macOS guest its memory budget: `wk vm start`
+      then refused, because both want the whole envelope
 - [ ] `wk backup` → `./setup` round-trips with no spurious changes
 - [ ] `wk backup`'s junk filters strip what they claim (weather location,
       WiFi UUIDs, last-folder paths, timestamps)

@@ -298,6 +298,9 @@ t_start() {
     if [ "$(_vm_state "$v")" = running ]; then
         ip=$(_ip "$name")
         _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
+        _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
+        _set_guest_proxy "$name" "$ip" || warn "could not set the guest's system proxy; the browser in $name will reach nothing"
+        _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
         echo "$ip"
         return 0
     fi
@@ -312,6 +315,9 @@ t_start() {
     # would be the wrong trade.
     ip=$(_boot "$v" 180)
     _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
+    _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
+    _set_guest_proxy "$name" "$ip" || warn "could not set the guest's system proxy; the browser in $name will reach nothing"
+    _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
     echo "$ip"
 }
 
@@ -346,9 +352,21 @@ _softnet_flags() {
 # agent at boot would simply fail to bind.
 _proxy_pidfile() { echo "$WK_VM_DIR/proxy.pid"; }
 
+# Is there a proxy for the guest to reach? Ask the socket, not the pidfile.
+#
+# The pidfile records whoever started it last, and a proxy routinely outlives
+# the shell that recorded it -- one from an earlier session is still listening
+# while $WK_VM_DIR/proxy.pid names a process that is long gone. Trusting the
+# file alone, `wk vm start` then tried to bind an address it already owned, got
+# EADDRINUSE, and reported "the guest will have no egress at all" while egress
+# was working perfectly. That is the worst possible direction for this check to
+# be wrong in: it says the boundary failed open when it did not.
 _proxy_running() {
     local pf; pf=$(_proxy_pidfile)
-    [ -f "$pf" ] && kill -0 "$(cat "$pf" 2>/dev/null)" 2>/dev/null
+    [ -f "$pf" ] && kill -0 "$(cat "$pf" 2>/dev/null)" 2>/dev/null && return 0
+    # Nothing of ours, or nothing at all -- but the address is what matters.
+    lsof -nP -iTCP@"$(_proxy_addr)":"$WK_VM_PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1 || return 1
+    debug "a proxy is listening on $(_proxy_addr):$WK_VM_PROXY_PORT that this pidfile does not name"
 }
 
 _start_host_proxy() {
@@ -521,6 +539,113 @@ _write_marker() {
         $(sh_quote "name=$name") $(sh_quote "src=$(t_src "$name")") \
         $(sh_quote "config=${WK_VM_BASE_PREBUILD:-mac-release}") \
         > \$HOME/.wk-workspace"
+}
+
+# The agent's own configuration: CLAUDE.md, settings, hooks and skills.
+#
+# Provisioning links these (vm/provision-base.sh), and in a live guest they were
+# simply absent -- `~/.claude` held only the `backups` and `downloads` that
+# Claude itself creates at runtime. Same family as the missing egress block: a
+# provisioning step that did not run, inherited by every clone of the base. The
+# effect is worse than it sounds, because it is silent: `wk claude` starts an
+# agent that has never been told it is in a workspace, what `wk` can do for it,
+# or that the host filesystem is out of reach -- it just behaves like an agent
+# on a strange machine.
+#
+# Symlinks into $HOME/wk-tools rather than copies, exactly as provisioning does
+# it: `wk build` re-rsyncs that tree with --delete on every run, so a copy would
+# go stale the first time this repo changed, and in-guest edits are better
+# failing than quietly vanishing.
+_write_claude_config() {
+    local name="$1" ip="$2" tools; tools=$(t_tools "$name")
+    _ssh "$ip" "[ -d $(sh_quote "$tools/claude") ] || exit 1
+        mkdir -p \$HOME/.claude
+        for f in settings.json hooks CLAUDE.md skills; do
+            ln -sfn $(sh_quote "$tools/claude")/\$f \$HOME/.claude/\$f
+        done"
+}
+
+# The guest's *system* proxy, which is not the same thing as the environment
+# variables provisioning writes into ~/.zprofile.
+#
+# Measured 2026-08-18: WebKit's network process does not read
+# http_proxy/https_proxy. MiniBrowser loading https://webkit.org/ produced a
+# blank window and not one line in the host proxy log, while curl to the same
+# host from the same guest went straight through. So every egress check --
+# all of which used curl -- passed, while the browser the guest exists to run
+# could reach nothing at all. A blank page and a denied page look identical,
+# which is why this went unnoticed through a whole round of GPU work.
+#
+# Set from the host at start rather than baked into the golden base: the
+# address is discovered from the live interface (_proxy_addr) and can change,
+# and an existing guest gets it without a ~3 h rebuild.
+#
+# WK_VM_UNFILTERED turns it back off. An unfiltered guest has the open network
+# and nothing listening on the proxy address, so leaving the setting behind
+# would take the browser offline in the one case where it need not be.
+#
+# Best effort, like the marker: a guest that is up is up, and one failed
+# `sudo -n` should not turn `wk vm start` into an error. It says so, though --
+# the whole point of this function is that the failure is otherwise silent.
+_set_guest_proxy() {
+    local name="$1" ip="$2" addr=""
+    [ -n "${WK_VM_UNFILTERED:-}" ] || addr=$(_proxy_addr)
+    debug "guest system proxy in $name: ${addr:-off}"
+
+    _ssh "$ip" "bash -s" <<EOF
+set -u
+addr='$addr'
+port='$WK_VM_PROXY_PORT'
+
+# The service to configure is the one carrying the default route, not a name
+# typed in here: the Cirrus Labs image ships several (com.redhat.spice.0, three
+# tart-version-* entries, Ethernet) and which of them is real is a property of
+# the guest, not of this repo.
+dev=\$(route -n get default 2>/dev/null | awk '/interface:/{print \$2}')
+[ -n "\$dev" ] || { echo "no default route in the guest" >&2; exit 1; }
+svc=\$(networksetup -listnetworkserviceorder | awk -v d="\$dev" '
+    /^\([0-9]+\)/ { name = substr(\$0, index(\$0, ") ") + 2) }
+    index(\$0, "Device: " d ")") { print name; exit }')
+[ -n "\$svc" ] || { echo "no network service owns \$dev" >&2; exit 1; }
+
+read_state() {
+    networksetup -getsecurewebproxy "\$svc" | awk '
+        /^Enabled:/ { e = \$2 } /^Server:/ { s = \$2 } /^Port:/ { p = \$2 }
+        END { print e ":" s ":" p }'
+}
+
+if [ -z "\$addr" ]; then
+    [ "\$(read_state)" = "No::0" ] && exit 0
+    sudo -n networksetup -setwebproxystate "\$svc" off &&
+    sudo -n networksetup -setsecurewebproxystate "\$svc" off
+    exit
+fi
+
+# Idempotent by measurement rather than by a marker file: three networksetup
+# writes on every boot would be slow and would log three times over.
+[ "\$(read_state)" = "Yes:\$addr:\$port" ] && exit 0
+sudo -n networksetup -setwebproxy "\$svc" "\$addr" "\$port" &&
+sudo -n networksetup -setsecurewebproxy "\$svc" "\$addr" "\$port" &&
+sudo -n networksetup -setproxybypassdomains "\$svc" localhost 127.0.0.1
+EOF
+}
+
+# WebKit's lldb helpers, wired up in the guest the same way container/firstrun.sh
+# wires them up in a container -- summaries for WTF::String, JSValue and the rest,
+# without which a backtrace through JSC is a wall of hex.
+#
+# Written from the host, next to the marker and for the same reasons: it names
+# the workspace's own checkout, and a guest handed straight to `wk claude` would
+# otherwise have no debugger configuration until someone ran provisioning again.
+# Xcode's lldb accepts every setting in dotfiles/lldbinit unchanged (measured on
+# lldb-2100); container/lldb/rr.py is left out because rr is Linux-only.
+_write_lldbinit() {
+    local name="$1" ip="$2"
+    {
+        printf '%s\n' "# wk: written by targets/vm.sh. See wk run --lldb, wk gui --lldb."
+        printf '%s\n' "command script import $(t_src "$name")/Tools/lldb/lldb_webkit.py"
+        cat "$WK_ROOT/dotfiles/lldbinit"
+    } | _ssh "$ip" "cat > \$HOME/.lldbinit"
 }
 
 # rsync rather than a mount: no --dir is ever passed to `tart run`, because a
@@ -885,22 +1010,32 @@ _provision_base() {
     ip=$(_tart ip "$WK_VM_BASE" --wait 300 2>/dev/null | grep .) \
         || die "base VM did not boot; see $runlog"
 
-    # The guest agent is how the key gets in without ever typing the image's
-    # default password, and without leaving password auth working afterwards.
-    # Idempotent, so re-provisioning an existing base is safe.
-    info "installing the wk ssh key over the guest agent"
-    local pub; pub=$(cat "$WK_VM_KEY.pub")
-    _tart exec "$WK_VM_BASE" /bin/sh -c \
-        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
-         grep -qxF '$pub' ~/.ssh/authorized_keys 2>/dev/null || \
-         echo '$pub' >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys" \
-    || die "could not reach the guest agent in '$WK_VM_BASE'.
+    # The guest agent is how the key gets in the FIRST time, without ever typing
+    # the image's default password and without leaving password auth working
+    # afterwards. On every later run the key is already in there, and ssh is the
+    # better question to ask: `tart ip --wait` answers as soon as the guest has
+    # an address, which is well before the agent is listening, so a refresh that
+    # went straight to `tart exec` got "VM is not running" and died -- twice,
+    # measured, on a base that was perfectly healthy and whose ssh worked
+    # seconds later. Ask what is actually needed, and only fall back to the
+    # agent when it is not already true.
+    if _wait_ssh "$ip"; then
+        debug "ssh already works in '$WK_VM_BASE'; no key to install"
+    else
+        info "installing the wk ssh key over the guest agent"
+        local pub; pub=$(cat "$WK_VM_KEY.pub")
+        _tart exec "$WK_VM_BASE" /bin/sh -c \
+            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
+             grep -qxF '$pub' ~/.ssh/authorized_keys 2>/dev/null || \
+             echo '$pub' >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys" \
+        || die "could not reach the guest agent in '$WK_VM_BASE'.
     \`tart exec\` needs the Tart guest agent, which the Cirrus Labs images ship
     but a vanilla macOS image does not. Without it there is no way to get an ssh
     key in unattended -- log in once with the image's own credentials and append
     $WK_VM_KEY.pub to ~/.ssh/authorized_keys by hand, then re-run."
 
-    _wait_ssh "$ip" || die "ssh key was installed but ssh still refuses; see $runlog"
+        _wait_ssh "$ip" || die "ssh key was installed but ssh still refuses; see $runlog"
+    fi
 
     # Seed the checkout from a clone that already exists on the host, if there
     # is one. Cloning WebKit from GitHub happens through the egress proxy, and

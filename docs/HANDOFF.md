@@ -262,13 +262,42 @@ freehand steps" is unblocked on both platforms.
    boot as well as on sync, and `--dry-run`); the one item left over — build
    state recorded once per side — is written up there and blocks nothing.
 
-2. **macOS MiniBrowser DerivedData + debugging** —
+2. **macOS MiniBrowser DerivedData + debugging — DONE 2026-08-18** —
    `docs/HANDOFF-mac-minibrowser.md`
-   Fix the DerivedData location so it's fast and doesn't collide with other
-   builds — this is the correctness prerequisite for everything else on this
-   lane (a slow/colliding DerivedData will look like flakiness in every later
-   step). Then: graphical MiniBrowser run, attach a debugger, debug a layout
-   test.
+   All three lines of the original spec. DerivedData is placed explicitly and
+   separated per config, so `mac-release-asan` no longer builds into
+   `mac-release`'s tree. MiniBrowser runs windowed on the guest's own desktop
+   with hardware Metal, launched by `wk gui`. A debugger attaches three ways --
+   `wk run --lldb` for jsc, `wk gui --lldb[ web]` for the browser and its web
+   process, `wk test --layout --lldb <test>` for a layout test -- and needed no
+   codesigning work, because the guest has SIP disabled and developer mode on.
+   `wk test` against an Apple port ran green for the first time on the way.
+   Debugging covers both processes on the test side — `--lldb ui` attaches
+   WebKitTestRunner, which `--wrapper` cannot do, because the driver's stdin and
+   stdout are the test protocol.
+
+   The golden base was re-provisioned in the process, and it needed to be: it
+   carried no egress block, no `~/.claude` links and no warmed autoinstall, so
+   every new workspace would have failed at webkitpy exactly as before the F1/F2
+   fix (F4, F6, F9). The rebuild also caught a bug this lane had introduced —
+   `-derivedDataPath` is a flag, so it reached `build-imagediff`, which has no
+   `-scheme`; every Apple build since had ended in `BUILD SUCCEEDED` followed by
+   exit 64 and **no ImageDiff**, which every pixel and reftest comparison needs
+   (A8). A cold build costs 85.8 min with `--export-compile-commands` on, which
+   settles H3.
+
+   One thing found on the way is fixed rather than left: the browser could
+   reach nothing, because the guest's egress was environment variables and
+   WebKit's network process does not read them — every egress check had used
+   curl, which does (B11). Two remain, neither blocking: the guest is one macOS
+   release behind (B9 — **parked by decision**: upstream publishes no
+   `macos-tahoe-xcode:26.6`, re-checked 2026-08-18, and the only symptom is an
+   `open -a` nothing uses), and Swift-interop debug info does not resolve in lldb under
+   the compilation cache (C5). That one now has a measured answer rather than a
+   theory: `WK_NO_COMPILATION_CACHE=1` clears it completely — 103 warnings to 0
+   — and the cold build is *faster* without the cache, 68.6 min against 85.8,
+   because a first build pays to write 11 GB of CAS and reads none of it back
+   (C6). C++ debugging was unaffected either way.
 
 3. **Cross-compile / remote-target verification on macOS** — companion to
    lane A steps 4-6. Once the Linux side has the remote-target driver and

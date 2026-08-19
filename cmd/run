@@ -64,4 +64,12 @@ else
     CMD="$PRELUDE; export JSC_validateOptions=1; exec $(sh_quote "$JSC") --validateOptions=1 $(sh_quote "$@")"
 fi
 
-t_exec "$NAME" bash -lc "$CMD"
+# A debugger needs a terminal and ssh allocates one only when asked. Without
+# this the lldb prompt comes up in a session with no pty: it prints, it accepts
+# nothing, and ctrl-c kills the whole thing rather than interrupting the
+# inferior -- which reads as "lldb is broken in a workspace".
+if [ -n "$DEBUGGER" ]; then
+    t_exec_tty "$NAME" bash -lc "$CMD"
+else
+    t_exec "$NAME" bash -lc "$CMD"
+fi

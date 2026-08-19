@@ -292,6 +292,10 @@ config_build_env() {
     # through to the build half, which runs in the target and cannot see the
     # caller's environment.
     [ -n "${WK_NO_COMPILE_COMMANDS:-}" ] && CFG_ENV+=("WK_NO_COMPILE_COMMANDS=1")
+    # Same shape, for the CAS: build-in-target.sh explains what it buys and what
+    # it costs. Carried through here because the build half runs in the target
+    # and cannot see the caller's environment.
+    [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && CFG_ENV+=("WK_NO_COMPILATION_CACHE=1")
     return 0
 }
 
@@ -329,5 +333,95 @@ config_run_dir() {
     case "$CFG_BUILDSYS" in
         xcode) echo "$d" ;;
         *)     echo "$d/lib" ;;
+    esac
+}
+
+# --- the browser, and the processes it spawns --------------------------------
+# MiniBrowser is one binary on the CMake ports and an app bundle on the Apple
+# ports, and the difference is not only the path. Two things were measured in
+# the guest and neither is guessable:
+#
+#   `open -a` on the bundle is refused with LaunchServices -10825 -- the app is
+#   built against the 26.5 SDK and the guest runs 26.4. Exec'ing the binary
+#   inside the bundle skips that check, and keeps the browser a child of the
+#   shell that launched it, so ctrl-c and a debugger both reach it.
+#
+#   The Apple MiniBrowser takes its page as `--url <URL>`
+#   (Tools/MiniBrowser/mac/AppDelegate.m:47,265). A bare positional URL is
+#   parsed by nothing and silently ignored: the window comes up on about:blank,
+#   which reads as a browser that cannot load anything.
+
+config_browser_path() {
+    local d; d=$(config_build_dir "$1")
+    case "$CFG_BUILDSYS" in
+        xcode) echo "$d/MiniBrowser.app/Contents/MacOS/MiniBrowser" ;;
+        *)     echo "$d/bin/MiniBrowser" ;;
+    esac
+}
+
+# How the page is named on the command line, for the same reason: one port
+# takes a positional URL and the other ignores it.
+config_browser_url_flag() {
+    case "$CFG_BUILDSYS" in
+        xcode) echo "--url" ;;
+        *)     echo "" ;;
+    esac
+}
+
+# The environment a WebKit app needs to find its own frameworks in the build
+# tree. Apple only -- the CMake ports go through Tools/Scripts/run-minibrowser,
+# which sets up their own.
+#
+# The __XPC_ duplicates are the load-bearing half. WebKit's child processes --
+# WebContent, GPU, Networking -- are XPC services launched by launchd rather
+# than by the browser, so they inherit nothing from this shell; launchd passes
+# a variable named __XPC_FOO on to the service as FOO. Without them the UI
+# process runs out of the build tree while its children run against the system
+# WebKit, which is not a configuration anyone means to debug.
+config_browser_env() {
+    local d; d=$(config_build_dir "$1")
+    case "$CFG_BUILDSYS" in
+        xcode) echo "DYLD_FRAMEWORK_PATH=$d DYLD_LIBRARY_PATH=$d __XPC_DYLD_FRAMEWORK_PATH=$d __XPC_DYLD_LIBRARY_PATH=$d" ;;
+        *)     echo "" ;;
+    esac
+}
+
+# What the web process is called, for `lldb --attach-name ... --waitfor`. It is
+# the process a page or a layout test actually runs in, and the one worth
+# attaching to -- the UI process spends its life in a run loop.
+#
+# Empty for the CMake ports on purpose rather than guessed: nothing here has
+# been run against them, and a wrong name fails as "the debugger is still
+# waiting", which is the least debuggable failure of the lot. The Linux half is
+# docs/HANDOFF-linux-minibrower.md.
+config_web_process_name() {
+    case "$CFG_BUILDSYS" in
+        xcode) echo "com.apple.WebKit.WebContent.Development" ;;
+        *)     echo "" ;;
+    esac
+}
+
+# The layout-test driver, for the same `--attach-name ... --waitfor`. Attaching
+# is what makes the UI process debuggable at all here: its stdin and stdout are
+# the test protocol, so `--wrapper 'lldb'` would put a debugger's prompt in the
+# middle of a pipe webkitpy is talking on. An attach touches no file descriptor.
+config_test_runner_name() {
+    case "$CFG_BUILDSYS" in
+        xcode) echo "WebKitTestRunner" ;;
+        *)     echo "" ;;
+    esac
+}
+
+# An environment assignment that makes the web process sleep immediately after
+# launch, so a waiting debugger attaches before it does anything: 5 s on the
+# Apple ports (WebProcessCocoa.mm:655).
+#
+# Belt and braces. `--waitfor` on its own was measured attaching during dyld
+# start-up, well before main; the pause is what keeps that from being a race a
+# faster machine could win.
+config_web_process_pause_env() {
+    case "$CFG_BUILDSYS" in
+        xcode) echo "__XPC_WEBKIT_PAUSE_WEB_PROCESS_ON_LAUNCH=1" ;;
+        *)     echo "" ;;
     esac
 }
