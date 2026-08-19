@@ -448,18 +448,68 @@ boot_partition=3      # the perf image
 directly as a reboot parameter — `sudo reboot 3` — which `autoboot.adoc`
 documents as overriding `boot_partition` for that boot only.
 
-Two ways to lay it out, and the second is the recommendation:
+### Measured on the board, 2026-08-19 — the USB route is the only sane one
 
-1. **Extra partitions on the workstation NVMe.** Bootable partitions must be
-   FAT12/16/32 containing `config.txt` (on Pi 5), with the rootfs elsewhere — so
-   a FAT boot partition plus an ext4 root, on top of the two the workstation
-   already has. That is 4 of 4 MBR partitions, and whether the firmware will
-   read a GPT NVMe here needs checking before anything is repartitioned.
-2. **The perf image on a small USB SSD**, selected one-shot with
-   `vcmailbox 0x0003808b 4 4 0xf64` (USB-MSD first, then NVMe, then loop). No
-   repartitioning of the workstation disk at all, nothing at risk, and the image
-   is pushed over WiFi by rsync while the board is a workstation — a
-   ~500 MB squashfs over WiFi is seconds. **Preferred.**
+With SSH working, the board's own state settles the layout question and retires
+the partition option outright:
+
+```
+Raspberry Pi 5 Model B Rev 1.1, 15 GiB usable, kernel 7.0.6-1-numa, 8 NUMA nodes
+bootloader          2025/12/08 (recent; set_reboot_order available)
+BOOT_ORDER          0xf461      -> SD(1), NVMe(6), USB(4), restart(f)
+EEPROM              SDRAM_BANKLOW=1, BOOT_UART=1, NET_INSTALL_AT_POWER_ON=1
+config.txt          os_check=0 already set; os_prefix=current/, [tryboot] os_prefix=new/
+autoboot.txt        [all] tryboot_a_b=1
+nvme0n1             p1 512M FAT /boot/firmware (366M free), p2 469G ext4 / (219G free)
+eth0                DOWN (no cable)      wlan0 192.168.1.165/24
+sudo                passwordless
+```
+
+Four consequences:
+
+- **`tryboot` is already taken on this board.** `config.txt` carries
+  `os_prefix=current/` with `[tryboot] os_prefix=new/`, and `autoboot.txt` sets
+  `tryboot_a_b=1` — that is flash-kernel's `pi-try` kernel staging, installed by
+  the NUMA-kernel work. A perf image that also used tryboot would collide with
+  kernel updates. **So the partition-plus-tryboot option is out**, and the USB
+  route is not merely preferred, it is the one that does not fight the board's
+  existing configuration.
+- **Repartitioning was never cheap anyway**: `p2` fills the disk, so a third
+  partition means shrinking a 469 GB root.
+- **The perf USB can stay plugged in permanently.** `BOOT_ORDER=0xf461` reaches
+  the NVMe (6) before USB (4), so a normal boot always lands on the workstation
+  even with a bootable USB attached. Nothing needs unplugging between runs — arm
+  with a one-shot `0xf64` (USB, then NVMe, then loop) when a perf boot is wanted.
+- **The mechanism is confirmed live**, not just documented:
+  `sudo vcmailbox 0x0003808b 4 4 0xf461` — deliberately the *current* order, so
+  the next boot is unchanged — returned `0x80000000` (request succeeded) with the
+  tag marked processed. Passwordless sudo means `wk boot rpi5` can arm it over
+  SSH with no prompt.
+
+**The image must come up reachable, or a run cannot be driven at all** (raised by
+the user 2026-08-19, and it is a real gap in the plan as written). On this board
+`eth0` has no cable, so an image with no WiFi credentials boots into total
+isolation — no ssh, no runner, no result collection, and no way to reboot it back
+except a power cycle. So `wk image build` bakes in, as part of the spec rather
+than as manual post-flash surgery:
+
+- **the authorised key** that the driving machine already uses, so ssh works on
+  first boot;
+- **the network profile** — for the rpi5 that is the WiFi credential, which the
+  build should copy from the target board's own NetworkManager profile *on the
+  board*, so the PSK never travels through a driver's logs or an agent's context;
+- **sshd enabled explicitly**, not left to a distro's first-boot flag file;
+- **no first-boot resize-and-reboot step.** This one is subtle and specific to the
+  one-shot: a distro image that resizes its root and reboots itself spends the
+  one-shot on the *first* boot, so the self-reboot lands back on the workstation
+  and the image never finishes coming up. Pre-size the image instead.
+- **an identity marker** — hostname plus a file such as `/etc/wk-image` naming the
+  profile and build — so "which OS am I talking to" is never a guess.
+
+Two things the image build has to account for, from the same dump: `os_check=0`
+is already set on the workstation but the image needs its own copy, and
+`/boot/firmware` has only 366 MB free — so images are staged on `/` (219 GB
+free), never in the firmware partition.
 
 This is strictly better than netboot for this board: no server involved, no
 network traffic during boot *or* run, the same one-shot-and-revert behaviour,
@@ -540,23 +590,29 @@ sources never match `autogroup:member`, so nothing in the SETUP.md §7 grant set
 ever authorised this pair. Not proven, but it is the only hypothesis all the
 numbers fit.
 
-**The clean discriminator, to run the moment the board is back:**
+**Resolved 2026-08-19: it was WiFi range.** The board had been placed too far
+from the AP. Moved closer, and everything works: `tailscale ping` 6 ms direct
+over IPv6, `tailscale ping --icmp` (which *is* subject to ACLs and host
+firewalls, unlike the plain disco ping) pongs, and SSH connects normally.
 
-```sh
-tailscale ping rpi5          # disco layer: bypasses ACLs and firewalls
-tailscale ping --icmp rpi5   # real ICMP through the tunnel: subject to both
-```
+**So the ACL hypothesis was wrong**, and so was the reading of the scans. Two
+mistakes worth naming so neither is repeated:
 
-If the first pongs and the second does not, it is the ACL or the Pi's firewall,
-and the ACL is the one to fix first because the same gap will block `wk pi setup`
-from reaching the rpi4 and rpi3 later. If both work, the SSH failure was
-transient and the real problem is only that the board keeps dropping off the
-network.
+- The Pi *was* in the very first ARP sweep, at **192.168.1.165** with MAC
+  `88:a2:9e:07:1c:92` — the same 192.168.1.0/24 as moose. It was dismissed
+  because the OUI list being grepped for was incomplete: `88:a2:9e` is a
+  Raspberry Pi Ltd prefix, confirmed from the board's own kernel cmdline
+  (`smsc95xx.macaddr=88:A2:9E:07:1C:91`). Grep for the OUI list *and* eyeball
+  the hosts that answer.
+- Zero `RxBytes`/`TxBytes` and no handshake were read as "packets dropped before
+  the tunnel". They are equally consistent with "the link is too lossy to
+  complete a handshake", which is what it was. A marginal link and a filter look
+  identical from one end; the discriminator is `--icmp`, and it should have been
+  run before naming a cause.
 
-Separately and still true: the board went **offline at 15:37** and stayed there,
-which is its own fault to chase — and until it is reliably online, the rpi5's
-local one-shot (USB SSD, no server involved) is the only part of its plan that
-needs nothing from the network.
+The ACL note added to SETUP.md §7 has been rewritten accordingly: the general
+caveat about tagged sources not matching `autogroup:member` is real and worth
+keeping, but the live policy already permits this traffic.
 
 ### The rpi5's Ethernet is now free, so it can be the server
 
@@ -582,6 +638,42 @@ Three arrangements, depending on how much cable is acceptable:
 Whichever is used, the serving side is interchangeable with moose — same
 daemons, same files, and the service alias IP means the client's firmware does
 not care which machine is behind it.
+
+### First mechanism test, 2026-08-19 — and the lesson it taught
+
+Ran the one-shot for real on the rpi5: RPi OS Lite (trixie) written to a 29 GB
+Verbatim stick, preseeded to be reachable (driving machine's ed25519 key in
+`/root/.ssh/authorized_keys`, the board's own WiFi profile copied on-device so
+the PSK never left it, `ssh.service` and NetworkManager explicitly enabled,
+hostname `rpi5-perftest` plus an `/etc/wk-test-image` marker), then
+`vcmailbox 0x0003808b 4 4 0xf64` and a reboot.
+
+Result: **the workstation went away and did not come back, and the stick OS never
+appeared on the network.** tailscale shows the board offline since the reboot;
+the LAN has no host at its address and no host with its MAC. So the board is
+sitting in *something* with no network, and one-shot semantics mean a power cycle
+returns it to the workstation — which needs hands, because nothing on the board
+is reachable to reboot it.
+
+The most likely cause is not the boot mechanism but the radio: **Raspberry Pi OS
+soft-blocks WiFi until a WLAN country is set** (rfkill), which the Imager's
+first-run script normally does and which this preseed did not. A copied
+NetworkManager profile cannot help if the radio is blocked.
+
+Three things this bought, all worth more than the test itself:
+
+1. **An image that cannot be reached must return the machine by itself.** Add a
+   self-return watchdog to every image: a oneshot that reboots after N minutes
+   unless a marker (say `/run/wk-keep-running`) has been created by whoever
+   logged in. Without it, one bad image strands a machine until someone walks to
+   it — and the whole point of the one-shot was that undo is a command.
+2. **`wk image build` must set the WLAN regulatory country** and `rfkill unblock`
+   before NetworkManager starts, not rely on a distro's first-run wizard.
+3. **A console is the only ground truth when the network is the thing that
+   failed.** HDMI, or better, the UART — `BOOT_UART=1` is already set in this
+   board's EEPROM, so a serial console needs only a cable and would have answered
+   "did it boot the stick or hang at firmware" in one look. Worth having before
+   the next attempt.
 
 ## Perf risks in this arrangement — asked 2026-08-19
 

@@ -502,23 +502,19 @@ itself:
 > Do not reuse the existing `tag:server`: it covers moose, nextcloud, immich,
 > overleaf and the gateway, and workspaces would get all of them.
 
-> **`autogroup:member` does not cover moose, and this grant set is therefore
-> incomplete** (found 2026-08-19 while debugging SSH to the rpi5). moose is a
-> *tagged* node — `tag:workstation`, per its netmap — and a tagged device's
-> traffic is attributed to its tags, never to the user who set it up, so
-> `autogroup:member` grants do not apply to anything moose originates. Since the
-> path to a Pi from a workspace goes *through* moose, the policy needs the
-> workstation tag as an explicit source:
+> **Caveat when editing the policy: `autogroup:member` does not cover a tagged
+> node.** moose and the rpi5 both carry `tag:workstation`, and a tagged device's
+> traffic is attributed to its tags rather than to the user who set it up — so a
+> grant written only as `autogroup:member → *` would not authorise anything moose
+> originates, and the path to a Pi from a workspace goes *through* moose. The live
+> tailnet already permits this (verified 2026-08-19 with
+> `tailscale ping --icmp rpi5`, which is subject to ACLs, unlike a plain
+> `tailscale ping`); the note is here so a future tightening of the policy keeps
+> a tag-sourced grant such as:
 >
 > ```hujson
-> { "src": ["tag:workstation"], "dst": ["tag:wk"],          "ip": ["tcp:22"] },
-> { "src": ["tag:workstation"], "dst": ["tag:workstation"], "ip": ["tcp:22"] },
+> { "src": ["tag:workstation"], "dst": ["tag:wk"], "ip": ["tcp:22"] },
 > ```
->
-> The second line is what makes moose ↔ rpi5 work at all; both boards carry
-> `tag:workstation`, and without it every connection between them is dropped
-> silently — `tailscale ping` still pongs, which is what makes this confusing to
-> diagnose. Keep it to `tcp:22` unless something needs more.
 
 ---
 
