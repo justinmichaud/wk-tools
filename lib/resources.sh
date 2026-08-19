@@ -86,6 +86,14 @@ host_mem_mb() {
 avail_mem_mb() {
     local cg=/sys/fs/cgroup/memory.max avail=""
 
+    # A target that is another machine entirely replaces the measurement rather
+    # than capping it. What this host has free says nothing about a build
+    # running at the far end of an ssh connection, and taking the smaller of
+    # the two -- which is what a cap does -- would size a 250 GB build box from
+    # a laptop. WK_CGROUP_MB below stays a cap, because a container really is
+    # this machine, with a limit on top.
+    if [ -n "${WK_AVAIL_MB:-}" ]; then echo "$WK_AVAIL_MB"; return 0; fi
+
     if is_linux && [ -r /proc/meminfo ]; then
         avail=$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
     else
@@ -157,9 +165,13 @@ build_jobs() {
     by_cpu=$cores
 
     if [ -n "$polite" ]; then
-        # Treat the 1-minute load average as cores already spoken for.
+        # Treat the 1-minute load average as cores already spoken for. The
+        # caller supplies it when the busy machine is not this one -- a remote
+        # target's load is the only load that matters for a build running
+        # there, and /proc/loadavg here answers for the wrong computer (and on
+        # a macOS host does not exist at all, which reads as an idle machine).
         local load
-        load=$(awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0)
+        load=${WK_LOAD:-$(awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0)}
         by_cpu=$(( cores - load ))
         # Never take more than half a shared box, however idle it looks.
         local half=$(( cores / 2 ))
@@ -168,6 +180,12 @@ build_jobs() {
 
     jobs=$by_mem
     [ "$by_cpu" -lt "$jobs" ] && jobs=$by_cpu
+
+    # A ceiling that is a matter of policy rather than of capacity: a shared
+    # 80-core machine has the resources to hand one person 40 jobs and no
+    # reason to. Applied last so it caps the answer rather than the inputs.
+    [ -n "${WK_MAX_JOBS:-}" ] && [ "$jobs" -gt "$WK_MAX_JOBS" ] && jobs=$WK_MAX_JOBS
+
     [ "$jobs" -lt 1 ] && jobs=1
 
     echo "$jobs"
@@ -180,7 +198,7 @@ explain_jobs() {
     # Report the cores the job count was actually derived from. When the caller
     # supplied a cap -- a cgroup limit, or a guest's vCPU count -- printing the
     # host's core count instead makes the derivation look wrong every time.
-    log "resources: ${jobs} jobs (cores=${WK_CGROUP_CORES:-$(host_cores)} avail=$(avail_mem_mb)MB @ ${WK_MB_PER_JOB}MB/job${polite:+, polite})"
+    log "resources: ${jobs} jobs (cores=${WK_CGROUP_CORES:-$(host_cores)} avail=$(avail_mem_mb)MB @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${WK_LOAD:-0}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
     echo "$jobs"
 }
 

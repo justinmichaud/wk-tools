@@ -26,7 +26,7 @@ load_target "$TARGET"
 # boundary *is* differs by target -- so this dispatches on the target rather
 # than applying one test everywhere.
 
-if [ "$TARGET" = local ]; then
+if [ "$WK_TARGET_KIND" = local ]; then
     # Claude is already in here -- this *is* the workspace, and the host verified
     # the boundary when it started this one. Launching another agent from inside
     # would nest a relaxed-permission session in a sandbox nothing re-measured,
@@ -34,12 +34,12 @@ if [ "$TARGET" = local ]; then
     die "already inside workspace '$(wk_self)' -- run 'claude' directly"
 fi
 
-if [ "$TARGET" = remote ]; then
+if [ "$WK_TARGET_KIND" = remote ]; then
     die "refusing to run Claude against a remote target: it is a shared machine
     with no isolation at all. Use a container or vm workspace."
 fi
 
-if [ "$TARGET" = container ]; then
+if [ "$WK_TARGET_KIND" = container ]; then
     # `wk verify` measures the properties from inside the workspace: no network
     # interface, egress refused outside the allowlist, no path with the proxy
     # bypassed, no host filesystem. If any of that has regressed -- a
@@ -48,7 +48,7 @@ if [ "$TARGET" = container ]; then
     "$WK_ROOT/cmd/verify" "$NAME" || die "refusing to run: the sandbox is not intact (see above)"
 fi
 
-if [ "$TARGET" = vm ]; then
+if [ "$WK_TARGET_KIND" = vm ]; then
     # Deliberately NOT `wk verify`. Every property that check measures is a
     # container property -- no network interface, a unix-socket proxy -- and a
     # macOS guest has none of them by construction. Its egress is filtered from

@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+#
+# wk remote setup <target> -- provision a shared build machine.
+#
+# The companion to `wk pi setup`: it works against a live machine over ssh and
+# changes nothing about how that machine is installed. Here the constraint is
+# not a read-only rootfs but other people -- a build box belongs to everyone
+# who logs into it, so **this never needs root and never asks for it**, and
+# everything it leaves behind is under $HOME and reversible.
+#
+# What it is for: making `wk` work *on* the box as well as against it. After
+# this, a shell there has zsh, `wk` on PATH, and a target that resolves to the
+# same workspaces, the same paths and the same job policy as the workstation
+# driving it -- with the ssh step dropped.
+#
+# It also asks about what it finds. A shared machine accumulates: an old
+# wk-tools clone, a 13 GB mirror that a system-wide one has made redundant,
+# workspaces nobody remembers. Removing any of that is a decision, so it is a
+# question, once, with the size attached -- never a silent tidy-up.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+ACTION="${1:-}"; TARGET="${2:-}"
+[ "$ACTION" = setup ] && [ -n "$TARGET" ] || die "usage: wk remote setup <target>
+    <target> is a machine: an ssh destination that already works, which
+    becomes the target name. See docs/HANDOFF-linux-remote.md."
+
+require_name "$TARGET"
+
+# --- the conf ----------------------------------------------------------------
+# Offered rather than demanded. load_target would refuse an unknown target with
+# the file to write, which is the right answer when a command was going to act
+# on it -- but this command's whole job is to set the machine up, so writing
+# the two lines is part of that rather than a prerequisite for it.
+if ! target_kind "$TARGET" >/dev/null 2>&1; then
+    conf=$(target_conf "$TARGET")
+    info "no target conf yet: $conf"
+    log  "  probing $TARGET over ssh..."
+    ssh -o BatchMode=yes -o ConnectTimeout=10 "$TARGET" true 2>/dev/null \
+        || die "cannot ssh to '$TARGET' non-interactively.
+    A target is named after an ssh destination that already works, keys and
+    ProxyJump included:  ssh -o BatchMode=yes $TARGET true"
+
+    confirm "write $conf for this machine?" || die "aborted -- nothing was changed"
+    ensure_dir "$(dirname "$conf")"
+    cat > "$conf" <<EOF
+# A shared build machine, reached through the ssh entry of the same name.
+# Written by 'wk remote setup'.
+#
+# WK_REMOTE_ROOT defaults to ~/wk on the machine. WK_REMOTE_MAX_JOBS is a
+# ceiling on top of the polite calculation, applied however idle it looks.
+WK_REMOTE_MAX_JOBS=16
+EOF
+    changed "wrote $conf"
+fi
+
+load_target "$TARGET"
+[ "$WK_TARGET_KIND" = remote ] \
+    || die "'$TARGET' is a $WK_TARGET_KIND target -- there is nothing to provision"
+
+# --- probe -------------------------------------------------------------------
+info "probing $WK_REMOTE_HOST"
+PROBE=$(_rsh '
+    hostname
+    . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}"
+    uname -m; nproc
+    awk "/^MemTotal:/ {print int(\$2/1024)}" /proc/meminfo
+    command -v zsh || echo -
+    command -v ccache || echo -
+    command -v flock || echo -
+    df -Pk "$HOME" | awk "NR==2 {print int(\$4/1024/1024)}"
+') || die "cannot reach $WK_REMOTE_HOST"
+
+r_host=$(printf '%s\n' "$PROBE" | sed -n 1p)
+r_os=$(printf   '%s\n' "$PROBE" | sed -n 2p)
+r_arch=$(printf '%s\n' "$PROBE" | sed -n 3p)
+r_cores=$(printf '%s\n' "$PROBE" | sed -n 4p)
+r_mem=$(printf  '%s\n' "$PROBE" | sed -n 5p)
+r_zsh=$(printf  '%s\n' "$PROBE" | sed -n 6p)
+r_ccache=$(printf '%s\n' "$PROBE" | sed -n 7p)
+r_flock=$(printf '%s\n' "$PROBE" | sed -n 8p)
+r_freegb=$(printf '%s\n' "$PROBE" | sed -n 9p)
+
+log "  $r_host: $r_os, $r_arch, $r_cores cores, $((r_mem / 1024)) GB, ${r_freegb} GB free in \$HOME"
+log "  root: $(_remote_root)   jobs ceiling: $WK_REMOTE_MAX_JOBS"
+[ "$r_zsh" = - ]    && warn "no zsh (needs root to install; bash stays)"    || log "  zsh: $r_zsh"
+[ "$r_ccache" = - ] && warn "no ccache (every build starts cold)"           || log "  ccache: $r_ccache"
+[ "$r_flock" = - ] && die "no flock on this machine: two of your own builds could not be
+    serialised, which is the one thing a shared machine must not allow."
+
+# A shared WebKit repository, if the machine advertises one. Worth reporting
+# even when nothing is done with it, because it is the difference between a
+# workspace costing 13 GB and costing a working tree.
+REF=$(_remote_reference)
+if [ -n "$REF" ]; then
+    info "this machine publishes a WebKit repository: $REF"
+    log  "  workspaces will be cloned from it (hardlinked objects), not from a mirror of ours"
+else
+    log  "  no shared WebKit repository advertised -- a mirror under the root will be kept instead"
+fi
+
+# The MOTD is also where these machines say a home directory is shared between
+# several of them, and that changes what a workspace name means: the same name
+# on two boxes is the same directory, with one build tree between them.
+# Read once into a variable rather than piped: `cat` of the files that are not
+# there exits non-zero, and under `pipefail` that fails the whole pipeline even
+# when grep matched -- which is exactly how this warning silently never fired.
+MOTD=$(_rsh 'cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null' 2>/dev/null || true)
+if printf '%s\n' "$MOTD" | grep -qiE 'home *(dir|directory)?.*shared'; then
+    warn "this machine says its home directory is shared with other boxes."
+    log  "  A workspace name is then the same directory on all of them, and one build
+  tree cannot hold two architectures. Give each box its own WK_REMOTE_ROOT
+  (in its conf) if you use more than one."
+fi
+
+# --- provision ---------------------------------------------------------------
+info "pushing wk-tools to $(t_tools '')"
+t_sync_tools ""
+
+_rsh "env WK_REMOTE_TARGET=$(sh_quote "$TARGET") \
+          WK_REMOTE_ROOT=$(sh_quote "$(_remote_root)") \
+          WK_REMOTE_MAX_JOBS=$(sh_quote "$WK_REMOTE_MAX_JOBS") \
+          WK_REMOTE_REFERENCE=$(sh_quote "$REF") \
+          bash $(sh_quote "$(t_tools '')/remote/provision.sh")"
+
+# --- offer to clean up -------------------------------------------------------
+# Asked, never assumed, and each with its size, because on a machine whose MOTD
+# asks everyone to keep disk use down "13 GB" is the whole argument. Declining
+# every one of these leaves a working setup; `confirm` declines by itself when
+# there is no terminal, so an unattended re-run removes nothing.
+info "looking for things to clean up"
+cleaned=0
+
+# A wk-tools checkout from before this command existed. Ours now lives under
+# the remote root and is re-pushed on every build, so an older one somewhere
+# else is a second copy that nothing updates -- and, until provisioning just
+# fixed it, the source of a broken line in every interactive shell.
+OLD_TOOLS=$(_rsh 'for d in "$HOME"/Development/wk-tools "$HOME"/wk-tools; do
+                      [ -d "$d" ] && echo "$d"
+                  done' 2>/dev/null || true)
+for d in $OLD_TOOLS; do
+    [ "$d" = "$(t_tools '')" ] && continue
+    sz=$(_rsh "du -sh $(sh_quote "$d") 2>/dev/null | cut -f1" || echo '?')
+    log "  $d ($sz) -- an older wk-tools checkout; the live one is $(t_tools '')"
+    if confirm "remove $d from $r_host?"; then
+        _rsh "rm -rf $(sh_quote "$d")" && changed "removed $d"
+        cleaned=$((cleaned + 1))
+    fi
+done
+
+# Our own mirror, once the machine's own repository has made it redundant.
+if [ -n "$REF" ]; then
+    M="$(_remote_root)/mirror"
+    if _rsh "test -d $(sh_quote "$M")" 2>/dev/null; then
+        sz=$(_rsh "du -sh $(sh_quote "$M") 2>/dev/null | cut -f1" || echo '?')
+        log "  $M ($sz) -- redundant now that $REF is used instead"
+        warn "  existing workspaces cloned from it borrow its objects (--shared) and would break."
+        if confirm "remove the mirror at $M?"; then
+            _rsh "rm -rf $(sh_quote "$M")" && changed "removed $M"
+            cleaned=$((cleaned + 1))
+        fi
+    fi
+fi
+
+# Workspaces the machine has and this workstation does not know about. On a
+# shared home these may belong to another box, so they are described rather
+# than judged.
+ORPHANS=""
+for w in $(t_list 2>/dev/null | cut -f1 || true); do
+    target_of "$w" >/dev/null 2>&1 || ORPHANS="$ORPHANS $w"
+done
+if [ -n "$ORPHANS" ]; then
+    log "  workspaces on $r_host that this machine has no record of:$ORPHANS"
+    log "  (another machine sharing this home may own them -- check before removing)"
+    for w in $ORPHANS; do
+        sz=$(_rsh "du -sh $(sh_quote "$(_remote_ws "$w")") 2>/dev/null | cut -f1" || echo '?')
+        if confirm "remove workspace '$w' ($sz) from $r_host?"; then
+            t_destroy "$w"
+            cleaned=$((cleaned + 1))
+        fi
+    done
+fi
+
+[ "$cleaned" -gt 0 ] || log "  nothing removed"
+
+info "$TARGET is ready"
+log "  from here:   wk new <ws> --target $TARGET"
+log "  on the box:  ssh $WK_REMOTE_HOST, then wk ls / wk build <ws> <config>"

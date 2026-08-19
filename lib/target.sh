@@ -24,8 +24,11 @@
 #   t_needs_base       0 if `wk new` must resolve a base snapshot first
 #   t_start / t_stop   lifecycle, for targets that have one
 #   t_cores/t_mem_mb   the resources the target actually has
+#   t_load             the load already on the target, for the polite sizing
+#   t_ccache_dir       where ccache keeps its cache inside the target
 #   t_store_init       create the host-side directories this target needs
 #   t_ready            block until a new workspace finished initialising
+#   t_exec_build       t_exec, for a build specifically (see below)
 #
 # One driver is the degenerate case of all this: targets/local.sh, where the
 # target is the machine the command is already running on -- a workspace acting
@@ -50,6 +53,10 @@ t_src()        { echo "/src/WebKit"; }
 # lib/arch.sh.
 t_arch()       { echo native; }
 t_tools()      { echo "/opt/wk-tools"; }
+# The bind-mounted store cache in a container, and inert on the Apple ports,
+# which do not use ccache at all. A target that is somebody else's machine has
+# to answer with a directory of its own -- see targets/remote.sh.
+t_ccache_dir() { echo "/ccache"; }
 t_sync_tools() { :; }
 t_ssh_host()   { echo "wk-$1"; }
 t_needs_base() { return 0; }
@@ -69,6 +76,21 @@ t_mem_mb()     { envelope_mem_mb; }  # t_mem_mb <name>
 # is asked to. Defaults to the plain exec, which is right wherever the driver
 # already gives you a terminal.
 t_exec_tty()   { t_exec "$@"; }
+
+# The exec `wk build` uses, which is the same one everywhere except where a
+# build specifically has to be serialised. On a shared machine two of your own
+# builds must not stack, and the lock that guarantees it belongs on the build
+# alone: applied to t_exec it would also make `wk run`, `wk status` and every
+# small probe block for up to an hour behind a build, which is a hang with no
+# explanation attached.
+t_exec_build() { t_exec "$@"; }
+
+# The load already on the target, in whole cores, as `build_jobs polite`
+# subtracts it. Defaults to this machine's own -- correct for a container,
+# which shares the host's kernel and therefore its load average, and for the
+# degenerate local target, which *is* this machine. A driver whose target is
+# another machine has to answer for that machine instead.
+t_load() { awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0; }
 
 # Per-workspace target registry.
 #
@@ -116,13 +138,36 @@ wk_marker() { echo "${WK_MARKER:-$HOME/.wk-workspace}"; }
 
 in_workspace() { [ -f "$(wk_marker)" ]; }
 
-# One `key=value` field from the marker; empty when the marker or the key is
+# One `key=value` field from a marker file; empty when the file or the key is
 # missing. Comments and blank lines are ignored, so the file can explain itself.
-wk_marker_field() {
-    local f; f=$(wk_marker)
+marker_field() {
+    local f="$1" k="$2"
     [ -f "$f" ] || return 0
-    awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$f"
+    awk -F= -v k="$k" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$f"
 }
+
+wk_marker_field() { marker_field "$(wk_marker)" "$1"; }
+
+# --- am I a machine that *hosts* workspaces? ---------------------------------
+# A shared build box is neither a workstation nor a workspace. It holds several
+# workspaces at once, so the marker above -- which says "this machine IS a
+# workspace" and names one -- is the wrong shape for it. This one says "this
+# machine is the far end of a remote target", and names which:
+#
+#   target=devbox-arm64-2
+#   root=/home/you/wk
+#
+# Written by `wk remote setup`, and what makes `wk` usable *on* the box: with
+# it, a bare `wk ls` or `wk build bug-238 jsc-release` there resolves to the
+# same driver, the same paths and the same job policy as the workstation
+# driving it -- with the ssh step dropped (WK_REMOTE_LOCAL, targets/remote.sh).
+#
+# A file rather than an exported variable, for the same reason as the workspace
+# marker: it has to be true for `ssh box wk status` and for a cron line, not
+# only for shells that sourced a profile.
+wk_remote_marker()   { echo "${WK_REMOTE_MARKER:-$HOME/.wk-remote}"; }
+in_remote_host()     { [ -f "$(wk_remote_marker)" ]; }
+wk_remote_field()    { marker_field "$(wk_remote_marker)" "$1"; }
 
 # The workspace this machine *is*, or empty on a host. This is what makes the
 # workspace argument optional inside one: `wk build jsc-release` rather than
@@ -134,7 +179,12 @@ wk_self() { wk_marker_field name; }
 # that is `container` -- the default, and what every workspace predating the
 # registry is. Inside a workspace it is `local`, because there is nothing else
 # in there: no podman, no tart, and one workspace, which is this machine.
-default_target() { in_workspace && echo local || echo container; }
+default_target() {
+    if in_workspace; then echo local; return 0; fi
+    local t; t=$(wk_remote_field target)
+    if [ -n "$t" ]; then echo "$t"; return 0; fi
+    echo container
+}
 
 # The config to build, run or test when the caller names none.
 #
@@ -206,19 +256,123 @@ EOF
 target_all() {
     local d f t seen=" container "
     echo container
+
+    # On a shared build machine the workspaces were created from somewhere
+    # else, so nothing here is registered -- and without this a bare `wk
+    # status` on the box would walk one target it does not have and report
+    # nothing about the ones it does.
+    t=$(wk_remote_field target)
+    if [ -n "$t" ]; then seen="$seen$t "; echo "$t"; fi
+
     d="$(wk_state_dir)/targets"
+    if [ -d "$d" ]; then
+        for f in "$d"/*; do
+            [ -f "$f" ] || continue
+            t=$(cat "$f")
+            case "$seen" in *" $t "*) continue ;; esac
+            seen="$seen$t "
+            echo "$t"
+        done
+    fi
+
+    # Every machine that has been configured, whether or not a workspace is
+    # currently pinned to it. A machine you have set up is a target you have,
+    # and `wk status` should say what is on it -- including on the machine
+    # itself, where nothing is registered at all because workspaces are created
+    # from the workstation.
+    d=$(target_conf_dir)
     [ -d "$d" ] || return 0
-    for f in "$d"/*; do
+    for f in "$d"/*.conf; do
         [ -f "$f" ] || continue
-        t=$(cat "$f")
+        t=$(basename "$f" .conf)
         case "$seen" in *" $t "*) continue ;; esac
         seen="$seen$t "
         echo "$t"
     done
 }
 
+# --- named targets -----------------------------------------------------------
+# A target name is either one of the four built-in kinds -- container, vm,
+# remote, local -- or the name of a machine configured under
+# ~/.config/wk/targets/<name>.conf.
+#
+# The distinction exists because `remote` is the one kind you can have several
+# of. There is exactly one podman, one Tart and one local machine, so those
+# names identify a driver *and* the thing it drives; a shared build box does
+# not, and `wk new bug-238 --target remote` on a laptop with three of them
+# configured would be a coin toss. So the machine's own name is the target:
+#
+#   wk new bug-238 --target devbox-arm64-2
+#
+# and the conf next to that name says which driver to use and how to reach it.
+# Everything downstream keeps working unchanged because the registry already
+# records a target per workspace as an opaque string.
+target_conf_dir() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/wk/targets"; }
+target_conf()     { echo "$(target_conf_dir)/$1.conf"; }
+
+# The driver a target name selects. The built-in kinds are their own kind;
+# anything else must have a conf, and a conf that does not say otherwise
+# describes a remote machine -- the only kind there can be several of, and so
+# the only kind worth naming.
+target_kind() {
+    case "$1" in
+        container|vm|remote|local) echo "$1"; return 0 ;;
+    esac
+    local c k
+    c=$(target_conf "$1")
+    [ -f "$c" ] || return 1
+    k=$(awk -F= '/^[[:space:]]*WK_TARGET_KIND[[:space:]]*=/ {
+            gsub(/[ \t"'"'"']/, "", $2); print $2; exit }' "$c")
+    echo "${k:-remote}"
+}
+
+# Per-target driver state, cleared before every load.
+#
+# A driver is a sourced file that sets globals, and more than one target can be
+# loaded in a single process -- `wk status` with no argument walks every target
+# there is. Without this the second remote machine would inherit the first
+# one's host, root and measured capacity, and confidently report its workspaces
+# as living somewhere else.
+#
+# The environment still wins over a conf, so what it supplied is snapshotted
+# once, before any conf has been read, and restored on each load. The variables
+# are named here rather than in the driver because the reset has to happen
+# *before* the conf is sourced, and the conf is what would otherwise be undone.
+_target_reset_vars() {
+    if [ -z "${_WK_ENV_SEEDED:-}" ]; then
+        _WK_ENV_REMOTE_HOST="${WK_REMOTE_HOST:-}"
+        _WK_ENV_REMOTE_ROOT="${WK_REMOTE_ROOT:-}"
+        _WK_ENV_REMOTE_MAX_JOBS="${WK_REMOTE_MAX_JOBS:-}"
+        _WK_ENV_REMOTE_REFERENCE="${WK_REMOTE_REFERENCE:-}"
+        _WK_ENV_SEEDED=1
+    fi
+    WK_REMOTE_HOST="$_WK_ENV_REMOTE_HOST"
+    WK_REMOTE_ROOT="$_WK_ENV_REMOTE_ROOT"
+    WK_REMOTE_MAX_JOBS="$_WK_ENV_REMOTE_MAX_JOBS"
+    WK_REMOTE_REFERENCE="$_WK_ENV_REMOTE_REFERENCE"
+    WK_REMOTE_LOCAL=""
+    WK_MAX_JOBS=""
+    unset _WK_REMOTE_PROBED _WK_REMOTE_HOME _WK_REMOTE_CORES \
+          _WK_REMOTE_LOAD _WK_REMOTE_MEM _WK_REMOTE_REF_PROBED
+}
+
+# Every workspace a loaded target has, from both sides of it.
+#
+# The local store knows what this machine created -- what a workspace is pinned
+# to, its build log -- and the driver knows what actually exists over there.
+# Usually the same set, and not always: a remote target's workspaces live on
+# the far machine, so `wk ls` run *on* that machine has an empty store and a
+# full ws directory, and a workspace deleted out from under the store has the
+# opposite. Listing only one side is how a machine ends up reporting "no
+# workspaces" while holding six.
+target_workspaces() {
+    { list_workspaces 2>/dev/null || true
+      t_list 2>/dev/null | cut -f1 || true
+    } | grep -v '^[[:space:]]*$' | sort -u
+}
+
 load_target() {
-    local t="${1:-container}"
+    local t="${1:-container}" kind conf
 
     # $WK_STORE is target-dependent -- a vm workspace keeps its state under
     # XDG state on the host, a container's lives in /var/lib/wk -- and drivers
@@ -226,12 +380,36 @@ load_target() {
     # in one process does not inherit the first one's store.
     : "${WK_STORE_DEFAULT:=${WK_STORE:-/var/lib/wk}}"
     WK_STORE="$WK_STORE_DEFAULT"
-    case "$t" in
-        container|vm|remote|local) ;;
-        *) die "unknown target '$t' (container, vm, remote, local)" ;;
-    esac
-    # shellcheck disable=SC1090
-    . "$WK_ROOT/targets/$t.sh"
+
+    kind=$(target_kind "$t") || die "unknown target '$t'.
+    The built-in ones are container, vm, remote and local. Anything else is a
+    machine, and needs $(target_conf "$t"):
+
+        WK_REMOTE_HOST=$t          # an ssh destination that already works
+        WK_REMOTE_ROOT=/home/you/wk
+        WK_REMOTE_MAX_JOBS=16"
+
+    # Set before either file is read: a driver that can have several instances
+    # has to know which one it is, and both the conf and the driver's own
+    # defaults are written in terms of the name.
+    #
+    # WK_TARGET is the name, WK_TARGET_KIND is the driver behind it. Commands
+    # that branch on what kind of thing they are talking to must use the kind:
+    # `[ "$TARGET" = remote ]` was true for every remote target while there was
+    # only one possible name for one.
     WK_TARGET="$t"
-    export WK_TARGET
+    WK_TARGET_KIND="$kind"
+    export WK_TARGET WK_TARGET_KIND
+
+    _target_reset_vars
+
+    # The conf first and the driver second, so that the driver's own
+    # ${VAR:-default} assignments fill in only what the conf left unsaid.
+    conf=$(target_conf "$t")
+    if [ -f "$conf" ]; then
+        # shellcheck disable=SC1090
+        . "$conf"
+    fi
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/targets/$kind.sh"
 }

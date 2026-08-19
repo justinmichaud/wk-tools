@@ -23,7 +23,7 @@ load_target "$TARGET"
 # Refuse before asking. The driver refuses too -- a workspace cannot delete the
 # filesystem it is running on -- but prompting for a decision that cannot be
 # carried out either way is worse than saying so straight away.
-if [ "$TARGET" = local ]; then t_destroy "$NAME"; fi
+if [ "$WK_TARGET_KIND" = local ]; then t_destroy "$NAME"; fi
 
 ws=$(wk_ws_dir "$NAME")
 [ -d "$ws" ] || [ "$(t_info "$NAME")" != absent ] \

@@ -24,7 +24,7 @@ load_target "$TARGET"
 printf '%-20s %-12s %-20s %-8s %8s\n' NAME STATE BASE ARCH CHANGES
 
 found=0
-for ws in $(list_workspaces); do
+for ws in $(target_workspaces); do
     found=1
     state=$(t_info "$ws")
     base=$(ws_base_id "$ws" 2>/dev/null || echo '?')
@@ -32,7 +32,15 @@ for ws in $(list_workspaces); do
     printf '%-20s %-12s %-20s %-8s %8s\n' "$ws" "$state" "$base" "$(t_arch "$ws")" "$size"
 done
 
-[ "$found" -eq 1 ] || log "(no workspaces -- 'wk new <name>' to create one)"
+# The advice differs by where you are standing: a shared build machine cannot
+# create one, and saying so beats sending someone to a command that refuses.
+if [ "$found" -ne 1 ]; then
+    if in_remote_host; then
+        log "(no workspaces here -- from the workstation: wk new <name> --target $(wk_remote_field target))"
+    else
+        log "(no workspaces -- 'wk new <name>' to create one)"
+    fi
+fi
 
 echo
 cur=$(current_base 2>/dev/null || echo none)

@@ -22,7 +22,8 @@ usage() {
 usage: wk <command> [args]
 
 workspaces
-  new <name> [--target T]   create a workspace (container | vm | remote)
+  new <name> [--target T]   create a workspace (container | vm | remote,
+                            or a machine named in ~/.config/wk/targets/)
   ls                        list workspaces
   enter <name> [--zed|cmd]  interactive shell (GPU/desktop integration on Linux)
   build <name> <config>     build, with derived job count and nice level
@@ -52,6 +53,7 @@ hosts and machines
   backup                    write live desktop settings back into the repo
   vm <sub>                  macOS VM lifecycle: ls|new|start|stop|ip|enter|sync|base|rm
   pi <sub>                  provision a Raspberry Pi onto the tailnet
+  remote setup <target>     provision a shared build machine (never needs root)
   quiesce on|off|status     quiet the machine for benchmarking
   session on|gdm|off|status a real GPU session, or a real desktop (Linux)
     session on [--bmc]      benchmark kiosk; --bmc moves it to the BMC to
@@ -131,7 +133,21 @@ is_targetless() {
 # those act on the checkout or on the workspace, which is exactly what is here.
 is_host_only() {
     case "$1" in
-        setup|backup|vm|mcp|quiesce|session|pi|stop|start|sync|gc) return 0 ;;
+        setup|backup|vm|mcp|quiesce|session|pi|remote|stop|start|sync|gc) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Creating and destroying a workspace belongs to the machine that keeps the
+# record of it. A shared build box is the far end of a target, not the owner of
+# one: it holds checkouts, and the registry that says which target a workspace
+# belongs to -- and therefore where `wk build bug-238` should go -- lives on the
+# workstation. A `wk new` there would write half that state on the wrong
+# machine, and a `wk rm` there would delete the checkout while the workstation
+# went on listing it.
+is_lifecycle() {
+    case "$1" in
+        new|rm) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -143,7 +159,7 @@ is_host_only() {
 # podman machine, which has neither gh nor a credential to give it one.
 is_host_command() {
     case "$1" in
-        setup|doctor|backup|vm|mcp|quiesce|session|pi|key|report|stop|start|help|-h|--help) return 0 ;;
+        setup|doctor|backup|vm|mcp|quiesce|session|pi|remote|key|report|stop|start|help|-h|--help) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -165,6 +181,33 @@ is_readonly_report() {
 
 machine_running() {
     [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ]
+}
+
+# `wk status` with no argument reports on every target there is -- and on a
+# macOS host that claim was false. The dispatcher forwards a bare report into
+# the podman VM, whose registry has never heard of a macOS guest or a shared
+# build machine: both are driven from out here, and both were silently missing
+# from the one command whose whole job is "what is happening".
+#
+# So the host-side targets are reported here and the container half is
+# forwarded, because that store is only readable in there. Not exec'd, unlike
+# every other forward, so the two halves' exit codes can be combined: this
+# command promises a machine-readable status and a caller must not be told
+# about the containers alone.
+bare_status() {
+    local impl="$1" t rc worst=0
+    for t in $(target_all); do
+        [ "$t" = container ] && continue
+        WK_TARGET="$t" "$impl" || { rc=$?; [ "$rc" -gt "$worst" ] && worst=$rc; }
+    done
+
+    if machine_running; then
+        ( forward_to_vm status ) || { rc=$?; [ "$rc" -gt "$worst" ] && worst=$rc; }
+    elif command -v podman >/dev/null 2>&1; then
+        warn "the podman machine '$WK_MACHINE' is stopped, so container workspaces are not included"
+        log  "  'wk start' to bring it up"
+    fi
+    exit "$worst"
 }
 
 forward_to_vm() {
@@ -206,6 +249,30 @@ main() {
     Run it on the host instead."
     fi
 
+    # A shared build machine is not a workstation either, and it is not the
+    # owner of the workspaces it holds.
+    #
+    # The host-only list acts on a host's own store or hardware, and two of
+    # them would do more than no-op, which is why this is a refusal rather than
+    # a matter of taste: `wk sync` would build a 13 GB mirror in a home
+    # directory whose MOTD asks everyone to keep disk use down, and `wk gc`
+    # would prune a store that is not where this machine's workspaces come
+    # from.
+    if in_remote_host && is_host_only "$cmd"; then
+        die "'wk $cmd' acts on a workstation's own store or hardware, and this is
+    the shared build machine for target '$(wk_remote_field target)'.
+    Run it on the workstation instead. What works here: ls, status, build,
+    run, test, logs, enter."
+    fi
+
+    if in_remote_host && is_lifecycle "$cmd"; then
+        die "workspaces are created and destroyed from the workstation, and this is
+    the shared build machine for target '$(wk_remote_field target)'.
+    Run 'wk $cmd' there: it keeps the record of which target a workspace
+    belongs to, and that record is what sends a later 'wk build' back here.
+    What works here: build, run, test, logs, status, ls, enter."
+    fi
+
     if in_workspace; then
         # Inside a workspace every command acts on this machine. There is no
         # podman machine to forward to and there never can be -- a container has
@@ -241,6 +308,12 @@ main() {
     the podman machine has no GPU and there is no compositor to draw into.
     Use a macOS guest instead -- 'wk vm new <name>', then 'wk gui <name>',
     which runs MiniBrowser on the guest's own desktop with the real GPU."
+            fi
+
+            # Before the readonly-report shortcut below, which would answer
+            # for the containers alone and exit.
+            if [ "$cmd" = status ] && [ $# -eq 0 ]; then
+                bare_status "$impl"
             fi
 
             if is_readonly_report "$cmd" && ! machine_running; then

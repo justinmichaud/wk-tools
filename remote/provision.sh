@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+#
+# Runs on a shared build machine, over ssh from `wk remote setup`.
+#
+# The one rule that shapes all of it: **nothing here may need root.** These are
+# other people's machines. Some of them will hand you sudo and it still does
+# not matter -- a tool that installs packages, edits /etc or changes a login
+# shell on a box six other people are logged into is a tool that gets banned,
+# and then the sandbox story has a hole in it where the build machine used to
+# be. So: everything lives under $HOME, every prerequisite is checked rather
+# than installed, and anything missing is reported instead of fixed.
+#
+# What it leaves behind:
+#
+#   ~/.wk-remote                        this machine hosts wk workspaces
+#   ~/.config/wk/targets/<target>.conf  ... and drives them without ssh
+#   ~/.bashrc + ~/.zshrc + ~/.bash_profile
+#                                       source the shared rc, which puts `wk`
+#                                       on PATH and moves bash aside for zsh
+#
+# Idempotent: `wk remote setup` is re-run after every change to this file, so
+# every step checks before acting.
+#
+# Deliberately non-interactive. Removing what a previous setup (or a previous
+# person) left behind is a decision, and decisions are asked for on the driving
+# side by `wk remote setup`, where there is a terminal to ask at.
+
+set -euo pipefail
+
+TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WK_ROOT="$TOOLS"
+. "$TOOLS/lib/common.sh"
+
+TARGET="${WK_REMOTE_TARGET:-}"
+ROOT="${WK_REMOTE_ROOT:-$HOME/wk}"
+MAX_JOBS="${WK_REMOTE_MAX_JOBS:-16}"
+REFERENCE="${WK_REMOTE_REFERENCE:-}"
+
+[ -n "$TARGET" ] || die "WK_REMOTE_TARGET is not set (run this through 'wk remote setup')"
+
+info "provisioning $(hostname) for target '$TARGET'"
+
+# --- prerequisites, checked and never installed ------------------------------
+# git and flock are load-bearing: without them there is no checkout and no
+# serialisation between two of your own builds. Everything else is the build's
+# problem and fails with its own error, which is a better error than anything
+# guessed here.
+_missing=""
+for _t in git flock; do
+    have "$_t" || _missing="$_missing $_t"
+done
+[ -z "$_missing" ] || die "missing on this machine:$_missing
+    Installing needs root, and this never asks for it. Ask the machine's
+    administrators, or use a target that has them."
+
+# ccache is optional and worth naming, because its absence is silent: builds
+# just stay cold forever.
+have ccache || warn "no ccache on this machine -- every build starts cold"
+
+# --- the markers -------------------------------------------------------------
+ensure_dir "$ROOT"
+ensure_dir "$ROOT/ws"
+ensure_dir "$ROOT/cache/ccache"
+
+write_file "$HOME/.wk-remote" 0644 <<EOF
+# wk: this machine hosts wk remote workspaces. Written by remote/provision.sh.
+#
+# It is not a workspace (there are several here) and not a workstation (it owns
+# no store, no VM and no hardware of yours), so \`wk\` reads this to know which
+# target it is the far end of -- and refuses the commands that only make sense
+# on a workstation.
+target=$TARGET
+root=$ROOT
+EOF
+
+# The same conf the workstation has, plus WK_REMOTE_LOCAL: on this machine the
+# driver runs its commands directly instead of over an ssh connection to
+# itself. One driver, one set of paths, one job policy, from either end.
+ensure_dir "$HOME/.config/wk" 0755
+ensure_dir "$HOME/.config/wk/targets" 0755
+write_file "$HOME/.config/wk/targets/$TARGET.conf" 0644 <<EOF
+# Written by remote/provision.sh on $(hostname). This is the machine itself.
+WK_TARGET_KIND=remote
+WK_REMOTE_LOCAL=1
+WK_REMOTE_ROOT=$ROOT
+WK_REMOTE_MAX_JOBS=$MAX_JOBS
+${REFERENCE:+WK_REMOTE_REFERENCE=$REFERENCE}
+EOF
+
+# --- shell -------------------------------------------------------------------
+# zsh, without root and without touching /etc/passwd.
+#
+# `chsh` is the obvious way and the wrong one here: it wants a password, it is
+# often refused outright under LDAP, and on these boxes $HOME is shared between
+# several machines -- so the login shell is one setting for all of them, which
+# is not ours to change. shell/bashrc instead execs zsh from bash when it finds
+# one, which is per-session, reversible with NO_ZSH=1, and invisible to anyone
+# else on the machine.
+if have zsh; then
+    info "zsh: $(command -v zsh) -- interactive bash sessions will move to it"
+else
+    warn "no zsh on this machine, and installing one needs root.
+  Staying in bash: the same rc configures both, so only the line editor differs."
+fi
+
+# Source the shared rc from every startup file a login or interactive shell
+# might read. The rc puts $TOOLS on PATH, so this is also what makes `wk` a
+# command here rather than a path to remember.
+_rc_line=". \"$TOOLS/shell/bashrc\""
+for _rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+    [ -f "$_rc" ] || : > "$_rc"
+
+    # Stale references to a wk-tools that has moved. Left in place they error
+    # on every interactive shell -- this machine had a `~/Development/wk-tools/
+    # bashrc` from before the tree was restructured, and it printed three
+    # `setopt: command not found` lines into the middle of every `wk run`.
+    if grep -qE 'wk-tools/bashrc' "$_rc" 2>/dev/null; then
+        _tmp="$(mktemp)"
+        # `|| true`: grep exits 1 when it prints nothing, which is exactly what
+        # happens if the file holds only stale lines -- and under `set -e` that
+        # would abort here rather than emptying the file.
+        grep -vE '(^|[[:space:]])(source|\.)[[:space:]]+.*wk-tools/bashrc' "$_rc" > "$_tmp" || true
+        mv "$_tmp" "$_rc"
+        changed "removed stale wk-tools/bashrc line from $_rc"
+    fi
+
+    if grep -qF "$TOOLS/shell/bashrc" "$_rc" 2>/dev/null; then
+        unchanged "shell rc $_rc"
+    else
+        printf '\n# wk-tools shared shell configuration\n%s\n' "$_rc_line" >> "$_rc"
+        changed "source wk-tools/shell/bashrc from $_rc"
+    fi
+done
+unset _rc _rc_line _tmp _t _missing
+
+info "provisioned. On this machine:"
+log  "  wk ls / wk status            what is here"
+log  "  wk build <ws> <config>       polite: sized from this machine's load"
+log  "  wk run <ws> -- <args>        run jsc from that workspace's build"
+log  "  wk test <ws> / wk logs <ws>  the rest of the in-workspace interface"
+log  ""
+log  "  Workspaces are created and destroyed from the workstation -- it keeps"
+log  "  the record of which machine each one lives on."

@@ -248,8 +248,11 @@ config_build_env() {
     local archcmake; archcmake=$(arch_cmake "$arch" "$CFG_PORT")
     [ -n "$archcmake" ] && cmakeargs="$cmakeargs $archcmake"
 
+    # /ccache is the container's bind-mounted store cache and the default for
+    # everything that has one; a target on another machine sets WK_CCACHE_DIR
+    # to a directory that exists over there. See t_ccache_dir.
     CFG_ENV=(
-        "CCACHE_DIR=/ccache"
+        "CCACHE_DIR=${WK_CCACHE_DIR:-/ccache}"
         "NUMBER_OF_PROCESSORS=$jobs"
         "CMAKE_BUILD_PARALLEL_LEVEL=$jobs"
         "WK_JOBS=$jobs"

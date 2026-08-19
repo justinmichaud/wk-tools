@@ -97,18 +97,35 @@ done
 # Shared boxes get the polite calculation: other people are building too.
 POLITE=""
 NICE=10
-if [ "$TARGET" = remote ]; then POLITE=1; NICE=19; fi
+if [ "$WK_TARGET_KIND" = remote ]; then POLITE=1; NICE=19; fi
 
 # Size the build from what the *target* has, not from this machine's free
 # memory. Inside a container the kernel still reports the whole machine's
 # MemAvailable, so deriving jobs from it picks a number the cgroup will
 # OOM-kill mid-link; and for a macOS VM this half runs on the host, whose
 # memory has nothing to do with what the guest was booted with.
-if [ "$TARGET" != remote ]; then
+#
+# For a remote target none of the local numbers mean anything at all -- it is
+# somebody else's machine, reached over ssh -- so the driver's answers replace
+# the measurement instead of capping it, and the load average has to come from
+# over there as well. See avail_mem_mb().
+if [ "$WK_TARGET_KIND" = remote ]; then
+    WK_AVAIL_MB=$(t_mem_mb "$NAME")
+    WK_CGROUP_CORES=$(t_cores "$NAME")
+    WK_LOAD=$(t_load "$NAME")
+    export WK_AVAIL_MB WK_CGROUP_CORES WK_LOAD
+else
     WK_CGROUP_MB=$(t_mem_mb "$NAME")
     WK_CGROUP_CORES=$(t_cores "$NAME")
     export WK_CGROUP_MB WK_CGROUP_CORES
 fi
+
+# Where ccache keeps its cache inside the target. /ccache in a container, which
+# is the bind-mounted store cache; a directory of our own on a machine we share
+# with other people, whose cache is not ours to write to.
+WK_CCACHE_DIR=$(t_ccache_dir "$NAME")
+export WK_CCACHE_DIR
+
 JOBS=$(explain_jobs "$POLITE")
 
 # Everything above is resolution; everything below changes something. A dry run
@@ -169,8 +186,11 @@ log  "  stall warning after ${WK_STALL_SECONDS}s of silence; abort after ${WK_AB
 config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE" "$ARCH"
 
 set +e
+# t_exec_build, not t_exec: on a shared machine the build is the one thing that
+# has to be serialised against your own other builds, and the lock that does it
+# must not sit on every small command as well.
 run_watched "$LOG" -- \
-    t_exec "$NAME" env "${CFG_ENV[@]}" \
+    t_exec_build "$NAME" env "${CFG_ENV[@]}" \
         "$(t_tools "$NAME")/build/build-in-target.sh" "$@"
 rc=$?
 set -e

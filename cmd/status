@@ -48,9 +48,9 @@ report_one() {
     fi
 
     if [ "$kind" = build ]; then
-        printf '%-18s %-8s %-10s %s=%s' "$ws" "$TARGET" "$(t_info "$ws")" "$kind" "${state:-none}"
+        printf '%-18s %-16s %-10s %s=%s' "$ws" "$TARGET" "$(t_info "$ws")" "$kind" "${state:-none}"
     else
-        printf '%-18s %-8s %-10s %s=%s' "" "" "" "$kind" "${state:-none}"
+        printf '%-18s %-16s %-10s %s=%s' "" "" "" "$kind" "${state:-none}"
     fi
     case "$arch" in native|'') arch="" ;; *) arch=", $arch" ;; esac
     [ -n "$config" ] && printf ' (%s%s)' "$config" "$arch"
@@ -100,9 +100,12 @@ else
     found=0
     for TARGET in ${WK_TARGET:-$(in_workspace && default_target || target_all)}; do
         load_target "$TARGET"
-        for ws in $(list_workspaces); do found=1; report "$ws"; done
+        for ws in $(target_workspaces); do found=1; report "$ws"; done
     done
-    [ "$found" -eq 1 ] || log "(no workspaces)"
+    # Named when the caller asked about one target in particular -- a macOS
+    # host reports the host-side targets one pass at a time, and three bare
+    # "(no workspaces)" lines in a row say nothing about which.
+    [ "$found" -eq 1 ] || log "(no workspaces${WK_TARGET:+ on $WK_TARGET})"
 fi
 
 exit "$worst"

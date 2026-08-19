@@ -162,16 +162,27 @@ Every command runs against a target, behind one driver contract:
 | `container` | overlay + no network interface + no host mounts | the default |
 | `vm` | VM + Softnet default-deny + the same proxy | Apple ports, Tart; 2 running guests per host |
 | `remote` | **none** | shared build boxes; polite, no containers |
+| `local` | n/a — it *is* the workspace | what `wk` uses inside a container or guest |
 
-There is no `local` target: work never runs directly on a workstation.
+Work never runs directly on a workstation. `local` is the degenerate driver a
+workspace uses on itself, which is how `wk build` works from inside one; it is
+never a target you ask for.
+
+`remote` is the one target you can have several of, so a remote target is named
+after the machine — `--target devbox-arm64-2`, configured in
+`~/.config/wk/targets/devbox-arm64-2.conf`. `wk remote setup <machine>`
+provisions one, without ever needing root on it, and leaves `wk` usable *on*
+the machine as well as against it.
 
 A workspace remembers the target it was created with, so only `wk new` ever
 needs `--target`. On macOS that also decides whether a command is forwarded
 into the podman VM at all: only container workspaces live there.
 
 Shared build machines are treated as someone else's machine too — job count
-comes from live load average, builds run at `nice 19`, and a `flock` stops two
-of your own builds from stacking.
+comes from *that* machine's live load average and free memory, builds run at
+`nice 19` under a ceiling, and a `flock` stops two of your own builds from
+stacking. There is no sandbox there, so `wk claude` and `wk verify` refuse a
+remote target outright.
 
 ## Claude
 

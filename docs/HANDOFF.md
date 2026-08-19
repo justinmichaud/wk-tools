@@ -202,13 +202,43 @@ alias IP rather than each being named.
    than write the EEPROM — see the rpi5 section of
    `docs/HANDOFF-benchmarking.md`.
 
-4. **Remote target** — `docs/HANDOFF-linux-remote.md`
-   `targets/remote.sh` has never been run. Write a real
-   `~/.config/wk/targets/<name>.conf`, run the driver contract end to end
-   (`t_create`/`t_exec`/`t_info`/`t_list`/`t_destroy`), decide what `wk sync`
-   means remotely, and fix the `t_exec` `$*`-interpolation quoting bug before
-   it gets a second caller. `wk status`/`wk logs` need a decision about
-   local-vs-remote status files.
+4. **Remote target — DONE 2026-08-19** — `docs/HANDOFF-linux-remote.md`
+   Run end to end against `devbox-arm64-2` (80 cores, Debian 12, through a
+   ProxyJump) — and driven from the **macOS host**, not from Linux, because
+   the driver is host-agnostic and the target is a Linux box either way. The
+   contract, the conf, `wk sync`'s remote meaning, the status-file question and
+   the `$*` quoting bug are all answered in the handoff.
+   The shape that came out of it: a target name can now be a *machine*
+   (`--target devbox-arm64-2`, resolved through
+   `~/.config/wk/targets/<name>.conf`), because remote is the one target you
+   can have several of — so `WK_TARGET` is the name and `WK_TARGET_KIND` is the
+   driver, and commands branch on the kind.
+   Two findings beyond the driver. Job sizing measured the *driving* machine
+   for every target: on a macOS host `/proc/loadavg` does not exist, so a
+   shared box always looked idle — `lib/resources.sh` now takes `WK_AVAIL_MB`,
+   `WK_LOAD` and `WK_MAX_JOBS` from the driver. And a bare `wk status` on a
+   macOS host reported containers only, because the dispatcher forwards it into
+   the podman VM whose registry has never heard of a guest or a build box; it
+   had been hiding the `vm` target the same way.
+   Left over, and not a wk problem: Debian 12's clang 18 + libstdc++ 12 has no
+   `<format>`, which trunk's WTF has required since 2026-06-16, so *trunk*
+   cannot be built on that box without the container SDK (step 6). Releases up
+   to 2.52.x build there normally.
+
+   **Extended the same day** with `wk remote setup <target>`, which provisions
+   a shared machine without ever needing root on it: zsh through the shared rc
+   rather than `chsh`, `wk` on PATH there, and a `~/.wk-remote` marker plus
+   `WK_REMOTE_LOCAL=1` that let the same driver act on the same workspaces from
+   the machine itself with no ssh hop (`wk build` there, 2m30s against 8m47s
+   cold from the workstation). Workspaces are cloned from a WebKit repository
+   the machine advertises in its MOTD when it has one — hardlinked, 69 MB of
+   new `.git` against a 13 GB source — and the advertisement is verified first,
+   because buildbox4's names a path that no longer exists. What it finds lying
+   around it offers to remove, once, with the size attached; it never removes
+   anything unattended. The machine holds workspaces and does not own them:
+   `wk new` and `wk rm` refuse there, because the registry that says which
+   machine a workspace lives on -- and so where a later `wk build` goes -- is
+   the workstation's.
 
 5. **`docs/HANDOFF-other-remote.md`** (Windows/macOS remote targets, rentable
    cloud VMs without containers/virtualization, for PII-free perf testing) —
@@ -399,10 +429,15 @@ alias IP rather than each being named.
    (C6). C++ debugging was unaffected either way.
 
 3. **Cross-compile / remote-target verification on macOS** — companion to
-   lane A steps 4-6. Once the Linux side has the remote-target driver and
-   cross-compile transfer path working, confirm the same flows work when
-   driven from a macOS Tart VM (in particular `docs/HANDOFF-other-remote.md`'s
-   macOS-remote-target case, which is macOS-flavored by definition).
+   lane A steps 4-6. **The remote-target half is already done**, and done from
+   this machine: lane A step 4 was built and verified on the macOS *host*
+   (2026-08-19), which is the case that matters most here. What is left is the
+   Tart-guest case — a macOS guest driving a remote target, where ssh has to
+   cross the Softnet boundary as well — plus the cross-compile transfer path
+   once lane A step 6 lands, and `docs/HANDOFF-other-remote.md`'s
+   macOS-*as*-remote-target case, which is macOS-flavored by definition (the
+   driver's `nice`/`ionice`, `/proc/*` probe and ccache path are the three
+   places that assume Linux).
 
 4. **Yocto builds — macOS half** — `docs/HANDOFF-yocto.md`
    After lane A step 8 lands the build-side work, confirm the same yocto flow
@@ -460,15 +495,11 @@ alias IP rather than each being named.
 Standing rule, not a task: every task above gets a line item in
 `docs/TESTING.md` as it is picked up — apply it inline.
 
-Do these two early; each is a single short session:
+Do this one early; it is a single short session:
 
 - **`docs/HANDOFF-test-runner.md`** — build `wk selftest`, the autonomous
   runner for `docs/TESTING.md`. The plan is currently a hand-ticked checklist,
   so "run the test plan after a re-install" is not actually possible.
-- **`docs/HANDOFF-privacy-scrub.md`** — this repo is public and carries
-  internal hostnames, RFC1918 addresses, and a WiFi SSID/BSSID. Needs user
-  decisions (make private? scrub? rewrite history?), so it is mostly a
-  conversation.
 
 Genuine filler, in no order:
 
@@ -525,6 +556,12 @@ execute all of them — see the doc for the full list and what "done" means.
 
 ## Fixed / resolved since the individual handoffs were written
 
+- **The privacy scrub is closed, 2026-08-19, by user decision.** The repo stays
+  public and the internal hostnames and RFC1918 addresses in it are accepted as
+  published; no scrub of HEAD, and no history rewrite.
+  `docs/HANDOFF-privacy-scrub.md` is now the record of that decision rather
+  than a task. The line that still matters is unchanged: no credential, key or
+  token in the tree.
 - **`docs/HANDOFF-sdcard.md` was an empty placeholder** — now scoped (see
   lane A step 7) rather than an orphan zero-byte file.
 - **The macOS-proxy unification is done.** `docs/HANDOFF-macos-proxy.md` was

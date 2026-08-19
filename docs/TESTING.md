@@ -279,14 +279,87 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] the guest disk fits a build (Release tree ~39 GB) with room for a second
 
 ## 3. Remote target
-- [ ] `wk new <ws> --target remote` clones on the shared box
-- [ ] `wk build` runs niced, job count from live load
-- [ ] two builds serialise on the flock
+
+Verified 2026-08-19 against `devbox-arm64-2` (80 cores, 250 GB, Debian 12,
+reached through a ProxyJump), driven from the macOS host.
+
+- [V] a machine name is a target: `--target devbox-arm64-2` resolves through
+      `~/.config/wk/targets/<name>.conf` to the remote driver
+- [V] an unconfigured name is refused, and the error prints the conf to write
+- [V] two remote targets in one process do not inherit each other's host,
+      root or capacity
+- [V] `wk new <ws> --target <machine>` clones on the shared box (39 s from a
+      warm mirror; the mirror's own first fetch is 25 min / 13 GB)
+- [V] the mirror is created and fetched by the driver — there is no `wk sync`
+      for a remote target and there is not meant to be one
+- [V] `wk build` runs niced 19 + ionice, job count from **that machine's**
+      cores, load and free memory, capped by `WK_REMOTE_MAX_JOBS`
+      (80 cores / load 1 / 248 GB → -j16); jsc-release in 8m47s
+- [V] `wk build --dry-run` resolves remote paths: checkout, build dir, tools,
+      and a ccache under the remote root rather than the container's /ccache
+- [V] two builds serialise on the flock (a second `flock -w 2` is refused
+      while a build runs)
+- [V] the build log and status are written on the driving side; `wk status`
+      and `wk logs` read them there
+- [V] `wk status` with no argument includes remote workspaces on a macOS host
+      (it used to forward into the podman VM and report containers only —
+      which silently hid the `vm` target too)
+- [V] `wk enter <ws> <cmd>` runs the command in the remote checkout
 - [V] `wk claude` refuses a remote workspace outright
+- [V] `wk verify` refuses a remote workspace outright, rather than reporting a
+      sandbox that does not exist
+- [!] a **trunk** build needs a newer C++ toolchain than Debian 12 has: clang
+      18 with libstdc++ 12 has no `<format>`, which `Source/WTF/wtf/
+      FormattedLogging.h` has required since 2026-06-16. The box builds
+      releases up to 2.52.x; trunk there needs the container SDK
+      (`docs/HANDOFF-cross-compile.md`), which is already installed on it
+- [V] `wk run` executes the remote build's jsc (stderr carries whatever noise
+      the box's own login shell prints — a shared machine's dotfiles are not
+      ours to fix)
+- [V] `wk rm` removes the remote checkout, the local state and the registry
+      entry, and leaves the mirror, the ccache and the pushed tools alone
+- [V] `t_list` answers in the contract's `<name>\t<state>` form
+
+### Provisioning and use on the machine itself (`wk remote setup`)
+- [V] `wk remote setup <target>` probes and reports the machine, and offers to
+      write the target conf when there is none
+- [V] nothing in the remote path uses sudo; prerequisites are checked, and a
+      missing `flock` is fatal while a missing zsh or ccache is a warning
+- [V] zsh: interactive bash sessions move to it through `shell/bashrc`, with no
+      `chsh` and no root
+- [ ] a machine with no zsh warns and stays in bash — written, and now with no
+      machine here to exercise it (buildbox4 has zsh since 2026-08-19)
+- [V] the stale `wk-tools/bashrc` source line is removed from `~/.bashrc`,
+      `~/.zshrc` and `~/.bash_profile` — it was printing three
+      `setopt: command not found` errors into every interactive shell
+- [V] cleanup candidates are listed with their size and **declined** when there
+      is no terminal; nothing is removed unattended
+- [ ] a cleanup candidate accepted at the prompt is actually removed
+- [V] `wk` is on PATH on the box: `ssh box bash -lc 'wk ls'` works
+      (a plain `ssh box wk ls` cannot, and needs root to fix)
+- [V] on the box: `wk ls`, `wk status`, `wk build`, `wk run`, `wk logs`,
+      `wk enter` act on the machine directly, with no ssh to itself
+      (`wk build zz jsc-release` there: 2m30s, 31.5% ccache hits)
+- [V] on the box, `wk new` and `wk rm` refuse: a build machine holds workspaces
+      and does not own them, and the registry that says which machine a
+      workspace lives on is the workstation's
+- [V] on the box, `wk sync` / `gc` / `vm` / `pi` refuse and say why
+- [V] an empty listing on the box points at the workstation, not at a `wk new`
+      that would refuse
+- [V] `wk status`/`wk ls` list what is on a configured machine even with
+      nothing in the registry, and honestly report `build=none` for a build
+      driven from the machine itself
+- [V] a workspace is cloned from a WebKit repository the machine advertises in
+      its MOTD, hardlinked: `.git` costs 69 MB against a 13 GB source
+- [V] an advertised path that does not exist is rejected rather than used —
+      buildbox4 names `/var/git/WebKit.git` and has no such directory
 
 ## 4. Cross-cutting
 - [V] a workspace remembers its target; only `wk new` needs `--target`
-- [V] `wk status` with no argument walks every target
+- [V] `wk status` with no argument walks every target — including, since
+      2026-08-19, the host-side ones on a macOS host: it forwarded into the
+      podman VM and reported containers only, hiding every `vm` and remote
+      workspace behind an exit code that looked fine
 - [V] `wk build --list` shows all configs
 - [V] `wk build --list` answers on a macOS host **with the podman machine
       stopped**, and leaves it stopped (26 ms; it used to boot the machine)

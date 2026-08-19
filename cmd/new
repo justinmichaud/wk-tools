@@ -51,7 +51,7 @@ load_target "$TARGET"
 # macOS guest is whatever Tart booted, a remote box is whatever it is, and a
 # workspace cannot create anything at all -- so anywhere else this flag would
 # be silently ignored, which is worse than refusing it.
-if ! arch_is_native "$ARCH" && [ "$TARGET" != container ]; then
+if ! arch_is_native "$ARCH" && [ "$WK_TARGET_KIND" != container ]; then
     die "--arch $ARCH is a container-only capability (this is target '$TARGET').
     32-bit ARM needs a host that can execute it: this Neoverse-N1 runs AArch32
     at EL0, and Apple Silicon does not, which is why it lives on the Linux
@@ -94,10 +94,26 @@ if ! arch_is_native "$ARCH"; then
     log "  $ARCH: native 32-bit, no GPU. 'wk bench' will run CPU-class plans"
     log "  in here and refuse GPU-class ones."
 fi
-if [ "$TARGET" = vm ]; then
+case "$WK_TARGET_KIND" in
+vm)
     log "  wk vm start $NAME       boot it (an ssh alias is written then)"
     log "  wk build $NAME mac-release"
-else
+    ;;
+remote)
+    # No generated alias here, and not for want of an address: the machine is
+    # already in ~/.ssh/config with whatever ProxyJump and key it needs, and a
+    # second entry pointing at it would be a second thing to keep right. So
+    # zed and ssh use the name you already use.
+    log "  wk build $NAME <config> build (polite: sized from that machine's load)"
+    log "  wk enter $NAME          shell, in the checkout"
+    # No ssh route when this command is running on the machine itself, and then
+    # there is nothing useful to say about zed.
+    _host=$(t_ssh_host "$NAME" 2>/dev/null) \
+        && log "  zed ssh://$_host$(t_src "$NAME")"
+    log ""
+    log "  no sandbox on a shared machine, so 'wk claude' and 'wk verify' refuse."
+    ;;
+*)
     # An address is known up front only when the target is already reachable;
     # a VM has none until it boots.
     ssh_alias_set "$NAME" localhost "$(id -un)"
@@ -106,4 +122,5 @@ else
     log "  wk build $NAME <config> build"
     log "  wk claude $NAME         sandboxed agent"
     log "  zed ssh://wk-$NAME$(t_src "$NAME")"
-fi
+    ;;
+esac

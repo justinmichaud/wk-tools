@@ -45,15 +45,30 @@ load_target "$TARGET"
 # reported "sandbox intact" after measuring two things and skipping the boundary
 # entirely. A green result that tested nothing is worse than no result, and
 # telling those apart is this command's whole purpose.
-if [ "$TARGET" = local ]; then
+if [ "$WK_TARGET_KIND" = local ]; then
     die "'wk verify' measures the boundary from outside as well as inside, so it
     only means anything on the host:  wk verify $NAME"
+fi
+
+# There is no boundary on a shared build machine, and this command's whole
+# purpose is telling "measured and intact" apart from "measured nothing". Every
+# check below is a property of the container sandbox -- no network interface,
+# egress through a unix-socket proxy, no host filesystem -- and a remote target
+# claims none of them: it is a plain checkout in your own home directory on a
+# machine other people are logged into. Running them would report failure
+# against promises never made, and skipping them would report a green sandbox
+# that does not exist.
+if [ "$WK_TARGET_KIND" = remote ]; then
+    die "'wk verify' proves a sandbox holds, and a remote target has none:
+    a plain checkout on a shared machine, no container, no firewall, no
+    disposable layer. There is nothing here to measure and nothing it
+    promised. 'wk claude' refuses on this target for the same reason."
 fi
 
 # The vm target's boundary is Softnet on the host; none of the container
 # properties below exist in a guest by construction. `wk claude` carries the
 # vm-side checks; measuring the guest's egress from inside it is future work.
-if [ "$TARGET" = vm ]; then
+if [ "$WK_TARGET_KIND" = vm ]; then
     warn "vm workspaces have no in-guest checks yet: the egress filter is Softnet
   on the host (checked by wk claude); only the GPU probe runs here."
 fi

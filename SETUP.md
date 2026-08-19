@@ -198,6 +198,61 @@ wk test
 wk status                    # this workspace's own build and test state
 ```
 
+### Shared build machines
+
+A target can be a machine rather than a kind. Name it after an ssh destination
+that already works, and set it up once:
+
+```sh
+wk remote setup devbox-arm64-2
+```
+
+That probes the machine, writes `~/.config/wk/targets/devbox-arm64-2.conf` if
+there is none, pushes wk-tools, and configures your shell there. **It never
+needs root** — a build box belongs to everyone who logs into it, so nothing is
+installed, nothing outside `$HOME` is touched, and anything it finds worth
+removing is a question rather than an action. Edit the conf for whatever
+differs from the defaults:
+
+```sh
+# ~/.config/wk/targets/devbox-arm64-2.conf
+WK_REMOTE_ROOT=/home/you/wk    # defaults to ~/wk on the box
+WK_REMOTE_MAX_JOBS=16          # a ceiling, however idle the machine looks
+WK_REMOTE_REFERENCE=/var/...   # a WebKit repo to clone from; usually detected
+```
+
+```sh
+wk new bug-238 --target devbox-arm64-2
+wk build bug-238 jsc-release   # sized from *that* machine's cores and load
+```
+
+The workspace is a plain checkout in your own home directory there — no
+container, no overlay, no firewall. If the machine publishes a WebKit
+repository and says so in its MOTD, workspaces are cloned from that, with the
+objects hardlinked, so a checkout costs its working tree and nothing else;
+otherwise the driver keeps one mirror under the root and only the first
+workspace pays for the history. Builds are niced to the floor, capped by the
+remote machine's live load average and by the job ceiling, and serialised
+against each other with a flock, because other people are using the box too.
+
+After setup the machine can drive itself, which is the point of provisioning
+it at all — ssh in and you get zsh (where the box has one) and `wk` on PATH:
+
+```sh
+ssh devbox-arm64-2
+wk ls                          # the workspaces on this machine
+wk build bug-238 jsc-release   # same paths, same job policy, no ssh hop
+```
+
+The commands that act on a workstation's own store or hardware — `wk sync`,
+`wk gc`, `wk vm`, `wk pi` — refuse there and say why, and so do `wk new` and
+`wk rm`: a build machine holds workspaces, it does not own them. The record of
+which machine each workspace lives on is the workstation's, and it is what
+sends a later `wk build` to the right place.
+
+There is no sandbox on a machine like that, so `wk claude` and `wk verify`
+both refuse it outright rather than pretending otherwise.
+
 ### 32-bit workspaces
 
 ```sh
@@ -526,7 +581,10 @@ Three limits to know about:
 
 ## Moving to another machine
 
-Nothing is machine-specific except what `wk backup` captures. On the new
+Nothing is machine-specific except what `wk backup` captures and
+`~/.config/wk/targets/*.conf` — the shared-build-machine confs above, which are
+machine-local by design and which `./setup` neither writes nor backs up, so a
+re-install loses every remote target until they are written again. On the new
 machine, clone and `./setup`. To carry your current desktop settings across,
 run `wk backup` on the old one first and commit the result — it writes live
 settings back into `host/macos/defaults.conf`, `host/macos/symbolichotkeys.plist`

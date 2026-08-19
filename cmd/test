@@ -80,11 +80,19 @@ SRC=$(t_src "$NAME")
 # assumptions -- and report the results as if they were meant.
 ARCH=$(t_arch "$NAME")
 WRAP=$(arch_wrapper "$ARCH")
-if [ "$TARGET" != remote ]; then
+if [ "$WK_TARGET_KIND" = remote ]; then
+    # Another machine entirely: its numbers replace this one's rather than
+    # capping them, exactly as in cmd/build.
+    WK_AVAIL_MB=$(t_mem_mb "$NAME"); WK_CGROUP_CORES=$(t_cores "$NAME")
+    WK_LOAD=$(t_load "$NAME")
+    export WK_AVAIL_MB WK_CGROUP_CORES WK_LOAD
+else
     WK_CGROUP_MB=$(t_mem_mb "$NAME"); WK_CGROUP_CORES=$(t_cores "$NAME")
     export WK_CGROUP_MB WK_CGROUP_CORES
 fi
-JOBS=$(build_jobs)
+POLITE=""
+[ "$WK_TARGET_KIND" = remote ] && POLITE=1
+JOBS=$(build_jobs "$POLITE")
 
 # Software rendering. llvmpipe via Mesa's software gallium driver, and the WPE
 # headless backend so no compositor is needed.
