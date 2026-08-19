@@ -1,5 +1,11 @@
 # Handoff: the Raspberry Pi test devices
 
+**Scope, 2026-08-19: this is rpi4 and rpi3 only.** The rpi5 is provisioned as a
+regular workstation -- its own `./setup`, full tailnet privileges, podman
+workspaces like moose -- so it never goes through `wk pi setup` and its
+identity never enters `pi-hosts`. Benchmarking it means booting an image whose
+*separate* identity does (`docs/HANDOFF-benchmarking.md`).
+
 `cmd/pi` is written and has never been run against a device from this machine.
 The macOS side never needed it -- workspaces there could not reach the Pis
 anyway -- so this is Linux-only work.
@@ -28,21 +34,24 @@ matches (`Policy.is_pi`) and nothing else in the range.
 
 ## What to do
 
-1. `wk pi setup rpi5` and `wk pi setup rpi4` against running devices. It works
-   over SSH and needs no image rebuild, which is the constraint that shaped it:
-   the rpi4 runs a buildroot image.
+1. `wk pi setup rpi4` against a running device (and rpi3 when it is up). It
+   works over SSH and needs no image rebuild, which is the constraint that
+   shaped it: the rpi4 runs a buildroot image. Not the rpi5 -- see the scope
+   note above.
 2. Confirm the address lands in `$WK_STORE/pi-hosts` and that a workspace can
-   then `ssh rpi5 uname -m` -- through `container/proxy/ssh-proxy.py`, since
+   then `ssh rpi4 uname -m` -- through `container/proxy/ssh-proxy.py`, since
    the workspace has no network interface.
 3. Confirm the *negative*: a second tailnet address that is not in the file is
    refused. That is the check that proves the allowlist is an allowlist.
 4. The Tailscale ACL grant in SETUP.md still applies, and still must not reuse
    `tag:server` -- that tag covers moose, nextcloud, immich, overleaf and the
    gateway.
-5. Make `wk pi setup rpi5` also deploy `host/linux/rpi5/` to the device. Today
-   that tree (overclock, fan-max.service, verify/stress scripts) is manual
-   state restored from backup -- the one part of a Pi wipe that `./setup`
-   cannot recreate. Mirror how the tailscale install already copies files in.
+5. `host/linux/rpi5/` needs an owner now that the rpi5 is a workstation. Its
+   stability half (fan-max.service, WiFi, fstab/indexer, the NUMA kernel) is
+   workstation setup and belongs in the rpi5's own `./setup` run, not in
+   `wk pi setup`; its perf half belongs to the benchmark image. Today the whole
+   tree is manual state restored from backup -- the one part of a Pi wipe that
+   nothing recreates.
 
 ## Traps
 

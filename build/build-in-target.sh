@@ -6,6 +6,8 @@
 #
 # Environment supplied by cmd/build: WK_JOBS, WK_NICE, WK_BUILD_ARGS,
 # WK_BUILD_CMAKE, WK_BUILDSYS, WK_SRC, plus the ccache and cross-build caches.
+# A non-native workspace adds WK_ARCH and the WK_ARCH_* flags; see lib/arch.sh
+# and the architecture block below.
 # The Apple configs add WEBKIT_OUTPUTDIR and WK_DERIVED_DATA, which the xcode
 # case below turns into build settings; both are absent for the CMake ports.
 #
@@ -46,6 +48,37 @@ fi
 nicelevel=${WK_NICE:-10}
 
 cmakeargs=${WK_BUILD_CMAKE:-}
+
+# --- architecture ------------------------------------------------------------
+# Empty for a native workspace, which is every workspace on macOS and the
+# default everywhere, so this whole block is inert there.
+#
+# The flags are prepended to whatever is already set rather than replacing it,
+# for the same reason LD_LIBRARY_PATH is prepended in cmd/run: the image puts
+# things there and a build that overwrites them fails to find libraries that
+# were on the path all along.
+#
+# CMake reads CFLAGS/CXXFLAGS/LDFLAGS at *configure* time and caches them, so
+# these take effect on a fresh build directory and are ignored by an incremental
+# build of a tree configured without them. That is the same behaviour
+# webkitdirs.pm has for its own --32-bit path, and the reason an architecture is
+# fixed when a workspace is created rather than chosen per build.
+arch=${WK_ARCH:-native}
+if [ "$arch" != native ]; then
+    export CFLAGS="${WK_ARCH_CFLAGS:-} ${CFLAGS:-}"
+    export CXXFLAGS="${WK_ARCH_CFLAGS:-} ${CXXFLAGS:-}"
+    export LDFLAGS="${WK_ARCH_LDFLAGS:-} ${LDFLAGS:-}"
+fi
+
+# The personality wrapper, and it is load-bearing rather than cosmetic. The
+# kernel is the host's, so `uname -m` in an armhf container answers aarch64;
+# CMake takes CMAKE_SYSTEM_PROCESSOR from it and WebKitCommon.cmake:167 turns
+# aarch64 into WTF_CPU_ARM64. Without linux32 a 32-bit compiler therefore
+# builds a tree configured for 64-bit ARM, and the first thing to notice is the
+# assembler, thousands of files in. Outermost of the wrappers because the
+# personality is inherited: cmake, ninja and every compiler underneath need it,
+# not just build-webkit.
+wrapper=${WK_ARCH_WRAPPER:-}
 
 # Arrays, not a flat string: --cmakeargs carries several -D flags as ONE
 # argument, and any unquoted expansion splits it apart -- build-webkit then
@@ -146,6 +179,6 @@ command -v ionice >/dev/null 2>&1 && pre="ionice -c3"
 command -v choom  >/dev/null 2>&1 && pre="$pre choom -n 500 --"
 
 set -x
-# shellcheck disable=SC2086 -- $pre is a deliberate list of bare words.
-exec $pre nice -n "$nicelevel" \
+# shellcheck disable=SC2086 -- $wrapper and $pre are deliberate lists of bare words.
+exec $wrapper $pre nice -n "$nicelevel" \
     Tools/Scripts/build-webkit "${args[@]}" ${@+"$@"}

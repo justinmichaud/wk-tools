@@ -23,6 +23,7 @@ A workspace is a named, disposable environment for one task.
 ```sh
 wk sync                    # fetch all upstreams, publish a base snapshot
 wk new bug-238             # instant, regardless of checkout size
+wk new arm-bug --arch armhf   # a native 32-bit workspace (Linux only)
 wk build bug-238 jsc-release
 wk run bug-238 -- -e '1+1'
 wk claude bug-238          # sandboxed agent, permissions relaxed
@@ -33,6 +34,28 @@ zed ssh://wk-bug-238/src/WebKit
 Creating a workspace costs one overlay mount, not a clone. The base snapshot is
 shared and read-only; each workspace writes only to its own copy-on-write
 layer.
+
+### Architecture
+
+`--arch armhf` makes the workspace itself 32-bit: an armhf image, an armhf
+clang, armhf libraries, all executing natively — this Neoverse-N1 runs AArch32
+at EL0, which is why this exists on the Linux workstation and can never exist
+on Apple Silicon. Everything in there is native, so the configs mean what they
+always meant: `wk build arm-bug jsc-release` is a 32-bit JSC. The architecture
+is fixed at creation, recorded with the workspace, and shown by `wk ls`.
+
+Three different things could all be called "building 32-bit here", and they get
+three different words so no flag is ever a guess about which was meant:
+
+| word | what it is | where |
+|---|---|---|
+| `--arch` | the workspace's own userland, executed natively | `wk new` |
+| `--sysroot` | a *cross* build from a native workspace — another arch's libraries, `-m32`, an aarch64 clang | `wk build`, reserved, not implemented |
+| `--target` | another machine entirely — a Pi, a remote box, a device booted off a benchmark image | `wk new` |
+
+The armhf image has no NVIDIA userspace and never will, so an armhf workspace
+is a software-rendering workspace. That is fine for JSC and for CPU-class
+benchmarks, and it is not a rendering measurement — see below.
 
 ### Why snapshots rather than one shared checkout
 
@@ -232,3 +255,22 @@ them. What it adds is the part that decides whether a number means anything:
 - **it records provenance.** Kernel, driver version, governor, container caps,
   WebKit sha and renderer land next to the result, because two JSONs with no
   provenance are not a comparison.
+
+Three axes decide what a run needs and what it may be compared with. All three
+are derived rather than passed, recorded with the result, and warned about by
+`wk bench compare` when two runs disagree:
+
+- **class** — what the benchmark measures, from the plan. Speedometer and
+  MotionMark are gpu-class and need a real compositor on a real GPU. JetStream
+  and the other JS benchmarks are cpu-class: the GPU is not part of the
+  measurement, so the run is not refused for lacking one and is not marked as
+  degraded for it. That is what makes an armhf workspace — or any machine with
+  no display — somewhere a JetStream number can honestly be taken.
+- **runner** — what executes it, from the config's port. A browser port runs
+  the plan in MiniBrowser through `run-benchmark`, which is the official number
+  for every plan. A JSCOnly port runs the benchmark's own `cli.js` in the jsc
+  shell, which is the only thing a JSCOnly tree can do; it writes the same
+  result JSON, so `wk bench compare` and `compare-results` work unchanged.
+- **host** — where it ran. Everything `wk bench` can currently reach is
+  `container`: a workspace, with its cgroup limits and a desktop underneath it.
+  The bootable benchmark image will be `image`, and the two are not comparable.

@@ -25,6 +25,15 @@ copy-on-write layer on top; in a macOS workspace it is an APFS clone of a
 golden image. Either way the edits are yours alone and cannot affect another
 workspace.
 
+A Linux workspace may also be **armhf** — 32-bit ARM, natively. `arch=` in
+`~/.wk-workspace` is the authority, and it is the only one: the kernel is the
+host's, so `uname -m` answers `aarch64` in a 32-bit workspace and `lscpu` looks
+64-bit too. Nothing has gone wrong there, and it needs no fixing — `wk build`
+already runs the build under `linux32` and passes the ARM flags, so a plain
+`wk build jsc-release` in an armhf workspace is a 32-bit JSC. There is no GPU in
+one (the NVIDIA userspace is aarch64-only), so it is a software-rendering
+workspace: fine for JSC and for CPU-class benchmarks, useless for MotionMark.
+
 ## Commands
 
 Use `wk` rather than invoking build scripts directly — it derives the job count

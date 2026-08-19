@@ -32,12 +32,16 @@ report() {
 
 report_one() {
     local ws="$1" kind="$2" status_file="$3"
-    local state=none config="" secs="" rc="" logf=""
+    local state=none config="" arch="" secs="" rc="" logf=""
 
     if [ -f "$status_file" ]; then
         # shellcheck disable=SC1090
         state=$(awk -F= '/^state=/{print $2}' "$status_file")
         config=$(awk -F= '/^config=/{print $2}' "$status_file")
+        # Recorded per build rather than read from the workspace now: what
+        # matters here is the architecture the build in question was made with,
+        # and for a build predating --arch the field is simply absent.
+        arch=$(awk -F= '/^arch=/{print $2}' "$status_file")
         secs=$(awk -F= '/^seconds=/{print $2}' "$status_file")
         rc=$(awk -F= '/^exit=/{print $2}' "$status_file")
         logf=$(awk -F= '/^log=/{print $2}' "$status_file")
@@ -48,7 +52,8 @@ report_one() {
     else
         printf '%-18s %-8s %-10s %s=%s' "" "" "" "$kind" "${state:-none}"
     fi
-    [ -n "$config" ] && printf ' (%s)' "$config"
+    case "$arch" in native|'') arch="" ;; *) arch=", $arch" ;; esac
+    [ -n "$config" ] && printf ' (%s%s)' "$config" "$arch"
     [ -n "$secs" ] && printf ' %sm%ss' "$(( secs / 60 ))" "$(( secs % 60 ))"
     echo
 

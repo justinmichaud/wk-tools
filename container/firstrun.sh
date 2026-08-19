@@ -224,12 +224,19 @@ grep -qF 'wk-tools/shell/bashrc' "$HOME/.bashrc" 2>/dev/null || \
 # Written from $WK_WORKSPACE rather than guessed: the name reaches `wk status`
 # and every message, and a workspace calling itself by the wrong name is worse
 # than one that says it does not know. Refuses to invent one.
+#
+# arch= is the one field that cannot be re-derived in here at all. The kernel
+# is the host's, so `uname -m` in an armhf container answers aarch64; only
+# whoever created the container knows, and this is where they say so. Without
+# it an in-workspace `wk build` would drop linux32 and the ARM flags and
+# configure a 64-bit tree with a 32-bit compiler.
 if [ -n "${WK_WORKSPACE:-}" ]; then
     cat > "$HOME/.wk-workspace" <<EOF
 # wk: this machine IS a workspace. Written by container/firstrun.sh.
 name=$WK_WORKSPACE
 src=$SRC
 config=jsc-release
+arch=${WK_ARCH:-native}
 EOF
     log "workspace marker written ($HOME/.wk-workspace)"
 else

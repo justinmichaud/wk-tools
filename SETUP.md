@@ -198,6 +198,33 @@ wk test
 wk status                    # this workspace's own build and test state
 ```
 
+### 32-bit workspaces
+
+```sh
+wk new arm-bug --arch armhf  # a native armhf container (Linux only)
+wk build arm-bug jsc-release # a 32-bit JSC; no special config
+```
+
+The workspace itself is armhf: an armhf image, an armhf clang, armhf libraries,
+executing natively — this Neoverse-N1 runs AArch32 at EL0, and Apple Silicon
+does not, so this is permanently a Linux-workstation capability. Because it is
+native, the configs are the ordinary ones and mean the ordinary things.
+
+Two things follow from the architecture rather than from the config, and
+`lib/arch.sh` is where they live: the build runs under `linux32` (without it
+`uname -m` answers with the *host's* aarch64, and CMake configures a 64-bit
+tree for a 32-bit compiler), and it links with gold and the mapping options
+off (a 32-bit linker has under 4 GB of address space to link WebKit in,
+regardless of the memory on the machine).
+
+An armhf workspace gets no GPU — the NVIDIA userspace is published for aarch64
+only — so it is a software-rendering workspace. `wk bench` knows: it runs
+CPU-class plans there and refuses GPU-class ones.
+
+A cross build against a sysroot is a *different* mechanism and gets a different
+word, `--sysroot`, which is reserved and refused for now
+(`docs/HANDOFF-cross-compile.md`).
+
 That is the interface `wk claude` hands an agent, and the only one available to
 it: a workspace has no podman and a macOS guest has no nested virtualisation, so
 there is nothing to reach out to. Provisioning writes `~/.wk-workspace` naming
@@ -230,6 +257,26 @@ wk bench bug-238 speedometer3          # preflight, then run-benchmark
 wk bench bug-238 motionmark1.3.1
 wk bench ls
 wk bench compare <run-a> <run-b>       # compare-results, with provenance checks
+```
+
+What "three things" means depends on the benchmark, and `wk bench` derives that
+rather than asking. Speedometer and MotionMark are gpu-class: a real compositor
+on a real GPU is part of the measurement, and a run without one is refused.
+JetStream and the other JS benchmarks are cpu-class: the GPU is not part of the
+measurement, so the run is neither refused nor marked as degraded for lacking
+one, and it runs headless where there is no display to use. The governor,
+idleness and payload checks apply to both.
+
+The config decides what executes the plan: a browser port runs it in
+MiniBrowser through `run-benchmark`, and a JSCOnly port runs the benchmark's own
+`cli.js` in the jsc shell — the same JSON out of both, so `wk bench compare`
+does not care which. What it does care about is a mismatch: class, runner,
+architecture and host all land in the result and all produce a warning when two
+runs disagree.
+
+```sh
+wk bench arm-bug jetstream3 --config jsc-release   # jsc shell, no GPU needed
+wk bench bug-238 jetstream3 --config wpe-release   # MiniBrowser, the official number
 ```
 
 The NVIDIA driver itself comes from Ubuntu's own packages (`ubuntu-drivers

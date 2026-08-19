@@ -4,12 +4,22 @@
 on this Raspberry Pi 5 (16GB, NVMe). This folder was restored from backup after the wipe.
 It holds the reproducible performance-tuning setup built over a prior session.
 
-**Role decision (2026-08-18, see `docs/HANDOFF-benchmarking.md`):** this tree
-splits. The stability half (fan-max, WiFi stability, fstab/indexer, NUMA
-kernel) keeps applying to the installed OS in every role; the perf half
-(overclock, v3d, perf governor, swap off) moves into the dedicated benchmark
-image once that exists, and the rpi5 then becomes a full workstation. Until
-then, everything below still applies as written.
+**Role decision (2026-08-18, confirmed 2026-08-19; see
+`docs/HANDOFF-benchmarking.md`):** this tree splits, and the workstation half
+is not conditional any more -- the rpi5 is provisioned as a regular
+workstation now, with its own `./setup` and podman workspaces like moose. The
+stability half here (fan-max, WiFi stability, fstab/indexer, NUMA kernel) keeps
+applying to the installed OS in every role. The perf half (overclock, v3d, perf
+governor, swap off) belongs to the benchmark image the machine boots for a run,
+and the image does not exist yet -- so between now and then this board is not a
+benchmark device, which is accepted rather than overlooked.
+
+Watch the firmware boundary while moving the perf half: the EEPROM
+(`SDRAM_BANKLOW`, `BOOT_ORDER`) and `config.txt` are shared by both roles, so
+an overclock written to the EEPROM overclocks the workstation too. The image
+should carry its own `config.txt` on the boot medium.
+
+Everything below still applies as written for the installed OS.
 
 ## Step 1 — re-apply the tuning (idempotent, run as the user, NOT sudo)
 ```bash

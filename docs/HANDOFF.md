@@ -61,11 +61,32 @@ freehand steps" is unblocked on both platforms.
 
 ## Lane A — Linux workstation
 
-1. **32-bit containers (`wk new --arch 32`)** — `docs/HANDOFF-linux-arm32.md`
-   Linux-only, permanently: Apple Silicon has no AArch32 at EL0. Plumb `--arch`
-   through `cmd/new` → `targets/container.sh` → `wkdev-create`, add a 32-bit
-   build config, watch the two traps already documented (nvidia CDI conflicts
-   with `--arch`; check the arm32 image ships python3 for the proxy bridge).
+1. **32-bit containers (`wk new --arch armhf`)** — `docs/HANDOFF-linux-arm32.md`
+   **Done 2026-08-18**, and verified: an armhf workspace builds `jsc-release`
+   natively (`CMAKE_SYSTEM_PROCESSOR=armv7l`, armhf clang, `linux32`).
+   Linux-only, permanently: Apple Silicon has no AArch32 at EL0.
+
+   The lasting decision is the vocabulary, because three mechanisms here could
+   all be called "32-bit" and two of them do not exist yet: `--arch` is the
+   workspace's own userland executed natively, `--sysroot` (reserved, refused
+   with a pointer) is a cross build from a native workspace, and `--target` is
+   another machine. The images invite exactly this confusion — `24.04_arm32` is
+   native armhf, `24.04_arm32_arm64` is an arm64 image with armhf multiarch —
+   so `wk new --arch` pins the image explicitly rather than letting the SDK
+   infer one. Configs are unchanged: an armhf workspace builds `jsc-release`,
+   not `jsc-release-32`.
+
+   Two findings came out of it, both about the *branch* rather than the
+   workspace: trunk has no 32-bit ARM JIT left (an armhf JSC there is a CLoop
+   build by construction), and trunk's bytecode decoding SIGBUSes on anything
+   non-trivial. 2.48 still has the ARMv7 backend and still works, and the trunk
+   crash is fully debuggable in the workspace — `wk run --lldb`, lldb and gdb
+   all drive the 32-bit process — so neither blocks the lane.
+
+   Left over, all small: an armhf workspace has never been put on 2.48 (one
+   fetch), a browser port has never been built on armhf, `wk test` has never
+   been run there, and no benchmark has completed in one. See the handoff's
+   "Remaining".
 
 2. **Raspberry Pi provisioning** — `docs/HANDOFF-linux-pi.md`
    Linux-only (macOS workspaces can't reach the Pis at all). Run
@@ -73,17 +94,20 @@ freehand steps" is unblocked on both platforms.
    populates and the proxy allowlist works, and confirm the *negative* (an
    address not in the file is refused).
 
-   **rpi5 role, decided 2026-08-18** (reconciling this with
-   `docs/HANDOFF-benchmarking.md`): the end state is that the rpi5 is a full
-   workstation — its own `./setup`, full tailnet privileges, Claude sandboxed
-   in podman workspaces exactly like moose — and benchmarking happens from a
-   dedicated benchmark image it netboots or USB-boots. The image carries the
-   perf tuning and joins the tailnet under its *own* identity, and that
-   identity is what goes in `pi-hosts`; the workstation identity never does,
-   because an unrestricted tailnet node reachable from inside a workspace
-   would be the boundary gone. Until the benchmark image exists (after step
-   7), the rpi5 stays what it is today — a tuned test device in `pi-hosts` —
-   so there is no gap in benchmarking capability.
+   **rpi5 role, decided 2026-08-18 and confirmed 2026-08-19:** the rpi5 is
+   provisioned as a **regular workstation, now** — its own `./setup`, full
+   tailnet privileges, Claude sandboxed in podman workspaces exactly like
+   moose. It does not go through `wk pi setup`, and its workstation identity is
+   never in `pi-hosts`, because an unrestricted tailnet node reachable from
+   inside a workspace would be the boundary gone. So this step is rpi4 (and
+   rpi3) only.
+
+   Benchmarking it becomes a booted image instead, and that is now an open
+   design problem rather than a scheduling one — `docs/HANDOFF-benchmarking.md`,
+   "Booting the image", which covers all three machines and the fact that one
+   of them (the M4) cannot netboot at all. The accepted consequence is a gap:
+   between the conversion and a working image the rpi5 is not a benchmark
+   device.
 
 3. **RPi5 tuning re-apply** — `host/linux/rpi5/HANDOFF.md`
    Separate machine, reached over SSH from the Linux workstation once step 2
@@ -99,6 +123,13 @@ freehand steps" is unblocked on both platforms.
    half (overclock, v3d, perf governor, swap off) moves into the benchmark
    image definition when `docs/HANDOFF-benchmarking.md` is picked up, so the
    workstation install never depends on an overclock to be usable.
+
+   One part of that split is not obviously image state: the EEPROM
+   (`SDRAM_BANKLOW`, `BOOT_ORDER`) and `config.txt` are *firmware* settings
+   shared by both roles, so an overclock left there overclocks the workstation
+   too. The image has to carry its own `config.txt` on the boot medium rather
+   than write the EEPROM — see the rpi5 section of
+   `docs/HANDOFF-benchmarking.md`.
 
 4. **Remote target** — `docs/HANDOFF-linux-remote.md`
    `targets/remote.sh` has never been run. Write a real

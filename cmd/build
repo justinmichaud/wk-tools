@@ -15,6 +15,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/watchdog.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/build/configs.sh"
 
 if [ "${1:-}" = --list ]; then
@@ -72,6 +73,27 @@ load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
+# The workspace's own architecture, from the driver rather than from a flag.
+# It was fixed when the workspace was created and cannot change afterwards --
+# the container is armhf or it is not -- so there is nothing to pass and
+# nothing to get wrong per build. The flags it implies are in lib/arch.sh.
+ARCH=$(t_arch "$NAME")
+
+# Reserved, so that the day it exists it cannot be confused with the above.
+# --arch is what the workspace runs; --sysroot would be what a build targets
+# from a native workspace. They are different mechanisms with different flags
+# (see lib/arch.sh), and silently passing this through to build-webkit -- which
+# has no such option -- would fail 40 lines into a perl script.
+for _a in ${@+"$@"}; do
+    case "$_a" in
+        --sysroot|--sysroot=*)
+            die "--sysroot is not implemented (docs/HANDOFF-cross-compile.md).
+    This workspace is $ARCH; a --sysroot build would be a *cross* build from a
+    native workspace, which is a different mechanism -- an aarch64 clang, -m32,
+    CMAKE_LIBRARY_ARCHITECTURE and another rootfs to link against." ;;
+    esac
+done
+
 # Shared boxes get the polite calculation: other people are building too.
 POLITE=""
 NICE=10
@@ -93,10 +115,12 @@ JOBS=$(explain_jobs "$POLITE")
 # stops on the line between the two -- before the tooling sync and before the
 # status file, so it cannot leave a workspace looking like it is building.
 if [ -n "$DRY" ]; then
-    config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE"
+    config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE" "$ARCH"
+    ARCH_LABEL=$(arch_label "$ARCH")
     log "dry run -- nothing was built."
-    log "  workspace: $NAME ($TARGET, $(t_info "$NAME"))"
+    log "  workspace: $NAME ($TARGET, $(t_info "$NAME")${ARCH_LABEL:+, $ARCH_LABEL})"
     log "  config:    $CONFIG ($CFG_BUILDSYS${CFG_PORT:+ $CFG_PORT}${CFG_ARGS:+ $CFG_ARGS})"
+    [ -n "$ARCH_LABEL" ] && log "  arch:      $ARCH_LABEL, native ($(arch_wrapper "$ARCH") $(arch_cflags "$ARCH"))"
     log "  src:       $(t_src "$NAME")"
     log "  build dir: $(config_build_dir "$(t_src "$NAME")")"
     log "  jobs:      $JOBS (nice $NICE)"
@@ -123,6 +147,7 @@ write_status() {
     cat > "$STATUS" <<EOF
 state=$1
 config=$CONFIG
+arch=$ARCH
 exit=${2:-}
 started=$STARTED
 finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -130,17 +155,18 @@ seconds=$(( $(date +%s) - START_EPOCH ))
 log=$LOG
 EOF
 }
-printf 'state=running\nconfig=%s\nstarted=%s\nlog=%s\n' "$CONFIG" "$STARTED" "$LOG" > "$STATUS"
+printf 'state=running\nconfig=%s\narch=%s\nstarted=%s\nlog=%s\n' "$CONFIG" "$ARCH" "$STARTED" "$LOG" > "$STATUS"
 
 # ccache is on. jscb-configure used to pass --no-use-ccache unconditionally,
 # which meant the shared cache never did anything for JSC builds.
-info "building $CONFIG in '$NAME' with -j$JOBS (nice $NICE)"
+ARCH_LABEL=$(arch_label "$ARCH")
+info "building $CONFIG${ARCH_LABEL:+ ($ARCH_LABEL)} in '$NAME' with -j$JOBS (nice $NICE)"
 log  "  log: $LOG"
 log  "  stall warning after ${WK_STALL_SECONDS}s of silence; abort after ${WK_ABORT_SECONDS}s"
 
 # The build environment comes from one place, shared with the golden-base
 # prebuild, so the two cannot drift into building subtly different things.
-config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE"
+config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE" "$ARCH"
 
 set +e
 run_watched "$LOG" -- \
@@ -156,7 +182,7 @@ echo >&2
 case $rc in
 0)
     write_status ok 0
-    info "BUILD OK  $CONFIG in '$NAME'  (${MINS}m${SECS}s)"
+    info "BUILD OK  $CONFIG${ARCH_LABEL:+ ($ARCH_LABEL)} in '$NAME'  (${MINS}m${SECS}s)"
     ;;
 124)
     write_status stalled 124

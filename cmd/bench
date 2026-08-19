@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 #
-# wk bench -- run a browser benchmark and keep the result defensible.
+# wk bench -- run a benchmark and keep the result defensible.
 #
 #   wk bench <workspace> <plan> [--config C] [--count N] [--subtests "A B"]
 #                                [--software] [--force] [--browser-args "..."]
 #   wk bench seed <workspace> <plan>       fetch the benchmark payload only
 #   wk bench compare <run-a> <run-b>       compare-results on two saved runs
 #   wk bench ls                            saved runs
+#
+#   --config decides the runner: a browser port (wpe-release, gtk-release) runs
+#   the plan in MiniBrowser, a JSCOnly port (jsc-release) runs it in the jsc
+#   shell. The plan decides whether a GPU is required at all.
 #
 # The work is done by Tools/Scripts/run-benchmark and Tools/Scripts/
 # compare-results. Everything this script adds is around them, and it is the
@@ -23,8 +27,35 @@
 #   change under you between two runs you meant to compare.
 #
 #   the environment is recorded with the result. Kernel, driver, governor,
-#   compositor, WebKit sha, container limits. Two JSONs with no provenance are
-#   not a comparison.
+#   compositor, WebKit sha, container limits, architecture. Two JSONs with no
+#   provenance are not a comparison.
+#
+# Three axes decide what a run needs and what it may be compared with. They are
+# recorded with every result and `wk bench compare` warns when two runs differ
+# on any of them:
+#
+#   class     what the benchmark measures. gpu-class (Speedometer, MotionMark)
+#             is a rendering measurement and needs a real compositor on a real
+#             GPU; cpu-class (JetStream and the other JS benchmarks) is not,
+#             and demanding a GPU for it would rule out every workspace that
+#             has no business having one -- starting with armhf, where the
+#             NVIDIA userspace does not exist. Derived from the plan, not a
+#             flag, because it is a property of the benchmark.
+#
+#   runner    what actually executes it. `browser` is run-benchmark driving
+#             MiniBrowser, which is the official number for every plan;
+#             `jsc` is the jsc shell running the benchmark's own cli.js, which
+#             is the only thing a JSCOnly build can do and is what makes a
+#             JSC-only workspace measurable at all. Derived from the config's
+#             port.
+#
+#   host      where the run happened. Everything here is bench_host=container:
+#             a workspace on this machine, with its cgroup limits and its
+#             shared kernel. The bootable benchmark image
+#             (docs/HANDOFF-benchmarking.md) will be bench_host=image, and the
+#             two are not comparable -- one has a desktop underneath it and one
+#             is the whole machine. Recorded now, before that exists, so the
+#             day it does there is no ambiguity about what the old numbers were.
 #
 # Preflight failures are fatal by design. --force downgrades them to warnings
 # and records that in the run's metadata, because a result taken under protest
@@ -46,6 +77,7 @@ WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/arch.sh"
 
 BENCH_DIR="$WK_STORE/bench"
 SEED_DIR="$WK_STORE/cache/bench"
@@ -61,6 +93,33 @@ load_bench_target() {
     load_target "$t"
 }
 
+# Where this run happened, as recorded in the metadata. One value today,
+# because `wk bench` refuses every target but the container -- but the bootable
+# benchmark image (docs/HANDOFF-benchmarking.md) is a second one, and a field
+# that only ever holds one value is exactly what you want to have added before
+# the second appears. Runs from different hosts are not comparable and
+# `wk bench compare` says so.
+BENCH_HOST=container
+
+# What the benchmark measures, and therefore what the machine has to provide.
+#
+# gpu-class is the default for anything not named here, deliberately: a plan
+# nobody has classified is more likely to be a rendering benchmark than not,
+# and the failure mode of guessing gpu is a refusal that is easy to understand,
+# while the failure mode of guessing cpu is a MotionMark score from llvmpipe
+# that looks like a regression.
+#
+# Speedometer is gpu-class even though it is mostly script: its score depends
+# on the rendering it drives, and measuring it without a real display path is
+# measuring something else. That is the same rule the jsc-jetstream-compare
+# skill states for Speedometer and MotionMark rounds.
+bench_class() {
+    case "$1" in
+        jetstream*|octane*|kraken*|sunspider*|ares6*|jsbench*) echo cpu ;;
+        *) echo gpu ;;
+    esac
+}
+
 CONFIG="${WK_CONFIG:-wpe-release}"
 # Defaulted from the config's port below rather than fixed: the two ports have
 # different run-benchmark drivers (minibrowser-wpe, minibrowser-gtk) and picking
@@ -71,10 +130,14 @@ COUNT=""
 FORCE=""
 SUBTESTS=""
 SOFTWARE=""
+# Why the software path was taken, when it was. --software is a deliberate act;
+# a cpu-class run on a machine with no display is a derived one, and a result
+# that cannot tell them apart cannot be judged later.
+SOFTWARE_REASON=""
 BROWSER_ARGS=""
 
 usage() {
-    sed -n '3,12p' "$0" >&2
+    sed -n '3,16p' "$0" >&2
     exit 2
 }
 
@@ -89,7 +152,10 @@ cmd_ls() {
             python3 -c "
 import json,sys
 m=json.load(open('$meta'))
-print('%-14s %-12s %s%s' % (m.get('plan','?'), m.get('config','?'),
+axes = m.get('runner','browser')
+if m.get('arch','native') != 'native': axes += '/' + m['arch']
+if m.get('bench_host','container') != 'container': axes += '/' + m['bench_host']
+print('%-14s %-12s %-12s %s%s' % (m.get('plan','?'), m.get('config','?'), axes,
       (m.get('webkit_sha') or '?')[:10], '  [FORCED]' if m.get('forced') else ''))"
         else
             echo
@@ -195,13 +261,23 @@ check() {
     fi
 }
 
+# preflight <workspace> <build-dir> <class> <runner>
 preflight() {
-    local ws="$1" build_dir="$2"
+    local ws="$1" build_dir="$2" class="$3" runner="$4"
 
     info "preflight"
 
-    # 1. the build exists, and is the one we are about to measure
-    if t_exec "$ws" test -x "$build_dir/bin/MiniBrowser" 2>/dev/null \
+    # 1. the build exists, and is the one we are about to measure. Which binary
+    #    that is depends on the runner: a JSCOnly tree has no MiniBrowser and
+    #    never will, so looking for one there reports a missing browser when
+    #    what is missing is nothing at all.
+    if [ "$runner" = jsc ]; then
+        if t_exec "$ws" test -x "$build_dir/bin/jsc" 2>/dev/null; then
+            check yes "build present" "$build_dir/bin/jsc"
+        else
+            check no  "build present" "no jsc in $build_dir -- wk build $ws $CONFIG"
+        fi
+    elif t_exec "$ws" test -x "$build_dir/bin/MiniBrowser" 2>/dev/null \
        || t_exec "$ws" test -x "$build_dir/bin/WPEWebProcess" 2>/dev/null; then
         check yes "build present" "$build_dir"
     else
@@ -215,7 +291,21 @@ preflight() {
     #    the runner itself works when there is no display to be had. It skips
     #    this check and the compositor check, and the run is recorded as
     #    software so it can never be mistaken for a comparable result.
-    if [ -n "$SOFTWARE" ]; then
+    if [ "$class" = cpu ]; then
+        # A CPU-class benchmark is not a degraded GPU-class one. It does not
+        # need the device, so not having it is not a finding, and a run taken
+        # this way is directly comparable with every other cpu-class run --
+        # which is what makes an armhf workspace, or any machine without a
+        # display, a place where JetStream numbers can be taken at all.
+        #
+        # The sandbox check still runs. It is not about rendering: it is the
+        # one that catches a workspace that has quietly been given a network
+        # interface or a host mount, which changes what the machine is doing
+        # while the benchmark runs.
+        check yes "class" "cpu -- no GPU or compositor required"
+        "$WK_ROOT/cmd/verify" "$ws" >/dev/null 2>&1 \
+            || check no "sandbox intact" "wk verify $ws"
+    elif [ -n "$SOFTWARE" ]; then
         check yes "sandbox (software rendering)" "not comparable with a GPU run"
         "$WK_ROOT/cmd/verify" "$ws" >/dev/null 2>&1 \
             || check no "sandbox intact" "wk verify $ws"
@@ -242,7 +332,7 @@ preflight() {
     #    mode `wk session` recorded is the only place the difference shows.
     local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
     SESSION_MODE=$(session_mode)
-    if [ -n "$SOFTWARE" ]; then
+    if [ "$class" = cpu ] || [ -n "$SOFTWARE" ]; then
         :
     elif [ ! -S "$sock" ]; then
         check no  "graphical session" "no compositor -- wk session on"
@@ -320,6 +410,144 @@ preflight() {
     Fix the above, or re-run with --force to record a result anyway."
 }
 
+# --- the jsc runner ----------------------------------------------------------
+# JetStream and the other JS benchmarks ship a cli.js that drives the whole
+# suite inside a JavaScript shell. That is the only way a JSCOnly build can be
+# benchmarked -- there is no browser in the tree -- and it is what makes a
+# JSC-only workspace, armhf or otherwise, a place where a number can be taken.
+#
+# It is not a substitute for the browser number and is not compared with one:
+# the metadata records runner=jsc and `wk bench compare` warns across the two.
+# No page, no compositor, no multi-process WebKit -- the same JavaScript, in a
+# different machine.
+#
+# The output is deliberately byte-compatible with run-benchmark's. The driver's
+# own resultsJSON() is what it POSTs to run-benchmark's /report endpoint when
+# it runs in a browser, so dumping it in the shell instead produces the same
+# structure -- {"<suite>": {"tests": {"<test>": {"metrics": {"Score":
+# {"current": [...]}}}}}} -- and compare-results, `wk bench compare` and
+# container/bench/js3-ci.py all keep working with no special case for it.
+#
+# run_jsc <workspace> <plan> <out-dir> <run-id> <payload-host> <payload-in-target> <src>
+run_jsc() {
+    local ws="$1" plan="$2" out="$3" id="$4" payload="$5" payload_ctr="$6" src="$7"
+
+    [ -n "$payload" ] || die "$plan has no seeded payload, and the jsc runner has
+    nothing to run without one. 'wk bench seed $ws $plan' fetches it; a plan
+    whose source cannot be pre-seeded can only be run with a browser config."
+    [ -f "$payload/cli.js" ] || die "$payload has no cli.js, so $plan cannot be driven
+    from a JavaScript shell. Run it with a browser config instead
+    (--config wpe-release), which is the official number for every plan anyway."
+
+    local jsc var dir
+    jsc=$(config_jsc_path "$src")
+    var=$(config_run_var)
+    dir=$(config_run_dir "$src")
+
+    # cli.js takes its options from the shell's script arguments -- everything
+    # after `--`, which jsc hands to the script as `scriptArgs`. Its own
+    # --help lists them; two are used here.
+    #
+    # --dump-json-results is what makes this interchangeable with a browser run:
+    # the driver prints the same object it would POST to run-benchmark's
+    # /report endpoint, so compare-results, `wk bench compare` and
+    # container/bench/js3-ci.py all read it without a special case.
+    #
+    # The flags are passed rather than set as globals because the driver reads
+    # them off a JetStreamParams object built from these arguments; a global of
+    # the same name is simply ignored (JetStreamDriver.js:3263, utils/params.js).
+    # It also rejects a flag it does not know, so a payload too old for this
+    # interface fails loudly here rather than running the whole suite and
+    # producing nothing -- which is exactly what it did before this was written
+    # the other way round.
+    local cliargs="--dump-json-results"
+    if [ -n "$SUBTESTS" ]; then
+        cliargs="$cliargs --test=$(printf '%s' "$SUBTESTS" | tr ' ' ',')"
+    fi
+
+    # One jsc invocation per iteration, each a complete pass over the suite.
+    # Not one invocation asked to repeat itself: a fresh process per iteration
+    # is what keeps a warmed-up heap or a JIT tier from the previous pass out of
+    # the next one's numbers.
+    local n="${COUNT:-1}" i=1 rc=0
+    info "running $plan in '$ws' ($CONFIG, jsc shell, $n iteration(s))"
+    log  "  results: $out"
+    while [ "$i" -le "$n" ]; do
+        [ "$n" -gt 1 ] && info "iteration $i/$n"
+        set +e
+        run_watched "$out/run-$i.log" -- \
+            t_exec "$ws" bash -lc "export $var=\"$dir\${${var}:+:\${${var}}}\"; \
+                cd $(sh_quote "$payload_ctr") && \
+                exec $(sh_quote "$jsc") cli.js -- $cliargs"
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+            warn "jsc exited $rc on iteration $i"
+            first_error "$out/run-$i.log" | sed 's/^/  /' >&2 || true
+            log "  full log: $out/run-$i.log"
+            return "$rc"
+        fi
+        i=$((i + 1))
+    done
+
+    # Merge the iterations into one result, appending each pass's score to the
+    # same "current" list -- which is exactly what run-benchmark's --count does,
+    # and what compare-results needs to have any variance to work with.
+    python3 - "$out/result.json" "$out"/run-*.log <<'PYEOF'
+import json, sys
+
+def extract(path):
+    """The driver prints resultsJSON() on one line. Take the last line that
+    parses as an object: anything after it is jsc's own exit noise, and
+    anything before it may be a previous partial report."""
+    with open(path, errors="replace") as f:
+        lines = f.read().splitlines()
+    for line in reversed(lines):
+        line = line.strip()
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+def merge(into, other):
+    for key, value in other.items():
+        if key not in into:
+            into[key] = value
+        elif isinstance(value, dict) and isinstance(into[key], dict):
+            merge(into[key], value)
+        elif key == "current" and isinstance(value, list) and isinstance(into[key], list):
+            into[key].extend(value)
+    return into
+
+out = sys.argv[1]
+merged = None
+missing = []
+for path in sys.argv[2:]:
+    one = extract(path)
+    if one is None:
+        missing.append(path)
+        continue
+    merged = one if merged is None else merge(merged, one)
+
+if merged is None:
+    sys.exit("no results in any iteration log -- the suite printed no JSON. "
+             "Check the run-*.log files: a payload whose cli.js does not accept "
+             "--dump-json-results will have run the whole suite and reported "
+             "only in its own text format.")
+if missing:
+    print("warning: no results in %s" % ", ".join(missing), file=sys.stderr)
+
+with open(out, "w") as f:
+    json.dump(merged, f, indent=2)
+PYEOF
+    return 0
+}
+
 # --- the run -----------------------------------------------------------------
 cmd_run() {
     local ws="$1" plan="$2"
@@ -328,20 +556,76 @@ cmd_run() {
     [ "$(t_info "$ws")" != absent ] || die "no such workspace: $ws"
 
     config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
+
+    # The three axes, every one of them derived. class from the plan, runner
+    # from the config's port, arch from the workspace -- because each is a fact
+    # about what is being run, and a flag for any of them would be a way for
+    # the record to disagree with what happened.
+    local class runner arch
+    class=$(bench_class "$plan")
+    arch=$(t_arch "$ws")
     case "$CFG_PORT" in
-        --jsc-only) die "$CONFIG builds no browser; use a gtk or wpe config" ;;
+        --jsc-only) runner=jsc ;;
+        *)          runner=browser ;;
     esac
+
+    # A JSCOnly tree has no browser, so it cannot render anything, and no flag
+    # changes that. Said here rather than discovered as a missing binary.
+    if [ "$runner" = jsc ] && [ "$class" = gpu ]; then
+        die "$plan is a gpu-class benchmark and $CONFIG builds no browser.
+    Either build a browser port (wk build $ws wpe-release) and pass
+    --config wpe-release, or run a cpu-class plan -- jetstream3, octane,
+    kraken, sunspider, ares6 -- which the jsc shell can drive directly."
+    fi
+
+    # An armhf workspace is a software-rendering workspace, permanently: the
+    # NVIDIA userspace has to match the host kernel driver and is published for
+    # aarch64 only, and wkdev-create skips GPU injection for any --arch
+    # container for the same reason. So a rendering benchmark in here measures
+    # llvmpipe, which is a different benchmark wearing MotionMark's name.
+    #
+    # cpu-class plans are unaffected and are the point of allowing benchmarking
+    # in a container at all. A real 32-bit *rendering* number needs the device
+    # rather than a container -- that is the bootable benchmark image, and it
+    # will record bench_host=image (docs/HANDOFF-benchmarking.md).
+    if [ "$class" = gpu ] && ! arch_has_gpu "$arch"; then
+        die "$plan is gpu-class and '$ws' is an $arch workspace, which has no GPU.
+    cpu-class plans (jetstream3, octane, kraken, sunspider) do run in here,
+    with either a browser or a JSCOnly config. For a 32-bit rendering number
+    see docs/HANDOFF-benchmarking.md -- that is a device, not a container."
+    fi
+
     local build_dir; build_dir=$(config_build_dir)
 
-    if [ -z "$BROWSER" ]; then
+    if [ "$runner" = browser ] && [ -z "$BROWSER" ]; then
         case "$CFG_PORT" in
             --wpe) BROWSER=minibrowser-wpe ;;
             --gtk) BROWSER=minibrowser-gtk ;;
             *)     die "no benchmark browser for port $CFG_PORT" ;;
         esac
     fi
+    [ -n "$SOFTWARE" ] && SOFTWARE_REASON="--software"
 
-    preflight "$ws" "$build_dir"
+    # A cpu-class benchmark in a browser still needs somewhere to put a window.
+    # Where there is no usable display -- no compositor, a session on the BMC's
+    # chip, or a workspace with no GPU at all -- it runs headless rather than
+    # not running, because for a JavaScript benchmark the display is not the
+    # measurement. It is recorded as a software run all the same, so comparing
+    # it against one that had the GPU still warns.
+    if [ "$runner" = browser ] && [ "$class" = cpu ] && [ -z "$SOFTWARE" ]; then
+        local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
+        if ! arch_has_gpu "$arch" || [ ! -S "$sock" ]; then
+            SOFTWARE=1; SOFTWARE_REASON="cpu-class, no usable display"
+        else
+            case "$(session_mode)" in
+                gpu|none) ;;
+                *) SOFTWARE=1; SOFTWARE_REASON="cpu-class, session not on the GPU" ;;
+            esac
+        fi
+        [ -n "$SOFTWARE" ] && info "cpu-class: running headless ($SOFTWARE_REASON)"
+    fi
+
+    preflight "$ws" "$build_dir" "$class" "$runner"
 
     # The seeded payload and the run directory are both host paths under the
     # store, and the container sees the same trees at /cache/bench and /bench.
@@ -372,8 +656,10 @@ cmd_run() {
     cpu_model=$(awk -F: '/Model name/ {gsub(/^ +/,"",$2); print $2; exit}' <(lscpu) 2>/dev/null || true)
 
     WK_M_PLAN="$plan" WK_M_WS="$ws" WK_M_CONFIG="$CONFIG" WK_M_BROWSER="$BROWSER" \
+    WK_M_CLASS="$class" WK_M_RUNNER="$runner" WK_M_ARCH="$arch" WK_M_HOST="$BENCH_HOST" \
     WK_M_SHA="$sha" WK_M_COUNT="$COUNT" WK_M_LOCAL="$seeded" \
-    WK_M_FORCED="$FORCE" WK_M_SOFTWARE="$SOFTWARE" WK_M_NOTES="$PREFLIGHT_NOTES" \
+    WK_M_FORCED="$FORCE" WK_M_SOFTWARE="$SOFTWARE" WK_M_SWREASON="$SOFTWARE_REASON" \
+    WK_M_NOTES="$PREFLIGHT_NOTES" \
     WK_M_SESSION_MODE="${SESSION_MODE:-$(session_mode)}" \
     WK_M_RENDERER="${GPU_RENDERER:-}" WK_M_DISPLAY="$display" WK_M_CPU="$cpu_model" \
     WK_M_KERNEL="$(uname -r)" WK_M_CORES="$(host_cores)" \
@@ -388,6 +674,13 @@ json.dump({
     "browser": g("WK_M_BROWSER"), "webkit_sha": g("WK_M_SHA"),
     "count": g("WK_M_COUNT"), "local_copy": g("WK_M_LOCAL"),
     "forced": bool(g("WK_M_FORCED")), "software": bool(g("WK_M_SOFTWARE")),
+    "software_reason": g("WK_M_SWREASON"),
+    # The three axes a comparison has to agree on before the statistics mean
+    # anything: what was measured, what executed it, and on what.
+    # bench_host is "container" for everything wk can currently run; the
+    # bootable benchmark image will be "image" and is not comparable with it.
+    "class": g("WK_M_CLASS"), "runner": g("WK_M_RUNNER"),
+    "arch": g("WK_M_ARCH"), "bench_host": g("WK_M_HOST"),
     "preflight_notes": g("WK_M_NOTES"), "gpu_renderer": g("WK_M_RENDERER"),
     # Which chip the compositor was on: gpu, bmc (the BMC's chip, software
     # rendered), or none for somebody's own desktop.
@@ -403,6 +696,22 @@ json.dump({
     },
 }, open(sys.argv[1], "w"), indent=2)
 PYEOF
+
+    # The jsc runner writes its own result.json and reports for itself.
+    if [ "$runner" = jsc ]; then
+        set +e
+        run_jsc "$ws" "$plan" "$out" "$id" "$seeded" "$seeded_ctr" /src/WebKit
+        local jrc=$?
+        set -e
+        [ "$jrc" -eq 0 ] || exit "$jrc"
+
+        info "BENCH OK  $plan -> $out/result.json"
+        tr '\r' '\n' < "$out/run-1.log" | grep -iE '^(Score|Total|.*Score:)' \
+            | tail -5 | sed 's/^/  /' >&2 || true
+        log ""
+        log "  compare with:  wk bench compare <other-run> $id"
+        return 0
+    fi
 
     info "running $plan in '$ws' ($CONFIG, $BROWSER)"
     log  "  results: $out"
@@ -486,9 +795,29 @@ if a.get("plan") != b.get("plan"):
     print("warning: different plans (%s vs %s)" % (a.get("plan"), b.get("plan")))
 if a.get("config") != b.get("config"):
     print("warning: different build configs (%s vs %s)" % (a.get("config"), b.get("config")))
-if a.get("gpu_renderer") != b.get("gpu_renderer"):
+# The three axes. A runner or host mismatch is not a caveat on a comparison --
+# it means the two runs measured different machines doing different work, and
+# the statistics below will still happily produce a p-value for them.
+if a.get("runner", "browser") != b.get("runner", "browser"):
+    print("warning: different runners (%s vs %s) -- the jsc shell and MiniBrowser "
+          "are not the same measurement" % (a.get("runner", "browser"), b.get("runner", "browser")))
+if a.get("bench_host", "container") != b.get("bench_host", "container"):
+    print("warning: different benchmark hosts (%s vs %s) -- a container shares a kernel "
+          "and a desktop with everything else on the machine; an image does not"
+          % (a.get("bench_host", "container"), b.get("bench_host", "container")))
+if a.get("arch", "native") != b.get("arch", "native"):
+    print("warning: different architectures (%s vs %s)" % (a.get("arch", "native"), b.get("arch", "native")))
+# No default for class: runs predating the field say nothing about what they
+# measured, and "absent" is not "different".
+if a.get("class") and b.get("class") and a["class"] != b["class"]:
+    print("warning: different benchmark classes (%s vs %s)" % (a["class"], b["class"]))
+# The renderer and the session are only evidence for a gpu-class run. Warning
+# that a JetStream run in the jsc shell had no renderer is noise, and noise in
+# front of real warnings is how the real ones stop being read.
+gpu_class = a.get("class") != "cpu" and b.get("class") != "cpu"
+if gpu_class and a.get("gpu_renderer") != b.get("gpu_renderer"):
     print("warning: different renderers (%s vs %s)" % (a.get("gpu_renderer"), b.get("gpu_renderer")))
-if a.get("session_mode") != b.get("session_mode"):
+if gpu_class and a.get("session_mode") != b.get("session_mode"):
     print("warning: different session modes (%s vs %s) -- only 'gpu' is a measurable display path"
           % (a.get("session_mode"), b.get("session_mode")))
 if bool(a.get("software")) != bool(b.get("software")):

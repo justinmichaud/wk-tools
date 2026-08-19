@@ -21,6 +21,7 @@ WK_SANDBOX=self
 # for the marker again from inside a build, where $HOME may not be what it was.
 _local_name=$(wk_marker_field name)
 _local_src=$(wk_marker_field src)
+_local_arch=$(wk_marker_field arch)
 [ -n "$_local_name" ] || die "$(wk_marker) does not name the workspace (name=)"
 [ -n "$_local_src" ] || die "$(wk_marker) does not name a checkout (src=)"
 
@@ -37,6 +38,11 @@ WK_STORE="${XDG_STATE_HOME:-$HOME/.local/state}/wk"
 mkdir -p "$WK_STORE/ws/$_local_name"
 
 t_src()   { echo "$_local_src"; }
+
+# From the marker, because nothing in here can work it out: the kernel is the
+# host's, so an armhf container reports aarch64 from uname. Defaulted for
+# workspaces created before the field existed, which are all native.
+t_arch()  { echo "${_local_arch:-native}"; }
 
 # The wk being run is the one in the workspace, so there is nothing to locate
 # and nothing to push: $WK_ROOT is already the in-workspace tooling tree.

@@ -456,6 +456,48 @@ open(path, "w").write(src)
 print("gated host-session integration behind --isolated", file=sys.stderr)
 PYEOF
 
+# --- 12: pin the image explicitly -------------------------------------------
+# wkdev-create resolves the image from the SDK version and, when --arch is
+# given, falls back to a `_${arch}` tag *only if the unsuffixed tag is missing
+# locally*. On a machine that already has the current aarch64 image -- which is
+# every machine that has ever created a workspace -- the fallback never fires,
+# so `--arch arm` hands podman an arm64 image and asks for a 32-bit container
+# from it. podman then either refuses or, worse, matches a multiarch manifest
+# and produces something that is not the image anyone meant.
+#
+# --image says which image, and nothing infers it. That is also what keeps the
+# native-armhf and the cross-sysroot images apart: they differ by a tag suffix
+# (24.04_arm32 vs 24.04_arm32_arm64) and by nothing else visible from here.
+py "$CREATE" <<'PYSECTION12'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+
+if "argsparse_use_option =image:" not in src:
+    anchor = 'argsparse_use_option =arch:'
+    line = src[src.index(anchor):].split("\n")[0]
+    src = src.replace(line, line + "\n" +
+        'argsparse_use_option =image: "Exact image to use (repository:tag), '
+        'instead of resolving one from the SDK version"',
+        1)
+    print("added --image", file=sys.stderr)
+
+anchor = '    if argsparse_is_option_set "arch"; then'
+inject = """    # wk: an explicitly pinned image, which no version resolution or
+    # architecture fallback may then second-guess. See sdk-patches/apply.sh 12.
+    if argsparse_is_option_set "image"; then
+        sdk_repo_qualified="${program_options["image"]%:*}"
+        container_tag="${program_options["image"]##*:}"
+    fi
+
+"""
+if "an explicitly pinned image" not in src and anchor in src:
+    src = src.replace(anchor, inject + anchor, 1)
+    print("spliced --image into image resolution", file=sys.stderr)
+
+open(path, "w").write(src)
+PYSECTION12
+
 # --- verify ------------------------------------------------------------------
 # One token per section that matters, matching text the section *writes*, so a
 # section that silently no-opped (upstream reformatted its anchor) fails here
@@ -472,7 +514,8 @@ for token in \
     'argsparse_is_option_set "isolated" || try_process_session_bus' \
     "not the workspace's business" \
     'isolated-systemd-user' \
-    'shares the session bus'
+    'shares the session bus' \
+    'an explicitly pinned image'
 do
     grep -q "$token" "$CREATE" || { echo "verify failed: $token missing from wkdev-create" >&2; fail=1; }
 done

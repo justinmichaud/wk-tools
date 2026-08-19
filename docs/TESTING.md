@@ -108,6 +108,46 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] `wk logs <ws>` shows `(none)` under errors for a successful build
 - [ ] `wk bench` produces per-subtest results with confidence intervals
 
+### Architecture — `--arch armhf` (Linux only)
+- [V] `wk new <ws> --arch armhf` creates a native armhf container: `dpkg
+      --print-architecture` is armhf, clang targets `arm-unknown-linux-gnueabihf`
+- [V] `wk ls` shows the ARCH column; the marker carries `arch=armhf`, which is
+      the only way an in-workspace `wk build` can know (`uname -m` says aarch64
+      in there, because the kernel is the host's)
+- [V] `wk build <ws> jsc-release` builds 32-bit: `CMAKE_SYSTEM_PROCESSOR=armv7l`
+      in the cache, the arch flags in `CMAKE_CXX_FLAGS`, gold in the linker flags
+- [V] `wk run <ws> -- -e 'print(1+1)'` prints 2 from a 32-bit jsc
+      (`file bin/jsc` → ELF 32-bit LSB pie executable, ARM, EABI5)
+- [V] the in-workspace form works in there: `wk build jsc-release --dry-run` and
+      `wk test --dry-run` name the architecture and put `linux32` in the command
+- [V] both debuggers drive the 32-bit process: `wk run <ws> --lldb` stops at
+      entry, and lldb/gdb catch the trunk SIGBUS with a backtrace and disassembly
+- [ ] `wk test <ws>` — on trunk it hits the known SIGBUS (see
+      `docs/HANDOFF-linux-arm32.md`); on a 2.48 branch it is the real test
+- [ ] an armhf workspace on `webkitglib/2.48`, where the ARMv7 JIT still exists
+- [V] `wk build <ws> wpe-release` — 22m, 32-bit ARM MiniBrowser, links with the
+      gold low-memory flags; needs three feature disables the image forces
+      (Vulkan, WebRTC, WPE Qt API), now in `arch_cmake`
+- [V] MiniBrowser launches headless on armhf; a benchmark through it does not
+      complete on trunk (same JSC SIGBUS, in the web process)
+- [V] a native workspace's build environment is unchanged: no `WK_ARCH*` in
+      `wk build <native-ws> jsc-release --dry-run`
+- [V] `--arch` is refused on a non-container target; an unknown arch and
+      `riscv64` are refused by name; `--sysroot` is refused on both `wk new` and
+      `wk build` with a pointer to the cross-compile handoff
+
+### Benchmark axes
+- [V] a gpu-class plan in an armhf workspace refuses, naming the missing GPU;
+      a gpu-class plan with a JSCOnly config refuses, naming the missing browser
+- [V] a cpu-class plan (jetstream3) with a JSCOnly config runs in the jsc shell,
+      merges `--count` iterations into one `result.json`, and compares cleanly
+      against another such run (per-subtest table, FDR p-value)
+- [V] a cpu-class plan with a browser config runs headless where there is no
+      usable display, and records `software_reason` saying which case it was
+- [V] `wk bench compare` warns across differing `runner`, `arch` or
+      `bench_host`; `wk bench ls` shows the axes
+- [ ] the same, in an armhf workspace — needs a branch whose JSC runs, i.e. 2.48
+
 ## 2. macOS guest VMs — the `vm` target
 
 ### Lifecycle

@@ -55,8 +55,19 @@ EOF
 }
 
 # Override with WK_CC / WK_CXX if a config needs something specific.
+#
+# clang everywhere, including in an armhf workspace: the arm32 image's
+# /usr/local/bin/clang is a native armhf clang targeting
+# arm-unknown-linux-gnueabihf, so this needs no per-architecture special case
+# and gets none. What the architecture does change is flags, and those live in
+# lib/arch.sh -- deliberately not here, because a config names a port and a
+# build type and must go on meaning exactly that in every workspace.
 WK_CC="${WK_CC:-clang}"
 WK_CXX="${WK_CXX:-clang++}"
+
+# The architecture vocabulary, loaded on demand: not every caller of this file
+# has sourced it, and the functions are only reached for a non-native build.
+command -v arch_canon >/dev/null 2>&1 || . "$WK_ROOT/lib/arch.sh"
 
 # Where a config's build tree lands, relative to the checkout.
 #
@@ -186,8 +197,13 @@ config_load() {
 # `--release` that env then treats as the command to run.
 #
 # config_load must have run first. Sets CFG_ENV.
+#
+# The architecture is the workspace's, from t_arch, and is passed in rather
+# than read here: this function is also what the golden-base prebuild uses, and
+# a build environment that went looking for the current workspace would be
+# assembling one thing while describing another.
 config_build_env() {
-    local src="$1" jobs="$2" nice="$3"
+    local src="$1" jobs="$2" nice="$3" arch="${4:-native}"
 
     # --- Apple ports: pin where the output and the caches go -----------------
     # Nothing here used to be set at all, and the defaults are worse than they
@@ -226,6 +242,12 @@ config_build_env() {
         out=$(config_build_dir "$src")
     fi
 
+    # CMake flags that come from the architecture rather than from the config,
+    # appended so a config's own flags still win where they overlap.
+    local cmakeargs="$CFG_CMAKE"
+    local archcmake; archcmake=$(arch_cmake "$arch" "$CFG_PORT")
+    [ -n "$archcmake" ] && cmakeargs="$cmakeargs $archcmake"
+
     CFG_ENV=(
         "CCACHE_DIR=/ccache"
         "NUMBER_OF_PROCESSORS=$jobs"
@@ -235,12 +257,25 @@ config_build_env() {
         "WK_SRC=$src"
         "WK_BUILDSYS=$CFG_BUILDSYS"
         "WK_BUILD_ARGS=$CFG_PORT $CFG_ARGS"
-        "WK_BUILD_CMAKE=$CFG_CMAKE"
+        "WK_BUILD_CMAKE=$cmakeargs"
         "WK_MB_PER_JOB=${WK_MB_PER_JOB:-1536}"
     )
     # Only when the config asks for it: the Apple configs leave these empty on
     # purpose, and `env CC= ` is not the same as not setting CC at all.
     [ -n "$CFG_CC" ] && CFG_ENV+=("CC=$CFG_CC" "CXX=$CFG_CXX")
+
+    # Only for a non-native workspace, so a native build's environment is
+    # exactly what it was before --arch existed. That is not tidiness: these
+    # variables are part of every ccache hash, and adding empty ones would
+    # invalidate a shared cache that several workspaces are already using.
+    if ! arch_is_native "$arch"; then
+        CFG_ENV+=(
+            "WK_ARCH=$arch"
+            "WK_ARCH_WRAPPER=$(arch_wrapper "$arch")"
+            "WK_ARCH_CFLAGS=$(arch_cflags "$arch")"
+            "WK_ARCH_LDFLAGS=$(arch_ldflags "$arch")"
+        )
+    fi
     # Xcode only. Setting WEBKIT_OUTPUTDIR on a CMake port would change every
     # one of those layouts at once -- usesPerConfigurationBuildDirectory()
     # (webkitdirs.pm:1182-1184) keys off nothing but this variable being

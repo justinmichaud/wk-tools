@@ -22,6 +22,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/arch.sh"
 
 NAME="${1:-}"; shift || true
 require_name "$NAME"
@@ -161,19 +162,31 @@ fi
 # The probe's exit status is the answer: 0 hardware, 1 software only, 2 no EGL
 # at all, 3 it would not build. Parsing renderer strings here would just
 # duplicate the judgement it already made.
-set +e
-probe=$(t_exec "$NAME" bash -lc "/opt/wk-tools/container/gpu/gpu-probe.sh" 2>&1)
-prc=$?
-set -e
-[ -n "$probe" ] && printf '%s\n' "$probe" | sed 's/^/        /' >&2
+#
+# Skipped entirely for a workspace of another architecture. There is no GPU in
+# one by construction -- the NVIDIA userspace is published for aarch64 only, so
+# nothing is injected and there is nothing to find -- and probing anyway buries
+# the verdict under half a screen of Mesa errors about a device that was never
+# there. Saying so plainly is the honest answer; failing would be a lie, and
+# silence would read as an oversight.
+if ! arch_has_gpu "$(t_arch "$NAME")"; then
+    note "no GPU: an $(t_arch "$NAME") workspace gets none (the NVIDIA userspace is aarch64-only)"
+    [ -n "$WANT_GPU" ] && fail "--gpu on an $(t_arch "$NAME") workspace, which cannot have one"
+else
+    set +e
+    probe=$(t_exec "$NAME" bash -lc "/opt/wk-tools/container/gpu/gpu-probe.sh" 2>&1)
+    prc=$?
+    set -e
+    [ -n "$probe" ] && printf '%s\n' "$probe" | sed 's/^/        /' >&2
 
-case "$prc" in
-    0) pass "GPU acceleration available" ;;
-    1) [ -n "$WANT_GPU" ] && fail "only software rendering inside the workspace" \
-                          || note "software rendering only -- benchmarks would measure llvmpipe" ;;
-    *) [ -n "$WANT_GPU" ] && fail "no usable EGL inside the workspace (probe exit $prc)" \
-                          || note "no usable EGL inside the workspace (probe exit $prc)" ;;
-esac
+    case "$prc" in
+        0) pass "GPU acceleration available" ;;
+        1) [ -n "$WANT_GPU" ] && fail "only software rendering inside the workspace" \
+                              || note "software rendering only -- benchmarks would measure llvmpipe" ;;
+        *) [ -n "$WANT_GPU" ] && fail "no usable EGL inside the workspace (probe exit $prc)" \
+                              || note "no usable EGL inside the workspace (probe exit $prc)" ;;
+    esac
+fi
 
 echo >&2
 if [ "$fails" -eq 0 ]; then

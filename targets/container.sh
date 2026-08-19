@@ -53,6 +53,11 @@ export WKDEV_CONTAINER_USER="${WK_CONTAINER_USER:-$(id -un)}"
 # workspace comes up without its git identity, push key or Claude install.
 export WKDEV_CONTAINER_SHELL=/bin/bash
 
+# The architecture vocabulary: what --arch may say, which image each answer
+# means, and the build flags that follow. Loaded on demand rather than assumed,
+# because not every command that loads a target sources it.
+command -v arch_canon >/dev/null 2>&1 || . "$WK_ROOT/lib/arch.sh"
+
 # GPU policy lives with the rest of the Linux host support, because what has to
 # be injected depends entirely on the host's driver stack.
 if [ -f "$WK_ROOT/host/linux/gpu.sh" ]; then
@@ -72,6 +77,16 @@ _wk_runtime() { echo "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk"; }
 [ -n "${WK_IN_VM:-}" ] && WK_TOOLS_SRC=/opt/wk-tools
 
 _ctr() { echo "wk-$1"; }
+
+# The architecture this workspace was created with, recorded at creation
+# because nothing else can recover it: the container reports the *kernel's*
+# architecture (the host's, since it shares it), so `uname -m` in an armhf
+# workspace answers aarch64 and would call it native. Absent for every
+# workspace made before --arch existed, which is what the default is for.
+t_arch() {
+    local f; f="$(wk_ws_dir "$1")/arch"
+    [ -f "$f" ] && cat "$f" || echo native
+}
 
 t_list() {
     _podman ps -a --filter 'name=^wk-' --format '{{.Names}}\t{{.Status}}' 2>/dev/null \
@@ -102,9 +117,20 @@ _sdk_opts() {
     printf '%s\n' --network none --isolated
 }
 
+# _sandbox_flags <arch>
 _sandbox_flags() {
+    local arch="${1:-native}"
     local rt; rt=$(_wk_runtime)
     mkdir -p "$rt"
+
+    # No GPU for a non-native workspace, and not as a policy: the NVIDIA
+    # userspace libraries have to match the host kernel driver exactly and are
+    # published for aarch64 only, so on armhf there is nothing to inject and
+    # asking for the device nodes anyway produces a container that fails to
+    # start. wkdev-create makes the same call for its own nvidia handling
+    # whenever --arch is set. See arch_has_gpu in lib/arch.sh.
+    local gpu=""
+    arch_has_gpu "$arch" && gpu=$(gpu_flags)
 
     # One directory holds every host socket a workspace may see: the egress
     # proxy's, and the benchmark compositor's. The compositor's socket comes
@@ -119,11 +145,12 @@ _sandbox_flags() {
          --env no_proxy=localhost,127.0.0.1,::1
          --env NO_PROXY=localhost,127.0.0.1,::1
          --env WAYLAND_DISPLAY=/run/wk/display/wayland-0
-         $(gpu_flags)"
+         $gpu"
 }
 
+# t_create <name> <base-id> [arch]
 t_create() {
-    local name="$1" base_id="$2"
+    local name="$1" base_id="$2" arch="${3:-native}"
     local c ws base
     c=$(_ctr "$name")
     ws=$(wk_ws_dir "$name")
@@ -137,6 +164,12 @@ t_create() {
     ensure_dir "$ws/overlay-work"
     ensure_dir "$ws/home"
     printf '%s\n' "$base_id" > "$ws/base-id"
+
+    # Recorded before creation, not after: everything downstream -- the build
+    # flags, the benchmark preflight, `wk ls` -- resolves the architecture from
+    # here, and a workspace that exists without this file would be reported as
+    # native and then built as native.
+    printf '%s\n' "$arch" > "$ws/arch"
 
     # The overlay must be spelled with an explicit upperdir and workdir. A bare
     # :O gives an ephemeral upper that podman throws away when the container
@@ -178,15 +211,27 @@ t_create() {
          --env BR2_DL_DIR=/cache/buildroot/dl
          --env BR2_CCACHE_DIR=/cache/buildroot/ccache
          --env WK_WORKSPACE=$name
+         --env WK_ARCH=$arch
          --env WKDEV_OFFLINE=1
          --env WK_FORKS=$(wk_push_forks | awk '{printf "%s%s:%s:%s", sep, $1, $2, $3; sep=","}')
-         $(_sandbox_flags)"
+         $(_sandbox_flags "$arch")"
     )
 
-    info "creating workspace '$name' from base $base_id ($WK_SANDBOX)"
+    # An explicit image and an explicit podman architecture, both from
+    # lib/arch.sh and neither inferred. --image is a wk addition to the SDK
+    # (sdk-patches/apply.sh section 12); without it `--arch arm` picks the
+    # aarch64 image of the current SDK version and asks podman for a 32-bit
+    # container from it.
+    local -a archopts=()
+    if ! arch_is_native "$arch"; then
+        archopts=(--arch "$(arch_podman "$arch")" --image "$(arch_image "$arch")")
+    fi
+
+    info "creating workspace '$name' from base $base_id ($WK_SANDBOX${arch:+, $arch})"
     # shellcheck disable=SC2046 -- _sdk_opts is a deliberate list of words.
     _sdk "$WK_SDK/scripts/host-only/wkdev-create" \
         $(_sdk_opts) \
+        ${archopts[@]+"${archopts[@]}"} \
         --name "$c" \
         --shell "$WKDEV_CONTAINER_SHELL" \
         --user "$WKDEV_CONTAINER_USER" \

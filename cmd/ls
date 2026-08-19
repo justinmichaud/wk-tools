@@ -17,7 +17,11 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${WK_TARGET:-$(default_target)}"
 load_target "$TARGET"
 
-printf '%-20s %-12s %-20s %8s\n' NAME STATE BASE CHANGES
+# ARCH is here rather than left to `wk build` to mention, because it is the one
+# property of a workspace that cannot be seen from inside it: the kernel is the
+# host's, so an armhf container reports aarch64 from uname, and a workspace
+# whose architecture is invisible is one whose builds are a surprise.
+printf '%-20s %-12s %-20s %-8s %8s\n' NAME STATE BASE ARCH CHANGES
 
 found=0
 for ws in $(list_workspaces); do
@@ -25,7 +29,7 @@ for ws in $(list_workspaces); do
     state=$(t_info "$ws")
     base=$(ws_base_id "$ws" 2>/dev/null || echo '?')
     size=$(du -sh "$(wk_ws_dir "$ws")/changes" 2>/dev/null | cut -f1 || echo -)
-    printf '%-20s %-12s %-20s %8s\n' "$ws" "$state" "$base" "$size"
+    printf '%-20s %-12s %-20s %-8s %8s\n' "$ws" "$state" "$base" "$(t_arch "$ws")" "$size"
 done
 
 [ "$found" -eq 1 ] || log "(no workspaces -- 'wk new <name>' to create one)"

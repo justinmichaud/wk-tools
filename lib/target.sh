@@ -17,6 +17,7 @@
 # different about it; re-stating a default is how the two copies drift apart.
 #
 #   t_src <name>       where the WebKit checkout is *inside* the target
+#   t_arch <name>      the architecture the target runs natively
 #   t_tools <name>     where wk-tools is inside the target
 #   t_sync_tools <n>   push wk-tools in (no-op when it is bind-mounted)
 #   t_ssh_host <name>  ssh destination, for Zed and the generated alias
@@ -38,6 +39,16 @@
 # MemAvailable instead of its cgroup limit.
 
 t_src()        { echo "/src/WebKit"; }
+
+# The architecture a workspace runs natively -- `native` unless something said
+# otherwise at creation. Only the container driver can currently answer
+# anything else, because only a container can be a different architecture from
+# the host it runs on; a VM guest and a remote box are whatever they are.
+#
+# This is deliberately not "what would I build for": that question has a second
+# answer once cross builds exist, and the two must not share a word. See
+# lib/arch.sh.
+t_arch()       { echo native; }
 t_tools()      { echo "/opt/wk-tools"; }
 t_sync_tools() { :; }
 t_ssh_host()   { echo "wk-$1"; }

@@ -12,6 +12,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/arch.sh"
 
 # container on a host, which is what every workspace here is unless `--target`
 # says otherwise. Inside a workspace it resolves to local, whose driver refuses
@@ -20,6 +21,12 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET=$(default_target)
 BASE=""
 
+# The architecture the workspace itself runs. Native unless asked otherwise --
+# and "asked otherwise" is only ever a workspace that executes another
+# architecture *natively*, never a cross build. See lib/arch.sh for why those
+# are two words and not one.
+ARCH=native
+
 NAME="${1:-}"; shift || true
 require_name "$NAME"
 
@@ -27,11 +34,29 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --target) TARGET="${2:-}"; shift 2 ;;
         --base)   BASE="${2:-}"; shift 2 ;;
+        --arch)   ARCH=$(arch_canon "${2:-}"); shift 2 ;;
+        --sysroot)
+            die "--sysroot is not implemented (docs/HANDOFF-cross-compile.md).
+    It is also not this flag: --arch makes the workspace itself another
+    architecture, executed natively. A sysroot cross build stays in a native
+    workspace and is a property of the build, so it will be 'wk build
+    --sysroot', not 'wk new --sysroot'." ;;
         *) die "unknown option: $1" ;;
     esac
 done
 
 load_target "$TARGET"
+
+# Only a container can be a different architecture from the host it runs on. A
+# macOS guest is whatever Tart booted, a remote box is whatever it is, and a
+# workspace cannot create anything at all -- so anywhere else this flag would
+# be silently ignored, which is worse than refusing it.
+if ! arch_is_native "$ARCH" && [ "$TARGET" != container ]; then
+    die "--arch $ARCH is a container-only capability (this is target '$TARGET').
+    32-bit ARM needs a host that can execute it: this Neoverse-N1 runs AArch32
+    at EL0, and Apple Silicon does not, which is why it lives on the Linux
+    workstation permanently."
+fi
 
 t_store_init
 
@@ -43,7 +68,7 @@ if t_needs_base; then
         || die "no base snapshot yet -- run 'wk sync' first"
 fi
 
-t_create "$NAME" "$BASE"
+t_create "$NAME" "$BASE" "$ARCH"
 
 # Creation can be asynchronous, and a workspace that is half-initialised looks
 # exactly like a working one until the first thing that needs the missing part.
@@ -59,7 +84,16 @@ fi
 # rather than making the user restate it.
 target_register "$NAME" "$TARGET"
 
-info "workspace '$NAME' ready"
+LABEL=$(arch_label "$ARCH")
+info "workspace '$NAME' ready${LABEL:+ ($LABEL)}"
+
+# Said once, here, rather than by every later command: an armhf workspace is a
+# software-rendering workspace (no NVIDIA userspace for it), which is fine for
+# JSC and for CPU-class benchmarks and is not a measurement for MotionMark.
+if ! arch_is_native "$ARCH"; then
+    log "  $ARCH: native 32-bit, no GPU. 'wk bench' will run CPU-class plans"
+    log "  in here and refuse GPU-class ones."
+fi
 if [ "$TARGET" = vm ]; then
     log "  wk vm start $NAME       boot it (an ssh alias is written then)"
     log "  wk build $NAME mac-release"

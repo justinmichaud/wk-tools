@@ -19,6 +19,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/watchdog.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/build/configs.sh"
 
 # Inside a workspace the name is implicit -- see cmd/build. A test path is never
@@ -58,6 +59,17 @@ load_target "$TARGET"
 
 lower=$(echo "$CFG_TYPE" | tr '[:upper:]' '[:lower:]')
 SRC=$(t_src "$NAME")
+
+# The same personality wrapper the build ran under, and for a sharper reason
+# here: the test scripts ask the machine what architecture it is. `uname -m` in
+# an armhf container answers with the host's aarch64, webkitdirs turns that into
+# arm64 (it reads CMAKE_SYSTEM_PROCESSOR out of `cmake --system-information`,
+# which is the host's), and run-javascriptcore-tests passes the answer to
+# run-jsc-stress-tests as --arch. That would select 64-bit expectations for a
+# 32-bit binary -- FTL and SIMD platform checks, 36-bit address-space
+# assumptions -- and report the results as if they were meant.
+ARCH=$(t_arch "$NAME")
+WRAP=$(arch_wrapper "$ARCH")
 if [ "$TARGET" != remote ]; then
     WK_CGROUP_MB=$(t_mem_mb "$NAME"); WK_CGROUP_CORES=$(t_cores "$NAME")
     export WK_CGROUP_MB WK_CGROUP_CORES
@@ -96,14 +108,14 @@ OUT_ENV=""
 case "$SUITE" in
 jsc)
     info "JSC tests ($CONFIG, -j$JOBS)"
-    CMD="cd $SRC && $OUT_ENV nice -n 10 Tools/Scripts/run-javascriptcore-tests \
+    CMD="cd $SRC && $OUT_ENV $WRAP nice -n 10 Tools/Scripts/run-javascriptcore-tests \
          --$lower $CFG_PORT --no-build --no-fail-fast --memory-limited $(sh_quote "$@")"
     ;;
 layout)
     info "layout tests ($CONFIG, ${GPU:+GPU}${GPU:-software rendering}, $JOBS processes)"
     # --no-retry-failures: a retry doubles the runtime and hides flakiness,
     # which is the opposite of what an automated check wants.
-    CMD="cd $SRC && $OUT_ENV $RENDER_ENV nice -n 10 Tools/Scripts/run-webkit-tests \
+    CMD="cd $SRC && $OUT_ENV $RENDER_ENV $WRAP nice -n 10 Tools/Scripts/run-webkit-tests \
          --$lower $CFG_PORT --no-build --no-retry-failures \
          --child-processes=$JOBS $(sh_quote "$@")"
     ;;
@@ -112,7 +124,8 @@ esac
 
 if [ -n "$DRY" ]; then
     log "dry run -- nothing was run."
-    log "  workspace: $NAME ($TARGET, $(t_info "$NAME"))"
+    ARCH_LABEL=$(arch_label "$ARCH")
+    log "  workspace: $NAME ($TARGET, $(t_info "$NAME")${ARCH_LABEL:+, $ARCH_LABEL})"
     log "  suite:     $SUITE ($CONFIG)"
     log "  would run: bash -lc $(sh_quote "$CMD")"
     exit 0
