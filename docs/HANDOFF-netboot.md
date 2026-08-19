@@ -660,6 +660,26 @@ soft-blocks WiFi until a WLAN country is set** (rfkill), which the Imager's
 first-run script normally does and which this preseed did not. A copied
 NetworkManager profile cannot help if the radio is blocked.
 
+**Proven by forensics on the stick afterwards, which is the important half:** the
+board *did* boot the stick — `/etc/machine-id` populated, six ssh host keys
+generated, NetworkManager state written, cloud-init logs, all stamped 10:48. And
+a power cycle brought the workstation back on the NVMe, unaided. **So the
+one-shot USB mechanism works in both directions**; only the network failed.
+
+Why it failed, found in the stick's own `cloud-init.log`: **Raspberry Pi OS
+trixie is cloud-init driven** (v25.2) and reads its network configuration from
+`/boot/firmware/network-config`, so the NetworkManager profile dropped into
+`/etc` was the wrong lever and was never consulted. `wlan0` shows `Up: False`
+throughout. Compounding it, this AP runs on **channel 52 — 5 GHz DFS** — which
+does not exist for a radio with no regulatory domain set, and RPi OS leaves the
+radio rfkill-blocked until a WLAN country is configured.
+
+So the reproducible preseed for any RPi OS-derived image is three files on the
+FAT partition and no rootfs surgery at all: `user-data` (users, keys, `bootcmd`
+for `rfkill unblock` and the country), `network-config` (netplan v2 wifi with
+SSID and PSK), and `meta-data` (whose `instance-id` must change, or cloud-init
+sees an instance it has already configured and skips every module).
+
 Three things this bought, all worth more than the test itself:
 
 1. **An image that cannot be reached must return the machine by itself.** Add a
