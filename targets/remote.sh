@@ -66,7 +66,14 @@ WK_MAX_JOBS="$WK_REMOTE_MAX_JOBS"   # what lib/resources.sh reads
 # What lives here is only what this side produces: the build log and the build
 # status. The checkout, the build tree and the ccache are all on the far end,
 # where they belong.
-WK_STORE="${WK_REMOTE_STORE:-$(wk_state_dir)/remote/${WK_TARGET:-remote}}"
+# On the machine itself the state *is* the workspace directory: `$root/ws/<name>`
+# already holds the checkout, and putting build.log and build.status beside it
+# is what makes one copy canonical no matter which end started the build.
+if [ -n "${WK_REMOTE_LOCAL:-}" ] && [ -n "${WK_REMOTE_ROOT:-}" ]; then
+    WK_STORE="${WK_REMOTE_STORE:-$WK_REMOTE_ROOT}"
+else
+    WK_STORE="${WK_REMOTE_STORE:-$(wk_state_dir)/remote/${WK_TARGET:-remote}}"
+fi
 
 # Whether this process is running *on* the target. `wk remote setup` writes
 # WK_REMOTE_LOCAL=1 into the conf it leaves on the machine itself, so the same
@@ -113,6 +120,31 @@ _rsh() {
     ssh $(_ssh_opts) "$WK_REMOTE_HOST" "$@"
 }
 
+# ssh for *questions* -- everything that asks the machine something rather than
+# handing it work. `-n`, so it can never read this side's stdin.
+#
+# That is not a precaution, it is a fix. ssh reads stdin eagerly and forwards
+# it whether or not the remote command wants it, and these run inside command
+# substitutions that inherit whatever stdin their caller had. Two ways it bit:
+# the build status arrived on the machine as an empty file, because resolving
+# the destination path in the same pipeline drank the content; and a `du` in
+# `wk remote setup`'s cleanup loop could swallow the answer being typed at the
+# confirmation prompt right after it.
+#
+# t_exec, t_exec_tty, t_wk and t_state_put deliberately do *not* use it: a
+# command run in the workspace may legitimately be fed something. A *build* is
+# not one of those -- it reads nothing, and `run_watched` puts it in the
+# background, where an ssh reaching for the terminal earns a SIGTTIN.
+_rsh_q() {
+    _remote_require
+    if _remote_is_local; then
+        bash -c "$*" </dev/null
+        return $?
+    fi
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    ssh -n $(_ssh_opts) "$WK_REMOTE_HOST" "$@"
+}
+
 # One round trip, cached for the life of this process: the remote home (which
 # is what $WK_REMOTE_ROOT defaults to), the core count, the load average and
 # the memory actually free.
@@ -125,7 +157,7 @@ _remote_probe() {
     [ -n "${_WK_REMOTE_PROBED:-}" ] && return 0
     _remote_require
     local out
-    out=$(_rsh 'echo "$HOME"; nproc; awk "{print int(\$1)}" /proc/loadavg;
+    out=$(_rsh_q 'echo "$HOME"; nproc; awk "{print int(\$1)}" /proc/loadavg;
                 awk "/^MemAvailable:/ {print int(\$2/1024)}" /proc/meminfo') \
         || die "cannot reach '$WK_REMOTE_HOST' over ssh.
     This target has no way in but ssh, and it is not interactive: the key,
@@ -170,7 +202,7 @@ _remote_reference() {
 
     # Static MOTD files only: /etc/update-motd.d holds scripts, and running
     # somebody else's scripts to read a hint is not a trade worth making.
-    WK_REMOTE_REFERENCE=$(_rsh '
+    WK_REMOTE_REFERENCE=$(_rsh_q '
         cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null \
         | grep -oE "/[A-Za-z0-9._/-]*[Ww]eb[Kk]it(\.git)?" | sort -u \
         | while read -r p; do
@@ -227,12 +259,12 @@ t_store_init() {
 t_list() {
     # `|| true`: no ws directory yet is not an error, and under `pipefail` in
     # the caller a non-zero ls would fail the whole listing.
-    { _rsh "ls -1 $(sh_quote "$(_remote_root)/ws") 2>/dev/null" 2>/dev/null || true; } \
+    { _rsh_q "ls -1 $(sh_quote "$(_remote_root)/ws") 2>/dev/null" 2>/dev/null || true; } \
         | while read -r n; do [ -n "$n" ] && printf '%s\tpresent\n' "$n"; done
 }
 
 t_info() {
-    _rsh "test -d $(sh_quote "$(_remote_ws "$1")/WebKit") && echo present || echo absent" \
+    _rsh_q "test -d $(sh_quote "$(_remote_ws "$1")/WebKit") && echo present || echo absent" \
         2>/dev/null || echo absent
 }
 
@@ -259,7 +291,7 @@ t_create() {
         # and is far closer than GitHub. `github` is added alongside so an
         # upstream fetch is always one named remote away.
         info "cloning from $ref (this machine's shared WebKit, hardlinked)"
-        _rsh "set -e
+        _rsh_q "set -e
             mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
             git clone --quiet -b main $(sh_quote "$ref") $(sh_quote "$ws/WebKit")
             git -C $(sh_quote "$ws/WebKit") remote add github \
@@ -288,7 +320,7 @@ t_create() {
         # workspaces borrow its objects through --shared, and a repack
         # underneath a live clone is how that arrangement breaks.
         info "updating the WebKit mirror on $WK_REMOTE_HOST (first run clones it)"
-        _rsh "set -e
+        _rsh_q "set -e
             mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
             M=$(sh_quote "$root/mirror")
             if [ ! -d \"\$M\" ]; then
@@ -305,7 +337,7 @@ t_create() {
     # ccache's own default ceiling is 5 GB, which a couple of WebKit builds
     # blow through; recorded in the cache's config so `ccache -s` on the box
     # reports the real limit too.
-    _rsh "printf 'max_size = %s\n' $(sh_quote "${WK_CCACHE_MAXSIZE:-40G}") \
+    _rsh_q "printf 'max_size = %s\n' $(sh_quote "${WK_CCACHE_MAXSIZE:-40G}") \
           > $(sh_quote "$root/cache/ccache/ccache.conf")" || true
 
     ensure_dir "$(wk_ws_dir "$name")"
@@ -326,9 +358,66 @@ t_exec() {
 # target is shared, and the flock has to be outside them either way.
 t_exec_build() {
     local name="$1"; shift
-    _rsh "cd $(sh_quote "$(t_src "$name")") && \
+    local log tee_to
+    log="$(_remote_ws "$name")/build.log"
+
+    # Nothing to tee into on the machine itself: $WK_STORE is the remote root
+    # there, so run_watched is already writing this exact file. Two writers on
+    # one log interleave, and the result reads like a corrupted build.
+    tee_to=" 2>&1 | tee $(sh_quote "$log")"
+    _remote_is_local && tee_to=""
+
+    # tee, so the canonical log is written *on the machine that is building*
+    # while the same bytes stream back for the watchdog and the terminal here.
+    # Without it a build started from the workstation would leave nothing
+    # behind on the box, and `wk logs` in a shell there -- the shell most
+    # likely to be watching -- would have nothing to show.
+    #
+    # pipefail with it, or tee's exit status becomes the build's and every
+    # failure reads as success.
+    _rsh_q "set -o pipefail
+          cd $(sh_quote "$(t_src "$name")") && \
           flock -w 3600 $(sh_quote "$(_remote_root)/.build.lock") \
-          nice -n 19 ionice -c3 $(sh_quote "$@")"
+          nice -n 19 ionice -c3 $(sh_quote "$@")$tee_to"
+}
+
+# The status file, pushed to the machine as it changes.
+#
+# A no-op in local mode, where cmd/build has already written that exact file:
+# $WK_STORE is the remote root there, so the local write and this one are the
+# same path.
+t_state_put() {
+    local name="$1" ws
+    _remote_is_local && { cat >/dev/null; return 0; }
+    # Resolved with stdin closed and *before* the pipeline below: the lookup
+    # can itself reach the machine, and an ssh in a command substitution reads
+    # the stdin it inherits.
+    ws=$(_remote_ws "$name" </dev/null)
+    # The log= field is rewritten on the way: the file it names is this side's
+    # transcript, and on the machine the canonical log sits beside the
+    # checkout. A status file pointing at a path that does not exist over there
+    # would cost `wk status` its liveness check -- the one part that answers
+    # "is it still moving".
+    sed "s|^log=.*|log=$ws/build.log|" \
+        | _rsh "cat > $(sh_quote "$ws/build.status")" || true
+}
+
+# `wk`, run on the machine itself.
+#
+# It answers about its own workspaces with its own store, which is where the
+# canonical build state lives -- so `wk status` and `wk logs` here ask it
+# rather than reporting the half of the truth this side happens to hold.
+#
+# Refused unless the machine has been provisioned: `wk remote setup` is what
+# puts wk-tools and the marker there, and without them the command would either
+# not exist or would resolve a target it has never heard of.
+t_has_wk() {
+    _remote_is_local && return 1
+    _rsh_q "test -f \$HOME/.wk-remote && test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
+}
+
+t_wk() {
+    _rsh "cd \$HOME && $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@")"
 }
 
 # A pty, for anything with a full-screen UI. ssh gives a command no terminal
@@ -379,7 +468,7 @@ t_sync_tools() {
 
 t_destroy() {
     local name="$1"
-    _rsh "rm -rf $(sh_quote "$(_remote_ws "$name")")"
+    _rsh_q "rm -rf $(sh_quote "$(_remote_ws "$name")")"
     rm -rf "$(wk_ws_dir "$name")"
     info "removed remote workspace '$name' from $WK_REMOTE_HOST"
 }

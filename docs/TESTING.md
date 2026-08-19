@@ -18,10 +18,17 @@ Two rules make the rest of it worth doing:
 Legend: **[V]** verified working at least once · **[ ]** not yet verified ·
 **[!]** known broken or unimplemented.
 
-There is no runner yet: this is a hand-ticked checklist, which means "run the
-test plan after a re-install" is not actually possible. Building `wk selftest`
-is `docs/HANDOFF-test-runner.md`; until it lands, every [V] is only as fresh
-as the last human pass.
+**`wk selftest` runs the automatable part of this file.** `wk selftest --quick`
+needs no workspace, no podman and no ssh, so it is cheap enough to gate an
+edit; a bare `wk selftest` adds the sections whose prerequisites are present
+and skips the rest out loud. It exits 0 only if everything it ran passed.
+
+Each check names a phrase from the line it implements and looks that phrase up
+here at run time, so rewording a line without touching the runner is reported
+as DRIFT rather than quietly passing. The runner prints how much of this file
+it covers on every run — the remainder is still hand-ticked, and the manual
+ones (watching a monitor go dark, judging a desktop) always will be. Every [V]
+outside the runner's coverage is only as fresh as the last human pass.
 
 ---
 
@@ -347,8 +354,18 @@ reached through a ProxyJump), driven from the macOS host.
 - [V] an empty listing on the box points at the workstation, not at a `wk new`
       that would refuse
 - [V] `wk status`/`wk ls` list what is on a configured machine even with
-      nothing in the registry, and honestly report `build=none` for a build
+      nothing in the registry
+- [V] the build state is the machine's: a build driven from the box reports
+      identically on the workstation (`build=failed (jsc-release) 0m45s`), and
+      one driven from the workstation reports identically on the box
+- [V] `wk status` and `wk logs` ask the machine and bring its **exit status**
+      back with it (1 for a failed build, from either end)
+- [V] a bare `wk status` on the workstation reaches every configured machine
+      and its worst state becomes the command's exit code
+- [V] the canonical log has one writer: no duplicate lines when the build is
       driven from the machine itself
+- [V] a machine that has not been provisioned falls back to the local
+      transcript instead of failing
 - [V] a workspace is cloned from a WebKit repository the machine advertises in
       its MOTD, hardlinked: `.git` costs 69 MB against a 13 GB source
 - [V] an advertised path that does not exist is rejected rather than used —
@@ -386,12 +403,21 @@ reached through a ProxyJump), driven from the macOS host.
 - [ ] `wk report` prints the weekly summary (needs gh auth)
 - [ ] the MCP server (`wk mcp`) creates and destroys a workspace from Claude
       Desktop, and refuses past its workspace cap
-- [ ] `wk help` lists every cmd/* entry (no orphan commands, no dead entries)
+- [V] `wk help` lists every cmd/* entry (no orphan commands, no dead entries)
+- [V] an unknown command prints the usage and exits 2
+- [V] host-only commands refuse inside a workspace rather than acting on an
+      empty store — `wk sync` in there would fetch a 13 GB mirror into a
+      directory that is discarded with the workspace
 - [V] `wk doctor` runs read-only (does not start the podman machine or a
       guest), reports ok/--/?? per item, and exits 1 when something is missing
 - [ ] `wk doctor` on a freshly set-up machine reports everything ok, and each
       `--` line's printed fix actually clears that line when run
 - [V] every shell file parses under both bash 5 and bash 3.2
+- [V] `wk selftest --quick` passes on a set-up machine, needs no workspace, no
+      podman and no ssh, and starts nothing — in particular it leaves the
+      podman machine exactly as it found it
+- [V] `wk selftest` reports DRIFT when a check's plan line is reworded or
+      removed, so the runner and this file cannot part company quietly
 
 ## 5. Host: quiesce, session, gui (Linux)
 - [ ] `wk quiesce on` sets the performance governor with no password;

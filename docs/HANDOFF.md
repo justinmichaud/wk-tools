@@ -238,6 +238,9 @@ alias IP rather than each being named.
    anything unattended. The machine holds workspaces and does not own them:
    `wk new` and `wk rm` refuse there, because the registry that says which
    machine a workspace lives on -- and so where a later `wk build` goes -- is
+   the workstation's. The machine holds workspaces and does not own them:
+   `wk new` and `wk rm` refuse there, because the registry that says which
+   machine a workspace lives on -- and so where a later `wk build` goes -- is
    the workstation's.
 
 5. **`docs/HANDOFF-other-remote.md`** (Windows/macOS remote targets, rentable
@@ -495,11 +498,16 @@ alias IP rather than each being named.
 Standing rule, not a task: every task above gets a line item in
 `docs/TESTING.md` as it is picked up — apply it inline.
 
-Do this one early; it is a single short session:
-
-- **`docs/HANDOFF-test-runner.md`** — build `wk selftest`, the autonomous
-  runner for `docs/TESTING.md`. The plan is currently a hand-ticked checklist,
-  so "run the test plan after a re-install" is not actually possible.
+- **`docs/HANDOFF-test-runner.md` — started 2026-08-19.** `wk selftest` exists:
+  `--quick` is 13 hermetic checks (no workspace, no podman, no ssh), a bare run
+  adds the remote section, and every check names the `docs/TESTING.md` line it
+  implements so a reworded line reports DRIFT rather than passing quietly. It
+  starts nothing and prints its own coverage — 15 of 198 line items. What is
+  left is coverage rather than machinery: the container and vm sections need a
+  workspace and a guest, and the plan still mixes automatable lines with ones
+  that need a human. Three defects fell out of writing it, including
+  `wk selftest` itself forwarding into the podman VM and being answered by a
+  stale copy of wk-tools.
 
 Genuine filler, in no order:
 

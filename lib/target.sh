@@ -29,6 +29,8 @@
 #   t_store_init       create the host-side directories this target needs
 #   t_ready            block until a new workspace finished initialising
 #   t_exec_build       t_exec, for a build specifically (see below)
+#   t_state_put        keep a copy of the build status where the target is
+#   t_has_wk / t_wk    run `wk` on the target's own machine, if that is one
 #
 # One driver is the degenerate case of all this: targets/local.sh, where the
 # target is the machine the command is already running on -- a workspace acting
@@ -84,6 +86,24 @@ t_exec_tty()   { t_exec "$@"; }
 # small probe block for up to an hour behind a build, which is a hang with no
 # explanation attached.
 t_exec_build() { t_exec "$@"; }
+
+# Build state, for a target that is a machine of its own.
+#
+# `wk build` writes build.status and build.log on the side it was driven from,
+# which is the only side that knows how the build ended. That is the whole
+# answer for a container or a guest, because there is exactly one side. A build
+# machine has two: a build can be started from the workstation over ssh or from
+# a shell on the box, and a `wk status` that only ever saw the half it started
+# would report `build=none` about a build running in front of you.
+#
+# So a driver that has a far side keeps the canonical copy over there, and
+# these two hooks are how: t_state_put pushes the status as it changes, and
+# t_wk answers the question by running `wk` on that machine instead of guessing
+# from here. Both default to "there is no far side", which is true everywhere
+# else and leaves those targets exactly as they were.
+t_state_put() { cat >/dev/null; }   # t_state_put <name>, content on stdin
+t_has_wk()    { return 1; }         # is there a far side that can answer?
+t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
 
 # The load already on the target, in whole cores, as `build_jobs polite`
 # subtracts it. Defaults to this machine's own -- correct for a container,

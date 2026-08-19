@@ -1,49 +1,89 @@
 # HANDOFF — `wk selftest`: run the test plan autonomously
 
-`docs/TESTING.md` is the test plan, and today it is a hand-ticked checklist:
-nothing in the repo reads or executes it. That fails the plan's own purpose —
-after building something, after a re-install, or after an upgrade, it should be
-possible to run one command and learn what broke.
+`cmd/selftest` exists as of 2026-08-19. `wk selftest --quick` is 13 checks, all
+green on this macOS host, needing no workspace, no podman and no ssh; a bare
+`wk selftest` adds the remote section. What is left is coverage, not
+machinery.
 
-## What to build
+## What it does
 
-`cmd/selftest`, run as `wk selftest [--section N] [--quick]`:
+- **Each check names the plan line it implements**, as a phrase looked up in
+  `docs/TESTING.md` at run time. A line reworded or deleted without touching
+  the runner reports **DRIFT**, which is a failure. That is the whole answer to
+  "the plan and the runner must not drift apart silently", and it works: two of
+  the first checks written reported DRIFT immediately, because they were checks
+  for lines nobody had added to the plan yet.
+- **A missing prerequisite is a visible SKIP**, never nothing. Checks report by
+  exit status — 0 passed, 77 the prerequisite is absent (its output is the
+  reason), anything else failed (its output is the evidence). 77 rather than a
+  separate probe function, because a prerequisite is usually only discoverable
+  by starting to do the thing.
+- **Every run prints its own coverage** — "198 line items in docs/TESTING.md,
+  15 encoded here". A runner that reports ok over a fraction of the plan and
+  says nothing about the rest is exactly the silent pass the plan forbids.
+- **It starts nothing.** Verified: the podman machine is in the same state
+  after a run as before it, including a full run.
+- `wk doctor` runs first for context and its verdict is printed, but nothing is
+  gated on it: each check probes its own prerequisite, which is more honest
+  than parsing a checklist.
 
-- Each automatable line item in TESTING.md becomes a check function: run the
-  command, assert the observable outcome, report ok/FAIL in the style of
-  `cmd/verify` (which is the model to copy — it already tests properties
-  rather than configuration and exits 1 on any failure).
-- Checks that need expensive state (a synced mirror, a built workspace, a
-  running guest) declare it and are skipped with an explicit SKIP when it is
-  absent — a skip must be visible, never silent.
-- Checks that are inherently manual (watching a monitor go dark, judging a
-  desktop) stay in TESTING.md as a short manual section; the runner prints
-  them at the end as "verify by hand".
-- `--quick` runs only what needs no workspace (help output, dispatch, syntax,
-  config parsing, store layout) so it can gate any edit cheaply.
-- The regressions table at the bottom of TESTING.md is the priority list:
-  each row already cost a debugging session, so encode those first.
+## What it found while being written
 
-## Constraints
+Three real defects, all in the first run:
 
-- bash 5 and bash 3.2 (`bash -n` and `/bin/bash -n`), or make the case for
-  python and follow `cmd/mcp`'s precedent.
-- Never start the podman machine or boot a guest unless the section that
-  needs it was explicitly requested.
-- A failing check must name the TESTING.md line it implements, so the plan
-  and the runner cannot drift apart silently.
+- `wk selftest` itself was not in `is_host_command`, so on a macOS host it
+  forwarded into the podman VM — which booted the machine and then reported
+  "unknown command: selftest" from a stale copy of wk-tools. Exactly the class
+  of bug the `wk build --list` regression row is about.
+- The first `sudo` check flagged `cmd/gc`, which uses `sudo -n` and prints
+  "run 'sudo fstrim -av' yourself" when it cannot. Two lessons: the property is
+  "no sudo that can *prompt*", and a grep for a command name has to look at
+  command position or it reads advice as a call.
+- The argument-form check booted the podman VM: on a macOS host an
+  unregistered workspace name cannot be resolved without asking the VM. Pinned
+  with `WK_IN_VM=1`, which keeps the check on the argument parsing it is
+  actually about.
+
+## What is left
+
+**Coverage.** 15 of 198 line items. The cheap ones are done — the whole
+`--quick` section is hermetic — and what remains needs state:
+
+1. **Container section (59 items).** Needs the podman machine and a workspace.
+   The shape to follow: a `container` section that creates one workspace, runs
+   the lifecycle/sandbox/build checks against it, and removes it; SKIP the
+   whole section when podman is absent or stopped, since starting it is exactly
+   what this must not do without being asked.
+2. **vm section (62 items).** Same, with a guest — and the expensive
+   prerequisite (a golden base, a booted guest) means most of it should skip by
+   default and run only on `--section vm`.
+3. **Remote section (37 items).** Two encoded. The rest need a workspace on a
+   machine, which is cheap now (39 s) but not free.
+4. **The regressions table.** Six of its nineteen rows are encoded. The
+   remainder need a workspace or a guest; they are the highest-value ones left,
+   because each already cost a debugging session.
+5. **A manual section.** The plan still mixes automatable lines with ones that
+   need a human (watching a monitor go dark, judging a desktop). Those should
+   be marked as such in `docs/TESTING.md` so the runner can print them at the
+   end as "verify by hand" rather than leaving them indistinguishable from
+   coverage nobody has written yet.
+
+## Constraints that still hold
+
+- bash 5 and bash 3.2. The runner checks this for the whole tree, itself
+  included.
+- Never start the podman machine or boot a guest unless the section that needs
+  it was explicitly requested.
+- A check that cannot fail loudly is not a check.
 
 ## Relationship to `wk doctor`
 
-`wk doctor` (exists) answers "what is provisioned on this machine" by
-inspecting state, read-only. `wk selftest` answers "does what is provisioned
-actually behave" by running commands. Don't merge them: doctor must stay safe
-to run anywhere anytime, while selftest may build, create workspaces, and take
-minutes. selftest should *start* by running doctor and skipping sections whose
-prerequisites doctor reports missing.
+Unchanged and deliberate: `wk doctor` answers "what is provisioned here" by
+inspecting state, read-only, safe anywhere; `wk selftest` answers "does it
+behave" by running commands, and may take minutes. Don't merge them.
 
 ## Done means
 
-`wk selftest` on a freshly set-up machine reports ok/SKIP everywhere, exits 0,
-and `docs/TESTING.md` says at the top that the runner exists and how the
-manual remainder is organised.
+`wk selftest` on a freshly set-up machine reports ok/SKIP everywhere and exits
+0 — true today for what is encoded. The remaining work is the four sections
+above, and the honest measure of it is the coverage line the runner prints.

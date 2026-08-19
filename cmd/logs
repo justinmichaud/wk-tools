@@ -27,6 +27,21 @@ require_name "$NAME"
 # The log lives wherever that workspace's target keeps its state, which is not
 # the same place for a container and a macOS VM.
 load_target "${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+
+# The canonical log for a target that is a machine of its own is on that
+# machine -- written there by the build itself, whichever end started it. Ask
+# it rather than reading the transcript this side happens to hold, which is
+# empty for every build driven from the other one.
+#
+# The whole command goes over, arguments included, so --all and --follow behave
+# the same as they do locally. A ctrl-c out of --follow closes the connection,
+# which ends the `tail -f` with it.
+if t_has_wk; then
+    rc=0
+    t_wk logs "$NAME" ${@+"$@"} || rc=$?
+    exit "$rc"
+fi
+
 LOG="$(wk_ws_dir "$NAME")/build.log"
 [ -f "$LOG" ] || die "no build log for '$NAME' -- has it been built?"
 

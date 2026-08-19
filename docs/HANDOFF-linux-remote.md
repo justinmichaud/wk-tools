@@ -205,12 +205,36 @@ half that state on the machine that never reads it, and a `wk rm` there would
 delete the checkout while the workstation went on listing it. So the machine
 holds checkouts and builds them; it does not own them.
 
-What that leaves is one asymmetry, and it is honest rather than hidden:
-**a build's log and status live wherever it was started from.** The driving
-side is the only one that knows how a build ended, so `wk status` on the
-workstation reports `build=none` for a build run on the box, and the box
-reports it in full. The *flock* is shared, which is the part that matters: two
-builds cannot stack whichever end starts them.
+**The build state is the machine's, not the driver's.** A build can be started
+from either end, and a `wk status` that only saw the half it started reported
+`build=none` about a build running in front of you. So the canonical copy lives
+beside the checkout, at `$WK_REMOTE_ROOT/ws/<name>/build.{status,log}`, and
+both ends agree on it:
+
+- the log is written **on the machine that is building**, by the build — the
+  remote command is teed there, and the same bytes still stream back for the
+  watchdog and the terminal. On the box `$WK_STORE` *is* the remote root, so
+  `run_watched` already writes that exact file and the tee is dropped: two
+  writers on one log interleave into something that reads like a corrupted
+  build.
+- the status is pushed as it changes (`t_state_put`), with its `log=` field
+  rewritten to the path that exists over there — a status file naming a path
+  the machine does not have would cost `wk status` its liveness check, which is
+  the part that answers "is it still moving".
+- `wk status` and `wk logs` **ask the machine** rather than reading whichever
+  half this side holds (`t_has_wk` / `t_wk`, which run `wk` over there through
+  the tooling `wk remote setup` installed). Its exit status comes back with it,
+  because a script branching on `wk status` must not be told 0 by the end that
+  did not run the build.
+
+Measured: a build driven from the box reports `build=failed (jsc-release)
+0m45s` on the workstation, identically, and `wk status` exits 1 at both ends.
+`wk logs` likewise, including `--all` and `--follow`. The *flock* was already
+shared, which is why two builds cannot stack whichever end starts them.
+
+Both fall back gracefully: a machine that has not been through
+`wk remote setup` has no `wk` to ask, `t_has_wk` says so, and the commands read
+the local transcript exactly as they did before.
 
 `wk ls` and `wk status` see everything from either end regardless —
 `target_all` walks every *configured* machine, not just the ones the registry
@@ -307,6 +331,18 @@ provision nothing there and should not start.
   The declining path is verified (no terminal, nothing removed); nobody has
   answered yes to one yet, because the only real candidate on this machine is
   the user's own older checkout and that is not a decision to make for them.
+- **Delegated output interleaves.** `wk status`/`wk logs` against a machine
+  return two streams over one connection, and the report's stdout rows and
+  stderr headings can arrive out of order — the error lines before the
+  `errors:` that introduces them. Merging them remotely would fix the order and
+  put `wk logs --all` on stderr, which is worse.
+- **An ssh must never read this side's stdin unless the command wants it.**
+  Two bugs came from that, both found here: the pushed build status arrived
+  empty, because resolving its destination path in the same pipeline drank the
+  content; and a `du` in the cleanup loop could swallow the answer being typed
+  at the prompt right after it. Questions now go through `_rsh_q` (`ssh -n`)
+  and only `t_exec`, `t_exec_tty`, `t_wk` and the status write forward stdin.
+  Anything added to this driver has to pick a side.
 - **buildbox4 is configured but not provisioned.** It answered the MOTD probe
   and the reference check; `wk remote setup buildbox4` has never been run
   against it, so it has no `~/.wk-remote` and no shell rc of ours.

@@ -1,0 +1,445 @@
+#!/usr/bin/env bash
+#
+# wk selftest -- run docs/TESTING.md instead of reading it.
+#
+# The plan is a hand-ticked checklist, which means "run the test plan after a
+# re-install" was not actually possible: every [V] in it is only as fresh as
+# the last human pass. This executes the automatable part of it.
+#
+# Two rules, both from the plan's own preamble:
+#
+#   Test the property, not the configuration. Every check below runs a command
+#   and looks at what happened, never at the file that was supposed to make it
+#   happen.
+#
+#   A silent pass is not a pass. A check whose prerequisite is missing reports
+#   SKIP with the reason, never nothing; and a check whose plan line has been
+#   reworded reports DRIFT rather than quietly testing something the plan no
+#   longer claims.
+#
+# That last one is what keeps this file and the plan together. Each check names
+# a phrase from the docs/TESTING.md line it implements, and the phrase is
+# looked up in the file at run time -- so deleting or rewriting a line without
+# touching the runner is a failure, not a silent divergence.
+#
+# Not `wk doctor`. Doctor answers "what is provisioned here" by inspecting
+# state and is safe to run anywhere at any time; this answers "does it
+# behave" by running commands, and may take minutes. Doctor is run first, for
+# context, and its verdict is reported rather than acted on: each section
+# probes its own prerequisites, which is more honest than parsing a checklist.
+#
+#   0  every check passed (skips are not failures)
+#   1  something failed, or the runner and the plan have drifted apart
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+PLAN="$WK_ROOT/docs/TESTING.md"
+WK="$WK_ROOT/wk"
+
+SECTION=""
+LIST=""
+
+usage() {
+    cat >&2 <<'EOF'
+usage: wk selftest [--quick] [--section <name>] [--list]
+
+  --quick            only checks that need no workspace, no podman and no ssh
+  --section <name>   quick | remote        (more as they are encoded)
+  --list             print the checks and the plan lines they implement
+
+Exit 0 when everything checkable passed; 1 on any failure or plan drift.
+EOF
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --quick)   SECTION=quick; shift ;;
+        --section) SECTION="${2:-}"; shift 2 ;;
+        --list)    LIST=1; shift ;;
+        -h|--help) usage ;;
+        *) die "unknown option: $1" ;;
+    esac
+done
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+passes=0; fails=0; skips=0; drifts=0
+pass()  { printf '  \033[32mok\033[0m    %s\n' "$*" >&2; passes=$((passes + 1)); }
+fail()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*" >&2; fails=$((fails + 1)); }
+skip()  { printf '  \033[33mSKIP\033[0m  %s\n' "$*" >&2; skips=$((skips + 1)); }
+drift() { printf '  \033[35mDRIFT\033[0m %s\n' "$*" >&2; drifts=$((drifts + 1)); }
+detail() { printf '%s\n' "$*" | sed 's/^/        /' >&2; }
+section() { printf '\n%s\n' "$*" >&2; }
+
+want() { [ -z "$SECTION" ] || [ "$SECTION" = "$1" ]; }
+
+# check <plan-anchor> <function>
+#
+# The anchor is a distinctive phrase from the docs/TESTING.md line this check
+# implements, matched as a fixed string. A check that runs is a line of the
+# plan actually exercised; a check whose anchor is gone is DRIFT.
+#
+# The function reports by exit status: 0 passed, 77 the prerequisite is absent
+# (its output is the reason), anything else failed (its output is the evidence).
+# 77 rather than a second function, because a prerequisite is usually only
+# discoverable by starting to do the thing.
+check() {
+    local anchor="$1" fn="$2" out rc=0
+
+    if [ -n "$LIST" ]; then
+        printf '  %-8s %s\n' "$fn" "$anchor" >&2
+        return 0
+    fi
+
+    if ! grep -qF -- "$anchor" "$PLAN"; then
+        drift "$anchor"
+        detail "no line in docs/TESTING.md contains this phrase any more."
+        detail "Either restore the line or update the check ($fn)."
+        return 0
+    fi
+
+    out=$("$fn" 2>&1) || rc=$?
+    case "$rc" in
+        0)  pass "$anchor" ;;
+        77) skip "$anchor"; [ -n "$out" ] && detail "$out" ;;
+        *)  fail "$anchor"; [ -n "$out" ] && detail "$out" ;;
+    esac
+    return 0
+}
+
+# --- shared helpers ----------------------------------------------------------
+
+# Every shell file in the tree, by shebang rather than by extension -- `wk`,
+# `setup` and everything under cmd/ have no suffix, and cmd/mcp is python and
+# must not be handed to bash.
+shell_files() {
+    local f
+    find "$WK_ROOT" -type f -not -path '*/.git/*' -not -path '*/__pycache__/*' 2>/dev/null \
+    | while read -r f; do
+        case "$(head -1 "$f" 2>/dev/null)" in
+            '#!'*bash*|'#!'*/sh|'#!'*/sh\ *) echo "$f" ;;
+        esac
+    done
+}
+
+# A workspace that is not one: a marker naming a checkout that exists, so the
+# in-workspace code paths can be exercised on a host without creating anything.
+# $XDG_STATE_HOME goes with it, because targets/local.sh makes its store at
+# source time and a test must not leave a directory in the real one.
+fake_marker() {
+    local d="$TMP/ws"
+    mkdir -p "$d/WebKit" "$TMP/state"
+    printf '%s\n' \
+        '# written by wk selftest' \
+        'name=selftest-ws' \
+        "src=$d/WebKit" \
+        'config=jsc-release' > "$d/marker"
+    echo "$d/marker"
+}
+
+# Run `wk` as if this machine were a workspace.
+as_workspace() {
+    WK_MARKER="$(fake_marker)" XDG_STATE_HOME="$TMP/state" "$WK" "$@"
+}
+
+# --- quick: no workspace, no podman, no ssh ----------------------------------
+
+# Every file, under both shells. macOS ships bash 3.2 and the host installs
+# nothing extra, so a bash 5 idiom in anything the host runs is a syntax error
+# on the machine it matters on.
+chk_parse() {
+    local f bad=""
+    while read -r f; do
+        [ -n "$f" ] || continue
+        /bin/bash -n "$f" 2>/dev/null || bad="$bad
+  bash 3.2: $f"
+        bash -n "$f" 2>/dev/null || bad="$bad
+  bash 5:   $f"
+    done <<EOF
+$(shell_files)
+EOF
+    [ -z "$bad" ] || { echo "does not parse:$bad"; return 1; }
+}
+
+# An orphan command is invisible: it works and nobody knows it is there.
+chk_help_commands() {
+    local help c n missing=""
+    help=$("$WK" help 2>&1 || true)
+    for c in "$WK_ROOT"/cmd/*; do
+        [ -f "$c" ] && [ -x "$c" ] || continue
+        n=$(basename "$c")
+        printf '%s\n' "$help" | grep -qE "^  $n( |\$)" || missing="$missing $n"
+    done
+    [ -z "$missing" ] || { echo "not listed by 'wk help':$missing"; return 1; }
+}
+
+chk_build_list() {
+    local out
+    out=$("$WK" build --list 2>&1) || { echo "exit $?: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'jsc-release' || { echo "no jsc-release in the table"; return 1; }
+    printf '%s\n' "$out" | grep -q 'mac-release' || { echo "no mac-release in the table"; return 1; }
+}
+
+# The table is a static lookup; it used to boot a two-minute VM to print it,
+# and on a host without podman it failed naming a problem it did not have.
+chk_build_list_starts_nothing() {
+    local before after
+    have podman || { echo "no podman on this machine"; return 77; }
+    before=$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null || echo none)
+    [ "$before" = running ] && { echo "the podman machine is already running"; return 77; }
+    "$WK" build --list >/dev/null 2>&1 || { echo "wk build --list failed"; return 1; }
+    after=$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null || echo none)
+    [ "$after" = "$before" ] || { echo "podman machine went $before -> $after"; return 1; }
+}
+
+# The marker escaping into a host's $HOME makes every command act on a
+# workspace that is not there, and it does it silently.
+chk_no_host_marker() {
+    in_workspace && { echo "this machine is workspace '$(wk_self)'"; return 77; }
+    [ ! -e "$HOME/.wk-workspace" ] || { echo "$HOME/.wk-workspace exists on a host"; return 1; }
+}
+
+# A clean merge can leave two definitions of the same function in one file,
+# with the wrong one live and nothing to show for it.
+chk_no_duplicate_functions() {
+    local f dups="" d
+    while read -r f; do
+        [ -n "$f" ] || continue
+        d=$(grep -oE '^[a-zA-Z_][a-zA-Z0-9_]*\(\)' "$f" 2>/dev/null | sort | uniq -d | tr '\n' ' ') || true
+        [ -n "$d" ] && dups="$dups
+  $(basename "$f"): $d"
+    done <<EOF
+$(shell_files)
+EOF
+    [ -z "$dups" ] || { echo "defined twice in one file:$dups"; return 1; }
+}
+
+# A driver is a sourced file that sets globals. One that evaluates something at
+# source time which is only true later breaks every command that merely loads
+# it -- `wk start` and `wk stop` load all of them.
+chk_drivers_source() {
+    local t out rc
+    for t in container vm remote; do
+        rc=0
+        out=$(bash -c '
+            set -euo pipefail
+            WK_ROOT="$1"
+            . "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/resources.sh"
+            . "$WK_ROOT/lib/store.sh";  . "$WK_ROOT/lib/target.sh"
+            load_target "$2"' _ "$WK_ROOT" "$t" 2>&1) || rc=$?
+        [ "$rc" -eq 0 ] || { echo "targets/$t.sh: exit $rc: $out"; return 1; }
+    done
+
+    # local.sh only means anything with a marker, and refuses without one --
+    # which is itself the behaviour to keep.
+    rc=0
+    out=$(WK_MARKER="$(fake_marker)" XDG_STATE_HOME="$TMP/state" bash -c '
+        set -euo pipefail
+        WK_ROOT="$1"
+        . "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/resources.sh"
+        . "$WK_ROOT/lib/store.sh";  . "$WK_ROOT/lib/target.sh"
+        load_target local' _ "$WK_ROOT" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || { echo "targets/local.sh with a marker: exit $rc: $out"; return 1; }
+}
+
+# Two argument forms for one command, and each has to lose to the other in the
+# right place: `wk build <config>` in a workspace, `wk build <ws> <config>` on
+# a host. Silently picking the wrong one builds the wrong thing.
+chk_build_arg_forms() {
+    local out rc
+
+    rc=0; out=$(as_workspace build jsc-release --dry-run 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || { echo "in-workspace 'wk build <config>' failed: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'workspace: selftest-ws' \
+        || { echo "in-workspace form did not resolve this workspace:"; echo "$out"; return 1; }
+
+    # The host form typed inside: read literally it would build this workspace
+    # and report the config as unknown, explaining neither half.
+    rc=0; out=$(as_workspace build otherws jsc-release --dry-run 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "'wk build <ws> <config>' was accepted inside a workspace"; return 1; }
+    printf '%s\n' "$out" | grep -q 'no name' \
+        || { echo "the refusal does not name the in-workspace form: $out"; return 1; }
+
+    # And the workspace form typed outside: one bare argument is a workspace
+    # name there, so it must ask for the config rather than guess.
+    #
+    # WK_IN_VM=1 pins this to the argument parsing, which is what is under
+    # test. Without it a macOS host cannot know whether an unregistered name is
+    # a container workspace without asking the podman VM -- so it starts one,
+    # and a selftest that boots a two-minute VM to check an error message is a
+    # selftest nobody runs.
+    if ! in_workspace; then
+        rc=0; out=$(WK_IN_VM=1 "$WK" build jsc-release 2>&1) || rc=$?
+        [ "$rc" -eq 2 ] || { echo "host 'wk build <config>' exited $rc, expected 2: $out"; return 1; }
+        printf '%s\n' "$out" | grep -q 'usage: wk build <workspace> <config>' \
+            || { echo "the usage line does not show the host form: $out"; return 1; }
+    fi
+}
+
+# The check's own gate was unset in a workspace, so it reported "sandbox
+# intact" after measuring two things and skipping the boundary entirely.
+chk_verify_refuses_inside() {
+    local out rc=0
+    out=$(as_workspace verify selftest-ws 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "wk verify succeeded inside a workspace"; return 1; }
+    printf '%s\n' "$out" | grep -q 'only means anything on the host' \
+        || { echo "refused, but not for the stated reason: $out"; return 1; }
+}
+
+# Host commands act on a store, a seat or a hypervisor. Inside a workspace they
+# either no-op against an empty store and report success, or do real work in
+# the wrong place -- `wk sync` would fetch a 13 GB mirror into a directory that
+# is discarded with the workspace.
+chk_host_only_refused_inside() {
+    local c out rc
+    for c in sync gc vm pi session quiesce; do
+        rc=0; out=$(as_workspace "$c" 2>&1) || rc=$?
+        [ "$rc" -ne 0 ] || { echo "'wk $c' was accepted inside a workspace"; return 1; }
+        printf '%s\n' "$out" | grep -q "acts on a host" \
+            || { echo "'wk $c' refused for some other reason: $out"; return 1; }
+    done
+}
+
+chk_unknown_command() {
+    local out rc=0
+    out=$("$WK" nosuchcommand 2>&1) || rc=$?
+    [ "$rc" -eq 2 ] || { echo "exited $rc, expected 2"; return 1; }
+    printf '%s\n' "$out" | grep -q 'unknown command' || { echo "no 'unknown command': $out"; return 1; }
+}
+
+# A typo'd target must not be mistaken for a machine, and the error is where
+# the conf format is documented.
+chk_unknown_target() {
+    local out rc=0
+    out=$(WK_TARGET=nosuchtarget-selftest "$WK" ls 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "an unknown target was accepted"; return 1; }
+    printf '%s\n' "$out" | grep -q 'targets/nosuchtarget-selftest.conf' \
+        || { echo "the error does not name the conf to write: $out"; return 1; }
+}
+
+# The whole design is that daily work needs no password. quiesce and session
+# are the deliberate exceptions and have their own privileged helper.
+#
+# `sudo -n` does not count, and the distinction is the point rather than a
+# loophole: it never prompts, so a command that uses it stays usable by an
+# agent and unattended. cmd/gc trims the filesystem that way and says so when
+# it cannot -- which is the behaviour to keep, not to flag.
+chk_no_sudo_daily() {
+    local c hits found=""
+    for c in build run test logs status ls new rm enter claude gui bench sync gc; do
+        [ -f "$WK_ROOT/cmd/$c" ] || continue
+        # In command position only. `sudo` inside a quoted string is advice --
+        # cmd/gc prints "run 'sudo fstrim -av' yourself" when it cannot, which
+        # is the opposite of the thing being looked for.
+        hits=$(grep -nE '(^|;|&&|\|\||\bthen\b|\belse\b|\bdo\b)[[:space:]]*sudo[[:space:]]' \
+                   "$WK_ROOT/cmd/$c" \
+               | grep -v 'sudo -n' | grep -v '^[0-9]*:[[:space:]]*#' || true)
+        [ -n "$hits" ] && found="$found
+  cmd/$c: $(printf '%s' "$hits" | head -2 | tr '\n' ';')"
+    done
+    [ -z "$found" ] || { echo "sudo that can prompt:$found"; return 1; }
+}
+
+# --- remote: needs a configured machine, and reaches it ----------------------
+
+chk_remote_confs_resolve() {
+    local d f n bad="" any=""
+    d=$(target_conf_dir)
+    [ -d "$d" ] || { echo "no machines configured in $d"; return 77; }
+    for f in "$d"/*.conf; do
+        [ -f "$f" ] || continue
+        any=1
+        n=$(basename "$f" .conf)
+        target_kind "$n" >/dev/null 2>&1 || bad="$bad $n"
+    done
+    [ -n "$any" ] || { echo "no machines configured in $d"; return 77; }
+    [ -z "$bad" ] || { echo "configured but unresolvable:$bad"; return 1; }
+}
+
+chk_remote_reachable() {
+    local d f n any="" bad=""
+    d=$(target_conf_dir)
+    [ -d "$d" ] || { echo "no machines configured"; return 77; }
+    for f in "$d"/*.conf; do
+        [ -f "$f" ] || continue
+        n=$(basename "$f" .conf)
+        [ "$(target_kind "$n" 2>/dev/null)" = remote ] || continue
+        any=1
+        ( load_target "$n"; t_info selftest-nonexistent >/dev/null 2>&1 ) \
+            || bad="$bad $n"
+    done
+    [ -n "$any" ] || { echo "no remote machines configured"; return 77; }
+    [ -z "$bad" ] || { echo "configured but unreachable:$bad"; return 1; }
+}
+
+# --- run ---------------------------------------------------------------------
+
+[ -f "$PLAN" ] || die "no test plan at $PLAN"
+
+if [ -z "$LIST" ]; then
+    info "wk selftest on $(wk_os) ($(hostname))${SECTION:+ -- section $SECTION}"
+
+    # Context, not a gate. Its exit status says whether this machine is fully
+    # provisioned; the sections below decide for themselves what they can run.
+    if [ -z "$SECTION" ] || [ "$SECTION" != quick ]; then
+        if "$WK" doctor >/dev/null 2>&1; then
+            log "  wk doctor: everything it can check is provisioned"
+        else
+            log "  wk doctor: something is missing -- expect skips ('wk doctor' for the list)"
+        fi
+    fi
+fi
+
+if want quick; then
+    section "quick -- no workspace, no podman, no ssh"
+    check "every shell file parses under both bash 5 and bash 3.2"        chk_parse
+    check "\`wk help\` lists every cmd/* entry"                            chk_help_commands
+    check "\`wk build --list\` shows all configs"                          chk_build_list
+    check "\`wk build --list\` with podman stopped"                        chk_build_list_starts_nothing
+    check "the host's \`\$HOME\` has no \`~/.wk-workspace\`"                 chk_no_host_marker
+    check "two \`config_build_dir\` definitions"                           chk_no_duplicate_functions
+    check "\`wk start\` / \`wk stop\` with a driver loaded"                  chk_drivers_source
+    check "\`wk build <config>\` inside, \`wk build <ws> <config>\` outside"  chk_build_arg_forms
+    check "\`wk verify\` refuses inside a workspace"                       chk_verify_refuses_inside
+    check "host-only commands refuse inside a workspace"                  chk_host_only_refused_inside
+    check "an unknown command prints the usage and exits 2"               chk_unknown_command
+    check "an unconfigured name is refused, and the error prints the conf to write" chk_unknown_target
+    check "no \`wk\` command in the daily path calls \`sudo\` on either host" chk_no_sudo_daily
+fi
+
+if want remote; then
+    section "remote -- reaches every configured machine"
+    check "a machine name is a target"          chk_remote_confs_resolve
+    check "\`wk status\`/\`wk ls\` list what is on a configured machine" chk_remote_reachable
+fi
+
+[ -n "$LIST" ] && exit 0
+
+# --- what the plan holds that this does not ----------------------------------
+# Printed every run, because a runner that reports "ok" over a fraction of the
+# plan and says nothing about the rest is exactly the silent pass the plan
+# forbids.
+plan_items=$(grep -cE '^- \[' "$PLAN" || true)
+encoded=$(grep -cE '^ *check "' "$0" || true)
+
+echo >&2
+log "plan: $plan_items line items in docs/TESTING.md, $encoded encoded here"
+log "      the rest are still hand-ticked -- and the manual ones always will be"
+
+printf '\n' >&2
+if [ "$drifts" -gt 0 ]; then
+    warn "$passes ok, $fails failed, $skips skipped, $drifts drifted from the plan"
+    exit 1
+fi
+if [ "$fails" -gt 0 ]; then
+    warn "$passes ok, $fails failed, $skips skipped"
+    exit 1
+fi
+info "$passes ok, $skips skipped"
+exit 0

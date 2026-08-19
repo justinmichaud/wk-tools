@@ -50,6 +50,7 @@ sources and disk
 hosts and machines
   setup                     idempotent host bootstrap (also: ./setup)
   doctor                    what is provisioned here and what is missing (read-only)
+  selftest [--quick]        run docs/TESTING.md against this machine
   backup                    write live desktop settings back into the repo
   vm <sub>                  macOS VM lifecycle: ls|new|start|stop|ip|enter|sync|base|rm
   pi <sub>                  provision a Raspberry Pi onto the tailnet
@@ -159,7 +160,7 @@ is_lifecycle() {
 # podman machine, which has neither gh nor a credential to give it one.
 is_host_command() {
     case "$1" in
-        setup|doctor|backup|vm|mcp|quiesce|session|pi|remote|key|report|stop|start|help|-h|--help) return 0 ;;
+        setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|key|report|stop|start|help|-h|--help) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -196,13 +197,20 @@ machine_running() {
 # about the containers alone.
 bare_status() {
     local impl="$1" t rc worst=0
+    # A function, because `[ x -gt y ] && worst=x` as the last command of an
+    # AND-OR list returns 1 when the test is false, and `set -e` then ends the
+    # walk on the second target that reports the same state as the first.
+    _bump() { [ "$1" -gt "$worst" ] && worst="$1"; return 0; }
+
     for t in $(target_all); do
         [ "$t" = container ] && continue
-        WK_TARGET="$t" "$impl" || { rc=$?; [ "$rc" -gt "$worst" ] && worst=$rc; }
+        rc=0; WK_TARGET="$t" "$impl" || rc=$?
+        _bump "$rc"
     done
 
     if machine_running; then
-        ( forward_to_vm status ) || { rc=$?; [ "$rc" -gt "$worst" ] && worst=$rc; }
+        rc=0; ( forward_to_vm status ) || rc=$?
+        _bump "$rc"
     elif command -v podman >/dev/null 2>&1; then
         warn "the podman machine '$WK_MACHINE' is stopped, so container workspaces are not included"
         log  "  'wk start' to bring it up"

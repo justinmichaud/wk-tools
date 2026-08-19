@@ -160,8 +160,13 @@ STATUS="$WS/build.status"
 STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 START_EPOCH=$(date +%s)
 
+# Written here, and -- for a target that is a machine of its own -- pushed
+# there too, so that `wk status` gets the same answer from either end instead
+# of whichever half of the truth it is standing on. t_state_put is a no-op
+# everywhere else.
 write_status() {
-    cat > "$STATUS" <<EOF
+    local content
+    content=$(cat <<EOF
 state=$1
 config=$CONFIG
 arch=$ARCH
@@ -171,8 +176,15 @@ finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 seconds=$(( $(date +%s) - START_EPOCH ))
 log=$LOG
 EOF
+)
+    printf '%s\n' "$content" > "$STATUS"
+    printf '%s\n' "$content" | t_state_put "$NAME"
 }
-printf 'state=running\nconfig=%s\narch=%s\nstarted=%s\nlog=%s\n' "$CONFIG" "$ARCH" "$STARTED" "$LOG" > "$STATUS"
+
+RUNNING=$(printf 'state=running\nconfig=%s\narch=%s\nstarted=%s\nlog=%s\n' \
+    "$CONFIG" "$ARCH" "$STARTED" "$LOG")
+printf '%s\n' "$RUNNING" > "$STATUS"
+printf '%s\n' "$RUNNING" | t_state_put "$NAME"
 
 # ccache is on. jscb-configure used to pass --no-use-ccache unconditionally,
 # which meant the shared cache never did anything for JSC builds.

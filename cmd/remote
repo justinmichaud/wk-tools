@@ -65,7 +65,7 @@ load_target "$TARGET"
 
 # --- probe -------------------------------------------------------------------
 info "probing $WK_REMOTE_HOST"
-PROBE=$(_rsh '
+PROBE=$(_rsh_q '
     hostname
     . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}"
     uname -m; nproc
@@ -110,7 +110,7 @@ fi
 # Read once into a variable rather than piped: `cat` of the files that are not
 # there exits non-zero, and under `pipefail` that fails the whole pipeline even
 # when grep matched -- which is exactly how this warning silently never fired.
-MOTD=$(_rsh 'cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null' 2>/dev/null || true)
+MOTD=$(_rsh_q 'cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null' 2>/dev/null || true)
 if printf '%s\n' "$MOTD" | grep -qiE 'home *(dir|directory)?.*shared'; then
     warn "this machine says its home directory is shared with other boxes."
     log  "  A workspace name is then the same directory on all of them, and one build
@@ -122,7 +122,7 @@ fi
 info "pushing wk-tools to $(t_tools '')"
 t_sync_tools ""
 
-_rsh "env WK_REMOTE_TARGET=$(sh_quote "$TARGET") \
+_rsh_q "env WK_REMOTE_TARGET=$(sh_quote "$TARGET") \
           WK_REMOTE_ROOT=$(sh_quote "$(_remote_root)") \
           WK_REMOTE_MAX_JOBS=$(sh_quote "$WK_REMOTE_MAX_JOBS") \
           WK_REMOTE_REFERENCE=$(sh_quote "$REF") \
@@ -140,15 +140,15 @@ cleaned=0
 # the remote root and is re-pushed on every build, so an older one somewhere
 # else is a second copy that nothing updates -- and, until provisioning just
 # fixed it, the source of a broken line in every interactive shell.
-OLD_TOOLS=$(_rsh 'for d in "$HOME"/Development/wk-tools "$HOME"/wk-tools; do
+OLD_TOOLS=$(_rsh_q 'for d in "$HOME"/Development/wk-tools "$HOME"/wk-tools; do
                       [ -d "$d" ] && echo "$d"
                   done' 2>/dev/null || true)
 for d in $OLD_TOOLS; do
     [ "$d" = "$(t_tools '')" ] && continue
-    sz=$(_rsh "du -sh $(sh_quote "$d") 2>/dev/null | cut -f1" || echo '?')
+    sz=$(_rsh_q "du -sh $(sh_quote "$d") 2>/dev/null | cut -f1" || echo '?')
     log "  $d ($sz) -- an older wk-tools checkout; the live one is $(t_tools '')"
     if confirm "remove $d from $r_host?"; then
-        _rsh "rm -rf $(sh_quote "$d")" && changed "removed $d"
+        _rsh_q "rm -rf $(sh_quote "$d")" && changed "removed $d"
         cleaned=$((cleaned + 1))
     fi
 done
@@ -156,12 +156,12 @@ done
 # Our own mirror, once the machine's own repository has made it redundant.
 if [ -n "$REF" ]; then
     M="$(_remote_root)/mirror"
-    if _rsh "test -d $(sh_quote "$M")" 2>/dev/null; then
-        sz=$(_rsh "du -sh $(sh_quote "$M") 2>/dev/null | cut -f1" || echo '?')
+    if _rsh_q "test -d $(sh_quote "$M")" 2>/dev/null; then
+        sz=$(_rsh_q "du -sh $(sh_quote "$M") 2>/dev/null | cut -f1" || echo '?')
         log "  $M ($sz) -- redundant now that $REF is used instead"
         warn "  existing workspaces cloned from it borrow its objects (--shared) and would break."
         if confirm "remove the mirror at $M?"; then
-            _rsh "rm -rf $(sh_quote "$M")" && changed "removed $M"
+            _rsh_q "rm -rf $(sh_quote "$M")" && changed "removed $M"
             cleaned=$((cleaned + 1))
         fi
     fi
@@ -178,7 +178,7 @@ if [ -n "$ORPHANS" ]; then
     log "  workspaces on $r_host that this machine has no record of:$ORPHANS"
     log "  (another machine sharing this home may own them -- check before removing)"
     for w in $ORPHANS; do
-        sz=$(_rsh "du -sh $(sh_quote "$(_remote_ws "$w")") 2>/dev/null | cut -f1" || echo '?')
+        sz=$(_rsh_q "du -sh $(sh_quote "$(_remote_ws "$w")") 2>/dev/null | cut -f1" || echo '?')
         if confirm "remove workspace '$w' ($sz) from $r_host?"; then
             t_destroy "$w"
             cleaned=$((cleaned + 1))
