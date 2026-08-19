@@ -8,8 +8,10 @@
 #   the remote) writes a diff to a temp file, opens it in VS Code if `code` is
 #   on PATH, and offers to force-reset to the remote.
 #
-# Every git command is printed and confirmed before running. Destructive
-# operations (remote add, set-upstream changes, reset --hard) are flagged.
+# Every git command is printed. Only the destructive one prompts: reset
+# --hard, which discards local work. Everything else -- fetch, checkout,
+# remote add, set-upstream -- is routine or reversible and just runs; git's
+# own guards refuse a checkout that would clobber uncommitted changes.
 
 set -u
 
@@ -41,27 +43,20 @@ remote_repo_from_url() {
 }
 
 ask() {
-    # ask "prompt" -> returns 0 if yes, 1 if no. Default is yes (empty -> yes).
+    # ask "prompt" -> returns 0 if yes, 1 if no. This only ever guards a
+    # destructive command, so the default is no, and no terminal means
+    # decline -- a prompt nobody can answer must not run a reset unattended.
     local prompt="$1"
     local reply
-    read -r -p "$prompt [Y/n] " reply
+    if [ ! -t 0 ]; then
+        echo "$prompt -- declining (no terminal)" >&2
+        return 1
+    fi
+    read -r -p "$prompt [y/N] " reply
     case "$reply" in
-        ""|[Yy]|[Yy][Ee][Ss]) return 0 ;;
+        [Yy]|[Yy][Ee][Ss]) return 0 ;;
         *) return 1 ;;
     esac
-}
-
-confirm_run() {
-    # Print the command, ask, then run it. Returns the command's exit status,
-    # or 130 if the user declined.
-    echo
-    echo "  \$ $*"
-    if ask "Run this?"; then
-        "$@"
-        return $?
-    fi
-    echo "  (skipped)"
-    return 130
 }
 
 run_silent() {
@@ -85,13 +80,9 @@ confirm_run_destructive() {
 }
 
 require() {
-    # Run a confirm_run; abort if the user declines or the command fails.
-    confirm_run "$@"
+    # Run a routine command; abort if it fails.
+    run_silent "$@"
     local rc=$?
-    if [ $rc -eq 130 ]; then
-        echo "Required step declined; aborting." >&2
-        exit 1
-    fi
     if [ $rc -ne 0 ]; then
         echo "Command failed (exit $rc); aborting." >&2
         exit $rc
@@ -144,7 +135,7 @@ else
         echo
         echo "No remote exists for user '$PR_USER'."
         echo "Proposed: remote='$REMOTE' url='$NEW_URL'"
-        confirm_run_destructive git remote add "$REMOTE" "$NEW_URL"
+        run_silent git remote add "$REMOTE" "$NEW_URL"
         rc=$?
         if [ $rc -ne 0 ]; then
             echo "Cannot continue without remote." >&2
@@ -181,7 +172,7 @@ echo "  expected: $EXPECTED_UPSTREAM"
 
 if [ "$CURRENT_UPSTREAM" != "$EXPECTED_UPSTREAM" ]; then
     echo "Upstream does not match."
-    confirm_run_destructive git branch --set-upstream-to="$EXPECTED_UPSTREAM" "$BRANCH" || true
+    run_silent git branch --set-upstream-to="$EXPECTED_UPSTREAM" "$BRANCH" || true
 else
     echo "Upstream OK."
 fi

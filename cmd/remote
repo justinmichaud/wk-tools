@@ -131,7 +131,8 @@ if ! target_kind "$TARGET" >/dev/null 2>&1; then
     A target is named after an ssh destination that already works, keys and
     ProxyJump included:  ssh -o BatchMode=yes $TARGET true"
 
-    confirm "write $conf for this machine?" || die "aborted -- nothing was changed"
+    # Writing the conf is routine and undone by 'wk remote rm' -- prompts are
+    # for destructive actions only.
     ensure_dir "$(dirname "$conf")"
     cat > "$conf" <<EOF
 # A shared build machine, reached through the ssh entry of the same name.

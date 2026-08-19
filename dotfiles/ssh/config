@@ -3,30 +3,8 @@ Host igalia.com
   User jmichaud
   Port 6789
 
-Host home
-  HostName fbi-surveillance-gateway
-  User root
-
 Host moose
   User jmichaud
-
-Host moosebmc
-  HostName 192.168.1.41
-  Port 2200
-  User root
-  ProxyCommand ssh -q -W %h:%p home
-
-Host moose64
-  HostName localhost
-  User jmichaud
-  Port 2264
-  ProxyCommand ssh -q -W %h:%p moose
-
-Host moose32
-  HostName localhost
-  User jmichaud
-  Port 2232
-  ProxyCommand ssh -q -W %h:%p moose
 
 Host buildbox4
   HostName buildbox4
@@ -42,18 +20,6 @@ Host devbox-armhf-2
   HostName bbox-12-armhf
   User jmichaud
   ProxyJump igalia.com
-
-Host raspberrypi3
-  HostName 192.168.1.159
-  User root
-  StrictHostKeyChecking no
-  UserKnownHostsFile=/dev/null
-
-Host raspberrypi4
-  HostName 192.168.1.182
-  User root
-  StrictHostKeyChecking no
-  UserKnownHostsFile=/dev/null
 
 Host rpi5
   User jmichaud

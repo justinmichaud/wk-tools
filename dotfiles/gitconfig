@@ -22,9 +22,3 @@
 	algorithm = histogram
 	colorMoved = zebra
 
-[rerere]
-	# WebKit rebases are long; remember conflict resolutions.
-	enabled = true
-
-[push]
-	default = current

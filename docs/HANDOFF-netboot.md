@@ -173,7 +173,8 @@ change rather than a one-shot register; plan for that difference.
   affecting a benchmark.
 - **BMC virtual media.** moose has a real ASPEED BMC (SETUP.md §"Screen, GPU
   and egress" drives its display-only `ast` chip for `wk session --bmc`),
-  reachable as `moosebmc` — 192.168.1.41, ssh on 2200 — so an image can be
+  reachable as `moosebmc` — at 10.99.0.2 on the Librem 5's `bmc0` segment, ssh
+  on 2200; the 192.168.1.41 in `dotfiles/ssh/config` is stale — so an image can be
   attached over the network and presented to the host as USB storage. Which BMC
   firmware it runs decides whether that is scriptable: virtual media differs
   between OpenBMC and AMI, and only some expose it over Redfish. Check before
@@ -263,8 +264,9 @@ architecture:
 moose's own last mile then depends on whether a cable can reach it. If yes, UEFI
 HTTP boot from the rpi5's root. If no, **virtual media through its BMC** —
 moose has a real ASPEED BMC with KVM-over-IP (SETUP.md's session `--bmc` mode
-drives its display chip; ssh on `moosebmc`, 192.168.1.41:2200, though it did not
-answer on 2026-08-19). That path needs nothing from DHCP and works when the
+drives its display chip; ssh on `moosebmc`, 10.99.0.2:2200 on the Librem 5's
+`bmc0` segment — the 192.168.1.41 in `dotfiles/ssh/config` is stale — though it
+did not answer on 2026-08-19). That path needs nothing from DHCP and works when the
 host's NICs are down, which is also `docs/HANDOFF-bmc.md`'s recovery story.
 Confirm which BMC stack it runs before designing on it — virtual-media support
 differs between OpenBMC and the AMI firmware, and only some expose it over
@@ -402,6 +404,15 @@ Concretely, the verbs this step owes, each idempotent and each with `--dry-run`
 | `wk pi netboot-enable <host>` | writes the client-side firmware config (`BOOT_ORDER`, `TFTP_IP`, static IP) | **the EEPROM is never hand-edited**; this is the only writer |
 | `wk pi flash <image> [device]` | image → SD/USB, with the removable-device refusal | already scoped in `docs/HANDOFF-sdcard.md`; consume it, do not duplicate |
 | `wk verify <machine>` | proves a machine is in the expected state (which image, which kernel, which profile, which root device) | extends the existing `wk verify`; this is what makes "reproducible" checkable rather than claimed |
+
+`wk boot` is a role transition, and the fleet status must see it:
+per `docs/HANDOFF-workspace-state.md` ("`wk status` walks the fleet"),
+arming writes a small record of intent (image, who, when) next to the boot
+mechanism, the firmware's own one-shot state is read back as the evidence
+where the platform allows, `wk status` on any workstation shows the armed
+transition on the machine's line, and mutating commands against an armed
+machine warn or refuse. `--back` and a completed boot clear the record; a
+record that outlives its transition is reported as desync.
 
 Two rules that follow from "one command" and are easy to lose:
 
@@ -570,15 +581,14 @@ rpi3 and rpi4.
 The rpi3 is the one device that *requires* a DHCP reply carrying option 43
 `"Raspberry Pi Boot"`, because its network boot lives in the boot ROM rather than
 an EEPROM bootloader, and it cannot be told to skip DHCP the way the Pi 4/5
-bootloader can. That looked like it forced a private segment.
-
-**It does not — see "The rpi5's Ethernet is for the private segment, never the
-LAN" below, which supersedes this paragraph.** `dnsmasq` in *proxy* mode supplies
-the PXE bits without assigning addresses, which the boot ROM's flow explicitly
-allows, so the house LAN works with no second address-assigning DHCP server. A
-private segment (a cable from the rpi5's `eth0`, or moose's `igb` port
-`enP2p3s0` — the plain 1GbE, not either `bnxt_en`) is the fallback if the boot
-ROM's DHCP quirks defeat proxy mode.
+bootloader can. That does not force a private segment: `dnsmasq` in *proxy*
+mode supplies the PXE bits without assigning addresses, which the boot ROM's
+flow explicitly allows, so the house LAN works with no second
+address-assigning DHCP server. A private segment (a cable from the rpi5's
+`eth0`, or moose's `igb` port `enP2p3s0` — the plain 1GbE, not either
+`bnxt_en`) is the fallback if the boot ROM's DHCP quirks defeat proxy mode.
+Details and the rpi3's two prerequisites are in "The rpi5's Ethernet is for
+the private segment, never the LAN" below.
 
 The trap on this board is *not* booting, it is measuring: **on the Pi 3 the
 Ethernet is behind the USB controller** (LAN7515 on the 3B+), so network root
@@ -684,8 +694,8 @@ So the arrangement is:
   transfer is boot-time only. moose can serve this equally well; the roles are
   interchangeable.
 - **rpi3: try proxy DHCP on the LAN first, and keep the private segment as the
-  fallback.** Correcting a claim made earlier in this session: a private segment
-  is *not* the only way. The boot ROM's documented flow includes an "(optional)
+  fallback.** A private segment is *not* the only way (an earlier draft of this
+  file claimed it was). The boot ROM's documented flow includes an "(optional)
   Receive DHCP proxy reply" step (`boot-net.adoc`), so `dnsmasq` in proxy mode
   (`dhcp-range=<net>,proxy`) can supply the PXE bits and option 43 while the house
   router keeps handing out addresses — no second address-assigning DHCP server,

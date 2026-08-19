@@ -56,6 +56,16 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] `wk ls` / `wk status` list it; `wk status` exit code is 0
 - [V] `wk rm <ws>` reclaims the container, the overlay, the home and the ssh alias
 - [ ] `wk stop` then `wk start` returns every workspace to running
+- [ ] `wk new <ws>` with no base snapshot says `run 'wk sync' first`, creates
+      nothing, and registers nothing
+- [ ] `wk new` interrupted mid-create leaves nothing half-alive: a re-run
+      destroys the rubble and remakes the workspace from scratch — it never
+      re-pins `base-id` over a surviving `changes/` layer from the first try
+- [ ] `wk rm` that cannot remove everything exits nonzero, keeps the registry
+      entry, and names what is left — never "destroyed" over an orphan whose
+      `base-id` pins a snapshot forever
+- [ ] `wk ls` and a bare `wk status` print the same workspace-name set on
+      every host shape (macOS with containers+vm+remote, Linux, a build box)
 
 ### Sandbox — the part that must never be assumed
 - [V] `wk verify <ws>` reports **sandbox intact**, all checks ok
@@ -114,6 +124,21 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] every build writes `compile_commands.json` by default
 - [V] `wk logs <ws>` shows `(none)` under errors for a successful build
 - [ ] `wk bench` produces per-subtest results with confidence intervals
+
+### Babysit — `wk build --babysit` (landed 2026-08-19, zero lines here until now)
+- [ ] the E2E: plant a compile error, `--babysit`, disconnect the terminal,
+      reconnect — the error is fixed, the build is green, `wk status` showed
+      building→fixing→building→ok throughout, and babysit.report says what
+      was changed
+- [ ] a second `--babysit` while one is alive is refused by pid; a stale
+      status file with a dead pid does not refuse
+- [ ] a stalled build (exit 124) ends `stalled` and is not handed to the
+      model; exhausted attempts end `gave-up` naming the last exit
+- [ ] claude failing to *run* ends `error` and does not retry forever
+- [ ] `--babysit` refuses inside a workspace, on a remote target, and on the
+      local target; `--babysit --dry-run` prints the command and starts nothing
+- [ ] `wk status` reports a `fixing` claim with a dead pid as a crash, not as
+      progress, and its exit code goes to 1
 
 ### Architecture — `--arch armhf` (Linux only)
 - [V] `wk new <ws> --arch armhf` creates a native armhf container: `dpkg
@@ -453,6 +478,195 @@ reached through a ProxyJump), driven from the macOS host.
 - [ ] `wk gui <ws>` opens MiniBrowser in the seat; in a bmc session it pins
       the browser to Mesa and the picture actually appears
 
+## 6. State, concurrency and clobbering
+
+The authoritative statement of these rules is "The rules" at the top of
+`docs/HANDOFF-workspace-state.md`; the summary here only exists so the
+checks below read on their own:
+
+- **Smallest state, no caching.** Every fact is recomputed from evidence at
+  read time; a fact lives in exactly one place per machine; a status file's
+  claim is never believed without checking the evidence behind it.
+- **Crash-only.** Every mutating command can be killed at any point and
+  re-run, and the re-run converges to the declared final state. "Already
+  exists" is never the answer to a half-made thing.
+- **Wipe over repair.** A re-run converges by destroying and remaking
+  anything half-made or unrecognized, not by patching it in place;
+  resume-in-place is only for expensive stages with unambiguous evidence
+  (the mirror fetch, the vm base). The corollary under test: destroy and
+  re-provision must be cheap and *total*.
+- **Read-only commands are read-only absolutely.**
+- **One lock per mutated resource.** Concurrent mutators serialize or refuse
+  by name; a lock dies with its holder.
+
+### Read-only commands make no changes
+- [ ] `wk status` / `wk ls` / `wk logs` / `wk doctor` with the podman machine
+      stopped leave it stopped — machine state identical before and after
+      (observed 2026-08-19: a `wk status` path still starts podman)
+- [ ] the same four start no guest, write no file, and repair nothing
+
+### Interrupted and restarted — every mutating command, kill -9, re-run
+
+The invariant, per command: name the final state the command guarantees,
+kill it at its worst moment, re-run it, and the final state is reached — the
+re-run resumes or rolls forward, never refuses a half-made thing, and no
+intermediate state is ever visible to another command as complete.
+
+- [ ] `wk sync` — final state: one new complete snapshot, or none. Killed
+      during the `cp -al`, during the fetch, and after checkout but before
+      the marker: the half-written snapshot does not exist to `current_base`
+      (completion marker absent), `wk new` can never pin it, the next
+      `wk sync` finishes or replaces it, and the mirror is intact throughout
+- [ ] `wk new`, container — final state: registered, running, firstrun
+      complete. Killed before the container exists, during `wkdev-create`,
+      and during firstrun: a re-run destroys the rubble and remakes the
+      workspace from scratch, saying so — it never re-pins `base-id` over a
+      surviving `changes/` layer, and never repairs a half-made workspace
+      in place (wipe over repair: a workspace that never finished creating
+      holds nothing of value)
+- [ ] `wk new --target vm` — killed during the clone: a re-run replaces or
+      completes the clone; registry and guest agree at the end
+- [ ] `wk new --target <machine>` — killed mid-clone over ssh (and: the ssh
+      cut rather than the process killed): the far checkout without its
+      marker is rubble, `t_info` does not call it `present`, `wk status`
+      says creating-with-dead-driver, and a re-run remakes it; killed
+      between the far clone and the near state dir: both ends converge
+- [ ] `wk rm`, each target — final state: no container/guest/checkout, no
+      ws dir, no registry entry, no alias. Killed between each pair of those
+      steps: a re-run finishes; the registry entry outlives the artifacts it
+      describes (never the reverse), so the re-run can still resolve the target
+- [ ] `wk build` — final state: status says ok/failed with the log to prove
+      it. Driver killed mid-build: `state=running` with a dead pid and a
+      cold log reads as crashed in `wk status`, `wk bench`'s idle check
+      agrees (today it reads `state=running` as gospel until `--force`), and
+      a re-run simply builds
+- [ ] `wk build --babysit` — babysitter killed between attempts: status says
+      crashed, not fixing; a re-run starts attempt 1 with the checkout in
+      the state the last fix left it, stated in the report
+- [ ] `wk test` — same convergence as build; a re-run overwrites cleanly
+- [ ] `wk bench` — killed during seed: the payload without `.wk-seeded` is
+      re-fetched whole; leaked `.tmp-*` seed dirs are pruned by `wk gc`.
+      Killed during the run: `env.json` without `result.json` reads as a
+      crashed run in `wk bench ls`, never as a comparable result
+- [ ] `wk gc` — killed between prunes: nothing referenced was removed, and a
+      re-run finishes the unreferenced remainder
+- [ ] `wk vm base` / `--refresh` — killed host-side while the detached guest
+      build runs: a second `--refresh` detects the live far-side build and
+      waits or refuses — it never starts a second build in the same tree;
+      killed guest-side: the rc file names the failure and a re-run rebuilds
+- [ ] `wk vm start` / `wk stop` / `wk start` — killed mid-way: re-run
+      converges (these are already idempotent by construction; prove it)
+- [ ] `wk remote setup` — killed between the tools push, the conf write and
+      the rc edits: a re-run completes every stage; the box is never
+      half-provisioned with no path forward
+- [ ] `wk remote rm` — killed after the far side is cleaned but before the
+      local conf goes: a re-run (or the documented ordering) removes the
+      rest; nothing ends orphaned on the far side with the local conf gone
+- [ ] `wk pi setup` — killed mid-push: re-run converges; `pi-hosts` gains no
+      duplicate or stale address
+- [ ] `wk key register` — killed between keygen and GitHub registration: a
+      re-run registers the existing key rather than generating a second
+- [ ] `wk skills pull` / `push` — killed mid-rsync: a re-run completes; the
+      half-synced tree is never left looking authoritative (rsync --delete
+      re-converges both directions)
+- [ ] `wk backup` — killed mid-write: the repo files are whole or unchanged
+      (cmp-guarded write), never truncated
+- [ ] `./setup` — killed inside any stage: a re-run reports and completes
+      only what is missing; the second full run still reports no changes
+- [ ] `wk quiesce on`/`off` — `off` after a reboot or a lost `on` record
+      restores the machine's real prior values, not hardcoded guesses; a
+      re-run of either is a no-op that says so
+- [ ] `wk session on|gdm|off` — killed mid-transition: the next invocation
+      reaches the asked-for mode from whatever half-state remains
+- [ ] `wk claude` — killed during verify or launch: nothing persists but the
+      verify log; a re-run verifies again from scratch
+
+### Concurrency — every mutating verb locks what it mutates
+- [ ] two `wk sync` at once: the second waits or refuses naming the first
+- [ ] `wk gc` racing `wk new`: gc cannot prune the base new is pinning
+- [ ] two `wk new <same-name>`: exactly one wins, no half-merged workspace
+- [ ] two `wk build` on one workspace serialize on every target (today only
+      remote has the flock); `wk vm base --refresh` while one runs is refused
+- [ ] two `wk vm start` do not corrupt `~/.ssh/config.d/wk`
+- [ ] a lock holder killed -9 releases the lock; no stale lock to clean
+
+### Status files are claims; evidence decides
+- [ ] corrupt each status file (truncate, garbage): status reports the file
+      as stale/unparseable, keeps listing everything else, and the
+      evidence-derived answer is unchanged
+- [ ] a status file written by an older schema (missing keys) still renders;
+      unknown keys are ignored
+- [ ] `wk enter --zed` against a `creating` workspace waits and opens only
+      on `present`; against `broken` it refuses with the repair command
+
+### Un-managed commands clobbering the record
+- [ ] `podman rm` a workspace's container by hand: `wk ls`/`wk status` say
+      "the record says container, the machine has none" and name the repair —
+      not a bare `absent`, not a crash
+- [ ] `tart delete` a guest by hand: same
+- [ ] delete `$WK_STORE/ws/<n>` by hand under a live registry entry: same,
+      and `wk gc` refuses to prune what the survivor may still pin
+- [ ] `git fetch` into a published base snapshot by hand: the recorded sha no
+      longer matches `rev-parse HEAD`; `wk new` and `wk sync` refuse it by name
+- [ ] hand-edit `~/.ssh/config.d/wk`: the next `wk vm start` regenerates only
+      its own block and leaves foreign lines alone
+- [ ] an unreachable remote machine is reported unreachable with its timeout —
+      never `absent` — and any fallback to the stale local status copy says so
+
+### Prompts guard destructive actions only
+- [ ] every interactive prompt in the tree guards a destructive action —
+      `wk rm`, `wk vm rm`, `wk vm base --rebuild`, `wk remote rm` and its
+      cleanup offers, `wk skills` overwrites, `wk pr`'s `reset --hard` —
+      and nothing else prompts: `wk remote setup` writes its conf and says
+      so, `wk pr` runs fetch/checkout/remote-add/set-upstream unprompted,
+      and `wk pi setup` asks for an auth key only when the node is not
+      already on the tailnet
+- [ ] destructive prompts default to No and decline without a terminal,
+      never block and never proceed (`WK_YES=1` is the scripted yes)
+
+### Changing workstations — the view is calculated, not carried
+- [ ] a fresh clone + `./setup` on a second workstation sees every remote
+      target and its workspaces, with no state copied from the first
+- [ ] deleting the workspace→target registry loses nothing: every command
+      still resolves every workspace from the evidence on the targets
+- [ ] a workspace name that exists on two targets refuses and names both;
+      `--target` disambiguates
+- [ ] a target that cannot be probed during resolution is reported
+      unreachable by name — never silently left out of the view
+
+### The fleet walk — `wk status` reaches every workstation that is up
+- [ ] a bare `wk status` sshes into each listed workstation that answers,
+      runs its read-only status, and merges the answer — this Mac's guests
+      and containers appear in the other workstation's view, attributed to
+      their host
+- [ ] a workstation that is down is listed unreachable with its timeout;
+      the walk never hangs on it and never drops it silently
+- [ ] the remote half is read-only absolutely: nothing starts, boots or is
+      repaired on the far machine (its podman machine stays stopped)
+- [ ] wk-tools version skew is flagged: a machine on an older or dirty
+      checkout is named, with both shas
+- [ ] the same workspace name alive on two machines is reported as a
+      conflict, not listed twice as if normal
+- [ ] two workstations reaching one build box see one state; a disagreement
+      is reported naming both views
+- [ ] a machine armed to reboot into a bench image shows the transition on
+      its status line (image id, who armed it, when); after it reboots, the
+      walk reports it in its new role or as off-ssh under the image driver
+- [ ] an armed machine still in its old role long after arming, or back in
+      its old role with the arming record uncleared, is flagged as desync
+- [ ] a mutating command against a machine armed to leave its role warns or
+      refuses — no build starts on a box about to reboot out from under it
+- [ ] the exit code aggregates the worst state found anywhere in the fleet
+
+### Shared-home remotes (devbox-arm64-2 / devbox-armhf-2)
+- [ ] provisioning the second of two remotes that share one home folder does
+      not clobber the first's identity; `wk` on either box resolves its own
+      target (by hostname against the confs, not a shared marker); `wk remote
+      rm` of one leaves the other provisioned and working
+- [ ] builds from the two machines never collide in a shared checkout or on a
+      shared lock: build dirs and locks are keyed per machine, derived, not
+      configured
+
 ---
 
 ## Regressions worth a permanent test
@@ -480,3 +694,7 @@ in the file because each one already cost a debugging session.
 | a macOS guest's `~/.zprofile` carries the `wk-tools: egress` block | provisioning silently not having run, which looks like a network fault |
 | `mac-release-asan` and `mac-release` resolve to different dirs | Xcode toggling ASan within a configuration without changing the path, so the two builds silently share one tree |
 | the guest desktop is visible after a reboot | three independent things hiding it -- screen saver, display sleep, and the screen *lock* -- where disabling any two is not enough |
+| `WK_TARGET=vm wk gc` runs at all | cmd/gc sourcing a driver without lib/target.sh (`wk_state_dir: command not found`, verified 2026-08-19) |
+| `wk selftest --section <typo>` fails | the runner exiting 0 having run nothing -- the silent pass the plan's own preamble forbids |
+| no `Host wk-<name>` alias for a container workspace | a fictional `HostName localhost` entry pointing zed at the host's own filesystem -- containers have no sshd |
+| `wk status` with the podman machine stopped leaves it stopped | a read-only report booting a VM as a side effect |

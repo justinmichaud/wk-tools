@@ -13,6 +13,7 @@
       "/private/tmp"
     ]
   },
+  "model": "claude-fable-5[1m]",
   "hooks": {
     "PreToolUse": [
       {
@@ -33,6 +34,5 @@
   "autoCompactEnabled": false,
   "precomputeCompactionEnabled": false,
   "remoteControlAtStartup": true,
-  "agentPushNotifEnabled": true,
-  "model": "claude-fable-5[1m]"
+  "agentPushNotifEnabled": true
 }

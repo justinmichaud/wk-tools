@@ -29,6 +29,74 @@ Each item names the source handoff so detail is not duplicated here.
 
 ---
 
+## Next, in parallel — one prompt per machine (written 2026-08-19)
+
+The two tasks below touch disjoint files (one shared exception:
+`docs/TESTING.md`, where each adds lines only under its own sections). Both
+sessions start the same way: read "The rules" at the top of
+`docs/HANDOFF-workspace-state.md` — nothing may contradict them.
+
+**macOS box — implement the state rules, phase 1.** Paste this:
+
+> Read docs/HANDOFF-workspace-state.md in full ("The rules" govern) and
+> docs/TESTING.md §6. Implement in this order, verifying each step against
+> the podman VM before the next:
+>
+> 1. Find and fix the path by which a bare `wk status` still starts the
+>    podman machine (look in `wk`'s dispatch/forwarding and at podman CLI
+>    calls that auto-start the machine). Then make `wk ls` and `wk status`
+>    enumerate from one shared walk so their workspace-name sets are
+>    identical. Encode the §6 "read-only commands" checks in selftest:
+>    status/ls/logs/doctor with the machine stopped leave it stopped.
+> 2. Snapshot completion marker: `cmd/sync` writes `base/<id>/sha` and
+>    `branch` last, as the publish gate; `current_base` and `wk new` ignore
+>    unmarked snapshots; `wk gc` prunes them; a snapshot whose tree no
+>    longer matches its recorded sha is refused by name.
+> 3. Crash-only `wk new` / `wk rm` per rule 3 (wipe over repair): `base-id`
+>    written last; a re-run over a half-made workspace destroys the rubble
+>    and remakes it from scratch — never "already exists"; `wk rm` destroys
+>    artifacts first, forgets the registry last, and exits nonzero naming
+>    leftovers on partial failure.
+> 4. `with_lock` in lib/common.sh (flock where a store lives, an
+>    atomic-mkdir lock on the bare macOS host) and take it in sync, gc,
+>    new, rm, build per §6 "Concurrency".
+>
+> On the way, fix the two verified bugs: `WK_TARGET=vm wk gc` dies sourcing
+> a driver without lib/target.sh, and `wk selftest --section <typo>` exits 0
+> having run nothing. Run `wk selftest` and tick the §6 lines you verified.
+> Do NOT touch cmd/pi, docs/HANDOFF-netboot.md, or create cmd/image,
+> cmd/serve, cmd/boot — the Linux box is working there.
+
+**Linux box — netboot: the rpi5 perf image.** Paste this:
+
+> Read docs/HANDOFF-netboot.md — "State as of 2026-08-19" and the appendix
+> are ground truth; the one-shot, the revert and the self-return watchdog
+> are already proven on hardware. Execute its "Next three actions":
+>
+> 1. `wk image build` on an Ubuntu base — WiFi is a first-class
+>    requirement (the rpi5 has no wired fallback, ever), and Ubuntu is the
+>    stack already proven to drive this radio onto this AP. Bake in: the
+>    driving machine's ssh key, the network profile, sshd, an identity
+>    marker, the self-return watchdog (TimeoutStartSec=infinity), the diag
+>    dump to the FAT partition, a persistent journal, and no first-boot
+>    resize-and-reboot (it spends the one-shot). The spec lives in the
+>    repo; encapsulate the appendix's steps as the implementation.
+> 2. Arm the one-shot with that image, confirm it comes up reachable over
+>    WiFi, then set perf_event_paranoid and the JIT-dump environment — the
+>    profiling half this whole step exists to unblock.
+> 3. `wk serve` plus `wk pi netboot-enable rpi4`, trying proxy DHCP on the
+>    LAN before any cable.
+>
+> `wk boot` arming must write the role-transition record and clear it on
+> return, per "wk boot is a role transition" in the netboot handoff and the
+> fleet-status section of docs/HANDOFF-workspace-state.md. Add TESTING.md
+> lines under a new netboot section as you go. Do NOT touch `wk`,
+> cmd/status, cmd/ls, cmd/sync, cmd/new, cmd/rm, lib/store.sh,
+> lib/common.sh, lib/target.sh, or targets/container.sh — the macOS box is
+> working there.
+
+---
+
 ## Was blocking, both lanes — `wk` inside a workspace
 
 **`docs/HANDOFF-wk-in-workspace.md`** — found 2026-08-18, **both halves done and
@@ -50,9 +118,10 @@ absent on a guest booted straight into `wk claude`, and `--dry-run` had to exist
 before any of it could be checked without a 99-minute build.
 
 One piece remains, and it blocks nothing: build state is recorded twice, once
-per side, because a workspace cannot see the host's store. Both answers are
-honest and neither is single; the handoff explains why the obvious mount is
-wrong and what to do instead.
+per side, because a workspace cannot see the host's store. Under the state
+rules in `docs/HANDOFF-workspace-state.md` (one copy of a fact per machine)
+this is a violation to fix, not a design; the handoff explains why the
+obvious mount is wrong and what to do instead.
 
 `docs/HANDOFF-claude.md`'s "every skill invokes a deterministic tool rather than
 freehand steps" is unblocked on both platforms.
@@ -499,7 +568,10 @@ Standing rule, not a task: every task above gets a line item in
 `docs/TESTING.md` as it is picked up — apply it inline.
 
 - **`docs/HANDOFF-workspace-state.md` — new 2026-08-19, and not filler: pick
-  it up before anything else that creates or gates on workspaces.** Workspace
+  it up before anything else that creates or gates on workspaces. It opens
+  with "The rules" — no caching of facts, crash-only convergence, wipe over
+  repair, one lock per resource, clobber detection, read-only reports — and
+  every other doc, comment and command defers to them; read them first.** Workspace
   lifecycle state (`absent | creating | present`, evidence-at-the-artifact),
   readiness gating for `wk build` / `--zed` / the babysitter, staged resumable
   creation, and one detach primitive — all in service of its **core

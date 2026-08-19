@@ -93,17 +93,25 @@ chmod +x '$DEST/tailscale-up.sh'
 
 sleep 2
 
-info "bringing the node up as $TAG"
-log "  an auth key is required; generate a tagged one at:"
-log "  https://login.tailscale.com/admin/settings/keys  (tags: $TAG)"
-printf 'tailscale auth key (tskey-auth-...): ' >&2
-read -r AUTHKEY
-[ -n "$AUTHKEY" ] || die "no auth key given"
+# Only prompt for an auth key when the node actually needs one: a re-run
+# against a device already on the tailnet is routine, and prompts are for
+# things that cannot proceed without an answer.
+TSIP=$(rsh "'$DEST/tailscale' --socket='$DEST/tailscale-state/tailscaled.sock' ip -4" 2>/dev/null | head -1) || TSIP=""
+if [ -n "$TSIP" ]; then
+    info "$HOST is already on the tailnet at $TSIP -- no auth key needed"
+else
+    info "bringing the node up as $TAG"
+    log "  an auth key is required; generate a tagged one at:"
+    log "  https://login.tailscale.com/admin/settings/keys  (tags: $TAG)"
+    printf 'tailscale auth key (tskey-auth-...): ' >&2
+    read -r AUTHKEY
+    [ -n "$AUTHKEY" ] || die "no auth key given"
 
-rsh "'$DEST/tailscale' --socket='$DEST/tailscale-state/tailscaled.sock' up \
-        --authkey='$AUTHKEY' --advertise-tags='$TAG' --hostname='$(basename "$HOST")'"
+    rsh "'$DEST/tailscale' --socket='$DEST/tailscale-state/tailscaled.sock' up \
+            --authkey='$AUTHKEY' --advertise-tags='$TAG' --hostname='$(basename "$HOST")'"
 
-TSIP=$(rsh "'$DEST/tailscale' --socket='$DEST/tailscale-state/tailscaled.sock' ip -4" | head -1)
+    TSIP=$(rsh "'$DEST/tailscale' --socket='$DEST/tailscale-state/tailscaled.sock' ip -4" | head -1)
+fi
 info "$HOST is on the tailnet at $TSIP"
 
 # Add the address to the workspace egress allowlist. Individual addresses, not

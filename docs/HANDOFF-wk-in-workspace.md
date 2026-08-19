@@ -191,7 +191,9 @@ BUILD OK), `wk run -- -e 'print(2+2)'` → 4, status, and the refusals.
   is exactly what `lib/store.sh` warns is undefined. A dedicated
   `$ws/state:/wk-ws` would work, but the host reads `$ws/build.status` directly
   through `wk_ws_dir`, so it means moving those files for every target. Worth
-  doing deliberately, not as a side effect of this change.
+  doing deliberately, not as a side effect of this change. (This is a
+  violation of the one-copy-per-machine rule in
+  `docs/HANDOFF-workspace-state.md` — that file's rules govern.)
 - **Two adjacent macOS-host defects from the original report, still open.**
   `wk` auto-starts the podman machine for any container-target command even when
   a macOS VM is running (and on a 32 GB host the two cannot coexist) — it should
