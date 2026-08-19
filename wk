@@ -137,9 +137,13 @@ is_host_only() {
 }
 
 # Commands that act on the host itself and are never forwarded into the VM.
+#
+# `report` is here because it is `gh` and nothing else: the authenticated GitHub
+# CLI lives on the host, the same reason `key` does. Forwarded, it ran in the
+# podman machine, which has neither gh nor a credential to give it one.
 is_host_command() {
     case "$1" in
-        setup|doctor|backup|vm|mcp|quiesce|session|pi|key|stop|start|help|-h|--help) return 0 ;;
+        setup|doctor|backup|vm|mcp|quiesce|session|pi|key|report|stop|start|help|-h|--help) return 0 ;;
         *) return 1 ;;
     esac
 }

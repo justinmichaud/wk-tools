@@ -37,10 +37,13 @@ wk run -- <args>      # run jsc from the current build
 wk test <args>        # run tests
 wk status             # this workspace's build/test state; exit code is machine-readable
 wk logs [-f|--all]    # the build log, errors first
+wk build <config> --dry-run    # what it would build, and where, without building
 ```
 
 No workspace name in any of them: you are inside the workspace, and it is the
-only one there is. `wk build --list` shows the configs.
+only one there is. `wk build --list` shows the configs, and a bare `wk run` or
+`wk test` uses the config this workspace was built with — so a macOS guest does
+not have to be told it is an Apple port every time.
 
 Commands that act on the *host* — `wk new`, `wk rm`, `wk sync`, `wk gc`,
 `wk session`, `wk quiesce`, `wk verify`, `wk claude` — refuse in here and say

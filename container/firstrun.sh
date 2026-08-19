@@ -229,6 +229,7 @@ if [ -n "${WK_WORKSPACE:-}" ]; then
 # wk: this machine IS a workspace. Written by container/firstrun.sh.
 name=$WK_WORKSPACE
 src=$SRC
+config=jsc-release
 EOF
     log "workspace marker written ($HOME/.wk-workspace)"
 else

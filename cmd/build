@@ -23,6 +23,12 @@ if [ "${1:-}" = --list ]; then
     exit 0
 fi
 
+# --dry-run is accepted on either side of the config, because both readings are
+# natural and the name/config parse below would otherwise consume it as one or
+# the other. See the flag itself further down.
+DRY=""
+[ "${1:-}" = --dry-run ] && { DRY=1; shift; }
+
 # The workspace name is optional inside a workspace: there is exactly one, it is
 # this machine, and `wk build <config>` is the form claude/CLAUDE.md documents
 # and the only one available in there. The leading argument is consumed as a
@@ -42,6 +48,16 @@ if in_workspace && { [ "$NAME" != "$(wk_self)" ] || config_load "$NAME" 2>/dev/n
 else
     shift 2 2>/dev/null || true
 fi
+
+# --dry-run: resolve everything and print what would happen, build nothing.
+#
+# Here because a cold Apple-port build is ~99 minutes, so "does `wk build` reach
+# the right target with the right config and job count" cannot be answered by
+# running one -- which is exactly the question a workspace's first in-workspace
+# build asks. Taken off what is left of the argument list, which is otherwise
+# passed through to the build untouched.
+[ "${1:-}" = --dry-run ] && { DRY=1; shift; }
+
 require_name "$NAME"
 [ -n "$CONFIG" ] || {
     if in_workspace; then log "usage: wk build <config>"
@@ -72,6 +88,21 @@ if [ "$TARGET" != remote ]; then
     export WK_CGROUP_MB WK_CGROUP_CORES
 fi
 JOBS=$(explain_jobs "$POLITE")
+
+# Everything above is resolution; everything below changes something. A dry run
+# stops on the line between the two -- before the tooling sync and before the
+# status file, so it cannot leave a workspace looking like it is building.
+if [ -n "$DRY" ]; then
+    config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE"
+    log "dry run -- nothing was built."
+    log "  workspace: $NAME ($TARGET, $(t_info "$NAME"))"
+    log "  config:    $CONFIG ($CFG_BUILDSYS${CFG_PORT:+ $CFG_PORT}${CFG_ARGS:+ $CFG_ARGS})"
+    log "  src:       $(t_src "$NAME")"
+    log "  build dir: $(config_build_dir "$(t_src "$NAME")")"
+    log "  jobs:      $JOBS (nice $NICE)"
+    log "  would run: env ${CFG_ENV[*]} $(t_tools "$NAME")/build/build-in-target.sh $*"
+    exit 0
+fi
 
 # Push the tooling in before anything else. A no-op for the container, which
 # bind-mounts it; an rsync of differences for a VM.

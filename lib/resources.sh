@@ -34,7 +34,23 @@ WK_HEADLESS_RESERVE_MB="${WK_HEADLESS_RESERVE_MB:-2048}"
 
 # The marker is written by the provisioning playbook, so this is an explicit
 # fact about the machine rather than a guess from $DISPLAY.
-is_headless() { [ -f /var/lib/wk/.headless ]; }
+#
+# A workspace counts, and for the same reason rather than by analogy: the host
+# already subtracted its own reserve when it sized this guest or this
+# container's cgroup, so taking a second desktop-sized reserve out in here
+# double-counts it. This is the Darwin path specifically -- avail_mem_mb() reads
+# MemAvailable and the cgroup on Linux, but on macOS it can only subtract the
+# reserve from the total. Measured in a 20 GB guest: `wk build mac-release` from
+# inside sized itself from 8192 MB and picked -j5, where the same build driven
+# from the host picked -j9. A guest with a window on screen is still not a
+# machine with a desktop session to protect.
+#
+# Guarded by command -v: lib/resources.sh is sourced on its own by host scripts
+# that have no reason to know about workspaces.
+is_headless() {
+    [ -f /var/lib/wk/.headless ] && return 0
+    command -v in_workspace >/dev/null 2>&1 && in_workspace
+}
 
 reserve_cores() { is_headless && echo "$WK_HEADLESS_RESERVE_CORES" || echo "$WK_RESERVE_CORES"; }
 reserve_mb()    { is_headless && echo "$WK_HEADLESS_RESERVE_MB"    || echo "$WK_RESERVE_MB"; }

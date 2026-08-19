@@ -85,8 +85,17 @@ Run these inside the podman VM on macOS, and directly on Linux.
       `wk vm`
 - [V] the marker `~/.wk-workspace` is written by firstrun and names this
       workspace and its checkout; the host's own `$HOME` never gets one
-- [ ] the same, in a macOS guest (lane B — implemented in `targets/vm.sh`,
-      never run)
+- [V] the same, in a macOS guest — `wk-mac-rel`, no `WK_IN_VM`, no podman
+      error: `wk build --list`, `wk build mac-release --dry-run` (-j9, the
+      Release tree, `WEBKIT_OUTPUTDIR` set), `wk run -- -e 'print(2+2)'` → 4
+      with the config taken from the marker, `wk test --dry-run` both suites,
+      `wk status`/`wk logs`, and every refusal
+- [V] `wk vm start` alone writes the guest's marker (no host-side build first),
+      which is the case `wk claude` on a fresh guest depends on
+- [V] the in-workspace build is sized from the whole guest: -j9, not the -j5 a
+      second desktop reserve produced
+- [V] `wk build --dry-run` / `wk test --dry-run` resolve everything and change
+      nothing — no tooling sync, no status file
 
 ### Build and run
 - [V] `wk build <ws> jsc-release` succeeds
@@ -177,6 +186,8 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] a workspace remembers its target; only `wk new` needs `--target`
 - [V] `wk status` with no argument walks every target
 - [V] `wk build --list` shows all configs
+- [V] `wk build --list` answers on a macOS host **with the podman machine
+      stopped**, and leaves it stopped (26 ms; it used to boot the machine)
 - [ ] `wk backup` → `./setup` round-trips with no spurious changes
 - [ ] `wk backup`'s junk filters strip what they claim (weather location,
       WiFi UUIDs, last-folder paths, timestamps)
@@ -228,6 +239,9 @@ in the file because each one already cost a debugging session.
 | `.config` in a new workspace is owned by the user | the SDK's systemd mount re-appearing and breaking firstrun |
 | `wk logs` shows `(none)` on a good build | `error:` matching inside message text |
 | `wk enter <ws> <cmd>` runs the command | `exec`-ing a shell function |
+| an in-workspace build sizes from the whole machine | the 12 GB desktop reserve being subtracted a second time inside a guest the host had already sized: -j5 in a 20 GB guest against -j9 from the host |
+| a bare `wk run` in a macOS guest finds a binary | the container-shaped `jsc-release` default resolving a JSCOnly path that an Apple-port guest can never have |
+| `wk build --list` with podman stopped | a static table lookup starting a two-minute VM boot, and blaming podman when it could not |
 | `wk verify` refuses inside a workspace | a sandbox check whose gate (`WK_SANDBOX`) is unset reporting "intact" after measuring two things |
 | the host's `$HOME` has no `~/.wk-workspace` | the marker escaping into the host and making every host command act on a workspace that is not there |
 | `wk build <config>` inside, `wk build <ws> <config>` outside | one argument form silently shadowing the other |

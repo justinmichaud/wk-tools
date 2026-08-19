@@ -31,8 +31,8 @@ Each item names the source handoff so detail is not duplicated here.
 
 ## Was blocking, both lanes — `wk` inside a workspace
 
-**`docs/HANDOFF-wk-in-workspace.md`** — found 2026-08-18, **Linux half done and
-verified the same day**. Claude only ever runs inside a workspace, so the
+**`docs/HANDOFF-wk-in-workspace.md`** — found 2026-08-18, **both halves done and
+verified the same day**: Linux from the workstation, macOS from this host. Claude only ever runs inside a workspace, so the
 in-workspace `wk build <config>` / `wk run` / `wk test` interface that
 `CLAUDE.md` documents is what the sandbox exists to allow, and it did not exist.
 It does now on Linux: a marker written by provisioning, a `targets/local.sh`
@@ -40,19 +40,22 @@ where the target is this machine, and the workspace name made optional in
 `build`/`run`/`test`/`logs`. Measured in a fresh workspace — `wk build
 jsc-release` from inside, 1m16s.
 
-Two pieces remain, and neither blocks Lane A:
+The macOS guest half — lane B's first item, and where the original "podman is
+required" failure was measured — is verified, along with the bash 3.2 parse the
+Linux host could not run. It needed four things on top, all in the handoff: the
+in-workspace build was sized from a third of the guest (the desktop reserve
+subtracted twice), a bare `wk run` in a guest resolved a JSCOnly path that
+cannot exist there, the marker was written only on tooling sync and so was
+absent on a guest booted straight into `wk claude`, and `--dry-run` had to exist
+before any of it could be checked without a 99-minute build.
 
-- **Lane B, first item:** the same path in a macOS guest. It is implemented
-  (`targets/vm.sh` writes the marker) and has never been run, and the guest is
-  where the original failure — "podman is required" for every command — was
-  measured. The bash 3.2 parse check belongs there too; this host has only
-  bash 5.
-- Build state is now recorded twice, once per side, because a workspace cannot
-  see the host's store. Both answers are honest and neither is single; the
-  handoff explains why the obvious mount is wrong and what to do instead.
+One piece remains, and it blocks nothing: build state is recorded twice, once
+per side, because a workspace cannot see the host's store. Both answers are
+honest and neither is single; the handoff explains why the obvious mount is
+wrong and what to do instead.
 
 `docs/HANDOFF-claude.md`'s "every skill invokes a deterministic tool rather than
-freehand steps" is unblocked on Linux.
+freehand steps" is unblocked on both platforms.
 
 ---
 
@@ -220,15 +223,13 @@ freehand steps" is unblocked on Linux.
 
 ## Lane B — macOS host
 
-1. **`wk` inside a macOS guest** — `docs/HANDOFF-wk-in-workspace.md`
-   The Linux half landed 2026-08-18 and the guest half is written but never run:
-   `targets/vm.sh` writes the `~/.wk-workspace` marker from `t_sync_tools`, and
-   `targets/local.sh` then makes the guest its own target. Verify `wk build
-   --list`, `wk run` and `wk test` in there with **no `WK_IN_VM=1` and no podman
-   error**, without running a full `mac-release` to prove it. Run the `/bin/bash
-   -n` (bash 3.2) parse of every file that change touched while there — the
-   Linux host has only bash 5. Small, and it unblocks the agent interface on this
-   lane the way it already is on the other.
+1. **`wk` inside a macOS guest — DONE 2026-08-18** —
+   `docs/HANDOFF-wk-in-workspace.md`
+   Verified in `wk-mac-rel` with no `WK_IN_VM=1` and no podman error, plus the
+   bash 3.2 parse of every file the change touches. Four fixes came out of it
+   (job sizing in a guest, the default config for a bare `wk run`, the marker on
+   boot as well as on sync, and `--dry-run`); the one item left over — build
+   state recorded once per side — is written up there and blocks nothing.
 
 2. **macOS MiniBrowser DerivedData + debugging** —
    `docs/HANDOFF-mac-minibrowser.md`

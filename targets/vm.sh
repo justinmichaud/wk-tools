@@ -291,12 +291,14 @@ t_create() {
 }
 
 t_start() {
-    local name="$1"
+    local name="$1" ip
     local v; v=$(_vm "$name")
 
     [ "$(_vm_state "$v")" != absent ] || die "no such workspace: $name"
     if [ "$(_vm_state "$v")" = running ]; then
-        _ip "$name"
+        ip=$(_ip "$name")
+        _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
+        echo "$ip"
         return 0
     fi
 
@@ -304,7 +306,13 @@ t_start() {
     _check_memory_budget "$name" "$(t_mem_mb "$name")"
     _check_host_disk
 
-    _boot "$v" 180
+    # t_start's stdout is the guest's address, so _boot's is captured and
+    # re-echoed rather than left to fall through. Best-effort marker: a guest
+    # that came up is up, and refusing to report that because one ssh failed
+    # would be the wrong trade.
+    ip=$(_boot "$v" 180)
+    _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
+    echo "$ip"
 }
 
 # The tart flags that confine a guest's egress.
@@ -485,6 +493,36 @@ t_enter() {
     exec ssh -t $(_ssh_opts) "$WK_VM_USER@$ip" "cd $(t_src "$name") 2>/dev/null; exec \$SHELL -l"
 }
 
+# The marker that tells the guest's own wk that it *is* a workspace, and which
+# one -- without it, `wk build` in there tries to reach a podman machine that a
+# macOS guest can never host. See targets/local.sh.
+#
+# Written from the host, not by provisioning, and deliberately not into the
+# golden base: the base is not a workspace, and a marker in it would be
+# inherited by every clone naming the base. The host is also the only side that
+# knows what a clone was called -- left to guess, the guest would fall back to
+# its own hostname, which on a Cirrus Labs image is `Manageds-Virtual-Machine`,
+# a name appearing nowhere in `wk ls`.
+#
+# Called from two places, because either alone leaves a real gap: t_sync_tools,
+# so it is true before every build and test, and t_start, so a guest that is
+# booted and handed straight to `wk claude` has it without a host-side build
+# first -- which is the case that matters most, since that agent's only way to
+# build is this interface. Idempotent and cheap: one ssh.
+#
+# config= is what a bare `wk run` or `wk test` in the guest reaches for. The
+# tree the guest inherited from the base is $WK_VM_BASE_PREBUILD's, and a macOS
+# guest can build nothing but the Apple ports, so the jsc-release default that
+# is right in a container is never right here.
+_write_marker() {
+    local name="$1" ip="$2"
+    _ssh "$ip" "printf '%s\n' \
+        '# wk: this machine IS a workspace. Written by targets/vm.sh.' \
+        $(sh_quote "name=$name") $(sh_quote "src=$(t_src "$name")") \
+        $(sh_quote "config=${WK_VM_BASE_PREBUILD:-mac-release}") \
+        > \$HOME/.wk-workspace"
+}
+
 # rsync rather than a mount: no --dir is ever passed to `tart run`, because a
 # shared directory is exactly the host-filesystem hole this target exists to
 # not have. The cost is that the tooling has to be pushed on every build, and
@@ -497,19 +535,7 @@ t_sync_tools() {
         -e "ssh $(_ssh_opts)" \
         "$WK_ROOT/" "$WK_VM_USER@$ip:$(t_tools "$name")/"
 
-    # The marker that tells the guest's own wk that it *is* a workspace, and
-    # which one -- without it, `wk build` in there tries to reach a podman
-    # machine that a macOS guest can never host. See targets/local.sh.
-    #
-    # Written here rather than at creation because a clone is not booted until
-    # `wk vm start`, so t_create has no way to reach in; and here it is
-    # guaranteed to be true before every build and test, which is when it
-    # matters. Deliberately not in the golden base: the base is not a workspace,
-    # and a marker in it would be inherited by every clone naming the base.
-    _ssh "$ip" "printf '%s\n' \
-        '# wk: this machine IS a workspace. Written by targets/vm.sh.' \
-        $(sh_quote "name=$name") $(sh_quote "src=$(t_src "$name")") \
-        > \$HOME/.wk-workspace"
+    _write_marker "$name" "$ip"
 }
 
 t_destroy() {

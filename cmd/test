@@ -32,16 +32,21 @@ else
 fi
 require_name "$NAME"
 
-CONFIG="${WK_CONFIG:-jsc-release}"
+CONFIG="${WK_CONFIG:-$(default_config)}"
 SUITE=jsc
 GPU=""
+DRY=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --config) CONFIG="${2:-}"; shift 2 ;;
-        --layout) SUITE=layout; shift ;;
-        --gpu)    GPU=1; shift ;;
-        --)       shift; break ;;
-        *)        break ;;
+        --config)  CONFIG="${2:-}"; shift 2 ;;
+        --layout)  SUITE=layout; shift ;;
+        --gpu)     GPU=1; shift ;;
+        # Print the resolved run and stop, for the same reason `wk build` has it:
+        # a suite takes long enough that "did it resolve the right tree" needs
+        # an answer that is not a full run.
+        --dry-run) DRY=1; shift ;;
+        --)        shift; break ;;
+        *)         break ;;
     esac
 done
 
@@ -58,15 +63,6 @@ if [ "$TARGET" != remote ]; then
     export WK_CGROUP_MB WK_CGROUP_CORES
 fi
 JOBS=$(build_jobs)
-
-# Before the status file, so a failure here cannot leave state=running behind.
-t_sync_tools "$NAME"
-
-WS=$(wk_ws_dir "$NAME")
-LOG="$WS/test.log"
-STATUS="$WS/test.status"
-STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-START_EPOCH=$(date +%s)
 
 # Software rendering. llvmpipe via Mesa's software gallium driver, and the WPE
 # headless backend so no compositor is needed.
@@ -97,22 +93,6 @@ fi
 OUT_ENV=""
 [ "$CFG_BUILDSYS" = xcode ] && OUT_ENV="WEBKIT_OUTPUTDIR=$(config_build_dir "$SRC")"
 
-printf 'state=running\nsuite=%s\nconfig=%s\nstarted=%s\nlog=%s\n' \
-    "$SUITE" "$CONFIG" "$STARTED" "$LOG" > "$STATUS"
-
-write_status() {
-    cat > "$STATUS" <<EOF
-state=$1
-suite=$SUITE
-config=$CONFIG
-exit=${2:-}
-started=$STARTED
-finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-seconds=$(( $(date +%s) - START_EPOCH ))
-log=$LOG
-EOF
-}
-
 case "$SUITE" in
 jsc)
     info "JSC tests ($CONFIG, -j$JOBS)"
@@ -129,6 +109,41 @@ layout)
     ;;
 *) die "unknown suite: $SUITE" ;;
 esac
+
+if [ -n "$DRY" ]; then
+    log "dry run -- nothing was run."
+    log "  workspace: $NAME ($TARGET, $(t_info "$NAME"))"
+    log "  suite:     $SUITE ($CONFIG)"
+    log "  would run: bash -lc $(sh_quote "$CMD")"
+    exit 0
+fi
+
+# Everything from here changes something, which is why the dry run stops above.
+# The tooling sync stays ahead of the status file, so a failure in it cannot
+# leave state=running behind.
+t_sync_tools "$NAME"
+
+WS=$(wk_ws_dir "$NAME")
+LOG="$WS/test.log"
+STATUS="$WS/test.status"
+STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+START_EPOCH=$(date +%s)
+
+printf 'state=running\nsuite=%s\nconfig=%s\nstarted=%s\nlog=%s\n' \
+    "$SUITE" "$CONFIG" "$STARTED" "$LOG" > "$STATUS"
+
+write_status() {
+    cat > "$STATUS" <<EOF
+state=$1
+suite=$SUITE
+config=$CONFIG
+exit=${2:-}
+started=$STARTED
+finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+seconds=$(( $(date +%s) - START_EPOCH ))
+log=$LOG
+EOF
+}
 
 log "  log: $LOG"
 

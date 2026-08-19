@@ -1,8 +1,10 @@
 # HANDOFF — `wk` inside a workspace
 
-**Status: the Linux container half is done and verified (2026-08-18). The macOS
-guest half is implemented and unverified — that is lane B's step, below.**
-Discovered 2026-08-18 while working the macOS MiniBrowser lane
+**Status: done and verified on both halves (2026-08-18).** The Linux container
+half landed first, from the workstation; the macOS guest half — which was
+implemented but never run, and was lane B's step 1 — is verified from the macOS
+host, together with the bash 3.2 parse the Linux side could not do. Discovered
+2026-08-18 while working the macOS MiniBrowser lane
 (`docs/HANDOFF-mac-minibrowser.md`, item group I).
 
 Claude only ever runs inside a wk workspace — that is the sandbox boundary and
@@ -86,6 +88,51 @@ So the fix took the shape the design called for, unchanged.
    an empty store; `wk sync` would otherwise fetch a 13 GB mirror into a
    directory that is discarded with the workspace.
 
+## What the macOS half needed on top
+
+Four things, found while verifying the guest and fixed there rather than worked
+around:
+
+7. **The build was sized from a third of the guest.** `t_cores`/`t_mem_mb` read
+   the cgroup, which is the right answer on Linux and no answer at all on
+   Darwin: a macOS guest has no cgroup, so both fall through to the host
+   figures, and `avail_mem_mb()`'s Darwin path then subtracts the 12 GB
+   *desktop* reserve — inside a guest whose size the host had already chosen.
+   Measured in a 20 GB guest: -j5 in there against -j9 for the same build driven
+   from the host. `is_headless()` now counts a workspace, so the reserve applied
+   in one is the small headless reserve. Both sides now say -j9.
+
+8. **`config=` in the marker.** `wk run`/`wk test` defaulted to `jsc-release`,
+   which is right in a container and impossible in a macOS guest — it can build
+   nothing but the Apple ports, so a bare `wk run` went looking for a JSCOnly
+   binary that cannot exist and reported the path rather than the reason. The
+   marker now carries the config a bare run should use (`default_config()` in
+   `lib/target.sh`), written by whoever writes the marker: `jsc-release` from
+   `container/firstrun.sh`, `$WK_VM_BASE_PREBUILD` from `targets/vm.sh`.
+
+9. **The marker is written on boot as well as on sync.** `t_sync_tools` alone
+   leaves a real gap: a guest that is booted and handed straight to `wk claude`
+   has had no host-side build, so it has no marker — and that agent's only way
+   to build is this interface. Both callers now go through one `_write_marker`
+   in `targets/vm.sh`; verified by booting a guest whose marker had been deleted
+   and finding it written by `wk vm start` alone.
+
+10. **`--dry-run` on `wk build` and `wk test`**, which is what makes the guest
+    half checkable at all: a cold `mac-release` is ~99 minutes, so "did it
+    resolve the right target, config, tree and job count" needed an answer that
+    is not a build. It stops on the line between resolution and mutation — no
+    tooling sync, no status file — which for `cmd/test` meant moving that setup
+    below the command construction. `--dry-run` is accepted on either side of
+    the config.
+
+Also, unrelated to the workspace but found by the same audit: **`wk report` is
+now a host command.** It is `gh` and nothing else, and forwarded it ran in the
+podman machine, which has neither gh nor a credential. `is_targetless` covers
+the one case that needs no target at all; `wk pr` is the remaining one of this
+shape and is deliberately left — it runs `git` in the current directory, so
+neither the host nor the podman machine is a good answer, and it belongs to
+`docs/HANDOFF-git-tools.md`.
+
 ## Verified, on the Linux workstation
 
 In a fresh `wk new selftest`, so provisioning is what wrote the marker:
@@ -104,20 +151,34 @@ In a fresh `wk new selftest`, so provisioning is what wrote the marker:
 | dispatch, host | `in_workspace=no` for every invocation; `resolve_target` unchanged; only `build --list` newly skips forwarding |
 | `bash -n` | every touched file |
 
+## Verified, on the macOS host
+
+In the guest `wk-mac-rel`, over ssh, with the tree rsynced in — and with **no
+`WK_IN_VM=1`**, which is the whole point: every command below failed with
+"podman is required" before this work.
+
+| | |
+|---|---|
+| marker written by `wk vm start` alone | `name=mac-rel`, `src=/Users/admin/WebKit`, `config=mac-release`, with no host-side build first |
+| `wk build --list` | works in the guest, and on the host with the podman machine **stopped** (26 ms, and it stays stopped — it used to boot it) |
+| `wk build mac-release --dry-run` | target `local`, `src=/Users/admin/WebKit`, `WebKitBuild/Release`, `WEBKIT_OUTPUTDIR`/`WK_DERIVED_DATA` set, **-j9** |
+| `wk build --dry-run mac-release` | same, flag on either side of the config |
+| `wk run -- -e 'print(2+2)'` | `4` — the real `jsc` from the Release tree, config taken from the marker |
+| `wk test --dry-run`, `--layout --dry-run` | resolved suite and command, both carrying `WEBKIT_OUTPUTDIR` |
+| `wk status`, `wk logs` (no name) | report this workspace |
+| `wk build other-ws mac-release` | names the missing workspace and prints the in-workspace form |
+| refusals | `new`, `rm`, `sync`, `gc`, `verify`, `claude`, `enter` all refuse, each naming the host |
+| host path unchanged | `wk build mac-rel mac-release --dry-run` and `wk run mac-rel --config mac-release -- -e 'print(6*7)'` → `42` from the host |
+| dispatch, host | with a fake `podman` on PATH: a container-target command still forwards, `build --list` never calls podman, `default_target` is `container` |
+| **`/bin/bash -n`** | every non-doc file the change touches, under bash 3.2.57 as well as bash 5 — the check the Linux host could not run |
+
+A full `mac-release` was deliberately not run: ~99 minutes, and `--dry-run`
+exists so it does not have to be. The container half was re-run here too, on the
+merged tree: real in-workspace `wk build jsc-release` (15 s incremental,
+BUILD OK), `wk run -- -e 'print(2+2)'` → 4, status, and the refusals.
+
 ## What is left
 
-- **The macOS guest half — lane B.** `targets/vm.sh` now writes the marker from
-  `t_sync_tools` (not at creation: a clone is not booted until `wk vm start`, so
-  `t_create` cannot reach in; and not into the golden base, which is not a
-  workspace and whose marker every clone would inherit). Nothing about it has
-  been run. Verify as `docs/HANDOFF-mac-minibrowser.md` describes: rsync the
-  tree in, then `wk build --list`, `wk run`, `wk test` with **no `WK_IN_VM=1`
-  and no podman error**. Do not run a full `mac-release` to prove it — verify as
-  far as config, target and job count.
-- **bash 3.2 was not checked.** The repo invariant is `bash -n` *and*
-  `/bin/bash -n`, and on this Linux host both are bash 5.2. The additions use
-  nothing newer (no arrays, no `[[ =~ ]]`, no `${x^^}`), but the 3.2 parse is
-  lane B's to run.
 - **Build state is recorded twice, once per side.** A workspace writes
   `build.status` and `build.log` into its own `~/.local/state/wk/ws/<name>/`,
   because the host's store is not mounted in — so `wk status <ws>` on the host
@@ -138,9 +199,12 @@ In a fresh `wk new selftest`, so provisioning is what wrote the marker:
   needed no target at all. And `wk status` with no argument should show macOS
   VMs as well as containers; `cmd/status` now walks every registered target,
   which looks right and has not been checked on macOS.
+- **`wk ls` inside a workspace** prints `?` for BASE and `-` for CHANGES.
+  Honest — both are overlay concepts that do not exist for this target — but it
+  reads as missing data rather than as not-applicable.
 - **`docs/HANDOFF-claude.md`** can now be picked up: "every skill invokes a
   deterministic tool rather than freehand steps" depends on this interface
-  existing, and it does on Linux.
+  existing, and it now does on both platforms.
 
 ## Open questions
 

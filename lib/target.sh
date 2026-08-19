@@ -125,6 +125,21 @@ wk_self() { wk_marker_field name; }
 # in there: no podman, no tart, and one workspace, which is this machine.
 default_target() { in_workspace && echo local || echo container; }
 
+# The config to build, run or test when the caller names none.
+#
+# jsc-release is right on a host and in a container, where JSCOnly is what gets
+# built. It is meaningless in a macOS guest, which can build nothing but the
+# Apple ports -- so a bare `wk run` in there went looking for a JSCOnly binary
+# that cannot exist, and reported the path it could not find rather than the
+# reason. The marker carries the answer, written by whoever wrote the marker:
+# container/firstrun.sh knows the container builds JSCOnly, and targets/vm.sh
+# knows the guest's tree is $WK_VM_BASE_PREBUILD.
+default_config() {
+    local c=""
+    in_workspace && c=$(wk_marker_field config)
+    printf '%s' "${c:-jsc-release}"
+}
+
 # --- generated ssh aliases ---------------------------------------------------
 # Written to a file under ~/.ssh/config.d rather than to ~/.ssh/config itself,
 # so it can be rewritten freely without ever touching hand-maintained entries.

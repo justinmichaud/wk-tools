@@ -23,7 +23,7 @@ else
 fi
 require_name "$NAME"
 
-CONFIG="${WK_CONFIG:-jsc-release}"
+CONFIG="${WK_CONFIG:-$(default_config)}"
 DEBUGGER=""
 while [ $# -gt 0 ]; do
     case "$1" in

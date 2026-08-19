@@ -382,10 +382,14 @@ because the image is cached; everything else is minutes.
       it and measure the real number on the next rebuild, then correct
       `SETUP.md`.
 
-### I. `wk` does not work inside a workspace
+### I. `wk` does not work inside a workspace — FIXED 2026-08-18
 
-Split out into its own document: **`docs/HANDOFF-wk-in-workspace.md`**, and
-escalated — Claude only ever runs inside a workspace, so an in-workspace `wk`
+Built on the Linux side and verified in this guest the same day:
+**`docs/HANDOFF-wk-in-workspace.md`**. `wk build mac-release`, `wk run` and
+`wk test` now work in the guest with no `WK_IN_VM` and no podman error, and the
+guest's marker is written by `targets/vm.sh` from the host — so no
+re-provisioning and no change to the golden base was needed. Original write-up,
+for the record: split out into its own document, and escalated — Claude only ever runs inside a workspace, so an in-workspace `wk`
 that cannot build or test makes `wk claude` useless on this lane. Summary:
 `wk` is present in the guest but every command fails with "podman is required"
 (`resolve_target` defaults to `container` when no workspace is named, and the
@@ -463,6 +467,15 @@ which read as "the GUI cannot start" rather than "the network is broken".
 - [ ] F8 Two `wk-proxy.py` processes were seen running on the host at once
       (one under Homebrew python 3.14, one under Xcode python 3.9). Determine
       whether one is stale.
+      More on this, seen again 2026-08-18: `wk vm start mac-rel` printed
+      **"the host egress proxy did not start; the guest will have no egress at
+      all"** while a perfectly good proxy from an earlier session was already
+      listening on 192.168.2.1:3128 — the new one died with `EADDRINUSE`. The
+      cause is that `_proxy_running` trusts `$WK_VM_DIR/proxy.pid`, which goes
+      stale when the proxy outlives the shell that recorded it, so `wk` tries to
+      bind an address it already owns and then reports the opposite of the
+      truth. Egress in the guest was fine throughout. Check the listener, not
+      just the pidfile.
 
 ### E. Documentation debt found on the way
 - [x] E1 SETUP.md referenced `docs/macos-vm.md`, deleted in `8400f49` — fixed
