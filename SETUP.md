@@ -188,6 +188,26 @@ wk rm    bug-238             # reclaims everything it created
 `wk build --list` shows the configs. `zed ssh://wk-bug-238/src/WebKit` opens it
 in Zed.
 
+The same commands work *inside* a workspace, with the name left out — there is
+exactly one workspace in there and it is the machine:
+
+```sh
+wk build jsc-release         # from a shell in the workspace, or from an agent
+wk run -- -e 'print(1+1)'
+wk test
+wk status                    # this workspace's own build and test state
+```
+
+That is the interface `wk claude` hands an agent, and the only one available to
+it: a workspace has no podman and a macOS guest has no nested virtualisation, so
+there is nothing to reach out to. Provisioning writes `~/.wk-workspace` naming
+the checkout, and `wk` uses it to select `targets/local.sh`, where the target is
+this machine. Commands that act on a host — `wk sync`, `wk gc`, `wk session`,
+`wk quiesce`, `wk vm`, `wk pi` — refuse in there rather than acting on an empty
+store, and a workspace can neither create nor destroy a workspace. `wk verify`
+refuses too: half of what it measures is only visible from the host, so a green
+result from inside would mean nothing.
+
 Before trusting a workspace with an agent, or with a benchmark, check that the
 sandbox is what it claims:
 

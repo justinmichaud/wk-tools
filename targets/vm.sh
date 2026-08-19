@@ -496,6 +496,20 @@ t_sync_tools() {
     rsync -az --delete --exclude '.git/' \
         -e "ssh $(_ssh_opts)" \
         "$WK_ROOT/" "$WK_VM_USER@$ip:$(t_tools "$name")/"
+
+    # The marker that tells the guest's own wk that it *is* a workspace, and
+    # which one -- without it, `wk build` in there tries to reach a podman
+    # machine that a macOS guest can never host. See targets/local.sh.
+    #
+    # Written here rather than at creation because a clone is not booted until
+    # `wk vm start`, so t_create has no way to reach in; and here it is
+    # guaranteed to be true before every build and test, which is when it
+    # matters. Deliberately not in the golden base: the base is not a workspace,
+    # and a marker in it would be inherited by every clone naming the base.
+    _ssh "$ip" "printf '%s\n' \
+        '# wk: this machine IS a workspace. Written by targets/vm.sh.' \
+        $(sh_quote "name=$name") $(sh_quote "src=$(t_src "$name")") \
+        > \$HOME/.wk-workspace"
 }
 
 t_destroy() {

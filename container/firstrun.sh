@@ -214,6 +214,28 @@ grep -qF 'wk-tools/shell/bashrc' "$HOME/.bashrc" 2>/dev/null || \
     '# wk: login shells read this, interactive non-login shells read .bashrc.' \
     '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"' > "$HOME/.bash_profile"
 
+# --- the workspace marker ----------------------------------------------------
+# Says "this machine IS a workspace", and where its checkout is. That is what
+# lets the wk in /opt/wk-tools act on this container -- `wk build <config>`,
+# `wk run`, `wk test` -- instead of trying to reach a workspace from outside,
+# which from in here means a podman machine that does not exist. See
+# targets/local.sh and "am I a workspace?" in lib/target.sh.
+#
+# Written from $WK_WORKSPACE rather than guessed: the name reaches `wk status`
+# and every message, and a workspace calling itself by the wrong name is worse
+# than one that says it does not know. Refuses to invent one.
+if [ -n "${WK_WORKSPACE:-}" ]; then
+    cat > "$HOME/.wk-workspace" <<EOF
+# wk: this machine IS a workspace. Written by container/firstrun.sh.
+name=$WK_WORKSPACE
+src=$SRC
+EOF
+    log "workspace marker written ($HOME/.wk-workspace)"
+else
+    warn "WK_WORKSPACE is not set -- no workspace marker, so 'wk build' in here
+         will not find this workspace. Recreate with a current wk."
+fi
+
 # A completion marker, checked by `wk new`.
 #
 # .wkdev-init runs this hook and then carries on regardless of how it exited,

@@ -32,10 +32,22 @@ WANT_GPU=""
 # Resolved from the registry like every other command: with a fixed default a
 # `wk verify <vm-ws>` would load the container driver and report "no such
 # workspace" about a workspace that exists.
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
 load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+
+# A workspace cannot certify its own sandbox, and must not appear to. Some of the
+# properties below are invisible from inside one -- whether podman is rootless,
+# whether the host's proxy service is running -- and the rest are gated on
+# WK_SANDBOX, which the local driver does not set, so running this in here
+# reported "sandbox intact" after measuring two things and skipping the boundary
+# entirely. A green result that tested nothing is worse than no result, and
+# telling those apart is this command's whole purpose.
+if [ "$TARGET" = local ]; then
+    die "'wk verify' measures the boundary from outside as well as inside, so it
+    only means anything on the host:  wk verify $NAME"
+fi
 
 # The vm target's boundary is Softnet on the host; none of the container
 # properties below exist in a guest by construction. `wk claude` carries the

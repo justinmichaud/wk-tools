@@ -4,8 +4,9 @@
 #
 # On Linux (and inside the podman VM) this dispatches straight to cmd/<name>.
 # On macOS most commands have nothing to act on locally, because workspaces
-# live inside the VM; those are forwarded over `podman machine ssh`. This file
-# must therefore stay bash 3.2 compatible -- macOS ships bash 3.2 and the whole
+# live inside the VM; those are forwarded over `podman machine ssh`. Inside a
+# workspace nothing is forwarded at all -- the target is the machine itself.
+# This file must therefore stay bash 3.2 compatible -- macOS ships bash 3.2 and the whole
 # point of the design is that the host installs nothing extra.
 
 set -euo pipefail
@@ -62,6 +63,9 @@ hosts and machines
                             real otherwise); nothing restarts on its own
   mcp                       MCP server, for the Claude Desktop app
 
+  Inside a workspace the name is implicit and there is no host to reach:
+  `wk build <config>`, `wk run -- <args>`, `wk test <args>` act on this machine.
+
   WK_DEBUG=1 for verbose output.
 EOF
     exit 2
@@ -98,6 +102,38 @@ resolve_target() {
         return 0
     fi
     printf '%s' container
+}
+
+# Invocations that act on no target at all, so there is nothing to forward and
+# nothing to start. `wk build --list` prints the config table and stops; today
+# it forwards, which boots the podman machine for nothing -- and on a host
+# without podman it fails with "podman is required", naming a problem the
+# command does not have.
+is_targetless() {
+    case "$1${2:+ $2}" in
+        "build --list") return 0 ;;
+    esac
+    return 1
+}
+
+# Commands that only mean anything on a host, and are refused inside a workspace.
+#
+# Not the same list as is_host_command below: that one is about *forwarding*
+# (which of them the podman machine must not be handed), this one is about the
+# machine they act on. Every one of these operates on a host's hardware or on
+# the host's store -- the seat, the display, tart, the Pis, the snapshot mirror
+# -- and none of that exists in a workspace. Left to run they either no-op
+# against an empty store and report success, or do real work in the wrong place:
+# `wk sync` inside a container would fetch a 13 GB mirror into a directory that
+# is discarded with the workspace.
+#
+# Deliberately not listed: build, run, test, logs, status, ls, pr, skills --
+# those act on the checkout or on the workspace, which is exactly what is here.
+is_host_only() {
+    case "$1" in
+        setup|backup|vm|mcp|quiesce|session|pi|stop|start|sync|gc) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Commands that act on the host itself and are never forwarded into the VM.
@@ -142,7 +178,22 @@ main() {
     # inside it, which is slow and reports the wrong problem.
     [ -x "$impl" ] || { warn "unknown command: $cmd"; usage; }
 
-    if is_macos && [ -z "${WK_IN_VM:-}" ] && ! is_host_command "$cmd"; then
+    if in_workspace && is_host_only "$cmd"; then
+        die "'wk $cmd' acts on a host, and this is workspace '$(wk_self)'.
+    Run it on the host instead."
+    fi
+
+    if in_workspace; then
+        # Inside a workspace every command acts on this machine. There is no
+        # podman machine to forward to and there never can be -- a container has
+        # no podman, a macOS guest has no nested virtualisation -- and the
+        # workspace is the thing the command means. An explicit WK_TARGET still
+        # wins, so a workspace can be told to act as something else if it ever
+        # has the means to.
+        : "${WK_TARGET:=local}"
+        export WK_TARGET
+    elif is_macos && [ -z "${WK_IN_VM:-}" ] && ! is_host_command "$cmd" \
+            && ! is_targetless "$cmd" "${1:-}"; then
         if [ "$(resolve_target "$@")" = container ]; then
             forward_to_vm "$cmd" "$@"
         fi

@@ -58,7 +58,7 @@ esac
 # like the browser is broken.
 [ -n "$URL" ] || URL="about:blank"
 
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
 load_target "$TARGET"
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 

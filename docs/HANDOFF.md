@@ -29,21 +29,30 @@ Each item names the source handoff so detail is not duplicated here.
 
 ---
 
-## Blocking, both lanes — `wk` does not work inside a workspace
+## Was blocking, both lanes — `wk` inside a workspace
 
-**`docs/HANDOFF-wk-in-workspace.md`** — found 2026-08-18. Claude only ever runs
-inside a workspace, so the in-workspace `wk build <config>` / `wk run` /
-`wk test` interface that `CLAUDE.md` documents is what the sandbox exists to
-allow — and it does not exist: inside a macOS guest every `wk` command fails
-with "podman is required", because `resolve_target` defaults to `container`
-when no workspace is named and the entrypoint then tries to forward into a
-podman machine that cannot exist there. Verified in the macOS guest; **the
-Linux-container half is unverified** and should be established first.
+**`docs/HANDOFF-wk-in-workspace.md`** — found 2026-08-18, **Linux half done and
+verified the same day**. Claude only ever runs inside a workspace, so the
+in-workspace `wk build <config>` / `wk run` / `wk test` interface that
+`CLAUDE.md` documents is what the sandbox exists to allow, and it did not exist.
+It does now on Linux: a marker written by provisioning, a `targets/local.sh`
+where the target is this machine, and the workspace name made optional in
+`build`/`run`/`test`/`logs`. Measured in a fresh workspace — `wk build
+jsc-release` from inside, 1m16s.
 
-Until it is fixed, `wk claude` puts Claude in a correctly sandboxed guest that
-cannot build or test. It also gates `docs/HANDOFF-claude.md`'s "every skill
-invokes a deterministic tool rather than freehand steps". Do it before
-anything below on whichever machine frees up first.
+Two pieces remain, and neither blocks Lane A:
+
+- **Lane B, first item:** the same path in a macOS guest. It is implemented
+  (`targets/vm.sh` writes the marker) and has never been run, and the guest is
+  where the original failure — "podman is required" for every command — was
+  measured. The bash 3.2 parse check belongs there too; this host has only
+  bash 5.
+- Build state is now recorded twice, once per side, because a workspace cannot
+  see the host's store. Both answers are honest and neither is single; the
+  handoff explains why the obvious mount is wrong and what to do instead.
+
+`docs/HANDOFF-claude.md`'s "every skill invokes a deterministic tool rather than
+freehand steps" is unblocked on Linux.
 
 ---
 
@@ -119,7 +128,7 @@ anything below on whichever machine frees up first.
    Do the build-side work here first (yocto tooling is native to Linux); cache
    must survive workspace destruction, and image upload to a target should
    reuse step 7's flashing flow. The *macOS* half — confirming the same flow
-   works from a Tart VM — is lane B step 4, after this lands. Also: get
+   works from a Tart VM — is lane B step 5, after this lands. Also: get
    Tailscale installed on the rpi3 target image itself.
 
 9. **Linux MiniBrowser: debugging + graphical run** —
@@ -139,7 +148,7 @@ anything below on whichever machine frees up first.
     strong-ref tracking) become modes of one command instead of wiki
     copy-paste and skill recitation.
     (`strip-addresses` and `show-profiled-functions` are already restored in
-    `container/bin/`.) The macOS-MiniBrowser half of profiling is lane B step 5.
+    `container/bin/`.) The macOS-MiniBrowser half of profiling is lane B step 6.
 
 11. **Memory charting** — `docs/HANDOFF-memory.md` (`wk bench mem`; starts by
     rescuing `plot-memory-log.py` and the experiment patches out of the wiki).
@@ -204,14 +213,24 @@ anything below on whichever machine frees up first.
     included. Add the git-push toggle (push allowed only inside the
     container, never from a bare `wk claude` on the host) as part of this
     pass, and retrofit it onto step 13's restored git helpers. Feed findings
-    into lane B step 8, which re-runs the equivalent check against the VM
+    into lane B step 9, which re-runs the equivalent check against the VM
     model.
 
 ---
 
 ## Lane B — macOS host
 
-1. **macOS MiniBrowser DerivedData + debugging** —
+1. **`wk` inside a macOS guest** — `docs/HANDOFF-wk-in-workspace.md`
+   The Linux half landed 2026-08-18 and the guest half is written but never run:
+   `targets/vm.sh` writes the `~/.wk-workspace` marker from `t_sync_tools`, and
+   `targets/local.sh` then makes the guest its own target. Verify `wk build
+   --list`, `wk run` and `wk test` in there with **no `WK_IN_VM=1` and no podman
+   error**, without running a full `mac-release` to prove it. Run the `/bin/bash
+   -n` (bash 3.2) parse of every file that change touched while there — the
+   Linux host has only bash 5. Small, and it unblocks the agent interface on this
+   lane the way it already is on the other.
+
+2. **macOS MiniBrowser DerivedData + debugging** —
    `docs/HANDOFF-mac-minibrowser.md`
    Fix the DerivedData location so it's fast and doesn't collide with other
    builds — this is the correctness prerequisite for everything else on this
@@ -219,37 +238,37 @@ anything below on whichever machine frees up first.
    step). Then: graphical MiniBrowser run, attach a debugger, debug a layout
    test.
 
-2. **Cross-compile / remote-target verification on macOS** — companion to
+3. **Cross-compile / remote-target verification on macOS** — companion to
    lane A steps 4-6. Once the Linux side has the remote-target driver and
    cross-compile transfer path working, confirm the same flows work when
    driven from a macOS Tart VM (in particular `docs/HANDOFF-other-remote.md`'s
    macOS-remote-target case, which is macOS-flavored by definition).
 
-3. **Yocto builds — macOS half** — `docs/HANDOFF-yocto.md`
+4. **Yocto builds — macOS half** — `docs/HANDOFF-yocto.md`
    After lane A step 8 lands the build-side work, confirm the same yocto flow
    works from a Tart VM (podman inside the VM), and that image transfer to the
    host for SD-card flashing (`docs/HANDOFF-sdcard.md`) works from macOS too.
 
-4. **Profiling tooling — macOS MiniBrowser half** —
+5. **Profiling tooling — macOS MiniBrowser half** —
    `docs/HANDOFF-original-helpers.md` (profiling section)
    Once lane A step 10 has the samply/sysprof/heaptrack/JIT-dump plumbing
    built for cli/GTK/WPE, extend it to macOS MiniBrowser specifically — that's
    the one target in that list that only exists on this machine.
 
-5. **Fixed-core-count benchmarking, macOS confirmation** —
+6. **Fixed-core-count benchmarking, macOS confirmation** —
    companion to lane A step 11 (`docs/HANDOFF-memory.md`)
    Confirm the memory-chart collection and fixed-core benchmarking work
    correctly on the Tart VM once lane A has built the mechanism — core pinning
    in a VM is not the same primitive as a container `--cpuset`, so this needs
    an independent check, not just a re-run.
 
-6. **MBP public-wifi safety check** — the one item from
+7. **MBP public-wifi safety check** — the one item from
    `docs/HANDOFF-tailscale.md` (#8) that has to run on this machine: confirm
    the MBP is safe to use on public/untrusted wifi. Run this alongside lane A
    step 16's audit (not before it) so both halves of the Tailscale review land
    together.
 
-7. **Settings audit — macOS half** — `docs/HANDOFF-settings-audit.md`
+8. **Settings audit — macOS half** — `docs/HANDOFF-settings-audit.md`
    Run `wk backup`, diff `host/macos/defaults.conf` against what's committed,
    and separately scan for non-default, plausibly-deliberate preference
    domains that aren't in `defaults.conf` at all yet — `cmd/backup` only
@@ -258,11 +277,11 @@ anything below on whichever machine frees up first.
    `vmtools.sh`, `mcp.sh`, `tools.sh`, `playbook.yaml`. Ask the user about
    every candidate before writing anything, confirm the `wk backup` →
    `./setup` round trip, and end with the written summary of what's kept and
-   why. Scheduled here, after steps 1-6, for the same reason as the Linux
+   why. Scheduled here, after steps 1-7, for the same reason as the Linux
    half: earlier steps in this lane are themselves a source of new
    non-default settings.
 
-8. **Sandbox audit — macOS-specific escape surface, holistic pass** —
+9. **Sandbox audit — macOS-specific escape surface, holistic pass** —
    companion to lane A step 17 (`docs/HANDOFF-sandboxing.md`), and likewise
    scheduled last. The Linux audit found host-mount and D-Bus escapes that
    were invisible on macOS "because the VM's session has nothing in it" per

@@ -171,7 +171,7 @@ so log in once inside the golden base and every clone inherits it.
 ```
 setup              host bootstrap                lib/       shared helpers
 wk                 the CLI                       cmd/       one file per subcommand
-host/              per-OS setup and settings     targets/   container, vm, remote
+host/              per-OS setup and settings     targets/   container, vm, remote, local
 dotfiles/          host dotfiles (Zed only)      claude/    settings, skills, hooks, CLAUDE.md
 container/         workspace-side setup          build/     configs + the in-target build
 container/proxy/   the egress boundary           container/gpu/  the EGL probe

@@ -13,7 +13,11 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-TARGET=container
+# container on a host, which is what every workspace here is unless `--target`
+# says otherwise. Inside a workspace it resolves to local, whose driver refuses
+# to create -- so `wk new` in there stops with "a workspace cannot create a
+# workspace" instead of building a store and a container it has no means to run.
+TARGET=$(default_target)
 BASE=""
 
 NAME="${1:-}"; shift || true

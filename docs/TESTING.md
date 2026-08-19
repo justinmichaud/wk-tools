@@ -68,9 +68,25 @@ Run these inside the podman VM on macOS, and directly on Linux.
       workspace inherits it
 
 ### Inside the workspace (the interface `wk claude` hands an agent)
-- [!] `wk build <config>` / `wk run` / `wk test` with no workspace name —
-      **does not exist**; see docs/HANDOFF-wk-in-workspace.md (blocking)
-- [ ] `wk build --list` works in a workspace with no podman anywhere
+- [V] `wk build jsc-release` with no workspace name builds this workspace
+      (1m16s warm, from inside `selftest`)
+- [V] `wk run -- -e 'print(1+1)'` prints 2; `wk test <args>` runs and reports
+- [V] `wk status` / `wk logs` with no name report this workspace
+- [V] the explicit form still works from inside: `wk run <own-name> -- ...`
+- [V] `wk build <other-name> <config>` says *which* thing is missing, rather
+      than reading the config as a workspace name
+- [V] `wk build --list` works in a workspace with no podman anywhere
+- [V] `wk new` / `wk rm` refuse — a workspace may not create or destroy one,
+      and `wk rm` refuses *before* prompting
+- [V] `wk verify` refuses from inside (it would report "sandbox intact" having
+      measured neither the interfaces nor the proxy)
+- [V] `wk claude` refuses from inside; `wk enter <own-name>` says so too
+- [V] host-only commands refuse: `wk sync`, `wk gc`, `wk session`, `wk quiesce`,
+      `wk vm`
+- [V] the marker `~/.wk-workspace` is written by firstrun and names this
+      workspace and its checkout; the host's own `$HOME` never gets one
+- [ ] the same, in a macOS guest (lane B — implemented in `targets/vm.sh`,
+      never run)
 
 ### Build and run
 - [V] `wk build <ws> jsc-release` succeeds
@@ -212,6 +228,9 @@ in the file because each one already cost a debugging session.
 | `.config` in a new workspace is owned by the user | the SDK's systemd mount re-appearing and breaking firstrun |
 | `wk logs` shows `(none)` on a good build | `error:` matching inside message text |
 | `wk enter <ws> <cmd>` runs the command | `exec`-ing a shell function |
+| `wk verify` refuses inside a workspace | a sandbox check whose gate (`WK_SANDBOX`) is unset reporting "intact" after measuring two things |
+| the host's `$HOME` has no `~/.wk-workspace` | the marker escaping into the host and making every host command act on a workspace that is not there |
+| `wk build <config>` inside, `wk build <ws> <config>` outside | one argument form silently shadowing the other |
 | `wk start` / `wk stop` with a driver loaded | driver defaults evaluated at source time |
 | two `config_build_dir` definitions | a clean merge leaving the wrong one live |
 | guest reaches nothing with the proxy bypassed | softnet actually enforcing, rather than the env vars being politely obeyed |

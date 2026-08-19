@@ -16,7 +16,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NAME="${1:-}"; shift || true
 require_name "$NAME"
 
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
 load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
@@ -25,6 +25,14 @@ load_target "$TARGET"
 # Relaxed permissions are defensible only while the boundary holds, and what the
 # boundary *is* differs by target -- so this dispatches on the target rather
 # than applying one test everywhere.
+
+if [ "$TARGET" = local ]; then
+    # Claude is already in here -- this *is* the workspace, and the host verified
+    # the boundary when it started this one. Launching another agent from inside
+    # would nest a relaxed-permission session in a sandbox nothing re-measured,
+    # which is the one thing the check below exists to prevent.
+    die "already inside workspace '$(wk_self)' -- run 'claude' directly"
+fi
 
 if [ "$TARGET" = remote ]; then
     die "refusing to run Claude against a remote target: it is a shared machine

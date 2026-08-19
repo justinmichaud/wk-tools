@@ -26,6 +26,10 @@
 #   t_store_init       create the host-side directories this target needs
 #   t_ready            block until a new workspace finished initialising
 #
+# One driver is the degenerate case of all this: targets/local.sh, where the
+# target is the machine the command is already running on -- a workspace acting
+# on itself. See "am I a workspace?" below for how that is detected.
+#
 # t_cores/t_mem_mb are separate from lib/resources.sh on purpose. A build has
 # to be sized from the memory of the machine it runs on, and for a vm target
 # that is the *guest*, not the host -- sizing a macOS VM build from the host's
@@ -82,6 +86,44 @@ target_of() {
     local f="$(wk_state_dir)/targets/$1"
     [ -f "$f" ] && cat "$f" || return 1
 }
+
+# --- am I a workspace? -------------------------------------------------------
+# A workspace is a whole machine -- a podman container or a macOS guest -- and
+# the `wk` inside one has to act on that machine rather than try to reach one
+# from outside. Claude only ever runs inside a workspace, so this is the path
+# that has to work for it to build or test anything at all.
+#
+# Provisioning writes a marker file saying so and naming the checkout:
+# container/firstrun.sh in a container, targets/vm.sh in a macOS guest. A file
+# rather than an environment variable, because it has to be true for everything
+# that reaches in -- an ssh command, a hook, a `bash -c` from an agent -- and
+# not only for the shells that happened to inherit the right environment.
+#
+# When the marker is absent this machine is a host, and every path that reads it
+# must behave exactly as it did before it existed.
+wk_marker() { echo "${WK_MARKER:-$HOME/.wk-workspace}"; }
+
+in_workspace() { [ -f "$(wk_marker)" ]; }
+
+# One `key=value` field from the marker; empty when the marker or the key is
+# missing. Comments and blank lines are ignored, so the file can explain itself.
+wk_marker_field() {
+    local f; f=$(wk_marker)
+    [ -f "$f" ] || return 0
+    awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$f"
+}
+
+# The workspace this machine *is*, or empty on a host. This is what makes the
+# workspace argument optional inside one: `wk build jsc-release` rather than
+# `wk build <name> jsc-release`, which is the interface claude/CLAUDE.md
+# documents and the only one available in here.
+wk_self() { wk_marker_field name; }
+
+# The target to assume for a workspace that is not in the registry. On a host
+# that is `container` -- the default, and what every workspace predating the
+# registry is. Inside a workspace it is `local`, because there is nothing else
+# in there: no podman, no tart, and one workspace, which is this machine.
+default_target() { in_workspace && echo local || echo container; }
 
 # --- generated ssh aliases ---------------------------------------------------
 # Written to a file under ~/.ssh/config.d rather than to ~/.ssh/config itself,
@@ -159,8 +201,8 @@ load_target() {
     : "${WK_STORE_DEFAULT:=${WK_STORE:-/var/lib/wk}}"
     WK_STORE="$WK_STORE_DEFAULT"
     case "$t" in
-        container|vm|remote) ;;
-        *) die "unknown target '$t' (container, vm, remote)" ;;
+        container|vm|remote|local) ;;
+        *) die "unknown target '$t' (container, vm, remote, local)" ;;
     esac
     # shellcheck disable=SC1090
     . "$WK_ROOT/targets/$t.sh"

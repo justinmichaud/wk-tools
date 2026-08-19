@@ -12,7 +12,15 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/build/configs.sh"
 
-NAME="${1:-}"; shift || true
+# Inside a workspace the name is implicit -- see cmd/build. Nothing else on the
+# command line can be one, so anything that is not this workspace's own name is
+# an option or a jsc argument, including the very first word.
+NAME="${1:-}"
+if in_workspace && [ "$NAME" != "$(wk_self)" ]; then
+    NAME=$(wk_self)
+else
+    shift || true
+fi
 require_name "$NAME"
 
 CONFIG="${WK_CONFIG:-jsc-release}"
@@ -28,7 +36,7 @@ done
 
 config_load "$CONFIG" || die "unknown config '$CONFIG'"
 
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
 load_target "$TARGET"
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 

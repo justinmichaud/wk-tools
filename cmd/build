@@ -23,13 +23,35 @@ if [ "${1:-}" = --list ]; then
     exit 0
 fi
 
-NAME="${1:-}"; CONFIG="${2:-}"; shift 2 2>/dev/null || true
+# The workspace name is optional inside a workspace: there is exactly one, it is
+# this machine, and `wk build <config>` is the form claude/CLAUDE.md documents
+# and the only one available in there. The leading argument is consumed as a
+# name only when it really is this workspace's own name -- and not when that
+# word is also a config, so a workspace named after one still builds.
+NAME="${1:-}"; CONFIG="${2:-}"
+if in_workspace && { [ "$NAME" != "$(wk_self)" ] || config_load "$NAME" 2>/dev/null; }; then
+    # A name *and* a config, where the name is not this workspace's, is the host
+    # form typed in the wrong place. Read literally it would build this
+    # workspace and report the config as unknown, which explains neither half.
+    if [ -n "$CONFIG" ] && config_load "$CONFIG" 2>/dev/null; then
+        die "no such workspace: $NAME -- this is workspace '$(wk_self)', so the
+    form in here is 'wk build $CONFIG' with no name"
+    fi
+    NAME=$(wk_self); CONFIG="${1:-}"
+    shift 1 2>/dev/null || true
+else
+    shift 2 2>/dev/null || true
+fi
 require_name "$NAME"
-[ -n "$CONFIG" ] || { log "usage: wk build <workspace> <config>"; config_list | sed 's/^/  /'; exit 2; }
+[ -n "$CONFIG" ] || {
+    if in_workspace; then log "usage: wk build <config>"
+    else log "usage: wk build <workspace> <config>"; fi
+    config_list | sed 's/^/  /'; exit 2
+}
 
 config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
 
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || echo container)}"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
 load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"

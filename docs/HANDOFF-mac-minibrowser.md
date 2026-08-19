@@ -1,4 +1,4 @@
-# HANDOFF — macOS MiniBrowser (Lane B step 1)
+# HANDOFF — macOS MiniBrowser (Lane B step 2)
 
 Original three-line spec, kept verbatim because it is the acceptance test:
 

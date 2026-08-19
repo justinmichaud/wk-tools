@@ -88,12 +88,12 @@ report_one() {
 # because the container driver has never heard of them.
 if [ -n "${1:-}" ]; then
     require_name "$1"
-    TARGET="${WK_TARGET:-$(target_of "$1" 2>/dev/null || echo container)}"
+    TARGET="${WK_TARGET:-$(target_of "$1" 2>/dev/null || default_target)}"
     load_target "$TARGET"
     report "$1"
 else
     found=0
-    for TARGET in ${WK_TARGET:-$(target_all)}; do
+    for TARGET in ${WK_TARGET:-$(in_workspace && default_target || target_all)}; do
         load_target "$TARGET"
         for ws in $(list_workspaces); do found=1; report "$ws"; done
     done
