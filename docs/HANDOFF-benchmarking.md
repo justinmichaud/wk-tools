@@ -20,6 +20,30 @@ via the benchmark's own cli.js in the jsc shell). The image runner must set
 `bench_host=image` and record the same `class`/`runner`/`arch` fields — see the
 header of `cmd/bench`.
 
+## Fields the image runner has to record (added 2026-08-19)
+
+Three decisions taken while designing `docs/HANDOFF-netboot.md` add fields to the
+run environment, on top of the `class`/`runner`/`host` axes `cmd/bench` already
+records:
+
+- **`kernel_provenance`** — stock or custom. Perf results represent what
+  customers ship, so the image runs a **stock kernel**; the rpi5's custom
+  `7.0.6-numa` kernel is workstation-only, and any older number taken on it is
+  not a baseline for the image series.
+- **`profile`** — `stock` (stock clocks) or `oc` (opt-in overclock), plus the fan
+  policy in force. Fan-max is measurement hygiene, not tuning: it keeps a run out
+  of thermal throttle so runs are repeatable. The two profiles must never merge
+  into one series.
+- **`root_device`** — model, link speed, TRIM/rotational. The rpi4 starts on a
+  USB stick with an SSD to follow, and cheap flash contributes variance rather
+  than a subtractable bias, so stick runs are provisional and are not comparable
+  with SSD runs — the same rule as `bench_host`.
+
+Plus one refusal: the content origin for a measured run must resolve to
+**loopback**, and nothing in the run path may be a network mount. See the
+"Where the network can still get into a measurement" section of the netboot
+handoff — that check is code, not documentation.
+
 ## The rpi5 model (decided 2026-08-18, confirmed 2026-08-19)
 
 This supersedes the earlier rpi5-as-tuned-test-device plan.
@@ -56,6 +80,14 @@ opposite of every other environment in this repo, and it is why it is an image
 rather than a mode.
 
 ### rpi5 — real netboot, and a one-shot primitive that fits perfectly
+
+**Superseded in detail by `docs/HANDOFF-netboot.md` (2026-08-19), which is now
+lane A's first step.** What it settles, so the guesses below can be read as
+history: the one-shot primitive is `set_reboot_order` via `vcmailbox`, not
+`tryboot` — `tryboot` picks a config on the medium that is already booting,
+which leaves the medium unchosen. moose serves, not the BMC. And the DHCP
+problem the section below worries about is avoidable outright: the bootloader
+skips DHCP entirely when `TFTP_IP` and the static-IP keys are set.
 
 The Pi bootloader supports network boot natively (a `BOOT_ORDER` nibble
 selecting network: TFTP for firmware and kernel, NFS or an initramfs for the
@@ -125,6 +157,14 @@ What exists instead:
   does not, macOS perf runs need someone in the room, and the honest thing is
   to say so in the docs rather than build an automation that cannot exist.
 
+  **Answered 2026-08-19: it does not, so macOS perf runs are hands-on.** Boot
+  volume selection on Apple Silicon goes through LocalPolicy, changed only via
+  System Settings → Startup Disk or Startup Security Utility in Recovery — both
+  authenticated user actions. `bless --setBoot` is superseded for this purpose;
+  its `folder` option survives only for external media. Screen Sharing makes the
+  switch remote-ish, never automatic. Recorded in `docs/HANDOFF-netboot.md` as
+  tier 2, alongside the second-internal-volume alternative.
+
 A fallback worth costing before ruling it out: a second internal-volume install
 on the same Mac (a separate APFS system volume in the same container), which
 avoids the external-media performance question entirely — an external SSD over
@@ -134,10 +174,14 @@ benchmarks that touch disk that is itself a variable.
 ## Open research questions
 
 - What drive speed/size is required — ideally a 32 GB flash drive works.
+  **Answered for the rpi5 (2026-08-19): none.** It netboots, and the build
+  payload lands on a dedicated NVMe partition — see `docs/HANDOFF-netboot.md`,
+  "Storage". Still open for moose and the MBP.
 - The BMC image-boot option for moose (RAM should be ample) and netboot are
   both candidates for media-less booting.
-- Who serves TFTP/NFS for the Pis: the BMC (which already does DHCP on that
-  network) or moose.
+- ~~Who serves TFTP/NFS for the Pis~~ — **answered 2026-08-19: moose.** Serving
+  a multi-gigabyte root is not a phone's job, and the BMC is offline more often
+  than moose. Its DHCP role on the guest network is unaffected.
 - Whether `bless --setBoot` makes the macOS half remotely bootable, or whether
   macOS perf runs are inherently hands-on.
 - Where the benchmark runner lives once the machine under test is the whole

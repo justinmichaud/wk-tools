@@ -32,6 +32,12 @@ apply to the Pi addresses themselves, so an allowlisted device was refused as
 "resolved to a blocked address" — the proxy now exempts exact `pi-hosts`
 matches (`Policy.is_pi`) and nothing else in the range.
 
+**Scheduling, revised 2026-08-19:** this now runs *after* the yocto image
+build (`docs/HANDOFF-yocto.md`), not first — so `wk pi setup rpi4` gets a
+freshly built image to run against, which tests the no-image-rebuild promise
+against something other than the buildroot install it was written for. See
+"Order, revised 2026-08-19" in `docs/HANDOFF.md`.
+
 ## What to do
 
 1. `wk pi setup rpi4` against a running device (and rpi3 when it is up). It

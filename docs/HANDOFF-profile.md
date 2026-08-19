@@ -36,7 +36,11 @@ Provisioning that has to exist first (the step-10 half):
   not a per-run instruction. No more `~/Development/samply` host paths.
 - `perf_event_paranoid`: a workspace cannot set it. Decide the mechanism once
   (a quiesce-helper verb on the host is the pattern that exists) instead of
-  each skill saying "ask the user to sudo tee".
+  each skill saying "ask the user to sudo tee". **On the netbooted image
+  (`docs/HANDOFF-netboot.md`, lane A's new first step, whose first consumer is
+  profiling) it is simply ours to set** — no sandbox, no host to ask. That does
+  not remove the need for an answer inside a workspace; it means there is a
+  machine where the hardest modes work while that answer is being found.
 - Viewing: profiler.firefox.com is outside the egress allowlist; serve the
   profile file out of the workspace (samply's own server on loopback + the
   host's browser via the forwarded port, or copy the file out) and document

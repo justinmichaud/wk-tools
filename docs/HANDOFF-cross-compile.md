@@ -32,6 +32,16 @@ distinguish them: `wkdev-sdk:24.04_arm32` is native armhf, while
 multiarch architecture — that one belongs to this handoff, along with
 `wkdev-sysroot:2.53-v8-8a63f74_arm` and `wkdev-sysroot:*_riscv64`.
 
+## The test target, decided 2026-08-19
+
+The thing to run a cross-built binary on is the **netbooted rpi5 image**
+(`docs/HANDOFF-netboot.md`), which now lands before this step: a slim distro
+with no SDK on it, which is exactly the condition a sysroot cross build has to
+satisfy, and a GTK MiniBrowser is the payload. Build the image and the sysroot
+from the *same tree* and the ABI question answers itself rather than becoming
+a debugging session — that is the cheap version of this step, and it is only
+cheap because netboot went first.
+
 ## Where it plugs in
 
 - `lib/arch.sh` is the vocabulary file; a sysroot is not an `arch` and must not

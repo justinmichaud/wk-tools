@@ -61,6 +61,66 @@ freehand steps" is unblocked on both platforms.
 
 ## Lane A — Linux workstation
 
+### Order, revised 2026-08-19 — netboot first
+
+**The numbered items below are stable identifiers, not the running order.**
+Three other files cite "lane A step N" (`docs/HANDOFF-profile.md`,
+`docs/HANDOFF-claude.md`, and lane B here), so the numbers stay put and the
+running order is stated here instead.
+
+Netboot moves to the front, at the user's direction, and the four steps behind
+it re-order to consume it. The reason it is worth pulling forward: netboot is
+the one mechanism *all* of them need — an unsandboxed machine you can put an
+image on and take back afterwards — and every one of them was otherwise going
+to invent its own way to get a binary onto hardware.
+
+  N. **Boot an image — the shared substrate** — `docs/HANDOFF-netboot.md` (new
+     file, split out of the benchmarking handoff's open questions, which it now
+     answers). Scoped 2026-08-19 to **all three machines**, at the user's
+     direction: moose and the MBP, not just the rpi5. That scoping produced the
+     structural finding — Apple Silicon cannot netboot at all, so the substrate
+     is an image store plus one boot driver per machine, and the MBP's driver is
+     hands-on by nature. Boot the rpi5 first for **profiling**: the least
+     demanding consumer, so the mechanism gets proven before storage-stability
+     requirements pile on. Pulls the profiling half of step 10 forward with it.
+  1. Then **benchmarking on that image** — `docs/HANDOFF-benchmarking.md`,
+     `bench_host=image`, driven remotely. Promoted out of the unassigned pile
+     at the bottom of this file by the same decision; it is no longer waiting
+     on step ⑦'s SD-card flashing, because netboot needs no media.
+  2. Then **cross-compilation** — step ⑥. The netbooted image is a slim distro
+     with no SDK on it, which is exactly the condition a sysroot cross build
+     has to satisfy; a GTK MiniBrowser built on moose and run there is the
+     test. Cheap if the image and the sysroot are the same tree — see the
+     netboot handoff's "sysroot equivalence".
+  3. Then **yocto for the rpi4** — step ⑧, consuming step ⑦'s flashing path,
+     and testable over netboot before any SD card is written.
+  4. Then **`wk pi setup` on the rpi4** — step ②, against that yocto image.
+     This is why step 2 is no longer first: it now has a freshly built image to
+     run against instead of the buildroot install, which also tests the
+     no-image-rebuild promise on something new.
+
+Everything else keeps its old relative order (④ ⑤ then the rest of ⑩ ⑪ ⑫ ⑬ ⑭,
+then the audits ⑮ ⑯ ⑰ last, for the reasons at the top of this file). Step ③,
+the rpi5 tuning re-apply, splits around the new first step: its *stability*
+half is a prerequisite — the board has to be a working, reachable workstation
+before anything can arm a one-shot netboot over SSH — while its perf half was
+already reassigned to the image, which is now the thing being built.
+
+**Hardware state, measured 2026-08-19:** rpi4 and rpi3 not on the tailnet at
+all, moose's BMC not answering, and moose is WiFi-only (`wlo1`; all three wired
+NICs DOWN, carrier=0 — no cable in any of them). The rpi5 was powered on later
+the same day and **is up on the tailnet but not reachable over SSH**:
+`tailscale ping` pongs (so tailscaled is running and a path exists, via a
+relay), while TCP 22 times out — one attempt completed the handshake and then
+produced no banner. That points at `sshd` on the board or a tailnet ACL, not at
+the network. Nothing on the netboot step can start until that is cleared: the
+one-shot is armed over SSH.
+
+The serving role is also required to *float* (any idle machine serves, the Mac
+included), which the netboot handoff now covers — the one non-obvious
+consequence is that `TFTP_IP` lives in firmware, so the servers share a service
+alias IP rather than each being named.
+
 1. **32-bit containers (`wk new --arch armhf`)** — `docs/HANDOFF-linux-arm32.md`
    **Done 2026-08-18**, and verified: an armhf workspace builds `jsc-release`
    natively (`CMAKE_SYSTEM_PROCESSOR=armv7l`, armhf clang, `linux32`).
@@ -102,12 +162,16 @@ freehand steps" is unblocked on both platforms.
    inside a workspace would be the boundary gone. So this step is rpi4 (and
    rpi3) only.
 
-   Benchmarking it becomes a booted image instead, and that is now an open
-   design problem rather than a scheduling one — `docs/HANDOFF-benchmarking.md`,
-   "Booting the image", which covers all three machines and the fact that one
-   of them (the M4) cannot netboot at all. The accepted consequence is a gap:
-   between the conversion and a working image the rpi5 is not a benchmark
-   device.
+   Benchmarking it becomes a booted image instead, and that is no longer an
+   open design problem: `docs/HANDOFF-netboot.md` settles the mechanism (a
+   one-shot `set_reboot_order` over SSH, moose serving), and closing that gap
+   is now the *first* thing lane A does rather than the last. The gap itself
+   still stands until it lands — until then the rpi5 is not a benchmark device.
+   `docs/HANDOFF-benchmarking.md`'s "Booting the image" still covers the other
+   two machines, including the fact that the M4 cannot netboot at all.
+
+   **Revised 2026-08-19:** this step runs *last* of the five re-ordered items,
+   against the yocto rpi4 image from step 8 rather than the buildroot install.
 
 3. **RPi5 tuning re-apply** — `host/linux/rpi5/HANDOFF.md`
    Separate machine, reached over SSH from the Linux workstation once step 2
@@ -123,6 +187,13 @@ freehand steps" is unblocked on both platforms.
    half (overclock, v3d, perf governor, swap off) moves into the benchmark
    image definition when `docs/HANDOFF-benchmarking.md` is picked up, so the
    workstation install never depends on an overclock to be usable.
+
+   **Revised 2026-08-19:** the stability half is now a prerequisite for the
+   new first step, not a peer of it — a one-shot netboot is armed over SSH, so
+   the board has to be up, reachable and provisioned as a workstation before
+   any of this begins. The perf half's destination now exists as a written
+   design (`docs/HANDOFF-netboot.md`): the image's own `config.txt`, served
+   over TFTP.
 
    One part of that split is not obviously image state: the EEPROM
    (`SDRAM_BANKLOW`, `BOOT_ORDER`) and `config.txt` are *firmware* settings
@@ -153,10 +224,23 @@ freehand steps" is unblocked on both platforms.
    build-archive-copy-extract loop and the per-session device prep ritual —
    which consumes this step's transfer path and step 2's provisioning.
 
+   **Revised 2026-08-19:** this is position 2 in the running order, and its
+   test target is the netbooted rpi5 image rather than the rpi5 install — a
+   slim distro with no SDK on it, running a cross-built GTK MiniBrowser. If the
+   image and the sysroot are the same tree, the ABI question answers itself;
+   see `docs/HANDOFF-netboot.md`. The "natural follow-on to steps 2 and 4"
+   note above is superseded: netboot supplies the get-a-binary-onto-hardware
+   path, so neither the Pi provisioning nor the remote driver gates it.
+
 7. **SD-card image flashing** — `docs/HANDOFF-sdcard.md`
    Generic copy-image-out-of-workspace + flash-to-card flow (was an empty
    placeholder file; now scoped). Do this before yocto (step 8) so yocto can
    consume it instead of building its own copy-to-host path.
+
+   **Revised 2026-08-19:** yocto is still the consumer, but the benchmark image
+   no longer is — it netboots, so no card is written for it. That drops this
+   step from two consumers to one, and it can be done lazily, once the yocto
+   image needs to survive without a netboot server.
 
 8. **Yocto builds — Linux half** — `docs/HANDOFF-yocto.md`
    Do the build-side work here first (yocto tooling is native to Linux); cache
@@ -164,6 +248,12 @@ freehand steps" is unblocked on both platforms.
    reuse step 7's flashing flow. The *macOS* half — confirming the same flow
    works from a Tart VM — is lane B step 5, after this lands. Also: get
    Tailscale installed on the rpi3 target image itself.
+
+   **Revised 2026-08-19:** position 3 in the running order, and the target is
+   the **rpi4** — netboot it (the Pi 4 bootloader has the same network boot
+   mode) so each image can be tested the moment it builds, without a card and
+   without a trip to the machine. Flashing then becomes the last step for the
+   image that is kept, not the loop that tests them.
 
 9. **Linux MiniBrowser: debugging + graphical run** —
    `docs/HANDOFF-linux-minibrower.md`, implemented together with
@@ -183,6 +273,15 @@ freehand steps" is unblocked on both platforms.
     copy-paste and skill recitation.
     (`strip-addresses` and `show-profiled-functions` are already restored in
     `container/bin/`.) The macOS-MiniBrowser half of profiling is lane B step 6.
+
+    **Revised 2026-08-19:** the part of this that needs a machine of its own
+    comes forward with netboot and is its first consumer — `perf_event_paranoid`
+    and the JIT-dump environment are ours to set outright in an image, which is
+    the whole reason profiling leads rather than follows. The workspace-side
+    provisioning (samply/sysprof/heaptrack in the container image, the
+    profile-viewing path out through the egress allowlist) stays here, in the
+    old relative position: an image is where a run has no sandbox, not a
+    replacement for profiling inside a workspace.
 
 11. **Memory charting** — `docs/HANDOFF-memory.md` (`wk bench mem`; starts by
     rescuing `plot-memory-log.py` and the experiment patches out of the wiki).
@@ -378,10 +477,12 @@ Genuine filler, in no order:
   wk-in-workspace item above; carries the concrete defect list from the
   2026-08 audit (host-side sudo steps, retired-machine paths, contradictory
   build guidance, the missing uclamp fallback).
-- **`docs/HANDOFF-benchmarking.md`** — bootable benchmark images on external
-  media / netboot. The rpi5 conflict is resolved (decision recorded in lane A
-  step 2 and in the file itself); pick this up after lane A step 7, whose
-  image-flashing flow it consumes.
+- **`docs/HANDOFF-benchmarking.md`** — **no longer filler as of 2026-08-19: it
+  is position 1 in lane A's revised running order**, right behind netboot. See
+  "Order, revised 2026-08-19" at the top of lane A. Its netboot half is split
+  out into `docs/HANDOFF-netboot.md`, and it no longer waits on step 7's
+  image-flashing flow — netboot needs no media. The rpi5 role conflict was
+  already resolved (recorded in lane A step 2 and in the file itself).
 - **`docs/HANDOFF-bench-python.md`** — rewrite `cmd/bench` in Python; it has
   outgrown bash (four inline Python heredocs, JSON via 16 env vars, a
   hand-rolled plan parser).

@@ -14,6 +14,15 @@ governor, swap off) belongs to the benchmark image the machine boots for a run,
 and the image does not exist yet -- so between now and then this board is not a
 benchmark device, which is accepted rather than overlooked.
 
+**Update 2026-08-19:** the image now has a design and is lane A's first step,
+not its last -- `docs/HANDOFF-netboot.md`. Two consequences for this tree. The
+perf half has a destination: the image's own `config.txt`, served over TFTP,
+which the board fetches on a one-shot netboot (`vcmailbox 0x0003808b 4 4
+0xf4612` + reboot) and forgets on the next. And the stability half became a
+prerequisite rather than a peer -- the netboot is armed over SSH, so this board
+has to be up, reachable and provisioned as a workstation before any of it
+starts. As of this date it is offline (6 days on the tailnet).
+
 Watch the firmware boundary while moving the perf half: the EEPROM
 (`SDRAM_BANKLOW`, `BOOT_ORDER`) and `config.txt` are shared by both roles, so
 an overclock written to the EEPROM overclocks the workstation too. The image
@@ -37,6 +46,16 @@ Adjust via env vars if needed: `ARM_FREQ`, `V3D_FREQ`, `OVER_VOLTAGE_DELTA`, `BR
 - Root fstab label (was `writable`) and the `discard` mount option.
 - GNOME 50 indexer is `localsearch`/`tinysparql` (script already handles this dynamically).
 - swapfile unit name / whether swap exists by default.
+
+**Decided 2026-08-19 — the NUMA kernel is workstation-only.** Perf results must
+represent what customers ship, and customers do not ship `CONFIG_NUMA_EMU`, so
+the benchmark image runs a **stock kernel** and the custom `7.0.6-numa` kernel
+below is a dev/workstation convenience from here on. Two consequences: image
+numbers on this board will be lower than the tuned-workstation numbers on
+memory-bandwidth-bound work (correct, not a regression), and historical numbers
+taken on the numa kernel are not the going-forward baseline. `SDRAM_BANKLOW=1`
+stays in the EEPROM because it is shared firmware state; a stock kernel simply
+does not act on it. See `docs/HANDOFF-netboot.md`.
 
 ## Step 2 — NUMA: DONE ✅ (Path B completed 2026-07-04)
 The custom **`7.0.6-numa`** kernel (`CONFIG_NUMA_EMU=y`, built via `rpi5-numa-kernel.sh`) is
