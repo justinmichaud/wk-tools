@@ -36,7 +36,18 @@ The two tasks below touch disjoint files (one shared exception:
 sessions start the same way: read "The rules" at the top of
 `docs/HANDOFF-workspace-state.md` — nothing may contradict them.
 
-**macOS box — implement the state rules, phase 1.** Paste this:
+**macOS box — implement the state rules, phase 1. DONE 2026-08-19** — all
+four steps and both bugs, verified against the podman VM (a real workspace
+created, half-broken, remade, destroyed; two `wk new` raced; `wk gc` raced
+against `wk new`). Two corrections came out of it, both written up in
+`docs/HANDOFF-workspace-state.md`: the "`wk status` starts podman"
+observation did not reproduce (the guard moved inside `forward_to_vm`
+anyway, which is the only thing that can start it), and `flock` had to be
+abandoned for an atomic-mkdir lock, because podman's `conmon` inherits the
+lock fd and then holds a workspace's lock for as long as the container
+exists. What phase 2 is — the `.wk-ready` far-side marker, `wait_ready`,
+the detach primitive, the lifecycle line in `wk status` — is listed under
+"The plan" there. The prompt that was run:
 
 > Read docs/HANDOFF-workspace-state.md in full ("The rules" govern) and
 > docs/TESTING.md §6. Implement in this order, verifying each step against
@@ -94,6 +105,28 @@ sessions start the same way: read "The rules" at the top of
 > cmd/status, cmd/ls, cmd/sync, cmd/new, cmd/rm, lib/store.sh,
 > lib/common.sh, lib/target.sh, or targets/container.sh — the macOS box is
 > working there.
+
+---
+
+## Out of order, by request — the git-push switch (2026-08-19)
+
+Asked for directly while the state-rules work was landing, so it jumped the
+queue: `wk push on|off|status`, the toggle `docs/HANDOFF-sandboxing.md` asked
+for and `docs/HANDOFF-git-tools.md` was waiting on. **This is not the security
+audit being pulled forward** — that is still last in both lanes, for the
+reasons at the top of this file. It is one mechanism the audit will have to
+look at, built now because an agent could push and the answer could not wait.
+
+Landed with it, from the same request: every checkout gets `origin` =
+`WebKit/WebKit` and both forks wired automatically, from one place
+(`wk_wiring_script`) rather than four that had drifted — the remote build
+machine's driver had pointed `origin` at that box's own shared clone;
+`wk build ... --cmake '<flags>'`, which adds to the config's CMake flags where
+a hand-written `--cmakeargs` silently replaced them; and
+`wk <command> --explain`, which prints what a command does, what it acts on
+and whether it changes anything, so an agent does not have to read the
+implementation to find out. Details in `docs/HANDOFF-sandboxing.md` and the
+TESTING lines under §1 and §4.
 
 ---
 

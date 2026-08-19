@@ -116,10 +116,31 @@ Skip this if you are not benchmarking. Everything else works without it.
 
 ---
 
+## 3a. Make root cost a password
+
+```sh
+wk sudo status          # here
+wk sudo status --all    # and on every configured machine
+wk sudo require         # install the drop-in (asks for your password)
+```
+
+Two defaults are worth closing on every machine you log into: sudo keeps a
+five-minute timestamp, and Igalia's build machines grant `NOPASSWD: ALL`. One
+drop-in of your own — `/etc/sudoers.d/zz-<user>-passwd`, which sorts after the
+site's file and therefore wins — closes both. `wk doctor` reports the state on
+every run.
+
+---
+
 ## 3. The build key (one GitHub step)
 
-Workspaces push to your fork with a dedicated key. `setup` generates it; you
-register it once:
+Every machine that pushes gets **its own** deploy key: GitHub refuses one key
+on two repositories but accepts many keys on one, so a per-machine key can be
+revoked on its own and no private key is ever copied between machines.
+`wk key register` generates and registers them for this workstation and for
+every configured build machine; `wk status` lists them by fingerprint.
+
+`setup` generates the local one; you register it once:
 
 ```sh
 wk key register
@@ -131,6 +152,20 @@ enabled**. Without write access workspaces can read but not push.
 
 It is a GitHub *deploy key*, so it is scoped to that one repository — a
 workspace cannot push anywhere else with it, whatever its git config says.
+
+Pushing is also a switch, and it is off by default whenever an agent is
+running:
+
+```sh
+wk push status     # where the keys are, and therefore whether a push works
+wk push on         # expose them to every workspace
+wk push off        # hold them back; a push is refused at the door
+```
+
+`off` moves the private keys out of the directory workspaces have mounted, so
+it takes effect immediately in workspaces that are already running and nothing
+inside one can undo it. `wk claude` turns it off before it hands over control.
+Fetching is never affected: every remote fetches anonymously over HTTPS.
 
 ---
 

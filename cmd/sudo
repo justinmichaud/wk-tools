@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+#
+# wk sudo status|require -- make root cost a password, every time, everywhere.
+#
+# Two things have to be true on a machine before an unattended agent runs
+# anything on it, and neither is true by default:
+#
+#   no NOPASSWD.  Igalia's shared build machines grant `(ALL : ALL) NOPASSWD:
+#                 ALL` from the site's own sudoers drop-in. Anything running as
+#                 you on that box is root for the asking, including something
+#                 that got there by accident.
+#   no timestamp. sudo remembers that you authenticated for five minutes by
+#                 default. Five minutes is a window, and "look for a live sudo
+#                 timestamp and use it" is a thing agents have actually done
+#                 here. timestamp_timeout=0 closes it: every sudo asks.
+#
+# The fix is one drop-in file, and the reason it works is sudoers' last-match
+# rule: `/etc/sudoers.d/zz-<user>-passwd` sorts after the site's own file, so
+# its `PASSWD: ALL` overrides an earlier `NOPASSWD: ALL` without touching -- or
+# needing permission to touch -- anything the sysadmins own.
+#
+#   wk sudo status                  what this machine does today
+#   wk sudo require                 install the drop-in here (asks for your password)
+#   wk sudo status  --target <t>    the same, on a configured machine
+#   wk sudo require --target <t>    ...
+#   wk sudo status  --all           every configured machine, and this one
+#
+# `require` never edits an existing file and never removes one: it writes a
+# file of its own, validates it with `visudo -c` before installing it and
+# again afterwards, and then *tests the property* -- clears the timestamp and
+# checks that sudo asks. A sudoers change that cannot be undone by hand is the
+# one mistake that locks you out of your own machine, so nothing here is done
+# on faith.
+#
+#   0  a password is required, with no timestamp window
+#   1  it is not (status), or the action failed
+#   2  usage
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+in_workspace && die "'wk sudo' hardens a machine you log into, and this is workspace
+    '$(wk_self)' -- a container's sudoers belong to the image and the
+    workspace is the blast radius anyway. Run it on the host."
+
+ACTION=status
+TARGET=""
+ALL=""
+# The verdict line and nothing else, for the machine that is being asked as
+# part of somebody else's listing: the hints belong to the side that knows the
+# machine by name (`--target <it>`), not to the machine itself.
+QUIET=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        status|require) ACTION="$1"; shift ;;
+        --target) TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
+        --all)    ALL=1; shift ;;
+        --quiet)  QUIET=1; shift ;;
+        -h|--help) log "usage: wk sudo [status|require] [--target <name>|--all]"; exit 2 ;;
+        *) die "unknown option: $1" ;;
+    esac
+done
+
+USER_NAME=$(id -un)
+DROPIN="/etc/sudoers.d/zz-${USER_NAME}-passwd"
+
+# --- what does this machine do today? ----------------------------------------
+#
+# Every probe is `sudo -n`, which never prompts: a status command that asks for
+# a password to tell you whether it would ask for a password is not usable from
+# a script, and this one is read by `wk doctor`.
+#
+# `sudo -n -l` succeeding is itself evidence -- it means either a NOPASSWD rule
+# or a live timestamp, and the output distinguishes them. Failing is evidence
+# too: a password is required *right now*. What cannot be learned that way is
+# the timeout, because reading it needs the authentication we are declining to
+# do; saying so is better than guessing, and `require` is idempotent so there
+# is no cost to running it anyway.
+probe_local() {
+    local out rc=0 nopasswd="" timeout="" rules
+    out=$(sudo -n -l 2>&1) || rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        echo "readable=no"
+        echo "cached=no"
+        return 0
+    fi
+    echo "readable=yes"
+    echo "cached=yes"
+
+    rules=$(printf '%s\n' "$out" | sed -n '/may run the following/,$p')
+
+    # Only a blanket one counts. A NOPASSWD scoped to one program is how the
+    # deliberate exceptions work -- wk's own quiesce helper is exactly that,
+    # and so are most site rules worth having -- while `NOPASSWD: ALL` is the
+    # thing this command exists to override. Told apart by what follows the
+    # tag: the command list, which is `ALL` in the blanket case.
+    printf '%s\n' "$rules" | grep -qE 'NOPASSWD:[[:space:]]*ALL[[:space:]]*$' && nopasswd=yes
+    echo "nopasswd=${nopasswd:-no}"
+    echo "scoped=$(printf '%s\n' "$rules" | grep -c 'NOPASSWD:' || true)"
+
+    timeout=$(printf '%s\n' "$out" | sed -n 's/.*timestamp_timeout=\([0-9-]*\).*/\1/p' | head -1)
+    echo "timeout=${timeout:-unset}"
+}
+
+# 0 when this machine is as it should be. The two facts are independent: a
+# machine with no NOPASSWD and a five-minute window still hands root to
+# anything that runs within five minutes of you.
+verdict_local() {
+    local f nopasswd timeout readable
+    f=$(probe_local)
+    readable=$(printf '%s\n' "$f" | sed -n 's/^readable=//p')
+    nopasswd=$(printf '%s\n' "$f" | sed -n 's/^nopasswd=//p')
+    timeout=$(printf '%s\n' "$f" | sed -n 's/^timeout=//p')
+
+    if [ "$readable" = no ]; then
+        printf 'a password is required right now (no timestamp cached).\n'
+        printf '  the timeout cannot be read without authenticating -- '
+        if [ -f "$DROPIN" ]; then
+            printf 'but %s is installed\n' "$DROPIN"
+            return 0
+        fi
+        printf "and %s is not installed, so it is sudo's default (a few minutes)\n" "$DROPIN"
+        return 1
+    fi
+
+    if [ "$nopasswd" = yes ]; then
+        printf 'NOPASSWD: ALL is granted here -- root costs nothing at all\n'
+        return 1
+    fi
+    case "$timeout" in
+        0) printf 'a password is required, and no timestamp is kept (timeout 0)\n'; return 0 ;;
+        unset) printf "a password is required, but sudo keeps a timestamp (timeout unset -- sudo's default)\n"; return 1 ;;
+        *) printf 'a password is required, but sudo keeps a timestamp for %s minute(s)\n' "$timeout"; return 1 ;;
+    esac
+}
+
+# --- install the drop-in -----------------------------------------------------
+require_local() {
+    local tmp grp rc=0
+
+    if [ -f "$DROPIN" ] && verdict_local >/dev/null; then
+        info "already required on $(hostname -s): $DROPIN"
+        return 0
+    fi
+
+    tmp=$(mktemp)
+    cat > "$tmp" <<EOF
+# Installed by 'wk sudo require'. Do not edit; re-run the command instead.
+#
+# Sorted after the site's own drop-ins on purpose: sudoers takes the LAST
+# match, so this re-imposes a password over a NOPASSWD granted elsewhere
+# without modifying a file somebody else owns.
+#
+# timestamp_timeout=0 means every sudo authenticates -- no five-minute window
+# for something running as $USER_NAME to walk through.
+Defaults:$USER_NAME timestamp_timeout=0
+$USER_NAME ALL=(ALL:ALL) PASSWD: ALL
+EOF
+
+    # Before it goes anywhere near /etc: a syntactically broken sudoers file is
+    # how a machine locks its owner out, and visudo will parse a file for you
+    # without being root.
+    visudo -c -f "$tmp" >/dev/null || { rm -f "$tmp"; die "the sudoers file wk generated does not parse -- refusing to install it"; }
+
+    grp=wheel
+    is_linux && grp=root
+
+    info "installing $DROPIN on $(hostname -s) -- sudo will ask for your password"
+    log  "  after this, every sudo on this machine asks. That is the point."
+    sudo install -m 0440 -o root -g "$grp" "$tmp" "$DROPIN" || rc=$?
+    rm -f "$tmp"
+    [ "$rc" -eq 0 ] || die "could not install $DROPIN"
+
+    # The whole ruleset, not just our file: an install that leaves sudoers
+    # unparseable has to be caught while we still have a working sudo.
+    sudo visudo -c >/dev/null || {
+        warn "sudoers does not parse after the install -- removing what we added"
+        sudo rm -f "$DROPIN"
+        die "sudoers was left as it was; nothing changed"
+    }
+
+    # Test the property, not the file. Clearing the timestamp first is what
+    # makes this a test at all: without it the still-valid one answers.
+    sudo -k
+    if sudo -n true 2>/dev/null; then
+        warn "sudo still runs without a password after installing $DROPIN"
+        log  "  something later in the include order is granting NOPASSWD -- 'sudo -l' shows the order"
+        return 1
+    fi
+    changed "sudo on $(hostname -s) now asks for a password every time"
+}
+
+# --- one machine, or several -------------------------------------------------
+#
+# A configured machine answers for itself: `wk remote setup` puts wk-tools on
+# it, so the far side runs exactly this file rather than a second
+# implementation reached over ssh. `require` there needs a terminal, because
+# sudo is going to ask for a password.
+on_target() {
+    local t="$1" act="$2" rc=0 out
+    load_target "$t"
+    if ! t_has_wk; then
+        printf '%-22s %s\n' "$t" "no wk-tools there yet -- 'wk remote setup $t'"
+        return 1
+    fi
+    if [ "$act" = require ]; then
+        t_wk_tty sudo require || rc=$?
+        return "$rc"
+    fi
+    out=$(t_wk sudo status --quiet 2>&1) || rc=$?
+    printf '%-22s %s\n' "$t" "$out"
+    [ "$rc" -eq 0 ] || log "  fix: wk sudo require --target $t"
+    return "$rc"
+}
+
+WORST=0
+bump() { [ "$1" -gt "$WORST" ] && WORST="$1"; return 0; }
+
+if [ -n "$TARGET" ]; then
+    rc=0; on_target "$TARGET" "$ACTION" || rc=$?
+    exit "$rc"
+fi
+
+if [ -n "$ALL" ]; then
+    # One probe, then print it: `printf "$(verdict_local)" || bump` would bump
+    # on printf's status, which is not the answer to anything.
+    rc=0; v=$(verdict_local) || rc=$?
+    printf '%-22s %s\n' "$(hostname -s)" "$v"
+    [ "$rc" -eq 0 ] || log "  fix: wk sudo require"
+    bump "$rc"
+    for t in $(target_all); do
+        case "$t" in container|vm|local) continue ;; esac
+        rc=0; on_target "$t" "$ACTION" || rc=$?
+        bump "$rc"
+    done
+    exit "$WORST"
+fi
+
+case "$ACTION" in
+status)
+    rc=0
+    v=$(verdict_local) || rc=$?
+    if [ -n "$QUIET" ]; then
+        printf '%s\n' "$v"
+        exit "$rc"
+    fi
+    printf '%-22s %s\n' "$(hostname -s)" "$v"
+    if [ "$rc" -ne 0 ]; then
+        log "  fix: wk sudo require"
+        log "  every other machine: wk sudo status --all"
+    fi
+    exit "$rc"
+    ;;
+require)
+    require_local
+    ;;
+esac

@@ -11,30 +11,53 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
+# Every target, from the same walk `wk status` uses (walk_targets, then
+# target_workspaces per target). Listing only the default target is how the two
+# commands came to disagree about what "the workspaces" are: on a macOS host
+# this one was forwarded into the podman VM and answered for containers alone,
+# so a vm or remote workspace showed up in `wk status` and not here.
+#
+# TARGET is therefore a column: with more than one of them in the listing, a
+# bare name says nothing about which machine it is on.
+#
 # BASE and CHANGES are overlay concepts and only mean anything for the
 # container target. A macOS VM has neither -- its equivalents are the golden
 # image and the guest's own disk -- so `wk vm ls` is what lists those.
-TARGET="${WK_TARGET:-$(default_target)}"
-load_target "$TARGET"
-
+#
 # ARCH is here rather than left to `wk build` to mention, because it is the one
 # property of a workspace that cannot be seen from inside it: the kernel is the
 # host's, so an armhf container reports aarch64 from uname, and a workspace
 # whose architecture is invisible is one whose builds are a surprise.
-printf '%-20s %-12s %-20s %-8s %8s\n' NAME STATE BASE ARCH CHANGES
+
+# --continued: this listing is the second half of one being assembled from two
+# machines. On a macOS host `wk ls` walks the host-side targets out here and
+# forwards the container half into the podman VM; two header rows in one table
+# is not a table, and "no workspaces -- 'wk new' to create one" is false when
+# the other half just listed several.
+CONTINUED=""
+[ "${1:-}" = --continued ] && CONTINUED=1
+
+if [ -z "$CONTINUED" ]; then
+    printf '%-20s %-14s %-10s %-20s %-8s %8s\n' NAME TARGET STATE BASE ARCH CHANGES
+fi
 
 found=0
-for ws in $(target_workspaces); do
-    found=1
-    state=$(t_info "$ws")
-    base=$(ws_base_id "$ws" 2>/dev/null || echo '?')
-    size=$(du -sh "$(wk_ws_dir "$ws")/changes" 2>/dev/null | cut -f1 || echo -)
-    printf '%-20s %-12s %-20s %-8s %8s\n' "$ws" "$state" "$base" "$(t_arch "$ws")" "$size"
+TARGETS=$(walk_targets)
+for TARGET in $TARGETS; do
+    load_target "$TARGET"
+    for ws in $(target_workspaces); do
+        found=1
+        state=$(ws_display_state "$ws")
+        base=$(ws_base_id "$ws" 2>/dev/null || echo '-')
+        size=$(du -sh "$(wk_ws_dir "$ws")/changes" 2>/dev/null | cut -f1 || echo -)
+        printf '%-20s %-14s %-10s %-20s %-8s %8s\n' \
+            "$ws" "$TARGET" "$state" "$base" "$(t_arch "$ws")" "$size"
+    done
 done
 
 # The advice differs by where you are standing: a shared build machine cannot
 # create one, and saying so beats sending someone to a command that refuses.
-if [ "$found" -ne 1 ]; then
+if [ "$found" -ne 1 ] && [ -z "$CONTINUED" ]; then
     if in_remote_host; then
         log "(no workspaces here -- from the workstation: wk new <name> --target $(wk_remote_field target))"
     else
@@ -42,10 +65,23 @@ if [ "$found" -ne 1 ]; then
     fi
 fi
 
-echo
-cur=$(current_base 2>/dev/null || echo none)
-log "current base: $cur"
-
-unref=$(unreferenced_bases | wc -l | tr -d ' ')
-[ "$unref" -gt 0 ] && log "$unref unreferenced snapshot(s) reclaimable with 'wk gc'"
+# The snapshot store is per target and only exists where the overlay scheme
+# does, so this is reported per target rather than once for whatever driver
+# happened to be loaded last -- which on a multi-target walk was a store the
+# numbers did not come from.
+_multi=""
+if [ "$(printf '%s\n' $TARGETS | wc -l | tr -d ' ')" -gt 1 ]; then _multi=1; fi
+for TARGET in $TARGETS; do
+    load_target "$TARGET"
+    t_needs_base || continue
+    # The blank line belongs to the trailer, so a walk with no snapshot store
+    # in it (the host-side half of a macOS listing) ends where its rows do.
+    [ -n "${_spaced:-}" ] || { echo; _spaced=1; }
+    cur=$(current_base 2>/dev/null || echo none)
+    log "${_multi:+$TARGET: }current base: $cur"
+    unref=$(unreferenced_bases | wc -l | tr -d ' ')
+    if [ "$unref" -gt 0 ]; then
+        log "${_multi:+$TARGET: }$unref unreferenced snapshot(s) reclaimable with 'wk gc'"
+    fi
+done
 exit 0

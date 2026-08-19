@@ -81,6 +81,19 @@ if have gh; then
     check "gh authenticated" "gh auth login   (then: wk key register)" gh auth status
 fi
 
+# --- root costs a password ------------------------------------------------------
+# Reported on every run rather than remembered anywhere, because it is exactly
+# the kind of fact that changes underneath you: a site sudoers update, a
+# reinstall, or a `wk sudo require` that was forced past. The check itself
+# never prompts (`wk sudo status` is all `sudo -n`), so doctor stays usable
+# without a terminal.
+section "root access"
+if _sudo=$("$WK_ROOT/cmd/sudo" status --quiet 2>&1); then
+    ok "sudo: $_sudo"
+else
+    miss "sudo: $_sudo" "wk sudo require"
+fi
+
 # --- config links ----------------------------------------------------------------
 section "config (./setup owns these)"
 check "~/.claude/settings.json is the HOST settings" "./setup --stage claude" \

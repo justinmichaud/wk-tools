@@ -98,6 +98,14 @@ command -v arch_canon >/dev/null 2>&1 || . "$WK_ROOT/lib/arch.sh"
 # what changes the products; a second field could drift out of step with it.
 # CMake is left alone: those ports encode the sanitizer in CMAKE_BUILD_TYPE and
 # their directory names are upstream's, not ours, to choose.
+# What a config contributes to --cmakeargs, for an error message that has to
+# name what would have been lost.
+config_cmake_summary() {
+    local c="${CFG_CMAKE:-}"
+    [ -n "$c" ] || { echo "the flags it sets"; return 0; }
+    printf '%s' "$c"
+}
+
 config_build_dir() {
     local root="${1:-/src/WebKit}"
     local variant=""
@@ -248,6 +256,18 @@ config_build_env() {
     local archcmake; archcmake=$(arch_cmake "$arch" "$CFG_PORT")
     [ -n "$archcmake" ] && cmakeargs="$cmakeargs $archcmake"
 
+    # The machine's own defaults, from its target conf (WK_TARGET_CMAKE).
+    # Some flags belong to a machine rather than to a configuration -- a
+    # library that distribution does not have, a toolchain quirk -- and
+    # retyping them on every build is how they end up forgotten on the one
+    # build that mattered.
+    [ -n "${WK_TARGET_CMAKE:-}" ] && cmakeargs="$cmakeargs $WK_TARGET_CMAKE"
+
+    # `wk build --cmake ...`, last of all: cmake takes the last value for a
+    # repeated -D, so a flag typed on the command line overrides the same flag
+    # from the config, the architecture or the machine rather than fighting it.
+    [ -n "${WK_EXTRA_CMAKE:-}" ] && cmakeargs="$cmakeargs $WK_EXTRA_CMAKE"
+
     # /ccache is the container's bind-mounted store cache and the default for
     # everything that has one; a target on another machine sets WK_CCACHE_DIR
     # to a directory that exists over there. See t_ccache_dir.
@@ -294,6 +314,14 @@ config_build_env() {
     # compile_commands.json is on by default; this only carries the opt-out
     # through to the build half, which runs in the target and cannot see the
     # caller's environment.
+    # The memory watchdog's knobs, carried into the target only when set: the
+    # build half runs over there and cannot see this caller's environment, and
+    # an empty value is not the same as an unset one for a script that has its
+    # own defaults.
+    [ -n "${WK_MEM_BUDGET_MB:-}" ] && CFG_ENV+=("WK_MEM_BUDGET_MB=$WK_MEM_BUDGET_MB")
+    [ -n "${WK_MEM_FLOOR_MB:-}" ]  && CFG_ENV+=("WK_MEM_FLOOR_MB=$WK_MEM_FLOOR_MB")
+    [ -n "${WK_MEM_INTERVAL:-}" ]  && CFG_ENV+=("WK_MEM_INTERVAL=$WK_MEM_INTERVAL")
+
     [ -n "${WK_NO_COMPILE_COMMANDS:-}" ] && CFG_ENV+=("WK_NO_COMPILE_COMMANDS=1")
     # Same shape, for the CAS: build-in-target.sh explains what it buys and what
     # it costs. Carried through here because the build half runs in the target

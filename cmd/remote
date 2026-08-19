@@ -138,9 +138,18 @@ if ! target_kind "$TARGET" >/dev/null 2>&1; then
 # A shared build machine, reached through the ssh entry of the same name.
 # Written by 'wk remote setup'.
 #
-# WK_REMOTE_ROOT defaults to ~/wk on the machine. WK_REMOTE_MAX_JOBS is a
-# ceiling on top of the polite calculation, applied however idle it looks.
-WK_REMOTE_MAX_JOBS=16
+# WK_REMOTE_ROOT defaults to ~/wk on the machine.
+#
+# There is deliberately no job ceiling here. The job count is derived per
+# build from what this machine has free at the time -- a fixed number would be
+# wrong on the day the machine changes, and it was: 16 on a box with 250 GB
+# and 80 cores.
+#
+# WK_TARGET_CMAKE, if set, is added to the CMake flags of every build on this
+# machine. For a port or a toolchain quirk that belongs to the machine rather
+# than to the configuration:
+#
+#   WK_TARGET_CMAKE=-DENABLE_JOURNALD_LOG=OFF
 EOF
     changed "wrote $conf"
 fi
@@ -173,7 +182,7 @@ r_flock=$(printf '%s\n' "$PROBE" | sed -n 8p)
 r_freegb=$(printf '%s\n' "$PROBE" | sed -n 9p)
 
 log "  $r_host: $r_os, $r_arch, $r_cores cores, $((r_mem / 1024)) GB, ${r_freegb} GB free in \$HOME"
-log "  root: $(_remote_root)   jobs ceiling: $WK_REMOTE_MAX_JOBS"
+log "  root: $(_remote_root)   jobs: derived per build from what is free"
 [ "$r_zsh" = - ]    && warn "no zsh (needs root to install; bash stays)"    || log "  zsh: $r_zsh"
 [ "$r_ccache" = - ] && warn "no ccache (every build starts cold)"           || log "  ccache: $r_ccache"
 [ "$r_flock" = - ] && die "no flock on this machine: two of your own builds could not be
@@ -210,9 +219,31 @@ t_sync_tools ""
 
 _rsh_q "env WK_REMOTE_TARGET=$(sh_quote "$TARGET") \
           WK_REMOTE_ROOT=$(sh_quote "$(_remote_root)") \
-          WK_REMOTE_MAX_JOBS=$(sh_quote "$WK_REMOTE_MAX_JOBS") \
           WK_REMOTE_REFERENCE=$(sh_quote "$REF") \
           bash $(sh_quote "$(t_tools '')/remote/provision.sh")"
+
+# --- root on a machine you share ---------------------------------------------
+#
+# Igalia's build machines grant `(ALL : ALL) NOPASSWD: ALL`, so anything
+# running as you on one of them is root for the asking. That is the machine
+# where wk runs long unattended builds, so it is the machine where it matters
+# most -- and the fix needs no sysadmin: one drop-in of your own, sorted last.
+#
+# A barrier rather than a refusal you cannot get past: `--force` proceeds with
+# the warning repeated at the end, for when the machine is needed now and the
+# password can wait. `wk doctor` and `wk sudo status --all` go on saying so
+# either way, because they recompute it.
+if ! "$WK_ROOT/cmd/sudo" status --target "$TARGET" >/dev/null 2>&1; then
+    warn "$("$WK_ROOT/cmd/sudo" status --target "$TARGET" 2>&1 | head -2)"
+    if confirm "require a password for sudo on $r_host now?"; then
+        "$WK_ROOT/cmd/sudo" require --target "$TARGET" \
+            || barrier "sudo on '$TARGET' still grants root without a password."
+    else
+        barrier "sudo on '$TARGET' grants root without a password, and this machine
+    runs unattended builds. 'wk sudo require --target $TARGET' fixes it in one
+    file that no sysadmin has to approve."
+    fi
+fi
 
 # --- offer to clean up -------------------------------------------------------
 # Asked, never assumed, and each with its size, because on a machine whose MOTD

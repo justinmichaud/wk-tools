@@ -101,12 +101,38 @@ deploying builds.
 
 ## Git
 
-Reads of public repositories are anonymous over HTTPS. The only push
-destination configured is the `justinmichaud/WebKit` fork, via a deploy key
-scoped to that one repository — you cannot push anywhere else.
+`origin` is `WebKit/WebKit` and pushing to it fails immediately — there is no
+write access to upstream and never will be. The fork remotes (`fork`,
+`forkwpe`) are already configured in every checkout: fetch over HTTPS, push
+over ssh through a deploy key scoped to that one repository.
+
+Reads are anonymous over HTTPS and always work: fetching `origin` or either
+fork needs no credential at all.
+
+**Pushing is a switch, and it is normally off while you are running.** The
+deploy keys are held outside the workspace (`wk push`, on the host) and
+`wk claude` turns the switch off before handing over control, so a push is
+refused at the door — `no such identity` from ssh means exactly that, not a
+broken setup. Do not try to work around it: publishing is the one thing a
+disposable workspace is not allowed to do on its own. Say what you would have
+pushed and let the person at the keyboard run `wk push on`.
 
 Never use `git push --force` against a shared branch, and never commit unless
 asked.
+
+## Long-running commands, from inside a workspace
+
+A build here is tens of minutes and the shell running it is not guaranteed to
+last that long. `wk build <config> --detach` starts it and returns
+immediately; `wk status` and `wk logs -f` follow it. Nothing is lost if this
+session ends, and `build.status` ends up saying what actually happened rather
+than `running` forever.
+
+Every build is watched for memory (a job count is a prediction, and a link
+step can break it). If yours is killed you will see `build=oom` in `wk status`
+with the peak and the budget: build with fewer jobs
+(`WK_MB_PER_JOB=3072 wk build <config>`) rather than assuming the code is at
+fault.
 
 ## WebKit conventions
 

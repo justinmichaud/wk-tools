@@ -43,6 +43,17 @@ outside the runner's coverage is only as fresh as the last human pass.
 - [ ] `./setup --stage quiesce` installs the privileged helper (needs a terminal)
 - [ ] `./setup --stage softnet` installs softnet SUID root (needs a terminal, macOS only)
 - [V] no `wk` command in the daily path calls `sudo` on either host
+- [V] `wk sudo status` answers without ever prompting (every probe is
+      `sudo -n`), names what is wrong and the command that fixes it — measured
+      on this Mac (keeps a timestamp) and on buildbox4 (`NOPASSWD: ALL` from
+      the site sudoers)
+- [ ] `wk sudo require` installs `/etc/sudoers.d/zz-<user>-passwd`, validates
+      with `visudo -c` before and after, and then proves the property: `sudo -k`
+      followed by `sudo -n true` fails
+- [ ] `wk sudo require --target <machine>` does the same over ssh, with a
+      terminal for the password prompt
+- [V] `wk sudo status --all` walks every configured machine and names the fix
+      per machine
 
 ## 1. Container workspaces — the default target
 
@@ -54,18 +65,28 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] firstrun completed everything: `~/.wk-firstrun-complete` exists, plus
       `.lldbinit`, `.bash_profile`, the shell rc line, `hx`, the push keys
 - [V] `wk ls` / `wk status` list it; `wk status` exit code is 0
+- [V] every checkout has `origin` = `WebKit/WebKit` with pushing to it refused
+      up front, and both forks already added (fetch HTTPS, push ssh via the
+      per-fork host alias) — one wiring for every target, `wk_wiring_script`
 - [V] `wk rm <ws>` reclaims the container, the overlay, the home and the ssh alias
 - [ ] `wk stop` then `wk start` returns every workspace to running
 - [ ] `wk new <ws>` with no base snapshot says `run 'wk sync' first`, creates
       nothing, and registers nothing
-- [ ] `wk new` interrupted mid-create leaves nothing half-alive: a re-run
+- [V] `wk new` interrupted mid-create leaves nothing half-alive: a re-run
       destroys the rubble and remakes the workspace from scratch — it never
       re-pins `base-id` over a surviving `changes/` layer from the first try
-- [ ] `wk rm` that cannot remove everything exits nonzero, keeps the registry
+      (2026-08-19, macOS→podman VM: `base-id` removed to stand for a create
+      killed before it was written; `wk ls`/`wk status` then said `creating`,
+      and `wk new` destroyed and remade it in 50s)
+- [V] `wk rm` that cannot remove everything exits nonzero, keeps the registry
       entry, and names what is left — never "destroyed" over an orphan whose
-      `base-id` pins a snapshot forever
-- [ ] `wk ls` and a bare `wk status` print the same workspace-name set on
+      `base-id` pins a snapshot forever (2026-08-19, forced with `chattr +i`
+      on a file in the overlay); and a workspace with nothing left but its
+      registry entry is forgotten rather than refused
+- [V] `wk ls` and a bare `wk status` print the same workspace-name set on
       every host shape (macOS with containers+vm+remote, Linux, a build box)
+      — verified on macOS with a container and a remote workspace, machine
+      running and stopped; encoded in `wk selftest --section state`
 
 ### Sandbox — the part that must never be assumed
 - [V] `wk verify <ws>` reports **sandbox intact**, all checks ok
@@ -83,6 +104,59 @@ Run these inside the podman VM on macOS, and directly on Linux.
       (temporarily break one token to prove the check can fail)
 - [ ] one `claude login` in a workspace seeds `/secrets` and a second
       workspace inherits it
+
+### A barrier can be forced, loudly (`--force`)
+- [V] a barrier refuses by default and names `--force`
+- [V] `--force` turns it into a warning at the point of bypass **and** a
+      repeated summary when the command ends
+- [V] `wk build ... --force --cmakeargs=...` passes the flag through after
+      saying what it will cost
+- [ ] `wk claude --force` starts an agent in a workspace whose sandbox check
+      failed, with the warning repeated at exit
+- [V] `--force` is not consumed after a `--`: `wk run <ws> -- --force` is the
+      program's argument
+
+### Pushing to git is a switch (`wk push`)
+- [V] a workspace's deploy keys are **symlinks** into the read-only `/secrets`,
+      never copies — a copy is a key the switch cannot reach, and it also
+      strands the workspace on a rotated key
+- [V] `wk push off` takes effect in a workspace that is already running, with
+      nothing restarted: `ssh -T git@github-webkit` and `git push fork` both
+      fail with `no such identity`
+- [V] from inside a workspace with the switch off, the held keys are
+      unreachable (`/var/lib/wk/push-keys`: no such directory) and `/secrets`
+      is read-only, so nothing in there can turn it back on
+- [V] `wk push off` holds back **every** private key in `secrets/`, not only
+      the ones `wk_push_forks` names — a leftover `build_key` is a push
+      credential too
+- [V] `wk claude` turns the switch off before starting an agent, says so, and
+      leaves it off after a headless run
+- [V] `wk claude` on a **remote** target refuses by default naming what is
+      missing (no container, no separate uid, no filesystem boundary, other
+      people's work), and `--force` proceeds — offering to install the Claude
+      CLI there when it is absent, and declining by itself with no terminal
+- [ ] `wk claude` in a terminal turns it back on when the session ends
+- [V] `wk key check` says "registered, but push is OFF" rather than failing to
+      authenticate; `wk key ensure` does not generate a second key over a held
+      one
+- [V] fetching is unaffected by the switch: with push off, `git ls-remote fork`
+      and a real `git fetch fork main` both work from inside a workspace
+      (anonymous HTTPS, no credential — 0.6 s)
+- [V] `wk push status` answers with the podman machine stopped and leaves it
+      stopped: a subcommand that only lists must not boot a VM
+
+### Push keys on a shared build machine
+- [V] `wk key ensure` on a build machine generates a key of *its own* under
+      the remote root — never a copy of another machine's
+- [ ] `wk key register` registers each machine's key separately, titled with
+      the machine name, and `wk key check` reports per machine
+- [V] a remote checkout gets `origin` = WebKit/WebKit, both forks, the
+      machine's mirror, and `core.sshCommand` pointing at `$root/ssh/config`
+      — nothing outside the wk root is edited
+- [V] `wk push off --target <machine>` leaves ssh with `no such identity`
+      there, and `git fetch fork main` still works
+- [V] `wk status` lists each machine's keys by fingerprint with their state,
+      once per machine, and the two machines' fingerprints differ
 
 ### Inside the workspace (the interface `wk claude` hands an agent)
 - [V] `wk build jsc-release` with no workspace name builds this workspace
@@ -113,6 +187,33 @@ Run these inside the podman VM on macOS, and directly on Linux.
       second desktop reserve produced
 - [V] `wk build --dry-run` / `wk test --dry-run` resolve everything and change
       nothing — no tooling sync, no status file
+- [V] the job count has no configured ceiling: it is derived per build from
+      what the target has free *at that moment*, and the derivation is printed
+      (`resources: 63 jobs (cores=128 avail=138327MB @ 1536MB/job, polite,
+      load=65)` on buildbox4, where the old conf capped it at 16)
+- [V] a conf that still sets `WK_REMOTE_MAX_JOBS` is reported as ignored,
+      where the job count is chosen
+- [V] every build is watched for memory every 30s from inside the machine
+      building it: over budget or under the machine's free-memory floor, the
+      tree is killed TERM-then-KILL, and the log carries `wk: MEMORY LIMIT`
+      and the peak
+- [V] `wk build` turns that into `state=oom` with `peak_mb`, and `wk status`
+      renders "killed for memory (peak 1050MB)" plus the reason line
+      (2026-08-19: `--mem-budget 700`, killed at 1050 MB after 16 s)
+- [V] an explicit `--mem-budget` is used as given, never raised to the floor
+      that applies to the derived one
+- [V] the watchdog does not kill itself: it is a child of the shell that
+      becomes the build, so it is in the tree it measures
+- [V] `wk build --detach` returns in under a second and the build survives
+      this end going away — in the podman VM for a container workspace, on
+      the machine's own `wk` for a remote one (verified separately, 1.1 s)
+- [V] `WK_TARGET_CMAKE` in a target's conf is added to every build's CMake
+      flags on that machine, after the config's and the architecture's and
+      before `--cmake`
+- [V] `wk build ... --cmake '<flags>'` **adds** to the config's CMake flags
+      (repeatable, shown by `--dry-run`), a bare `--cmakeargs` is refused
+      naming the flags it would have silently dropped, and everything after
+      `--` reaches build-webkit verbatim
 
 ### Build and run
 - [V] `wk build <ws> jsc-release` succeeds
@@ -444,11 +545,32 @@ reached through a ProxyJump), driven from the macOS host.
 - [ ] `wk gc` prunes an unreferenced snapshot, keeps the newest, trims ccache,
       removes a stale bench payload seed, and reports the dirs it keeps
 - [ ] `wk sync --all` and `WK_MIRROR_BRANCHES` carry the extra branches
-- [ ] `wk pr <user>:<branch>` checks out a PR head, confirming each command
+- [V] `wk pr [ws] <user>:<branch>` checks out a PR head from **either**
+      WebKit or WPEWebKit — the project is found by asking both forks for the
+      branch, and a name in both is refused rather than guessed
+      (2026-08-19: `justinmichaud:eng/non-cocoa-fuzz-Frame-cache-…`, 4 s on a
+      re-run, reusing the existing `fork` remote rather than adding a second)
+- [V] it warns about nothing except your own work: uncommitted changes are
+      named, and a local branch with commits the PR head lacks is checked out
+      as it is, never reset — `--force` takes the head and says what it
+      discarded, twice
+- [V] a branch in neither project is refused naming both URLs it checked
+- [V] `wk status` shows each workspace's current branch, for every target
 - [ ] `wk report` prints the weekly summary (needs gh auth)
 - [ ] the MCP server (`wk mcp`) creates and destroys a workspace from Claude
       Desktop, and refuses past its workspace cap
 - [V] `wk help` lists every cmd/* entry (no orphan commands, no dead entries)
+- [V] `wk version` prints a tree hash that is identical on the workstation and
+      on every machine its tooling was pushed to — the git sha is only
+      available where there is a checkout, so the tree is the comparable one
+- [V] `wk status` flags a machine whose wk-tools differs from this machine's,
+      by name, and says "in sync" when it does not — the skew that produced
+      `unknown option --quiet` from a command that works here
+- [V] every command answers `--explain` without running anything: what it does
+      (its own header comment), whether it changes anything, what machine it
+      acts on, and how to preview it — answerable with the podman machine
+      stopped, inside a workspace, and on a shared build machine, because it
+      is a question about the command rather than a use of it
 - [V] an unknown command prints the usage and exits 2
 - [V] host-only commands refuse inside a workspace rather than acting on an
       empty store — `wk sync` in there would fetch a 13 GB mirror into a
@@ -500,10 +622,14 @@ checks below read on their own:
   by name; a lock dies with its holder.
 
 ### Read-only commands make no changes
-- [ ] `wk status` / `wk ls` / `wk logs` / `wk doctor` with the podman machine
+- [V] `wk status` / `wk ls` / `wk logs` / `wk doctor` with the podman machine
       stopped leave it stopped — machine state identical before and after
-      (observed 2026-08-19: a `wk status` path still starts podman)
-- [ ] the same four start no guest, write no file, and repair nothing
+      (the 2026-08-19 observation could not be reproduced on the tree as it
+      then stood; the guard now lives inside `forward_to_vm`, which is the
+      only thing that can start the machine, rather than at the call sites)
+- [V] the same four start no guest, write no file, and repair nothing
+      (guests counted through `tart` directly, writes by fingerprinting the
+      host state directory before and after)
 
 ### Interrupted and restarted — every mutating command, kill -9, re-run
 
@@ -516,7 +642,12 @@ intermediate state is ever visible to another command as complete.
       during the `cp -al`, during the fetch, and after checkout but before
       the marker: the half-written snapshot does not exist to `current_base`
       (completion marker absent), `wk new` can never pin it, the next
-      `wk sync` finishes or replaces it, and the mirror is intact throughout
+      `wk sync` finishes or replaces it, and the mirror is intact throughout.
+      The marker half of this is verified (2026-08-19: a snapshot directory
+      with no `sha` was invisible to `current_base`, refused by name by
+      `wk new --base`, and removed by `wk gc`; a snapshot whose recorded sha
+      no longer matches its tree was refused by name) — killing a real sync
+      at each of the three points is not
 - [ ] `wk new`, container — final state: registered, running, firstrun
       complete. Killed before the container exists, during `wkdev-create`,
       and during firstrun: a re-run destroys the rubble and remakes the
@@ -583,12 +714,19 @@ intermediate state is ever visible to another command as complete.
 
 ### Concurrency — every mutating verb locks what it mutates
 - [ ] two `wk sync` at once: the second waits or refuses naming the first
-- [ ] `wk gc` racing `wk new`: gc cannot prune the base new is pinning
-- [ ] two `wk new <same-name>`: exactly one wins, no half-merged workspace
-- [ ] two `wk build` on one workspace serialize on every target (today only
-      remote has the flock); `wk vm base --refresh` while one runs is refused
+- [V] `wk gc` racing `wk new`: gc cannot prune the base new is pinning
+      (2026-08-19: gc waited 50s on the store lock, named the pid holding it,
+      and the snapshot survived)
+- [V] two `wk new <same-name>`: exactly one wins, no half-merged workspace
+      (2026-08-19: the second waited on the workspace lock, then found a
+      finished workspace and refused by name)
+- [ ] two `wk build` on one workspace serialize on every target (the
+      workspace lock is taken; not yet exercised by two real builds);
+      `wk vm base --refresh` while one runs is refused
 - [ ] two `wk vm start` do not corrupt `~/.ssh/config.d/wk`
-- [ ] a lock holder killed -9 releases the lock; no stale lock to clean
+- [V] a lock holder killed -9 releases the lock; no stale lock to clean
+      (2026-08-19, macOS host: the next taker broke the dead holder's lock
+      immediately and the directory was clean afterwards)
 
 ### Status files are claims; evidence decides
 - [ ] corrupt each status file (truncate, garbage): status reports the file
@@ -689,6 +827,7 @@ in the file because each one already cost a debugging session.
 | `wk build <config>` inside, `wk build <ws> <config>` outside | one argument form silently shadowing the other |
 | `wk start` / `wk stop` with a driver loaded | driver defaults evaluated at source time |
 | two `config_build_dir` definitions | a clean merge leaving the wrong one live |
+| loading a second target does not leave the first driver's overrides live | a driver's function override outliving its load: `wk status` walked container first, and every remote workspace's branch was then read by the container driver's `t_branch` — plausibly, and wrongly, as `-` |
 | guest reaches nothing with the proxy bypassed | softnet actually enforcing, rather than the env vars being politely obeyed |
 | a macOS guest reaches PyPI through the proxy | the proxy address being passed as a raw unset variable, so the guest got a hardcoded 192.168.64.1 that nothing listens on -- indistinguishable from the filter working |
 | a macOS guest's `~/.zprofile` carries the `wk-tools: egress` block | provisioning silently not having run, which looks like a network fault |
@@ -698,3 +837,11 @@ in the file because each one already cost a debugging session.
 | `wk selftest --section <typo>` fails | the runner exiting 0 having run nothing -- the silent pass the plan's own preamble forbids |
 | no `Host wk-<name>` alias for a container workspace | a fictional `HostName localhost` entry pointing zed at the host's own filesystem -- containers have no sshd |
 | `wk status` with the podman machine stopped leaves it stopped | a read-only report booting a VM as a side effect |
+| a workspace's `~/.ssh/id_*` are symlinks, not files | a copied deploy key: one the push switch cannot take back, and one that survives a key rotation as a dead key |
+| `origin` is `WebKit/WebKit` in every target's checkout | the remote build machine pointing origin at the box's own shared clone, so `git log origin/main` answered for that box's last fetch |
+| `wk build --cmakeargs` is refused | build-webkit taking one `--cmakeargs`, so a hand-written one silently replaces `DEVELOPER_MODE`, `USE_LIBBACKTRACE` and the architecture's flags |
+| `claude` is on `$PATH` in a container workspace | firstrun installing the CLI to `~/.local/bin` and no rc putting it on the path, so `wk claude` failed with "claude: not found" in a workspace where it was installed and working |
+| `wk ls` and `wk status` name the same set | one of them being forwarded whole into the podman VM, so a vm or remote workspace showed in one listing and not the other |
+| a snapshot with no `sha` is invisible to `current_base` | an interrupted `wk sync` publishing rubble that the next `wk new` pins and the next `wk sync` hardlinks from |
+| `wk new` over a workspace with no `base-id` remakes it | "already exists" answered about a half-made thing, and `base-id` re-pinned over a surviving `changes/` layer |
+| a lock outlives the command that took it | a flock inherited by the `conmon` podman leaves behind, holding a workspace's lock for as long as the container exists |

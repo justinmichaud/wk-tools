@@ -98,6 +98,30 @@ t_info() {
     _podman inspect "$c" --format '{{.State.Status}}' 2>/dev/null || echo absent
 }
 
+# Read, not exec'd. The checkout is an overlay whose upper layer is a directory
+# on this machine, so HEAD is a file here: `changes/.git/HEAD` once the
+# workspace has checked anything out, and the base snapshot's own HEAD before
+# that. A container exec per workspace would be a second of latency each in a
+# command that must stay quick and must start nothing.
+t_branch() {
+    local ws head ref base
+    ws=$(wk_ws_dir "$1")
+    head="$ws/changes/.git/HEAD"
+    if [ ! -f "$head" ]; then
+        base=$(ws_base_id "$1" 2>/dev/null) || { echo -; return 0; }
+        head="$(base_path "$base")/.git/HEAD"
+    fi
+    [ -f "$head" ] || { echo -; return 0; }
+    ref=$(cat "$head" 2>/dev/null) || { echo -; return 0; }
+    case "$ref" in
+        "ref: refs/heads/"*) printf '%s' "${ref#ref: refs/heads/}" ;;
+        "ref: "*)            printf '%s' "${ref#ref: }" ;;
+        # A fresh workspace is detached at the snapshot's commit, which is the
+        # honest answer rather than a branch name it is not on.
+        *)                   printf 'detached %s' "$(printf '%s' "$ref" | cut -c1-10)" ;;
+    esac
+}
+
 # Flags that differ between the two sandbox modes.
 #
 # Two lists, because they are consumed differently: wkdev-create has its own
@@ -163,7 +187,6 @@ t_create() {
     ensure_dir "$ws/changes"
     ensure_dir "$ws/overlay-work"
     ensure_dir "$ws/home"
-    printf '%s\n' "$base_id" > "$ws/base-id"
 
     # Recorded before creation, not after: everything downstream -- the build
     # flags, the benchmark preflight, `wk ls` -- resolves the architecture from
@@ -213,7 +236,6 @@ t_create() {
          --env WK_WORKSPACE=$name
          --env WK_ARCH=$arch
          --env WKDEV_OFFLINE=1
-         --env WK_FORKS=$(wk_push_forks | awk '{printf "%s%s:%s:%s", sep, $1, $2, $3; sep=","}')
          $(_sandbox_flags "$arch")"
     )
 
@@ -241,6 +263,17 @@ t_create() {
 
     # Drop the firstrun hook where .wkdev-init will pick it up on first start.
     install -m 0755 "$WK_ROOT/container/firstrun.sh" "$ws/home/.wkdev-firstrun"
+
+    # Last, and that is the point: base-id is the completion marker this target
+    # is read by (ws_state in lib/target.sh). Written first -- as it used to be
+    # -- a `wk new` killed during wkdev-create left a workspace that pinned a
+    # snapshot, looked finished to every command, and had no container; and a
+    # re-run re-pinned base-id over the `changes/` layer the first attempt had
+    # already started, which is undefined behaviour with the overlay.
+    #
+    # It is also what `wk gc` counts as a snapshot's refcount, so writing it
+    # last is only safe because gc and new take the store lock (lib/common.sh).
+    printf '%s\n' "$base_id" > "$ws/base-id"
 }
 
 # Creation is asynchronous: wkdev-create returns as soon as the container is

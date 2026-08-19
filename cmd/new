@@ -66,12 +66,46 @@ fi
 
 t_store_init
 
+# One lock per mutated resource (rule 4): this workspace, so two
+# `wk new <same-name>` cannot both create, and the store, so `wk gc` cannot
+# prune the snapshot being pinned between the moment it is resolved here and
+# the moment the driver records the pin. Both are dropped when this process
+# ends, however it ends.
+#
+# The store lock is asked for shared and taken exclusively (lib/common.sh has
+# no shared mode), so a create and a `wk sync` serialise instead of
+# overlapping. The cost is a wait; the alternative is a snapshot that moves
+# under a workspace being built on it.
+hold_lock "ws-$NAME"
+if t_needs_base; then hold_lock store -s; fi
+
+# Crash-only creation (rules 2 and 3): converge by remaking, never by repairing
+# and never by refusing. A workspace that never finished creating holds nothing
+# of value -- no build, no branch, no uncommitted work -- so the cheap, total
+# answer is to destroy the rubble and start again, and say so.
+case "$(ws_state "$NAME")" in
+present)
+    die "workspace '$NAME' already exists (target '$TARGET').
+    'wk rm $NAME' first, or pick another name." ;;
+creating)
+    warn "'$NAME' exists but was never finished -- destroying it and starting again"
+    log  "  (an interrupted 'wk new' leaves this; nothing in it is worth keeping)"
+    t_destroy "$NAME" || die "could not destroy the half-made workspace '$NAME'"
+    ssh_alias_remove "$NAME"
+    target_forget "$NAME"
+    ;;
+esac
+
 # Only the overlay scheme has base snapshots. A macOS VM's "base" is the golden
 # guest image, which the driver manages itself, so demanding a snapshot id here
 # would make `wk sync` a prerequisite for a target that never reads the mirror.
 if t_needs_base; then
     [ -n "$BASE" ] || BASE=$(current_base) \
         || die "no base snapshot yet -- run 'wk sync' first"
+    # Never build on an unpublished or tampered snapshot, and refuse it by
+    # name: `--base` can point straight at one, and `current_base` can only
+    # rule out the first of those.
+    _why=$(base_verify "$BASE") || die "$_why"
 fi
 
 t_create "$NAME" "$BASE" "$ARCH"
@@ -135,6 +169,9 @@ esac
 # not a failure. A vm workspace has no route until it boots, so zed on it is
 # necessarily a second step.
 if [ -n "$ZED" ]; then
+    # Before the exec: this process becomes the editor and keeps its pid, so a
+    # lock still held here would be held for as long as the window is open.
+    release_locks
     if ! Z=$(zed_cli); then
         warn "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)"
     elif ! _zhost=$(t_ssh_host "$NAME" 2>/dev/null); then

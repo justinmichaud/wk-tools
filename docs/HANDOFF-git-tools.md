@@ -16,11 +16,21 @@ macOS host, whichever is free).
 
 ## What to do
 
-1. **Bring `cmd/pr` up to house style.** It exists and works, but predates the
-   repo's conventions: it does not source `lib/common.sh`, and it assumes VS
-   Code for viewing the diff. Align it rather than rewriting it.
+1. ~~**Bring `cmd/pr` up to house style.**~~ **Done 2026-08-19**, and it did
+   turn into a rewrite: the shape was wrong, not just the style. It now takes
+   a workspace like `wk build` does (the checkout is in one, never on the
+   host), finds the project by asking *both* forks — WebKit and WPEWebKit —
+   for the branch rather than assuming whatever `origin` is, and drops the
+   print-and-confirm-every-command narration. The VS Code diff is gone with
+   it. One warning remains, which is the only one the user wanted: your own
+   work, either uncommitted or as commits the PR head does not have, is named
+   and never overwritten; `--force` takes the head and says twice what it
+   discarded.
 2. **`git-sync-fork`.** Natural pair with `wk pr` — both are fork-branch
    plumbing — so share its remote-handling code instead of duplicating it.
+   The pieces to reuse are `wk_pr_repos` and `wk_wiring_script` in
+   `lib/store.sh`: which projects exist, and what a checkout's remotes should
+   be, are each answered in one place now.
 3. **A cherry-pick helper for release-branch maintenance.** The
    `WebKit-branching` wiki page shows the manual loop: collect commit ids,
    resolve WebKit `NNNNNN@main` identifiers to ToT shas (today via a
@@ -37,7 +47,9 @@ macOS host, whichever is free).
 ## Where this connects to sandboxing
 
 Whether any of these are even allowed to push is a separate, security-shaped
-question, not a "restore the helper" question — see the git-push permission
-toggle in `docs/HANDOFF-sandboxing.md`. Build `gpr`/`git-sync-fork` assuming
-that toggle exists and respect it (i.e. don't have the restored helper push
-directly; let it hand off to whatever `git push` the toggle already gates).
+question, not a "restore the helper" question. **The toggle now exists**:
+`wk push on|off|status` (2026-08-19), which moves the deploy keys in and out of
+the directory workspaces have mounted, and which `wk claude` turns off before
+an agent takes over. Build `gpr`/`git-sync-fork` on top of it: don't have the
+restored helper carry a credential or push by any other route — let it run
+`git push`, which the switch already gates.

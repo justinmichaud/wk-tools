@@ -1,4 +1,19 @@
 #!/bin/bash
+#
+# wk report -- what happened on GitHub this week, in the current repository.
+#
+# The week's PRs opened, PRs reviewed and issues touched, for the authenticated
+# user, printed as three lists. Written for the weekly summary that has to be
+# assembled by hand otherwise, out of three searches nobody remembers the
+# syntax for.
+#
+# Runs on the host and nowhere else: it is `gh` and nothing but `gh`, and the
+# credential lives here. Read-only -- every call is a search or a view, and
+# nothing is created, edited or commented on.
+#
+# The repository is whichever one the working directory is in, so run it from a
+# checkout of the repository you want the summary for.
+
 export GH_PAGER=cat
 # Setup
 

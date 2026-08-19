@@ -13,6 +13,14 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 store_init
 
+# One lock per mutated resource (rule 4), exclusive: this publishes into the
+# store and fetches into the mirror, and two of them racing would hardlink from
+# each other's half-published snapshot. It also keeps `wk gc` -- which prunes
+# exactly the unmarked directory this is building -- out until the snapshot is
+# published. `wk new` takes the same lock while it pins a base, so a create
+# and a publish serialise rather than overlap.
+hold_lock store
+
 MIRROR=$(wk_mirror)
 
 # --- 1. the mirror -----------------------------------------------------------
@@ -118,8 +126,16 @@ PREV_ID=$(current_base 2>/dev/null || true)
 # behind for the next run to trip over in the same way.
 if [ -n "$PREV_ID" ] && [ ! -d "$(base_path "$PREV_ID")/.git" ]; then
     warn "previous snapshot $PREV_ID is not a git checkout; ignoring it"
-    log  "  (remove it with: rm -rf $(wk_base_dir)/$PREV_ID)"
+    log  "  (remove it with: wk gc)"
     PREV_ID=""
+fi
+
+# Rule 5: when the record and the machine disagree, say so rather than trust
+# either. Hardlinking from a snapshot somebody fetched into still produces a
+# correct new snapshot -- it records its own HEAD -- but the old one is broken
+# for everything pinned to it, and that is worth a name and a line.
+if [ -n "$PREV_ID" ] && ! _why=$(base_verify "$PREV_ID"); then
+    warn "$_why"
 fi
 
 if [ -n "$PREV_ID" ]; then
@@ -140,23 +156,16 @@ else
 fi
 
 # Point the snapshot's remotes at GitHub rather than at the mirror it was
-# cloned from. The mirror lives in the VM and is deliberately not mounted into
-# workspaces, so a snapshot keeping it as origin would hand every workspace a
-# remote it cannot reach.
+# cloned from, and add the forks. The mirror lives in the VM and is
+# deliberately not mounted into workspaces, so a snapshot keeping it as origin
+# would hand every workspace a remote it cannot reach -- and no mirror remote
+# is added here for the same reason.
 #
-# Each fork gets an HTTPS fetch URL and an ssh push URL through its own host
-# alias, because each fork needs its own deploy key -- GitHub will not accept
-# one key on two repositories.
+# The wiring itself is wk_wiring_script's, shared with every other target, so
+# "origin is WebKit/WebKit and my forks are already there" is one statement in
+# one place rather than four that drifted.
 info "wiring snapshot remotes for workspace use"
-git -C "$NEW_TREE" remote set-url origin https://github.com/WebKit/WebKit.git
-git -C "$NEW_TREE" remote set-url --push origin no-push://use-a-fork-remote
-
-wk_push_forks | while read -r remote repo alias; do
-    [ -n "$remote" ] || continue
-    git -C "$NEW_TREE" remote add "$remote" "https://github.com/${repo}.git" 2>/dev/null \
-        || git -C "$NEW_TREE" remote set-url "$remote" "https://github.com/${repo}.git"
-    git -C "$NEW_TREE" remote set-url --push "$remote" "git@${alias}:${repo}.git"
-done
+sh -c "$(wk_wiring_script "$NEW_TREE")"
 
 info "checking out $BRANCH"
 git -C "$NEW_TREE" checkout --quiet --detach "$BRANCH"
@@ -170,8 +179,15 @@ git -C "$NEW_TREE" clean -qfdx
 # next `wk new`.
 [ -d "$NEW_TREE/.git" ] || { rm -rf "$NEW_DIR"; die "snapshot $NEW_ID was not published"; }
 
+# `sha` is the completion marker (lib/store.sh), so it is written last and
+# atomically: everything above can be killed at any point and leaves a
+# directory no reader will look at, which `wk gc` removes. `branch` is
+# ordinary content and goes first -- a snapshot marked complete must already
+# have everything a reader expects to find next to it.
 printf '%s\n' "$BRANCH" > "$NEW_DIR/branch"
-git -C "$NEW_TREE" rev-parse HEAD > "$NEW_DIR/sha"
+git -C "$NEW_TREE" rev-parse HEAD > "$NEW_DIR/sha.tmp"
+[ -s "$NEW_DIR/sha.tmp" ] || { rm -rf "$NEW_DIR"; die "snapshot $NEW_ID has no HEAD to record"; }
+mv "$NEW_DIR/sha.tmp" "$NEW_DIR/sha"
 
 info "published base $NEW_ID ($(cut -c1-10 < "$NEW_DIR/sha"))"
 

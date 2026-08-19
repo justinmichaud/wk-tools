@@ -18,6 +18,11 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/build/configs.sh"
 
+# Kept whole, before any of the parsing below consumes it: `--detach` re-runs
+# this same command on the machine that will do the work, and the only
+# reliable way to reproduce an argument list is to have kept it.
+_ALL_ARGS=("$@")
+
 if [ "${1:-}" = --list ]; then
     log "available configs:"
     config_list | sed 's/^/  /'
@@ -88,13 +93,51 @@ ARCH=$(t_arch "$NAME")
 # different flags (see lib/arch.sh), and silently passing this through to
 # build-webkit -- which has no such option -- would fail 40 lines into a perl
 # script.
-BABYSIT=""; BRANCH=""; _PASS=()
+BABYSIT=""; BRANCH=""; EXTRA_CMAKE=""; MEM_BUDGET=""; MEM_FLOOR=""; DETACH=""; _PASS=()
 while [ $# -gt 0 ]; do
     case "$1" in
+        --detach)    DETACH=1; shift ;;
         --babysit)   BABYSIT="${WK_BABYSIT_MODEL:-haiku}"; shift ;;
         --babysit=*) BABYSIT="${1#*=}"; shift ;;
         --branch)    BRANCH="${2:-}"; [ -n "$BRANCH" ] || die "--branch needs a name"; shift 2 ;;
         --branch=*)  BRANCH="${1#*=}"; shift ;;
+
+        # Extra CMake flags for this build, *added* to the config's own.
+        # Repeatable, and quoted as one argument per use:
+        #
+        #   wk build ws jsc-release --cmake '-DENABLE_X=ON -DENABLE_Y=OFF'
+        #
+        # This exists because the obvious spelling is a trap. build-webkit
+        # takes --cmakeargs as a single option, so a second one on the command
+        # line replaces the first: passing --cmakeargs by hand silently drops
+        # every flag the config sets (DEVELOPER_MODE, USE_LIBBACKTRACE, the
+        # architecture's flags) and builds something else entirely, with no
+        # sign that it happened. Appended last, so where the same -D appears
+        # twice the one typed here wins -- cmake takes the last value.
+        # The memory watchdog's two numbers, as flags rather than only as
+        # environment: a container build on a macOS host is forwarded into the
+        # podman VM over ssh, and only what is on the command line survives
+        # that. Both default to the derivation in build/build-in-target.sh.
+        --mem-budget)  MEM_BUDGET="${2:-}"; [ -n "$MEM_BUDGET" ] || die "--mem-budget needs MB"; shift 2 ;;
+        --mem-budget=*) MEM_BUDGET="${1#*=}"; shift ;;
+        --mem-floor)   MEM_FLOOR="${2:-}"; [ -n "$MEM_FLOOR" ] || die "--mem-floor needs MB"; shift 2 ;;
+        --mem-floor=*)  MEM_FLOOR="${1#*=}"; shift ;;
+
+        --cmake)     [ -n "${2:-}" ] || die "--cmake needs at least one flag"
+                     EXTRA_CMAKE="$EXTRA_CMAKE $2"; shift 2 ;;
+        --cmake=*)   EXTRA_CMAKE="$EXTRA_CMAKE ${1#*=}"; shift ;;
+        --cmakeargs|--cmakeargs=*)
+            barrier "--cmakeargs would replace the config's CMake flags rather than add to
+    them: build-webkit takes one --cmakeargs, so the last one on the command
+    line wins and '$CONFIG' would lose $(config_cmake_summary).
+    Use --cmake instead, which is added to them:
+        wk build$(in_workspace || printf ' %s' "$NAME") $CONFIG --cmake $(sh_quote "${1#*=}")"
+                     _PASS+=("$1"); shift ;;
+        # Everything after `--` is the build's, verbatim -- including words
+        # that would otherwise be read as ours. Without it there is no way to
+        # pass build-webkit an option this command also defines.
+        --) shift; _PASS+=(${@+"$@"}); break ;;
+
         --sysroot|--sysroot=*)
             die "--sysroot is not implemented (docs/HANDOFF-cross-compile.md).
     This workspace is $ARCH; a --sysroot build would be a *cross* build from a
@@ -154,6 +197,44 @@ if [ -n "$BABYSIT" ]; then
     exit 0
 fi
 
+# --detach: hand the build to the machine that will run it and come back.
+#
+# A WebKit build is tens of minutes and the connection driving it is not.
+# Anything that kills the driver -- a tool call's timeout, a closed laptop, a
+# dropped ssh -- takes the build with it today, at whatever object it had
+# reached, and leaves `build.status` still saying `running`. Detaching moves
+# the process to the far end of that fragility: the machine that builds owns
+# it, and this end is free to go away.
+#
+# Where it detaches *to* depends on where the work is, and this needs no
+# special-casing because of where this file is already running: a container
+# build on a macOS host was forwarded into the podman VM before it got here,
+# so the nohup happens in the VM; a remote target hands the command to that
+# machine's own `wk` over ssh and drops the connection.
+#
+# Deliberately after --dry-run and the babysitter, which detach in their own
+# ways, and before anything that writes: the detached run does all of it
+# again, including taking the lock.
+if [ -n "$DETACH" ]; then
+    _det=()
+    for _a in ${_ALL_ARGS[@]+"${_ALL_ARGS[@]}"}; do
+        [ "$_a" = --detach ] && continue
+        _det+=("$_a")
+    done
+
+    if t_has_wk && t_wk_detach build ${_det[@]+"${_det[@]}"} >/dev/null 2>&1; then
+        info "building $CONFIG in '$NAME' on $TARGET, detached -- this end can go away"
+    else
+        WS=$(wk_ws_dir "$NAME"); ensure_dir "$WS" >/dev/null
+        nohup "$WK_ROOT/wk" build ${_det[@]+"${_det[@]}"} \
+            > "$WS/detached.log" 2>&1 < /dev/null &
+        info "building $CONFIG in '$NAME', detached as pid $! -- this end can go away"
+    fi
+    log "  follow:  wk logs $NAME -f"
+    log "  state:   wk status $NAME"
+    exit 0
+fi
+
 # Shared boxes get the polite calculation: other people are building too.
 POLITE=""
 NICE=10
@@ -180,11 +261,30 @@ else
     export WK_CGROUP_MB WK_CGROUP_CORES
 fi
 
+# Extra CMake flags from the command line, read by config_build_env when it
+# assembles WK_BUILD_CMAKE. An environment variable rather than a parameter
+# because config_build_env already takes four positional arguments and is
+# called from three places, only one of which has a command line at all.
+WK_EXTRA_CMAKE="${EXTRA_CMAKE# }"
+export WK_EXTRA_CMAKE
+
+# Flags win over the environment; both are read by config_build_env, which is
+# what carries them into the target.
+[ -z "$MEM_BUDGET" ] || { WK_MEM_BUDGET_MB="$MEM_BUDGET"; export WK_MEM_BUDGET_MB; }
+[ -z "$MEM_FLOOR" ]  || { WK_MEM_FLOOR_MB="$MEM_FLOOR";   export WK_MEM_FLOOR_MB; }
+
 # Where ccache keeps its cache inside the target. /ccache in a container, which
 # is the bind-mounted store cache; a directory of our own on a machine we share
 # with other people, whose cache is not ours to write to.
 WK_CCACHE_DIR=$(t_ccache_dir "$NAME")
 export WK_CCACHE_DIR
+
+# A conf that still sets the old ceiling is not an error and is not obeyed
+# either -- saying so where the job count is chosen is the only place it would
+# be noticed.
+[ -z "${WK_REMOTE_MAX_JOBS:-}" ] || \
+    warn "WK_REMOTE_MAX_JOBS is set in $TARGET's conf and is ignored: the job count
+  is derived per build from what that machine has free. Delete the line."
 
 JOBS=$(explain_jobs "$POLITE")
 
@@ -198,13 +298,29 @@ if [ -n "$DRY" ]; then
     log "  workspace: $NAME ($TARGET, $(t_info "$NAME")${ARCH_LABEL:+, $ARCH_LABEL})"
     [ -n "$BRANCH" ] && log "  branch:    $BRANCH (would be checked out first)"
     log "  config:    $CONFIG ($CFG_BUILDSYS${CFG_PORT:+ $CFG_PORT}${CFG_ARGS:+ $CFG_ARGS})"
+    [ -n "${WK_TARGET_CMAKE:-}" ] && log "  machine:   $WK_TARGET_CMAKE (WK_TARGET_CMAKE, from $TARGET's conf)"
+    [ -n "$WK_EXTRA_CMAKE" ] && log "  --cmake:   $WK_EXTRA_CMAKE (added to the config's)"
+    [ $# -gt 0 ] && log "  passed on: $* (straight to build-webkit)"
     [ -n "$ARCH_LABEL" ] && log "  arch:      $ARCH_LABEL, native ($(arch_wrapper "$ARCH") $(arch_cflags "$ARCH"))"
     log "  src:       $(t_src "$NAME")"
     log "  build dir: $(config_build_dir "$(t_src "$NAME")")"
     log "  jobs:      $JOBS (nice $NICE)"
+    log "  memory:    budget ${WK_MEM_BUDGET_MB:-$(( JOBS * ${WK_MB_PER_JOB:-1536} ))}MB, floor ${WK_MEM_FLOOR_MB:-2048}MB, watched every ${WK_MEM_INTERVAL:-30}s"
     log "  would run: env ${CFG_ENV[*]} $(t_tools "$NAME")/build/build-in-target.sh $*"
     exit 0
 fi
+
+# One lock per mutated resource (rule 4): this workspace, for the rest of this
+# process. Everything above resolves and reports; everything below writes to
+# the checkout and to the status files, and two builds interleaved in one
+# workspace corrupt both the build directory and the record of it.
+#
+# Taken after --dry-run and after the --babysit dispatch above: neither of
+# those builds anything, and the babysitter re-runs `wk build`, which takes
+# this lock itself for each attempt. A remote target locks here *and* on the
+# far machine (targets/remote.sh) -- this one serialises this workstation's own
+# builds, that one serialises the machine's.
+hold_lock "ws-$NAME" -w "${WK_BUILD_LOCK_WAIT:-3600}"
 
 # The branch, before anything is recorded about this build. checkout first,
 # fetch only when the name is not already local -- a fetch per build would put
@@ -248,6 +364,7 @@ started=$STARTED
 finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 seconds=$(( $(date +%s) - START_EPOCH ))
 log=$LOG
+peak_mb=${MEM_PEAK:-}
 EOF
 )
     printf '%s\n' "$content" > "$STATUS"
@@ -280,6 +397,18 @@ run_watched "$LOG" -- \
 rc=$?
 set -e
 
+# What the memory watchdog saw, lifted out of the log it wrote it to.
+#
+# The log is the one channel that survives everything: a dropped ssh, a killed
+# driver, a build started from the other end. Reading the markers back here is
+# what turns "the build died" into "the build was killed for using 96 GB
+# against a 94 GB budget", which is the difference between a mystery and a
+# job count to change.
+MEM_PEAK=$(grep -a 'wk: memory: peak' "$LOG" 2>/dev/null | tail -1 \
+           | sed -n 's/.*peak \([0-9]*\)MB.*/\1/p' || true)
+MEM_KILLED=""
+grep -aq 'wk: MEMORY LIMIT' "$LOG" 2>/dev/null && MEM_KILLED=1
+
 ELAPSED=$(( $(date +%s) - START_EPOCH ))
 MINS=$(( ELAPSED / 60 )); SECS=$(( ELAPSED % 60 ))
 
@@ -296,6 +425,14 @@ case $rc in
     A stall is usually memory pressure -- check 'wk status $NAME' for OOM kills."
     ;;
 *)
+    if [ -n "$MEM_KILLED" ]; then
+        write_status oom "$rc"
+        warn "BUILD KILLED FOR MEMORY  $CONFIG in '$NAME'  (after ${MINS}m${SECS}s)"
+        grep -a 'wk: MEMORY LIMIT' "$LOG" | tail -2 | sed 's/^wk: /  /' >&2
+        log "  peak ${MEM_PEAK:-?}MB. Fewer jobs: WK_MB_PER_JOB=3072 wk build $NAME $CONFIG"
+        log "  full log: $LOG"
+        exit "$rc"
+    fi
     write_status failed "$rc"
     warn "BUILD FAILED  $CONFIG in '$NAME'  (exit $rc after ${MINS}m${SECS}s)"
     log "first error(s):"

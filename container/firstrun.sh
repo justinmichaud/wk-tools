@@ -33,6 +33,13 @@ git config --global user.name  "Justin Michaud"
 git config --global user.email "jmichaud@igalia.com"
 git config --global --add safe.directory "$SRC"
 
+# The forks, read from the mounted tooling at use time rather than from an
+# environment variable frozen into the container at creation: `wk_push_forks`
+# in lib/store.sh is the one list, and a workspace created last month must see
+# today's answer. In a subshell, because those files are `wk`'s and define
+# log(), warn() and a shell mode of their own.
+_forks() { bash -c '. "$1/lib/store.sh"; wk_push_forks' _ "$WK_TOOLS" 2>/dev/null; }
+
 # One deploy key per fork. Both forks are on github.com, so the key is selected
 # by ssh host alias rather than hostname -- that is the only way to use two
 # different keys against the same host.
@@ -56,21 +63,24 @@ Host *
 
 PROXYEOF
 
-# Comma-separated, not space-separated: the value reaches the container through
-# wkdev-create's --additional-flags, which word-splits, so a space would break
-# it into separate podman arguments.
+# The key is *pointed at*, never copied.
+#
+# Two reasons, and the second is the one that matters. A copy goes stale: the
+# day a key is rotated, every existing workspace goes on offering the dead one.
+# And a copy cannot be taken back -- /secrets is mounted read-only for the
+# container's life, so the host can add and remove keys there and this
+# workspace sees it immediately, which is exactly what makes `wk push off` a
+# switch rather than a suggestion. A copy in here would be a second key nobody
+# can reach. (The Claude credentials are already linked for the first reason;
+# this is the same pattern with a second reason behind it.)
+#
+# ssh follows the symlink and checks the *target's* permissions, which are 0600
+# in the store; a dangling link is simply "no key", which is the off position.
 _have_key=0
-_IFS_SAVE=$IFS; IFS=,
-for _spec in ${WK_FORKS:-}; do
-    IFS=$_IFS_SAVE
-    # remote:repo:alias, packed by cmd/new because firstrun has no wk libs.
-    _remote=${_spec%%:*}; _rest=${_spec#*:}
-    _repo=${_rest%%:*}; _alias=${_rest#*:}
-    _src="/secrets/build_key_${_remote}"
+while read -r _remote _repo _alias; do
+    [ -n "$_remote" ] || continue
 
-    [ -f "$_src" ] || { log "WARNING: no key for $_repo -- pushing there will fail"; continue; }
-
-    install -m 0600 "$_src" "$HOME/.ssh/id_${_remote}"
+    ln -sfn "/secrets/build_key_${_remote}" "$HOME/.ssh/id_${_remote}"
     cat >> "$HOME/.ssh/config" <<EOF
 Host ${_alias}
     HostName github.com
@@ -79,34 +89,29 @@ Host ${_alias}
     IdentitiesOnly yes
     StrictHostKeyChecking accept-new
 EOF
-    _have_key=1
-    log "deploy key installed for $_repo (push via $_alias)"
-    IFS=,
-done
-IFS=$_IFS_SAVE
-[ "$_have_key" = 1 ] || log "         generate and register keys with: wk key register"
+    if [ -e "$HOME/.ssh/id_${_remote}" ]; then
+        _have_key=1
+        log "deploy key linked for $_repo (push via $_alias)"
+    else
+        log "no key for $_repo right now -- pushes there will be refused ('wk push status')"
+    fi
+done <<EOF
+$(_forks)
+EOF
+[ "$_have_key" = 1 ] || log "         'wk push on' exposes them; 'wk key register' creates them"
 
-# Remotes. The snapshot already carries these, but they live in the read-only
-# lower layer, so re-assert them here: a workspace made from an older snapshot
-# still gets the right push URLs.
+# Remotes. The snapshot already carries these, but it was published at some
+# point in the past and lives in a read-only lower layer, so they are
+# re-asserted here from the same one authority (wk_wiring_script): a workspace
+# made from an older snapshot still gets today's origin and today's forks.
 if [ -d "$SRC/.git" ]; then
-    git -C "$SRC" remote set-url origin https://github.com/WebKit/WebKit.git 2>/dev/null || true
-    # Pushing to origin is impossible (no upstream write access) and almost
-    # always a mistake; fail immediately rather than after an auth round trip.
-    git -C "$SRC" remote set-url --push origin no-push://use-a-fork-remote 2>/dev/null || true
-
-    IFS=,
-    for _spec in ${WK_FORKS:-}; do
-        IFS=$_IFS_SAVE
-        _remote=${_spec%%:*}; _rest=${_spec#*:}
-        _repo=${_rest%%:*}; _alias=${_rest#*:}
-        git -C "$SRC" remote add "$_remote" "https://github.com/${_repo}.git" 2>/dev/null \
-            || git -C "$SRC" remote set-url "$_remote" "https://github.com/${_repo}.git"
-        git -C "$SRC" remote set-url --push "$_remote" "git@${_alias}:${_repo}.git"
-        log "remote $_remote -> $_repo (fetch https, push ssh)"
-        IFS=,
-    done
-    IFS=$_IFS_SAVE
+    _wiring=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_wiring_script "$2"' \
+                  _ "$WK_TOOLS" "$SRC" 2>/dev/null) || _wiring=""
+    if [ -n "$_wiring" ] && sh -c "$_wiring"; then
+        log "remotes: origin=WebKit/WebKit (push refused), forks added"
+    else
+        log "WARNING: could not wire the checkout's remotes"
+    fi
 fi
 
 # --- claude ------------------------------------------------------------------
@@ -202,8 +207,13 @@ fi
 } > "$HOME/.lldbinit"
 
 # --- shell -------------------------------------------------------------------
+# ~/.local/bin as well as the tooling: that is where the Claude installer puts
+# its own launcher (a symlink into ~/.local/share/claude/versions), and without
+# it on PATH `wk claude` -- which runs `bash -lc "exec claude ..."` -- fails
+# with "claude: not found" in a workspace where the CLI is installed and
+# working. The image does not put it there and neither did anything else.
 grep -qF 'wk-tools/shell/bashrc' "$HOME/.bashrc" 2>/dev/null || \
-    printf '\n. %s/shell/bashrc\nexport PATH="%s:$PATH"\ncd %s\n' \
+    printf '\n. %s/shell/bashrc\nexport PATH="%s:$HOME/.local/bin:$PATH"\ncd %s\n' \
         "$WK_TOOLS" "$WK_TOOLS" "$SRC" >> "$HOME/.bashrc"
 
 # bash reads ~/.bashrc for interactive non-login shells and ~/.bash_profile for

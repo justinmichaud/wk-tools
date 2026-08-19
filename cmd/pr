@@ -1,256 +1,185 @@
-#!/bin/bash
-# Check out a fork branch in GitHub PR head syntax (user:branch).
+#!/usr/bin/env bash
 #
-# - Fetches `fork` and `origin`.
-# - If `user` is not the owner of `fork`, looks for an existing remote pointing
-#   at that user; if none exists, offers to add one.
-# - Checks out the branch, confirms its upstream, and (if local diverges from
-#   the remote) writes a diff to a temp file, opens it in VS Code if `code` is
-#   on PATH, and offers to force-reset to the remote.
+# wk pr [workspace] <user>:<branch> -- check out a PR head, from either project.
 #
-# Every git command is printed. Only the destructive one prompts: reset
-# --hard, which discards local work. Everything else -- fetch, checkout,
-# remote add, set-upstream -- is routine or reversible and just runs; git's
-# own guards refuse a checkout that would clobber uncommitted changes.
+# GitHub's own syntax for a PR head, pasted straight from the page:
+#
+#   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
+#
+# The branch alone does not say which project it belongs to -- WebKit and
+# WPEWebKit are separate repositories that share a history -- so both are
+# tried: whichever fork of the two has that branch is the one it comes from,
+# and a branch that exists in both is refused by name rather than guessed at.
+# Nothing about the name is parsed for meaning; `eng/…` with slashes in it is
+# an ordinary branch name.
+#
+# The remote is added if it is not there (a fork of a project this tooling
+# already knows), the branch is checked out tracking it, and that is all. No
+# confirmation for any of it: fetching, adding a remote and checking out are
+# routine and reversible, and a command that asks four times is a command that
+# gets answered without reading.
+#
+# The exception, and the only warning this prints, is *your* work:
+#
+#   uncommitted changes in the tree are named before anything moves, because a
+#   checkout carries them across and they are easy to forget;
+#   a local branch of the same name that has commits the PR head does not is
+#   never overwritten -- it is checked out as it is, and what would be lost is
+#   named. `--force` takes the remote version instead, discarding yours.
+#
+# Runs in the workspace, like `wk build`: from a host, name it; from inside
+# one, do not.
 
-set -u
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
 
-if [ $# -lt 1 ] || [[ "$1" != *:* ]]; then
-    echo "Usage: $(basename "$0") <user>:<branch>" >&2
-    exit 1
-fi
-
-INPUT="$1"
-PR_USER="${INPUT%%:*}"
-BRANCH="${INPUT#*:}"
-
-if [ -z "$PR_USER" ] || [ -z "$BRANCH" ]; then
-    echo "Invalid argument: '$INPUT' (expected user:branch)" >&2
-    exit 1
-fi
-
-# Extract the github user/org from a remote URL.
-# Handles git@host:USER/REPO(.git) and https://host/USER/REPO(.git).
-remote_user_from_url() {
-    local url="$1"
-    echo "$url" | sed -E 's#(\.git)?$##; s#.*[:/]([^/:]+)/[^/]+$#\1#'
+usage() {
+    if in_workspace; then log "usage: wk pr <user>:<branch>"
+    else log "usage: wk pr <workspace> <user>:<branch>"; fi
+    exit 2
 }
 
-# Extract the repo name from a remote URL.
-remote_repo_from_url() {
-    local url="$1"
-    echo "$url" | sed -E 's#(\.git)?$##; s#.*/([^/]+)$#\1#'
-}
+# The workspace name is optional inside one, exactly as in `wk build`: there is
+# one workspace in here and it is this machine. A PR argument always contains a
+# colon, which is what tells the two forms apart -- a workspace name cannot
+# contain one (valid_name).
+NAME=""; SPEC=""
+case "${1:-}" in
+    '') usage ;;
+    *:*) SPEC="$1"; in_workspace && NAME=$(wk_self) || usage ;;
+    *)  NAME="$1"; SPEC="${2:-}"; [ -n "$SPEC" ] || usage ;;
+esac
+shift $#
 
-ask() {
-    # ask "prompt" -> returns 0 if yes, 1 if no. This only ever guards a
-    # destructive command, so the default is no, and no terminal means
-    # decline -- a prompt nobody can answer must not run a reset unattended.
-    local prompt="$1"
-    local reply
-    if [ ! -t 0 ]; then
-        echo "$prompt -- declining (no terminal)" >&2
-        return 1
-    fi
-    read -r -p "$prompt [y/N] " reply
-    case "$reply" in
-        [Yy]|[Yy][Ee][Ss]) return 0 ;;
-        *) return 1 ;;
-    esac
-}
+case "$SPEC" in *:*) ;; *) usage ;; esac
+PR_USER="${SPEC%%:*}"
+BRANCH="${SPEC#*:}"
+[ -n "$PR_USER" ] && [ -n "$BRANCH" ] || die "expected <user>:<branch>, got '$SPEC'"
 
-run_silent() {
-    # Print and run a read-only/non-destructive command, no prompt.
-    echo
-    echo "  \$ $*"
-    "$@"
-    return $?
-}
+require_name "$NAME"
+TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+load_target "$TARGET"
+[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
-confirm_run_destructive() {
-    echo
-    echo "  DESTRUCTIVE:"
-    echo "  \$ $*"
-    if ask "Run this?"; then
-        "$@"
-        return $?
-    fi
-    echo "  (skipped)"
-    return 130
-}
+SRC=$(t_src "$NAME")
 
-require() {
-    # Run a routine command; abort if it fails.
-    run_silent "$@"
-    local rc=$?
-    if [ $rc -ne 0 ]; then
-        echo "Command failed (exit $rc); aborting." >&2
-        exit $rc
-    fi
-}
-
-# --- Identify the fork remote and its owner -----------------------------------
-
-if ! git remote get-url fork >/dev/null 2>&1; then
-    echo "No 'fork' remote configured." >&2
-    exit 1
-fi
-FORK_URL=$(git remote get-url fork)
-FORK_USER=$(remote_user_from_url "$FORK_URL")
-
-if ! git remote get-url origin >/dev/null 2>&1; then
-    echo "No 'origin' remote configured." >&2
-    exit 1
-fi
-ORIGIN_URL=$(git remote get-url origin)
-ORIGIN_REPO=$(remote_repo_from_url "$ORIGIN_URL")
-
-echo "fork    : $FORK_URL  (user: $FORK_USER)"
-echo "origin  : $ORIGIN_URL  (repo: $ORIGIN_REPO)"
-echo "request : user=$PR_USER  branch=$BRANCH"
-
-# --- Fetch fork and origin ----------------------------------------------------
-
-run_silent git fetch fork || exit $?
-run_silent git fetch origin || exit $?
-
-# --- Pick the remote that owns the requested branch ---------------------------
-
-if [ "$PR_USER" = "$FORK_USER" ]; then
-    REMOTE="fork"
-else
-    REMOTE=""
-    for r in $(git remote); do
-        url=$(git remote get-url "$r")
-        ruser=$(remote_user_from_url "$url")
-        if [ "$ruser" = "$PR_USER" ]; then
-            REMOTE="$r"
-            echo "Found existing remote '$REMOTE' for user '$PR_USER'."
-            break
-        fi
+# --- 1. which project, and what is here already ------------------------------
+#
+# One round trip that changes nothing: which of the projects has this branch,
+# what the head is, whether a remote for that user already exists, and what
+# the local side looks like. Everything that follows is decided from this, out
+# here, where the answers can be reported.
+#
+# `git ls-remote` over HTTPS is anonymous and needs no credential -- the same
+# reason fetching a fork works while `wk push` is off.
+probe=$(t_exec "$NAME" bash -c "
+    cd $(sh_quote "$SRC") || exit 1
+    for repo in $(wk_pr_repos | tr '\n' ' '); do
+        url=https://github.com/$(sh_quote "$PR_USER")/\$repo.git
+        sha=\$(git ls-remote \"\$url\" refs/heads/$(sh_quote "$BRANCH") 2>/dev/null | awk '{print \$1}')
+        [ -n \"\$sha\" ] && echo \"found=\$repo \$url \$sha\"
     done
-    if [ -z "$REMOTE" ]; then
-        NEW_URL="git@github.com:$PR_USER/$ORIGIN_REPO.git"
-        REMOTE="$PR_USER"
-        echo
-        echo "No remote exists for user '$PR_USER'."
-        echo "Proposed: remote='$REMOTE' url='$NEW_URL'"
-        run_silent git remote add "$REMOTE" "$NEW_URL"
-        rc=$?
-        if [ $rc -ne 0 ]; then
-            echo "Cannot continue without remote." >&2
-            exit 1
-        fi
-    fi
-    run_silent git fetch "$REMOTE" || exit $?
+    # A remote that already points at this user's copy of one of them, so a
+    # second one is not added beside it under a different name.
+    for r in \$(git remote); do
+        u=\$(git remote get-url \"\$r\")
+        case \"\$u\" in
+            *[:/]$(sh_quote "$PR_USER")/*) echo \"remote=\$r \$u\" ;;
+        esac
+    done
+    echo \"head=\$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"
+    echo \"local=\$(git rev-parse --verify --quiet refs/heads/$(sh_quote "$BRANCH") || true)\"
+    echo \"dirty=\$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"
+" 2>/dev/null | tr -d '\r') || die "could not reach the checkout in '$NAME'"
+
+found=$(printf '%s\n' "$probe" | sed -n 's/^found=//p')
+n=$(printf '%s\n' "$found" | grep -c . || true)
+case "$n" in
+0) die "no branch '$BRANCH' in $(wk_pr_repos | tr '\n' '/' | sed 's|/$||') under '$PR_USER'.
+    Checked: $(wk_pr_repos | sed "s|^|https://github.com/$PR_USER/|;s|\$|.git|" | tr '\n' ' ')" ;;
+1) ;;
+*) die "'$BRANCH' exists in more than one of $PR_USER's repositories:
+$(printf '%s\n' "$found" | sed 's/^/    /')
+    They are different projects; check the PR page for which one it is and
+    fetch that remote by hand." ;;
+esac
+
+REPO=$(printf '%s' "$found" | awk '{print $1}')
+URL=$(printf '%s' "$found"  | awk '{print $2}')
+HEAD_SHA=$(printf '%s' "$found" | awk '{print $3}')
+LOCAL_SHA=$(printf '%s\n' "$probe" | sed -n 's/^local=//p')
+DIRTY=$(printf '%s\n' "$probe" | sed -n 's/^dirty=//p')
+REMOTE=$(printf '%s\n' "$probe" | sed -n 's/^remote=//p' | awk -v u="$URL" '$2 == u {print $1; exit}')
+
+# The name a new remote gets. The user's, with the project appended when it is
+# not the one `origin` is -- one user can have a PR in both, and two remotes
+# cannot share a name.
+if [ -z "$REMOTE" ]; then
+    REMOTE="$PR_USER"
+    [ "$REPO" = "$(wk_pr_repos | head -1)" ] || REMOTE="$PR_USER-$(printf '%s' "$REPO" | tr 'A-Z' 'a-z')"
 fi
 
-# --- Check out the branch -----------------------------------------------------
-
-EXPECTED_UPSTREAM="$REMOTE/$BRANCH"
-
-if ! git rev-parse --verify --quiet "refs/remotes/$EXPECTED_UPSTREAM" >/dev/null; then
-    echo "Remote ref '$EXPECTED_UPSTREAM' not found after fetch." >&2
-    exit 1
+# --- 2. what this would cost -------------------------------------------------
+if [ "${DIRTY:-0}" -gt 0 ] 2>/dev/null; then
+    warn "'$NAME' has $DIRTY uncommitted change(s); the checkout carries them across"
 fi
 
-if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-    echo
-    echo "Local branch '$BRANCH' already exists."
-    require git checkout "$BRANCH"
-else
-    require git checkout -b "$BRANCH" --track "$EXPECTED_UPSTREAM"
+RESET=""
+if [ -n "$LOCAL_SHA" ] && [ "$LOCAL_SHA" != "$HEAD_SHA" ]; then
+    # Whether it is *your* work at stake is the whole question, so it is asked
+    # of git rather than assumed: commits on the local branch that the PR head
+    # does not have. None of them means the branch is simply behind, and
+    # fast-forwarding it costs nothing.
+    ahead=$(t_exec "$NAME" bash -c "
+        cd $(sh_quote "$SRC") &&
+        git fetch --quiet $(sh_quote "$URL") $(sh_quote "$BRANCH") 2>/dev/null &&
+        git rev-list --count FETCH_HEAD..$(sh_quote "$BRANCH") 2>/dev/null || echo unknown
+    " 2>/dev/null | tr -d '\r' | tail -1)
+
+    case "$ahead" in
+        0)  RESET=1 ;;   # behind or equal: taking the PR head loses nothing
+        unknown)
+            barrier "cannot tell whether '$BRANCH' in '$NAME' has work the PR head does not.
+    Checking it out will leave it as it is."
+            ;;
+        *)
+            if [ -n "${WK_FORCE:-}" ]; then
+                barrier "discarding $ahead local commit(s) on '$BRANCH' in '$NAME'."
+                RESET=1
+            else
+                warn "local '$BRANCH' has $ahead commit(s) the PR head does not have"
+                log  "  it is checked out as it is; nothing is discarded."
+                log  "  to take the PR head instead and lose those commits:"
+                log  "    wk pr${NAME:+ $NAME} $SPEC --force"
+            fi
+            ;;
+    esac
 fi
 
-# --- Verify upstream ----------------------------------------------------------
-
-CURRENT_UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
-echo
-echo "Upstream check:"
-echo "  current : ${CURRENT_UPSTREAM:-<none>}"
-echo "  expected: $EXPECTED_UPSTREAM"
-
-if [ "$CURRENT_UPSTREAM" != "$EXPECTED_UPSTREAM" ]; then
-    echo "Upstream does not match."
-    run_silent git branch --set-upstream-to="$EXPECTED_UPSTREAM" "$BRANCH" || true
-else
-    echo "Upstream OK."
-fi
-
-# --- Status & divergence check ------------------------------------------------
-
-run_silent git status
-
-LOCAL_SHA=$(git rev-parse HEAD)
-REMOTE_SHA=$(git rev-parse "$EXPECTED_UPSTREAM")
-
-if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
-    echo
-    echo "Local '$BRANCH' matches '$EXPECTED_UPSTREAM'. Nothing more to do."
-    exit 0
-fi
-
-echo
-echo "Local '$BRANCH' ($LOCAL_SHA) differs from '$EXPECTED_UPSTREAM' ($REMOTE_SHA)."
-
-# Determine an upstream base so we can exclude origin-only commits (e.g. when
-# the remote branch was rebased onto a newer origin/main). We compare the
-# patch series from each branch's merge-base with origin/main.
-UPSTREAM_BASE_BRANCH="origin/main"
-if ! git rev-parse --verify --quiet "$UPSTREAM_BASE_BRANCH" >/dev/null; then
-    UPSTREAM_BASE_BRANCH=""
-fi
-
-LOCAL_BASE=""
-REMOTE_BASE=""
-if [ -n "$UPSTREAM_BASE_BRANCH" ]; then
-    LOCAL_BASE=$(git merge-base "$BRANCH" "$UPSTREAM_BASE_BRANCH" 2>/dev/null || true)
-    REMOTE_BASE=$(git merge-base "$EXPECTED_UPSTREAM" "$UPSTREAM_BASE_BRANCH" 2>/dev/null || true)
-fi
-
-# Portable: --suffix is GNU mktemp only, and this runs on macOS too.
-DIFF_FILE=$(mktemp "${TMPDIR:-/tmp}/gpr.XXXXXX")
-mv "$DIFF_FILE" "$DIFF_FILE.diff"
-DIFF_FILE="$DIFF_FILE.diff"
-{
-    echo "# Comparing local '$BRANCH' vs '$EXPECTED_UPSTREAM'"
-    echo "# Local : $LOCAL_SHA"
-    echo "# Remote: $REMOTE_SHA"
-    if [ -n "$LOCAL_BASE" ] && [ -n "$REMOTE_BASE" ]; then
-        echo "# Excluding $UPSTREAM_BASE_BRANCH commits."
-        echo "# Local  base: $LOCAL_BASE"
-        echo "# Remote base: $REMOTE_BASE"
-        echo
-        echo "# git log --oneline $LOCAL_BASE..$BRANCH  (local PR commits)"
-        git log --oneline "$LOCAL_BASE..$BRANCH" || true
-        echo
-        echo "# git log --oneline $REMOTE_BASE..$EXPECTED_UPSTREAM  (remote PR commits)"
-        git log --oneline "$REMOTE_BASE..$EXPECTED_UPSTREAM" || true
-        echo
-        echo "# git range-diff $LOCAL_BASE..$BRANCH $REMOTE_BASE..$EXPECTED_UPSTREAM"
-        git range-diff "$LOCAL_BASE..$BRANCH" "$REMOTE_BASE..$EXPECTED_UPSTREAM" || true
+# --- 3. do it ----------------------------------------------------------------
+t_exec "$NAME" bash -c "
+    set -e
+    cd $(sh_quote "$SRC")
+    git remote get-url $(sh_quote "$REMOTE") >/dev/null 2>&1 \
+        || git remote add $(sh_quote "$REMOTE") $(sh_quote "$URL")
+    git remote set-url $(sh_quote "$REMOTE") $(sh_quote "$URL")
+    git fetch --quiet $(sh_quote "$REMOTE") $(sh_quote "$BRANCH")
+    if git show-ref --verify --quiet refs/heads/$(sh_quote "$BRANCH"); then
+        git checkout --quiet $(sh_quote "$BRANCH")
+        ${RESET:+git reset --hard --quiet $(sh_quote "$REMOTE")/$(sh_quote "$BRANCH")}
     else
-        echo "# (no $UPSTREAM_BASE_BRANCH found; falling back to full diff)"
-        echo
-        echo "# git log --oneline --left-right $BRANCH...$EXPECTED_UPSTREAM"
-        git log --oneline --left-right "$BRANCH...$EXPECTED_UPSTREAM" || true
-        echo
-        echo "# git diff $BRANCH..$EXPECTED_UPSTREAM"
-        git diff "$BRANCH..$EXPECTED_UPSTREAM"
+        git checkout --quiet -b $(sh_quote "$BRANCH") --track $(sh_quote "$REMOTE")/$(sh_quote "$BRANCH")
     fi
-} > "$DIFF_FILE"
+    git branch --quiet --set-upstream-to=$(sh_quote "$REMOTE")/$(sh_quote "$BRANCH") $(sh_quote "$BRANCH") 2>/dev/null || true
+" || die "could not check out '$BRANCH' in '$NAME'"
 
-echo "Wrote diff to: $DIFF_FILE"
-
-if command -v code >/dev/null 2>&1; then
-    run_silent code "$DIFF_FILE" || true
-else
-    echo "(VS Code 'code' CLI not on PATH; open the file manually)"
-fi
-
-echo
-echo "Offer to force-update local '$BRANCH' to match '$EXPECTED_UPSTREAM'."
-confirm_run_destructive git reset --hard "$EXPECTED_UPSTREAM" || true
-
-echo
-echo "Done."
+info "'$NAME' is on $BRANCH ($REPO, from $REMOTE)"
+# --no-pager, and it is not cosmetic: the driver's exec gives the command a
+# terminal, so `git log` starts a pager and waits for a keystroke that is never
+# coming -- which looks exactly like a fetch that will not finish. Measured
+# once, at seven minutes.
+log  "  $(t_exec "$NAME" bash -c "cd $(sh_quote "$SRC") && git --no-pager log --oneline -1" 2>/dev/null | tr -d '\r')"

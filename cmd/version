@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#
+# wk version -- which wk-tools this machine is running.
+#
+# Every machine in the fleet runs a *copy* of this repository: the podman VM
+# gets one over rsync, so does every build machine and every macOS guest. They
+# go stale silently, and a stale copy fails in the least helpful way there is --
+# `error: unknown option --quiet` from a command that works perfectly on the
+# machine you typed it on. That happened three times in one afternoon while the
+# push-key work was landing, which is why this exists.
+#
+# Two identifiers, because neither is enough on its own:
+#
+#   sha     the git commit, when there is a git checkout here. Only the
+#           workstation has one -- the copies are rsynced with `--exclude .git`
+#           -- so this is `-` on most machines, and it says nothing about
+#           uncommitted edits by itself.
+#   tree    a hash of the file contents, computed identically everywhere and
+#           over exactly what rsync copies. This is the one that answers "is
+#           that machine running what I am running", including when what I am
+#           running has never been committed.
+#
+# Both are derived on every call. Nothing is written down: a recorded version
+# is a claim that outlives the thing it describes, and the tree is right here
+# to be read.
+#
+#   wk version            the two identifiers, one per line
+#   wk version --tree     just the tree hash (what a caller compares)
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+
+# sha256, whatever this machine calls it. macOS ships `shasum` (perl) and no
+# `sha256sum`; Fedora CoreOS and Ubuntu ship both. A *command*, not a function,
+# because xargs has to be able to exec it.
+if have sha256sum;  then SHA256=sha256sum
+elif have shasum;   then SHA256="shasum -a 256"
+else die "no sha256 program on this machine (sha256sum or shasum)"
+fi
+
+_sha256() { $SHA256; }
+
+# The content of the tree, and nothing else about it.
+#
+# Paths are relative to the root, because they are absolutely different on
+# every machine (/opt/wk-tools, ~/wk/wk-tools, the checkout here) and hashing
+# them would make two identical trees look different. `.git` is excluded for
+# the same reason it is excluded from the rsync: it is not part of what runs.
+#
+# Sorted under LC_ALL=C so two machines with different locales agree on the
+# order, which is otherwise a difference that is not a difference.
+tree_hash() {
+    # shellcheck disable=SC2086 -- $SHA256 is a deliberate command word list.
+    ( cd "$WK_ROOT" && \
+      find . -type f -not -path './.git/*' -not -name '*.pyc' -print0 \
+      | LC_ALL=C sort -z \
+      | xargs -0 $SHA256 ) | _sha256 | cut -c1-12
+}
+
+git_sha() {
+    git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || echo -
+}
+
+git_dirty() {
+    git -C "$WK_ROOT" rev-parse HEAD >/dev/null 2>&1 || { echo unknown; return 0; }
+    [ -z "$(git -C "$WK_ROOT" status --porcelain 2>/dev/null)" ] && echo no || echo yes
+}
+
+case "${1:-}" in
+--tree) tree_hash ;;
+'')
+    printf 'sha=%s\n'   "$(git_sha)"
+    printf 'dirty=%s\n' "$(git_dirty)"
+    printf 'tree=%s\n'  "$(tree_hash)"
+    printf 'root=%s\n'  "$WK_ROOT"
+    ;;
+*) log "usage: wk version [--tree]"; exit 2 ;;
+esac

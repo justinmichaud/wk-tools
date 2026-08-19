@@ -18,6 +18,9 @@ set -euo pipefail
 
 MARKER="$HOME/.wk-provisioned"
 SRC="$HOME/WebKit"
+# The tree targets/vm.sh rsyncs in (t_tools). Named once, here, because two
+# steps below read it and they are far apart.
+WK_TOOLS_DIR="$HOME/wk-tools"
 
 say() { printf '==> %s\n' "$*" >&2; }
 
@@ -105,6 +108,23 @@ else
     git clone --quiet --single-branch --branch main \
         https://github.com/WebKit/WebKit.git "$SRC"
 fi
+# origin is WebKit/WebKit and the forks are already there -- the same wiring
+# every other target's checkout gets, from the one place that knows the list
+# (wk_wiring_script in lib/store.sh, part of the tree rsynced in above).
+#
+# In a subshell, because those files are written for `wk` and define log(),
+# warn() and a shell mode of their own; this script has its own and neither
+# should be able to surprise the other.
+#
+# Whether a push from in here can *authenticate* is a separate switch -- see
+# `wk push`. A guest has no deploy key today, so the push URL is a URL that
+# fails at the door rather than one that quietly pushes.
+_wiring=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_wiring_script "$2"' \
+              _ "$WK_TOOLS_DIR" "$SRC" 2>/dev/null) \
+    && sh -c "$_wiring" \
+    && say "remotes: origin=WebKit/WebKit, forks added" \
+    || say "WARNING: could not wire the checkout's remotes"
+
 say "WebKit at $(git -C "$SRC" rev-parse --short HEAD)"
 
 # --- Claude Code -------------------------------------------------------------
@@ -134,7 +154,6 @@ fi
 # container's shared mutable /skills volume: `wk build` re-rsyncs the tree with
 # --delete on every run, so in-guest skill edits would be silently clobbered --
 # better they fail to write than quietly vanish.
-WK_TOOLS_DIR="$HOME/wk-tools"
 if [ -d "$WK_TOOLS_DIR/claude" ]; then
     mkdir -p "$HOME/.claude"
     ln -sfn "$WK_TOOLS_DIR/claude/settings.json" "$HOME/.claude/settings.json"

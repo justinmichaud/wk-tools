@@ -24,7 +24,7 @@
 #
 #   WK_REMOTE_HOST=devbox-arm64-2  # ssh destination; defaults to the target name
 #   WK_REMOTE_ROOT=/home/you/wk    # defaults to ~/wk on the box
-#   WK_REMOTE_MAX_JOBS=16          # hard ceiling regardless of what is free
+#   WK_TARGET_CMAKE=-DFOO=ON       # extra CMake flags for builds on this machine
 #   WK_REMOTE_REFERENCE=/var/...   # a shared checkout to clone from; see below
 #   WK_REMOTE_LOCAL=1              # this *is* the machine; run without ssh
 #
@@ -54,8 +54,16 @@ WK_REMOTE_ROOT="${WK_REMOTE_ROOT:-}"
 # performance knob -- the point is that a 96-core machine shared by six people
 # should not hand any one of them 48 jobs just because the load average
 # happened to be low in the second we looked.
-WK_REMOTE_MAX_JOBS="${WK_REMOTE_MAX_JOBS:-16}"
-WK_MAX_JOBS="$WK_REMOTE_MAX_JOBS"   # what lib/resources.sh reads
+# No job ceiling of its own. It had one -- WK_REMOTE_MAX_JOBS, 16 by default --
+# and a fixed number is exactly the thing this repo's resource policy says not
+# to have: it was too small on a 250 GB build box and would be too large on a
+# small one, and it went stale the moment the machine changed. The job count is
+# derived per build from what that machine has free *at the time*
+# (_remote_probe reads MemAvailable and the load average on every invocation),
+# which is the number that decides whether a link step survives.
+#
+# WK_MAX_JOBS is still honoured if something in the environment sets it, as a
+# deliberate one-off; nothing configures it any more.
 
 # Host-side state, per machine. $WK_STORE defaults to /var/lib/wk, which is
 # right inside the podman VM and wrong on a workstation driving a build
@@ -287,16 +295,19 @@ t_create() {
         # theirs: no 13 GB mirror of our own on a machine whose MOTD asks
         # everyone to keep disk use down.
         #
-        # origin stays pointed at it, because it is refreshed every ten minutes
-        # and is far closer than GitHub. `github` is added alongside so an
-        # upstream fetch is always one named remote away.
+        # The clone comes from it, and then origin is re-pointed at
+        # WebKit/WebKit like everywhere else -- the machine's copy stays as
+        # `shared`, which is what a fast, ten-minutes-fresh local mirror should
+        # be called. It was origin until 2026-08-19, which made `git log
+        # origin/main` in a remote workspace answer for that box's last fetch
+        # rather than for upstream.
         info "cloning from $ref (this machine's shared WebKit, hardlinked)"
         _rsh_q "set -e
             mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
-            git clone --quiet -b main $(sh_quote "$ref") $(sh_quote "$ws/WebKit")
-            git -C $(sh_quote "$ws/WebKit") remote add github \
-                https://github.com/WebKit/WebKit.git 2>/dev/null || true" \
+            git clone --quiet -b main $(sh_quote "$ref") $(sh_quote "$ws/WebKit")" \
             || die "could not clone $ref on $WK_REMOTE_HOST"
+        _rsh_q "$(wk_wiring_script "$ws/WebKit" shared "$ref" "$root/ssh/config")" \
+            || warn "could not wire the remotes in $ws/WebKit"
     else
         # No shared repository, so we keep one -- and this is also the answer
         # to "what does `wk sync` mean remotely": it means this, and it happens
@@ -332,6 +343,11 @@ t_create() {
             git -C \"\$M\" fetch --prune -q origin
             git clone --quiet --shared -b main \"\$M\" $(sh_quote "$ws/WebKit")" \
             || die "could not create the checkout on $WK_REMOTE_HOST"
+        # Same wiring as every other target: origin is WebKit/WebKit, the forks
+        # are here, and the local mirror keeps a name of its own -- the
+        # workspace borrows its objects through --shared either way.
+        _rsh_q "$(wk_wiring_script "$ws/WebKit" mirror "$root/mirror" "$root/ssh/config")" \
+            || warn "could not wire the remotes in $ws/WebKit"
     fi
 
     # ccache's own default ceiling is 5 GB, which a couple of WebKit builds
@@ -418,6 +434,30 @@ t_has_wk() {
 
 t_wk() {
     _rsh "cd \$HOME && $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@")"
+}
+
+# Detached on the machine, so this end can go away.
+#
+# nohup and </dev/null, and the redirections matter as much as the nohup:
+# ssh's own session ends when its channel closes, and a child still holding
+# the tty or the pipe is killed with it. The log is not lost -- the far-side
+# `wk build` writes build.log and build.status beside the checkout, which is
+# where `wk logs` and `wk status` already look.
+t_wk_detach() {
+    _rsh_q "cd \$HOME && nohup $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@") \
+                >/dev/null 2>&1 </dev/null & echo \$!"
+}
+
+# The same, with a pty: `wk sudo require` over there prompts for a password,
+# and sudo refuses to read one without a terminal.
+t_wk_tty() {
+    if _remote_is_local; then
+        t_wk "$@"
+        return $?
+    fi
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    ssh -t $(_ssh_opts) "$WK_REMOTE_HOST" \
+        "cd \$HOME && $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@")"
 }
 
 # A pty, for anything with a full-screen UI. ssh gives a command no terminal

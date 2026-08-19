@@ -27,6 +27,12 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+# The store this machine keeps its own keys in: /var/lib/wk inside the podman
+# VM, the remote root on a build machine. The driver is what knows, so ask it
+# rather than letting the default answer for a machine it is wrong about.
+load_target "$(default_target)" 2>/dev/null || true
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 ACTION="${1:-register}"
@@ -47,7 +53,66 @@ in_vm() {
 }
 
 ensure_keys() { in_vm "WK_IN_VM=1 /opt/wk-tools/cmd/key ensure" 2>&1 | sed 's/^/  /'; }
-pub_of()      { in_vm "cat /var/lib/wk/secrets/build_key_$1.pub 2>/dev/null" | tr -d '\r'; }
+
+# --- one key per machine, not one key everywhere ------------------------------
+#
+# GitHub refuses the same deploy key on a second repository, which is what
+# forced one key per fork. It is perfectly happy with several keys on one
+# repository, though, and that is what makes this work: every machine that
+# pushes gets a key of its own, registered under its own name, and can be
+# revoked on its own without touching the others. Copying one key between
+# machines would give that up and put a private key on the wire.
+#
+# The machines: this workstation's own store (the podman VM on macOS, the local
+# store on Linux) and every configured build machine that has wk-tools on it.
+key_machines() {
+    local t
+    echo local
+    for t in $(target_all); do
+        case "$t" in container|vm|local) continue ;; esac
+        ( load_target "$t"; t_has_wk ) 2>/dev/null && echo "$t"
+    done
+    return 0
+}
+
+# The label a key is registered under, so a key list on GitHub says which
+# machine each one lets in.
+m_label() {
+    [ "$1" = local ] && { hostname -s; return 0; }
+    printf '%s' "$1"
+}
+
+m_ensure() {
+    if [ "$1" = local ]; then ensure_keys; return 0; fi
+    ( load_target "$1"; t_wk key ensure ) 2>&1 | sed 's/^/  /'
+}
+
+# `|| true` on both: a machine with no key yet answers non-zero, and under
+# `set -o pipefail` that becomes the caller's assignment status and ends the
+# command. An absent key is an answer here, not a failure.
+m_pub() {
+    if [ "$1" = local ]; then pub_of "$2"; return 0; fi
+    { ( load_target "$1"; t_wk key pub "$2" ) 2>/dev/null || true; } | tr -d '\r'
+}
+
+m_sshtest() {
+    if [ "$1" = local ]; then "$0" sshtest "$2" 2>/dev/null || true; return 0; fi
+    { ( load_target "$1"; t_wk key sshtest "$2" ) 2>/dev/null || true; } | tr -d '\r'
+    return 0
+}
+# The public half. `wk push off` moves only the *private* half out of the
+# mounted directory, so this normally finds it where it always was; the second
+# path is for a key generated while push was off. Registering a key is not the
+# same permission as being able to use one, so both keep working either way.
+pub_of()      { in_vm "cat $WK_STORE/secrets/build_key_$1.pub 2>/dev/null \
+                       || cat $WK_STORE/push-keys/build_key_$1.pub 2>/dev/null" | tr -d '\r'; }
+
+# Where the private half is right now, or empty when there is none. `wk key
+# check` needs it to authenticate, and needs to say *why* when it cannot.
+priv_of()     { in_vm "for d in secrets push-keys; do \
+                          p=$WK_STORE/\$d/build_key_$1; \
+                          [ -f \"\$p\" ] && { echo \"\$p\"; break; }; \
+                       done" | tr -d '\r'; }
 
 # --- ensure runs inside the VM, where the secrets are ------------------------
 if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
@@ -55,7 +120,13 @@ if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         key="$WK_STORE/secrets/build_key_$remote"
-        if [ -f "$key" ]; then
+        # A key held back by `wk push off` is still this machine's key: it is
+        # in $WK_STORE/push-keys, out of the workspaces' reach on purpose.
+        # Generating a second one here would register a new deploy key and
+        # leave the switch pointing at a dead one.
+        if [ -f "$WK_STORE/push-keys/build_key_$remote" ]; then
+            unchanged "key for $repo (held back -- 'wk push on' to expose it)"
+        elif [ -f "$key" ]; then
             unchanged "key for $repo"
         else
             # No passphrase: used unattended by agents, and a passphrase stored
@@ -69,6 +140,55 @@ if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
 fi
 
 case "$ACTION" in
+# One public key, nothing else: what a workstation reads over ssh when it is
+# registering this machine's key. `show` is the human version.
+pub)
+    remote="${2:-}"
+    [ -n "$remote" ] || die "usage: wk key pub <remote>"
+    out=$(pub_of "$remote")
+    [ -n "$out" ] || exit 1
+    printf '%s\n' "$out"
+    ;;
+
+# Does the key on *this* machine authenticate, and as what? Printed raw, for a
+# caller that will interpret it -- which may be another machine, since only the
+# workstation has `gh` and only the machine with the key can offer it.
+sshtest)
+    remote="${2:-}"
+    [ -n "$remote" ] || die "usage: wk key sshtest <remote>"
+    priv=$(priv_of "$remote")
+    [ -n "$priv" ] || { echo "no key"; exit 1; }
+    case "$priv" in */push-keys/*) echo "push is off"; exit 3 ;; esac
+    in_vm "ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes \
+              -o BatchMode=yes -i $(sh_quote "$priv") \
+              -T git@github.com 2>&1 </dev/null || true"
+    ;;
+
+# The keys this machine holds, one per line, with the fingerprint that
+# identifies them on GitHub and where they currently are:
+#
+#   fork     SHA256:…  allowed
+#   forkwpe  SHA256:…  held
+#
+# For `wk status`, which lists them per machine -- "which keys can push from
+# where" is a question about the fleet, and reading a fingerprint off a screen
+# beats reading a public key off one.
+fingerprints)
+    wk_push_forks | while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        pub=$(pub_of "$remote")
+        [ -n "$pub" ] || { printf '%-9s %-50s %s\n' "$remote" "-" "no key"; continue; }
+        fp=$(printf '%s\n' "$pub" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+        priv=$(priv_of "$remote")
+        case "$priv" in
+            '')             state="no private half" ;;
+            */push-keys/*)  state="held back (wk push on)" ;;
+            *)              state="push allowed" ;;
+        esac
+        printf '%-9s %-50s %s\n' "$remote" "${fp:-unreadable}" "$state"
+    done
+    ;;
+
 show)
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
@@ -80,34 +200,39 @@ register)
     require gh "gh is required to register deploy keys -- https://cli.github.com"
     gh auth status >/dev/null 2>&1 || die "gh is not authenticated -- run: gh auth login"
 
-    ensure_keys
-
     failed=0
+    for machine in $(key_machines); do
+        label=$(m_label "$machine")
+        info "keys for $label"
+        m_ensure "$machine"
+
     while read -r remote repo alias; do
         [ -n "$remote" ] || continue
-        pub=$(pub_of "$remote")
-        [ -n "$pub" ] || { warn "no key for $repo"; failed=1; continue; }
+        pub=$(m_pub "$machine" "$remote")
+        [ -n "$pub" ] || { warn "no key for $repo on $label"; failed=1; continue; }
 
-        title="wk build key ($(hostname -s))"
+        # The machine's name, because a deploy-key list on GitHub with three
+        # identical titles is a list you cannot revoke selectively.
+        title="wk build key ($label)"
 
         # Already registered? Compare the key body, ignoring title and comment.
         body=$(printf '%s' "$pub" | awk '{print $1" "$2}')
         if gh api "repos/$repo/keys" --jq '.[].key' </dev/null 2>/dev/null \
              | awk '{print $1" "$2}' | grep -qxF "$body"; then
-            unchanged "$repo: key already registered"
+            unchanged "$repo: $label's key already registered"
             continue
         fi
 
-        info "registering deploy key on $repo"
+        info "registering $label's deploy key on $repo"
         # read_only=false is the whole point: a key registered read-only looks
         # fine until the first push fails.
         if gh api "repos/$repo/keys" \
              -f "title=$title" \
              -f "key=$pub" \
              -F read_only=false </dev/null >/dev/null 2>&1; then
-            changed "$repo: deploy key registered with write access"
+            changed "$repo: $label's deploy key registered with write access"
         else
-            warn "$repo: could not register automatically"
+            warn "$repo: could not register $label's key automatically"
             log  "  add it by hand at https://github.com/$repo/settings/keys/new"
             log  "  (tick 'Allow write access')"
             printf '%s\n' "$pub"
@@ -116,6 +241,7 @@ register)
     done <<EOF
 $(wk_push_forks)
 EOF
+    done
 
     echo >&2
     "$0" check
@@ -130,15 +256,27 @@ check)
     # read_only is explicit. Checking ssh alone would happily pass a read-only
     # key and fail at the first push instead.
     rc=0
-    while read -r remote repo alias; do
+    for machine in $(key_machines); do
+      label=$(m_label "$machine")
+      section_printed=""
+      while read -r remote repo alias; do
         [ -n "$remote" ] || continue
-        printf '  %-28s ' "$repo"
-        pub=$(pub_of "$remote")
+        [ -n "$section_printed" ] || { printf '  %s\n' "$label:"; section_printed=1; }
+        printf '    %-28s ' "$repo"
+        pub=$(m_pub "$machine" "$remote")
         [ -n "$pub" ] || { echo "no key -- run: wk key register"; rc=1; continue; }
 
-        out=$(in_vm "ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes \
-                        -o BatchMode=yes -i /var/lib/wk/secrets/build_key_$remote \
-                        -T git@github.com 2>&1 </dev/null || true")
+        # The ssh half runs on the machine that holds the key -- it is the only
+        # one that can offer it -- and the answer comes back here, where `gh`
+        # and its credential are. Neither half can be done from the other end.
+        out=$(m_sshtest "$machine" "$remote")
+        case "$out" in
+            "push is off"*)
+                echo "registered, but push is OFF there -- 'wk push on' allows it"
+                continue ;;
+            "no key"*)
+                echo "no key -- run: wk key register"; rc=1; continue ;;
+        esac
 
         case "$out" in
             *"Hi $repo!"*) ;;
@@ -158,9 +296,10 @@ check)
             true)  echo "READ-ONLY -- delete it on GitHub and re-run 'wk key register'"; rc=1 ;;
             *)     echo "registered, but write access could not be confirmed"; rc=1 ;;
         esac
-    done <<EOF
+      done <<EOF
 $(wk_push_forks)
 EOF
+    done
     exit $rc
     ;;
 

@@ -73,9 +73,11 @@ report_one() {
     local ws="$1" kind="$2" status_file="$3"
     local state=none config="" arch="" secs="" rc="" logf=""
 
+    local peak=""
     if [ -f "$status_file" ]; then
         # shellcheck disable=SC1090
         state=$(awk -F= '/^state=/{print $2}' "$status_file")
+        peak=$(awk -F= '/^peak_mb=/{print $2}' "$status_file")
         config=$(awk -F= '/^config=/{print $2}' "$status_file")
         # Recorded per build rather than read from the workspace now: what
         # matters here is the architecture the build in question was made with,
@@ -87,9 +89,10 @@ report_one() {
     fi
 
     if [ "$kind" = build ]; then
-        printf '%-18s %-16s %-10s %s=%s' "$ws" "$TARGET" "$(t_info "$ws")" "$kind" "${state:-none}"
+        printf '%-18s %-16s %-10s %-24s %s=%s' \
+            "$ws" "$TARGET" "$(ws_display_state "$ws")" "$(t_branch "$ws")" "$kind" "${state:-none}"
     else
-        printf '%-18s %-16s %-10s %s=%s' "" "" "" "$kind" "${state:-none}"
+        printf '%-18s %-16s %-10s %-24s %s=%s' "" "" "" "" "$kind" "${state:-none}"
     fi
     case "$arch" in native|'') arch="" ;; *) arch=", $arch" ;; esac
     [ -n "$config" ] && printf ' (%s%s)' "$config" "$arch"
@@ -123,6 +126,19 @@ report_one() {
         warn "  killed after no output; see $logf"
         worst=3
         ;;
+    # The memory watchdog's verdict, kept distinct from a build that merely
+    # failed: the fix is a job count or a per-job working set, not the code.
+    oom)
+        warn "  killed for memory${peak:+ (peak ${peak}MB)}; see $logf"
+        grep -a 'wk: MEMORY LIMIT' "$logf" 2>/dev/null | tail -1 | sed 's/^wk: /    /' >&2 || true
+        worst=3
+        ;;
+    esac
+
+    # Printed for a build that survived too: how close it came is the question
+    # asked right after one that nearly did not finish.
+    case "$state" in
+        ok|running) [ -z "$peak" ] || log "  memory: peak ${peak}MB" ;;
     esac
 }
 
@@ -145,33 +161,118 @@ delegate() {
     return "$rc"
 }
 
+# This machine's own tooling, once, when this machine is the one driving.
+# Everything else in the fleet block is compared against it, so it has to be
+# on screen -- and on a macOS host it is the one line no target walk produces,
+# because the store and the tooling copies are all somewhere else.
+report_self() {
+    local ver sha dirty tree
+    [ -z "${WK_EXPECT_TREE:-}" ] || return 0
+    ver=$("$WK_ROOT/cmd/version" 2>/dev/null) || return 0
+    sha=$(printf '%s\n' "$ver"   | sed -n 's/^sha=//p')
+    dirty=$(printf '%s\n' "$ver" | sed -n 's/^dirty=//p')
+    tree=$(printf '%s\n' "$ver"  | sed -n 's/^tree=//p')
+    printf '%-18s %-16s %s\n' "" "wk-tools@here" \
+        "$([ "$sha" = - ] || printf '%s%s ' "$sha" "$([ "$dirty" = yes ] && printf '+dirty')")tree $tree  this machine"
+}
+
+# --no-fleet: report the workspaces and nothing else. For the half of a
+# listing that is being assembled by another machine -- it asks each machine
+# for its keys and its version itself, so a delegated status printing its own
+# would be the same facts twice, compared against the wrong side.
+FLEET=1
+if [ "${1:-}" = --no-fleet ]; then FLEET=""; shift; fi
+
 # Raise the worst-so-far. A function rather than `[ x -gt y ] && worst=x`,
 # because that form is the last command of an AND-OR list and returns 1 when
 # the test is false -- which under `set -e` ends the walk on the second target
 # that reports the same state.
 bump() { [ "$1" -gt "$worst" ] && worst="$1"; return 0; }
 
+# What a *machine* is, as opposed to what a workspace is doing: which wk-tools
+# it runs, and which push keys it holds.
+#
+# Both are fleet questions and this is the fleet command. The keys because one
+# machine per key is the design (GitHub takes many deploy keys on one
+# repository, so every machine gets its own and can be revoked on its own),
+# which is only manageable if something lists them side by side. The version
+# because every machine runs a *copy* of this repository, pushed by rsync, and
+# a stale copy fails as `unknown option --quiet` from a command that works
+# perfectly on the machine you typed it on -- three times in one afternoon,
+# which is what put this here.
+#
+# The machine that holds the thing is the machine that answers: a fingerprint
+# or a tree hash read from anywhere else would be a copy of a fact. The
+# comparison happens here, because only this side sees both.
+#
+# Read-only throughout -- public keys, a hash of files on disk, and nothing
+# started anywhere.
+report_machine() {
+    local label="$1" ver keys mine theirs sha dirty note
+
+    if [ "$WK_TARGET_KIND" = remote ] && t_has_wk; then
+        ver=$(  { t_wk version          2>/dev/null || true; } | tr -d '\r' )
+        keys=$( { t_wk key fingerprints  2>/dev/null || true; } | tr -d '\r' )
+    elif [ "$label" = "$(default_target)" ]; then
+        # This machine's own store and its own tooling. Not every target names
+        # a machine we can read: on a macOS host the container store lives in
+        # the podman VM, and the VM's own half of this listing reports it.
+        ver=$("$WK_ROOT/cmd/version"          2>/dev/null || true)
+        keys=$("$WK_ROOT/cmd/key" fingerprints 2>/dev/null || true)
+    else
+        return 0
+    fi
+
+    if [ -n "$ver" ]; then
+        theirs=$(printf '%s\n' "$ver" | sed -n 's/^tree=//p')
+        sha=$(printf '%s\n' "$ver"    | sed -n 's/^sha=//p')
+        dirty=$(printf '%s\n' "$ver"  | sed -n 's/^dirty=//p')
+        # Compared against the machine that *pushes* the tooling, which is the
+        # workstation -- not against whichever half of the listing happens to
+        # be printing. The podman VM's own copy is rsynced from there, so a VM
+        # comparing itself with itself would report "in sync" about a tree
+        # that is a week behind the machine it came from. WK_EXPECT_TREE is
+        # how the workstation says what it has; unset means this is the
+        # workstation.
+        mine="${WK_EXPECT_TREE:-$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)}"
+        note="in sync"
+        [ "$theirs" = "$mine" ] || note="DIFFERS from the workstation ($mine) -- push it there"
+        printf '%-18s %-16s %s\n' "" "wk-tools@$label" \
+            "$([ "$sha" = - ] || printf '%s%s ' "$sha" "$([ "$dirty" = yes ] && printf '+dirty')")tree $theirs  $note"
+    fi
+
+    [ -n "$keys" ] || return 0
+    printf '%s\n' "$keys" | while read -r line; do
+        [ -n "$line" ] || continue
+        printf '%-18s %-16s %s\n' "" "keys@$label" "$line"
+    done
+}
+
 if [ -n "${1:-}" ]; then
     require_name "$1"
     TARGET="${WK_TARGET:-$(target_of "$1" 2>/dev/null || default_target)}"
     load_target "$TARGET"
     if t_has_wk; then
-        delegate status "$1"
+        delegate status --no-fleet "$1"
         exit $?
     fi
     report "$1"
 else
     found=0
-    for TARGET in ${WK_TARGET:-$(in_workspace && default_target || target_all)}; do
+    for TARGET in $(walk_targets); do
         load_target "$TARGET"
         if t_has_wk; then
             found=1
-            rc=0; delegate status || rc=$?
+            rc=0; delegate status --no-fleet || rc=$?
             bump "$rc"
+            [ -z "$FLEET" ] || report_machine "$TARGET"
             continue
         fi
         for ws in $(target_workspaces); do found=1; report "$ws"; done
+        [ -z "$FLEET" ] || report_machine "$TARGET"
     done
+    [ -z "$FLEET" ] || report_self
+
     # Named when the caller asked about one target in particular -- a macOS
     # host reports the host-side targets one pass at a time, and three bare
     # "(no workspaces)" lines in a row say nothing about which.

@@ -11,24 +11,59 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
 
-TARGET="${WK_TARGET:-container}"
-. "$WK_ROOT/targets/$TARGET.sh"
+# Through load_target, never by sourcing the driver directly: a driver is
+# written against the contract in lib/target.sh and uses its helpers at source
+# time (`WK_TARGET=vm wk gc` died in targets/vm.sh with `wk_state_dir: command
+# not found`), and the per-target reset that stops two drivers in one process
+# from inheriting each other's globals lives there too.
+TARGET="${WK_TARGET:-$(default_target)}"
+load_target "$TARGET"
+
+# Exclusive, for the same reason `wk sync` takes it: this prunes snapshots by
+# reference count, and both `wk sync` (which publishes one) and `wk new` (which
+# pins one) hold the same lock. Without it, the window between `wk new`
+# resolving a base and the driver recording the pin is a window in which gc can
+# delete the snapshot underneath it.
+hold_lock store
 
 REFRESH_NET=""
 [ "${1:-}" = --refresh-net ] && REFRESH_NET=1
 
+# The snapshot store and the mirror belong to the overlay scheme, which is the
+# container target's. A vm or remote target has neither -- its "base" is the
+# golden guest image or the machine's own shared repository -- so pruning and
+# repacking them there means operating on an empty directory and reporting a
+# fatal git error about it.
+_uses_snapshots() { t_needs_base; }
+
 # --- unreferenced base snapshots --------------------------------------------
-for base in $(unreferenced_bases); do
-    # Keep the newest snapshot even when unreferenced: it is what the next
-    # `wk new` will use, and re-fetching it is expensive.
-    [ "$base" = "$(current_base)" ] && continue
-    info "removing unreferenced snapshot $base"
-    rm -rf "$(wk_base_dir)/$base"
-done
+#
+# A workspace that has not recorded its pin yet -- creation in flight, or
+# rubble left by one that was killed -- is a reference nothing can count, and
+# `unreferenced_bases` refuses to answer at all while one exists. Saying why is
+# this command's job: the snapshots simply stay, which costs disk and nothing
+# else.
+unpinned=""
+if _uses_snapshots; then
+    unpinned=$(unpinned_workspaces | tr '\n' ' ')
+    unpinned="${unpinned% }"
+fi
+
+if [ -n "$unpinned" ]; then
+    warn "not pruning snapshots: workspace(s) $unpinned have no recorded base"
+    log  "  they never finished being created -- 'wk new <name>' remakes one from"
+    log  "  scratch, 'wk rm <name>' removes it; then re-run 'wk gc'"
+elif _uses_snapshots; then
+    for base in $(unreferenced_bases); do
+        info "removing unreferenced snapshot $base"
+        rm -rf "$(wk_base_dir)/$base"
+    done
+fi
 
 # --- podman ------------------------------------------------------------------
-if have podman; then
+if [ "$WK_TARGET_KIND" = container ] && have podman; then
     podman image prune -f >/dev/null 2>&1 || true
     podman volume prune -f >/dev/null 2>&1 || true
     info "pruned dangling images and volumes"
@@ -38,7 +73,9 @@ fi
 # Repacking rewrites pack files that snapshots share inodes with via cp -al, so
 # it is only safe when nothing is using them.
 active=$(list_workspaces | wc -l | tr -d ' ')
-if [ "$active" -eq 0 ]; then
+if ! _uses_snapshots; then
+    debug "no snapshot store on target '$TARGET'; nothing to repack"
+elif [ "$active" -eq 0 ]; then
     info "repacking the mirror"
     git -C "$(wk_mirror)" gc --auto --quiet || true
 else

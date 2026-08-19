@@ -205,6 +205,37 @@ xcode)
     ;;
 esac
 
+# --- the memory watchdog -----------------------------------------------------
+#
+# Started here, in the background, and pointed at *this* shell's pid -- the
+# `exec` below replaces this process without changing its pid, so from the
+# watchdog's side it is watching the build itself and every compiler under it.
+#
+# The budget is what the job count was derived from: jobs x the per-job working
+# set. That is a prediction (lib/resources.sh sizes from memory free at the
+# time), and this is the thing that notices when the prediction was wrong --
+# before the OOM killer picks a victim, which on a shared machine may be
+# somebody else's work entirely.
+#
+# The floor is generous by default and the budget has one too: a single WebKit
+# link step can want several GB on its own, so a small job count must not mean
+# a budget a normal build trips over.
+# The floor applies to the *derived* budget only. A number that was asked for
+# explicitly is the answer, not a suggestion -- silently raising it to 8 GB is
+# how a --mem-budget of 200 produced a build that was never watched, which is
+# worse than refusing the flag would have been.
+if [ -n "${WK_MEM_BUDGET_MB:-}" ]; then
+    mem_budget=$WK_MEM_BUDGET_MB
+else
+    mem_budget=$(( jobs * ${WK_MB_PER_JOB:-1536} ))
+    [ "$mem_budget" -lt 8192 ] && mem_budget=8192
+fi
+watchdog="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mem-watchdog.sh"
+if [ -x "$watchdog" ]; then
+    "$watchdog" "$$" "$mem_budget" "${WK_MEM_FLOOR_MB:-2048}" &
+    echo "wk: memory watchdog: budget ${mem_budget}MB, floor ${WK_MEM_FLOOR_MB:-2048}MB, sampled every ${WK_MEM_INTERVAL:-30}s" >&2
+fi
+
 # ionice keeps the build off the desktop's I/O path; choom makes the OOM killer
 # choose the build rather than the session. oom_score_adj is inherited, so
 # setting it on the wrapper covers every compiler process underneath. Neither

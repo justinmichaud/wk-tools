@@ -19,3 +19,28 @@ Consequences:
 
 Never use `git push --force` against a shared branch, and never commit unless
 asked.
+
+## Long-running wk commands
+
+`wk build`, `wk test` and `wk bench` outlive any tool call: the Bash tool
+defaults to a 2-minute timeout and maxes out at 10, while a cold WebKit build
+is tens of minutes. A foreground timeout SIGTERMs the local driver, and that
+propagates to the remote ninja -- the build dies at whatever object it had
+reached, leaving `build.status` still saying `running`.
+
+So never run one in the foreground. Two ways, and prefer the first:
+
+- **`wk build <ws> <config> --detach`** returns in a fraction of a second and
+  leaves the build running *on the machine that builds it* — in the podman VM
+  for a container workspace, on the build machine itself for a remote one. No
+  ssh session has to stay up, so nothing this end does can kill it. Then poll
+  `wk status <ws>` and read `wk logs <ws>` when it ends.
+- `run_in_background` for anything without a `--detach` of its own
+  (`wk test`, `wk bench`, `./setup`), then poll the same way.
+
+`wk setup` and the other provisioning commands are minutes, not seconds: run
+them in the background too rather than watching a tool call time out.
+
+`wk status` reporting `alive: [N/M] (last output Xs ago)` just after a kill is
+not evidence the build survived; in-flight compile jobs drain for a minute or
+more. Confirm with `pgrep -c ninja` on the target before believing it.

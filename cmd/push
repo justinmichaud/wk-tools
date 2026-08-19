@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+#
+# wk push on|off|status -- whether a workspace can push to git at all.
+#
+# The rule this implements, from docs/HANDOFF-sandboxing.md: only the person at
+# the keyboard pushes. An agent in a workspace must not be able to publish
+# anything -- the failures that produced this were Claude pushing over work and
+# replying to reviewers on GitHub -- while a shell in the same workspace, run by
+# a human who asked for it, should push perfectly normally.
+#
+# So it is a switch, and the switch is *where the key is*, not a flag anything
+# reads:
+#
+#   on    the private deploy keys are in the store's secrets directory, which
+#         every workspace has mounted read-only at /secrets and links to from
+#         ~/.ssh. Push works.
+#   off   they are in $WK_STORE/push-keys, which nothing mounts anywhere. The
+#         links in every workspace dangle, ssh has no identity to offer, and a
+#         push is refused by GitHub. Nothing in a workspace can undo this: the
+#         only copy is on the far side of a read-only mount, on a filesystem a
+#         container cannot see.
+#
+# That is the whole design. There is no state file to disagree with reality,
+# nothing to restore after a crash, and `status` is a directory listing rather
+# than a claim -- the same rule the rest of the workspace state follows
+# (docs/HANDOFF-workspace-state.md).
+#
+# `wk claude` turns it off before handing over control, which is the case the
+# switch exists for; see the note there about when it turns it back on.
+#
+#   0  push is on (status), or the action succeeded
+#   1  push is off (status), or the action failed
+#   4  there are no deploy keys on this machine at all
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+# $WK_STORE is target-dependent and the driver is what knows it: /var/lib/wk in
+# the podman VM, the remote root on a build machine. Loading the target this
+# machine *is* puts the keys where this machine actually keeps them, rather
+# than where a workstation would.
+load_target "$(default_target)" 2>/dev/null || true
+
+# Refused inside a workspace, but *not* on a build machine: the switch acts on
+# the machine that holds the key, and on a shared box that is the box. A
+# workspace can only ever read the key it was given -- which is the whole
+# design -- so throwing the switch from in there is exactly what must not work.
+in_workspace && die "'wk push' moves the deploy keys, and this is workspace '$(wk_self)'.
+    The keys are on the host and a workspace cannot reach them -- which is what
+    makes the switch a switch. Run it on the host."
+
+ACTION=status
+TARGET=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        on|off|status) ACTION="$1"; shift ;;
+        --target) TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
+        --all) TARGET=--all; shift ;;
+        *) log "usage: wk push [on|off|status] [--target <name>|--all]"; exit 2 ;;
+    esac
+done
+
+# A build machine keeps its own key under its own wk root, so the switch has to
+# be thrown *there*: the machine answers for itself by running this same file,
+# exactly as `wk sudo` does. The keys are per machine by necessity anyway --
+# GitHub refuses one deploy key on two repositories, but takes many keys on
+# one, so every machine gets its own and can be revoked on its own.
+if [ -n "$TARGET" ]; then
+    _one() {
+        local t="$1" rc=0 out
+        load_target "$t"
+        if ! t_has_wk; then
+            printf '%-22s %s\n' "$t" "no wk-tools there yet -- 'wk remote setup $t'"
+            return 1
+        fi
+        out=$(t_wk push "$ACTION" 2>&1) || rc=$?
+        printf '%s\n' "$out" | sed "s/^/$(printf '%-22s' "$t")/"
+        return "$rc"
+    }
+    if [ "$TARGET" = --all ]; then
+        worst=0
+        for t in $(target_all); do
+            case "$t" in container|vm|local) continue ;; esac
+            rc=0; _one "$t" || rc=$?
+            [ "$rc" -gt "$worst" ] && worst=$rc
+        done
+        exit "$worst"
+    fi
+    _one "$TARGET"
+    exit $?
+fi
+
+# Where the keys go when push is off. Deliberately not under secrets/: that
+# directory is bind-mounted into every workspace, so a subdirectory of it would
+# be just as reachable as the keys were.
+HELD="$WK_STORE/push-keys"
+LIVE="$WK_STORE/secrets"
+
+forks() { wk_push_forks | awk 'NF {print $1}'; }
+
+# The evidence, per fork: live | held | absent. A key that is somehow in both
+# places is reported as `live`, because that is what a workspace would use --
+# and `wk push off` then moves it and the duplicate is gone.
+where() {
+    local r="$1"
+    [ -f "$LIVE/build_key_$r" ] && { echo live; return 0; }
+    [ -f "$HELD/build_key_$r" ] && { echo held; return 0; }
+    echo absent
+}
+
+# Copies of a key inside a workspace's own home, which older workspaces have:
+# firstrun used to `install` the key rather than link it, and a copy is a key
+# this switch cannot reach. They are removed rather than reported, because the
+# original is in the store and a copy has nothing in it to lose.
+#
+# A symlink is the current arrangement and is left alone -- it is the thing
+# that makes the switch work.
+copies() {
+    local d f r
+    [ -d "$WK_STORE/ws" ] || return 0
+    for d in "$WK_STORE"/ws/*/; do
+        [ -d "$d" ] || continue
+        for r in $(forks); do
+            f="$d/home/.ssh/id_$r"
+            [ -f "$f" ] && [ ! -L "$f" ] && printf '%s\n' "$f"
+        done
+    done
+    return 0
+}
+
+purge_copies() {
+    local f n=0
+    while read -r f; do
+        [ -n "$f" ] || continue
+        if rm -f "$f" 2>/dev/null; then
+            n=$((n + 1))
+        else
+            warn "could not remove a copy of a deploy key: $f"
+        fi
+    done <<EOF
+$(copies)
+EOF
+    [ "$n" -eq 0 ] || info "removed $n key copy/copies left in workspace homes"
+}
+
+# Every private key in the directory, not only the ones wk_push_forks names.
+#
+# The switch's promise is "no push credential is reachable from a workspace",
+# and a key it does not know about is exactly as usable as one it does -- a
+# `build_key` left over from before there was one key per fork sat in there for
+# months, and an agent could have pushed with it by naming it directly. The
+# public halves stay: they are not credentials, and `wk key check`/`show` need
+# them while push is off.
+private_keys_in() {
+    local d="$1" f
+    [ -d "$d" ] || return 0
+    for f in "$d"/build_key*; do
+        [ -f "$f" ] || continue
+        case "$f" in *.pub) continue ;; esac
+        printf '%s\n' "$f"
+    done
+}
+
+move_keys() {
+    local from="$1" to="$2" f b moved=0
+    ensure_dir "$to" 0700 >/dev/null
+    while read -r f; do
+        [ -n "$f" ] || continue
+        b=$(basename "$f")
+        mv "$f" "$to/$b"
+        chmod 0600 "$to/$b"
+        # The public half goes with it. It is not a credential and every
+        # reader here falls back to the held directory for it -- but ssh will
+        # offer a public key it can find beside the IdentityFile path even
+        # when it cannot sign with it, so leaving it behind makes an ssh -v
+        # transcript in the off position read exactly like the on position
+        # until the signature fails. One place, one answer.
+        [ -f "$from/$b.pub" ] && mv "$from/$b.pub" "$to/$b.pub"
+        moved=$((moved + 1))
+    done <<EOF
+$(private_keys_in "$from")
+EOF
+    echo "$moved"
+}
+
+case "$ACTION" in
+on)
+    n=$(move_keys "$HELD" "$LIVE")
+    # Idempotent, and it says which of the two it was: a switch that reports
+    # "on" whether or not it did anything is a switch you have to verify by
+    # hand afterwards.
+    if [ "$n" -gt 0 ]; then
+        changed "push is ON -- $n deploy key(s) exposed to every workspace"
+    else
+        info "push is already ON"
+    fi
+    log "  every workspace can push to the forks now, including any agent in one."
+    log "  'wk push off' when you are done; 'wk claude' turns it off by itself."
+    ;;
+
+off)
+    n=$(move_keys "$LIVE" "$HELD")
+    purge_copies
+    if [ "$n" -gt 0 ]; then
+        changed "push is OFF -- $n deploy key(s) held in $HELD"
+    else
+        info "push is already OFF"
+    fi
+    log "  workspaces keep their remotes and can fetch; a push is refused at the door."
+    ;;
+
+status)
+    live=0; held=0; absent=0
+    for r in $(forks); do
+        case "$(where "$r")" in
+            live)   live=$((live + 1));   printf '%-10s %s\n' "$r" "push allowed" ;;
+            held)   held=$((held + 1));   printf '%-10s %s\n' "$r" "held back ($HELD)" ;;
+            absent) absent=$((absent + 1)); printf '%-10s %s\n' "$r" "no key ('wk key register')" ;;
+        esac
+    done
+
+    # Anything else with a private half in there is a push credential too, and
+    # this is the one place that would notice it.
+    other=$(private_keys_in "$LIVE" | while read -r f; do
+                b=$(basename "$f"); keep=""
+                for r in $(forks); do [ "$b" = "build_key_$r" ] && keep=1; done
+                [ -n "$keep" ] || printf '%s\n' "$b"
+            done)
+    if [ -n "$other" ]; then
+        warn "other private key(s) exposed to every workspace: $(printf '%s' "$other" | tr '\n' ' ')"
+        log  "  'wk push off' holds these back too"
+    fi
+
+    c=$(copies | wc -l | tr -d ' ')
+    if [ "$c" -gt 0 ]; then
+        warn "$c workspace(s) hold their own copy of a key, which this switch cannot reach"
+        log  "  'wk push off' removes them (the key itself lives in the store)"
+    fi
+
+    if [ "$live" -gt 0 ]; then
+        info "push is ON"
+        exit 0
+    fi
+    if [ "$held" -gt 0 ]; then
+        info "push is OFF -- 'wk push on' to allow it"
+        exit 1
+    fi
+    warn "there are no deploy keys here at all -- 'wk key register' makes them"
+    exit 4
+    ;;
+
+*)
+    log "usage: wk push on|off|status"
+    exit 2
+    ;;
+esac

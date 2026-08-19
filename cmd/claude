@@ -35,8 +35,37 @@ if [ "$WK_TARGET_KIND" = local ]; then
 fi
 
 if [ "$WK_TARGET_KIND" = remote ]; then
-    die "refusing to run Claude against a remote target: it is a shared machine
-    with no isolation at all. Use a container or vm workspace."
+    # A barrier, not a refusal: it is the user's machine and their call. But it
+    # is the one target with no boundary of any kind -- a shared box, your own
+    # uid, other people's work on the same filesystem, and `--dangerously-skip-
+    # permissions` on top. Nothing here is contained, so the warning is the
+    # containment.
+    barrier "'$NAME' is on the shared build machine '$TARGET', which has no sandbox at
+    all: no container, no separate uid, no filesystem boundary, and other
+    people's work on the same machine. An agent there is an agent on that
+    machine, with your access."
+
+    # Forced, and now it has to actually work. Claude is not installed on a
+    # build box by wk (nothing here provisions an agent onto a shared
+    # machine), so say what is missing rather than handing over a shell that
+    # exits with "command not found".
+    if ! t_exec "$NAME" bash -lc 'command -v claude >/dev/null 2>&1'; then
+        warn "there is no Claude CLI on $TARGET"
+        # Offered, never assumed: installing an agent onto a machine other
+        # people share is a decision about their machine as much as yours, and
+        # `confirm` declines by itself when there is nobody to ask. The same
+        # installer the container and the guest use -- one command, one place
+        # it comes from.
+        if confirm "install it on $TARGET now (into your own ~/.local, as you)?"; then
+            t_exec "$NAME" bash -lc 'curl -fsSL https://claude.ai/install.sh | bash' \
+                || die "the installer failed on $TARGET"
+        else
+            die "not installing. To do it yourself:
+        ssh $TARGET 'curl -fsSL https://claude.ai/install.sh | bash'"
+        fi
+        t_exec "$NAME" bash -lc 'command -v claude >/dev/null 2>&1' \
+            || die "installed, but 'claude' is still not on PATH in a login shell on $TARGET"
+    fi
 fi
 
 if [ "$WK_TARGET_KIND" = container ]; then
@@ -45,7 +74,9 @@ if [ "$WK_TARGET_KIND" = container ]; then
     # bypassed, no host filesystem. If any of that has regressed -- a
     # hand-edited container, a proxy that is not running -- the right response
     # is to stop, not to start an autonomous agent anyway.
-    "$WK_ROOT/cmd/verify" "$NAME" || die "refusing to run: the sandbox is not intact (see above)"
+    "$WK_ROOT/cmd/verify" "$NAME" \
+        || barrier "the sandbox around '$NAME' is not intact (see above), and relaxed
+    permissions are only defensible while it is."
 fi
 
 if [ "$WK_TARGET_KIND" = vm ]; then
@@ -59,9 +90,9 @@ if [ "$WK_TARGET_KIND" = vm ]; then
     # installed after boot filters nothing until the guest restarts. The boot
     # writes the marker; both fail closed, matching the container path above.
     if [ -f "$WK_VM_DIR/$NAME.unfiltered" ] && [ -z "${WK_VM_UNFILTERED:-}" ]; then
-        die "refusing to run: '$NAME' was booted with NO egress filter.
+        barrier "'$NAME' was booted with NO egress filter.
     Restart it filtered:  wk vm stop $NAME && wk vm start $NAME
-    Or set WK_VM_UNFILTERED=1 to say you meant it."
+    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)"
     fi
     if [ -x "${WK_SOFTNET_BIN:-/usr/local/bin/softnet}" ] && [ -z "${WK_VM_UNFILTERED:-}" ]; then
         info "'$NAME' is a macOS VM: egress is filtered on the host by Softnet,
@@ -72,11 +103,50 @@ if [ "$WK_TARGET_KIND" = vm ]; then
   is still unreachable and the guest is still disposable -- but that is the
   whole of the boundary right now."
     else
-        die "refusing to run: softnet is not installed, so this guest's egress is
-    not filtered. Install it:  ./setup --stage softnet   (needs a terminal)
-    Or set WK_VM_UNFILTERED=1 to say you meant it."
+        barrier "softnet is not installed, so this guest's egress is not filtered.
+    Install it:  ./setup --stage softnet   (needs a terminal)
+    (WK_VM_UNFILTERED=1 is the same decision, said the older way.)"
     fi
 fi
+
+# --- git push: off while an agent has the keyboard ---------------------------
+#
+# The one thing a disposable workspace cannot contain is a push: it leaves the
+# blast radius by definition, and the failures that produced this rule were
+# exactly that -- work overwritten on a fork, comments posted to reviewers. So
+# the deploy keys are held back for the duration (`wk push`, which moves them
+# out of the mount rather than setting a flag an agent could clear).
+#
+# Turned back on afterwards only for an interactive session, where somebody is
+# there to notice: a headless run is the babysitter's fix loop, which re-enters
+# this command every few minutes, and leaving push on between its attempts
+# would be the switch flapping open for hours unattended. Off is also where a
+# crash, a kill or a dropped ssh leaves it, which is the safe direction.
+#
+# Container targets only, because that is where the deploy keys are: they live
+# in the podman VM's store and are mounted into containers. A macOS guest has
+# no push credential at all -- nothing installs one -- so there is nothing to
+# hold back, and touching the switch from here would only turn push off for
+# unrelated container workspaces.
+PUSH_WAS_ON=""
+if [ "$WK_TARGET_KIND" = container ] && "$WK_ROOT/wk" push status >/dev/null 2>&1; then
+    PUSH_WAS_ON=1
+    warn "git push is ON -- turning it off while Claude runs in '$NAME'"
+    "$WK_ROOT/wk" push off >/dev/null 2>&1 \
+        || die "refusing to run: could not hold back the push keys ('wk push status')"
+fi
+
+restore_push() {
+    [ -n "$PUSH_WAS_ON" ] || return 0
+    if [ -t 0 ] && [ -t 1 ]; then
+        "$WK_ROOT/wk" push on >/dev/null 2>&1 \
+            && info "git push turned back on" \
+            || warn "could not turn git push back on -- 'wk push on'"
+    else
+        log "git push stays off (headless session; 'wk push on' when you want it back)"
+    fi
+}
+trap restore_push EXIT
 
 info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
 
@@ -88,10 +158,14 @@ info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boun
 # this under nohup with `-p`, and t_exec_tty would demand a tty from a process
 # that owns none. Same sandbox checks either way -- that is why the babysitter
 # comes through here instead of running claude itself.
+# Not exec'd, so the EXIT trap above still runs when Claude exits: the session
+# is the thing being bounded, and the switch has to close behind it.
+rc=0
 if [ -t 0 ] && [ -t 1 ]; then
     t_exec_tty "$NAME" env WK_WORKSPACE="$NAME" \
-        bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $(sh_quote "$@")"
+        bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $(sh_quote "$@")" || rc=$?
 else
     t_exec "$NAME" env WK_WORKSPACE="$NAME" \
-        bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $(sh_quote "$@")"
+        bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $(sh_quote "$@")" || rc=$?
 fi
+exit "$rc"

@@ -66,6 +66,26 @@ t_start()      { :; }
 t_stop()       { :; }
 t_store_init() { store_init; }
 
+# The branch this workspace's checkout is on, or `-` when it cannot be known
+# without starting something.
+#
+# `wk status` prints it per workspace, because "which branch is that one on"
+# is the question you ask before every build and the one thing the listing
+# could not answer -- and with several workspaces open at once, guessing from
+# the name is how the wrong tree gets built.
+#
+# Asked of the target, never of a record: a checkout's branch is git's to
+# answer. The default does that over the driver's own exec, which is right for
+# a machine that is up; a driver whose checkout is readable from here without
+# entering anything overrides it (targets/container.sh does -- an overlay's
+# HEAD is a file on the host, and reading it costs nothing).
+t_branch() {
+    local out
+    [ "$(t_info "$1")" != absent ] || { echo -; return 0; }
+    out=$(t_exec "$1" git -C "$(t_src "$1")" rev-parse --abbrev-ref HEAD 2>/dev/null | tr -d '\r') || out=""
+    printf '%s' "${out:--}"
+}
+
 # Wait until a freshly created workspace is actually usable, and fail if it
 # never gets there. Defaults to "immediately ready", which is true for targets
 # whose creation is synchronous.
@@ -104,6 +124,18 @@ t_exec_build() { t_exec "$@"; }
 t_state_put() { cat >/dev/null; }   # t_state_put <name>, content on stdin
 t_has_wk()    { return 1; }         # is there a far side that can answer?
 t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
+# Start a `wk` command on the far machine and return immediately, leaving it
+# running there. The connection that started it is then free to drop -- which
+# is the whole point: a build must not depend on an ssh session staying up for
+# an hour, and the machine doing the work is the machine that should own the
+# process. Defaults to "there is no far side", where the caller detaches
+# locally instead.
+t_wk_detach() { return 1; }   # t_wk_detach <args...>
+
+# t_wk with a terminal, for the far-side commands that have to ask a human
+# something -- `wk sudo require` is going to prompt for a password, and ssh
+# gives a command no tty unless it is asked to.
+t_wk_tty()    { t_wk "$@"; }
 
 # The load already on the target, in whole cores, as `build_jobs polite`
 # subtracts it. Defaults to this machine's own -- correct for a container,
@@ -362,18 +394,91 @@ _target_reset_vars() {
     if [ -z "${_WK_ENV_SEEDED:-}" ]; then
         _WK_ENV_REMOTE_HOST="${WK_REMOTE_HOST:-}"
         _WK_ENV_REMOTE_ROOT="${WK_REMOTE_ROOT:-}"
-        _WK_ENV_REMOTE_MAX_JOBS="${WK_REMOTE_MAX_JOBS:-}"
         _WK_ENV_REMOTE_REFERENCE="${WK_REMOTE_REFERENCE:-}"
         _WK_ENV_SEEDED=1
     fi
     WK_REMOTE_HOST="$_WK_ENV_REMOTE_HOST"
     WK_REMOTE_ROOT="$_WK_ENV_REMOTE_ROOT"
-    WK_REMOTE_MAX_JOBS="$_WK_ENV_REMOTE_MAX_JOBS"
     WK_REMOTE_REFERENCE="$_WK_ENV_REMOTE_REFERENCE"
     WK_REMOTE_LOCAL=""
     WK_MAX_JOBS=""
+    # Per-machine CMake defaults come from the conf about to be sourced, so
+    # the previous target's must not survive into this one.
+    WK_TARGET_CMAKE=""
     unset _WK_REMOTE_PROBED _WK_REMOTE_HOME _WK_REMOTE_CORES \
           _WK_REMOTE_LOAD _WK_REMOTE_MEM _WK_REMOTE_REF_PROBED
+}
+
+# --- what state is this workspace in? ----------------------------------------
+#
+#   absent    nothing of it exists anywhere
+#   creating  something of it exists, and creation never finished
+#   present   it exists and creation finished
+#
+# Derived on every call from evidence next to the artifacts, stored nowhere:
+# the environment the driver can see, and -- where the target pins a base
+# snapshot -- the `base-id` file, which the driver writes as the last act of
+# creation and which is therefore the completion marker. A workspace that was
+# interrupted mid-create has the directory, the layers and often the container,
+# and no base-id; nothing else on this machine can tell that apart from a
+# finished one, which is why `wk new` used to answer "already exists" about
+# rubble and `wk build` used to build it.
+#
+# The registry is deliberately not consulted: it is a cache of which target a
+# workspace was created with (the audit in docs/HANDOFF-workspace-state.md
+# reclassifies it as one), and a workspace that predates it -- every container
+# workspace on the Linux workstation does -- must not be read as half-made.
+#
+# What this cannot yet see: a remote or vm workspace whose *far side* was cut
+# mid-clone. Those targets pin no base, so there is no marker over there to be
+# missing; the `.wk-ready` marker that fixes it is step 1 of the plan in
+# docs/HANDOFF-workspace-state.md and is not in this pass.
+ws_state() {
+    local name="$1" env ws
+    env=$(t_info "$name" 2>/dev/null || echo absent)
+    ws=$(wk_ws_dir "$name")
+
+    if [ "$env" = absent ] && [ ! -d "$ws" ]; then echo absent; return 0; fi
+
+    if [ "$env" != absent ]; then
+        if t_needs_base && [ ! -f "$ws/base-id" ]; then echo creating; return 0; fi
+        echo present; return 0
+    fi
+
+    # A ws directory with no environment behind it: the near-side half of a
+    # creation that never got to the far side, or the leftovers of a `wk rm`
+    # that was killed. Either way it is rubble, and rule 3 says remake.
+    echo creating
+}
+
+# The word `wk ls` and `wk status` print in their STATE column: the driver's
+# own answer (running, exited, present), except that a workspace creation
+# never finished is reported as `creating` rather than as whatever the
+# environment half of it happens to be. A container that exists inside a
+# workspace that was never finished is not a workspace that is running -- and
+# two commands disagreeing about that is exactly what the rules forbid.
+ws_display_state() {
+    local st; st=$(ws_state "$1")
+    [ "$st" = creating ] && { echo creating; return 0; }
+    t_info "$1"
+}
+
+# The targets a report covers, and the one place that question is answered.
+#
+# `wk ls` and `wk status` both claim to list "the workspaces", so they have to
+# enumerate the same thing: same target list here, same per-target walk in
+# target_workspaces below. They did not -- a bare `wk status` walked every
+# target while `wk ls` on a macOS host was forwarded into the podman VM and
+# answered for containers alone, so a vm or remote workspace appeared in one
+# listing and not the other.
+#
+# An explicit WK_TARGET (which may name several, space separated -- that is how
+# the macOS dispatcher hands over the host-side half) wins; inside a workspace
+# there is exactly one target and it is this machine.
+walk_targets() {
+    if [ -n "${WK_TARGET:-}" ]; then printf '%s\n' $WK_TARGET; return 0; fi
+    if in_workspace; then default_target; return 0; fi
+    target_all
 }
 
 # Every workspace a loaded target has, from both sides of it.
@@ -406,8 +511,7 @@ load_target() {
     machine, and needs $(target_conf "$t"):
 
         WK_REMOTE_HOST=$t          # an ssh destination that already works
-        WK_REMOTE_ROOT=/home/you/wk
-        WK_REMOTE_MAX_JOBS=16"
+        WK_REMOTE_ROOT=/home/you/wk"
 
     # Set before either file is read: a driver that can have several instances
     # has to know which one it is, and both the conf and the driver's own
@@ -422,6 +526,21 @@ load_target() {
     export WK_TARGET WK_TARGET_KIND
 
     _target_reset_vars
+
+    # And the *functions*, which is the other half of the same problem this
+    # file already warns about for variables. A driver overrides the hooks it
+    # needs and a function definition outlives the load, so the first driver's
+    # override was still live when the second target was loaded: measured
+    # 2026-08-19, `wk status` on a build machine walked container first, and
+    # every remote workspace's branch was then read by the container driver's
+    # t_branch -- which looks for an overlay that is not there and answered
+    # `-` for all of them, plausibly and wrongly.
+    #
+    # Re-sourcing this file restores every default before the driver replaces
+    # what it means to replace. It is only function definitions; the running
+    # load_target keeps executing the body it was called with.
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/lib/target.sh"
 
     # The conf first and the driver second, so that the driver's own
     # ${VAR:-default} assignments fill in only what the conf left unsaid.

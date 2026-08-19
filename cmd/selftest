@@ -43,12 +43,18 @@ WK="$WK_ROOT/wk"
 SECTION=""
 LIST=""
 
+# Every section this runner knows. One list, because a name that is not in it
+# has to be a refusal: `wk selftest --section <typo>` used to run nothing at
+# all and exit 0 -- the silent pass the plan's own preamble forbids, and the
+# worst possible one, since it is reported as "everything passed".
+SECTIONS="quick state remote"
+
 usage() {
-    cat >&2 <<'EOF'
+    cat >&2 <<EOF
 usage: wk selftest [--quick] [--section <name>] [--list]
 
   --quick            only checks that need no workspace, no podman and no ssh
-  --section <name>   quick | remote        (more as they are encoded)
+  --section <name>   $(printf '%s' "$SECTIONS" | tr ' ' '|')        (more as they are encoded)
   --list             print the checks and the plan lines they implement
 
 Exit 0 when everything checkable passed; 1 on any failure or plan drift.
@@ -65,6 +71,14 @@ while [ $# -gt 0 ]; do
         *) die "unknown option: $1" ;;
     esac
 done
+
+# Before anything runs, so the refusal is immediate and names what there is.
+if [ -n "$SECTION" ]; then
+    case " $SECTIONS " in
+        *" $SECTION "*) ;;
+        *) die "no such section '$SECTION' -- there are: $SECTIONS" ;;
+    esac
+fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -248,6 +262,29 @@ chk_drivers_source() {
     [ "$rc" -eq 0 ] || { echo "targets/local.sh with a marker: exit $rc: $out"; return 1; }
 }
 
+# A driver overrides the hooks it needs, and a function definition outlives the
+# load -- so loading a second target in one process used to leave the first
+# driver's overrides live. `wk status` walks every target in one process, which
+# is exactly where it bit: the container driver's t_branch answered for remote
+# workspaces and reported "-" for all of them.
+chk_driver_overrides_do_not_leak() {
+    local out rc=0
+    out=$(bash -c '
+        set -euo pipefail
+        WK_ROOT="$1"
+        . "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/resources.sh"
+        . "$WK_ROOT/lib/store.sh";  . "$WK_ROOT/lib/target.sh"
+        # The container driver overrides t_branch; the remote driver does not,
+        # so after loading both the default must be back.
+        load_target container
+        first=$(type t_branch)
+        load_target remote
+        second=$(type t_branch)
+        [ "$first" != "$second" ] || { echo "t_branch is the same after loading two drivers"; exit 1; }
+    ' _ "$WK_ROOT" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || { echo "$out"; return 1; }
+}
+
 # Two argument forms for one command, and each has to lose to the other in the
 # right place: `wk build <config>` in a workspace, `wk build <ws> <config>` on
 # a host. Silently picking the wrong one builds the wrong thing.
@@ -306,6 +343,35 @@ chk_host_only_refused_inside() {
     done
 }
 
+# An agent reaching for a command it has not run before should be able to ask
+# what it does rather than read it. That only holds while every command has a
+# header comment to print -- a new one with none would explain itself as an
+# empty answer, which is worse than no feature at all.
+chk_explain_every_command() {
+    local c n out bad=""
+    for c in "$WK_ROOT"/cmd/*; do
+        [ -f "$c" ] && [ -x "$c" ] || continue
+        n=$(basename "$c")
+        out=$("$WK" "$n" --explain 2>&1) || { bad="$bad $n(exit)"; continue; }
+        printf '%s\n' "$out" | grep -q '^  changes things: ' || bad="$bad $n(no-role)"
+        printf '%s\n' "$out" | grep -q '^what it does' || bad="$bad $n(no-header)"
+        # Three lines of prose is not much to ask of a file's own header.
+        [ "$(printf '%s\n' "$out" | sed -n '/^what it does/,$p' | wc -l)" -ge 4 ] \
+            || bad="$bad $n(empty-header)"
+    done
+    [ -z "$bad" ] || { echo "'wk <cmd> --explain' is not usable for:$bad"; return 1; }
+}
+
+# A status command that prompts for a password is a status command nothing can
+# script -- and `wk doctor` calls this one. The property is "it answers without
+# a terminal", which is exactly what running it with no stdin proves.
+chk_sudo_status_never_prompts() {
+    local out rc=0
+    out=$("$WK" sudo status </dev/null 2>&1) || rc=$?
+    case "$rc" in 0|1) ;; *) echo "exit $rc: $out"; return 1 ;; esac
+    printf '%s\n' "$out" | grep -qi 'password' || { echo "said nothing about passwords: $out"; return 1; }
+}
+
 chk_unknown_command() {
     local out rc=0
     out=$("$WK" nosuchcommand 2>&1) || rc=$?
@@ -344,6 +410,125 @@ chk_no_sudo_daily() {
   cmd/$c: $(printf '%s' "$hits" | head -2 | tr '\n' ';')"
     done
     [ -z "$found" ] || { echo "sudo that can prompt:$found"; return 1; }
+}
+
+# --- state: the rules in docs/HANDOFF-workspace-state.md ---------------------
+
+_machine_state() {
+    podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null || echo none
+}
+
+# Every read-only command, run for real, with the machine stopped. Running it
+# is the only honest check: the guard that was supposed to prevent this already
+# existed in the dispatcher when a `wk status` was observed starting the
+# machine anyway.
+_readonly_commands() {
+    "$WK" status >/dev/null 2>&1 || true
+    "$WK" ls     >/dev/null 2>&1 || true
+    "$WK" logs   selftest-nonexistent >/dev/null 2>&1 || true
+    "$WK" doctor >/dev/null 2>&1 || true
+}
+
+chk_readonly_starts_nothing() {
+    local before after
+    have podman || { echo "no podman on this machine"; return 77; }
+    before=$(_machine_state)
+    [ "$before" = running ] && {
+        echo "the podman machine is running; 'wk stop' first to check this"; return 77; }
+
+    _readonly_commands
+
+    after=$(_machine_state)
+    [ "$after" = "$before" ] || { echo "podman machine went $before -> $after"; return 1; }
+}
+
+# The other half of the same rule: no guest booted, nothing written, nothing
+# repaired. Guests are counted through tart directly rather than through `wk vm
+# ls`, so the check does not depend on the thing it is checking; the write side
+# is the host's own state directory, which is where every file a host-side
+# command would write lives.
+# Name, mtime and size of everything under the host's state directory. `stat`
+# is spelled differently on the two platforms and the wrong spelling does not
+# fail on either -- GNU stat -f reports the *filesystem*, which is identical
+# before and after by construction, so the check would pass without measuring
+# anything.
+_state_fingerprint() {
+    local d; d=$(wk_state_dir)
+    [ -d "$d" ] || { echo "(absent)"; return 0; }
+    if is_macos; then
+        find "$d" -exec stat -f '%N %m %z' {} \; 2>/dev/null | sort
+    else
+        find "$d" -exec stat -c '%n %Y %s' {} \; 2>/dev/null | sort
+    fi
+}
+
+chk_readonly_writes_nothing() {
+    local guests_before guests_after before after d
+    have podman || { echo "no podman on this machine"; return 77; }
+    [ "$(_machine_state)" = running ] && {
+        echo "the podman machine is running; 'wk stop' first to check this"; return 77; }
+
+    guests_before=""; guests_after=""
+    if have tart; then guests_before=$(tart list --format json 2>/dev/null || true); fi
+
+    d=$(wk_state_dir)
+    before=$(_state_fingerprint)
+
+    _readonly_commands
+
+    after=$(_state_fingerprint)
+    if [ "$before" != "$after" ]; then
+        # A control, before blaming the commands: this directory holds the
+        # build logs and status files of every target, and a build running on
+        # a remote machine writes into it once a second. Measured 2026-08-19,
+        # where exactly that produced a failure the commands had no part in.
+        local ctl_a ctl_b
+        ctl_a=$(_state_fingerprint); sleep 3; ctl_b=$(_state_fingerprint)
+        [ "$ctl_a" = "$ctl_b" ] || {
+            echo "$d is being written by something else (a build, most likely);"
+            echo "this check cannot tell that apart from a read-only command writing"
+            return 77; }
+        echo "$d changed:"
+        printf '%s\n' "$before" > "$TMP/before"; printf '%s\n' "$after" > "$TMP/after"
+        diff "$TMP/before" "$TMP/after" | head -10
+        return 1
+    fi
+
+    if have tart; then guests_after=$(tart list --format json 2>/dev/null || true); fi
+    [ "$guests_before" = "$guests_after" ] || { echo "the tart guest list changed"; return 1; }
+}
+
+# `wk ls` and `wk status` both claim to list "the workspaces". A name in one
+# and not the other means one of them is enumerating from somewhere else --
+# which is what a macOS host did for as long as `wk ls` was forwarded whole
+# into the podman VM.
+#
+# stdout only: every warning, header and note goes to stderr, so the rows are
+# the answer. In `wk status` a workspace's own line starts at column 1 and its
+# build/test/babysit lines are indented, which is what separates them here.
+chk_ls_status_same_names() {
+    local a b
+    a=$("$WK" ls 2>/dev/null | tail -n +2 | awk 'NF {print $1}' | sort -u)
+    b=$("$WK" status 2>/dev/null | awk '/^[^ ]/ && NF {print $1}' | sort -u)
+    [ "$a" = "$b" ] || {
+        echo "wk ls lists: $(printf '%s' "$a" | tr '\n' ' ')"
+        echo "wk status  : $(printf '%s' "$b" | tr '\n' ' ')"
+        return 1; }
+}
+
+# The switch only works while the key a workspace uses is the one in the store.
+# A copy inside a workspace is a push credential `wk push off` cannot take
+# back, which is how it was before 2026-08-19 -- and the regression would be
+# silent, because pushing keeps working, which is the failure.
+chk_push_keys_not_copied() {
+    local out
+    have podman || { echo "no podman on this machine"; return 77; }
+    [ "$(_machine_state)" = running ] || {
+        echo "the podman machine is stopped; the keys live in its store"; return 77; }
+    out=$("$WK" push status 2>&1) || true
+    printf '%s\n' "$out" | grep -q 'hold their own copy' && {
+        echo "$out"; return 1; }
+    return 0
 }
 
 # --- remote: needs a configured machine, and reaches it ----------------------
@@ -405,12 +590,23 @@ if want quick; then
     check "the host's \`\$HOME\` has no \`~/.wk-workspace\`"                 chk_no_host_marker
     check "two \`config_build_dir\` definitions"                           chk_no_duplicate_functions
     check "\`wk start\` / \`wk stop\` with a driver loaded"                  chk_drivers_source
+    check "loading a second target does not leave the first driver's overrides live" chk_driver_overrides_do_not_leak
     check "\`wk build <config>\` inside, \`wk build <ws> <config>\` outside"  chk_build_arg_forms
     check "\`wk verify\` refuses inside a workspace"                       chk_verify_refuses_inside
     check "host-only commands refuse inside a workspace"                  chk_host_only_refused_inside
+    check "every command answers \`--explain\` without running anything"     chk_explain_every_command
+    check "\`wk sudo status\` answers without ever prompting"                 chk_sudo_status_never_prompts
     check "an unknown command prints the usage and exits 2"               chk_unknown_command
     check "an unconfigured name is refused, and the error prints the conf to write" chk_unknown_target
     check "no \`wk\` command in the daily path calls \`sudo\` on either host" chk_no_sudo_daily
+fi
+
+if want state; then
+    section "state -- read-only is read-only, and one walk behind both listings"
+    check "machine state identical before and after"                      chk_readonly_starts_nothing
+    check "the same four start no guest, write no file, and repair nothing" chk_readonly_writes_nothing
+    check "print the same workspace-name set on"                          chk_ls_status_same_names
+    check "never copies"                                                  chk_push_keys_not_copied
 fi
 
 if want remote; then

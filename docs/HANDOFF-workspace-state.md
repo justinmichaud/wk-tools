@@ -89,12 +89,20 @@ stay correct, or degrade *visibly and honestly*, across:
 - **Read-only, absolutely.** `wk status` makes no changes: it never starts
   the podman machine, never boots a guest, never writes a status file, never
   repairs anything — it only checks, and reports what it could not check.
-  Observed 2026-08-19: a `wk status` path still starts podman, despite the
-  readonly-report guard in the dispatcher — find the path (a `podman`
-  invocation that auto-starts the machine, or a forward that slips past
-  `is_readonly_report`) and add a selftest line that runs `wk status` with
-  the machine stopped and asserts it is still stopped afterwards. The same
-  guarantee applies to `wk ls`, `wk logs` and `wk doctor`.
+  The same guarantee applies to `wk ls`, `wk logs` and `wk doctor`.
+  **Done 2026-08-19**, with one honest correction: the observed
+  "`wk status` starts podman" could not be reproduced on the tree as it then
+  stood — every read-only command was measured, with the machine stopped and
+  with a container, vm and remote workspace in the picture, and none of them
+  started it. What was real is that the guarantee lived at the *call sites*,
+  which is where a later path walks past it. It now lives inside
+  `forward_to_vm`, the only thing in the tree that can start the machine: a
+  read-only command reaching it is answered and refused rather than served by
+  a boot, which also closes the window between a caller's own
+  `machine_running` check and the forward. `wk selftest --section state` runs
+  all four with the machine stopped and asserts it is still stopped, that no
+  guest appeared, and that nothing under the host state directory was
+  written.
 
 The contract in one line: **`wk status` never hangs, never crashes, never
 changes anything, and never asserts something it did not just verify; in the
@@ -136,15 +144,16 @@ branch).
 
 ## The gaps
 
-0. **`wk ls` and `wk status` list different sets.** A bare `wk status` walks
-   every target (`bare_status` in `wk` + `target_all`); `wk ls` on a macOS
-   host is forwarded into the podman VM and answers for containers alone, so
-   a vm or remote workspace shows in one listing and not the other. Two
-   commands whose output claims to be "the workspaces" must enumerate from
-   the same walk — one shared "all workspaces across all targets" helper,
-   with `ls` as the terse view and `status` as the deep one. Add a test:
-   the name sets printed by `wk ls` and `wk status` are identical on every
-   host shape (macOS with vm+remote+containers, Linux, on a build box).
+0. ~~**`wk ls` and `wk status` list different sets.**~~ **Done 2026-08-19.**
+   Both enumerate through `walk_targets` (which targets) and
+   `target_workspaces` (which workspaces on one), and `wk ls` grew a TARGET
+   column, because a bare name says nothing once more than one machine is in
+   the listing. On macOS the dispatcher assembles one listing from two
+   machines for both commands (`bare_report`): the host-side targets are
+   walked out here in one pass, the container half is forwarded, and that
+   half is told it is a continuation, so there is one header and no false
+   "no workspaces" note. The name sets are checked by
+   `wk selftest --section state`.
 
 1. **Readiness is only half a concept.** Container creation is async and has
    a real marker; `t_ready` is a no-op for vm and remote; and *nothing gates
@@ -161,6 +170,16 @@ branch).
 
 Order chosen so every step ships alone and the fragile target (remote) is
 fixed first.
+
+**Phase 1 landed 2026-08-19** (macOS host, verified against the podman VM):
+step 4 below for the near side — creation converges by remaking — plus the
+snapshot completion marker, the locks and the read-only guarantee from the
+audit further down, and the two verified small bugs. What is *not* in it, and
+is what a phase 2 is: the `.wk-ready` marker on the far side (steps 1–2), the
+`wait_ready` gate and its consumers (step 3), the detach primitive (step 5),
+and the lifecycle line in `wk status` (step 6). Until those land, a remote or
+vm workspace cut mid-clone still looks finished — the near side has no marker
+to miss, because those targets pin no base.
 
 1. **Evidence at the artifact: a `.wk-ready` marker per workspace,** written
    as the *last* act of creation by every driver — the firstrun pattern,
@@ -285,49 +304,83 @@ second statement of them.
 
 ### Worst desync risks found (fix order)
 
-1. **`wk sync` has no completion marker on a snapshot** — an interrupted
-   publish is chosen by the next `wk new` and hardlinked from by the next
-   sync. Fix with the repurposed `sha` marker above.
-2. **`wk new` re-run after a failed create re-pins `base-id`** over a
-   surviving `changes/` overlay layer from the first attempt — undefined
-   behaviour territory, silently. Write `base-id` last; refuse or clear a
-   non-empty `changes/` whose pin would change.
+1. ~~**`wk sync` has no completion marker on a snapshot**~~ **Fixed
+   2026-08-19.** `sha` is written last and atomically, and is the publication
+   gate: `current_base` returns the newest *marked* snapshot, `wk new`
+   refuses an unmarked one by name, `wk gc` prunes it, and a snapshot whose
+   tree no longer matches its recorded sha is refused by name as well
+   (`base_verify`, `lib/store.sh`).
+2. ~~**`wk new` re-run after a failed create re-pins `base-id`**~~ **Fixed
+   2026-08-19.** The container driver writes `base-id` as its last act, so
+   its absence is the evidence that creation never finished (`ws_state`,
+   `lib/target.sh`, reported as `creating` by both listings); a re-run
+   destroys the rubble and remakes from scratch rather than re-pinning
+   anything over a surviving layer. `wk gc` prunes no snapshot at all while
+   any workspace is unpinned, since that is a reference it cannot count.
 3. **firstrun failure has no clean recovery path** — the remedy is
-   destroying the workspace, which under rule 5 is the *right* remedy (a
+   destroying the workspace, which under rule 3 is the *right* remedy (a
    workspace that never finished creating holds nothing of value); what is
    missing is that it happens by hand in two commands. `wk new` on a
-   creating-but-dead workspace should destroy the rubble and recreate from
-   scratch itself, and say so.
-4. **`wk rm` returns success on partial destroy** and forgets the registry
-   entry first — orphaned ws dirs pin snapshots forever and `wk gc`'s
-   `unreferenced_bases` skips workspaces with no `base-id`, so gc can delete
-   a live overlay's lower layer. Destroy artifacts first, forget the record
-   last, exit nonzero naming leftovers.
+   creating-but-dead workspace now destroys the rubble and recreates from
+   scratch itself, and says so — but a workspace whose *firstrun* failed
+   still reads as `present`, because it has its `base-id`. Closing that needs
+   the readiness marker, step 1 of the plan above.
+4. ~~**`wk rm` returns success on partial destroy**~~ **Fixed 2026-08-19.**
+   Artifacts first, then a check of what is actually gone, and the registry
+   entry last — so a partial destroy exits nonzero, names what is left and
+   keeps the record that can still resolve it, and a re-run finishes the job.
+   A workspace with nothing left but a registry entry is forgotten rather
+   than refused. `unreferenced_bases` no longer answers at all while a
+   workspace is unpinned, so gc cannot delete a live overlay's lower layer.
 5. **Unreachable ≠ absent** — a remote `t_info` failure reads as `absent`,
    and `t_has_wk` failure silently falls back to the stale near-side status.
 6. **`cmd/bench` reads `state=running` as gospel** while `cmd/status` has
    the mtime liveness heuristic — one shared reader for status files, with
    the evidence check built in.
-7. Verified small bugs: `WK_TARGET=vm wk gc` dies (`cmd/gc` sources a driver
-   without `lib/target.sh`); `wk selftest --section <typo>` exits 0 having
-   run nothing; `wk vm rm` leaves `<name>.unfiltered` behind (false refusal
+7. Verified small bugs. **Fixed 2026-08-19:** `WK_TARGET=vm wk gc` died
+   (`cmd/gc` sourced a driver without `lib/target.sh`; it goes through
+   `load_target` now, and the snapshot and mirror work is skipped on a target
+   that has neither); `wk selftest --section <typo>` exited 0 having run
+   nothing (the section list is validated before anything runs). Still
+   open: `wk vm rm` leaves `<name>.unfiltered` behind (false refusal
    on a recreated guest); `wk quiesce`'s state dir is `$TMPDIR`, which
    differs between a terminal and ssh, leaking caffeinate and stranding
    SIGSTOPped daemons; `is_headless` reads `/var/lib/wk/.headless` while the
    Linux cleanup checks `$WK_STORE/.headless`.
 
-### Locks (rule 3, the design)
+### Locks (rule 4, the design)
 
-One helper, `with_lock <resource> [-w timeout] -- cmd…`: `flock` where it
-exists (the podman VM, Linux, remote boxes — i.e. everywhere a store
-lives), an atomic-mkdir lock with pid-liveness on the bare macOS host,
-which only ever locks host-side resources (the alias file, tart
-operations). Lock points: the store (shared for `wk new` pinning a base,
-exclusive for `wk sync` publish and `wk gc` prune), per-workspace (new/rm/
-build/test on one name), per-machine build locks on shared boxes (see
-below), the alias file rewrite, the vm base tree. The babysitter's pid
-guard becomes a lock too — pid files can lie after recycling; a held flock
-cannot.
+**Landed 2026-08-19, with the mechanism changed by measurement.** One helper
+in `lib/common.sh` — `hold_lock <resource> [-w timeout]` for the life of a
+command, `with_lock <resource> -- cmd…` for a smaller critical section — and
+one implementation on both hosts: an atomic mkdir with the holder's pid
+inside it.
+
+The plan said `flock` where it exists and mkdir only on the bare macOS host.
+flock was implemented first and is *wrong here*, for a reason worth keeping:
+a flock is held by the open file description, so every process that inherits
+the descriptor holds it — and `wk new` starts a container, after which
+podman's `conmon` supervises it holding the inherited lock fd for as long as
+the workspace exists. Measured: after one `wk new`, conmon held
+`ws-<name>.lock` and the next command on that workspace waited on it forever.
+bash cannot mark a redirection close-on-exec, and `flock --close` applies
+only to flock's own `-c` command form, which would mean re-exec'ing every
+command under it. mkdir has no descriptor to inherit; a lock whose pid is
+gone is broken by the next taker, which is what makes it die with its holder
+even on kill -9 (verified). The cost is that there is no shared mode, so
+`wk new` and `wk sync` serialise rather than overlap — `-s` is accepted and
+waits, which is always more than was asked for and never less.
+
+Lock files are keyed by the machine's hostname as well as by the resource,
+because a home directory can be shared by several build machines and a pid is
+only meaningful on the machine it came from.
+
+Lock points taken: the store (`wk sync`, `wk gc`, and `wk new`/`wk rm` where
+the target pins a base) and per-workspace (`wk new`, `wk rm`, `wk build`).
+Not yet: `wk test`, the alias file rewrite, the vm base tree, and the
+babysitter's pid guard, which should become a lock too — pid files can lie
+after recycling. The per-machine build lock on a shared box is a separate
+thing and already exists on the far side (`targets/remote.sh`).
 
 ### Shared-home remotes (devbox-arm64-2 / devbox-armhf-2), no special case
 
@@ -389,8 +442,16 @@ and asks it what it is up to — by running that machine's own read-only
 its containers and guests. The same walk is where out-of-sync gets
 noticed, because it is the one moment every machine's view is side by side:
 
-- **wk-tools version skew** — each machine reports its checkout's sha; a
-  machine running older or dirty wk-tools is flagged by name.
+- **wk-tools version skew** — **done 2026-08-19**, with a correction to the
+  mechanism: a sha is not available where it matters. Every machine but the
+  workstation runs an rsynced *copy* with no `.git`, so `wk version` reports
+  two things — the git sha and dirty flag where there is a checkout, and a
+  hash of the tree's contents (relative paths, `.git` excluded) computed
+  identically everywhere. The tree hash is the comparable one, and it also
+  catches uncommitted work that was pushed, which a sha never could.
+  `wk status` asks each machine for its own and flags any that differs from
+  this one, by name. This was not a hypothetical: the push-key work hit
+  `unknown option --quiet` from a stale copy three times in one afternoon.
 - **A workspace claimed twice** — the same name alive on two machines is
   reported as the conflict it is, not listed twice as if normal.
 - **A shared machine seen differently** — two workstations reaching one

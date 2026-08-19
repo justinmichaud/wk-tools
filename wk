@@ -28,6 +28,8 @@ workspaces
   ls                        list workspaces
   enter <name> [--zed|cmd]  interactive shell (GPU/desktop integration on Linux)
   build <name> <config>     build, with derived job count and nice level
+      --detach              run it on the machine that builds and return; the
+                            build survives this connection going away
   status [name]             build/container state; exit code is machine-readable
   logs <name> [-f|--all]    build log, errors first
   run <name> [--config C] [--lldb] [args]   run jsc from the workspace build
@@ -44,7 +46,12 @@ sources and disk
   sync [--all]              fetch all upstreams, publish a new base snapshot
   skills <sub>              status|diff|pull|push the shared, mutable skills
   key <sub>                 register|check the fork push keys (uses gh)
-  pr <user>:<branch>        check out a PR head, confirming every git command
+  sudo status|require       make root cost a password every time, here or on
+                            a configured machine (--target T, --all)
+  push on|off|status        whether workspaces may push to git at all; off is
+                            what `wk claude` sets before an agent takes over
+  pr [ws] <user>:<branch>   check out a PR head from WebKit or WPEWebKit; warns
+                            only when your own work is at stake
   report                    weekly GitHub activity summary (uses gh)
   gc                        prune snapshots, images and caches; reclaim disk
 
@@ -52,6 +59,7 @@ hosts and machines
   setup                     idempotent host bootstrap (also: ./setup)
   doctor                    what is provisioned here and what is missing (read-only)
   selftest [--quick]        run docs/TESTING.md against this machine
+  version                   which wk-tools this machine runs (sha and tree hash)
   backup                    write live desktop settings back into the repo
   vm <sub>                  macOS VM lifecycle: ls|new|start|stop|ip|enter|sync|base|rm
   pi <sub>                  provision a Raspberry Pi onto the tailnet
@@ -70,6 +78,14 @@ hosts and machines
 
   Inside a workspace the name is implicit and there is no host to reach:
   `wk build <config>`, `wk run -- <args>`, `wk test <args>` act on this machine.
+
+  `wk <command> --explain` says what a command does, what it acts on, whether
+  it changes anything, and how to preview it -- without running it.
+
+  `wk <command> --force` turns a refusal that exists because of a rule -- an
+  unfiltered guest, passwordless sudo -- into a loud warning, repeated when
+  the command ends. It does not force past a missing workspace or a failed
+  build: those are not rules, they are facts.
 
   WK_DEBUG=1 for verbose output.
 EOF
@@ -162,7 +178,7 @@ is_lifecycle() {
 # podman machine, which has neither gh nor a credential to give it one.
 is_host_command() {
     case "$1" in
-        setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|key|report|stop|start|help|-h|--help) return 0 ;;
+        setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|key|report|sudo|version|stop|start|help|-h|--help) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -175,30 +191,130 @@ is_host_command() {
 # the machine, and `wk vm start` then refused for want of memory, naming a
 # conflict the user had not created. That is a steep price for a listing, and
 # the same fault `wk build --list` had before it became targetless.
+#
+# The list is the four commands rule 6 names (docs/HANDOFF-workspace-state.md):
+# status, ls, logs, doctor. `doctor` never reaches the forward -- it is a host
+# command and answers here, asking the machine only when it is already running
+# -- but it is named anyway, because the rule is about the command and not
+# about which branch of this file happens to implement it today.
+# A subcommand can be read-only where its command is not: `wk push status`
+# lists where the deploy keys are and changes nothing, and booting a VM to
+# answer it would be the same fault this list exists to prevent.
 is_readonly_report() {
+    case "$1${2:+ $2}" in
+        "push status") return 0 ;;
+    esac
     case "$1" in
-        ls|status|logs) return 0 ;;
+        ls|status|logs|doctor|version) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# --- what is this command? ---------------------------------------------------
+#
+# `wk <cmd> --explain` answers "what does this do, what will it touch, and how
+# do I ask it to show me before it acts" -- for an agent, which otherwise has
+# to read the implementation or guess from the name, and for anyone at a
+# terminal wondering whether a command is safe to run here.
+#
+# Every fact printed is derived, and none of it is written twice:
+#
+#   what it does   the command's own header comment, which is the file's
+#                  documentation and sits next to the code it describes. A
+#                  second copy in a table here would be a copy to keep right.
+#   what it acts on / whether it changes anything
+#                  the same lists the dispatcher itself branches on, so a
+#                  command that says "read-only" is read-only by the same
+#                  test that stops it starting the podman machine.
+#   how to preview it
+#                  by looking for a --dry-run in the implementation, which is
+#                  the only honest source for whether one exists.
+#   usage          the line `wk help` already prints for it.
+#
+# Answered here, before any target is resolved and before anything is
+# forwarded: explaining a command must never start a machine, and must work on
+# a host where the thing it describes cannot even run.
+explain_cmd() {
+    local cmd="$1" impl="$2" line
+
+    printf 'wk %s\n' "$cmd"
+
+    # `|| true`: usage() ends in `exit 2`, and under `set -o pipefail` that
+    # status becomes the assignment's, which would end this shell before it
+    # printed anything at all.
+    # The entry `wk help` prints for it, continuation lines included -- several
+    # are two lines and the second one carries the qualifier that matters.
+    # `|| true`: usage() ends in `exit 2`, and under `set -o pipefail` that
+    # status becomes the assignment's, which would end this shell before it
+    # printed anything at all.
+    line=$( (usage 2>&1 || true) | awk -v c="$cmd" '
+        $0 ~ "^  " c "( |$)" { on = 1; sub(/^  */, ""); print "  usage: " $0; next }
+        on && /^ {8,}/       { sub(/^ */, ""); print "         " $0; next }
+        on                   { exit }' ) || true
+    [ -n "$line" ] && printf '%s\n' "$line"
+
+    if is_readonly_report "$cmd"; then
+        printf '  changes things: no -- read-only absolutely (starts nothing, writes nothing, repairs nothing)\n'
+    else
+        printf '  changes things: yes\n'
+    fi
+
+    if is_host_only "$cmd"; then
+        printf "  runs on: a host's own store or hardware; refused inside a workspace and on a build machine\n"
+    elif is_lifecycle "$cmd"; then
+        printf '  runs on: the workstation that keeps the workspace record\n'
+    elif is_host_command "$cmd"; then
+        printf '  runs on: this machine, never forwarded\n'
+    else
+        printf "  runs on: the workspace's target (forwarded into the podman VM for a container workspace on macOS)\n"
+    fi
+
+    if grep -q -- '--dry-run' "$impl" 2>/dev/null; then
+        printf '  preview: wk %s ... --dry-run resolves everything and changes nothing\n' "$cmd"
+    fi
+
+    # The header comment: everything from the line after the shebang to the
+    # first line that is not a comment. Blank comment lines are kept, because
+    # they are the paragraph breaks.
+    printf '\nwhat it does (from %s):\n' "${impl#$WK_ROOT/}"
+    # Two shapes, because one command is python: a `#` comment block, or a
+    # module docstring. Both are the file's own first words about itself.
+    awk 'NR == 1 { next }
+         NR == 2 && /^"""/ { doc = 1; sub(/^"""[[:space:]]*/, "")
+                             if ($0 != "") { seen = 1; print "  " $0 }
+                             next }
+         doc && /"""/ { exit }
+         doc { if ($0 == "" && !seen) next
+               seen = 1; print "  " $0; next }
+         /^#!/ { next }
+         /^#/  { sub(/^# ?/, "")
+                 if ($0 == "" && !seen) next        # the blank line under the shebang
+                 seen = 1; print "  " $0; next }
+         { exit }' "$impl"
+    exit 0
 }
 
 machine_running() {
     [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ]
 }
 
-# `wk status` with no argument reports on every target there is -- and on a
+# A bare `wk ls` or `wk status` reports on every target there is -- and on a
 # macOS host that claim was false. The dispatcher forwards a bare report into
 # the podman VM, whose registry has never heard of a macOS guest or a shared
 # build machine: both are driven from out here, and both were silently missing
-# from the one command whose whole job is "what is happening".
+# from the one command whose whole job is "what is happening". `wk ls` had it
+# worse: it was forwarded whole, so it never mentioned them at all.
 #
-# So the host-side targets are reported here and the container half is
-# forwarded, because that store is only readable in there. Not exec'd, unlike
-# every other forward, so the two halves' exit codes can be combined: this
-# command promises a machine-readable status and a caller must not be told
-# about the containers alone.
-bare_status() {
-    local impl="$1" t rc worst=0
+# So both go through here, and "the workspaces" means the same set in each:
+# the host-side targets are walked in one pass out here (WK_TARGET takes a
+# list, and cmd/ls and cmd/status share walk_targets), and the container half
+# is forwarded, because that store is only readable in there.
+#
+# Not exec'd, unlike every other forward, so the two halves' exit codes can be
+# combined: this command promises a machine-readable status and a caller must
+# not be told about the containers alone.
+bare_report() {
+    local impl="$1" cmd="$2" t hosts='' rc worst=0
     # A function, because `[ x -gt y ] && worst=x` as the last command of an
     # AND-OR list returns 1 when the test is false, and `set -e` then ends the
     # walk on the second target that reports the same state as the first.
@@ -206,12 +322,33 @@ bare_status() {
 
     for t in $(target_all); do
         [ "$t" = container ] && continue
-        rc=0; WK_TARGET="$t" "$impl" || rc=$?
-        _bump "$rc"
+        hosts="$hosts $t"
     done
 
+    if [ -n "$hosts" ]; then
+        rc=0; WK_TARGET="${hosts# }" "$impl" || rc=$?
+        _bump "$rc"
+    fi
+
     if machine_running; then
-        rc=0; ( forward_to_vm status ) || rc=$?
+        # What the forwarded half compares its tooling against: this machine's
+        # tree, since this is where its copy is pushed from. Without it the
+        # podman VM compares itself with itself and calls a stale copy "in
+        # sync" -- true, and not the question being asked.
+        if [ "$cmd" = status ]; then
+            WK_EXPECT_TREE=$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)
+            export WK_EXPECT_TREE
+        fi
+        # The forwarded half is the second half of one listing, so it prints
+        # rows and neither a header nor an empty-listing note. `wk status`
+        # needs no such flag: its rows carry no header, and its own
+        # "(no workspaces)" line is already conditional on the whole walk.
+        rc=0
+        if [ "$cmd" = ls ] && [ -n "$hosts" ]; then
+            ( forward_to_vm ls --continued ) || rc=$?
+        else
+            ( forward_to_vm "$cmd" ) || rc=$?
+        fi
         _bump "$rc"
     elif command -v podman >/dev/null 2>&1; then
         warn "the podman machine '$WK_MACHINE' is stopped, so container workspaces are not included"
@@ -227,6 +364,17 @@ forward_to_vm() {
         || die "podman machine '$WK_MACHINE' does not exist -- run ./setup first"
 
     if [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" != running ]; then
+        # Rule 6: read-only commands are read-only absolutely. The check is
+        # here rather than only at the call sites because this is the single
+        # place that can start the machine, and a guard that lives at the
+        # callers is a guard that a later path can walk past -- which is
+        # exactly what was observed. It also closes the window between a
+        # caller's own machine_running check and this one.
+        if is_readonly_report "$1" "${2:-}"; then
+            warn "the podman machine '$WK_MACHINE' is stopped, so its store cannot be read"
+            log  "  'wk start' to bring it up -- 'wk $1' will not start it"
+            exit 0
+        fi
         info "starting podman machine '$WK_MACHINE'"
         podman machine start "$WK_MACHINE" >&2
     fi
@@ -234,12 +382,12 @@ forward_to_vm() {
     # -- separates our args from ssh's. WK_IN_VM stops the VM-side wk from
     # trying to forward again if anything is ever misconfigured.
     exec podman machine ssh "$WK_MACHINE" -- \
-        "WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
+        "WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }${WK_EXPECT_TREE:+WK_EXPECT_TREE=$(sh_quote "${WK_EXPECT_TREE:-}") }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
 }
 
 main() {
     [ $# -ge 1 ] || usage
-    local cmd="$1"; shift
+    local cmd="$1" _a _seen_dashdash="" _rest; shift
 
     case "$cmd" in
         help|-h|--help) usage ;;
@@ -253,6 +401,27 @@ main() {
     # Validate before forwarding. Otherwise a typo starts the VM and then fails
     # inside it, which is slow and reports the wrong problem.
     [ -x "$impl" ] || { warn "unknown command: $cmd"; usage; }
+
+    # Before every refusal and every forward below: --explain is a question
+    # about the command, not a use of it, so it must be answerable inside a
+    # workspace, on a shared build machine, and on a host with no podman.
+    # Only before a `--`: everything after that belongs to whatever the command
+    # runs (`wk run <ws> -- --explain` is jsc's argument, not ours).
+    #
+    # --force is taken off the line here and passed as WK_FORCE, so every
+    # command gets it without each one having to parse a flag it would then
+    # have to remember to reject in the wrong place. Commands that already had
+    # a --force of their own (wk bench) honour the variable as well.
+    _rest=()
+    for _a in ${@+"$@"}; do
+        case "$_seen_dashdash:$_a" in
+            :--explain) explain_cmd "$cmd" "$impl" ;;
+            :--force)   WK_FORCE=1; export WK_FORCE; continue ;;
+            :--)        _seen_dashdash=1 ;;
+        esac
+        _rest+=("$_a")
+    done
+    set -- ${_rest[@]+"${_rest[@]}"}
 
     if in_workspace && is_host_only "$cmd"; then
         die "'wk $cmd' acts on a host, and this is workspace '$(wk_self)'.
@@ -322,18 +491,21 @@ main() {
 
             # Before the readonly-report shortcut below, which would answer
             # for the containers alone and exit.
-            if [ "$cmd" = status ] && [ $# -eq 0 ]; then
-                bare_status "$impl"
+            if [ $# -eq 0 ]; then
+                case "$cmd" in
+                    status|ls) bare_report "$impl" "$cmd" ;;
+                esac
             fi
 
-            if is_readonly_report "$cmd" && ! machine_running; then
-                if command -v podman >/dev/null 2>&1; then
-                    warn "the podman machine '$WK_MACHINE' is stopped, so container workspaces cannot be read"
-                    log  "  'wk start' to bring it up, or 'wk vm ls' for the macOS guests"
-                else
-                    warn "podman is not installed, so there are no container workspaces to read"
-                    log  "  './setup' installs it; 'wk vm ls' lists the macOS guests, which do not need it"
-                fi
+            # A machine that is merely stopped is handled inside
+            # forward_to_vm, which is the one place that could start it and so
+            # the one place the rule has to hold. This is the other half: no
+            # podman at all, where there is nothing to forward to and `require
+            # podman` would report a missing package rather than an empty
+            # listing.
+            if is_readonly_report "$cmd" "${1:-}" && ! command -v podman >/dev/null 2>&1; then
+                warn "podman is not installed, so there are no container workspaces to read"
+                log  "  './setup' installs it; 'wk vm ls' lists the macOS guests, which do not need it"
                 exit 0
             fi
             forward_to_vm "$cmd" "$@"
