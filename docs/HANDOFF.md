@@ -176,7 +176,15 @@ the one mechanism *all* of them need — an unsandboxed machine you can put an
 image on and take back afterwards — and every one of them was otherwise going
 to invent its own way to get a binary onto hardware.
 
-  N. **Boot an image — the shared substrate** — `docs/HANDOFF-netboot.md` (new
+  N. **Boot an image — the shared substrate** — `docs/HANDOFF-netboot.md`.
+     **Started 2026-08-19:** `wk image build|flash|ls|show|rm` and
+     `wk boot [--status|--keep|--back|--disarm|--diag]` exist, with the spec in
+     `image/` and one driver per machine in `boot/`; the rpi5's perf image is
+     built from a pinned Ubuntu 26.04 base and written to its USB stick. See
+     that file's newest state section for what is proven and what is not — the
+     rpi5 half is **done and measured on hardware** (arm -> image reachable in
+     53 s -> claim -> hand back in ~40 s, with `perf_event_paranoid=-1` set on
+     the image); the server and the rpi4/rpi3 clients are not started. (new
      file, split out of the benchmarking handoff's open questions, which it now
      answers). Scoped 2026-08-19 to **all three machines**, at the user's
      direction: moose and the MBP, not just the rpi5. That scoping produced the

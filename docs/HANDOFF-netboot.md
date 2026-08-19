@@ -18,7 +18,190 @@ Profiling comes first of the four, deliberately: it is the least demanding
 consumer (it wants no-sandbox, not perf stability), so it proves the mechanism
 without also having to settle the storage question benchmarking raises.
 
+## State as of 2026-08-19, later the same day — the verbs exist
+
+Read this before the section below it, which it supersedes on every point they
+both cover. Everything the earlier session proved on hardware still stands; what
+changed is that the mechanism is now a command instead of a scratch script.
+
+**Landed, and exercised on the workstation:**
+
+- **`wk image build <profile>`** — `cmd/image`, spec in `image/profiles.sh` plus
+  `image/<profile>/`. Builds `rpi5-perf` from a pinned Ubuntu 26.04 preinstalled
+  server raspi base and seeds it through cloud-init on the boot partition. 47 s
+  from a cached base, and **entirely unprivileged**: mtools writes into the
+  image's FAT filesystem at a byte offset taken from the partition table, so
+  nothing is mounted and `wk` still never calls sudo on this host. The manifest
+  is written last and is the whole publishing protocol — a killed build leaves a
+  directory every reader ignores and the next build deletes.
+- **`wk image flash <machine>`**, **`wk image ls|show|rm`** — the write happens
+  *on* the machine over ssh, where sudo is passwordless, and is verified by
+  reading the bytes back and comparing hashes. It refuses any device whose
+  transport is not usb, the machine's own root device, and anything mounted.
+- **`wk boot <machine> [--status|--keep|--back|--disarm|--dry-run]`** —
+  `cmd/boot`, with `boot/machines.sh` (the fleet) and `boot/rpi5-usb.sh` (the
+  driver), the same shape `targets/*.sh` uses. Arming refuses unless the boot
+  device actually starts with the image being armed, which is checked before the
+  firmware call: a one-shot that falls through looks exactly like a firmware
+  fault.
+- **The role transition is recorded and read back.** One record of intent, on the
+  machine, next to the boot mechanism — a copy on the driving workstation would
+  be the one that goes stale, because the transition happens over there.
+  Everything else is derived: `--status` reports the role from the image's own
+  identity marker, the persistent boot order from the EEPROM, and calls a record
+  *spent* (not desynced) when the machine has booted since it was armed. The
+  reader is `wk boot --status` rather than a line in `wk status` only because
+  `cmd/status` belongs to the macOS lane this week.
+- **`wk boot <machine> --diag`** — the offline diagnostics channel as a verb.
+  The image dumps its network state to its own FAT partition 75 s into every
+  boot; this mounts that partition read-only from the *other* role and prints
+  it. It is the one channel that works precisely when the image never appeared,
+  and last session's scratch version of it is what turned three blind attempts
+  into one answer.
+
+**The finding that would have cost another boot attempt.** The board's own
+netplan says `renderer: NetworkManager`, and **the Ubuntu base image has no
+NetworkManager at all** — its 668-package manifest carries `netplan.io`,
+`wpasupplicant` and `systemd`, and nothing else that could render that file.
+Copying the board's netplan into the image verbatim, which is what "copy the
+network profile from the board" naturally means, produces an image with no
+network on a board with no cable: the same failure as attempts 1-3, reached from
+a new direction. So `image/netplan-to-networkd.py` carries the *credential*
+across and re-renders it for `networkd`, dropping every NM-specific key. This
+is safe for the reason that matters: NM drives wpa_supplicant and so does
+networkd, so the association machinery on the far side is the one that is
+associating with this AP right now.
+
+**Two deliberate departures from the earlier session's conclusions**, both on
+its own evidence:
+
+- **The regulatory country is not set.** Conclusion 2 of "Attempts 2 and 3" asks
+  for it, but the same section disproves it: the image showed `country 99 /
+  DFS-UNSET` and so does the workstation *while connected to this AP on channel
+  52*. Setting a country would change the one thing known to work. `rfkill
+  unblock all` stays, as insurance that costs nothing.
+- **The self-return watchdog is armed in `bootcmd`, not `runcmd`.** runcmd is
+  cloud-init's last stage, behind the package install — and "the network did not
+  come up" is both the scenario the watchdog exists for and the scenario that
+  makes apt slowest. A safety net installed behind the thing it protects against
+  fires too late to matter. The unit file is still written and enabled, for every
+  boot after the first.
+
+**Done, on hardware, and the whole cycle measured:** arm -> the board boots the
+image -> **reachable over WiFi 53 s later** -> `wk boot rpi5 --keep` claims it ->
+`wk boot rpi5 --back` hands it back in ~40 s -> `--status` reports the record as
+*spent*. On the image: `kernel.perf_event_paranoid = -1`, `kernel.kptr_restrict
+= 0`, `perf` installed, the JIT-dump directory and environment in place, its own
+root and boot partitions mounted, its own cloud-init seed used, and a persistent
+journal. That is the profiling half of this step unblocked.
+
+It took **four attempts and three power cycles**, and the four failures are the
+most valuable thing this session produced. Each is recorded below as its own
+trap, because each is a thing that will happen again to anyone building an image
+for a machine that also runs a workstation install of the same distro.
+
+**The trap that cost the first arming, and would have cost every one after
+it: an image and a workstation built from the same distro are filesystem
+label-twins.** Ubuntu's preinstalled raspi image labels its partitions
+`writable` (ext4) and `system-boot` (FAT), its `cmdline.txt` says
+`root=LABEL=writable`, and its `/etc/fstab` mounts both by label. The rpi5's
+NVMe workstation came from that same image, so it carries the *same two labels*.
+Boot the stick with the NVMe attached — which is the whole point of a perf image
+that lives on a permanently-plugged stick — and `root=LABEL=writable` names two
+filesystems. Which one the initramfs picks is enumeration order. Both outcomes
+are bad and neither is visible: land on the NVMe root with the stick's kernel
+and the wifi driver's modules are missing, so the board is up and unreachable
+forever; fail to resolve it at all and the initramfs drops to a shell, where
+there is no cloud-init, no watchdog, and therefore **no self-return** — the one
+safety property the design leans on, defeated before it is ever armed.
+
+`/boot/firmware` is the same hazard with a worse tail: mounted by
+`LABEL=system-boot`, the image's kernel updates could land on the
+*workstation's* firmware partition.
+
+The fix is in `wk image build` and it is four edits that must agree: `tune2fs -L`
+on the ext4, `mlabel` on the FAT, `/etc/fstab` rewritten through `debugfs`, and
+`root=LABEL=` in `current/cmdline.txt`. All unprivileged — e2fsprogs accepts
+`file?offset=N` on every tool, so the root filesystem is editable inside the
+image exactly as the boot partition is, with nothing mounted.
+
+**Trap 2: cloud-init finds its seed by filesystem label too, so relabelling
+breaks it.** Ubuntu's raspi base ships `datasource: NoCloud: fs_label:
+system-boot`, which means cloud-init does not read `/boot/firmware` -- it goes
+looking for a filesystem with that label and mounts whatever it finds. Rename
+the stick's boot partition to fix trap 1 and the only `system-boot` left in the
+machine is the *workstation's* NVMe. The image then booted correctly from the
+stick and configured itself **from the workstation's seed**: no user, no key, no
+network configuration, no watchdog -- and cloud-init reported `0 failures` at
+every stage, because from its point of view nothing had gone wrong. The tell was
+one line in `/var/lib/cloud/data/status.json` on the stick:
+`"datasource": "DataSourceNoCloud [seed=/dev/nvme0n1p1]"`.
+
+`wk image build` now writes `/etc/cloud/cloud.cfg.d/99-wk-image.cfg` pointing
+`fs_label` at the image's own boot label. **The general rule, of which traps 1
+and 2 are both instances: an image and an install made from the same distro are
+twins in every namespace, and any mechanism that finds something by name will
+find the wrong one. Renaming one namespace is not a fix until every mechanism
+that reads that name has been changed with it** -- here fstab, the kernel command
+line, and cloud-init's datasource.
+
+**Trap 3, and the expensive one: `systemd-run` in cloud-init's `bootcmd`
+deadlocks the boot.** Arming the watchdog as early as possible looked obviously
+right -- bootcmd is cloud-init's first stage, runcmd its last -- and it stalled
+the machine at `sysinit.target` forever. `systemd-run` without `--no-block`
+waits for the start job to complete; the transient unit it creates carries
+default dependencies and so waits for `basic.target`; `basic.target` waits for
+`sysinit.target`; and `sysinit.target` waits for `cloud-init-local`, which is
+sitting inside `systemd-run`. No ssh, no multi-user, no watchdog, and a journal
+whose last systemd line is an unmet condition check while wpa_supplicant chatters
+on beneath it for another five minutes. **Anything that must run early belongs in
+a unit installed in the rootfs, where systemd orders it -- never in a command
+that asks systemd to do work while systemd is waiting for that command.**
+
+**Trap 4: a different DHCP client identifier means a different address.**
+NetworkManager identifies itself by MAC; systemd-networkd defaults to a DUID.
+The image therefore got `192.168.1.156` where the workstation has `.165`, and
+was invisible to a driving host looking for the machine it knew. The generated
+network configuration now sets `dhcp-identifier: mac`, so the image lands on the
+same lease as the workstation and the neighbour-table lookup in
+`boot/machines.sh` finds it.
+
+**What actually diagnosed all of this** was not any of the network channels: it
+was the **persistent journal on the image's own root partition**, read from the
+workstation afterwards with `journalctl -D /mnt/r/var/log/journal`. Making the
+journal persistent costs one drop-in and it is the difference between "the board
+did not come back" and a timestamped account of exactly how far it got. Put it
+in every image, and reach for it before anything else.
+
+**The lesson underneath it, for every future image:** the self-return watchdog
+only protects boots that *reach userspace* -- and, as trap 3 showed, only those
+that reach the target it is wanted by. It is now installed into the rootfs at
+build time and enabled by systemd, not by cloud-init, because the boots that need
+a watchdog most are exactly the boots where cloud-init did not run. Anything that
+can strand the image in firmware or initramfs — a root= that does not resolve, a missing kernel, a
+bad overlay — is outside its reach and costs a trip to the machine. Those
+failures are the ones to design out at build time, not to catch at run time.
+A serial console (`enable_uart=1` is already in the base) is the only thing
+that observes them, and it is worth a cable.
+
+**One correction to the section below, from the base image itself.** `os_prefix=
+current/` with `[tryboot] os_prefix=new/` is **Ubuntu's own A/B layout, shipped
+in the stock preinstalled image** — not something flash-kernel or the NUMA-kernel
+work added, as "Measured on the board" reads. The conclusion it supports is
+unchanged and if anything stronger: tryboot is taken on *any* Ubuntu install of
+this board, by the distro, so a perf image using it would collide with ordinary
+kernel updates. The other reason stands untouched — `p2` fills the 469 GB disk,
+so a third partition means shrinking the root. The base also ships
+`enable_uart=1`, so the serial console the last session wished for needs only a
+cable.
+
+**Also owed, and blocked on file ownership rather than on work:** `wk status`
+showing the armed transition on the machine's line, `wk`'s help text listing
+`image` and `boot`, and their `is_host_only` refusals. All three live in files
+the macOS lane holds this week.
+
 ## State as of 2026-08-19, end of session — read this first
+
 
 **Proven on hardware, not just designed:**
 
@@ -54,7 +237,8 @@ all three wired NICs at `carrier=0`. rpi4 and rpi3 are not on the tailnet. moose
 BMC lives at **10.99.0.2** on the Librem 5's `bmc0` segment, not the stale
 192.168.1.41 in `~/.ssh/config`.
 
-**Next three actions, in order:**
+**Next three actions, in order** (1 is built but not yet booted; see the newer
+state section above):
 
 1. `wk image build` on an **Ubuntu** base (the only path to a reachable rpi5 perf
    image, since that board is never on the LAN — see the topology section). It
@@ -432,7 +616,17 @@ Two rules that follow from "one command" and are easy to lose:
 Topology is settled (see below), so this is an execution list now. Each item is
 a verb from the table above, not a procedure.
 
-0. **Unblock SSH to the rpi5.** As of 2026-08-19 `tailscale ping rpi5` pongs
+**Status, 2026-08-19 (later):** 0, 1, 2 and 3 are **done** — ssh unblocked, the
+image built by `wk image build rpi5-perf`, the rpi5 booted into it over the USB
+one-shot and returned, and `perf_event_paranoid`/`kptr_restrict`/the JIT-dump
+environment set and verified on the board. 4 onward (the server, and the
+rpi4/rpi3 netboot clients) are untouched — they need a wire and a machine that is
+currently not on the tailnet at all.
+
+0. **Unblock SSH to the rpi5.** *(Cleared: ssh to the board works, over
+   Tailscale SSH, which authenticates with no key at all. The ACL hypothesis
+   below was already disproven in the same session that raised it — the cause
+   was WiFi range.)* As of 2026-08-19 `tailscale ping rpi5` pongs
    while TCP 22 times out, so the board is up and a path exists but something
    refuses the connection — `sshd` on the board, or more likely the tailnet ACL.
    Nothing below can start without it: every arming mechanism is an SSH command.
@@ -450,9 +644,14 @@ a verb from the table above, not a procedure.
    reboot lands in the image; a plain reboot lands back in the workstation. Prove
    the negative too: with the USB device absent, the same command falls through
    to the NVMe rather than hanging.
-3. **Profiling in that image** — `perf_event_paranoid` and the JIT-dump
-   environment are ours to set outright there, which is the whole point and the
-   reason profiling leads (`docs/HANDOFF-profile.md`).
+3. **Profiling in that image** — *done 2026-08-19*: `kernel.perf_event_paranoid
+   = -1` and `kernel.kptr_restrict = 0` measured on the booted image, `perf`
+   installed, and the JSC JIT-dump wall written to `/etc/wk-perf-env` rather
+   than exported globally (every one of those variables changes what JSC does,
+   `useConcurrentJIT=0` most of all, so a shell that set them for all processes
+   would silently change every measurement taken on the machine). What
+   `docs/HANDOFF-profile.md` still owes is the `wk profile` verb itself; the
+   machine it needs now exists.
 4. **`wk serve`** on the rpi5's `eth0` (or moose's `igb`): DHCP with option 43,
    TFTP, HTTP, service alias IP, bound to that interface only. Refuses while a
    bench run is live on the same host.

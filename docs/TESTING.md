@@ -807,6 +807,151 @@ intermediate state is ever visible to another command as complete.
 
 ---
 
+## 7. Boot images and role transitions — `wk image`, `wk boot` (Linux)
+
+A machine booted into an image is a *role transition*, not a reboot: the box
+stops being a workstation for a while and then becomes one again. So the
+checks come in three groups — the build (which must be unprivileged and
+reproducible), the transition (which must be one-shot and self-reverting), and
+the reader (which must never mistake intent for evidence).
+
+### Building — unprivileged, reproducible, crash-only
+
+- [V] `wk image build <profile> --dry-run` resolves the profile, the machine,
+      the base and the destination, builds nothing, and names any missing
+      tooling rather than failing at the first `require`
+- [V] `wk image build rpi5-perf` completes with **no sudo anywhere** — the FAT
+      seed goes in through mtools at a byte offset, never a loop mount
+- [V] the base is pinned by sha256 and re-verified on every build; a cached
+      base that matches is not re-downloaded
+- [V] the built image carries `user-data`, `meta-data`, `network-config` and
+      an appended `config.txt` on its boot partition, and all three YAML files
+      parse
+- [V] the network config is **rendered for the image's own backend**, not
+      copied: the board's netplan says `renderer: NetworkManager` and the base
+      image has no NetworkManager, so a verbatim copy is an image with no
+      network on a board with no cable
+- [V] the wifi PSK reaches the image without appearing in any terminal output,
+      log or agent transcript — it is read on the board and written into the
+      image by the same pipeline
+- [V] the image's filesystem labels are its own, and every place that names
+      them agrees: the ext4 superblock, the FAT boot sector, `/etc/fstab` and
+      `root=LABEL=` in `current/cmdline.txt`. **None of them may equal the
+      target machine's own install** — a distro image and an install made from
+      it are label-twins, and `root=LABEL=writable` with both disks attached
+      names two filesystems
+- [V] `e2fsck -fn` on the built image's root passes clean after that surgery
+- [V] `wk image ls` lists only images with a manifest; a build directory
+      without one is reported as rubble, by name
+- [V] `wk image show <id>` re-hashes `disk.img` and refuses an image that no
+      longer matches its manifest
+- [V] a build that fails partway leaves a directory with no manifest; it is
+      reported as rubble and the next build destroys it, never "already
+      exists" (rule 2) — seen for real when the target machine went away
+      mid-build
+- [V] a machine that is unreachable fails the build *before* the unpack, and
+      names the reason: the network profile is read from that machine
+- [ ] `kill -9` mid-build, re-run: same, at every other point
+- [ ] two `wk image build` at once: the second waits on the store lock rather
+      than racing the first's rubble cleanup (rule 4)
+
+### Flashing
+
+- [V] `wk image flash <machine> --dry-run` writes nothing
+- [V] it refuses a device with mounted partitions until it has agreement to
+      erase, then unmounts them itself rather than sending the user to a
+      hand-typed `umount`
+- [ ] it refuses a device whose transport is not usb, and the machine's own
+      root device
+- [V] the write is verified by reading the same number of bytes back off the
+      device and comparing hashes (4.6 GB, ~7 min over WiFi with zstd)
+- [ ] the prompt appears and "no" leaves the device untouched
+
+### Arming and returning — the one-shot
+
+- [V] `wk boot <machine>` refuses to arm when the boot device does not start
+      with the image it was asked to arm — checked before the firmware call,
+      because a one-shot that falls through looks like a firmware fault
+- [V] arming leaves a record of intent on the machine and **nowhere else**
+- [V] `wk boot <machine>` lands in the image, reachable over the LAN — 53 s
+      from arming to an answering ssh, on the rpi5
+- [V] a plain reboot from the image lands back on the workstation: the
+      one-shot is spent by any boot (~40 s)
+- [V] `wk boot <machine> --keep` cancels the self-return watchdog
+- [ ] left alone, the image hands the machine back by itself within the
+      profile's watchdog period
+- [V] `wk boot <machine> --back` returns the machine and clears the record
+- [V] `wk boot <machine> --disarm` re-arms the normal boot order and clears
+      the record, and the next reboot is an ordinary one
+- [ ] with the boot device absent, arming falls through to the normal role
+      rather than hanging at firmware
+
+### Reading the transition — intent is never evidence
+
+- [V] `wk boot <machine> --status` starts nothing, writes nothing and repairs
+      nothing (rule 6)
+- [V] it reports the role from the machine's own identity marker, and the
+      firmware's persistent boot order alongside it
+- [ ] armed and not yet rebooted: reported as ARMED, exit 2, with the warning
+      that the next reboot leaves this role
+- [V] armed, rebooted, and back in the normal role: the record is reported as
+      **spent** rather than as a desync — the transition happened, and the
+      mechanism worked
+- [V] spentness is decided by the machine's **boot id**, not by comparing the
+      driving host's clock against the machine's. The clock version called a
+      plainly-spent arming "armed" — `date -u -d "$(uptime -s)"` re-reads a
+      local-time string as UTC, so a machine six hours off UTC reports a boot
+      six hours in the past
+- [V] unreachable in both roles: reported as unreachable by name, exit 3,
+      never hung on
+- [V] `wk boot <machine> --diag` prints the image's own account of its last
+      boot, read off the image's boot device from the *other* role — the
+      channel that works precisely when the image never appeared. Its "the
+      image did not get that far" answer is what identified a boot that never
+      reached userspace
+- [V] the image is found by the machine's hardware address in the driving
+      host's neighbour table, with mDNS as the fallback and `WK_IMAGE_HOST` as
+      the override — no address is stored anywhere
+
+### The image is what the profile says
+
+- [V] `perf_event_paranoid = -1` and `kptr_restrict = 0` on the booted image —
+      the reason this step exists, and the thing a workspace can never have
+- [V] `perf` present, the JIT-dump directory created, `WK_IMAGE` and
+      `WK_JITDUMP_DIR` exported
+- [V] the JSC JIT-dump variables are written to `/etc/wk-perf-env` and **not**
+      exported globally — every one of them changes what JSC does, so a shell
+      that set them for all processes would silently change every measurement
+      taken on the machine
+- [V] the image mounts *its own* root and boot partitions (`/dev/sda2`,
+      `/dev/sda1`), not the workstation's
+- [V] cloud-init's datasource is the image's own boot partition
+      (`DataSourceNoCloud [seed=/dev/sda1]`), not the workstation's NVMe
+- [V] the persistent journal survives a boot, and is readable off the stick
+      from the other role with `journalctl -D` — which is how three failed
+      boots were finally explained
+- [ ] first boot is slow (~17 min) because `packages:` installs over WiFi
+      before `runcmd` applies the sysctls. Anything not needing a per-machine
+      secret should move into the rootfs at build time, where systemd applies
+      it with no cloud-init involved.
+
+### Still owed here
+
+- [V] the boot time a status reports equals `/proc/stat`'s btime on the
+      machine. Two separate bugs produced a plausible-looking wrong answer
+      here: `date -u -d "$(uptime -s)"` re-reading a local string as UTC, and
+      an `awk '{print $2}'` whose `$2` did not survive three shells on the way
+      through ssh. A remote one-liner that reports a *number* is worth
+      checking against the source, because a wrong one does not look wrong.
+- [ ] `wk status` shows the armed transition on the machine's line, and
+      mutating commands aimed at an armed machine warn or refuse. The reader
+      exists (`wk boot --status`); wiring it into `cmd/status` waits for the
+      macOS lane to release that file.
+- [ ] `wk` help text lists `image` and `boot`, and both are refused inside a
+      workspace and on a shared build machine (`is_host_only`). Same reason.
+- [ ] `wk serve`, `wk pi netboot-enable` — the rpi4/rpi3 half, which needs a
+      server and a wire.
+
 ## Regressions worth a permanent test
 
 Each of these shipped, looked fine, and was wrong. They are the cheapest checks

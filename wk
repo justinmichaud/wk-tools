@@ -63,6 +63,9 @@ hosts and machines
   backup                    write live desktop settings back into the repo
   vm <sub>                  macOS VM lifecycle: ls|new|start|stop|ip|enter|sync|base|rm
   pi <sub>                  provision a Raspberry Pi onto the tailnet
+  image <sub>               boot images: build|ls|show|flash|rm
+  boot <machine>            put a machine into its image for one boot
+                            (--status|--keep|--back|--disarm|--dry-run)
   remote setup|rm <target>  provision a shared build machine, or undo that
                             and forget it (never needs root)
   quiesce on|off|status     quiet the machine for benchmarking

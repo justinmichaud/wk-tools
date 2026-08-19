@@ -24,6 +24,22 @@ python3
 # Benchmarking and profiling on the host side
 linux-tools-generic
 
+# Boot images. mtools
+# ... and PyYAML, because the image's network configuration is derived from the
+# target machine's own netplan rather than copied: the two ends render it with
+# different backends, and getting that wrong produces an image with no network
+# on a board with no cable.
+python3-yaml writes into an image's FAT partition at a byte offset,
+# with no loop device and no mount -- which is the only reason `wk image build`
+# needs no privilege at all. Without it the whole command would want root on a
+# machine whose entire design is that `wk` never calls sudo.
+mtools
+# ... and PyYAML, because the image's network configuration is derived from the
+# target machine's own netplan rather than copied: the two ends render it with
+# different backends, and getting that wrong produces an image with no network
+# on a board with no cable.
+python3-yaml
+
 # GPU and the benchmark session on the attached monitor. cage is a one-client
 # kiosk compositor: a real DRM session for benchmark runs without a desktop's
 # worth of background compositing noise. mesa-utils/wayland-utils are how the
