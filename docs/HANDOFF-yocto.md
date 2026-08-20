@@ -185,6 +185,55 @@ expensive thing in the build: measured here, `chromium-ozone-wayland` and
 tasks. This profile exists to get a WPE runtime onto the rpi4, so `YOC_CHROMIUM=0`
 and `--chromium` puts it back for the day the comparison is the point.
 
+### OPEN: is the pseudo patch needed at all? (read this before trusting it)
+
+**Status: the patch works, and the reason given for it is refuted.** Resolve
+this before building on it.
+
+What is solid, by measurement rather than theory:
+
+- `do_package` fails in this container with scarthgap's pinned pseudo 1.9.0
+  (`got *at() syscall for unknown directory`, `tar: Cannot mkdir: Bad address`).
+- Bumping to 1.9.11 in `image/yocto/meta-wk` fixes it. Verified by the
+  three-line reproducer and by the exact recipe that failed, and the full 13130
+  task build then completed with 0 errors.
+- It is not wk's doing: the reproducer is `pseudo bash -c 'tar -cf - . | tar -xf
+  -'`, no bitbake, and it fails identically in a plain `podman run` with default
+  seccomp and no sandbox. The overlay checkout, mixed sstate and the host's tar
+  were each tested and refuted too.
+- pseudo 1.9.0's wrapper list genuinely lacks `__open_2`/`__open64_2` while
+  1.9.11 has them, and Ubuntu 24.04's `tar` genuinely references `__open_2`.
+  Both by inspection.
+
+**But the explanation those last two facts suggest cannot be right.** Ubuntu
+24.04 with `wpe-2.46` is a known-good configuration that needs no patch — and
+the Yocto spec is *byte-identical* between the branches: `wpe-2.46` and
+`webkitglib/2.48` pin the same poky (`6879650b`), the same layers, and the same
+`rpi/local-rpi4-64bits-mesa.conf`. `diff` on both files is empty. So the same
+pseudo, built the same way, from the same recipe.
+
+Which means the variable is **not the branch**, and it cannot be: the reproducer
+does not involve WebKit at all. It is pseudo plus that container's `tar`. So one
+of these is true, and the next session should find out which:
+
+1. **The known-good 2.46 build ran in a different container** — most likely an
+   older wkdev SDK that was 24.04-based, rather than the plain `ubuntu:24.04`
+   this builder now uses. Then the patch is needed here for *any* branch, and
+   the honest fix is to match whatever `tar` that container had rather than to
+   carry a pseudo patch. **Cheapest check:** run the three-line reproducer in
+   the known-good container. It answers this in seconds and needs no build.
+2. **Something about this container differs in a way not yet looked at** — the
+   `tar` build in particular. Compare `objdump -T $(command -v tar)` between the
+   two containers; if the working one calls `open`/`open64` where this one calls
+   `__open_2`, that is the whole difference and the patch is a workaround for a
+   container choice, not for scarthgap.
+
+**If either turns out that way, delete `image/yocto/meta-wk`.** It is one
+bbappend in a layer whose only rule is build-time recipes, so removing it
+changes no image content — and a local patch kept for a reason that has been
+disproved is worse than no patch. What must not happen is the patch quietly
+becoming load-bearing folklore because a build once succeeded with it in place.
+
 ### scarthgap's pseudo did not work on this host (fixed)
 
 `do_package` fails for every recipe that packages a directory tree:

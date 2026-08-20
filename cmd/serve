@@ -248,7 +248,7 @@ EOF
 # server that reported success.
 #
 # So this refuses, rather than discovering it on the hardware. The image is
-# fine; it is simply a *local-boot* image, and `wk image flash` is what it is
+# fine; it is simply a *local-boot* image, and `wk image write` is what it is
 # for.
 check_root_is_reachable() {
     local cmdline root=""
@@ -271,7 +271,7 @@ check_root_is_reachable() {
     'Storage: what the image is'). Neither is built yet.
 
     What works today is the local path this image is actually for:
-      wk image flash $(manifest_get "$IMAGE" machine) --image $IMAGE
+      wk image write $IMAGE --disk <machine>:<device>
     Set WK_SERVE_ANY_ROOT=1 to serve it anyway (for testing the transfer
     itself, which is all it can prove)."
             ;;
@@ -280,7 +280,7 @@ check_root_is_reachable() {
 }
 
 # The boot files a netboot client asks for are the contents of the image's own
-# boot partition -- the same bytes `wk image flash` writes to a stick. Copied
+# boot partition -- the same bytes `wk image write` puts on a disk. Copied
 # out with mtools, at a byte offset from the partition table, so this needs no
 # mount and no privilege.
 populate_tftp_root() {

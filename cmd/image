@@ -5,7 +5,8 @@
 #   wk image build <profile> [--dry-run] [--keep-rubble]
 #   wk image ls
 #   wk image show <id>
-#   wk image flash <machine> [--image <id>] [--dry-run]
+#   wk image disks <machine>
+#   wk image write <id> --disk <machine>:<device>
 #   wk image rm <id>
 #
 # An image is a whole machine, built from a spec in this repo, that a machine
@@ -30,6 +31,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/boot/machines.sh"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/image/yocto.sh"
 
 # Both of these act on physical machines: a boot device, a firmware register, a
@@ -52,8 +54,20 @@ usage: wk image <sub>
                                    --no-import)
   ls                              images in the store
   show <id>                       what an image is, and whether it still is
-  flash <machine> [--image <id>]  write an image to that machine's boot device
+  disks <machine>                 removable disks attached to that machine
+  write <id> --disk <machine>:<device>
+                                  write the image onto that disk
   rm <id>                         delete an image
+
+Two things about `write`, because neither is guessable:
+
+  It never touches a machine's own system disk. That is refused, by several
+  independent checks -- what gets written is a removable disk that happens to
+  be plugged into the machine. The machine is where the disk is, not the target.
+
+  Writing a disk does not make anything boot it. Booting is `wk boot
+  <machine>`, and it is one-shot: the machine boots the disk once and returns
+  to its normal role by itself.
 
 profiles:
 EOF
@@ -649,7 +663,7 @@ disk_sha256=$sha
 EOF
 
     info "built $ID  ($(du -h "$DISK" | cut -f1))"
-    log  "  next:  wk image flash $IMG_MACHINE --image $ID"
+    log  "  next:  wk image write $ID --disk $IMG_MACHINE:$MACH_DEVICE"
 }
 
 # --- the rest ----------------------------------------------------------------
@@ -688,48 +702,145 @@ cmd_rm() {
     info "deleted $id"
 }
 
-cmd_flash() {
-    local machine="${1:-}" id="" dry=""
-    shift || true
+# --- write -------------------------------------------------------------------
+
+cmd_disks() {
+    local machine="${1:-}"
+    [ -n "$machine" ] || die "usage: wk image disks <machine>
+    machines:
+$(machine_list | sed 's/^/      /')"
+    machine_load "$machine" || die "unknown machine '$machine'"
+    m_reachable || die "$machine is not reachable over ssh"
+    log "removable disks attached to $machine:"
+    disk_list
+    log ""
+    log "  write one with:  wk image write <id> --disk $machine:<device>"
+    log "  a machine's own system disk is never listed and never writable."
+}
+
+# wk image write <id> --disk <machine>:<device>
+#
+# One verb for both cases the two old `flash` commands split: the disk the
+# machine is configured to boot from, and any other removable disk plugged into
+# it. They were never different operations -- same store, same verification,
+# same unmount, same refusals -- only different device policy, and the stricter
+# policy is the right one for both. boot/disk.sh has the naming argument.
+cmd_write() {
+    local id="" spec="" dry="" grow=1
     while [ $# -gt 0 ]; do
         case "$1" in
-            --image) id="${2:-}"; shift ;;
-            --dry-run) dry=1 ;;
-            *) die "unknown option: $1" ;;
+            --disk)    spec="${2:-}"; [ -n "$spec" ] || die "--disk needs <machine>:<device>"; shift 2 ;;
+            --dry-run) dry=1; shift ;;
+            --no-grow) grow=0; shift ;;
+            -*) die "unknown option: $1" ;;
+            *)  [ -z "$id" ] || die "unexpected argument: $1"; id="$1"; shift ;;
         esac
-        shift
     done
 
-    [ -n "$machine" ] || usage
-    machine_load "$machine" || die "unknown machine '$machine' (wk boot --list)"
-    load_driver "$MACH_DRIVER"
+    [ -n "$id" ] || die "usage: wk image write <id> --disk <machine>:<device>
+    images:
+$(image_ids | sort | sed 's/^/      /')"
+    [ -n "$spec" ] || die "usage: wk image write $id --disk <machine>:<device>
+    'wk image disks <machine>' lists what is attached where."
 
-    [ -n "$id" ] || id=$(image_latest "$MACH_PROFILE") \
-        || die "no image built for $machine yet -- 'wk image build $MACH_PROFILE'"
-    image_complete "$id" || die "no such image: $id"
+    image_complete "$id" || die "no such image: $id
+    images:
+$(image_ids | sort | sed 's/^/      /')"
+
+    disk_parse "$spec"
+    machine_load "$DISK_MACHINE" || die "unknown machine '$DISK_MACHINE'
+    machines:
+$(machine_list | sed 's/^/      /')"
+    m_reachable || die "$DISK_MACHINE is not reachable over ssh, and the disk is attached to it."
+
+    # No device: say what is there rather than guessing. Guessing which /dev/sd*
+    # is the card is the mistake this command exists to make impossible.
+    if [ -z "$DISK_DEV" ]; then
+        log "disks attached to $DISK_MACHINE:"
+        disk_list
+        die "say which one: --disk $DISK_MACHINE:<device>"
+    fi
+
+    local bytes; bytes=$(stat -c %s "$(image_disk "$id")")
+    disk_refuse_unless_safe "$DISK_DEV" "$bytes"
+    image_check_root "$id" "$DISK_DEV" "$DISK_MACHINE"
+
+    local method mounted
+    method=$(disk_method "$id")
+    mounted=$(disk_mounted "$DISK_DEV")
 
     if [ -n "$dry" ]; then
-        log "would write $id ($(numfmt --to=iec "$(manifest_get "$id" disk_bytes)")) to $MACH_DEVICE on $machine"
+        cat >&2 <<EOF
+would write
+  image     $id ($(numfmt --to=iec "$bytes"))
+  its root  $(image_root_spec "$id" || echo '(no cmdline.txt)') -- $(image_root_word "$(image_root_class "$(image_root_spec "$id")")")
+  onto      $DISK_DEV attached to $DISK_MACHINE ($(m_ssh "lsblk -dno SIZE,TRAN,MODEL $DISK_DEV" 2>/dev/null | tr -s ' '))
+  mounted   ${mounted:-nothing}
+  method    $([ "$method" = bmap ] && echo "bmaptool -- sends $(numfmt --to=iec "$(stat -c %s "$(image_wic "$id")")") compressed, writes mapped blocks only, checksums each" || echo "zstd stream into dd, then read back and compare sha256")
+  grow      $([ "$grow" = 1 ] && echo "yes, partition 2 to fill the disk" || echo "no (--no-grow)")
+EOF
+        [ "$DISK_DEV" = "${MACH_DEVICE:-}" ] && log "  note      $DISK_MACHINE is configured to boot from this disk (wk boot $DISK_MACHINE)"
         log "dry run -- nothing was written."
         return 0
     fi
 
-    image_verify "$id" || die "refusing to flash an image that does not match its manifest"
+    image_verify "$id" || die "refusing to write an image that does not match its manifest"
 
-    m_reachable || die "$machine is not reachable over ssh in its normal role"
+    warn "this ERASES $DISK_DEV on $DISK_MACHINE, whatever is on it now."
+    [ -n "$mounted" ] && printf '%s\n' "$mounted" | sed 's/^/    /' >&2
+    confirm "write $id onto $DISK_DEV attached to $DISK_MACHINE?" || die "not written"
 
-    warn "this ERASES $MACH_DEVICE on $machine, whatever is on it now."
-    confirm "write $id to $MACH_DEVICE on $machine?" || die "not written"
+    disk_unmount "$DISK_DEV"
+    if [ "$method" = bmap ]; then
+        disk_write_bmap "$id" "$DISK_DEV"
+    else
+        disk_write_dd "$(image_disk "$id")" "$DISK_DEV"
+        [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_dd "$(image_disk "$id")" "$DISK_DEV"
+    fi
+    [ "$grow" = 1 ] && disk_grow "$DISK_DEV"
+    disk_eject "$DISK_DEV"
 
-    b_flash "$(image_disk "$id")" "$MACH_DEVICE"
-    info "$machine now has $id on $MACH_DEVICE"
-    log  "  next:  wk boot $machine"
+    info "$DISK_DEV on $DISK_MACHINE now holds $id"
+    if [ "$DISK_DEV" = "${MACH_DEVICE:-}" ]; then
+        log "  $DISK_MACHINE is configured to boot from this disk, but writing it"
+        log "  did not arm anything. To boot it -- once, reverting by itself:"
+        log "      wk boot $DISK_MACHINE"
+    else
+        log "  nothing boots this yet. Move it to the board it is for, or point a"
+        log "  machine at it; 'wk boot <machine>' is the one-shot."
+    fi
+}
+
+# `flash` is gone, and the message says why rather than just where.
+#
+# It named the wrong thing twice over: "flash <machine>" reads as reflashing the
+# machine, which never happened and is refused; and "flash" implies permanence,
+# where a machine boots one of these disks once and reverts on its own. See
+# boot/disk.sh.
+cmd_flash() {
+    local machine="${1:-<machine>}"
+    die "'wk image flash' is gone -- it named the wrong thing twice.
+
+    'flash <machine>' reads as reflashing $machine. That never happened: the
+    machine's own system disk is refused, and what gets written is a removable
+    disk plugged into it. And nothing here is permanent -- a machine boots such
+    a disk once, by a firmware one-shot or by what a netboot server holds, and
+    returns to its normal role by itself.
+
+    So the disk is named, and the verb says what it does to it:
+
+        wk image disks $machine                  what is attached over there
+        wk image write <id> --disk $machine:<device>
+
+    Booting it is still a separate step, and still one-shot:  wk boot $machine"
 }
 
 case "${1:-}" in
     build) shift; cmd_build "$@" ;;
     ls|list) shift; cmd_ls "$@" ;;
     show) shift; cmd_show "$@" ;;
+    disks) shift; cmd_disks "$@" ;;
+    write) shift; cmd_write "$@" ;;
     flash) shift; cmd_flash "$@" ;;
     rm) shift; cmd_rm "$@" ;;
     *) usage ;;

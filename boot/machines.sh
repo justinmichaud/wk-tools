@@ -52,7 +52,7 @@ machine_load() {
         # NOTE: `Host rpi4` in the user's ~/.ssh/config points at
         # rpi4-compilers-0, a remote build box behind a ProxyJump -- an
         # entirely different machine. This name has to be resolved before the
-        # board is first reached, or a `wk image flash` aimed at a test device
+        # board is first reached, or a `wk image write` aimed at a test device
         # lands on a shared build machine's disk.
         MACH_SSH="${WK_RPI4_SSH:-rpi4-test}"
         MACH_DRIVER=pi-netboot

@@ -194,7 +194,7 @@ image_profile_load() {
     # distro base, a cloud-init seed, or a filesystem relabel: bitbake builds
     # the whole distribution, partitions it with wic, and the result enters the
     # store as an image like any other -- which is the entire reason to put it
-    # here rather than in a command of its own. `wk image flash`, `wk image
+    # here rather than in a command of its own. `wk image write`, `wk image
     # show` and the SD-card path then work on it unchanged.
     rpi4-wpe-2.48)
         IMG_BUILDER=yocto

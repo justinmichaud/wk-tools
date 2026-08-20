@@ -401,6 +401,19 @@ yocto_import() {
         || die "the image copied out of '$ws' is not valid xz"
     rm -f "$dir/image.wic.xz"
 
+    # The compressed wic and its block map, which is what makes writing a card
+    # fast: bmaptool sends the 573 MB compressed image instead of the 4 GB raw
+    # one and writes only the blocks the map says are in use, checksumming each
+    # against the map as it goes. It needs a seekable file, so it cannot work on
+    # a stream -- which is exactly why the compressed original has to be kept
+    # rather than regenerated. boot/disk.sh picks the path.
+    local wic_xz="$src_dir/$recipe.wic.xz" bmap="$src_dir/$recipe.wic.bmap"
+    if t_exec "$ws" test -f "$bmap"; then
+        info "importing $recipe.wic.xz and its block map (the fast write path)"
+        t_pull "$ws" "$wic_xz" "$dir/disk.wic.xz" || die "could not import the compressed image"
+        t_pull "$ws" "$bmap" "$dir/disk.bmap" || die "could not import the block map"
+    fi
+
     # The rootfs tarball as well. Not needed to flash a card, and kept anyway:
     # a network root is what the rpi4's netboot loop needs (cmd/serve refuses
     # to serve an image whose cmdline names a local root, correctly), and a
@@ -656,6 +669,13 @@ wk_tools=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
 disk_bytes=$(stat -c %s "$dir/disk.img")
 disk_sha256=$sha
 EOF
+        if [ -f "$dir/disk.bmap" ]; then
+            cat <<EOF
+wic_xz=disk.wic.xz
+bmap=disk.bmap
+wic_xz_bytes=$(stat -c %s "$dir/disk.wic.xz")
+EOF
+        fi
         if [ -f "$dir/rootfs.tar.xz" ]; then
             cat <<EOF
 rootfs_tar=rootfs.tar.xz
@@ -667,7 +687,8 @@ EOF
 
     sed -i 's/^state=running/state=ok/' "$(yocto_status "$ws")"
     info "built $id  ($(du -h "$dir/disk.img" | cut -f1))"
-    log  "  next:  wk image flash $IMG_MACHINE --image $id"
+    log  "  next:  wk image write $id --disk <machine>:<device>"
+    log  "         ('wk image disks <machine>' lists what is attached where)"
     log  "  the image carries no WebKit -- it is the runtime. The matching"
     log  "  build is:  wk image build $profile --stage webkit"
 }

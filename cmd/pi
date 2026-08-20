@@ -19,6 +19,9 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/boot/machines.sh"
+. "$WK_ROOT/lib/image.sh"
+. "$WK_ROOT/image/profiles.sh"
+. "$WK_ROOT/boot/disk.sh"
 
 TS_VERSION="${TS_VERSION:-1.102.2}"
 TAG="${WK_PI_TAG:-tag:wk}"
@@ -26,12 +29,38 @@ TAG="${WK_PI_TAG:-tag:wk}"
 ACTION="${1:-}"; HOST="${2:-}"
 case "$ACTION" in
     setup|netboot-enable) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>" ;;
+    # `flash` takes a *fleet machine* rather than an ssh host: the refusals need
+    # MACH_ROOT to know which disk is that machine's own, and the image comes
+    # from the store by profile. See boot/sdcard.sh.
+    # Kept only to say where it went; see below.
+    flash) : ;;
     *) die "usage: wk pi setup <ssh-host>
-       wk pi netboot-enable <ssh-host> [--server <ip>] [--revert] [--dry-run]" ;;
+       wk pi netboot-enable <ssh-host> [--server <ip>] [--revert] [--dry-run]
+       (flashing moved: 'wk image write <id> --disk <machine>:<device>')" ;;
 esac
 shift 2 2>/dev/null || true
 
 rsh() { ssh -o BatchMode=yes "$HOST" "$@"; }
+
+# `wk pi flash` existed for about an hour and is folded into `wk image write`.
+#
+# It was the same operation as the other flashing verb -- same store, same
+# verification, same unmount, same refusals -- differing only in device policy,
+# and the stricter policy was right for both. Two commands owning the image
+# store's internals was the cost of keeping them apart. boot/disk.sh has the
+# argument, including why neither was called the right thing.
+if [ "$ACTION" = flash ]; then
+    die "'wk pi flash' is gone -- it and 'wk image flash' were one operation.
+
+    Writing a disk is an image operation, so it lives with the image store, and
+    the disk is named rather than the machine:
+
+        wk image disks $HOST                  what is attached over there
+        wk image write <id> --disk $HOST:<device>
+
+    'wk pi' is for the things that are actually about the board: putting it on
+    the tailnet, and its EEPROM boot order."
+fi
 
 # --- wk pi netboot-enable ----------------------------------------------------
 #
@@ -130,7 +159,7 @@ cmd_netboot_enable() {
     rsh true >/dev/null 2>&1 || die "cannot ssh to $HOST.
     This writes the board's firmware configuration, so it needs the board
     running and reachable. A Pi that cannot be reached at all has to be met
-    physically once -- an SD card written by 'wk pi flash' -- before netboot
+    physically once -- an SD card written by 'wk image write' -- before netboot
     can make any later trip unnecessary. Netboot removes the second visit,
     not the first."
 

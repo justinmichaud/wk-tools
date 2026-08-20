@@ -1199,6 +1199,54 @@ the reader (which must never mistake intent for evidence).
 - [ ] two `wk image build` at once: the second waits on the store lock rather
       than racing the first's rubble cleanup (rule 4)
 
+### Writing an image onto a disk — `wk image write`
+
+- [V] with no `--device` it lists candidates on the machine and **refuses to
+      guess** which disk is the card
+- [V] refuses the machine's own system disk: `/dev/nvme0n1` → *not removable
+      (RM=0) and its transport is 'nvme', not usb or mmc*
+- [V] refuses a partition: `/dev/mmcblk0p1 is a 'part', not a whole disk` — an
+      image carries its own partition table
+- [V] `--dry-run` resolves the image, the device, what is mounted on it, and the
+      image's own root spec, and writes nothing
+- [V] the real write, to the rpi5's reader: unmounts the partition the desktop
+      automounter had taken, streams 3984 MB with zstd, **reads it back and
+      compares sha256**, then grows partition 2 to fill the card
+- [V] confirmed on the card independently of the log — `mmcblk0p1 130M vfat
+      boot`, `mmcblk0p2 7.3G ext4 root`, grown from the image's 3.8 G
+- [ ] the card actually boots an rpi4 (needs the card moved to the board)
+- [V] the `bmaptool` path: *mapped 566163 of 1019904 blocks (2.2 GiB of 3.9
+      GiB, 55.5%)*, 547 MB sent instead of 4 GB, each block checksummed against
+      the map. Verified on the card afterwards — `boot`/`root` labels, the
+      bcm2711 DTBs, `root=/dev/mmcblk0p2` intact
+- [V] the fallback is **not silent**: an image with a block map written to a
+      machine without `bmaptool` warns and gives the install command, because
+      that is a missing package rather than a property of the image
+- [V] the read-back sha256 check runs only after a **dd** write. After a bmap
+      write it would always fail — bmaptool does not write unmapped blocks, so
+      comparing the whole span compares bytes nobody wrote
+- [V] one verb, not two: `wk image flash` and `wk pi flash` both fail with a
+      message saying why the *name* was wrong ("reads as reflash that machine";
+      "nothing here is permanent"), not merely where it moved
+- [V] `wk image disks <machine>` marks which disk that machine is configured to
+      boot from, so `wk boot` does not look like it takes a disk argument
+- [V] after writing, the closing line says whether anything will boot it and
+      names `wk boot <machine>` — the sentence that would have prevented the
+      original confusion
+
+### The image must be able to boot from what it is written to
+
+- [V] `wk image flash rpi4` with the yocto image is **refused**: the image says
+      `root=/dev/mmcblk0p2` and `MACH_DEVICE` is `/dev/sda`, so the firmware
+      would load the kernel and the kernel would find no root. The message says
+      exactly that, and says it in the dry run too
+- [V] no false positive on the distro images: `root=LABEL=wk-image-root` is
+      classed `portable` and passes on any device
+- [V] compared by device *kind*, not path — a card written in one machine's
+      reader is routinely booted in another, so `/dev/mmcblk0` on the writer and
+      on the booter are two facts that merely share a spelling
+- [V] `WK_ANY_ROOT=1` overrides it, and says the write proves the transfer only
+
 ### Flashing
 
 - [V] `wk image flash <machine> --dry-run` writes nothing
@@ -1400,6 +1448,15 @@ egress list that cannot be "every upstream in six layers".
       block rather than returning early when its marker is present — otherwise
       `--chromium`, `--keep-work` and the job counts silently do nothing on the
       second invocation
+- [ ] **OPEN — is the pseudo bump needed at all?** 24.04 + `wpe-2.46` is
+      known-good unpatched, and the Yocto spec is *byte-identical* between
+      `wpe-2.46` and `webkitglib/2.48` (same poky `6879650b`, same layers, same
+      `local-rpi4-64bits-mesa.conf` — `diff` is empty). So the variable is not
+      the branch, and cannot be: the reproducer involves no WebKit. Settle it by
+      running the three-line reproducer in the known-good container, and by
+      diffing `objdump -T $(command -v tar)` between the two.
+      `docs/HANDOFF-yocto.md` has the full note. Delete `image/yocto/meta-wk` if
+      it turns out unnecessary
 - [V] `do_package` works, with pseudo bumped to 1.9.11 in
       `image/yocto/meta-wk`. Verified by the three-line reproducer and by the
       exact recipe that failed (`update-rc.d ... do_package: Succeeded`) rather

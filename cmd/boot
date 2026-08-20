@@ -259,7 +259,7 @@ cmd_arm() {
         local on_device
         on_device=$(b_device_image)
         [ "$on_device" = "$IMAGE" ] || die "$MACH_DEVICE on $MACHINE holds ${on_device:-no wk image}, not $IMAGE.
-    Write it first:  wk image flash $MACHINE --image $IMAGE"
+    Write it first:  wk image write $IMAGE --disk $MACHINE:$MACH_DEVICE"
     fi
 
     if [ -n "$DRY" ]; then
