@@ -1,0 +1,107 @@
+where the disk goes, and how to reclaim it
+
+COUNTING IT
+
+      wk disk
+
+  One report for the whole machine, with the total. It has to be one command
+  because the bytes are in three places no single `du` reaches, and two of them
+  are invisible from the obvious one:
+
+    * on a macOS host the entire container store -- mirror, snapshots, every
+      workspace's overlay, the container images -- is inside one sparse disk
+      image belonging to the podman VM. `du` on that file is what the host is
+      actually backing; the breakdown inside it is a separate question, which
+      `wk disk` asks over one ssh and prints in parentheses to mark it as
+      already counted.
+    * the macOS guests live in ~/.tart, outside every wk directory, and are by
+      far the largest thing here.
+    * the store itself -- on Linux under the user's own data directory, on macOS
+      inside that VM.
+
+  Read-only absolutely: it starts nothing (not the podman machine, not a guest)
+  and never prompts. A stopped machine is reported as '??' with `wk start`,
+  rather than being booted to answer a question about disk.
+
+  Two caveats it prints rather than hides. `du` counts allocated blocks, so a
+  guest disk with a 320 GB ceiling costs what it has written, not the ceiling;
+  and APFS clones -- every `tart clone`, so every vm workspace -- share blocks
+  with what they came from while `du` charges both. The total is an upper bound;
+  the `df` line under it is the filesystem's own answer.
+
+  Inside a workspace the same command answers the only version of the question
+  available in there: this checkout, its build trees and its compilation caches.
+  The host's store is not visible from a workspace, by design.
+
+WHAT IS EXPENSIVE, AND WHAT IT COSTS TO GET BACK
+
+  golden macOS base VM      the largest thing on a macOS host by a wide margin
+                            (162 GB measured here): Xcode, a checkout and a full
+                            mac-release build, sealed once so that every
+                            `wk vm new` is an instant clone. Hours to rebuild.
+  the master git store      the bare mirror (~13 GB of history) and the base
+                            snapshots hardlinked from it. Minutes to hours to
+                            refetch, and only over the network.
+  the podman VM's image     grows to whatever the container store has needed and
+                            never shrinks on its own.
+  container images          podman's own store, ~15 GB: the images workspaces
+                            are made from. Re-pullable.
+  ccache and the caches     trimmed to a ceiling, never unbounded.
+  boot images               4.6 GB each, rebuildable from a spec in this repo.
+  workspaces                a container's is its overlay upper layer -- what you
+                            have actually changed and built. A guest's is the
+                            whole guest.
+  bench results             small, and the provenance record; never pruned
+                            automatically.
+
+ROUTINE RECLAIM
+
+      wk gc                 prunes by reference count, so it can never lose
+                            work: unreferenced snapshots, dangling images and
+                            volumes, stale benchmark seeds, superseded boot
+                            images, ccache back to its ceiling. It also prints
+                            what it deliberately did *not* prune, so growth
+                            stays visible.
+      wk rm <name>          a workspace and everything it created, in one step.
+                            This is the intended way to reclaim: workspaces are
+                            disposable and remaking one is cheap.
+      wk vm stop <name>     frees a running-guest slot, not disk.
+
+  On a macOS host, deleting files inside the podman VM returns exactly zero
+  bytes to the host until the guest discards those blocks: the image is sparse.
+  `wk gc` runs `fstrim -av` for that, but only where root costs no password (the
+  podman VM qualifies); otherwise it says so and `sudo fstrim -av` is the manual
+  half.
+
+ERASING THE MASTERS
+
+  Each of these throws away something a plain `wk gc` will never touch, so each
+  one asks first, with the size attached.
+
+      wk vm base --rm       the golden macOS base VM, and then -- separately,
+                            because it is only a download -- the pulled OCI
+                            image behind it. Existing vm workspaces are
+                            unaffected: a clone is an independent guest.
+                            `wk vm base` builds it again (hours).
+      wk gc --purge-mirror  the bare mirror and every base snapshot. Refused
+                            while any workspace exists, and not out of caution:
+                            a snapshot is the lower layer of a live overlay
+                            mount. `wk sync` rebuilds both.
+      wk remote rm <t>      a build machine's remote root -- its pushed tooling,
+                            its caches, its own mirror -- offered with the size,
+                            on the machine itself.
+
+  The podman VM as a whole is not a wk command, because recreating it is `setup`
+  and not gc:
+
+      podman machine rm wk && ./setup
+
+  A full `./setup` rather than one stage: a fresh machine still needs the
+  tooling, the SDK and the egress proxy provisioned into it. That erases the
+  container store with it -- mirror, snapshots, every container workspace -- and
+  is the one way to hand the whole sparse image back at once. `wk stop` does
+  nothing of the sort: it shuts everything down and loses nothing.
+
+  Nothing here reaches a workstation's checkout of this repository, your ssh
+  keys, or the shared credentials in the store's secrets directory. Those are
+  not caches, and no wk command prunes them.

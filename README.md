@@ -197,6 +197,27 @@ comes from *that* machine's live load average and free memory, builds run at
 stacking. There is no sandbox there, so `wk claude` and `wk verify` refuse a
 remote target outright.
 
+`wk help targets` is the same ground as a decision — which target a piece of
+work belongs on, and what a container costs against a macOS guest — and
+`wk help machines` is how a machine becomes a target here in the first place.
+
+## Disk
+
+```sh
+wk disk                # every place wk stores something here, with the total
+wk gc                  # prune by reference count; can never lose work
+wk gc --purge-mirror   # erase the master git store (wk sync refetches it)
+wk vm base --rm        # erase the golden macOS image (hours to rebuild)
+```
+
+Three things dominate, and none of them is visible from the others: the golden
+macOS base VM (162 GB measured here — Xcode, a checkout and a full build, sealed
+so every `wk vm new` is an instant clone), the podman VM's sparse disk image
+(which is where the whole container store lives on macOS), and the master git
+store — the bare mirror plus the base snapshots hardlinked from it. `wk disk`
+counts all three in one read-only report and never starts anything to do it;
+`wk help disk` says what is safe to erase and what it costs to get back.
+
 ## Claude
 
 `wk claude <name>` runs the agent inside a workspace with permissions relaxed,

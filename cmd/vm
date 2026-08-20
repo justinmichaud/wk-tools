@@ -10,6 +10,12 @@
 # goes through the ordinary commands, because `wk new <name> --target vm`
 # registers the target and they resolve it from there. `wk vm new` is a
 # shorthand for that one case.
+#
+# `wk vm base` is the exception that is not lifecycle-per-workspace: the golden
+# guest every workspace is cloned from. It is built once (hours), fast-forwarded
+# week to week (--refresh), remade (--rebuild) or erased (--rm) -- and it is by
+# a wide margin the largest thing wk stores on a macOS host, which `wk disk`
+# reports and `wk help disk` explains.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -85,6 +91,38 @@ base)
         _tart delete "$WK_VM_BASE" 2>/dev/null || true
         _ensure_base
         ;;
+    --rm)
+        # Erasing the largest single thing on the machine, which is why it is a
+        # command rather than a note in the docs: 162 GB measured on this host,
+        # and nothing else here comes close.
+        #
+        # Two artifacts, asked about separately because they cost differently to
+        # get back: the golden guest (hours -- Xcode, a checkout and a full
+        # mac-release prebuild) and the pulled OCI image it was cloned from (a
+        # download). Existing workspaces are unaffected either way: a `tart
+        # clone` is an independent guest, and APFS keeps the blocks alive for as
+        # long as anything references them.
+        _base_exists || die "no golden base '$WK_VM_BASE' on this machine -- nothing to erase.
+    'wk vm base' builds one; 'wk disk' says what everything here costs."
+        sz=$(du -sh "${TART_HOME:-$HOME/.tart}/vms/$WK_VM_BASE" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
+        confirm "delete the golden base VM '$WK_VM_BASE' ($sz)? rebuilding it is hours" \
+            || die "aborted -- nothing was changed"
+        _tart delete "$WK_VM_BASE"
+        info "deleted '$WK_VM_BASE' -- existing vm workspaces are unaffected"
+        log  "  'wk vm base' builds it again; until then 'wk vm new' has nothing to clone"
+
+        cache="${TART_HOME:-$HOME/.tart}/cache"
+        if [ -d "$cache" ] && [ -n "$(ls -A "$cache" 2>/dev/null)" ]; then
+            csz=$(du -sh "$cache" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
+            if confirm "also drop the pulled image cache ($csz)? it is re-downloadable"; then
+                _tart prune --space-budget 0
+                info "pruned the image cache"
+            else
+                log "  kept: $cache"
+            fi
+        fi
+        exit 0
+        ;;
     --refresh)
         # The cheap one, and the one you actually want week to week: boot the
         # existing base, fast-forward its checkout, shut it down. New
@@ -98,7 +136,7 @@ base)
         _ensure_base
         ;;
     *)
-        die "usage: wk vm base [--refresh|--rebuild]"
+        die "usage: wk vm base [--refresh|--rebuild|--rm]"
         ;;
     esac
     info "golden base '$WK_VM_BASE' is ready"
@@ -112,6 +150,6 @@ rm)
     ;;
 *)
     die "usage: wk vm ls|new|start|stop|ip|enter|sync|rm <name>
-       wk vm base [--refresh|--rebuild]"
+       wk vm base [--refresh|--rebuild|--rm]"
     ;;
 esac

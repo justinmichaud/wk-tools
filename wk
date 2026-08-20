@@ -59,6 +59,10 @@ sources and disk
                             only when your own work is at stake
   report                    weekly GitHub activity summary (uses gh)
   gc                        prune snapshots, images and caches; reclaim disk
+      --purge-mirror        erase the master git store -- the bare mirror and
+                            every base snapshot; 'wk sync' refetches them
+  disk                      what is stored on this machine, where, and the
+                            total (read-only; 'wk help disk' says what to erase)
 
 hosts and machines
   setup                     idempotent host bootstrap (also: ./setup)
@@ -67,6 +71,10 @@ hosts and machines
   version                   which wk-tools this machine runs (sha and tree hash)
   backup                    write live desktop settings back into the repo
   vm <sub>                  macOS VM lifecycle: ls|new|start|stop|ip|enter|sync|base|rm
+      base [--refresh|--rebuild|--rm]
+                            the golden guest every vm workspace is cloned from:
+                            build it, fast-forward its checkout, remake it, or
+                            erase it (it is the largest thing on the machine)
   pi <sub>                  setup: onto the tailnet; netboot-enable: the
                             EEPROM's only writer
   image <sub>               boot images: build|ls|show|flash|rm
@@ -100,7 +108,47 @@ hosts and machines
 
   WK_DEBUG=1 for verbose output.
 EOF
+    help_topics >&2
     exit 2
+}
+
+# --- help topics -------------------------------------------------------------
+#
+# `wk --explain` answers "what does this one command do". A topic answers the
+# question underneath that: what a target *is*, which one to put a workspace on,
+# where the disk went, how a machine becomes a target here. Neither is derivable
+# from the other -- the first is a fact about an implementation and is derived
+# from it, the second is a decision, and a decision has to be written down.
+#
+# The topics are files under docs/help/, one per topic, first line a summary.
+# Files rather than heredocs in here for two reasons: this listing is then
+# derived from what exists rather than being a second list to keep right, and
+# the prose is readable (and greppable, and reviewable in a diff) without being
+# indented inside a shell function.
+help_dir() { echo "$WK_ROOT/docs/help"; }
+
+help_topics() {
+    local f n
+    [ -d "$(help_dir)" ] || return 0
+    printf '\nconcepts -- wk help <topic>\n'
+    for f in "$(help_dir)"/*.txt; do
+        [ -f "$f" ] || continue
+        n=$(basename "$f" .txt)
+        printf '  %-25s %s\n' "$n" "$(head -1 "$f")"
+    done
+}
+
+help_topic() {
+    local f; f="$(help_dir)/$1.txt"
+    if [ ! -f "$f" ]; then
+        warn "no help topic '$1'"
+        help_topics >&2
+        exit 2
+    fi
+    # From the second line: the first is the one-line summary the listing above
+    # prints, and repeating it as the page's own first line reads like a stutter.
+    tail -n +2 "$f"
+    exit 0
 }
 
 # Which target a command will act on.
@@ -201,9 +249,13 @@ is_lifecycle() {
 # `report` is here because it is `gh` and nothing else: the authenticated GitHub
 # CLI lives on the host, the same reason `key` does. Forwarded, it ran in the
 # podman machine, which has neither gh nor a credential to give it one.
+# `disk` is here because the numbers that matter are host-side: the podman VM's
+# disk image and the Tart guests are files on this machine, and the store inside
+# the VM is asked for over one ssh -- but only when the machine is already
+# running, which forwarding the whole command could not preserve.
 is_host_command() {
     case "$1" in
-        setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|key|report|sudo|version|stop|start|help|-h|--help) return 0 ;;
+        setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|key|report|sudo|version|stop|start|disk|help|-h|--help) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -233,7 +285,7 @@ is_readonly_report() {
         "remotes --fix") return 1 ;;
     esac
     case "$1" in
-        ls|status|logs|doctor|version|remotes) return 0 ;;
+        ls|status|logs|doctor|version|remotes|disk) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -433,7 +485,11 @@ main() {
     local cmd="$1" _a _seen_dashdash="" _rest; shift
 
     case "$cmd" in
-        help|-h|--help) usage ;;
+        # A topic argument makes this a question about a concept rather than
+        # about a command -- and, like --explain, it must be answerable
+        # anywhere: inside a workspace, on a build box, on a host with no
+        # podman. Nothing below this point is reached.
+        help|-h|--help) [ $# -ge 1 ] && help_topic "$1"; usage ;;
         # Advertised in the help but implemented by the top-level script, so it
         # has no cmd/ file for the dispatch below to find.
         setup) exec "$WK_ROOT/setup" "$@" ;;

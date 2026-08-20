@@ -1,0 +1,136 @@
+adding a build box or another workstation
+
+MACHINES
+
+  A machine becomes a target in three steps, and none of them is a command that
+  writes to git on your behalf:
+
+    1. an ssh destination that already works, non-interactively
+    2. a conf naming it -- shared in this repository, or local to this device
+    3. `wk remote setup <name>`, for a build box you intend to drive
+
+  The target is named after the ssh destination, so step 1 is what everything
+  else is built on:
+
+      ssh -o BatchMode=yes buildbox4 true      # must succeed, silently
+
+  Keys, user and ProxyJump therefore live where ssh keeps them, not here. The
+  entries this repository ships are dotfiles/ssh/config, linked to
+  ~/.ssh/config.d/wk-tools by `./setup` -- so adding a machine's ssh entry
+  there gives it to every device that pulls, alongside its target conf. (The
+  generated `wk-<workspace>` aliases are a different file, ~/.ssh/config.d/wk,
+  written and removed by wk itself.)
+
+WHICH CONF, AND WHY THERE ARE TWO
+
+  targets/hosts/<name>.conf     in this repository, and therefore on every
+                                device that pulls it. What is true about the
+                                *machine* no matter who is driving: its ssh
+                                destination, the CMake flags its toolchain
+                                needs, whether it is a build box or a
+                                workstation of its own.
+  ~/.config/wk/targets/<n>.conf this device's own view of the same machine, and
+                                only what it alone can know: a different alias,
+                                a root somewhere else, a ceiling for a link
+                                that is not the machine's fault.
+
+  The registry is read first and the local conf second, and a conf is sourced
+  shell, so the local one overrides the shared one *line by line* -- setting one
+  variable keeps the registry's answer for everything else.
+
+  Almost everything belongs in the registry. It exists because the local half
+  used to be the only half: a reinstall lost every target, and a machine's build
+  flags had to be re-typed on every device. Adding one is an edit and a commit.
+
+  What the conf can say (targets/remote.sh has the full list):
+
+      WK_REMOTE_HOST=bbox-12-arm64    # ssh destination; defaults to the name
+      WK_REMOTE_ROOT=/home/you/wk     # defaults to ~/wk on the machine
+      WK_TARGET_CMAKE=-DFOO=OFF       # extra CMake flags for builds there
+      WK_REMOTE_REFERENCE=/var/…      # a shared checkout to clone from
+      WK_REMOTE_TOOLS=Development/…   # its wk-tools, if not $root/tools
+      WK_TARGET_KIND=remote           # implied for any named machine
+      WK_REMOTE_PEER=1                # a workstation, not a build box
+
+  No job ceiling: the count is derived per build from what that machine has
+  free at the time, which is the number that decides whether a link step
+  survives on a box shared with everyone else.
+
+A SHARED BUILD MACHINE
+
+      wk remote setup buildbox4
+
+  Provisions it over ssh and **never needs root** -- a shared box belongs to
+  everyone who logs into it, so everything left behind is under $HOME and
+  reversible. It writes the local conf if there is none, pushes wk-tools, and
+  leaves `wk` working *on* the machine as well as against it: a shell there gets
+  `wk build`, `wk status`, `wk logs` on the same workspaces, with the ssh step
+  dropped. It also asks -- once, with the size attached -- about anything it
+  finds that looks redundant.
+
+  Where workspaces are cloned from is the machine's decision, not ours: a box
+  that advertises a shared WebKit repository in its MOTD gets used (a local
+  clone hardlinks its objects, so it costs almost nothing, and the same MOTD
+  asks everyone to keep disk use down), and only a machine with none gets a
+  13 GB mirror of our own under the root.
+
+      wk new big-build --target buildbox4     # a workspace there
+      wk sync --target buildbox4              # refresh its tooling and mirror
+      wk sudo status --target buildbox4       # does root cost a password there
+      wk remote rm buildbox4                  # undo all of it, and forget it
+
+  Then move what is true of the *machine* into targets/hosts/buildbox4.conf and
+  commit it, so the next device you set up already has the target. That file is
+  also the right place for the explanation: why a flag is there, and what
+  breaks without it.
+
+  `wk new` and `wk rm` are workstation commands even for a remote workspace --
+  the record of which target a workspace belongs to lives here, and that record
+  is what sends a later `wk build` over there. Running them on the box itself
+  is refused, with the machine to run them on named.
+
+ANOTHER WORKSTATION
+
+  A second machine that owns workspaces of its own -- containers, guests, its
+  own store and mirror, its own git checkout of this repository -- is a *peer*,
+  and it must not be provisioned as a build box. `wk remote setup` writes
+  ~/.wk-remote, and that marker makes the machine refuse `wk sync`, `wk gc` and
+  `wk new` on *itself*: a workstation cannot be told it is somebody's build box
+  without ceasing to be a workstation.
+
+  So a peer is added by hand -- an ssh entry, and a registry conf saying what it
+  is. targets/hosts/moose.conf is the worked example:
+
+      WK_TARGET_KIND=remote
+      WK_REMOTE_PEER=1
+      WK_REMOTE_TOOLS=Development/wk-tools   # relative to *its* home
+
+  A peer is asked and not driven. `wk status` and `wk ls` here delegate to that
+  machine's own wk and report what it says -- which is the entire reason peers
+  exist, since a target list used to be machine-local and neither workstation
+  could say a word about the other. Nothing is pushed to it (it keeps its own
+  checkout, under git), and `wk new --target <peer>` and `wk rm --target <peer>`
+  are refused, naming the machine to run them on.
+
+CHECKING IT
+
+      wk status            every target at once; a machine that is off, or off
+                           this network, reports `unreachable` with the timeout
+                           that decided it -- never a hang
+      wk ls                the same set, per workspace
+      wk disk              what it all costs here (the far side keeps its own)
+
+  All three are read-only absolutely: they start nothing, including the podman
+  machine.
+
+REMOVING ONE
+
+      wk remote rm <name>       deprovisions the machine, offers to remove its
+                                remote root (with the size), forgets the target
+                                here. Registered workspaces block it -- remove
+                                them first; a machine that is already gone can
+                                still be forgotten.
+
+  A registry entry is a tracked file and is not deleted for you: `git rm
+  targets/hosts/<name>.conf` and commit, or the machine is still a target on
+  every device.

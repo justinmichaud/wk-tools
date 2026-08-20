@@ -740,6 +740,46 @@ reached through a ProxyJump), driven from the macOS host.
 - [V] `wk selftest` reports DRIFT when a check's plan line is reworded or
       removed, so the runner and this file cannot part company quietly
 
+### Help topics — the concepts, not the commands
+- [V] `wk help` lists every topic under `docs/help/` with its one-line summary,
+      derived from the files that exist rather than from a second list
+- [V] `wk help targets` / `machines` / `disk` print the page; an unknown topic
+      warns, lists what there is, and exits 2
+- [V] a topic is answerable wherever `--explain` is — inside a workspace, on a
+      build machine, on a host with no podman — because nothing is resolved,
+      forwarded or started to print one
+
+### Disk: counting it, and erasing the masters
+- [V] `wk disk` reports the three places the bytes are — the podman VM's sparse
+      disk image, the Tart guests, the store — with a total, and starts nothing:
+      a stopped podman machine is `??` naming `wk start`, never a boot
+      (216 G measured here 2026-08-20: 54 G image + 162 G golden base + 37 M
+      host state)
+- [V] rows that are inside a row already counted are parenthesised and left out
+      of the total, so the column adds up by eye
+- [V] the du-vs-df caveats are printed, not hidden: allocated blocks, APFS
+      clones charged twice (macOS only), and `df` underneath as the filesystem's
+      own answer
+- [ ] `wk disk` inside a workspace answers the only version of the question
+      available in there — this checkout, its build trees, its caches — because
+      the host's store is not visible from a workspace by design
+- [ ] `wk disk` with the podman machine stopped leaves it stopped (the
+      read-only rule, measured the same way as `wk status`)
+- [V] `wk gc --purge-mirror` refuses while any workspace exists, naming them: a
+      snapshot is the lower layer of a live overlay mount, so this would delete
+      the ground they stand on
+- [V] on a target with no snapshot store it refuses naming *that* target's
+      equivalent — the golden guest for `vm`, the machine's own repository for a
+      remote — rather than reporting a git error about an empty directory
+- [V] with no workspaces it prints both sizes, asks once, erases the mirror and
+      every snapshot, and says that `wk sync` rebuilds them; the fstrim at the
+      end of gc is what returns the bytes to a macOS host
+- [ ] `wk vm base --rm` deletes the golden base, then asks *separately* about
+      the pulled OCI image (a download, not hours), and existing vm workspaces
+      keep working — a `tart clone` is an independent guest
+- [V] both name the size before asking, and decline without a terminal rather
+      than blocking or proceeding
+
 ## 5. Host: quiesce, session, gui (Linux)
 - [ ] `wk quiesce on` sets the performance governor with no password;
       `off` restores; `status` reports
@@ -1006,8 +1046,10 @@ command that asked for it.
 
 ### Prompts guard destructive actions only
 - [ ] every interactive prompt in the tree guards a destructive action —
-      `wk rm`, `wk vm rm`, `wk vm base --rebuild`, `wk remote rm` and its
-      cleanup offers, `wk skills` overwrites, `wk pr`'s `reset --hard` —
+      `wk rm`, `wk vm rm`, `wk vm base --rebuild`, `wk vm base --rm` and its
+      second question about the image cache, `wk gc --purge-mirror`,
+      `wk remote rm` and its cleanup offers, `wk skills` overwrites,
+      `wk pr`'s `reset --hard` —
       and nothing else prompts: `wk remote setup` writes its conf and says
       so, `wk pr` runs fetch/checkout/remote-add/set-upstream unprompted,
       and `wk pi setup` asks for an auth key only when the node is not
