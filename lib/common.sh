@@ -184,6 +184,51 @@ confirm() {
     case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
 
+# --- at exit ------------------------------------------------------------------
+#
+# One EXIT trap for the whole process, and a list of handlers under it.
+#
+# There was one trap and several claimants: `hold_lock` installed
+# `trap _lock_release_all EXIT`, and so did `barrier`, `cmd/new`'s driver,
+# `cmd/image`'s seed cleanup and four commands' prefetch reapers -- and bash
+# keeps only the last one set. Every one of those was correct on its own and
+# silently disabled whichever had been set before it, which for a lock means
+# the lock outlives the command that took it and is cleared only by the next
+# taker's liveness check. That works (that is why the bug was invisible), but
+# it turns "the lock dies with its holder" from a property into a repair.
+#
+# So handlers register instead of trapping. Registration is idempotent and
+# ordered, a handler that fails cannot stop the ones after it, and the exit
+# status is preserved -- a trap that ends in a non-zero command would otherwise
+# change what the command exits with.
+_WK_ATEXIT=""
+
+_wk_run_atexit() {
+    local _rc=$? _h
+    # Published rather than passed: a handler that reports how the command
+    # ended (cmd/new's driver) needs it, and `trap 'f $?' EXIT` -- the only way
+    # to pass it as an argument -- is exactly the single-claimant trap this
+    # replaces.
+    WK_EXIT_STATUS=$_rc
+    for _h in $_WK_ATEXIT; do "$_h" || true; done
+    return $_rc
+}
+
+# wk_atexit <function-name>  -- run it when this process ends, whatever ends it.
+wk_atexit() {
+    case " $_WK_ATEXIT " in
+        *" $1 "*) return 0 ;;   # already registered; registering is idempotent
+    esac
+    _WK_ATEXIT="$_WK_ATEXIT $1"
+    trap _wk_run_atexit EXIT
+    return 0
+}
+
+# Deliberately *not* offered: a wk_atexit_remove. `cmd/new`'s refusal path
+# wants "do not record a failure I did not cause", which is a decision the
+# handler itself can make from its own state -- and a registry anything can
+# take entries out of is one where the lock release can be taken out too.
+
 # --- barriers, and getting past one in a hurry --------------------------------
 #
 # A barrier is a refusal that exists because of a rule rather than because the
@@ -217,9 +262,9 @@ barrier() {
     warn "FORCED past a barrier: $*"
     _WK_FORCED="$_WK_FORCED
 - $(printf '%s' "$*" | head -1)"
-    # Composes with any EXIT trap a lock has taken: both are ours, and
-    # release_locks is idempotent.
-    trap '_forced_summary; _lock_release_all 2>/dev/null || true' EXIT
+    # Composes with any lock this command has taken, and with any other
+    # handler: both are registrations under one trap (wk_atexit above).
+    wk_atexit _forced_summary
     return 0
 }
 
@@ -228,11 +273,11 @@ barrier() {
 # Rule 4: one lock per mutated resource, and a lock is not state -- it dies
 # with its holder.
 #
-# One mechanism, an atomic mkdir with the holder's pid inside it, on every
-# host. `flock` was the obvious choice and was tried first; it is wrong here,
-# and the reason is worth keeping:
+# One mechanism on every host: a symlink whose target string names the holder.
+# Two earlier attempts are recorded here, because both were tried and both were
+# wrong in ways that only appear when something is killed.
 #
-#   a flock is held by the open file description, so *every process that
+#   `flock` is held by the open file description, so *every process that
 #   inherits the descriptor* holds it. `wk new` starts a container, and podman
 #   leaves `conmon` behind supervising it -- with our lock fd inherited and the
 #   lock held for as long as the workspace exists. Measured 2026-08-19: after
@@ -240,23 +285,98 @@ barrier() {
 #   workspace waited on it forever. bash cannot mark a redirection
 #   close-on-exec, so there is no fix that keeps the fd; `flock --close` only
 #   applies to flock's own `-c` command form, which would mean re-exec'ing
-#   every command under it.
+#   every command under it. It is also one more thing to install -- macOS
+#   ships no flock(1) at all.
 #
-# mkdir has no descriptor to inherit. It is atomic on every filesystem here,
-# the holder's pid goes inside, and a lock whose pid is gone is broken by the
-# next taker -- which is what makes it die with its holder even on kill -9
-# (verified: the next taker proceeds immediately). The cost is that there is no
-# shared mode, so `-s` is accepted and serialises anyway: it only ever waits
-# more than asked, never less.
+#   an atomic `mkdir` with the holder's pid written inside it fixes the
+#   inheritance and introduces a window: the directory exists for a moment
+#   before the pid file in it does, and a process killed inside that window
+#   leaves a lock whose holder cannot be named -- indistinguishable from a live
+#   one, and so waited out in full. Found 2026-08-19 by a `wk rm` that sat out
+#   its entire timeout on rubble (docs/HANDOFF-yocto.md).
+#
+# A symlink has neither problem. `ln -s` is atomic *and* carries the payload
+# with it, so a lock can never exist without a holder written in it; there is
+# no descriptor for a child to inherit; and it needs nothing installed. The
+# payload is read with readlink and never resolved -- the target is not a path
+# and nothing here follows it.
+#
+# A lock whose holder is gone is broken by the next taker, which is what makes
+# it die with its holder even under kill -9. Breaking it is a rename over the
+# dead link rather than an unlink and a re-create, so there is never an instant
+# with no lock at all, and two takers breaking the same lock settle it by
+# reading back what they wrote: one sees its own payload and proceeds, the
+# other sees the winner's and goes back to waiting.
+#
+# The cost is that there is no shared mode, so `-s` is accepted and serialises
+# anyway: it only ever waits more than asked, never less.
 #
 # Locks live under the invoking machine's own state directory and are keyed by
 # that machine's hostname, because a home directory can be shared by several
 # build machines over NFS -- and a pid is only meaningful on the machine it
 # came from. Two machines under one home then lock their own resources, which
 # is what "per mutated resource" means when the resource is per machine.
+#
+# What a lock here cannot do is serialise against work that is not a process on
+# this machine: a build detached into a container or handed to a build box
+# outlives the command that started it, and nothing here can be held by
+# something that is not here. That half is evidence at the artifact instead --
+# ws_busy_reason in lib/target.sh -- and the two are used together.
 wk_lock_dir() { echo "${WK_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/wk/locks}"; }
 
+# Two lists, because they answer two different questions.
+#
+#   _WK_LOCK_HELD   what *this* scope must release when it ends.
+#   _WK_LOCK_MINE   what this process already holds, for re-entrancy.
+#
+# They differ inside `with_lock`, which clears the first (its subshell must not
+# release the caller's locks) and keeps the second (a `with_lock X` inside a
+# command already holding X must not wait for itself).
+#
+# Re-entrancy is decided from this list and never from the pid in the lock,
+# and that is the whole reason the list exists: subshells share `$$`, so a
+# command that starts several of them in parallel -- each taking the same lock
+# before touching the same file -- would have every one of them recognise its
+# own parent's pid and walk straight in. Measured: twelve concurrent takers,
+# twelve simultaneous critical sections, a counter that ended at 1.
 _WK_LOCK_HELD=""
+_WK_LOCK_MINE=""
+_WK_LOCK_PAYLOAD=""
+
+# This scope's identity, written into every lock it takes and compared before
+# releasing one, or before believing it won a race to break a dead one.
+#
+# Two fields, because the two questions have different answers:
+#
+#   pid=  is the holder still alive? `$$` is the command's pid, which is what
+#         a *later* command's liveness check needs.
+#   tok=  am I the one that wrote this? `$$` cannot answer that: every
+#         subshell of one command shares it, so two of them breaking the same
+#         dead lock at the same moment would write byte-identical payloads and
+#         both read one back and conclude they had won. Measured: twelve
+#         takers, one counter, a final value of 9. The token is four bytes of
+#         urandom, taken once per scope.
+#
+# Computed once and kept: it is an identity, not a timestamp, and a lock taken
+# twice must read as the same holder both times.
+# Made once, by a call and never by a substitution: `$(...)` runs in a subshell,
+# so a payload minted in there would be lost the moment it was read and the
+# next read would mint a different one -- which is the same identity crisis the
+# token exists to prevent, arrived at from the other side. hold_lock calls this
+# first, in its own scope, and everything after it only reads the variable.
+_lock_init() {
+    [ -n "$_WK_LOCK_PAYLOAD" ] && return 0
+    local tok
+    tok=$( (od -An -N4 -tx1 /dev/urandom 2>/dev/null || echo "$$ $RANDOM") | tr -dc 'a-f0-9')
+    _WK_LOCK_PAYLOAD="pid=$$ tok=${tok:-$$} at=$(date -u +%Y-%m-%dT%H:%M:%SZ) cmd=${WK_CMD:-wk}"
+    return 0
+}
+
+_lock_payload() { _lock_init; printf '%s' "$_WK_LOCK_PAYLOAD"; }
+
+_lock_token() { printf '%s' "$_WK_LOCK_PAYLOAD" | sed -n 's/.*tok=\([a-f0-9]*\).*/\1/p'; }
+
+_lock_pid_of() { printf '%s' "${1:-}" | sed -n 's/^pid=\([0-9][0-9]*\).*/\1/p'; }
 
 _lock_path() {
     local d h
@@ -267,9 +387,61 @@ _lock_path() {
 }
 
 _lock_release_all() {
-    local d
-    for d in $_WK_LOCK_HELD; do rm -rf "$d"; done
+    local f
+    [ -n "$_WK_LOCK_HELD" ] || return 0
+    for f in $_WK_LOCK_HELD; do
+        # Only if it is still ours. A lock we were judged dead for and lost to
+        # another taker belongs to that taker now, and removing it would leave
+        # the resource unprotected while it is being written.
+        [ "$(readlink "$f" 2>/dev/null || true)" = "$(_lock_payload)" ] || continue
+        rm -f "$f"
+    done
     _WK_LOCK_HELD=""
+    _WK_LOCK_MINE=""
+    return 0
+}
+
+# Break a lock whose holder is gone -- exactly once, however many takers saw
+# the same dead lock at the same moment.
+#
+# "Is the holder dead" and "replace it" are two operations, and the gap between
+# them is a race with every other taker that read the same thing: A replaces the
+# dead lock and starts working; B, which read that same dead payload a moment
+# earlier, replaces *A's* fresh lock and starts working too. Measured under the
+# contention check in `wk selftest --quick`: twelve takers, eleven critical
+# sections, one increment silently lost. Reading the link back after the rename
+# does not fix it -- at the instant A read it back, A really had won.
+#
+# So the replacement is a compare-and-swap, and the thing that makes it atomic
+# is one more of the same atomic create: a short-lived breaker lock, held for
+# the microseconds of a readlink and a rename. Inside it, the swap happens only
+# if the lock still holds the *same* dead payload the caller saw -- so a taker
+# whose observation has been overtaken does nothing at all and goes back to
+# waiting, which is now the truth.
+_lock_break() {
+    local f="$1" seen="$2" bf="$f.breaking" tmp bpid rc=1
+
+    if ! ln -s "$(_lock_payload)" "$bf" 2>/dev/null; then
+        # Someone else is breaking it. Unless they died in the two syscalls it
+        # takes, in which case this clears the way and the caller comes round
+        # again -- the same rule as the lock itself, applied to the breaker.
+        bpid=$(_lock_pid_of "$(readlink "$bf" 2>/dev/null || true)")
+        if [ -z "$bpid" ] || ! kill -0 "$bpid" 2>/dev/null; then rm -rf "$bf"; fi
+        return 1
+    fi
+
+    if [ "$(readlink "$f" 2>/dev/null || true)" = "$seen" ]; then
+        tmp="$f.new.$(_lock_token)"
+        rm -f "$tmp"
+        if ln -s "$(_lock_payload)" "$tmp" 2>/dev/null && mv -f "$tmp" "$f" 2>/dev/null; then
+            rc=0
+        else
+            rm -f "$tmp"
+        fi
+    fi
+
+    rm -f "$bf"
+    return $rc
 }
 
 # hold_lock <resource> [-w seconds] [-s]
@@ -277,13 +449,18 @@ _lock_release_all() {
 # Takes the lock and holds it for the life of this process -- which is what a
 # long, linear command wants (`wk build` locks the workspace it is building
 # from the moment it starts writing status to the moment it exits). Dropped by
-# an EXIT trap, and by the next taker's liveness check if that never runs.
+# an EXIT handler, and by the next taker's liveness check if that never runs.
+#
+# Re-entrant: a second call for a lock this process has already taken returns
+# at once. Without that, a command that takes the same resource twice waits on
+# itself until the timeout -- a deadlock against nobody. "Already taken" is
+# this process's own list and not the pid in the lock; see _WK_LOCK_MINE.
 #
 # Before an `exec` that replaces this process with something long-lived (`wk
 # new --zed`), call release_locks: the pid stays alive, so the lock would be
 # held for as long as the editor is open.
 hold_lock() {
-    local res="$1" timeout=600 f waited=0 owner
+    local res="$1" timeout=600 f owner opid started announced=""
     shift
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -293,27 +470,60 @@ hold_lock() {
         esac
     done
 
+    _lock_init
     f=$(_lock_path "$res")
+    started=$(date +%s)
 
-    while ! mkdir "$f.d" 2>/dev/null; do
-        owner=$(cat "$f.d/pid" 2>/dev/null || true)
-        if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-            # The holder is gone. Its lock is not state and must not outlive it.
-            rm -rf "$f.d"
-            continue
+    case " $_WK_LOCK_MINE " in
+        *" $f "*) debug "lock: $res (already held here)"; return 0 ;;
+    esac
+
+    while :; do
+        if [ -d "$f" ] && [ ! -L "$f" ]; then
+            # A lock left by a wk-tools old enough to have used the mkdir form.
+            # Dealt with *before* the `ln` and not after it, because `ln -s x
+            # somedir` does not fail -- it creates a link inside the directory
+            # and reports success, which would hand this process a lock that
+            # somebody else is holding.
+            opid=$(cat "$f/pid" 2>/dev/null | tr -dc '0-9') || true
+            if [ -z "$opid" ] || ! kill -0 "$opid" 2>/dev/null; then
+                rm -rf "$f"; continue
+            fi
+        elif ln -s "$(_lock_payload)" "$f" 2>/dev/null; then
+            break
+        else
+            owner=$(readlink "$f" 2>/dev/null || true)
+            opid=$(_lock_pid_of "$owner")
+
+            if [ -n "$opid" ] && ! kill -0 "$opid" 2>/dev/null; then
+                # The holder is gone. Its lock is not state and must not
+                # outlive it.
+                _lock_break "$f" "$owner" && break
+                continue
+            fi
+
+            if [ -z "$opid" ]; then
+                # Something at the path with no holder written in it: not a
+                # lock this or any earlier wk-tools wrote. There is nothing to
+                # wait for, and waiting would be waiting on nobody.
+                warn "clearing a lock file with no holder in it: $f"
+                rm -rf "$f"; continue
+            fi
         fi
-        if [ "$waited" -eq 0 ]; then
-            info "waiting for the $res lock${owner:+ (held by pid $owner)}"
+
+        if [ -z "$announced" ]; then
+            announced=1
+            info "waiting for the $res lock${opid:+ (held by pid $opid)}"
         fi
-        if [ "$waited" -ge "$timeout" ]; then
-            die "could not take the $res lock within ${timeout}s${owner:+ -- pid $owner still holds it}"
+        if [ "$(( $(date +%s) - started ))" -ge "$timeout" ]; then
+            die "could not take the $res lock within ${timeout}s${opid:+ -- pid $opid still holds it}"
         fi
-        sleep 1; waited=$((waited + 1))
+        sleep 1
     done
 
-    printf '%s\n' "$$" > "$f.d/pid"
-    _WK_LOCK_HELD="$_WK_LOCK_HELD $f.d"
-    trap _lock_release_all EXIT
+    _WK_LOCK_HELD="$_WK_LOCK_HELD $f"
+    _WK_LOCK_MINE="$_WK_LOCK_MINE $f"
+    wk_atexit _lock_release_all
     debug "lock: $res"
 }
 
@@ -335,7 +545,16 @@ with_lock() {
         esac
     done
     [ $# -gt 0 ] || die "with_lock: nothing to run"
-    ( hold_lock "$res" $args; "$@" )
+    # A subshell, so the EXIT handler that drops the lock runs when the command
+    # ends rather than when this process does. `$$` is still this process's pid
+    # inside it, which is the right holder to record: the subshell is where the
+    # work happens, but the lifetime the lock is bounded by is this one.
+    #
+    # The held-list is cleared inside it, and that is not tidiness: the subshell
+    # inherits this process's list, and the handler at its end would otherwise
+    # drop every lock the *caller* still holds -- in the middle of the caller's
+    # critical section, from a scope that has no idea it exists.
+    ( _WK_LOCK_HELD=""; hold_lock "$res" $args; "$@" )
 }
 
 # --- the BMC's DRM device -----------------------------------------------------

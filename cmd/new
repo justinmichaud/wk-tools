@@ -128,17 +128,21 @@ if [ -n "$DETACHED" ]; then
     # A failure has to leave a state behind, or a waiter would sit there until
     # its timeout deciding from the process table alone.
     _driver_exit() {
-        [ "${1:-0}" -eq 0 ] || \
+        [ -n "${REFUSED:-}" ] && return 0
+        [ "${WK_EXIT_STATUS:-0}" -eq 0 ] || \
             status_write "$SF" state=failed "pid=$$" "stage=$CUR" "log=$LOG" "target=$TARGET"
         release_locks
     }
 
     # A refusal is not a failed creation, and must not be recorded as one: this
     # driver changed nothing, and the workspace it declined to touch may be a
-    # perfectly good one whose status file says so. Drops the trap first, so
-    # `failed` is not written over `present`.
+    # perfectly good one whose status file says so. Said with a flag rather
+    # than by dropping the trap, because the trap is shared now (wk_atexit,
+    # lib/common.sh) and dropping it would take the lock release with it --
+    # which is the class of bug that motivated sharing it in the first place.
+    REFUSED=""
     refuse() {
-        trap - EXIT
+        REFUSED=1
         release_locks
         die "$@"
     }
@@ -156,9 +160,10 @@ if [ -n "$DETACHED" ]; then
     hold_lock "ws-$NAME"
     if t_needs_base; then hold_lock store -s; fi
 
-    # After the locks, because hold_lock installs an EXIT trap of its own and
-    # the last one set is the one that runs; this one releases them itself.
-    trap '_driver_exit $?' EXIT
+    # Order does not matter any more -- handlers register, they do not replace
+    # each other -- but it stays after the locks because that is the order the
+    # two things happen in: take, then arrange to report however it ends.
+    wk_atexit _driver_exit
 
     stage checking
 

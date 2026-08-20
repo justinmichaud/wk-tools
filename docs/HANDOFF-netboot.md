@@ -442,6 +442,14 @@ otherwise:
 
 - **Tier 1 — armed remotely, no media, no hands.** rpi5, rpi4, rpi3, moose. One
   command puts the machine in the image for one boot; the next boot is normal.
+- **Tier 2 — the MBP. As of 2026-08-20 this has a driver**
+  (`boot/mac-volume.sh`) and a third arming model, `hands-on`: the driver
+  checks what it can, records the intent, prints the ritual, and reboots
+  nothing. `wk boot mbp --status` reports it as armed *and waiting for a
+  person*, which is the honest reading of a transition no software can make.
+  The machine also drives itself (`MACH_LOCAL`), because it is the only Apple
+  Silicon machine here. See docs/HANDOFF-benchmarking.md for the staging that
+  goes with it.
 - **Tier 2 — the MBP.** A macOS install on an external SSD, *personalised for
   that Mac* (installed or blessed from it, not merely copied to it), selected by
   an authenticated action. **Accepted by the user 2026-08-19 on the condition

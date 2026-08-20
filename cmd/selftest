@@ -81,7 +81,8 @@ if [ -n "$SECTION" ]; then
 fi
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+_tmp_cleanup() { rm -rf "$TMP"; }
+wk_atexit _tmp_cleanup
 
 passes=0; fails=0; skips=0; drifts=0
 pass()  { printf '  \033[32mok\033[0m    %s\n' "$*" >&2; passes=$((passes + 1)); }
@@ -412,6 +413,175 @@ chk_no_sudo_daily() {
     [ -z "$found" ] || { echo "sudo that can prompt:$found"; return 1; }
 }
 
+# --- locks -------------------------------------------------------------------
+#
+# The lock is the one piece of shared machinery every mutating command depends
+# on, and every one of its failures is a race that only shows up under a kill
+# or under load -- which is to say, never in the run where you would look for
+# it. Each property below cost a real defect to learn (lib/common.sh, "locks").
+#
+# In a scratch lock directory, so a selftest cannot wedge a real command by
+# leaving one behind, and so this runs the same on a machine in the middle of a
+# build.
+_lock_sh() {
+    WK_LOCK_DIR="$TMP/locks" bash -c '
+        set -uo pipefail
+        . "$1/lib/common.sh"
+        set +e
+        shift
+        eval "$@"' _ "$WK_ROOT" "$@"
+}
+
+# The property: a lock dies with its holder, however the holder dies -- and a
+# lock with no holder recorded in it is not a lock, it is rubble.
+chk_lock_dies_with_holder() {
+    local out
+    out=$(_lock_sh '
+        # killed -9 with the lock held
+        bash -c ". $WK_ROOT/lib/common.sh; hold_lock k; sleep 30" &
+        p=$!; sleep 1; kill -9 $p 2>/dev/null; wait $p 2>/dev/null
+        s=$(date +%s); ( hold_lock k -w 20 >/dev/null 2>&1 )
+        [ $(( $(date +%s) - s )) -lt 3 ] || echo "killed holder: waited"
+
+        # the window the mkdir form had: a lock naming nobody
+        mkdir -p "$(_lock_path h)"
+        s=$(date +%s); ( hold_lock h -w 20 >/dev/null 2>&1 )
+        [ $(( $(date +%s) - s )) -lt 3 ] || echo "holder-less lock: waited it out"
+
+        # and a live holder is still respected
+        bash -c ". $WK_ROOT/lib/common.sh; hold_lock l; sleep 5" &
+        q=$!; sleep 1
+        ( hold_lock l -w 2 >/dev/null 2>&1 ) && echo "live holder: walked in"
+        kill $q 2>/dev/null; wait $q 2>/dev/null
+    ') || true
+    [ -z "$out" ] || { echo "$out"; return 1; }
+}
+
+# The property: takers of one lock serialise, even when they start together and
+# even when the lock they find is a dead one they all try to break at once.
+# Twelve of them, each doing a read-modify-write no lock would survive.
+chk_lock_serialises_under_contention() {
+    local out
+    out=$(_lock_sh '
+        c="$WK_LOCK_DIR/n"; mkdir -p "$WK_LOCK_DIR"; echo 0 > "$c"
+        ln -s "pid=99999998 tok=dead at=x cmd=x" "$(_lock_path r)"
+        for i in $(seq 1 12); do
+            ( hold_lock r -w 60 >/dev/null 2>&1
+              n=$(cat "$c"); sleep 0.2; echo $((n + 1)) > "$c" ) &
+        done
+        wait
+        [ "$(cat "$c")" = 12 ] || echo "twelve takers, $(cat "$c") critical sections"
+        [ -L "$(_lock_path r)" ] && echo "the lock was left behind"
+        true
+    ') || true
+    [ -z "$out" ] || { echo "$out"; return 1; }
+}
+
+# The property: a command may register its own end-of-run work without
+# disabling anybody else's. There was one trap and several claimants, and bash
+# keeps the last one set -- so `cmd/new`'s failure record silently replaced the
+# lock release for the whole of a creation.
+chk_exit_handlers_compose() {
+    local out
+    out=$(_lock_sh '
+        r=$(bash -c ". $WK_ROOT/lib/common.sh
+                     mine() { echo mine; }
+                     hold_lock e; wk_atexit mine" 2>/dev/null)
+        [ "$r" = mine ] || echo "the command own handler did not run"
+        [ -L "$(_lock_path e)" ] && echo "the lock was not released"
+        bash -c ". $WK_ROOT/lib/common.sh; hold_lock x; exit 7" >/dev/null 2>&1
+        [ $? = 7 ] || echo "the exit status did not survive the handlers"
+        true
+    ') || true
+    [ -z "$out" ] || { echo "$out"; return 1; }
+    # And structurally: nothing outside lib/common.sh may take the EXIT trap,
+    # because taking it is what disables everything else registered under it.
+    local claimants
+    claimants=$(grep -rn "^[^#]*trap .*EXIT" "$WK_ROOT/cmd" "$WK_ROOT/lib" "$WK_ROOT/targets" \
+                    "$WK_ROOT/boot" "$WK_ROOT/image" 2>/dev/null \
+                | grep -v "lib/common.sh" || true)
+    [ -z "$claimants" ] || { echo "these take the EXIT trap instead of registering a handler:
+$claimants"; return 1; }
+}
+
+# One lock mechanism, everywhere. flock is the one that keeps coming back: it
+# is the obvious answer, it is inherited by every child, and macOS does not
+# ship it -- so a machine with no flock silently locked nothing.
+chk_one_lock_mechanism() {
+    local hits
+    # This file is excluded, and has to be: a checker that forbids a word
+    # cannot avoid containing it, and matching itself is the one hit that means
+    # the check is working.
+    hits=$(grep -rn '\bflock\b' "$WK_ROOT/cmd" "$WK_ROOT/lib" "$WK_ROOT/targets" \
+               "$WK_ROOT/boot" "$WK_ROOT/image" "$WK_ROOT/wk" 2>/dev/null \
+           | grep -v "^$0:" | grep -v '/selftest:' \
+           | grep -v '^[^:]*:[0-9]*: *#' | grep -v '# ' || true)
+    [ -z "$hits" ] || { echo "flock is still called here:
+$hits"; return 1; }
+}
+
+# --- the commands that resolve a build without one ---------------------------
+#
+# `wk profile` and `wk bench stage` both compose an environment and a command
+# line out of a config, a port and a target, and both are wrong in ways that
+# only show up as a profile of the wrong thing: a JSC option spelled into the
+# wrong position is ignored in silence, and a loader variable spelled for the
+# wrong platform produces a binary that will not start. Their dry runs are
+# where that is checkable without a build.
+chk_profile_resolves() {
+    local out bad=""
+
+    # The jsc shell, Apple port: options before the script (jsc treats
+    # everything after the file as the script's arguments, so a `--sample`
+    # appended at the end turns the profiler off and passes the word on), and
+    # DYLD_FRAMEWORK_PATH rather than LD_LIBRARY_PATH.
+    out=$(as_workspace profile --config mac-release --dry-run bench.js 2>&1) || { echo "exit: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'DYLD_FRAMEWORK_PATH' || bad="$bad no-dyld"
+    printf '%s\n' "$out" | grep -qE '/jsc.* --sample.* .?bench\.js' || bad="$bad flags-after-script"
+
+    # A CMake port from the same workspace: the other loader variable, and
+    # samply rather than xctrace under --mode native.
+    out=$(as_workspace profile --config wpe-release --mode native --dry-run bench.js 2>&1) \
+        || { echo "exit: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'LD_LIBRARY_PATH' || bad="$bad no-ld-library-path"
+    printf '%s\n' "$out" | grep -q 'samply record' || bad="$bad native-is-not-samply"
+
+    # And the Apple port picks Instruments for the same word.
+    out=$(as_workspace profile --config mac-release --mode native --dry-run bench.js 2>&1) \
+        || { echo "exit: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'xctrace record' || bad="$bad native-is-not-xctrace"
+
+    # Every mode either resolves or refuses with a reason; none may traceback.
+    local m
+    for m in sampling bytecode samply instruments heaptrack massif; do
+        out=$(as_workspace profile --mode "$m" --dry-run bench.js 2>&1) || {
+            printf '%s\n' "$out" | grep -q '^error:' || bad="$bad $m(no-reason)"
+        }
+    done
+
+    [ -z "$bad" ] || { echo "wk profile resolved wrongly:$bad"; return 1; }
+}
+
+# The fleet's third arming model. A machine whose transition is a person's act
+# must never be reported as one that will move by itself, and must never leave
+# an arming record for a role it could not even check was there.
+chk_hands_on_arming() {
+    is_macos || { echo "the hands-on machine is this Mac"; return 77; }
+    local out rc=0
+    out=$(WK_BENCH_VOLUME="wk-selftest-no-such-volume" "$WK" boot mbp --status 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || { echo "wk boot mbp --status exited $rc: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'not attached' \
+        || { echo "status did not notice the missing volume: $out"; return 1; }
+
+    rc=0
+    out=$(XDG_STATE_HOME="$TMP/state" WK_BENCH_VOLUME="wk-selftest-no-such-volume" \
+          "$WK" boot mbp 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "arming succeeded with no volume attached"; return 1; }
+    [ -e "$TMP/state/wk/boot-armed" ] \
+        && { echo "a refused arming still wrote a record"; return 1; }
+    return 0
+}
+
 # --- state: the rules in docs/HANDOFF-workspace-state.md ---------------------
 
 _machine_state() {
@@ -701,6 +871,12 @@ if want quick; then
     check "an unknown command prints the usage and exits 2"               chk_unknown_command
     check "an unconfigured name is refused, and the error prints the conf to write" chk_unknown_target
     check "no \`wk\` command in the daily path calls \`sudo\` on either host" chk_no_sudo_daily
+    check "a lock dies with its holder, and a lock naming nobody is not waited out" chk_lock_dies_with_holder
+    check "twelve takers of one lock, one at a time"                      chk_lock_serialises_under_contention
+    check "a command's own end-of-run work does not disable the lock release" chk_exit_handlers_compose
+    check "one lock mechanism, everywhere: nothing in the tree calls \`flock\`" chk_one_lock_mechanism
+    check "\`wk profile\` composes the right environment for each port"       chk_profile_resolves
+    check "arming with no volume attached refuses"                         chk_hands_on_arming
 fi
 
 if want state; then

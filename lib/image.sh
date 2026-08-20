@@ -204,17 +204,17 @@ image_root_word() {
 
 # One lock per mutated resource (rule 4). The image store is one resource: two
 # concurrent builds would race on the same rubble-cleanup and on the shared
-# base download. flock dies with its holder, so a killed build leaves no lock
-# to clear -- which is the property that makes rule 2 possible at all.
+# base download.
 #
-# lib/common.sh is about to grow a general `with_lock` (the macOS lane owns
-# that file this week); when it lands, this collapses into a call to it.
+# The general lock (hold_lock, lib/common.sh) rather than a flock of its own,
+# which is what this used to be. Two reasons, and the first is not a tidiness
+# argument: macOS ships no flock(1) at all, so the one command in here that a
+# Mac can run -- writing a disk attached to a fleet machine -- was locking
+# nothing, or dying, depending on what was installed. The second is that a
+# flock is held by the file descriptor and therefore by every process that
+# inherits it, which is the property that made it wrong for workspaces too.
 image_lock() {
-    local d
-    d=$(image_store_dir); mkdir -p "$d"
-    exec 9>"$d/.lock"
-    flock -w "${WK_LOCK_WAIT:-300}" 9 \
-        || die "another 'wk image' is holding the image store lock"
+    hold_lock image-store -w "${WK_LOCK_WAIT:-300}"
 }
 
 # The base distro image, downloaded once and pinned by sha256.

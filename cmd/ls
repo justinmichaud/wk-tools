@@ -65,7 +65,7 @@ TARGETS=$(walk_targets)
 # lib/target.sh). Only the waiting moves; the listing is the same listing.
 # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
 prefetch_targets $TARGETS
-trap 'prefetch_done' EXIT
+wk_atexit prefetch_done
 for TARGET in $TARGETS; do
     load_target "$TARGET"
 

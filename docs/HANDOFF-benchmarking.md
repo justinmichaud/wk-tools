@@ -165,6 +165,87 @@ What exists instead:
   switch remote-ish, never automatic. Recorded in `docs/HANDOFF-netboot.md` as
   tier 2, alongside the second-internal-volume alternative.
 
+### The macOS shape, decided and half-built 2026-08-20
+
+**Build inside the VM, run outside on the metal.** Both halves are necessary
+and neither is negotiable. A guest cannot produce a number worth keeping — it
+shares a CPU with a desktop, its GPU is paravirtualised, its scheduler is
+somebody else's — and the benchmark install cannot build, because an install
+carrying Xcode and a checkout is no longer a benchmark install: it is a second
+workstation, drifting from the first. So the build stays where builds are
+cheap and reproducible, and what crosses the boundary is the product.
+
+The thing that makes this cheap on a Mac, and that has no equivalent on the
+Pis: **while this machine is in its normal role the benchmark volume is simply
+mounted**, so staging a build onto it is a copy rather than a transfer, and
+reading the results back afterwards is the same. The transition is the only
+manual part, and it is two clicks.
+
+Built and verified as far as the hardware allows (there is no benchmark volume
+on this machine yet — exercised against a disposable `hdiutil` APFS volume):
+
+- **`boot/mac-volume.sh`**, the fleet's third arming model. `one-shot` (rpi5)
+  and `server` (rpi4/rpi3) are joined by **`hands-on`**: the driver checks what
+  it can, records the intent, and prints the ritual; nothing reboots the
+  machine, because the role it is going to is chosen at the startup manager.
+  `wk boot mbp --status` then reports it as *armed and waiting for a person*
+  rather than as something that will move by itself, and `--disarm` says which
+  half a person still has to undo if they used the sticky route.
+- The machine drives itself (`MACH_LOCAL` in `boot/machines.sh`): there is one
+  Apple Silicon machine here, so the transition is arranged from inside the
+  role being left, by a shell that is about to be rebooted out from under
+  itself. That also answers the open question below about where the runner
+  lives — for the Mac it is the machine itself, writing its results onto the
+  volume, which the normal role reads back the moment it returns.
+- Boot identity comes from `kern.boottime`, which does the same job for "has
+  this arming been spent" that Linux's random `boot_id` does, and is a clock
+  reading as well.
+- **`wk bench stage <ws> --to mbp`** copies the product out of the guest onto
+  the volume: `WebKitBuild/<config>`, `Tools/` (run-benchmark, webkitpy and
+  the plans — the smallest tree that can drive a run), and a `stage.json`
+  written last, carrying workspace, sha, config, wk-tools tree hash and
+  `bench_host=image`. Provenance is decided *here*, where it is all still
+  known: the other role cannot ask a guest anything.
+- **`t_pull_dir`** joins `t_pull` in the driver contract, since a build tree is
+  tens of thousands of files: `podman cp` for a container, rsync over ssh for
+  a guest and for a build machine.
+
+**Prepare the benchmark install by hand, once.** `wk quiesce` already covers
+the per-run half on macOS (a `caffeinate`, the analysis daemons paused, and the
+privileged helper switching Spotlight, automatic updates and low power mode
+off), and as of 2026-08-20 it also *measures* the result rather than trusting
+it — including the two things the helper does not touch, a configured Time
+Machine destination and the thermal state. What is left is what the install
+itself has to be:
+
+- a full macOS install on the volume, *personalised for this Mac* (installed or
+  blessed from it — copying an image onto a disk does not boot), named
+  `WK Bench` (or `WK_BENCH_VOLUME`);
+- Spotlight indexing off for that volume, Time Machine off, automatic updates
+  off, sleep and screen saver off, Siri and analytics off, no login items;
+- an `/etc/wk-image` with an `id=` line — that marker is the only thing that
+  tells `wk boot` which role answered, and without it the benchmark role
+  reports itself as a workstation;
+- ssh in, so the run can be driven from a terminal rather than a keyboard.
+
+**What is not written, deliberately.** The runner in the benchmark role. Two
+things have to be read out of a real checkout before it can be written
+honestly, and neither is guessable:
+
+1. **Does `run-benchmark` drive from a partial tree?** The staged payload is
+   `Tools/` plus `WebKitBuild/<config>`; webkitdirs finds a checkout root by
+   looking for files that a partial tree may not have. If it does not, the
+   answer is a checkout on the volume — cloned once, `git fetch` per run, with
+   only the product staged each time — and that is a decision to take with the
+   measurement in hand, not before.
+2. **Which browser driver name is the Mac MiniBrowser?** The Linux ones are
+   `minibrowser-wpe` and `minibrowser-gtk` and are named in `cmd/bench`
+   already; the Apple one has to be read from
+   `webkitpy/benchmark_runner/browser_driver/`.
+
+`wk bench stage` says all of this in its own output rather than implying the
+loop is closed.
+
 A fallback worth costing before ruling it out: a second internal-volume install
 on the same Mac (a separate APFS system volume in the same container), which
 avoids the external-media performance question entirely — an external SSD over
@@ -182,9 +263,19 @@ benchmarks that touch disk that is itself a variable.
 - ~~Who serves TFTP/NFS for the Pis~~ — **answered 2026-08-19: moose.** Serving
   a multi-gigabyte root is not a phone's job, and the BMC is offline more often
   than moose. Its DHCP role on the guest network is unaffected.
-- Whether `bless --setBoot` makes the macOS half remotely bootable, or whether
-  macOS perf runs are inherently hands-on.
-- Where the benchmark runner lives once the machine under test is the whole
-  machine. `wk bench` today assumes a container workspace on the local host;
-  an image run needs it to drive a remote machine and record
-  `bench_host=image`.
+- ~~Whether `bless --setBoot` makes the macOS half remotely bootable~~ —
+  **answered 2026-08-19: it does not.** macOS perf runs are hands-on, and the
+  `hands-on` arming model above is what that looks like once it is admitted
+  rather than worked around.
+- ~~Where the benchmark runner lives once the machine under test is the whole
+  machine~~ — **answered for the Mac, 2026-08-20: the machine itself.** It is
+  the only Apple Silicon machine here, so nothing else can drive it; the
+  payload is staged onto the volume before the transition and the results are
+  read back off it afterwards. Still open for the Pis, where the runner is on
+  the machine that serves the image.
+- Still open: **nothing runs `wk quiesce` on the benchmark volume for you**,
+  and nothing checks the install *before* a run rather than during it. The
+  measurement exists now (`wk quiesce status` on macOS reports Spotlight, Time
+  Machine, updates, sleep, low power and the thermal limit from evidence); what
+  is missing is a preflight in the benchmark role that refuses a run on an
+  install that is still indexing itself.

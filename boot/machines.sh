@@ -22,6 +22,7 @@ machine_list() {
 rpi5   Raspberry Pi 5, WiFi only. USB one-shot; the NVMe workstation is untouched.
 rpi4   Raspberry Pi 4 (2 GB), on the LAN. Netboots; armed from the server side.
 rpi3   Raspberry Pi 3, on a direct cable. Netboots; needs real DHCP with option 43.
+mbp    This Mac. Boots a benchmark volume; the selection is hands-on (Apple Silicon).
 EOF
 }
 
@@ -73,6 +74,27 @@ machine_load() {
         MACH_ROLE=test-device
         MACH_NOTE="Raspberry Pi 3, netboot over a direct cable"
         ;;
+    mbp)
+        # The machine this is running on, and the only one in the fleet that
+        # cannot be driven from anywhere else: there is one Apple Silicon
+        # machine here, so its transition is arranged from inside the role it
+        # is leaving. See boot/mac-volume.sh for what that costs.
+        MACH_LOCAL=1
+        MACH_SSH=localhost
+        MACH_DRIVER=mac-volume
+        # Not a block device: what is booted is an *installed volume*,
+        # personalised for this Mac (an image copied onto a disk does not boot
+        # -- the boot policy lives in this machine's own secure storage).
+        # MACH_DEVICE is left empty so that anything reaching for it fails
+        # loudly rather than writing to a disk on a machine that has no image
+        # to write.
+        MACH_DEVICE=""
+        MACH_ROOT=""
+        MACH_VOLUME="${WK_BENCH_VOLUME:-WK Bench}"
+        MACH_PROFILE=mac-bench
+        MACH_ROLE=workstation
+        MACH_NOTE="this Mac, booting its benchmark volume (hands-on)"
+        ;;
     *)  return 1 ;;
     esac
 }
@@ -88,8 +110,19 @@ load_driver() {
 # fails immediately instead of prompting into a script, ConnectTimeout because
 # every fleet probe is bounded (the reliability contract in
 # docs/HANDOFF-workspace-state.md).
+#
+# MACH_LOCAL is the case where the machine under test *is* the machine driving
+# -- which is not an edge case but the normal shape for the MBP: it is the only
+# Apple Silicon machine here, so nothing else can drive its transition, and the
+# benchmark role is reached by rebooting this very shell out from under itself.
+# Running the same commands locally keeps every driver written against one
+# spelling; what changes is only who executes them.
 m_ssh() {
-    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$MACH_SSH" "$@"
+    if [ -n "${MACH_LOCAL:-}" ]; then
+        bash -c "$*"
+    else
+        ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$MACH_SSH" "$@"
+    fi
 }
 
 m_reachable() { m_ssh true >/dev/null 2>&1; }
@@ -145,6 +178,11 @@ MACH_RECORD=/var/lib/wk/boot-armed
 # knows it. The boot id is the load-bearing field: "has this arming been
 # spent" is then a comparison of two values from one kernel, not of two
 # machines' wall clocks.
+#
+# It comes through `b_boot_id` rather than out of /proc directly, because a
+# boot id is a per-platform question -- Linux has one to read and macOS has to
+# derive one from kern.boottime -- and a record whose id is written by one rule
+# and read by another compares two different things and always disagrees.
 record_write() {
     m_ssh "sudo mkdir -p $(dirname $MACH_RECORD) && sudo tee $MACH_RECORD >/dev/null <<EOF
 image=$1
@@ -153,7 +191,7 @@ device=$3
 order=$4
 armed_by=$(hostname)
 armed_at=\$(date -u +%Y-%m-%dT%H:%M:%SZ)
-armed_boot_id=\$(cat /proc/sys/kernel/random/boot_id)
+armed_boot_id=$(b_boot_id)
 EOF"
 }
 

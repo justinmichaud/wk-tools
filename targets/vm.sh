@@ -520,6 +520,30 @@ t_exec() {
     _ssh "$ip" "bash -lc $(sh_quote "$cmd")"
 }
 
+# One file out of the guest, byte for byte (lib/target.sh, t_pull).
+#
+# scp rather than `t_exec cat`, for the reason the contract gives: a command
+# whose stdout goes through a login shell is not a byte pipe. Here the shell is
+# `bash -lc` over ssh, which is friendlier to binary than wkdev-enter and still
+# not something to hand a 40 MB profile.
+t_pull() {
+    local name="$1" src="$2" dest="$3"
+    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    scp -q $(_ssh_opts) "$WK_VM_USER@$ip:$src" "$dest"
+}
+
+# A directory out of the guest. rsync over the same ssh options everything
+# else here uses, because this is how a build tree gets to the machine that
+# will run it (docs/HANDOFF-benchmarking.md: build in the guest, run on bare
+# metal) and that tree is tens of thousands of files.
+t_pull_dir() {
+    local name="$1" src="$2" dest="$3"
+    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
+    mkdir -p "$dest"
+    rsync -a --delete -e "ssh $(_ssh_opts)" "$WK_VM_USER@$ip:$src/" "$dest/"
+}
+
 t_exec_tty() {
     local name="$1"; shift
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"

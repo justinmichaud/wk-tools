@@ -47,7 +47,16 @@ wk test <args>        # run tests
 wk status             # this workspace's build/test state; exit code is machine-readable
 wk logs [-f|--all]    # the build log, errors first
 wk build <config> --dry-run    # what it would build, and where, without building
+wk profile [file.js]  # where the time went: JSC's own profilers, samply,
+                      # Instruments -- one flag each, no env-var walls
 ```
+
+`wk profile --mode sampling` (the default) prints the tier breakdown, which is
+what decides the next step: mostly FTL/DFG/Baseline means the cost is in
+generated JS, so `--mode bytecode` next; mostly C/C++ means the engine itself,
+so `--mode native` -- samply on Linux, Instruments on a macOS guest. The
+jsc-profile skill explains how to read each one; the flags are here so no run
+has to be assembled by hand.
 
 Debugging, in a macOS workspace (the Apple ports; the Linux half is not wired
 up yet). Each needs a terminal, and each gets one:

@@ -29,6 +29,95 @@ Each item names the source handoff so detail is not duplicated here.
 
 ---
 
+## Done since — locking, consistency, and the macOS profiling/benchmark lane (2026-08-20, macOS host)
+
+One session, in the order the user asked for it: fix locking and reliability,
+make the commands consistent, then the macOS VM lane — debugging, profiling,
+benchmarking — with the rest of the macOS work (remote, cross-compile, yocto)
+explicitly deprioritised.
+
+**Locking, rebuilt on a different primitive.** The lock is now a **symlink**
+whose target string names the holder. Three defects went with the old
+atomic-mkdir form, and the last two were found by writing the test rather than
+by being reported:
+
+1. *A lock naming nobody was waited out in full.* mkdir publishes the lock
+   before the pid is written into it, and a process killed in that window
+   leaves something indistinguishable from a live holder (`wk rm` sat out its
+   whole timeout on one — docs/HANDOFF-yocto.md item 7). `ln -s` writes the
+   payload *with* the lock, so the window does not exist rather than being
+   made small.
+2. *Several takers could break one dead lock and all conclude they had won.*
+   Reading the link back after the swap does not settle it — at the instant A
+   read it back, A really had won, and B overwrote it a moment later. The break
+   is a compare-and-swap now: a short-lived breaker lock, and the swap only if
+   the lock still holds the same dead payload the caller saw. Measured before
+   the fix: twelve takers, eleven critical sections.
+3. *Re-entrancy compared `$$`*, which every subshell of one command shares — so
+   twelve parallel subshells each recognised their own parent and walked
+   straight in (a counter that ended at 1). It is this process's own list now,
+   and the payload carries four bytes of urandom so two subshells cannot write
+   byte-identical claims.
+
+**One EXIT trap, and handlers register under it** (`wk_atexit`). There was one
+trap and six claimants — `hold_lock`, `barrier`, `cmd/new`'s driver, the seed
+cleanup in `cmd/image`, `boot/disk.sh`'s staging cleanup, four prefetch reapers
+— and bash keeps only the last one set. Every one was correct alone and
+silently disabled whichever had been set before it; for a lock that turned "it
+dies with its holder" from a property into a repair. `wk selftest` now checks
+both the behaviour and that no file has gone back to trapping.
+
+**One lock mechanism everywhere.** `flock` is gone: it was still the image
+store's lock (and macOS ships no `flock(1)`, so on a Mac that lock was no lock)
+and the remote build lock, where the descriptor is inherited by everything the
+build leaves running. The remote build takes the same lock through
+`lib/lockrun.sh` in the wk-tools that `t_sync_tools` has just pushed there, so
+`wk remote setup` no longer has to refuse a machine for want of a package.
+
+**And the half a lock cannot cover.** A job detached *into* a workspace
+outlives the command that took the lock: a Yocto stage held nothing out here
+and a `wk build` in the same checkout was let straight in. `ws_busy_reason`
+asks the workspace for evidence instead — the pid a detached job leaves in
+`home/<job>.pid`, tested *inside* the workspace — and `wk build` goes through
+it as a barrier (docs/HANDOFF-yocto.md item 8).
+
+**Consistency.** `image`, `boot` and `serve` were neither host-only nor host
+commands, so on a macOS host they forwarded into the podman VM and were allowed
+inside a workspace; they are classified now, which is the item
+docs/HANDOFF-netboot.md listed as owed. `wk help`'s `image` line matches the
+verbs it actually has, `--explain` no longer cuts a command's sub-flags off its
+usage, and `cmd/report` joined the house style (it was the one file pinned to
+`/bin/bash`, with `date -v-7d` that fails on Linux and `$USER` — the *unix*
+name — deciding whose week it reported).
+
+**`wk profile`** (docs/HANDOFF-profile.md) — the env-var walls from three wiki
+pages and two skills, written down once: JSC's sampling and bytecode
+profilers, samply, Instruments via xctrace, heaptrack and massif, with
+`--mode native` picking xctrace on the Apple ports and samply everywhere else.
+Composition is verified in `wk selftest --quick`; nothing has been *run*,
+because this host has no guest and no container workspace. `t_pull` grew `vm`
+and `remote` implementations and `t_pull_dir` joined the contract.
+
+**The macOS benchmark role** (docs/HANDOFF-benchmarking.md, "The macOS shape"):
+build in the guest, run on the metal. `boot/mac-volume.sh` adds a third arming
+model — `hands-on` — for a transition no software can make on Apple Silicon,
+and the machine drives itself because it is the only one of its kind here.
+`wk bench stage <ws> --to mbp` copies the product, `Tools/`, and a `stage.json`
+written last onto the benchmark volume while it is merely mounted. The whole
+lifecycle is verified against a disposable APFS volume; what is *not* written
+is the runner in the other role, because two things have to be read out of a
+real checkout first, and they are named rather than guessed.
+
+**`wk quiesce` measures instead of trusting.** On macOS it now prints the
+privileged half's claim and what the machine says now, labelled separately, and
+covers what the helper does not touch: a configured Time Machine destination,
+the sleep timer, and `CPU_Speed_Limit` — a machine thermally held back during
+one half of an A/B is a difference that has nothing to do with the change.
+
+`wk selftest --quick` is 21 checks (was 15 of 198 line items; the plan is 545
+now, 31 encoded), and every claim above that could be tested without a guest,
+a board or an external SSD is one of them.
+
 ## Done since — a batch of reported defects (2026-08-19, macOS host)
 
 Driven by what broke in use rather than by a lane. Every item has a

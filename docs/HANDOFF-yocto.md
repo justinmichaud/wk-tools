@@ -503,7 +503,8 @@ Not done, in the order it matters:
    the SDK than that, the honest options are to add what it names to
    `container/yocto/Containerfile` or to split the stages across two
    workspaces: bitbake on the supported host, `build-webkit` in a wkdev one.
-7. **`hold_lock` cannot reclaim a lock directory with no `pid` file** — found
+7. **FIXED 2026-08-20. `hold_lock` cannot reclaim a lock directory with no
+   `pid` file** — found
    here, and it is in `lib/common.sh`, which the other lane owns this week, so
    it is reported rather than edited. The atomic-mkdir lock records the holder's
    pid *inside* the directory it just created, and the next taker reclaims the
@@ -514,14 +515,34 @@ Not done, in the order it matters:
    the pid already in it (`mkdir` a temp dir, write the pid, then `mv` it into
    place — the rename is the atomic step).
 
-8. **A detached build holds no lock.** `hold_lock "ws-<ws>"` is taken for the
+   The second one, taken to its conclusion: the lock is a **symlink** whose
+   target string names the holder. `ln -s` is atomic *and* carries the payload
+   with it, so the window does not exist rather than being made small — and the
+   descriptor-inheritance problem that ruled `flock` out in the first place
+   cannot come back, because there is no descriptor. Two further defects fell
+   out of writing the contention test for it, both of which the mkdir form had
+   as well: several takers breaking one dead lock could all conclude they had
+   won (the break is a compare-and-swap under a breaker lock now), and
+   re-entrancy compared `$$`, which every subshell of one command shares. See
+   lib/common.sh, "locks", and the lock lines in docs/TESTING.md §6.
+
+8. **FIXED 2026-08-20. A detached build holds no lock.** `hold_lock "ws-<ws>"` is taken for the
    foreground build, and `flock` dies with its holder — so with `--detach` this
    process exits and the lock goes with it. A second `wk image build` of the
    same profile is still refused, from evidence (a live pid in the workspace),
    but a concurrent `wk build` in the same workspace is not, and two builds in
-   one checkout corrupt both. Closing it properly means a lock held by the
-   spawned process on the far side, which is the same thing `wk build --detach`
-   will want. The *same-workspace* half of this is closed: `yocto_spawn` refuses
+   one checkout corrupt both.
+
+   Closed the other way round, because a lock on this machine cannot be held by
+   a process that is not on it: the workspace is asked for **evidence**
+   instead. `ws_busy_reason` (lib/target.sh) reads the pid a detached job
+   leaves in `$(t_home)/<job>.pid` — the convention `yocto_spawn` already
+   followed — and tests it *inside* the workspace, which is the only namespace
+   the number means anything in. `wk build` goes through it right after taking
+   the workspace lock, as a barrier: the evidence is a pid this end cannot
+   inspect further, so `--force` exists for the case where the number has been
+   reused. Anything else detached into a workspace gets the same serialisation
+   by writing the same file. The *same-workspace* half of this is closed: `yocto_spawn` refuses
    when any stage is live, not just the one being asked for — which was found
    the hard way, by a `--stage fetch` starting on top of a running
    `--stage image` and getting two bitbake cookers into one build directory.

@@ -1,0 +1,466 @@
+#!/usr/bin/env bash
+#
+# wk profile [<workspace>] [--mode M] [file.js | --browser [url] | --attach P]
+#
+# Where the time went -- with the env-var wall for each profiler written down
+# once, here, instead of in three wiki pages and two skills.
+#
+# The recipes this replaces were the longest copy-paste blocks in the wiki
+# (`JSC-Samply---perf`, `Debugging-WPE-Linux-(desktop)`,
+# `WPE-memory-usage-investigation`), and the jsc-profile and jsc-marker-trace
+# skills re-taught them with host paths baked in -- `~/Development/samply`, a
+# WebKitBuild directory spelled per port, a DYLD_/LD_ variable spelled per
+# platform. Every one of those is derivable from the workspace and the config,
+# and none of it should be typed again.
+#
+# Which profiler, and why it is a choice at all:
+#
+#   sampling    JSC's own sampling profiler. Names JS functions, and gives the
+#               tier breakdown (LLInt/Baseline/DFG/FTL/C++) that decides where
+#               to look next. No tools, no privileges, works on every port and
+#               every architecture -- including armhf, where the native
+#               profilers need a patched build. This is the default because it
+#               is the one that answers "which half of the engine is this".
+#   bytecode    JSC's Profiler::Database: per-CodeBlock, per-bytecode counts
+#               split by tier, plus the compile/OSR-exit/jettison log. The
+#               answer to "is this function reaching FTL, and if not why".
+#   samply      native sampling with the Firefox Profiler UI: C++ frames,
+#               every thread, the GC and the compiler. The mirror image of the
+#               two above -- precise about the engine, poor about JS -- which
+#               is why `--jit-dump` exists to give it JS frame names too.
+#   instruments Apple's Time Profiler through xctrace. Same job as samply on
+#               a Mac, and it needs nothing installed: a guest that can build
+#               the Apple port already has Xcode. `--mode native` picks this
+#               one on the Apple ports and samply everywhere else.
+#   heaptrack   allocations rather than time (Linux ports only).
+#   massif      the same question asked of the peak, through valgrind.
+#
+# What this deliberately does not do is decide *what* to profile: the run is
+# the jsc shell with your file, or MiniBrowser with your page, or an attach to
+# something already running. A profiler that also picks the workload is a
+# benchmark, and that is `wk bench`.
+#
+# The artifacts stay in the workspace, next to the build that produced them,
+# and `--fetch` copies them out to this machine for a UI that runs here. The
+# copy goes through t_pull, because a profile is exactly the kind of binary
+# that `t_exec <ws> cat` silently corrupts (lib/target.sh).
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/build/configs.sh"
+
+MODES="sampling bytecode samply instruments heaptrack massif"
+
+usage() {
+    cat >&2 <<'EOF'
+usage: wk profile [<workspace>] [--mode <mode>] [options] [file.js | -- args]
+
+  --mode <m>        sampling (default) | bytecode | samply | instruments |
+                    heaptrack | massif | native  (native = instruments on the
+                    Apple ports, samply everywhere else)
+  --config <c>      which build to profile (default: the workspace's own)
+  --browser [url]   profile MiniBrowser on that page instead of the jsc shell
+  --attach <pid|name>
+                    profile something already running in the workspace
+  --jit-dump        JS/JIT frame names for the native profilers
+  --markers         JSC's interval text markers, for splitting a trace by phase
+  --top <n>         how many functions/bytecodes the sampling report prints
+  --fetch [dir]     copy the artifacts to this machine when the run ends
+  --env NAME=VALUE  one more variable for the run (repeatable)
+  --dry-run         print the environment and the command, run nothing
+
+Everything after `--` is passed to what is being profiled.
+EOF
+    exit 2
+}
+
+# Inside a workspace there is no name to give: every command acts on this one
+# (refuse_ws_name, lib/target.sh).
+NAME="${1:-}"
+if in_workspace; then
+    refuse_ws_name "$NAME" profile "[--mode <mode>] [file.js]"
+    NAME=$(wk_self)
+else
+    case "$NAME" in
+        ''|-*) ;;              # a flag, or nothing: no name was given
+        *) shift ;;
+    esac
+fi
+
+MODE=sampling
+CONFIG="${WK_CONFIG:-}"
+BROWSER=""; URL=""; ATTACH=""; JITDUMP=""; MARKERS=""; TOP=""
+FETCH=""; FETCH_DIR=""; DRY=""; EXTRA_ENV=""
+ARGS=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --mode)    MODE="${2:-}"; shift 2 ;;
+        --mode=*)  MODE="${1#*=}"; shift ;;
+        --config)  CONFIG="${2:-}"; shift 2 ;;
+        --browser) BROWSER=1; shift
+                   case "${1:-}" in ''|-*) ;; *) URL="$1"; shift ;; esac ;;
+        --attach)  ATTACH="${2:-}"; [ -n "$ATTACH" ] || die "--attach needs a pid or a process name"; shift 2 ;;
+        --jit-dump) JITDUMP=1; shift ;;
+        --markers) MARKERS=1; shift ;;
+        --top)     TOP="${2:-}"; shift 2 ;;
+        --fetch)   FETCH=1; shift
+                   case "${1:-}" in ''|-*) ;; *) FETCH_DIR="$1"; shift ;; esac ;;
+        --env)     EXTRA_ENV="$EXTRA_ENV
+${2:-}"; shift 2 ;;
+        --dry-run) DRY=1; shift ;;
+        --list)    printf '%s\n' $MODES; exit 0 ;;
+        -h|--help) usage ;;
+        --)        shift; while [ $# -gt 0 ]; do ARGS+=("$1"); shift; done ;;
+        -*)        die "unknown option: $1
+    'wk profile --help' lists them." ;;
+        *)         ARGS+=("$1"); shift ;;
+    esac
+done
+
+require_name "$NAME"
+
+[ -n "$CONFIG" ] || CONFIG=$(default_config)
+config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
+
+# `native` is not a mode, it is a question about the platform -- and the answer
+# is different for a reason worth stating: on the Apple ports xctrace is
+# already there, and asking someone to install a Rust toolchain to profile a
+# build that shipped with Instruments is a poor trade.
+[ "$MODE" = native ] && { case "$CFG_BUILDSYS" in xcode) MODE=instruments ;; *) MODE=samply ;; esac; }
+case " $MODES " in
+    *" $MODE "*) ;;
+    *) die "no such mode '$MODE' -- there are: $MODES (and 'native')" ;;
+esac
+
+[ -n "$ATTACH" ] && [ -n "$BROWSER" ] && \
+    die "--attach and --browser are two ways to name the same thing: one starts
+    the browser under the profiler, the other profiles a process that is
+    already running. Pick one."
+
+TARGET="$(ws_target "$NAME")"
+load_target "$TARGET"
+wait_ready "$NAME"
+
+SRC=$(t_src "$NAME")
+VAR=$(config_run_var)
+DIR=$(config_run_dir "$SRC")
+
+# --- what is being profiled ---------------------------------------------------
+#
+# One of three shapes, and each resolves to a command in the workspace. The jsc
+# shell is the default because it is the one where a profile means what it
+# says: one process, one workload, no compositor and no network in the way.
+if [ -n "$ATTACH" ]; then
+    SUBJECT="attach:$ATTACH"
+    TARGET_CMD=""
+elif [ -n "$BROWSER" ]; then
+    case "$CFG_BUILDSYS" in
+        xcode) ;;
+        *) die "--browser is wired up for the Apple ports only.
+    On the CMake ports the browser is started by Tools/Scripts/run-minibrowser
+    and the process that matters is a child of it, so a profiler pointed at the
+    launcher records the launcher. Profile the web process with
+    '--attach WebKitWebProcess' once it is up, or use the jsc shell.
+    See docs/HANDOFF-linux-minibrower.md." ;;
+    esac
+    BIN=$(config_browser_path "$SRC")
+    [ -n "$URL" ] || URL="about:blank"
+    SUBJECT="MiniBrowser $URL"
+    TARGET_CMD="$(sh_quote "$BIN") $(config_browser_url_flag) $(sh_quote "$URL")"
+    [ ${#ARGS[@]} -gt 0 ] && TARGET_CMD="$TARGET_CMD $(sh_quote "${ARGS[@]}")"
+else
+    BIN=$(config_jsc_path "$SRC")
+    SUBJECT="jsc${ARGS[0]:+ ${ARGS[0]}}"
+    # Assembled last, in run it, because a mode may have flags of its own to
+    # put in -- and jsc takes its options *before* the script: anything after
+    # the file name is an argument to the script, so a `--sample` appended at
+    # the end turns the profiler silently off and hands the word to the
+    # benchmark.
+    TARGET_CMD=""
+fi
+
+# --- where the recording lands ------------------------------------------------
+#
+# In the workspace, under the home directory, in a directory named for the run.
+# Not /tmp: a profile is worth more than the ten minutes it took to record, and
+# /tmp on a container workspace is the first thing a restart takes away.
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+RUN="$STAMP-$MODE"
+OUTDIR="$(t_home "$NAME")/wk-profile/$RUN"
+
+# --- the environment ----------------------------------------------------------
+#
+# The loader variable first, and prepended rather than replaced -- the wkdev
+# image ships libwpe and the rest of the jhbuild prefix on that same path, so a
+# plain assignment makes the binary fail to start with a missing library that
+# was there all along. (This is the same prelude cmd/run explains.)
+PRELUDE="export $VAR=\"$DIR\${${VAR}:+:\${${VAR}}}\""
+
+# JSC options are environment variables named JSC_<option>, and every one below
+# is spelled the way JSC's OptionsList.h spells it -- a typo'd JSC_ variable is
+# ignored in silence, which is the failure that makes a profile look like the
+# code changed.
+JSC_ENV=""
+add_env() { JSC_ENV="$JSC_ENV $1"; }
+
+if [ -n "$MARKERS" ]; then
+    # Interval markers, for splitting one trace into per-phase profiles
+    # (claude/skills/jsc-marker-trace). The directory must exist and must be
+    # named: with the default empty value the markers go nowhere and the
+    # failure looks like a build without the instrumentation.
+    add_env "JSC_useTextMarkers=1"
+    add_env "JSC_textMarkersDirectory=$OUTDIR"
+fi
+
+if [ -n "$JITDUMP" ]; then
+    # JS/JIT frame names for a native profiler. Default-on for the Apple
+    # ports and default-off on Linux, where it is known to take the WebKitGTK
+    # UI process down within seconds of startup -- so it is opt-in here, and
+    # the refusal below is a warning rather than a barrier because the crash
+    # is port-specific and the jsc shell is fine.
+    add_env "JSC_useJITDump=1"
+    add_env "JSC_jitDumpDirectory=$OUTDIR"
+    if [ "$CFG_BUILDSYS" != xcode ] && [ -n "$BROWSER" ]; then
+        warn "JSC_useJITDump=1 has been seen to crash the WebKitGTK UI process on startup"
+        log  "  (claude/skills/jsc-marker-trace). If the browser dies at once, that is why."
+    fi
+fi
+
+if [ -n "$EXTRA_ENV" ]; then
+    while IFS= read -r _e; do
+        [ -n "$_e" ] || continue
+        add_env "$_e"
+    done <<EOF
+$EXTRA_ENV
+EOF
+fi
+
+# --- the tool -----------------------------------------------------------------
+#
+# Each mode contributes three things: what has to be present in the workspace,
+# what wraps the command, and what to do with what it leaves behind. They are
+# assembled here rather than branched over three times below.
+NEEDS=""       # a binary that must exist in the workspace
+JSC_FLAGS=""   # options for the jsc shell itself, which go before the script
+TEE=""         # a file the run's own output is copied into
+WRAP=""        # what goes in front of the command
+PRE=""         # what to run in the workspace first
+POST=""        # what to run in the workspace afterwards
+ARTIFACT=""    # what to point at when it is done
+
+case "$MODE" in
+sampling)
+    [ -n "$ATTACH" ] && die "the sampling profiler is a JSC option, not an attach: it has to be
+    on when the process starts. Use --mode samply (or instruments) to profile
+    something already running."
+    if [ -n "$BROWSER" ]; then
+        # In a browser the report has nowhere to be printed to at exit, so the
+        # options are set and the process is expected to write it to stderr
+        # when it ends. Said out loud because it is the one shape of this mode
+        # that does not simply work.
+        add_env "JSC_useSamplingProfiler=1"
+        add_env "JSC_collectExtraSamplingProfilerData=1"
+        add_env "JSC_reportSamplingProfilerData=1"
+        ARTIFACT="the report goes to the browser's stderr at exit"
+    else
+        # `--sample` is the shell's own spelling of useSamplingProfiler plus
+        # collectExtraSamplingProfilerData, and the two count flags are the
+        # difference between a 12-line report and a usable one.
+        JSC_FLAGS="--sample"
+        if [ -n "$TOP" ]; then
+            JSC_FLAGS="$JSC_FLAGS --samplingProfilerTopFunctionsCount=$TOP"
+            JSC_FLAGS="$JSC_FLAGS --samplingProfilerTopBytecodesCount=$((TOP * 2))"
+        fi
+        ARTIFACT="$OUTDIR/report.txt"
+        TEE="$ARTIFACT"
+    fi
+    ;;
+bytecode)
+    [ -n "$ATTACH" ] && die "the bytecode profiler is a JSC option and has to be on when the
+    process starts -- there is nothing to attach to."
+    add_env "JSC_useProfiler=true"
+    add_env "JSC_dumpProfilerDataAtExit=true"
+    # JSC writes JSCProfile-<pid>-<n>.json into the working directory, which is
+    # the checkout -- the run cannot simply be done in the output directory
+    # instead, because a relative script path on the command line is relative
+    # to the checkout and would stop resolving.
+    #
+    # So the file is moved out afterwards, and it is identified by being newer
+    # than a stamp taken just before the run rather than by being the newest
+    # one in the tree: the wiki recipe picks `ls -t | head -1` out of /tmp,
+    # which on a machine with two runs going is somebody else's profile.
+    ARTIFACT="$OUTDIR/JSCProfile.json"
+    PRE="touch $(sh_quote "$OUTDIR/.stamp")"
+    POST="p=\$(find $(sh_quote "$SRC") -maxdepth 1 -name 'JSCProfile-*.json' -newer $(sh_quote "$OUTDIR/.stamp") 2>/dev/null | head -1)
+          [ -n \"\$p\" ] || { echo 'no JSCProfile-*.json was written -- did the run reach exit?'; exit 1; }
+          mv \"\$p\" $(sh_quote "$ARTIFACT")
+          printf 'summary\\nquit\\n' | $(sh_quote "$SRC")/Tools/Scripts/display-profiler-output $(sh_quote "$ARTIFACT")"
+    ;;
+samply)
+    NEEDS=samply
+    ARTIFACT="$OUTDIR/profile.json"
+    if [ -n "$ATTACH" ]; then
+        case "$ATTACH" in
+            [0-9]*) WRAP="samply record --save-only -o $(sh_quote "$ARTIFACT") -p $ATTACH" ;;
+            *) die "samply attaches by pid. Find it in the workspace first:
+    wk enter $NAME -- pgrep -f $ATTACH" ;;
+        esac
+    else
+        WRAP="samply record --save-only -o $(sh_quote "$ARTIFACT") --"
+    fi
+    ;;
+instruments)
+    [ "$CFG_BUILDSYS" = xcode ] || die "xctrace profiles Mach-O processes on macOS; '$CONFIG' is a $CFG_BUILDSYS
+    build. Use --mode samply there."
+    NEEDS=xctrace
+    ARTIFACT="$OUTDIR/trace.trace"
+    if [ -n "$ATTACH" ]; then
+        WRAP="xctrace record --template 'Time Profiler' --output $(sh_quote "$ARTIFACT") --attach $(sh_quote "$ATTACH")"
+    else
+        WRAP="xctrace record --template 'Time Profiler' --output $(sh_quote "$ARTIFACT") --launch --"
+    fi
+    ;;
+heaptrack|massif)
+    [ "$CFG_BUILDSYS" = xcode ] && die "$MODE is a Linux tool and this is an Apple-port build.
+    For allocations on macOS use Instruments' Allocations template by hand --
+    'wk profile --mode instruments' records Time Profiler only."
+    [ -n "$ATTACH" ] && die "$MODE has to be there from the first allocation; there is nothing
+    useful to attach to."
+    if [ "$MODE" = heaptrack ]; then
+        NEEDS=heaptrack
+        ARTIFACT="$OUTDIR/heaptrack.*.zst"
+        WRAP="cd $(sh_quote "$OUTDIR") && heaptrack"
+    else
+        NEEDS=valgrind
+        ARTIFACT="$OUTDIR/massif.out"
+        WRAP="valgrind --tool=massif --massif-out-file=$(sh_quote "$ARTIFACT")"
+    fi
+    ;;
+esac
+
+# --- what has to be true before anything runs ---------------------------------
+
+# Under --dry-run this is reported and not enforced: the whole point of a dry
+# run is to see what an invocation would do, and refusing to describe it
+# because the build is not there yet answers a question nobody asked.
+BIN_PRESENT=""
+if [ -z "$ATTACH" ] && [ -n "${BIN:-}" ]; then
+    if t_exec "$NAME" test -x "$BIN" 2>/dev/null; then
+        BIN_PRESENT=1
+    elif [ -z "$DRY" ]; then
+        die "nothing to profile: no $(basename "$BIN") at $BIN
+    Build it first:  wk build $NAME $CONFIG"
+    fi
+fi
+
+if [ -n "$NEEDS" ] && [ -z "$DRY" ]; then
+    t_exec "$NAME" command -v "$NEEDS" >/dev/null 2>&1 || die "$NEEDS is not installed in '$NAME'.
+    It is provisioning, not a per-run step -- see docs/HANDOFF-profile.md and
+    lane A step 10 of docs/HANDOFF.md. Until that lands:
+        wk enter $NAME     and install it there, or
+        wk profile $NAME --mode sampling   which needs no tools at all."
+fi
+
+# samply reads the kernel's perf events, and the default paranoia level refuses
+# them. The sysctl is not namespaced, so a container cannot set it -- which is
+# exactly the failure this check exists to explain, because from inside the
+# workspace it reads as a permission problem with samply.
+if [ "$MODE" = samply ] && [ -z "$DRY" ]; then
+    _par=$(t_exec "$NAME" cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null | tr -dc '0-9') || _par=""
+    if [ -n "$_par" ] && [ "$_par" -gt 1 ]; then
+        die "perf_event_paranoid is $_par in '$NAME', and samply needs 1 or less.
+    It is a host setting and cannot be written from inside a workspace (the
+    sysctl is not namespaced -- sudo in there fails with 'permission denied on
+    key'). On the machine that runs the workspace:
+        echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+    On a booted benchmark image it is set already (docs/HANDOFF-netboot.md)."
+    fi
+fi
+
+# --- run it -------------------------------------------------------------------
+
+# The jsc shell only: for a browser or an attach, TARGET_CMD is already whole.
+if [ -z "$TARGET_CMD" ]; then
+    TARGET_CMD="$(sh_quote "$BIN")${JSC_FLAGS:+ $JSC_FLAGS}"
+    [ ${#ARGS[@]} -gt 0 ] && TARGET_CMD="$TARGET_CMD $(sh_quote "${ARGS[@]}")"
+fi
+
+# pipefail with the tee, or the status of the run becomes tee's and every
+# crash reads as a clean exit.
+[ -n "$TEE" ] && TARGET_CMD="set -o pipefail; $TARGET_CMD 2>&1 | tee $(sh_quote "$TEE")"
+
+CMD="$PRELUDE
+mkdir -p $(sh_quote "$OUTDIR")
+${PRE:+$PRE
+}${JSC_ENV:+export$JSC_ENV
+}${WRAP:+$WRAP }$TARGET_CMD"
+
+if [ -n "$DRY" ]; then
+    info "dry run -- nothing was profiled"
+    log  "  workspace: $NAME ($TARGET), config: $CONFIG, mode: $MODE"
+    log  "  subject:   $SUBJECT${BIN:+ (${BIN_PRESENT:+built: }${BIN_PRESENT:-NOT BUILT: }$BIN)}"
+    log  "  output:    $OUTDIR"
+    log  "  in the workspace:"
+    printf '%s\n' "$CMD" | sed 's/^/    /' >&2
+    [ -n "$POST" ] && { log "  and afterwards:"; printf '%s\n' "$POST" | sed 's/^/    /' >&2; }
+    exit 0
+fi
+
+info "$MODE: $SUBJECT in '$NAME' ($CONFIG)"
+log  "  output: $OUTDIR"
+
+# A tty when the subject is interactive or the tool draws: xctrace and an
+# attached samply both expect to be interrupted with ctrl-c, and without a pty
+# that signal kills the ssh instead of the recorder -- which loses the
+# recording rather than ending it.
+if [ -n "$ATTACH" ] || [ -n "$BROWSER" ]; then
+    t_exec_tty "$NAME" bash -lc "cd $(sh_quote "$SRC") && $CMD"
+else
+    t_exec "$NAME" bash -lc "cd $(sh_quote "$SRC") && $CMD"
+fi
+
+[ -n "$POST" ] && t_exec "$NAME" bash -lc "$POST" || true
+
+# --- what to do with it -------------------------------------------------------
+
+info "recorded in '$NAME': $ARTIFACT"
+
+if [ -n "$FETCH" ]; then
+    [ -n "$FETCH_DIR" ] || FETCH_DIR="$(wk_state_dir)/profiles/$NAME/$RUN"
+    mkdir -p "$FETCH_DIR"
+    # One file at a time and by name: t_pull copies a file, and the shapes that
+    # produce several (heaptrack, a marker run) are listed by the workspace
+    # rather than guessed at from here.
+    for _f in $(t_exec "$NAME" bash -lc "ls -1 $(sh_quote "$OUTDIR")" 2>/dev/null | tr -d '\r'); do
+        t_pull "$NAME" "$OUTDIR/$_f" "$FETCH_DIR/$_f" 2>/dev/null \
+            || warn "could not copy $_f out of '$NAME'"
+    done
+    info "copied to $FETCH_DIR"
+fi
+
+case "$MODE" in
+samply)
+    log "  view it:  samply load $ARTIFACT          (in the workspace)"
+    log "            or --fetch it here and open it at profiler.firefox.com --"
+    log "            the file is self-contained and the site uploads nothing"
+    ;;
+instruments)
+    log "  view it:  open $ARTIFACT                 (on the machine that has it)"
+    log "            --fetch brings it here; a .trace is a bundle, so fetch the"
+    log "            directory with 'wk enter $NAME' and scp if it has to move"
+    ;;
+bytecode)
+    log "  the summary is above; for the interactive tool:"
+    log "    wk enter $NAME -- Tools/Scripts/display-profiler-output $ARTIFACT"
+    log "    then: summary | bytecode <hash> | log <hash>"
+    ;;
+sampling)
+    log "  the tier breakdown decides the next step: mostly FTL/DFG/Baseline"
+    log "  means the cost is in generated JS -- 'wk profile $NAME --mode bytecode'."
+    log "  Mostly C/C++ means the engine itself -- '--mode native'."
+    ;;
+esac

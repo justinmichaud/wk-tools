@@ -36,9 +36,11 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Both of these act on physical machines: a boot device, a firmware register, a
 # disk image measured in gigabytes. None of that exists in a workspace, and the
-# sandbox cannot reach the machine that has it. Refused here rather than in
-# `wk`'s is_host_only list only because that file belongs to the other lane
-# this week -- it belongs there, next to the commands it is the same rule as.
+# sandbox cannot reach the machine that has it. The rule now lives in `wk`'s
+# is_host_only list, where it is one line next to every other command of the
+# same kind; this stays as the second half of it, for the case the dispatcher
+# cannot cover -- cmd/image run directly, which is how a hook or a script that
+# knows the path invokes it.
 if in_workspace; then
     die "'wk $(basename "$0")' acts on a host and its hardware, and this is
     workspace '$(wk_self)'. Run it on the workstation instead."
@@ -74,6 +76,8 @@ EOF
     image_profile_list | sed 's/^/  /' >&2
     exit 2
 }
+
+_seed_cleanup() { [ -n "${SEED:-}" ] && rm -rf "$SEED"; SEED=""; return 0; }
 
 # --- the seed ----------------------------------------------------------------
 
@@ -585,7 +589,11 @@ EOF
     # turns any failure during seeding into a confusing second failure that
     # hides the first.
     SEED=$(mktemp -d)
-    trap 'rm -rf "${SEED:-}"' EXIT
+    # Registered rather than trapped, so it composes with the store lock's own
+    # release instead of replacing it (wk_atexit, lib/common.sh). Idempotent
+    # and self-cancelling: the normal path clears SEED when it is done, and the
+    # handler then has nothing to remove.
+    wk_atexit _seed_cleanup
 
     user_data > "$SEED/user-data"
 
@@ -639,7 +647,7 @@ NETEOF
 
     relabel "$SEED"
 
-    rm -rf "$SEED"; trap - EXIT
+    rm -rf "$SEED"; SEED=""
 
     # The manifest is written last, and that is the entire publishing
     # protocol: until it exists this directory is rubble that every reader

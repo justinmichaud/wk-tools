@@ -118,12 +118,31 @@ t_home()       { echo "$HOME"; }
 # site, which is what makes it worth a named primitive rather than a comment.
 #
 # The default is right for the `local` driver, where the workspace *is* this
-# machine. Anything reached over a network needs its own -- see the container
-# driver, and note that a `vm` or `remote` target has none yet because the one
-# caller (the yocto builder) refuses those targets outright.
+# machine. Anything reached over a network overrides it: `podman cp` for a
+# container, `scp` for a macOS guest and for a build machine. All four exist
+# now -- the yocto builder was the first caller and refuses everything but the
+# container, but `wk profile` copies a recording out of whichever workspace
+# made it, and a profile is exactly the binary the `cat` spelling corrupts.
 t_pull() {
     local name="$1" src="$2" dest="$3"
     cp -f "$src" "$dest"
+}
+
+# t_pull_dir <name> <src-dir-in-target> <dest-dir-on-host>
+#
+# The same thing for a directory, and a separate hook rather than a loop over
+# t_pull, because every transport has a better answer than one file at a time:
+# a build tree is tens of thousands of files, and a per-file round trip over
+# ssh is minutes of latency and nothing else.
+#
+# The destination is created; its *contents* are replaced rather than merged,
+# so a re-stage of the same tree cannot leave last build's binaries behind
+# next to this one's -- which is the failure that produces a benchmark of a
+# build nobody has.
+t_pull_dir() {
+    local name="$1" src="$2" dest="$3"
+    mkdir -p "$dest"
+    rsync -a --delete "$src/" "$dest/"
 }
 
 # t_spawn <name> <log> <pidfile> <cmd...>
@@ -906,6 +925,48 @@ wait_ready() {
         fi
         sleep 2; waited=$((waited + 2))
     done
+}
+
+# --- work a lock here cannot see --------------------------------------------
+#
+# A lock (hold_lock, lib/common.sh) is a process on this machine, and it dies
+# with that process. That is exactly right for a command that does its work
+# and exits, and it covers nothing at all for work that was *detached into the
+# workspace*: `wk image build --stage image --detach` starts bitbake inside the
+# container through t_spawn and returns, so the lock it held is gone within the
+# second while the build runs for another six hours. A `wk build` in the same
+# workspace then takes the workspace lock -- correctly, nobody else holds it --
+# and puts a second writer into the same checkout, which corrupts both.
+#
+# The answer is not a longer-lived lock. It is that the question "is anything
+# running in here" has an answer at the artifact: a detached job writes its pid
+# into the workspace's home directory, and the workspace itself can be asked
+# whether that pid is alive. Evidence, in the namespace where the number means
+# something (docs/HANDOFF-workspace-state.md -- "status files are claims").
+#
+# The convention, and it is the whole interface: **a job detached into a
+# workspace writes `$(t_home)/<job>.pid`, and removes nothing on the way out**
+# -- a stale file is expected and costs one liveness check. `image/yocto.sh`
+# writes `yocto-<stage>.pid` through it, and anything added later gets
+# serialised against `wk build` for free by doing the same.
+#
+# Prints what it found, so a refusal can name it. Costs nothing when there is
+# no such file, and one exec into the workspace when there is.
+ws_busy_reason() {
+    local name="$1" ws p pid job
+    ws=$(wk_ws_dir "$name")
+    [ -d "$ws/home" ] || return 1
+    for p in "$ws"/home/*.pid; do
+        [ -f "$p" ] || continue
+        pid=$(tr -dc '0-9' < "$p" 2>/dev/null) || true
+        [ -n "$pid" ] || continue
+        job=$(basename "$p" .pid)
+        if t_exec "$name" kill -0 "$pid" >/dev/null 2>&1; then
+            printf '%s (pid %s in the workspace)' "$job" "$pid"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # The targets a report covers, and the one place that question is answered.

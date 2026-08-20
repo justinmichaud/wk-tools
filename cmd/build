@@ -435,6 +435,22 @@ wait_ready "$NAME" "${WK_BUILD_READY_WAIT:-1800}"
 # builds, that one serialises the machine's.
 hold_lock "ws-$NAME" -w "${WK_BUILD_LOCK_WAIT:-3600}"
 
+# And the half the lock cannot cover: a job detached *into* the workspace
+# outlives the command that started it, so it holds no lock out here
+# (ws_busy_reason, lib/target.sh). A six-hour Yocto build and this build would
+# share one checkout and one WebKitBuild, and neither would survive it.
+#
+# A barrier and not a refusal: the evidence is a pid in a namespace this end
+# cannot inspect further, so a workspace where that number has been reused
+# names a job that is not really there -- and only the person looking at it can
+# tell. --force says so and proceeds.
+if _busy=$(ws_busy_reason "$NAME"); then
+    barrier "'$NAME' already has a detached job running in it: $_busy
+    Two builds in one checkout corrupt both, and this one would be the second.
+    See what it is:  wk logs $NAME --all
+    Stop it:         wk image build <profile> --stop   (for a Yocto stage)"
+fi
+
 # The branch, before anything is recorded about this build. checkout first,
 # fetch only when the name is not already local -- a fetch per build would put
 # a network round trip in front of every offline rebuild.

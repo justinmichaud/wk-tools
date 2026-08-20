@@ -365,7 +365,7 @@ else
     # lib/target.sh).
     # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
     prefetch_targets $_TARGETS
-    trap 'prefetch_done' EXIT
+    wk_atexit prefetch_done
     for TARGET in $_TARGETS; do
         load_target "$TARGET"
         if t_has_wk; then

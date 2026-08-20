@@ -184,7 +184,6 @@ PROBE=$(_rsh_q '
     awk "/^MemTotal:/ {print int(\$2/1024)}" /proc/meminfo
     command -v zsh || echo -
     command -v ccache || echo -
-    command -v flock || echo -
     df -Pk "$HOME" | awk "NR==2 {print int(\$4/1024/1024)}"
 ') || die "cannot reach $WK_REMOTE_HOST"
 
@@ -195,15 +194,16 @@ r_cores=$(printf '%s\n' "$PROBE" | sed -n 4p)
 r_mem=$(printf  '%s\n' "$PROBE" | sed -n 5p)
 r_zsh=$(printf  '%s\n' "$PROBE" | sed -n 6p)
 r_ccache=$(printf '%s\n' "$PROBE" | sed -n 7p)
-r_flock=$(printf '%s\n' "$PROBE" | sed -n 8p)
-r_freegb=$(printf '%s\n' "$PROBE" | sed -n 9p)
+r_freegb=$(printf '%s\n' "$PROBE" | sed -n 8p)
 
 log "  $r_host: $r_os, $r_arch, $r_cores cores, $((r_mem / 1024)) GB, ${r_freegb} GB free in \$HOME"
 log "  root: $(_remote_root)   jobs: derived per build from what is free"
 [ "$r_zsh" = - ]    && warn "no zsh (needs root to install; bash stays)"    || log "  zsh: $r_zsh"
 [ "$r_ccache" = - ] && warn "no ccache (every build starts cold)"           || log "  ccache: $r_ccache"
-[ "$r_flock" = - ] && die "no flock on this machine: two of your own builds could not be
-    serialised, which is the one thing a shared machine must not allow."
+# What used to be here: a refusal when the machine had no flock(1), because two
+# of your own builds could not otherwise be serialised. It has nothing to check
+# any more -- the build lock is lib/lockrun.sh in the wk-tools this command is
+# about to push, and needs nothing installed (lib/common.sh, "locks").
 
 # A shared WebKit repository, if the machine advertises one. Worth reporting
 # even when nothing is done with it, because it is the difference between a

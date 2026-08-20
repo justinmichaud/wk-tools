@@ -38,6 +38,10 @@ workspaces
   gui <name> [url]          MiniBrowser in the seat, launched as perf runs do
   test <name> [args]        run tests
   bench <name> <plan>       run a benchmark, with preflight and provenance
+  profile <name> [file.js]  where the time went: JSC's own profilers, samply,
+                            or Instruments -- one flag each, no env-var walls
+      --mode <m>            sampling (default) | bytecode | samply |
+                            instruments | heaptrack | massif | native
   verify <name> [--gpu]     prove the sandbox holds, by testing it
   claude <name>             launch Claude inside the workspace, sandboxed
   rm <name>                 destroy a workspace and everything it created
@@ -77,7 +81,11 @@ hosts and machines
                             erase it (it is the largest thing on the machine)
   pi <sub>                  setup: onto the tailnet; netboot-enable: the
                             EEPROM's only writer
-  image <sub>               boot images: build|ls|show|flash|rm
+  image <sub>               boot images: build|ls|show|disks|write|rm
+      write <id> --disk <machine>:<device>
+                            write an image onto a removable disk attached to a
+                            fleet machine (never that machine's own system
+                            disk; writing one does not make anything boot it)
   boot <machine>            put a machine into its image for one boot
                             (--status|--keep|--back|--disarm|--diag|--dry-run)
   serve                     hand boot files to machines that netboot
@@ -226,6 +234,13 @@ is_targetless() {
 is_host_only() {
     case "$1" in
         setup|backup|vm|mcp|quiesce|session|pi|remote|stop|start|sync|gc) return 0 ;;
+        # The fleet and the image store: a boot device, a firmware register, a
+        # disk measured in gigabytes, a TFTP server on the LAN. None of it
+        # exists in a workspace and the sandbox cannot reach the machine that
+        # has it. Each of these three carried its own copy of this refusal,
+        # with a comment saying it belonged here -- it does, next to the
+        # commands it is the same rule as.
+        image|boot|serve) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -256,6 +271,12 @@ is_lifecycle() {
 is_host_command() {
     case "$1" in
         setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|key|report|sudo|version|stop|start|disk|help|-h|--help) return 0 ;;
+        # The image store and the fleet drivers are this machine's: the store
+        # is under the host's $WK_STORE, the boot drivers reach machines over
+        # ssh from here, and `wk serve` binds a port on this machine's LAN.
+        # Forwarded into the podman VM they would have looked in an empty store
+        # inside a Linux guest with no route to any of it.
+        image|boot|serve) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -280,6 +301,13 @@ is_host_command() {
 is_readonly_report() {
     case "$1${2:+ $2}" in
         "push status") return 0 ;;
+        # Reading the image store, and asking a machine what it is attached to
+        # or which role it is in. Every one of these changes nothing -- and
+        # `wk boot --status` in particular has to stay that way, because it is
+        # what you run when you are not sure what a machine is doing.
+        "image ls"|"image show"|"image disks") return 0 ;;
+        "boot --status"|"boot --diag") return 0 ;;
+        "serve --status") return 0 ;;
         # `wk remotes --fix` writes: it re-asserts the wiring. Named here so
         # the *bare* form below can be read-only without this one sneaking in.
         "remotes --fix") return 1 ;;
@@ -323,13 +351,16 @@ explain_cmd() {
     # status becomes the assignment's, which would end this shell before it
     # printed anything at all.
     # The entry `wk help` prints for it, continuation lines included -- several
-    # are two lines and the second one carries the qualifier that matters.
+    # are two lines and the second one carries the qualifier that matters, and
+    # the sub-flags under a command (`build --detach`, `image write`) are
+    # indented six rather than eight, which an earlier threshold cut off
+    # exactly where the interesting part started.
     # `|| true`: usage() ends in `exit 2`, and under `set -o pipefail` that
     # status becomes the assignment's, which would end this shell before it
     # printed anything at all.
     line=$( (usage 2>&1 || true) | awk -v c="$cmd" '
         $0 ~ "^  " c "( |$)" { on = 1; sub(/^  */, ""); print "  usage: " $0; next }
-        on && /^ {8,}/       { sub(/^ */, ""); print "         " $0; next }
+        on && /^ {6,}/       { sub(/^    /, ""); print "         " $0; next }
         on                   { exit }' ) || true
     [ -n "$line" ] && printf '%s\n' "$line"
 

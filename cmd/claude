@@ -263,7 +263,7 @@ restore_push() {
         log "git push stays off (headless session; 'wk push on' when you want it back)"
     fi
 }
-trap restore_push EXIT
+wk_atexit restore_push
 
 info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
 

@@ -5,6 +5,9 @@
 #   wk bench <workspace> <plan> [--config C] [--count N] [--subtests "A B"]
 #                                [--software] [--force] [--browser-args "..."]
 #   wk bench seed <workspace> <plan>       fetch the benchmark payload only
+#   wk bench stage <ws> --to <machine>     put a build where a bare-metal role
+#                                          will find it (build in the guest,
+#                                          run on the machine itself)
 #   wk bench compare <run-a> <run-b>       compare-results on two saved runs
 #   wk bench ls                            saved runs
 #
@@ -165,12 +168,14 @@ print('%-14s %-12s %-12s %s%s' % (m.get('plan','?'), m.get('config','?'), axes,
 
 # --- the payload -------------------------------------------------------------
 # Read the plan from the workspace's own checkout rather than from the repo:
+# (through t_src rather than the container's /src/WebKit: `wk bench stage`
+# reads a plan out of a macOS guest, where that path does not exist.)
 # a workspace may be testing a change to the plan itself, and seeding a
 # different payload than the one the run will use is a silent lie.
 plan_json() {
     local ws="$1" plan="$2" body seen=0
     while [ "$seen" -lt 5 ]; do
-        body=$(t_exec "$ws" cat "/src/WebKit/Tools/Scripts/webkitpy/benchmark_runner/data/plans/${plan}.plan" 2>/dev/null) \
+        body=$(t_exec "$ws" cat "$(t_src "$ws")/Tools/Scripts/webkitpy/benchmark_runner/data/plans/${plan}.plan" 2>/dev/null) \
             || die "no such plan: $plan (plans live in Tools/Scripts/webkitpy/benchmark_runner/data/plans)"
         # A plan file may contain nothing but the name of another plan.
         case "$(printf '%s' "$body" | head -c 1)" in
@@ -874,10 +879,156 @@ except Exception: print('')" 2>/dev/null)" = 1 ]; then
         -a '$ca' -b '$cb' --breakdown"
 }
 
+# --- staging a build onto a machine that will run it --------------------------
+#
+# The macOS half of docs/HANDOFF-benchmarking.md, and the shape the user asked
+# for: **build inside the VM, run outside on bare metal.** Both halves are
+# necessary and neither is negotiable. A guest cannot produce a number worth
+# keeping -- it shares a CPU with a desktop, its GPU is paravirtualised and its
+# scheduler is somebody else's -- and the bare-metal role cannot build, because
+# a benchmark install with Xcode and a checkout on it is no longer a benchmark
+# install: it is a second workstation, drifting from the first.
+#
+# So the build stays where builds are cheap and reproducible, and what crosses
+# the boundary is the product. Which is a *copy*, not a transfer: while this
+# machine is in its normal role the benchmark volume is simply mounted, so
+# staging is rsync from the guest onto a directory that the other role will
+# find at a fixed path when it boots.
+#
+# What is staged, and why each part:
+#
+#   WebKitBuild/<config>   the product. The thing being measured.
+#   Tools/                 run-benchmark, webkitpy and the plan files. The
+#                          benchmark install has no checkout and must not grow
+#                          one; this is the smallest tree that can drive a run.
+#   stage.json             which workspace, which sha, which config, built
+#                          when, staged when, by which wk-tools. Provenance
+#                          decided *here*, where it is all still known -- the
+#                          other role cannot ask a guest anything.
+#
+# The result carries `bench_host=image`, which `wk bench compare` already
+# refuses to compare against a container run (that field was added before
+# anything could produce it, for exactly this day).
+#
+# NOT YET VERIFIED end to end: there is no benchmark volume on this machine and
+# no guest to build in, so what has been exercised is the staging itself --
+# layout, provenance, refusals -- against a local workspace and a disposable
+# volume. The run in the other role is written up in
+# docs/HANDOFF-benchmarking.md and is deliberately not guessed at here.
+cmd_stage() {
+    local ws="$1" machine="" config="" plan="" dry=""
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --to)      machine="${2:-}"; shift 2 ;;
+            --config)  config="${2:-}"; shift 2 ;;
+            --plan)    plan="${2:-}"; shift 2 ;;
+            --dry-run) dry=1; shift ;;
+            *) die "unknown option: $1
+    usage: wk bench stage <workspace> --to <machine> [--config C] [--plan P]" ;;
+        esac
+    done
+    require_name "$ws"
+    [ -n "$machine" ] || die "which machine is going to run it? --to <machine> (wk boot --list)"
+
+    # The machine, and its other role's disk. Loaded through the same registry
+    # and driver `wk boot` uses, because "where does a staged payload go on
+    # this machine" is a property of the machine's boot arrangement and not
+    # something a benchmark runner should have its own opinion about.
+    . "$WK_ROOT/boot/machines.sh"
+    machine_load "$machine" || die "unknown machine '$machine' (wk boot --list)"
+    load_driver "$MACH_DRIVER"
+    command -v b_bench_root >/dev/null 2>&1 \
+        || die "$machine has no place to stage a build onto from here.
+    Its other role is reached over the network rather than mounted, so the
+    payload is pushed to it while it runs rather than copied to it while it
+    does not -- see docs/HANDOFF-netboot.md, 'Storage'."
+    local root
+    root=$(b_bench_root) || die "$machine's benchmark disk is not attached, so there is nowhere to
+    stage a build onto. 'wk boot $machine --status' says what it can see."
+
+    # The workspace, through its own driver -- and deliberately *not*
+    # load_bench_target, which refuses everything but a container. That refusal
+    # is right for running a benchmark here and exactly wrong for staging one:
+    # the whole point is that the build came from a macOS guest.
+    local t; t="$(ws_target "$ws")"
+    load_target "$t"
+    wait_ready "$ws"
+
+    [ -n "$config" ] || config="${WK_CONFIG:-$(default_config)}"
+    config_load "$config" || die "unknown config '$config' (wk build --list)"
+
+    local src build_dir
+    src=$(t_src "$ws")
+    build_dir=$(config_build_dir "$src")
+    t_exec "$ws" test -d "$build_dir" 2>/dev/null \
+        || die "'$ws' has no $config build to stage ($build_dir).
+    Build it first:  wk build $ws $config"
+
+    # The sha is asked of the checkout, now, rather than read from any record:
+    # a staged payload that names the wrong commit is worse than one that names
+    # none, because it is the only thing the other role will be able to say
+    # about what it measured.
+    local sha; sha=$(t_exec "$ws" bash -lc "cd $(sh_quote "$src") && git rev-parse HEAD" 2>/dev/null | tr -d '\r' | tail -1) || sha=""
+
+    local stamp dest
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    dest="$root/staged/$stamp-$config"
+
+    if [ -n "$dry" ]; then
+        info "dry run -- nothing was staged"
+        log  "  from:   '$ws' ($t), $config at ${sha:0:12}"
+        log  "          $build_dir"
+        log  "          $src/Tools"
+        log  "  to:     $dest   (on $machine's $MACH_VOLUME)"
+        log  "  then:   wk boot $machine     and pick the disk"
+        return 0
+    fi
+
+    info "staging $config from '$ws' onto $machine ($MACH_VOLUME)"
+    mkdir -p "$dest"
+    log  "  the build product"
+    t_pull_dir "$ws" "$build_dir" "$dest/WebKitBuild/$(basename "$build_dir")"
+    log  "  Tools/ -- run-benchmark, webkitpy and the plans"
+    t_pull_dir "$ws" "$src/Tools" "$dest/Tools"
+
+    # Written last, and that is the publishing protocol every other store in
+    # this repo uses (lib/image.sh, lib/store.sh): until it exists this
+    # directory is rubble, and the other role ignores it.
+    cat > "$dest/stage.json" <<EOF
+{
+  "staged_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "staged_by": "$(hostname)",
+  "workspace": "$ws",
+  "workspace_target": "$t",
+  "config": "$config",
+  "webkit_sha": "$sha",
+  "plan": "${plan:-}",
+  "machine": "$machine",
+  "volume": "${MACH_VOLUME:-}",
+  "wk_tools": "$("$WK_ROOT/cmd/version" --tree 2>/dev/null || echo unknown)",
+  "bench_host": "image"
+}
+EOF
+
+    info "staged: $dest"
+    log  "  $(du -sh "$dest" 2>/dev/null | cut -f1) on $MACH_VOLUME"
+    log  ""
+    log  "  next, and the two halves a person does:"
+    log  "    wk boot $machine        arm it, and it prints the ritual"
+    log  "    (boot the benchmark volume, run the plan there, reboot back)"
+    log  "  the run itself is written up in docs/HANDOFF-benchmarking.md --"
+    log  "  it is not wired into this command yet, and this says so rather than"
+    log  "  pretending: what runs it in the other role has never been run."
+}
+
 # --- dispatch ----------------------------------------------------------------
 case "${1:-}" in
     ls)      shift; cmd_ls; exit 0 ;;
     compare) shift; [ $# -ge 2 ] || usage; cmd_compare "$@"; exit 0 ;;
+    stage)   shift
+             [ $# -ge 1 ] || usage
+             cmd_stage "$@"; exit 0 ;;
     seed)    shift
              [ $# -ge 2 ] || usage
              load_bench_target "$1"

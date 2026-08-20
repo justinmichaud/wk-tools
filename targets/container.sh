@@ -402,6 +402,19 @@ t_pull() {
     _podman cp "$(_ctr "$name"):$src" "$dest"
 }
 
+# A directory out of the container, in one `podman cp`. The rsync in the
+# generic implementation would need an rsync inside the container *and* a
+# transport to run it over; podman already has one.
+#
+# `podman cp <ctr>:<dir>/. <dest>` -- the trailing `/.` is what makes it copy
+# the contents rather than nesting the directory inside the destination, which
+# is `cp -r`'s rule and podman follows it.
+t_pull_dir() {
+    local name="$1" src="$2" dest="$3"
+    rm -rf "$dest"; mkdir -p "$dest"
+    _podman cp "$(_ctr "$name"):$src/." "$dest"
+}
+
 # podman's own detached exec, because the generic `setsid nohup` in
 # lib/target.sh does not survive here: when the `podman exec` client exits,
 # podman tears the exec session down and takes the process with it, new session

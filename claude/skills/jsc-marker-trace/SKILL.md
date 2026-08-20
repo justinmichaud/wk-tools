@@ -31,6 +31,16 @@ allowed-tools:
 
 # Per-section samply traces for JavaScriptCore
 
+> **The JSC options this needs have a flag inside a workspace**: `wk profile
+> --mode samply --markers --jit-dump` sets `JSC_useTextMarkers=1`,
+> `JSC_textMarkersDirectory`, `JSC_useJITDump=1` and `JSC_jitDumpDirectory`,
+> pointed at a directory of that run's own, and `--dry-run` prints the exact
+> command first. The marker directory *must* be a real path (an empty default
+> writes the markers nowhere and looks exactly like a build without the
+> instrumentation), which is the mistake the flag exists to stop making. The
+> capture and split scripts below are still the mechanism; what they no longer
+> need is a hand-assembled environment.
+
 Goal: see where time goes inside a chosen JavaScriptCore code region during a real WebKit
 run, broken down into named sub-sections. A short section gets only a handful of samples
 per occurrence at ~1 kHz, so the trick is to **repeat the section many times, mark each

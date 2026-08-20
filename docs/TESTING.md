@@ -740,6 +740,26 @@ reached through a ProxyJump), driven from the macOS host.
 - [V] `wk selftest` reports DRIFT when a check's plan line is reworded or
       removed, so the runner and this file cannot part company quietly
 
+### Profiling — `wk profile`
+- [V] `wk profile` composes the right environment for each port (2026-08-20,
+      in `wk selftest --quick`): `DYLD_FRAMEWORK_PATH` for an Apple config and
+      `LD_LIBRARY_PATH` for a CMake one, JSC options *before* the script rather
+      than after it (jsc treats everything after the file as the script's own
+      arguments, so an appended `--sample` turns the profiler off in silence),
+      and `--mode native` resolving to xctrace on the Apple ports and samply
+      everywhere else
+- [V] every mode either resolves or refuses with a reason — none traceback
+      (2026-08-20, `wk selftest --quick`; the refusals name the port, the
+      platform or the missing tool)
+- [ ] `--mode sampling` in a real workspace prints the tier breakdown
+- [ ] `--mode bytecode` leaves exactly one JSCProfile json and the summary
+      prints (the file is identified by being newer than a stamp taken before
+      the run, not by being newest in /tmp — two runs at once)
+- [ ] `--mode samply` in a container: refuses with the host remedy when
+      `perf_event_paranoid` > 1, records otherwise
+- [ ] `--mode instruments` in a macOS guest records a .trace
+- [ ] `--fetch` copies a recording out of a guest byte for byte (t_pull)
+
 ### Help topics — the concepts, not the commands
 - [V] `wk help` lists every topic under `docs/help/` with its one-line summary,
       derived from the files that exist rather than from a second list
@@ -994,6 +1014,40 @@ command that asked for it.
 - [V] a lock holder killed -9 releases the lock; no stale lock to clean
       (2026-08-19, macOS host: the next taker broke the dead holder's lock
       immediately and the directory was clean afterwards)
+- [V] a lock dies with its holder, and a lock naming nobody is not waited out
+      (2026-08-20: the mkdir form had a window between creating the lock and
+      writing the pid into it, and a lock left in that window was
+      indistinguishable from a live one — `wk rm` sat out its whole timeout on
+      one. The lock is a symlink now: `ln -s` writes the holder *with* the
+      lock, so the window does not exist. In `wk selftest --quick`)
+- [V] twelve takers of one lock, one at a time — started together, with a dead
+      holder's lock already in place for all of them to break at once
+      (2026-08-20: exactly twelve critical sections and nothing left behind.
+      Two earlier attempts failed this: payloads that every subshell of one
+      command computed identically, and a re-entrancy test that compared `$$`
+      — which twelve subshells of one script all share. In `wk selftest
+      --quick`)
+- [V] a command's own end-of-run work does not disable the lock release
+      (2026-08-20: there was one EXIT trap and six claimants, and bash keeps
+      the last one set. Handlers register under one trap now — `wk_atexit` —
+      and nothing outside `lib/common.sh` takes the trap. Checked both ways in
+      `wk selftest --quick`: the behaviour, and that no file has gone back to
+      trapping)
+- [V] one lock mechanism, everywhere: nothing in the tree calls `flock`
+      (2026-08-20: a flock is held by the open file descriptor, so every
+      process that inherits it holds the lock — which is how `conmon` came to
+      hold a workspace lock for the life of a container. macOS ships no
+      flock(1) either, so the one lock a Mac took was no lock at all. The
+      remote build lock is `lib/lockrun.sh` on the machine that builds. In
+      `wk selftest --quick`)
+- [V] a job detached *into* a workspace is not overrun by a later `wk build`
+      (2026-08-20: a lock here dies with the command that took it, so a Yocto
+      stage detached into the container held nothing out here and a `wk build`
+      in the same checkout was let straight in — two writers, both corrupted.
+      The workspace is now asked for evidence instead: `ws_busy_reason` reads
+      the pid a detached job leaves in `home/<job>.pid` and tests it *inside*
+      the workspace, which is the only namespace the number means anything in.
+      A barrier, so `--force` can say "that pid is not really there")
 
 ### Status files are claims; evidence decides
 - [ ] corrupt each status file (truncate, garbage): status reports the file
@@ -1158,6 +1212,52 @@ stops being a workstation for a while and then becomes one again. So the
 checks come in three groups — the build (which must be unprivileged and
 reproducible), the transition (which must be one-shot and self-reverting), and
 the reader (which must never mistake intent for evidence).
+
+### The drift warning is only useful while it is true
+- [V] a machine reports "in sync" immediately after a successful sync
+      (2026-08-20: it never did. `dotfiles/zed/prompts/…/lock.mdb` is an LMDB
+      lock file — rewritten by any process that *opens* the database, a read
+      included — and it is tracked, so every machine reported "wk-tools
+      DIFFERS from the workstation" straight after a sync, permanently. The
+      tree hash excludes it now; `wk sync --target container` then produced
+      matching hashes on both sides. The file should not be tracked either)
+
+### Quiesce measures rather than assumes (macOS)
+- [V] `wk quiesce status` prints the privileged half's *claim* and what the
+      machine says *now*, labelled separately (2026-08-20; when they disagree
+      the disagreement is the finding)
+- [V] the measured block covers what the helper does not: a configured Time
+      Machine destination, the sleep timer, and `CPU_Speed_Limit` — a machine
+      being thermally held back during one half of an A/B is a difference that
+      has nothing to do with the change (2026-08-20, on this Mac: it found
+      automatic update checking still on)
+- [ ] the same on a benchmark install, before a run
+
+### The Mac: a role transition nobody can automate (`wk boot mbp`)
+- [V] `wk boot mbp --status` reports the booted volume and whether the
+      benchmark volume is attached, and changes nothing (2026-08-20, on this
+      Mac: `booted_volume=Macintosh HD`, `benchmark_volume=... (not attached)`)
+- [V] boot time and boot identity come from `kern.boottime` and are right
+      (2026-08-20: the first attempt parsed `usec` out of
+      `{ sec = …, usec = … }` — greedy — and reported a 1970 boot date)
+- [V] a spent arming record is recognised on macOS too, by boot id
+      (2026-08-20, with a hand-written record: reported as spent, naming the
+      boot that consumed it)
+- [V] arming with no volume attached refuses *and writes no record*
+      (2026-08-20: it wrote one the first time — the checks now run before the
+      record, the opposite order to the one-shot machines, because a ritual
+      printed to a person cannot half-happen and a firmware call can)
+- [V] the full lifecycle against a disposable APFS volume: dry-run → arm →
+      status (exit 2, ARMED, "waiting for a person") → diag → disarm → status
+      clean (2026-08-20, `hdiutil` volume named "WK Bench Test")
+- [ ] the same against a real benchmark install, booted for real
+- [ ] `wk bench stage <ws> --to mbp` from a macOS guest onto the volume
+- [V] ... and its refusals: no `--to`, a machine whose other role is only
+      reachable over the network (rpi5), a volume that is not attached
+      (2026-08-20)
+- [V] staging lays out `WebKitBuild/<config>`, `Tools/` and a `stage.json`
+      written last, with workspace, sha, config and `bench_host=image`
+      (2026-08-20, from a local workspace onto the disposable volume)
 
 ### Building — unprivileged, reproducible, crash-only
 

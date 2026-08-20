@@ -21,6 +21,31 @@ allowed-tools:
 
 # Profiling a JSC run (root-causing where time goes)
 
+> **Inside a workspace, run `wk profile` and let it compose the command.**
+> Every recipe below is correct and worth reading for *how to read the output*
+> — the tier breakdown, the bytecode counts, the OSR-exit log — but the
+> invocations were written for a host checkout and carry host paths
+> (`~/Development/samply`, `$WEBKIT_ROOT`) that do not exist in a sandboxed
+> workspace. One flag each, from the same facts the build used:
+>
+> ```bash
+> wk profile bench.js                    # JSC's sampling profiler (Step 1)
+> wk profile --mode bytecode bench.js    # the bytecode profiler + summary (Step 2)
+> wk profile --mode native bench.js      # samply on Linux, Instruments on macOS (Step 3)
+> wk profile --mode native --jit-dump bench.js   # ... with JS/JIT frame names
+> wk profile --mode heaptrack bench.js   # allocations (Linux)
+> wk profile --mode native --attach <pid>        # something already running
+> wk profile --mode <m> --dry-run bench.js       # the exact command, run nothing
+> ```
+>
+> It resolves the build directory and the loader variable from the config
+> (`DYLD_FRAMEWORK_PATH` vs `LD_LIBRARY_PATH`), puts JSC's options *before* the
+> script — anything after the file name is an argument to the script, so an
+> appended `--sample` silently turns the profiler off — keeps each run's
+> artifacts in their own directory, and refuses with the reason when a tool is
+> missing or a mode does not apply to the port. `--fetch` copies the recording
+> out to the machine with the UI on it.
+
 Find the hot code in a `jsc` run — a microbenchmark or a JetStream3 subtest run headlessly via
 `cli.js` — and, for a regression, find what *changed* between baseline and patched. Pick the tool by
 where the cost is: **generated JS** (Step 1 tier breakdown says FTL/DFG/Baseline/RegExp) uses JSC's own

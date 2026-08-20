@@ -50,10 +50,18 @@ _sha256() { $SHA256; }
 #
 # Sorted under LC_ALL=C so two machines with different locales agree on the
 # order, which is otherwise a difference that is not a difference.
+#
+# `lock.mdb` for the same reason, arrived at the hard way: an LMDB lock file is
+# rewritten by any process that *opens* the database, a read included, and one
+# is checked in under dotfiles/zed. So every machine reported "wk-tools DIFFERS
+# from the workstation" immediately after a successful sync, permanently --
+# which is worse than no check at all, because a drift warning that is always
+# on is a drift warning nobody reads. (The file has no business being tracked
+# either; excluding it here is the half that does not touch anyone's data.)
 tree_hash() {
     # shellcheck disable=SC2086 -- $SHA256 is a deliberate command word list.
     ( cd "$WK_ROOT" && \
-      find . -type f -not -path './.git/*' -not -name '*.pyc' -print0 \
+      find . -type f -not -path './.git/*' -not -name '*.pyc' -not -name 'lock.mdb' -print0 \
       | LC_ALL=C sort -z \
       | xargs -0 $SHA256 ) | _sha256 | cut -c1-12
 }

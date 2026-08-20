@@ -523,13 +523,39 @@ t_exec() {
     _rsh "cd $(sh_quote "$(t_src "$name")") && $(sh_quote "$@")"
 }
 
-# The build, and only the build, is serialised. A flock keeps two of your own
-# builds from stacking on a machine you are already sharing with other people
-# -- and putting it on t_exec instead would silently block every `wk run` and
-# every one-line probe behind an hour-long build.
+# One file out of the machine, byte for byte (lib/target.sh, t_pull).
+t_pull() {
+    local name="$1" src="$2" dest="$3"
+    if _remote_is_local; then cp -f "$src" "$dest"; return; fi
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    scp -q $(_ssh_opts) "$WK_REMOTE_HOST:$src" "$dest"
+}
+
+t_pull_dir() {
+    local name="$1" src="$2" dest="$3"
+    mkdir -p "$dest"
+    if _remote_is_local; then rsync -a --delete "$src/" "$dest/"; return; fi
+    rsync -a --delete -e "ssh $(_ssh_opts)" "$WK_REMOTE_HOST:$src/" "$dest/"
+}
+
+# The build, and only the build, is serialised: two of your own builds must not
+# stack on a machine you are already sharing with other people, and putting the
+# lock on t_exec instead would silently block every `wk run` and every one-line
+# probe behind an hour-long build.
+#
+# The lock is taken *on the machine that builds*, by lib/lockrun.sh in the copy
+# of wk-tools that t_sync_tools has just pushed there. It cannot be taken here:
+# a lock dies with its holder, and the holder that matters is the build, not
+# the ssh session -- which a detached build outlives by hours.
+#
+# It was a `flock` on a file under the remote root, and stopped being one for
+# the reason lib/common.sh gives: the descriptor is inherited, so anything the
+# build leaves running holds the machine's build lock for as long as it lives.
+# The lock is now this repo's one mechanism on both ends, which also means one
+# fewer thing a shared machine has to have installed.
 #
 # nice and ionice are here as well as in build-in-target.sh: this end knows the
-# target is shared, and the flock has to be outside them either way.
+# target is shared, and the lock has to be outside them either way.
 t_exec_build() {
     local name="$1"; shift
     local log tee_to
@@ -551,7 +577,7 @@ t_exec_build() {
     # failure reads as success.
     _rsh_q "set -o pipefail
           cd $(sh_quote "$(t_src "$name")") && \
-          flock -w 3600 $(sh_quote "$(_remote_root)/.build.lock") \
+          $(sh_quote "$(t_tools "$name")/lib/lockrun.sh") remote-build -w 3600 -- \
           nice -n 19 ionice -c3 $(sh_quote "$@")$tee_to"
 }
 

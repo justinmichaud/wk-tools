@@ -166,7 +166,7 @@ found=0
 _TARGETS=$(walk_targets)
 # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
 prefetch_targets $_TARGETS
-trap 'prefetch_done' EXIT
+wk_atexit prefetch_done
 for TARGET in $_TARGETS; do
     load_target "$TARGET"
     # A machine of its own answers for its own checkouts, exactly as in

@@ -43,6 +43,12 @@ Host-only steps that dead-end a sandboxed agent:
   explicit in-sandbox degraded mode. Also: `/sdk/webkit` and `wkdev-enter`
   references, a literal-ellipsis path (`~/Development/.../OpenSource/...`),
   "ask the user to sudo kill".
+- **PARTLY CLOSED 2026-08-20**: `wk profile` exists (docs/HANDOFF-profile.md),
+  and both skills now open with the `wk profile` invocation for the recipe they
+  teach -- so the env-var walls and the host paths are no longer what an agent
+  copies. What is *not* closed is the provisioning half: samply and heaptrack
+  are still not in the workspace image, and the command refuses by name rather
+  than pretending. The original finding, for the record:
 - `jsc-profile` / `jsc-marker-trace`: samply hardcoded at
   `~/Development/samply/...` (no workspace provisions it — lane A step 10 is
   where it gets built), "ask the user to sudo tee perf_event_paranoid",

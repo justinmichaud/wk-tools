@@ -185,6 +185,14 @@ disk_method() {
 # before it can be written -- it cannot be streamed. That is why the *compressed*
 # wic is what gets copied: 573 MB instead of 4 GB, and bmaptool reads .xz
 # directly. The temp copy is removed even if the write fails.
+DISK_STAGING=""
+_disk_staging_cleanup() {
+    [ -n "${DISK_STAGING:-}" ] || return 0
+    m_ssh "rm -rf $DISK_STAGING" >/dev/null 2>&1 || true
+    DISK_STAGING=""
+    return 0
+}
+
 disk_write_bmap() {
     local id="$1" dev="$2" wic bmap remote
     wic=$(image_wic "$id"); bmap=$(image_bmap "$id")
@@ -192,8 +200,12 @@ disk_write_bmap() {
     [ -n "$remote" ] || die "could not make a staging directory on $MACH_NAME"
 
     info "sending $(basename "$wic") ($(numfmt --to=iec "$(stat -c %s "$wic")")) and its block map to $MACH_NAME"
-    # shellcheck disable=SC2064 -- $remote must expand now, not at trap time.
-    trap "m_ssh 'rm -rf $remote' >/dev/null 2>&1 || true" EXIT
+    # Registered rather than trapped, and the path goes in a global for it to
+    # read: this command holds the image-store lock, and a `trap ... EXIT` here
+    # would replace the release with the staging cleanup (lib/common.sh,
+    # wk_atexit). Self-cancelling -- the normal path clears the variable.
+    DISK_STAGING="$remote"
+    wk_atexit _disk_staging_cleanup
     m_ssh "cat > $remote/disk.wic.xz" < "$wic" || die "could not copy the image to $MACH_NAME"
     m_ssh "cat > $remote/disk.bmap"   < "$bmap" || die "could not copy the block map to $MACH_NAME"
 
@@ -202,7 +214,7 @@ disk_write_bmap() {
         || die "bmaptool failed writing to $dev on $MACH_NAME"
     m_ssh "sync"
     m_ssh "rm -rf $remote" >/dev/null 2>&1 || true
-    trap - EXIT
+    DISK_STAGING=""
 }
 
 # Stream the raw image over ssh into dd. zstd on both ends when both have it --

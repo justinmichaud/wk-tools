@@ -27,6 +27,9 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/image/profiles.sh"
 . "$WK_ROOT/lib/target.sh"
 
+# The same rule as `wk image` and `wk boot`, and it lives in `wk`'s
+# is_host_only list too; this is the half that still holds when cmd/serve is
+# run directly rather than through the dispatcher.
 if in_workspace; then
     die "'wk serve' hands boot files to real machines over a real network, and
     this is workspace '$(wk_self)'. Run it on the workstation instead."

@@ -11,6 +11,39 @@ samply/sysprof-cli/heaptrack into the workspace image) — the tools without the
 wrapper leave every run hand-assembled, and the wrapper without the tools has
 nothing to run.
 
+## State, 2026-08-20 — the command exists
+
+`cmd/profile` is written and its resolution is verified (in `wk selftest
+--quick`, against a workspace that is a marker rather than a machine): the
+loader variable per port, JSC options *before* the script rather than after it,
+`--mode native` resolving to xctrace on the Apple ports and samply everywhere
+else, and every mode either resolving or refusing with a reason.
+
+What it does **not** have yet, and why each is left:
+
+- **A run.** Nothing here has been profiled, because this host has no guest and
+  no container workspace to profile in. Every mode's command line is composed
+  and checked; none has been executed.
+- **`--mode strongrefs`.** The option name below (`JSC_enableStrongRefTracker`)
+  is from this file and has not been checked against `OptionsList.h`, and a
+  typo'd `JSC_` variable is ignored in silence — which is the one failure that
+  makes a profile look like the code changed. `--env NAME=VALUE` sets any
+  option in the meantime, and the mode goes in when somebody with a checkout
+  can read the spelling off it.
+- **The provisioning half.** samply, heaptrack and valgrind are not in the
+  workspace image; the command checks for each by name and refuses with the
+  install line rather than failing inside the run. That is lane A step 10 and
+  is unchanged by this.
+- **`--browser` on the CMake ports.** Refused, with the reason: the browser is
+  started by `Tools/Scripts/run-minibrowser` and the process that matters is a
+  child of it, so a profiler pointed at the launcher records the launcher.
+  `--attach` is the way in until that is wired up.
+
+`t_pull` grew implementations for the `vm` and `remote` targets on the way (it
+had only container and local), and `t_pull_dir` joined it — a recording has to
+come out of the workspace that made it, and a profile is exactly the binary
+that `t_exec … cat` corrupts.
+
 ## Shape
 
 `wk profile <ws> [--mode M] [--config C] [--attach] [js-file | url]`

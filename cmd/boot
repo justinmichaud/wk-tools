@@ -36,9 +36,11 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Both of these act on physical machines: a boot device, a firmware register, a
 # disk image measured in gigabytes. None of that exists in a workspace, and the
-# sandbox cannot reach the machine that has it. Refused here rather than in
-# `wk`'s is_host_only list only because that file belongs to the other lane
-# this week -- it belongs there, next to the commands it is the same rule as.
+# sandbox cannot reach the machine that has it. The rule now lives in `wk`'s
+# is_host_only list, where it is one line next to every other command of the
+# same kind; this stays as the second half of it, for the case the dispatcher
+# cannot cover -- cmd/boot run directly, which is how a hook or a script that
+# knows the path invokes it.
 if in_workspace; then
     die "'wk $(basename "$0")' acts on a host and its hardware, and this is
     workspace '$(wk_self)'. Run it on the workstation instead."
@@ -163,6 +165,13 @@ cmd_status() {
         return 0
     fi
 
+    if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
+        warn "$MACHINE is ARMED for '$ARMED_IMG' (by $ARMED_BY at $ARMED_AT) and waiting for a person"
+        log  "  nothing will move it on its own: the role is chosen at the startup"
+        log  "  manager. 'wk boot $MACHINE' prints the ritual again."
+        log  "  cancel with: wk boot $MACHINE --disarm"
+        return 2
+    fi
     warn "$MACHINE is ARMED to reboot into image $ARMED_IMG (by $ARMED_BY at $ARMED_AT)"
     log  "  it is still in its normal role, so the one-shot has not been spent."
     log  "  do not start work on it: the next reboot leaves this role."
@@ -218,10 +227,15 @@ cmd_disarm() {
     fi
     # Re-arming with the EEPROM's own order is how a one-shot is cancelled:
     # there is no "clear" tag, and the register is write-only, so the way to
-    # make the next boot normal is to say so.
-    [ "$SPENT" = yes ] || b_arm "$BOOT_ORDER_NORMAL"
+    # make the next boot normal is to say so. A hands-on machine has no
+    # register at all, so forgetting the record is the whole of the disarm --
+    # and its driver says which half a person still has to do.
+    if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then
+        [ "$SPENT" = yes ] || b_arm "$BOOT_ORDER_NORMAL"
+    fi
     record_clear
     info "$MACHINE disarmed; its next reboot is a normal one"
+    command -v b_disarm_note >/dev/null 2>&1 && b_disarm_note
 }
 
 cmd_arm() {
@@ -243,9 +257,19 @@ cmd_arm() {
     'wk boot $MACHINE --back' returns it first." ;;
     esac
 
-    [ -n "$IMAGE" ] || IMAGE=$(image_latest "$MACH_PROFILE") \
-        || die "no image built for $MACHINE yet -- 'wk image build $MACH_PROFILE'"
-    image_complete "$IMAGE" || die "no such image: $IMAGE"
+    # What "the image" is depends on the arming model, and for one machine it is
+    # not a file at all: a hands-on machine boots an *installed volume*
+    # (boot/mac-volume.sh), which no image store can hold and `wk image build`
+    # can never produce. Its identity is the volume's name, which is also what
+    # the person choosing it will see on the screen.
+    if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
+        [ -n "$IMAGE" ] || IMAGE="${MACH_VOLUME:-}"
+        [ -n "$IMAGE" ] || die "$MACHINE has no benchmark volume configured (MACH_VOLUME)"
+    else
+        [ -n "$IMAGE" ] || IMAGE=$(image_latest "$MACH_PROFILE") \
+            || die "no image built for $MACHINE yet -- 'wk image build $MACH_PROFILE'"
+        image_complete "$IMAGE" || die "no such image: $IMAGE"
+    fi
 
     # A one-shot boots a local device, so the image has to actually be on it
     # or the boot falls through to the normal role and the whole thing looks
@@ -263,7 +287,17 @@ cmd_arm() {
     fi
 
     if [ -n "$DRY" ]; then
-        cat >&2 <<EOF
+        if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
+            cat >&2 <<EOF
+would arm $MACHINE
+  volume       $IMAGE $(mac_volume_present 2>/dev/null && echo "(attached)" || echo "(NOT attached -- arming would refuse)")
+  boot order   nothing in firmware; the selection is a person's, twice
+  record       $MACH_RECORD
+  then         print the ritual and stop. Nothing reboots this machine: the
+               role it is going to is chosen at the startup manager.
+EOF
+        else
+            cat >&2 <<EOF
 would arm $MACHINE
   image        $IMAGE (verified present on $MACH_DEVICE)
   boot order   $BOOT_ORDER_IMAGE (one-shot; the normal order $BOOT_ORDER_NORMAL is untouched)
@@ -271,11 +305,32 @@ would arm $MACHINE
   then         reboot, and the image's watchdog returns it in
                $(manifest_get "$IMAGE" watchdog)s unless claimed
 EOF
+        fi
         log "dry run -- nothing was armed."
         return 0
     fi
 
     info "arming $MACHINE for image $IMAGE"
+    if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
+        # The record first, then the ritual, and no reboot: the transition
+        # happens when a person picks a disk, and a command that rebooted the
+        # machine before saying so would take away the moment they need to be
+        # holding the power button. There is no watchdog either -- the way back
+        # is a plain reboot, because the startup-manager route leaves the
+        # default alone.
+        # Checks first, record second -- the opposite order to the one-shot
+        # below, and for the reason that makes both right. A firmware call can
+        # half-happen, so its record goes in before it; a ritual printed to a
+        # person cannot, so recording an intent that the checks then refuse
+        # would leave the machine "armed" for a volume that is not even
+        # attached. Found by running exactly that.
+        b_arm
+        record_write "$IMAGE" "$MACH_PROFILE" "${MACH_VOLUME:-}" ""
+        info "$MACHINE is armed on paper: the record says the next role is '$IMAGE'"
+        log  "  it is still a workstation until somebody boots it -- 'wk boot $MACHINE --status'"
+        log  "  says so, and 'wk boot $MACHINE --disarm' forgets the intent."
+        return 0
+    fi
     if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then
         # One record of intent, on the machine, next to the boot mechanism.
         record_write "$IMAGE" "$(manifest_get "$IMAGE" profile)" "$MACH_DEVICE" "$BOOT_ORDER_IMAGE"
