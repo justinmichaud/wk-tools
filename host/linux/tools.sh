@@ -9,6 +9,28 @@
 # substitution aborts the whole of ./setup under `set -e`.
 _pkgs=$(grep -vE '^\s*(#|$)' "$WK_ROOT/host/linux/apt.txt" | tr '\n' ' ' || true)
 
+# Validated per *line*, before any of it reaches apt.
+#
+# This is not defensive padding. A stray edit once turned a comment into a
+# package list, and apt went looking for `an`, `at`, `a` and `into` -- two of
+# which are real Debian packages it would have installed without complaint.
+#
+# The check that actually catches it is per-line rather than per-word: every
+# legitimate line here is a single token, so a line with whitespace *inside* it
+# is prose that lost its `#`. Checking the words instead would pass `writes`
+# and `into` happily, which is precisely the case that went wrong.
+while IFS= read -r _line; do
+    case "$_line" in
+        ''|\#*) continue ;;
+    esac
+    case "$_line" in
+        *[!a-z0-9+.:-]*)
+            die "host/linux/apt.txt: not a package name -- '$_line'
+    Every line here is one package. A comment that lost its '#' is the usual
+    cause. Nothing was installed." ;;
+    esac
+done < "$WK_ROOT/host/linux/apt.txt"
+
 _missing=""
 for p in $_pkgs; do
     dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "ok installed" || _missing="$_missing $p"

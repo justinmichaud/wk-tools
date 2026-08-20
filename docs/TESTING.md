@@ -935,6 +935,84 @@ the reader (which must never mistake intent for evidence).
       secret should move into the rootfs at build time, where systemd applies
       it with no cloud-init involved.
 
+### Serving — `wk serve`
+
+- [V] `wk serve --dry-run` resolves image, address, ports and helper state and
+      starts nothing
+- [V] `wk serve` fills its TFTP root from an image already in the store, with
+      mtools at a byte offset — no mount, no privilege, and what a netboot
+      client gets is the same artifact `wk image flash` writes to a stick
+- [V] a second machine on the LAN fetches boot files over TFTP: `config.txt`
+      (2699 B) and a 14.7 MB kernel, byte-identical, ~23 s over WiFi at a
+      firmware-realistic 1468-byte block size
+- [V] a request under a serial-number directory that does not exist falls back
+      to the root, and the log says which happened — the board's serial is not
+      knowable before it first asks, and this is the part of Pi netboot most
+      often got wrong from a machine with no console
+- [V] path traversal is refused, including via a serial-directory prefix
+      (`deadbeef/../../etc/passwd`)
+- [V] a write request is refused explicitly rather than ignored — the server
+      has no WRQ handler at all
+- [V] `wk serve --status` reports from evidence: a pid that is alive **and**
+      still the process we started, never the status file alone
+- [V] `wk serve --stop` stops both daemons and forgets the record
+- [V] without the privileged helper it degrades to port 6969 and says plainly
+      that no firmware can reach it — a Pi's TFTP client speaks to port 69 and
+      cannot be told otherwise
+- [ ] with the helper installed, port 69 binds, and `drop_privileges()` has
+      become the invoking user before any path is resolved (`./setup` once)
+- [ ] `wk serve` refuses while a build or a bench run is live on the same host
+- [V] serving an image whose `root=` is a local label/UUID is **refused**, with
+      the local path named instead — a netbooted client would otherwise fetch
+      the kernel, find no root, and (with `panic=10` and network first in
+      `BOOT_ORDER`) loop headlessly
+- [ ] a netboot root that actually works: NFS, or an initramfs pulling a
+      squashfs into RAM. **Not built.** Until it is, netboot proves the
+      transfer and nothing further.
+- [ ] the service alias IP is claimed for the duration and released after, so
+      the fixed `TFTP_IP` in a client's firmware can point at whichever machine
+      is serving
+
+### Why the server is not a container
+
+- [V] rootless podman cannot publish port 69 (`rootlessport cannot expose
+      privileged port 69`), and cannot bind it with `--network host
+      --cap-add NET_BIND_SERVICE` either — the capability lands in the
+      container's user namespace, the bind is checked against the initial one
+- [V] podman's own suggested workaround, `ip_unprivileged_port_start=69`, is a
+      **broader** grant than the helper it would replace: every local process
+      could then bind 69–1023 permanently, including 80 and 443
+- [ ] the same on macOS, where the podman machine's user-mode NAT plus TFTP's
+      ephemeral data port make it worse again — untested, and not worth
+      testing unless someone proposes it a second time
+
+### Reclaiming — `wk gc` knows about images
+
+- [V] rubble from an interrupted image build is removed
+- [V] all but the **newest complete image per profile** is removed, and the
+      newest is kept unconditionally — unlike a base snapshot there is no pin
+      to consult, because an image is written to a device and the device holds
+      no reference back
+- [V] the TFTP root is emptied when the image its stamp names is gone
+- [V] `cache/images` (the pinned distro bases, 1.5 GB) is reported as kept
+      rather than pruned — it is re-downloadable but slow, and growth should be
+      visible rather than silent
+
+### The EEPROM's only writer — `wk pi netboot-enable`
+
+- [V] `--dry-run` prints a unified diff of the firmware configuration and
+      writes nothing
+- [V] network is added as the **last** entry before the restart nibble
+      (`0xf461` → `0xf2461`), never the first: `BOOT_ORDER` is shared by both
+      of a machine's roles, and a Pi that netboots by default is a Pi that
+      stops being a workstation the moment a server answers
+- [V] the transform is idempotent and reversible (`--revert` removes the
+      network nibble and the netboot keys)
+- [ ] an actual write, confirmed, applied, and read back on a board that is
+      not this session's workstation
+- [ ] `TFTP_PREFIX` is never written — the tftpd's root fallback removes the
+      need, and it is the one value nobody can know before first contact
+
 ### Still owed here
 
 - [V] the boot time a status reports equals `/proc/stat`'s btime on the
@@ -949,8 +1027,19 @@ the reader (which must never mistake intent for evidence).
       macOS lane to release that file.
 - [ ] `wk` help text lists `image` and `boot`, and both are refused inside a
       workspace and on a shared build machine (`is_host_only`). Same reason.
-- [ ] `wk serve`, `wk pi netboot-enable` — the rpi4/rpi3 half, which needs a
-      server and a wire.
+- [ ] the rpi4/rpi3 half end to end: a board that actually netboots. Blocked
+      on hardware, not on code — the rpi4 is not powered on (a full LAN sweep
+      finds no Raspberry Pi but the rpi5), and moose's three wired NICs are all
+      `carrier=0`.
+- [V] `wk image build rpi3-perf` refuses rather than handing the fleet's only
+      32-bit board an arm64 base
+- [ ] the rpi3 at all: it needs proxy DHCP with option 43 (not built), an
+      irreversible OTP burn, and its model (3B vs 3B+) established. Deliberately
+      last.
+- [ ] **first contact with an unreachable Pi is physical.** `netboot-enable`
+      writes the EEPROM over ssh, so it needs the board running; netboot
+      removes the *second* trip to a device, not the first. A Pi that answers
+      nothing has to be met once with an SD card.
 
 ## Regressions worth a permanent test
 

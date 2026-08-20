@@ -1,0 +1,313 @@
+#!/usr/bin/env bash
+#
+# wk serve -- hand boot files to machines that netboot.
+#
+#   wk serve [--image <id>] [--address <ip>] [--dry-run]   start serving
+#   wk serve --status                                      what is running here
+#   wk serve --stop                                        stop it
+#
+# The Pi firmware's last mile is TFTP on port 69 for the boot files, and HTTP
+# for the root filesystem, which is the big half and needs no privilege at all.
+# Both roots are filled from an image already in the store, so what a netboot
+# client gets is the same artifact `wk boot` writes to a stick -- one image,
+# two ways of reaching a machine.
+#
+# The serving role is meant to float: any idle machine serves, the Mac
+# included (docs/HANDOFF-netboot.md, "The serving role floats"). That is why
+# the daemon is a stdlib script in this repo rather than a distro package with
+# a different name, unit and config file on every host -- and why the client's
+# fixed `TFTP_IP` is met with a service alias address that whichever machine is
+# serving claims for the duration, rather than by re-flashing EEPROMs.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/image.sh"
+. "$WK_ROOT/image/profiles.sh"
+. "$WK_ROOT/lib/target.sh"
+
+if in_workspace; then
+    die "'wk serve' hands boot files to real machines over a real network, and
+    this is workspace '$(wk_self)'. Run it on the workstation instead."
+fi
+
+PRIV=/usr/local/libexec/wk-tftpd
+SERVE_DIR="$WK_STORE/serve"
+TFTP_ROOT="$SERVE_DIR/tftp"
+HTTP_ROOT="$SERVE_DIR/http"
+STATUS="$SERVE_DIR/serve.status"
+LOG_DIR="$SERVE_DIR/log"
+
+TFTP_PORT="${WK_TFTP_PORT:-69}"
+HTTP_PORT="${WK_HTTP_PORT:-8069}"
+
+usage() {
+    cat >&2 <<'EOF'
+usage: wk serve [options]
+
+  --image <id>     which image's boot files to serve (default: the newest)
+  --address <ip>   bind address (default: the LAN address of the default route)
+  --status         what this machine is serving, from evidence
+  --stop           stop serving
+  --dry-run        resolve everything, start nothing
+EOF
+    exit 2
+}
+
+ACTION=start; IMAGE=""; ADDRESS=""; DRY=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --status)  ACTION=status ;;
+        --stop)    ACTION=stop ;;
+        --dry-run) DRY=1 ;;
+        --image)   IMAGE="${2:-}"; shift ;;
+        --address) ADDRESS="${2:-}"; shift ;;
+        -h|--help) usage ;;
+        *) die "unknown option: $1" ;;
+    esac
+    shift
+done
+
+# --- liveness, from evidence rather than from the file -----------------------
+#
+# A pid in a status file is a claim (docs/HANDOFF-workspace-state.md: "status
+# files are claims; evidence decides"). A pid alone is worse than nothing here,
+# because pids are reused: the check is that the process is alive *and* is
+# still the thing we started.
+alive() {
+    local pid="$1" want="$2"
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q "$want"
+}
+
+status_get() { [ -f "$STATUS" ] && sed -n "s/^$1=//p" "$STATUS" | head -1 || true; }
+
+# The address a client will reach this machine on. Derived from the routing
+# table rather than configured: the machine already knows which address it
+# answers on, and a second copy in a config file is a second copy of one fact.
+lan_address() {
+    ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1
+}
+
+cmd_status() {
+    local tpid hpid
+    tpid=$(status_get tftp_pid); hpid=$(status_get http_pid)
+
+    if alive "$tpid" wk-tftpd; then
+        log "tftp:  serving $(status_get tftp_root) on $(status_get address):$(status_get tftp_port) (pid $tpid)"
+    elif [ -n "$tpid" ]; then
+        warn "tftp:  the record says pid $tpid, but no such server is running"
+        log  "  'wk serve --stop' forgets it, 'wk serve' starts a new one"
+    else
+        log "tftp:  not serving"
+    fi
+
+    if alive "$hpid" http.server; then
+        log "http:  serving $(status_get http_root) on $(status_get address):$(status_get http_port) (pid $hpid)"
+    elif [ -n "$hpid" ]; then
+        warn "http:  the record says pid $hpid, but no such server is running"
+    else
+        log "http:  not serving"
+    fi
+
+    [ -n "$(status_get image)" ] && log "image: $(status_get image)"
+    return 0
+}
+
+cmd_stop() {
+    local tpid hpid stopped=0
+    tpid=$(status_get tftp_pid); hpid=$(status_get http_pid)
+    if alive "$tpid" wk-tftpd; then kill "$tpid" 2>/dev/null && stopped=1; fi
+    if alive "$hpid" http.server; then kill "$hpid" 2>/dev/null && stopped=1; fi
+    rm -f "$STATUS"
+    [ "$stopped" = 1 ] && info "stopped serving" || log "nothing was serving"
+    return 0
+}
+
+# --- refusals ----------------------------------------------------------------
+#
+# Serving is not free: it is a network daemon and a burst of disk reads at the
+# moment a client boots. Both are exactly the kind of background noise that
+# makes a benchmark number quietly wrong, which is why the handoff requires
+# this to refuse while a measured run is live on the same host.
+refuse_if_busy() {
+    local f busy=0
+    for f in "$WK_STORE"/ws/*/build.status; do
+        [ -f "$f" ] || continue
+        # Counted in a loop, not piped into wc: with `set -o pipefail` a grep
+        # that matches nothing fails the pipeline and `set -e` ends the run.
+        if grep -q '^state=running' "$f"; then busy=$((busy + 1)); fi
+    done
+    [ "$busy" = 0 ] || die "$busy build(s) are running on this machine.
+    Serving competes with them for disk and network. Wait, or serve elsewhere:
+    the role floats on purpose."
+
+    if pgrep -f "$WK_ROOT/cmd/bench" >/dev/null 2>&1; then
+        die "a benchmark run is live on this machine, and serving would put
+    network and disk load underneath it. Serve from another machine."
+    fi
+}
+
+cmd_start() {
+    refuse_if_busy
+
+    [ -n "$IMAGE" ] || IMAGE=$(image_latest rpi5-perf 2>/dev/null) || IMAGE=""
+    [ -n "$IMAGE" ] || die "no image to serve -- 'wk image build <profile>' first"
+    image_complete "$IMAGE" || die "no such image: $IMAGE"
+
+    [ -n "$ADDRESS" ] || ADDRESS=$(lan_address)
+    [ -n "$ADDRESS" ] || die "could not work out this machine's LAN address; pass --address"
+
+    local priv=no
+    [ -x "$PRIV" ] && priv=yes
+
+    if [ "$TFTP_PORT" -lt 1024 ] && [ "$priv" = no ]; then
+        warn "the netboot helper is not installed, so port $TFTP_PORT cannot be bound."
+        log  "  './setup' installs it (one sudo). Serving on 6969 instead, which is"
+        log  "  testable from another machine but useless to firmware: a Pi's TFTP"
+        log  "  client speaks to port 69 and cannot be told otherwise."
+        TFTP_PORT=6969
+    fi
+
+    if [ -n "$DRY" ]; then
+        cat >&2 <<EOF
+would serve
+  image      $IMAGE
+  tftp       $TFTP_ROOT on $ADDRESS:$TFTP_PORT $([ "$TFTP_PORT" -lt 1024 ] && echo "(via $PRIV)" || echo "(unprivileged)")
+  http       $HTTP_ROOT on $ADDRESS:$HTTP_PORT
+  helper     $([ "$priv" = yes ] && echo present || echo "MISSING -- './setup'")
+  logs       $LOG_DIR
+EOF
+        log "dry run -- nothing was started."
+        return 0
+    fi
+
+    cmd_stop >/dev/null 2>&1 || true
+    ensure_dir "$TFTP_ROOT" >/dev/null
+    ensure_dir "$HTTP_ROOT" >/dev/null
+    ensure_dir "$LOG_DIR" >/dev/null
+
+    populate_tftp_root "$IMAGE"
+    [ -n "${WK_SERVE_ANY_ROOT:-}" ] || check_root_is_reachable
+
+    info "serving image $IMAGE on $ADDRESS"
+
+    local tpid hpid
+    if [ "$TFTP_PORT" -lt 1024 ]; then
+        # sudo -n: the rule is NOPASSWD or it is not installed. Prompting from
+        # here would block a command meant to be startable unattended.
+        sudo -n "$PRIV" --root "$TFTP_ROOT" --address "$ADDRESS" --port "$TFTP_PORT" \
+            >> "$LOG_DIR/tftp.log" 2>&1 &
+        tpid=$!
+    else
+        python3 "$WK_ROOT/boot/wk-tftpd.py" --root "$TFTP_ROOT" --address "$ADDRESS" \
+            --port "$TFTP_PORT" >> "$LOG_DIR/tftp.log" 2>&1 &
+        tpid=$!
+    fi
+
+    python3 -m http.server --directory "$HTTP_ROOT" --bind "$ADDRESS" "$HTTP_PORT" \
+        >> "$LOG_DIR/http.log" 2>&1 &
+    hpid=$!
+
+    # A daemon that died on startup must not be reported as running. Give both
+    # a moment and then check, because "started" is a claim and only the
+    # process being there is evidence.
+    sleep 1
+    alive "$tpid" wk-tftpd || die "the tftp server did not start; see $LOG_DIR/tftp.log
+$(tail -3 "$LOG_DIR/tftp.log" 2>/dev/null | sed 's/^/    /')"
+    alive "$hpid" http.server || die "the http server did not start; see $LOG_DIR/http.log"
+
+    cat > "$STATUS" <<EOF
+state=running
+image=$IMAGE
+address=$ADDRESS
+tftp_port=$TFTP_PORT
+http_port=$HTTP_PORT
+tftp_root=$TFTP_ROOT
+http_root=$HTTP_ROOT
+tftp_pid=$tpid
+http_pid=$hpid
+updated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
+    cmd_status
+    log ""
+    log "  a client's firmware needs TFTP_IP=$ADDRESS -- 'wk pi netboot-enable <host>'"
+    log "  writes that, and it is the EEPROM's only writer."
+    [ "$TFTP_PORT" -lt 1024 ] || warn "on port $TFTP_PORT no firmware can reach this; testing only"
+}
+
+# A netboot client gets its kernel over TFTP and then has to find a root
+# filesystem. Serving an image whose cmdline names a *local* root is the one
+# mistake here with a genuinely expensive failure mode: the client fetches the
+# kernel, drops into an initramfs that cannot find `LABEL=...` on any disk it
+# has, and -- with `panic=10` in the cmdline and network first in BOOT_ORDER --
+# reboots and does it again. A boot loop on a headless board, caused by a
+# server that reported success.
+#
+# So this refuses, rather than discovering it on the hardware. The image is
+# fine; it is simply a *local-boot* image, and `wk image flash` is what it is
+# for.
+check_root_is_reachable() {
+    local cmdline root=""
+    for cmdline in "$TFTP_ROOT/current/cmdline.txt" "$TFTP_ROOT/cmdline.txt"; do
+        [ -f "$cmdline" ] || continue
+        root=$(tr ' ' '\n' < "$cmdline" | sed -n 's/^root=//p' | head -1)
+        break
+    done
+
+    case "$root" in
+        /dev/nfs|*nfsroot*|"") return 0 ;;
+        LABEL=*|UUID=*|PARTUUID=*|/dev/*)
+            die "the image being served boots from a local root ($root), so a netboot
+    client would fetch this kernel and then have nowhere to mount / from --
+    and with panic=10 in the same cmdline it would loop, headless, retrying
+    the netboot each time.
+
+    Netbooting needs a root the network can supply: an NFS root, or an
+    initramfs that pulls a squashfs into RAM (docs/HANDOFF-netboot.md,
+    'Storage: what the image is'). Neither is built yet.
+
+    What works today is the local path this image is actually for:
+      wk image flash $(manifest_get "$IMAGE" machine) --image $IMAGE
+    Set WK_SERVE_ANY_ROOT=1 to serve it anyway (for testing the transfer
+    itself, which is all it can prove)."
+            ;;
+    esac
+    return 0
+}
+
+# The boot files a netboot client asks for are the contents of the image's own
+# boot partition -- the same bytes `wk image flash` writes to a stick. Copied
+# out with mtools, at a byte offset from the partition table, so this needs no
+# mount and no privilege.
+populate_tftp_root() {
+    local id="$1" disk offset stamp
+    disk=$(image_disk "$id")
+    stamp="$TFTP_ROOT/.wk-image"
+
+    if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$id" ]; then
+        debug "tftp root already holds $id"
+        return 0
+    fi
+
+    require mcopy "mtools is required to read the image's boot partition -- './setup' installs it"
+
+    offset=$(sfdisk -J "$disk" | python3 -c '
+import json, sys
+print(json.load(sys.stdin)["partitiontable"]["partitions"][0]["start"] * 512)')
+
+    info "filling the tftp root from $id"
+    rm -rf "${TFTP_ROOT:?}"/*
+    MTOOLS_SKIP_CHECK=1 mcopy -s -i "$disk@@$offset" "::*" "$TFTP_ROOT/" 2>/dev/null \
+        || die "could not copy the image's boot partition into $TFTP_ROOT"
+    printf '%s' "$id" > "$stamp"
+}
+
+case "$ACTION" in
+    start)  cmd_start ;;
+    status) cmd_status ;;
+    stop)   cmd_stop ;;
+esac

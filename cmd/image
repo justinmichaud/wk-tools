@@ -490,7 +490,7 @@ would build image $ID
               $([ -f "$(image_cache_dir)/$(basename "$IMG_BASE_URL")" ] && echo "cached" || echo "not cached -- would download")
   hostname    $IMG_HOSTNAME
   ssh key     ${WK_IMAGE_KEY:-$HOME/.ssh/id_ed25519.pub}
-  network     $MACH_SSH's own netplan, re-rendered for networkd
+  network     $([ "${IMG_NETWORK:-}" = wired ] && echo "DHCP on eth0 (no credential; builds with the board off)" || echo "$MACH_SSH's own netplan, re-rendered for networkd")
   watchdog    ${IMG_WATCHDOG}s self-return unless /run/wk-keep-running exists
   grow root   $IMG_GROW
   packages    ${IMG_PACKAGES:-none}
@@ -508,10 +508,15 @@ EOF
     # machine means no image -- and finding that out *after* a 45 s unpack is
     # 45 s spent on an answer already available. Checked before the lock, too:
     # nothing else should queue behind a build that cannot start.
-    m_reachable || die "$IMG_MACHINE is not reachable over ssh, and the image's network
-    profile is read from that machine -- an image built without it comes up
+    # Only the wifi profile needs the board: it is where the credential lives.
+    # A cabled image carries no secret, so it builds with the target switched
+    # off -- which is exactly the case for a test device waiting to be netbooted.
+    if [ "${IMG_NETWORK:-wifi-from-machine}" != wired ]; then
+        m_reachable || die "$IMG_MACHINE is not reachable over ssh, and this profile reads its
+    network credential from that machine -- an image built without it comes up
     unreachable on a board with no cable.
     'wk boot $IMG_MACHINE --status' says what role it is in."
+    fi
 
     image_lock
 
@@ -553,11 +558,25 @@ EOF
     # seed that was never read.
     printf 'instance-id: %s\nlocal-hostname: %s\n' "$ID" "$IMG_HOSTNAME" > "$SEED/meta-data"
 
-    info "reading the network profile from $MACH_SSH (the PSK stays on the board)"
-    network_config "$MACH_SSH" > "$SEED/network-config"
-    grep -q 'wifis:' "$SEED/network-config" \
-        || die "$MACH_SSH's netplan has no wifi stanza, so the image would come up unreachable.
+    if [ "${IMG_NETWORK:-wifi-from-machine}" = wired ]; then
+        info "network: DHCP on eth0 (cabled; no credential to carry)"
+        cat > "$SEED/network-config" <<'NETEOF'
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      dhcp4: true
+      dhcp-identifier: mac
+      optional: true
+NETEOF
+    else
+        info "reading the network profile from $MACH_SSH (the PSK stays on the board)"
+        network_config "$MACH_SSH" > "$SEED/network-config"
+        grep -q 'wifis:' "$SEED/network-config" \
+            || die "$MACH_SSH's netplan has no wifi stanza, so the image would come up unreachable.
     That board has no cable; an image with no credentials boots into isolation."
+    fi
 
     # The image's own config.txt: read the base's, append the profile's, write
     # it back. Appended rather than replaced, because the base's copy is what
@@ -569,8 +588,16 @@ EOF
         cat "$IMG_SPEC_DIR/config.txt.append" >> "$SEED/config.txt"
     fi
 
+    # The image's identity, on the boot partition where it can be read back
+    # from the *other* role without mounting anything ext4. The obvious check
+    # -- does the device still byte-match the image -- is wrong after the first
+    # boot: a booted image writes to its own boot partition (the diagnostics
+    # dump, cloud-init's own state), so bit-identity stops holding the moment
+    # the thing works. Identity is what the question actually means.
+    printf '%s\n' "$ID" > "$SEED/wk-image.id"
+
     local f
-    for f in user-data meta-data network-config config.txt; do
+    for f in user-data meta-data network-config config.txt wk-image.id; do
         mt mcopy -o "$SEED/$f" "::$f"
     done
 

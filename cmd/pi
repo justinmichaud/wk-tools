@@ -18,14 +18,185 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/boot/machines.sh"
 
 TS_VERSION="${TS_VERSION:-1.102.2}"
 TAG="${WK_PI_TAG:-tag:wk}"
 
 ACTION="${1:-}"; HOST="${2:-}"
-[ "$ACTION" = setup ] && [ -n "$HOST" ] || die "usage: wk pi setup <ssh-host>"
+case "$ACTION" in
+    setup|netboot-enable) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>" ;;
+    *) die "usage: wk pi setup <ssh-host>
+       wk pi netboot-enable <ssh-host> [--server <ip>] [--revert] [--dry-run]" ;;
+esac
+shift 2 2>/dev/null || true
 
 rsh() { ssh -o BatchMode=yes "$HOST" "$@"; }
+
+# --- wk pi netboot-enable ----------------------------------------------------
+#
+# The EEPROM's only writer, and the reason that matters: `BOOT_ORDER` is
+# firmware state *shared by both of a machine's roles*. A Pi that netboots by
+# default is a Pi that stops being a workstation the moment a server answers,
+# and getting it back means a trip to the device. So this adds network as the
+# **last** entry before the restart nibble, never the first: an ordinary boot
+# still finds its SD card or NVMe exactly as before, and an actual netboot is
+# requested per-boot with the same one-shot `wk boot` uses.
+#
+# What it writes, and nothing else:
+#
+#   BOOT_ORDER  with network (nibble 2) added as a fallback, order preserved
+#   TFTP_IP     the serving address -- a service alias, so the role can float
+#   CLIENT_IP / SUBNET / GATEWAY   optional; when set the firmware skips DHCP
+#                                  entirely, so no second DHCP server ever has
+#                                  to appear on a family LAN
+#
+# TFTP_PREFIX is deliberately *not* written. It selects the serial-number
+# directory the firmware prefixes to every request, and `boot/wk-tftpd.py`
+# already falls back to the root when that directory is absent -- so the one
+# value you cannot know before the board first asks is not a value anyone has
+# to set.
+
+# Insert network into a boot order, at one of two positions -- and which one
+# is a property of what the machine *is*, not a preference.
+#
+# BOOT_ORDER reads lowest-nibble-first, so the string is written in reverse
+# priority: 0xf41 is SD(1), then USB(4), then restart(f).
+#
+#   last  (the default, for a machine that is also a workstation)
+#         0xf41 -> 0xf241. An ordinary boot still finds its local disk exactly
+#         as before; netbooting is requested per-boot with a one-shot. A Pi
+#         that netbooted by default would stop being a workstation the moment
+#         a server answered, and getting it back needs physical access.
+#
+#   first (for a dedicated test device -- the rpi4 and rpi3)
+#         0xf41 -> 0xf412. There is no one-shot to fall back on: vcmailbox's
+#         `set_reboot_order` is Raspberry Pi 5 only. So arming moves to the
+#         server instead, and it is strictly better than what the rpi5 gets --
+#         serve the files and the board netboots, empty the TFTP root and it
+#         falls through to its local image, with no access to the device
+#         needed to arm a run at all.
+#
+# Any existing network nibble is removed first, so the position is whatever was
+# asked for rather than whatever happened to be there.
+boot_order_with_net() {
+    local order="${1#0x}" pos="${2:-last}"
+    order=$(printf '%s' "$order" | sed 's/2//g')
+    case "$pos" in
+        first) printf '0x%s2' "$order" ;;
+        *)     case "$order" in
+                   f*) printf '0xf2%s' "${order#f}" ;;
+                   *)  printf '0x2%s' "$order" ;;
+               esac ;;
+    esac
+}
+
+boot_order_without_net() {
+    local order="${1#0x}"
+    printf '0x%s' "$(printf '%s' "$order" | sed 's/2//g')"
+}
+
+cmd_netboot_enable() {
+    local server="" client="" gateway="" subnet="255.255.255.0" dry="" revert="" position=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --position)  position="${2:-}"; shift ;;
+            --server)    server="${2:-}"; shift ;;
+            --client-ip) client="${2:-}"; shift ;;
+            --gateway)   gateway="${2:-}"; shift ;;
+            --subnet)    subnet="${2:-}"; shift ;;
+            --dry-run)   dry=1 ;;
+            --revert)    revert=1 ;;
+            *) die "unknown option: $1" ;;
+        esac
+        shift
+    done
+
+    # The position defaults from what the fleet says this machine is, not from
+    # a flag the caller has to remember: getting it wrong on a workstation
+    # costs a trip to the device.
+    if [ -z "$position" ]; then
+        if machine_load "$HOST" 2>/dev/null; then
+            case "${MACH_ROLE:-workstation}" in
+                test-device) position=first ;;
+                *)           position=last ;;
+            esac
+        else
+            position=last
+        fi
+    fi
+    case "$position" in first|last) ;; *) die "--position is 'first' or 'last'" ;; esac
+
+    rsh true >/dev/null 2>&1 || die "cannot ssh to $HOST.
+    This writes the board's firmware configuration, so it needs the board
+    running and reachable. A Pi that cannot be reached at all has to be met
+    physically once -- an SD card written by 'wk pi flash' -- before netboot
+    can make any later trip unnecessary. Netboot removes the second visit,
+    not the first."
+
+    rsh 'command -v rpi-eeprom-config >/dev/null' \
+        || die "$HOST has no rpi-eeprom-config, so this is not a Pi whose
+    firmware configuration can be written from the running system."
+
+    local current new
+    current=$(rsh 'sudo rpi-eeprom-config') || die "could not read $HOST's EEPROM configuration"
+
+    local order
+    order=$(printf '%s\n' "$current" | sed -n 's/^BOOT_ORDER=//p' | head -1)
+    [ -n "$order" ] || order=0xf41
+
+    if [ -n "$revert" ]; then
+        new=$(printf '%s\n' "$current" \
+            | grep -vE '^(TFTP_IP|CLIENT_IP|SUBNET|GATEWAY)=' \
+            | sed "s|^BOOT_ORDER=.*|BOOT_ORDER=$(boot_order_without_net "$order")|")
+    else
+        [ -n "$server" ] || server=$(ip route get 1.1.1.1 2>/dev/null \
+            | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+        [ -n "$server" ] || die "could not work out this machine's address; pass --server"
+
+        new=$(printf '%s\n' "$current" \
+            | grep -vE '^(TFTP_IP|CLIENT_IP|SUBNET|GATEWAY)=' \
+            | sed "s|^BOOT_ORDER=.*|BOOT_ORDER=$(boot_order_with_net "$order" "$position")|")
+        new="$new
+TFTP_IP=$server"
+        if [ -n "$client" ]; then
+            new="$new
+CLIENT_IP=$client
+SUBNET=$subnet"
+            [ -n "$gateway" ] && new="$new
+GATEWAY=$gateway"
+        fi
+    fi
+
+    log "$HOST's firmware configuration would change (network boot: $position):"
+    diff -u <(printf '%s\n' "$current") <(printf '%s\n' "$new") | sed '1,2d;s/^/  /' || true
+
+    if [ -n "$dry" ]; then
+        log "dry run -- the EEPROM was not written."
+        return 0
+    fi
+
+    if [ "$current" = "$new" ]; then
+        info "$HOST's firmware already says this; nothing to write"
+        return 0
+    fi
+
+    warn "this writes $HOST's EEPROM. BOOT_ORDER is shared by both of that"
+    warn "machine's roles, and a bad value needs physical access to fix."
+    confirm "write this configuration to $HOST's EEPROM?" || die "not written"
+
+    printf '%s\n' "$new" | rsh 'cat > /tmp/wk-boot.conf && sudo rpi-eeprom-config --apply /tmp/wk-boot.conf' \
+        || die "rpi-eeprom-config refused the configuration; nothing was written"
+
+    info "$HOST's EEPROM updated; it takes effect on the next boot"
+    log  "  verify with: ssh $HOST sudo rpi-eeprom-config"
+    log  "  undo with:   wk pi netboot-enable $HOST --revert"
+}
+
+if [ "$ACTION" = netboot-enable ]; then
+    cmd_netboot_enable "$@"
+    exit 0
+fi
 
 info "probing $HOST"
 ARCH=$(rsh 'uname -m') || die "cannot ssh to $HOST"

@@ -78,6 +78,89 @@ else
     rm -f "$_tmp"
 fi
 
+# --- the netboot helper: one syscall's worth of privilege ---------------------
+#
+# `wk serve` hands boot files to firmware, and firmware TFTP clients speak to
+# port 69. Nothing below 1024 binds without privilege, so this is the second
+# and last thing in the repo that needs a sudoers rule.
+#
+# The grant is deliberately narrower than the quiesce helper's. That one does
+# real work as root; this one binds a socket and immediately becomes the
+# invoking user -- `drop_privileges()` in the script refuses outright to serve
+# with root still held. So the rule buys exactly one bind(2), and the files a
+# client can fetch afterwards are the files the *user* running `wk serve` can
+# read. Without that ordering, a NOPASSWD rule on a file server would be a
+# read-only export of the entire filesystem, as root, over UDP.
+#
+# Same guarantees as above and for the same reason: copied to a root-owned
+# path, never symlinked into the checkout, and the mode re-verified every run.
+# Its own default, not a borrowed one: this block must stand alone if the
+# quiesce half above is ever moved or skipped.
+_libexec="${_libexec:-/usr/local/libexec}"
+_nb_target="$_libexec/wk-tftpd"
+_nb_source="$WK_ROOT/boot/wk-tftpd.py"
+_nb_sudoers=/etc/sudoers.d/wk-netboot
+
+if [ ! -f "$_nb_source" ]; then
+    warn "netboot helper missing at $_nb_source; skipping"
+else
+    _nb_needs=0
+    if [ ! -f "$_nb_target" ] || ! cmp -s "$_nb_source" "$_nb_target"; then
+        _nb_needs=1
+    fi
+    _nb_owner=$(stat -c '%U' "$_nb_target" 2>/dev/null || stat -f '%Su' "$_nb_target" 2>/dev/null || echo "")
+    [ -f "$_nb_target" ] && [ "$_nb_owner" != root ] && _nb_needs=1
+
+    _nb_rule="$(id -un) ALL=(root) NOPASSWD: $_nb_target"
+
+    # --help exits 0 and touches nothing, so it is a safe probe for "is the
+    # rule installed and working" -- the same reasoning as `status` above,
+    # which exists on the quiesce helper for exactly this purpose.
+    _nb_ok=0
+    if [ -x "$_nb_target" ] && sudo -n "$_nb_target" --help >/dev/null 2>&1; then
+        _nb_ok=1
+    fi
+
+    if [ "$_nb_needs" -eq 0 ] && [ "$_nb_ok" -eq 1 ]; then
+        unchanged "netboot helper and sudoers rule"
+    elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
+        warn "netboot helper not installed: sudo needs a terminal"
+        log  "  run this from an interactive shell:  ./setup --stage quiesce"
+    else
+        info "installing the netboot helper (requires sudo once)"
+        sudo install -d -o root -g wheel -m 0755 "$_libexec" 2>/dev/null \
+            || sudo install -d -o root -g root -m 0755 "$_libexec"
+        sudo install -o root -m 0755 "$_nb_source" "$_nb_target"
+        changed "installed $_nb_target"
+
+        _nb_tmp="$(mktemp)"
+        printf '%s\n' "$_nb_rule" > "$_nb_tmp"
+        if sudo visudo -cqf "$_nb_tmp"; then
+            sudo install -o root -m 0440 "$_nb_tmp" "$_nb_sudoers"
+            changed "installed $_nb_sudoers"
+        else
+            rm -f "$_nb_tmp"
+            die "generated netboot sudoers rule failed validation; nothing was installed"
+        fi
+        rm -f "$_nb_tmp"
+    fi
+
+    if [ -f "$_nb_target" ]; then
+        _nb_perm=$(stat -c '%a' "$_nb_target" 2>/dev/null || stat -f '%Lp' "$_nb_target" 2>/dev/null || echo "")
+        case "$_nb_perm" in
+            ''|*[!0-7]*) die "could not read the mode of $_nb_target -- refusing to vouch for the sudoers rule" ;;
+        esac
+        case "$_nb_perm" in
+            *[2367])  die "$_nb_target is world-writable (mode $_nb_perm) -- this is a root escalation; remove $_nb_sudoers now" ;;
+        esac
+        case "$_nb_perm" in
+            ?[2367]?) die "$_nb_target is group-writable (mode $_nb_perm) -- this is a root escalation; remove $_nb_sudoers now" ;;
+        esac
+        unchanged "netboot helper permissions ($_nb_perm)"
+    fi
+fi
+unset _nb_target _nb_source _nb_sudoers _nb_needs _nb_owner _nb_rule _nb_ok _nb_tmp _nb_perm
+
 # --- the session user --------------------------------------------------------
 # The helper's session verbs run a compositor as a specific user. That user is
 # recorded here, root-owned, rather than passed as an argument: an argument

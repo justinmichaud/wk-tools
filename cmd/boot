@@ -228,8 +228,17 @@ cmd_arm() {
     read_state
 
     case "$ROLE" in
-        unreachable) die "$MACHINE is not reachable over ssh in its normal role.
-    Arming is an ssh command, so there is nothing to arm from here." ;;
+        unreachable)
+            if [ "${BOOT_ARMING:-one-shot}" = server ]; then
+                # Not fatal here, unlike a one-shot: the server holds the
+                # arming, so a board that is off or wedged is still armed --
+                # it boots the image whenever it next powers on.
+                warn "$MACHINE is not answering, but its arming lives on the server:"
+                warn "  power it on and it boots what this machine is serving."
+            else
+                die "$MACHINE is not reachable over ssh in its normal role.
+    Arming is an ssh command, so there is nothing to arm from here."
+            fi ;;
         image*) die "$MACHINE is already in $ROLE.
     'wk boot $MACHINE --back' returns it first." ;;
     esac
@@ -238,16 +247,20 @@ cmd_arm() {
         || die "no image built for $MACHINE yet -- 'wk image build $MACH_PROFILE'"
     image_complete "$IMAGE" || die "no such image: $IMAGE"
 
-    # The image has to actually be on the device, or the one-shot falls through
-    # to the normal role and the whole thing looks like a firmware failure.
-    # What can be checked from here is cheap and worth it: that the device
-    # exists, and that its first bytes are the image's.
-    local want have bytes
-    bytes=4194304
-    want=$(head -c "$bytes" "$(image_disk "$IMAGE")" | sha256sum | cut -d' ' -f1)
-    have=$(m_ssh "sudo head -c $bytes $MACH_DEVICE 2>/dev/null | sha256sum" | cut -d' ' -f1) || have=""
-    [ "$want" = "$have" ] || die "$MACH_DEVICE on $MACHINE does not start with image $IMAGE.
+    # A one-shot boots a local device, so the image has to actually be on it
+    # or the boot falls through to the normal role and the whole thing looks
+    # like a firmware failure. Asked by name rather than by hash -- see
+    # b_device_image() for why bit comparison is the wrong question once an
+    # image has booted once.
+    #
+    # A server-armed machine has no local image to check: its driver's b_arm
+    # checks the server instead, which is where its arming actually lives.
+    if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then
+        local on_device
+        on_device=$(b_device_image)
+        [ "$on_device" = "$IMAGE" ] || die "$MACH_DEVICE on $MACHINE holds ${on_device:-no wk image}, not $IMAGE.
     Write it first:  wk image flash $MACHINE --image $IMAGE"
+    fi
 
     if [ -n "$DRY" ]; then
         cat >&2 <<EOF
@@ -263,11 +276,22 @@ EOF
     fi
 
     info "arming $MACHINE for image $IMAGE"
-    record_write "$IMAGE" "$(manifest_get "$IMAGE" profile)" "$MACH_DEVICE" "$BOOT_ORDER_IMAGE"
-    b_arm "$BOOT_ORDER_IMAGE"
+    if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then
+        # One record of intent, on the machine, next to the boot mechanism.
+        record_write "$IMAGE" "$(manifest_get "$IMAGE" profile)" "$MACH_DEVICE" "$BOOT_ORDER_IMAGE"
+        b_arm "$BOOT_ORDER_IMAGE"
+    else
+        # No record is written here, and that is rule 1 rather than an
+        # omission: a server-armed machine's intent *is* the server's content,
+        # which the serving host already records once in serve.status. A copy
+        # on the client would be a second record of one fact -- and the one
+        # that goes stale, because the transition happens at the server.
+        b_arm
+    fi
     b_reboot
 
     info "$MACHINE is rebooting into $IMAGE"
+    [ "${BOOT_ARMING:-one-shot}" = server ] && b_disarm_note
     log  "  it returns by itself in $(manifest_get "$IMAGE" watchdog)s unless claimed:"
     log  "    wk boot $MACHINE --keep     claim it"
     log  "    wk boot $MACHINE --back     hand it back now"

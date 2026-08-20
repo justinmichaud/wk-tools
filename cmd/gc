@@ -129,6 +129,44 @@ if [ -d "$WK_STORE/cache/bench" ]; then
     done
 fi
 
+# --- boot images ---------------------------------------------------------------
+# 4.6 GB each, and a profile gets rebuilt every time its spec changes, so this
+# is the fastest-growing thing in the store by a wide margin. Two rules, both
+# conservative:
+#
+#   * rubble first -- a directory with no manifest is an interrupted build,
+#     which every reader already ignores and nothing can be pinned to.
+#   * then all but the newest complete image per profile. Unlike a base
+#     snapshot there is no pin to consult: an image is written to a device and
+#     the device does not hold a reference back. The newest of each profile is
+#     therefore kept unconditionally, because it is the one `wk boot` would
+#     arm, and older ones are re-buildable from a spec in the repo.
+if [ -d "$WK_STORE/images" ]; then
+    . "$WK_ROOT/lib/image.sh"
+
+    for id in $(image_rubble); do
+        info "removing rubble from an interrupted image build: $id"
+        rm -rf "$(image_dir "$id")"
+    done
+
+    for id in $(image_ids | sort); do
+        profile=$(manifest_get "$id" profile) || continue
+        newest=$(image_latest "$profile" 2>/dev/null) || continue
+        [ "$id" = "$newest" ] && continue
+        info "removing superseded image $id ($(du -sh "$(image_dir "$id")" 2>/dev/null | cut -f1))"
+        rm -rf "$(image_dir "$id")"
+    done
+
+    # The served copy of an image that is no longer there is just bytes. The
+    # stamp names the image it was filled from, which is what makes this
+    # answerable rather than a guess.
+    stamp="$WK_STORE/serve/tftp/.wk-image"
+    if [ -f "$stamp" ] && ! image_complete "$(cat "$stamp")"; then
+        info "emptying the tftp root: image $(cat "$stamp") is gone"
+        rm -rf "${WK_STORE:?}/serve/tftp"
+    fi
+fi
+
 # --- return free space to the host ------------------------------------------
 # Only with passwordless sudo (the podman VM has it; a workstation may not):
 # gc runs unattended, and a command that prompts has stopped being usable by
@@ -145,7 +183,7 @@ info "gc complete"
 df -h "$WK_STORE" 2>/dev/null | tail -1 || true
 
 # What gc deliberately does not prune, so growth is visible rather than silent.
-for d in bench cache/bench cache/yocto/sstate cache/yocto/downloads cache/buildroot; do
+for d in bench cache/bench cache/images cache/yocto/sstate cache/yocto/downloads cache/buildroot; do
     [ -d "$WK_STORE/$d" ] || continue
     du -sh "$WK_STORE/$d" 2>/dev/null | awk -v d="$d" '{printf "  %-8s %s (kept; prune by hand if needed)\n", $1, d}' >&2
 done

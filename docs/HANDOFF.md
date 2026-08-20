@@ -184,7 +184,10 @@ to invent its own way to get a binary onto hardware.
      that file's newest state section for what is proven and what is not — the
      rpi5 half is **done and measured on hardware** (arm -> image reachable in
      53 s -> claim -> hand back in ~40 s, with `perf_event_paranoid=-1` set on
-     the image); the server and the rpi4/rpi3 clients are not started. (new
+     the image). `wk serve` and `wk pi netboot-enable` are written and verified
+     as far as hardware allows -- boot files fetched over the real LAN by
+     another machine, the EEPROM diff produced without writing. What is left is
+     a board to point them at: the rpi4 is powered off. (new
      file, split out of the benchmarking handoff's open questions, which it now
      answers). Scoped 2026-08-19 to **all three machines**, at the user's
      direction: moose and the MBP, not just the rpi5. That scoping produced the

@@ -17,6 +17,14 @@
 #   IMG_WATCHDOG     seconds before the self-return reboot, unless kept
 #   IMG_GROW         whether cloud-init may grow the root partition
 #   IMG_PACKAGES     packages installed on first boot (needs egress)
+#   IMG_NETWORK      how the image gets on the network:
+#                      wifi-from-machine -- copy the credential off the target
+#                        board itself, so the PSK never travels through a log
+#                        or an agent's context. Requires the board to be up,
+#                        which is the price of not handling the secret here.
+#                      wired -- DHCP on eth0, no secret at all, so the image
+#                        builds with the target powered off. This is why a
+#                        cabled test device is easier to serve than the rpi5.
 #   IMG_LABEL_ROOT   the image's own root filesystem label
 #   IMG_LABEL_BOOT   ... and its boot filesystem label
 #   IMG_SPEC_DIR     the profile's own files
@@ -47,6 +55,9 @@ image_profile_list() {
     cat <<'EOF'
 rpi5-perf   Ubuntu 26.04 server, aarch64, for the rpi5's USB one-shot: no
             sandbox, perf_event_paranoid ours to set, WiFi baked in
+rpi4-perf   the same, cabled: DHCP on eth0, no credential, so it builds with
+            the board switched off
+rpi3-perf   likewise, for the rpi3 on its direct cable
 EOF
 }
 
@@ -56,6 +67,7 @@ image_profile_load() {
 
     case "$1" in
     rpi5-perf)
+        IMG_NETWORK=wifi-from-machine
         IMG_MACHINE=rpi5
         IMG_ARCH=arm64
         IMG_BASE_KIND=ubuntu-raspi
@@ -92,6 +104,45 @@ image_profile_load() {
         IMG_PACKAGES="linux-tools-raspi avahi-daemon"
         IMG_LABEL_ROOT=wk-image-root   # ext4, <= 16 chars
         IMG_LABEL_BOOT=WK-IMG-BOOT     # FAT, <= 11 chars, upper case
+        ;;
+    rpi3-perf)
+        # Refused rather than built, because the obvious thing here is wrong.
+        # The rpi3 is the fleet's only 32-bit board -- armv7l, a buildroot/WPE
+        # rig with 931 MB and no swap -- and it is that deliberately: this repo
+        # carries a whole armhf story (`wk new --arch armhf`) and the rpi3 is
+        # where 32-bit gets exercised on real hardware. Handing it the arm64
+        # base the other profiles use would boot (the Cortex-A53 is 64-bit
+        # capable) and would quietly convert the one device that tests 32-bit
+        # into another 64-bit one.
+        #
+        # So this waits on a decision rather than guessing at it: either a
+        # 32-bit base for this profile, or an explicit "the rpi3 becomes
+        # arm64". See docs/HANDOFF-netboot.md's rpi3 section.
+        die "no rpi3 image profile yet, and this is deliberate.
+
+    The rpi3 is the fleet's only 32-bit board (armv7l, 931 MB, no swap), and
+    the base every other profile uses is arm64. Building that here would boot
+    -- and would silently turn the one device that exercises 32-bit into a
+    64-bit one.
+
+    Decide first: a 32-bit base for the rpi3, or the rpi3 becomes arm64."
+        ;;
+    rpi4-perf)
+        # Cabled, so no credential is involved and the image builds with the
+        # board switched off -- which is the whole difference between these and
+        # the rpi5's profile.
+        IMG_NETWORK=wired
+        IMG_MACHINE="${1%-perf}"
+        IMG_ARCH=arm64
+        IMG_BASE_KIND=ubuntu-raspi
+        IMG_BASE_URL=https://cdimage.ubuntu.com/releases/26.04/release/ubuntu-26.04-preinstalled-server-arm64+raspi.img.xz
+        IMG_BASE_SHA256=10604098a0c4eeb7359e58e12b01badbce8c74b0d53b414e633ba0b047b512cd
+        IMG_HOSTNAME="${1%-perf}-perf"
+        IMG_WATCHDOG=900
+        IMG_GROW=off
+        IMG_PACKAGES="linux-tools-raspi avahi-daemon"
+        IMG_LABEL_ROOT=wk-image-root
+        IMG_LABEL_BOOT=WK-IMG-BOOT
         ;;
     *)  return 1 ;;
     esac

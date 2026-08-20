@@ -195,6 +195,170 @@ so a third partition means shrinking the root. The base also ships
 `enable_uart=1`, so the serial console the last session wished for needs only a
 cable.
 
+**The server half, added the same day.** `wk serve` (`cmd/serve`) fills a TFTP
+root from an image already in the store -- with mtools at a byte offset, so a
+netboot client gets the same artifact `wk image flash` writes to a stick -- and
+serves it alongside an HTTP root for the root filesystem. Verified over the real
+LAN from another machine: `config.txt` and a 14.7 MB kernel, byte-identical, ~23 s
+over WiFi at a firmware-realistic 1468-byte block size.
+
+Three decisions in it worth keeping:
+
+- **A stdlib TFTP daemon (`boot/wk-tftpd.py`), not tftpd-hpa.** The serving role
+  has to float between machines, the Mac included, and a distro system service
+  does not float: different package, different unit, different config file per
+  host, and none at all on macOS. One stdlib file runs wherever `wk` runs -- the
+  same argument that made the egress proxy stdlib-only.
+- **The serial-number directory is solved rather than configured.** Pi firmware
+  prefixes every request with a directory named after the board's serial, which
+  nobody can know before the board first asks -- the fiddliest part of setting Pi
+  netboot up by hand, and the worst one to get wrong from a machine with no
+  console. The server retries at the root when that directory is absent, through
+  the same containment check, and logs which of the two happened. So
+  `TFTP_PREFIX` never has to be written into an EEPROM.
+- **Privilege is one syscall wide.** Firmware TFTP clients speak to port 69, so
+  something must bind below 1024. The helper binds and then *drops to the
+  invoking user before resolving a single path* -- and refuses outright to serve
+  with root still held. The difference matters: a root-owned server reading an
+  arbitrary `--root` would be a read-only export of the whole filesystem, as
+  root, over UDP, with a sudoers rule as the only thing between a home LAN and
+  `/etc/shadow`. Installed by `admin/install.sh` beside the quiesce helper, with
+  the same copied-to-root-owned-path and re-verified-mode guarantees.
+
+**A container cannot serve this, and the measurement is worth recording so
+nobody re-derives it.** Asked 2026-08-19: rootless podman would be the natural
+home for the server -- it is what every workspace already is, it works on macOS,
+and it would need no sudoers rule. It cannot do it, for one reason: firmware
+TFTP clients speak to **port 69**, and rootless containers cannot bind below
+1024 either way round. Measured on this machine:
+
+    $ podman run --rm -p 69:69/udp alpine ...
+    Error: rootlessport cannot expose privileged port 69, you can add
+    'net.ipv4.ip_unprivileged_port_start=69' to /etc/sysctl.conf (currently
+    1024), or choose a larger port number (>= 1024)
+
+    $ podman run --rm --network host --cap-add NET_BIND_SERVICE alpine ...
+    nc: bind: Permission denied
+
+`--cap-add` does not help: the capability is granted in the container's user
+namespace, and the bind is checked against the initial one. Podman's own
+suggested workaround is **worse than the helper it would replace** -- lowering
+`ip_unprivileged_port_start` to 69 lets *any* local process bind 69 through
+1023, permanently, including 80 and 443, where the helper buys one bind(2) on
+one path and drops privileges immediately. And on macOS the container path is
+worse still: the podman machine sits behind user-mode NAT, TFTP's data transfer
+comes from a fresh ephemeral port, and forwarding that through two layers of
+NAT is a well-known way to get a protocol that half works.
+
+So the split stands: **everything that can be a container is one; the bind is
+not one.** Rootless podman is the right answer for a workspace, and the wrong
+answer for a service whose port number is fixed in firmware.
+
+**`wk pi netboot-enable` is written and its read path verified.** It diffs a
+board's firmware configuration and refuses to write without confirmation. The
+load-bearing detail is where network goes in `BOOT_ORDER`: **last, before the
+restart nibble** (`0xf461` -> `0xf2461`), never first. That register is shared by
+both of a machine's roles, so a Pi that netboots by default is a Pi that stops
+being a workstation the moment a server answers -- and getting it back needs
+physical access. An actual netboot is requested per-boot with the same one-shot
+`wk boot` uses.
+
+**The remaining gap, and it is the substantial one: netboot has no root yet.**
+`wk serve` hands a client its firmware, kernel, DTBs and initramfs correctly --
+that half is verified over the real LAN. But the image's `cmdline.txt` says
+`root=LABEL=wk-image-root`, a label that exists only on a local disk, so a
+netbooted board would fetch the kernel and then sit in an initramfs with nothing
+to mount. With `panic=10` in the same cmdline and network first in `BOOT_ORDER`,
+that is a **boot loop on a headless board** -- caused by a server reporting
+success. `wk serve` now refuses to serve an image whose root is local, and names
+`wk image flash` instead, so this is a message rather than a trip to the device.
+
+Closing it means one of the two mechanisms this file already scoped under
+"Storage: what the image is" -- an NFS root (needs a server with real
+privileges, so it reopens the question above) or an initramfs that pulls a
+squashfs into RAM over HTTP (needs the image's initramfs rebuilt, which the
+unprivileged build path cannot yet do). **That is the next piece of work on this
+step**, and until it exists netboot proves the transfer and nothing further.
+
+Note what this does *not* block: the rpi4 can run a wk image today by exactly
+the route the rpi5 took -- `wk image flash` to a local device over ssh, then
+boot it -- which needs no server, no root mechanism and no privilege at all.
+Netboot is the *test channel* for images not yet committed to local storage,
+which is what this file always said it was for.
+
+**And the thing netboot cannot bootstrap itself out of.** `netboot-enable` writes
+the EEPROM over ssh, so it needs the board *running*. Netboot removes the second
+trip to a device, not the first: a Pi that answers nothing has to be met once,
+physically, with an SD card. For the rpi4 specifically that first contact is
+probably trivial -- it has a buildroot SD image and comes up on the LAN when
+powered -- but as of this session a full 254-address sweep finds no Raspberry Pi
+on the LAN but the rpi5, and moose's three wired NICs are all `carrier=0`. The
+rpi4 is off or unplugged, and that is the whole of what blocks step 3.
+
+**Two hardware facts corrected while hunting for the rpi4, 2026-08-19 (later).**
+Both contradict statements elsewhere in this file, and evidence wins:
+
+- **moose's BMC is up and has a lease.** `docs/HANDOFF-bmc.md` and the section
+  below record it as not answering. It is answering: the Librem 5's `bmc0`
+  segment (10.99.0.1/24) holds exactly one dnsmasq lease,
+  `9c:6b:00:75:5a:d7 -> 10.99.0.2 altrad8ud2-1l2q`, which is moose's own ASPEED
+  BMC. That unblocks the moose half of this step -- BMC virtual media is the
+  path that survives a dead LAN, and it now has something to talk to.
+- **The Librem 5 is up, on the LAN, and is *not* running a guest network.**
+  It answers at 192.168.1.151 (`librem5-oob-lan` in the ssh config) and its only
+  served segment is `bmc0`. So the "isolated guest network with no route to the
+  main LAN" that `cmd/pi` cites as the reason the tailnet is the only path to
+  the test devices does not currently exist. There is no hidden segment for a
+  Pi to be hiding on.
+
+The rpi4 was searched for from three vantage points -- moose, the rpi5 and the
+Librem 5 -- by ICMP sweep of all 254 LAN addresses, IPv6 all-nodes (which finds
+a host with no DHCP lease), neighbour tables, dnsmasq leases and an SSH banner
+scan of every host that answered. The only Raspberry Pi anywhere is the rpi5.
+The `raspberrypi` entry in the ssh config (192.168.1.182) has nothing at it.
+
+**The rpi3's bring-up, scoped 2026-08-19 — and the recommendation is to wait.**
+It is the furthest-out client of this step, for reasons that are properties of
+the board rather than of the plan:
+
+- **Nothing to configure.** A Pi 3's network boot lives in the SoC boot ROM, not
+  an EEPROM bootloader, so there is no `BOOT_ORDER`, no `TFTP_IP`, no static-IP
+  keys and no `set_reboot_order`. `wk pi netboot-enable` refuses on it correctly
+  -- it checks for `rpi-eeprom-config`, which does not exist there. The *only*
+  way to point this board at a server is DHCP.
+- **So it needs the one component `wk serve` does not have:** a DHCP reply
+  carrying option 43 `"Raspberry Pi Boot"`. dnsmasq in proxy mode
+  (`dhcp-range=<net>,proxy`) on the house LAN is the shape to try first -- it
+  supplies the PXE bits without assigning addresses, so no second
+  address-assigning server appears on a family network. Port 67 is privileged
+  too, so it is one more bind for the same helper.
+- **An irreversible one-time cost.** Network boot on a Pi 3 needs
+  `program_usb_boot_mode=1` written once from a working SD card, and **OTP is a
+  one-way door**. Whether this is a 3B or a 3B+ also matters and is unestablished
+  -- a plain 3B cannot use a TFTP server on another subnet, among several boot-ROM
+  bugs fixed only in the B+.
+- **And the payoff is capped.** The Pi 3's Ethernet sits behind the USB
+  controller, so netboot is a *test channel* and measured runs come off the SD
+  card; with 931 MB and no swap a RAM root is out for anything browser-shaped.
+
+**So: do not burn the OTP yet.** The rpi3's fastest route to being useful is the
+one the rpi5 has already proven -- `wk image flash` to its local media over ssh,
+then boot it -- which needs no DHCP, no OTP and no server at all. Netboot for
+this board is worth doing only after the netboot *root* mechanism exists and the
+rpi4 has proven the whole chain; otherwise the one-way door is taken for a
+capability that cannot yet be exercised.
+
+**A 32-bit decision is owed before any rpi3 image exists.** It is the fleet's
+only armv7l board, and deliberately so -- this repo carries a whole armhf story
+and the rpi3 is where 32-bit meets real hardware. The arm64 base every other
+profile uses *would* boot on it (the Cortex-A53 is 64-bit capable) and would
+quietly retire the fleet's 32-bit coverage. `wk image build rpi3-perf` therefore
+refuses and says so rather than guessing.
+
+**Where the rpi3 actually was:** `root@192.168.1.160`, on the house LAN -- which
+is one more reason the "isolated guest network" premise in `cmd/pi` needs
+retiring. It is powered off as of this session.
+
 **Also owed, and blocked on file ownership rather than on work:** `wk status`
 showing the armed transition on the machine's line, `wk`'s help text listing
 `image` and `boot`, and their `is_host_only` refusals. All three live in files
