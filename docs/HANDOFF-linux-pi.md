@@ -42,8 +42,17 @@ against something other than the buildroot install it was written for. See
 
 1. `wk pi setup rpi4` against a running device (and rpi3 when it is up). It
    works over SSH and needs no image rebuild, which is the constraint that
-   shaped it: the rpi4 runs a buildroot image. Not the rpi5 -- see the scope
-   note above.
+   shaped it. Not the rpi5 -- see the scope note above.
+
+   **The rpi4 is up as of 2026-08-20** at `raspberrypi4-64.local`, reachable as
+   `rpi4-test` (`dotfiles/ssh/config`), and it runs the **WebKit Dev@CI Yocto
+   image** (scarthgap 5.0.2), not the buildroot image this step was written
+   against. The no-image-rebuild constraint holds either way and is now tested
+   against something other than buildroot, which is what the 2026-08-19
+   rescheduling wanted. It has no tailscale binary at all, so step 1 is
+   genuinely unrun. See `docs/HANDOFF-netboot.md`, "State as of 2026-08-20",
+   for everything else established about the board -- including that it is
+   currently halted and needs a power cycle.
 2. Confirm the address lands in `$WK_STORE/pi-hosts` and that a workspace can
    then `ssh rpi4 uname -m` -- through `container/proxy/ssh-proxy.py`, since
    the workspace has no network interface.

@@ -50,11 +50,13 @@ machine_load() {
         MACH_NOTE="Raspberry Pi 5, USB one-shot"
         ;;
     rpi4)
-        # NOTE: `Host rpi4` in the user's ~/.ssh/config points at
-        # rpi4-compilers-0, a remote build box behind a ProxyJump -- an
-        # entirely different machine. This name has to be resolved before the
-        # board is first reached, or a `wk image write` aimed at a test device
-        # lands on a shared build machine's disk.
+        # Not `rpi4`: a hand-written `Host rpi4` in ~/.ssh/config used to point
+        # at rpi4-compilers-0, a shared build box behind a ProxyJump, and a
+        # `wk image write` aimed at this test device would have landed on that
+        # machine's disk. host/dotfiles.sh now drops any hand-written stanza
+        # naming a fleet machine, so the collision cannot come back -- and the
+        # names stay apart on purpose, so that `Host rpi4` reads as the mistake
+        # it is rather than as an alternative spelling of this one.
         MACH_SSH="${WK_RPI4_SSH:-rpi4-test}"
         MACH_DRIVER=pi-netboot
         MACH_DEVICE=/dev/sda
@@ -97,6 +99,28 @@ machine_load() {
         ;;
     *)  return 1 ;;
     esac
+}
+
+# The reverse lookup: an ssh destination -> the machine it reaches.
+#
+# `wk pi` takes an ssh host, because putting a device on the tailnet is a thing
+# you do to a device rather than to a fleet entry, and it long predates the
+# fleet. But its EEPROM half needs MACH_ROLE -- a test device wants network
+# *first* in BOOT_ORDER and a workstation wants it last -- and looking the
+# argument up with machine_load only works when the two names coincide. They do
+# not for the rpi4, whose ssh name is rpi4-test on purpose, so the one board
+# that must have network first was silently getting the workstation default.
+#
+# Machine names win over ssh names: `wk pi netboot-enable rpi4` should mean the
+# fleet's rpi4 even if some host is called that.
+machine_by_ssh() {
+    local want="$1" m
+    machine_load "$want" 2>/dev/null && return 0
+    for m in $(machine_list | awk '{print $1}'); do
+        machine_load "$m" || continue
+        [ "$MACH_SSH" = "$want" ] && return 0
+    done
+    return 1
 }
 
 load_driver() {

@@ -3,8 +3,9 @@
 # wk pi setup <host> -- put a Raspberry Pi test device on the tailnet.
 #
 # Works against a running device over SSH and requires no image rebuild. That
-# constraint is what shapes the whole script: the rpi4 runs a buildroot image,
-# and rebuilding it to add a package is not an option.
+# constraint is what shapes the whole script: these boards run whatever slim
+# image the lane they serve produced -- the rpi4 is on the WebKit Dev@CI Yocto
+# image today -- and rebuilding one to add a package is not an option.
 #
 # Tailscale ships pure-Go static binaries with no libc dependency, including a
 # 32-bit ARM build, so provisioning is: copy two binaries to a writable
@@ -22,6 +23,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/image.sh"
 . "$WK_ROOT/image/profiles.sh"
 . "$WK_ROOT/boot/disk.sh"
+. "$WK_ROOT/boot/rpi-eeprom.sh"
 
 TS_VERSION="${TS_VERSION:-1.102.2}"
 TAG="${WK_PI_TAG:-tag:wk}"
@@ -145,7 +147,7 @@ cmd_netboot_enable() {
     # a flag the caller has to remember: getting it wrong on a workstation
     # costs a trip to the device.
     if [ -z "$position" ]; then
-        if machine_load "$HOST" 2>/dev/null; then
+        if machine_by_ssh "$HOST"; then
             case "${MACH_ROLE:-workstation}" in
                 test-device) position=first ;;
                 *)           position=last ;;
@@ -163,12 +165,30 @@ cmd_netboot_enable() {
     can make any later trip unnecessary. Netboot removes the second visit,
     not the first."
 
-    rsh 'command -v rpi-eeprom-config >/dev/null' \
-        || die "$HOST has no rpi-eeprom-config, so this is not a Pi whose
-    firmware configuration can be written from the running system."
+    # Two ways to write an EEPROM, and which one is available is a property of
+    # the image the board happens to be running rather than of the board.
+    #
+    #   onboard   rpi-eeprom-config --apply, on the device. Raspberry Pi OS.
+    #   recovery  stage recovery.bin + pieeprom.upd and let the ROM do it.
+    #             boot/rpi-eeprom.sh, and it needs nothing on the board.
+    #
+    # onboard is preferred where it exists, because it edits the *running*
+    # EEPROM image and so changes only what was asked for; recovery replaces
+    # the whole image with a pinned release. This used to refuse outright when
+    # onboard was missing, which grounded the one board the fleet most wants to
+    # netboot.
+    local method=onboard
+    if ! rsh 'command -v rpi-eeprom-config >/dev/null 2>&1'; then
+        method=recovery
+        eeprom_check_soc
+    fi
 
     local current new
-    current=$(rsh 'sudo rpi-eeprom-config') || die "could not read $HOST's EEPROM configuration"
+    if [ "$method" = onboard ]; then
+        current=$(rsh 'sudo rpi-eeprom-config') || die "could not read $HOST's EEPROM configuration"
+    else
+        current=$(eeprom_read_config)
+    fi
 
     local order
     order=$(printf '%s\n' "$current" | sed -n 's/^BOOT_ORDER=//p' | head -1)
@@ -197,6 +217,15 @@ GATEWAY=$gateway"
         fi
     fi
 
+    # The no-change case reads badly the other way round: a "would change"
+    # header followed by an empty diff and then "already says this" is three
+    # lines saying one thing, and the one they agree on is the opposite of the
+    # header. It is also the *common* case once a board is set up.
+    if [ "$current" = "$new" ]; then
+        info "$HOST's firmware already says this; nothing to write"
+        return 0
+    fi
+
     log "$HOST's firmware configuration would change (network boot: $position):"
     diff -u <(printf '%s\n' "$current") <(printf '%s\n' "$new") | sed '1,2d;s/^/  /' || true
 
@@ -205,20 +234,29 @@ GATEWAY=$gateway"
         return 0
     fi
 
-    if [ "$current" = "$new" ]; then
-        info "$HOST's firmware already says this; nothing to write"
-        return 0
-    fi
-
     warn "this writes $HOST's EEPROM. BOOT_ORDER is shared by both of that"
     warn "machine's roles, and a bad value needs physical access to fix."
+    if [ "$method" = recovery ]; then
+        warn ""
+        warn "$HOST has no rpi-eeprom-config, so this goes through recovery.bin --"
+        warn "which replaces the whole bootloader image with rpi-eeprom's pinned"
+        warn "$EEPROM_IMAGE, carrying the configuration above onto it. The"
+        warn "bootloader is upgraded as well as configured."
+    fi
     confirm "write this configuration to $HOST's EEPROM?" || die "not written"
 
-    printf '%s\n' "$new" | rsh 'cat > /tmp/wk-boot.conf && sudo rpi-eeprom-config --apply /tmp/wk-boot.conf' \
-        || die "rpi-eeprom-config refused the configuration; nothing was written"
-
-    info "$HOST's EEPROM updated; it takes effect on the next boot"
-    log  "  verify with: ssh $HOST sudo rpi-eeprom-config"
+    if [ "$method" = onboard ]; then
+        printf '%s\n' "$new" | rsh 'cat > /tmp/wk-boot.conf && sudo rpi-eeprom-config --apply /tmp/wk-boot.conf' \
+            || die "rpi-eeprom-config refused the configuration; nothing was written"
+        info "$HOST's EEPROM updated; it takes effect on the next boot"
+        log  "  verify with: ssh $HOST sudo rpi-eeprom-config"
+    else
+        eeprom_stage_recovery "$new"
+        info "$HOST's EEPROM update is staged; the ROM applies it on the next boot"
+        log  "  apply with:  ssh $HOST reboot"
+        log  "  verify with: ssh $HOST vcgencmd bootloader_config"
+        log  "  the board goes through firmware twice, so allow a few minutes"
+    fi
     log  "  undo with:   wk pi netboot-enable $HOST --revert"
 }
 

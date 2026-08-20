@@ -193,6 +193,7 @@ EOF
     ensure_dir "$LOG_DIR" >/dev/null
 
     populate_tftp_root "$IMAGE"
+    check_boot_files_serveable "$IMAGE"
     [ -n "${WK_SERVE_ANY_ROOT:-}" ] || check_root_is_reachable
 
     info "serving image $IMAGE on $ADDRESS"
@@ -242,6 +243,62 @@ EOF
     [ "$TFTP_PORT" -lt 1024 ] || warn "on port $TFTP_PORT no firmware can reach this; testing only"
 }
 
+# The device tree a board asks for, which is a fact about the machine rather
+# than about the image, and is needed here because the check below has to ask
+# for the same filenames the firmware will.
+serve_dtb_for() {
+    case "$1" in
+        rpi5) echo bcm2712-rpi-5-b.dtb ;;
+        rpi4) echo bcm2711-rpi-4-b.dtb ;;
+        rpi3) echo bcm2710-rpi-3-b.dtb ;;
+        *)    echo "" ;;
+    esac
+}
+
+# Serving an incomplete set of boot files is worse than serving none, and that
+# asymmetry is the whole reason this is here rather than in a log line.
+#
+# Not serving: the client's TFTP attempt times out, BOOT_ORDER falls through to
+# its local disk, and nothing is lost. boot/pi-netboot.sh leans on exactly that
+# and calls it benign, correctly.
+#
+# Serving *half*: the bootloader pulls start4.elf over the network and executes
+# it, which spends BOOT_ORDER. If that stage then cannot find the kernel its
+# config.txt names, Pi 4 firmware halts. It does not retry, does not fall back
+# to the SD card, and does not come back when the server is fixed. The board is
+# gone until someone unplugs it.
+#
+# So this refuses unconditionally -- WK_SERVE_ANY_ROOT does not reach it. That
+# flag trades a reboot loop for a transfer test, which is a real trade; this
+# would be trading a trip to the device, which is not.
+#
+# It happened, on 2026-08-20, to the fleet's rpi4: wk-tftpd resolved a missed
+# `<serial>/current/vmlinuz` down to `vmlinuz` with os.path.basename, so the
+# kernel was present in the tree and unreachable through the server. Which is
+# why the check runs through wk-tftpd's own resolver rather than looking at the
+# filesystem: the filesystem said the kernel was there, and it was.
+check_boot_files_serveable() {
+    local machine dtb out
+    machine=$(manifest_get "$1" machine)
+    dtb=$(serve_dtb_for "$machine")
+    [ -n "$dtb" ] || { warn "no device tree known for machine '$machine'; not checking boot files"; return 0; }
+
+    out=$(python3 "$WK_ROOT/boot/check-boot-files.py" \
+              --root "$TFTP_ROOT" --tftpd "$WK_ROOT/boot/wk-tftpd.py" --dtb "$dtb" 2>&1) && return 0
+
+    die "the boot files a $machine will ask for are not all reachable in $TFTP_ROOT:
+
+$(printf '%s\n' "$out" | sed 's/^/      /')
+
+    Serving this would be worse than serving nothing. A client that finds
+    start4.elf over the network has spent its BOOT_ORDER on the network, and
+    Pi firmware that then cannot find its kernel halts -- it does not fall
+    back to the local disk, so the board would need a power cycle by hand.
+
+    Nothing has been started. Check the image's config.txt against what
+    'wk serve' copied out of its boot partition."
+}
+
 # A netboot client gets its kernel over TFTP and then has to find a root
 # filesystem. Serving an image whose cmdline names a *local* root is the one
 # mistake here with a genuinely expensive failure mode: the client fetches the
@@ -275,8 +332,11 @@ check_root_is_reachable() {
 
     What works today is the local path this image is actually for:
       wk image write $IMAGE --disk <machine>:<device>
-    Set WK_SERVE_ANY_ROOT=1 to serve it anyway (for testing the transfer
-    itself, which is all it can prove)."
+    Set WK_SERVE_ANY_ROOT=1 to serve it anyway. That is a real transfer test
+    and it is recoverable -- this image carries panic=10, so a client that
+    cannot find its root reboots rather than sitting there, and stopping the
+    server drops it back to its local disk. It is *not* free: every attempt
+    costs the client a full boot cycle."
             ;;
     esac
     return 0

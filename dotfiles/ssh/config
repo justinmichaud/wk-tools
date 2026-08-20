@@ -23,3 +23,21 @@ Host devbox-armhf-2
 
 Host rpi5
   User jmichaud
+
+# The rpi4 test board. Named rpi4-test rather than rpi4 because the fleet name
+# is boot/machines.sh's, not ssh's -- `wk boot rpi4` resolves the machine and
+# reaches for MACH_SSH, and keeping the two namespaces apart is what makes a
+# hand-written `Host rpi4` a mistake ./setup can detect rather than a plausible
+# alternative spelling.
+#
+# mDNS rather than the DHCP address: the board is on the house LAN with no
+# reservation, and .local follows it across a lease. It has no tailnet identity
+# -- `wk pi setup` has not run against it -- so this is the only stable name.
+#
+# The host key is deliberately not pinned. The whole point of this board is
+# that it boots a different image on demand, and each one brings its own key.
+Host rpi4-test
+  HostName raspberrypi4-64.local
+  User root
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null

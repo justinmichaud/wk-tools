@@ -151,7 +151,10 @@ cmd_status() {
             return 0 ;;
     esac
 
-    log "$MACHINE: workstation (booted $BOOTED)"
+    # MACH_ROLE, not the literal "workstation": `workstation` is this file's
+    # internal token for "not in an image", and printing it at a dedicated test
+    # device is a status line that contradicts boot/machines.sh.
+    log "$MACHINE: ${MACH_ROLE:-workstation} (booted $BOOTED)"
     b_evidence | sed 's/^/  /'
 
     [ -n "$ARMED_IMG" ] || return 0

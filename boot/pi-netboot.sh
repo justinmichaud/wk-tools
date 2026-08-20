@@ -25,6 +25,13 @@
 
 BOOT_ARMING=server
 
+# Reading the bootloader's configuration, on a board that may have no eeprom
+# tooling. vcgencmd is part of the VideoCore userland every Pi image carries;
+# rpi-eeprom-config is a Raspberry Pi OS package, and asking it first is how
+# this driver used to end up with an empty answer on the fleet's own rpi4. Both
+# print the same text. See boot/rpi-eeprom.sh for the writing half.
+EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-config 2>/dev/null || true'
+
 # Not used by this driver -- the boot order is permanent here, not per-boot --
 # but named so that a reader comparing the two drivers sees the difference
 # rather than an omission.
@@ -45,8 +52,14 @@ b_arm() {
 
     # The firmware has to be pointed at a server, and that is EEPROM state
     # rather than something this command can set per-boot.
+    #
+    # Read with vcgencmd, not rpi-eeprom-config: the tool is a Raspberry Pi OS
+    # package and these boards do not run one, so asking it returned nothing on
+    # the fleet's rpi4 and fell into the warn branch below -- which is the arm
+    # reporting "assuming it netboots" about the very board whose BOOT_ORDER it
+    # exists to check. vcgencmd is firmware, so it answers on any Pi.
     local order
-    order=$(m_ssh 'sudo rpi-eeprom-config 2>/dev/null | sed -n "s/^BOOT_ORDER=//p"' | head -1) || order=""
+    order=$(m_ssh "$EEPROM_CONFIG_CMD" | sed -n 's/^BOOT_ORDER=//p' | head -1) || order=""
     case "$order" in
         *2*) ;;
         '')  warn "could not read $MACH_NAME's BOOT_ORDER; assuming it netboots" ;;
@@ -65,5 +78,6 @@ b_disarm_note() {
 }
 
 b_evidence() {
-    m_ssh "rpi-eeprom-config 2>/dev/null | sed -n 's/^BOOT_ORDER=/eeprom_boot_order=/p;s/^TFTP_IP=/eeprom_tftp_ip=/p'" || true
+    m_ssh "$EEPROM_CONFIG_CMD" \
+        | sed -n 's/^BOOT_ORDER=/eeprom_boot_order=/p;s/^TFTP_IP=/eeprom_tftp_ip=/p' || true
 }

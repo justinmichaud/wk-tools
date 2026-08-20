@@ -18,6 +18,144 @@ Profiling comes first of the four, deliberately: it is the least demanding
 consumer (it wants no-sandbox, not perf stability), so it proves the mechanism
 without also having to settle the storage question benchmarking raises.
 
+## State as of 2026-08-20 — the rpi4 netboots, and it cost a power cycle
+
+Read this before the two sections below it, which it supersedes wherever they
+overlap. The headline of 2026-08-19 — "the rpi4 is off or unplugged, and that is
+the whole of what blocks step 3" — is out of date: it is on, it is found, its
+EEPROM is written, and the firmware fetches boot files from `wk serve` over the
+LAN. The remaining blocker moved from the board to the root filesystem, which is
+where this file always predicted it would end up.
+
+**The board.** `raspberrypi4-64`, Pi 4 Model B Rev 1.5 (2 GB), wired on the house
+LAN, **not** on any isolated guest network — consistent with the 2026-08-19
+finding that no such segment exists. It runs the **WebKit Dev@CI Yocto image**
+(scarthgap 5.0.2, kernel 6.6.22-v8), not the buildroot image `cmd/pi` and
+`docs/HANDOFF-linux-pi.md` assumed; both have been corrected. Root on
+`mmcblk0p2`, and a 29.5 GB USB stick at `/dev/sda` carrying one ext4 partition
+labelled `WebKit` — so `MACH_DEVICE=/dev/sda` in `boot/machines.sh` points at
+real data, and writing an image there destroys it.
+
+Its address is not stable. Three different DHCP leases were observed in one
+afternoon (`.160` from Linux, `.163` from the firmware, `.159` later), because
+the firmware's DHCP client and the kernel's present different client
+identifiers. **mDNS is the only fixed name**: `raspberrypi4-64.local`, which is
+what `Host rpi4-test` in `dotfiles/ssh/config` uses. It has no tailnet identity
+— `wk pi setup` has still not run against it.
+
+**`Host rpi4` is gone from `~/.ssh/config`, and `./setup` now keeps it gone.**
+It named `rpi4-compilers-0`, a shared build box behind a ProxyJump, so every wk
+verb that takes an ssh destination was aimed at the wrong machine — the hazard
+`boot/machines.sh` flagged and worked around by defaulting `MACH_SSH` to
+`rpi4-test`. `host/dotfiles.sh` now owns the whole of `~/.ssh/config` rather
+than just its first line: hand-written entries move to `~/.ssh/config.d/local`
+(machine-local, never committed), and any stanza naming a **fleet machine** is
+dropped, because that is a shadow rather than a host. The original is kept once
+at `~/.ssh/config.wk-backup`.
+
+**The EEPROM, on a board with no eeprom tooling.** `wk pi netboot-enable`
+required `rpi-eeprom-config` on the device and refused without it — and the
+Yocto image has `vcgencmd` and nothing else, so the writer refused on the one
+board the fleet most wants to netboot. `boot/rpi-eeprom.sh` adds the way in that
+needs nothing on the board: build the update image *here*, stage
+`pieeprom.upd` + `pieeprom.sig` + `recovery.bin` on the board's FAT partition,
+and let the ROM apply it on the next boot. Three files pinned by sha256 from
+`raspberrypi/rpi-eeprom@86759b0` — not the release tarball, which is 106 MB for
+660 KB of content.
+
+Two things it does that the on-board path does not, both said out loud at the
+confirm prompt: it replaces the **whole** bootloader image rather than the
+config section (there is no way to edit the running image without reading it
+back, which is the part the board cannot do), and it takes effect on the *next*
+boot. On this board that upgraded the bootloader from 2023-01-11 to 2026-05-17.
+`recovery.bin` verifies the image against the signature before writing anything,
+so a corrupt transfer flashes nothing.
+
+Done on hardware. `vcgencmd bootloader_config` now reports `BOOT_ORDER=0xf412`
+and `TFTP_IP=192.168.1.40`, and re-running `wk pi netboot-enable rpi4-test`
+reports "already says this" — the landed code and the by-hand flash agree byte
+for byte.
+
+**Two bugs the first real netboot exposed, both fixed:**
+
+- **`wk pi netboot-enable` was writing the workstation boot order to a test
+  device.** It defaults the network position from `machine_load "$HOST"`, but
+  `$HOST` is an *ssh* name and `rpi4-test` is not a fleet name, so the lookup
+  never matched and it fell to `last`. `machine_by_ssh` in `boot/machines.sh`
+  resolves the destination back to its machine; the rpi4 now correctly gets
+  network **first**.
+- **`b_arm` could not read the BOOT_ORDER it exists to check.** It asked
+  `rpi-eeprom-config`, got nothing on this board, and took the
+  `warn "assuming it netboots"` branch — about the very board whose boot order
+  was in question. Both it and `b_evidence` now read `vcgencmd
+  bootloader_config`, which is firmware and answers on any Pi. `wk boot rpi4
+  --status` prints real evidence.
+
+**The netboot conversation works.** With an empty TFTP root, the firmware
+DHCP'd, reached `192.168.1.40:69`, and asked for `7da7aee3/start4.elf` — the
+serial-number prefix — then fell back to the root, missed everything, and fell
+through to the SD card as designed. Boot cycle with a full miss: about 135 s.
+
+### The power cycle, and the asymmetry it taught
+
+Serving the real `rpi4-perf` boot files went further and ended badly. The
+firmware fetched `start4.elf`, `fixup4.dat` and `config.txt`, executed the
+second stage, read `os_prefix=current/`, asked for `7da7aee3/current/vmlinuz`
+— and got NOT FOUND. **The board halted.** It has been silent since: no ICMP,
+no ARP, no further TFTP. It needs someone to unplug it.
+
+The cause was in `boot/wk-tftpd.py`. Its serial-directory fallback retried a
+missed request under `os.path.basename`, which throws away *every* directory
+rather than the firmware's prefix, so `<serial>/current/vmlinuz` became
+`vmlinuz` — not at the root of a flash-kernel image. Worse,
+`<serial>/current/overlays/README` became `README`, and the boot partition has
+one, so the firmware was handed a real file that was not the file it asked for.
+The fallback now strips only the leading component, and only when that component
+is not a directory we actually hold.
+
+**The asymmetry, which is the durable lesson.** This file has always said the
+netboot failure mode is benign, and for *not serving* that is exactly right: the
+TFTP attempt times out, `BOOT_ORDER` falls through to the local disk, nothing is
+lost. It is not right for serving **half**. Once the bootloader has pulled
+`start4.elf` over the network and executed it, BOOT_ORDER is spent; a second
+stage that cannot find its kernel halts, does not retry, and never looks at the
+SD card. Serving an incomplete tree is strictly worse than serving nothing —
+the one costs a reboot, the other costs a trip to the device.
+
+So `wk serve` now runs `boot/check-boot-files.py` before it starts anything, and
+**`WK_SERVE_ANY_ROOT=1` does not reach it**. That flag trades a reboot loop for
+a transfer test, which is a real trade; this would trade a journey, which is not.
+The check asks `wk-tftpd`'s own `resolve()` rather than the filesystem, and that
+is the whole point: the filesystem would have reported `current/vmlinuz` present
+and correct, because it was. The only question worth asking is the one the
+firmware asks — *if I request this name, do I get bytes?*
+
+`wk serve` is stopped, so a power cycle lands the board on its SD card.
+
+### What is left
+
+**The root filesystem, and it is blocked on one privileged install.** Everything
+above proves the transfer, which is exactly what the 2026-08-19 entry predicted
+would be the limit. `rpi4-perf` boots to an initramfs that cannot find
+`LABEL=wk-image-root` on any disk the netboot client has; it carries `panic=10`,
+so it reboots rather than sitting there, and stopping the server drops it back
+to its local disk.
+
+Phase 1 in "Storage: what the image is" is an NFS root, and `nfs-kernel-server`
+is not installed on moose. `sudo` here needs a password, so this is the step that
+has to be run by a person:
+
+    sudo apt install nfs-kernel-server
+
+It does not belong in `./setup`: serving is a role that floats between machines
+and most of them will never hold it, so the install belongs to whichever machine
+takes the role rather than to every host's bootstrap.
+
+**A note on moose's sudoers while passing.** `/usr/bin/tee` is NOPASSWD for
+root, which is passwordless write access to any file on the system and therefore
+equivalent to NOPASSWD root. It was presumably added for a specific write. It is
+worth narrowing.
+
 ## State as of 2026-08-19, later the same day — the verbs exist
 
 Read this before the section below it, which it supersedes on every point they

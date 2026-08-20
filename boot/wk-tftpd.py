@@ -90,20 +90,37 @@ def resolve(root, filename):
     directory named after the last eight hex digits of the board's serial
     number, and that serial is not knowable until the board asks -- which is
     the fiddliest part of setting up Pi netboot by hand, and the one most
-    likely to be got wrong from a machine with no console.  So a request that
-    misses under its leading directory is retried at the root.
+    likely to be got wrong from a machine with no console.  So a request whose
+    leading directory does not exist here is retried with that directory
+    removed and *the rest of the path kept*.
+
+    Keeping the rest is the whole of it, and the first netboot of a real image
+    is what proved why.  This used to retry with `os.path.basename`, which
+    throws away every directory rather than the prefix, and an image whose
+    config.txt sets `os_prefix=current/` asks for `<serial>/current/vmlinuz`.
+    Under basename that became `vmlinuz`, which is not at the root, so the
+    kernel was unreachable and the board fell through to its local disk with
+    nothing in the log to say why.  Worse, `<serial>/current/overlays/README`
+    became `README` -- and the boot partition has one, so the firmware was
+    handed a real file that was not the file it asked for.  Serving the wrong
+    bytes under the right name is the failure that costs a day.
+
+    The guard is that the leading component must not be a directory we hold:
+    if the serial directory is actually populated it is used, and a request
+    into any real subdirectory is never rewritten.
 
     This cannot reach outside the served tree: the retry goes through the same
-    containment check, on a path with no directory component at all.  And the
-    log distinguishes the two, so "served from the root" never looks like
-    "found where the client asked".
+    containment check.  And the log distinguishes the two, so "served from the
+    root" never looks like "found where the client asked".
     """
     wanted = filename.lstrip("/").replace("\\", "/")
     path = _inside(root, wanted)
     if path is not None:
         return path, False
-    if "/" in wanted:
-        path = _inside(root, os.path.basename(wanted))
+
+    head, sep, rest = wanted.partition("/")
+    if sep and rest and not os.path.isdir(os.path.join(root, head)):
+        path = _inside(root, rest)
         if path is not None:
             return path, True
     return None, False
@@ -285,4 +302,9 @@ def main():
         ).start()
 
 
-main()
+# Guarded so the module can be imported. boot/check-boot-files.py asks this
+# file's `resolve` what the firmware will actually get, rather than asking the
+# filesystem and hoping the two agree -- they did not, once, and the board that
+# found out had to be power-cycled by hand.
+if __name__ == "__main__":
+    main()
