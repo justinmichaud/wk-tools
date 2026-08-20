@@ -230,10 +230,19 @@ config_load() {
 #
 # Measured 2026-08-20, in the golden base: `-j9` derived from 13824 MB at
 # 1536 MB/job peaked at **16593 MB** and was killed at 95% of the way through a
-# mac-release. At 3072 the same envelope derives 4 jobs and a 12288 MB budget,
-# which is slower and finishes. `claude/CLAUDE.md` already told agents to pass
-# `WK_MB_PER_JOB=3072` by hand for exactly this; a default that needs a manual
-# override on one of the two build systems is a wrong default.
+# mac-release. At 3072 the same guest derived `-j6` and an 18432 MB budget, and
+# the build finished at a peak of **16783 MB**.
+#
+# Read those two together, because they say something the fix alone does not:
+# the peak barely moved with a third fewer jobs, so it is dominated by one step
+# -- the big link -- rather than by parallelism. What was actually wrong was
+# the *budget*; the job count mostly buys wall-clock. An Apple build of WebKit
+# on this machine wants about 17 GB whatever it is told to do, and a budget
+# derived from the CMake figure is below that for any plausible job count.
+#
+# `claude/CLAUDE.md` already told agents to pass `WK_MB_PER_JOB=3072` by hand
+# for exactly this; a default that needs a manual override on one of the two
+# build systems is a wrong default.
 config_mb_per_job() {
     case "$CFG_BUILDSYS" in
         xcode) echo 3072 ;;

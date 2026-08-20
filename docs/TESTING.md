@@ -1305,6 +1305,12 @@ the reader (which must never mistake intent for evidence).
 - [V] and the figure reaches the *job count*, not only the environment handed
       to the target (2026-08-20: fixing it in `config_build_env` alone left the
       count still derived from 1536, and the next run was `-j9` again)
+- [V] the same build then finished: **peak 16783 MB of an 18432 MB budget**,
+      against 16593 MB of 13824 before. Note what the two numbers say together:
+      the peak barely moved between `-j9` and `-j6`, so it is dominated by one
+      step (the big link) rather than by parallelism — the *budget* was the
+      operative fix and the job count mostly buys wall-clock. An Apple build on
+      this machine wants ~17 GB whatever it is told to do
 
 ### The memory check does not count a guest against itself
 - [V] `wk vm base --refresh` on a base that is already running is not refused

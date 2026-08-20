@@ -29,6 +29,36 @@ Plus one clarification from the user, which changes the shape of the work:
 
 ---
 
+
+## The golden base, rebuilt 2026-08-20 — four defects on the way
+
+Rebuilding the base to rehearse the benchmark lane turned up four things, all
+of which had been latent since the last rebuild and none of which were visible
+from a base that already existed:
+
+1. **An unfinished base was adopted as ready.** The first attempt pulled 68.8 GB,
+   cloned the guest, and then refused to start it (the podman machine held the
+   whole memory envelope). The *next* run found a VM by that name and reported
+   "golden base 'wk-base' is ready" in half a second -- an unprovisioned macOS
+   image with no Xcode licence, no checkout and no prebuild, which every
+   `wk vm new` would have cloned. There is a completion marker now, written
+   last, with the same protocol as an image manifest or a snapshot sha.
+2. **The Apple build's job count came from the CMake memory figure.** `-j9`
+   derived from 13824 MB at 1536 MB/job peaked at 16593 MB and the watchdog
+   killed the prebuild 95% of the way through. At 3072 MB/job the same guest
+   derives `-j6` and an 18432 MB budget, and the build finishes at a peak of
+   16783 MB. The peak barely moved: it is one link, not parallelism -- the
+   *budget* was the operative fix.
+3. **The memory check counted a guest against itself**, so `wk vm base
+   --refresh` could never run on a base that was already running.
+4. **The prebuild survives its driver, and that is load-bearing here.** The
+   driving process was killed three times during this rebuild (long-running
+   commands do not survive an agent's tool call); the in-guest `xcodebuild`
+   carried on each time, because it is started with `nohup` inside the guest
+   and merely polled from outside. Without that, the rebuild would have had to
+   start over three times.
+
+
 ## Background established by the survey (2026-08-18)
 
 ### GPU
