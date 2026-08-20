@@ -103,10 +103,36 @@ build in the guest, run on the metal. `boot/mac-volume.sh` adds a third arming
 model — `hands-on` — for a transition no software can make on Apple Silicon,
 and the machine drives itself because it is the only one of its kind here.
 `wk bench stage <ws> --to mbp` copies the product, `Tools/`, and a `stage.json`
-written last onto the benchmark volume while it is merely mounted. The whole
-lifecycle is verified against a disposable APFS volume; what is *not* written
-is the runner in the other role, because two things have to be read out of a
-real checkout first, and they are named rather than guessed.
+written last onto the benchmark volume while it is merely mounted.
+
+**And the runner, `wk bench staged`.** The two questions it was waiting on were
+answered by reading and running WebKit's own code out of a base snapshot rather
+than guessing: run-benchmark drives from a *partial* tree (`Tools/Scripts`
+alone — plans and patches resolve relative to webkitpy, not to a checkout), and
+`--browser minibrowser --platform osx --build-directory …` launches
+`MiniBrowser.app` directly with `DYLD_*` set, which is what makes the partial
+tree sufficient. Two more facts fell out of the same reading, both of which
+would otherwise have been found in the benchmark role with the machine already
+rebooted: it needs a python with PyObjC (Apple's `/usr/bin/python3`, not the
+Homebrew one on PATH — `import objc` is not autoinstalled), and webkitpy
+installs everything else into the staged tree on first use.
+
+**A benchmark runs in the benchmark role or it does not run** — the one refusal
+here that `--force` does not open, at the user's direction: a run on the
+workstation produces a result of exactly the same shape and nothing tells them
+apart afterwards. `--dry-run` still describes it. `WK_IMAGE_MARKER` lets the
+role's code path be exercised without a reboot, and a run that uses it is
+recorded as `role_marker_overridden`, which `wk bench compare` warns about.
+
+Verified end to end against a simulated role with a stub browser: preflight,
+payload build, http server, driver, `prepare_env`, launch, the timeout path,
+the recorded failure with the real exception surfaced, and the record on the
+volume. What has *not* run is a measurement — that needs a real `mac-release`
+build, which needs the golden base guest this machine does not have. Two things
+found by running it: a benchmark that dies leaves the Dock's launch animation
+off (put back now), and `wk bench compare` on two *files* was being forwarded
+into the podman VM, where it reported "no such run" about a file sitting right
+there.
 
 **`wk quiesce` measures instead of trusting.** On macOS it now prints the
 privileged half's claim and what the machine says now, labelled separately, and
@@ -846,6 +872,12 @@ Standing rule, not a task: every task above gets a line item in
   (`wk build --babysit`/`--branch`, `wk new --zed`, headless `wk claude`),
   which are landed and listed there; the readiness/resumability work is the
   open half. Machine-agnostic; whichever lane is idle first.
+
+- **`docs/HANDOFF-mac-perf-mode.md` — new 2026-08-20.** The one part of the
+  macOS benchmark lane that software cannot do: making a second macOS install
+  this Mac can boot, provisioning it, and booting it. Everything either side of
+  it is built and exercised; this is a disk, half an hour at the keyboard, and
+  a list. Machine-specific by definition -- it is this Mac.
 
 - **`docs/HANDOFF-test-runner.md` — started 2026-08-19.** `wk selftest` exists:
   `--quick` is 13 hermetic checks (no workspace, no podman, no ssh), a bare run

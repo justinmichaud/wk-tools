@@ -1,17 +1,4 @@
 {
-  "ssh_connections": [
-    {
-      "host": "devbox-armhf-2",
-      "args": [],
-      "projects": [
-        {
-          "paths": [
-            "/home/igalia/jmichaud/Development/ReleaseVersion/OpenSource"
-          ]
-        }
-      ]
-    }
-  ],
   "project_panel": {
     "dock": "left"
   },
@@ -52,7 +39,12 @@
   "remove_trailing_whitespace_on_save": false,
   "file_scan_exclusions": [
     "WebKitBuild",
+    "results",
+    "Source/ThirdParty",
+    "TestExpectations",
     "LayoutTests",
+    "WebDriverTests",
+    "WebKitLibraries",
     "PerformanceTests",
     "ManualTests",
     "Websites",
@@ -76,11 +68,11 @@
         }
       },
       "solargraph": {
-            "initialization_options": {
-              "diagnostics": false,
-              "formatting": false
-            }
-          }
+        "initialization_options": {
+          "diagnostics": false,
+          "formatting": false
+        }
+      }
     },
   "languages": {
     "Ruby": {
@@ -88,5 +80,16 @@
       "formatter": null,
       "format_on_save": "off"
     }
+  },
+  "cursor_blink": false,
+  "minimap": { "show": "never" },
+  "buffer_font_features": { "calt": false },
+  "git": { "inline_blame": { "enabled": false } },
+  "lsp_document_colors": "none",
+  "lsp_document_links": false,
+  "semantic_tokens": "off",
+  "diagnostics": {
+    "lsp_pull_diagnostics": { "debounce_ms": 500 },
+    "inline": { "enabled": false }
   }
 }

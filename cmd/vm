@@ -89,6 +89,7 @@ base)
         # there -- but does redo the WebKit clone and the installers.
         confirm "delete and rebuild the golden base VM '$WK_VM_BASE'?" || die "aborted"
         _tart delete "$WK_VM_BASE" 2>/dev/null || true
+        rm -f "$(_base_marker)"
         _ensure_base
         ;;
     --rm)
@@ -108,6 +109,7 @@ base)
         confirm "delete the golden base VM '$WK_VM_BASE' ($sz)? rebuilding it is hours" \
             || die "aborted -- nothing was changed"
         _tart delete "$WK_VM_BASE"
+        rm -f "$(_base_marker)"
         info "deleted '$WK_VM_BASE' -- existing vm workspaces are unaffected"
         log  "  'wk vm base' builds it again; until then 'wk vm new' has nothing to clone"
 
@@ -130,6 +132,9 @@ base)
         # base was first built. Existing workspaces are unaffected -- they are
         # already independent clones.
         _base_exists || die "no golden base yet -- run 'wk vm base'"
+        # A refresh re-runs provisioning, which ends by writing the marker --
+        # so a refresh is also how a base that lost its marker gets one back,
+        # without re-pulling 68 GB.
         _provision_base
         ;;
     "")

@@ -1,0 +1,1 @@
+Scope out if it is possible to do this tailnet bridge setup with a non-rooted android phone. I have a teracube 2e collecting dust, and a backup would be nice to have. This would also make this setup more accessible to others, everyone has a spare android phone.

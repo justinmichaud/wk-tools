@@ -1222,6 +1222,107 @@ the reader (which must never mistake intent for evidence).
       tree hash excludes it now; `wk sync --target container` then produced
       matching hashes on both sides. The file should not be tracked either)
 
+### The bare-metal benchmark run (`wk bench stage` / `wk bench staged`)
+- [V] a benchmark runs in the benchmark role or it does not run — the
+      workstation role is refused, and `--force` does not open it (2026-08-20,
+      in `wk selftest --quick`: same refusal with and without the flag; the two
+      roles produce the same shape of result and nothing tells them apart
+      afterwards)
+- [V] `--dry-run` still describes it from the workstation role, quoting
+      included — the default volume name has a space in it
+- [V] run-benchmark drives from a *partial* tree: `Tools/Scripts` alone, no
+      checkout root, no `Source/` (2026-08-20, on this Mac against a tree
+      copied out of a base snapshot: `--list-plans` exits 0. Plans and their
+      patches resolve relative to webkitpy itself, not to a checkout)
+- [V] the arguments the runner builds are the ones webkitpy accepts:
+      `--browser minibrowser --platform osx --build-directory …` parses, and
+      `BrowserDriverFactory.create('osx','minibrowser')` returns OSXMiniDriver
+      (2026-08-20). With `--build-directory` the driver launches
+      `MiniBrowser.app/Contents/MacOS/MiniBrowser` itself with `DYLD_*` set —
+      that is what makes the partial tree sufficient
+- [V] it must run under a python that has PyObjC: the driver's `prepare_env`
+      does a bare `import objc`, which is *not* autoinstalled. Apple's
+      `/usr/bin/python3` has it (3.9.6, pyobjc 11.1); the Homebrew python3
+      first on PATH here does not (2026-08-20 — so the interpreter is named
+      explicitly rather than left to the shebang)
+- [V] the whole runner, against a simulated role: preflight (role, tooling,
+      build, python, console session, AC power, machine quiet), payload build
+      from `--payload`, http server, driver, browser launch, and the timeout
+      path — ending in a recorded failure with the real exception surfaced
+      (2026-08-20; the browser was a stub, so everything up to the measurement
+      itself is exercised)
+- [V] a run that dies leaves the Dock's launch animation off — webkitpy turns
+      it off in `prepare_env` and only restores it on a clean exit. Measured,
+      and put back by the runner afterwards (2026-08-20)
+- [V] the record carries the three axes plus the role, the display size, the
+      thermal limit and the machine, and `wk bench compare` warns across
+      `bench_host` (container vs image) and on a rehearsal
+      (`role_marker_overridden`)
+- [V] comparing two results *by path* is not forwarded into the podman VM
+      (2026-08-20: it was, and reported "no such run" about a file that was
+      sitting right there)
+- [ ] a real measured run: a real `mac-release` build, staged from a guest,
+      on a real benchmark install
+
+### Every boot driver answers `--status` from either workstation
+- [V] `wk boot <machine> --status` exits 0/2/3 and always says something, for
+      every machine with a driver (2026-08-20, in `wk selftest --quick`). It
+      found two: the guest driver exited 1 in silence when its guest was off
+      (its probes ran under `set -o pipefail`), and `wk boot rpi5 --status`
+      could not run on the Mac at all — `date -u -d @<epoch>` is GNU-only and
+      BSD date answers "illegal option -- d" plus a usage block. The fleet is
+      meant to be drivable from either workstation; one of them could not read
+      a machine's boot time
+
+### The golden base finishes, or it is rubble
+- [V] a base that exists but was never provisioned is destroyed and remade,
+      not adopted (2026-08-20, found the hard way: `wk vm base` pulled 68.8 GB,
+      cloned the guest, then refused to start it because the podman machine
+      held the whole memory envelope — and the *next* run found a VM by that
+      name and said "golden base is ready" in half a second. An unprovisioned
+      macOS image with no Xcode licence, no checkout and no prebuild, which
+      every `wk vm new` would have cloned. There is a completion marker now,
+      written last, with the same protocol as an image manifest and a snapshot
+      sha; `--rm` and `--rebuild` clear it, `--refresh` rewrites it)
+- [V] and it says so rather than doing it silently: "exists but was never
+      finished (no completion marker)" (2026-08-20)
+- [V] the prebuild survives its driver dying — it is started with `nohup`
+      inside the guest and merely *polled* from here (2026-08-20: the driving
+      process was killed mid-provision and the in-guest `xcodebuild` carried on
+      to WebKitLegacy without noticing. `wk vm base --refresh` is the recovery:
+      it re-provisions the existing guest and writes the marker, with no 68 GB
+      re-pull and no lost build tree)
+
+### The job count and the memory budget agree with the build system
+- [V] an Apple build derives its job count at 3072 MB/job, a CMake one at 1536,
+      and an explicit `WK_MB_PER_JOB` still wins (2026-08-20, measured the
+      expensive way: the golden base's `mac-release` prebuild ran at `-j9`,
+      derived from 13824 MB at the CMake figure, peaked at **16593 MB** and was
+      killed by the memory watchdog 95% of the way through. `claude/CLAUDE.md`
+      already told agents to pass `WK_MB_PER_JOB=3072` by hand for exactly
+      this — a default that needs a manual override on one of the two build
+      systems is a wrong default)
+- [V] and the figure reaches the *job count*, not only the environment handed
+      to the target (2026-08-20: fixing it in `config_build_env` alone left the
+      count still derived from 1536, and the next run was `-j9` again)
+
+### The memory check does not count a guest against itself
+- [V] `wk vm base --refresh` on a base that is already running is not refused
+      (2026-08-20: it reported "only -20480MB is unspoken for" — the guest's
+      own allocation subtracted twice)
+
+### The rehearsal: a guest standing in for the benchmark role (`benchvm`)
+- [V] `wk boot benchvm --status` on a machine with no such guest says so —
+      "guest=wk-bench (absent)" — instead of exiting silently (2026-08-20: it
+      did exit silently, because the driver's probes ran under `set -o
+      pipefail` and a guest that is merely off is a normal state)
+- [V] the arming model reaches the "next step" text: a guest is *started*, not
+      armed and rebooted, and the staging output says so (2026-08-20)
+- [ ] build in one guest, stage to the other, run there: the whole path with
+      nothing hands-on in the middle
+- [ ] the staged tree is products only — no `*.noindex`, no `DerivedData`, no
+      `*.dSYM` — and is a few GB rather than the ~39 GB of an Apple build tree
+
 ### Quiesce measures rather than assumes (macOS)
 - [V] `wk quiesce status` prints the privileged half's *claim* and what the
       machine says *now*, labelled separately (2026-08-20; when they disagree

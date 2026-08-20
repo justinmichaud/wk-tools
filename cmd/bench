@@ -8,6 +8,8 @@
 #   wk bench stage <ws> --to <machine>     put a build where a bare-metal role
 #                                          will find it (build in the guest,
 #                                          run on the machine itself)
+#   wk bench staged [--plan P]             run it, in the role that was booted
+#                                          for it; --ls lists what is there
 #   wk bench compare <run-a> <run-b>       compare-results on two saved runs
 #   wk bench ls                            saved runs
 #
@@ -70,6 +72,10 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/watchdog.sh"
+# How quiet the machine is, measured. Shared with `wk quiesce`, which does the
+# quieting: two answers to "is it quiet" is how a number ends up with a
+# footnote nobody can check.
+. "$WK_ROOT/lib/quiet.sh"
 . "$WK_ROOT/build/configs.sh"
 
 # A benchmark is legitimately silent for much longer than a build: MotionMark
@@ -130,7 +136,11 @@ CONFIG="${WK_CONFIG:-wpe-release}"
 # which fails in a way that looks like a broken build.
 BROWSER="${WK_BENCH_BROWSER:-}"
 COUNT=""
-FORCE=""
+# `wk <command> --force` is taken off the line by the dispatcher and passed as
+# WK_FORCE (see `wk`, main): a command that also parses its own --force has to
+# honour the variable, or the flag works everywhere except the one command that
+# documented it first.
+FORCE="${WK_FORCE:-}"
 SUBTESTS=""
 SOFTWARE=""
 # Why the software path was taken, when it was. --software is a deliberate act;
@@ -139,8 +149,17 @@ SOFTWARE=""
 SOFTWARE_REASON=""
 BROWSER_ARGS=""
 
+# The synopsis, from the file's own header, so there is one copy of it. Taken
+# by *shape* rather than by line number, which is what it used to be: adding a
+# verb to the header pushed the last lines out of a fixed `sed -n 3,16p` and
+# the usage ended mid-sentence. Everything indented under the header, up to the
+# first line of prose, is the synopsis; the `# ` markers go.
 usage() {
-    sed -n '3,16p' "$0" >&2
+    awk 'NR < 3 { next }
+         !/^#/ { exit }                       # past the header
+         started && /^# [^ ]/ { exit }        # prose again: the synopsis ended
+         /^#   / { started = 1 }
+         { sub(/^# ?/, ""); print }' "$0" >&2
     exit 2
 }
 
@@ -784,9 +803,18 @@ cmd_compare() {
     # Inside the workspace the run directory is /bench, not the store path.
     local ca="${fa/#$BENCH_DIR//bench}" cb="${fb/#$BENCH_DIR//bench}"
 
+    # The record sits next to the result, so a run named by path -- which is
+    # how a result on a benchmark volume is named, since it is not in this
+    # machine's store -- gets its axes checked like any other. Without this the
+    # one comparison the bench_host axis exists for (image against container)
+    # was the one that silently skipped the check.
+    local ea="$BENCH_DIR/$a/env.json" eb="$BENCH_DIR/$b/env.json"
+    [ -f "$ea" ] || ea="$(dirname "$fa")/env.json"
+    [ -f "$eb" ] || eb="$(dirname "$fb")/env.json"
+
     # Comparing a forced run, or two different plans, is almost never what was
     # meant. Say so rather than printing a confident p-value.
-    python3 - "$BENCH_DIR/$a/env.json" "$BENCH_DIR/$b/env.json" <<'PYEOF' >&2 || true
+    python3 - "$ea" "$eb" <<'PYEOF' >&2 || true
 import json, sys, os
 def load(p):
     try:
@@ -829,9 +857,31 @@ if bool(a.get("software")) != bool(b.get("software")):
     print("warning: one run is software-rendered and the other is not -- these are not comparable")
 if a.get("forced") or b.get("forced"):
     print("warning: at least one run was taken with failing preflight checks (--force)")
+# A rehearsal: the benchmark role was asserted by an override rather than by
+# the machine having booted the image, so the number came off a workstation
+# however it is labelled (cmd_staged, WK_IMAGE_MARKER).
+if a.get("role_marker_overridden") or b.get("role_marker_overridden"):
+    print("warning: at least one run only *claimed* the benchmark role "
+          "(WK_IMAGE_MARKER was overridden) -- it was measured on a workstation")
 if a.get("local_copy") != b.get("local_copy"):
     print("warning: different benchmark payloads (%s vs %s)" % (a.get("local_copy"), b.get("local_copy")))
 PYEOF
+
+    # A staged tree can do the statistics itself, and in the benchmark role it
+    # is the only thing that can: that machine has no workspace, no container
+    # and no checkout -- it has the Tools/ tree the run came with. Taken before
+    # the workspace path below, because when both exist the staged one is the
+    # one that matches the results being compared.
+    local staged_cmp=""
+    if is_macos && staged_cmp=$(staged_compare_tool); then
+        if ! "$STAGED_PY" -c 'import scipy' >/dev/null 2>&1; then
+            die "compare-results needs scipy, and $STAGED_PY does not have it.
+    On a benchmark install:  $STAGED_PY -m pip install --user scipy
+    (it is a 30 MB download and the only thing here that needs the network)"
+        fi
+        "$STAGED_PY" -u "$staged_cmp" -a "$fa" -b "$fb" --breakdown
+        return 0
+    fi
 
     # compare-results is a WebKit script and needs webkitpy, so it runs in the
     # workspace like everything else.
@@ -879,6 +929,18 @@ except Exception: print('')" 2>/dev/null)" = 1 ]; then
         -a '$ca' -b '$cb' --breakdown"
 }
 
+# The compare-results that belongs to the staged tree, if there is one on this
+# machine. Printed rather than returned so the caller can test for it, and
+# resolved through the same staged_root/staged_pick the runner uses -- one
+# answer to "which staged tree", not two.
+staged_compare_tool() {
+    local root dir
+    root=$(staged_root 2>/dev/null) || return 1
+    dir=$(staged_pick "$root" "") || return 1
+    [ -f "$dir/Tools/Scripts/compare-results" ] || return 1
+    printf '%s' "$dir/Tools/Scripts/compare-results"
+}
+
 # --- staging a build onto a machine that will run it --------------------------
 #
 # The macOS half of docs/HANDOFF-benchmarking.md, and the shape the user asked
@@ -916,16 +978,23 @@ except Exception: print('')" 2>/dev/null)" = 1 ]; then
 # volume. The run in the other role is written up in
 # docs/HANDOFF-benchmarking.md and is deliberately not guessed at here.
 cmd_stage() {
-    local ws="$1" machine="" config="" plan="" dry=""
+    local ws="$1" machine="" config="" plan="" payload="" dry=""
     shift
     while [ $# -gt 0 ]; do
         case "$1" in
             --to)      machine="${2:-}"; shift 2 ;;
             --config)  config="${2:-}"; shift 2 ;;
             --plan)    plan="${2:-}"; shift 2 ;;
+            # A directory on this machine, copied in beside the build. The run
+            # then needs no network at all and cannot silently measure a
+            # different revision of the benchmark than the last run did --
+            # which is the same argument `wk bench seed` makes for a container
+            # run, applied to a machine that may have no route out.
+            --payload) payload="${2:-}"; shift 2 ;;
             --dry-run) dry=1; shift ;;
             *) die "unknown option: $1
-    usage: wk bench stage <workspace> --to <machine> [--config C] [--plan P]" ;;
+    usage: wk bench stage <workspace> --to <machine> [--config C] [--plan P]
+                          [--payload <dir>] [--dry-run]" ;;
         esac
     done
     require_name "$ws"
@@ -946,6 +1015,19 @@ cmd_stage() {
     local root
     root=$(b_bench_root) || die "$machine's benchmark disk is not attached, so there is nowhere to
     stage a build onto. 'wk boot $machine --status' says what it can see."
+
+    # Is that path reachable from here, or does the payload have to be sent?
+    # The MBP's benchmark disk is *mounted* while it is being staged onto,
+    # which is what makes staging a copy; every other machine in the fleet has
+    # to be sent the payload over the network. A driver that does not say
+    # counts as local, which is what the only local driver does.
+    local deliver=""
+    if command -v b_bench_local >/dev/null 2>&1 && ! b_bench_local; then
+        command -v b_bench_put >/dev/null 2>&1 \
+            || die "$machine's staging root is not reachable from here and its driver
+    has no way to send a payload to it (b_bench_put)."
+        deliver=1
+    fi
 
     # The workspace, through its own driver -- and deliberately *not*
     # load_bench_target, which refuses everything but a container. That refusal
@@ -975,27 +1057,68 @@ cmd_stage() {
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$root/staged/$stamp-$config"
 
+    # How this machine is put into its benchmark role, in its own words. The
+    # three arming models arrive at the same place by different routes, and a
+    # "next step" that names the wrong one is worse than none.
+    local arm_hint run_hint
+    case "${BOOT_ARMING:-one-shot}" in
+        hands-on) arm_hint="wk boot $machine        arm it; it prints the ritual (you pick the disk)"
+                  run_hint="wk bench staged${plan:+ --plan $plan}       once it has booted, over there" ;;
+        guest)    arm_hint="wk boot $machine        start the guest -- for a guest that *is* the transition"
+                  run_hint="wk enter ${MACH_GUEST:-<guest>} -- wk bench staged${plan:+ --plan $plan}" ;;
+        server)   arm_hint="wk serve --image …      the machine boots what this machine serves"
+                  run_hint="wk bench staged${plan:+ --plan $plan}       on the machine, once it is up" ;;
+        *)        arm_hint="wk boot $machine        arm the one-shot and reboot into it"
+                  run_hint="wk bench staged${plan:+ --plan $plan}       on the machine, once it is up" ;;
+    esac
+
     if [ -n "$dry" ]; then
         info "dry run -- nothing was staged"
         log  "  from:   '$ws' ($t), $config at ${sha:0:12}"
         log  "          $build_dir"
         log  "          $src/Tools"
-        log  "  to:     $dest   (on $machine's $MACH_VOLUME)"
-        log  "  then:   wk boot $machine     and pick the disk"
+        log  "  to:     $dest   (on $machine${MACH_VOLUME:+, $MACH_VOLUME})"
+        [ -n "$payload" ] && log "  payload: $payload -- copied in, so the run needs no network"
+        log  "  then:   $arm_hint"
         return 0
     fi
 
-    info "staging $config from '$ws' onto $machine ($MACH_VOLUME)"
-    mkdir -p "$dest"
-    log  "  the build product"
-    t_pull_dir "$ws" "$build_dir" "$dest/WebKitBuild/$(basename "$build_dir")"
+    info "staging $config from '$ws' onto $machine${MACH_VOLUME:+ ($MACH_VOLUME)}"
+
+    # Where the tree is assembled. For a mounted disk that is the destination
+    # itself; for a machine that has to be sent the payload it is a directory
+    # here, which is then delivered and removed.
+    local build assemble="$dest"
+    if [ -n "$deliver" ]; then
+        assemble="$(wk_state_dir)/bench-stage/$stamp-$config"
+        rm -rf "$assemble"
+    fi
+    mkdir -p "$assemble"
+
+    # Products, not the build tree. An Apple WebKitBuild/<config> is ~39 GB and
+    # nearly all of it -- Intermediates.noindex, the compilation cache, the
+    # module cache, DerivedData -- is of no use to a machine that will not
+    # compile anything. What is left is the frameworks, the dylibs and
+    # MiniBrowser.app, which is what the browser driver asks for.
+    log  "  the build product (frameworks and MiniBrowser.app; no intermediates)"
+    build="$assemble/WebKitBuild/$(basename "$build_dir")"
+    t_pull_dir "$ws" "$build_dir" "$build" \
+        --exclude '*.noindex' --exclude 'DerivedData' --exclude '*.dSYM'
     log  "  Tools/ -- run-benchmark, webkitpy and the plans"
-    t_pull_dir "$ws" "$src/Tools" "$dest/Tools"
+    t_pull_dir "$ws" "$src/Tools" "$assemble/Tools"
+
+    if [ -n "$payload" ]; then
+        [ -d "$payload" ] || die "no such payload directory: $payload"
+        log  "  the benchmark itself, pinned ($(basename "$payload"))"
+        rm -rf "$assemble/payload"
+        mkdir -p "$assemble/payload"
+        rsync -a "$payload/" "$assemble/payload/"
+    fi
 
     # Written last, and that is the publishing protocol every other store in
     # this repo uses (lib/image.sh, lib/store.sh): until it exists this
     # directory is rubble, and the other role ignores it.
-    cat > "$dest/stage.json" <<EOF
+    cat > "$assemble/stage.json" <<EOF
 {
   "staged_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "staged_by": "$(hostname)",
@@ -1004,6 +1127,7 @@ cmd_stage() {
   "config": "$config",
   "webkit_sha": "$sha",
   "plan": "${plan:-}",
+  "payload_pinned": ${payload:+true}${payload:-false},
   "machine": "$machine",
   "volume": "${MACH_VOLUME:-}",
   "wk_tools": "$("$WK_ROOT/cmd/version" --tree 2>/dev/null || echo unknown)",
@@ -1011,21 +1135,441 @@ cmd_stage() {
 }
 EOF
 
-    info "staged: $dest"
-    log  "  $(du -sh "$dest" 2>/dev/null | cut -f1) on $MACH_VOLUME"
+    if [ -n "$deliver" ]; then
+        info "sending it to $machine ($(du -sh "$assemble" 2>/dev/null | cut -f1))"
+        b_bench_put "$assemble" "$dest" || die "could not deliver the payload to $machine"
+        rm -rf "$assemble"
+    fi
+
+    info "staged: $dest${MACH_VOLUME:+ on $MACH_VOLUME}"
+    [ -n "$deliver" ] || log "  $(du -sh "$dest" 2>/dev/null | cut -f1) on $MACH_VOLUME"
     log  ""
-    log  "  next, and the two halves a person does:"
-    log  "    wk boot $machine        arm it, and it prints the ritual"
-    log  "    (boot the benchmark volume, run the plan there, reboot back)"
-    log  "  the run itself is written up in docs/HANDOFF-benchmarking.md --"
-    log  "  it is not wired into this command yet, and this says so rather than"
-    log  "  pretending: what runs it in the other role has never been run."
+    log  "  next:"
+    log  "    $arm_hint"
+    log  "    $run_hint"
+    log  "    wk boot $machine --back   leave the role again; the result stays"
+    log  "                              on the machine that took it"
+}
+
+# --- running a staged build, in the role that was booted for it ---------------
+#
+# The other half of `wk bench stage`, and the one that produces the number: the
+# machine has been rebooted into its benchmark install, the payload is on the
+# volume that is now `/`, and this runs it and records what it ran on.
+#
+# What was unknown until it was measured (2026-08-20, on this Mac, against a
+# `Tools/Scripts` tree copied out of a base snapshot -- all four verified, and
+# every one of them would otherwise have been discovered in the benchmark role
+# with the machine already rebooted):
+#
+#   run-benchmark drives from a *partial* tree.  `Tools/Scripts` alone is
+#   enough: `--list-plans` runs to completion with no checkout root, no
+#   Source/, no WebKitBuild. Plan files are found relative to webkitpy itself
+#   (BenchmarkRunner.plan_directory), and so are the patches a plan applies
+#   (get_path_from_project_root resolves against the benchmark_runner package,
+#   not against a checkout). So the staged tree does not have to grow into a
+#   clone.
+#
+#   the browser is `--browser minibrowser --platform osx`, and
+#   `--build-directory` is what makes it usable here: with one, the driver
+#   launches <dir>/MiniBrowser.app/Contents/MacOS/MiniBrowser itself with
+#   DYLD_FRAMEWORK_PATH set, instead of going through Tools/Scripts/
+#   run-minibrowser -- which is the path that *would* have needed a checkout.
+#   It insists the build directory contain a *.framework, and says so.
+#
+#   it has to run under a python that has PyObjC.  The driver's prepare_env
+#   imports `webkitpy.autoinstalled.pyobjc_frameworks`, whose first line is a
+#   bare `import objc` -- pyobjc-core is *not* autoinstalled. Apple's
+#   /usr/bin/python3 has it (3.9.6, pyobjc 11.1 here); a Homebrew python3 does
+#   not, and it is the one on PATH on this machine. So the interpreter is named
+#   explicitly rather than left to `#!/usr/bin/env python3`.
+#
+#   everything else webkitpy needs, it installs itself, into the staged tree
+#   (Tools/Scripts/libraries/autoinstalled) on first use. That needs the
+#   network once -- or a tree staged from a guest where it has already
+#   happened, which carries the packages with it.
+#
+# The refusal that matters most is the first one, and it is the one thing here
+# that --force does not open: **a benchmark runs in the benchmark role or it
+# does not run.** A run on the workstation shares the machine with a desktop, a
+# podman VM, a browser and whatever else is open, and it would produce a number
+# that looks exactly like a bare-metal one -- same command, same plan, same
+# build, same shape of result. There is no way to tell them apart afterwards
+# except by trusting a field, so the run does not happen. `--dry-run` still
+# describes it from here, because describing is not measuring.
+STAGED_PY=/usr/bin/python3
+
+# Where the staged payloads are, from whichever role is asking.
+#
+# In the benchmark role the volume is `/`, so the path is absolute and short.
+# In the normal role it is a mounted disk, and the machine's own driver knows
+# where -- the same b_bench_root that `wk bench stage` writes into, so there is
+# one answer to "where do staged builds live" rather than two that can drift.
+staged_root() {
+    # An explicit answer wins. Two reasons it exists, and the second is why it
+    # is not only a test hook: the benchmark role's payload need not be on the
+    # boot volume (a second disk is the obvious variation), and the runner was
+    # exercised from the workstation role by pointing this at a disposable
+    # volume -- which is the only way to reach the benchmark role's code path
+    # on a machine that has not been rebooted into it.
+    [ -n "${WK_BENCH_ROOT:-}" ] && { printf '%s' "$WK_BENCH_ROOT"; return 0; }
+    if in_image_role; then
+        printf '/var/wk'
+        return 0
+    fi
+    . "$WK_ROOT/boot/machines.sh"
+    machine_load "${WK_BENCH_MACHINE:-mbp}" || return 1
+    load_driver "$MACH_DRIVER"
+    command -v b_bench_root >/dev/null 2>&1 || return 1
+    b_bench_root
+}
+
+# The newest staged payload with a manifest, or the one named. The manifest is
+# written last by `wk bench stage`, so a payload without one is a copy that was
+# interrupted and is ignored rather than measured.
+staged_pick() {
+    local root="$1" want="${2:-}" d
+    if [ -n "$want" ]; then
+        [ -f "$root/staged/$want/stage.json" ] || return 1
+        printf '%s' "$root/staged/$want"; return 0
+    fi
+    for d in $(ls -1r "$root/staged" 2>/dev/null); do
+        [ -f "$root/staged/$d/stage.json" ] || continue
+        printf '%s' "$root/staged/$d"; return 0
+    done
+    return 1
+}
+
+staged_field() {
+    "$STAGED_PY" -c "
+import json,sys
+try: print(json.load(open(sys.argv[1])).get(sys.argv[2], '') or '')
+except Exception: print('')" "$1/stage.json" "$2" 2>/dev/null
+}
+
+staged_usage() {
+    cat >&2 <<'EOF'
+usage: wk bench staged [options]        run a staged build, in the benchmark role
+
+  --plan <name>       which benchmark (default: the one the payload names)
+  --id <staged-id>    which staged payload (default: the newest complete one)
+  --count <n>         iterations
+  --timeout <s>       how long one iteration may take
+  --subtests "A B"    a subset of the plan
+  --payload <dir>     a pinned copy of the benchmark, instead of fetching it
+  --browser-args "…"  passed through to MiniBrowser
+  --ls                what is staged here, and what has been run
+  --dry-run           resolve everything and print the command; run nothing
+  --force             record the result even though preflight failed. It does
+                      NOT run a benchmark in the workstation role -- nothing
+                      does.
+EOF
+    exit 2
+}
+
+cmd_staged() {
+    local id="" plan="" dry="" list="" PAYLOAD="" TIMEOUT=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --id)       id="${2:-}"; shift 2 ;;
+            --plan)     plan="${2:-}"; shift 2 ;;
+            --count)    COUNT="${2:-}"; shift 2 ;;
+            --subtests) SUBTESTS="${2:-}"; shift 2 ;;
+            --browser-args) BROWSER_ARGS="${2:-}"; shift 2 ;;
+            # The payload, pinned. Same argument `wk bench seed` makes for a
+            # container run: left to itself run-benchmark clones the benchmark
+            # from GitHub on every run, so two runs meant to be compared can
+            # differ by the benchmark rather than by the build.
+            --payload)  PAYLOAD="${2:-}"; shift 2 ;;
+            --timeout)  TIMEOUT="${2:-}"; shift 2 ;;
+            --force)    FORCE=1; shift ;;
+            --dry-run)  dry=1; shift ;;
+            --ls)       list=1; shift ;;
+            -h|--help)  staged_usage ;;
+            *) die "unknown option: $1
+    usage: wk bench staged [--plan P] [--id <staged-id>] [--count N]
+                           [--subtests \"A B\"] [--ls] [--dry-run] [--force]" ;;
+        esac
+    done
+
+    is_macos || die "'wk bench staged' is the macOS benchmark role. The Linux images
+    run their benchmark from the machine that serves them -- see
+    docs/HANDOFF-netboot.md and docs/HANDOFF-benchmarking.md."
+
+    local root
+    root=$(staged_root) || die "this machine has no benchmark volume to read.
+    In the normal role it has to be attached ('wk boot mbp --status');
+    in the benchmark role /etc/wk-image says which image is running."
+
+    if [ -n "$list" ]; then
+        local d
+        [ -d "$root/staged" ] || { log "(nothing staged on $root)"; return 0; }
+        for d in $(ls -1 "$root/staged" 2>/dev/null | sort); do
+            [ -f "$root/staged/$d/stage.json" ] || { printf '  %-34s (incomplete)\n' "$d" >&2; continue; }
+            printf '  %-34s %s %s\n' "$d" \
+                "$(staged_field "$root/staged/$d" config)" \
+                "$(staged_field "$root/staged/$d" webkit_sha | cut -c1-10)" >&2
+        done
+        [ -d "$root/results" ] && { log ""; log "  results:"; ls -1 "$root/results" 2>/dev/null | sed 's/^/    /' >&2; }
+        return 0
+    fi
+
+    local dir
+    dir=$(staged_pick "$root" "$id") || die "nothing staged on this machine's benchmark volume${id:+ under '$id'}.
+    Stage a build from the workspace that built it:
+        wk bench stage <workspace> --to mbp --config mac-release"
+
+    local config sha ws
+    config=$(staged_field "$dir" config)
+    sha=$(staged_field "$dir" webkit_sha)
+    ws=$(staged_field "$dir" workspace)
+    [ -n "$plan" ] || plan=$(staged_field "$dir" plan)
+    [ -n "$plan" ] || die "which benchmark? --plan <name>
+    (the staged payload does not name one; 'wk bench staged --ls' shows what
+    is here, and Tools/Scripts/run-benchmark --list-plans what it can run)"
+
+    local build_dir runner_script out_id out
+    build_dir=$(ls -d "$dir"/WebKitBuild/* 2>/dev/null | head -1)
+    runner_script="$dir/Tools/Scripts/run-benchmark"
+    out_id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$(basename "$dir")"
+    out="$root/results/$out_id"
+
+    # --- what has to be true, measured -------------------------------------
+    info "preflight"
+
+    local role marker_faked=""
+    if in_image_role; then
+        role=$(wk_image_id)
+        # The override exists so this code path can be exercised at all on a
+        # machine that has not been rebooted (lib/common.sh, WK_IMAGE_MARKER).
+        # It is announced and recorded rather than merely allowed: the one
+        # thing that must not happen is a workstation run that is *reported* as
+        # a benchmark-role run, and a record that says so is the only defence
+        # against a hook nobody remembers setting.
+        if [ "$WK_IMAGE_MARKER" != /etc/wk-image ]; then
+            marker_faked=1
+            warn "WK_IMAGE_MARKER points at $WK_IMAGE_MARKER, not /etc/wk-image"
+            log  "  this run is being told it is in the benchmark role. If that is"
+            log  "  not true, the number is a workstation number. Recorded as such."
+        fi
+        check yes "the benchmark role" "${role:-image}${marker_faked:+ (marker overridden)}"
+    elif [ -n "$dry" ]; then
+        # A dry run describes; it does not refuse. Same rule as `wk profile
+        # --dry-run`: the question is "what would this do", and answering it
+        # needs no benchmark install.
+        check no "the benchmark role" "this is the workstation role -- a real run refuses"
+    else
+        # Not a barrier, and deliberately not forceable: a barrier is a rule
+        # you can decide to take responsibility for, and this is not a rule.
+        # The workstation and the benchmark install produce results that are
+        # indistinguishable on paper and incomparable in fact.
+        die "this is the workstation role, and a benchmark does not run here.
+    Nothing about a run on this machine-as-workstation is comparable with one
+    on the benchmark install -- same command, same plan, same shape of result,
+    a different machine underneath it -- and there is no way to tell the two
+    apart afterwards. So it does not run.
+        wk boot mbp        arm it; it prints the two clicks
+        ... boot the benchmark volume, then run this there ...
+    'wk bench staged --dry-run' still shows what it would do from here."
+    fi
+
+    if [ -x "$runner_script" ]; then
+        check yes "run-benchmark" "$runner_script"
+    else
+        check no  "run-benchmark" "not in the staged tree: $runner_script"
+    fi
+
+    if [ -n "$build_dir" ] && [ -x "$build_dir/MiniBrowser.app/Contents/MacOS/MiniBrowser" ]; then
+        if ls "$build_dir"/*.framework >/dev/null 2>&1; then
+            check yes "the build" "$(basename "$build_dir") ${sha:+@${sha:0:10}}"
+        else
+            # The driver raises on exactly this, deep inside python.
+            check no "the build" "no *.framework in $build_dir -- the driver refuses it"
+        fi
+    else
+        check no "the build" "no MiniBrowser.app in ${build_dir:-$dir/WebKitBuild}"
+    fi
+
+    # PyObjC, in the interpreter this will actually use.
+    if "$STAGED_PY" -c 'import objc' >/dev/null 2>&1; then
+        check yes "python with PyObjC" "$STAGED_PY ($("$STAGED_PY" -V 2>&1))"
+    else
+        check no "python with PyObjC" "$STAGED_PY cannot 'import objc' -- xcode-select --install"
+    fi
+
+    # A browser needs a window server, and a benchmark needs the *console*
+    # session: driven over ssh with nobody logged in at the screen, MiniBrowser
+    # has nowhere to draw and the run hangs rather than failing.
+    local console; console=$(stat -f %Su /dev/console 2>/dev/null)
+    if [ "$console" = "$(id -un)" ]; then
+        check yes "the console session" "$console is logged in at the screen"
+    else
+        check no "the console session" "the screen belongs to '${console:-nobody}', not $(id -un)"
+    fi
+
+    # A laptop on battery throttles, and does it silently. A machine with no
+    # battery at all -- a desktop, or a guest -- is on AC by construction, and
+    # failing it for the absence of a battery would refuse every run on the one
+    # kind of machine that never has this problem.
+    local _batt; _batt=$(pmset -g batt 2>/dev/null | head -1)
+    case "$_batt" in
+        *"AC Power"*)      check yes "power" "AC" ;;
+        *"Battery Power"*) check no  "power" "on battery -- the CPU is not the same CPU" ;;
+        *)                 check yes "power" "no battery (a desktop, or a guest)" ;;
+    esac
+
+    # Everything the machine is doing that a run cannot pause (lib/quiet.sh).
+    # Reported rather than checked one by one: each line says what it found.
+    log "  the machine itself:"
+    local quiet=yes
+    macos_noise || quiet=no
+    [ "$quiet" = yes ] || check no "quiet machine" "see above -- 'wk quiesce on' first"
+
+    if [ "$PREFLIGHT_FAILS" -gt 0 ]; then
+        if [ -n "$dry" ]; then
+            warn "$PREFLIGHT_FAILS preflight check(s) would fail -- a real run would stop here"
+        elif [ -z "$FORCE" ]; then
+            die "$PREFLIGHT_FAILS preflight check(s) failed. Fix them, or --force to
+    record the result with the failures attached to it."
+        else
+            warn "$PREFLIGHT_FAILS preflight failure(s) FORCED -- recorded with the result"
+        fi
+    fi
+
+    # --- the run ------------------------------------------------------------
+    local args="--plan $plan --browser minibrowser --platform osx"
+    args="$args --build-directory $(sh_quote "$build_dir")"
+    args="$args --output-file $(sh_quote "$out/result.json") --no-adjust-unit --show-iteration-values"
+    [ -n "$COUNT" ] && args="$args --count $COUNT"
+    [ -n "$TIMEOUT" ] && args="$args --timeout $TIMEOUT"
+    [ -n "$SUBTESTS" ] && args="$args --subtests $SUBTESTS"
+    # A payload that ships with the staged tree, when there is one: the run
+    # then needs no network at all, which is the difference between a
+    # reproducible number and one that depends on what GitHub served today.
+    [ -z "$PAYLOAD" ] && [ -d "$dir/payload" ] && PAYLOAD="$dir/payload"
+    [ -n "$PAYLOAD" ] && args="$args --local-copy $(sh_quote "$PAYLOAD")"
+    [ -n "$BROWSER_ARGS" ] && args="$args -- $BROWSER_ARGS"
+
+    if [ -n "$dry" ]; then
+        info "dry run -- nothing was benchmarked"
+        log  "  staged:  $dir"
+        log  "  from:    workspace '$ws', $config${sha:+ @${sha:0:10}}"
+        log  "  results: $out"
+        log  "  would run, in $dir:"
+        # The same string the run builds, quoting included: a volume name with
+        # a space in it (the default is "WK Bench") makes an unquoted preview
+        # a preview of something that would not work.
+        printf '    %s\n' "$(sh_quote "$STAGED_PY") $(sh_quote "$runner_script") $args" >&2
+        return 0
+    fi
+
+    ensure_dir "$out"
+    staged_env_json "$out/env.json" "$dir" "$plan" "$config" "$sha" "$ws" "$role" "$marker_faked"
+
+    info "$plan on $(sysctl -n hw.model), from '$ws' ($config${sha:+ @${sha:0:10}})"
+    log  "  results: $out"
+
+    # In the staged tree, because webkitpy resolves plans and patches relative
+    # to itself and autoinstalls into it.
+    set +e
+    run_watched "$out/run.log" -- \
+        bash -lc "cd $(sh_quote "$dir") && $(sh_quote "$STAGED_PY") $(sh_quote "$runner_script") $args"
+    local rc=$?
+    set -e
+
+    staged_restore_desktop
+
+    if [ "$rc" -ne 0 ]; then
+        warn "run-benchmark exited $rc"
+        # first_error knows what a *build* failure looks like; a benchmark
+        # fails with a python traceback, whose interesting line is the last
+        # one. Fall back to the tail rather than printing nothing, which is
+        # what happened the first time this path was exercised.
+        local _err; _err=$(first_error "$out/run.log" || true)
+        if [ -n "$_err" ]; then
+            printf '%s\n' "$_err" | sed 's/^/  /' >&2
+        else
+            tr '\r' '\n' < "$out/run.log" | tail -3 | sed 's/^/  /' >&2 || true
+        fi
+        log "  full log: $out/run.log"
+        exit "$rc"
+    fi
+
+    info "BENCH OK  $plan -> $out/result.json"
+    tr '\r' '\n' < "$out/run.log" | grep -iE '^(Score|Total|.*Score:)' | tail -5 | sed 's/^/  /' >&2 || true
+    log ""
+    log "  it is on the benchmark volume, so it survives the way back:"
+    log "    wk boot mbp --back        reboot into the workstation role"
+    log "    wk bench staged --ls      list it from over there"
+    log "    wk bench compare <other> $out/result.json"
+}
+
+# What a run that died halfway leaves behind on the desktop.
+#
+# The macOS browser driver turns the Dock's launch animation off before a run
+# (prepare_env) and back on after it (restore_env) -- and restore_env does not
+# run when the run raises, which a timed-out benchmark does. Measured: after
+# one failed run, `com.apple.dock launchanim` was still 0. It is cosmetic and
+# it is also *somebody's machine*, so it is put back here, and only when it is
+# actually off, so this never fights webkitpy for it.
+staged_restore_desktop() {
+    [ "$(defaults read com.apple.dock launchanim 2>/dev/null)" = 0 ] || return 0
+    defaults write com.apple.dock launchanim -bool true 2>/dev/null || return 0
+    killall Dock 2>/dev/null || true
+    info "restored the Dock's launch animation (the run left it off)"
+}
+
+# The record, in the same shape `wk bench` writes for a container run -- same
+# file name, same three axes -- so `wk bench compare` can put one against the
+# other and warn about exactly what differs.
+staged_env_json() {
+    local f="$1" dir="$2" plan="$3" config="$4" sha="$5" ws="$6" role="$7" faked="${8:-}"
+    WK_M_PLAN="$plan" WK_M_WS="$ws" WK_M_CONFIG="$config" WK_M_SHA="$sha" \
+    WK_M_ROLE="$role" WK_M_STAGED="$dir" WK_M_FAKED="$faked" \
+    WK_M_COUNT="$COUNT" WK_M_FORCED="$FORCE" WK_M_NOTES="$PREFLIGHT_NOTES" \
+    WK_M_CLASS="$(bench_class "$plan")" \
+    WK_M_MODEL="$(sysctl -n hw.model 2>/dev/null)" \
+    WK_M_CORES="$(sysctl -n hw.ncpu 2>/dev/null)" \
+    WK_M_MEM="$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 ))" \
+    WK_M_OS="$(sw_vers -productVersion 2>/dev/null)" \
+    WK_M_POWER="$(pmset -g batt 2>/dev/null | head -1)" \
+    WK_M_THERM="$(pmset -g therm 2>/dev/null | sed -n 's/.*CPU_Speed_Limit *= *//p' | head -1)" \
+    WK_M_DISPLAY="$("$STAGED_PY" -c 'from AppKit import NSScreen; f=NSScreen.mainScreen().frame(); print("%dx%d" % (f.size.width, f.size.height))' 2>/dev/null)" \
+    "$STAGED_PY" - "$f" <<'PYEOF'
+import json, os, sys
+g = os.environ.get
+json.dump({
+    "plan": g("WK_M_PLAN"), "workspace": g("WK_M_WS"), "config": g("WK_M_CONFIG"),
+    "browser": "minibrowser", "webkit_sha": g("WK_M_SHA"),
+    "count": g("WK_M_COUNT"), "forced": bool(g("WK_M_FORCED")),
+    "preflight_notes": g("WK_M_NOTES"),
+    # The three axes, same names and same meanings as a container run.
+    # bench_host is "image" and nothing else here: this code path is only
+    # reachable from the benchmark role, because a run in any other role is
+    # refused rather than relabelled.
+    "class": g("WK_M_CLASS"), "runner": "browser", "arch": "native",
+    "bench_host": "image", "role": g("WK_M_ROLE"),
+    # True when the role was asserted by an override rather than by the
+    # machine having booted the image. A run marked this way is a rehearsal.
+    "role_marker_overridden": bool(g("WK_M_FAKED")),
+    "staged_from": g("WK_M_STAGED"),
+    # MotionMark and Speedometer both scale with the surface being drawn, so
+    # the display size belongs with the number rather than in somebody's memory.
+    "display": g("WK_M_DISPLAY"),
+    "host": {
+        "model": g("WK_M_MODEL"), "cores": g("WK_M_CORES"),
+        "memory_mb": g("WK_M_MEM"), "macos": g("WK_M_OS"),
+        "power": g("WK_M_POWER"), "cpu_speed_limit": g("WK_M_THERM") or "100",
+    },
+}, open(sys.argv[1], "w"), indent=2)
+PYEOF
 }
 
 # --- dispatch ----------------------------------------------------------------
 case "${1:-}" in
     ls)      shift; cmd_ls; exit 0 ;;
     compare) shift; [ $# -ge 2 ] || usage; cmd_compare "$@"; exit 0 ;;
+    staged)  shift; cmd_staged "$@"; exit 0 ;;
     stage)   shift
              [ $# -ge 1 ] || usage
              cmd_stage "$@"; exit 0 ;;

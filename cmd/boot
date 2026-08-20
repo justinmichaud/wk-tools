@@ -122,8 +122,8 @@ read_state() {
         # explicit Z, so this comparison is at least unambiguous -- but it is
         # the fallback, not the mechanism.
         local a b
-        a=$(date -u -d "$ARMED_AT" +%s 2>/dev/null || echo 0)
-        b=$(date -u -d "$BOOTED" +%s 2>/dev/null || echo 0)
+        a=$(utc_to_epoch "$ARMED_AT")
+        b=$(utc_to_epoch "$BOOTED")
         if [ "$b" -gt "$a" ]; then SPENT=yes; fi
     fi
     # Explicit, and not decoration: a function whose last statement is a false
@@ -138,6 +138,10 @@ cmd_status() {
     case "$ROLE" in
         unreachable)
             log "$MACHINE: unreachable over ssh in its normal role"
+            # Whatever the driver can still say about it without reaching it --
+            # for a guest that is "the guest is absent", which is a different
+            # thing from an outage and the reader should not have to guess.
+            b_evidence 2>/dev/null | sed 's/^/  /' || true
             if [ -n "$ARMED_IMG" ]; then
                 log "  the record says it was armed for image $ARMED_IMG"
             else

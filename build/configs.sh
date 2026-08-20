@@ -192,6 +192,15 @@ config_load() {
             return 1
             ;;
     esac
+
+    # How much memory a job of *this* build system is worth, decided here so
+    # that everything downstream agrees: the job count (build_jobs, which reads
+    # WK_MB_PER_JOB), the memory budget the watchdog enforces (jobs x this),
+    # and the value carried into the target. Setting it only in the environment
+    # handed to the far side left the job count derived from the CMake figure,
+    # which is how a mac-release came to be built with -j9 and killed at
+    # 16.6 GB. An explicit WK_MB_PER_JOB from the caller still wins.
+    [ -n "${WK_MB_PER_JOB_EXPLICIT:-}" ] || WK_MB_PER_JOB=$(config_mb_per_job)
     return 0
 }
 
@@ -210,6 +219,28 @@ config_load() {
 # than read here: this function is also what the golden-base prebuild uses, and
 # a build environment that went looking for the current workspace would be
 # assembling one thing while describing another.
+# How much memory one compile job is worth, which is a property of the build
+# system and not of the machine.
+#
+# 1536 MB is right for the CMake ports and was measured there (lib/resources.sh
+# explains it): typical WebKit translation units peak near 1-1.5 GB. The Apple
+# build is a different shape -- unified sources, a content-addressed compilation
+# cache, and Xcode scheduling work inside each job -- and the same number is an
+# underestimate that shows up as the memory watchdog killing a healthy build.
+#
+# Measured 2026-08-20, in the golden base: `-j9` derived from 13824 MB at
+# 1536 MB/job peaked at **16593 MB** and was killed at 95% of the way through a
+# mac-release. At 3072 the same envelope derives 4 jobs and a 12288 MB budget,
+# which is slower and finishes. `claude/CLAUDE.md` already told agents to pass
+# `WK_MB_PER_JOB=3072` by hand for exactly this; a default that needs a manual
+# override on one of the two build systems is a wrong default.
+config_mb_per_job() {
+    case "$CFG_BUILDSYS" in
+        xcode) echo 3072 ;;
+        *)     echo 1536 ;;
+    esac
+}
+
 config_build_env() {
     local src="$1" jobs="$2" nice="$3" arch="${4:-native}"
 
@@ -281,7 +312,7 @@ config_build_env() {
         "WK_BUILDSYS=$CFG_BUILDSYS"
         "WK_BUILD_ARGS=$CFG_PORT $CFG_ARGS"
         "WK_BUILD_CMAKE=$cmakeargs"
-        "WK_MB_PER_JOB=${WK_MB_PER_JOB:-1536}"
+        "WK_MB_PER_JOB=$WK_MB_PER_JOB"
     )
     # Only when the config asks for it: the Apple configs leave these empty on
     # purpose, and `env CC= ` is not the same as not setting CC at all.

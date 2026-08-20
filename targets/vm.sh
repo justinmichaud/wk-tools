@@ -538,10 +538,19 @@ t_pull() {
 # will run it (docs/HANDOFF-benchmarking.md: build in the guest, run on bare
 # metal) and that tree is tens of thousands of files.
 t_pull_dir() {
-    local name="$1" src="$2" dest="$3"
+    local name="$1" src="$2" dest="$3"; shift 3
+    local ex=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --exclude) ex+=("--exclude" "${2:-}"); shift 2 ;;
+            *) die "t_pull_dir: unknown option $1" ;;
+        esac
+    done
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
     mkdir -p "$dest"
-    rsync -a --delete -e "ssh $(_ssh_opts)" "$WK_VM_USER@$ip:$src/" "$dest/"
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    rsync -a --delete ${ex[@]+"${ex[@]}"} -e "ssh $(_ssh_opts)" \
+        "$WK_VM_USER@$ip:$src/" "$dest/"
 }
 
 t_exec_tty() {
@@ -914,9 +923,17 @@ _vm_configured() { _vm_get "$(_vm "$1")" "$2"; }
 # of guests at two, and nothing caps their combined size -- so without this,
 # starting a second 20 GB guest beside a first one is permitted right up to the
 # point where the host starts swapping.
+# What the running guests already hold, optionally excluding one by name.
+#
+# The exclusion is not a nicety: the caller is about to start or re-use *that*
+# guest, and counting it as competition with itself makes the check refuse
+# something that fits exactly. Measured 2026-08-20: `wk vm base --refresh` on a
+# base that was already running reported "-20480MB is unspoken for" -- the
+# guest's own allocation, subtracted twice.
 _committed_mem_mb() {
-    local total=0 v m
+    local skip="${1:-}" total=0 v m
     for v in $(_local_vms | jq -r '.[]|select(.State=="running")|.Name'); do
+        [ -n "$skip" ] && [ "$v" = "$skip" ] && continue
         m=$(_vm_get "$v" Memory)
         [ -n "$m" ] && total=$(( total + m ))
     done
@@ -940,7 +957,7 @@ _check_memory_budget() {
     local name="$1" mine="$2" podman_mb guests total budget spare
     podman_mb=0
     _podman_running && podman_mb=$(_podman_mem_mb)
-    guests=$(_committed_mem_mb)
+    guests=$(_committed_mem_mb "$name")
     total=$(( mine + podman_mb + guests ))
     budget=$(envelope_mem_mb)
 
@@ -1000,8 +1017,45 @@ $advice
 
 _base_exists() { [ "$(_vm_state "$WK_VM_BASE")" != absent ]; }
 
+# Existing is not the same as finished, and treating it as such is how a broken
+# base gets inherited by every workspace cloned from it.
+#
+# Measured 2026-08-20: `wk vm base` pulled 68.8 GB, cloned the guest, and then
+# refused to start it because the podman machine held the whole memory
+# envelope. The next run found a VM by that name and reported "golden base is
+# ready" in half a second -- an unprovisioned macOS image with no Xcode
+# licence, no checkout and no prebuild, which every `wk vm new` would have
+# copied.
+#
+# So the base gets the same completion protocol as every other artifact here
+# (lib/image.sh's manifest, lib/store.sh's snapshot sha, `.wk-ready` for a
+# workspace): **a marker written last**, and anything without one is rubble to
+# be destroyed and remade rather than repaired (docs/HANDOFF-workspace-state.md,
+# rules 2 and 3).
+_base_marker() { echo "$WK_VM_DIR/base.ready"; }
+
+_base_ready() { _base_exists && [ -f "$(_base_marker)" ]; }
+
+_base_mark_ready() {
+    ensure_dir "$WK_VM_DIR" 0700 >/dev/null
+    printf 'image=%s
+prebuild=%s
+finished=%s
+' \
+        "$WK_VM_IMAGE" "${WK_VM_BASE_PREBUILD:-none}" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$(_base_marker)"
+}
+
 _ensure_base() {
-    _base_exists && return 0
+    _base_ready && return 0
+
+    if _base_exists; then
+        warn "'$WK_VM_BASE' exists but was never finished (no completion marker)"
+        log  "  destroying it and starting again -- an unprovisioned base is rubble,"
+        log  "  and every workspace cloned from one inherits whatever it is missing."
+        _tart delete "$WK_VM_BASE" 2>/dev/null || true
+    fi
+    rm -f "$(_base_marker)"
 
     require jq "jq is required (macOS ships it at /usr/bin/jq)"
 
@@ -1129,5 +1183,8 @@ _provision_base() {
 
     info "shutting the base VM down"
     _tart stop "$WK_VM_BASE"
+    # Last, and that is the whole publishing protocol: until this exists the
+    # guest is rubble that the next run destroys.
+    _base_mark_ready
     changed "golden base VM '$WK_VM_BASE' is ready"
 }

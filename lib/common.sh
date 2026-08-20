@@ -576,6 +576,48 @@ bmc_drm_device() {
     return 1
 }
 
+# --- dates, on two platforms that disagree about them -------------------------
+#
+# GNU date and BSD date share no syntax for the two conversions this repo needs,
+# and the failure is not subtle: `date -u -d @1786800736` on macOS prints
+# "illegal option -- d" and a usage block. That is how `wk boot rpi5 --status`
+# came to be unrunnable from this Mac -- the fleet is meant to be drivable from
+# either workstation, and one of them could not read a machine's boot time.
+#
+# GNU form first, BSD second, because the Linux workstation runs these far more
+# often; either way the caller gets a string or nothing.
+epoch_to_utc() {
+    date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || true
+}
+
+# An ISO-8601 UTC stamp (the format everything here writes) back to seconds.
+# Prints 0 when it cannot be parsed, because every caller is comparing it and a
+# comparison against nothing is a shell error rather than a false answer.
+utc_to_epoch() {
+    date -u -d "$1" +%s 2>/dev/null \
+        || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null \
+        || echo 0
+}
+
+# --- which role is this machine in? ------------------------------------------
+#
+# A machine that has been booted into an image (docs/HANDOFF-netboot.md) says
+# so in one file, written by the image and absent from every normal install.
+# One name for it, because three things read it: the boot driver deciding which
+# role answered, `wk bench staged` refusing to call a workstation run a
+# bare-metal one, and the image's own provisioning writing it.
+#
+# Overridable so both can be exercised without a second machine -- the runner
+# was tested by pointing it at a marker in a scratch directory, which is the
+# only way to reach the benchmark role's code path from the workstation role.
+WK_IMAGE_MARKER="${WK_IMAGE_MARKER:-/etc/wk-image}"
+
+# The image's own id, or empty in a normal role.
+wk_image_id() { sed -n 's/^id=//p' "$WK_IMAGE_MARKER" 2>/dev/null || true; }
+in_image_role() { [ -f "$WK_IMAGE_MARKER" ]; }
+
 # --- the graphical session's mode --------------------------------------------
 # `wk session` can start the compositor a few ways, and from the Wayland
 # socket alone they are indistinguishable -- which is exactly the problem,

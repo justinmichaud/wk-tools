@@ -22,3 +22,20 @@
 	algorithm = histogram
 	colorMoved = zebra
 
+[core]
+    fsmonitor = true
+    untrackedCache = true
+    preloadIndex = true
+[feature]
+    manyFiles = true
+[index]
+    skipHash = true
+[fetch]
+    writeCommitGraph = true
+    parallel = 4
+[checkout]
+    workers = 0
+[diff]
+    algorithm = histogram
+[gc]
+    auto = 6700

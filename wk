@@ -38,6 +38,12 @@ workspaces
   gui <name> [url]          MiniBrowser in the seat, launched as perf runs do
   test <name> [args]        run tests
   bench <name> <plan>       run a benchmark, with preflight and provenance
+      stage <ws> --to <machine>
+                            put a build where a bare-metal role will find it
+                            (build in the guest, run on the machine itself)
+      staged [--plan P]     run it, in the role that was booted for it; refused
+                            in the workstation role, which is not the same
+                            machine underneath
   profile <name> [file.js]  where the time went: JSC's own profilers, samply,
                             or Instruments -- one flag each, no env-var walls
       --mode <m>            sampling (default) | bytecode | samply |
@@ -206,6 +212,19 @@ resolve_target() {
 # without podman it fails with "podman is required", naming a problem the
 # command does not have.
 is_targetless() {
+    # A comparison of two *files on this machine* is host-side: a result taken
+    # in the benchmark role lives on that machine's own volume, not in the
+    # container store, and forwarding the command into the podman VM looks for
+    # those paths in a Linux guest that has never seen them ("no such run", of
+    # a file sitting right there). A comparison of two run *ids* still
+    # forwards, because those runs and compare-results both live in there.
+    if [ "$1" = bench ] && [ "${2:-}" = compare ]; then
+        local _a
+        for _a in "$@"; do
+            [ -f "$_a" ] && return 0
+        done
+        return 1
+    fi
     case "$1${2:+ $2}" in
         "build --list") return 0 ;;
         # `wk sync --target <machine>` acts on the far end of an ssh, so the
@@ -214,6 +233,13 @@ is_targetless() {
         # replaced. A bare `wk sync` still forwards -- the container store it
         # publishes into is in there.
         "sync --target"|"sync --target="*) return 0 ;;
+        # The two halves of a bare-metal benchmark run. Neither acts on a
+        # container workspace and neither may be forwarded into the podman VM:
+        # `stage` copies a build out of a *guest* onto a disk attached to this
+        # machine, and `staged` runs on the machine that booted the benchmark
+        # install. Forwarded, both resolved the word after `bench` as a
+        # workspace name and reported "no such workspace: staged".
+        "bench stage"|"bench staged") return 0 ;;
     esac
     return 1
 }
@@ -592,7 +618,7 @@ main() {
         : "${WK_TARGET:=local}"
         export WK_TARGET
     elif is_macos && [ -z "${WK_IN_VM:-}" ] && ! is_host_command "$cmd" \
-            && ! is_targetless "$cmd" "${1:-}"; then
+            && ! is_targetless "$cmd" "$@"; then
         if [ "$(resolve_target "$@")" = container ]; then
             # Answering "there is nothing to say, and here is why" beats both
             # booting a VM for it and printing an empty table from a store that

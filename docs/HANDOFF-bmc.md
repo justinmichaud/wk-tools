@@ -1,7 +1,12 @@
 How can I make my librem5 bmc auto turn on after power loss? How can I recover this device if it is left off without being phisically present?
 
-Support streaming the camera, so that I can watch the screen and use the bmc to send input when in gpu mode.
+Going forward, we will name the librem5 tailnet-bridge-X and switch to pmos for portability. We will support the librem 5 and pinephone as the primary devices.
 
-Make the setup files run from this repo instead of the phone, and get rid of the tar file.
+This role should:
+- Support bridging the ethernet to the tailnet
+- Support streaming the camera whenever the kill switch is on, so that I can watch the screen remotely.
+- Be resilient to power loss and network failures.
 
-Don't do this, but prepare the repo to support it if possible: can this bmc role be handled by a non-rooted android phone? (dhcp server, tailscale proxy, router functionality). What about an iPhone? It would be nice if this part can be generalized in the future.
+Make the setup files run from this repo instead of the phone, and get rid of the tar file in this repo. It should be one command to re-provision a new tailnet bridge device, and it should be easy to remove one.
+
+We will first flash my pinephone to act as a bridge for the rpi4 or rpi3 (tailnet-bridge-generic). Then, we will re-flash my librem5 to act as a bridge for the bmc (rpi-bridge-moose-bmc).

@@ -63,6 +63,11 @@ reserve_mb()    { is_headless && echo "$WK_HEADLESS_RESERVE_MB"    || echo "$WK_
 # leaving half the CPU idle for the whole build. Typical WebKit TUs peak nearer
 # 1-1.5 GB, so 1.5 GB keeps the cap honest without throttling the common case;
 # the cgroup clamp in build/build-in-target.sh is the real safety net.
+# ...for the CMake ports. The Apple build wants twice this and says so itself
+# (config_mb_per_job, build/configs.sh), which is why this records whether the
+# value was *asked for*: a default may be replaced by the config, an explicit
+# `WK_MB_PER_JOB=3072 wk build ...` may not.
+WK_MB_PER_JOB_EXPLICIT="${WK_MB_PER_JOB:+1}"
 WK_MB_PER_JOB="${WK_MB_PER_JOB:-1536}"
 
 host_cores() {

@@ -72,7 +72,7 @@ mac_volume_present() {
 b_probe() {
     local id
     ROLE_CHANNEL=normal
-    id=$(sed -n 's/^id=//p' /etc/wk-image 2>/dev/null || true)
+    id=$(wk_image_id)
     if [ -n "$id" ]; then ROLE="image $id"; else ROLE=workstation; fi
     return 0
 }
@@ -99,7 +99,7 @@ b_boot_id() { _mac_boottime; }
 b_booted_at() {
     local sec; sec=$(_mac_boottime)
     [ -n "$sec" ] || return 0
-    date -u -r "$sec" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true
+    epoch_to_utc "$sec"
 }
 
 # What can be asked of the machine itself. Not a firmware register -- there is

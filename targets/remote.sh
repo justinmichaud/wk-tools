@@ -532,10 +532,21 @@ t_pull() {
 }
 
 t_pull_dir() {
-    local name="$1" src="$2" dest="$3"
+    local name="$1" src="$2" dest="$3"; shift 3
+    local ex=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --exclude) ex+=("--exclude" "${2:-}"); shift 2 ;;
+            *) die "t_pull_dir: unknown option $1" ;;
+        esac
+    done
     mkdir -p "$dest"
-    if _remote_is_local; then rsync -a --delete "$src/" "$dest/"; return; fi
-    rsync -a --delete -e "ssh $(_ssh_opts)" "$WK_REMOTE_HOST:$src/" "$dest/"
+    if _remote_is_local; then
+        rsync -a --delete ${ex[@]+"${ex[@]}"} "$src/" "$dest/"; return
+    fi
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    rsync -a --delete ${ex[@]+"${ex[@]}"} -e "ssh $(_ssh_opts)" \
+        "$WK_REMOTE_HOST:$src/" "$dest/"
 }
 
 # The build, and only the build, is serialised: two of your own builds must not

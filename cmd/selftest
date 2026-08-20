@@ -582,6 +582,54 @@ chk_hands_on_arming() {
     return 0
 }
 
+# A benchmark that ran on the workstation and a benchmark that ran on the
+# benchmark install produce the same shape of result and are not comparable.
+# Nothing tells them apart afterwards except the refusal, so the refusal is
+# absolute: not a barrier, not forceable.
+chk_bench_role_required() {
+    is_macos || { echo "the bare-metal benchmark role is this Mac"; return 77; }
+    local out rc=0
+
+    # With a staged tree in reach it must still refuse -- and refuse the same
+    # way with --force, which everywhere else in this tree opens a barrier.
+    out=$(WK_BENCH_ROOT="$TMP/bench" "$WK" bench staged --plan jetstream2.2 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "a run was accepted with no benchmark volume at all"; return 1; }
+
+    mkdir -p "$TMP/bench/staged/20260101T000000Z-mac-release/Tools/Scripts"
+    mkdir -p "$TMP/bench/staged/20260101T000000Z-mac-release/WebKitBuild/Release/MiniBrowser.app/Contents/MacOS"
+    : > "$TMP/bench/staged/20260101T000000Z-mac-release/stage.json"
+    printf '{"config":"mac-release","plan":"jetstream2.2"}' \
+        > "$TMP/bench/staged/20260101T000000Z-mac-release/stage.json"
+
+    rc=0
+    out=$(WK_BENCH_ROOT="$TMP/bench" "$WK" bench staged --plan jetstream2.2 --force 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "--force ran a benchmark in the workstation role"; return 1; }
+    printf '%s\n' "$out" | grep -q 'workstation role' \
+        || { echo "refused for some other reason: $out"; return 1; }
+
+    # A dry run still describes it: that is a question, not a measurement.
+    rc=0
+    out=$(WK_BENCH_ROOT="$TMP/bench" "$WK" bench staged --plan jetstream2.2 --dry-run 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || { echo "--dry-run refused as well: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q -- '--plan jetstream2.2 --browser minibrowser --platform osx' \
+        || { echo "the dry run does not show the command it would run: $out"; return 1; }
+}
+
+# A boot driver runs under `set -euo pipefail` and every one of its probes
+# talks to a machine that may be off -- which is a normal state, not a failure.
+# The guest driver got this wrong and `wk boot benchvm --status` printed
+# nothing at all and exited 1, which is the least debuggable output there is.
+chk_boot_status_survives_an_absent_machine() {
+    local m out rc
+    for m in $("$WK" boot --list 2>/dev/null | awk '{print $1}'); do
+        rc=0; out=$("$WK" boot "$m" --status 2>&1) || rc=$?
+        # 0 = in a role, 2 = armed, 3 = unreachable. Anything else, or no
+        # output at all, is the failure this check is about.
+        case "$rc" in 0|2|3) ;; *) echo "'wk boot $m --status' exited $rc: $out"; return 1 ;; esac
+        [ -n "$out" ] || { echo "'wk boot $m --status' printed nothing (exit $rc)"; return 1; }
+    done
+}
+
 # --- state: the rules in docs/HANDOFF-workspace-state.md ---------------------
 
 _machine_state() {
@@ -877,6 +925,8 @@ if want quick; then
     check "one lock mechanism, everywhere: nothing in the tree calls \`flock\`" chk_one_lock_mechanism
     check "\`wk profile\` composes the right environment for each port"       chk_profile_resolves
     check "arming with no volume attached refuses"                         chk_hands_on_arming
+    check "a benchmark runs in the benchmark role or it does not run"      chk_bench_role_required
+    check "instead of exiting silently"                                    chk_boot_status_survives_an_absent_machine
 fi
 
 if want state; then

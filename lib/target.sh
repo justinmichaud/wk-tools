@@ -128,7 +128,7 @@ t_pull() {
     cp -f "$src" "$dest"
 }
 
-# t_pull_dir <name> <src-dir-in-target> <dest-dir-on-host>
+# t_pull_dir <name> <src-dir-in-target> <dest-dir-on-host> [--exclude PAT]...
 #
 # The same thing for a directory, and a separate hook rather than a loop over
 # t_pull, because every transport has a better answer than one file at a time:
@@ -139,10 +139,22 @@ t_pull() {
 # so a re-stage of the same tree cannot leave last build's binaries behind
 # next to this one's -- which is the failure that produces a benchmark of a
 # build nobody has.
+# The excludes are how a build tree is reduced to a *product* tree on the way
+# out: an Apple WebKitBuild/<config> is ~39 GB, and all but a few of them are
+# intermediates, module caches and the CAS, which nothing downstream can use.
+# A driver that cannot honour them refuses rather than copying everything and
+# calling it the same thing (see the container driver).
 t_pull_dir() {
-    local name="$1" src="$2" dest="$3"
+    local name="$1" src="$2" dest="$3"; shift 3
+    local ex=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --exclude) ex+=("--exclude" "${2:-}"); shift 2 ;;
+            *) die "t_pull_dir: unknown option $1" ;;
+        esac
+    done
     mkdir -p "$dest"
-    rsync -a --delete "$src/" "$dest/"
+    rsync -a --delete ${ex[@]+"${ex[@]}"} "$src/" "$dest/"
 }
 
 # t_spawn <name> <log> <pidfile> <cmd...>

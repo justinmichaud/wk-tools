@@ -410,7 +410,12 @@ t_pull() {
 # the contents rather than nesting the directory inside the destination, which
 # is `cp -r`'s rule and podman follows it.
 t_pull_dir() {
-    local name="$1" src="$2" dest="$3"
+    local name="$1" src="$2" dest="$3"; shift 3
+    # `podman cp` copies a tree or nothing; it has no filter. Refused rather
+    # than ignored, because a caller that asked for a product tree and got a
+    # 39 GB build tree would not find out until the disk did.
+    [ $# -eq 0 ] || die "t_pull_dir: the container driver cannot exclude paths ($*).
+    Copy the whole tree, or make the selection inside the workspace first."
     rm -rf "$dest"; mkdir -p "$dest"
     _podman cp "$(_ctr "$name"):$src/." "$dest"
 }

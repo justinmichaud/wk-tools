@@ -210,6 +210,43 @@ on this machine yet — exercised against a disposable `hdiutil` APFS volume):
   tens of thousands of files: `podman cp` for a container, rsync over ssh for
   a guest and for a build machine.
 
+### The rehearsal: a guest standing in for the benchmark role
+
+Everything above except the *number* can be exercised without a reboot and
+without a disk, by making the benchmark machine a second macOS guest:
+`boot/mac-guest.sh`, machine `benchvm`. Build in one guest, stage across the
+machine boundary into another, run there, read the result back — which is the
+whole design, with the one manual step replaced by `wk vm start`.
+
+It proves the mechanism and cannot prove the measurement: a guest shares a CPU
+with a desktop and its GPU is paravirtualised, which is precisely why the real
+role is bare metal. What it *does* answer, in minutes rather than in a
+half-hour trip to the keyboard, is whether the staged tree carries everything
+run-benchmark needs, whether the payload survives the crossing, whether the
+role is recognised on the other side, and whether the record is complete.
+
+Three things fell out of building it, all of which apply to the real machine
+too:
+
+- **Staging is products, not the build tree.** An Apple `WebKitBuild/<config>`
+  is ~39 GB and nearly all of it — `Intermediates.noindex`, the compilation
+  cache, the module cache, `DerivedData`, `*.dSYM` — is of no use to a machine
+  that will not compile anything. `t_pull_dir` grew `--exclude` for it, and the
+  container driver *refuses* excludes rather than silently copying everything
+  (`podman cp` has no filter).
+- **A machine that is off is a normal state.** The guest driver's probes ran
+  under `set -o pipefail` and `wk boot benchvm --status` exited 1 in silence
+  when the guest was not running. `wk selftest --quick` now asserts that every
+  driver answers `--status` with *something* and exits 0/2/3.
+- **`wk boot rpi5 --status` could not run on the Mac at all.** `date -u -d
+  @<epoch>` is GNU-only; BSD date answers "illegal option -- d". The fleet is
+  meant to be drivable from either workstation and one of them could not read a
+  machine's boot time — `epoch_to_utc`/`utc_to_epoch` in `lib/common.sh` now.
+
+The payload is pinned the same way in both: `wk bench stage --payload <dir>`
+copies a benchmark checkout in beside the build, so the run needs no network
+and cannot silently measure a different revision than the last run did.
+
 **Prepare the benchmark install by hand, once.** `wk quiesce` already covers
 the per-run half on macOS (a `caffeinate`, the analysis daemons paused, and the
 privileged helper switching Spotlight, automatic updates and low power mode
@@ -228,23 +265,75 @@ itself has to be:
   reports itself as a workstation;
 - ssh in, so the run can be driven from a terminal rather than a keyboard.
 
-**What is not written, deliberately.** The runner in the benchmark role. Two
-things have to be read out of a real checkout before it can be written
-honestly, and neither is guessable:
+**The runner: `wk bench staged`, written 2026-08-20** — and the two questions
+it was waiting on were answered by reading and running WebKit's own code (a
+`Tools/Scripts` tree out of a base snapshot, on this Mac), not by guessing:
 
-1. **Does `run-benchmark` drive from a partial tree?** The staged payload is
-   `Tools/` plus `WebKitBuild/<config>`; webkitdirs finds a checkout root by
-   looking for files that a partial tree may not have. If it does not, the
-   answer is a checkout on the volume — cloned once, `git fetch` per run, with
-   only the product staged each time — and that is a decision to take with the
-   measurement in hand, not before.
-2. **Which browser driver name is the Mac MiniBrowser?** The Linux ones are
-   `minibrowser-wpe` and `minibrowser-gtk` and are named in `cmd/bench`
-   already; the Apple one has to be read from
-   `webkitpy/benchmark_runner/browser_driver/`.
+1. **run-benchmark drives from a partial tree.** `Tools/Scripts` alone is
+   enough — `--list-plans` exits 0 with no checkout root, no `Source/`, no
+   `WebKitBuild`. Plan files come from `BenchmarkRunner.plan_directory()`,
+   which is relative to webkitpy itself, and so do the patches a plan applies
+   (`get_path_from_project_root` resolves against the `benchmark_runner`
+   package). So the staged tree never has to grow into a clone.
+2. **The browser is `--browser minibrowser --platform osx`,** and
+   `--build-directory` is what makes the partial tree work: with one, the
+   driver launches `MiniBrowser.app/Contents/MacOS/MiniBrowser` itself with
+   `DYLD_FRAMEWORK_PATH` set. Without one it goes through
+   `Tools/Scripts/run-minibrowser`, which is the path that *would* have needed
+   a checkout. It insists on a `*.framework` in the build directory.
 
-`wk bench stage` says all of this in its own output rather than implying the
-loop is closed.
+Two more things were found the same way, and both would otherwise have been
+discovered in the benchmark role with the machine already rebooted:
+
+3. **It needs a python with PyObjC.** The driver's `prepare_env` imports
+   `webkitpy.autoinstalled.pyobjc_frameworks`, whose first line is a bare
+   `import objc` — pyobjc-core is *not* autoinstalled. Apple's
+   `/usr/bin/python3` has it (3.9.6, pyobjc 11.1); the Homebrew python3 first
+   on PATH does not. The runner names the interpreter explicitly.
+4. **Everything else webkitpy installs itself**, into the staged tree
+   (`Tools/Scripts/libraries/autoinstalled`), on first use — so either the
+   benchmark install has the network once, or the tree is staged from a guest
+   where it has already happened and carries the packages with it.
+
+**The run happens in the benchmark role or it does not happen.** That is the
+one refusal here that `--force` does not open, at the user's direction and for
+the reason the whole design exists: a run on the workstation shares the machine
+with a desktop, a podman VM and a browser, and produces a result of exactly the
+same shape — same command, same plan, same build, same JSON. Nothing tells the
+two apart afterwards except the refusal, so there is no "record it as a
+workstation run" escape hatch. `--dry-run` still describes the whole thing from
+the workstation role, because describing is not measuring.
+
+`WK_IMAGE_MARKER` exists so the benchmark role's code path can be exercised
+without a reboot; a run that uses it is announced loudly and recorded as
+`role_marker_overridden`, and `wk bench compare` warns about it. The record
+cannot be made to lie by an override nobody remembers setting.
+
+**What the run records**, in the same shape a container run records so
+`wk bench compare` can put one against the other: the three axes
+(`class` / `runner` / `bench_host=image`), the role, the staged payload, the
+workspace and sha it came from, and the machine — model, cores, memory, macOS
+version, AC or battery, `CPU_Speed_Limit`, and the display size, because both
+Speedometer and MotionMark scale with the surface being drawn.
+
+**Preflight, all of it measured**: the role, run-benchmark in the staged tree,
+`MiniBrowser.app` plus a framework in the build, PyObjC in the interpreter that
+will be used, a console session (a browser driven over ssh with nobody logged
+in at the screen has nowhere to draw), AC power, and the machine's own quietness
+through the same `macos_noise` that `wk quiesce` uses.
+
+**Verified end to end against a simulated role** (a stub browser, a disposable
+APFS volume, a trivial payload): payload build, http server, driver creation,
+`prepare_env`, browser launch, the timeout path, the recorded failure with the
+real exception surfaced, and the record on the volume. What has *not* run is a
+measurement — that needs a real `mac-release` build, which needs the golden
+base guest this machine does not have yet.
+
+One side effect worth knowing about, found by running it: **a run that dies
+leaves the Dock's launch animation off.** webkitpy turns it off in
+`prepare_env` and restores it only on a clean exit; a timed-out run does not
+reach the restore. `wk bench staged` puts it back afterwards, and only when it
+is actually off.
 
 A fallback worth costing before ruling it out: a second internal-volume install
 on the same Mac (a separate APFS system volume in the same container), which

@@ -23,6 +23,7 @@ rpi5   Raspberry Pi 5, WiFi only. USB one-shot; the NVMe workstation is untouche
 rpi4   Raspberry Pi 4 (2 GB), on the LAN. Netboots; armed from the server side.
 rpi3   Raspberry Pi 3, on a direct cable. Netboots; needs real DHCP with option 43.
 mbp    This Mac. Boots a benchmark volume; the selection is hands-on (Apple Silicon).
+benchvm A macOS guest standing in for a benchmark install. Rehearses the path, not the number.
 EOF
 }
 
@@ -96,6 +97,20 @@ machine_load() {
         MACH_PROFILE=mac-bench
         MACH_ROLE=workstation
         MACH_NOTE="this Mac, booting its benchmark volume (hands-on)"
+        ;;
+    benchvm)
+        # A guest, so everything about it is scriptable -- which is what makes
+        # it the rehearsal for the MBP rather than a replacement for it. See
+        # boot/mac-guest.sh for what it can and cannot prove.
+        MACH_LOCAL=""
+        MACH_SSH=""            # the driver reaches the guest itself
+        MACH_DRIVER=mac-guest
+        MACH_DEVICE=""
+        MACH_ROOT=""
+        MACH_VOLUME=""
+        MACH_PROFILE=mac-bench
+        MACH_ROLE=test-device
+        MACH_NOTE="a macOS guest as a benchmark install (rehearsal)"
         ;;
     *)  return 1 ;;
     esac
@@ -284,7 +299,9 @@ b_booted_at() {
     local btime
     btime=$(r_ssh 'sed -n "s/^btime //p" /proc/stat' 2>/dev/null | tr -dc '0-9') || true
     [ -n "$btime" ] || return 0
-    date -u -d "@$btime" +%Y-%m-%dT%H:%M:%SZ
+    # Through the shared helper: BSD date has no `-d`, and this command is
+    # driven from both workstations (lib/common.sh, epoch_to_utc).
+    epoch_to_utc "$btime"
 }
 
 # The kernel's own identifier for this boot. This is what makes "has the
