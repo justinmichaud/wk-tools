@@ -566,6 +566,27 @@ case $rc in
     warn "BUILD FAILED  $CONFIG in '$NAME'  (exit $rc after ${MINS}m${SECS}s)"
     log "first error(s):"
     first_error "$LOG" | sed 's/^/  /' || true
+
+    # One failure that reads as a broken checkout and is neither: Xcode's build
+    # description is a derived artifact under WebKitBuild/<config>/XCBuildData,
+    # and a build that was interrupted -- or a tree cloned from a guest whose
+    # build was -- can leave it in a state the next build cannot use. The
+    # symptom is exit 65 and "unable to open .../manifest.json" for a hash that
+    # is not there. Nothing in the source is wrong and a clean build is an hour
+    # of penance for it; deleting the derived directory is the whole repair.
+    #
+    # Named rather than done automatically: this is somebody's build tree, and
+    # "wk deleted things and retried" is a worse first experience than one line
+    # saying exactly what to remove.
+    if grep -q 'xcbuilddata/manifest.json' "$LOG" 2>/dev/null; then
+        log ""
+        warn "that is Xcode's build description, not your code."
+        log  "  It is derived, and an interrupted build can leave it unusable."
+        log  "  The products survive; only the plan has to be rebuilt:"
+        log  "    wk enter $NAME rm -rf $(t_src "$NAME")/WebKitBuild/$(basename "$(config_build_dir "$(t_src "$NAME")")")/XCBuildData"
+        log  "    wk build $NAME $CONFIG"
+    fi
+
     log ""
     log "  full log: $LOG"
     exit "$rc"
