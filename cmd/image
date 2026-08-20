@@ -29,6 +29,8 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/image/profiles.sh"
 . "$WK_ROOT/boot/machines.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/image/yocto.sh"
 
 # Both of these act on physical machines: a boot device, a firmware register, a
 # disk image measured in gigabytes. None of that exists in a workspace, and the
@@ -45,6 +47,9 @@ usage() {
 usage: wk image <sub>
 
   build <profile> [--dry-run]     build an image from the spec in this repo
+                                  (a yocto profile also takes --workspace,
+                                   --stage, --detach, --stop, --keep-work,
+                                   --no-import)
   ls                              images in the store
   show <id>                       what an image is, and whether it still is
   flash <machine> [--image <id>]  write an image to that machine's boot device
@@ -452,8 +457,28 @@ WantedBy=multi-user.target
 # --- build -------------------------------------------------------------------
 
 cmd_build() {
-    local profile="${1:-}" dry=""
-    shift || true
+    local profile="${1:-}"
+    [ -n "$profile" ] || usage
+    image_profile_load "$profile" || die "unknown profile '$profile' (wk image ls)"
+    shift
+
+    # Two builders, one verb, dispatched on the profile rather than on a flag:
+    # which mechanism makes an image is a property of the image, and asking the
+    # caller to say it as well would be a second copy of one fact -- and one
+    # that can disagree. Everything below this line is the distro builder;
+    # image/yocto.sh is the other one, and they share only what comes after the
+    # manifest.
+    if [ "${IMG_BUILDER:-distro}" = yocto ]; then
+        # The target the build workspace lives on. Resolved here rather than in
+        # the builder because load_target is this file's business (the distro
+        # path needs it for `flash`), and the builder needs WK_TARGET_KIND to
+        # refuse a remote or VM workspace.
+        load_target "${WK_TARGET:-$(default_target)}"
+        yocto_build "$profile" "$@"
+        return $?
+    fi
+
+    local dry=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) dry=1 ;;
@@ -461,9 +486,6 @@ cmd_build() {
         esac
         shift
     done
-
-    [ -n "$profile" ] || usage
-    image_profile_load "$profile" || die "unknown profile '$profile' (wk image ls)"
 
     # Collected rather than asserted, so --dry-run can answer "it would fail,
     # and here is what is missing" instead of failing at the check itself. A

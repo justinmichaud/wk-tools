@@ -1,0 +1,135 @@
+# The workspace image for a Yocto build: a *supported Yocto build host*.
+#
+# Why this is not a layer on the wkdev SDK image
+# ---------------------------------------------
+# It was, for a while, and every problem that cost a debugging cycle came from
+# that decision. The SDK image is Ubuntu 26.04: GCC 15, Python 3.14, glibc 2.43.
+# Yocto scarthgap is from 2024 and its supported build hosts stop at Ubuntu
+# 24.04. Five distinct failures came out of the gap, in this order:
+#
+#   1. four Yocto host packages simply absent (texinfo above all -- `makeinfo`
+#      is in bitbake's HOSTTOOLS and therefore mandatory)
+#   2. bitbake could not start: Python 3.14 defaults multiprocessing to
+#      `forkserver`, which pickles its target, and bitbake's is a closure
+#   3. `unzip-native` and `m4-native` would not compile under GCC 15 -- 2009
+#      tarballs meeting a 2026 compiler, with dozens more behind them
+#   4. adding the Yocto Project's buildtools tarball to fix 3 gave the build a
+#      GCC 13 and a Python 3.12, and then `cross-toolchain-helper` would not
+#      run, because that Python has no `readline` and webkitcorepy imports it
+#   5. and with buildtools in place, `gtk+3-native` died on a *header* mismatch:
+#      meson's CMake fallback found the SDK image's host cups (2.4.16, there
+#      because WebKit's GTK port needs it), added `-I/usr/include`, and mixed
+#      glibc 2.43 headers into a build using buildtools' 2.39 ones --
+#      `unknown type name '__time64_t'`
+#
+# 5 is the one that settled it. The SDK image is full of development headers by
+# design -- that is what a WebKit SDK is -- and buildtools makes every one of
+# those leaks fatal rather than harmless. The number of such leaks is not
+# knowable in advance, so each would have been found by a multi-hour build.
+#
+# On a 24.04 base all five are gone by construction: GCC 13, Python 3.12 and
+# glibc 2.39 are what scarthgap was written and tested against, so there is no
+# buildtools tarball, no sitecustomize, no interpreter split, and no header
+# mismatch to leak into. It also fixes something quieter: with glibc 2.39,
+# bitbake's uninative is *enabled*, so `NATIVELSBSTRING` is `universal` and the
+# sstate cache is portable rather than namespaced to one host release.
+#
+# The cost, and it is the real one: this image is not the WebKit SDK, so it
+# carries only what a Yocto build and WebKit's own driving scripts need. It is
+# not a workspace to develop WebKit in; `wk new` on it exists to build images.
+# Built by image/yocto.sh, tagged localhost/wk-yocto-host:<the ubuntu tag>.
+
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Three groups, kept apart because they answer to different authorities.
+#
+#   Yocto's own required-host-packages list for Ubuntu, from the Yocto Project
+#   reference manual, verbatim except `lz4` for the `liblz4-tool` it still
+#   names (transitional here, gone by 26.04).
+#
+#   What WebKit's driving scripts need: `cross-toolchain-helper` is Python and
+#   imports webkitpy -> webkitcorepy -> requests and readline; `build-webkit`
+#   is perl and drives cmake and ninja for the --stage webkit cross build.
+#
+#   What the workspace scaffolding needs. wkdev-create's `.wkdev-init` creates
+#   the container user (`useradd`, `getent`) and a sudoers drop-in; wk's own
+#   container/firstrun.sh fetches the Claude CLI and helix over the egress
+#   proxy. Both tolerate failure, but a workspace whose user cannot be created
+#   is not a workspace.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        \
+        build-essential \
+        chrpath \
+        cpio \
+        debianutils \
+        diffstat \
+        file \
+        gawk \
+        git \
+        iputils-ping \
+        libacl1 \
+        locales \
+        lz4 \
+        python3 \
+        python3-git \
+        python3-jinja2 \
+        python3-pexpect \
+        python3-pip \
+        python3-subunit \
+        socat \
+        texinfo \
+        unzip \
+        wget \
+        xz-utils \
+        zstd \
+        \
+        cmake \
+        ninja-build \
+        perl \
+        python3-requests \
+        \
+        bash \
+        ca-certificates \
+        curl \
+        iproute2 \
+        less \
+        passwd \
+        procps \
+        sudo \
+        tar \
+    && rm -rf /var/lib/apt/lists/*
+
+# poky's sanity check wants a UTF-8 locale and its documentation names this one.
+RUN sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen && locale-gen
+
+# Free uid 1000.
+#
+# Ubuntu's base images have shipped a default `ubuntu` user at uid 1000 since
+# 23.04, and wkdev-create maps the *host* user's uid into the container
+# unchanged -- which is what makes the bind-mounted home and the overlay
+# checkout writable. `useradd --uid 1000` then fails, and it fails quietly
+# (wk's own SDK patch ends that line with `|| true`), so the next step reports
+# the confusing half of it: "Creating user jmichaud (1000:1000)" followed by
+# "usermod: user 'jmichaud' does not exist".
+#
+# Removing the placeholder user is the standard fix for a base image used this
+# way. Not conditional on 1000 being the host uid: this image exists to be
+# initialised by wkdev-create, and nothing in it wants an `ubuntu` account.
+RUN userdel -r ubuntu 2>/dev/null || true
+
+# The marker that lets wkdev-create's `.wkdev-init` initialise this container.
+#
+# `.wkdev-init` refuses to run outside a wkdev-sdk container, and its test is
+# whether `/usr/bin/podman-host` exists -- a file the SDK image ships. That
+# guard is right (running it on a host would be a mess) and this image is
+# genuinely not the SDK, so the answer is a second, honest discriminator rather
+# than a stub `podman-host`: that file is a working podman wrapper in the SDK
+# image and something would eventually call it. sdk-patches/apply.sh section 13
+# teaches the guard about this one.
+RUN printf '%s\n' \
+        'Built by wk (container/yocto/Containerfile) as a Yocto build host.' \
+        'Not a wkdev-sdk image. See sdk-patches/apply.sh section 13.' \
+        > /etc/wk-container

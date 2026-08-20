@@ -296,10 +296,20 @@ t_create() {
     # (sdk-patches/apply.sh section 12); without it `--arch arm` picks the
     # aarch64 image of the current SDK version and asks podman for a 32-bit
     # container from it.
+    #
+    # WK_SDK_IMAGE overrides the image, and the only thing that sets it is the
+    # Yocto builder (image/yocto.sh), which needs a workspace with Yocto's host
+    # tooling in it. It wins over the arch-derived image because it is the more
+    # specific statement of the two -- and an armhf Yocto workspace, if one ever
+    # exists, would want an armhf image with that tooling rather than either
+    # half. The architecture stays whatever it was: the image is a different
+    # question from the arch, which is why they are chosen separately here.
     local -a archopts=()
-    if ! arch_is_native "$arch"; then
-        archopts=(--arch "$(arch_podman "$arch")" --image "$(arch_image "$arch")")
-    fi
+    local image="${WK_SDK_IMAGE:-}"
+    arch_is_native "$arch" || archopts+=(--arch "$(arch_podman "$arch")")
+    [ -n "$image" ] || arch_is_native "$arch" || image=$(arch_image "$arch")
+    [ -z "$image" ] || archopts+=(--image "$image")
+    [ -z "${WK_SDK_IMAGE:-}" ] || info "using workspace image $WK_SDK_IMAGE (WK_SDK_IMAGE)"
 
     info "creating workspace '$name' from base $base_id ($WK_SANDBOX${arch:+, $arch})"
     # shellcheck disable=SC2046 -- _sdk_opts is a deliberate list of words.
@@ -375,6 +385,51 @@ t_exec() {
     local name="$1"; shift
     local c; c=$(_ctr "$name")
     _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --quiet --name "$c" --exec -- $(_wrap_cmd) "$@"
+}
+
+# The container's home is the workspace's own `home/` directory on the host,
+# bind-mounted (`--home $ws/home` in t_create). Naming it here is what lets the
+# host follow a detached build's log with a plain `tail -f`.
+t_home() { echo "/home/$WKDEV_CONTAINER_USER"; }
+
+# `podman cp`, for the same reason t_spawn is `podman exec -d`: the generic
+# implementation goes through `wkdev-enter`, and that is an interactive-shell
+# wrapper rather than a byte pipe. A 1396-byte file read with `t_exec ... cat`
+# arrived as 1399 bytes and xz refused it -- three bytes of difference that
+# nothing at the call site could have seen.
+t_pull() {
+    local name="$1" src="$2" dest="$3"
+    _podman cp "$(_ctr "$name"):$src" "$dest"
+}
+
+# podman's own detached exec, because the generic `setsid nohup` in
+# lib/target.sh does not survive here: when the `podman exec` client exits,
+# podman tears the exec session down and takes the process with it, new session
+# or not. Verified on this machine -- a detached `sleep 3; echo` started that
+# way never wrote its file, and the same command under `podman exec -d` did.
+#
+# Two things have to be reproduced that `wkdev-enter` would otherwise do, since
+# this bypasses it:
+#
+#   the bridge.  ensure-bridge.sh is what gives the workspace egress at all
+#   (it forwards loopback to the proxy socket), and t_exec wraps every command
+#   in it. A detached build that fetches sources needs it just as much.
+#
+#   the user and the login shell.  `podman exec` runs as root by default -- the
+#   container's configured user is not consulted -- and without a login shell
+#   the PATH the SDK sets up in ~/.bash_profile is missing. Both would produce
+#   a build that fails in a way that has nothing to do with the build.
+t_spawn() {
+    local name="$1" log="$2" pidf="$3"; shift 3
+    local c u; c=$(_ctr "$name"); u="$WKDEV_CONTAINER_USER"
+    # $$ is written before the exec, so the pid recorded is the pid the command
+    # goes on to have. Redirected explicitly: under `exec -d` stdout is
+    # podman's and goes nowhere.
+    _podman exec -d --user "$u" "$c" \
+        /opt/wk-tools/container/proxy/ensure-bridge.sh \
+        /usr/bin/env "USER=$u" "HOME=/home/$u" bash --login -c \
+        "echo \$\$ > $(sh_quote "$pidf"); exec $(sh_quote "$@") > $(sh_quote "$log") 2>&1 < /dev/null" \
+        >/dev/null
 }
 
 t_enter() {

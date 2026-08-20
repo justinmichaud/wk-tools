@@ -8,16 +8,26 @@
 #
 # A profile sets:
 #
+#   IMG_BUILDER      which mechanism builds it:
+#                      distro -- download a pinned distro image and seed it
+#                        (cloud-init, minutes, unprivileged, done on the host)
+#                      yocto  -- bitbake a whole distribution from source in a
+#                        workspace (hours, tens of gigabytes; image/yocto.sh)
+#                    The two share only the store and the flashing path. Every
+#                    field below marked (distro) is meaningless to the yocto
+#                    builder and is not set by a yocto profile -- a profile that
+#                    set them anyway would be describing a seeding step that
+#                    never runs.
 #   IMG_MACHINE      the fleet machine it is built for (boot/machines.sh)
 #   IMG_ARCH         the image's architecture
-#   IMG_BASE_URL     distro base, pinned
-#   IMG_BASE_SHA256  ... and pinned by content, not by name
-#   IMG_BASE_KIND    which seeding dialect the base speaks
+#   IMG_BASE_URL     (distro) distro base, pinned
+#   IMG_BASE_SHA256  (distro) ... and pinned by content, not by name
+#   IMG_BASE_KIND    (distro) which seeding dialect the base speaks
 #   IMG_HOSTNAME     what it calls itself once booted
-#   IMG_WATCHDOG     seconds before the self-return reboot, unless kept
-#   IMG_GROW         whether cloud-init may grow the root partition
-#   IMG_PACKAGES     packages installed on first boot (needs egress)
-#   IMG_NETWORK      how the image gets on the network:
+#   IMG_WATCHDOG     (distro) seconds before the self-return reboot, unless kept
+#   IMG_GROW         (distro) whether cloud-init may grow the root partition
+#   IMG_PACKAGES     (distro) packages installed on first boot (needs egress)
+#   IMG_NETWORK      (distro) how the image gets on the network:
 #                      wifi-from-machine -- copy the credential off the target
 #                        board itself, so the PSK never travels through a log
 #                        or an agent's context. Requires the board to be up,
@@ -25,9 +35,25 @@
 #                      wired -- DHCP on eth0, no secret at all, so the image
 #                        builds with the target powered off. This is why a
 #                        cabled test device is easier to serve than the rpi5.
-#   IMG_LABEL_ROOT   the image's own root filesystem label
-#   IMG_LABEL_BOOT   ... and its boot filesystem label
+#   IMG_LABEL_ROOT   (distro) the image's own root filesystem label
+#   IMG_LABEL_BOOT   (distro) ... and its boot filesystem label
 #   IMG_SPEC_DIR     the profile's own files
+#
+# A yocto profile sets these instead (image/yocto.sh reads them):
+#
+#   YOC_BRANCH       the WebKit branch whose Tools/yocto config is the spec.
+#                    This is the whole version pin: that branch's manifest.xml
+#                    names every layer by commit, so "which Yocto, which
+#                    meta-webkit, which kernel" is answered by the release
+#                    branch rather than by anything written here.
+#   YOC_TARGET       the cross-target section in Tools/yocto/targets.conf
+#   YOC_IMAGE        the bitbake image recipe (targets.conf's image_basename)
+#   YOC_RM_WORK      1 to inherit rm_work -- see image/yocto.sh for the
+#                    disk-space argument, which is the reason it defaults on
+#   YOC_CHROMIUM     1 to leave Chromium in the image, 0 to drop it. The
+#                    branch's own local.conf adds it ("to be able to compare
+#                    WPE/Chromium performance"), and it is about half the build
+#                    -- see the profile for the numbers.
 #
 # The two labels are not cosmetic and not optional. A distro image and an
 # install made from the same distro image carry the *same* filesystem labels --
@@ -58,12 +84,29 @@ rpi5-perf   Ubuntu 26.04 server, aarch64, for the rpi5's USB one-shot: no
 rpi4-perf   the same, cabled: DHCP on eth0, no credential, so it builds with
             the board switched off
 rpi3-perf   likewise, for the rpi3 on its direct cable
+
+rpi4-wpe-2.48
+            WPE WebKit 2.48's own Yocto image for the rpi4 (aarch64,
+            scarthgap, weston): the runtime the 2.48 release branch pins,
+            bitbaked from source in a workspace. Hours, not minutes.
 EOF
 }
 
 image_profile_load() {
     IMG_PROFILE="$1"
     IMG_SPEC_DIR="$WK_ROOT/image/$1"
+
+    # Reset every field a profile may set, so a second load in one process
+    # cannot inherit the first profile's answers. `wk boot --list` loads one
+    # profile per machine in a loop, and a yocto profile that silently kept the
+    # previous profile's IMG_BASE_URL would describe an image that does not
+    # exist.
+    IMG_BUILDER=distro
+    IMG_MACHINE=""; IMG_ARCH=""; IMG_BASE_KIND=""; IMG_BASE_URL=""
+    IMG_BASE_SHA256=""; IMG_HOSTNAME=""; IMG_WATCHDOG=""; IMG_GROW=""
+    IMG_PACKAGES=""; IMG_NETWORK=""; IMG_LABEL_ROOT=""; IMG_LABEL_BOOT=""
+    YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
+    YOC_CHROMIUM=1
 
     case "$1" in
     rpi5-perf)
@@ -143,6 +186,49 @@ image_profile_load() {
         IMG_PACKAGES="linux-tools-raspi avahi-daemon"
         IMG_LABEL_ROOT=wk-image-root
         IMG_LABEL_BOOT=WK-IMG-BOOT
+        ;;
+    # --- yocto ------------------------------------------------------------
+    #
+    # A different mechanism entirely, and the profile says so in one field
+    # rather than by which other fields happen to be set. Nothing below is a
+    # distro base, a cloud-init seed, or a filesystem relabel: bitbake builds
+    # the whole distribution, partitions it with wic, and the result enters the
+    # store as an image like any other -- which is the entire reason to put it
+    # here rather than in a command of its own. `wk image flash`, `wk image
+    # show` and the SD-card path then work on it unchanged.
+    rpi4-wpe-2.48)
+        IMG_BUILDER=yocto
+        IMG_MACHINE=rpi4
+        IMG_ARCH=arm64
+        # The version pin, and the only one. Tools/yocto on this branch names
+        # poky, meta-openembedded, meta-raspberrypi, meta-webkit, meta-clang
+        # and meta-browser by commit, so pinning the branch pins the whole
+        # distribution -- and pins it to the same tree the WebKit that will run
+        # on the board is built from, which is what makes the pair coherent.
+        # `webkitglib/2.48` is the release branch for both GLib ports; there is
+        # no separate `wpe-2.48` in WebKit/WebKit.
+        YOC_BRANCH=webkitglib/2.48
+        YOC_TARGET=rpi4-64bits-mesa
+        # targets.conf's image_basename for that target. Named here as well so
+        # a missing or renamed section fails with "that target is gone" rather
+        # than with bitbake's own error four hours in.
+        YOC_IMAGE=webkit-dev-ci-tools
+        YOC_RM_WORK=1
+        # Chromium out. The branch's own local-rpi4-64bits-mesa.conf adds it --
+        # "Add chromium to image to be able to compare WPE/Chromium
+        # performance" -- and that is a real reason on a fleet built for
+        # comparative benchmarking. It is also, by a wide margin, the most
+        # expensive thing in the build: measured here, chromium-ozone-wayland
+        # and gn-native were 21 GB of TMPDIR *each*, with rust-native,
+        # cargo-native, rust-llvm-native and mozjs-115 behind them, and roughly
+        # half of the 13,379 tasks. This profile exists to get a WPE runtime
+        # onto the rpi4, so it is off, and `--chromium` puts it back for the day
+        # the comparison is the point.
+        YOC_CHROMIUM=0
+        # What the board calls itself. Yocto takes it from MACHINE and there is
+        # no cloud-init here to override it, so this is recorded rather than
+        # applied -- it is what `wk image show` should be able to answer.
+        IMG_HOSTNAME=raspberrypi4-64
         ;;
     *)  return 1 ;;
     esac

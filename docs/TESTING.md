@@ -1288,6 +1288,238 @@ the reader (which must never mistake intent for evidence).
       ephemeral data port make it worse again — untested, and not worth
       testing unless someone proposes it a second time
 
+### Building a Yocto image — `wk image build rpi4-wpe-2.48`
+
+The second builder behind the same verb. What is checked here is the seam
+between the two, and the things the distro builder never had to think about: a
+build that outlives its driver, a cache that outlives its workspace, and an
+egress list that cannot be "every upstream in six layers".
+
+- [V] `wk image build rpi4-wpe-2.48 --dry-run` resolves the branch, the
+      cross-target, the recipe, the stage list, the workspace, the two caches
+      and the free disk, and builds nothing
+- [V] the same command with a *distro* profile still takes the distro path
+      unchanged — one verb, dispatched on `IMG_BUILDER`, and neither builder
+      sees the other's flags (`wk image build rpi4-wpe-2.48 --bogus` names the
+      yocto flags; `wk image build rpi4-perf --dry-run` is untouched)
+- [V] the build workspace is created on demand and left on the profile's
+      branch; a workspace on the wrong branch is checked out rather than built
+      in — the branch *is* the version pin
+- [V] `--stage layers` does the network-bound `repo sync` and nothing else, so
+      an egress failure is not reported as a build failure
+- [V] a workspace can actually be *created* from a non-SDK image. Three things
+      had to give, each found by a container that exited on startup:
+      `.wkdev-init` refuses to run outside a wkdev-sdk container (its test is
+      `/usr/bin/podman-host`, so our image writes `/etc/wk-container` and SDK
+      patch 13 accepts it); `utilities/podman.sh` then demanded `systemctl`
+      because patch 13 made our container claim podman-host integration it does
+      not have (patch 14 scopes that file to the file its own comment names);
+      and Ubuntu base images ship an `ubuntu` user at **uid 1000**, so
+      `useradd --uid 1000` failed quietly and the next step said "usermod: user
+      'jmichaud' does not exist"
+- [V] the workspace image is a **supported Yocto build host** — `ubuntu:24.04`,
+      GCC 13, Python 3.12, glibc 2.39 — and not a layer on the wkdev SDK image.
+      That is the single check that subsumes five others: on the SDK image
+      (26.04 / GCC 15 / Python 3.14) the build failed five distinct ways, the
+      last of which was unbounded. See `container/yocto/Containerfile`
+- [V] the preflight names missing Yocto host tooling **in the first second**
+      rather than after the layer sync. Verified against the plain SDK image,
+      which lacked four (`makeinfo socat python3-git python3-pexpect`);
+      `makeinfo` is in bitbake's `HOSTTOOLS` and therefore mandatory
+- [V] the image is built on the **host** (`podman build`), not by `apt` inside
+      the sandbox: a workspace has no interface and the allowlist has no Ubuntu
+      archive, and neither of those is a thing to change to make a build work
+- [V] it is built on demand, tagged with the base's own tag, and passed to
+      `wk new` through `WK_SDK_IMAGE`
+- [V] bitbake starts and parses the whole metadata — 3105 recipes, 5137
+      targets, **0 errors**
+- [V] `tmp/hosttools/gcc` points at the toolchain in force **now**. bitbake
+      hands tasks `tmp/hosttools` rather than `PATH` and only creates a
+      *missing* symlink, so a directory from an earlier run pins that run's
+      compiler: the log once reported GCC 13.3 while the build used GCC 15, and
+      `m4-native`/`unzip-native` failed identically. Verified by reading the
+      symlink, never by reading the log
+- [V] and **only** `tmp/hosttools` is discarded. Deleting native work trees
+      alongside it — which an earlier version did — leaves `tmp/stamps` saying
+      those tasks are done, and produces `do_patch` on an empty directory and
+      `do_compile` with no makefile. `tmp/work` is not the unit of
+      invalidation; `bitbake -c cleansstate` or the whole of `tmp` is
+- [V] nothing in the workspace half can fail silently: an `ERR` trap prints the
+      line and the command. Earned — a `find` on a not-yet-existing directory
+      met `pipefail` and ended a detached run with no message at all
+- [V] Chromium is **out** of the image by default (`YOC_CHROMIUM=0`), and
+      `--chromium` puts it back. The branch's own `local.conf` adds it for
+      WPE-vs-Chromium comparison; measured here it is
+      `chromium-ozone-wayland` and `gn-native` at **21 GB of TMPDIR each**, plus
+      rust/cargo/rust-llvm and mozjs behind them, and about half of the 13,379
+      tasks
+- [V] a knob that lands in `local.conf` takes effect on **every** run, not only
+      the one that created the file. `configure_local_conf` rewrites its own
+      block rather than returning early when its marker is present — otherwise
+      `--chromium`, `--keep-work` and the job counts silently do nothing on the
+      second invocation
+- [V] `do_package` works, with pseudo bumped to 1.9.11 in
+      `image/yocto/meta-wk`. Verified by the three-line reproducer and by the
+      exact recipe that failed (`update-rc.d ... do_package: Succeeded`) rather
+      than by a rebuild. The layer's rule is build-time recipes only: pseudo
+      never enters the image, so this changes how the image is built and not
+      what it contains
+- [V] all three of scarthgap's pseudo patches had to be dropped — two are
+      upstream by name, the third (`older-glibc-symbols.patch`) is safe to drop
+      only because sstate is namespaced per build-host image, which the bbappend
+      records
+- [x] ~~**blocked:** `do_package` fails under scarthgap's
+      `pseudo` on this host (`got *at() syscall for unknown directory`).
+      Reduced to `pseudo bash -c 'tar -cf - . | tar -xf -'`, which fails with no
+      bitbake involved, and fails identically in a **plain `podman run`** with
+      default seccomp, default caps and network up. The overlay, the sandbox,
+      the host tar and mixed sstate were each tested and refuted.~~ Fixed; the
+      four refuted hypotheses are kept in `docs/HANDOFF-yocto.md` because each
+      is the obvious guess
+- [ ] `wk image build rpi4-wpe-2.48` compiles the whole image — **not yet run to
+      completion** (hours; see `docs/HANDOFF-yocto.md`)
+- [V] the *import* half is verified independently of it, against a hand-made
+      8 MB image in a throwaway cross-target directory: `disk.img` and
+      `rootfs.tar.xz` land in the store, the manifest is written last,
+      `wk image ls` lists it and `wk image show` re-hashes it and agrees. Worth
+      testing separately precisely because a bug here would only surface after
+      six hours of compiling
+- [V] the import is a real file copy (`t_pull`), not `t_exec … cat`. That was
+      the first attempt and it **silently corrupts binary**: a 1396-byte image
+      arrived as 1399 bytes and xz refused it. Nothing at the call site could
+      have seen that, which is why it is a named driver primitive
+- [V] the imported image is checked for a readable partition table before it is
+      hashed — a contaminated stream would otherwise hash perfectly and fail on
+      the board
+- [V] an interrupted import leaves a directory with no manifest, which
+      `wk image ls` reports as rubble by name (seen for real, from the corrupt
+      first attempt)
+- [V] the manifest records `cross_version`, the hash
+      `cross-toolchain-helper` also installs in the image at
+      `/usr/share/cross-target-info-version`, so "is this board running this
+      image" is a string comparison rather than a belief
+- [ ] a second `wk image build` of the same profile reuses the sstate cache and
+      is dramatically faster than the first
+- [V] the store now holds both namespaces — `sstate/ubuntu-26.04/` from the
+      abandoned 26.04 image (where uninative was disabled, so native sstate was
+      pinned to that release) and `sstate/universal/` from this one. Dead weight
+      rather than a problem, and `wk gc` reports the directory as kept so it is
+      visible rather than silent
+- [V] the caches are store-backed and shared, tested from a **fresh, unrelated
+      workspace**: `/cache/yocto` is a bind of
+      `$WK_STORE/cache/yocto`, `DL_DIR`/`SSTATE_DIR` point into it, it is
+      writable, and it already holds 24 GB / 1726 download entries, 3263 sstate
+      packages — none of which that workspace put there
+- [V] `wk rm` on that workspace left both caches **byte-identical**
+      (`downloads` 25357468380 → 25357468380 bytes) while the workspace
+      directory and container went. `t_destroy` removes only `$ws`; the cache is
+      not under it. Shown twice, the second time across a **base-image change**:
+      the workspace was destroyed and remade on a different image and the 24 GB
+      of `DL_DIR` was still there to reuse
+- [V] `DL_DIR` reuse is real, not just written: the second `--stage fetch` pass
+      reported *1490 of 1492 tasks didn't need to be rerun*
+- [V] **sstate read-reuse works** — but the first demonstration of it was also
+      a bug. The first build on the 24.04 image reported *Sstate summary: Wanted
+      6369 Local 3007 Missed 3362 (47% match)*, reusing 3007 packages written
+      under the **abandoned 26.04 host**, where bitbake had disabled uninative
+      "so that sstate is not corrupted". Five recipes then failed in
+      `do_package` with `pseudo` unable to intercept `*at()` syscalls
+      (`got *at() syscall for unknown directory`, `tar: Cannot mkdir: Bad
+      address`). *Target* sstate paths carry no host marker, so bitbake had no
+      way to refuse the mix
+- [V] so `SSTATE_DIR` is namespaced by the build-host image tag
+      (`cache/yocto/sstate/wk-yocto-host-24.04-<digest>`), which makes the mix
+      impossible rather than documented. `DL_DIR` stays shared — a source
+      tarball is a source tarball whatever built it, and it is the 24 GB that is
+      expensive to refill
+- [V] uninative is **enabled** on this host, which is what makes native sstate
+      portable rather than namespaced per host release. Checked by evidence, not
+      by the `Build Configuration` header — that prints
+      `NATIVELSBSTRING = ubuntu-24.04` before uninative's own event handler
+      rewrites it to `universal<gcc>`. The evidence is a `sstate/universal/`
+      subtree and `downloads/uninative`, plus the *absence* of the "your host
+      glibc is newer than uninative's — disabling" warning that the 26.04 image
+      produced
+- [V] the trap underneath all of this is bitbake's **environment filtering**:
+      `DL_DIR` and `SSTATE_DIR` are set by `targets/container.sh` and are
+      silently *dropped* unless named in `BB_ENV_PASSTHROUGH_ADDITIONS`, so a
+      build can look perfectly healthy while writing its cache into the layer
+      `wk rm` deletes. They are named there *and* written into `local.conf`,
+      and the 24 GB in the store is the evidence that it took
+- [V] `wk image build <profile> --stop` stops a detached build, killing bitbake
+      as well as the wrapper, with SIGTERM rather than SIGKILL so bitbake closes
+      its own state and the sstate cache stays resumable
+- [ ] a killed build leaves no lock behind. **Fails today**: the atomic-mkdir
+      lock writes the holder's pid *inside* the directory it has just created,
+      and the next taker reclaims only when it can read that pid — so a
+      directory with no pid file is indistinguishable from a live holder, and
+      `wk rm` waited out its whole timeout on one. `lib/common.sh`, reported in
+      `docs/HANDOFF-yocto.md` rather than fixed (other lane's file this week)
+- [V] editing `container/yocto/Containerfile` rebuilds the workspace image. The
+      tag carries a digest of the spec, because keying it on the base tag alone
+      meant `podman image exists` said yes, the edit never reached any
+      workspace, and it looked exactly like the change not working
+- [V] `--stop` matches on **this workspace's build directory**, never on the
+      word `bitbake`. A wkdev container shares the host's PID namespace, so
+      `pkill -f bitbake` from inside one reaches every bitbake on the machine —
+      another workspace's build included
+- [ ] `--keep-work` turns off `rm_work`, and `bitbake -c menuconfig
+      virtual/kernel` in `--bitbake-dev-shell` then has the kernel tree to
+      configure (the wiki's 16 KB-page / 36-bit-VA flow)
+
+### Detached, and it really is detached
+
+- [V] a stage started by `wk image build` survives the driving process being
+      killed. The reason this needs its own line: `setsid nohup` through
+      `podman exec` **does not** — measured, with a detached `sleep 3; echo`
+      that never wrote its file — so the container driver detaches with
+      podman's own `exec -d` (`t_spawn`), and the generic `setsid nohup` is
+      right only where the far side is reached over ssh
+- [V] `podman exec -d` needs `--user` and a login shell spelled out, because it
+      bypasses `wkdev-enter`: without them the build runs as **root** with no
+      SDK `PATH`, and fails for reasons that have nothing to do with the build
+- [V] the detached stage's log is followable with a plain `tail -f` on the
+      host, no podman involved — the workspace's `$HOME` *is* `$ws/home`
+- [ ] `--detach` returns immediately, and re-running the same stage later
+      re-attaches rather than starting a second one
+- [ ] a stage still running is refused by name rather than started twice
+- [ ] "finished" is decided from the wrapper's own marker line, not from an
+      exit status — a process nobody forked cannot be waited for, and a build
+      whose container was killed leaves a log with no marker
+- [ ] a long-silent bitbake task is **reported and not killed**, unlike a
+      stalled compile: `run_watched`'s abort would cost hours that sstate
+      cannot always give back
+
+### The Yocto egress widening
+
+- [V] the build is pointed at the Yocto source mirror first (`own-mirrors` +
+      `SOURCE_MIRROR_URL`), and a full `--runall=fetch` pass over **1492 fetch
+      tasks** then needs only **seven** hostnames in total. That number is the
+      measurement the design rests on, not an estimate: `yoctoproject.org`,
+      `openembedded.org`, `googlesource.com`, `freedesktop.org`, `kernel.org`,
+      `videolan.org`, `metacpan.org`
+- [V] `BLOCKED_NETS` is unchanged, so none of the three can become a route onto
+      the LAN or the tailnet
+- [V] a recipe whose source the mirror lacks is refused by the proxy and the
+      refusal names the host — `gitlab.freedesktop.org` for `polkit`, 2900 tasks
+      in. The mirror carries oe-core's sources and not meta-openembedded's,
+      meta-raspberrypi's, meta-clang's or meta-webkit's, so this is the normal
+      case for those four layers rather than an edge one
+- [V] `--stage fetch` (`bitbake --runall=fetch -k`) names **every** such host in
+      one pass instead of one halted build per host. `-k` is the load-bearing
+      flag; without it the allowlist could only grow one host per full run
+- [V] with all seven hosts allowed, the pass comes back clean: *Attempted 1492
+      tasks … all succeeded*, 24 GB in `DL_DIR`, so the compile that follows
+      needs no network at all
+- [V] the yocto hosts are allowed on **port 80 as well as 443**. poky's built-in
+      `PREMIRRORS`/`MIRRORS` are `http://` URLs, so 443-only refuses the mirror
+      itself (`DENY downloads.yoctoproject.org:80`) and sends every fetch
+      upstream — the inverse of what pointing at a mirror was for
+- [V] two stages cannot run in one workspace: they share a bitbake build
+      directory, and `yocto_spawn` refuses on *any* live stage rather than only
+      the one asked for. Found by a `--stage fetch` starting on top of a live
+      `--stage image` and reaching two cookers
+
 ### Reclaiming — `wk gc` knows about images
 
 - [V] rubble from an interrupted image build is removed

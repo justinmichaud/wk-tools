@@ -7,7 +7,7 @@
 # survive rebasing the fork onto upstream, and patch fuzz on a moving target is
 # worse than a script that checks what it is editing.
 #
-# Eleven numbered sections, each independently upstreamable. The load-bearing
+# Fourteen numbered sections, each independently upstreamable. The load-bearing
 # ones for the sandbox: 2 (--network selectable, so --network none is possible),
 # 3 (SYS_ADMIN/NET_RAW/seccomp opt-in), 6 (no host podman socket), 11
 # (--isolated: no session D-Bus, keyring, host home or runtime dir). The rest
@@ -498,6 +498,116 @@ if "an explicitly pinned image" not in src and anchor in src:
 open(path, "w").write(src)
 PYSECTION12
 
+# --- 13: let a non-SDK container be initialised ------------------------------
+# `.wkdev-init` refuses to run outside a wkdev-sdk container, and the test is
+# `is_running_in_container && [ -f /usr/bin/podman-host ]` -- that file being
+# something the SDK image ships. The guard is right: running it on a host would
+# be a mess.
+#
+# But the Yocto builder needs a workspace whose image is *not* the SDK. Yocto
+# scarthgap's supported build hosts stop at Ubuntu 24.04 and the SDK image is
+# 26.04, and that gap breaks the build in five different ways
+# (container/yocto/Containerfile). So `wk image build <a yocto profile>` creates
+# its workspace from a plain 24.04 image with Yocto's host tooling in it, and
+# `.wkdev-init` then aborts with "intended to run from within the wkdev-sdk
+# container only".
+#
+# The fix is a second discriminator rather than a fake `/usr/bin/podman-host`:
+# our image writes `/etc/wk-container`, and that is accepted too. Writing a stub
+# podman-host would have been shorter and would have been a lie -- that file is
+# a working podman wrapper in the SDK image, and something would eventually call
+# it.
+#
+# Additive and host-safe by construction: the added clause is another `-f` test
+# on a path that does not exist outside such a container, so on the host and in
+# a real SDK container the answer is exactly what it was.
+SETTINGS="$SDK/utilities/settings.sh"
+if [ -f "$SETTINGS" ]; then
+    py "$SETTINGS" <<'PYSECTION13'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+
+old = 'is_running_in_wkdev_sdk_container() { is_running_in_container && [ -f "/usr/bin/podman-host" ]; }'
+new = ('# wk: /etc/wk-container marks a container wk built for a workspace whose\n'
+       '# image is deliberately not the SDK -- see sdk-patches/apply.sh 13.\n'
+       'is_running_in_wkdev_sdk_container() { is_running_in_container && '
+       '{ [ -f "/usr/bin/podman-host" ] || [ -f "/etc/wk-container" ]; }; }')
+
+if "/etc/wk-container" not in src and old in src:
+    src = src.replace(old, new, 1)
+    print("accepted /etc/wk-container as a wk-built container", file=sys.stderr)
+
+open(path, "w").write(src)
+PYSECTION13
+fi
+
+# --- 14: ask podman.sh's question, not the general one -----------------------
+# `utilities/podman.sh` selects the podman binary with
+# `is_running_in_wkdev_sdk_container`, then unconditionally requires `systemctl`
+# and a working podman. Its own comment says what it actually depends on:
+# "Requires the presence of /usr/bin/podman-host in the container image."
+#
+# Those are two different questions, and section 13 made the difference visible
+# by conflating them: teaching the general guard about `/etc/wk-container` made
+# a Yocto build workspace claim podman-host integration it does not have, and
+# `.wkdev-init` then died with "Cannot find required 'systemctl' executable".
+#
+# So this asks the narrower question in the place that means it. A container
+# with no podman-host has no podman to reach and nothing here needs one, so the
+# requirement is skipped rather than aborted on. Host behaviour is byte-for-byte
+# what it was -- `is_running_in_container` is false there, so the verify still
+# runs -- and a real SDK container still has podman-host, so it still runs
+# there too. Upstreamable on its own: it makes the code agree with its comment.
+PODMANSH="$SDK/utilities/podman.sh"
+if [ -f "$PODMANSH" ]; then
+    py "$PODMANSH" <<'PYSECTION14'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+
+old_sel = (
+    'if is_running_in_wkdev_sdk_container; then\n'
+    '    # Requires the presence of /usr/bin/podman-host in the container image.\n'
+    '    # It acts as portal to access the host podman instance.\n'
+    '    podman_executable="/usr/bin/podman-host"\n'
+    'fi'
+)
+new_sel = (
+    '# wk: the file itself, which is what the comment below has always said this\n'
+    '# depends on -- not "is this a container the SDK may initialise". See\n'
+    '# sdk-patches/apply.sh 14.\n'
+    'if [ -f "/usr/bin/podman-host" ]; then\n'
+    '    # Requires the presence of /usr/bin/podman-host in the container image.\n'
+    '    # It acts as portal to access the host podman instance.\n'
+    '    podman_executable="/usr/bin/podman-host"\n'
+    'fi'
+)
+
+old_v = 'verify_executables_exist systemctl\n\nverify_podman_is_acceptable "${podman_executable}"'
+new_v = (
+    '# wk: a container with no podman-host has no podman to reach, and nothing in\n'
+    '# this file needs one there. On the host, and in a real SDK container, both\n'
+    '# checks run exactly as before.\n'
+    'if ! is_running_in_container || [ -f "/usr/bin/podman-host" ]; then\n'
+    '    verify_executables_exist systemctl\n'
+    '\n'
+    '    verify_podman_is_acceptable "${podman_executable}"\n'
+    'fi'
+)
+
+changed = False
+if 'not "is this a container the SDK may initialise"' not in src and old_sel in src:
+    src = src.replace(old_sel, new_sel, 1); changed = True
+if 'has no podman to reach' not in src and old_v in src:
+    src = src.replace(old_v, new_v, 1); changed = True
+if changed:
+    print("scoped podman.sh to podman-host", file=sys.stderr)
+
+open(path, "w").write(src)
+PYSECTION14
+fi
+
 # --- verify ------------------------------------------------------------------
 # One token per section that matters, matching text the section *writes*, so a
 # section that silently no-opped (upstream reformatted its anchor) fails here
@@ -521,6 +631,16 @@ do
 done
 grep -q "WKDEV_OFFLINE" "$INIT" 2>/dev/null \
     || { echo "verify failed: WKDEV_OFFLINE missing from .wkdev-init" >&2; fail=1; }
+if [ -f "$SDK/utilities/podman.sh" ]; then
+    grep -q "has no podman to reach" "$SDK/utilities/podman.sh" \
+        || { echo "verify failed: podman.sh not scoped to podman-host (section 14)" >&2; fail=1; }
+    bash -n "$SDK/utilities/podman.sh" || fail=1
+fi
+if [ -f "$SDK/utilities/settings.sh" ]; then
+    grep -q "/etc/wk-container" "$SDK/utilities/settings.sh" \
+        || { echo "verify failed: /etc/wk-container missing from settings.sh (section 13)" >&2; fail=1; }
+    bash -n "$SDK/utilities/settings.sh" || fail=1
+fi
 bash -n "$CREATE" || fail=1
 [ -f "$ENTER" ] && { bash -n "$ENTER" || fail=1; }
 [ -f "$INIT" ] && { bash -n "$INIT" || fail=1; }

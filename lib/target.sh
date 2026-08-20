@@ -98,6 +98,57 @@ t_start()      { :; }
 t_stop()       { :; }
 t_store_init() { store_init; }
 
+# The workspace user's home directory, as seen from inside the workspace.
+#
+# Needed by anything that has to name one file from both sides -- a detached
+# build's log, which the far side writes and this side follows. In a container
+# that directory is a host bind mount, which is what makes following it free;
+# see t_spawn.
+t_home()       { echo "$HOME"; }
+
+# t_pull <name> <src-in-target> <dest-on-host>
+#
+# Copy one file out of a workspace, byte for byte.
+#
+# This exists because the obvious spelling -- `t_exec <ws> cat <file>` into a
+# host-side redirect -- silently corrupts binary data. Measured: a 1396-byte
+# file came out of a container workspace as 1399 bytes, and `xz` said
+# "Compressed data is corrupt". `wkdev-enter` is an interactive-shell wrapper
+# and its stdout is not a byte pipe; nothing about that is visible from the call
+# site, which is what makes it worth a named primitive rather than a comment.
+#
+# The default is right for the `local` driver, where the workspace *is* this
+# machine. Anything reached over a network needs its own -- see the container
+# driver, and note that a `vm` or `remote` target has none yet because the one
+# caller (the yocto builder) refuses those targets outright.
+t_pull() {
+    local name="$1" src="$2" dest="$3"
+    cp -f "$src" "$dest"
+}
+
+# t_spawn <name> <log> <pidfile> <cmd...>
+#
+# Start a command in the workspace, detached from *this* process, and return at
+# once. `log` and `pidfile` are paths inside the target.
+#
+# This exists because a multi-hour build must not depend on the process driving
+# it staying alive, and because the obvious spelling of that does not work
+# everywhere: over ssh, `nohup cmd &` genuinely survives the connection closing,
+# which is what this default relies on. Under `podman exec` it does not --
+# `setsid nohup` and all -- so the container driver overrides this with podman's
+# own detached exec. Measured, not assumed: a `setsid nohup` started through
+# `podman exec` and given nothing to do but sleep 3 and write a file was gone
+# before it wrote anything.
+#
+# The exit status of a process nobody forked cannot be waited for, so a caller
+# has to decide "finished" from what the command left behind -- which is why
+# the yocto builder's wrapper ends by printing a marker line.
+t_spawn() {
+    local name="$1" log="$2" pidf="$3"; shift 3
+    t_exec "$name" bash -lc "setsid nohup $(sh_quote "$@") \
+        > $(sh_quote "$log") 2>&1 < /dev/null & echo \$! > $(sh_quote "$pidf")"
+}
+
 # The branch this workspace's checkout is on, or `-` when it cannot be known
 # without starting something.
 #

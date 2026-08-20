@@ -105,6 +105,52 @@ ALLOWED_HOSTS = {
     "tiktokcdn.com": (80, 443),
     "whatsapp.com": (80, 443),
     "baidu.com": (80, 443),
+
+    # --- building a Yocto image ----------------------------------------------
+    # `wk image build rpi4-wpe-2.48` runs bitbake in a workspace, and bitbake
+    # fetches sources. A Yocto build touches, in principle, every upstream that
+    # every recipe in six layers names -- which is not a list anyone can write
+    # down, and is exactly the wrong shape for an allowlist.
+    #
+    # So the build is configured to fetch from the Yocto Project's own source
+    # mirror first (`INHERIT += "own-mirrors"` with SOURCE_MIRROR_URL, in
+    # image/yocto-build.sh). The mirror carries every source of every release
+    # branch, so the overwhelming majority of fetches resolve to one host, and
+    # this list is the *remainder*: the layer repositories named in the release
+    # branch's own manifest.xml, plus the two hosts the `repo` tool needs to
+    # bootstrap itself.
+    #
+    # NOTE FOR THE SANDBOX AUDIT (docs/HANDOFF-sandboxing.md): this is a real
+    # widening, of the same kind as the browsing block above and smaller. It
+    # adds source-code hosts only, it is still by hostname, and the BLOCKED_NETS
+    # check below is unchanged -- so none of these names can become a route
+    # onto the LAN or the tailnet. What it does mean is that a workspace can
+    # fetch arbitrary tarballs from a distribution mirror, which the
+    # Anthropic/GitHub/PyPI list did not permit.
+    #
+    # It is deliberately NOT the full set of upstreams a recipe might reach for
+    # when the mirror lacks something. When a fetch is refused, the proxy logs
+    # the name; add it here with a reason, rather than pre-emptively allowing a
+    # hundred hosts against the day one of them is needed.
+    # Port 80 as well as 443, and not out of laziness: poky's built-in PREMIRRORS
+    # and MIRRORS lists are written with `http://` URLs, so the mirror this whole
+    # arrangement depends on is reached over port 80 by default. Refusing it
+    # sends every fetch to its upstream instead, which is the opposite of the
+    # intent -- and shows up as `DENY downloads.yoctoproject.org:80`.
+    "yoctoproject.org": (80, 443),     # git. and downloads. -- layers + the mirror
+    "openembedded.org": (80, 443),     # git. (manifest.xml) and sources. (a MIRROR)
+    "googlesource.com": (443,),        # `repo` clones its own git-repo from here
+    # Added from refusals in this log, not in anticipation of them. A full
+    # `--runall=fetch` pass over 1492 fetch tasks produced exactly these four
+    # beyond the mirror itself, which is the measurement that made this list
+    # short: point the build at the mirror and almost everything resolves there.
+    "freedesktop.org": (80, 443),      # gitlab. -- polkit, wayland, mesa, libinput
+    "kernel.org": (80, 443),           # mirrors. is one of poky's default PREMIRRORS
+    "videolan.org": (80, 443),         # code. -- dav1d
+    "metacpan.org": (80, 443),         # cpan. -- Archive-Zip
+    # github.com and githubusercontent.com are already allowed above, and carry
+    # meta-openembedded, meta-webkit, meta-clang, meta-browser and the
+    # Raspberry Pi firmware and kernel.
 }
 
 # Addresses that are never permitted as a *destination*, whatever resolved to
