@@ -130,14 +130,35 @@ either measured or found while building the runner:
 
 ## Verified, and not
 
-**Verified** (2026-08-20, on this Mac): the whole `wk boot mbp` lifecycle
-against a disposable APFS volume; that run-benchmark drives from the staged
-partial tree; the exact arguments the runner builds; the preflight; and the
-runner end to end against a simulated role with a stub browser — payload build,
-http server, driver, `prepare_env`, launch, timeout, recorded failure.
+**The whole path is verified, on real builds, between two real machines** —
+they were two macOS guests rather than one Mac in two roles, which is the only
+thing this task adds. 2026-08-20: built `mac-release` in one guest (8m1s
+incremental, peak 7.6 GB), staged 1.5 GB of products onto another, and ran
+JetStream2.2 there through `wk bench staged`: `BENCH OK`, per-subtest scores,
+and a record carrying `bench_host=image`, `role_marker_overridden: false`, the
+full sha and the machine. The web process launched out of the staged tree, so
+the exclusions keep everything the browser driver needs.
 
-**Not verified**: a real measurement. That needs a real `mac-release` build and
-a real benchmark install — this task.
+Also verified on this Mac: the whole `wk boot mbp` lifecycle against a
+disposable APFS volume, and every refusal in the preflight.
+
+**Not verified**: this Mac, in its own benchmark role, producing a number that
+means something. Everything upstream of the reboot is exercised now; what is
+left is the volume and the two clicks.
+
+**What the rehearsal taught, that applies here:**
+
+- give the *first* run after a stage a generous `--timeout`. The first
+  JetStream2.2 run timed out at 900 s and the second, identical, finished in
+  about five minutes — not root-caused, but a first-launch scan of 1.5 GB of
+  freshly copied binaries is the obvious suspect.
+- the `quiet machine` check will fail on an install where automatic update
+  checking is on, and `softwareupdate --schedule off` did not stick in the
+  guest. Set it on the real install and confirm it stuck — `wk quiesce status`
+  says whether it did.
+- a killed `wk bench stage` leaves rubble; the manifest crosses last and on its
+  own, so an interrupted delivery is ignored rather than measured.
+
 
 ## Done means
 

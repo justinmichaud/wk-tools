@@ -124,15 +124,30 @@ apart afterwards. `--dry-run` still describes it. `WK_IMAGE_MARKER` lets the
 role's code path be exercised without a reboot, and a run that uses it is
 recorded as `role_marker_overridden`, which `wk bench compare` warns about.
 
-Verified end to end against a simulated role with a stub browser: preflight,
-payload build, http server, driver, `prepare_env`, launch, the timeout path,
-the recorded failure with the real exception surfaced, and the record on the
-volume. What has *not* run is a measurement — that needs a real `mac-release`
-build, which needs the golden base guest this machine does not have. Two things
-found by running it: a benchmark that dies leaves the Dock's launch animation
-off (put back now), and `wk bench compare` on two *files* was being forwarded
-into the podman VM, where it reported "no such run" about a file sitting right
-there.
+**Run end to end 2026-08-20, on real builds, between two real machines** — two
+macOS guests, one building and one in the benchmark role (`boot/mac-guest.sh`,
+machine `benchvm`, a fourth arming model where the transition *is* `wk vm
+start`). Built `mac-release` in one guest, staged 1.5 GB of products onto the
+other, ran JetStream2.2 there: `BENCH OK`, per-subtest scores, and a record
+carrying `bench_host=image`, `role_marker_overridden: false`, the full sha and
+the machine. The web process launched out of the staged tree, which settles the
+last question the staging raised. The numbers mean nothing — a guest shares a
+CPU and has a paravirtualised GPU — and the path means everything: what is left
+for the real machine is a volume and two clicks
+(`docs/HANDOFF-mac-perf-mode.md`).
+
+Getting there cost eleven defects, every one of which would have shown up on
+the bare-metal machine too — the golden base adopting an unfinished guest as
+ready, the Apple build's job count derived from the CMake memory figure, the
+memory check counting a guest against itself, a driver's `--status` dying in
+silence when its machine was off, `wk boot rpi5 --status` unable to run on a
+Mac at all (`date -u -d` is GNU-only), staging copying 37 GB of intermediates
+because the exclude list named directories that live somewhere else, a killed
+delivery leaving 13 GB in the guest under a perfectly good manifest, that
+manifest not being JSON, a benchmark that dies leaving the Dock's launch
+animation off, `wk bench compare` on two *files* being forwarded into the
+podman VM, and the selftest's own MBR fixture built with Linux `fdisk` syntax.
+Every one is in `docs/TESTING.md` with what it cost to find.
 
 **`wk quiesce` measures instead of trusting.** On macOS it now prints the
 privileged half's claim and what the machine says now, labelled separately, and

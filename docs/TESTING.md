@@ -1324,10 +1324,59 @@ the reader (which must never mistake intent for evidence).
       pipefail` and a guest that is merely off is a normal state)
 - [V] the arming model reaches the "next step" text: a guest is *started*, not
       armed and rebooted, and the staging output says so (2026-08-20)
-- [ ] build in one guest, stage to the other, run there: the whole path with
-      nothing hands-on in the middle
-- [ ] the staged tree is products only — no `*.noindex`, no `DerivedData`, no
-      `*.dSYM` — and is a few GB rather than the ~39 GB of an Apple build tree
+- [V] **build in one guest, stage to the other, run there — done end to end,
+      2026-08-20.** `wk build bench-build mac-release` (8m1s, peak 7.6 GB),
+      `wk bench stage bench-build --to benchvm` (1.5 GB across the boundary),
+      then in the guest: `wk bench staged --plan jetstream2.2 --count 1`.
+      BENCH OK, with real per-subtest scores — string-unpack-code-SP 452.1,
+      tagcloud-SP 242.3, tsf-wasm 71.1, typescript 17.5, uglify-js-wtb 39.3 —
+      and a record carrying `bench_host=image`, `role=mac-bench-rehearsal`,
+      `role_marker_overridden: false`, the full sha, and the machine
+      (VirtualMac2,1, 9 cores, 8192 MB, macOS 26.4, AC, `cpu_speed_limit` 100).
+      The numbers mean nothing (a guest), the path means everything
+- [V] the products-only tree is sufficient for the browser driver: the web
+      process launched from it — `com.apple.WebKit.WebContent.Development` out
+      of `…/staged/…/WebKitBuild/Release/com.apple.WebKit.WebContent.xpc`, at
+      55% CPU next to MiniBrowser's 43% (2026-08-20). The XPC services survive
+      the exclusions
+- [!] the *first* run after a stage timed out at 900 s; the second, identical,
+      finished in about five minutes. Not root-caused — the candidates are a
+      first-launch Gatekeeper/XProtect scan of 1.5 GB of freshly copied
+      binaries, webkitpy's autoinstall on first use, and a cold dyld cache.
+      Worth knowing before blaming a build: give the first run after a stage a
+      generous `--timeout`
+- [V] the staged tree is products only, and the exclusions are the ones that
+      matter (2026-08-20: the first list — `*.noindex`, `DerivedData`, `*.dSYM`
+      — excluded *nothing*, because those live under `WebKitBuild/DerivedData`,
+      a sibling of `Release` rather than inside it, and 37 GB started going
+      across the wire. What is actually in there: `WebCore.build` 16 G,
+      `WebKit.build` 7.1 G, `JavaScriptCore.build` 3.3 G, `libJavaScriptCore.a`
+      2.8 G, `TestWebKitAPI.build` 1.4 G, `XCBuildData` 856 M. Excluding
+      `*.build`, `XCBuildData`, `DerivedSources`, `PrecompiledHeaders`,
+      `compile_commands`, `*.a`, `*.dSYM`: **1.3 GB kept, 37.4 GB skipped**)
+
+- [V] the manifest crosses the wire *last*, on its own (2026-08-20: a killed
+      `wk bench stage` left 13 GB in the guest with a perfectly good
+      `stage.json` on top of it — rsync carries the manifest along with the
+      bulk and gives no order guarantee, so "written last" does not survive a
+      network hop unless it is sent separately)
+- [V] and it parses (2026-08-20: `"payload_pinned": ${payload:+true}${payload:-false}`
+      emitted `true/private/tmp/...` — a bare path where a JSON literal
+      belongs. Every field then read back empty, and a reader cannot tell "no
+      workspace recorded" from "this file is not JSON". `wk selftest --quick`
+      now rejects that shell idiom in a JSON value)
+
+### A guest that draws has to be a guest with nothing in front of it
+- [V] no post-login Setup Assistant pane on a fresh clone (2026-08-20, reported
+      from outside as "it looks stuck on Update Automatically" — and it was not
+      stuck: `.AppleSetupDone` was present, auto-login had happened, the console
+      belonged to `admin`, and ssh and builds worked throughout. What was on
+      the screen was the *post*-login assistant, which asks about automatic
+      updates, Siri and appearance on the first login of what macOS considers a
+      new install — and every clone of the base is one. Harmless for ssh, not
+      harmless for anything that draws: it sits modal in front of the desktop,
+      and a browser window under it is occluded, which throttles its timers.
+      The `DidSee*` keys are set in provisioning now)
 
 ### Quiesce measures rather than assumes (macOS)
 - [V] `wk quiesce status` prints the privileged half's *claim* and what the

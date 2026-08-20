@@ -130,6 +130,15 @@ b_diag() { m_ssh 'cat /var/log/wk-diag.txt 2>/dev/null || echo "(no diag on the 
 b_bench_root() { printf '%s' "$BENCH_GUEST_ROOT"; }
 b_bench_local() { return 1; }
 
+# One file, for the manifest that publishes a delivery (cmd/bench, cmd_stage).
+b_bench_put_file() {
+    local src="$1" dest="$2" ip
+    ip=$(_guest_ip) || die "'$MACH_GUEST' is not running"
+    ( load_target vm >/dev/null 2>&1
+      # shellcheck disable=SC2046 -- deliberate word splitting of the options.
+      scp -q $(_ssh_opts) "$src" "$WK_VM_USER@$ip:$dest" )
+}
+
 b_bench_put() {
     local src="$1" dest="$2" ip
     ip=$(_guest_ip) || die "'$MACH_GUEST' is not running"

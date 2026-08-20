@@ -234,6 +234,31 @@ WK_VM_DISPLAY_H="${WK_VM_DISPLAY#*x}"
 # nothing else touches it.
 sudo -n sysadminctl -screenLock off -password "$WK_VM_PASSWORD" 2>/dev/null ||     echo "warning: could not turn off the screen lock; the guest may come up locked" >&2
 
+# 4. macOS's own post-login Setup Assistant panes. Reported from the outside
+#    2026-08-20 -- "it looks stuck on Update Automatically" -- and it was not
+#    stuck: `/var/db/.AppleSetupDone` was present, auto-login had happened and
+#    the console belonged to the admin user. What was on the screen was the
+#    *post*-login assistant (Setup Assistant.app's mbusertrampoline), which
+#    asks about automatic updates, Siri, appearance and analytics on the first
+#    login of a new install -- and every clone of the base is a new install by
+#    that measure.
+#
+#    Harmless for ssh and for builds, which is why it went unnoticed; not
+#    harmless for anything that draws. It sits modal in front of the desktop,
+#    so a browser window under it is occluded -- and an occluded window has its
+#    timers throttled, which is a benchmark measuring the wrong thing rather
+#    than failing.
+#
+#    Answering the panes in advance is the documented way to stop them: each
+#    `DidSee*` key is what the assistant sets when you click through it.
+for _k in DidSeeCloudSetup DidSeeSiriSetup DidSeeAppearanceSetup           DidSeePrivacy DidSeeTrueTone DidSeeAccessibility DidSeeSyncSetup; do
+    defaults write com.apple.SetupAssistant "$_k" -bool true
+done
+defaults write com.apple.SetupAssistant LastSeenCloudProductVersion "$(sw_vers -productVersion)"
+defaults write com.apple.SetupAssistant LastSeenBuddyBuildVersion "$(sw_vers -buildVersion)"
+# And the one already on screen, if this is a re-provision.
+pkill -f 'Setup Assistant' 2>/dev/null || true
+
 defaults -currentHost write com.apple.screensaver idleTime -int 0
 defaults write com.apple.screensaver askForPassword -int 0
 defaults write com.apple.screensaver askForPasswordDelay -int 0

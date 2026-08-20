@@ -615,6 +615,27 @@ chk_bench_role_required() {
         || { echo "the dry run does not show the command it would run: $out"; return 1; }
 }
 
+# A manifest that does not parse is worse than no manifest: every field a
+# reader asks for comes back empty, and the reader cannot tell "this run has no
+# workspace recorded" from "this file is not JSON". Found 2026-08-20 with
+# `"payload_pinned": true/private/tmp/...` -- a `${x:+true}${x:-false}` where
+# the second half expanded to the value instead of the default.
+chk_stage_manifest_is_json() {
+    local out
+    out=$(as_workspace bench stage selftest-ws --to benchvm --dry-run 2>&1) || true
+    # The dry run does not write one, so the shape is checked by generating the
+    # same document the writer does, with a payload set -- the case that broke.
+    printf '{\n  "payload_pinned": %s,\n  "plan": "%s"\n}\n' \
+        "$([ -n "/tmp/x" ] && echo true || echo false)" "jetstream2.2" > "$TMP/stage.json"
+    python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$TMP/stage.json" 2>/dev/null \
+        || { echo "the generated manifest is not JSON"; return 1; }
+    # And the writer itself, as it stands in the file: no shell expansion may
+    # emit a bare value where a JSON literal belongs.
+    grep -nE '"[a-z_]+": \$\{[a-z_]+:\+' "$WK_ROOT/cmd/bench" \
+        && { echo "a JSON value is built from \${x:+...}\${x:-...}, which emits the value on the else branch"; return 1; }
+    return 0
+}
+
 # A boot driver runs under `set -euo pipefail` and every one of its probes
 # talks to a machine that may be off -- which is a normal state, not a failure.
 # The guest driver got this wrong and `wk boot benchvm --status` printed
@@ -1018,9 +1039,20 @@ chk_piusb_type_byte_roundtrips() {
     # conv=notrunc, dd truncates the device to one byte.
     local d img before after back
     d=$(mktemp -d "$TMP/piusb.XXXXXX"); img="$d/mbr.img"
-    truncate -s 2M "$img"
-    printf 'n\np\n1\n\n+1M\nt\nc\nw\n' | fdisk "$img" >/dev/null 2>&1 \
-        || { echo "no fdisk to build the fixture"; return 77; }
+    # A 2 MB file with the one byte this is about set to 0x0c, written the same
+    # way the thing under test writes it.
+    #
+    # The fixture used to be built by feeding a keystroke script to `fdisk`,
+    # which is Linux fdisk's interface and not macOS fdisk's -- so on this Mac
+    # the fixture came out as partition type 00 and the check failed for a
+    # reason that had nothing to do with the code. The selftest has to run on
+    # both workstations, the same rule as `wk boot --status` (lib/common.sh,
+    # epoch_to_utc). Nothing here needs a real partition table: the property is
+    # that one byte at offset 450 round-trips and the write does not truncate.
+    dd if=/dev/zero of="$img" bs=1024 count=2048 status=none 2>/dev/null \
+        || { echo "could not make the fixture"; return 77; }
+    printf '\'"$(printf '%03o' 0x0c)" \
+        | dd of="$img" bs=1 seek=450 count=1 conv=notrunc status=none
 
     # shellcheck disable=SC1090
     ( MACH_DEVICE=/dev/null; . "$WK_ROOT/boot/pi-usb.sh"
@@ -1033,14 +1065,24 @@ chk_piusb_type_byte_roundtrips() {
         | dd of="$img" bs=1 seek=450 count=1 conv=notrunc status=none
     after=$(dd if="$img" bs=1 skip=450 count=1 status=none | od -An -tx1 | tr -d ' ')
     [ "$after" = 83 ] || { echo "disarm wrote $after, wanted 83"; return 1; }
-    [ "$(stat -c %s "$img")" = 2097152 ] || { echo "the write truncated the device"; return 1; }
+    # `wc -c`, not `stat -c %s`: BSD stat spells it `-f %z` and answers the GNU
+    # form with a usage block, which is the same portability trap as the
+    # fixture above.
+    [ "$(wc -c < "$img" | tr -d ' ')" = 2097152 ] || { echo "the write truncated the device"; return 1; }
 
     printf '\'"$(printf '%03o' 0x0c)" \
         | dd of="$img" bs=1 seek=450 count=1 conv=notrunc status=none
     back=$(dd if="$img" bs=1 skip=450 count=1 status=none | od -An -tx1 | tr -d ' ')
     [ "$back" = 0c ] || { echo "arm wrote $back, wanted 0c"; return 1; }
-    sfdisk -l "$img" 2>/dev/null | grep -q 'FAT32' \
-        || { echo "sfdisk no longer reads the round-tripped table as FAT32"; return 1; }
+    # The last assertion is the interesting one and the least portable: that a
+    # *partition tool* agrees the byte means FAT32, rather than only that the
+    # byte is 0x0c. sfdisk is util-linux and this Mac has none, so it is asked
+    # for only where it exists -- the byte-level round trip above is the part
+    # that has to hold everywhere, and it does.
+    if have sfdisk; then
+        sfdisk -l "$img" 2>/dev/null | grep -q 'FAT32' \
+            || { echo "sfdisk no longer reads the round-tripped table as FAT32"; return 1; }
+    fi
 }
 
 chk_image_seed_prose_is_inert() {
@@ -1128,6 +1170,7 @@ if want quick; then
     check "arming with no volume attached refuses"                         chk_hands_on_arming
     check "a benchmark runs in the benchmark role or it does not run"      chk_bench_role_required
     check "instead of exiting silently"                                    chk_boot_status_survives_an_absent_machine
+    check "and it parses"                                                  chk_stage_manifest_is_json
     check "keeps the rest of the path"                                    chk_tftp_fallback_keeps_path
     check "never answers with a *different* file"                         chk_tftp_fallback_never_substitutes
     check "does not fire when the leading directory really exists"        chk_tftp_fallback_yields_to_real_dir

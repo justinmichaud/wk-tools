@@ -465,6 +465,13 @@ without a disk, by making the benchmark machine a second macOS guest:
 machine boundary into another, run there, read the result back — which is the
 whole design, with the one manual step replaced by `wk vm start`.
 
+**Run end to end 2026-08-20, and it works**: built in `bench-build` (8m1s
+incremental, peak 7.6 GB), staged onto `wk-bench` (1.5 GB), and run there --
+`BENCH OK`, with per-subtest JetStream2.2 scores and a record carrying
+`bench_host=image`, the full sha, and the machine. The web process launched
+out of the staged products tree, which settles the last question the staging
+raised: no `*.build`, no `XCBuildData`, and the XPC services still work.
+
 It proves the mechanism and cannot prove the measurement: a guest shares a CPU
 with a desktop and its GPU is paravirtualised, which is precisely why the real
 role is bare metal. What it *does* answer, in minutes rather than in a

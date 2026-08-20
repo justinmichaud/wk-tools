@@ -1095,15 +1095,28 @@ cmd_stage() {
     fi
     mkdir -p "$assemble"
 
-    # Products, not the build tree. An Apple WebKitBuild/<config> is ~39 GB and
-    # nearly all of it -- Intermediates.noindex, the compilation cache, the
-    # module cache, DerivedData -- is of no use to a machine that will not
-    # compile anything. What is left is the frameworks, the dylibs and
-    # MiniBrowser.app, which is what the browser driver asks for.
+    # Products, not the build tree -- and the exclusions are worth writing down
+    # exactly, because the obvious guesses are wrong. Measured in the rehearsal
+    # guest, `WebKitBuild/Release` was 37 GB:
+    #
+    #     WebCore.build 16G   WebKit.build 7.1G   JavaScriptCore.build 3.3G
+    #     libJavaScriptCore.a 2.8G   TestWebKitAPI.build 1.4G
+    #     XCBuildData 856M    WebKitLegacy.build 861M   libwebrtc.build 829M
+    #
+    # All of it link-time or compile-time only. The first attempt excluded
+    # `*.noindex` and `DerivedData`, which live under `WebKitBuild/DerivedData`
+    # -- a *sibling* of Release, not inside it -- so it excluded nothing at all
+    # and started sending 37 GB across the wire.
+    #
+    # What a machine that will never compile anything needs is the frameworks,
+    # the dylibs, the XPC services and MiniBrowser.app: what the browser driver
+    # launches, and what DYLD_FRAMEWORK_PATH resolves against.
     log  "  the build product (frameworks and MiniBrowser.app; no intermediates)"
     build="$assemble/WebKitBuild/$(basename "$build_dir")"
     t_pull_dir "$ws" "$build_dir" "$build" \
-        --exclude '*.noindex' --exclude 'DerivedData' --exclude '*.dSYM'
+        --exclude '*.build' --exclude 'XCBuildData' --exclude 'DerivedSources' \
+        --exclude 'PrecompiledHeaders' --exclude 'compile_commands' \
+        --exclude '*.a' --exclude '*.dSYM' --exclude '*.noindex'
     log  "  Tools/ -- run-benchmark, webkitpy and the plans"
     t_pull_dir "$ws" "$src/Tools" "$assemble/Tools"
 
@@ -1127,7 +1140,7 @@ cmd_stage() {
   "config": "$config",
   "webkit_sha": "$sha",
   "plan": "${plan:-}",
-  "payload_pinned": ${payload:+true}${payload:-false},
+  "payload_pinned": $([ -n "$payload" ] && echo true || echo false),
   "machine": "$machine",
   "volume": "${MACH_VOLUME:-}",
   "wk_tools": "$("$WK_ROOT/cmd/version" --tree 2>/dev/null || echo unknown)",
@@ -1137,7 +1150,18 @@ EOF
 
     if [ -n "$deliver" ]; then
         info "sending it to $machine ($(du -sh "$assemble" 2>/dev/null | cut -f1))"
+        # The manifest crosses last, on its own, and that is the whole point of
+        # it: a delivery is minutes of rsync and can be interrupted, and rsync
+        # gives no order guarantee -- so a stage.json carried along with the
+        # bulk arrives at some arbitrary moment and a half-delivered payload
+        # looks finished. Measured 2026-08-20: a killed `wk bench stage` left
+        # 13 GB in the guest with a perfectly good manifest on top of it.
+        mv "$assemble/stage.json" "$assemble/.stage.json.pending"
         b_bench_put "$assemble" "$dest" || die "could not deliver the payload to $machine"
+        mv "$assemble/.stage.json.pending" "$assemble/stage.json"
+        b_bench_put_file "$assemble/stage.json" "$dest/stage.json" \
+            || die "delivered the payload to $machine but could not publish its manifest.
+    Nothing will use it until one is there -- re-run the stage."
         rm -rf "$assemble"
     fi
 
@@ -1197,7 +1221,35 @@ EOF
 # build, same shape of result. There is no way to tell them apart afterwards
 # except by trusting a field, so the run does not happen. `--dry-run` still
 # describes it from here, because describing is not measuring.
-STAGED_PY=/usr/bin/python3
+# The interpreter the run uses, and it is chosen by *property* rather than by
+# path: what run-benchmark needs is a python that can `import objc`, because
+# the macOS browser driver's prepare_env imports
+# `webkitpy.autoinstalled.pyobjc_frameworks` and pyobjc-core is not
+# autoinstalled. Which python that is varies by machine and is not guessable:
+#
+#   this Mac        /usr/bin/python3 is 3.9.6 with pyobjc 11.1  -- works
+#   a macOS guest   /usr/bin/python3 shims to the *Xcode* python3, also 3.9.6,
+#                   with no pyobjc at all -- and neither has Homebrew's
+#
+# Measured on both, 2026-08-20. So the runner looks for one and names what it
+# found; hardcoding the path would have been right on the machine it was
+# written on and wrong on the first one it was used on.
+staged_python() {
+    local p
+    for p in "${WK_BENCH_PYTHON:-}" /usr/bin/python3 \
+             /Library/Developer/CommandLineTools/usr/bin/python3 \
+             /usr/local/bin/python3 /opt/homebrew/bin/python3; do
+        [ -n "$p" ] || continue
+        [ -x "$p" ] || continue
+        "$p" -c 'import objc' >/dev/null 2>&1 || continue
+        printf '%s' "$p"; return 0
+    done
+    return 1
+}
+
+# The fallback, so every message and dry run has something to name even when
+# nothing on the machine qualifies.
+STAGED_PY="$(staged_python || echo /usr/bin/python3)"
 
 # Where the staged payloads are, from whichever role is asking.
 #
@@ -1394,7 +1446,11 @@ cmd_staged() {
     if "$STAGED_PY" -c 'import objc' >/dev/null 2>&1; then
         check yes "python with PyObjC" "$STAGED_PY ($("$STAGED_PY" -V 2>&1))"
     else
-        check no "python with PyObjC" "$STAGED_PY cannot 'import objc' -- xcode-select --install"
+        check no "python with PyObjC" "no python3 here can 'import objc' (tried /usr/bin, the CLT, Homebrew)"
+        log  "        the browser driver needs it and does not autoinstall it. Either:"
+        log  "          xcode-select --install                      (the CLT python3 ships it)"
+        log  "          $STAGED_PY -m pip install --user pyobjc-framework-Quartz pyobjc-framework-Cocoa"
+        log  "        or point WK_BENCH_PYTHON at one that has it."
     fi
 
     # A browser needs a window server, and a benchmark needs the *console*
