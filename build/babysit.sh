@@ -22,7 +22,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 NAME="$1"; CONFIG="$2"; MODEL="$3"; MAX="$4"; BRANCH="$5"; shift 5
 
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
 WS=$(wk_ws_dir "$NAME")

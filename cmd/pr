@@ -61,9 +61,15 @@ BRANCH="${SPEC#*:}"
 [ -n "$PR_USER" ] && [ -n "$BRANCH" ] || die "expected <user>:<branch>, got '$SPEC'"
 
 require_name "$NAME"
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
-[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+
+# The same gate as build, run, test and claude (wait_ready, lib/target.sh):
+# this checks out a branch *in* the workspace, so it needs one that finished
+# being made. `absent` is still refused by name; a creation that died, an
+# environment removed by hand and a machine that will not answer each get the
+# words that fit -- this said "no such workspace" about all four.
+wait_ready "$NAME"
 
 SRC=$(t_src "$NAME")
 

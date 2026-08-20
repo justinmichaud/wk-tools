@@ -16,10 +16,21 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 NAME="${1:-}"; shift || true
 require_name "$NAME"
 
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+# One gate for "is this workspace usable yet" (wait_ready, lib/target.sh):
+# `absent` is still refused by name, and everything else -- a creation still
+# running, one whose driver died, an environment removed from under the record,
+# a machine that will not answer -- gets the words that fit it there rather
+# than "no such workspace", which is what this said about all four.
+wait_ready "$NAME"
+
+# Which binary to hand over to. `claude` from the workspace's own PATH
+# everywhere provisioning installed it -- a container, a guest -- and a
+# specific path on a shared machine, where what is on PATH may be somebody
+# else's broken system-wide install (see the remote branch below).
+CLAUDE_BIN=claude
 
 # --- verify the sandbox ------------------------------------------------------
 # Relaxed permissions are defensible only while the boundary holds, and what the
@@ -45,27 +56,83 @@ if [ "$WK_TARGET_KIND" = remote ]; then
     people's work on the same machine. An agent there is an agent on that
     machine, with your access."
 
-    # Forced, and now it has to actually work. Claude is not installed on a
-    # build box by wk (nothing here provisions an agent onto a shared
-    # machine), so say what is missing rather than handing over a shell that
-    # exits with "command not found".
-    if ! t_exec "$NAME" bash -lc 'command -v claude >/dev/null 2>&1'; then
-        warn "there is no Claude CLI on $TARGET"
+    # Forced, and now it has to actually work.
+    #
+    # Test the property, not the file -- the same rule `wk sudo` follows. A
+    # shared build box very often has a Claude CLI on PATH that *somebody else*
+    # installed system-wide with npm, and an npm install runs on that machine's
+    # own node: measured on devbox-arm64-2, `/usr/local/bin/claude` under node
+    # v16.19.0 dies before printing anything with "ReferenceError:
+    # ReadableStream is not defined" (it became a global in node 18). Checking
+    # `command -v claude` said yes to that, and wk handed the session over to a
+    # program that cannot start.
+    #
+    # So: find one that *runs*, prefer the one in your own home, and launch it
+    # by path. By path because PATH ordering is not ours to fix on a machine we
+    # share -- with /usr/local/bin ahead of ~/.local/bin, installing a working
+    # one would still leave the broken one selected.
+    CLAUDE_BIN=$(t_exec "$NAME" bash -lc '
+        for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)"; do
+            [ -n "$c" ] && [ -x "$c" ] || continue
+            "$c" --version >/dev/null 2>&1 && { echo "$c"; exit 0; }
+        done
+        exit 1' 2>/dev/null | tr -d '\r' | tail -1) || CLAUDE_BIN=""
+
+    if [ -z "$CLAUDE_BIN" ]; then
+        warn "there is no Claude CLI on $TARGET that runs"
+        # What was found and why it does not work, because "install it?" is a
+        # question somebody can only answer knowing that. Single-quoted, so it
+        # is the *far* side's shell that expands $c and $(node -v) -- with one
+        # deliberate exception, the target's name, which only this side knows.
+        _diag=$(t_exec "$NAME" bash -lc '
+            c=$(command -v claude 2>/dev/null) || true
+            if [ -n "$c" ]; then
+                echo "  on PATH:  $c"
+                echo "  node:     $(node -v 2>&1 | head -1)  (Claude Code needs 18 or newer)"
+                # Not the error text, deliberately. When an npm-installed
+                # Claude dies on an old node, what it prints is a file URL and
+                # then the whole offending line of minified bundle -- tens of
+                # kilobytes with the actual sentence somewhere inside it. Any
+                # grep clever enough to find it is a grep that will print
+                # minified JavaScript on the day it guesses wrong, so this
+                # names the command that shows it instead.
+                echo "  it fails to start; see for yourself:  ssh '"$TARGET"' claude --version"
+            else
+                echo "  nothing called claude is on PATH in a login shell there"
+            fi' 2>/dev/null) || true
+        # Captured and then printed, rather than redirected in place: the
+        # obvious `2>/dev/null >&2` sends stdout to whatever fd 2 is *now*,
+        # which is the /dev/null the first redirection just made -- so the
+        # diagnosis went nowhere.
+        [ -z "$_diag" ] || printf '%s\n' "$_diag" >&2
+
         # Offered, never assumed: installing an agent onto a machine other
         # people share is a decision about their machine as much as yours, and
         # `confirm` declines by itself when there is nobody to ask. The same
         # installer the container and the guest use -- one command, one place
-        # it comes from.
-        if confirm "install it on $TARGET now (into your own ~/.local, as you)?"; then
+        # it comes from -- and it carries its own runtime into your home
+        # directory, so it neither needs nor touches the shared node.
+        if confirm "install one on $TARGET now (into your own ~/.local, as you)?"; then
             t_exec "$NAME" bash -lc 'curl -fsSL https://claude.ai/install.sh | bash' \
                 || die "the installer failed on $TARGET"
         else
             die "not installing. To do it yourself:
-        ssh $TARGET 'curl -fsSL https://claude.ai/install.sh | bash'"
+        ssh $TARGET 'curl -fsSL https://claude.ai/install.sh | bash'
+    That install goes in your home directory and carries its own runtime, so it
+    works whatever node the machine has -- and wk runs it by path, so it wins
+    over anything installed system-wide."
         fi
-        t_exec "$NAME" bash -lc 'command -v claude >/dev/null 2>&1' \
-            || die "installed, but 'claude' is still not on PATH in a login shell on $TARGET"
+
+        CLAUDE_BIN=$(t_exec "$NAME" bash -lc '
+            for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)"; do
+                [ -n "$c" ] && [ -x "$c" ] || continue
+                "$c" --version >/dev/null 2>&1 && { echo "$c"; exit 0; }
+            done
+            exit 1' 2>/dev/null | tr -d '\r' | tail -1) || CLAUDE_BIN=""
+        [ -n "$CLAUDE_BIN" ] || die "installed, and still nothing on $TARGET runs: try it by hand --
+        ssh $TARGET '~/.local/bin/claude --version'"
     fi
+    info "using $CLAUDE_BIN on $TARGET"
 fi
 
 if [ "$WK_TARGET_KIND" = container ]; then
@@ -163,9 +230,9 @@ info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boun
 rc=0
 if [ -t 0 ] && [ -t 1 ]; then
     t_exec_tty "$NAME" env WK_WORKSPACE="$NAME" \
-        bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $(sh_quote "$@")" || rc=$?
+        bash -lc "cd $(t_src "$NAME") && exec $(sh_quote "$CLAUDE_BIN") --dangerously-skip-permissions $(sh_quote "$@")" || rc=$?
 else
     t_exec "$NAME" env WK_WORKSPACE="$NAME" \
-        bash -lc "cd $(t_src "$NAME") && exec claude --dangerously-skip-permissions $(sh_quote "$@")" || rc=$?
+        bash -lc "cd $(t_src "$NAME") && exec $(sh_quote "$CLAUDE_BIN") --dangerously-skip-permissions $(sh_quote "$@")" || rc=$?
 fi
 exit "$rc"

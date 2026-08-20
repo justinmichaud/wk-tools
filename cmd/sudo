@@ -139,9 +139,30 @@ verdict_local() {
     esac
 }
 
+# --- where visudo is ---------------------------------------------------------
+#
+# visudo lives in /usr/sbin, and /usr/sbin is not on a normal user's PATH on
+# Debian-family Linux -- so `visudo -c -f` below is a "command not found" on
+# exactly the machines this command exists for, before it ever looks at the
+# file. Resolve it once, by name if the PATH has it and by path if it does not.
+# Not being able to find it at all is fatal on purpose: the alternative is
+# installing an unvalidated sudoers file. Sets a variable rather than printing
+# one, so that `die` kills the command instead of just a substitution subshell
+# -- which would leave an empty command word behind and report a parse failure
+# the generated file never had.
+VISUDO=""
+visudo_resolve() {
+    if have visudo; then VISUDO=visudo
+    elif [ -x /usr/sbin/visudo ]; then VISUDO=/usr/sbin/visudo
+    else die "visudo is not on PATH and /usr/sbin/visudo does not exist -- refusing to write a sudoers file that cannot be validated"
+    fi
+}
+
 # --- install the drop-in -----------------------------------------------------
 require_local() {
     local tmp grp rc=0
+
+    visudo_resolve
 
     if [ -f "$DROPIN" ] && verdict_local >/dev/null; then
         info "already required on $(hostname -s): $DROPIN"
@@ -165,7 +186,7 @@ EOF
     # Before it goes anywhere near /etc: a syntactically broken sudoers file is
     # how a machine locks its owner out, and visudo will parse a file for you
     # without being root.
-    visudo -c -f "$tmp" >/dev/null || { rm -f "$tmp"; die "the sudoers file wk generated does not parse -- refusing to install it"; }
+    "$VISUDO" -c -f "$tmp" >/dev/null || { rm -f "$tmp"; die "the sudoers file wk generated does not parse -- refusing to install it"; }
 
     grp=wheel
     is_linux && grp=root
@@ -178,7 +199,7 @@ EOF
 
     # The whole ruleset, not just our file: an install that leaves sudoers
     # unparseable has to be caught while we still have a working sudo.
-    sudo visudo -c >/dev/null || {
+    sudo "$VISUDO" -c >/dev/null || {
         warn "sudoers does not parse after the install -- removing what we added"
         sudo rm -f "$DROPIN"
         die "sudoers was left as it was; nothing changed"

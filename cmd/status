@@ -11,8 +11,13 @@
 # Exit status is meaningful, so a script or an agent can branch on it:
 #   0  idle or last build succeeded
 #   1  last build failed
-#   2  a build is running
+#   2  a build is running, or a workspace is still being created
 #   3  a build stalled and was killed
+#   4  a workspace needs a person: a creation whose driver is gone, an
+#      environment removed from under the record, or a machine that will not
+#      answer. Distinct from 3 on purpose -- 3 is a build to re-run, 4 is a
+#      workspace to repair, and an agent branching on this should not conflate
+#      them.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,14 +25,79 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/watchdog.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/detach.sh"
 
 worst=0
 
 report() {
     local ws="$1"
+    report_ws "$ws"
     report_one "$ws" build "$(wk_ws_dir "$ws")/build.status"
     [ -f "$(wk_ws_dir "$ws")/test.status" ] && report_one "$ws" test "$(wk_ws_dir "$ws")/test.status"
     [ -f "$(wk_ws_dir "$ws")/babysit.status" ] && report_babysit "$(wk_ws_dir "$ws")/babysit.status"
+    return 0
+}
+
+# The lifecycle line, first and above everything else this workspace has been
+# asked to do -- because "is this a workspace at all, and can it be acted on"
+# comes before "how did its last build go", and because for three of the five
+# answers every line under it is about a workspace that is not there.
+#
+# Every word of it is derived at read time (ws_state in lib/target.sh): the
+# environment as the driver finds it, the completion marker next to the
+# workspace, the base pin. The one thing read from ws.status is whether the
+# process that claimed to be creating this is still alive -- which is not on
+# disk anywhere, and which is exactly the difference between "being made" and
+# "was being made when the ssh dropped".
+report_ws() {
+    local ws="$1" st disp sf stage pid upd
+    st=$(ws_state "$ws")
+    sf=$(ws_status_file "$ws")
+
+    # `present` is the only state where the environment's own word adds
+    # anything (running, exited, present); for the rest it *is* the answer, and
+    # asking the driver a second time would cost a probe to be told what we
+    # already know.
+    if [ "$st" = present ]; then disp=$(t_info "$ws"); else disp="$st"; fi
+
+    printf '%-18s %-16s %-10s %-24s ws=%s\n' \
+        "$ws" "$TARGET" "$disp" "$(t_branch "$ws")" "$st"
+
+    stage=$(status_field "$sf" stage)
+    pid=$(status_field "$sf" pid)
+    upd=$(status_field "$sf" updated)
+
+    case "$st" in
+    creating)
+        if detach_alive "$sf"; then
+            log "  creating: ${stage:-?} (pid $pid, alive${upd:+, said so $upd})"
+            log "  follow:   tail -f $(ws_create_log "$ws")"
+            bump 2
+        else
+            warn "  creation never finished, and nothing is creating it now${pid:+ (pid $pid is gone)}"
+            [ -z "$stage" ] || log "  it got as far as: $stage${upd:+ ($upd)}"
+            log "  usually there is nothing in one worth keeping -- remake it:"
+            log "    $(ws_remake_hint "$ws")"
+            log "  or, if the checkout is complete and only the marker is missing,"
+            log "  any command that gates on it takes --force"
+            bump 4
+        fi
+        ;;
+    broken)
+        warn "  the record says a $TARGET workspace and the machine has none -- something
+  outside wk removed it (podman rm, tart delete, an rm -rf over there)"
+        log "  clear the record:  wk rm $ws"
+        [ -d "$(wk_ws_dir "$ws")" ] && \
+            log "  what is left of it here: $(wk_ws_dir "$ws")"
+        bump 4
+        ;;
+    unreachable)
+        warn "  the machine behind '$TARGET' did not answer within ${WK_SSH_TIMEOUT:-10}s"
+        log "  this is not 'absent': nothing about the workspace was checked at all,"
+        log "  and anything below is the last thing this machine wrote about it"
+        bump 4
+        ;;
+    esac
     return 0
 }
 
@@ -88,12 +158,10 @@ report_one() {
         logf=$(awk -F= '/^log=/{print $2}' "$status_file")
     fi
 
-    if [ "$kind" = build ]; then
-        printf '%-18s %-16s %-10s %-24s %s=%s' \
-            "$ws" "$TARGET" "$(ws_display_state "$ws")" "$(t_branch "$ws")" "$kind" "${state:-none}"
-    else
-        printf '%-18s %-16s %-10s %-24s %s=%s' "" "" "" "" "$kind" "${state:-none}"
-    fi
+    # No identity columns: the lifecycle line above this one carries them, and
+    # a name repeated on every line of a workspace's block reads as several
+    # workspaces with the same name.
+    printf '%-18s %-16s %-10s %-24s %s=%s' "" "" "" "" "$kind" "${state:-none}"
     case "$arch" in native|'') arch="" ;; *) arch=", $arch" ;; esac
     [ -n "$config" ] && printf ' (%s%s)' "$config" "$arch"
     [ -n "$secs" ] && printf ' %sm%ss' "$(( secs / 60 ))" "$(( secs % 60 ))"
@@ -250,7 +318,7 @@ report_machine() {
 
 if [ -n "${1:-}" ]; then
     require_name "$1"
-    TARGET="${WK_TARGET:-$(target_of "$1" 2>/dev/null || default_target)}"
+    TARGET="$(ws_target "$1")"
     load_target "$TARGET"
     if t_has_wk; then
         delegate status --no-fleet "$1"

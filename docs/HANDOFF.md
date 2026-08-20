@@ -36,6 +36,27 @@ The two tasks below touch disjoint files (one shared exception:
 sessions start the same way: read "The rules" at the top of
 `docs/HANDOFF-workspace-state.md` — nothing may contradict them.
 
+**macOS box — implement the state rules, phase 2. DONE 2026-08-19** — the
+readiness half: `.wk-ready` written last by every driver, `t_info` answering
+the lifecycle (`absent | creating | present`, plus `broken` and `unreachable`,
+which the implementation needed and which rule 5 and the core requirement
+ask for), one `wait_ready` gate that `wk build` and the `--zed` paths go
+through, `lib/detach.sh` extracted from the babysitter with `wk new` as its
+second user (creation detached by default, `--no-wait` to return at once),
+and `wk status` rendering the lifecycle first with a new exit code 4 for a
+workspace that needs a person. Verified against the podman VM: a workspace
+created and followed to `present`, its driver killed -9 at the init stage and
+then reported as abandoned-with-a-dead-driver by `wk status` (exit 4),
+refused by `wk build` with the repair command, and remade by a re-run of
+`wk new`; a container removed by hand reported as `broken` rather than
+`absent`. Six decisions that differ from the plan as written are listed in
+`docs/HANDOFF-workspace-state.md` under "The plan" — the most load-bearing
+being that `ws.status` and the creation log live *beside* the workspace
+directory, because the wipe at the start of a re-run would otherwise delete
+the log the driver is writing to. What is left there: `wk build --detach`
+still has its own nohup rather than `detach_run`, and the `--zed` gate is
+exercised through `wk build` rather than by opening a real editor.
+
 **macOS box — implement the state rules, phase 1. DONE 2026-08-19** — all
 four steps and both bugs, verified against the podman VM (a real workspace
 created, half-broken, remade, destroyed; two `wk new` raced; `wk gc` raced

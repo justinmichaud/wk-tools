@@ -10,7 +10,11 @@
 #   t_exec   <name> <cmd..>  run a command in it
 #   t_enter  <name>          interactive shell
 #   t_destroy <name>         remove it and everything it created
-#   t_info   <name>          one word of state, or "absent"
+#   t_info   <name>          the lifecycle in one word: "absent", "creating",
+#                            or the driver's word for an environment that
+#                            exists ("running", "exited", "present"); a driver
+#                            that reaches over a network may also answer
+#                            "unreachable"
 #   t_list                   "<name>\t<state>" per line
 #
 # Optional, defaulted here. A driver overrides only what is genuinely
@@ -27,6 +31,7 @@
 #   t_load             the load already on the target, for the polite sizing
 #   t_ccache_dir       where ccache keeps its cache inside the target
 #   t_store_init       create the host-side directories this target needs
+#   t_created <name>   is creation's completion marker there? (see .wk-ready)
 #   t_ready            block until a new workspace finished initialising
 #   t_exec_build       t_exec, for a build specifically (see below)
 #   t_state_put        keep a copy of the build status where the target is
@@ -81,15 +86,73 @@ t_store_init() { store_init; }
 # HEAD is a file on the host, and reading it costs nothing).
 t_branch() {
     local out
-    [ "$(t_info "$1")" != absent ] || { echo -; return 0; }
+    # Only a workspace that exists and finished being made has a branch to
+    # ask about, and only a machine that answers can be asked. Anything else
+    # is `-`: asking would mean an exec into a container that is still being
+    # provisioned, or -- measured 2026-08-19, in `wk status` against a machine
+    # that was off -- resolving a remote path, which reaches for the capacity
+    # probe and dies with a connection error in the middle of a listing.
+    case "$(t_info "$1")" in
+        absent|creating|broken|unreachable) echo -; return 0 ;;
+    esac
     out=$(t_exec "$1" git -C "$(t_src "$1")" rev-parse --abbrev-ref HEAD 2>/dev/null | tr -d '\r') || out=""
     printf '%s' "${out:--}"
 }
 
+# --- creation's completion marker -------------------------------------------
+#
+# One file name, written as the *last* act of creating a workspace, by every
+# driver: `.wk-ready`. Present means creation finished; absent means it is
+# still going or something killed it. It is the same pattern as the base
+# snapshot's `sha` and the container's old `.wk-firstrun-complete`, promoted to
+# the contract -- because without it a remote or vm workspace cut mid-clone
+# looked finished to every command, and `wk build` built the rubble.
+#
+# Next to the artifact, never in a record on the driving side: the far side for
+# a remote (so the box itself, and any other workstation, derive the same
+# answer), the container's own home for a container. The one deviation is the
+# vm target, and it is a property of the thing rather than a shortcut -- a
+# freshly cloned guest is not running, so there is nothing in there to write
+# to, and the guest is visible from this host and nowhere else; its marker
+# therefore lives in the host-side workspace directory. Written by whoever
+# performs the last step of creation, which for a container is provisioning
+# inside it (container/firstrun.sh).
+WK_READY_MARKER=".wk-ready"
+
+# Is creation's completion marker there? Asked of the driver, because only it
+# knows where the workspace's artifacts are -- and asked separately from
+# t_info, because the interesting case is exactly the one where the marker is
+# there and the environment is *not*: that is a workspace somebody removed by
+# hand, not one that never finished (rule 5).
+#
+# Defaults to yes, so a target with no marker mechanism behaves as it did
+# before this existed rather than reporting every workspace half-made.
+t_created() { return 0; }
+
 # Wait until a freshly created workspace is actually usable, and fail if it
-# never gets there. Defaults to "immediately ready", which is true for targets
-# whose creation is synchronous.
-t_ready()      { :; }
+# never gets there.
+#
+# The default polls the driver's own lifecycle answer, which is what `creating`
+# means there: a driver whose creation is synchronous and total answers
+# `present` on the first pass and this returns immediately. A driver with
+# something better to say on failure overrides it (targets/container.sh prints
+# the container's last output, which is where a failed firstrun explains
+# itself).
+t_ready() {
+    local name="$1" i=0 max="${WK_READY_TIMEOUT:-300}"
+    while [ "$i" -lt "$max" ]; do
+        case "$(t_info "$name")" in
+            creating) ;;
+            # Creation has returned and left nothing behind, or left a machine
+            # that cannot be asked. Neither gets better by waiting five
+            # minutes for it.
+            absent|unreachable) return 1 ;;
+            *) return 0 ;;
+        esac
+        sleep 1; i=$((i + 1))
+    done
+    return 1
+}
 t_cores()      { envelope_cores; }   # t_cores <name>
 t_mem_mb()     { envelope_mem_mb; }  # t_mem_mb <name>
 
@@ -164,6 +227,48 @@ target_register() {
 
 target_forget() { rm -f "$(wk_state_dir)/targets/$1"; }
 
+# Which target a *named* workspace lives on, and the one answer every command
+# uses -- so `wk build`, `wk pr` and the macOS dispatcher cannot reach three
+# different machines for one name.
+#
+# Three sources, in order, and the last two are why this exists at all:
+#
+#   an explicit WK_TARGET, which is how a caller overrides everything;
+#   the registry, which is the fast path and is only ever a cache of a fact
+#   that can be recomputed (the audit in docs/HANDOFF-workspace-state.md
+#   reclassifies it as one);
+#   this machine's own stores, asked directly: whichever target has a
+#   workspace directory of this name is the target it lives on.
+#
+# The store walk is what fixes a real failure. A `wk new` that dies before it
+# registers -- an ssh cut, a killed driver, a wk-tools update mid-run -- leaves
+# a workspace on a machine and no record of which machine, and every command
+# then fell back to `container`, asked podman, and answered "no such
+# workspace: <name>" about a checkout sitting on a build box. Measured
+# 2026-08-19 with `wk pr db …`, whose clone was complete on devbox-arm64-2.
+#
+# A file test per configured target, nothing started and no ssh: a remote
+# target's host-side store is on this machine (it holds the build log), and a
+# vm's is too. Drivers are loaded in a subshell so nothing leaks into the
+# caller -- load_target sets and exports the target's identity.
+ws_target() {
+    local name="$1" t
+    if [ -n "${WK_TARGET:-}" ]; then printf '%s' "$WK_TARGET"; return 0; fi
+    if target_of "$name" 2>/dev/null; then return 0; fi
+    for t in $(target_all 2>/dev/null); do
+        # lib/store.sh inside the subshell, because not every caller has it --
+        # `wk pr` and the dispatcher itself do not -- and because sourcing it
+        # sets a default $WK_STORE that must not outlive the question.
+        if ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+             load_target "$t" >/dev/null 2>&1
+             [ -d "$(wk_ws_dir "$name")" ] ); then
+            printf '%s' "$t"
+            return 0
+        fi
+    done
+    default_target
+}
+
 # The target a workspace was created with, or empty if it is not registered.
 # Container workspaces on Linux predate the registry and are the default, so
 # "not registered" must resolve to container rather than to an error.
@@ -190,13 +295,9 @@ wk_marker() { echo "${WK_MARKER:-$HOME/.wk-workspace}"; }
 
 in_workspace() { [ -f "$(wk_marker)" ]; }
 
-# One `key=value` field from a marker file; empty when the file or the key is
-# missing. Comments and blank lines are ignored, so the file can explain itself.
-marker_field() {
-    local f="$1" k="$2"
-    [ -f "$f" ] || return 0
-    awk -F= -v k="$k" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$f"
-}
+# One `key=value` field from a marker file -- the tolerant reader in
+# lib/common.sh, which the status files use too.
+marker_field() { kv_field "$1" "$2"; }
 
 wk_marker_field() { marker_field "$(wk_marker)" "$1"; }
 
@@ -406,61 +507,208 @@ _target_reset_vars() {
     # the previous target's must not survive into this one.
     WK_TARGET_CMAKE=""
     unset _WK_REMOTE_PROBED _WK_REMOTE_HOME _WK_REMOTE_CORES \
-          _WK_REMOTE_LOAD _WK_REMOTE_MEM _WK_REMOTE_REF_PROBED
+          _WK_REMOTE_LOAD _WK_REMOTE_MEM _WK_REMOTE_REF_PROBED _WK_REMOTE_DOWN
 }
 
 # --- what state is this workspace in? ----------------------------------------
 #
-#   absent    nothing of it exists anywhere
-#   creating  something of it exists, and creation never finished
-#   present   it exists and creation finished
+#   absent       nothing of it exists anywhere
+#   creating     something of it exists, and creation never finished
+#   present      it exists and creation finished
+#   broken       creation finished and the environment is gone -- something
+#                outside wk removed it (rule 5)
+#   unreachable  the machine that holds it did not answer in time
 #
-# Derived on every call from evidence next to the artifacts, stored nowhere:
-# the environment the driver can see, and -- where the target pins a base
-# snapshot -- the `base-id` file, which the driver writes as the last act of
-# creation and which is therefore the completion marker. A workspace that was
-# interrupted mid-create has the directory, the layers and often the container,
-# and no base-id; nothing else on this machine can tell that apart from a
-# finished one, which is why `wk new` used to answer "already exists" about
-# rubble and `wk build` used to build it.
+# Derived on every call from evidence next to the artifacts, and stored nowhere.
+# Three pieces of evidence, in this order:
 #
-# The registry is deliberately not consulted: it is a cache of which target a
-# workspace was created with (the audit in docs/HANDOFF-workspace-state.md
-# reclassifies it as one), and a workspace that predates it -- every container
-# workspace on the Linux workstation does -- must not be read as half-made.
+#   the driver's own answer about the environment (t_info), which is where
+#   `creating` and `unreachable` come from -- a driver knows whether its
+#   completion marker is next to its artifacts, and whether it could ask;
 #
-# What this cannot yet see: a remote or vm workspace whose *far side* was cut
-# mid-clone. Those targets pin no base, so there is no marker over there to be
-# missing; the `.wk-ready` marker that fixes it is step 1 of the plan in
-# docs/HANDOFF-workspace-state.md and is not in this pass.
+#   the `base-id` file, for a target that pins a base snapshot: the container
+#   driver writes it as the last act of creation, so a workspace whose
+#   container exists without one was interrupted (and re-pinning it over a
+#   surviving `changes/` layer is undefined behaviour with the overlay);
+#
+#   t_created, when the environment is absent but a workspace directory is
+#   here: with the marker, the environment was removed out from under a
+#   finished workspace, which is a different problem with a different repair
+#   than a creation that never got that far.
+#
+# `ws.status` is not evidence and is never believed about a workspace that
+# exists: it is a claim by the process that drove the creation. It is read in
+# exactly two places, both of which are about that process rather than about
+# the workspace -- whether it is still alive (wait_ready, `wk status`), and,
+# for a target whose marker lives on a far side that has since been emptied,
+# whether it ever said it finished. That second one is rule 5 by definition:
+# `broken` *is* the record and the machine disagreeing, so deciding it without
+# reading the record is not possible.
+#
+# The registry is not consulted either: it is a cache of which target a
+# workspace was created with, and a workspace that predates it -- every
+# container workspace on the Linux workstation does -- must not be read as
+# half-made.
 ws_state() {
     local name="$1" env ws
     env=$(t_info "$name" 2>/dev/null || echo absent)
     ws=$(wk_ws_dir "$name")
 
-    if [ "$env" = absent ] && [ ! -d "$ws" ]; then echo absent; return 0; fi
+    case "$env" in
+        creating|unreachable) echo "$env"; return 0 ;;
+    esac
 
-    if [ "$env" != absent ]; then
-        if t_needs_base && [ ! -f "$ws/base-id" ]; then echo creating; return 0; fi
-        echo present; return 0
+    if [ "$env" = absent ]; then
+        [ -d "$ws" ] || { echo absent; return 0; }
+        # A ws directory with no environment behind it. Which of the two things
+        # that is, the marker decides: with it, this was a finished workspace
+        # and something removed the environment by hand; without it, it is the
+        # near-side half of a creation that never got to the far side, or the
+        # leftovers of a `wk rm` that was killed -- rubble, and rule 3 says
+        # remake.
+        command -v status_field >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
+        if t_created "$name" 2>/dev/null \
+           || [ "$(status_field "$(ws_status_file "$name")" state)" = present ]; then
+            echo broken
+        else
+            echo creating
+        fi
+        return 0
     fi
 
-    # A ws directory with no environment behind it: the near-side half of a
-    # creation that never got to the far side, or the leftovers of a `wk rm`
-    # that was killed. Either way it is rubble, and rule 3 says remake.
-    echo creating
+    if t_needs_base && [ ! -f "$ws/base-id" ]; then echo creating; return 0; fi
+    echo present
 }
 
 # The word `wk ls` and `wk status` print in their STATE column: the driver's
-# own answer (running, exited, present), except that a workspace creation
-# never finished is reported as `creating` rather than as whatever the
+# own answer (running, exited, present), except that a workspace whose
+# lifecycle is not `present` is reported as that instead of as whatever the
 # environment half of it happens to be. A container that exists inside a
 # workspace that was never finished is not a workspace that is running -- and
 # two commands disagreeing about that is exactly what the rules forbid.
 ws_display_state() {
     local st; st=$(ws_state "$1")
-    [ "$st" = creating ] && { echo creating; return 0; }
-    t_info "$1"
+    case "$st" in
+        present) t_info "$1" ;;
+        *)       echo "$st" ;;
+    esac
+}
+
+# What the process that created this workspace claimed, while it was doing so,
+# and the transcript of the attempt. A claim, never the record -- see ws_state.
+#
+# Beside the workspace directory rather than inside it, which is not tidiness:
+# a re-run of `wk new` over a half-made workspace *destroys* that directory
+# first (rule 3), and the log the driver is writing to at that moment must not
+# be the file it deletes -- the fd would survive, pointing at nothing, and the
+# words explaining what happened would be lost exactly when they are wanted.
+# They are removed by `wk rm`, with the workspace they describe.
+ws_state_dir()   { echo "$WK_STORE/create"; }
+ws_status_file() { echo "$(ws_state_dir)/$1.status"; }
+ws_create_log()  { echo "$(ws_state_dir)/$1.log"; }
+
+# Where the command that remakes a workspace has to be typed.
+#
+# `wk new` is a workstation command: a machine that only *hosts* workspaces
+# refuses it (is_lifecycle in `wk`), because the record of which target a
+# workspace belongs to lives on the workstation. So printing it bare on a build
+# box sends somebody straight to a refusal -- which is what the readiness
+# refusal did, reported 2026-08-19 from a shell on devbox-arm64-2.
+ws_remake_hint() {
+    if in_remote_host; then
+        printf 'from the workstation:  wk new %s --target %s' "$1" "$(wk_remote_field target)"
+    else
+        printf 'wk new %s%s' "$1" "${WK_TARGET:+ --target $WK_TARGET}"
+    fi
+}
+
+# --- one gate: wait_ready ----------------------------------------------------
+#
+# Block until this workspace is usable, and be honest about every other
+# outcome. The one place anything asks "may I act on this yet", so that zed,
+# a build and the babysitter cannot each answer it differently:
+#
+#   present      return, immediately in the normal case
+#   creating     wait -- and say what it is waiting for, once
+#   creating,    the driver died with the connection that started it: say so
+#   driver dead  and name the one command that fixes it (`wk new`, which
+#                remakes from scratch -- rule 3, not repair)
+#   broken       refuse, and name the repair
+#   unreachable  refuse, with the timeout that decided it -- never a hang
+#   absent       refuse
+#
+# Foreground by design. If this waiter is killed, only the waiting stops:
+# creation is detached and continues, and re-running the same command is the
+# resume. A waiter that detached itself and opened an editor afterwards would
+# be opening windows into a session that had gone.
+wait_ready() {
+    local name="$1" timeout="${2:-${WK_READY_WAIT:-1800}}"
+    local st sf waited=0 said="" stage
+
+    command -v detach_alive >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
+    sf=$(ws_status_file "$name")
+
+    while :; do
+        st=$(ws_state "$name")
+        case "$st" in
+        present)
+            [ -z "$said" ] || info "'$name' is ready"
+            return 0
+            ;;
+        absent)
+            die "no such workspace: $name"
+            ;;
+        broken)
+            die "'$name' exists as a record and not as a $WK_TARGET workspace: creation
+    finished, and the environment is gone -- something outside wk removed it.
+    Repair:  wk rm $name    (then 'wk new $name' if you still want it)"
+            ;;
+        unreachable)
+            die "'$name' lives on a machine that did not answer (${WK_SSH_TIMEOUT:-10}s).
+    Nothing is wrong with the workspace as far as this end can tell -- it
+    cannot be reached to ask. Try again, or check the route:
+        ssh -o BatchMode=yes ${WK_REMOTE_HOST:-the machine} true"
+            ;;
+        creating)
+            if ! detach_alive "$sf"; then
+                # A barrier rather than a refusal, and the distinction is the
+                # one lib/common.sh draws: this command *can* proceed. A clone
+                # that finished and never got its marker -- a driver killed one
+                # step from the end, a wk-tools update mid-run -- looks exactly
+                # like one cut in the middle, and only the person looking at it
+                # can tell which. Reported 2026-08-19: `wk claude db --force`
+                # on the build machine, where the workspace was complete, the
+                # refusal was absolute, and the repair it named is a command
+                # that machine does not accept.
+                #
+                # Under --force this returns and the caller acts on the
+                # workspace as it is; the warning is repeated when the command
+                # ends, which is what --force buys everywhere else too.
+                barrier "'$name' was never finished creating, and nothing is creating it now
+    (the process that was is gone, with whatever connection started it).
+    Usually there is nothing in one worth keeping, so remake it:
+        $(ws_remake_hint "$name")
+    --force uses it as it is, which is right when you can see that the
+    checkout is complete and only the marker is missing."
+                return 0
+            fi
+            if [ -z "$said" ]; then
+                said=1
+                stage=$(status_field "$sf" stage)
+                info "waiting for '$name' to finish being created${stage:+ (at: $stage)}"
+                log  "  follow it:  tail -f $(ws_create_log "$name")"
+                log  "  this end can be killed; creation is detached and continues"
+            fi
+            ;;
+        esac
+
+        if [ "$waited" -ge "$timeout" ]; then
+            die "'$name' was still $st after ${timeout}s.
+    Creation is detached, so it may still be going: 'wk status $name' says
+    whether the driver is alive, and $(ws_create_log "$name") says what it is doing."
+        fi
+        sleep 2; waited=$((waited + 2))
+    done
 }
 
 # The targets a report covers, and the one place that question is answered.

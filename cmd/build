@@ -73,10 +73,23 @@ require_name "$NAME"
 
 config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
 
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+# The lifecycle, not the environment (ws_state in lib/target.sh): a container
+# somebody removed by hand is not "no such workspace", and answering that sends
+# a person looking for a name they typed correctly. Every other state gets its
+# own words from wait_ready further down; `absent` is the one that has to be
+# refused before the config, the job count and the flags are resolved.
+WS_STATE=$(ws_state "$NAME")
+case "$WS_STATE" in
+    absent) die "no such workspace: $NAME" ;;
+    # Neither of these gets better by resolving a config and a job count first
+    # -- one needs a repair and the other needs a network -- and wait_ready is
+    # where both are worded, so it is asked now rather than at the gate below.
+    # It does not wait for either.
+    broken|unreachable) wait_ready "$NAME" ;;
+esac
 
 # The workspace's own architecture, from the driver rather than from a flag.
 # It was fixed when the workspace was created and cannot change afterwards --
@@ -295,7 +308,7 @@ if [ -n "$DRY" ]; then
     config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE" "$ARCH"
     ARCH_LABEL=$(arch_label "$ARCH")
     log "dry run -- nothing was built."
-    log "  workspace: $NAME ($TARGET, $(t_info "$NAME")${ARCH_LABEL:+, $ARCH_LABEL})"
+    log "  workspace: $NAME ($TARGET, $WS_STATE${ARCH_LABEL:+, $ARCH_LABEL})"
     [ -n "$BRANCH" ] && log "  branch:    $BRANCH (would be checked out first)"
     log "  config:    $CONFIG ($CFG_BUILDSYS${CFG_PORT:+ $CFG_PORT}${CFG_ARGS:+ $CFG_ARGS})"
     [ -n "${WK_TARGET_CMAKE:-}" ] && log "  machine:   $WK_TARGET_CMAKE (WK_TARGET_CMAKE, from $TARGET's conf)"
@@ -309,6 +322,18 @@ if [ -n "$DRY" ]; then
     log "  would run: env ${CFG_ENV[*]} $(t_tools "$NAME")/build/build-in-target.sh $*"
     exit 0
 fi
+
+# One gate, before anything is written: a build must not start on a workspace
+# that is still being created (lib/target.sh, wait_ready). It returns at once
+# for a finished workspace, waits while a detached `wk new` is still working,
+# and refuses -- naming the repair -- for the three states no amount of waiting
+# fixes: a creation whose driver is gone, an environment removed from under the
+# record, and a machine that will not answer.
+#
+# Bounded, because this is a build and not a watch: a creation that has not
+# finished in half an hour is something to look at rather than to keep waiting
+# on. `--babysit` inherits the gate for free, since it re-runs this command.
+wait_ready "$NAME" "${WK_BUILD_READY_WAIT:-1800}"
 
 # One lock per mutated resource (rule 4): this workspace, for the rest of this
 # process. Everything above resolves and reports; everything below writes to

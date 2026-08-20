@@ -26,7 +26,7 @@ require_name "$NAME"
 
 # The log lives wherever that workspace's target keeps its state, which is not
 # the same place for a container and a macOS VM.
-load_target "${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+load_target "$(ws_target "$NAME")"
 
 # The canonical log for a target that is a machine of its own is on that
 # machine -- written there by the build itself, whichever end started it. Ask

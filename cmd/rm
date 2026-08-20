@@ -13,11 +13,12 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/detach.sh"
 
 NAME="${1:-}"
 require_name "$NAME"
 
-TARGET="${2:-${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}}"
+TARGET="${2:-$(ws_target "$NAME")}"
 load_target "$TARGET"
 
 # Refuse before asking. The driver refuses too -- a workspace cannot delete the
@@ -25,26 +26,45 @@ load_target "$TARGET"
 # carried out either way is worse than saying so straight away.
 if [ "$WK_TARGET_KIND" = local ]; then t_destroy "$NAME"; fi
 
+ws=$(wk_ws_dir "$NAME")
+
+# The creation attempt's own bookkeeping, which lives beside the workspace
+# directory rather than in it (lib/target.sh) and so has to be named here: a
+# `wk rm` that left the status file behind would leave `wk status` reporting a
+# workspace that no longer exists anywhere.
+sf=$(ws_status_file "$NAME")
+clog=$(ws_create_log "$NAME")
+
+# Before the lock, because the lock is what makes it invisible: a creation in
+# flight holds this workspace's lock, so waiting for it and then destroying
+# what it just made would look exactly like a slow `wk rm`. Said here, and then
+# the wait is a wait somebody asked for.
+if detach_alive "$sf"; then
+    warn "'$NAME' is being created right now (pid $(status_field "$sf" pid), at stage
+  '$(status_field "$sf" stage)') -- this will wait for that to finish and then
+  destroy it. Ctrl-C now if that is not what you meant."
+fi
+
 # One lock per mutated resource (rule 4): the workspace being destroyed, and
 # the store -- `wk gc` must not be counting references while this is removing
 # one.
 hold_lock "ws-$NAME"
 if t_needs_base; then hold_lock store -s; fi
 
-ws=$(wk_ws_dir "$NAME")
-
 # Nothing left but the record: converge on the declared final state rather than
 # refusing. This is what a `wk rm` killed after the destroy but before the
 # registry write leaves behind, and re-running it has to finish the job.
 if [ ! -d "$ws" ] && [ "$(t_info "$NAME")" = absent ]; then
-    if target_of "$NAME" >/dev/null 2>&1; then
+    if target_of "$NAME" >/dev/null 2>&1 || [ -f "$sf" ]; then
+        rm -f "$sf" "$clog"
         ssh_alias_remove "$NAME"
         target_forget "$NAME"
-        info "'$NAME' had nothing left but its registry entry; forgotten"
+        info "'$NAME' had nothing left but its record; forgotten"
         exit 0
     fi
     die "no such workspace: $NAME"
 fi
+
 
 # Uncommitted work lives only in the overlay layer, so warn before discarding.
 if [ -d "$ws/changes" ]; then
@@ -75,6 +95,7 @@ if [ -n "$left" ] || [ "$rc" -ne 0 ]; then
     exit 1
 fi
 
+rm -f "$sf" "$clog"
 ssh_alias_remove "$NAME"
 target_forget "$NAME"
 

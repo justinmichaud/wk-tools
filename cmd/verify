@@ -33,7 +33,7 @@ WANT_GPU=""
 # Resolved from the registry like every other command: with a fixed default a
 # `wk verify <vm-ws>` would load the container driver and report "no such
 # workspace" about a workspace that exists.
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"

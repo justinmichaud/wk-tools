@@ -36,9 +36,14 @@ done
 
 config_load "$CONFIG" || die "unknown config '$CONFIG'"
 
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
-[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+# One gate for "is this workspace usable yet" (wait_ready, lib/target.sh):
+# `absent` is still refused by name, and everything else -- a creation still
+# running, one whose driver died, an environment removed from under the record,
+# a machine that will not answer -- gets the words that fit it there rather
+# than "no such workspace", which is what this said about all four.
+wait_ready "$NAME"
 
 # Where the products landed, and what the loader needs to find them, both come
 # from build/configs.sh -- four ports lay their trees out four ways and the

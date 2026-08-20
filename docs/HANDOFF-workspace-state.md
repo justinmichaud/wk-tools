@@ -155,16 +155,16 @@ branch).
    "no workspaces" note. The name sets are checked by
    `wk selftest --section state`.
 
-1. **Readiness is only half a concept.** Container creation is async and has
-   a real marker; `t_ready` is a no-op for vm and remote; and *nothing gates
-   on readiness* — not zed, not build, not babysit.
-2. **Remote creation is one long synchronous ssh.** A cut mid-`wk new` leaves
-   a partial clone that `t_info` calls `present`; `wk new` then refuses
-   ("already exists"), `wk build` builds rubble, and only a by-hand `wk rm`
-   recovers.
-3. **Creation state does not exist at all** — there is no way to tell
-   "creating, driver alive" from "creating, driver died with my ssh session"
-   from "done".
+1. ~~**Readiness is only half a concept.**~~ **Done 2026-08-19 (phase 2).**
+   Every driver writes `.wk-ready` last, `t_info` reports `creating` while it
+   is missing, and one gate (`wait_ready`) is what zed and build go through.
+2. ~~**Remote creation is one long synchronous ssh.**~~ **Done 2026-08-19
+   (phase 2).** Creation is detached on the driving machine, the far-side
+   marker is written last, and a cut mid-clone leaves a workspace that reads
+   `creating` from either end — which `wk new` converges by remaking.
+3. ~~**Creation state does not exist at all**~~ **Done 2026-08-19 (phase 2).**
+   `absent | creating | present | broken | unreachable`, derived per call, with
+   the driver's liveness read from `ws.status` and nothing else taken from it.
 
 ## The plan
 
@@ -180,6 +180,140 @@ is what a phase 2 is: the `.wk-ready` marker on the far side (steps 1–2), the
 and the lifecycle line in `wk status` (step 6). Until those land, a remote or
 vm workspace cut mid-clone still looks finished — the near side has no marker
 to miss, because those targets pin no base.
+
+**Phase 2 landed 2026-08-19** (macOS host, verified against the podman VM):
+steps 1, 2, 3, 5 and 6 below, and step 4 for the far side. What that means in
+the tree:
+
+- `.wk-ready`, one name (`WK_READY_MARKER`, lib/target.sh), written last by
+  every driver. The container's is written from *inside*, by
+  `container/firstrun.sh`, because that hook genuinely is the last act of
+  creating one -- the driver's part ended when `wkdev-create` returned, minutes
+  before the workspace was usable. The remote's is written on the far side, so
+  the box itself and any other workstation derive the same answer.
+- `t_info` answers the lifecycle rather than the environment: `absent`,
+  `creating`, or the driver's word for something that exists. The remote driver
+  answers all of it in **one** ssh round trip, because `wk status` asks per
+  workspace.
+- `wait_ready` in lib/target.sh, and its consumers: `wk build` (bounded,
+  `WK_BUILD_READY_WAIT`, before anything is written -- `--babysit` inherits it
+  by re-running `wk build`) and `wk enter --zed` / `wk new --zed`. Four more
+  than the plan listed -- `wk run`, `wk test`, `wk claude`, `wk gui` -- because
+  they all had the same line (`t_info != absent`, "no such workspace") and it
+  said that about four different situations, one of which was launching an
+  agent into a workspace whose provisioning had not finished writing its
+  CLAUDE.md or its keys. `wk test --dry-run` deliberately does not wait: a dry
+  run resolves and prints, and reports the state it saw.
+- `lib/detach.sh`: `detach_run`, `detach_wait`, `detach_alive`, `status_write`,
+  `status_field`. Extracted from the babysitter, whose details were the ones
+  worth keeping (nohup, stdin closed, both streams to the log, pid for
+  liveness). `wk new` is its second user: creation is detached by default and
+  the command waits in the foreground, `--no-wait` returns immediately.
+- `wk status` renders the lifecycle line first, with the stage and the driver's
+  liveness, and exits 4 when a workspace needs a person.
+
+Six decisions that differ from the plan as it was written, all of them made
+while implementing it:
+
+1. **Two more states than the one step 2 asked for: `broken` and
+   `unreachable`.** `broken` is creation finished plus an environment that is
+   gone -- a by-hand `podman rm`, `tart delete`, `rm -rf` over there -- which
+   is rule 5's case and needs a different answer (`wk rm`, because the overlay
+   layer may still hold work) from a creation that never finished (`wk new`,
+   which wipes). `unreachable` is the core requirement's: a machine that did
+   not answer is never reported as `absent`, and the timeout that decided it is
+   named. The remote driver's capacity probe therefore grew a soft form
+   (`_remote_probe_try`) so a reporting path can survive what a build cannot.
+2. **`broken` is the one place a record is read** to decide state. Everything
+   else in `ws_state` is evidence next to the artifact, but a record-vs-machine
+   disagreement cannot be detected without the record, so the marker *or* a
+   `ws.status` that says `present` is what separates it from rubble.
+3. **`ws.status` and `create.log` live beside the workspace directory**
+   (`$WK_STORE/create/<name>.{status,log}`), not in it. They cannot be in it:
+   a re-run of `wk new` over a half-made workspace destroys that directory as
+   its first act, and the log the driver is writing to must not be the file it
+   deletes -- the fd survives, pointing at nothing, and the words explaining
+   what happened are lost exactly when they are wanted. `wk rm` removes them.
+4. **The vm marker is host-side.** Creating a vm workspace clones a guest that
+   is not running, so there is nothing inside it to write to, and a guest is
+   visible from this host and nowhere else -- there is no second machine that
+   would need to read it. Everywhere else the marker is next to the checkout.
+5. **The container's old `.wk-firstrun-complete` counts as the same
+   evidence.** It means exactly what `.wk-ready` means, and every container
+   workspace made before today has it; read as absent they would all have been
+   reported half-made and offered for destruction. New ones write only the new
+   name, and the clause can go when no pre-marker workspace is left.
+6. **A workspace that never finished initialising is a failed creation, not a
+   warning.** `wk new` used to say "it is usable, but the push keys and the
+   Claude CLI may be missing"; under rule 3 that is rubble, so the driver dies,
+   the status file says `failed`, and a re-run remakes it from scratch.
+
+Three bugs came out of writing it, all three found by running it rather than
+by reading it:
+
+- **A waiter must not believe the previous attempt's status file.** Re-running
+  `wk new` over half-made rubble read the killed driver's `state=creating` and
+  dead pid from the file the *last* run left, and reported the run it had just
+  started as crashed -- while the new driver went on to finish the workspace
+  correctly. `detach_run` now clears a status file no live process owns, and
+  `detach_wait` trusts the pid it forked over the one in the file. A stale
+  `state=failed` would have done the same thing faster.
+- **A listing must not ask an unreachable machine anything.** `t_branch` and
+  `t_has_wk` both resolved a remote path, which reaches for the capacity probe,
+  which dies -- so `wk status` against a machine that was off printed two
+  connection errors before the line that said `unreachable` perfectly clearly.
+  `t_branch` now answers `-` for any state that cannot be asked, and
+  `t_has_wk` checks reachability before resolving anything.
+- **"no such workspace" was the answer to four different situations**, one of
+  them a workspace whose container somebody had removed by hand. That is what
+  the extra `wait_ready` consumers above fix.
+- **The readiness refusal was absolute, and its advice was unrunnable where it
+  printed.** Reported from `wk claude db --force` in a shell *on*
+  devbox-arm64-2: the workspace's clone was complete and only its marker was
+  missing, `--force` could not get past a `die`, and the "remake it: wk new …"
+  it named is a command that machine refuses (workspaces are created from the
+  workstation). It is a `barrier` now -- the distinction lib/common.sh draws:
+  the command *can* proceed, and a clone that finished one step before its
+  marker looks exactly like one cut in the middle, so the person looking at it
+  gets to decide. `ws_remake_hint` prints "from the workstation: wk new …
+  --target <t>" on a machine that only hosts workspaces.
+- **A workspace with no registry entry was unreachable by name.** Reported
+  from `wk pr db …`: every command resolved the target as
+  `target_of || default_target`, so a `wk new` that died before registering
+  left a complete checkout on a build box while every command asked podman and
+  said "no such workspace: db". Two halves to the fix, and both are the audit's
+  own prescription that the target view is calculated rather than carried:
+  `ws_target` (lib/target.sh) now falls back to whichever target's own store on
+  this machine holds that name -- a file test per configured target, no ssh,
+  nothing started -- and every command plus the macOS dispatcher goes through
+  it, so they cannot reach three different machines for one name. And `wk new`
+  registers the target *before* it creates anything: the record is what lets a
+  later command find a half-made workspace, which is the mirror image of
+  `wk rm`, where the record is what outlives the artifacts.
+
+Still open from this pass:
+
+- `wk build --detach`'s own nohup has not been moved onto `detach_run` (it
+  predates it and does the same three things).
+- A creation's bookkeeping can outlive everything it describes and then be
+  invisible: `wk rm` removes it, and a `state=present` file is what tells a
+  hand-emptied far side apart from rubble, but a `$WK_STORE/create/<n>.*` pair
+  whose workspace, environment and registry entry are all gone is listed by
+  nothing and pruned by nothing. `wk gc` is where that belongs.
+- The `--zed` gate is exercised through `wk build` rather than by opening a
+  real editor against a `creating` workspace.
+- The remote and vm markers are code-verified and name-checked by selftest, but
+  no remote or guest workspace was created end to end in this pass -- the
+  container was, including a driver killed mid-provisioning and remade.
+- **A delegated `wk status` is answered by the far machine's own wk-tools**, so
+  a build box still running an older copy answers by the older rules: measured
+  2026-08-19 on devbox-arm64-2, a workspace whose creation had died was
+  reported `present` from over there and `creating` by this machine's code. The
+  fleet block already prints "wk-tools@<machine> ... DIFFERS from the
+  workstation -- push it there", which is the honest half; what is missing is
+  that the drift changes *answers* and not just versions. A `wk build` (or
+  `wk remote setup`) to that machine rsyncs the tooling and the answers agree
+  again.
 
 1. **Evidence at the artifact: a `.wk-ready` marker per workspace,** written
    as the *last* act of creation by every driver — the firstrun pattern,
@@ -234,6 +368,14 @@ absolute UTC timestamps, unknown keys ignored by every reader:
     log=… report=…     # where the words went
     updated=…          # staleness display, never correctness
     (+ concern-specific: config, model, attempt/max, branch, stage)
+
+Written and read through `status_write` / `status_field` / `detach_alive` in
+`lib/detach.sh` as of 2026-08-19 — one atomic writer and one tolerant reader,
+so "a file written by last month's wk-tools still renders" is a property of two
+functions rather than of every caller. The single-writer rule is enforced by
+the lock: whoever holds the resource's lock writes its status file, which is
+why `wk new`'s waiting half writes nothing at all. `ws.status` sits beside the
+workspace directory rather than inside it (decision 3 under "The plan").
 
 ## Branch semantics
 

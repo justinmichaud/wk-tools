@@ -254,7 +254,7 @@ else
          will not find this workspace. Recreate with a current wk."
 fi
 
-# A completion marker, checked by `wk new`.
+# Creation's completion marker, and the last thing this hook does.
 #
 # .wkdev-init runs this hook and then carries on regardless of how it exited,
 # so a failure part-way through is invisible: the container comes up, the
@@ -262,6 +262,19 @@ fi
 # after the failing step. That happened -- a root-owned ~/.config aborted the
 # helix install and cost this workspace its lldb config and its shell rc --
 # and the only honest fix is for something downstream to check.
-: > "$HOME/.wk-firstrun-complete"
+#
+# `.wk-ready` is that check, and it is now the same name on every target
+# (lib/target.sh, "creation's completion marker"): the file every driver writes
+# last, next to the workspace rather than on whichever machine drove the
+# creation. It is what `wk new` waits for, what stops `wk build` starting on a
+# half-initialised checkout, and what tells a workspace whose container was
+# removed by hand apart from one that never finished being made. This home
+# directory is a directory on the host, so the host reads it without entering
+# anything.
+#
+# Written here rather than by the driver because this is genuinely the last
+# act of creating a container workspace -- the driver's part ended when
+# wkdev-create returned, minutes before the workspace was usable.
+: > "$HOME/.wk-ready"
 
 log "workspace ${WK_WORKSPACE:-?} ready"

@@ -93,9 +93,35 @@ t_list() {
         | sed 's/^wk-//'
 }
 
+# The container's own home, which is a directory on this machine: the workspace
+# is an overlay plus a home under the store, so provisioning's marker is a file
+# here and reading it costs nothing.
+#
+# Two names accepted, and only one written. `.wk-firstrun-complete` is what
+# firstrun.sh wrote before the marker became the contract, and every container
+# workspace made before 2026-08-19 has it -- read as absent, those would all
+# have been reported half-made and offered for destruction. It means exactly
+# what the new name means, so it counts. New workspaces write `.wk-ready`;
+# this clause can go when no pre-marker workspace is left anywhere.
+t_created() {
+    local h; h="$(wk_ws_dir "$1")/home"
+    [ -f "$h/$WK_READY_MARKER" ] || [ -f "$h/.wk-firstrun-complete" ]
+}
+
+# Two questions in one word, and the marker is what separates them: a container
+# that exists inside a workspace whose creation never finished is not a
+# workspace that is running. Creation here is asynchronous -- wkdev-create
+# returns as soon as the container starts and .wkdev-init runs the firstrun
+# hook afterwards -- so this window is normal, and every command that gates on
+# readiness needs to see it (ws_state, wait_ready in lib/target.sh).
 t_info() {
-    local c; c=$(_ctr "$1")
-    _podman inspect "$c" --format '{{.State.Status}}' 2>/dev/null || echo absent
+    local c st
+    c=$(_ctr "$1")
+    st=$(_podman inspect "$c" --format '{{.State.Status}}' 2>/dev/null) || st=absent
+    [ -n "$st" ] || st=absent
+    [ "$st" = absent ] && { echo absent; return 0; }
+    t_created "$1" || { echo creating; return 0; }
+    echo "$st"
 }
 
 # Read, not exec'd. The checkout is an overlay whose upper layer is a directory
@@ -262,6 +288,9 @@ t_create() {
         "${flags[@]}"
 
     # Drop the firstrun hook where .wkdev-init will pick it up on first start.
+    # It writes `.wk-ready` in this home directory as its own last act, which is
+    # what makes creation's completion evidence live next to the workspace
+    # rather than on whichever machine happened to drive it.
     install -m 0755 "$WK_ROOT/container/firstrun.sh" "$ws/home/.wkdev-firstrun"
 
     # Last, and that is the point: base-id is the completion marker this target
@@ -286,10 +315,12 @@ t_create() {
 # marker as its last act; this waits for it and reports honestly when it never
 # appears.
 t_ready() {
-    local name="$1" ws c i=0
-    ws=$(wk_ws_dir "$name"); c=$(_ctr "$name")
-    while [ "$i" -lt 300 ]; do
-        [ -f "$ws/home/.wk-firstrun-complete" ] && return 0
+    local name="$1" c i=0
+    c=$(_ctr "$name")
+    while [ "$i" -lt "${WK_READY_TIMEOUT:-300}" ]; do
+        t_created "$name" && return 0
+        # No point waiting for a marker no process is going to write: the
+        # container the firstrun hook runs in is gone.
         _podman container exists "$c" >/dev/null 2>&1 || break
         sleep 1; i=$((i + 1))
     done

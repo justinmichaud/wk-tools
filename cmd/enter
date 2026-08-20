@@ -19,16 +19,23 @@ require_name "$NAME"
 ZED=""
 [ "${1:-}" = --zed ] && { ZED=1; shift; }
 
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
-
 if [ -n "$ZED" ]; then
+    # Wait for it, rather than opening an editor on a checkout that is still
+    # being cloned -- which is what this did, and which shows up as a tree of
+    # missing files and a remote-development session against a workspace that
+    # was not there yet. The waiter stays in the foreground on purpose: if this
+    # end dies, creation continues detached and re-running this command is the
+    # resume (lib/target.sh, wait_ready).
+    wait_ready "$NAME"
     Z=$(zed_cli) || die "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)"
     host=$(t_ssh_host "$NAME") || die "'$NAME' is not running"
     exec "$Z" "ssh://$host$(t_src "$NAME")"
 fi
+
+[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
 # No `exec`: t_exec is a shell function, and exec can only replace the process
 # with a real program. `exec t_exec ...` fails with "t_exec: not found".

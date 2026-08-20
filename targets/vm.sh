@@ -248,7 +248,25 @@ t_list() {
            |"\(.Name|ltrimstr("wk-"))\t\(.State)"'
 }
 
-t_info() { _vm_state "$(_vm "$1")"; }
+# Creation's completion marker, and the one target where it lives on the host
+# rather than next to the checkout: a workspace here is created by cloning the
+# golden guest, which is not running while that happens, so there is nothing
+# inside it to write to -- and a guest is visible from this host and from
+# nowhere else, so there is no second machine that would need to read it. The
+# host-side workspace directory is where every other host-side fact about this
+# guest already lives.
+#
+# What it rules out: a `tart clone` or the `tart set` after it killed part-way
+# through leaves a VM that `tart list` reports quite happily, with the wrong
+# cpu and memory or an incomplete disk.
+t_created() { [ -f "$(wk_ws_dir "$1")/$WK_READY_MARKER" ]; }
+
+t_info() {
+    local st; st=$(_vm_state "$(_vm "$1")")
+    [ "$st" = absent ] && { echo absent; return 0; }
+    t_created "$1" || { echo creating; return 0; }
+    echo "$st"
+}
 
 t_ssh_host() {
     local ip; ip=$(_ip "$1") || return 1
@@ -288,6 +306,11 @@ t_create() {
         warn "the clone took $(( $(date +%s) - t0 ))s -- APFS copy-on-write may not be in play; check disk use"
 
     ensure_dir "$(wk_ws_dir "$name")"
+
+    # Last: the clone happened, and it was sized. Anything killed before here
+    # leaves a guest with no marker, which every command reads as `creating`
+    # and `wk new` remakes from scratch.
+    : > "$(wk_ws_dir "$name")/$WK_READY_MARKER"
 }
 
 t_start() {

@@ -112,6 +112,23 @@ ensure_dir() {
 
 # --- misc --------------------------------------------------------------------
 
+# One `key=value` field out of a small text file; empty when the file or the
+# key is missing. Comments and blank lines are ignored, so every file written
+# in this format can explain itself, and a key this reader has never heard of
+# is simply not asked for -- which is what makes a file written by last
+# month's wk-tools readable by today's.
+#
+# The one parser for every such file in the tree: the workspace and remote
+# markers (marker_field, lib/target.sh) and the status files (status_field,
+# lib/detach.sh) are both this. Two copies of a tolerant parse are two
+# tolerances that drift.
+kv_field() {
+    local f="$1" k="$2"
+    [ -f "$f" ] || return 0
+    awk -F= -v k="$k" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$f"
+}
+
+
 # zed's CLI: the PATH entry when the user has run "Install CLI", otherwise the
 # binary inside the app bundle. A drag-installed Zed.app has no symlink and is
 # still installed -- cmd/doctor already accepts it as such, so the commands

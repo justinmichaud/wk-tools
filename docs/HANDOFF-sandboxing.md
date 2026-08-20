@@ -72,6 +72,31 @@ validates the whole ruleset after, and then *tests the property*: clears the
 timestamp and checks that sudo asks. It never edits or removes a file it did
 not write.
 
+Where `visudo` *is* was worth fixing (2026-08-19): it lives in `/usr/sbin`,
+which is not on a normal user's PATH on Debian-family Linux -- so on exactly
+the machines this command exists for, the validation was a "command not found"
+before it ever looked at the file. `visudo_resolve` in `cmd/sudo` takes it from
+the PATH when the PATH has it and from `/usr/sbin/visudo` when it does not, and
+refuses to install anything at all when neither exists: the alternative is
+writing an unvalidated sudoers file, which is the one mistake this whole
+paragraph is about. It sets a variable rather than printing one, so that
+refusal kills the command instead of a command substitution -- which would
+have left an empty command word and reported a parse failure the generated
+file never had.
+
+One more thing `--force` has to be honest about, found 2026-08-19: forcing
+`wk claude` onto a shared build machine used to check that a `claude` existed
+on PATH and then hand the session to it. On devbox-arm64-2 that was a global
+npm install running under the machine's own node v16.19.0, which dies before
+printing anything (`ReferenceError: ReadableStream is not defined` -- the
+global arrived in node 18). Same rule as the sudoers check above: test the
+property, not the file. `wk claude` now runs `claude --version` to find one
+that works, prefers the one in your own home, offers the user-local installer
+(which carries its own runtime, so it neither needs nor touches the shared
+node) when nothing does, and launches it **by absolute path** -- because with
+`/usr/local/bin` ahead of `~/.local/bin` on a machine that is not ours to
+reorder, installing a working one would still leave the broken one selected.
+
 **A way past a barrier: `wk <command> --force`.** Asked for alongside the sudo
 rule, and the reason is honest — a rule you cannot get past in a hurry is a
 rule that gets deleted. Any refusal that exists because of a policy rather than

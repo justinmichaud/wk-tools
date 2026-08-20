@@ -113,7 +113,7 @@ _remote_require() {
 _ssh_opts() {
     local d; d="$(wk_state_dir)/ssh"
     mkdir -p "$d" 2>/dev/null || true
-    printf '%s' "-o BatchMode=yes -o ConnectTimeout=10 -o ControlMaster=auto -o ControlPath=$d/%h-%p-%r -o ControlPersist=60"
+    printf '%s' "-o BatchMode=yes -o ConnectTimeout=${WK_SSH_TIMEOUT:-10} -o ControlMaster=auto -o ControlPath=$d/%h-%p-%r -o ControlPersist=60"
 }
 
 _rsh() {
@@ -161,16 +161,26 @@ _rsh_q() {
 # The machine driving the build may be a laptop with 8 cores and the build may
 # be running on 80; lib/resources.sh measures the machine it runs on, which for
 # every other target is the right one and for this one is never.
-_remote_probe() {
+# The two halves are split because reporting and working want different
+# answers to "the machine did not reply". A build cannot proceed without the
+# numbers and says so with the ssh command to try; `wk status` must never die
+# over an unreachable machine -- the core requirement is that it reports
+# unreachable, with the timeout that decided it, and carries on with the rest
+# of the fleet.
+#
+# The failure is remembered for the life of this process, exactly as the
+# success is: `wk status` asks about every workspace on the machine, and one
+# ConnectTimeout per question would turn a listing into a minute of waiting.
+_remote_probe_try() {
     [ -n "${_WK_REMOTE_PROBED:-}" ] && return 0
+    [ -n "${_WK_REMOTE_DOWN:-}" ] && return 1
     _remote_require
     local out
-    out=$(_rsh_q 'echo "$HOME"; nproc; awk "{print int(\$1)}" /proc/loadavg;
-                awk "/^MemAvailable:/ {print int(\$2/1024)}" /proc/meminfo') \
-        || die "cannot reach '$WK_REMOTE_HOST' over ssh.
-    This target has no way in but ssh, and it is not interactive: the key,
-    the ProxyJump and the host entry all have to work non-interactively.
-    Try:  ssh -o BatchMode=yes $WK_REMOTE_HOST true"
+    if ! out=$(_rsh_q 'echo "$HOME"; nproc; awk "{print int(\$1)}" /proc/loadavg;
+                awk "/^MemAvailable:/ {print int(\$2/1024)}" /proc/meminfo'); then
+        _WK_REMOTE_DOWN=1
+        return 1
+    fi
 
     _WK_REMOTE_HOME=$(printf '%s\n' "$out" | sed -n 1p)
     _WK_REMOTE_CORES=$(printf '%s\n' "$out" | sed -n 2p)
@@ -179,6 +189,13 @@ _remote_probe() {
 
     [ -n "$WK_REMOTE_ROOT" ] || WK_REMOTE_ROOT="$_WK_REMOTE_HOME/wk"
     _WK_REMOTE_PROBED=1
+}
+
+_remote_probe() {
+    _remote_probe_try || die "cannot reach '$WK_REMOTE_HOST' over ssh (${WK_SSH_TIMEOUT:-10}s).
+    This target has no way in but ssh, and it is not interactive: the key,
+    the ProxyJump and the host entry all have to work non-interactively.
+    Try:  ssh -o BatchMode=yes $WK_REMOTE_HOST true"
 }
 
 # A shared WebKit repository on the machine, to clone workspaces from.
@@ -271,10 +288,34 @@ t_list() {
         | while read -r n; do [ -n "$n" ] && printf '%s\tpresent\n' "$n"; done
 }
 
+# The whole lifecycle in one round trip, because every extra one is a
+# handshake through a jump host and `wk status` asks per workspace:
+#
+#   no workspace directory          absent
+#   directory, no `.wk-ready`       creating -- a clone that never finished,
+#                                   or one whose ssh was cut mid-way
+#   `.wk-ready`                     present
+#   the machine did not answer      unreachable, never absent
+#
+# The marker is the point of the exercise. Before it, a workspace whose clone
+# died half-way had a directory and a partial checkout, `t_info` called it
+# present, `wk new` refused it as "already exists" and `wk build` built the
+# rubble -- and none of that was visible from the machine itself, which is
+# where the marker now is.
 t_info() {
-    _rsh_q "test -d $(sh_quote "$(_remote_ws "$1")/WebKit") && echo present || echo absent" \
-        2>/dev/null || echo absent
+    local ws out
+    _remote_probe_try || { echo unreachable; return 0; }
+    ws=$(_remote_ws "$1")
+    out=$(_rsh_q "if [ ! -d $(sh_quote "$ws") ]; then echo absent;
+                  elif [ -f $(sh_quote "$ws/$WK_READY_MARKER") ]; then echo present;
+                  else echo creating; fi" 2>/dev/null) || out=unreachable
+    printf '%s\n' "${out:-unreachable}"
 }
+
+# The far side's marker, which is the only copy of this fact. Asked through
+# t_info so there is one round trip and one place that knows where the marker
+# lives.
+t_created() { [ "$(t_info "$1")" = present ]; }
 
 t_create() {
     local name="$1" root ws ref
@@ -282,7 +323,19 @@ t_create() {
     root=$(_remote_root)
     ws=$(_remote_ws "$name")
 
-    [ "$(t_info "$name")" = absent ] || die "workspace '$name' already exists on $WK_REMOTE_HOST"
+    # A finished workspace is somebody's work and is refused by name. A
+    # half-made one is not: `wk new` has already destroyed it before getting
+    # here (rule 3, wipe over repair), so reaching this with anything but
+    # absent means the record and the machine disagree about something this
+    # driver cannot resolve on its own.
+    case "$(t_info "$name")" in
+        absent) ;;
+        creating) die "'$name' on $WK_REMOTE_HOST is a checkout that never finished being
+    made, and destroying it did not take. Remove it by hand and try again:
+        ssh $WK_REMOTE_HOST rm -rf $(sh_quote "$(_remote_ws "$name")")" ;;
+        unreachable) die "cannot reach $WK_REMOTE_HOST to create '$name'" ;;
+        *) die "workspace '$name' already exists on $WK_REMOTE_HOST" ;;
+    esac
 
     ref=$(_remote_reference)
 
@@ -357,6 +410,15 @@ t_create() {
           > $(sh_quote "$root/cache/ccache/ccache.conf")" || true
 
     ensure_dir "$(wk_ws_dir "$name")"
+
+    # Last, on the far side, and that is the whole point: this file is what
+    # says the clone, the wiring and the ccache config all happened. Written
+    # over there rather than here so that it survives this end going away --
+    # an ssh cut mid-clone leaves no marker and the workspace reads `creating`
+    # from any machine that asks, including the box itself.
+    _rsh_q "touch $(sh_quote "$ws/$WK_READY_MARKER")" \
+        || die "could not mark '$name' ready on $WK_REMOTE_HOST -- treat it as half-made
+    and re-run 'wk new $name --target ${WK_TARGET:-remote}'"
     info "remote workspace '$name' created on $WK_REMOTE_HOST ($ws)"
 }
 
@@ -429,6 +491,11 @@ t_state_put() {
 # not exist or would resolve a target it has never heard of.
 t_has_wk() {
     _remote_is_local && return 1
+    # Before resolving the remote root, which is what `t_tools` needs and which
+    # only the capacity probe knows: on a machine that is off, resolving it dies
+    # inside a command substitution and prints a connection error in the middle
+    # of a listing that was about to say "unreachable" perfectly clearly.
+    _remote_probe_try || return 1
     _rsh_q "test -f \$HOME/.wk-remote && test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
 }
 

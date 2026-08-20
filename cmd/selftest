@@ -516,6 +516,108 @@ chk_ls_status_same_names() {
         return 1; }
 }
 
+# The five words ws_state can answer, each from the evidence that decides it.
+#
+# Hermetic, and a unit test rather than an end-to-end one on purpose: producing
+# a real `broken` or `unreachable` workspace means removing a container by hand
+# or taking a machine off the network, which is exactly the kind of thing the
+# interruption matrix in the plan is hand-run for. What can be checked every
+# run is that the combination logic is right -- a stub driver, five inputs, five
+# answers -- because that logic is what every command now gates on.
+chk_ws_state_words() {
+    local out
+    out=$(
+        WK_STORE="$TMP/store"; export WK_STORE
+        mkdir -p "$TMP/store/ws"
+        # shellcheck disable=SC1090
+        . "$WK_ROOT/lib/target.sh"
+        wk_ws_dir() { echo "$WK_STORE/ws/$1"; }
+        t_needs_base() { return 1; }
+
+        _env=absent; _marker=""
+        t_info()    { echo "$_env"; }
+        t_created() { [ -n "$_marker" ]; }
+
+        # nothing anywhere
+        echo "1:$(ws_state nothing)"
+        # the environment is up and creation finished
+        mkdir -p "$WK_STORE/ws/done"; _env=running; _marker=1
+        echo "2:$(ws_state done)"
+        # the driver says so itself: still being made
+        _env=creating
+        echo "3:$(ws_state done)"
+        # the machine did not answer
+        _env=unreachable
+        echo "4:$(ws_state done)"
+        # a workspace directory with no environment behind it, and no marker:
+        # rubble from an interrupted creation
+        _env=absent; _marker=""
+        echo "5:$(ws_state done)"
+        # the same, but creation had finished: something outside wk removed it
+        _marker=1
+        echo "6:$(ws_state done)"
+    ) || { echo "ws_state failed: $out"; return 1; }
+
+    local want="1:absent
+2:present
+3:creating
+4:unreachable
+5:creating
+6:broken"
+    [ "$out" = "$want" ] || { echo "got:"; echo "$out"; echo "want:"; echo "$want"; return 1; }
+}
+
+# A status file is a claim: it is read tolerantly, and the process table is what
+# decides whether what it claims is still happening.
+chk_status_files_are_claims() {
+    local f="$TMP/ws.status" got
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/lib/detach.sh"
+
+    status_write "$f" state=creating "pid=$$" stage=create
+    [ "$(status_field "$f" state)" = creating ] || { echo "state did not round-trip"; return 1; }
+    detach_alive "$f" || { echo "a live pid was read as dead"; return 1; }
+
+    # An unknown key is ignored rather than fatal, and a key that is not there
+    # is empty rather than an error -- that is what makes a file written by an
+    # older wk-tools readable.
+    status_write "$f" state=creating "pid=$$" "future_key=whatever"
+    [ -z "$(status_field "$f" stage)" ] || { echo "a missing key was not empty"; return 1; }
+
+    # A pid that cannot be running any more. 2^22 is above every default
+    # pid_max on both platforms, so this is a dead pid by construction rather
+    # than by luck.
+    status_write "$f" state=creating pid=4194304 stage=create
+    ! detach_alive "$f" || { echo "a dead pid was read as alive"; return 1; }
+
+    # Garbage: still readable for what is there, never a crash.
+    printf 'not a status file at all' > "$f"
+    got=$(status_field "$f" state) || { echo "a garbage file failed the reader"; return 1; }
+    [ -z "$got" ] || { echo "a garbage file produced a state: $got"; return 1; }
+}
+
+# One marker, one name. Every driver that creates a workspace has to write the
+# same file, and the day one of them spells it differently is the day a
+# workspace on that target reads as half-made forever.
+chk_ready_marker_one_name() {
+    local f missing=""
+    for f in targets/container.sh targets/vm.sh targets/remote.sh; do
+        grep -q 'WK_READY_MARKER' "$WK_ROOT/$f" || missing="$missing $f"
+    done
+    # The container's is written from inside, by provisioning, which is the last
+    # act of creating one.
+    grep -q '\.wk-ready' "$WK_ROOT/container/firstrun.sh" \
+        || missing="$missing container/firstrun.sh"
+    [ -z "$missing" ] || { echo "no ready marker in:$missing"; return 1; }
+
+    # And nothing may hardcode the name where the variable is in scope -- one
+    # place defines it, everything else spells it $WK_READY_MARKER.
+    local hits
+    hits=$(grep -n '\.wk-ready' "$WK_ROOT"/targets/*.sh "$WK_ROOT"/lib/*.sh 2>/dev/null \
+           | grep -v 'WK_READY_MARKER=' | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)
+    [ -z "$hits" ] || { echo "hardcoded marker name:"; echo "$hits"; return 1; }
+}
+
 # The switch only works while the key a workspace uses is the one in the store.
 # A copy inside a workspace is a push credential `wk push off` cannot take
 # back, which is how it was before 2026-08-19 -- and the regression would be
@@ -607,6 +709,9 @@ if want state; then
     check "the same four start no guest, write no file, and repair nothing" chk_readonly_writes_nothing
     check "print the same workspace-name set on"                          chk_ls_status_same_names
     check "never copies"                                                  chk_push_keys_not_copied
+    check "five words, each from the evidence that decides it"             chk_ws_state_words
+    check "a status file written by an older schema"                      chk_status_files_are_claims
+    check "every driver writes the same completion marker"                chk_ready_marker_one_name
 fi
 
 if want remote; then

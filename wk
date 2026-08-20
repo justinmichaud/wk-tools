@@ -22,9 +22,11 @@ usage() {
 usage: wk <command> [args]
 
 workspaces
-  new <name> [--target T] [--zed]
+  new <name> [--target T] [--zed] [--no-wait]
                             create a workspace (container | vm | remote, or a
-                            machine in ~/.config/wk/targets/); --zed opens it
+                            machine in ~/.config/wk/targets/); --zed opens it.
+                            Creation is detached and survives this connection;
+                            --no-wait returns as soon as it is under way
   ls                        list workspaces
   enter <name> [--zed|cmd]  interactive shell (GPU/desktop integration on Linux)
   build <name> <config>     build, with derived job count and nice level
@@ -125,9 +127,17 @@ resolve_target() {
         esac
     done
 
-    if [ -n "$name" ] && target_of "$name" 2>/dev/null; then
-        return 0
-    fi
+    # The same answer every command gets (ws_target, lib/target.sh): the
+    # registry when it has one, and otherwise whichever target's own store on
+    # this machine holds a workspace of that name. The fallback matters here
+    # more than anywhere: a `wk new` that died before registering leaves a
+    # workspace on a build box, and this used to answer `container`, forward
+    # the command into the podman VM and have it report "no such workspace"
+    # about a checkout that exists.
+    #
+    # Still a file test per configured target and nothing else -- no ssh, and
+    # nothing started, which is what this function has to remain.
+    if [ -n "$name" ]; then ws_target "$name"; return 0; fi
     printf '%s' container
 }
 

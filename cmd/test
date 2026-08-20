@@ -63,9 +63,23 @@ done
 
 config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
 
-TARGET="${WK_TARGET:-$(target_of "$NAME" 2>/dev/null || default_target)}"
+TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
-[ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+# One gate for "is this workspace usable yet" (wait_ready, lib/target.sh):
+# `absent` is still refused by name, and everything else -- a creation still
+# running, one whose driver died, an environment removed from under the record,
+# a machine that will not answer -- gets the words that fit it there rather
+# than "no such workspace", which is what this said about all four.
+#
+# Not for a dry run: that resolves and prints, and printing must not wait for a
+# workspace that is still being made. It reports the state it saw instead.
+if [ -n "$DRY" ]; then
+    WS_STATE=$(ws_state "$NAME")
+    [ "$WS_STATE" != absent ] || die "no such workspace: $NAME"
+else
+    wait_ready "$NAME"
+    WS_STATE=present
+fi
 
 lower=$(echo "$CFG_TYPE" | tr '[:upper:]' '[:lower:]')
 SRC=$(t_src "$NAME")
@@ -189,7 +203,7 @@ esac
 if [ -n "$DRY" ]; then
     log "dry run -- nothing was run."
     ARCH_LABEL=$(arch_label "$ARCH")
-    log "  workspace: $NAME ($TARGET, $(t_info "$NAME")${ARCH_LABEL:+, $ARCH_LABEL})"
+    log "  workspace: $NAME ($TARGET, $WS_STATE${ARCH_LABEL:+, $ARCH_LABEL})"
     log "  suite:     $SUITE ($CONFIG)"
     log "  would run: bash -lc $(sh_quote "$CMD")"
     # The debugger is the foreground half of a debug run and the run itself is
