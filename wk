@@ -45,13 +45,16 @@ workspaces
   start                     bring them all back
 
 sources and disk
-  sync [--all]              fetch all upstreams, publish a new base snapshot
+  sync [--all|--target <t>] fetch all upstreams, publish a new base snapshot
+                            (--target: refresh a machine's tooling and mirror)
   skills <sub>              status|diff|pull|push the shared, mutable skills
   key <sub>                 register|check the fork push keys (uses gh)
   sudo status|require       make root cost a password every time, here or on
                             a configured machine (--target T, --all)
   push on|off|status        whether workspaces may push to git at all; off is
                             what `wk claude` sets before an agent takes over
+                            (--target T, --all: the machine that holds the key)
+  remotes [ws] [--fix]      is origin upstream, and can fork be pushed to?
   pr [ws] <user>:<branch>   check out a PR head from WebKit or WPEWebKit; warns
                             only when your own work is at stake
   report                    weekly GitHub activity summary (uses gh)
@@ -149,6 +152,12 @@ resolve_target() {
 is_targetless() {
     case "$1${2:+ $2}" in
         "build --list") return 0 ;;
+        # `wk sync --target <machine>` acts on the far end of an ssh, so the
+        # one thing it must not do is run inside the podman VM: the VM has no
+        # route to that machine and its own copy of wk-tools is the thing being
+        # replaced. A bare `wk sync` still forwards -- the container store it
+        # publishes into is in there.
+        "sync --target"|"sync --target="*) return 0 ;;
     esac
     return 1
 }
@@ -219,9 +228,12 @@ is_host_command() {
 is_readonly_report() {
     case "$1${2:+ $2}" in
         "push status") return 0 ;;
+        # `wk remotes --fix` writes: it re-asserts the wiring. Named here so
+        # the *bare* form below can be read-only without this one sneaking in.
+        "remotes --fix") return 1 ;;
     esac
     case "$1" in
-        ls|status|logs|doctor|version) return 0 ;;
+        ls|status|logs|doctor|version|remotes) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -271,6 +283,12 @@ explain_cmd() {
 
     if is_readonly_report "$cmd"; then
         printf '  changes things: no -- read-only absolutely (starts nothing, writes nothing, repairs nothing)\n'
+        # ...with the one exception a report is allowed to have: a command whose
+        # own text offers --fix has a writing form, and claiming otherwise about
+        # the command as a whole would be the kind of overstatement this line
+        # exists to prevent.
+        grep -q -- '--fix' "$impl" 2>/dev/null && \
+            printf '                  ...except with --fix, which is the only form here that writes\n'
     else
         printf '  changes things: yes\n'
     fi
@@ -287,6 +305,14 @@ explain_cmd() {
 
     if grep -q -- '--dry-run' "$impl" 2>/dev/null; then
         printf '  preview: wk %s ... --dry-run resolves everything and changes nothing\n' "$cmd"
+        # Where the dry run does not stop at "this is what I resolved" but
+        # prints the commands themselves, say so -- that is the question
+        # --explain gets asked next, and the answer is a different flag rather
+        # than a longer explanation here. This file explains *the command*; the
+        # dry run reports what an actual invocation would do, which only the
+        # command (and, for a build, the target) can know.
+        grep -q 'WK_DRY_RUN' "$impl" 2>/dev/null && \
+            printf '           ...and prints the exact commands it would run, the far side%s\n' "'s included"
     fi
 
     # The header comment: everything from the line after the shebang to the
@@ -331,6 +357,7 @@ machine_running() {
 # not be told about the containers alone.
 bare_report() {
     local impl="$1" cmd="$2" t hosts='' rc worst=0
+    shift 2
     # A function, because `[ x -gt y ] && worst=x` as the last command of an
     # AND-OR list returns 1 when the test is false, and `set -e` then ends the
     # walk on the second target that reports the same state as the first.
@@ -342,7 +369,7 @@ bare_report() {
     done
 
     if [ -n "$hosts" ]; then
-        rc=0; WK_TARGET="${hosts# }" "$impl" || rc=$?
+        rc=0; WK_TARGET="${hosts# }" "$impl" ${@+"$@"} || rc=$?
         _bump "$rc"
     fi
 
@@ -360,10 +387,10 @@ bare_report() {
         # needs no such flag: its rows carry no header, and its own
         # "(no workspaces)" line is already conditional on the whole walk.
         rc=0
-        if [ "$cmd" = ls ] && [ -n "$hosts" ]; then
-            ( forward_to_vm ls --continued ) || rc=$?
+        if { [ "$cmd" = ls ] || [ "$cmd" = remotes ]; } && [ -n "$hosts" ]; then
+            ( forward_to_vm "$cmd" --continued ${@+"$@"} ) || rc=$?
         else
-            ( forward_to_vm "$cmd" ) || rc=$?
+            ( forward_to_vm "$cmd" ${@+"$@"} ) || rc=$?
         fi
         _bump "$rc"
     elif command -v podman >/dev/null 2>&1; then
@@ -505,12 +532,42 @@ main() {
     which runs MiniBrowser on the guest's own desktop with the real GPU."
             fi
 
+            # --zed is the same shape of impossibility, and it was failing the
+            # long way round: forwarded into the VM, where it looked for
+            # /Applications/Zed.app and reported "zed is not installed" about a
+            # Mac that has it. Measured 2026-08-19 against a fresh container
+            # workspace -- the readiness gate held correctly, waited for
+            # creation to finish, and then said that.
+            #
+            # It cannot work as it stands, for a second reason the message has
+            # to carry: the generated alias is written by whichever side ran
+            # `wk new`, and for a container on macOS that is the VM. So
+            # `wk-<name>` exists in the VM's ssh config and not in this
+            # machine's, and even a Zed launched here would have nothing to
+            # resolve -- the container is inside a Linux VM with no route in
+            # from the host.
+            case " $* " in
+                *" --zed "*)
+                    die "a container workspace on a macOS host cannot be opened in Zed: Zed runs
+    here, the container runs inside the podman VM, and there is no ssh route
+    from this machine into it (the generated 'wk-<name>' alias is written in
+    the VM, not here).
+    Use a macOS guest -- 'wk vm new <name>', then 'wk enter <name> --zed' --
+    or a remote target, both of which Zed can reach directly." ;;
+            esac
+
             # Before the readonly-report shortcut below, which would answer
             # for the containers alone and exit.
             if [ $# -eq 0 ]; then
                 case "$cmd" in
                     status|ls) bare_report "$impl" "$cmd" ;;
                 esac
+            fi
+            # `wk remotes` is the same shape of report -- every workspace there
+            # is -- and it keeps that meaning with its one flag, which is why it
+            # is matched with an argument where status and ls are not.
+            if [ "$cmd" = remotes ] && { [ $# -eq 0 ] || [ "${1:-}" = --fix ]; }; then
+                bare_report "$impl" remotes ${1:+"$1"}
             fi
 
             # A machine that is merely stopped is handled inside

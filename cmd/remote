@@ -113,6 +113,14 @@ if [ "$ACTION" = rm ]; then
 
     rm -f "$conf"
     changed "removed $conf"
+    # Forgetting a machine means forgetting it everywhere, and the registry is
+    # the half this command must not touch: it is a tracked file, shared with
+    # every other device, and deleting it here would show up as an unexplained
+    # working-tree change in whatever else is going on in this repository.
+    [ -f "$(target_registry_conf "$TARGET")" ] && {
+        warn "'$TARGET' is still in the shared registry, so it is still a target here"
+        log  "  remove it everywhere: git rm $(target_registry_conf "$TARGET") && commit"
+    }
     info "'$TARGET' is gone -- 'wk remote setup $TARGET' brings it back"
     exit 0
 fi
@@ -150,8 +158,17 @@ if ! target_kind "$TARGET" >/dev/null 2>&1; then
 # than to the configuration:
 #
 #   WK_TARGET_CMAKE=-DENABLE_JOURNALD_LOG=OFF
+#
+# This file is *this device's* view of the machine, and no other device has it.
+# What is true about the machine itself -- its CMake flags, whether it is a
+# build box or a workstation -- belongs in the shared registry in the
+# repository instead, where every device gets it by pulling:
+#
+#   targets/hosts/$TARGET.conf
 EOF
     changed "wrote $conf"
+    log  "  this device only. To give every device this target, put what is true"
+    log  "  of the machine in $(target_registry_conf "$TARGET") and commit it."
 fi
 
 load_target "$TARGET"

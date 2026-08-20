@@ -12,11 +12,13 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/build/configs.sh"
 
-# Inside a workspace the name is implicit -- see cmd/build. Nothing else on the
-# command line can be one, so anything that is not this workspace's own name is
-# an option or a jsc argument, including the very first word.
+# Inside a workspace there is no name to give: every command acts on this one,
+# and the name form is refused rather than quietly accepted (refuse_ws_name,
+# lib/target.sh). Everything else on the command line is this command's own
+# argument, including the very first word.
 NAME="${1:-}"
-if in_workspace && [ "$NAME" != "$(wk_self)" ]; then
+if in_workspace; then
+    refuse_ws_name "$NAME" run "[--config <config>] [args...]"
     NAME=$(wk_self)
 else
     shift || true

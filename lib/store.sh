@@ -60,6 +60,19 @@ wk_ws_dir()   { echo "$WK_STORE/ws/$1"; }
 # anonymous, so the mirror needs no credential at all. Pushing is a separate
 # concern handled per-workspace by the deploy key, which is scoped to the fork.
 # Using SSH here would make `wk sync` fail on any machine without that key.
+# This list is also what a workspace's remotes are wired from
+# (wk_wiring_script), so it is the one place a project is added.
+#
+# The wiki's own set for a WebKit checkout is origin, wpe, fork, forkwpe and
+# `igalia`
+# (ssh://git@gitlab.igalia.com:4429/teams/compilers/javascriptcore/web-kit.git).
+# The first four are here; igalia is deliberately not, and the reason is the
+# sandbox rather than an oversight: a workspace holds deploy keys for the two
+# forks and no personal key, and the egress allowlist permits igalia.com on 80
+# and 443 only -- not gitlab's ssh port 4429 (container/proxy/wk-proxy.py). A
+# remote that cannot authenticate or connect from where it is written is worse
+# than no remote: it fails at fetch time, in a workspace, with an ssh error.
+# Add it here the day a workspace has a way to reach it.
 wk_remotes() {
     cat <<'EOF'
 origin   https://github.com/WebKit/WebKit.git
@@ -154,6 +167,27 @@ wk_wiring_script() {
         printf 'git remote set-url --push %s git@%s:%s.git
 ' "$remote" "$alias" "$repo"
     done
+    # The other upstreams, fetch-only, from the same list the mirror carries.
+    #
+    # `wpe` is the one this was missing, and it is the wiki's own set that says
+    # so (WebKit-JSC-Container-Development-Setup: origin, wpe, fork, forkwpe).
+    # Without it a workspace cannot `git fetch wpe` at all -- so a WPEWebKit
+    # branch cannot be looked at, while `wk pr` accepts PRs from that project
+    # and the mirror has been carrying its objects all along.
+    #
+    # Pushing to them is refused for exactly the reason origin is: we never
+    # push to an upstream, always to a fork.
+    _forks=$(wk_push_forks | awk 'NF {printf " %s", $1}')
+    wk_remotes | while read -r name url; do
+        [ -n "$name" ] || continue
+        [ "$name" = origin ] && continue
+        case "$_forks " in *" $name "*) continue ;; esac
+        printf 'git remote add %s %s 2>/dev/null || git remote set-url %s %s
+' \
+            "$name" "$(sh_quote "$url")" "$name" "$(sh_quote "$url")"
+        printf 'git remote set-url --push %s no-push://use-a-fork-remote
+' "$name"
+    done
     if [ -n "$ssh_config" ]; then
         printf 'git config core.sshCommand %s\n' "$(sh_quote "ssh -F $ssh_config")"
     fi
@@ -164,6 +198,226 @@ wk_wiring_script() {
         printf 'git remote set-url --push %s no-push://%s-is-a-local-copy
 ' "$extra_name" "$extra_name"
     fi
+}
+
+# The same wiring, as a *check* rather than an assertion.
+#
+# `wk_wiring_script` is the authority on what a checkout's remotes should be,
+# and until this existed nothing ever asked whether they still were. They drift
+# for two reasons, both real: a workspace made before the wiring existed keeps
+# whatever `git clone` left it with -- `origin` pointing at the local mirror it
+# was cloned from, which is the exact failure the wiring script was written to
+# prevent -- and anyone can run `git remote set-url` in a checkout afterwards.
+#
+# Measured 2026-08-19: `bb4` on buildbox4 had `origin` = /home/…/wk/mirror with
+# pushing *enabled* to it, `fork` with an https push URL (so no deploy key can
+# ever be offered, whatever `wk push` says), and no `core.sshCommand`. `db` on
+# devbox-arm64-2, created after the wiring landed, was correct. Nothing reported
+# the difference.
+#
+# Prints one `problem: …` line per fault and exits 1 if there were any, so a
+# caller can relay it without parsing. A snippet for the same reason as the
+# wiring: the checkout is usually on another machine.
+#
+# A non-empty second argument skips the checks that are about the *environment*
+# rather than the tree -- whether ssh can resolve the fork's host alias from
+# here. A base snapshot is a template nobody pushes from, and it lives in the
+# podman VM, which has no alias config and needs none: the aliases are written
+# into each workspace (container/firstrun.sh) and into a build machine's own ssh
+# config. Asking the environment question of a snapshot means reporting a fault
+# that no re-wiring can ever clear.
+#
+#   wk_wiring_check_script <src> [<skip-env>]
+wk_wiring_check_script() {
+    local src="$1" skip_env="${2:-}"
+    printf 'cd %s || exit 2
+' "$(sh_quote "$src")"
+    printf 'bad=0
+'
+    # origin is upstream, fetch-only. Both halves matter: a local path here is
+    # what makes `git log origin/main` answer for a stale mirror, and a
+    # *pushable* origin is a push at the wrong repository waiting to happen.
+    printf 'u=$(git remote get-url origin 2>/dev/null || echo "")
+'
+    printf 'p=$(git remote get-url --push origin 2>/dev/null || echo "")
+'
+    printf 'case "$u" in
+  https://github.com/WebKit/WebKit.git) ;;
+  "") echo "problem: no origin remote at all"; bad=1 ;;
+  *)  echo "problem: origin is $u -- origin must be upstream (WebKit/WebKit); a local copy is what a second remote is for"; bad=1 ;;
+esac
+'
+    # Only when the remote is there: "origin accepts a push ()" about a remote
+    # that does not exist is a second complaint about the first fault.
+    printf 'if [ -n "$u" ]; then case "$p" in
+  no-push://*) ;;
+  *) echo "problem: origin accepts a push ($p) -- there is no write access to upstream, and this is how a push goes to the wrong repository"; bad=1 ;;
+esac
+fi
+'
+    # The other upstreams the wiring adds (`wpe`), by the same two rules: the
+    # url the mirror uses, and no push -- we never push to an upstream.
+    _forks=$(wk_push_forks | awk 'NF {printf " %s", $1}')
+    wk_remotes | while read -r name url; do
+        [ -n "$name" ] || continue
+        [ "$name" = origin ] && continue
+        case "$_forks " in *" $name "*) continue ;; esac
+        printf 'u=$(git remote get-url %s 2>/dev/null || echo "")
+' "$name"
+        printf 'p=$(git remote get-url --push %s 2>/dev/null || echo "")
+' "$name"
+        printf 'case "$u" in
+  %s) ;;
+  "") echo "problem: no %s remote (upstream %s), so its branches cannot be fetched at all"; bad=1 ;;
+  *)  echo "problem: %s is $u, not %s"; bad=1 ;;
+esac
+' "$url" "$name" "$url" "$name" "$url"
+        printf 'if [ -n "$u" ]; then case "$p" in
+  no-push://*) ;;
+  *) echo "problem: %s accepts a push ($p) -- we never push to an upstream"; bad=1 ;;
+esac
+fi
+' "$name"
+    done
+    wk_push_forks | while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        printf 'u=$(git remote get-url %s 2>/dev/null || echo "")
+' "$remote"
+        printf 'p=$(git remote get-url --push %s 2>/dev/null || echo "")
+' "$remote"
+        printf 'case "$u" in
+  https://github.com/%s.git) ;;
+  "") echo "problem: no %s remote (the fork)"; bad=1 ;;
+  *)  echo "problem: %s fetches from $u, not https://github.com/%s.git"; bad=1 ;;
+esac
+' "$repo" "$remote" "$remote" "$repo"
+        # The push URL is the whole point of the switch: the deploy key is
+        # selected by the ssh host alias, so an https push URL means git never
+        # asks ssh, never offers a key, and `wk push on` cannot help.
+        printf 'if [ -n "$u" ]; then case "$p" in
+  git@%s:%s.git) ;;
+  *) echo "problem: %s pushes to $p, not git@%s:%s.git -- the deploy key is chosen by that ssh alias, so no key is offered at all"; bad=1 ;;
+esac
+fi
+' "$alias" "$repo" "$remote" "$alias" "$repo"
+        # ...and the alias has to resolve. Either the user's own ssh config
+        # knows it, or the checkout carries a core.sshCommand pointing at a
+        # config that does -- which is the arrangement on a shared machine,
+        # where wk owns a config file under its own root instead of editing
+        # ~/.ssh/config.
+        [ -z "$skip_env" ] || continue
+        printf 'c=$(git config core.sshCommand 2>/dev/null || echo "")
+'
+        printf 'f=${c#*-F }; f=${f%%%% *}
+'
+        printf 'if ! grep -qs "^[[:space:]]*Host[[:space:]].*%s" "$HOME/.ssh/config" "$HOME/.ssh/config.d/"* 2>/dev/null; then
+  if [ -z "$c" ]; then
+    echo "problem: nothing resolves the ssh alias %s (no Host entry, no core.sshCommand)"; bad=1
+  elif ! grep -qs "^[[:space:]]*Host[[:space:]].*%s" "$f" 2>/dev/null; then
+    echo "problem: core.sshCommand uses $f, which has no Host entry for %s"; bad=1
+  fi
+fi
+' "$alias" "$alias" "$alias" "$alias"
+    done
+    # Which repository the *branch* points at, which is the same separation one
+    # level up -- and a fault rather than a note, because the rule is absolute:
+    # we never push to origin, always to the fork (2026-08-19). A working branch
+    # tracking origin/<x> therefore cannot be pushed by a bare `git push` at
+    # all, and when origin used to be a local mirror (the fault above) that
+    # tracking ref meant a different repository than it does once the wiring is
+    # corrected -- measured on bb4, whose branch tracked origin/eng/... for a
+    # branch that exists on the fork and nowhere upstream.
+    #
+    # Following an upstream branch is the one exception, and it is exactly the
+    # mirrored ones: nobody pushes those either, so tracking them is not a push
+    # waiting to fail.
+    # Following an upstream's own branches is the exception -- nobody pushes
+    # those either, so tracking one is not a push waiting to fail.
+    local keep='""' _u _r _f
+    for _u in $(wk_remotes | awk 'NF {print $1}'); do
+        case "$_forks " in *" $_u "*) continue ;; esac
+        for _b in $(wk_mirror_branches); do keep="$keep|$_u/$_b"; done
+    done
+    printf 'b=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+if [ -n "$b" ]; then
+  up=$(git rev-parse --abbrev-ref --symbolic-full-name "@{u}" 2>/dev/null || echo "")
+  case "$up" in
+    %s) ;;
+' "$keep"
+    # One arm per upstream, naming *that project's* fork: a WPEWebKit branch
+    # belongs to forkwpe, not to fork. Paired by repository name, the same way
+    # wk_pr_repos derives its list, so adding a project to wk_remotes and
+    # wk_push_forks is all it takes.
+    wk_remotes | while read -r _u _url; do
+        [ -n "$_u" ] || continue
+        # Upstreams only. A branch tracking its *own* fork is the arrangement
+        # this is checking for, not a fault.
+        case "$_forks " in *" $_u "*) continue ;; esac
+        _r=$(printf '%s' "$_url" | sed -E 's#(\.git)?$##; s#.*/##')
+        _f=$(wk_push_forks | awk -v r="$_r" 'NF && $2 ~ "/" r "$" { print $1; exit }')
+        [ -n "$_f" ] || continue
+        printf '    %s/*) echo "problem: branch $b tracks $up, and we never push to %s -- it belongs to the fork: %s/$b"; bad=1 ;;
+' "$_u" "$_u" "$_f"
+    done
+    printf '  esac
+fi
+'
+    printf 'exit $bad
+'
+}
+
+# Point the current branch at the fork it can actually be pushed to.
+#
+# The rule is the one above, one level down: we never push to an upstream, so a
+# working branch tracking origin/<x> or wpe/<x> can never be pushed by a bare
+# `git push`. This is the only part of the wiring that touches a *branch*, which
+# is why it is a separate snippet run only by `wk remotes --fix` rather than by
+# every creation: it is git config (branch.<b>.remote and .merge), not the
+# checkout, but it is still somebody's branch.
+#
+# The fetch is needed and is one ref: `git branch -u` refuses an upstream whose
+# remote-tracking ref it has never seen. A branch that is not on the fork yet
+# gets said so rather than silently left -- pushing it is the answer, and only
+# a person can decide to.
+#
+#   wk_branch_upstream_fix_script <src>
+wk_branch_upstream_fix_script() {
+    local src="$1" _u _url _r _f
+    printf 'cd %s || exit 2
+' "$(sh_quote "$src")"
+    printf 'b=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+[ -n "$b" ] || exit 0
+up=$(git rev-parse --abbrev-ref --symbolic-full-name "@{u}" 2>/dev/null || echo "")
+f=""
+case "$up" in
+'
+    _forks=$(wk_push_forks | awk 'NF {printf " %s", $1}')
+    for _b in $(wk_mirror_branches); do
+        wk_remotes | while read -r _u _url; do
+            [ -n "$_u" ] || continue
+            case "$_forks " in *" $_u "*) continue ;; esac
+            printf '  %s/%s) exit 0 ;;
+' "$_u" "$_b"
+        done
+    done
+    wk_remotes | while read -r _u _url; do
+        [ -n "$_u" ] || continue
+        case "$_forks " in *" $_u "*) continue ;; esac
+        _r=$(printf '%s' "$_url" | sed -E 's#(\.git)?$##; s#.*/##')
+        _f=$(wk_push_forks | awk -v r="$_r" 'NF && $2 ~ "/" r "$" { print $1; exit }')
+        [ -n "$_f" ] || continue
+        printf '  %s/*) f=%s ;;
+' "$_u" "$_f"
+    done
+    printf '  *) exit 0 ;;
+esac
+git fetch -q "$f" "$b" 2>/dev/null || true
+if git rev-parse --verify -q "refs/remotes/$f/$b" >/dev/null; then
+    git branch -u "$f/$b" >/dev/null 2>&1 && echo "retargeted: $b now tracks $f/$b"
+else
+    echo "left alone: $b is not on $f yet -- push it first:  git push $f $b"
+fi
+'
 }
 
 # The ssh aliases that select a deploy key per fork, as an ssh_config body.

@@ -25,18 +25,22 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/build/configs.sh"
 
-# Inside a workspace the name is implicit -- see cmd/build. A test path is never
-# a valid workspace name, so treating anything but this workspace's own name as
-# the first real argument is unambiguous.
+# Inside a workspace there is no name to give: every command acts on this one,
+# and the name form is refused rather than quietly accepted (refuse_ws_name,
+# lib/target.sh). Everything else on the command line is this command's own
+# argument, including the very first word.
 NAME="${1:-}"
-if in_workspace && [ "$NAME" != "$(wk_self)" ]; then
+if in_workspace; then
+    refuse_ws_name "$NAME" test "[--layout <test>]"
     NAME=$(wk_self)
 else
     shift || true
 fi
 require_name "$NAME"
 
-CONFIG="${WK_CONFIG:-$(default_config)}"
+# Resolved after the options, so the workspace's own history can answer when
+# nothing on the command line does (below).
+CONFIG="${WK_CONFIG:-}"
 SUITE=jsc
 GPU=""
 DRY=""
@@ -61,7 +65,34 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# What to test, when nobody said: the config this workspace was last built
+# with, and only then the fallback default. Without this a bare
+# `wk test <ws> --layout` resolved jsc-release -> `--jsc-only`, and pointed
+# run-webkit-tests at a tree that contains neither WebKitTestRunner nor
+# ImageDiff -- a port with no layout tests in it at all.
+if [ -z "$CONFIG" ]; then
+    CONFIG=$(last_built_config "$NAME")
+    if [ -n "$CONFIG" ]; then
+        info "config: $CONFIG -- what '$NAME' was last built with"
+    else
+        CONFIG=$(default_config)
+    fi
+fi
+
 config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
+
+# A JSCOnly build has no layout tests, and saying so beats letting
+# run-webkit-tests discover it: the port builds jsc and the JSC test harness
+# and nothing else, so there is no driver to run a page in and no ImageDiff to
+# compare one with.
+if [ "$SUITE" = layout ] && [ "$CFG_PORT" = --jsc-only ]; then
+    die "'$CONFIG' is a JSCOnly build, which has no layout tests -- no
+    WebKitTestRunner and no ImageDiff are built by it. Name a full-port config
+    that has been built in '$NAME':
+        wk test $NAME --layout --config gtk-release-asan
+    ('wk status $NAME' says what it was last built with; 'wk build --list' has
+    the configs.)"
+fi
 
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"

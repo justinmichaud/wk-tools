@@ -61,7 +61,22 @@ report_ws() {
     if [ "$st" = present ]; then disp=$(t_info "$ws"); else disp="$st"; fi
 
     printf '%-18s %-16s %-10s %-24s ws=%s\n' \
-        "$ws" "$TARGET" "$disp" "$(t_branch "$ws")" "$st"
+        "$ws" "$(_col "$TARGET")" "$disp" "$(t_branch "$ws")" "$st"
+
+    # A wrong `origin` is worth a line in the listing rather than only in
+    # `wk remotes`: it is silent, it changes what `git log origin/main` means
+    # (a local mirror answers for its own last fetch), and it is how a push
+    # goes somewhere nobody intended. One question, one exec -- the full wiring
+    # check is `wk remotes`, which this points at. Only for a workspace that
+    # exists and finished being made, the same condition t_branch uses.
+    if [ "$st" = present ]; then
+        _origin=$(t_exec "$ws" git -C "$(t_src "$ws")" config --get remote.origin.url \
+                    2>/dev/null | tr -d '\r') || _origin=""
+        case "$_origin" in
+            ''|https://github.com/WebKit/WebKit.git) ;;
+            *) warn "  origin is $_origin, not upstream -- 'wk remotes $ws --fix'" ;;
+        esac
+    fi
 
     stage=$(status_field "$sf" stage)
     pid=$(status_field "$sf" pid)
@@ -251,6 +266,19 @@ report_self() {
 FLEET=1
 if [ "${1:-}" = --no-fleet ]; then FLEET=""; shift; fi
 
+# WK_ROW_LABEL: the name the asking machine knows this one by, for the TARGET
+# column. A machine of its own answers in its own vocabulary, and for a peer
+# workstation that vocabulary is `container` -- the same word the asking machine
+# uses for a different machine's containers. Qualified rather than always
+# prefixed: a build box's own target name already *is* the label, and
+# `buildbox4:buildbox4` says nothing twice.
+#
+# An environment variable and not a flag, because the far side may be an older
+# checkout of this repository (see t_wk in targets/remote.sh). Same mechanism in
+# `wk ls`.
+LABEL="${WK_ROW_LABEL:-}"
+_col() { if [ -z "$LABEL" ] || [ "$1" = "$LABEL" ]; then printf '%s' "$1"; else printf '%s:%s' "$LABEL" "$1"; fi; }
+
 # Raise the worst-so-far. A function rather than `[ x -gt y ] && worst=x`,
 # because that form is the last command of an AND-OR list and returns 1 when
 # the test is false -- which under `set -e` ends the walk on the second target
@@ -317,21 +345,34 @@ report_machine() {
 }
 
 if [ -n "${1:-}" ]; then
+    # In a workspace a bare `wk status` is the whole command: there is one
+    # workspace and it is this machine (refuse_ws_name, lib/target.sh).
+    refuse_ws_name "$1" status
     require_name "$1"
     TARGET="$(ws_target "$1")"
     load_target "$TARGET"
     if t_has_wk; then
-        delegate status --no-fleet "$1"
+        WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 \
+            delegate status --no-fleet "$1"
         exit $?
     fi
     report "$1"
 else
     found=0
-    for TARGET in $(walk_targets); do
+    _TARGETS=$(walk_targets)
+    # Every machine asked at once, before the first row is printed; the walk
+    # below is unchanged and finds them already answered (prefetch_targets,
+    # lib/target.sh).
+    # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
+    prefetch_targets $_TARGETS
+    trap 'prefetch_done' EXIT
+    for TARGET in $_TARGETS; do
         load_target "$TARGET"
         if t_has_wk; then
             found=1
-            rc=0; delegate status --no-fleet || rc=$?
+            rc=0
+            WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 \
+                delegate status --no-fleet || rc=$?
             bump "$rc"
             [ -z "$FLEET" ] || report_machine "$TARGET"
             continue

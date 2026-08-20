@@ -29,6 +29,117 @@ Each item names the source handoff so detail is not duplicated here.
 
 ---
 
+## Done since — a batch of reported defects (2026-08-19, macOS host)
+
+Driven by what broke in use rather than by a lane. Every item has a
+`docs/TESTING.md` line; the two that changed a design decision are written up
+in `docs/HANDOFF-workspace-state.md` and `docs/HANDOFF-linux-remote.md`.
+
+1. **A shared target registry** — `targets/hosts/<name>.conf`, in this
+   repository and therefore on every device that pulls it, with
+   `~/.config/wk/targets/<name>.conf` still overriding it line by line. This
+   was the answer to two separate reports: buildbox4's three clang-19 CMake
+   flags had to be re-typed on every command from every device, and a
+   reinstall lost every target (the gap listed under "Fixed / resolved" below).
+   `wk build bb4 gtk-release-asan` now needs no `--cmake`.
+2. **`moose` is visible from the Mac** — a *peer* target
+   (`WK_REMOTE_PEER=1`): another workstation, which can be asked and not
+   driven. `wk status` and `wk ls` delegate to its own wk and report its
+   workspaces; no tooling is pushed to it and `wk new`/`wk rm` against it are
+   refused. Provisioning it as a build box would have written `~/.wk-remote`
+   and made it refuse `wk sync`, `wk gc` and `wk new` *on itself*.
+3. **One round of probes, not N** — every target is asked concurrently before
+   the walk prints anything, so two unreachable machines cost 10.0 s rather
+   than one `WK_SSH_TIMEOUT` each. Only the waiting moved; the report is the
+   same report. This mattered *because* of item 1: a device now knows machines
+   that are not on its network.
+4. **`wk sync --target <machine>`** — the far-side equivalent of a sync, which
+   did not exist: it pushes wk-tools (the stale far copy that answers a
+   delegated command by the old rules) and fetches that machine's own mirror.
+   `wk status` named the drift and nothing but a full `wk remote setup` fixed
+   it. A machine that clones from a shared repository in its MOTD is told so
+   rather than silently skipped.
+5. **`wk sudo` read sudoers wrongly** — it grepped the whole listing for
+   `NOPASSWD: ALL` while sudoers takes the *last* match, so buildbox4 (site
+   NOPASSWD, our `PASSWD: ALL` after it) was reported as wide open and
+   `require` re-installed and asked for a password on every run. Now the
+   verdict starts from `sudo -n true`, and `require` gates on the property
+   rather than on a drop-in path that is wrong whenever the remote login name
+   differs from the local one.
+6. **The in-workspace interface has one spelling** — a workspace name on the
+   command line inside a workspace is refused (`refuse_ws_name`), where it used
+   to be silently accepted as a synonym. Two spellings meant everything written
+   about the in-here interface was describing one of them.
+7. **`wk build --dry-run` prints the exact commands**, including the ones only
+   the target can resolve (ionice/choom, the cgroup-clamped job count, the real
+   cmakeargs), and `--explain` names the flag rather than describing them. It
+   refuses to ask a target whose wk-tools predates the mechanism -- an old
+   `build-in-target.sh` ignores `WK_DRY_RUN` and *builds*, which is how that
+   guard was found.
+8. **`wk build --env NAME=VALUE`** — the environment was the one half of a
+   build that could not be steered from the command line, because the build
+   runs in the target and only what `config_build_env` carries gets there.
+   Applied last, so it overrides the config rather than joining it.
+9. **Layout tests on a remote target, against the build already there** — the
+   config now defaults to what the workspace was last built with, and a
+   JSCOnly config is refused for the layout suite by name. A bare
+   `wk test <ws> --layout` used to resolve `--jsc-only` and point
+   run-webkit-tests at a tree with no WebKitTestRunner in it.
+10. **`wk claude`**: Claude's own options work on either side of the workspace
+    name, and on a remote target it starts in **auto mode** rather than with
+    `--dangerously-skip-permissions` -- skipping permissions is the sandbox's
+    bargain, and a shared build box is the one target with no sandbox.
+11. **`--detach` and `--babysit` share one detach primitive**, and the `--zed`
+    gate was exercised with a real editor -- which found that `--zed` cannot
+    work for a container workspace on a macOS host at all. Both are written up
+    in `docs/HANDOFF-workspace-state.md`.
+
+12. **git remotes: `origin` and `fork` are separate things, and now checked**
+    — `wk remotes [<ws>] [--fix]`. The wiring had one authority
+    (`wk_wiring_script`) and no verifier, so a workspace created before it
+    kept whatever `git clone --shared <mirror>` left: `bb4` on buildbox4 had
+    `origin` = the machine's local mirror, pushable, with `fork` pushing over
+    https — which means git never consults ssh and no deploy key is ever
+    offered, whatever `wk push` says. `db`, created after, was correct, and
+    nothing reported the difference. A wrong origin is now flagged in
+    `wk status` too, and the branch's own tracking is checked by the same rule
+    -- we never push to an upstream, always to a fork -- with `--fix`
+    retargeting it (bb4's branch tracked `origin/<x>` for a branch that exists
+    only on the fork). Each upstream is paired with its own project's fork, so a
+    `wpe/<x>` branch belongs to `forkwpe`. `--fix` takes its arguments from the
+    driver (`t_wiring_args`), so creation and re-assertion cannot drift.
+
+    Reading the user's wiki for the canonical set turned up a remote missing
+    everywhere: `wpe` (WebPlatformForEmbedded/WPEWebKit) was in the *mirror's*
+    upstreams and in `wk pr`'s repositories but was never wired into a
+    workspace, so no workspace could fetch a WPE branch at all. The wiring now
+    creates every upstream in `wk_remotes`, fetch-only. The wiki's fifth
+    remote, `igalia` over gitlab ssh, is a recorded omission: port 4429 is not
+    in the egress allowlist and a workspace holds no personal key.
+13. **`wk sync --target container`** — the podman VM's `/opt/wk-tools` was
+    refreshed only by `./setup --stage vmtools`, so a command added to this
+    repo was "unknown command" inside every container until somebody
+    remembered. That is how `wk remotes` first failed. On Linux there is
+    nothing to sync and the command says so: containers bind-mount the
+    checkout.
+14. **The push switch, end to end.** Proven from a container: refused with the
+    switch off, `* [new branch]` on a `--dry-run` push with it on. *Not* working
+    from a remote target, and not because of the switch — buildbox4's deploy key
+    exists but was never registered on GitHub, so a push is
+    `Permission denied (publickey)` with everything else correct. `wk push on`
+    now names `wk key check`, which is the only thing that can ask GitHub.
+    Registering the three machines' keys (bb4 "not registered", devbox-arm64-2
+    and moose "no key") is a GitHub-side action and is left to the user.
+
+One hazard found the hard way and worth stating on its own: **editing wk-tools
+while a `wk` command is running corrupts that run.** bash reads a script
+incrementally, so rewriting `cmd/build` under a 23-minute build resumed the
+process mid-word (`empt.: command not found`) and dropped it back into the lock
+wait. The build itself was fine and a re-run recorded `ok` -- the crash-only
+design held -- but the same applies with more force to the copy on a build
+machine, which `t_sync_tools` replaces at the start of every build. Nothing in
+the tooling prevents it today.
+
 ## Next, in parallel — one prompt per machine (written 2026-08-19)
 
 The two tasks below touch disjoint files (one shared exception:

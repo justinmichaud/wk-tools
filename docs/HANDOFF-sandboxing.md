@@ -19,6 +19,24 @@ for hours unattended. A crash, a kill or a dropped ssh leaves it off, which is
 the safe direction. Fetching is unaffected in every case: the fork remotes
 fetch anonymously over HTTPS and need no credential.
 
+**Two corrections, later on 2026-08-19.** The wiring was asserted at creation
+and never verified, and both halves of "the same mechanisms work on a build
+box" turned out to be false on the older of the two machines. `bb4` on
+buildbox4 had `origin` pointing at that machine's local mirror -- *pushable* --
+and `fork` with an https push URL, which is the failure that matters most here:
+git never consults ssh for an https URL, so no deploy key is offered and the
+switch is not in the path at all. `wk remotes [--fix]` now checks and
+re-asserts it, and a wrong origin is flagged in `wk status`.
+
+And the switch is only one of the two things a push needs. With it on, the
+wiring corrected and the ssh alias resolving, buildbox4 still answered
+`Permission denied (publickey)`: its key exists and was never registered on
+GitHub. Only the host can ask (`gh` and the credential are here), so
+`wk push on` now names `wk key check` rather than reporting success as though a
+push would work. Verified end to end in a container -- refused with the switch
+off, `* [new branch]` on a dry-run push with it on -- and *not* yet verified
+from a build machine, for that reason.
+
 **Remote build machines, 2026-08-19.** The same three mechanisms now work on a
 shared build box: `wk key register` generates and registers a key *per machine*
 (GitHub refuses one deploy key on two repositories but takes many keys on one,
@@ -56,10 +74,21 @@ sorts after the site's file and sudoers takes the last match, so
 `PASSWD: ALL` plus `Defaults:<user> timestamp_timeout=0` wins without touching
 anything a sysadmin owns and without asking one.
 
-Detection is by property, not by file: `sudo -n -l` (which never prompts) is
-parsed for a *blanket* `NOPASSWD: ALL` — a NOPASSWD scoped to one program is
-how the deliberate exceptions work, wk's own quiesce helper included — and for
-the timeout. `wk sudo status --all` walks every configured machine; each
+Detection is by property, not by file: `sudo -n true` (which never prompts)
+answers "does root cost anything right now" by trying it, and `sudo -n -l` is
+read for the timeout and for which *blanket* rule is in force — a NOPASSWD
+scoped to one program is how the deliberate exceptions work, wk's own quiesce
+helper included.
+
+That reading was wrong until 2026-08-19, and wrong in the direction that
+matters: it grepped the whole listing for `NOPASSWD: ALL` and reported a hit,
+while sudoers takes the **last** match. On buildbox4 `sudo -l` lists the site's
+`NOPASSWD: ALL` *and* the drop-in's `PASSWD: ALL` after it, so a correctly
+hardened machine was reported as wide open — `wk remote setup` offered to fix
+it on every run, and `wk sudo require` re-installed and asked for the password
+every time, its own short-circuit having tested `[ -f "$DROPIN" ]` for a path
+that does not exist when the remote login name differs from the local one.
+Which for a shared build box is the normal case. `wk sudo status --all` walks every configured machine; each
 answers by running the same file over there rather than by a second
 implementation reached over ssh. `wk doctor` reports it on every run, so it
 cannot quietly drift back. Measured 2026-08-19: this Mac keeps a timestamp

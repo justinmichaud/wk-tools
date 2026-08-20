@@ -23,6 +23,15 @@
 
 set -euo pipefail
 
+# Shell quoting, for WK_DRY_RUN below. ${var@Q} would do it in one word and
+# needs bash 4.4; this file has to parse under macOS's bash 3.2.
+_q() {
+    case "$1" in
+        *[!A-Za-z0-9._/=:-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 SRC=${WK_SRC:-/src/WebKit}
 cd "$SRC"
 
@@ -231,7 +240,7 @@ else
     [ "$mem_budget" -lt 8192 ] && mem_budget=8192
 fi
 watchdog="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mem-watchdog.sh"
-if [ -x "$watchdog" ]; then
+if [ -x "$watchdog" ] && [ -z "${WK_DRY_RUN:-}" ]; then
     "$watchdog" "$$" "$mem_budget" "${WK_MEM_FLOOR_MB:-2048}" &
     echo "wk: memory watchdog: budget ${mem_budget}MB, floor ${WK_MEM_FLOOR_MB:-2048}MB, sampled every ${WK_MEM_INTERVAL:-30}s" >&2
 fi
@@ -243,6 +252,27 @@ fi
 pre=""
 command -v ionice >/dev/null 2>&1 && pre="ionice -c3"
 command -v choom  >/dev/null 2>&1 && pre="$pre choom -n 500 --"
+
+# WK_DRY_RUN: print the command and build nothing.
+#
+# The point of doing it *here* rather than reconstructing the line in cmd/build
+# is that this is the half that knows. Whether ionice and choom exist, what the
+# cgroup clamped the job count to, which build settings the Apple path adds,
+# what the architecture wrapper is -- all of it is resolved in the target and
+# none of it is knowable from outside. A rendering in the caller would be a
+# second implementation of this file, and would be wrong on the day they differ.
+#
+# The same quoting `set -x` would use, so what is printed can be pasted into a
+# shell in the checkout and run.
+if [ -n "${WK_DRY_RUN:-}" ]; then
+    printf 'cd %s\n' "$(_q "$SRC")"
+    # shellcheck disable=SC2086 -- $wrapper and $pre are deliberate word lists.
+    set -- $wrapper $pre nice -n "$nicelevel" \
+        Tools/Scripts/build-webkit "${args[@]}" ${@+"$@"}
+    for _a in "$@"; do printf '%s ' "$(_q "$_a")"; done
+    printf '\n'
+    exit 0
+fi
 
 set -x
 # shellcheck disable=SC2086 -- $wrapper and $pre are deliberate lists of bare words.

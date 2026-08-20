@@ -35,23 +35,59 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # is not a table, and "no workspaces -- 'wk new' to create one" is false when
 # the other half just listed several.
 CONTINUED=""
-[ "${1:-}" = --continued ] && CONTINUED=1
+[ "${1:-}" = --continued ] && { CONTINUED=1; shift; }
+
+# WK_ROW_LABEL: the name the *asking* machine knows this one by.
+#
+# A machine of its own answers for its own workspaces, in its own vocabulary --
+# and for a peer workstation that vocabulary is `container` and `vm`, which in
+# somebody else's listing is the same word this machine uses for a different
+# machine's containers. So the asker passes the name it asked about, and rows
+# whose target does not already carry it are qualified with it:
+# `moose:container`. A build box needs none of this -- its own target name *is*
+# the label -- which is why this qualifies rather than always prefixing.
+#
+# Environment rather than a flag: a peer runs its own checkout of this
+# repository, so the far side may not know a flag added here yet -- and an
+# unknown flag there is fatal where an unknown variable is ignored (t_wk,
+# targets/remote.sh).
+LABEL="${WK_ROW_LABEL:-}"
+_col() { if [ -z "$LABEL" ] || [ "$1" = "$LABEL" ]; then printf '%s' "$1"; else printf '%s:%s' "$LABEL" "$1"; fi; }
 
 if [ -z "$CONTINUED" ]; then
-    printf '%-20s %-14s %-10s %-20s %-8s %8s\n' NAME TARGET STATE BASE ARCH CHANGES
+    printf '%-20s %-18s %-10s %-20s %-8s %8s\n' NAME TARGET STATE BASE ARCH CHANGES
 fi
 
 found=0
 TARGETS=$(walk_targets)
+# One round of probes for every machine at once, rather than one ten-second
+# connect after another as the walk reaches them (prefetch_targets,
+# lib/target.sh). Only the waiting moves; the listing is the same listing.
+# shellcheck disable=SC2086 -- deliberate word splitting of the target list.
+prefetch_targets $TARGETS
+trap 'prefetch_done' EXIT
 for TARGET in $TARGETS; do
     load_target "$TARGET"
+
+    # A machine of its own answers for itself, exactly as in `wk status`: the
+    # workspaces are over there, and so is every fact about them. Without this
+    # the two commands disagreed again -- `wk status` delegated and listed a
+    # peer workstation's workspaces while this one, walking a local store that
+    # has never heard of them, reported nothing.
+    if t_has_wk; then
+        rc=0
+        WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued || rc=$?
+        [ "$rc" -eq 0 ] && found=1
+        continue
+    fi
+
     for ws in $(target_workspaces); do
         found=1
         state=$(ws_display_state "$ws")
         base=$(ws_base_id "$ws" 2>/dev/null || echo '-')
         size=$(du -sh "$(wk_ws_dir "$ws")/changes" 2>/dev/null | cut -f1 || echo -)
-        printf '%-20s %-14s %-10s %-20s %-8s %8s\n' \
-            "$ws" "$TARGET" "$state" "$base" "$(t_arch "$ws")" "$size"
+        printf '%-20s %-18s %-10s %-20s %-8s %8s\n' \
+            "$ws" "$(_col "$TARGET")" "$state" "$base" "$(t_arch "$ws")" "$size"
     done
 done
 
@@ -69,6 +105,14 @@ fi
 # does, so this is reported per target rather than once for whatever driver
 # happened to be loaded last -- which on a multi-target walk was a store the
 # numbers did not come from.
+# ...and not at all when this listing is one machine's contribution to
+# somebody else's: --label means the rows are going into a fleet table on
+# another computer, and that machine's snapshot store is not the reader's to
+# act on. `wk gc` and `wk new` there are run there. (--continued alone is the
+# other case and does still print it: the podman VM's store is the *only* copy
+# of the store the macOS host is asking about.)
+[ -z "$LABEL" ] || exit 0
+
 _multi=""
 if [ "$(printf '%s\n' $TARGETS | wc -l | tr -d ' ')" -gt 1 ]; then _multi=1; fi
 for TARGET in $TARGETS; do

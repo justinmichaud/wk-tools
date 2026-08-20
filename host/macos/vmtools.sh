@@ -45,6 +45,18 @@ else
     unchanged "wk-tools in sync"
 fi
 
+# WK_VMTOOLS_ONLY=tools: the push above and nothing else.
+#
+# `wk sync --target container` is the caller, and it wants exactly this one
+# thing -- the copy of wk-tools every container bind-mounts read-only. Until it
+# existed, that copy was refreshed only by `./setup --stage vmtools`, so a
+# command added here was "unknown command" inside every container until somebody
+# remembered to re-run setup. An environment variable rather than an argument
+# because this file is *sourced* by ./setup, and $1 there is setup's own.
+if [ "${WK_VMTOOLS_ONLY:-}" = tools ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 # --- shared mutable skills ---------------------------------------------------
 # Seeded from the repo once, then left alone. Workspaces share this directory
 # read-write and are expected to edit it, so re-syncing on every setup run would

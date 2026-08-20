@@ -45,11 +45,13 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/build/configs.sh"
 
-# Inside a workspace the name is implicit -- see cmd/build. A URL is never a
-# workspace name, so treating anything but this workspace's own name as the
-# first real argument is unambiguous here too.
+# Inside a workspace there is no name to give: every command acts on this one,
+# and the name form is refused rather than quietly accepted (refuse_ws_name,
+# lib/target.sh). Everything else on the command line is this command's own
+# argument, including the very first word.
 NAME="${1:-}"
-if in_workspace && [ "$NAME" != "$(wk_self)" ]; then
+if in_workspace; then
+    refuse_ws_name "$NAME" gui "[<url>]"
     NAME=$(wk_self)
 else
     shift || true

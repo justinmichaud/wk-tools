@@ -293,15 +293,36 @@ by reading it:
 
 Still open from this pass:
 
-- `wk build --detach`'s own nohup has not been moved onto `detach_run` (it
-  predates it and does the same three things).
+- ~~`wk build --detach`'s own nohup~~ **done 2026-08-19**: both remaining
+  hand-rolled nohups (`--detach`'s local fallback and `--babysit`) go through
+  `detach_run`. One thing came out of doing it that the primitive did not have:
+  `--detach` passes an *empty* status file, because a build's status file
+  carries no pid deliberately -- a build can be driven from either end of an
+  ssh and a pid written by one machine is not a fact on the other, so liveness
+  there is the age of the build log (cmd/status). `detach_alive` can therefore
+  never answer yes about it, and the "remove last run's file" step would have
+  deleted the record of a build that was running. `detach_run "" <log>` means
+  "the child's record is not mine to touch".
 - A creation's bookkeeping can outlive everything it describes and then be
   invisible: `wk rm` removes it, and a `state=present` file is what tells a
   hand-emptied far side apart from rubble, but a `$WK_STORE/create/<n>.*` pair
   whose workspace, environment and registry entry are all gone is listed by
   nothing and pruned by nothing. `wk gc` is where that belongs.
-- The `--zed` gate is exercised through `wk build` rather than by opening a
-  real editor against a `creating` workspace.
+- ~~The `--zed` gate is exercised through `wk build`~~ **done 2026-08-19**,
+  and it found the thing a `wk build` proxy could not. The gate itself is
+  right: `wk new zedgate --no-wait` then `wk enter zedgate --zed` printed
+  "waiting for 'zedgate' to finish being created (at: init)", opened nothing,
+  and released on `present`. What is *behind* the gate does not work for a
+  container workspace on a macOS host, for two reasons that have nothing to do
+  with readiness: the command is forwarded into the podman VM, so it looked for
+  `/Applications/Zed.app` in a Linux VM and reported "zed is not installed"
+  about a Mac that has it -- and the generated `wk-<name>` alias is written by
+  whichever side ran `wk new`, which for a container on macOS is the VM, so
+  even a Zed launched on the host would have nothing to resolve and no route
+  into the VM's container network. Refused on the host now, naming a macOS
+  guest or a remote target. Whether a container in the podman VM *should* be
+  reachable from the host (a generated alias with a ProxyJump through the
+  podman machine) is a real question and is not answered here.
 - The remote and vm markers are code-verified and name-checked by selftest, but
   no remote or guest workspace was created end to end in this pass -- the
   container was, including a driver killed mid-provisioning and remade.

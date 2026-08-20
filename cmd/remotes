@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+#
+# wk remotes [<workspace>] [--fix] -- are this checkout's git remotes right?
+#
+# One question, asked of the workspace rather than of a record: does `origin`
+# mean upstream, and can `fork` actually be pushed to?
+#
+# The two names are not interchangeable and the whole push design rests on
+# them being separate:
+#
+#   origin  is WebKit/WebKit, and is fetch-only. `git log origin/main` has to
+#           mean upstream's main -- if origin is the machine's local mirror it
+#           means "whatever that mirror last fetched", which is a different
+#           question with the same spelling. Its push URL is a `no-push://`
+#           address so a stray `git push` fails at once instead of after an
+#           auth round trip, or worse, succeeding somewhere.
+#   fork    is your own fork, fetched over https and *pushed over ssh through
+#           a host alias*. The alias is how one deploy key per fork is
+#           selected (GitHub takes many keys on one repository and refuses one
+#           key on two), so the alias is not cosmetic: an https push URL means
+#           git never consults ssh, never offers a key, and no amount of
+#           `wk push on` will make a push work.
+#
+# Both are asserted at creation (wk_wiring_script, lib/store.sh -- one
+# authority, used by every driver) and neither was ever *checked* afterwards.
+# They drift for two ordinary reasons: a workspace made before that authority
+# existed keeps what `git clone --shared <mirror>` left it -- origin pointing at
+# the mirror, pushable -- and anything can run `git remote set-url` later.
+# Measured 2026-08-19, `bb4` on buildbox4 had exactly the first case, with
+# `fork` pushing over https, while `db` on devbox-arm64-2 was correct: nothing
+# reported the difference, and a push from bb4 could not have worked whatever
+# the switch said.
+#
+#   wk remotes             every workspace this machine can see
+#   wk remotes <ws>        one of them, with its remotes printed
+#   wk remotes <ws> --fix  re-assert the wiring (idempotent)
+#   wk remotes --fix       ...for every workspace that needs it
+#
+# --fix is a re-assertion and not a repair in the wipe-over-repair sense: the
+# wiring is *derived* -- the same script that creates it runs again -- so there
+# is nothing here that can converge on a half-state. What it touches is git
+# config and nothing else: the remotes, `core.sshCommand`, and the current
+# branch's *upstream* when that upstream is a remote nobody pushes to. No
+# commit, no index, no working tree, and never a branch that already points at
+# a fork.
+#
+#   0  every checkout is wired correctly (or --fix made it so)
+#   1  something is wrong (and --fix was not given)
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+FIX=""
+NAME=""
+# --continued: this is the second half of one listing being assembled from two
+# machines (bare_report in `wk`), so the empty-listing note and the closing
+# hint belong to the half that knows whether anything was listed at all.
+CONTINUED=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --fix) FIX=1; shift ;;
+        --continued) CONTINUED=1; shift ;;
+        -h|--help) log "usage: wk remotes [<workspace>] [--fix]"; exit 2 ;;
+        -*) die "unknown option: $1" ;;
+        *)  refuse_ws_name "$1" remotes "[--fix]"
+            NAME="$1"; shift ;;
+    esac
+done
+# Inside a workspace there is one checkout and it is this machine's.
+in_workspace && NAME=$(wk_self)
+
+worst=0
+
+# The local copy of the checkout's remotes, for the one-workspace form. Printed
+# rather than summarised, because when the answer is "these are wrong" the next
+# thing anybody wants is to see them.
+show_remotes() {
+    local ws="$1"
+    t_exec "$ws" git -C "$(t_src "$ws")" remote -v 2>/dev/null \
+        | tr -d '\r' | sed 's/^/    /' || true
+}
+
+# The check runs *in the target*: the checkout is a container's, a guest's or
+# another machine's, and ssh config and `core.sshCommand` only mean anything
+# where git will read them.
+check_one() {
+    local ws="$1" out rc=0
+    out=$(t_exec "$ws" sh -c "$(wk_wiring_check_script "$(t_src "$ws")")" 2>/dev/null) || rc=$?
+
+    if [ "$rc" -eq 2 ] || { [ "$rc" -ne 0 ] && [ -z "$out" ]; }; then
+        printf '%-20s %s\n' "$ws" "could not be read (is it up? 'wk status $ws')"
+        return 1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        printf '%-20s %s\n' "$ws" "origin is upstream, fork pushes over ssh -- ok"
+        # Notes are printed on a correctly wired checkout too: they are about
+        # what the *branch* points at, which is a separate question from whether
+        # the remotes are right, and one nobody would think to ask again.
+        [ -z "$out" ] || printf '%s\n' "$out" | tr -d '\r' | sed 's/^note: /  ~ /' >&2
+        return 0
+    fi
+
+    printf '%-20s %s\n' "$ws" "wired wrong:"
+    printf '%s\n' "$out" | tr -d '\r' \
+        | sed -e 's/^problem: /  - /' -e 's/^note: /  ~ /' >&2
+    return 1
+}
+
+fix_one() {
+    local ws="$1" extra_name="" extra_url="" ssh_config=""
+    # shellcheck disable=SC2034 -- read into three names used just below.
+
+    # The same arguments the driver used at creation, from the driver itself --
+    # a remote target keeps its ssh aliases in a config file under its own root
+    # (its $HOME is shared with other machines and often other people), and its
+    # local copy of the history is a second remote. Asking the driver means
+    # --fix cannot wire a workspace differently from the way it was created.
+    { read -r extra_name; read -r extra_url; read -r ssh_config; } <<EOF
+$(t_wiring_args)
+EOF
+
+    t_exec "$ws" sh -c "$(wk_wiring_script "$(t_src "$ws")" \
+        "$extra_name" "$extra_url" "$ssh_config")" >/dev/null 2>&1 \
+        || { warn "could not re-wire '$ws'"; return 1; }
+    changed "re-wired '$ws'"
+
+    # ...and the branch, which is the same rule one level down: we never push to
+    # an upstream, so a working branch belongs to its project's fork. Reported
+    # rather than silent -- it is somebody's branch -- and it says so when the
+    # fork does not have it yet, because pushing it is a decision.
+    _b=$(t_exec "$ws" sh -c "$(wk_branch_upstream_fix_script "$(t_src "$ws")")" 2>/dev/null | tr -d '\r') || _b=""
+    [ -z "$_b" ] || printf '%s\n' "$_b" | sed 's/^/  /' >&2
+    # Say it worked, from the same check -- a fix that reports success without
+    # re-measuring is a claim.
+    check_one "$ws"
+}
+
+one() {
+    local ws="$1" rc=0
+    load_target "$(ws_target "$ws")"
+    case "$(ws_state "$ws")" in
+        absent)      printf '%-20s %s\n' "$ws" "no such workspace"; return 1 ;;
+        creating)    printf '%-20s %s\n' "$ws" "still being created -- nothing to check yet"; return 0 ;;
+        broken)      printf '%-20s %s\n' "$ws" "the environment is gone ('wk status $ws')"; return 1 ;;
+        unreachable) printf '%-20s %s\n' "$ws" "the machine did not answer"; return 1 ;;
+    esac
+    check_one "$ws" || rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    [ -n "$FIX" ] || return "$rc"
+    rc=0; fix_one "$ws" || rc=$?
+    return "$rc"
+}
+
+if [ -n "$NAME" ]; then
+    require_name "$NAME"
+    rc=0; one "$NAME" || rc=$?
+    [ "$rc" -eq 0 ] || { log ""; log "  its remotes now:"; show_remotes "$NAME"; }
+    exit "$rc"
+fi
+
+# Every workspace this machine can see, from the same walk `wk status` uses.
+found=0
+_TARGETS=$(walk_targets)
+# shellcheck disable=SC2086 -- deliberate word splitting of the target list.
+prefetch_targets $_TARGETS
+trap 'prefetch_done' EXIT
+for TARGET in $_TARGETS; do
+    load_target "$TARGET"
+    # A machine of its own answers for its own checkouts, exactly as in
+    # `wk status`: the git config being asked about is over there.
+    if t_has_wk; then
+        rc=0
+        WK_NO_DELEGATE=1 t_wk remotes ${FIX:+--fix} || rc=$?
+        # A machine runs its *own* copy of wk-tools, so a command added here is
+        # not there until that copy is updated -- and what a far side does with
+        # a command it has never heard of is print its usage and exit 2, in the
+        # middle of this listing. Say what that was, since the alternative is a
+        # page of somebody else's help text with no explanation.
+        if [ "$rc" -eq 2 ]; then
+            warn "$TARGET's wk-tools has no 'remotes' command yet (its usage is above)"
+            if [ -n "${WK_REMOTE_PEER:-}" ]; then
+                log "  it is a workstation with its own checkout:  git pull there"
+            else
+                log "  update it:  wk sync --target $TARGET"
+            fi
+            rc=0
+        fi
+        [ "$rc" -gt "$worst" ] && worst="$rc"
+        found=1
+        continue
+    fi
+    for ws in $(target_workspaces); do
+        found=1
+        rc=0; one "$ws" || rc=$?
+        [ "$rc" -gt "$worst" ] && worst="$rc"
+    done
+
+    # The base snapshot, which is where every *future* workspace on this target
+    # gets its remotes from. `container/firstrun.sh` re-asserts the wiring in
+    # each new workspace, so a stale snapshot is not fatal -- but it is the same
+    # fault one step upstream, and the snapshot in the podman VM had it:
+    # `origin` pushable over https and `fork` pushing to github.com directly
+    # rather than through the alias that selects its deploy key. Published
+    # before the wiring authority existed, and nothing has looked at it since.
+    #
+    # Checked here rather than in a command of its own because it is the same
+    # question about the same kind of tree. It is this machine's store, so it is
+    # read directly: no driver, nothing started.
+    if t_needs_base; then
+        # base_path is the checkout itself, not the directory holding it.
+        _base=$(current_base 2>/dev/null || true)
+        _bp=""
+        [ -z "$_base" ] || _bp=$(base_path "$_base" 2>/dev/null || true)
+        if [ -n "$_bp" ] && [ -d "$_bp/.git" ]; then
+            found=1
+            rc=0
+            _out=$(sh -c "$(wk_wiring_check_script "$_bp" skip-env)" 2>/dev/null) || rc=$?
+            if [ "$rc" -eq 0 ]; then
+                printf '%-20s %s\n' "base:$_base" "origin is upstream, fork pushes over ssh -- ok"
+            else
+                printf '%-20s %s\n' "base:$_base" "wired wrong (every new workspace starts from this):"
+                printf '%s\n' "$_out" | sed -e 's/^problem: /  - /' -e 's/^note: /  ~ /' >&2
+                if [ -n "$FIX" ]; then
+                    if sh -c "$(wk_wiring_script "$_bp")" >/dev/null 2>&1; then
+                        changed "re-wired the base snapshot $_base"
+                        rc=0
+                    else
+                        warn "could not re-wire the base snapshot $_base"
+                    fi
+                fi
+                [ "$rc" -gt "$worst" ] && worst="$rc"
+            fi
+        fi
+    fi
+done
+
+[ "$found" -eq 1 ] || [ -n "$CONTINUED" ] || log "(no workspaces)"
+if [ "$worst" -ne 0 ] && [ -z "$FIX" ] && [ -z "$CONTINUED" ]; then
+    log ""
+    log "  re-assert the wiring:  wk remotes --fix"
+fi
+exit "$worst"

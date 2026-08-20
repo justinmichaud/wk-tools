@@ -15,6 +15,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/watchdog.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/detach.sh"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/build/configs.sh"
 
@@ -35,13 +36,17 @@ fi
 DRY=""
 [ "${1:-}" = --dry-run ] && { DRY=1; shift; }
 
-# The workspace name is optional inside a workspace: there is exactly one, it is
+# There is no workspace name inside a workspace: there is exactly one, it is
 # this machine, and `wk build <config>` is the form claude/CLAUDE.md documents
-# and the only one available in there. The leading argument is consumed as a
-# name only when it really is this workspace's own name -- and not when that
-# word is also a config, so a workspace named after one still builds.
+# and the only one available in there. The name form is refused rather than
+# accepted as a synonym (refuse_ws_name, lib/target.sh).
 NAME="${1:-}"; CONFIG="${2:-}"
-if in_workspace && { [ "$NAME" != "$(wk_self)" ] || config_load "$NAME" 2>/dev/null; }; then
+if in_workspace; then
+    # The one exception the refusal has to make for itself: a workspace named
+    # after a config still has to be able to build that config, so in a
+    # workspace called `jsc-release`, `wk build jsc-release` is the config and
+    # not the name. Configs are a closed list, so this is decidable.
+    config_load "$NAME" 2>/dev/null || refuse_ws_name "$NAME" build "<config>"
     # A name *and* a config, where the name is not this workspace's, is the host
     # form typed in the wrong place. Read literally it would build this
     # workspace and report the config as unknown, which explains neither half.
@@ -107,6 +112,10 @@ ARCH=$(t_arch "$NAME")
 # build-webkit -- which has no such option -- would fail 40 lines into a perl
 # script.
 BABYSIT=""; BRANCH=""; EXTRA_CMAKE=""; MEM_BUDGET=""; MEM_FLOOR=""; DETACH=""; _PASS=()
+# Newline-separated, because an environment value may contain spaces. Held in a
+# variable rather than written as a literal so the quoting stays readable.
+EXTRA_ENV=""; _NL='
+'
 while [ $# -gt 0 ]; do
     case "$1" in
         --detach)    DETACH=1; shift ;;
@@ -114,6 +123,15 @@ while [ $# -gt 0 ]; do
         --babysit=*) BABYSIT="${1#*=}"; shift ;;
         --branch)    BRANCH="${2:-}"; [ -n "$BRANCH" ] || die "--branch needs a name"; shift 2 ;;
         --branch=*)  BRANCH="${1#*=}"; shift ;;
+
+        # The memory watchdog's two numbers, as flags rather than only as
+        # environment: a container build on a macOS host is forwarded into the
+        # podman VM over ssh, and only what is on the command line survives
+        # that. Both default to the derivation in build/build-in-target.sh.
+        --mem-budget)  MEM_BUDGET="${2:-}"; [ -n "$MEM_BUDGET" ] || die "--mem-budget needs MB"; shift 2 ;;
+        --mem-budget=*) MEM_BUDGET="${1#*=}"; shift ;;
+        --mem-floor)   MEM_FLOOR="${2:-}"; [ -n "$MEM_FLOOR" ] || die "--mem-floor needs MB"; shift 2 ;;
+        --mem-floor=*)  MEM_FLOOR="${1#*=}"; shift ;;
 
         # Extra CMake flags for this build, *added* to the config's own.
         # Repeatable, and quoted as one argument per use:
@@ -127,18 +145,34 @@ while [ $# -gt 0 ]; do
         # architecture's flags) and builds something else entirely, with no
         # sign that it happened. Appended last, so where the same -D appears
         # twice the one typed here wins -- cmake takes the last value.
-        # The memory watchdog's two numbers, as flags rather than only as
-        # environment: a container build on a macOS host is forwarded into the
-        # podman VM over ssh, and only what is on the command line survives
-        # that. Both default to the derivation in build/build-in-target.sh.
-        --mem-budget)  MEM_BUDGET="${2:-}"; [ -n "$MEM_BUDGET" ] || die "--mem-budget needs MB"; shift 2 ;;
-        --mem-budget=*) MEM_BUDGET="${1#*=}"; shift ;;
-        --mem-floor)   MEM_FLOOR="${2:-}"; [ -n "$MEM_FLOOR" ] || die "--mem-floor needs MB"; shift 2 ;;
-        --mem-floor=*)  MEM_FLOOR="${1#*=}"; shift ;;
-
         --cmake)     [ -n "${2:-}" ] || die "--cmake needs at least one flag"
                      EXTRA_CMAKE="$EXTRA_CMAKE $2"; shift 2 ;;
         --cmake=*)   EXTRA_CMAKE="$EXTRA_CMAKE ${1#*=}"; shift ;;
+
+        # One environment variable for this build, added last so it *overrides*
+        # what the config sets rather than merely joining it (`env` takes the
+        # last assignment of a name). Repeatable:
+        #
+        #   wk build ws jsc-release --env CC=gcc-14 --env CXX=g++-14
+        #
+        # This exists because the environment was the one half of a build that
+        # could not be steered from the command line. Exporting CC here does
+        # nothing: the build runs in the target -- another container, another
+        # machine -- and only what config_build_env carries gets there. So a
+        # one-off compiler, a CFLAGS, a ccache setting all meant editing a
+        # config or a conf.
+        --env)       [ -n "${2:-}" ] || die "--env needs NAME=VALUE"
+                     case "$2" in
+                         [A-Za-z_]*=*) ;;
+                         *) die "--env takes NAME=VALUE, got $(sh_quote "$2")" ;;
+                     esac
+                     EXTRA_ENV="$EXTRA_ENV$2$_NL"; shift 2 ;;
+        --env=*)     _v="${1#*=}"
+                     case "$_v" in
+                         [A-Za-z_]*=*) ;;
+                         *) die "--env takes NAME=VALUE, got $(sh_quote "$_v")" ;;
+                     esac
+                     EXTRA_ENV="$EXTRA_ENV$_v$_NL"; shift ;;
         --cmakeargs|--cmakeargs=*)
             barrier "--cmakeargs would replace the config's CMake flags rather than add to
     them: build-webkit takes one --cmakeargs, so the last one on the command
@@ -179,12 +213,15 @@ if [ -n "$BABYSIT" ]; then
     esac
 
     WS=$(wk_ws_dir "$NAME")
+    # The file is a claim and the process table is the fact (lib/detach.sh), so
+    # both are asked: a state that says "building" whose pid is gone is last
+    # run's file, and starting a second babysitter over it is right.
     if [ -f "$WS/babysit.status" ]; then
-        _pid=$(awk -F= '/^pid=/{print $2}' "$WS/babysit.status")
-        _state=$(awk -F= '/^state=/{print $2}' "$WS/babysit.status")
-        case "$_state" in
-            starting|building|fixing)
-                [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null \
+        _state=$(status_field "$WS/babysit.status" state)
+        case "$_DETACH_RUNNING" in
+            *" ${_state:-none} "*)
+                _pid=$(status_field "$WS/babysit.status" pid)
+                detach_alive "$WS/babysit.status" \
                     && die "a babysitter is already running for '$NAME' (pid $_pid, $_state).
     Follow it:  tail -f $WS/babysit.log" ;;
         esac
@@ -198,10 +235,9 @@ if [ -n "$BABYSIT" ]; then
     fi
 
     ensure_dir "$WS" >/dev/null
-    nohup "$WK_ROOT/build/babysit.sh" "$NAME" "$CONFIG" "$BABYSIT" \
-        "${WK_BABYSIT_ATTEMPTS:-5}" "$BRANCH" ${@+"$@"} \
-        > "$WS/babysit.log" 2>&1 < /dev/null &
-    _pid=$!
+    _pid=$(detach_run "$WS/babysit.status" "$WS/babysit.log" -- \
+        "$WK_ROOT/build/babysit.sh" "$NAME" "$CONFIG" "$BABYSIT" \
+        "${WK_BABYSIT_ATTEMPTS:-5}" "$BRANCH" ${@+"$@"})
     info "babysitter started for $CONFIG in '$NAME' (pid $_pid, model $BABYSIT${BRANCH:+, branch $BRANCH})"
     log  "  it survives this terminal; up to ${WK_BABYSIT_ATTEMPTS:-5} fixes, then it closes itself"
     log  "  state:   wk status $NAME"
@@ -238,10 +274,19 @@ if [ -n "$DETACH" ]; then
     if t_has_wk && t_wk_detach build ${_det[@]+"${_det[@]}"} >/dev/null 2>&1; then
         info "building $CONFIG in '$NAME' on $TARGET, detached -- this end can go away"
     else
-        WS=$(wk_ws_dir "$NAME"); ensure_dir "$WS" >/dev/null
-        nohup "$WK_ROOT/wk" build ${_det[@]+"${_det[@]}"} \
-            > "$WS/detached.log" 2>&1 < /dev/null &
-        info "building $CONFIG in '$NAME', detached as pid $! -- this end can go away"
+        # detach_run rather than a nohup of our own (lib/detach.sh): the same
+        # stdin-closed, both-streams-redirected launch the babysitter gets,
+        # from one implementation instead of two.
+        #
+        # No status file passed, and that is not an omission: the re-run writes
+        # build.status itself, and a build's liveness is the age of its log
+        # rather than a pid (cmd/status) -- so nothing here can tell last run's
+        # file from a build that is running right now, and the honest move is
+        # to leave it to the child that owns it.
+        WS=$(wk_ws_dir "$NAME")
+        _pid=$(detach_run "" "$WS/detached.log" -- \
+            "$WK_ROOT/wk" build ${_det[@]+"${_det[@]}"})
+        info "building $CONFIG in '$NAME', detached as pid $_pid -- this end can go away"
     fi
     log "  follow:  wk logs $NAME -f"
     log "  state:   wk status $NAME"
@@ -281,6 +326,11 @@ fi
 WK_EXTRA_CMAKE="${EXTRA_CMAKE# }"
 export WK_EXTRA_CMAKE
 
+# The same, for the environment (--env). Read by config_build_env, which
+# appends each line to CFG_ENV last so it overrides the config's own.
+WK_EXTRA_ENV="$EXTRA_ENV"
+export WK_EXTRA_ENV
+
 # Flags win over the environment; both are read by config_build_env, which is
 # what carries them into the target.
 [ -z "$MEM_BUDGET" ] || { WK_MEM_BUDGET_MB="$MEM_BUDGET"; export WK_MEM_BUDGET_MB; }
@@ -313,6 +363,7 @@ if [ -n "$DRY" ]; then
     log "  config:    $CONFIG ($CFG_BUILDSYS${CFG_PORT:+ $CFG_PORT}${CFG_ARGS:+ $CFG_ARGS})"
     [ -n "${WK_TARGET_CMAKE:-}" ] && log "  machine:   $WK_TARGET_CMAKE (WK_TARGET_CMAKE, from $TARGET's conf)"
     [ -n "$WK_EXTRA_CMAKE" ] && log "  --cmake:   $WK_EXTRA_CMAKE (added to the config's)"
+    [ -n "$WK_EXTRA_ENV" ] && log "  --env:     $(printf '%s' "$WK_EXTRA_ENV" | tr '\n' ' ')(overrides the config's)"
     [ $# -gt 0 ] && log "  passed on: $* (straight to build-webkit)"
     [ -n "$ARCH_LABEL" ] && log "  arch:      $ARCH_LABEL, native ($(arch_wrapper "$ARCH") $(arch_cflags "$ARCH"))"
     log "  src:       $(t_src "$NAME")"
@@ -320,6 +371,43 @@ if [ -n "$DRY" ]; then
     log "  jobs:      $JOBS (nice $NICE)"
     log "  memory:    budget ${WK_MEM_BUDGET_MB:-$(( JOBS * ${WK_MB_PER_JOB:-1536} ))}MB, floor ${WK_MEM_FLOOR_MB:-2048}MB, watched every ${WK_MEM_INTERVAL:-30}s"
     log "  would run: env ${CFG_ENV[*]} $(t_tools "$NAME")/build/build-in-target.sh $*"
+
+    # ...and the commands *that* runs, from the half that knows them
+    # (WK_DRY_RUN in build/build-in-target.sh). Asked through the target's own
+    # exec path rather than reconstructed here: whether ionice and choom exist,
+    # what the cgroup clamps the job count to, which build settings the Apple
+    # path adds and what the architecture wrapper is are all resolved inside the
+    # target, and a rendering out here would be a second implementation of that
+    # file -- right until the day they disagree, which is the day it matters.
+    #
+    # t_exec, deliberately not t_exec_build: the build path takes that machine's
+    # build lock, and a dry run that waited an hour behind somebody's link step
+    # would be answering a question nobody is still asking.
+    #
+    # Guarded on the far copy understanding the flag, and this guard is not
+    # belt-and-braces -- it is the whole safety of the mechanism. Every target
+    # runs its *own* copy of build-in-target.sh (bind-mounted for a container,
+    # rsynced for a guest or a machine), and a copy that predates WK_DRY_RUN
+    # does not decline: it ignores an environment variable it has never heard
+    # of and builds. Measured the hard way on 2026-08-19 -- a dry run against a
+    # build box with a stale tree started a real build-webkit in a workspace
+    # somebody was already building in, and rewrote that build directory's
+    # options file. A flag an old copy ignores is a flag that builds.
+    _bit="$(t_tools "$NAME")/build/build-in-target.sh"
+    if ! t_exec "$NAME" grep -q WK_DRY_RUN "$_bit" 2>/dev/null; then
+        warn "  the wk-tools in '$NAME' predates --dry-run's target half, so the commands"
+        log  "  it would run cannot be asked for without risking a real build."
+        log  "  push this tree there first:  wk sync --target $TARGET"
+        exit 0
+    fi
+    if _cmds=$(t_exec "$NAME" env "${CFG_ENV[@]}" WK_DRY_RUN=1 \
+            "$_bit" ${@+"$@"} 2>/dev/null); then
+        log "  and then, in the target:"
+        printf '%s\n' "$_cmds" | tr -d '\r' | sed 's/^/    /' >&2
+    else
+        warn "  could not ask '$NAME' itself what it would run -- the lines above are"
+        log  "  this side's half of it. Is the workspace up? (wk status $NAME)"
+    fi
     exit 0
 fi
 

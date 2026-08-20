@@ -13,7 +13,7 @@
 # never consulted for a decision that evidence next to the artifact can answer
 # (docs/HANDOFF-workspace-state.md, "The rules").
 #
-#   detach_run <status-file> <log> -- cmd...    start it; prints the pid
+#   detach_run <status-file|''> <log> -- cmd...  start it; prints the pid
 #   status_write <file> <key=value>...          atomic write, adds updated=
 #   status_field <file> <key>                   one field, tolerantly
 #   detach_alive <file> [fallback-pid]          is the driving process still here?
@@ -86,6 +86,14 @@ detach_alive() {
 # the run it had just started as crashed -- while the new driver went on to
 # finish the workspace perfectly. A stale `state=failed` would have done the
 # same thing faster.
+#
+# An empty status-file argument means "the child's record is not mine to
+# touch", and `wk build --detach` is why it exists: a build's status file
+# carries no pid, deliberately -- a build can be driven from either end of an
+# ssh, and a pid written by one machine is not a fact on the other, so
+# liveness there is the age of the build log instead (cmd/status). detach_alive
+# can therefore never answer yes about it, and removing it as "last run's
+# file" would delete the record of a build that is running right now.
 detach_run() {
     local sf="$1" log="$2"
     shift 2
@@ -97,7 +105,7 @@ detach_run() {
     # same work is a race the caller should have refused, and if one slips
     # through, deleting the winner's record of itself is the worst of the two
     # available mistakes.
-    detach_alive "$sf" || rm -f "$sf"
+    [ -z "$sf" ] || detach_alive "$sf" || rm -f "$sf"
     : > "$log" 2>/dev/null || true
 
     nohup "$@" >> "$log" 2>&1 < /dev/null &

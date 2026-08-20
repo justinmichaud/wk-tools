@@ -47,11 +47,23 @@ outside the runner's coverage is only as fresh as the last human pass.
       `sudo -n`), names what is wrong and the command that fixes it — measured
       on this Mac (keeps a timestamp) and on buildbox4 (`NOPASSWD: ALL` from
       the site sudoers)
+- [V] and it reads sudoers by its **last-match** rule, not by grepping for
+      `NOPASSWD`. Fixed 2026-08-19: on buildbox4 `sudo -l` lists the site's
+      `NOPASSWD: ALL` *and* the drop-in's `PASSWD: ALL` after it, and the grep
+      matched the line already overridden — reporting a correctly hardened
+      machine as wide open. The verdict now starts from `sudo -n true`, which
+      is evidence rather than a reading
 - [ ] `wk sudo require` installs `/etc/sudoers.d/zz-<user>-passwd`, validates
       with `visudo -c` before and after, and then proves the property: `sudo -k`
       followed by `sudo -n true` fails
-- [ ] `wk sudo require --target <machine>` does the same over ssh, with a
-      terminal for the password prompt
+- [V] `wk sudo require --target <machine>` is idempotent: with the property
+      already true it says "already required" and does **not** prompt or
+      re-install (measured on buildbox4, 2026-08-19). It gates on the property
+      and not on `[ -f "$DROPIN" ]`, which is false whenever the remote login
+      name differs from this machine's — the normal case for a shared box, and
+      the reason every run used to ask for a password
+- [ ] `wk sudo require --target <machine>` on a machine that needs it: the
+      password prompt gets a terminal over ssh
 - [V] `wk sudo status --all` walks every configured machine and names the fix
       per machine
 
@@ -116,6 +128,66 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] `--force` is not consumed after a `--`: `wk run <ws> -- --force` is the
       program's argument
 
+### Remotes: `origin` and `fork` are different things (`wk remotes`)
+- [V] the wiring is *checked*, not only asserted at creation. Measured
+      2026-08-19: `db` on devbox-arm64-2 was correct and `bb4` on buildbox4 was
+      not — `origin` was that machine's local mirror **and pushable**, `fork`
+      pushed over https so no deploy key could ever be offered, `forkwpe` was
+      missing, and nothing resolved the ssh aliases. Both had been created by
+      the same driver; nothing had ever asked
+- [V] `wk remotes` reports every workspace this machine can see (the same walk
+      `wk status` uses, delegating to machines of their own), naming each fault
+      and what it costs; `wk remotes <ws> --fix` re-asserts the wiring from the
+      same authority that creates it (`wk_wiring_script`) and re-checks
+      afterwards rather than claiming success
+- [V] `--fix` takes its arguments from the driver (`t_wiring_args`), so a
+      re-assertion cannot wire a workspace differently from the way it was
+      created — the machine's mirror or its shared WebKit, and the ssh config
+      under the wk root
+- [V] a wrong origin is flagged where it is seen: `wk status <ws>` prints
+      `origin is <url>, not upstream -- 'wk remotes <ws> --fix'` (verified by
+      breaking it deliberately in a container workspace and repairing it)
+- [V] `origin` refuses a push at once rather than after an auth round trip:
+      `git push origin` → `remote helper 'no-push' aborted session`
+- [V] the *branch* is checked by the same rule, because the rule is absolute --
+      we never push to an upstream, always to a fork: a branch tracking
+      `origin/<x>` can never be pushed by a bare `git push`, and on bb4 that ref
+      existed only on the fork. `--fix` retargets it (fetching the one ref
+      first, since `git branch -u` refuses an upstream it has never seen) and
+      says so; a branch not yet on the fork is left alone, naming the push
+- [V] each upstream is paired with *its own project's* fork: a branch tracking
+      `wpe/<x>` belongs to `forkwpe`, not to `fork`. Derived by repository name
+      from `wk_remotes` and `wk_push_forks`, so adding a project is one edit
+- [V] the wiring creates every remote the wiki's own set names: `origin`, `wpe`,
+      `fork`, `forkwpe` (plus the machine's local copy). `wpe` was missing
+      everywhere until 2026-08-19 — so no workspace could `git fetch wpe` at
+      all, while `wk pr` accepts PRs from that project and the mirror had been
+      carrying its objects the whole time. `igalia` is a deliberate omission
+      with the reason recorded next to the list: ssh port 4429 is not in the
+      egress allowlist and a workspace holds no personal key
+- [V] the **base snapshot** is checked too, because it is where every future
+      workspace's remotes come from — and it was wrong: `origin` pushable over
+      https, `fork` pushing to github.com directly rather than through the
+      alias that selects its deploy key, no `forkwpe`, no `wpe`. Published
+      before the wiring authority existed and never looked at since;
+      `container/firstrun.sh` had been quietly correcting each workspace.
+      `--fix` re-wires it (2026-08-19). The environment half of the check
+      (can ssh resolve the alias *here*) is skipped for a snapshot: it lives in
+      the podman VM, which has no alias config and needs none, so asking would
+      report a fault no re-wiring can clear
+- [V] the podman VM does not enumerate the shared registry: the whole
+      repository is rsynced in there, so a forwarded half was walking every
+      machine in the fleet and paying an ssh timeout each for machines it has
+      no key or route to. A bare `wk status` went from 12.1 s to 8.7 s
+- [V] the podman VM's copy of wk-tools has a way to be refreshed at all:
+      `wk sync --target container` pushes it (`t_sync` on the container driver).
+      Before that, only `./setup --stage vmtools` did — so a command added to
+      this repo was "unknown command" inside every container, which is exactly
+      how `wk remotes` first failed
+- [V] a delegated command a far side is too old to know explains itself
+      instead of dumping that machine's usage unexplained (measured against
+      moose, a peer on an older checkout)
+
 ### Pushing to git is a switch (`wk push`)
 - [V] a workspace's deploy keys are **symlinks** into the read-only `/secrets`,
       never copies — a copy is a key the switch cannot reach, and it also
@@ -150,9 +222,21 @@ Run these inside the podman VM on macOS, and directly on Linux.
       the remote root — never a copy of another machine's
 - [ ] `wk key register` registers each machine's key separately, titled with
       the machine name, and `wk key check` reports per machine
-- [V] a remote checkout gets `origin` = WebKit/WebKit, both forks, the
+- [!] a remote checkout gets `origin` = WebKit/WebKit, both forks, the
       machine's mirror, and `core.sshCommand` pointing at `$root/ssh/config`
-      — nothing outside the wk root is edited
+      — nothing outside the wk root is edited. True of `db` (created after the
+      wiring landed) and **false of `bb4`**, which predated it: see
+      `wk remotes` above, which is what now says so
+- [V] **push works end to end from a container**: with the switch off,
+      `git push --dry-run fork HEAD:refs/heads/…` from inside fails; with it on,
+      the same command reports `* [new branch]` (2026-08-19, a throwaway
+      workspace; `--dry-run`, so nothing was published)
+- [!] and does **not** yet work from a remote target, for a reason that is not
+      the switch: with push on, the wiring correct and the alias resolving,
+      buildbox4 got `Permission denied (publickey)` — its deploy key exists but
+      was never registered on GitHub (`wk key check`: bb4 "not registered",
+      devbox-arm64-2 and moose "no key"). `wk push on` now says that a push
+      also needs `wk key check`, because only the host can ask GitHub
 - [V] `wk push off --target <machine>` leaves ssh with `no such identity`
       there, and `git fetch fork main` still works
 - [V] `wk status` lists each machine's keys by fingerprint with their state,
@@ -163,7 +247,14 @@ Run these inside the podman VM on macOS, and directly on Linux.
       (1m16s warm, from inside `selftest`)
 - [V] `wk run -- -e 'print(1+1)'` prints 2; `wk test <args>` runs and reports
 - [V] `wk status` / `wk logs` with no name report this workspace
-- [V] the explicit form still works from inside: `wk run <own-name> -- ...`
+- [V] the name form is *refused* from inside, not accepted as a synonym:
+      `wk build <own-name> <config>`, `wk run/test/logs/gui/status/pr
+      <own-name> ...` each say "there is no workspace argument in here" and
+      print the form to type (2026-08-19; it used to build exactly what the
+      short form builds, so everything written about the in-here interface was
+      describing one of two spellings)
+- [V] the one exception: a workspace *named after a config* still builds that
+      config — `wk build jsc-release` in a workspace called `jsc-release`
 - [V] `wk build <other-name> <config>` says *which* thing is missing, rather
       than reading the config as a workspace name
 - [V] `wk build --list` works in a workspace with no podman anywhere
@@ -187,6 +278,16 @@ Run these inside the podman VM on macOS, and directly on Linux.
       second desktop reserve produced
 - [V] `wk build --dry-run` / `wk test --dry-run` resolve everything and change
       nothing — no tooling sync, no status file
+- [V] `wk build --dry-run` also prints the exact commands, including the ones
+      only the target can resolve: `cd <src>` and the full `ionice -c3 choom -n
+      500 -- nice -n 19 Tools/Scripts/build-webkit …` line, quoted so it can be
+      pasted (2026-08-19, against buildbox4). `--explain` names the flag rather
+      than trying to describe them
+- [V] and it refuses to ask a target whose wk-tools predates the mechanism,
+      naming `wk sync --target <t>`: an old `build-in-target.sh` ignores
+      `WK_DRY_RUN` and *builds*. Measured the hard way — a dry run against a
+      stale build box started a real build-webkit in a workspace somebody was
+      building in, and rewrote that build directory's options file
 - [V] the job count has no configured ceiling: it is derived per build from
       what the target has free *at that moment*, and the derivation is printed
       (`resources: 63 jobs (cores=128 avail=138327MB @ 1536MB/job, polite,
@@ -207,9 +308,20 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] `wk build --detach` returns in under a second and the build survives
       this end going away — in the podman VM for a container workspace, on
       the machine's own `wk` for a remote one (verified separately, 1.1 s)
+- [V] both detaching paths go through one primitive (`detach_run`,
+      lib/detach.sh): `--detach`'s local fallback and `--babysit` no longer
+      carry a nohup of their own. `--detach` passes *no* status file on
+      purpose — a build's liveness is the age of its log, not a pid, so
+      nothing there can tell last run's `build.status` from a build that is
+      running right now
 - [V] `WK_TARGET_CMAKE` in a target's conf is added to every build's CMake
       flags on that machine, after the config's and the architecture's and
       before `--cmake`
+- [V] `wk build ... --env NAME=VALUE` (repeatable) is applied *last*, so it
+      overrides what the config sets rather than joining it — `--env CC=gcc-14`
+      lands after the config's `CC=clang` and `env` takes the last assignment;
+      a value containing spaces survives (`--env 'CXXFLAGS=-O2 -g'`), and a
+      word without `=` is refused
 - [V] `wk build ... --cmake '<flags>'` **adds** to the config's CMake flags
       (repeatable, shown by `--dry-run`), a bare `--cmakeargs` is refused
       naming the flags it would have silently dropped, and everything after
@@ -417,14 +529,27 @@ Verified 2026-08-19 against `devbox-arm64-2` (80 cores, 250 GB, Debian 12,
 reached through a ProxyJump), driven from the macOS host.
 
 - [V] a machine name is a target: `--target devbox-arm64-2` resolves through
-      `~/.config/wk/targets/<name>.conf` to the remote driver
+      `targets/hosts/<name>.conf` in this repository, or
+      `~/.config/wk/targets/<name>.conf` for this device alone
 - [V] an unconfigured name is refused, and the error prints the conf to write
 - [V] two remote targets in one process do not inherit each other's host,
       root or capacity
 - [V] `wk new <ws> --target <machine>` clones on the shared box (39 s from a
       warm mirror; the mirror's own first fetch is 25 min / 13 GB)
-- [V] the mirror is created and fetched by the driver — there is no `wk sync`
-      for a remote target and there is not meant to be one
+- [V] the mirror is created and fetched by the driver on `wk new`
+- [V] `wk sync --target <machine>` is the far-side equivalent of `wk sync`, and
+      is what refreshes a machine between builds: it pushes wk-tools (the stale
+      copy that answers a delegated command with `unknown option --quiet` is
+      the failure this closes — `wk status` named the drift and nothing but a
+      full `wk remote setup` fixed it) and fetches that machine's own mirror.
+      Verified 2026-08-19 on buildbox4: 11 s, and `wk status` went from
+      "DIFFERS from the workstation" to "in sync"
+- [V] a machine that clones from a shared repository in its MOTD is told so and
+      nothing of ours is fetched — that repository is the sysadmins', not ours
+      to write to
+- [V] `wk sync --target all` walks every machine; `wk sync --target container`
+      (or vm, or local) is refused, naming a plain `wk sync` as the thing that
+      refreshes this machine's own store
 - [V] `wk build` runs niced 19 + ionice, job count from **that machine's**
       cores, load and free memory, capped by `WK_REMOTE_MAX_JOBS`
       (80 cores / load 1 / 248 GB → -j16); jsc-release in 8m47s
@@ -440,11 +565,18 @@ reached through a ProxyJump), driven from the macOS host.
 - [V] `wk enter <ws> <cmd>` runs the command in the remote checkout
 - [V] `wk enter <ws> --zed` and `wk new <ws> --target <machine> --zed` open the
       checkout over ssh, and work when Zed.app is installed without the `zed`
-      CLI symlink (the app bundle's own cli is used)
+      CLI symlink (the app bundle's own cli is used). The URL for a machine is
+      that machine's own ssh name and its real path
+      (`ssh://buildbox4/home/…/wk/ws/bb4/WebKit`, checked 2026-08-19)
 - [ ] `wk new --zed` warns instead of failing when zed is missing or the
       workspace has no route yet (a vm before first boot) — the workspace is
       created either way
 - [V] `wk claude` refuses a remote workspace outright
+- [V] forced onto a remote with `--force`, Claude starts in **auto mode**
+      (`--permission-mode auto`), not `--dangerously-skip-permissions`: skipping
+      permissions is the sandbox's bargain, and a shared build box is the one
+      target with no sandbox — forcing past the barrier says "run an agent
+      there", not "and give it everything"
 - [V] forced onto a remote with `--force`, it hands over only to a Claude that
       *runs*: on a shared box the CLI on PATH is often somebody else's global
       npm install on that machine's own node, which dies on start (measured
@@ -454,6 +586,19 @@ reached through a ProxyJump), driven from the macOS host.
       offers the user-local installer that carries its own runtime, and
       launches by absolute path — preferring `~/.local/bin/claude`, because
       PATH ordering on a shared machine is not ours to change
+- [V] **layout tests run on a remote target against the build that is already
+      there** — no second build, no second config. `wk test db --layout
+      fast/dom/Element/id-attribute.html`: 15 s, green, 2026-08-19 on
+      devbox-arm64-2 against its `gtk-release-asan` tree. Two things had to be
+      true for it: `--no-build` (always was), and the config defaulting to what
+      the workspace was last built with (`config=` in build.status) — a bare
+      `wk test --layout` used to resolve `jsc-release`, i.e. `--jsc-only`, and
+      point run-webkit-tests at a tree with no WebKitTestRunner and no
+      ImageDiff in it. That combination is now refused by name
+- [V] `wk claude <ws>` takes Claude's own options on either side of the
+      workspace name: `wk claude -r db` and `wk claude db -r` are the same
+      command. Which bare word is the name is decided by the registry, not by
+      position, so `-r <session-id>` does not lose its argument to it
 - [V] `wk verify` refuses a remote workspace outright, rather than reporting a
       sandbox that does not exist
 - [!] a **trunk** build needs a newer C++ toolchain than Debian 12 has: clang
@@ -816,10 +961,21 @@ command that asked for it.
       evidence-derived answer is unchanged
 - [ ] a status file written by an older schema (missing keys) still renders;
       unknown keys are ignored
-- [ ] `wk enter --zed` against a `creating` workspace waits and opens only
-      on `present`; against `broken` it refuses with the repair command
-      (the gate itself — `wait_ready` — is verified through `wk build`;
-      what is untested is the editor actually opening after the wait)
+- [V] `wk enter --zed` against a `creating` workspace waits and opens only on
+      `present`. Exercised for real 2026-08-19 with a throwaway container
+      workspace: `wk new zedgate --no-wait`, then `wk enter zedgate --zed`,
+      which printed "waiting for 'zedgate' to finish being created (at: init)"
+      and held — no editor — until creation finished, then "'zedgate' is ready"
+      and on to the launch
+- [!] and the launch is where it ends on a macOS host, for a container
+      workspace: it was forwarded into the podman VM, looked for
+      `/Applications/Zed.app` in a Linux VM and reported "zed is not installed"
+      about a Mac that has it. Two reasons it cannot work as it stands, both now
+      in the refusal: Zed runs on the host and the container is inside a VM with
+      no ssh route in from here, and the generated `wk-<name>` alias is written
+      by whichever side ran `wk new` — the VM. Refused on the host now, naming a
+      macOS guest or a remote target instead
+- [ ] against `broken` it refuses with the repair command
 
 ### Un-managed commands clobbering the record
 - [V] `podman rm` a workspace's container by hand: `wk ls`/`wk status` say
@@ -859,9 +1015,29 @@ command that asked for it.
 - [ ] destructive prompts default to No and decline without a terminal,
       never block and never proceed (`WK_YES=1` is the scripted yes)
 
+### The target registry — one list of machines, shared by git
+- [V] `targets/hosts/<name>.conf` in this repository makes a machine a target
+      on every device that pulls it; `~/.config/wk/targets/<name>.conf` still
+      overrides it line by line (sourced second, so a device's own conf keeps
+      the registry's answer for everything it does not mention)
+- [V] `wk build bb4 gtk-release-asan` needs no `--cmake` any more: buildbox4's
+      three clang-19 flags are in its registry conf and land in every build's
+      CMake flags (`--dry-run` shows them, 2026-08-19)
+- [V] the registry is **not** enumerated on a machine that is the far end of a
+      target: the whole repository is pushed to a build box, so without that a
+      delegated `wk ls` there walked the fleet and tried to ssh to machines it
+      has no route or host key for, printing "Could not resolve hostname" into
+      somebody else's listing
+- [V] and never itself: a target whose name is this machine's hostname is
+      skipped, so a workstation does not ssh to itself to ask what it knows
+- [V] `wk remote setup` still writes the machine-local conf, and says that it
+      is this device only, naming the registry path to share it; `wk remote rm`
+      warns when a registry entry outlives the local conf, and does not touch a
+      tracked file itself
+- [ ] a second device: fresh clone + `./setup`, and every machine in the
+      registry is a target there with no state copied from the first
+
 ### Changing workstations — the view is calculated, not carried
-- [ ] a fresh clone + `./setup` on a second workstation sees every remote
-      target and its workspaces, with no state copied from the first
 - [V] deleting the workspace→target registry loses nothing: every command
       still resolves every workspace from the evidence on the targets
       (partly: `ws_target` falls back to whichever target's own store on this
@@ -882,10 +1058,27 @@ command that asked for it.
       unreachable by name — never silently left out of the view
 
 ### The fleet walk — `wk status` reaches every workstation that is up
-- [ ] a bare `wk status` sshes into each listed workstation that answers,
-      runs its read-only status, and merges the answer — this Mac's guests
-      and containers appear in the other workstation's view, attributed to
-      their host
+- [V] a bare `wk status` sshes into each listed workstation that answers, runs
+      its read-only status, and merges the answer. Verified 2026-08-19 from the
+      Mac: moose's own container workspace appears in the Mac's listing, with
+      moose's wk-tools sha and tree beside it — a *peer* target
+      (`WK_REMOTE_PEER=1`), which is a workstation that can be asked and not
+      driven: no tooling is pushed to it (its checkout is git's), and `wk new`
+      / `wk rm` against it are refused naming the command to run there.
+      Provisioning it as a build box would have written `~/.wk-remote` on it
+      and made it refuse `wk sync`, `wk gc` and `wk new` on itself
+- [V] a delegated row says which machine it came from: the asking side passes
+      the name it knows (`--label`), and a row whose own target is not already
+      that name is qualified — `moose:container`, while a build box stays
+      `buildbox4` rather than `buildbox4:buildbox4`
+- [V] `wk ls` delegates the same way and lists the same names as `wk status`
+      (it walked only the local store before, so a peer's workspaces appeared
+      in one command and not the other)
+- [V] every machine is probed in **one round** rather than one after another:
+      two unreachable machines cost 10.0 s against one machine's 9.9 s
+      (measured 2026-08-19; serially it was one `WK_SSH_TIMEOUT` each). The
+      report itself is untouched — same order, same streams, same exit status
+      — because only the waiting moved
 - [ ] a workstation that is down is listed unreachable with its timeout;
       the walk never hangs on it and never drops it silently
 - [ ] the remote half is read-only absolutely: nothing starts, boots or is
@@ -1179,6 +1372,7 @@ in the file because each one already cost a debugging session.
 | `WK_TARGET=vm wk gc` runs at all | cmd/gc sourcing a driver without lib/target.sh (`wk_state_dir: command not found`, verified 2026-08-19) |
 | `wk selftest --section <typo>` fails | the runner exiting 0 having run nothing -- the silent pass the plan's own preamble forbids |
 | no `Host wk-<name>` alias for a container workspace | a fictional `HostName localhost` entry pointing zed at the host's own filesystem -- containers have no sshd |
+| `--zed` on a container workspace is refused on a macOS host | "zed is not installed" from inside the podman VM, about a Mac that has it -- and, behind that, an editor opened on an alias only the VM can resolve |
 | `wk status` with the podman machine stopped leaves it stopped | a read-only report booting a VM as a side effect |
 | a workspace's `~/.ssh/id_*` are symlinks, not files | a copied deploy key: one the push switch cannot take back, and one that survives a key rotation as a dead key |
 | `origin` is `WebKit/WebKit` in every target's checkout | the remote build machine pointing origin at the box's own shared clone, so `git log origin/main` answered for that box's last fetch |

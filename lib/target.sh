@@ -24,6 +24,7 @@
 #   t_arch <name>      the architecture the target runs natively
 #   t_tools <name>     where wk-tools is inside the target
 #   t_sync_tools <n>   push wk-tools in (no-op when it is bind-mounted)
+#   t_sync             refresh the target's own far-side state, if it has any
 #   t_ssh_host <name>  ssh destination, for Zed and the generated alias
 #   t_needs_base       0 if `wk new` must resolve a base snapshot first
 #   t_start / t_stop   lifecycle, for targets that have one
@@ -65,6 +66,32 @@ t_tools()      { echo "/opt/wk-tools"; }
 # to answer with a directory of its own -- see targets/remote.sh.
 t_ccache_dir() { echo "/ccache"; }
 t_sync_tools() { :; }
+
+# `wk sync` against this target, when the target is a machine with state of its
+# own to refresh. Everything else -- container, vm, local -- keeps its base in
+# this machine's store, and there `wk sync` *is* the operation (cmd/sync); a
+# driver hook would be a second name for the same thing. Returning 1 says "I
+# have no far side", which is what cmd/sync branches on.
+t_sync()       { return 1; }
+
+# Ask this target whatever a report is going to need, so the asking can happen
+# for every target at once. Nothing to do for a target that is this machine.
+t_prefetch()   { :; }
+
+# How this target's checkouts are wired, for whoever re-asserts it: three
+# lines, any of which may be empty --
+#
+#   <name of the local-copy remote>   (mirror, shared)
+#   <its url, on the target>
+#   <an ssh config the checkout must use, if not ~/.ssh/config>
+#
+# A contract hook rather than a table in the command that re-asserts, because
+# only the driver knows: a shared build box keeps its ssh aliases in a file
+# under the wk root (its $HOME is several machines' and often several people's)
+# and has a local copy of the history to fetch from, while a container has
+# neither. Creation reads the same three lines, so a re-assertion cannot wire a
+# workspace differently from the way it was made.
+t_wiring_args() { printf '\n\n\n'; }
 t_ssh_host()   { echo "wk-$1"; }
 t_needs_base() { return 0; }
 t_start()      { :; }
@@ -328,6 +355,36 @@ wk_remote_field()    { marker_field "$(wk_remote_marker)" "$1"; }
 # documents and the only one available in here.
 wk_self() { wk_marker_field name; }
 
+# ...and the other half of that: in here the name is not optional, it is
+# *absent*. A workspace name on the command line inside a workspace is refused
+# rather than accepted.
+#
+# It used to be accepted, silently, when it happened to be this workspace's own
+# name -- `wk build bug-238 jsc-release` in bug-238 built exactly what
+# `wk build jsc-release` builds. Which is worse than it looks: it is the host
+# form typed in the wrong place, so the next thing typed is usually the host
+# form for a *different* workspace, and that one cannot work in here at all.
+# Two spellings of one command also means everything written about the in-here
+# interface -- claude/CLAUDE.md, the skills, `--explain` -- is describing one of
+# them and being read against the other. One form, and a refusal that names it.
+#
+#   refuse_ws_name <word> <cmd> [<what-to-type-instead>]
+#
+# Only this workspace's own name is refused, because it is the only word that
+# can be *known* to be a workspace name: every other argument these commands
+# take -- a config, a test path, a jsc script, an option -- is a word we have no
+# registry to check it against, and refusing on a guess would break the
+# arguments the command exists to pass through.
+refuse_ws_name() {
+    local word="${1:-}" cmd="${2:-}" form="${3:-}"
+    in_workspace || return 0
+    [ -n "$word" ] || return 0
+    [ "$word" = "$(wk_self)" ] || return 0
+    die "this is workspace '$(wk_self)', and there is no workspace argument in here --
+    every command acts on this one. Drop the name:
+        wk $cmd${form:+ $form}"
+}
+
 # The target to assume for a workspace that is not in the registry. On a host
 # that is `container` -- the default, and what every workspace predating the
 # registry is. Inside a workspace it is `local`, because there is nothing else
@@ -352,6 +409,26 @@ default_config() {
     local c=""
     in_workspace && c=$(wk_marker_field config)
     printf '%s' "${c:-jsc-release}"
+}
+
+# The config this workspace was last *built* with, from the record the build
+# itself wrote (`config=` in build.status), or empty when it has never been
+# built here.
+#
+# This is what makes `wk test <ws> --layout` usable: the fallback default is
+# jsc-release, which resolves to `--jsc-only` -- a port that builds jsc and
+# nothing else, so run-webkit-tests was being pointed at a tree with no
+# WebKitTestRunner and no ImageDiff in it. The config a person means when they
+# ask for layout tests is the one they just built, and the build says which that
+# was.
+#
+# Evidence rather than a preference: it is the build's own record, next to the
+# build, and an empty answer means "nothing has been built" rather than a guess.
+last_built_config() {
+    local name="$1"
+    ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+      load_target "$(ws_target "$name")" >/dev/null 2>&1
+      kv_field "$(wk_ws_dir "$name")/build.status" config 2>/dev/null ) || true
 }
 
 # --- generated ssh aliases ---------------------------------------------------
@@ -433,15 +510,47 @@ target_all() {
     # and `wk status` should say what is on it -- including on the machine
     # itself, where nothing is registered at all because workspaces are created
     # from the workstation.
-    d=$(target_conf_dir)
-    [ -d "$d" ] || return 0
-    for f in "$d"/*.conf; do
-        [ -f "$f" ] || continue
-        t=$(basename "$f" .conf)
-        case "$seen" in *" $t "*) continue ;; esac
-        seen="$seen$t "
-        echo "$t"
-    done
+    #
+    # Two directories, because a target has two halves that belong in different
+    # places: the registry in this repository, which every device gets by
+    # pulling it, and the machine-local conf, which is this device's own view of
+    # the same machine. Both are enumerated, so a machine that is only in the
+    # registry is still a target here -- that is the entire point of it.
+    # The registry is skipped on a machine that is the far end of a target,
+    # and that is not a detail: the whole repository is what gets pushed to a
+    # build box, registry included, so without this every delegated `wk ls`
+    # there walked the entire fleet and tried to ssh to machines it has no
+    # route, host key or reason to reach -- printing "Could not resolve
+    # hostname" in the middle of somebody else's listing. A build box answers
+    # for itself; it drives nothing. (Its own target was added above, from the
+    # marker.) A *peer* is a workstation and does drive things, so it keeps the
+    # whole registry.
+    # ...and not inside the podman VM either, for the same reason: the whole
+    # repository is rsynced in there, so the VM would walk every machine in the
+    # registry and pay an ssh timeout each for machines it has no key, route or
+    # business reaching. The VM holds the container store; it drives nothing.
+    # (Measured 2026-08-19: a forwarded half doing four probes it could never
+    # answer, which is most of what a bare `wk status` was waiting for.)
+    local me=""
+    if ! in_remote_host && [ -z "${WK_IN_VM:-}" ]; then
+        me=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        for d in "$(target_registry_dir)" "$(target_conf_dir)"; do
+            [ -d "$d" ] || continue
+            for f in "$d"/*.conf; do
+                [ -f "$f" ] || continue
+                t=$(basename "$f" .conf)
+                case "$seen" in *" $t "*) continue ;; esac
+                # ...and never itself. A machine in the registry is in it on
+                # every device, including the one it names: without this, a
+                # bare `wk status` on the workstation would ssh to itself to
+                # ask what it already knows -- and on a machine with no sshd
+                # reachable from inside, report itself unreachable.
+                [ -n "$me" ] && [ "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" = "$me" ] && continue
+                seen="$seen$t "
+                echo "$t"
+            done
+        done
+    fi
 }
 
 # --- named targets -----------------------------------------------------------
@@ -460,6 +569,34 @@ target_all() {
 # and the conf next to that name says which driver to use and how to reach it.
 # Everything downstream keeps working unchanged because the registry already
 # records a target per workspace as an opaque string.
+# A target is configured in two places, and which one a fact belongs in is the
+# whole distinction:
+#
+#   targets/hosts/<name>.conf   in this repository, and therefore on every
+#                               device that pulls it. What is true about the
+#                               *machine* no matter who is driving it: the ssh
+#                               destination, the CMake flags its toolchain
+#                               needs, whether it is a build box or a
+#                               workstation of its own.
+#   ~/.config/wk/targets/…      this device's own view of the same machine, and
+#                               what only it can know: a different ssh alias, a
+#                               root somewhere else, a job ceiling for a link
+#                               that is not the machine's fault.
+#
+# The registry exists because the machine-local half was the *only* half, and a
+# machine you had configured on one device did not exist on the others: a
+# reinstall lost every target, buildbox4's build flags had to be re-typed on
+# every command from every device, and `wk status` on the Mac could not say a
+# word about the Linux workstation because it had never heard of it. None of
+# that is per-device knowledge; it is knowledge about the machine, and it
+# belongs where the rest of this tooling lives.
+#
+# No new machinery, deliberately: the registry is committed files. A device
+# gets a new machine by pulling, and `wk remote setup`/`t_sync_tools` already
+# push the whole tree to the machines themselves. Adding one is an edit and a
+# commit, not a command that writes to git on your behalf.
+target_registry_dir() { echo "$WK_ROOT/targets/hosts"; }
+target_registry_conf(){ echo "$(target_registry_dir)/$1.conf"; }
 target_conf_dir() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/wk/targets"; }
 target_conf()     { echo "$(target_conf_dir)/$1.conf"; }
 
@@ -471,11 +608,20 @@ target_kind() {
     case "$1" in
         container|vm|remote|local) echo "$1"; return 0 ;;
     esac
-    local c k
-    c=$(target_conf "$1")
-    [ -f "$c" ] || return 1
-    k=$(awk -F= '/^[[:space:]]*WK_TARGET_KIND[[:space:]]*=/ {
-            gsub(/[ \t"'"'"']/, "", $2); print $2; exit }' "$c")
+    # Either conf makes the target exist; the local one answers first, because
+    # it is the overriding half -- a device that says a machine is something
+    # other than what the registry says gets to. A conf that names no kind
+    # falls through to the other one, and then to `remote`, which is the only
+    # kind worth naming after a machine.
+    local c k="" found=""
+    for c in "$(target_conf "$1")" "$(target_registry_conf "$1")"; do
+        [ -f "$c" ] || continue
+        found=1
+        [ -n "$k" ] && continue
+        k=$(awk -F= '/^[[:space:]]*WK_TARGET_KIND[[:space:]]*=/ {
+                gsub(/[ \t"'"'"']/, "", $2); print $2; exit }' "$c")
+    done
+    [ -n "$found" ] || return 1
     echo "${k:-remote}"
 }
 
@@ -723,9 +869,77 @@ wait_ready() {
 # An explicit WK_TARGET (which may name several, space separated -- that is how
 # the macOS dispatcher hands over the host-side half) wins; inside a workspace
 # there is exactly one target and it is this machine.
+# --- one round of probes instead of N ----------------------------------------
+#
+# A bare `wk status` walks every target there is, and for a machine reached over
+# ssh the first question costs a full connect -- ten seconds (WK_SSH_TIMEOUT)
+# when the machine is off, off this network, or behind a jump host that is. That
+# is per machine and it is serial, so the shared registry made it worse by
+# exactly the amount it made `wk status` more useful: every device now knows
+# every machine, and the ones not on this network are the norm rather than the
+# exception. Four machines, two of them away, meant twenty seconds before the
+# first row.
+#
+# So the waiting is done once, for all of them, before the walk: one subshell
+# per target asks its own machine and writes the answer where the serial pass
+# will find it (t_prefetch, and _remote_probe_file in targets/remote.sh). The
+# report itself is untouched -- same order, same streams, same exit status --
+# because nothing about *printing* was the problem. What the walk finds is a
+# machine that has already answered, or one already known not to have.
+#
+# Two things fall out of it for free: the ssh multiplexing socket is warm by
+# the time the walk asks its real questions (ControlPersist, targets/remote.sh),
+# and a machine that is down is down *once* rather than once per question.
+#
+# Best-effort throughout. A prefetch that fails leaves no file and the walk asks
+# the machine itself, exactly as it did before this existed.
+prefetch_targets() {
+    local t
+    [ $# -gt 0 ] || return 0
+    command -v mktemp >/dev/null 2>&1 || return 0
+    WK_PREFETCH_DIR=$(mktemp -d "${TMPDIR:-/tmp}/wk-probe.XXXXXX" 2>/dev/null) || return 0
+    export WK_PREFETCH_DIR
+    for t in "$@"; do
+        # A subshell, so each target's driver load and its globals stay its own
+        # -- the same reason load_target resets them (see _target_reset_vars).
+        ( load_target "$t" >/dev/null 2>&1 && t_prefetch ) >/dev/null 2>&1 &
+    done
+    wait
+}
+
+prefetch_done() {
+    [ -n "${WK_PREFETCH_DIR:-}" ] || return 0
+    rm -rf "$WK_PREFETCH_DIR"
+    unset WK_PREFETCH_DIR
+}
+
 walk_targets() {
     if [ -n "${WK_TARGET:-}" ]; then printf '%s\n' $WK_TARGET; return 0; fi
     if in_workspace; then default_target; return 0; fi
+
+    # WK_NO_DELEGATE: this walk is one machine's contribution to somebody
+    # else's fleet listing, so it reports what this machine holds and asks
+    # nobody. Without it a workstation asked by another workstation would go on
+    # to ask every machine *it* knows -- and since the registry is shared, that
+    # is the same set: every build box listed once per workstation, and the ssh
+    # work squared.
+    #
+    # A machine's own target survives it: on a build box the target named after
+    # that machine *is* this machine (WK_REMOTE_LOCAL, set in the conf
+    # `wk remote setup` leaves there), and dropping it would drop every
+    # workspace the box holds. Decided from the conf, so this costs no ssh.
+    if [ -n "${WK_NO_DELEGATE:-}" ]; then
+        local t
+        for t in $(target_all); do
+            case "$(target_kind "$t")" in
+                remote) ( load_target "$t" >/dev/null 2>&1
+                          [ -n "${WK_REMOTE_LOCAL:-}" ] ) || continue ;;
+            esac
+            printf '%s\n' "$t"
+        done
+        return 0
+    fi
+
     target_all
 }
 
@@ -756,10 +970,13 @@ load_target() {
 
     kind=$(target_kind "$t") || die "unknown target '$t'.
     The built-in ones are container, vm, remote and local. Anything else is a
-    machine, and needs $(target_conf "$t"):
+    machine, and needs a conf -- in the registry, so every device gets it:
 
-        WK_REMOTE_HOST=$t          # an ssh destination that already works
-        WK_REMOTE_ROOT=/home/you/wk"
+        $(target_registry_conf "$t")
+            WK_REMOTE_HOST=$t      # an ssh destination that already works
+            WK_REMOTE_ROOT=/home/you/wk
+
+    or in $(target_conf "$t") for this device alone."
 
     # Set before either file is read: a driver that can have several instances
     # has to know which one it is, and both the conf and the driver's own
@@ -790,13 +1007,18 @@ load_target() {
     # shellcheck disable=SC1090
     . "$WK_ROOT/lib/target.sh"
 
-    # The conf first and the driver second, so that the driver's own
-    # ${VAR:-default} assignments fill in only what the conf left unsaid.
-    conf=$(target_conf "$t")
-    if [ -f "$conf" ]; then
+    # The confs first and the driver second, so that the driver's own
+    # ${VAR:-default} assignments fill in only what the confs left unsaid.
+    #
+    # Registry, then local: last assignment wins in a sourced file, so the
+    # device's own conf overrides the shared one line by line rather than all
+    # or nothing. A local conf that sets one variable keeps the registry's
+    # answer for every other.
+    for conf in "$(target_registry_conf "$t")" "$(target_conf "$t")"; do
+        [ -f "$conf" ] || continue
         # shellcheck disable=SC1090
         . "$conf"
-    fi
+    done
     # shellcheck disable=SC1090
     . "$WK_ROOT/targets/$kind.sh"
 }

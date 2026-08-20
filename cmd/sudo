@@ -74,33 +74,55 @@ DROPIN="/etc/sudoers.d/zz-${USER_NAME}-passwd"
 # a password to tell you whether it would ask for a password is not usable from
 # a script, and this one is read by `wk doctor`.
 #
-# `sudo -n -l` succeeding is itself evidence -- it means either a NOPASSWD rule
-# or a live timestamp, and the output distinguishes them. Failing is evidence
-# too: a password is required *right now*. What cannot be learned that way is
-# the timeout, because reading it needs the authentication we are declining to
-# do; saying so is better than guessing, and `require` is idempotent so there
-# is no cost to running it anyway.
+# `free=` is the one line here that is evidence rather than inference: `sudo -n
+# true` answers "does root cost anything right now" by trying it. Everything
+# else is a reading of the *ruleset*, and reading a ruleset means implementing
+# sudoers' last-match rule -- which the version of this that grepped the whole
+# listing for `NOPASSWD: ALL` did not.
+#
+# That was not a cosmetic bug. On buildbox4, where the site grants NOPASSWD and
+# our drop-in overrides it, `sudo -l` lists *both* rules:
+#
+#     (ALL : ALL) NOPASSWD: ALL      <- the site's, first
+#     (ALL : ALL) PASSWD: ALL        <- ours, last, and therefore in force
+#
+# so the grep matched the line that had already been overridden and reported a
+# correctly hardened machine as wide open. `wk remote setup` then offered to fix
+# it on every run, and `require` -- whose own short-circuit looked for a file it
+# cannot see -- re-installed and asked for the password every time.
+#
+# What still cannot be learned without authenticating is the timeout, when the
+# listing is not readable; saying so is better than guessing, and `require` is
+# idempotent so there is no cost to running it anyway.
 probe_local() {
-    local out rc=0 nopasswd="" timeout="" rules
-    out=$(sudo -n -l 2>&1) || rc=$?
+    local out rc=0 free=no timeout="" rules last blanket=unknown
+    sudo -n true 2>/dev/null && free=yes
+    echo "free=$free"
 
+    out=$(sudo -n -l 2>&1) || rc=$?
     if [ "$rc" -ne 0 ]; then
         echo "readable=no"
-        echo "cached=no"
         return 0
     fi
     echo "readable=yes"
-    echo "cached=yes"
 
-    rules=$(printf '%s\n' "$out" | sed -n '/may run the following/,$p')
-
-    # Only a blanket one counts. A NOPASSWD scoped to one program is how the
+    # Only blanket rules count. A NOPASSWD scoped to one program is how the
     # deliberate exceptions work -- wk's own quiesce helper is exactly that,
-    # and so are most site rules worth having -- while `NOPASSWD: ALL` is the
-    # thing this command exists to override. Told apart by what follows the
-    # tag: the command list, which is `ALL` in the blanket case.
-    printf '%s\n' "$rules" | grep -qE 'NOPASSWD:[[:space:]]*ALL[[:space:]]*$' && nopasswd=yes
-    echo "nopasswd=${nopasswd:-no}"
+    # and so are most site rules worth having -- while a rule whose command
+    # list is `ALL` is the thing this command exists to override. Told apart by
+    # what follows the tag: the command list, which is `ALL` in the blanket
+    # case.
+    rules=$(printf '%s\n' "$out" | sed -n '/may run the following/,$p' \
+            | grep -E '^[[:space:]]*\(.*\)' || true)
+    last=$(printf '%s\n' "$rules" | grep -E '(^|[[:space:]])(NO)?PASSWD:[[:space:]]*ALL[[:space:]]*$|\)[[:space:]]*ALL[[:space:]]*$' | tail -1)
+    case "$last" in
+        *NOPASSWD:*) blanket=nopasswd ;;
+        # Either an explicit PASSWD: ALL or a blanket rule with no tag at all,
+        # which authenticates by default. Both mean the same thing here.
+        ?*)          blanket=passwd ;;
+        *)           blanket=none ;;
+    esac
+    echo "blanket=$blanket"
     echo "scoped=$(printf '%s\n' "$rules" | grep -c 'NOPASSWD:' || true)"
 
     timeout=$(printf '%s\n' "$out" | sed -n 's/.*timestamp_timeout=\([0-9-]*\).*/\1/p' | head -1)
@@ -111,12 +133,27 @@ probe_local() {
 # machine with no NOPASSWD and a five-minute window still hands root to
 # anything that runs within five minutes of you.
 verdict_local() {
-    local f nopasswd timeout readable
+    local f free blanket timeout readable
     f=$(probe_local)
+    free=$(printf '%s\n' "$f" | sed -n 's/^free=//p')
     readable=$(printf '%s\n' "$f" | sed -n 's/^readable=//p')
-    nopasswd=$(printf '%s\n' "$f" | sed -n 's/^nopasswd=//p')
+    blanket=$(printf '%s\n' "$f" | sed -n 's/^blanket=//p')
     timeout=$(printf '%s\n' "$f" | sed -n 's/^timeout=//p')
 
+    # Root is free right now, which is the failure this command exists to fix.
+    # The two ways of getting there need different fixes, so they are named
+    # apart: a rule is a sudoers change, a live timestamp is a window that
+    # closes by itself and reopens the next time you authenticate.
+    if [ "$free" = yes ]; then
+        if [ "$blanket" = nopasswd ]; then
+            printf 'NOPASSWD: ALL is granted here -- root costs nothing at all\n'
+        else
+            printf 'sudo runs without a password right now -- a timestamp is cached\n'
+        fi
+        return 1
+    fi
+
+    # A password is required *right now*; all that is left is the window.
     if [ "$readable" = no ]; then
         printf 'a password is required right now (no timestamp cached).\n'
         printf '  the timeout cannot be read without authenticating -- '
@@ -128,12 +165,15 @@ verdict_local() {
         return 1
     fi
 
-    if [ "$nopasswd" = yes ]; then
-        printf 'NOPASSWD: ALL is granted here -- root costs nothing at all\n'
-        return 1
-    fi
     case "$timeout" in
-        0) printf 'a password is required, and no timestamp is kept (timeout 0)\n'; return 0 ;;
+        0) printf 'a password is required, and no timestamp is kept (timeout 0)'
+           # Whoever provides it. The property is the machine's, not this
+           # command's, and a machine already hardened by a site policy or by
+           # hand is done -- there is nothing for `require` to add, and saying
+           # "installed by wk" about a file wk did not write would be worse
+           # than saying nothing.
+           [ -f "$DROPIN" ] && printf ' (%s)' "$DROPIN"
+           printf '\n'; return 0 ;;
         unset) printf "a password is required, but sudo keeps a timestamp (timeout unset -- sudo's default)\n"; return 1 ;;
         *) printf 'a password is required, but sudo keeps a timestamp for %s minute(s)\n' "$timeout"; return 1 ;;
     esac
@@ -160,12 +200,19 @@ visudo_resolve() {
 
 # --- install the drop-in -----------------------------------------------------
 require_local() {
-    local tmp grp rc=0
+    local tmp grp rc=0 _v
 
     visudo_resolve
 
-    if [ -f "$DROPIN" ] && verdict_local >/dev/null; then
-        info "already required on $(hostname -s): $DROPIN"
+    # The property, not our file. `[ -f "$DROPIN" ] &&` was the second half of
+    # the bug above: on a machine whose remote login name differs from this
+    # one's -- which is the normal case for a shared box -- the drop-in that
+    # provides the property is not the path this side computes, so the test was
+    # false, the short-circuit never fired, and every run re-installed and
+    # asked for a password. What matters is whether root costs a password here;
+    # if it does, there is nothing to install.
+    if _v=$(verdict_local); then
+        info "already required on $(hostname -s): $_v"
         return 0
     fi
 

@@ -78,6 +78,32 @@ _wk_runtime() { echo "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk"; }
 
 _ctr() { echo "wk-$1"; }
 
+# `wk sync` against the container target: the copy of wk-tools the containers
+# bind-mount.
+#
+# On a workstation there is nothing to do and that is a property, not a gap:
+# the mount source is this checkout, so a container is running the tree you are
+# editing. On a macOS host it is a *copy* inside the podman VM, pushed by
+# rsync, and until this existed the only thing that refreshed it was
+# `./setup --stage vmtools` -- so a command added to this repo was "unknown
+# command" inside every container, and a build ran the old build half, until
+# somebody remembered. Measured 2026-08-19 with `wk remotes`, which the VM had
+# never heard of.
+#
+# The store half -- the mirror and the base snapshots, which live in the VM too
+# -- is what a plain `wk sync` does (it is forwarded in there); this is
+# deliberately only the tooling, so the two forms do not do each other's work.
+t_sync() {
+    if ! is_macos; then
+        info "containers here bind-mount this checkout ($WK_ROOT), so the tooling is never stale"
+        log  "  the mirror and snapshots are this machine's store:  wk sync"
+        return 0
+    fi
+    ( WK_VMTOOLS_ONLY=tools . "$WK_ROOT/host/macos/vmtools.sh" ) \
+        || die "could not push wk-tools into the podman VM"
+    log "  the mirror and snapshots in there are a plain 'wk sync' away"
+}
+
 # The architecture this workspace was created with, recorded at creation
 # because nothing else can recover it: the container reports the *kernel's*
 # architecture (the host's, since it shares it), so `uname -m` in an armhf

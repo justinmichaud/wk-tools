@@ -199,6 +199,15 @@ on)
     fi
     log "  every workspace can push to the forks now, including any agent in one."
     log "  'wk push off' when you are done; 'wk claude' turns it off by itself."
+    # The switch is one of two things a push needs, and this one cannot see the
+    # other: whether GitHub has this machine's key. Every machine has its own
+    # (GitHub refuses one deploy key on two repositories but takes many on one),
+    # so a machine set up later has a key nobody registered -- measured
+    # 2026-08-19 on buildbox4, where the switch was ON, the wiring was right,
+    # the alias resolved, and the push was still "Permission denied
+    # (publickey)". Only the host can ask GitHub, so this names the command
+    # rather than pretending to know.
+    log "  a push also needs this machine's key registered:  wk key check"
     ;;
 
 off)

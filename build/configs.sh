@@ -327,6 +327,25 @@ config_build_env() {
     # it costs. Carried through here because the build half runs in the target
     # and cannot see the caller's environment.
     [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && CFG_ENV+=("WK_NO_COMPILATION_CACHE=1")
+
+    # Last, and that is the whole mechanism: `wk build … --env CC=gcc-14`.
+    #
+    # `env` applies its assignments left to right, so an assignment added after
+    # the config's own replaces it -- which makes this an override and not just
+    # an addition, and is the difference between this and WK_EXTRA_CMAKE (cmake
+    # takes the last -D, which is the same rule arrived at from the other end).
+    #
+    # Newline-separated rather than space-separated, because an environment
+    # value may legitimately contain a space (CFLAGS is the obvious one) and
+    # this must not be the place that comes apart on it.
+    if [ -n "${WK_EXTRA_ENV:-}" ]; then
+        while IFS= read -r _e; do
+            [ -n "$_e" ] || continue
+            CFG_ENV+=("$_e")
+        done <<EOF
+$WK_EXTRA_ENV
+EOF
+    fi
     return 0
 }
 

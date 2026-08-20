@@ -27,6 +27,35 @@
 #   WK_TARGET_CMAKE=-DFOO=ON       # extra CMake flags for builds on this machine
 #   WK_REMOTE_REFERENCE=/var/...   # a shared checkout to clone from; see below
 #   WK_REMOTE_LOCAL=1              # this *is* the machine; run without ssh
+#   WK_REMOTE_PEER=1               # a workstation of its own, not a build box
+#   WK_REMOTE_TOOLS=Development/…  # its wk-tools, if not $root/tools
+#
+# ...or, for a machine every device should know about, in the shared registry
+# instead: targets/hosts/<name>.conf, which is in this repository (see
+# target_registry_conf in lib/target.sh).
+#
+# --- peers -------------------------------------------------------------------
+#
+# WK_REMOTE_PEER marks the one case that is not a build box: another
+# *workstation*. The Linux workstation and this Mac are both machines that own
+# workspaces -- containers or guests, a store, a mirror, a git checkout of this
+# repository -- and neither is the far end of the other. Before this, the only
+# way to make one visible from the other was to provision it as a build box,
+# which would have been actively wrong: `wk remote setup` writes ~/.wk-remote,
+# and that marker makes the machine refuse `wk sync`, `wk gc` and `wk new` *on
+# itself* (`wk` dispatch, in_remote_host). A workstation cannot be told it is
+# somebody's build box without ceasing to be a workstation.
+#
+# So a peer is a target that can be *asked* and not driven:
+#
+#   asked    t_has_wk is true without the marker, so `wk status` and `wk ls`
+#            delegate to the machine's own wk and report what it says. That is
+#            the whole reason peers exist: `wk status` on the Mac said nothing
+#            about the Linux box, because it had never heard of it.
+#   not driven  no tooling is pushed (it has its own checkout, kept by git),
+#            and creation and destruction are refused -- a workstation's
+#            workspaces are containers and guests, which this driver knows
+#            nothing about and would replace with a plain checkout.
 #
 # The bare name `remote` still works for a one-off, and then WK_REMOTE_HOST
 # has to come from the environment -- there is no machine name to infer it
@@ -90,6 +119,9 @@ fi
 # the two can never answer differently about where a checkout is or how many
 # jobs a build gets.
 _remote_is_local() { [ -n "${WK_REMOTE_LOCAL:-}" ]; }
+
+# Another workstation rather than a build box -- see "peers" at the top.
+_remote_peer() { [ -n "${WK_REMOTE_PEER:-}" ]; }
 
 _remote_require() {
     _remote_is_local && return 0
@@ -171,13 +203,55 @@ _rsh_q() {
 # The failure is remembered for the life of this process, exactly as the
 # success is: `wk status` asks about every workspace on the machine, and one
 # ConnectTimeout per question would turn a listing into a minute of waiting.
+# The four questions, as one shell snippet, because two callers ask them: the
+# probe below and the parallel prefetch further down. One copy, or the prefetch
+# fills the cache with fields the reader parses differently.
+_remote_probe_cmd() {
+    printf '%s' 'echo "$HOME"; nproc; awk "{print int(\$1)}" /proc/loadavg;
+                 awk "/^MemAvailable:/ {print int(\$2/1024)}" /proc/meminfo'
+}
+
+# Where a prefetched answer for *this* target would be, if a command asked for
+# one (prefetch_targets, lib/target.sh). Empty when nothing did.
+#
+# A file rather than an inherited variable because the prefetch happens in a
+# subshell per target -- that is what makes it parallel -- and a subshell cannot
+# hand a value back to its parent. It lives for the length of one command and is
+# removed with it: this is the same per-process memo _WK_REMOTE_PROBED already
+# is, not a cache of a fact that outlives the asking (docs/HANDOFF-workspace-state.md).
+_remote_probe_file() {
+    [ -n "${WK_PREFETCH_DIR:-}" ] || return 0
+    printf '%s/%s.probe' "$WK_PREFETCH_DIR" "${WK_TARGET:-remote}"
+}
+
+# Asks the machine, in parallel with every other target, and writes what it
+# says. An *empty* file means asked-and-did-not-answer, which is a real answer
+# and the one worth prefetching: it is the ten-second one.
+t_prefetch() {
+    local f out
+    f=$(_remote_probe_file) || return 0
+    [ -n "$f" ] || return 0
+    _remote_is_local && return 0
+    [ -n "${WK_REMOTE_HOST:-}" ] || return 0
+    out=$(_rsh_q "$(_remote_probe_cmd)" 2>/dev/null) || out=""
+    printf '%s' "$out" > "$f.tmp.$$" && mv "$f.tmp.$$" "$f"
+}
+
 _remote_probe_try() {
     [ -n "${_WK_REMOTE_PROBED:-}" ] && return 0
     [ -n "${_WK_REMOTE_DOWN:-}" ] && return 1
     _remote_require
-    local out
-    if ! out=$(_rsh_q 'echo "$HOME"; nproc; awk "{print int(\$1)}" /proc/loadavg;
-                awk "/^MemAvailable:/ {print int(\$2/1024)}" /proc/meminfo'); then
+    local out f
+    # A prefetched answer if one was taken for this command, and the ssh
+    # otherwise. Same question, same parsing; the only difference is who waited.
+    f=$(_remote_probe_file) || f=""
+    if [ -n "$f" ] && [ -f "$f" ]; then
+        out=$(cat "$f")
+        if [ -z "$out" ]; then
+            _WK_REMOTE_DOWN=1
+            return 1
+        fi
+    elif ! out=$(_rsh_q "$(_remote_probe_cmd)"); then
         _WK_REMOTE_DOWN=1
         return 1
     fi
@@ -238,6 +312,37 @@ _remote_reference() {
     printf '%s' "$WK_REMOTE_REFERENCE"
 }
 
+# The mirror this driver keeps when the machine has no shared repository of its
+# own, and the fetch into it.
+#
+# Both halves live here because both callers need both: `t_create` clones a new
+# workspace from it, and `t_sync` refreshes it -- and a sync that assumed the
+# mirror already existed would fail on the machine that has never made one,
+# which is exactly the machine somebody is most likely to sync first.
+#
+# Only main is mirrored, matching wk_mirror_branches: WebKit has ~920 branches
+# and the ones that are not main are not what a workspace starts from. Anything
+# else is still one `git fetch` away inside the workspace.
+#
+# gc.auto is off for the same reason it is off in the local mirror: the
+# workspaces borrow its objects through --shared, and a repack underneath a
+# live clone is how that arrangement breaks.
+_remote_mirror_update() {
+    local root="$1"
+    info "updating the WebKit mirror on $WK_REMOTE_HOST (first run clones it)"
+    _rsh_q "set -e
+        mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
+        M=$(sh_quote "$root/mirror")
+        if [ ! -d \"\$M\" ]; then
+            git init --bare -q \"\$M\"
+            git -C \"\$M\" config gc.auto 0
+            git -C \"\$M\" remote add origin https://github.com/WebKit/WebKit.git
+            git -C \"\$M\" config --add remote.origin.fetch '+refs/heads/main:refs/heads/main'
+        fi
+        git -C \"\$M\" fetch --prune -q origin" \
+        || die "could not update the WebKit mirror on $WK_REMOTE_HOST"
+}
+
 # $WK_REMOTE_ROOT, resolved. Every path function goes through this rather than
 # reading the variable, because the default is only known after the probe.
 _remote_root() { _remote_probe; printf '%s' "$WK_REMOTE_ROOT"; }
@@ -253,9 +358,24 @@ t_src()   { echo "$(_remote_ws "$1")/WebKit"; }
 # for other people, and a good way to become unpopular.
 t_ccache_dir() { echo "$(_remote_root)/cache/ccache"; }
 
+# The remote $HOME, from the probe that already asked for it.
+_remote_home() { _remote_probe; printf '%s' "$_WK_REMOTE_HOME"; }
+
 # wk-tools is pushed to the remote root rather than per workspace: it is the
 # same tree for all of them, and `wk build` re-rsyncs it on every run.
-t_tools() { echo "$(_remote_root)/tools"; }
+#
+# WK_REMOTE_TOOLS overrides, which is how a peer is reached: its wk-tools is a
+# git checkout it maintains itself, wherever that machine keeps it. A relative
+# path is relative to the *remote* home -- the conf is sourced on this side, so
+# writing $HOME in it would expand to the wrong machine's home, silently and
+# plausibly.
+t_tools() {
+    case "${WK_REMOTE_TOOLS:-}" in
+        "") echo "$(_remote_root)/tools" ;;
+        /*) printf '%s' "$WK_REMOTE_TOOLS" ;;
+        *)  printf '%s/%s' "$(_remote_home)" "$WK_REMOTE_TOOLS" ;;
+    esac
+}
 
 # There are no base snapshots here. The overlay scheme is a local-store
 # concept; the equivalent on the far end is the git mirror, which t_create
@@ -319,6 +439,10 @@ t_created() { [ "$(t_info "$1")" = present ]; }
 
 t_create() {
     local name="$1" root ws ref
+    _remote_peer && die "'$WK_REMOTE_HOST' is a workstation, not a build machine for this one.
+    Its workspaces are its own -- containers or guests, from its own store --
+    and this driver would make a plain checkout under ~/wk instead. Create it
+    there:  ssh $WK_REMOTE_HOST wk new $name"
     _remote_probe
     root=$(_remote_root)
     ws=$(_remote_ws "$name")
@@ -359,48 +483,20 @@ t_create() {
             mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
             git clone --quiet -b main $(sh_quote "$ref") $(sh_quote "$ws/WebKit")" \
             || die "could not clone $ref on $WK_REMOTE_HOST"
-        _rsh_q "$(wk_wiring_script "$ws/WebKit" shared "$ref" "$root/ssh/config")" \
-            || warn "could not wire the remotes in $ws/WebKit"
+        _remote_wire "$ws/WebKit"
     else
-        # No shared repository, so we keep one -- and this is also the answer
-        # to "what does `wk sync` mean remotely": it means this, and it happens
-        # here.
-        #
-        # `wk sync` is a host-store command -- a bare mirror plus the
-        # hardlinked snapshots the overlay scheme is built on -- and none of
-        # that exists on a machine where a workspace is a plain clone. What
-        # does carry over is the reason the mirror exists: cloning WebKit from
-        # GitHub once per workspace is minutes of somebody else's bandwidth
-        # every time. So the driver keeps one mirror per remote root and clones
-        # every workspace from it with --shared, which costs a checkout and no
-        # objects at all.
-        #
-        # Only main is mirrored, matching wk_mirror_branches: WebKit has ~920
-        # branches and the ones that are not main are not what a workspace
-        # starts from. Anything else is still one `git fetch` away inside the
-        # workspace.
-        #
-        # gc.auto is off for the same reason it is off in the local mirror: the
-        # workspaces borrow its objects through --shared, and a repack
-        # underneath a live clone is how that arrangement breaks.
-        info "updating the WebKit mirror on $WK_REMOTE_HOST (first run clones it)"
-        _rsh_q "set -e
-            mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
-            M=$(sh_quote "$root/mirror")
-            if [ ! -d \"\$M\" ]; then
-                git init --bare -q \"\$M\"
-                git -C \"\$M\" config gc.auto 0
-                git -C \"\$M\" remote add origin https://github.com/WebKit/WebKit.git
-                git -C \"\$M\" config --add remote.origin.fetch '+refs/heads/main:refs/heads/main'
-            fi
-            git -C \"\$M\" fetch --prune -q origin
-            git clone --quiet --shared -b main \"\$M\" $(sh_quote "$ws/WebKit")" \
+        # No shared repository, so we keep one of our own and clone from it
+        # with --shared: a checkout and no objects at all. Both halves of that
+        # -- keeping it and fetching into it -- are _remote_mirror_update, which
+        # `t_sync` is the other caller of.
+        _remote_mirror_update "$root"
+        _rsh_q "git clone --quiet --shared -b main $(sh_quote "$root/mirror") \
+                          $(sh_quote "$ws/WebKit")" \
             || die "could not create the checkout on $WK_REMOTE_HOST"
         # Same wiring as every other target: origin is WebKit/WebKit, the forks
         # are here, and the local mirror keeps a name of its own -- the
         # workspace borrows its objects through --shared either way.
-        _rsh_q "$(wk_wiring_script "$ws/WebKit" mirror "$root/mirror" "$root/ssh/config")" \
-            || warn "could not wire the remotes in $ws/WebKit"
+        _remote_wire "$ws/WebKit"
     fi
 
     # ccache's own default ceiling is 5 GB, which a couple of WebKit builds
@@ -496,11 +592,30 @@ t_has_wk() {
     # inside a command substitution and prints a connection error in the middle
     # of a listing that was about to say "unreachable" perfectly clearly.
     _remote_probe_try || return 1
+    # A peer has no marker and must not be given one: the marker is what makes
+    # a machine refuse the host-only commands on itself, and a workstation
+    # needs those. Its own wk being there is the whole qualification.
+    if _remote_peer; then
+        _rsh_q "test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
+        return $?
+    fi
     _rsh_q "test -f \$HOME/.wk-remote && test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
 }
 
+# Two variables travel with a delegated command, as environment and not as
+# arguments, and the reason is version skew: a *peer* runs its own checkout of
+# this repository, kept by git, so the two sides are the same code only after
+# both have pulled. An argument an old copy has never heard of is fatal there --
+# measured 2026-08-19, when `--label` reached a workstation on an older tree and
+# `require_name --label` killed the delegated status, dropping that machine's
+# workspaces out of the listing while `wk ls`, which happened to ignore extra
+# arguments, still showed them. An unknown *variable* is ignored by every
+# version, so the old side answers as it always did.
 t_wk() {
-    _rsh "cd \$HOME && $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@")"
+    _rsh "cd \$HOME && \
+        ${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }\
+        ${WK_NO_DELEGATE:+WK_NO_DELEGATE=1 }\
+        $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@")"
 }
 
 # Detached on the machine, so this end can go away.
@@ -559,6 +674,15 @@ t_sync_tools() {
     local name="$1" dest
     dest=$(t_tools "$name")
 
+    # A peer keeps its own copy, under git, and it is not ours to overwrite:
+    # rsync --delete onto another workstation's checkout would throw away
+    # whatever it had uncommitted -- which on a machine somebody works on is
+    # the most valuable thing in the tree.
+    if _remote_peer; then
+        debug "not pushing wk-tools to $WK_REMOTE_HOST: it is a workstation with its own checkout"
+        return 0
+    fi
+
     # On the machine itself the tooling being run *is* the tooling: `wk` there
     # is $dest/wk, reached through the PATH entry the shell rc adds. Rsyncing a
     # tree onto itself mid-command would be, at best, pointless.
@@ -577,8 +701,94 @@ t_sync_tools() {
         "$WK_ROOT/" "$WK_REMOTE_HOST:$dest/"
 }
 
+# See t_wiring_args in lib/target.sh. The machine's own shared WebKit when it
+# advertises one (fetch-only, hardlinked, and the house rules ask us to use it),
+# our own mirror otherwise -- and the ssh config under the wk root either way,
+# which is what makes the fork push URLs resolve on a box whose ~/.ssh is not
+# ours to edit.
+# Wire a checkout on the machine, from the three lines above -- so creation and
+# `wk remotes --fix` cannot drift apart. `origin` is upstream on every target,
+# which is the point of doing this at all: `git clone --shared <mirror>` leaves
+# origin pointing at the mirror, and a workspace whose origin is a local copy
+# answers `git log origin/main` for whatever that copy last fetched.
+_remote_wire() {
+    local src="$1" n u c
+    { read -r n; read -r u; read -r c; } <<EOF
+$(t_wiring_args)
+EOF
+    _rsh_q "$(wk_wiring_script "$src" "$n" "$u" "$c")" \
+        || warn "could not wire the remotes in $src"
+}
+
+t_wiring_args() {
+    local ref root
+    root=$(_remote_root)
+    ref=$(_remote_reference)
+    if [ -n "$ref" ]; then
+        printf 'shared\n%s\n%s\n' "$ref" "$root/ssh/config"
+    else
+        printf 'mirror\n%s\n%s\n' "$root/mirror" "$root/ssh/config"
+    fi
+}
+
+# `wk sync`, for a machine of its own.
+#
+# On a host, sync means the store: a bare mirror of every upstream plus the
+# hardlinked base snapshots the overlay scheme is built on. None of that exists
+# here -- a workspace is a plain checkout -- so a bare `wk sync` is refused on
+# this machine (`wk` dispatch, is_host_only) and this is what takes its place:
+# the two things that *do* go stale on the far end of a target.
+#
+# The tooling first, because it is the one that fails confusingly. Every
+# delegated command runs the machine's own copy of wk-tools, so a stale copy
+# answers a question this side did not ask -- `unknown option --quiet` from a
+# command that works perfectly where it was typed, three times in one
+# afternoon. `wk status` already names the drift; without this there was
+# nothing to name as the fix but a full `wk remote setup`.
+#
+# Then the WebKit objects, and which ones depends on where the machine's
+# workspaces come from: our own mirror is ours to fetch, a shared repository in
+# the machine's MOTD is not -- it belongs to the sysadmins, is updated by them
+# every ten minutes, and fetching into it would be writing to somebody else's
+# repository. Said rather than silently skipped, because "wk sync did nothing
+# and reported success" is indistinguishable from a bug.
+t_sync() {
+    local ref
+    _remote_probe
+
+    # A peer's store is its own, and syncing it means running `wk sync` over
+    # there -- 13 GB of fetch and a new base snapshot, on a machine somebody
+    # else may be working on. So it happens only when that machine was asked
+    # for by name: WK_SYNC_NAMED is set by cmd/sync for `--target <it>` and
+    # unset when `--target all` merely walked onto it. Doing it either way
+    # would mean one absent-minded `wk sync --target all` publishing snapshots
+    # on every machine in the fleet.
+    if _remote_peer; then
+        if [ -z "${WK_SYNC_NAMED:-}" ]; then
+            info "$WK_REMOTE_HOST is a workstation with a store of its own -- skipped"
+            log  "  sync it by name:  wk sync --target $WK_TARGET"
+            return 0
+        fi
+        info "running 'wk sync' on $WK_REMOTE_HOST -- its store, its snapshot"
+        t_wk sync
+        return $?
+    fi
+
+    t_sync_tools ""
+    ref=$(_remote_reference)
+    if [ -n "$ref" ]; then
+        info "workspaces here clone from $ref, which this machine's admins keep up to date"
+        log  "  nothing of ours to fetch: no mirror is kept on $WK_REMOTE_HOST"
+        return 0
+    fi
+    _remote_mirror_update "$(_remote_root)"
+    changed "the WebKit mirror on $WK_REMOTE_HOST is up to date"
+}
+
 t_destroy() {
     local name="$1"
+    _remote_peer && die "'$WK_REMOTE_HOST' is a workstation: its workspaces are removed there,
+    by the machine that made them.  ssh $WK_REMOTE_HOST wk rm $name"
     _rsh_q "rm -rf $(sh_quote "$(_remote_ws "$name")")"
     rm -rf "$(wk_ws_dir "$name")"
     info "removed remote workspace '$name' from $WK_REMOTE_HOST"

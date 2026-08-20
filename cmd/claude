@@ -13,7 +13,39 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-NAME="${1:-}"; shift || true
+# The workspace name is a *word* on the command line rather than the first
+# argument, so Claude's own options can come on either side of it:
+#
+#   wk claude bb4 -r          resume, in bb4
+#   wk claude -r bb4          the same command
+#   wk claude --continue bb4  and so on
+#
+# Everything that is not the name is Claude's, verbatim -- which it always was
+# (`$@` reaches the launch below untouched), but the name had to come first, so
+# `wk claude -r bb4` answered "invalid name '-r'" and looked like a passthrough
+# that did not work.
+#
+# Which bare word is the name is decided by the registry rather than by
+# position, because bare words are not all names: `-r <session-id>` and a
+# prompt are bare words too, and guessing "the first one" would send a session
+# id to require_name. target_of is a file test, no ssh and nothing started.
+# When nothing on the line is a registered workspace the first bare word is
+# taken anyway -- there has to be one for the error to be about.
+NAME=""; _FIRST_BARE=""
+for _a in ${@+"$@"}; do
+    case "$_a" in --) break ;; -*) continue ;; esac
+    if target_of "$_a" >/dev/null 2>&1; then NAME="$_a"; break; fi
+    [ -n "$_FIRST_BARE" ] || _FIRST_BARE="$_a"
+done
+[ -n "$NAME" ] || NAME="$_FIRST_BARE"
+
+_PASS=(); _dropped=""
+for _a in ${@+"$@"}; do
+    if [ -z "$_dropped" ] && [ -n "$NAME" ] && [ "$_a" = "$NAME" ]; then _dropped=1; continue; fi
+    _PASS+=("$_a")
+done
+set -- ${_PASS[@]+"${_PASS[@]}"}
+
 require_name "$NAME"
 
 TARGET="$(ws_target "$NAME")"
@@ -31,6 +63,23 @@ wait_ready "$NAME"
 # specific path on a shared machine, where what is on PATH may be somebody
 # else's broken system-wide install (see the remote branch below).
 CLAUDE_BIN=claude
+
+# ...and which permission mode it starts in, which is a property of the
+# boundary rather than a preference.
+#
+# --dangerously-skip-permissions is the point of a *sandbox*: inside a
+# disposable workspace with no host filesystem, prompting for each edit buys
+# nothing and prevents unattended work. A shared build machine is the one
+# target where that reasoning does not hold -- your own uid, other people's
+# work on the same filesystem, nothing disposable about it -- and skipping
+# permissions there was the barrier's warning being ignored by the very next
+# line. Forcing past the barrier says "run an agent on that machine anyway",
+# not "and give it everything".
+#
+# So: auto there. It still runs unattended for the ordinary work -- reading,
+# editing the checkout, building -- and stops to ask before the things that
+# leave it.
+CLAUDE_MODE=(--dangerously-skip-permissions)
 
 # --- verify the sandbox ------------------------------------------------------
 # Relaxed permissions are defensible only while the boundary holds, and what the
@@ -132,7 +181,8 @@ if [ "$WK_TARGET_KIND" = remote ]; then
         [ -n "$CLAUDE_BIN" ] || die "installed, and still nothing on $TARGET runs: try it by hand --
         ssh $TARGET '~/.local/bin/claude --version'"
     fi
-    info "using $CLAUDE_BIN on $TARGET"
+    CLAUDE_MODE=(--permission-mode auto)
+    info "using $CLAUDE_BIN on $TARGET, in auto mode (this machine is not a sandbox)"
 fi
 
 if [ "$WK_TARGET_KIND" = container ]; then
@@ -217,9 +267,8 @@ trap restore_push EXIT
 
 info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
 
-# --dangerously-skip-permissions is the point of the sandbox: inside a
-# disposable workspace with no host filesystem, prompting for each edit buys
-# nothing and prevents unattended work.
+# The permission mode was chosen with the boundary, up where the boundary is
+# known (CLAUDE_MODE).
 #
 # Headless when there is no terminal: `wk build --babysit`'s fix loop runs
 # this under nohup with `-p`, and t_exec_tty would demand a tty from a process
@@ -230,9 +279,9 @@ info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boun
 rc=0
 if [ -t 0 ] && [ -t 1 ]; then
     t_exec_tty "$NAME" env WK_WORKSPACE="$NAME" \
-        bash -lc "cd $(t_src "$NAME") && exec $(sh_quote "$CLAUDE_BIN") --dangerously-skip-permissions $(sh_quote "$@")" || rc=$?
+        bash -lc "cd $(t_src "$NAME") && exec $(sh_quote "$CLAUDE_BIN") $(sh_quote "${CLAUDE_MODE[@]}") $(sh_quote "$@")" || rc=$?
 else
     t_exec "$NAME" env WK_WORKSPACE="$NAME" \
-        bash -lc "cd $(t_src "$NAME") && exec $(sh_quote "$CLAUDE_BIN") --dangerously-skip-permissions $(sh_quote "$@")" || rc=$?
+        bash -lc "cd $(t_src "$NAME") && exec $(sh_quote "$CLAUDE_BIN") $(sh_quote "${CLAUDE_MODE[@]}") $(sh_quote "$@")" || rc=$?
 fi
 exit "$rc"

@@ -51,7 +51,8 @@ NAME=""; SPEC=""
 case "${1:-}" in
     '') usage ;;
     *:*) SPEC="$1"; in_workspace && NAME=$(wk_self) || usage ;;
-    *)  NAME="$1"; SPEC="${2:-}"; [ -n "$SPEC" ] || usage ;;
+    *)  refuse_ws_name "$1" pr "<user>:<branch>"
+        NAME="$1"; SPEC="${2:-}"; [ -n "$SPEC" ] || usage ;;
 esac
 shift $#
 

@@ -5,11 +5,62 @@
 # Safe to run at any time, including while workspaces are building. Running
 # workspaces stay pinned to the snapshot they were created from and are never
 # touched; only workspaces created after this runs pick up the new one.
+#
+#   wk sync                    this machine's store: mirror + a new snapshot
+#   wk sync --all              ...fetching every upstream, not just origin
+#   wk sync --target <machine> the far end of a remote target instead
+#   wk sync --target all       every remote target there is
+#
+# The store half is this machine's and has no target: a container, a macOS guest
+# and a workspace acting on itself all take their base from it. A machine
+# reached over ssh keeps its own -- its copy of wk-tools and, unless it has a
+# shared WebKit of its own, its own mirror -- and none of it is refreshed by
+# anything above. That was the gap: `wk sync` on a remote target did nothing for
+# it, and the only thing that ever updated the far side was `wk new` (the
+# mirror) and `wk build` (the tooling), so a machine you had not built on
+# answered every delegated command from whatever copy it was left with. The
+# driver decides what its far side is; see t_sync in targets/remote.sh.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+# --- a machine of its own ----------------------------------------------------
+# Before store_init and before the store lock: neither has anything to do with
+# a target on the far end of an ssh, and taking this machine's store lock to
+# fetch on another one would block a local sync for the duration.
+TARGET=""
+_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --target)   TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
+        --target=*) TARGET="${1#*=}"; shift ;;
+        *)          _ARGS+=("$1"); shift ;;
+    esac
+done
+set -- ${_ARGS[@]+"${_ARGS[@]}"}
+
+if [ -n "$TARGET" ]; then
+    # Named, or walked onto by `--target all`. A driver may reasonably do more
+    # for the machine somebody asked about than for one it merely enumerated;
+    # see t_sync for a peer in targets/remote.sh.
+    [ "$TARGET" = all ] || { WK_SYNC_NAMED=1; export WK_SYNC_NAMED; }
+    for _t in $([ "$TARGET" = all ] && target_all || printf '%s' "$TARGET"); do
+        load_target "$_t"
+        # Which targets have a far side is the drivers' answer, not a list kept
+        # here: t_sync returns 1 for every target whose base is this machine's
+        # store. Walked onto by `--target all` that is nothing to report; named
+        # explicitly it is worth saying, because the fix is a different command.
+        if ! t_sync; then
+            [ "$TARGET" = all ] && continue
+            die "target '$_t' keeps nothing of its own to sync: its base is this
+    machine's store, and refreshing that is what a plain 'wk sync' does."
+        fi
+    done
+    exit 0
+fi
 
 store_init
 

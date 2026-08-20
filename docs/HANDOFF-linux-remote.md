@@ -380,6 +380,23 @@ provision nothing there and should not start.
 - **`wk gc` never looks at a remote store.** Nothing large lives there (a log
   and a status file), but the remote root itself — mirror, ccache, dead
   workspaces — has no reclaim path at all beyond `wk rm`.
+- **A shared registry, and peers** (added 2026-08-19). A target's shared half
+  now lives in `targets/hosts/<name>.conf` in this repository, and the
+  machine-local conf overrides it line by line -- the machine-local half used to
+  be the only half, so a machine configured on one device did not exist on the
+  others. Two consequences worth knowing about this driver: the registry
+  travels with the tree that `t_sync_tools` pushes, so `target_all` skips it
+  entirely on a machine that is the far end of a target (a build box drives
+  nothing, and it has no route or host key to the rest of the fleet); and
+  `WK_REMOTE_PEER=1` marks another *workstation*, which is asked and not driven
+  -- no tooling pushed, no creation, no destruction, and `t_has_wk` satisfied
+  without `~/.wk-remote`, because that marker would make the machine refuse the
+  host-only commands on itself.
+- **`wk sync --target <machine>`** (added 2026-08-19) is what refreshes the far
+  side between builds: the tooling, and the mirror when the machine has no
+  shared repository of its own. `_remote_mirror_update` is shared with
+  `t_create`, so a machine that has never had a mirror gets one -- which is the
+  machine somebody is most likely to sync first.
 - **The macOS-remote-target case** (`docs/HANDOFF-other-remote.md`) is the same
   driver contract against a machine that is not Linux; `t_ccache_dir`,
   `nice`/`ionice` and `/proc/*` in the probe are the three places that assume

@@ -167,6 +167,27 @@ it takes effect immediately in workspaces that are already running and nothing
 inside one can undo it. `wk claude` turns it off before it hands over control.
 Fetching is never affected: every remote fetches anonymously over HTTPS.
 
+A push needs two things, and the switch is only one of them: the machine's key
+also has to be registered, and every machine has its own. `wk key check` is the
+one command that can say — it asks GitHub from here, because that is where the
+credential is. A build box with the switch on, correct remotes and an
+unregistered key answers `Permission denied (publickey)` and looks like a
+broken switch.
+
+The other half is the remotes themselves, and they are not interchangeable:
+
+```sh
+wk remotes             # is origin upstream, and can fork be pushed to?
+wk remotes <ws> --fix  # re-assert the wiring (idempotent)
+```
+
+`origin` is WebKit/WebKit and is fetch-only, so `git log origin/main` means
+upstream; `fork` fetches over https and **pushes over ssh through a host
+alias**, which is how one deploy key per fork is selected. An https push URL on
+`fork` is the quiet version of this going wrong: git never consults ssh, so no
+key is offered and no amount of `wk push on` helps. `wk status` flags a wrong
+origin as it lists a workspace.
+
 ---
 
 ## 4. First sources
@@ -243,7 +264,11 @@ wk remote setup devbox-arm64-2
 ```
 
 That probes the machine, writes `~/.config/wk/targets/devbox-arm64-2.conf` if
-there is none, pushes wk-tools, and configures your shell there. **It never
+there is none, pushes wk-tools, and configures your shell there. That conf is
+*this device's* view of the machine; what is true of the machine itself belongs
+in `targets/hosts/devbox-arm64-2.conf` in the repository, which every device
+gets by pulling (see `targets/hosts/buildbox4.conf` for a machine whose
+toolchain needs three CMake flags on every build). **It never
 needs root** — a build box belongs to everyone who logs into it, so nothing is
 installed, nothing outside `$HOME` is touched, and anything it finds worth
 removing is a question rather than an action. Edit the conf for whatever
@@ -613,9 +638,11 @@ Three limits to know about:
 ## Moving to another machine
 
 Nothing is machine-specific except what `wk backup` captures and
-`~/.config/wk/targets/*.conf` — the shared-build-machine confs above, which are
-machine-local by design and which `./setup` neither writes nor backs up, so a
-re-install loses every remote target until they are written again. On the new
+`~/.config/wk/targets/*.conf` — the *device's own overrides* for the machines
+above. Since 2026-08-19 the machines themselves are in the repository
+(`targets/hosts/*.conf`), so a re-install no longer loses every remote target:
+it loses only whatever that device had overridden, and a fresh clone knows the
+whole fleet. On the new
 machine, clone and `./setup`. To carry your current desktop settings across,
 run `wk backup` on the old one first and commit the result — it writes live
 settings back into `host/macos/defaults.conf`, `host/macos/symbolichotkeys.plist`
