@@ -155,6 +155,11 @@ refuse_if_busy() {
 
 cmd_start() {
     refuse_if_busy
+    # Before the image is even resolved: which server this machine would run is
+    # a fact about the machine, and "the code about to talk to firmware is not
+    # the code in this checkout" outranks anything that could be wrong with an
+    # image.
+    [ "$TFTP_PORT" -lt 1024 ] && [ -x "$PRIV" ] && check_helper_current
 
     [ -n "$IMAGE" ] || IMAGE=$(image_latest rpi5-perf 2>/dev/null) || IMAGE=""
     [ -n "$IMAGE" ] || die "no image to serve -- 'wk image build <profile>' first"
@@ -243,16 +248,36 @@ EOF
     [ "$TFTP_PORT" -lt 1024 ] || warn "on port $TFTP_PORT no firmware can reach this; testing only"
 }
 
-# The device tree a board asks for, which is a fact about the machine rather
-# than about the image, and is needed here because the check below has to ask
-# for the same filenames the firmware will.
-serve_dtb_for() {
-    case "$1" in
-        rpi5) echo bcm2712-rpi-5-b.dtb ;;
-        rpi4) echo bcm2711-rpi-4-b.dtb ;;
-        rpi3) echo bcm2710-rpi-3-b.dtb ;;
-        *)    echo "" ;;
-    esac
+# The privileged helper is a *copy*, and a copy can be stale.
+#
+# admin/install.sh installs boot/wk-tftpd.py to a root-owned path because the
+# sudoers rule has to name a file the invoking user cannot write -- a NOPASSWD
+# rule pointing into a checkout is a local root hole, and that reasoning is
+# right. What it leaves behind is a second copy of the server that only
+# `./setup` ever refreshes, while `wk serve` runs it every time.
+#
+# That gap cost the rpi4 its second power cycle on 2026-08-20. The
+# serial-prefix bug below had been fixed in boot/wk-tftpd.py and verified
+# against it; the helper on disk was three hours older and still had the bug,
+# so the board was served by code nobody had looked at that day. Worse, the
+# boot-file check passed -- it was reading the repo's copy, so it certified a
+# resolver that was not the one about to run.
+#
+# Two things follow, and this is the first: if the two differ, refuse. The
+# second is that check_boot_files_serveable asks whichever server is actually
+# going to serve.
+check_helper_current() {
+    cmp -s "$WK_ROOT/boot/wk-tftpd.py" "$PRIV" && return 0
+    die "the installed netboot helper is not the server in this checkout:
+
+      $PRIV
+      $WK_ROOT/boot/wk-tftpd.py
+
+    'wk serve' runs the installed copy on port 69, so serving now would hand
+    boot files to firmware using code that is not what this repo says. That is
+    how a fixed bug reaches a board anyway.
+
+    Reinstall it (one sudo):  ./setup --stage quiesce"
 }
 
 # Serving an incomplete set of boot files is worse than serving none, and that
@@ -278,13 +303,22 @@ serve_dtb_for() {
 # why the check runs through wk-tftpd's own resolver rather than looking at the
 # filesystem: the filesystem said the kernel was there, and it was.
 check_boot_files_serveable() {
-    local machine dtb out
+    local machine dtb out server
+    # Whichever binary cmd_start is about to launch. check_helper_current has
+    # already refused a mismatch by now, so these agree -- but the check asking
+    # the *other* copy is precisely the mistake that made this necessary, and
+    # it should not be true again by coincidence.
+    server="$WK_ROOT/boot/wk-tftpd.py"
+    [ "$TFTP_PORT" -lt 1024 ] && [ -x "$PRIV" ] && server="$PRIV"
+
     machine=$(manifest_get "$1" machine)
-    dtb=$(serve_dtb_for "$machine")
+    # image_dtb_for, from lib/image.sh: `wk image write` asks the same question
+    # of the same machine, and two copies of that table would drift.
+    dtb=$(image_dtb_for "$machine")
     [ -n "$dtb" ] || { warn "no device tree known for machine '$machine'; not checking boot files"; return 0; }
 
     out=$(python3 "$WK_ROOT/boot/check-boot-files.py" \
-              --root "$TFTP_ROOT" --tftpd "$WK_ROOT/boot/wk-tftpd.py" --dtb "$dtb" 2>&1) && return 0
+              --root "$TFTP_ROOT" --tftpd "$server" --dtb "$dtb" 2>&1) && return 0
 
     die "the boot files a $machine will ask for are not all reachable in $TFTP_ROOT:
 

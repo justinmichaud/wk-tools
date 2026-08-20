@@ -25,13 +25,6 @@
 
 BOOT_ARMING=server
 
-# Reading the bootloader's configuration, on a board that may have no eeprom
-# tooling. vcgencmd is part of the VideoCore userland every Pi image carries;
-# rpi-eeprom-config is a Raspberry Pi OS package, and asking it first is how
-# this driver used to end up with an empty answer on the fleet's own rpi4. Both
-# print the same text. See boot/rpi-eeprom.sh for the writing half.
-EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-config 2>/dev/null || true'
-
 # Not used by this driver -- the boot order is permanent here, not per-boot --
 # but named so that a reader comparing the two drivers sees the difference
 # rather than an omission.

@@ -130,7 +130,58 @@ is the whole point: the filesystem would have reported `current/vmlinuz` present
 and correct, because it was. The only question worth asking is the one the
 firmware asks — *if I request this name, do I get bytes?*
 
-`wk serve` is stopped, so a power cycle lands the board on its SD card.
+`wk serve` is stopped, so a power cycle lands the board on its SD card. It
+was restarted once after that, which is the next section.
+
+### The second power cycle: the fix was not the code that ran
+
+The board was power-cycled, came back on its SD card, and was served the same
+image again to confirm the resolver fix on hardware. It halted in exactly the
+same place, on exactly the same request.
+
+`wk serve` binds port 69 through `/usr/local/libexec/wk-tftpd`, a **root-owned
+copy** that `admin/install.sh` installs from `boot/wk-tftpd.py`. The copy is
+right and the reason is good: the sudoers rule has to name a file the invoking
+user cannot write, or a NOPASSWD grant on a file server is a local root hole.
+But only `./setup` ever refreshes it, and `wk serve` runs it every time. The
+copy on disk was three hours old and still had the bug. The board was served by
+code nobody had looked at that day.
+
+The part worth sitting with is that the guard added an hour earlier — the
+boot-file completeness check, written specifically so an incomplete tree could
+never reach a board — **passed**. It loaded `boot/wk-tftpd.py`, resolved every
+file through it, and certified a resolver that was not the one about to run. A
+check that reads a different copy of the thing it is checking is not a check.
+It is a second opinion about a third file.
+
+Three changes, and the ordering between them is the point:
+
+- `wk serve` compares `$PRIV` against `boot/wk-tftpd.py` and refuses if they
+  differ, naming `./setup --stage quiesce`. It runs **first** in `cmd_start`,
+  before the image is resolved: which server this machine would run is a fact
+  about the machine, and "the code about to talk to firmware is not the code in
+  this checkout" outranks anything that could be wrong with an image.
+- `check_boot_files_serveable` loads its resolver from whichever binary
+  `cmd_start` is about to launch, not from the checkout. With the refusal above
+  in place the two always agree — but they should not agree *by coincidence*,
+  which is the whole of what went wrong.
+- `wk selftest --quick` grew a `netboot` group: seven offline checks over the
+  resolver and the two guards, including the two requests that cost the board
+  its afternoon (`<serial>/current/vmlinuz` must keep its path,
+  `<serial>/current/overlays/README` must not be answered with the root's own
+  `README`). This resolver has halted the fleet twice; it should not be
+  possible to edit it without exercising it.
+
+**Before serving again**, in this order:
+
+1. power-cycle the rpi4 — it is halted and nothing over the wire can reach it;
+2. `./setup --stage quiesce` — one sudo, to reinstall the fixed helper.
+   `wk serve` refuses until this is done, which is now the intended behaviour
+   rather than an obstacle;
+3. then `wk serve` and reboot the board. The transfer should complete through
+   `current/vmlinuz` and `current/initrd.img`; the kernel will still find no
+   root and reboot on `panic=10`, which is the recoverable failure and the
+   limit of what can be proved before the root question is settled.
 
 ### What is left
 

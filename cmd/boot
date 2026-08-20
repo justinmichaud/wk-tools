@@ -239,6 +239,11 @@ cmd_disarm() {
     # and its driver says which half a person still has to do.
     if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then
         [ "$SPENT" = yes ] || b_arm "$BOOT_ORDER_NORMAL"
+    elif command -v b_disarm >/dev/null 2>&1; then
+        # A medium-armed machine has a real disarm to perform -- the intent is
+        # a file on the stick, so forgetting the record would leave the board
+        # still booting the image it was told to forget.
+        b_disarm
     fi
     record_clear
     info "$MACHINE disarmed; its next reboot is a normal one"
@@ -286,12 +291,12 @@ cmd_arm() {
     #
     # A server-armed machine has no local image to check: its driver's b_arm
     # checks the server instead, which is where its arming actually lives.
-    if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then
+    case "${BOOT_ARMING:-one-shot}" in one-shot|medium)
         local on_device
         on_device=$(b_device_image)
         [ "$on_device" = "$IMAGE" ] || die "$MACH_DEVICE on $MACHINE holds ${on_device:-no wk image}, not $IMAGE.
     Write it first:  wk image write $IMAGE --disk $MACHINE:$MACH_DEVICE"
-    fi
+    ;; esac
 
     if [ -n "$DRY" ]; then
         if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
@@ -307,7 +312,9 @@ EOF
             cat >&2 <<EOF
 would arm $MACHINE
   image        $IMAGE (verified present on $MACH_DEVICE)
-  boot order   $BOOT_ORDER_IMAGE (one-shot; the normal order $BOOT_ORDER_NORMAL is untouched)
+  boot order   $([ "${BOOT_ARMING:-one-shot}" = medium ] \
+                  && echo "untouched; the arming is $MACH_DEVICE's own boot partition" \
+                  || echo "$BOOT_ORDER_IMAGE (one-shot; the normal order $BOOT_ORDER_NORMAL is untouched)")
   record       $MACH_RECORD on $MACHINE
   then         reboot, and the image's watchdog returns it in
                $(manifest_get "$IMAGE" watchdog)s unless claimed
@@ -342,6 +349,14 @@ EOF
         # One record of intent, on the machine, next to the boot mechanism.
         record_write "$IMAGE" "$(manifest_get "$IMAGE" profile)" "$MACH_DEVICE" "$BOOT_ORDER_IMAGE"
         b_arm "$BOOT_ORDER_IMAGE"
+    elif [ "${BOOT_ARMING:-one-shot}" = medium ]; then
+        # The record is written for the same reason as the one-shot's -- the
+        # arm and the reboot are two steps and something has to survive between
+        # them -- but here it is a claim with evidence behind it: the driver's
+        # b_evidence reads the stick and says armed or disarmed, so a record
+        # that disagrees with the medium is visibly wrong rather than believed.
+        record_write "$IMAGE" "$(manifest_get "$IMAGE" profile)" "$MACH_DEVICE" ""
+        b_arm
     else
         # No record is written here, and that is rule 1 rather than an
         # omission: a server-armed machine's intent *is* the server's content,

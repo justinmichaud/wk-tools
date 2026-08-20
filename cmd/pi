@@ -30,14 +30,18 @@ TAG="${WK_PI_TAG:-tag:wk}"
 
 ACTION="${1:-}"; HOST="${2:-}"
 case "$ACTION" in
-    setup|netboot-enable) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>" ;;
+    setup|netboot-enable|boot-order) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>" ;;
     # `flash` takes a *fleet machine* rather than an ssh host: the refusals need
     # MACH_ROOT to know which disk is that machine's own, and the image comes
     # from the store by profile. See boot/sdcard.sh.
     # Kept only to say where it went; see below.
     flash) : ;;
     *) die "usage: wk pi setup <ssh-host>
+       wk pi boot-order <ssh-host> <order> [--server <ip>] [--dry-run]
+         orders: netboot-first  netboot-last  usb-first  local
        wk pi netboot-enable <ssh-host> [--server <ip>] [--revert] [--dry-run]
+         the netboot spelling of the same writer; the order comes from the
+         machine's role in boot/machines.sh
        (flashing moved: 'wk image write <id> --disk <machine>:<device>')" ;;
 esac
 shift 2 2>/dev/null || true
@@ -127,8 +131,36 @@ boot_order_without_net() {
     printf '0x%s' "$(printf '%s' "$order" | sed 's/2//g')"
 }
 
-cmd_netboot_enable() {
+# USB first, then whatever else was there -- the local-boot lane.
+#
+# `0xf412 -> 0xf14`. Network comes out because this lane does not use it, and
+# USB moves to the front because the default order tries the SD card first: an
+# image written to the stick with `0xf41` in the EEPROM is an image that never
+# boots, and the symptom is a board that comes up looking perfectly normal on
+# the wrong root.
+#
+# The SD card staying *behind* USB is the whole safety property. A stick with no
+# bootable filesystem is skipped and the board lands on its rescue image,
+# reachable, with no one in the room -- which is the thing netboot cannot do,
+# because a network boot that gets as far as start4.elf and no further halts
+# instead of falling through. See docs/HANDOFF-benchmarking.md, "rpi4".
+#
+# Derived from the current order rather than written as a constant, so a board
+# with an entry this does not know about (6 is NVMe on a Pi 5) keeps it.
+boot_order_usb_first() {
+    local order="${1#0x}"
+    order=$(printf '%s' "$order" | sed 's/2//g')
+    order=$(printf '%s' "$order" | sed 's/4//g')
+    printf '0x%s4' "$order"
+}
+
+# One writer, four intents. `wk pi netboot-enable` and `wk pi boot-order` are
+# two spellings of this function and not two implementations of it: BOOT_ORDER
+# is firmware state shared by every role a machine has, and two commands that
+# could both write it is two places for a wrong value to come from.
+cmd_boot_order() {
     local server="" client="" gateway="" subnet="255.255.255.0" dry="" revert="" position=""
+    local order_name="${ORDER_NAME:-}"
     while [ $# -gt 0 ]; do
         case "$1" in
             --position)  position="${2:-}"; shift ;;
@@ -143,20 +175,44 @@ cmd_netboot_enable() {
         shift
     done
 
-    # The position defaults from what the fleet says this machine is, not from
-    # a flag the caller has to remember: getting it wrong on a workstation
-    # costs a trip to the device.
-    if [ -z "$position" ]; then
-        if machine_by_ssh "$HOST"; then
-            case "${MACH_ROLE:-workstation}" in
-                test-device) position=first ;;
-                *)           position=last ;;
-            esac
+    # `netboot-enable`'s two flags are older spellings of two of the orders, and
+    # are resolved into one before anything else looks at them.
+    if [ -z "$order_name" ]; then
+        if [ -n "$revert" ]; then
+            order_name=local
         else
-            position=last
+            # The position defaults from what the fleet says this machine is,
+            # not from a flag the caller has to remember: getting it wrong on a
+            # workstation costs a trip to the device.
+            if [ -z "$position" ]; then
+                if machine_by_ssh "$HOST"; then
+                    case "${MACH_ROLE:-workstation}" in
+                        test-device) position=first ;;
+                        *)           position=last ;;
+                    esac
+                else
+                    position=last
+                fi
+            fi
+            case "$position" in
+                first) order_name=netboot-first ;;
+                last)  order_name=netboot-last ;;
+                *)     die "--position is 'first' or 'last'" ;;
+            esac
         fi
     fi
-    case "$position" in first|last) ;; *) die "--position is 'first' or 'last'" ;; esac
+
+    case "$order_name" in
+        netboot-first|netboot-last|usb-first|local) ;;
+        *) die "no such boot order '$order_name'.
+    orders:
+      netboot-first  network, then the local disks -- a dedicated test device
+      netboot-last   the local disks, then network -- a machine that is also a
+                     workstation, so an ordinary boot is unchanged
+      usb-first      USB, then the SD card -- the local-boot lane, where the
+                     stick carries the image and the card is the rescue role
+      local          the local disks only, network removed" ;;
+    esac
 
     rsh true >/dev/null 2>&1 || die "cannot ssh to $HOST.
     This writes the board's firmware configuration, so it needs the board
@@ -194,18 +250,26 @@ cmd_netboot_enable() {
     order=$(printf '%s\n' "$current" | sed -n 's/^BOOT_ORDER=//p' | head -1)
     [ -n "$order" ] || order=0xf41
 
-    if [ -n "$revert" ]; then
-        new=$(printf '%s\n' "$current" \
-            | grep -vE '^(TFTP_IP|CLIENT_IP|SUBNET|GATEWAY)=' \
-            | sed "s|^BOOT_ORDER=.*|BOOT_ORDER=$(boot_order_without_net "$order")|")
-    else
+    # The netboot keys come out for every order, and go back in only for the two
+    # that use them. Leaving a TFTP_IP behind on a board that no longer netboots
+    # is a stale fact that reads as a live one.
+    local stripped want
+    stripped=$(printf '%s\n' "$current" | grep -vE '^(TFTP_IP|CLIENT_IP|SUBNET|GATEWAY)=')
+
+    case "$order_name" in
+        local)         want=$(boot_order_without_net "$order") ;;
+        usb-first)     want=$(boot_order_usb_first "$order") ;;
+        netboot-first) want=$(boot_order_with_net "$order" first) ;;
+        netboot-last)  want=$(boot_order_with_net "$order" last) ;;
+    esac
+    new=$(printf '%s\n' "$stripped" | sed "s|^BOOT_ORDER=.*|BOOT_ORDER=$want|")
+
+    case "$order_name" in
+      netboot-first|netboot-last)
         [ -n "$server" ] || server=$(ip route get 1.1.1.1 2>/dev/null \
             | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
         [ -n "$server" ] || die "could not work out this machine's address; pass --server"
 
-        new=$(printf '%s\n' "$current" \
-            | grep -vE '^(TFTP_IP|CLIENT_IP|SUBNET|GATEWAY)=' \
-            | sed "s|^BOOT_ORDER=.*|BOOT_ORDER=$(boot_order_with_net "$order" "$position")|")
         new="$new
 TFTP_IP=$server"
         if [ -n "$client" ]; then
@@ -215,7 +279,8 @@ SUBNET=$subnet"
             [ -n "$gateway" ] && new="$new
 GATEWAY=$gateway"
         fi
-    fi
+        ;;
+    esac
 
     # The no-change case reads badly the other way round: a "would change"
     # header followed by an empty diff and then "already says this" is three
@@ -223,10 +288,15 @@ GATEWAY=$gateway"
     # header. It is also the *common* case once a board is set up.
     if [ "$current" = "$new" ]; then
         info "$HOST's firmware already says this; nothing to write"
+        # And if it says this *because* a staged update was applied, the files
+        # that carried it have done their job. This is the only moment that is
+        # knowable -- the staging runs before the reboot that consumes it, so
+        # it can never clean up after itself.
+        [ "$method" = recovery ] && eeprom_clear_staged
         return 0
     fi
 
-    log "$HOST's firmware configuration would change (network boot: $position):"
+    log "$HOST's firmware configuration would change (boot order: $order_name):"
     diff -u <(printf '%s\n' "$current") <(printf '%s\n' "$new") | sed '1,2d;s/^/  /' || true
 
     if [ -n "$dry" ]; then
@@ -257,11 +327,20 @@ GATEWAY=$gateway"
         log  "  verify with: ssh $HOST vcgencmd bootloader_config"
         log  "  the board goes through firmware twice, so allow a few minutes"
     fi
-    log  "  undo with:   wk pi netboot-enable $HOST --revert"
+    log  "  undo with:   wk pi boot-order $HOST local"
 }
 
 if [ "$ACTION" = netboot-enable ]; then
-    cmd_netboot_enable "$@"
+    cmd_boot_order "$@"
+    exit 0
+fi
+
+if [ "$ACTION" = boot-order ]; then
+    ORDER_NAME="${1:-}"
+    [ -n "$ORDER_NAME" ] || die "usage: wk pi boot-order $HOST <order>
+    orders: netboot-first  netboot-last  usb-first  local"
+    shift
+    cmd_boot_order "$@"
     exit 0
 fi
 

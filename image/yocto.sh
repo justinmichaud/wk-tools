@@ -202,6 +202,43 @@ yocto_ensure_ws() {
 # Evidence, not the status file: the pid is read from the workspace and tested
 # in the workspace, because that is the only namespace the number means
 # anything in (docs/HANDOFF-workspace-state.md -- "status files are claims").
+# Does the branch actually have a section for the target this profile names?
+#
+# Asked here rather than left to bitbake, because the failure is otherwise a
+# config-parse error inside a spawned build whose log the caller has not been
+# told to read yet -- and because the fix is eight lines that the caller can
+# see from the message.
+#
+# The rpi5 is why this exists. `Tools/yocto/rpi/local-rpi5-64bits-mesa.conf` is
+# shipped on this branch and the pinned meta-raspberrypi carries
+# `raspberrypi5.conf`, so everything a Pi 5 build needs is present except the
+# stanza that names them together.
+yocto_check_target() {
+    local ws="$1" conf=/src/WebKit/Tools/yocto/targets.conf have
+    have=$(t_exec "$ws" bash -c "grep -c '^\[$YOC_TARGET\]' $conf 2>/dev/null || echo 0" \
+        2>/dev/null | tr -d '\r' | tail -1)
+    [ "${have:-0}" != 0 ] && return 0
+
+    die "$YOC_BRANCH has no [$YOC_TARGET] section in Tools/yocto/targets.conf,
+    so there is nothing for bitbake to configure from.
+
+    Everything else that target needs is already on the branch -- its
+    local.conf (Tools/yocto/rpi/local-$YOC_TARGET.conf) and its MACHINE in the
+    pinned meta-raspberrypi. Only the stanza tying them together is missing.
+    Add it upstream, beside [rpi4-64bits-mesa]:
+
+        [$YOC_TARGET]
+        repo_manifest_path = rpi/manifest.xml
+        conf_bblayers_path = rpi/bblayers.conf
+        conf_local_path = rpi/local-$YOC_TARGET.conf
+        image_basename = $YOC_IMAGE
+        image_types = tar.xz wic.xz wic.bmap
+        patch_file_path = meta-openembedded_and_meta-webkit.patch
+
+    The sections that do exist here are:
+$(t_exec "$ws" bash -c "sed -n 's/^\[\(.*\)\]/      \1/p' $conf" 2>/dev/null | tr -d '\r')"
+}
+
 yocto_running() {
     local ws="$1" stage="$2" pid
     pid=$(cat "$(yocto_pidfile "$ws" "$stage")" 2>/dev/null | tr -dc '0-9') || true
@@ -583,6 +620,8 @@ stage=$stage
 started=$built
 EOF
 
+    yocto_check_target "$ws"
+
     info "stage '$stage' for $profile in '$ws'"
     log  "  log: $(yocto_log "$ws" "$stage")"
     yocto_spawn "$ws" "$stage" \
@@ -643,6 +682,25 @@ EOF
         || die "the imported $dir/disk.img has no readable partition table.
     Something was written ahead of the image bytes on the way out of '$ws'.
     'wk enter $ws' and check $(yocto_image_dir "$YOC_TARGET")."
+
+    # The fleet integration, before the hash, because it modifies the image.
+    #
+    # Everything above this line produced a distribution; this makes it a
+    # system *this repo can drive* -- the identity marker `b_probe` reads, the
+    # self-return watchdog, and the self-disarm a medium-armed machine needs.
+    # Without it a Yocto image boots perfectly and is invisible: `wk boot
+    # --status` cannot tell a board running it from a board that never left its
+    # host mode, and on the rpi4 the stick would stay armed for ever.
+    #
+    # The distro builder has done this all along, inside `relabel`, which is
+    # why it took wanting a Yocto image on the rpi5 to notice that the two
+    # builders shared nothing after the manifest.
+    DISK="$dir/disk.img"
+    SEED=$(mktemp -d)
+    wk_atexit _seed_cleanup
+    info "adding the fleet integration (identity marker, watchdog, self-disarm)"
+    install_fleet_integration "$(part_offset "$DISK" 2)"
+    rm -rf "$SEED"; SEED=""
 
     info "hashing the image"
     local sha; sha=$(sha256sum "$dir/disk.img" | cut -d' ' -f1)

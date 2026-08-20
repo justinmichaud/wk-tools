@@ -24,7 +24,9 @@
 #   IMG_BASE_SHA256  (distro) ... and pinned by content, not by name
 #   IMG_BASE_KIND    (distro) which seeding dialect the base speaks
 #   IMG_HOSTNAME     what it calls itself once booted
-#   IMG_WATCHDOG     (distro) seconds before the self-return reboot, unless kept
+#   IMG_WATCHDOG     seconds before the self-return reboot, unless kept. Every
+#                    profile that can be *booted as a bench system* wants one --
+#                    it is what hands the machine back when a run wedges it.
 #   IMG_GROW         (distro) whether cloud-init may grow the root partition
 #   IMG_PACKAGES     (distro) packages installed on first boot (needs egress)
 #   IMG_NETWORK      (distro) how the image gets on the network:
@@ -83,12 +85,26 @@ rpi5-perf   Ubuntu 26.04 server, aarch64, for the rpi5's USB one-shot: no
             sandbox, perf_event_paranoid ours to set, WiFi baked in
 rpi4-perf   the same, cabled: DHCP on eth0, no credential, so it builds with
             the board switched off
-rpi3-perf   likewise, for the rpi3 on its direct cable
+rpi3-perf   refused, and says why: Ubuntu ships no armhf raspi image, and a
+            32-bit run wants a 32-bit system rather than an arm64 one
 
 rpi4-wpe-2.48
             WPE WebKit 2.48's own Yocto image for the rpi4 (aarch64,
             scarthgap, weston): the runtime the 2.48 release branch pins,
             bitbaked from source in a workspace. Hours, not minutes.
+rpi4-wpe-2.48-32
+            the same distribution, 32-bit: a 32-bit kernel and userspace, which
+            is what a 32-bit perf run has to measure -- not a 32-bit process on
+            a 64-bit kernel's compat layer
+rpi3-wpe-2.48-32
+            and for the rpi3, whose native width this is
+rpi3-wpe-2.48-64
+            the rpi3 as aarch64. Marginal at 931 MB, and there so that "slower,
+            or just out of memory" is answerable
+rpi5-wpe-2.48
+            the rpi5 running what ships, on its USB stick, leaving the NVMe
+            workstation alone. Needs one section added to targets.conf upstream
+            -- the local.conf and the MACHINE are already there
 EOF
 }
 
@@ -158,17 +174,28 @@ image_profile_load() {
         # capable) and would quietly convert the one device that tests 32-bit
         # into another 64-bit one.
         #
-        # So this waits on a decision rather than guessing at it: either a
-        # 32-bit base for this profile, or an explicit "the rpi3 becomes
-        # arm64". See docs/HANDOFF-netboot.md's rpi3 section.
-        die "no rpi3 image profile yet, and this is deliberate.
+        # This used to wait on a decision -- "a 32-bit base for this profile, or
+        # an explicit 'the rpi3 becomes arm64'". The decision was taken on
+        # 2026-08-20 and it was neither, so the refusal stays but the reason
+        # changed: there is no armhf Ubuntu raspi image to build this *from*
+        # (26.04 publishes arm64 desktop and arm64 server, and nothing else),
+        # and the rpi3's perf systems are Yocto builds instead -- which
+        # targets.conf already had targets for in both widths.
+        die "there is no rpi3-perf, and there will not be one.
 
-    The rpi3 is the fleet's only 32-bit board (armv7l, 931 MB, no swap), and
-    the base every other profile uses is arm64. Building that here would boot
-    -- and would silently turn the one device that exercises 32-bit into a
-    64-bit one.
+    'perf-linux-*' profiles are seeded from Ubuntu's preinstalled raspi image,
+    and Ubuntu 26.04 publishes no armhf one -- arm64 desktop and arm64 server,
+    and nothing else. There is nothing to seed a 32-bit rpi3 system from.
 
-    Decide first: a 32-bit base for the rpi3, or the rpi3 becomes arm64."
+    A 32-bit perf run has to measure a 32-bit kernel and userspace rather than
+    a 32-bit process on a 64-bit kernel, so the answer is not to build this
+    board an arm64 system either. Use the Yocto profiles, which exist in both
+    widths:
+
+        wk image build rpi3-wpe-2.48-32     its native width
+        wk image build rpi3-wpe-2.48-64     marginal at 931 MB, for comparison
+
+    docs/HANDOFF-vocabulary.md, '32-bit and 64-bit', has the whole argument."
         ;;
     rpi4-perf)
         # Cabled, so no credential is involved and the image builds with the
@@ -225,10 +252,81 @@ image_profile_load() {
         # onto the rpi4, so it is off, and `--chromium` puts it back for the day
         # the comparison is the point.
         YOC_CHROMIUM=0
+        IMG_WATCHDOG=900
         # What the board calls itself. Yocto takes it from MACHINE and there is
         # no cloud-init here to override it, so this is recorded rather than
         # applied -- it is what `wk image show` should be able to answer.
         IMG_HOSTNAME=raspberrypi4-64
+        ;;
+    # The 32-bit half of the same distribution, and the reason 32-bit is not a
+    # separate problem to solve.
+    #
+    # A 32-bit perf run measures a 32-bit *system* -- a 32-bit kernel and a
+    # 32-bit userspace -- and not a 32-bit process borrowing a 64-bit kernel's
+    # compat layer. The two differ in syscall path, page size and pointer
+    # width in the kernel, so a number from one is not a number from the other,
+    # and the armhf port that ships to customers runs the first.
+    #
+    # Which is why the base for this is Yocto rather than a distro image.
+    # Ubuntu 26.04 publishes **no armhf raspi image at all** (checked
+    # 2026-08-20: `arm64` desktop and server, and nothing else), so the obvious
+    # route does not exist; and `Tools/yocto/targets.conf` on this branch
+    # already carries `rpi3-32bits-mesa`, `rpi3-32bits-userland`,
+    # `rpi4-32bits-mesa` and `rpi3-64bits-mesa` beside the 64-bit rpi4 target.
+    # The 32-bit systems were already buildable; nothing had named them.
+    #
+    # This also answers the question the rpi3 entry above was waiting on. It
+    # asked for "a 32-bit base for this profile, or an explicit 'the rpi3
+    # becomes arm64'", and the answer is neither: the rpi3's perf system is a
+    # Yocto build, in whichever width the run is measuring, and no distro base
+    # is involved.
+    rpi4-wpe-2.48-32|rpi3-wpe-2.48-32|rpi3-wpe-2.48-64|rpi5-wpe-2.48)
+        IMG_BUILDER=yocto
+        YOC_BRANCH=webkitglib/2.48
+        YOC_IMAGE=webkit-dev-ci-tools
+        YOC_RM_WORK=1
+        YOC_CHROMIUM=0
+        # Same as the distro profiles, and for the same reason: these images
+        # are booted as bench systems, and a bench system with no self-return
+        # is a board that stays borrowed until somebody notices.
+        IMG_WATCHDOG=900
+        case "$1" in
+            rpi4-wpe-2.48-32)
+                IMG_MACHINE=rpi4; IMG_ARCH=armhf
+                YOC_TARGET=rpi4-32bits-mesa; IMG_HOSTNAME=raspberrypi4 ;;
+            rpi3-wpe-2.48-32)
+                IMG_MACHINE=rpi3; IMG_ARCH=armhf
+                # `-mesa`, not `-userland`: targets.conf offers both for the
+                # rpi3 and the userland one is the closed Broadcom stack. Mesa
+                # is what the rpi4 targets use, so it is the one that keeps a
+                # rpi3 number and a rpi4 number describing the same graphics
+                # path. `-userland` is a deliberate second profile if it is
+                # ever wanted, not a default.
+                YOC_TARGET=rpi3-32bits-mesa; IMG_HOSTNAME=raspberrypi3 ;;
+            rpi5-wpe-2.48)
+                IMG_MACHINE=rpi5; IMG_ARCH=arm64
+                # The rpi5 as a Yocto system, so that the board can be measured
+                # running what ships rather than only a distro -- without
+                # touching its NVMe workstation, which is untouched here for
+                # the same reason it is untouched by rpi5-perf: the image goes
+                # on the USB stick and the firmware one-shot boots it.
+                #
+                # `targets.conf` has no [rpi5-64bits-mesa] section on this
+                # branch, and everything it would need is already there:
+                # `Tools/yocto/rpi/local-rpi5-64bits-mesa.conf` is shipped, and
+                # the pinned meta-raspberrypi carries `raspberrypi5.conf`. The
+                # section is the only missing piece, so yocto_build refuses
+                # with the eight lines to add rather than failing inside
+                # bitbake.
+                YOC_TARGET=rpi5-64bits-mesa; IMG_HOSTNAME=raspberrypi5 ;;
+            rpi3-wpe-2.48-64)
+                IMG_MACHINE=rpi3; IMG_ARCH=arm64
+                # Buildable, and marginal on this board: 931 MB of RAM, no
+                # swap. It exists so that "is the 64-bit port slower here, or
+                # just short of memory" is answerable, which is a question the
+                # 32-bit-only rpi3 could never be asked.
+                YOC_TARGET=rpi3-64bits-mesa; IMG_HOSTNAME=raspberrypi3-64 ;;
+        esac
         ;;
     *)  return 1 ;;
     esac

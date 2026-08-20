@@ -71,6 +71,17 @@ mac_volume_present() {
 # discover, so ROLE_CHANNEL is always `normal` and r_ssh runs locally.
 b_probe() {
     local id
+    # This driver's every question is asked of the machine it is running on --
+    # `diskutil`, `bless`, `sysctl kern.boottime` -- because MACH_LOCAL says
+    # there is no other way to reach an Apple Silicon machine. Which means that
+    # from anywhere else, the honest answer is "not here", and that has to be
+    # said *before* the first macOS-only command rather than discovered by it:
+    # run from Linux, this exited 127 partway through printing a status, which
+    # is worse than either answering or refusing.
+    if ! is_macos; then
+        ROLE_CHANNEL=none; ROLE=unreachable
+        return 0
+    fi
     ROLE_CHANNEL=normal
     id=$(wk_image_id)
     if [ -n "$id" ]; then ROLE="image $id"; else ROLE=workstation; fi
@@ -94,7 +105,10 @@ b_probe() {
 # as a 1970 boot date the first time.
 _mac_boottime() { sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ *sec *= *\([0-9][0-9]*\).*/\1/p'; }
 
-b_boot_id() { _mac_boottime; }
+# `|| true` for the same reason the Linux driver has it: a boot id that cannot
+# be read is a missing fact, not a failure, and `set -e` should not turn the
+# one into the other at `BOOT_ID=$(b_boot_id)`.
+b_boot_id() { _mac_boottime || true; }
 
 b_booted_at() {
     local sec; sec=$(_mac_boottime)
@@ -107,6 +121,18 @@ b_booted_at() {
 # is even possible: which volume is booted right now, and whether the other one
 # is attached.
 b_evidence() {
+    # Both facts below are read off the machine this is running on, which is
+    # only the right machine when that is this Mac. Said plainly instead when
+    # it is not: the `df /` fallback answered with the *driving* machine's root
+    # volume, so `wk boot mbp --status` from Linux reported an Ubuntu LVM path
+    # as the Mac's booted volume -- a confident answer to a question that was
+    # never asked of the right computer.
+    if ! is_macos; then
+        echo "booted_volume=unknown (this is not that Mac; MACH_LOCAL machines answer only for themselves)"
+        echo "benchmark_volume=$MACH_VOLUME (cannot be seen from here)"
+        return 0
+    fi
+
     # `diskutil info /`'s own labelled output rather than its plist: the plist
     # puts key and value on separate lines, so reading it with sed is a
     # two-line state machine to get a string that the plain form prints once.

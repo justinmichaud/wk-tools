@@ -103,12 +103,21 @@ image_verify() {
 # selects, so both places are tried.
 #
 # Prints the raw `root=` value, or nothing if there is no cmdline to read.
+# The byte offset of the image's boot partition, from its own partition table.
+# Factored out because three readers now want it and each one computing it again
+# is three chances to disagree about which partition is the boot one.
+image_boot_offset() {
+    local disk="$1" offset
+    offset=$(sfdisk -J "$disk" 2>/dev/null \
+        | sed -n 's/.*"start": *\([0-9]*\).*/\1/p' | head -1 | awk '{print $1 * 512}')
+    [ -n "$offset" ] && [ "$offset" -gt 0 ] || return 1
+    echo "$offset"
+}
+
 image_root_spec() {
     local id="$1" disk offset p
     disk=$(image_disk "$id"); [ -f "$disk" ] || return 0
-    offset=$(sfdisk -J "$disk" 2>/dev/null \
-        | sed -n 's/.*"start": *\([0-9]*\).*/\1/p' | head -1 | awk '{print $1 * 512}')
-    [ -n "$offset" ] && [ "$offset" -gt 0 ] || return 0
+    offset=$(image_boot_offset "$disk") || return 0
     for p in ::/current/cmdline.txt ::cmdline.txt; do
         MTOOLS_SKIP_CHECK=1 mtype -i "$disk@@$offset" "$p" 2>/dev/null \
             | tr ' ' '\n' | sed -n 's/^root=//p' | head -1 && return 0
@@ -193,12 +202,88 @@ image_check_root() {
     anyway (for testing the transfer, which is all it can prove)."
 }
 
+# Refuse a write whose image cannot get as far as its kernel.
+#
+# image_check_root above asks whether the kernel will find its root. This asks
+# the question before it: whether the *firmware* will find the kernel. They fail
+# differently and that is why both exist -- a kernel that cannot find its root
+# panics, and with `panic=10` in these images it reboots, so a board is at worst
+# in a loop that stopping the arm ends. Firmware that cannot find a kernel
+# **halts**: no retry, no fall-through to the next BOOT_ORDER entry, no way back
+# over the wire.
+#
+# That is the difference between an unattended lane and one that needs a person
+# in the room, so it is checked here -- where the whole boot filesystem is
+# sitting in a file and can be read in a second -- rather than discovered on a
+# board.
+#
+# It happened over TFTP on 2026-08-20 and cost the rpi4 two power cycles. The
+# medium was incidental; firmware asks the same questions of a disk.
+#
+#   image_check_boot_files <id> <machine>
+image_check_boot_files() {
+    local id="$1" machine="$2" disk offset dtb work out
+
+    dtb=$(image_dtb_for "$machine")
+    [ -n "$dtb" ] || { debug "no device tree known for '$machine'; not checking boot files"; return 0; }
+
+    disk=$(image_disk "$id"); [ -f "$disk" ] || return 0
+    offset=$(image_boot_offset "$disk") || return 0
+
+    command -v mcopy >/dev/null 2>&1 || { debug "no mtools; not checking boot files"; return 0; }
+
+    work=$(mktemp -d)
+    if ! MTOOLS_SKIP_CHECK=1 mcopy -s -i "$disk@@$offset" "::*" "$work/" 2>/dev/null; then
+        rm -rf "$work"
+        debug "could not read $id's boot partition; not checking boot files"
+        return 0
+    fi
+
+    # --serial "": on a disk the firmware asks for the plain name. The TFTP
+    # serial-directory fallback is a property of the transport, and letting it
+    # fire here would pass a tree that a disk boot would not.
+    out=$(python3 "$WK_ROOT/boot/check-boot-files.py" \
+              --root "$work" --tftpd "$WK_ROOT/boot/wk-tftpd.py" \
+              --dtb "$dtb" --serial "" 2>&1) && { rm -rf "$work"; return 0; }
+    rm -rf "$work"
+
+    die "$id's boot partition is missing files a $machine needs to reach its kernel:
+
+$(printf '%s\n' "$out" | sed 's/^/      /')
+
+    Firmware that cannot find a kernel halts. It does not move on to the next
+    BOOT_ORDER entry and it does not come back, so writing this would cost a
+    trip to the board rather than a reboot.
+
+    Nothing has been written. The image is the problem, not the disk: rebuild
+    it, or check what its config.txt names against what its boot partition
+    holds."
+}
+
+# The device tree a board asks its firmware for. A fact about the machine, and
+# the one thing image_check_boot_files cannot read out of the image.
+image_dtb_for() {
+    case "$1" in
+        rpi5) echo bcm2712-rpi-5-b.dtb ;;
+        rpi4) echo bcm2711-rpi-4-b.dtb ;;
+        rpi3) echo bcm2710-rpi-3-b.dtb ;;
+        *)    echo "" ;;
+    esac
+}
+
+# Every class image_root_class can return needs a word here. `portable` and
+# `network` were missing, so `wk image write --dry-run` described the commonest
+# root of all -- a LABEL=, which is exactly the kind that works anywhere -- as
+# "an unrecognised kind of device", while the check on the very next line was
+# passing it deliberately.
 image_root_word() {
     case "$1" in
-        mmc)  echo "an SD card (/dev/mmcblk*)" ;;
-        usb)  echo "a USB or SCSI disk (/dev/sd*)" ;;
-        nvme) echo "an NVMe disk" ;;
-        *)    echo "an unrecognised kind of device" ;;
+        mmc)      echo "an SD card (/dev/mmcblk*)" ;;
+        usb)      echo "a USB or SCSI disk (/dev/sd*)" ;;
+        nvme)     echo "an NVMe disk" ;;
+        portable) echo "any device it is written to" ;;
+        network)  echo "a network root, not a local device" ;;
+        *)        echo "an unrecognised kind of device" ;;
     esac
 }
 

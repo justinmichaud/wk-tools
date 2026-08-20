@@ -34,6 +34,16 @@ records:
   policy in force. Fan-max is measurement hygiene, not tuning: it keeps a run out
   of thermal throttle so runs are repeatable. The two profiles must never merge
   into one series.
+- **`kernel_arch`** — the width of the *kernel* the run was made under, beside
+  the `arch` of the build that `cmd/bench` already records. They are not the
+  same fact, and only recording the second makes two incomparable runs look
+  like one series: an armhf build on an armhf kernel and an armhf build on an
+  arm64 kernel both report `arch=armhf`. The fleet has boards where both are
+  physically possible (the rpi5's kernel is `CONFIG_COMPAT=y`), so this is a
+  real confusion rather than a hypothetical one. Runs whose `kernel_arch`
+  differs are two series — the same rule as `bench_host` and `root_device`.
+  See `docs/HANDOFF-vocabulary.md`, "32-bit and 64-bit", for why a 32-bit run
+  is a 32-bit *system* rather than a 32-bit process.
 - **`root_device`** — model, link speed, TRIM/rotational. The rpi4 starts on a
   USB stick with an SSD to follow, and cheap flash contributes variance rather
   than a subtractable bias, so stick runs are provisional and are not comparable
@@ -111,6 +121,243 @@ state, and firmware state is shared between the two roles. Overclocking the
 workstation permanently to benchmark it occasionally is the thing this split
 was meant to avoid, so the answer is probably that the overclock stays in
 `config.txt` on the boot medium the image supplies, not in the EEPROM.
+
+### rpi4 — netboot is the wrong lane for this, on the hardware's own evidence
+
+Scoped 2026-08-20, after the first real netboot of an image onto the fleet's
+rpi4. The goal it is scoped against: **build an image for the rpi4 and benchmark
+it end to end with no human in the room, and without the delivery mechanism
+showing up in the numbers.** Those two constraints between them rule netboot out
+for this lane, and neither is a matter of taste.
+
+**No human in the room rules out netboot's failure mode.** Once the bootloader
+has pulled `start4.elf` over the network and executed it, `BOOT_ORDER` is spent.
+A second stage that cannot then find its kernel *halts* — no retry, no
+fall-through to the SD card, nothing reachable over the wire. That is not a
+theoretical tail: it happened twice on 2026-08-20 and cost two power cycles, the
+first from a resolver bug and the second from a stale copy of the fixed
+resolver. Both causes are now guarded (`boot/check-boot-files.py`,
+`check_helper_current`), but the *class* is not closable: a server that dies
+mid-transfer, or a dropped packet at the wrong moment, lands in the same place.
+An unattended lane cannot have a state whose only exit is a hand on the power
+supply.
+
+Local boot fails better rather than never. A kernel that cannot find its root
+panics, and these images carry `panic=10`, so the board reboots; if the boot
+medium is not bootable at all the firmware moves to the next `BOOT_ORDER` entry
+and lands on the SD card, reachable. Both exits are automatic.
+
+**Not distorting the numbers rules out the network root.** "Storage: what the
+image is" in `docs/HANDOFF-netboot.md` already phases this correctly — a network
+root for *profiling*, a RAM root for *benchmarking* — and the reason is exactly
+this constraint: an NFS root does I/O, over the same interface, during the
+measurement.
+
+But the RAM root is not available here either. It is realistic on the rpi5 (16
+GB) and on moose (115 GB free); **the rpi4 has 2 GB**, and a browser benchmark
+is the workload. The rpi3, at 931 MB, already needs swap to finish Speedometer.
+A squashfs held in RAM plus an overlay would leave something like a gigabyte for
+the thing being measured, and a run that swaps is a run whose number means
+nothing.
+
+So for the rpi4, and for the rpi4 specifically, both network options are out and
+what is left is the one the netboot handoff already noted was never blocked:
+**write the image to a local device over ssh and boot it.** No server, no root
+mechanism, no privilege — and no network in the boot path or the measurement.
+
+**The shape, and the one thing it needs that does not exist yet.**
+
+- The image goes on the **USB stick** (`/dev/sda`, 29.5 GB, USB 3.0 — faster and
+  far more consistent than the SD card, which matters for a benchmark). The
+  **SD card stays the rescue role**: a Yocto image that boots, joins the LAN and
+  answers ssh.
+- `BOOT_ORDER` becomes **USB → SD → restart** (`0xf14`). Today it is `0xf412`
+  — network, SD, USB — which was right for the netboot experiment and is wrong
+  for this: the SD is tried before the USB, so an image on the stick would never
+  boot. This is one `wk pi` write, and `boot/rpi-eeprom.sh` can do it without
+  eeprom tooling on the board.
+- **Arming is the stick's boot partition**, the way arming is the server's
+  content for netboot. The firmware will not boot a device with no `start4.elf`,
+  so renaming that one file is a complete, instant, reversible arm — and the
+  disarm can be done from either role, since the rescue role can mount the
+  stick's FAT partition.
+- **The one-shot comes back for free.** The image renames its own `start4.elf`
+  away on boot, so any later reboot falls through to the SD card. That is the
+  same "reverts by itself unless claimed" property `wk boot <machine> --keep`
+  relies on for the rpi5, reached without the Pi 5's `set_reboot_order` — which
+  is the primitive `boot/pi-netboot.sh` correctly says the Pi 4 does not have.
+  It wants a driver of its own (`boot/pi-usb.sh`); `pi-netboot.sh` stays where
+  it is, for the profiling lane.
+
+**What netboot is still for.** Nothing above wastes it. Profiling wants a root
+that is a directory on the server, editable in place, and does not care about
+storage noise; that is phase 1 of "Storage: what the image is" and netboot is
+how it gets there. The two lanes want opposite things and should stop sharing a
+mechanism.
+
+**Already landed toward this, 2026-08-20:** `wk image write` refuses an image
+whose boot partition cannot get the firmware as far as a kernel
+(`image_check_boot_files`), checked from the image file before anything is
+written. That is the pre-flight that makes an unattended local boot safe, and it
+is the same check `wk serve` runs — firmware asks a disk the same questions it
+asks a TFTP server.
+
+**Built 2026-08-20, all of it offline — the board was halted at the time and
+none of this has met hardware yet:**
+
+- **`wk pi boot-order <host> <order>`**, with `netboot-first`, `netboot-last`,
+  `usb-first` and `local`. One writer still: `netboot-enable` is now a spelling
+  of the same function rather than a second implementation, because BOOT_ORDER
+  is firmware state shared by every role and two commands that can both write
+  it is two places for a wrong value to come from. The orders are derived from
+  whatever is already there rather than written as constants, so a board with a
+  nibble this does not know about keeps it, and applying one twice is a no-op.
+- **`boot/pi-usb.sh`**, and a third arming model to go with it. The other two
+  put the intent in firmware (`one-shot`) or in the server's content
+  (`server`); `medium` puts it on the disk the machine boots from — the only
+  one of the three that is both readable and writable from the other role, so
+  `--status` reports the arming as evidence rather than as a claim.
+- **The self-disarm**, which is what makes a file-based arming behave like a
+  one-shot. `wk image build` installs it as a `sysinit.target` unit, so the
+  image parks its own `start4.elf` before it does anything else and every later
+  reboot — clean, panic, watchdog or power cut — lands on the SD card.
+- **`force_turbo=1` with `arm_freq=arm_freq_min=1500` and `arm_boost=0`**, in
+  `image/rpi4-perf/config.txt.append`. Pinned rather than fast: 1800 needs the
+  boost clock, and a Pi 4 that throttles partway through a run has produced two
+  measurements and reported one.
+- **`wk-no-swap.service`**, which is a guard and not a change — the Ubuntu base
+  ships no swap, and the point is that swap arriving later would otherwise show
+  up as variance nobody could explain.
+
+**A bug found while building it, and worth knowing about beyond this lane.**
+`user_data()` in `cmd/image` is an *unquoted* heredoc, because it interpolates
+the profile's values — so its lines are shell input, including the ones that
+look like YAML comments. Backticked command names in prose were being executed
+on the build host: three `systemd-run` invocations per build, and the comment
+explaining the cloud-init deadlock had lost the name of the thing that caused
+it. Escaped, and `wk selftest` now refuses an unescaped backtick in that
+heredoc. `install_unit` also grew a target argument in the same pass: nothing
+ever runs `systemctl enable` here, so a unit's own `[Install] WantedBy=` is
+inert and a unit asking for `sysinit.target` was being linked from
+`multi-user.target.wants` — an ordering systemd cannot satisfy.
+
+### On hardware, 2026-08-20 — the lane runs, and the disarm was wrong twice
+
+The whole chain was exercised on the board: `wk pi boot-order rpi4-test
+usb-first` wrote `0xf14` through recovery.bin (bootloader 2023-01-11 ->
+2026-05-17, `TFTP_IP` removed), `wk image write` put a 4.6 GB image on the stick
+and verified it by read-back, `wk boot rpi4` armed and rebooted, and **the image
+came up on `/dev/sda2` with its own identity marker**. `wk boot rpi4 --status`
+reported `image rpi4-perf-...` from evidence. The self-disarm had run.
+
+Four facts corrected against hardware, and two of them matter beyond this board:
+
+- **The rpi4 is a 4 GB Pi 4B Rev 1.5, not 2 GB.** `boot/machines.sh` said 2 GB
+  and this file argued from it. The USB-local decision does not move -- it rests
+  on netboot's halt, which is independent of RAM -- but the RAM-root option is
+  more plausible than it was written up as, and should be re-costed if the
+  profiling lane ever wants it.
+- **`force_turbo` works**: `measure_clock arm` reads 1500345728 at idle, and
+  `get_throttled` was `0x0` at 48.7 C through the run.
+- **The perf sysctls were never taking effect, and this affects the rpi5 image
+  too.** `systemd-sysctl` ran at 18:33:04; cloud-init wrote
+  `/etc/sysctl.d/90-wk-perf.conf` at 18:33:21. Seventeen seconds too late, so
+  `perf_event_paranoid` was still 4 on an image whose entire purpose is that it
+  is -1 -- and on a one-shot image, "takes effect on the second boot" means
+  never. The file is installed into the rootfs at build time now (`install_file`),
+  which is the lesson the watchdog already taught and this had not learned.
+  **The rpi5's `-1` should be re-checked**: this file records it as confirmed,
+  and the same ordering applies there.
+- **`image_addr` could not find the image.** It looks the board up by MAC in the
+  neighbour table and the rpi4 had no `MACH_MAC`; its fallback is the image's
+  mDNS name, which cloud-init installs and so is absent for the first several
+  minutes of exactly the boot worth watching. The MAC is declared now, and
+  `image_addr` prefers a REACHABLE neighbour entry -- this board takes a fresh
+  DHCP lease per boot and was observed holding three at once, two of them dead.
+
+**And the disarm was wrong, in the same way twice.** The first version renamed
+`start4.elf` aside, reasoning that a device the firmware cannot boot is a device
+it skips. The observation behind that was real but was of a *different state*: a
+stick carrying one **ext4** partition and no FAT at all, which does skip. A
+stick with a valid FAT boot partition that is merely missing `start4.elf`
+**halts the firmware** -- the netboot failure again, reached from a third
+direction, and it cost the board another power cycle.
+
+The disarm now reproduces the state that was watched skipping: partition 1's MBR
+type byte flips 0x0c -> 0x83, so the firmware finds no boot filesystem on the
+device at all. One byte at offset 450, written with `dd conv=notrunc` rather
+than through `sfdisk`, because the self-disarm runs from that same disk with
+partition 2 mounted as root -- a tool that rewrites the table asks the kernel to
+re-read it, and a surgical write asks nothing of anybody. `wk selftest` checks
+the offset, the round trip, and that the write does not truncate the device.
+
+**The rule this board has now taught three times, worth stating once:** Pi
+firmware that finds a boot medium and then cannot complete from it *halts*. It
+only falls through when the medium is not bootable at all. Every arming
+mechanism here has to produce the second state, never the first.
+
+### The lane closed, 2026-08-20 evening
+
+With the partition-type disarm in place the whole cycle ran clean and with no
+hands on the board:
+
+    wk image build rpi4-perf                        2.8G, 47 s from a cached base
+    wk image write <id> --disk rpi4:/dev/sda        4642 MB, verified by read-back,
+                                                    left disarmed
+    wk boot rpi4                                    armed, rebooted
+    ... image up on /dev/sda2, self-disarmed ...
+    wk boot rpi4 --back                             back on the SD card in 84 s
+
+and then the same cycle again with nothing touching it at all, which is the
+property the lane exists for: armed 18:53, image up 18:55:30, the 900 s
+self-return watchdog fired at ~19:11:30, and the board was back in its rescue
+role at 19:12:20. No command, no console, no hands.
+
+Verified inside the running image, which is the point of all of it:
+
+    kernel.perf_event_paranoid = -1      (was 4 before install_file)
+    kernel.kptr_restrict = 0
+    scaling_governor = performance
+    measure_clock arm = 1500345728       pinned, at idle
+    get_throttled = 0x0                  at 51.1 C
+    swap: none
+    / on /dev/sda2                       no network anywhere in the boot path
+    /dev/sda partition 1 type = 0x83     the image disarmed itself on the way up
+    start4.elf still present             the disarm destroys nothing
+
+Two more bugs found in the process, both of the same shape -- a mechanism that
+looked right and had never been exercised twice:
+
+- **`i_ssh` pinned the image's host key, and an image's host key changes every
+  build.** `wk image build` makes a fresh rootfs, ssh generates a fresh key in
+  it, and the next image boots at the same address. `accept-new` accepts keys
+  it has never seen, not keys that have moved -- so the *second* image ever
+  booted on a machine was refused, and `wk boot --status` called a running,
+  pingable, healthy board unreachable. Nothing is pinned on that channel now:
+  a key with no continuity across builds cannot authenticate anything, and
+  `/etc/wk-image` says *which* image answered, which is the stronger statement.
+  **The rpi5 has the same channel and will hit this on its second image.**
+- **The self-disarm command was interpolated into a single-quoted systemd
+  `ExecStart` and contained single quotes of its own**, which close that string
+  early. Found by reading the unit out of a built image; the only other way it
+  was going to surface was a board that did not come back. `wk selftest`
+  asserts the absence now.
+
+**The residual hands-on case, stated rather than papered over.** An image that
+hangs *between kernel start and sysinit* never reaches its self-disarm, so the
+stick stays armed and a power cycle re-enters it. `panic=10` covers kernel-level
+failure and the watchdog covers anything after multi-user, but that window is
+real. It is far narrower than netboot's — which halts on any transfer hiccup, on
+every boot — and it is the one place this design is weaker than the rpi5's, whose
+one-shot is consumed by the boot *attempt* rather than by the boot succeeding.
+Closing it properly would mean disarming from the initramfs.
+
+**Still to build:** `bench_host=image` itself, which none of this has touched —
+the runner, the fields in "Fields the image runner has to record", and getting a
+WebKit build onto a booted image without reimaging it. Then the remaining
+measurement question this lane has not answered: the Pi 4 throttles under
+sustained load and nothing yet reads the firmware's throttled flags, so a run
+that thermally degraded is currently reported as a run.
 
 ### moose — UEFI network boot, or the BMC's virtual media
 

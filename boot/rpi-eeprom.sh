@@ -149,6 +149,25 @@ eeprom_bootfs() {
     echo "$found"
 }
 
+# Remove a consumed update from the boot partition.
+#
+# recovery.bin renames itself to RECOVERY.000 once it has flashed, but nothing
+# clears the pieeprom.upd and pieeprom.sig it read -- rpi-eeprom-update does
+# that itself on the next run, and there is no rpi-eeprom-update here. Left
+# behind they are inert (the bootloader compares versions and skips an update
+# it already has) but not harmless to read: a board carrying a staged update it
+# has already applied looks exactly like a board with one still pending.
+#
+# Called only when the running firmware already reports what was asked for,
+# which is the one moment it is certain the staged files have been consumed.
+eeprom_clear_staged() {
+    local bootfs
+    bootfs=$(eeprom_bootfs 2>/dev/null) || return 0
+    rsh "sudo rm -f '$bootfs/pieeprom.upd' '$bootfs/pieeprom.sig' \
+                    '$bootfs/recovery.bin' '$bootfs'/RECOVERY.0* '$bootfs'/recovery.0* && sync" \
+        >/dev/null 2>&1 || return 0
+}
+
 # Build the update image and stage it. $1 is the configuration text.
 eeprom_stage_recovery() {
     local config="$1" dir work bootfs sum_local sum_remote f

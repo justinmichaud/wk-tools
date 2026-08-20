@@ -1,0 +1,35 @@
+# --- wk image: rpi4-perf -----------------------------------------------------
+# Appended by `wk image build` to the base image's own config.txt. The base's
+# copy is what makes the base bootable, so this only ever adds.
+
+[all]
+# Pin the ARM clock, because a benchmark measures whatever the clock was doing.
+#
+# The Pi 4 idles at 600 MHz and ramps on demand. A run that starts cold spends
+# its first samples on a CPU that is still climbing, and DVFS ramping inside a
+# measurement is a source of variance that has nothing to do with the code
+# under test -- which is why `jsc-jetstream-compare` treats pinning the
+# frequency as mandatory rather than as tuning.
+#
+# force_turbo=1 holds the ARM clock at arm_freq instead of scaling it, and
+# arm_freq_min=arm_freq removes the floor the firmware would otherwise scale
+# back to. Both, not either: force_turbo alone still leaves a min the firmware
+# is entitled to use in some states.
+force_turbo=1
+arm_freq=1500
+arm_freq_min=1500
+
+# 1500 and not 1800, deliberately. 1800 needs `arm_boost=1` -- which the Ubuntu
+# base sets in its own `[pi4]` block -- and the boost clock is the one this
+# board is least able to hold: a Pi 4 with no heatsink throttles under sustained
+# load, and a run that throttles partway is worse than a slower run that does
+# not, because it is quietly two measurements. 1500 MHz is this board's rated
+# base clock, so it is the fastest number it can be expected to hold flat.
+#
+# `[all]` comes after the base's `[pi4]` section, so this wins.
+arm_boost=0
+
+# The overclock deliberately does NOT live here, and must never be written to
+# the EEPROM either: BOOT_ORDER and the SDRAM timings are firmware state shared
+# by every role this board has. Per-image is the only place an overclock can go
+# without following the board into its rescue role.

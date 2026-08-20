@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Will the firmware find everything it needs in this TFTP root?
+"""Will the firmware find everything it needs in this boot filesystem?
+
+Asked of a TFTP root and of an image's boot partition alike, because it is the
+same question either way: firmware reads config.txt, follows `os_prefix`, and
+looks for a kernel.  The only difference is the spelling -- over TFTP every
+request carries a serial-number directory, and on a disk none of them do, which
+is what `--serial ""` is for.
 
 Why this exists, and why it is a hard refusal rather than a warning.
 
@@ -30,15 +36,39 @@ the one the firmware asks: "if I request this name, do I get bytes?"
 """
 
 import argparse
+import importlib.machinery
 import importlib.util
 import os
 import sys
 
 
 def load_resolver(script):
-    spec = importlib.util.spec_from_file_location("wk_tftpd", script)
+    """Import `resolve` out of the server that is actually going to run.
+
+    An explicit SourceFileLoader rather than letting spec_from_file_location
+    infer one: on the privileged path the server is
+    /usr/local/libexec/wk-tftpd, a root-owned copy with no .py extension, and
+    inference returns a spec with no loader for a name Python does not
+    recognise as source.
+
+    Pointing this at the repo's copy when the installed one will serve is the
+    whole failure this argument exists to prevent -- see cmd/serve.
+    """
+    loader = importlib.machinery.SourceFileLoader("wk_tftpd", script)
+    spec = importlib.util.spec_from_file_location("wk_tftpd", script, loader=loader)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except SystemExit:
+        # The server called main() at import. Every copy new enough to be
+        # importable guards that call, so this *is* the staleness signature --
+        # and it is worth naming rather than letting argparse's usage message
+        # be the whole of the diagnosis.
+        raise SystemExit(
+            f"{script} ran its main() on import, so it predates the importable "
+            f"guard in boot/wk-tftpd.py. It is a stale copy: re-run "
+            f"'./setup --stage quiesce' to reinstall it."
+        )
     return module.resolve
 
 
@@ -89,16 +119,30 @@ def wanted_files(config, model_dtb):
     """
     prefix = config.get("os_prefix", "")
 
-    kernel = config.get("kernel")
-    if not kernel:
-        # The firmware's own default, which depends on the width it was told to
-        # boot. Both spellings are checked by the caller as alternatives.
-        kernel = "kernel8.img" if config.get("arm_64bit") == "1" else "kernel7l.img"
+    if "kernel" in config:
+        # Named explicitly: that file and no other. The firmware will not look
+        # for anything else, so neither should this.
+        kernels = [prefix + config["kernel"]]
+    else:
+        # Not named, so the firmware picks from its own defaults by inspecting
+        # what is there -- on BCM2711 a bare config.txt with a `kernel8.img`
+        # next to it boots 64-bit without `arm_64bit=1` being set anywhere.
+        # The WebKit Dev@CI Yocto image is exactly that shape, and deriving one
+        # expected name from `arm_64bit` refused it as unbootable when it boots
+        # this board every day.
+        #
+        # So: any of the default names satisfies this. The check's question is
+        # "is there a kernel for the firmware to find", not "which one will it
+        # pick" -- guessing the second wrongly costs a refused write, while the
+        # failure being guarded against is *no kernel at all*, which this still
+        # catches.
+        kernels = [prefix + k for k in
+                   ("kernel8.img", "kernel7l.img", "kernel7.img", "kernel.img")]
 
     files = [
         ("second-stage firmware", ["start4.elf"]),
         ("firmware fixup", ["fixup4.dat"]),
-        ("kernel", [prefix + kernel]),
+        ("kernel", kernels),
         ("device tree", [prefix + model_dtb]),
     ]
     if "initramfs" in config:
@@ -114,16 +158,34 @@ def wanted_files(config, model_dtb):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", required=True, help="the TFTP root to check")
-    ap.add_argument("--tftpd", required=True, help="path to wk-tftpd.py")
+    ap.add_argument("--tftpd", required=True,
+                    help="the tftp server that will actually serve this root")
     ap.add_argument("--dtb", default="bcm2711-rpi-4-b.dtb",
                     help="the device tree the target board will ask for")
     ap.add_argument("--serial", default="0badc0de",
                     help="a stand-in serial directory, so the check goes through "
-                         "the same prefixed path the firmware uses")
+                         "the same prefixed path the firmware uses over TFTP. "
+                         "Empty for a boot filesystem on a disk, where firmware "
+                         "asks for the plain name and there is no prefix to "
+                         "fall back from")
+    ap.add_argument("--resolve", metavar="NAME",
+                    help="instead of checking the tree, print what this one "
+                         "request maps to, relative to the root, and nothing at "
+                         "all if it maps to no file. For asking the resolver a "
+                         "direct question -- wk selftest does exactly that.")
     args = ap.parse_args()
 
     root = os.path.realpath(args.root)
     resolve = load_resolver(args.tftpd)
+
+    def ask(name):
+        """One request, spelled the way the firmware would spell it here."""
+        return resolve(root, f"{args.serial}/{name}" if args.serial else name)
+
+    if args.resolve is not None:
+        path, _ = resolve(root, args.resolve)
+        print(os.path.relpath(path, root) if path else "")
+        return 0
 
     config_path = os.path.join(root, "config.txt")
     if not os.path.isfile(config_path):
@@ -136,7 +198,7 @@ def main():
     missing = []
     for what, candidates in wanted_files(config, args.dtb):
         for name in candidates:
-            path, _ = resolve(root, f"{args.serial}/{name}")
+            path, _ = ask(name)
             if path is not None:
                 break
         else:

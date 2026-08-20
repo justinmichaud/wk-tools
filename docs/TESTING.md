@@ -1548,6 +1548,45 @@ the reader (which must never mistake intent for evidence).
       to the root, and the log says which happened — the board's serial is not
       knowable before it first asks, and this is the part of Pi netboot most
       often got wrong from a machine with no console
+- [V] that fallback **keeps the rest of the path**: `<serial>/current/vmlinuz`
+      is retried as `current/vmlinuz`, not as `vmlinuz`. Stripping to the
+      basename made the kernel of an `os_prefix=` image unreachable and halted
+      the rpi4 twice on 2026-08-20
+- [V] the fallback never answers with a *different* file: `<serial>/current/
+      overlays/README` must not be served the boot partition's own `README`
+- [V] the fallback does not fire when the leading directory really exists, so a
+      populated serial directory is used as-is
+- [V] `wk serve` refuses when the boot files a client will ask for are not all
+      reachable — serving half a tree spends the client's `BOOT_ORDER` on the
+      network and then halts it, which costs a trip to the device where serving
+      nothing costs nothing
+- [V] that check resolves through the server that will actually run, not
+      through the copy in the checkout
+- [V] `wk serve` refuses when the installed privileged helper differs from
+      `boot/wk-tftpd.py` — the root-owned copy is only refreshed by `./setup`,
+      and serving a stale one is how a fixed bug reaches a board anyway
+- [V] the same question is asked of a **disk**: `wk image write` refuses an
+      image whose boot partition cannot get the firmware as far as a kernel,
+      before writing anything — firmware that finds no kernel halts, where a
+      kernel that finds no root reboots
+- [V] the rpi4's arm/disarm is one byte of the MBR at offset 450, it round-trips
+      0x0c <-> 0x83, and it neither truncates the device nor moves anything
+      else in the sector — a stick with a FAT boot partition and no
+      `start4.elf` **halts** the firmware rather than being skipped, which is
+      why the disarm removes the partition type and not the file
+- [V] a driver's self-disarm command contains no single quote — it is
+      interpolated into a single-quoted systemd `ExecStart`, where one would
+      close the string early and leave three fragments where a command should
+      be
+- [V] a freshly built image's partition 1 is type 0x0c, so `wk image write`
+      leaves the stick in the armed state the driver expects
+- [V] the cloud-init seed's heredoc contains no unescaped backtick — it is an
+      unquoted heredoc, so prose in it is shell input: three `systemd-run`
+      invocations per build ran on the workstation and left holes where the
+      words had been
+- [V] a `config.txt` that names no `kernel=` and no `arm_64bit=` is accepted
+      when any firmware-default kernel is present — the Dev@CI Yocto image is
+      that shape and boots the rpi4 daily
 - [V] path traversal is refused, including via a serial-directory prefix
       (`deadbeef/../../etc/passwd`)
 - [V] a write request is refused explicitly rather than ignored — the server

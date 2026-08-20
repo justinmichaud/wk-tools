@@ -17,10 +17,21 @@
 #   MACH_PROFILE  its default image profile
 #   MACH_NOTE     one line, for the listing
 
+# Reading the bootloader's configuration, on a board that may have no eeprom
+# tooling. vcgencmd is part of the VideoCore userland every Pi image carries;
+# rpi-eeprom-config is a Raspberry Pi OS package, and asking it first is how
+# the netboot driver used to end up with an empty answer on the fleet's own
+# rpi4 -- reporting "assuming it netboots" about the board whose boot order was
+# in question. Both print the same text.
+#
+# Here rather than in one driver because two of them read it. See
+# boot/rpi-eeprom.sh for the writing half.
+EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-config 2>/dev/null || true'
+
 machine_list() {
     cat <<'EOF'
 rpi5   Raspberry Pi 5, WiFi only. USB one-shot; the NVMe workstation is untouched.
-rpi4   Raspberry Pi 4 (2 GB), on the LAN. Netboots; armed from the server side.
+rpi4   Raspberry Pi 4 (4 GB), on the LAN. Boots its USB stick; SD is the rescue.
 rpi3   Raspberry Pi 3, on a direct cable. Netboots; needs real DHCP with option 43.
 mbp    This Mac. Boots a benchmark volume; the selection is hands-on (Apple Silicon).
 benchvm A macOS guest standing in for a benchmark install. Rehearses the path, not the number.
@@ -59,14 +70,34 @@ machine_load() {
         # names stay apart on purpose, so that `Host rpi4` reads as the mistake
         # it is rather than as an alternative spelling of this one.
         MACH_SSH="${WK_RPI4_SSH:-rpi4-test}"
-        MACH_DRIVER=pi-netboot
+        # pi-usb, not pi-netboot, and the reason is the benchmark lane rather
+        # than a preference: netboot puts the root on the network (so in the
+        # measurement) and has a failure that halts the board (so needs a
+        # person). Neither is survivable for an unattended benchmark on this
+        # machine, and the RAM-root answer that fixes both wants more than the
+        # 2 GB this board has. docs/HANDOFF-benchmarking.md, "rpi4", has it all.
+        #
+        # boot/pi-netboot.sh stays, for the profiling lane, which wants the
+        # opposite trade -- a root that is a directory on the server, editable
+        # in place, with storage noise nobody is measuring. When that lane is
+        # built this entry needs a way to say which mechanism a given run
+        # wants; today it says the one the fleet actually uses.
+        MACH_DRIVER=pi-usb
         MACH_DEVICE=/dev/sda
         MACH_ROOT=/dev/mmcblk0p2
         MACH_PROFILE=rpi4-perf
+        # The radio -- here the wired NIC -- and the reason the image is
+        # findable at all: it boots the same hardware, so it presents the same
+        # MAC and image_addr can answer "where is the image" from the driving
+        # machine's neighbour table. Without it the only name is the image's
+        # own mDNS, which on this board is installed by cloud-init and so is
+        # not up for the first several minutes of exactly the boot that wants
+        # watching. Declared hardware identity, like MACH_DEVICE.
+        MACH_MAC=d8:3a:dd:aa:42:8a
         # A dedicated test device, not a workstation: that is what licenses a
         # permanent network-first BOOT_ORDER, and cmd/pi reads it from here.
         MACH_ROLE=test-device
-        MACH_NOTE="Raspberry Pi 4 (2 GB), netboot"
+        MACH_NOTE="Raspberry Pi 4 (4 GB), USB stick, SD rescue"
         ;;
     rpi3)
         MACH_SSH="${WK_RPI3_SSH:-rpi3}"
@@ -177,8 +208,20 @@ m_reachable() { m_ssh true >/dev/null 2>&1; }
 image_addr() {
     local a=''
     [ -n "${WK_IMAGE_HOST:-}" ] && { printf '%s' "$WK_IMAGE_HOST"; return 0; }
-    [ -n "${MACH_MAC:-}" ] && a=$(ip neigh show 2>/dev/null \
-        | awk -v m="$MACH_MAC" 'tolower($5) == tolower(m) && $1 ~ /^[0-9]+\./ { print $1; exit }')
+    # Entries this MAC has held before are still in the table, and a board that
+    # takes a fresh DHCP lease per boot leaves several -- the rpi4 was observed
+    # holding three at once, two of them dead. So the state word decides:
+    # REACHABLE first, then anything the kernel still considers usable, and
+    # FAILED/INCOMPLETE never (those are entries for addresses that answered
+    # nothing when last asked, which is precisely a stale lease).
+    if [ -n "${MACH_MAC:-}" ]; then
+        local table
+        table=$(ip neigh show 2>/dev/null \
+            | awk -v m="$MACH_MAC" 'tolower($5) == tolower(m) && $1 ~ /^[0-9]+\./')
+        a=$(printf '%s\n' "$table" | awk '/REACHABLE/ { print $1; exit }')
+        [ -n "$a" ] || a=$(printf '%s\n' "$table" \
+            | awk '!/FAILED|INCOMPLETE/ && NF { print $1; exit }')
+    fi
     [ -n "$a" ] || a="$(image_hostname).local"
     printf '%s' "$a"
 }
@@ -189,13 +232,34 @@ image_hostname() {
 }
 
 # The image's host key is not the workstation's, and never will be: they are
-# different installs on the same hardware, and on the same address. A shared
+# different installs on the same hardware, on the same address. A shared
 # known_hosts would report that as the man-in-the-middle warning it looks
-# exactly like, so images get their own file.
+# exactly like.
+#
+# A separate file was the first answer and it was not enough, because the key
+# does not change *once* -- it changes every build. `wk image build` produces a
+# fresh rootfs, ssh generates a fresh host key in it, and the next image boots
+# at the same address as the last. So the second image ever booted on a machine
+# arrived with a changed key, `accept-new` refused it (that mode accepts keys
+# it has never seen, not keys that have moved), and `wk boot --status` reported
+# a running, healthy, pingable board as unreachable. Watched happen on the
+# rpi4, 2026-08-20.
+#
+# So nothing is pinned here. That is not a shrug: a key with no continuity
+# across builds cannot authenticate anything, and pinning one can only produce
+# false alarms of exactly the kind that just cost an hour. What identifies an
+# image is `/etc/wk-image`, which b_probe reads and which names the build --
+# and that is a stronger statement than a key would be, because it says *which*
+# image answered rather than merely that something did.
+#
+# The same conclusion `dotfiles/ssh/config` already reached for the rescue
+# role: "the host key is deliberately not pinned. The whole point of this board
+# is that it boots a different image on demand, and each one brings its own."
 i_ssh() {
     ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" \
-        -o StrictHostKeyChecking=accept-new \
-        -o UserKnownHostsFile="$WK_STORE/known_hosts-images" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
         "$(id -un)@$(image_addr)" "$@"
 }
 
