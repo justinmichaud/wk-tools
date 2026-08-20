@@ -1,10 +1,5 @@
-# HANDOFF — helix as a real editor on the rpi5
+# HANDOFF — helix
 
-Make helix work with dotfiles configured to cover most of what zed provides —
-in particular an easy way to view and edit git changes across multiple files.
-The motivation is the rpi5: zed cannot run there with acceptable performance,
-helix can, so this decides the development experience on that machine.
+Make helix work with dotfiles configured. It should be installed in all workspaces, containers, and remotes with my dotfiles. armhf will take some special work.
 
-Starting points: `container/helix/` holds the config firstrun installs into
-workspaces; the rpi5 is reached over the tailnet (`wk pi setup rpi5`,
-`host/linux/rpi5/`).
+It should be configured with sane defaults for perfomance and usability for JSC work. Do research on what other users set up. It should also have lazygit integrated, and help docs explaining how to do common tasks on Webkit for folks coming from zed.
