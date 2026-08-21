@@ -75,7 +75,7 @@ Two consequences for this handoff:
 
 - **The multiarch cross path is deliberately gone.** `3d8e55c` deletes
   `images/wkdev_sdk/cross/armhf/*`, so on this branch the sysroot flow is the only
-  cross mechanism. The table below still lists `wkdev-sdk:24.04_arm32_arm64` (an
+  cross mechanism. The table above still lists `wkdev-sdk:24.04_arm32_arm64` (an
   arm64 image with armhf multiarch) as belonging here; on `-oc` that image is
   irrelevant and `wkdev-sysroot:*` is the mechanism. Keep `--arch armhf` as the
   native-workspace word and let `--sysroot` mean this flow, which is what the
@@ -95,13 +95,15 @@ ppc64el.
 
 ## The test target, decided 2026-08-19
 
-The thing to run a cross-built binary on is the **netbooted rpi5 image**
-(`docs/HANDOFF-netboot.md`), which now lands before this step: a slim distro
+The thing to run a cross-built binary on is the **rpi5's bench system** —
+`perf-linux-rpi5`, which now exists and lands before this step: a slim distro
 with no SDK on it, which is exactly the condition a sysroot cross build has to
-satisfy, and a GTK MiniBrowser is the payload. Build the image and the sysroot
-from the *same tree* and the ABI question answers itself rather than becoming
-a debugging session — that is the cheap version of this step, and it is only
-cheap because netboot went first.
+satisfy, and a GTK MiniBrowser is the payload. (The decision named it "the
+netbooted rpi5 image"; the mechanism has since moved to a USB one-shot —
+`wk boot rpi5` — while netboot serves the other boards. The condition is
+unchanged.) Build the system and the sysroot from the *same tree* and the ABI
+question answers itself rather than becoming a debugging session — that is
+the cheap version of this step.
 
 ## Where it plugs in
 

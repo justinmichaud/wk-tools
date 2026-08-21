@@ -611,12 +611,12 @@ utc_to_epoch() {
 #
 # Overridable so both can be exercised without a second machine -- the runner
 # was tested by pointing it at a marker in a scratch directory, which is the
-# only way to reach the benchmark role's code path from the workstation role.
+# only way to reach bench mode's code path from host mode.
 WK_IMAGE_MARKER="${WK_IMAGE_MARKER:-/etc/wk-image}"
 
-# The image's own id, or empty in a normal role.
+# The bench system's own id, or empty in host mode.
 wk_image_id() { sed -n 's/^id=//p' "$WK_IMAGE_MARKER" 2>/dev/null || true; }
-in_image_role() { [ -f "$WK_IMAGE_MARKER" ]; }
+in_bench_mode() { [ -f "$WK_IMAGE_MARKER" ]; }
 
 # --- the graphical session's mode --------------------------------------------
 # `wk session` can start the compositor a few ways, and from the Wayland

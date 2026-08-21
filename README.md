@@ -51,7 +51,7 @@ three different words so no flag is ever a guess about which was meant:
 |---|---|---|
 | `--arch` | the workspace's own userland, executed natively | `wk new` |
 | `--sysroot` | a *cross* build from a native workspace — another arch's libraries, `-m32`, an aarch64 clang | `wk build`, reserved, not implemented |
-| `--target` | another machine entirely — a Pi, a remote box, a device booted off a benchmark image | `wk new` |
+| `--target` | another machine entirely — a Pi, a remote box, a machine booted into a bench system | `wk new` |
 
 The armhf image has no NVIDIA userspace and never will, so an armhf workspace
 is a software-rendering workspace. That is fine for JSC and for CPU-class
@@ -88,10 +88,13 @@ the few trees it actually needs. That matters more than it sounds: the session
 bus alone is a full host escape, and it is not a network problem, so no
 firewall addresses it.
 
-Network egress is restricted to the Anthropic API, GitHub, PyPI and the
-Raspberry Pi test devices. Everything else, including the whole local network,
-is refused. *How* that is enforced differs by host, and the difference is the
-most important thing in this file.
+Network egress is allowlisted by hostname: Anthropic, GitHub, PyPI, the
+Raspberry Pi test devices, the benchmark hosts, and — a deliberate widening,
+recorded in the proxy itself — a fixed set of top sites plus the CDN domains
+they cannot render without, so MiniBrowser can be driven at real pages.
+Everything else, including the whole local network, is refused: nothing on the
+list may resolve into RFC1918 or the tailnet range. *How* that is enforced
+differs by host, and the difference is the most important thing in this file.
 
 **Linux: there is no network interface.** A workspace runs with
 `--network none`. Its namespace has loopback and nothing else — no address, no
@@ -132,9 +135,13 @@ Tart runs **Softnet**, a userspace packet filter, as a subprocess on the host,
 default-denying everything except the address where the same `wk-proxy.py`
 listens. The filter is outside the guest on purpose — `pf` inside it would be
 modifiable by whatever is being sandboxed. Softnet needs root, so it is
-installed SUID once at setup time; `wk` still never calls sudo. That path is
-implemented but not yet verified, and until `./setup --stage softnet` has run
-a guest's egress is unfiltered and `wk vm start` says so.
+installed SUID once at setup time; `wk` still never calls sudo. The boundary is
+measured the same way the container's is — the guest reaches the allowlist only
+through the proxy, cannot reach the LAN, and cannot bypass Softnet
+(docs/TESTING.md, "Sandbox"). Until `./setup --stage softnet` has run,
+`wk vm start` refuses to boot a guest at all; booting with the open network
+takes an explicit `WK_VM_UNFILTERED=1`, and `wk claude` refuses a guest booted
+that way.
 
 Workstations are never sandboxed. They join the tailnet normally and keep full
 access to everything.
@@ -143,8 +150,9 @@ access to everything.
 
 Builds should never make the machine unusable. Three layers:
 
-- The VM (macOS) or container (Linux) is capped at `cores - 2` and
-  `memory - 12 GB`, so the host always keeps headroom.
+- The VM (macOS) or container (Linux) is capped at `cores - 1` and
+  `memory - 12 GB`, so the host always keeps headroom (a headless machine
+  holds back less — there is no desktop to protect).
 - Builds run niced and `ionice`d, inside a systemd scope on Linux.
 - Build processes get a raised `oom_score_adj`, so the OOM killer takes the
   build rather than your session.
@@ -193,9 +201,10 @@ into the podman VM at all: only container workspaces live there.
 
 Shared build machines are treated as someone else's machine too — job count
 comes from *that* machine's live load average and free memory, builds run at
-`nice 19` under a ceiling, and a `flock` stops two of your own builds from
-stacking. There is no sandbox there, so `wk claude` and `wk verify` refuse a
-remote target outright.
+`nice 19`, and a `flock` stops two of your own builds from stacking. There is
+no sandbox there, so `wk verify` refuses a remote target outright — there is
+nothing to measure — and `wk claude` stops at a barrier that says exactly
+that; only `--force` proceeds, loudly.
 
 `wk help targets` is the same ground as a decision — which target a piece of
 work belongs on, and what a container costs against a macOS guest — and
@@ -244,6 +253,7 @@ dotfiles/          host dotfiles (Zed only)      claude/    settings, skills, ho
 container/         workspace-side setup          build/     configs + the in-target build
 container/proxy/   the egress boundary           container/gpu/  the EGL probe
 admin/             quiesce + session helper      vm/        macOS guest provisioning
+image/             system profiles + builders    boot/      the fleet: machines + boot drivers
 docs/              handoffs and design notes
 
 ```
@@ -284,7 +294,7 @@ Linux cannot make a `#!` script setuid — the kernel ignores the bit — so the
 privileged half is a `NOPASSWD` rule naming one root-owned path, installed only
 after `visudo -c` validates it, and re-checked for writability on every setup
 run. The command set behind it is a fixed allowlist with no passthrough:
-quiesce on/off/status, and session on/on-bmc/gdm/gdm-bmc/off/status.
+quiesce on/off/status, and session on/on-bmc/gdm/gdm-bmc/stop/off/status.
 
 `wk bench` wraps `run-benchmark` and `compare-results` rather than replacing
 them. What it adds is the part that decides whether a number means anything:
@@ -316,6 +326,11 @@ are derived rather than passed, recorded with the result, and warned about by
   for every plan. A JSCOnly port runs the benchmark's own `cli.js` in the jsc
   shell, which is the only thing a JSCOnly tree can do; it writes the same
   result JSON, so `wk bench compare` and `compare-results` work unchanged.
-- **host** — where it ran. Everything `wk bench` can currently reach is
-  `container`: a workspace, with its cgroup limits and a desktop underneath it.
-  The bootable benchmark image will be `image`, and the two are not comparable.
+- **host** — where it ran. `wk bench <ws>` runs in a workspace and records
+  `container`: cgroup limits, a shared kernel, a desktop underneath. A run on
+  the bare machine records `image`: `wk sysimage build <profile>` builds a
+  bootable system from a spec in this repo, `wk boot <machine>` puts a fleet
+  machine into bench mode for one boot (and hands it back), and
+  `wk bench stage --to <machine>` / `wk bench staged` carry the build over and
+  run it there. The two are not comparable — one has a desktop underneath it
+  and one is the whole machine — and `wk bench compare` warns.

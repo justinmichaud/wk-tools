@@ -53,3 +53,12 @@ the directory workspaces have mounted, and which `wk claude` turns off before
 an agent takes over. Build `gpr`/`git-sync-fork` on top of it: don't have the
 restored helper carry a credential or push by any other route — let it run
 `git push`, which the switch already gates.
+
+## The walkthrough still owed
+
+The PR workflow has never been walked end to end as a whole: sandboxed agents
+driving builds while I push, rebase, fetch forks and upload PRs myself — with
+the push switch, `wk remotes`, and `wk pr` all in the loop — including the
+edge case of making a PR from an armhf container, where git-webkit cannot
+run. Each piece is verified alone; the walkthrough is what proves they
+compose.

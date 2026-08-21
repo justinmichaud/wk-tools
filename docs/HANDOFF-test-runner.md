@@ -1,9 +1,13 @@
 # HANDOFF — `wk selftest`: run the test plan autonomously
 
-`cmd/selftest` exists as of 2026-08-19. `wk selftest --quick` is 13 checks, all
-green on this macOS host, needing no workspace, no podman and no ssh; a bare
-`wk selftest` adds the remote section. What is left is coverage, not
-machinery.
+`cmd/selftest` exists as of 2026-08-19 (13 checks then), and has grown with
+every lane since: as of 2026-08-20 `wk selftest --quick` reports **34 ok,
+2 skipped**, needing no workspace, no podman and no ssh — the 2026-08-20
+locking, consistency and netboot work all landed their checks there, since the
+tftp/boot-file checks drive the resolver against fixtures rather than a board.
+A bare `wk selftest` adds the `state` section (read-only commands are
+read-only, one walk behind both listings) and the `remote` section. What is
+left is coverage, not machinery.
 
 ## What it does
 
@@ -18,9 +22,10 @@ machinery.
   reason), anything else failed (its output is the evidence). 77 rather than a
   separate probe function, because a prerequisite is usually only discoverable
   by starting to do the thing.
-- **Every run prints its own coverage** — "198 line items in docs/TESTING.md,
-  15 encoded here". A runner that reports ok over a fraction of the plan and
-  says nothing about the rest is exactly the silent pass the plan forbids.
+- **Every run prints its own coverage** — "588 line items in docs/TESTING.md,
+  45 encoded here" as of 2026-08-20; both numbers move, and the printed line is
+  the authority. A runner that reports ok over a fraction of the plan and says
+  nothing about the rest is exactly the silent pass the plan forbids.
 - **It starts nothing.** Verified: the podman machine is in the same state
   after a run as before it, including a full run.
 - `wk doctor` runs first for context and its verdict is printed, but nothing is
@@ -46,22 +51,24 @@ Three real defects, all in the first run:
 
 ## What is left
 
-**Coverage.** 15 of 198 line items. The cheap ones are done — the whole
-`--quick` section is hermetic — and what remains needs state:
+**Coverage.** 45 of 588 line items (2026-08-20; the plan grows faster than the
+runner). The cheap ones are done — the `--quick` and `state` sections are
+hermetic — and what remains needs state:
 
-1. **Container section (59 items).** Needs the podman machine and a workspace.
-   The shape to follow: a `container` section that creates one workspace, runs
-   the lifecycle/sandbox/build checks against it, and removes it; SKIP the
-   whole section when podman is absent or stopped, since starting it is exactly
-   what this must not do without being asked.
-2. **vm section (62 items).** Same, with a guest — and the expensive
+1. **Container section (§1, ~118 items).** Needs the podman machine and a
+   workspace. The shape to follow: a `container` section that creates one
+   workspace, runs the lifecycle/sandbox/build checks against it, and removes
+   it; SKIP the whole section when podman is absent or stopped, since starting
+   it is exactly what this must not do without being asked.
+2. **vm section (§2, ~62 items).** Same, with a guest — and the expensive
    prerequisite (a golden base, a booted guest) means most of it should skip by
    default and run only on `--section vm`.
-3. **Remote section (37 items).** Two encoded. The rest need a workspace on a
-   machine, which is cheap now (39 s) but not free.
-4. **The regressions table.** Six of its nineteen rows are encoded. The
-   remainder need a workspace or a guest; they are the highest-value ones left,
-   because each already cost a debugging session.
+3. **Remote section (§3, ~51 items).** Two encoded (the conf resolves, the
+   machine answers a listing). The rest need a workspace on a machine, which is
+   cheap now (39 s) but not free.
+4. **The regressions table.** 31 rows now. The hermetic ones are encoded; the
+   remainder need a workspace or a guest, and they are the highest-value ones
+   left, because each already cost a debugging session.
 5. **A manual section.** The plan still mixes automatable lines with ones that
    need a human (watching a monitor go dark, judging a desktop). Those should
    be marked as such in `docs/TESTING.md` so the runner can print them at the

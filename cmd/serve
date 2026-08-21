@@ -2,7 +2,7 @@
 #
 # wk serve -- hand boot files to machines that netboot.
 #
-#   wk serve [--image <id>] [--address <ip>] [--dry-run]   start serving
+#   wk serve [--system <id>] [--address <ip>] [--dry-run]   start serving
 #   wk serve --status                                      what is running here
 #   wk serve --stop                                        stop it
 #
@@ -13,7 +13,7 @@
 # two ways of reaching a machine.
 #
 # The serving role is meant to float: any idle machine serves, the Mac
-# included (docs/HANDOFF-netboot.md, "The serving role floats"). That is why
+# included (docs/HANDOFF-netboot.md, "Where the server goes, and how the role floats"). That is why
 # the daemon is a stdlib script in this repo rather than a distro package with
 # a different name, unit and config file on every host -- and why the client's
 # fixed `TFTP_IP` is met with a service alias address that whichever machine is
@@ -27,7 +27,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/image/profiles.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# The same rule as `wk image` and `wk boot`, and it lives in `wk`'s
+# The same rule as `wk sysimage` and `wk boot`, and it lives in `wk`'s
 # is_host_only list too; this is the half that still holds when cmd/serve is
 # run directly rather than through the dispatcher.
 if in_workspace; then
@@ -49,7 +49,7 @@ usage() {
     cat >&2 <<'EOF'
 usage: wk serve [options]
 
-  --image <id>     which image's boot files to serve (default: the newest)
+  --system <id>    which system's boot files to serve (default: the newest)
   --address <ip>   bind address (default: the LAN address of the default route)
   --status         what this machine is serving, from evidence
   --stop           stop serving
@@ -64,7 +64,8 @@ while [ $# -gt 0 ]; do
         --status)  ACTION=status ;;
         --stop)    ACTION=stop ;;
         --dry-run) DRY=1 ;;
-        --image)   IMAGE="${2:-}"; shift ;;
+        --system)  IMAGE="${2:-}"; shift ;;
+        --image)   die "renamed: --system <id> (docs/HANDOFF-vocabulary.md)" ;;
         --address) ADDRESS="${2:-}"; shift ;;
         -h|--help) usage ;;
         *) die "unknown option: $1" ;;
@@ -161,8 +162,8 @@ cmd_start() {
     # image.
     [ "$TFTP_PORT" -lt 1024 ] && [ -x "$PRIV" ] && check_helper_current
 
-    [ -n "$IMAGE" ] || IMAGE=$(image_latest rpi5-perf 2>/dev/null) || IMAGE=""
-    [ -n "$IMAGE" ] || die "no image to serve -- 'wk image build <profile>' first"
+    [ -n "$IMAGE" ] || IMAGE=$(image_latest perf-linux-rpi5 2>/dev/null) || IMAGE=""
+    [ -n "$IMAGE" ] || die "no system to serve -- 'wk sysimage build <profile>' first"
     image_complete "$IMAGE" || die "no such image: $IMAGE"
 
     [ -n "$ADDRESS" ] || ADDRESS=$(lan_address)
@@ -312,7 +313,7 @@ check_boot_files_serveable() {
     [ "$TFTP_PORT" -lt 1024 ] && [ -x "$PRIV" ] && server="$PRIV"
 
     machine=$(manifest_get "$1" machine)
-    # image_dtb_for, from lib/image.sh: `wk image write` asks the same question
+    # image_dtb_for, from lib/image.sh: `wk sysimage write` asks the same question
     # of the same machine, and two copies of that table would drift.
     dtb=$(image_dtb_for "$machine")
     [ -n "$dtb" ] || { warn "no device tree known for machine '$machine'; not checking boot files"; return 0; }
@@ -342,7 +343,7 @@ $(printf '%s\n' "$out" | sed 's/^/      /')
 # server that reported success.
 #
 # So this refuses, rather than discovering it on the hardware. The image is
-# fine; it is simply a *local-boot* image, and `wk image write` is what it is
+# fine; it is simply a *local-boot* image, and `wk sysimage write` is what it is
 # for.
 check_root_is_reachable() {
     local cmdline root=""
@@ -365,7 +366,7 @@ check_root_is_reachable() {
     'Storage: what the image is'). Neither is built yet.
 
     What works today is the local path this image is actually for:
-      wk image write $IMAGE --disk <machine>:<device>
+      wk sysimage write $IMAGE --disk <machine>:<device>
     Set WK_SERVE_ANY_ROOT=1 to serve it anyway. That is a real transfer test
     and it is recoverable -- this image carries panic=10, so a client that
     cannot find its root reboots rather than sitting there, and stopping the
@@ -377,7 +378,7 @@ check_root_is_reachable() {
 }
 
 # The boot files a netboot client asks for are the contents of the image's own
-# boot partition -- the same bytes `wk image write` puts on a disk. Copied
+# boot partition -- the same bytes `wk sysimage write` puts on a disk. Copied
 # out with mtools, at a byte offset from the partition table, so this needs no
 # mount and no privilege.
 populate_tftp_root() {

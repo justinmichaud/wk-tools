@@ -45,7 +45,7 @@ info "provisioning $(hostname) for target '$TARGET'"
 # problem and fails with its own error, which is a better error than anything
 # guessed here.
 _missing=""
-for _t in git flock; do
+for _t in git; do
     have "$_t" || _missing="$_missing $_t"
 done
 [ -z "$_missing" ] || die "missing on this machine:$_missing

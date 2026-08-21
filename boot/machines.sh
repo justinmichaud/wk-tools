@@ -10,11 +10,11 @@
 #
 # A machine sets:
 #
-#   MACH_SSH      ssh destination in its *normal* role
+#   MACH_SSH      ssh destination in host mode
 #   MACH_DRIVER   boot/<driver>.sh
 #   MACH_DEVICE   the block device the image is written to, on the machine
-#   MACH_ROOT     the root device of its normal role -- never written to
-#   MACH_PROFILE  its default image profile
+#   MACH_ROOT     the root device of its host mode -- never written to
+#   MACH_PROFILE  its default system profile
 #   MACH_NOTE     one line, for the listing
 
 # Reading the bootloader's configuration, on a board that may have no eeprom
@@ -51,7 +51,7 @@ machine_load() {
         MACH_DRIVER=rpi5-usb
         MACH_DEVICE=/dev/sda
         MACH_ROOT=/dev/nvme0n1p2
-        MACH_PROFILE=rpi5-perf
+        MACH_PROFILE=perf-linux-rpi5
         # The radio's own address, and the reason the image is findable at all.
         # The image boots the same hardware, so it presents the same MAC and
         # the AP hands it the same lease -- which makes "where is the image"
@@ -64,7 +64,7 @@ machine_load() {
     rpi4)
         # Not `rpi4`: a hand-written `Host rpi4` in ~/.ssh/config used to point
         # at rpi4-compilers-0, a shared build box behind a ProxyJump, and a
-        # `wk image write` aimed at this test device would have landed on that
+        # `wk sysimage write` aimed at this test device would have landed on that
         # machine's disk. host/dotfiles.sh now drops any hand-written stanza
         # naming a fleet machine, so the collision cannot come back -- and the
         # names stay apart on purpose, so that `Host rpi4` reads as the mistake
@@ -85,7 +85,7 @@ machine_load() {
         MACH_DRIVER=pi-usb
         MACH_DEVICE=/dev/sda
         MACH_ROOT=/dev/mmcblk0p2
-        MACH_PROFILE=rpi4-perf
+        MACH_PROFILE=perf-linux-rpi4
         # The radio -- here the wired NIC -- and the reason the image is
         # findable at all: it boots the same hardware, so it presents the same
         # MAC and image_addr can answer "where is the image" from the driving
@@ -94,9 +94,9 @@ machine_load() {
         # not up for the first several minutes of exactly the boot that wants
         # watching. Declared hardware identity, like MACH_DEVICE.
         MACH_MAC=d8:3a:dd:aa:42:8a
-        # A dedicated test device, not a workstation: that is what licenses a
+        # A dedicated bench device, not a workstation: that is what licenses a
         # permanent network-first BOOT_ORDER, and cmd/pi reads it from here.
-        MACH_ROLE=test-device
+        MACH_ROLE=bench-device
         MACH_NOTE="Raspberry Pi 4 (4 GB), USB stick, SD rescue"
         ;;
     rpi3)
@@ -104,8 +104,8 @@ machine_load() {
         MACH_DRIVER=pi-netboot
         MACH_DEVICE=/dev/sda
         MACH_ROOT=/dev/mmcblk0p2
-        MACH_PROFILE=rpi3-perf
-        MACH_ROLE=test-device
+        MACH_PROFILE=perf-linux-rpi3
+        MACH_ROLE=bench-device
         MACH_NOTE="Raspberry Pi 3, netboot over a direct cable"
         ;;
     mbp)
@@ -125,7 +125,7 @@ machine_load() {
         MACH_DEVICE=""
         MACH_ROOT=""
         MACH_VOLUME="${WK_BENCH_VOLUME:-WK Bench}"
-        MACH_PROFILE=mac-bench
+        MACH_PROFILE=perf-macos-tolken
         MACH_ROLE=workstation
         MACH_NOTE="this Mac, booting its benchmark volume (hands-on)"
         ;;
@@ -139,8 +139,8 @@ machine_load() {
         MACH_DEVICE=""
         MACH_ROOT=""
         MACH_VOLUME=""
-        MACH_PROFILE=mac-bench
-        MACH_ROLE=test-device
+        MACH_PROFILE=perf-macos-benchvm
+        MACH_ROLE=bench-device
         MACH_NOTE="a macOS guest as a benchmark install (rehearsal)"
         ;;
     *)  return 1 ;;
@@ -151,7 +151,7 @@ machine_load() {
 #
 # `wk pi` takes an ssh host, because putting a device on the tailnet is a thing
 # you do to a device rather than to a fleet entry, and it long predates the
-# fleet. But its EEPROM half needs MACH_ROLE -- a test device wants network
+# fleet. But its EEPROM half needs MACH_ROLE -- a bench device wants network
 # *first* in BOOT_ORDER and a workstation wants it last -- and looking the
 # argument up with machine_load only works when the two names coincide. They do
 # not for the rpi4, whose ssh name is rpi4-test on purpose, so the one board
@@ -176,15 +176,15 @@ load_driver() {
     . "$d"
 }
 
-# ssh to a machine in its normal role. BatchMode so an unreachable machine
+# ssh to a machine in host mode. BatchMode so an unreachable machine
 # fails immediately instead of prompting into a script, ConnectTimeout because
 # every fleet probe is bounded (the reliability contract in
 # docs/HANDOFF-workspace-state.md).
 #
 # MACH_LOCAL is the case where the machine under test *is* the machine driving
 # -- which is not an edge case but the normal shape for the MBP: it is the only
-# Apple Silicon machine here, so nothing else can drive its transition, and the
-# benchmark role is reached by rebooting this very shell out from under itself.
+# Apple Silicon machine here, so nothing else can drive its transition, and bench
+# mode is reached by rebooting this very shell out from under itself.
 # Running the same commands locally keeps every driver written against one
 # spelling; what changes is only who executes them.
 m_ssh() {
@@ -197,10 +197,10 @@ m_ssh() {
 
 m_reachable() { m_ssh true >/dev/null 2>&1; }
 
-# --- reaching the image ------------------------------------------------------
+# --- reaching the bench system ------------------------------------------------------
 #
-# The normal-role destination is no use here: this board is reached over
-# Tailscale SSH, and the image carries no tailscale. So the image is found the
+# The host-mode destination is no use here: that channel is Tailscale SSH,
+# and the bench system carries no tailscale. So it is found the
 # way anything on a LAN is found -- by its hardware address in the driving
 # machine's neighbour table, which is evidence read at the moment it is needed
 # and stored nowhere. mDNS is the fallback for a cold ARP cache, and
@@ -231,13 +231,13 @@ image_hostname() {
         || printf '%s' "$MACH_NAME"
 }
 
-# The image's host key is not the workstation's, and never will be: they are
-# different installs on the same hardware, on the same address. A shared
+# The bench system's host key is not the host install's, and never will be:
+# they are different installs on the same hardware, on the same address. A shared
 # known_hosts would report that as the man-in-the-middle warning it looks
 # exactly like.
 #
 # A separate file was the first answer and it was not enough, because the key
-# does not change *once* -- it changes every build. `wk image build` produces a
+# does not change *once* -- it changes every build. `wk sysimage build` produces a
 # fresh rootfs, ssh generates a fresh host key in it, and the next image boots
 # at the same address as the last. So the second image ever booted on a machine
 # arrived with a changed key, `accept-new` refused it (that mode accepts keys
@@ -247,8 +247,8 @@ image_hostname() {
 #
 # So nothing is pinned here. That is not a shrug: a key with no continuity
 # across builds cannot authenticate anything, and pinning one can only produce
-# false alarms of exactly the kind that just cost an hour. What identifies an
-# image is `/etc/wk-image`, which b_probe reads and which names the build --
+# false alarms of exactly the kind that just cost an hour. What identifies a
+# bench system is `/etc/wk-image`, which b_probe reads and which names the build --
 # and that is a stronger statement than a key would be, because it says *which*
 # image answered rather than merely that something did.
 #
@@ -265,7 +265,7 @@ i_ssh() {
 
 # --- the arming record -------------------------------------------------------
 #
-# `wk boot` is a role transition, and no probe can derive the *intent* half in
+# `wk boot` is a mode transition, and no probe can derive the *intent* half in
 # full: once armed, the firmware register and the running system look exactly
 # as they did a moment before. So arming leaves a small record of intent --
 # and exactly one copy of it, on the machine it describes, next to the boot
@@ -298,11 +298,12 @@ armed_boot_id=$(b_boot_id)
 EOF"
 }
 
-# Only the normal role can be asked: the record lives on that role's root, and
-# the image does not mount it. Answering "no record" from inside the image
-# would be a lie, so the caller gets nothing and decides on evidence instead.
+# Only host mode can be asked: the record lives on the host install's root,
+# and a bench system does not mount it. Answering "no record" from inside
+# bench mode would be a lie, so the caller gets nothing and decides on
+# evidence instead.
 record_read() {
-    [ "${ROLE_CHANNEL:-normal}" = normal ] || return 0
+    [ "${MODE_CHANNEL:-host}" = host ] || return 0
     m_ssh "sudo cat $MACH_RECORD 2>/dev/null" || true
 }
 record_clear() { m_ssh "sudo rm -f $MACH_RECORD"; }
@@ -315,35 +316,36 @@ record_clear() { m_ssh "sudo rm -f $MACH_RECORD"; }
 # media). Everything else -- which role answered, when it booted, rebooting it,
 # writing its boot device, reading its offline dump -- is the same work.
 
-# Which role is answering, and on which channel. Evidence, never the record:
-# the image writes an identity marker and the workstation does not, and the two
-# are reached completely differently -- the workstation over the tailnet, the
-# image over the LAN, because the image carries no tailscale and never will.
+# Which mode is answering, and on which channel. Evidence, never the record:
+# a bench system writes an identity marker and the host install does not, and
+# the two are reached completely differently -- the host install over the
+# tailnet, the bench system over the LAN, because it carries no tailscale and
+# never will.
 #
-# Sets ROLE and ROLE_CHANNEL, rather than printing the role: everything
+# Sets MODE and MODE_CHANNEL, rather than printing the mode: everything
 # downstream has to talk to whatever actually answered, and a probe whose
 # channel is discovered in a command substitution loses it on the way out --
 # the subshell that computed it is gone by the time anyone acts on it.
 b_probe() {
     local id
     if m_ssh true >/dev/null 2>&1; then
-        ROLE_CHANNEL=normal
+        MODE_CHANNEL=host
         id=$(m_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null || true)
-        ROLE="workstation"
-        [ -n "$id" ] && ROLE="image $id"
+        MODE="host"
+        [ -n "$id" ] && MODE="bench $id"
         return 0
     fi
     if id=$(i_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null) && [ -n "$id" ]; then
-        ROLE_CHANNEL=image; ROLE="image $id"; return 0
+        MODE_CHANNEL=bench; MODE="bench $id"; return 0
     fi
-    ROLE_CHANNEL=none; ROLE=unreachable
+    MODE_CHANNEL=none; MODE=unreachable
 }
 
 # ssh over whichever channel answered.
 r_ssh() {
-    case "${ROLE_CHANNEL:-none}" in
-        normal) m_ssh "$@" ;;
-        image)  i_ssh "$@" ;;
+    case "${MODE_CHANNEL:-none}" in
+        host)  m_ssh "$@" ;;
+        bench) i_ssh "$@" ;;
         *) return 1 ;;
     esac
 }

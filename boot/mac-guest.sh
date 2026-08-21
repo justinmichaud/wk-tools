@@ -1,4 +1,4 @@
-# Boot driver: a macOS guest standing in for a machine in its benchmark role.
+# Boot driver: a macOS guest standing in for a machine in bench mode.
 #
 # Not a machine that boots an image -- a guest that *is* one. It exists for two
 # reasons, and the first is the reason it was written:
@@ -31,7 +31,7 @@ BOOT_ORDER_NORMAL=""
 MACH_GUEST="${WK_BENCH_GUEST:-wk-bench}"
 
 # The same path a real benchmark install uses, deliberately: `/var/wk` is where
-# `wk bench staged` looks when it finds itself in the image role, and a
+# `wk bench staged` looks when it finds itself in bench mode, and a
 # rehearsal that used a different path would be rehearsing a different thing.
 # It is created on first delivery -- a guest has passwordless sudo, and this is
 # the only thing here that needs it.
@@ -59,11 +59,11 @@ m_ssh() {
 
 b_probe() {
     local id
-    ROLE_CHANNEL=none; ROLE=unreachable
+    MODE_CHANNEL=none; MODE=unreachable
     m_ssh true >/dev/null 2>&1 || return 0
-    ROLE_CHANNEL=normal
+    MODE_CHANNEL=host
     id=$(m_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null | tr -d '\r')
-    if [ -n "$id" ]; then ROLE="image $id"; else ROLE=workstation; fi
+    if [ -n "$id" ]; then MODE="bench $id"; else MODE=host; fi
     return 0
 }
 

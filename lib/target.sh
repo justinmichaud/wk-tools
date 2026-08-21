@@ -944,7 +944,7 @@ wait_ready() {
 # A lock (hold_lock, lib/common.sh) is a process on this machine, and it dies
 # with that process. That is exactly right for a command that does its work
 # and exits, and it covers nothing at all for work that was *detached into the
-# workspace*: `wk image build --stage image --detach` starts bitbake inside the
+# workspace*: `wk sysimage build --stage image --detach` starts bitbake inside the
 # container through t_spawn and returns, so the lock it held is gone within the
 # second while the build runs for another six hours. A `wk build` in the same
 # workspace then takes the workspace lock -- correctly, nobody else holds it --

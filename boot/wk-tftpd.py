@@ -3,7 +3,7 @@
 
 Why this rather than tftpd-hpa, which is what the handoff first assumed.  The
 serving role has to *float*: any idle machine should be able to serve, the Mac
-included (docs/HANDOFF-netboot.md, "The serving role floats").  A distro system
+included (docs/HANDOFF-netboot.md, "Where the server goes, and how the role floats").  A distro system
 service does not float -- it is a different package, a different unit name and a
 different config file on every host, and there is no tftpd-hpa on macOS at all.
 This is one stdlib file that runs identically wherever `wk` runs, which is the

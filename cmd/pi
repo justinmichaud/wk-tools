@@ -42,13 +42,13 @@ case "$ACTION" in
        wk pi netboot-enable <ssh-host> [--server <ip>] [--revert] [--dry-run]
          the netboot spelling of the same writer; the order comes from the
          machine's role in boot/machines.sh
-       (flashing moved: 'wk image write <id> --disk <machine>:<device>')" ;;
+       (flashing moved: 'wk sysimage write <id> --disk <machine>:<device>')" ;;
 esac
 shift 2 2>/dev/null || true
 
 rsh() { ssh -o BatchMode=yes "$HOST" "$@"; }
 
-# `wk pi flash` existed for about an hour and is folded into `wk image write`.
+# `wk pi flash` existed for about an hour and is folded into `wk sysimage write`.
 #
 # It was the same operation as the other flashing verb -- same store, same
 # verification, same unmount, same refusals -- differing only in device policy,
@@ -61,8 +61,8 @@ if [ "$ACTION" = flash ]; then
     Writing a disk is an image operation, so it lives with the image store, and
     the disk is named rather than the machine:
 
-        wk image disks $HOST                  what is attached over there
-        wk image write <id> --disk $HOST:<device>
+        wk sysimage disks $HOST                  what is attached over there
+        wk sysimage write <id> --disk $HOST:<device>
 
     'wk pi' is for the things that are actually about the board: putting it on
     the tailnet, and its EEPROM boot order."
@@ -187,7 +187,7 @@ cmd_boot_order() {
             if [ -z "$position" ]; then
                 if machine_by_ssh "$HOST"; then
                     case "${MACH_ROLE:-workstation}" in
-                        test-device) position=first ;;
+                        bench-device) position=first ;;
                         *)           position=last ;;
                     esac
                 else
@@ -217,7 +217,7 @@ cmd_boot_order() {
     rsh true >/dev/null 2>&1 || die "cannot ssh to $HOST.
     This writes the board's firmware configuration, so it needs the board
     running and reachable. A Pi that cannot be reached at all has to be met
-    physically once -- an SD card written by 'wk image write' -- before netboot
+    physically once -- an SD card written by 'wk sysimage write' -- before netboot
     can make any later trip unnecessary. Netboot removes the second visit,
     not the first."
 

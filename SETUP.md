@@ -68,8 +68,8 @@ What it does:
 - Installs the Claude config into `~/.claude`.
 - Registers the `wk` MCP server with Claude Desktop.
 - Creates the `wk` podman VM, sized to leave your desktop usable.
-- Syncs this repo into the VM, clones and patches the container SDK, and loads
-  the workspace firewall.
+- Syncs this repo into the VM, clones and patches the container SDK, and
+  starts the egress proxy that is the workspace boundary.
 
 Individual stages:
 `./setup --stage <tools|settings|dotfiles|claude|mcp|machine|vmtools|softnet|sdk|quiesce>`.
@@ -108,7 +108,7 @@ starts the actual display manager and a real desktop instead, for debugging
 that needs more than a kiosk's one window. The command set is a fixed
 allowlist — quiesce on/off/status, and one session verb per session
 configuration (`session-on`, `session-on-bmc`, `session-gdm`,
-`session-gdm-bmc`, `session-off`, `session-status`) — with no argument that
+`session-gdm-bmc`, `session-stop`, `session-off`, `session-status`) — with no argument that
 becomes part of a command, and the user the compositor runs as is read from a
 root-owned file rather than passed in.
 
@@ -277,7 +277,6 @@ differs from the defaults:
 ```sh
 # ~/.config/wk/targets/devbox-arm64-2.conf
 WK_REMOTE_ROOT=/home/you/wk    # defaults to ~/wk on the box
-WK_REMOTE_MAX_JOBS=16          # a ceiling, however idle the machine looks
 WK_REMOTE_REFERENCE=/var/...   # a WebKit repo to clone from; usually detected
 ```
 
@@ -291,9 +290,11 @@ container, no overlay, no firewall. If the machine publishes a WebKit
 repository and says so in its MOTD, workspaces are cloned from that, with the
 objects hardlinked, so a checkout costs its working tree and nothing else;
 otherwise the driver keeps one mirror under the root and only the first
-workspace pays for the history. Builds are niced to the floor, capped by the
-remote machine's live load average and by the job ceiling, and serialised
-against each other with a flock, because other people are using the box too.
+workspace pays for the history. Builds are niced to the floor, sized from the
+machine's free memory and live load average probed on every build (there is no
+fixed job ceiling — a fixed number goes stale the moment the machine changes),
+and serialised against each other with a flock, because other people are using
+the box too.
 
 After setup the machine can drive itself, which is the point of provisioning
 it at all — ssh in and you get zsh (where the box has one) and `wk` on PATH:
@@ -310,8 +311,9 @@ The commands that act on a workstation's own store or hardware — `wk sync`,
 which machine each workspace lives on is the workstation's, and it is what
 sends a later `wk build` to the right place.
 
-There is no sandbox on a machine like that, so `wk claude` and `wk verify`
-both refuse it outright rather than pretending otherwise.
+There is no sandbox on a machine like that, so `wk verify` refuses it outright
+— there is nothing to measure — and `wk claude` stops at a barrier that says
+exactly that; only `--force` proceeds, loudly.
 
 ### 32-bit workspaces
 
@@ -540,13 +542,19 @@ Put the Pis on an isolated guest network, then:
 
 ```sh
 wk pi setup rpi5
-wk pi setup rpi4
+wk pi setup rpi4-test
 ```
 
+The argument is an ssh destination. The rpi4's alias is `rpi4-test` on
+purpose: the bare name `rpi4` is the fleet machine's (`wk boot rpi4`), and
+keeping the two spellings apart is what stops a command aimed at the test
+board from landing on some build box that once answered to `rpi4` —
+`./setup` drops any hand-written `Host rpi4` stanza for the same reason.
+
 Works over SSH against a running device and needs **no image rebuild** — which
-matters because the rpi4 runs a buildroot image. It installs Tailscale's static
-binaries, tags the node `tag:wk`, and records its tailnet address so the
-workspace firewall lets it through.
+matters because the rpi4 runs a slim Yocto image, not something with a package
+manager. It installs Tailscale's static binaries, tags the node `tag:wk`, and
+records its tailnet address so the workspace egress allowlist lets it through.
 
 One manual step, in the Tailscale admin console — grant `tag:wk` access to
 itself:
@@ -611,7 +619,7 @@ Measured on the same M4, guest at 9 vCPU / 20 GB:
 |---|---|
 | `wk new --target vm` | ~1 s |
 | `wk vm start`, cold boot to ssh | ~10 s |
-| `wk build mac-release`, cold (there is no ccache here) | ~99 min (measured before `--export-compile-commands` was added; re-measure per HANDOFF-mac-minibrowser H3) |
+| `wk build mac-release`, cold (there is no ccache here) | ~86–99 min across measured rebuilds (the 2026-08-18 base rebuild, with `--export-compile-commands` on, took 85.8 min) |
 
 Three limits to know about:
 
@@ -707,7 +715,7 @@ wk gc                       # reclaim disk, including fstrim
 ```
 
 **Re-running `./setup` is the repair tool.** The VM's configuration — tooling,
-SDK checkout and patches, firewall, network, packages — is regenerated from this
+SDK checkout and patches, egress proxy, network, packages — is regenerated from this
 repo on every run, so anything changed by hand inside the VM is reverted. Your
 data is not touched: the mirror, snapshots, workspaces, caches, shared skills
 and the build key all survive.

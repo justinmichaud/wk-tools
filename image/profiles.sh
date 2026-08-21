@@ -1,4 +1,10 @@
-# Named boot-image profiles -- the spec that `wk image build` executes.
+# Named system profiles -- the spec that `wk sysimage build` executes.
+#
+# The name carries the category (docs/HANDOFF-vocabulary.md, "Systems, named
+# by what they are for"): perf-<distro>-<device> for measurement-grade
+# systems seeded from a general-purpose distribution, downstream-<builder>-
+# <release>-<device>[-width] for the public embedded images. Adding a
+# category later is adding a profile.
 #
 # The rule this file exists to keep (docs/HANDOFF-netboot.md, "One-command
 # reproducible, everywhere"): the spec lives in the repo, not on a machine.
@@ -81,27 +87,30 @@
 
 image_profile_list() {
     cat <<'EOF'
-rpi5-perf   Ubuntu 26.04 server, aarch64, for the rpi5's USB one-shot: no
+perf-linux-rpi5
+            Ubuntu 26.04 server, aarch64, for the rpi5's USB one-shot: no
             sandbox, perf_event_paranoid ours to set, WiFi baked in
-rpi4-perf   the same, cabled: DHCP on eth0, no credential, so it builds with
+perf-linux-rpi4
+            the same, cabled: DHCP on eth0, no credential, so it builds with
             the board switched off
-rpi3-perf   refused, and says why: Ubuntu ships no armhf raspi image, and a
+perf-linux-rpi3
+            refused, and says why: Ubuntu ships no armhf raspi image, and a
             32-bit run wants a 32-bit system rather than an arm64 one
 
-rpi4-wpe-2.48
+downstream-yocto-wpe-2.48-rpi4
             WPE WebKit 2.48's own Yocto image for the rpi4 (aarch64,
             scarthgap, weston): the runtime the 2.48 release branch pins,
             bitbaked from source in a workspace. Hours, not minutes.
-rpi4-wpe-2.48-32
+downstream-yocto-wpe-2.48-rpi4-32
             the same distribution, 32-bit: a 32-bit kernel and userspace, which
             is what a 32-bit perf run has to measure -- not a 32-bit process on
             a 64-bit kernel's compat layer
-rpi3-wpe-2.48-32
+downstream-yocto-wpe-2.48-rpi3-32
             and for the rpi3, whose native width this is
-rpi3-wpe-2.48-64
+downstream-yocto-wpe-2.48-rpi3-64
             the rpi3 as aarch64. Marginal at 931 MB, and there so that "slower,
             or just out of memory" is answerable
-rpi5-wpe-2.48
+downstream-yocto-wpe-2.48-rpi5
             the rpi5 running what ships, on its USB stick, leaving the NVMe
             workstation alone. Needs one section added to targets.conf upstream
             -- the local.conf and the MACHINE are already there
@@ -125,7 +134,22 @@ image_profile_load() {
     YOC_CHROMIUM=1
 
     case "$1" in
-    rpi5-perf)
+    # The old names, refused by name: every profile was renamed on 2026-08-20
+    # to carry its category (docs/HANDOFF-vocabulary.md). One spelling, so the
+    # old one points at the new one rather than quietly meaning it.
+    rpi5-perf|rpi4-perf|rpi3-perf|rpi4-wpe-2.48|rpi4-wpe-2.48-32|rpi3-wpe-2.48-32|rpi3-wpe-2.48-64|rpi5-wpe-2.48|mac-bench)
+        die "profile '$1' was renamed (docs/HANDOFF-vocabulary.md, 'Systems'):
+    rpi5-perf        -> perf-linux-rpi5
+    rpi4-perf        -> perf-linux-rpi4
+    rpi3-perf        -> perf-linux-rpi3
+    rpi4-wpe-2.48    -> downstream-yocto-wpe-2.48-rpi4
+    rpi4-wpe-2.48-32 -> downstream-yocto-wpe-2.48-rpi4-32
+    rpi3-wpe-2.48-32 -> downstream-yocto-wpe-2.48-rpi3-32
+    rpi3-wpe-2.48-64 -> downstream-yocto-wpe-2.48-rpi3-64
+    rpi5-wpe-2.48    -> downstream-yocto-wpe-2.48-rpi5
+    mac-bench        -> perf-macos-tolken"
+        ;;
+    perf-linux-rpi5)
         IMG_NETWORK=wifi-from-machine
         IMG_MACHINE=rpi5
         IMG_ARCH=arm64
@@ -136,6 +160,8 @@ image_profile_load() {
         # Raspberry Pi OS base could not get.
         IMG_BASE_URL=https://cdimage.ubuntu.com/releases/26.04/release/ubuntu-26.04-preinstalled-server-arm64+raspi.img.xz
         IMG_BASE_SHA256=10604098a0c4eeb7359e58e12b01badbce8c74b0d53b414e633ba0b047b512cd
+        # The hostname keeps the old short form: it is what the system calls
+        # itself on mDNS, and the flashed stick already announces it.
         IMG_HOSTNAME=rpi5-perf
         # 15 minutes: long enough to ssh in and claim the board for a real
         # session, short enough that a wedged boot costs one coffee rather than
@@ -164,7 +190,7 @@ image_profile_load() {
         IMG_LABEL_ROOT=wk-image-root   # ext4, <= 16 chars
         IMG_LABEL_BOOT=WK-IMG-BOOT     # FAT, <= 11 chars, upper case
         ;;
-    rpi3-perf)
+    perf-linux-rpi3)
         # Refused rather than built, because the obvious thing here is wrong.
         # The rpi3 is the fleet's only 32-bit board -- armv7l, a buildroot/WPE
         # rig with 931 MB and no swap -- and it is that deliberately: this repo
@@ -181,7 +207,7 @@ image_profile_load() {
         # (26.04 publishes arm64 desktop and arm64 server, and nothing else),
         # and the rpi3's perf systems are Yocto builds instead -- which
         # targets.conf already had targets for in both widths.
-        die "there is no rpi3-perf, and there will not be one.
+        die "there is no perf-linux-rpi3, and there will not be one.
 
     'perf-linux-*' profiles are seeded from Ubuntu's preinstalled raspi image,
     and Ubuntu 26.04 publishes no armhf one -- arm64 desktop and arm64 server,
@@ -192,22 +218,22 @@ image_profile_load() {
     board an arm64 system either. Use the Yocto profiles, which exist in both
     widths:
 
-        wk image build rpi3-wpe-2.48-32     its native width
-        wk image build rpi3-wpe-2.48-64     marginal at 931 MB, for comparison
+        wk sysimage build downstream-yocto-wpe-2.48-rpi3-32   its native width
+        wk sysimage build downstream-yocto-wpe-2.48-rpi3-64   marginal, for comparison
 
     docs/HANDOFF-vocabulary.md, '32-bit and 64-bit', has the whole argument."
         ;;
-    rpi4-perf)
+    perf-linux-rpi4)
         # Cabled, so no credential is involved and the image builds with the
         # board switched off -- which is the whole difference between these and
         # the rpi5's profile.
         IMG_NETWORK=wired
-        IMG_MACHINE="${1%-perf}"
+        IMG_MACHINE=rpi4
         IMG_ARCH=arm64
         IMG_BASE_KIND=ubuntu-raspi
         IMG_BASE_URL=https://cdimage.ubuntu.com/releases/26.04/release/ubuntu-26.04-preinstalled-server-arm64+raspi.img.xz
         IMG_BASE_SHA256=10604098a0c4eeb7359e58e12b01badbce8c74b0d53b414e633ba0b047b512cd
-        IMG_HOSTNAME="${1%-perf}-perf"
+        IMG_HOSTNAME=rpi4-perf
         IMG_WATCHDOG=900
         IMG_GROW=off
         IMG_PACKAGES="linux-tools-raspi avahi-daemon"
@@ -221,9 +247,9 @@ image_profile_load() {
     # distro base, a cloud-init seed, or a filesystem relabel: bitbake builds
     # the whole distribution, partitions it with wic, and the result enters the
     # store as an image like any other -- which is the entire reason to put it
-    # here rather than in a command of its own. `wk image write`, `wk image
+    # here rather than in a command of its own. `wk sysimage write`, `wk sysimage
     # show` and the SD-card path then work on it unchanged.
-    rpi4-wpe-2.48)
+    downstream-yocto-wpe-2.48-rpi4)
         IMG_BUILDER=yocto
         IMG_MACHINE=rpi4
         IMG_ARCH=arm64
@@ -255,7 +281,7 @@ image_profile_load() {
         IMG_WATCHDOG=900
         # What the board calls itself. Yocto takes it from MACHINE and there is
         # no cloud-init here to override it, so this is recorded rather than
-        # applied -- it is what `wk image show` should be able to answer.
+        # applied -- it is what `wk sysimage show` should be able to answer.
         IMG_HOSTNAME=raspberrypi4-64
         ;;
     # The 32-bit half of the same distribution, and the reason 32-bit is not a
@@ -280,7 +306,7 @@ image_profile_load() {
     # becomes arm64'", and the answer is neither: the rpi3's perf system is a
     # Yocto build, in whichever width the run is measuring, and no distro base
     # is involved.
-    rpi4-wpe-2.48-32|rpi3-wpe-2.48-32|rpi3-wpe-2.48-64|rpi5-wpe-2.48)
+    downstream-yocto-wpe-2.48-rpi4-32|downstream-yocto-wpe-2.48-rpi3-32|downstream-yocto-wpe-2.48-rpi3-64|downstream-yocto-wpe-2.48-rpi5)
         IMG_BUILDER=yocto
         YOC_BRANCH=webkitglib/2.48
         YOC_IMAGE=webkit-dev-ci-tools
@@ -291,10 +317,10 @@ image_profile_load() {
         # is a board that stays borrowed until somebody notices.
         IMG_WATCHDOG=900
         case "$1" in
-            rpi4-wpe-2.48-32)
+            downstream-yocto-wpe-2.48-rpi4-32)
                 IMG_MACHINE=rpi4; IMG_ARCH=armhf
                 YOC_TARGET=rpi4-32bits-mesa; IMG_HOSTNAME=raspberrypi4 ;;
-            rpi3-wpe-2.48-32)
+            downstream-yocto-wpe-2.48-rpi3-32)
                 IMG_MACHINE=rpi3; IMG_ARCH=armhf
                 # `-mesa`, not `-userland`: targets.conf offers both for the
                 # rpi3 and the userland one is the closed Broadcom stack. Mesa
@@ -303,12 +329,12 @@ image_profile_load() {
                 # path. `-userland` is a deliberate second profile if it is
                 # ever wanted, not a default.
                 YOC_TARGET=rpi3-32bits-mesa; IMG_HOSTNAME=raspberrypi3 ;;
-            rpi5-wpe-2.48)
+            downstream-yocto-wpe-2.48-rpi5)
                 IMG_MACHINE=rpi5; IMG_ARCH=arm64
                 # The rpi5 as a Yocto system, so that the board can be measured
                 # running what ships rather than only a distro -- without
                 # touching its NVMe workstation, which is untouched here for
-                # the same reason it is untouched by rpi5-perf: the image goes
+                # the same reason it is untouched by perf-linux-rpi5: the image goes
                 # on the USB stick and the firmware one-shot boots it.
                 #
                 # `targets.conf` has no [rpi5-64bits-mesa] section on this
@@ -319,7 +345,7 @@ image_profile_load() {
                 # with the eight lines to add rather than failing inside
                 # bitbake.
                 YOC_TARGET=rpi5-64bits-mesa; IMG_HOSTNAME=raspberrypi5 ;;
-            rpi3-wpe-2.48-64)
+            downstream-yocto-wpe-2.48-rpi3-64)
                 IMG_MACHINE=rpi3; IMG_ARCH=arm64
                 # Buildable, and marginal on this board: 931 MB of RAM, no
                 # swap. It exists so that "is the 64-bit port slower here, or

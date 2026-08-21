@@ -17,12 +17,14 @@ held in this machine's own secure storage, changed only by an authenticated
 user action. `bless --setBoot` is superseded for this purpose. Established
 2026-08-19; recorded in `docs/HANDOFF-netboot.md` as tier 2.
 
-So the fleet has three arming models and this machine has the third:
+So the fleet's arming models put the intent in different places, and this
+machine is the one where the place is a person:
 
 | machine | arming | who does it |
 |---|---|---|
 | rpi5 | `one-shot` — a firmware register | one ssh command |
-| rpi4 / rpi3 | `server` — the image the server holds | change what is served |
+| rpi4 | `medium` — the stick's boot partition | one ssh command |
+| rpi3 | `server` — what the netboot server holds | change what is served |
 | **mbp** | **`hands-on`** — a LocalPolicy | **a person, twice** |
 
 `wk boot mbp` checks what it can, records the intent, and prints the ritual.
@@ -42,8 +44,8 @@ one:
   the machine normally runs on* — for anything that touches disk that is itself
   a variable.
 - **A second APFS system volume in the internal container.** Same storage as
-  the workstation role, which removes that variable, at the cost of living in
-  the same container as the machine's real install. This is the option
+  host mode, which removes that variable, at the cost of living in the same
+  container as the machine's real install. This is the option
   `docs/HANDOFF-benchmarking.md` flags as worth costing before ruling out; it
   has not been costed.
 
@@ -55,16 +57,16 @@ identifier `wk boot` uses and the thing you click in the startup manager.
 Nothing here is automated yet, and the list is short enough to do by hand. In
 the new install:
 
-1. **The role marker.** `/etc/wk-image`, with at least `id=<something>`:
+1. **The mode marker.** `/etc/wk-image`, with at least `id=<something>`:
 
    ```
-   id=mac-bench-2026-08
-   profile=mac-bench
+   id=perf-macos-tolken-2026-08
+   profile=perf-macos-tolken
    ```
 
-   This is the only thing that tells `wk` which role answered. Without it the
-   benchmark install reports itself as a workstation and `wk bench staged`
-   refuses to run there — correctly, because it cannot tell.
+   The `id=` line is the only thing that tells `wk` bench mode answered.
+   Without it the benchmark install reports itself as host mode and
+   `wk bench staged` refuses to run there — correctly, because it cannot tell.
 
 2. **Quiet it, permanently.** `wk quiesce` covers the per-run half (a
    `caffeinate`, the analysis daemons paused, Spotlight/updates/low-power off
@@ -100,9 +102,9 @@ wk build <ws> mac-release              # in a macOS guest, where builds belong
 wk bench stage <ws> --to mbp           # onto the volume, while it is mounted
 wk boot mbp                            # checks, records, prints the ritual
    ... choose the disk (see below) ...
-wk bench staged --plan speedometer3.0  # over there, in the benchmark role
+wk bench staged --plan speedometer3.0  # over there, in bench mode
 wk boot mbp --back                     # a plain reboot; the result stays put
-wk bench staged --ls                   # read it back from this role
+wk bench staged --ls                   # read it back from host mode
 ```
 
 **Which way to choose the disk matters:**
@@ -131,7 +133,7 @@ either measured or found while building the runner:
 ## Verified, and not
 
 **The whole path is verified, on real builds, between two real machines** —
-they were two macOS guests rather than one Mac in two roles, which is the only
+they were two macOS guests rather than one Mac in two modes, which is the only
 thing this task adds. 2026-08-20: built `mac-release` in one guest (8m1s
 incremental, peak 7.6 GB), staged 1.5 GB of products onto another, and ran
 JetStream2.2 there through `wk bench staged`: `BENCH OK`, per-subtest scores,
@@ -142,9 +144,9 @@ the exclusions keep everything the browser driver needs.
 Also verified on this Mac: the whole `wk boot mbp` lifecycle against a
 disposable APFS volume, and every refusal in the preflight.
 
-**Not verified**: this Mac, in its own benchmark role, producing a number that
-means something. Everything upstream of the reboot is exercised now; what is
-left is the volume and the two clicks.
+**Not verified**: this Mac, in bench mode, producing a number that means
+something. Everything upstream of the reboot is exercised now; what is left is
+the volume and the two clicks.
 
 **What the rehearsal taught, that applies here:**
 
@@ -164,7 +166,7 @@ left is the volume and the two clicks.
 
 A `wk bench staged` run on the benchmark install that produces a `result.json`
 and an `env.json` with `bench_host=image` and `role_marker_overridden: false`,
-readable from the workstation role after `wk boot mbp --back`, and comparable
-against a container run with `wk bench compare` printing exactly the axis
-warnings it should. Then tick the `[ ]` lines under "The bare-metal benchmark
-run" and "The Mac: a role transition nobody can automate" in `docs/TESTING.md`.
+readable from host mode after `wk boot mbp --back`, and comparable against a
+container run with `wk bench compare` printing exactly the axis warnings it
+should. Then tick the `[ ]` lines under "The bare-metal benchmark run" and
+"The Mac: a mode transition nobody can automate" in `docs/TESTING.md`.

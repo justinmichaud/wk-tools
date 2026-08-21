@@ -47,7 +47,7 @@ image_ids() {
 }
 
 # Directories with no manifest: rubble from an interrupted build. Named
-# separately from image_ids so `wk image ls` can report them as what they are
+# separately from image_ids so `wk sysimage ls` can report them as what they are
 # rather than hiding them, and so a re-build can delete them without a
 # heuristic.
 image_rubble() {
@@ -272,7 +272,7 @@ image_dtb_for() {
 }
 
 # Every class image_root_class can return needs a word here. `portable` and
-# `network` were missing, so `wk image write --dry-run` described the commonest
+# `network` were missing, so `wk sysimage write --dry-run` described the commonest
 # root of all -- a LABEL=, which is exactly the kind that works anywhere -- as
 # "an unrecognised kind of device", while the check on the very next line was
 # passing it deliberately.

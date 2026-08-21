@@ -74,7 +74,7 @@ BOOT_ORDER_NORMAL=""
 # nothing else in the sector moves when it changes.
 PIUSB_PART_SUFFIX=1
 PIUSB_TYPE_OFFSET=450
-PIUSB_TYPE_ARMED=0c      # FAT32 LBA -- what `wk image write` leaves behind
+PIUSB_TYPE_ARMED=0c      # FAT32 LBA -- what `wk sysimage write` leaves behind
 PIUSB_TYPE_DISARMED=83   # Linux -- no boot filesystem, as far as firmware sees
 
 # Read partition 1's type byte, as two lowercase hex digits.
@@ -142,7 +142,7 @@ b_arm() {
     $PIUSB_PART_SUFFIX, which is neither 0x$PIUSB_TYPE_ARMED nor 0x$PIUSB_TYPE_DISARMED. That is not a disk
     this driver put an image on, and arming it would be a guess.
 
-    Write one first:  wk image write <id> --disk $MACH_NAME:$MACH_DEVICE" ;;
+    Write one first:  wk sysimage write <id> --disk $MACH_NAME:$MACH_DEVICE" ;;
     esac
 }
 
@@ -163,7 +163,7 @@ b_disarm_note() {
 
 # The other half of the one-shot, and the half that runs *inside* the image.
 #
-# `wk image build` installs this as an early systemd unit, so a booted image
+# `wk sysimage build` installs this as an early systemd unit, so a booted image
 # takes its own start4.elf out of the firmware's way before it does anything
 # else. From then on the stick is not bootable and any reboot -- clean, panic,
 # watchdog or power cut -- lands on the SD card, reachable.

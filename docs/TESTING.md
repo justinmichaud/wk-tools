@@ -1205,9 +1205,9 @@ command that asked for it.
 
 ---
 
-## 7. Boot images and role transitions — `wk image`, `wk boot` (Linux)
+## 7. Systems and mode transitions — `wk sysimage`, `wk boot` (Linux)
 
-A machine booted into an image is a *role transition*, not a reboot: the box
+A machine booted into a system is a *mode transition*, not a reboot: the box
 stops being a workstation for a while and then becomes one again. So the
 checks come in three groups — the build (which must be unprivileged and
 reproducible), the transition (which must be one-shot and self-reverting), and
@@ -1223,12 +1223,12 @@ the reader (which must never mistake intent for evidence).
       matching hashes on both sides. The file should not be tracked either)
 
 ### The bare-metal benchmark run (`wk bench stage` / `wk bench staged`)
-- [V] a benchmark runs in the benchmark role or it does not run — the
-      workstation role is refused, and `--force` does not open it (2026-08-20,
-      in `wk selftest --quick`: same refusal with and without the flag; the two
-      roles produce the same shape of result and nothing tells them apart
+- [V] a benchmark runs in bench mode or it does not run — host mode is
+      refused, and `--force` does not open it (2026-08-20, in
+      `wk selftest --quick`: same refusal with and without the flag; the two
+      modes produce the same shape of result and nothing tells them apart
       afterwards)
-- [V] `--dry-run` still describes it from the workstation role, quoting
+- [V] `--dry-run` still describes it from host mode, quoting
       included — the default volume name has a space in it
 - [V] run-benchmark drives from a *partial* tree: `Tools/Scripts` alone, no
       checkout root, no `Source/` (2026-08-20, on this Mac against a tree
@@ -1317,7 +1317,7 @@ the reader (which must never mistake intent for evidence).
       (2026-08-20: it reported "only -20480MB is unspoken for" — the guest's
       own allocation subtracted twice)
 
-### The rehearsal: a guest standing in for the benchmark role (`benchvm`)
+### The rehearsal: a guest standing in for bench mode (`benchvm`)
 - [V] `wk boot benchvm --status` on a machine with no such guest says so —
       "guest=wk-bench (absent)" — instead of exiting silently (2026-08-20: it
       did exit silently, because the driver's probes ran under `set -o
@@ -1389,7 +1389,7 @@ the reader (which must never mistake intent for evidence).
       automatic update checking still on)
 - [ ] the same on a benchmark install, before a run
 
-### The Mac: a role transition nobody can automate (`wk boot mbp`)
+### The Mac: a mode transition nobody can automate (`wk boot mbp`)
 - [V] `wk boot mbp --status` reports the booted volume and whether the
       benchmark volume is attached, and changes nothing (2026-08-20, on this
       Mac: `booted_volume=Macintosh HD`, `benchmark_volume=... (not attached)`)
@@ -1417,10 +1417,10 @@ the reader (which must never mistake intent for evidence).
 
 ### Building — unprivileged, reproducible, crash-only
 
-- [V] `wk image build <profile> --dry-run` resolves the profile, the machine,
+- [V] `wk sysimage build <profile> --dry-run` resolves the profile, the machine,
       the base and the destination, builds nothing, and names any missing
       tooling rather than failing at the first `require`
-- [V] `wk image build rpi5-perf` completes with **no sudo anywhere** — the FAT
+- [V] `wk sysimage build perf-linux-rpi5` completes with **no sudo anywhere** — the FAT
       seed goes in through mtools at a byte offset, never a loop mount
 - [V] the base is pinned by sha256 and re-verified on every build; a cached
       base that matches is not re-downloaded
@@ -1441,9 +1441,9 @@ the reader (which must never mistake intent for evidence).
       it are label-twins, and `root=LABEL=writable` with both disks attached
       names two filesystems
 - [V] `e2fsck -fn` on the built image's root passes clean after that surgery
-- [V] `wk image ls` lists only images with a manifest; a build directory
+- [V] `wk sysimage ls` lists only images with a manifest; a build directory
       without one is reported as rubble, by name
-- [V] `wk image show <id>` re-hashes `disk.img` and refuses an image that no
+- [V] `wk sysimage show <id>` re-hashes `disk.img` and refuses an image that no
       longer matches its manifest
 - [V] a build that fails partway leaves a directory with no manifest; it is
       reported as rubble and the next build destroys it, never "already
@@ -1452,10 +1452,10 @@ the reader (which must never mistake intent for evidence).
 - [V] a machine that is unreachable fails the build *before* the unpack, and
       names the reason: the network profile is read from that machine
 - [ ] `kill -9` mid-build, re-run: same, at every other point
-- [ ] two `wk image build` at once: the second waits on the store lock rather
+- [ ] two `wk sysimage build` at once: the second waits on the store lock rather
       than racing the first's rubble cleanup (rule 4)
 
-### Writing an image onto a disk — `wk image write`
+### Writing a system onto a disk — `wk sysimage write`
 
 - [V] with no `--device` it lists candidates on the machine and **refuses to
       guess** which disk is the card
@@ -1481,10 +1481,10 @@ the reader (which must never mistake intent for evidence).
 - [V] the read-back sha256 check runs only after a **dd** write. After a bmap
       write it would always fail — bmaptool does not write unmapped blocks, so
       comparing the whole span compares bytes nobody wrote
-- [V] one verb, not two: `wk image flash` and `wk pi flash` both fail with a
+- [V] one verb, not two: `wk sysimage flash` and `wk pi flash` both fail with a
       message saying why the *name* was wrong ("reads as reflash that machine";
       "nothing here is permanent"), not merely where it moved
-- [V] `wk image disks <machine>` marks which disk that machine is configured to
+- [V] `wk sysimage disks <machine>` marks which disk that machine is configured to
       boot from, so `wk boot` does not look like it takes a disk argument
 - [V] after writing, the closing line says whether anything will boot it and
       names `wk boot <machine>` — the sentence that would have prevented the
@@ -1492,7 +1492,7 @@ the reader (which must never mistake intent for evidence).
 
 ### The image must be able to boot from what it is written to
 
-- [V] `wk image flash rpi4` with the yocto image is **refused**: the image says
+- [V] `wk sysimage flash rpi4` with the yocto image is **refused**: the image says
       `root=/dev/mmcblk0p2` and `MACH_DEVICE` is `/dev/sda`, so the firmware
       would load the kernel and the kernel would find no root. The message says
       exactly that, and says it in the dry run too
@@ -1505,7 +1505,7 @@ the reader (which must never mistake intent for evidence).
 
 ### Flashing
 
-- [V] `wk image flash <machine> --dry-run` writes nothing
+- [V] `wk sysimage flash <machine> --dry-run` writes nothing
 - [V] it refuses a device with mounted partitions until it has agreement to
       erase, then unmounts them itself rather than sending the user to a
       hand-typed `umount`
@@ -1531,7 +1531,7 @@ the reader (which must never mistake intent for evidence).
 - [V] `wk boot <machine> --back` returns the machine and clears the record
 - [V] `wk boot <machine> --disarm` re-arms the normal boot order and clears
       the record, and the next reboot is an ordinary one
-- [ ] with the boot device absent, arming falls through to the normal role
+- [ ] with the boot device absent, arming falls through to host mode
       rather than hanging at firmware
 
 ### Reading the transition — intent is never evidence
@@ -1542,7 +1542,7 @@ the reader (which must never mistake intent for evidence).
       firmware's persistent boot order alongside it
 - [ ] armed and not yet rebooted: reported as ARMED, exit 2, with the warning
       that the next reboot leaves this role
-- [V] armed, rebooted, and back in the normal role: the record is reported as
+- [V] armed, rebooted, and back in host mode: the record is reported as
       **spent** rather than as a desync — the transition happened, and the
       mechanism worked
 - [V] spentness is decided by the machine's **boot id**, not by comparing the
@@ -1589,7 +1589,7 @@ the reader (which must never mistake intent for evidence).
       starts nothing
 - [V] `wk serve` fills its TFTP root from an image already in the store, with
       mtools at a byte offset — no mount, no privilege, and what a netboot
-      client gets is the same artifact `wk image flash` writes to a stick
+      client gets is the same artifact `wk sysimage write` puts on a stick
 - [V] a second machine on the LAN fetches boot files over TFTP: `config.txt`
       (2699 B) and a 14.7 MB kernel, byte-identical, ~23 s over WiFi at a
       firmware-realistic 1468-byte block size
@@ -1614,7 +1614,7 @@ the reader (which must never mistake intent for evidence).
 - [V] `wk serve` refuses when the installed privileged helper differs from
       `boot/wk-tftpd.py` — the root-owned copy is only refreshed by `./setup`,
       and serving a stale one is how a fixed bug reaches a board anyway
-- [V] the same question is asked of a **disk**: `wk image write` refuses an
+- [V] the same question is asked of a **disk**: `wk sysimage write` refuses an
       image whose boot partition cannot get the firmware as far as a kernel,
       before writing anything — firmware that finds no kernel halts, where a
       kernel that finds no root reboots
@@ -1622,12 +1622,16 @@ the reader (which must never mistake intent for evidence).
       0x0c <-> 0x83, and it neither truncates the device nor moves anything
       else in the sector — a stick with a FAT boot partition and no
       `start4.elf` **halts** the firmware rather than being skipped, which is
-      why the disarm removes the partition type and not the file
+      why the disarm removes the partition type and not the file; the fixture
+      is a *minimal valid MBR* (0x55AA signature, one entry with a real LBA
+      start and size), because the sfdisk assertion reads a table and runs
+      only where sfdisk exists — rebuilding the fixture as bare zeros on the
+      Mac passed there and failed on every Linux box (found 2026-08-20)
 - [V] a driver's self-disarm command contains no single quote — it is
       interpolated into a single-quoted systemd `ExecStart`, where one would
       close the string early and leave three fragments where a command should
       be
-- [V] a freshly built image's partition 1 is type 0x0c, so `wk image write`
+- [V] a freshly built image's partition 1 is type 0x0c, so `wk sysimage write`
       leaves the stick in the armed state the driver expects
 - [V] the cloud-init seed's heredoc contains no unescaped backtick — it is an
       unquoted heredoc, so prose in it is shell input: three `systemd-run`
@@ -1673,20 +1677,20 @@ the reader (which must never mistake intent for evidence).
       ephemeral data port make it worse again — untested, and not worth
       testing unless someone proposes it a second time
 
-### Building a Yocto image — `wk image build rpi4-wpe-2.48`
+### Building a Yocto system — `wk sysimage build downstream-yocto-wpe-2.48-rpi4`
 
 The second builder behind the same verb. What is checked here is the seam
 between the two, and the things the distro builder never had to think about: a
 build that outlives its driver, a cache that outlives its workspace, and an
 egress list that cannot be "every upstream in six layers".
 
-- [V] `wk image build rpi4-wpe-2.48 --dry-run` resolves the branch, the
+- [V] `wk sysimage build downstream-yocto-wpe-2.48-rpi4 --dry-run` resolves the branch, the
       cross-target, the recipe, the stage list, the workspace, the two caches
       and the free disk, and builds nothing
 - [V] the same command with a *distro* profile still takes the distro path
       unchanged — one verb, dispatched on `IMG_BUILDER`, and neither builder
-      sees the other's flags (`wk image build rpi4-wpe-2.48 --bogus` names the
-      yocto flags; `wk image build rpi4-perf --dry-run` is untouched)
+      sees the other's flags (`wk sysimage build downstream-yocto-wpe-2.48-rpi4 --bogus` names the
+      yocto flags; `wk sysimage build perf-linux-rpi4 --dry-run` is untouched)
 - [V] the build workspace is created on demand and left on the profile's
       branch; a workspace on the wrong branch is checked out rather than built
       in — the branch *is* the version pin
@@ -1770,12 +1774,13 @@ egress list that cannot be "every upstream in six layers".
       the host tar and mixed sstate were each tested and refuted.~~ Fixed; the
       four refuted hypotheses are kept in `docs/HANDOFF-yocto.md` because each
       is the obvious guess
-- [ ] `wk image build rpi4-wpe-2.48` compiles the whole image — **not yet run to
-      completion** (hours; see `docs/HANDOFF-yocto.md`)
+- [V] `wk sysimage build downstream-yocto-wpe-2.48-rpi4` compiles the whole
+      image — completed and imported 2026-08-20 (store id
+      `rpi4-wpe-2.48-20260820T124927Z`; see `docs/HANDOFF-yocto.md`)
 - [V] the *import* half is verified independently of it, against a hand-made
       8 MB image in a throwaway cross-target directory: `disk.img` and
       `rootfs.tar.xz` land in the store, the manifest is written last,
-      `wk image ls` lists it and `wk image show` re-hashes it and agrees. Worth
+      `wk sysimage ls` lists it and `wk sysimage show` re-hashes it and agrees. Worth
       testing separately precisely because a bug here would only surface after
       six hours of compiling
 - [V] the import is a real file copy (`t_pull`), not `t_exec … cat`. That was
@@ -1786,13 +1791,13 @@ egress list that cannot be "every upstream in six layers".
       hashed — a contaminated stream would otherwise hash perfectly and fail on
       the board
 - [V] an interrupted import leaves a directory with no manifest, which
-      `wk image ls` reports as rubble by name (seen for real, from the corrupt
+      `wk sysimage ls` reports as rubble by name (seen for real, from the corrupt
       first attempt)
 - [V] the manifest records `cross_version`, the hash
       `cross-toolchain-helper` also installs in the image at
       `/usr/share/cross-target-info-version`, so "is this board running this
       image" is a string comparison rather than a belief
-- [ ] a second `wk image build` of the same profile reuses the sstate cache and
+- [ ] a second `wk sysimage build` of the same profile reuses the sstate cache and
       is dramatically faster than the first
 - [V] the store now holds both namespaces — `sstate/ubuntu-26.04/` from the
       abandoned 26.04 image (where uninative was disabled, so native sstate was
@@ -1840,7 +1845,7 @@ egress list that cannot be "every upstream in six layers".
       build can look perfectly healthy while writing its cache into the layer
       `wk rm` deletes. They are named there *and* written into `local.conf`,
       and the 24 GB in the store is the evidence that it took
-- [V] `wk image build <profile> --stop` stops a detached build, killing bitbake
+- [V] `wk sysimage build <profile> --stop` stops a detached build, killing bitbake
       as well as the wrapper, with SIGTERM rather than SIGKILL so bitbake closes
       its own state and the sstate cache stays resumable
 - [ ] a killed build leaves no lock behind. **Fails today**: the atomic-mkdir
@@ -1863,7 +1868,7 @@ egress list that cannot be "every upstream in six layers".
 
 ### Detached, and it really is detached
 
-- [V] a stage started by `wk image build` survives the driving process being
+- [V] a stage started by `wk sysimage build` survives the driving process being
       killed. The reason this needs its own line: `setsid nohup` through
       `podman exec` **does not** — measured, with a detached `sleep 3; echo`
       that never wrote its file — so the container driver detaches with
@@ -1959,7 +1964,7 @@ egress list that cannot be "every upstream in six layers".
       on hardware, not on code — the rpi4 is not powered on (a full LAN sweep
       finds no Raspberry Pi but the rpi5), and moose's three wired NICs are all
       `carrier=0`.
-- [V] `wk image build rpi3-perf` refuses rather than handing the fleet's only
+- [V] `wk sysimage build perf-linux-rpi3` refuses rather than handing the fleet's only
       32-bit board an arm64 base
 - [ ] the rpi3 at all: it needs proxy DHCP with option 43 (not built), an
       irreversible OTP burn, and its model (3B vs 3B+) established. Deliberately

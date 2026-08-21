@@ -39,10 +39,10 @@ workspaces
   test <name> [args]        run tests
   bench <name> <plan>       run a benchmark, with preflight and provenance
       stage <ws> --to <machine>
-                            put a build where a bare-metal role will find it
-                            (build in the guest, run on the machine itself)
-      staged [--plan P]     run it, in the role that was booted for it; refused
-                            in the workstation role, which is not the same
+                            put a build where a machine's bench mode will find
+                            it (build in the guest, run on the machine itself)
+      staged [--plan P]     run it, in the bench mode booted for it; refused
+                            in host mode, which is not the same
                             machine underneath
   profile <name> [file.js]  where the time went: JSC's own profilers, samply,
                             or Instruments -- one flag each, no env-var walls
@@ -87,15 +87,15 @@ hosts and machines
                             erase it (it is the largest thing on the machine)
   pi <sub>                  setup: onto the tailnet; netboot-enable: the
                             EEPROM's only writer
-  image <sub>               boot images: build|ls|show|disks|write|rm
+  sysimage <sub>            bootable systems: build|ls|show|disks|write|rm
       write <id> --disk <machine>:<device>
                             write an image onto a removable disk attached to a
                             fleet machine (never that machine's own system
                             disk; writing one does not make anything boot it)
-  boot <machine>            put a machine into its image for one boot
+  boot <machine>            put a machine into bench mode for one boot
                             (--status|--keep|--back|--disarm|--diag|--dry-run)
   serve                     hand boot files to machines that netboot
-                            (--image|--address|--status|--stop|--dry-run)
+                            (--system|--address|--status|--stop|--dry-run)
   remote setup|rm <target>  provision a shared build machine, or undo that
                             and forget it (never needs root)
   quiesce on|off|status     quiet the machine for benchmarking
@@ -213,7 +213,7 @@ resolve_target() {
 # command does not have.
 is_targetless() {
     # A comparison of two *files on this machine* is host-side: a result taken
-    # in the benchmark role lives on that machine's own volume, not in the
+    # in bench mode lives on that machine's own volume, not in the
     # container store, and forwarding the command into the podman VM looks for
     # those paths in a Linux guest that has never seen them ("no such run", of
     # a file sitting right there). A comparison of two run *ids* still
@@ -266,7 +266,7 @@ is_host_only() {
         # has it. Each of these three carried its own copy of this refusal,
         # with a comment saying it belonged here -- it does, next to the
         # commands it is the same rule as.
-        image|boot|serve) return 0 ;;
+        sysimage|boot|serve) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -302,7 +302,7 @@ is_host_command() {
         # ssh from here, and `wk serve` binds a port on this machine's LAN.
         # Forwarded into the podman VM they would have looked in an empty store
         # inside a Linux guest with no route to any of it.
-        image|boot|serve) return 0 ;;
+        sysimage|boot|serve) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -331,7 +331,7 @@ is_readonly_report() {
         # or which role it is in. Every one of these changes nothing -- and
         # `wk boot --status` in particular has to stay that way, because it is
         # what you run when you are not sure what a machine is doing.
-        "image ls"|"image show"|"image disks") return 0 ;;
+        "sysimage ls"|"sysimage show"|"sysimage disks") return 0 ;;
         "boot --status"|"boot --diag") return 0 ;;
         "serve --status") return 0 ;;
         # `wk remotes --fix` writes: it re-asserts the wiring. Named here so
@@ -550,6 +550,10 @@ main() {
         # Advertised in the help but implemented by the top-level script, so it
         # has no cmd/ file for the dispatch below to find.
         setup) exec "$WK_ROOT/setup" "$@" ;;
+        # Renamed 2026-08-20 (docs/HANDOFF-vocabulary.md): a bootable artifact
+        # is a *system*, never bare "image" -- the old word also meant three
+        # other things. One spelling, so the old one points rather than works.
+        image) die "'wk image' is renamed: wk sysimage" ;;
     esac
 
     local impl="$WK_ROOT/cmd/$cmd"

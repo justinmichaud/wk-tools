@@ -1,9 +1,9 @@
 # HANDOFF — bootable benchmark images
 
-A managed image, deployed automatically to external media (or netboot), that a
-machine boots into for benchmarking: pre-configured with tailscale (like the
-rpi5 provisioning), no sandboxing inside, driven remotely by a benchmark runner
-on another computer, for maximum perf stability.
+A managed system, deployed automatically to external media (or netboot), that
+a machine boots into for benchmarking: pre-configured to be reachable on first
+boot, no sandboxing inside, driven remotely by a benchmark runner on another
+computer, for maximum perf stability.
 
 Targets: macOS and Linux workstations, rpi5 (Ubuntu), rpi5/4/3 (yocto).
 
@@ -64,63 +64,50 @@ This supersedes the earlier rpi5-as-tuned-test-device plan.
   `pi-hosts`: an unrestricted tailnet node reachable from inside a workspace
   would defeat the boundary.
 - **Benchmarking boots an image instead.** The image carries the perf tuning
-  that used to live on the installed OS — overclock, v3d, perf governor, swap
-  off (see `host/linux/rpi5/`) — plus the quiesce environment, and joins the
-  tailnet under its *own* identity, tagged `tag:wk`. That identity is what goes
-  in `pi-hosts` and what workspaces and the remote benchmark runner reach.
+  that used to live on the installed OS — perf governor, swap off, the pinned
+  clocks (see `image/*/config.txt.append`) — plus the quiesce environment. As
+  designed (2026-08-18) it was to join the tailnet under its own `tag:wk`
+  identity; as built (2026-08-20) it carries **no tailscale at all** and is
+  reachable only over the LAN, by its mDNS name (`image/profiles.sh`, which is
+  why avahi is one of the image's two packages).
 - **The stability half of the rpi5 tuning** (fan always 100%, WiFi stability,
-  fstab/indexer, the NUMA kernel) applies to the rpi5 in every role and stays
+  fstab/indexer, the NUMA kernel) applies to the rpi5 in both modes and stays
   on the installed OS.
-- rpi4/rpi3 are unchanged: plain test devices via `wk pi setup`.
+- rpi4/rpi3 are unchanged: plain bench devices via `wk pi setup`.
 - The gap this leaves is real and accepted: between the workstation conversion
   and a working image, the rpi5 is not a benchmark device. Nothing else was
   benchmarking on it.
 
-## Booting the image: three machines, three mechanisms, one of them missing
+## Booting the image: one mechanism per machine, and one of them hands-on
 
-"Netboot" is one word for three different things here, and only two of the
-three machines can actually do it. This is the design question to settle before
-building the image, because it decides what the image even is — a network root,
-a RAM disk, or an installed volume.
+"Netboot" is one word for several different things here, and most of the
+machines cannot or should not do it. This was the design question to settle
+before building the image, because it decides what the image even is — a
+network root, a RAM disk, or an installed volume — and the per-machine answers
+below are now settled (the mechanics live in `docs/HANDOFF-netboot.md`).
 
-The shared requirement: **no sandboxing inside**. The image is the whole
+The shared requirement: **no sandboxing inside**. The system is the whole
 machine for the duration of a run — no podman, no Tart, no workspace — and the
 benchmark runner drives it from another computer over the tailnet. That is the
-opposite of every other environment in this repo, and it is why it is an image
-rather than a mode.
+opposite of every other environment in this repo, and it is why entering it is
+a mode transition rather than a setting on the host install.
 
-### rpi5 — real netboot, and a one-shot primitive that fits perfectly
+### rpi5 — settled 2026-08-19, and not by netboot
 
-**Superseded in detail by `docs/HANDOFF-netboot.md` (2026-08-19), which is now
-lane A's first step.** What it settles, so the guesses below can be read as
-history: the one-shot primitive is `set_reboot_order` via `vcmailbox`, not
-`tryboot` — `tryboot` picks a config on the medium that is already booting,
-which leaves the medium unchosen. moose serves, not the BMC. And the DHCP
-problem the section below worries about is avoidable outright: the bootloader
-skips DHCP entirely when `TFTP_IP` and the static-IP keys are set.
+**Superseded in detail by `docs/HANDOFF-netboot.md`.** This section originally
+argued for netboot via `tryboot`; both guesses died on the board's own
+evidence, and what stands is:
 
-The Pi bootloader supports network boot natively (a `BOOT_ORDER` nibble
-selecting network: TFTP for firmware and kernel, NFS or an initramfs for the
-root). Two things make this the easiest of the three:
-
-- The isolated guest network already has a machine that could serve it. The
-  Librem 5 BMC is described in `docs/HANDOFF-bmc.md` as doing DHCP, routing and
-  tailscale proxying for that network; a TFTP root and an NFS export are the
-  same box's job. Worth confirming before designing around it — the alternative
-  is moose serving it, which means the Pis' network has to reach moose.
-- **`tryboot` is the mechanism to reach for.** `sudo reboot '0 tryboot'` boots
-  the alternate configuration *once* and falls back on the next reboot. That is
-  exactly the semantics wanted here — become a benchmark machine for one run,
-  come back a workstation — and it needs no EEPROM rewrite per run and no
-  physical access when a run wedges the machine.
-
-Open: whether the perf tuning in `host/linux/rpi5/` survives being baked into
-an image rather than applied to an install. The EEPROM half (`SDRAM_BANKLOW`,
-`BOOT_ORDER`, the overclock in `config.txt`) is firmware state, not image
-state, and firmware state is shared between the two roles. Overclocking the
-workstation permanently to benchmark it occasionally is the thing this split
-was meant to avoid, so the answer is probably that the overclock stays in
-`config.txt` on the boot medium the image supplies, not in the EEPROM.
+- The mechanism is the **USB one-shot** — `set_reboot_order` via `vcmailbox` —
+  not `tryboot`, which picks a config on the medium already booting and leaves
+  the medium unchosen (and is already taken by Ubuntu's own A/B kernel
+  staging on this board). Netboot never applied at all: the rpi5 is WiFi-only
+  by assignment, and netboot is wired-only on every Pi.
+- The overclock question is answered where the firmware boundary put it: the
+  EEPROM is shared by both modes and is never written, so an `oc` profile sets
+  `arm_freq`/`over_voltage` in the *image's* `config.txt`
+  (`image/rpi5-perf/config.txt.append` records the rule; no `oc` profile
+  exists yet).
 
 ### rpi4 — netboot is the wrong lane for this, on the hardware's own evidence
 
@@ -148,10 +135,10 @@ medium is not bootable at all the firmware moves to the next `BOOT_ORDER` entry
 and lands on the SD card, reachable. Both exits are automatic.
 
 **Not distorting the numbers rules out the network root.** "Storage: what the
-image is" in `docs/HANDOFF-netboot.md` already phases this correctly — a network
-root for *profiling*, a RAM root for *benchmarking* — and the reason is exactly
-this constraint: an NFS root does I/O, over the same interface, during the
-measurement.
+system is" in `docs/HANDOFF-netboot.md` already phases this correctly — a
+network root for *profiling*, a RAM root for *benchmarking* — and the reason is
+exactly this constraint: an NFS root does I/O, over the same interface, during
+the measurement.
 
 But the RAM root is not available here either. It is realistic on the rpi5 (16
 GB) and on moose (115 GB free); **the rpi4 has 2 GB**, and a browser benchmark
@@ -165,7 +152,8 @@ what is left is the one the netboot handoff already noted was never blocked:
 **write the image to a local device over ssh and boot it.** No server, no root
 mechanism, no privilege — and no network in the boot path or the measurement.
 
-**The shape, and the one thing it needs that does not exist yet.**
+**The shape, and the one thing it needed that did not yet exist** (built later
+the same day, below):
 
 - The image goes on the **USB stick** (`/dev/sda`, 29.5 GB, USB 3.0 — faster and
   far more consistent than the SD card, which matters for a benchmark). The
@@ -179,7 +167,7 @@ mechanism, no privilege — and no network in the boot path or the measurement.
 - **Arming is the stick's boot partition**, the way arming is the server's
   content for netboot. The firmware will not boot a device with no `start4.elf`,
   so renaming that one file is a complete, instant, reversible arm — and the
-  disarm can be done from either role, since the rescue role can mount the
+  disarm can be done from either mode, since the rescue system can mount the
   stick's FAT partition.
 - **The one-shot comes back for free.** The image renames its own `start4.elf`
   away on boot, so any later reboot falls through to the SD card. That is the
@@ -191,16 +179,16 @@ mechanism, no privilege — and no network in the boot path or the measurement.
 
 **What netboot is still for.** Nothing above wastes it. Profiling wants a root
 that is a directory on the server, editable in place, and does not care about
-storage noise; that is phase 1 of "Storage: what the image is" and netboot is
+storage noise; that is phase 1 of "Storage: what the system is" and netboot is
 how it gets there. The two lanes want opposite things and should stop sharing a
 mechanism.
 
-**Already landed toward this, 2026-08-20:** `wk image write` refuses an image
-whose boot partition cannot get the firmware as far as a kernel
-(`image_check_boot_files`), checked from the image file before anything is
-written. That is the pre-flight that makes an unattended local boot safe, and it
-is the same check `wk serve` runs — firmware asks a disk the same questions it
-asks a TFTP server.
+**Already landed toward this, 2026-08-20:** `wk sysimage write` refuses an
+image whose boot partition cannot get the firmware as far as a kernel
+(`image_check_boot_files`, `lib/image.sh`), checked from the image file before
+anything is written. That is the pre-flight that makes an unattended local boot
+safe, and it is the same check `wk serve` runs — firmware asks a disk the same
+questions it asks a TFTP server.
 
 **Built 2026-08-20, all of it offline — the board was halted at the time and
 none of this has met hardware yet:**
@@ -208,19 +196,19 @@ none of this has met hardware yet:**
 - **`wk pi boot-order <host> <order>`**, with `netboot-first`, `netboot-last`,
   `usb-first` and `local`. One writer still: `netboot-enable` is now a spelling
   of the same function rather than a second implementation, because BOOT_ORDER
-  is firmware state shared by every role and two commands that can both write
-  it is two places for a wrong value to come from. The orders are derived from
+  is firmware state shared by everything the board can boot, and two commands
+  that can both write it is two places for a wrong value to come from. The orders are derived from
   whatever is already there rather than written as constants, so a board with a
   nibble this does not know about keeps it, and applying one twice is a no-op.
 - **`boot/pi-usb.sh`**, and a third arming model to go with it. The other two
   put the intent in firmware (`one-shot`) or in the server's content
   (`server`); `medium` puts it on the disk the machine boots from — the only
-  one of the three that is both readable and writable from the other role, so
+  one of the three that is both readable and writable from the other mode, so
   `--status` reports the arming as evidence rather than as a claim.
 - **The self-disarm**, which is what makes a file-based arming behave like a
-  one-shot. `wk image build` installs it as a `sysinit.target` unit, so the
-  image parks its own `start4.elf` before it does anything else and every later
-  reboot — clean, panic, watchdog or power cut — lands on the SD card.
+  one-shot. `wk sysimage build` installs it as a `sysinit.target` unit, so the
+  image parks its own boot partition before it does anything else and every
+  later reboot — clean, panic, watchdog or power cut — lands on the SD card.
 - **`force_turbo=1` with `arm_freq=arm_freq_min=1500` and `arm_boost=0`**, in
   `image/rpi4-perf/config.txt.append`. Pinned rather than fast: 1800 needs the
   boost clock, and a Pi 4 that throttles partway through a run has produced two
@@ -230,7 +218,8 @@ none of this has met hardware yet:**
   up as variance nobody could explain.
 
 **A bug found while building it, and worth knowing about beyond this lane.**
-`user_data()` in `cmd/image` is an *unquoted* heredoc, because it interpolates
+`user_data()` in `cmd/sysimage` (then `cmd/image`) is an *unquoted* heredoc,
+because it interpolates
 the profile's values — so its lines are shell input, including the ones that
 look like YAML comments. Backticked command names in prose were being executed
 on the build host: three `systemd-run` invocations per build, and the comment
@@ -299,7 +288,8 @@ mechanism here has to produce the second state, never the first.
 ### The lane closed, 2026-08-20 evening
 
 With the partition-type disarm in place the whole cycle ran clean and with no
-hands on the board:
+hands on the board (as run; the verbs and profile are now `wk sysimage
+build perf-linux-rpi4` and `wk sysimage write`):
 
     wk image build rpi4-perf                        2.8G, 47 s from a cached base
     wk image write <id> --disk rpi4:/dev/sda        4642 MB, verified by read-back,
@@ -329,14 +319,16 @@ Two more bugs found in the process, both of the same shape -- a mechanism that
 looked right and had never been exercised twice:
 
 - **`i_ssh` pinned the image's host key, and an image's host key changes every
-  build.** `wk image build` makes a fresh rootfs, ssh generates a fresh key in
-  it, and the next image boots at the same address. `accept-new` accepts keys
-  it has never seen, not keys that have moved -- so the *second* image ever
-  booted on a machine was refused, and `wk boot --status` called a running,
-  pingable, healthy board unreachable. Nothing is pinned on that channel now:
-  a key with no continuity across builds cannot authenticate anything, and
-  `/etc/wk-image` says *which* image answered, which is the stronger statement.
-  **The rpi5 has the same channel and will hit this on its second image.**
+  build.** `wk sysimage build` makes a fresh rootfs, ssh generates a fresh key
+  in it, and the next image boots at the same address. `accept-new` accepts
+  keys it has never seen, not keys that have moved -- so the *second* image
+  ever booted on a machine was refused, and `wk boot --status` called a
+  running, pingable, healthy board unreachable. Nothing is pinned on that
+  channel now: a key with no continuity across builds cannot authenticate
+  anything, and `/etc/wk-image` says *which* system answered, which is the
+  stronger statement. `i_ssh` is shared (`boot/machines.sh`), so the rpi5 —
+  which would have hit the same wall on its second image — is covered by the
+  same fix.
 - **The self-disarm command was interpolated into a single-quoted systemd
   `ExecStart` and contained single quotes of its own**, which close that string
   early. Found by reading the unit out of a built image; the only other way it
@@ -377,7 +369,7 @@ be true of the network:
 Either way the run is remote-driven, and the machine that drives it cannot be
 moose. That is a new constraint: today moose is the machine that runs
 `wk bench`. An image run needs a *second* machine to hold the runner — the MBP,
-or the rpi5 in its workstation role.
+or the rpi5 in host mode.
 
 ### macOS — there is no netboot, and this is the hard one
 
@@ -423,7 +415,7 @@ workstation, drifting from the first. So the build stays where builds are
 cheap and reproducible, and what crosses the boundary is the product.
 
 The thing that makes this cheap on a Mac, and that has no equivalent on the
-Pis: **while this machine is in its normal role the benchmark volume is simply
+Pis: **while this machine is in host mode the benchmark volume is simply
 mounted**, so staging a build onto it is a copy rather than a transfer, and
 reading the results back afterwards is the same. The transition is the only
 manual part, and it is two clicks.
@@ -431,19 +423,19 @@ manual part, and it is two clicks.
 Built and verified as far as the hardware allows (there is no benchmark volume
 on this machine yet — exercised against a disposable `hdiutil` APFS volume):
 
-- **`boot/mac-volume.sh`**, the fleet's third arming model. `one-shot` (rpi5)
-  and `server` (rpi4/rpi3) are joined by **`hands-on`**: the driver checks what
+- **`boot/mac-volume.sh`**, and a new arming model beside `one-shot` (rpi5),
+  `medium` (rpi4) and `server` (rpi3): **`hands-on`** — the driver checks what
   it can, records the intent, and prints the ritual; nothing reboots the
-  machine, because the role it is going to is chosen at the startup manager.
+  machine, because the mode it is going to is chosen at the startup manager.
   `wk boot mbp --status` then reports it as *armed and waiting for a person*
   rather than as something that will move by itself, and `--disarm` says which
   half a person still has to undo if they used the sticky route.
 - The machine drives itself (`MACH_LOCAL` in `boot/machines.sh`): there is one
   Apple Silicon machine here, so the transition is arranged from inside the
-  role being left, by a shell that is about to be rebooted out from under
+  mode being left, by a shell that is about to be rebooted out from under
   itself. That also answers the open question below about where the runner
   lives — for the Mac it is the machine itself, writing its results onto the
-  volume, which the normal role reads back the moment it returns.
+  volume, which host mode reads back the moment it returns.
 - Boot identity comes from `kern.boottime`, which does the same job for "has
   this arming been spent" that Linux's random `boot_id` does, and is a clock
   reading as well.
@@ -452,12 +444,12 @@ on this machine yet — exercised against a disposable `hdiutil` APFS volume):
   the plans — the smallest tree that can drive a run), and a `stage.json`
   written last, carrying workspace, sha, config, wk-tools tree hash and
   `bench_host=image`. Provenance is decided *here*, where it is all still
-  known: the other role cannot ask a guest anything.
+  known: the other mode cannot ask a guest anything.
 - **`t_pull_dir`** joins `t_pull` in the driver contract, since a build tree is
   tens of thousands of files: `podman cp` for a container, rsync over ssh for
   a guest and for a build machine.
 
-### The rehearsal: a guest standing in for the benchmark role
+### The rehearsal: a guest standing in for bench mode
 
 Everything above except the *number* can be exercised without a reboot and
 without a disk, by making the benchmark machine a second macOS guest:
@@ -474,10 +466,10 @@ raised: no `*.build`, no `XCBuildData`, and the XPC services still work.
 
 It proves the mechanism and cannot prove the measurement: a guest shares a CPU
 with a desktop and its GPU is paravirtualised, which is precisely why the real
-role is bare metal. What it *does* answer, in minutes rather than in a
+bench mode is bare metal. What it *does* answer, in minutes rather than in a
 half-hour trip to the keyboard, is whether the staged tree carries everything
-run-benchmark needs, whether the payload survives the crossing, whether the
-role is recognised on the other side, and whether the record is complete.
+run-benchmark needs, whether the payload survives the crossing, whether bench
+mode is recognised on the other side, and whether the record is complete.
 
 Three things fell out of building it, all of which apply to the real machine
 too:
@@ -506,18 +498,9 @@ the per-run half on macOS (a `caffeinate`, the analysis daemons paused, and the
 privileged helper switching Spotlight, automatic updates and low power mode
 off), and as of 2026-08-20 it also *measures* the result rather than trusting
 it — including the two things the helper does not touch, a configured Time
-Machine destination and the thermal state. What is left is what the install
-itself has to be:
-
-- a full macOS install on the volume, *personalised for this Mac* (installed or
-  blessed from it — copying an image onto a disk does not boot), named
-  `WK Bench` (or `WK_BENCH_VOLUME`);
-- Spotlight indexing off for that volume, Time Machine off, automatic updates
-  off, sleep and screen saver off, Siri and analytics off, no login items;
-- an `/etc/wk-image` with an `id=` line — that marker is the only thing that
-  tells `wk boot` which role answered, and without it the benchmark role
-  reports itself as a workstation;
-- ssh in, so the run can be driven from a terminal rather than a keyboard.
+Machine destination and the thermal state. What the install itself has to be —
+the volume, the permanent quieting, the `/etc/wk-image` marker, ssh — is
+`docs/HANDOFF-mac-perf-mode.md`'s task and is itemised there, once.
 
 **The runner: `wk bench staged`, written 2026-08-20** — and the two questions
 it was waiting on were answered by reading and running WebKit's own code (a
@@ -537,7 +520,7 @@ it was waiting on were answered by reading and running WebKit's own code (a
    a checkout. It insists on a `*.framework` in the build directory.
 
 Two more things were found the same way, and both would otherwise have been
-discovered in the benchmark role with the machine already rebooted:
+discovered in bench mode with the machine already rebooted:
 
 3. **It needs a python with PyObjC.** The driver's `prepare_env` imports
    `webkitpy.autoinstalled.pyobjc_frameworks`, whose first line is a bare
@@ -549,17 +532,17 @@ discovered in the benchmark role with the machine already rebooted:
    benchmark install has the network once, or the tree is staged from a guest
    where it has already happened and carries the packages with it.
 
-**The run happens in the benchmark role or it does not happen.** That is the
-one refusal here that `--force` does not open, at the user's direction and for
-the reason the whole design exists: a run on the workstation shares the machine
-with a desktop, a podman VM and a browser, and produces a result of exactly the
-same shape — same command, same plan, same build, same JSON. Nothing tells the
-two apart afterwards except the refusal, so there is no "record it as a
-workstation run" escape hatch. `--dry-run` still describes the whole thing from
-the workstation role, because describing is not measuring.
+**The run happens in bench mode or it does not happen.** That is the one
+refusal here that `--force` does not open, at the user's direction and for the
+reason the whole design exists: a run in host mode shares the machine with a
+desktop, a podman VM and a browser, and produces a result of exactly the same
+shape — same command, same plan, same build, same JSON. Nothing tells the two
+apart afterwards except the refusal, so there is no "record it as a host-mode
+run" escape hatch. `--dry-run` still describes the whole thing from host mode,
+because describing is not measuring.
 
-`WK_IMAGE_MARKER` exists so the benchmark role's code path can be exercised
-without a reboot; a run that uses it is announced loudly and recorded as
+`WK_IMAGE_MARKER` exists so bench mode's code path can be exercised without a
+reboot; a run that uses it is announced loudly and recorded as
 `role_marker_overridden`, and `wk bench compare` warns about it. The record
 cannot be made to lie by an override nobody remembers setting.
 
@@ -570,18 +553,19 @@ workspace and sha it came from, and the machine — model, cores, memory, macOS
 version, AC or battery, `CPU_Speed_Limit`, and the display size, because both
 Speedometer and MotionMark scale with the surface being drawn.
 
-**Preflight, all of it measured**: the role, run-benchmark in the staged tree,
+**Preflight, all of it measured**: the mode, run-benchmark in the staged tree,
 `MiniBrowser.app` plus a framework in the build, PyObjC in the interpreter that
 will be used, a console session (a browser driven over ssh with nobody logged
 in at the screen has nowhere to draw), AC power, and the machine's own quietness
 through the same `macos_noise` that `wk quiesce` uses.
 
-**Verified end to end against a simulated role** (a stub browser, a disposable
+**Verified end to end against a simulated bench mode** (a stub browser, a disposable
 APFS volume, a trivial payload): payload build, http server, driver creation,
 `prepare_env`, browser launch, the timeout path, the recorded failure with the
-real exception surfaced, and the record on the volume. What has *not* run is a
-measurement — that needs a real `mac-release` build, which needs the golden
-base guest this machine does not have yet.
+real exception surfaced, and the record on the volume. The rehearsal above
+then ran the same path on a real `mac-release` build; what has *not* run is a
+measurement on a real benchmark install, which is
+`docs/HANDOFF-mac-perf-mode.md`'s task.
 
 One side effect worth knowing about, found by running it: **a run that dies
 leaves the Dock's launch animation off.** webkitpy turns it off in
@@ -597,28 +581,24 @@ benchmarks that touch disk that is itself a variable.
 
 ## Open research questions
 
-- What drive speed/size is required — ideally a 32 GB flash drive works.
-  **Answered for the rpi5 (2026-08-19): none.** It netboots, and the build
-  payload lands on a dedicated NVMe partition — see `docs/HANDOFF-netboot.md`,
-  "Storage". Still open for moose and the MBP.
-- The BMC image-boot option for moose (RAM should be ample) and netboot are
-  both candidates for media-less booting.
-- ~~Who serves TFTP/NFS for the Pis~~ — **answered 2026-08-19: moose.** Serving
-  a multi-gigabyte root is not a phone's job, and the BMC is offline more often
-  than moose. Its DHCP role on the guest network is unaffected.
-- ~~Whether `bless --setBoot` makes the macOS half remotely bootable~~ —
-  **answered 2026-08-19: it does not.** macOS perf runs are hands-on, and the
-  `hands-on` arming model above is what that looks like once it is admitted
-  rather than worked around.
-- ~~Where the benchmark runner lives once the machine under test is the whole
-  machine~~ — **answered for the Mac, 2026-08-20: the machine itself.** It is
-  the only Apple Silicon machine here, so nothing else can drive it; the
-  payload is staged onto the volume before the transition and the results are
-  read back off it afterwards. Still open for the Pis, where the runner is on
-  the machine that serves the image.
-- Still open: **nothing runs `wk quiesce` on the benchmark volume for you**,
-  and nothing checks the install *before* a run rather than during it. The
-  measurement exists now (`wk quiesce status` on macOS reports Spotlight, Time
-  Machine, updates, sleep, low power and the thermal limit from evidence); what
-  is missing is a preflight in the benchmark role that refuses a run on an
-  install that is still indexing itself.
+Answered, and where the answers live: media requirements for the Pis (none —
+the rpi5 keeps a permanently plugged stick, the rpi4 a stick with SD rescue);
+who serves TFTP for the Pis (moose, 2026-08-19 — not the phone, not the BMC);
+whether `bless --setBoot` makes the macOS half remotely bootable (it does not,
+2026-08-19 — hence the `hands-on` arming model); where the runner lives for
+the Mac (the machine itself, 2026-08-20 — nothing else here can drive it);
+what the MBP boots (a second internal APFS volume, 2026-08-19 —
+`docs/HANDOFF-netboot.md`, "The disk budget").
+
+Still open:
+
+- **Media for moose.** RAM root over UEFI HTTP boot, or BMC virtual media —
+  neither attempted; see the moose section above.
+- **Where the runner lives for the Pis.** Probably the machine that serves or
+  stages the image, but nothing is built.
+- **Nothing runs `wk quiesce` on the benchmark volume for you**, and nothing
+  checks the install *before* a run rather than during it. The measurement
+  exists now (`wk quiesce status` on macOS reports Spotlight, Time Machine,
+  updates, sleep, low power and the thermal limit from evidence); what is
+  missing is a preflight in bench mode that refuses a run on an install that
+  is still indexing itself.

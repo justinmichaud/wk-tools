@@ -582,12 +582,12 @@ chk_hands_on_arming() {
     return 0
 }
 
-# A benchmark that ran on the workstation and a benchmark that ran on the
+# A benchmark that ran in host mode and a benchmark that ran on the
 # benchmark install produce the same shape of result and are not comparable.
 # Nothing tells them apart afterwards except the refusal, so the refusal is
 # absolute: not a barrier, not forceable.
 chk_bench_role_required() {
-    is_macos || { echo "the bare-metal benchmark role is this Mac"; return 77; }
+    is_macos || { echo "bare-metal bench mode is this Mac"; return 77; }
     local out rc=0
 
     # With a staged tree in reach it must still refuse -- and refuse the same
@@ -603,8 +603,8 @@ chk_bench_role_required() {
 
     rc=0
     out=$(WK_BENCH_ROOT="$TMP/bench" "$WK" bench staged --plan jetstream2.2 --force 2>&1) || rc=$?
-    [ "$rc" -ne 0 ] || { echo "--force ran a benchmark in the workstation role"; return 1; }
-    printf '%s\n' "$out" | grep -q 'workstation role' \
+    [ "$rc" -ne 0 ] || { echo "--force ran a benchmark in host mode"; return 1; }
+    printf '%s\n' "$out" | grep -q 'host mode' \
         || { echo "refused for some other reason: $out"; return 1; }
 
     # A dry run still describes it: that is a question, not a measurement.
@@ -1051,6 +1051,17 @@ chk_piusb_type_byte_roundtrips() {
     # that one byte at offset 450 round-trips and the write does not truncate.
     dd if=/dev/zero of="$img" bs=1024 count=2048 status=none 2>/dev/null \
         || { echo "could not make the fixture"; return 77; }
+    # The byte round-trip needs none of this, but the sfdisk assertion at the
+    # bottom reads a *table*, and a table is more than the type byte: without
+    # the 0x55AA signature at 510 and a partition entry with a start and a
+    # size, sfdisk sees no MBR at all -- which is how rebuilding this fixture
+    # on the Mac (where the sfdisk branch is skipped) broke the check on
+    # Linux without anyone seeing it. Entry 1 at 446: status 0, CHS zeroed
+    # (sfdisk reads the LBA fields), start sector 2048, 2048 sectors long.
+    printf '\000\000\000\000\000\000\000\000\000\010\000\000\000\010\000\000' \
+        | dd of="$img" bs=1 seek=446 count=16 conv=notrunc status=none
+    printf '\125\252' \
+        | dd of="$img" bs=1 seek=510 count=2 conv=notrunc status=none
     printf '\'"$(printf '%03o' 0x0c)" \
         | dd of="$img" bs=1 seek=450 count=1 conv=notrunc status=none
 
@@ -1086,15 +1097,15 @@ chk_piusb_type_byte_roundtrips() {
 }
 
 chk_image_seed_prose_is_inert() {
-    # `user_data` in cmd/image is an unquoted heredoc, because it interpolates
+    # `user_data` in cmd/sysimage is an unquoted heredoc, because it interpolates
     # the profile's values. That makes every line of it shell input, including
     # the lines that look like YAML comments -- so a backticked command name in
     # prose runs on the build host and leaves an empty gap in the emitted file.
     # Found by a build printing "Command line to execute required." three times.
     local body
     body=$(awk '/^user_data\(\) \{/ {inside=1} inside && /^EOF$/ {print; exit} inside {print}' \
-               "$WK_ROOT/cmd/image")
-    [ -n "$body" ] || { echo "could not find user_data()'s heredoc in cmd/image"; return 1; }
+               "$WK_ROOT/cmd/sysimage")
+    [ -n "$body" ] || { echo "could not find user_data()'s heredoc in cmd/sysimage"; return 1; }
     if printf '%s\n' "$body" | grep -nP '(?<!\\)`' >/dev/null 2>&1; then
         echo "unescaped backticks in the cloud-init seed heredoc -- these run on the build host:"
         printf '%s\n' "$body" | grep -nP '(?<!\\)`' | sed 's/^/    /'
@@ -1137,7 +1148,7 @@ chk_serve_refuses_stale_helper() {
     # In sync, so the refusal cannot be provoked without breaking the install.
     # The guard being wired in is all that is checkable here.
     cmp -s "$WK_ROOT/boot/wk-tftpd.py" "$priv" && return 0
-    out=$("$WK" serve --image wk-selftest-no-such-image 2>&1) || true
+    out=$("$WK" serve --system wk-selftest-no-such-image 2>&1) || true
     case "$out" in
         *"not the server in this checkout"*) return 0 ;;
         *) echo "the helper is stale but wk serve did not say so:"; echo "$out"; return 1 ;;
@@ -1168,7 +1179,7 @@ if want quick; then
     check "one lock mechanism, everywhere: nothing in the tree calls \`flock\`" chk_one_lock_mechanism
     check "\`wk profile\` composes the right environment for each port"       chk_profile_resolves
     check "arming with no volume attached refuses"                         chk_hands_on_arming
-    check "a benchmark runs in the benchmark role or it does not run"      chk_bench_role_required
+    check "a benchmark runs in bench mode or it does not run"      chk_bench_role_required
     check "instead of exiting silently"                                    chk_boot_status_survives_an_absent_machine
     check "and it parses"                                                  chk_stage_manifest_is_json
     check "keeps the rest of the path"                                    chk_tftp_fallback_keeps_path

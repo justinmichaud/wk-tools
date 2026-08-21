@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 #
-# wk boot <machine> -- put a machine into its image for one boot, and take it
-# back out again.
+# wk boot <machine> -- put a machine from host mode into bench mode for one
+# boot, and take it back out again.
 #
-#   wk boot <machine> [--image <id>] [--dry-run]   arm the one-shot and reboot
-#   wk boot <machine> --status                     what role it is in, and why
+#   wk boot <machine> [--system <id>] [--dry-run]  arm the one-shot and reboot
+#   wk boot <machine> --status                     what mode it is in, and why
 #   wk boot <machine> --keep                       cancel the self-return watchdog
-#   wk boot <machine> --back                       reboot back to the normal role
+#   wk boot <machine> --back                       reboot back to host mode
 #   wk boot <machine> --disarm                     cancel an arming not yet spent
-#   wk boot <machine> --diag                       the image's own account of
-#                                                  its last boot, read offline
+#   wk boot <machine> --diag                       the bench system's own account
+#                                                  of its last boot, read offline
 #   wk boot --list                                 the machines that have drivers
 #
-# This is a role transition, not a reboot. A machine that is armed is about to
-# stop being a workstation, and anything that acts on it in the meantime is
-# acting on a box that is about to reboot out from under it -- so arming leaves
-# a record of intent, and this command is where that record is read back
-# against the evidence (docs/HANDOFF-workspace-state.md, "wk status walks the
-# fleet"; docs/HANDOFF-netboot.md, "wk boot is a role transition").
+# This is a mode transition, not a reboot. A machine that is armed is about to
+# leave host mode, and anything that acts on it in the meantime is acting on a
+# box that is about to reboot out from under it -- so arming leaves a record of
+# intent, and this command is where that record is read back against the
+# evidence (docs/HANDOFF-workspace-state.md, "wk status walks the fleet";
+# docs/HANDOFF-netboot.md, "wk boot is a mode transition").
 #
 # The record is kept on the machine it describes, next to the boot mechanism it
 # describes, and nowhere else. A copy on the driving workstation would be a
@@ -50,14 +50,15 @@ usage() {
     cat >&2 <<'EOF'
 usage: wk boot <machine> [options]
 
-  (no options)        arm the one-shot and reboot into the image
-  --image <id>        which image (default: the newest for this machine)
-  --status            the machine's role, its announced transition, and the
-                      evidence for both
-  --diag              the image's own account of its last boot, read off its
-                      boot device -- works when the image never appeared
-  --keep              claim a running image: cancel its self-return watchdog
-  --back              reboot back to the normal role now
+  (no options)        arm the one-shot and reboot into the bench system
+  --system <id>       which system (default: the newest for this machine)
+  --status            the machine's role and mode, its announced transition,
+                      and the evidence for all of it
+  --diag              the bench system's own account of its last boot, read off
+                      its boot device -- works when it never appeared
+  --keep              claim a running bench system: cancel its self-return
+                      watchdog
+  --back              reboot back to host mode now
   --disarm            cancel an arming that has not been spent yet
   --dry-run           resolve everything, change nothing
   --list              machines with a boot driver
@@ -83,7 +84,9 @@ while [ $# -gt 0 ]; do
         --back)    ACTION=back ;;
         --disarm)  ACTION=disarm ;;
         --dry-run) DRY=1 ;;
-        --image)   IMAGE="${2:-}"; shift ;;
+        --system)  IMAGE="${2:-}"; shift ;;
+        --image)   die "renamed: --system <id> (a bootable artifact is a system, never bare
+    'image' -- docs/HANDOFF-vocabulary.md)" ;;
         *) die "unknown option: $1" ;;
     esac
     shift
@@ -95,7 +98,7 @@ load_driver "$MACH_DRIVER"
 # --- reading the transition --------------------------------------------------
 #
 # Three sources, in decreasing authority: what the machine says it is (the
-# identity marker, which only the image has), when it last booted, and the
+# identity marker, which only a bench system has), when it last booted, and the
 # record of intent. The record is never trusted on its own -- a record whose
 # arming predates the machine's current boot has been *spent*, and that is a
 # derived fact, not a stored one.
@@ -135,30 +138,31 @@ read_state() {
 
 cmd_status() {
     read_state
-    case "$ROLE" in
+    case "$MODE" in
         unreachable)
-            log "$MACHINE: unreachable over ssh in its normal role"
+            log "$MACHINE: unreachable over ssh in host mode"
             # Whatever the driver can still say about it without reaching it --
             # for a guest that is "the guest is absent", which is a different
             # thing from an outage and the reader should not have to guess.
             b_evidence 2>/dev/null | sed 's/^/  /' || true
             if [ -n "$ARMED_IMG" ]; then
-                log "  the record says it was armed for image $ARMED_IMG"
+                log "  the record says it was armed for system $ARMED_IMG"
             else
                 log "  no arming record could be read either, so this is a plain outage"
-                log "  or the machine is in an image that answers somewhere else."
+                log "  or the machine is in a bench system that answers somewhere else."
             fi
             return 3 ;;
-        image*)
-            log "$MACHINE: $ROLE (booted $BOOTED)"
-            log "  a plain reboot returns it to its normal role: wk boot $MACHINE --back"
+        bench*)
+            log "$MACHINE: bench mode -- system ${MODE#bench } (booted $BOOTED)"
+            log "  a plain reboot returns it to host mode: wk boot $MACHINE --back"
             return 0 ;;
     esac
 
-    # MACH_ROLE, not the literal "workstation": `workstation` is this file's
-    # internal token for "not in an image", and printing it at a dedicated test
-    # device is a status line that contradicts boot/machines.sh.
-    log "$MACHINE: ${MACH_ROLE:-workstation} (booted $BOOTED)"
+    # Role and mode are different facts and the line carries both: the role
+    # (boot/machines.sh) says what the machine *is*, the mode says what it is
+    # running right now. Printing only one of them is the confusion
+    # docs/HANDOFF-vocabulary.md exists to end.
+    log "$MACHINE: ${MACH_ROLE:-workstation}, host mode (booted $BOOTED)"
     b_evidence | sed 's/^/  /'
 
     [ -n "$ARMED_IMG" ] || return 0
@@ -167,41 +171,41 @@ cmd_status() {
         # Not a desync: the transition happened and the machine came back, which
         # is the mechanism working. The record is simply spent, and saying so is
         # more useful than either clearing it silently or crying wolf.
-        log "  a spent arming record remains (image $ARMED_IMG, armed by $ARMED_BY at $ARMED_AT)"
+        log "  a spent arming record remains (system $ARMED_IMG, armed by $ARMED_BY at $ARMED_AT)"
         log "  it was consumed by the boot at $BOOTED; clear it with: wk boot $MACHINE --disarm"
         return 0
     fi
 
     if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
         warn "$MACHINE is ARMED for '$ARMED_IMG' (by $ARMED_BY at $ARMED_AT) and waiting for a person"
-        log  "  nothing will move it on its own: the role is chosen at the startup"
+        log  "  nothing will move it on its own: the mode is chosen at the startup"
         log  "  manager. 'wk boot $MACHINE' prints the ritual again."
         log  "  cancel with: wk boot $MACHINE --disarm"
         return 2
     fi
-    warn "$MACHINE is ARMED to reboot into image $ARMED_IMG (by $ARMED_BY at $ARMED_AT)"
-    log  "  it is still in its normal role, so the one-shot has not been spent."
-    log  "  do not start work on it: the next reboot leaves this role."
+    warn "$MACHINE is ARMED to reboot into system $ARMED_IMG (by $ARMED_BY at $ARMED_AT)"
+    log  "  it is still in host mode, so the one-shot has not been spent."
+    log  "  do not start work on it: the next reboot leaves host mode."
     log  "  cancel with: wk boot $MACHINE --disarm"
     return 2
 }
 
 cmd_diag() {
     b_probe
-    case "$ROLE" in
-        workstation) ;;
-        *) die "$MACHINE is in '$ROLE'. The diagnostics dump is read off the
-    image's boot device from the *other* role -- ask the image directly, or
-    'wk boot $MACHINE --back' first." ;;
+    case "$MODE" in
+        host) ;;
+        *) die "$MACHINE is in '$MODE'. The diagnostics dump is read off the
+    bench system's boot device from host mode -- ask the bench system
+    directly, or 'wk boot $MACHINE --back' first." ;;
     esac
     b_diag
 }
 
 cmd_keep() {
     read_state
-    case "$ROLE" in
-        image*) ;;
-        *) die "$MACHINE is not in an image right now ($ROLE), so there is no
+    case "$MODE" in
+        bench*) ;;
+        *) die "$MACHINE is not in bench mode right now ($MODE), so there is no
     watchdog to cancel." ;;
     esac
     [ -n "$DRY" ] && { log "would create /run/wk-keep-running on $MACHINE"; return 0; }
@@ -212,17 +216,17 @@ cmd_keep() {
 
 cmd_back() {
     read_state
-    case "$ROLE" in
+    case "$MODE" in
         unreachable) die "$MACHINE is not answering, so nothing here can reboot it.
     The one-shot is spent by any boot, so a power cycle returns it." ;;
     esac
-    [ -n "$DRY" ] && { log "would reboot $MACHINE back to its normal role and clear the record"; return 0; }
-    # Clear the record first: it lives on the normal role's root, which is
+    [ -n "$DRY" ] && { log "would reboot $MACHINE back to host mode and clear the record"; return 0; }
+    # Clear the record first: it lives on the host install's root, which is
     # exactly where the machine is going, and clearing it after the reboot
     # would mean racing the boot.
-    case "$ROLE" in workstation) record_clear ;; esac
+    case "$MODE" in host) record_clear ;; esac
     b_reboot
-    info "$MACHINE is rebooting; the one-shot is spent, so it lands in its normal role"
+    info "$MACHINE is rebooting; the one-shot is spent, so it lands in host mode"
 }
 
 cmd_disarm() {
@@ -253,7 +257,7 @@ cmd_disarm() {
 cmd_arm() {
     read_state
 
-    case "$ROLE" in
+    case "$MODE" in
         unreachable)
             if [ "${BOOT_ARMING:-one-shot}" = server ]; then
                 # Not fatal here, unlike a one-shot: the server holds the
@@ -262,16 +266,16 @@ cmd_arm() {
                 warn "$MACHINE is not answering, but its arming lives on the server:"
                 warn "  power it on and it boots what this machine is serving."
             else
-                die "$MACHINE is not reachable over ssh in its normal role.
+                die "$MACHINE is not reachable over ssh in host mode.
     Arming is an ssh command, so there is nothing to arm from here."
             fi ;;
-        image*) die "$MACHINE is already in $ROLE.
+        bench*) die "$MACHINE is already in bench mode (system ${MODE#bench }).
     'wk boot $MACHINE --back' returns it first." ;;
     esac
 
-    # What "the image" is depends on the arming model, and for one machine it is
-    # not a file at all: a hands-on machine boots an *installed volume*
-    # (boot/mac-volume.sh), which no image store can hold and `wk image build`
+    # What "the system" is depends on the arming model, and for one machine it
+    # is not a file at all: a hands-on machine boots an *installed volume*
+    # (boot/mac-volume.sh), which no store can hold and `wk sysimage build`
     # can never produce. Its identity is the volume's name, which is also what
     # the person choosing it will see on the screen.
     if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
@@ -279,13 +283,13 @@ cmd_arm() {
         [ -n "$IMAGE" ] || die "$MACHINE has no benchmark volume configured (MACH_VOLUME)"
     else
         [ -n "$IMAGE" ] || IMAGE=$(image_latest "$MACH_PROFILE") \
-            || die "no image built for $MACHINE yet -- 'wk image build $MACH_PROFILE'"
-        image_complete "$IMAGE" || die "no such image: $IMAGE"
+            || die "no system built for $MACHINE yet -- 'wk sysimage build $MACH_PROFILE'"
+        image_complete "$IMAGE" || die "no such system: $IMAGE"
     fi
 
-    # A one-shot boots a local device, so the image has to actually be on it
-    # or the boot falls through to the normal role and the whole thing looks
-    # like a firmware failure. Asked by name rather than by hash -- see
+    # A one-shot boots a local device, so the system has to actually be on it
+    # or the boot falls through to host mode and the whole thing looks like a
+    # firmware failure. Asked by name rather than by hash -- see
     # b_device_image() for why bit comparison is the wrong question once an
     # image has booted once.
     #
@@ -294,8 +298,8 @@ cmd_arm() {
     case "${BOOT_ARMING:-one-shot}" in one-shot|medium)
         local on_device
         on_device=$(b_device_image)
-        [ "$on_device" = "$IMAGE" ] || die "$MACH_DEVICE on $MACHINE holds ${on_device:-no wk image}, not $IMAGE.
-    Write it first:  wk image write $IMAGE --disk $MACHINE:$MACH_DEVICE"
+        [ "$on_device" = "$IMAGE" ] || die "$MACH_DEVICE on $MACHINE holds ${on_device:-no wk system}, not $IMAGE.
+    Write it first:  wk sysimage write $IMAGE --disk $MACHINE:$MACH_DEVICE"
     ;; esac
 
     if [ -n "$DRY" ]; then
@@ -306,12 +310,12 @@ would arm $MACHINE
   boot order   nothing in firmware; the selection is a person's, twice
   record       $MACH_RECORD
   then         print the ritual and stop. Nothing reboots this machine: the
-               role it is going to is chosen at the startup manager.
+               mode it is going to is chosen at the startup manager.
 EOF
         else
             cat >&2 <<EOF
 would arm $MACHINE
-  image        $IMAGE (verified present on $MACH_DEVICE)
+  system       $IMAGE (verified present on $MACH_DEVICE)
   boot order   $([ "${BOOT_ARMING:-one-shot}" = medium ] \
                   && echo "untouched; the arming is $MACH_DEVICE's own boot partition" \
                   || echo "$BOOT_ORDER_IMAGE (one-shot; the normal order $BOOT_ORDER_NORMAL is untouched)")
@@ -324,7 +328,7 @@ EOF
         return 0
     fi
 
-    info "arming $MACHINE for image $IMAGE"
+    info "arming $MACHINE for system $IMAGE"
     if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
         # The record first, then the ritual, and no reboot: the transition
         # happens when a person picks a disk, and a command that rebooted the
@@ -340,8 +344,8 @@ EOF
         # attached. Found by running exactly that.
         b_arm
         record_write "$IMAGE" "$MACH_PROFILE" "${MACH_VOLUME:-}" ""
-        info "$MACHINE is armed on paper: the record says the next role is '$IMAGE'"
-        log  "  it is still a workstation until somebody boots it -- 'wk boot $MACHINE --status'"
+        info "$MACHINE is armed on paper: the record says the next mode is bench ('$IMAGE')"
+        log  "  it is still in host mode until somebody boots it -- 'wk boot $MACHINE --status'"
         log  "  says so, and 'wk boot $MACHINE --disarm' forgets the intent."
         return 0
     fi
@@ -367,7 +371,7 @@ EOF
     fi
     b_reboot
 
-    info "$MACHINE is rebooting into $IMAGE"
+    info "$MACHINE is rebooting into system $IMAGE"
     [ "${BOOT_ARMING:-one-shot}" = server ] && b_disarm_note
     log  "  it returns by itself in $(manifest_get "$IMAGE" watchdog)s unless claimed:"
     log  "    wk boot $MACHINE --keep     claim it"

@@ -24,8 +24,8 @@ What it does **not** have yet, and why each is left:
 - **A run.** Nothing here has been profiled, because this host has no guest and
   no container workspace to profile in. Every mode's command line is composed
   and checked; none has been executed.
-- **`--mode strongrefs`.** The option name below (`JSC_enableStrongRefTracker`)
-  is from this file and has not been checked against `OptionsList.h`, and a
+- **`--mode strongrefs`.** The option name this file specced
+  (`JSC_enableStrongRefTracker`) has not been checked against `OptionsList.h`, and a
   typo'd `JSC_` variable is ignored in silence — which is the one failure that
   makes a profile look like the code changed. `--env NAME=VALUE` sets any
   option in the meantime, and the mode goes in when somebody with a checkout
@@ -44,36 +44,26 @@ had only container and local), and `t_pull_dir` joined it — a recording has to
 come out of the workspace that made it, and a profile is exactly the binary
 that `t_exec … cat` corrupts.
 
-## Shape
+## What remains
 
-`wk profile <ws> [--mode M] [--config C] [--attach] [js-file | url]`
+The interface itself is no longer spec: `cmd/profile`'s header is the
+authority. `wk profile [<ws>] [--mode <m>] [file.js | --browser [url] |
+--attach <pid|name>]`, modes `sampling` (default) | `bytecode` | `samply` |
+`instruments` | `heaptrack` | `massif` | `native`, each owning its env-var
+wall, plus `--jit-dump`, `--markers`, `--fetch`, `--env`, `--dry-run`.
 
-Modes, each owning its env-var wall so nobody types it again:
-
-- `--samply` — samply + JIT dump: `JSC_useJITDump=1 JSC_useTextMarkers=1
-  JSC_jitDumpDirectory=... JSC_useConcurrentJIT=0`, plus the
-  MiniBrowser-vs-jsc-shell and 32-vs-64-bit differences the wiki documents.
-- `--sampling` — JSC's own sampling profiler; clean stale
-  `JSCSamplingProfile-*` first (stale files silently pollute the next run),
-  and print the report/collation command at the end.
-- `--bytecode` — bytecode profiler; print the `display-profiler-output`
-  invocation at the end.
-- `--heaptrack` / `--massif` — `MALLOC=0 WEB_PROCESS_CMD_PREFIX=...` per the
-  memory-investigation page.
-- `--strongrefs` — `JSC_enableStrongRefTracker=1` etc.
-
-Provisioning that has to exist first (the step-10 half):
+Provisioning that has to exist for it to run (the step-10 half):
 
 - samply and heaptrack built/installed into the container image or seeded
   like bench payloads — the wiki's rustup/cargo dance is a provisioning step,
   not a per-run instruction. No more `~/Development/samply` host paths.
 - `perf_event_paranoid`: a workspace cannot set it. Decide the mechanism once
   (a quiesce-helper verb on the host is the pattern that exists) instead of
-  each skill saying "ask the user to sudo tee". **On the netbooted image
-  (`docs/HANDOFF-netboot.md`, lane A's new first step, whose first consumer is
-  profiling) it is simply ours to set** — no sandbox, no host to ask. That does
-  not remove the need for an answer inside a workspace; it means there is a
-  machine where the hardest modes work while that answer is being found.
+  each skill saying "ask the user to sudo tee". **On a bench system it is
+  already ours**: `wk sysimage build` bakes `perf_event_paranoid = -1` into
+  every system's sysctls (`cmd/sysimage`) — no sandbox, no host to ask. That
+  does not remove the need for an answer inside a workspace; it means there is
+  a machine where the hardest modes work while that answer is being found.
 - Viewing: profiler.firefox.com is outside the egress allowlist; serve the
   profile file out of the workspace (samply's own server on loopback + the
   host's browser via the forwarded port, or copy the file out) and document

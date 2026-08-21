@@ -63,17 +63,20 @@ stays as the capability inventory it was.
 
 `jscs`/`jscsp` mattered: both set `perf_event_paranoid` to -1 first, which is
 a root operation, and both depend on a profiler that lives on the host. Under
-the current sandbox a workspace has no such privilege. If profiling comes back
-it should be a `wk` verb that runs the profiler outside and attaches, not a
-script inside that needs root.
-
-We need to support collecting samply, sysprof profiles. Heaptrack too, plus the jsc sampling profiler. This should work on cli jsc builds, gtk, wpe and macos MiniBrowser too, and support jit dump (extra jsc flags, my sysprof patch). Build these from source.
+the current sandbox a workspace has no such privilege — which is why the verb
+that came back (`cmd/profile`, 2026-08-20) composes the run and refuses by
+name when the profiler is missing, instead of being a script inside that needs
+root. `wk profile` covers samply, JSC's sampling and bytecode profilers,
+Instruments, heaptrack and massif, with JIT dump, on the jsc shell and (Apple
+ports) MiniBrowser. Not covered: sysprof (and the sysprof JIT-dump patch), and
+building the profilers into the workspace image — both remain with
+`docs/HANDOFF-profile.md` / lane A step 10.
 
 ## Building
 
-Support running a layout test in the debugger
-Support running a js test in the debugger
-Support collecting and building a PGO profile + build
+- Running a layout test or a js test in the debugger: specced as `wk debug`
+  in `docs/HANDOFF-debug.md`.
+- Support collecting and building a PGO profile + build — still uncovered.
 
 ## Benchmarking
 
@@ -86,7 +89,7 @@ Support collecting and building a PGO profile + build
 | `bench-js2-simd-nosimd`, `-v8` | SIMD on/off, and against V8 | **gone** |
 | `bench-show-results*` | `compare-results -a ToT*.result -b Patched*.result --detailed-breakdown` | `wk bench` reports its own |
 | `js3-run-loop.sh` | interleaved full-suite JS3 loop, one JSON per build per round | `wk bench` |
-| `js3-ci.py` | per-subtest b/a ratio with 95% CI | **check** — `wk bench` must do this or it is a regression |
+| `js3-ci.py` | per-subtest b/a ratio with 95% CI | **check** — `wk bench compare` runs `compare-results --breakdown`, which should cover it, but TESTING.md's per-subtest-CI line is still unticked |
 | `quiesce.sh` | 298 lines: Spotlight, Software Update, App Nap, `caffeinate`, keeping MiniBrowser frontmost | `wk quiesce` + `admin/wk-quiesce-priv` |
 
 Two things in `quiesce.sh` are easy to lose and were hard-won:
@@ -95,9 +98,12 @@ Two things in `quiesce.sh` are easy to lose and were hard-won:
   inject `DYLD_FRAMEWORK_PATH`, so macOS never activates it. Occluded pages get
   their `requestAnimationFrame` throttled, which stalls the rAF-driven
   JetStream3 loop. The original disabled App Nap for MiniBrowser and ran a
-  background raiser. **Confirm `wk quiesce` still does this.**
+  background raiser. **Checked 2026-08-20: `wk quiesce` does not** — it does
+  caffeinate, daemon-pausing and the privileged helper, and nothing raises or
+  App-Nap-exempts MiniBrowser. Still a real gap for macOS browser runs.
 - **A pinned local copy of the benchmark**, so a run is not measuring whatever
-  the network served that day.
+  the network served that day. **Survived**: `wk bench seed` pins payloads by
+  commit.
 
 **Baseline builds.** `jscrb` and every `bench-*` script assumed a second tree
 at `WebKitBuildBaseline/`, built from ToT, living beside the patched one. `wk`
@@ -136,11 +142,12 @@ with the profiling/benchmarking/wasm material in this file.
 1. Decide, once, about each **gone** row: restore it as a `wk` verb, restore it
    as a script in `container/bin/` where the workspace can see it, or record
    that it is deliberately dropped.
-2. The two worth doing first, because nothing covers them and each has real
+2. The one worth doing first, because nothing covers it and it has real
    logic: the option-toggle A/B benchmark mode (`bench-js2-cli`,
-   `bench-js3-switch`), and `strip-addresses`. (`gpr` is the equivalent
-   priority pick in `docs/HANDOFF-git-tools.md`.)
-3. Verify the two `quiesce.sh` subtleties above survived into `wk quiesce`, and
-   that `wk bench` reports per-subtest confidence intervals the way `js3-ci.py`
-   did. Both are silent regressions if they did not: the numbers still appear,
-   they are just worth less.
+   `bench-js3-switch`). (`strip-addresses` and `gpr` were the other priority
+   picks; both are restored.)
+3. Close the two verification items above: the frontmost-raiser gap in
+   `wk quiesce` is confirmed real (2026-08-20) and needs building; the
+   per-subtest CI needs one run checked against `js3-ci.py`'s output and the
+   TESTING.md line ticked. Both are silent regressions while open: the numbers
+   still appear, they are just worth less.

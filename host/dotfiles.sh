@@ -28,7 +28,7 @@ link_config "$WK_ROOT/dotfiles/ssh/config" "$HOME/.ssh/config.d/wk-tools"
 # `Host rpi4` is why this is a migration rather than a comment. It named
 # rpi4-compilers-0, a shared build box behind a ProxyJump, while the fleet's
 # rpi4 (boot/machines.sh) is a 2 GB board on the LAN. Every wk verb that takes
-# an ssh destination would have aimed at the build box, and `wk image write`
+# an ssh destination would have aimed at the build box, and `wk sysimage write`
 # aims at a disk.
 #
 # So: a fleet name may not be defined by hand. Those stanzas are dropped --

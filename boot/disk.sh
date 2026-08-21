@@ -12,11 +12,11 @@
 #
 #   "flash" also implies permanence, and there is none. A machine boots one of
 #   these disks *once*, by a firmware one-shot or by what a netboot server is
-#   holding, and returns to its normal role by itself (`wk boot`).
+#   holding, and returns to host mode by itself (`wk boot`).
 #
 # So there is one verb, and it says what it does to what:
 #
-#   wk image write <id> --disk <machine>:<device>
+#   wk sysimage write <id> --disk <machine>:<device>
 #
 # `<machine>:<device>` rather than a bare machine, because the containment is
 # the thing people get wrong: the disk is *at* the machine, the machine is not

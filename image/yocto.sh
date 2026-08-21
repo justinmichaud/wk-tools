@@ -1,11 +1,11 @@
-# The yocto image builder: `wk image build <a yocto profile>`.
+# The yocto image builder: `wk sysimage build <a yocto profile>`.
 #
-# Why this lives under `wk image` and not in a command of its own
+# Why this lives under `wk sysimage` and not in a command of its own
 # ---------------------------------------------------------------
 # What comes out of a Yocto build is the same *kind* of thing that comes out of
 # the distro builder: one partitioned disk image for one machine, whose
 # identity has to be recorded and whose bytes have to reach a boot device. Every
-# consumer downstream of that -- `wk image ls`, `wk image show`, `wk image
+# consumer downstream of that -- `wk sysimage ls`, `wk sysimage show`, `wk sysimage
 # flash`, the SD-card path in docs/HANDOFF-sdcard.md, and (once it can serve a
 # network root) `wk serve` -- is about a disk image and has nothing to say about
 # how it was made. Giving Yocto its own command would have meant a second image
@@ -165,7 +165,7 @@ yocto_ensure_ws() {
     $WK_SDK_IMAGE. A container cannot be moved between images, so this build
     would use host packages that container/yocto/Containerfile no longer
     describes. Remake it -- the Yocto caches are in the store and survive:
-        wk rm $ws && wk image build $IMG_PROFILE${stage:+ --stage $stage}"
+        wk rm $ws && wk sysimage build $IMG_PROFILE${stage:+ --stage $stage}"
         fi
     fi
 
@@ -274,7 +274,7 @@ yocto_spawn() {
     bitbake build directory -- two cookers in it is what bitbake's own lock
     exists to prevent.
     Follow it:  tail -f $(yocto_log "$ws" "$live")
-    Stop it:    wk image build $IMG_PROFILE --stage $live --stop"
+    Stop it:    wk sysimage build $IMG_PROFILE --stage $live --stop"
     fi
 
     # The log is truncated, not unlinked, and the pid file is unlinked. The
@@ -428,7 +428,7 @@ yocto_import() {
 
     mkdir -p "$dir"
 
-    # Decompressed on the way in, so what the store holds is what `wk image
+    # Decompressed on the way in, so what the store holds is what `wk sysimage
     # flash` writes and what `image_verify` hashes: one artifact, one hash, no
     # "which of these two files is the image" question anywhere downstream.
     info "importing $recipe.wic.xz from '$ws' (decompressing)"
@@ -516,7 +516,7 @@ yocto_build() {
             --chromium)  chromium=1 ;;
             --no-import) no_import=1 ;;
             *) die "unknown option: $1
-    'wk image build $profile' takes --dry-run, --workspace, --stage,
+    'wk sysimage build $profile' takes --dry-run, --workspace, --stage,
     --detach, --stop, --keep-work, --chromium and --no-import." ;;
         esac
         shift
@@ -604,7 +604,7 @@ yocto_build() {
 
     # The workspace lock, for the whole build. Not the image-store lock: that
     # one is taken for the seconds of the import, because holding it for six
-    # hours would stop every other `wk image` in the meantime, and nothing this
+    # hours would stop every other `wk sysimage` in the meantime, and nothing this
     # build does touches the store until then. What must not happen is a `wk
     # build` in the same workspace at the same time -- two builds in one
     # checkout corrupt both -- and that is what this lock is.
@@ -633,7 +633,7 @@ EOF
     if [ -n "$detach" ]; then
         info "running detached in '$ws' -- this end can go away"
         log  "  follow:  tail -f $(yocto_log "$ws" "$stage")"
-        log  "  import:  wk image build $profile --stage $stage   (once it has finished)"
+        log  "  import:  wk sysimage build $profile --stage $stage   (once it has finished)"
         return 0
     fi
 
@@ -745,8 +745,8 @@ EOF
 
     sed -i 's/^state=running/state=ok/' "$(yocto_status "$ws")"
     info "built $id  ($(du -h "$dir/disk.img" | cut -f1))"
-    log  "  next:  wk image write $id --disk <machine>:<device>"
-    log  "         ('wk image disks <machine>' lists what is attached where)"
+    log  "  next:  wk sysimage write $id --disk <machine>:<device>"
+    log  "         ('wk sysimage disks <machine>' lists what is attached where)"
     log  "  the image carries no WebKit -- it is the runtime. The matching"
-    log  "  build is:  wk image build $profile --stage webkit"
+    log  "  build is:  wk sysimage build $profile --stage webkit"
 }

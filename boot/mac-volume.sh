@@ -14,7 +14,7 @@
 # So, compared with the Pi drivers:
 #
 #   * there is no image *file*. What boots is an installed, personalised macOS
-#     volume -- `wk image write` cannot produce one and must never be pointed
+#     volume -- `wk sysimage write` cannot produce one and must never be pointed
 #     at this machine. An install per Mac, maintained per Mac, even when the
 #     contents are identical.
 #   * arming is a person. This driver checks what it can, records the intent,
@@ -63,12 +63,13 @@ mac_volume_present() {
     [ -d "$v/System/Library/CoreServices" ]
 }
 
-# --- which role is answering --------------------------------------------------
+# --- which mode is answering --------------------------------------------------
 #
-# The same rule as every other driver -- the image writes an identity marker
-# and the normal role does not -- with the one difference that both roles are
+# The same rule as every other driver -- the bench system writes an identity
+# marker and the host install does not -- with the one difference that both
+# modes are
 # reached the same way, because both are this machine. There is no channel to
-# discover, so ROLE_CHANNEL is always `normal` and r_ssh runs locally.
+# discover, so MODE_CHANNEL is always `host` and r_ssh runs locally.
 b_probe() {
     local id
     # This driver's every question is asked of the machine it is running on --
@@ -79,12 +80,12 @@ b_probe() {
     # run from Linux, this exited 127 partway through printing a status, which
     # is worse than either answering or refusing.
     if ! is_macos; then
-        ROLE_CHANNEL=none; ROLE=unreachable
+        MODE_CHANNEL=none; MODE=unreachable
         return 0
     fi
-    ROLE_CHANNEL=normal
+    MODE_CHANNEL=host
     id=$(wk_image_id)
-    if [ -n "$id" ]; then ROLE="image $id"; else ROLE=workstation; fi
+    if [ -n "$id" ]; then MODE="bench $id"; else MODE=host; fi
     return 0
 }
 
@@ -174,7 +175,7 @@ EOF
 }
 
 record_read() {
-    [ "${ROLE_CHANNEL:-normal}" = normal ] || return 0
+    [ "${MODE_CHANNEL:-host}" = host ] || return 0
     cat "$MACH_RECORD" 2>/dev/null || true
 }
 
@@ -238,10 +239,10 @@ b_diag() {
 
 # A plain reboot, which lands in the *default* startup disk -- the internal
 # volume, unless somebody used the Startup Disk pane. That is the way back from
-# the benchmark role and it needs no ritual, which is the whole reason the
+# bench mode and it needs no ritual, which is the whole reason the
 # startup-manager route is the recommended one above.
 b_reboot() {
-    sudo shutdown -r +1 "wk boot: returning to the normal role" >/dev/null 2>&1 \
+    sudo shutdown -r +1 "wk boot: returning to host mode" >/dev/null 2>&1 \
         || die "could not schedule a reboot (this one needs sudo, and it is the
     only part of a transition that does)."
 }
@@ -250,7 +251,7 @@ b_reboot() {
 #
 # A path on *this* machine, because that is the whole reason this transition is
 # cheap: the other role's disk is merely a mounted volume while we are in the
-# normal role, so staging a build onto it is a copy and not a transfer.
+# host mode, so staging a build onto it is a copy and not a transfer.
 #
 # The Pi images have an equivalent and it is not this: their payload is pushed
 # over ssh to a machine that is already running the image, onto a partition

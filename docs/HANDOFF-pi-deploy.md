@@ -37,13 +37,16 @@ command encodes the mechanics so neither human nor agent re-derives them):
 - record provenance next to `wk bench`'s results so device runs and
   workstation runs live in one place. Whether this becomes
   `wk bench --device <pi>` instead of a `pi` verb is the implementer's call —
-  provenance and refusal rules should be shared either way.
+  provenance and refusal rules should be shared either way, and
+  `wk bench stage`/`staged` (2026-08-20, `docs/HANDOFF-benchmarking.md`) is
+  the existing shape for a run driven onto another machine.
 
 ## Traps
 
 - The rpi3 is 32-bit WPE with its own OOM behaviour — the rpi3 skill is the
   reference for completion/crash detection; do not re-derive it.
-- Keep the perf-image question separate: once
-  `docs/HANDOFF-benchmarking.md`'s image exists, `wk pi bench` targets the
-  image's tailnet identity, and nothing here should assume which OS the
-  device booted.
+- Keep the bench-mode question separate: the perf systems exist now
+  (`wk sysimage build perf-linux-rpi4`), so `wk pi bench` targets whatever
+  identity the booted system announces — a perf system's is mDNS, the
+  downstream image's is whatever `wk pi setup` gave it — and nothing here
+  should assume which system the device booted.

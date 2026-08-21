@@ -32,6 +32,7 @@ the mechanisms differ and each can silently not-apply:
 - macOS guest: the vCPU count at boot (not a pin — document that honestly);
 - Pi devices: taskset/isolcpus on the device.
 
-Record the core set in the bench provenance, and make `wk bench compare` warn
-on mismatched core counts the same way it warns on renderer or session-mode
-mismatches.
+`wk bench` already records `cores` and the container envelope's `cpus` in
+env.json; what is missing is the pin itself, recording the *set* rather than
+the count, and making `wk bench compare` warn on a mismatch the same way it
+warns on renderer or session-mode mismatches.

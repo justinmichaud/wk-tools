@@ -47,7 +47,8 @@ WHAT IS EXPENSIVE, AND WHAT IT COSTS TO GET BACK
   container images          podman's own store, ~15 GB: the images workspaces
                             are made from. Re-pullable.
   ccache and the caches     trimmed to a ceiling, never unbounded.
-  boot images               4.6 GB each, rebuildable from a spec in this repo.
+  system images             4.6 GB each ('wk sysimage'), rebuilt from their
+                            profile in this repo whenever its spec changes.
   workspaces                a container's is its overlay upper layer -- what you
                             have actually changed and built. A guest's is the
                             whole guest.
@@ -58,7 +59,7 @@ ROUTINE RECLAIM
 
       wk gc                 prunes by reference count, so it can never lose
                             work: unreferenced snapshots, dangling images and
-                            volumes, stale benchmark seeds, superseded boot
+                            volumes, stale benchmark seeds, superseded system
                             images, ccache back to its ceiling. It also prints
                             what it deliberately did *not* prune, so growth
                             stays visible.

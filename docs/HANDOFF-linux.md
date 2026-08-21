@@ -47,8 +47,9 @@ What this bought:
 - `wk` never calls `sudo` on Linux. Builds, benchmarks and `wk claude` run
   unattended with no privileged component at all.
 - The allowlist is by hostname and port, so the GitHub, Fastly/PyPI and
-  Anthropic CIDR lists, `resolved_hosts`, and `wk gc --refresh-net` are all
-  gone. `github.com` replaces four ranges that had to be refreshed by hand.
+  Anthropic CIDR lists and `resolved_hosts` are gone, and `wk gc --refresh-net`
+  is a no-op that says so. `github.com` replaces four ranges that had to be
+  refreshed by hand.
 - A name that resolves into RFC1918 or the tailnet range is refused *after*
   resolution, which the address-based policy could not express.
 - It is testable: `wk verify` measures the properties from inside a workspace.
@@ -153,13 +154,16 @@ first branch win.
 
 ## What is left
 
-Each with its own document:
+Each with its own document, two of which have since closed:
 
-- `docs/HANDOFF-linux-arm32.md` -- `wk new --arch 32`, which only this machine
-  can run (the Ampere supports AArch32 at EL0; Apple Silicon does not)
-- `docs/HANDOFF-linux-remote.md` -- the never-run remote target
-- `docs/HANDOFF-linux-pi.md` -- provisioning the test devices, now that the
-  proxy rather than nftables consumes `pi-hosts`
+- `docs/HANDOFF-linux-arm32.md` -- **done 2026-08-18**: `wk new --arch armhf`,
+  which only this machine can run (the Ampere supports AArch32 at EL0; Apple
+  Silicon does not). Its own "Remaining" list is what's open there.
+- `docs/HANDOFF-linux-remote.md` -- **done 2026-08-19**: the remote target,
+  built and verified against devbox-arm64-2.
+- `docs/HANDOFF-linux-pi.md` -- still open: provisioning the bench devices, now
+  that the proxy rather than nftables consumes `pi-hosts`. Scheduled last of
+  lane A's re-ordered items (`docs/HANDOFF.md`).
 
 Also unfinished: `host/linux/config.dconf` is still a raw dump with
 machine-specific junk in it (a weather location, four nm-applet WiFi UUIDs, a

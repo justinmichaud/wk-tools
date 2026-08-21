@@ -37,11 +37,11 @@ b_arm() {
 
     [ -n "$served" ] || die "nothing is being served from this machine, so there is
     nothing for $MACH_NAME to boot: its arming *is* the server's content.
-    Start it first:  wk serve --image <id>"
+    Start it first:  wk serve --system <id>"
 
     [ "$served" = "$IMAGE" ] || die "this machine is serving $served, not $IMAGE.
     A netboot client boots what the server holds, so change the server rather
-    than the client:  wk serve --image $IMAGE"
+    than the client:  wk serve --system $IMAGE"
 
     # The firmware has to be pointed at a server, and that is EEPROM state
     # rather than something this command can set per-boot.

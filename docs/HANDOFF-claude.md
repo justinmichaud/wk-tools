@@ -1,8 +1,8 @@
 # HANDOFF — make CLAUDE.md and the skills workspace-true
 
-**Gated on `docs/HANDOFF-wk-in-workspace.md`**: several fixes below need the
-in-workspace `wk build <config>` interface to exist before a skill can be told
-to use it.
+**No longer gated**: the in-workspace `wk build <config>` interface this
+waited on exists (`docs/HANDOFF-wk-in-workspace.md`, done 2026-08-18), so a
+skill can be told to use it.
 
 The problem, in one sentence: the skills were written on machines that no
 longer exist (a host workstation, the wkdev containers) and routinely direct an
@@ -54,8 +54,8 @@ Host-only steps that dead-end a sandboxed agent:
   where it gets built), "ask the user to sudo tee perf_event_paranoid",
   "open the profile from the host's Firefox" (blocked by egress).
 - `rpi3/SKILL.md`: targets a LAN IP the workspace firewall drops, and prompts
-  for an IP — guaranteed stall. Either retarget to the tailnet rpi4/rpi5 (for
-  which no skill exists) or mark host-only.
+  for an IP — guaranteed stall. Either retarget to the fleet bench devices
+  (rpi4, for which no skill exists) or mark host-only.
 
 Consistency:
 - `jsc-marker-trace` says `git checkout -- <file>`, which the jsc skill's own

@@ -10,11 +10,13 @@
 # is a user-owned proxy, and the only privileged operations left (quiesce, the
 # benchmark session) go through the fixed-allowlist helper in admin/.
 #
-# That is a deliberate reversal of the macOS design, where rootful podman was
-# mandatory because the egress firewall lives in the forward chain. Rootless
-# podman has no filterable forward path at all -- its network helper sits in a
-# randomly named cgroup scope -- so the boundary moved to `--network none` plus
-# a proxy, and root moved out of the daily path with it. See docs/HANDOFF-linux.md.
+# That was a deliberate reversal of the old macOS design, where rootful podman
+# was mandatory because the egress firewall lived in the forward chain --
+# rootless podman has no filterable forward path at all (its network helper
+# sits in a randomly named cgroup scope), so the boundary moved to
+# `--network none` plus a proxy, and root moved out of the daily path with it.
+# macOS has since adopted the same model (targets/container.sh, WK_SANDBOX).
+# See docs/HANDOFF-linux.md.
 
 # The storage model, for WK_STORE and store_init. setup itself only loads
 # common.sh and resources.sh, since the macOS stages need nothing else.

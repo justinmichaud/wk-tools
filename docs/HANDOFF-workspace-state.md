@@ -1,11 +1,13 @@
 # HANDOFF — workspace lifecycle state, readiness gating, and a status command that cannot lie
 
-Written 2026-08-19. Grew out of three features that landed the same day —
-`wk new --zed`, `wk build --babysit`, `wk build --branch` — and the question
-they all forced: *when is a workspace ready to be acted on, and who is allowed
-to say so?* Today the honest answer is "nobody, reliably": zed opens on
-whatever exists, a build starts on whatever exists, and an ssh cut in the
-middle of `wk new` leaves a half-workspace that every command treats as whole.
+Written 2026-08-19; the plan below landed the same day. Grew out of three
+features — `wk new --zed`, `wk build --babysit`, `wk build --branch` — and the
+question they all forced: *when is a workspace ready to be acted on, and who
+is allowed to say so?* The honest answer then was "nobody, reliably": zed
+opened on whatever existed, a build started on whatever existed, and an ssh
+cut in the middle of `wk new` left a half-workspace that every command treated
+as whole. The rules at the top are why this file stays: other docs defer to
+them.
 
 ---
 
@@ -107,9 +109,9 @@ stay correct, or degrade *visibly and honestly*, across:
 The contract in one line: **`wk status` never hangs, never crashes, never
 changes anything, and never asserts something it did not just verify; in the
 worst case it says "unknown", why, and the one command that repairs it.**
-Exit codes stay machine-readable (the current 0/1/2/3 contract extends;
-unreachable and broken get codes of their own so scripts and agents can
-branch).
+Exit codes stay machine-readable: the 0/1/2/3 contract extended, and a
+workspace that needs a person exits 4 (`cmd/status`), so scripts and agents
+can branch.
 
 ---
 
@@ -126,7 +128,8 @@ branch).
   with the same words as `wk claude` (no sandbox on a shared machine) and
   refuses from inside a workspace. A second `--babysit` while one is alive is
   refused by pid. **Not yet run through a real fix cycle** — that E2E (plant a
-  build error, watch it get fixed) is the first verification item below.
+  build error, watch it get fixed) is still open in `docs/TESTING.md`
+  ("Babysit").
 - **`wk claude` headless** — no tty on stdin/stdout → `t_exec` instead of
   `t_exec_tty`, same sandbox verification either way. This is why the
   babysitter goes through `wk claude` rather than running claude itself.
@@ -134,56 +137,44 @@ branch).
   name is not already local; in the babysit path the checkout happens once,
   up front, never under a fix the model just made.
 - **`wk new --zed` / `wk enter --zed`** — via `zed_cli()` (PATH entry or the
-  app bundle's own cli). *Currently opens as soon as creation returns*, which
-  is exactly the gap this handoff exists to close.
+  app bundle's own cli). It opened as soon as creation returned — exactly the
+  gap this handoff was written to close, and `wait_ready` (phase 2) closed it.
 - The prior art the state model generalizes: `build.status` (whose `running`
   is already treated as a hint, with log mtime deciding liveness),
   `.wk-firstrun-complete` (a completion marker written as provisioning's last
   act, waited on by the container driver's `t_ready`), and `remote/provision.sh`
   (idempotent stages that check evidence before acting).
 
-## The gaps
+## The gaps — all closed 2026-08-19
 
-0. ~~**`wk ls` and `wk status` list different sets.**~~ **Done 2026-08-19.**
-   Both enumerate through `walk_targets` (which targets) and
-   `target_workspaces` (which workspaces on one), and `wk ls` grew a TARGET
-   column, because a bare name says nothing once more than one machine is in
-   the listing. On macOS the dispatcher assembles one listing from two
-   machines for both commands (`bare_report`): the host-side targets are
-   walked out here in one pass, the container half is forwarded, and that
-   half is told it is a continuation, so there is one header and no false
-   "no workspaces" note. The name sets are checked by
+0. **`wk ls` and `wk status` listed different sets.** Both now enumerate
+   through `walk_targets` (which targets) and `target_workspaces` (which
+   workspaces on one), and `wk ls` grew a TARGET column, because a bare name
+   says nothing once more than one machine is in the listing. On macOS the
+   dispatcher assembles one listing from two machines for both commands
+   (`bare_report`): the host-side targets are walked out here in one pass, the
+   container half is forwarded and told it is a continuation, so there is one
+   header and no false "no workspaces" note. The name sets are checked by
    `wk selftest --section state`.
+1. **Readiness was only half a concept.** Every driver writes `.wk-ready`
+   last, `t_info` reports `creating` while it is missing, and one gate
+   (`wait_ready`) is what zed and build go through.
+2. **Remote creation was one long synchronous ssh.** Creation is detached on
+   the driving machine, the far-side marker is written last, and a cut
+   mid-clone leaves a workspace that reads `creating` from either end — which
+   `wk new` converges by remaking.
+3. **Creation state did not exist at all.** Now `absent | creating | present |
+   broken | unreachable`, derived per call, with the driver's liveness read
+   from `ws.status` and nothing else taken from it.
 
-1. ~~**Readiness is only half a concept.**~~ **Done 2026-08-19 (phase 2).**
-   Every driver writes `.wk-ready` last, `t_info` reports `creating` while it
-   is missing, and one gate (`wait_ready`) is what zed and build go through.
-2. ~~**Remote creation is one long synchronous ssh.**~~ **Done 2026-08-19
-   (phase 2).** Creation is detached on the driving machine, the far-side
-   marker is written last, and a cut mid-clone leaves a workspace that reads
-   `creating` from either end — which `wk new` converges by remaking.
-3. ~~**Creation state does not exist at all**~~ **Done 2026-08-19 (phase 2).**
-   `absent | creating | present | broken | unreachable`, derived per call, with
-   the driver's liveness read from `ws.status` and nothing else taken from it.
+## The plan — landed in two phases, both 2026-08-19
 
-## The plan
-
-Order chosen so every step ships alone and the fragile target (remote) is
-fixed first.
-
-**Phase 1 landed 2026-08-19** (macOS host, verified against the podman VM):
-step 4 below for the near side — creation converges by remaking — plus the
-snapshot completion marker, the locks and the read-only guarantee from the
-audit further down, and the two verified small bugs. What is *not* in it, and
-is what a phase 2 is: the `.wk-ready` marker on the far side (steps 1–2), the
-`wait_ready` gate and its consumers (step 3), the detach primitive (step 5),
-and the lifecycle line in `wk status` (step 6). Until those land, a remote or
-vm workspace cut mid-clone still looks finished — the near side has no marker
-to miss, because those targets pin no base.
-
-**Phase 2 landed 2026-08-19** (macOS host, verified against the podman VM):
-steps 1, 2, 3, 5 and 6 below, and step 4 for the far side. What that means in
-the tree:
+Order was chosen so every step shipped alone and the fragile target (remote)
+was fixed first: phase 1 (macOS host, verified against the podman VM) was
+convergence-by-remaking on the near side, the snapshot completion marker, the
+locks and the read-only guarantee from the audit further down; phase 2 was
+everything evidence-shaped — the marker, the state, the gate, the detach
+primitive, the lifecycle line. What that means in the tree:
 
 - `.wk-ready`, one name (`WK_READY_MARKER`, lib/target.sh), written last by
   every driver. The container's is written from *inside*, by
@@ -197,8 +188,12 @@ the tree:
   workspace.
 - `wait_ready` in lib/target.sh, and its consumers: `wk build` (bounded,
   `WK_BUILD_READY_WAIT`, before anything is written -- `--babysit` inherits it
-  by re-running `wk build`) and `wk enter --zed` / `wk new --zed`. Four more
-  than the plan listed -- `wk run`, `wk test`, `wk claude`, `wk gui` -- because
+  by re-running `wk build`) and `wk enter --zed` / `wk new --zed`, whose waiter
+  stays **foreground** deliberately: if ssh dies, only the waiter dies,
+  creation continues detached, and re-running the command is the resume -- a
+  detached GUI-opener would open windows into a session that no longer exists.
+  Four more consumers than the plan listed -- `wk run`, `wk test`, `wk claude`,
+  `wk gui` -- because
   they all had the same line (`t_info != absent`, "no such workspace") and it
   said that about four different situations, one of which was launching an
   agent into a workspace whose provisioning had not finished writing its
@@ -248,8 +243,8 @@ while implementing it:
    Claude CLI may be missing"; under rule 3 that is rubble, so the driver dies,
    the status file says `failed`, and a re-run remakes it from scratch.
 
-Three bugs came out of writing it, all three found by running it rather than
-by reading it:
+The bugs that came out of it, every one found by running it rather than by
+reading it:
 
 - **A waiter must not believe the previous attempt's status file.** Re-running
   `wk new` over half-made rubble read the killed driver's `state=creating` and
@@ -336,48 +331,14 @@ Still open from this pass:
   `wk remote setup`) to that machine rsyncs the tooling and the answers agree
   again.
 
-1. **Evidence at the artifact: a `.wk-ready` marker per workspace,** written
-   as the *last* act of creation by every driver — the firstrun pattern,
-   promoted to the contract. Next to the checkout (far side for remote/vm,
-   the ws home for containers), so it survives anything that only kills the
-   driving side.
-2. **`t_info` grows one state: `absent | creating | present`.** `creating` =
-   the workspace directory exists and the marker does not. Derived on every
-   call, stored nowhere.
-3. **One gate: `wait_ready <name> [timeout]`** in `lib/target.sh` — polls
-   `t_info`, says what it is waiting for, dies honestly on timeout, and on
-   creating-with-dead-driver points at `wk new <name>`, which remakes the
-   half-made workspace from scratch (rule 3). Consumers:
-   - `wk enter --zed` / `wk new --zed`: wait, *then* exec zed. The waiter
-     stays **foreground** deliberately — if ssh dies, only the waiter dies;
-     creation continues detached and re-running `wk enter --zed` is the
-     resume. A detached GUI-opener would open windows into a session that no
-     longer exists.
-   - `wk build`: wait (bounded) before writing `state=running` — a build can
-     no longer start on a half-initialised checkout. `--babysit` inherits the
-     gate because it re-runs `wk build`.
-4. **Creation converges by remaking, not repairing (rule 3).** `wk new
-   <name>` on a `creating` workspace with a dead driver destroys the rubble
-   and recreates from scratch instead of refusing — a workspace that never
-   finished creating holds nothing of value. The only stages that resume in
-   place are the expensive ones whose evidence is unambiguous: the mirror
-   fetch (resumes by nature) and the vm base build. An ssh cut costs a
-   re-run of the same command, nothing else. Remote first.
-5. **One detach primitive, `lib/detach.sh`,** extracted from the babysitter
-   (its status-file schema, pid-liveness, nohup discipline): `detach_run
-   <status-file> <log> -- cmd…`. Second user: `wk new` itself — creation
-   detaches by default and the command waits in foreground (`--no-wait` to
-   return immediately). `ws.status` (schema below) is written by the detached
-   driver; readers treat it as a claim, and the evidence decides.
-6. **Status renders the lifecycle first.** `wk status` gains the workspace
-   state line (`creating` with driver liveness and the current stage,
-   `broken` with the repair command) above the existing build/test/babysit
-   lines, under the reliability contract at the top of this file.
-
 Follow-up, explicitly out of this pass: remote *builds* still hold an ssh
-open end-to-end. Moving them under the machine-side `wk` that
-`wk remote setup` installs closes the last ssh-cut hole and resolves the
-"build state recorded twice" leftover in `docs/HANDOFF-wk-in-workspace.md`.
+open end-to-end (the trap is recorded in `docs/HANDOFF-linux-remote.md`:
+ctrl-c ends the local half while the compiler keeps going). Moving the build
+itself under the machine-side `wk` that `wk remote setup` installs closes
+that last ssh-cut hole. The build *state* half is already the machine's — the
+canonical `build.{status,log}` lives beside the checkout and both ends agree
+on it — but the container half of the "build state recorded twice" leftover
+in `docs/HANDOFF-wk-in-workspace.md` is still open.
 
 ## The status-file schema (shared by ws/build/test/babysit)
 
@@ -424,12 +385,13 @@ second statement of them.
 
 - **Container ssh aliases** (`cmd/new` writing `HostName localhost`):
   fictional — containers have no sshd. Delete outright.
-- **Deploy-key copies** in workspace `~/.ssh/id_*` (`container/firstrun.sh`):
-  `/secrets` is mounted read-only for the container's life — symlink, exactly
-  as the Claude credentials already are. A rotated key currently strands
-  every existing workspace on the dead one.
-- **`WK_FORKS` frozen into container env** at creation: read
-  `wk_push_forks` from the mounted `/opt/wk-tools` at use time.
+- ~~**Deploy-key copies** in workspace `~/.ssh/id_*`~~ **Done** —
+  `container/firstrun.sh` symlinks into the read-only `/secrets`, exactly as
+  the Claude credentials already were, so a rotated key rotates everywhere
+  (verified in `docs/TESTING.md`).
+- ~~**`WK_FORKS` frozen into container env** at creation~~ **Done** —
+  `wk_push_forks` (lib/store.sh) is read from the mounted `/opt/wk-tools` at
+  use time; nothing bakes it any more.
 - **Guest proxy address baked into `~/.zprofile`** by `vm/provision-base.sh`
   behind a comment-matching guard: the host already recomputes the address
   per boot for the *system* proxy; rewrite the env block per start too, or
@@ -437,15 +399,16 @@ second statement of them.
   address hangs `git`/`pip`/`curl` in every clone, indistinguishable from
   Softnet denying traffic.
 - **Machine-side conf duplicates** (`remote/provision.sh` baking
-  `WK_REMOTE_ROOT`, `WK_REMOTE_MAX_JOBS`, `WK_REMOTE_REFERENCE`): all three
-  are probed per process anyway, and the baked `WK_REMOTE_REFERENCE` skips
-  the `rev-parse` verification that exists precisely because the value goes
-  stale. Keep only `WK_REMOTE_LOCAL=1`… and see "shared homes" below, which
-  removes the machine-side marker entirely.
-- **Near-side remote `build.status`/`build.log`**: written on every build,
-  read only when the machine is unreachable, and then presented as current.
-  Either delete the near copy or label the fallback read as stale with its
-  timestamp — never let it impersonate a live answer.
+  `WK_REMOTE_ROOT` and `WK_REMOTE_REFERENCE` — `WK_REMOTE_MAX_JOBS` has since
+  been removed altogether): both are probed per process anyway, and the baked
+  `WK_REMOTE_REFERENCE` skips the `rev-parse` verification that exists
+  precisely because the value goes stale. Keep only `WK_REMOTE_LOCAL=1`… and
+  see "shared homes" below, which removes the machine-side marker entirely.
+- **Near-side remote `build.status`/`build.log`**: largely closed — the
+  canonical copy now lives beside the checkout on the build machine and
+  `wk status`/`wk logs` ask the machine (`docs/HANDOFF-linux-remote.md`).
+  What remains is that the fallback read against a machine with no `wk`
+  should be labelled stale with its timestamp, never presented as live.
 - **`base/<id>/sha` + `branch`**: pure caches of the tree today, read by
   nobody. Repurpose: written last, they become the snapshot's completion
   marker (closing the interrupted-`wk sync` hole — `current_base` is
@@ -480,14 +443,11 @@ second statement of them.
    destroys the rubble and remakes from scratch rather than re-pinning
    anything over a surviving layer. `wk gc` prunes no snapshot at all while
    any workspace is unpinned, since that is a reference it cannot count.
-3. **firstrun failure has no clean recovery path** — the remedy is
-   destroying the workspace, which under rule 3 is the *right* remedy (a
-   workspace that never finished creating holds nothing of value); what is
-   missing is that it happens by hand in two commands. `wk new` on a
-   creating-but-dead workspace now destroys the rubble and recreates from
-   scratch itself, and says so — but a workspace whose *firstrun* failed
-   still reads as `present`, because it has its `base-id`. Closing that needs
-   the readiness marker, step 1 of the plan above.
+3. ~~**firstrun failure has no clean recovery path**~~ **Fixed 2026-08-19**
+   by the readiness marker plus decision 6 above: a failed firstrun is a
+   failed creation — the driver dies, the status file says `failed`, the
+   workspace reads `creating` (its `.wk-ready` was never written), and a
+   re-run of `wk new` remakes it from scratch.
 4. ~~**`wk rm` returns success on partial destroy**~~ **Fixed 2026-08-19.**
    Artifacts first, then a check of what is actually gone, and the registry
    entry last — so a partial destroy exits nonzero, names what is left and
@@ -495,8 +455,10 @@ second statement of them.
    A workspace with nothing left but a registry entry is forgotten rather
    than refused. `unreferenced_bases` no longer answers at all while a
    workspace is unpinned, so gc cannot delete a live overlay's lower layer.
-5. **Unreachable ≠ absent** — a remote `t_info` failure reads as `absent`,
-   and `t_has_wk` failure silently falls back to the stale near-side status.
+5. ~~**Unreachable ≠ absent**~~ **Fixed 2026-08-19** — `unreachable` is a
+   state of its own with the timeout that decided it named, and `t_has_wk`
+   checks reachability before resolving anything (phase 2, decision 1 and the
+   listing bug above).
 6. **`cmd/bench` reads `state=running` as gospel** while `cmd/status` has
    the mtime liveness heuristic — one shared reader for status files, with
    the evidence check built in.
@@ -513,26 +475,39 @@ second statement of them.
 
 ### Locks (rule 4, the design)
 
-**Landed 2026-08-19, with the mechanism changed by measurement.** One helper
-in `lib/common.sh` — `hold_lock <resource> [-w timeout]` for the life of a
-command, `with_lock <resource> -- cmd…` for a smaller critical section — and
-one implementation on both hosts: an atomic mkdir with the holder's pid
-inside it.
+**Landed 2026-08-19, with the mechanism changed twice by measurement.** One
+helper in `lib/common.sh` — `hold_lock <resource> [-w timeout]` for the life
+of a command, `with_lock <resource> -- cmd…` for a smaller critical section —
+and one implementation on both hosts.
 
-The plan said `flock` where it exists and mkdir only on the bare macOS host.
-flock was implemented first and is *wrong here*, for a reason worth keeping:
-a flock is held by the open file description, so every process that inherits
-the descriptor holds it — and `wk new` starts a container, after which
-podman's `conmon` supervises it holding the inherited lock fd for as long as
-the workspace exists. Measured: after one `wk new`, conmon held
-`ws-<name>.lock` and the next command on that workspace waited on it forever.
-bash cannot mark a redirection close-on-exec, and `flock --close` applies
-only to flock's own `-c` command form, which would mean re-exec'ing every
-command under it. mkdir has no descriptor to inherit; a lock whose pid is
-gone is broken by the next taker, which is what makes it die with its holder
-even on kill -9 (verified). The cost is that there is no shared mode, so
-`wk new` and `wk sync` serialise rather than overlap — `-s` is accepted and
-waits, which is always more than was asked for and never less.
+The plan said `flock` where it exists. flock was implemented first and is
+*wrong here*, for a reason worth keeping: a flock is held by the open file
+description, so every process that inherits the descriptor holds it — and
+`wk new` starts a container, after which podman's `conmon` supervises it
+holding the inherited lock fd for as long as the workspace exists. Measured:
+after one `wk new`, conmon held `ws-<name>.lock` and the next command on that
+workspace waited on it forever. bash cannot mark a redirection close-on-exec,
+and `flock --close` applies only to flock's own `-c` command form, which
+would mean re-exec'ing every command under it.
+
+An atomic mkdir with the holder's pid inside came next, and had a hole of its
+own, found 2026-08-20 by `wk rm` sitting out its full timeout: a lock
+directory whose pid file was never written is indistinguishable from a live
+holder, so it can never be reclaimed. **The mechanism is now a symlink whose
+target string names the holder** (`lib/common.sh`, "locks"): `ln -s` is
+atomic *and* carries the payload with it, so the window does not exist rather
+than being made small — and there is still no descriptor to inherit. Writing
+the contention test found two more defects the mkdir form shared: several
+takers breaking one dead lock could all conclude they had won (the break is a
+compare-and-swap under a breaker lock now), and re-entrancy compared `$$`,
+which every subshell of one command shares. A lock whose holder is gone is
+broken by the next taker, which is what makes it die with its holder even on
+kill -9 (verified). The cost is that there is no shared mode, so `wk new` and
+`wk sync` serialise rather than overlap — `-s` is accepted and waits, which
+is always more than was asked for and never less. The same mechanism serves a
+build started over ssh through `lib/lockrun.sh`, run on the machine that
+builds, because a lock has to die with the *build* and not with the
+connection.
 
 Lock files are keyed by the machine's hostname as well as by the resource,
 because a home directory can be shared by several build machines and a pid is
@@ -549,18 +524,19 @@ thing and already exists on the far side (`targets/remote.sh`).
 
 Several build machines can share one NFS home. The current `~/.wk-remote`
 marker cannot survive that: the second `wk remote setup` overwrites the
-first's `target=`, and `$root/.build.lock` would serialize two *different
-machines'* builds. The clean fix is rule 1 applied to identity: **delete
-the machine-side marker and derive the role every invocation** — each
-target's conf gains the machine's hostname (recorded at setup from
-`hostname`, which is a genuine creation-time fact), and `wk` on a box finds
-"which conf names me" by matching. Shared homes then need nothing special:
-all the confs coexist, each names its machine, and `wk remote rm` of one
-leaves the others whole. Everything per-machine under a shared root is
-keyed by derived machine identity, never by path alone: the build flock
-(`.build.<hostname>.lock`) and the build directories (arch- or
-hostname-keyed) so an aarch64 and an armhf box never collide in one
-checkout.
+first's `target=`, and a path-keyed build lock would serialize two
+*different machines'* builds. The clean fix is rule 1 applied to identity:
+**delete the machine-side marker and derive the machine's identity every
+invocation** — each target's conf gains the machine's hostname (recorded at
+setup from `hostname`, which is a genuine creation-time fact), and `wk` on a
+box finds "which conf names me" by matching. Shared homes then need nothing
+special: all the confs coexist, each names its machine, and `wk remote rm`
+of one leaves the others whole. Everything per-machine under a shared root
+is keyed by derived machine identity, never by path alone — the build
+directories arch- or hostname-keyed, so an aarch64 and an armhf box never
+collide in one checkout. Status: the lock half exists (every lock file is
+keyed by hostname, `lib/common.sh`); the marker is still written and the
+conf-names-me derivation is not built.
 
 ### Changing workstations: the target view is calculated, not carried
 
@@ -581,14 +557,17 @@ sitting down at a different workstation means a different, wrong answer to
   requirement is exactly the case that shows it was a cache all along. The
   macOS dispatcher keeps its shape — host-side targets answer first, and
   container remains the default claim, answered honestly when the podman
-  machine is stopped.
+  machine is stopped. Status: not yet removed — `target_of` still reads the
+  registry, and `ws_target` (lib/target.sh) already computes the fallback
+  when the entry is missing, which is the first half of retiring it.
 - **The target confs are the one genuine record** — how to reach a machine
-  cannot be derived — and they are *config*, not state: they move into the
-  repo (a committed `config/targets/` that `./setup` installs, with
-  `~/.config/wk/targets/` kept only as a local override layer). The
-  privacy decision of 2026-08-19 already accepts these hostnames as
-  published. A new workstation is then `git clone && ./setup` and the view
-  is identical — nothing to migrate, nothing to drift.
+  cannot be derived — and they are *config*, not state. **Landed 2026-08-19**
+  as `targets/hosts/<name>.conf` in this repository, with
+  `~/.config/wk/targets/` kept as the local override layer
+  (`target_registry_dir`, lib/target.sh; the shared half travels with the
+  tree `t_sync_tools` pushes). The privacy decision of 2026-08-19 already
+  accepts these hostnames as published. A new workstation is `git clone &&
+  ./setup` and the view is identical — nothing to migrate, nothing to drift.
 
 Host-bound targets stay host-bound by nature: this Mac's podman VM and
 tart guests are drivable only from this Mac. But they are not invisible
@@ -597,13 +576,15 @@ from elsewhere — see the fleet status below.
 ### `wk status` walks the fleet: every workstation that is up
 
 Decided 2026-08-19, superseding the "future work" note this section first
-carried: workstations are peers, listed in the same committed
-`config/targets/` as the build machines (kind=workstation, an ssh
-destination each), and a bare `wk status` sshes into every one that is up
-and asks it what it is up to — by running that machine's own read-only
-`wk status` and merging the answer, since only the machine itself can see
-its containers and guests. The same walk is where out-of-sync gets
-noticed, because it is the one moment every machine's view is side by side:
+carried, and the peer half **landed the same day**: workstations are peers,
+listed in the same committed `targets/hosts/` as the build machines
+(`WK_REMOTE_PEER=1`, an ssh destination each — see "peers" in
+`targets/remote.sh` and `targets/hosts/moose.conf`), and a bare `wk status`
+asks every one that is up what it is up to — by running that machine's own
+read-only `wk status` (`t_has_wk` / `t_wk`) and merging the answer, since
+only the machine itself can see its containers and guests. The same walk is
+where out-of-sync gets noticed, because it is the one moment every machine's
+view is side by side:
 
 - **wk-tools version skew** — **done 2026-08-19**, with a correction to the
   mechanism: a sha is not available where it matters. Every machine but the
@@ -621,25 +602,25 @@ noticed, because it is the one moment every machine's view is side by side:
   build box must see one state; a disagreement means a stale near-side
   file somewhere, and the walk names both views.
 
-**Roles are dynamic, and the walk reports transitions.** A machine's role
-can be *about to change*: the netboot flow (`docs/HANDOFF-netboot.md`)
-arms a one-shot reboot that takes a workstation out of its role and boots
-it into a benchmark image, and later brings it back. So a machine's
-status line is its current role *plus any announced transition*:
-`rpi5: workstation, armed to reboot into bench image <id> (armed by
-moose, 14:02 UTC)`. The role itself stays derived per invocation — after
-the reboot the machine simply *is* the image and answers as such (or
-stops answering ssh entirely, which the image's own driver reports) —
-but the arming is a genuine record of intent that no probe can derive
-in full, kept as a small file next to the boot mechanism it describes,
-plus whatever the firmware itself can be asked (the one-shot boot order
-is readable where the platform allows, and evidence beats the file when
-they disagree). The walk then notices the transition-shaped desyncs: a
-machine armed to reboot that is still in its old role long past the
-arming, a machine that came back without the arming record being
-cleared, and — the operational one — a mutating command aimed at a
-machine that is armed to leave its role, which warns or refuses rather
-than starting a build on a box about to reboot out from under it.
+**Modes are dynamic, and the walk reports transitions.** A machine's mode
+(`host` or `bench` — `docs/HANDOFF-vocabulary.md`) can be *about to change*:
+`wk boot` arms a one-shot reboot that takes a machine out of host mode and
+boots it into a system wk built, and later brings it back. So a machine's
+status line is its role, its current mode, *plus any announced transition*:
+`rpi5: workstation, host mode, armed to boot system <id> (armed by moose,
+14:02 UTC)`. The mode itself stays derived per invocation — after the
+reboot the machine simply *is* in bench mode and answers as such (or stops
+answering ssh entirely, which the boot driver reports) — but the arming is
+a genuine record of intent that no probe can derive in full, kept as a
+small file next to the boot mechanism it describes, plus whatever the
+firmware itself can be asked (the one-shot boot order is readable where the
+platform allows, and evidence beats the file when they disagree). The walk
+then notices the transition-shaped desyncs: a machine armed to reboot that
+is still in host mode long past the arming, a machine that came back
+without the arming record being cleared, and — the operational one — a
+mutating command aimed at a machine that is armed to leave host mode, which
+warns or refuses rather than starting a build on a box about to reboot out
+from under it.
 
 The rules bind the walk exactly as they bind everything else: read-only
 absolutely (the remote `wk status` starts nothing, boots nothing, repairs
@@ -659,7 +640,7 @@ machines, and with its own binary across updates; it is the caching this
 plan exists to remove, plus a liveness problem (rule at the top of this
 file: nothing load-bearing lives only in a process table). Every guarantee
 wanted here — locks, resumability, honest status — is *stronger* without
-one: flocks outlive nothing, evidence outlives everything, and a CLI that
+one: locks outlive nothing, evidence outlives everything, and a CLI that
 recomputes from evidence cannot be stale. A daemon would also break the
 founding constraint that the macOS host installs nothing (bash 3.2 is the
 only universal runtime; a daemon means an installer, a launchd unit, and a

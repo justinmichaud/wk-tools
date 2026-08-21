@@ -25,7 +25,7 @@ python3
 linux-tools-generic
 
 # Boot images. mtools writes into an image's FAT partition at a byte offset,
-# with no loop device and no mount -- which is the only reason `wk image build`
+# with no loop device and no mount -- which is the only reason `wk sysimage build`
 # needs no privilege at all. Without it the whole command would want root on a
 # machine whose entire design is that `wk` never calls sudo.
 mtools

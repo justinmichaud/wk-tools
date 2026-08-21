@@ -6,23 +6,25 @@ host...") but the need isn't yocto-specific — any Pi target (buildroot rpi4,
 yocto/Wayland rpi3, whatever rpi5 ends up running) produces an image that has
 to get from a build workspace onto a physical SD card in the host machine.
 
-## Done, 2026-08-20 — `wk image write`
+## Done, 2026-08-20 — `wk sysimage write`
 
 ```
-wk image disks <machine>                        what is attached over there
-wk image write <id> --disk <machine>:<device>    write the image onto that disk
+wk sysimage disks <machine>                         what is attached over there
+wk sysimage write <id> --disk <machine>:<device>    write the system onto that disk
 ```
 
 with the mechanics in `boot/disk.sh`.
 
-**The naming took two goes, and the second is the point.** This landed first as
-`wk pi flash`, alongside the existing `wk image flash <machine>` — and both
-names were wrong in the same way. `flash <machine>` reads as *reflash that
-machine*: replace its OS, lose what is on it. That never happened; the machine's
-own system disk is refused by several independent checks, and what gets written
-is a removable disk that happens to be plugged into it. "flash" also implies
-permanence, where a machine boots one of these disks *once* and returns to its
-normal role by itself.
+**The naming took three goes, and the last two are the point.** This landed
+first as `wk pi flash`, alongside the existing `wk image flash <machine>` —
+and both names were wrong in the same way. `flash <machine>` reads as *reflash
+that machine*: replace its OS, lose what is on it. That never happened; the
+machine's own system disk is refused by several independent checks, and what
+gets written is a removable disk that happens to be plugged into it. "flash"
+also implies permanence, where a machine boots one of these disks *once* and
+returns to host mode by itself. (`wk image` itself became `wk sysimage` later
+the same day — `docs/HANDOFF-vocabulary.md` — and every old spelling is
+refused by name.)
 
 They were also one operation pretending to be two: same store, same
 verification, same unmount, same refusals, differing only in device policy — and
@@ -55,7 +57,9 @@ Verified against the rpi5's reader with the WPE 2.48 yocto image:
 and confirmed on the card afterwards: `mmcblk0p1 130M vfat boot`,
 `mmcblk0p2 7.3G ext4 root` — grown from the image's 3.8 G to fill a 7.5 G card.
 
-The checklist items above are covered: removable-only refusal, whole-disks-only,
+The manual checklist this replaces (wiki:
+`Building-WPEWebKit-for-32-bit-Raspberry-Pi-3-(Yocto-Wayland)`, "Flashing the
+image") is covered item by item: removable-only refusal, whole-disks-only,
 never the machine's own root disk, a size check, unmount-after-confirm, sync,
 `udisksctl power-off` (best-effort), and growpart/resize2fs. Two deviations
 worth stating:
@@ -87,25 +91,18 @@ must match the kind of device being written**. `image_check_root` in
 runs — see `docs/HANDOFF-yocto.md`. It is compared by *kind*, not by path,
 because a card written in one machine's reader is routinely booted in another.
 
-## What to do
+## What remains
 
-1. An easy way to copy the built image out of a workspace/container and onto
-   the host filesystem — the workspace has no direct access to the host's SD
-   card reader, so this is a two-step handoff, not a single `dd`.
-2. A `wk pi flash <image> [device]` verb for writing that image to the card
-   safely. The manual checklist it replaces (wiki:
-   `Building-WPEWebKit-for-32-bit-Raspberry-Pi-3-(Yocto-Wayland)`, "Flashing
-   the image") is exactly the error-prone part:
-   - enumerate removable devices and **refuse non-removable ones** — the
-     footgun this exists to remove is `dd` to the wrong `/dev/sd*`;
-   - `umount` anything mounted from the card first;
-   - write with `bmaptool` when a `.bmap` exists, else the wic/dd path;
-   - `sync`, then `udisksctl power-off`;
-   - the growpart/`resize2fs` fallback for images smaller than the card, and
-     the `tune2fs` FEATURE_C12 workaround for old e2fsprogs on the target
-     (label the workaround with the image generation that needs it).
-3. Do this once, generically, rather than as a yocto-only script — the yocto
-   task and the benchmark-image task (`docs/HANDOFF-benchmarking.md`) both
-   consume this rather than duplicate it.
+The original task list (copy the image out of the workspace, a safe flashing
+verb with the removable-only/umount/bmaptool/grow checklist, done once and
+generically) is covered by the above: the store holds what `wk sysimage build`
+produces, both flashing verbs collapsed into `write`, and yocto and perf
+systems go through the same path.
+
+The one gap is **`wk sysimage flash --reader`** — a card reader attached to
+*this* workstation cannot be named, because every write path resolves its
+target through the fleet and goes over ssh. That is what blocks fully-automatic
+first provisioning, and it is recorded (with the no-NOPASSWD decision) in
+`docs/HANDOFF-vocabulary.md`'s lifecycle.
 
 No machine constraint beyond "wherever the SD card reader physically is."

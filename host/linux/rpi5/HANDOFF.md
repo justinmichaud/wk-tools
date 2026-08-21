@@ -9,10 +9,9 @@ It holds the reproducible performance-tuning setup built over a prior session.
 is not conditional any more -- the rpi5 is provisioned as a regular
 workstation now, with its own `./setup` and podman workspaces like moose. The
 stability half here (fan-max, WiFi stability, fstab/indexer, NUMA kernel) keeps
-applying to the installed OS in every role. The perf half (overclock, v3d, perf
-governor, swap off) belongs to the benchmark image the machine boots for a run,
-and the image does not exist yet -- so between now and then this board is not a
-benchmark device, which is accepted rather than overlooked.
+applying to the installed OS -- host mode. The perf half (overclock, v3d, perf
+governor, swap off) belongs to the bench system the machine boots for a run --
+which did not exist when this was written; see the 2026-08-20 update below.
 
 **Update 2026-08-19:** the image now has a design and is lane A's first step,
 not its last -- `docs/HANDOFF-netboot.md`. Two consequences for this tree. The
@@ -23,10 +22,20 @@ prerequisite rather than a peer -- the netboot is armed over SSH, so this board
 has to be up, reachable and provisioned as a workstation before any of it
 starts. As of this date it is offline (6 days on the tailnet).
 
-Watch the firmware boundary while moving the perf half: the EEPROM
-(`SDRAM_BANKLOW`, `BOOT_ORDER`) and `config.txt` are shared by both roles, so
-an overclock written to the EEPROM overclocks the workstation too. The image
-should carry its own `config.txt` on the boot medium.
+**Update 2026-08-20: the bench system exists, and it boots from USB, not
+TFTP.** `wk sysimage build perf-linux-rpi5` builds it, `wk sysimage write`
+puts it on the USB stick, and `wk boot rpi5` enters it by a USB one-shot
+(`vcmailbox 0x0003808b 4 4 0xf64`, `boot/rpi5-usb.sh`) -- the NVMe workstation
+is untouched. The perf governor and swap-off are baked into every system
+(`cmd/sysimage`); **the overclock/v3d half of this tree has not moved yet**,
+and its destination is the system's own `config.txt` on the stick's boot
+partition, per the firmware-boundary note below.
+
+Watch the firmware boundary while moving that last piece: the EEPROM
+(`SDRAM_BANKLOW`, `BOOT_ORDER`) and any `config.txt` on shared media are seen
+in both modes, so an overclock written to the EEPROM overclocks the
+workstation too. The bench system carries its own `config.txt` on its own
+boot medium.
 
 Everything below still applies as written for the installed OS.
 
@@ -39,7 +48,8 @@ sudo bash ~/rpi5-tune/rpi5-stress.sh     # validate 2.8GHz CPU stability
 ```
 Then validate the GPU (v3d=1200) with a sustained glmark2-wayland load + `dmesg | grep -i v3d`.
 Adjust via env vars if needed: `ARM_FREQ`, `V3D_FREQ`, `OVER_VOLTAGE_DELTA`, `BROWSER`.
-(The setup script also installs the bundled `id_ed25519` SSH key into `~/.ssh/` automatically.)
+(If an `id_ed25519` sits beside the script -- the restored backup carried one -- it is installed
+into `~/.ssh/`; no key is in this repo, and that is deliberate.)
 
 ### Things to re-check on 26.04 (may have shifted from 24.04):
 - Paths `/boot/firmware/config.txt` and `/boot/firmware/cmdline.txt` still correct? (A/B boot may relocate.)
@@ -66,7 +76,7 @@ installed and running. NUMA is **ON and optimal**: **8 nodes**, `mempolicy inter
 Key facts for the next agent (see `rpi5-numa-README.md` → "Best configuration"):
 - NUMA is **firmware-driven** here. There is **no `cmdline.txt`** — boot args come from
   `/proc/device-tree/chosen/bootargs`, into which the firmware injects `numa_policy=interleave`
-  + `numa=fake=8`. `rpi5-setup.sh` Section 10 now pins `SDRAM_BANKLOW=1` in the EEPROM and, on
+  + `numa=fake=8`. `rpi5-setup.sh`'s NUMA step now pins `SDRAM_BANKLOW=1` in the EEPROM and, on
   boxes that *do* have a `cmdline.txt`, `numa_policy=interleave`. `NUMA_FAKE=auto` (default) lets
   the firmware pick the optimal node count — **do not hardcode 4** (that was 8GB-era guidance;
   8 is correct for this 16GB board).

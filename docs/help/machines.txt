@@ -9,6 +9,11 @@ MACHINES
     2. a conf naming it -- shared in this repository, or local to this device
     3. `wk remote setup <name>`, for a build box you intend to drive
 
+  This topic is machines you build *on*. A board that is measured rather than
+  built on -- a bench device such as the rpi4 or rpi3 -- is not a target at
+  all: it lives in the fleet (boot/machines.sh), with a role saying what it
+  permanently is, and `wk boot` is its verb.
+
   The target is named after the ssh destination, so step 1 is what everything
   else is built on:
 

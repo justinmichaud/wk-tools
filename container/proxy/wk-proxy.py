@@ -107,7 +107,7 @@ ALLOWED_HOSTS = {
     "baidu.com": (80, 443),
 
     # --- building a Yocto image ----------------------------------------------
-    # `wk image build rpi4-wpe-2.48` runs bitbake in a workspace, and bitbake
+    # `wk sysimage build downstream-yocto-wpe-2.48-rpi4` runs bitbake in a workspace, and bitbake
     # fetches sources. A Yocto build touches, in principle, every upstream that
     # every recipe in six layers names -- which is not a list anyone can write
     # down, and is exactly the wrong shape for an allowlist.

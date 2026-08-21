@@ -74,8 +74,9 @@ CONTAINER OR MACOS GUEST?
                     proves that from inside. A guest is filtered from the host
                     by Softnet instead, which is why `wk verify` does not apply
                     to it -- and why `./setup --stage softnet` has to have run:
-                    until it has, `wk vm start` says the guest is unfiltered
-                    and `wk claude` refuses it.
+                    until it has, `wk vm start` refuses to boot a guest at all
+                    (WK_VM_UNFILTERED=1 is the explicit, loud override), and
+                    `wk claude` refuses a guest booted that way.
   display and GPU   only the guest has one. A container workspace on a macOS
                     host has no display and cannot get one (the podman VM has
                     no GPU, and there is no compositor to draw into), so

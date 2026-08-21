@@ -507,7 +507,7 @@ PYSECTION12
 # But the Yocto builder needs a workspace whose image is *not* the SDK. Yocto
 # scarthgap's supported build hosts stop at Ubuntu 24.04 and the SDK image is
 # 26.04, and that gap breaks the build in five different ways
-# (container/yocto/Containerfile). So `wk image build <a yocto profile>` creates
+# (container/yocto/Containerfile). So `wk sysimage build <a yocto profile>` creates
 # its workspace from a plain 24.04 image with Yocto's host tooling in it, and
 # `.wkdev-init` then aborts with "intended to run from within the wkdev-sdk
 # container only".

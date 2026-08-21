@@ -448,7 +448,7 @@ if _busy=$(ws_busy_reason "$NAME"); then
     barrier "'$NAME' already has a detached job running in it: $_busy
     Two builds in one checkout corrupt both, and this one would be the second.
     See what it is:  wk logs $NAME --all
-    Stop it:         wk image build <profile> --stop   (for a Yocto stage)"
+    Stop it:         wk sysimage build <profile> --stop   (for a Yocto stage)"
 fi
 
 # The branch, before anything is recorded about this build. checkout first,

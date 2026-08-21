@@ -2,7 +2,7 @@
 # Provisioning for the wk podman machine, run by podman after first boot.
 #
 # Scope is deliberately narrow: only OS-level state that has no dependency on
-# wk-tools itself. Anything that needs the repo -- the nftables policy, the
+# wk-tools itself. Anything that needs the repo -- the egress proxy, the
 # workspace tooling -- is installed afterwards by host/macos/vmtools.sh, which
 # copies the *local* working tree into the VM. Cloning from GitHub here would
 # mean nothing could be tested until it was pushed.
@@ -112,9 +112,12 @@
         - "'already requested' not in (pkgs.stderr | default(''))"
 
     - name: Create the workspace bridge network
-      # A real bridge, so traffic traverses the forward chain and can be
-      # filtered. Rootless podman's pasta backend cannot be firewalled this way,
-      # which is why this machine is rootful.
+      # VESTIGIAL (2026-08-20): this bridge belonged to the old rootful-podman
+      # + nftables model, which targets/container.sh's WK_SANDBOX comment
+      # records as replaced by `--network none` plus the user proxy. Left in
+      # place because removing it is only testable on the macOS host -- take
+      # it out there, together with the nftables task below, and prove the
+      # round trip with `podman machine rm` + `./setup`.
       ansible.builtin.command:
         cmd: >
           podman network create
@@ -129,6 +132,8 @@
         - "'already used' not in (netcreate.stderr | default(''))"
 
     - name: Enable nftables at boot
+      # VESTIGIAL (2026-08-20): see the bridge task above -- the egress policy
+      # is the user proxy now, and nothing writes an nftables ruleset any more.
       ansible.builtin.systemd_service:
         name: nftables
         enabled: true

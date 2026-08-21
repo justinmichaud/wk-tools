@@ -1,5 +1,5 @@
-# --- wk image: rpi5-perf -----------------------------------------------------
-# Appended by `wk image build` to the base image's own config.txt. The base's
+# --- wk sysimage: perf-linux-rpi5 -----------------------------------------------------
+# Appended by `wk sysimage build` to the base image's own config.txt. The base's
 # copy is what makes the base bootable, so this only ever adds.
 
 [all]

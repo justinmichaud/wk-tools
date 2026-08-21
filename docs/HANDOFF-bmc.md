@@ -1,4 +1,4 @@
-How can I make my librem5 bmc auto turn on after power loss? How can I recover this device if it is left off without being phisically present?
+How can I make my librem5 bmc auto turn on after power loss? How can I recover this device if it is left off without being physically present?
 
 Going forward, we will name the librem5 tailnet-bridge-X and switch to pmos for portability. We will support the librem 5 and pinephone as the primary devices.
 

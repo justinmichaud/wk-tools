@@ -25,6 +25,13 @@ requirement to execute all of them.
 
 ## Abstraction candidates already visible from the work above
 
+- **The layering decided in `docs/HANDOFF-generalizing.md`** (2026-08-20):
+  the `home` / `lab` / `wk` / `field` / `stock` decomposition and its one-way
+  dependency rule. The rule binds new code from the decision date; this review
+  is where existing code catches up — directory moves, plus a grep selftest
+  that the lab layer (targets/, boot/, image/, the bench mechanics) knows no
+  WebKit.
+
 - **The target driver contract** (`t_create`/`t_exec`/`t_info`/`t_list`/
   `t_destroy`) is implemented three times — `targets/container.sh`,
   `targets/remote.sh`, `targets/vm.sh` — written at different times against
