@@ -72,17 +72,49 @@ THE TWO LANES
                      whole of first contact, and setup falls back to it by
                      itself.
 
-  The image carries the device's own bootloader, embedded at the sector its
-  deviceinfo names -- because pmbootstrap does that only when it writes a real
-  card, not when it produces an image file. Without it the card is perfectly
-  formatted and completely unbootable, and the phone quietly comes up on its
-  eMMC instead; the builder embeds it and reads the sector back to prove it.
+  The image carries the device's own bootloader: pmbootstrap embeds it at the
+  offset the device declares (`deviceinfo_sd_embed_firmware`, in units of 1024
+  bytes -- 8 KiB on a PinePhone, 33 KiB on a Librem 5). The builder checks it is
+  there rather than writing it, because writing it by hand overlapped
+  pmbootstrap's copy and turned a working image into an unbootable card.
+
+GETTING IT ONTO INTERNAL STORAGE
+
+  A card is how a bridge is *proved*, not where it should live: a bridge writes
+  leases, logs and tailscale state for months, and a microSD is the part of a
+  phone most likely to wear out or work loose. Once the role works, the same
+  verified image goes onto internal storage and the card becomes the rescue copy
+  -- put it back in and the phone boots it again.
+
+  One route, because writing a disk is a thing this repo already does:
+
+      wk sysimage build recovery-pinephone      # Jumpdrive, pinned and stored
+      wk sysimage write <that id> --disk rpi5:/dev/mmcblk0
+      # card into the phone, phone cabled to rpi5, power on
+      wk sysimage disks rpi5                    # the phone's eMMC is now a disk
+      wk sysimage write <bridge image> --disk rpi5:/dev/sdX
+
+  Jumpdrive is the PinePhone's service image: it boots from a card and exports
+  the phone's internal storage as USB mass storage. That turns "flash the
+  phone's eMMC" into "write a removable disk attached to a machine", which is
+  `wk sysimage write` with every refusal and the block-map path it already has,
+  and no new verb.
+
+  There was a second route -- write the image from the card system to the idle
+  eMMC over ssh -- and it is deliberately gone. It reimplemented dd, partition
+  growth and identity-copying against a phone, to reach a disk that Jumpdrive
+  hands to the ordinary write path for nothing.
+
+  Then: power off (not reboot -- the card wins a boot), take the card out, power
+  on, and `wk bridge setup <name>` to re-apply the role to the installed system.
+  It is idempotent and every package it needs is already in the image.
 
   microSD, and both phones boot one in preference to their internal storage.
-  Neither depends on what is already installed: pmbootstrap embeds each device's
-  own firmware into the card, at the sector its deviceinfo names
-  (`deviceinfo_sd_embed_firmware` -- the PinePhone's SPL at sector 8, the Librem
-  5's u-boot at 33), so the card carries its own way of starting. That is what
+  Neither depends on what is already installed: the image carries each device's
+  own firmware at the offset its deviceinfo names -- `deviceinfo_sd_embed_firmware`,
+  in units of 1024 bytes, so the PinePhone's SPL at 8 KiB and the Librem 5's
+  u-boot at 33 KiB, which are the canonical sunxi and i.MX addresses. So the card
+  carries its own way of starting. That is what
   makes this the recoverable path: the eMMC install underneath is untouched, and
   removing the card puts the phone back exactly as it was.
 
@@ -143,6 +175,8 @@ DECLARING AND PROVISIONING ONE
   Then:
 
       wk bridge setup <name>          # idempotent; re-run after any change
+                                      # (WK_BRIDGE_AUTHKEY=tskey-... to skip the
+                                      #  prompt on a first run)
       wk bridge status <name>         # the on-device health check, read-only
       wk bridge rm <name>             # removes the role, leaves the OS
 

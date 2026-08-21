@@ -26,7 +26,6 @@
 #   PMO_EXTRA_SPACE MB of slack in the image beyond the rootfs
 #   PMO_HOSTNAME    what the system calls itself
 #   PMO_KEYFILE     a public key file on this host, put there by the caller
-#   PMO_WIFI        yes to copy this host's own WiFi credential into the image
 #   PMO_ROOT        where the venv, the pmbootstrap work folder and the output go
 set -eu
 
@@ -37,7 +36,6 @@ PMO_USER="${PMO_USER:-user}"
 PMO_PASSWORD="${PMO_PASSWORD:-147147}"
 PMO_PACKAGES="${PMO_PACKAGES:-}"
 PMO_EXTRA_SPACE="${PMO_EXTRA_SPACE:-512}"
-PMO_WIFI="${PMO_WIFI:-no}"
 PMO_ROOT="${PMO_ROOT:-$HOME/wk-pmos}"
 
 VENV="$PMO_ROOT/venv"
@@ -261,59 +259,52 @@ img=$(find "$WORK/chroot_native/home/pmos/rootfs" -maxdepth 1 -name "$PMO_DEVICE
 [ -n "$img" ] || die "pmbootstrap reported success but no $PMO_DEVICE.img is under $WORK"
 info "image: $img ($(du -h "$img" | cut -f1))"
 
-# --- the bootloader ----------------------------------------------------------
+# --- the bootloader, which pmbootstrap has already written --------------------
 #
-# pmbootstrap does not put it in an image *file*. It embeds firmware when it
-# writes a real disk (`--disk`/`--sdcard`) and not when it produces an image, so
-# `--no-split` output has a valid partition table, valid filesystems, and
-# nothing for the boot ROM to find. The card then looks perfectly good and the
-# phone boots whatever is on its eMMC instead -- which is precisely what
-# happened the first time this was tried on hardware: sector 8 of the image was
-# all zeros and the PinePhone came up on its old OS.
+# Nothing to do here, and that is worth writing down because a previous version
+# of this file did it by hand and broke the image.
 #
-# So it is done here, from the same two facts the device itself declares:
+# pmbootstrap embeds each device's firmware into the image it produces, at the
+# offset the device declares -- its own log says so ("Embed firmware
+# u-boot/... at offset 8 with step size 1024"), and an image built before this
+# section existed has the i.MX IVT header at exactly 33 KiB on a Librem 5. The
+# offset is in units of 1024 bytes, not sectors.
 #
-#   deviceinfo_sd_embed_firmware="<path under /usr/share>:<sector> ..."
+# The manual version came from checking the wrong address: 512-byte sector 8 is
+# byte 4096, the firmware is at byte 8192, so "sector 8 is all zeros" was true
+# and meaningless. Writing the SPL there then overlapped pmbootstrap's copy and
+# replaced a working bootloader with a misaligned one -- a hand-written step
+# that turned a good image into an unbootable card.
 #
-# The file comes out of the rootfs pmbootstrap just built, so it is the version
-# that matches this image rather than whatever the build host happens to have.
-step "Embedding the bootloader"
+# What is left is the check, which is cheap and which would have caught that:
+# read back the byte the boot ROM will read and refuse to ship an image whose
+# firmware is not there.
+step "Checking the bootloader pmbootstrap embedded"
 DEVICEINFO=$(find "$APORTS/device" -name deviceinfo -path "*device-$PMO_DEVICE/*" | head -1)
 [ -n "$DEVICEINFO" ] || die "no deviceinfo for $PMO_DEVICE under $APORTS/device"
 embed=$(sed -n 's/^deviceinfo_sd_embed_firmware="\(.*\)"$/\1/p' "$DEVICEINFO")
-if [ -z "$embed" ]; then
-    # Not every device boots this way (some are flashed over fastboot or uuu),
-    # and for those an image with no embedded firmware is correct. Said out loud
-    # so that "the card does not boot" is never a silent possibility.
-    warn "$PMO_DEVICE declares no sd_embed_firmware: this image carries no"
-    warn "  bootloader of its own, and a card written from it will only boot if"
-    warn "  the device finds firmware somewhere else."
-else
-    rootfs="$WORK/chroot_rootfs_$PMO_DEVICE"
-    for entry in $embed; do
-        f="${entry%:*}"; sector="${entry##*:}"
-        src="$rootfs/usr/share/$f"
-        sudo -n test -f "$src" \
-            || die "$DEVICEINFO wants $f at sector $sector, and it is not in the
-    rootfs pmbootstrap built ($src). The device package that provides it may
-    have changed name."
-        sudo -n dd if="$src" of="$img" bs=512 seek="$sector" conv=notrunc,fsync \
-            status=none || die "could not embed $f at sector $sector"
-        info "embedded $(basename "$f") at sector $sector ($(sudo -n stat -c %s "$src") bytes)"
-    done
+fw_step=$(sed -n 's/^deviceinfo_sd_embed_firmware_step_size="\{0,1\}\([0-9]*\).*/\1/p' "$DEVICEINFO")
+case "$fw_step" in ''|*[!0-9]*) fw_step=1024 ;; esac
 
-    # Read it back. An embed that silently wrote nothing is the same failure as
-    # not embedding at all, and this is one dd to rule it out -- it is checked
-    # here rather than trusted, because the whole class of bug this fixes was
-    # invisible until a phone in somebody's hand booted the wrong OS.
-    first_sector=$(printf '%s' "$embed" | awk '{print $1}' | sed 's/.*://')
-    nonzero=$(sudo -n dd if="$img" bs=512 skip="$first_sector" count=1 status=none \
-              | tr -d '\0' | wc -c | tr -d ' ')
-    [ "${nonzero:-0}" -gt 0 ] \
-        || die "sector $first_sector is still all zeros after embedding -- a card
-    written from this image would not boot, and the phone would come up on
-    whatever is on its internal storage."
-    info "verified: sector $first_sector carries $nonzero non-zero bytes"
+if [ -z "$embed" ]; then
+    # Some devices are flashed over fastboot or uuu instead, and for those an
+    # image with no embedded firmware is correct. Said out loud, so that "the
+    # card does not boot" is never a silent possibility.
+    warn "$PMO_DEVICE declares no sd_embed_firmware: this image carries no"
+    warn "  bootloader of its own, and a card written from it boots only if the"
+    warn "  device finds firmware somewhere else."
+else
+    for entry in $embed; do
+        f="${entry%:*}"; off="${entry##*:}"
+        byte=$((off * fw_step))
+        nonzero=$(sudo -n dd if="$img" bs=1 skip="$byte" count=512 status=none \
+                  | tr -d '\0' | wc -c | tr -d ' ')
+        [ "${nonzero:-0}" -gt 0 ] \
+            || die "$(basename "$f") should be at $((byte / 1024)) KiB and that byte range is
+    all zeros. pmbootstrap did not embed it, and a card written from this image
+    would not boot -- the phone would come up on its internal storage instead."
+        info "$(basename "$f") is at $((byte / 1024)) KiB ($nonzero non-zero bytes in the first 512)"
+    done
 fi
 
 # --- seeding the image -------------------------------------------------------
@@ -340,12 +331,9 @@ fi
 # the reason everything else in this file is: this is the machine that already
 # needs root to build at all.
 step "Seeding the image"
-keyfile=""
-ssid=""
-if [ "$PMO_WIFI" = yes ]; then
-    keyfile=$(mktemp)
-    chmod 600 "$keyfile"
-    sudo -n cat /etc/netplan/*.yaml 2>/dev/null | python3 -c '
+keyfile=$(mktemp)
+chmod 600 "$keyfile"
+sudo -n cat /etc/netplan/*.yaml 2>/dev/null | python3 -c '
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
 for doc in docs:
@@ -380,15 +368,10 @@ sys.exit(3)
 ' > "$keyfile" || { rm -f "$keyfile"; die "no WiFi credential found in this host's netplan.
     The image needs one: the phone has no cable, so an image without it boots
     into isolation. Build on a host that is on the WiFi the phone will use."; }
-    ssid=$(sed -n 's/^ssid=//p' "$keyfile")
-else
-    warn "no WiFi credential in this image (PMO_WIFI=no)."
-    warn "  The phone has no cable, so it will not reach the tailnet until"
-    warn "  somebody joins a network on its own screen."
-fi
+ssid=$(sed -n 's/^ssid=//p' "$keyfile")
 
 loop=$(sudo -n losetup --show -P -f "$img")
-trap 'sudo -n umount "$OUT/mnt" 2>/dev/null || true; sudo -n losetup -d "$loop" 2>/dev/null || true; [ -n "$keyfile" ] && rm -f "$keyfile"' EXIT INT TERM
+trap 'sudo -n umount "$OUT/mnt" 2>/dev/null || true; sudo -n losetup -d "$loop" 2>/dev/null || true; rm -f "$keyfile"' EXIT INT TERM
 mkdir -p "$OUT/mnt"
 # Partition 2 is the root on both phones' layouts (boot is 1). Checked below
 # rather than assumed: a wrong guess would silently seed the boot partition and
@@ -397,12 +380,10 @@ sudo -n mount "${loop}p2" "$OUT/mnt" || die "could not mount ${loop}p2"
 [ -d "$OUT/mnt/etc/NetworkManager" ] \
     || die "${loop}p2 has no /etc/NetworkManager -- that is not the rootfs"
 
-if [ -n "$keyfile" ]; then
-    # root:root 0600, or NetworkManager ignores the file outright.
-    sudo -n install -o 0 -g 0 -m 0600 "$keyfile" \
-        "$OUT/mnt/etc/NetworkManager/system-connections/wk-uplink.nmconnection"
-    info "uplink: $ssid (the PSK stayed on this host)"
-fi
+# root:root 0600, or NetworkManager ignores the file outright.
+sudo -n install -o 0 -g 0 -m 0600 "$keyfile" \
+    "$OUT/mnt/etc/NetworkManager/system-connections/wk-uplink.nmconnection"
+info "uplink: $ssid (the PSK stayed on this host)"
 
 # A service is enabled by linking it into a runlevel -- that is all
 # `rc-update add` does -- and installing avahi does not start it.
@@ -421,7 +402,7 @@ fi
 sudo -n sync
 sudo -n umount "$OUT/mnt"
 sudo -n losetup -d "$loop"
-[ -n "$keyfile" ] && rm -f "$keyfile"
+rm -f "$keyfile"
 trap - EXIT INT TERM
 rmdir "$OUT/mnt"
 

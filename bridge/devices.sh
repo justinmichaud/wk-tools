@@ -15,19 +15,24 @@
 # tree, with the same OpenRC, the same apk and the same NetworkManager, so one
 # provisioner covers both and a third device is a table entry.
 #
-# A device sets:
+# A device sets two things, and only two, because only two are read:
 #
-#   DEV_PMOS       the postmarketOS device codename -- what `pmbootstrap init`
-#                  and the release image filenames call it
-#   DEV_WIFI       the WiFi part, for the message when the uplink misbehaves.
-#                  Named because on both phones it *is* the weak component,
-#                  and knowing which one you have is the difference between
-#                  "expected, the watchdog handles it" and "something is wrong"
-#   DEV_BATTERY    the power-supply node, for the health report's battery line
-#   DEV_KILLSWITCH one line: which switches exist and where they are. The
-#                  camera stream depends on one of them being *on*, so this is
-#                  operational rather than trivia
+#   DEV_KILLSWITCH one line: which switches exist and where they are. The camera
+#                  stream depends on one of them being *on* and the uplink on
+#                  another, so this is operational rather than trivia
 #   DEV_NOTE       one line, for the listing
+#
+# It used to carry the pmOS codename, the WiFi part and the battery node as
+# well. All three were dead: the codename is image/profiles.sh's (one source of
+# truth for what gets built), the health check finds the battery by globbing
+# /sys/class/power_supply rather than being told, and the WiFi part turned out
+# to be prose rather than a value -- both phones' radios drop associations, which
+# is why the watchdog ladder is not device-specific:
+#
+#   PinePhone   RTL8723CS on SDIO, driver `8723cs`, out of tree and never loved
+#   Librem 5    RS9116 on SDIO, `rsi_sdio` over `rsi_91x`, and the reason the
+#               module-reload rung exists at all -- it wedges its firmware in a
+#               way a link bounce does not clear
 
 bridge_device_list() {
     cat <<'LIST'
@@ -37,25 +42,12 @@ LIST
 }
 
 bridge_device_load() {
-    DEV_NAME="$1"
     case "$1" in
     pinephone)
-        DEV_PMOS=pine64-pinephone
-        # RTL8723CS on SDIO, driver `8723cs`. Out of tree and never loved; it
-        # drops associations under load the same way the Librem 5's part does,
-        # which is why the escalating watchdog is not device-specific.
-        DEV_WIFI="RTL8723CS (8723cs)"
-        DEV_BATTERY=axp20x-battery
         DEV_KILLSWITCH="6 DIP switches under the back cover: modem, WiFi/BT, mic, speaker, cameras, headphone"
         DEV_NOTE="PinePhone, A64"
         ;;
     librem5)
-        DEV_PMOS=purism-librem5
-        # RS9116 on SDIO, driver `rsi_sdio` over `rsi_91x`. The module reload
-        # rung of the watchdog exists because of this part specifically: it
-        # wedges its firmware in a way a link bounce does not clear.
-        DEV_WIFI="RS9116 (rsi_sdio)"
-        DEV_BATTERY=max170xx_battery
         DEV_KILLSWITCH="3 switches on the side: WiFi/BT, cellular, camera+mic"
         DEV_NOTE="Librem 5, i.MX8M Quad"
         ;;

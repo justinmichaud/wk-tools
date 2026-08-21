@@ -260,8 +260,19 @@ cmd_setup() {
         log  "  untagged bridge works for 180 days and then goes dark -- which is"
         log  "  the exact outage this device exists to prevent."
         log  "  generate one at https://login.tailscale.com/admin/settings/keys"
-        printf 'tailscale auth key (tskey-auth-..., empty to skip): ' >&2
-        read -r authkey
+        # The environment, when there is one: this command is otherwise
+        # unscriptable, and the first provisioning run of a phone is exactly the
+        # moment somebody wants to drive it from a script (or hand it to an
+        # agent) without typing a secret into a prompt. Single-use either way --
+        # provision.sh deletes the key file the moment tailscale has consumed it,
+        # and nothing at this end writes it down.
+        if [ -n "${WK_BRIDGE_AUTHKEY:-}" ]; then
+            authkey="$WK_BRIDGE_AUTHKEY"
+            log  "  using the key in \$WK_BRIDGE_AUTHKEY"
+        else
+            printf 'tailscale auth key (tskey-auth-..., empty to skip): ' >&2
+            read -r authkey
+        fi
     fi
 
     # The key never appears on a command line, on either side: argv is world

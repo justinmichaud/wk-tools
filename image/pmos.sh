@@ -168,7 +168,7 @@ would build image $id
   build on    $host ($(pmos_ssh)), pmbootstrap $PMO_PMB_VERSION in a venv there
   packages    ${PMO_PACKAGES:-none} (on top of postmarketos-base and the UI)
   ssh key     ${WK_IMAGE_KEY:-$HOME/.ssh/id_ed25519.pub}
-  uplink      $([ "$PMO_WIFI" = yes ] && echo "$host's own WiFi credential, copied on $host (the PSK never leaves it)" || echo "none -- the phone would need a network joined on its own screen")
+  uplink      $host's own WiFi credential, copied on $host (the PSK never leaves it)
   console     user '$PMO_USER', password '$PMO_PASSWORD' (the phone's screen; ssh is key-only)
   into        $(image_dir "$id")
   writes to   a card, with 'wk sysimage write $id --disk <machine>:<device>'
@@ -325,7 +325,6 @@ pmos_spawn() {
         PMO_EXTRA_SPACE=$(sh_quote "$PMO_EXTRA_SPACE") \
         PMO_HOSTNAME=$(sh_quote "$IMG_HOSTNAME") \
         PMO_KEYFILE=$(pmos_root)/driving-key.pub \
-        PMO_WIFI=$(sh_quote "$PMO_WIFI") \
         PMO_ROOT=$(pmos_root) \
         sh $(pmos_root)/pmos-build.sh > $(pmos_log "$id") 2>&1; \
         echo \$? > $(pmos_rc "$id")" >/dev/null 2>&1 &

@@ -2045,16 +2045,16 @@ image/pmos-build.sh, and every one of them a silent failure):
   before and after
 - the build script must not `rm -rf` its own output directory — the log it is
   writing lives there, and unlinking it makes the whole failure invisible
-- **pmbootstrap does not put a bootloader in an image *file*.** It embeds
-  firmware when it writes a real disk (`--disk`/`--sdcard`) and not for
-  `--no-split` output, so the image has a valid partition table, valid
-  filesystems and nothing at sector 8. The card looks perfect, and the phone
-  boots whatever is on its eMMC — which is exactly what happened on the first
-  real attempt (2026-08-21). image/pmos-build.sh now embeds it from the two
-  facts the device declares (`deviceinfo_sd_embed_firmware`, e.g.
-  `u-boot/pine64-pinephone/u-boot-sunxi-with-spl-528.bin:8`), takes the file out
-  of the rootfs pmbootstrap just built, and reads the sector back to prove it is
-  no longer zeros
+- **`deviceinfo_sd_embed_firmware`'s offset is in units of 1024 bytes, not
+  sectors** — and pmbootstrap embeds the firmware into the image *file* itself,
+  which I got wrong twice in a row on real hardware. Sector 8 is byte 4096; the
+  firmware is at byte 8192, so "sector 8 is all zeros" is true, meaningless, and
+  exactly the wrong conclusion. Writing a second copy at 4 KiB then overlapped
+  pmbootstrap's (736 KiB of SPL from 4 KiB runs over 8 KiB), replacing a working
+  bootloader with a misaligned one: a hand-written step that turned a good image
+  into an unbootable card. The lesson is the process one — reach for a known-good
+  reference image (`recovery-pinephone`) before theorising about boot ROMs.
+  image/pmos-build.sh now only *checks*, at the byte the boot ROM reads
 
 ### Storage: the caches a phone-image build leaves, on two machines
 - [V] `wk disk` reports them: the boot images (3 GB each — on a macOS host inside
@@ -2078,6 +2078,26 @@ image/pmos-build.sh, and every one of them a silent failure):
 - [V] the image prune holds the image-store lock (rule 4). It did not: `wk gc`
       pruning "all but the newest per profile" while `wk sysimage build` imports
       is how the newest gets deleted
+
+### Getting a system onto internal storage
+- [V] `wk sysimage build recovery-pinephone` fetches Jumpdrive (the PinePhone's
+      service image) into the store, pinned by release and by content, and it is
+      an image like any other afterwards — 41 MB, verified, written by the same
+      path with the same refusals. Upstream publishes no checksum file, so the
+      pin is "what this repo verified once", which still has the property that
+      matters: it cannot change underneath us silently
+- [V] the reference settles arguments: Jumpdrive's own layout has `eGON.BT0` at
+      8 KiB and zeros at 4 KiB, which is what proved the pmOS images were right
+      all along and the hand-written embed was the bug
+- [ ] Jumpdrive boots the phone, exports its eMMC over USB, and
+      `wk sysimage write <bridge image> --disk rpi5:/dev/sdX` installs the bridge
+      onto internal storage — the end state, using the ordinary write path with
+      no new verb
+- [V] there is exactly one route. The second one (write to the idle eMMC from
+      the running card system over ssh) was written and then removed: it
+      reimplemented dd, partition growth and identity-copying to reach a disk
+      that Jumpdrive hands to `wk sysimage write` for free. One way to write a
+      disk, and it is the one with the refusals
 
 ### Needs the hardware
 - [ ] a PinePhone flashed with pmOS, answering ssh, provisioned end to end:

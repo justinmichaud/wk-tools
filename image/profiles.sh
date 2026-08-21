@@ -124,6 +124,14 @@ bridge-librem5
             the same for the Librem 5, as tailnet-bridge-moose-bmc. Its u-boot is
             embedded in the card by pmbootstrap (deviceinfo_sd_embed_firmware),
             so the card boots without touching the eMMC install
+
+recovery-pinephone
+            Jumpdrive: the PinePhone's service image, downloaded and pinned
+            rather than built. Boots from a card and exports the phone's
+            internal storage over USB, which is how its eMMC gets written --
+            and, being somebody else's known-good image, is what settles
+            whether a card that does not boot is a bad image or a phone that
+            will not boot cards
 EOF
 }
 
@@ -142,9 +150,10 @@ image_profile_load() {
     IMG_PACKAGES=""; IMG_NETWORK=""; IMG_LABEL_ROOT=""; IMG_LABEL_BOOT=""
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
     YOC_CHROMIUM=1
+    FET_URL=""; FET_SHA256=""; FET_XZ=""; FET_NOTE=""; FET_DEVICE=""
     PMO_DEVICE=""; PMO_UI=""; PMO_CHANNEL=""; PMO_PMB_VERSION=""
     PMO_USER=""; PMO_PASSWORD=""; PMO_PACKAGES=""; PMO_EXTRA_SPACE=""
-    PMO_WIFI=""; PMO_BRIDGE=""; PMO_BUILD_HOST=""
+    PMO_BRIDGE=""; PMO_BUILD_HOST=""
 
     case "$1" in
     # The old names, refused by name: every profile was renamed on 2026-08-20
@@ -253,6 +262,27 @@ image_profile_load() {
         IMG_LABEL_ROOT=wk-image-root
         IMG_LABEL_BOOT=WK-IMG-BOOT
         ;;
+    # --- fetch --------------------------------------------------------------
+    #
+    # Not built here, and that is the point: Jumpdrive is the PinePhone
+    # community's service image, and the reason it is in the store at all is
+    # that it turns the phone's internal storage into a disk this repo's
+    # ordinary write path can reach. Pinned by release *and* by content.
+    recovery-pinephone)
+        IMG_BUILDER=fetch
+        IMG_ARCH=aarch64
+        IMG_MACHINE=""
+        FET_DEVICE=pine64-pinephone
+        FET_URL=https://github.com/dreemurrs-embedded/Jumpdrive/releases/download/0.8/pine64-pinephone.img.xz
+        # Recorded from the artifact this repo actually fetched (2026-08-21).
+        # Upstream publishes no checksum file, so the pin is "what we verified
+        # once" rather than "what they said" -- which is still the property that
+        # matters: it cannot change underneath us without this failing.
+        FET_SHA256=a8c9e0252e070e1737c14ca7c8cac515d3196148ded1af98c2bf8e9350d970be
+        FET_XZ=1
+        FET_NOTE="Jumpdrive 0.8: boots from a card and exports the phone's eMMC over USB"
+        ;;
+
     # --- pmos ---------------------------------------------------------------
     #
     # A phone, and therefore not a machine. `IMG_MACHINE` stays empty on
@@ -315,12 +345,11 @@ image_profile_load() {
         PMO_PACKAGES="openssh,nftables,dnsmasq,chrony,tailscale,jq,iw,ethtool,logrotate,zram-init,v4l-utils,networkmanager,avahi"
         PMO_EXTRA_SPACE=512
 
-        # The uplink credential, copied from the build host's own connection on
-        # the build host. A phone has no cable: an image without WiFi comes up
-        # in isolation, and `wk bridge setup` has nothing to talk to. So the
-        # build host has to be a machine on the WiFi the phone will use --
-        # which the default one is.
-        PMO_WIFI=yes
+        # The build host, which has to be a machine on the WiFi the phone will
+        # use: the uplink credential is copied from its own connection, on it,
+        # so the PSK never travels. A phone has no cable, so this is not
+        # optional -- an image without a credential comes up in isolation and
+        # `wk bridge setup` has nothing to talk to.
         PMO_BUILD_HOST=rpi5
 
         # ...and the two lines that differ. Nested rather than two branches of

@@ -34,6 +34,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/image/yocto.sh"
 . "$WK_ROOT/image/pmos.sh"
+. "$WK_ROOT/image/fetch.sh"
 
 # Both of these act on physical machines: a boot device, a firmware register, a
 # disk image measured in gigabytes. None of that exists in a workspace, and the
@@ -665,6 +666,13 @@ cmd_build() {
     # path: which mechanism makes an image is a property of the image, and
     # nothing below this line applies -- there is no distro base to download,
     # no cloud-init seed to write, and no workspace involved.
+    # Downloaded rather than built: nothing below applies, and the store is the
+    # whole point (verification, the write path, gc).
+    if [ "${IMG_BUILDER:-distro}" = fetch ]; then
+        fetch_build "$profile" "$@"
+        return $?
+    fi
+
     if [ "${IMG_BUILDER:-distro}" = pmos ]; then
         pmos_build "$profile" "$@"
         return $?
