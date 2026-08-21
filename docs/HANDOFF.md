@@ -41,6 +41,27 @@ replaces at the start of every build. Nothing in the tooling prevents it today.
 Newest first. Each entry is a pointer: the detail, the defects and the
 verification live in the named handoff and in `docs/TESTING.md`, not here.
 
+- **2026-08-21, Linux — cattle, not pets** (`docs/HANDOFF-cattle.md`, the
+  rule and the per-machine ledger): the fleet registry became config —
+  `boot/machines/<name>.conf`, each opening with its device's from-nothing
+  recipe, with the `MACH_OS` field the vocabulary asked for (`wk boot mbp`
+  from Linux now refuses by the registry's word instead of probing the wrong
+  computer) — closing the vocabulary lifecycle's registry item; `wk doctor`
+  gained the machine-local-state section (everything a rebuild cannot get
+  from this repo, declared as regenerable / re-authable / backed-up); both
+  are in `wk selftest --quick`. The remaining gaps are named in the ledger:
+  `flash --reader`, `provision`/`unprovision`, the settings audits, a backup
+  story for bench results, the BMC's own config, and the home layer.
+- **2026-08-21, Linux — netboot removed outright, and the fleet made visible.**
+  The removal is recorded under Fixed/resolved below. Built with it:
+  `wk status` ends with the fleet block (per device: role, mode, the media wk
+  owns and what is on it — the rpi4's stick and its system, armed/disarmed;
+  the Mac's bench volume attached-or-missing — parallel read-only probes, one
+  subshell per machine, honest "unknown from here" for machines only a Mac
+  can probe), fed by new `b_media`/`b_probeable` driver hooks; and
+  `wk help hardware`, the fleet's physical shape in prose. The rpi3 gained
+  its hands-on local-SD stub driver, and `wk pi boot-order` shrank to
+  `usb-first|local`.
 - **2026-08-20, Linux — the vocabulary rename landed end to end**
   (`docs/HANDOFF-vocabulary.md`, now the record of what the words mean).
   `wk image` → `wk sysimage`; `wk boot`/`wk serve` take `--system`; profiles
@@ -105,8 +126,9 @@ verification live in the named handoff and in `docs/TESTING.md`, not here.
   its "state" section is the authority): `wk sysimage`, `wk boot` with five
   drivers, `wk serve`, `wk pi boot-order`; the rpi5 proven on hardware
   (arm → bench system reachable in 53 s → claim → hand back), the rpi4 lane
-  rescoped 2026-08-20 to its USB stick with netboot kept for the profiling
-  lane.
+  rescoped 2026-08-20 to its USB stick. (Netboot was kept for the profiling
+  lane at the time; that idea fell with the netboot root on 2026-08-21 —
+  see the ledger entry above.)
 
 ---
 
@@ -125,8 +147,12 @@ the rpi4 answers on the LAN and its EEPROM has been read and written
 machine this lane runs on.
 
   N. **Boot a system — the shared substrate** — `docs/HANDOFF-netboot.md`.
-     Substrate built and proven (see the ledger). Open there: the netboot
-     *root* (NFS/RAM phases), moose's own bench mode, and the rpi3.
+     Substrate built and proven (see the ledger). Netboot is gone outright
+     (2026-08-21): every bench lane boots local media, `wk serve` and its
+     daemon are removed (the boot-file resolver they carried now guards
+     `wk sysimage write`), and the rpi3's lane is its SD card (hands-on stub
+     driver until provisioned). Open there: moose's bench mode (BMC virtual
+     media, the one route left) and provisioning the rpi3.
   1. **Benchmarking on the bench systems** — `docs/HANDOFF-benchmarking.md`.
      `bench_host=image` runs driven remotely; the image runner still has to
      record `kernel_provenance`, `kernel_arch`, `profile` (stock/oc) and
@@ -170,9 +196,12 @@ machine this lane runs on.
   12. **PGO profile build support** — `docs/HANDOFF-original-helpers.md`.
   13. **Git and GitHub helpers** — `docs/HANDOFF-git-tools.md`: `wk pr` is
       restored; `git-sync-fork` and the small helpers remain.
-  14. **BMC recovery/streaming** — `docs/HANDOFF-bmc.md`, plus the Android
-      scoping in `docs/HANDOFF-bmc-2.md`. Feed the new remote-access surface
-      into steps 16/17.
+  14. **Tailnet bridges — hardware half** — `docs/HANDOFF-bmc.md`. The
+      software shipped 2026-08-20 (`wk bridge`, `bridge/`, camera streaming,
+      the watchdogs; TESTING.md §8); open is flashing the PinePhone
+      (`tailnet-bridge-generic`), re-flashing the librem5
+      (`tailnet-bridge-moose-bmc`), and `docs/HANDOFF-bmc-battery.md`. Feed
+      the new remote-access surface into steps 16/17.
   15. **Settings audit — Linux half** — `docs/HANDOFF-settings-audit.md`.
   16. **Tailscale ACL audit** — `docs/HANDOFF-tailscale.md`. Item 8 (MBP on
       public wifi) is lane B's final step, run alongside this.
@@ -214,9 +243,13 @@ machine this lane runs on.
 
 ## Either machine / process items
 
-Two standing rules, not tasks, applied inline as work lands: every task above
-gets a line item in `docs/TESTING.md` as it is picked up; and tools stranded
-by a workflow change are removed in the change that strands them.
+Three standing rules, not tasks, applied inline as work lands: every task
+above gets a line item in `docs/TESTING.md` as it is picked up; tools
+stranded by a workflow change are removed in the change that strands them;
+and **cattle, not pets** (`docs/HANDOFF-cattle.md`) — every machine is
+reproducible from this repo plus declared restorables, new machine-local
+state goes into `wk doctor`'s machine-local section or it is a bug, and new
+devices arrive as config, never code.
 
 - **`docs/HANDOFF-workspace-state.md`** — "The rules" at its top govern
   everything that creates or gates on workspaces; read them first. Phases 1
@@ -295,6 +328,16 @@ execute all of them — see the doc for the full list and what "done" means.
 
 ## Fixed / resolved since the individual handoffs were written
 
+- **Netboot is removed, 2026-08-21, by user decision, in two same-day steps**
+  — first the root (no device will ever netboot for a run: every bench lane
+  boots local media), then `wk serve` itself: dead code is worse than a
+  re-implementation if the need ever returns. Gone: `cmd/serve`,
+  `boot/wk-tftpd.py` and its root-owned port-69 helper (`./setup` removes
+  the installed copy and its sudoers grant), `boot/pi-netboot.sh`, the
+  netboot EEPROM orders, the NFS/RAM root phases, the serving election, and
+  moose's UEFI HTTP/PXE route. Kept: the boot-file resolver, moved into
+  `boot/check-boot-files.py`, where `wk sysimage write` runs it before any
+  disk is touched. `docs/HANDOFF-netboot.md` carries the record.
 - **The generalization design is decided, 2026-08-20, by user decision** —
   `docs/HANDOFF-generalizing.md` went from brainstorm to a researched,
   decided proposal in one pass: the three-layer decomposition

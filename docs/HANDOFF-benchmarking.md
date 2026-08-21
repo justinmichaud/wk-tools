@@ -106,7 +106,7 @@ evidence, and what stands is:
 - The overclock question is answered where the firmware boundary put it: the
   EEPROM is shared by both modes and is never written, so an `oc` profile sets
   `arm_freq`/`over_voltage` in the *image's* `config.txt`
-  (`image/rpi5-perf/config.txt.append` records the rule; no `oc` profile
+  (`image/perf-linux-rpi5/config.txt.append` records the rule; no `oc` profile
   exists yet).
 
 ### rpi4 — netboot is the wrong lane for this, on the hardware's own evidence
@@ -123,8 +123,8 @@ A second stage that cannot then find its kernel *halts* — no retry, no
 fall-through to the SD card, nothing reachable over the wire. That is not a
 theoretical tail: it happened twice on 2026-08-20 and cost two power cycles, the
 first from a resolver bug and the second from a stale copy of the fixed
-resolver. Both causes are now guarded (`boot/check-boot-files.py`,
-`check_helper_current`), but the *class* is not closable: a server that dies
+resolver. Both causes were guarded and the whole mechanism has since been
+removed, but the *class* was never closable: a server that dies
 mid-transfer, or a dropped packet at the wrong moment, lands in the same place.
 An unattended lane cannot have a state whose only exit is a hand on the power
 supply.
@@ -134,14 +134,14 @@ panics, and these images carry `panic=10`, so the board reboots; if the boot
 medium is not bootable at all the firmware moves to the next `BOOT_ORDER` entry
 and lands on the SD card, reachable. Both exits are automatic.
 
-**Not distorting the numbers rules out the network root.** "Storage: what the
-system is" in `docs/HANDOFF-netboot.md` already phases this correctly — a
-network root for *profiling*, a RAM root for *benchmarking* — and the reason is
+**Not distorting the numbers rules out the network root.** The reason is
 exactly this constraint: an NFS root does I/O, over the same interface, during
-the measurement.
+the measurement. (Both network-root phases were later dropped outright —
+2026-08-21, "Storage" in `docs/HANDOFF-netboot.md` — so this is now the
+fleet-wide rule, not one board's exception.)
 
-But the RAM root is not available here either. It is realistic on the rpi5 (16
-GB) and on moose (115 GB free); **the rpi4 has 2 GB**, and a browser benchmark
+And the RAM root was never available here anyway. It is realistic on the rpi5 (16
+GB) and on moose (115 GB free); **the rpi4 has 4 GB**, and a browser benchmark
 is the workload. The rpi3, at 931 MB, already needs swap to finish Speedometer.
 A squashfs held in RAM plus an overlay would leave something like a gigabyte for
 the thing being measured, and a run that swaps is a run whose number means
@@ -173,28 +173,27 @@ the same day, below):
   away on boot, so any later reboot falls through to the SD card. That is the
   same "reverts by itself unless claimed" property `wk boot <machine> --keep`
   relies on for the rpi5, reached without the Pi 5's `set_reboot_order` — which
-  is the primitive `boot/pi-netboot.sh` correctly says the Pi 4 does not have.
-  It wants a driver of its own (`boot/pi-usb.sh`); `pi-netboot.sh` stays where
-  it is, for the profiling lane.
+  is the primitive the Pi 4 does not have. It got a driver of its own
+  (`boot/pi-usb.sh`); the netboot driver it replaced is gone (2026-08-21,
+  with the netboot root).
 
-**What netboot is still for.** Nothing above wastes it. Profiling wants a root
-that is a directory on the server, editable in place, and does not care about
-storage noise; that is phase 1 of "Storage: what the system is" and netboot is
-how it gets there. The two lanes want opposite things and should stop sharing a
-mechanism.
+**Netboot is gone — 2026-08-21.** First the root fell (the profiling-root
+idea included: the local bench systems already give profiling everything it
+actually needs), then the transfer-test remnant and the daemon with it. The
+boot-file resolver that era produced guards `wk sysimage write` now.
 
 **Already landed toward this, 2026-08-20:** `wk sysimage write` refuses an
 image whose boot partition cannot get the firmware as far as a kernel
 (`image_check_boot_files`, `lib/image.sh`), checked from the image file before
 anything is written. That is the pre-flight that makes an unattended local boot
-safe, and it is the same check `wk serve` runs — firmware asks a disk the same
-questions it asks a TFTP server.
+safe — it began life inside the removed `wk serve`, because firmware asks a
+disk the same questions it asked a TFTP server.
 
 **Built 2026-08-20, all of it offline — the board was halted at the time and
 none of this has met hardware yet:**
 
-- **`wk pi boot-order <host> <order>`**, with `netboot-first`, `netboot-last`,
-  `usb-first` and `local`. One writer still: `netboot-enable` is now a spelling
+- **`wk pi boot-order <host> <order>`**, with `usb-first` and `local` (the
+  netboot orders are refused by name). One writer still: it is a spelling
   of the same function rather than a second implementation, because BOOT_ORDER
   is firmware state shared by everything the board can boot, and two commands
   that can both write it is two places for a wrong value to come from. The orders are derived from
@@ -210,7 +209,7 @@ none of this has met hardware yet:**
   image parks its own boot partition before it does anything else and every
   later reboot — clean, panic, watchdog or power cut — lands on the SD card.
 - **`force_turbo=1` with `arm_freq=arm_freq_min=1500` and `arm_boost=0`**, in
-  `image/rpi4-perf/config.txt.append`. Pinned rather than fast: 1800 needs the
+  `image/perf-linux-rpi4/config.txt.append`. Pinned rather than fast: 1800 needs the
   boost clock, and a Pi 4 that throttles partway through a run has produced two
   measurements and reported one.
 - **`wk-no-swap.service`**, which is a guard and not a change — the Ubuntu base
@@ -243,9 +242,9 @@ Four facts corrected against hardware, and two of them matter beyond this board:
 
 - **The rpi4 is a 4 GB Pi 4B Rev 1.5, not 2 GB.** `boot/machines.sh` said 2 GB
   and this file argued from it. The USB-local decision does not move -- it rests
-  on netboot's halt, which is independent of RAM -- but the RAM-root option is
-  more plausible than it was written up as, and should be re-costed if the
-  profiling lane ever wants it.
+  on netboot's halt, which is independent of RAM. (The RAM-root option this
+  correction made more plausible was dropped outright on 2026-08-21, with the
+  rest of the netboot root.)
 - **`force_turbo` works**: `measure_clock arm` reads 1500345728 at idle, and
   `get_throttled` was `0x0` at 48.7 C through the run.
 - **The perf sysctls were never taking effect, and this affects the rpi5 image
@@ -353,13 +352,8 @@ that thermally degraded is currently reported as a run.
 
 ### moose — UEFI network boot, or the BMC's virtual media
 
-An Ampere workstation with a BMC has two routes, and they differ in what has to
-be true of the network:
-
-- **UEFI HTTP/PXE boot**, with the image as a RAM root so nothing on the NVMe
-  is touched or even mounted. RAM is ample here (115 GB free measured during
-  this session), so a full image in RAM is realistic and removes every question
-  about disk state affecting a benchmark.
+An Ampere workstation with a BMC had two candidate routes; the UEFI HTTP/PXE
+one (a RAM root) fell with the netboot root (2026-08-21), leaving:
 - **BMC virtual media** — mount the image over KVM-over-IP and boot it. Already
   named as a candidate in `docs/HANDOFF-bmc.md` ("the BMC image-boot option for
   moose"). Slower to load, but it needs nothing from the network's DHCP and it
@@ -592,8 +586,8 @@ what the MBP boots (a second internal APFS volume, 2026-08-19 —
 
 Still open:
 
-- **Media for moose.** RAM root over UEFI HTTP boot, or BMC virtual media —
-  neither attempted; see the moose section above.
+- **Media for moose.** BMC virtual media, the one route left (the RAM root is
+  dropped) — unattempted; see the moose section above.
 - **Where the runner lives for the Pis.** Probably the machine that serves or
   stages the image, but nothing is built.
 - **Nothing runs `wk quiesce` on the benchmark volume for you**, and nothing

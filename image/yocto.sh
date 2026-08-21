@@ -5,9 +5,9 @@
 # What comes out of a Yocto build is the same *kind* of thing that comes out of
 # the distro builder: one partitioned disk image for one machine, whose
 # identity has to be recorded and whose bytes have to reach a boot device. Every
-# consumer downstream of that -- `wk sysimage ls`, `wk sysimage show`, `wk sysimage
-# flash`, the SD-card path in docs/HANDOFF-sdcard.md, and (once it can serve a
-# network root) `wk serve` -- is about a disk image and has nothing to say about
+# consumer downstream of that -- `wk sysimage ls`, `wk sysimage show`,
+# `wk sysimage write`, the SD-card path in docs/HANDOFF-sdcard.md -- is about
+# a disk image and has nothing to say about
 # how it was made. Giving Yocto its own command would have meant a second image
 # store, a second manifest format and a second flashing path, and
 # docs/HANDOFF-yocto.md asks for the opposite in as many words: consume the

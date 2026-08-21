@@ -551,14 +551,12 @@ reached through a ProxyJump), driven from the macOS host.
       (or vm, or local) is refused, naming a plain `wk sync` as the thing that
       refreshes this machine's own store
 - [V] `wk build` runs niced 19 + ionice, job count from **that machine's**
-      cores, load and free memory, capped by `WK_REMOTE_MAX_JOBS`
-      (80 cores / load 1 / 248 GB → -j16); jsc-release in 8m47s
+      cores, load and free memory (80 cores / load 1 / 248 GB → -j16 when
+      measured; the configured ceiling was later removed); jsc-release in 8m47s
 - [V] `wk build --dry-run` resolves remote paths: checkout, build dir, tools,
       and a ccache under the remote root rather than the container's /ccache
-- [V] two builds serialise on the flock (a second `flock -w 2` is refused
-      while a build runs)
-- [V] the build log and status are written on the driving side; `wk status`
-      and `wk logs` read them there
+- [V] two builds serialise on the build lock (`lib/lockrun.sh` on the machine
+      that builds; a second taker is refused while a build runs)
 - [V] `wk status` with no argument includes remote workspaces on a macOS host
       (it used to forward into the podman VM and report containers only —
       which silently hid the `vm` target too)
@@ -617,7 +615,8 @@ reached through a ProxyJump), driven from the macOS host.
 - [V] `wk remote setup <target>` probes and reports the machine, and offers to
       write the target conf when there is none
 - [V] nothing in the remote path uses sudo; prerequisites are checked, and a
-      missing `flock` is fatal while a missing zsh or ccache is a warning
+      missing `git` is fatal while a missing zsh or ccache is a warning
+      (`flock` was a prerequisite until `lib/lockrun.sh` replaced it)
 - [V] zsh: interactive bash sessions move to it through `shell/bashrc`, with no
       `chsh` and no root
 - [ ] a machine with no zsh warns and stays in bash — written, and now with no
@@ -692,7 +691,8 @@ reached through a ProxyJump), driven from the macOS host.
       WiFi UUIDs, last-folder paths, timestamps)
 - [ ] `wk skills` status/diff/pull/push; pull refuses over uncommitted repo edits
 - [ ] `wk key register` / `check`
-- [ ] `wk pi setup rpi5`, and a workspace can reach the Pi
+- [ ] `wk pi setup rpi4`, and a workspace can reach the Pi (the rpi5 is a
+      workstation and never goes through `wk pi setup`)
 - [ ] `wk enter <ws>` lands in a shell; `wk enter <ws> <cmd>` runs the command
 - [ ] `wk logs <ws> -f` follows a live build
 - [ ] `wk stop --keep-vm` leaves the podman machine running
@@ -1185,12 +1185,12 @@ command that asked for it.
       conflict, not listed twice as if normal
 - [ ] two workstations reaching one build box see one state; a disagreement
       is reported naming both views
-- [ ] a machine armed to reboot into a bench image shows the transition on
-      its status line (image id, who armed it, when); after it reboots, the
-      walk reports it in its new role or as off-ssh under the image driver
-- [ ] an armed machine still in its old role long after arming, or back in
-      its old role with the arming record uncleared, is flagged as desync
-- [ ] a mutating command against a machine armed to leave its role warns or
+- [ ] a machine armed to reboot into a bench system shows the transition on
+      its status line (system id, who armed it, when); after it reboots, the
+      walk reports its new mode or off-ssh under the bench channel
+- [ ] an armed machine still in host mode long after arming, or back in host
+      mode with the arming record uncleared, is flagged as desync
+- [ ] a mutating command against a machine armed to leave host mode warns or
       refuses — no build starts on a box about to reboot out from under it
 - [ ] the exit code aggregates the worst state found anywhere in the fleet
 
@@ -1318,8 +1318,10 @@ the reader (which must never mistake intent for evidence).
       own allocation subtracted twice)
 
 ### The rehearsal: a guest standing in for bench mode (`benchvm`)
-- [V] `wk boot benchvm --status` on a machine with no such guest says so —
-      "guest=wk-bench (absent)" — instead of exiting silently (2026-08-20: it
+- [V] `wk boot benchvm --status` on a Mac with no such guest says so —
+      "guest=wk-bench (absent)" — instead of exiting silently; from a host
+      the registry says cannot drive it (`os=macos`), the answer is the loud
+      os refusal instead (2026-08-20: it
       did exit silently, because the driver's probes ran under `set -o
       pipefail` and a guest that is merely off is a normal state)
 - [V] the arming model reaches the "next step" text: a guest is *started*, not
@@ -1471,6 +1473,7 @@ the reader (which must never mistake intent for evidence).
 - [V] confirmed on the card independently of the log — `mmcblk0p1 130M vfat
       boot`, `mmcblk0p2 7.3G ext4 root`, grown from the image's 3.8 G
 - [ ] the card actually boots an rpi4 (needs the card moved to the board)
+- [ ] the confirmation prompt appears and "no" leaves the device untouched
 - [V] the `bmaptool` path: *mapped 566163 of 1019904 blocks (2.2 GiB of 3.9
       GiB, 55.5%)*, 547 MB sent instead of 4 GB, each block checksummed against
       the map. Verified on the card afterwards — `boot`/`root` labels, the
@@ -1492,7 +1495,7 @@ the reader (which must never mistake intent for evidence).
 
 ### The image must be able to boot from what it is written to
 
-- [V] `wk sysimage flash rpi4` with the yocto image is **refused**: the image says
+- [V] `wk sysimage write` of the yocto image to the rpi4 is **refused**: it says
       `root=/dev/mmcblk0p2` and `MACH_DEVICE` is `/dev/sda`, so the firmware
       would load the kernel and the kernel would find no root. The message says
       exactly that, and says it in the dry run too
@@ -1502,18 +1505,6 @@ the reader (which must never mistake intent for evidence).
       reader is routinely booted in another, so `/dev/mmcblk0` on the writer and
       on the booter are two facts that merely share a spelling
 - [V] `WK_ANY_ROOT=1` overrides it, and says the write proves the transfer only
-
-### Flashing
-
-- [V] `wk sysimage flash <machine> --dry-run` writes nothing
-- [V] it refuses a device with mounted partitions until it has agreement to
-      erase, then unmounts them itself rather than sending the user to a
-      hand-typed `umount`
-- [ ] it refuses a device whose transport is not usb, and the machine's own
-      root device
-- [V] the write is verified by reading the same number of bytes back off the
-      device and comparing hashes (4.6 GB, ~7 min over WiFi with zstd)
-- [ ] the prompt appears and "no" leaves the device untouched
 
 ### Arming and returning — the one-shot
 
@@ -1538,8 +1529,8 @@ the reader (which must never mistake intent for evidence).
 
 - [V] `wk boot <machine> --status` starts nothing, writes nothing and repairs
       nothing (rule 6)
-- [V] it reports the role from the machine's own identity marker, and the
-      firmware's persistent boot order alongside it
+- [V] it reports the mode from the machine's own identity marker (the role
+      comes from config), and the firmware's persistent boot order alongside it
 - [ ] armed and not yet rebooted: reported as ARMED, exit 2, with the warning
       that the next reboot leaves this role
 - [V] armed, rebooted, and back in host mode: the record is reported as
@@ -1578,46 +1569,32 @@ the reader (which must never mistake intent for evidence).
 - [V] the persistent journal survives a boot, and is readable off the stick
       from the other role with `journalctl -D` — which is how three failed
       boots were finally explained
-- [ ] first boot is slow (~17 min) because `packages:` installs over WiFi
-      before `runcmd` applies the sysctls. Anything not needing a per-machine
-      secret should move into the rootfs at build time, where systemd applies
-      it with no cloud-init involved.
+- [ ] first boot is slow (~17 min) because `packages:` installs over WiFi.
+      (The sysctls already moved into the rootfs at build time; anything else
+      not needing a per-machine secret should follow.)
 
-### Serving — `wk serve`
+### The boot-file check — what `wk sysimage write` refuses
 
-- [V] `wk serve --dry-run` resolves image, address, ports and helper state and
-      starts nothing
-- [V] `wk serve` fills its TFTP root from an image already in the store, with
-      mtools at a byte offset — no mount, no privilege, and what a netboot
-      client gets is the same artifact `wk sysimage write` puts on a stick
-- [V] a second machine on the LAN fetches boot files over TFTP: `config.txt`
-      (2699 B) and a 14.7 MB kernel, byte-identical, ~23 s over WiFi at a
-      firmware-realistic 1468-byte block size
-- [V] a request under a serial-number directory that does not exist falls back
-      to the root, and the log says which happened — the board's serial is not
-      knowable before it first asks, and this is the part of Pi netboot most
-      often got wrong from a machine with no console
-- [V] that fallback **keeps the rest of the path**: `<serial>/current/vmlinuz`
-      is retried as `current/vmlinuz`, not as `vmlinuz`. Stripping to the
-      basename made the kernel of an `os_prefix=` image unreachable and halted
-      the rpi4 twice on 2026-08-20
-- [V] the fallback never answers with a *different* file: `<serial>/current/
-      overlays/README` must not be served the boot partition's own `README`
-- [V] the fallback does not fire when the leading directory really exists, so a
-      populated serial directory is used as-is
-- [V] `wk serve` refuses when the boot files a client will ask for are not all
-      reachable — serving half a tree spends the client's `BOOT_ORDER` on the
-      network and then halts it, which costs a trip to the device where serving
-      nothing costs nothing
-- [V] that check resolves through the server that will actually run, not
-      through the copy in the checkout
-- [V] `wk serve` refuses when the installed privileged helper differs from
-      `boot/wk-tftpd.py` — the root-owned copy is only refreshed by `./setup`,
-      and serving a stale one is how a fixed bug reaches a board anyway
-- [V] the same question is asked of a **disk**: `wk sysimage write` refuses an
-      image whose boot partition cannot get the firmware as far as a kernel,
-      before writing anything — firmware that finds no kernel halts, where a
-      kernel that finds no root reboots
+(`wk serve` and its TFTP daemon were removed 2026-08-21 — netboot is gone,
+every bench lane boots local media — and the boot-file resolver they carried
+moved into `boot/check-boot-files.py`, where `wk sysimage write` runs it
+before anything touches a disk. The serving-era lines this section held are
+retired with the daemon; the fleet-integration and disk-side lines below are
+the live ones.)
+
+- [V] `wk sysimage write` refuses an image whose boot partition cannot get the
+      firmware as far as a kernel, before writing anything — firmware that
+      finds no kernel halts, where a kernel that finds no root reboots. The
+      check asks a resolver that models the firmware's name rules, not
+      os.path.exists: the files that halted the rpi4 twice on 2026-08-20 were
+      all present in the tree and unreachable through the names asked for
+- [V] the check refuses when the boot files the firmware will ask for are not
+      all reachable, and names the missing ones
+- [V] a `config.txt` that names no `kernel=` and no `arm_64bit=` is accepted
+      when any firmware-default kernel is present — the Dev@CI Yocto image is
+      that shape and boots the rpi4 daily
+- [V] path traversal is refused (`deadbeef/../../etc/passwd` resolves to
+      nothing)
 - [V] the rpi4's arm/disarm is one byte of the MBR at offset 450, it round-trips
       0x0c <-> 0x83, and it neither truncates the device nor moves anything
       else in the sector — a stick with a FAT boot partition and no
@@ -1637,45 +1614,8 @@ the reader (which must never mistake intent for evidence).
       unquoted heredoc, so prose in it is shell input: three `systemd-run`
       invocations per build ran on the workstation and left holes where the
       words had been
-- [V] a `config.txt` that names no `kernel=` and no `arm_64bit=` is accepted
-      when any firmware-default kernel is present — the Dev@CI Yocto image is
-      that shape and boots the rpi4 daily
-- [V] path traversal is refused, including via a serial-directory prefix
-      (`deadbeef/../../etc/passwd`)
-- [V] a write request is refused explicitly rather than ignored — the server
-      has no WRQ handler at all
-- [V] `wk serve --status` reports from evidence: a pid that is alive **and**
-      still the process we started, never the status file alone
-- [V] `wk serve --stop` stops both daemons and forgets the record
-- [V] without the privileged helper it degrades to port 6969 and says plainly
-      that no firmware can reach it — a Pi's TFTP client speaks to port 69 and
-      cannot be told otherwise
-- [ ] with the helper installed, port 69 binds, and `drop_privileges()` has
-      become the invoking user before any path is resolved (`./setup` once)
-- [ ] `wk serve` refuses while a build or a bench run is live on the same host
-- [V] serving an image whose `root=` is a local label/UUID is **refused**, with
-      the local path named instead — a netbooted client would otherwise fetch
-      the kernel, find no root, and (with `panic=10` and network first in
-      `BOOT_ORDER`) loop headlessly
-- [ ] a netboot root that actually works: NFS, or an initramfs pulling a
-      squashfs into RAM. **Not built.** Until it is, netboot proves the
-      transfer and nothing further.
-- [ ] the service alias IP is claimed for the duration and released after, so
-      the fixed `TFTP_IP` in a client's firmware can point at whichever machine
-      is serving
-
-### Why the server is not a container
-
-- [V] rootless podman cannot publish port 69 (`rootlessport cannot expose
-      privileged port 69`), and cannot bind it with `--network host
-      --cap-add NET_BIND_SERVICE` either — the capability lands in the
-      container's user namespace, the bind is checked against the initial one
-- [V] podman's own suggested workaround, `ip_unprivileged_port_start=69`, is a
-      **broader** grant than the helper it would replace: every local process
-      could then bind 69–1023 permanently, including 80 and 443
-- [ ] the same on macOS, where the podman machine's user-mode NAT plus TFTP's
-      ephemeral data port make it worse again — untested, and not worth
-      testing unless someone proposes it a second time
+- [V] a netboot root is deliberately never built (decided 2026-08-21, and the
+      daemon went with it): every bench lane boots local media
 
 ### Building a Yocto system — `wk sysimage build downstream-yocto-wpe-2.48-rpi4`
 
@@ -1848,12 +1788,11 @@ egress list that cannot be "every upstream in six layers".
 - [V] `wk sysimage build <profile> --stop` stops a detached build, killing bitbake
       as well as the wrapper, with SIGTERM rather than SIGKILL so bitbake closes
       its own state and the sstate cache stays resumable
-- [ ] a killed build leaves no lock behind. **Fails today**: the atomic-mkdir
-      lock writes the holder's pid *inside* the directory it has just created,
-      and the next taker reclaims only when it can read that pid — so a
-      directory with no pid file is indistinguishable from a live holder, and
-      `wk rm` waited out its whole timeout on one. `lib/common.sh`, reported in
-      `docs/HANDOFF-yocto.md` rather than fixed (other lane's file this week)
+- [V] a killed build leaves no reclaimable-forever lock behind: the symlink
+      lock (2026-08-20) writes the holder *with* the lock, so a lock naming
+      nobody cannot exist and a dead holder's lock is broken by compare-and-
+      swap — the atomic-mkdir failure this line used to record (`wk rm`
+      waiting out its whole timeout on an empty lock directory) is closed
 - [V] editing `container/yocto/Containerfile` rebuilds the workspace image. The
       tag carries a digest of the spec, because keying it on the base tag alone
       meant `podman image exists` said yes, the edit never reached any
@@ -1926,25 +1865,42 @@ egress list that cannot be "every upstream in six layers".
       newest is kept unconditionally — unlike a base snapshot there is no pin
       to consult, because an image is written to a device and the device holds
       no reference back
-- [V] the TFTP root is emptied when the image its stamp names is gone
+- [V] anything under the retired serve/ tree is reclaimed whole (`wk serve`
+      is gone, 2026-08-21)
 - [V] `cache/images` (the pinned distro bases, 1.5 GB) is reported as kept
       rather than pruned — it is re-downloadable but slow, and growth should be
       visible rather than silent
 
-### The EEPROM's only writer — `wk pi netboot-enable`
+### The registry: cattle, not pets
+
+- [V] every machine is a conf under boot/machines/ (2026-08-21) that loads
+      standalone and carries a driver that exists, a role and an os the
+      vocabulary knows, a profile and a note — and `machine_list` and the
+      directory are the same set, so a conf cannot exist invisibly. In
+      `wk selftest --quick`.
+- [V] each conf opens with its device's from-nothing recipe, so the file that
+      defines a machine says how to reproduce it (hand-checked; the ledger is
+      `docs/HANDOFF-cattle.md`)
+- [V] a machine whose `os=` does not match this host is refused by `wk boot`
+      with the conf named — probing a MACH_LOCAL machine from the wrong host
+      used to answer confidently about the wrong computer
+- [V] `wk doctor` ends its config half with the machine-local-state section:
+      everything a rebuild cannot get from this repo, each entry declared as
+      regenerable, re-authable, or backed-up, with how to get it back
+
+### The EEPROM's only writer — `wk pi boot-order`
 
 - [V] `--dry-run` prints a unified diff of the firmware configuration and
       writes nothing
-- [V] network is added as the **last** entry before the restart nibble
-      (`0xf461` → `0xf2461`), never the first: `BOOT_ORDER` is shared by both
-      of a machine's roles, and a Pi that netboots by default is a Pi that
-      stops being a workstation the moment a server answers
-- [V] the transform is idempotent and reversible (`--revert` removes the
-      network nibble and the netboot keys)
+- [V] the network nibble and the netboot-era keys (`TFTP_IP`, `CLIENT_IP`,
+      `SUBNET`, `GATEWAY`) come out of every order unconditionally — netboot
+      is gone (2026-08-21) and a board still trying a server that does not
+      exist is a stale fact that reads as a live one
+- [V] the transform is idempotent and reversible (`--revert` is `local`)
+- [V] the netboot orders and `wk pi netboot-enable` are refused by name, each
+      pointing at what replaced them
 - [ ] an actual write, confirmed, applied, and read back on a board that is
       not this session's workstation
-- [ ] `TFTP_PREFIX` is never written — the tftpd's root fallback removes the
-      need, and it is the one value nobody can know before first contact
 
 ### Still owed here
 
@@ -1954,25 +1910,34 @@ egress list that cannot be "every upstream in six layers".
       an `awk '{print $2}'` whose `$2` did not survive three shells on the way
       through ssh. A remote one-liner that reports a *number* is worth
       checking against the source, because a wrong one does not look wrong.
-- [ ] `wk status` shows the armed transition on the machine's line, and
-      mutating commands aimed at an armed machine warn or refuse. The reader
-      exists (`wk boot --status`); wiring it into `cmd/status` waits for the
-      macOS lane to release that file.
-- [ ] `wk` help text lists `image` and `boot`, and both are refused inside a
-      workspace and on a shared build machine (`is_host_only`). Same reason.
-- [ ] the rpi4/rpi3 half end to end: a board that actually netboots. Blocked
-      on hardware, not on code — the rpi4 is not powered on (a full LAN sweep
-      finds no Raspberry Pi but the rpi5), and moose's three wired NICs are all
-      `carrier=0`.
+- [V] `wk status` ends with the fleet block (2026-08-21): one line per
+      machine — role, mode, and the media wk owns with what is on it right
+      now (the rpi4's stick and its system + armed/disarmed, the Mac's bench
+      volume attached-or-MISSING) — probed in parallel, one subshell per
+      machine so no driver's overrides leak into the next, read-only, with a
+      short fleet timeout so a powered-off board costs seconds. A machine in
+      host mode with an unspent-looking arming record is flagged **armed
+      for <id>** on its line. Honesty rules verified by inspection: a
+      MACH_LOCAL or guest machine that cannot be probed from this host says
+      "unknown from here" rather than reporting the driving machine's own
+      marker, and the block is skipped inside a workspace (no network, five
+      timeouts to say so).
+- [ ] mutating commands aimed at an armed machine warn or refuse — still
+      open; the fleet block shows the arming, nothing gates on it yet.
+- [ ] `wk help hardware` stays true to `boot/machines.sh` and the drivers —
+      hand-checked when either changes; it documents the media each device
+      needs and which steps are a person's.
+- [V] `wk` help text lists `sysimage` and `boot`, and both are refused inside
+      a workspace and on a shared build machine (`is_host_only`). Same reason.
+- [ ] the rpi3 end to end: provision it, `wk sysimage write` its SD card, and
+      boot it. (Netboot is gone, 2026-08-21 — the OTP door stays shut for
+      good; its driver is a hands-on stub until then.)
 - [V] `wk sysimage build perf-linux-rpi3` refuses rather than handing the fleet's only
       32-bit board an arm64 base
-- [ ] the rpi3 at all: it needs proxy DHCP with option 43 (not built), an
-      irreversible OTP burn, and its model (3B vs 3B+) established. Deliberately
-      last.
-- [ ] **first contact with an unreachable Pi is physical.** `netboot-enable`
-      writes the EEPROM over ssh, so it needs the board running; netboot
-      removes the *second* trip to a device, not the first. A Pi that answers
-      nothing has to be met once with an SD card.
+- [ ] **first contact with an unreachable Pi is physical.** `wk pi boot-order`
+      writes the EEPROM over ssh, so it needs the board running. A Pi that
+      answers nothing has to be met once with a card written by
+      `wk sysimage write`.
 
 ## 8. Tailnet bridges — `wk bridge`
 

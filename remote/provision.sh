@@ -40,7 +40,7 @@ REFERENCE="${WK_REMOTE_REFERENCE:-}"
 info "provisioning $(hostname) for target '$TARGET'"
 
 # --- prerequisites, checked and never installed ------------------------------
-# git and flock are load-bearing: without them there is no checkout and no
+# git is load-bearing: without it there is no checkout and no
 # serialisation between two of your own builds. Everything else is the build's
 # problem and fails with its own error, which is a better error than anything
 # guessed here.

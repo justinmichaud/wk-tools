@@ -100,8 +100,8 @@ The thing to run a cross-built binary on is the **rpi5's bench system** —
 with no SDK on it, which is exactly the condition a sysroot cross build has to
 satisfy, and a GTK MiniBrowser is the payload. (The decision named it "the
 netbooted rpi5 image"; the mechanism has since moved to a USB one-shot —
-`wk boot rpi5` — while netboot serves the other boards. The condition is
-unchanged.) Build the system and the sysroot from the *same tree* and the ABI
+`wk boot rpi5` — and netboot is gone entirely now; every board's bench lane
+is local media. The condition is unchanged.) Build the system and the sysroot from the *same tree* and the ABI
 question answers itself rather than becoming a debugging session — that is
 the cheap version of this step.
 

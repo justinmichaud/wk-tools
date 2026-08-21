@@ -1,11 +1,11 @@
 # Writing a Pi 4's bootloader EEPROM from a board that has no eeprom tooling.
 #
-# `wk pi netboot-enable` was written against Raspberry Pi OS, where
+# `wk pi boot-order` was written against Raspberry Pi OS, where
 # `rpi-eeprom-config --apply` does the whole job on the board. The fleet's rpi4
 # does not run Raspberry Pi OS -- it runs the WebKit Dev@CI Yocto image, whose
 # 668-package manifest carries `vcgencmd` and nothing else from the rpi-eeprom
 # package: no rpi-eeprom-config, no rpi-eeprom-update, no flashrom. So on the
-# one board the fleet most wants to netboot, the writer refused.
+# fleet's own rpi4, the writer refused.
 #
 # It refused for a good reason and the reason is worth keeping: it is a check
 # that the machine is a Pi whose firmware configuration can be written *from

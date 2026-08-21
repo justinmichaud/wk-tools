@@ -1057,17 +1057,15 @@ cmd_stage() {
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     dest="$root/staged/$stamp-$config"
 
-    # How this machine is put into bench mode, in its own words. The
-    # three arming models arrive at the same place by different routes, and a
-    # "next step" that names the wrong one is worse than none.
+    # How this machine is put into bench mode, in its own words. The arming
+    # models arrive at the same place by different routes, and a "next step"
+    # that names the wrong one is worse than none.
     local arm_hint run_hint
     case "${BOOT_ARMING:-one-shot}" in
         hands-on) arm_hint="wk boot $machine        arm it; it prints the ritual (you pick the disk)"
                   run_hint="wk bench staged${plan:+ --plan $plan}       once it has booted, over there" ;;
         guest)    arm_hint="wk boot $machine        start the guest -- for a guest that *is* the transition"
                   run_hint="wk enter ${MACH_GUEST:-<guest>} -- wk bench staged${plan:+ --plan $plan}" ;;
-        server)   arm_hint="wk serve --system …      the machine boots what this machine serves"
-                  run_hint="wk bench staged${plan:+ --plan $plan}       on the machine, once it is up" ;;
         *)        arm_hint="wk boot $machine        arm the one-shot and reboot into it"
                   run_hint="wk bench staged${plan:+ --plan $plan}       on the machine, once it is up" ;;
     esac

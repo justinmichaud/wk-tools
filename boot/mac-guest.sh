@@ -148,3 +148,17 @@ b_bench_put() {
       # shellcheck disable=SC2046 -- deliberate word splitting of the options.
       rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
 }
+
+# The guest exists only where tart does.
+b_probeable() { is_macos && command -v tart >/dev/null 2>&1; }
+
+# The wk-managed media, in one line, for the fleet block in `wk status`.
+b_media() {
+    local st
+    if ! is_macos || ! command -v tart >/dev/null 2>&1; then
+        printf 'a Tart guest, %s (managed on the macOS host)' "$MACH_GUEST"
+        return 0
+    fi
+    st=$( load_target vm >/dev/null 2>&1; _vm_state "$MACH_GUEST" 2>/dev/null || echo absent )
+    printf 'a Tart guest, %s (%s); no physical media' "$MACH_GUEST" "${st:-unknown}"
+}

@@ -54,3 +54,18 @@ b_arm() {
 b_evidence() {
     m_ssh "rpi-eeprom-config 2>/dev/null | sed -n 's/^BOOT_ORDER=/eeprom_boot_order=/p'" || true
 }
+
+# The wk-managed media, in one line, for the fleet block in `wk status`.
+b_media() {
+    local id order
+    case "${MODE:-}" in
+        bench*) printf 'booted from its USB stick (system %s); NVMe untouched' "${MODE#bench }"; return 0 ;;
+        host)   ;;
+        *)      printf 'USB stick %s: state unknown (board unreachable)' "$MACH_DEVICE"; return 0 ;;
+    esac
+    id=$(b_device_image 2>/dev/null || true)
+    order=$(b_evidence 2>/dev/null | sed -n 's/^eeprom_boot_order=//p' | head -1)
+    printf 'USB stick %s holds %s; NVMe workstation untouched%s' \
+        "$MACH_DEVICE" "${id:-no wk system (wk sysimage write puts one there)}" \
+        "${order:+ (eeprom $order)}"
+}

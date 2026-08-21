@@ -149,7 +149,7 @@ probe_store() {
     done
 
     for d in cache/ccache cache/bench cache/images cache/yocto cache/buildroot \
-             images serve bench secrets skills tools; do
+             images bench secrets skills tools; do
         [ -d "$WK_STORE/$d" ] || continue
         printf '%s\t%s\t%s\n' "$(_kb "$WK_STORE/$d")" "$d" ""
     done

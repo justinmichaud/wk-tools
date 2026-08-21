@@ -103,6 +103,38 @@ check "~/.claude/CLAUDE.md is the HOST briefing" "./setup --stage claude" \
 check "shell rc sources shell/bashrc" "./setup --stage dotfiles" \
     sh -c "grep -q 'wk-tools/shell/bashrc' '$HOME/.zshrc' 2>/dev/null || grep -q 'wk-tools/shell/bashrc' '$HOME/.bashrc' 2>/dev/null"
 
+# --- machine-local state: declared, never hidden ---------------------------------
+# The cattle-not-pets rule (docs/HANDOFF-cattle.md): everything a rebuilt
+# machine cannot get from this repo is *declared here*, with how to get it
+# back -- so a from-nothing rebuild is a checklist, not an archaeology dig.
+# Three kinds, and the kind is the restore story:
+#   regenerable   wk makes a new one (nothing to back up)
+#   re-authable   a person logs in again (nothing to back up)
+#   backed-up     genuinely machine-local data; if it is not in your backups,
+#                 it is lost with the disk
+section "machine-local state (everything a rebuild cannot get from this repo)"
+local_state() { # <path> <kind> <how to get it back>
+    local path="$1" kind="$2" how="$3" disp
+    disp="${path/#$HOME/\~}"
+    if [ -e "$path" ]; then
+        ok "$disp ($kind) -- $how"
+    else
+        unk "$disp (absent)" "$kind: $how"
+    fi
+}
+local_state "$WK_STORE/secrets"                    regenerable "wk key register makes new deploy keys (revoke the old ones on GitHub)"
+local_state "$WK_STORE/secrets/claude-credentials.json" re-authable "claude login in one workspace re-seeds it"
+local_state "$HOME/.config/wk/targets"             backed-up   "this device's own view of shared targets; recreate by hand from wk help machines"
+local_state "$WK_ROOT/targets/local"               backed-up   "machine-local target definitions (gitignored: internal hosts and paths)"
+local_state "$HOME/.ssh/config.d/local"            backed-up   "hand-written ssh entries (host/dotfiles.sh moves them here and owns the rest)"
+if [ "$(wk_os)" = linux ]; then
+    # The WiFi identity lives on the rpi5 itself and nowhere else.
+    [ "$(hostname)" != rpi5 ] || \
+        local_state "$WK_ROOT/host/linux/rpi5/rpi5.conf" backed-up "site WiFi identity (gitignored: repo is public); rpi5.conf.example documents the shape"
+    local_state /var/lib/tailscale                 re-authable "tailscale up re-authenticates; the node name survives via the admin console"
+fi
+unset -f local_state
+
 # --- the store: mirror, snapshots, keys, credentials -----------------------------
 # Probed over one `podman machine ssh` on macOS -- and only if the machine is
 # already running, because doctor never starts anything.

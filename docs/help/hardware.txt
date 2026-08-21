@@ -1,0 +1,96 @@
+what each fleet device is, and the media wk owns on it
+wk help hardware -- the fleet's physical shape: what each device needs plugged
+into it, which media wk owns, and which steps are a person's.
+
+The rule underneath all of it (docs/HANDOFF-vocabulary.md): a machine's host
+mode is either your install (a workstation -- wk never writes it) or a system
+wk built (a bench-device -- wk can remake it from nothing). Bench mode always
+lives on media of its own, so entering and leaving it never touches the host
+install. Netboot does not exist here (removed 2026-08-21): every bench system
+is bytes on a local device, put there by `wk sysimage write`.
+
+rpi5 -- workstation (Raspberry Pi 5, WiFi only)
+  host mode   its own Ubuntu install on the NVMe. Never written by wk.
+  bench mode  a USB stick (any stick comfortably over the ~4.6 GB image; the
+              one in it is 29 GB) holding a system from `wk sysimage build
+              perf-linux-rpi5`. The firmware one-shot picks the stick for one
+              boot and the board hands itself back -- nothing physical after
+              the stick is first written.
+  network     WiFi is its only link, so the bench system bakes the credential
+              in at build time (read off the running board, never through a
+              log) and announces itself as rpi5-perf.local over mDNS.
+
+rpi4 -- bench-device (Raspberry Pi 4B, 4 GB, wired)
+  bench mode  a USB stick holding `perf-linux-rpi4` (or a downstream yocto
+              system). Armed on the medium itself: one byte of the stick's
+              MBR flips it bootable/unbootable, so arming needs no firmware
+              write per run.
+  rescue      the SD card, holding the WebKit Dev@CI Yocto image -- what the
+              board falls through to whenever the stick is disarmed or
+              unbootable. This is also its host mode; wk owns both media.
+  firmware    BOOT_ORDER must be usb-first (`wk pi boot-order rpi4-test
+              usb-first`): with the default SD-first order, a written stick
+              never boots and the board comes up looking normal on the wrong
+              root.
+  network     wired, on the house LAN. Its DHCP leases are unstable, so it is
+              found by MAC and by raspberrypi4-64.local.
+  storage     the stick is provisional bench media -- cheap flash lands as
+              variance, so stick runs are never compared with SSD runs; a
+              UASP SSD on the USB 3 port is the real substrate when numbers
+              start to matter.
+
+rpi3 -- bench-device (Raspberry Pi 3, armv7l, 931 MB; not provisioned)
+  bench mode  its SD card, and only its SD card: USB or network boot would
+              burn a one-way OTP bit for a capability nothing needs, so the
+              door stays shut. Swapping what the card holds is hands-on
+              today (`wk sysimage write` from a machine with the card in a
+              reader, then walk the card over).
+  systems     Yocto only, in both widths (`downstream-yocto-wpe-2.48-rpi3-32`
+              / `-64`) -- there is no distro base for a 32-bit Pi, and 931 MB
+              makes the 64-bit system deliberately marginal.
+
+tolken / mbp -- workstation (Apple Silicon Mac)
+  host mode   your macOS install. Never written by wk.
+  bench mode  a second macOS install on its own APFS volume, named "WK Bench"
+              (WK_BENCH_VOLUME overrides), on the same physical SSD -- so
+              storage is not a variable, but Spotlight and Time Machine local
+              snapshots must be off on it. It cannot be produced by
+              `wk sysimage build`: an image copied onto a disk does not boot
+              an Apple Silicon Mac (boot policy lives in the machine's own
+              secure storage), so the volume is installed and personalised
+              once, by hand -- docs/HANDOFF-mac-perf-mode.md is the runbook.
+  arming      hands-on by nature: `wk boot mbp` records the intent and prints
+              the ritual; a person picks the startup disk. A plain reboot
+              returns it.
+
+benchvm -- bench-device (a macOS guest; no hardware at all)
+  A Tart guest standing in for the Mac's bench volume: everything about it is
+  scriptable, which is what makes it the rehearsal. It proves the path, never
+  the number -- a guest shares a CPU and has a paravirtualised GPU.
+
+moose -- workstation + build-host (Ampere, 80 cores; bench mode unbuilt)
+  Its eventual bench mode arrives by BMC virtual media (the ASPEED BMC
+  presents an image as USB storage; needs nothing from the network stack),
+  reached through the tailnet bridge below. gpu-class runs additionally need
+  the NVIDIA kernel module and userspace inside the system, or `wk bench`
+  refuses the degraded run.
+
+tailnet bridges -- the out-of-band path (see `wk help bridge`)
+  A spare phone (PinePhone or Librem 5 on postmarketOS) with a USB-C dock and
+  an ethernet adapter, bridging an isolated segment -- moose's BMC today --
+  onto the tailnet, with camera streaming to watch a screen remotely. The
+  phone, dock and adapter are the hardware; `wk bridge setup <name>` does the
+  rest.
+
+what is still hands-on, fleet-wide
+  Writing the *first* medium for an unprovisioned board needs a card reader
+  on some machine wk can reach; a reader on this workstation is the one write
+  path that does not exist yet (`wk sysimage flash --reader`,
+  docs/HANDOFF-vocabulary.md's lifecycle). Until then: `wk sysimage write`
+  through any provisioned machine with a reader, or a hand flash.
+
+`wk boot --list` names the fleet; `wk status` reports each device's role,
+mode, and what is on its media right now. Each device is defined by
+boot/machines/<name>.conf, which opens with its from-nothing recipe -- the
+cattle-not-pets rule (docs/HANDOFF-cattle.md): any of these machines can be
+reproduced from this repo plus the restorables `wk doctor` declares.

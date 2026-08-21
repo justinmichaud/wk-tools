@@ -39,7 +39,7 @@ matches (`Policy.is_pi`) and nothing else in the range.
 build (`docs/HANDOFF-yocto.md`), not first — so `wk pi setup rpi4` gets a
 freshly built image to run against, which tests the no-image-rebuild promise
 against something other than the buildroot install it was written for. See
-"Order, revised 2026-08-19" in `docs/HANDOFF.md`.
+lane A's running-order note in `docs/HANDOFF.md`.
 
 ## What to do
 

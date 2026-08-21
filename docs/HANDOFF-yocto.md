@@ -14,12 +14,13 @@ netboot, flashing only the image that is kept. Superseded 2026-08-20 by the
 hardware's own evidence (`docs/HANDOFF-benchmarking.md`, "rpi4"): netboot puts
 the root filesystem on the network (so in the measurement) and has a failure
 mode that halts the board with no fall-through — neither survivable for an
-unattended benchmark on a 2 GB-class machine. The rpi4 is a **bench-device**
+unattended benchmark (the halt-on-incomplete-transfer failure mode, plus a
+network root inside the measurement — the board is 4 GB, and the decision
+rests on the halt, not the RAM). The rpi4 is a **bench-device**
 booted from its USB stick with the SD card as the rescue role
 (`boot/pi-usb.sh`): `wk sysimage write <id> --disk rpi4:/dev/sda`, then
-`wk boot rpi4`, one-shot, back to host mode by itself. Netboot
-(`boot/pi-netboot.sh`) stays for the profiling lane, which wants the opposite
-trade. `wk pi setup rpi4` against the resulting image is the step after this
+`wk boot rpi4`, one-shot, back to host mode by itself. (Netboot is gone
+entirely — 2026-08-21.) `wk pi setup rpi4` against the resulting image is the step after this
 one (`docs/HANDOFF-linux-pi.md`).
 
 ---
@@ -452,16 +453,10 @@ Not done, in the order it matters:
    would load the kernel and the kernel would find no root. Either the wic
    recipe's root device changes so the image can boot from USB, or the image
    goes onto a card and the rpi4's boot order does the rest.
-2. **Netboot cannot serve this image, and `wk serve` is right to refuse it.**
-   `check_root_is_reachable` in `cmd/serve` refuses any image whose
-   `cmdline.txt` names a local root, because a netboot client would fetch the
-   kernel and then have nowhere to mount `/` from — and a wic image names a
-   local root. Since the rpi4 bench lane moved to USB boot this blocks only
-   the *profiling* lane's netboot use. The import already pulls
-   `rootfs.tar.xz` into the store alongside `disk.img` for exactly that day: a
-   tarball is what fills an NFS root, so the systems already in the store are
-   complete. `webkit-dev-ci-tools` also does its own boot-file handling "for
-   NFS boot capability", worth reading before building it.
+2. **The netboot question is moot: netboot is gone (2026-08-21).** The import
+   still pulls `rootfs.tar.xz` into the store alongside `disk.img` — a
+   tarball remains the honest archival form of a rootfs, and it costs nothing
+   to keep — but nothing will ever fill an NFS root from it.
 3. **The image carries no WebKit.** meta-webkit's `webkit-dev-ci-tools` is the
    runtime and the test tooling — it says so in its own recipe. The matching
    WebKit is a cross build against the image's toolchain: `--stage toolchain`

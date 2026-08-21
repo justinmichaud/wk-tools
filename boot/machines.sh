@@ -1,12 +1,13 @@
 # The fleet: which machines can be booted into an image, and how.
 #
 # One verb (`wk boot`) with one driver per machine, which is the shape
-# targets/*.sh already uses -- because "netboot" is not one mechanism. The Pis
-# take a firmware one-shot over SSH; moose takes UEFI HTTP boot or BMC virtual
-# media; the MBP cannot be booted remotely at all and its driver is hands-on by
-# nature (Apple Silicon's boot volume selection goes through a LocalPolicy in
-# the machine's own secure storage -- there is nothing to hand an image to over
-# the wire). See docs/HANDOFF-netboot.md, "the headline".
+# targets/*.sh already uses -- because entering bench mode is not one
+# mechanism. The Pi 5 takes a firmware one-shot over SSH, the rpi4 arms its
+# own stick, moose would take BMC virtual media, and the MBP cannot be booted
+# remotely at all: its driver is hands-on by nature (Apple Silicon's boot
+# volume selection goes through a LocalPolicy in the machine's own secure
+# storage -- there is nothing to hand an image to over the wire). See
+# docs/HANDOFF-netboot.md, "the headline".
 #
 # A machine sets:
 #
@@ -28,136 +29,58 @@
 # boot/rpi-eeprom.sh for the writing half.
 EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-config 2>/dev/null || true'
 
+# The registry: one conf per machine under boot/machines/, the same shape as
+# targets/hosts/*.conf -- adding a device is adding a file, and changing a
+# role is editing one field, never code (docs/HANDOFF-vocabulary.md, the
+# lifecycle; the cattle-not-pets rule in docs/HANDOFF-cattle.md). Each conf
+# also opens with its device's from-nothing recipe, so the file that defines
+# a machine is the file that says how to reproduce it.
+machines_dir() { echo "$WK_ROOT/boot/machines"; }
+
 machine_list() {
-    cat <<'EOF'
-rpi5   Raspberry Pi 5, WiFi only. USB one-shot; the NVMe workstation is untouched.
-rpi4   Raspberry Pi 4 (4 GB), on the LAN. Boots its USB stick; SD is the rescue.
-rpi3   Raspberry Pi 3, on a direct cable. Netboots; needs real DHCP with option 43.
-mbp    This Mac. Boots a benchmark volume; the selection is hands-on (Apple Silicon).
-benchvm A macOS guest standing in for a benchmark install. Rehearses the path, not the number.
-EOF
+    local f n
+    for f in "$(machines_dir)"/*.conf; do
+        [ -f "$f" ] || continue
+        n=$(basename "$f" .conf)
+        machine_load "$n" 2>/dev/null || continue
+        printf '%-8s%s\n' "$n" "$MACH_NOTE"
+    done
 }
 
 machine_load() {
+    local f
+    f="$(machines_dir)/$1.conf"
+    [ -f "$f" ] || return 1
     MACH_NAME="$1"
-    case "$1" in
-    rpi5)
-        MACH_SSH=rpi5
-        # Not netboot, and this is not a compromise. Netboot is wired-only on
-        # every Pi and this board has no cable, but the same one-shot semantics
-        # exist for a local device -- and the board's `tryboot` is already
-        # taken by flash-kernel's kernel staging, so USB is also the option
-        # that does not fight the existing configuration.
-        MACH_DRIVER=rpi5-usb
-        MACH_DEVICE=/dev/sda
-        MACH_ROOT=/dev/nvme0n1p2
-        MACH_PROFILE=perf-linux-rpi5
-        # The radio's own address, and the reason the image is findable at all.
-        # The image boots the same hardware, so it presents the same MAC and
-        # the AP hands it the same lease -- which makes "where is the image"
-        # answerable from the driving machine's neighbour table rather than
-        # from anything stored. Declared hardware identity, like MACH_DEVICE.
-        MACH_MAC=88:a2:9e:07:1c:92
-        MACH_ROLE=workstation
-        MACH_NOTE="Raspberry Pi 5, USB one-shot"
-        ;;
-    rpi4)
-        # Not `rpi4`: a hand-written `Host rpi4` in ~/.ssh/config used to point
-        # at rpi4-compilers-0, a shared build box behind a ProxyJump, and a
-        # `wk sysimage write` aimed at this test device would have landed on that
-        # machine's disk. host/dotfiles.sh now drops any hand-written stanza
-        # naming a fleet machine, so the collision cannot come back -- and the
-        # names stay apart on purpose, so that `Host rpi4` reads as the mistake
-        # it is rather than as an alternative spelling of this one.
-        MACH_SSH="${WK_RPI4_SSH:-rpi4-test}"
-        # pi-usb, not pi-netboot, and the reason is the benchmark lane rather
-        # than a preference: netboot puts the root on the network (so in the
-        # measurement) and has a failure that halts the board (so needs a
-        # person). Neither is survivable for an unattended benchmark on this
-        # machine, and the RAM-root answer that fixes both wants more than the
-        # 2 GB this board has. docs/HANDOFF-benchmarking.md, "rpi4", has it all.
-        #
-        # boot/pi-netboot.sh stays, for the profiling lane, which wants the
-        # opposite trade -- a root that is a directory on the server, editable
-        # in place, with storage noise nobody is measuring. When that lane is
-        # built this entry needs a way to say which mechanism a given run
-        # wants; today it says the one the fleet actually uses.
-        MACH_DRIVER=pi-usb
-        MACH_DEVICE=/dev/sda
-        MACH_ROOT=/dev/mmcblk0p2
-        MACH_PROFILE=perf-linux-rpi4
-        # The radio -- here the wired NIC -- and the reason the image is
-        # findable at all: it boots the same hardware, so it presents the same
-        # MAC and image_addr can answer "where is the image" from the driving
-        # machine's neighbour table. Without it the only name is the image's
-        # own mDNS, which on this board is installed by cloud-init and so is
-        # not up for the first several minutes of exactly the boot that wants
-        # watching. Declared hardware identity, like MACH_DEVICE.
-        MACH_MAC=d8:3a:dd:aa:42:8a
-        # A dedicated bench device, not a workstation: that is what licenses a
-        # permanent network-first BOOT_ORDER, and cmd/pi reads it from here.
-        MACH_ROLE=bench-device
-        MACH_NOTE="Raspberry Pi 4 (4 GB), USB stick, SD rescue"
-        ;;
-    rpi3)
-        MACH_SSH="${WK_RPI3_SSH:-rpi3}"
-        MACH_DRIVER=pi-netboot
-        MACH_DEVICE=/dev/sda
-        MACH_ROOT=/dev/mmcblk0p2
-        MACH_PROFILE=perf-linux-rpi3
-        MACH_ROLE=bench-device
-        MACH_NOTE="Raspberry Pi 3, netboot over a direct cable"
-        ;;
-    mbp)
-        # The machine this is running on, and the only one in the fleet that
-        # cannot be driven from anywhere else: there is one Apple Silicon
-        # machine here, so its transition is arranged from inside the role it
-        # is leaving. See boot/mac-volume.sh for what that costs.
-        MACH_LOCAL=1
-        MACH_SSH=localhost
-        MACH_DRIVER=mac-volume
-        # Not a block device: what is booted is an *installed volume*,
-        # personalised for this Mac (an image copied onto a disk does not boot
-        # -- the boot policy lives in this machine's own secure storage).
-        # MACH_DEVICE is left empty so that anything reaching for it fails
-        # loudly rather than writing to a disk on a machine that has no image
-        # to write.
-        MACH_DEVICE=""
-        MACH_ROOT=""
-        MACH_VOLUME="${WK_BENCH_VOLUME:-WK Bench}"
-        MACH_PROFILE=perf-macos-tolken
-        MACH_ROLE=workstation
-        MACH_NOTE="this Mac, booting its benchmark volume (hands-on)"
-        ;;
-    benchvm)
-        # A guest, so everything about it is scriptable -- which is what makes
-        # it the rehearsal for the MBP rather than a replacement for it. See
-        # boot/mac-guest.sh for what it can and cannot prove.
-        MACH_LOCAL=""
-        MACH_SSH=""            # the driver reaches the guest itself
-        MACH_DRIVER=mac-guest
-        MACH_DEVICE=""
-        MACH_ROOT=""
-        MACH_VOLUME=""
-        MACH_PROFILE=perf-macos-benchvm
-        MACH_ROLE=bench-device
-        MACH_NOTE="a macOS guest as a benchmark install (rehearsal)"
-        ;;
-    *)  return 1 ;;
-    esac
+    # Reset every field a conf may set, so a second load in one process cannot
+    # inherit the first machine's answers -- the same rule, for the same
+    # reason, as image_profile_load.
+    MACH_SSH=""; MACH_DRIVER=""; MACH_DEVICE=""; MACH_ROOT=""; MACH_PROFILE=""
+    MACH_NOTE=""; MACH_MAC=""; MACH_LOCAL=""; MACH_VOLUME=""
+    MACH_ROLE=workstation
+    # Which host can drive this machine: `any` (reached over ssh from
+    # anywhere), or an OS name for a machine that answers only for itself
+    # (the mbp) or needs host-only tooling (tart). Not cosmetic:
+    # `wk boot mbp --status` run from Linux used to probe the *driving*
+    # machine and report a confident answer about the wrong computer.
+    MACH_OS=any
+    # shellcheck disable=SC1090
+    . "$f"
+    [ -n "$MACH_DRIVER" ] && [ -n "$MACH_NOTE" ] || return 1
 }
 
 # The reverse lookup: an ssh destination -> the machine it reaches.
 #
 # `wk pi` takes an ssh host, because putting a device on the tailnet is a thing
 # you do to a device rather than to a fleet entry, and it long predates the
-# fleet. But its EEPROM half needs MACH_ROLE -- a bench device wants network
-# *first* in BOOT_ORDER and a workstation wants it last -- and looking the
-# argument up with machine_load only works when the two names coincide. They do
-# not for the rpi4, whose ssh name is rpi4-test on purpose, so the one board
-# that must have network first was silently getting the workstation default.
+# fleet. But its EEPROM half needs MACH_ROLE -- a bench device wants USB
+# *first* in BOOT_ORDER and a workstation wants the network nibble gone -- and
+# looking the argument up with machine_load only works when the two names
+# coincide. They do not for the rpi4, whose ssh name is rpi4-test on purpose,
+# so the one board that must have USB first was silently getting the
+# workstation default.
 #
-# Machine names win over ssh names: `wk pi netboot-enable rpi4` should mean the
+# Machine names win over ssh names: `wk pi boot-order rpi4` should mean the
 # fleet's rpi4 even if some host is called that.
 machine_by_ssh() {
     local want="$1" m
@@ -339,6 +262,24 @@ b_probe() {
         MODE_CHANNEL=bench; MODE="bench $id"; return 0
     fi
     MODE_CHANNEL=none; MODE=unreachable
+}
+
+# Can this host probe this machine at all? Most machines are reached over
+# ssh and the answer is yes from anywhere; the two mac drivers override it,
+# because a MACH_LOCAL machine answers only for itself and a guest needs
+# tart. Callers that cannot probe say "unknown from here" instead of printing
+# a confident answer read off the wrong computer -- the mistake the mac
+# driver's b_evidence records.
+b_probeable() { :; }
+
+# One line: the wk-managed media on this machine, and what is on it right
+# now. Every driver overrides this with its own hardware's sentence (the
+# fleet block in `wk status` prints it, and `wk help hardware` is the prose
+# version); this default exists so a driver without one still answers.
+# Callers run b_probe first, so MODE/MODE_CHANNEL are set.
+b_media() {
+    [ -n "${MACH_DEVICE:-}" ] || { printf 'no wk-managed media declared'; return 0; }
+    printf 'media %s (this driver says nothing more about it)' "$MACH_DEVICE"
 }
 
 # ssh over whichever channel answered.

@@ -344,6 +344,78 @@ report_machine() {
     done
 }
 
+# --- the fleet devices: role, mode, and the media wk owns ---------------------
+#
+# One line per fleet machine: what it is (role), what it is running (mode),
+# and what is on the hardware wk manages for it -- the rpi4's USB stick and
+# what system it holds, the Mac's bench volume and whether it is attached.
+# `wk help hardware` is the prose version; `wk boot <machine> --status` is the
+# deep one.
+#
+# Every machine is probed in its own subshell, all at once, so the wall cost
+# is one bounded probe rather than one per machine -- and so one driver's
+# function overrides can never leak into the next machine's answers (each
+# subshell sources its own driver fresh). The probes are read-only. A short
+# timeout of its own: these are LAN neighbours, and a powered-off board
+# should cost this listing seconds, not the ssh default.
+report_fleet_device() {
+    local m="$1" role mode media armed rec
+    (
+        set +e
+        export WK_SSH_TIMEOUT="${WK_FLEET_TIMEOUT:-4}"
+        . "$WK_ROOT/lib/image.sh"
+        . "$WK_ROOT/image/profiles.sh"
+        . "$WK_ROOT/boot/machines.sh"
+        machine_load "$m" || exit 0
+        load_driver "$MACH_DRIVER" 2>/dev/null || exit 0
+        role="${MACH_ROLE:-workstation}"
+        if b_probeable 2>/dev/null; then
+            b_probe 2>/dev/null
+            case "${MODE:-unreachable}" in
+                host)    mode="host mode" ;;
+                bench*)  mode="bench mode" ;;
+                *)       mode="unreachable" ;;
+            esac
+            # A record of intent on a machine still in host mode is the one
+            # transition worth shouting about here (the spent/unspent nuance
+            # is `wk boot --status`'s).
+            armed=""
+            if [ "${MODE:-}" = host ]; then
+                rec=$(record_read 2>/dev/null | sed -n 's/^image=//p' | head -1)
+                [ -n "$rec" ] && armed="  ** armed for $rec -- wk boot $m --status **"
+            fi
+        else
+            MODE=""
+            mode="unknown from here"
+            armed=""
+        fi
+        media=$(b_media 2>/dev/null || printf 'unknown')
+        printf '  %-9s %-13s %-18s %s%s\n' "$m" "$role" "$mode" "$media" "$armed"
+    )
+}
+
+report_fleet_devices() {
+    [ -f "$WK_ROOT/boot/machines.sh" ] || return 0
+    # Not from inside a workspace: the fleet is the host's, and a sandbox with
+    # no network would spend five probe timeouts saying so.
+    ! in_workspace || return 0
+    local dir m
+    dir=$(mktemp -d)
+    # shellcheck disable=SC1091
+    for m in $(. "$WK_ROOT/boot/machines.sh"; machine_list | awk '{print $1}'); do
+        report_fleet_device "$m" > "$dir/$m" 2>/dev/null &
+    done
+    wait
+    printf '
+fleet -- role, mode, and the media wk owns (wk help hardware):
+'
+    for m in $(. "$WK_ROOT/boot/machines.sh"; machine_list | awk '{print $1}'); do
+        cat "$dir/$m" 2>/dev/null
+    done
+    rm -rf "$dir"
+    return 0
+}
+
 if [ -n "${1:-}" ]; then
     # In a workspace a bare `wk status` is the whole command: there is one
     # workspace and it is this machine (refuse_ws_name, lib/target.sh).
@@ -381,6 +453,7 @@ else
         [ -z "$FLEET" ] || report_machine "$TARGET"
     done
     [ -z "$FLEET" ] || report_self
+    [ -z "$FLEET" ] || report_fleet_devices
 
     # Named when the caller asked about one target in particular -- a macOS
     # host reports the host-side targets one pass at a time, and three bare

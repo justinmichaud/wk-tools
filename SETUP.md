@@ -293,8 +293,8 @@ otherwise the driver keeps one mirror under the root and only the first
 workspace pays for the history. Builds are niced to the floor, sized from the
 machine's free memory and live load average probed on every build (there is no
 fixed job ceiling — a fixed number goes stale the moment the machine changes),
-and serialised against each other with a flock, because other people are using
-the box too.
+and serialised against each other with the build lock (`lib/lockrun.sh`),
+because other people are using the box too.
 
 After setup the machine can drive itself, which is the point of provisioning
 it at all — ssh in and you get zsh (where the box has one) and `wk` on PATH:
@@ -342,9 +342,11 @@ A cross build against a sysroot is a *different* mechanism and gets a different
 word, `--sysroot`, which is reserved and refused for now
 (`docs/HANDOFF-cross-compile.md`).
 
-That is the interface `wk claude` hands an agent, and the only one available to
-it: a workspace has no podman and a macOS guest has no nested virtualisation, so
-there is nothing to reach out to. Provisioning writes `~/.wk-workspace` naming
+That in-workspace command set (the block in "Working inside a workspace"
+above) is the interface `wk claude` hands an agent, and the only one available
+to it: a workspace has no podman and a macOS guest has no nested
+virtualisation, so there is nothing to reach out to. Provisioning writes
+`~/.wk-workspace` naming
 the checkout, and `wk` uses it to select `targets/local.sh`, where the target is
 this machine. Commands that act on a host — `wk sync`, `wk gc`, `wk session`,
 `wk quiesce`, `wk vm`, `wk pi` — refuse in there rather than acting on an empty
@@ -538,10 +540,11 @@ sha and the renderer that was actually used.
 
 Only if you run benchmarks on real hardware.
 
-Put the Pis on an isolated guest network, then:
+The Pis sit on the house LAN (the isolated-guest-network design was retired —
+the proxy allowlist is the boundary that matters), and the rpi5 is a
+workstation that never goes through `wk pi setup`. For the bench devices:
 
 ```sh
-wk pi setup rpi5
 wk pi setup rpi4-test
 ```
 

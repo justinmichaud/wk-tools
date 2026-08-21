@@ -11,9 +11,9 @@
 # 32-bit ARM build, so provisioning is: copy two binaries to a writable
 # partition, add an init script, and bring the node up tagged.
 #
-# The Pis are expected to sit on an isolated guest network with no route to the
-# main LAN, so the tailnet is the only path to them -- which is exactly what
-# lets a workspace reach them without being able to reach anything else.
+# The Pis sit on the house LAN (the isolated-guest-network premise is retired
+# -- docs/HANDOFF-linux-pi.md); what lets a workspace reach a test board and
+# nothing else is the proxy allowlist fed from pi-hosts, not the topology.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,18 +30,20 @@ TAG="${WK_PI_TAG:-tag:wk}"
 
 ACTION="${1:-}"; HOST="${2:-}"
 case "$ACTION" in
-    setup|netboot-enable|boot-order) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>" ;;
+    setup|boot-order) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>" ;;
+    # Retired with netboot (2026-08-21): the orders it wrote pointed firmware
+    # at a server that no longer exists. One spelling, so it points.
+    netboot-enable) die "'wk pi netboot-enable' is gone with netboot itself.
+    'wk pi boot-order <ssh-host> usb-first|local' is the EEPROM's writer." ;;
     # `flash` takes a *fleet machine* rather than an ssh host: the refusals need
     # MACH_ROOT to know which disk is that machine's own, and the image comes
-    # from the store by profile. See boot/sdcard.sh.
+    # from the store by profile. See boot/disk.sh.
     # Kept only to say where it went; see below.
     flash) : ;;
     *) die "usage: wk pi setup <ssh-host>
-       wk pi boot-order <ssh-host> <order> [--server <ip>] [--dry-run]
-         orders: netboot-first  netboot-last  usb-first  local
-       wk pi netboot-enable <ssh-host> [--server <ip>] [--revert] [--dry-run]
-         the netboot spelling of the same writer; the order comes from the
-         machine's role in boot/machines.sh
+       wk pi boot-order <ssh-host> [<order>] [--dry-run] [--revert]
+         orders: usb-first  local -- omitted, it comes from the machine's
+         role in boot/machines.sh (bench-device: usb-first; else local)
        (flashing moved: 'wk sysimage write <id> --disk <machine>:<device>')" ;;
 esac
 shift 2 2>/dev/null || true
@@ -68,63 +70,20 @@ if [ "$ACTION" = flash ]; then
     the tailnet, and its EEPROM boot order."
 fi
 
-# --- wk pi netboot-enable ----------------------------------------------------
+# --- wk pi boot-order ----------------------------------------------------------
 #
 # The EEPROM's only writer, and the reason that matters: `BOOT_ORDER` is
-# firmware state *shared by both of a machine's roles*. A Pi that netboots by
-# default is a Pi that stops being a workstation the moment a server answers,
-# and getting it back means a trip to the device. So this adds network as the
-# **last** entry before the restart nibble, never the first: an ordinary boot
-# still finds its SD card or NVMe exactly as before, and an actual netboot is
-# requested per-boot with the same one-shot `wk boot` uses.
-#
-# What it writes, and nothing else:
-#
-#   BOOT_ORDER  with network (nibble 2) added as a fallback, order preserved
-#   TFTP_IP     the serving address -- a service alias, so the role can float
-#   CLIENT_IP / SUBNET / GATEWAY   optional; when set the firmware skips DHCP
-#                                  entirely, so no second DHCP server ever has
-#                                  to appear on a family LAN
-#
-# TFTP_PREFIX is deliberately *not* written. It selects the serial-number
-# directory the firmware prefixes to every request, and `boot/wk-tftpd.py`
-# already falls back to the root when that directory is absent -- so the one
-# value you cannot know before the board first asks is not a value anyone has
-# to set.
-
-# Insert network into a boot order, at one of two positions -- and which one
-# is a property of what the machine *is*, not a preference.
+# firmware state *shared by both of a machine's modes*, so a wrong value costs
+# a trip to the device. The netboot orders this used to write are gone with
+# netboot itself (2026-08-21); what remains is the local-boot lane's order and
+# its undo.
 #
 # BOOT_ORDER reads lowest-nibble-first, so the string is written in reverse
-# priority: 0xf41 is SD(1), then USB(4), then restart(f).
-#
-#   last  (the default, for a machine that is also a workstation)
-#         0xf41 -> 0xf241. An ordinary boot still finds its local disk exactly
-#         as before; netbooting is requested per-boot with a one-shot. A Pi
-#         that netbooted by default would stop being a workstation the moment
-#         a server answered, and getting it back needs physical access.
-#
-#   first (for a dedicated test device -- the rpi4 and rpi3)
-#         0xf41 -> 0xf412. There is no one-shot to fall back on: vcmailbox's
-#         `set_reboot_order` is Raspberry Pi 5 only. So arming moves to the
-#         server instead, and it is strictly better than what the rpi5 gets --
-#         serve the files and the board netboots, empty the TFTP root and it
-#         falls through to its local image, with no access to the device
-#         needed to arm a run at all.
-#
-# Any existing network nibble is removed first, so the position is whatever was
-# asked for rather than whatever happened to be there.
-boot_order_with_net() {
-    local order="${1#0x}" pos="${2:-last}"
-    order=$(printf '%s' "$order" | sed 's/2//g')
-    case "$pos" in
-        first) printf '0x%s2' "$order" ;;
-        *)     case "$order" in
-                   f*) printf '0xf2%s' "${order#f}" ;;
-                   *)  printf '0x2%s' "$order" ;;
-               esac ;;
-    esac
-}
+# priority: 0xf41 is SD(1), then USB(4), then restart(f). The network nibble
+# (2) is stripped by every order here -- a board with one left over would try
+# a server that does not exist on every boot (benign, but a stale fact that
+# reads as a live one), and so are the TFTP_IP/CLIENT_IP keys the netboot era
+# wrote.
 
 boot_order_without_net() {
     local order="${1#0x}"
@@ -154,72 +113,55 @@ boot_order_usb_first() {
     printf '0x%s4' "$order"
 }
 
-# One writer, four intents. `wk pi netboot-enable` and `wk pi boot-order` are
-# two spellings of this function and not two implementations of it: BOOT_ORDER
-# is firmware state shared by every role a machine has, and two commands that
-# could both write it is two places for a wrong value to come from.
+# One writer. BOOT_ORDER is firmware state shared by every mode a machine
+# has, and two commands that could both write it is two places for a wrong
+# value to come from.
 cmd_boot_order() {
-    local server="" client="" gateway="" subnet="255.255.255.0" dry="" revert="" position=""
+    local dry="" revert=""
     local order_name="${ORDER_NAME:-}"
     while [ $# -gt 0 ]; do
         case "$1" in
-            --position)  position="${2:-}"; shift ;;
-            --server)    server="${2:-}"; shift ;;
-            --client-ip) client="${2:-}"; shift ;;
-            --gateway)   gateway="${2:-}"; shift ;;
-            --subnet)    subnet="${2:-}"; shift ;;
             --dry-run)   dry=1 ;;
             --revert)    revert=1 ;;
+            --server|--client-ip|--gateway|--subnet|--position)
+                die "$1 is gone with netboot (2026-08-21): there is no server to
+    point firmware at. Orders: usb-first, local." ;;
             *) die "unknown option: $1" ;;
         esac
         shift
     done
 
-    # `netboot-enable`'s two flags are older spellings of two of the orders, and
-    # are resolved into one before anything else looks at them.
     if [ -z "$order_name" ]; then
         if [ -n "$revert" ]; then
             order_name=local
         else
-            # The position defaults from what the fleet says this machine is,
-            # not from a flag the caller has to remember: getting it wrong on a
-            # workstation costs a trip to the device.
-            if [ -z "$position" ]; then
-                if machine_by_ssh "$HOST"; then
-                    case "${MACH_ROLE:-workstation}" in
-                        bench-device) position=first ;;
-                        *)           position=last ;;
-                    esac
-                else
-                    position=last
-                fi
+            # The order defaults from what the fleet says this machine is,
+            # not from a flag the caller has to remember: getting it wrong on
+            # a workstation costs a trip to the device.
+            if machine_by_ssh "$HOST" && [ "${MACH_ROLE:-workstation}" = bench-device ]; then
+                order_name=usb-first
+            else
+                order_name=local
             fi
-            case "$position" in
-                first) order_name=netboot-first ;;
-                last)  order_name=netboot-last ;;
-                *)     die "--position is 'first' or 'last'" ;;
-            esac
         fi
     fi
 
     case "$order_name" in
-        netboot-first|netboot-last|usb-first|local) ;;
+        netboot-first|netboot-last)
+            die "'$order_name' is gone with netboot (2026-08-21): there is no
+    server for the firmware to boot from. Orders: usb-first, local." ;;
+        usb-first|local) ;;
         *) die "no such boot order '$order_name'.
     orders:
-      netboot-first  network, then the local disks -- a dedicated test device
-      netboot-last   the local disks, then network -- a machine that is also a
-                     workstation, so an ordinary boot is unchanged
       usb-first      USB, then the SD card -- the local-boot lane, where the
-                     stick carries the image and the card is the rescue role
+                     stick carries the system and the card is the rescue role
       local          the local disks only, network removed" ;;
     esac
 
     rsh true >/dev/null 2>&1 || die "cannot ssh to $HOST.
     This writes the board's firmware configuration, so it needs the board
-    running and reachable. A Pi that cannot be reached at all has to be met
-    physically once -- an SD card written by 'wk sysimage write' -- before netboot
-    can make any later trip unnecessary. Netboot removes the second visit,
-    not the first."
+    running and reachable -- a Pi that cannot be reached at all has to be met
+    physically first, with a card written by 'wk sysimage write'."
 
     # Two ways to write an EEPROM, and which one is available is a property of
     # the image the board happens to be running rather than of the board.
@@ -231,8 +173,7 @@ cmd_boot_order() {
     # onboard is preferred where it exists, because it edits the *running*
     # EEPROM image and so changes only what was asked for; recovery replaces
     # the whole image with a pinned release. This used to refuse outright when
-    # onboard was missing, which grounded the one board the fleet most wants to
-    # netboot.
+    # onboard was missing, which grounded the fleet's own rpi4.
     local method=onboard
     if ! rsh 'command -v rpi-eeprom-config >/dev/null 2>&1'; then
         method=recovery
@@ -250,37 +191,17 @@ cmd_boot_order() {
     order=$(printf '%s\n' "$current" | sed -n 's/^BOOT_ORDER=//p' | head -1)
     [ -n "$order" ] || order=0xf41
 
-    # The netboot keys come out for every order, and go back in only for the two
-    # that use them. Leaving a TFTP_IP behind on a board that no longer netboots
-    # is a stale fact that reads as a live one.
+    # The netboot era's keys come out unconditionally: nothing writes them any
+    # more, and a TFTP_IP left behind on a board is a stale fact that reads as
+    # a live one.
     local stripped want
     stripped=$(printf '%s\n' "$current" | grep -vE '^(TFTP_IP|CLIENT_IP|SUBNET|GATEWAY)=')
 
     case "$order_name" in
-        local)         want=$(boot_order_without_net "$order") ;;
-        usb-first)     want=$(boot_order_usb_first "$order") ;;
-        netboot-first) want=$(boot_order_with_net "$order" first) ;;
-        netboot-last)  want=$(boot_order_with_net "$order" last) ;;
+        local)     want=$(boot_order_without_net "$order") ;;
+        usb-first) want=$(boot_order_usb_first "$order") ;;
     esac
     new=$(printf '%s\n' "$stripped" | sed "s|^BOOT_ORDER=.*|BOOT_ORDER=$want|")
-
-    case "$order_name" in
-      netboot-first|netboot-last)
-        [ -n "$server" ] || server=$(ip route get 1.1.1.1 2>/dev/null \
-            | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
-        [ -n "$server" ] || die "could not work out this machine's address; pass --server"
-
-        new="$new
-TFTP_IP=$server"
-        if [ -n "$client" ]; then
-            new="$new
-CLIENT_IP=$client
-SUBNET=$subnet"
-            [ -n "$gateway" ] && new="$new
-GATEWAY=$gateway"
-        fi
-        ;;
-    esac
 
     # The no-change case reads badly the other way round: a "would change"
     # header followed by an empty diff and then "already says this" is three
@@ -330,16 +251,12 @@ GATEWAY=$gateway"
     log  "  undo with:   wk pi boot-order $HOST local"
 }
 
-if [ "$ACTION" = netboot-enable ]; then
-    cmd_boot_order "$@"
-    exit 0
-fi
-
 if [ "$ACTION" = boot-order ]; then
-    ORDER_NAME="${1:-}"
-    [ -n "$ORDER_NAME" ] || die "usage: wk pi boot-order $HOST <order>
-    orders: netboot-first  netboot-last  usb-first  local"
-    shift
+    ORDER_NAME=""
+    case "${1:-}" in
+        ''|--*) ;;
+        *) ORDER_NAME="$1"; shift ;;
+    esac
     cmd_boot_order "$@"
     exit 0
 fi

@@ -1,75 +1,47 @@
 #!/usr/bin/env python3
 """Will the firmware find everything it needs in this boot filesystem?
 
-Asked of a TFTP root and of an image's boot partition alike, because it is the
-same question either way: firmware reads config.txt, follows `os_prefix`, and
-looks for a kernel.  The only difference is the spelling -- over TFTP every
-request carries a serial-number directory, and on a disk none of them do, which
-is what `--serial ""` is for.
+Asked by `wk sysimage write` of an image's boot partition before anything is
+written to a disk.  Firmware reads config.txt, follows `os_prefix`, and looks
+for a kernel -- and a boot that gets *partway* is not harmless.  Once the
+bootloader has executed start4.elf, the second stage owns the boot and
+BOOT_ORDER is spent: if that stage cannot find the kernel its config.txt
+names, Pi 4 firmware halts with an LED error pattern.  It does not retry, it
+does not return to the bootloader, and it does not touch the next device.  A
+headless board in that state needs a hand on its power supply.
 
-Why this exists, and why it is a hard refusal rather than a warning.
-
-A netboot that never gets off the ground is *harmless*: the firmware's TFTP
-attempt times out, BOOT_ORDER falls through to the local disk, and the board
-comes up as it always did.  That fall-through is the safety property the whole
-netboot design leans on -- boot/pi-netboot.sh calls it "benign" and it is.
-
-A netboot that gets *partway* is not harmless.  Once the bootloader has pulled
-start4.elf over the network and executed it, the second stage owns the boot and
-BOOT_ORDER is spent.  If that stage cannot find the kernel its config.txt names,
-Pi 4 firmware halts with an LED error pattern.  It does not retry, it does not
-return to the bootloader, and it does not touch the SD card.  A headless board in
-that state needs a hand on its power supply.
-
-That happened here, on 2026-08-20, to the fleet's rpi4.  The cause was a bug in
-wk-tftpd's serial-directory fallback: it retried a missed request under
-`os.path.basename`, so `<serial>/current/vmlinuz` became `vmlinuz`, which is not
-at the root of a flash-kernel image.  The firmware fetched start4.elf and
-config.txt happily, then asked for the kernel, got NOT FOUND, and stopped.  The
-files were all present in the served tree; they were simply unreachable through
-the resolver.
-
-So this check asks *the resolver* rather than the filesystem.  Reading the tree
-with os.path.exists would have found vmlinuz exactly where it was supposed to be
-and passed the board straight into the halt.  The only question worth asking is
-the one the firmware asks: "if I request this name, do I get bytes?"
+That happened here, on 2026-08-20, to the fleet's rpi4 -- over the since-
+removed netboot path, but the medium was incidental: firmware asks the same
+questions of a disk.  The lesson that survives the netboot removal is *how*
+the files went missing: they were all present in the tree, and unreachable
+through the name-resolution rules the firmware actually applies.  So this
+check asks a resolver that models those rules, not os.path.exists -- the only
+question worth asking is the one the firmware asks: "if I request this name,
+do I get bytes?"
 """
 
 import argparse
-import importlib.machinery
-import importlib.util
 import os
 import sys
 
 
-def load_resolver(script):
-    """Import `resolve` out of the server that is actually going to run.
+def _inside(root, wanted):
+    """Join onto the root, or None if the result escapes it.
 
-    An explicit SourceFileLoader rather than letting spec_from_file_location
-    infer one: on the privileged path the server is
-    /usr/local/libexec/wk-tftpd, a root-owned copy with no .py extension, and
-    inference returns a spec with no loader for a name Python does not
-    recognise as source.
-
-    Pointing this at the repo's copy when the installed one will serve is the
-    whole failure this argument exists to prevent -- see cmd/serve.
+    Path traversal is refused by construction: the result must still be inside
+    the root after resolution.  A name like `../../etc/shadow` never resolves
+    to a file outside the tree being checked, no matter how it is spelled.
     """
-    loader = importlib.machinery.SourceFileLoader("wk_tftpd", script)
-    spec = importlib.util.spec_from_file_location("wk_tftpd", script, loader=loader)
-    module = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(module)
-    except SystemExit:
-        # The server called main() at import. Every copy new enough to be
-        # importable guards that call, so this *is* the staleness signature --
-        # and it is worth naming rather than letting argparse's usage message
-        # be the whole of the diagnosis.
-        raise SystemExit(
-            f"{script} ran its main() on import, so it predates the importable "
-            f"guard in boot/wk-tftpd.py. It is a stale copy: re-run "
-            f"'./setup --stage quiesce' to reinstall it."
-        )
-    return module.resolve
+    path = os.path.realpath(os.path.join(root, wanted))
+    if path != root and not path.startswith(root + os.sep):
+        return None
+    return path if os.path.isfile(path) else None
+
+
+def resolve(root, filename):
+    """Map a requested name onto a real file inside the tree, or refuse."""
+    wanted = filename.lstrip("/").replace("\\", "/")
+    return _inside(root, wanted)
 
 
 def parse_config(text):
@@ -114,8 +86,7 @@ def wanted_files(config, model_dtb):
 
     Only the files whose absence *stops* the boot. The firmware probes for a
     long tail of optional things on every boot -- recovery.elf, dt-blob.bin,
-    bootcfg.txt -- and missing those is normal, which is why a log full of
-    misses is not by itself a problem.
+    bootcfg.txt -- and missing those is normal.
     """
     prefix = config.get("os_prefix", "")
 
@@ -157,17 +128,9 @@ def wanted_files(config, model_dtb):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--root", required=True, help="the TFTP root to check")
-    ap.add_argument("--tftpd", required=True,
-                    help="the tftp server that will actually serve this root")
+    ap.add_argument("--root", required=True, help="the boot filesystem to check")
     ap.add_argument("--dtb", default="bcm2711-rpi-4-b.dtb",
                     help="the device tree the target board will ask for")
-    ap.add_argument("--serial", default="0badc0de",
-                    help="a stand-in serial directory, so the check goes through "
-                         "the same prefixed path the firmware uses over TFTP. "
-                         "Empty for a boot filesystem on a disk, where firmware "
-                         "asks for the plain name and there is no prefix to "
-                         "fall back from")
     ap.add_argument("--resolve", metavar="NAME",
                     help="instead of checking the tree, print what this one "
                          "request maps to, relative to the root, and nothing at "
@@ -176,20 +139,15 @@ def main():
     args = ap.parse_args()
 
     root = os.path.realpath(args.root)
-    resolve = load_resolver(args.tftpd)
-
-    def ask(name):
-        """One request, spelled the way the firmware would spell it here."""
-        return resolve(root, f"{args.serial}/{name}" if args.serial else name)
 
     if args.resolve is not None:
-        path, _ = resolve(root, args.resolve)
+        path = resolve(root, args.resolve)
         print(os.path.relpath(path, root) if path else "")
         return 0
 
     config_path = os.path.join(root, "config.txt")
     if not os.path.isfile(config_path):
-        print("no config.txt in the served tree", file=sys.stderr)
+        print("no config.txt in the boot filesystem", file=sys.stderr)
         return 1
 
     with open(config_path, "r", errors="replace") as fh:
@@ -198,8 +156,7 @@ def main():
     missing = []
     for what, candidates in wanted_files(config, args.dtb):
         for name in candidates:
-            path, _ = ask(name)
-            if path is not None:
+            if resolve(root, name) is not None:
                 break
         else:
             missing.append((what, candidates))

@@ -201,7 +201,8 @@ into the podman VM at all: only container workspaces live there.
 
 Shared build machines are treated as someone else's machine too — job count
 comes from *that* machine's live load average and free memory, builds run at
-`nice 19`, and a `flock` stops two of your own builds from stacking. There is
+`nice 19`, and a build lock (`lib/lockrun.sh`) stops two of your own builds
+from stacking. There is
 no sandbox there, so `wk verify` refuses a remote target outright — there is
 nothing to measure — and `wk claude` stops at a barrier that says exactly
 that; only `--force` proceeds, loudly.
@@ -301,7 +302,8 @@ container/         workspace-side setup          build/     configs + the in-tar
 container/proxy/   the egress boundary           container/gpu/  the EGL probe
 admin/             quiesce + session helper      vm/        macOS guest provisioning
 image/             system profiles + builders    boot/      the fleet: machines + boot drivers
-docs/              handoffs and design notes
+bridge/            tailnet-bridge devices        remote/    build-machine provisioning
+shell/             shared shell rc               docs/      handoffs and design notes
 
 ```
 

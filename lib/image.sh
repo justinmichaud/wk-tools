@@ -186,7 +186,7 @@ device_class() {
 
 # Refuse a write whose image cannot boot from the device it is going to.
 #
-# This is the same class of check as `check_root_is_reachable` in cmd/serve,
+# This is the same class of check as image_check_root below,
 # which refuses to *netboot* an image whose cmdline names a local root. The
 # failure it prevents is expensive in the same way: nothing here fails, the
 # write succeeds, and the discovery happens on a headless board that fetched a
@@ -240,8 +240,9 @@ image_check_root() {
 # sitting in a file and can be read in a second -- rather than discovered on a
 # board.
 #
-# It happened over TFTP on 2026-08-20 and cost the rpi4 two power cycles. The
-# medium was incidental; firmware asks the same questions of a disk.
+# It first happened over the since-removed netboot path on 2026-08-20 and cost
+# the rpi4 two power cycles. The medium was incidental; firmware asks the same
+# questions of a disk.
 #
 #   image_check_boot_files <id> <machine>
 image_check_boot_files() {
@@ -262,12 +263,8 @@ image_check_boot_files() {
         return 0
     fi
 
-    # --serial "": on a disk the firmware asks for the plain name. The TFTP
-    # serial-directory fallback is a property of the transport, and letting it
-    # fire here would pass a tree that a disk boot would not.
     out=$(python3 "$WK_ROOT/boot/check-boot-files.py" \
-              --root "$work" --tftpd "$WK_ROOT/boot/wk-tftpd.py" \
-              --dtb "$dtb" --serial "" 2>&1) && { rm -rf "$work"; return 0; }
+              --root "$work" --dtb "$dtb" 2>&1) && { rm -rf "$work"; return 0; }
     rm -rf "$work"
 
     die "$id's boot partition is missing files a $machine needs to reach its kernel:

@@ -3,7 +3,8 @@
 **Status: decided 2026-08-20, and the rename landed in the code the same day.**
 `wk sysimage`, `role`/`mode`, `bench-device`/`workstation` and the profile
 names below are what the tool now says; this file is what they mean. Still
-missing are the three lifecycle commands marked [MISSING] below.
+missing: the lifecycle steps marked [MISSING] below, and `wk provision` is
+only partly covered by `wk pi setup` ([PARTIAL]).
 
 It exists because four words in this repo each meant three or four different
 things, and the confusion had started costing mistakes rather than just
@@ -259,7 +260,8 @@ step 4 with its own host mode.
     2  wk sysimage flash <id> --reader /dev/sdX                     [MISSING]
        -- card into the board, power on
     3  wk provision <machine>                                       [PARTIAL]
-       tailnet, keys, boot order, fleet record
+       tailnet, keys, boot order (the fleet record is config now:
+       boot/machines/<name>.conf)
     ---------------------------------------------------------------------------
     4  wk sysimage build perf-linux-<machine>                       [built]
     5  wk sysimage write <id> --disk <machine>:<device>             [built]
@@ -298,12 +300,14 @@ step 4 with its own host mode.
    `wk pi setup`; the hands-on steps (a card in a reader, a power cable) are
    prompts, not documentation.
 
-5. **A device registry.** `boot/machines.sh`'s case statement should become
-   `machines/<name>.conf`, the same shape `targets/hosts/*.conf` already uses,
-   carrying `role`, `hardware`, `ssh`, `seed_profile`, `bench_profile`,
-   `device`, `mac`, and `os`. `MACH_OS` is not cosmetic: `wk boot mbp --status`
-   run from Linux used to exit 127 partway through printing a status, because
-   nothing recorded that the machine is macOS-only.
+5. **A device registry — DONE 2026-08-21.** `boot/machines.sh`'s case
+   statement became `boot/machines/<name>.conf`, the same shape
+   `targets/hosts/*.conf` uses, carrying role, ssh, driver, device, profile,
+   mac, note and `MACH_OS` — which is not cosmetic: `wk boot mbp` run from
+   Linux now refuses by the registry's word, where it used to probe the
+   driving machine and answer about the wrong computer. Each conf opens with
+   its device's from-nothing recipe (`docs/HANDOFF-cattle.md`). Roles change
+   by editing one field, as this file required.
 
 ## The devices
 
@@ -317,14 +321,14 @@ Everything on the tailnet or in the fleet, and what it is for.
 | `tolken` | Apple Silicon Mac (M4) | workstation | `hands-on` | `mbp` in the fleet; boots the `WK Bench` volume, chosen by a person |
 | `rpi5` | Pi 5, NVMe + WiFi | workstation | `one-shot` | firmware register; NVMe untouched; **64-bit only**; distro *and* yocto bench modes |
 | `rpi4` | Pi 4B, **4 GB**, wired | bench-device | `medium` | USB stick is bench mode, SD card is host mode; 32- and 64-bit |
-| `rpi3` | Pi 3, armv7l, 931 MB | bench-device | — | **not provisioned**, no DNS entry; 32- and 64-bit systems both named now |
-| `benchvm` | macOS guest | bench-device | — | scriptable rehearsal for tolken |
+| `rpi3` | Pi 3, armv7l, 931 MB | bench-device | `hands-on` (local SD; netboot dropped 2026-08-21) | **not provisioned**, no DNS entry; 32- and 64-bit systems both named now |
+| `benchvm` | macOS guest | bench-device | `guest` | scriptable rehearsal for tolken |
 
 ### Auxiliary — not booted by wk, but part of how the fleet is reached
 
 | device | role | notes |
 |---|---|---|
-| `librem5-oob` | tailnet-bridge | Librem 5; DHCP, routing and tailscale proxy for the `bmc0` segment. Called "bmc" today; `docs/HANDOFF-bmc-2.md` scopes doing the same job with a spare Android phone |
+| `librem5-oob` | tailnet-bridge | Librem 5; DHCP, routing and tailscale proxy for the `bmc0` segment. Called "bmc" today; `docs/HANDOFF-bmc.md` scopes the generic tailnet-bridge devices (pinephone/librem5 on pmos) that replace it |
 | moose's ASPEED BMC | out-of-band console | `10.99.0.2`, behind the bridge; KVM-over-IP and virtual media |
 | `fbi-surveillance-gateway` | infrastructure | home gateway |
 | `nextcloud`, `immich`, `overleaf`, `nc`, `leaf` | infrastructure | home services; `tag:server`, which the Pi ACL must not reuse |

@@ -5,7 +5,7 @@
 # needs the property both of them provide.
 #
 # `boot/rpi5-usb.sh` uses `set_reboot_order` through the firmware mailbox --
-# a genuine one-shot, and Raspberry Pi 5 only. `boot/pi-netboot.sh` moves the
+# a genuine one-shot, and Raspberry Pi 5 only. The retired netboot driver moved the
 # arming to the server instead, which is a good answer and the wrong one for a
 # benchmark: a netboot that reaches start4.elf and no further *halts*, with no
 # fall-through and nothing reachable over the wire, and a lane that runs
@@ -211,4 +211,18 @@ b_evidence() {
     local state
     state=$(piusb_state 2>/dev/null) || true
     printf 'usb_stick=%s\n' "${state:-unreadable}"
+}
+
+# The wk-managed media, in one line, for the fleet block in `wk status`.
+b_media() {
+    local id state
+    case "${MODE:-}" in
+        bench*) printf 'booted from its USB stick (system %s); SD card is the rescue' "${MODE#bench }"; return 0 ;;
+        host)   ;;
+        *)      printf 'USB stick %s: state unknown (board unreachable); SD card is the rescue' "$MACH_DEVICE"; return 0 ;;
+    esac
+    id=$(b_device_image 2>/dev/null || true)
+    state=$(piusb_state 2>/dev/null) || true
+    printf 'USB stick %s holds %s, %s; SD card is the rescue' \
+        "$MACH_DEVICE" "${id:-no wk system (wk sysimage write puts one there)}" "${state:-unreadable}"
 }

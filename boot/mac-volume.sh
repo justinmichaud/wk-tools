@@ -36,12 +36,13 @@
 # that exist without one -- probe, status, evidence, and the refusals. What
 # needs a volume is marked where it appears.
 
-# A third arming model, next to `one-shot` (rpi5) and `server` (rpi4/rpi3):
+# Another arming model, next to `one-shot` (rpi5), `medium` (rpi4) and
+# `server` (rpi3):
 # the intent is recorded and the act is a person's. cmd/boot branches on it
 # rather than assuming a firmware call it can make.
 BOOT_ARMING=hands-on
 
-# Not used: there is no boot order to write. Named, as in boot/pi-netboot.sh,
+# Not used: there is no boot order to write. Named, as other drivers do,
 # so that a reader comparing drivers sees a difference rather than an omission.
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
@@ -266,4 +267,22 @@ b_reboot() {
 b_bench_root() {
     mac_volume_present || return 1
     printf '%s/var/wk' "$(mac_volume_path)"
+}
+
+# A MACH_LOCAL machine answers only for itself: probing it from anywhere else
+# reads the *driving* machine's marker and reports a confident wrong answer
+# (the b_evidence comment above records the df / version of that mistake).
+b_probeable() { is_macos; }
+
+# The wk-managed media, in one line, for the fleet block in `wk status`.
+b_media() {
+    if ! is_macos; then
+        printf "bench volume '%s' (visible only on that Mac)" "$MACH_VOLUME"
+        return 0
+    fi
+    if mac_volume_present; then
+        printf "bench volume '%s' attached at %s" "$MACH_VOLUME" "$(mac_volume_path)"
+    else
+        printf "bench volume '%s' MISSING -- docs/HANDOFF-mac-perf-mode.md creates it" "$MACH_VOLUME"
+    fi
 }

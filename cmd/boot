@@ -93,6 +93,19 @@ while [ $# -gt 0 ]; do
 done
 
 machine_load "$MACHINE" || die "unknown machine '$MACHINE' (wk boot --list)"
+
+# A machine that can only be driven from one OS is refused everywhere else,
+# by the registry's own word -- probing a MACH_LOCAL machine from the wrong
+# host reads the *driving* machine's marker and answers confidently about the
+# wrong computer, which is exactly the class of bug MACH_OS exists to stop.
+case "$MACH_OS" in
+    any) ;;
+    macos) is_macos || die "$MACHINE is driven from a macOS host only (os=macos in
+    boot/machines/$MACHINE.conf) -- run this over there." ;;
+    linux) ! is_macos || die "$MACHINE is driven from a Linux host only (os=linux in
+    boot/machines/$MACHINE.conf) -- run this over there." ;;
+esac
+
 load_driver "$MACH_DRIVER"
 
 # --- reading the transition --------------------------------------------------
@@ -259,16 +272,8 @@ cmd_arm() {
 
     case "$MODE" in
         unreachable)
-            if [ "${BOOT_ARMING:-one-shot}" = server ]; then
-                # Not fatal here, unlike a one-shot: the server holds the
-                # arming, so a board that is off or wedged is still armed --
-                # it boots the image whenever it next powers on.
-                warn "$MACHINE is not answering, but its arming lives on the server:"
-                warn "  power it on and it boots what this machine is serving."
-            else
-                die "$MACHINE is not reachable over ssh in host mode.
-    Arming is an ssh command, so there is nothing to arm from here."
-            fi ;;
+            die "$MACHINE is not reachable over ssh in host mode.
+    Arming is an ssh command, so there is nothing to arm from here." ;;
         bench*) die "$MACHINE is already in bench mode (system ${MODE#bench }).
     'wk boot $MACHINE --back' returns it first." ;;
     esac
@@ -292,9 +297,6 @@ cmd_arm() {
     # firmware failure. Asked by name rather than by hash -- see
     # b_device_image() for why bit comparison is the wrong question once an
     # image has booted once.
-    #
-    # A server-armed machine has no local image to check: its driver's b_arm
-    # checks the server instead, which is where its arming actually lives.
     case "${BOOT_ARMING:-one-shot}" in one-shot|medium)
         local on_device
         on_device=$(b_device_image)
@@ -361,18 +363,10 @@ EOF
         # that disagrees with the medium is visibly wrong rather than believed.
         record_write "$IMAGE" "$(manifest_get "$IMAGE" profile)" "$MACH_DEVICE" ""
         b_arm
-    else
-        # No record is written here, and that is rule 1 rather than an
-        # omission: a server-armed machine's intent *is* the server's content,
-        # which the serving host already records once in serve.status. A copy
-        # on the client would be a second record of one fact -- and the one
-        # that goes stale, because the transition happens at the server.
-        b_arm
     fi
     b_reboot
 
     info "$MACHINE is rebooting into system $IMAGE"
-    [ "${BOOT_ARMING:-one-shot}" = server ] && b_disarm_note
     log  "  it returns by itself in $(manifest_get "$IMAGE" watchdog)s unless claimed:"
     log  "    wk boot $MACHINE --keep     claim it"
     log  "    wk boot $MACHINE --back     hand it back now"

@@ -47,7 +47,7 @@ LIST=""
 # has to be a refusal: `wk selftest --section <typo>` used to run nothing at
 # all and exit 0 -- the silent pass the plan's own preamble forbids, and the
 # worst possible one, since it is reported as "everything passed".
-SECTIONS="quick state remote netboot"
+SECTIONS="quick state remote"
 
 usage() {
     cat >&2 <<EOF
@@ -813,9 +813,16 @@ chk_boot_status_survives_an_absent_machine() {
     local m out rc
     for m in $("$WK" boot --list 2>/dev/null | awk '{print $1}'); do
         rc=0; out=$("$WK" boot "$m" --status 2>&1) || rc=$?
-        # 0 = in a role, 2 = armed, 3 = unreachable. Anything else, or no
-        # output at all, is the failure this check is about.
-        case "$rc" in 0|2|3) ;; *) echo "'wk boot $m --status' exited $rc: $out"; return 1 ;; esac
+        # 0 = in a mode, 2 = armed, 3 = unreachable. A machine another OS
+        # drives is refused by the registry's os= field -- loudly, which is
+        # this check's whole property -- so that refusal passes too.
+        case "$rc" in
+            0|2|3) ;;
+            *) case "$out" in
+                   *"driven from a"*"host only"*) ;;
+                   *) echo "'wk boot $m --status' exited $rc: $out"; return 1 ;;
+               esac ;;
+        esac
         [ -n "$out" ] || { echo "'wk boot $m --status' printed nothing (exit $rc)"; return 1; }
     done
 }
@@ -1091,20 +1098,17 @@ if [ -z "$LIST" ]; then
     fi
 fi
 
-# --- netboot: the resolver a board's firmware talks to ------------------------
+# --- the boot-file check `wk sysimage write` runs before a disk is written ----
 #
-# These are here rather than in a scratch script because this resolver halted
-# the fleet's rpi4 twice in one afternoon, and both times the mistake was
-# invisible from outside: the files were in the served tree, the tree looked
-# right, and the server answered NOT FOUND. A resolver whose failures cost a
-# trip to the device is one that should be exercised on every edit.
+# These are here rather than in a scratch script because the failure this check
+# guards against halted the fleet's rpi4 twice in one afternoon (over the
+# since-removed netboot path -- the medium was incidental): the files were all
+# present in the tree and unreachable through the names the firmware asks for.
 #
 # All of it is offline, so it belongs in --quick.
 
 # One fixture, the layout of a flash-kernel image's boot partition -- which is
-# the layout that broke. `README` at the root *and* `overlays/README` under the
-# prefix is not incidental: it is the pair that proves the fallback does not
-# answer with the wrong file.
+# the layout that broke.
 _nb_fixture() {
     local d; d=$(mktemp -d "$TMP/netboot.XXXXXX")
     mkdir -p "$d/current/overlays"
@@ -1127,44 +1131,44 @@ _nb_fixture() {
     echo "$d"
 }
 
-# Ask the real resolver what one request maps to, through the same entry point
-# cmd/serve uses to certify a tree.
+# Ask the resolver what one request maps to, through the same entry point
+# image_check_boot_files uses to certify a tree.
 _nb_resolve() {
-    python3 "$WK_ROOT/boot/check-boot-files.py" \
-        --root "$1" --tftpd "$WK_ROOT/boot/wk-tftpd.py" --resolve "$2"
+    python3 "$WK_ROOT/boot/check-boot-files.py" --root "$1" --resolve "$2"
 }
 
-chk_tftp_fallback_keeps_path() {
-    local d got; d=$(_nb_fixture)
-    got=$(_nb_resolve "$d" "7da7aee3/current/vmlinuz")
-    [ "$got" = "current/vmlinuz" ] || {
-        echo "7da7aee3/current/vmlinuz resolved to '${got:-NOTHING}', wanted current/vmlinuz"
-        echo "that is the halt: an os_prefix= image's kernel unreachable over TFTP"
-        return 1
-    }
+chk_machine_registry() {
+    # The fleet is config, not code (docs/HANDOFF-cattle.md): every machine is
+    # a conf under boot/machines/ that loads cleanly and answers the questions
+    # every consumer asks of it. A conf that half-loads would surface as a
+    # driver error at arming time, on the machine it matters on.
+    local f n bad=""
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/boot/machines.sh"
+    for f in "$WK_ROOT"/boot/machines/*.conf; do
+        [ -f "$f" ] || { echo "no machine confs at all"; return 1; }
+        n=$(basename "$f" .conf)
+        ( machine_load "$n" || exit 1
+          [ -n "$MACH_DRIVER" ] || { echo "  $n: no MACH_DRIVER"; exit 1; }
+          [ -f "$WK_ROOT/boot/$MACH_DRIVER.sh" ] || { echo "  $n: driver boot/$MACH_DRIVER.sh does not exist"; exit 1; }
+          case "$MACH_ROLE" in workstation|bench-device) ;; *) echo "  $n: role '$MACH_ROLE' is not in the vocabulary"; exit 1 ;; esac
+          case "$MACH_OS" in any|macos|linux) ;; *) echo "  $n: os '$MACH_OS' is not any|macos|linux"; exit 1 ;; esac
+          [ -n "$MACH_PROFILE" ] || { echo "  $n: no MACH_PROFILE"; exit 1; }
+          [ -n "$MACH_NOTE" ] || { echo "  $n: no MACH_NOTE"; exit 1; }
+        ) || bad="$bad $n"
+    done
+    [ -z "$bad" ] || { echo "machine confs that do not stand alone:$bad"; return 1; }
+    # The listing and the directory must be the same set: a conf the listing
+    # skips is a machine that exists and is invisible.
+    local listed dir_names
+    listed=$(machine_list | awk '{print $1}' | sort)
+    dir_names=$(ls "$WK_ROOT"/boot/machines/*.conf 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.conf$//' | sort)
+    [ "$listed" = "$dir_names" ] || { echo "machine_list and boot/machines/ disagree:
+  listed: $(printf '%s' "$listed" | tr '\n' ' ')
+  dir:    $(printf '%s' "$dir_names" | tr '\n' ' ')"; return 1; }
 }
 
-chk_tftp_fallback_never_substitutes() {
-    local d got; d=$(_nb_fixture)
-    got=$(_nb_resolve "$d" "7da7aee3/current/overlays/README")
-    [ "$got" = "current/overlays/README" ] || {
-        echo "resolved to '${got:-NOTHING}', wanted current/overlays/README"
-        echo "answering with the root's own README is the wrong bytes under the right name"
-        return 1
-    }
-}
-
-chk_tftp_fallback_yields_to_real_dir() {
-    local d got; d=$(_nb_fixture)
-    mkdir -p "$d/7da7aee3"; printf 'serial\n' > "$d/7da7aee3/start4.elf"
-    got=$(_nb_resolve "$d" "7da7aee3/start4.elf")
-    [ "$got" = "7da7aee3/start4.elf" ] || {
-        echo "resolved to '${got:-NOTHING}'; a populated serial directory must win"
-        return 1
-    }
-}
-
-chk_tftp_traversal_refused() {
+chk_boot_traversal_refused() {
     local d n; d=$(_nb_fixture)
     for n in "../../etc/passwd" "deadbeef/../../etc/passwd"; do
         [ -z "$(_nb_resolve "$d" "$n")" ] || { echo "$n resolved to something"; return 1; }
@@ -1175,8 +1179,8 @@ chk_boot_files_check_catches_missing_kernel() {
     local d out; d=$(_nb_fixture)
     rm -f "$d/current/vmlinuz"
     out=$(python3 "$WK_ROOT/boot/check-boot-files.py" --root "$d" \
-              --tftpd "$WK_ROOT/boot/wk-tftpd.py" --dtb bcm2711-rpi-4-b.dtb 2>&1) && {
-        echo "a tree with no kernel was reported serveable"; return 1; }
+              --dtb bcm2711-rpi-4-b.dtb 2>&1) && {
+        echo "a tree with no kernel was reported bootable"; return 1; }
     case "$out" in
         *current/vmlinuz*) ;;
         *) echo "did not name the missing kernel: $out"; return 1 ;;
@@ -1293,35 +1297,8 @@ chk_boot_files_accepts_autodetected_kernel() {
     rm -rf "$d/current"
     : > "$d/kernel8.img"; : > "$d/cmdline.txt"; : > "$d/bcm2711-rpi-4-b.dtb"
     out=$(python3 "$WK_ROOT/boot/check-boot-files.py" --root "$d" \
-              --tftpd "$WK_ROOT/boot/wk-tftpd.py" --dtb bcm2711-rpi-4-b.dtb \
-              --serial "" 2>&1) \
+              --dtb bcm2711-rpi-4-b.dtb 2>&1) \
         || { echo "an auto-detected kernel8.img image was refused: $out"; return 1; }
-}
-
-chk_boot_files_check_uses_the_running_server() {
-    # The --tftpd argument exists so the check can interrogate the root-owned
-    # copy that actually serves. If cmd/serve stopped passing it, the check
-    # would go back to certifying a file that is not the one about to run --
-    # which is exactly what it did on the day it was written.
-    grep -q -- '--tftpd "\$server"' "$WK_ROOT/cmd/serve" \
-        || { echo "cmd/serve no longer points the boot-file check at the server it starts"; return 1; }
-    grep -q -- 'server="\$PRIV"' "$WK_ROOT/cmd/serve" \
-        || { echo "cmd/serve no longer prefers the privileged helper when checking"; return 1; }
-}
-
-chk_serve_refuses_stale_helper() {
-    local priv=/usr/local/libexec/wk-tftpd out
-    [ -f "$priv" ] || { echo "no privileged helper installed"; return 77; }
-    grep -q 'check_helper_current' "$WK_ROOT/cmd/serve" \
-        || { echo "cmd/serve no longer compares the installed helper"; return 1; }
-    # In sync, so the refusal cannot be provoked without breaking the install.
-    # The guard being wired in is all that is checkable here.
-    cmp -s "$WK_ROOT/boot/wk-tftpd.py" "$priv" && return 0
-    out=$("$WK" serve --system wk-selftest-no-such-image 2>&1) || true
-    case "$out" in
-        *"not the server in this checkout"*) return 0 ;;
-        *) echo "the helper is stale but wk serve did not say so:"; echo "$out"; return 1 ;;
-    esac
 }
 
 if want quick; then
@@ -1351,17 +1328,13 @@ if want quick; then
     check "a benchmark runs in bench mode or it does not run"      chk_bench_role_required
     check "instead of exiting silently"                                    chk_boot_status_survives_an_absent_machine
     check "and it parses"                                                  chk_stage_manifest_is_json
-    check "keeps the rest of the path"                                    chk_tftp_fallback_keeps_path
-    check "never answers with a *different* file"                         chk_tftp_fallback_never_substitutes
-    check "does not fire when the leading directory really exists"        chk_tftp_fallback_yields_to_real_dir
-    check "path traversal is refused, including via a serial-directory prefix" chk_tftp_traversal_refused
-    check "the boot files a client will ask for are not all"              chk_boot_files_check_catches_missing_kernel
-    check "resolves through the server that will actually run"            chk_boot_files_check_uses_the_running_server
+    check "every machine is a conf under boot/machines"                   chk_machine_registry
+    check "path traversal is refused"                                     chk_boot_traversal_refused
+    check "the boot files the firmware will ask for are not"              chk_boot_files_check_catches_missing_kernel
     check "names no \`kernel=\` and no \`arm_64bit=\` is accepted"           chk_boot_files_accepts_autodetected_kernel
     check "contains no unescaped backtick"                                chk_image_seed_prose_is_inert
     check "one byte of the MBR at offset 450"                             chk_piusb_type_byte_roundtrips
     check "contains no single quote"                                      chk_self_disarm_sh_is_single_quote_free
-    check "the installed privileged helper differs from"                  chk_serve_refuses_stale_helper
     check "lists every declared bridge"                                   chk_bridge_ls
     check "loads and names a device"                                      chk_bridge_confs_resolve
     check "is the inverse of"                                             chk_bridge_rm_is_inverse

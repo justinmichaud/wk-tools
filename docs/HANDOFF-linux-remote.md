@@ -265,9 +265,6 @@ host-only commands on itself.
 - **`wk gc` never looks at a remote store.** Nothing large lives on the
   driving side (a log and a status file), but the remote root itself — mirror,
   ccache, dead workspaces — has no reclaim path beyond `wk rm`.
-- **`remote/provision.sh` still checks for `flock` as a hard prerequisite**,
-  and nothing uses flock any more — the build lock is `lib/lockrun.sh`. The
-  check should go, or name what is actually required.
 - **Delegated output interleaves.** `wk status`/`wk logs` against a machine
   return two streams over one connection, and stdout rows can arrive before
   the stderr headings that introduce them. Merging them remotely would fix the

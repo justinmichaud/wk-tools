@@ -1,3 +1,13 @@
+# HANDOFF — tailnet-bridge devices (the BMC's librem5, and its successors)
+
+**Status 2026-08-20: the software half shipped** — `wk bridge` (`cmd/bridge`,
+`bridge/`), one-command provision/removal from this repo, camera streaming,
+the power/network watchdogs, and the tar file gone; TESTING.md §8 has the
+verified lines. **Open is the hardware half** (§8 "Needs the hardware"): flash
+the PinePhone with pmOS and provision `tailnet-bridge-generic` end to end,
+then re-flash the librem5 as `tailnet-bridge-moose-bmc`. The original asks,
+kept below because the hardware steps still execute against them:
+
 How can I make my librem5 bmc auto turn on after power loss? How can I recover this device if it is left off without being physically present?
 
 Going forward, we will name the librem5 tailnet-bridge-X and switch to pmos for portability. We will support the librem 5 and pinephone as the primary devices.
@@ -9,4 +19,4 @@ This role should:
 
 Make the setup files run from this repo instead of the phone, and get rid of the tar file in this repo. It should be one command to re-provision a new tailnet bridge device, and it should be easy to remove one.
 
-We will first flash my pinephone to act as a bridge for the rpi4 or rpi3 (tailnet-bridge-generic). Then, we will re-flash my librem5 to act as a bridge for the bmc (rpi-bridge-moose-bmc).
+We will first flash my pinephone to act as a bridge for the rpi4 or rpi3 (tailnet-bridge-generic). Then, we will re-flash my librem5 to act as a bridge for the bmc (tailnet-bridge-moose-bmc).

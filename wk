@@ -32,7 +32,9 @@ workspaces
   build <name> <config>     build, with derived job count and nice level
       --detach              run it on the machine that builds and return; the
                             build survives this connection going away
-  status [name]             build/container state; exit code is machine-readable
+  status [name]             build/container state, then the fleet: each
+                            device's role, mode and wk-owned media; exit code
+                            is machine-readable
   logs <name> [-f|--all]    build log, errors first
   run <name> [--config C] [--lldb] [args]   run jsc from the workspace build
   gui <name> [url]          MiniBrowser in the seat, launched as perf runs do
@@ -87,7 +89,7 @@ hosts and machines
                             the golden guest every vm workspace is cloned from:
                             build it, fast-forward its checkout, remake it, or
                             erase it (it is the largest thing on the machine)
-  pi <sub>                  setup: onto the tailnet; netboot-enable: the
+  pi <sub>                  setup: onto the tailnet; boot-order: the
                             EEPROM's only writer
   sysimage <sub>            bootable systems: build|ls|show|disks|write|rm
       write <id> --disk <machine>:<device>
@@ -96,7 +98,6 @@ hosts and machines
                             disk; writing one does not make anything boot it)
   boot <machine>            put a machine into bench mode for one boot
                             (--status|--keep|--back|--disarm|--diag|--dry-run)
-  serve                     hand boot files to machines that netboot
                             (--system|--address|--status|--stop|--dry-run)
   remote setup|rm <target>  provision a shared build machine, or undo that
                             and forget it (never needs root)
@@ -267,12 +268,11 @@ is_host_only() {
     case "$1" in
         setup|backup|vm|mcp|quiesce|session|pi|remote|bridge|stop|start|sync|gc) return 0 ;;
         # The fleet and the image store: a boot device, a firmware register, a
-        # disk measured in gigabytes, a TFTP server on the LAN. None of it
-        # exists in a workspace and the sandbox cannot reach the machine that
-        # has it. Each of these three carried its own copy of this refusal,
-        # with a comment saying it belonged here -- it does, next to the
-        # commands it is the same rule as.
-        sysimage|boot|serve) return 0 ;;
+        # disk measured in gigabytes. None of it exists in a workspace and the
+        # sandbox cannot reach the machine that has it. Each of these carried
+        # its own copy of this refusal, with a comment saying it belonged here
+        # -- it does, next to the commands it is the same rule as.
+        sysimage|boot) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -310,11 +310,11 @@ is_host_command() {
         # now and pipes its own container half into the VM.
         gc) return 0 ;;
         # The image store and the fleet drivers are this machine's: the store
-        # is under the host's $WK_STORE, the boot drivers reach machines over
-        # ssh from here, and `wk serve` binds a port on this machine's LAN.
-        # Forwarded into the podman VM they would have looked in an empty store
-        # inside a Linux guest with no route to any of it.
-        sysimage|boot|serve) return 0 ;;
+        # is under the host's $WK_STORE and the boot drivers reach machines
+        # over ssh from here. Forwarded into the podman VM they would have
+        # looked in an empty store inside a Linux guest with no route to any
+        # of it.
+        sysimage|boot) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -350,7 +350,6 @@ is_readonly_report() {
         # by construction (bridge/bin/wk-bridge-healthcheck says so in its
         # first line, and exits non-zero rather than repairing anything).
         "bridge ls"|"bridge status") return 0 ;;
-        "serve --status") return 0 ;;
         # `wk remotes --fix` writes: it re-asserts the wiring. Named here so
         # the *bare* form below can be read-only without this one sneaking in.
         "remotes --fix") return 1 ;;
@@ -571,6 +570,10 @@ main() {
         # is a *system*, never bare "image" -- the old word also meant three
         # other things. One spelling, so the old one points rather than works.
         image) die "'wk image' is renamed: wk sysimage" ;;
+        # Removed 2026-08-21 with the rest of netboot: every bench lane boots
+        # local media, so there is nothing to serve and nothing to elect.
+        serve) die "'wk serve' is removed: netboot is gone (docs/HANDOFF-netboot.md).
+    'wk sysimage write <id> --disk <machine>:<device>' puts a system on a disk." ;;
     esac
 
     local impl="$WK_ROOT/cmd/$cmd"

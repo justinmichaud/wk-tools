@@ -9,10 +9,10 @@ it:
 
 | consumer | what it needs from here | status |
 |---|---|---|
-| profiling (`docs/HANDOFF-profile.md`) | a machine with no sandbox, where `perf_event_paranoid` is ours to set | served: the rpi5's booted system has `-1`, and `wk profile` exists |
+| profiling (`docs/HANDOFF-profile.md`) | a machine with no sandbox, where `perf_event_paranoid` is ours to set | served: the rpi5's booted system has `-1`, and `wk profile` exists (the editable network root once imagined for iteration is dropped) |
 | benchmarking (`docs/HANDOFF-benchmarking.md`) | `bench_host=image` — the whole machine, perf-tuned, remote-driven | the boot half is served; the image-lane runner is still owed there |
-| cross-compile (`docs/HANDOFF-cross-compile.md`) | a slim distro with no SDK on it, to run a cross-built GTK MiniBrowser | not served yet — see "The sysroot equivalence" |
-| yocto + `wk pi setup` (`docs/HANDOFF-yocto.md`, `docs/HANDOFF-linux-pi.md`) | a way to boot a freshly built rpi4 image without touching an SD card | served: `wk sysimage build downstream-yocto-*`, `wk serve`, `wk boot` |
+| cross-compile (`docs/HANDOFF-cross-compile.md`) | a slim distro with no SDK on it, to run a cross-built GTK MiniBrowser | the machine is served (`perf-linux-rpi5` boots); the sysroot-equivalence half is not — see "The sysroot equivalence" |
+| yocto + `wk pi setup` (`docs/HANDOFF-yocto.md`, `docs/HANDOFF-linux-pi.md`) | a way to test a freshly built rpi4 image | served: `wk sysimage build downstream-yocto-*`, `wk sysimage write` to the stick, `wk boot` |
 
 Profiling came first of the four, deliberately: it is the least demanding
 consumer (it wants no-sandbox, not perf stability), so it proved the mechanism
@@ -38,13 +38,12 @@ netboot` exercises the resolver and its guards offline):
   machine, next to the boot mechanism; `--status` reports role and mode from
   evidence (the system's own `/etc/wk-image`, the firmware's registers) and
   calls a record *spent* by boot id, never by guessing.
-- **`wk serve`** (`cmd/serve`, `boot/wk-tftpd.py`): TFTP for the boot files
-  plus HTTP, filled from an image already in the store, refusing to start when
-  the installed privileged helper differs from the checkout, when a client
-  could be led into a halt (`boot/check-boot-files.py`), when the image's root
-  is local-only, or when a bench run is live on this host.
-- **`wk pi boot-order <host> <order>`** (`netboot-first|netboot-last|usb-first|local`),
-  with `netboot-enable` kept as an older spelling of the same single writer.
+- **The boot-file check** (`boot/check-boot-files.py`): the resolver that
+  models what firmware asks of a boot tree, run by `wk sysimage write` before
+  anything touches a disk. (It arrived as part of the removed `wk serve`,
+  where it kept half-served trees from halting boards.)
+- **`wk pi boot-order <host> <order>`** (`usb-first|local`; the netboot-era
+  orders and the `netboot-enable` spelling are refused by name).
   `boot/rpi-eeprom.sh` can flash a board that has no eeprom tooling of its own
   (staged `pieeprom.upd` + `recovery.bin`, pinned by sha256, verified before
   write).
@@ -57,30 +56,36 @@ transfer end to end, then the whole USB-local lane with no hands on the board �
 `docs/HANDOFF-benchmarking.md` records that lane closing, self-disarm and
 watchdog return included).
 
+**Decided 2026-08-21: no netboot, at all.** Every bench lane — measured or
+not — boots local media: the rpi5's and rpi4's USB sticks, the Mac's volume,
+the rpi3's SD card, moose by BMC virtual media. The NFS root (phase 1) and
+the RAM root (phase 2) in "Storage" below are dropped, not deferred: a
+network root sits inside the measurement, the rpi4's halt made unattended
+netboot unacceptable, and once every board had a working local lane the
+remaining consumers did not justify the machinery. The decision was taken in
+two steps the same day — first keeping `wk serve` as a transfer test channel,
+then removing it too: dead code is worse than a re-implementation if the need
+ever returns, and the one thing serve carried that `wk sysimage write` needs
+— the boot-file resolver that models what firmware asks of a tree — moved
+into `boot/check-boot-files.py`. Gone with it: `cmd/serve`,
+`boot/wk-tftpd.py`, the port-69 helper and its sudoers grant (`./setup`
+removes them from machines that had them), `boot/pi-netboot.sh`, the netboot
+EEPROM orders in `wk pi boot-order`, the serving election (never built), and
+moose's UEFI HTTP/PXE route. The rpi3 has a hands-on local-SD stub
+(`boot/pi-sd.sh`) until it is provisioned.
+
 **Still owed, here or nearby:**
 
-- **Netboot has no root.** `wk serve` hands a client firmware, kernel, DTBs
-  and initramfs — verified over the real LAN — but the images boot from
-  `root=LABEL=wk-image-root`, a label that exists only on local disks, so a
-  netbooted board would sit in an initramfs with nothing to mount. `wk serve`
-  refuses to serve such an image and names `wk sysimage write` instead, so
-  this is a message rather than a boot loop. Closing it means an NFS root
-  (phase 1 below — `nfs-kernel-server` is not installed on moose, and `sudo`
-  there needs a password, so that one `apt install` is a person's step; it
-  does not belong in `./setup`, because serving is a role that floats and most
-  machines will never hold it) or a RAM root (phase 2 — needs the initramfs
-  rebuilt, which the unprivileged build path cannot yet do). Until one exists,
-  netboot proves the transfer and nothing further — which is all the test
-  channel needs.
-- **The rpi3, entirely** — see its section below; the recommendation to wait
-  stands, and the OTP door stays shut.
-- **moose as a boot client** — neither UEFI HTTP boot nor BMC virtual media
-  has been attempted; both routes are scoped below.
-- **`wk status` showing an armed transition on the machine's line**
-  (`docs/TESTING.md`, "Still owed here"). `wk`'s help text and the
-  `is_host_only` refusals, once owed alongside it, are done.
-- **The serving election** (`--server auto`, the service alias IP) is designed
-  below and unbuilt; today the server is whichever machine runs `wk serve`.
+- **Mutating commands aimed at an armed machine warning or refusing.**
+  The display half landed 2026-08-21: `wk status` ends with the fleet block
+  (role, mode, the media wk owns and what is on it, an **armed for <id>**
+  flag), fed by each driver's `b_media`/`b_probeable`; `wk help hardware` is
+  the prose companion. The gating half is still open.
+- **moose as a boot client** — BMC virtual media, the one route left (see its
+  section); unattempted.
+- **The rpi3** — provision it, then `wk sysimage write` its SD card; its
+  driver is a hands-on stub until then. The OTP door stays shut for good:
+  it bought only boot modes this decision retired.
 
 **A note on moose's sudoers while passing.** `/usr/bin/tee` is NOPASSWD for
 root, which is passwordless write access to any file on the system and
@@ -94,7 +99,7 @@ Five machines, and their last miles do not converge:
 | machine | mechanism | remotely armable? |
 |---|---|---|
 | rpi5 | USB one-shot (`set_reboot_order`); netboot never applied — WiFi-only, and netboot is wired-only | **yes** — one SSH command |
-| rpi4 | local USB boot, armed on the medium itself; netboot kept as the test channel | **yes** — one SSH command |
+| rpi4 | local USB boot, armed on the medium itself | **yes** — one SSH command |
 | rpi3 | firmware network boot from the boot ROM (option-43 DHCP), or local media | **yes**, once built |
 | moose (Ampere, ASPEED BMC) | UEFI HTTP/PXE boot, **or** BMC virtual media | **yes** — either path |
 | MBP (M4) | personalised volume. **Netboot does not exist here.** | **no** — authenticated, hands-on |
@@ -184,15 +189,8 @@ instead (`boot/pi-usb.sh`, the `medium` arming model: the system disarms its
 own stick on the way up, so every later reboot lands on the SD card). The rpi3
 has neither; its network boot lives in the SoC boot ROM.
 
-## moose: two routes, and it cannot serve its own boot
+## moose: one route (UEFI HTTP/PXE fell with the netboot root, 2026-08-21)
 
-- **UEFI HTTP/PXE boot**, with the system as a RAM root so nothing on the NVMe
-  is touched or even mounted. RAM is ample (115 GB free, measured 2026-08-19),
-  so a full system in RAM is realistic and removes every question about disk
-  state affecting a benchmark. UEFI boot needs DHCP, so moose's boot segment
-  has to be one the server owns — and it needs a cable: moose is WiFi-only
-  today (all three wired NICs measured `carrier=0` on 2026-08-19), and no
-  netboot mechanism anywhere in this file has a WiFi stack.
 - **BMC virtual media.** moose has a real ASPEED BMC, reachable as `moosebmc`
   at **10.99.0.2** on the Librem 5's `bmc0` segment, ssh on 2200 (the
   192.168.1.41 in `dotfiles/ssh/config` is stale; the lease was confirmed live
@@ -203,52 +201,20 @@ has neither; its network boot lives in the SoC boot ROM.
   between OpenBMC and AMI, and only some expose it over Redfish. Check before
   designing on it.
 
-**The constraint that decides the topology:** the boot server cannot be moose,
-because moose is one of the clients — an HTTP or nbd export on moose dies the
-moment moose reboots into the image it is serving. The driving machine cannot
-be moose either: today moose is the machine that runs `wk bench`, so an image
-run on moose needs a second machine to hold the runner.
+**The constraint that survives the dropped route:** the driving machine cannot
+be moose — today moose is the machine that runs `wk bench`, so an image run on
+moose needs a second machine to hold the runner.
 
-## Where the server goes, and how the role floats — decided 2026-08-19
+## Where the server goes, and how the role floats — dissolved 2026-08-21
 
-Two measurements settled the placement:
-
-- **The Proxmox host is out.** It is the ideal always-on server on paper —
-  never a boot client — but it sits on 192.168.4.60/24 and is not reachable
-  from the house LAN at all; moose only reaches it over the tailnet, and
-  firmware cannot use tailscale. It stays useful as an off-machine *image
-  store*.
-- **Bandwidth stops mattering once the root is in RAM.** A squashfs pulled
-  once at boot is a boot-time cost, not a per-run variable — so the server
-  does not need to be co-located, on the same switch, or even wired. That is
-  what makes "the machines sit in separate areas" a non-problem.
-
-So: **the Pis are served by moose** (over its WiFi link — with `TFTP_IP` and
-the static-IP keys set, Pi 4/5-class firmware skips DHCP entirely, so there is
-no broadcast-domain requirement and no second DHCP server on the family LAN,
-only routability); **moose is served by the rpi5 in host mode or by the MBP**,
-never by itself. The Librem 5 stays what it is — DHCP and routing for the BMC
-segment — and is not the image server: a phone serving multi-gigabyte roots is
-the wrong shape.
-
-The user's requirement on top: *any* idle machine should be able to serve.
-That is a constraint on three things, and only one is awkward:
-
-- **Running the daemons anywhere** — solved. `boot/wk-tftpd.py` is a stdlib
-  TFTP daemon, chosen over tftpd-hpa precisely because a distro system service
-  does not float (different package, unit and config per host, none on macOS);
-  one stdlib file runs wherever `wk` runs, the same argument that made the
-  egress proxy stdlib-only.
-- **Having the image** — one store, and the artifact a netboot client gets is
-  byte-identical to what `wk sysimage write` puts on a stick (`wk serve` fills
-  its TFTP root with mtools at a byte offset, from the same `disk.img`).
-- **The client's server address, baked into EEPROM.** The fix is not to
-  re-flash EEPROMs per move — it is a **service alias IP** the serving machine
-  claims for the duration (`ip addr add` / `ifconfig alias`): one address in
-  firmware, any machine behind it. With an explicit, dumb election on top —
-  `wk boot <machine> --server <host>`, `--server auto` walking a priority list
-  — there is nothing to debug at 2am. **Neither the alias nor the election is
-  built**; they become worth building when a second machine actually serves.
+The placement question (moose serves the Pis, the rpi5 or MBP serves moose,
+the Proxmox host ruled out, a service alias IP with a `--server auto`
+election on top) belonged to netboot-as-infrastructure, and it dissolved with
+netboot itself: there is no server. What survived the design is one habit
+worth keeping — anything that has to run on every workstation is a stdlib
+script in this repo, never a distro service (the reason the egress proxy is
+stdlib-only), and the boot-file resolver from that era now guards
+`wk sysimage write`.
 
 Two decisions inside the server worth keeping:
 
@@ -279,24 +245,24 @@ where TFTP's fresh-ephemeral-port data transfer is a known way to get a
 protocol that half works. So the split stands: **everything that can be a
 container is one; the bind is not one.**
 
-## Storage: what the system is
+## Storage: what the system is — both network phases dropped 2026-08-21
 
-Booting fixes how a machine *starts*; where its root lives is separate, and the
-two consumers want different answers. Phase it:
+Booting fixes how a machine *starts*; where its root lives is separate. Two
+network-root phases were designed and are recorded here as the analysis that
+was weighed, not as a plan:
 
-1. **Network root, for profiling.** The root is a directory on the server,
-   editable in place — the fastest iteration loop. Good enough for
-   `wk profile`, which wants an unsandboxed machine and a writable
-   `perf_event_paranoid`, not perf-stable storage. (This is the phase the NFS
-   install above unblocks; it is also the layout the loopback preflight in
-   "Perf risks" exists to keep out of measured runs.)
-2. **RAM root, for benchmarking.** A small initramfs pulls a squashfs over
-   HTTP into RAM and pivots into it. Realistic on the rpi5 (16 GB) and moose
-   (115 GB free); it removes storage from the measurement entirely. **Not on
-   the rpi4 for measured browser runs** — even at its corrected 4 GB, a
-   squashfs plus tmpfs overlay is memory taken from the workload — which is
-   half of why that board went to local USB instead
-   (`docs/HANDOFF-benchmarking.md`, the rpi4 sections).
+1. **Network root, for profiling** (dropped). The root would have been a
+   directory on the server, editable in place — the fastest iteration loop.
+   The profiling lane's actual needs (no sandbox, writable
+   `perf_event_paranoid`) are already met by the local bench systems, so the
+   only thing this bought was edit-in-place, and it cost an NFS server, a
+   root inside every measurement path, and a second storage model.
+2. **RAM root, for benchmarking** (dropped). A small initramfs pulling a
+   squashfs over HTTP into RAM — realistic on the rpi5 (16 GB) and moose,
+   never on the rpi4 (memory taken from the workload, half of why that board
+   went to local USB — `docs/HANDOFF-benchmarking.md`, the rpi4 sections).
+   Local media with provenance (`root_device` recorded, stick vs SSD never
+   compared) is the accepted answer instead.
 
 Do not TFTP a multi-gigabyte root: firmware TFTP is slow, and `boot_ramdisk`'s
 `boot.img` is capped at 180 MB anyway (it is the *boot* filesystem, not the
@@ -370,9 +336,8 @@ The verbs, as they landed (each idempotent, each with `--dry-run`):
 |---|---|---|
 | `wk sysimage build <profile>` | builds a system from a spec **in this repo** | built; reproducible from a clean checkout, no interactive steps |
 | `wk sysimage write <id> --disk <machine>:<device>` | system → the machine's removable disk, verified by read-back | built; absorbed the scoped `wk pi flash` — one flashing verb, not two |
-| `wk serve` | TFTP + HTTP from the store, helper freshness and boot-file completeness checked first | built; the alias IP and `--server` election are not |
-| `wk boot <machine> [--system S] [--back]` | the mode transition: one verb, one driver per arming model | built: `one-shot` (rpi5), `medium` (rpi4), `server` (rpi3), `hands-on` (mbp), `guest` (benchvm) |
-| `wk pi boot-order <host> <order>` | the EEPROM's **only** writer (`netboot-enable` is an older spelling of it) | built; orders derived from what is there, so unknown nibbles survive and re-applying is a no-op |
+| `wk boot <machine> [--system S] [--back]` | the mode transition: one verb, one driver per arming model | built: `one-shot` (rpi5), `medium` (rpi4), `hands-on` (mbp, and the rpi3 stub), `guest` (benchvm) |
+| `wk pi boot-order <host> <order>` | the EEPROM's **only** writer (`usb-first` or `local`; the netboot orders are refused by name) | built; orders derived from what is there, so unknown nibbles survive and re-applying is a no-op |
 | `wk bench stage <ws> --to <machine>` | pushes products + payloads to where the bench system will read them | built for the Mac; the Pi payload path is still owed |
 | `wk verify <machine>` | prove a machine is in the expected state | **not built** — `wk verify` still takes only workspaces; `wk boot --status` covers the mode half from evidence |
 
@@ -451,21 +416,18 @@ Four consequences:
   the UART — `BOOT_UART=1` is already set, so it needs only a cable.
 
 Also from the dump: images are staged on `/` (219 GB free), never in the
-366 MB firmware partition; and if a serving board ever feeds the rpi3, it also
-has to *route* — `wk pi setup` installs tailscale on the served device, which
-needs egress, so NAT from `eth0` out over WiFi would have to be explicit in
-`wk serve` rather than discovered when the control plane is unreachable.
+366 MB firmware partition.
 
-### The rpi4 — netboot proven, then retired to the test channel
+### The rpi4 — netboot proven, then removed entirely
 
 The rpi4 netbooted for real on 2026-08-20, and the same day's evidence moved
 its benchmark lane to local USB boot — the halt-on-incomplete-transfer failure
 mode (below) is unacceptable for an unattended device, and a network root
 would sit inside the measurement. The full scoping, the `medium` arming model,
 and the closed lane live in `docs/HANDOFF-benchmarking.md`; the netboot path
-stays exactly what this file always said it was — **the test channel for
-images not yet committed to local storage** — and the profiling lane's
-editable network root is still its future.
+was kept for a day as a transfer test channel and then removed with the rest
+of netboot (2026-08-21): the proven transfer chain is recorded here, and the
+boot-file resolver it produced lives on in `wk sysimage write`'s preflight.
 
 Board facts, corrected on hardware and now in `boot/machines.sh`: a 4 GB Pi 4B
 Rev 1.5 (this file argued RAM-root impossibility from "2 GB", which was wrong;
@@ -508,17 +470,16 @@ Three prerequisites, all worth knowing before power-up:
 - **A plain 3B cannot use a TFTP server on another subnet**, among several
   boot-ROM bugs fixed only in the B+ — and **which model this board is has not
   been established**.
-- **Netboot is a test channel only on this board no matter what**: its
-  Ethernet sits behind the USB controller (~300 Mbps shared with storage), so
-  measured runs come off local media, and with 931 MB and no swap a RAM root
-  is out for anything browser-shaped. The `rpi3` skill's OOM notes are the
-  same constraint from the other end.
+- **Netboot never made sense on this board anyway**: its Ethernet sits
+  behind the USB controller (~300 Mbps shared with storage), and with 931 MB
+  and no swap a RAM root was out for anything browser-shaped. The `rpi3`
+  skill's OOM notes are the same constraint from the other end.
 
-So: the rpi3's fastest route to being useful is the one the other boards
-proved — `wk sysimage write` to local media, boot it — which needs no DHCP, no
-OTP and no server. Netboot for it is worth doing only after the netboot root
-exists and the rpi4 has proven the chain; otherwise the one-way door is taken
-for a capability that cannot be exercised.
+So: the rpi3's route is the one the other boards proved — `wk sysimage write`
+to local media, boot it — which needs no DHCP, no OTP and no server. That is
+now the decision, not a recommendation (2026-08-21): with the netboot root
+dropped, the OTP door stays shut for good, and the board's driver is a
+hands-on local-SD stub (`boot/pi-sd.sh`) until it is provisioned.
 
 The 32-bit question this board carries was decided 2026-08-20:
 `wk sysimage build perf-linux-rpi3` **refuses**, permanently — Ubuntu publishes
@@ -568,10 +529,10 @@ that boots on its own:
   profile is built yet, and when one is, it goes in the image's
   `config.txt.append`, never the EEPROM.)
 
-**Never serve a boot from a machine that is measuring.** Serving is boot-time
-traffic only, so it cannot touch a client's run — but it absolutely touches
-the *server's* own run. Encoded, not remembered: `wk serve` refuses to start
-while a bench run is live on the same host.
+**Nothing extra runs on a machine that is measuring.** The serve-era version
+of this rule (a boot server's traffic touches its own run, so `wk serve`
+refused while a bench run was live) is gone with the daemon; the principle
+stays and applies to whatever runs next to a measurement.
 
 ### Where the network can still get into a measurement
 
@@ -603,10 +564,11 @@ while a bench run is live on the same host.
   than a subtractable bias**. While the stick is in use, record the root
   device in the run environment, mark those runs provisional, and never
   compare stick numbers with SSD numbers — same rule as `bench_host`.
-- **moose.** A RAM root is free here, but gpu-class runs need the matching
-  NVIDIA kernel module *and* userspace in the image or they degrade to
-  software rendering — which `wk bench` will refuse, correctly, and which is
-  the most likely reason a first moose image run fails.
+- **moose.** Its bench system arrives by BMC virtual media now (the RAM root
+  is dropped), and gpu-class runs need the matching NVIDIA kernel module
+  *and* userspace in the system or they degrade to software rendering —
+  which `wk bench` will refuse, correctly, and which is the most likely
+  reason a first moose image run fails.
 - **macOS.** The second volume is on the same physical SSD, so storage is not
   a variable — but Spotlight indexing and Time Machine local snapshots must be
   off on it, or they add IO mid-run. And it is a laptop: sustained rounds on
@@ -692,14 +654,13 @@ second state, never the first.
   so `<serial>/current/vmlinuz` became `vmlinuz` — and worse,
   `<serial>/current/overlays/README` was answered with the *root's own*
   `README`, a real file that was not the file asked for. The fallback now
-  strips only the leading component, and only when it is not a directory
-  actually held. So `wk serve` runs `boot/check-boot-files.py` before starting
-  anything, `WK_SERVE_ANY_ROOT=1` does not bypass it (that flag trades a
-  reboot loop for a transfer test; this would trade a journey), and the check
-  asks the *resolver* rather than the filesystem — the filesystem would have
-  said `current/vmlinuz` was present and correct, because it was. The only
-  question worth asking is the one the firmware asks: *if I request this name,
-  do I get bytes?*
+  was fixed to strip only the leading component. The daemon is gone now, but
+  the lesson is load-bearing and kept: `boot/check-boot-files.py` asks the
+  *resolver* rather than the filesystem — the filesystem would have said
+  `current/vmlinuz` was present and correct, because it was — and
+  `wk sysimage write` runs it before anything touches a disk. The only
+  question worth asking is the one the firmware asks: *if I request this
+  name, do I get bytes?*
 - **The rpi4's first self-disarm hit the same wall from a third direction.**
   It renamed `start4.elf` aside, on the observation that an unbootable stick
   is skipped — but the state actually watched skipping was a stick with *no
@@ -715,25 +676,21 @@ second state, never the first.
 ### A check that reads a different copy of the thing it checks is not a check
 
 The resolver fix above was verified on hardware — and the board halted again,
-in the same place, on the same request. `wk serve` binds port 69 through a
-**root-owned copy** of the tftpd (`admin/install.sh` installs it; the copy is
-right — a sudoers rule must name a file the invoking user cannot write). But
-only `./setup` ever refreshed it, and the copy was three hours stale: the
-board was served by code nobody had looked at that day. The guard added an
-hour earlier — written specifically so an incomplete tree could never reach a
-board — **passed**, because it loaded the checkout's resolver and certified a
-resolver that was not the one about to run. A second opinion about a third
-file.
+in the same place, on the same request. The serve era's daemon bound port 69
+through a **root-owned copy** of itself, only `./setup` ever refreshed that
+copy, and it was three hours stale: the board was served by code nobody had
+looked at that day. The guard added an hour earlier — written specifically so
+an incomplete tree could never reach a board — **passed**, because it loaded
+the checkout's resolver and certified a resolver that was not the one about
+to run. A second opinion about a third file.
 
-Three changes, and the ordering between them is the point: `wk serve` compares
-the installed helper against `boot/wk-tftpd.py` and refuses on any difference,
-**first**, before the image is resolved — "the code about to talk to firmware
-is not the code in this checkout" outranks anything wrong with an image;
-`check_boot_files_serveable` loads its resolver from whichever binary is about
-to run, so the two agree by construction rather than by coincidence; and
-`wk selftest --section netboot` replays offline the exact requests that cost
-the board its afternoon. This resolver has halted the fleet twice; it cannot
-be edited without being exercised.
+The daemon, the root-owned copy and the freshness dance are all gone with
+netboot (2026-08-21) — which is itself the cleanest form of the lesson: a
+privileged second copy of anything is a staleness bug waiting for its moment.
+The resolver lives in `boot/check-boot-files.py` now, run from the checkout
+by `wk sysimage write`, and `wk selftest --quick` replays offline the exact
+requests that cost the board its afternoon. This resolver has halted the
+fleet twice; it cannot be edited without being exercised.
 
 ### An image and an install from the same distro are twins in every namespace
 
