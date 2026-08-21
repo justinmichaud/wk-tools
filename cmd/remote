@@ -34,7 +34,7 @@ ACTION="${1:-}"; TARGET="${2:-}"
 case "$ACTION" in setup|rm) [ -n "$TARGET" ] || ACTION="" ;; esac
 [ -n "$ACTION" ] && [ -n "$TARGET" ] || die "usage: wk remote setup|rm <target>
     <target> is a machine: an ssh destination that already works, which
-    becomes the target name. See docs/HANDOFF-linux-remote.md."
+    becomes the target name. See SETUP.md, \"Shared build machines\"."
 
 require_name "$TARGET"
 

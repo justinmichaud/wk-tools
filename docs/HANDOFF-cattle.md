@@ -98,8 +98,8 @@ credentials (re-authable).
   half is where that belongs.
 - **The home layer** — gateway, proxmox, nextcloud, immich, overleaf are
   machines the user owns that this repo does not reproduce and does not
-  pretend to. Under the generalizing decomposition
-  (`docs/HANDOFF-generalizing.md`) they are `home`-layer work: out of wk's
+  pretend to. Under the layer decomposition
+  (`docs/HANDOFF-vocabulary.md`, "The layers") they are `home`-layer work: out of wk's
   scope, in the principle's scope, and named here so the ledger is complete.
 
 ## What "done" looks like

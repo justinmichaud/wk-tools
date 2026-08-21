@@ -372,7 +372,7 @@ b_device_image() {
 #
 # The write happens on the machine, not from here: the board has passwordless
 # sudo and the workstation deliberately has no privileged component at all
-# (docs/HANDOFF-linux.md, "no root, and no firewall"). So the image is streamed
+# ("no root, and no firewall"). So the image is streamed
 # over ssh into a `dd` on the far side.
 b_flash() {
     local img="$1" dev="$2" bytes tran remote_zstd sha_local sha_remote

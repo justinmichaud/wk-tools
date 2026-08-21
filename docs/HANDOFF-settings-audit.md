@@ -42,7 +42,7 @@ then write.
 
 ## Linux — `host/linux/config.dconf`
 
-The known problem, already flagged in `docs/HANDOFF-linux.md`: the file is a
+The known problem, flagged when the Linux port landed: the file is a
 raw dump containing a weather location, four nm-applet WiFi UUIDs, a GTK
 last-folder path, Ptyxis profile UUIDs, and timestamps — none of which
 transfer to another machine or represent a real choice. `cmd/backup` has
@@ -56,7 +56,7 @@ filters written for these but they've never been exercised.
    machine" decision.
 3. Confirm the full round trip: `wk backup` → `./setup` → the machine ends up
    in the same state, with `./setup` reporting no further changes on a second
-   run (the existing invariant from `docs/HANDOFF-linux.md`).
+   run (the existing `./setup` invariant, stated in SETUP.md).
 
 ## macOS — `host/macos/defaults.conf` and friends
 

@@ -34,8 +34,8 @@
 # Where the work happens
 # ----------------------
 # On the machine, over ssh, where sudo is passwordless. The workstation
-# deliberately has no privileged component (docs/HANDOFF-linux.md, "no root, and
-# no firewall"), and the disk is over there anyway. This end decides and reports.
+# deliberately has no privileged component ("no root, and no firewall"),
+# and the disk is over there anyway. This end decides and reports.
 #
 # Requires machine_load() to have run, so MACH_SSH/MACH_ROOT/MACH_DEVICE are set.
 

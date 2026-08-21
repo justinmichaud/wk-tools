@@ -463,7 +463,7 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [!] the guest runs the latest macOS  **-- 26.4 vs host 26.6.1. PARKED: no
       suitable image exists upstream (re-checked 2026-08-18) and the only
       symptom is `open -a`, which nothing uses. Do not spend time here; see
-      docs/HANDOFF-mac-minibrowser.md B9 for the one-command tag check**
+      docs/HANDOFF.md lane B step 2 (item B9) for the one-command tag check**
 - [ ] `open -a` inside the guest  **-- KNOWN BROKEN**, LaunchServices -10825:
       the app targets the 26.5 SDK, the guest is 26.4. Use direct bundle exec
 

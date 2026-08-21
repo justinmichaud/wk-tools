@@ -25,7 +25,8 @@ requirement to execute all of them.
 
 ## Abstraction candidates already visible from the work above
 
-- **The layering decided in `docs/HANDOFF-generalizing.md`** (2026-08-20):
+- **The layering decided 2026-08-20** (recorded in
+  `docs/HANDOFF-vocabulary.md`, "The layers"):
   the `home` / `lab` / `wk` / `field` / `stock` decomposition and its one-way
   dependency rule. The rule binds new code from the decision date; this review
   is where existing code catches up — directory moves, plus a grep selftest
@@ -36,7 +37,7 @@ requirement to execute all of them.
   `t_destroy`) is implemented three times — `targets/container.sh`,
   `targets/remote.sh`, `targets/vm.sh` — written at different times against
   the same implicit interface. Once the remote and cross-compile work
-  (`docs/HANDOFF-linux-remote.md`, `docs/HANDOFF-cross-compile.md`,
+  (the remote target landed 2026-08-19; `docs/HANDOFF-cross-compile.md`,
   `docs/HANDOFF-other-remote.md`) has all landed, check whether the contract
   can be an actual shared interface with a conformance test run against all
   three, instead of three files that happen to agree by convention.
@@ -62,8 +63,9 @@ requirement to execute all of them.
 
 ## Upstreaming candidates already visible from the work above
 
-- **The rootless-podman + unix-socket egress-proxy design**
-  (`docs/HANDOFF-linux.md`'s "no root, and no firewall" section) is a genuine
+- **The rootless-podman + unix-socket egress-proxy design** (`--network
+  none` plus an allowlist-by-hostname proxy over one unix socket, so `wk`
+  never needs root on Linux) is a genuine
   answer to a problem rootless podman doesn't solve out of the box (no stable
   selector for nftables to match rootless network-helper traffic on). That's
   worth writing up somewhere podman users would find it, not just in this

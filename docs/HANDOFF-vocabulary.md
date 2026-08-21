@@ -48,7 +48,10 @@ second. **`target`** is both a workspace target and Yocto's `YOC_TARGET`.
 boot. `wk boot --back` returns it. That sentence is now unambiguous, and it is
 the same sentence for every machine in the fleet.
 
-## The layers (decided 2026-08-20, with `docs/HANDOFF-generalizing.md`)
+## The layers (decided 2026-08-20)
+
+The generalizing handoff that researched them was removed 2026-08-21; its
+research record is in git history.
 
 Five more words: the layers the repo decomposes into, and the command names
 they take *when a layer gains a second consumer* — none is minted before then.

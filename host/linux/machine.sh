@@ -16,7 +16,6 @@
 # sits in a randomly named cgroup scope), so the boundary moved to
 # `--network none` plus a proxy, and root moved out of the daily path with it.
 # macOS has since adopted the same model (targets/container.sh, WK_SANDBOX).
-# See docs/HANDOFF-linux.md.
 
 # The storage model, for WK_STORE and store_init. setup itself only loads
 # common.sh and resources.sh, since the macOS stages need nothing else.

@@ -332,13 +332,37 @@ Still open from this pass:
   again.
 
 Follow-up, explicitly out of this pass: remote *builds* still hold an ssh
-open end-to-end (the trap is recorded in `docs/HANDOFF-linux-remote.md`:
-ctrl-c ends the local half while the compiler keeps going). Moving the build
+open end-to-end (the trap: ssh without a pty carries no signal, so ctrl-c —
+and the watchdog's stall abort — ends the local half while the compiler keeps
+going at the far end, and the build lock makes the next `wk build` wait behind
+it, which reads as a hang; the fix is a remote-side pid file and a
+`wk build --abort`, not a shorter lock timeout). Moving the build
 itself under the machine-side `wk` that `wk remote setup` installs closes
 that last ssh-cut hole. The build *state* half is already the machine's — the
 canonical `build.{status,log}` lives beside the checkout and both ends agree
 on it — but the container half of the "build state recorded twice" leftover
-in `docs/HANDOFF-wk-in-workspace.md` is still open.
+is still open (moved here 2026-08-21 from the removed wk-in-workspace
+handoff): a container workspace writes `build.status` and `build.log` into
+its own `~/.local/state/wk/ws/<name>/`, because the host's store is not
+mounted in — so `wk status <ws>` on the host says `build=none` while
+`wk status` inside the same workspace says `build=ok`. The obvious fix —
+bind-mounting the host's `$ws` in — is wrong as stated: `$ws` also holds
+`changes/` and `overlay-work/`, and a second write path into the upperdir of
+a live overlay is exactly what `lib/store.sh` warns is undefined. A dedicated
+`$ws/state:/wk-ws` mount would work, but the host reads `$ws/build.status`
+directly through `wk_ws_dir`, so it means moving those files for every
+target. Worth doing deliberately, not as a side effect of another change —
+the one-copy-per-machine rule at the top of this file governs.
+
+Two smaller leftovers from the same (removed) handoff:
+
+- **`wk` auto-starts the podman machine for any mutating container-target
+  command even when a macOS VM is running** — on a 32 GB host the two cannot
+  coexist; it should report and let the user choose. (Read-only commands no
+  longer boot it: that guarantee lives in `forward_to_vm`.)
+- **`wk ls` inside a workspace** prints `?` for BASE and `-` for CHANGES.
+  Honest — both are overlay concepts that do not exist for this target — but
+  it reads as missing data rather than as not-applicable.
 
 ## The status-file schema (shared by ws/build/test/babysit)
 
@@ -406,7 +430,7 @@ second statement of them.
   see "shared homes" below, which removes the machine-side marker entirely.
 - **Near-side remote `build.status`/`build.log`**: largely closed — the
   canonical copy now lives beside the checkout on the build machine and
-  `wk status`/`wk logs` ask the machine (`docs/HANDOFF-linux-remote.md`).
+  `wk status`/`wk logs` ask the machine (`t_has_wk` / `t_wk`).
   What remains is that the fallback read against a machine with no `wk`
   should be labelled stale with its timestamp, never presented as live.
 - **`base/<id>/sha` + `branch`**: pure caches of the tree today, read by

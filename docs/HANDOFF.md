@@ -118,10 +118,11 @@ verification live in the named handoff and in `docs/TESTING.md`, not here.
   order by request, with the remote wiring unified (`wk_wiring_script`) and
   `wk <command> --explain`. `docs/HANDOFF-sandboxing.md` records the
   mechanism; the audit it belongs to is still scheduled last.
-- **2026-08-18 — `wk` inside a workspace**, both halves
-  (`docs/HANDOFF-wk-in-workspace.md`): the in-workspace `wk build`/`run`/
-  `test` interface exists on Linux containers and macOS guests. One leftover
-  recorded there (build state written once per side), blocking nothing.
+- **2026-08-18 — `wk` inside a workspace**, both halves: the in-workspace
+  `wk build`/`run`/`test` interface exists on Linux containers and macOS
+  guests. (Handoff removed 2026-08-21; the record is in git history. Its
+  leftovers — build state recorded once per side, and two smaller ones —
+  moved to `docs/HANDOFF-workspace-state.md`'s follow-up section.)
 - **2026-08-18/19 — netboot substrate and the rpi5** (`docs/HANDOFF-netboot.md`,
   its "state" section is the authority): `wk sysimage`, `wk boot` with five
   drivers, `wk serve`, `wk pi boot-order`; the rpi5 proven on hardware
@@ -166,9 +167,20 @@ machine this lane runs on.
      *perf* half is baked into the bench systems (governor and swap-off
      already are; the overclock/v3d half has not moved yet — see that file's
      2026-08-20 update).
-  4. **Remote target — DONE 2026-08-19** — `docs/HANDOFF-linux-remote.md`
-     holds the record and the still-open leftovers (`wk gui`/`wk gc` on remote
-     targets, delegated-output interleave).
+  4. **Remote target — DONE 2026-08-19** (handoff removed 2026-08-21; the
+     decision record is in git history; SETUP.md "Shared build machines" is
+     the usage doc). Still-open leftovers, moved here: `wk gui` does not
+     refuse a remote target and should (no seat, no display; it currently
+     advises `wk session on`, which is advice for the wrong computer);
+     `wk gc` never looks at a remote store (the remote root's mirror, ccache
+     and dead workspaces have no reclaim path beyond `wk rm`); delegated
+     `wk status`/`wk logs` output interleaves (stdout rows can arrive before
+     the stderr headings that introduce them); a shared `$HOME` across boxes
+     is warned about, not handled (one build tree cannot hold two
+     architectures; nothing enforces per-box `WK_REMOTE_ROOT`); the removal
+     half of setup's cleanup prompts and `t_exec_tty` (the pty path, for
+     `wk run --lldb`) are unexercised, and `wk enter --zed` has not been used
+     in anger.
   5. **Windows/macOS/cloud remotes** — `docs/HANDOFF-other-remote.md`: the
      same driver contract for a different OS/provider; the three Linux
      assumptions in `targets/remote.sh` are named there. Also the PII-free
@@ -214,10 +226,24 @@ machine this lane runs on.
 ## Lane B — macOS host
 
 1. **`wk` inside a macOS guest — DONE 2026-08-18** (the ledger).
-2. **macOS MiniBrowser DerivedData + debugging — DONE 2026-08-18** —
-   `docs/HANDOFF-mac-minibrowser.md` holds the decisions (DerivedData
-   placement, the compilation-cache findings, the lldb attach recipes) and the
-   two open items (A9, B9-parked).
+2. **macOS MiniBrowser DerivedData + debugging — DONE 2026-08-18** (handoff
+   removed 2026-08-21; the decision record — DerivedData placement, the
+   compilation-cache findings, the lldb attach recipes — is in git history
+   and `docs/TESTING.md` §2). Two open items, moved here:
+   - **A9** — the golden base still carries 3.4 GB of
+     `CompilationCache.noindex` and 263 MB of `ModuleCache.noindex` in
+     `~/Library/Developer/Xcode/DerivedData` from builds that predate the
+     explicit placement; dead weight every clone inherits. Delete it during
+     the next base refresh (anything wanted is regenerated).
+   - **B9 — parked by decision, 2026-08-18.** The guest runs macOS 26.4
+     while the build targets the 26.5 SDK. The only symptom is `open -a`
+     being refused (-10825), and nothing in `wk` uses `open -a`. Upgrades
+     are by rebuild only (`WK_VM_IMAGE` + a base rebuild); blocked upstream
+     on a suitable image (re-checked 2026-08-18). One command re-checks the
+     available tags, no tart pull required:
+
+         T=$(curl -s "https://ghcr.io/token?scope=repository:cirruslabs/macos-tahoe-xcode:pull&service=ghcr.io" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+         curl -s -H "Authorization: Bearer $T" https://ghcr.io/v2/cirruslabs/macos-tahoe-xcode/tags/list
 3. **Cross-compile / remote-target verification on macOS** — the remote-target
    half is done (driven from this machine, 2026-08-19). Left: the Tart-guest
    case (ssh across the Softnet boundary), the cross-compile transfer once
@@ -237,7 +263,8 @@ machine this lane runs on.
 9. **Sandbox audit — macOS-specific escape surface** — companion to lane A
    step 17, against the Tart VM model; also verify the push switch behaves
    the same here. One input is already recorded: the golden base provisions
-   with egress unfiltered (`docs/HANDOFF-mac-minibrowser.md`, B11 note).
+   with egress unfiltered — Softnet's flags are passed in `t_start` only, so
+   the base boots on plain vmnet (`docs/HANDOFF-sandboxing.md` carries it).
 
 ---
 
@@ -313,8 +340,10 @@ out, look holistically across both lanes for:
    `--unsafe-caps` gating), the RPi5 NUMA kernel work's Path A (Launchpad
    request for `CONFIG_NUMA_EMU`), and `gpr`/the profiling wrappers as a
    WebKit contributor toolkit.
-3. **Enforcing the layering decided in `docs/HANDOFF-generalizing.md`**
-   (2026-08-20): the `home`/`lab`/`wk`/`field`/`stock` decomposition and its
+3. **Enforcing the layering decided 2026-08-20** (recorded in
+   `docs/HANDOFF-vocabulary.md`, "The layers"; the generalizing handoff that
+   researched it was removed 2026-08-21 — research record in git history):
+   the `home`/`lab`/`wk`/`field`/`stock` decomposition and its
    one-way dependency rule — directory moves, a grep selftest that the lab
    layer knows no WebKit, and the driver-contract conformance test item 1
    already lists. The rule binds new code from the decision date; this step
@@ -339,8 +368,10 @@ execute all of them — see the doc for the full list and what "done" means.
   `boot/check-boot-files.py`, where `wk sysimage write` runs it before any
   disk is touched. `docs/HANDOFF-netboot.md` carries the record.
 - **The generalization design is decided, 2026-08-20, by user decision** —
-  `docs/HANDOFF-generalizing.md` went from brainstorm to a researched,
-  decided proposal in one pass: the three-layer decomposition
+  the generalizing handoff went from brainstorm to a researched, decided
+  proposal in one pass (handoff removed 2026-08-21; the decisions live in
+  `docs/HANDOFF-vocabulary.md`, the research in git history): the three-layer
+  decomposition
   (`home` / `lab` / `wk` / `field` / `stock`, recorded in
   `docs/HANDOFF-vocabulary.md`), the one-way dependency rule (binding for new
   code now; existing code catches up in the architecture review, item 3

@@ -1,7 +1,7 @@
 # HANDOFF — make CLAUDE.md and the skills workspace-true
 
 **No longer gated**: the in-workspace `wk build <config>` interface this
-waited on exists (`docs/HANDOFF-wk-in-workspace.md`, done 2026-08-18), so a
+waited on exists (done 2026-08-18; SETUP.md documents it), so a
 skill can be told to use it.
 
 The problem, in one sentence: the skills were written on machines that no

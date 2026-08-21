@@ -187,5 +187,7 @@ image-upload path, the BMC's remote-recovery/streaming surface). The Linux pass
 is lane A step 17; lane B step 9 re-runs the equivalent checklist against the
 Tart VM model, whose isolation properties are different in kind and may hide
 different bugs — including the on-record item that the base VM provisions with
-unfiltered egress (`docs/HANDOFF-mac-minibrowser.md`). Do not pull it forward:
+unfiltered egress (Softnet's flags are passed in `t_start` only, so the base
+boots on plain vmnet — host-driven and one-shot, but it should be a decision
+on the record). Do not pull it forward:
 the ordering argument at the top of `docs/HANDOFF.md` is the decision.

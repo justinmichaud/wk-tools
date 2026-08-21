@@ -144,7 +144,7 @@ read_state() {
     fi
     # Explicit, and not decoration: a function whose last statement is a false
     # test returns non-zero, and every caller here runs it as a plain command
-    # under `set -e`. That is the trap docs/HANDOFF-linux.md records, and it
+    # under `set -e` -- a trap that has bitten this repo before, and it
     # would fire exactly when nothing was armed -- the common case.
     return 0
 }
