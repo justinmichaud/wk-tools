@@ -28,61 +28,95 @@ TAILNET BRIDGES
 
   `wk bridge ls` lists what is declared and what answers.
 
-THE TWO LANES, AND WHY ONLY ONE IS A COMMAND
+THE TWO LANES
 
-  Installing postmarketOS on a phone is hands-on, once per phone: a card to
-  write, a button combination, a first-boot wizard, a person holding the
-  device. Applying the bridge role is a command, every time, over ssh.
+  A bridge runs postmarketOS, which is what makes one role and one builder
+  cover both phones: pmOS carries `pine64-pinephone` and `purism-librem5` in the
+  same tree, with the same OpenRC, the same apk and the same NetworkManager. The
+  hand-built Librem 5 this replaces ran PureOS and was written in systemd,
+  Debian's NetworkManager and apt -- none of which was portable to a second
+  phone.
 
-  Keeping those apart is what makes the second one honest. `wk bridge setup`
-  assumes only that the phone runs pmOS and answers ssh -- exactly what this
-  repository already means by a *seed* (docs/HANDOFF-vocabulary.md: "a seed's
-  whole job is to boot and answer ssh so that provisioning can do the rest over
-  the wire"). So there is deliberately no image profile for a bridge: the pmOS
-  release image is the seed, and building a second one would be building
-  something the first already does.
+  Building and provisioning are both commands:
 
-GETTING postmarketOS ONTO THE PHONE
+      wk sysimage build bridge-pinephone            # a pmOS system for the phone
+      wk sysimage write <id> --disk rpi5:/dev/mmcblk0
+      # ...card into the phone, power on...
+      wk bridge setup tailnet-bridge-generic        # the role, over ssh
 
-  Device names, which is what pmOS calls them:
+  The image is built by pmbootstrap on a Linux aarch64 machine over ssh --
+  `rpi5` by default -- because pmbootstrap is Linux-only and needs root, and the
+  workstation driving this is a Mac. Both phones are aarch64, so the build host
+  runs the target's own architecture and nothing is emulated; the builder
+  refuses a host that is not aarch64 rather than quietly taking ten times as
+  long. Minutes, with a warm package cache.
 
-      pine64-pinephone       PinePhone
-      purism-librem5         Librem 5
+  What goes into the image, so that the phone is reachable the first time it
+  boots and `wk bridge setup` has something to talk to:
 
-  Two ways in. Prefer the first for a bridge, because it can put your ssh key
-  and hostname in before the phone has ever booted -- and a headless device you
-  cannot type on is a device where "set it up on first boot" is a trap.
+    the ssh key      $WK_IMAGE_KEY, or ~/.ssh/id_ed25519.pub
+    the WiFi         copied from the build host's own connection, on the build
+                     host, so the PSK never travels through a log or an agent's
+                     context. This is why the build host has to be a machine on
+                     the WiFi the phone will use -- a phone has no cable, and an
+                     image without a credential boots into isolation.
+    the hostname     the bridge's name
+    the packages     the whole bridge role's package list, so provisioning needs
+                     no egress and no apk index that has moved on
+    the console      user `user`, password `147147` -- the phone's own screen,
+                     which is the recovery path when WiFi and ssh are both gone.
+                     Password authentication over the network is off.
+    mDNS             avahi, with the service enabled in the image. On the very
+                     first boot there is no tailnet name yet -- `wk bridge
+                     setup` is what creates it -- so `<hostname>.local` is the
+                     whole of first contact, and setup falls back to it by
+                     itself.
 
-  1. pmbootstrap, on a Linux machine (moose):
+  The image carries the device's own bootloader, embedded at the sector its
+  deviceinfo names -- because pmbootstrap does that only when it writes a real
+  card, not when it produces an image file. Without it the card is perfectly
+  formatted and completely unbootable, and the phone quietly comes up on its
+  eMMC instead; the builder embeds it and reads the sector back to prove it.
 
-       pmbootstrap init                 # device, phosh UI, OpenRC (not systemd)
-       pmbootstrap install --sdcard=/dev/sdX --add=openssh \
-                           --ssh-keys --no-sshd-passwords
+  microSD, and both phones boot one in preference to their internal storage.
+  Neither depends on what is already installed: pmbootstrap embeds each device's
+  own firmware into the card, at the sector its deviceinfo names
+  (`deviceinfo_sd_embed_firmware` -- the PinePhone's SPL at sector 8, the Librem
+  5's u-boot at 33), so the card carries its own way of starting. That is what
+  makes this the recoverable path: the eMMC install underneath is untouched, and
+  removing the card puts the phone back exactly as it was.
 
-     Both phones are aarch64 and so is moose, so nothing is emulated and this
-     is minutes rather than hours. OpenRC, not systemd: the bridge role is
-     written in OpenRC service files, and `wk bridge setup` refuses a systemd
-     image rather than half-applying itself.
+  The build host needs a few packages of its own (kpartx, bmap-tools,
+  python3-venv, python3-yaml). They are not in host/linux/apt.txt because
+  multipath-tools brings a multipathd daemon no other Linux host here wants, so
+  the builder asks once, on the machine that needs them.
 
-  2. A release image from images.postmarketos.org, written to a microSD, then
-     the on-device wizard for the user and password. You will need sshd:
+  What it costs on the build host: about 8 GB under ~/wk-pmos for pmbootstrap's
+  chroots and package cache -- which is what makes a rebuild four minutes rather
+  than twenty -- plus half a gigabyte per kept build under ~/wk-pmos/out.
+  `wk disk` reports both, on every build host a profile names; `wk gc` prunes
+  interrupted and superseded builds, and `wk gc --purge-pmos` erases the chroots
+  when you want the 8 GB back.
 
-       sudo apk add openssh && sudo rc-update add sshd && sudo service sshd start
-       ssh-copy-id user@<phone>          # from the workstation
+  Long builds detach: `--detach` returns as soon as the build is running on the
+  build host, and `--resume` picks it back up and imports it. The build survives
+  the connection either way -- it is started with setsid on the far side, which
+  is the only reason a dropped WiFi link costs a poll rather than half an hour.
 
-  microSD, not eMMC, for a first install: both phones boot the card in
-  preference to internal storage, so the card is a change you can undo by
-  removing it, and the eMMC install stays as the thing to fall back to. Flash
-  the eMMC once the card has proved the role works.
+WHAT IS PINNED
 
-  On the Librem 5, take the plain variant and never the LUKS one: a passphrase
-  at every boot is fatal for a device whose whole job is to come back up on its
-  own after a power cut.
+  pmbootstrap        3.9.0, a git tag. Every PyPI release of it is yanked, so
+                     pip installs it from the project's own repository.
+  the pmOS channel   v25.12 -- what pmaports' channels.cfg calls the latest
+                     release (Alpine 3.23). Not edge: a device whose job is to
+                     still be answering in six months does not want a rolling
+                     release. A channel has to be one channels.cfg lists; a
+                     branch that merely exists (v26.06 does) is not a channel.
+  the device names   pine64-pinephone, purism-librem5
 
-  Charge the phone fully before flashing anything over USB. A depleted battery
-  on a 500 mA hub port browns out mid-write -- this has happened, 55 seconds
-  into a 5.6 GB rootfs, and the tell is the link renegotiating down to full
-  speed in the kernel log.
+  Both live in image/profiles.sh. The pmaports commit that was actually used is
+  recorded in the image's manifest, so `wk sysimage show <id>` says what a card
+  was built from.
 
 DECLARING AND PROVISIONING ONE
 
@@ -151,7 +185,9 @@ THINGS THAT WILL BITE YOU
   not investigation. dotfiles/ssh/config sets ServerAliveInterval for the
   bridges for this reason.
 
-  Nothing on the phone is upgraded unattended, deliberately. There is no serial
-  console on either device, so an unattended kernel bump that fails to boot is
-  unrecoverable without physically handling the phone. `apk upgrade` when you
-  are in front of it.
+  Nothing on the phone is upgraded unattended, deliberately. A kernel bump that
+  fails to boot needs the device in your hands: the PinePhone does have a UART,
+  on the headphone jack behind one of the DIP switches, but it needs a special
+  cable and the back off, and the Librem 5's is not something you have wired. So
+  `apk upgrade` when you are in front of it -- and the card is the fallback,
+  since rewriting it is one `wk sysimage write` away.

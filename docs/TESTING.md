@@ -1996,6 +1996,16 @@ not, and is marked as such rather than assumed.
       (`is_host_only`), and `bridge ls` / `bridge status` are read-only reports
 - [V] `wk help bridge` exists and covers the half no command does: getting
       postmarketOS onto the phone
+- [V] the image carries every package the role requires, so a first provision
+      touches no network at all — `wk bridge setup` reports "all packages present
+      -- apk not contacted". A package in bridge/provision.sh's list that the
+      profile does not bake in would send a phone in a drawer to an apk index
+      that has moved on
+- [V] the profile and the bridge conf name the same phone — `bridge-pinephone`
+      builds `pine64-pinephone` and `tailnet-bridge-generic.conf` says
+      `BR_DEVICE=pinephone`, and likewise for the Librem 5. Disagreeing, they
+      would produce an image for one phone provisioned as the other, and nothing
+      short of the phone failing to boot would say so
 - [V] the Alpine facts the provisioner hardcodes are real, checked in a
       container rather than assumed (2026-08-20, `alpine:latest` = 3.24,
       main + community): every package name resolves (`tailscale`, `dnsmasq`,
@@ -2008,6 +2018,101 @@ not, and is marked as such rather than assumed.
       so both edits are fallbacks; and `/etc/nftables.nft` really does begin
       with `flush ruleset`, which is what the packaged service being disabled
       is about
+
+### The pmos builder — flashing, which is a command and not a procedure
+- [V] `wk sysimage build bridge-pinephone` runs pmbootstrap on rpi5 over ssh and
+      produces a bootable image: 3.2 GB raw (msdos, boot + root), block map and
+      compressed copy beside it, ~4 minutes with a warm package cache
+      (2026-08-20). The build is detached on the far side with setsid, so a
+      dropped WiFi link costs a poll rather than the run
+- [V] the WiFi credential is copied from the build host's own netplan *on the
+      build host* — the image comes out with an `wk-uplink` NM keyfile and the
+      PSK never enters a log, a command line, or an agent's context. The bssid
+      is deliberately not copied: two APs on one SSID, roaming expected
+- [V] `--detach` returns immediately and `--resume` picks the build back up and
+      imports it. This is the path that matters for a twenty-minute build: no
+      local process has to survive it
+- [V] every pinned thing is pinned and recorded: pmbootstrap 3.9.0 (a git tag —
+      every PyPI release is yanked), channel v25.12 (what channels.cfg calls the
+      latest release; `v26.06` exists as a branch and is not a channel), and the
+      pmaports commit lands in the image's manifest
+- [V] `wk sysimage write <id> --disk rpi5:/dev/mmcblk0` puts it on the card
+      (2026-08-21): bmaptool wrote the 1.9 GiB of mapped blocks in 1m12s at
+      27 MiB/s, growpart+resize2fs took the root to 59.4 G, and the card came
+      out `pmOS_boot` + `pmOS_root`. The firmware check is *skipped* rather than
+      failed — the card goes into a phone, so checking it against rpi5's boot
+      files would refuse a perfectly good image — and the dry run says so
+      instead of claiming a check it did not make
+- [V] the same write path works from a Mac at all. It never had: `stat -c %s`
+      and `numfmt` are GNU-only, so `wk sysimage write --dry-run` died printing
+      its own plan (`stat: illegal option -- c`), and the image store resolved
+      to /var/lib/wk — the podman VM's path, which the Mac cannot create.
+      lib/common.sh now has `file_bytes`/`human_bytes` and lib/image.sh puts the
+      store under the state dir on a Mac, the same correction targets/vm.sh
+      already makes for the same reason
+- [V] one build at a time per build host: a second `wk sysimage build` refuses
+      while one is running, because the first thing a build does is
+      `pmbootstrap shutdown` — which would pull the chroots out from under the
+      other one
+- [V] the same for `bridge-librem5` (2026-08-21): same builder, same host, one
+      device name different — 1109 packages, `linux-purism-librem5`, avahi
+      enabled, 526 MB compressed, imported and hash-checked end to end. Not
+      written to a card only because there is one card
+- [ ] the card boots the phone, and `wk bridge setup tailnet-bridge-generic`
+      reaches it. First contact is `<hostname>.local`: the image carries avahi
+      with the service enabled by symlink, because until `tailscale up` has run
+      there is no tailnet name and the DHCP address is not knowable in advance
+
+Traps found while automating this, each of which cost a run (all now handled in
+image/pmos-build.sh, and every one of them a silent failure):
+
+- `pmbootstrap init` cannot be driven non-interactively — it prompts for the
+  work path before reading anything, and `-y` does not answer that. The work
+  folder is prepared directly instead: a version file and a pmaports clone
+- `aports` does not follow `work` in the config; unset, pmbootstrap looks under
+  its *default* work folder and reports "pmaports dir not found"
+- pmaports' default branch is `main`, but pmbootstrap reads channels.cfg from
+  `origin/master`, so that ref has to be fetched explicitly
+- fetching into the checked-out branch is refused by git, so the channel is
+  fetched into its tracking ref and `checkout -B`'d off that
+- pmbootstrap leaves its chroots mounted and the previous image on a loop
+  device; the next install then fails at `mkfs.ext4 /dev/installp2`. `shutdown`
+  before and after
+- the build script must not `rm -rf` its own output directory — the log it is
+  writing lives there, and unlinking it makes the whole failure invisible
+- **pmbootstrap does not put a bootloader in an image *file*.** It embeds
+  firmware when it writes a real disk (`--disk`/`--sdcard`) and not for
+  `--no-split` output, so the image has a valid partition table, valid
+  filesystems and nothing at sector 8. The card looks perfect, and the phone
+  boots whatever is on its eMMC — which is exactly what happened on the first
+  real attempt (2026-08-21). image/pmos-build.sh now embeds it from the two
+  facts the device declares (`deviceinfo_sd_embed_firmware`, e.g.
+  `u-boot/pine64-pinephone/u-boot-sunxi-with-spl-528.bin:8`), takes the file out
+  of the rootfs pmbootstrap just built, and reads the sector back to prove it is
+  no longer zeros
+
+### Storage: the caches a phone-image build leaves, on two machines
+- [V] `wk disk` reports them: the boot images (3 GB each — on a macOS host inside
+      the state-directory row, named rather than hidden inside "logs, keys,
+      target registry"), and each pmos build host's pmbootstrap chroots (8.2 GB
+      measured on rpi5) and builds awaiting import (1.0 GB). The build-host rows
+      are parenthesised and excluded from the total, because the total is this
+      machine's — and a host that does not answer says `??` rather than `0`
+- [V] `wk gc` reclaims both. On a macOS host it runs in two halves, because the
+      things it reclaims are on two machines: images and build-host caches out
+      here, the container store inside the podman VM (this file piped into the
+      VM's bash, the same trick cmd/disk's store probe uses). `wk` no longer
+      forwards it whole — which is what made it prune the VM's empty image
+      directory and report success
+- [V] `wk gc --purge-pmos` erases the chroots, per host, with the size, after
+      shutting the chroots down first — they carry bind mounts into the host's
+      own /proc and /dev, so `rm -rf` alone would follow them out
+- [V] `./setup` installs what a build host needs (multipath-tools for kpartx,
+      bmap-tools, python3-venv, xz-utils), so the builder's own ask-and-install
+      is a fallback rather than the path
+- [V] the image prune holds the image-store lock (rule 4). It did not: `wk gc`
+      pruning "all but the newest per profile" while `wk sysimage build` imports
+      is how the newest gets deleted
 
 ### Needs the hardware
 - [ ] a PinePhone flashed with pmOS, answering ssh, provisioned end to end:
@@ -2067,4 +2172,11 @@ in the file because each one already cost a debugging session.
 | `wk ls` and `wk status` name the same set | one of them being forwarded whole into the podman VM, so a vm or remote workspace showed in one listing and not the other |
 | a snapshot with no `sha` is invisible to `current_base` | an interrupted `wk sync` publishing rubble that the next `wk new` pins and the next `wk sync` hardlinks from |
 | `wk new` over a workspace with no `base-id` remakes it | "already exists" answered about a half-made thing, and `base-id` re-pinned over a surviving `changes/` layer |
+| `wk sysimage build <pmos profile>` prints something | `set -o pipefail` turning `x=$(ssh "cat missing" \| tr …)` into a silent `set -e` exit: the poll asks for an rc file that does not exist yet — the normal state of a running build — and the command dies with no message at all. Every "the build vanished after one poll" was this one bug |
+| `wk sysimage write --dry-run` prints its plan from a Mac | `stat -c %s` and `numfmt`, which are GNU-only, in a path whose whole point is being driven from a workstation that is not Linux |
+| the image store is writable on the machine that owns it | `$WK_STORE` resolving to `/var/lib/wk` on a macOS host — the podman VM's path, which the Mac cannot create — in a command that is never forwarded into that VM |
+| a second `wk sysimage build` refuses while one runs | `pgrep -f <pattern>` matching the ssh that carries the pattern, so an idle build host reports a build in progress |
+| `wk gc` keeps the newest build **per profile** on a build host | keeping the newest two overall, which two PinePhone builds in a row turned into "the Librem 5's artifacts are old" — deleting the only un-imported copy |
+| `cmd/gc` honours a pre-set `$WK_ROOT` | deriving it from `$0` under `bash -s`, where `$0` is "bash": the container half then sourced /var/home/lib/common.sh and died |
+| `cmd/gc` sources tree files optionally | the container half being this file piped into a VM whose copy of the *rest* of the tree is only as new as the last `wk sync --target container` |
 | a lock outlives the command that took it | a flock inherited by the `conmon` podman leaves behind, holding a workspace's lock for as long as the container exists |

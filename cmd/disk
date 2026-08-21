@@ -49,6 +49,13 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+# For the pmos build-host caches below: the largest thing this repo stores on a
+# machine that is not this one, and therefore the one part of "where did the disk
+# go" that no local du can reach.
+. "$WK_ROOT/lib/image.sh"
+. "$WK_ROOT/image/profiles.sh"
+. "$WK_ROOT/boot/machines.sh"
+. "$WK_ROOT/image/pmos.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 TART_HOME="${TART_HOME:-$HOME/.tart}"
@@ -288,13 +295,50 @@ fi
 section "this host"
 if [ -d "$(wk_state_dir)" ]; then
     row "$(_kb "$(wk_state_dir)")" "host-side state" "logs, keys, target registry"
+    # On a macOS host the image store lives in there (lib/image.sh: $WK_STORE is
+    # the podman VM's path, which this machine cannot write), and 3 GB of phone
+    # images inside a row labelled "logs, keys, target registry" is a row that
+    # lies. Noted rather than added: it is inside the row above.
+    if [ -d "$(image_store_dir)" ] && case "$(image_store_dir)" in "$(wk_state_dir)"/*) true ;; *) false ;; esac; then
+        n=$(image_ids 2>/dev/null | wc -l | tr -d ' ')
+        kb=$(_kb "$(image_store_dir)")
+        [ "$kb" -gt 0 ] && noted "$kb" "boot images ($n)" \
+            "inside the row above; wk gc drops superseded ones, wk sysimage rm <id>"
+    fi
 fi
 row "$(_kb "$WK_ROOT")" "wk-tools checkout" "$WK_ROOT"
+
+# --- other machines this repo stores things on -------------------------------
+#
+# Not this machine, and still this repo's: a pmos build host holds pmbootstrap's
+# chroots (about 8 GB) and the built images waiting to be imported. Reported
+# because "where did the disk go" is a question about the fleet as much as about
+# here, and because nothing else would ever mention them -- they are on a
+# machine whose own `wk disk` does not know they are wk's.
+#
+# Not added to the total, which is this machine's. Bounded, too: a host that does
+# not answer says so and the report carries on.
+if [ -z "${WK_IN_VM:-}" ] && ! in_remote_host; then
+    _pmos_rows=$(for h in $(pmos_build_hosts); do pmos_cache_probe "$h"; done)
+    if [ -n "$_pmos_rows" ]; then
+        section "pmos build hosts (not this machine, not in the total)"
+        while IFS=$'\t' read -r kb what note; do
+            [ -n "${kb:-}" ] || continue
+            if [ "$kb" = '??' ]; then unknown "$what" "$note"
+            else noted "$kb" "$what" "$note"; fi
+        done <<EOF
+$_pmos_rows
+EOF
+    fi
+fi
 
 # --- the total, and the machine's own answer --------------------------------
 section "total"
 printf '  %7s  %s\n' "$(_human "$TOTAL")" "wk's storage on this machine" >&2
-if [ -n "$NOTED" ]; then log "           parenthesised rows are inside a row above and not added"; fi
+if [ -n "$NOTED" ]; then
+    log "           parenthesised rows are not in the total: they are inside a row"
+    log "           above, or on another machine (the build-host section)"
+fi
 # The clone caveat is APFS's, so it is printed where it is true and nowhere else:
 # a caveat that does not apply reads as a reason to distrust the number.
 if is_macos; then

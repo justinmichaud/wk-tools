@@ -133,7 +133,7 @@ $(disk_list)"
 
     dev_bytes=$(m_ssh "lsblk -bdno SIZE $(sh_quote "$dev")" 2>/dev/null | tr -dc '0-9')
     [ -n "$dev_bytes" ] && [ "$dev_bytes" -ge "$bytes" ] \
-        || die "$dev on $MACH_NAME is ${size:-unknown}, smaller than the image ($(numfmt --to=iec "$bytes"))"
+        || die "$dev on $MACH_NAME is ${size:-unknown}, smaller than the image ($(human_bytes "$bytes"))"
 }
 
 disk_mounted() {
@@ -199,7 +199,7 @@ disk_write_bmap() {
     remote=$(m_ssh 'mktemp -d /var/tmp/wk-write.XXXXXX' | tr -d '\r\n')
     [ -n "$remote" ] || die "could not make a staging directory on $MACH_NAME"
 
-    info "sending $(basename "$wic") ($(numfmt --to=iec "$(stat -c %s "$wic")")) and its block map to $MACH_NAME"
+    info "sending $(basename "$wic") ($(human_bytes "$(file_bytes "$wic")")) and its block map to $MACH_NAME"
     # Registered rather than trapped, and the path goes in a global for it to
     # read: this command holds the image-store lock, and a `trap ... EXIT` here
     # would replace the release with the staging cleanup (lib/common.sh,
@@ -221,7 +221,7 @@ disk_write_bmap() {
 # a wic image is mostly unallocated space and text, and this goes over a tailnet.
 disk_write_dd() {
     local img="$1" dev="$2" bytes remote_zstd=no
-    bytes=$(stat -c %s "$img")
+    bytes=$(file_bytes "$img")
     m_ssh 'command -v zstd >/dev/null' && remote_zstd=yes
     info "writing $(basename "$img") to $dev on $MACH_NAME ($((bytes / 1024 / 1024)) MB, zstd=$remote_zstd)"
     if [ "$remote_zstd" = yes ] && have zstd; then
@@ -242,7 +242,7 @@ disk_write_dd() {
 # map, as it writes -- which is a stronger check than this one, not a weaker.
 disk_verify_dd() {
     local img="$1" dev="$2" bytes local_sha remote_sha
-    bytes=$(stat -c %s "$img")
+    bytes=$(file_bytes "$img")
     info "verifying by reading it back"
     local_sha=$(sha256sum "$img" | cut -d' ' -f1)
     remote_sha=$(m_ssh "sudo head -c $bytes $(sh_quote "$dev") | sha256sum" | cut -d' ' -f1)

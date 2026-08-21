@@ -110,6 +110,29 @@ ensure_dir() {
     fi
 }
 
+# --- sizes -------------------------------------------------------------------
+#
+# `stat -c %s` is GNU, `stat -f %z` is BSD, and `numfmt` is GNU only -- "not on
+# macOS and never will be", as cmd/disk puts it, which carries its own copy of
+# the second half for KiB. Both halves live here because the image store spans
+# both kinds of machine in one operation: an image is built on a Linux host and
+# the write that follows is driven from a Mac, so every size printed on that
+# path was a `stat: illegal option -- c` waiting to happen. It was: `wk sysimage
+# write --dry-run` could not print its own plan.
+file_bytes() {
+    stat -f %z "$1" 2>/dev/null || stat -c %s "$1" 2>/dev/null || echo 0
+}
+
+human_bytes() {
+    awk -v b="${1:-0}" 'BEGIN {
+        split("B K M G T P", u, " ")
+        v = b; i = 1
+        while (v >= 1024 && i < 6) { v /= 1024; i++ }
+        if (i > 1 && v < 10) printf "%.1f%s\n", v, u[i]
+        else                 printf "%.0f%s\n", v, u[i]
+    }'
+}
+
 # --- misc --------------------------------------------------------------------
 
 # One `key=value` field out of a small text file; empty when the file or the

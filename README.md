@@ -216,6 +216,7 @@ work belongs on, and what a container costs against a macOS guest — and
 wk disk                # every place wk stores something here, with the total
 wk gc                  # prune by reference count; can never lose work
 wk gc --purge-mirror   # erase the master git store (wk sync refetches it)
+wk gc --purge-pmos     # erase a phone-image build host's chroots (~8 GB)
 wk vm base --rm        # erase the golden macOS image (hours to rebuild)
 ```
 
@@ -226,6 +227,12 @@ so every `wk vm new` is an instant clone), the podman VM's sparse disk image
 store — the bare mirror plus the base snapshots hardlinked from it. `wk disk`
 counts all three in one read-only report and never starts anything to do it;
 `wk help disk` says what is safe to erase and what it costs to get back.
+
+It also counts what is *not* on this machine: a pmos build host keeps about 8 GB
+of pmbootstrap chroots, and nothing else would ever mention them — the machine
+that has them does not know they are wk's. On a macOS host `wk gc` therefore runs
+in two halves, one out here and one inside the podman VM, because that is where
+the two stores are.
 
 ## Claude
 
@@ -254,11 +261,23 @@ workspace can reach the rpi3 and rpi4 without anything on the house network
 reaching either.
 
 ```sh
+wk sysimage build bridge-pinephone            # a pmOS system for the phone
+wk sysimage write <id> --disk rpi5:/dev/mmcblk0
+                             # ...card into the phone, power on...
+wk bridge setup <name>       # the role: idempotent, re-run after any change
 wk bridge ls                 # what is declared, and what answers
-wk bridge setup <name>       # idempotent; re-run after any change
 wk bridge status <name>      # the on-device health check, read-only
 wk bridge rm <name>          # removes the role, leaves the OS
 ```
+
+Flashing is a command too. The image is built by pmbootstrap on a Linux aarch64
+machine over ssh (`rpi5` by default) because pmbootstrap is Linux-only and needs
+root, and both phones are aarch64 so nothing is emulated. It bakes in the ssh
+key, the bridge's hostname, the role's packages, and the WiFi credential —
+copied from the build host's own connection *on that host*, so the PSK never
+travels through a log or an agent's context. What comes back is an image in the
+store like any other, written to a card with the same verified path everything
+else uses.
 
 A bridge is declared in `bridge/hosts/<name>.conf` — the same shared-plus-local
 split targets use — and provisioned over ssh by `bridge/provision.sh`, which is

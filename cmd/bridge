@@ -89,6 +89,35 @@ $(bridge_device_list | sed 's/^/      /')"
 
 rsh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$BR_SSH" "$@"; }
 
+# Which name actually reaches the phone right now.
+#
+# The conf names it by its tailnet name, which is the right answer for every run
+# except the first: a freshly flashed phone has no tailnet identity at all --
+# `tailscale up` is something *this* command runs -- so the name it is reached
+# by before that has to come from somewhere else. mDNS is that somewhere: the
+# image carries avahi with the service enabled (image/pmos-build.sh), so
+# <hostname>.local answers on the LAN from the first boot.
+#
+# accept-new rather than no host-key checking at all. A fresh image brings a new
+# host key and there is nothing to compare it against, but every run after this
+# one should be checked -- root on a bridge is equivalent to whatever is behind
+# it, so "the key changed" has to stay a question somebody gets asked.
+resolve_ssh() {
+    ssh -o BatchMode=yes -o ConnectTimeout=8 "$BR_SSH" true >/dev/null 2>&1 && return 0
+
+    local mdns="$BR_HOSTNAME.local"
+    if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new \
+           "$mdns" true >/dev/null 2>&1; then
+        warn "$BR_SSH does not resolve yet, but $mdns answers -- using that."
+        log  "  That is the expected shape of a first run: the phone has no tailnet"
+        log  "  name until this command brings tailscale up, and mDNS is what"
+        log  "  reaches it in the meantime."
+        BR_SSH="$mdns"
+        return 0
+    fi
+    return 1
+}
+
 # Root on the phone, however this image spells it. pmOS images log in as an
 # ordinary user with doas (Alpine's default) or sudo, and a provisioner that
 # assumed root would fail on the first write with a permission error rather
@@ -96,6 +125,11 @@ rsh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$BR_SSH" "$@"; }
 PRIV=""
 resolve_priv() {
     local uid
+    resolve_ssh || die "cannot reach $BR_NAME.
+    Tried $BR_SSH and $BR_HOSTNAME.local, and neither answered. A bridge is
+    provisioned over ssh against a phone that is already running postmarketOS --
+    'wk help bridge' covers building the card and getting it in there, which is
+    the one hands-on step."
     uid=$(rsh 'id -u') || die "cannot ssh to $BR_SSH.
     A bridge is provisioned over ssh against a phone that is already running
     postmarketOS and already answers -- 'wk help bridge' covers getting it

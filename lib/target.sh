@@ -324,8 +324,9 @@ t_load() { awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0; }
 # into the podman VM. So the choice is recorded once, at creation.
 #
 # Kept on the host under XDG state rather than in $WK_STORE, because $WK_STORE
-# is itself target-dependent and this is what resolves that.
-wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
+# is itself target-dependent and this is what resolves that. `wk_state_dir`
+# itself is in lib/store.sh -- it is a question about where things live, and
+# more than this file needs the answer.
 
 target_register() {
     local name="$1" target="$2" d

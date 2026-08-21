@@ -71,6 +71,8 @@ sources and disk
   gc                        prune snapshots, images and caches; reclaim disk
       --purge-mirror        erase the master git store -- the bare mirror and
                             every base snapshot; 'wk sync' refetches them
+      --purge-pmos          erase the pmbootstrap chroots on the pmos build
+                            hosts (~8 GB each; the next build refetches them)
   disk                      what is stored on this machine, where, and the
                             total (read-only; 'wk help disk' says what to erase)
 
@@ -301,6 +303,12 @@ is_lifecycle() {
 is_host_command() {
     case "$1" in
         setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|bridge|key|report|sudo|version|stop|start|disk|help|-h|--help) return 0 ;;
+        # gc, because what it reclaims is on two machines when the workstation is
+        # a Mac: the container store inside the podman VM, and the image store
+        # and the pmos build hosts' caches out here. Forwarded whole it pruned
+        # the first and silently left the other two -- so cmd/gc owns the split
+        # now and pipes its own container half into the VM.
+        gc) return 0 ;;
         # The image store and the fleet drivers are this machine's: the store
         # is under the host's $WK_STORE, the boot drivers reach machines over
         # ssh from here, and `wk serve` binds a port on this machine's LAN.

@@ -114,6 +114,16 @@ downstream-yocto-wpe-2.48-rpi5
             the rpi5 running what ships, on its USB stick, leaving the NVMe
             workstation alone. Needs one section added to targets.conf upstream
             -- the local.conf and the MACHINE are already there
+
+bridge-pinephone
+            postmarketOS for the PinePhone, as tailnet-bridge-generic: pmbootstrap
+            on a Linux aarch64 machine, ssh key and WiFi baked in, the bridge
+            role's packages preinstalled. Goes on a microSD, which both phones
+            boot in preference to their own storage
+bridge-librem5
+            the same for the Librem 5, as tailnet-bridge-moose-bmc. Its u-boot is
+            embedded in the card by pmbootstrap (deviceinfo_sd_embed_firmware),
+            so the card boots without touching the eMMC install
 EOF
 }
 
@@ -132,6 +142,9 @@ image_profile_load() {
     IMG_PACKAGES=""; IMG_NETWORK=""; IMG_LABEL_ROOT=""; IMG_LABEL_BOOT=""
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
     YOC_CHROMIUM=1
+    PMO_DEVICE=""; PMO_UI=""; PMO_CHANNEL=""; PMO_PMB_VERSION=""
+    PMO_USER=""; PMO_PASSWORD=""; PMO_PACKAGES=""; PMO_EXTRA_SPACE=""
+    PMO_WIFI=""; PMO_BRIDGE=""; PMO_BUILD_HOST=""
 
     case "$1" in
     # The old names, refused by name: every profile was renamed on 2026-08-20
@@ -239,6 +252,95 @@ image_profile_load() {
         IMG_PACKAGES="linux-tools-raspi avahi-daemon"
         IMG_LABEL_ROOT=wk-image-root
         IMG_LABEL_BOOT=WK-IMG-BOOT
+        ;;
+    # --- pmos ---------------------------------------------------------------
+    #
+    # A phone, and therefore not a machine. `IMG_MACHINE` stays empty on
+    # purpose: the fleet is "machines wk can boot" (boot/machines.sh), `wk boot`
+    # cannot boot a phone, and adding one to that table to satisfy a field would
+    # be a claim this repo cannot honour. A pmos profile names a *device* -- the
+    # postmarketOS codename -- and the card it lands on is written by whichever
+    # machine holds the card reader.
+    #
+    # Both profiles are the same system with two device names and two bridges,
+    # which is the whole point of moving the bridges to pmOS: one provisioner
+    # (bridge/provision.sh) and now one builder for both phones.
+    bridge-pinephone|bridge-librem5)
+        IMG_BUILDER=pmos
+        IMG_ARCH=aarch64
+        # No machine: see above. Empty rather than absent so `wk sysimage write`
+        # can tell "this image is not for the machine holding the card" from
+        # "this image does not say", and skip the firmware check that only makes
+        # sense for a board that is going to boot the disk in place.
+        IMG_MACHINE=""
+
+        # phosh, and the GUI is deliberate. A bridge keeps its screen: if WiFi
+        # and ssh are both gone, the phone's own display and touchscreen are the
+        # last way in, and that is worth more than the memory a headless image
+        # would save. bridge/provision.sh says the same thing from the other end.
+        PMO_UI=phosh
+
+        # A released channel, not edge. `v25.12` is what pmaports' own
+        # channels.cfg calls "Latest release / Recommended for best stability"
+        # (Alpine 3.23), and stability is the entire requirement for a device
+        # whose job is to still be answering in six months.
+        PMO_CHANNEL=v25.12
+
+        # Pinned, because pmbootstrap is the one moving part here: it prompts
+        # differently, stores its config differently and expects a different
+        # work-folder version from release to release, and image/pmos-build.sh
+        # is written against exactly this one. Every PyPI release of it is
+        # yanked, so this is a git tag.
+        PMO_PMB_VERSION=3.9.0
+
+        # The console account on the phone's own screen. The password is a
+        # known one and that is not an oversight: it is the recovery path,
+        # bridge/provision.sh turns off password authentication over the
+        # network, and pmbootstrap handles this value in plain text by design
+        # (it says so itself) -- so a secret here would be a secret in a log.
+        PMO_USER=user
+        PMO_PASSWORD=147147
+
+        # The bridge role's own package list, baked in. Provisioning a phone
+        # then needs no egress and no apk index that has moved on: the packages
+        # are already there and `wk bridge setup` reports "all packages present
+        # -- apk not contacted". Every name here was resolved against this
+        # channel by an actual install, not from memory.
+        # avahi is in there for one specific moment: the first boot. The phone
+        # has no tailnet identity until `wk bridge setup` runs `tailscale up`,
+        # so the name it is reached by *before* that has to come from somewhere
+        # else, and mDNS is the only thing that works with no configuration on
+        # either end. Enabled in the image by image/pmos-build.sh, because
+        # installing a package does not enable its OpenRC service.
+        PMO_PACKAGES="openssh,nftables,dnsmasq,chrony,tailscale,jq,iw,ethtool,logrotate,zram-init,v4l-utils,networkmanager,avahi"
+        PMO_EXTRA_SPACE=512
+
+        # The uplink credential, copied from the build host's own connection on
+        # the build host. A phone has no cable: an image without WiFi comes up
+        # in isolation, and `wk bridge setup` has nothing to talk to. So the
+        # build host has to be a machine on the WiFi the phone will use --
+        # which the default one is.
+        PMO_WIFI=yes
+        PMO_BUILD_HOST=rpi5
+
+        # ...and the two lines that differ. Nested rather than two branches of
+        # the outer case: everything above is shared, and a second branch would
+        # be a second copy of it to keep in step.
+        case "$1" in
+            bridge-pinephone)
+                PMO_DEVICE=pine64-pinephone
+                PMO_BRIDGE=tailnet-bridge-generic
+                IMG_HOSTNAME=tailnet-bridge-generic
+                ;;
+            bridge-librem5)
+                PMO_DEVICE=purism-librem5
+                PMO_BRIDGE=tailnet-bridge-moose-bmc
+                IMG_HOSTNAME=tailnet-bridge-moose-bmc
+                # The camera stream is this bridge's job, so its pipeline is in
+                # the image rather than fetched on first provision.
+                PMO_PACKAGES="$PMO_PACKAGES,ffmpeg"
+                ;;
+        esac
         ;;
     # --- yocto ------------------------------------------------------------
     #

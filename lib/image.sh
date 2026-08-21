@@ -17,17 +17,40 @@
 # and remakes. There is no half-built image to recognise, and therefore no
 # repair path to get wrong -- rule 3, wipe over repair.
 
-image_store_dir() { echo "$WK_STORE/images"; }
-# The compressed original and its block map, when the builder kept them. Only
-# the yocto builder has them (bitbake's wic output); the distro builder edits a
-# raw image in place and has nothing to map. Both optional -- their absence
-# picks the dd path in boot/disk.sh, it is not an error.
-image_wic()       { echo "$WK_STORE/images/$1/disk.wic.xz"; }
-image_bmap()      { echo "$WK_STORE/images/$1/disk.bmap"; }
-image_cache_dir() { echo "$WK_STORE/cache/images"; }
-image_dir()       { echo "$WK_STORE/images/$1"; }
-image_disk()      { echo "$WK_STORE/images/$1/disk.img"; }
-image_manifest()  { echo "$WK_STORE/images/$1/manifest"; }
+# Where images live, and it is not simply $WK_STORE on every machine.
+#
+# $WK_STORE is /var/lib/wk on a macOS host: right inside the podman VM, and a
+# path the Mac itself cannot even create. targets/vm.sh and targets/remote.sh
+# already make this same correction for their own host-side state, with the same
+# reasoning -- "right inside the podman VM and wrong on a macOS workstation" --
+# and an image store is host-side state of exactly that kind. `wk sysimage` is a
+# host command that is never forwarded, so on a Mac it was resolving every path
+# below into a directory that does not exist, and the first thing to notice was
+# an import failing with "mkdir: /var/lib/wk: Permission denied".
+#
+# Deterministic rather than "wherever is writable": a store whose location
+# depends on what happens to exist is a store where yesterday's images become
+# invisible.
+_image_root() {
+    if [ "$(uname -s)" = Darwin ] && [ -z "${WK_IN_VM:-}" ]; then
+        wk_state_dir
+    else
+        printf '%s' "$WK_STORE"
+    fi
+}
+image_store_dir() { echo "$(_image_root)/images"; }
+
+# The compressed original and its block map, when the builder kept them. The
+# yocto and pmos builders have them (bitbake's wic output; xz plus `bmaptool
+# create`); the distro builder edits a raw image in place and has nothing to
+# map. Both optional -- their absence picks the dd path in boot/disk.sh, it is
+# not an error.
+image_wic()       { echo "$(image_store_dir)/$1/disk.wic.xz"; }
+image_bmap()      { echo "$(image_store_dir)/$1/disk.bmap"; }
+image_cache_dir() { echo "$(_image_root)/cache/images"; }
+image_dir()       { echo "$(image_store_dir)/$1"; }
+image_disk()      { echo "$(image_store_dir)/$1/disk.img"; }
+image_manifest()  { echo "$(image_store_dir)/$1/manifest"; }
 
 # Complete = has a manifest. Nothing else is looked at: a reader that inferred
 # completeness from the presence of disk.img would accept a half-written one.

@@ -13,10 +13,30 @@
 # `wk help disk` is the prose.
 
 set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Honouring the environment is what lets the container half below run *this*
+# copy of this file inside the podman VM: `bash -s` sets $0 to "bash", so
+# deriving the root from it there resolves to the parent of whatever cwd the ssh
+# landed in (/var/home) and every source fails. cmd/disk's store probe says the
+# same thing for the same reason.
+WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+# The image store's own paths, and the pmos build hosts' caches: both are things
+# this command prunes, and on a macOS host both are here rather than in the VM.
+#
+# Optionally, and that is not defensiveness: the container half of this command
+# is this file piped into the VM's bash, where the *rest* of the tree is only as
+# new as the last `wk sync --target container`. A hard source of a file added in
+# the same commit as this line fails in there with "No such file or directory"
+# about a path that is perfectly correct out here. (cmd/disk's store probe
+# depends on this same property and says so.) The halves that need these check
+# for them.
+_source_if_there() { [ -f "$1" ] && . "$1"; return 0; }
+_source_if_there "$WK_ROOT/lib/image.sh"
+_source_if_there "$WK_ROOT/image/profiles.sh"
+_source_if_there "$WK_ROOT/boot/machines.sh"
+_source_if_there "$WK_ROOT/image/pmos.sh"
 
 # Through load_target, never by sourcing the driver directly: a driver is
 # written against the contract in lib/target.sh and uses its helpers at source
@@ -43,16 +63,133 @@ REFRESH_NET=""
 # only over the network.
 PURGE=""
 [ "${1:-}" = --purge-mirror ] && PURGE=1
+# The pmbootstrap chroots on a build host: 8 GB, rebuildable from the network,
+# and the difference between a four-minute rebuild and a twenty-minute one. Same
+# shape of decision as --purge-mirror, so the same shape of flag.
+PURGE_PMOS=""
+[ "${1:-}" = --purge-pmos ] && PURGE_PMOS=1
 
 # Validated rather than ignored, which is what this command used to do with an
 # unrecognised argument. That was harmless while every flag was a no-op or a
 # refresh; it is not harmless next to a flag that erases the mirror, because a
 # typo would run a full ordinary gc and report success at doing something else.
 case "${1:-}" in
-    ''|--refresh-net|--purge-mirror) ;;
+    ''|--refresh-net|--purge-mirror|--purge-pmos) ;;
     *) die "unknown option '$1'
-    usage: wk gc [--purge-mirror]      (--refresh-net is kept as a no-op)" ;;
+    usage: wk gc [--purge-mirror] [--purge-pmos]
+      --purge-mirror  erase the master git store (wk sync refetches it)
+      --purge-pmos    erase the pmbootstrap chroots on the pmos build hosts
+                      (the next image build there refetches them)
+      (--refresh-net is kept as a no-op)" ;;
 esac
+
+# --- the halves, and which machine each belongs to ----------------------------
+#
+# What wk stores is on two machines whenever the workstation is a Mac: the
+# container store is inside the podman VM, and the image store and the pmos
+# build hosts' caches are out here. `wk gc` was forwarded whole, so it pruned the
+# VM's store and left 3 GB of phone images and 8 GB of pmbootstrap chroots
+# untouched -- reporting success at reclaiming disk while the two largest things
+# this repo stores sat there.
+#
+# So the halves are named. Both run on Linux, where there is one machine;
+# on a macOS host the first runs here and the second is this same file piped
+# into the VM's bash -- the trick cmd/disk already uses for its store probe,
+# and for the same reason (the copy at /opt/wk-tools is only as new as the last
+# `wk sync --target container`).
+
+# --- boot images ---------------------------------------------------------------
+gc_images() {
+    # Nothing to prune without the image store's own path helpers -- which is
+    # the case in a podman VM whose copy of the tree predates them.
+    command -v image_store_dir >/dev/null 2>&1 || return 0
+    # One lock per mutated resource (rule 4): `wk sysimage build` holds this
+    # while it imports, and pruning "all but the newest per profile" against a
+    # store that is gaining one is how the newest gets deleted.
+    image_lock
+# 4.6 GB each, and a profile gets rebuilt every time its spec changes, so this
+# is the fastest-growing thing in the store by a wide margin. Two rules, both
+# conservative:
+#
+#   * rubble first -- a directory with no manifest is an interrupted build,
+#     which every reader already ignores and nothing can be pinned to.
+#   * then all but the newest complete image per profile. Unlike a base
+#     snapshot there is no pin to consult: an image is written to a device and
+#     the device does not hold a reference back. The newest of each profile is
+#     therefore kept unconditionally, because it is the one `wk boot` would
+#     arm, and older ones are re-buildable from a spec in the repo.
+# Sourced before the test, not inside it: the store's location is
+# image_store_dir's answer and not $WK_STORE/images -- on a macOS host those are
+# two different places (lib/image.sh says why), and testing the wrong one means
+# gc reports reclaiming nothing, for ever, on the machine that has the images.
+if [ -d "$(image_store_dir)" ]; then
+
+    for id in $(image_rubble); do
+        info "removing rubble from an interrupted image build: $id"
+        rm -rf "$(image_dir "$id")"
+    done
+
+    for id in $(image_ids | sort); do
+        profile=$(manifest_get "$id" profile) || continue
+        newest=$(image_latest "$profile" 2>/dev/null) || continue
+        [ "$id" = "$newest" ] && continue
+        info "removing superseded image $id ($(du -sh "$(image_dir "$id")" 2>/dev/null | cut -f1))"
+        rm -rf "$(image_dir "$id")"
+    done
+
+    # The served copy of an image that is no longer there is just bytes. The
+    # stamp names the image it was filled from, which is what makes this
+    # answerable rather than a guess.
+    stamp="$WK_STORE/serve/tftp/.wk-image"
+    if [ -f "$stamp" ] && ! image_complete "$(cat "$stamp")"; then
+        info "emptying the tftp root: image $(cat "$stamp") is gone"
+        rm -rf "${WK_STORE:?}/serve/tftp"
+    fi
+fi
+}
+
+# The pmos build hosts: pmbootstrap's chroots and the builds waiting to be
+# imported, on a machine that is not this one. Pruned the way images are --
+# interrupted builds and all but the newest two -- and the chroots only when
+# asked, because they are what makes a rebuild four minutes.
+#
+# Never from inside the VM: it has no route to a build host, and a failure there
+# would be a confusing error about somebody else's machine.
+gc_pmos() {
+    [ -z "${WK_IN_VM:-}" ] || return 0
+    command -v pmos_build_hosts >/dev/null 2>&1 || return 0
+    local h
+    for h in $(pmos_build_hosts 2>/dev/null); do
+        ( WK_PMOS_HOST="$h"; pmos_prune ) || warn "could not prune the build cache on $h"
+        [ -n "$PURGE_PMOS" ] && pmos_purge_work "$h"
+    done
+    return 0
+}
+
+# --- a macOS host: do this machine's half, hand the rest to the VM -----------
+#
+# Placed before the store work below, because on a Mac $WK_STORE is the VM's
+# /var/lib/wk and none of that work means anything out here. `wk` does not
+# forward this command any more (is_host_command), so this is where the split
+# lives -- and the exit status is the VM's, so a failure in there is still a
+# failure of `wk gc`.
+if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+    info "this machine's half: boot images and the pmos build hosts"
+    gc_images
+    gc_pmos
+
+    if command -v podman >/dev/null 2>&1 \
+       && [ "$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null)" = running ]; then
+        info "the container store's half, inside the podman machine"
+        podman machine ssh "${WK_MACHINE:-wk}" -- \
+            "WK_IN_VM=1 WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk bash -s -- ${1:-}" <"$0"
+        exit $?
+    fi
+    warn "the podman machine is not running, so the container store was not touched"
+    log  "  'wk start', then 'wk gc' again -- that half is the mirror, the snapshots"
+    log  "  and every workspace's overlay, and it is the largest of them"
+    exit 0
+fi
 
 # The snapshot store and the mirror belong to the overlay scheme, which is the
 # container target's. A vm or remote target has neither -- its "base" is the
@@ -194,43 +331,8 @@ if [ -d "$WK_STORE/cache/bench" ]; then
     done
 fi
 
-# --- boot images ---------------------------------------------------------------
-# 4.6 GB each, and a profile gets rebuilt every time its spec changes, so this
-# is the fastest-growing thing in the store by a wide margin. Two rules, both
-# conservative:
-#
-#   * rubble first -- a directory with no manifest is an interrupted build,
-#     which every reader already ignores and nothing can be pinned to.
-#   * then all but the newest complete image per profile. Unlike a base
-#     snapshot there is no pin to consult: an image is written to a device and
-#     the device does not hold a reference back. The newest of each profile is
-#     therefore kept unconditionally, because it is the one `wk boot` would
-#     arm, and older ones are re-buildable from a spec in the repo.
-if [ -d "$WK_STORE/images" ]; then
-    . "$WK_ROOT/lib/image.sh"
-
-    for id in $(image_rubble); do
-        info "removing rubble from an interrupted image build: $id"
-        rm -rf "$(image_dir "$id")"
-    done
-
-    for id in $(image_ids | sort); do
-        profile=$(manifest_get "$id" profile) || continue
-        newest=$(image_latest "$profile" 2>/dev/null) || continue
-        [ "$id" = "$newest" ] && continue
-        info "removing superseded image $id ($(du -sh "$(image_dir "$id")" 2>/dev/null | cut -f1))"
-        rm -rf "$(image_dir "$id")"
-    done
-
-    # The served copy of an image that is no longer there is just bytes. The
-    # stamp names the image it was filled from, which is what makes this
-    # answerable rather than a guess.
-    stamp="$WK_STORE/serve/tftp/.wk-image"
-    if [ -f "$stamp" ] && ! image_complete "$(cat "$stamp")"; then
-        info "emptying the tftp root: image $(cat "$stamp") is gone"
-        rm -rf "${WK_STORE:?}/serve/tftp"
-    fi
-fi
+gc_images   # (defined above; the store's images and the tftp copy of one)
+gc_pmos     # ...and the build hosts' caches, on the machine that can reach them
 
 # --- return free space to the host ------------------------------------------
 # Only with passwordless sudo (the podman VM has it; a workstation may not):

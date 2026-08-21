@@ -33,6 +33,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/image/yocto.sh"
+. "$WK_ROOT/image/pmos.sh"
 
 # Both of these act on physical machines: a boot device, a firmware register, a
 # disk image measured in gigabytes. None of that exists in a workspace, and the
@@ -53,7 +54,9 @@ usage: wk sysimage <sub>
   build <profile> [--dry-run]     build an image from the spec in this repo
                                   (a yocto profile also takes --workspace,
                                    --stage, --detach, --stop, --keep-work,
-                                   --no-import)
+                                   --no-import; a pmos profile takes --detach
+                                   and --resume, and builds on a Linux aarch64
+                                   machine over ssh)
   ls                              images in the store
   show <id>                       what an image is, and whether it still is
   disks <machine>                 removable disks attached to that machine
@@ -657,6 +660,16 @@ cmd_build() {
     # that can disagree. Everything below this line is the distro builder;
     # image/yocto.sh is the other one, and they share only what comes after the
     # manifest.
+    # A phone, built by pmbootstrap on a Linux machine over ssh. Dispatched
+    # before yocto for the same reason yocto is dispatched before the distro
+    # path: which mechanism makes an image is a property of the image, and
+    # nothing below this line applies -- there is no distro base to download,
+    # no cloud-init seed to write, and no workspace involved.
+    if [ "${IMG_BUILDER:-distro}" = pmos ]; then
+        pmos_build "$profile" "$@"
+        return $?
+    fi
+
     if [ "${IMG_BUILDER:-distro}" = yocto ]; then
         # The target the build workspace lives on. Resolved here rather than in
         # the builder because load_target is this file's business (the distro
@@ -837,7 +850,7 @@ watchdog=$IMG_WATCHDOG
 built=$BUILT
 built_by=$(hostname)
 wk_tools=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
-disk_bytes=$(stat -c %s "$DISK")
+disk_bytes=$(file_bytes "$DISK")
 disk_sha256=$sha
 EOF
 
@@ -851,10 +864,14 @@ cmd_ls() {
     local id r n=0
     for id in $(image_ids | sort); do
         n=$((n + 1))
-        printf '%-34s %-12s %-8s %s\n' \
+        # The machine, or -- for an image that is not any machine's, which a
+        # phone's is not -- the device it was built for. A blank column here
+        # read as "this image is for nothing".
+        printf '%-34s %-18s %-8s %s\n' \
             "$id" \
-            "$(manifest_get "$id" machine)" \
-            "$(numfmt --to=iec "$(manifest_get "$id" disk_bytes)" 2>/dev/null || echo '?')" \
+            "$(manifest_get "$id" machine || true)$(
+                  [ -n "$(manifest_get "$id" machine)" ] || manifest_get "$id" device)" \
+            "$(human_bytes "$(manifest_get "$id" disk_bytes)")" \
             "$(manifest_get "$id" built)"
     done
     [ "$n" -eq 0 ] && log "no images built yet -- 'wk sysimage build <profile>'"
@@ -904,6 +921,21 @@ $(machine_list | sed 's/^/      /')"
 # it. They were never different operations -- same store, same verification,
 # same unmount, same refusals -- only different device policy, and the stricter
 # policy is the right one for both. boot/disk.sh has the naming argument.
+# What the dry run says about an image's root, including when it says nothing.
+#
+# An image with no cmdline.txt to read -- a phone's, whose bootloader is not a
+# Raspberry Pi's firmware -- used to print "-- an unrecognised kind of device",
+# which reads as a fault in the image rather than as a question that does not
+# apply to it.
+_root_line() {
+    local spec; spec=$(image_root_spec "$1")
+    if [ -z "$spec" ]; then
+        printf 'not declared in a cmdline.txt -- this image does not boot that way'
+    else
+        printf '%s -- %s' "$spec" "$(image_root_word "$(image_root_class "$spec")")"
+    fi
+}
+
 cmd_write() {
     local id="" spec="" dry="" grow=1
     while [ $# -gt 0 ]; do
@@ -940,12 +972,28 @@ $(machine_list | sed 's/^/      /')"
         die "say which one: --disk $DISK_MACHINE:<device>"
     fi
 
-    local bytes; bytes=$(stat -c %s "$(image_disk "$id")")
+    local bytes; bytes=$(file_bytes "$(image_disk "$id")")
     disk_refuse_unless_safe "$DISK_DEV" "$bytes"
     # Two checks, in the order the board will hit them: can the firmware reach
     # a kernel at all, and then can that kernel reach its root. The first is
     # the one that costs a trip to the device (lib/image.sh), so it goes first.
-    image_check_boot_files "$id" "$DISK_MACHINE"
+    # Only when the image is *for* this machine. The check asks whether this
+    # machine's firmware can find a kernel on the disk, which is the right
+    # question when the card stays where it is being written -- and the wrong
+    # one for a card that is about to be carried somewhere else. A bridge image
+    # is written on whichever machine holds the reader and then goes into a
+    # phone, so checking it against the reader's firmware would refuse a
+    # perfectly good image for a machine that is never going to boot it.
+    local img_machine boot_checked=""; img_machine=$(manifest_get "$id" machine)
+    if [ -n "$img_machine" ] && [ "$img_machine" = "$DISK_MACHINE" ]; then
+        image_check_boot_files "$id" "$DISK_MACHINE"
+        boot_checked=1
+    elif [ -n "$img_machine" ]; then
+        log "  (not checking $DISK_MACHINE's boot files: $id is $img_machine's image, so this card goes elsewhere)"
+    else
+        log "  (not checking $DISK_MACHINE's boot files: $id names no machine -- $(manifest_get "$id" device \
+             | sed 's/^$/it/;s/^\(.\)/a \1/') image, and the card goes into it, not into $DISK_MACHINE)"
+    fi
     image_check_root "$id" "$DISK_DEV" "$DISK_MACHINE"
 
     local method mounted
@@ -955,12 +1003,14 @@ $(machine_list | sed 's/^/      /')"
     if [ -n "$dry" ]; then
         cat >&2 <<EOF
 would write
-  image     $id ($(numfmt --to=iec "$bytes"))
-  its root  $(image_root_spec "$id" || echo '(no cmdline.txt)') -- $(image_root_word "$(image_root_class "$(image_root_spec "$id")")")
-  boot part every file a $DISK_MACHINE's firmware asks for resolves (checked before this line)
+  image     $id ($(human_bytes "$bytes"))
+  its root  $(_root_line "$id")
+  boot part $([ -n "$boot_checked" ] \
+      && printf 'every file a %s'"'"'s firmware asks for resolves (checked before this line)' "$DISK_MACHINE" \
+      || printf 'not checked -- this image is not %s'"'"'s, so its firmware is not the one that will read it' "$DISK_MACHINE")
   onto      $DISK_DEV attached to $DISK_MACHINE ($(m_ssh "lsblk -dno SIZE,TRAN,MODEL $DISK_DEV" 2>/dev/null | tr -s ' '))
   mounted   ${mounted:-nothing}
-  method    $([ "$method" = bmap ] && echo "bmaptool -- sends $(numfmt --to=iec "$(stat -c %s "$(image_wic "$id")")") compressed, writes mapped blocks only, checksums each" || echo "zstd stream into dd, then read back and compare sha256")
+  method    $([ "$method" = bmap ] && echo "bmaptool -- sends $(human_bytes "$(file_bytes "$(image_wic "$id")")") compressed, writes mapped blocks only, checksums each" || echo "zstd stream into dd, then read back and compare sha256")
   grow      $([ "$grow" = 1 ] && echo "yes, partition 2 to fill the disk" || echo "no (--no-grow)")
 EOF
         [ "$DISK_DEV" = "${MACH_DEVICE:-}" ] && log "  note      $DISK_MACHINE is configured to boot from this disk (wk boot $DISK_MACHINE)"

@@ -47,8 +47,18 @@ WHAT IS EXPENSIVE, AND WHAT IT COSTS TO GET BACK
   container images          podman's own store, ~15 GB: the images workspaces
                             are made from. Re-pullable.
   ccache and the caches     trimmed to a ceiling, never unbounded.
-  system images             4.6 GB each ('wk sysimage'), rebuilt from their
-                            profile in this repo whenever its spec changes.
+  system images             3-5 GB each ('wk sysimage'), rebuilt from their
+                            profile in this repo whenever its spec changes. On a
+                            macOS host these are *not* in the podman VM: they
+                            live under this device's own state directory,
+                            because a Mac cannot write /var/lib/wk.
+  a pmos build host         about 8 GB of pmbootstrap chroots and package cache
+                            under ~/wk-pmos on the machine that builds phone
+                            images (rpi5), plus ~500 MB per build waiting to be
+                            imported. Not this machine's disk, and reported
+                            anyway -- nothing else would ever mention it, and it
+                            is the largest thing this repo leaves on a machine
+                            that is not the workstation.
   workspaces                a container's is its overlay upper layer -- what you
                             have actually changed and built. A guest's is the
                             whole guest.
@@ -60,9 +70,18 @@ ROUTINE RECLAIM
       wk gc                 prunes by reference count, so it can never lose
                             work: unreferenced snapshots, dangling images and
                             volumes, stale benchmark seeds, superseded system
-                            images, ccache back to its ceiling. It also prints
-                            what it deliberately did *not* prune, so growth
-                            stays visible.
+                            images, interrupted and superseded builds on a pmos
+                            build host, ccache back to its ceiling. It also
+                            prints what it deliberately did *not* prune, so
+                            growth stays visible.
+
+                            On a macOS host it runs in two halves, because what
+                            it reclaims is on two machines: the system images and
+                            the build hosts' caches out here, and the container
+                            store inside the podman VM. It says which half is
+                            which as it goes, and if the VM is not running it
+                            tells you the container half was skipped rather than
+                            reporting success over half the job.
       wk rm <name>          a workspace and everything it created, in one step.
                             This is the intended way to reclaim: workspaces are
                             disposable and remaking one is cheap.
@@ -91,6 +110,15 @@ ERASING THE MASTERS
       wk remote rm <t>      a build machine's remote root -- its pushed tooling,
                             its caches, its own mirror -- offered with the size,
                             on the machine itself.
+      wk gc --purge-pmos    the pmbootstrap chroots on every pmos build host
+                            (~8 GB each). Offered with the size, per host, and
+                            the chroots are shut down before they are removed --
+                            they carry bind mounts into the host's own /proc and
+                            /dev. The next phone-image build there refetches
+                            them: minutes, and only over the network.
+      wk sysimage rm <id>   one system image. `wk gc` already drops superseded
+                            ones; this is for the newest of a profile you are
+                            done with (3-5 GB).
 
   The podman VM as a whole is not a wk command, because recreating it is `setup`
   and not gc:

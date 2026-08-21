@@ -1,0 +1,459 @@
+#!/bin/sh
+# Build a postmarketOS system with pmbootstrap. Runs on a Linux aarch64
+# machine, over ssh from image/pmos.sh, which copies this file there.
+#
+# Why remotely at all: pmbootstrap is Linux-only and needs root (loop devices,
+# chroots, kpartx), and the workstation driving all this is a Mac. That is the
+# same split `wk sysimage write` already lives with -- the unprivileged half
+# here, the privileged half on the machine that has the hardware -- so the
+# build host is chosen for being able to do the work, and nothing about it is
+# assumed beyond a package list this checks.
+#
+# Native, not emulated: both phones are aarch64, so an aarch64 build host runs
+# the target's own architecture and pmbootstrap never starts qemu. On anything
+# else this refuses rather than quietly taking ten times as long.
+#
+# Inputs, all from the environment (image/pmos.sh sets every one):
+#
+#   PMO_ID          the image id, for the log and the result block
+#   PMO_DEVICE      the pmOS device codename, e.g. pine64-pinephone
+#   PMO_UI          phosh -- and it is deliberate, see image/profiles.sh
+#   PMO_CHANNEL     the pmOS release channel, e.g. v25.12
+#   PMO_PMB_VERSION the pmbootstrap git tag to run
+#   PMO_USER        the account the phone's own screen logs into
+#   PMO_PASSWORD    that account's password. Plain text, on purpose: see below
+#   PMO_PACKAGES    comma-separated extras baked in
+#   PMO_EXTRA_SPACE MB of slack in the image beyond the rootfs
+#   PMO_HOSTNAME    what the system calls itself
+#   PMO_KEYFILE     a public key file on this host, put there by the caller
+#   PMO_WIFI        yes to copy this host's own WiFi credential into the image
+#   PMO_ROOT        where the venv, the pmbootstrap work folder and the output go
+set -eu
+
+: "${PMO_ID:?}"; : "${PMO_DEVICE:?}"; : "${PMO_CHANNEL:?}"; : "${PMO_PMB_VERSION:?}"
+: "${PMO_HOSTNAME:?}"; : "${PMO_KEYFILE:?}"
+PMO_UI="${PMO_UI:-phosh}"
+PMO_USER="${PMO_USER:-user}"
+PMO_PASSWORD="${PMO_PASSWORD:-147147}"
+PMO_PACKAGES="${PMO_PACKAGES:-}"
+PMO_EXTRA_SPACE="${PMO_EXTRA_SPACE:-512}"
+PMO_WIFI="${PMO_WIFI:-no}"
+PMO_ROOT="${PMO_ROOT:-$HOME/wk-pmos}"
+
+VENV="$PMO_ROOT/venv"
+WORK="$PMO_ROOT/work"
+APORTS="$WORK/cache_git/pmaports"
+CFG="$PMO_ROOT/$PMO_DEVICE.cfg"
+OUT="$PMO_ROOT/out/$PMO_ID"
+PMB="$VENV/bin/pmbootstrap"
+
+step() { printf '\n==> %s\n' "$*"; }
+info() { printf '    %s\n' "$*"; }
+warn() { printf '    WARN: %s\n' "$*"; }
+die()  { printf '    ERROR: %s\n' "$*" >&2; exit 1; }
+
+# Three attempts, because the build host is on WiFi.
+#
+# Not defensive programming for its own sake: this host roams between two APs on
+# one SSID, and a blip of a few seconds at minute one killed a build that would
+# otherwise have taken twenty (observed 2026-08-20 -- "Failed to connect ...
+# after 30 ms", with the same fetch succeeding immediately afterwards). Anything
+# that reaches the network here gets wrapped.
+retry() {
+    n=0
+    while :; do
+        "$@" && return 0
+        n=$((n + 1))
+        [ "$n" -ge 3 ] && return 1
+        warn "failed: $* -- retrying in $((n * 5))s"
+        sleep $((n * 5))
+    done
+}
+
+step "Preflight"
+[ "$(uname -s)" = Linux ] || die "this is not Linux; pmbootstrap cannot run here"
+arch=$(uname -m)
+[ "$arch" = aarch64 ] || die "this host is $arch and the phones are aarch64.
+    pmbootstrap would emulate the whole build with qemu -- hours instead of
+    minutes -- so this refuses. Build on an aarch64 machine."
+
+# Checked, and each name is the one that installs it. pmbootstrap's own error
+# for a missing program names the program and not the package, and `kpartx` is
+# the one where those differ enough to matter.
+missing=""
+for t in python3 git xz; do
+    command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+done
+command -v kpartx    >/dev/null 2>&1 || missing="$missing kpartx(multipath-tools)"
+command -v losetup   >/dev/null 2>&1 || missing="$missing losetup(util-linux)"
+command -v bmaptool  >/dev/null 2>&1 || missing="$missing bmaptool(bmap-tools)"
+python3 -c 'import ensurepip' 2>/dev/null || missing="$missing python3-venv"
+python3 -c 'import yaml' 2>/dev/null || missing="$missing python3-yaml"
+[ -z "$missing" ] || die "missing on this host:$missing
+    sudo apt install -y multipath-tools bmap-tools python3-venv python3-yaml xz-utils git"
+sudo -n true 2>/dev/null || die "sudo needs a password here.
+    pmbootstrap mounts chroots and loop devices; it cannot do that
+    non-interactively without passwordless sudo."
+[ -r "$PMO_KEYFILE" ] || die "no public key at $PMO_KEYFILE"
+
+# --- pmbootstrap -------------------------------------------------------------
+#
+# From a pinned git tag, in a venv of its own. Not from PyPI: every pmbootstrap
+# release there is yanked (checked 2026-08-20 -- 1.0.1 through 2.1.0, all of
+# them), so `pip install pmbootstrap` fails with "no matching distribution" and
+# the project's own distribution channel is the git repository. Not from apt
+# either: Ubuntu does not carry it.
+step "pmbootstrap $PMO_PMB_VERSION"
+have_ver=""
+[ -x "$PMB" ] && have_ver=$("$PMB" --version 2>/dev/null || true)
+if [ "$have_ver" = "$PMO_PMB_VERSION" ]; then
+    info "already installed"
+else
+    [ -d "$VENV" ] || python3 -m venv "$VENV"
+    "$VENV/bin/pip" install -q --upgrade pip
+    "$VENV/bin/pip" install -q \
+        "git+https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git@$PMO_PMB_VERSION" \
+        || die "could not install pmbootstrap $PMO_PMB_VERSION"
+    info "installed $("$PMB" --version)"
+fi
+
+# --- the work folder ---------------------------------------------------------
+#
+# Prepared here rather than by `pmbootstrap init`, because init cannot be driven
+# non-interactively: it prompts for the work path before it reads anything, and
+# `-y` does not answer that prompt (it only suppresses "are you sure"). Feeding
+# it a script of answers would be a guess about question order that breaks on
+# any upstream edit.
+#
+# What init does that matters is exactly two things: a version file, and a
+# pmaports clone. Both are done here, and the pmbootstrap version is pinned
+# above so the version number cannot drift underneath us.
+step "Work folder"
+WORK_VERSION=8
+if [ ! -d "$WORK" ]; then
+    mkdir -p "$WORK"
+    printf '%s\n' "$WORK_VERSION" > "$WORK/version"
+    info "created $WORK (version $WORK_VERSION)"
+elif [ ! -f "$WORK/version" ]; then
+    # A work folder with no version file is one pmbootstrap refuses to migrate
+    # ("we can't migrate that automatically") -- and an empty directory left by
+    # a failed first attempt looks exactly like that. Stamp it rather than
+    # making a person delete it.
+    printf '%s\n' "$WORK_VERSION" > "$WORK/version"
+    info "stamped $WORK with version $WORK_VERSION"
+fi
+
+# pmaports, on the channel's branch -- and `origin/master` fetched as well.
+#
+# Two non-obvious things, both of which fail in a way that names the wrong
+# problem. pmbootstrap reads channels.cfg from `origin/master`, but pmaports'
+# default branch is `main`, so a single-branch clone leaves it unable to resolve
+# any channel at all ("Failed to read channels.cfg from 'origin/master'"). And
+# the channel has to be one channels.cfg actually lists: `v26.06` exists as a
+# branch, is not a released channel, and picking it gets you a KeyError rather
+# than a sentence.
+step "pmaports ($PMO_CHANNEL)"
+if [ ! -d "$APORTS/.git" ]; then
+    mkdir -p "$(dirname "$APORTS")"
+    retry git clone -q --depth 1 https://gitlab.postmarketos.org/postmarketOS/pmaports.git "$APORTS" \
+        || die "could not clone pmaports"
+fi
+cd "$APORTS"
+retry git fetch -q --depth 1 origin "+refs/heads/master:refs/remotes/origin/master" \
+    || die "could not fetch pmaports' master ref (channels.cfg lives there)"
+# Into the tracking ref, then `checkout -B` off it. Fetching straight into
+# refs/heads/<channel> is refused by git the moment that branch is the one
+# checked out -- which it is on every run after the first ("refusing to fetch
+# into branch ... checked out at ...").
+retry git fetch -q --depth 1 origin "+refs/heads/$PMO_CHANNEL:refs/remotes/origin/$PMO_CHANNEL" \
+    || die "could not fetch the $PMO_CHANNEL branch of pmaports"
+git checkout -q -B "$PMO_CHANNEL" "refs/remotes/origin/$PMO_CHANNEL"
+cd - >/dev/null
+# Refuse a channel the release metadata does not know, here, where the answer
+# is one file read -- rather than inside pmbootstrap, where it is a traceback.
+(cd "$APORTS" && git show origin/master:channels.cfg) | grep -q "^\[$PMO_CHANNEL\]" \
+    || die "'$PMO_CHANNEL' is not a channel in pmaports' channels.cfg.
+    Channels are the released ones:
+$( (cd "$APORTS" && git show origin/master:channels.cfg) | sed -n 's/^\[\(v[0-9.]*\|edge\)\]$/      \1/p')"
+APORTS_REV=$(cd "$APORTS" && git rev-parse --short HEAD)
+info "pmaports $PMO_CHANNEL @ $APORTS_REV"
+
+# --- the config --------------------------------------------------------------
+#
+# `aports` is set explicitly and that is not redundant: it does not follow
+# `work`. Left out, pmbootstrap looks for pmaports under the *default* work
+# folder (~/.local/var/pmbootstrap) and reports "pmaports dir not found" about
+# a path nothing was ever put in.
+#
+# systemd = never: the bridge role is written in OpenRC service files, and
+# `wk bridge setup` refuses a systemd image rather than half-applying itself.
+step "Config"
+cat > "$CFG" <<EOF
+# Written by image/pmos-build.sh for $PMO_ID. Edit the profile, not this.
+[pmbootstrap]
+device = $PMO_DEVICE
+ui = $PMO_UI
+user = $PMO_USER
+hostname = $PMO_HOSTNAME
+work = $WORK
+aports = $APORTS
+ssh_keys = True
+ssh_key_glob = $PMO_KEYFILE
+systemd = never
+EOF
+info "$CFG"
+
+# --- install -----------------------------------------------------------------
+#
+# --no-firewall, because the bridge role owns the firewall: it installs one
+# nftables table of its own and disables the packaged service, and two things
+# writing one ruleset is how tailscale's chains get flushed by accident.
+#
+# --password is documented by pmbootstrap as a dummy for automation, handled in
+# plain text and logged -- which is exactly what it is here. It is the console
+# password on the phone's own screen, and the phone's screen is the recovery
+# path of last resort; over the network nothing can use it, because
+# bridge/provision.sh turns password authentication off.
+#
+# --no-split gives one combined image file, which is what a card wants.
+# Shut down whatever the last run left behind, first.
+#
+# pmbootstrap leaves its chroots bind-mounted and the previous image attached to
+# a loop device when it finishes -- it says so ("chroot is still active") and
+# does not clean up on its own. The next install then fails at
+# `mkfs.ext4 ... /dev/installp2`, because that mapping still belongs to the
+# image before it. Observed exactly once, which was one run too many: this is
+# the difference between "idempotent" and "works the first time".
+step "Shutting down any previous chroot"
+"$PMB" -c "$CFG" -y shutdown >/dev/null 2>&1 || warn "pmbootstrap shutdown reported a problem; continuing"
+
+step "pmbootstrap install ($PMO_DEVICE, $PMO_UI, +${PMO_EXTRA_SPACE}M)"
+# The artifacts, not the directory. $OUT is where this run's *log* lives -- the
+# caller redirected into it before this script started -- so `rm -rf "$OUT"`
+# unlinks the log mid-run: the shell keeps writing to a file nobody can open,
+# and the failure that follows is invisible from the outside. Cost an hour to
+# find, because it presents as "the build never started".
+mkdir -p "$OUT"
+rm -f "$OUT/disk.wic.xz" "$OUT/disk.bmap" "$OUT/result"
+add=""
+[ -n "$PMO_PACKAGES" ] && add="--add $PMO_PACKAGES"
+# shellcheck disable=SC2086
+"$PMB" -c "$CFG" -y -E "$PMO_EXTRA_SPACE" --details-to-stdout install \
+    --no-split --no-firewall --password "$PMO_PASSWORD" $add \
+    || {
+        # pmbootstrap's real error is in its own log, and the traceback it
+        # prints to stdout names the failed command without its output. Print
+        # the tail here so a detached build's log holds the reason rather than
+        # a path on another machine.
+        warn "pmbootstrap install failed; the last 40 lines of its own log:"
+        tail -40 "$WORK/log.txt" 2>/dev/null | sed 's/^/    | /'
+        die "pmbootstrap install failed (its log: $WORK/log.txt on this host)"
+    }
+
+# Unmount and detach before touching the image ourselves: the loop device the
+# install used is still attached to it, and mounting the same file twice is how
+# you get two writers to one filesystem.
+step "Shutting down the chroot"
+"$PMB" -c "$CFG" -y shutdown >/dev/null 2>&1 || warn "pmbootstrap shutdown reported a problem; continuing"
+
+img=$(find "$WORK/chroot_native/home/pmos/rootfs" -maxdepth 1 -name "$PMO_DEVICE.img" 2>/dev/null | head -1)
+[ -n "$img" ] || img=$(find "$WORK" -maxdepth 6 -name "$PMO_DEVICE.img" 2>/dev/null | head -1)
+[ -n "$img" ] || die "pmbootstrap reported success but no $PMO_DEVICE.img is under $WORK"
+info "image: $img ($(du -h "$img" | cut -f1))"
+
+# --- the bootloader ----------------------------------------------------------
+#
+# pmbootstrap does not put it in an image *file*. It embeds firmware when it
+# writes a real disk (`--disk`/`--sdcard`) and not when it produces an image, so
+# `--no-split` output has a valid partition table, valid filesystems, and
+# nothing for the boot ROM to find. The card then looks perfectly good and the
+# phone boots whatever is on its eMMC instead -- which is precisely what
+# happened the first time this was tried on hardware: sector 8 of the image was
+# all zeros and the PinePhone came up on its old OS.
+#
+# So it is done here, from the same two facts the device itself declares:
+#
+#   deviceinfo_sd_embed_firmware="<path under /usr/share>:<sector> ..."
+#
+# The file comes out of the rootfs pmbootstrap just built, so it is the version
+# that matches this image rather than whatever the build host happens to have.
+step "Embedding the bootloader"
+DEVICEINFO=$(find "$APORTS/device" -name deviceinfo -path "*device-$PMO_DEVICE/*" | head -1)
+[ -n "$DEVICEINFO" ] || die "no deviceinfo for $PMO_DEVICE under $APORTS/device"
+embed=$(sed -n 's/^deviceinfo_sd_embed_firmware="\(.*\)"$/\1/p' "$DEVICEINFO")
+if [ -z "$embed" ]; then
+    # Not every device boots this way (some are flashed over fastboot or uuu),
+    # and for those an image with no embedded firmware is correct. Said out loud
+    # so that "the card does not boot" is never a silent possibility.
+    warn "$PMO_DEVICE declares no sd_embed_firmware: this image carries no"
+    warn "  bootloader of its own, and a card written from it will only boot if"
+    warn "  the device finds firmware somewhere else."
+else
+    rootfs="$WORK/chroot_rootfs_$PMO_DEVICE"
+    for entry in $embed; do
+        f="${entry%:*}"; sector="${entry##*:}"
+        src="$rootfs/usr/share/$f"
+        sudo -n test -f "$src" \
+            || die "$DEVICEINFO wants $f at sector $sector, and it is not in the
+    rootfs pmbootstrap built ($src). The device package that provides it may
+    have changed name."
+        sudo -n dd if="$src" of="$img" bs=512 seek="$sector" conv=notrunc,fsync \
+            status=none || die "could not embed $f at sector $sector"
+        info "embedded $(basename "$f") at sector $sector ($(sudo -n stat -c %s "$src") bytes)"
+    done
+
+    # Read it back. An embed that silently wrote nothing is the same failure as
+    # not embedding at all, and this is one dd to rule it out -- it is checked
+    # here rather than trusted, because the whole class of bug this fixes was
+    # invisible until a phone in somebody's hand booted the wrong OS.
+    first_sector=$(printf '%s' "$embed" | awk '{print $1}' | sed 's/.*://')
+    nonzero=$(sudo -n dd if="$img" bs=512 skip="$first_sector" count=1 status=none \
+              | tr -d '\0' | wc -c | tr -d ' ')
+    [ "${nonzero:-0}" -gt 0 ] \
+        || die "sector $first_sector is still all zeros after embedding -- a card
+    written from this image would not boot, and the phone would come up on
+    whatever is on its internal storage."
+    info "verified: sector $first_sector carries $nonzero non-zero bytes"
+fi
+
+# --- seeding the image -------------------------------------------------------
+#
+# Two things go in that pmbootstrap cannot put there, and both are about the
+# phone being *reachable* the first time it boots -- which is the whole
+# difference between a card you can provision over the wire and a card that
+# needs a person holding the phone.
+#
+#   the WiFi credential   the phone's uplink *is* WiFi; there is no cable, so an
+#                         image without it comes up in isolation
+#   avahi, enabled        until `wk bridge setup` runs `tailscale up` there is no
+#                         tailnet name, and the DHCP address is not knowable in
+#                         advance, so <hostname>.local is the whole of first
+#                         contact
+#
+# The credential is read from this host's own connection, on this host, so the
+# PSK never travels through a log, a command line, or an agent's context -- the
+# same rule image/profiles.sh's `wifi-from-machine` follows for the Pis. The
+# bssid is deliberately not copied: this house has two APs on one SSID and the
+# phone is expected to roam, and a pinned bssid turns a roam into an outage.
+#
+# One mount for both, and the mount is here rather than on the workstation for
+# the reason everything else in this file is: this is the machine that already
+# needs root to build at all.
+step "Seeding the image"
+keyfile=""
+ssid=""
+if [ "$PMO_WIFI" = yes ]; then
+    keyfile=$(mktemp)
+    chmod 600 "$keyfile"
+    sudo -n cat /etc/netplan/*.yaml 2>/dev/null | python3 -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+for doc in docs:
+    for _, dev in (doc.get("network", {}).get("wifis") or {}).items():
+        for ssid, ap in (dev.get("access-points") or {}).items():
+            psk = ((ap.get("auth") or {}).get("password")
+                   or ap.get("password") or "")
+            if not psk:
+                continue
+            print("[connection]")
+            print("id=wk-uplink")
+            print("type=wifi")
+            print("autoconnect=true")
+            print("autoconnect-retries=0")
+            print("")
+            print("[wifi]")
+            print("mode=infrastructure")
+            print("ssid=%s" % ssid)
+            print("")
+            print("[wifi-security]")
+            print("key-mgmt=wpa-psk")
+            print("psk=%s" % psk)
+            print("")
+            print("[ipv4]")
+            print("method=auto")
+            print("")
+            print("[ipv6]")
+            print("method=auto")
+            print("addr-gen-mode=default")
+            sys.exit(0)
+sys.exit(3)
+' > "$keyfile" || { rm -f "$keyfile"; die "no WiFi credential found in this host's netplan.
+    The image needs one: the phone has no cable, so an image without it boots
+    into isolation. Build on a host that is on the WiFi the phone will use."; }
+    ssid=$(sed -n 's/^ssid=//p' "$keyfile")
+else
+    warn "no WiFi credential in this image (PMO_WIFI=no)."
+    warn "  The phone has no cable, so it will not reach the tailnet until"
+    warn "  somebody joins a network on its own screen."
+fi
+
+loop=$(sudo -n losetup --show -P -f "$img")
+trap 'sudo -n umount "$OUT/mnt" 2>/dev/null || true; sudo -n losetup -d "$loop" 2>/dev/null || true; [ -n "$keyfile" ] && rm -f "$keyfile"' EXIT INT TERM
+mkdir -p "$OUT/mnt"
+# Partition 2 is the root on both phones' layouts (boot is 1). Checked below
+# rather than assumed: a wrong guess would silently seed the boot partition and
+# the phone would come up with no uplink and no way in.
+sudo -n mount "${loop}p2" "$OUT/mnt" || die "could not mount ${loop}p2"
+[ -d "$OUT/mnt/etc/NetworkManager" ] \
+    || die "${loop}p2 has no /etc/NetworkManager -- that is not the rootfs"
+
+if [ -n "$keyfile" ]; then
+    # root:root 0600, or NetworkManager ignores the file outright.
+    sudo -n install -o 0 -g 0 -m 0600 "$keyfile" \
+        "$OUT/mnt/etc/NetworkManager/system-connections/wk-uplink.nmconnection"
+    info "uplink: $ssid (the PSK stayed on this host)"
+fi
+
+# A service is enabled by linking it into a runlevel -- that is all
+# `rc-update add` does -- and installing avahi does not start it.
+if [ -x "$OUT/mnt/etc/init.d/avahi-daemon" ] && [ -d "$OUT/mnt/etc/runlevels/default" ]; then
+    if [ -e "$OUT/mnt/etc/runlevels/default/avahi-daemon" ]; then
+        info "avahi-daemon already enabled in the image"
+    else
+        sudo -n ln -s /etc/init.d/avahi-daemon "$OUT/mnt/etc/runlevels/default/avahi-daemon"
+        info "enabled avahi-daemon, so $PMO_HOSTNAME.local answers on the first boot"
+    fi
+else
+    warn "no avahi-daemon in the image: first contact will need the phone's own"
+    warn "  address, since it has no tailnet name until it is provisioned"
+fi
+
+sudo -n sync
+sudo -n umount "$OUT/mnt"
+sudo -n losetup -d "$loop"
+[ -n "$keyfile" ] && rm -f "$keyfile"
+trap - EXIT INT TERM
+rmdir "$OUT/mnt"
+
+# --- the artifacts -----------------------------------------------------------
+#
+# A block map and a compressed image, which is the fast write path: bmaptool
+# sends the compressed file and writes only the blocks the map says are in use,
+# checksumming each against the map as it goes. A phone image is mostly empty
+# space, so this is the difference between sending a few hundred megabytes and
+# sending all of it. boot/disk.sh picks the path from what the store holds.
+step "Block map and compression"
+raw_bytes=$(stat -c %s "$img")
+raw_sha=$(sha256sum "$img" | cut -d' ' -f1)
+bmaptool create -o "$OUT/disk.bmap" "$img" >/dev/null 2>&1 \
+    || die "bmaptool could not map $img"
+xz -T0 -3 -c "$img" > "$OUT/disk.wic.xz" || die "could not compress $img"
+
+cat > "$OUT/result" <<EOF
+device=$PMO_DEVICE
+ui=$PMO_UI
+channel=$PMO_CHANNEL
+pmaports_rev=$APORTS_REV
+pmbootstrap=$("$PMB" --version)
+user=$PMO_USER
+hostname=$PMO_HOSTNAME
+uplink_ssid=$ssid
+raw_bytes=$raw_bytes
+raw_sha256=$raw_sha
+wic_xz_bytes=$(stat -c %s "$OUT/disk.wic.xz")
+bmap_bytes=$(stat -c %s "$OUT/disk.bmap")
+EOF
+
+step "Done"
+info "$OUT/disk.wic.xz  ($(du -h "$OUT/disk.wic.xz" | cut -f1) of $(du -h "$img" | cut -f1) raw)"
+cat "$OUT/result"

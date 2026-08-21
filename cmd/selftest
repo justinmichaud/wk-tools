@@ -254,6 +254,60 @@ chk_bridge_rm_is_inverse() {
     [ -z "$missing" ] || { echo "written by provision.sh, never removed by 'wk bridge rm':$missing"; return 1; }
 }
 
+# A bridge's system and its role are declared in two files, and they have to
+# agree: the profile says which phone it builds for, the bridge conf says which
+# phone the role runs on. Disagreeing, they produce an image for one device
+# provisioned as if it were the other -- and nothing before the phone fails to
+# boot would notice.
+chk_bridge_profiles_match() {
+    local prof out device bridge conf declared bad=""
+    for prof in bridge-pinephone bridge-librem5; do
+        out=$("$WK" sysimage build "$prof" --dry-run 2>&1) || { echo "$prof: does not resolve: $out"; return 1; }
+        device=$(printf '%s\n' "$out" | sed -n 's/^  device *\([^ ]*\).*/\1/p' | head -1)
+        bridge=$(printf '%s\n' "$out" | sed -n 's/^  for bridge *\([^ ]*\).*/\1/p' | head -1)
+        [ -n "$device" ] || { bad="$bad
+  $prof: the dry run names no device"; continue; }
+        conf="$WK_ROOT/bridge/hosts/$bridge.conf"
+        [ -f "$conf" ] || { bad="$bad
+  $prof: names bridge '$bridge', which has no conf"; continue; }
+        declared=$(sed -n 's/^BR_DEVICE=//p' "$conf" | head -1)
+        # pinephone <-> pine64-pinephone, librem5 <-> purism-librem5: the pmOS
+        # codename has to contain the device name bridge/devices.sh uses.
+        case "$device" in
+            *"$declared"*) ;;
+            *) bad="$bad
+  $prof: builds for '$device' but $bridge.conf says BR_DEVICE=$declared" ;;
+        esac
+    done
+    [ -z "$bad" ] || { echo "profile and bridge conf disagree:$bad"; return 1; }
+}
+
+# The image bakes in the packages the role needs, and the point of that is a
+# provisioning run that touches no network: `wk bridge setup` reports "all
+# packages present -- apk not contacted". A package the provisioner requires and
+# the profile does not carry breaks that quietly -- provisioning still works,
+# over egress the bridge segment may not have, against an apk index that may
+# have moved on. Months later, on a phone in a drawer.
+chk_bridge_image_carries_role_packages() {
+    local required profile_pkgs p missing=""
+    required=$(sed -n 's/^REQUIRED="\(.*\)"$/\1/p;s/^OPTIONAL="\(.*\)"$/\1/p' \
+                   "$WK_ROOT/bridge/provision.sh")
+    [ -n "$required" ] || { echo "could not read the package lists out of bridge/provision.sh"; return 1; }
+    # Both profiles carry the same list plus ffmpeg for the camera one, so the
+    # pinephone's is the strict subset to check against.
+    profile_pkgs=$(sed -n 's/^ *PMO_PACKAGES="\([^"]*\)".*/\1/p' "$WK_ROOT/image/profiles.sh" \
+                   | tr ',' ' ')
+    [ -n "$profile_pkgs" ] || { echo "could not read PMO_PACKAGES out of image/profiles.sh"; return 1; }
+    for p in $required; do
+        case " $profile_pkgs " in
+            *" $p "*) ;;
+            *) missing="$missing $p" ;;
+        esac
+    done
+    [ -z "$missing" ] || { echo "bridge/provision.sh needs these and the image does not carry them:$missing
+  A first provision would then need egress from the phone to install them."; return 1; }
+}
+
 # The half no command does -- flashing postmarketOS -- has to be written down
 # somewhere, and the topic is where a person looks.
 chk_bridge_help_topic() {
@@ -595,10 +649,26 @@ chk_exit_handlers_compose() {
     [ -z "$out" ] || { echo "$out"; return 1; }
     # And structurally: nothing outside lib/common.sh may take the EXIT trap,
     # because taking it is what disables everything else registered under it.
-    local claimants
-    claimants=$(grep -rn "^[^#]*trap .*EXIT" "$WK_ROOT/cmd" "$WK_ROOT/lib" "$WK_ROOT/targets" \
-                    "$WK_ROOT/boot" "$WK_ROOT/image" 2>/dev/null \
-                | grep -v "lib/common.sh" || true)
+    #
+    # In a process that has the registry, which is the whole point of the rule.
+    # A file that never sources lib/common.sh has no wk_atexit to register with
+    # -- image/pmos-build.sh is copied to a build host and run by its /bin/sh,
+    # with none of this repo beside it -- and there `trap` is the only mechanism
+    # there is, with nothing else under the trap to disable. So the scan asks
+    # both questions rather than one: does this file take the trap, and could it
+    # have done anything else.
+    local claimants f
+    claimants=""
+    while read -r f; do
+        [ -n "$f" ] || continue
+        grep -q 'lib/common\.sh' "${f%%:*}" 2>/dev/null || continue
+        claimants="$claimants
+$f"
+    done <<EOF
+$(grep -rn "^[^#]*trap .*EXIT" "$WK_ROOT/cmd" "$WK_ROOT/lib" "$WK_ROOT/targets" \
+      "$WK_ROOT/boot" "$WK_ROOT/image" 2>/dev/null | grep -v "lib/common.sh" || true)
+EOF
+    claimants=$(printf '%s' "$claimants" | sed '/^$/d')
     [ -z "$claimants" ] || { echo "these take the EXIT trap instead of registering a handler:
 $claimants"; return 1; }
 }
@@ -1297,6 +1367,8 @@ if want quick; then
     check "is the inverse of"                                             chk_bridge_rm_is_inverse
     check "covers the half no command does"                               chk_bridge_help_topic
     check "is refused inside a workspace and on a shared build machine"   chk_bridge_host_only
+    check "the profile and the bridge conf name the same phone"            chk_bridge_profiles_match
+    check "the image carries every package the role requires"             chk_bridge_image_carries_role_packages
 fi
 
 if want state; then

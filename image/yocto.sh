@@ -377,7 +377,7 @@ yocto_wait() {
         # and over a six-hour build a ten-second interval is two thousand of
         # them for a question whose answer changes once.
         sleep "${WK_YOCTO_POLL_SECONDS:-30}"
-        size=$(stat -c %s "$log" 2>/dev/null || echo 0); now=$(date +%s)
+        size=$(file_bytes "$log"); now=$(date +%s)
         if [ "$size" != "$last_size" ]; then
             last_size=$size; last_change=$now; warned=0
         fi
@@ -724,20 +724,20 @@ workspace=$ws
 built=$built
 built_by=$(hostname)
 wk_tools=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
-disk_bytes=$(stat -c %s "$dir/disk.img")
+disk_bytes=$(file_bytes "$dir/disk.img")
 disk_sha256=$sha
 EOF
         if [ -f "$dir/disk.bmap" ]; then
             cat <<EOF
 wic_xz=disk.wic.xz
 bmap=disk.bmap
-wic_xz_bytes=$(stat -c %s "$dir/disk.wic.xz")
+wic_xz_bytes=$(file_bytes "$dir/disk.wic.xz")
 EOF
         fi
         if [ -f "$dir/rootfs.tar.xz" ]; then
             cat <<EOF
 rootfs_tar=rootfs.tar.xz
-rootfs_tar_bytes=$(stat -c %s "$dir/rootfs.tar.xz")
+rootfs_tar_bytes=$(file_bytes "$dir/rootfs.tar.xz")
 rootfs_tar_sha256=$(sha256sum "$dir/rootfs.tar.xz" | cut -d' ' -f1)
 EOF
         fi

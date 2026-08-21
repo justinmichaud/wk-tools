@@ -36,6 +36,23 @@ _wk_default_store() {
 
 WK_STORE="${WK_STORE:-$(_wk_default_store)}"
 
+# This device's own state, on the host, whatever $WK_STORE happens to be.
+#
+# It was defined in lib/target.sh, which is where the first caller happened to
+# live: the workspace registry, which has to be readable before a target is
+# resolved. It belongs here, because the question it answers is the one this
+# file exists for -- where does something live when $WK_STORE is somebody else's
+# path. Both users are that shape: the registry (target-dependent $WK_STORE
+# cannot say which target a workspace is on) and the image store (on a macOS
+# host $WK_STORE is the podman VM's /var/lib/wk, which the Mac cannot create).
+#
+# Moved because a helper reachable only through lib/target.sh is a helper that
+# silently disappears: lib/image.sh started calling it, and every command that
+# sources image.sh without target.sh -- cmd/pi among them -- resolved the image
+# store to `/images` and pruned, listed and wrote nothing, with no error but a
+# `command not found` on stderr.
+wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
+
 # ccache ceiling, shared by every workspace.
 #
 # Measured: a full WPE release build plus two JSC release builds came to 364 MB
