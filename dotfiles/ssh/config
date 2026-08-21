@@ -36,11 +36,19 @@ Host rpi5
 #
 # The host key is deliberately not pinned. The whole point of this board is
 # that it boots a different image on demand, and each one brings its own key.
+#
+# LogLevel goes with that and is not cosmetic. With the known-hosts file at
+# /dev/null, ssh "permanently adds" the key on *every* connection and says so,
+# which put seven identical warnings into one `wk sysimage write` -- and a
+# warning that fires unconditionally is worse than silence, because it trains
+# the eye to skip the place real warnings appear. ERROR, not QUIET: a failure
+# to connect still has to be audible.
 Host rpi4-test
   HostName raspberrypi4-64.local
   User root
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
+  LogLevel ERROR
 
 # The tailnet bridges: phones routing a segment that cannot join the tailnet
 # itself (moose's BMC port, the rpi3/rpi4 cable). `wk bridge` drives them over

@@ -138,13 +138,6 @@ if [ -d "$(image_store_dir)" ]; then
     done
 
     # The served copy of an image that is no longer there is just bytes. The
-    # stamp names the image it was filled from, which is what makes this
-    # answerable rather than a guess.
-    stamp="$WK_STORE/serve/tftp/.wk-image"
-    if [ -f "$stamp" ] && ! image_complete "$(cat "$stamp")"; then
-        info "emptying the tftp root: image $(cat "$stamp") is gone"
-        rm -rf "${WK_STORE:?}/serve/tftp"
-    fi
 fi
 }
 
@@ -331,7 +324,7 @@ if [ -d "$WK_STORE/cache/bench" ]; then
     done
 fi
 
-gc_images   # (defined above; the store's images and the tftp copy of one)
+gc_images   # (defined above; the store's images)
 gc_pmos     # ...and the build hosts' caches, on the machine that can reach them
 
 # --- boot images ---------------------------------------------------------------
@@ -362,8 +355,8 @@ if [ -d "$WK_STORE/images" ]; then
         rm -rf "$(image_dir "$id")"
     done
 
-    # `wk serve` is gone (2026-08-21, no netboot), so anything under serve/ is
-    # a leftover from before the removal -- reclaim it whole.
+    # Nothing writes serve/ any more, so whatever is under it is a leftover
+    # from an older revision of this repo -- reclaim it whole.
     if [ -d "$WK_STORE/serve" ]; then
         info "removing the retired serve/ tree ($(du -sh "$WK_STORE/serve" 2>/dev/null | cut -f1))"
         rm -rf "${WK_STORE:?}/serve"

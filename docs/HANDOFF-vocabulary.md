@@ -324,7 +324,7 @@ Everything on the tailnet or in the fleet, and what it is for.
 | `tolken` | Apple Silicon Mac (M4) | workstation | `hands-on` | `mbp` in the fleet; boots the `WK Bench` volume, chosen by a person |
 | `rpi5` | Pi 5, NVMe + WiFi | workstation | `one-shot` | firmware register; NVMe untouched; **64-bit only**; distro *and* yocto bench modes |
 | `rpi4` | Pi 4B, **4 GB**, wired | bench-device | `medium` | USB stick is bench mode, SD card is host mode; 32- and 64-bit |
-| `rpi3` | Pi 3, armv7l, 931 MB | bench-device | `hands-on` (local SD; netboot dropped 2026-08-21) | **not provisioned**, no DNS entry; 32- and 64-bit systems both named now |
+| `rpi3` | Pi 3, armv7l, 931 MB | bench-device | `hands-on` (local SD) | **not provisioned**, no DNS entry; 32- and 64-bit systems both named now |
 | `benchvm` | macOS guest | bench-device | `guest` | scriptable rehearsal for tolken |
 
 ### Auxiliary — not booted by wk, but part of how the fleet is reached

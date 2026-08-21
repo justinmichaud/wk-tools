@@ -451,11 +451,10 @@ yocto_import() {
         t_pull "$ws" "$bmap" "$dir/disk.bmap" || die "could not import the block map"
     fi
 
-    # The rootfs tarball as well. Not needed to flash a card, and kept anyway:
-    # a network root is what the rpi4's netboot loop needs (cmd/serve refuses
-    # to serve an image whose cmdline names a local root, correctly), and a
-    # tarball is what fills an NFS root. Importing it now costs ~600 MB and
-    # means the day that lands, the image is already in the store complete.
+    # The rootfs tarball as well. Not needed to write a disk, and kept anyway:
+    # a tarball is the honest archival form of a rootfs -- readable without a
+    # partition table, and the one form that can be unpacked somewhere this
+    # repo has not thought of yet. It costs ~600 MB.
     local tar="$src_dir/$recipe.tar.xz"
     if t_exec "$ws" test -f "$tar"; then
         info "importing $recipe.tar.xz (the rootfs, for a future network root)"
@@ -695,12 +694,32 @@ EOF
     # The distro builder has done this all along, inside `relabel`, which is
     # why it took wanting a Yocto image on the rpi5 to notice that the two
     # builders shared nothing after the manifest.
+    # $ID, not just the local $id: marker_file and install_disk_id both read
+    # the global, and without it a Yocto image got `id=` with nothing after it
+    # -- an identity marker that identifies nothing, which every reader of it
+    # treats as "some wk image" rather than as this one.
+    ID="$id"
     DISK="$dir/disk.img"
+    FAT_OFFSET=$(fat_offset "$DISK")
+    [ -n "$FAT_OFFSET" ] && [ "$FAT_OFFSET" -gt 0 ] \
+        || die "could not find the boot partition in $DISK"
     SEED=$(mktemp -d)
     wk_atexit _seed_cleanup
     info "adding the fleet integration (identity marker, watchdog, self-disarm)"
     install_fleet_integration "$(part_offset "$DISK" 2)"
+    # And the two things that make that integration reachable and this image
+    # writable to the machine's actual bench device. Both are here rather than
+    # in the recipe because both are properties of *this fleet* rather than of
+    # the distribution: the key is ours, and which disk the board boots is a
+    # fleet decision the wks file knows nothing about.
+    install_driving_key "$(part_offset "$DISK" 2)"
+    install_disk_id
+    retarget_root "$SEED"
     rm -rf "$SEED"; SEED=""
+
+    # After the edits, so the compressed copy describes the image that is
+    # actually in the store rather than what came out of bitbake.
+    refresh_fast_path "$dir"
 
     info "hashing the image"
     local sha; sha=$(sha256sum "$dir/disk.img" | cut -d' ' -f1)
@@ -715,6 +734,12 @@ builder=yocto
 machine=$IMG_MACHINE
 arch=$IMG_ARCH
 hostname=$IMG_HOSTNAME
+# The same field the distro builder records, and for the same reader: `wk boot`
+# prints how long an unclaimed machine takes to hand itself back, and reads it
+# from here rather than from the profile -- the image is what is booting, and
+# its profile may have changed since. Absent, that sentence came out as "returns
+# it in  s".
+watchdog=$IMG_WATCHDOG
 branch=$YOC_BRANCH
 commit=$commit
 cross_target=$YOC_TARGET
@@ -732,6 +757,7 @@ EOF
 wic_xz=disk.wic.xz
 bmap=disk.bmap
 wic_xz_bytes=$(file_bytes "$dir/disk.wic.xz")
+wic_of=$sha
 EOF
         fi
         if [ -f "$dir/rootfs.tar.xz" ]; then

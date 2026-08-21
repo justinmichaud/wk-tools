@@ -1101,16 +1101,16 @@ fi
 # --- the boot-file check `wk sysimage write` runs before a disk is written ----
 #
 # These are here rather than in a scratch script because the failure this check
-# guards against halted the fleet's rpi4 twice in one afternoon (over the
-# since-removed netboot path -- the medium was incidental): the files were all
-# present in the tree and unreachable through the names the firmware asks for.
+# guards against halted the fleet's rpi4 twice in one afternoon: the files were
+# all present in the tree and unreachable through the names the firmware asks
+# for.
 #
 # All of it is offline, so it belongs in --quick.
 
 # One fixture, the layout of a flash-kernel image's boot partition -- which is
 # the layout that broke.
 _nb_fixture() {
-    local d; d=$(mktemp -d "$TMP/netboot.XXXXXX")
+    local d; d=$(mktemp -d "$TMP/bootfiles.XXXXXX")
     mkdir -p "$d/current/overlays"
     printf 'root\n'   > "$d/README"
     printf 'nested\n' > "$d/current/overlays/README"

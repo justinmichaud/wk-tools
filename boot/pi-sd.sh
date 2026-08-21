@@ -1,8 +1,7 @@
 # Boot driver: a board whose only boot medium is its SD card, hands-on today.
 #
-# The rpi3 cannot boot USB or the network without burning a one-way OTP bit,
-# and the netboot root was decided against outright (2026-08-21, the netboot
-# handoff) -- so its bench lane is the same as everyone else's: a system on
+# The rpi3 cannot boot USB or the network without burning a one-way OTP bit
+# -- so its bench lane is the same as everyone else's: a system on
 # local media, written by `wk sysimage write` (or, once it exists, `wk
 # sysimage flash --reader`) and booted by putting the card in the slot. That
 # transition is a person's until the board is provisioned, which is why the
@@ -18,12 +17,12 @@ b_arm() {
         wk sysimage write <id> --disk <machine>:<device>   (from another machine
                                                             with a reader)
 
-    The board is also not provisioned yet -- docs/HANDOFF-netboot.md, 'The
+    The board is also not provisioned yet -- docs/HANDOFF-boot.md, 'The
     rpi3', has the order of operations, and the OTP door stays shut."
 }
 
 b_evidence() {
-    echo "lane=local SD media (netboot dropped 2026-08-21; OTP unburned)"
+    echo "lane=local SD media (OTP unburned)"
     return 0
 }
 

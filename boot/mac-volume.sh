@@ -8,7 +8,7 @@
 # manager you reach by holding the power button. `bless --setBoot` is
 # superseded for this purpose (its `folder` option survives on Apple Silicon
 # only for external media). Established 2026-08-19 and recorded in
-# docs/HANDOFF-netboot.md as tier 2; nothing here tries to work around it,
+# docs/HANDOFF-boot.md as tier 2; nothing here tries to work around it,
 # because an automation that cannot exist is worse than a documented ritual.
 #
 # So, compared with the Pi drivers:
@@ -256,7 +256,7 @@ b_reboot() {
 #
 # The Pi images have an equivalent and it is not this: their payload is pushed
 # over ssh to a machine that is already running the image, onto a partition
-# that exists for it (docs/HANDOFF-netboot.md, "Storage"). A driver whose other
+# that exists for it (docs/HANDOFF-boot.md, "Storage"). A driver whose other
 # role is only reachable over the network leaves this unset, and `wk bench
 # stage` refuses it by name rather than inventing a transport.
 # Fails when the disk is not attached, rather than printing a path under a

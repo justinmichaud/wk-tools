@@ -7,7 +7,7 @@
 # remotely at all: its driver is hands-on by nature (Apple Silicon's boot
 # volume selection goes through a LocalPolicy in the machine's own secure
 # storage -- there is nothing to hand an image to over the wire). See
-# docs/HANDOFF-netboot.md, "the headline".
+# docs/HANDOFF-boot.md, "the headline".
 #
 # A machine sets:
 #
@@ -20,10 +20,9 @@
 
 # Reading the bootloader's configuration, on a board that may have no eeprom
 # tooling. vcgencmd is part of the VideoCore userland every Pi image carries;
-# rpi-eeprom-config is a Raspberry Pi OS package, and asking it first is how
-# the netboot driver used to end up with an empty answer on the fleet's own
-# rpi4 -- reporting "assuming it netboots" about the board whose boot order was
-# in question. Both print the same text.
+# rpi-eeprom-config is a Raspberry Pi OS package, and asking it first is how a
+# driver ends up with an empty answer on the fleet's own rpi4 -- guessing about
+# the board whose boot order was the question. Both print the same text.
 #
 # Here rather than in one driver because two of them read it. See
 # boot/rpi-eeprom.sh for the writing half.

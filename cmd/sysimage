@@ -13,7 +13,7 @@
 # can be put into for one boot and taken out of again. It exists because four
 # later steps all need the same thing -- a machine with no sandbox, whose
 # kernel knobs are ours to set -- and each was otherwise going to invent its
-# own way to get a binary onto hardware (docs/HANDOFF-netboot.md).
+# own way to get a binary onto hardware (docs/HANDOFF-boot.md).
 #
 # The build runs entirely unprivileged. Nothing here mounts anything: the
 # seed files go into the image's FAT partition with mtools at a byte offset
@@ -63,6 +63,9 @@ usage: wk sysimage <sub>
   disks <machine>                 removable disks attached to that machine
   write <id> --disk <machine>:<device>
                                   write the image onto that disk
+  retarget <id>                   make an imported image bootable from the
+                                  disk its machine actually boots, and give it
+                                  the driving ssh key
   rm <id>                         delete an image
 
 Two things about `write`, because neither is guessable:
@@ -101,9 +104,8 @@ driving_key() {
 #
 # Copied rather than composed, and from netplan rather than from a
 # NetworkManager keyfile: on this distro NM rewrites a dropped-in keyfile under
-# a new uuid and the secret does not survive the round trip (netboot handoff,
-# "Attempts 2 and 3"). netplan is what NM is actually configured from here, and
-# cloud-init's network-config is netplan.
+# a new uuid and the secret does not survive the round trip. netplan is what NM
+# is actually configured from here, and cloud-init's network-config is netplan.
 network_config() {
     local host="$1"
     # One document per file, `---`-separated: several netplan files
@@ -334,6 +336,219 @@ symlink /etc/systemd/system/$target.wants/$name /etc/systemd/system/$name
 EOF
     debugfs -R "stat /etc/systemd/system/$name" "$DISK?offset=$roff" 2>/dev/null \
         | grep -q '^Inode:' || die "could not install $name into the image"
+}
+
+# --- making an image bootable from the disk it is written to -------------------
+
+# The MBR partition UUID of one partition: the disk signature, then the
+# partition number, which is the form the *kernel* resolves with no help from
+# userspace.
+#
+# `LABEL=` would read better and is what the distro builder uses, but it is not
+# available here: resolving a filesystem label at boot needs an initramfs to do
+# the lookup, and a Yocto wic image has none -- the firmware loads kernel8.img
+# and the kernel mounts its root directly. `PARTUUID=` is resolved inside the
+# kernel (`devt_from_partuuid`), so it works with nothing in front of it.
+image_partuuid() {
+    local img="$1" n="$2" sig
+    sig=$(sfdisk -J "$img" 2>/dev/null | sed -n 's/.*"id": *"0x\([0-9a-fA-F]*\)".*/\1/p' | head -1)
+    [ -n "$sig" ] || return 1
+    printf '%08x-%02d' "$((0x$sig))" "$n"
+}
+
+# Give an image a root reference that survives being written to a different
+# kind of device than the one its recipe assumed.
+#
+# The problem this solves is a wic image's baked-in root. bitbake writes
+# `root=/dev/mmcblk0p2` because its wks file says so, and that is a promise
+# about a device rather than about a filesystem: written to a USB stick the
+# firmware loads the kernel from partition 1 and the kernel then looks for its
+# root on an SD card that is not there. `image_check_root` (lib/image.sh)
+# refuses that write, correctly -- and refusing is all it can do, because the
+# fix is not on the writing side.
+#
+# The fix is here: rewrite the two places that name a device by path so they
+# name a *partition* instead. Then one image boots from the card or the stick,
+# `image_root_class` calls it `portable`, and the check passes because there is
+# nothing left to catch.
+#
+# Both halves matter and they are resolved by different code. `root=` on the
+# kernel command line is resolved by the kernel; `/boot` in /etc/fstab is
+# resolved by mount(8) after userspace is up. Rewriting only the first gives a
+# system that boots and then has an empty /boot -- which looks fine until
+# something writes a kernel there.
+#
+# Unprivileged, in place, nothing mounted: mtools for the FAT, debugfs for the
+# ext4, exactly as `relabel` does it.
+retarget_root() {
+    local seed="$1" roff spec class uuid_root uuid_boot cmdline_path
+    roff=$(part_offset "$DISK" 2)
+
+    spec=$(cmdline_root_spec)
+    [ -n "$spec" ] || die "$DISK has no cmdline.txt to read a root from"
+    class=$(image_root_class "$spec")
+    case "$class" in
+        portable)
+            debug "root is already portable ($spec); nothing to retarget"
+            return 0 ;;
+        network)
+            die "$DISK names a network root ($spec). Nothing here boots that way." ;;
+    esac
+
+    uuid_root=$(image_partuuid "$DISK" 2) \
+        || die "could not read the disk signature out of $DISK's partition table"
+    uuid_boot=$(image_partuuid "$DISK" 1)
+
+    info "retargeting the root: $spec -> PARTUUID=$uuid_root (boots from any device)"
+
+    # The kernel command line.
+    for cmdline_path in ::/current/cmdline.txt ::cmdline.txt; do
+        if mt mtype "$cmdline_path" > "$seed/cmdline.txt" 2>/dev/null; then
+            sed -i "s|root=$spec|root=PARTUUID=$uuid_root|" "$seed/cmdline.txt"
+            grep -q "root=PARTUUID=$uuid_root" "$seed/cmdline.txt" \
+                || die "could not rewrite root= in $cmdline_path"
+            mt mcopy -o "$seed/cmdline.txt" "$cmdline_path"
+            debug "rewrote $cmdline_path"
+            break
+        fi
+    done
+
+    # /etc/fstab, for every device path in it. The root line is usually
+    # `/dev/root`, which the kernel fills in and which is right already; it is
+    # the /boot line that names a card.
+    if debugfs -R "cat /etc/fstab" "$DISK?offset=$roff" 2>/dev/null > "$seed/fstab.old"; then
+        sed -e "s|^/dev/mmcblk0p1[[:space:]]|PARTUUID=$uuid_boot\t|" \
+            -e "s|^/dev/sda1[[:space:]]|PARTUUID=$uuid_boot\t|" \
+            -e "s|^/dev/mmcblk0p2[[:space:]]|PARTUUID=$uuid_root\t|" \
+            -e "s|^/dev/sda2[[:space:]]|PARTUUID=$uuid_root\t|" \
+            "$seed/fstab.old" > "$seed/fstab"
+        if ! cmp -s "$seed/fstab.old" "$seed/fstab"; then
+            debugfs -w -f - "$DISK?offset=$roff" >/dev/null 2>&1 <<EOF
+rm /etc/fstab
+cd /etc
+write $seed/fstab fstab
+sif fstab mode 0100644
+sif fstab uid 0
+sif fstab gid 0
+EOF
+            e2fsck -fy "$DISK?offset=$roff" >/dev/null 2>&1 || true
+            debugfs -R "cat /etc/fstab" "$DISK?offset=$roff" 2>/dev/null \
+                | grep -q "PARTUUID=$uuid_boot" \
+                || die "/etc/fstab did not survive the rewrite"
+            info "  and /etc/fstab's /boot -> PARTUUID=$uuid_boot"
+        fi
+    fi
+}
+
+# The image's own cmdline root=, read from $DISK rather than from the store, so
+# this works mid-build before there is a manifest to look it up by.
+cmdline_root_spec() {
+    local p
+    for p in ::/current/cmdline.txt ::cmdline.txt; do
+        mt mtype "$p" 2>/dev/null | tr ' ' '\n' | sed -n 's/^root=//p' | head -1 \
+            | grep . && return 0
+    done
+    return 1
+}
+
+# The image's identity, on the **boot partition** -- a different file from
+# /etc/wk-image in the rootfs, and not a duplicate of it. This one is FAT, so
+# `b_device_image` (boot/machines.sh) can read it off a disk that is not
+# running, from the other role, without mounting anything ext4. That is the
+# question "what is on this stick", which is not the question "what is this
+# machine running".
+#
+# The obvious check -- does the device still byte-match the image -- is wrong
+# after the first boot: a booted image writes to its own boot partition (the
+# diagnostics dump, cloud-init's own state), so bit-identity stops holding the
+# moment the thing works. Identity is what the question actually means.
+#
+# One writer, called from every builder. It was inline in the distro builder's
+# cloud-init seeding for a while, which meant a Yocto image reached a board
+# with no id on its boot partition at all -- and `wk boot` then refused it with
+# "holds no wk system" about a disk that had just been written and verified.
+install_disk_id() {
+    printf '%s\n' "$ID" > "$SEED/wk-image.id"
+    mt mcopy -o "$SEED/wk-image.id" ::wk-image.id
+    mt mtype ::wk-image.id 2>/dev/null | grep -qxF "$ID" \
+        || die "the identity did not survive the write to the boot partition"
+}
+
+# The ssh key that makes the fleet integration usable on an image with no
+# cloud-init.
+#
+# `install_fleet_integration` writes the identity marker and the watchdog, and
+# every one of those is read or driven **over ssh** -- `b_probe` reads
+# /etc/wk-image, `wk boot --back` disarms, `wk bench` runs the benchmark. A
+# Yocto image ships `PermitRootLogin yes` with an empty root password, so a
+# person can get in and nothing automated can: an empty password is not
+# something `ssh -o BatchMode=yes` can offer. Without a key the image boots
+# perfectly and is invisible to every verb here -- the exact failure that
+# handoff calls out, arrived at from the other side.
+install_driving_key() {
+    local roff="$1" home ssh
+    # Asked of the image rather than assumed: Yocto puts root in /home/root,
+    # Debian and Ubuntu in /root, and writing the key into a directory the
+    # sshd will not look in fails exactly as silently as not writing it.
+    home=$(debugfs -R "cat /etc/passwd" "$DISK?offset=$roff" 2>/dev/null \
+        | awk -F: '$1 == "root" { print $6 }' | head -1)
+    [ -n "$home" ] || die "no root entry in the image's /etc/passwd"
+    ssh="$home/.ssh"
+
+    driving_key > "$SEED/authorized_keys"
+    info "installing the driving ssh key into the image ($ssh)"
+    debugfs -w -f - "$DISK?offset=$roff" >/dev/null 2>&1 <<EOF
+mkdir $ssh
+cd $ssh
+rm authorized_keys
+write $SEED/authorized_keys authorized_keys
+sif authorized_keys mode 0100600
+sif authorized_keys uid 0
+sif authorized_keys gid 0
+sif $ssh mode 040700
+sif $ssh uid 0
+sif $ssh gid 0
+EOF
+    e2fsck -fy "$DISK?offset=$roff" >/dev/null 2>&1 || true
+    debugfs -R "cat $ssh/authorized_keys" "$DISK?offset=$roff" 2>/dev/null \
+        | grep -q 'ssh-' || die "the driving key did not survive the write into the image"
+}
+
+# Rebuild the compressed copy and its block map from the image beside them.
+#
+# Anything that edits disk.img after the builder produced it -- the fleet
+# integration, the root retarget -- leaves disk.wic.xz describing a system that
+# no longer exists, and the bmap write path reads *only* the compressed copy.
+# That combination writes a disk that looks like a success and boots without
+# any of the work. So the two are re-derived together, and the manifest records
+# which disk.img they came from (`wic_of`, checked by `image_fast_path_ok`).
+#
+# What this deliberately does *not* do is make the image sparse again first.
+# `fallocate --dig-holes` would shrink the block map -- a decompressed wic is
+# fully allocated, so the map ends up covering every byte -- and it would be
+# wrong: a hole tells bmaptool "nothing here", and bmaptool then leaves whatever
+# the destination already had. bitbake's own map is safe because its holes are
+# filesystem free space that was never written; holes dug by scanning for zeros
+# are not the same set. Ext4's inode tables are allocated and mostly zeros, so
+# digging would skip writing them and leave a previous image's inode tables in
+# place. The transfer saving is xz's anyway (573 MB, not 4 GB); the map only
+# saves write time at the far end, and correctness is worth more than that.
+refresh_fast_path() {
+    local dir="$1"
+    [ -f "$dir/disk.wic.xz" ] || return 0
+    command -v bmaptool >/dev/null 2>&1 || {
+        warn "no bmaptool here, so the compressed copy cannot be re-derived from the
+  edited image; removing it rather than leaving a stale one behind"
+        rm -f "$dir/disk.wic.xz" "$dir/disk.bmap"
+        return 0
+    }
+    info "re-deriving the compressed copy and its block map from the edited image"
+    bmaptool create -o "$dir/disk.bmap.new" "$dir/disk.img" >/dev/null 2>&1 \
+        || die "bmaptool create failed on $dir/disk.img"
+    xz -T0 -3 -c "$dir/disk.img" > "$dir/disk.wic.xz.new" \
+        || die "could not compress $dir/disk.img"
+    mv "$dir/disk.bmap.new"   "$dir/disk.bmap"
+    mv "$dir/disk.wic.xz.new" "$dir/disk.wic.xz"
 }
 
 # Give the image filesystem labels of its own, and make everything that names
@@ -742,7 +957,7 @@ EOF
     # nothing else should queue behind a build that cannot start.
     # Only the wifi profile needs the board: it is where the credential lives.
     # A cabled image carries no secret, so it builds with the target switched
-    # off -- which is exactly the case for a test device waiting to be netbooted.
+    # off -- which is exactly the case for a test device waiting for a system.
     if [ "${IMG_NETWORK:-wifi-from-machine}" != wired ]; then
         m_reachable || die "$IMG_MACHINE is not reachable over ssh, and this profile reads its
     network credential from that machine -- an image built without it comes up
@@ -824,18 +1039,11 @@ NETEOF
         cat "$IMG_SPEC_DIR/config.txt.append" >> "$SEED/config.txt"
     fi
 
-    # The image's identity, on the boot partition where it can be read back
-    # from the *other* role without mounting anything ext4. The obvious check
-    # -- does the device still byte-match the image -- is wrong after the first
-    # boot: a booted image writes to its own boot partition (the diagnostics
-    # dump, cloud-init's own state), so bit-identity stops holding the moment
-    # the thing works. Identity is what the question actually means.
-    printf '%s\n' "$ID" > "$SEED/wk-image.id"
-
     local f
-    for f in user-data meta-data network-config config.txt wk-image.id; do
+    for f in user-data meta-data network-config config.txt; do
         mt mcopy -o "$SEED/$f" "::$f"
     done
+    install_disk_id
 
     relabel "$SEED"
 
@@ -1039,6 +1247,7 @@ EOF
         disk_write_dd "$(image_disk "$id")" "$DISK_DEV"
         [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_dd "$(image_disk "$id")" "$DISK_DEV"
     fi
+    disk_unique_identity "$DISK_DEV" "$(image_root_spec "$id")"
     [ "$grow" = 1 ] && disk_grow "$DISK_DEV"
     disk_eject "$DISK_DEV"
 
@@ -1080,8 +1289,7 @@ cmd_flash() {
     'flash <machine>' reads as reflashing $machine. That never happened: the
     machine's own system disk is refused, and what gets written is a removable
     disk plugged into it. And nothing here is permanent -- a machine boots such
-    a disk once, by a firmware one-shot or by what a netboot server holds, and
-    returns to host mode by itself.
+    a disk once, by a firmware one-shot, and returns to host mode by itself.
 
     So the disk is named, and the verb says what it does to it:
 
@@ -1091,6 +1299,99 @@ cmd_flash() {
     Booting it is still a separate step, and still one-shot:  wk boot $machine"
 }
 
+# --- wk sysimage retarget -----------------------------------------------------
+#
+# Apply to an image already in the store what the import now does on the way in:
+# a root reference that survives being written to a different kind of device, the
+# driving ssh key, and a compressed copy that matches the result.
+#
+# It exists because a Yocto build is hours and this is seconds. An image built
+# before the import learned any of it is not wrong -- it is a distribution,
+# faithfully imported -- it just cannot be written to the disk its machine
+# actually boots. Rebuilding to change two text files would be the wrong trade.
+#
+# Idempotent: an image that is already portable and already carries the key is
+# reported as such and nothing is written.
+cmd_retarget() {
+    local id="${1:-}"
+    [ -n "$id" ] || die "usage: wk sysimage retarget <id>"
+    image_complete "$id" || die "no such image '$id' (wk sysimage ls)"
+
+    image_lock
+
+    # Before, so that a mismatch is reported as a mismatch rather than quietly
+    # becoming this command's output.
+    image_verify "$id" || die "'$id' does not match its manifest, so there is no
+    known image here to retarget. Rebuild it."
+
+    local dir; dir=$(image_dir "$id")
+    DISK="$dir/disk.img"
+    FAT_OFFSET=$(fat_offset "$DISK")
+    [ -n "$FAT_OFFSET" ] && [ "$FAT_OFFSET" -gt 0 ] \
+        || die "could not find the boot partition in $DISK"
+
+    local was; was=$(image_root_spec "$id")
+
+    # The profile, so that the fleet integration below has the fields it
+    # records: which machine, which watchdog, which driver's self-disarm.
+    # Loaded from the manifest rather than asked for, because the image already
+    # knows what it is.
+    local profile; profile=$(manifest_get "$id" profile)
+    image_profile_load "$profile" \
+        || die "'$id' records profile '$profile', which this checkout does not define"
+    ID="$id"
+    built=$(manifest_get "$id" built)
+
+    SEED=$(mktemp -d)
+    wk_atexit _seed_cleanup
+
+    local roff; roff=$(part_offset "$DISK" 2)
+
+    # The identity marker is what every other verb here reads to tell a booted
+    # bench system from a machine that never left host mode, so an image
+    # without one is invisible: `wk boot --status` cannot see it, and on a
+    # medium-armed machine the stick therefore stays armed for ever. Installed
+    # when it is absent rather than assumed present -- images imported before
+    # the yocto builder learned to do this have none.
+    if debugfs -R "stat /etc/wk-image" "$DISK?offset=$roff" 2>/dev/null | grep -q '^Inode:'; then
+        debug "the image already carries its identity marker"
+    else
+        info "adding the fleet integration (identity marker, watchdog, self-disarm)"
+        install_fleet_integration "$roff"
+    fi
+
+    install_driving_key "$roff"
+    install_disk_id
+    retarget_root "$SEED"
+    rm -rf "$SEED"; SEED=""
+
+    refresh_fast_path "$dir"
+
+    info "hashing the image"
+    local sha; sha=$(sha256sum "$DISK" | cut -d' ' -f1)
+
+    # The manifest last and atomically, the same publishing gate as a build:
+    # a crash before this leaves the old manifest, which `image_verify` then
+    # reports as a mismatch -- loudly, and without having destroyed anything.
+    local m; m=$(image_manifest "$id")
+    {
+        grep -vE '^(disk_sha256|disk_bytes|wic_xz_bytes|wic_of|retargeted_from)=' "$m"
+        echo "disk_bytes=$(file_bytes "$DISK")"
+        echo "disk_sha256=$sha"
+        if [ -f "$dir/disk.wic.xz" ]; then
+            echo "wic_xz_bytes=$(file_bytes "$dir/disk.wic.xz")"
+            echo "wic_of=$sha"
+        fi
+        [ "$was" = "$(cmdline_root_spec)" ] || echo "retargeted_from=$was"
+    } > "$m.new"
+    mv "$m.new" "$m"
+
+    local now; now=$(cmdline_root_spec)
+    log "$id"
+    log "  root      $now  ($(image_root_word "$(image_root_class "$now")"))"
+    log "  next:  wk sysimage write $id --disk <machine>:<device>"
+}
+
 case "${1:-}" in
     build) shift; cmd_build "$@" ;;
     ls|list) shift; cmd_ls "$@" ;;
@@ -1098,6 +1399,7 @@ case "${1:-}" in
     disks) shift; cmd_disks "$@" ;;
     write) shift; cmd_write "$@" ;;
     flash) shift; cmd_flash "$@" ;;
+    retarget) shift; cmd_retarget "$@" ;;
     rm) shift; cmd_rm "$@" ;;
     *) usage ;;
 esac

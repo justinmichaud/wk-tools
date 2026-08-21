@@ -11,8 +11,8 @@
 #   happens to be plugged into it.
 #
 #   "flash" also implies permanence, and there is none. A machine boots one of
-#   these disks *once*, by a firmware one-shot or by what a netboot server is
-#   holding, and returns to host mode by itself (`wk boot`).
+#   these disks *once*, by a firmware one-shot, and returns to host mode by
+#   itself (`wk boot`).
 #
 # So there is one verb, and it says what it does to what:
 #
@@ -167,6 +167,16 @@ EOF
 disk_method() {
     local id="$1"
     if [ -f "$(image_bmap "$id")" ] && [ -f "$(image_wic "$id")" ]; then
+        # Provenance before speed. A compressed copy that predates the last
+        # edit to disk.img would write a board that boots without the fleet
+        # integration or the retargeted root, and would do it silently -- see
+        # image_fast_path_ok.
+        if ! image_fast_path_ok "$id"; then
+            warn "$id's compressed copy does not record which disk.img it came from,
+  so it may not be the image beside it. Writing the raw image instead (slower,
+  and verified by read-back). 'wk sysimage retarget $id' re-derives it." >&2
+            echo dd; return 0
+        fi
         if m_ssh 'command -v bmaptool >/dev/null' 2>/dev/null; then
             echo bmap; return 0
         fi
@@ -253,6 +263,64 @@ disk_verify_dd() {
     info "read-back matches"
 }
 
+# Make the written disk's identity its own.
+#
+# A raw image write copies the MBR disk signature along with everything else,
+# and `PARTUUID=` *is* that signature plus a partition number. So every disk
+# ever written from one image answers to the same `root=`, and which one the
+# kernel picks when two are attached is enumeration order.
+#
+# That is not a hypothetical. The rpi4's SD rescue and its bench stick were
+# written from the same Yocto wic; both carried `0x076c4a2a`; the board loaded
+# the *stick's* kernel and mounted the *card's* root filesystem, and came up as
+# a system that was neither of the two -- with the stick's fleet integration
+# missing, because the running rootfs was the card's. `/proc/cmdline` said
+# `root=PARTUUID=076c4a2a-02` and `findmnt /` said `/dev/mmcblk0p2`, which is
+# the whole bug in two lines. It is the same ambiguity image/profiles.sh
+# records for filesystem labels, reached through the partition table instead,
+# and it survives every check on the writing side because nothing about the
+# write is wrong.
+#
+# So uniqueness is stamped per *disk*, here, where the ambiguity actually
+# lives. The image keeps a portable root spec -- that is what lets it be
+# written to a card or a stick at all -- and this makes the copy on this disk
+# name itself. Both readers have to agree: `root=` in cmdline.txt, which the
+# kernel resolves, and `/boot` in /etc/fstab, which mount(8) resolves later.
+#
+# After the read-back verification, necessarily: this changes the disk on
+# purpose, so the bytes stop matching the image here and not before.
+disk_unique_identity() {
+    local dev="$1" spec="$2" old new p1 p2
+    case "$spec" in PARTUUID=*) ;; *) return 0 ;; esac
+    old=${spec#PARTUUID=}; old=${old%-*}
+    new=$(od -An -tx4 -N4 /dev/urandom | tr -d ' \n')
+    [ -n "$new" ] || { warn "could not generate a disk identity; $dev keeps $old"; return 0; }
+    p1=$(disk_part "$dev" 1); p2=$(disk_part "$dev" 2)
+
+    info "stamping a unique identity on $dev (0x$old -> 0x$new), so it cannot be confused with another copy"
+    m_ssh "set -e
+        sudo sfdisk --disk-id $(sh_quote "$dev") 0x$new >/dev/null
+        m=\$(mktemp -d)
+        sudo mount $(sh_quote "$p1") \$m
+        sudo sed -i 's/PARTUUID=$old-/PARTUUID=$new-/g' \$m/cmdline.txt
+        sudo umount \$m
+        sudo mount $(sh_quote "$p2") \$m
+        [ -f \$m/etc/fstab ] && sudo sed -i 's/PARTUUID=$old-/PARTUUID=$new-/g' \$m/etc/fstab
+        sudo umount \$m
+        rmdir \$m
+        sync" >/dev/null 2>&1 \
+        || die "could not stamp a unique identity on $dev.
+    The image is written and verified, but its root is still PARTUUID=$old-2 --
+    the same as any other disk written from this image. Booted next to one of
+    them, the kernel may mount the wrong root."
+
+    # Read back rather than trusted: this is the check whose absence let the
+    # original confusion reach a board.
+    m_ssh "sudo blkid -o value -s PARTUUID $(sh_quote "$p2")" 2>/dev/null | tr -d '\r\n ' \
+        | grep -qx "$new-02" \
+        || die "$dev did not take the new identity; refusing to leave it ambiguous"
+}
+
 # Grow the last partition to fill the disk.
 #
 # An image is sized to its contents, so a 4 GB image on a 64 GB card leaves most
@@ -260,11 +328,25 @@ disk_verify_dd() {
 # disk, hours later and a long way from this decision.
 disk_grow() {
     local dev="$1" part; part=$(disk_part "$dev" 2)
-    m_ssh 'command -v growpart >/dev/null' \
-        || { warn "growpart is not installed on $MACH_NAME; the root partition stays the image's size"; return 0; }
     info "growing $part to fill the disk"
-    m_ssh "sudo growpart $(sh_quote "$dev") 2" >/dev/null 2>&1 \
-        || { log "  (nothing to grow -- it already fills the disk)"; return 0; }
+
+    # Two ways, because "install growpart" is not advice every machine here can
+    # take: cloud-utils is a Debian package and the rpi4's rescue system is a
+    # Yocto image with no apt at all. It does ship sfdisk, partx and resize2fs,
+    # which between them do the same job -- `, +` keeps partition 2's start and
+    # takes it to the end of the disk, which is the whole of what growpart was
+    # doing here.
+    if m_ssh 'command -v growpart >/dev/null' 2>/dev/null; then
+        m_ssh "sudo growpart $(sh_quote "$dev") 2" >/dev/null 2>&1 \
+            || { log "  (nothing to grow -- it already fills the disk)"; return 0; }
+    elif m_ssh 'command -v sfdisk >/dev/null' 2>/dev/null; then
+        m_ssh "printf ', +\n' | sudo sfdisk -N 2 --no-reread --force $(sh_quote "$dev")" >/dev/null 2>&1 \
+            || { log "  (nothing to grow -- it already fills the disk)"; return 0; }
+        m_ssh "sudo partx -u $(sh_quote "$dev")" >/dev/null 2>&1 || true
+    else
+        warn "$MACH_NAME has neither growpart nor sfdisk; the root partition stays the image's size"
+        return 0
+    fi
     m_ssh "sudo e2fsck -fy $(sh_quote "$part") >/dev/null 2>&1; true"
     m_ssh "sudo resize2fs $(sh_quote "$part")" >/dev/null 2>&1 \
         || warn "resize2fs failed on $part; the filesystem is still the image's size"

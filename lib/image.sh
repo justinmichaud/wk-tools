@@ -118,6 +118,27 @@ image_verify() {
     return 1
 }
 
+# Whether the compressed copy still describes the image lying beside it.
+#
+# They are two files and only one of them is what the builder produced. The
+# yocto import decompresses bitbake's wic into disk.img and *then* edits it --
+# the fleet integration, the root retarget -- so disk.wic.xz can easily
+# describe a system that no longer exists. The bmap write path reads only the
+# compressed copy and never disk.img, so writing from a stale one succeeds,
+# reports success, and puts a disk on a board with none of that work on it.
+#
+# So the fast path is opt-in by provenance rather than by existence: `wic_of`
+# records the disk.img sha256 the compressed copy was derived from, and only an
+# exact match takes it. An image built before this field existed has no
+# `wic_of` and takes the slow path -- the safe direction to be wrong in.
+image_fast_path_ok() {
+    local id="$1" of want
+    of=$(manifest_get "$id" wic_of 2>/dev/null) || return 1
+    [ -n "$of" ] || return 1
+    want=$(manifest_get "$id" disk_sha256) || return 1
+    [ "$of" = "$want" ]
+}
+
 # What the image's kernel command line says its root filesystem is.
 #
 # Read out of the image's own boot partition with mtools at a byte offset -- no
@@ -186,11 +207,9 @@ device_class() {
 
 # Refuse a write whose image cannot boot from the device it is going to.
 #
-# This is the same class of check as image_check_root below,
-# which refuses to *netboot* an image whose cmdline names a local root. The
-# failure it prevents is expensive in the same way: nothing here fails, the
-# write succeeds, and the discovery happens on a headless board that fetched a
-# kernel and then could not find `/`.
+# The failure it prevents is expensive in a particular way: nothing here fails,
+# the write succeeds, and the discovery happens on a headless board that loaded
+# a kernel and then could not find `/`.
 #
 #   image_check_root <id> <device> <what-it-is>
 #
@@ -240,9 +259,7 @@ image_check_root() {
 # sitting in a file and can be read in a second -- rather than discovered on a
 # board.
 #
-# It first happened over the since-removed netboot path on 2026-08-20 and cost
-# the rpi4 two power cycles. The medium was incidental; firmware asks the same
-# questions of a disk.
+# It first happened on 2026-08-20 and cost the rpi4 two power cycles.
 #
 #   image_check_boot_files <id> <machine>
 image_check_boot_files() {

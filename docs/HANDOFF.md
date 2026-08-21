@@ -41,6 +41,27 @@ replaces at the start of every build. Nothing in the tooling prevents it today.
 Newest first. Each entry is a pointer: the detail, the defects and the
 verification live in the named handoff and in `docs/TESTING.md`, not here.
 
+- **2026-08-21, Linux — the rpi4 runs a Yocto bench system, and netboot is
+  gone from the tree.** The whole round trip on hardware: arm → the WPE 2.48
+  image up on the stick (`root=PARTUUID=…`, `governor=performance`, swap off,
+  `/etc/wk-image` read from the board) → self-disarm → the watchdog's reboot →
+  host mode, no hands. What stood in the way was a wic image's baked-in
+  `root=/dev/mmcblk0p2`, and the fix is `wk sysimage retarget` (now also part
+  of the import): the two places that name a device by path become `PARTUUID=`,
+  which the kernel resolves without an initramfs. Six defects on the way, in
+  `docs/TESTING.md`, and one of them nearly passed as success — the SD rescue
+  and the stick were written from the same wic, so both carried MBR signature
+  `0x076c4a2a`, and the board booted the stick's kernel onto the *card's* root.
+  Identity is now stamped per disk at write time (`disk_unique_identity`). The
+  others: the bmap write path silently sent the pre-edit image (`wic_of` now
+  gates it), `wk-image.id` was distro-only so `wk boot` refused a disk it had
+  just verified, `$ID` was unset in the yocto import, the yocto manifest
+  recorded no `watchdog`, and `file_bytes` was putting `stat -f` filesystem
+  statistics into every manifest on Linux. Netboot itself is out of the tree:
+  `docs/HANDOFF-netboot.md` → `docs/HANDOFF-boot.md` (the live substrate it
+  always was), 155 references down to 8 — each one a literal name of something
+  being deleted or stripped. And moose's bench mode has a plan on measured
+  evidence: `docs/HANDOFF-moose-bench.md`.
 - **2026-08-21, Linux — cattle, not pets** (`docs/HANDOFF-cattle.md`, the
   rule and the per-machine ledger): the fleet registry became config —
   `boot/machines/<name>.conf`, each opening with its device's from-nothing
@@ -52,8 +73,7 @@ verification live in the named handoff and in `docs/TESTING.md`, not here.
   are in `wk selftest --quick`. The remaining gaps are named in the ledger:
   `flash --reader`, `provision`/`unprovision`, the settings audits, a backup
   story for bench results, the BMC's own config, and the home layer.
-- **2026-08-21, Linux — netboot removed outright, and the fleet made visible.**
-  The removal is recorded under Fixed/resolved below. Built with it:
+- **2026-08-21, Linux — the fleet made visible.**
   `wk status` ends with the fleet block (per device: role, mode, the media wk
   owns and what is on it — the rpi4's stick and its system, armed/disarmed;
   the Mac's bench volume attached-or-missing — parallel read-only probes, one
@@ -64,7 +84,7 @@ verification live in the named handoff and in `docs/TESTING.md`, not here.
   `usb-first|local`.
 - **2026-08-20, Linux — the vocabulary rename landed end to end**
   (`docs/HANDOFF-vocabulary.md`, now the record of what the words mean).
-  `wk image` → `wk sysimage`; `wk boot`/`wk serve` take `--system`; profiles
+  `wk image` → `wk sysimage`; `wk boot` takes `--system`; profiles
   renamed to carry their category (`perf-linux-rpi5`,
   `downstream-yocto-wpe-2.48-rpi4`, …) with the old spellings refused by name;
   `role=bench-device`, `mode=host|bench` (`MODE`/`MODE_CHANNEL` replaced
@@ -123,20 +143,18 @@ verification live in the named handoff and in `docs/TESTING.md`, not here.
   guests. (Handoff removed 2026-08-21; the record is in git history. Its
   leftovers — build state recorded once per side, and two smaller ones —
   moved to `docs/HANDOFF-workspace-state.md`'s follow-up section.)
-- **2026-08-18/19 — netboot substrate and the rpi5** (`docs/HANDOFF-netboot.md`,
+- **2026-08-18/19 — the boot substrate and the rpi5** (`docs/HANDOFF-boot.md`,
   its "state" section is the authority): `wk sysimage`, `wk boot` with five
-  drivers, `wk serve`, `wk pi boot-order`; the rpi5 proven on hardware
-  (arm → bench system reachable in 53 s → claim → hand back), the rpi4 lane
-  rescoped 2026-08-20 to its USB stick. (Netboot was kept for the profiling
-  lane at the time; that idea fell with the netboot root on 2026-08-21 —
-  see the ledger entry above.)
+  drivers, `wk pi boot-order`; the rpi5 proven on hardware (arm → bench system
+  reachable in 53 s → claim → hand back), the rpi4 lane rescoped 2026-08-20 to
+  its USB stick.
 
 ---
 
 ## Lane A — Linux workstation
 
-**The numbered items are stable identifiers, not the running order.** Netboot
-(step N) ran first, at the user's direction, and is done as far as the
+**The numbered items are stable identifiers, not the running order.** The boot
+substrate (step N) ran first, at the user's direction, and is done as far as the
 substrate goes; the revised order behind it was 1 (benchmarking on the bench
 systems), then ⑥ cross-compile, then ⑧ yocto, then ② pi provisioning — with
 ⑧'s build side now landed (see the ledger) and its hardware half open.
@@ -144,16 +162,17 @@ systems), then ⑥ cross-compile, then ⑧ yocto, then ② pi provisioning — w
 Hardware state, updated 2026-08-20: the rpi5 is up on the tailnet and
 reachable (its stick was verified over ssh by a `wk boot --dry-run` today);
 the rpi4 answers on the LAN and its EEPROM has been read and written
-(`docs/HANDOFF-netboot.md`); the rpi3 is unprovisioned and off; moose is the
+(`docs/HANDOFF-boot.md`); the rpi3 is unprovisioned and off; moose is the
 machine this lane runs on.
 
-  N. **Boot a system — the shared substrate** — `docs/HANDOFF-netboot.md`.
-     Substrate built and proven (see the ledger). Netboot is gone outright
-     (2026-08-21): every bench lane boots local media, `wk serve` and its
-     daemon are removed (the boot-file resolver they carried now guards
-     `wk sysimage write`), and the rpi3's lane is its SD card (hands-on stub
-     driver until provisioned). Open there: moose's bench mode (BMC virtual
-     media, the one route left) and provisioning the rpi3.
+  N. **Boot a system — the shared substrate** — `docs/HANDOFF-boot.md`.
+     Substrate built and proven (see the ledger). Every bench lane boots local
+     media, `boot/check-boot-files.py` guards `wk sysimage write`, and the
+     rpi3's lane is its SD card (hands-on stub driver until provisioned).
+     Open there: moose's bench mode (`docs/HANDOFF-moose-bench.md` — planned
+     2026-08-21 on measured evidence: a RAM root off a USB stick, armed by
+     `efibootmgr --bootnext`, GRUB and the NVMe untouched) and provisioning
+     the rpi3.
   1. **Benchmarking on the bench systems** — `docs/HANDOFF-benchmarking.md`.
      `bench_host=image` runs driven remotely; the image runner still has to
      record `kernel_provenance`, `kernel_arch`, `profile` (stock/oc) and
@@ -357,16 +376,6 @@ execute all of them — see the doc for the full list and what "done" means.
 
 ## Fixed / resolved since the individual handoffs were written
 
-- **Netboot is removed, 2026-08-21, by user decision, in two same-day steps**
-  — first the root (no device will ever netboot for a run: every bench lane
-  boots local media), then `wk serve` itself: dead code is worse than a
-  re-implementation if the need ever returns. Gone: `cmd/serve`,
-  `boot/wk-tftpd.py` and its root-owned port-69 helper (`./setup` removes
-  the installed copy and its sudoers grant), `boot/pi-netboot.sh`, the
-  netboot EEPROM orders, the NFS/RAM root phases, the serving election, and
-  moose's UEFI HTTP/PXE route. Kept: the boot-file resolver, moved into
-  `boot/check-boot-files.py`, where `wk sysimage write` runs it before any
-  disk is touched. `docs/HANDOFF-netboot.md` carries the record.
 - **The generalization design is decided, 2026-08-20, by user decision** —
   the generalizing handoff went from brainstorm to a researched, decided
   proposal in one pass (handoff removed 2026-08-21; the decisions live in

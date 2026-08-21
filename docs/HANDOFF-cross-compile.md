@@ -82,8 +82,8 @@ Two consequences for this handoff:
   vocabulary already says.
 - **The sysroot release is a floor, not a match.** `wkdev-cross-sysroot`'s own
   help says it plainly: "Target the oldest device you need to run on: glibc is
-  backwards but not forwards compatible." That refines the netboot handoff's
-  sysroot-equivalence idea — the requirement is *sysroot glibc ≤ image glibc*, not
+  backwards but not forwards compatible." That refines the sysroot-equivalence
+  idea in `docs/HANDOFF-boot.md` — the requirement is *sysroot glibc ≤ image glibc*, not
   identical trees. Building both from one release satisfies it; if the rpi3/rpi4
   yocto targets are older, the sysroot must come from the oldest of them.
 
@@ -98,10 +98,9 @@ ppc64el.
 The thing to run a cross-built binary on is the **rpi5's bench system** —
 `perf-linux-rpi5`, which now exists and lands before this step: a slim distro
 with no SDK on it, which is exactly the condition a sysroot cross build has to
-satisfy, and a GTK MiniBrowser is the payload. (The decision named it "the
-netbooted rpi5 image"; the mechanism has since moved to a USB one-shot —
-`wk boot rpi5` — and netboot is gone entirely now; every board's bench lane
-is local media. The condition is unchanged.) Build the system and the sysroot from the *same tree* and the ABI
+satisfy, and a GTK MiniBrowser is the payload. (The decision named the mechanism
+differently; it is a USB one-shot now — `wk boot rpi5` — and every board's
+bench lane is local media. The condition is unchanged.) Build the system and the sysroot from the *same tree* and the ABI
 question answers itself rather than becoming a debugging session — that is
 the cheap version of this step.
 

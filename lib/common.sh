@@ -119,8 +119,15 @@ ensure_dir() {
 # the write that follows is driven from a Mac, so every size printed on that
 # path was a `stat: illegal option -- c` waiting to happen. It was: `wk sysimage
 # write --dry-run` could not print its own plan.
+# GNU first, BSD second, and the order is the whole correctness of this.
+# `stat -c %s` is the GNU spelling and fails outright on BSD/macOS, which is
+# what makes it safe to try first. The reverse is not true: GNU `stat -f` means
+# *filesystem* status and reads its argument as a path, so `stat -f %z file`
+# looks for a file called `%z`, prints the filesystem block for `file` on
+# stdout, and exits non-zero -- so with BSD first, every Linux caller got a
+# paragraph of filesystem statistics followed by the number it asked for.
 file_bytes() {
-    stat -f %z "$1" 2>/dev/null || stat -c %s "$1" 2>/dev/null || echo 0
+    stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0
 }
 
 human_bytes() {
@@ -626,7 +633,7 @@ utc_to_epoch() {
 
 # --- which role is this machine in? ------------------------------------------
 #
-# A machine that has been booted into an image (docs/HANDOFF-netboot.md) says
+# A machine that has been booted into an image (docs/HANDOFF-boot.md) says
 # so in one file, written by the image and absent from every normal install.
 # One name for it, because three things read it: the boot driver deciding which
 # role answered, `wk bench staged` refusing to call a workstation run a

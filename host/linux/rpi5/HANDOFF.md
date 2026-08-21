@@ -14,16 +14,15 @@ governor, swap off) belongs to the bench system the machine boots for a run --
 which did not exist when this was written; see the 2026-08-20 update below.
 
 **Update 2026-08-19:** the image now has a design and is lane A's first step,
-not its last -- `docs/HANDOFF-netboot.md`. Two consequences for this tree. The
-perf half has a destination: the image's own `config.txt`, served over TFTP,
-which the board fetches on a one-shot netboot (`vcmailbox 0x0003808b 4 4
-0xf4612` + reboot) and forgets on the next. And the stability half became a
-prerequisite rather than a peer -- the netboot is armed over SSH, so this board
-has to be up, reachable and provisioned as a workstation before any of it
-starts. As of this date it is offline (6 days on the tailnet).
+not its last -- `docs/HANDOFF-boot.md`. Two consequences for this tree. The
+perf half has a destination: the image's own `config.txt`, which the board
+picks up on a one-shot boot of its own medium and forgets on the next. And the
+stability half became a prerequisite rather than a peer -- the one-shot is
+armed over SSH, so this board has to be up, reachable and provisioned as a
+workstation before any of it starts. As of this date it is offline (6 days on
+the tailnet).
 
-**Update 2026-08-20: the bench system exists, and it boots from USB, not
-TFTP.** `wk sysimage build perf-linux-rpi5` builds it, `wk sysimage write`
+**Update 2026-08-20: the bench system exists, and it boots from USB.** `wk sysimage build perf-linux-rpi5` builds it, `wk sysimage write`
 puts it on the USB stick, and `wk boot rpi5` enters it by a USB one-shot
 (`vcmailbox 0x0003808b 4 4 0xf64`, `boot/rpi5-usb.sh`) -- the NVMe workstation
 is untouched. The perf governor and swap-off are baked into every system
@@ -65,7 +64,7 @@ numbers on this board will be lower than the tuned-workstation numbers on
 memory-bandwidth-bound work (correct, not a regression), and historical numbers
 taken on the numa kernel are not the going-forward baseline. `SDRAM_BANKLOW=1`
 stays in the EEPROM because it is shared firmware state; a stock kernel simply
-does not act on it. See `docs/HANDOFF-netboot.md`.
+does not act on it. See `docs/HANDOFF-boot.md`.
 
 ## Step 2 — NUMA: DONE ✅ (Path B completed 2026-07-04)
 The custom **`7.0.6-numa`** kernel (`CONFIG_NUMA_EMU=y`, built via `rpi5-numa-kernel.sh`) is

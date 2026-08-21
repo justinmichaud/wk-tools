@@ -58,11 +58,21 @@ else
 
         [ -e "$_ssh_conf.wk-backup" ] || cp -p "$_ssh_conf" "$_ssh_conf.wk-backup"
 
-        {
-            [ -f "$_ssh_local" ] && cat "$_ssh_local"
-            printf '# Hosts belonging to this machine rather than to wk-tools, moved out of\n'
-            printf '# ~/.ssh/config by ./setup. Edit freely: nothing here is committed.\n\n'
-            grep -vxF "$_ssh_include" "$_ssh_conf" | awk -v fleet="$_ssh_fleet" '
+        # Migrated stanzas go **first**, and any older copy of a name they
+        # define is dropped rather than kept below them. Both halves of that
+        # are load-bearing, and getting it backwards was a real bug: ssh takes
+        # the first value it sees for a keyword, so appending a freshly
+        # corrected `Host moosebmc` underneath the stale one filed the fix
+        # behind the mistake, in the same file, permanently -- and added
+        # another duplicate on every run. The symptom is an entry that "keeps
+        # coming back": editing changes nothing, because the edit is shadowed
+        # by a line the editor never saw.
+        #
+        # Dropping the old copy rather than relying on order also keeps the
+        # file honest -- one stanza per name, and the surviving one is the one
+        # that was written most recently.
+        _ssh_new=$(mktemp)
+        grep -vxF "$_ssh_include" "$_ssh_conf" | awk -v fleet="$_ssh_fleet" '
                 BEGIN {
                     n = split(fleet, f, "\n")
                     for (i = 1; i <= n; i++) if (f[i] != "") is_fleet[f[i]] = 1
@@ -75,11 +85,44 @@ else
                     if (drop) printf "  dropped hand-written fleet name: %s\n", $0 > "/dev/stderr"
                 }
                 !drop
-            '
+            ' > "$_ssh_new"
+
+        {
+            printf '# Hosts belonging to this machine rather than to wk-tools, moved out of\n'
+            printf '# ~/.ssh/config by ./setup. Edit freely: nothing here is committed --\n'
+            printf '# and edit it *here*, not in ~/.ssh/config, which is only an Include and\n'
+            printf '# is read after this file.\n\n'
+            cat "$_ssh_new"
+            # The previous contents, minus this header and minus any stanza the
+            # migration above has just redefined.
+            if [ -f "$_ssh_local" ]; then
+                awk -v newfile="$_ssh_new" '
+                    BEGIN {
+                        while ((getline line < newfile) > 0) {
+                            n = split(line, w, /[ \t]+/)
+                            if (tolower(w[1]) == "host")
+                                for (i = 2; i <= n; i++) if (w[i] != "") defined[w[i]] = 1
+                        }
+                    }
+                    tolower($1) == "host" {
+                        drop = 0
+                        for (i = 2; i <= NF; i++) if ($i in defined) drop = 1
+                        if (drop) printf "  replaced by a newer stanza: %s\n", $0 > "/dev/stderr"
+                    }
+                    /^# Hosts belonging to this machine rather than to wk-tools/ { next }
+                    /^# ~\/\.ssh\/config by \.\/setup/ { next }
+                    /^# and edit it \*here\*, not in ~\/\.ssh\/config/ { next }
+                    /^# is read after this file\./ { next }
+                    !drop
+                ' "$_ssh_local"
+            fi
         } | write_file "$_ssh_local" 0600
+        rm -f "$_ssh_new"; unset _ssh_new
 
         warn "hand-written hosts moved from $_ssh_conf to $_ssh_local"
         warn "the original is kept at $_ssh_conf.wk-backup"
+        log  "  edit $_ssh_local, not $_ssh_conf: the Include is read first, so a"
+        log  "  stanza written in ~/.ssh/config is shadowed by the files behind it"
     fi
 
     printf '%s\n' "$_ssh_include" | write_file "$_ssh_conf" 0600

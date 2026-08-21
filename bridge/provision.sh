@@ -537,9 +537,9 @@ fi
 
 # --- 10. NTP for the segment -------------------------------------------------
 #
-# Because a BMC's clock resets with its configuration, and a board that netboots
-# has no RTC at all. Both then produce logs and TLS errors dated 1970, which is
-# a day of debugging the wrong thing.
+# Because a BMC's clock resets with its configuration, and a bare board has no
+# RTC at all. Both then produce logs and TLS errors dated 1970, which is a day
+# of debugging the wrong thing.
 step "NTP"
 write_file /etc/chrony/conf.d/wk-bridge.conf <<EOF
 allow $BR_SEGMENT

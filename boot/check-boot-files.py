@@ -10,9 +10,7 @@ names, Pi 4 firmware halts with an LED error pattern.  It does not retry, it
 does not return to the bootloader, and it does not touch the next device.  A
 headless board in that state needs a hand on its power supply.
 
-That happened here, on 2026-08-20, to the fleet's rpi4 -- over the since-
-removed netboot path, but the medium was incidental: firmware asks the same
-questions of a disk.  The lesson that survives the netboot removal is *how*
+That happened here, on 2026-08-20, to the fleet's rpi4.  The lesson is *how*
 the files went missing: they were all present in the tree, and unreachable
 through the name-resolution rules the firmware actually applies.  So this
 check asks a resolver that models those rules, not os.path.exists -- the only

@@ -5,13 +5,14 @@
 # needs the property both of them provide.
 #
 # `boot/rpi5-usb.sh` uses `set_reboot_order` through the firmware mailbox --
-# a genuine one-shot, and Raspberry Pi 5 only. The retired netboot driver moved the
-# arming to the server instead, which is a good answer and the wrong one for a
-# benchmark: a netboot that reaches start4.elf and no further *halts*, with no
-# fall-through and nothing reachable over the wire, and a lane that runs
-# unattended cannot have a state whose only exit is a hand on the power supply.
-# It also puts the root filesystem on the network, which puts the network in
-# the measurement. See docs/HANDOFF-benchmarking.md, "rpi4".
+# a genuine one-shot, and Raspberry Pi 5 only. Arming the medium itself is the
+# answer here, and the property that makes it the right one for a benchmark is
+# fall-through: a board offered a stick with nothing bootable on it skips to
+# the next entry and comes up on its rescue system, reachable. Firmware that
+# gets as far as start4.elf and no further *halts* instead -- no fall-through,
+# nothing over the wire -- and a lane that runs unattended cannot have a state
+# whose only exit is a hand on the power supply. See
+# docs/HANDOFF-benchmarking.md, "rpi4".
 #
 # So the arming moves to the boot medium:
 #
@@ -26,8 +27,8 @@
 # actually watched skipping, on this board on 2026-08-20, was a stick carrying
 # a single **ext4** partition and no FAT at all. A stick with a perfectly valid
 # FAT boot partition that happens to be missing `start4.elf` is a different
-# thing entirely, and the firmware **halts** on it -- the same halt as netboot,
-# reached from a new direction, and the board went silent mid-afternoon.
+# thing entirely, and the firmware **halts** on it -- the same halt, reached
+# from a new direction, and the board went silent mid-afternoon.
 #
 # So the disarm now reproduces the state that was observed to skip: partition
 # 1's type byte in the MBR is flipped from 0x0c (FAT32 LBA) to 0x83 (Linux), so

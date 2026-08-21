@@ -78,26 +78,28 @@ else
     rm -f "$_tmp"
 fi
 
-# --- the netboot helper: removed 2026-08-21 ------------------------------------
+# --- privileged files this repo has retired -----------------------------------
 #
-# `wk serve` and its TFTP daemon are gone (docs/HANDOFF-netboot.md: no netboot,
-# ever -- every bench lane boots local media). The helper this stage used to
-# install was a root-owned copy of the daemon plus a NOPASSWD rule buying one
-# bind(2) on port 69; both are removed here so a machine that once had them
-# does not keep a privileged file and a sudoers grant that nothing uses.
-_nb_target="${_libexec:-/usr/local/libexec}/wk-tftpd"
-_nb_sudoers=/etc/sudoers.d/wk-netboot
-if [ -f "$_nb_target" ] || [ -f "$_nb_sudoers" ]; then
+# Anything this stage installed in the past and no longer installs. A machine
+# provisioned by an older revision keeps it otherwise -- a root-owned file and a
+# sudoers grant that nothing uses, which is the worst kind of leftover: it is
+# privilege with no owner. Named literally, because removing a file means naming
+# it. Entries come out of this list once every machine in the fleet is clean.
+_retired="${_libexec:-/usr/local/libexec}/wk-tftpd /etc/sudoers.d/wk-netboot"
+_stale=""
+for _f in $_retired; do [ -e "$_f" ] && _stale="$_stale $_f"; done
+if [ -n "$_stale" ]; then
     if ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
-        warn "stale netboot helper present ($_nb_target); removing it needs sudo"
-        log  "  run this from an interactive shell:  ./setup --stage quiesce"
+        warn "retired privileged file(s) present:$_stale"
+        log  "  removing them needs sudo; run:  ./setup --stage quiesce"
     else
-        info "removing the retired netboot helper (requires sudo once)"
-        sudo rm -f "$_nb_target" "$_nb_sudoers"
-        changed "removed $_nb_target and $_nb_sudoers"
+        info "removing retired privileged file(s) (requires sudo once)"
+        # shellcheck disable=SC2086
+        sudo rm -f $_stale
+        changed "removed$_stale"
     fi
 fi
-unset _nb_target _nb_sudoers
+unset _retired _stale _f
 
 # --- the session user --------------------------------------------------------
 # The helper's session verbs run a compositor as a specific user. That user is

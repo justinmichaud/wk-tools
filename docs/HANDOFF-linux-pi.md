@@ -9,7 +9,7 @@ because the system carries no tailscale (`docs/HANDOFF-benchmarking.md`,
 `image/profiles.sh`).
 
 `wk pi setup` -- the tailnet half of `cmd/pi` -- has never been run against a
-device. The eeprom and boot-order verbs have (`docs/HANDOFF-netboot.md`). The
+device. The eeprom and boot-order verbs have (`docs/HANDOFF-boot.md`). The
 macOS side never needed any of it -- workspaces there could not reach the Pis
 anyway -- so this is Linux-only work.
 
@@ -53,7 +53,7 @@ lane A's running-order note in `docs/HANDOFF.md`.
    against. The no-image-rebuild constraint holds either way and is now tested
    against something other than buildroot, which is what the 2026-08-19
    rescheduling wanted. It has no tailscale binary at all, so step 1 is
-   genuinely unrun. See `docs/HANDOFF-netboot.md`, "State as of 2026-08-20",
+   genuinely unrun. See `docs/HANDOFF-boot.md`, "State as of 2026-08-20",
    for everything else established about the board -- it is up, found, and its
    EEPROM is written.
 2. Confirm the address lands in `$WK_STORE/pi-hosts` and that a workspace can
@@ -82,7 +82,7 @@ names against the allowlist and a bare Pi hostname is not on it. Use addresses,
 or add a name to the proxy's allowlist deliberately.
 
 **The isolated guest network the design assumed does not exist.** Checked
-2026-08-19 (`docs/HANDOFF-netboot.md`): the rpi4 is wired on the house LAN.
+2026-08-19 (`docs/HANDOFF-boot.md`): the rpi4 is wired on the house LAN.
 The design intent stands -- the tailnet plus the proxy allowlist is the only
 path a *workspace* gets, whatever LAN the device sits on -- but do not treat
 the boards as isolated, and do not "fix" a connectivity problem by widening

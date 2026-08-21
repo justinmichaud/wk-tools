@@ -17,7 +17,7 @@
 # box that is about to reboot out from under it -- so arming leaves a record of
 # intent, and this command is where that record is read back against the
 # evidence (docs/HANDOFF-workspace-state.md, "wk status walks the fleet";
-# docs/HANDOFF-netboot.md, "wk boot is a mode transition").
+# docs/HANDOFF-boot.md, "wk boot is a mode transition").
 #
 # The record is kept on the machine it describes, next to the boot mechanism it
 # describes, and nowhere else. A copy on the driving workstation would be a

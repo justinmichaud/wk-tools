@@ -9,19 +9,12 @@ the rpi target. Writing a built system onto a physical disk is tracked
 generically in `docs/HANDOFF-sdcard.md` (not yocto-specific) — consume that
 rather than building a separate copy-to-host path here.
 
-**The test loop.** Decided 2026-08-19: the target is the **rpi4**, tested over
-netboot, flashing only the image that is kept. Superseded 2026-08-20 by the
-hardware's own evidence (`docs/HANDOFF-benchmarking.md`, "rpi4"): netboot puts
-the root filesystem on the network (so in the measurement) and has a failure
-mode that halts the board with no fall-through — neither survivable for an
-unattended benchmark (the halt-on-incomplete-transfer failure mode, plus a
-network root inside the measurement — the board is 4 GB, and the decision
-rests on the halt, not the RAM). The rpi4 is a **bench-device**
-booted from its USB stick with the SD card as the rescue role
-(`boot/pi-usb.sh`): `wk sysimage write <id> --disk rpi4:/dev/sda`, then
-`wk boot rpi4`, one-shot, back to host mode by itself. (Netboot is gone
-entirely — 2026-08-21.) `wk pi setup rpi4` against the resulting image is the step after this
-one (`docs/HANDOFF-linux-pi.md`).
+**The test loop.** Settled 2026-08-20 on the hardware's own evidence
+(`docs/HANDOFF-benchmarking.md`, "rpi4"). The rpi4 is a **bench-device** booted
+from its USB stick with the SD card as the rescue role (`boot/pi-usb.sh`):
+`wk sysimage write <id> --disk rpi4:/dev/sda`, then `wk boot rpi4`, one-shot,
+back to host mode by itself. `wk pi setup rpi4` against the resulting image is
+the step after this one (`docs/HANDOFF-linux-pi.md`).
 
 ---
 
@@ -440,23 +433,42 @@ recorded because their reasons outlive them:
 
 Not done, in the order it matters:
 
-1. **The system has not been booted on the board, and as built it cannot go
-   onto the bench stick.** The rpi4 loop exists and is exercised with the
-   `perf-linux-rpi4` system (`docs/HANDOFF-benchmarking.md`): write the stick,
-   `wk boot rpi4`, `wk boot rpi4 --back`. Two things stand between this image
-   and that loop. `wk boot rpi4` with no `--system` picks the newest system
-   for the machine's default profile (`MACH_PROFILE=perf-linux-rpi4`), so the
-   yocto system must be named explicitly. And the wic image bakes
+1. **Booted on the board, 2026-08-21.** The image runs on the rpi4's USB
+   stick, in bench mode, and hands itself back: `wk boot rpi4 --status` reads
+   it from the board's own evidence, and the self-disarm has already flipped
+   the stick so the next reboot lands on the SD rescue. What follows in this
+   item is how the blocker that stood here was removed. As built, the wic image baked
    `root=/dev/mmcblk0p2` — an SD-card root — so `wk sysimage write … --disk
-   rpi4:/dev/sda` is **refused** by `image_check_root` (`lib/image.sh`,
-   verified in `docs/TESTING.md`): written to the USB stick, the firmware
-   would load the kernel and the kernel would find no root. Either the wic
-   recipe's root device changes so the image can boot from USB, or the image
-   goes onto a card and the rpi4's boot order does the rest.
-2. **The netboot question is moot: netboot is gone (2026-08-21).** The import
-   still pulls `rootfs.tar.xz` into the store alongside `disk.img` — a
-   tarball remains the honest archival form of a rootfs, and it costs nothing
-   to keep — but nothing will ever fill an NFS root from it.
+   rpi4:/dev/sda` was refused by `image_check_root`, correctly: written to the
+   stick, the firmware would load the kernel and the kernel would find no root.
+   The fix was not on the writing side. `wk sysimage retarget <id>` rewrites the
+   two places that name a device by path — `root=` on the kernel command line
+   and `/boot` in `/etc/fstab` — to `PARTUUID=`, which the kernel resolves with
+   no initramfs, so one image boots from the card or the stick and the check has
+   nothing left to catch. The import now does it on the way in, so a rebuild
+   needs no second step; `retarget` exists because a Yocto build is hours and
+   this is seconds. It also installs the driving ssh key and, if absent, the
+   identity marker — see `docs/TESTING.md`.
+
+   **One trap found on the way, on hardware.** The rpi4's SD rescue was written
+   from the same Yocto wic as the stick, so both disks carried MBR signature
+   `0x076c4a2a` — and `PARTUUID=` is that signature plus a partition number.
+   The board loaded the stick's kernel and mounted the *card's* root
+   filesystem: a system that was neither of the two, reporting the right
+   distribution, answering ssh, and looking for all the world like a
+   successful boot with the fleet integration mysteriously absent. Identity is
+   now stamped per disk at write time (`disk_unique_identity`, boot/disk.sh);
+   `docs/TESTING.md` has the whole reading.
+
+   What is left is the boot itself: `wk sysimage write
+   rpi4-wpe-2.48-20260820T124927Z --disk rpi4:/dev/sda` (an erase of the stick,
+   so it asks), then `wk boot rpi4 --system rpi4-wpe-2.48-20260820T124927Z` —
+   named explicitly, because `wk boot rpi4` with no `--system` picks the newest
+   system for the machine's default profile (`MACH_PROFILE=perf-linux-rpi4`).
+
+2. **The rootfs tarball has no consumer.** The import pulls `rootfs.tar.xz`
+   into the store alongside `disk.img` — a tarball is the honest archival form
+   of a rootfs and it costs ~600 MB to keep — but nothing reads it today.
 3. **The image carries no WebKit.** meta-webkit's `webkit-dev-ci-tools` is the
    runtime and the test tooling — it says so in its own recipe. The matching
    WebKit is a cross build against the image's toolchain: `--stage toolchain`

@@ -6,7 +6,7 @@
 # <release>-<device>[-width] for the public embedded images. Adding a
 # category later is adding a profile.
 #
-# The rule this file exists to keep (docs/HANDOFF-netboot.md, "One-command
+# The rule this file exists to keep (docs/HANDOFF-boot.md, "One-command
 # reproducible, everywhere"): the spec lives in the repo, not on a machine.
 # Package lists, the image's config.txt, the units, the network shape -- all
 # under version control, applied by a verb. A machine is then disposable in the
@@ -76,14 +76,12 @@
 #
 # Why a whole distro image rather than a rootfs built from a package list: the
 # one thing that has to work on first boot is the network, and the last three
-# attempts at this failed there and nowhere else (see the netboot handoff's
-# "Attempts 2 and 3"). Ubuntu on this board, associating with this AP on
+# attempts at this failed there and nowhere else. Ubuntu on this board, associating with this AP on
 # channel 52, is the one configuration that is *known* to work -- so the image
-# is that configuration, modified as little as possible. The slim
-# built-from-scratch rootfs the size table in the netboot handoff sizes is the
-# next increment, and it is what the RAM-root benchmarking phase needs; it is
-# not what the profiling phase needs, and building it first would have meant
-# debugging a new rootfs and a new radio setup at the same time.
+# is that configuration, modified as little as possible. A slim
+# built-from-scratch rootfs is the next increment if one is ever wanted;
+# building it first would have meant debugging a new rootfs and a new radio
+# setup at the same time.
 
 image_profile_list() {
     cat <<'EOF'

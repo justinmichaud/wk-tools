@@ -6,8 +6,8 @@ The rule underneath all of it (docs/HANDOFF-vocabulary.md): a machine's host
 mode is either your install (a workstation -- wk never writes it) or a system
 wk built (a bench-device -- wk can remake it from nothing). Bench mode always
 lives on media of its own, so entering and leaving it never touches the host
-install. Netboot does not exist here (removed 2026-08-21): every bench system
-is bytes on a local device, put there by `wk sysimage write`.
+install. Every bench system is bytes on a local device, put there by
+`wk sysimage write` -- no machine here boots from a server.
 
 rpi5 -- workstation (Raspberry Pi 5, WiFi only)
   host mode   its own Ubuntu install on the NVMe. Never written by wk.

@@ -1011,7 +1011,7 @@ cmd_stage() {
         || die "$machine has no place to stage a build onto from here.
     Its other role is reached over the network rather than mounted, so the
     payload is pushed to it while it runs rather than copied to it while it
-    does not -- see docs/HANDOFF-netboot.md, 'Storage'."
+    does not -- see docs/HANDOFF-boot.md, 'Storage'."
     local root
     root=$(b_bench_root) || die "$machine's benchmark disk is not attached, so there is nowhere to
     stage a build onto. 'wk boot $machine --status' says what it can see."
@@ -1344,7 +1344,7 @@ cmd_staged() {
 
     is_macos || die "'wk bench staged' is macOS bench mode. The Linux systems
     run their benchmark from the machine that serves them -- see
-    docs/HANDOFF-netboot.md and docs/HANDOFF-benchmarking.md."
+    docs/HANDOFF-boot.md and docs/HANDOFF-benchmarking.md."
 
     local root
     root=$(staged_root) || die "this machine has no benchmark volume to read.

@@ -570,10 +570,6 @@ main() {
         # is a *system*, never bare "image" -- the old word also meant three
         # other things. One spelling, so the old one points rather than works.
         image) die "'wk image' is renamed: wk sysimage" ;;
-        # Removed 2026-08-21 with the rest of netboot: every bench lane boots
-        # local media, so there is nothing to serve and nothing to elect.
-        serve) die "'wk serve' is removed: netboot is gone (docs/HANDOFF-netboot.md).
-    'wk sysimage write <id> --disk <machine>:<device>' puts a system on a disk." ;;
     esac
 
     local impl="$WK_ROOT/cmd/$cmd"

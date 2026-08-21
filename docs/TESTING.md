@@ -1575,11 +1575,9 @@ the reader (which must never mistake intent for evidence).
 
 ### The boot-file check — what `wk sysimage write` refuses
 
-(`wk serve` and its TFTP daemon were removed 2026-08-21 — netboot is gone,
-every bench lane boots local media — and the boot-file resolver they carried
-moved into `boot/check-boot-files.py`, where `wk sysimage write` runs it
-before anything touches a disk. The serving-era lines this section held are
-retired with the daemon; the fleet-integration and disk-side lines below are
+(The boot-file resolver lives in `boot/check-boot-files.py`, where
+`wk sysimage write` runs it before anything touches a disk. The
+fleet-integration and disk-side lines below are
 the live ones.)
 
 - [V] `wk sysimage write` refuses an image whose boot partition cannot get the
@@ -1614,8 +1612,125 @@ the live ones.)
       unquoted heredoc, so prose in it is shell input: three `systemd-run`
       invocations per build ran on the workstation and left holes where the
       words had been
-- [V] a netboot root is deliberately never built (decided 2026-08-21, and the
-      daemon went with it): every bench lane boots local media
+- [V] every bench lane boots local media: no image is built to take its root
+      from anywhere but the disk it was written to
+
+### Retargeting an imported system — `wk sysimage retarget`
+
+An imported distribution is faithful to its recipe and that is exactly the
+problem: a wic image's `root=` names the device its wks file assumed, so the
+rpi4's own image could not be written to the disk the rpi4 boots. This verb is
+the seam between "what the distribution says" and "what this fleet needs", and
+it is checked against a copy of the store rather than the store.
+
+- [V] `retarget` rewrites `root=/dev/mmcblk0p2` to `root=PARTUUID=<sig>-02`,
+      which `image_root_class` then calls `portable`, so `image_check_root`
+      accepts **both** `/dev/sda` and `/dev/mmcblk0` where it refused the stick
+      before
+- [V] `PARTUUID=` and not `LABEL=`: resolving a filesystem label at boot needs
+      an initramfs to do the lookup and the wic image has none (no
+      `initramfs*` in its boot partition), where `PARTUUID` is resolved inside
+      the kernel. The distro builder's `relabel` uses `LABEL=` because Ubuntu's
+      raspi images *do* carry an initramfs — two spellings for two facts, not
+      an inconsistency
+- [V] `/etc/fstab`'s `/boot` is rewritten too (`/dev/mmcblk0p1` →
+      `PARTUUID=<sig>-01`). Rewriting only the command line gives a system that
+      boots and then has an empty `/boot`, which looks fine until something
+      writes a kernel there. The image has util-linux `mount`, `blkid` and
+      `findfs`, so userspace can resolve it
+- [V] the driving ssh key lands in root's home **as the image's own
+      `/etc/passwd` reports it** (`/home/root` on Yocto, `/root` on Debian),
+      mode 0600 in a 0700 `.ssh`. Without it the fleet integration is
+      unusable: the marker, the disarm and the benchmark are all read over ssh,
+      and a Yocto image ships `PermitRootLogin yes` with an **empty root
+      password**, which `ssh -o BatchMode=yes` cannot offer
+- [V] the identity marker is installed when absent. The stored
+      `rpi4-wpe-2.48-20260820T124927Z` had **no `/etc/wk-image` at all**, so it
+      would have booted invisible to `wk boot --status` and left the stick
+      armed for ever — found by looking, not by a boot
+- [V] the filesystem survives every rewrite: `e2fsck -fn` clean afterwards,
+      and the marker, units and key all read back
+- [V] idempotent — a second run reports the root already portable and rewrites
+      nothing but the key
+- [V] the manifest is rewritten **last and atomically**, the same publishing
+      gate as a build; a crash before it leaves the old manifest, which
+      `image_verify` then reports as a mismatch rather than destroying anything
+- [V] the retargeted image **boots on the rpi4**, 2026-08-21: `wk boot rpi4
+      --status` reports `bench mode -- system rpi4-wpe-2.48-20260820T124927Z`,
+      the running system is on `/dev/sda2` with `root=PARTUUID=ea58701f-02`,
+      `/etc/wk-image` names the image, `governor=performance`, swap off, and
+      the **self-disarm ran** (partition 1's MBR type byte is `0x83`), so the
+      next reboot falls through to the SD card with no hands on the board
+- [V] and it **came back by itself**: the watchdog rebooted the board at
+      18:10:52, the disarmed stick was skipped, and `wk boot rpi4 --status`
+      reads `bench-device, host mode` with `usb_stick=disarmed`. Arm → bench
+      system → self-disarm → self-return → host mode, no hands at any point
+- [V] `disk_grow` falls back to `sfdisk -N 2` + `partx -u` where `growpart` is
+      absent. The rpi4's rescue system is a Yocto image with **no apt**, so
+      "install cloud-utils" is not advice it can take — it does ship sfdisk,
+      partx and resize2fs. (This stick was written before the fallback existed,
+      so its root is still the image's 3.8 GB of a 29.5 GB device)
+
+### One disk, one identity — `disk_unique_identity`
+
+The failure this exists for was reached on hardware 2026-08-21, and every check
+on the writing side passed while it happened.
+
+- [V] a raw image write copies the **MBR disk signature**, and `PARTUUID=` is
+      that signature plus a partition number — so two disks written from one
+      image answer to the same `root=`. Observed: the rpi4's SD rescue and its
+      bench stick both carried `0x076c4a2a`, the board loaded the **stick's**
+      kernel and mounted the **card's** root filesystem, and came up as a
+      system that was neither. `/proc/cmdline` said
+      `root=PARTUUID=076c4a2a-02`, `findmnt /` said `/dev/mmcblk0p2`
+- [V] the symptom is *not* a failure. The board boots, answers ssh, and reports
+      the right distribution — it is simply running the other disk's rootfs, so
+      the written image's fleet integration appears to be missing and
+      `usb_stick=armed` never clears because the self-disarm is in the rootfs
+      that did not boot
+- [V] the same class of ambiguity `image/profiles.sh` records for filesystem
+      labels ("booted with both attached, `root=LABEL=writable` is ambiguous,
+      and which disk wins is a property of enumeration order"), reached through
+      the partition table instead. Making the root spec portable is what allows
+      one image to boot from a card *or* a stick; it is also what makes two
+      copies indistinguishable, and those are the same property
+- [V] so uniqueness is stamped per **disk**, at write time, after the read-back
+      verification (which necessarily stops matching once this runs), and both
+      resolvers are rewritten together: `root=` in cmdline.txt for the kernel,
+      `/boot` in `/etc/fstab` for mount(8). Rewriting only the first gives a
+      system whose `/boot` is the *other* disk's
+- [V] read back rather than trusted — `blkid -s PARTUUID` on the target — and a
+      disk that did not take the new identity is refused rather than left
+      ambiguous
+- [ ] the distro builder's `LABEL=` images have the same disk-copy exposure
+      (`relabel` makes each *image* unique, not each disk). Not yet reached: the
+      fleet has one Ubuntu bench system per board
+
+### The compressed copy and the image beside it
+
+- [V] the bmap write path is opt-in by **provenance**, not by existence
+      (`image_fast_path_ok`): the manifest records `wic_of`, the disk.img
+      sha256 the compressed copy was derived from, and only an exact match
+      takes the fast path. This was a live silent bug — the yocto import
+      decompresses bitbake's wic and *then* edits disk.img (fleet integration,
+      and now the retarget), while `disk_write_bmap` sends only
+      `disk.wic.xz`. A write reported success and put a disk on a board with
+      none of that work on it
+- [V] an image with no `wic_of` (anything imported before the field existed)
+      falls back to dd with a warning naming `wk sysimage retarget` — the safe
+      direction to be wrong in
+- [V] `refresh_fast_path` re-derives both from the edited image, and
+      `xz -dc disk.wic.xz | sha256sum` then equals the manifest's
+      `disk_sha256` exactly
+- [V] it does **not** `fallocate --dig-holes` first. That would shrink the map
+      and be wrong: a hole tells bmaptool "nothing here", so it leaves whatever
+      the destination had. bitbake's holes are filesystem free space that was
+      never written; holes dug by scanning for zeros are not the same set —
+      ext4's inode tables are allocated and mostly zeros, and skipping them
+      would leave a previous image's inode tables in place
+- [ ] a bmap write onto **used** media, which is the case the above reasoning
+      is about and which no test has exercised (the rpi4 has no bmaptool, so
+      every write to it takes the dd path today)
 
 ### Building a Yocto system — `wk sysimage build downstream-yocto-wpe-2.48-rpi4`
 
@@ -1892,13 +2007,11 @@ egress list that cannot be "every upstream in six layers".
 
 - [V] `--dry-run` prints a unified diff of the firmware configuration and
       writes nothing
-- [V] the network nibble and the netboot-era keys (`TFTP_IP`, `CLIENT_IP`,
-      `SUBNET`, `GATEWAY`) come out of every order unconditionally — netboot
-      is gone (2026-08-21) and a board still trying a server that does not
-      exist is a stale fact that reads as a live one
+- [V] the network nibble and the network-boot keys (`TFTP_IP`, `CLIENT_IP`,
+      `SUBNET`, `GATEWAY`) come out of every order unconditionally — no lane
+      here boots over the network, and a board still trying a source nothing
+      answers is a stale fact that reads as a live one
 - [V] the transform is idempotent and reversible (`--revert` is `local`)
-- [V] the netboot orders and `wk pi netboot-enable` are refused by name, each
-      pointing at what replaced them
 - [ ] an actual write, confirmed, applied, and read back on a board that is
       not this session's workstation
 
@@ -1930,8 +2043,8 @@ egress list that cannot be "every upstream in six layers".
 - [V] `wk` help text lists `sysimage` and `boot`, and both are refused inside
       a workspace and on a shared build machine (`is_host_only`). Same reason.
 - [ ] the rpi3 end to end: provision it, `wk sysimage write` its SD card, and
-      boot it. (Netboot is gone, 2026-08-21 — the OTP door stays shut for
-      good; its driver is a hands-on stub until then.)
+      boot it. (The OTP door stays shut for good; its driver is a hands-on
+      stub until then.)
 - [V] `wk sysimage build perf-linux-rpi3` refuses rather than handing the fleet's only
       32-bit board an arm64 base
 - [ ] **first contact with an unreachable Pi is physical.** `wk pi boot-order`

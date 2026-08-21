@@ -15,7 +15,7 @@ Apple Silicon cannot be handed an image over the wire and cannot be told from
 software which volume to boot: boot volume selection goes through a LocalPolicy
 held in this machine's own secure storage, changed only by an authenticated
 user action. `bless --setBoot` is superseded for this purpose. Established
-2026-08-19; recorded in `docs/HANDOFF-netboot.md` as tier 2.
+2026-08-19; recorded in `docs/HANDOFF-boot.md` as tier 2.
 
 So the fleet's arming models put the intent in different places, and this
 machine is the one where the place is a person:
@@ -24,7 +24,7 @@ machine is the one where the place is a person:
 |---|---|---|
 | rpi5 | `one-shot` — a firmware register | one ssh command |
 | rpi4 | `medium` — the stick's boot partition | one ssh command |
-| rpi3 | `server` — what the netboot server holds | change what is served |
+| rpi3 | `hands-on` — the card in the slot | swap the card |
 | **mbp** | **`hands-on`** — a LocalPolicy | **a person, twice** |
 
 `wk boot mbp` checks what it can, records the intent, and prints the ritual.

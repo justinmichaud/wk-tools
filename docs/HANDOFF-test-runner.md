@@ -3,8 +3,8 @@
 `cmd/selftest` exists as of 2026-08-19 (13 checks then), and has grown with
 every lane since: as of 2026-08-20 `wk selftest --quick` reports **34 ok,
 2 skipped**, needing no workspace, no podman and no ssh — the 2026-08-20
-locking, consistency and netboot work all landed their checks there, since the
-tftp/boot-file checks drive the resolver against fixtures rather than a board.
+locking, consistency and boot work all landed their checks there, since the
+boot-file checks drive the resolver against fixtures rather than a board.
 A bare `wk selftest` adds the `state` section (read-only commands are
 read-only, one walk behind both listings) and the `remote` section. What is
 left is coverage, not machinery.
