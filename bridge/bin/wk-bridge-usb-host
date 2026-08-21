@@ -1,0 +1,56 @@
+#!/bin/sh
+# Put the Type-C port into host mode, so the USB Ethernet adapter enumerates.
+#
+# Both phones have exactly one USB-C port and both default to *device* mode:
+# they become a host only if the attached dock asks for it on the CC pins, and
+# a powered dock makes the phone a power sink, whose data role follows unless
+# the dock performs a Data Role Swap. Some docks do, some do not, and the same
+# dock does not always do it in the same order of plugging.
+#
+# So the role is asserted rather than hoped for -- at boot, and again by the
+# watchdog whenever the downstream interface disappears (a re-plug, a PD
+# renegotiation, a resume all drop it back). If the role will not change at
+# all, the dock is refusing the swap and no amount of configuration fixes it;
+# powering the dock *before* connecting it to the phone changes the negotiation
+# and is the thing worth trying.
+#
+# Ordinary exit 0 even when nothing could be done: this runs at boot in front
+# of the network, and a dock that is simply not plugged in yet must not hold
+# the boot back or mark a service failed.
+set -u
+
+changed=0
+
+for f in /sys/class/typec/port*/data_role; do
+    [ -w "$f" ] || continue
+    # Reads like "device [host]" or "[device] host" -- the brackets mark which
+    # role is active, and the other word is what it could be switched to. A
+    # port that lists no `host` at all cannot be switched and is skipped.
+    cur=$(cat "$f" 2>/dev/null)
+    case "$cur" in
+        *"[host]"*) ;;
+        *host*)
+            if printf 'host\n' > "$f" 2>/dev/null; then
+                changed=1
+                logger -t wk-bridge-usb-host "set $(basename "$(dirname "$f")") data_role=host"
+            fi
+            ;;
+    esac
+done
+
+# The other half of the same knob: the USB controller's own role, which on some
+# kernels is what actually moves even when the Type-C port agrees already.
+for f in /sys/class/usb_role/*/role; do
+    [ -w "$f" ] || continue
+    [ "$(cat "$f" 2>/dev/null)" = host ] && continue
+    if printf 'host\n' > "$f" 2>/dev/null; then
+        changed=1
+        logger -t wk-bridge-usb-host "set $(basename "$(dirname "$f")") role=host"
+    fi
+done
+
+# Enumeration is not instant, and the caller's next act is usually to look for
+# the interface. Only when something actually moved: at boot, with the dock
+# already in host mode, this would otherwise be three seconds of nothing.
+[ "$changed" -eq 1 ] && sleep 3
+exit 0

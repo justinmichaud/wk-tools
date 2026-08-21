@@ -584,6 +584,25 @@ itself:
 > { "src": ["tag:workstation"], "dst": ["tag:wk"], "ip": ["tcp:22"] },
 > ```
 
+### A board with no network of its own
+
+`wk pi setup` needs the board to be reachable in the first place. The rpi3 is on
+a direct cable and has no tailnet identity at all, which makes that a
+chicken-and-egg problem rather than a step.
+
+A **tailnet bridge** is the answer: a phone with WiFi one side and USB-C
+Ethernet the other, routing the cable's subnet onto the tailnet.
+
+```sh
+wk bridge ls
+wk bridge setup tailnet-bridge-generic
+```
+
+That bridge sets `BR_EGRESS=nat`, deliberately unlike the BMC's — a board has
+to be able to fetch things (`wk pi setup` downloads Tailscale onto the board
+itself), and a BMC must not be able to reach anything. `wk help bridge` has the
+rest, including how postmarketOS gets onto the phone in the first place.
+
 ---
 
 ## 8. Optional: macOS VMs for Apple-port builds

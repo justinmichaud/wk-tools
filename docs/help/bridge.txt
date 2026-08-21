@@ -1,0 +1,157 @@
+putting a segment that cannot join the tailnet onto it, with a phone
+
+TAILNET BRIDGES
+
+  A bridge is a phone with two legs: WiFi to the house, USB-C Ethernet to
+  something that has no way onto the tailnet of its own.
+
+      house WiFi --wlan0-- [ phone ] --lan0-- the segment
+                               |
+                        tailscaled advertises 10.99.x.0/24
+
+  Two of them, for two problems that look nothing alike until you write them
+  down:
+
+    tailnet-bridge-moose-bmc   moose's BMC has a dedicated management port and
+      (Librem 5)               nothing else. Behind this bridge, moose is
+                               reachable while it is powered off, hung, or has
+                               no working OS -- and the BMC's own credentials
+                               revert to factory defaults on a power loss, so
+                               the tailnet policy is the only access control
+                               worth relying on.
+
+    tailnet-bridge-generic     rpi3 and rpi4 sit on a cable. The rpi3 is not
+      (PinePhone)              provisioned and has no DNS entry; neither has a
+                               tailnet identity of its own. Behind this bridge
+                               a workspace can reach a board without anything
+                               on the house network reaching either.
+
+  `wk bridge ls` lists what is declared and what answers.
+
+THE TWO LANES, AND WHY ONLY ONE IS A COMMAND
+
+  Installing postmarketOS on a phone is hands-on, once per phone: a card to
+  write, a button combination, a first-boot wizard, a person holding the
+  device. Applying the bridge role is a command, every time, over ssh.
+
+  Keeping those apart is what makes the second one honest. `wk bridge setup`
+  assumes only that the phone runs pmOS and answers ssh -- exactly what this
+  repository already means by a *seed* (docs/HANDOFF-vocabulary.md: "a seed's
+  whole job is to boot and answer ssh so that provisioning can do the rest over
+  the wire"). So there is deliberately no image profile for a bridge: the pmOS
+  release image is the seed, and building a second one would be building
+  something the first already does.
+
+GETTING postmarketOS ONTO THE PHONE
+
+  Device names, which is what pmOS calls them:
+
+      pine64-pinephone       PinePhone
+      purism-librem5         Librem 5
+
+  Two ways in. Prefer the first for a bridge, because it can put your ssh key
+  and hostname in before the phone has ever booted -- and a headless device you
+  cannot type on is a device where "set it up on first boot" is a trap.
+
+  1. pmbootstrap, on a Linux machine (moose):
+
+       pmbootstrap init                 # device, phosh UI, OpenRC (not systemd)
+       pmbootstrap install --sdcard=/dev/sdX --add=openssh \
+                           --ssh-keys --no-sshd-passwords
+
+     Both phones are aarch64 and so is moose, so nothing is emulated and this
+     is minutes rather than hours. OpenRC, not systemd: the bridge role is
+     written in OpenRC service files, and `wk bridge setup` refuses a systemd
+     image rather than half-applying itself.
+
+  2. A release image from images.postmarketos.org, written to a microSD, then
+     the on-device wizard for the user and password. You will need sshd:
+
+       sudo apk add openssh && sudo rc-update add sshd && sudo service sshd start
+       ssh-copy-id user@<phone>          # from the workstation
+
+  microSD, not eMMC, for a first install: both phones boot the card in
+  preference to internal storage, so the card is a change you can undo by
+  removing it, and the eMMC install stays as the thing to fall back to. Flash
+  the eMMC once the card has proved the role works.
+
+  On the Librem 5, take the plain variant and never the LUKS one: a passphrase
+  at every boot is fatal for a device whose whole job is to come back up on its
+  own after a power cut.
+
+  Charge the phone fully before flashing anything over USB. A depleted battery
+  on a 500 mA hub port browns out mid-write -- this has happened, 55 seconds
+  into a 5.6 GB rootfs, and the tell is the link renegotiating down to full
+  speed in the kernel log.
+
+DECLARING AND PROVISIONING ONE
+
+  A bridge is a conf file. Shared, in this repository:
+
+      bridge/hosts/<name>.conf
+
+  ...or this device's own view of one, which wins where both exist:
+
+      ~/.config/wk/bridges/<name>.conf
+
+  The fields are documented at the top of bridge/provision.sh. The two worth
+  thinking about:
+
+    BR_EGRESS    none or nat. Whether the segment may reach the internet. A
+                 test board needs it (`wk pi setup` downloads tailscale onto
+                 the board itself); a BMC must not have it.
+    BR_REACHED_BY  who may reach the segment, in tailnet-policy terms. Printed
+                 by setup for you to paste. tag:wk belongs on the board
+                 segment and must never appear on the BMC's: root on a bridge
+                 is equivalent to whatever is behind it, and a compromised
+                 container should not be one hop from a machine's firmware.
+
+  Then:
+
+      wk bridge setup <name>          # idempotent; re-run after any change
+      wk bridge status <name>         # the on-device health check, read-only
+      wk bridge rm <name>             # removes the role, leaves the OS
+
+  The one thing setup cannot do is apply the tailnet policy: it prints the
+  tagOwners, autoApprovers and grant to paste into the admin console. Applying
+  it would need an API key with policy-write scope, and this repository holding
+  one would mean its compromise rewrites every ACL you have.
+
+  Without `autoApprovers` for the segment the bridge comes up looking perfectly
+  healthy and nothing behind it is reachable. `wk bridge status` calls that out
+  specifically, because it is the failure that looks like success.
+
+THINGS THAT WILL BITE YOU
+
+  Power the phone from a wall charger, never from the machine it exists to
+  rescue. Fed from that machine, the out-of-band path dies exactly when it is
+  needed. On mains, the battery is a UPS instead of the entire supply.
+
+  Never `poweroff` a bridge. There is no reliable way to power a phone back on
+  remotely. `reboot` is fine -- the hardware watchdog recovers hangs, but not a
+  clean shutdown.
+
+  Kill switches: WiFi on. The camera switch is the camera stream's access
+  control, and it is hardware: switched off there is no capture device, so
+  nothing can stream, and no software fault can undo that.
+
+  The downstream interface is renamed by a udev rule, which applies when the
+  adapter appears -- an interface that is already up cannot be renamed
+  underneath itself. On a first run with the dock already plugged in, re-plug
+  it (or reboot) and run setup again; setup says so when it notices.
+
+  If the interface never appears at all, the dock is refusing a USB Data Role
+  Swap. Both phones have one port and default to *device* mode. Powering the
+  dock before connecting it to the phone changes the negotiation and is the
+  thing worth trying; no amount of configuration fixes a dock that will not
+  swap.
+
+  An ssh session dying while the phone stays up is usually a WiFi roam, not a
+  fault -- two APs on one SSID and the phone moves between them. Keepalives,
+  not investigation. dotfiles/ssh/config sets ServerAliveInterval for the
+  bridges for this reason.
+
+  Nothing on the phone is upgraded unattended, deliberately. There is no serial
+  console on either device, so an unattended kernel bump that fails to boot is
+  unrecoverable without physically handling the phone. `apk upgrade` when you
+  are in front of it.

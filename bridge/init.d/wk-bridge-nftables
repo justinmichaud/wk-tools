@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+# The bridge's own table, and nothing else in the ruleset.
+#
+# The packaged nftables service is deliberately disabled: its stock
+# configuration begins with `flush ruleset`, which would take out tailscale's
+# ts-input and ts-forward chains -- and with them the tailnet, which is the one
+# thing this device exists to keep.
+description="The bridge's nftables table (never flushes the ruleset)"
+
+depend() {
+    before net
+}
+
+start() {
+    ebegin "Loading the wkbridge nftables table"
+    /usr/sbin/nft -f /etc/nftables.d/wk-bridge.nft
+    eend $?
+}
+
+stop() {
+    ebegin "Removing the wkbridge nftables table"
+    /usr/sbin/nft delete table inet wkbridge 2>/dev/null
+    eend 0
+}

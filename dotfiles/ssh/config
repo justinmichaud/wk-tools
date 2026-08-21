@@ -41,3 +41,29 @@ Host rpi4-test
   User root
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
+
+# The tailnet bridges: phones routing a segment that cannot join the tailnet
+# itself (moose's BMC port, the rpi3/rpi4 cable). `wk bridge` drives them over
+# these entries -- see `wk help bridge`.
+#
+# The name is the tailnet name and there is no HostName: the whole point of a
+# bridge is to be reachable when the LAN is not the way in, so resolving it
+# through MagicDNS rather than an address is the property worth keeping. It also
+# means these entries work unchanged from anywhere on the tailnet.
+#
+# ServerAliveInterval because both phones roam between two APs on one SSID, and
+# a roam stalls TCP long enough to kill an idle session while the phone itself
+# never wavered. That symptom is a keepalive's problem, not a fault to chase.
+#
+# The host key is deliberately *not* pinned away like the rpi4's: root on a
+# bridge is equivalent to whatever is behind it, so an unexpected key is
+# something to look at rather than something to shrug past. A reflash does
+# change it -- remove the old line from known_hosts when that is what happened.
+#
+# User: pmbootstrap's default account, and what a pmOS release image's first-boot
+# wizard suggests. Password auth is off on the phone (bridge/provision.sh), so
+# this is a key login or nothing.
+Host tailnet-bridge-generic tailnet-bridge-moose-bmc
+  User user
+  ServerAliveInterval 15
+  ServerAliveCountMax 4

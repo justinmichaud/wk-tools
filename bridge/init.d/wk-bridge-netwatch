@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+# The escalating uplink watchdog. A loop under supervision rather than a timer:
+# OpenRC has no timer units, and the failure counter is simpler as a variable in
+# a process that lives than as a file in /run to be interpreted after a crash.
+description="Escalating recovery for the uplink and the segment"
+
+supervisor=supervise-daemon
+command=/usr/local/sbin/wk-bridge-netwatch
+respawn_delay=10
+respawn_max=0
+
+depend() {
+    need net
+    after tailscale
+}

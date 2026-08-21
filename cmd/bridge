@@ -1,0 +1,390 @@
+#!/usr/bin/env bash
+#
+# wk bridge setup <name> -- provision a phone as a tailnet bridge.
+#
+# A bridge is a phone with two legs: WiFi to the house, USB-C Ethernet to a
+# segment that has no other way onto the tailnet. It exists for the things that
+# cannot join a tailnet themselves and cannot be reached from anywhere useful:
+# a BMC's dedicated management port (so a machine is reachable while it is off,
+# hung, or has no OS), and a test board on a cable (so a workspace can reach
+# the rpi3 and rpi4 without the house network being able to reach anything).
+#
+# The whole spec is in this repository -- bridge/provision.sh, bridge/bin and
+# bridge/hosts/<name>.conf -- and the phone holds a copy, never the original.
+# That is the difference from what this replaces: one hand-built Librem 5,
+# whose configuration lived on the device and in a tarball, with a README
+# admitting it was the only copy in existence. Re-provisioning a bridge is now
+# `wk bridge setup <name>`, and it is idempotent: run it after every change to
+# the conf or the provisioner, and it reports how many things it changed.
+#
+# What it does *not* do is install the operating system. A bridge runs
+# postmarketOS -- the same tree covers both phones, which is what makes one
+# provisioner possible at all -- and getting pmOS onto the device is a
+# hands-on, once-per-phone job: `wk help bridge` has it.
+#
+# wk bridge rm <name> -- the inverse: stop and remove everything setup left on
+# the phone, and drop the node from the tailnet. It leaves the OS alone.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/bridge/devices.sh"
+
+# Two places a bridge can be declared, the same split targets use (lib/target.sh,
+# "A target is configured in two places"): what is true about the bridge no
+# matter who is driving it goes in the repository, and this device's own view of
+# it -- a different ssh alias while it is being set up, say -- goes in
+# ~/.config/wk/bridges. The local one wins.
+bridge_registry_dir() { echo "$WK_ROOT/bridge/hosts"; }
+bridge_conf_dir()     { echo "${XDG_CONFIG_HOME:-$HOME/.config}/wk/bridges"; }
+
+bridge_conf() {
+    local c
+    for c in "$(bridge_conf_dir)/$1.conf" "$(bridge_registry_dir)/$1.conf"; do
+        [ -f "$c" ] && { printf '%s' "$c"; return 0; }
+    done
+    return 1
+}
+
+bridge_names() {
+    local f
+    for f in "$(bridge_registry_dir)"/*.conf "$(bridge_conf_dir)"/*.conf; do
+        [ -f "$f" ] || continue
+        basename "$f" .conf
+    done | sort -u
+}
+
+# Everything a subcommand needs about one bridge, in globals, from one place.
+load_bridge() {
+    local name="$1" conf
+    conf=$(bridge_conf "$name") || die "no such bridge '$name'.
+    Declared bridges:$(bridge_names | sed 's/^/ /' | tr -d '\n')
+    A bridge is a conf file: $(bridge_registry_dir)/<name>.conf
+    (shared, in this repository) or $(bridge_conf_dir)/<name>.conf (this
+    device only). See 'wk help bridge'."
+
+    BR_NAME="$name"
+    BR_DEVICE=""; BR_SSH=""; BR_HOSTNAME=""; BR_TAG=""; BR_SEGMENT=""
+    BR_ROUTER=""; BR_IF=""; BR_POOL=""; BR_LEASES=""; BR_EGRESS=""
+    BR_CAMERA=""; BR_REACHED_BY=""; BR_NOTE=""; BR_LAN_MAC=""
+    # shellcheck disable=SC1090
+    . "$conf"
+    BR_CONF="$conf"
+
+    [ -n "$BR_DEVICE" ]   || die "$conf sets no BR_DEVICE (pinephone | librem5)"
+    [ -n "$BR_SEGMENT" ]  || die "$conf sets no BR_SEGMENT"
+    [ -n "$BR_ROUTER" ]   || die "$conf sets no BR_ROUTER"
+    : "${BR_SSH:=$name}"
+    : "${BR_HOSTNAME:=$name}"
+    : "${BR_TAG:=tag:bridge}"
+    : "${BR_IF:=lan0}"
+    : "${BR_EGRESS:=none}"
+    : "${BR_CAMERA:=off}"
+
+    bridge_device_load "$BR_DEVICE" \
+        || die "$conf names device '$BR_DEVICE', which bridge/devices.sh has never heard of.
+    Known devices:
+$(bridge_device_list | sed 's/^/      /')"
+}
+
+rsh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$BR_SSH" "$@"; }
+
+# Root on the phone, however this image spells it. pmOS images log in as an
+# ordinary user with doas (Alpine's default) or sudo, and a provisioner that
+# assumed root would fail on the first write with a permission error rather
+# than a sentence anyone can act on.
+PRIV=""
+resolve_priv() {
+    local uid
+    uid=$(rsh 'id -u') || die "cannot ssh to $BR_SSH.
+    A bridge is provisioned over ssh against a phone that is already running
+    postmarketOS and already answers -- 'wk help bridge' covers getting it
+    there, which is a hands-on job once per phone."
+    if [ "$uid" = 0 ]; then PRIV=""; return 0; fi
+    if rsh 'command -v doas >/dev/null 2>&1'; then PRIV="doas"
+    elif rsh 'command -v sudo >/dev/null 2>&1'; then PRIV="sudo -n"
+    else die "ssh to $BR_SSH lands on uid $uid and the phone has neither doas nor sudo.
+    Either is fine; without one there is no way to provision from here."
+    fi
+    # Proven, not assumed: a doas that will ask for a password fails silently
+    # halfway through a provision run, which is the worst place to find out.
+    rsh "$PRIV true" >/dev/null 2>&1 \
+        || die "'$PRIV' on $BR_SSH needs a password (or is not permitted).
+    Provisioning is non-interactive over ssh. Give this user a passwordless
+    rule on the phone, or ssh in as root."
+}
+
+usage() {
+    die "usage: wk bridge ls
+       wk bridge setup <name> [--dry-run]
+       wk bridge status <name>
+       wk bridge rm <name>
+
+    A bridge is a phone routing a segment onto the tailnet. Declared in
+    bridge/hosts/<name>.conf; see 'wk help bridge'."
+}
+
+# --- ls ----------------------------------------------------------------------
+# Read-only, and deliberately says both halves: what is declared here, and what
+# the phone answers to. A bridge that exists as a conf file and nothing else is
+# the normal state of one that has not been flashed yet, and it should read that
+# way rather than as an error.
+cmd_ls() {
+    local name any=""
+    printf '%-28s %-10s %-16s %-12s %s\n' NAME DEVICE SEGMENT STATE NOTE
+    for name in $(bridge_names); do
+        any=1
+        ( load_bridge "$name"
+          state=unreachable
+          if ssh -o BatchMode=yes -o ConnectTimeout=5 "$BR_SSH" true >/dev/null 2>&1; then
+              if ssh -o BatchMode=yes -o ConnectTimeout=5 "$BR_SSH" \
+                     'test -f /etc/wk-bridge.conf' >/dev/null 2>&1; then
+                  state=provisioned
+              else
+                  state=bare
+              fi
+          fi
+          printf '%-28s %-10s %-16s %-12s %s\n' \
+              "$BR_NAME" "$BR_DEVICE" "$BR_SEGMENT" "$state" "${BR_NOTE:-}" ) \
+            || warn "$name: its conf does not load -- 'wk bridge status $name' says why"
+    done
+    [ -n "$any" ] || log "(no bridges declared -- bridge/hosts/*.conf)"
+    log ""
+    log "  bare         answers ssh, nothing of this role on it yet"
+    log "  provisioned  'wk bridge setup' has run against it"
+    log "  unreachable  did not answer in 5s -- off, or not flashed yet"
+}
+
+# --- setup -------------------------------------------------------------------
+cmd_setup() {
+    local dry=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run) dry=1 ;;
+            *) die "unknown option: $1" ;;
+        esac
+        shift
+    done
+
+    info "$BR_NAME -- $DEV_NOTE, $BR_SEGMENT via $BR_IF"
+    log  "  conf:     $BR_CONF"
+    log  "  ssh:      $BR_SSH"
+    log  "  tailnet:  $BR_HOSTNAME, $BR_TAG, advertising $BR_SEGMENT"
+    log  "  egress:   $BR_EGRESS$([ "$BR_EGRESS" = nat ] && printf ' (the segment can reach the internet)' || printf ' (the segment reaches nothing but the tailnet)')"
+    log  "  camera:   $BR_CAMERA"
+
+    if [ -n "$dry" ]; then
+        log ""
+        log "dry run -- nothing was copied and nothing was run. It would:"
+        log "  1. copy $WK_ROOT/bridge to $BR_SSH:/usr/local/lib/wk-bridge"
+        log "  2. run bridge/provision.sh there as root, with the conf above in its environment"
+        log "  3. join the tailnet if the node is not on it (asking for a tagged auth key)"
+        log "  4. run wk-bridge-healthcheck and print the result"
+        return 0
+    fi
+
+    resolve_priv
+
+    # pmOS or nothing, checked here so the message arrives before the copy
+    # rather than from the far side after it. The Librem 5 is the live case:
+    # it still runs the PureOS/systemd configuration this role replaces, and
+    # half-applying Alpine service files onto it would leave a bridge that is
+    # neither one thing nor the other.
+    rsh 'command -v apk >/dev/null 2>&1' \
+        || die "$BR_SSH is not running postmarketOS (no apk).
+    The bridge role is pmOS-only on purpose: one provisioner for both phones,
+    which is what the rewrite bought. Reflash the phone first -- 'wk help
+    bridge' has the device names and the flashing path."
+
+    # Two things no script can do for you, said every time because both have
+    # already caused an outage on the phone this role came from.
+    warn "power the phone from a wall charger, never from the machine it exists to rescue."
+    warn "  A bridge fed by the machine it is the out-of-band path *to* dies exactly"
+    warn "  when it is needed. The battery is then a UPS instead of the whole supply."
+    warn "kill switches: WiFi on. $DEV_KILLSWITCH"
+
+    info "copying bridge/ to $BR_SSH:/usr/local/lib/wk-bridge"
+    # Clean-then-extract, not extract-over: a script removed from the
+    # repository must not go on living on the phone, where the next person to
+    # read /usr/local/sbin would find it and believe it.
+    tar czf - -C "$WK_ROOT/bridge" . \
+        | rsh "$PRIV sh -c 'rm -rf /usr/local/lib/wk-bridge \
+                            && mkdir -p /usr/local/lib/wk-bridge \
+                            && tar xzf - -C /usr/local/lib/wk-bridge'" \
+        || die "could not copy bridge/ to $BR_SSH"
+
+    # Only ask for a key when the node actually needs one. A re-run against a
+    # bridge that is already on the tailnet is the common case -- that is what
+    # "idempotent" is for -- and a prompt there would be a prompt for nothing.
+    local authkey="" ts_state
+    ts_state=$(rsh "$PRIV tailscale status --json --peers=false 2>/dev/null \
+                    | jq -r '.BackendState'" 2>/dev/null) || ts_state=""
+    if [ "$ts_state" != Running ]; then
+        log ""
+        info "this node is not on the tailnet yet, so it needs an auth key"
+        log  "  it MUST be tagged $BR_TAG: a tagged node never key-expires, and an"
+        log  "  untagged bridge works for 180 days and then goes dark -- which is"
+        log  "  the exact outage this device exists to prevent."
+        log  "  generate one at https://login.tailscale.com/admin/settings/keys"
+        printf 'tailscale auth key (tskey-auth-..., empty to skip): ' >&2
+        read -r authkey
+    fi
+
+    # The key never appears on a command line, on either side: argv is world
+    # readable in /proc, and a `tailscale up --authkey=...` in the phone's
+    # process table is a credential anyone with a shell there can read. It goes
+    # over the same ssh, into a 0600 file on tmpfs, and provision.sh deletes it
+    # the moment it has been used. Nothing writes it down at this end at all.
+    if [ -n "$authkey" ]; then
+        printf '%s\n' "$authkey" \
+            | rsh "$PRIV sh -c 'umask 077; cat > /run/wk-bridge-authkey'" \
+            || die "could not hand the auth key to $BR_SSH"
+    fi
+
+    info "provisioning $BR_SSH"
+    rsh "$PRIV env \
+        BR_NAME=$(sh_quote "$BR_NAME") \
+        BR_DEVICE=$(sh_quote "$BR_DEVICE") \
+        BR_HOSTNAME=$(sh_quote "$BR_HOSTNAME") \
+        BR_TAG=$(sh_quote "$BR_TAG") \
+        BR_SEGMENT=$(sh_quote "$BR_SEGMENT") \
+        BR_ROUTER=$(sh_quote "$BR_ROUTER") \
+        BR_IF=$(sh_quote "$BR_IF") \
+        BR_POOL=$(sh_quote "$BR_POOL") \
+        BR_LEASES=$(sh_quote "$BR_LEASES") \
+        BR_EGRESS=$(sh_quote "$BR_EGRESS") \
+        BR_CAMERA=$(sh_quote "$BR_CAMERA") \
+        BR_LAN_MAC=$(sh_quote "$BR_LAN_MAC") \
+        sh /usr/local/lib/wk-bridge/provision.sh" \
+        || die "provisioning failed on $BR_SSH -- nothing here changed"
+
+    # The one thing this cannot apply, and must therefore print: the tailnet
+    # policy. Applying it needs an API key with policy-write scope, and a
+    # repository that held one would be a repository whose compromise rewrites
+    # every ACL you have. So it is a paste, once, per bridge.
+    cat >&2 <<EOF
+
+Remaining manual step -- the tailnet policy, in the admin console.
+
+  "tagOwners": { "$BR_TAG": ["autogroup:admin"] },
+
+  "autoApprovers": {
+    "routes": { "$BR_SEGMENT": ["$BR_TAG"] }
+  },
+
+  "grants": [
+    { "src": [$(printf '%s' "$BR_REACHED_BY" \
+                  | awk -F' *, *' '{ for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i > 1 ? ", " : ""), $i }')],
+      "dst": ["$BR_SEGMENT"], "ip": ["*"] }
+  ]
+
+autoApprovers is what makes the route live without a console click; without it
+the node is up, the segment is advertised, and nothing behind it is reachable.
+
+The grant is the real access control for everything behind this bridge -- the
+devices on the segment have none of their own worth relying on (a BMC reverts
+to factory credentials on a power loss). Grant $BR_TAG itself nothing: it
+routes, it never initiates, and root on it is equivalent to whatever is behind
+it.
+EOF
+
+    log ""
+    info "health check"
+    rsh "$PRIV /usr/local/sbin/wk-bridge-healthcheck" || \
+        warn "the health check reported problems -- see above; 'wk bridge status $BR_NAME' re-runs it"
+}
+
+# --- status ------------------------------------------------------------------
+cmd_status() {
+    resolve_priv
+    rsh "$PRIV test -x /usr/local/sbin/wk-bridge-healthcheck" 2>/dev/null \
+        || die "$BR_SSH answers but has no bridge role on it.
+    'wk bridge setup $BR_NAME' provisions it."
+    rsh "$PRIV /usr/local/sbin/wk-bridge-healthcheck"
+}
+
+# --- rm ----------------------------------------------------------------------
+# Undoes the role, not the phone. Everything this removes was written by
+# provision.sh; nothing that came with the image is touched, so what is left
+# behind is a pmOS phone that answers ssh -- which is exactly the state
+# `wk bridge setup` expects to find.
+cmd_rm() {
+    resolve_priv
+    log "this removes the bridge role from $BR_SSH:"
+    log "  services       wk-bridge-{dhcp,nftables,netwatch,watchdog,usb-host,camera}"
+    log "  configuration  /etc/wk-bridge.conf, /etc/dnsmasq.d/wk-bridge.conf,"
+    log "                 /etc/nftables.d/wk-bridge.nft, the udev rule, the NM"
+    log "                 connection, the chrony and sshd drop-ins"
+    log "  tailnet        the node logs out, so it stops advertising $BR_SEGMENT"
+    log "it leaves postmarketOS, the packages, and your ssh keys alone."
+    confirm "remove the bridge role from $BR_SSH?" || die "aborted -- nothing was changed"
+
+    # Order matters: the tailnet logout is last of the network-affecting steps
+    # that still need the network, and sshd's drop-in is removed *before* the
+    # daemon is reloaded, so a run that dies partway leaves ssh working.
+    rsh "$PRIV sh -s" <<'EOF' || die "deprovisioning did not complete -- re-run it, or see what is left with 'wk bridge status'"
+set -u
+for s in wk-bridge-camera wk-bridge-netwatch wk-bridge-watchdog wk-bridge-dhcp wk-bridge-nftables wk-bridge-usb-host; do
+    [ -x "/etc/init.d/$s" ] || continue
+    rc-service "$s" stop >/dev/null 2>&1 || true
+    rc-update del "$s" default >/dev/null 2>&1 || true
+    rm -f "/etc/init.d/$s"
+    printf 'removed %s\n' "$s"
+done
+nft delete table inet wkbridge 2>/dev/null || true
+rm -f /etc/wk-bridge.conf \
+      /etc/dnsmasq.d/wk-bridge.conf \
+      /etc/nftables.d/wk-bridge.nft \
+      /etc/udev/rules.d/70-wk-bridge-net.rules \
+      /etc/sysctl.d/99-wk-bridge.conf \
+      /etc/NetworkManager/conf.d/99-wk-bridge.conf \
+      /etc/NetworkManager/dispatcher.d/50-wk-bridge-gro \
+      /etc/NetworkManager/system-connections/wk-bridge-*.nmconnection \
+      /etc/chrony/conf.d/wk-bridge.conf \
+      /etc/elogind/logind.conf.d/10-wk-bridge.conf \
+      /etc/logrotate.d/wk-bridge \
+      /usr/local/sbin/wk-bridge-*
+rm -rf /usr/local/lib/wk-bridge
+nmcli connection reload >/dev/null 2>&1 || true
+
+# The sshd drop-in goes last and the daemon is only reloaded if it still parses:
+# locking yourself out of the phone is the one mistake here with no remote fix.
+# The drop-in goes; the `Include` line provisioning added to sshd_config
+# stays, and so does chrony.conf's `include`. Both are includes of a glob that
+# now matches nothing, which OpenSSH and chrony both tolerate -- and editing a
+# file we do not own, to remove one line, on the way out, is how a
+# deprovisioning ends up being the thing that breaks sshd.
+rm -f /etc/ssh/sshd_config.d/10-wk-bridge.conf
+if sshd -t 2>/dev/null; then
+    rc-service sshd reload >/dev/null 2>&1 || true
+else
+    printf 'WARNING: sshd -t fails; NOT reloading sshd. Fix /etc/ssh/sshd_config by hand.\n' >&2
+fi
+
+tailscale logout >/dev/null 2>&1 || printf 'note: tailscale logout failed (already logged out?)\n'
+printf 'the bridge role is gone; postmarketOS and the packages are untouched\n'
+EOF
+
+    changed "removed the bridge role from $BR_SSH"
+    log "  the tailnet node is logged out but still listed in the admin console --"
+    log "  delete it there if the phone is not coming back, or the name is taken"
+    log "  when it next joins."
+}
+
+# --- dispatch ----------------------------------------------------------------
+ACTION="${1:-}"; shift || true
+case "$ACTION" in
+    ls)
+        cmd_ls
+        ;;
+    setup|status|rm)
+        NAME="${1:-}"; shift || true
+        [ -n "$NAME" ] || die "usage: wk bridge $ACTION <name>
+    Declared bridges:$(bridge_names | sed 's/^/ /' | tr -d '\n')"
+        load_bridge "$NAME"
+        cmd_"$ACTION" "$@"
+        ;;
+    *)
+        usage
+        ;;
+esac

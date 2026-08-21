@@ -98,6 +98,10 @@ hosts and machines
                             (--system|--address|--status|--stop|--dry-run)
   remote setup|rm <target>  provision a shared build machine, or undo that
                             and forget it (never needs root)
+  bridge <sub>              ls|setup|status|rm a tailnet bridge: a phone
+                            routing a segment (a BMC port, a test board on a
+                            cable) onto the tailnet. Declared in
+                            bridge/hosts/<name>.conf; 'wk help bridge'
   quiesce on|off|status     quiet the machine for benchmarking
   session on|gdm|off|status a real GPU session, or a real desktop (Linux)
     session on [--bmc]      benchmark kiosk; --bmc moves it to the BMC to
@@ -259,7 +263,7 @@ is_targetless() {
 # those act on the checkout or on the workspace, which is exactly what is here.
 is_host_only() {
     case "$1" in
-        setup|backup|vm|mcp|quiesce|session|pi|remote|stop|start|sync|gc) return 0 ;;
+        setup|backup|vm|mcp|quiesce|session|pi|remote|bridge|stop|start|sync|gc) return 0 ;;
         # The fleet and the image store: a boot device, a firmware register, a
         # disk measured in gigabytes, a TFTP server on the LAN. None of it
         # exists in a workspace and the sandbox cannot reach the machine that
@@ -296,7 +300,7 @@ is_lifecycle() {
 # running, which forwarding the whole command could not preserve.
 is_host_command() {
     case "$1" in
-        setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|key|report|sudo|version|stop|start|disk|help|-h|--help) return 0 ;;
+        setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|bridge|key|report|sudo|version|stop|start|disk|help|-h|--help) return 0 ;;
         # The image store and the fleet drivers are this machine's: the store
         # is under the host's $WK_STORE, the boot drivers reach machines over
         # ssh from here, and `wk serve` binds a port on this machine's LAN.
@@ -333,6 +337,11 @@ is_readonly_report() {
         # what you run when you are not sure what a machine is doing.
         "sysimage ls"|"sysimage show"|"sysimage disks") return 0 ;;
         "boot --status"|"boot --diag") return 0 ;;
+        # A bridge listing reads conf files and asks each phone whether it
+        # answers; `status` runs the on-device health check, which is read-only
+        # by construction (bridge/bin/wk-bridge-healthcheck says so in its
+        # first line, and exits non-zero rather than repairing anything).
+        "bridge ls"|"bridge status") return 0 ;;
         "serve --status") return 0 ;;
         # `wk remotes --fix` writes: it re-asserts the wiring. Named here so
         # the *bare* form below can be read-only without this one sneaking in.

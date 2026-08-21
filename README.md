@@ -243,6 +243,34 @@ the first container workspace seeds a shared volume for all of them. macOS VM
 workspaces cannot use that volume at all — the Keychain is not a file to share —
 so log in once inside the golden base and every clone inherits it.
 
+## Tailnet bridges
+
+Some things cannot join a tailnet and cannot be reached from anywhere useful: a
+BMC on a dedicated management port, a test board on a cable. A **bridge** is a
+phone that routes such a segment onto the tailnet — WiFi one side, USB-C
+Ethernet the other, `tailscaled` advertising the subnet in between. Behind one,
+moose is reachable while it is powered off or has no working OS, and a
+workspace can reach the rpi3 and rpi4 without anything on the house network
+reaching either.
+
+```sh
+wk bridge ls                 # what is declared, and what answers
+wk bridge setup <name>       # idempotent; re-run after any change
+wk bridge status <name>      # the on-device health check, read-only
+wk bridge rm <name>          # removes the role, leaves the OS
+```
+
+A bridge is declared in `bridge/hosts/<name>.conf` — the same shared-plus-local
+split targets use — and provisioned over ssh by `bridge/provision.sh`, which is
+the single source of truth for what is on the phone. That is the point of it:
+the predecessor of this role was one hand-built Librem 5 whose configuration
+lived on the device, with a README admitting it was the only copy in existence.
+
+Both phones run postmarketOS, which is what makes one provisioner cover both.
+Installing pmOS is hands-on, once per phone; applying the role is a command,
+every time. `wk help bridge` has both, and the traps — the wall charger, the
+kill switches, why a bridge is never powered off.
+
 ## Layout
 
 ```

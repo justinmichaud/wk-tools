@@ -182,6 +182,105 @@ EOF
     [ -z "$bad" ] || { echo "does not parse:$bad"; return 1; }
 }
 
+# --- bridge: the spec, with no phone in the room ------------------------------
+#
+# A bridge's provisioner cannot be run here (it runs on a phone, over ssh), so
+# what is checkable is the spec: that every declared bridge resolves, and that
+# removal is the inverse of provisioning. The second one is the check that
+# earns its place -- a file the provisioner leaves behind after `wk bridge rm`
+# is a bridge that cannot be cleanly re-provisioned, and nothing notices until
+# the phone behaves strangely months later.
+
+chk_bridge_ls() {
+    local out name
+    out=$("$WK" bridge ls 2>&1) || { echo "exit $?: $out"; return 1; }
+    for name in $(cd "$WK_ROOT/bridge/hosts" && ls *.conf 2>/dev/null | sed 's/\.conf$//'); do
+        printf '%s\n' "$out" | grep -q "^$name " \
+            || { echo "$name is declared but not listed"; return 1; }
+    done
+    printf '%s\n' "$out" | grep -qE 'unreachable|bare|provisioned' \
+        || { echo "no state column in the listing"; return 1; }
+}
+
+# --dry-run resolves the conf, the device table and every derived value, and
+# touches nothing -- so it is also the check that a conf naming a device
+# bridge/devices.sh has never heard of is a refusal rather than a surprise on
+# the phone.
+chk_bridge_confs_resolve() {
+    local name out bad=""
+    for name in $(cd "$WK_ROOT/bridge/hosts" && ls *.conf 2>/dev/null | sed 's/\.conf$//'); do
+        out=$("$WK" bridge setup "$name" --dry-run 2>&1) || bad="$bad
+  $name: $out"
+    done
+    [ -z "$bad" ] || { echo "does not resolve:$bad"; return 1; }
+}
+
+chk_bridge_rm_is_inverse() {
+    local written removed p tok covered missing=""
+
+    # What provisioning writes, by our own name. Files it *edits* that belong to
+    # the image (/etc/hostname, /etc/hosts, sshd_config's Include line) are
+    # deliberately out of scope: those are edits, not files we own, and `rm`
+    # leaving them alone is the correct behaviour.
+    # `sed 's/"//'` and not `"\?"`: BSD sed has no `\?`, and a pattern that
+    # silently matches nothing here would turn this check into a silent pass.
+    # $BR_IF becomes a glob, because the interface name is a conf field.
+    written=$( { grep -oE 'write_file "?/[^" ]+' "$WK_ROOT/bridge/provision.sh" \
+                   | sed 's/^write_file //; s/^"//'
+                 # The service files, which are installed rather than written.
+                 ls "$WK_ROOT/bridge/init.d" 2>/dev/null | sed 's|^|/etc/init.d/|'
+               } | grep wk-bridge | sed 's/\$BR_IF/*/' | sort -u)
+    [ -n "$written" ] || { echo "no wk-bridge paths found in bridge/"; return 1; }
+
+    # What removal actually removes: the script cmd_rm feeds to the phone, and
+    # nothing else. Deriving this from the whole function was the first attempt
+    # and it passed a deliberately broken `rm` -- because cmd_rm also *prints*
+    # the paths it is about to remove, and prose counted as evidence. `$s` is
+    # the service loop's variable, so it stands for any of our service names.
+    removed=$(awk '/rsh "\$PRIV sh -s" <</ { on = 1; next } on && /^EOF$/ { exit } on { print }' \
+                  "$WK_ROOT/cmd/bridge" \
+              | grep -oE '/[a-zA-Z0-9_./$*-]+' | sed 's/\$s/wk-bridge-*/' | sort -u)
+    [ -n "$removed" ] || { echo "cmd_rm's deprovisioning script did not parse out of cmd/bridge"; return 1; }
+
+    for p in $written; do
+        covered=""
+        for tok in $removed; do
+            # shellcheck disable=SC2053
+            [[ "$p" == $tok ]] && { covered=1; break; }
+        done
+        [ -n "$covered" ] || missing="$missing
+  $p"
+    done
+    [ -z "$missing" ] || { echo "written by provision.sh, never removed by 'wk bridge rm':$missing"; return 1; }
+}
+
+# The half no command does -- flashing postmarketOS -- has to be written down
+# somewhere, and the topic is where a person looks.
+chk_bridge_help_topic() {
+    local out
+    out=$("$WK" help bridge 2>&1) || { echo "exit $?"; return 1; }
+    printf '%s\n' "$out" | grep -qi 'postmarketos' \
+        || { echo "the topic never mentions postmarketOS, which is the part no command does"; return 1; }
+    printf '%s\n' "$out" | grep -q 'pine64-pinephone' \
+        || { echo "no pmOS device name in the topic"; return 1; }
+}
+
+# It acts on a phone over ssh from a workstation's own configuration, so it is
+# host-only; and the listing is a report, which must not start anything.
+chk_bridge_host_only() {
+    local out before after
+    out=$(as_workspace bridge ls 2>&1) && { echo "not refused inside a workspace"; return 1; }
+    printf '%s\n' "$out" | grep -q 'acts on a host' \
+        || { echo "refused, but not as a host-only command: $out"; return 1; }
+
+    have podman || return 0
+    before=$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null || echo none)
+    [ "$before" = running ] && return 0
+    "$WK" bridge ls >/dev/null 2>&1 || { echo "wk bridge ls failed"; return 1; }
+    after=$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null || echo none)
+    [ "$after" = "$before" ] || { echo "podman machine went $before -> $after"; return 1; }
+}
+
 # An orphan command is invisible: it works and nobody knows it is there.
 chk_help_commands() {
     local help c n missing=""
@@ -1193,6 +1292,11 @@ if want quick; then
     check "one byte of the MBR at offset 450"                             chk_piusb_type_byte_roundtrips
     check "contains no single quote"                                      chk_self_disarm_sh_is_single_quote_free
     check "the installed privileged helper differs from"                  chk_serve_refuses_stale_helper
+    check "lists every declared bridge"                                   chk_bridge_ls
+    check "loads and names a device"                                      chk_bridge_confs_resolve
+    check "is the inverse of"                                             chk_bridge_rm_is_inverse
+    check "covers the half no command does"                               chk_bridge_help_topic
+    check "is refused inside a workspace and on a shared build machine"   chk_bridge_host_only
 fi
 
 if want state; then

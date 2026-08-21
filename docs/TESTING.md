@@ -1974,6 +1974,61 @@ egress list that cannot be "every upstream in six layers".
       removes the *second* trip to a device, not the first. A Pi that answers
       nothing has to be met once with an SD card.
 
+## 8. Tailnet bridges — `wk bridge`
+
+A bridge is a phone routing a segment onto the tailnet. Two halves, and only
+one is testable without the hardware: the spec (conf files, the provisioner,
+the inverse) is checkable here; whether a phone actually forwards a packet is
+not, and is marked as such rather than assumed.
+
+### The spec, checkable with no phone at all
+- [V] `wk bridge ls` lists every declared bridge, with its device and segment,
+      and says whether each answers — a conf with no phone behind it reads as
+      `unreachable`, which is the normal state of one not flashed yet
+- [V] every conf in `bridge/hosts/` loads and names a device `bridge/devices.sh`
+      knows, and `wk bridge setup <name> --dry-run` resolves the whole thing and
+      changes nothing
+- [V] `wk bridge rm` is the inverse of `wk bridge setup`: every path
+      `bridge/provision.sh` writes is a path `rm` removes. A file the
+      provisioner leaves behind after `rm` is a bridge that cannot be
+      re-provisioned cleanly, and the failure appears months later
+- [V] `wk bridge` is refused inside a workspace and on a shared build machine
+      (`is_host_only`), and `bridge ls` / `bridge status` are read-only reports
+- [V] `wk help bridge` exists and covers the half no command does: getting
+      postmarketOS onto the phone
+- [V] the Alpine facts the provisioner hardcodes are real, checked in a
+      container rather than assumed (2026-08-20, `alpine:latest` = 3.24,
+      main + community): every package name resolves (`tailscale`, `dnsmasq`,
+      `nftables`, `chrony`, `jq`, `iw`, `ethtool`, `openssh`, `networkmanager`,
+      `logrotate`, `zram-init`, `v4l-utils`, `ffmpeg`); the service names are
+      `chronyd`, `networkmanager`, `tailscale`, `dnsmasq`, `sshd`; the binaries
+      are `/usr/sbin/{nft,dnsmasq,sshd}`; `busybox` has a `watchdog` applet;
+      sshd_config already carries the `sshd_config.d` Include *above* every
+      directive and chrony.conf already carries `confdir /etc/chrony/conf.d`,
+      so both edits are fallbacks; and `/etc/nftables.nft` really does begin
+      with `flush ruleset`, which is what the packaged service being disabled
+      is about
+
+### Needs the hardware
+- [ ] a PinePhone flashed with pmOS, answering ssh, provisioned end to end:
+      `wk bridge setup tailnet-bridge-generic` from nothing to a health check
+      that passes. Blocked on the phone, which is in a drawer
+- [ ] the dock does a USB Data Role Swap and the adapter enumerates. This is
+      the step with no software fallback; a dock that refuses is hardware
+- [ ] the udev rename takes effect: `lan0` exists after a re-plug, and the NM
+      keyfile puts the router address on it
+- [ ] a board on the segment gets its reserved address, and is reachable from a
+      workspace over the tailnet — which needs `autoApprovers` in the policy,
+      the failure that looks exactly like success
+- [ ] the escalation ladder does what it says: pull the AP, watch
+      `wk-bridge-netwatch` climb, and confirm it stops at the reboot budget
+      rather than rebooting forever
+- [ ] `BR_CAMERA=http` streams at all. The pipeline is unproven on both phones:
+      libcamera-era sensors do not always present a format ffmpeg will open
+- [ ] the Librem 5 reflashed to pmOS and moved onto this role, replacing the
+      hand-built PureOS configuration. Until then `wk bridge setup` refuses it,
+      which is the intended behaviour rather than a gap
+
 ## Regressions worth a permanent test
 
 Each of these shipped, looked fine, and was wrong. They are the cheapest checks

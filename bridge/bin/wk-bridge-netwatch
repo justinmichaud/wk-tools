@@ -1,0 +1,180 @@
+#!/bin/sh
+# Escalating recovery for a WiFi-uplinked tailscale subnet router.
+#
+# The bridge's whole value is being reachable when the thing behind it is not,
+# which means the failure it must survive is its own uplink dropping while
+# nobody is watching. Both phones' WiFi parts are the weakest component in the
+# path -- the Librem 5's RS9116 wedges its firmware in a way a link bounce does
+# not clear, and the PinePhone's 8723cs drops associations under load -- so
+# recovery is a ladder rather than a retry: each consecutive failed check
+# climbs one rung, and any success resets to the bottom.
+#
+#   1      log only. Most failures are a roam, and a roam recovers itself.
+#   2-3    bounce the WiFi interface
+#   4-5    restart NetworkManager
+#   6-7    reload the WiFi driver module
+#   8-9    restart tailscaled
+#   10+    reboot -- rate limited, and never in the first 15 minutes of uptime
+#
+# The rate limit is the part that matters: an unconditional reboot rung turns a
+# fault that would have cleared into a machine that reboots forever, and this
+# is the device you cannot walk up to. Uptime and a reboot budget in
+# /var/lib are both checked, so the loop cannot outrun its own history.
+#
+# A loop under supervise-daemon rather than a timer firing a one-shot: OpenRC
+# has no timer units, busybox cron's finest granularity is a minute of its own
+# choosing, and the counter is simpler as a variable in a process that lives
+# than as a file in /run that has to be interpreted after a crash.
+set -u
+
+INTERVAL="${WK_BRIDGE_NETWATCH_INTERVAL:-60}"
+REBOOTLOG=/var/lib/wk-bridge/reboots
+MIN_UPTIME=900          # don't reboot within 15 min of booting
+MAX_REBOOTS=3           # ...or more than 3 times in
+REBOOT_WINDOW=21600     # ...6 hours
+
+iface=lan0
+segment=""
+[ -f /etc/wk-bridge.conf ] && . /etc/wk-bridge.conf
+
+log() { logger -t wk-bridge-netwatch -- "$*"; printf 'wk-bridge-netwatch: %s\n' "$*"; }
+
+# Service names differ between distributions and even between packagings of the
+# same one (NetworkManager vs networkmanager, tailscale vs tailscaled), and a
+# restart aimed at a name that does not exist is a rung of this ladder that
+# silently does nothing. So the name is resolved from what is installed.
+svc() {
+    local n
+    for n in "$@"; do
+        if [ -x "/etc/init.d/$n" ]; then
+            printf '%s' "$n"
+            return 0
+        fi
+    done
+    return 1
+}
+NM_SVC=$(svc networkmanager NetworkManager) || NM_SVC=""
+TS_SVC=$(svc tailscale tailscaled) || TS_SVC=""
+
+wifi_if() {
+    nmcli -t -f DEVICE,TYPE device status 2>/dev/null \
+        | awk -F: '$2 == "wifi" { print $1; exit }'
+}
+
+healthy() {
+    addr=$(ip -4 -br addr show dev "$WIFI" 2>/dev/null | awk '{print $3}')
+    [ -n "$addr" ] || { log "no IPv4 address on $WIFI"; return 1; }
+
+    gw=$(ip -4 route show default dev "$WIFI" 2>/dev/null | awk '{print $3; exit}')
+    [ -n "$gw" ] || { log "no default route via $WIFI"; return 1; }
+    ping -c 2 -W 3 -I "$WIFI" "$gw" >/dev/null 2>&1 \
+        || { log "gateway $gw unreachable"; return 1; }
+
+    st=$(tailscale status --json --peers=false 2>/dev/null) \
+        || { log "tailscale status failed"; return 1; }
+    [ "$(printf '%s' "$st" | jq -r '.BackendState')" = Running ] \
+        || { log "tailscale backend not Running"; return 1; }
+    [ "$(printf '%s' "$st" | jq -r '.Self.Online')" = true ] \
+        || { log "tailscale reports self offline"; return 1; }
+
+    # Noted, never escalated on. An unapproved route is a tailnet-policy
+    # problem: no amount of rebooting this phone will approve it, and treating
+    # it as a fault would put the device in a reboot loop over a console
+    # setting. `wk bridge status` is where this is meant to be noticed.
+    if [ -n "$segment" ]; then
+        printf '%s' "$st" | jq -e --arg r "$segment" \
+            '.Self.PrimaryRoutes // [] | index($r)' >/dev/null 2>&1 \
+            || log "note: $segment is not an approved route (autoApprovers? tag?)"
+    fi
+    return 0
+}
+
+reload_wifi_driver() {
+    drv=$(basename "$(readlink -f "/sys/class/net/$WIFI/device/driver" 2>/dev/null)" 2>/dev/null)
+    [ -n "$drv" ] || return 1
+    # The bus module is what gets removed; its dependencies follow (rsi_sdio
+    # pulls rsi_91x, 8723cs is one module). Sleeps rather than a wait loop: the
+    # firmware upload is what takes the time and nothing observable happens
+    # first.
+    log "reloading wifi driver module '$drv'"
+    modprobe -r "$drv" 2>/dev/null || true
+    sleep 3
+    modprobe "$drv" 2>/dev/null || true
+    sleep 5
+}
+
+may_reboot() {
+    up=$(awk '{print int($1)}' /proc/uptime)
+    [ "$up" -ge "$MIN_UPTIME" ] || { log "uptime ${up}s < ${MIN_UPTIME}s, not rebooting"; return 1; }
+    now=$(date +%s)
+    mkdir -p "$(dirname "$REBOOTLOG")"
+    touch "$REBOOTLOG"
+    cnt=$(awk -v n="$now" -v w="$REBOOT_WINDOW" '$1 > n - w' "$REBOOTLOG" | wc -l)
+    [ "$cnt" -lt "$MAX_REBOOTS" ] || {
+        log "already rebooted ${cnt}x in the last $((REBOOT_WINDOW / 3600))h, refusing"
+        return 1
+    }
+    printf '%s\n' "$now" >> "$REBOOTLOG"
+    tail -50 "$REBOOTLOG" > "$REBOOTLOG.tmp" && mv "$REBOOTLOG.tmp" "$REBOOTLOG"
+    return 0
+}
+
+fails=0
+while :; do
+    WIFI=$(wifi_if)
+    [ -n "$WIFI" ] || { log "no wifi device present"; WIFI=wlan0; }
+
+    # Belt and braces, every pass: power save comes back on after a
+    # reassociation on both parts, and it is the single most reliable way to
+    # turn a working uplink into one that answers every third ping.
+    iw dev "$WIFI" set power_save off 2>/dev/null || true
+
+    # The downstream leg is checked but never escalated on, and the asymmetry is
+    # the point: losing the segment is a dock or a cable, and rebooting the
+    # phone over it would take out the uplink that is the only way to be told
+    # about any of this. Re-assert host mode and say so.
+    if [ ! -e "/sys/class/net/$iface" ]; then
+        log "$iface missing -- re-asserting USB host mode"
+        /usr/local/sbin/wk-bridge-usb-host 2>/dev/null || true
+        if [ -e "/sys/class/net/$iface" ]; then
+            log "$iface came back"
+        else
+            log "$iface still absent -- check the dock, its power, and the cable"
+        fi
+    fi
+
+    if healthy; then
+        [ "$fails" -gt 0 ] && log "recovered after $fails failed checks"
+        fails=0
+    else
+        fails=$((fails + 1))
+        log "health check failed (consecutive: $fails)"
+        case "$fails" in
+            1) ;;
+            2|3)
+                log "bouncing $WIFI"
+                nmcli device reapply "$WIFI" 2>/dev/null \
+                    || nmcli device connect "$WIFI" 2>/dev/null || true
+                ;;
+            4|5)
+                [ -n "$NM_SVC" ] && { log "restarting $NM_SVC"; rc-service "$NM_SVC" restart; }
+                ;;
+            6|7)
+                reload_wifi_driver
+                [ -n "$NM_SVC" ] && rc-service "$NM_SVC" restart
+                ;;
+            8|9)
+                [ -n "$TS_SVC" ] && { log "restarting $TS_SVC"; rc-service "$TS_SVC" restart; }
+                ;;
+            *)
+                log "escalating to reboot"
+                if may_reboot; then
+                    fails=0
+                    reboot
+                fi
+                ;;
+        esac
+    fi
+
+    sleep "$INTERVAL"
+done

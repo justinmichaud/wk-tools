@@ -1,0 +1,86 @@
+#!/bin/sh
+# Stream the phone's camera over the tailnet, for watching a screen the
+# out-of-band console cannot show you.
+#
+# What it is for: a BMC serves the framebuffer of the machine's management chip,
+# which is blank exactly when it would be most useful -- firmware that draws to
+# the GPU instead, a discrete card that has taken the outputs, a machine that
+# hangs before the BMC sees anything. A camera pointed at the monitor has no
+# such blind spot, because it is watching the same photons a person in the room
+# would.
+#
+# The kill switch is the access control, and it is deliberately hardware. With
+# the camera switch off the sensor is electrically disconnected: there is no
+# capture device, nothing can stream, and no software fault or remote intruder
+# can undo that. So this waits for the device rather than failing without it --
+# flip the switch on and the stream appears, flip it off and it goes away.
+#
+# Bound to the tailnet address only. The stream is a camera in a room and must
+# never be offered to the house WiFi, and binding is how that is enforced --
+# not the firewall, which is a second line for the same rule.
+#
+# UNTESTED on either phone as of writing. Camera support on both is handled by
+# libcamera and the sensors deliver formats plain v4l2 consumers do not always
+# accept; if ffmpeg cannot open the node, the pipeline is what needs replacing
+# here, not the service around it.
+set -u
+
+camera=off
+camera_device=""
+camera_port=8081
+[ -f /etc/wk-bridge.conf ] && . /etc/wk-bridge.conf
+
+log() { logger -t wk-bridge-camera -- "$*"; printf 'wk-bridge-camera: %s\n' "$*"; }
+
+# `sleep` rather than exit: a service that exits is a service supervise-daemon
+# restarts forever. Idle is the honest state for a bridge with no camera role.
+if [ "$camera" = off ]; then
+    log "camera is off in /etc/wk-bridge.conf -- nothing to do"
+    while :; do sleep 3600; done
+fi
+
+# First capture-capable node, unless one is named. A phone has several video
+# nodes and most of them are not the sensor -- ISP and mem2mem converters get
+# their own -- so the choice is checked against the device's own claim rather
+# than assumed to be video0.
+pick_device() {
+    [ -n "$camera_device" ] && { [ -e "$camera_device" ] && printf '%s' "$camera_device"; return; }
+    for d in /dev/video*; do
+        [ -e "$d" ] || continue
+        # The node's own claim, from its capability list. Without this the
+        # answer on a phone is video0, which is as often the ISP as the sensor.
+        if v4l2-ctl -d "$d" --all 2>/dev/null | grep "Video Capture" >/dev/null 2>&1; then
+            printf '%s' "$d"; return
+        fi
+    done
+}
+
+while :; do
+    dev=$(pick_device)
+    if [ -z "$dev" ]; then
+        # Not an error and not logged every 30 seconds: "the switch is off" is
+        # the normal resting state of this service.
+        sleep 30
+        continue
+    fi
+
+    addr=$(tailscale ip -4 2>/dev/null | head -1)
+    if [ -z "$addr" ]; then
+        log "no tailnet address yet -- waiting rather than binding to the house network"
+        sleep 30
+        continue
+    fi
+
+    log "streaming $dev on http://$addr:$camera_port/"
+    # -listen 1 serves one client at a time, which is what a person watching a
+    # screen needs and is one fewer moving part than a streaming server. Low
+    # frame rate on purpose: this is a screen, over WiFi, on a phone that is
+    # also routing.
+    ffmpeg -nostdin -hide_banner -loglevel warning \
+        -f v4l2 -framerate 5 -video_size 640x480 -i "$dev" \
+        -q:v 8 -f mjpeg -listen 1 "http://$addr:$camera_port" \
+        || log "ffmpeg exited ($?) -- retrying"
+    # A clean exit here is usually the switch being flipped off (the node
+    # disappears mid-stream) or a client disconnecting. Both are ordinary.
+    sleep 5
+done

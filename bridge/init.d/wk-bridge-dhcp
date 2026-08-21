@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+# dnsmasq, with one conf file named explicitly and nothing else read.
+#
+# Not the packaged dnsmasq service, and that is a scar rather than a
+# preference: a distribution's unit reads /etc/dnsmasq.conf and a conf
+# *directory*, so `port=0` in our file never reached the daemon and it fought
+# the system resolver for port 53. One daemon, one file, no conf-dir.
+description="DHCP (and the NTP hand-off) for the bridge segment"
+
+supervisor=supervise-daemon
+command=/usr/sbin/dnsmasq
+command_args="-k --conf-file=/etc/dnsmasq.d/wk-bridge.conf"
+respawn_delay=5
+respawn_max=0
+
+depend() {
+    need net
+    after wk-bridge-usb-host
+}

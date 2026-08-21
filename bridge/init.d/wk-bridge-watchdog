@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+# Feed the hardware watchdog: 30 s timeout, fed every 10 s.
+#
+# This is the only thing here that recovers a kernel that has stopped
+# scheduling. Everything else -- the netwatch ladder, the service supervision --
+# assumes the machine is still running. busybox's applet rather than the
+# watchdog package, so there is one path on both phones and nothing extra to
+# install.
+description="Feed the hardware watchdog"
+
+supervisor=supervise-daemon
+command=/bin/busybox
+command_args="watchdog -F -t 10 -T 30 /dev/watchdog"
+respawn_delay=5
+respawn_max=0
+
+depend() {
+    after net
+}

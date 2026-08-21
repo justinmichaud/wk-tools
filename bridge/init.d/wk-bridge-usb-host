@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+# Assert USB host mode before the network comes up, so the downstream adapter
+# has enumerated by the time anything looks for it. One-shot: the watchdog
+# re-asserts it later if the port drops back to device mode.
+description="Force the Type-C port into USB host mode"
+
+depend() {
+    before net
+}
+
+start() {
+    ebegin "Asserting USB host mode"
+    /usr/local/sbin/wk-bridge-usb-host
+    # Always 0: a dock that is not plugged in yet must not hold up the boot or
+    # mark this service crashed. The health check is what reports a missing leg.
+    eend 0
+}
+
+stop() {
+    return 0
+}

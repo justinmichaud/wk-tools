@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# The camera stream, for watching a screen the out-of-band console cannot show.
+#
+# It idles rather than fails when there is no capture device, because that is
+# the normal resting state: the camera kill switch is hardware, and with it off
+# the sensor is disconnected. Flip it on and the stream appears.
+description="Stream the camera over the tailnet, while the kill switch allows it"
+
+supervisor=supervise-daemon
+command=/usr/local/sbin/wk-bridge-camera
+respawn_delay=10
+respawn_max=0
+
+depend() {
+    need net
+    after tailscale
+}
