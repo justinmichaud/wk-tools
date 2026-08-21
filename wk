@@ -101,10 +101,14 @@ hosts and machines
                             (--system|--address|--status|--stop|--dry-run)
   remote setup|rm <target>  provision a shared build machine, or undo that
                             and forget it (never needs root)
-  bridge <sub>              ls|setup|status|rm a tailnet bridge: a phone
-                            routing a segment (a BMC port, a test board on a
-                            cable) onto the tailnet. Declared in
+  bridge <sub>              ls|provision|setup|status|rm a tailnet bridge: a
+                            phone routing a segment (a BMC port, a test board
+                            on a cable) onto the tailnet. Declared in
                             bridge/hosts/<name>.conf; 'wk help bridge'
+    bridge provision <name> the whole path -- images, card, phone, role -- with
+                            a prompt at each step that needs a hand. Installs to
+                            the phone's internal storage through Jumpdrive; the
+                            card ends up as the rescue copy
   quiesce on|off|status     quiet the machine for benchmarking
   session on|gdm|off|status a real GPU session, or a real desktop (Linux)
     session on [--bmc]      benchmark kiosk; --bmc moves it to the BMC to

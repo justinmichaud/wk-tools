@@ -598,7 +598,8 @@ Ethernet the other, routing the cable's subnet onto the tailnet.
 
 ```sh
 wk bridge ls
-wk bridge setup tailnet-bridge-generic
+wk bridge provision tailnet-bridge-generic   # onto the phone's eMMC, via Jumpdrive
+wk bridge setup tailnet-bridge-generic       # just re-apply the role
 ```
 
 That bridge sets `BR_EGRESS=nat`, deliberately unlike the BMC's — a board has

@@ -37,12 +37,87 @@ THE TWO LANES
   Debian's NetworkManager and apt -- none of which was portable to a second
   phone.
 
-  Building and provisioning are both commands:
+  One command does the whole path:
+
+      wk bridge provision tailnet-bridge-generic
+
+  It builds what it needs, writes a card, and then stops -- because the next
+  step is a hand. It tells you exactly what to do with the card, the cable, the
+  wall charger, the kill switch and the dock; waits; picks the story back up on
+  the other side; applies the role; and stops once more for the one thing it
+  cannot do, the tailnet policy. Then it checks the route actually came live,
+  which is a different claim from "I pasted it" and the only one that matters.
+
+  WHERE IT INSTALLS: the phone's internal storage, and there is no second
+  option. A bridge writes leases, logs and tailscale state for months, and a
+  microSD is the part of a phone most likely to wear out or work loose -- so the
+  card is the rescue copy, never the system. Writing the bridge image to the card
+  and letting the phone boot that is quicker to reach and used to be offered
+  here; it is gone, because it left the bridge living on the one component most
+  likely to fail. GETTING IT ONTO INTERNAL STORAGE below has the mechanism.
+
+  A phone Jumpdrive does not cover is refused by name rather than quietly
+  falling back to the card. Today that means the Librem 5, and the refusal names
+  what would fix it: a fetch profile with a pinned URL, its sha256, and
+  FET_DEVICE set to that phone's pmOS codename.
+
+  That route is the reason the phone needs a cable: it is plugged into the
+  machine holding the card reader, Jumpdrive exports its internal storage as USB
+  mass storage, and that storage is then an ordinary removable disk on an
+  ordinary machine. Both halves are rpi5 here, and BR_CARD names it once.
+
+  How that disk is identified is worth knowing, because every obvious way is
+  wrong. Jumpdrive exports the SD card *as well as* the eMMC, as two separate
+  LUNs -- so "the disk that appeared" is normally two, and one of them is the
+  Jumpdrive currently running. Writing to that one destroys the tool being used
+  to do the writing and leaves the eMMC untouched. And the three things that
+  look like discriminators are not: LUN order works until a release reorders it,
+  both LUNs are the same gadget so they carry identical model strings, and the
+  sizes overlap (16/32/128 GB of eMMC against whatever card you own).
+
+  What is not a guess: we wrote the Jumpdrive card ourselves, minutes earlier,
+  and verified the read-back. So provision hashes the first mebibyte of each
+  exported disk and compares it with the image it just wrote -- the card is the
+  one that matches, and the eMMC is what is left, with nothing recognised and no
+  ordering assumed. It is fully automatic and there is no prompt. The length of
+  each read is checked as well as its hash, because a disk that reads zero bytes
+  hashes to the sha256 of the empty string: a valid-looking digest that matches
+  nothing, which unguarded would classify an unreadable disk as the eMMC and aim
+  a write at it. Anything that leaves the answer undecided -- no disk matching
+  the card, or two -- stops the run and prints what it saw.
+
+  Nothing in that chain holds a tailscale credential, and that is deliberate
+  rather than unfinished. Minting a tagged auth key and writing the policy both
+  need an API key, and a repository that held a policy-write one would be a
+  repository whose compromise rewrites every ACL you have. So provision asks and
+  waits at those two points instead of acquiring the ability to do them itself.
+
+  Every step is skipped when it is already done, so the way to use it after
+  something goes wrong is to run it again. Two flags for the cases it cannot
+  infer:
+
+      --no-write    the phone already holds the right system; go straight to
+                    waiting for it and applying the role
+      --rebuild     build a fresh image rather than using the newest in the
+                    store (--image <id> picks a specific one instead)
+      --disk        write the card somewhere other than BR_CARD, for a day the
+                    reader is a different machine
+
+  The pieces are still commands, and provision is a chain of them rather than a
+  replacement -- which is what makes a half-finished run recoverable by hand.
+  The card route:
 
       wk sysimage build bridge-pinephone            # a pmOS system for the phone
       wk sysimage write <id> --disk rpi5:/dev/mmcblk0
       # ...card into the phone, power on...
       wk bridge setup tailnet-bridge-generic        # the role, over ssh
+
+  ...and the eMMC route is the same list with Jumpdrive in front of it, which is
+  spelled out under GETTING IT ONTO INTERNAL STORAGE below.
+
+  `wk bridge setup` on its own is also the *re*-provisioning path, and the one
+  to reach for after any change to a conf or to bridge/provision.sh: it is
+  idempotent, it needs no card, and it reports how many things it changed.
 
   The image is built by pmbootstrap on a Linux aarch64 machine over ssh --
   `rpi5` by default -- because pmbootstrap is Linux-only and needs root, and the
@@ -80,19 +155,26 @@ THE TWO LANES
 
 GETTING IT ONTO INTERNAL STORAGE
 
-  A card is how a bridge is *proved*, not where it should live: a bridge writes
-  leases, logs and tailscale state for months, and a microSD is the part of a
-  phone most likely to wear out or work loose. Once the role works, the same
-  verified image goes onto internal storage and the card becomes the rescue copy
-  -- put it back in and the phone boots it again.
+  A card is not where a bridge should live: a bridge writes leases, logs and
+  tailscale state for months, and a microSD is the part of a phone most likely to
+  wear out or work loose. So the verified image goes onto internal storage and
+  the card is the rescue copy -- put it back in and the phone boots Jumpdrive
+  again, with the install underneath untouched.
 
-  One route, because writing a disk is a thing this repo already does:
+  This is what `wk bridge provision` does by default, and it is worth reading the
+  long form once, because every step of it is a command this repo already had:
 
       wk sysimage build recovery-pinephone      # Jumpdrive, pinned and stored
       wk sysimage write <that id> --disk rpi5:/dev/mmcblk0
       # card into the phone, phone cabled to rpi5, power on
       wk sysimage disks rpi5                    # the phone's eMMC is now a disk
       wk sysimage write <bridge image> --disk rpi5:/dev/sdX
+
+  `wk bridge provision <name>` is that list with the waiting done for you, the
+  eMMC identified by difference rather than by eye, and the role applied at the
+  end. The pieces stay usable on their own: a run that dies halfway leaves a
+  card with Jumpdrive on it and a phone that still boots it, which is exactly
+  where a re-run picks up.
 
   Jumpdrive is the PinePhone's service image: it boots from a card and exports
   the phone's internal storage as USB mass storage. That turns "flash the
@@ -107,7 +189,8 @@ GETTING IT ONTO INTERNAL STORAGE
 
   Then: power off (not reboot -- the card wins a boot), take the card out, power
   on, and `wk bridge setup <name>` to re-apply the role to the installed system.
-  It is idempotent and every package it needs is already in the image.
+  It is idempotent and every package it needs is already in the image. provision
+  prompts for exactly this and then does the last part itself.
 
   microSD, and both phones boot one in preference to their internal storage.
   Neither depends on what is already installed: the image carries each device's
@@ -160,8 +243,8 @@ DECLARING AND PROVISIONING ONE
 
       ~/.config/wk/bridges/<name>.conf
 
-  The fields are documented at the top of bridge/provision.sh. The two worth
-  thinking about:
+  Most of the fields are documented at the top of bridge/provision.sh, which is
+  the script they are handed to. Three worth thinking about:
 
     BR_EGRESS    none or nat. Whether the segment may reach the internet. A
                  test board needs it (`wk pi setup` downloads tailscale onto
@@ -171,9 +254,23 @@ DECLARING AND PROVISIONING ONE
                  segment and must never appear on the BMC's: root on a bridge
                  is equivalent to whatever is behind it, and a compromised
                  container should not be one hop from a machine's firmware.
+    BR_CARD      <machine>:<device> -- the reader this bridge's cards get
+                 written on, e.g. rpi5:/dev/mmcblk0. The one field the phone
+                 never sees: it is read by `wk bridge provision` on the
+                 workstation and is a property of the reader, not of the phone,
+                 so `--disk` overrides it for a day the card is somewhere else.
+                 Declared rather than discovered because picking the wrong
+                 /dev/sd* is the one mistake in this path that destroys
+                 something that was not yours to destroy.
+
+  There is no BR_PROFILE, deliberately: image/profiles.sh already records which
+  bridge each pmos profile builds (PMO_BRIDGE), and the same fact in two files
+  is a fact that drifts. provision derives the profile from that.
 
   Then:
 
+      wk bridge provision <name>      # the whole path, prompting at the two
+                                      # steps that need a hand
       wk bridge setup <name>          # idempotent; re-run after any change
                                       # (WK_BRIDGE_AUTHKEY=tskey-... to skip the
                                       #  prompt on a first run)
@@ -187,9 +284,41 @@ DECLARING AND PROVISIONING ONE
 
   Without `autoApprovers` for the segment the bridge comes up looking perfectly
   healthy and nothing behind it is reachable. `wk bridge status` calls that out
-  specifically, because it is the failure that looks like success.
+  specifically, because it is the failure that looks like success -- and
+  `wk bridge provision` will not report a bridge finished until the phone's own
+  `tailscale status` shows the route as primary.
+
+  It is also a once-per-bridge step, not a once-per-flash one. Once tag:bridge
+  and the segment are in the policy, reflashing the phone needs no console visit
+  at all: provision checks, finds the route already approved, and says so.
 
 THINGS THAT WILL BITE YOU
+
+  A PinePhone has TWO card slots under the back cover, and the microSD is the
+  UPPER one. The lower one is the micro-SIM. A card in the SIM slot gives you
+  the exact symptom of a card that is not there at all: the phone boots its
+  internal storage and never mentions the card. PINE64 lists "the microSD card
+  is in the wrong slot" first among the reasons a PinePhone will not boot one,
+  which is a good indication of how often it is that. It cost an afternoon here
+  once (2026-08-21), after the image, the write and the SPL offset had all been
+  verified byte for byte and were all fine.
+
+  Nothing else about SD boot needs configuring, and it is worth knowing that so
+  you do not go looking. The A64 boot ROM loads 32 KB from sector 16 of the SD
+  card before it looks at the eMMC at all -- no jumper, no DIP switch, no key
+  combination -- and postmarketOS's Tow-Boot, which lives in the eMMC's
+  dedicated firmware storage, does not override that. A correctly written card
+  always wins the boot. So when one does not, the fault is that the ROM never
+  read the card: the wrong slot, a card not engaged, or a phone that was woken
+  rather than cold-booted. Inserting a card into a running phone does nothing --
+  only a cold boot re-runs the ROM.
+
+  The u-boot residue trap that PINE64 documents does *not* apply to a card this
+  repo wrote, and knowing why saves re-reading it: the problem there is a card
+  *formatted after* being flashed, which leaves a bootloader at 8 KiB (or at
+  128 KiB, for the GPT-based Danctnix images) with no OS behind it. Every write
+  here lays down a whole image over the front of the card, both offsets
+  included, so there is never a stale bootloader in the region the ROM reads.
 
   Power the phone from a wall charger, never from the machine it exists to
   rescue. Fed from that machine, the out-of-band path dies exactly when it is

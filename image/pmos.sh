@@ -24,6 +24,11 @@
 # and the card it lands on is written by the machine that happens to hold the
 # card reader:
 #
+#   wk bridge provision tailnet-bridge-generic
+#
+# ...which builds this, writes it to the card the bridge's conf names, and then
+# prompts through the step that is a person. By hand, the same thing is:
+#
 #   wk sysimage build bridge-pinephone
 #   wk sysimage write <id> --disk rpi5:/dev/mmcblk0
 #
@@ -460,6 +465,128 @@ pmos_find_build() {
     _pmos_ask "ls -1t $(pmos_root)/out" | grep "^$IMG_PROFILE-" | head -1 || true
 }
 
+# --- can the phone actually reach the network the credential names? ----------
+#
+# The uplink credential is copied from the build host's own association, which
+# is what keeps the PSK off every wire and out of every log. The cost of that
+# shortcut is that the *band* comes along implicitly, and nothing used to notice
+# when it was a band the target has no radio for.
+#
+# It cost an afternoon on 2026-08-21. rpi5 is dual-band and was associated with
+# the house SSID on channel 52; the PinePhone's radio is an RTL8723CS, which is
+# 802.11 b/g/n and single-band. The image was built with a perfectly valid
+# credential for a network the phone's hardware cannot see, booted, and showed
+# every neighbour's 2.4 GHz network except the one it wanted. Everything else
+# about that image was correct, which is what made it expensive: the card, the
+# SPL, the write and the read-back all verified, and the fault was one number
+# nobody had compared.
+#
+# The question this asks is deliberately *not* "which band is the build host
+# on". The first version of this check asked that, and it was wrong within the
+# hour: the SSID gained a 2.4 GHz radio while rpi5 stayed associated on 5 GHz,
+# which is a build that works and a check that refuses it. What matters is
+# whether the SSID the credential names is *on the air* in a band the phone
+# supports -- so that is what gets looked at, with a scan from the machine that
+# is about to copy the credential.
+#
+# Nothing here reads or transports the PSK. The SSID is not the secret; it is
+# already recorded in the image manifest.
+
+# The SSID the credential will name, read out of the build host's netplan the
+# same way image/pmos-build.sh reads the whole credential -- so the two can
+# never disagree about which network is meant.
+pmos_uplink_ssid() {
+    _pmos_ask "sudo -n cat /etc/netplan/*.yaml 2>/dev/null \
+        | python3 -c \"
+import sys, yaml
+for doc in (d for d in yaml.safe_load_all(sys.stdin) if d):
+    for _, dev in (doc.get('network', {}).get('wifis') or {}).items():
+        for ssid, ap in (dev.get('access-points') or {}).items():
+            psk = ((ap.get('auth') or {}).get('password') or ap.get('password') or '')
+            if psk:
+                print(ssid); sys.exit(0)
+\""
+}
+
+# Every frequency, in MHz, that SSID is being broadcast on, as seen from the
+# build host.
+#
+# Both a fresh scan and the cached dump, unioned, and the reason is a bug this
+# had on its first outing: `scan dump` alone returned only the 5 GHz BSSID of an
+# SSID that had just gained a 2.4 GHz radio, because the cache predated the
+# change -- and a band missing from the answer is a build refused for no reason.
+# A fresh scan is what sees the current truth; the dump is the fallback for a
+# host where scanning is not permitted. Unioned rather than preferred, so a
+# stale cache can only ever be over-generous, never blocking.
+pmos_ssid_freqs() { # <ssid>
+    local ifs i how out all=""
+    ifs=$(_pmos_ask "iw dev 2>/dev/null | awk '/Interface/ { print \$2 }'")
+    for i in $ifs; do
+        for how in scan "scan dump"; do
+            out=$(_pmos_sh "sudo -n iw dev $i $how 2>/dev/null" < /dev/null 2>/dev/null \
+                  | awk -v want="$1" '
+                      /^BSS/            { f = "" }
+                      /freq:/           { f = $2 }
+                      /^[ \t]*SSID: /   { sub(/^[ \t]*SSID: /, "")
+                                          if ($0 == want && f != "") print f }') || out=""
+            all="$all
+$out"
+        done
+    done
+    printf '%s\n' "$all" | sed '/^$/d' | sort -u
+}
+
+# Refuse a build whose credential names a network the phone has no radio to see.
+pmos_check_uplink_band() {
+    local bands="${PMO_WIFI_BANDS:-}" ssid freqs f reach="" seen="" want24="" want5=""
+    [ -n "$bands" ] || { debug "profile declares no PMO_WIFI_BANDS -- not checking the uplink band"; return 0; }
+    case " $bands " in *" 2.4 "*) want24=1 ;; esac
+    case " $bands " in *" 5 "*)   want5=1  ;; esac
+
+    ssid=$(pmos_uplink_ssid)
+    [ -n "$ssid" ] || { debug "could not read the uplink SSID from $(pmos_host) -- leaving the band unchecked"; return 0; }
+
+    freqs=$(pmos_ssid_freqs "$ssid")
+    if [ -z "$freqs" ]; then
+        # Not proof of anything: a scan can miss an AP, and the phone will be
+        # somewhere else in the house anyway.
+        warn "$(pmos_host) cannot currently see '$ssid' on the air, so which bands it"
+        warn "  offers could not be checked. $PMO_DEVICE's radio is ${bands} GHz."
+        return 0
+    fi
+
+    for f in $freqs; do
+        # `iw` prints "freq: 2412.0", and `[ 2412.0 -lt 3000 ]` is not a failed
+        # comparison -- it is a syntax error that `[` reports as false. Every
+        # frequency therefore fell through to the 5 GHz branch, which made this
+        # refuse a network it had just correctly found on 2.4 GHz. Truncate to
+        # an integer before comparing, and never compare a string `iw` printed.
+        f=${f%%.*}
+        case "$f" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ "$f" -lt 3000 ]; then
+            seen="${seen:+$seen }2.4"; [ -n "$want24" ] && reach=1
+        else
+            seen="${seen:+$seen }5";   [ -n "$want5" ]  && reach=1
+        fi
+    done
+    [ -n "$reach" ] && {
+        debug "'$ssid' is on the air in a band $PMO_DEVICE supports"
+        return 0
+    }
+
+    die "'$ssid' is only being broadcast on $(printf '%s' "$seen" | tr ' ' '\n' | sort -u | tr '\n' '/' | sed 's:/$::') GHz, and $PMO_DEVICE's radio is $(printf '%s' "$bands" | tr ' ' '/') GHz only.
+    The image copies its WiFi credential from $(pmos_host)'s own association, so it
+    would be built with a valid PSK for a network the phone's hardware cannot
+    see -- and a phone with no uplink has no way in at all. That failure looks
+    exactly like a bad card: everything else verifies and the phone simply never
+    appears.
+    The fix is on the access point, not here: broadcast '$ssid' on $(printf '%s' "$bands" | tr ' ' '/') GHz as well.
+    Same SSID and same PSK, so nothing needs rebuilding once the band exists --
+    and re-running this build will then stop refusing."
+}
+
 pmos_build() {
     local profile="$1"; shift
     local dry="" detach="" resume=""
@@ -483,6 +610,10 @@ pmos_build() {
         || die "cannot ssh to $(pmos_ssh) -- that is the build host for this profile.
     pmbootstrap is Linux-only and needs root, so the build happens there.
     Another machine: WK_PMOS_HOST=<name> wk sysimage build $profile"
+
+    # Before the lock and before anything is built: a twenty-minute build that
+    # produces an unreachable phone is the expensive way to learn this.
+    pmos_check_uplink_band
 
     image_lock
 
@@ -518,8 +649,14 @@ pmos_build() {
     pmos_import "$id"
 
     info "built $id  ($(du -h "$(image_disk "$id")" | cut -f1))"
-    log  "  write it:  wk sysimage write $id --disk <machine>:<device>"
+    # One line first, because the rest of this path is a chain somebody has to
+    # get right in order, and `wk bridge provision` is that chain -- it picks up
+    # exactly this image, writes it, and prompts through the two steps that are
+    # a person.
+    log  "  the rest of the way:  wk bridge provision ${PMO_BRIDGE:-<bridge>}"
+    log  "  ...or by hand:"
+    log  "             wk sysimage write $id --disk <machine>:<device>"
     log  "             ('wk sysimage disks <machine>' lists what is attached where)"
-    log  "  then the card goes into the phone, and:"
+    log  "             then the card goes into the phone, and:"
     log  "             wk bridge setup ${PMO_BRIDGE:-<bridge>}"
 }

@@ -151,7 +151,7 @@ image_profile_load() {
     FET_URL=""; FET_SHA256=""; FET_XZ=""; FET_NOTE=""; FET_DEVICE=""
     PMO_DEVICE=""; PMO_UI=""; PMO_CHANNEL=""; PMO_PMB_VERSION=""
     PMO_USER=""; PMO_PASSWORD=""; PMO_PACKAGES=""; PMO_EXTRA_SPACE=""
-    PMO_BRIDGE=""; PMO_BUILD_HOST=""
+    PMO_BRIDGE=""; PMO_BUILD_HOST=""; PMO_WIFI_BANDS=""
 
     case "$1" in
     # The old names, refused by name: every profile was renamed on 2026-08-20
@@ -358,11 +358,27 @@ image_profile_load() {
                 PMO_DEVICE=pine64-pinephone
                 PMO_BRIDGE=tailnet-bridge-generic
                 IMG_HOSTNAME=tailnet-bridge-generic
+                # 2.4 GHz only, and this is load-bearing rather than trivia.
+                # The PinePhone's radio is an RTL8723CS: 802.11 b/g/n, single
+                # band, no 5 GHz at all. The uplink credential is copied from
+                # the build host's own association, and a build host on a 5 GHz
+                # SSID therefore produces an image that is *guaranteed* to boot
+                # into isolation -- it has a perfectly good PSK for a network
+                # the phone's hardware cannot see. That happened here
+                # (2026-08-21): rpi5 associated on channel 52, and the phone
+                # came up showing every neighbour's 2.4 GHz network and not the
+                # one it was built for. pmos_check_uplink_band refuses it now.
+                PMO_WIFI_BANDS="2.4"
                 ;;
             bridge-librem5)
                 PMO_DEVICE=purism-librem5
                 PMO_BRIDGE=tailnet-bridge-moose-bmc
                 IMG_HOSTNAME=tailnet-bridge-moose-bmc
+                # Dual band: the RS9116 is 802.11abgn, so either band works and
+                # the check below has nothing to refuse. Stated rather than left
+                # empty, because "unknown" and "both" are different answers and
+                # only one of them should let a build through unquestioned.
+                PMO_WIFI_BANDS="2.4 5"
                 # The camera stream is this bridge's job, so its pipeline is in
                 # the image rather than fetched on first provision.
                 PMO_PACKAGES="$PMO_PACKAGES,ffmpeg"

@@ -24,10 +24,23 @@
 #
 # wk bridge rm <name> -- the inverse: stop and remove everything setup left on
 # the phone, and drop the node from the tailnet. It leaves the OS alone.
+#
+# wk bridge provision <name> -- all of it, from an empty card to a health
+# check, as one verb. `setup` is the half that runs over ssh against a phone
+# that already boots; `provision` is that half plus the image, the card and the
+# two steps only a person can take. See cmd_provision.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/image.sh"
+. "$WK_ROOT/image/profiles.sh"
+# For the eMMC route: the phone's internal storage arrives as a removable disk
+# on whichever machine it is cabled to, and finding it is the same problem
+# `wk sysimage disks` already solves.
+. "$WK_ROOT/boot/machines.sh"
+. "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/bridge/devices.sh"
 
 # Two places a bridge can be declared, the same split targets use (lib/target.sh,
@@ -66,7 +79,7 @@ load_bridge() {
     BR_NAME="$name"
     BR_DEVICE=""; BR_SSH=""; BR_HOSTNAME=""; BR_TAG=""; BR_SEGMENT=""
     BR_ROUTER=""; BR_IF=""; BR_POOL=""; BR_LEASES=""; BR_EGRESS=""
-    BR_CAMERA=""; BR_REACHED_BY=""; BR_NOTE=""; BR_LAN_MAC=""
+    BR_CAMERA=""; BR_REACHED_BY=""; BR_NOTE=""; BR_LAN_MAC=""; BR_CARD=""
     # shellcheck disable=SC1090
     . "$conf"
     BR_CONF="$conf"
@@ -150,9 +163,14 @@ resolve_priv() {
 
 usage() {
     die "usage: wk bridge ls
+       wk bridge provision <name> [--disk <machine>:<dev>] [--image <id>]
+                                  [--rebuild] [--no-write] [--dry-run]
        wk bridge setup <name> [--dry-run]
        wk bridge status <name>
        wk bridge rm <name>
+
+    provision is the whole path -- image, card, the phone, the role. setup is
+    the ssh half of it, against a phone that already boots.
 
     A bridge is a phone routing a segment onto the tailnet. Declared in
     bridge/hosts/<name>.conf; see 'wk help bridge'."
@@ -188,6 +206,722 @@ cmd_ls() {
     log "  provisioned  'wk bridge setup' has run against it"
     log "  unreachable  did not answer in 5s -- off, or not flashed yet"
 }
+
+# --- provision ---------------------------------------------------------------
+#
+# The whole path, from nothing to a health check, as one verb.
+#
+# It was five or six commands with an image id copied by hand between two of
+# them, and the steps in it that no script can take -- carrying a card across a
+# room, recabling a phone, pasting a policy into a console -- lived in `wk help
+# bridge` rather than being asked for at the moment they blocked. That is the
+# wrong shape for something done once every few months: prose read in advance is
+# prose misremembered, and getting the dock's power-before-connect wrong costs an
+# afternoon staring at a lan0 that never appears.
+#
+# So every scriptable step runs, and each step that needs a hand is a prompt at
+# the point it blocks, with the reason beside it. Deliberately that is *all* it
+# is: nothing here holds a tailscale credential. Minting the auth key and
+# writing the tailnet policy stay the operator's, for the reason cmd_setup's
+# closing note gives -- a repository holding a policy-write key is a repository
+# whose compromise rewrites every ACL you have -- so provision asks for them and
+# waits, rather than acquiring the ability to do them itself.
+#
+# WHERE IT INSTALLS, and there is one answer: the phone's internal storage.
+#
+# A bridge writes leases, logs and tailscale state for months, and a microSD is
+# the part of a phone most likely to wear out or work loose -- so the card is the
+# rescue copy, never the system. There used to be a second route here, writing
+# the bridge image to the card and letting the phone boot that, and it is gone
+# on purpose: it was quicker to reach and it left the bridge living on the one
+# component most likely to fail, which is the whole thing this avoids.
+#
+# The way in is Jumpdrive: a service image that boots from the card and exports
+# the phone's internal storage as USB mass storage. That turns "flash a phone"
+# into "write a removable disk attached to a machine", which is
+# `wk sysimage write` with every refusal and the block-map path it already has,
+# and no new verb. It does mean the phone is cabled to whichever machine holds
+# the card reader, because that is where the exported disk appears -- both are
+# rpi5 here, and BR_CARD names it once.
+#
+# Every step is skipped when it is already done, because the expected way to use
+# this is to re-run it after whichever step went wrong. The one thing that
+# cannot be inferred gets a flag: --no-write, "the phone already holds the right
+# system", which is not something this end can see.
+
+# One field out of one profile, without leaving a profile loaded behind.
+profile_field() {
+    ( image_profile_load "$1" >/dev/null 2>&1 || exit 0
+      local v="$2"
+      printf '%s' "${!v:-}" )
+}
+
+# Every profile name image/profiles.sh lists.
+profile_names() { image_profile_list | awk '/^[a-z0-9-]+$/ { print $1 }'; }
+
+# The two lookups below share a shape and deliberately not an abstraction. The
+# first attempt here was one `profile_matching <test-command>` helper, and it
+# silently matched nothing: a command passed as a string and run unquoted is
+# word-split *without* quote removal, so the argument arrived still wrapped in
+# its own quotes. A five-line loop written twice is worth more than a helper
+# that takes code as data.
+#
+# What both loops do share: no `| head -1`. head exits at its first line and
+# SIGPIPEs the producer, and under `set -o pipefail` that turns a successful
+# lookup into a failed one -- the trap bridge/bin/wk-bridge-healthcheck opens
+# with a warning about. Each loop short-circuits itself instead. And a subshell
+# per profile, because image_profile_load sets globals and neither caller should
+# be left holding a profile's.
+
+# The image profile that builds this bridge's phone.
+#
+# Derived rather than declared twice: image/profiles.sh already records which
+# bridge each pmos profile is for (PMO_BRIDGE), and a BR_PROFILE field in the
+# conf would be that same fact in a second place, free to drift out of step.
+bridge_profile() {
+    local want="$1" p hit
+    for p in $(profile_names); do
+        hit=$( image_profile_load "$p" >/dev/null 2>&1 || exit 0
+               [ "${IMG_BUILDER:-}" = pmos ] || exit 0
+               [ "${PMO_BRIDGE:-}" = "$want" ] || exit 0
+               printf '%s' "$p" )
+        [ -z "$hit" ] || { printf '%s' "$hit"; return 0; }
+    done
+    return 1
+}
+
+# The service image that exports this phone's internal storage.
+#
+# Matched on the pmOS device codename rather than on a name: the bridge profile
+# says which phone it is for (PMO_DEVICE) and a fetch profile says which phone it
+# services (FET_DEVICE), so "the Jumpdrive for this bridge" is a join on the one
+# fact both of them already state. A phone with no such profile gets a refusal
+# naming what is missing -- Jumpdrive is a PinePhone project and there is no
+# Librem 5 equivalent in image/profiles.sh, so that refusal is a real case and
+# not a defensive one.
+recovery_profile() {
+    local want p hit
+    want=$(profile_field "$1" PMO_DEVICE)
+    [ -n "$want" ] || return 1
+    for p in $(profile_names); do
+        hit=$( image_profile_load "$p" >/dev/null 2>&1 || exit 0
+               [ "${IMG_BUILDER:-}" = fetch ] || exit 0
+               [ "${FET_DEVICE:-}" = "$want" ] || exit 0
+               printf '%s' "$p" )
+        [ -z "$hit" ] || { printf '%s' "$hit"; return 0; }
+    done
+    return 1
+}
+
+# An image of a profile, built if the store has none. Echoes the id.
+#
+# --rebuild is the caller's business, not this function's: it takes `force` so
+# that "the newest one will do" and "I want a fresh one" are one code path with
+# one set of failure messages.
+image_for() {
+    local profile="$1" force="${2:-}" id
+    if [ -z "$force" ] && id=$(image_latest "$profile" 2>/dev/null); then
+        info "using $id from the store"
+        log  "  --rebuild builds a fresh one instead"
+        printf '%s' "$id"
+        return 0
+    fi
+    if [ -n "$force" ]; then
+        info "building a new $profile (--rebuild)"
+    else
+        info "no $profile image in the store yet -- building one"
+    fi
+    "$WK_ROOT/wk" sysimage build "$profile" >&2 \
+        || die "the $profile build failed -- nothing was written to any disk"
+    id=$(image_latest "$profile") \
+        || die "the $profile build reported success but left no image in the store"
+    printf '%s' "$id"
+}
+
+# Wait for a person. Not `confirm`: there is nothing being decided here, the run
+# is simply blocked on a hand, and treating that as a y/N question invites the
+# answer "n" for a step that has no alternative.
+pause() {
+    [ -t 0 ] || die "this step needs a terminal, and there is not one: $*"
+    printf '\n%s' "$* [enter when done] " >&2
+    local _reply
+    read -r _reply || die "aborted -- nothing further was changed"
+}
+
+# Poll until the phone answers on the network, or give up saying what it is ever.
+#
+# resolve_ssh is one attempt at both names; this is that in a loop, because a
+# phone booting pmOS is a minute or two -- phosh comes up, and the RTL8723CS
+# takes its time to associate -- and a single attempt would fail on every first
+# boot.
+wait_for_phone() {
+    local budget="${1:-420}" start="$SECONDS"
+    while [ $((SECONDS - start)) -lt "$budget" ]; do
+        # Redirected for the reason disks_now is: resolve_ssh runs ssh, ssh eats
+        # stdin, and this loop runs against a terminal somebody is waiting at.
+        if resolve_ssh < /dev/null; then return 0; fi
+        printf '.' >&2
+        sleep 5
+    done
+    log ""
+    return 1
+}
+
+# --- finding the phone's storage once Jumpdrive has exported it ---------------
+#
+# By difference, not by recognition. What Jumpdrive exports has no name worth
+# matching on -- it is a generic USB mass-storage LUN -- so the honest question
+# is "which disks were not here before the phone was plugged in", and the answer
+# is exact. Matching on a model string or a size would be a guess, and the cost
+# of a wrong guess here is overwriting the machine's own boot stick.
+
+# `<dev> <size>` for every removable disk on a machine, one per line, sorted.
+# `< /dev/null` for the same reason device_head_sha has it: disk_candidates
+# reaches the machine over ssh, ssh forwards its stdin to the far side, and both
+# callers below run this in a poll loop against a terminal. Without the
+# redirect, every poll swallows whatever the operator has typed since the last
+# one -- including the newline meant for the *next* prompt, which is how a
+# `pause` gets answered by nobody.
+disks_now() {
+    disk_candidates < /dev/null | awk '{ print $1, $2 }' | sort
+}
+
+# The disks present now that were not in the baseline.
+disks_new() {
+    comm -13 <(printf '%s\n' "$1") <(disks_now)
+}
+
+# Poll for them, because a phone takes a few seconds to boot Jumpdrive and
+# announce itself.
+wait_for_disks() {
+    local baseline="$1" budget="${2:-180}" start="$SECONDS" found
+    while [ $((SECONDS - start)) -lt "$budget" ]; do
+        found=$(disks_new "$baseline")
+        [ -z "$found" ] || { printf '%s' "$found"; return 0; }
+        printf '.' >&2
+        sleep 5
+    done
+    log ""
+    return 1
+}
+
+# Which of the new disks is the phone's internal storage.
+#
+# Automatically, and by content rather than by position or by name.
+#
+# Jumpdrive on a PinePhone exports the SD card *as well as* the eMMC, as two
+# separate LUNs, so "the disk that appeared" is normally two disks -- and one of
+# them is the Jumpdrive card that is currently running. Writing the bridge image
+# to that one destroys the tool being used to do the writing and leaves the eMMC
+# untouched, with the phone coming back up on a half-written card.
+#
+# Everything that looks like a discriminator here is a guess:
+#
+#   LUN or enumeration order   works until a firmware or Jumpdrive release
+#                              reorders it, and then it silently means the
+#                              other disk
+#   size                       the eMMC is 16, 32 or 128 GB and the card is
+#                              whatever card you own, and those sets overlap.
+#                              Measured here (2026-08-21): the eMMC came up
+#                              29.1 GB, against a 29 GB USB boot stick on the
+#                              very same machine
+#
+# The SCSI model string is the exception, and an earlier version of this comment
+# had it wrong -- it claimed both LUNs carry identical strings because they are
+# one gadget. They do not: Jumpdrive 0.8 labels them `e eMMC` and `e microSD`,
+# which says outright which is which. That is used below, but as corroboration
+# rather than as the answer, because those strings are an undocumented cosmetic
+# choice of one release and the point of this function is to not depend on what a
+# release happens to do.
+#
+# What depends on no release at all: we wrote the Jumpdrive card ourselves,
+# minutes ago, and verified the read-back. So its first mebibyte is a known
+# quantity, and the card is *the exported disk whose head matches the image we
+# just wrote*. The other one is the eMMC, by elimination, with no ordering
+# assumed and nothing recognised. Then the labels are checked against that
+# conclusion: two independent signals agreeing is worth the few lines it costs,
+# and if they ever disagree the assumption to re-examine is this file'"'"'s.
+#
+# The two ways this can fail to be decisive are both reported rather than
+# guessed past: nothing matched (so the card is not among the exported disks,
+# which means these are not the disks we think they are) and everything matched
+# (two disks carrying the same image -- ambiguous, and not something to resolve
+# by picking one).
+CARD_HEAD_BYTES=1048576
+
+# The head of a local image file, hashed.
+image_head_sha() {
+    dd if="$1" bs="$CARD_HEAD_BYTES" count=1 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+
+# The head of a block device on the card machine, hashed there. `sudo` because a
+# raw block device is not world readable, and the same passwordless sudo
+# `wk sysimage write` already relies on.
+#
+# `< /dev/null` is load-bearing. ssh reads stdin and forwards it to the far
+# side, so calling this inside a `while read` loop hands the loop's own input to
+# ssh -- which ate every candidate after the first and made a two-disk export
+# look like a one-disk one. The caller builds an array for the same reason;
+# this redirect is here so the function is safe wherever it is called from.
+# The length is checked, not just the hash, and that is not belt-and-braces: a
+# device that reads zero bytes -- pulled, asleep, or refusing -- hashes to the
+# sha256 of the empty string, which is a perfectly valid-looking digest that
+# matches nothing. Unguarded, such a disk is classified "not the Jumpdrive card"
+# and therefore *selected as the eMMC*, which is a write aimed at a disk that
+# could not even be read. A short read is an error here, never a hash.
+device_head_sha() {
+    local out bytes sha
+    out=$(m_ssh "sudo dd if=$(sh_quote "$1") bs=$CARD_HEAD_BYTES count=1 2>/dev/null | wc -c
+                 sudo dd if=$(sh_quote "$1") bs=$CARD_HEAD_BYTES count=1 2>/dev/null | sha256sum" \
+          < /dev/null 2>/dev/null) || return 1
+    bytes=$(printf '%s\n' "$out" | sed -n 1p | tr -dc '0-9')
+    sha=$(printf '%s\n'   "$out" | sed -n 2p | cut -d' ' -f1)
+    [ "${bytes:-0}" = "$CARD_HEAD_BYTES" ] || return 1
+    [ -n "$sha" ] || return 1
+    printf '%s' "$sha"
+}
+
+# What the phone is presenting over USB, when it is not presenting storage.
+#
+# The timeout this serves used to say "one of three things went wrong" and leave
+# you to work out which. But the phone is not silent when Jumpdrive fails to
+# boot -- it comes up on its own OS instead, and postmarketOS's default USB
+# gadget is MTP with Pine64's own vendor id. That is positive evidence of
+# exactly which failure this is, so it is worth reading rather than listing
+# possibilities.
+#
+# Reported, never acted on: this tells a person which of two very different
+# problems they have (a card that is not being read, versus a cable that is not
+# carrying data), and both fixes are hands-on.
+phone_usb_note() {
+    local usb
+    usb=$(m_ssh "lsusb 2>/dev/null" < /dev/null 2>/dev/null) || return 0
+    case "$usb" in
+        *18d1:4ee1*|*"Nexus/Pixel Device (MTP)"*)
+            printf 'the phone IS attached, and it is presenting an MTP gadget (18d1:4ee1)
+    rather than storage. That is postmarketOS default -- so the phone booted its
+    own installed OS and never read the card. Jumpdrive is not running.
+      - power the phone fully OFF: hold power for about 12 seconds until the
+        screen is black and stays black. A reboot or a wake from sleep does not
+        re-run the boot ROM, so the card is never looked at
+      - re-seat the card. The slot is under the back cover, and a card that is
+        half in looks exactly like no card at all'
+            ;;
+        *)
+            printf 'nothing on %s'"'"'s USB looks like a phone at all, which points at the
+    cable rather than at the card -- a charge-only cable is the most common
+    cause of this exact symptom. Jumpdrive would also have drawn a splash
+    listing the storage sizes; a blank screen means the card did not boot.' "$MACH_NAME"
+            ;;
+    esac
+}
+
+identify_internal_storage() {
+    local candidates="$1" jd_disk="$2" want dev size head
+    local emmc="" cards="" n=0
+
+    want=$(image_head_sha "$jd_disk")
+    [ -n "$want" ] || die "could not hash the first $(human_bytes "$CARD_HEAD_BYTES") of $jd_disk.
+    That hash is how the Jumpdrive card is told apart from the phone's own
+    storage, and without it there is nothing to distinguish them by."
+
+    info "identifying the phone's internal storage by content"
+    log  "  the card is whichever exported disk matches the Jumpdrive we just wrote;"
+    log  "  the eMMC is the other one. Nothing is assumed about LUN order."
+
+    # Collected before any of it is hashed: the hashing talks over ssh, and a
+    # loop whose body runs ssh cannot also be reading from a heredoc.
+    local devs=() sizes=() i
+    while read -r dev size; do
+        [ -n "$dev" ] || continue
+        devs+=("$dev"); sizes+=("$size")
+    done <<EOF
+$candidates
+EOF
+    n=${#devs[@]}
+    [ "$n" -gt 0 ] || die "identify_internal_storage was given no disks at all."
+
+    for i in $(seq 0 $((n - 1))); do
+        dev="${devs[$i]}"; size="${sizes[$i]}"
+        head=$(device_head_sha "$dev" || true)
+        [ -n "$head" ] || die "could not read the first $(human_bytes "$CARD_HEAD_BYTES") of $dev on $MACH_NAME.
+    It is listed as a disk but does not deliver that much when read -- a card
+    that has been pulled since the listing, or a LUN the phone is advertising
+    without backing. Telling the card from the eMMC is decided by reading both,
+    so an unreadable one stops this rather than being assumed to be either.
+    Nothing was written."
+        if [ "$head" = "$want" ]; then
+            log  "  $dev  $size  -- the Jumpdrive card (its head matches the image)"
+            cards="$cards $dev"
+        else
+            log  "  $dev  $size  -- not the card"
+            emmc="$emmc $dev"
+        fi
+    done
+
+    # Trim.
+    cards="${cards# }"; emmc="${emmc# }"
+
+    [ -n "$cards" ] || die "none of the $n disks the phone exported is the Jumpdrive card.
+    Exported:
+$(printf '%s\n' "$candidates" | sed 's/^/      /')
+    The card was written and read back minutes ago, so one of these should have
+    matched it byte for byte. That it did not means these are not the disks this
+    was looking for -- something else was plugged into $MACH_NAME, or the phone
+    is exporting something other than its storage. Nothing was written."
+
+    if [ -z "$emmc" ] && [ "$n" = 1 ]; then
+        die "the only disk that appeared is the Jumpdrive card itself -- the phone's
+    internal storage did not show up beside it.
+    Jumpdrive exports both, so one LUN and not two means the eMMC was not
+    exported. Worth trying, in order: power the phone right off and boot it
+    again (a partial gadget setup does look exactly like this), and check the
+    phone is a model with eMMC at all. Nothing was written."
+    fi
+    case "$emmc" in
+        "") die "every one of the $n disks that appeared matches the Jumpdrive image.
+    Two disks carrying the same image is ambiguous, and not something to resolve
+    by picking one -- so nothing was written.
+    'wk sysimage disks $MACH_NAME' is what this was looking at."
+            ;;
+        *" "*) die "the phone exported more than one disk that is not the Jumpdrive card:
+      $emmc
+    The eMMC is meant to be the only one left after the card is eliminated, so a
+    second candidate means something else is attached to $MACH_NAME that was not
+    there when the baseline was taken. Unplug it and re-run; nothing was
+    written."
+            ;;
+    esac
+
+    # Corroboration from a signal that has nothing to do with the hash: the
+    # label Jumpdrive puts on the LUN. If the disk the content check chose is
+    # the one calling itself microSD, the two signals disagree -- and a
+    # destructive write is not the place to pick a favourite.
+    local model
+    model=$(m_ssh "lsblk -dno MODEL $(sh_quote "$emmc")" < /dev/null 2>/dev/null \
+            | tr -d '\r' | sed 's/[[:space:]]*$//')
+    case "$model" in
+        *microSD*|*microsd*|*MicroSD*|*micro-SD*)
+            die "the content check picked $emmc as the phone's internal storage, but that
+    disk reports its own model as '$model'. Two independent signals disagreeing
+    about the same disk is not something to resolve by preferring one of them,
+    least of all for a write that erases it. Nothing was written.
+    'wk sysimage disks $MACH_NAME' shows what is attached."
+            ;;
+    esac
+
+    info "the phone's internal storage is $emmc${model:+ (which calls itself '$model', agreeing)}"
+    printf '%s' "$emmc"
+}
+
+# Is the segment actually routed?
+#
+# This is the failure that looks like success, and it is worth one function of
+# its own: without `autoApprovers` for the segment the bridge is up, healthy,
+# tagged and advertising -- and nothing behind it is reachable, because the
+# route is waiting on a click nobody made. The phone's own view of tailscale is
+# the honest answer here; the admin console's is the thing being verified.
+route_approved() {
+    local r
+    r=$(rsh "$PRIV tailscale status --json --peers=false 2>/dev/null \
+             | jq -rc '.Self.PrimaryRoutes // empty'" 2>/dev/null) || return 1
+    case "$r" in *"$BR_SEGMENT"*) return 0 ;; *) return 1 ;; esac
+}
+
+# The half that is identical whichever storage the image landed on: the phone
+# comes up, the role goes on, the policy gets applied, and the route is checked
+# rather than assumed.
+provision_finish() {
+    info "waiting for $BR_NAME to answer (up to 7 minutes)"
+    log  "  it has no tailnet name until setup runs, so $BR_HOSTNAME.local is what"
+    log  "  answers on a first boot -- either name is fine here."
+    wait_for_phone 420 || die "$BR_NAME never answered.
+    Tried $BR_SSH and $BR_HOSTNAME.local for 7 minutes. In order of likelihood:
+      - the WiFi kill switch is off, so the phone is up and on no network
+      - the card is still in it, so it booted Jumpdrive rather than the system
+        just installed. A card wins a boot -- that is exactly what makes it the
+        rescue copy, and why step 1 above is 'power off', not 'reboot'
+      - the image carries the wrong WiFi credential: it is copied from the build
+        host's own connection, so an image built on a machine that has since
+        moved network comes up in isolation. 'wk sysimage show <id>' names the
+        SSID it was built with.
+    The phone's own screen is the way in when none of that is it -- it is the
+    reason a bridge image keeps a GUI. 'wk help bridge' has the console user
+    and password."
+    info "$BR_NAME answers on $BR_SSH"
+
+    # --- the role ---
+    # cmd_setup, not a copy of it: it is the idempotent half and it is what
+    # every re-run after today uses. It resolves privilege itself, prompts for
+    # the auth key only when the node actually needs one, and prints the policy.
+    log ""
+    cmd_setup
+
+    # --- the policy ---
+    # The one thing setup printed and could not apply. Asked for here, and then
+    # *verified*, because "I pasted it" and "the route is live" are different
+    # claims and only the second one matters.
+    log ""
+    if route_approved; then
+        info "$BR_SEGMENT is approved and live -- the tailnet policy is already in place"
+        log  "  which is the normal state of every run after the first: the policy is"
+        log  "  per bridge, not per flash."
+    else
+        warn "$BR_SEGMENT is advertised but not approved, so nothing behind this bridge"
+        warn "  is reachable yet. That is the expected state of a first run: the"
+        warn "  autoApprovers stanza setup just printed is not in the policy yet."
+        log  ""
+        log  "  Paste the tagOwners, autoApprovers and grants printed above into"
+        log  "  https://login.tailscale.com/admin/acls -- autoApprovers is the one"
+        log  "  that makes the route live without a console click."
+        local tries=0
+        while ! route_approved; do
+            tries=$((tries + 1))
+            if [ "$tries" -gt 3 ]; then
+                warn "still not approved after $((tries - 1)) checks -- leaving it there."
+                log  "  Everything on the phone is done; this is the console's half."
+                log  "  'wk bridge status $BR_NAME' re-checks it whenever you like."
+                return 0
+            fi
+            pause "policy applied?"
+            info "checking whether $BR_SEGMENT came live"
+        done
+        changed "$BR_SEGMENT is approved and live"
+    fi
+
+    log ""
+    info "$BR_NAME is provisioned"
+    log  "  status:   wk bridge status $BR_NAME"
+    log  "  re-apply: wk bridge setup $BR_NAME   (idempotent; after any conf change)"
+    log  "  reach something behind it: $(bridge_reach_hint)"
+}
+
+# What to try, to prove the segment is reachable -- without pretending to know
+# what is on it. The conf's reservations are the only list of that which exists,
+# and a bridge whose segment holds nothing named yet gets the honest version.
+bridge_reach_hint() {
+    local first
+    first=$(printf '%s' "${BR_LEASES:-}" | tr ' ' '\n' | sed -n '1s/^[^,]*,\([^,]*\).*/\1/p')
+    if [ -n "$first" ]; then
+        printf 'ping %s' "$first"
+    else
+        printf 'ping %s (the router this bridge answers on)' "$BR_ROUTER"
+    fi
+}
+
+cmd_provision() {
+    local disk="" image="" rebuild="" no_write="" dry=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --disk)     disk="${2:-}";  [ -n "$disk" ]  || die "--disk needs <machine>:<device>"; shift 2 ;;
+            --image)    image="${2:-}"; [ -n "$image" ] || die "--image needs an image id"; shift 2 ;;
+            --rebuild)  rebuild=1; shift ;;
+            --no-write) no_write=1; shift ;;
+            --dry-run)  dry=1; shift ;;
+            *) die "unknown option: $1
+    wk bridge provision <name> [--disk <machine>:<dev>] [--image <id>]
+                               [--rebuild] [--no-write] [--dry-run]" ;;
+        esac
+    done
+    [ -z "$rebuild" ] || [ -z "$image" ] \
+        || die "--rebuild and --image contradict each other: one builds a new image, the other names an existing one."
+    [ -z "$no_write" ] || { [ -z "$rebuild" ] && [ -z "$image" ]; } \
+        || die "--no-write says the phone already holds its system, so there is no image for --image or --rebuild to be about."
+
+    local profile="" recovery="" card="" cardmach=""
+    if [ -z "$no_write" ]; then
+        profile=$(bridge_profile "$BR_NAME" || true)
+        [ -n "$profile" ] || die "no image profile builds $BR_NAME.
+    A pmos profile in image/profiles.sh claims a bridge by setting PMO_BRIDGE to
+    its name, and none of them names this one. Either add a profile for it, or
+    provision the phone by hand and use --no-write."
+
+        card="${disk:-${BR_CARD:-}}"
+        [ -n "$card" ] || die "no card to write: $BR_CONF sets no BR_CARD and there is no --disk.
+    BR_CARD is <machine>:<device> -- the reader that holds this bridge's cards,
+    e.g. BR_CARD=rpi5:/dev/mmcblk0. 'wk sysimage disks <machine>' lists what is
+    attached where; guessing which /dev is the card is the one mistake
+    'wk sysimage write' exists to make impossible, so it is declared, not found."
+        cardmach="${card%%:*}"
+        [ "$cardmach" != "$card" ] && [ -n "${card#*:}" ] \
+            || die "'$card' is not <machine>:<device> -- e.g. rpi5:/dev/mmcblk0."
+
+        # A named image is checked here, with the rest of the arguments, rather
+        # than at the point it gets written -- so `--dry-run` catches it, which
+        # is the run somebody makes *because* they are unsure. A profile
+        # mismatch is refused rather than warned about: the wrong phone's image
+        # is a card that does not boot, and the symptom is a black screen with
+        # nothing on it to read.
+        if [ -n "$image" ]; then
+            image_complete "$image" || die "no such image: $image
+    'wk sysimage ls' lists the store."
+            local named; named=$(manifest_get "$image" profile || true)
+            [ "$named" = "$profile" ] || die "$image is a '$named' image, and $BR_NAME is built by '$profile'.
+    --image chooses which build, not which phone."
+        fi
+
+        recovery=$(recovery_profile "$profile" || true)
+        [ -n "$recovery" ] || die "there is no service image for $(profile_field "$profile" PMO_DEVICE), so this phone cannot be provisioned.
+    A bridge is installed onto the phone's internal storage, and the way in is a
+    service image that boots from a card and exports that storage over USB --
+    Jumpdrive, for the PinePhone. It is a PinePhone project, and image/profiles.sh
+    carries no equivalent for this device.
+    Adding one is a fetch profile: a pinned URL, its sha256, and FET_DEVICE set
+    to this phone's pmOS codename. Until then there is no way to write this
+    phone's storage from here, and pretending otherwise would mean installing a
+    bridge somewhere it should not live."
+    fi
+
+    info "$BR_NAME -- $DEV_NOTE, $BR_SEGMENT via $BR_IF"
+    log  "  conf:     $BR_CONF"
+    if [ -z "$no_write" ]; then
+        log  "  profile:  $profile"
+        log  "  card:     $card"
+        log  "  onto:     the phone's internal storage, through $recovery on the card"
+        log  "            (the card ends up as the rescue copy, which is what it is for)"
+        if [ -n "$image" ]; then
+            log  "  image:    $image (--image)"
+        elif [ -n "$rebuild" ]; then
+            log  "  image:    a new build (--rebuild)"
+        else
+            local have; have=$(image_latest "$profile" 2>/dev/null || true)
+            log  "  image:    ${have:-none in the store yet, so it gets built}"
+        fi
+    else
+        log  "  image:    not touched (--no-write: the phone already holds its system)"
+    fi
+
+    if [ -n "$dry" ]; then
+        log ""
+        log "dry run -- nothing was built, written, or changed. It would:"
+        local n=0
+        _step() { n=$((n + 1)); log "  $n. $*"; }
+        if [ -z "$no_write" ]; then
+            _step "build $recovery and $profile, unless the store already has them"
+            _step "write $recovery to $card"
+            _step "stop, and ask you to put the card in the phone, cable the phone to"
+            log   "     $cardmach, and power it on"
+            _step "wait for the phone's storage to appear as a disk on $cardmach, then"
+            log   "     tell the card from the eMMC by hashing the head of each and"
+            log   "     matching it against the Jumpdrive just written -- no prompt, and"
+            log   "     nothing assumed about LUN order"
+            _step "write the bridge image to the eMMC, with every refusal"
+            log   "     'wk sysimage write' has"
+            _step "stop, and ask you to power the phone OFF, remove the card, and boot it"
+        fi
+        _step "wait for the phone to answer, on its tailnet name or ${BR_HOSTNAME}.local"
+        _step "run 'wk bridge setup $BR_NAME' against it (which asks for a tagged auth"
+        log   "     key if the node is not on the tailnet yet, and prints the policy)"
+        _step "stop, and ask you to apply that policy -- then confirm the route came live"
+        return 0
+    fi
+
+    # A terminal, checked here rather than three steps in. Several of the steps
+    # below are a person, so a run with nobody watching cannot finish -- and
+    # finding that out *after* erasing a disk is the version of this that costs
+    # something.
+    if [ ! -t 0 ]; then
+        # Assembled rather than interpolated: a `$(...)` inside the string
+        # eats its own trailing newline, which silently ran the last two lines
+        # of this message together.
+        local why parts
+        if [ -n "$no_write" ]; then
+            why="Applying the tailnet policy is a person, so it cannot run unattended."
+            parts=""
+        else
+            why="Several of its steps are a person -- the card into the phone, the phone
+    recabled, the policy into the console -- so it cannot run unattended."
+            parts="        wk sysimage build $profile
+        wk sysimage write <id> --disk $card
+"
+        fi
+        die "wk bridge provision needs a terminal.
+    $why
+    The pieces that can:
+$parts        WK_BRIDGE_AUTHKEY=tskey-... wk bridge setup $BR_NAME"
+    fi
+
+    if [ -z "$no_write" ]; then
+        [ -n "$image" ] || image=$(image_for "$profile" "$rebuild")
+        local jd; jd=$(image_for "$recovery" "")
+
+        # --no-grow: Jumpdrive is a 41 MB service image and growing its root to
+        # fill a 64 GB card is work done to a filesystem that is discarded the
+        # moment the phone reboots. It also keeps the card's head byte-identical
+        # to the image, which is what identify_internal_storage matches on.
+        info "writing $jd to $card"
+        "$WK_ROOT/wk" sysimage write "$jd" --disk "$card" --no-grow \
+            || die "the card was not written -- nothing on the phone has changed"
+
+        machine_load "$cardmach" \
+            || die "unknown machine '$cardmach' (from $([ -n "$disk" ] && echo --disk || echo BR_CARD)=$card)"
+        m_reachable || die "$cardmach is not reachable, and it is where the phone's storage will appear."
+
+        # The baseline is taken *now*, with the phone not yet attached, so that
+        # "which disks are the phone's" is a difference rather than a
+        # recognition problem. The content check that follows narrows that set
+        # to one; this narrows the universe to the set.
+        local baseline; baseline=$(disks_now)
+        debug "disks on $cardmach before the phone: $(printf '%s' "$baseline" | tr '\n' ' ')"
+
+        log ""
+        info "Jumpdrive is on the card. Now the part no script can do:"
+        log  "   1. pull the card out of $cardmach -- it is synced, so it is safe to pull"
+        log  "   2. card into the $BR_DEVICE"
+        log  "   3. cable the phone to $cardmach with a DATA cable. This is the one"
+        log  "      step where the phone is powered from that machine: Jumpdrive needs"
+        log  "      the data link, and this is a service boot, not the bridge running."
+        log  "   4. power the phone on. Jumpdrive draws a splash and exports storage;"
+        log  "      it has no shell and nothing to log into."
+        pause "card in the phone, phone cabled to $cardmach, powering up?"
+
+        info "waiting for the phone's storage to appear on $cardmach (up to 3 minutes)"
+        local new
+        new=$(wait_for_disks "$baseline" 180) || die "no new disk appeared on $cardmach within 3 minutes.
+    Jumpdrive exports the phone's storage as USB mass storage within seconds of
+    its splash screen, so this means it is not running. What is attached says
+    which:
+    $(phone_usb_note)
+    Nothing was written. 'wk sysimage disks $cardmach' is what this was watching;
+    re-running this command picks up from the same place -- the card still holds
+    Jumpdrive."
+        log ""
+
+        local target
+        target=$(identify_internal_storage "$new" "$(image_disk "$jd")")
+
+        info "writing $image to $cardmach:$target"
+        log  "  every refusal 'wk sysimage write' has applies here: it checks the disk"
+        log  "  is removable, is not $cardmach's own root, and is big enough."
+        "$WK_ROOT/wk" sysimage write "$image" --disk "$cardmach:$target" \
+            || die "the phone's internal storage was not written.
+    Nothing is lost: the card still holds Jumpdrive, so re-running this picks up
+    from the same place. 'wk bridge provision $BR_NAME' is idempotent."
+
+        log ""
+        info "the bridge is installed on the phone's internal storage. Last hands-on part:"
+        log  "   1. power the phone OFF -- not reboot. A card wins a boot, so a reboot"
+        log  "      with the card still in it comes back into Jumpdrive."
+        log  "   2. take the card out. Keep it: it is the rescue copy now, and putting"
+        log  "      it back boots Jumpdrive again with the install untouched."
+        log  "   3. unplug the phone from $cardmach."
+        log  "   4. power the phone from a WALL CHARGER, never from the machine it"
+        log  "      exists to rescue. Fed from that machine the out-of-band path dies"
+        log  "      exactly when it is needed; on mains the battery is a UPS instead."
+        log  "   5. kill switches: WiFi ON. $DEV_KILLSWITCH"
+        log  "   6. plug in the USB-C Ethernet dock -- and power the dock BEFORE"
+        log  "      connecting it to the phone. Both phones have one port and default"
+        log  "      to USB device mode; a dock that is already powered is the thing"
+        log  "      that makes the data-role swap happen, and without the swap $BR_IF"
+        log  "      never appears at all."
+        log  "   7. power the phone on. It boots the system just installed."
+        pause "card out, phone on mains and on its own dock, powering up?"
+    fi
+
+    log ""
+    provision_finish
+}
+
 
 # --- setup -------------------------------------------------------------------
 cmd_setup() {
@@ -422,7 +1156,7 @@ case "$ACTION" in
     ls)
         cmd_ls
         ;;
-    setup|status|rm)
+    setup|status|rm|provision)
         NAME="${1:-}"; shift || true
         [ -n "$NAME" ] || die "usage: wk bridge $ACTION <name>
     Declared bridges:$(bridge_names | sed 's/^/ /' | tr -d '\n')"

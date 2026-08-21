@@ -215,6 +215,100 @@ chk_bridge_confs_resolve() {
     [ -z "$bad" ] || { echo "does not resolve:$bad"; return 1; }
 }
 
+# `wk bridge provision --dry-run` is the whole chain resolved and nothing done:
+# the profile derived from image/profiles.sh, the card read out of the conf, the
+# image picked out of the store. Every one of those is a lookup that can come
+# back empty, and a provision run that discovers it *after* erasing a card is
+# the version of this that costs something -- so it is resolved here, with no
+# phone in the room.
+chk_bridge_provision_resolves() {
+    local name out bad=""
+    for name in $(cd "$WK_ROOT/bridge/hosts" && ls *.conf 2>/dev/null | sed 's/\.conf$//'); do
+        # There is one route -- onto the phone's internal storage, through a
+        # service image -- so a bridge either resolves the whole chain or is
+        # refused for want of that service image. Both are correct outcomes;
+        # anything else means one of the two derived joins has broken.
+        if out=$("$WK" bridge provision "$name" --dry-run 2>&1); then
+            # A dry run that resolved nothing would still exit 0, so each value
+            # that cannot be defaulted is checked for rather than assumed.
+            printf '%s\n' "$out" | grep -q '^  profile:  bridge-' \
+                || bad="$bad
+  $name: no profile derived -- no pmos profile in image/profiles.sh sets PMO_BRIDGE=$name"
+            printf '%s\n' "$out" | grep -q '^  card:     [a-z0-9-]*:/dev/' \
+                || bad="$bad
+  $name: no card -- its conf sets no BR_CARD, so provision cannot write one"
+            printf '%s\n' "$out" | grep -q '^  onto:     the phone.s internal storage, through recovery-' \
+                || bad="$bad
+  $name: resolved without naming the service image that reaches internal storage"
+        else
+            # The Librem 5's true state: Jumpdrive is a PinePhone project. A
+            # refusal for any other reason means the PMO_DEVICE/FET_DEVICE join
+            # has broken, and the PinePhone would be next.
+            case "$out" in
+                *"no service image for"*) ;;
+                *) bad="$bad
+  $name: refused, but not because no service image exists: $out" ;;
+            esac
+        fi
+    done
+    [ -z "$bad" ] || { echo "does not resolve:$bad"; return 1; }
+}
+
+# provision refuses to run without a terminal, and refuses *before* the write.
+# Two of its steps are a person, so a headless run cannot finish -- and the
+# order matters more than the refusal: finding out after erasing a card is the
+# expensive way to learn it. Driven with --no-write so that a regression here
+# cannot itself destroy a card.
+chk_bridge_provision_needs_a_tty() {
+    local out
+    out=$("$WK" bridge provision tailnet-bridge-generic --no-write </dev/null 2>&1) \
+        && { echo "it ran to completion with no terminal; it should have refused"; return 1; }
+    case "$out" in
+        *"needs a terminal"*) ;;
+        *) echo "refused, but not for the reason it should have: $out"; return 1 ;;
+    esac
+}
+
+# The eMMC route tells the Jumpdrive card from the phone's storage by hashing
+# the first mebibyte of each and matching it against the image it just wrote. That
+# only works if two things are true of the images themselves, and neither is
+# something to assume: each carries its device's bootloader at the offset the
+# device's ROM looks for it, and the two heads *differ*. Identical heads would
+# make every exported disk look like the card.
+chk_bridge_image_heads_are_distinguishable() {
+    local a b ja jb f
+    a=$("$WK" sysimage ls 2>/dev/null | awk '/^bridge-pinephone-/ { print $1 }' | tail -1)
+    b=$("$WK" sysimage ls 2>/dev/null | awk '/^recovery-pinephone-/ { print $1 }' | tail -1)
+    [ -n "$a" ] && [ -n "$b" ] || { echo "skip: needs a bridge-pinephone and a recovery-pinephone image in the store"; return 0; }
+    a=$(_bridge_image_disk "$a"); b=$(_bridge_image_disk "$b")
+    [ -f "$a" ] && [ -f "$b" ] || { echo "one of the images has no disk.img: $a $b"; return 1; }
+
+    # eGON.BT0 at 8196 is the sunxi boot ROM's magic, and 8 KiB is the offset
+    # `deviceinfo_sd_embed_firmware` declares for a PinePhone. Without it the
+    # card is not bootable and every later step is moot.
+    for f in "$a" "$b"; do
+        [ "$(dd if="$f" bs=1 skip=8196 count=8 2>/dev/null)" = "eGON.BT0" ] \
+            || { echo "$f has no sunxi SPL at offset 8192 -- that card would not boot"; return 1; }
+    done
+
+    ja=$(dd if="$a" bs=1048576 count=1 2>/dev/null | sha256sum | cut -d' ' -f1)
+    jb=$(dd if="$b" bs=1048576 count=1 2>/dev/null | sha256sum | cut -d' ' -f1)
+    [ -n "$ja" ] && [ "$ja" != "$jb" ] \
+        || { echo "the two images' first mebibytes are identical ($ja) -- the eMMC route could not tell the card from the phone's storage"; return 1; }
+    # And not the sha256 of nothing, which is what an unreadable file hashes to.
+    [ "$ja" != e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 ] \
+        || { echo "hashed zero bytes -- the discriminator would match nothing"; return 1; }
+}
+
+# Where an image's disk.img lives, without sourcing the store libs into the
+# selftest: `wk sysimage show` is the interface that answers for the store.
+_bridge_image_disk() {
+    local root
+    if [ "$(uname -s)" = Darwin ]; then root="${XDG_STATE_HOME:-$HOME/.local/state}/wk"
+    else root="${WK_STORE:-/var/lib/wk}"; fi
+    echo "$root/images/$1/disk.img"
+}
+
 chk_bridge_rm_is_inverse() {
     local written removed p tok covered missing=""
 
@@ -1342,6 +1436,9 @@ if want quick; then
     check "is refused inside a workspace and on a shared build machine"   chk_bridge_host_only
     check "the profile and the bridge conf name the same phone"            chk_bridge_profiles_match
     check "the image carries every package the role requires"             chk_bridge_image_carries_role_packages
+    check "resolves the whole chain with no"                               chk_bridge_provision_resolves
+    check "refuses a headless run before it erases anything"               chk_bridge_provision_needs_a_tty
+    check "can actually be told apart by content"                          chk_bridge_image_heads_are_distinguishable
 fi
 
 if want state; then

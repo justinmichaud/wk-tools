@@ -262,13 +262,56 @@ workspace can reach the rpi3 and rpi4 without anything on the house network
 reaching either.
 
 ```sh
+wk bridge provision <name>   # all of it: image, card, phone, role
+wk bridge ls                 # what is declared, and what answers
+wk bridge setup <name>       # just the role: idempotent, re-run after any change
+wk bridge status <name>      # the on-device health check, read-only
+wk bridge rm <name>          # removes the role, leaves the OS
+```
+
+`provision` is the whole path as one verb, and what it mostly does is stop in
+the right places. It builds what it needs, writes a card, and then blocks —
+because the next step is a hand, and it would rather tell you about the wall
+charger and the dock's power-before-connect at the moment they matter than in
+prose read a month earlier. Then it picks the story back up, applies the role,
+and blocks once more on the one thing it cannot do: the tailnet policy. It does
+not call the bridge finished until the phone's own `tailscale status` shows the
+route as primary, because an unapproved route is the failure that looks like
+success.
+
+By default it installs to the phone's **internal storage**, which is where a
+bridge should live — it writes leases, logs and tailscale state for months, and a
+microSD is the part of a phone most likely to work loose. Getting there goes
+through Jumpdrive: a service image that boots from the card and exports internal
+storage as USB mass storage, which turns "flash a phone" into "write a removable
+disk attached to a machine" — the path `wk sysimage write` already has, refusals
+included. The card is then the rescue copy, and putting it back boots Jumpdrive
+again with the install untouched. There is no second route: writing the bridge
+image to the card and letting the phone boot that is quicker to reach and leaves
+the bridge living on the component most likely to fail, so it is deliberately
+not offered. A phone Jumpdrive does not cover — which today means the Librem 5 —
+is refused by name, naming the fetch profile that would fix it.
+
+One detail there is worth knowing because the obvious approach is dangerous:
+Jumpdrive exports the SD card as well as the eMMC, so "the new disk" is usually
+two, and one of them is the Jumpdrive currently running. provision takes a
+baseline of the machine's disks before the phone is attached and finds the
+phone's by difference; when that difference is more than one disk it prints them
+with sizes and asks. Guessing by LUN order would work today and is still a
+guess, against a destructive write.
+
+Nothing in that chain holds a tailscale credential, deliberately. Minting a
+tagged auth key and writing the policy both need an API key, and a repository
+holding a policy-write one is a repository whose compromise rewrites every ACL
+you have — so provision asks and waits rather than acquiring the ability. The
+steps underneath are still ordinary commands, which is what makes a
+half-finished run recoverable by hand:
+
+```sh
 wk sysimage build bridge-pinephone            # a pmOS system for the phone
 wk sysimage write <id> --disk rpi5:/dev/mmcblk0
                              # ...card into the phone, power on...
-wk bridge setup <name>       # the role: idempotent, re-run after any change
-wk bridge ls                 # what is declared, and what answers
-wk bridge status <name>      # the on-device health check, read-only
-wk bridge rm <name>          # removes the role, leaves the OS
+wk bridge setup <name>       # the role, over ssh
 ```
 
 Flashing is a command too. The image is built by pmbootstrap on a Linux aarch64
@@ -287,8 +330,8 @@ the predecessor of this role was one hand-built Librem 5 whose configuration
 lived on the device, with a README admitting it was the only copy in existence.
 
 Both phones run postmarketOS, which is what makes one provisioner cover both.
-Installing pmOS is hands-on, once per phone; applying the role is a command,
-every time. `wk help bridge` has both, and the traps — the wall charger, the
+Getting the card into the phone is hands-on; everything either side of that is a
+command, and `wk bridge provision` is the two halves with the hand in between. `wk help bridge` has both, and the traps — the wall charger, the
 kill switches, why a bridge is never powered off.
 
 ## Layout

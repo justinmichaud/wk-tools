@@ -2084,6 +2084,33 @@ not, and is marked as such rather than assumed.
       `BR_DEVICE=pinephone`, and likewise for the Librem 5. Disagreeing, they
       would produce an image for one phone provisioned as the other, and nothing
       short of the phone failing to boot would say so
+- [V] `wk bridge provision <name> --dry-run` resolves the whole chain with no
+      phone in the room, for every declared bridge: the bridge's own image
+      profile, the card, the image, and the service image that reaches internal
+      storage. Each is a lookup that can come back empty, and a run that
+      discovers it *after* erasing a disk is the expensive way to find out. Both
+      joins are derived, never declared twice: the bridge's profile from
+      `PMO_BRIDGE`, its service image from `PMO_DEVICE` matching a fetch
+      profile's `FET_DEVICE`
+- [V] a phone with no service image is refused by name, and *for that reason* —
+      Jumpdrive is a PinePhone project and image/profiles.sh carries no Librem 5
+      equivalent, so that bridge cannot be installed from here at all. It is not
+      quietly given the card instead: there is one destination, and a refusal
+      that names the missing fetch profile beats a fallback that puts a bridge
+      where it should not live. A refusal for any other reason means the
+      `PMO_DEVICE`/`FET_DEVICE` join has broken, and the PinePhone is next
+- [V] the two images can actually be told apart by content, which is what the
+      eMMC route's whole safety argument rests on: both carry `eGON.BT0` at
+      offset 8196 (the sunxi ROM's magic, at the 8 KiB
+      `deviceinfo_sd_embed_firmware` declares — without it the card does not
+      boot and nothing later matters), and their first mebibytes *differ*.
+      Identical heads would make every exported disk look like the Jumpdrive
+      card and the run would refuse; a head hashing to the sha256 of the empty
+      string would make an unreadable disk look like the eMMC
+- [V] `wk bridge provision` refuses a headless run before it erases anything.
+      Two of its steps are a person — the card into the phone, the policy into
+      the console — so it cannot finish unattended; the refusal has to come
+      first, and it names the three commands that *can* run without a terminal
 - [V] the Alpine facts the provisioner hardcodes are real, checked in a
       container rather than assumed (2026-08-20, `alpine:latest` = 3.24,
       main + community): every package name resolves (`tailscale`, `dnsmasq`,
@@ -2136,10 +2163,56 @@ not, and is marked as such rather than assumed.
       device name different — 1109 packages, `linux-purism-librem5`, avahi
       enabled, 526 MB compressed, imported and hash-checked end to end. Not
       written to a card only because there is one card
-- [ ] the card boots the phone, and `wk bridge setup tailnet-bridge-generic`
-      reaches it. First contact is `<hostname>.local`: the image carries avahi
-      with the service enabled by symlink, because until `tailscale up` has run
-      there is no tailnet name and the DHCP address is not knowable in advance
+- [ ] `wk bridge provision tailnet-bridge-generic` end to end on the eMMC
+      route: Jumpdrive to the card, the phone cabled to rpi5, its internal
+      storage appearing as a new USB disk, the bridge image written there, the
+      card out, and the phone coming up on its own install. The disk is found by
+      *difference* against a baseline taken before the phone was attached —
+      Jumpdrive exports the SD card as well as the eMMC, so the candidate set is
+      normally two, and writing to the wrong one destroys the tool being used to
+      do the writing. That one is asked, not guessed
+- [ ] the phone comes up on its own install and `wk bridge setup
+      tailnet-bridge-generic` reaches it. First contact is `<hostname>.local`:
+      the image carries avahi with the service enabled by symlink, because until
+      `tailscale up` has run there is no tailnet name and the DHCP address is not
+      knowable in advance
+- [V] the PinePhone will not boot a Jumpdrive card just because one is in the
+      slot (2026-08-21). The image was exonerated at byte level — `eGON.BT0` at
+      8196 with a well-formed header naming `sun50i-a64-pinephone`, U-Boot
+      2020.07 behind it, a complete self-consistent FAT32 holding `Image.gz`,
+      three DTBs and `initramfs.gz`, written and read-back verified — and the
+      phone still came up on its eMMC pmOS. Identifiable from the other end,
+      because postmarketOS's default USB gadget is MTP with Pine64's vendor id
+      (`18d1:4ee1`, "Product: PinePhone"), so the timeout reads `lsusb` on the
+      card machine and names the failure instead of listing possibilities
+- [V] no special configuration is needed for SD boot, checked against upstream
+      rather than assumed (2026-08-21): the A64 ROM reads sector 16 of the SD
+      before the eMMC, no switch or key combination is involved, and Tow-Boot in
+      the eMMC's firmware storage does not override it. Which means a card that
+      does not boot was never *read* — and PINE64 lists "the microSD card is in
+      the wrong slot" first among the causes, the microSD being the upper slot
+      and the micro-SIM the lower. Recorded in `wk help bridge` under the traps,
+      because every cheaper explanation had already been eliminated by then
+- [V] Jumpdrive 0.8 is the newest release upstream has (checked 2026-08-21), and
+      0.4 onwards "expose both the eMMC and SD" — the upstream confirmation that
+      the two-LUN case the content discriminator handles is the normal one, not
+      an edge case. Observed exactly so on the real phone: `/dev/sdb 29.1G` and
+      `/dev/sdc 59.6G`
+- [V] the content discriminator picks the right disk on real hardware
+      (2026-08-21): given the two exported LUNs it matched `/dev/sdc`'s first
+      mebibyte against the Jumpdrive image it had just written, and concluded
+      `/dev/sdb` — correct — with no prompt. Note the sizes: the eMMC came up
+      29.1 GB against rpi5's own 29 GB USB boot stick, so size would have been
+      ambiguous between *the phone and the machine writing it*. That is what the
+      baseline-difference step is for, and it is the reason it runs first
+- [V] Jumpdrive does label its LUNs, and an earlier comment in cmd/bridge
+      claimed it does not (fixed 2026-08-21). The real strings are `e eMMC` and
+      `e microSD`, which say outright which is which — better evidence than the
+      hash on the face of it, but an undocumented cosmetic choice of one
+      release, so it is used to *corroborate* the content match rather than to
+      make it. The two agreeing is checked; a disk chosen as the eMMC while
+      calling itself microSD stops the run, because two independent signals
+      disagreeing is not resolved by preferring one of them
 
 Traps found while automating this, each of which cost a run (all now handled in
 image/pmos-build.sh, and every one of them a silent failure):
