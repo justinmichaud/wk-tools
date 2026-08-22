@@ -75,6 +75,26 @@ Host rpi4-test
 # freshly flashed phone, which has no tailnet name yet because `wk bridge setup`
 # is what gives it one. The image carries avahi for exactly that, and cmd/bridge
 # falls back to this name on its own.
+# moose's BMC, reached through the Librem 5 that fronts its management port.
+#
+# Repo-owned rather than machine-local, because the address is not a local
+# preference: bridge/hosts/tailnet-bridge-moose-bmc.conf pins it by MAC
+# (BR_LEASES) and makes it the entire DHCP pool, so 10.99.0.2 is the only
+# address the BMC can have. A hand-written copy of this stanza is how it went
+# stale -- it pointed at 192.168.1.41, which answers nothing, and
+# config.d/local is read *before* this file, so the stale copy won every time
+# it was corrected here. host/dotfiles.sh now drops hand-written stanzas for
+# names this file defines, for that reason.
+#
+# ProxyJump rather than a route: 10.99.0.0/24 is advertised by the bridge and
+# reaching it needs --accept-routes, which is off. Jumping through the phone
+# needs nothing turned on anywhere.
+Host moosebmc
+  HostName 10.99.0.2
+  User root
+  Port 2200
+  ProxyJump librem5-oob
+
 Host tailnet-bridge-generic tailnet-bridge-generic.local tailnet-bridge-moose-bmc tailnet-bridge-moose-bmc.local
   User user
   ServerAliveInterval 15

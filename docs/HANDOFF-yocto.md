@@ -469,24 +469,97 @@ Not done, in the order it matters:
 2. **The rootfs tarball has no consumer.** The import pulls `rootfs.tar.xz`
    into the store alongside `disk.img` — a tarball is the honest archival form
    of a rootfs and it costs ~600 MB to keep — but nothing reads it today.
-3. **The image carries no WebKit.** meta-webkit's `webkit-dev-ci-tools` is the
-   runtime and the test tooling — it says so in its own recipe. The matching
-   WebKit is a cross build against the image's toolchain: `--stage toolchain`
-   (`populate_sdk`, hours) and then `--stage webkit` (`build-webkit --wpe
-   --release --cross-target=…`). Neither has been run since the base image
-   changed, and the workspace is no longer a WebKit SDK — perl, cmake, ninja
-   and `python3-requests` are installed for exactly this, but the cross build
-   is the test. If it wants more of the SDK, the honest options are to add
-   what it names to `container/yocto/Containerfile` or to split the stages
-   across two workspaces: bitbake on the supported host, `build-webkit` in a
-   wkdev one. What is not built at all is the step after: `built-product-archive
-   … archive` and getting the zip onto the board — "uploading new build to
-   target" in this handoff's words, and it belongs next to `wk pi` rather than
-   here.
-4. **Tailscale on the rpi target** — untouched. A Yocto image has no apt, so
+3. **The image is the runtime, and WebKit is sent to it separately — by
+   design, not as a gap.** Confirmed against the wiki 2026-08-21 (`WebKit JSC
+   Container Development Setup`, and `Building WPEWebKit for 32-bit Raspberry
+   Pi 3 (Yocto Wayland)` for the device half). `webkit-dev-ci-tools` says what
+   it is in its own name: the image carries weston, cmake, perl, gdb and
+   **gdbserver** and no browser at all — no `cog`, no `run-minibrowser`, no
+   `/WebKit` (checked in the built image). The browser is cross-built on the
+   workstation and deployed on every cycle, which is what makes the cycle
+   minutes instead of hours.
+
+   The loop the wiki does by hand, and `docs/HANDOFF-pi-deploy.md` is where it
+   becomes `wk pi deploy`:
+
+       # in the workspace -- the env scrub is marked VERY IMPORTANT there,
+       # because a poisoned env produces a broken archive with no error
+       unset CC CXX LD_LIBRARY_PATH
+       Tools/Scripts/build-webkit --wpe --release \
+           --cross-target=rpi4-64bits-mesa \
+           --cmakeargs="-DENABLE_MINIBROWSER=ON -DDEVELOPER_MODE=ON"
+       Tools/CISupport/built-product-archive --platform=wpe --release \
+           --cross-target=rpi4-64bits-mesa archive
+       scp WebKitBuild/release.zip root@<device>:/WebKit/WebKit/WebKitBuild/
+
+       # on the device
+       cd /WebKit/WebKit
+       Tools/CISupport/built-product-archive --platform=wpe --release extract
+       systemctl start weston
+       source <(strings /proc/$(pidof weston-desktop-shell)/environ \
+           | grep -P '(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)') \
+           && export XDG_RUNTIME_DIR WAYLAND_DISPLAY
+       Tools/Scripts/run-minibrowser --wpe -P wl \
+           "https://browserbench.org/Speedometer3.1/?startAutomatically=true"
+
+   **The requirement that follows from this, and that nothing here provisions
+   yet: the device needs a WebKit checkout at `/WebKit/WebKit`.** Both
+   `built-product-archive extract` and `run-minibrowser` are WebKit's own
+   scripts, run *on the board*, from that tree — so "deploy a build" is not
+   only a file transfer, and the image does not contain the tree. That belongs
+   with `wk pi setup`/`wk pi deploy`, not with the image.
+
+   So `--stage toolchain` and `--stage webkit` are the build half of this loop
+   (`populate_sdk`, then `build-webkit --cross-target=`), not repairs to the
+   image. Neither has run since the base image changed.
+
+4. **"Does it build unmodified?" -- asked and answered, 2026-08-21.** The
+   known-good pairing is Ubuntu 24.04 plus **`wpe-2.46` from the downstream
+   `WebPlatformForEmbedded/WPEWebKit` repo** (the `wpe` remote, lib/store.sh) --
+   a different repository from the `webkitglib/2.48` this handoff was written
+   against, and the branch the `rpi3` skill already clones. It has its own
+   profile now, `downstream-wpe-2.46-rpi4`, and reaching a branch outside
+   `origin` needed `YOC_REMOTE` before the profile could exist at all.
+
+   Built with **no local layer** it fails, and it fails in the one place that
+   matters: `update-rc.d` and `base-files` die in `do_package` with
+
+       got *at() syscall for unknown directory, fd 4
+       unknown base path for fd 4, path sbin
+       tar: ./usr/sbin: Cannot mkdir: Bad address
+
+   byte for byte the signature in `image/yocto/meta-wk/recipes-devtools/pseudo/
+   pseudo_%.bbappend`. Re-run with the layer and the same two recipes succeed,
+   zero errors. So **the pseudo bug is a property of pseudo plus this host's
+   kernel (7.0.11 aarch64), not of the release branch**: 2.46 pins poky
+   6879650b, whose pseudo is the same 1.9.0-era fakeroot, and it fails
+   identically. A branch cannot be known-good against a kernel that postdates
+   its fakeroot.
+
+   Which resolves the question this was asked to settle: the **image** carries
+   no local changes -- pseudo is a build-time fakeroot and is never installed
+   into it -- while the **build** needs the bump on this machine.
+   `--no-local-layer` re-runs the experiment anywhere it might pass, and that
+   is the flag to try first on a host with an older kernel.
+
+5. **`zip` belongs in `container/yocto/Containerfile`, and is not there yet.**
+   `built-product-archive archive` shells out to `zip`; the image has `unzip`
+   only, so the documented deploy path cannot run and `wk pi deploy` falls back
+   to a plain tar of `bin/` and `lib/` (cmd/pi, `pi_deploy_tar`). It cannot be
+   installed at runtime -- `ports.ubuntu.com` is not in the egress allowlist,
+   and widening that to fetch a zip is the wrong trade.
+   Adding the package is a one-line change, and the reason it is deferred is
+   the workspace guard: editing the Containerfile changes `WK_SDK_IMAGE`'s tag,
+   and an existing workspace is pinned to the image it was made from, so the
+   edit forces `wk rm` -- which would discard a Yocto **toolchain** that took
+   hours (`populate_sdk` lives in the workspace, unlike sstate and DL_DIR,
+   which are in the store and survive). So: add `zip` the next time this
+   workspace is recreated for another reason, not before.
+
+6. **Tailscale on the rpi target** — untouched. A Yocto image has no apt, so
    this is a recipe (or the static-binary route `SETUP.md` already describes
    for the rpi4's buildroot image), not a package install.
-5. **The macOS half.** The builder refuses any target that is not a container,
+7. **The macOS half.** The builder refuses any target that is not a container,
    and the reasons are in the refusal: a remote target is a shared machine and
    this is 100 GB and days of CPU, and a macOS VM workspace has no
    store-backed Yocto cache at all (`targets/vm.sh` says so). The podman VM on

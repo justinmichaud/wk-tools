@@ -474,6 +474,44 @@ install_disk_id() {
         || die "the identity did not survive the write to the boot partition"
 }
 
+# Kernel command-line additions this profile declares, appended to whatever the
+# image already had.
+#
+# The distro builder has `config.txt.append` for firmware settings; this is the
+# same idea one layer up, for the things the *kernel* has to be told. It exists
+# because the rpi4 is headless and Speedometer is gpu-class: forcing a KMS
+# output is a kernel cmdline setting, and doing it by hand on a stick would be
+# exactly the un-reproducible tinkering the fleet rules forbid.
+#
+# Appended rather than replacing, and idempotent: the marker keeps a second
+# import from adding the same options twice.
+CMDLINE_MARKER='# wk:'
+apply_cmdline_append() {
+    local seed="$1" add f path
+    f="$IMG_SPEC_DIR/cmdline.txt.append"
+    [ -f "$f" ] || return 0
+    add=$(grep -vE '^\s*(#|$)' "$f" | tr '\n' ' ' | sed 's/ *$//')
+    [ -n "$add" ] || return 0
+
+    for path in ::/current/cmdline.txt ::cmdline.txt; do
+        if mt mtype "$path" > "$seed/cmdline.txt" 2>/dev/null; then
+            if grep -qF "$add" "$seed/cmdline.txt"; then
+                debug "cmdline already carries: $add"
+                return 0
+            fi
+            info "kernel cmdline += $add  (from $(basename "$IMG_SPEC_DIR")/cmdline.txt.append)"
+            # One line, always: the firmware reads the first line only, so a
+            # trailing newline from the spec file would silently drop it all.
+            printf '%s %s\n' "$(tr -d '\r\n' < "$seed/cmdline.txt")" "$add" > "$seed/cmdline.new"
+            mv "$seed/cmdline.new" "$seed/cmdline.txt"
+            mt mcopy -o "$seed/cmdline.txt" "$path"
+            CMDLINE_APPENDED="$add"
+            return 0
+        fi
+    done
+    die "no cmdline.txt in the image's boot partition to append to"
+}
+
 # The ssh key that makes the fleet integration usable on an image with no
 # cloud-init.
 #
@@ -1363,6 +1401,7 @@ cmd_retarget() {
     install_driving_key "$roff"
     install_disk_id
     retarget_root "$SEED"
+    apply_cmdline_append "$SEED"
     rm -rf "$SEED"; SEED=""
 
     refresh_fast_path "$dir"
@@ -1383,6 +1422,9 @@ cmd_retarget() {
             echo "wic_of=$sha"
         fi
         [ "$was" = "$(cmdline_root_spec)" ] || echo "retargeted_from=$was"
+        case "${CMDLINE_APPENDED:-}" in
+            *video=*) echo "display_forced=${CMDLINE_APPENDED#*video=}" ;;
+        esac
     } > "$m.new"
     mv "$m.new" "$m"
 

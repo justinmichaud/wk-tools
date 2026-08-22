@@ -37,6 +37,8 @@ while [ $# -gt 0 ]; do
         --src)     SRC="${2:-}"; shift 2 ;;
         --chromium) CHROMIUM="${2:-}"; shift 2 ;;
         --sstate-ns) SSTATE_NS="${2:-}"; shift 2 ;;
+        --local-layer) LOCAL_LAYER="${2:-}"; shift 2 ;;
+        --webkit-jobs) WEBKIT_JOBS="${2:-}"; shift 2 ;;
         *) echo "yocto-build.sh: unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -391,11 +393,26 @@ bb() {
 # Rewritten each run for the same reason configure_local_conf is -- a guard that
 # skipped when its marker was present would make an edit to the layer take
 # effect only on the run that created the file.
+#
+# And it is optional, because "does this configuration build unmodified?" is a
+# question worth being able to ask. A profile that needs no local fixes says so
+# (YOC_LOCAL_LAYER=0) and gets the branch's own layer set and nothing else --
+# which is the only way to find out whether a carried fix is still earning its
+# place, or whether the configuration was the problem all along.
 BB_MARKER='# --- wk layers (image/yocto-build.sh) ---'
 configure_bblayers() {
     local f="$WORKDIR/build/conf/bblayers.conf"
-    local layer; layer=$(cd "$(dirname "$0")/../image/yocto/meta-wk" && pwd)
     [ -f "$f" ] || fail "no $f -- the layer sync did not run"
+
+    if [ "${LOCAL_LAYER:-1}" = 0 ]; then
+        if grep -qF "$BB_MARKER" "$f"; then
+            sed -i "/^$(printf '%s' "$BB_MARKER" | sed 's/[][\.*^$/]/\\&/g')\$/,\$d" "$f"
+        fi
+        say "no local layer: this profile builds the branch's own configuration unmodified"
+        return 0
+    fi
+
+    local layer; layer=$(cd "$(dirname "$0")/../image/yocto/meta-wk" && pwd)
     [ -f "$layer/conf/layer.conf" ] || fail "no layer at $layer"
 
     if grep -qF "$BB_MARKER" "$f"; then
@@ -470,15 +487,82 @@ case "$STAGE" in
         configure_bblayers
         clear_hosttools
         say "cross-building WebKit (WPE, Release) for $TARGET"
-        # No --cmakeargs here, deliberately. targets.conf sets
-        # BUILD_WEBKIT_ARGS for this target with a --cmakeargs of its own, and
-        # build-webkit takes only one: a second on the command line replaces
-        # the first, silently dropping the target's flags (the same trap
-        # `wk build --cmake` exists to prevent). MiniBrowser is on by default
-        # for WPE developer builds anyway -- this target's flags do not turn it
-        # off -- so the wiki's extra -DENABLE_MINIBROWSER=ON buys nothing and
-        # costs the rest.
+        # The one flag this repo has to add, and why it cannot simply be passed.
+        #
+        # wpe-2.46 defaults both ENABLE_WPE_1_1_API and ENABLE_WPE_PLATFORM on,
+        # and CMake refuses the pair outright:
+        #
+        #   ENABLE_WPE_PLATFORM conflicts with ENABLE_WPE_1_1_API.
+        #   You must disable one or the other.
+        #
+        # so the configure step fails before a line is compiled. Which half to
+        # keep depends on what will launch the browser, and the two answers are
+        # both right for their own caller:
+        #
+        #   * the wiki's flow (`run-minibrowser --wpe -P wl`) wants
+        #     ENABLE_WPE_1_1_API=ON, and that is what it documents.
+        #   * `run-benchmark`'s WPE driver -- the only thing that produces a
+        #     *score*, since the benchmarks keep results in the DOM -- hardcodes
+        #     `--use-wpe-platform-api` and `--maximized`
+        #     (linux_minibrowserwpe_driver.py, lines 39-40). A MiniBrowser built
+        #     without WPEPlatform rejects them outright: "Cannot parse
+        #     arguments: Unknown option --maximized", which run-benchmark
+        #     reports as a bare `exit_code: 1` and then answers by falling back
+        #     to a "default MiniBrowser" that does not exist.
+        #
+        # This repo builds images to benchmark them, so WPEPlatform wins and the
+        # 1.1 API is the half that goes. Flipped 2026-08-22 after the driver
+        # failure above; the previous choice cost a rebuild to learn.
+        #
+        # It cannot go on the command line as a second `--cmakeargs`, because
+        # build-webkit takes only one and the last wins: that would silently
+        # drop the target's own flags (bwrap and xdg-dbus-proxy paths among
+        # them, which the sandbox needs). So the target's are *read* out of
+        # targets.conf and ours appended -- upstream stays the source of truth
+        # and this adds exactly one thing to it.
+        # No `local`: this case arm runs at file scope, not in a function.
+        tgt_args=$(python3 - "$TARGET" <<'PYEOF'
+import configparser, sys, shlex
+c = configparser.ConfigParser()
+c.read("Tools/yocto/targets.conf")
+v = c[sys.argv[1]].get("environment[BUILD_WEBKIT_ARGS]", "")
+# The value holds --cmakeargs="..." plus flags of its own; keep both apart.
+toks = shlex.split(v)
+cmake, rest = "", []
+for t in toks:
+    if t.startswith("--cmakeargs="):
+        cmake = t[len("--cmakeargs="):]
+    else:
+        rest.append(t)
+print(shlex.join(rest))
+print(cmake)
+PYEOF
+) || fail "could not read BUILD_WEBKIT_ARGS for $TARGET out of Tools/yocto/targets.conf"
+        tgt_cmake=$(printf '%s\n' "$tgt_args" | sed -n 2p)
+        tgt_args=$(printf '%s\n' "$tgt_args" | sed -n 1p)
+        extra="-DENABLE_WPE_PLATFORM=ON -DENABLE_WPE_1_1_API=OFF"
+        say "  target flags: ${tgt_args:-none}"
+        say "  cmakeargs:    $tgt_cmake $extra"
+
+        # And a job count, because the default is a machine-killer here.
+        #
+        # build-webkit appends `-j$(numberOfCPUs)` only when --makeargs carries
+        # no -j, so the default on this host was -j80 -- and WebCore's unified
+        # sources are the largest translation units in the tree. The OOM killer
+        # took cc1plus three times and ninja reported
+        # "fatal error: Killed signal terminated program cc1plus", which reads
+        # like a compiler bug and is not one.
+        #
+        # bitbake's own PARALLEL_MAKE was capped (-j4 from 79) by the envelope;
+        # this stage is a cmake/ninja build that bitbake never sees, so nothing
+        # applied that reasoning to it. Sized the way every other build here is
+        # (build_jobs, lib/resources.sh) -- the caller passes the answer.
+        webkit_makeargs="-j${WEBKIT_JOBS:-8}"
+        say "  jobs:         ${WEBKIT_JOBS:-8} (memory-sized; the default -j$(nproc) OOMs on unified sources)"
+
+        # shellcheck disable=SC2086
         Tools/Scripts/build-webkit --wpe --release --cross-target="$TARGET" \
+            $tgt_args --makeargs="$webkit_makeargs" --cmakeargs="$tgt_cmake $extra" \
             || fail "the cross build of WebKit failed"
         ;;
     *)  fail "unknown stage '$STAGE' (layers, fetch, image, toolchain, webkit)" ;;

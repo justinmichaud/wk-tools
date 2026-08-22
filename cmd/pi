@@ -24,6 +24,8 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/image/profiles.sh"
 . "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/boot/rpi-eeprom.sh"
+# For `deploy`, which reaches into a build workspace as well as onto a board.
+. "$WK_ROOT/lib/target.sh"
 
 TS_VERSION="${TS_VERSION:-1.102.2}"
 TAG="${WK_PI_TAG:-tag:wk}"
@@ -31,12 +33,22 @@ TAG="${WK_PI_TAG:-tag:wk}"
 ACTION="${1:-}"; HOST="${2:-}"
 case "$ACTION" in
     setup|boot-order) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>" ;;
+    # deploy takes a *workspace* and a fleet machine, not an ssh host: it has
+    # to reach into the build to make the archive and onto the board to unpack
+    # it, and the board is named the way every other fleet verb names one.
+    deploy|bench) : ;;
     # `flash` takes a *fleet machine* rather than an ssh host: the refusals need
     # MACH_ROOT to know which disk is that machine's own, and the image comes
     # from the store by profile. See boot/disk.sh.
     # Kept only to say where it went; see below.
     flash) : ;;
     *) die "usage: wk pi setup <ssh-host>
+       wk pi deploy <workspace> <machine> [--skeleton|--skeleton-only]
+         puts a cross-built WebKit on the board -- the image is the runtime
+         and carries no browser, so this is how one gets there
+       wk pi bench <machine> <plan> [--count N] [--timeout S]
+         runs the plan through WebKit's own run-benchmark on a booted bench
+         system -- refuses host mode, and reports what the number is worth
        wk pi boot-order <ssh-host> [<order>] [--dry-run] [--revert]
          orders: usb-first  local -- omitted, it comes from the machine's
          role in boot/machines.sh (bench-device: usb-first; else local)
@@ -65,6 +77,516 @@ if [ "$ACTION" = flash ]; then
     'wk pi' is for the things that are actually about the board: putting it on
     the tailnet, and its EEPROM boot order."
 fi
+
+# --- wk pi deploy --------------------------------------------------------------
+#
+# Put a cross-built WebKit on a device. The loop the wiki does by hand
+# (`WebKit JSC Container Development Setup`, and the Yocto Wayland page for the
+# device half), encoded so neither a person nor an agent re-derives it.
+#
+# The shape is fixed by one fact: **the image is the runtime and the browser is
+# not in it.** A Yocto `webkit-dev-ci-tools` image carries weston, libwpe and the
+# FDO backend and no libWPEWebKit at all -- deliberately, because a browser
+# rebuilt into the image would make every WebKit change an hours-long bitbake
+# instead of a minutes-long copy. So the browser arrives here.
+#
+#   wk pi deploy <workspace> <machine> [--skeleton] [--libs-only]
+#
+# The device needs a WebKit *skeleton* at /WebKit/WebKit -- `--depth 1`, not a
+# checkout -- because `built-product-archive extract` and `run-minibrowser` are
+# WebKit's own scripts and both run **on the board**, out of that tree. The
+# source in it is not the source that built the binary and must never be read as
+# such (the rpi3 skill records that trap: a stale pi tree said 90% where the
+# running binary used 80%).
+pi_deploy_ws_profile() {
+    # `yocto-<profile>` is what image/yocto.sh names its workspaces, so the
+    # profile is derivable rather than a second argument to keep in sync.
+    local ws="$1"
+    case "$ws" in
+        yocto-*) printf '%s' "${ws#yocto-}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Registered rather than trapped, for the reason lib/common.sh's wk_atexit
+# exists: a `trap ... EXIT` here would replace whatever else is registered.
+PI_TMP=""
+_pi_tmp_cleanup() { [ -n "${PI_TMP:-}" ] && rm -rf "$PI_TMP"; PI_TMP=""; return 0; }
+
+cmd_deploy() {
+    local ws="${1:-}" machine="${2:-}"; shift 2 2>/dev/null || true
+    local skeleton="" libs_only="" skeleton_only=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --skeleton)  skeleton=1 ;;
+            # Provision the tree and stop -- useful while a cross build is
+            # still running, since the two do not depend on each other.
+            --skeleton-only) skeleton=1; skeleton_only=1 ;;
+            --libs-only) libs_only=1 ;;
+            *) die "unknown option: $1" ;;
+        esac
+        shift
+    done
+    [ -n "$ws" ] && [ -n "$machine" ] \
+        || die "usage: wk pi deploy <workspace> <machine> [--skeleton] [--libs-only]"
+
+    machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
+
+    local profile target
+    profile=$(pi_deploy_ws_profile "$ws") \
+        || die "'$ws' is not a yocto build workspace (they are named yocto-<profile>)"
+    image_profile_load "$profile" \
+        || die "'$ws' names profile '$profile', which this checkout does not define"
+    target="${YOC_TARGET:-}"
+    [ -n "$target" ] || die "profile '$profile' declares no YOC_TARGET, so there is no
+    cross-target to archive for."
+
+    # 1. The skeleton first, because it is a precondition and not part of the
+    # payload: discovering it missing *after* an archive has been built is the
+    # wrong order, and with --skeleton-only it is the whole job.
+
+    if ! m_ssh 'test -d /WebKit/WebKit/Tools/CISupport' 2>/dev/null; then
+        [ -n "$skeleton" ] || die "$machine has no WebKit skeleton at /WebKit/WebKit.
+    'built-product-archive extract' and 'run-minibrowser' are WebKit's own
+    scripts and both run on the board out of that tree, so a copy of the
+    archive alone cannot be unpacked or launched.
+    Provision it once (a --depth 1 clone, ~minutes):
+        wk pi deploy $ws $machine --skeleton"
+        pi_skeleton "$machine"
+    fi
+
+    [ -n "$skeleton_only" ] && { log "skeleton ready on $machine"; return 0; }
+
+    # 2. The archive, built in the workspace.
+    #
+    # The env scrub is not defensive tidiness: the wiki marks it VERY IMPORTANT
+    # because a poisoned CC/CXX/LD_LIBRARY_PATH produces a *broken archive with
+    # no error*, which is discovered on the board. `env -u` rather than `unset`
+    # so it cannot depend on what the calling shell happens to hold.
+    # The workspace's own driver, or t_exec is not defined at all: each target
+    # kind brings its own (targets/container.sh, remote.sh, vm.sh).
+    load_target "$(ws_target "$ws")" >/dev/null 2>&1 \
+        || die "'$ws' is not a workspace this machine knows (wk ls)"
+
+    # Somewhere to stage a payload, needed by both transports below -- so it is
+    # created before the branch chooses one. It was created inside the
+    # built-product-archive path once, which left the tar path pulling into
+    # "$PI_TMP/..." with PI_TMP unset: podman was asked to write `/wk-webkit.tgz`
+    # and refused to make `/` writable, which is a confusing way to be told a
+    # variable is empty.
+    PI_TMP=$(mktemp -d)
+    wk_atexit _pi_tmp_cleanup
+
+    # Two transports, and which one is available is a property of the build
+    # container rather than a preference.
+    #
+    # `built-product-archive` is the documented path (the wiki's, and what the
+    # board's own extract expects) but it shells out to `zip`, which the yocto
+    # build image did not have -- and cannot be given at runtime, because
+    # ports.ubuntu.com is not in the egress allowlist and widening that to
+    # install a zip is the wrong trade. container/yocto/Containerfile carries
+    # `zip` now, so a workspace made after 2026-08-22 takes the documented path;
+    # one made before it takes the tar below rather than being unusable.
+    if ! t_exec "$ws" bash -c 'command -v zip >/dev/null' 2>/dev/null; then
+        warn "the build container has no 'zip', so built-product-archive cannot run.
+  Falling back to a plain tar of bin/ and lib/ -- the same bytes, without the
+  archive format. 'wk rm $ws' and rebuild to get the documented path back."
+        pi_deploy_tar "$ws" "$machine" "$target"
+        return 0
+    fi
+
+    info "archiving the cross build in '$ws' (target $target)"
+    t_exec "$ws" env -u CC -u CXX -u LD_LIBRARY_PATH bash -c "cd /src/WebKit &&
+        Tools/CISupport/built-product-archive --platform=wpe --release \
+            --cross-target=$(sh_quote "$target") archive" \
+        || die "built-product-archive failed in '$ws' -- nothing is deployed.
+    Read the error above rather than assuming a cause; the two seen so far are
+    a cross build that was never made:
+        wk sysimage build $profile --stage webkit
+    and a host tool missing from the build container (it needs \`zip\`), which
+    is container/yocto/Containerfile's business, not this command's."
+
+    local zip="$PI_TMP/release.zip"
+    t_pull "$ws" /src/WebKit/WebKitBuild/release.zip "$zip" \
+        || die "the archive was built but could not be copied out of '$ws'"
+    info "archive: $(human_bytes "$(file_bytes "$zip")")"
+
+    # 3. And across.
+    info "copying the archive to $machine"
+    m_ssh 'mkdir -p /WebKit/WebKit/WebKitBuild' >/dev/null 2>&1 || true
+    # `cat >` through m_ssh rather than scp: the same channel the rest of this
+    # repo uses to move bytes onto a board (boot/disk.sh), and it needs no scp
+    # binary on the far side -- which a slim image may not have.
+    m_ssh 'cat > /WebKit/WebKit/WebKitBuild/release.zip' < "$zip" \
+        || die "could not copy the archive to $machine"
+
+    info "extracting on $machine"
+    m_ssh 'cd /WebKit/WebKit && Tools/CISupport/built-product-archive --platform=wpe --release extract' \
+        >/dev/null 2>&1 \
+        || die "extract failed on $machine. The archive is at
+    /WebKit/WebKit/WebKitBuild/release.zip; run the extract by hand to see why."
+
+    # Proof, not a claim: the thing the whole deploy exists to put there.
+    local built
+    built=$(m_ssh 'ls -l --time-style=+%Y-%m-%dT%H:%M /WebKit/WebKit/WebKitBuild/WPE/Release/bin/jsc 2>/dev/null | awk "{print \$6}"' 2>/dev/null | tr -d '\r')
+    [ -n "$built" ] || die "the extract reported success but there is no
+    WebKitBuild/WPE/Release/bin/jsc on $machine."
+    log "deployed to $machine"
+    log "  jsc      $built  (timestamps, not the SONAME, tell builds apart)"
+    log "  next:    wk pi bench $machine <plan>"
+}
+
+# The transport of last resort: bin/ and lib/ as a tarball.
+#
+# It carries the same bytes built-product-archive would, minus the archive
+# format and its manifest -- so `built-product-archive extract` is not what
+# unpacks it, and the board's build directory is written directly. The
+# destination is `WebKitBuild/WPE/Release`, *not* the cross-target-suffixed name
+# the workspace uses (`Release_rpi4-64bits-mesa`): run-benchmark is pointed at
+# the former, and a board only ever holds one build.
+#
+# Staged through a file rather than piped out of the container: a `t_exec ... |
+# tar -x` puts a container exec's stdout straight into an extractor, and
+# anything that exec prints ahead of the bytes (an init log, a shell banner)
+# corrupts the stream. image/yocto.sh records that exact trap for disk images.
+pi_deploy_tar() {
+    local ws="$1" machine="$2" target="$3" b="/src/WebKit/WebKitBuild/WPE"
+    info "packing bin/ and lib/ from Release_$target"
+    t_exec "$ws" bash -c "cd $(sh_quote "$b/Release_$target") &&
+        tar -czf /tmp/wk-webkit.tgz bin lib" \
+        || die "could not pack the build in '$ws' -- is $b/Release_$target there?"
+
+    local tgz="$PI_TMP/wk-webkit.tgz"
+    t_pull "$ws" /tmp/wk-webkit.tgz "$tgz" \
+        || die "could not copy the tarball out of '$ws'"
+    info "copying $(human_bytes "$(file_bytes "$tgz")") to $machine"
+
+    m_ssh 'mkdir -p /WebKit/WebKit/WebKitBuild/WPE/Release &&
+        tar -C /WebKit/WebKit/WebKitBuild/WPE/Release -xzf -' < "$tgz" \
+        || die "could not unpack the build on $machine"
+
+    local built
+    built=$(m_ssh 'ls -l --time-style=+%Y-%m-%dT%H:%M /WebKit/WebKit/WebKitBuild/WPE/Release/bin/MiniBrowser 2>/dev/null | awk "{print \$6}"' 2>/dev/null | tr -d '\r')
+    [ -n "$built" ] || die "the unpack reported success but there is no
+    WebKitBuild/WPE/Release/bin/MiniBrowser on $machine."
+    log "deployed to $machine (tar transport)"
+    log "  MiniBrowser $built"
+    log "  next:       wk pi bench $machine <plan>"
+}
+
+# The skeleton. `--depth 1` of the profile's own branch, from the profile's own
+# remote: the tree only has to carry the scripts the board runs, and a full
+# history on a bench device is 3 GB of nothing anyone will read there.
+pi_skeleton() {
+    local machine="$1" url
+    url=$(wk_remotes | awk -v r="${YOC_REMOTE:-origin}" '$1 == r { print $2 }')
+    [ -n "$url" ] || die "no remote '${YOC_REMOTE:-origin}' in wk_remotes (lib/store.sh)"
+
+    info "provisioning the WebKit skeleton on $machine (--depth 1, ${YOC_BRANCH:-main} from $url)"
+    m_ssh "command -v git >/dev/null" \
+        || die "$machine has no git, so the skeleton cannot be cloned there.
+    A Yocto image has no apt either; the tree has to be copied in instead."
+    # Detached on the board, with a log, and resumable -- for the same reason
+    # `wk build` is: this is minutes of work over a channel that can drop, and
+    # the first attempt was killed at "Updating files: 42%" by a timeout on
+    # *this* end. The objects survived that (2.8 GB, right branch) and only the
+    # working tree was half-written, so a re-run completes the checkout instead
+    # of fetching it all again.
+    #
+    # --quiet on both: git's progress meter emitted several thousand
+    # "Updating files: N%" lines into the log, which buries everything else.
+    m_ssh "mkdir -p /WebKit && cd /WebKit &&
+        if [ -d WebKit.part/.git ] &&
+           [ \"\$(git -C WebKit.part rev-parse --abbrev-ref HEAD 2>/dev/null)\" = $(sh_quote "${YOC_BRANCH}") ]; then
+            echo resuming
+        else
+            rm -rf WebKit.part
+            git clone --quiet --depth 1 --branch $(sh_quote "${YOC_BRANCH}") $(sh_quote "$url") WebKit.part
+        fi
+        cd WebKit.part && git checkout -f --quiet" \
+        || die "the skeleton clone failed on $machine.
+    It is resumable -- the objects are kept at /WebKit/WebKit.part and a re-run
+    finishes the checkout rather than starting over."
+    m_ssh "test -x /WebKit/WebKit.part/Tools/Scripts/run-benchmark" \
+        || die "the clone left an incomplete working tree on $machine (no
+    Tools/Scripts/run-benchmark). Re-run to finish it."
+    m_ssh "cd /WebKit && rm -rf WebKit && mv WebKit.part WebKit && mkdir -p WebKit/WebKitBuild" \
+        || die "could not put the skeleton in place on $machine"
+
+    # Three empty directories, and they are load-bearing.
+    #
+    # webkitdirs.pm walks up from FindBin looking for a top-level checkout, and
+    # its test is `-d Source && -d Source/WebCore && -d Source/JavaScriptCore`
+    # (determineSourceDir). A Tools-only tree fails it, so
+    # `webkit-build-directory` dies with "Could not find top level webkit
+    # directory", and run-benchmark's WPE driver answers that by falling back to
+    # "Using default MiniBrowser" -- a browser that does not exist here. The run
+    # then sits there having launched nothing, which reads like a hung benchmark
+    # rather than a missing directory.
+    #
+    # The test is `-d` only: nothing reads what is inside. So the skeleton stays
+    # ~4,400 files instead of 427,711, and the scripts still resolve the build
+    # directory correctly.
+    m_ssh 'mkdir -p /WebKit/WebKit/Source/WebCore /WebKit/WebKit/Source/JavaScriptCore' \
+        || die "could not create the source-tree markers on $machine"
+    m_ssh 'cd /WebKit/WebKit && perl Tools/Scripts/webkit-build-directory --configuration --release --wpe' \
+        >/dev/null 2>&1 \
+        || die "$machine's skeleton is present but webkit-build-directory still
+    cannot resolve a build directory in it. Nothing downstream will find the
+    browser; check it by hand before running a benchmark."
+    m_ssh 'test -x /WebKit/WebKit/Tools/CISupport/built-product-archive' \
+        || die "the clone succeeded but Tools/CISupport is not there -- wrong branch?"
+    log "  skeleton at /WebKit/WebKit (its Source/ is NOT what built any binary here)"
+}
+
+# --- wk pi bench ---------------------------------------------------------------
+#
+#   wk pi bench <machine> <plan> [--count N] [--timeout S] [--keep-session]
+#
+# Runs a browser benchmark on a booted bench system and brings the number back.
+# The mechanics are the rpi3 skill's, encoded so that neither a person nor an
+# agent re-derives them; what this adds on top is the refusals and the
+# provenance, which are the difference between a number and a defensible one.
+#
+# **The harness is WebKit's own `run-benchmark`, not a URL in a browser.** That
+# is not a preference: the benchmarks keep their score in the DOM, so launching
+# `run-minibrowser` at browserbench.org tells you the run *finished* and nothing
+# about what it scored (the rpi3 skill's §5 says so at length, having tried).
+# run-benchmark also clones the benchmark and serves it from a local webserver
+# -- `speedometer3.plan` names `WebKit/Speedometer.git` at `release/3.0` -- which
+# is how the content origin ends up on loopback rather than across the internet,
+# the rule docs/HANDOFF-benchmarking.md sets for a measured run. Both properties
+# come free with the official harness and neither can be bolted onto a URL.
+pi_bench_env() {
+    # For the headless session the environment is the one we just created, not
+    # whatever a login session left behind.
+    # LD_LIBRARY_PATH always, whichever session: a cross build's RPATH names the
+    # *workspace's* build directory
+    # (/src/WebKit/WebKitBuild/WPE/Release_<target>/lib), which does not exist on
+    # the board, so the loader finds nothing and MiniBrowser dies with
+    # "libWPEWebKit-1.1.so.0: cannot open shared object file". `run-minibrowser`
+    # papers over this by exporting the path itself (webkitdirs), but
+    # run-benchmark's WPE driver execs MiniBrowser directly and does not -- so
+    # the harness that produces a score is exactly the one that needs this said
+    # out loud.
+    # WEBKIT_INJECTED_BUNDLE_PATH for the same class of reason: the bundle's
+    # location is compiled in as an *install* prefix
+    # (/usr/local/lib/wpe-webkit-2.0/injected-bundle), and a deployed build was
+    # never installed -- so the web process starts and then warns "Error loading
+    # the injected bundle", which is easy to read as cosmetic and is not.
+    local b=/WebKit/WebKit/WebKitBuild/WPE/Release/lib
+    local libs="export LD_LIBRARY_PATH=$b WEBKIT_INJECTED_BUNDLE_PATH=$b"
+    if [ "${PI_SESSION:-}" = headless-rdp ]; then
+        printf '%s' "$libs && export XDG_RUNTIME_DIR=/run/user/0 WAYLAND_DISPLAY=wk-bench"
+        return 0
+    fi
+    printf '%s && ' "$libs"
+    # weston's own environment, read out of the running compositor rather than
+    # assumed. The process to read is `weston-desktop-shell`, not `weston`: the
+    # skill's helpers hard-code /run/user/1000 + wayland-1 and say to update
+    # them if weston differs, which is a note that only exists because it did.
+    printf '%s' 'source <(strings /proc/$(pidof weston-desktop-shell)/environ \
+        | grep -E "^(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)=") \
+        && export XDG_RUNTIME_DIR WAYLAND_DISPLAY'
+}
+
+# cog aborts at startup with no input seat:
+#   cog_wl_platform_create_im_context: assertion failed: (display->seat_default)
+# so a virtual uinput device has to exist and *stay* alive for the whole run.
+# Inline rather than a copied script: one fewer file to get out of sync, and it
+# is the form the skill offers for exactly that reason.
+PI_SESSION=""
+PI_SEAT_PY='import fcntl,os,struct,signal
+IOC=lambda d,t,nr,size:(d<<30)|(size<<16)|(t<<8)|nr
+U=ord("U")
+fd=os.open("/dev/uinput",os.O_WRONLY|os.O_NONBLOCK)
+fcntl.ioctl(fd,IOC(1,U,100,4),1)
+fcntl.ioctl(fd,IOC(1,U,101,4),1)
+os.write(fd,struct.pack("=80s4HI256i",b"wk-bench-seat",3,1,1,1,0,*([0]*256)))
+fcntl.ioctl(fd,IOC(0,U,1,0),0)
+signal.pause()'
+
+cmd_bench() {
+    local machine="${1:-}" plan="${2:-}"; shift 2 2>/dev/null || true
+    local count="" timeout_s="" keep=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --count)   count="${2:-}"; shift ;;
+            --timeout) timeout_s="${2:-}"; shift ;;
+            --keep-session) keep=1 ;;
+            *) die "unknown option: $1" ;;
+        esac
+        shift
+    done
+    [ -n "$machine" ] && [ -n "$plan" ] \
+        || die "usage: wk pi bench <machine> <plan> [--count N] [--timeout S]"
+
+    machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
+
+    # One run at a time, and this is not politeness. Two run-benchmark
+    # invocations on one board each start their own http server, both write this
+    # log, and the second's clone appears to hang while the first holds the
+    # board -- which is what a stale run from a previous attempt did here, and it
+    # read like a stuck benchmark rather than two of them. The same reason
+    # bitbake has a cooker lock (image/yocto.sh, yocto_spawn).
+    #
+    # Bracketed pattern so pgrep does not match the shell carrying this command.
+    # `pgrep -fc` prints its count *and* exits non-zero when the count is zero,
+    # so a `|| echo 0` appends a second zero and the value becomes "0\n0" --
+    # which is not "0", and the guard then refuses every run. head -1 is the fix;
+    # the empty case is a pgrep that did not run at all.
+    local running
+    running=$(m_ssh 'pgrep -fc "run-bench[m]ark" 2>/dev/null | head -1' 2>/dev/null | tr -d '\r\n')
+    if [ -n "$running" ] && [ "$running" != 0 ]; then
+        die "a benchmark is already running on $machine.
+    Watch it:  ssh $MACH_SSH 'tail -f /tmp/wk-bench-*.log'
+    Stop it:   ssh $MACH_SSH 'pkill -f run-bench\[m\]ark'"
+    fi
+
+    # 1. Bench mode or nothing. The rule is docs/HANDOFF-benchmarking.md's and it
+    # is not softened here: a run on a machine that never left host mode is a
+    # measurement of a desktop with a browser on it, which is a different thing
+    # wearing the same number. The evidence is the image's own marker.
+    local sysid
+    sysid=$(m_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null | tr -d '\r')
+    [ -n "$sysid" ] || die "$machine is not running a wk bench system (no /etc/wk-image).
+    A benchmark runs in bench mode or it does not run:
+        wk boot $machine --system <id>   then   wk boot $machine --keep"
+
+    # 2. The build the whole thing measures.
+    m_ssh 'test -x /WebKit/WebKit/WebKitBuild/WPE/Release/bin/jsc' 2>/dev/null \
+        || die "$machine has no WebKit build at /WebKit/WebKit/WebKitBuild/WPE/Release.
+    The image is the runtime and carries no browser; deploy one first:
+        wk pi deploy <workspace> $machine"
+
+    # 3. Provenance, gathered before the run rather than reconstructed after.
+    local kernel gov throttled root_dev forced
+    kernel=$(m_ssh 'uname -r' 2>/dev/null | tr -d '\r')
+    gov=$(m_ssh 'cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor 2>/dev/null' 2>/dev/null | tr -d '\r')
+    throttled=$(m_ssh 'vcgencmd get_throttled 2>/dev/null' 2>/dev/null | tr -d '\r')
+    root_dev=$(m_ssh 'findmnt -no SOURCE /' 2>/dev/null | tr -d '\r')
+    forced=$(manifest_get "$sysid" display_forced 2>/dev/null || true)
+
+    log "$machine: $sysid"
+    log "  kernel      $kernel"
+    log "  root        $root_dev"
+    log "  governor    ${gov:-unknown}$([ "$gov" = performance ] || echo '   <-- not pinned; the score is not a perf result')"
+    log "  throttled   ${throttled:-unknown}$(case "$throttled" in throttled=0x0) ;; *) echo '   <-- non-zero: thermally or voltage limited' ;; esac)"
+    [ -n "$forced" ] && warn "this system's display is FORCED ($forced), so the compositor is
+  drawing to a mode no panel negotiated. The run proves the path works; the
+  number is not comparable with one taken against real hardware."
+
+    # 4. The graphical session, and which one depends on whether a display
+    # exists. netdata goes first either way -- it competes for the CPU being
+    # measured, and the board's own runbook stops it before every run.
+    info "bringing up the session on $machine"
+    m_ssh 'systemctl stop netdata 2>/dev/null' >/dev/null 2>&1 || true
+
+    local connected renderer session
+    connected=$(m_ssh 'grep -l "^connected$" /sys/class/drm/card*-HDMI-*/status 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
+    if [ -n "$connected" ]; then
+        # A real panel: weston's own service, DRM backend, GL renderer. The
+        # only configuration whose number is comparable with other hardware.
+        renderer=gl; session=drm
+        m_ssh 'systemctl start --no-block weston' >/dev/null 2>&1 || true
+    else
+        # None attached. The compositor still needs an *output*, and "no
+        # display" is not the same thing as "no compositor": weston's RDP
+        # backend synthesises a head with no display hardware at all, and the
+        # pixman renderer composites it on the CPU. Nothing has to connect to
+        # the RDP port for the output to exist -- it is a virtual head, not a
+        # remote desktop -- so this needs no client and no network in the run.
+        #
+        # This is the honest headless answer, and it is *not* the same as
+        # forcing a mode with `video=`: that hangs vc4 in probe and takes the
+        # board off the network (docs/TESTING.md). Software compositing costs a
+        # comparable number, which is recorded rather than hidden.
+        renderer=pixman; session=headless-rdp
+        info "  no display attached: RDP virtual head + pixman (software) compositing"
+        # The backend refuses to start without keys. Generated here, once, so
+        # the session is reproducible rather than depending on what somebody
+        # left on the board.
+        m_ssh 'mkdir -p /etc/wk-bench && [ -f /etc/wk-bench/rdp.key ] || {
+                 openssl req -x509 -newkey rsa:2048 -nodes \
+                   -keyout /etc/wk-bench/rdp.key -out /etc/wk-bench/rdp.crt \
+                   -days 3650 -subj /CN=wk-bench >/dev/null 2>&1
+                 chmod 600 /etc/wk-bench/rdp.key; }' >/dev/null 2>&1 \
+            || die "could not create the RDP backend's keys on $machine (needs openssl)"
+        # desktop-shell, not fullscreen-shell: the latter serves no xdg-shell,
+        # and a browser asking for one gets "invalid object" and exits. Measured
+        # by watching weston-simple-shm do exactly that.
+        m_ssh 'pkill -x weston 2>/dev/null; sleep 1
+               mkdir -p /run/user/0 && chmod 700 /run/user/0
+               XDG_RUNTIME_DIR=/run/user/0 setsid weston \
+                 --backend=rdp-backend.so --renderer=pixman \
+                 --width=1280 --height=1024 --socket=wk-bench \
+                 --rdp-tls-cert=/etc/wk-bench/rdp.crt \
+                 --rdp-tls-key=/etc/wk-bench/rdp.key \
+                 </dev/null >/tmp/wk-weston.log 2>&1 & sleep 6' >/dev/null 2>&1 || true
+    fi
+
+    local i=0 out=""
+    while [ "$i" -lt 20 ]; do
+        out=$(m_ssh 'grep -oE "Output .[a-z0-9-]+. enabled" /tmp/wk-weston.log 2>/dev/null | tail -1;
+                     pidof weston-desktop-shell 2>/dev/null' 2>/dev/null | tr -d '\r' | head -1)
+        [ -n "$out" ] && break
+        i=$((i + 1)); sleep 2
+    done
+    [ -n "$out" ] || die "no compositor output on $machine.
+    Check:  ssh $MACH_SSH 'tail -30 /tmp/wk-weston.log; journalctl -u weston -n 20'
+    and whether a display is seen at all:
+        ssh $MACH_SSH 'for c in /sys/class/drm/card*/status; do echo \$c \$(cat \$c); done'"
+    PI_SESSION="$session"
+    log "  session     $session, $renderer renderer ($out)"
+    [ "$renderer" = pixman ] && warn "compositing is on the CPU, so this number is not comparable with a
+  run on real display hardware. It proves the path, which is what it is for."
+
+    # The seat, once, and left running for the whole session.
+    if ! m_ssh 'pgrep -f wk-bench-seat >/dev/null' 2>/dev/null; then
+        m_ssh "setsid python3 -c $(sh_quote "$PI_SEAT_PY") </dev/null >/tmp/wk-seat.log 2>&1 & sleep 2" >/dev/null 2>&1 || true
+    fi
+    m_ssh 'pgrep -f "signal.pause|wk-bench-seat" >/dev/null' 2>/dev/null \
+        && log "  input seat  up" \
+        || warn "no fake input seat -- cog asserts at startup without one; the run may abort"
+
+    # 5. The run itself, detached on the board with its own log, because a
+    # Speedometer 3 round is minutes and an ssh channel held open for it is a
+    # channel that can drop and take the run with it.
+    local logf="/tmp/wk-bench-$plan.log" res="/tmp/wk-bench-$plan.json"
+    local args="--plan $(sh_quote "$plan") --browser minibrowser-wpe --platform linux"
+    args="$args --build-directory /WebKit/WebKit/WebKitBuild/WPE/Release"
+    args="$args --output-file $(sh_quote "$res")"
+    [ -n "$count" ] && args="$args --count $(sh_quote "$count")"
+
+    info "running $plan on $machine (detached; log $logf)"
+    m_ssh "cd /WebKit/WebKit && rm -f $(sh_quote "$logf") $(sh_quote "$res") &&
+        setsid bash -c '$(pi_bench_env) && exec Tools/Scripts/run-benchmark $args' \
+            </dev/null >$(sh_quote "$logf") 2>&1 & sleep 3; echo started" >/dev/null 2>&1 \
+        || die "could not start the benchmark on $machine"
+
+    # 6. Wait on the result file, not on a process: run-benchmark writes it when
+    # it has a score, which is the only completion signal that means what it
+    # says. A vanished process could be a crash, and a quiet log could be a
+    # long subtest.
+    local waited=0 cap="${timeout_s:-3600}"
+    while [ "$waited" -lt "$cap" ]; do
+        if m_ssh "test -s $(sh_quote "$res")" 2>/dev/null; then
+            log "  result      after ${waited}s"
+            m_ssh "cat $(sh_quote "$res")"
+            return 0
+        fi
+        # A crash is worth reporting early rather than at the timeout.
+        if m_ssh "grep -qiE 'Traceback|Crash!|cannot open display|assertion failed' $(sh_quote "$logf")" 2>/dev/null; then
+            warn "the run reported a failure; its log follows"
+            m_ssh "tail -30 $(sh_quote "$logf")"
+            die "benchmark failed on $machine"
+        fi
+        sleep 20; waited=$((waited + 20))
+    done
+    warn "no result after ${cap}s -- the run may still be going"
+    m_ssh "tail -20 $(sh_quote "$logf")"
+    die "timed out waiting for $plan on $machine"
+}
 
 # --- wk pi boot-order ----------------------------------------------------------
 #
@@ -240,6 +762,20 @@ cmd_boot_order() {
     fi
     log  "  undo with:   wk pi boot-order $HOST local"
 }
+
+# $HOST holds $2, which for `deploy` is the workspace -- the argument order is
+# <workspace> <machine>, so the machine is what is left after the top-level
+# shift. Named locally rather than reusing $HOST, which means an ssh host
+# everywhere else in this file.
+if [ "$ACTION" = deploy ]; then
+    cmd_deploy "$HOST" "$@"
+    exit 0
+fi
+
+if [ "$ACTION" = bench ]; then
+    cmd_bench "$HOST" "$@"
+    exit 0
+fi
 
 if [ "$ACTION" = boot-order ]; then
     ORDER_NAME=""

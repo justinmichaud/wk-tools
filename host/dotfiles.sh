@@ -119,6 +119,23 @@ else
         } | write_file "$_ssh_local" 0600
         rm -f "$_ssh_new"; unset _ssh_new
 
+        # Shadowing is reported, not removed. config.d/local is read *before*
+        # config.d/wk-tools, so a hand-written stanza for a name this repo also
+        # defines wins -- and some of those are deliberate (`moose` resolves to
+        # localhost *on* moose, which the repo's own stanza cannot know). But a
+        # silent win is how `moosebmc` kept resolving to a dead address after
+        # being corrected in the repo, so the collision is said out loud and
+        # the choice is left to a person.
+        _ssh_owned=$(awk 'tolower($1) == "host" { for (i = 2; i <= NF; i++) print $i }' \
+                        "$WK_ROOT/dotfiles/ssh/config" 2>/dev/null)
+        awk -v owned="$_ssh_owned" '
+            BEGIN { n = split(owned, o, "\n"); for (i = 1; i <= n; i++) if (o[i] != "") mine[o[i]] = 1 }
+            tolower($1) == "host" {
+                for (i = 2; i <= NF; i++) if ($i in mine)
+                    printf "  %s in config.d/local shadows this repo'"'"'s own stanza (local is read first)\n", $i
+            }' "$_ssh_local" 2>/dev/null | sort -u | while read -r line; do warn "$line"; done
+        unset _ssh_owned
+
         warn "hand-written hosts moved from $_ssh_conf to $_ssh_local"
         warn "the original is kept at $_ssh_conf.wk-backup"
         log  "  edit $_ssh_local, not $_ssh_conf: the Include is read first, so a"

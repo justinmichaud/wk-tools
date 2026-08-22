@@ -95,10 +95,17 @@ perf-linux-rpi3
             refused, and says why: Ubuntu ships no armhf raspi image, and a
             32-bit run wants a 32-bit system rather than an arm64 one
 
+downstream-wpe-2.46-rpi4
+            the known-good pairing: WPE 2.46 from the downstream
+            WebPlatformForEmbedded/WPEWebKit repo. The image is the branch's
+            own, unmodified; the build needs the pseudo bump this host's kernel
+            requires (--no-local-layer to re-test that).
 downstream-yocto-wpe-2.48-rpi4
             WPE WebKit 2.48's own Yocto image for the rpi4 (aarch64,
             scarthgap, weston): the runtime the 2.48 release branch pins,
-            bitbaked from source in a workspace. Hours, not minutes.
+            bitbaked from source in a workspace. Hours, not minutes. Needs
+            image/yocto/meta-wk to build at all -- see the pseudo story in
+            docs/HANDOFF-yocto.md.
 downstream-yocto-wpe-2.48-rpi4-32
             the same distribution, 32-bit: a 32-bit kernel and userspace, which
             is what a 32-bit perf run has to measure -- not a 32-bit process on
@@ -147,7 +154,7 @@ image_profile_load() {
     IMG_BASE_SHA256=""; IMG_HOSTNAME=""; IMG_WATCHDOG=""; IMG_GROW=""
     IMG_PACKAGES=""; IMG_NETWORK=""; IMG_LABEL_ROOT=""; IMG_LABEL_BOOT=""
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
-    YOC_CHROMIUM=1
+    YOC_CHROMIUM=1; YOC_REMOTE=origin; YOC_LOCAL_LAYER=1
     FET_URL=""; FET_SHA256=""; FET_XZ=""; FET_NOTE=""; FET_DEVICE=""
     PMO_DEVICE=""; PMO_UI=""; PMO_CHANNEL=""; PMO_PMB_VERSION=""
     PMO_USER=""; PMO_PASSWORD=""; PMO_PACKAGES=""; PMO_EXTRA_SPACE=""
@@ -394,6 +401,54 @@ image_profile_load() {
     # store as an image like any other -- which is the entire reason to put it
     # here rather than in a command of its own. `wk sysimage write`, `wk sysimage
     # show` and the SD-card path then work on it unchanged.
+    downstream-wpe-2.46-rpi4)
+        # The known-good configuration, and the reason it exists as a profile of
+        # its own rather than as a flag on the 2.48 one: it is a different
+        # *repository*, not just a different branch. `wpe-2.46` lives in
+        # WebPlatformForEmbedded/WPEWebKit -- the downstream WPE repo, wired as
+        # `wpe` (lib/store.sh) -- where 2.48's `webkitglib/2.48` is upstream
+        # WebKit/WebKit. A `git fetch origin wpe-2.46` finds nothing at all,
+        # which is why YOC_REMOTE had to exist before this profile could.
+        #
+        # Known-good means: it is the pairing that has actually built and run
+        # (Ubuntu 24.04 build host + this branch), and the `rpi3` skill already
+        # clones exactly this branch for the 32-bit board. So it is the profile
+        # to reach for when the question is "is my change the problem, or is the
+        # configuration?" -- and it carries **no local fixes** for that reason.
+        IMG_BUILDER=yocto
+        IMG_MACHINE=rpi4
+        IMG_ARCH=arm64
+        YOC_REMOTE=wpe
+        YOC_BRANCH=wpe-2.46
+        YOC_TARGET=rpi4-64bits-mesa
+        YOC_IMAGE=webkit-dev-ci-tools
+        YOC_RM_WORK=1
+        YOC_CHROMIUM=0
+        # Tested unmodified on 2026-08-21, and it does not build here. The
+        # finding, because it is the useful half of this profile: with no local
+        # layer the build dies in `do_package` on `update-rc.d` and `base-files`
+        # with pseudo's own signature --
+        #
+        #   got *at() syscall for unknown directory, fd 4
+        #   unknown base path for fd 4, path sbin
+        #   tar: ./usr/sbin: Cannot mkdir: Bad address
+        #
+        # byte for byte what recipes-devtools/pseudo/pseudo_%.bbappend
+        # documents. So the pseudo bug is a property of **pseudo plus this
+        # host's kernel** (7.0.11 aarch64), not of the release branch: 2.46
+        # pins poky 6879650b, whose pseudo is the same 1.9.0-era fakeroot 2.48
+        # pins, and it fails identically. A branch cannot be known-good against
+        # a kernel that postdates its pseudo.
+        #
+        # So the layer stays on, and that does *not* compromise "the image
+        # works without changes": pseudo is a build-time fakeroot and is never
+        # installed into the image. What it changes is how the image is built,
+        # not what the image contains. `--no-local-layer` re-runs the
+        # experiment on a host where it might pass.
+        YOC_LOCAL_LAYER=1
+        IMG_HOSTNAME=raspberrypi4-64
+        IMG_WATCHDOG=900
+        ;;
     downstream-yocto-wpe-2.48-rpi4)
         IMG_BUILDER=yocto
         IMG_MACHINE=rpi4

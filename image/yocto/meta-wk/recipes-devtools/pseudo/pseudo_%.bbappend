@@ -50,18 +50,33 @@ PV = "1.9.11+git"
 # Removed by name rather than by clearing SRC_URI: the recipe also fetches the
 # prebuilt sqlite tarball and two fallback passwd/group files from there, and
 # they are still wanted.
-SRC_URI:remove = "file://0001-configure-Prune-PIE-flags.patch file://glibc238.patch"
+# All three in one assignment, deliberately: `:remove` is a variable flag, so a
+# second `SRC_URI:remove = ...` would *replace* this list rather than add to it,
+# and the two already-upstream patches would come back and fail do_patch again.
+SRC_URI:remove = "file://0001-configure-Prune-PIE-flags.patch \
+                  file://glibc238.patch \
+                  file://older-glibc-symbols.patch"
 
 # And the third, which needs its own justification because it is not simply
-# already-upstream. `older-glibc-symbols.patch` makes pseudo-native link against
-# older glibc symbol versions, so that a native binary built on a newer host
-# still runs on an older one -- i.e. so sstate can travel between hosts. It no
-# longer applies (upstream's Makefile.in has moved; upstream carries the same
-# patch only as an unapplied reference, 137d7be).
+# already-upstream. `older-glibc-symbols.patch` makes pseudo link against older
+# glibc symbol versions, so that a binary built on a newer host still runs on an
+# older one -- i.e. so sstate can travel between hosts. It no longer applies
+# (upstream's Makefile.in has moved; upstream carries the same patch only as an
+# unapplied reference, 137d7be).
 #
 # Dropping it is safe *here* because that portability is something this setup
 # deliberately does not rely on: SSTATE_DIR is namespaced per build-host image
-# (image/yocto-build.sh), so native sstate is never handed to a different host
-# in the first place. If that ever changes, this line has to be reconsidered
-# before the namespacing is removed.
-SRC_URI:remove:class-native = "file://older-glibc-symbols.patch"
+# (image/yocto-build.sh), so sstate is never handed to a different host in the
+# first place. If that ever changes, this line has to be reconsidered before the
+# namespacing is removed.
+#
+# Unconditional, and it was `:class-native` until 2026-08-21. pseudo is built
+# once per variant, and the variant that matters here was the one nobody had
+# reached yet: `--stage image` builds **pseudo-native**, `populate_sdk` builds
+# **nativesdk-pseudo**, and a `:class-native` override does not touch the
+# nativesdk one. So the toolchain stage died on its first run at
+# `nativesdk-pseudo do_patch` -- the same patch, the same failure, in the one
+# variant the override missed. The patch applies to no variant of 1.9.11, so
+# the removal belongs everywhere rather than in a second override beside the
+# first.
+# (removed in the single assignment above)

@@ -1,0 +1,66 @@
+Spec dir for downstream-wpe-2.46-rpi4.
+
+cmdline.txt.append.disabled -- forces a display that is not physically there.
+**DISABLED 2026-08-21 after it took the board off the network.** The mechanism
+is described below and is still believed right; what was wrong was proving it.
+See "The incident" at the end.
+
+The rpi4 is headless: both HDMI connectors read `disconnected`, so weston's DRM
+backend has no output and weston.service fails. Speedometer is gpu-class by
+this repo's own definition (cmd/bench: "a rendering measurement [that] needs a
+real compositor on a real GPU"), so there is nothing to run it on.
+
+`video=HDMI-A-1:1920x1080M@60D` is the KMS way to say "drive this connector at
+this mode even with no EDID" -- the trailing `D` forces digital output. It is
+what a dummy HDMI plug does, in software, and the important part is *what it
+does not change*: the compositor is still weston on the real vc4/v3d GPU
+through the real DRM/KMS path, not a software renderer and not RDP. The legacy
+`hdmi_force_hotplug=1` in config.txt does not do this under
+`dtoverlay=vc4-kms-v3d`, which is why the setting is here and not there.
+
+**A run made this way is a proof that the path works, not a comparable
+number.** The mode is invented rather than negotiated, so it is not the mode a
+real panel would give, and MotionMark and Speedometer both scale with the
+surface being drawn (cmd/bench records `display` for exactly that reason).
+Recorded as `display_forced` in the manifest so no result from it can be
+mistaken for one taken against real hardware. Delete this file when a dummy
+plug or a monitor is attached, and the image goes back to negotiating a mode.
+
+
+## The incident, 2026-08-21
+
+This setting was written into the image, the image was written to the stick, and
+the stick was booted, in one step. The board never came back: pingable for a
+minute or two while resetting ssh mid-key-exchange, then gone from the
+neighbour table entirely. It needs a person to pull the stick.
+
+**Established 2026-08-22 by removing one variable:** the same image, same
+stick, same everything, with `video=HDMI-A-1:1920x1080M@60D` deleted from
+cmdline.txt and nothing else changed, boots and is reachable. So this setting
+is the cause, and the 2.46 image is fine.
+
+Why it can break a boot, which was not obvious and was argued the wrong way
+first: forcing a mode on a connector with nothing attached leaves vc4's KMS
+driver waiting on hardware that will not answer, and a driver that hangs in
+probe hangs the boot. "A display setting cannot stop userspace" is false when
+the setting is handled by a driver that boot waits on.
+
+What made it unrecoverable is worth more than the cause:
+
+- **An armed stick that boots but hangs is sticky.** Firmware finds
+  `start4.elf`, so it keeps choosing the stick; a power cycle re-enters the
+  same hang rather than falling through to the SD rescue. The self-disarm lives
+  in the rootfs and never runs. `docs/HANDOFF-benchmarking.md` already records
+  this residual case -- this is it happening.
+- **These images carry no `panic=10`.** The distro profiles set it, so a distro
+  image that cannot find its root reboots; a Yocto image hangs. Adding it here
+  would not have helped on its own (the reboot would re-enter the same stick),
+  but the asymmetry is undocumented and worth knowing.
+- **There is no console.** moose's BMC would have shown the boot; the rpi4 has
+  no such path, and `docs/HANDOFF-moose-bench.md`'s "get the console working
+  before the first risky boot" applies to every board, not just moose.
+
+The order that was available and was not taken: put `video=` on the **SD**
+system first, where a bad kernel argument still leaves the stick as an unarmed
+fall-through, and only bake it into the stick once it has booted something.
+Re-enable this file by dropping the `.disabled` suffix, and do it that way.

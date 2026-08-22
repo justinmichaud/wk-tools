@@ -1671,6 +1671,250 @@ it is checked against a copy of the store rather than the store.
       partx and resize2fs. (This stick was written before the fallback existed,
       so its root is still the image's 3.8 GB of a 29.5 GB device)
 
+### The known-good configuration, built and imported
+
+`downstream-wpe-2.46-rpi4` — WPE 2.46 from the downstream
+`WebPlatformForEmbedded/WPEWebKit` repo, 2026-08-21.
+
+- [V] it builds, on a 24.04 host, with the pseudo bump and nothing else:
+      `stage 'image' done`, all three artifacts, **zero errors and zero pseudo
+      signatures**. Unmodified it dies (see the profile's note) — the same
+      controlled experiment run both ways
+- [V] reaching it needed two independent fixes, either of which alone leaves
+      the build impossible: the `wpe` remote had never been applied to any
+      workspace or to the base (`wk remotes --fix`), and `yocto_ensure_ws`
+      fetched only from `origin` (`YOC_REMOTE`)
+- [V] **the import path produces everything by itself**, which until now had
+      only been proven through `wk sysimage retarget`: a portable
+      `root=PARTUUID=…`, `wk-image.id` on the boot partition, `/etc/wk-image`,
+      the driving ssh key, `/boot` in fstab by PARTUUID, five `wk-*` units, and
+      `wic_of == disk_sha256`. No manual step, and `wk sysimage show` reports
+      `disk.img matches its manifest`
+- [V] the manifest records `branch_remote`, because a branch name alone no
+      longer says which repository a system came from
+- [V] and the two rpi4 images **share a disk signature** (`0x076c4a2a`): they
+      come from the same recipe lineage, so the wic's MBR id is identical. That
+      is the case `disk_unique_identity` exists for, and it is why the stamping
+      is per *disk* at write time rather than per image at build time — an
+      image-time fix would have made these two collide with each other
+- [V] a `#` line inside the manifest heredoc is **not a comment** — it is prose
+      written into the record. Three lines of explanation landed above
+      `watchdog=900` in a real manifest; `manifest_get` greps `^key=` and
+      shrugged, so it took reading one to notice. The heredoc holds key=value
+      and nothing else, and the explanation lives in the shell above it
+
+### Speedometer 3 on the rpi4 — a score, 2026-08-22
+
+The first browser benchmark this fleet has produced on a bench device, end to
+end from `wk pi deploy` and `wk pi bench`.
+
+- [V] **`Speedometer-3: 1.35pt, stdev 3.5%`** (the harness's own summary), from
+      4 iterations x 10 runs over 22 minutes. Per-iteration means 1.340, 1.359,
+      1.342, 1.343 -- 0.6% spread between iterations, which is the number worth
+      looking at: the run is repeatable even software-composited
+- [V] the score is **not comparable with real hardware** and is not offered as
+      one: compositing is pixman on the CPU because no display is attached. It
+      proves the path, which is what it was for
+- [V] the content came from **loopback** -- run-benchmark clones
+      `WebKit/Speedometer.git` at `release/3.0` and serves it from its own http
+      server (port 44647 this run), so the measured-run rule holds without
+      anything extra
+- [V] the harness is `run-benchmark`, not a URL in a browser: the benchmarks
+      keep their score in the DOM, so a `run-minibrowser` launch can prove
+      completion and never a number
+- [V] verified the printed result against the board's own
+      `/tmp/wk-bench-speedometer3.json` rather than trusting the command's
+      output -- they match exactly
+- [ ] `wk pi bench` prints `result after 0s` for a run that took 22 minutes.
+      The elapsed counter is wrong; the result is not. Cosmetic, and worth
+      fixing before anyone reads the timing as data
+- [ ] the result is printed and not **saved**: nothing files it beside
+      `wk bench`'s own runs, so `wk bench ls`/`compare` cannot see it. That is
+      the remaining half of "record provenance next to wk bench's results"
+      (docs/HANDOFF-pi-deploy.md)
+- [ ] the manifest still records `display_forced` for this image although the
+      forced mode was removed from the stick's cmdline by hand, so the run
+      warned about a mode it was not using. A manifest describes the image and
+      the disk was edited after it -- the provenance and the disk have to be
+      reconciled
+
+### Cross-building WebKit for the board — `--stage webkit`
+
+The last stage, and the first time it had been run since the base image changed.
+Both failures were in how this repo invokes `build-webkit`, not in WebKit.
+
+- [V] **the target's cmakeargs must be merged, not replaced.** wpe-2.46 defaults
+      `ENABLE_WPE_1_1_API` and `ENABLE_WPE_PLATFORM` both on and CMake refuses
+      the pair ("You must disable one or the other"), so configure failed before
+      a line compiled. `build-webkit` takes one `--cmakeargs` and the last wins,
+      so passing ours would have dropped the target's — including the `bwrap`
+      and `xdg-dbus-proxy` paths the sandbox needs. So `BUILD_WEBKIT_ARGS` is
+      read out of `Tools/yocto/targets.conf`, its `--cmakeargs` split off, and
+      ours appended: upstream stays the source of truth. Verified the parse
+      keeps `--no-fatal-warnings` and all five target flags
+- [V] **the job count has to be memory-sized.** `build-webkit` appends
+      `-j$(numberOfCPUs)` unless `--makeargs` already carries a `-j`, so it ran
+      **-j80** on WebCore's unified sources — the largest TUs in the tree — and
+      the OOM killer took cc1plus three times. The symptom reads like a
+      compiler bug: `fatal error: Killed signal terminated program cc1plus`
+- [V] bitbake's own `PARALLEL_MAKE` *was* capped by the envelope (`-j4` from 79)
+      — this stage is a cmake/ninja build bitbake never sees, so nothing applied
+      that reasoning to it. Now sized with `build_jobs` at 2560 MB/job, the
+      figure the failure itself established (80 jobs exceeded 125 GB): **47
+      jobs**, and the build completed 3736/3736 with zero errors
+- [V] the products are what the deploy needs: `MiniBrowser`, `jsc`,
+      `WPEWebProcess`, `WPENetworkProcess`, and `libWPEWebKit-1.1.so` — the
+      SONAME confirming `ENABLE_WPE_1_1_API=ON` took effect
+- [ ] a wrapper whose command failed can still be `yocto_any_running` for a
+      while afterwards (ninja finishes in-flight jobs), so a restart refuses
+      with "already running" until `--stop`. Benign, and confusing the first time
+
+### The skeleton on the board — what "skeleton" should mean
+
+- [V] resumable, and it had to be: the first clone was killed at "Updating
+      files: 42%" by a timeout on the *driving* end. The objects survived
+      (2.8 GB, right branch) so a re-run completes the checkout rather than
+      refetching, and `Tools/Scripts/run-benchmark` is verified present before
+      `.part` is moved into place
+- [V] `--quiet` on clone and checkout: git's progress meter wrote several
+      thousand `Updating files: N%` lines into the log and buried everything else
+- [ ] **and it is not really a skeleton.** `--depth 1` of WPEWebKit is
+      **427,711 files and ~4.2 GB**, and checking that out onto a USB stick on a
+      Pi 4 takes longer than cross-building WebKit did. The board only needs the
+      scripts it runs there — `Tools/CISupport/built-product-archive`,
+      `Tools/Scripts/run-benchmark`, `run-minibrowser` and their imports — so a
+      sparse checkout of `Tools/` (~5,000 files) is the right shape. The
+      depth-1 form is what the wiki and the `rpi3` skill document, which is why
+      it was used first
+
+### A compositor with no display — software rendering, proven 2026-08-22
+
+"No display attached" and "no compositor" are different problems, and conflating
+them is what made Speedometer look hardware-blocked when it is not.
+
+- [V] weston's **RDP backend synthesises a head with no display hardware**:
+      `weston --backend=rdp-backend.so --renderer=pixman --width=1280
+      --height=1024` logs `Output 'rdp-0' enabled with head(s) rdp-0` on a board
+      whose every HDMI connector reads `disconnected`. Nothing has to connect to
+      the RDP port — it is a virtual output, not a remote desktop — so no client
+      and no network are in the run
+- [V] and a wayland client renders into it: `weston-simple-shm` stays up with
+      empty stderr. That is the check that matters; the compositor starting
+      proves less than a client drawing
+- [V] the backend **refuses to start without keys** ("the RDP compositor
+      requires keys and an optional certificate"), so `wk pi bench` generates a
+      self-signed pair into `/etc/wk-bench` once, rather than depending on
+      whatever somebody left on the board
+- [V] `--shell=fullscreen-shell.so` is the wrong shell for this: it serves no
+      xdg-shell, and a client asking for one dies with `wl_display@1: error 0:
+      invalid object 6`. Watched `weston-simple-shm` do exactly that, then
+      succeed under `desktop-shell.so`. Worth having found with a 20-line client
+      rather than with a browser, where it would have read as a WebKit failure
+- [V] the image ships `gl` and `pixman` renderers and **no headless backend**
+      (drm, rdp, wayland, x11 only), and has no Xvfb — so rdp+pixman is the
+      headless path here, not a preference among several
+- [V] `wk pi bench` picks the session from the hardware: a connected HDMI
+      connector takes **drm + gl**, otherwise **rdp + pixman**, and it records
+      which. A pixman run is announced as not comparable with real display
+      hardware, which is what makes it usable as a proof rather than a result
+- [V] and this is **not** the same as `video=`: forcing a mode hangs vc4 in
+      probe and takes the board off the network, where a virtual head touches
+      no display driver at all
+
+### Forcing a display on a headless board — and the incident that came with it
+
+The rpi4 has no panel: both HDMI connectors read `disconnected`, weston's DRM
+backend has no output, and `weston.service` fails. Speedometer is gpu-class by
+this repo's own definition, so there is nothing to run it on.
+
+- [V] `video=HDMI-A-1:1920x1080M@60D` is the KMS spelling of "drive this
+      connector at this mode with no EDID" — a software dummy plug. What makes
+      it the right override rather than `--software` is what it leaves alone:
+      weston still composites on the real vc4/v3d through the real DRM path.
+      `hdmi_force_hotplug=1` does **not** do this under `dtoverlay=vc4-kms-v3d`,
+      which is why it is a kernel argument and not a `config.txt` line
+- [V] declared as profile config (`image/<profile>/cmdline.txt.append`), applied
+      by `apply_cmdline_append` in **both** the import and `retarget`, appended
+      as a single line (the firmware reads the first line only, so a stray
+      newline would drop the lot), idempotent, and recorded as `display_forced`
+      in the manifest so no score from it can be read as a real-panel result
+- [V] **and it does not boot.** Established by removing one variable: the same
+      image on the same stick, with only `video=…` deleted from cmdline.txt,
+      boots and is reachable in bench mode. Forcing a mode on a connector with
+      nothing attached leaves vc4's KMS driver waiting on hardware that never
+      answers, and a driver that hangs in probe hangs the boot. Disabled
+      (`.disabled`) so no later write repeats it
+- [V] "a display setting cannot stop userspace" is **false** when the setting is
+      handled by a driver the boot waits on — the argument that exonerated
+      `video=` was wrong, and one boot with one variable removed settled it
+      where reasoning did not
+- [V] so **Speedometer stays blocked on real hardware**: a physical dummy HDMI
+      plug or a monitor. There is no software substitute that keeps the run
+      gpu-class, which is what the plan requires
+- [V] a cpu-class plan is the headless alternative and is not degraded for
+      lacking a display (`cmd/bench`): JetStream in the **jsc shell**
+      (`runner=jsc`) needs no compositor at all
+- [V] an armed stick that boots-but-hangs is **sticky**: firmware finds
+      `start4.elf` and keeps choosing it, so a power cycle re-enters the hang
+      instead of falling through to the SD. The self-disarm is in the rootfs
+      and never runs. `docs/HANDOFF-benchmarking.md`'s "residual hands-on case"
+      is exactly this, observed
+- [V] these Yocto images carry no `panic=10` where the distro profiles do — so
+      a distro image that cannot find its root reboots and a Yocto one hangs.
+      Not the cause here, and an undocumented asymmetry worth knowing
+- [ ] the safe order, not taken: prove a kernel argument on the **SD** system
+      first, where a bad one still leaves the stick an unarmed fall-through
+
+### Reproducibility of the bench stick — the standing rule
+
+**cattle, not pets** (`docs/HANDOFF-cattle.md`) applied to the one device that
+got hand-tuned. Restated 2026-08-21 by the user: *all changes to the stick and
+the hardware setup must be fully reproducible.*
+
+- [V] every edit the stick needed is now a code path, not a command someone
+      remembered: the boot-partition id (`install_disk_id`, in the image), the
+      unique disk signature (`disk_unique_identity`, at write time), the grow
+      (`disk_grow`'s `sfdisk` fallback), the portable root
+      (`retarget_root`/the import)
+- [ ] **the stick itself is still a pet.** The one in the rpi4 today was
+      produced by hand-stamping over ssh before those paths existed, so it is
+      correct but not reproduced. The proof is one command --
+      `wk sysimage write rpi4-wpe-2.48-20260820T124927Z --disk rpi4:/dev/sda`
+      -- which now does all four by construction and would come out grown as
+      well. It needs a confirmed erase, so it is a person's
+- [V] a *backup* placed inside `~/.ssh/config.d/` is not a backup, it is a
+      second config file: `Include config.d/*` globs it. Dropping
+      `local.pre-bmc-fix` there left the stale `moosebmc` resolving even after
+      the real stanza was corrected -- found by `ssh -G` still reporting the
+      dead address with no matching stanza anywhere in `local`
+- [V] `moosebmc` is repo-owned (`dotfiles/ssh/config`) rather than
+      machine-local, because its address is not a preference:
+      `bridge/hosts/tailnet-bridge-moose-bmc.conf` pins it by MAC and makes it
+      the whole DHCP pool. `ssh -G moosebmc` resolves it from the repo with no
+      machine-local copy, so `./setup` reproduces it anywhere
+- [V] `config.d/local` is read **before** `config.d/wk-tools`, so a
+      hand-written stanza overrides a repo-owned one rather than duplicating
+      it. Some of those are deliberate (`moose` → localhost *on* moose), so
+      `./setup` now warns about the shadowing instead of dropping it, and the
+      hard drop stays limited to fleet machine names
+
+### The remote wiring, applied rather than declared
+
+- [V] the wiki's set (`WebKit JSC Container Development Setup`) is `origin`,
+      `wpe`, `fork`, `forkwpe` plus `igalia`, and `wk_remotes` matches it
+      exactly, with `igalia` a documented omission (ssh port 4429 is not in the
+      egress allowlist)
+- [V] but declaring is not applying, and nothing had applied it: the yocto
+      workspace had **no `wpe` remote**, and the **base snapshot every new
+      workspace starts from** was wired wrong four ways — `origin` accepting a
+      push, no `wpe`, `fork` pushing to `git@github.com:` instead of the
+      `github-webkit` ssh alias that selects the deploy key, and no `forkwpe`.
+      `wk remotes` names all of it; `wk remotes --fix` repaired both
+- [V] and it was load-bearing immediately: `wpe-2.46` cannot be checked out
+      without that remote, so the known-good profile could not have been built
+      at all. `yocto_ensure_ws` also fetched only from `origin` until
+      `YOC_REMOTE` (2026-08-21) — two independent reasons the same build failed
+
 ### One disk, one identity — `disk_unique_identity`
 
 The failure this exists for was reached on hardware 2026-08-21, and every check
@@ -1688,6 +1932,13 @@ on the writing side passed while it happened.
       the written image's fleet integration appears to be missing and
       `usb_stick=armed` never clears because the self-disarm is in the rootfs
       that did not boot
+- [V] the wiki's own manual ritual for this (`Building WPE evaluation images`,
+      "USB Stick Alternative") edits `cmdline.txt` to `/dev/sda2` and `/etc/fstab`
+      to `/dev/sda1` — the same two files, by **device path**. Device paths
+      would have dodged this collision entirely, at the cost of an image that
+      only boots from one kind of device. Keeping the root spec portable and
+      making each *disk* unique buys both, but only because the stamping
+      exists; portable-and-unstamped is the one combination that fails
 - [V] the same class of ambiguity `image/profiles.sh` records for filesystem
       labels ("booted with both attached, `root=LABEL=writable` is ambiguous,
       and which disk wins is a property of enumeration order"), reached through

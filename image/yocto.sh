@@ -185,13 +185,20 @@ yocto_ensure_ws() {
         # release branch is fetched from GitHub on demand -- which the egress
         # policy already permits and which lib/store.sh names as the intended
         # path for exactly this.
+        # From the profile's remote, not always origin. The known-good WPE
+        # configurations live in WebPlatformForEmbedded/WPEWebKit -- a different
+        # repository from WebKit/WebKit, wired as `wpe` (lib/store.sh) -- and a
+        # `git fetch origin wpe-2.46` simply has nothing to find. That is the
+        # whole reason YOC_REMOTE exists.
+        local remote="${YOC_REMOTE:-origin}"
         t_exec "$ws" bash -c "cd /src/WebKit && {
             git checkout -q $(sh_quote "$branch") 2>/dev/null ||
-            { git fetch -q origin $(sh_quote "$branch:$branch") &&
+            { git fetch -q $(sh_quote "$remote") $(sh_quote "$branch:$branch") &&
               git checkout -q $(sh_quote "$branch"); }; }" \
-            || die "could not check out '$branch' in '$ws'.
-    It is fetched from GitHub on demand, so this is usually egress. Try:
-        wk enter $ws  and then  git fetch origin $branch"
+            || die "could not check out '$branch' from '$remote' in '$ws'.
+    It is fetched from GitHub on demand, so this is usually egress -- or a
+    missing remote, which 'wk remotes' reports and 'wk remotes --fix' repairs.
+    Try:  wk enter $ws  and then  git fetch $remote $branch"
     fi
 }
 
@@ -482,7 +489,7 @@ yocto_dry_run() {
     cat >&2 <<EOF
 would build image $IMG_PROFILE (builder: yocto)
   for machine $IMG_MACHINE ($IMG_ARCH)
-  branch      $YOC_BRANCH
+  branch      $YOC_BRANCH  (from the '${YOC_REMOTE:-origin}' remote)
   cross-target $YOC_TARGET
   recipe      $YOC_IMAGE
   stage       $stage (it includes the ones before it)
@@ -492,6 +499,8 @@ would build image $IMG_PROFILE (builder: yocto)
   SSTATE_DIR  $WK_STORE/cache/yocto/sstate ($(du -sh "$WK_STORE/cache/yocto/sstate" 2>/dev/null | cut -f1))
   rm_work     $([ "${YOC_RM_WORK:-0}" = 1 ] && echo "on (--keep-work turns it off; still peaked at 79 GB here)" || echo off)
   chromium    $([ "$chromium" = 0 ] && echo "dropped (about half the build; --chromium puts it back)" || echo "in the image (--chromium)")
+  webkit jobs $(WK_MB_PER_JOB=2560 build_jobs) (2560 MB/job -- WebCore's unified sources OOM'd at -j79)
+  local fixes $([ "${YOC_LOCAL_LAYER:-1}" = 0 ] && echo "none -- the branch's own configuration, unmodified" || echo "image/yocto/meta-wk is added to bblayers")
   disk free   $(df -h --output=avail "$WK_STORE" 2>/dev/null | tail -1 | tr -d ' ')
   into        $(image_dir "<profile>-<stamp>")
 EOF
@@ -513,10 +522,15 @@ yocto_build() {
             --detach)    detach=1 ;;
             --keep-work) keep_work=1 ;;
             --chromium)  chromium=1 ;;
+            # Re-run "does this configuration build unmodified?" without
+            # editing a profile. The answer is host-dependent -- see the 2.46
+            # profile's note -- so it is a flag rather than a constant.
+            --no-local-layer) YOC_LOCAL_LAYER=0 ;;
+            --local-layer)    YOC_LOCAL_LAYER=1 ;;
             --no-import) no_import=1 ;;
             *) die "unknown option: $1
     'wk sysimage build $profile' takes --dry-run, --workspace, --stage,
-    --detach, --stop, --keep-work, --chromium and --no-import." ;;
+    --detach, --stop, --keep-work, --chromium, --no-local-layer and --no-import." ;;
         esac
         shift
     done
@@ -627,6 +641,8 @@ EOF
         --target "$YOC_TARGET" --image "$YOC_IMAGE" --stage "$stage" \
         --jobs "$(envelope_cores)" --rm-work "${YOC_RM_WORK:-0}" \
         --chromium "$chromium" \
+        --local-layer "${YOC_LOCAL_LAYER:-1}" \
+        --webkit-jobs "$(WK_MB_PER_JOB=2560 build_jobs)" \
         --sstate-ns "$(printf '%s' "${WK_SDK_IMAGE##*/}" | tr ':/' '--')"
 
     if [ -n "$detach" ]; then
@@ -715,6 +731,7 @@ EOF
     install_driving_key "$(part_offset "$DISK" 2)"
     install_disk_id
     retarget_root "$SEED"
+    apply_cmdline_append "$SEED"
     rm -rf "$SEED"; SEED=""
 
     # After the edits, so the compressed copy describes the image that is
@@ -726,6 +743,19 @@ EOF
 
     # Written last: this is the publishing gate for the yocto builder exactly
     # as it is for the distro one (lib/image.sh).
+    #
+    # Nothing but key=value inside the heredoc below. It is an unquoted heredoc
+    # writing a record that other code parses, so a `#` comment in it is not a
+    # comment -- it is three lines of prose in the manifest, which is how
+    # `watchdog` arrived with a paragraph above it. (`manifest_get` greps
+    # `^key=` and shrugged, which is why it took reading one to notice.)
+    #
+    # `watchdog` is here rather than looked up from the profile because the
+    # image is what is booting and its profile may have changed since; `wk boot`
+    # reads it to say how long an unclaimed machine takes to hand itself back.
+    # `branch_remote` is here because a branch name alone no longer says which
+    # repository a system came from -- wpe-2.46 is the downstream WPE repo,
+    # webkitglib/2.48 is upstream WebKit.
     {
         cat <<EOF
 id=$id
@@ -734,13 +764,9 @@ builder=yocto
 machine=$IMG_MACHINE
 arch=$IMG_ARCH
 hostname=$IMG_HOSTNAME
-# The same field the distro builder records, and for the same reader: `wk boot`
-# prints how long an unclaimed machine takes to hand itself back, and reads it
-# from here rather than from the profile -- the image is what is booting, and
-# its profile may have changed since. Absent, that sentence came out as "returns
-# it in  s".
 watchdog=$IMG_WATCHDOG
 branch=$YOC_BRANCH
+branch_remote=${YOC_REMOTE:-origin}
 commit=$commit
 cross_target=$YOC_TARGET
 image_recipe=$YOC_IMAGE

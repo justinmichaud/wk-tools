@@ -14,12 +14,44 @@ and the Buildroot page's dev cycle):
    env-poisoning as "VERY IMPORTANT" because a poisoned env produces a broken
    archive with no error; the command must scrub its own environment rather
    than trusting the shell's.
-2. `built-product-archive ... archive` (or, for the buildroot fast path, just
-   the `libWPEWebKit*` libraries — a `--libs-only` flag).
+2. `built-product-archive --platform=wpe --release --cross-target=<t> archive`
+   (or, for the buildroot fast path, just the `libWPEWebKit*` libraries — a
+   `--libs-only` flag).
 3. Copy to the device over the tailnet (the proxy allows the pi-hosts
-   addresses on port 22; scp/rsync ride ssh).
-4. On the device: `built-product-archive extract` (or drop the libs into
-   `/usr/lib`).
+   addresses on port 22; scp/rsync ride ssh). The wiki's destination is
+   `root@<device>:/WebKit/WebKit/WebKitBuild/release.zip`.
+4. On the device: `cd /WebKit/WebKit && built-product-archive --platform=wpe
+   --release extract` (or drop the libs into `/usr/lib`).
+
+**The prerequisite this loop hides, and the reason `deploy` is not just a
+copy: the device needs a WebKit tree at `/WebKit/WebKit`.** **A skeleton, not a
+checkout** (decided 2026-08-21): the board needs the scripts the loop runs
+there -- `Tools/CISupport/built-product-archive` and
+`Tools/Scripts/run-minibrowser` and what they import -- not the source of
+WebKit, which is built on the workstation. So this is a one-time sync of a
+subtree at `wk pi setup`, not a clone, and not something to re-send per
+cycle. Steps 2 and 4
+and the `run-minibrowser` that follows are all WebKit's *own scripts*, and step
+4 and the launch run them **on the board**. The Yocto image deliberately does
+not carry them (`docs/HANDOFF-yocto.md` item 3 — it is the runtime, and the
+browser is what this loop sends), and the freshly built
+`downstream-yocto-wpe-2.48-rpi4` has no `/WebKit` at all. So provisioning that
+tree is part of `wk pi setup`, and `wk pi deploy` should refuse rather than
+scp into a directory that does not exist.
+
+Launching, for `wk pi bench` below — the environment has to come out of the
+running compositor, and the process to read it from is `weston-desktop-shell`
+rather than `weston`:
+
+    source <(strings /proc/$(pidof weston-desktop-shell)/environ \
+        | grep -P '(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)') \
+        && export XDG_RUNTIME_DIR WAYLAND_DISPLAY
+    Tools/Scripts/run-minibrowser --wpe -P wl \
+        "https://browserbench.org/Speedometer3.1/?startAutomatically=true"
+
+Software rendering, when the GPU path is the thing being ruled out:
+`WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1
+GALLIUM_DRIVER=softpipe` in front of it.
 
 ## `wk pi bench <device> <plan>`
 
