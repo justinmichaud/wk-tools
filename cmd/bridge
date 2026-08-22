@@ -80,6 +80,7 @@ load_bridge() {
     BR_DEVICE=""; BR_SSH=""; BR_HOSTNAME=""; BR_TAG=""; BR_SEGMENT=""
     BR_ROUTER=""; BR_IF=""; BR_POOL=""; BR_LEASES=""; BR_EGRESS=""
     BR_CAMERA=""; BR_REACHED_BY=""; BR_NOTE=""; BR_LAN_MAC=""; BR_CARD=""
+    BR_USER=""
     # shellcheck disable=SC1090
     . "$conf"
     BR_CONF="$conf"
@@ -93,6 +94,11 @@ load_bridge() {
     : "${BR_IF:=lan0}"
     : "${BR_EGRESS:=none}"
     : "${BR_CAMERA:=off}"
+    # The account the image logs in as. `user` is what pmbootstrap creates
+    # (PMO_USER in image/profiles.sh); it matters because --at reaches the phone
+    # by address, and an address carries no ssh_config `User` line the way the
+    # declared hostnames do.
+    : "${BR_USER:=user}"
 
     bridge_device_load "$BR_DEVICE" \
         || die "$conf names device '$BR_DEVICE', which bridge/devices.sh has never heard of.
@@ -100,34 +106,279 @@ load_bridge() {
 $(bridge_device_list | sed 's/^/      /')"
 }
 
-rsh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$BR_SSH" "$@"; }
-
-# Which name actually reaches the phone right now.
+# Every ssh this command makes, optionally through a jump host.
 #
-# The conf names it by its tailnet name, which is the right answer for every run
-# except the first: a freshly flashed phone has no tailnet identity at all --
-# `tailscale up` is something *this* command runs -- so the name it is reached
-# by before that has to come from somewhere else. mDNS is that somewhere: the
-# image carries avahi with the service enabled (image/pmos-build.sh), so
-# <hostname>.local answers on the LAN from the first boot.
+# --via exists because "the workstation can reach the phone" stopped being true
+# in a way no code fixes: measured 2026-08-21, this access point does not bridge
+# its 2.4 GHz radio to its 5 GHz radio or the wired LAN at layer 2. Every 5 GHz
+# and wired host reaches every other; the phone, the only 2.4 GHz client, answers
+# ARP to none of them. A machine that *is* on the phone's segment can still
+# carry the connection, so --via names it and ssh does the rest with ProxyJump.
+#
+# It is transport only. Nothing is executed on the jump host, and authentication
+# is still this machine's key against the phone -- which matters, because the
+# image holds the workstation's key and not the jump host's.
+BR_VIA=""
+_ssh_via() { [ -z "$BR_VIA" ] || printf '%s' "-J $BR_VIA"; }
+rsh() { ssh -o BatchMode=yes -o ConnectTimeout=10 $(_ssh_via) "$BR_SSH" "$@"; }
+
+# Run something with a hard ceiling on wall time.
+#
+# `timeout(1)` is GNU and absent on macOS, and per-tool timeout flags cannot be
+# trusted. ssh is the case that matters here: `ConnectTimeout` covers the TCP
+# connect and nothing after it, so a host that accepts port 22 and then says
+# nothing leaves ssh waiting on its own timers -- and a phone half-way into
+# suspend does exactly that. (BSD `nc -w` has the same shape of lie: it
+# documents itself as bounding connects and ran 75 s against a black-holed
+# address here, against 1.05 s for `-G1`.) So the ceiling lives here rather than
+# in any tool's own flag.
+_capped() { # <seconds> <cmd...>
+    local secs="$1"; shift
+    "$@" &
+    local pid=$! rc=0
+    ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+    local wd=$!
+    wait "$pid" 2>/dev/null || rc=$?
+    kill -TERM "$wd" 2>/dev/null
+    wait "$wd" 2>/dev/null || true
+    return "$rc"
+}
+
+_reaches() { # <destination>
+    _capped 20 ssh -o BatchMode=yes -o ConnectTimeout=8 $(_ssh_via) \
+        -o StrictHostKeyChecking=accept-new "$1" true >/dev/null 2>&1
+}
+
+# --- finding the phone when its name does not resolve ------------------------
+#
+# It has to be found automatically, because the name will *never* resolve before
+# the first provision on this network. `tailscale up` is what creates the tailnet
+# name, and mDNS -- the only other thing that would answer -- is broken here in
+# a way no code can fix: measured 2026-08-21, the phone's avahi was running and
+# publishing correctly, but the access point declines to forward multicast
+# between its 2.4 GHz and 5 GHz radios and the phone is on the band the
+# workstation is not.
+#
+# The thing that survived that measurement is what this is built on. *Unicast*
+# mDNS works perfectly: a query aimed straight at an address, port 5353, asking
+# for the phone's own name, is answered by the phone and by nothing else. It
+# needs no credentials, and it took 34 ms against a live responder here -- as
+# against two ssh handshakes and their timeouts, which is what an earlier version
+# of this used and why it took 100 seconds.
+#
+# So: collect candidate addresses, ask each one whether it is the phone, believe
+# the one that says yes. Identification is still the host stating its own name;
+# only the question got cheap.
+
+# This machine's /24, from whichever interface holds the default route. A /24 is
+# an assumption and a deliberate one: it is what every network this repo touches
+# uses, and a wrong guess costs a scan that finds nothing rather than a wrong
+# answer.
+_bridge_subnet() {
+    local ip=""
+    if is_macos; then
+        ip=$(route -n get default 2>/dev/null | awk '/interface:/ { print $2 }' \
+             | while read -r i; do ipconfig getifaddr "$i" 2>/dev/null; done | head -1)
+    else
+        ip=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -1)
+    fi
+    [ -n "$ip" ] || return 1
+    printf '%s' "${ip%.*}"
+}
+
+# Does this address claim to be the phone? One unicast mDNS query; what it prints
+# is the address the responder gives for its own name, which is what gets used --
+# more correct than the address asked, for a multi-homed host.
+#
+# `dig +short` writes its timeout message to *stdout* on some platforms, so the
+# answer is filtered to something that is actually an address. Without that
+# filter every timed-out host looks like a positive.
+_bridge_claims_name() { # <address>  -> prints the answered address
+    local got
+    got=$(_bridge_dig "$1" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+    [ -n "$got" ] || return 1
+    printf '%s' "$got"
+}
+
+# The query itself, run wherever it can actually reach the segment. With --via
+# that is the jump host, because this machine by definition cannot -- and a scan
+# from the wrong side of an L2 boundary finds nothing however correct it is.
+_bridge_dig() { # <address>
+    if [ -n "$BR_VIA" ]; then
+        ssh -o BatchMode=yes -o ConnectTimeout=8 "$BR_VIA" \
+            "dig +short +time=1 +tries=1 @$1 -p 5353 $BR_HOSTNAME.local A" \
+            < /dev/null 2>/dev/null
+    else
+        dig +short +time=1 +tries=1 "@$1" -p 5353 "$BR_HOSTNAME.local" A 2>/dev/null
+    fi
+}
+
+# Ask every address in this machine's /24 whether it is the phone.
+#
+# Every address, not the neighbour table, and that correction is the whole
+# function. The first version built its candidate set from ARP and swept the
+# subnet with ICMP to populate it -- and the sweep added *nothing*: macOS
+# `arp -an` lists only resolved entries, so a sweep helps only for hosts that
+# answer ping. Measured: 8.5 seconds of sweeping, zero new candidates, and a
+# phone that was up the whole time never even got asked. ARP is not a list of
+# hosts that exist.
+#
+# A unicast mDNS query needs neither. The kernel resolves the address while
+# sending, and a host that ignores ICMP still answers for its own name. So this
+# asks all 254 directly: 6.4 seconds measured for the whole /24, which is less
+# than the sweep it replaces, with no ARP filtering and no second pass.
+#
+# 48 in flight, because an unbounded fan-out here once put 246 concurrent
+# processes on this machine.
+# Does this address answer ssh, and call itself the phone?
+#
+# The authoritative identification, and the fallback for when the mDNS one
+# cannot work. avahi renames itself on a name conflict -- observed here as
+# `tailnet-bridge-generic-2.local`, at which point the phone stops answering for
+# the name it was asked about while being perfectly reachable. `hostname` over
+# ssh cannot drift like that: it is the phone stating what it is, with no
+# announcement protocol in between.
+#
+# Slower than one UDP packet, so it runs second: a TCP probe to gate, then ssh
+# only for the handful that answer.
+_bridge_ssh_is_phone() { # <address> -> prints the address
+    local u got
+    _capped 4 nc -z "$1" 22 >/dev/null 2>&1 || return 1
+    for u in root "$BR_USER"; do
+        got=$(_capped 10 ssh -o BatchMode=yes -o ConnectTimeout=4 \
+                  -o StrictHostKeyChecking=accept-new "$u@$1" hostname 2>/dev/null \
+              | tr -d '\r')
+        [ "$got" = "$BR_HOSTNAME" ] && { printf '%s' "$1"; return 0; }
+    done
+    return 1
+}
+
+bridge_discover() {
+    local base d i n=0 hit when="${BRIDGE_ELAPSED:+$BRIDGE_ELAPSED  }"
+    if [ -z "$BR_VIA" ]; then
+        have dig || { warn "${when}no dig(1) here, so no host can be asked its name"; return 1; }
+    fi
+    if [ -n "$BR_VIA" ]; then
+        base=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$BR_VIA" \
+                 "ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \\([0-9.]*\\).*/\\1/p' | head -1" \
+                 < /dev/null 2>/dev/null)
+        base="${base%.*}"
+        [ -n "$base" ] || { warn "${when}cannot tell which subnet $BR_VIA is on"; return 1; }
+    else
+        base=$(_bridge_subnet) || { warn "${when}cannot tell which subnet this machine is on"; return 1; }
+    fi
+
+    d=$(mktemp -d) || return 1
+    for i in $(seq 1 254); do
+        ( a=$(_bridge_claims_name "$base.$i") && printf '%s' "$a" > "$d/hit.$i" ) &
+        n=$((n + 1))
+        [ $(( n % 48 )) -eq 0 ] && wait
+    done
+    wait
+    hit=$(cat "$d"/hit.* 2>/dev/null | head -1)
+    rm -rf "$d"
+    [ -z "$hit" ] || { printf '%s' "$hit"; return 0; }
+
+    # Nobody answered for the name. Ask over ssh instead -- see
+    # _bridge_ssh_is_phone for why the two questions are not the same one.
+    log "  ${when}no host in $base.0/24 answers for $BR_HOSTNAME.local -- asking over ssh"
+    d=$(mktemp -d) || return 1
+    n=0
+    for i in $(seq 1 254); do
+        ( a=$(_bridge_ssh_is_phone "$base.$i") && printf '%s' "$a" > "$d/hit.$i" ) &
+        n=$((n + 1))
+        [ $(( n % 32 )) -eq 0 ] && wait
+    done
+    wait
+    hit=$(cat "$d"/hit.* 2>/dev/null | head -1)
+    rm -rf "$d"
+    [ -n "$hit" ] || {
+        log "  ${when}no host in $base.0/24 is $BR_HOSTNAME, by name or by ssh"
+        return 1
+    }
+    printf '%s' "$hit"
+}
+
+# Which name or address actually reaches the phone right now.
+#
+# Three attempts, in decreasing order of "somebody said so":
+#
+#   --at <host>         an address given on the command line. Explicit beats
+#                       inferred, so it is tried first and, if it does not
+#                       answer, refused rather than worked around.
+#   $BR_SSH             the conf's name -- the tailnet name, and therefore the
+#                       right answer for every run after the first.
+#   <hostname>.local    mDNS.
+#
+# mDNS is tried and not relied on. It fails here in a way no code can fix:
+# measured on 2026-08-21, the phone's avahi was running and publishing correctly
+# -- a unicast mDNS query aimed at its address returned the right answer --
+# while the access point declined to forward the multicast between its 2.4 GHz
+# and 5 GHz radios. When it does not answer, `--at` is the way in.
+#
+# There was a fourth attempt for a while: sweep the subnet and ask every host
+# with port 22 open what it was called. It is gone, and why is worth recording.
+# It was built because the workstation could not reach the phone -- which turned
+# out to be neither topology nor configuration but clients reassociating while
+# the access point's channel was being changed underneath the diagnosis. There
+# was nothing to route around. What it left was thirty seconds per invocation
+# and a subnet-wide ping sweep across the very link the target depends on, aimed
+# at a radio this repo documents as dropping associations under load. `--at`
+# covers the same ground in four lines and never guesses.
 #
 # accept-new rather than no host-key checking at all. A fresh image brings a new
 # host key and there is nothing to compare it against, but every run after this
 # one should be checked -- root on a bridge is equivalent to whatever is behind
 # it, so "the key changed" has to stay a question somebody gets asked.
 resolve_ssh() {
-    ssh -o BatchMode=yes -o ConnectTimeout=8 "$BR_SSH" true >/dev/null 2>&1 && return 0
+    local u
 
-    local mdns="$BR_HOSTNAME.local"
-    if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new \
-           "$mdns" true >/dev/null 2>&1; then
-        warn "$BR_SSH does not resolve yet, but $mdns answers -- using that."
-        log  "  That is the expected shape of a first run: the phone has no tailnet"
-        log  "  name until this command brings tailscale up, and mDNS is what"
-        log  "  reaches it in the meantime."
-        BR_SSH="$mdns"
-        return 0
+    if [ -n "${BR_AT:-}" ]; then
+        # root first, for the reason resolve_priv prefers it: the image seeds
+        # root's key precisely so provisioning needs no password. The console
+        # user keeps an older image, built before that, still reachable.
+        for u in root "$BR_USER"; do
+            if _reaches "$u@$BR_AT"; then BR_SSH="$u@$BR_AT"; return 0; fi
+        done
+        die "--at $BR_AT does not answer ssh as root or '$BR_USER'.
+    An address given on the command line is taken at its word rather than worked
+    around, because the alternative is provisioning something else. Drop --at to
+    try the phone's names instead."
     fi
+
+    _reaches "root@${BR_SSH#*@}" && { BR_SSH="root@${BR_SSH#*@}"; return 0; }
+    _reaches "$BR_SSH" && return 0
+
+    # root first here too. dotfiles/ssh/config sets `User user` for these names,
+    # so the bare name always lands as the console user -- which then makes
+    # resolve_priv bootstrap root on every run, even once root already has the
+    # key. Asking for root explicitly skips that.
+    local mdns="$BR_HOSTNAME.local"
+    for u in "root@$mdns" "$mdns"; do
+        if _reaches "$u"; then
+            warn "$BR_SSH does not resolve yet, but $mdns answers -- using that."
+            BR_SSH="$u"
+            return 0
+        fi
+    done
+
+    # Callers that poll pass --names-only: discovery sweeps a subnet and must not
+    # run once every five seconds. wait_for_phone does the cheap attempts on
+    # every tick and this one on a much slower cadence.
+    [ "${1:-}" = --names-only ] && return 1
+
+    local found
+    found=$(bridge_discover) || return 1
+    for u in root "$BR_USER"; do
+        if _reaches "$u@$found"; then
+            changed "found $BR_NAME at $found (it identifies itself as $BR_HOSTNAME)"
+            log  "  a DHCP lease, so it is used for this run and not written down."
+            log  "  Once tailscale is up, $BR_HOSTNAME is the name that lasts."
+            BR_SSH="$u@$found"
+            return 0
+        fi
+    done
+    warn "$found says it is $BR_HOSTNAME but does not accept ssh as root or '$BR_USER'."
     return 1
 }
 
@@ -135,14 +386,94 @@ resolve_ssh() {
 # ordinary user with doas (Alpine's default) or sudo, and a provisioner that
 # assumed root would fail on the first write with a permission error rather
 # than a sentence anyone can act on.
+# Give root the console user's ssh key, using the image's own console password.
+#
+# The password is not a secret and image/profiles.sh says so at length:
+# pmbootstrap handles it in plain text by design, bridge/provision.sh turns off
+# password authentication over the network, and it exists to be the recovery path
+# on the phone's own screen. That makes it usable for exactly one thing --
+# bootstrapping key-based root on a phone whose image did not seed it.
+#
+# Worth doing here rather than printing two install(1) commands for somebody to
+# type on a phone. Newer images seed root's key at build time
+# (image/pmos-build.sh), but a phone flashed from an older card lands here, and
+# "reachable, healthy, and impossible to provision" is not a state to leave
+# anyone in. Only ever reached when root does not already work.
+bridge_bootstrap_root() {
+    local prof pw target host
+    prof=$(bridge_profile "$BR_NAME" || true)
+    [ -n "$prof" ] || return 1
+    pw=$(profile_field "$prof" PMO_PASSWORD)
+    [ -n "$pw" ] || return 1
+
+    info "giving root the same ssh key, so provisioning needs no password"
+    log  "  pmbootstrap installs the key for '$BR_USER' only, and that account cannot"
+    log  "  become root without one. Using PMO_PASSWORD from image/profiles.sh, which"
+    log  "  is deliberately not a secret; images built after 2026-08-21 do this at"
+    log  "  build time and skip this step entirely."
+
+    # -tt because doas reads its prompt from a tty and refuses a pipe outright.
+    # One doas invocation, so one prompt to answer.
+    #
+    # Two details, both learned by it failing on real hardware:
+    #
+    # The password is sent *after* a pause, not immediately. Password readers
+    # flush pending terminal input before prompting -- which is the right thing
+    # for them to do, since it stops a typed-ahead password being captured -- so
+    # writing it up front means it is echoed to the pty and then thrown away,
+    # and doas sits waiting for input that has already been consumed. Measured:
+    # instant write hangs, three-second delay authenticates.
+    #
+    # And this is deliberately *not* wrapped in _capped. That helper backgrounds
+    # the command, and bash redirects a background job's stdin from /dev/null --
+    # so the password would never arrive at all. The bound here is doas itself:
+    # it gives up after its own retries, and stdin closes right after.
+    #
+    # All output is discarded: a pty echoes what is written to it, and the
+    # password must not reach a log.
+    target="/home/$BR_USER/.ssh/authorized_keys"
+    ( sleep 3; printf '%s\n' "$pw"; sleep 3 ) \
+        | ssh -tt -o ConnectTimeout=15 \
+              -o StrictHostKeyChecking=accept-new "$BR_SSH" \
+              "doas sh -c 'install -d -o root -g root -m 700 /root/.ssh && install -o root -g root -m 600 $target /root/.ssh/authorized_keys'" \
+              >/dev/null 2>&1 || true
+
+    # Proven, not assumed. The pipeline above cannot report failure reliably --
+    # with a pty, ssh's exit status is about the pty and not the command -- so
+    # the only honest test is whether root now answers.
+    host="${BR_SSH#*@}"
+    if _reaches "root@$host"; then
+        BR_SSH="root@$host"
+        changed "root on $host now accepts the same key"
+        return 0
+    fi
+    return 1
+}
+
 PRIV=""
 resolve_priv() {
     local uid
     resolve_ssh || die "cannot reach $BR_NAME.
-    Tried $BR_SSH and $BR_HOSTNAME.local, and neither answered. A bridge is
-    provisioned over ssh against a phone that is already running postmarketOS --
-    'wk help bridge' covers building the card and getting it in there, which is
-    the one hands-on step."
+    Tried the name in its conf and $BR_HOSTNAME.local, and neither answered.
+
+    If it was answering earlier, two things do this to an unprovisioned phone
+    and the role fixes both -- which is why they are now also baked into the
+    image (image/pmos-build.sh), since a phone that needs them in order to
+    answer ssh cannot be sent them over ssh:
+      - WiFi power save. The RTL8723CS powers its RF side down when idle and
+        misses frames aimed at it, so the phone reaches its router while
+        answering nothing, ARP included. Proving it takes one command on the
+        phone: iw dev wlan0 set power_save off
+      - suspend. phosh idles it off the network after a few minutes.
+
+    mDNS is unreliable here through the network rather than the phone: an access
+    point that will not forward multicast between its radios breaks the name
+    while leaving the phone perfectly reachable. So if you know the address:
+
+        wk bridge <sub> $BR_NAME --at <address>
+
+    Otherwise the phone is off, on another subnet, or was never installed;
+    'wk bridge provision $BR_NAME' does the whole path."
     uid=$(rsh 'id -u') || die "cannot ssh to $BR_SSH.
     A bridge is provisioned over ssh against a phone that is already running
     postmarketOS and already answers -- 'wk help bridge' covers getting it
@@ -155,19 +486,31 @@ resolve_priv() {
     fi
     # Proven, not assumed: a doas that will ask for a password fails silently
     # halfway through a provision run, which is the worst place to find out.
-    rsh "$PRIV true" >/dev/null 2>&1 \
-        || die "'$PRIV' on $BR_SSH needs a password (or is not permitted).
-    Provisioning is non-interactive over ssh. Give this user a passwordless
-    rule on the phone, or ssh in as root."
+    if ! rsh "$PRIV true" >/dev/null 2>&1; then
+        # Not a dead end. The console password is known and not secret, so root
+        # can be given the key it should have had -- see bridge_bootstrap_root.
+        if bridge_bootstrap_root; then PRIV=""; return 0; fi
+        die "'$PRIV' on $BR_SSH needs a password, and root could not be given the key either.
+    Provisioning is non-interactive over ssh, so one of the two has to work.
+    By hand on the phone, once:
+        doas install -d -o root -g root -m 700 /root/.ssh
+        doas install -o root -g root -m 600 ~/.ssh/authorized_keys /root/.ssh/authorized_keys
+    Newer images do this at build time (image/pmos-build.sh)."
+    fi
 }
 
 usage() {
     die "usage: wk bridge ls
-       wk bridge provision <name> [--disk <machine>:<dev>] [--image <id>]
-                                  [--rebuild] [--no-write] [--dry-run]
-       wk bridge setup <name> [--dry-run]
-       wk bridge status <name>
-       wk bridge rm <name>
+       wk bridge provision <name> [--at <host>] [--disk <machine>:<dev>]
+                                  [--image <id>] [--rebuild] [--no-write] [--dry-run]
+       wk bridge setup <name> [--at <host>] [--no-tailnet] [--dry-run]
+       wk bridge tailnet <name> [--at <host>]
+       wk bridge status <name> [--at <host>]
+       wk bridge rm <name> [--at <host>]
+
+    --at <host> reaches the phone at an address rather than by name, for the run
+    before it has a tailnet identity and where mDNS does not carry. Nothing is
+    written down: it is a DHCP lease.
 
     provision is the whole path -- image, card, the phone, the role. setup is
     the ssh half of it, against a phone that already boots.
@@ -354,12 +697,35 @@ pause() {
 # phone booting pmOS is a minute or two -- phosh comes up, and the RTL8723CS
 # takes its time to associate -- and a single attempt would fail on every first
 # boot.
+# Poll until the phone answers.
+#
+# Two cadences, and the split is not cosmetic. The cheap attempts -- the conf's
+# name and mDNS -- are a couple of packets and run on every tick. Discovery
+# sweeps a subnet, so it runs every DISCOVER_EVERY seconds instead: the first
+# version called the whole of resolve_ssh on every five-second tick and
+# therefore re-swept the subnet a dozen times a minute, across the very link the
+# phone it was looking for depends on.
 wait_for_phone() {
-    local budget="${1:-420}" start="$SECONDS"
-    while [ $((SECONDS - start)) -lt "$budget" ]; do
-        # Redirected for the reason disks_now is: resolve_ssh runs ssh, ssh eats
-        # stdin, and this loop runs against a terminal somebody is waiting at.
-        if resolve_ssh < /dev/null; then return 0; fi
+    local budget="${1:-420}" start="$SECONDS" last_disc=-999 now
+    local DISCOVER_EVERY=60
+    while :; do
+        now=$((SECONDS - start))
+        [ "$now" -lt "$budget" ] || break
+
+        # Redirected because ssh eats stdin and this loop runs against a
+        # terminal somebody is waiting at.
+        if resolve_ssh --names-only < /dev/null; then return 0; fi
+
+        if [ $((now - last_disc)) -ge "$DISCOVER_EVERY" ]; then
+            last_disc="$now"
+            # One line per round from bridge_discover itself, saying what it
+            # actually looked at. The first version reprinted the same two-line
+            # banner every five seconds and said nothing about what it found,
+            # which is worse than silence.
+            BRIDGE_ELAPSED=$(printf '%d:%02d' $((now / 60)) $((now % 60)))
+            printf '\n' >&2
+            if resolve_ssh < /dev/null; then return 0; fi
+        fi
         printf '.' >&2
         sleep 5
     done
@@ -632,9 +998,9 @@ route_approved() {
 # comes up, the role goes on, the policy gets applied, and the route is checked
 # rather than assumed.
 provision_finish() {
-    info "waiting for $BR_NAME to answer (up to 7 minutes)"
-    log  "  it has no tailnet name until setup runs, so $BR_HOSTNAME.local is what"
-    log  "  answers on a first boot -- either name is fine here."
+    info "waiting for $BR_NAME (up to 7 minutes)"
+    log  "  trying, in order: its conf name, $BR_HOSTNAME.local, and a unicast mDNS"
+    log  "  question to each host on this subnet asking whether it is the phone."
     wait_for_phone 420 || die "$BR_NAME never answered.
     Tried $BR_SSH and $BR_HOSTNAME.local for 7 minutes. In order of likelihood:
       - the WiFi kill switch is off, so the phone is up and on no network
@@ -656,6 +1022,14 @@ provision_finish() {
     # the auth key only when the node actually needs one, and prints the policy.
     log ""
     cmd_setup
+
+    if [ -n "${BR_NO_TAILNET:-}" ]; then
+        log ""
+        info "$BR_NAME is provisioned except for the tailnet"
+        log  "  status:   wk bridge status $BR_NAME"
+        log  "  finish:   wk bridge tailnet $BR_NAME   (needs a tag:bridge auth key)"
+        return 0
+    fi
 
     # --- the policy ---
     # The one thing setup printed and could not apply. Asked for here, and then
@@ -713,14 +1087,16 @@ cmd_provision() {
     local disk="" image="" rebuild="" no_write="" dry=""
     while [ $# -gt 0 ]; do
         case "$1" in
+            --at)       BR_AT="${2:-}"; [ -n "${BR_AT:-}" ] || die "--at needs a host or address"; shift 2 ;;
+            --no-tailnet) BR_NO_TAILNET=1; shift ;;
             --disk)     disk="${2:-}";  [ -n "$disk" ]  || die "--disk needs <machine>:<device>"; shift 2 ;;
             --image)    image="${2:-}"; [ -n "$image" ] || die "--image needs an image id"; shift 2 ;;
             --rebuild)  rebuild=1; shift ;;
             --no-write) no_write=1; shift ;;
             --dry-run)  dry=1; shift ;;
             *) die "unknown option: $1
-    wk bridge provision <name> [--disk <machine>:<dev>] [--image <id>]
-                               [--rebuild] [--no-write] [--dry-run]" ;;
+    wk bridge provision <name> [--at <host>] [--disk <machine>:<dev>]
+                               [--image <id>] [--rebuild] [--no-write] [--dry-run]" ;;
         esac
     done
     [ -z "$rebuild" ] || [ -z "$image" ] \
@@ -810,9 +1186,16 @@ cmd_provision() {
             _step "stop, and ask you to power the phone OFF, remove the card, and boot it"
         fi
         _step "wait for the phone to answer, on its tailnet name or ${BR_HOSTNAME}.local"
-        _step "run 'wk bridge setup $BR_NAME' against it (which asks for a tagged auth"
-        log   "     key if the node is not on the tailnet yet, and prints the policy)"
-        _step "stop, and ask you to apply that policy -- then confirm the route came live"
+        if [ -n "${BR_NO_TAILNET:-}" ]; then
+            _step "run 'wk bridge setup $BR_NAME --no-tailnet': the whole role except"
+            log   "     joining the tailnet, so no auth key is needed and nothing here"
+            log   "     waits on a console paste"
+            _step "stop, leaving 'wk bridge tailnet $BR_NAME' as the one command left"
+        else
+            _step "run 'wk bridge setup $BR_NAME' against it (which asks for a tagged auth"
+            log   "     key if the node is not on the tailnet yet, and prints the policy)"
+            _step "stop, and ask you to apply that policy -- then confirm the route came live"
+        fi
         return 0
     fi
 
@@ -929,7 +1312,10 @@ cmd_setup() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) dry=1 ;;
-            *) die "unknown option: $1" ;;
+            --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift ;;
+            --no-tailnet) BR_NO_TAILNET=1 ;;
+            *) die "unknown option: $1
+    wk bridge setup <name> [--at <host>] [--no-tailnet] [--dry-run]" ;;
         esac
         shift
     done
@@ -987,7 +1373,13 @@ cmd_setup() {
     local authkey="" ts_state
     ts_state=$(rsh "$PRIV tailscale status --json --peers=false 2>/dev/null \
                     | jq -r '.BackendState'" 2>/dev/null) || ts_state=""
-    if [ "$ts_state" != Running ]; then
+    if [ -n "${BR_NO_TAILNET:-}" ]; then
+        log ""
+        info "--no-tailnet: applying the role but not joining the tailnet"
+        log  "  no auth key is needed for this run. 'wk bridge tailnet $BR_NAME' is"
+        log  "  the one step left afterwards, and it is the only one that needs a"
+        log  "  credential fetched by hand."
+    elif [ "$ts_state" != Running ]; then
         log ""
         info "this node is not on the tailnet yet, so it needs an auth key"
         log  "  it MUST be tagged $BR_TAG: a tagged node never key-expires, and an"
@@ -1034,8 +1426,19 @@ cmd_setup() {
         BR_EGRESS=$(sh_quote "$BR_EGRESS") \
         BR_CAMERA=$(sh_quote "$BR_CAMERA") \
         BR_LAN_MAC=$(sh_quote "$BR_LAN_MAC") \
+        BR_NO_TAILNET=$(sh_quote "${BR_NO_TAILNET:-}") \
         sh /usr/local/lib/wk-bridge/provision.sh" \
         || die "provisioning failed on $BR_SSH -- nothing here changed"
+
+    if [ -n "${BR_NO_TAILNET:-}" ]; then
+        log ""
+        info "health check (the tailnet parts will fail, by design)"
+        rsh "$PRIV /usr/local/sbin/wk-bridge-healthcheck" || true
+        log ""
+        info "$BR_NAME has the whole role except the tailnet"
+        log  "  finish it with:  wk bridge tailnet $BR_NAME"
+        return 0
+    fi
 
     # The one thing this cannot apply, and must therefore print: the tailnet
     # policy. Applying it needs an API key with policy-write scope, and a
@@ -1073,8 +1476,39 @@ EOF
         warn "the health check reported problems -- see above; 'wk bridge status $BR_NAME' re-runs it"
 }
 
+# --- tailnet -----------------------------------------------------------------
+#
+# The last step, on its own, because it is the only one that needs a credential
+# a person has to go and fetch -- and because `tailscale up --advertise-tags` is
+# settable only at login, which makes it the one part of the role that is not
+# freely repeatable. Splitting it out means everything else can be applied,
+# verified and iterated on without a key in hand, which is what the rest of this
+# command became usable for.
+cmd_tailnet() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
+            *) die "unknown option: $1
+    wk bridge tailnet <name> [--at <host>]" ;;
+        esac
+    done
+    resolve_priv
+    rsh "$PRIV test -f /etc/wk-bridge.conf" 2>/dev/null \
+        || die "$BR_SSH has no bridge role on it yet.
+    'wk bridge setup $BR_NAME --no-tailnet' applies everything else first; this
+    command is only the tailnet half."
+    BR_NO_TAILNET=""
+    cmd_setup "$@"
+}
+
 # --- status ------------------------------------------------------------------
 cmd_status() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
+            *) die "unknown option: $1" ;;
+        esac
+    done
     resolve_priv
     rsh "$PRIV test -x /usr/local/sbin/wk-bridge-healthcheck" 2>/dev/null \
         || die "$BR_SSH answers but has no bridge role on it.
@@ -1088,6 +1522,12 @@ cmd_status() {
 # behind is a pmOS phone that answers ssh -- which is exactly the state
 # `wk bridge setup` expects to find.
 cmd_rm() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
+            *) die "unknown option: $1" ;;
+        esac
+    done
     resolve_priv
     log "this removes the bridge role from $BR_SSH:"
     log "  services       wk-bridge-{dhcp,nftables,netwatch,watchdog,usb-host,camera}"
@@ -1117,6 +1557,7 @@ rm -f /etc/wk-bridge.conf \
       /etc/udev/rules.d/70-wk-bridge-net.rules \
       /etc/sysctl.d/99-wk-bridge.conf \
       /etc/NetworkManager/conf.d/99-wk-bridge.conf \
+      /etc/NetworkManager/conf.d/98-wk-bridge-dns.conf \
       /etc/NetworkManager/dispatcher.d/50-wk-bridge-gro \
       /etc/NetworkManager/system-connections/wk-bridge-*.nmconnection \
       /etc/chrony/conf.d/wk-bridge.conf \
@@ -1156,7 +1597,7 @@ case "$ACTION" in
     ls)
         cmd_ls
         ;;
-    setup|status|rm|provision)
+    setup|status|rm|provision|tailnet)
         NAME="${1:-}"; shift || true
         [ -n "$NAME" ] || die "usage: wk bridge $ACTION <name>
     Declared bridges:$(bridge_names | sed 's/^/ /' | tr -d '\n')"

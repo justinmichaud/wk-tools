@@ -43,15 +43,19 @@ printf '\033[1m%s\033[0m (%s)\n' "$name" "$device"
 hdr "Uplink"
 wifi=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }')
 [ -n "$wifi" ] || wifi=wlan0
-addr=$(ip -4 -br addr show dev "$wifi" 2>/dev/null | awk '{print $3}')
+# `-o`, not `-br`. BusyBox ip -- which is what Alpine and therefore pmOS ships
+# -- has no brief mode: `ip -4 -br addr` exits 1 with a usage message, so this
+# read back empty and the check reported an uplink with no address on a phone
+# holding a perfectly good lease. `-o[neline]` is in BusyBox's own usage string.
+addr=$(ip -4 -o addr show dev "$wifi" 2>/dev/null | awk '{print $4; exit}')
 if [ -n "$addr" ]; then ok "$wifi $addr"; else bad "$wifi has no IPv4 address"; fi
 note "$(iw dev "$wifi" link 2>/dev/null | awk '/SSID|signal/ { $1 = $1; print }' | tr '\n' ' ')"
 ps=$(iw dev "$wifi" get power_save 2>/dev/null | awk '{print $3}')
 if [ "$ps" = off ]; then ok "wifi power save off"; else bad "wifi power save is ON ($ps) -- causes dropped links"; fi
 
 hdr "Segment ${segment:-?}"
-if ip -br addr show "$iface" >/dev/null 2>&1; then
-    ok "$iface $(ip -4 -br addr show "$iface" | awk '{print $3}')"
+if ip -o link show "$iface" >/dev/null 2>&1; then
+    ok "$iface $(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4; exit}')"
     if [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = 1 ]; then
         ok "cable connected"
     else
@@ -136,6 +140,38 @@ case "$egress" in
     *) ok "egress: none (nothing behind this bridge reaches the internet)" ;;
 esac
 
+# The two that took a whole afternoon to find, both invisible in every other
+# check: a bridge with no DNS and a bridge at 1970 both look like "no internet"
+# while ping and routing are perfect, and both stop `tailscale up` dead.
+hdr "Name resolution and time"
+if [ -f /etc/resolv.conf ]; then
+    ns=$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null)
+    case "$(grep '^nameserver' /etc/resolv.conf 2>/dev/null | head -1)" in
+        *127.0.0.53*)
+            bad "resolv.conf points at 127.0.0.53 -- a systemd-resolved stub, and there is no systemd-resolved here"
+            note "every lookup fails while routing works. NetworkManager should own this file." ;;
+        '') bad "resolv.conf lists no nameserver" ;;
+        *)  if [ "${ns:-0}" -gt 0 ]; then ok "resolv.conf: $ns nameserver(s)"; else bad "resolv.conf lists no nameserver"; fi ;;
+    esac
+else
+    bad "no /etc/resolv.conf at all"
+fi
+if nslookup login.tailscale.com >/dev/null 2>&1; then
+    ok "DNS resolves"
+else
+    bad "DNS does not resolve -- tailscale cannot reach its coordination server"
+fi
+
+# A clock this far out fails every TLS certificate check there is, which is what
+# a phone with no RTC does on every boot until chrony steps it.
+year=$(date -u +%Y)
+if [ "${year:-1970}" -ge 2024 ] 2>/dev/null; then
+    ok "clock sane ($(date -u '+%Y-%m-%d %H:%M UTC'))"
+else
+    bad "clock is $year -- every TLS check fails, so tailscale cannot log in"
+    note "chrony needs 'makestep 1.0 -1' on a device with no RTC"
+fi
+
 hdr "Hardening"
 pwauth=$(sshd -T 2>/dev/null | awk '/^passwordauthentication/ { print $2; exit }')
 if [ "$pwauth" = no ]; then ok "SSH password auth disabled"; else bad "SSH password auth is ENABLED ($pwauth)"; fi
@@ -174,8 +210,26 @@ if [ "$camera" != off ]; then
 fi
 
 hdr "System"
-crashed=$(rc-status --crashed 2>/dev/null | sed '/^$/d')
-if [ -z "$crashed" ]; then ok "no crashed services"; else bad "crashed: $(printf '%s' "$crashed" | tr '\n' ' ')"; fi
+# Crashed services, minus the ones whose "crash" is how they are built.
+#
+# OpenRC marks a service crashed when its process is gone while the service is
+# marked started -- which is the normal end state of a one-shot. pmOS ships two
+# that do exactly that, and reporting them as faults every single run trains
+# whoever reads this to skip the crashed line, which is the one line here that
+# must never be skipped.
+#
+#   kill-pbsplash        "Stop the splash animation": runs once, exits
+#   postmarketos-tweakd  settings daemon; short-lived on a headless-ish boot,
+#                        and nothing in this role depends on it
+#
+# Anything else crashing is reported.
+crashed=$(rc-status --crashed 2>/dev/null | sed '/^$/d' \
+          | grep -vxE 'kill-pbsplash|postmarketos-tweakd')
+if [ -z "$crashed" ]; then
+    ok "no crashed services (ignoring pmOS one-shots kill-pbsplash, postmarketos-tweakd)"
+else
+    bad "crashed: $(printf '%s' "$crashed" | tr '\n' ' ')"
+fi
 note "uptime $(uptime | sed 's/^ *//')"
 for b in /sys/class/power_supply/*/capacity; do
     [ -f "$b" ] || continue

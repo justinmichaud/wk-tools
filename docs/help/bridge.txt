@@ -141,17 +141,91 @@ THE TWO LANES
     the console      user `user`, password `147147` -- the phone's own screen,
                      which is the recovery path when WiFi and ssh are both gone.
                      Password authentication over the network is off.
-    mDNS             avahi, with the service enabled in the image. On the very
-                     first boot there is no tailnet name yet -- `wk bridge
-                     setup` is what creates it -- so `<hostname>.local` is the
-                     whole of first contact, and setup falls back to it by
-                     itself.
+    mDNS             avahi, with the service enabled in the image -- one of
+                     several ways in, and no longer the one everything rests on.
+                     See FIRST CONTACT below: an access point that does not
+                     forward multicast between its radios breaks mDNS while
+                     leaving the phone perfectly reachable, which is a failure
+                     worth routing around rather than re-diagnosing each time.
+    root's ssh key   the same key as the console user's. pmbootstrap installs it
+                     for that user only, and that user cannot become root without
+                     typing a password -- so provisioning, which is
+                     non-interactive over ssh, died on its first privileged
+                     write. Root by key is the same authority as a passwordless
+                     doas rule and says so out loud.
 
   The image carries the device's own bootloader: pmbootstrap embeds it at the
   offset the device declares (`deviceinfo_sd_embed_firmware`, in units of 1024
   bytes -- 8 KiB on a PinePhone, 33 KiB on a Librem 5). The builder checks it is
   there rather than writing it, because writing it by hand overlapped
   pmbootstrap's copy and turned a working image into an unbootable card.
+
+FIRST CONTACT, AND WHY IT IS NOT JUST mDNS
+
+  A freshly installed phone has no tailnet identity -- `tailscale up` is
+  something `wk bridge setup` runs -- so the name in the conf does not resolve
+  until after the first successful provision. Something else has to reach it
+  that once.
+
+  And it has to reach it *while it is awake*, which is the circular bit. Step 4
+  of the role is "Never sleep" -- `IdleAction=ignore`, because a bridge that
+  suspends is a bridge that is down -- so until the role has been applied, phosh
+  idles the phone off the network after a few minutes. The first provision
+  therefore has to land in a window while somebody is at the phone; every run
+  after it can be driven from anywhere, because by then the phone stays up.
+
+  mDNS was that something, and it was too fragile to be the only one. The
+  failure that settled it (2026-08-21): the phone's avahi was running and
+  publishing `tailnet-bridge-generic.local` correctly -- a unicast mDNS query
+  aimed straight at its address returned the right answer -- but the access point
+  does not forward multicast between its 2.4 GHz and 5 GHz radios, and the phone
+  was on the band the workstation was not. Unicast worked the whole time;
+  multicast never arrived. No amount of code here fixes an access point.
+
+  So there are four ways in, tried in decreasing order of "somebody said so":
+
+      --at <host>        an address on the command line. Explicit beats
+                         inferred, so this is tried first and, if it does not
+                         answer, refused rather than worked around.
+      the conf's name    right for every run after the first.
+      <hostname>.local   mDNS, by the ordinary multicast route.
+      discovery          ask this subnet's hosts, one at a time, who they are.
+
+  The last one exists because the first three cannot cover a first provision on
+  this network, and finding the phone by hand every time is the manual step this
+  whole verb exists to remove.
+
+  What it is built on is the half of the mDNS measurement that *worked*.
+  Multicast never arrives, but a **unicast** mDNS query -- aimed straight at an
+  address, port 5353, asking for the phone's own name -- is answered by the
+  phone and by nothing else. It needs no credentials and took 34 ms against a
+  live responder here. So discovery is: collect candidate addresses from the
+  neighbour table, ask each of them whether it is `<hostname>.local`, and believe
+  the one that says yes. Identification remains the host stating its own name --
+  never a MAC, a lease or a vendor string, all of which go stale and whose wrong
+  answer means provisioning something else.
+
+  Two things about it were learned the hard way and are worth not re-learning.
+
+  It asks in parallel with a one-second deadline, so a round costs a second
+  rather than a second per host: the first version asked over ssh instead --
+  two accounts, two handshakes, two timeouts each -- and took 100 seconds.
+
+  And the sweep that populates the neighbour table is bounded to 32 at a time.
+  254 pings at once with a one-second timeout gave a false negative on a phone
+  that had been up for an hour, because that many simultaneous ARP resolutions
+  thrash the table; and it is 254 packets across the very link the phone depends
+  on, aimed at a radio bridge/devices.sh describes as dropping associations
+  under load. The neighbour table is asked *first* and the sweep only happens if
+  that fails, so the common case costs neither.
+
+  One general caution, from the afternoon that produced all of this: an
+  intermittent network reads exactly like a misconfigured one, and only a
+  measurement separates them. Four hypotheses about this access point -- client
+  isolation, band isolation, a second AP, a remote firewall -- were all inferred
+  and all wrong; the workstation's unreachability was clients reassociating
+  while the AP's channel was being changed underneath the diagnosis. Measure
+  before building.
 
 GETTING IT ONTO INTERNAL STORAGE
 
@@ -293,6 +367,38 @@ DECLARING AND PROVISIONING ONE
   at all: provision checks, finds the route already approved, and says so.
 
 THINGS THAT WILL BITE YOU
+
+  WiFi power save makes the phone look absent. The RTL8723CS powers its RF side
+  down when idle and misses frames aimed at it, so the phone reaches its router
+  and answers nothing -- no ssh, no ping, not even ARP, from any host on the
+  LAN. It is indistinguishable from a phone that is off, on another subnet, or
+  behind an isolated access point, and it will send you looking at your router.
+  One command on the phone settles it:
+
+      iw dev wlan0 set power_save off
+
+  The role turns it off (step 5) and so does the image now, because a phone that
+  needs it in order to answer ssh cannot be sent it over ssh. If mDNS also looks
+  broken, suspect this first: a sleeping radio misses multicast, which reads as
+  an access point that will not forward it.
+
+  The phone has no RTC. It boots at 1970, and a 1970 clock fails every TLS
+  certificate check -- so `tailscale up` cannot reach its coordination server and
+  the symptom is "no internet" while ping and DNS both work. chrony must
+  `makestep`, not slew; the role sets `makestep 1.0 -1`.
+
+  And the sting in that tail: OpenRC caches its dependency tree and rebuilds it
+  only when an init script is *newer* than the cache. Files written while the
+  clock says 1970, then chrony steps to now, and the cache looks decades newer --
+  so the bridge services are enabled, symlinked, listed by `rc-update show`,
+  absent from `rc-status`, and never started at boot. The role runs
+  `rc-update -u` for exactly this. If services will not start at boot but start
+  by hand, that is the first thing to check.
+
+  BusyBox `ip` has no `-br`. Alpine, and so pmOS, ships BusyBox: `ip -br addr`
+  exits 1 with a usage message. Use `-o`. This was in the netwatch health test,
+  where it made a working uplink look dead on every check and set the escalation
+  ladder climbing towards reboots.
 
   A PinePhone has TWO card slots under the back cover, and the microSD is the
   UPPER one. The lower one is the micro-SIM. A card in the SIM slot gives you

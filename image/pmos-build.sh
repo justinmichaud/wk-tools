@@ -352,6 +352,19 @@ for doc in docs:
             print("[wifi]")
             print("mode=infrastructure")
             print("ssid=%s" % ssid)
+            # The hardware MAC, not a random one. NetworkManager randomises by
+            # default, which is right for a phone roaming between networks it
+            # does not own and wrong for infrastructure that lives on one
+            # network for months: a stable MAC is what lets this hold a DHCP
+            # reservation, appear as the same device in a router client list,
+            # and be recognised by anything that filters or approves devices.
+            # A randomised address arrives as a new unknown device on every
+            # association. Observed 2026-08-21: the phone came up as
+            # 2e:30:b8:f5:ce:48, locally-administered, and was reachable from
+            # nothing on the LAN despite holding a lease.
+            # (No apostrophes in here: this block is inside a single-quoted
+            # shell string, and one apostrophe ends it.)
+            print("cloned-mac-address=permanent")
             print("")
             print("[wifi-security]")
             print("key-mgmt=wpa-psk")
@@ -384,6 +397,86 @@ sudo -n mount "${loop}p2" "$OUT/mnt" || die "could not mount ${loop}p2"
 sudo -n install -o 0 -g 0 -m 0600 "$keyfile" \
     "$OUT/mnt/etc/NetworkManager/system-connections/wk-uplink.nmconnection"
 info "uplink: $ssid (the PSK stayed on this host)"
+
+# The same ssh key for root, and not as a convenience.
+#
+# pmbootstrap's `ssh_keys`/`ssh_key_glob` install the key for the console user
+# only, and that user cannot become root without a password: doas prompts, and
+# `wk bridge setup` is non-interactive over ssh by design, so the provisioner
+# died on its first privileged write with "'doas' needs a password". Which is a
+# phone that is reachable, healthy, and impossible to provision -- found the
+# hard way on 2026-08-21, after everything else about the image was verified.
+#
+# Root by key rather than a passwordless doas rule for the console user, because
+# they are the same authority and only one of them says so out loud. sshd's
+# default here is `prohibit-password`, so this permits exactly one thing: the
+# holder of this key. Password authentication over the network stays off, and
+# bridge/provision.sh turns it off again explicitly.
+# `sudo -n test`, not a bare test. pmbootstrap creates the account's .ssh as
+# mode 700 owned by the image's own uid, and this script runs unprivileged --
+# so reading through that directory needs search permission the builder does
+# not have, and a plain `[ -f ... ]` comes back false on a file that is plainly
+# there. Measured: the first build with this block warned "no authorized_keys
+# for user in the image" while `find` as root listed it. Every neighbouring
+# operation here already uses sudo; this test was the one that did not.
+if sudo -n test -f "$OUT/mnt/home/$PMO_USER/.ssh/authorized_keys"; then
+    sudo -n install -d -o 0 -g 0 -m 0700 "$OUT/mnt/root/.ssh"
+    sudo -n install -o 0 -g 0 -m 0600 \
+        "$OUT/mnt/home/$PMO_USER/.ssh/authorized_keys" \
+        "$OUT/mnt/root/.ssh/authorized_keys"
+    info "root: the same ssh key, so provisioning needs no password on the phone"
+else
+    warn "no authorized_keys for '$PMO_USER' in the image -- root gets no key either."
+    warn "  'wk bridge setup' will then fail on its first privileged write, because"
+    warn "  the console user cannot become root without typing a password."
+fi
+
+# The two settings a fresh phone must already have, because without them it is
+# not reliably reachable and therefore cannot be provisioned.
+#
+# Both are in bridge/provision.sh as well, and belonged here all along. The role
+# applies them, but the role is applied *over ssh* -- so a phone that needs them
+# in order to answer ssh can never receive them, and the first provision becomes
+# a race against the phone disappearing. That is not hypothetical: it cost most
+# of 2026-08-21.
+#
+#   power save    the RTL8723CS powers its RF side down when idle and misses
+#                 frames aimed at it. The phone can still *initiate* -- it wakes
+#                 to transmit -- so it reaches its router while answering
+#                 nothing, ARP included, which reads exactly like a phone that
+#                 is not on the network. Realtek power management on this part is
+#                 known-broken upstream, to the point that distributions carry
+#                 patches whose only job is to disable it.
+#   never sleep   an unprovisioned phone idles off the network after a few
+#                 minutes, taking the uplink with it.
+sudo -n install -d -o 0 -g 0 -m 0755 "$OUT/mnt/etc/NetworkManager/conf.d"
+printf '%s\n' \
+    '# Written into the image by image/pmos-build.sh. bridge/provision.sh writes' \
+    '# the same thing; a phone needs it before it can be provisioned at all.' \
+    '[connection]' \
+    'wifi.powersave=2' \
+    '' \
+    '[device]' \
+    'wifi.scan-rand-mac-address=no' \
+    | sudo -n tee "$OUT/mnt/etc/NetworkManager/conf.d/99-wk-bridge-reachable.conf" >/dev/null
+info "power save off and scan MAC pinned, so the phone answers before it is provisioned"
+
+if [ -d "$OUT/mnt/etc/elogind" ]; then
+    sudo -n install -d -o 0 -g 0 -m 0755 "$OUT/mnt/etc/elogind/logind.conf.d"
+    printf '%s\n' \
+        '# Written into the image by image/pmos-build.sh: a phone that suspends' \
+        '# before it is provisioned cannot be provisioned.' \
+        '[Login]' \
+        'HandlePowerKey=ignore' \
+        'HandleSuspendKey=ignore' \
+        'HandleHibernateKey=ignore' \
+        'HandleLidSwitch=ignore' \
+        'IdleAction=ignore' \
+        | sudo -n tee "$OUT/mnt/etc/elogind/logind.conf.d/10-wk-bridge-nosleep.conf" >/dev/null
+    info "suspend disabled in the image, so the first provision is not a race"
+else
+    warn "no /etc/elogind in the image -- cannot disable suspend before first boot"
+fi
 
 # A service is enabled by linking it into a runlevel -- that is all
 # `rc-update add` does -- and installing avahi does not start it.

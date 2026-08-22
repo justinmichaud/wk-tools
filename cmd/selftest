@@ -309,6 +309,54 @@ _bridge_image_disk() {
     echo "$root/images/$1/disk.img"
 }
 
+# Every pmos profile has to declare which bands its phone's radio has, because
+# the guard that stops an unreachable image being built reads that field and
+# skips silently when it is empty. A new phone added without it gets no
+# protection at all, and the failure it protects against is the expensive one:
+# an image that verifies perfectly and boots into isolation.
+chk_bridge_pmos_profiles_declare_bands() {
+    local prof out bad=""
+    for prof in bridge-pinephone bridge-librem5; do
+        out=$("$WK" sysimage build "$prof" --dry-run 2>&1) \
+            || { bad="$bad
+  $prof: --dry-run does not resolve: $out"; continue; }
+        printf '%s\n' "$out" | grep -q '^  radio ' \
+            || bad="$bad
+  $prof: its dry run names no radio bands, so PMO_WIFI_BANDS is unset and the
+      uplink-band guard would pass anything for this phone"
+    done
+    [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
+# Reaching the phone must not be able to hang, and this is checkable without a
+# phone.
+#
+# The bug it guards against was measured, not imagined: ssh's `ConnectTimeout`
+# bounds the TCP connect and nothing after it, and BSD `nc -w` documents itself
+# as "Timeout for connects and final net reads" while running 75 seconds against
+# a black-holed address (1.05 s for `-G1`). A phone half-way into suspend
+# accepts and stalls exactly that way, so the ceiling is enforced by `_capped`
+# rather than by trusting any tool's own flag -- and what is tested here is the
+# ceiling, not the flag.
+chk_bridge_probe_cannot_hang() {
+    local t0 t1 d
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/lib/common.sh"
+    eval "$(sed -n '/^_capped()/,/^}/p' "$WK_ROOT/cmd/bridge")"
+    eval "$(sed -n '/^_reaches()/,/^}/p' "$WK_ROOT/cmd/bridge")"
+
+    # The cap itself: a command that would run for 20s must not.
+    t0=$(date +%s); _capped 1 sleep 20 >/dev/null 2>&1 || true; t1=$(date +%s)
+    d=$((t1 - t0))
+    [ "$d" -le 4 ] || { echo "_capped 1 took ${d}s -- the ceiling is not being enforced"; return 1; }
+
+    # And a reachability attempt against an address that will never answer.
+    # 192.0.2.1 is TEST-NET-1, unroutable anywhere this runs.
+    t0=$(date +%s); _reaches root@192.0.2.1 >/dev/null 2>&1 || true; t1=$(date +%s)
+    d=$((t1 - t0))
+    [ "$d" -le 16 ] || { echo "an unroutable address took ${d}s -- reaching the phone can hang"; return 1; }
+}
+
 chk_bridge_rm_is_inverse() {
     local written removed p tok covered missing=""
 
@@ -1439,6 +1487,8 @@ if want quick; then
     check "resolves the whole chain with no"                               chk_bridge_provision_resolves
     check "refuses a headless run before it erases anything"               chk_bridge_provision_needs_a_tty
     check "can actually be told apart by content"                          chk_bridge_image_heads_are_distinguishable
+    check "every pmos profile declares"                                    chk_bridge_pmos_profiles_declare_bands
+    check "reaching the phone cannot hang"                                 chk_bridge_probe_cannot_hang
 fi
 
 if want state; then

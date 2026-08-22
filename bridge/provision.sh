@@ -48,6 +48,15 @@ BR_EGRESS="${BR_EGRESS:-none}"
 BR_CAMERA="${BR_CAMERA:-off}"
 BR_LAN_MAC="${BR_LAN_MAC:-}"
 
+# Everything except joining the tailnet. The tailnet step is the only one that
+# needs a credential a person has to fetch, and it is the only one that is not
+# idempotent in the cheap sense -- `tailscale up --advertise-tags` can only be
+# set at login. So it is separable: the whole role can be applied and verified
+# without it, which is what makes the rest of this script something a run can
+# iterate on. Set BR_NO_TAILNET=1 to stop short; the daemon is still enabled and
+# started, so `wk bridge tailnet <name>` afterwards is one command.
+BR_NO_TAILNET="${BR_NO_TAILNET:-}"
+
 # The auth key arrives in a 0600 file on tmpfs rather than in the environment
 # or on a command line: argv is world readable in /proc, so a
 # `tailscale up --authkey=...` is a credential handed to anyone with a shell on
@@ -140,6 +149,26 @@ enable_svc() {
     changed "enabled $1"
 }
 
+# Force OpenRC to re-read the init scripts.
+#
+# OpenRC caches the dependency tree and regenerates it only when a script is
+# *newer* than the cache. This phone has no RTC, so it boots at 1970 and every
+# file this script writes is stamped 1970 -- and then chrony steps the clock
+# forward to now, at which point the cache looks decades newer than the scripts
+# and OpenRC never looks at them again. The services are enabled, the symlinks
+# are right, `rc-update show` lists them, and `rc-status` does not: they are
+# invisible to the dependency tree and so they never start at boot.
+#
+# That is precisely what happened on 2026-08-21: a phone that provisioned
+# cleanly, passed its health check, and then came back from a reboot with all
+# four bridge services stopped. `mtime` is not a safe clock on a device whose
+# clock is not safe either, so the cache is rebuilt explicitly rather than left
+# to a timestamp comparison.
+refresh_deptree() {
+    rc-update -u >/dev/null 2>&1 \
+        || warn "could not refresh OpenRC's dependency cache; services may not start at boot"
+}
+
 # --- 0. is this the machine this script is for? ------------------------------
 #
 # Refusing beats half-applying. The Librem 5 still runs the hand-built
@@ -156,7 +185,6 @@ command -v rc-update >/dev/null 2>&1 || die "no OpenRC here (rc-update is missin
 step "Provisioning $BR_NAME ($BR_DEVICE) on $(cat /etc/hostname 2>/dev/null)"
 info "segment $BR_SEGMENT via $BR_IF, router $BR_ROUTER, egress $BR_EGRESS"
 
-# --- 1. packages -------------------------------------------------------------
 # Two lists, because failure means different things. Without the required set
 # there is no bridge at all; the optional set makes it survive longer unattended
 # and its absence is a warning, not the end of the run -- an apk index that has
@@ -166,6 +194,42 @@ REQUIRED="tailscale dnsmasq nftables chrony jq iw ethtool openssh networkmanager
 OPTIONAL="logrotate zram-init v4l-utils"
 [ "$BR_CAMERA" = off ] || OPTIONAL="$OPTIONAL ffmpeg"
 
+# --- 1. stop it disappearing -------------------------------------------------
+#
+# This goes first, before anything that takes time, and the ordering is the
+# whole point. It used to be step 4, after the package check -- and an
+# unprovisioned phone suspends on idle, so a run could lose the device it was
+# provisioning partway through and leave a half-applied role behind. On this
+# fleet that happened repeatedly: the phone answered, work started, phosh idled
+# it off the network, and every later step failed against a host that was no
+# longer there.
+#
+# Applying it first costs one file write and makes the rest of the run possible.
+# The GUI stays. It is the recovery path: if WiFi and ssh are both gone, the
+# phone's own screen and touchscreen are what is left, and masking phosh to
+# save a few tens of megabytes trades the last way in for nothing that matters
+# on a device whose job is to be reachable.
+#
+# What must go is every reason it might sleep or act on a button. A bridge that
+# suspends is a bridge that is down.
+step "Never sleep"
+if [ -d /etc/elogind ]; then
+    write_file /etc/elogind/logind.conf.d/10-wk-bridge.conf <<'EOF'
+# A bridge must not suspend, and must not act on its own buttons: the power
+# button on a device wedged in a drawer is as likely to be a pocket as a person.
+[Login]
+HandlePowerKey=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+IdleAction=ignore
+EOF
+else
+    warn "no /etc/elogind -- cannot pin the power/suspend keys; check what this image uses"
+fi
+
+
+# --- 2. packages -------------------------------------------------------------
 step "Packages"
 missing=""
 for p in $REQUIRED $OPTIONAL; do
@@ -200,7 +264,7 @@ fi
     subnet without it. Check that the kernel has tun (modprobe tun), or this
     bridge will come up healthy-looking and forward nothing."
 
-# --- 2. the scripts, and the fact file they all read -------------------------
+# --- 3. the scripts, and the fact file they all read -------------------------
 #
 # One file on the device says what this bridge is, and every on-device script
 # reads it instead of being generated with the values baked in. That is what
@@ -237,7 +301,7 @@ camera=$BR_CAMERA
 leasefile=$LEASEFILE
 EOF
 
-# --- 3. hostname -------------------------------------------------------------
+# --- 4. hostname -------------------------------------------------------------
 step "Hostname"
 if [ "$(cat /etc/hostname 2>/dev/null)" != "$BR_HOSTNAME" ]; then
     printf '%s\n' "$BR_HOSTNAME" > /etc/hostname
@@ -249,31 +313,6 @@ fi
 if ! grep "$BR_HOSTNAME" /etc/hosts >/dev/null 2>&1; then
     printf '127.0.1.1\t%s\n' "$BR_HOSTNAME" >> /etc/hosts
     changed "/etc/hosts entry for $BR_HOSTNAME"
-fi
-
-# --- 4. never sleep, and keep the screen ------------------------------------
-#
-# The GUI stays. It is the recovery path: if WiFi and ssh are both gone, the
-# phone's own screen and touchscreen are what is left, and masking phosh to
-# save a few tens of megabytes trades the last way in for nothing that matters
-# on a device whose job is to be reachable.
-#
-# What must go is every reason it might sleep or act on a button. A bridge that
-# suspends is a bridge that is down.
-step "Never sleep"
-if [ -d /etc/elogind ]; then
-    write_file /etc/elogind/logind.conf.d/10-wk-bridge.conf <<'EOF'
-# A bridge must not suspend, and must not act on its own buttons: the power
-# button on a device wedged in a drawer is as likely to be a pocket as a person.
-[Login]
-HandlePowerKey=ignore
-HandleSuspendKey=ignore
-HandleHibernateKey=ignore
-HandleLidSwitch=ignore
-IdleAction=ignore
-EOF
-else
-    warn "no /etc/elogind -- cannot pin the power/suspend keys; check what this image uses"
 fi
 
 # --- 5. the uplink -----------------------------------------------------------
@@ -309,7 +348,7 @@ EOF
 NM_SVC=$(svc networkmanager NetworkManager) || die "NetworkManager has no init script here"
 enable_svc "$NM_SVC"
 
-# --- 6. USB host mode, and the downstream NIC -------------------------------
+# --- 6. USB host mode, and the downstream NIC --------------------------------
 step "USB host mode"
 install_service wk-bridge-usb-host
 enable_svc wk-bridge-usb-host
@@ -487,6 +526,14 @@ info "uplink $UPLINK, segment interface $BR_IF"
     printf '        iifname "%s" tcp dport 22 accept\n' "$UPLINK"
     printf '        iifname "%s" udp dport 41641 accept\n' "$UPLINK"
     printf '        iifname "%s" udp sport 67 udp dport 68 accept\n' "$UPLINK"
+    # Unicast mDNS from the uplink, so the bridge stays findable by name on the
+    # LAN. Not decoration: this file drops multicast a few lines down, and
+    # without this the phone becomes invisible to the one mechanism that finds
+    # it when the tailnet is not up -- which is exactly the state a bridge is in
+    # while it is being provisioned, and the state it is in when the thing that
+    # is broken *is* the tailnet. Found by provisioning a phone and then being
+    # unable to locate it, having just applied the rules that hid it.
+    printf '        iifname "%s" udp dport 5353 accept\n' "$UPLINK"
     printf '        iifname "%s" icmp type { echo-request, echo-reply, destination-unreachable, time-exceeded } accept\n\n' "$UPLINK"
     printf '        # The segment is untrusted: what it needs from us and nothing else.\n'
     printf '        iifname "%s" udp dport { 67, 123 } accept\n' "$BR_IF"
@@ -535,7 +582,36 @@ if [ -x /etc/init.d/nftables ]; then
     fi
 fi
 
-# --- 10. NTP for the segment -------------------------------------------------
+# --- 10. DNS that resolves ---------------------------------------------------
+#
+# The image can arrive with an /etc/resolv.conf that NetworkManager is not
+# managing -- a plain file left over from whatever built the rootfs. This one
+# held a systemd-resolved stub pointing at 127.0.0.53, on an OpenRC system with
+# no systemd-resolved on it at all, so every lookup got "connection refused"
+# while routing was perfect. That reads as "no internet" and is not: DHCP was
+# offering three working nameservers the whole time.
+#
+# Nothing downstream survives it. chrony cannot resolve its pool, so the clock
+# stays at 1970; TLS then fails everywhere; `tailscale up` cannot log in. So this
+# runs before NTP, and hands resolv.conf to NetworkManager, which knows the
+# servers DHCP offered.
+step "DNS"
+write_file /etc/NetworkManager/conf.d/98-wk-bridge-dns.conf <<'EOF'
+# NetworkManager owns /etc/resolv.conf. Without this an unmanaged file shadows
+# the servers DHCP offered, and every lookup fails while ping works.
+[main]
+dns=default
+rc-manager=file
+EOF
+
+# A resolv.conf NetworkManager did not write is one it will not correct, so it
+# goes. NM recreates it on the next reload; the reload is in the services step.
+if [ -f /etc/resolv.conf ] && grep -q '127\.0\.0\.53' /etc/resolv.conf 2>/dev/null; then
+    rm -f /etc/resolv.conf
+    changed "removed the stale systemd-resolved stub /etc/resolv.conf"
+fi
+
+# --- 11. NTP for the segment -------------------------------------------------
 #
 # Because a BMC's clock resets with its configuration, and a bare board has no
 # RTC at all. Both then produce logs and TLS errors dated 1970, which is a day
@@ -544,6 +620,19 @@ step "NTP"
 write_file /etc/chrony/conf.d/wk-bridge.conf <<EOF
 allow $BR_SEGMENT
 rtcsync
+
+# Step the clock, however far out it is, however many times.
+#
+# This phone has no working RTC: it boots at 1970-01-01, and chrony's default is
+# to *slew* rather than step, which will not close a fifty-six year gap in any
+# useful time. A clock at 1970 fails every TLS certificate check there is, so
+# nothing that matters works -- \`tailscale up\` cannot reach its coordination
+# server, apk cannot fetch, and the failure reads as "no internet" while ping
+# and DNS are both fine. Found exactly that way on 2026-08-21.
+#
+# -1 rather than a count: the offset recurs on every boot, so a limit of "the
+# first few updates" would fix the first boot and no other.
+makestep 1.0 -1
 EOF
 # Alpine already ships `confdir /etc/chrony/conf.d` (verified on 3.24), so this
 # edit normally does not happen at all -- it is the fallback for an image that
@@ -559,7 +648,7 @@ if [ -f /etc/chrony/chrony.conf ] \
 fi
 CHRONY_SVC=$(svc chronyd chrony) && enable_svc "$CHRONY_SVC" || warn "chrony has no init script here"
 
-# --- 11. ssh ----------------------------------------------------------------
+# --- 12. ssh -----------------------------------------------------------------
 #
 # Key-only. The account password is left alone deliberately: it is the console
 # login on the phone's own screen, which is the last recovery path, and it
@@ -591,7 +680,7 @@ else
     warn "sshd -t rejects the configuration -- NOT reloading it; fix this before rebooting"
 fi
 
-# --- 12. flash and memory ---------------------------------------------------
+# --- 13. flash and memory ----------------------------------------------------
 #
 # The phone's eMMC is the only storage it has and there is no way to replace it
 # without opening the device. Swap on it and verbose logs to it are the two
@@ -625,7 +714,7 @@ elif [ "${nonzram:-0}" -eq 0 ] && [ "$(awk 'NR > 1 { c++ } END { print c + 0 }' 
     warn "no swap at all and no zram-init -- a memory spike will OOM the router"
 fi
 
-# --- 13. the hardware watchdog ----------------------------------------------
+# --- 14. the hardware watchdog -----------------------------------------------
 #
 # The failure this catches is the one nothing else can: a kernel that stops
 # scheduling. Everything else here recovers a service or a link, and all of it
@@ -638,12 +727,12 @@ else
     warn "no /dev/watchdog on this device -- a kernel hang needs a person"
 fi
 
-# --- 14. the network watchdog ------------------------------------------------
+# --- 15. the network watchdog ------------------------------------------------
 step "Network watchdog"
 install_service wk-bridge-netwatch
 enable_svc wk-bridge-netwatch
 
-# --- 15. the camera ---------------------------------------------------------
+# --- 16. the camera ----------------------------------------------------------
 step "Camera"
 if [ "$BR_CAMERA" = off ]; then
     if [ -x /etc/init.d/wk-bridge-camera ]; then
@@ -661,7 +750,7 @@ else
     info "capture device and the service idles."
 fi
 
-# --- 16. tailscale ----------------------------------------------------------
+# --- 17. tailscale -----------------------------------------------------------
 step "Tailscale"
 TS_SVC=$(svc tailscale tailscaled) || die "the tailscale package has no init script here"
 enable_svc "$TS_SVC"
@@ -678,7 +767,11 @@ done
 TS_STATE=$(tailscale status --json --peers=false 2>/dev/null | jq -r '.BackendState // "unknown"')
 TS_TAGS=$(tailscale status --json --peers=false 2>/dev/null | jq -rc '.Self.Tags // "none"')
 
-if [ "$TS_STATE" = Running ] && [ "$TS_TAGS" != none ]; then
+if [ -n "$BR_NO_TAILNET" ] && { [ "$TS_STATE" != Running ] || [ "$TS_TAGS" = none ]; }; then
+    info "daemon enabled and running; not joining the tailnet (BR_NO_TAILNET)"
+    info "everything else in this role is applied. To finish:"
+    info "    wk bridge tailnet $BR_NAME"
+elif [ "$TS_STATE" = Running ] && [ "$TS_TAGS" != none ]; then
     # Already a member, already tagged: re-assert what can be changed without
     # re-authenticating, and leave the identity alone.
     tailscale set --advertise-routes="$BR_SEGMENT" --accept-dns=false --ssh=true >/dev/null 2>&1 \
@@ -721,9 +814,14 @@ else
     warn "  Re-run 'wk bridge setup $BR_NAME' with a tagged key ($BR_TAG) to join."
 fi
 
-# --- 17. start everything ---------------------------------------------------
+# --- 18. start everything ----------------------------------------------------
+#
+# The dependency cache is rebuilt first: everything below is started by name,
+# and a service OpenRC cannot see in its tree is one it will neither start now
+# nor at the next boot.
 step "Services"
-for s in wk-bridge-nftables wk-bridge-dhcp wk-bridge-netwatch wk-bridge-watchdog wk-bridge-camera; do
+refresh_deptree
+for s in wk-bridge-nftables wk-bridge-usb-host wk-bridge-dhcp wk-bridge-netwatch wk-bridge-watchdog wk-bridge-camera; do
     [ -x "/etc/init.d/$s" ] || continue
     if rc-service "$s" status >/dev/null 2>&1; then
         # Restart the ones whose configuration this run may have rewritten, so

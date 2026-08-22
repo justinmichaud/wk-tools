@@ -174,6 +174,8 @@ would build image $id
   packages    ${PMO_PACKAGES:-none} (on top of postmarketos-base and the UI)
   ssh key     ${WK_IMAGE_KEY:-$HOME/.ssh/id_ed25519.pub}
   uplink      $host's own WiFi credential, copied on $host (the PSK never leaves it)
+  radio       $(printf '%s' "${PMO_WIFI_BANDS:-unknown}" | tr ' ' '/') GHz -- the build refuses if that SSID is not on the air in a
+              band this phone has, because such an image boots into isolation
   console     user '$PMO_USER', password '$PMO_PASSWORD' (the phone's screen; ssh is key-only)
   into        $(image_dir "$id")
   writes to   a card, with 'wk sysimage write $id --disk <machine>:<device>'

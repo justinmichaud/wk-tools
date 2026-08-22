@@ -2375,6 +2375,144 @@ not, and is marked as such rather than assumed.
       with `flush ruleset`, which is what the packaged service being disabled
       is about
 
+- [V] a bridge image is refused when the SSID its credential names is not on the
+      air in a band the phone's radio has (2026-08-21, and it cost the afternoon
+      that produced this line). The uplink credential is copied from the build
+      host's own association, so the band comes along implicitly: rpi5 is
+      dual-band and was on channel 52, the PinePhone's RTL8723CS is 802.11 b/g/n
+      single-band, and the image booted with a valid PSK for a network the phone
+      cannot see. Everything else about it verified — card, SPL, write,
+      read-back — which is exactly what made it expensive to find
+- [V] the check asks whether *the SSID* is on the air in a usable band, not
+      which band the build host sits on. The first version asked the latter and
+      was wrong inside the hour: the SSID gained a 2.4 GHz radio while rpi5
+      stayed associated on 5 GHz, which is a working build and a check that
+      refuses it
+- [V] it unions a fresh `iw scan` with `scan dump` rather than taking the first
+      non-empty answer, because the cached dump predated the new 2.4 GHz radio
+      and a band missing from the answer is a build refused for nothing. And it
+      truncates `iw`'s `freq: 2412.0` to an integer first — `[ 2412.0 -lt 3000 ]`
+      is not a false comparison but a syntax error reported as false, which sent
+      every frequency down the 5 GHz branch
+- [V] every pmos profile declares `PMO_WIFI_BANDS`, checked in the selftest: the
+      guard reads that field and skips silently when it is empty, so a phone
+      added without one would get no protection against the failure above
+
+- [V] first contact does not depend on mDNS, because mDNS is not dependable. The
+      phone's avahi was running and publishing correctly — a unicast query to its
+      address returned the right answer — while the access point declined to
+      forward multicast between its 2.4 and 5 GHz radios (2026-08-21). Four ways
+      in now, in order of "somebody said so": `--at`, the conf's name,
+      `<hostname>.local` by multicast, then discovery. Discovery is required
+      rather than optional: on this network the first three cannot cover a first
+      provision, and finding the phone by hand each time is the manual step the
+      verb exists to remove
+- [V] discovery is built on the half of the mDNS measurement that worked.
+      Multicast never arrives; a *unicast* mDNS query to an address, port 5353,
+      asking for the phone's own name is answered by the phone and nothing else —
+      34 ms against a live responder, no credentials. Validated against a
+      third-party responder (`moose.local`, 85 ms), against a host running no
+      avahi (times out), and against the wrong host for that name (no answer)
+- [V] it asks in parallel on a one-second deadline, so a round costs a second
+      rather than a second per host. The first version asked over ssh — two
+      accounts, two handshakes, two timeouts — and took 100 s; measured 26 s for
+      the whole failure path now, and sub-second when the phone is already in the
+      neighbour table. The sweep that populates that table is bounded to 32 at a
+      time and only runs if the table alone fails
+- [V] reaching the phone cannot hang, checked offline against 192.0.2.1
+      (TEST-NET-1). ssh's `ConnectTimeout` bounds the TCP connect and nothing
+      after it, and BSD `nc -w` claims to bound connects and does not — 75 s
+      against a black-holed address here versus 1.05 s for `-G1`. A phone
+      half-way into suspend stalls exactly that way, so `_capped` enforces the
+      ceiling rather than any tool's own flag, and the selftest proves the
+      ceiling rather than the flag
+- [V] `resolve_priv` bootstraps root rather than giving up. pmbootstrap installs
+      the ssh key for the console user only, and that user cannot become root
+      without a password, so provisioning died on its first privileged write
+      against a phone that was otherwise perfectly healthy. Newer images seed
+      root's key at build time; for a phone flashed from an older card, setup
+      uses `PMO_PASSWORD` — which image/profiles.sh keeps in plain text on
+      purpose — over `ssh -tt`, because doas refuses a pipe. Success is verified
+      by root then answering, since with a pty ssh's exit status describes the
+      pty and not the command
+- [ ] the first provision has to land while the phone is awake, and that is
+      circular: step 4 of the role is what stops it suspending, so an
+      unprovisioned phone idles off the network after a few minutes. Said in the
+      error message and in `wk help bridge`. Worth revisiting if it keeps
+      costing runs — the image could ship the elogind drop-in itself
+
+### First provision of a real phone, 2026-08-21/22 — what it cost and why
+- [V] the bridge role applies end to end over ssh and survives a reboot: all
+      four `wk-bridge-*` services, sshd, chronyd, NetworkManager, tailscaled and
+      avahi come back unattended, nftables table loaded, power save off, clock
+      correct, DNS resolving, and HTTPS to login.tailscale.com working — which
+      is the precondition `tailscale up` actually needs
+- [V] **WiFi power save is the thing that makes a PinePhone look absent.** The
+      RTL8723CS powers its RF side down when idle and misses frames aimed at it,
+      so the phone reaches its router while answering nothing — ARP included —
+      from every host on the LAN. It reads exactly like a phone that is off, on
+      another subnet, or behind an isolated AP; four hypotheses about the access
+      point were wrong before the answer turned out to be one line already in
+      `provision.sh`. `iw dev wlan0 set power_save off` proves it in seconds.
+      Now applied by the *image* as well as the role, because a phone that needs
+      it in order to answer ssh cannot be sent it over ssh
+- [V] the mDNS failure was the same cause, not the network. Multicast queries
+      went unanswered because the radio was asleep; unicast happened to land
+      while it was awake. The access point was innocent throughout
+- [V] no DNS, and it looks like no internet. The image can carry an
+      `/etc/resolv.conf` that NetworkManager does not manage — here a
+      systemd-resolved stub pointing at 127.0.0.53 on an OpenRC system with no
+      systemd-resolved — so every lookup fails while routing is perfect and DHCP
+      has been offering three good nameservers all along
+- [V] no RTC, so the phone boots at 1970, and chrony *slews* by default: it will
+      never close a 56-year gap. A 1970 clock fails every TLS check, so
+      `tailscale up` cannot reach its coordination server. The role had `rtcsync`
+      and needed `makestep 1.0 -1` — any offset, every boot
+- [V] and the consequence nobody would predict: OpenRC caches its dependency
+      tree and rebuilds it only when an init script is *newer* than the cache.
+      Scripts written while the clock said 1970, then a chrony step to 2026, and
+      the cache looks decades newer — so the services are enabled, symlinked,
+      listed by `rc-update show`, invisible to `rc-status`, and never started at
+      boot. The role now runs `rc-update -u` explicitly, because mtime is not a
+      safe signal on a device whose clock is not
+- [V] `ip -br` does not exist in BusyBox, which is what Alpine and so pmOS
+      ships. Four uses; the damaging one was in `wk-bridge-netwatch`, where
+      `healthy()` read an empty address every check and so returned false
+      unconditionally — setting the escalation ladder climbing on a working
+      uplink: interface bounce, NetworkManager restart, driver reload, then
+      reboots against its budget, forever. Use `-o`
+- [V] avahi renames itself on a name conflict — seen as
+      `tailnet-bridge-generic-2.local` — at which point the phone stops
+      answering for the name being asked about while remaining perfectly
+      reachable. Discovery therefore falls back to asking over ssh, which is the
+      phone stating what it is with no announcement protocol in between
+- [V] provisioning over USB works and is the reliable path when the radio is
+      not: pmOS presents a CDC-NCM gadget, macOS binds it as a network interface
+      (`172.16.42.2` here, phone at `.1`), and `--at 172.16.42.1` provisions over
+      a cable that cannot sleep or drop. It is inherently one-shot — the role
+      switches the port to host mode for the Ethernet dock, which tears the
+      gadget down. rpi5 cannot do this: its NUMA kernel has `CONFIG_USB_USBNET=y`
+      but no `CDC_NCM` and no modules on disk
+- [V] the image-side fixes are in a real image, not just in the source
+      (`bridge-pinephone-20260822T054554Z`): the build log shows all three
+      seeding steps, and the built rootfs was mounted and inspected —
+      `/etc/NetworkManager/conf.d/99-wk-bridge-reachable.conf`,
+      `/etc/elogind/logind.conf.d/10-wk-bridge-nosleep.conf`, and root holding
+      the same ssh key. So a freshly flashed phone is reachable and stays
+      reachable before anything is provisioned
+- [V] and building it is what caught the root-key step silently not working.
+      pmbootstrap creates the account's `.ssh` as mode 700 owned by the image's
+      own uid, and pmos-build.sh runs unprivileged — so a bare
+      `[ -f .../authorized_keys ]` is denied search permission and returns false
+      on a file `find` as root lists plainly. Measured both ways on the built
+      image. Every neighbouring operation there already used `sudo -n`; the test
+      was the one that did not. A `warn` branch is the only reason it was not
+      silent, which is the argument for writing the else-branch at all
+- [ ] the segment itself — `lan0`, DHCP to rpi3/rpi4 — is untested, because it
+      needs the USB-C Ethernet dock physically attached and none was
+- [ ] `wk bridge tailnet <name>` untested: it is the one step left, and the only
+      one needing a credential fetched by hand
+
 ### The pmos builder — flashing, which is a command and not a procedure
 - [V] `wk sysimage build bridge-pinephone` runs pmbootstrap on rpi5 over ssh and
       produces a bootable image: 3.2 GB raw (msdos, boot + root), block map and

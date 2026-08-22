@@ -62,7 +62,14 @@ wifi_if() {
 }
 
 healthy() {
-    addr=$(ip -4 -br addr show dev "$WIFI" 2>/dev/null | awk '{print $3}')
+    # `-o`, not `-br`: BusyBox ip has no brief mode and exits 1 with a usage
+    # message, so this read back empty on every check -- which made healthy()
+    # return false unconditionally and set this ladder climbing on a working
+    # uplink. Interface bounce, NetworkManager restart, driver reload, and then
+    # reboots against the budget below, forever, on a phone with nothing wrong
+    # with it. The single most damaging line in this role, and invisible until
+    # it ran on the device.
+    addr=$(ip -4 -o addr show dev "$WIFI" 2>/dev/null | awk '{print $4; exit}')
     [ -n "$addr" ] || { log "no IPv4 address on $WIFI"; return 1; }
 
     gw=$(ip -4 route show default dev "$WIFI" 2>/dev/null | awk '{print $3; exit}')
