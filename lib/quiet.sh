@@ -131,6 +131,35 @@ macos_noise() {
 # only, so a daemon buried in an .app bundle cannot be mistaken for a window.
 WK_SCREEN_BLOCKERS="${WK_SCREEN_BLOCKERS:-Setup Assistant|Software Update|Installer|Migration Assistant|System Settings}"
 
+# --- the panel that is not an application ------------------------------------
+#
+# screen_blocker above asks the window server which *application* is frontmost,
+# and that is the right question for the things it lists. It cannot see a modal
+# authentication panel: macOS draws those from SecurityAgent, which is not a
+# frontmost application, so `lsappinfo front` answers "Finder" while a password
+# sheet sits on top of everything.
+#
+# Found the way these things are always found -- somebody looked at the screen.
+# 2026-08-23, during an A/B on the benchmark install: `the screen is free` passed
+# on every preflight while an authentication dialog had been up for five minutes.
+# (The run survived it, and that is luck rather than reassurance: arm A scored
+# 42.176 against a 42.774 baseline, so MiniBrowser was getting focus. A panel
+# that *had* taken focus would have produced the silent exit-124 timeout this
+# whole area exists to prevent.)
+#
+# SecurityAgent is a reliable signal precisely because it is not a daemon: it
+# runs only while it has a panel up. The host install, idle, does not have it in
+# `lsappinfo list` at all -- which is what makes this a check that can pass
+# rather than one that trains people to force past it.
+#
+# On this install it comes from the login keychain not matching the account
+# password, so autologin raises an unlock prompt: bench/mac-bench-firstboot.sh
+# logs `passwd: DS error: eDSAuthFailed` where it tries to set that password.
+auth_panel() {
+    pgrep -x SecurityAgent >/dev/null 2>&1 && printf 'SecurityAgent'
+    return 0
+}
+
 screen_blocker() {
     command -v lsappinfo >/dev/null 2>&1 || return 0
     local asn name

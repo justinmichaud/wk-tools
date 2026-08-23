@@ -426,3 +426,13 @@ are derived rather than passed, recorded with the result, and warned about by
   `wk bench stage --to <machine>` / `wk bench staged` carry the build over and
   run it there. The two are not comparable — one has a desktop underneath it
   and one is the whole machine — and `wk bench compare` warns.
+
+  On the Mac, `wk bench mac-ab <ws>` runs a whole interleaved A/B on the bench
+  install without anyone driving it: it stages the build, plants the job and a
+  one-shot launch agent on the volume while it is merely mounted, reboots, and
+  reads the numbers back afterwards. The one thing it cannot do is choose which
+  volume the firmware boots — that is not a SIP restriction and no amount of
+  root changes it (`docs/HANDOFF-boot.md` has the tests) — so a cycle costs one
+  authenticated action at the keyboard, on whichever side the firmware default
+  is not, and `wk boot mbp --status` says which side that is. One action per
+  experiment, not per run: the planted job holds every round of every arm.

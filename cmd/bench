@@ -14,6 +14,11 @@
 #                                          driven from another machine: build,
 #                                          stage, arm, wait for the one step a
 #                                          person has to do, run, come back
+#   wk bench mac-ab <ws> [--rounds N]      an interleaved A/B on the Mac's
+#                                          benchmark install, with nobody in the
+#                                          room: plant a job, reboot, read it
+#                                          back. --preflight/--status/--collect
+#   wk bench ab-summary --runs <tsv>       the A/B's own verdict, per arm
 #   wk bench compare <run-a> <run-b>       compare-results on two saved runs
 #   wk bench ls                            saved runs
 #
@@ -246,6 +251,10 @@ else:
     local dest="$SEED_DIR/$plan-${sha:0:12}"
     if [ -d "$dest/.wk-seeded" ]; then
         debug "payload cached: $dest"
+        # Repair an older cache in place. Entries seeded before .git was dropped
+        # (below) may still carry one, and with it the socket that made this a
+        # bug rather than a size question.
+        [ -d "$dest/.git" ] && rm -rf "$dest/.git"
         echo "$dest"; return 0
     fi
 
@@ -265,6 +274,21 @@ else:
         mv "$tmp/repo/$subdir" "$dest"
     fi
     rm -rf "$tmp"
+    # No .git in a pinned payload.
+    #
+    # A seeded payload is a *snapshot* of one commit -- the directory name says
+    # which, and .wk-seeded/origin records where from -- so the repository it
+    # came out of is dead weight. It is also not merely dead: a clone carries
+    # git's runtime state, and git's fsmonitor leaves a Unix domain socket at
+    # `.git/fsmonitor--daemon.ipc`. Nothing can copy a socket. Staging this
+    # payload onto the Mac's benchmark volume died on
+    # `rsync: mkstempsock: Invalid argument` (openrsync, 2026-08-23) and `cp -R`
+    # skips it with a warning, which is the same problem arriving quietly.
+    #
+    # Dropping it also makes the snapshot deterministic: whether a socket exists
+    # depended on whether a daemon had happened to start, so two seeds of the
+    # same commit were not necessarily the same tree.
+    rm -rf "$dest/.git"
     mkdir -p "$dest/.wk-seeded"
     printf 'url=%s\nref=%s\nsha=%s\nsubdir=%s\n' "$url" "$ref" "$sha" "$subdir" > "$dest/.wk-seeded/origin"
     info "seeded $dest"
@@ -1204,7 +1228,14 @@ cmd_stage() {
         log  "  the benchmark itself, pinned ($(basename "$payload"))"
         rm -rf "$assemble/payload"
         mkdir -p "$assemble/payload"
-        rsync -a "$payload/" "$assemble/payload/"
+        # --exclude .git, for the payload a caller passed by hand.
+        #
+        # `wk bench seed` no longer leaves one, but `--payload <dir>` takes any
+        # directory and a working clone is the obvious thing to point it at --
+        # and a working clone can contain git's fsmonitor socket, which no copy
+        # tool can reproduce. The benchmark install has no use for the history
+        # either way.
+        rsync -a --exclude '.git' "$payload/" "$assemble/payload/"
     fi
 
     # Written last, and that is the publishing protocol every other store in
@@ -1580,6 +1611,21 @@ cmd_staged() {
         check yes "the screen is free" "no onboarding or installer pane in front"
     fi
 
+    # And the panel that is not an application. screen_blocker cannot see a modal
+    # authentication sheet -- macOS draws it from SecurityAgent, which never
+    # becomes the frontmost *application*, so the check above passes with a
+    # password dialog on top of everything (measured 2026-08-23, five minutes of
+    # it, through six preflights).
+    local panel; panel=$(auth_panel)
+    if [ -n "$panel" ]; then
+        check no "no auth panel" "$panel has a modal dialog up -- it is above the browser"
+        log  "        it does not answer SIGTERM (it holds XPC transactions open while its"
+        log  "        sheet is modal), so dismissing it means:"
+        log  "          sudo killall -9 SecurityAgent"
+    else
+        check yes "no auth panel" "no modal authentication dialog"
+    fi
+
     # A laptop on battery throttles, and does it silently. A machine with no
     # battery at all -- a desktop, or a guest -- is on AC by construction, and
     # failing it for the absence of a battery would refuse every run on the one
@@ -1619,7 +1665,34 @@ cmd_staged() {
     # A payload that ships with the staged tree, when there is one: the run
     # then needs no network at all, which is the difference between a
     # reproducible number and one that depends on what GitHub served today.
-    [ -z "$PAYLOAD" ] && [ -d "$dir/payload" ] && PAYLOAD="$dir/payload"
+    #
+    # Only when it is a payload for *this* plan, and that qualification was
+    # missing. A pinned payload is one benchmark's checkout -- `wk bench stage
+    # --payload` copies in whatever `wk bench seed <ws> <plan>` fetched -- but
+    # this used it for any plan the run happened to ask for. Measured
+    # 2026-08-23 in the guest rehearsal: a tree staged for jetstream2.2, run
+    # with --plan speedometer3.0, handed run-benchmark JetStream as
+    # `--local-copy` and died inside `patch` with "No file to patch. Skipping…"
+    # and then a temp-file error, twelve lines deep in a traceback that names
+    # neither the payload nor the plan.
+    #
+    # The loud failure is the lucky case. A payload for a *related* plan --
+    # speedometer3.0 against speedometer3.1, say -- would patch cleanly enough
+    # to run and produce a number for the wrong benchmark, labelled with the
+    # right one. So the manifest's plan is checked rather than the directory's
+    # existence, and a mismatch fetches instead of guessing.
+    if [ -z "$PAYLOAD" ] && [ -d "$dir/payload" ]; then
+        local payload_plan; payload_plan=$(staged_field "$dir" plan)
+        if [ -z "$payload_plan" ] || [ "$payload_plan" = "$plan" ]; then
+            PAYLOAD="$dir/payload"
+        else
+            warn "the pinned payload in this staged tree is for '$payload_plan', not '$plan'"
+            log  "  ignoring it -- run-benchmark will fetch $plan itself, which needs the"
+            log  "  network. To pin this plan instead:"
+            log  "    wk bench stage <ws> --to <machine> --plan $plan --payload \\"
+            log  "        \"\$(wk bench seed <ws> $plan)\""
+        fi
+    fi
     [ -n "$PAYLOAD" ] && args="$args --local-copy $(sh_quote "$PAYLOAD")"
     [ -n "$BROWSER_ARGS" ] && args="$args -- $BROWSER_ARGS"
 
@@ -1755,14 +1828,56 @@ case "${1:-}" in
     # sibling of the lane rather than a phase of it: the lane is driven from
     # elsewhere precisely because it must outlive that reboot.
     mac-volume) shift; exec "$WK_ROOT/bench/mac-bench-volume.sh" "$@" ;;
+    # The unattended A/B. Its own file for the same reason as the lane above --
+    # it runs on another machine and has to outlive a reboot of this one -- and
+    # separate from the lane because the two solve different problems: the lane
+    # drives bench mode over ssh once per phase, and this one plants a job that
+    # bench mode runs by itself. See bench/mac-ab.sh for which constraint forces
+    # which shape.
+    mac-ab)  shift; exec "$WK_ROOT/bench/mac-ab.sh" "$@" ;;
+    # The verdict, computed where the results are. Called by the planted job at
+    # the end of a run, and again from host mode to re-read it afterwards.
+    ab-summary) shift; exec "$WK_ROOT/bench/mac-ab-summary.sh" "$@" ;;
     stage)   shift
              [ $# -ge 1 ] || usage
              cmd_stage "$@"; exit 0 ;;
+    # Seeding is *not* running, and it must not inherit running's refusal.
+    #
+    # This went through load_bench_target, which allows container workspaces and
+    # nothing else -- right for a benchmark that is about to execute here, and
+    # exactly wrong for fetching a payload that is about to be staged onto
+    # another machine. cmd_stage already makes this argument for itself and this
+    # is the same one: the build the macOS lane measures comes out of a macOS
+    # guest, so the plan file to read the payload's origin from is in a guest
+    # too, and `wk bench seed <guest-ws> speedometer3.0` died on the target
+    # check before it could read anything. Found 2026-08-23, seeding a pinned
+    # Speedometer for the Mac's benchmark volume, which has no network to fetch
+    # it with at run time.
+    #
+    # The clone still happens here, on the workstation, which is the machine
+    # that has a route to GitHub.
+    #
+    # And it prints the directory. `>/dev/null` discarded the one thing a caller
+    # wants -- the path to pass to `wk bench stage --payload` -- leaving the
+    # progress lines on stderr as the only evidence, which a script cannot use.
     seed)    shift
              [ $# -ge 2 ] || usage
-             load_bench_target "$1"
+             load_target "$(ws_target "$1")"
+             wait_ready "$1"
+             # SEED_DIR again, now that a target has been loaded.
+             #
+             # It is assigned near the top of this file from $WK_STORE, which at
+             # that moment is still the *default* -- /var/lib/wk on a Mac. That
+             # was harmless while only container workspaces could get here,
+             # because the container's store is /var/lib/wk too (inside the
+             # podman VM, which is provisioned for it). A vm target sets
+             # WK_STORE to the user's own state directory, so the source-time
+             # value is somebody else's path: seeding on the Mac died on
+             # `mkdir: /var/lib/wk: Permission denied`, which reads like a
+             # missing setup step and is really a variable read too early.
+             SEED_DIR="$WK_STORE/cache/bench"
              ensure_dir "$SEED_DIR"
-             seed_payload "$1" "$2" >/dev/null; exit 0 ;;
+             seed_payload "$1" "$2"; exit 0 ;;
     ''|-h|--help) usage ;;
 esac
 

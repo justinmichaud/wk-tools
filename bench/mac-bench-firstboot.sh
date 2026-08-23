@@ -134,6 +134,31 @@ if [ -n "$PW" ]; then
     dscl . -passwd "/Users/$BENCH_USER" "$PW" 2>/dev/null \
         || say "WARNING: dscl could not set $BENCH_USER's password"
 
+    # The login keychain, reset to match.
+    #
+    # This is the fix for a dialog that sat on the benchmark install's screen
+    # through an entire A/B (2026-08-23): `dscl . -passwd` fails here with
+    # `DS error: eDSAuthFailed` on a re-run -- it needs the *old* password to
+    # change one, and this script does not have it -- so the account password and
+    # the login keychain's password drift apart. autologin then logs the account
+    # in and macOS raises a keychain-unlock panel, drawn by SecurityAgent, which
+    # `lsappinfo front` cannot see (lib/quiet.sh, auth_panel).
+    #
+    # Deleting the keychain is the right remedy *here* specifically because this
+    # install is cattle: it holds no secrets worth keeping -- no Apple ID, no
+    # certificates, no saved passwords, nothing but whatever a browser benchmark
+    # happens to store. macOS recreates an empty login keychain, matched to the
+    # account, at the next login. On a workstation this would be vandalism; on a
+    # volume `diskutil apfs deleteVolume` can replace in one command it is
+    # provisioning.
+    home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+    if [ -n "$home" ] && [ -d "$home/Library/Keychains" ]; then
+        rm -rf "$home/Library/Keychains" \
+            && say "reset $BENCH_USER's login keychain (it drifts from the account password" \
+            && say "  on a re-run, and the unlock prompt lands on top of the benchmark)" \
+            || say "WARNING: could not reset the login keychain; expect an unlock prompt"
+    fi
+
     # Autologin, written rather than requested.
     #
     # `sysadminctl -autologin set` logged `SACSetAutoLoginPassword error:22` and
@@ -379,9 +404,32 @@ fi
 # The daemon removes itself rather than guarding on a stamp file. A first-boot
 # job that stays loaded is a job that runs again after a crash and re-randomises
 # the account password out from under the autologin that depends on it.
+# The plist and the script, and *not* `launchctl bootout` on this daemon's own
+# label -- which is `kill $$` with extra steps.
+#
+# That is what was here, and it meant this script had never once removed itself:
+# booting out the label terminates the job, which is the process running these
+# very lines, so `rm -f` below never ran. The log said "removing the first-boot
+# daemon" ten times between 2026-08-22 and 2026-08-23 while both files sat
+# untouched with their original mtimes.
+#
+# It was not merely untidy. Every boot of the benchmark install therefore
+# re-ran provisioning, which `rsync --delete`s wk-tools back to the payload copy
+# and then reboots the machine a minute later -- so a run planted by
+# `wk bench mac-ab` had its tooling replaced under it and was cut off mid-flight.
+# Two whole cycles were spent on that before the cause was found. (The same
+# suicide, in the same shape, was found in bench/mac-bench-autorun.sh a few
+# hours earlier -- worth knowing that this is an easy mistake to make twice.)
+#
+# Removing the files is sufficient: launchd has the job loaded for this boot
+# either way, and there is no next boot for it to be loaded from.
 say "removing the first-boot daemon"
-launchctl bootout system "$DAEMON" 2>/dev/null || true
 rm -f "$DAEMON" "$SELF"
+if [ -f "$DAEMON" ]; then
+    say "WARNING: $DAEMON is still there -- provisioning will run again next boot"
+else
+    say "  removed $DAEMON"
+fi
 say "=== first boot provisioning complete ==="
 
 # Autologin only takes effect at the *next* boot, and a console session is a

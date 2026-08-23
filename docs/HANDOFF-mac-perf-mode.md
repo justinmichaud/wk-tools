@@ -17,6 +17,203 @@ held in this machine's own secure storage, changed only by an authenticated
 user action. `bless --setBoot` is superseded for this purpose. Established
 2026-08-19; recorded in `docs/HANDOFF-boot.md` as tier 2.
 
+**Tested rather than reasoned about, 2026-08-23** — because "SIP is off, so
+surely root can just set it" is the obvious next thought and it is wrong. In a
+macOS 26 guest with SIP *disabled* and passwordless root:
+
+| attempt | result |
+|---|---|
+| `nvram boot-volume=<other volume group>` | exits **0** and changes nothing. The value lands under the `7C436110-…` GUID and is discarded; `IODeviceTree:/options` still holds the firmware's own value, before *and after* a reboot |
+| `bless --mount … --setBoot` | "This is not supported on Apple Silicon based systems", in its own man page |
+| `systemsetup -getstartupdisk` | prints `(null)`; `-liststartupdisks` prints nothing at all |
+| `bputil` | changes *security policy* per volume group, and needs a volume owner's username and password. It does not select a volume |
+
+So **SIP is not what gates this.** The variable is firmware-owned, not
+SIP-protected, and disabling SIP buys nothing here. What the firmware publishes
+*is* readable, and that turned out to be the useful half — see the next section.
+
+## What the firmware default buys, once you read it
+
+`nvram -p` publishes `boot-volume` as three colon-separated UUIDs, of which only
+the last identifies anything on the disk: the APFS **volume group**. Compare it
+against `diskutil info`'s group for each install and it says which install the
+*next plain reboot* will enter. `wk boot mbp --status` reports it as
+`firmware_default=` since 2026-08-23.
+
+It is evidence and not a promise, in a specific and useful way: the startup
+manager boots a volume **once without updating this variable**, so a machine
+last started that way names a default it is not currently running. That is
+exactly the state this Mac was found in on 2026-08-23 — booted `Macintosh HD`,
+`boot-volume` naming `WK Bench`, because `startosinstall` made the benchmark
+volume the default and somebody used the startup manager to get back.
+
+Which matters because it decides where the one human step falls, and the two
+cases are not equally expensive:
+
+| firmware default | entering bench mode | coming back |
+|---|---|---|
+| `Macintosh HD` | one human step (startup manager) | free — a plain reboot |
+| `WK Bench` | free — a plain reboot | one human step |
+
+Either way it is **one human action per A/B, not per run** — which is the whole
+argument for `wk bench mac-ab` below: a planted job holds every round of every
+arm, so a twelve-run experiment costs the same single action as a one-run one.
+
+## `wk bench mac-ab` — the unattended A/B, written 2026-08-23
+
+`bench/mac-ab.sh` plus `bench/mac-bench-autorun.sh`. A different shape from
+`wk bench mac`, and the difference is forced by the machine rather than chosen.
+
+**Why it plants a job instead of driving one.** `wk bench mac` holds its state
+on another machine and reaches into bench mode over ssh once per phase. That
+needs bench mode to answer over the network, and this install's network is its
+own: `com.apple.wifi.known-networks.plist` exists on the benchmark volume and a
+run there did clone Speedometer from GitHub (2026-08-22 19:32), so it *does*
+join — but nothing about that is guaranteed, its address is a DHCP lease shared
+with host mode (private Wi-Fi MAC is off, so both installs present the same
+hardware MAC and take the same lease), and it has no tailnet identity at all.
+Fixing any of that needs the System keychain and `SystemConfiguration`, both
+root, in the mode where root costs a password.
+
+So everything the run needs is written onto the volume **while it is merely
+mounted** — which is the same property that makes staging a copy rather than a
+transfer — and a per-user LaunchAgent in `~bench/Library/LaunchAgents` starts it
+when the bench account auto-logs in. Nothing in the path needs a password:
+
+| step | why no password |
+|---|---|
+| staging | `/var/wk` on the volume is owned by uid 501: this account in host mode, `bench` over there |
+| planting | `~bench` is uid 501 too, so its `LaunchAgents` is writable from host mode |
+| the reboot | `osascript … restart` restarts as the logged-in user |
+| the run | the bench account has NOPASSWD sudo on that install, so `wk quiesce` works with nobody to ask |
+| coming back | the autorun reboots when it finishes |
+
+**The ordering is the safety, and it is the rpi4's self-disarm reached without a
+firmware register.** The autorun advances its state file *before* it runs
+anything, counts its attempts (three, then it abandons the job), and arms a
+watchdog that reboots the machine whatever happens to the benchmark. So a panic,
+a hang, a power cut and a timed-out run all land on a boot that knows the job
+was attempted and does not attempt it again.
+
+**And it cannot loop.** If the firmware default is the benchmark volume, the
+reboot at the end lands back in bench mode — where the state file says the job
+is finished, so the autorun removes its own agent and **halts** rather than
+running again. Worst case is a machine that is off, not a machine in a loop, and
+the person who powers it on picks a disk once.
+
+**Interleaved, not blocked.** `A B A B …`, because the machine drifts: the SSD
+warms, the fans spin up, the thermal budget twenty minutes in is not the one at
+the start. Blocking the arms puts all of that drift on one side of the
+comparison and calls it a result. `wk pi bench --ab` interleaves for the same
+reason.
+
+**Two arms with the same staged build is the control, not a mistake.** An A/A
+measures this lane's noise floor, and there is no honest way to read an A/B
+without it — a 2% difference means nothing until you know whether the same build
+twice differs by 3%. `wk bench ab-summary` says so in its output when it sees it.
+
+**What the guest rehearsal caught, 2026-08-23** — the reason it was rehearsed in
+a VM before the volume. The first arm died 20 s after login with
+
+```
+patch: Can't create '/var/folders/…/T/patchXXXX' … No such file or directory
+```
+
+run-benchmark applies a plan's patch through `patch`, which writes into
+`DARWIN_USER_TEMP_DIR` — and that directory is created by the per-user bootstrap,
+which at login has not necessarily happened yet. The second arm, sixteen seconds
+later, was fine. On the real volume that would have been a missing number with
+nobody in the room to see why, so the autorun now waits for a writable per-user
+temp directory before it starts and settles for 90 s by default.
+
+**What the first three real cycles cost, and what was actually wrong
+(2026-08-23).** Worth recording in the order the causes were *found*, because
+two of the three guesses in between were wrong and the wrong guesses are
+instructive.
+
+Every cycle staged, planted and rebooted cleanly, and the machine entered bench
+mode exactly as the firmware default predicted. Every one produced no numbers.
+
+*Guess one, wrong: the unpinned payload.* The lane had staged with no pinned
+payload and warned about it, so the obvious reading was that each arm died
+fetching Speedometer over a network the install may not have. It is a real
+hazard — staging now **refuses** without a pinned payload rather than warning,
+because the consequences of that warning arrive after a reboot on a machine
+with no way to report them — but it was not what happened. The runs never got
+that far.
+
+*Guess two, wrong: the update-schedule check.* What the log actually showed was
+one failing preflight check, six times:
+
+```
+warning:   updates:    Automatic checking for updates is turned on
+  FAIL  quiet machine   see above -- 'wk quiesce on' first
+```
+
+Everything else passed — bench mode, `bench is logged in at the screen`, screen
+free, AC power, pyobjc, the build. But that wording does not exist in the
+current `lib/quiet.sh`: it is the *old* reader, the one this file's own comment
+describes as lying on macOS 26. So the benchmark install was running an old tree.
+
+*The actual cause: provisioning that could not stop running.*
+`bench/mac-bench-firstboot.sh` ends by removing its own launchd job — and it did
+it with `launchctl bootout system <its own label>`, which is `kill $$` with extra
+steps. The job dies before the `rm`. So it had **never** removed itself: ten runs
+between 2026-08-22 and 2026-08-23, both files still carrying their original
+mtimes, the log saying "removing the first-boot daemon" every time.
+
+Two things it does on each of those runs are fatal to a planted A/B:
+
+- it `rsync --delete`s its payload copy of wk-tools over
+  `~bench/Development/wk-tools`, **replacing this lane's tooling with the copy
+  the install was built with** — which is why the run read an old
+  `lib/quiet.sh`, and why the tree reverted between being verified and being
+  used; and
+- it ends with `shutdown -r +1`, so the machine reboots about a minute into the
+  run. The 17:51Z cycle got two preflights in before the machine went down under
+  it.
+
+The same suicide, in the same shape, had been found in
+`bench/mac-bench-autorun.sh` a few hours earlier in a guest rehearsal. Worth
+knowing that it is an easy mistake to make twice.
+
+What changed, and why each is more than a bug fix:
+
+- **the daemon removes itself by deleting its files**, not by booting out its own
+  label. Its `rm` is now checked, and it says so if the file survives.
+- **the autorun defuses a daemon it finds**, because a volume provisioned before
+  the fix still carries the broken one. It kills the running script *before* it
+  can schedule a reboot rather than cancelling one afterwards — the two start
+  within two seconds of each other, so reacting is a race that cannot be seen —
+  and re-checks for a pending shutdown after the settle.
+- **planted tooling goes to `/var/wk/wk-tools`, not `~bench/Development`.** The
+  install's own copy is the one directory on that volume something else rewrites.
+  A run should not depend on what the install happens to carry anyway.
+- **`put_tree` verifies the far end** — a sentinel file and a byte count — rather
+  than trusting an exit status. It was already doing this when the tree reverted,
+  which is the useful part of the story: the verification was true when it was
+  made. What it could not tell was that something would undo it. Hence the point
+  above.
+- staging refuses without a pinned payload; `wk bench seed` no longer forwards
+  for a non-container workspace and no longer computes its cache path before a
+  target is loaded (`mkdir: /var/lib/wk: Permission denied`, a variable read too
+  early); seeded payloads drop `.git`, because git's fsmonitor leaves a Unix
+  socket that no copy tool can reproduce (`rsync: mkstempsock: Invalid argument`,
+  openrsync).
+
+One measurement finding, separate from all of it and worth keeping: the update
+scan was **real**. `LastFullSuccessfulDate` on the volume shows a software-update
+scan starting at 15:41:17 — thirty seconds into a run. The autorun now writes
+`AutomaticCheckEnabled=false` itself before quiescing and reads it back (it came
+back `0`), because provisioning's attempt at the same thing is on record as not
+sticking.
+
+The pattern worth carrying, and it is the one every item above is an instance of:
+**on this lane, anything that can only be discovered after the reboot has to be
+refused, verified, or defused before it.** Nothing over there can tell you
+anything until the machine comes back, and by then it has cost a cycle and a
+trip to the keyboard.
+
 So the fleet's arming models put the intent in different places, and this
 machine is the one where the place is a person:
 

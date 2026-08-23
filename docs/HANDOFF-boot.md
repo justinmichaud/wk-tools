@@ -108,6 +108,36 @@ scriptable ones. `bless --setBoot` has been superseded for this purpose and its
 (eclecticlight.co's LocalPolicy and external-bootable-disk write-ups are the
 clearest references; `bless(8)` for what is left of the tool.)
 
+**Re-tested 2026-08-23, on the machine rather than from the references, because
+"SIP is off now" is the obvious reason to expect a different answer** — and it
+is not one. In a macOS 26 guest with SIP *disabled* and passwordless root:
+
+| attempt | result |
+|---|---|
+| `nvram boot-volume=<other volume group>` | exits **0** and changes nothing. The write lands under the `7C436110-…` GUID and is discarded; `IODeviceTree:/options` still holds the firmware's own value, before *and after* a reboot |
+| `bless --mount … --setBoot` | its own man page: "not supported on Apple Silicon based systems" |
+| `systemsetup -getstartupdisk` | `(null)`; `-liststartupdisks` prints nothing |
+| `bputil` | sets *security policy* per volume group and needs a volume owner's credentials. It does not select a volume |
+
+So the gate is not SIP — `boot-volume` is firmware-owned, not SIP-protected —
+and tier 2 stands exactly as written.
+
+**What the same test did buy: the firmware's choice is *readable*.** `nvram -p`
+publishes `boot-volume` as three colon-separated UUIDs whose last field is the
+APFS volume group, so comparing it with `diskutil info` says which install the
+*next plain reboot* enters. `wk boot mbp --status` reports it as
+`firmware_default=` since 2026-08-23. That turns tier 2 from "a person, twice"
+into "a person, once, on whichever side the default is not" — and with a job
+planted on the volume rather than driven over ssh, once per *experiment* instead
+of once per run (`wk bench mac-ab`, `docs/HANDOFF-mac-perf-mode.md`).
+
+It is evidence rather than a promise, and usefully so: the startup manager boots
+a volume once **without updating the variable**, so a machine last started that
+way names a default it is not running. That is the state this Mac was in on
+2026-08-23 — running `Macintosh HD`, `boot-volume` naming `WK Bench` — and the
+reading is still the right one, because the question a lane asks is where the
+*next* plain reboot goes.
+
 So the honest shape is **two tiers**, and the design must not pretend
 otherwise:
 

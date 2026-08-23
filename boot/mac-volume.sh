@@ -11,6 +11,14 @@
 # docs/HANDOFF-boot.md as tier 2; nothing here tries to work around it,
 # because an automation that cannot exist is worse than a documented ritual.
 #
+# Re-tested 2026-08-23 with SIP *disabled* and root, because that is the obvious
+# reason to expect a different answer: `nvram boot-volume=<other group>` exits 0
+# and changes nothing, `bless --setBoot` refuses by documentation, and
+# `systemsetup -getstartupdisk` answers "(null)". SIP is not the gate. What the
+# test did buy is that the firmware's *own* choice is readable, which is what
+# mac_firmware_default() below reports and what decides which side of a
+# benchmark cycle costs a person anything.
+#
 # So, compared with the Pi drivers:
 #
 #   * there is no image *file*. What boots is an installed, personalised macOS
@@ -145,6 +153,57 @@ b_evidence() {
         echo "benchmark_volume=$MACH_VOLUME (attached at $(mac_volume_path))"
     else
         echo "benchmark_volume=$MACH_VOLUME (not attached)"
+    fi
+    echo "firmware_default=$(mac_firmware_default)"
+}
+
+# Which install the firmware says it will boot next, and what that is worth.
+#
+# This is the one fact that decides whether a benchmark cycle on this machine
+# costs a person nothing or costs them one trip to the keyboard, and until
+# 2026-08-23 nothing here reported it -- so "hands-on" was stated as a property
+# of the machine when it is really a property of *which way round the default
+# currently points*.
+#
+# The firmware publishes its choice as `boot-volume` in IODeviceTree:/options,
+# three colon-separated UUIDs of which only the last identifies anything on this
+# disk: the APFS *volume group*. `diskutil` gives the same UUID for each install,
+# so the two can simply be compared.
+#
+# Two things it is honest about rather than quiet about:
+#
+#   it is evidence, not a promise. The startup manager boots a volume *once*
+#   without updating this variable, so a machine that was last started that way
+#   reports a default it is not currently running -- which is exactly the state
+#   this Mac was found in (booted Macintosh HD, boot-volume naming WK Bench).
+#   That is a feature of the reading: it says where the *next plain reboot*
+#   goes, which is the question a lane actually asks.
+#
+#   it cannot be written. Tested 2026-08-23 in a macOS guest with SIP disabled
+#   and root: `nvram boot-volume=<other group>` exits 0 and changes nothing --
+#   the value lands in the 7C436110-… namespace and is discarded, while
+#   IODeviceTree:/options keeps the firmware's own across a reboot.
+#   `bless --setBoot` is documented as unsupported on Apple Silicon and
+#   `systemsetup -getstartupdisk` answers "(null)". SIP is not the gate; the
+#   variable is firmware-owned. So this driver reports and never sets.
+mac_volume_group() {  # $1 = mount point
+    diskutil info "$1" 2>/dev/null | sed -n 's/^ *APFS Volume Group: *//p' | head -1
+}
+
+mac_firmware_default() {
+    local bv grp host_grp bench_grp
+    bv=$(nvram -p 2>/dev/null | awk -F'\t' '$1 == "boot-volume" { print $2 }')
+    [ -n "$bv" ] || { printf 'unknown (the firmware publishes no boot-volume)'; return 0; }
+    grp="${bv##*:}"
+    host_grp=$(mac_volume_group /)
+    bench_grp=""
+    mac_volume_present && bench_grp=$(mac_volume_group "$(mac_volume_path)")
+    if [ -n "$bench_grp" ] && [ "$grp" = "$bench_grp" ]; then
+        printf "%s ('%s' -- a plain reboot is expected to enter bench mode)" "$grp" "$MACH_VOLUME"
+    elif [ -n "$host_grp" ] && [ "$grp" = "$host_grp" ]; then
+        printf '%s (the host install -- a plain reboot stays in host mode)' "$grp"
+    else
+        printf '%s (matches neither install on this disk)' "$grp"
     fi
 }
 

@@ -235,10 +235,37 @@ is_targetless() {
     # those paths in a Linux guest that has never seen them ("no such run", of
     # a file sitting right there). A comparison of two run *ids* still
     # forwards, because those runs and compare-results both live in there.
+    # Seeding a benchmark payload for a workspace that is not a container.
+    #
+    # `wk bench seed <ws> <plan>` reads the plan file out of the workspace and
+    # clones the benchmark into this machine's own cache. For a *container*
+    # workspace both of those live inside the podman VM, so it must forward. For
+    # a macOS guest -- which is where the Apple ports are built, and therefore
+    # the only place the macOS lane can read a plan from -- forwarding sends it
+    # to a Linux VM that has never heard of the guest: on this Mac it started
+    # the podman machine and then failed to find `bench-build`, so the payload
+    # was silently not pinned and the run fell back to cloning Speedometer over
+    # the network *during the measurement*. Found 2026-08-23, staging for
+    # `wk bench mac-ab`.
+    #
+    # `ws_target` is safe to ask here: it is a file test per configured target
+    # and starts nothing (lib/target.sh).
+    if [ "$1" = bench ] && [ "${2:-}" = seed ] && [ -n "${3:-}" ]; then
+        [ "$(ws_target "$3" 2>/dev/null)" = container ] || return 0
+        return 1
+    fi
     if [ "$1" = bench ] && [ "${2:-}" = compare ]; then
-        local _a
+        local _a _one
         for _a in "$@"; do
-            [ -f "$_a" ] && return 0
+            # An arm may be several runs, comma-separated (`wk bench compare
+            # a1,a2 b1,b2`), so the whole argument is not a file even when every
+            # part of it is. Testing the argument as one string answered "not
+            # host-side" for a comparison of files sitting on this machine and
+            # forwarded it into the podman VM, where those paths do not exist.
+            local IFS=,
+            for _one in $_a; do
+                [ -f "$_one" ] && return 0
+            done
         done
         return 1
     fi
@@ -265,7 +292,15 @@ is_targetless() {
         # machine it measures), but only if it gets far enough to say so:
         # forwarded, the refusal never prints and the podman machine boots for
         # a command that was never going to run there.
-        "bench mac"|"bench mac-volume") return 0 ;;
+        # ...and the two verbs the unattended A/B added, for exactly the same
+        # reason. `mac-ab` reaches another machine over ssh and reboots it;
+        # `ab-summary` reads result files sitting on a volume attached to *this*
+        # machine. Forwarded, the first asked a Linux guest to ssh to tolken and
+        # the second looked for `/Volumes/WK Bench - Data/...` in a guest that
+        # has never seen it -- and on the Mac, which has no podman at all, both
+        # died on "podman is required" before printing anything. Found
+        # 2026-08-23 running `wk bench ab-summary` on tolken.
+        "bench mac"|"bench mac-volume"|"bench mac-ab"|"bench ab-summary") return 0 ;;
     esac
     return 1
 }

@@ -1416,6 +1416,128 @@ the reader (which must never mistake intent for evidence).
 - [V] staging lays out `WebKitBuild/<config>`, `Tools/` and a `stage.json`
       written last, with workspace, sha, config and `bench_host=image`
       (2026-08-20, from a local workspace onto the disposable volume)
+- [V] `--status` reports which install the *firmware* will boot next
+      (2026-08-23: `firmware_default=73C12614-… ('WK Bench' — a plain reboot is
+      expected to enter bench mode)`, on this Mac, while it was running
+      Macintosh HD. That combination is the point: `startosinstall` set the
+      default and the startup manager overrode it once without updating it)
+- [V] the boot volume still cannot be *set* from software, with SIP disabled and
+      root (2026-08-23, in a guest: `nvram boot-volume=<other group>` exits 0
+      and changes nothing before or after a reboot; `bless --setBoot` refuses by
+      documentation; `systemsetup -getstartupdisk` answers `(null)`). Re-tested
+      rather than assumed, because "SIP is off now" is the obvious reason to
+      expect otherwise
+
+### The unattended A/B (`wk bench mac-ab`)
+Rehearsed in the `wk-bench` guest before it was pointed at the volume, which is
+the only reason the three bugs below were not found on hardware with nobody in
+the room.
+
+- [V] `--preflight` answers from another machine, changes nothing, and names
+      every reason the run could fail after the reboot: host mode, the volume,
+      `/var/wk` and `~bench` writable without sudo, autologin, pyobjc, scipy,
+      wk-tools and what is staged (2026-08-23, from rpi5 against tolken)
+- [V] `--dry-run` prints the plan and reboots nothing (2026-08-23; the first
+      version reported "tolken is not answering" from a dry run, because
+      `phase_wait` returned an empty answer the caller then branched on)
+- [V] a per-user LaunchAgent in `~/Library/LaunchAgents` fires at autologin and
+      drives the whole job (2026-08-23, guest: agent started ~60 s after the
+      reboot, which is worth knowing — a poll at 30 s reads as "it never ran")
+- [V] the arm→result map is written as it happens, because it cannot be
+      recovered afterwards: an A/A runs both arms out of one staged payload, so
+      the result names differ only by timestamp (2026-08-23, `ab/<stamp>/runs.tsv`)
+- [V] both arms complete and produce a score (2026-08-23, guest:
+      `Speedometer-3:Score: 31.467pt stdev=7.3%` for arm A)
+- [V] **the job cannot loop.** Finishing sets `phase=done`; the reboot at the
+      end landed back in bench mode (a guest always does), and the next boot
+      removed the agent and *halted* the machine (2026-08-23, verified twice —
+      once failing, once passing, see below)
+- [V] the state file advances before the run, so an interrupted attempt is
+      counted rather than repeated forever (2026-08-23: `attempts=1`,
+      `phase=running` during, `phase=done outcome=ran` after)
+- [V] the watchdog is armed and reaped quietly (2026-08-23; it first left
+      `Terminated: 15` in the log, which reads like a failure in a transcript
+      whose whole job is to be read after the machine has gone)
+
+Three bugs the rehearsal found, each of which would have cost a trip to the
+keyboard:
+
+- [V] `launchctl bootout gui/<uid>/<label>` on the agent's *own* label is
+      `kill $$`: it killed the script mid-function, so the plist survived and
+      the machine never halted — in the one branch whose entire job is to stop
+      a benchmark install running unattended. Deleting the plist is sufficient
+      and is what it does now (2026-08-23)
+- [V] `run-benchmark`'s patch step needs `DARWIN_USER_TEMP_DIR`, and at login
+      that directory does not necessarily exist yet: the first arm died 20 s in
+      with `patch: Can't create '/var/folders/…/T/patchXXXX'`, the second was
+      fine 16 s later. The autorun waits for a writable per-user temp directory
+      (2026-08-23)
+- [V] **`wk bench staged` used a staged tree's pinned payload for any plan.** A
+      tree staged for `jetstream2.2`, run with `--plan speedometer3.0`, handed
+      JetStream to run-benchmark as `--local-copy` and died inside `patch` with
+      "No file to patch". The loud failure is the lucky case — a payload for a
+      *near* plan would have produced a number for the wrong benchmark under
+      the right name. The manifest's plan is now checked (2026-08-23)
+- [V] `wk bench seed` refused every workspace but a container, so a payload
+      could not be pinned for the macOS lane at all — the plan file it reads
+      lives in the guest that did the build. Seeding is not running and no
+      longer inherits running's refusal; it also prints the directory, which
+      `>/dev/null` had been discarding (2026-08-23)
+- [V] `wk bench seed <guest-ws>` is not forwarded into the podman VM. It was,
+      and the forwarding was silent: on tolken it *started the podman machine*
+      and then could not find the guest workspace, so the payload was not
+      pinned and the lane went ahead anyway (2026-08-23 — see the refusal below,
+      which is what that cost bought)
+- [V] `wk bench compare a1,a2 b1,b2` with file paths is not forwarded either:
+      the arm is comma-separated, so the whole argument is not a file even when
+      every part of it is, and testing it as one string sent a comparison of
+      local files into the VM (2026-08-23, unit-checked against the matcher)
+- [V] staging **refuses** when the payload cannot be pinned, rather than warning
+      and continuing. It is cheap to pin on the machine that has a network, and
+      there is no version of "we will find out over there" worth a cycle
+      (`--allow-network-fetch` overrides and says what it is buying). Note this
+      was *not* what broke the 2026-08-23 cycles — the runs never reached the
+      payload; see the first-boot daemon below
+- [V] a seeded payload carries no `.git`. git's fsmonitor leaves a Unix socket
+      at `.git/fsmonitor--daemon.ipc`, openrsync dies on it
+      (`mkstempsock: Invalid argument`) and `cp -R` skips it with a warning,
+      which is the same problem arriving quietly. Dropping it also makes two
+      seeds of one commit the same tree, which they were not before (2026-08-23)
+- [V] `wk bench seed` computes its cache path *after* a target is loaded.
+      `SEED_DIR` is assigned at source time from the default store, which is
+      `/var/lib/wk` on a Mac — right for a container, wrong for a macOS guest, so
+      seeding died on `mkdir: /var/lib/wk: Permission denied`, which reads like a
+      missing setup step and is really a variable read too early (2026-08-23)
+- [V] **the first-boot daemon removes itself.** It removed itself with
+      `launchctl bootout` on its own label, which kills the job before the `rm`,
+      so it had never once succeeded: ten runs across two days, both files still
+      carrying their original mtimes, and "removing the first-boot daemon" in the
+      log every time. Every boot it therefore `rsync --delete`d its payload copy
+      of wk-tools over `~bench/Development/wk-tools` and then rebooted the machine
+      a minute later — which is what actually killed three planted A/B cycles:
+      the run read an old `lib/quiet.sh` and the machine went down under it
+      (2026-08-23). Deleting the files is the whole of the fix, and the `rm` is
+      now checked
+- [V] the autorun defuses a first-boot daemon it finds on a volume provisioned
+      before that fix, by killing the running script *before* it can schedule a
+      reboot rather than cancelling one after — the two start within two seconds
+      of each other, so reacting to it is a race that cannot be observed — and
+      re-checks for a pending shutdown after the settle (2026-08-23)
+- [V] planted tooling lives at `/var/wk/wk-tools`, not `~bench/Development`:
+      the install's own copy is the one directory on that volume that something
+      else rewrites, and a run should not depend on what the install happens to
+      carry (2026-08-23)
+- [V] `put_tree`/`put_file` verify the far end — a sentinel file and a byte
+      count — instead of trusting an exit status. Worth being precise about what
+      this does and does not buy: it was already verifying when the tree reverted,
+      and the verification was true when it was made. It catches a transfer that
+      did not land; it cannot catch one that is undone afterwards (2026-08-23)
+- [V] a whole round producing nothing stops the schedule. The build, the payload
+      and the machine do not change between rounds, so finishing them buys
+      nothing and spends the machine's time in a mode nobody can reach. One
+      flaky arm does *not* abort — that is what more rounds are for
+      (2026-08-23, unit-checked: `nnnnnn` stops after round 1; `ynnnnn` and
+      `nyyyyy` both run all three)
 
 ### Building — unprivileged, reproducible, crash-only
 
