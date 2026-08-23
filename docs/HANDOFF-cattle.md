@@ -25,6 +25,11 @@ state or hidden setup. Concretely, four obligations:
 4. **Provisioning is a verb, not a wiki page.** Where it is not yet a verb,
    that is a named gap below, not an accepted state.
 
+**The test of all four is a rebuild**, and the punch-list for the day it
+happens is `docs/HANDOFF-reprovision.md` — the changes that are only cheap to
+make while a machine is already being wiped (account names, Remote Login), and
+what a rebuild is expected to *catch*. Planned for moose and tolken.
+
 ## The ledger — every machine, its from-nothing path, and what is local to it
 
 ### Fleet (boot/machines/*.conf — each conf carries the recipe)

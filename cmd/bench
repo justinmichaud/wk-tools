@@ -10,6 +10,10 @@
 #                                          run on the machine itself)
 #   wk bench staged [--plan P]             run it, in the role that was booted
 #                                          for it; --ls lists what is there
+#   wk bench mac <ws> [--plan P]           the whole macOS lane in one command,
+#                                          driven from another machine: build,
+#                                          stage, arm, wait for the one step a
+#                                          person has to do, run, come back
 #   wk bench compare <run-a> <run-b>       compare-results on two saved runs
 #   wk bench ls                            saved runs
 #
@@ -1461,6 +1465,44 @@ cmd_staged() {
         check no "the console session" "the screen belongs to '${console:-nobody}', not $(id -un)"
     fi
 
+    # A session that exists is not a session that is *usable*, and this check
+    # exists because the difference cost a whole run.
+    #
+    # macOS shows Setup Assistant after a major upgrade -- the automatic-updates
+    # pane among others -- and until somebody answers it, it owns the frontmost
+    # window. MiniBrowser then launches, never becomes active, and a benchmark
+    # in a background window is throttled by the browser itself: no error, no
+    # crash, just no progress until run-benchmark gives up (exit 124).
+    #
+    # Measured 2026-08-22 in a bench guest. The console check above passed
+    # (`admin is logged in at the screen`) and the run burned its entire timeout
+    # with no error. Nothing in the preflight was looking at the screen, so
+    # nothing could say why.
+    #
+    # The near-miss worth recording: the only failing check at the time was
+    # `quiet machine`, complaining about an update schedule -- and that was a
+    # *coincidence*, not a symptom. Dismissing Setup Assistant does not make the
+    # schedule settable in a guest; the two are unrelated. The lesson is not
+    # "read the quiet check more carefully", it is that `--force` is
+    # all-or-nothing: forcing a benign failure forces a fatal one too, and there
+    # was no separate check for the fatal one to fail. Now there is.
+    #
+    # A process check rather than AppleScript: asking System Events for window
+    # titles needs assistive access, which a fresh install has not granted, and
+    # it fails with -25211 rather than answering. The .app suffix keeps this
+    # from matching the SoftwareUpdateSubscriber XPC service, which is always
+    # running and means nothing.
+    local blocker; blocker=$(screen_blocker)
+    if [ -n "$blocker" ]; then
+        check no "the screen is free" "'$blocker' is running and owns the front window"
+        log  "        a benchmark in a background window is throttled, so the run would"
+        log  "        time out rather than fail. Answer it at the screen, or for an"
+        log  "        install that should never show it:"
+        log  "          sudo touch /var/db/.AppleSetupDone   (before its first boot)"
+    else
+        check yes "the screen is free" "no onboarding or installer pane in front"
+    fi
+
     # A laptop on battery throttles, and does it silently. A machine with no
     # battery at all -- a desktop, or a guest -- is on AC by construction, and
     # failing it for the absence of a battery would refuse every run on the one
@@ -1624,6 +1666,18 @@ case "${1:-}" in
     ls)      shift; cmd_ls; exit 0 ;;
     compare) shift; [ $# -ge 2 ] || usage; cmd_compare "$@"; exit 0 ;;
     staged)  shift; cmd_staged "$@"; exit 0 ;;
+    # The whole macOS lane rather than one step of it: build, stage, arm, wait
+    # for the person at the startup manager, run, come back, read the result.
+    # Its own file because it is the one verb here that runs on a machine other
+    # than the one being measured -- it has to outlive a reboot of it -- and so
+    # shares none of this script's preflight, which is about the machine it is
+    # running on. exec, not a function: nothing below is wanted.
+    mac)     shift; exec "$WK_ROOT/bench/mac-lane.sh" "$@" ;;
+    # Making the benchmark install, as opposed to using it. Runs on the Mac --
+    # it acts on that machine's own disk and one step reboots it -- so it is a
+    # sibling of the lane rather than a phase of it: the lane is driven from
+    # elsewhere precisely because it must outlive that reboot.
+    mac-volume) shift; exec "$WK_ROOT/bench/mac-bench-volume.sh" "$@" ;;
     stage)   shift
              [ $# -ge 1 ] || usage
              cmd_stage "$@"; exit 0 ;;

@@ -41,11 +41,40 @@ macos_noise() {
         *) warn "  timemachine: a destination is configured; a backup can start mid-run"; bad=1 ;;
     esac
 
-    v=$(softwareupdate --schedule 2>/dev/null | head -1)
+    # Read the setting, not `softwareupdate --schedule`.
+    #
+    # On macOS 26 that command reports "Automatic checking for updates is turned
+    # on" with AutomaticCheckEnabled set to 0 in the very plist it describes --
+    # verified on real hardware 2026-08-22, after the same disagreement in a
+    # guest had been written off as a virtualisation quirk twice. It is not a
+    # quirk and it is not the guest: the reader is simply wrong, the same way
+    # `systemsetup -getremotelogin` needs admin and exits 0 while refusing to
+    # answer (host/macos/sharing.sh).
+    #
+    # This matters more than a cosmetic warning. It is the check that fails, so
+    # it is the check that gets `--force`d past -- and `--force` is
+    # all-or-nothing, so believing this one costs every other preflight failure
+    # too. A check that cannot pass on a correctly configured machine trains
+    # people to ignore the whole preflight.
+    # `sudo -n` first, and it is not paranoia: as an ordinary user this domain
+    # answers "does not exist" for a key that root reads as 0, because cfprefsd
+    # serves /Library domains differently by privilege -- and reading the plist
+    # file directly does not help, plutil finds no such key in it either. Root
+    # is the only reader that sees the truth. `-n` so it never prompts; a
+    # machine without passwordless sudo just falls through.
+    v=$(sudo -n defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null) \
+        || v=$(defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null) \
+        || v=""
     case "$v" in
-        *"turned off"*) log "  updates:    automatic checking off" ;;
-        '')             log "  updates:    unknown" ;;
-        *)              warn "  updates:    $v"; bad=1 ;;
+        0)  log  "  updates:    automatic checking off" ;;
+        1)  warn "  updates:    automatic checking is on"; bad=1 ;;
+        # Unreadable is reported as unknown and does NOT fail the check. The
+        # temptation is to treat it as "on" and be safe, but this is the check
+        # that gets --force'd past when it cannot pass, and --force is
+        # all-or-nothing -- so a check that fails on machines it cannot read
+        # ends up disabling every other check too. Say what is known.
+        '') log  "  updates:    unknown (needs root to read; not treated as a failure)" ;;
+        *)  log  "  updates:    unknown (AutomaticCheckEnabled=$v)" ;;
     esac
 
     # Sleep is not only a noise source: a display that sleeps mid-run changes
@@ -69,4 +98,49 @@ macos_noise() {
     fi
 
     return $bad
+}
+
+# --- is the screen usable, as opposed to merely occupied ----------------------
+#
+# Prints the name of an app that owns the *front window* and would ruin a run,
+# or nothing. macOS puts several of these in front of a fresh install and they
+# all have the same effect: a benchmark in a background window is throttled by
+# the browser, so the run makes no progress and times out with no error at all
+# (run-benchmark exit 124, measured 2026-08-22).
+#
+# Here, and not in the two places that ask, for the reason at the top of this
+# file. The first version lived in cmd/bench with a list of three apps while the
+# lane deciding whether to --force past it kept its own list of one -- so
+# `Setup Assistant` was caught and `Software Update`, which came to the front the
+# moment Setup Assistant was dismissed, was forced straight through. One list,
+# two callers.
+#
+# ASKED AS "WHAT IS FRONTMOST", NOT "WHAT IS RUNNING"
+#
+# The first version pattern-matched process command lines for `<app>.app` and
+# was wrong in the worst direction: `softwareupdated` and `suhelperd` live
+# *inside* `Software Update.app/Contents/Resources/`, run on every healthy Mac,
+# and matched. The check failed on a machine whose screen was perfectly free --
+# and a check that cannot pass is worse than no check, because the first thing
+# anybody does with it is force past it, which is exactly the habit this whole
+# area is trying to break.
+#
+# `lsappinfo front` asks the window server which application is actually
+# frontmost. It needs no assistive access -- unlike System Events, which answers
+# `-25211` on a fresh install rather than the truth -- and it reports GUI apps
+# only, so a daemon buried in an .app bundle cannot be mistaken for a window.
+WK_SCREEN_BLOCKERS="${WK_SCREEN_BLOCKERS:-Setup Assistant|Software Update|Installer|Migration Assistant|System Settings}"
+
+screen_blocker() {
+    command -v lsappinfo >/dev/null 2>&1 || return 0
+    local asn name
+    asn=$(lsappinfo front 2>/dev/null) || return 0
+    [ -n "$asn" ] || return 0
+    name=$(lsappinfo info -only name "$asn" 2>/dev/null \
+             | sed -n 's/.*"LSDisplayName"="\([^"]*\)".*/\1/p')
+    [ -n "$name" ] || return 0
+    case "|$WK_SCREEN_BLOCKERS|" in
+        *"|$name|"*) printf '%s' "$name" ;;
+    esac
+    return 0
 }

@@ -46,6 +46,12 @@ workspaces
       staged [--plan P]     run it, in the bench mode booted for it; refused
                             in host mode, which is not the same
                             machine underneath
+      mac <ws> [--plan P]   the whole macOS lane in one command, driven from
+                            another machine: build, stage, arm, wait for the
+                            one step a person has to do, run, come back
+      mac-volume [--create|--install|--provision]
+                            make that Mac's benchmark install, on a second
+                            APFS volume in its own container (runs on the Mac)
   profile <name> [file.js]  where the time went: JSC's own profilers, samply,
                             or Instruments -- one flag each, no env-var walls
       --mode <m>            sampling (default) | bytecode | samply |
@@ -251,6 +257,15 @@ is_targetless() {
         # install. Forwarded, both resolved the word after `bench` as a
         # workspace name and reported "no such workspace: staged".
         "bench stage"|"bench staged") return 0 ;;
+        # The macOS lane and the thing that builds the install it runs in, for
+        # the same reason and with the same symptom. `mac-volume` acts on this
+        # Mac's own APFS container -- forwarded it asked a Linux guest about
+        # `diskutil` and died on `podman is required` before reaching any of
+        # it. `mac` is refused on macOS anyway (it must outlive a reboot of the
+        # machine it measures), but only if it gets far enough to say so:
+        # forwarded, the refusal never prints and the podman machine boots for
+        # a command that was never going to run there.
+        "bench mac"|"bench mac-volume") return 0 ;;
     esac
     return 1
 }

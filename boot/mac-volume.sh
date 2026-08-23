@@ -264,9 +264,35 @@ b_reboot() {
 # is a perfectly creatable directory on the *internal* disk, and a payload
 # staged there would be invisible to the role it was staged for and invisible
 # to whoever staged it.
+# The *Data* volume, not the system volume, and this is not a detail: since APFS
+# volume groups the system volume is sealed and read-only (`csrutil
+# authenticated-root` is enabled), so `/Volumes/WK Bench/var/wk` cannot be
+# created at all -- staging died on `mkdir: /Volumes/WK Bench/var/wk:
+# Permission denied` the first time this driver ever met a real volume, having
+# been written and reviewed against one that did not exist yet.
+#
+# `/var` does not exist on the data volume either: on the *running* system it is
+# a firmlink, and from outside the pair is mounted as two volumes with the real
+# directory at `private/var`. So the same bytes are `/var/wk` to the booted
+# bench install and `/Volumes/<name> - Data/private/var/wk` to host mode staging
+# them, and both spellings have to appear because both are correct from where
+# they are said.
+mac_volume_data_path() {
+    local d="/Volumes/$MACH_VOLUME - Data"
+    [ -d "$d" ] && { printf '%s' "$d"; return 0; }
+    # No data volume: a plain volume rather than a group. Then the system
+    # volume is the only place there is, and its writability is the caller's
+    # problem to report rather than this function's to hide.
+    printf '%s' "$(mac_volume_path)"
+}
+
 b_bench_root() {
     mac_volume_present || return 1
-    printf '%s/var/wk' "$(mac_volume_path)"
+    local d; d=$(mac_volume_data_path)
+    case "$d" in
+        *" - Data") printf '%s/private/var/wk' "$d" ;;
+        *)          printf '%s/var/wk' "$d" ;;
+    esac
 }
 
 # A MACH_LOCAL machine answers only for itself: probing it from anywhere else

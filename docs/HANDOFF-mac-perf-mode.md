@@ -45,17 +45,73 @@ one:
   a variable.
 - **A second APFS system volume in the internal container.** Same storage as
   host mode, which removes that variable, at the cost of living in the same
-  container as the machine's real install. This is the option
-  `docs/HANDOFF-benchmarking.md` flags as worth costing before ruling out; it
-  has not been costed.
+  container as the machine's real install.
+
+**Decided 2026-08-22: the second APFS volume.** The reasoning is that the disk
+is the one variable that cannot be corrected for after the fact — a number
+taken against a different SSD than host mode uses is not a slower number, it is
+a different measurement — whereas every cost of sharing the container is a cost
+that can be seen and managed:
+
+- the two installs share free space (APFS volumes have no fixed size), so the
+  benchmark install growing is the workstation shrinking. `wk bench mac-volume`
+  refuses below 120 GB free rather than warning, because the disk that fills is
+  the one being worked on.
+- they share the SSD's wear and thermal behaviour. That is the point — it is
+  what makes them comparable — but a long run is heating the workstation's disk.
+- the way back is `sudo diskutil apfs deleteVolume 'WK Bench'`, one command,
+  which is the practical argument over an install on a disk you have to find.
 
 Name the volume **`WK Bench`** (or set `WK_BENCH_VOLUME`). The name is both the
 identifier `wk boot` uses and the thing you click in the startup manager.
 
 ## Provisioning it, once
 
-Nothing here is automated yet, and the list is short enough to do by hand. In
-the new install:
+`wk bench mac-volume` now does most of this, on the Mac, in four steps that
+stop where a person is needed (2026-08-22):
+
+```
+wk bench mac-volume                    # the container, the room, the plan
+wk bench mac-volume --create           # add the APFS volume
+wk bench mac-volume --fetch            # list installers; --version to pick
+wk bench mac-volume --install          # startosinstall; needs a credential, reboots
+   ... Setup Assistant: one user, no Apple ID, no FileVault ...
+wk bench mac-volume --provision        # in bench mode: marker, quiet, python
+```
+
+It deliberately does **not** go through the `wk quiesce` privileged helper.
+That helper is a fixed allowlist granted NOPASSWD forever
+(`admin/wk-quiesce-priv`), and it stays auditable because everything in it is
+small, reversible and per-run. "Create a volume" and "run `startosinstall` as
+root" are once-per-machine provisioning; granting them unconditionally would
+trade a real root escalation for saving one password prompt on a command run
+once a year. `--provision` also refuses to run in host mode, because writing a
+bench-mode marker onto the workstation would make `wk bench staged` measure a
+machine with a desktop under it and label the result `bench_host=image` — a
+wrong number that looks right.
+
+What is left for a person is **one credential**: `startosinstall --passprompt`,
+because Apple Silicon will not personalise a volume without a volume owner.
+Everything else on the old version of this list turned out to be automatable,
+and was automated on 2026-08-22 — Setup Assistant (`.AppleSetupDone` in the
+installed package), Command Line Tools (the trigger file below, not the GUI
+prompt), the console login (auto-login), and `authorized_keys` (carried in the
+package from this Mac's own).
+
+Two things that are *not* what the old list assumed, both measured on the real
+volume rather than reasoned about:
+
+- **`startosinstall --installpackage` accepts an unsigned package.** Assumed to
+  need a Developer ID Installer certificate; it does not. The receipt is written
+  and the payload lands from a package reporting `no signature`.
+- **The install makes the benchmark volume the *sticky* default startup disk.**
+  That inverts what the rest of this document assumes: after
+  `startosinstall --volume`, a plain reboot keeps booting `WK Bench`, and it is
+  *host mode* that needs the startup manager. `wk boot mbp --back` is therefore
+  wrong immediately after an install, and System Settings → Startup Disk is how
+  the default goes back to `Macintosh HD`.
+
+The list below is what `--provision` sets and what it only reports:
 
 1. **The mode marker.** `/etc/wk-image`, with at least `id=<something>`:
 
@@ -81,17 +137,62 @@ the new install:
      at the screen has nowhere to draw, which is a check `wk bench staged`
      makes and a failure that otherwise looks like a hang.
 
-3. **Command Line Tools**, for `/usr/bin/python3` — and it must be *that*
-   python: the benchmark driver's `prepare_env` does a bare `import objc`, and
-   pyobjc-core is not autoinstalled. Apple's python3 has it (3.9.6, pyobjc
-   11.1); a Homebrew python3 does not. `xcode-select --install`.
+3. **Command Line Tools**, for `/usr/bin/python3` — and on a fresh install
+   there is no `python3` at all, which is worth stating plainly because two
+   separate things fail on it: the benchmark driver's `prepare_env` does a bare
+   `import objc`, and any provisioning that writes `/etc/kcpassword` with a
+   Python helper silently does nothing.
 
-4. **scipy**, only if you want `wk bench compare` to run there:
+   `xcode-select --install` is a GUI prompt no script can answer. The headless
+   route, established 2026-08-22 on the real volume, is that `softwareupdate`
+   will not even *offer* CLT until the on-demand trigger file exists:
+
+   ```
+   sudo touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+   softwareupdate --list                       # now lists "Command Line Tools for Xcode 26.6"
+   sudo softwareupdate -i "Command Line Tools for Xcode 26.6-26.6"
+   ```
+
+4. **pyobjc**, which does *not* arrive with the Command Line Tools despite what
+   this list used to say. Measured on the real volume and in a guest: no python
+   on either machine could `import objc` after CLT was installed.
+
+   The install fails in a way that looks like a compiler problem and is not:
+   Apple ships pip **21.2.4**, which is too old to take pyobjc's wheels, so it
+   falls back to building `pyobjc-core` from source and fails. Upgrade pip
+   first, then refuse source builds outright so a failure is loud:
+
+   ```
+   /usr/bin/python3 -m pip install --user --upgrade pip
+   /usr/bin/python3 -m pip install --user --only-binary :all: \
+       pyobjc-core pyobjc-framework-Cocoa pyobjc-framework-Quartz
+   ```
+
+5. **scipy**, only if you want `wk bench compare` to run there:
    `/usr/bin/python3 -m pip install --user scipy`.
 
-5. **ssh in**, so a run can be driven from a terminal rather than a keyboard.
+6. **ssh in**, so a run can be driven from a terminal rather than a keyboard.
+   macOS ships Remote Login *off*, and it is off in host mode too as of
+   2026-08-22 — which is worth saying plainly because it blocks the lane before
+   anything else in this list can even be checked, and because it is not
+   something the tooling can turn on for itself:
 
-6. Nothing else. No Xcode, no checkout, no toolchain: the moment the benchmark
+   ```
+   sudo systemsetup -setremotelogin on      # or System Settings -> General -> Sharing
+   ```
+
+   Then authorise the driving machine's key in `~/.ssh/authorized_keys` —
+   `wk bench mac --preflight` prints the exact key to paste. Both installs need
+   this, and they need it *separately*: two installs means two
+   `authorized_keys`, and it is the second one that is easy to forget, because
+   forgetting it is only discovered after the reboot.
+
+   The bench install also needs a name the driver can reach it by. If it is not
+   on the tailnet — its tailscale state is its own, and a fresh install has
+   none — give it one and set `WK_MAC_BENCH_SSH` to a `.local` or LAN name for
+   it. The `tolken-bench` stanza assumes the tailnet name is shared.
+
+7. Nothing else. No Xcode, no checkout, no toolchain: the moment the benchmark
    install can build, it is a second workstation drifting from the first, and
    the numbers stop meaning what they say.
 
@@ -106,6 +207,49 @@ wk bench staged --plan speedometer3.0  # over there, in bench mode
 wk boot mbp --back                     # a plain reboot; the result stays put
 wk bench staged --ls                   # read it back from host mode
 ```
+
+### Or as one command — `wk bench mac`, written 2026-08-22
+
+`bench/mac-lane.sh` runs all six, waits for the one that is a person, and
+resumes across the reboot:
+
+```
+wk bench mac <ws> --preflight          # what the lane needs, before anyone walks over
+wk bench mac <ws> --plan speedometer3.0
+```
+
+Three things about it are design rather than convenience, and each is a trap
+found while building it:
+
+- **It runs on another machine, and refuses to run on the Mac.** Phase 4
+  reboots the computer the driver would be running on. Living on tolken would
+  mean re-establishing itself as a launchd job in the *other* install — state
+  on the machine being measured, and a benchmark install that has grown a
+  scheduler, which is the same mistake as giving it a checkout. So it is driven
+  from rpi5 or moose, holds the state there, and reaches in once per phase; the
+  connection was never meant to survive the reboot, only the state file.
+- **It waits for a *mode*, not for reachability.** The machine answers ssh in
+  both modes. `wk bench staged` aimed at host mode is refused, but a `wk build`
+  aimed at bench mode would quietly start turning the benchmark install into a
+  workstation — so every phase asserts its mode from `/etc/wk-image` first.
+- **Bench mode has its own ssh alias.** One address, two macOS installs, two
+  host keys, and ssh refuses a *changed* key outright — `accept-new` accepts an
+  unknown host and still refuses a changed one. So the lane would arm the
+  machine, wait for it to come back, and then be unable to talk to what came
+  back. `tolken-bench` in `dotfiles/ssh/config` carries a `HostKeyAlias`, which
+  gives the two installs separate known-hosts identities on one address: each
+  is pinned normally, neither can masquerade as the other, and a command aimed
+  at the wrong mode fails on the key rather than doing the wrong thing quietly.
+
+The phases are recorded as they complete (`wk bench mac <ws> --status`), so an
+interrupted lane is resumed by repeating the command and a lane whose build is
+already staged does not rebuild. `--reset` forgets it.
+
+**Unverified against hardware**: everything above the reboot has been exercised
+only as far as an unreachable machine allows — the preflight, the refusals, the
+phase state machine and the state file. The lane has never completed, because
+there is no benchmark volume yet and, as of 2026-08-22, Remote Login on tolken
+is off.
 
 **Which way to choose the disk matters:**
 

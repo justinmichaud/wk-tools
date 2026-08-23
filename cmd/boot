@@ -272,7 +272,19 @@ cmd_arm() {
 
     case "$MODE" in
         unreachable)
-            die "$MACHINE is not reachable over ssh in host mode.
+            # True of every arming model but one. `one-shot`, `medium` and
+            # `hands-on` all reach the machine to arm it -- a firmware register,
+            # a file on the stick, a record on the Mac -- so a machine that does
+            # not answer cannot be armed.
+            #
+            # `guest` is the exception, and not by accident: arming a guest *is*
+            # starting it (b_arm calls t_start), so "unreachable" is the normal
+            # state to arm *from*, not a failure. A stopped guest is what the
+            # rehearsal looks like between runs, and refusing here made
+            # `wk boot benchvm` impossible in exactly the state it exists for --
+            # the guest had to already be running to be told to start.
+            # Found 2026-08-22, driving the lane against benchvm.
+            [ "${BOOT_ARMING:-}" = guest ] || die "$MACHINE is not reachable over ssh in host mode.
     Arming is an ssh command, so there is nothing to arm from here." ;;
         bench*) die "$MACHINE is already in bench mode (system ${MODE#bench }).
     'wk boot $MACHINE --back' returns it first." ;;
@@ -283,14 +295,25 @@ cmd_arm() {
     # (boot/mac-volume.sh), which no store can hold and `wk sysimage build`
     # can never produce. Its identity is the volume's name, which is also what
     # the person choosing it will see on the screen.
-    if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
+    case "${BOOT_ARMING:-one-shot}" in
+    hands-on)
         [ -n "$IMAGE" ] || IMAGE="${MACH_VOLUME:-}"
-        [ -n "$IMAGE" ] || die "$MACHINE has no benchmark volume configured (MACH_VOLUME)"
-    else
+        [ -n "$IMAGE" ] || die "$MACHINE has no benchmark volume configured (MACH_VOLUME)" ;;
+    # And for a guest it is not a file either: the guest *is* the system. There
+    # is nothing for `wk sysimage build` to produce and no image to write --
+    # `wk vm new` made it and cloning the golden guest is the equivalent step.
+    # Sent down the store path it died on `no system built for benchvm yet --
+    # 'wk sysimage build perf-macos-benchvm'`, advising a command that cannot
+    # exist for this machine. Its identity is the guest's name, which is what
+    # `wk vm ls` shows and what b_arm starts. Found 2026-08-22.
+    guest)
+        [ -n "$IMAGE" ] || IMAGE="${MACH_GUEST:-}"
+        [ -n "$IMAGE" ] || die "$MACHINE has no guest configured (MACH_GUEST)" ;;
+    *)
         [ -n "$IMAGE" ] || IMAGE=$(image_latest "$MACH_PROFILE") \
             || die "no system built for $MACHINE yet -- 'wk sysimage build $MACH_PROFILE'"
-        image_complete "$IMAGE" || die "no such system: $IMAGE"
-    fi
+        image_complete "$IMAGE" || die "no such system: $IMAGE" ;;
+    esac
 
     # A one-shot boots a local device, so the system has to actually be on it
     # or the boot falls through to host mode and the whole thing looks like a
@@ -305,7 +328,19 @@ cmd_arm() {
     ;; esac
 
     if [ -n "$DRY" ]; then
-        if [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
+        if [ "${BOOT_ARMING:-one-shot}" = guest ]; then
+            # Neither of the branches below fits: there is no device to verify
+            # an image on and no manifest to read a watchdog out of, so the
+            # generic one would have printed empty fields for both.
+            cat >&2 <<EOF
+would arm $MACHINE
+  guest        $IMAGE ($( ( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$IMAGE")" ) 2>/dev/null || echo unknown ))
+  boot order   nothing in firmware; arming a guest is starting it
+  record       none; the guest either answers with a marker or it does not
+  then         start the guest and wait for its marker. Nothing reboots this
+               machine -- the rehearsal is a VM, which is the whole point.
+EOF
+        elif [ "${BOOT_ARMING:-one-shot}" = hands-on ]; then
             cat >&2 <<EOF
 would arm $MACHINE
   volume       $IMAGE $(mac_volume_present 2>/dev/null && echo "(attached)" || echo "(NOT attached -- arming would refuse)")
@@ -349,6 +384,26 @@ EOF
         info "$MACHINE is armed on paper: the record says the next mode is bench ('$IMAGE')"
         log  "  it is still in host mode until somebody boots it -- 'wk boot $MACHINE --status'"
         log  "  says so, and 'wk boot $MACHINE --disarm' forgets the intent."
+        return 0
+    fi
+    # A guest, and it returns early for the same reason hands-on does: the
+    # generic tail below ends in b_reboot, and for a guest b_reboot is *stop*.
+    # Falling through here did exactly that -- `guest` matched neither the
+    # one-shot nor the medium branch, so b_arm was never called at all and the
+    # only thing that ran was the reboot, which stopped the guest that was
+    # supposed to be starting. `wk boot benchvm` reported success, rc=0, having
+    # done the precise opposite of arming. Found 2026-08-22.
+    #
+    # No record_write: unlike every other model, arming here is not an intent
+    # that has to survive until a reboot -- it is the state change itself, and
+    # the guest either answers with a marker or it does not (b_evidence reads it
+    # directly). A record would be a second, staler answer to a question the
+    # machine can simply be asked.
+    if [ "${BOOT_ARMING:-one-shot}" = guest ]; then
+        b_arm
+        info "$MACHINE is in bench mode: guest '$IMAGE' is running and carries its marker"
+        log  "  'wk boot $MACHINE --back' stops it -- for a guest, leaving the role"
+        log  "  is leaving the machine, so there is nothing to hand back afterwards."
         return 0
     fi
     if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then

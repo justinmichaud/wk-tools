@@ -39,7 +39,14 @@ on)
         # Keep the machine awake for the whole run without touching power
         # settings permanently.
         if [ ! -f "$STATE/caffeinate.pid" ]; then
-            caffeinate -dimsu &
+            # stdin, stdout and stderr all detached, and that is not tidiness:
+            # a backgrounded process that keeps the inherited descriptors open
+            # holds an ssh session open with it, because ssh waits for the
+            # streams and not for the shell. `wk quiesce on` over ssh therefore
+            # hung for ever instead of returning -- measured 2026-08-22 driving
+            # the benchmark install from another machine, which is the only way
+            # this command is ever run unattended.
+            caffeinate -dimsu </dev/null >/dev/null 2>&1 &
             echo $! > "$STATE/caffeinate.pid"
             info "caffeinate started"
         fi

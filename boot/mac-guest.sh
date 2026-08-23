@@ -24,6 +24,16 @@
 
 BOOT_ARMING=guest
 
+# MACH_GUEST is a *workspace* name, and the vm target speaks two namespaces:
+# `_vm()` maps a workspace to the tart VM that backs it by prefixing `wk-`.
+# t_start, t_stop and _ip all take the workspace name and map it themselves;
+# `_vm_state` takes the mapped name. Three calls here passed the unmapped one,
+# so every state probe answered `absent` about a guest that was sitting there
+# stopped -- which made `--status` wrong and `b_arm` fatal ("there is no guest
+# 'wk-bench'"), i.e. this driver could never arm. Hidden by the workspace being
+# called `wk-bench`, so the correct tart name is the double-prefixed
+# `wk-wk-bench` and the wrong one looks entirely plausible. Fixed 2026-08-22.
+
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
 
@@ -87,7 +97,7 @@ b_boot_id() { _guest_boot_sec; }
 
 b_evidence() {
     local st
-    st=$( load_target vm >/dev/null 2>&1; _vm_state "$MACH_GUEST" 2>/dev/null || echo unknown )
+    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$MACH_GUEST")" 2>/dev/null || echo unknown )
     echo "guest=$MACH_GUEST (${st:-unknown})"
     m_ssh 'echo "marker=$(sed -n "s/^id=//p" /etc/wk-image 2>/dev/null)"' 2>/dev/null | tr -d '\r' || true
     return 0
@@ -99,7 +109,7 @@ b_evidence() {
 # a state change nobody has to remember.
 b_arm() {
     local st
-    st=$( load_target vm >/dev/null 2>&1; _vm_state "$MACH_GUEST" 2>/dev/null )
+    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$MACH_GUEST")" 2>/dev/null )
     [ "$st" = absent ] && die "there is no guest '$MACH_GUEST'.
     Make one from the golden base and mark it as a benchmark install:
         wk vm new $MACH_GUEST
@@ -150,7 +160,15 @@ b_bench_put() {
 }
 
 # The guest exists only where tart does.
-b_probeable() { is_macos && command -v tart >/dev/null 2>&1; }
+# Asked through the vm driver's own resolver, not with a bare `command -v tart`.
+# The resolver (_tart_bin) already falls back to ~/.local/bin/tart and to the
+# .app inside ~/.local/share, which is where the signed bundle has to live --
+# so `wk vm ls` was right about this guest at the same moment this function
+# called it unprobeable. The difference was PATH: a non-interactive ssh to a Mac
+# gets /usr/bin:/bin:/usr/sbin:/sbin and nothing else, so `command -v tart`
+# answers "no" on a machine running tart with three VMs on it. Any probe that
+# duplicates a resolver instead of calling it will drift from it. 2026-08-22.
+b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; _tart_bin >/dev/null 2>&1 ); }
 
 # The wk-managed media, in one line, for the fleet block in `wk status`.
 b_media() {
@@ -159,6 +177,6 @@ b_media() {
         printf 'a Tart guest, %s (managed on the macOS host)' "$MACH_GUEST"
         return 0
     fi
-    st=$( load_target vm >/dev/null 2>&1; _vm_state "$MACH_GUEST" 2>/dev/null || echo absent )
+    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$MACH_GUEST")" 2>/dev/null || echo absent )
     printf 'a Tart guest, %s (%s); no physical media' "$MACH_GUEST" "${st:-unknown}"
 }

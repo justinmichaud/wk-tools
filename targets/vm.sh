@@ -75,6 +75,25 @@ _proxy_addr() {
 }
 WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 
+# softnet's directory goes on PATH for *tart's* benefit, not ours, and it is
+# done here rather than at a call site because there are three call sites and
+# two of them bypass _tart() by design (`nohup "$(_tart_bin)" run ...`, which
+# must outlive the shell that starts it).
+#
+# We verify softnet by absolute path below, but tart resolves it through PATH
+# when it builds the guest's network -- so the guard passed and the boot died
+# with `InitializationFailed(why: "softnet not found in PATH")`. A guard that
+# checks a binary one way while its consumer finds it another way is false
+# confidence, and this one is invisible interactively: a login shell on the Mac
+# has /usr/local/bin, a non-interactive ssh has only
+# /usr/bin:/bin:/usr/sbin:/sbin. The guest therefore booted by hand and never
+# when driven from another machine -- which is every fleet verb there is.
+# Found 2026-08-22, arming benchvm over ssh from rpi5.
+case ":$PATH:" in
+    *":$(dirname "$WK_SOFTNET_BIN"):"*) ;;
+    *) PATH="$(dirname "$WK_SOFTNET_BIN"):$PATH"; export PATH ;;
+esac
+
 # The golden base gets the full envelope, because provisioning it ends in a
 # complete WebKit build (see _prebuild_base) rather than just a clone.
 #
@@ -82,6 +101,16 @@ WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 # caller to have sourced lib/resources.sh first -- `wk start` and `wk stop`
 # load this file only to stop a guest, and calling envelope_cores() while the
 # file is being read made them fail with "command not found".
+#
+# Laziness alone was not enough, though: it moved the failure from source time
+# to call time rather than removing it. `wk boot benchvm` loads this driver to
+# start a guest, does not source lib/resources.sh, and died on
+# `envelope_mem_mb: command not found` at rc=127 with the guest half-started.
+# So the dependency is declared here, guarded, the same way targets/local.sh
+# already declares it -- a driver that needs a library should say so rather
+# than hope its caller did. Sourcing is safe to repeat: lib/resources.sh is
+# only `${VAR:-default}` assignments and function definitions.
+command -v envelope_mem_mb >/dev/null 2>&1 || . "$WK_ROOT/lib/resources.sh"
 WK_VM_BASE_CPUS="${WK_VM_BASE_CPUS:-}"
 WK_VM_BASE_MEM_MB="${WK_VM_BASE_MEM_MB:-}"
 _base_cpus()   { echo "${WK_VM_BASE_CPUS:-$(envelope_cores)}"; }

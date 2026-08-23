@@ -2694,6 +2694,69 @@ image/pmos-build.sh, and every one of them a silent failure):
       hand-built PureOS configuration. Until then `wk bridge setup` refuses it,
       which is the intended behaviour rather than a gap
 
+### The macOS benchmark lane — `wk bench mac`, 2026-08-22
+
+The six commands of `docs/HANDOFF-mac-perf-mode.md` as one resumable command,
+driven from rpi5 against tolken. Written and exercised as far as a Mac with no
+benchmark volume allows, which is everything except the measurement.
+
+- [V] **the lane is driven from another machine, and refuses to be driven from
+      the Mac.** Phase 4 reboots the computer the driver would be running on, so
+      the driver holds the state elsewhere and reaches in once per phase. The
+      guard compares `hostname -s` against the ssh destination **case-folded**:
+      tolken reports `Tolken` while every config spells it `tolken`, so the
+      case-sensitive first version never fired — a guard that silently does
+      nothing is worse than no guard, because the refusal it owes you is
+      replaced by a reboot that kills the driver
+- [V] **bench mode gets its own ssh alias.** One address, two macOS installs,
+      two host keys — and ssh refuses a *changed* key outright, where
+      `accept-new` accepts an unknown host and still refuses a changed one. So
+      the lane would arm the machine, wait for it to come back, and then be
+      unable to talk to what came back. `tolken-bench` carries a `HostKeyAlias`:
+      separate known-hosts identities on one address, each pinned normally, and
+      a phase aimed at the wrong mode fails on the key rather than doing the
+      wrong thing quietly
+- [V] **every phase asserts its mode from `/etc/wk-image` first.** The machine
+      answers ssh in both modes. `wk bench staged` in host mode is refused, but
+      a `wk build` aimed at bench mode would quietly start turning the benchmark
+      install into a workstation
+- [V] the phase state machine, unit-tested over all seven phases × the fresh /
+      mid-lane / resumed / finished cases. The first version had the comparison
+      inverted — `past build` was false with `done_through=stage` — which would
+      have rebuilt and re-staged on every resume
+- [V] `--dry-run` prints the whole plan on a machine that is **not ready to run
+      it**, which is exactly when the plan is worth reading. It writes no lane
+      state and performs no waits; both were bugs first (below)
+- [V] the preflight names the exact key to authorise, and the exact
+      `systemsetup` line, when ssh is refused — the state tolken was actually
+      in, and one where nothing else about the machine can be inspected
+- [ ] **the measurement.** No benchmark volume exists yet, so the lane has never
+      completed. `wk bench mac-volume` is the other half of this task
+
+### Making the benchmark install — `wk bench mac-volume`, 2026-08-22
+
+- [V] **the second APFS volume, decided over an external SSD.** The disk is the
+      one variable that cannot be corrected for afterwards; every cost of
+      sharing the container is visible and manageable. Recorded in
+      `docs/HANDOFF-mac-perf-mode.md` with the costs, not just the choice
+- [V] the headroom check is **fatal, not a warning**: APFS volumes have no fixed
+      size, so the benchmark install growing is the workstation shrinking, and
+      the disk that fills is the one being worked on. tolken: 167 GB free in
+      `disk3` against a 120 GB floor
+- [V] it stays **out of the `wk quiesce` privileged helper**. That helper is a
+      fixed allowlist granted NOPASSWD forever; "create a volume" and "run
+      `startosinstall` as root" are once-per-machine provisioning, and granting
+      them unconditionally trades a real root escalation for one password prompt
+- [V] `--provision` **refuses to run in host mode**, because writing a
+      bench-mode marker onto the workstation would make `wk bench staged`
+      measure a machine with a desktop under it and stamp the result
+      `bench_host=image` — a wrong number that looks right
+- [V] the installer is fetched by version, matching the host (26.6.1), so the
+      two installs do not differ by a macOS version nobody chose. No sudo
+      needed; ~17 GB
+- [ ] `--create`, `--install` and `--provision` against the real disk. Each
+      needs a credential a script cannot supply
+
 ## Regressions worth a permanent test
 
 Each of these shipped, looked fine, and was wrong. They are the cheapest checks
@@ -2740,3 +2803,39 @@ in the file because each one already cost a debugging session.
 | `cmd/gc` honours a pre-set `$WK_ROOT` | deriving it from `$0` under `bash -s`, where `$0` is "bash": the container half then sourced /var/home/lib/common.sh and died |
 | `cmd/gc` sources tree files optionally | the container half being this file piped into a VM whose copy of the *rest* of the tree is only as new as the last `wk sync --target container` |
 | a lock outlives the command that took it | a flock inherited by the `conmon` podman leaves behind, holding a workspace's lock for as long as the container exists |
+| two machines sharing one ssh destination get **separate lane state** | keying the state file by host alone. `mbp` and `benchvm` are different machines on one address, so the rehearsal and the real run wrote the same file — and immediately after a completed benchvm lane, an `mbp` lane would read `done_through=collect` and skip build, stage, arm and run, reporting a finished lane for a benchmark volume it had never touched |
+| the result is collected from **where it was written** | collecting after leaving bench mode unconditionally. On the volume that is the point (it proves the result survived the reboot); in a guest the result lives *inside the guest*, and leaving the role stops it — so host mode was asked to read a benchmark volume this Mac does not have, and said so. Guest collects before back, volume after |
+| a phase-order change updates the **order list** too | the high-water mark being compared against a hardcoded sequence. Twice: reordering stage for the guest silently marked it done, and then reordering collect did the same |
+| never edit a shell script while it is executing | bash reads scripts incrementally, so an edit that shifts byte offsets makes the running shell resume mid-token. Produced `line 859: eport: command not found` from the middle of the word `report`, on a line that was `}` — an error that looks like corruption and is really a live edit |
+| `wk quiesce on` returns when driven over ssh | `caffeinate` backgrounded with the session's stdout/stderr still attached. ssh waits for the streams, not for the shell, so the command hung for ever — on the only path where it is ever run unattended. Detach all three descriptors |
+| `./setup --stage quiesce` succeeds on macOS | an unguarded Linux block masking `getty@tty2`/`autovt@tty2`, which fails with `sudo: systemctl: command not found` **after** the helper and its sudoers rule have installed correctly. The stage reported failure for a machine it had finished provisioning |
+| the update-check state is read from the **setting**, not `softwareupdate --schedule` | that command reporting "Automatic checking for updates is turned on" while `AutomaticCheckEnabled = 0` sits in the plist it describes (macOS 26, verified on hardware). Twice written off as a virtualisation quirk before being reproduced on the real install; it is the reader, the same way `systemsetup -getremotelogin` needs admin and exits 0 while refusing to answer |
+| a preflight check that **cannot pass** degrades to unknown, not failure | the update check failing on every machine that cannot read the setting as root. It was *the* failing check, so it was the one people `--force` past — and `--force` is all-or-nothing, so believing it disabled every other check with it. A check that cannot pass on a correct machine trains people to ignore the whole preflight |
+| the **per-user** Setup Assistant stays suppressed across reboots | writing the `com.apple.SetupAssistant` keys once, in a session that is then replaced. Auto-login creates a fresh session on the next boot and the pane returns — caught only because `screen_blocker` was there to notice |
+| the bench install is reached at **its own address**, not the host's | `Host tolken-bench` carrying `HostName tolken`, which MagicDNS resolves to the *host* install's tailnet address. The bench install is a different OS with no tailscale and no tailnet identity, so that name reaches host mode or nothing. Cost most of an evening: ssh, authorized_keys, Remote Login and the network were all working the whole time and every probe was aimed at the wrong machine. Found by scanning the LAN for a host answering as the bench marker. The stanza's own comment had predicted this before the volume existed |
+| a fresh macOS install has **no `/usr/bin/python3`** | provisioning that writes `/etc/kcpassword` with a Python heredoc. Command Line Tools are not present on a new install, so the writer failed silently, `autoLoginUser` was set without a password blob, and the machine landed at a login window every boot. The same absence is why pyobjc was missing |
+| a fresh macOS install has **no network credentials** | assuming ssh reachability means the machine is configured. On a Wi-Fi-only Mac a new install joins nothing, so Remote Login can be genuinely enabled on a machine nothing can route to — indistinguishable from sshd being off unless you check for an address |
+| the **per-user** Setup Assistant is a separate pane from the system one | `/var/db/.AppleSetupDone` suppressing only the system-level assistant. A newly created account still gets Apple ID / analytics / Screen Time on its first login, and it owns the front window — which is exactly the modal-pane condition that silently times out a benchmark |
+| CLT can be installed headlessly, but only after a trigger file | `softwareupdate --list` not offering Command Line Tools at all until `/tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress` exists. Without it the only documented route is `xcode-select --install`, a GUI prompt no daemon can answer |
+| a `--installpackage` LaunchDaemon runs on the boot it was installed on | those packages being laid down during the **boot-install phase of the first boot** (install.log shows `.com.apple.templatemigration.boot-install/`), which is *after* launchd has scanned `/Library/LaunchDaemons`. A `RunAtLoad` daemon dropped then does not run until the next boot — and with Setup Assistant suppressed and no account yet created, nothing causes a next boot. The volume booted, ran for minutes (wifi.log, asl) and never opened the daemon's StandardOutPath. Fixed with a package `postinstall` that bootstraps the job into the running system |
+| a failsafe does not live inside the thing it is protecting against | the lockout guard being written *in* the first-boot script: when the script never ran, the guard never ran either, and `.AppleSetupDone` plus no account left a login window with nothing to click and no ssh. A failsafe downstream of the failure is not a failsafe |
+| `startosinstall --installpackage` accepts an **unsigned** productbuild package | (answered, not a bug) — assumed to need a Developer ID Installer signature. It does not: the receipt was written and every payload file landed from a package reporting `no signature`. Worth knowing before anyone builds signing into this path |
+| the benchmark preflight notices a **modal pane owning the screen** | nothing looking at the screen at all. The console check asks "is someone logged in", not "is the screen usable" — so an unanswered Setup Assistant sailed through, MiniBrowser launched but never became frontmost, and Speedometer was throttled in a background window until `run-benchmark` timed out at exit 124. No error, no crash, no progress |
+| `--force` cannot hide a *fatal* preflight failure behind a benign one | `--force` being all-or-nothing. It was added for a guest quirk that genuinely cannot pass (`softwareupdate --schedule off` does not stick in a guest — unrelated to Setup Assistant, confirmed by dismissing it and re-reading), and it then forced past the modal-pane failure too. The lane now asserts the fatal condition itself, before forcing the benign one |
+| `screen_blocker` asks *what is frontmost*, not *what is running* | matching process command lines for `<app>.app`: `softwareupdated` and `suhelperd` live inside `Software Update.app/Contents/Resources/` and run on every healthy Mac, so the check failed on a machine whose screen was free. **A check that cannot pass is worse than no check** — the first thing anyone does with it is force past it. `lsappinfo front` asks the window server, needs no assistive access (System Events answers `-25211` on a fresh install), and sees GUI apps only. Verified both directions: empty on a free screen, and firing when a listed app is frontmost |
+| one definition of "is the screen free", not one per caller | the check living in cmd/bench with three apps while the lane that decided whether to `--force` past it kept its own list of one. `Setup Assistant` was caught; `Software Update`, which came to the front the moment Setup Assistant was dismissed, was forced straight through. Same shape as `b_probeable` duplicating `_tart_bin` — a probe that reimplements a resolver drifts from it |
+| only the machine being measured is running during a measurement | the lane starting the build guest for the build and stage and never stopping it, so a second macOS VM competed for the same CPUs throughout the run. Noticed by a person looking at the screen and counting two windows; the code had a comment claiming the opposite |
+| a lane that launches a **detached** build waits for *that* build | polling `wk status` immediately after `wk build --detach`, which answers about the *previous* build until the new one registers. The first iteration read a two-day-old `ok` and the lane declared "build ok" in seconds — then armed the bench machine and staged, **while the real build was still compiling**. It would have published a Speedometer number for a tree nobody had just built, labelled fresh. The tell was the elapsed time: `8m1s`, the exact figure recorded for the 2026-08-20 build. Fix: snapshot the report before launching and believe a terminal exit code only once the report has changed |
+| a trailing `[ -n "$x" ] && …` in a function under `set -e` | the function returning 1 when the test is false, killing an unguarded caller. Harmless mid-function (verified: `set -e` does not fire there), fatal as the **last** statement — the exit status becomes the function's. A pattern worth grepping for wherever optional args are appended to an array |
+| `wk boot benchvm` actually *starts* the guest | `guest` matching neither the one-shot nor the medium branch in `cmd_arm`, so `b_arm` was never called and the unconditional `b_reboot` at the end ran instead — which for a guest is **stop**. It reported `rc=0` having done the exact opposite of arming |
+| `wk boot <guest-machine>` works from a *stopped* guest | the `unreachable` refusal in `cmd_arm` ("arming is an ssh command"), true of every model but `guest`, where arming *is* starting it. A stopped guest is the state the rehearsal exists to be armed from, and it was the one state that refused |
+| a `guest` machine needs no `wk sysimage build` | `cmd_arm` sending it down the store path, dying with `no system built for benchvm yet -- 'wk sysimage build perf-macos-benchvm'` and advising a command that cannot exist for a machine whose system *is* the guest |
+| a driver declares the libraries it calls | `targets/vm.sh` calling `envelope_mem_mb` while relying on the caller to have sourced `lib/resources.sh`. Making the call lazy moved the failure from source time to call time rather than removing it: `wk boot benchvm` died `rc=127` with the guest half-started. `targets/local.sh` already had the guarded-source idiom; vm.sh did not |
+| a guest boots when driven **over ssh**, not only from a login shell | `tart` resolving `softnet` through `PATH` while wk checks it by absolute path (`$WK_SOFTNET_BIN`) — so the guard passed and the boot died with `InitializationFailed(why: "softnet not found in PATH")`. Invisible interactively, because a login shell has `/usr/local/bin` and a non-interactive ssh has only `/usr/bin:/bin:/usr/sbin:/sbin`. The guest therefore booted by hand and never from another machine, which is every fleet verb there is |
+| `wk boot benchvm --status` reports a stopped guest as **stopped**, not absent | the vm target speaking two namespaces and a caller mixing them: `_vm()` maps a workspace name to the tart VM backing it by prefixing `wk-`, and while `t_start`/`t_stop`/`_ip` map it themselves, `_vm_state` takes the mapped name. Three calls in `boot/mac-guest.sh` passed the unmapped one, so every probe answered `absent` about a guest sitting there stopped — `--status` lied and `b_arm` was fatal, meaning **the driver could never arm and the whole guest rehearsal was dead**. Hidden by the workspace being called `wk-bench`, which makes the correct tart name the double-prefixed `wk-wk-bench` and the wrong one entirely plausible. Also hidden by `wk vm ls` being *right* about the same guest at the same moment — two commands disagreeing about one fact, which is the signal that was there to be read |
+| a `command -v <tool>` probe over non-interactive ssh | a PATH artifact read as a fact about the machine. Non-interactive ssh to a Mac gets `/usr/bin:/bin:/usr/sbin:/sbin`, so a Homebrew or `~/.local/bin` tool is "missing" — `tart` was reported absent on a machine running tart 2.35.0 with three VMs on it. Probe with an absolute path, or `zsh -l -c`, and never conclude "not installed" from one bare `command -v` |
+| `wk ls` and `wk status` on a **macOS host** name every workspace | `wk` sourcing `lib/target.sh` without `lib/store.sh`, so `target_all`'s `wk_state_dir` was undefined: on Linux `wk` execs cmd/ls (which sources it) and on macOS the walk runs inside `wk` itself. The listing came back **truncated and confident**, hiding the two macOS guests the benchmark lane needs, behind one stderr line nobody reads. Third sighting of this one helper vanishing (cmd/gc 2026-08-19, lib/image.sh before it) — now in `lib/common.sh`, which every store.sh user already sources |
+| `wk bench mac-volume` runs on the Mac | the macOS host forwarding it into the podman VM, where it asked a Linux guest about `diskutil` and died on `podman is required` — the same failure `bench stage`/`bench staged` are already exempted from |
+| the lane's preflight refuses when the benchmark volume is absent | matching a list of ways it could be missing instead of the one way it is present: `benchmark_volume=WK Bench (not attached)` was not in the list, so the preflight reported **ready** and the lane would have failed at the stage. Matching `(attached at …)` instead also fails closed on a new spelling — and needs `^[[:space:]]*`, because the driver indents those lines and a `^`-anchored version blocked the lane even *with* the volume attached |
+| `--dry-run` is the real path with mutations suppressed, and **not a second path** | a dry run that models what its own earlier steps *would* have done. `wk bench mac-volume --all --dry-run` was made to walk its whole chain by simulating the volume `--create` had not really made — so the dry run reasoned about a fictional disk, and could have passed while the real path failed. That is exactly the evidence it exists to provide, inverted. Backed out 2026-08-22: one `run()` gate on mutating commands, every precondition checked for real, and an unmet one refuses identically in both modes |
+| `--dry-run` on a fresh lane prints a plan | two ways it did not: `state_get` under `set -o pipefail` failing on a state file that does not exist yet — the normal starting state — so `set -e` killed the run at the first read with no error and exit 0; and the dry run *writing* `done_through` as it walked, so the next real run skipped build and stage and looked for products nobody had staged |

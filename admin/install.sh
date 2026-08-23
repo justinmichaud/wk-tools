@@ -176,6 +176,14 @@ unchanged "quiesce helper permissions ($_perm)"
 # create was silently skipped, even though the unit was demonstrably still
 # starting. /etc/systemd/system/<unit> -> /dev/null is what masking actually
 # is, so that symlink is the fact this checks instead.
+#
+# Linux only, and it had no guard: on macOS this ran `sudo systemctl mask` and
+# failed the whole quiesce stage with `sudo: systemctl: command not found` --
+# after the helper and its sudoers rule had already installed correctly. So the
+# stage reported failure for a machine it had finished provisioning, which is
+# the kind of error that gets a working setup re-run and re-debugged. tty2 and
+# getty units do not exist on macOS; there is nothing here to do there.
+if is_linux; then
 for _u in getty@tty2.service autovt@tty2.service; do
     _link="/etc/systemd/system/$_u"
     if [ -L "$_link" ] && [ "$(readlink "$_link")" = /dev/null ]; then
@@ -185,6 +193,7 @@ for _u in getty@tty2.service autovt@tty2.service; do
         changed "masked $_u -- tty2 is wk session's VT, not a login prompt's"
     fi
 done
+fi
 unset _u _link
 
 unset _libexec _target _source _sudoers _needs_install _owner _rule _sudoers_ok _tmp _perm _sessenv _sessline _tmp2

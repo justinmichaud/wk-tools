@@ -352,6 +352,27 @@ barrier() {
 # outlives the command that started it, and nothing here can be held by
 # something that is not here. That half is evidence at the artifact instead --
 # ws_busy_reason in lib/target.sh -- and the two are used together.
+# This machine's own state directory, and the parent of wk_lock_dir's.
+#
+# It lives here, and not in lib/store.sh where it was, because it had already
+# been moved once for this exact failure and the move did not go far enough.
+# store.sh's own comment records the first round: a helper reachable only
+# through lib/target.sh silently disappeared for every command that sourced
+# image.sh without target.sh, resolving the image store to `/images` and
+# pruning nothing, with no error but a `command not found` on stderr.
+#
+# The second round was the same shape one level up. `wk` sources common.sh and
+# target.sh but *not* store.sh, and target_all() in target.sh calls this -- so
+# on a macOS host, where `wk ls` and `wk status` walk targets inside `wk`
+# itself rather than exec'ing cmd/ls (which does source store.sh), the walk
+# died on `wk_state_dir: command not found` and reported a truncated,
+# confident-looking workspace list. Found 2026-08-22 on tolken, where it hid
+# the two macOS guests the benchmark lane needs.
+#
+# common.sh is the floor: every file that sources store.sh sources this too
+# (checked, all 35 of them), so there is no lower level for it to fall out of.
+wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
+
 wk_lock_dir() { echo "${WK_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/wk/locks}"; }
 
 # Two lists, because they answer two different questions.

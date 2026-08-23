@@ -51,7 +51,12 @@ WK_STORE="${WK_STORE:-$(_wk_default_store)}"
 # sources image.sh without target.sh -- cmd/pi among them -- resolved the image
 # store to `/images` and pruned, listed and wrote nothing, with no error but a
 # `command not found` on stderr.
-wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
+#
+# Moved again 2026-08-22, and out of this file entirely: `wk_state_dir` is now
+# in lib/common.sh. Here was still not low enough -- `wk` sources target.sh
+# without store.sh, so target_all() lost it again on macOS hosts. The reasoning
+# above is why it kept happening and is kept here for that; the definition and
+# the rest of the story are in common.sh.
 
 # ccache ceiling, shared by every workspace.
 #

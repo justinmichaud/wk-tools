@@ -24,6 +24,105 @@ Host devbox-armhf-2
 Host rpi5
   User jmichaud
 
+# tolken -- the Apple Silicon workstation, and the fleet's `mbp`. The two names
+# are deliberately different: `mbp` is boot/machines.sh's name for the machine
+# and resolves to MACH_SSH=localhost, because that driver is MACH_LOCAL and
+# answers only for the computer it runs on. This stanza is how *another* device
+# reaches the same hardware, which is what the macOS benchmark lane needs -- the
+# build, the staging and the run all happen on tolken, driven from wherever the
+# terminal is.
+#
+# The tailnet name and no HostName, for the same reason the bridges have none:
+# the Mac is on the house LAN with no reservation, and it is the one machine in
+# the fleet that reboots into a *different macOS install* on purpose. MagicDNS
+# follows it across a lease and across that reboot.
+#
+# The host key is pinned normally. Unlike the rpi4, both installs on this
+# machine are long-lived and personalised, so each has one stable key -- two
+# known-hosts entries for one name, added once. An unexpected key here is worth
+# looking at.
+#
+# ServerAliveInterval: a bench run is driven over this connection and is
+# legitimately silent for minutes at a time, and the session has to outlive
+# that. It must NOT outlive the reboot into bench mode, which is why the
+# orchestrator reconnects rather than holding one session across it.
+# User: `justinmichaud`, and it is the odd one out in this file -- every other
+# machine in the fleet is `jmichaud`. That is the account this Mac's *current*
+# host install happens to have been created with, not a decision, and it is
+# scheduled to be corrected the next time this install is replaced:
+# docs/HANDOFF-reprovision.md carries the change so it is not rediscovered
+# from a failed login. Do not "tidy" it to jmichaud before then -- the login
+# would break, and the failure (`Permission denied (publickey)`) reads exactly
+# like an unauthorised key, which is the wrong thing to go looking at.
+Host tolken
+  User justinmichaud
+  ServerAliveInterval 30
+  ServerAliveCountMax 6
+
+# The same Mac, in the other mode. One address, two macOS installs, and
+# therefore two host keys for one name -- which without this stanza is not a
+# nuisance but a hard mid-run failure: ssh refuses a *changed* key outright
+# (`StrictHostKeyChecking=accept-new` accepts an unknown host and still refuses
+# a changed one), so the lane would arm the machine, wait for it to come back,
+# and then be unable to talk to what came back.
+#
+# HostKeyAlias is what that is for. The two installs get separate identities in
+# known_hosts while sharing the address, so each is pinned normally and neither
+# can masquerade as the other. Putting the bench install on a name of its own
+# also makes the mode explicit at the call site: `ssh tolken` is host mode and
+# `ssh tolken-bench` is bench mode, and a command aimed at the wrong one fails
+# on the key rather than doing the wrong thing quietly.
+#
+# HostName rather than an address for the same reason as the plain entry: the
+# Mac has no DHCP reservation, and the tailnet name follows it. Note the
+# tailnet identity belongs to the *machine*, not the install -- the bench
+# install has its own tailscale state or none at all, so if it is not on the
+# tailnet, set WK_MAC_BENCH_SSH to a .local or LAN name for it instead.
+# User: `bench`, and deliberately not a person's name -- not the host install's
+# `justinmichaud`, and not the fleet's `jmichaud` either.
+#
+# A benchmark install is cattle (docs/HANDOFF-cattle.md): it is meant to be
+# reproducible from nothing, by anyone, on any machine. Whose laptop it happens
+# to be attached to is not a property of the measurement, so an operator's
+# account name inside the artifact is exactly the hidden state that document
+# forbids -- it makes the rebuild recipe depend on who is running it, which is
+# a dependency only discovered by somebody else trying to follow the runbook.
+#
+# `bench` rather than `user`: `user` already means something specific in this
+# file -- pmbootstrap's default account on the tailnet bridges -- and a second
+# meaning for it on a different kind of machine is how a stanza gets copied to
+# the wrong place. `bench` says what the install is for.
+#
+# Same reasoning as the Pi bench images logging in as `root` rather than as
+# anybody: an impersonal account is the point, and macOS just has no usable
+# root login to be the impersonal one.
+# HostName is deliberately NOT `tolken`, and this is the correction to an error
+# that cost most of an evening on 2026-08-22.
+#
+# `tolken` resolves through MagicDNS to the tailnet address of the *host*
+# install. The bench install is a different operating system with its own
+# network stack and no tailscale, so it has no tailnet identity at all -- that
+# address reaches host mode or nothing, never bench mode. Every "the bench
+# volume is unreachable" that evening was this: ssh, authorized_keys, Remote
+# Login and the network were all working, and the connection was being aimed at
+# the wrong machine. The paragraph above predicted it in as many words, was
+# written before the volume existed, and was not read again until the volume was
+# found by scanning the LAN for it.
+#
+# So: no HostName here, and the address comes from the machine-local
+# config.d/local (or WK_MAC_BENCH_SSH), because the bench install's address is
+# exactly the kind of thing this repository cannot know -- a DHCP lease on
+# somebody's LAN. The proper fix is to give that install its own tailnet
+# identity, at which point `HostName tolken-bench` becomes true and belongs
+# here; until then a hand-written stanza in config.d/local is the honest
+# arrangement, and a missing one fails to resolve instead of silently
+# succeeding against the wrong computer.
+Host tolken-bench
+  HostKeyAlias tolken-bench
+  User bench
+  ServerAliveInterval 30
+  ServerAliveCountMax 6
+
 # The rpi4 test board. Named rpi4-test rather than rpi4 because the fleet name
 # is boot/machines.sh's, not ssh's -- `wk boot rpi4` resolves the machine and
 # reaches for MACH_SSH, and keeping the two namespaces apart is what makes a
