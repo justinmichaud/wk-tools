@@ -374,7 +374,17 @@ report_fleet_device() {
             case "${MODE:-unreachable}" in
                 host)    mode="host mode" ;;
                 bench*)  mode="bench mode" ;;
-                *)       mode="unreachable" ;;
+                # Which bridge, when there is one. A board behind a phone's USB
+                # ethernet is unreachable for two very different reasons -- the
+                # board is off, or the segment it lives on does not exist right
+                # now -- and the second takes every board on that cable down
+                # together. Naming the bridge is the whole difference between a
+                # dead end and a next command; `wk bridge status` is the one
+                # that pays an ssh to answer it, and this block deliberately
+                # does not (see report_bridges).
+                *)       mode="unreachable"
+                         [ -z "${MACH_BRIDGE:-}" ] \
+                             || mode="unreachable via $MACH_BRIDGE" ;;
             esac
             # A record of intent on a machine still in host mode is the one
             # transition worth shouting about here (the spent/unspent nuance
@@ -390,8 +400,55 @@ report_fleet_device() {
             armed=""
         fi
         media=$(b_media 2>/dev/null || printf 'unknown')
-        printf '  %-9s %-13s %-18s %s%s\n' "$m" "$role" "$mode" "$media" "$armed"
+        printf '  %-9s %-13s %-40s %s%s\n' "$m" "$role" "$mode" "$media" "$armed"
     )
+}
+
+# The bridges, from the same registry `wk bridge` reads.
+#
+# Here because `wk status`'s fleet block claimed to show the machines wk owns
+# while omitting two of them: a bridge phone is a machine this repo defines,
+# provisions and depends on, and it was visible only to `wk bridge ls`. The
+# cattle rule's obligation 1 (docs/HANDOFF-cattle.md) puts a bridge in
+# `bridge/hosts/<name>.conf` rather than in `boot/machines/`, which is right --
+# it is not a machine `wk boot` drives into a bench system -- but "enumerated
+# somewhere" and "visible where a person looks" are different claims.
+#
+# Declared facts only, and no probe: state costs an ssh per phone against a
+# device on the far side of a radio, `wk bridge ls` is the command that pays
+# that, and this block says so rather than making every `wk status` wait for a
+# phone that may be in a drawer.
+report_bridges() {
+    local dir f n dev seg note any=""
+    dir="$WK_ROOT/bridge/hosts"
+    [ -d "$dir" ] || return 0
+    for f in "$dir"/*.conf; do
+        [ -f "$f" ] || continue
+        [ -n "$any" ] || printf '
+tailnet bridges -- declared; `wk bridge ls` says which answer (wk help bridge):
+'
+        any=1
+        n=$(basename "$f" .conf)
+        # Read, not sourced: this is a report, and a conf is a shell file that
+        # a report has no business executing to print one line of it.
+        # `tail -1` and not `head -1`: head exits at the first line, which can
+        # SIGPIPE sed, which `pipefail` above then reports as a failure. Same
+        # trap as `| grep -q` (cmd/selftest's header has the measurement).
+        dev=$(sed -n 's/^BR_DEVICE=//p'  "$f" | tail -1)
+        seg=$(sed -n 's/^BR_SEGMENT=//p' "$f" | tail -1)
+        note=$(sed -n 's/^BR_NOTE=//p'   "$f" | tail -1 | sed 's/^"//; s/"$//')
+        # Name first, like the fleet block: the identity is what a reader is
+        # looking for. Wider columns than that block because a bridge's name is
+        # its tailnet name and those are long.
+        printf '  %-24s %-10s %s\n' "$n" "${dev:-?}" "${seg:-?}"
+        # An `if`, not `[ -n ... ] &&`: that form is the loop body's last
+        # command, so a conf with no BR_NOTE would make the loop -- and this
+        # function, and the `||` that calls it -- return 1, and `set -e` would
+        # end `wk status` one line before it prints its verdict. The same
+        # reason report_fleet_devices ends with an explicit `return 0`.
+        if [ -n "$note" ]; then printf '  %-24s %s\n' "" "$note"; fi
+    done
+    return 0
 }
 
 report_fleet_devices() {
@@ -454,6 +511,7 @@ else
     done
     [ -z "$FLEET" ] || report_self
     [ -z "$FLEET" ] || report_fleet_devices
+    [ -z "$FLEET" ] || report_bridges
 
     # Named when the caller asked about one target in particular -- a macOS
     # host reports the host-side targets one pass at a time, and three bare

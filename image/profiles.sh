@@ -159,6 +159,7 @@ image_profile_load() {
     PMO_DEVICE=""; PMO_UI=""; PMO_CHANNEL=""; PMO_PMB_VERSION=""
     PMO_USER=""; PMO_PASSWORD=""; PMO_PACKAGES=""; PMO_EXTRA_SPACE=""
     PMO_BRIDGE=""; PMO_BUILD_HOST=""; PMO_WIFI_BANDS=""
+    PMO_KERNEL_APORT=""; PMO_KCONFIG=""
 
     case "$1" in
     # The old names, refused by name: every profile was renamed on 2026-08-20
@@ -365,6 +366,31 @@ image_profile_load() {
                 PMO_DEVICE=pine64-pinephone
                 PMO_BRIDGE=tailnet-bridge-generic
                 IMG_HOSTNAME=tailnet-bridge-generic
+
+                # One kernel option, and the only one this repo patches into
+                # anybody's aport -- so it needs to earn it.
+                #
+                # A bridge's own documentation says "the hardware watchdog
+                # recovers hangs", and on a PinePhone there was none: pmOS
+                # ships `linux-postmarketos-allwinner` with
+                # CONFIG_SUNXI_WATCHDOG unset, while the A64's device tree
+                # declares the watchdog at 0x1c20ca0 (`allwinner,sun50i-a64-wdt`).
+                # So the hardware is present, the DT node is present, and the
+                # driver that would bind them is simply not built -- measured on
+                # the phone 2026-08-22. Nothing in userspace substitutes: this is
+                # the only thing that recovers a kernel that has stopped
+                # scheduling, on the one device here that cannot be walked up to.
+                #
+                # `=m` rather than `=y` deliberately. The kernel builds modules
+                # already (431 of them), a module is loaded by the role rather
+                # than by the image, and a driver that turns out to misbehave is
+                # then a line in a modules file rather than a reflash.
+                #
+                # The Librem 5 gets no such entry: its watchdog situation is
+                # unmeasured, and guessing at a second SoC's kconfig from this
+                # one's is how a working image stops booting.
+                PMO_KERNEL_APORT=device/community/linux-postmarketos-allwinner
+                PMO_KCONFIG="CONFIG_SUNXI_WATCHDOG=m"
                 # 2.4 GHz only, and this is load-bearing rather than trivia.
                 # The PinePhone's radio is an RTL8723CS: 802.11 b/g/n, single
                 # band, no 5 GHz at all. The uplink credential is copied from

@@ -56,6 +56,15 @@ machine_load() {
     # reason, as image_profile_load.
     MACH_SSH=""; MACH_DRIVER=""; MACH_DEVICE=""; MACH_ROOT=""; MACH_PROFILE=""
     MACH_NOTE=""; MACH_MAC=""; MACH_LOCAL=""; MACH_VOLUME=""
+    # The tailnet bridge a machine sits behind, if any (bridge/hosts/<name>.conf).
+    # Declared, not discovered -- the same rule as BR_CARD, and for a stronger
+    # reason: this field exists to be readable when the machine is *not*
+    # answering, so anything that had to probe to establish it would be
+    # unavailable at exactly the moment it is wanted. It changes nothing about
+    # how a machine is reached (that is ssh's ProxyJump); it is what lets an
+    # unreachable board name the next thing to check instead of reading as a
+    # dead board. dotfiles/ssh/config records the session that cost.
+    MACH_BRIDGE=""
     MACH_ROLE=workstation
     # Which host can drive this machine: `any` (reached over ssh from
     # anywhere), or an OS name for a machine that answers only for itself

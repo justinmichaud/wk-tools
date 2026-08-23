@@ -2314,6 +2314,27 @@ not, and is marked as such rather than assumed.
 - [V] `wk bridge ls` lists every declared bridge, with its device and segment,
       and says whether each answers — a conf with no phone behind it reads as
       `unreachable`, which is the normal state of one not flashed yet
+- [V] `wk status` names every declared bridge, in its own block after the
+      fleet block. Before it, `wk status` reported "the machines wk owns" while
+      omitting two machines this repo defines, provisions and depends on --
+      "enumerated in a registry" and "visible where a person looks" are
+      different claims. Declared facts only and no probe: state is
+      `wk bridge ls`'s to pay for, because it costs an ssh across a radio to a
+      device that may be in a drawer
+- [V] a kernel config delta names an aport and well-formed options. `PMO_KCONFIG`
+      is the one place this repo edits somebody else's tree, and every way of
+      getting it wrong — a delta with no `PMO_KERNEL_APORT`, an aport name that
+      is not a path inside pmaports, an assignment that is not
+      `CONFIG_<NAME>=y|m|n` — fails tens of minutes into a build that has
+      already installed a chroot. It is config, so it is read here instead
+- [V] an unknown host key is not reported as an absent phone. `ls` probed with
+      plain ssh under BatchMode, which for an unknown key is *refuse* rather than
+      ask — so it read `unreachable`, the same word as a phone in a drawer, and
+      the first thing seen on 2026-08-22 was both bridges reporting that while
+      one of them was up, provisioned and healthy. `accept-new` is the mode that
+      fits (accepts a key never seen, still refuses one that has *moved*), and a
+      refused key now reads `key-changed`, because a reflash changes the key and
+      "unreachable" sends the diagnosis at the radio instead of at known_hosts
 - [V] every conf in `bridge/hosts/` loads and names a device `bridge/devices.sh`
       knows, and `wk bridge setup <name> --dry-run` resolves the whole thing and
       changes nothing
@@ -2664,24 +2685,156 @@ image/pmos-build.sh, and every one of them a silent failure):
 - [V] the reference settles arguments: Jumpdrive's own layout has `eGON.BT0` at
       8 KiB and zeros at 4 KiB, which is what proved the pmOS images were right
       all along and the hand-written embed was the bug
-- [ ] Jumpdrive boots the phone, exports its eMMC over USB, and
+- [V] Jumpdrive boots the phone, exports its eMMC over USB, and
       `wk sysimage write <bridge image> --disk rpi5:/dev/sdX` installs the bridge
       onto internal storage — the end state, using the ordinary write path with
-      no new verb
+      no new verb. Confirmed on the running phone 2026-08-22: root is
+      `/dev/mmcblk2p2` on a 29.1 GB disk that carries `mmcblk2boot0`/`boot1`
+      (an eMMC-only feature), and there is no `mmcblk0` at all — the card is
+      out and the install underneath it is what boots
 - [V] there is exactly one route. The second one (write to the idle eMMC from
       the running card system over ssh) was written and then removed: it
       reimplemented dd, partition growth and identity-copying to reach a disk
       that Jumpdrive hands to `wk sysimage write` for free. One way to write a
       disk, and it is the one with the refusals
 
+### The hardware — done, 2026-08-22, and verified across a reboot
+- [V] a PinePhone flashed with pmOS, answering ssh, provisioned end to end:
+      `wk bridge setup tailnet-bridge-generic` applies the whole role and the
+      health check passes on everything that does not need the downstream leg.
+      pmOS v25.12, `linux-postmarketos-allwinner` 6.17.5, on the tailnet as
+      `tag:bridge` advertising 10.99.1.0/24, never sleeping, WiFi power save
+      off, clock stepped, every wk-bridge service `started`, and `rc-update -u`
+      having done its job (the services survive a boot, which is the 1970-clock
+      trap)
+- [V] the dock does a USB Data Role Swap. The anx7688 reaches DFP and stays
+      there (`data_role = [host] device`, a `port0-partner` present, the phone a
+      1.5 A sink), and a hub enumerates behind it — so the fault this was
+      written to catch is not the fault that is left
+- [V] **which dock, and why it is a property of the phone.** A generic USB-C
+      dock cannot work here and the PinePhone's own dock can, for one reason:
+      the A64 has no SuperSpeed anywhere, so a dock whose NIC sits behind its
+      own USB3 hub presents only its USB2 hub — VIA VL813, four downstream
+      ports reading `not attached`, permanently, with the role swap and the
+      power negotiation both perfect. The PinePhone dock puts its NIC on the
+      USB2 path (CoreChips `0fe6:9900` "10/100M LAN" behind a `1a40:0101` hub),
+      `cdc_ether` claims it with no extra packages, and it links at 100 Mb/s.
+      The unusable case reads exactly like a dock refusing the role swap, which
+      is why the health check now separates the cases by name
+- [V] the adapter present under its kernel name is reported as *that*, not as
+      absence. The first version of the improved check listed a device called
+      "10/100M LAN" and concluded "none of it an ethernet adapter" — `cdc_ether`
+      had already claimed it as `eth0` and the only thing wrong was the name.
+      Also separated: a NIC on the bus with no driver bound, which is a missing
+      kernel module rather than a missing dock
+- [V] `wk bridge setup` renames the interface in place, so an adapter plugged in
+      after a bare run needs no hand at the phone. udev's `NAME=` applies only
+      when a device appears and a live link cannot be renamed under itself,
+      which is why this used to end at "re-plug the dock, or reboot" — a hand at
+      the device, for the one machine whose whole purpose is being reachable
+      without going to it. A downed link renames fine; NetworkManager has to be
+      told to let go of it first and to take it back after
+- [V] the segment survives a reboot of the bridge, which is the claim an
+      in-place rename does *not* establish on its own. Rebooted 2026-08-22:
+      `lan0` came back named (udev), addressed (the NM keyfile), with carrier,
+      the lease file intact, the route still approved and every `wk-bridge-*`
+      service started
+- [V] **the udev rule matches the *permanent* MAC, not the live one.** pmOS
+      ships NetworkManager with `ethernet.cloned-mac-address=stable`
+      (`/usr/lib/NetworkManager/conf.d/50-random-mac.conf`), so the interface is
+      running on a synthetic address within seconds of appearing — `lan0`
+      answering to `ae:bf:97:99:88:46` while `ethtool -P` said
+      `00:00:00:00:03:88`. The rule applies at `ACTION=="add"`, when the
+      hardware address is still in place, so autodetecting the *current* address
+      writes a rule matching nothing and the rename stops working at the next
+      boot — invisibly, because the interface was already renamed by the
+      previous correct rule. Found by re-running setup and noticing the rule had
+      changed under it. The keyfile also pins `cloned-mac-address=permanent` on
+      this one leg: a subnet router's segment address is something other
+      machines key on, and the phone's uplink randomization is left alone
+- [!] **the downstream NIC can enumerate perfectly and be forty times too
+      slow, and this is unfixed at the root.** On a PinePhone the dock asks for
+      the data-role swap itself and the phone is host by 3.5 s — but at 13 s the
+      pmOS initramfs sets up its USB-gadget network and flips the phy back to
+      peripheral (`Changing dr_mode to 2`) with a hub physically attached. EHCI
+      then fails for a minute (`device descriptor read/64, error -110`, port
+      power cycles) and gives up at 77 s with "unable to enumerate USB device";
+      the port falls to the *companion* OHCI controller and the dock comes up at
+      **12 Mbit/s instead of 480**, capping a 100 Mbit link at about eight. Host
+      mode is *correct* in that state, the link says 100 Mb/s, and nothing else
+      notices. It is a race — earlier boots of the same phone landed on EHCI —
+      which is the worst way for a fault to behave. The real fix is to stop the
+      initramfs taking the port; that is not done
+- [V] the degraded link is *reported* and *recovered*. `wk bridge status` prints
+      the USB bus speed and fails on anything below high speed;
+      wk-bridge-usb-host recovers it with a four-step rebind — unbind OHCI (so
+      the companion releases the device), unbind EHCI (so it forgets it gave
+      up), bind EHCI (it takes the device at high speed), bind OHCI — and
+      netwatch runs it every pass, not only when the interface is missing, since
+      a slow NIC is *present*
+- [V] the recovery is capped at three attempts per boot, in `/run`. Rebinding
+      EHCI *alone* looked right in a hand test where EHCI had just been unbound
+      seconds earlier, shipped, and then ran every 60 s against a real degraded
+      boot without ever moving the device off OHCI — logging a recovery it was
+      not performing. A repair that repeats forever is a fault, not a recovery,
+      and the health check's honest "12 Mbit/s" is worth more than a bridge that
+      resets its own USB controllers every minute for a day
+- [V] the board does not wait ~80 s to reappear after the bridge reboots. It
+      asks for DHCP on carrier-up — which is when the *kernel* enumerates the
+      adapter, before any of userspace — so waiting for `net` put dnsmasq well
+      behind the first request and what brought the segment back was the
+      client's own retry (80 s, measured). `wk-bridge-dhcp` is now `after net`
+      rather than `need net`, which `bind-dynamic` makes safe: dnsmasq starts
+      before its interface exists and binds when it appears, checked on the
+      phone with a throwaway instance on a nonexistent interface rather than
+      assumed
+- [V] a client that has given up is made to ask again. Carrier up and an empty
+      lease file for two consecutive netwatch passes flaps the segment link
+      once — the only thing that makes a DHCP client re-request, since nothing
+      on the phone can reach into it. Two passes because one can catch a board
+      that is still booting, and once per episode because an empty segment is a
+      normal state and a bridge that flaps its own link every minute is a fault
+      rather than a recovery
+- [!] no `/dev/watchdog`, and it is the kernel rather than the phone: the A64
+      carries a watchdog and the device tree declares it
+      (`allwinner,sun50i-a64-wdt` at 0x1c20ca0), but
+      `linux-postmarketos-allwinner` is built with `CONFIG_SUNXI_WATCHDOG`
+      unset. Until a kernel with it on exists, the netwatch ladder is this
+      phone's only recovery and it cannot see a kernel that has stopped
+      scheduling
+- [V] the tailnet policy for 10.99.1.0/24 — `autoApprovers` and the grant, and
+      **a paste is not enough**. `autoApprovers` is evaluated when a node
+      *advertises* a route, so a route first advertised before the policy
+      existed stays unapproved: re-running setup re-asserts the same value and
+      `tailscale set` with an unchanged value is a no-op. Observed exactly so —
+      policy in place, every check green except the one that matters,
+      `PrimaryRoutes` null. Withdrawing and re-advertising forces the
+      evaluation, and setup now does it whenever the route is advertised but
+      not primary, conditionally, because on a working bridge it would drop the
+      segment for a second for nothing
+- [V] a board on the segment gets its reserved address and is reachable from
+      the workstation. `10.99.1.10 rpi4` in the lease file — the address pinned
+      by the MAC `boot/machines/rpi4.conf` declares — pings from the phone,
+      answers ssh through it by ProxyJump, and reaches the internet through the
+      NAT egress
+- [V] the fleet can still find a board that has moved behind the bridge. It
+      could not: `MACH_SSH=rpi4-test` was `raspberrypi4-64.local`, and mDNS does
+      not cross the phone, so `wk boot rpi4 --status` reported "unreachable ...
+      a plain outage" about a board that was up, linked and one hop away. The
+      ssh entry now jumps through the bridge to the reserved address, and
+      matches the bare *address* as a Host pattern too — `wk boot`'s bench-mode
+      channel (`i_ssh`) reaches a booted system by address with no jump host of
+      its own, and a bench system on this board lands on the same reserved
+      address, so one entry covers both modes
+- [V] a board that moved networks carries its old lease, and that is what breaks
+      first. The rpi4 held `192.168.1.159` with 22 h left *and* `10.99.1.10`:
+      egress worked, DNS did not, because the stale lease's nameservers sat at
+      route metric 10 against the bridge's 1002 and were reachable only through
+      a gateway that is no longer there. It looks like a broken bridge and is a
+      client that has not let go. Dropping the dead address and rebinding the
+      client fixed it; the lease would also have expired on its own
+
 ### Needs the hardware
-- [ ] a PinePhone flashed with pmOS, answering ssh, provisioned end to end:
-      `wk bridge setup tailnet-bridge-generic` from nothing to a health check
-      that passes. Blocked on the phone, which is in a drawer
-- [ ] the dock does a USB Data Role Swap and the adapter enumerates. This is
-      the step with no software fallback; a dock that refuses is hardware
-- [ ] the udev rename takes effect: `lan0` exists after a re-plug, and the NM
-      keyfile puts the router address on it
 - [ ] a board on the segment gets its reserved address, and is reachable from a
       workspace over the tailnet — which needs `autoApprovers` in the policy,
       the failure that looks exactly like success
@@ -2803,6 +2956,7 @@ in the file because each one already cost a debugging session.
 | `cmd/gc` honours a pre-set `$WK_ROOT` | deriving it from `$0` under `bash -s`, where `$0` is "bash": the container half then sourced /var/home/lib/common.sh and died |
 | `cmd/gc` sources tree files optionally | the container half being this file piped into a VM whose copy of the *rest* of the tree is only as new as the last `wk sync --target container` |
 | a lock outlives the command that took it | a flock inherited by the `conmon` podman leaves behind, holding a workspace's lock for as long as the container exists |
+<<<<<<< Updated upstream
 | two machines sharing one ssh destination get **separate lane state** | keying the state file by host alone. `mbp` and `benchvm` are different machines on one address, so the rehearsal and the real run wrote the same file — and immediately after a completed benchvm lane, an `mbp` lane would read `done_through=collect` and skip build, stage, arm and run, reporting a finished lane for a benchmark volume it had never touched |
 | the result is collected from **where it was written** | collecting after leaving bench mode unconditionally. On the volume that is the point (it proves the result survived the reboot); in a guest the result lives *inside the guest*, and leaving the role stops it — so host mode was asked to read a benchmark volume this Mac does not have, and said so. Guest collects before back, volume after |
 | a phase-order change updates the **order list** too | the high-water mark being compared against a hardcoded sequence. Twice: reordering stage for the guest silently marked it done, and then reordering collect did the same |
@@ -2839,3 +2993,11 @@ in the file because each one already cost a debugging session.
 | the lane's preflight refuses when the benchmark volume is absent | matching a list of ways it could be missing instead of the one way it is present: `benchmark_volume=WK Bench (not attached)` was not in the list, so the preflight reported **ready** and the lane would have failed at the stage. Matching `(attached at …)` instead also fails closed on a new spelling — and needs `^[[:space:]]*`, because the driver indents those lines and a `^`-anchored version blocked the lane even *with* the volume attached |
 | `--dry-run` is the real path with mutations suppressed, and **not a second path** | a dry run that models what its own earlier steps *would* have done. `wk bench mac-volume --all --dry-run` was made to walk its whole chain by simulating the volume `--create` had not really made — so the dry run reasoned about a fictional disk, and could have passed while the real path failed. That is exactly the evidence it exists to provide, inverted. Backed out 2026-08-22: one `run()` gate on mutating commands, every precondition checked for real, and an unmet one refuses identically in both modes |
 | `--dry-run` on a fresh lane prints a plan | two ways it did not: `state_get` under `set -o pipefail` failing on a state file that does not exist yet — the normal starting state — so `set -e` killed the run at the first read with no error and exit 0; and the dry run *writing* `done_through` as it walked, so the next real run skipped build and stage and looked for products nobody had staged |
+=======
+| a check in `cmd/selftest` asks about text with a here-string, never `printf … \| grep -q` | `grep -q` exiting at the first match, SIGPIPEing the producer, and `pipefail` reporting a *successful* match as a failed pipeline. Invisible while the text is short: this file had 34 of them and the day `docs/help/bridge.txt` reached ~29 KB one began failing 24 times in 80 runs, reported as a broken help topic. `grep -q P <<<"$out"` reads a file, not a pipe — 0 in 80 on the same text. The rest of the tree still has the pipe form, latent for the same reason |
+| a `wk sysimage write` onto a *reused* disk leaves a mountable filesystem | bmaptool writing only the mapped blocks, so every hole kept the previous system's bytes -- and a hole is not don't-care: a free FAT directory slot and a free FAT entry are *defined* as zeros. Writing the rpi3's image onto a card that had held a PinePhone system left 100 MB of the 130 MB boot partition unwritten, the root directory region among it; it mounted with garbage entries beside the real files, `ls` gave `Input/output error`, and fsck found files whose start clusters were past the end of the partition. Every block bmaptool *did* write was correct and checksummed against the map, which is exactly why nothing caught it -- the map's checksums cover what was written and never what was not, and the bmap path has no read-back check by deliberate design (`disk_verify_dd` is dd-only). `refresh_fast_path`'s note had reasoned the opposite: safe "because its holes are filesystem free space that was never written", which holds for a blank card and fails for a reused one. `disk_write_bmap` now zeros the image's extent first -- the image's extent only, since zeroing the other 56 GB of a 64 GB card costs more than the write. The image itself was clean throughout (`93 files, 7656/33241 clusters` before and after), so the corruption was purely the write path's |
+| `wk sysimage build --detach` leaves `yocto.status` saying what happened | only the *waiting* parent writing the terminal state, so a detached build's status reads `state=running` for ever -- after the artifacts are written, after the process is gone. `wk ls` then reports an idle workspace as "running" indefinitely, and the only way to tell a live build from a finished one is `podman exec`-ing in to check the pid. Found while trying to decide whether a 75 GB workspace was busy or abandoned; the 2.46 workspace had been "running" since 02:14 with no bitbake in it. The fix belongs in `image/yocto-build.sh`, which is the half that runs detached and therefore the only half present at the end |
+| `wk bench compare` can install scipy in the workspace that built the thing being compared | `pip3 install --user` alone, which Ubuntu 24.04 refuses outright under PEP 668 (`externally-managed-environment`). The SDK image is not externally managed so this passed everywhere it was tried; a yocto build workspace is plain Ubuntu 24.04 (`container/yocto/Containerfile`), so the one workspace holding the cross-built WebKit an on-board run measures was the one that could not compare its results. `--break-system-packages` *with* `--user` writes `~/.local/lib` and touches no distro package, whatever the flag is called, and the workspace is disposable by construction |
+| an on-board run reaches `wk bench compare` at all | `wk pi bench` printing run-benchmark's JSON to stdout and stopping there, so the number lived in terminal scrollback and never entered the store `wk bench compare` reads. Two on-board runs could not be compared to each other by any means the tool offered -- which is most of why anyone takes a second one |
+| `wk pi bench --ab` compares only rounds where **both** arms finished | including a survivor whose partner crashed: that puts an extra sample on one arm, and since a crash is usually a property of the build that crashed (OOM under a heavier binary), the surviving arm is precisely the one that would bias the answer. Dropped from the comparison, not deleted from the store -- the run that finished is still evidence about why its partner did not |
+>>>>>>> Stashed changes

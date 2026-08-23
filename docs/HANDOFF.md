@@ -229,9 +229,11 @@ machine this lane runs on.
       restored; `git-sync-fork` and the small helpers remain.
   14. **Tailnet bridges — hardware half** — `docs/HANDOFF-bmc.md`. The
       software shipped 2026-08-20 (`wk bridge`, `bridge/`, camera streaming,
-      the watchdogs; TESTING.md §8); open is flashing the PinePhone
-      (`tailnet-bridge-generic`), re-flashing the librem5
-      (`tailnet-bridge-moose-bmc`), and `docs/HANDOFF-bmc-battery.md`. Feed
+      the watchdogs; TESTING.md §8). **`tailnet-bridge-generic` is done as of
+      2026-08-22** — pmOS on the PinePhone's eMMC, route approved, `lan0` up,
+      the rpi4 on its reserved 10.99.1.10 and reachable from the workstation,
+      verified across a reboot. What remains of this item is the librem5
+      (`tailnet-bridge-moose-bmc`) and `docs/HANDOFF-bmc-battery.md`. Feed
       the new remote-access surface into steps 16/17.
   15. **Settings audit — Linux half** — `docs/HANDOFF-settings-audit.md`.
   16. **Tailscale ACL audit** — `docs/HANDOFF-tailscale.md`. Item 8 (MBP on

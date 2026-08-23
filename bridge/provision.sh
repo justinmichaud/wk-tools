@@ -369,16 +369,44 @@ if [ -z "$BR_LAN_MAC" ]; then
         case "$d" in lo|wlan*|tailscale*|dummy*|usb*) continue ;; esac
         [ -e "$n/device/subsystem" ] || continue
         case "$(readlink -f "$n/device/subsystem")" in
-            */usb) BR_LAN_MAC=$(cat "$n/address"); info "found USB ethernet: $d ($BR_LAN_MAC)"; break ;;
+            */usb)
+                # The *permanent* address, and that distinction is the whole
+                # reason this is three lines instead of one.
+                #
+                # pmOS ships NetworkManager with
+                # `ethernet.cloned-mac-address=stable`
+                # (/usr/lib/NetworkManager/conf.d/50-random-mac.conf), so a
+                # managed interface is running on a synthetic MAC within seconds
+                # of appearing -- observed here as lan0 answering to
+                # ae:bf:97:99:88:46 while `ethtool -P` said 00:00:00:00:03:88.
+                #
+                # The udev rule below matches at ACTION=="add", when the
+                # interface still has its hardware address. So reading the
+                # *current* address writes a rule that matches nothing, and the
+                # rename silently stops working at the next boot -- while
+                # everything looks perfect until then, because the interface was
+                # already renamed by the previous, correct rule. Caught by
+                # re-running setup and noticing the rule had changed.
+                perm=$(ethtool -P "$d" 2>/dev/null | sed -n 's/^Permanent address: //p')
+                case "$perm" in
+                    ""|00:00:00:00:00:00) BR_LAN_MAC=$(cat "$n/address") ;;
+                    *) BR_LAN_MAC="$perm" ;;
+                esac
+                info "found USB ethernet: $d ($BR_LAN_MAC)"
+                break ;;
         esac
     done
 fi
 
 if [ -z "$BR_LAN_MAC" ]; then
     warn "no USB ethernet adapter is enumerated right now."
-    warn "  The rest of this run still applies -- the interface is matched by MAC"
-    warn "  when it appears, and wk-bridge-netwatch re-asserts host mode. But"
-    warn "  nothing behind this bridge is reachable until the dock is in."
+    warn "  The rest of this run applies, but this step does *not*: the udev"
+    warn "  rename and the address are written from the adapter's own MAC, so"
+    warn "  with no adapter there is nothing to match and neither file is"
+    warn "  written. An adapter plugged in later comes up unnamed and"
+    warn "  unaddressed until 'wk bridge setup $BR_NAME' is run again."
+    warn "  (This used to claim the interface would be 'matched by MAC when it"
+    warn "  appears'. Nothing had been written that could match it.)"
 else
     # A udev rule, not a systemd .link file: pmOS has eudev and no
     # systemd-networkd. Renaming at all is what makes every other file here
@@ -412,17 +440,59 @@ ignore-auto-dns=true
 
 [ipv6]
 method=ignore
+
+# Keep the hardware address on this leg, against pmOS's global
+# `ethernet.cloned-mac-address=stable`. Two reasons, and neither is taste:
+# the udev rule above matches the permanent MAC, so an interface running on a
+# synthetic one is an interface whose identity disagrees with the rule that
+# named it; and a subnet router's segment address is a thing other machines key
+# on -- an ARP entry, a reservation on the far side -- which a per-connection
+# hash quietly makes wrong. The phone's *uplink* randomization is a privacy
+# feature and is deliberately left alone; this pins one interface.
+[ethernet]
+cloned-mac-address=permanent
 EOF
     nmcli connection reload >/dev/null 2>&1 || true
 
-    # A udev NAME= applies when the device appears, and an interface that is
-    # already up cannot be renamed underneath itself. So the first run against
-    # a plugged-in dock leaves the adapter under its kernel name, everything
-    # named $BR_IF matches nothing, and the bridge looks provisioned but dead.
-    # Said out loud rather than left to be discovered.
+    # A udev NAME= applies when the device *appears*, and an interface that is
+    # already up cannot be renamed underneath itself. So the first run against a
+    # plugged-in dock leaves the adapter under its kernel name, everything named
+    # $BR_IF matches nothing, and the bridge looks provisioned but dead.
+    #
+    # This used to say so and stop -- "re-plug the dock, or reboot the phone,
+    # then re-run this" -- which is a hand at the phone for something the kernel
+    # will do on request. A downed link can be renamed, so it is renamed here
+    # and the udev rule above is what makes it survive the next boot. The whole
+    # point of a bridge is being reachable without going to it.
     if [ ! -e "/sys/class/net/$BR_IF" ]; then
-        warn "$BR_IF does not exist yet: the rename applies when the adapter next"
-        warn "  appears. Re-plug the dock, or reboot the phone, then re-run this."
+        cur=""
+        for n in /sys/class/net/*; do
+            d=$(basename "$n")
+            case "$d" in lo|wlan*|tailscale*|dummy*|usb*) continue ;; esac
+            [ "$(cat "$n/address" 2>/dev/null)" = "$BR_LAN_MAC" ] || continue
+            cur="$d"; break
+        done
+        if [ -z "$cur" ]; then
+            warn "$BR_IF does not exist and no interface holds $BR_LAN_MAC --"
+            warn "  the adapter went away between detection and now. Re-run this."
+        else
+            info "renaming $cur to $BR_IF in place"
+            # NetworkManager will not let go of a device it is managing, and a
+            # rename under it is refused; handing the device back afterwards is
+            # what lets the keyfile above claim it under its new name.
+            nmcli device set "$cur" managed no >/dev/null 2>&1 || true
+            ip link set "$cur" down 2>/dev/null || true
+            if ip link set "$cur" name "$BR_IF" 2>/dev/null; then
+                ip link set "$BR_IF" up 2>/dev/null || true
+                nmcli device set "$BR_IF" managed yes >/dev/null 2>&1 || true
+                nmcli connection up "wk-bridge-$BR_IF" >/dev/null 2>&1 || true
+                CHANGES=$((CHANGES + 1))
+            else
+                nmcli device set "$cur" managed yes >/dev/null 2>&1 || true
+                warn "could not rename $cur to $BR_IF. Re-plug the dock or reboot"
+                warn "  the phone -- udev applies the rule when it next appears."
+            fi
+        fi
     fi
 fi
 
@@ -720,6 +790,17 @@ fi
 # scheduling. Everything else here recovers a service or a link, and all of it
 # assumes the machine is still running.
 step "Watchdog"
+# No /dev/watchdog may mean a kernel without the driver, or a kernel whose
+# driver is a module nobody has loaded -- and those look identical from here
+# while having completely different answers. So the driver is asked for before
+# the verdict is reached.
+#
+# wk-bridge-watchdog-load is that attempt, and it is a separate script because
+# the watchdog service runs it too: a boot must not depend on udev's coldplug
+# having autoloaded the driver. It identifies the driver by the device's own
+# modalias, so no module name appears anywhere in this role.
+/usr/local/sbin/wk-bridge-watchdog-load || true
+
 if [ -e /dev/watchdog ]; then
     install_service wk-bridge-watchdog
     enable_svc wk-bridge-watchdog
@@ -778,6 +859,37 @@ elif [ "$TS_STATE" = Running ] && [ "$TS_TAGS" != none ]; then
         || warn "could not re-assert the advertised route"
     rm -f "$AUTHKEY_FILE"
     info "already on the tailnet, tags $TS_TAGS"
+
+    # And the half that `set` alone cannot do, which is the whole reason this
+    # block is more than one line.
+    #
+    # `autoApprovers` is evaluated when a node *advertises* a route. The
+    # advertisement above is a no-op whenever the value has not changed -- which
+    # it never has on a re-run -- so a route first advertised before the policy
+    # existed stays unapproved no matter how many times this runs, and the
+    # bridge sits there healthy with nothing behind it reachable. That is
+    # exactly what happened on 2026-08-22: the policy was pasted, every check
+    # stayed green except the one that matters, and `PrimaryRoutes` was null.
+    #
+    # Withdrawing and re-advertising forces the evaluation. Conditional on the
+    # route not already being primary, because on a working bridge this would
+    # drop the segment for a second for no reason.
+    if [ "$(tailscale status --json 2>/dev/null | jq -rc '.Self.PrimaryRoutes // "none"')" = none ]; then
+        info "the route is advertised but not approved -- re-advertising so"
+        info "  autoApprovers is evaluated (a paste alone does not trigger it)"
+        tailscale set --advertise-routes= >/dev/null 2>&1 || true
+        sleep 2
+        tailscale set --advertise-routes="$BR_SEGMENT" >/dev/null 2>&1 || true
+        sleep 5
+        if [ "$(tailscale status --json 2>/dev/null | jq -rc '.Self.PrimaryRoutes // "none"')" = none ]; then
+            warn "still not approved. Either the policy is not in place yet, or"
+            warn "  its autoApprovers names a tag this node does not hold"
+            warn "  ($TS_TAGS). 'wk bridge setup' prints the stanza to paste."
+        else
+            info "approved: $BR_SEGMENT is live"
+            CHANGES=$((CHANGES + 1))
+        fi
+    fi
 elif [ -n "$BR_AUTHKEY" ]; then
     # A key handed over in the environment (a hand-run of this script) is put
     # into the same file, so there is one code path into `tailscale up` and it

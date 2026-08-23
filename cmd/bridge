@@ -524,15 +524,52 @@ usage() {
 # the phone answers to. A bridge that exists as a conf file and nothing else is
 # the normal state of one that has not been flashed yet, and it should read that
 # way rather than as an error.
+# One bounded probe, and the reason it does not use plain ssh.
+#
+# A phone's host key is unknown until something connects to it once, and this
+# listing is normally that something. With the default StrictHostKeyChecking
+# and BatchMode -- which is refuse, not ask -- an unknown key fails exactly
+# like a phone that is switched off, so `wk bridge ls` reported *both* bridges
+# `unreachable` while the PinePhone was up, provisioned, healthy and one ssh
+# away (2026-08-22, the first thing seen in that session). `accept-new` is the
+# mode that fits: it accepts a key never seen before and still refuses one that
+# has *moved*, which is the distinction worth keeping -- root on a bridge is
+# equivalent to whatever is behind it, so a changed key is something to look at
+# rather than shrug past (dotfiles/ssh/config says the same).
+#
+# And a refused key is reported as itself rather than as absence, because a
+# reflash changes the key and "unreachable" would send the diagnosis at the
+# phone's power and radio instead of at known_hosts.
+# Split in two so that the half with the judgement in it can be tested without
+# a phone: cmd/selftest lifts _ls_classify out of this file and feeds it the two
+# messages ssh actually prints (both captured from a real refusal, not written
+# from memory).
+_ls_classify() { # <ssh stderr> -> key-changed | unreachable
+    case "$1" in
+        *"IDENTIFICATION HAS CHANGED"*|*"Host key verification failed"*)
+            printf 'key-changed' ;;
+        *)  printf 'unreachable' ;;
+    esac
+}
+
+_ls_probe() { # <destination> -> up | key-changed | unreachable
+    local err rc=0
+    err=$(ssh -o BatchMode=yes -o ConnectTimeout=5 \
+              -o StrictHostKeyChecking=accept-new "$1" true 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && { printf 'up'; return 0; }
+    _ls_classify "$err"
+}
+
 cmd_ls() {
     local name any=""
     printf '%-28s %-10s %-16s %-12s %s\n' NAME DEVICE SEGMENT STATE NOTE
     for name in $(bridge_names); do
         any=1
         ( load_bridge "$name"
-          state=unreachable
-          if ssh -o BatchMode=yes -o ConnectTimeout=5 "$BR_SSH" true >/dev/null 2>&1; then
-              if ssh -o BatchMode=yes -o ConnectTimeout=5 "$BR_SSH" \
+          state=$(_ls_probe "$BR_SSH")
+          if [ "$state" = up ]; then
+              if ssh -o BatchMode=yes -o ConnectTimeout=5 \
+                     -o StrictHostKeyChecking=accept-new "$BR_SSH" \
                      'test -f /etc/wk-bridge.conf' >/dev/null 2>&1; then
                   state=provisioned
               else
@@ -547,6 +584,10 @@ cmd_ls() {
     log ""
     log "  bare         answers ssh, nothing of this role on it yet"
     log "  provisioned  'wk bridge setup' has run against it"
+    log "  key-changed  answered, with a host key that is not the one on record."
+    log "               A reflash does this: drop the old line from known_hosts"
+    log "               (ssh-keygen -R <name>). Anything else is worth reading"
+    log "               before you do."
     log "  unreachable  did not answer in 5s -- off, or not flashed yet"
 }
 

@@ -58,23 +58,134 @@ if ip -o link show "$iface" >/dev/null 2>&1; then
     ok "$iface $(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4; exit}')"
     if [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = 1 ]; then
         ok "cable connected"
+        # The USB bus speed behind it, because a segment can be perfectly up and
+        # forty times too slow. On a PinePhone the dock's NIC can fall to the
+        # companion OHCI controller (12 Mbit/s against EHCI's 480) after the pmOS
+        # initramfs flips the phy to peripheral mid-boot; host mode is *correct*
+        # in that state, the link says 100 Mb/s, and nothing else here notices.
+        # wk-bridge-usb-host recovers it; this is what makes it visible.
+        nicdev=$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null)
+        nicspeed=$(cat "${nicdev%/*}/speed" 2>/dev/null)
+        case "$nicspeed" in
+            "") ;;
+            480|5000|10000|20000) ok "USB $nicspeed Mbit/s" ;;
+            *) bad "USB $nicspeed Mbit/s -- the NIC is on a full-speed controller"
+               note "wk-bridge-usb-host rebinds the EHCI companion to recover 480;"
+               note "  netwatch runs it every pass, so this should clear itself." ;;
+        esac
     else
         bad "no carrier on $iface -- check the cable"
     fi
 else
-    bad "$iface missing -- USB host mode? run wk-bridge-usb-host"
+    bad "$iface missing -- nothing on the segment"
+    # Which of three faults this is, said out loud, because they have three
+    # different fixes and the message here used to name only the first. It sent
+    # the diagnosis at USB host mode on a phone (2026-08-22) whose port was
+    # already in host mode, had a partner attached, and had enumerated a hub --
+    # none of which the old wording could express.
+    role=$(cat /sys/class/typec/port0/data_role 2>/dev/null)
+    # Everything on the bus that is not a root hub. `usbN` are the controllers'
+    # own root hubs and are always there; a `N-M` directory with an idVendor is
+    # something that actually answered an enumeration.
+    downstream=""
+    for d in /sys/bus/usb/devices/*-*; do
+        [ -f "$d/idVendor" ] || continue
+        downstream="$downstream $(cat "$d/idVendor"):$(cat "$d/idProduct") $(cat "$d/product" 2>/dev/null)"
+    done
+    # A network interface on USB that is neither WiFi nor the gadget: the
+    # adapter is *present and working*, it is simply not called $iface. Asked
+    # first, and separately from the bus scan, because it is the one case where
+    # nothing is wrong with the hardware at all -- and reporting it as a missing
+    # adapter is how an afternoon gets spent on a dock that was fine (the
+    # PinePhone's own dock, 2026-08-22: cdc_ether had claimed it as eth0 while
+    # this check was still describing what USB3 docks cannot do).
+    found=""
+    for n in /sys/class/net/*; do
+        nn=$(basename "$n")
+        case "$nn" in lo|wlan*|tailscale*|dummy*|usb*|"$iface") continue ;; esac
+        [ -e "$n/device/subsystem" ] || continue
+        case "$(readlink -f "$n/device/subsystem")" in
+            */usb) found="$found $nn($(cat "$n/address" 2>/dev/null))" ;;
+        esac
+    done
+    # And an adapter on the bus with no driver bound to it, which is a kernel
+    # that lacks the module rather than a dock that is absent. Interface class
+    # 02 (communications) and 0a (CDC data) are what an ethernet adapter
+    # presents; ff is the vendor-specific one the ASIX and Realtek parts use.
+    unclaimed=""
+    for i in /sys/bus/usb/devices/*-*/*:*; do
+        [ -f "$i/bInterfaceClass" ] || continue
+        [ -e "$i/driver" ] && continue
+        case "$(cat "$i/bInterfaceClass" 2>/dev/null)" in
+            02|0a|ff) unclaimed="$unclaimed $(basename "$i")" ;;
+        esac
+    done
+
+    if [ -n "$found" ]; then
+        note "the adapter is here and working --$found -- it is just not called"
+        note "  $iface. The udev rename is written from the adapter's own MAC, so"
+        note "  a setup run with no adapter plugged in wrote no rule for this one."
+        note "  Fix: wk bridge setup <name> (it renames it in place; no re-plug)."
+    elif [ -n "$unclaimed" ]; then
+        note "something on the bus looks like a network adapter and has no driver"
+        note "  bound to it (interface$unclaimed). That is a missing kernel"
+        note "  module, not a missing dock -- check dmesg for the vendor/product"
+        note "  and which driver should claim it."
+    else
+        case "$role" in
+            *"[host]"*)
+                if [ -n "$downstream" ]; then
+                    note "not a host-mode fault: the port is in host mode and the bus"
+                    note "  enumerated$downstream -- no network adapter among it."
+                    # The PinePhone's port is USB 2.0 and there is no second data
+                    # path: the A64 has one OTG controller and one USB 2.0 host
+                    # controller, and the USB-C carries DP alt mode rather than
+                    # SuperSpeed. So a dock whose NIC hangs off its own USB3 hub
+                    # presents its USB2 hub here and nothing else, forever --
+                    # which reads exactly like a broken dock and is not one.
+                    if [ "$device" = pinephone ]; then
+                        note "  A dock's NIC behind its USB3 hub can never appear: this"
+                        note "  phone's port is USB 2.0 only (A64 has no SuperSpeed at"
+                        note "  all). Use a USB 2.0 adapter -- the PinePhone's own"
+                        note "  dock works (CoreChips 0fe6:9900, driven by cdc_ether)."
+                    fi
+                else
+                    note "the port is in host mode and nothing enumerated at all:"
+                    note "  the dock's own power, or the cable."
+                fi
+                ;;
+            *)  note "the port is not in host mode (${role:-no typec port}) --"
+                note "  run wk-bridge-usb-host. A dock that will not swap data role"
+                note "  is hardware; powering it before connecting it is the thing"
+                note "  worth trying."
+                ;;
+        esac
+    fi
 fi
 note "typec data_role: $(cat /sys/class/typec/port0/data_role 2>/dev/null)"
 
-# The lease file is the ground truth for "did the thing behind me get an
-# address", and the failure it exists to make visible is a *different* device
-# holding the address you meant -- which is what an infinite lease on a
-# one-address pool guarantees if the cable is in the wrong socket.
+# The lease file shows *who took which address*, and the failure it exists to
+# make visible is a different device holding the address you meant -- which is
+# what an infinite lease on a one-address pool guarantees if the cable is in the
+# wrong socket.
+#
+# What it is not is evidence about the present, and treating it as such was
+# wrong here (2026-08-22). Leases on these segments are `infinite`, so a client
+# that already has one re-uses it after a carrier drop by ARP alone and never
+# sends another request -- which means an empty lease file with a perfectly
+# working segment is a real and benign state: reflash the phone, and the board
+# behind it keeps its address without ever telling the new dnsmasq about it.
+# Reserved addresses are pinned by MAC (`dhcp-host`), so nothing is lost even
+# when it does ask again. So this reports, and the reachability check below is
+# the one that can fail.
 if [ -s "$leasefile" ]; then
     ok "DHCP leases:"
     sed 's/^/          /' "$leasefile"
 else
-    bad "no DHCP lease issued (leasefile $leasefile empty)"
+    note "no lease recorded ($leasefile is empty). Not a fault on its own:"
+    note "  these leases are infinite, so a client that already has an address"
+    note "  re-uses it without asking again. The reachability check below is"
+    note "  what says whether anything is actually there."
 fi
 
 # Ping every reservation. A reservation that does not answer is either unplugged
@@ -182,7 +293,29 @@ if [ -e /dev/watchdog ]; then
         bad "/dev/watchdog exists but nothing is feeding it -- a hang stays hung"
     fi
 else
-    bad "no /dev/watchdog on this device"
+    bad "no /dev/watchdog -- a kernel hang needs a person at the phone"
+    # Whether that is the hardware's fault or the kernel's, because the two
+    # have completely different answers and the old wording ("on this device")
+    # implied the first. Measured on the PinePhone, 2026-08-22: the A64 *does*
+    # carry a watchdog and the device tree declares it -- what is missing is
+    # the driver, so this is a packaging gap and not a property of the phone.
+    wdt=$(ls -d /proc/device-tree/*/watchdog@* 2>/dev/null | head -1)
+    if [ -n "$wdt" ]; then
+        note "the hardware is there and the device tree declares it:"
+        note "  $(basename "$wdt") ($(tr '\000' ' ' < "$wdt/compatible" 2>/dev/null))"
+        note "  so this is the kernel, not the phone -- either it has no driver"
+        note "  for that node, or the driver is a module nobody loaded."
+        note "  'wk bridge setup' loads it by the device's own modalias, so try"
+        note "  that first. If it still does not appear, this kernel was built"
+        note "  without the driver: image/profiles.sh carries the kconfig delta"
+        note "  that turns it on (PMO_KCONFIG), and a phone flashed before that"
+        note "  landed needs a reflash to get it."
+        note "  Until then the netwatch ladder is the only recovery, and it"
+        note "  cannot see a kernel that has stopped scheduling."
+    else
+        note "no watchdog node in the device tree either, so there is nothing"
+        note "  to drive: recovery is the netwatch ladder and a person."
+    fi
 fi
 # Swap on eMMC wears out the only storage the phone has, and a bridge that
 # swapped its way through a memory spike is a bridge whose flash died early.

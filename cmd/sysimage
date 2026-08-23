@@ -565,11 +565,17 @@ EOF
 # `fallocate --dig-holes` would shrink the block map -- a decompressed wic is
 # fully allocated, so the map ends up covering every byte -- and it would be
 # wrong: a hole tells bmaptool "nothing here", and bmaptool then leaves whatever
-# the destination already had. bitbake's own map is safe because its holes are
-# filesystem free space that was never written; holes dug by scanning for zeros
-# are not the same set. Ext4's inode tables are allocated and mostly zeros, so
-# digging would skip writing them and leave a previous image's inode tables in
-# place. The transfer saving is xz's anyway (573 MB, not 4 GB); the map only
+# the destination already had. Ext4's inode tables are allocated and mostly
+# zeros, so digging would skip writing them and leave a previous image's inode
+# tables in place.
+#
+# This used to add that "bitbake's own map is safe because its holes are
+# filesystem free space that was never written". That is false on a reused
+# disk, and cost a corrupt card on 2026-08-22 -- free space is not don't-care,
+# and a FAT free directory slot is *defined* as zeros. disk_write_bmap
+# (boot/disk.sh) now zeros the image's extent before copying, which is what
+# actually makes any block map safe to write from; keeping the map small stays
+# worth it for the same reasons below. The transfer saving is xz's anyway (573 MB, not 4 GB); the map only
 # saves write time at the far end, and correctness is worth more than that.
 refresh_fast_path() {
     local dir="$1"

@@ -26,7 +26,15 @@ TAILNET BRIDGES
                                a workspace can reach a board without anything
                                on the house network reaching either.
 
-  `wk bridge ls` lists what is declared and what answers.
+  `wk bridge ls` lists what is declared and what answers. Its state column has
+  a word for the case that used to hide: a phone that answers with a host key
+  that is not the one on record reads `key-changed`, not `unreachable`. A
+  reflash changes the key, so that is the *normal* state of a freshly installed
+  bridge -- and reporting it as absence sent the diagnosis at the phone's radio
+  instead of at known_hosts (seen 2026-08-22, with both bridges reading
+  `unreachable` while one of them was up, provisioned and healthy). Drop the
+  stale line with `ssh-keygen -R <name>`; anything that is not a reflash is
+  worth reading first.
 
 THE TWO LANES
 
@@ -292,7 +300,7 @@ GETTING IT ONTO INTERNAL STORAGE
   the connection either way -- it is started with setsid on the far side, which
   is the only reason a dropped WiFi link costs a poll rather than half an hour.
 
-WHAT IS PINNED
+WHAT IS PINNED, AND THE ONE THING PATCHED
 
   pmbootstrap        3.9.0, a git tag. Every PyPI release of it is yanked, so
                      pip installs it from the project's own repository.
@@ -306,6 +314,15 @@ WHAT IS PINNED
   Both live in image/profiles.sh. The pmaports commit that was actually used is
   recorded in the image's manifest, so `wk sysimage show <id>` says what a card
   was built from.
+
+  And one thing is *patched* rather than pinned: `PMO_KCONFIG`, the kernel
+  options a profile needs and pmOS does not set. Today that is exactly one
+  option on one profile -- CONFIG_SUNXI_WATCHDOG=m for the PinePhone, whose
+  reasoning is under THINGS THAT WILL BITE YOU below. It is applied to the
+  aport at build time rather than kept as a patch file, because a patch against
+  a generated defconfig conflicts on every pmaports bump; and the pkgrel is
+  bumped by 100 so that a patched kernel is always distinguishable from a stock
+  one by version alone.
 
 DECLARING AND PROVISIONING ONE
 
@@ -361,6 +378,18 @@ DECLARING AND PROVISIONING ONE
   specifically, because it is the failure that looks like success -- and
   `wk bridge provision` will not report a bridge finished until the phone's own
   `tailscale status` shows the route as primary.
+
+  And pasting the policy is not, on its own, enough -- which is the trap that
+  turns a five-minute step into an afternoon. `autoApprovers` is evaluated when
+  a node *advertises* a route. A route first advertised before the policy
+  existed stays unapproved forever afterwards, because re-running setup
+  re-asserts the same value and `tailscale set` with an unchanged value is a
+  no-op. Seen exactly so on 2026-08-22: policy in place, every check green
+  except the one that matters, `PrimaryRoutes` null. Withdrawing and
+  re-advertising forces the evaluation, and `wk bridge setup` now does that by
+  itself whenever it finds the route advertised but not primary -- conditional,
+  because on a working bridge it would drop the segment for a second for
+  nothing. So the recipe is: paste the policy, run `wk bridge setup` again.
 
   It is also a once-per-bridge step, not a once-per-flash one. Once tag:bridge
   and the segment are in the policy, reflashing the phone needs no console visit
@@ -443,11 +472,122 @@ THINGS THAT WILL BITE YOU
   underneath itself. On a first run with the dock already plugged in, re-plug
   it (or reboot) and run setup again; setup says so when it notices.
 
-  If the interface never appears at all, the dock is refusing a USB Data Role
-  Swap. Both phones have one port and default to *device* mode. Powering the
-  dock before connecting it to the phone changes the negotiation and is the
-  thing worth trying; no amount of configuration fixes a dock that will not
-  swap.
+  And the rule is written *from the adapter's own MAC*, which means a run with
+  no adapter enumerated writes neither it nor the address. So an adapter
+  plugged in after that run comes up unnamed and unaddressed, and the fix is to
+  run `wk bridge setup` again rather than to wait. This used to claim the
+  interface would be "matched by MAC when it appears"; nothing had been written
+  that could match it.
+
+  That second run does not need a hand at the phone any more either. udev's
+  NAME= only applies when a device appears, so an adapter that is already up
+  cannot be renamed by it -- which is why this used to end with "re-plug the
+  dock, or reboot the phone". A *downed* link can be renamed, so setup now
+  brings it down, renames it, and hands it back to NetworkManager, and the udev
+  rule is what makes it survive the next boot. Verified across a reboot on
+  2026-08-22: lan0 comes back named and addressed with nothing touched.
+
+  If the interface never appears at all, there are three faults and they look
+  identical from the outside. `wk bridge status` now tells them apart, because
+  the guess it used to print sent an afternoon at the wrong one.
+
+    the port is not in host mode      the dock is refusing a USB Data Role
+                                      Swap. Both phones have one port and
+                                      default to *device* mode. Powering the
+                                      dock before connecting it to the phone
+                                      changes the negotiation and is the thing
+                                      worth trying; no amount of configuration
+                                      fixes a dock that will not swap.
+
+    host mode, nothing enumerated     the dock's own power, or the cable.
+
+    host mode, a hub enumerated,      the ethernet is not on the USB 2 path,
+    no NIC                            and on a PinePhone it never will be. See
+                                      below.
+
+  A PinePhone's port is USB 2.0 and there is no second data path: the A64 has
+  one OTG controller and one USB 2.0 host controller, and the USB-C carries DP
+  alt mode rather than SuperSpeed. So a USB-C dock whose ethernet hangs off its
+  own USB3 hub hands the phone its USB2 hub and nothing else -- the hub
+  enumerates happily, its downstream ports read `not attached` forever, and
+  every host-mode assertion succeeds and changes nothing.
+
+  Both halves of that were measured here on 2026-08-22, which is what makes it
+  a rule rather than a theory. A generic VIA VL813 dock: role swap fine, phone
+  charging, hub up, four ports empty, no NIC, unusable. **The PinePhone's own
+  dock: works** -- its ethernet is a CoreChips 0fe6:9900 "10/100M LAN" on the
+  USB2 path, claimed by `cdc_ether` with nothing extra installed, up at
+  100 Mb/s. (It also presents a Chrontel CH7210 "Billboard" for the DP side
+  which binds no driver; that is not a fault.)
+
+  So the question to ask of a dock on this phone is which hub its NIC sits
+  behind, and a dock's own RJ45 is not a given. A plain USB 2.0 adapter
+  (AX88772, RTL8152) in a USB-A port is the other answer. The Librem 5's
+  i.MX8M does have USB3, so none of this constrains that phone.
+
+  And one that looks like nothing at all, because everything is green: the NIC
+  can enumerate on the *companion* full-speed controller and run at 12 Mbit/s
+  instead of 480. Host mode is correct in that state and the link still says
+  100 Mb/s, so only the USB bus speed gives it away -- `wk bridge status`
+  prints it and fails on anything below high speed.
+
+  How it happens on a PinePhone (2026-08-22): the dock asks for the data-role
+  swap itself and the phone is host by 3.5 s, but at 13 s the pmOS initramfs
+  sets up its USB-gadget network and flips the phy back to peripheral with a hub
+  attached. EHCI then fails for a minute and gives up at 77 s, the port falls to
+  OHCI, and the dock comes up at full speed. It is a race, so it is
+  intermittent. wk-bridge-usb-host recovers it with a four-step rebind -- unbind
+  OHCI so the companion lets go, unbind EHCI so it forgets it gave up, bind
+  EHCI, bind OHCI -- capped at three attempts per boot, because a repair that
+  repeats forever is a fault rather than a recovery. The root cause, the
+  initramfs taking the port, is not fixed.
+
+  Two more things the health check separates out, both of which look like "no
+  adapter" and are not:
+
+    the adapter is there under     it is working; it is simply not called
+    its kernel name (eth0)        lan0, because the udev rename is written
+                                  from the adapter's own MAC and a setup run
+                                  with no adapter plugged in wrote no rule for
+                                  it. `wk bridge setup` again is the fix, and
+                                  it renames the link in place -- no re-plug,
+                                  no reboot, nothing at the phone.
+
+    something on the bus with     a missing kernel module, not a missing dock.
+    no driver bound               dmesg names the vendor/product and which
+                                  driver should have claimed it.
+
+  The hardware watchdog on a PinePhone needs a kernel option pmOS does not
+  set, and this repo now sets it. Worth reading once, because it is the only
+  place wk edits somebody else's tree.
+
+  The A64 carries a watchdog and the device tree declares it
+  (`allwinner,sun50i-a64-wdt` at 0x1c20ca0) -- but stock
+  `linux-postmarketos-allwinner` is built with CONFIG_SUNXI_WATCHDOG unset, so
+  nothing binds to the node and there is no /dev/watchdog to feed. That is not
+  cosmetic on a bridge: the watchdog is the only thing that recovers a kernel
+  which has stopped scheduling, everything else here assumes the machine is
+  still running, and this is the device you cannot walk up to.
+
+  So `bridge-pinephone` declares the option (`PMO_KCONFIG` in
+  image/profiles.sh) and `wk sysimage build` patches it into the kernel aport
+  before building: the option is set, the APKBUILD's checksums are regenerated
+  -- abuild refuses the build otherwise, and says only "Use 'abuild checksum'"
+  -- and pkgrel is bumped by 100, without which pmbootstrap happily reuses the
+  stock package it already has and the change is applied, checksummed and
+  never compiled. `=m` rather than `=y`, so the driver is loaded by the role
+  and a driver that misbehaves is a line in a file rather than a reflash.
+
+  `wk bridge setup` then loads it by the *device's own modalias*, read out of
+  sysfs -- so no module name appears anywhere in the role, and the same code
+  does the right thing on a device whose kernel already has the driver and
+  nothing at all on one that has no such node.
+
+  Two consequences worth knowing. A phone flashed before this landed has a
+  kernel without the driver and needs a reflash to get it -- `wk bridge status`
+  says which of the two states it is in. And the Librem 5 gets no such entry:
+  its watchdog situation is unmeasured, and guessing at a second SoC's kconfig
+  from this one's is how a working image stops booting.
 
   An ssh session dying while the phone stays up is usually a WiFi roam, not a
   fault -- two APs on one SSID and the phone moves between them. Keepalives,

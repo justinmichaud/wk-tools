@@ -53,4 +53,110 @@ done
 # the interface. Only when something actually moved: at boot, with the dock
 # already in host mode, this would otherwise be three seconds of nothing.
 [ "$changed" -eq 1 ] && sleep 3
+
+# --- the companion-controller trap -------------------------------------------
+#
+# A downstream NIC can enumerate perfectly and still be forty times too slow,
+# and nothing above notices because host mode is *correct* in that state.
+#
+# What happens on a PinePhone (measured 2026-08-22): the dock asks for the data
+# role swap itself and the phone is host by 3.5 s, but at 13 s the pmOS
+# initramfs sets up its USB-gadget network and flips the phy back to peripheral
+# (`Changing dr_mode to 2`) with a hub physically attached. EHCI then spends a
+# minute failing -- `device descriptor read/64, error -110`, port power cycles
+# -- and gives up at 77 s with "unable to enumerate USB device". The port falls
+# to the *companion* OHCI controller, and the dock comes up at full speed: 12
+# Mbit/s instead of 480, capping a 100 Mbit ethernet at about eight.
+#
+# It is a race, so it is intermittent: earlier boots of this same phone landed
+# on EHCI and were fine, which is the worst way for a fault like this to behave.
+#
+# Recovery is a four-step rebind, and the order is the whole thing: the
+# *companion* has to let go of the device before EHCI will take it.
+#
+#   unbind OHCI   releases the device, so the port has nothing attached
+#   unbind EHCI   makes it forget that it gave up on this port
+#   bind EHCI     it enumerates the re-connecting device, at high speed
+#   bind OHCI     put the companion back for low/full-speed devices
+#
+# Rebinding EHCI *alone* is not enough and that was a real mistake here: it
+# looked right in a hand test where EHCI had just been unbound seconds earlier,
+# shipped, and then ran every sixty seconds against a real degraded boot
+# without ever moving the device off OHCI -- logging a recovery it was not
+# performing. Which is the shape this file warns about elsewhere: a repair that
+# repeats forever is a fault, not a recovery.
+#
+# Hence the attempt cap. In /run, so its scope is one boot: if the fourth
+# attempt has not worked, something about this dock is not what was measured,
+# and the health check reporting 12 Mbit/s is more use than a bridge that
+# resets its own USB controllers every minute for a day.
+#
+# Everything below is derived from sysfs rather than named: which interface is
+# the downstream NIC, which controller it sits on, and which EHCI controller is
+# that one's companion -- the last from the sunxi convention that the pair sits
+# 0x400 apart, and only ever acted on when a platform device by that name
+# actually exists. On a device with no such pair, nothing matches and nothing
+# happens.
+nic_usb_dev() {
+    local n d p
+    for n in /sys/class/net/*; do
+        d=$(basename "$n")
+        # usb* is the gadget, which is what this whole file exists to get out of
+        case "$d" in lo|wlan*|tailscale*|dummy*|usb*) continue ;; esac
+        [ -e "$n/device/subsystem" ] || continue
+        case "$(readlink -f "$n/device/subsystem")" in */usb) ;; *) continue ;; esac
+        p=$(readlink -f "$n/device")
+        printf '%s' "${p%/*}"        # the usb_device dir, not the interface
+        return 0
+    done
+    return 1
+}
+
+nic=$(nic_usb_dev) || exit 0
+speed=$(cat "$nic/speed" 2>/dev/null || echo 0)
+case "$speed" in
+    480|5000|10000|20000) exit 0 ;;   # high speed or better: nothing to do
+    0|'') exit 0 ;;                   # no answer; not something to act on
+esac
+
+ctrl=$(printf '%s' "$nic" | sed -n 's|.*/\([0-9a-f]*\)\.usb/usb[0-9]*/.*|\1|p')
+[ -n "$ctrl" ] || exit 0
+companion=$(printf '%x' $(( 0x$ctrl - 0x400 )) 2>/dev/null) || exit 0
+[ -e /sys/devices/platform/soc/"$companion".usb ] || exit 0
+
+TRIES=/run/wk-bridge-usb-speed-tries
+tries=$(cat "$TRIES" 2>/dev/null || echo 0)
+case "$tries" in ''|*[!0-9]*) tries=0 ;; esac
+if [ "$tries" -ge 3 ]; then
+    if [ "$tries" -eq 3 ]; then
+        printf '%s' 4 > "$TRIES"
+        logger -t wk-bridge-usb-host \
+            "downstream NIC still at ${speed}Mbit/s after 3 rebinds -- leaving it until the next boot"
+    fi
+    exit 0
+fi
+printf '%s' "$((tries + 1))" > "$TRIES"
+
+ohci=/sys/bus/platform/drivers/ohci-platform
+ehci=/sys/bus/platform/drivers/ehci-platform
+
+logger -t wk-bridge-usb-host \
+    "downstream NIC is at ${speed}Mbit/s on $ctrl.usb -- rebinding (attempt $((tries + 1)))"
+
+# Each step guarded on the current binding state: unbinding something already
+# unbound is an error, and a sequence that aborts half-done leaves that port
+# with no USB at all until the next boot.
+[ -e "$ohci/$ctrl.usb" ] && { printf '%s\n' "$ctrl.usb" > "$ohci/unbind" 2>/dev/null || true; }
+sleep 2
+[ -e "$ehci/$companion.usb" ] && { printf '%s\n' "$companion.usb" > "$ehci/unbind" 2>/dev/null || true; }
+sleep 1
+[ -e "$ehci/$companion.usb" ] || { printf '%s\n' "$companion.usb" > "$ehci/bind" 2>/dev/null || true; }
+sleep 5
+[ -e "$ohci/$ctrl.usb" ] || { printf '%s\n' "$ctrl.usb" > "$ohci/bind" 2>/dev/null || true; }
+sleep 3
+
+nic=$(nic_usb_dev) || exit 0
+now=$(cat "$nic/speed" 2>/dev/null || echo 0)
+logger -t wk-bridge-usb-host "downstream NIC is now at ${now}Mbit/s"
+case "$now" in 480|5000|10000|20000) rm -f "$TRIES" ;; esac
 exit 0

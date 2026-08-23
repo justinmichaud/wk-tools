@@ -35,6 +35,11 @@ REBOOT_WINDOW=21600     # ...6 hours
 
 iface=lan0
 segment=""
+# Defaulted for the same reason the two above are: this script runs `set -u`, so
+# a conf written by an older provision.sh -- or none at all -- must not turn a
+# health check into an unbound-variable crash in the recovery loop.
+leases=""
+leasefile=/var/lib/misc/dnsmasq.leases
 [ -f /etc/wk-bridge.conf ] && . /etc/wk-bridge.conf
 
 log() { logger -t wk-bridge-netwatch -- "$*"; printf 'wk-bridge-netwatch: %s\n' "$*"; }
@@ -55,6 +60,26 @@ svc() {
 }
 NM_SVC=$(svc networkmanager NetworkManager) || NM_SVC=""
 TS_SVC=$(svc tailscale tailscaled) || TS_SVC=""
+
+# Is anything actually behind us? Asked of the *reservations*, because they are
+# the addresses this bridge exists to make reachable and they are declared
+# rather than discovered -- so a yes is unambiguous. A segment with no
+# reservations declared falls back to the lease file, which is the only evidence
+# there is in that case.
+#
+# This is the signal the recovery rung below keys on. The lease file is not:
+# these leases are infinite, so it records history rather than the present.
+segment_answers() {
+    local l ip any=""
+    for l in $leases; do
+        ip=$(printf '%s' "$l" | cut -d, -f2)
+        [ -n "$ip" ] || continue
+        any=1
+        ping -c 1 -W 2 "$ip" >/dev/null 2>&1 && return 0
+    done
+    [ -n "$any" ] && return 1
+    [ -s "$leasefile" ]
+}
 
 wifi_if() {
     nmcli -t -f DEVICE,TYPE device status 2>/dev/null \
@@ -127,6 +152,8 @@ may_reboot() {
 }
 
 fails=0
+nopeer=0
+flapped=""
 while :; do
     WIFI=$(wifi_if)
     [ -n "$WIFI" ] || { log "no wifi device present"; WIFI=wlan0; }
@@ -140,14 +167,77 @@ while :; do
     # the point: losing the segment is a dock or a cable, and rebooting the
     # phone over it would take out the uplink that is the only way to be told
     # about any of this. Re-assert host mode and say so.
+    # Every pass, not only when the interface is missing. It used to run only in
+    # that branch, which meant the fault it now also fixes was invisible to the
+    # ladder: a NIC that fell to the companion full-speed controller is *present*
+    # and *host mode is correct*, it is merely forty times too slow, so nothing
+    # here ever looked at it. The script itself is cheap and idempotent -- a few
+    # sysfs reads and an early exit when there is nothing to do.
+    /usr/local/sbin/wk-bridge-usb-host 2>/dev/null || true
+
     if [ ! -e "/sys/class/net/$iface" ]; then
         log "$iface missing -- re-asserting USB host mode"
         /usr/local/sbin/wk-bridge-usb-host 2>/dev/null || true
         if [ -e "/sys/class/net/$iface" ]; then
             log "$iface came back"
         else
-            log "$iface still absent -- check the dock, its power, and the cable"
+            # Not "check the dock, its power and the cable", which is what
+            # this said and was wrong here more often than right: the phone
+            # observed on 2026-08-22 had a dock that was powered, cabled, in
+            # host mode and enumerating a hub, and the NIC still never
+            # appeared. wk-bridge-healthcheck tells the three cases apart;
+            # this line points at it rather than guessing at one of them.
+            log "$iface still absent -- wk-bridge-healthcheck says which fault"
         fi
+    elif [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = 1 ] \
+         && ! segment_answers; then
+        # Carrier, and nothing on the segment answers. A client asks for an
+        # address when it sees the link come up, so a client that asked into the
+        # window before dnsmasq was listening -- or gave up after enough silence
+        # -- stays without one, and nothing on this phone can reach into it and
+        # make it ask again. Except taking the carrier away and giving it back,
+        # which every DHCP client treats as a new link.
+        #
+        # The trigger is reachability and *not* an empty lease file, which is
+        # what this first tried and was simply wrong: these leases are infinite,
+        # so a client that already has an address re-uses it after a carrier
+        # drop by ARP alone and never files another request. Tested by deleting
+        # the lease file on a working segment -- the flap fired, the board did
+        # not re-ask because it had no need to, and nothing was broken except
+        # this check's opinion of it.
+        #
+        # Two consecutive passes first, because one can legitimately catch a
+        # board that is still booting, and flapping the link under a client
+        # mid-DISCOVER makes it worse. And once per episode, not once per pass:
+        # an empty segment is a normal state -- nothing plugged in at the far
+        # end yet -- and a bridge that flaps its own link every minute forever
+        # is a fault, not a recovery.
+        nopeer=$((nopeer + 1))
+        # Two passes before acting, except just after a boot, where one is
+        # right: nothing has ever been established on this link, so there is no
+        # settled client to disturb -- and a boot is exactly when the wait is
+        # worst. Measured 2026-08-22: after a reboot of the phone the rpi4's
+        # DHCPDISCOVER landed 134 s later. That is the *board's* retry schedule,
+        # not this phone's readiness: its first request goes out when the kernel
+        # enumerates the adapter, seconds in, and no amount of starting dnsmasq
+        # earlier can beat that. Flapping the link is the only thing that makes
+        # a backed-off client ask again, and doing it at the first pass turns
+        # two minutes into about twenty seconds.
+        #
+        # Once per episode either way, tracked by a flag rather than by the
+        # counter -- with only the counter, flapping at pass 1 and still seeing
+        # nothing at pass 2 would flap twice.
+        up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 999)
+        if [ -z "$flapped" ] && { [ "$nopeer" -ge 2 ] || [ "$up" -lt 180 ]; }; then
+            flapped=1
+            log "$iface has carrier and nothing answers -- flapping it so a client re-asks"
+            ip link set "$iface" down 2>/dev/null || true
+            sleep 2
+            ip link set "$iface" up 2>/dev/null || true
+        fi
+    else
+        nopeer=0
+        flapped=""
     fi
 
     if healthy; then

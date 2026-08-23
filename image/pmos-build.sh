@@ -222,6 +222,89 @@ info "$CFG"
 # `mkfs.ext4 ... /dev/installp2`, because that mapping still belongs to the
 # image before it. Observed exactly once, which was one run too many: this is
 # the difference between "idempotent" and "works the first time".
+# Placed after the Config step above and not next to the pmaports checkout it
+# edits: the checksum run below is `pmbootstrap`, and pmbootstrap needs the
+# config file that step writes. Aports first, config, then this.
+# --- the kernel config delta -------------------------------------------------
+#
+# A profile may declare kernel options its device needs and pmOS does not set
+# (PMO_KCONFIG, PMO_KERNEL_APORT in image/profiles.sh). Applied here rather
+# than kept as a patch file, because the thing being changed is one line of a
+# generated defconfig and a patch against it would conflict on every pmaports
+# bump; and applied *after* the checkout above, because that checkout is
+# `git checkout -B` against upstream and resets the tree every run -- a hand
+# edit in the aport does not survive one build, which is exactly why this is
+# code and not an instruction.
+#
+# Three things have to happen together or the build fails in a way that reads
+# like something else:
+#
+#   the option        replaced in place whether pmOS spells it `# ... is not
+#                     set` or assigns it something else, and appended if the
+#                     option is absent entirely.
+#   the checksums     the APKBUILD's sha512sums cover the config file, so
+#                     editing it makes abuild stop with "Use 'abuild checksum'"
+#                     -- which is what the first attempt at this hit, and it
+#                     names neither the config nor the reason.
+#   pkgrel            bumped, and by a lot. Without it the package version is
+#                     identical to the one already in the local repo from a
+#                     previous build, and pmbootstrap reuses that apk: the
+#                     config change is applied, checksummed, and silently not
+#                     built. +100 puts it somewhere no upstream pkgrel will
+#                     reach, so a patched kernel is always distinguishable from
+#                     a stock one by version alone.
+if [ -n "${PMO_KCONFIG:-}" ]; then
+    step "Kernel config delta ($PMO_KERNEL_APORT)"
+    [ -n "${PMO_KERNEL_APORT:-}" ] \
+        || die "the profile sets PMO_KCONFIG but no PMO_KERNEL_APORT to apply it to"
+    KDIR="$APORTS/$PMO_KERNEL_APORT"
+    [ -d "$KDIR" ] || die "no such aport in pmaports $PMO_CHANNEL: $PMO_KERNEL_APORT"
+
+    # The config fragment for the architecture being built. Named by the aport's
+    # own $CARCH convention, and there is exactly one for aarch64.
+    # The glob directly rather than `ls | head -1`. This script runs `set -eu`
+    # without pipefail, so that pipeline would not actually misfire here -- but
+    # `head` closing a pipe early is the shape that bit cmd/selftest 32 times
+    # (its header has the measurement), and it buys nothing when there is one
+    # such config per architecture.
+    KCFG=""
+    for f in "$KDIR"/config-*.aarch64; do
+        [ -f "$f" ] && { KCFG="$f"; break; }
+    done
+    [ -n "$KCFG" ] || die "no config-*.aarch64 in $KDIR"
+
+    for opt in $PMO_KCONFIG; do
+        name=${opt%%=*}
+        # Read *before* editing. The first version of this printed the value it
+        # had just written and called it the old one.
+        was=$(sed -n "s/^$name=/=/p;s/^# $name is not set\$/unset/p" "$KCFG" | tr '\n' ' ')
+        if grep -q "^$name=" "$KCFG" 2>/dev/null; then
+            sed -i "s|^$name=.*|$opt|" "$KCFG"
+            info "$opt (was ${was:-something else})"
+        elif grep -q "^# $name is not set$" "$KCFG" 2>/dev/null; then
+            sed -i "s|^# $name is not set\$|$opt|" "$KCFG"
+            info "$opt (was unset)"
+        else
+            printf '%s\n' "$opt" >> "$KCFG"
+            info "$opt (appended; the option was absent)"
+        fi
+        grep -q "^$opt\$" "$KCFG" \
+            || die "could not apply $opt to $(basename "$KCFG")"
+    done
+
+    # pkgrel, then the checksums -- in that order, because the checksum run
+    # reads the APKBUILD.
+    KREL=$(sed -n 's/^pkgrel=\([0-9]*\)$/\1/p' "$KDIR/APKBUILD" | tail -1)
+    [ -n "$KREL" ] || die "could not read pkgrel from $KDIR/APKBUILD"
+    sed -i "s/^pkgrel=$KREL\$/pkgrel=$((KREL + 100))/" "$KDIR/APKBUILD"
+    info "pkgrel $KREL -> $((KREL + 100)), so the cached stock package cannot win"
+
+    "$PMB" -c "$CFG" checksum "$(basename "$PMO_KERNEL_APORT")" >/dev/null 2>&1 \
+        || die "could not regenerate checksums for $(basename "$PMO_KERNEL_APORT")
+    The config was edited, so abuild will refuse the build without this."
+    info "checksums regenerated"
+fi
+
 step "Shutting down any previous chroot"
 "$PMB" -c "$CFG" -y shutdown >/dev/null 2>&1 || warn "pmbootstrap shutdown reported a problem; continuing"
 

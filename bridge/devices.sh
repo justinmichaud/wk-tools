@@ -33,6 +33,41 @@
 #   Librem 5    RS9116 on SDIO, `rsi_sdio` over `rsi_91x`, and the reason the
 #               module-reload rung exists at all -- it wedges its firmware in a
 #               way a link bounce does not clear
+#
+# Two more that are prose for the same reason, both measured on the PinePhone
+# on 2026-08-22 and both about the *downstream* leg rather than the uplink:
+#
+#   the port is USB 2.0, full stop, and it decides which docks can work. The
+#   A64 has one OTG controller and one USB 2.0 host controller and no
+#   SuperSpeed anywhere; the USB-C carries DP alt mode, not USB3. Two docks
+#   were tried here on 2026-08-22 and the difference between them is entirely
+#   this:
+#
+#     a generic USB-C dock   its ethernet hangs off its own USB3 hub, so the
+#                            phone sees the dock's *USB2* hub (VIA VL813) and
+#                            nothing else -- four downstream ports reading
+#                            `not attached`, forever, with the role swap and
+#                            the power negotiation both perfect. Unusable, and
+#                            no amount of host-mode asserting changes it.
+#     the PinePhone's own    ethernet on the USB2 path: a CoreChips
+#     dock                   0fe6:9900 "10/100M LAN" behind a 1a40:0101 hub,
+#                            claimed by `cdc_ether` with no extra packages.
+#                            Works. (It also presents a Chrontel CH7210
+#                            "Billboard" for the DP side, which binds no
+#                            driver and is not a fault.)
+#
+#   So: on a PinePhone a dock's own RJ45 is not a given, and the question to
+#   ask of any dock is which hub its NIC sits behind. A plain USB 2.0 adapter
+#   (AX88772, RTL8152) in a USB-A port is the other answer. The Librem 5's
+#   i.MX8M does have USB3, so none of this constrains that phone.
+#
+#   no hardware watchdog, and it is the kernel rather than the phone. The A64
+#   carries one and the device tree declares it
+#   (`allwinner,sun50i-a64-wdt` at 0x1c20ca0), but
+#   `linux-postmarketos-allwinner` is built with CONFIG_SUNXI_WATCHDOG unset,
+#   so nothing binds to it and there is no /dev/watchdog to feed. The
+#   netwatch ladder is therefore the only recovery on this phone, and it
+#   cannot see a kernel that has stopped scheduling.
 
 bridge_device_list() {
     cat <<'LIST'

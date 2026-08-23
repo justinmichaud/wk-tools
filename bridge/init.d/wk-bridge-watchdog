@@ -17,3 +17,12 @@ respawn_max=0
 depend() {
     after net
 }
+
+# The driver, before anything tries to feed it. udev's coldplug usually
+# autoloads a platform driver by modalias, but "usually" is not the standard for
+# the one mechanism that recovers a hung kernel on a device nobody can walk up
+# to -- so the service that needs /dev/watchdog is the service that ensures it.
+# Idempotent, and a no-op where there is nothing to load.
+start_pre() {
+    /usr/local/sbin/wk-bridge-watchdog-load || true
+}

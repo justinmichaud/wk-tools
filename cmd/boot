@@ -160,6 +160,17 @@ cmd_status() {
             b_evidence 2>/dev/null | sed 's/^/  /' || true
             if [ -n "$ARMED_IMG" ]; then
                 log "  the record says it was armed for system $ARMED_IMG"
+            elif [ -n "${MACH_BRIDGE:-}" ]; then
+                # Not a plain outage until the segment is ruled out. This board
+                # is reached across a phone's USB ethernet, and when that
+                # adapter is absent every board on the cable goes silent at
+                # once -- which looks exactly like a dead board and is not one.
+                # That mistake has been made here before (dotfiles/ssh/config),
+                # so the machine that knows it names the check rather than
+                # asserting the conclusion.
+                log "  no arming record could be read either -- but this machine is behind"
+                log "  $MACH_BRIDGE, so rule the segment out before the board:"
+                log "      wk bridge status $MACH_BRIDGE"
             else
                 log "  no arming record could be read either, so this is a plain outage"
                 log "  or the machine is in a bench system that answers somewhere else."

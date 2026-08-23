@@ -330,6 +330,8 @@ pmos_spawn() {
         PMO_PASSWORD=$(sh_quote "$PMO_PASSWORD") \
         PMO_PACKAGES=$(sh_quote "$PMO_PACKAGES") \
         PMO_EXTRA_SPACE=$(sh_quote "$PMO_EXTRA_SPACE") \
+        PMO_KERNEL_APORT=$(sh_quote "${PMO_KERNEL_APORT:-}") \
+        PMO_KCONFIG=$(sh_quote "${PMO_KCONFIG:-}") \
         PMO_HOSTNAME=$(sh_quote "$IMG_HOSTNAME") \
         PMO_KEYFILE=$(pmos_root)/driving-key.pub \
         PMO_ROOT=$(pmos_root) \

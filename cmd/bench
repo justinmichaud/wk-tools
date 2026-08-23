@@ -797,15 +797,47 @@ PYEOF
 # --- comparison --------------------------------------------------------------
 # compare-results does the statistics; this only resolves run ids to files and
 # refuses comparisons that are not like for like.
+# Either side may be a comma-separated list of runs.
+#
+# compare-results takes `-a` and `-b` with nargs='+' and action='append', and
+# its own help says "if more than one JSON is passed as a/b they will be merged
+# when computing the breakdown". An interleaved A/B (`wk pi bench --ab`)
+# produces exactly that shape: N runs per arm, alternated, and the arms are only
+# meaningful pooled. Taking one run per side would have thrown away every round
+# but the last.
+#
+# Resolution is per element and unchanged: a name in the store, or a path.
+# rewrite=1 maps store paths to /bench, which is where the workspace sees them;
+# rewrite=0 leaves them as host paths, which is what the staged macOS tree needs
+# (it runs compare-results on this machine, with no workspace and no /bench).
+_compare_files() {
+    local spec="$1" which="$2" rewrite="${3:-1}" out="" one f
+    local IFS=,
+    for one in $spec; do
+        [ -n "$one" ] || continue
+        f="$BENCH_DIR/$one/result.json"
+        [ -f "$f" ] || f="$one"
+        [ -f "$f" ] || die "no such run in $which: $one"
+        [ "$rewrite" = 1 ] && f="${f/#$BENCH_DIR//bench}"
+        out="$out $f"
+    done
+    [ -n "$out" ] || die "no runs given for $which"
+    printf '%s' "${out# }"
+}
+
 cmd_compare() {
-    local a="$1" b="$2" ws="${3:-}"
+    # aspec/bspec keep the whole arm; a and b are the first run of each, which
+    # is what the axis checks, the count check and the workspace lookup read.
+    # Every run in one arm came off the same board, the same build and the same
+    # session, so the first is representative and checking all of them would
+    # print the same warning N times.
+    local aspec="$1" bspec="$2" ws="${3:-}"
+    local a="${aspec%%,*}" b="${bspec%%,*}"
+    local ca cb
+    ca=$(_compare_files "$aspec" "-a"); cb=$(_compare_files "$bspec" "-b")
     local fa="$BENCH_DIR/$a/result.json" fb="$BENCH_DIR/$b/result.json"
     [ -f "$fa" ] || fa="$a"
     [ -f "$fb" ] || fb="$b"
-    [ -f "$fa" ] || die "no such run: $a"
-    [ -f "$fb" ] || die "no such run: $b"
-    # Inside the workspace the run directory is /bench, not the store path.
-    local ca="${fa/#$BENCH_DIR//bench}" cb="${fb/#$BENCH_DIR//bench}"
 
     # The record sits next to the result, so a run named by path -- which is
     # how a result on a benchmark volume is named, since it is not in this
@@ -869,6 +901,33 @@ if a.get("role_marker_overridden") or b.get("role_marker_overridden"):
           "(WK_IMAGE_MARKER was overridden) -- it was measured on a workstation")
 if a.get("local_copy") != b.get("local_copy"):
     print("warning: different benchmark payloads (%s vs %s)" % (a.get("local_copy"), b.get("local_copy")))
+# The machine, for on-board runs. Two boards are two different computers, and
+# an rpi3 score against an rpi4 score is not a comparison however similar the
+# axes look -- different SoC, different width, different memory. This is a
+# warning where the kernel below is not, because nobody sets out to compare
+# two boards to each other.
+if a.get("machine") and b.get("machine") and a["machine"] != b["machine"]:
+    print("warning: different machines (%s vs %s) -- these are two computers, not "
+          "two states of one" % (a["machine"], b["machine"]))
+# The kernel and the system, *reported* rather than warned about.
+#
+# For most comparisons these being equal is what you want. For the one this
+# field was added for -- A/B of a kernel patch on the rpi4 -- their differing is
+# the entire experiment, so a warning would be firing on the intended case and
+# training the eye to skip it. Printing the delta serves both readings: it is
+# the confirmation you wanted when deliberate, and it is the thing you notice
+# when it was not.
+for key, label in (("system", "system"), ):
+    if a.get(key) and b.get(key) and a[key] != b[key]:
+        print("note: %s differs -- %s vs %s" % (label, a[key], b[key]))
+ka = (a.get("host") or {}).get("kernel")
+kb = (b.get("host") or {}).get("kernel")
+if ka and kb and ka != kb:
+    print("note: kernel differs -- %s vs %s" % (ka, kb))
+elif ka and kb and ka == kb and a.get("system") != b.get("system"):
+    print("note: same kernel release (%s) on both sides. If this was meant to be a "
+          "kernel A/B, the patched build needs its own LOCALVERSION -- otherwise "
+          "the two are indistinguishable here and their modules collide on disk." % ka)
 PYEOF
 
     # A staged tree can do the statistics itself, and in bench mode it
@@ -883,7 +942,10 @@ PYEOF
     On a benchmark install:  $STAGED_PY -m pip install --user scipy
     (it is a 30 MB download and the only thing here that needs the network)"
         fi
-        "$STAGED_PY" -u "$staged_cmp" -a "$fa" -b "$fb" --breakdown
+        local ha hb
+        ha=$(_compare_files "$aspec" "-a" 0); hb=$(_compare_files "$bspec" "-b" 0)
+        # shellcheck disable=SC2086
+        "$STAGED_PY" -u "$staged_cmp" -a $ha -b $hb --breakdown
         return 0
     fi
 
@@ -920,8 +982,23 @@ except Exception: print('')" 2>/dev/null)" = 1 ]; then
     # already allows PyPI because build-webkit depends on it.
     if ! t_exec "$ws" python3 -c 'import scipy' >/dev/null 2>&1; then
         info "installing scipy for compare-results (once per workspace)"
-        t_exec "$ws" bash -lc 'pip3 install --user --quiet scipy' \
-            || die "could not install scipy; compare-results cannot run"
+        # Two attempts, and the second is not a shrug.
+        #
+        # The SDK image takes the first. A yocto build workspace is plain
+        # Ubuntu 24.04 (container/yocto/Containerfile), which is PEP 668
+        # "externally managed", and there pip refuses outright -- so the one
+        # workspace that has the cross-built WebKit an on-board run measures
+        # was the one that could not compare its results.
+        #
+        # --break-system-packages is safe *with --user*, whatever the name
+        # suggests: it writes ~/.local/lib and touches no distro package. And
+        # the workspace is disposable by construction; `wk rm` is the undo.
+        t_exec "$ws" bash -lc 'pip3 install --user --quiet scipy' >/dev/null 2>&1 \
+            || t_exec "$ws" bash -lc 'pip3 install --user --quiet --break-system-packages scipy' \
+            || die "could not install scipy in '$ws'; compare-results cannot run.
+    Try by hand:  wk enter $ws -- pip3 install --user --break-system-packages scipy"
+        t_exec "$ws" python3 -c 'import scipy' >/dev/null 2>&1 \
+            || die "scipy installed into '$ws' but does not import; compare-results cannot run"
     fi
 
     # Invoked through python3 rather than executed: compare-results' shebang is
@@ -930,7 +1007,7 @@ except Exception: print('')" 2>/dev/null)" = 1 ]; then
     # file or directory". It works on macOS, which is presumably why it is
     # still there.
     t_exec "$ws" bash -lc "cd /src/WebKit && python3 -u Tools/Scripts/compare-results \
-        -a '$ca' -b '$cb' --breakdown"
+        -a $ca -b $cb --breakdown"
 }
 
 # The compare-results that belongs to the staged tree, if there is one on this

@@ -43,12 +43,20 @@ case "$ACTION" in
     # Kept only to say where it went; see below.
     flash) : ;;
     *) die "usage: wk pi setup <ssh-host>
-       wk pi deploy <workspace> <machine> [--skeleton|--skeleton-only]
+       wk pi deploy <workspace> <machine> [--slot NAME] [--skeleton|--skeleton-only]
          puts a cross-built WebKit on the board -- the image is the runtime
          and carries no browser, so this is how one gets there
-       wk pi bench <machine> <plan> [--count N] [--timeout S]
+         --slot puts it beside an existing build rather than over it, which is
+         what makes an A/B possible without redeploying between runs
+       wk pi bench <machine> <plan> [--slot NAME] [--count N] [--timeout S]
+       wk pi bench <machine> <plan> --ab A,B [--rounds N]
          runs the plan through WebKit's own run-benchmark on a booted bench
          system -- refuses host mode, and reports what the number is worth
+         --ab alternates two deployed slots (A B A B ...) so that thermal drift
+         lands on both arms instead of only the second; each run is recorded
+         separately, and 'wk bench compare' does the statistics
+         a run with no display attached needs --force: compositing falls to the
+         CPU, which measures the renderer as much as the browser
        wk pi boot-order <ssh-host> [<order>] [--dry-run] [--revert]
          orders: usb-first  local -- omitted, it comes from the machine's
          role in boot/machines.sh (bench-device: usb-first; else local)
@@ -115,9 +123,13 @@ _pi_tmp_cleanup() { [ -n "${PI_TMP:-}" ] && rm -rf "$PI_TMP"; PI_TMP=""; return 
 
 cmd_deploy() {
     local ws="${1:-}" machine="${2:-}"; shift 2 2>/dev/null || true
-    local skeleton="" libs_only="" skeleton_only=""
+    local skeleton="" libs_only="" skeleton_only="" slot=a
     while [ $# -gt 0 ]; do
         case "$1" in
+            # Which build directory on the board this lands in. Default `a` is
+            # the historical unsuffixed path, so nothing that predates slots
+            # changes behaviour.
+            --slot)      slot="${2:-}"; pi_check_slot "$slot"; shift ;;
             --skeleton)  skeleton=1 ;;
             # Provision the tree and stop -- useful while a cross build is
             # still running, since the two do not depend on each other.
@@ -128,7 +140,7 @@ cmd_deploy() {
         shift
     done
     [ -n "$ws" ] && [ -n "$machine" ] \
-        || die "usage: wk pi deploy <workspace> <machine> [--skeleton] [--libs-only]"
+        || die "usage: wk pi deploy <workspace> <machine> [--slot NAME] [--skeleton] [--libs-only]"
 
     machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
 
@@ -191,7 +203,7 @@ cmd_deploy() {
         warn "the build container has no 'zip', so built-product-archive cannot run.
   Falling back to a plain tar of bin/ and lib/ -- the same bytes, without the
   archive format. 'wk rm $ws' and rebuild to get the documented path back."
-        pi_deploy_tar "$ws" "$machine" "$target"
+        pi_deploy_tar "$ws" "$machine" "$target" "$slot"
         return 0
     fi
 
@@ -237,6 +249,36 @@ cmd_deploy() {
 }
 
 # The transport of last resort: bin/ and lib/ as a tarball.
+# Where a build lives on the board, by slot.
+#
+# `Release` with no suffix is slot "a" and the historical path, so every
+# existing invocation and every deployed board keeps working untouched.
+#
+# Slots exist because the comment below used to end "and a board only ever
+# holds one build", which made an A/B of two WebKits a reflash-per-side
+# affair -- minutes of copying between every pair of numbers, on a board whose
+# thermal state drifts over exactly that timescale. Two builds side by side
+# turn that into an alternation, which is the design that actually controls
+# for drift (see cmd_bench's --ab).
+#
+# The name is restricted to a short alphanumeric because it becomes a directory
+# on the board and arrives from the command line.
+pi_build_dir() {
+    local slot="${1:-a}"
+    case "$slot" in
+        a) printf '/WebKit/WebKit/WebKitBuild/WPE/Release' ;;
+        *) printf '/WebKit/WebKit/WebKitBuild/WPE/Release-%s' "$slot" ;;
+    esac
+}
+
+pi_check_slot() {
+    case "${1:-}" in
+        [a-zA-Z0-9] | [a-zA-Z0-9][a-zA-Z0-9] | [a-zA-Z0-9][a-zA-Z0-9][a-zA-Z0-9]) return 0 ;;
+        *) die "slot '${1:-}' is not usable: one to three letters or digits.
+    It names a directory on the board, so it stays boring on purpose." ;;
+    esac
+}
+
 #
 # It carries the same bytes built-product-archive would, minus the archive
 # format and its manifest -- so `built-product-archive extract` is not what
@@ -250,7 +292,8 @@ cmd_deploy() {
 # anything that exec prints ahead of the bytes (an init log, a shell banner)
 # corrupts the stream. image/yocto.sh records that exact trap for disk images.
 pi_deploy_tar() {
-    local ws="$1" machine="$2" target="$3" b="/src/WebKit/WebKitBuild/WPE"
+    local ws="$1" machine="$2" target="$3" slot="${4:-a}" b="/src/WebKit/WebKitBuild/WPE"
+    local dest; dest=$(pi_build_dir "$slot")
     info "packing bin/ and lib/ from Release_$target"
     t_exec "$ws" bash -c "cd $(sh_quote "$b/Release_$target") &&
         tar -czf /tmp/wk-webkit.tgz bin lib" \
@@ -261,17 +304,30 @@ pi_deploy_tar() {
         || die "could not copy the tarball out of '$ws'"
     info "copying $(human_bytes "$(file_bytes "$tgz")") to $machine"
 
-    m_ssh 'mkdir -p /WebKit/WebKit/WebKitBuild/WPE/Release &&
-        tar -C /WebKit/WebKit/WebKitBuild/WPE/Release -xzf -' < "$tgz" \
+    m_ssh "mkdir -p $(sh_quote "$dest") && tar -C $(sh_quote "$dest") -xzf -" < "$tgz" \
         || die "could not unpack the build on $machine"
 
+    # What this slot holds, beside the bytes. Without it an A/B record can say
+    # which slot each side ran from and not which commit that was, which is the
+    # half that matters six months later.
+    m_ssh "printf '%s\\n' \
+        workspace=$(sh_quote "$ws") \
+        sha=$(sh_quote "$(t_exec "$ws" bash -c 'cd /src/WebKit && git rev-parse HEAD' 2>/dev/null | tr -d '\r' | tail -1)") \
+        deployed=$(date -u +%Y-%m-%dT%H:%M:%SZ) > $(sh_quote "$dest/.wk-slot")" \
+        >/dev/null 2>&1 || true
+
     local built
-    built=$(m_ssh 'ls -l --time-style=+%Y-%m-%dT%H:%M /WebKit/WebKit/WebKitBuild/WPE/Release/bin/MiniBrowser 2>/dev/null | awk "{print \$6}"' 2>/dev/null | tr -d '\r')
+    built=$(m_ssh "ls -l --time-style=+%Y-%m-%dT%H:%M $(sh_quote "$dest/bin/MiniBrowser") 2>/dev/null | awk '{print \$6}'" 2>/dev/null | tr -d '\r')
     [ -n "$built" ] || die "the unpack reported success but there is no
-    WebKitBuild/WPE/Release/bin/MiniBrowser on $machine."
+    $dest/bin/MiniBrowser on $machine."
     log "deployed to $machine (tar transport)"
     log "  MiniBrowser $built"
-    log "  next:       wk pi bench $machine <plan>"
+    log "  slot        $slot ($dest)"
+    if [ "$slot" = a ]; then
+        log "  next:       wk pi bench $machine <plan>"
+    else
+        log "  next:       wk pi bench $machine <plan> --slot $slot"
+    fi
 }
 
 # The skeleton. `--depth 1` of the profile's own branch, from the profile's own
@@ -374,7 +430,7 @@ pi_bench_env() {
     # (/usr/local/lib/wpe-webkit-2.0/injected-bundle), and a deployed build was
     # never installed -- so the web process starts and then warns "Error loading
     # the injected bundle", which is easy to read as cosmetic and is not.
-    local b=/WebKit/WebKit/WebKitBuild/WPE/Release/lib
+    local b="${1:?pi_bench_env needs a build directory}/lib"
     local libs="export LD_LIBRARY_PATH=$b WEBKIT_INJECTED_BUNDLE_PATH=$b"
     if [ "${PI_SESSION:-}" = headless-rdp ]; then
         printf '%s' "$libs && export XDG_RUNTIME_DIR=/run/user/0 WAYLAND_DISPLAY=wk-bench"
@@ -406,20 +462,124 @@ os.write(fd,struct.pack("=80s4HI256i",b"wk-bench-seat",3,1,1,1,0,*([0]*256)))
 fcntl.ioctl(fd,IOC(0,U,1,0),0)
 signal.pause()'
 
+# Save the run where `wk bench compare` will find it.
+#
+# It used to print run-benchmark's JSON to stdout and stop there, which made an
+# on-board number a thing you had to keep in a terminal scrollback. The store is
+# the only place `wk bench compare` looks (BENCH_DIR, cmd/bench), so a result
+# that never lands there cannot be compared against anything -- and comparing
+# two runs is most of why anyone takes one. That gap is what an A/B of a kernel
+# patch runs straight into: two runs, and no way to put them side by side.
+#
+# Same directory shape and same three axes as every other run, so the records
+# are interchangeable: env.json, result.json, run.log.
+pi_bench_record() {
+    local machine="$1" plan="$2" sysid="$3" kernel="$4" gov="$5" throttled="$6"
+    local root_dev="$7" renderer="$8" session="$9" count="${10}"
+    local logf="${11}" res="${12}" slot="${13:-a}" sha="${14:-}" bws="${15:-}"
+    local dir="$WK_STORE/bench/$(date -u +%Y%m%dT%H%M%SZ)-$plan-$machine-$slot"
+    ensure_dir "$dir"
+
+    m_ssh "cat $(sh_quote "$res")"  > "$dir/result.json" 2>/dev/null || true
+    m_ssh "cat $(sh_quote "$logf")" > "$dir/run.log"     2>/dev/null || true
+
+    # kernel_arch and the kernel release, because this is the pair that makes a
+    # kernel A/B legible afterwards. docs/HANDOFF-benchmarking.md asked for
+    # kernel_arch and kernel_provenance and neither existed anywhere.
+    #
+    # kernel_provenance is deliberately *not* a hand-set stock/custom flag. The
+    # honest discriminator is already here: two systems built from two profiles
+    # have two image ids, and two kernels built from two profiles have two
+    # `uname -r` strings if the patched build sets its own LOCALVERSION. Both
+    # are read off the running board rather than asserted, which a boolean in a
+    # config file would not be.
+    local karch
+    karch=$(m_ssh 'uname -m' 2>/dev/null | tr -d '\r')
+
+    WK_M_PLAN="$plan" WK_M_MACHINE="$machine" WK_M_SYSTEM="$sysid" \
+    WK_M_KERNEL="$kernel" WK_M_KARCH="$karch" WK_M_GOV="$gov" \
+    WK_M_THROTTLED="$throttled" WK_M_ROOT="$root_dev" WK_M_RENDERER="$renderer" \
+    WK_M_SESSION="$session" WK_M_COUNT="$count" WK_M_FORCED="${WK_FORCE:-}" \
+    WK_M_SLOT="$slot" WK_M_SHA="$sha" WK_M_WS="$bws" \
+    python3 - "$dir/env.json" <<'PYEOF'
+import json, os, sys
+g = os.environ.get
+plan = g("WK_M_PLAN") or ""
+cpu = plan.startswith(("jetstream", "octane", "kraken", "sunspider", "ares6", "jsbench"))
+json.dump({
+    "plan": plan,
+    # The workspace that deployed this slot, read back from the board's
+    # .wk-slot marker. It is not where the run happened -- that was the board --
+    # but it is the checkout whose Tools/ matches the binary that produced these
+    # numbers, which is exactly what `wk bench compare` needs to run
+    # compare-results in. Leaving it empty made every on-board run
+    # uncomparable ("cannot find a workspace to run compare-results in").
+    "workspace": g("WK_M_WS") or "",
+    "config": "wpe-release", "browser": "minibrowser-wpe",
+    "count": g("WK_M_COUNT") or "", "forced": bool(g("WK_M_FORCED")),
+    # The three axes. bench_host is "image" for the reason cmd/bench's staged
+    # record says: this path is only reachable against a booted bench system,
+    # which is checked before the run rather than asserted here.
+    "class": "cpu" if cpu else "gpu", "runner": "browser",
+    "arch": g("WK_M_KARCH") or "native", "bench_host": "image",
+    # Software compositing is never incidental on these boards -- there is
+    # either a panel or there is not -- and --force is what allows the second.
+    "software": g("WK_M_RENDERER") == "pixman",
+    "software_reason": ("no display attached; weston rdp + pixman"
+                        if g("WK_M_RENDERER") == "pixman" else ""),
+    "session_mode": g("WK_M_SESSION") or "",
+    "gpu_renderer": g("WK_M_RENDERER") or "",
+    "machine": g("WK_M_MACHINE"),
+    "system": g("WK_M_SYSTEM"),
+    # Which build directory on the board produced this, and what commit was in
+    # it. The slot alone is a label; the sha is what makes an A/B answerable
+    # after the boards have moved on to something else.
+    "build_slot": g("WK_M_SLOT"),
+    "webkit_sha": g("WK_M_SHA") or "",
+    "host": {
+        "kernel": g("WK_M_KERNEL"), "kernel_arch": g("WK_M_KARCH"),
+        "governor": g("WK_M_GOV"), "throttled": g("WK_M_THROTTLED"),
+        "root_device": g("WK_M_ROOT"),
+    },
+}, open(sys.argv[1], "w"), indent=2)
+PYEOF
+    PI_LAST_RUN=$(basename "$dir")
+    log "  recorded    $PI_LAST_RUN"
+}
+
 cmd_bench() {
     local machine="${1:-}" plan="${2:-}"; shift 2 2>/dev/null || true
-    local count="" timeout_s="" keep=""
+    local count="" timeout_s="" keep="" slot=a ab="" rounds=3
     while [ $# -gt 0 ]; do
         case "$1" in
             --count)   count="${2:-}"; shift ;;
             --timeout) timeout_s="${2:-}"; shift ;;
             --keep-session) keep=1 ;;
+            --slot)    slot="${2:-}"; pi_check_slot "$slot"; shift ;;
+            # Two slots, alternated. See pi_bench_ab. Validated here rather
+            # than in that function: the slot-presence check below would
+            # otherwise reject a malformed pair with a message about a missing
+            # build, which sends the reader to fix the wrong thing.
+            --ab)      ab="${2:-}"
+                       case "$ab" in
+                           *,*) ;;
+                           *) die "--ab takes two slot names separated by a comma, e.g. --ab a,b" ;;
+                       esac
+                       pi_check_slot "${ab%%,*}"; pi_check_slot "${ab##*,}"
+                       [ "${ab%%,*}" != "${ab##*,}" ] \
+                           || die "--ab needs two different slots (got '${ab%%,*}' twice).
+    Two runs from one build directory measure the same binary twice, which is a
+    repeatability check rather than an A/B -- '--count N' is the way to ask for
+    that."
+                       shift ;;
+            --rounds)  rounds="${2:-}"; shift ;;
             *) die "unknown option: $1" ;;
         esac
         shift
     done
     [ -n "$machine" ] && [ -n "$plan" ] \
-        || die "usage: wk pi bench <machine> <plan> [--count N] [--timeout S]"
+        || die "usage: wk pi bench <machine> <plan> [--slot NAME] [--ab A,B [--rounds N]]
+                                    [--count N] [--timeout S]"
 
     machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
 
@@ -453,11 +613,56 @@ cmd_bench() {
     A benchmark runs in bench mode or it does not run:
         wk boot $machine --system <id>   then   wk boot $machine --keep"
 
-    # 2. The build the whole thing measures.
-    m_ssh 'test -x /WebKit/WebKit/WebKitBuild/WPE/Release/bin/jsc' 2>/dev/null \
-        || die "$machine has no WebKit build at /WebKit/WebKit/WebKitBuild/WPE/Release.
+    # 1b. Is there a display? Asked here, ahead of the build check, and that
+    # ordering is deliberate: this refusal cannot be satisfied by anything the
+    # user does on the software side, so making them deploy a WebKit first only
+    # spends twenty minutes to arrive at the same answer. It is also asked
+    # before anything on the board is touched -- a refusal that arrives after
+    # netdata has been stopped and a compositor started has already changed the
+    # machine it refused to measure.
+    local connected renderer session
+    connected=$(m_ssh 'grep -l "^connected$" /sys/class/drm/card*-HDMI-*/status 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
+
+    # No display is a refusal, not a fallback, and the difference is the whole
+    # point. Compositing on the CPU does not degrade the number a little: it
+    # puts the CPU under test to work drawing the frames, so a Speedometer score
+    # taken this way is measuring the renderer as much as the engine. That is a
+    # fine thing to do deliberately -- proving the path works, comparing a
+    # change against itself -- and a ruinous thing to do by accident, because
+    # the result looks exactly like a real one and lands in the same store.
+    #
+    # This used to warn and carry on, which is the shape that loses the
+    # distinction: a warning scrolls past, and six months later the number is
+    # just a number. cmd/bench makes the same call for the same reason (a
+    # gpu-class plan on a machine with no GPU is refused there too), and
+    # --force is the one way through in both.
+    if [ -z "$connected" ] && [ -z "${WK_FORCE:-}" ]; then
+        die "$machine has no display attached, so the only session available composites
+    on the CPU (weston's RDP virtual head, pixman renderer). $plan would then be
+    measuring the software renderer as much as the browser, and the result would
+    be indistinguishable from a real one afterwards.
+
+    Attach a display, or say so on purpose:
+
+        wk pi bench $machine $plan --force
+
+    The run is recorded as software-composited either way; --force is what makes
+    that a decision rather than an accident."
+    fi
+
+    # 2. The build(s) the whole thing measures. Every slot this run will use is
+    # checked here, before the session is brought up -- an --ab that discovers
+    # its second slot is missing only after the first half has run has wasted
+    # the first half and left half an experiment in the store.
+    local _s _need="$slot"
+    [ -z "$ab" ] || _need="${ab%%,*} ${ab##*,}"
+    for _s in $_need; do
+        pi_check_slot "$_s"
+        m_ssh "test -x $(sh_quote "$(pi_build_dir "$_s")/bin/jsc")" 2>/dev/null \
+            || die "$machine has no WebKit build in slot '$_s' ($(pi_build_dir "$_s")).
     The image is the runtime and carries no browser; deploy one first:
-        wk pi deploy <workspace> $machine"
+        wk pi deploy <workspace> $machine --slot $_s"
+    done
 
     # 3. Provenance, gathered before the run rather than reconstructed after.
     local kernel gov throttled root_dev forced
@@ -476,14 +681,14 @@ cmd_bench() {
   drawing to a mode no panel negotiated. The run proves the path works; the
   number is not comparable with one taken against real hardware."
 
-    # 4. The graphical session, and which one depends on whether a display
-    # exists. netdata goes first either way -- it competes for the CPU being
-    # measured, and the board's own runbook stops it before every run.
+    # 4. The graphical session. Which one it is was already decided above; a
+    # display that is absent has ended the run by now unless --force said
+    # otherwise.
+    # netdata goes first either way -- it competes for the CPU being measured,
+    # and the board's own runbook stops it before every run.
     info "bringing up the session on $machine"
     m_ssh 'systemctl stop netdata 2>/dev/null' >/dev/null 2>&1 || true
 
-    local connected renderer session
-    connected=$(m_ssh 'grep -l "^connected$" /sys/class/drm/card*-HDMI-*/status 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
     if [ -n "$connected" ]; then
         # A real panel: weston's own service, DRM backend, GL renderer. The
         # only configuration whose number is comparable with other hardware.
@@ -549,22 +754,64 @@ cmd_bench() {
         && log "  input seat  up" \
         || warn "no fake input seat -- cog asserts at startup without one; the run may abort"
 
-    # 5. The run itself, detached on the board with its own log, because a
-    # Speedometer 3 round is minutes and an ssh channel held open for it is a
-    # channel that can drop and take the run with it.
-    local logf="/tmp/wk-bench-$plan.log" res="/tmp/wk-bench-$plan.json"
+    # 5/6. The run(s). One slot, or two alternated.
+    if [ -n "$ab" ]; then
+        pi_bench_ab "$ab" "$rounds"
+        return $?
+    fi
+    pi_bench_once "$slot" || die "benchmark failed on $machine"
+    m_ssh "cat /tmp/wk-bench-$plan-$slot.json"
+}
+
+# One run, from a named slot, waited on and recorded.
+#
+# Split out of cmd_bench so that --ab can call it repeatedly against a session
+# that was brought up once. That is not a refactor for tidiness: bringing the
+# compositor down and up between the halves of an A/B would put a fresh
+# weston, a fresh seat and a cold page cache on one side of the comparison and
+# not the other.
+pi_bench_once() {
+    local slot="$1" bdir; bdir=$(pi_build_dir "$slot")
+
+    m_ssh "test -x $(sh_quote "$bdir/bin/jsc")" 2>/dev/null \
+        || die "$machine has no WebKit build in slot '$slot' ($bdir).
+    Deploy one first:
+        wk pi deploy <workspace> $machine${slot:+ --slot $slot}"
+
+    # Detached on the board with its own log, because a Speedometer 3 round is
+    # minutes and an ssh channel held open for it is a channel that can drop
+    # and take the run with it. Log and result are named per slot so two halves
+    # of an A/B cannot overwrite each other's evidence.
+    local logf="/tmp/wk-bench-$plan-$slot.log" res="/tmp/wk-bench-$plan-$slot.json"
     local args="--plan $(sh_quote "$plan") --browser minibrowser-wpe --platform linux"
-    args="$args --build-directory /WebKit/WebKit/WebKitBuild/WPE/Release"
+    args="$args --build-directory $(sh_quote "$bdir")"
     args="$args --output-file $(sh_quote "$res")"
     [ -n "$count" ] && args="$args --count $(sh_quote "$count")"
 
-    info "running $plan on $machine (detached; log $logf)"
+    info "running $plan on $machine from slot '$slot' (detached; log $logf)"
+    # The braces and the outer redirection are what make this detached, and
+    # without them it only looked it.
+    #
+    # `setsid ... >log 2>&1 &` redirects the *child*; the backgrounded compound
+    # still holds the ssh channel's own stdout and stderr, and sshd keeps the
+    # channel open until every inheritor of those closes them. Measured on the
+    # rpi4: a 25-second job returned after 26.4 seconds, not the 3 the `sleep 3`
+    # asks for. So the channel was held for the whole of a Speedometer round --
+    # precisely the thing the comment above says detaching avoids, and a
+    # dropped ssh really would have taken the run with it.
+    #
+    # Worse, it made the wait loop below decorative: m_ssh returned only once
+    # the run was over, so the first poll always succeeded, every run recorded
+    # "result after 0s" whatever it took, and --timeout and the early crash
+    # check were unreachable code. Redirecting the group's own stdio closes the
+    # last handle and the call returns in 3.5s.
     m_ssh "cd /WebKit/WebKit && rm -f $(sh_quote "$logf") $(sh_quote "$res") &&
-        setsid bash -c '$(pi_bench_env) && exec Tools/Scripts/run-benchmark $args' \
-            </dev/null >$(sh_quote "$logf") 2>&1 & sleep 3; echo started" >/dev/null 2>&1 \
+        { setsid bash -c '$(pi_bench_env "$bdir") && exec Tools/Scripts/run-benchmark $args' \
+            </dev/null >$(sh_quote "$logf") 2>&1 & } </dev/null >/dev/null 2>&1
+        sleep 3; echo started" >/dev/null 2>&1 \
         || die "could not start the benchmark on $machine"
 
-    # 6. Wait on the result file, not on a process: run-benchmark writes it when
+    # Wait on the result file, not on a process: run-benchmark writes it when
     # it has a score, which is the only completion signal that means what it
     # says. A vanished process could be a crash, and a quiet log could be a
     # long subtest.
@@ -572,20 +819,112 @@ cmd_bench() {
     while [ "$waited" -lt "$cap" ]; do
         if m_ssh "test -s $(sh_quote "$res")" 2>/dev/null; then
             log "  result      after ${waited}s"
-            m_ssh "cat $(sh_quote "$res")"
+            pi_bench_record "$machine" "$plan" "$sysid" "$kernel" "$gov" \
+                "$throttled" "$root_dev" "$renderer" "$session" "$count" \
+                "$logf" "$res" "$slot" "$(pi_slot_sha "$bdir")" "$(pi_slot_ws "$bdir")"
             return 0
         fi
         # A crash is worth reporting early rather than at the timeout.
         if m_ssh "grep -qiE 'Traceback|Crash!|cannot open display|assertion failed' $(sh_quote "$logf")" 2>/dev/null; then
-            warn "the run reported a failure; its log follows"
+            warn "the run from slot '$slot' reported a failure; its log follows"
             m_ssh "tail -30 $(sh_quote "$logf")"
-            die "benchmark failed on $machine"
+            return 1
         fi
         sleep 20; waited=$((waited + 20))
     done
-    warn "no result after ${cap}s -- the run may still be going"
+    warn "no result from slot '$slot' after ${cap}s -- the run may still be going"
     m_ssh "tail -20 $(sh_quote "$logf")"
-    die "timed out waiting for $plan on $machine"
+    return 1
+}
+
+# What a slot holds, written by `wk pi deploy`.
+pi_slot_sha() {
+    m_ssh "sed -n 's/^sha=//p' $(sh_quote "$1/.wk-slot") 2>/dev/null" 2>/dev/null \
+        | tr -d '\r' | head -1
+}
+pi_slot_ws() {
+    m_ssh "sed -n 's/^workspace=//p' $(sh_quote "$1/.wk-slot") 2>/dev/null" 2>/dev/null \
+        | tr -d '\r' | head -1
+}
+
+# Interleaved A/B: A B A B ..., not AAA then BBB.
+#
+# The order is the whole point. These boards drift -- they warm up, the SoC
+# throttles, the SD card's cache state changes -- and every one of those drifts
+# monotonically over the tens of minutes an A/B takes. Run all of A and then
+# all of B and the drift lands entirely on B, where it is indistinguishable
+# from an effect of the change. Alternating spreads it across both arms, which
+# is the standard answer and the reason this is a verb rather than advice in a
+# document.
+#
+# Each half is recorded as its own run, so the output is 2N runs in the store
+# and the statistics are `wk bench compare`'s job, not this function's --
+# compare-results already does Welch with FDR correction across subtests, and
+# reimplementing that here would be a second, worse copy.
+pi_bench_ab() {
+    local spec="$1" n="$2" a b i
+    # The pair was validated at parse time (cmd_bench); only the count is new.
+    a="${spec%%,*}"; b="${spec##*,}"
+    case "$n" in ''|*[!0-9]*) die "--rounds takes a number (got '$n')" ;; esac
+    [ "$n" -ge 1 ] || die "--rounds needs to be at least 1"
+
+    log "interleaving $n round(s) of $a vs $b -- $((n * 2)) runs"
+    log "  alternated rather than blocked, so thermal drift lands on both arms"
+
+    # Only *paired* rounds are compared, and that is the whole resilience
+    # design. A round where one arm crashed and the other did not is not half a
+    # data point -- including the survivor puts one extra sample on one arm,
+    # and since a crash is usually a property of the build being crashed (OOM
+    # under a heavier binary, say) the surviving arm is exactly the one that
+    # would bias the answer. So a broken round is dropped from the comparison
+    # whole.
+    #
+    # Dropped, not deleted: both records stay in the store. The run that
+    # succeeded is still evidence, and an investigation into why its partner
+    # died starts from it.
+    local a_runs="" b_runs="" ra rb kept=0 lost=0
+    i=1
+    while [ "$i" -le "$n" ]; do
+        log ""
+        log "round $i/$n -- slot $a"
+        ra=""; rb=""
+        if pi_bench_once "$a"; then ra="$PI_LAST_RUN"; fi
+        log "round $i/$n -- slot $b"
+        if pi_bench_once "$b"; then rb="$PI_LAST_RUN"; fi
+
+        if [ -n "$ra" ] && [ -n "$rb" ]; then
+            a_runs="${a_runs:+$a_runs,}$ra"
+            b_runs="${b_runs:+$b_runs,}$rb"
+            kept=$((kept + 1))
+        else
+            lost=$((lost + 1))
+            warn "round $i produced ${ra:+a }${rb:+b }only -- dropped from the comparison"
+            # A board that has started failing usually keeps failing, and the
+            # next round costs the same minutes. Carrying on is still right --
+            # a transient OOM is real and recoverable -- but say how it is
+            # going so a run that is quietly losing every round is visible
+            # while there is still time to stop it.
+            [ "$lost" -lt 3 ] || { warn "three rounds lost; stopping early"; break; }
+        fi
+        i=$((i + 1))
+    done
+
+    log ""
+    log "$kept round(s) usable, $lost dropped"
+    [ "$kept" -ge 1 ] || die "no round produced both halves; nothing to compare.
+    The individual runs that did finish are in the store ('wk bench ls')."
+
+    # The comparison itself is compare-results' job and nobody else's. It is
+    # WebKit's own tool, it does Welch with FDR correction across subtests, and
+    # it merges the several JSONs of one arm on its own (`-a` takes nargs='+').
+    # Anything computed here instead would be a second implementation of that,
+    # differing from the one every other WebKit result is judged by.
+    log ""
+    log "comparing with compare-results: $kept run(s) per arm, merged"
+    log "  a = slot $a   b = slot $b"
+    "$WK_ROOT/wk" bench compare "$a_runs" "$b_runs" \
+        || warn "compare-results did not complete; the runs are recorded and can be
+  compared by hand:  wk bench compare $a_runs $b_runs"
 }
 
 # --- wk pi boot-order ----------------------------------------------------------

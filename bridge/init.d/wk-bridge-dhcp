@@ -14,6 +14,29 @@ respawn_delay=5
 respawn_max=0
 
 depend() {
-    need net
-    after wk-bridge-usb-host
+    # `after net`, not `need net`: be listening as early as there is anything to
+    # listen with.
+    #
+    # Nothing here needs `net` to have finished. `bind-dynamic` is exactly the
+    # option that lets dnsmasq start before its interface exists and bind when
+    # it appears -- checked on the phone rather than assumed, with a throwaway
+    # instance on a nonexistent interface, which starts and stays up. The DNS
+    # half re-reads /etc/resolv.conf on change by inotify, so it does not need
+    # the resolver settled either.
+    #
+    # What this does *not* do is fix the delay it was first written for, and the
+    # honest version is worth keeping. After a reboot of the phone the board's
+    # segment address took over two minutes to come back, and the reason is that
+    # the board asks for DHCP when the *kernel* enumerates the adapter -- seconds
+    # into the boot, before any of this phone's userspace can possibly answer --
+    # and then backs off. Measured 2026-08-22: its DHCPDISCOVER landed 134 s
+    # after boot, and starting dnsmasq earlier moved that by nothing, because
+    # no userspace start is early enough. The thing that actually shortens it is
+    # wk-bridge-netwatch flapping the link once the server *is* up, which makes
+    # a backed-off client ask again immediately.
+    #
+    # One side effect, so it does not have to be re-discovered: starting this
+    # early can put dnsmasq ahead of syslog, and its own startup lines then go
+    # nowhere. The DHCP exchanges are logged normally; only the banner is lost.
+    after net wk-bridge-usb-host
 }

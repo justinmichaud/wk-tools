@@ -219,6 +219,35 @@ disk_write_bmap() {
     m_ssh "cat > $remote/disk.wic.xz" < "$wic" || die "could not copy the image to $MACH_NAME"
     m_ssh "cat > $remote/disk.bmap"   < "$bmap" || die "could not copy the block map to $MACH_NAME"
 
+    # Zero the image's extent first, and this is a correctness step rather than
+    # hygiene.
+    #
+    # bmaptool writes only the mapped blocks; the unmapped ones keep whatever the
+    # destination already held. The note on disk_verify_dd below says so, and the
+    # note in cmd/sysimage's refresh_fast_path argues it is safe because a hole is
+    # "filesystem free space that was never written". That argument holds for a
+    # blank card and fails for a reused one, because free space is not
+    # don't-care: on FAT, a free directory slot and a free FAT entry are *defined*
+    # as zeros, so leaving a previous filesystem's bytes there does not leave
+    # unused space, it leaves entries. Measured 2026-08-22 writing an rpi3 image
+    # onto a card that had held a PinePhone system: 100 MB of the 130 MB boot
+    # partition went unwritten, the root directory region among it, and the
+    # result mounted with garbage entries beside the real ones, an I/O error on
+    # readdir, and fsck reporting files with start clusters past the end of the
+    # partition. Every block bmaptool did write was correct and checksummed --
+    # which is exactly why nothing caught it. The map's checksums cover what was
+    # written, never what was not, and the bmap path has no read-back check.
+    #
+    # Only the image's own extent, not the whole card: what lies past it is not
+    # this image's business, and on a 64 GB card holding a 3.3 GB image, zeroing
+    # the rest would cost far more than the write.
+    local bytes
+    bytes=$(file_bytes "$(image_disk "$id")")
+    info "zeroing the first $(human_bytes "$bytes") of $dev (bmaptool skips holes; a reused disk keeps its old bytes there)"
+    m_ssh "sudo blkdiscard -z --offset 0 --length $bytes $(sh_quote "$dev") 2>/dev/null \
+           || sudo dd if=/dev/zero of=$(sh_quote "$dev") bs=4M count=$(( (bytes + 4194303) / 4194304 )) conv=fsync status=none" \
+        || die "could not zero $dev on $MACH_NAME before writing"
+
     info "writing with bmaptool -- mapped blocks only, each checksummed against the map"
     m_ssh "sudo bmaptool copy --bmap $remote/disk.bmap $remote/disk.wic.xz $(sh_quote "$dev")" \
         || die "bmaptool failed writing to $dev on $MACH_NAME"
@@ -244,12 +273,18 @@ disk_write_dd() {
 
 # Read back what was written and compare hashes.
 #
-# Only valid after a dd write. After a bmap write it would *always* fail, and
-# that is not a bug to work around: bmaptool deliberately does not write the
-# unmapped blocks, so those regions of the disk still hold whatever they held
-# before, while the image has zeroes there. Comparing the whole span compares
-# bytes nobody wrote. bmaptool checksums every block it does write, against the
-# map, as it writes -- which is a stronger check than this one, not a weaker.
+# Only valid after a dd write, and the reason is worth stating carefully now
+# that disk_write_bmap zeros first.
+#
+# It used to be that a bmap write left the unmapped regions holding whatever
+# they held before, so comparing the whole span compared bytes nobody wrote.
+# That is what the zeroing fixed. What has not changed is that bmaptool's
+# checksums cover only the blocks it writes -- a strictly weaker claim than a
+# read-back, not a stronger one, and believing otherwise is what let a corrupt
+# card through on 2026-08-22. A read-back over the bmap path is now meaningful
+# whenever the image's unmapped regions really are holes; that is true of every
+# image refresh_fast_path re-derived, and not guaranteed of a map bitbake wrote
+# from free-space data, so it is not switched on here blindly.
 disk_verify_dd() {
     local img="$1" dev="$2" bytes local_sha remote_sha
     bytes=$(file_bytes "$img")

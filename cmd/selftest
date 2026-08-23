@@ -30,6 +30,22 @@
 #
 #   0  every check passed (skips are not failures)
 #   1  something failed, or the runner and the plan have drifted apart
+#
+# One rule for anyone adding a check here, and it is the same one at the top of
+# bridge/bin/wk-bridge-healthcheck: do **not** write `something | grep -q ...`.
+# grep -q exits at the first match, which can SIGPIPE the producer, and
+# `pipefail` below then turns a *successful* match into a failed pipeline. It is
+# invisible while the text is short and it appears as the text grows: this file
+# had 34 of them, and the day docs/help/bridge.txt reached ~29 KB one of them
+# started failing 24 times in 80 runs -- reported as a broken help topic, which
+# it was not (2026-08-22). Use a here-string instead: `grep -q PATTERN <<<"$out"`
+# reads a file rather than a pipe, so there is no producer to signal. Measured
+# on the same text: 0 failures in 80.
+#
+# The rest of the tree still has instances of the pipe form (image/pmos-build.sh,
+# cmd/sysimage, host/linux/rpi5/rpi5-setup.sh and others). They are latent for
+# the same reason this one was, and sweeping them is its own job -- not silently
+# half-done here.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -195,11 +211,84 @@ chk_bridge_ls() {
     local out name
     out=$("$WK" bridge ls 2>&1) || { echo "exit $?: $out"; return 1; }
     for name in $(cd "$WK_ROOT/bridge/hosts" && ls *.conf 2>/dev/null | sed 's/\.conf$//'); do
-        printf '%s\n' "$out" | grep -q "^$name " \
+        grep -q "^$name " <<<"$out" \
             || { echo "$name is declared but not listed"; return 1; }
     done
-    printf '%s\n' "$out" | grep -qE 'unreachable|bare|provisioned' \
+    grep -qE 'unreachable|bare|provisioned' <<<"$out" \
         || { echo "no state column in the listing"; return 1; }
+}
+
+# A kernel config delta has to be declared completely, and that is checkable
+# here for nothing.
+#
+# `PMO_KCONFIG` makes image/pmos-build.sh patch an option into a pmaports
+# kernel aport, which is the one place this repo edits somebody else's tree.
+# Everything about it fails *late*: a delta with no aport to apply it to, an
+# aport that does not exist in the channel, or a malformed assignment all stop
+# a build that has already spent minutes installing a chroot. The declaration
+# is config, so it can be read here instead.
+chk_bridge_kconfig_delta_is_declarable() {
+    local prof bad="" opt
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/image/profiles.sh"
+    for prof in bridge-pinephone bridge-librem5; do
+        ( image_profile_load "$prof" >/dev/null 2>&1 || exit 0
+          [ -n "${PMO_KCONFIG:-}" ] || exit 0
+          [ -n "${PMO_KERNEL_APORT:-}" ] \
+              || { echo "  $prof: PMO_KCONFIG with no PMO_KERNEL_APORT to apply it to"; exit 1; }
+          # A path inside pmaports, so it must look like one rather than like a
+          # bare package name -- `pmbootstrap checksum` takes the basename and
+          # the edit takes the path, and only one of those survives a typo.
+          case "$PMO_KERNEL_APORT" in
+              */*) ;;
+              *) echo "  $prof: PMO_KERNEL_APORT '$PMO_KERNEL_APORT' is not a path in pmaports"; exit 1 ;;
+          esac
+          for opt in $PMO_KCONFIG; do
+              case "$opt" in
+                  CONFIG_*=y|CONFIG_*=m|CONFIG_*=n) ;;
+                  *) echo "  $prof: '$opt' is not CONFIG_<NAME>=y|m|n"; exit 1 ;;
+              esac
+          done
+        ) || bad="$bad $prof"
+    done
+    [ -z "$bad" ] || { echo "kernel config deltas that would fail mid-build:$bad"; return 1; }
+}
+
+# An unknown host key must not read as an absent phone.
+#
+# This is the bug that cost the opening of 2026-08-22: `wk bridge ls` probed
+# with plain ssh under BatchMode, which for an unknown key is *refuse* rather
+# than ask, so both bridges reported `unreachable` while one of them was up,
+# provisioned, healthy and one ssh away. A reflash changes the key, so this is
+# the normal state of a newly installed bridge rather than an edge case.
+#
+# The two inputs are the messages ssh actually printed, captured from a real
+# refusal against the phone (a bogus key in a temporary known_hosts) rather
+# than written from memory -- which is the only way this test is worth
+# anything, since it is the exact strings that make or break the match.
+chk_bridge_unknown_key_is_not_absence() {
+    local got
+    eval "$(sed -n '/^_ls_classify()/,/^}/p' "$WK_ROOT/cmd/bridge")"
+    command -v _ls_classify >/dev/null 2>&1 \
+        || { echo "_ls_classify is no longer liftable out of cmd/bridge"; return 1; }
+
+    got=$(_ls_classify "Host key verification failed.")
+    [ "$got" = key-changed ] || { echo "a refused key classified as '$got'"; return 1; }
+
+    got=$(_ls_classify "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@
+Host key for tailnet-bridge-generic has changed and you have requested strict checking.
+Host key verification failed.")
+    [ "$got" = key-changed ] || { echo "a changed key classified as '$got'"; return 1; }
+
+    got=$(_ls_classify "ssh: connect to host x port 22: No route to host")
+    [ "$got" = unreachable ] || { echo "an unroutable host classified as '$got'"; return 1; }
+
+    # And the probe must ask ssh to accept a key it has never seen, or the
+    # first case above is what every fresh phone reports forever.
+    local probe
+    probe=$(sed -n '/^_ls_probe()/,/^}/p' "$WK_ROOT/cmd/bridge")
+    grep -q 'StrictHostKeyChecking=accept-new' <<<"$probe" \
+        || { echo "_ls_probe does not pass accept-new -- an unflashed-looking phone is the result"; return 1; }
 }
 
 # --dry-run resolves the conf, the device table and every derived value, and
@@ -231,13 +320,13 @@ chk_bridge_provision_resolves() {
         if out=$("$WK" bridge provision "$name" --dry-run 2>&1); then
             # A dry run that resolved nothing would still exit 0, so each value
             # that cannot be defaulted is checked for rather than assumed.
-            printf '%s\n' "$out" | grep -q '^  profile:  bridge-' \
+            grep -q '^  profile:  bridge-' <<<"$out" \
                 || bad="$bad
   $name: no profile derived -- no pmos profile in image/profiles.sh sets PMO_BRIDGE=$name"
-            printf '%s\n' "$out" | grep -q '^  card:     [a-z0-9-]*:/dev/' \
+            grep -q '^  card:     [a-z0-9-]*:/dev/' <<<"$out" \
                 || bad="$bad
   $name: no card -- its conf sets no BR_CARD, so provision cannot write one"
-            printf '%s\n' "$out" | grep -q '^  onto:     the phone.s internal storage, through recovery-' \
+            grep -q '^  onto:     the phone.s internal storage, through recovery-' <<<"$out" \
                 || bad="$bad
   $name: resolved without naming the service image that reaches internal storage"
         else
@@ -320,7 +409,7 @@ chk_bridge_pmos_profiles_declare_bands() {
         out=$("$WK" sysimage build "$prof" --dry-run 2>&1) \
             || { bad="$bad
   $prof: --dry-run does not resolve: $out"; continue; }
-        printf '%s\n' "$out" | grep -q '^  radio ' \
+        grep -q '^  radio ' <<<"$out" \
             || bad="$bad
   $prof: its dry run names no radio bands, so PMO_WIFI_BANDS is unset and the
       uplink-band guard would pass anything for this phone"
@@ -455,9 +544,9 @@ chk_bridge_image_carries_role_packages() {
 chk_bridge_help_topic() {
     local out
     out=$("$WK" help bridge 2>&1) || { echo "exit $?"; return 1; }
-    printf '%s\n' "$out" | grep -qi 'postmarketos' \
+    grep -qi 'postmarketos' <<<"$out" \
         || { echo "the topic never mentions postmarketOS, which is the part no command does"; return 1; }
-    printf '%s\n' "$out" | grep -q 'pine64-pinephone' \
+    grep -q 'pine64-pinephone' <<<"$out" \
         || { echo "no pmOS device name in the topic"; return 1; }
 }
 
@@ -466,7 +555,7 @@ chk_bridge_help_topic() {
 chk_bridge_host_only() {
     local out before after
     out=$(as_workspace bridge ls 2>&1) && { echo "not refused inside a workspace"; return 1; }
-    printf '%s\n' "$out" | grep -q 'acts on a host' \
+    grep -q 'acts on a host' <<<"$out" \
         || { echo "refused, but not as a host-only command: $out"; return 1; }
 
     have podman || return 0
@@ -484,7 +573,7 @@ chk_help_commands() {
     for c in "$WK_ROOT"/cmd/*; do
         [ -f "$c" ] && [ -x "$c" ] || continue
         n=$(basename "$c")
-        printf '%s\n' "$help" | grep -qE "^  $n( |\$)" || missing="$missing $n"
+        grep -qE "^  $n( |\$)" <<<"$help" || missing="$missing $n"
     done
     [ -z "$missing" ] || { echo "not listed by 'wk help':$missing"; return 1; }
 }
@@ -492,8 +581,8 @@ chk_help_commands() {
 chk_build_list() {
     local out
     out=$("$WK" build --list 2>&1) || { echo "exit $?: $out"; return 1; }
-    printf '%s\n' "$out" | grep -q 'jsc-release' || { echo "no jsc-release in the table"; return 1; }
-    printf '%s\n' "$out" | grep -q 'mac-release' || { echo "no mac-release in the table"; return 1; }
+    grep -q 'jsc-release' <<<"$out" || { echo "no jsc-release in the table"; return 1; }
+    grep -q 'mac-release' <<<"$out" || { echo "no mac-release in the table"; return 1; }
 }
 
 # The table is a static lookup; it used to boot a two-minute VM to print it,
@@ -589,14 +678,14 @@ chk_build_arg_forms() {
 
     rc=0; out=$(as_workspace build jsc-release --dry-run 2>&1) || rc=$?
     [ "$rc" -eq 0 ] || { echo "in-workspace 'wk build <config>' failed: $out"; return 1; }
-    printf '%s\n' "$out" | grep -q 'workspace: selftest-ws' \
+    grep -q 'workspace: selftest-ws' <<<"$out" \
         || { echo "in-workspace form did not resolve this workspace:"; echo "$out"; return 1; }
 
     # The host form typed inside: read literally it would build this workspace
     # and report the config as unknown, explaining neither half.
     rc=0; out=$(as_workspace build otherws jsc-release --dry-run 2>&1) || rc=$?
     [ "$rc" -ne 0 ] || { echo "'wk build <ws> <config>' was accepted inside a workspace"; return 1; }
-    printf '%s\n' "$out" | grep -q 'no name' \
+    grep -q 'no name' <<<"$out" \
         || { echo "the refusal does not name the in-workspace form: $out"; return 1; }
 
     # And the workspace form typed outside: one bare argument is a workspace
@@ -610,7 +699,7 @@ chk_build_arg_forms() {
     if ! in_workspace; then
         rc=0; out=$(WK_IN_VM=1 "$WK" build jsc-release 2>&1) || rc=$?
         [ "$rc" -eq 2 ] || { echo "host 'wk build <config>' exited $rc, expected 2: $out"; return 1; }
-        printf '%s\n' "$out" | grep -q 'usage: wk build <workspace> <config>' \
+        grep -q 'usage: wk build <workspace> <config>' <<<"$out" \
             || { echo "the usage line does not show the host form: $out"; return 1; }
     fi
 }
@@ -621,7 +710,7 @@ chk_verify_refuses_inside() {
     local out rc=0
     out=$(as_workspace verify selftest-ws 2>&1) || rc=$?
     [ "$rc" -ne 0 ] || { echo "wk verify succeeded inside a workspace"; return 1; }
-    printf '%s\n' "$out" | grep -q 'only means anything on the host' \
+    grep -q 'only means anything on the host' <<<"$out" \
         || { echo "refused, but not for the stated reason: $out"; return 1; }
 }
 
@@ -634,7 +723,7 @@ chk_host_only_refused_inside() {
     for c in sync gc vm pi session quiesce; do
         rc=0; out=$(as_workspace "$c" 2>&1) || rc=$?
         [ "$rc" -ne 0 ] || { echo "'wk $c' was accepted inside a workspace"; return 1; }
-        printf '%s\n' "$out" | grep -q "acts on a host" \
+        grep -q "acts on a host" <<<"$out" \
             || { echo "'wk $c' refused for some other reason: $out"; return 1; }
     done
 }
@@ -649,8 +738,8 @@ chk_explain_every_command() {
         [ -f "$c" ] && [ -x "$c" ] || continue
         n=$(basename "$c")
         out=$("$WK" "$n" --explain 2>&1) || { bad="$bad $n(exit)"; continue; }
-        printf '%s\n' "$out" | grep -q '^  changes things: ' || bad="$bad $n(no-role)"
-        printf '%s\n' "$out" | grep -q '^what it does' || bad="$bad $n(no-header)"
+        grep -q '^  changes things: ' <<<"$out" || bad="$bad $n(no-role)"
+        grep -q '^what it does' <<<"$out" || bad="$bad $n(no-header)"
         # Three lines of prose is not much to ask of a file's own header.
         [ "$(printf '%s\n' "$out" | sed -n '/^what it does/,$p' | wc -l)" -ge 4 ] \
             || bad="$bad $n(empty-header)"
@@ -665,14 +754,14 @@ chk_sudo_status_never_prompts() {
     local out rc=0
     out=$("$WK" sudo status </dev/null 2>&1) || rc=$?
     case "$rc" in 0|1) ;; *) echo "exit $rc: $out"; return 1 ;; esac
-    printf '%s\n' "$out" | grep -qi 'password' || { echo "said nothing about passwords: $out"; return 1; }
+    grep -qi 'password' <<<"$out" || { echo "said nothing about passwords: $out"; return 1; }
 }
 
 chk_unknown_command() {
     local out rc=0
     out=$("$WK" nosuchcommand 2>&1) || rc=$?
     [ "$rc" -eq 2 ] || { echo "exited $rc, expected 2"; return 1; }
-    printf '%s\n' "$out" | grep -q 'unknown command' || { echo "no 'unknown command': $out"; return 1; }
+    grep -q 'unknown command' <<<"$out" || { echo "no 'unknown command': $out"; return 1; }
 }
 
 # A typo'd target must not be mistaken for a machine, and the error is where
@@ -681,7 +770,7 @@ chk_unknown_target() {
     local out rc=0
     out=$(WK_TARGET=nosuchtarget-selftest "$WK" ls 2>&1) || rc=$?
     [ "$rc" -ne 0 ] || { echo "an unknown target was accepted"; return 1; }
-    printf '%s\n' "$out" | grep -q 'targets/nosuchtarget-selftest.conf' \
+    grep -q 'targets/nosuchtarget-selftest.conf' <<<"$out" \
         || { echo "the error does not name the conf to write: $out"; return 1; }
 }
 
@@ -847,26 +936,26 @@ chk_profile_resolves() {
     # appended at the end turns the profiler off and passes the word on), and
     # DYLD_FRAMEWORK_PATH rather than LD_LIBRARY_PATH.
     out=$(as_workspace profile --config mac-release --dry-run bench.js 2>&1) || { echo "exit: $out"; return 1; }
-    printf '%s\n' "$out" | grep -q 'DYLD_FRAMEWORK_PATH' || bad="$bad no-dyld"
-    printf '%s\n' "$out" | grep -qE '/jsc.* --sample.* .?bench\.js' || bad="$bad flags-after-script"
+    grep -q 'DYLD_FRAMEWORK_PATH' <<<"$out" || bad="$bad no-dyld"
+    grep -qE '/jsc.* --sample.* .?bench\.js' <<<"$out" || bad="$bad flags-after-script"
 
     # A CMake port from the same workspace: the other loader variable, and
     # samply rather than xctrace under --mode native.
     out=$(as_workspace profile --config wpe-release --mode native --dry-run bench.js 2>&1) \
         || { echo "exit: $out"; return 1; }
-    printf '%s\n' "$out" | grep -q 'LD_LIBRARY_PATH' || bad="$bad no-ld-library-path"
-    printf '%s\n' "$out" | grep -q 'samply record' || bad="$bad native-is-not-samply"
+    grep -q 'LD_LIBRARY_PATH' <<<"$out" || bad="$bad no-ld-library-path"
+    grep -q 'samply record' <<<"$out" || bad="$bad native-is-not-samply"
 
     # And the Apple port picks Instruments for the same word.
     out=$(as_workspace profile --config mac-release --mode native --dry-run bench.js 2>&1) \
         || { echo "exit: $out"; return 1; }
-    printf '%s\n' "$out" | grep -q 'xctrace record' || bad="$bad native-is-not-xctrace"
+    grep -q 'xctrace record' <<<"$out" || bad="$bad native-is-not-xctrace"
 
     # Every mode either resolves or refuses with a reason; none may traceback.
     local m
     for m in sampling bytecode samply instruments heaptrack massif; do
         out=$(as_workspace profile --mode "$m" --dry-run bench.js 2>&1) || {
-            printf '%s\n' "$out" | grep -q '^error:' || bad="$bad $m(no-reason)"
+            grep -q '^error:' <<<"$out" || bad="$bad $m(no-reason)"
         }
     done
 
@@ -881,7 +970,7 @@ chk_hands_on_arming() {
     local out rc=0
     out=$(WK_BENCH_VOLUME="wk-selftest-no-such-volume" "$WK" boot mbp --status 2>&1) || rc=$?
     [ "$rc" -eq 0 ] || { echo "wk boot mbp --status exited $rc: $out"; return 1; }
-    printf '%s\n' "$out" | grep -q 'not attached' \
+    grep -q 'not attached' <<<"$out" \
         || { echo "status did not notice the missing volume: $out"; return 1; }
 
     rc=0
@@ -915,14 +1004,14 @@ chk_bench_role_required() {
     rc=0
     out=$(WK_BENCH_ROOT="$TMP/bench" "$WK" bench staged --plan jetstream2.2 --force 2>&1) || rc=$?
     [ "$rc" -ne 0 ] || { echo "--force ran a benchmark in host mode"; return 1; }
-    printf '%s\n' "$out" | grep -q 'host mode' \
+    grep -q 'host mode' <<<"$out" \
         || { echo "refused for some other reason: $out"; return 1; }
 
     # A dry run still describes it: that is a question, not a measurement.
     rc=0
     out=$(WK_BENCH_ROOT="$TMP/bench" "$WK" bench staged --plan jetstream2.2 --dry-run 2>&1) || rc=$?
     [ "$rc" -eq 0 ] || { echo "--dry-run refused as well: $out"; return 1; }
-    printf '%s\n' "$out" | grep -q -- '--plan jetstream2.2 --browser minibrowser --platform osx' \
+    grep -q -- '--plan jetstream2.2 --browser minibrowser --platform osx' <<<"$out" \
         || { echo "the dry run does not show the command it would run: $out"; return 1; }
 }
 
@@ -1185,7 +1274,7 @@ chk_push_keys_not_copied() {
     [ "$(_machine_state)" = running ] || {
         echo "the podman machine is stopped; the keys live in its store"; return 77; }
     out=$("$WK" push status 2>&1) || true
-    printf '%s\n' "$out" | grep -q 'hold their own copy' && {
+    grep -q 'hold their own copy' <<<"$out" && {
         echo "$out"; return 1; }
     return 0
 }
@@ -1286,6 +1375,10 @@ chk_machine_registry() {
     # driver error at arming time, on the machine it matters on.
     local f n bad=""
     # shellcheck disable=SC1090
+    . "$WK_ROOT/lib/image.sh"
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/image/profiles.sh"
+    # shellcheck disable=SC1090
     . "$WK_ROOT/boot/machines.sh"
     for f in "$WK_ROOT"/boot/machines/*.conf; do
         [ -f "$f" ] || { echo "no machine confs at all"; return 1; }
@@ -1296,6 +1389,32 @@ chk_machine_registry() {
           case "$MACH_ROLE" in workstation|bench-device) ;; *) echo "  $n: role '$MACH_ROLE' is not in the vocabulary"; exit 1 ;; esac
           case "$MACH_OS" in any|macos|linux) ;; *) echo "  $n: os '$MACH_OS' is not any|macos|linux"; exit 1 ;; esac
           [ -n "$MACH_PROFILE" ] || { echo "  $n: no MACH_PROFILE"; exit 1; }
+          # And, where wk builds the system, it must *resolve* rather than
+          # merely be spelt. Non-empty was the whole test until the rpi3's
+          # entry was found naming `perf-linux-rpi3` -- a profile
+          # image/profiles.sh refuses by name, because Ubuntu publishes no
+          # armhf raspi image to seed one from. So the fleet's only 32-bit
+          # board pointed at a system that could never be built, and nothing
+          # said so until someone tried to build it. A machine whose default
+          # system does not exist is not a machine wk can reproduce from this
+          # repo, which is the cattle rule's whole claim.
+          #
+          # Except on macOS, and not as an exemption of convenience: a Mac's
+          # bench system is a macOS *install*, personalised by the machine's
+          # own secure storage, and `wk sysimage build` cannot produce one
+          # (docs/HANDOFF-mac-perf-mode.md). `perf-macos-tolken` is therefore
+          # vocabulary -- the name a run records -- and not a build recipe, so
+          # asking image/profiles.sh to resolve it is asking the wrong
+          # question. MACH_OS is what already draws that line.
+          if [ "$MACH_OS" != macos ]; then
+              # A subshell of its own because image_profile_load refuses by
+              # `die`, which exits rather than returning -- so without one it
+              # takes this check's own shell down and the `||` never runs,
+              # leaving the machine named as bad with no reason beside it. The
+              # IMG_* it would set are not wanted here; only the verdict is.
+              ( image_profile_load "$MACH_PROFILE" ) >/dev/null 2>&1 \
+                  || { echo "  $n: MACH_PROFILE '$MACH_PROFILE' does not resolve"; exit 1; }
+          fi
           [ -n "$MACH_NOTE" ] || { echo "  $n: no MACH_NOTE"; exit 1; }
         ) || bad="$bad $n"
     done
@@ -1406,7 +1525,9 @@ chk_piusb_type_byte_roundtrips() {
     # for only where it exists -- the byte-level round trip above is the part
     # that has to hold everywhere, and it does.
     if have sfdisk; then
-        sfdisk -l "$img" 2>/dev/null | grep -q 'FAT32' \
+        local table
+        table=$(sfdisk -l "$img" 2>/dev/null || true)
+        grep -q 'FAT32' <<<"$table" \
             || { echo "sfdisk no longer reads the round-tripped table as FAT32"; return 1; }
     fi
 }
@@ -1478,6 +1599,8 @@ if want quick; then
     check "one byte of the MBR at offset 450"                             chk_piusb_type_byte_roundtrips
     check "contains no single quote"                                      chk_self_disarm_sh_is_single_quote_free
     check "lists every declared bridge"                                   chk_bridge_ls
+    check "an unknown host key is not reported as an absent phone"         chk_bridge_unknown_key_is_not_absence
+    check "a kernel config delta names an aport and well-formed options"    chk_bridge_kconfig_delta_is_declarable
     check "loads and names a device"                                      chk_bridge_confs_resolve
     check "is the inverse of"                                             chk_bridge_rm_is_inverse
     check "covers the half no command does"                               chk_bridge_help_topic

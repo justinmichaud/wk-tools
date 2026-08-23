@@ -129,9 +129,36 @@ Host tolken-bench
 # hand-written `Host rpi4` a mistake ./setup can detect rather than a plausible
 # alternative spelling.
 #
-# mDNS rather than the DHCP address: the board is on the house LAN with no
-# reservation, and .local follows it across a lease. It has no tailnet identity
-# -- `wk pi setup` has not run against it -- so this is the only stable name.
+# Reached through the tailnet bridge, at the address that bridge reserves for
+# it -- not by mDNS on the house LAN, which is what this said until
+# 2026-08-22. The board sits on the cable behind `tailnet-bridge-generic`
+# (that segment is the reason that bridge exists), so `raspberrypi4-64.local`
+# resolves nowhere from here: the phone is the only thing on the board's L2,
+# and mDNS does not cross it. The board looked simply absent -- `wk boot rpi4
+# --status` said "unreachable ... a plain outage" about a board that was up,
+# linked and one hop away.
+#
+# The address is safe to write down for the same reason `moosebmc`'s is:
+# bridge/hosts/tailnet-bridge-generic.conf pins it by MAC (BR_LEASES) against
+# the MAC boot/machines/rpi4.conf declares, and that MAC is the one thing the
+# board keeps across every image it boots. So 10.99.1.10 survives a reflash,
+# which .local never did.
+#
+# ProxyJump rather than a route: reaching 10.99.1.0/24 directly needs
+# `--accept-routes`, which is off here. Jumping through the phone needs nothing
+# turned on anywhere -- the same choice `moosebmc` makes below.
+#
+# The *address* is a Host pattern too, and that is load-bearing rather than
+# tidy. `wk boot`'s bench-mode channel (`i_ssh`, boot/machines.sh) reaches a
+# booted system by bare address with no jump host of its own; a stanza matching
+# the literal address is what gives it one. A bench system on this board lands
+# on 10.99.1.10 as well -- same NIC, same MAC, same reservation -- so one entry
+# covers both modes. The user differs and is meant to: `Host rpi4-test` logs in
+# as root, while `i_ssh`'s explicit `<you>@10.99.1.10` wins over the User below,
+# which is what that channel wants.
+#
+# If the cable ever goes back to the house switch, `WK_RPI4_SSH` overrides
+# MACH_SSH and `raspberrypi4-64.local` is the name to point it at.
 #
 # The host key is deliberately not pinned. The whole point of this board is
 # that it boots a different image on demand, and each one brings its own key.
@@ -142,8 +169,40 @@ Host tolken-bench
 # warning that fires unconditionally is worse than silence, because it trains
 # the eye to skip the place real warnings appear. ERROR, not QUIET: a failure
 # to connect still has to be audible.
-Host rpi4-test
-  HostName raspberrypi4-64.local
+Host rpi4-test 10.99.1.10
+  HostName 10.99.1.10
+  User root
+  ProxyJump tailnet-bridge-generic
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+
+# The rpi3 test board. `Host rpi3` and not `rpi3-test`: unlike the rpi4, no
+# shared build box has ever answered to this name, so there is no collision to
+# keep the namespaces apart from -- and MACH_SSH in boot/machines/rpi3.conf
+# already spells it `rpi3`, which is the name this has to match.
+#
+# HostName is the mDNS name, not an address, and that is the load-bearing part.
+# This board is on the house LAN with no reservation anyone here controls, and
+# it was seen holding *two* DHCP leases at once on one interface (192.168.1.169
+# and .171, both live on eth0) -- the same firmware-and-kernel-disagree-about-
+# the-client-identifier behaviour the rpi4 conf describes. An address written
+# here would be right until the next lease. The image runs avahi and announces
+# `raspberrypi3`, and moose resolves it through nss-mdns (`mdns4_minimal` in
+# /etc/nsswitch.conf), so the name is the stable half.
+#
+# No ProxyJump: this board is cabled to the house LAN directly, not onto the
+# phone's segment. bridge/hosts/tailnet-bridge-generic.conf still calls
+# 10.99.1.0/24 "the rpi3/rpi4 cable" -- only the rpi4 has ever appeared there.
+#
+# The host key is deliberately not pinned, for the rpi4's reason: the whole
+# point of this board is that it boots a different image on demand and each one
+# brings its own key. LogLevel ERROR goes with that -- with known-hosts at
+# /dev/null ssh announces a permanently-added key on every single connection,
+# and a warning that fires unconditionally trains the eye to skip the place
+# real warnings appear.
+Host rpi3
+  HostName raspberrypi3.local
   User root
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null

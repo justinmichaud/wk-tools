@@ -32,8 +32,14 @@ rpi4 -- bench-device (Raspberry Pi 4B, 4 GB, wired)
               usb-first`): with the default SD-first order, a written stick
               never boots and the board comes up looking normal on the wrong
               root.
-  network     wired, on the house LAN. Its DHCP leases are unstable, so it is
-              found by MAC and by raspberrypi4-64.local.
+  network     wired, and since 2026-08-22 *behind* tailnet-bridge-generic
+              rather than on the house LAN: the phone's segment is the only
+              thing on the board's L2, so it answers at 10.99.1.10 through a
+              ProxyJump and raspberrypi4-64.local resolves nowhere. That
+              address is the bridge's reservation against the board's MAC,
+              which makes it the first stable name this board has ever had --
+              its DHCP leases are unstable, which is why the MAC was already
+              declared.
   storage     the stick is provisional bench media -- cheap flash lands as
               variance, so stick runs are never compared with SSD runs; a
               UASP SSD on the USB 3 port is the real substrate when numbers
@@ -77,10 +83,31 @@ moose -- workstation + build-host (Ampere, 80 cores; bench mode unbuilt)
 
 tailnet bridges -- the out-of-band path (see `wk help bridge`)
   A spare phone (PinePhone or Librem 5 on postmarketOS) with a USB-C dock and
-  an ethernet adapter, bridging an isolated segment -- moose's BMC today --
-  onto the tailnet, with camera streaming to watch a screen remotely. The
-  phone, dock and adapter are the hardware; `wk bridge setup <name>` does the
-  rest.
+  an ethernet adapter, bridging an isolated segment onto the tailnet, with
+  camera streaming to watch a screen remotely. The phone, dock and adapter are
+  the hardware; `wk bridge setup <name>` does the rest. Two of them:
+
+    tailnet-bridge-generic     the PinePhone, live since 2026-08-22 -- pmOS on
+      (PinePhone)              its internal storage, on the tailnet as
+                               tag:bridge, routing 10.99.1.0/24 for the
+                               rpi3/rpi4 cable, with the rpi4 on its reserved
+                               10.99.1.10. Its dock must have ethernet on the
+                               USB2 path: the A64 has no SuperSpeed, so the
+                               PinePhone's own dock works and a generic USB-C
+                               one may not (`wk help bridge`).
+    tailnet-bridge-moose-bmc   the Librem 5, in front of moose's BMC. Still
+      (Librem 5)               running the hand-built PureOS configuration this
+                               role replaces; reflashing it to pmOS is the open
+                               half.
+
+  A phone is enumerated by `bridge/hosts/<name>.conf` rather than by
+  `boot/machines/<name>.conf`, which is the cattle rule's obligation 1 for a
+  bridge (docs/HANDOFF-cattle.md) -- it is a machine wk owns, but not one wk
+  boots into a bench system, so it is in the registry that describes what it
+  actually is. `wk status` prints both: the fleet block for the machines
+  `wk boot` drives, and a bridges block from this registry. Only the first
+  probes; a phone's live state costs an ssh across a radio, so `wk bridge ls`
+  is where that is paid.
 
 what is still hands-on, fleet-wide
   Writing the *first* medium for an unprovisioned board needs a card reader
