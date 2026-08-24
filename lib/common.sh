@@ -258,7 +258,36 @@ prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optiona
     printf '%s' "$path"
 }
 
-# The tailscale auth key, resolved rather than assumed present.
+# The tailscale auth key: one key for the whole fleet, resolved from the one
+# place it lives, by every path that joins anything to the tailnet.
+#
+# There is one because of the rule it serves: everything wk touches is on the
+# tailnet, and a node is reached by its tailnet name with nothing about how to
+# reach it written down (CLAUDE.md, "Cattle, not pets"). A join path with a key
+# of its own is a second copy of a credential -- the one kind of state this
+# repository refuses outright -- and, less obviously, a path that cannot run
+# without somebody at a keyboard.
+#
+# What the key has to be, and why each word of it is load-bearing:
+#
+#   tagged tag:wk    the tag *is* the permission. A tagged node is owned by the
+#                    tailnet rather than by a person, gets only what the policy
+#                    grants tag:wk, and -- the part that matters here -- never
+#                    key-expires. An untagged node works for 180 days and then
+#                    goes dark, which for a board whose name is its whole
+#                    address reads as dead hardware (`wk bridge` says the same
+#                    at length, having been bitten).
+#   reusable         one key provisions every device. A single-use key means a
+#                    credential fetched by hand per board, which is the thing
+#                    that ends up pasted into a script.
+#   NOT ephemeral    an ephemeral node is *removed* from the tailnet when it goes
+#                    offline, and its name stops resolving with it. These boards
+#                    reboot between host mode and bench mode constantly; a name
+#                    that survives only while the device is up is not an address.
+#   longest expiry   the key's own expiry only bounds how long it can enrol new
+#                    devices (90 days is tailscale's ceiling); already-joined
+#                    tagged nodes are unaffected. Short expiry buys nothing and
+#                    costs a re-auth in the middle of something else.
 #
 # Validated on the way in, because the failure it prevents is discovered after a
 # reboot on a machine with no way to report it: a mistyped key means `tailscale
@@ -267,7 +296,8 @@ prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optiona
 wk_tailscale_authkey() {
     local path="${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"
     local p
-    p=$(prompt_secret "$path" "A tailscale auth key (reusable, ephemeral is fine)" \
+    p=$(prompt_secret "$path" \
+        "A tailscale auth key -- tagged tag:wk, reusable, NOT ephemeral, longest expiry" \
         "https://login.tailscale.com/admin/settings/keys") || return 1
     case "$(head -1 "$p" 2>/dev/null)" in
         tskey-*) printf '%s' "$p"; return 0 ;;
@@ -321,6 +351,54 @@ wk_atexit() {
 # wants "do not record a failure I did not cause", which is a decision the
 # handler itself can make from its own state -- and a registry anything can
 # take entries out of is one where the lock release can be taken out too.
+
+# --- a hard ceiling on wall time ----------------------------------------------
+#
+# `timeout(1)` is GNU and absent on macOS, and per-tool timeout flags cannot be
+# trusted. ssh is the case that matters: `ConnectTimeout` covers the TCP connect
+# and nothing after it, so a host that accepts port 22 and then says nothing
+# leaves ssh waiting on its own timers -- and a phone half-way into suspend does
+# exactly that. (BSD `nc -w` has the same shape of lie: it documents itself as
+# bounding connects and ran 75 s against a black-holed address here, against
+# 1.05 s for `-G1`.) So the ceiling lives here rather than in any tool's own
+# flag.
+#
+# Worse, an ssh option is not even a bound on the whole connection: options
+# given on the command line do not reach a *jump* hop. `ssh -o ConnectTimeout=4
+# -o BatchMode=yes rpi4-test` builds its ProxyJump as `ssh -l user -p 22 -W
+# host:port <bridge>` and passes nothing else, so the hop through the phone runs
+# with the defaults -- unbounded, and free to ask a question on the terminal.
+# That is what hung `wk status`'s fleet block (2026-08-24): a host-key prompt
+# for the bridge, from a probe whose output was going to a file, with nothing in
+# the fleet listing's 4-second budget able to stop it. The options a jump hop
+# does read are the ones in its own `Host` stanza (dotfiles/ssh/config sets
+# them there for the bridges), and this is the backstop for everything that
+# cannot be reached that way.
+#
+# The whole process group is killed, not just the child: `capped 5 probe` where
+# `probe` is a function runs it in a subshell, and TERM to the subshell alone
+# leaves its ssh running -- holding the terminal, printing into a listing that
+# has already moved on. `set -m` gives the child a process group of its own so
+# one signal reaches everything it started; the plain `kill` after it is the
+# fallback for a shell that gave us no job control.
+capped() { # <seconds> <cmd...>
+    local secs="$1"; shift
+    # Job control is turned on for exactly one background start and then put
+    # back the way it was found -- a caller that had it on (nothing here does,
+    # but this is a shared helper) must not have it switched off underneath it.
+    local jc=""; case "$-" in *m*) jc=on ;; esac
+    set -m
+    "$@" &
+    local pid=$! rc=0
+    [ -n "$jc" ] || set +m
+    ( sleep "$secs"; kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null ) \
+        >/dev/null 2>&1 &
+    local wd=$!
+    wait "$pid" 2>/dev/null || rc=$?
+    kill -TERM "$wd" 2>/dev/null
+    wait "$wd" 2>/dev/null || true
+    return "$rc"
+}
 
 # --- barriers, and getting past one in a hurry --------------------------------
 #

@@ -1294,6 +1294,17 @@ EOF
         [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_dd "$(image_disk "$id")" "$DISK_DEV"
     fi
     disk_unique_identity "$DISK_DEV" "$(image_root_spec "$id")"
+
+    # The name this card's board answers to on the tailnet, which is the fleet's
+    # ssh name for the machine the image is *for* -- not for $DISK_MACHINE,
+    # which is only whoever holds the reader. Read in a subshell on purpose:
+    # machine_load would otherwise overwrite the MACH_* of the machine every
+    # remote command in this function is talking to.
+    local tn_name=""
+    [ -z "$img_machine" ] \
+        || tn_name=$( machine_load "$img_machine" >/dev/null 2>&1 && printf '%s' "${MACH_SSH:-}" )
+    disk_seed_tailnet "$DISK_DEV" "$tn_name"
+
     [ "$grow" = 1 ] && disk_grow "$DISK_DEV"
     disk_eject "$DISK_DEV"
 

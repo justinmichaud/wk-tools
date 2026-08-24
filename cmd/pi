@@ -27,7 +27,16 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # For `deploy`, which reaches into a build workspace as well as onto a board.
 . "$WK_ROOT/lib/target.sh"
 
-TS_VERSION="${TS_VERSION:-1.102.2}"
+# The tailscale release, from the one file that declares it -- the same one the
+# Yocto layer's recipe requires (image/yocto/meta-wk-tailnet). Two copies of a
+# version is a board running a different tailscale from the image beside it, and
+# the drift would be invisible until something needed them to match.
+TS_RELEASE="$WK_ROOT/image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc"
+ts_release_field() { # <name> -- one `NAME = "value"` line out of the .inc
+    sed -n "s/^$1 = \"\(.*\)\"\$/\1/p" "$TS_RELEASE" | head -1
+}
+TS_VERSION="${TS_VERSION:-$(ts_release_field TS_VERSION)}"
+[ -n "$TS_VERSION" ] || die "no TS_VERSION in $TS_RELEASE"
 TAG="${WK_PI_TAG:-tag:wk}"
 
 ACTION="${1:-}"; HOST="${2:-}"
@@ -1161,15 +1170,38 @@ else
     warn "  if it does not, fall back to a Pi-originated reverse tunnel (still no image change)"
 fi
 
+# The published checksum for this arch, from the same file as the version. It
+# was a pipe straight from the internet into `tar` on the board and nothing
+# checked what arrived -- on a device whose whole job is to run other people's
+# code and report numbers about it.
+TS_SHA256=$(ts_release_field "TS_SHA256_$TS_ARCH")
+[ -n "$TS_SHA256" ] || die "$TS_RELEASE declares no TS_SHA256_$TS_ARCH.
+    Add the published checksum for that architecture:
+      curl -fsS https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz.sha256"
+
 info "installing tailscale $TS_VERSION on $HOST"
 rsh "set -e
     cd '$DEST'
     if [ ! -x '$DEST/tailscaled' ]; then
         url=https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz
-        (command -v curl >/dev/null && curl -fsSL \"\$url\" || wget -qO- \"\$url\") \
-            | tar xz --strip-components=1 \
+        (command -v curl >/dev/null && curl -fsSL \"\$url\" -o ts.tgz || wget -qO ts.tgz \"\$url\")
+        # Verified before it is unpacked, not after: an archive that is not the
+        # one this fleet pinned must never be written to the disk at all. A
+        # board with no sha256 tool refuses rather than proceeding unchecked --
+        # 'no checksum here' is not a reason to trust the bytes.
+        if command -v sha256sum >/dev/null; then
+            echo '$TS_SHA256  ts.tgz' | sha256sum -c - >/dev/null
+        elif command -v openssl >/dev/null; then
+            got=\$(openssl dgst -sha256 -r ts.tgz | cut -d' ' -f1)
+            [ \"\$got\" = '$TS_SHA256' ] || { echo \"tailscale tarball sha256 \$got, expected $TS_SHA256\" >&2; exit 1; }
+        else
+            echo 'no sha256sum or openssl on this board; refusing to unpack an unverified tarball' >&2
+            exit 1
+        fi
+        tar xzf ts.tgz --strip-components=1 \
                   'tailscale_${TS_VERSION}_${TS_ARCH}/tailscale' \
                   'tailscale_${TS_VERSION}_${TS_ARCH}/tailscaled'
+        rm -f ts.tgz
         chmod +x tailscale tailscaled
     fi
     mkdir -p '$DEST/tailscale-state'"
@@ -1200,14 +1232,37 @@ if [ -n "$TSIP" ]; then
     info "$HOST is already on the tailnet at $TSIP -- no auth key needed"
 else
     info "bringing the node up as $TAG"
-    log "  an auth key is required; generate a tagged one at:"
-    log "  https://login.tailscale.com/admin/settings/keys  (tags: $TAG)"
-    printf 'tailscale auth key (tskey-auth-...): ' >&2
-    read -r AUTHKEY
-    [ -n "$AUTHKEY" ] || die "no auth key given"
 
+    # The fleet's one key, from the one place it lives (wk_tailscale_authkey,
+    # lib/common.sh) rather than a `read` of its own. Two reasons, and the
+    # second is the one that bit: a second copy of a credential is state this
+    # repository refuses, and a command that stops to ask for a secret cannot be
+    # run from a script or handed to an agent -- which is exactly how a board
+    # ends up staying off the tailnet with its address written down somewhere
+    # instead.
+    KEYFILE=$(wk_tailscale_authkey) || die "no tailscale auth key, so this board cannot join the tailnet.
+    It has to: everything wk touches is on the tailnet, and a node is reached by
+    its tailnet name with nothing about how to reach it stored anywhere
+    (CLAUDE.md, 'Cattle, not pets'). The key must be tagged $TAG."
+
+    # Over the same ssh into a 0600 file, and never onto a command line: argv is
+    # world readable in /proc, so `--authkey=tskey-...` hands the key to anything
+    # with a shell on the board. `wk bridge` makes the same argument at length
+    # and does the same thing. `--auth-key file:` is how tailscale reads one
+    # without argv; the file goes as soon as it has been spent, whether or not
+    # the join worked.
+    rsh "umask 077; cat > '$DEST/tailscale-state/authkey'" < "$KEYFILE" \
+        || die "could not hand the auth key to $HOST"
+
+    UP_RC=0
     rsh "'$DEST/tailscale' --socket='$DEST/tailscale-state/tailscaled.sock' up \
-            --authkey='$AUTHKEY' --advertise-tags='$TAG' --hostname='$(basename "$HOST")'"
+            --auth-key='file:$DEST/tailscale-state/authkey' \
+            --advertise-tags='$TAG' --hostname='$(basename "$HOST")'" || UP_RC=$?
+    rsh "rm -f '$DEST/tailscale-state/authkey'" || \
+        warn "the spent auth key is still at $DEST/tailscale-state/authkey on $HOST"
+    [ "$UP_RC" -eq 0 ] || die "tailscale up failed on $HOST (exit $UP_RC).
+    A key that is single-use, untagged, or expired fails exactly here; the node
+    is left with tailscaled running and no identity, and re-running this is safe."
 
     TSIP=$(rsh "'$DEST/tailscale' --socket='$DEST/tailscale-state/tailscaled.sock' ip -4" | head -1)
 fi

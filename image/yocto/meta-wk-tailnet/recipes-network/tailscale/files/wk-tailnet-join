@@ -1,0 +1,78 @@
+#!/bin/sh
+#
+# Join this node to the tailnet, once, on first boot.
+#
+# The image cannot carry a tailnet identity: it is cattle, it is written to more
+# than one card, and an auth key inside an artifact that lives in an image store
+# is a credential in a place nothing revokes. So the key arrives *with the card*
+# -- `wk sysimage write` seeds /etc/wk/tailscale-authkey and /etc/wk/tailnet.conf
+# onto the disk it just wrote (disk_seed_tailnet, boot/disk.sh) -- and this runs
+# once against them and deletes the key.
+#
+# Exits 0 on every path that is not a failure of this node's own doing, because
+# a boot is not a failure just because nobody staged a key: an image written by
+# something that had none is a board reachable the old way, not a broken board.
+# The journal says which happened, and `wk status` shows the node missing from
+# the tailnet, which is the visible half.
+#
+# POSIX sh, no jq: this runs on a slim Yocto image whose shell is whatever the
+# distro shipped.
+
+set -u
+
+KEY=/etc/wk/tailscale-authkey
+CONF=/etc/wk/tailnet.conf
+TS=/usr/bin/tailscale
+
+say() { echo "wk-tailnet-join: $*"; }
+
+[ -x "$TS" ] || { say "no $TS -- nothing to join with"; exit 0; }
+
+# Already on the tailnet? Then this is a later boot, and the only thing left to
+# do is make sure a spent key is not still lying on the disk. `tailscale ip -4`
+# is the property rather than the daemon's word for it: a running tailscaled
+# with no identity answers nothing here.
+if "$TS" ip -4 >/dev/null 2>&1; then
+    say "already on the tailnet as $("$TS" ip -4 2>/dev/null | head -1)"
+    rm -f "$KEY"
+    exit 0
+fi
+
+if [ ! -r "$KEY" ]; then
+    say "no auth key at $KEY, so this node has no tailnet identity."
+    say "  it was written by something that had no key; 'wk sysimage write' seeds one."
+    exit 0
+fi
+
+# The name and the tag come with the key, because neither is a property of the
+# image: the same image is written for more than one machine, and the name this
+# node has to answer to is the fleet's name for the machine the card goes into.
+# Defaults are last-resort only -- a node that joins under the image's hostname
+# is reachable by a name nothing else in the fleet uses.
+HOSTNAME_WANTED=""
+TAG="tag:wk"
+if [ -r "$CONF" ]; then
+    HOSTNAME_WANTED=$(sed -n 's/^hostname=//p' "$CONF" | head -1)
+    TAG_READ=$(sed -n 's/^tag=//p' "$CONF" | head -1)
+    [ -n "$TAG_READ" ] && TAG="$TAG_READ"
+fi
+[ -n "$HOSTNAME_WANTED" ] || HOSTNAME_WANTED=$(cat /etc/hostname 2>/dev/null | tr -d ' \t\n')
+[ -n "$HOSTNAME_WANTED" ] || HOSTNAME_WANTED=$(hostname 2>/dev/null)
+
+say "joining as $HOSTNAME_WANTED ($TAG)"
+
+# `--auth-key file:` and not the key itself: argv is world readable in /proc, and
+# this is a machine other people's benchmarks run on.
+if "$TS" up --auth-key "file:$KEY" \
+        --advertise-tags="$TAG" \
+        --hostname="$HOSTNAME_WANTED" \
+        --accept-dns=false; then
+    say "up as $HOSTNAME_WANTED at $("$TS" ip -4 2>/dev/null | head -1)"
+    # Spent, and only now: a key deleted before a successful join is a board
+    # that cannot retry on the next boot.
+    rm -f "$KEY"
+else
+    say "tailscale up failed -- the key is kept so the next boot can retry."
+    say "  a key that is single-use, untagged or expired fails exactly here."
+    exit 0
+fi

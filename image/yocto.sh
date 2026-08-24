@@ -500,7 +500,8 @@ would build image $IMG_PROFILE (builder: yocto)
   rm_work     $([ "${YOC_RM_WORK:-0}" = 1 ] && echo "on (--keep-work turns it off; still peaked at 79 GB here)" || echo off)
   chromium    $([ "$chromium" = 0 ] && echo "dropped (about half the build; --chromium puts it back)" || echo "in the image (--chromium)")
   webkit jobs $(WK_MB_PER_JOB=2560 build_jobs) (2560 MB/job -- WebCore's unified sources OOM'd at -j79)
-  local fixes $([ "${YOC_LOCAL_LAYER:-1}" = 0 ] && echo "none -- the branch's own configuration, unmodified" || echo "image/yocto/meta-wk is added to bblayers")
+  local fixes $([ "${YOC_LOCAL_LAYER:-1}" = 0 ] && echo "none -- the branch's own configuration, unmodified" || echo "image/yocto/meta-wk is added to bblayers (build-time only)")
+  tailnet     $([ "${YOC_TAILNET:-1}" = 0 ] && echo "off -- the board is reachable only over whatever LAN it lands on" || echo "tailscale in the image (meta-wk-tailnet); the card carries the key")
   disk free   $(df -h --output=avail "$WK_STORE" 2>/dev/null | tail -1 | tr -d ' ')
   into        $(image_dir "<profile>-<stamp>")
 EOF
@@ -527,10 +528,17 @@ yocto_build() {
             # profile's note -- so it is a flag rather than a constant.
             --no-local-layer) YOC_LOCAL_LAYER=0 ;;
             --local-layer)    YOC_LOCAL_LAYER=1 ;;
+            # An image without tailscale, for a measurement that has to compare
+            # against numbers taken before the fleet put it there. It is a flag
+            # and not a profile field for the same reason --no-local-layer is:
+            # the question is asked of a build, not of a configuration.
+            --no-tailnet)     YOC_TAILNET=0 ;;
+            --tailnet)        YOC_TAILNET=1 ;;
             --no-import) no_import=1 ;;
             *) die "unknown option: $1
     'wk sysimage build $profile' takes --dry-run, --workspace, --stage,
-    --detach, --stop, --keep-work, --chromium, --no-local-layer and --no-import." ;;
+    --detach, --stop, --keep-work, --chromium, --no-local-layer, --no-tailnet
+    and --no-import." ;;
         esac
         shift
     done
@@ -642,6 +650,7 @@ EOF
         --jobs "$(envelope_cores)" --rm-work "${YOC_RM_WORK:-0}" \
         --chromium "$chromium" \
         --local-layer "${YOC_LOCAL_LAYER:-1}" \
+        --tailnet "${YOC_TAILNET:-1}" \
         --webkit-jobs "$(WK_MB_PER_JOB=2560 build_jobs)" \
         --sstate-ns "$(printf '%s' "${WK_SDK_IMAGE##*/}" | tr ':/' '--')"
 

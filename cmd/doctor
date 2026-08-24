@@ -132,6 +132,12 @@ local_state "$WK_STORE/bench"                      backed-up   "benchmark runs a
 local_state "$WK_STORE/secrets"                    regenerable "wk key register makes new deploy keys (revoke the old ones on GitHub)"
 local_state "$WK_STORE/secrets/claude-credentials.json" re-authable "claude login in one workspace re-seeds it"
 local_state "$HOME/.config/wk/targets"             backed-up   "this device's own view of shared targets; recreate by hand from wk help machines"
+# The fleet's one tailscale auth key (wk_tailscale_authkey, lib/common.sh).
+# re-authable rather than backed-up on purpose: a new tagged key from the admin
+# console is as good as the old one, and the nodes already on the tailnet do not
+# care -- a tagged node never key-expires. Losing it costs nothing but the walk
+# to the console; what it must never be is in the repo.
+local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "a new tag:wk key (reusable, not ephemeral, longest expiry) from https://login.tailscale.com/admin/settings/keys; joined nodes are unaffected"
 local_state "$WK_ROOT/targets/local"               backed-up   "machine-local target definitions (gitignored: internal hosts and paths)"
 local_state "$HOME/.ssh/config.d/local"            backed-up   "hand-written ssh entries (host/dotfiles.sh moves them here and owns the rest)"
 if [ "$(wk_os)" = linux ]; then

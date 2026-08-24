@@ -38,6 +38,7 @@ while [ $# -gt 0 ]; do
         --chromium) CHROMIUM="${2:-}"; shift 2 ;;
         --sstate-ns) SSTATE_NS="${2:-}"; shift 2 ;;
         --local-layer) LOCAL_LAYER="${2:-}"; shift 2 ;;
+        --tailnet) TAILNET="${2:-}"; shift 2 ;;
         --webkit-jobs) WEBKIT_JOBS="${2:-}"; shift 2 ;;
         *) echo "yocto-build.sh: unknown option: $1" >&2; exit 2 ;;
     esac
@@ -322,6 +323,24 @@ configure_local_conf() {
         # cargo-native and rust-llvm-native behind them, and roughly half of
         # the 13,379 tasks. Dropping it is what to do when the image is wanted
         # for WPE alone or the disk is tight.
+        # tailscale, from meta-wk-tailnet. The layer carries the recipe; this is
+        # the line that puts it in the image, and it is here rather than in a
+        # bbappend on the image recipe so that the whole of "this image is not
+        # stock" is two greppable places instead of hidden in a layer.
+        #
+        # This is what makes a booted board reachable by its own name with
+        # nothing written down about how to reach it (CLAUDE.md, "Cattle, not
+        # pets"). The daemon is not free on the machine under test -- the layer
+        # conf says what it costs -- and YOC_TAILNET=0 is the way to build the
+        # image without it, for a measurement that has to be comparable with the
+        # numbers taken before this existed.
+        if [ "${TAILNET:-1}" = 0 ]; then
+            printf '# tailnet: off. This image joins nothing and is reachable only\n'
+            printf '# over whatever LAN it lands on.\n\n'
+        else
+            printf 'IMAGE_INSTALL:append = " tailscale"\n\n'
+        fi
+
         if [ "$CHROMIUM" = 0 ]; then
             printf '# Chromium dropped: about half the build. --chromium puts it back.\n'
             printf 'IMAGE_INSTALL:remove = "chromium-ozone-wayland"\n\n'
@@ -412,18 +431,22 @@ configure_bblayers() {
         return 0
     fi
 
-    local layer; layer=$(cd "$(dirname "$0")/../image/yocto/meta-wk" && pwd)
-    [ -f "$layer/conf/layer.conf" ] || fail "no layer at $layer"
-
     if grep -qF "$BB_MARKER" "$f"; then
         sed -i "/^$(printf '%s' "$BB_MARKER" | sed 's/[][\.*^$/]/\\&/g')\$/,\$d" "$f"
     fi
-    {
-        printf '\n%s\n' "$BB_MARKER"
-        printf '# Build-time fixes only -- see that layer conf/layer.conf.\n'
-        printf 'BBLAYERS += "%s"\n' "$layer"
-    } >> "$f"
-    say "layer added: $layer"
+    printf '\n%s\n' "$BB_MARKER" >> "$f"
+
+    # Two layers, and they are deliberately not one. meta-wk may only change how
+    # the image is built; meta-wk-tailnet changes what is on the board, which is
+    # a different promise and is kept visible by being a different line here.
+    # Each layer's own conf/layer.conf argues its case.
+    local dir layer
+    for dir in meta-wk meta-wk-tailnet; do
+        layer=$(cd "$(dirname "$0")/../image/yocto/$dir" && pwd)
+        [ -f "$layer/conf/layer.conf" ] || fail "no layer at $layer"
+        printf 'BBLAYERS += "%s"\n' "$layer" >> "$f"
+        say "layer added: $layer"
+    done
 }
 
 run_helper() {

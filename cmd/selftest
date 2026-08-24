@@ -431,19 +431,237 @@ chk_bridge_probe_cannot_hang() {
     local t0 t1 d
     # shellcheck disable=SC1090
     . "$WK_ROOT/lib/common.sh"
-    eval "$(sed -n '/^_capped()/,/^}/p' "$WK_ROOT/cmd/bridge")"
     eval "$(sed -n '/^_reaches()/,/^}/p' "$WK_ROOT/cmd/bridge")"
 
     # The cap itself: a command that would run for 20s must not.
-    t0=$(date +%s); _capped 1 sleep 20 >/dev/null 2>&1 || true; t1=$(date +%s)
+    t0=$(date +%s); capped 1 sleep 20 >/dev/null 2>&1 || true; t1=$(date +%s)
     d=$((t1 - t0))
-    [ "$d" -le 4 ] || { echo "_capped 1 took ${d}s -- the ceiling is not being enforced"; return 1; }
+    [ "$d" -le 4 ] || { echo "capped 1 took ${d}s -- the ceiling is not being enforced"; return 1; }
 
     # And a reachability attempt against an address that will never answer.
     # 192.0.2.1 is TEST-NET-1, unroutable anywhere this runs.
     t0=$(date +%s); _reaches root@192.0.2.1 >/dev/null 2>&1 || true; t1=$(date +%s)
     d=$((t1 - t0))
     [ "$d" -le 16 ] || { echo "an unroutable address took ${d}s -- reaching the phone can hang"; return 1; }
+}
+
+# The ceiling has to reach what the command *started*, and it has to let go of a
+# command that finished. Both halves have been wrong at some point in a
+# hand-rolled version of this: `capped 5 probe` runs a function in a subshell, so
+# a TERM aimed at the subshell alone leaves its ssh running -- holding the
+# terminal, printing into a listing that has moved on -- and a watchdog reaped by
+# signalling its wrapper rather than its `sleep` holds every caller for the whole
+# ceiling, which would make each fleet probe cost its own timeout even when the
+# machine answered instantly.
+chk_capped_reaches_the_subtree() {
+    local t0 d left
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/lib/common.sh"
+
+    # A grandchild with a duration nothing else in the tree uses, so pgrep can
+    # only match this one.
+    t0=$(date +%s)
+    capped 1 bash -c 'sleep 31.5 & wait' >/dev/null 2>&1 || true
+    d=$(( $(date +%s) - t0 ))
+    [ "$d" -le 4 ] || { echo "capped 1 took ${d}s"; return 1; }
+
+    left=$(pgrep -f 'sleep 31.5' 2>/dev/null | wc -l | tr -d ' ')
+    [ "$left" = 0 ] || {
+        pkill -f 'sleep 31.5' 2>/dev/null || true
+        echo "the ceiling killed the child and left $left grandchild(ren) running"
+        return 1
+    }
+
+    # And the fast path: a command that returns at once must not be held for the
+    # rest of the ceiling.
+    t0=$(date +%s); capped 20 true; d=$(( $(date +%s) - t0 ))
+    [ "$d" -le 2 ] || { echo "capped 20 true took ${d}s -- callers pay the whole ceiling"; return 1; }
+}
+
+# Options on an ssh command line do not reach a ProxyJump child: the hop is
+# `ssh -l <user> -p <port> -W host:port <jump>` and nothing else is passed. So
+# every bound a probe through a jump host depends on has to be in that host's own
+# stanza, and this reads the file the way the jump child reads it rather than
+# grepping it -- what matters is what ssh resolves, not what the file appears to
+# say. `wk status` hung on exactly this (docs/TESTING.md, the fleet block).
+chk_ssh_jump_hosts_bounded() {
+    local conf="$WK_ROOT/dotfiles/ssh/config" j opts mode to bad=""
+    have ssh || { echo "no ssh on this machine"; return 77; }
+
+    for j in $(awk '$1 == "ProxyJump" { print $2 }' "$conf" \
+                 | tr ',' '\n' | sed 's/.*@//; s/:[0-9]*$//' | sort -u); do
+        opts=$(ssh -G -F "$conf" "$j" 2>/dev/null) || opts=""
+        mode=$(printf '%s\n' "$opts" | awk '$1 == "stricthostkeychecking" { print $2 }')
+        to=$(printf   '%s\n' "$opts" | awk '$1 == "connecttimeout" { print $2 }')
+        # `false` is how ssh -G spells StrictHostKeyChecking=no.
+        case "$mode" in
+            accept-new|no|false|off) ;;
+            *) bad="$bad
+  $j: StrictHostKeyChecking is '${mode:-unset}' -- an unknown key asks on the
+      terminal, and a probe whose output goes to a file waits there forever" ;;
+        esac
+        case "$to" in
+            ''|none|0) bad="$bad
+  $j: no ConnectTimeout -- the hop is unbounded, and so is every probe
+      through it" ;;
+        esac
+    done
+    [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
+# A probe that never returns must cost the listing its ceiling and its own line,
+# not the command. The stub stands in for the driver: what is being tested is
+# report_fleet_device's contract, and a real hanging probe needs a phone in a
+# drawer to reproduce.
+chk_fleet_probe_capped() {
+    local out t0 d
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/lib/common.sh"
+    eval "$(sed -n '/^report_fleet_device()/,/^}/p' "$WK_ROOT/cmd/status")"
+
+    _fleet_probe() { sleep 30; }
+    WK_FLEET_TIMEOUT=1
+
+    t0=$(date +%s); out=$(report_fleet_device rpi4 2>/dev/null); d=$(( $(date +%s) - t0 ))
+    [ "$d" -le 10 ] || { echo "a probe that never returns held the fleet block ${d}s"; return 1; }
+    case "$out" in
+        *rpi4*) ;;
+        *) echo "a probe killed for time left its machine out of the listing: '$out'"; return 1 ;;
+    esac
+}
+
+# One key, one place, every join path -- and no join that needs a person.
+#
+# The rule it serves is the fleet's: everything wk touches is on the tailnet, and
+# a node is reached by its tailnet name with nothing about how to reach it stored
+# anywhere (CLAUDE.md, "Cattle, not pets"). A path that stops to ask for a
+# credential is a path that gets skipped, and a device that never joined is a
+# device whose address somebody writes down.
+chk_one_tailnet_key() {
+    local f bad="" reads
+    for f in cmd/pi cmd/bridge bench/mac-bench-volume.sh; do
+        grep -q 'wk_tailscale_authkey' "$WK_ROOT/$f" || bad="$bad
+  $f joins the tailnet without resolving the key through wk_tailscale_authkey"
+    done
+
+    # `prompt_secret` is the one reader of a secret, and it stores what it reads
+    # so it is asked for once. A `read` of an auth key anywhere else is a second
+    # copy of the credential and an unscriptable command.
+    reads=$(grep -rn 'read -r[s]* *[A-Za-z_]*[Aa][Uu][Tt][Hh]' \
+                "$WK_ROOT/cmd" "$WK_ROOT/bench" "$WK_ROOT/bridge" \
+                "$WK_ROOT/boot" "$WK_ROOT/image" 2>/dev/null || true)
+    [ -z "$reads" ] || bad="$bad
+  an auth key is read outside prompt_secret:
+$reads"
+
+    [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
+# argv is world readable in /proc, so a key on a command line is a key handed to
+# anything with a shell on that machine -- including the board under test.
+# `--auth-key file:<path>` is the spelling that does not do that.
+chk_no_authkey_in_argv() {
+    local hits line bad=""
+    hits=$(grep -rn -e '--auth-\{0,1\}key' \
+               "$WK_ROOT/cmd" "$WK_ROOT/bench" "$WK_ROOT/bridge" \
+               "$WK_ROOT/boot" "$WK_ROOT/image" "$WK_ROOT/lib" 2>/dev/null \
+             | sed 's/^\([^:]*:[0-9]*:\)[[:space:]]*/\1/' | grep -v ':#' || true)
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case "$line" in
+            *file:*) ;;
+            *) bad="$bad
+  $line" ;;
+        esac
+    done <<EOF
+$hits
+EOF
+    [ -z "$bad" ] || { echo "a tailscale key is passed through argv:$bad"; return 1; }
+}
+
+# The image half of "everything wk touches is on the tailnet": tailscale is in
+# the image, the build is allowed to fetch it, and the pin is one file.
+#
+# All three are checkable without a build, which matters because the build that
+# would check them properly is hours long -- and the failure mode of getting it
+# wrong is not a broken build but a *silent* one: an image that comes off the
+# line without tailscale looks exactly like an image with it until a board is
+# written, booted, and does not appear on the tailnet.
+TS_INC="image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc"
+
+chk_tailnet_layer_is_wired() {
+    local bad="" f
+    f="$WK_ROOT/image/yocto/meta-wk-tailnet"
+    [ -f "$f/conf/layer.conf" ] || bad="$bad
+  no layer at $f"
+    grep -q 'meta-wk-tailnet' "$WK_ROOT/image/yocto-build.sh" || bad="$bad
+  image/yocto-build.sh does not add the layer to bblayers, so the recipe is
+      parsed by nothing and the image is built without it"
+    grep -q 'IMAGE_INSTALL:append = " tailscale"' "$WK_ROOT/image/yocto-build.sh" || bad="$bad
+  nothing puts tailscale in IMAGE_INSTALL: the layer would be on the layer list
+      and the image still would not carry it"
+    # The one fetch that cannot come from the Yocto source mirror.
+    grep -q '"tailscale.com"' "$WK_ROOT/container/proxy/wk-proxy.py" || bad="$bad
+  the workspace egress allowlist has no tailscale.com, so the recipe's fetch is
+      refused and the build fails hours in"
+    [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
+# One pin, two installers. `wk pi setup` pushes tailscale onto a board that is
+# already running and the recipe ships it in the image; a version in both places
+# is two versions the first time one of them is bumped.
+chk_tailscale_pin_is_one_file() {
+    local inc="$WK_ROOT/$TS_INC" ver bad="" a
+    [ -f "$inc" ] || { echo "no $TS_INC"; return 1; }
+
+    ver=$(sed -n 's/^TS_VERSION = "\(.*\)"$/\1/p' "$inc" | head -1)
+    case "$ver" in
+        [0-9]*.[0-9]*) ;;
+        *) bad="$bad
+  $TS_INC declares no usable TS_VERSION (got '${ver:-nothing}')" ;;
+    esac
+
+    # arm64 and arm, because the fleet is 64-bit boards plus one armv7l rpi3.
+    for a in arm64 arm; do
+        case "$(sed -n "s/^TS_SHA256_$a = \"\(.*\)\"\$/\1/p" "$inc" | head -1)" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+            *) bad="$bad
+  $TS_INC has no sha256 for $a, so that architecture cannot be verified" ;;
+        esac
+    done
+
+    grep -q "require .*tailscale-release.inc" \
+        "$WK_ROOT/image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale.bb" \
+        || bad="$bad
+  the recipe does not require the release .inc, so its pin is its own"
+
+    grep -q 'tailscale-release.inc' "$WK_ROOT/cmd/pi" || bad="$bad
+  cmd/pi does not read the release .inc, so a board gets whatever version is
+      written in cmd/pi"
+    # And no second copy of the version hiding in the pusher.
+    grep -qE '^TS_VERSION="\$\{TS_VERSION:-[0-9]' "$WK_ROOT/cmd/pi" && bad="$bad
+  cmd/pi still carries a literal tailscale version"
+
+    [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
+# An image is stored, compressed, copied between machines and kept after it is
+# superseded. A credential inside one is a credential in every copy of it, and
+# revoking it means revoking it for the whole fleet -- so the key reaches the
+# *card*, one boot before the join spends it, and never the image.
+chk_no_authkey_in_an_image() {
+    local hits
+    hits=$(grep -rln 'wk_tailscale_authkey' "$WK_ROOT/image" "$WK_ROOT/cmd/sysimage" 2>/dev/null || true)
+    [ -z "$hits" ] || {
+        echo "the image build path resolves an auth key, which puts it inside the artifact:
+$hits"
+        return 1
+    }
+    grep -q 'disk_seed_tailnet' "$WK_ROOT/cmd/sysimage" || {
+        echo "nothing seeds the tailnet identity onto a written card, so an image that
+      carries the join has nothing to join with"
+        return 1
+    }
 }
 
 chk_bridge_rm_is_inverse() {
@@ -1612,6 +1830,14 @@ if want quick; then
     check "can actually be told apart by content"                          chk_bridge_image_heads_are_distinguishable
     check "every pmos profile declares"                                    chk_bridge_pmos_profiles_declare_bands
     check "reaching the phone cannot hang"                                 chk_bridge_probe_cannot_hang
+    check "ceiling reaches the whole process group"                        chk_capped_reaches_the_subtree
+    check "a jump host's stanza carries the bounds its jump cannot inherit" chk_ssh_jump_hosts_bounded
+    check "no fleet probe can outlive its ceiling"                         chk_fleet_probe_capped
+    check "one tailscale auth key for the whole fleet"                     chk_one_tailnet_key
+    check "puts the key on a command line"                                chk_no_authkey_in_argv
+    check "the Yocto images are built with tailscale in them"             chk_tailnet_layer_is_wired
+    check "the tailscale release is pinned in one file"                   chk_tailscale_pin_is_one_file
+    check "no auth key is ever written into an image"                     chk_no_authkey_in_an_image
 fi
 
 if want state; then

@@ -34,10 +34,30 @@ WebKit against the target's own SDK (3736/3736, `libWPEWebKit-1.1.so`).
    `wk rm` — which would discard an hours-long `populate_sdk` toolchain that
    lives in the workspace (unlike sstate and DL_DIR, which are in the store).
    **Add it the next time that workspace is recreated for another reason.**
-5. **Tailscale on the rpi target** — untouched. A Yocto image has no apt, so
-   this is a recipe or the static-binary route, not a package install. Partly
-   obviated for the rpi4, which is reached through the tailnet bridge — but a
-   *workspace* still cannot reach it (`docs/HANDOFF-linux-pi.md`).
+5. **Tailscale on the rpi target** — written, not yet built (2026-08-24). It is
+   a layer of its own, `image/yocto/meta-wk-tailnet`, and deliberately not a
+   recipe in `meta-wk`: that layer may only change how an image is *built*
+   (item 3 above is the open question about it), and this changes what is in
+   one. The recipe installs upstream's pinned static build — a Yocto image has
+   no apt, and compiling tailscale here would mean a Go toolchain and a module
+   cache for a binary upstream publishes as pure-Go, static, and with the
+   32-bit ARM build the rpi3 needs. The pin (version + sha256 per arch) is one
+   file that `wk pi setup` reads too, so the pushed-onto-a-board copy and the
+   in-the-image copy cannot drift.
+
+   What is left is the running of it, in this order, and none of it can be done
+   from a workstation alone: **build** (`wk sysimage build <profile>` — the
+   first build with the layer is also the first test of the recipe), **write**
+   (`disk_seed_tailnet` puts the key and the fleet's name for the board onto the
+   card, never into the image), **boot**, and confirm the board answers to its
+   own tailnet name. Only then do the stored-reachability deletions in
+   `docs/TESTING.md` §7 — the `.local` names, the `10.99.1.10` stanza, the
+   `ProxyJump`, `image_addr`'s ARP ladder and `MACH_MAC`.
+
+   The thing this changes for a *workspace* (`docs/HANDOFF-linux-pi.md`): a
+   board on the tailnet is reachable by the egress proxy's `pi-hosts`
+   allowlist by address, which is what `wk pi setup` already records — so this
+   is the same mechanism, arriving with the image instead of after it.
 6. **The macOS half** — unattempted. The builder refuses any target that is not
    a container (a remote target is a shared machine, and this is 100 GB and days
    of CPU; a macOS VM workspace has no store-backed Yocto cache). The podman VM

@@ -1,0 +1,24 @@
+[Unit]
+Description=Join this node to the tailnet (wk)
+Documentation=https://github.com/justinmichaud/wk-tools
+# After tailscaled rather than Wants=network-online.target: `tailscale up`
+# talks to the local daemon, and the daemon is the thing that needs the network.
+# Requires, so that a boot where tailscaled failed does not also log a confusing
+# "could not connect to the local API" from this.
+Requires=tailscaled.service
+After=tailscaled.service
+# Nothing to do without a key, and the common case after the first boot is that
+# there is none. Skipping is cheaper and quieter than starting to find out --
+# the script still handles the file vanishing between here and there.
+ConditionPathExists=/etc/wk/tailscale-authkey
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/wk-tailnet-join
+RemainAfterExit=yes
+# The daemon can take a moment to come up before it answers; the default 90s
+# start timeout is the bound, and a failure here must not hold the boot.
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

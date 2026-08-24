@@ -59,6 +59,27 @@ reasoning; this is the binding statement.
   naming a machine is the shape being replaced.
 - Hand-applied settings are expected to vanish on a rebuild. Anything that is
   missed belongs in `./setup` or `wk backup`, not in a person's memory.
+- **A node is reached by its tailnet name, and how to reach it is not written
+  down.** Every node this repo owns is on the tailnet, always — so there is no
+  address, no `.local` name, no MAC to look up in an ARP table and no
+  `ProxyJump` to store, in `dotfiles/ssh/config` or in code. The name is the
+  whole address, and Tailscale SSH makes the host key a non-question, which is
+  the entire class of failure `wk status` hung on (2026-08-24: a jump hop
+  asking about a bridge's key on the terminal, from a probe whose output was a
+  file). Stored reachability is the same bug as cached state — it is a second
+  copy of a fact, and it goes stale in the way that reads as broken hardware.
+
+  Two things cannot hold a tailnet identity and are the only exceptions: moose's
+  BMC (reached through its bridge phone) and Igalia's shared build boxes
+  (through the company gateway). Both are jumps, and a jump host carries its own
+  bounds, because ssh passes a jump child none of the options on its command
+  line.
+
+  Open violations, and they are the reason the machinery above still exists:
+  rpi3 (an mDNS name) and rpi4 (a bridge-segment address behind a `ProxyJump`)
+  are the only fleet machines not on the tailnet, and the bench images
+  deliberately carry no tailscale (`image/profiles.sh`: "the image has no
+  tailscale and never will"). docs/TESTING.md, section 7, carries the item.
 
 `docs/HANDOFF-reprovision.md` is the punch-list for the day this is tested by
 an actual rebuild.

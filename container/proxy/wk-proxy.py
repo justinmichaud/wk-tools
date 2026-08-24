@@ -151,6 +151,15 @@ ALLOWED_HOSTS = {
     # github.com and githubusercontent.com are already allowed above, and carry
     # meta-openembedded, meta-webkit, meta-clang, meta-browser and the
     # Raspberry Pi firmware and kernel.
+    #
+    # pkgs.tailscale.com, for one recipe: image/yocto/meta-wk-tailnet fetches
+    # the pinned static tailscale build so that a board made from the image is
+    # on the tailnet and nothing about how to reach it has to be written down
+    # (CLAUDE.md, "Cattle, not pets"). The tarball is pinned by version and
+    # sha256 in that layer, so what this allows is one file whose bytes are
+    # decided before the fetch -- and the Yocto source mirror does not carry it,
+    # which is why the fetch has to go upstream at all.
+    "tailscale.com": (443,),
 }
 
 # Addresses that are never permitted as a *destination*, whatever resolved to

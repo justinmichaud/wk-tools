@@ -1,7 +1,24 @@
+# The company gateway, and the jump host for all three shared build boxes below.
+#
+# StrictHostKeyChecking and ConnectTimeout are here because it is a *jump* host:
+# options on an ssh command line are not passed to the ProxyJump child, so
+# `wk status`'s walk of devbox-arm64-2 runs its first hop with whatever this
+# stanza says and with the defaults for the rest. The defaults are `ask` and no
+# timeout, which is a fleet listing that stops dead on a question about the
+# gateway -- the same failure the bridge stanzas at the bottom of this file
+# carry the long version of, seen there first (2026-08-24).
+#
+# accept-new, for the reason `wk bridge ls` gives: it accepts a key never seen
+# before and still refuses one that has *moved*, and the refusal is the half
+# worth having. A first contact with this host through a probe was going to be
+# either silently accepted or an unanswerable question, and "ask" only looks
+# like the stronger of the two.
 Host igalia.com
   ForwardAgent yes
   User jmichaud
   Port 6789
+  StrictHostKeyChecking accept-new
+  ConnectTimeout 10
 
 Host moose
   User jmichaud
@@ -253,7 +270,66 @@ Host moosebmc
   Port 2200
   ProxyJump librem5-oob
 
+# The tailnet bridges themselves, and -- because these two names are also the
+# jump hosts above -- the only place a jump hop's options can be written.
+#
+# Scaffolding, and dated as such. A node this repo owns is reached by its tailnet
+# name with nothing written down (CLAUDE.md, "Cattle, not pets"); the rpi4 is
+# jumped through this phone only because it is not on the tailnet yet, and the
+# day it joins, that hop and everything below that serves it goes. What stays is
+# the BMC's hop, because a BMC cannot hold a tailnet identity, and `wk bridge`'s
+# own connections to the phones, which pass their options themselves.
+#
+# Options given on an ssh command line do not reach a ProxyJump child. `ssh -o
+# BatchMode=yes -o ConnectTimeout=4 rpi4-test` builds the hop as `ssh -l user
+# -p 22 -W '[10.99.1.10]:22' tailnet-bridge-generic` and passes nothing else,
+# so the hop runs with whatever this file says for the bridge, and with the
+# defaults for anything it does not. On 2026-08-24 that was
+# StrictHostKeyChecking=ask: the phone's key was in known_hosts under
+# `tailnet-bridge-generic.local` and three LAN addresses but not under its
+# tailnet name, so `wk status`'s fleet block -- probing the rpi4, output going
+# to a file -- printed "Are you sure you want to continue connecting" onto the
+# terminal and waited there forever. Non-interactively the same hop fails with
+# `Host key verification failed`, which reads as a dead board.
+#
+# So: accept-new here, for the reason `wk bridge ls` gives for using it on the
+# phones directly -- it accepts a key never seen before and still refuses one
+# that has *moved*, and root on a bridge is equivalent to everything behind it.
+# ConnectTimeout for the same reason every wk probe carries one: a hop with no
+# bound of its own is a fleet listing with no bound at all.
+#
+# HostKeyAlias, and one stanza per phone, is the other half. A phone answers to
+# a tailnet name, a .local name and whatever address it holds, and without an
+# alias each of those is a separate first contact -- so a key that has moved is
+# silently accepted the first time it is asked for under a name that has not
+# been used before, which is precisely what accept-new is supposed to prevent.
+# One identity per phone, spanning its names, is what makes "the key changed" a
+# question somebody gets asked. Same mechanism, same reasoning as `tolken` and
+# `tolken-bench` above -- there, two installs sharing one address; here, one
+# install answering to several names. After a reflash the remedy is the one
+# `wk bridge ls` prints: `ssh-keygen -R <name>`, where the name is the alias.
+Host tailnet-bridge-generic tailnet-bridge-generic.local
+  HostKeyAlias tailnet-bridge-generic
+
+Host tailnet-bridge-moose-bmc tailnet-bridge-moose-bmc.local
+  HostKeyAlias tailnet-bridge-moose-bmc
+
 Host tailnet-bridge-generic tailnet-bridge-generic.local tailnet-bridge-moose-bmc tailnet-bridge-moose-bmc.local
   User user
   ServerAliveInterval 15
   ServerAliveCountMax 4
+  StrictHostKeyChecking accept-new
+  ConnectTimeout 10
+
+# `librem5-oob` is `moosebmc`'s jump host and is deliberately not given a
+# `User` here: it is the Librem 5 still running its hand-built PureOS install,
+# not yet reflashed into the `tailnet-bridge-moose-bmc` role that this file
+# describes (bridge/hosts/tailnet-bridge-moose-bmc.conf says so), so its
+# account is not this repository's to declare. The bounds are, and for the
+# reason above they cannot be passed on `moosebmc`'s command line. No
+# BatchMode: password authentication is off on a provisioned bridge but this
+# phone is not one yet, and a hop that refuses to ask for a password it may
+# still need is a hop that fails for the wrong reason.
+Host librem5-oob
+  StrictHostKeyChecking accept-new
+  ConnectTimeout 10

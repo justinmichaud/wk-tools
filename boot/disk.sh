@@ -356,6 +356,94 @@ disk_unique_identity() {
         || die "$dev did not take the new identity; refusing to leave it ambiguous"
 }
 
+# The tailnet identity, onto the card that was just written.
+#
+# This is the half of "everything wk touches is on the tailnet" that cannot live
+# in the image. The image carries tailscale and the join
+# (image/yocto/meta-wk-tailnet); what it must not carry is the auth key or the
+# name, and for different reasons:
+#
+#   the key   is a credential, and an image is an artifact that is stored,
+#             compressed, copied between machines and kept after it is
+#             superseded. A key baked into one is a key in every copy of it,
+#             revocable only by revoking it for the whole fleet. On a card it
+#             exists for one boot -- wk-tailnet-join deletes it once it has been
+#             spent.
+#   the name  is a property of the machine the card goes into, not of the image:
+#             the same image is written for more than one board, and the name a
+#             node has to answer to is the fleet's name for the machine. An
+#             image that joined under its own hostname would be on the tailnet
+#             under a name nothing else here uses -- which is a mapping, written
+#             down somewhere, which is the whole thing the rule forbids.
+#
+# Only for an image that asked for it. The probe is the image's own join script:
+# a card with no wk-tailnet-join is a bridge image, a rescue system or an older
+# build, and seeding a key into one would be leaving a credential on a disk that
+# has nothing to spend it.
+disk_seed_tailnet() { # <device> <tailnet hostname>
+    local dev="$1" name="$2" p2 keyfile tag="${WK_TAILNET_TAG:-tag:wk}"
+    p2=$(disk_part "$dev" 2)
+
+    m_ssh "set -e
+        m=\$(mktemp -d)
+        sudo mount $(sh_quote "$p2") \$m
+        test -x \$m/usr/sbin/wk-tailnet-join && echo has-join || true
+        sudo umount \$m; rmdir \$m" 2>/dev/null | grep -q has-join || {
+        debug "$p2 carries no wk-tailnet-join, so there is nothing to seed"
+        return 0
+    }
+
+    [ -n "$name" ] || barrier "this image joins the tailnet on first boot, and nothing here
+    knows what name it should answer to -- the image records no machine, so the
+    card would join under the image's own hostname and be reachable by a name
+    the fleet does not use. Write it for a machine, or --force to let it pick."
+
+    keyfile=$(wk_tailscale_authkey) || barrier "this image joins the tailnet on first boot and there is no auth
+    key here to give it. The board would boot reachable only over whatever LAN
+    it lands on, which is the state the fleet rule exists to end (CLAUDE.md,
+    'Cattle, not pets')."
+    [ -n "${keyfile:-}" ] || return 0   # forced past the barrier
+
+    info "seeding the tailnet identity onto $p2 -- it joins as '$name' ($tag) on first boot"
+    # The key goes in over the same ssh and never onto a command line, the same
+    # rule as everywhere else it moves. `dd` rather than a redirect inside
+    # `sudo sh -c`, so that nothing here has to nest three levels of quoting
+    # around a secret.
+    m_ssh "set -e
+        m=\$(mktemp -d)
+        sudo mount $(sh_quote "$p2") \$m
+        sudo mkdir -p \$m/etc/wk
+        sudo chmod 0755 \$m/etc/wk
+        printf 'hostname=%s\ntag=%s\n' $(sh_quote "$name") $(sh_quote "$tag") \
+            | sudo tee \$m/etc/wk/tailnet.conf >/dev/null
+        sudo chmod 0644 \$m/etc/wk/tailnet.conf
+        sudo dd of=\$m/etc/wk/tailscale-authkey status=none
+        sudo chmod 0600 \$m/etc/wk/tailscale-authkey
+        sudo chown 0:0 \$m/etc/wk/tailnet.conf \$m/etc/wk/tailscale-authkey
+        sudo umount \$m; rmdir \$m
+        sync" < "$keyfile" \
+        || die "could not seed the tailnet identity onto $p2.
+    The image is written; it will boot with no tailnet identity and be reachable
+    only over whatever LAN it lands on."
+
+    # Read back what can be read back. The key deliberately is not: its size and
+    # mode answer 'did it land', and printing a credential to prove it arrived
+    # would be the same mistake as putting it on a command line.
+    local got
+    got=$(m_ssh "set -e
+        m=\$(mktemp -d)
+        sudo mount -o ro $(sh_quote "$p2") \$m
+        sudo sed -n 's/^hostname=//p' \$m/etc/wk/tailnet.conf | head -1
+        sudo stat -c '%a %s' \$m/etc/wk/tailscale-authkey
+        sudo umount \$m; rmdir \$m" 2>/dev/null | tr '\r' ' ')
+    case "$got" in
+        *"$name"*"600 "*) debug "tailnet identity verified on $p2" ;;
+        *) die "the tailnet identity did not survive the write to $p2 (read back: ${got:-nothing}).
+    Refusing to report a card as seeded when the board would come up with no
+    tailnet identity and nothing to say so." ;;
+    esac
+}
+
 # Grow the last partition to fill the disk.
 #
 # An image is sized to its contents, so a 4 GB image on a 64 GB card leaves most

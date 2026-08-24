@@ -122,30 +122,14 @@ BR_VIA=""
 _ssh_via() { [ -z "$BR_VIA" ] || printf '%s' "-J $BR_VIA"; }
 rsh() { ssh -o BatchMode=yes -o ConnectTimeout=10 $(_ssh_via) "$BR_SSH" "$@"; }
 
-# Run something with a hard ceiling on wall time.
-#
-# `timeout(1)` is GNU and absent on macOS, and per-tool timeout flags cannot be
-# trusted. ssh is the case that matters here: `ConnectTimeout` covers the TCP
-# connect and nothing after it, so a host that accepts port 22 and then says
-# nothing leaves ssh waiting on its own timers -- and a phone half-way into
-# suspend does exactly that. (BSD `nc -w` has the same shape of lie: it
-# documents itself as bounding connects and ran 75 s against a black-holed
-# address here, against 1.05 s for `-G1`.) So the ceiling lives here rather than
-# in any tool's own flag.
-_capped() { # <seconds> <cmd...>
-    local secs="$1"; shift
-    "$@" &
-    local pid=$! rc=0
-    ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-    local wd=$!
-    wait "$pid" 2>/dev/null || rc=$?
-    kill -TERM "$wd" 2>/dev/null
-    wait "$wd" 2>/dev/null || true
-    return "$rc"
-}
+# The ceiling every probe here runs under lives in lib/common.sh as `capped`:
+# `wk status`'s fleet block needs the same one, and a second copy of a bound is
+# two bounds that drift. The reasoning that put it there -- ssh's own flags
+# bounding only the TCP connect, and nothing on the command line reaching a jump
+# hop at all -- is in the comment above it.
 
 _reaches() { # <destination>
-    _capped 20 ssh -o BatchMode=yes -o ConnectTimeout=8 $(_ssh_via) \
+    capped 20 ssh -o BatchMode=yes -o ConnectTimeout=8 $(_ssh_via) \
         -o StrictHostKeyChecking=accept-new "$1" true >/dev/null 2>&1
 }
 
@@ -243,9 +227,9 @@ _bridge_dig() { # <address>
 # only for the handful that answer.
 _bridge_ssh_is_phone() { # <address> -> prints the address
     local u got
-    _capped 4 nc -z "$1" 22 >/dev/null 2>&1 || return 1
+    capped 4 nc -z "$1" 22 >/dev/null 2>&1 || return 1
     for u in root "$BR_USER"; do
-        got=$(_capped 10 ssh -o BatchMode=yes -o ConnectTimeout=4 \
+        got=$(capped 10 ssh -o BatchMode=yes -o ConnectTimeout=4 \
                   -o StrictHostKeyChecking=accept-new "$u@$1" hostname 2>/dev/null \
               | tr -d '\r')
         [ "$got" = "$BR_HOSTNAME" ] && { printf '%s' "$1"; return 0; }
@@ -424,7 +408,7 @@ bridge_bootstrap_root() {
     # and doas sits waiting for input that has already been consumed. Measured:
     # instant write hangs, three-second delay authenticates.
     #
-    # And this is deliberately *not* wrapped in _capped. That helper backgrounds
+    # And this is deliberately *not* wrapped in `capped`. That helper backgrounds
     # the command, and bash redirects a background job's stdin from /dev/null --
     # so the password would never arrive at all. The bound here is doas itself:
     # it gives up after its own retries, and stdin closes right after.
@@ -1411,7 +1395,7 @@ cmd_setup() {
     # Only ask for a key when the node actually needs one. A re-run against a
     # bridge that is already on the tailnet is the common case -- that is what
     # "idempotent" is for -- and a prompt there would be a prompt for nothing.
-    local authkey="" ts_state
+    local authkey="" keyfile="" ts_state
     ts_state=$(rsh "$PRIV tailscale status --json --peers=false 2>/dev/null \
                     | jq -r '.BackendState'" 2>/dev/null) || ts_state=""
     if [ -n "${BR_NO_TAILNET:-}" ]; then
@@ -1436,9 +1420,15 @@ cmd_setup() {
         if [ -n "${WK_BRIDGE_AUTHKEY:-}" ]; then
             authkey="$WK_BRIDGE_AUTHKEY"
             log  "  using the key in \$WK_BRIDGE_AUTHKEY"
+        elif keyfile=$(wk_tailscale_authkey); then
+            # The fleet's one key, from the one place it lives -- the same key
+            # `wk pi setup` and the Mac bench volume join with. It used to be a
+            # `read` here, which meant a second copy of the same credential and
+            # a phone that could only be provisioned by hand.
+            authkey=$(head -1 "$keyfile")
         else
-            printf 'tailscale auth key (tskey-auth-..., empty to skip): ' >&2
-            read -r authkey
+            log  "  no key available, so this run applies the role without joining"
+            log  "  the tailnet; 'wk bridge tailnet $BR_NAME' finishes it later"
         fi
     fi
 

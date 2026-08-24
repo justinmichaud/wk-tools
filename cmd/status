@@ -384,7 +384,40 @@ report_machine() {
 # subshell sources its own driver fresh). The probes are read-only. A short
 # timeout of its own: these are LAN neighbours, and a powered-off board
 # should cost this listing seconds, not the ssh default.
+#
+# The ceiling is the probe's own, not ssh's. `WK_SSH_TIMEOUT` bounds a TCP
+# connect; it does not bound a driver that makes four of them, and it does not
+# reach a *jump* hop at all -- options on an ssh command line are not passed to
+# the ProxyJump child, which runs with the defaults and is free to ask a
+# question. That is what stopped `wk status` on 2026-08-24: the rpi4 is reached
+# through `tailnet-bridge-generic`, the bridge's tailnet name had no
+# known_hosts line of its own (its .local name and its LAN addresses did), and
+# the jump asked "Are you sure you want to continue connecting" -- on the
+# terminal, from a subshell whose stdout was a file and whose stderr was
+# /dev/null, with nothing in this block's 4-second budget able to stop it.
+#
+# dotfiles/ssh/config is where that hop got its bounds, because a jump host
+# reads only its own stanza. `capped` is here because the next unbounded thing
+# will not be that one: a probe that overruns loses its line, not the listing.
 report_fleet_device() {
+    local m="$1" cap role
+    cap=$(( ${WK_FLEET_TIMEOUT:-4} * 5 ))
+    # stdin from /dev/null so nothing down there can read the terminal, and a
+    # process group of its own (capped, lib/common.sh) so the kill reaches the
+    # ssh and not only the subshell that started it.
+    if capped "$cap" _fleet_probe "$m" </dev/null; then return 0; fi
+    # A machine dropped for time still gets a line. An omitted one reads as a
+    # machine that is not in the fleet, which is the single thing this block
+    # exists to be able to say it is. Its role is declared rather than probed,
+    # so the column that does not depend on the machine answering still does not.
+    role=$( . "$WK_ROOT/boot/machines.sh"
+            machine_load "$m" >/dev/null 2>&1 && printf '%s' "${MACH_ROLE:-workstation}"
+            true )
+    printf '  %-9s %-13s %s\n' "$m" "${role:-?}" "no answer within ${cap}s"
+    return 0
+}
+
+_fleet_probe() {
     local m="$1" role mode media armed rec
     (
         set +e

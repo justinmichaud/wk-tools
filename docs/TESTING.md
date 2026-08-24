@@ -2474,6 +2474,108 @@ egress list that cannot be "every upstream in six layers".
       "unknown from here" rather than reporting the driving machine's own
       marker, and the block is skipped inside a workspace (no network, five
       timeouts to say so).
+- [V] no fleet probe can outlive its ceiling, and one that hits it still gets a
+      line (2026-08-24). `wk status` hung outright: the rpi4 is reached through
+      `tailnet-bridge-generic`, and options on an ssh command line do not reach
+      a ProxyJump child — so the hop ran with `StrictHostKeyChecking=ask`,
+      found no known_hosts line for the bridge's tailnet name (its `.local`
+      name and three LAN addresses had one), and asked the question on the
+      terminal from a subshell whose stdout was a file. Two fixes, and both are
+      needed: the bounds a jump hop *can* read (below), and a wall-clock
+      ceiling in the fleet block, because the next unbounded thing will not be
+      that one. A probe killed for time prints "no answer within Ns" rather
+      than vanishing, since a missing line reads as a machine that is not in
+      the fleet.
+- [V] a jump host's stanza carries the bounds its jump cannot inherit:
+      `accept-new` and a `ConnectTimeout` for every name any `ProxyJump` in
+      `dotfiles/ssh/config` names. Checked by resolving that file the way the
+      jump child resolves it (`ssh -G -F`), not by reading it. Each bridge also
+      gets a `HostKeyAlias` so its tailnet name, its `.local` name and its
+      addresses are one identity — without it, `accept-new` silently accepts a
+      key that has *moved* the first time the phone is asked for under a name
+      not used before, which is the one thing that mode exists to refuse.
+- [V] `capped`'s ceiling reaches the whole process group, and a command that
+      finishes early is not held for the rest of it. It lives in
+      `lib/common.sh` because `wk bridge`'s probes and `wk status`'s fleet
+      block need the same one, and two copies of a bound are two bounds that
+      drift.
+- [!] rpi3 and rpi4 are the only fleet machines not on the tailnet, and so the
+      only ones whose reachability is written down anywhere:
+      `raspberrypi3.local` for one, `10.99.1.10` behind `ProxyJump
+      tailnet-bridge-generic` for the other (`dotfiles/ssh/config`), plus
+      `image_addr`'s MAC → ARP → mDNS ladder and `MACH_MAC` in
+      `boot/machines.sh` for a booted bench system. The rule is that none of
+      that exists — a node is on the tailnet and its name is the whole address
+      (CLAUDE.md, "Cattle, not pets"). What stands in the way is a decision, not
+      an accident: the bench images carry no tailscale ("no tailscale and never
+      will", `image/profiles.sh`), so the fix belongs in provisioning — an image
+      that joins the tailnet on first boot — and not in `wk pi setup` against a
+      running board, which is an in-place upgrade of a guest. Until then the jump
+      hop stays, and with it the bounds its stanza has to carry.
+- [V] one tailscale auth key for the whole fleet, in one place, used by every
+      path that joins anything to it: `wk pi setup`, `wk bridge setup` and the
+      Mac bench volume all resolve it through `wk_tailscale_authkey`
+      (`~/.config/wk/tailscale-authkey`, 0600, machine-local, never in the
+      tree), and none of them reads one from a prompt of its own — a join that
+      needs somebody at a keyboard is how a device ends up staying off the
+      tailnet with its address written down instead. What the key has to be is
+      documented where it is resolved: tagged `tag:wk`, reusable, **not**
+      ephemeral, longest expiry. The tag is the permission and a tagged node
+      never key-expires; an ephemeral node is removed from the tailnet the
+      moment it goes offline, taking with it the name that is its whole address.
+      Declared in `wk doctor`'s machine-local section as `re-authable`, because
+      a fresh tagged key is as good as the old one and the nodes already joined
+      do not care.
+- [V] no `tailscale up` in the tree puts the key on a command line — every one
+      passes `--auth-key file:<path>`, because argv is world readable in /proc.
+      `bridge/provision.sh` had this right and says why; `wk pi setup` and the
+      Mac bench first boot were fixed to match (2026-08-24), and the Mac install
+      now advertises `tag:wk` like every other wk-managed node instead of
+      joining untagged and key-expiring in 180 days.
+- [V] the Yocto images are built with tailscale in them, from a layer of their
+      own: `image/yocto/meta-wk-tailnet`, added to bblayers beside `meta-wk` and
+      deliberately *not* part of it — that layer's rule is that it may change
+      how an image is built and never what is in it, and this changes what is in
+      it. `IMAGE_INSTALL:append = " tailscale"` is written by
+      `image/yocto-build.sh`, so "this image is not stock" is two greppable
+      places rather than something hidden in a layer. `wk sysimage build
+      … --no-tailnet` builds without it, for a measurement that has to compare
+      against numbers taken before it existed.
+- [V] the tailscale release is pinned in one file for both halves of the fleet:
+      `meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc` carries
+      the version and a published sha256 per architecture, the recipe `require`s
+      it, and `wk pi setup` reads the same file with `sed` — so the board that
+      gets tailscale pushed onto it and the image that ships with it cannot
+      drift. `wk pi setup` now verifies that checksum before unpacking, and
+      refuses on a board with no sha256 tool rather than trusting the bytes; it
+      used to pipe a tarball off the internet straight into `tar`.
+- [V] no auth key is ever written into an image. Nothing under `image/` or in
+      `cmd/sysimage`'s image-editing paths resolves one: an image is stored,
+      compressed, copied between machines and kept after it is superseded, so a
+      key inside one is a credential in every copy, revocable only fleet-wide.
+      The key reaches the *card* instead (`disk_seed_tailnet`, boot/disk.sh),
+      one boot before `wk-tailnet-join` spends and deletes it.
+- [ ] `wk sysimage write` seeds the card and the board comes up on the tailnet.
+      Written, not yet run against hardware: it probes the written rootfs for
+      the image's own `wk-tailnet-join` and does nothing for a card that has
+      none (a bridge image, a rescue system, an older build); for one that has
+      it, it writes `/etc/wk/tailnet.conf` (the fleet's ssh name for the machine
+      the image is *for*, and the tag) and the key at 0600, reads back what can
+      be read back without printing a credential, and refuses — a barrier, so
+      `--force` states the exception — rather than writing a card that will come
+      up reachable only over whatever LAN it lands on.
+- [ ] and then the deletions, in this order: build, write, boot, confirm the
+      board answers to its own tailnet name, and only *then* remove
+      `image_addr`'s MAC → ARP → mDNS ladder, `MACH_MAC`, the `.local`
+      HostNames, the `10.99.1.10` stanza and the `ProxyJump`. Deleting them
+      first turns a reachable board into an unreachable one.
+- [ ] with those two on the tailnet, each one's ssh config is its name and
+      nothing else: no `HostName`, no `ProxyJump`, no
+      `UserKnownHostsFile=/dev/null`, and with Tailscale SSH no host key to
+      accept — at which point `HostKeyAlias` and `accept-new` on the bridge
+      stanzas are dead config and leave with the hop, kept only for `wk
+      bridge`'s own probes. The two jumps that remain are the two nodes that
+      cannot be on the tailnet: moose's BMC, and Igalia's build boxes.
 - [ ] mutating commands aimed at an armed machine warn or refuse — still
       open; the fleet block shows the arming, nothing gates on it yet.
 - [ ] `wk help hardware` stays true to `boot/machines.sh` and the drivers —

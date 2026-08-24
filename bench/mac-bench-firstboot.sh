@@ -311,7 +311,17 @@ if [ -r "$PAYLOAD/tailscale-authkey" ] && [ -n "$TS_PKG" ]; then
             sleep 10
         fi
         if [ -x "$TS_CLI" ]; then
-            "$TS_CLI" up --auth-key "$(cat "$PAYLOAD/tailscale-authkey")" \
+            # `file:` and not the key itself: argv is world readable, so
+            # `--auth-key tskey-...` hands the fleet's key to anything with a
+            # shell here. Same spelling, same reason, as bridge/provision.sh
+            # and `wk pi setup`.
+            #
+            # --advertise-tags: this install is a wk-managed node like any
+            # other, and a tagged node never key-expires. Untagged, it works for
+            # 180 days and then drops off the tailnet -- taking its name, which
+            # is the only way anything reaches it, with it.
+            "$TS_CLI" up --auth-key "file:$PAYLOAD/tailscale-authkey" \
+                --advertise-tags=tag:wk \
                 --hostname tolken-bench --accept-dns=false >/dev/null 2>&1 || true
             # The property, not the command's exit status: does this machine
             # have a tailnet address?

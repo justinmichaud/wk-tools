@@ -209,7 +209,15 @@ image_profile_load() {
         # still running, which is the failure mode to want.
         #
         # avahi-daemon earns its place for a different reason: the image has no
-        # tailscale and never will, so it is reachable only over the LAN, and
+        # tailscale -- "and never will" was the decision here until 2026-08-24,
+        # when the fleet rule went the other way: everything wk touches is on
+        # the tailnet, and a node is reached by its tailnet name with nothing
+        # about how to reach it written down (CLAUDE.md, "Cattle, not pets").
+        # The Yocto images have that now, from a layer of their own
+        # (image/yocto/meta-wk-tailnet); this is the *distro* builder, which
+        # needs the same treatment and has not had it yet
+        # (docs/TESTING.md, section 7). Until then it is reachable only over the
+        # LAN, and
         # `rpi5-perf.local` is the one name for it that does not depend on the
         # driving machine's ARP cache being warm. The workstation already
         # resolves .local (nss-mdns, avahi running), so this closes the loop
