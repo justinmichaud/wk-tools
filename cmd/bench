@@ -65,8 +65,7 @@
 #
 #   host      where the run happened. Everything here is bench_host=container:
 #             a workspace on this machine, with its cgroup limits and its
-#             shared kernel. The bootable benchmark image
-#             (docs/HANDOFF-benchmarking.md) will be bench_host=image, and the
+#             shared kernel. A bootable bench system is bench_host=image, and the
 #             two are not comparable -- one has a desktop underneath it and one
 #             is the whole machine. Recorded now, before that exists, so the
 #             day it does there is no ambiguity about what the old numbers were.
@@ -96,6 +95,9 @@ WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/arch.sh"
+# build_live: one rule for "is that build actually running", shared with
+# `wk status` rather than re-derived here.
+. "$WK_ROOT/lib/detach.sh"
 
 BENCH_DIR="$WK_STORE/bench"
 SEED_DIR="$WK_STORE/cache/bench"
@@ -111,13 +113,59 @@ load_bench_target() {
     load_target "$t"
 }
 
-# Where this run happened, as recorded in the metadata. One value today,
-# because `wk bench` refuses every target but the container -- but the bootable
-# benchmark image (docs/HANDOFF-benchmarking.md) is a second one, and a field
-# that only ever holds one value is exactly what you want to have added before
-# the second appears. Runs from different hosts are not comparable and
+# Where this run happened, as recorded in the metadata. One value here,
+# because `wk bench` refuses every target but the container -- a bootable bench
+# system is the second, written by `wk bench staged` and by `wk pi bench`.
+# Runs from different hosts are not comparable and
 # `wk bench compare` says so.
 BENCH_HOST=container
+
+# The storage the run read from, described rather than named.
+#
+# Cheap flash contributes variance rather than a bias that can be subtracted
+# afterwards, so a run off a USB stick and a run off an NVMe are two series and
+# not two samples -- the same rule as bench_host. A bare device node does not
+# say which of those it was, so this reports the parent disk with the three
+# facts that decide it: the transport, whether it spins, and whether it takes a
+# discard. Best-effort by design: an unknown storage is recorded as unknown
+# rather than guessed, and nothing here refuses a run.
+bench_root_device() { # <path>
+    local path="${1:-/}"
+    if is_macos; then
+        # `diskutil info` answers for the mount point directly, including the
+        # synthesised APFS case where the "device" is a volume in a container.
+        local out; out=$(diskutil info "$path" 2>/dev/null) || { echo unknown; return 0; }
+        local node proto ssd
+        node=$(printf '%s' "$out" | sed -n 's/^ *Device Node: *//p' | head -1)
+        proto=$(printf '%s' "$out" | sed -n 's/^ *Protocol: *//p' | head -1)
+        ssd=$(printf '%s' "$out" | sed -n 's/^ *Solid State: *//p' | head -1)
+        [ -n "$node" ] || { echo unknown; return 0; }
+        printf '%s (%s, %s)\n' "$node" "${proto:-unknown}" \
+            "$([ "$ssd" = Yes ] && echo ssd || echo rotational)"
+        return 0
+    fi
+    local src disk line rota tran model
+    src=$(findmnt -no SOURCE --target "$path" 2>/dev/null | head -1) || true
+    [ -n "$src" ] || { echo unknown; return 0; }
+    # -s walks *up* to the parent disk, which is what carries the model and the
+    # transport -- a partition, an LVM volume and a device-mapper name all
+    # report neither.
+    # -l as well as -s: the tree form draws glyphs into the NAME column, and
+    # `/sys/block/<glyphs>nvme0n1` resolves to nothing, which reads as a disk
+    # that takes no discard.
+    line=$(lsblk -nlo NAME,TYPE,ROTA,TRAN,MODEL -s "$src" 2>/dev/null \
+             | awk '$2 == "disk" { print; exit }') || true
+    [ -n "$line" ] || { echo "$src"; return 0; }
+    disk=$(printf '%s' "$line" | awk '{print $1}')
+    rota=$(printf '%s' "$line" | awk '{print $3}')
+    tran=$(printf '%s' "$line" | awk '{print $4}')
+    model=$(printf '%s' "$line" | awk '{ $1=""; $2=""; $3=""; $4=""; sub(/^ +/,""); print }')
+    local trim=no-trim
+    [ "$(cat "/sys/block/$disk/queue/discard_max_bytes" 2>/dev/null || echo 0)" -gt 0 ] \
+        && trim=trim
+    printf '%s %s(%s, %s, %s)\n' "$disk" "${model:+$model }" \
+        "${tran:-unknown}" "$([ "$rota" = 0 ] && echo ssd || echo rotational)" "$trim"
+}
 
 # What the benchmark measures, and therefore what the machine has to provide.
 #
@@ -421,7 +469,10 @@ preflight() {
     busy=0
     for f in "$WK_STORE"/ws/*/build.status; do
         [ -f "$f" ] || continue
-        if grep -q '^state=running' "$f"; then
+        # `build_live`, not a grep for the state: a build killed with -9 leaves
+        # `state=running` behind for ever, and this check used to refuse every
+        # later benchmark because of it (lib/detach.sh).
+        if build_live "$f"; then
             busy=$((busy + 1))
         fi
     done
@@ -639,12 +690,13 @@ cmd_run() {
     # cpu-class plans are unaffected and are the point of allowing benchmarking
     # in a container at all. A real 32-bit *rendering* number needs the device
     # rather than a container -- that is the bootable benchmark image, and it
-    # will record bench_host=image (docs/HANDOFF-benchmarking.md).
+    # will record bench_host=image.
     if [ "$class" = gpu ] && ! arch_has_gpu "$arch"; then
         die "$plan is gpu-class and '$ws' is an $arch workspace, which has no GPU.
     cpu-class plans (jetstream3, octane, kraken, sunspider) do run in here,
     with either a browser or a JSCOnly config. For a 32-bit rendering number
-    see docs/HANDOFF-benchmarking.md -- that is a device, not a container."
+    boot a bench system on the board and use `wk pi bench` -- that is a device,
+    not a container."
     fi
 
     local build_dir; build_dir=$(config_build_dir)
@@ -715,6 +767,7 @@ cmd_run() {
     WK_M_SESSION_MODE="${SESSION_MODE:-$(session_mode)}" \
     WK_M_RENDERER="${GPU_RENDERER:-}" WK_M_DISPLAY="$display" WK_M_CPU="$cpu_model" \
     WK_M_KERNEL="$(uname -r)" WK_M_CORES="$(host_cores)" \
+    WK_M_KARCH="$(uname -m)" WK_M_ROOTDEV="$(bench_root_device "$WK_STORE")" \
     WK_M_GOV="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)" \
     WK_M_DRIVER="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)" \
     WK_M_CPUS="$(envelope_cores)" WK_M_MEM="$(envelope_mem_mb)" \
@@ -743,7 +796,16 @@ json.dump({
     "display": g("WK_M_DISPLAY"),
     "host": {
         "kernel": g("WK_M_KERNEL"), "cpu": g("WK_M_CPU"), "cores": g("WK_M_CORES"),
+        # The width of the *kernel*, beside the arch of the build above. They
+        # are not the same fact: an armhf build on an armhf kernel and an armhf
+        # build on an arm64 kernel both report arch=armhf, and they are two
+        # different measurements -- different syscall path, page size and
+        # kernel pointer width. A container borrows the host's kernel, so this
+        # is the host's answer and is meant to be.
+        "kernel_arch": g("WK_M_KARCH"),
         "governor": g("WK_M_GOV"), "nvidia_driver": g("WK_M_DRIVER"),
+        # The storage the workspace and the seeded payload actually live on.
+        "root_device": g("WK_M_ROOTDEV"),
         "container_cpus": g("WK_M_CPUS"), "container_mem_mb": g("WK_M_MEM"),
     },
 }, open(sys.argv[1], "w"), indent=2)
@@ -963,7 +1025,22 @@ if a.get("machine") and b.get("machine") and a["machine"] != b["machine"]:
 # training the eye to skip it. Printing the delta serves both readings: it is
 # the confirmation you wanted when deliberate, and it is the thing you notice
 # when it was not.
-for key, label in (("system", "system"), ):
+# The width of the kernel, which `arch` above does not answer. Two runs whose
+# kernels differ in width are two measurements however identical their builds.
+kaa = (a.get("host") or {}).get("kernel_arch")
+kab = (b.get("host") or {}).get("kernel_arch")
+if kaa and kab and kaa != kab:
+    print("warning: different kernel widths (%s vs %s) -- a 32-bit system and a "
+          "32-bit process on a 64-bit kernel are not the same measurement" % (kaa, kab))
+# Storage. Cheap flash contributes variance rather than a subtractable bias, so
+# a stick run and an SSD run are two series. Reported rather than warned about
+# when only the model differs on the same transport -- see the note below.
+ra = (a.get("host") or {}).get("root_device")
+rb = (b.get("host") or {}).get("root_device")
+if ra and rb and ra != rb:
+    print("warning: different root storage (%s vs %s) -- cheap flash contributes "
+          "variance, not a bias that can be subtracted afterwards" % (ra, rb))
+for key, label in (("system", "system"), ("profile", "profile")):
     if a.get(key) and b.get(key) and a[key] != b[key]:
         print("note: %s differs -- %s vs %s" % (label, a[key], b[key]))
 ka = (a.get("host") or {}).get("kernel")
@@ -1070,8 +1147,8 @@ staged_compare_tool() {
 
 # --- staging a build onto a machine that will run it --------------------------
 #
-# The macOS half of docs/HANDOFF-benchmarking.md, and the shape the user asked
-# for: **build inside the VM, run outside on bare metal.** Both halves are
+# The macOS half of the bench lane, and the shape the user asked for:
+# **build inside the VM, run outside on bare metal.** Both halves are
 # necessary and neither is negotiable. A guest cannot produce a number worth
 # keeping -- it shares a CPU with a desktop, its GPU is paravirtualised and its
 # scheduler is somebody else's -- and the bare-metal role cannot build, because
@@ -1102,8 +1179,8 @@ staged_compare_tool() {
 # NOT YET VERIFIED end to end: there is no benchmark volume on this machine and
 # no guest to build in, so what has been exercised is the staging itself --
 # layout, provenance, refusals -- against a local workspace and a disposable
-# volume. The run in the other role is written up in
-# docs/HANDOFF-benchmarking.md and is deliberately not guessed at here.
+# volume. The run in the other role is docs/HANDOFF-mac-perf-mode.md's and is
+# deliberately not guessed at here.
 cmd_stage() {
     local ws="$1" machine="" config="" plan="" payload="" dry=""
     shift
@@ -1477,8 +1554,7 @@ cmd_staged() {
     done
 
     is_macos || die "'wk bench staged' is macOS bench mode. The Linux systems
-    run their benchmark from the machine that serves them -- see
-    docs/HANDOFF-boot.md and docs/HANDOFF-benchmarking.md."
+    run their benchmark from the machine that drives them -- `wk pi bench`."
 
     local root
     root=$(staged_root) || die "this machine has no benchmark volume to read.
@@ -1800,6 +1876,8 @@ staged_env_json() {
     WK_M_CORES="$(sysctl -n hw.ncpu 2>/dev/null)" \
     WK_M_MEM="$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 ))" \
     WK_M_OS="$(sw_vers -productVersion 2>/dev/null)" \
+    WK_M_KARCH="$(uname -m)" WK_M_ROOTDEV="$(bench_root_device /)" \
+    WK_M_PROFILE="$(wk_image_profile)" \
     WK_M_POWER="$(pmset -g batt 2>/dev/null | head -1)" \
     WK_M_THERM="$(pmset -g therm 2>/dev/null | sed -n 's/.*CPU_Speed_Limit *= *//p' | head -1)" \
     WK_M_DISPLAY="$("$STAGED_PY" -c 'from AppKit import NSScreen; f=NSScreen.mainScreen().frame(); print("%dx%d" % (f.size.width, f.size.height))' 2>/dev/null)" \
@@ -1817,6 +1895,11 @@ json.dump({
     # refused rather than relabelled.
     "class": g("WK_M_CLASS"), "runner": "browser", "arch": "native",
     "bench_host": "image", "role": g("WK_M_ROLE"),
+    # Which system this is, and which configuration of the machine it stands
+    # for. `system` is the artifact that booted; `profile` is what it was built
+    # from, so two runs from a stock and an overclocked profile are legible as
+    # two series rather than as noise.
+    "system": g("WK_M_ROLE"), "profile": g("WK_M_PROFILE"),
     # True when the role was asserted by an override rather than by the
     # machine having booted the image. A run marked this way is a rehearsal.
     "role_marker_overridden": bool(g("WK_M_FAKED")),
@@ -1827,6 +1910,7 @@ json.dump({
     "host": {
         "model": g("WK_M_MODEL"), "cores": g("WK_M_CORES"),
         "memory_mb": g("WK_M_MEM"), "macos": g("WK_M_OS"),
+        "kernel_arch": g("WK_M_KARCH"), "root_device": g("WK_M_ROOTDEV"),
         "power": g("WK_M_POWER"), "cpu_speed_limit": g("WK_M_THERM") or "100",
     },
 }, open(sys.argv[1], "w"), indent=2)

@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+#
+# wk pick [workspace] <commit>... -- cherry-pick WebKit commits onto this branch.
+#
+# The release-branch ritual, encoded. The wiki's version is: collect the commit
+# identifiers from the bug or the PR, resolve each `NNNNNN@main` to a ToT sha by
+# hand -- historically a re-typed throwaway python snippet, or a `git log --grep`
+# over a trailer -- and feed the shas to `git cherry-pick --stdin`.
+#
+# Each argument is either a WebKit identifier (`287654@main`) or an ordinary
+# sha/ref. They are picked in the order given, oldest first if you give them in
+# that order; the command does not reorder them, because which order a series
+# applies in is the picker's decision and getting it wrong is visible.
+#
+#   wk pick 287654@main 287655@main       # in a workspace
+#   wk pick relbranch 287654@main         # from the host, naming the workspace
+#
+# HOW AN IDENTIFIER IS RESOLVED, AND WHY IT IS THEN CHECKED.
+#
+# A WebKit identifier is a position: `N@main` is the Nth commit in main's
+# first-parent history. So the sha is arithmetic -- `main~(count - N)` -- and
+# needs no network, which matters because a workspace has none to commits.
+# webkit.org. Arithmetic is also exactly the kind of thing that is off by one
+# and looks right, so the result is *verified* against the commit's own
+# `Canonical link:` trailer before anything is picked, and a mismatch falls back
+# to a bounded search around the estimate rather than guessing.
+#
+# Nothing is committed on your behalf beyond the picks themselves, and a dirty
+# tree is refused rather than carried into a conflict.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+usage() {
+    if in_workspace; then log "usage: wk pick <commit>...        (287654@main, or a sha)"
+    else log "usage: wk pick <workspace> <commit>...  (287654@main, or a sha)"; fi
+    exit 2
+}
+
+# The workspace name is optional inside one, exactly as in `wk pr`. A commit
+# argument is an identifier (`287654@main`) or a sha; a workspace name is
+# neither, so the two forms are told apart by shape rather than by counting.
+[ $# -ge 1 ] || usage
+NAME=""
+case "$1" in
+    *@*) in_workspace && NAME=$(wk_self) || usage ;;
+    *)   if in_workspace && printf '%s' "$1" | grep -qE '^[0-9a-fA-F]{7,40}$'; then
+             NAME=$(wk_self)
+         else
+             refuse_ws_name "$1" pick "<commit>..."
+             NAME="$1"; shift
+             [ $# -ge 1 ] || usage
+         fi ;;
+esac
+
+require_name "$NAME"
+load_target "$(ws_target "$NAME")"
+wait_ready "$NAME"
+SRC=$(t_src "$NAME")
+
+# The identifiers, as given. Order is the caller's.
+SPECS="$*"
+
+# One round trip, like `wk pr`: everything the decision needs, read out here
+# where it can be reported.
+probe=$(t_exec "$NAME" bash -c "
+    cd $(sh_quote "$SRC") || exit 1
+    echo \"branch=\$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"
+    echo \"dirty=\$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"
+    echo \"picking=\$(test -d .git/sequencer && echo yes || echo no)\"
+" 2>/dev/null | tr -d '\r') || die "could not reach the checkout in '$NAME'"
+
+BRANCH=$(printf '%s\n' "$probe" | sed -n 's/^branch=//p')
+DIRTY=$(printf '%s\n' "$probe"  | sed -n 's/^dirty=//p')
+PICKING=$(printf '%s\n' "$probe" | sed -n 's/^picking=//p')
+
+[ "$PICKING" = no ] || die "a cherry-pick is already in progress in '$NAME'.
+    Finish it first:  git cherry-pick --continue   (or --abort)"
+
+# A dirty tree is a barrier rather than a warning here, unlike `wk pr`: a
+# checkout carries local changes across harmlessly, and a cherry-pick merges
+# into them -- so a conflict arrives mixed with your own edits and there is no
+# clean way back out.
+if [ "${DIRTY:-0}" -gt 0 ] 2>/dev/null; then
+    barrier "'$NAME' has $DIRTY uncommitted change(s), and a cherry-pick
+    conflicts into them. Commit or stash first (git stash push)."
+fi
+
+# --- resolve ------------------------------------------------------------------
+#
+# Resolution runs in the workspace, because that is where the checkout is. It
+# prints `<spec> <sha> <how>` per line and nothing else on stdout.
+resolved=$(t_exec "$NAME" bash -c "
+cd $(sh_quote "$SRC") || exit 1
+
+# The branch an identifier counts along. main for @main, and the identifier's
+# own branch name otherwise -- a release identifier counts along that release.
+tip_for() {
+    case \"\$1\" in
+        main) for r in origin/main main origin/master; do
+                  git rev-parse --verify --quiet \"\$r\" >/dev/null && { echo \"\$r\"; return; }
+              done ;;
+        *)    for r in \"origin/\$1\" \"\$1\"; do
+                  git rev-parse --verify --quiet \"\$r\" >/dev/null && { echo \"\$r\"; return; }
+              done ;;
+    esac
+}
+
+# The identifier a commit claims for itself, from the trailer commits.webkit.org
+# writes. Empty for a commit that has none, which is every unlanded one.
+ident_of() {
+    git --no-pager log -1 --format=%B \"\$1\" 2>/dev/null \
+        | sed -n 's|^ *Canonical link: https://commits.webkit.org/||p' | tail -1
+}
+
+for spec in $SPECS; do
+    case \"\$spec\" in
+    *@*)
+        n=\${spec%%@*}; br=\${spec##*@}
+        case \"\$n\" in ''|*[!0-9]*) echo \"\$spec - not-an-identifier\"; continue ;; esac
+        tip=\$(tip_for \"\$br\")
+        [ -n \"\$tip\" ] || { echo \"\$spec - no-such-branch:\$br\"; continue; }
+        total=\$(git rev-list --count --first-parent \"\$tip\")
+        back=\$(( total - n ))
+        [ \"\$back\" -ge 0 ] || { echo \"\$spec - ahead-of-\$br\"; continue; }
+        sha=\$(git rev-parse --verify --quiet \"\${tip}~\${back}\" || true)
+        if [ -n \"\$sha\" ] && [ \"\$(ident_of \"\$sha\")\" = \"\$spec\" ]; then
+            echo \"\$spec \$sha arithmetic\"
+            continue
+        fi
+        # The arithmetic disagreed with the commit's own trailer. Search a
+        # window around the estimate rather than the whole history: the two can
+        # differ by a few when a branch's history was rewritten, never by
+        # thousands.
+        found=\"\"
+        for d in 1 2 3 4 5 6 7 8 9 10 20 50 100; do
+            for cand in \"\${tip}~\$(( back - d ))\" \"\${tip}~\$(( back + d ))\"; do
+                s=\$(git rev-parse --verify --quiet \"\$cand\" || true)
+                [ -n \"\$s\" ] || continue
+                [ \"\$(ident_of \"\$s\")\" = \"\$spec\" ] || continue
+                found=\$s; break 2
+            done
+        done
+        if [ -n \"\$found\" ]; then echo \"\$spec \$found search\"
+        else echo \"\$spec - unresolved\"; fi
+        ;;
+    *)
+        sha=\$(git rev-parse --verify --quiet \"\${spec}^{commit}\" || true)
+        if [ -n \"\$sha\" ]; then echo \"\$spec \$sha ref\"
+        else echo \"\$spec - no-such-commit\"; fi
+        ;;
+    esac
+done
+" 2>/dev/null | tr -d '\r') || die "could not resolve the commits in '$NAME'"
+
+bad=$(printf '%s\n' "$resolved" | awk '$2 == "-" {print}')
+if [ -n "$bad" ]; then
+    die "could not resolve:
+$(printf '%s\n' "$bad" | sed 's/^/    /')
+    An identifier is <number>@<branch> and is resolved against that branch in
+    this checkout, so a branch it does not have -- or a commit newer than what
+    'wk sync' last mirrored -- cannot be found here. Fetch it, or pass a sha."
+fi
+
+info "picking onto $BRANCH in '$NAME':"
+printf '%s\n' "$resolved" | while read -r spec sha how; do
+    subject=$(t_exec "$NAME" bash -c \
+        "cd $(sh_quote "$SRC") && git --no-pager log -1 --format=%s $(sh_quote "$sha")" \
+        2>/dev/null | tr -d '\r')
+    log "  $(printf '%.12s' "$sha")  $spec  ${subject:0:60}$([ "$how" = search ] && printf '   [resolved by search]')"
+done
+
+SHAS=$(printf '%s\n' "$resolved" | awk '{print $2}')
+
+# --- pick ---------------------------------------------------------------------
+#
+# `--stdin` so the whole series is one invocation and one sequencer state: a
+# conflict stops it where it stopped, and `git cherry-pick --continue` in the
+# workspace resumes it, which is the ordinary git thing to do and needs no verb
+# of its own here.
+if t_exec "$NAME" bash -c "
+    cd $(sh_quote "$SRC") &&
+    printf '%s\n' $(sh_quote "$SHAS") | git cherry-pick --stdin
+"; then
+    info "picked $(printf '%s\n' "$SHAS" | grep -c .) commit(s) onto $BRANCH"
+else
+    warn "the cherry-pick stopped -- almost always a conflict, and the sequencer holds where."
+    log  "  in the workspace:  git status; git cherry-pick --continue   (or --abort)"
+    exit 1
+fi

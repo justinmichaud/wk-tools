@@ -45,6 +45,7 @@ wk build <config>     # jsc-release, gtk-debug, wpe-release, mac-release, ...
 wk run -- <args>      # run jsc from the current build
 wk test <args>        # run tests
 wk status             # this workspace's build/test state; exit code is machine-readable
+wk status --wait      # ... blocking until it is not busy, instead of polling a pid
 wk logs [-f|--all]    # the build log, errors first
 wk build <config> --dry-run    # what it would build, and where, without building
 wk profile [file.js]  # where the time went: JSC's own profilers, samply,

@@ -254,7 +254,7 @@ b_arm() {
     for this Mac -- an image copied onto a disk will not boot (the boot policy
     lives in this machine's secure storage). Install it from Recovery or with
     the macOS installer app, name the volume '$MACH_VOLUME', and see
-    docs/HANDOFF-benchmarking.md for what to turn off on it.
+    docs/HANDOFF-mac-perf-mode.md for what to turn off on it.
     A different name:  WK_BENCH_VOLUME='...' wk boot $MACH_NAME"
 
     cat >&2 <<EOF

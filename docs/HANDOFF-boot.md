@@ -59,6 +59,14 @@ reachable — where firmware that gets partway into a boot tree and no further
 - **An image that cannot be reached must return the machine by itself.** Every
   system carries a watchdog that self-disarms and reboots; without it a failed
   boot is a trip to the machine.
+- **The residual hands-on case, and it is real**: a medium complete enough for
+  firmware to commit to it (a `start4.elf` is there) but that then hangs takes
+  the fall-through away — the board keeps choosing that medium, a power cycle
+  re-enters the same hang instead of landing on the rescue system, and the
+  self-disarm never runs because it lives in the rootfs. Observed on the rpi4
+  with a downstream Yocto image (`docs/TESTING.md`). `boot/check-boot-files.py`
+  is what keeps a *partial* tree from being written; a complete tree that hangs
+  later is what nothing can catch from here.
 - **A check that reads a different copy of the thing it checks is not a check** —
   verify the artifact that will actually be written or booted, not its source.
 - **First contact with an unreachable board is physical.** Every arming

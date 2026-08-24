@@ -17,8 +17,7 @@ another provisioned machine or a hand flash.
 The constraint that shapes it: this workstation deliberately has no privileged
 component, so a local write means **interactive sudo, and no NOPASSWD**. That
 decision is recorded with the device lifecycle in
-`docs/HANDOFF-vocabulary.md` (item 1) and listed as a gap in
-`docs/HANDOFF-cattle.md`.
+`docs/HANDOFF-vocabulary.md` (item 1).
 
 No machine constraint beyond "wherever the SD card reader physically is."
 

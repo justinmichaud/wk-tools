@@ -35,6 +35,9 @@ workspaces
   status [name]             build/container state, then the fleet: each
                             device's role, mode and wk-owned media; exit code
                             is machine-readable
+    --wait [--timeout S]    block while it is busy, then report once -- instead
+                            of polling a pid in a loop, which is not a fact this
+                            end can know for a build driven over ssh
   logs <name> [-f|--all]    build log, errors first
   run <name> [--config C] [--lldb] [args]   run jsc from the workspace build
   gui <name> [url]          MiniBrowser in the seat, launched as perf runs do
@@ -73,6 +76,9 @@ sources and disk
                             what `wk claude` sets before an agent takes over
                             (--target T, --all: the machine that holds the key)
   remotes [ws] [--fix]      is origin upstream, and can fork be pushed to?
+  pick [ws] <commit>...     cherry-pick WebKit commits onto this branch, by
+                            identifier (287654@main) or sha; resolves without
+                            the network and checks the resolution before picking
   pr [ws] <user>:<branch>   check out a PR head from WebKit or WPEWebKit; warns
                             only when your own work is at stake
   report                    weekly GitHub activity summary (uses gh)

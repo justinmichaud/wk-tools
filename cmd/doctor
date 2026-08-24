@@ -104,7 +104,7 @@ check "shell rc sources shell/bashrc" "./setup --stage dotfiles" \
     sh -c "grep -q 'wk-tools/shell/bashrc' '$HOME/.zshrc' 2>/dev/null || grep -q 'wk-tools/shell/bashrc' '$HOME/.bashrc' 2>/dev/null"
 
 # --- machine-local state: declared, never hidden ---------------------------------
-# The cattle-not-pets rule (docs/HANDOFF-cattle.md): everything a rebuilt
+# The cattle-not-pets rule (CLAUDE.md): everything a rebuilt
 # machine cannot get from this repo is *declared here*, with how to get it
 # back -- so a from-nothing rebuild is a checklist, not an archaeology dig.
 # Three kinds, and the kind is the restore story:
@@ -122,6 +122,13 @@ local_state() { # <path> <kind> <how to get it back>
         unk "$disp (absent)" "$kind: $how"
     fi
 }
+# Benchmark runs are the one thing in the store that is data rather than a
+# rebuildable artifact: a snapshot can be re-fetched and an image can be rebuilt,
+# but a number came off a machine in a state that no longer exists. Named here
+# because the ledger is only honest if it names what a rebuild would lose --
+# and this is not in the repo, deliberately (it is measurement data, and the
+# repo is public).
+local_state "$WK_STORE/bench"                      backed-up   "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement"
 local_state "$WK_STORE/secrets"                    regenerable "wk key register makes new deploy keys (revoke the old ones on GitHub)"
 local_state "$WK_STORE/secrets/claude-credentials.json" re-authable "claude login in one workspace re-seeds it"
 local_state "$HOME/.config/wk/targets"             backed-up   "this device's own view of shared targets; recreate by hand from wk help machines"

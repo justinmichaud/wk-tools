@@ -18,9 +18,9 @@ Governor and swap-off are already baked into every system by `cmd/sysimage`.
   `image/perf-linux-rpi5/config.txt.append` says so in place: when an `oc`
   profile arrives it sets `arm_freq`/`over_voltage` in *that* file, per image.
   `image/perf-linux-rpi4/config.txt.append` is the worked example
-  (`arm_freq=1500`, `force_turbo`). Note `docs/HANDOFF-benchmarking.md` requires
-  a run to record `profile=stock|oc` and `cmd/bench` records neither — one piece
-  of work, not two.
+  (`arm_freq=1500`, `force_turbo`). A run already records the `profile` it
+  booted (`cmd/bench`, `wk_image_profile`), so an `oc` profile becomes a series
+  of its own the moment it exists.
   **Never write the overclock to the EEPROM**: `SDRAM_BANKLOW` and `BOOT_ORDER`
   are firmware state shared by both modes, so it would overclock the workstation
   too.

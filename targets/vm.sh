@@ -564,8 +564,7 @@ t_pull() {
 
 # A directory out of the guest. rsync over the same ssh options everything
 # else here uses, because this is how a build tree gets to the machine that
-# will run it (docs/HANDOFF-benchmarking.md: build in the guest, run on bare
-# metal) and that tree is tens of thousands of files.
+# will run it (build in the guest, run on bare metal) and that tree is tens of thousands of files.
 t_pull_dir() {
     local name="$1" src="$2" dest="$3"; shift 3
     local ex=()
@@ -766,6 +765,11 @@ t_destroy() {
     local ws; ws=$(wk_ws_dir "$name")
     [ -d "$ws" ] && { rm -rf "$ws"; info "removed $ws"; }
     rm -f "$WK_VM_DIR/$name.run.log"
+    # The unfiltered marker too. It records that *this* guest was booted with
+    # the packet filter off, and `wk claude` refuses on it (cmd/claude) -- so a
+    # marker outliving the guest that earned it refuses the next guest of the
+    # same name, which is a false refusal nobody can explain from the message.
+    rm -f "$WK_VM_DIR/$name.unfiltered"
 }
 
 # Build the base once, so every workspace starts warm.

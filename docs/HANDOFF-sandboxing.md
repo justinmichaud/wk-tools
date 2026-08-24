@@ -46,7 +46,9 @@ every surface added since the request:
 - **The device paths** — `wk pi deploy` and `wk pi bench` put code on a board
   and run it; `wk sysimage write` writes physical disks over ssh.
 - **The yocto build's own egress widening** (`docs/HANDOFF-yocto.md`).
-- **The restored git helpers**, as each lands (`docs/HANDOFF-git-tools.md`).
+- **The restored git helpers** — `wk pr`, `wk pick` and `container/bin/git-sync-fork`
+  all reach GitHub, and only the push switch stands between an agent and a
+  publish.
 - **macOS, as a separate pass**, against the Tart VM model — different in kind,
   so it may hide different bugs. One input is already on the record: the golden
   base provisions with **egress unfiltered**, because Softnet's flags are passed
@@ -56,10 +58,10 @@ every surface added since the request:
 - **Two live sudo grants that contradict the password rule**, both reported by
   the tooling itself rather than found by the audit: moose's `/usr/bin/tee` is
   NOPASSWD, which is passwordless write to any file and therefore equivalent to
-  NOPASSWD root (`docs/HANDOFF-boot.md`); and **the rpi5 grants `NOPASSWD: ALL`**
-  — `wk selftest --quick` fails on it today with "root costs nothing at all",
-  remedy `wk sudo require`. Fix the rpi5 now; narrowing moose's grant is the
-  audit's.
+  NOPASSWD root (`docs/HANDOFF-boot.md`); and **the rpi5 grants
+  `(ALL) NOPASSWD: ALL`** — `sudo -n -l` on the board shows it, so root costs
+  nothing at all there, and `wk sudo status` is what reports it. Remedy:
+  `wk sudo require`. Fix the rpi5 now; narrowing moose's grant is the audit's.
 
 Run it alongside `docs/Security/HANDOFF-tailscale.md`: its items 5-7 are the
 same question asked from the network side.

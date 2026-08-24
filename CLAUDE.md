@@ -60,8 +60,8 @@ reasoning; this is the binding statement.
 - Hand-applied settings are expected to vanish on a rebuild. Anything that is
   missed belongs in `./setup` or `wk backup`, not in a person's memory.
 
-`docs/HANDOFF-cattle.md` holds the per-machine ledger and the open gaps;
-`docs/HANDOFF-reprovision.md` is the punch-list for the day it is tested.
+`docs/HANDOFF-reprovision.md` is the punch-list for the day this is tested by
+an actual rebuild.
 
 ## Layering (binding for new code)
 
@@ -80,10 +80,11 @@ has a second consumer.
 - **`wk selftest` encodes plan lines by phrase**, so rewording or deleting a
   line in `docs/TESTING.md` without touching `cmd/selftest` reports DRIFT, which
   is a failure. Change both.
-- **Handoff docs carry a "Remaining, checked against the tree" block at the
-  top.** When work lands, update that block rather than leaving the reader to
-  infer state from the body. The body is the record of what was learned and why;
-  the header is what is still owed.
+- **A handoff doc under `docs/` states what is still owed, and nothing else.**
+  It is a work list, not a record: when the work lands, the doc shrinks, and
+  when the last item lands the doc is deleted. What was learned on the way
+  belongs in the code that embodies it, in `docs/TESTING.md`, or in
+  `docs/help/`; git history holds the rest.
 - **Tools stranded by a workflow change are removed in the change that strands
   them**, not later.
 

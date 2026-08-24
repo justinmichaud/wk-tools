@@ -15,12 +15,46 @@ allowed-tools:
   - Bash(rm -rf:*)
   - Bash(uname:*)
   - Bash(git rev-parse:*)
-  - Bash(wkdev-enter:*)
+  - Bash(wk build:*)
+  - Bash(wk run:*)
+  - Bash(wk status:*)
+  - Bash(wk logs:*)
 ---
 
 # Building JavaScriptCore / WebKit
 
-Every command runs from `$WEBKIT_ROOT`, the repository root. Resolve it with `git rev-parse --show-toplevel`. Default to a **release** build and the **JavaScriptCore** target unless the user says otherwise; swap `release` for `debug` when they ask.
+**This skill owns build guidance. Nothing else should state a build command.**
+
+## First branch: are you inside a wk workspace?
+
+`pwd` answers it — a Linux workspace holds the checkout at `/src/WebKit`, a macOS
+guest at `/Users/admin/WebKit`, and `~/.wk-workspace` exists in both.
+
+**Inside a workspace, the build is one command and none of the tuning below is
+yours to do:**
+
+```bash
+wk build <config>              # jsc-release, gtk-debug, wpe-release, mac-release, ...
+wk build <config> --detach     # tens of minutes; survives the shell going away
+wk build --list                # what the configs are
+wk status                      # build/test state, machine-readable exit code
+wk logs [-f]                   # the log, errors first
+wk run -- <args>               # run jsc from the build just made
+```
+
+`wk build` already derives the job count from available memory, runs the build at
+a nice level that keeps the host usable, watches for OOM (`build=oom` in
+`wk status`, with the peak and the budget — rebuild with
+`WK_MB_PER_JOB=3072 wk build <config>` rather than assuming the code is at
+fault), and passes the right arch flags in a 32-bit workspace. Do not hand-roll
+a `build-webkit` invocation in here: a raw `ninja -j$(nproc)` can hang the
+machine, and every number below about `-j` is the host's problem, not yours.
+
+**Outside a workspace — a host workstation with a checkout — the rest of this
+file applies.** Every command runs from `$WEBKIT_ROOT`, the repository root;
+resolve it with `git rev-parse --show-toplevel`. Default to a **release** build
+and the **JavaScriptCore** target unless the user says otherwise; swap `release`
+for `debug` when they ask.
 
 ## Parallelism: size `-j` to memory, and always `nice` the build
 
@@ -93,14 +127,22 @@ A JSCOnly `bin/jsc` runs in place — it links its sibling `lib/` via **RPATH**,
 redirect it to a different `libJavaScriptCore.so`; to run an alternate or saved lib, copy it over the
 in-place file (back it up first).
 
-### 32-bit ARMv7 (wkdev32 container)
+### 32-bit ARMv7 (an armhf workspace)
 
-Build and run 32-bit inside the container: `wkdev-enter --name wkdev32 --exec -- bash -lc '<cmd>'`
-(interactive: `wkdev-enter --name wkdev32`). In-container `/home/<u>/Development` maps to host
-`/home/<u>/Development/32/Development`. The build is `linux32 Tools/Scripts/build-webkit --jsc-only
---release --no-unified-builds` with `-march=armv7-a -mthumb -mfpu=neon -mfloat-abi=hard` in
-`CMAKE_{C,CXX}_FLAGS`, `-DCMAKE_BUILD_TYPE=RelWithDebInfo`, and `-DUSE_LD_LLD=OFF`. The full recipe is
-saved at `WebKitBuild/build-jsc-32.sh` (incremental ~11-17 min); output is
+**The container this section was written against (`wkdev32`, with host paths under
+`~/Development/32`) is gone.** 32-bit work now happens in a native armhf
+workspace, made on the host with `wk new <name> --arch armhf`; inside it,
+`wk build jsc-release` is the whole build and it already passes `linux32` and the
+ARM flags. `arch=` in `~/.wk-workspace` is the authority for the width — the
+kernel is the host's, so `uname -m` answers `aarch64` in a 32-bit workspace and
+`lscpu` looks 64-bit too. Nothing has gone wrong there.
+
+Everything below is what the flags mean and what goes wrong at this width. It is
+still current: the same compiler, the same linker, the same 32-bit address space.
+
+The flags `wk build` passes for you: `-march=armv7-a -mthumb -mfpu=neon
+-mfloat-abi=hard` in `CMAKE_{C,CXX}_FLAGS`, `-DCMAKE_BUILD_TYPE=RelWithDebInfo`,
+`-DUSE_LD_LLD=OFF`, and `linux32` around the whole build. Output is
 `WebKitBuild/JSCOnly/Release/bin/jsc`.
 
 When a 32-bit build/link fails or the JIT comes up disabled, verify the target arch first — this is
@@ -154,8 +196,9 @@ shows up as a link error, not a compile error: gold reported
 empty names (`readelf -gW obj.o | grep '^COMDAT group'` shows `` `.group' [] `` instead of a mangled
 name; a healthy sibling object is the contrast to check). Confirm by compiling the file by hand without
 the launcher, then fix with `CCACHE_RECACHE=1 <build command>` to overwrite just that entry. Check
-`ccache -s` **as the build user** — `podman exec --user 1000:1000`, since a plain `podman exec` runs as
-root and reports root's empty cache, which reads as "ccache is not involved." A cache over its size
+`ccache -s` **as the build user** — inside the workspace, which is where the cache
+is; asking on the host, or as root, reports an empty cache that reads as "ccache
+is not involved." A cache over its size
 limit with many cleanups and nonzero `Errors` is how entries get truncated in the first place: this one
 sat at 7.7 GB against a 5 GB ceiling with 1359 cleanups, and the constant eviction also held the hit
 rate to 7.6%. Raise the ceiling (`ccache -M 25G`, persisted to `~/.config/ccache/ccache.conf`) and
@@ -191,7 +234,7 @@ This matters for wasm: a linear-memory alignment immediate is only a hint, so an
 fast path from `MacroAssemblerARMv7::storePair32` for this reason (`5e2002044e76`); the matching
 load side is still unfixed upstream.
 
-#### Getting a C++ backtrace out of a wkdev32 crash
+#### Getting a C++ backtrace out of a 32-bit crash
 
 Both obvious routes fail here. In-container `gdb` is a 32-bit process and exhausts its address space
 loading the debug build's split DWARF (`virtual memory exhausted` while reading `.dwo`s), and

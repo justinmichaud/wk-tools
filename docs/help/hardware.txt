@@ -102,7 +102,7 @@ tailnet bridges -- the out-of-band path (see `wk help bridge`)
 
   A phone is enumerated by `bridge/hosts/<name>.conf` rather than by
   `boot/machines/<name>.conf`, which is the cattle rule's obligation 1 for a
-  bridge (docs/HANDOFF-cattle.md) -- it is a machine wk owns, but not one wk
+  bridge -- it is a machine wk owns, but not one wk
   boots into a bench system, so it is in the registry that describes what it
   actually is. `wk status` prints both: the fleet block for the machines
   `wk boot` drives, and a bridges block from this registry. Only the first
@@ -119,5 +119,5 @@ what is still hands-on, fleet-wide
 `wk boot --list` names the fleet; `wk status` reports each device's role,
 mode, and what is on its media right now. Each device is defined by
 boot/machines/<name>.conf, which opens with its from-nothing recipe -- the
-cattle-not-pets rule (docs/HANDOFF-cattle.md): any of these machines can be
+cattle-not-pets rule (CLAUDE.md): any of these machines can be
 reproduced from this repo plus the restorables `wk doctor` declares.

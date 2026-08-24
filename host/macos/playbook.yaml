@@ -58,6 +58,8 @@
       # applying the desktop reserve again here would leave containers with a
       # fraction of the memory that is actually free.
       ansible.builtin.file:
+        # One of the two paths `headless_markers` (lib/resources.sh) reads;
+        # in this VM wk_root *is* $WK_STORE, so the two coincide here.
         path: "{{ wk_root }}/.headless"
         state: touch
         owner: core

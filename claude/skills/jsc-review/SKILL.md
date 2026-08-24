@@ -16,7 +16,6 @@ allowed-tools:
   - Bash(Tools/Scripts/build-webkit:*)
   - Bash(Tools/Scripts/run-jsc-stress-tests:*)
   - Bash(Tools/Scripts/run-javascriptcore-tests:*)
-  - Bash(wkdev-enter:*)
   - Bash(taskset:*)
   - Bash(ls:*)
   - Bash(cat:*)

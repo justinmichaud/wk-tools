@@ -1,6 +1,6 @@
 ---
 name: jsc-profile
-description: Use to profile a JavaScriptCore run — a microbenchmark or a JetStream3 subtest — to find where time goes and root-cause a regression. Picks the tool by where the cost is: JSC's built-in sampling + bytecode profilers for generated JS code (FTL/DFG/Baseline), or samply (~/Development/samply) for C++ engine code. Covers reading the tier breakdown, dumping/inspecting the bytecode profile with display-profiler-output, and diffing baseline-vs-patched profiles.
+description: Use to profile a JavaScriptCore run — a microbenchmark or a JetStream3 subtest — to find where time goes and root-cause a regression. Picks the tool by where the cost is: JSC's built-in sampling + bytecode profilers for generated JS code (FTL/DFG/Baseline), or samply for C++ engine code. Covers reading the tier breakdown, dumping/inspecting the bytecode profile with display-profiler-output, and diffing baseline-vs-patched profiles.
 user-invocable: true
 allowed-tools:
   - Bash(Tools/Scripts/display-profiler-output:*)
@@ -15,7 +15,6 @@ allowed-tools:
   - Bash(valgrind:*)
   - Bash(callgrind_annotate:*)
   # Linux / 32-bit container path:
-  - Bash(wkdev-enter:*)
   - Bash(taskset:*)
 ---
 
@@ -77,7 +76,8 @@ rather than waiting on a stuck run.
 > A **0.1% statistically significant** regression in an **overall** benchmark score is **HUGE**;
 > **>1%** on a non-noisy subtest/microbenchmark is significant. Profiling is sampling — its own counts
 > are noisy and it perturbs timing slightly, so a profile **localizes** a regression you've already
-> confirmed statistically (via `jsc-jetstream-compare` / `jsc-microbenchmark`); it does not by itself
+> confirmed statistically — invoke `jsc-jetstream-compare` or `jsc-microbenchmark` (skip only if
+> already loaded this conversation). A profile does not by itself
 > prove one. Confirm the size with timing first, then profile to explain it.
 
 ## What to profile
@@ -174,7 +174,7 @@ poorly — the mirror image of JSC's own profilers, which label JS/bytecode prec
 internals. Supported on **x86_64 and aarch64**; for **32-bit ARM** see the box below.
 
 ```bash
-SAMPLY=~/Development/samply/target/release/samply
+SAMPLY=$(command -v samply)
 "$SAMPLY" setup     # once on macOS: codesign samply so it can attach. (May need sudo.)
 
 DIR="$WEBKIT_ROOT/WebKitBuild/Release"
@@ -220,7 +220,8 @@ DYLD_FRAMEWORK_PATH="$DIR" "$SAMPLY" record --save-only -o /tmp/prof-patched.jso
 > 3. **Run every samply invocation under `linux32`** (sets the uname personality to 32-bit so samply
 >    picks the arm code paths) and pin cores: `linux32 taskset -c 2-9 "$SAMPLY" record …`.
 > 4. **Lower `perf_event_paranoid` to ≤1** (default 2 → samply errors out): the box-owner runs
->    `echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid` on the **host** (host-wide kernel knob;
+>    `echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid` on the **host** — `wk profile` reads it
+>    first and refuses with exactly that line, and a bench system already has `-1` (host-wide knob;
 >    the agent can't and shouldn't silently weaken it). Restore the prior value after.
 > 5. **Symbolicate JIT'd JS frames** with jsc flags `--logJITCodeForPerf=1 --jitDumpDirectory=/tmp`
 >    (writes a perf jitdump samply ingests) — otherwise JIT frames are unnamed; with them you get
@@ -288,5 +289,6 @@ forcing a culprit.
   timing runs (`jsc-microbenchmark` / `jsc-jetstream-compare`).
 - For regressions, **always profile both builds the same way** and diff; a single profile shows hot
   code, not *changed* code.
-- Quote args; pass lists literally (the Bash tool is zsh — unquoted `$list` does not word-split).
+- Quote args; pass lists literally — word-splitting differs between shells, so a list that works
+  here can arrive as one argument elsewhere.
 - Keep dumped profiles under `/tmp/` so the user can inspect them.

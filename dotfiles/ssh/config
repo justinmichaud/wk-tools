@@ -81,7 +81,7 @@ Host tolken
 # User: `bench`, and deliberately not a person's name -- not the host install's
 # `justinmichaud`, and not the fleet's `jmichaud` either.
 #
-# A benchmark install is cattle (docs/HANDOFF-cattle.md): it is meant to be
+# A benchmark install is cattle (CLAUDE.md): it is meant to be
 # reproducible from nothing, by anyone, on any machine. Whose laptop it happens
 # to be attached to is not a property of the measurement, so an operator's
 # account name inside the artifact is exactly the hidden state that document

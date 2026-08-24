@@ -1369,7 +1369,7 @@ _nb_resolve() {
 }
 
 chk_machine_registry() {
-    # The fleet is config, not code (docs/HANDOFF-cattle.md): every machine is
+    # The fleet is config, not code (CLAUDE.md): every machine is
     # a conf under boot/machines/ that loads cleanly and answers the questions
     # every consumer asks of it. A conf that half-loads would surface as a
     # driver error at arming time, on the machine it matters on.

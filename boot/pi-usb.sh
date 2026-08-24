@@ -11,8 +11,7 @@
 # the next entry and comes up on its rescue system, reachable. Firmware that
 # gets as far as start4.elf and no further *halts* instead -- no fall-through,
 # nothing over the wire -- and a lane that runs unattended cannot have a state
-# whose only exit is a hand on the power supply. See
-# docs/HANDOFF-benchmarking.md, "rpi4".
+# whose only exit is a hand on the power supply.
 #
 # So the arming moves to the boot medium:
 #

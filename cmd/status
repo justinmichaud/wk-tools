@@ -187,11 +187,10 @@ report_one() {
         # A 'running' status file only means the build did not get to write a
         # final state -- it says nothing about liveness. Age of the log does.
         if [ -f "$logf" ]; then
-            local age now mtime
-            now=$(date +%s)
-            mtime=$(stat -c %Y "$logf" 2>/dev/null || stat -f %m "$logf" 2>/dev/null || echo "$now")
-            age=$(( now - mtime ))
-            if [ "$age" -gt "${WK_STALL_SECONDS:-300}" ]; then
+            # log_age and the threshold are lib/detach.sh's, so `wk bench`'s
+            # preflight and this report answer "is it running" the same way.
+            local age; age=$(log_age "$logf")
+            if ! build_live "$status_file" "$logf"; then
                 warn "  no log output for ${age}s -- likely stalled or killed"
                 _stall_report "$logf" "$age"
             else
@@ -265,6 +264,33 @@ report_self() {
 # would be the same facts twice, compared against the wrong side.
 FLEET=1
 if [ "${1:-}" = --no-fleet ]; then FLEET=""; shift; fi
+
+# --wait: block until this workspace is not busy, then report once.
+#
+# The ritual it replaces was hand-rolled in every long session, on both
+# workstations, in two forms: `for i in $(seq …); do kill -0 <pid> …; sleep 5;
+# done` around a pid, and `until grep -qaE 'BUILD OK|BUILD FAILED|BUILD STALLED'
+# <log>; do …` around a log. Both are wrong in the same way: a build can be
+# driven from either end of an ssh, so a pid on this side is not the fact it
+# looks like, and a grep for the words a log happens to print today is a second
+# copy of the state machine `build.status` already is. A poll loop that outlives
+# its own timeout then reports "still building" about a build that failed a
+# minute ago. This asks the same question `wk
+# status` already answers, and answers it with the same exit code.
+WAIT=""
+WAIT_TIMEOUT="${WK_WAIT_TIMEOUT:-0}"
+_args=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-fleet)  FLEET=""; shift ;;   # also accepted after --wait, not only first
+        --wait)      WAIT=1; shift ;;
+        --timeout)   WAIT_TIMEOUT="${2:-0}"; shift 2 ;;
+        --timeout=*) WAIT_TIMEOUT="${1#*=}"; shift ;;
+        *)           _args="$_args $1"; shift ;;
+    esac
+done
+# shellcheck disable=SC2086 -- deliberate re-splitting of the collected words.
+set -- $_args
 
 # WK_ROW_LABEL: the name the asking machine knows this one by, for the TARGET
 # column. A machine of its own answers in its own vocabulary, and for a peer
@@ -409,7 +435,7 @@ report_fleet_device() {
 # Here because `wk status`'s fleet block claimed to show the machines wk owns
 # while omitting two of them: a bridge phone is a machine this repo defines,
 # provisions and depends on, and it was visible only to `wk bridge ls`. The
-# cattle rule's obligation 1 (docs/HANDOFF-cattle.md) puts a bridge in
+# cattle rule's obligation 1 (CLAUDE.md) puts a bridge in
 # `bridge/hosts/<name>.conf` rather than in `boot/machines/`, which is right --
 # it is not a machine `wk boot` drives into a bench system -- but "enumerated
 # somewhere" and "visible where a person looks" are different claims.
@@ -424,9 +450,13 @@ report_bridges() {
     [ -d "$dir" ] || return 0
     for f in "$dir"/*.conf; do
         [ -f "$f" ] || continue
-        [ -n "$any" ] || printf '
-tailnet bridges -- declared; `wk bridge ls` says which answer (wk help bridge):
-'
+        # The heading on stderr, like every other heading here (log, lib/
+        # common.sh); the rows below it on stdout. They were both on stdout,
+        # which put the words "fleet" and "tailnet" into the workspace-name set
+        # anything parsing this command reads -- `wk selftest`'s own
+        # ls-and-status agreement check has been failing on exactly that.
+        [ -n "$any" ] || log '
+tailnet bridges -- declared; `wk bridge ls` says which answer (wk help bridge):'
         any=1
         n=$(basename "$f" .conf)
         # Read, not sourced: this is a report, and a conf is a shell file that
@@ -463,15 +493,39 @@ report_fleet_devices() {
         report_fleet_device "$m" > "$dir/$m" 2>/dev/null &
     done
     wait
-    printf '
-fleet -- role, mode, and the media wk owns (wk help hardware):
-'
+    log '
+fleet -- role, mode, and the media wk owns (wk help hardware):'
     for m in $(. "$WK_ROOT/boot/machines.sh"; machine_list | awk '{print $1}'); do
         cat "$dir/$m" 2>/dev/null
     done
     rm -rf "$dir"
     return 0
 }
+
+# The waiting half, before the reporting half: it drives this same command and
+# then falls through to print the final row exactly once.
+if [ -n "$WAIT" ]; then
+    _interval="${WK_WAIT_INTERVAL:-5}"
+    _waited=0
+    _last=""
+    while :; do
+        _rc=0
+        "$0" --no-fleet ${1:+"$1"} >/dev/null 2>&1 || _rc=$?
+        # 2 is "a build is running, or a workspace is still being created" --
+        # the only state worth waiting through. Everything else is an answer.
+        [ "$_rc" = 2 ] || break
+        if [ "$_last" != running ]; then
+            info "waiting for${1:+ '$1'} to finish (wk status says busy)"
+            _last=running
+        fi
+        if [ "$WAIT_TIMEOUT" -gt 0 ] && [ "$_waited" -ge "$WAIT_TIMEOUT" ]; then
+            warn "still busy after ${WAIT_TIMEOUT}s -- the work continues; this only stopped waiting"
+            break
+        fi
+        sleep "$_interval"
+        _waited=$((_waited + _interval))
+    done
+fi
 
 if [ -n "${1:-}" ]; then
     # In a workspace a bare `wk status` is the whole command: there is one

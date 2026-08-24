@@ -16,7 +16,6 @@ allowed-tools:
   - Bash(ls:*)
   - Bash(cat:*)
   # Linux / headless / 32-bit container path:
-  - Bash(wkdev-enter:*)
   - Bash(taskset:*)
   - Bash(python3:*)
   - Bash(grep:*)
@@ -55,22 +54,26 @@ completely wrong* number: DVFS responds to how much idle time a workload leaves,
 cells**, and the resulting delta looks exactly like a code change.
 
 ```bash
-# Linux — do this on the HOST (see below), then verify:
-sudo cpupower frequency-set -g performance          # or: write 'performance' to each policy's
-                                                    # scaling_governor, or raise scaling_min_freq to max
+# Linux, on the HOST: one command, and it does the rest of the quieting too.
+wk quiesce on
+wk quiesce status                                   # what it set, measured rather than claimed
+
+# Verifying it from anywhere, including inside a workspace:
 for p in /sys/devices/system/cpu/cpufreq/policy*; do cat $p/scaling_governor; done | sort -u  # want only 'performance'
 ```
 
-- **`/sys` is typically read-only inside a container, and `sudo` there cannot write it** — pin on the
-  host. If you have no host access, use the `uclamp` fallback in
-  [Pinning the clock from inside a container](#pinning-the-clock-from-inside-a-container-uclamp),
-  which needs no privileges at all.
+- **`/sys` is read-only inside a workspace and `sudo` there cannot write it** — that is the sandbox
+  working, not a problem to route around. `wk quiesce on` runs on the host through a privileged helper
+  with a fixed allowlist; ask the person at the keyboard for it rather than looking for another way in.
+- **With no host access, run the degraded mode deliberately** — see
+  [Pinning the clock from inside a container](#pinning-the-clock-from-inside-a-container-uclamp).
+  It needs no privileges, and its results carry a label.
 - **Verify the clock you actually got, and don't trust `scaling_cur_freq` to tell you** — it is the
   governor *setpoint* on some drivers, so an idle core reads the policy max (see
   [the clock-measurement notes](#simulating-a-small-device-pinning-to-exactly-n-cores-eg-2)).
 - **macOS has no governor knob.** The analogous requirements are AC power, settled thermals, no
   competing load, and a **fixed display refresh rate** (ProMotion/VRR jitters rAF-driven runs) — all
-  handled or warned about by `quiesce.sh`.
+  handled or warned about by `wk quiesce`.
 - **If you cannot pin it, DO NOT PROCEED!**
 - If the user *does* ask for the machine's default governor (e.g. to reproduce a user-visible effect),
   that's fine — state the governor and range in the report so the number isn't mistaken for a pinned one.
@@ -248,33 +251,35 @@ valid. If it is running and you need the machine, it is root-owned: ask the user
 
 ### Quiesce, then run interleaved
 
-Run `./quiesce.sh on` first (a symlink here to `wk-tools/quiesce.sh`). It handles the macOS determinism
-items: checks AC power / thermal / display-asleep, disables Spotlight indexing (sudo), stops an
-in-flight Time Machine backup, starts `caffeinate`, reports CPU-hog daemons to quit, settles thermals,
-and seeds a pinned local JetStream3 checkout. It prints `JS3_LOCAL_COPY=<path>` on its last line — pass
-that as `--local-copy` to every round so each run copies a fixed checkout instead of re-cloning
-upstream JetStream3.0 from GitHub (which adds network/disk noise and can shift the commit
-mid-experiment). Run `./quiesce.sh off` afterward. Set a fixed display refresh rate by hand —
-ProMotion/VRR is the one thing quiesce.sh can only warn about, and rAF-driven runs inherit its jitter.
-(A MacBook Air panel is a fixed 60 Hz with no ProMotion, so that warning is moot there — check
-`system_profiler SPDisplaysDataType` rather than assuming every Mac needs the manual step.)
-
-**quiesce.sh will hang a non-interactive shell on its `sudo` fallback, and `< /dev/null` does not
-stop it** — `sudo` reads the passphrase from the TTY, not stdin, so a tool call that cannot
-authenticate blocks forever on `sudo mdutil -a -i off` (the script tries `sudo -n` first, then a bare
-`sudo`). Check `sudo -n true` first. If sudo would prompt, either have the user run the script
-themselves, or put a fail-fast shim first on `PATH` so every `sudo` returns non-zero and the script
-degrades its sudo steps to warnings while still doing all the non-sudo work (caffeinate, App Nap,
-daemon SIGSTOP, the rAF "raiser", thermal settle — which are the ones that matter most):
-
 ```bash
-mkdir -p /tmp/nosudo && printf '#!/bin/sh\nexit 1\n' > /tmp/nosudo/sudo && chmod +x /tmp/nosudo/sudo
-PATH=/tmp/nosudo:$PATH ./quiesce.sh on < /dev/null
+wk quiesce on         # on the host: everything below, in one command
+wk quiesce status     # what it actually achieved, measured rather than claimed
+wk quiesce off        # afterwards
 ```
 
-Before doing that, check whether the sudo-gated items are *already* in the desired state —
-`mdutil -s /` (Spotlight), `pmset -g | grep lowpowermode`, `tmutil currentphase`. Often they are, and
-the warnings are then cosmetic rather than a real loss of quiescing.
+`wk quiesce` covers the macOS determinism items: `caffeinate`, the discretionary analysis daemons
+SIGSTOPped, Notification Center booted out (a banner is compositor work in the middle of a
+measurement and it can steal focus), the screensaver and its lock disabled, App Nap off for
+MiniBrowser and a "raiser" keeping it frontmost, and — through a privileged helper with a fixed
+allowlist — Spotlight indexing, automatic updates, low power mode and sleep. `wk quiesce status`
+then *measures* the result, including the thermal state, which no setting controls.
+
+The privileged half needs a password unless `./setup` has installed the sudoers rule; the
+unprivileged half runs regardless, which is the important half (caffeinate, App Nap, the raiser,
+the daemon SIGSTOP). **Never work around a sudo prompt** — ask the person at the keyboard, or accept
+the unprivileged subset and say so in the report. Before doing either, check whether the
+sudo-gated items are *already* in the desired state: `mdutil -s /` (Spotlight),
+`pmset -g | grep lowpowermode`, `tmutil currentphase`. Often they are, and the difference is cosmetic.
+
+**The pinned local copy of the benchmark is `wk bench seed`'s job**, not the quiescing script's: it
+pins payloads by commit so a run copies a fixed checkout instead of re-cloning upstream from GitHub
+(which adds network and disk noise and can shift the commit mid-experiment). Pass the seeded path as
+`--local-copy` to every round.
+
+**Set a fixed display refresh rate by hand** — ProMotion/VRR is the one thing nothing here can
+control, and rAF-driven runs inherit its jitter. (A MacBook Air panel is a fixed 60 Hz with no
+ProMotion, so the warning is moot there — check `system_profiler SPDisplaysDataType` rather than
+assuming every Mac needs the manual step.)
 
 **`timeout` does not exist on macOS** (it is GNU coreutils; `gtimeout` only if you installed it). A
 round wrapper written as `timeout 3000 Tools/Scripts/run-benchmark ...` dies instantly with
@@ -303,7 +308,7 @@ all — so check whether they are present before concluding a change is Worker-n
 J3=/tmp/js3-runs; mkdir -p "$J3"
 CACHE=~/js3-builds/$(git rev-parse HEAD)
 PATCHED="$WEBKIT_ROOT/WebKitBuild/Release"
-LOCAL_COPY="$JS3_LOCAL_COPY"                      # printed by quiesce.sh
+LOCAL_COPY="$JS3_LOCAL_COPY"                      # the seeded payload (wk bench seed)
 run_one(){ # $1=build-dir  $2=out.json
   Tools/Scripts/run-benchmark --plan jetstream3 --browser minibrowser \
     --build-directory "$1" --output-file "$2" --count 1 --local-copy "$LOCAL_COPY" \
@@ -330,9 +335,10 @@ count away), which a stub or failed run does not. Cheap subsets are an opportuni
 rather than settling for one block's N.
 
 **Pass list arguments literally** (`--subtests delta-blue bigint-noble-ed25519`), never through an
-unquoted variable. The macOS Bash tool runs **zsh**, which does not word-split, so `--subtests $SUB`
-passes the whole string as one arg and the run fails with `... is not a valid subtest`. Literal args
-are correct on every shell. For the full suite, drop `--subtests`, run ~6-8 rounds in the background,
+unquoted variable. Which shell the Bash tool runs is a property of the machine you happen to be on,
+not something to encode here: under zsh an unquoted `$SUB` does *not* word-split, so it arrives as
+one argument and the run fails with `... is not a valid subtest`, while under bash it does split and
+appears to work. Literal args are correct on every shell, which is why they are the rule. For the full suite, drop `--subtests`, run ~6-8 rounds in the background,
 and **verify the first round wrote a valid JSON** before waiting on the loop (a mis-typed subtest run
 fails in seconds).
 
@@ -481,7 +487,7 @@ far lower, which is expected, not a regression.
      subtests that succeeded in all cells/rounds.
   3. Compare with `python3 Tools/Scripts/compare-results ...` (invoke via `python3`; the script's
      `#!/usr/bin/env python3 -u` shebang fails on Linux).
-  A reusable implementation is at `~/Development/.../OpenSource/js3_runloop.sh` + `js3_combine.py`.
+  A reusable implementation is in this repo: `container/bench/js3-run-loop.sh`.
 - **Skip tests that can't run headless on 32-bit, excluded equally from both cells.** Large/SIMD wasm
   tests crash (`tfjs-wasm`, `tfjs-wasm-simd`, `argon2-wasm`, `argon2-wasm-simd`, `8bitbench-wasm`);
   `gcc-loops-wasm`, `HashSet-wasm`, `quicksort-wasm`, `richards-wasm`, `tsf-wasm` run fine.
@@ -507,15 +513,15 @@ rather than assuming a server-class box is set up that way (this box defaults to
   cells; give concurrent-JIT threads room (don't pin to a single core when `--useConcurrentJIT=1`). To
   pin down to a small core count on purpose (a 2-core device simulation), `taskset` alone is not
   sufficient — see [Simulating a small device](#simulating-a-small-device-pinning-to-exactly-n-cores-eg-2).
-- **`caffeinate` and `quiesce.sh` do not exist on Linux.** For a headless jsc run, screen blanking is
+- **`caffeinate` does not exist on Linux, and `wk quiesce` does something different there.** For a headless jsc run, screen blanking is
   irrelevant (no display dependency); only a full system suspend matters. Check
   `gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type` — if `'nothing'`, the
   box never idle-suspends on AC. Otherwise hold `systemd-inhibit --what=idle:sleep --mode=block
   --why=bench sleep <dur>` in the background. (A *browser* run on Linux does need blanking stopped —
   Wayland: `gsettings set org.gnome.desktop.session idle-delay 0` and `... power idle-dim false`; X11:
   `xset s off; xset -dpms`. `systemd-inhibit`'s idle lock alone does not stop GNOME blanking.)
-- The **Bash tool here runs bash** (unquoted variables *do* word-split), but still build `shuf` lists
-  and arrays explicitly rather than relying on it.
+- **Build `shuf` lists and arrays explicitly** rather than relying on word-splitting, which differs
+  between the shells the Bash tool may be running (see the rule above).
 
 ---
 
@@ -625,23 +631,24 @@ and treat any cross-cell clock gap as invalidating that comparison.
   and stay comparable, whereas a baseline-vs-patched delta does not. So if pinning is genuinely
   unavailable, restructure the question into same-build cells rather than trusting a baseline delta.
 
-**5. Keep each cell loading its own libraries** (GTK/container builds — the highest-severity trap here,
-because it produces scores from the *wrong build*). In a webkit-container-sdk setup `/sdk/webkit` is a
-**single symlink shared by every tree**, and all binaries carry the absolute RPATH
-`/sdk/webkit/WebKitBuild/GTK/Release/lib`. `build-webkit` repoints that symlink, so **after building
-tree B, tree A's MiniBrowser loads B's libraries** — or the *system* WebKitGTK, which at least fails
-loudly (`symbol lookup error`). `LD_LIBRARY_PATH` cannot fix it: `DT_RPATH` wins. Either:
+**5. Keep each cell loading its own libraries** (GTK builds — the highest-severity trap here, because
+it produces scores from the *wrong build*). Binaries carry an **absolute RPATH**, and `DT_RPATH` beats
+`LD_LIBRARY_PATH`, so a tree whose library directory is reached through a shared path loads whatever
+that path points at now — not what it was built against. The symptom is either a plausible wrong
+number or a loud `symbol lookup error` from the system WebKitGTK.
 
-- point the symlink per round and assert it —
-  `WEBKIT_SOURCE_DIR=<tree> Tools/Scripts/container-sdk-rootdir-wrapper --create-symlink`, check the
-  target inside the wrapper immediately before `exec`, and re-check after the round finished; or
-- run each cell under that wrapper's default mode (a private mount namespace bind-mounting the cell's
-  own tree at `/sdk/webkit`) — hermetic, and the better default.
+**In a wk workspace this trap cannot occur, and that is the reason to use one per cell**: a workspace
+holds exactly one checkout at `/src/WebKit` with its own `WebKitBuild`, and nothing is shared between
+two of them. Two cells means two workspaces (`wk new a`, `wk new b`), each built and run on its own.
+The historical form of this — a `/sdk/webkit` symlink shared by every tree, repointed by whichever
+`build-webkit` ran last — is what a per-workspace tree removes.
 
-**Assert the cell from inside the namespace, and never identify a cell by `/proc/<pid>/exe`.** The
-browser's `exe` link reads `/sdk/webkit/WebKitBuild/GTK/Release/bin/MiniBrowser`, so `readlink -f`
-run *outside* the namespace resolves it through the **host's** `/sdk/webkit` symlink — which
-`build-webkit` last repointed at whichever tree was built most recently. Every cell therefore appears
+Outside a workspace, on a shared tree, assert the path per round instead: check what it resolves to
+immediately before `exec` and re-check after the round finished.
+
+**Never identify a cell by `/proc/<pid>/exe` from outside the namespace it runs in.** The link is
+resolved in the *reader's* mount namespace, so a shared path resolves through whatever that path means
+out there, not what the process is actually running. Every cell therefore appears
 to be running that one tree's binary, which looks exactly like the shared-symlink bug you are trying
 to rule out (a real false alarm here: the host symlink pointed at the baseline, so both cells' browsers
 resolved to baseline paths while actually running the right builds). The authoritative check is the
@@ -672,7 +679,27 @@ then diff `lib/*.so*` and `bin/` between the trees (`LC_ALL=C sort` the listings
 
 #### Pinning the clock from inside a container (`uclamp`)
 
-When `/sys` is read-only and you have no host access, prompt the user. DO NOT TRY TO WORK AROUND THIS!
+`/sys` is read-only in a workspace, so the governor cannot be set from in there. Two honest options,
+in order:
+
+1. **Ask for `wk quiesce on` on the host.** One command, no sudo prompt beyond the helper, and it
+   pins the governor and quiets the machine in the same pass. This is the answer whenever there is a
+   person available.
+2. **The degraded mode, when there is not.** `uclampset` asks the scheduler to treat the task as if it
+   needed the full clock; it needs no privileges and no host access:
+
+   ```bash
+   uclampset -m 1024 -- <the run command>            # per-process clock hint, unprivileged
+   ```
+
+   It is a *hint to the scheduler*, not a governor setting: it raises the frequency the task asks for
+   and cannot stop another workload lowering it, so the clock is still not fixed and the variance is
+   still higher than a pinned run's. **A run made this way is reported as unpinned** — say
+   `uclampset -m 1024, governor not pinned` in the report, next to the number, every time. Do not
+   quietly compare it against a pinned run.
+
+Anything else — remounting `/sys`, a privileged container, hunting for a sudo timestamp — is working
+around the boundary rather than measuring, and the number would not be defensible anyway.
 
 #### Sandboxing, budget, and what to report
 
@@ -687,12 +714,16 @@ When `/sys` is read-only and you have no host access, prompt the user. DO NOT TR
   run each suite they named and report them separately with their movers named — an overall geomean from
   one suite is not evidence about another.
 
-### wkdev container access
+### Where a run happens
 
-Interactive `wkdev-enter --name <ctr>`; batch `wkdev-enter --name <ctr> --exec -- bash -lc '<cmd>'`.
-Paths are in-container; the host sees them under the mapped prefix (container `/home/<u>/Development`
-= host `/home/<u>/Development/32/Development`). Write results under the mapped prefix so you can read
-logs from the host while the loop runs inside.
+Inside a **wk workspace**, which is where an agent already is: the checkout is `/src/WebKit` on Linux
+and `/Users/admin/WebKit` in a macOS guest, and `wk build` / `wk run` / `wk test` need no workspace
+name in there. The host drives it with `wk build <ws> …`, reads progress with `wk status <ws>` and
+`wk logs <ws>`, and nothing on the host reaches into the workspace's filesystem — so write results
+where the run can read them back, not where the host expects to find them.
+
+(The `wkdev-enter` containers this section used to describe, and their mapped `~/Development/32`
+prefix, are gone.)
 
 ### Browser runs on Linux: find the Wayland display (wkdev container)
 
@@ -744,7 +775,7 @@ mutter/GNOME Wayland desktop and a discrete GPU mounted through.
   or an occluded/unfocused window all stall every rAF-driven benchmark** (SP3/MM/JS3 hang, then
   time out). Symptom: the page loads (resources fetched) but never posts results. Keep the display on
   (`gsettings set org.gnome.desktop.session idle-delay 0`, screensaver off) — this is the Linux analog
-  of macOS quiesce.sh's App-Nap-off + "raiser".
+  of macOS's App-Nap-off + "raiser", which `wk quiesce on` does for you.
 - **A headless Weston (`--backend=headless`) is a trap for MM/SP3.** Its default renderer is
   **pixman = software** (→ the 400× -low score above); rAF *does* fire (good for JS3), but the numbers
   are software. `weston --renderer=gl` runs on the GPU and is offscreen (doesn't steal the screen, no
@@ -852,8 +883,13 @@ background. Per-subtest noise ranges from ~±0.05% (float-mm) to ~±5%.
 - **Two things no amount of N fixes:** (1) if a point estimate already sits below `1 - θ` (e.g.
   b/a = 0.989 vs a 0.5% target), more rounds *confirm a regression*, not rule one out. (2) A targeted
   subset gives no overall geomean, so the 0.02% target applies only to a full-suite run.
-- **Set a compute budget** and log progress (current `1 - lowerCI` per subtest each batch); on hitting
-  it, report the tightest bound achieved and which subtests still gate it.
+- **A compute budget is mandatory, and it has a default.** Decide it *before* the first round and
+  say it in the report. Absent an instruction from the user, the cap is **8 hours of wall clock or 40
+  full-suite rounds per arm, whichever comes first** — which is roughly what an overnight run buys and
+  is nowhere near the ~25x that 0.02% overall would need. Log progress each batch (current
+  `1 - lowerCI` per subtest); on hitting the cap, stop and report **the tightest bound actually
+  achieved** and which subtests still gate it. A bound of "0.4%" honestly reached is a result; an
+  unbounded loop chasing 0.02% is not.
 
 ## Root-cause a confirmed regression (on request)
 
@@ -861,12 +897,14 @@ Narrow a confirmed-slower subtest to a loop. Delegate the code-tracing parts (wh
 changed between the two builds) to a subagent so the main context stays on the measurement state — but
 run the interleaved measurement loop itself in one context.
 
-1. **Profile the headless jsc run** (`jsc-profile` skill). Start from the tier breakdown: cost in
+1. **Profile the headless jsc run** — invoke the `jsc-profile` skill (skip only if it is already
+   loaded this conversation). Start from the tier breakdown: cost in
    FTL/DFG/Baseline (generated JS) → use the bytecode profiler to find the hot CodeBlock; cost in
    C/C++ → use samply to find the hot native function.
 2. **Decompose by phase.** Split the subtest into sub-operations and time each on both builds
    (interleaved, many reps). Require BH/Bonferroni-corrected significance across the k phases, not raw p.
-3. **Extract a microbenchmark** of the suspect loop (`jsc-microbenchmark` skill). If it reproduces the
+3. **Extract a microbenchmark** of the suspect loop — invoke the `jsc-microbenchmark` skill (skip
+   only if it is already loaded this conversation). If it reproduces the
    regression, that's the locus; if not, the cost is elsewhere or **diffuse** — a thin, broad codegen
    change across many functions, which shows as a small same-direction shift on many subtests plus a
    First/Worst category weighting.
@@ -925,7 +963,7 @@ result. Beyond that:
 - **Long / overnight runs:** write each round's JSON the moment it finishes so the run survives a restart or context compaction, and never stop because the context grew long or was compacted — the only stop is the decision rule. Kill leftover `jsc`/profiler processes between and after rounds (a hung profiler times out the whole suite — `exit 124`, no JSON), pin with `taskset`, and give each round a timeout.
 - **A pinned CPU frequency is a prerequisite for every run** — see
   [Pin the CPU frequency before every run](#pin-the-cpu-frequency-before-every-run-required). The rest of
-  the platform quiescing lives with each run mode: `quiesce.sh` under
+  the platform quiescing lives with each run mode: `wk quiesce` under
   [Browser](#quiesce-then-run-interleaved), `taskset` under [Linux quiescing](#linux-quiescing). For a
   core-constrained run (`taskset` + core-count override + pinned clock + hermetic cells) see
   [Simulating a small device](#simulating-a-small-device-pinning-to-exactly-n-cores-eg-2) — `taskset`

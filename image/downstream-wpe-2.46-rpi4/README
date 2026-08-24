@@ -50,8 +50,8 @@ What made it unrecoverable is worth more than the cause:
 - **An armed stick that boots but hangs is sticky.** Firmware finds
   `start4.elf`, so it keeps choosing the stick; a power cycle re-enters the
   same hang rather than falling through to the SD rescue. The self-disarm lives
-  in the rootfs and never runs. `docs/HANDOFF-benchmarking.md` already records
-  this residual case -- this is it happening.
+  in the rootfs and never runs. `docs/HANDOFF-boot.md` records this residual
+  hands-on case in its traps -- this is it happening.
 - **These images carry no `panic=10`.** The distro profiles set it, so a distro
   image that cannot find its root reboots; a Yocto image hangs. Adding it here
   would not have helped on its own (the reboot would re-enter the same stick),

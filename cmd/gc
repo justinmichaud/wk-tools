@@ -324,6 +324,41 @@ if [ -d "$WK_STORE/cache/bench" ]; then
     done
 fi
 
+# --- creation bookkeeping with nothing left to describe ------------------------
+#
+# `wk new` writes $WK_STORE/create/<name>.{status,log} before it makes anything,
+# so that a command arriving later can tell a half-made workspace from a missing
+# one; `wk rm` removes the pair with the workspace. What nothing removed was the
+# pair whose workspace, environment *and* registry entry are all gone -- a
+# creation whose `wk rm` was interrupted, or one whose driver died before the
+# registry entry landed. Listed by nothing, pruned by nothing, and small enough
+# to sit there for ever.
+#
+# The registry is the authority on whether a name is still ours: a status file
+# for a name no target knows is describing something that does not exist. A
+# creation still in flight keeps its pair, because the name is registered from
+# the first moment `wk new` acts.
+if [ -d "$(ws_state_dir)" ]; then
+    for _sf in "$(ws_state_dir)"/*.status; do
+        [ -f "$_sf" ] || continue
+        _n=$(basename "$_sf" .status)
+        # `ws_target` cannot answer this: it falls back to the default target
+        # for a name nobody knows, so it never reports "absent". The registry
+        # is asked directly instead.
+        if target_of "$_n" >/dev/null 2>&1; then continue; fi
+        _found=""
+        for _t in $(target_all 2>/dev/null); do
+            if ( load_target "$_t" >/dev/null 2>&1; [ -d "$(wk_ws_dir "$_n")" ] ); then
+                _found=1; break
+            fi
+        done
+        [ -z "$_found" ] || continue
+        info "removing orphaned creation record for '$_n' (no registry entry, no workspace)"
+        rm -f "$_sf" "$(ws_create_log "$_n")"
+    done
+    unset _sf _n _t _found
+fi
+
 gc_images   # (defined above; the store's images)
 gc_pmos     # ...and the build hosts' caches, on the machine that can reach them
 

@@ -22,7 +22,7 @@
 # Machine *destination* (stopping a backup is not the same as there being none
 # to start) and the thermal state, which no setting controls.
 #
-# It matters most for the benchmark volume (docs/HANDOFF-benchmarking.md): an
+# It matters most for a benchmark install: an
 # install that boots for a run, indexes itself for ten minutes and then reports
 # a Speedometer score is exactly the failure that is invisible in the number.
 macos_noise() {

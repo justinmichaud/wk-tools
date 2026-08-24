@@ -395,7 +395,7 @@ fi
 # sides without either needing privilege.
 #
 # Without this a person has to remember a chown before every re-provision,
-# which docs/HANDOFF-cattle.md's fourth obligation exists to forbid:
+# which the cattle rule's fourth obligation exists to forbid:
 # provisioning is a verb, not a wiki page.
 install -d -o "$BENCH_USER" -g staff -m 0755 /var/wk 2>/dev/null \
     && say "staging root /var/wk ready, owned by $BENCH_USER" \

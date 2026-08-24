@@ -14,15 +14,22 @@ image with **WPE WebKit** driven by **cog** on a **weston** wayland compositor. 
 **931 MB RAM** and (by default) **no swap** — memory is the dominant constraint. A WebKit
 build is deployed under `/WebKit/WebKit` (an ext4 disk on `/dev/sda1` mounted at `/WebKit`).
 
-## 0. Get the IP address (always do this first)
+## 0. Reach the board (always do this first)
 
-**Ask the user for the Pi's IP address before doing anything.** It has historically been
-`root@192.168.1.159`, but confirm — offer that as the default. Log in as **root** (no
-password / key-based). Everything below assumes `SSH="ssh root@<ip>"`.
+**The board is named by the fleet, not by an address you ask for.** `boot/machines/rpi3.conf`
+carries its ssh name, and the workstation's `dotfiles/ssh/config` carries the jump through the
+tailnet bridge that fronts these boards. Use the name: `SSH="ssh rpi3"`. Log in as **root** (no
+password, key-based).
+
+**From inside a workspace this may not work at all, and that is the sandbox, not a fault.** A
+workspace reaches a board only if its address is in `$WK_STORE/pi-hosts`, which `wk pi setup`
+writes — and the rpi3 has not been provisioned. Do not go hunting for the address, do not scan the
+LAN: say the board is not reachable from here and let the host drive it (`wk pi deploy`,
+`wk pi bench`).
 
 Quick connectivity + state check:
 ```
-ssh root@<ip> 'uname -a; mount | grep sda; systemctl is-active weston; pidof weston-desktop-shell'
+ssh rpi3 'uname -a; mount | grep sda; systemctl is-active weston; pidof weston-desktop-shell'
 ```
 
 > **Gotcha — ssh drops (exit 255) when you `pkill` cog.** Killing `cog`/the web process
@@ -35,7 +42,7 @@ ssh root@<ip> 'uname -a; mount | grep sda; systemctl is-active weston; pidof wes
 weston is a systemd service but is normally inactive. netdata competes for resources, so
 stop it first (per the board's runbook):
 ```
-ssh root@<ip> 'systemctl stop netdata; systemctl start weston; sleep 4; pidof weston-desktop-shell'
+ssh rpi3 'systemctl stop netdata; systemctl start weston; sleep 4; pidof weston-desktop-shell'
 ```
 If `/WebKit` isn't mounted: `sudo mkdir -p /WebKit && sudo mount /dev/sda1 /WebKit`.
 
@@ -74,8 +81,8 @@ Cog-Wayland:ERROR ... cog_wl_platform_create_im_context: assertion failed: (disp
 Create a virtual uinput device and leave it running for the whole session. Use
 `scripts/fakeseat.py` (scp it over):
 ```
-scp scripts/fakeseat.py root@<ip>:/tmp/
-ssh root@<ip> 'setsid python3 /tmp/fakeseat.py < /dev/null > /tmp/fakeseat.log 2>&1 & sleep 2; pgrep -f fakeseat.py && echo seat-alive'
+scp scripts/fakeseat.py rpi3:/tmp/
+ssh rpi3 'setsid python3 /tmp/fakeseat.py < /dev/null > /tmp/fakeseat.log 2>&1 & sleep 2; pgrep -f fakeseat.py && echo seat-alive'
 ```
 Verify with `pgrep -f fakeseat.py`. Clean up with `pkill -f fakeseat.py`. The seat survives
 across benchmark runs — start it once per session.
@@ -91,7 +98,7 @@ python3 -c "import fcntl,os,struct,signal; IOC=lambda d,t,nr,size:(d<<30)|(size<
 Benchmark launches need `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` matching the running weston.
 They are typically `/run/user/1000` and `wayland-1`. To read them live:
 ```
-ssh root@<ip> 'strings /proc/$(pidof weston-desktop-shell)/environ | grep -P "(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)"'
+ssh rpi3 'strings /proc/$(pidof weston-desktop-shell)/environ | grep -P "(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)"'
 ```
 The helper scripts hard-code `/run/user/1000` + `wayland-1`; update them if weston differs.
 
@@ -134,8 +141,8 @@ Benchmark URLs (browserbench.org):
   launches cog with `--enable-write-console-messages-to-stdout=1` so console messages, load
   status, and `Crash!` warnings land in `<log>`. Run detached and capture the log:
   ```
-  scp scripts/run-cog.sh scripts/monitor.sh root@<ip>:/tmp/
-  ssh root@<ip> 'chmod +x /tmp/run-cog.sh /tmp/monitor.sh; rm -f /tmp/js2.log; \
+  scp scripts/run-cog.sh scripts/monitor.sh rpi3:/tmp/
+  ssh rpi3 'chmod +x /tmp/run-cog.sh /tmp/monitor.sh; rm -f /tmp/js2.log; \
      setsid /tmp/run-cog.sh /tmp/js2.log "<URL>" < /dev/null > /dev/null 2>&1 & echo launched'
   ```
   Add `--debug` (3rd arg) to disable the sandbox — needed for gdb (see §6).
@@ -169,7 +176,7 @@ Rough wall-clock on this board: **SP2 ≈ 8 min**; **JS2 ≈ 34 min** (longer wi
 Symptom: web process dies mid-run; console shows repeated `Memory pressure relief:` then
 `Crash!: The renderer process crashed`. Confirm it's the kernel OOM-killer:
 ```
-ssh root@<ip> 'dmesg -T | grep -iE "oom|Killed process"; grep oom_kill /proc/vmstat'
+ssh rpi3 'dmesg -T | grep -iE "oom|Killed process"; grep oom_kill /proc/vmstat'
 ```
 `... invoked oom-killer ... Out of memory: Killed process NNNN (WPEWebProcess) anon-rss:~700MB`
 with 931 MB RAM and **no swap** is the classic case.
@@ -177,7 +184,7 @@ with 931 MB RAM and **no swap** is the classic case.
 **Fix — enable swap.** There is a pre-formatted (but not enabled) `/WebKit/swapfile` (1 GB),
 and `/WebKit` has several GB free. Enable it and add more headroom (~3 GB total is comfortable):
 ```
-ssh root@<ip> 'chmod 600 /WebKit/swapfile; swapon /WebKit/swapfile; \
+ssh rpi3 'chmod 600 /WebKit/swapfile; swapon /WebKit/swapfile; \
   [ -f /WebKit/swapfile2 ] || { fallocate -l 2G /WebKit/swapfile2 && chmod 600 /WebKit/swapfile2 && mkswap /WebKit/swapfile2; }; \
   swapon /WebKit/swapfile2; swapon --show; free -m'
 ```
@@ -187,7 +194,7 @@ of MB of swap used, memory was NOT the limiter → it's a real crash (Failure B)
 ### Failure B — SIGSEGV in the web process (a real JSC crash)
 Confirm it's a signal, not OOM:
 ```
-ssh root@<ip> 'dmesg -T | grep -iE "sig=11|WPEWebProcess.*sig"; grep oom_kill /proc/vmstat'
+ssh rpi3 'dmesg -T | grep -iE "sig=11|WPEWebProcess.*sig"; grep oom_kill /proc/vmstat'
 ```
 `audit: type=1701 ... comm="WPEWebProcess" ... sig=11` = SIGSEGV. If `oom_kill` didn't
 increment, it's not the OOM-killer.
@@ -203,10 +210,10 @@ uses SIGUSR1 for GC stop-the-world thread suspension**, and a plain `continue` w
 benign signal instead of the crash. Run it detached (it takes ~35 min for JS2), then poll the
 bt log for `FATAL SIGNAL CAUGHT` / `GDB DONE`:
 ```
-scp scripts/attach-gdb.sh root@<ip>:/tmp/
-ssh root@<ip> 'chmod +x /tmp/attach-gdb.sh; setsid /tmp/attach-gdb.sh "<URL>" /tmp/bt.log /tmp/console.log < /dev/null >/dev/null 2>&1 & echo launched'
+scp scripts/attach-gdb.sh rpi3:/tmp/
+ssh rpi3 'chmod +x /tmp/attach-gdb.sh; setsid /tmp/attach-gdb.sh "<URL>" /tmp/bt.log /tmp/console.log < /dev/null >/dev/null 2>&1 & echo launched'
 # ...later...
-ssh root@<ip> 'grep -vE "New LWP|New Thread|Thread .* exited|Thread debugging|host libthread" /tmp/bt.log'
+ssh rpi3 'grep -vE "New LWP|New Thread|Thread .* exited|Thread debugging|host libthread" /tmp/bt.log'
 ```
 Read the fault address: a small/near-null `si_addr` suggests an allocation-failure null-deref
 (still memory-related); a plausible-but-unmapped heap pointer (e.g. reading `[butterfly-4]`)
@@ -217,8 +224,8 @@ Some crashes only reproduce under the browser's real memory pressure and will **
 `jsc` (which owns the whole machine). Still worth trying — it's seconds vs. a 34-min browser
 run. Use `scripts/jsc-gdb.sh <jsfile> [env JSC_*=...]`:
 ```
-scp scripts/jsc-gdb.sh /path/to/repro.js root@<ip>:/tmp/
-ssh root@<ip> 'chmod +x /tmp/jsc-gdb.sh; JSC_collectContinuously=1 /tmp/jsc-gdb.sh /tmp/repro.js'
+scp scripts/jsc-gdb.sh /path/to/repro.js rpi3:/tmp/
+ssh rpi3 'chmod +x /tmp/jsc-gdb.sh; JSC_collectContinuously=1 /tmp/jsc-gdb.sh /tmp/repro.js'
 ```
 GC-stress options worth trying: `JSC_collectContinuously=1`, `JSC_useConcurrentGC=0` (nocgc),
 `JSC_useGenerationalGC=0` (nogen), `JSC_useJIT=0` (nojit — forces LLInt, giving cleaner
@@ -259,4 +266,4 @@ COG_MODULEDIR=/WebKit/WebKit/WebKitBuild/WPE/Release/Tools/cog-prefix/src/cog-bu
 - `jsc-gdb.sh <jsfile> [env JSC_*=…]` — run a JS file in `jsc` under gdb for fast repro attempts. Add `handle SIGUSR1/USR2 nostop noprint pass` (GC thread-suspension signals) so gdb traps only the real fault.
 - `oom-ool.js` — reliable OOM microbenchmark: grows unbounded LIVE out-of-line (butterfly) property storage until `JSObject::allocateMoreOutOfLineStorage` fails, hitting the `RELEASE_ASSERT` in `CompleteSubspace::allocateSlow` (`WTFCrash`, si_addr `0xbbadbeef`) in ~100s. Run under `jsc-gdb.sh` (with the SIGUSR1 handling). Deterministic repro of the JS2 crash. NOTE: this 32-bit build uses **bmalloc** (not system malloc) — `USE_SYSTEM_MALLOC=OFF` for ARM-Thumb2-Linux; verify from the binary (`fastMalloc` = bmalloc fast path), not assumptions.
 
-Copy scripts over with `scp scripts/* root@<ip>:/tmp/` and `chmod +x`.
+Copy scripts over with `scp scripts/* rpi3:/tmp/` and `chmod +x`.

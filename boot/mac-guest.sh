@@ -113,7 +113,7 @@ b_arm() {
     [ "$st" = absent ] && die "there is no guest '$MACH_GUEST'.
     Make one from the golden base and mark it as a benchmark install:
         wk vm new $MACH_GUEST
-        (then write /etc/wk-image in it -- see docs/HANDOFF-benchmarking.md)"
+        (then write /etc/wk-image in it: id=, profile=)"
     if [ "$st" != running ]; then
         info "starting guest '$MACH_GUEST'"
         ( load_target vm >/dev/null 2>&1; t_start "$MACH_GUEST" >/dev/null )

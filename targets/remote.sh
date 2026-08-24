@@ -499,11 +499,18 @@ t_create() {
         _remote_wire "$ws/WebKit"
     fi
 
-    # ccache's own default ceiling is 5 GB, which a couple of WebKit builds
-    # blow through; recorded in the cache's config so `ccache -s` on the box
-    # reports the real limit too.
-    _rsh_q "printf 'max_size = %s\n' $(sh_quote "${WK_CCACHE_MAXSIZE:-40G}") \
-          > $(sh_quote "$root/cache/ccache/ccache.conf")" || true
+    # The same ceiling and the same words as every other cache here
+    # (ccache_conf_render, lib/store.sh) -- rendered on this side and written on
+    # that one, so the far machine needs no wk-tools to get it right. Only when
+    # absent, matching the store's rule: a machine whose ccache has been tuned
+    # by hand keeps that tuning.
+    # Guarded like the other cross-file helpers here: not every caller of this
+    # driver sources lib/store.sh, and a `command not found` in a command
+    # substitution would write an empty config rather than fail.
+    command -v ccache_conf_render >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+    _rsh_q "[ -f $(sh_quote "$root/cache/ccache/ccache.conf") ] ||
+            printf %s $(sh_quote "$(ccache_conf_render)") \
+              > $(sh_quote "$root/cache/ccache/ccache.conf")" || true
 
     ensure_dir "$(wk_ws_dir "$name")"
 

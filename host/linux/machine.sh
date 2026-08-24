@@ -44,12 +44,15 @@ fi
 # a VM with no desktop and wrong for a workstation with a monitor attached --
 # the whole point of the reserve is that the GUI stays interactive under a full
 # build.
-if [ -f "$WK_STORE/.headless" ]; then
-    warn "$WK_STORE/.headless exists on a workstation -- removing it"
+for _hm in $(headless_markers); do
+    [ "$_hm" = "/.headless" ] && continue
+    [ -f "$_hm" ] || continue
+    warn "$_hm exists on a workstation -- removing it"
     warn "  it would cut the host reserve from ${WK_RESERVE_MB}MB to ${WK_HEADLESS_RESERVE_MB}MB"
-    rm -f "$WK_STORE/.headless"
+    rm -f "$_hm"
     changed "removed the headless marker"
-fi
+done
+unset _hm
 
 # --- rootless podman prerequisites -------------------------------------------
 # Subordinate id ranges. Without these rootless podman cannot map any user but

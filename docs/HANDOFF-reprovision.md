@@ -2,7 +2,7 @@
 
 The plan this serves: **wipe both machines and rebuild them from nothing, to
 find out whether the scripts in this repository actually are reproducible.**
-`docs/HANDOFF-cattle.md` states the rule and holds the per-machine recipes; this
+`CLAUDE.md` states the rule and each machine's conf holds its recipe; this
 is the punch-list for the day it is tested.
 
 It is a shopping list, not a task — nothing here justifies a wipe on its own.

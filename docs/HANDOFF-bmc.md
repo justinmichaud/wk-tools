@@ -34,7 +34,7 @@ second one and is not provisioned.
   `/dev/watchdog` is confirmed, the netwatch ladder is the only recovery, and it
   cannot see a kernel that has stopped scheduling.
 - **moose's BMC firmware config** (users, the bmc0 network) is set by hand and
-  captured nowhere — a named gap in `docs/HANDOFF-cattle.md` that belongs here.
+  captured nowhere — the one piece of this fleet that no conf reproduces.
 - Battery care for both phones: `docs/Urgent/HUMAN-battery.md`.
 
 ## What the first bridge taught — do not re-derive

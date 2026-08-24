@@ -83,7 +83,7 @@ MACHINE="${WK_MAC_MACHINE:-mbp}"
 #           for the same reason.
 #
 # The guest shape is the rehearsal: it proves every phase except the number,
-# and it needs nobody at the keyboard (docs/HANDOFF-benchmarking.md).
+# and it needs nobody at the keyboard.
 lane_shape() {
     local d
     d=$( . "$WK_ROOT/boot/machines.sh" >/dev/null 2>&1

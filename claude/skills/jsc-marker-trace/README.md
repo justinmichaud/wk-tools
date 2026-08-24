@@ -16,7 +16,7 @@ so the examples call them by full path. `SKILL=~/.claude/skills/jsc-marker-trace
   unwinding, pass explicit codegen flags (see SKILL.md prereq 1) -- they differ by compiler:
   - GCC (Linux/GTK default): `--cmakeargs="-DCMAKE_CXX_FLAGS='-fno-omit-frame-pointer -fno-reorder-blocks-and-partition'"`
   - clang (macOS, or a clang GTK build): `-fno-omit-frame-pointer -mllvm -enable-machine-outliner=never -Xclang -fno-split-cold-code`
-- **samply** built from `~/Development/samply` (or on `PATH`).
+- **samply** on `PATH` (`wk profile --mode samply` finds it, or says it is missing).
 - The workload served somewhere (e.g. `http://localhost:8080`).
 - A display (MiniBrowser renders; headless throttles timers).
 - Linux only: `sudo sysctl kernel.perf_event_paranoid=1` (samply uses perf). In a container

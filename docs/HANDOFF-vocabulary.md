@@ -92,7 +92,7 @@ never a 32-bit process borrowing a 64-bit kernel's compat layer. They differ in
 syscall path, page size and kernel pointer width, and the armhf port that ships
 to customers runs the first. A number from one is not a number from the other,
 which is why the run has to record `kernel_arch` beside `arch`
-(`docs/HANDOFF-benchmarking.md`).
+(the run records `kernel_arch` beside `arch`).
 
 **The layers** (decided 2026-08-20; binding for new code, per `CLAUDE.md`).
 Command names are minted only when a layer gains a second consumer.

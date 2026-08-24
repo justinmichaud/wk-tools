@@ -143,6 +143,8 @@ cmd_deploy() {
         || die "usage: wk pi deploy <workspace> <machine> [--slot NAME] [--skeleton] [--libs-only]"
 
     machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
+    machine_armed_barrier "A deploy now lands in the system that is answering, and the
+    machine is about to leave it -- the build would be on the disk nobody boots."
 
     local profile target
     profile=$(pi_deploy_ws_profile "$ws") \
@@ -411,7 +413,8 @@ pi_skeleton() {
 # run-benchmark also clones the benchmark and serves it from a local webserver
 # -- `speedometer3.plan` names `WebKit/Speedometer.git` at `release/3.0` -- which
 # is how the content origin ends up on loopback rather than across the internet,
-# the rule docs/HANDOFF-benchmarking.md sets for a measured run. Both properties
+# the rule for a measured run: nothing in the run path may be a network mount.
+# Both properties
 # come free with the official harness and neither can be bolted onto a URL.
 pi_bench_env() {
     # For the headless session the environment is the one we just created, not
@@ -484,8 +487,7 @@ pi_bench_record() {
     m_ssh "cat $(sh_quote "$logf")" > "$dir/run.log"     2>/dev/null || true
 
     # kernel_arch and the kernel release, because this is the pair that makes a
-    # kernel A/B legible afterwards. docs/HANDOFF-benchmarking.md asked for
-    # kernel_arch and kernel_provenance and neither existed anywhere.
+    # kernel A/B legible afterwards.
     #
     # kernel_provenance is deliberately *not* a hand-set stock/custom flag. The
     # honest discriminator is already here: two systems built from two profiles
@@ -603,8 +605,7 @@ cmd_bench() {
     Stop it:   ssh $MACH_SSH 'pkill -f run-bench\[m\]ark'"
     fi
 
-    # 1. Bench mode or nothing. The rule is docs/HANDOFF-benchmarking.md's and it
-    # is not softened here: a run on a machine that never left host mode is a
+    # 1. Bench mode or nothing, and it is not softened here: a run on a machine that never left host mode is a
     # measurement of a desktop with a browser on it, which is a different thing
     # wearing the same number. The evidence is the image's own marker.
     local sysid
@@ -958,8 +959,7 @@ boot_order_without_net() {
 # bootable filesystem is skipped and the board lands on its rescue image,
 # reachable, with no one in the room. Falling through is the property to
 # protect: firmware that gets as far as start4.elf and no further **halts**
-# instead, and a halted board needs a person. See
-# docs/HANDOFF-benchmarking.md, "rpi4".
+# instead, and a halted board needs a person.
 #
 # Derived from the current order rather than written as a constant, so a board
 # with an entry this does not know about (6 is NVMe on a Pi 5) keeps it.

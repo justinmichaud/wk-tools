@@ -392,6 +392,16 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] `wk bench compare` warns across differing `runner`, `arch` or
       `bench_host`; `wk bench ls` shows the axes
 - [ ] the same, in an armhf workspace — needs a branch whose JSC runs, i.e. 2.48
+- [V] every run records the provenance that decides whether two of them are one
+      series: `host.kernel_arch` (the width of the *kernel*, which `arch` does
+      not answer), `host.root_device` (the parent disk, its transport, whether
+      it spins and whether it takes a discard), and — for a run in bench mode —
+      the `system` that booted and the `profile` it was built from. Written by
+      all three record paths: `wk bench` (container), `wk bench staged` (macOS
+      bench mode) and `wk pi bench` (a board)
+- [ ] `wk bench compare` warns on differing `kernel_arch` and `root_device`, and
+      notes a differing `profile` — needs two runs that actually differ on one
+      of them
 
 ## 2. macOS guest VMs — the `vm` target
 
@@ -692,12 +702,46 @@ reached through a ProxyJump), driven from the macOS host.
 - [ ] `wk backup`'s junk filters strip what they claim (weather location,
       WiFi UUIDs, last-folder paths, timestamps)
 - [ ] `wk skills` status/diff/pull/push; pull refuses over uncommitted repo edits
+- [ ] the skills are workspace-true: an agent started by `wk claude` in a container
+      and in a macOS guest can follow every skill it can trigger without hitting a
+      host-only instruction (2026-08-24 sweep: build guidance has one owner and
+      opens with `wk build`, `wkdev-enter` and the `wkdev32`/`/sdk/webkit` paths
+      are gone, pinning is `wk quiesce on` with a labelled `uclampset` degraded
+      mode, samply is found on PATH, `rpi3` names the board instead of asking for
+      an IP)
+- [ ] `wk quiesce on` disables App Nap for MiniBrowser and starts the raiser; `off`
+      restores both, and `off` also undoes a session started under the old
+      `$TMPDIR` state directory
 - [ ] `wk key register` / `check`
 - [ ] `wk pi setup rpi4`, and a workspace can reach the Pi (the rpi5 is a
       workstation and never goes through `wk pi setup`)
 - [ ] `wk enter <ws>` lands in a shell; `wk enter <ws> <cmd>` runs the command
+- [ ] `wk status <ws> --wait` blocks while the workspace is busy and reports once
+      when it is not, with the same exit code a bare `wk status` would give;
+      `--timeout S` stops waiting and says so without claiming the work stopped
 - [ ] `wk logs <ws> -f` follows a live build
 - [ ] `wk stop --keep-vm` leaves the podman machine running
+- [ ] `wk gc` also prunes a creation record whose workspace, environment and
+      registry entry are all gone, and keeps one whose creation is still in
+      flight (exercised 2026-08-24 with a planted orphan; the in-flight half is
+      untested)
+- [V] `wk status`'s fleet and bridge *headings* go to stderr and its rows to
+      stdout, like every other heading here — they were both on stdout, which
+      put "fleet" and "tailnet" into the workspace-name set anything parsing the
+      command reads, and `wk selftest --section state`'s ls-and-status agreement
+      check had been failing on exactly that (found and fixed 2026-08-24)
+- [ ] one liveness rule: `build_live` (lib/detach.sh) answers for both
+      `wk status` and `wk bench`'s preflight — a `state=running` file whose log
+      has not moved for `WK_STALL_SECONDS` is not live, so a `kill -9`'d build
+      no longer refuses every later benchmark
+- [ ] one headless marker: `headless_markers` (lib/resources.sh) is read by
+      `is_headless` and by the Linux machine stage that removes it, so a marker
+      in either spelling is seen by both
+- [ ] `wk vm rm` removes `<name>.unfiltered`, so a recreated guest of the same
+      name is not refused by `wk claude` for the previous guest's sins
+- [ ] one ccache ceiling: `ccache_conf_render` (lib/store.sh) renders it for the
+      store and for a remote machine's cache, and neither overwrites a config
+      that is already there
 - [ ] `wk gc` prunes an unreferenced snapshot, keeps the newest, trims ccache,
       removes a stale bench payload seed, and reports the dirs it keeps
 - [ ] `wk sync --all` and `WK_MIRROR_BRANCHES` carry the extra branches
@@ -712,6 +756,22 @@ reached through a ProxyJump), driven from the macOS host.
       discarded, twice
 - [V] a branch in neither project is refused naming both URLs it checked
 - [V] `wk status` shows each workspace's current branch, for every target
+- [ ] `wk pick <ws> <id>@main` resolves the identifier without the network and
+      picks it: the arithmetic (`main~(count - N)`) agrees with the commit's own
+      `Canonical link:` trailer, a deliberately wrong id is reported `unresolved`
+      rather than picked, a dirty tree is a barrier, and a conflict leaves the
+      sequencer for `git cherry-pick --continue`
+- [ ] `container/bin/` helpers on PATH in a workspace: `git-clean` (empty repo,
+      all-untracked tree, and a tracked modification — each ends `clean` and
+      exits 0), `commit-count`, and `git-sync-fork` (refuses when the fork's
+      main is ahead; fast-forwards otherwise; says so plainly when `wk push` is
+      off)
+- [ ] **the PR workflow, end to end and as one flow**: sandboxed agents driving
+      builds while a person pushes, rebases, fetches forks and uploads PRs —
+      `wk push on|off`, `wk remotes --fix`, `wk pr`, `wk pick` and
+      `git-sync-fork` all in the loop, including making a PR from an armhf
+      container where `git-webkit` cannot run. Every piece is verified alone;
+      this is what proves they compose
 - [ ] `wk report` prints the weekly summary (needs gh auth)
 - [ ] the MCP server (`wk mcp`) creates and destroys a workspace from Claude
       Desktop, and refuses past its workspace cap
@@ -1631,6 +1691,10 @@ keyboard:
 - [V] `WK_ANY_ROOT=1` overrides it, and says the write proves the transfer only
 
 ### Arming and returning — the one-shot
+- [ ] a mutating command aimed at an armed machine is refused, and `--force`
+      turns it into a warning: `wk sysimage write --disk <machine>:<dev>` and
+      `wk pi deploy <ws> <machine>` both stop while an arming is unspent, and
+      both proceed once it is spent or disarmed (`machine_armed_barrier`)
 
 - [V] `wk boot <machine>` refuses to arm when the boot device does not start
       with the image it was asked to arm — checked before the firmware call,
@@ -1981,8 +2045,8 @@ this repo's own definition, so there is nothing to run it on.
 - [V] an armed stick that boots-but-hangs is **sticky**: firmware finds
       `start4.elf` and keeps choosing it, so a power cycle re-enters the hang
       instead of falling through to the SD. The self-disarm is in the rootfs
-      and never runs. `docs/HANDOFF-benchmarking.md`'s "residual hands-on case"
-      is exactly this, observed
+      and never runs. `docs/HANDOFF-boot.md`'s residual hands-on trap is exactly
+      this, observed
 - [V] these Yocto images carry no `panic=10` where the distro profiles do — so
       a distro image that cannot find its root reboots and a Yocto one hangs.
       Not the cause here, and an undocumented asymmetry worth knowing
@@ -1991,7 +2055,7 @@ this repo's own definition, so there is nothing to run it on.
 
 ### Reproducibility of the bench stick — the standing rule
 
-**cattle, not pets** (`docs/HANDOFF-cattle.md`) applied to the one device that
+**cattle, not pets** (`CLAUDE.md`) applied to the one device that
 got hand-tuned. Restated 2026-08-21 by the user: *all changes to the stick and
 the hardware setup must be fully reproducible.*
 
@@ -2369,8 +2433,8 @@ egress list that cannot be "every upstream in six layers".
       directory are the same set, so a conf cannot exist invisibly. In
       `wk selftest --quick`.
 - [V] each conf opens with its device's from-nothing recipe, so the file that
-      defines a machine says how to reproduce it (hand-checked; the ledger is
-      `docs/HANDOFF-cattle.md`)
+      defines a machine says how to reproduce it (hand-checked; the confs are
+      the ledger, and there is no second copy of it)
 - [V] a machine whose `os=` does not match this host is refused by `wk boot`
       with the conf named — probing a MACH_LOCAL machine from the wrong host
       used to answer confidently about the wrong computer

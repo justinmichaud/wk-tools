@@ -38,6 +38,13 @@ So never run one in the foreground. Two ways, and prefer the first:
 - `run_in_background` for anything without a `--detach` of its own
   (`wk test`, `wk bench`, `./setup`), then poll the same way.
 
+**Do not hand-roll a poll loop around a pid.** `wk status <ws> --wait` blocks
+while the workspace is busy and then reports once, with the same
+machine-readable exit code as a bare `wk status` (2 means busy, and it is the
+only state `--wait` waits through). A pid on this side is not evidence about a
+build driven over ssh, and a `for i in $(seq …); do kill -0 …; sleep 5; done`
+reports "still building" about a build that failed a minute ago.
+
 `wk setup` and the other provisioning commands are minutes, not seconds: run
 them in the background too rather than watching a tool call time out.
 

@@ -40,10 +40,12 @@ turns out not to work on this firmware.
      this repo does not add NOPASSWD. `wk boot moose` must say so rather than
      fail confusingly under `sudo -n`.
 3. **Get the BMC reachable first, before any real reboot** — flash the Librem 5
-   (`docs/HANDOFF-bmc.md`). Also still open: **moose has `--accept-routes`
-   false**, confirmed live in `tailscale status`'s own health check; it is
-   needed on whichever machine drives moose's boot (tolken, the rpi5), and it
-   will otherwise be debugged as a bridge failure.
+   (`docs/HANDOFF-bmc.md`). Also still open: **`--accept-routes` is false on the
+   rpi5**, confirmed live in `tailscale status`'s own health check ("Some peers
+   are advertising routes but --accept-routes is false"). It is needed on
+   whichever machine drives moose's boot — the rpi5 and tolken, not only moose —
+   and it will otherwise be debugged as a bridge failure. Check moose's own
+   setting the same way when it is reachable.
 4. **`perf-linux-moose`** — the only piece with real unknowns. Every existing
    Linux bench profile is a Raspberry Pi image, so none of `config.txt.append`,
    `image_check_boot_files`'s `start4.elf`/`kernel8.img` or the `cmdline.txt`

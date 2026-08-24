@@ -65,6 +65,45 @@ detach_alive() {
     kill -0 "$p" 2>/dev/null
 }
 
+# build_live <status-file> [log] -- is that build actually running *now*?
+#
+# One reader, because there were two rules and they disagreed. `wk status` has
+# always treated a `running` status file as a claim and decided liveness from
+# the age of the log -- a build carries no pid, deliberately, since it can be
+# driven from either end of an ssh and a pid written by one machine is not a
+# fact on the other. `wk bench`'s preflight, meanwhile, grepped for
+# `^state=running` and believed it: a build killed with -9 leaves that file
+# behind for ever, so every benchmark after one was refused with "1 build(s) in
+# progress" about a build that ended days ago, and the only way past was
+# --force, which records itself in the provenance of a run that did not need it.
+#
+# The rule, in one place: the state has to say running *and* the log has to have
+# moved within WK_STALL_SECONDS. No log is treated as not-live rather than
+# live -- a build that has produced no output at all is not something to block
+# a measurement on.
+# Seconds since a log last moved. The one place this arithmetic lives, because
+# both readers below want it and `stat` spells it two ways.
+log_age() { # <log>
+    local log="$1" now mtime
+    [ -f "$log" ] || return 1
+    now=$(date +%s)
+    mtime=$(stat -c %Y "$log" 2>/dev/null || stat -f %m "$log" 2>/dev/null || echo "$now")
+    printf '%s' $(( now - mtime ))
+}
+
+build_live() { # <status-file> [log]
+    local sf="$1" log="${2:-}" st now mtime
+    [ -f "$sf" ] || return 1
+    st=$(status_field "$sf" state)
+    case " $st " in
+        *" running "*|*" building "*) ;;
+        *) return 1 ;;
+    esac
+    [ -n "$log" ] || log="$(dirname "$sf")/build.log"
+    local age; age=$(log_age "$log") || return 1
+    [ "$age" -le "${WK_STALL_SECONDS:-300}" ]
+}
+
 # detach_run <status-file> <log> -- cmd...
 #
 # nohup, stdin closed, both streams into the log. All three matter: the process

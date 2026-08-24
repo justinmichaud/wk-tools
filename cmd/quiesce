@@ -12,13 +12,26 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 # macos_noise lives in a library because two commands ask the same question:
 # this one before and after a run, and `wk bench staged` before it will believe
-# a number (docs/HANDOFF-benchmarking.md).
+# a number.
 . "$WK_ROOT/lib/quiet.sh"
 
 PRIV=/usr/local/libexec/wk-quiesce-priv
 
 ACTION="${1:-status}"
-STATE="${TMPDIR:-/tmp}/wk-quiesce"
+
+# One state directory per machine, not one per shell.
+#
+# This used to be `${TMPDIR:-/tmp}/wk-quiesce`, and on macOS $TMPDIR is
+# per-user *and per-session*: a terminal and an ssh login get different values.
+# So `wk quiesce on` at the keyboard and `wk quiesce off` over ssh looked in two
+# different directories -- the caffeinate pid was invisible to the `off` that
+# should have killed it, and SIGSTOPped daemons stayed stopped with nothing
+# recording that they were. Both are exactly the state a benchmark install is
+# left in by an unattended lane, which drives it over ssh.
+STATE="${WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce}"
+# A session left behind by the older location is still undoable: `off` reads
+# both, so a machine quiesced by yesterday's wk-tools is not stranded.
+LEGACY_STATE="${TMPDIR:-/tmp}/wk-quiesce"
 
 run_priv() {
     if [ -x "$PRIV" ]; then
@@ -134,6 +147,59 @@ on)
         [ "$v" = 0 ] && info "screensaver disabled (idleTime=0)" \
                      || warn "screensaver idleTime reads '$v' -- the screen can still lock mid-run"
 
+        # APP NAP AND THE RAISER -- the last thing the pre-wk quiesce.sh did
+        # that this command did not.
+        #
+        # A custom-build MiniBrowser is launched by the benchmark driver through
+        # a raw exec, so that DYLD_FRAMEWORK_PATH reaches it; macOS therefore
+        # never *activates* it. An unactivated, occluded or unfocused window has
+        # its page marked hidden, and a hidden page has requestAnimationFrame
+        # throttled -- which is the run loop of JetStream3, Speedometer and
+        # MotionMark alike. The failure is not a slow number, it is a stalled
+        # run that ends in the silent exit-124 timeout.
+        #
+        # Two halves, because either alone is insufficient: App Nap off stops
+        # the throttling policy, and the raiser keeps the window frontmost so
+        # the page is never marked hidden in the first place. The raiser only
+        # acts when MiniBrowser is not already frontmost, so it costs the
+        # WindowServer nothing on a well-behaved run, and it is a no-op while no
+        # MiniBrowser is running -- which is what makes it safe to leave up for
+        # a whole quiesced window spanning many relaunches.
+        defaults write org.webkit.MiniBrowser NSAppSleepDisabled -bool YES 2>/dev/null \
+            && { touch "$STATE/appnap_disabled"; info "App Nap disabled for MiniBrowser"; } \
+            || warn "could not disable App Nap for MiniBrowser -- rAF may be throttled mid-run"
+        if [ -f "$STATE/raiser.pid" ] && kill -0 "$(cat "$STATE/raiser.pid")" 2>/dev/null; then
+            info "raiser already running"
+        elif /usr/bin/python3 -c 'import AppKit' >/dev/null 2>&1; then
+            cat > "$STATE/raiser.py" <<'RAISEREOF'
+#!/usr/bin/python3
+# Keep MiniBrowser frontmost so its page is never marked hidden. Picks up each
+# round's relaunched instance by bundle id; activateIgnoringOtherApps pulls it
+# into the current Space when the driving terminal is fullscreen.
+import sys, time
+from AppKit import (NSRunningApplication, NSWorkspace,
+                    NSApplicationActivateIgnoringOtherApps)
+BID = "org.webkit.MiniBrowser"
+INTERVAL = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
+while True:
+    f = NSWorkspace.sharedWorkspace().frontmostApplication()
+    if f is None or f.bundleIdentifier() != BID:
+        for a in NSRunningApplication.runningApplicationsWithBundleIdentifier_(BID):
+            a.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+    time.sleep(INTERVAL)
+RAISEREOF
+            # Detached like caffeinate above, and for the same reason: a
+            # background process holding this ssh session's descriptors holds
+            # the session open with it.
+            /usr/bin/python3 "$STATE/raiser.py" 1 </dev/null >"$STATE/raiser.log" 2>&1 &
+            echo $! > "$STATE/raiser.pid"
+            info "raiser started -- MiniBrowser is kept frontmost during runs"
+        else
+            warn "no python3 AppKit here, so no raiser: MiniBrowser can be backgrounded and
+    its rAF throttled. /usr/bin/python3 with pyobjc is what a benchmark install needs
+    anyway -- see docs/HANDOFF-mac-perf-mode.md."
+        fi
+
         # Reported at the moment it matters -- just before a run, not in a
         # status command nobody ran -- and deliberately not fixed: see
         # macos_noise.
@@ -147,11 +213,26 @@ on)
 
 off)
     if is_macos; then
-        if [ -f "$STATE/caffeinate.pid" ]; then
-            kill "$(cat "$STATE/caffeinate.pid")" 2>/dev/null || true
-            rm -f "$STATE/caffeinate.pid"
+      # Both directories: this one, and any session left behind by the older
+      # $TMPDIR location. Undoing twice is harmless; missing one is a leak.
+      for _st in "$STATE" "$LEGACY_STATE"; do
+        [ -d "$_st" ] || continue
+        if [ -f "$_st/caffeinate.pid" ]; then
+            kill "$(cat "$_st/caffeinate.pid")" 2>/dev/null || true
+            rm -f "$_st/caffeinate.pid"
             info "caffeinate stopped"
         fi
+        if [ -f "$_st/raiser.pid" ]; then
+            kill "$(cat "$_st/raiser.pid")" 2>/dev/null || true
+            rm -f "$_st/raiser.pid"
+            info "raiser stopped"
+        fi
+        if [ -f "$_st/appnap_disabled" ]; then
+            defaults delete org.webkit.MiniBrowser NSAppSleepDisabled 2>/dev/null || true
+            rm -f "$_st/appnap_disabled"
+            info "App Nap restored for MiniBrowser"
+        fi
+        STATE="$_st"
         # Notification Center comes back on its own at the next login, so there
         # is nothing to undo on a benchmark install that reboots. Restarted here
         # anyway for the workstation case, where `quiesce off` is expected to
@@ -173,6 +254,7 @@ off)
             rm -f "$STATE/daemons_paused"
             info "background daemons resumed"
         fi
+      done
     fi
     run_priv off
     ;;
@@ -190,6 +272,14 @@ status)
     log "  measured here, now:"
     [ -f "$STATE/caffeinate.pid" ] && log "  caffeinate: running" || log "  caffeinate: no"
     [ -f "$STATE/daemons_paused" ] && log "  daemons:    paused" || log "  daemons:    running"
+    if is_macos; then
+        [ -f "$STATE/raiser.pid" ] && kill -0 "$(cat "$STATE/raiser.pid")" 2>/dev/null \
+            && log "  raiser:     running (MiniBrowser kept frontmost)" \
+            || log "  raiser:     no"
+        [ "$(defaults read org.webkit.MiniBrowser NSAppSleepDisabled 2>/dev/null)" = 1 ] \
+            && log "  app nap:    disabled for MiniBrowser" \
+            || log "  app nap:    default (rAF can be throttled when backgrounded)"
+    fi
     is_macos && { macos_noise || true; }
     ;;
 

@@ -33,8 +33,9 @@ What is missing is everything the command needs in order to actually run.
 - **`--browser` on the CMake ports** — refused, because `run-minibrowser` is a
   launcher and the process that matters is its child. `--attach` until that is
   wired.
-- **The skills still have to be pointed at the command** where they have not
-  been (`docs/HANDOFF-claude.md`).
+- **The skills already invoke the command** (`jsc-profile`, `jsc-marker-trace`)
+  and refuse by name when a tool is missing — so the only thing standing between
+  them and a working run is the provisioning above.
 
 ## Done means
 

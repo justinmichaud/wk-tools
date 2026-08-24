@@ -23,7 +23,8 @@ one machine — but that dropping one should be a decision.
      `wasm-debug`, `wasm-test-v8`. All thin wrappers over `$VM/bin/jsc` plus
      `wabt`; if they come back they belong in `container/bin/`;
    - `bench-js2-simd-nosimd` and `-v8` (SIMD on/off, and against V8);
-   - the git one-liners, which moved to `docs/HANDOFF-git-tools.md`.
+   (The git helpers are done: `wk pr`, `wk pick`, and `git-clean`,
+   `commit-count`, `git-sync-fork` in `container/bin/`.)
 2. **The option-toggle A/B benchmark mode** (`bench-js2-cli`,
    `bench-js3-switch`) — the one worth doing first, because nothing covers it
    and it has real logic: N rounds toggling one JSC option. A/B arrived twice

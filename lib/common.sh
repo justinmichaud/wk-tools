@@ -730,6 +730,11 @@ WK_IMAGE_MARKER="${WK_IMAGE_MARKER:-/etc/wk-image}"
 
 # The bench system's own id, or empty in host mode.
 wk_image_id() { sed -n 's/^id=//p' "$WK_IMAGE_MARKER" 2>/dev/null || true; }
+# The profile it was built from -- `perf-linux-rpi5`, `downstream-yocto-...`.
+# Two systems from two profiles are two configurations of the machine (clocks,
+# fan policy, kernel), so a run records this beside the id: the id says which
+# artifact, the profile says which configuration it stands for.
+wk_image_profile() { sed -n 's/^profile=//p' "$WK_IMAGE_MARKER" 2>/dev/null || true; }
 in_bench_mode() { [ -f "$WK_IMAGE_MARKER" ]; }
 
 # --- the graphical session's mode --------------------------------------------

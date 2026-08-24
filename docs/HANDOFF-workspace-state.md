@@ -12,6 +12,15 @@ checks). Nothing is listed here so the two cannot drift.
 
 ## Remaining
 
+(Fixed since this list was written, and noted only to say where each rule lives
+now: `wk quiesce`'s state directory is `wk_state_dir`-based and `off` also
+undoes a session left under the old `$TMPDIR` path; `build_live`
+(`lib/detach.sh`) is the one answer to "is that build running", used by both
+`wk status` and `wk bench`'s preflight; `headless_markers`
+(`lib/resources.sh`) is the one spelling of the headless marker; `wk vm rm`
+removes `.unfiltered`; `wk gc` prunes orphaned creation records; and
+`ccache_conf_render` (`lib/store.sh`) is the one ccache ceiling.)
+
 - **Babysit has never run a real fix cycle.** `wk build --babysit[=model]` is
   built — a detached loop that rebuilds after every fix a sandboxed Claude
   makes, up to `WK_BABYSIT_ATTEMPTS` — and eight of its TESTING.md lines are
@@ -20,23 +29,6 @@ checks). Nothing is listed here so the two cannot drift.
   `stalled` rather than being handed to the model, claude failing to *run*
   ending `error` rather than retrying forever, and a `fixing` claim with a dead
   pid being reported as a crash.
-- **`wk gc` prunes no creation bookkeeping.** A `$WK_STORE/create/<n>.*` pair
-  whose workspace, environment and registry entry are all gone is listed by
-  nothing and removed by nothing. `wk gc` is where that belongs.
-- **`cmd/bench` reads `state=running` as gospel** (`cmd/bench:424`) while
-  `cmd/status` has the mtime liveness heuristic. One shared reader for status
-  files, with the evidence check built in.
-- **`wk quiesce`'s state dir is `${TMPDIR:-/tmp}/wk-quiesce`**
-  (`cmd/quiesce:21`), which differs between a terminal and an ssh session —
-  leaking caffeinate and stranding SIGSTOPped daemons. It matters more now that
-  the macOS bench lane leans on quiescing.
-- **The headless marker is spelled three ways**: `/var/lib/wk/.headless`
-  (`lib/resources.sh:51`), `$WK_STORE/.headless` (`host/linux/machine.sh`) and
-  `{{ wk_root }}/.headless` (`host/macos/playbook.yaml`).
-- **`.unfiltered` is orphaned by `wk vm rm`** — written and removed in
-  `targets/vm.sh`, read by `cmd/claude:209`, cleaned up nowhere, so a recreated
-  guest can inherit a false refusal.
-- **ccache max_size has more than one writer.**
 - **Build state is recorded twice for a container workspace.** It writes
   `build.status`/`build.log` into its own `~/.local/state/wk/ws/<name>/` because
   the host's store is not mounted in, so `wk status <ws>` on the host says

@@ -71,6 +71,25 @@ WK_STORE="${WK_STORE:-$(_wk_default_store)}"
 # most of the 200 GB disk for snapshots and workspaces.
 WK_CCACHE_MAXSIZE="${WK_CCACHE_MAXSIZE:-40G}"
 
+# The ccache ceiling, written the same way everywhere.
+#
+# ccache's own default is 5 GB, which a couple of WebKit builds blow through, so
+# every cache this repo creates records the real limit in its own config as well
+# as receiving it in the environment -- otherwise `ccache -s` on the machine
+# reports 5 GB and the next reader concludes the cache is misconfigured.
+#
+# One function because there were two spellings of this: the store's wrote only
+# when the file was absent and took the size from $WK_CCACHE_MAXSIZE, while the
+# remote target's overwrote on every provision with its own inline `40G`
+# default. Two defaults for one policy is how they drift, and the drift shows up
+# as a cache that is silently smaller than the one beside it.
+#
+# Writes the value in, never a path out: the caller says where.
+ccache_conf_render() { printf 'max_size = %s\n' "$WK_CCACHE_MAXSIZE"; }
+ccache_conf_write() { # <path to ccache.conf>
+    [ -f "$1" ] || ccache_conf_render > "$1"
+}
+
 wk_mirror()   { echo "$WK_STORE/git/WebKit.git"; }
 wk_base_dir() { echo "$WK_STORE/base"; }
 wk_ws_dir()   { echo "$WK_STORE/ws/$1"; }
@@ -487,11 +506,7 @@ store_init() {
     ensure_dir "$WK_STORE/base"
     ensure_dir "$WK_STORE/ws"
     ensure_dir "$WK_STORE/cache/ccache"
-    # Recorded in the cache's own config as well as passed as an environment
-    # variable, so `ccache -s` reports the real limit from the host too rather
-    # than the 5 GB default.
-    [ -f "$WK_STORE/cache/ccache/ccache.conf" ] || \
-        printf 'max_size = %s\n' "$WK_CCACHE_MAXSIZE" > "$WK_STORE/cache/ccache/ccache.conf"
+    ccache_conf_write "$WK_STORE/cache/ccache/ccache.conf"
     ensure_dir "$WK_STORE/cache/yocto/downloads"
     ensure_dir "$WK_STORE/cache/yocto/sstate"
     ensure_dir "$WK_STORE/cache/buildroot/dl"

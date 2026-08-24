@@ -47,8 +47,30 @@ WK_HEADLESS_RESERVE_MB="${WK_HEADLESS_RESERVE_MB:-2048}"
 #
 # Guarded by command -v: lib/resources.sh is sourced on its own by host scripts
 # that have no reason to know about workspaces.
+# Where the headless marker lives, in one place.
+#
+# It used to be spelled three ways -- `/var/lib/wk/.headless` here,
+# `$WK_STORE/.headless` in the Linux machine stage, `{{ wk_root }}/.headless` in
+# the podman VM's playbook -- and they agree only when $WK_STORE happens to be
+# /var/lib/wk. On a workstation whose store is under XDG they do not, so a
+# marker could sit in one path while the code that acts on it read the other,
+# and the machine would size its builds for a desktop that is not there (or the
+# reverse). Both are checked, and both are named here rather than spelled out
+# at each use: the fixed path because the VM's playbook writes it before any wk
+# has run, and the store path because that is where this machine's own state
+# goes.
+#
+# $WK_STORE is not always set: this file is sourced on its own by host scripts
+# that have no reason to know about workspaces, which is the same reason
+# is_headless guards its in_workspace call.
+headless_markers() { printf '%s\n' "${WK_STORE:-}/.headless" /var/lib/wk/.headless; }
+
 is_headless() {
-    [ -f /var/lib/wk/.headless ] && return 0
+    local m
+    for m in $(headless_markers); do
+        [ "$m" = "/.headless" ] && continue
+        [ -f "$m" ] && return 0
+    done
     command -v in_workspace >/dev/null 2>&1 && in_workspace
 }
 

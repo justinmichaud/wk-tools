@@ -13,7 +13,7 @@ this fleet has produced on a bench device.
   runs cannot be compared to each other by any means the tool offers. This is
   the remaining half of "record provenance next to `wk bench`'s results", and it
   is one piece of work with the missing provenance fields in
-  `docs/HANDOFF-benchmarking.md`.
+  the provenance fields in `cmd/bench`.
 - **`wk pi bench` prints `result after 0s`** for a run that took 22 minutes. The
   elapsed counter is wrong; the result is not. Cosmetic, and printed next to a
   number.

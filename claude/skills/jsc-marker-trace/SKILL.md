@@ -6,7 +6,8 @@ allowed-tools:
   - Bash(~/.claude/skills/jsc-marker-trace/capture.sh:*)
   - Bash(~/.claude/skills/jsc-marker-trace/split-trace.py:*)
   - Bash(samply:*)
-  - Bash(~/Development/samply/target/release/samply:*)
+  - Bash(samply:*)
+  - Bash(wk profile:*)
   - Bash(make release:*)
   - Bash(Tools/Scripts/build-webkit:*)
   - Bash(git rev-parse:*)
@@ -84,8 +85,10 @@ that directory.
 
      macOS -- the reliable way to inject flags with correct `$(inherited)` chaining is to
      append them to `OTHER_CFLAGS` in `Source/JavaScriptCore/Configurations/BaseTarget.xcconfig`
-     (covers C and C++), build, then `git checkout --` the file (the built binary is unaffected
-     by reverting afterward). A codegen-flag change recompiles all of JSC (~4 min here; WTF/
+     (covers C and C++), build, then put the file back with
+     `git stash push -- <file>` / `git stash pop` -- **not** `git checkout --`, which the jsc
+     skill's own hook forbids because it destroys uncommitted work with no way back (the built
+     binary is unaffected by reverting afterward). A codegen-flag change recompiles all of JSC (~4 min here; WTF/
      bmalloc are untouched, so it's effectively JSC-only). Passing them via `make ... ARGS=`
      is fragile because the `-mllvm`/`-Xclang` pairs contain spaces.
      ```
@@ -141,13 +144,16 @@ that directory.
      so the per-function summaries the analysis relies on stay trustworthy. A ready-made diagnostic
      is `phantom-check.py` in this dir: `phantom-check.py trace-gc-sweeping.json.gz` reports the
      seam and the adjacent-same-func share.
-2. **samply** built from `~/Development/samply` (or on PATH). On macOS run `samply setup`
+2. **samply** on PATH — inside a workspace `wk profile --mode samply` composes the
+   run and refuses by name if it is missing. On macOS run `samply setup`
    once (codesign). On Linux set `sudo sysctl kernel.perf_event_paranoid=1` (samply refuses
    to start at the default `2` with "Permission denied ... currently set to 2").
    **Inside a container (the wkdev docker box), this sysctl is non-namespaced and cannot be
    written from within** -- even `sudo` returns `permission denied on key`, and a `!`-prefixed
    command runs in-container and fails the same way. It must be set on the **host**; ask the
-   user to run `echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid` there.
+   user to run `echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid` there. `wk profile
+   --mode samply` reads the value first and refuses with that line rather than failing inside the
+   run; on a bench system it is already `-1`, set when the system was built.
 3. The workload served somewhere (e.g. the user's app at `http://localhost:8080`). Use
    the user's real server; do not roll your own unless asked.
 4. A real display -- MiniBrowser renders, and a headless/occluded window throttles the

@@ -31,7 +31,7 @@ EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-con
 # The registry: one conf per machine under boot/machines/, the same shape as
 # targets/hosts/*.conf -- adding a device is adding a file, and changing a
 # role is editing one field, never code (docs/HANDOFF-vocabulary.md, the
-# lifecycle; the cattle-not-pets rule in docs/HANDOFF-cattle.md). Each conf
+# lifecycle; the cattle-not-pets rule in CLAUDE.md). Each conf
 # also opens with its device's from-nothing recipe, so the file that defines
 # a machine is the file that says how to reproduce it.
 machines_dir() { echo "$WK_ROOT/boot/machines"; }
@@ -238,6 +238,40 @@ record_read() {
     m_ssh "sudo cat $MACH_RECORD 2>/dev/null" || true
 }
 record_clear() { m_ssh "sudo rm -f $MACH_RECORD"; }
+
+# Refuse to mutate a machine that is between `wk boot` and the reboot it asked
+# for. Load the machine first; this probes it.
+#
+# An arming is a one-shot the machine has *not yet consumed*, so in that window
+# the filesystem answering ssh is not the one the machine is about to run.
+# Writing the medium it is armed for destroys the boot it was asked to make;
+# deploying a build into the system that is answering puts the files on the
+# disk it is about to leave. Both look like they worked, and both are only
+# discovered after the reboot -- which is the expensive place to discover
+# anything about a board.
+#
+# Evidence rather than the record alone, the same rule `wk boot --status` uses:
+# a record whose boot id is not the machine's current one has been *spent*, and
+# refusing on a spent record would refuse every command after every bench run.
+# A machine already in bench mode is not armed for anything -- the transition
+# has happened -- so it passes.
+machine_armed_barrier() { # <what this command would do>
+    local what="$1" rec img armed_boot now_boot
+    b_probe >/dev/null 2>&1 || true
+    [ "${MODE:-}" = host ] || return 0
+    rec=$(record_read 2>/dev/null || true)
+    img=$(printf '%s\n' "$rec" | sed -n 's/^image=//p' | head -1)
+    [ -n "$img" ] || return 0
+    armed_boot=$(printf '%s\n' "$rec" | sed -n 's/^armed_boot_id=//p' | head -1)
+    now_boot=$(b_boot_id 2>/dev/null || true)
+    if [ -n "$armed_boot" ] && [ -n "$now_boot" ] && [ "$armed_boot" != "$now_boot" ]; then
+        return 0    # spent: the machine has rebooted since it was armed
+    fi
+    barrier "$MACH_NAME is armed for system '$img' and has not rebooted yet.
+    $what
+    Disarm it first:   wk boot $MACH_NAME --disarm
+    Or see the state:  wk boot $MACH_NAME --status"
+}
 
 # --- shared driver parts -----------------------------------------------------
 #

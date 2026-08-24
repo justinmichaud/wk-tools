@@ -1223,6 +1223,8 @@ $(image_ids | sort | sed 's/^/      /')"
     machines:
 $(machine_list | sed 's/^/      /')"
     m_reachable || die "$DISK_MACHINE is not reachable over ssh, and the disk is attached to it."
+    machine_armed_barrier "Writing a disk now would overwrite the medium that boot is aimed at,
+    and the machine would come up on whatever this write left behind."
 
     # No device: say what is there rather than guessing. Guessing which /dev/sd*
     # is the card is the mistake this command exists to make impossible.

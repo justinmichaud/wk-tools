@@ -4,7 +4,7 @@
 #
 # Works on macOS (Apple WebKit, XPC web process) and Linux (GTK WebKit, sandbox
 # disabled so the web process inherits env). Requires a Release WebKit build with
-# the GC text-marker patch, and samply built from ~/Development/samply.
+# the GC text-marker patch, and samply on PATH (a workspace's, or $SAMPLY).
 #
 # Usage:   capture.sh <periodMS> <durationSec> <out.json.gz> [url] [rateHz]
 # Env overrides: WEBKIT_ROOT, WEBKIT_BUILD, SAMPLY, TRACE_AUX
@@ -16,7 +16,11 @@ if [ -z "$ROOT" ] || [ ! -d "$ROOT/Source/JavaScriptCore" ]; then
     echo "Set WEBKIT_ROOT to your WebKit checkout (or run from inside one)." >&2
     exit 1
 fi
-SAMPLY="${SAMPLY:-$HOME/Development/samply/target/release/samply}"
+# samply comes from the workspace (or PATH), never from somebody's home
+# directory: a hardcoded host path is exactly what a sandboxed run cannot reach.
+# `wk profile --mode samply` composes the whole invocation and refuses by name
+# when the tool is missing, which is the shorter road than this script.
+SAMPLY="${SAMPLY:-$(command -v samply || echo samply)}"
 command -v "$SAMPLY" >/dev/null 2>&1 || SAMPLY=samply
 
 PERIOD_MS=${1:-30000}
