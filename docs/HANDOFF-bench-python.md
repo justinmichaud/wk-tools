@@ -1,32 +1,32 @@
 # HANDOFF — rewrite `cmd/bench` in Python
 
-`cmd/bench` (~1650 lines of bash as of 2026-08-20, and growing — `stage` and
-`staged` landed since this was written at ~580) has outgrown the language:
-eight inline Python heredocs, an env.json assembled by passing thirty-two
-`WK_M_*` variables through the environment, a hand-rolled `.plan` JSON parser,
-and argument lists built by string concatenation. Each of those is a
+Not started, and the counts that justify it keep growing: **1924 lines** of bash
+today (~580 when this was first written), **7 heredocs — 4 of them Python**
+(result.json assembly, env.json, the compare diff, the `staged` reader), and
+**47 `WK_M_*` references** passing provenance through the environment. Each is a
 workaround for bash, not a design.
 
-## Shape
+## Remaining
 
-One Python program (the repo already ships Python-only `cmd/mcp`, so the
-precedent and the "no third-party imports" constraint both exist):
+One Python program (`cmd/mcp` is the precedent: Python-only, stdlib-only).
 
-- Keep the exact CLI: `wk bench <ws> <plan> [flags]`, `seed`, `stage`,
-  `staged`, `compare`, `ls`.
-- Keep the behavior contract: preflight refuses rather than annotates
+- Keep the exact CLI: `wk bench <ws> <plan> [flags]`, `seed`, `stage`, `staged`,
+  `compare`, `ls` — plus `ab-summary` and whatever the mac A/B path added.
+- Keep the behaviour contract: preflight refuses rather than annotates
   (`--force` records itself in provenance), payloads seeded and pinned by
   commit, env.json provenance written before the run.
-- Drive the workspace through `wk`'s target drivers by shelling out to
-  `cmd/...`/`t_exec` equivalents — do not grow a second container-exec path.
+- Drive the workspace through `wk`'s target drivers by shelling out — do not
+  grow a second container-exec path.
 - stdlib only; must run on the podman VM's python3 and Ubuntu's.
 
 ## Watch out
 
-- The `set -e`/pipefail traps documented in the bash version's comments are
-  the regression tests: llvmpipe-vs-GPU refusal, session-mode refusal,
-  count=1 compare warning, the awk-not-grep-head lesson.
-- `wk bench` is on the benchmarking daily path; land the rewrite behind a
-  side-by-side comparison of env.json and result layout on one real run.
-- Add a TESTING.md line item and a `wk selftest` check
-  (`docs/HANDOFF-test-runner.md`).
+- The `set -e`/pipefail traps documented in the bash version's comments are the
+  regression tests: llvmpipe-vs-GPU refusal, session-mode refusal, count=1
+  compare warning, the awk-not-grep-head lesson.
+- `wk bench` is on the daily path; land the rewrite behind a side-by-side
+  comparison of env.json and result layout on one real run.
+- The store format is about to gain a second producer — `wk pi bench` needs to
+  file on-board runs where `wk bench ls`/`compare` can see them
+  (`docs/HANDOFF-pi-deploy.md`). Design for that rather than around it.
+- Add a TESTING.md line item and a `wk selftest` check.

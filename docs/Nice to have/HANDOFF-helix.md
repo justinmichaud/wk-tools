@@ -1,5 +1,13 @@
 # HANDOFF — helix
 
-Make helix work with dotfiles configured. It should be installed in all workspaces, containers, and remotes with my dotfiles. armhf will take some special work.
+Nothing started: `dotfiles/` carries `gitconfig`, `lldbinit`, `ssh/` and `zed/`
+and no helix config, and nothing installs helix anywhere.
 
-It should be configured with sane defaults for performance and usability for JSC work. Do research on what other users set up. It should also have lazygit integrated, and help docs explaining how to do common tasks on WebKit for folks coming from zed.
+## Remaining
+
+- Install helix in all workspaces, containers and remotes, configured from the
+  dotfiles. **armhf will take special work.**
+- Sane defaults for performance and usability on JSC work — research what other
+  users set up rather than inventing it.
+- lazygit integrated.
+- Help docs covering common WebKit tasks for someone coming from zed.

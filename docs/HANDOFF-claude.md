@@ -1,19 +1,17 @@
-# HANDOFF — make CLAUDE.md and the skills workspace-true
+# HANDOFF — make the skills workspace-true
 
-**No longer gated**: the in-workspace `wk build <config>` interface this
-waited on exists (done 2026-08-18; SETUP.md documents it), so a
-skill can be told to use it.
+The skills were written on machines that no longer exist (a host workstation,
+the wkdev containers) and routinely direct an agent inside a sandboxed workspace
+to host-only actions — which is how "I tried to build in the sandbox and was
+told to give claude access to the host" happens.
 
-The problem, in one sentence: the skills were written on machines that no
-longer exist (a host workstation, the wkdev containers) and routinely direct an
-agent inside a sandboxed workspace to host-only actions — which is how "I tried
-to build in the sandbox and was told to give claude access to the host"
-happens.
+Almost nothing on this list has been fixed; each item below was re-checked
+against `claude/skills/` and is still true.
 
-## Rules (from the original request)
+## Rules
 
-- Remove any detail that is stale now. Every skill invokes a deterministic
-  tool or script, never freehand steps.
+- Remove any detail that is stale. Every skill invokes a deterministic tool or
+  script, never freehand steps.
 - Cap tokens spent quoting benchmark results and build failures.
 - Never a hand-rolled build; always the script. Never a custom benchmark
   methodology: the script handles cli/graphical, reports GPU rendering, and
@@ -23,63 +21,59 @@ happens.
   `<purpose>-<host-os/arch>-<target>`.
 - Never push or commit in git unless asked.
 
-## Concrete defects to fix (2026-08 audit)
+## Remaining — defects
 
-Build guidance, three contradictory sources:
-- `claude/CLAUDE.md` says use `wk`; `jsc/SKILL.md` says use the build-webkit
-  skill; `build-webkit/SKILL.md` opens with a raw
-  `nice -n 10 Tools/Scripts/build-webkit -j16` for a host workstation. Pick
-  one owner (build-webkit), make its first branch "inside a wk workspace →
-  `wk build <config>`", and have the others point at it.
-- `build-webkit/SKILL.md` also carries a whole retired-machine section
-  (wkdev32, `/home/<u>/Development/32`, host `podman exec` for ccache, host
-  coredumpctl+gdb). Delete or label it as history.
+**Build guidance, three contradictory sources.** `claude/CLAUDE.md` says use
+`wk`; `jsc/SKILL.md` says use the build-webkit skill; `build-webkit/SKILL.md`
+opens with a raw `nice -n 10 Tools/Scripts/build-webkit --gtk --release -j16`
+called the "shared workstation default" (lines 36-44). Pick one owner
+(build-webkit), make its first branch "inside a wk workspace → `wk build
+<config>`", and have the others point at it. That file also still carries a
+whole retired-machine section (wkdev32, `/home/<u>/Development/32`, host
+`podman exec` for ccache, host coredumpctl+gdb) — delete it or label it history.
 
-Host-only steps that dead-end a sandboxed agent:
-- `jsc-jetstream-compare/SKILL.md`: "on the HOST ... sudo cpupower", then "if
-  you cannot pin it, DO NOT PROCEED" — while the promised no-privilege uclamp
-  fallback section contains only "prompt the user". Restore the fallback
-  (`uclampset -m 1024 -- <cmd>` survives in jsc-microbenchmark) and define an
-  explicit in-sandbox degraded mode. Also: `/sdk/webkit` and `wkdev-enter`
-  references, a literal-ellipsis path (`~/Development/.../OpenSource/...`),
-  "ask the user to sudo kill".
-- **PARTLY CLOSED 2026-08-20**: `wk profile` exists (docs/HANDOFF-profile.md),
-  and both skills now open with the `wk profile` invocation for the recipe they
-  teach -- so the env-var walls and the host paths are no longer what an agent
-  copies. What is *not* closed is the provisioning half: samply and heaptrack
-  are still not in the workspace image, and the command refuses by name rather
-  than pretending. The original finding, for the record:
-- `jsc-profile` / `jsc-marker-trace`: samply hardcoded at
-  `~/Development/samply/...` (no workspace provisions it — lane A step 10 is
-  where it gets built), "ask the user to sudo tee perf_event_paranoid",
-  "open the profile from the host's Firefox" (blocked by egress).
-- `rpi3/SKILL.md`: targets a LAN IP the workspace firewall drops, and prompts
-  for an IP — guaranteed stall. Either retarget to the fleet bench devices
-  (rpi4, for which no skill exists) or mark host-only.
+**Host-only steps that dead-end a sandboxed agent.**
+- `jsc-jetstream-compare/SKILL.md`: "on the HOST … sudo cpupower" (line 59) then
+  "if you cannot pin it, DO NOT PROCEED", while the promised no-privilege
+  fallback contains only "prompt the user". Restore it (`uclampset -m 1024 --
+  <cmd>` survives in jsc-microbenchmark) and define an explicit in-sandbox
+  degraded mode. Also `/sdk/webkit`, a literal-ellipsis path, "ask the user to
+  sudo kill", and the claim that `quiesce.sh` is "a symlink to
+  wk-tools/quiesce.sh" (line 251) — the file does not exist; `wk quiesce` is
+  what to name.
+- **`wkdev-enter` is in three skills' allowed-tools** (`jsc-microbenchmark`,
+  `jsc-jetstream-compare`, `jsc-review`) and in one body — a container the fleet
+  no longer has.
+- **The hardcoded samply path survived the partial `wk profile` fix**:
+  `jsc-marker-trace/capture.sh:19` still defaults to
+  `$HOME/Development/samply/target/release/samply`, and the same path is in that
+  skill's allowed-tools and README. The provisioning half is
+  `docs/Urgent/HANDOFF-profile.md`.
+- **`rpi3/SKILL.md` prompts for a LAN IP** and offers `root@192.168.1.159` — a
+  guaranteed stall from a workspace, and wrong besides: the rpi4 is reached at
+  10.99.1.10 through the bridge and the rpi3 is unprovisioned. Retarget to the
+  fleet bench devices or mark host-only. There is still no rpi4 skill.
 
-Consistency:
+**Consistency.**
 - `jsc-marker-trace` says `git checkout -- <file>`, which the jsc skill's own
   hook forbids; use `git stash push -- <file>` / `git stash pop`.
 - "The Bash tool runs zsh" vs "runs bash" asserted in different skills —
-  machine-specific claims don't belong in shared skills.
+  machine-specific claims do not belong in shared skills.
 - Cross-references between jetstream/profile/microbenchmark need "skip if
   already loaded" qualifiers (fix-webkit-ews→jsc already has one).
-- The equivalence margin in jsc-jetstream-compare (0.02% overall) implies
-  ~25x normal round counts; make the compute budget mandatory with a default
-  cap instead of optional.
-- Deduplicate: CPU-pinning doctrine (4 copies), DYLD/LD library-path lore
-  (5 copies), "record learnings in the skill" (2 copies).
-- `jsc-jetstream-compare` claims `quiesce.sh` is "a symlink to
-  wk-tools/quiesce.sh" — it is a regular file and the target does not exist;
-  point it at `wk quiesce`.
+- The 0.02% equivalence margin in jsc-jetstream-compare implies ~25x normal
+  round counts; make the compute budget mandatory with a default cap.
+- Deduplicate: CPU-pinning doctrine (4 copies), DYLD/LD library-path lore (5
+  copies), "record learnings in the skill" (2 copies).
 
-Config plumbing (partially done 2026-08-18 — verify, don't redo):
-- Host/workspace split of settings.json and CLAUDE.md is in place
-  (claude/install.sh vs firstrun.sh/provision-base.sh).
-- macOS guests now link ~/.claude from the synced tree; their skills are
-  read-only there (t_sync_tools --delete would clobber edits). A mutable
-  guest skills store, if wanted, is its own small design.
+**Verify, do not redo:** the host/workspace split of settings.json and CLAUDE.md
+is in place (`claude/install.sh` links the `-host` variants; `container/
+firstrun.sh` and `vm/provision-base.sh` link the workspace ones). macOS guests
+link `~/.claude` from the synced tree and their skills are read-only there — a
+mutable guest skills store, if wanted, is its own small design.
 
-Done means: an agent started by `wk claude` in a container and in a macOS
-guest can follow every skill it can trigger without hitting a host-only
-instruction, and `wk skills status` is clean against the repo.
+## Done means
+
+An agent started by `wk claude` in a container and in a macOS guest can follow
+every skill it can trigger without hitting a host-only instruction, and
+`wk skills status` is clean against the repo.

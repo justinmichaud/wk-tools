@@ -1,88 +1,83 @@
-# HANDOFF — next agent, read this first
+# HANDOFF — the rpi5's tuning tree
 
-**Context:** jmichaud (Igalia) re-installed **Ubuntu 26.04 LTS "Resolute Raccoon"** (kernel 7.0)
-on this Raspberry Pi 5 (16GB, NVMe). This folder was restored from backup after the wipe.
-It holds the reproducible performance-tuning setup built over a prior session.
+This directory is the rpi5's performance-tuning setup, restored from backup
+after a wipe and re-applied by hand. The board is a **workstation** (its own
+`./setup`, full tailnet privileges, podman workspaces like moose), so this tree
+splits in two:
 
-**Role decision (2026-08-18, confirmed 2026-08-19; see
-`docs/HANDOFF-benchmarking.md`):** this tree splits, and the workstation half
-is not conditional any more -- the rpi5 is provisioned as a regular
-workstation now, with its own `./setup` and podman workspaces like moose. The
-stability half here (fan-max, WiFi stability, fstab/indexer, NUMA kernel) keeps
-applying to the installed OS -- host mode. The perf half (overclock, v3d, perf
-governor, swap off) belongs to the bench system the machine boots for a run --
-which did not exist when this was written; see the 2026-08-20 update below.
+- the **stability half** — fan, WiFi, fstab/indexer, the NUMA kernel — applies
+  to the installed OS, i.e. host mode;
+- the **perf half** — overclock, v3d, perf governor, swap off — belongs to the
+  bench system the board boots for a run (`perf-linux-rpi5`).
 
-**Update 2026-08-19:** the image now has a design and is lane A's first step,
-not its last -- `docs/HANDOFF-boot.md`. Two consequences for this tree. The
-perf half has a destination: the image's own `config.txt`, which the board
-picks up on a one-shot boot of its own medium and forgets on the next. And the
-stability half became a prerequisite rather than a peer -- the one-shot is
-armed over SSH, so this board has to be up, reachable and provisioned as a
-workstation before any of it starts. As of this date it is offline (6 days on
-the tailnet).
+Governor and swap-off are already baked into every system by `cmd/sysimage`.
 
-**Update 2026-08-20: the bench system exists, and it boots from USB.** `wk sysimage build perf-linux-rpi5` builds it, `wk sysimage write`
-puts it on the USB stick, and `wk boot rpi5` enters it by a USB one-shot
-(`vcmailbox 0x0003808b 4 4 0xf64`, `boot/rpi5-usb.sh`) -- the NVMe workstation
-is untouched. The perf governor and swap-off are baked into every system
-(`cmd/sysimage`); **the overclock/v3d half of this tree has not moved yet**,
-and its destination is the system's own `config.txt` on the stick's boot
-partition, per the firmware-boundary note below.
+## Remaining
 
-Watch the firmware boundary while moving that last piece: the EEPROM
-(`SDRAM_BANKLOW`, `BOOT_ORDER`) and any `config.txt` on shared media are seen
-in both modes, so an overclock written to the EEPROM overclocks the
-workstation too. The bench system carries its own `config.txt` on its own
-boot medium.
+- **The overclock has not moved to the bench system.**
+  `image/perf-linux-rpi5/config.txt.append` says so in place: when an `oc`
+  profile arrives it sets `arm_freq`/`over_voltage` in *that* file, per image.
+  `image/perf-linux-rpi4/config.txt.append` is the worked example
+  (`arm_freq=1500`, `force_turbo`). Note `docs/HANDOFF-benchmarking.md` requires
+  a run to record `profile=stock|oc` and `cmd/bench` records neither — one piece
+  of work, not two.
+  **Never write the overclock to the EEPROM**: `SDRAM_BANKLOW` and `BOOT_ORDER`
+  are firmware state shared by both modes, so it would overclock the workstation
+  too.
+- **Nothing recreates this tree.** `rpi5-setup.sh` applies fan, wifi powersave,
+  the BSSID pin, fstab and the NUMA kernel with inline `sudo`, and neither
+  `./setup` nor `wk backup` reproduces any of it — so a rebuild of this board
+  loses all of it. The sharpest live example for
+  `docs/HANDOFF-settings-audit.md` and for cattle-not-pets' obligation 2.
+- **Re-flashing this board from nothing** still needs another provisioned
+  machine, pending `wk sysimage flash --reader` (`docs/HANDOFF-sdcard.md`).
+- **Path A is unfiled** — the Launchpad request to enable `CONFIG_NUMA_EMU` in
+  stock linux-raspi, so the custom kernel is not needed long-term (Igalia
+  authored the feature). Path B has validated the approach. An upstreaming item
+  in `docs/HANDOFF-architecture-review.md`.
+- **The 26.04 re-check list has never been walked**: are
+  `/boot/firmware/config.txt` and `cmdline.txt` still the right paths (A/B boot
+  may relocate them), the root fstab label (was `writable`) and its `discard`
+  option, the GNOME 50 indexer names (`localsearch`/`tinysparql` — the script
+  handles this dynamically), and whether swap exists by default.
 
-Everything below still applies as written for the installed OS.
+## Re-applying the tuning
 
-## Step 1 — re-apply the tuning (idempotent, run as the user, NOT sudo)
+Idempotent, run as the user, **not** with sudo:
+
 ```bash
 bash ~/rpi5-tune/rpi5-setup.sh
 sudo reboot
-sudo bash ~/rpi5-tune/rpi5-verify.sh     # confirm clocks/gen3/fan
-sudo bash ~/rpi5-tune/rpi5-stress.sh     # validate 2.8GHz CPU stability
+sudo bash ~/rpi5-tune/rpi5-verify.sh     # clocks / gen3 / fan
+sudo bash ~/rpi5-tune/rpi5-stress.sh     # 2.8GHz CPU stability
 ```
-Then validate the GPU (v3d=1200) with a sustained glmark2-wayland load + `dmesg | grep -i v3d`.
-Adjust via env vars if needed: `ARM_FREQ`, `V3D_FREQ`, `OVER_VOLTAGE_DELTA`, `BROWSER`.
-(If an `id_ed25519` sits beside the script -- the restored backup carried one -- it is installed
-into `~/.ssh/`; no key is in this repo, and that is deliberate.)
 
-### Things to re-check on 26.04 (may have shifted from 24.04):
-- Paths `/boot/firmware/config.txt` and `/boot/firmware/cmdline.txt` still correct? (A/B boot may relocate.)
-- Root fstab label (was `writable`) and the `discard` mount option.
-- GNOME 50 indexer is `localsearch`/`tinysparql` (script already handles this dynamically).
-- swapfile unit name / whether swap exists by default.
+Then validate the GPU (v3d=1200) with a sustained glmark2-wayland load and
+`dmesg | grep -i v3d`. Tunables: `ARM_FREQ`, `V3D_FREQ`, `OVER_VOLTAGE_DELTA`,
+`BROWSER`.
 
-**Decided 2026-08-19 — the NUMA kernel is workstation-only.** Perf results must
-represent what customers ship, and customers do not ship `CONFIG_NUMA_EMU`, so
-the benchmark image runs a **stock kernel** and the custom `7.0.6-numa` kernel
-below is a dev/workstation convenience from here on. Two consequences: image
-numbers on this board will be lower than the tuned-workstation numbers on
-memory-bandwidth-bound work (correct, not a regression), and historical numbers
-taken on the numa kernel are not the going-forward baseline. `SDRAM_BANKLOW=1`
-stays in the EEPROM because it is shared firmware state; a stock kernel simply
-does not act on it. See `docs/HANDOFF-boot.md`.
+**Known-good**: 2.8 GHz CPU (3.0 was UNSTABLE — SIGILL), v3d=1200, PCIe Gen3,
+perf governor, swap off, fan 100% via fan-max.service (trip-lowering +
+pwm=255), de-snapped, Flatpak Chromium, apport off + systemd-coredump, indexer
+and Evolution masked, fstab `discard`→`defaults`.
 
-## Step 2 — NUMA: DONE ✅ (Path B completed 2026-07-04)
-The custom **`7.0.6-numa`** kernel (`CONFIG_NUMA_EMU=y`, built via `rpi5-numa-kernel.sh`) is
-installed and running. NUMA is **ON and optimal**: **8 nodes**, `mempolicy interleave:0-7`,
-`SDRAM_BANKLOW=1` (bootloader default). Confirm any time with `sudo bash rpi5-verify.sh`
-(RESULT line) or `numactl --hardware`.
+## NUMA — done, and workstation-only
 
-Key facts for the next agent (see `rpi5-numa-README.md` → "Best configuration"):
-- NUMA is **firmware-driven** here. There is **no `cmdline.txt`** — boot args come from
-  `/proc/device-tree/chosen/bootargs`, into which the firmware injects `numa_policy=interleave`
-  + `numa=fake=8`. `rpi5-setup.sh`'s NUMA step now pins `SDRAM_BANKLOW=1` in the EEPROM and, on
-  boxes that *do* have a `cmdline.txt`, `numa_policy=interleave`. `NUMA_FAKE=auto` (default) lets
-  the firmware pick the optimal node count — **do not hardcode 4** (that was 8GB-era guidance;
-  8 is correct for this 16GB board).
-- Still open (optional): **Path A** — Launchpad request to enable `CONFIG_NUMA_EMU` in stock
-  linux-raspi so the custom kernel isn't needed long-term (Igalia authored the feature).
+The custom **`7.0.6-numa`** kernel (`CONFIG_NUMA_EMU=y`, built by
+`rpi5-numa-kernel.sh`) is installed: 8 nodes, `mempolicy interleave:0-7`,
+`SDRAM_BANKLOW=1`. Confirm with `rpi5-verify.sh` (RESULT line) or `numactl
+--hardware`; `rpi5-numa-README.md` → "Best configuration" has the detail.
 
-## Known-good tuning summary (validated on the prior 24.04 install)
-2.8GHz CPU (3.0 was UNSTABLE — SIGILL), v3d=1200 GPU, PCIe Gen3, perf governor, swap OFF,
-fan 100% via fan-max.service (trip-lowering + pwm=255), de-snapped, Flatpak Chromium,
-apport off + systemd-coredump, indexer+Evolution masked, fstab discard→defaults.
+**It stays out of bench systems by decision**: perf results represent what
+customers ship, and customers do not ship `CONFIG_NUMA_EMU`, so a bench system
+runs a stock kernel. Consequences: image numbers on this board will be lower
+than tuned-workstation numbers on memory-bandwidth-bound work (correct, not a
+regression), and historical numbers taken on the numa kernel are not the
+going-forward baseline. `SDRAM_BANKLOW=1` stays in the EEPROM because it is
+shared firmware state; a stock kernel simply does not act on it.
+
+**NUMA is firmware-driven here and there is no `cmdline.txt`** — boot args come
+from `/proc/device-tree/chosen/bootargs`, into which the firmware injects
+`numa_policy=interleave` and `numa=fake=8`. `NUMA_FAKE=auto` lets the firmware
+pick the node count; **do not hardcode 4** — that was 8 GB-era guidance, and 8
+is correct for this 16 GB board.

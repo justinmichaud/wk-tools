@@ -1,84 +1,52 @@
-# HANDOFF — `wk pi deploy` and `wk pi bench`
+# HANDOFF — `wk pi deploy` and `wk pi bench`: the open half
 
-Two rituals from the wiki that are done by hand on every Pi cycle, encoded as
-`cmd/pi` verbs. Depends on `wk pi setup` having put the device on the tailnet
-(`docs/HANDOFF-linux-pi.md`) and, for cross-built binaries, on the
-cross-compile flow (`docs/HANDOFF-cross-compile.md`).
+Both verbs are built and both have run on hardware: `wk pi deploy <ws> <machine>
+[--slot]` and `wk pi bench <machine> <plan> [--slot|--ab|--count|--timeout]`
+(`cmd/pi`), with `wk pi setup` provisioning the WebKit tree on the board.
+Speedometer 3 completed on the rpi4 on 2026-08-22 — the first browser benchmark
+this fleet has produced on a bench device.
 
-## `wk pi deploy <ws> <device>`
+## Remaining
 
-Replaces the four-step deploy loop (wiki: Container-Development-Setup "Yocto",
-and the Buildroot page's dev cycle):
+- **The result is printed, not stored.** Nothing files an on-board run beside
+  `wk bench`'s results, so `wk bench ls`/`compare` cannot see it and two on-board
+  runs cannot be compared to each other by any means the tool offers. This is
+  the remaining half of "record provenance next to `wk bench`'s results", and it
+  is one piece of work with the missing provenance fields in
+  `docs/HANDOFF-benchmarking.md`.
+- **`wk pi bench` prints `result after 0s`** for a run that took 22 minutes. The
+  elapsed counter is wrong; the result is not. Cosmetic, and printed next to a
+  number.
+- **The skeleton is not a skeleton.** `wk pi setup` does a `--depth 1` clone —
+  427,711 files, ~4.2 GB, slower onto a Pi's USB stick than cross-building
+  WebKit was. The board only needs the scripts it runs there
+  (`Tools/CISupport/built-product-archive`, `Tools/Scripts/run-benchmark`,
+  `run-minibrowser` and their imports), so a sparse checkout of `Tools/`
+  (~5,000 files) is the right shape.
+- **A manifest can disagree with its disk**: the rpi4's still records
+  `display_forced` after the mode was removed from the stick's cmdline by hand,
+  so the run warns about something it is not doing. Reconcile provenance and
+  disk.
+- **A real-display run has never happened** on the rpi4, and the rpi3 has never
+  been through any of this — it is unprovisioned and off.
+- **`zip` is missing from the yocto workspace image**, so `wk pi deploy` falls
+  back to a plain tar instead of the documented `built-product-archive` path
+  (`docs/HANDOFF-yocto.md` item 5).
 
-1. In the workspace: `unset CC CXX LD_LIBRARY_PATH` first — the wiki marks the
-   env-poisoning as "VERY IMPORTANT" because a poisoned env produces a broken
-   archive with no error; the command must scrub its own environment rather
-   than trusting the shell's.
-2. `built-product-archive --platform=wpe --release --cross-target=<t> archive`
-   (or, for the buildroot fast path, just the `libWPEWebKit*` libraries — a
-   `--libs-only` flag).
-3. Copy to the device over the tailnet (the proxy allows the pi-hosts
-   addresses on port 22; scp/rsync ride ssh). The wiki's destination is
-   `root@<device>:/WebKit/WebKit/WebKitBuild/release.zip`.
-4. On the device: `cd /WebKit/WebKit && built-product-archive --platform=wpe
-   --release extract` (or drop the libs into `/usr/lib`).
+## Constraints that bind the remaining work
 
-**The prerequisite this loop hides, and the reason `deploy` is not just a
-copy: the device needs a WebKit tree at `/WebKit/WebKit`.** **A skeleton, not a
-checkout** (decided 2026-08-21): the board needs the scripts the loop runs
-there -- `Tools/CISupport/built-product-archive` and
-`Tools/Scripts/run-minibrowser` and what they import -- not the source of
-WebKit, which is built on the workstation. So this is a one-time sync of a
-subtree at `wk pi setup`, not a clone, and not something to re-send per
-cycle. Steps 2 and 4
-and the `run-minibrowser` that follows are all WebKit's *own scripts*, and step
-4 and the launch run them **on the board**. The Yocto image deliberately does
-not carry them (`docs/HANDOFF-yocto.md` item 3 — it is the runtime, and the
-browser is what this loop sends), and the freshly built
-`downstream-yocto-wpe-2.48-rpi4` has no `/WebKit` at all. So provisioning that
-tree is part of `wk pi setup`, and `wk pi deploy` should refuse rather than
-scp into a directory that does not exist.
-
-Launching, for `wk pi bench` below — the environment has to come out of the
-running compositor, and the process to read it from is `weston-desktop-shell`
-rather than `weston`:
-
-    source <(strings /proc/$(pidof weston-desktop-shell)/environ \
-        | grep -P '(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)') \
-        && export XDG_RUNTIME_DIR WAYLAND_DISPLAY
-    Tools/Scripts/run-minibrowser --wpe -P wl \
-        "https://browserbench.org/Speedometer3.1/?startAutomatically=true"
-
-Software rendering, when the GPU path is the thing being ruled out:
-`WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1
-GALLIUM_DRIVER=softpipe` in front of it.
-
-## `wk pi bench <device> <plan>`
-
-Replaces the per-session device babysitting (wiki: the rpi3 Yocto page's
-"bash_history" ritual; the rpi3 skill already *teaches* this to an agent — the
-command encodes the mechanics so neither human nor agent re-derives them):
-
-- prep: stop `netdata`, ensure weston is up (seat/sudoers as the skill
-  documents), extract `WAYLAND_DISPLAY` from weston's `/proc/<pid>/environ`;
-- memory prep where the device needs it (rpi3: gpu_mem, swapfile on, per the
-  wiki's "Potential RPI3 workaround" — one-time halves belong in
-  `wk pi setup`);
-- launch the browser at the benchmark URL, detect completion or crash (the
-  rpi3 skill's monitor script shows how), pull the score;
-- record provenance next to `wk bench`'s results so device runs and
-  workstation runs live in one place. Whether this becomes
-  `wk bench --device <pi>` instead of a `pi` verb is the implementer's call —
-  provenance and refusal rules should be shared either way, and
-  `wk bench stage`/`staged` (2026-08-20, `docs/HANDOFF-benchmarking.md`) is
-  the existing shape for a run driven onto another machine.
-
-## Traps
-
-- The rpi3 is 32-bit WPE with its own OOM behaviour — the rpi3 skill is the
+- **A benchmark keeps its score in the DOM**, so a `run-minibrowser` launch can
+  prove completion and never a number. The harness is `run-benchmark`, which
+  also serves the payload from its own loopback http server — that is what keeps
+  the measured-run rule without extra work.
+- **"No display attached" and "no compositor" are different problems.**
+  `wk pi bench` picks drm+gl when an HDMI connector is live and weston's **RDP
+  backend + pixman** when none is (a virtual head; nothing connects to the port),
+  generating its own keys into `/etc/wk-bench`, and announces a pixman run as
+  not comparable with real display hardware. Do not use `video=` to force a
+  mode: it hangs vc4 in probe and takes the board off the network.
+- **The rpi3 is 32-bit WPE with its own OOM behaviour** — the rpi3 skill is the
   reference for completion/crash detection; do not re-derive it.
-- Keep the bench-mode question separate: the perf systems exist now
-  (`wk sysimage build perf-linux-rpi4`), so `wk pi bench` targets whatever
-  identity the booted system announces — a perf system's is mDNS, the
-  downstream image's is whatever `wk pi setup` gave it — and nothing here
-  should assume which system the device booted.
+- **`wk pi bench` targets whatever identity the booted system announces** — a
+  perf system's is mDNS, a downstream image's is whatever `wk pi setup` gave it.
+  Nothing here may assume which system the board booted.

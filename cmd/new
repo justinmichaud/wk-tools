@@ -74,7 +74,7 @@ while [ $# -gt 0 ]; do
         --no-wait) NO_WAIT=1; shift ;;
         --_detached) DETACHED=1; shift ;;
         --sysroot)
-            die "--sysroot is not implemented (docs/HANDOFF-cross-compile.md).
+            die "--sysroot is not implemented (docs/Nice to have/HANDOFF-cross-compile.md).
     It is also not this flag: --arch makes the workspace itself another
     architecture, executed natively. A sysroot cross build stays in a native
     workspace and is a property of the build, so it will be 'wk build

@@ -176,7 +176,7 @@ if [ -n "$LLDB" ]; then
         web) ATTACH=$(config_web_process_name) ;;
         ui)  ATTACH=$(config_test_runner_name) ;;
     esac
-    [ -n "$ATTACH" ] || die "--lldb is only wired up for the Apple ports (docs/HANDOFF-linux-minibrower.md)"
+    [ -n "$ATTACH" ] || die "--lldb is only wired up for the Apple ports (docs/Urgent/HANDOFF-linux-minibrower.md)"
     [ $# -gt 0 ] || die "--lldb needs a test to debug, e.g. fast/dom/Element/id-attribute.html"
     # One driver, so there is exactly one process of either kind to catch.
     JOBS=1

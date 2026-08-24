@@ -119,7 +119,7 @@ detach_run() {
 # it outlasted the bound. Never a state of its own invention otherwise: the
 # child says how it ended and this reports it.
 #
-# Foreground on purpose (docs/HANDOFF-workspace-state.md, step 3): if this end
+# Foreground on purpose (CLAUDE.md, crash-only): if this end
 # dies, only the waiting dies. The work continues, and re-running the same
 # command is the resume.
 detach_wait() {

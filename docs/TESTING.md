@@ -462,8 +462,10 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [ ] the tart window resizes / goes fullscreen  **-- KNOWN BROKEN**
 - [!] the guest runs the latest macOS  **-- 26.4 vs host 26.6.1. PARKED: no
       suitable image exists upstream (re-checked 2026-08-18) and the only
-      symptom is `open -a`, which nothing uses. Do not spend time here; see
-      docs/HANDOFF.md lane B step 2 (item B9) for the one-command tag check**
+      symptom is `open -a`, which nothing uses. Do not spend time here.
+      Upgrades are by rebuild only (`WK_VM_IMAGE` + a base rebuild); one
+      command re-checks the available tags, no `tart pull` required:
+      `T=$(curl -s "https://ghcr.io/token?scope=repository:cirruslabs/macos-tahoe-xcode:pull&service=ghcr.io" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])'); curl -s -H "Authorization: Bearer $T" https://ghcr.io/v2/cirruslabs/macos-tahoe-xcode/tags/list`**
 - [ ] `open -a` inside the guest  **-- KNOWN BROKEN**, LaunchServices -10825:
       the app targets the 26.5 SDK, the guest is 26.4. Use direct bundle exec
 
@@ -603,7 +605,7 @@ reached through a ProxyJump), driven from the macOS host.
       18 with libstdc++ 12 has no `<format>`, which `Source/WTF/wtf/
       FormattedLogging.h` has required since 2026-06-16. The box builds
       releases up to 2.52.x; trunk there needs the container SDK
-      (`docs/HANDOFF-cross-compile.md`), which is already installed on it
+      (`docs/Nice to have/HANDOFF-cross-compile.md`), which is already installed on it
 - [V] `wk run` executes the remote build's jsc (stderr carries whatever noise
       the box's own login shell prints — a shared machine's dotfiles are not
       ours to fix)

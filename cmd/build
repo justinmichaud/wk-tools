@@ -186,7 +186,7 @@ while [ $# -gt 0 ]; do
         --) shift; _PASS+=(${@+"$@"}); break ;;
 
         --sysroot|--sysroot=*)
-            die "--sysroot is not implemented (docs/HANDOFF-cross-compile.md).
+            die "--sysroot is not implemented (docs/Nice to have/HANDOFF-cross-compile.md).
     This workspace is $ARCH; a --sysroot build would be a *cross* build from a
     native workspace, which is a different mechanism -- an aarch64 clang, -m32,
     CMAKE_LIBRARY_ARCHITECTURE and another rootfs to link against." ;;

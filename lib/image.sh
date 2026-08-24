@@ -2,7 +2,7 @@
 #
 # An image is an artifact keyed by its content, not a cache of a fact, so it
 # belongs in the store alongside the base snapshots and the seeded benchmark
-# payloads (docs/HANDOFF-workspace-state.md, rule 1: "could a read recompute
+# payloads (CLAUDE.md, "smallest possible state": "could a read recompute
 # this value, or only re-download/rebuild it?" -- only rebuild).
 #
 #   cache/images/<file>       the distro base, downloaded once, verified by

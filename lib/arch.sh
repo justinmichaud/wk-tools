@@ -19,7 +19,7 @@
 #             multiarch `24.04_arm32_arm64` image, and it is a property of the
 #             build rather than of the workspace -- one aarch64 workspace can
 #             cross-build several ways. Reserved here, not implemented: see
-#             docs/HANDOFF-cross-compile.md, and `wk build --sysroot`, which
+#             docs/Nice to have/HANDOFF-cross-compile.md, and `wk build --sysroot`, which
 #             refuses with that pointer rather than doing something plausible.
 #
 #   target    another machine entirely -- an rpi5, a remote box, a device
@@ -64,11 +64,11 @@ arch_canon() {
         riscv64|riscv)
             die "riscv64 is a cross-build target, not a workspace architecture:
     this machine cannot execute riscv64 natively, so it needs a sysroot.
-    See docs/HANDOFF-cross-compile.md; 'wk build --sysroot' is where it will go." ;;
+    See docs/Nice to have/HANDOFF-cross-compile.md; 'wk build --sysroot' is where it will go." ;;
         *) die "unknown architecture '$1' (one of: $WK_ARCHES)
     A workspace's --arch is what it runs *natively*. To build for something
     this machine cannot execute, that is a cross build -- see
-    docs/HANDOFF-cross-compile.md." ;;
+    docs/Nice to have/HANDOFF-cross-compile.md." ;;
     esac
 }
 

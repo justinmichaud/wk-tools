@@ -111,9 +111,9 @@ esac
 # Nothing here has been run against a CMake port's debugger: the web process is
 # named differently, the launch goes through run-minibrowser rather than the
 # binary, and a wrong process name fails as a debugger that waits forever --
-# the least debuggable failure of the lot. See docs/HANDOFF-linux-minibrower.md.
+# the least debuggable failure of the lot. See docs/Urgent/HANDOFF-linux-minibrower.md.
 if [ -n "$DEBUG" ] && [ "$CFG_BUILDSYS" != xcode ]; then
-    die "--lldb is only wired up for the Apple ports (docs/HANDOFF-linux-minibrower.md)"
+    die "--lldb is only wired up for the Apple ports (docs/Urgent/HANDOFF-linux-minibrower.md)"
 fi
 
 # about:blank when no page is named. A workspace does reach the network -- the

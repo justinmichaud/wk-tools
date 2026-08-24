@@ -57,7 +57,7 @@ What made it unrecoverable is worth more than the cause:
   would not have helped on its own (the reboot would re-enter the same stick),
   but the asymmetry is undocumented and worth knowing.
 - **There is no console.** moose's BMC would have shown the boot; the rpi4 has
-  no such path, and `docs/HANDOFF-moose-bench.md`'s "get the console working
+  no such path, and `docs/Urgent/HANDOFF-moose-bench.md`'s "get the console working
   before the first risky boot" applies to every board, not just moose.
 
 The order that was available and was not taken: put `video=` on the **SD**

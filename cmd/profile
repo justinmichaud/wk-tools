@@ -165,7 +165,7 @@ elif [ -n "$BROWSER" ]; then
     and the process that matters is a child of it, so a profiler pointed at the
     launcher records the launcher. Profile the web process with
     '--attach WebKitWebProcess' once it is up, or use the jsc shell.
-    See docs/HANDOFF-linux-minibrower.md." ;;
+    See docs/Urgent/HANDOFF-linux-minibrower.md." ;;
     esac
     BIN=$(config_browser_path "$SRC")
     [ -n "$URL" ] || URL="about:blank"
@@ -359,8 +359,8 @@ fi
 
 if [ -n "$NEEDS" ] && [ -z "$DRY" ]; then
     t_exec "$NAME" command -v "$NEEDS" >/dev/null 2>&1 || die "$NEEDS is not installed in '$NAME'.
-    It is provisioning, not a per-run step -- see docs/HANDOFF-profile.md and
-    lane A step 10 of docs/HANDOFF.md. Until that lands:
+    It is provisioning, not a per-run step -- see the provisioning half of
+    docs/Urgent/HANDOFF-profile.md. Until that lands:
         wk enter $NAME     and install it there, or
         wk profile $NAME --mode sampling   which needs no tools at all."
 fi

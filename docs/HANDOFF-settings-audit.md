@@ -1,83 +1,70 @@
-# Handoff: audit non-default host settings, ask before persisting
+# HANDOFF — audit non-default host settings, ask before persisting
 
-`wk backup` is the inverse of `./setup` — it writes live desktop/OS settings
-back into the repo (`host/linux/config.dconf`, `host/macos/defaults.conf`) so
-a fresh machine can reproduce them. Both files are meant to hold *deliberate*
-choices only, per `cmd/backup`'s own comment: dumping everything produces a
-file that can't be applied to another machine and that changes on every run.
+`wk backup` is the inverse of `./setup`: it writes live desktop/OS settings back
+into the repo (`host/linux/config.dconf`, `host/macos/defaults.conf`) so a fresh
+machine can reproduce them. Both files are meant to hold *deliberate* choices
+only — dumping everything produces a file that cannot be applied to another
+machine and that changes on every run.
 
-That intent has never actually been checked against reality on either
-platform. This handoff is the check: find every setting that's currently
-non-default on each host, decide — with the user, not for them — whether it
-belongs in the repo, and end with a plain summary of what's now tracked and
-why.
+That intent has never been checked against reality on either platform. This is
+that check, and it has not started.
 
-**Do not silently add or drop settings.** The point of this task is that each
-one is a choice the user made, and the previous handoffs already have a
-warning about not respecting that: `docs/HANDOFF-sandboxing.md` lists "claude
-overwriting my work" as a real incident. Present findings, wait for an answer,
-then write.
+**Do not silently add or drop settings.** Each one is a choice the user made.
+Present findings, wait for an answer, then write.
 
-## Workflow (same shape on both platforms)
+## The workflow, same shape on both platforms
 
 1. Run `wk backup` to regenerate the tracked file from the live machine.
-2. `git diff` it against the last-committed version — that's the exact list
-   of what's new, changed, or (if something reverted) gone.
-3. Before showing anything to the user, apply `cmd/backup`'s existing filters
-   for known machine-specific junk (see Linux section below) and drop those
-   silently — the user shouldn't be asked about noise the filter was already
-   supposed to remove. If the filter doesn't catch something it should, fix
-   the filter rather than asking every time.
-4. For everything left, ask the user explicitly, one batch of questions
-   rather than one prompt per setting: keep it in the repo (so `./setup`
-   reproduces it on a new machine), or drop it (machine-specific, accidental,
-   or no longer wanted).
-5. Write the kept set back to the tracked file, run `./setup` (or the
-   relevant stage) to confirm the round trip actually reproduces the state,
-   and commit only after that's confirmed.
-6. Finish with a short written summary — what's now persisted and, for each,
-   the one-line reason it's a deliberate choice rather than machine noise.
-   That summary is the deliverable as much as the file change is; it's what
-   makes the next audit fast instead of starting from zero.
+2. `git diff` it — that is exactly what is new, changed or gone.
+3. Apply `cmd/backup`'s existing junk filters and drop that silently; the user
+   should not be asked about noise the filter was supposed to remove. If the
+   filter misses something it should catch, fix the filter.
+4. Ask about everything left, in **one batch**: keep it in the repo, or drop it.
+5. Write the kept set back, run `./setup` (or the stage) to confirm the round
+   trip reproduces the state, and commit only after that.
+6. Finish with a short written summary — what is persisted and the one-line
+   reason each is a deliberate choice. That summary is the deliverable as much
+   as the file change: it is what makes the next audit fast.
 
-## Linux — `host/linux/config.dconf`
+## Remaining — Linux (`host/linux/config.dconf`)
 
-The known problem, flagged when the Linux port landed: the file is a
-raw dump containing a weather location, four nm-applet WiFi UUIDs, a GTK
-last-folder path, Ptyxis profile UUIDs, and timestamps — none of which
-transfer to another machine or represent a real choice. `cmd/backup` has
-filters written for these but they've never been exercised.
+The file is a raw dump containing a weather location, four nm-applet WiFi UUIDs,
+a GTK last-folder path, Ptyxis profile UUIDs and timestamps — none of which
+transfer or represent a choice. `cmd/backup` has filters for these and **they
+have never been exercised**.
 
-1. Verify those filters actually strip that specific junk before trusting
-   them for anything else.
-2. Run the full workflow above on the dconf tree. `apt.txt` (the installed
-   package list) is adjacent state worth the same treatment — audit it for
-   packages that crept in without being a deliberate "this belongs on every
-   machine" decision.
-3. Confirm the full round trip: `wk backup` → `./setup` → the machine ends up
-   in the same state, with `./setup` reporting no further changes on a second
-   run (the existing `./setup` invariant, stated in SETUP.md).
+1. Verify the filters strip that specific junk before trusting them further.
+2. Run the workflow on the dconf tree. `apt.txt` deserves the same treatment —
+   audit it for packages that crept in without a deliberate decision.
+3. Confirm the round trip: `wk backup` → `./setup` → same state, with a second
+   `./setup` reporting no further changes.
 
-## macOS — `host/macos/defaults.conf` and friends
+## Remaining — macOS (`host/macos/defaults.conf` and friends)
 
-`defaults.conf` is already curated (domain/key/type triples with comments),
-and `cmd/backup` refreshes only the values for keys already listed there —
-it's a "keep what's already decided in sync," not an audit for what's missing.
-The gap this handoff covers: macOS reports ~574 preference domains total, and
-nothing currently looks for domains that are non-default, plausibly
-deliberate, and *not yet* in `defaults.conf`.
+`defaults.conf` is curated (domain/key/type triples with comments) and
+`cmd/backup` refreshes only keys already listed — "keep what is decided in
+sync", not an audit for what is missing. macOS reports ~574 preference domains
+and nothing looks for ones that are non-default, plausibly deliberate, and not
+yet listed.
 
-1. Enumerate current `defaults read` state across domains, filter out what's
-   obviously window position / per-app transient state (the same reasoning
-   `cmd/backup`'s comment already gives for why 574 domains isn't the list),
-   and surface the remainder as candidates.
-2. Ask the user per candidate: add to `defaults.conf` (with the same
-   domain/key/type/comment shape the file already uses), or leave untracked.
-3. The same question applies to the other machine-state files in
-   `host/macos/`: `symbolichotkeys.plist`, `softnet.sh`, `vmtools.sh`,
-   `mcp.sh`, `tools.sh`, `playbook.yaml`. Anything in there that's drifted
-   from what's committed is an audit candidate the same way `defaults.conf`
-   is; treat this as one audit pass across the whole directory, not just the
-   one file.
-4. Confirm the round trip the same way as Linux: `wk backup` → `./setup` on a
-   clean-ish machine, second run reports no changes.
+1. Enumerate `defaults read` across domains, filter obvious window-position and
+   per-app transient state, surface the remainder as candidates.
+2. Ask per candidate: add with the same domain/key/type/comment shape, or leave
+   untracked.
+3. Treat the rest of `host/macos/` the same way — `symbolichotkeys.plist`,
+   `softnet.sh`, `vmtools.sh`, `mcp.sh`, `tools.sh`, `playbook.yaml`. One audit
+   pass across the directory, not one file.
+4. Confirm the round trip as on Linux.
+
+## Three things that make this bigger than it was
+
+- **The macOS bench install is a second machine's worth of settings**, and what
+  it needs is the opposite of a workstation's: no FileVault, no update checking,
+  no App Nap. `docs/HANDOFF-mac-perf-mode.md` and `docs/HANDOFF-reprovision.md`
+  both name settings this audit is supposed to persist-or-drop.
+- **The rpi5's hand-applied state** (`host/linux/rpi5/`) is the sharpest live
+  example — overclock, fan, wifi powersave, a pinned BSSID — restored from
+  backup and recreated by nothing.
+- **`wk doctor`'s machine-local-state section** is the enforcement point for
+  cattle-not-pets; this audit's output should reconcile with it rather than
+  becoming a second list.

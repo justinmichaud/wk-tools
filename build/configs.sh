@@ -483,7 +483,7 @@ config_browser_env() {
 # Empty for the CMake ports on purpose rather than guessed: nothing here has
 # been run against them, and a wrong name fails as "the debugger is still
 # waiting", which is the least debuggable failure of the lot. The Linux half is
-# docs/HANDOFF-linux-minibrower.md.
+# docs/Urgent/HANDOFF-linux-minibrower.md.
 config_web_process_name() {
     case "$CFG_BUILDSYS" in
         xcode) echo "com.apple.WebKit.WebContent.Development" ;;

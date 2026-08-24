@@ -1,153 +1,62 @@
-# Handoff: the original helper scripts
+# HANDOFF — capabilities from the pre-`wk` helper scripts
 
-Before `wk`, this repository was a flat directory of ~70 shell scripts driven
-by three `init-*` files that exported `$BUILDDIR` and `$CONFIG` into the
-shell. They are all recoverable:
+Before `wk`, this repository was ~70 flat shell scripts driven by `init-*` files
+that exported `$BUILDDIR` and `$CONFIG` into the shell. They are recoverable:
 
 ```sh
 git show 7a76d6d^ --stat            # the tree as it was
 git archive 7a76d6d^ | tar -x -C /tmp/orig
 ```
 
-This document exists so nothing in them is lost by accident. Every script is
-listed with what it did and where that capability now lives. **"gone"** means
-the capability does not exist in `wk` today and would have to be rebuilt.
+This file exists so no *capability* is lost by accident. The point is not to
+port them one for one — most were two lines wrapping a path that made sense on
+one machine — but that dropping one should be a decision.
 
-The point is not to port them one for one. Most were two lines wrapping a path
-that only made sense on one machine, and the reason `wk` exists is that those
-paths were wrong in five different ways across three checkouts. The point is
-that the *capability* should be a deliberate decision, not an accident of what
-happened to get rewritten.
+## Remaining
 
----
+1. **Decide, once, about each capability that is still gone**: restore it as a
+   `wk` verb, restore it as a script in `container/bin/` where the workspace can
+   see it, or record that it is deliberately dropped. Still gone today:
+   - `jscrr`/`jscrrr` (rr record/replay; `container/lldb/rr.py` is wired for
+     replay only), `jscsp` (sysprof-cli, and the sysprof JIT-dump patch);
+   - the wasm wrappers — `wasm-compile`, `wasm-test`, `wasm-fast-stress`,
+     `wasm-debug`, `wasm-test-v8`. All thin wrappers over `$VM/bin/jsc` plus
+     `wabt`; if they come back they belong in `container/bin/`;
+   - `bench-js2-simd-nosimd` and `-v8` (SIMD on/off, and against V8);
+   - the git one-liners, which moved to `docs/HANDOFF-git-tools.md`.
+2. **The option-toggle A/B benchmark mode** (`bench-js2-cli`,
+   `bench-js3-switch`) — the one worth doing first, because nothing covers it
+   and it has real logic: N rounds toggling one JSC option. A/B arrived twice
+   elsewhere on different axes — `wk pi bench --ab A,B` alternates two deployed
+   slots, `bench/mac-ab.sh` interleaves two builds — so copy one of those
+   shapes rather than designing a third.
+3. **PGO profile collection and build** — still uncovered; nothing in
+   `cmd/build` or `build/` mentions it.
+4. **The frontmost-window raiser, still missing from `wk quiesce`.** MiniBrowser
+   is launched by raw exec to inject `DYLD_FRAMEWORK_PATH`, so macOS never
+   activates it; an occluded page gets its `requestAnimationFrame` throttled,
+   which stalls the rAF-driven JetStream3 loop. The original disabled App Nap
+   for MiniBrowser and ran a background raiser. `wk quiesce` does caffeinate,
+   daemon-pausing and the privileged helper, and nothing raises or App-Nap-exempts
+   the browser. A real gap for macOS browser runs.
+5. **Per-subtest confidence intervals** — `wk bench compare` runs
+   `compare-results --breakdown`, which should cover what `js3-ci.py` did.
+   Check one run against it and tick the TESTING.md line. Silent while open: the
+   numbers still appear, they are just worth less.
+6. **Baseline builds for ad-hoc runs.** Every `bench-*` script assumed a second
+   tree at `WebKitBuildBaseline/` built from ToT. A workspace holds one checkout
+   and one build tree per config, and `wk bench` builds its own baseline
+   elsewhere — worth confirming a baseline is still reachable outside
+   `wk bench`.
 
-## The model they used, and why it went away
+## Already covered, for reference
 
-```sh
-. init-release          # export BUILDDIR=~/Development/ReleaseVersion/OpenSource
-                        # export CONFIG=Release; cd $BUILDDIR
-jscb                    # build
-jscr foo.js             # run
-```
+`jsc-stress`→`wk test`; the JS2/SP2/JS3 loops→`wk bench`; `bench-show-results*`
+→`wk bench compare`; `quiesce.sh`→`wk quiesce` + `admin/wk-quiesce-priv`;
+`strip-addresses` and `show-profiled-functions`→`container/bin/`; `gpr`→`wk pr`;
+`report`→`wk report`; the profiling runs→`wk profile`; `lldbinit.py`→
+`dotfiles/lldbinit` + `container/lldb/`; `rpi5-tune/`→`host/linux/rpi5/`.
 
-`$BUILDDIR` and `$CONFIG` were ambient shell state. Every script read them, so
-which build you ran depended on which `init-*` you had sourced in *this*
-terminal, and there was no way to tell from the command itself. Two terminals
-meant two different answers to `jscr foo.js`.
-
-`wk` replaced the ambient pair with an explicit workspace name and a named
-config: `wk run bug-238 --config jsc-release`. The `init-*` scripts have no
-successor and should not get one.
-
-Three build-tree layouts were hardcoded across these scripts
-(`WebKitBuild/$CONFIG`, `WebKitBuild/JSCOnly/$CONFIG`, and the Apple one), and
-they disagreed. `build/configs.sh:config_build_dir` is now the single authority.
-
----
-
-## Running JSC
-
-The profiling rows below are superseded as a work item by
-`docs/HANDOFF-profile.md` (`wk profile` + image provisioning); this table
-stays as the capability inventory it was.
-
-| original | did | now |
-|---|---|---|
-| `jscrr` | run under `rr record` | **gone** (Linux only; `container/lldb/rr.py` is wired for replay) |
-| `jscrrr` | `rr replay` | **gone** |
-| `jscs` | run under `samply`, with `--useJITDump --useTextMarkers` | **gone** — the `jsc-profile` skill documents the invocation |
-| `jscsp` | run under `sysprof-cli` | **gone** |
-| `jsc-stress` | run-jsc-stress-tests over the build | `wk test <ws>` |
-| `strip-addresses` | strip hex addresses from disassembly so two dumps diff | **done** — restored at `container/bin/strip-addresses` |
-| `show-profiled-functions` | parse the bytecode profiler dump | **done** — restored at `container/bin/show-profiled-functions` (macOS-only: needs `xcrun llvm-profdata`) |
-
-`jscs`/`jscsp` mattered: both set `perf_event_paranoid` to -1 first, which is
-a root operation, and both depend on a profiler that lives on the host. Under
-the current sandbox a workspace has no such privilege — which is why the verb
-that came back (`cmd/profile`, 2026-08-20) composes the run and refuses by
-name when the profiler is missing, instead of being a script inside that needs
-root. `wk profile` covers samply, JSC's sampling and bytecode profilers,
-Instruments, heaptrack and massif, with JIT dump, on the jsc shell and (Apple
-ports) MiniBrowser. Not covered: sysprof (and the sysprof JIT-dump patch), and
-building the profilers into the workspace image — both remain with
-`docs/HANDOFF-profile.md` / lane A step 10.
-
-## Building
-
-- Running a layout test or a js test in the debugger: specced as `wk debug`
-  in `docs/HANDOFF-debug.md`.
-- Support collecting and building a PGO profile + build — still uncovered.
-
-## Benchmarking
-
-| original | did | now |
-|---|---|---|
-| `bench-js2` | 10 interleaved JetStream2 rounds, patched vs baseline, via `run-benchmark` | `wk bench` |
-| `bench-js2-cli` | 60 rounds of a 5-test JS2 subset in the jsc shell, toggling one JSC option | **partly** — `wk bench` does not do option-toggle A/B |
-| `bench-sp2` | 2 rounds of Speedometer 2 | `wk bench` |
-| `bench-js3-switch` | 20 rounds of `8bitbench-wasm` comparing `--minCasesForTable=7` vs `10` | **gone** — the same option-toggle gap |
-| `bench-js2-simd-nosimd`, `-v8` | SIMD on/off, and against V8 | **gone** |
-| `bench-show-results*` | `compare-results -a ToT*.result -b Patched*.result --detailed-breakdown` | `wk bench` reports its own |
-| `js3-run-loop.sh` | interleaved full-suite JS3 loop, one JSON per build per round | `wk bench` |
-| `js3-ci.py` | per-subtest b/a ratio with 95% CI | **check** — `wk bench compare` runs `compare-results --breakdown`, which should cover it, but TESTING.md's per-subtest-CI line is still unticked |
-| `quiesce.sh` | 298 lines: Spotlight, Software Update, App Nap, `caffeinate`, keeping MiniBrowser frontmost | `wk quiesce` + `admin/wk-quiesce-priv` |
-
-Two things in `quiesce.sh` are easy to lose and were hard-won:
-
-- **The frontmost-window raiser.** MiniBrowser is launched by raw exec to
-  inject `DYLD_FRAMEWORK_PATH`, so macOS never activates it. Occluded pages get
-  their `requestAnimationFrame` throttled, which stalls the rAF-driven
-  JetStream3 loop. The original disabled App Nap for MiniBrowser and ran a
-  background raiser. **Checked 2026-08-20: `wk quiesce` does not** — it does
-  caffeinate, daemon-pausing and the privileged helper, and nothing raises or
-  App-Nap-exempts MiniBrowser. Still a real gap for macOS browser runs.
-- **A pinned local copy of the benchmark**, so a run is not measuring whatever
-  the network served that day. **Survived**: `wk bench seed` pins payloads by
-  commit.
-
-**Baseline builds.** `jscrb` and every `bench-*` script assumed a second tree
-at `WebKitBuildBaseline/`, built from ToT, living beside the patched one. `wk`
-has no equivalent: a workspace holds one checkout and one build tree per
-config. `wk bench` builds its own baseline elsewhere. Worth confirming that a
-baseline is still reachable for ad-hoc runs, not only inside `wk bench`.
-
-## Wasm
-
-| original | did | now |
-|---|---|---|
-| `wasm-compile` | compile a `.wat` with the build's tooling | **gone** |
-| `wasm-test`, `wasm-fast-stress` | wasm stress suites | **partly** — `wk test` runs the JSC suites |
-| `wasm-debug` | wasm run under a debugger | **gone** |
-| `wasm-test-v8` | the same against V8 | **gone** |
-
-All five are thin wrappers over `$VM/bin/jsc` plus `wabt`, which the old PATH
-pulled from `/Volumes/WebKit/wabt/bin`. If they come back they belong in
-`container/bin/`, where the workspace can see them.
-
-Git and GitHub helpers (`gpr`, `git-sync-fork`, `git-clean`, `commit-count`,
-`report`) moved out to `docs/HANDOFF-git-tools.md` — they don't share anything
-with the profiling/benchmarking/wasm material in this file.
-
-## Editor, shell and misc
-
-| original | did | now |
-|---|---|---|
-| `lldbinit.py`, `lldb-run-file` | lldb helpers | `dotfiles/lldbinit`, `container/lldb/` |
-| `rpi5-tune/` | Pi 5 NUMA kernel, overclock sweep, stress and verify | `host/linux/rpi5/` |
-
----
-
-## What to do with this
-
-1. Decide, once, about each **gone** row: restore it as a `wk` verb, restore it
-   as a script in `container/bin/` where the workspace can see it, or record
-   that it is deliberately dropped.
-2. The one worth doing first, because nothing covers it and it has real
-   logic: the option-toggle A/B benchmark mode (`bench-js2-cli`,
-   `bench-js3-switch`). (`strip-addresses` and `gpr` were the other priority
-   picks; both are restored.)
-3. Close the two verification items above: the frontmost-raiser gap in
-   `wk quiesce` is confirmed real (2026-08-20) and needs building; the
-   per-subtest CI needs one run checked against `js3-ci.py`'s output and the
-   TESTING.md line ticked. Both are silent regressions while open: the numbers
-   still appear, they are just worth less.
+Two things from `quiesce.sh` that were hard-won: the raiser above, and **a
+pinned local copy of the benchmark** so a run does not measure whatever the
+network served that day — that one survived, as `wk bench seed`.

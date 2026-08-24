@@ -340,7 +340,7 @@ CPU-class plans there and refuses GPU-class ones.
 
 A cross build against a sysroot is a *different* mechanism and gets a different
 word, `--sysroot`, which is reserved and refused for now
-(`docs/HANDOFF-cross-compile.md`).
+(`docs/Nice to have/HANDOFF-cross-compile.md`).
 
 That in-workspace command set (the block in "Working inside a workspace"
 above) is the interface `wk claude` hands an agent, and the only one available
