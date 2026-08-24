@@ -160,6 +160,93 @@ EOF
     emit ""
 done
 
+# WHAT THIS EXPERIMENT COULD HAVE DETECTED.
+#
+# The missing half of every "not significant". A null result means nothing on its
+# own: it is only informative next to the smallest difference the run had the
+# power to find. Measured on this lane 2026-08-24 -- 0.31% run-to-run sd, so
+# three rounds a side resolve only about 0.75%. A patch worth 0.4% is invisible
+# here, and "not significant" is the wrong word for it.
+#
+# The decomposition behind this is worth stating because it is counter-intuitive.
+# Within a run the iteration scores have sd ~6.8%, but nearly all of that is a
+# *deterministic* dip at the first iteration of each browser launch (with the
+# plan's count=4, positions 1/11/21/31 score ~34 against ~43; Speedometer counts
+# compilation and instantiation there on purpose). Remove that repeating shape
+# and the real per-iteration noise is sd ~0.89, which over 40 iterations predicts
+# a run-mean SE of 0.33% -- against an observed between-run sd of 0.31%. They
+# agree, so **there is no measurable machine-level noise between runs at all**:
+# no thermal drift, no scheduling drift, nothing left for quiescing to remove.
+#
+# Two things follow. Trimming warm-up would be wrong twice over: methodologically
+# (Speedometer means to count it) and statistically (those are the most
+# reproducible values in the run, so dropping them made between-run sd *worse*,
+# 0.313% -> 0.342%). And --count and --rounds are interchangeable levers, both
+# scaling as 1/sqrt(total iterations), so buy precision whichever way is cheaper.
+mde_note() {
+    "$PY" - "$RUNS" "$ROOT" <<'MDEPY'
+import json, os, statistics as st, sys
+runs, root = sys.argv[1], sys.argv[2]
+arms = {}
+for line in open(runs):
+    f = line.rstrip("\n").split("\t")
+    if len(f) < 4: continue
+    arms.setdefault(f[1], []).append(os.path.join(root, "results", f[3], "result.json"))
+def coll(o, out):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k == "Score": out.append(v)
+            coll(v, out)
+    elif isinstance(o, list):
+        for i in o: coll(i, out)
+    return out
+def nums(x, a):
+    if isinstance(x, list):
+        for i in x: nums(i, a)
+    elif isinstance(x, dict):
+        for v in x.values(): nums(v, a)
+    elif isinstance(x, (int, float)): a.append(float(x))
+    return a
+def score(p):
+    try: d = json.load(open(p))
+    except Exception: return None
+    v = nums(coll(d, []), [])
+    return st.mean(v) if v else None
+groups = {}
+for a, ps in arms.items():
+    vs = [x for x in (score(p) for p in ps) if x is not None]
+    if len(vs) >= 2: groups[a] = vs
+if len(groups) < 2:
+    print("  (too few rounds per arm to state a detectable effect size)")
+    raise SystemExit
+num = sum((len(v) - 1) * st.variance(v) for v in groups.values())
+den = sum(len(v) - 1 for v in groups.values())
+sp = (num / den) ** 0.5
+grand = st.mean([x for v in groups.values() for x in v])
+ns = [len(v) for v in groups.values()][:2]
+se = sp * (1.0 / ns[0] + 1.0 / ns[1]) ** 0.5
+tt = {1:12.71,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,8:2.306,10:2.228,
+      12:2.179,14:2.145,18:2.101,22:2.074,30:2.042,60:2.000}
+df = ns[0] + ns[1] - 2
+t = tt.get(df) or tt[min(tt, key=lambda k: abs(k - df))]
+if grand:
+    print("  run-to-run sd (pooled, this experiment): %.4f  (%.3f%% of score)" % (sp, 100*sp/grand))
+    print("  smallest difference it could have found: %.2f%%  (p<0.05, %d+%d rounds)"
+          % (100*t*se/grand, ns[0], ns[1]))
+    print("  below that, 'not significant' means 'under this threshold', not 'absent'.")
+    for r in (8, 12):
+        se_r = sp * (2.0 / r) ** 0.5
+        t_r = tt.get(2*(r-1), 2.05)
+        print("    with %2d rounds a side it would be %.2f%%" % (r, 100*t_r*se_r/grand))
+MDEPY
+}
+
+emit "power"
+while IFS= read -r line; do emit "$line"; done <<MDEEOF
+$(mde_note 2>/dev/null)
+MDEEOF
+emit ""
+
 # The comparison proper. Two arms only -- compare-results takes -a and -b, and
 # a three-arm A/B/C is two comparisons rather than one, which the caller can ask
 # for by naming the pairs.

@@ -79,14 +79,34 @@ on)
         # per-login and self-reversing, which is the shape of everything else
         # here. Verified by asking whether the process is gone, not by the exit
         # status of the bootout.
+        # THE LABEL IS NOT WHAT IT LOOKS LIKE. The first version booted out
+        # `com.apple.notificationcenterui`, which is the *plist filename* and not
+        # the label inside it: macOS 26 answers "Could not find service
+        # com.apple.notificationcenterui in domain for user gui: 501" and the
+        # agent keeps running. Measured on the benchmark install 2026-08-24,
+        # where the warning below fired on every one of six arms. The label is
+        # `com.apple.notificationcenterui.agent` -- read out of
+        # /System/Library/LaunchAgents/com.apple.notificationcenterui.plist.
+        #
+        # So the label is *discovered* from the plist where possible and only
+        # falls back to a guess, and either way the verdict comes from `pgrep`
+        # rather than from launchctl's exit status. Same rule as everywhere else
+        # on this platform: ask whether the thing is gone, not whether the
+        # command said so.
         if pgrep -x NotificationCenter >/dev/null 2>&1; then
-            launchctl bootout "gui/$(id -u)/com.apple.notificationcenterui" >/dev/null 2>&1 || true
-            sleep 1
+            nc_label=$(/usr/libexec/PlistBuddy -c 'Print :Label' \
+                /System/Library/LaunchAgents/com.apple.notificationcenterui.plist 2>/dev/null)
+            for lbl in "$nc_label" com.apple.notificationcenterui.agent com.apple.notificationcenterui; do
+                [ -n "$lbl" ] || continue
+                launchctl bootout "gui/$(id -u)/$lbl" >/dev/null 2>&1
+                sleep 1
+                pgrep -x NotificationCenter >/dev/null 2>&1 || break
+            done
             if pgrep -x NotificationCenter >/dev/null 2>&1; then
                 warn "NotificationCenter is still running -- a banner can appear mid-run"
             else
-                info "NotificationCenter stopped (no banners can be drawn)"
-                touch "$STATE/notifications_stopped"
+                info "NotificationCenter stopped (label '${lbl}'; no banners can be drawn)"
+                printf '%s' "$lbl" > "$STATE/notifications_stopped"
             fi
         else
             info "NotificationCenter was not running"
@@ -137,7 +157,11 @@ off)
         # anyway for the workstation case, where `quiesce off` is expected to
         # hand the desktop back exactly as it was found.
         if [ -f "$STATE/notifications_stopped" ]; then
-            launchctl kickstart "gui/$(id -u)/com.apple.notificationcenterui" >/dev/null 2>&1 \
+            # The label that actually worked, not a guess -- see the note in `on`.
+            nc_label=$(cat "$STATE/notifications_stopped" 2>/dev/null)
+            launchctl bootstrap "gui/$(id -u)" \
+                /System/Library/LaunchAgents/com.apple.notificationcenterui.plist >/dev/null 2>&1 \
+                || launchctl kickstart "gui/$(id -u)/${nc_label:-com.apple.notificationcenterui.agent}" >/dev/null 2>&1 \
                 || open -a NotificationCenter >/dev/null 2>&1 || true
             rm -f "$STATE/notifications_stopped"
             info "NotificationCenter restarted"

@@ -428,6 +428,216 @@ through an entire A/B. `sysadminctl -resetPasswordFor` is the administrative
 reset and needs no old password; the result is then checked with
 `dscl . -authonly`, which is evidence rather than an exit status.
 
+## How much variance this lane actually has, measured (2026-08-24)
+
+Six runs of the same plan on the benchmark install, decomposed. The headline is
+that **the machine contributes no measurable noise between runs** — which is a
+better result than expected and it changes where effort should go.
+
+| quantity | value |
+|---|---|
+| within-run sd across the 40 iteration scores | 2.88 (6.8%) |
+| …after removing the deterministic per-position shape | 0.89 (2.1%) |
+| predicted SE of a run mean, 40 iterations | 0.140 (**0.331%**) |
+| observed between-run sd of the reported means | 0.133 (**0.313%**) |
+| unexplained run-level variance | **zero** (negative, within estimation error) |
+
+The two middle rows agreeing is the whole finding. All of the run-to-run spread
+is iteration noise averaged over 40 iterations; there is no thermal term, no
+scheduling term, nothing left for quiescing to remove. (The residual sd is
+biased low by ~9% from fitting 40 position means to 6 runs; correcting it leaves
+the conclusion unchanged.)
+
+### The 6.8% is not noise, it is a repeating dip
+
+With the plan's `count: 4`, positions 1, 11, 21 and 31 — the first Speedometer
+iteration of each browser launch — score **~34 against ~43** for every other
+iteration. That single dip is most of the within-run sd, and it is the most
+reproducible number in the run (sd across runs at position 1 is 0.43, the lowest
+of any position). Being deterministic, it contributes nothing to between-run
+variance, which is exactly why the reported mean is three times more stable than
+iid theory predicts from a 6.8% sd.
+
+**Do not trim it**, for two independent reasons:
+
+- Speedometer counts compilation and instantiation in the first iteration *on
+  purpose* — Speedometer 3 changed WebAssembly workloads specifically to make
+  that consistent with JavaScript. Trimming measures something the benchmark does
+  not define.
+- It makes A/B comparisons **worse**, not better. Measured: dropping the first
+  iteration moved between-run sd from 0.313% to 0.342%, and dropping ten moved it
+  to 0.558%. Removing the most reproducible values in a run costs precision.
+
+That is worth writing down because trimming warm-up is the obvious first move and
+it is wrong here in both directions.
+
+### What the lane can resolve, and the cheap way to improve it
+
+Since there is no run-level term, `--count` and `--rounds` are interchangeable:
+both scale precision as 1/sqrt(total iterations). Buy whichever is cheaper —
+`--count` amortises one browser launch over more iterations and skips the
+per-round overhead.
+
+| count | rounds/arm | run sd | smallest detectable difference (p<0.05) |
+|---|---|---|---|
+| 4 | 3 (today's default is 2) | 0.33% | **0.75%** |
+| 4 | 8 | 0.33% | 0.35% |
+| 4 | 12 | 0.33% | 0.29% |
+| 8 | 8 | 0.23% | 0.25% |
+| 12 | 8 | 0.19% | **0.20%** |
+
+`wk bench ab-summary` now prints this for the experiment it is summarising,
+because a null result is uninformative without it: the 2026-08-24 A/B could only
+have found a difference of 0.64% or larger, so its "not significant" meant
+"under 0.64%", not "no effect". Reporting a p-value without the power behind it
+is how a real 0.4% regression gets recorded as absent.
+
+### An unrelated finding worth keeping
+
+Rebuilding a tree this machine has built before takes **7 minutes, not 83** —
+Xcode 26's content-addressed cache hits on the previous state. So an A/B that
+switches between two commits is far cheaper after the first build of each than
+the first cycle suggests, and more rounds or more configurations are affordable
+than they look.
+
+## Bench mode IS reachable, and the reason it looked unreachable was wrong (2026-08-24)
+
+The premise the whole planted-agent architecture rests on — "the benchmark
+install has no network, so it cannot be driven" — is false, and the specific
+belief that made it look true is this, from `dotfiles/ssh/config`:
+
+> its address is a DHCP lease shared with host mode (private Wi-Fi MAC is off, so
+> both installs present the same hardware MAC and take the same lease)
+
+**Both halves are wrong for the bench install.** Measured while an A/B was
+actually running in it:
+
+| | host mode | bench mode |
+|---|---|---|
+| Wi-Fi MAC | `2c:ca:16:31:d3:8b` (hardware) | randomised, locally-administered |
+| LAN address | `192.168.1.150` | `192.168.1.172` |
+
+A fresh macOS install enables **private Wi-Fi address** by default, and nobody
+turned it off on this volume. So the two installs do *not* share a lease — they
+take different addresses, and bench mode's address is a perfectly ordinary,
+findable one. Every "the bench install is unreachable" was looking at the wrong
+address twice over: the tailnet name (host mode's identity) and then host mode's
+LAN lease.
+
+### How it was found, which is the reusable part
+
+`tolken` is only reachable from rpi5 over the tailnet, and bench mode has no
+tailnet identity — that part is true. But **another tailnet node is on the same
+LAN**: `moose` at `192.168.1.40/24`. So it is a jump host, and no subnet route or
+new credential is needed:
+
+```
+ssh -J moose bench@192.168.1.172        # + a per-alias known_hosts, see below
+```
+
+Finding the address: `nmap -p22 --open 192.168.1.0/24` from moose lists the
+handful of hosts with ssh, and the bench install is the one whose
+`/etc/wk-image` answers. Do *not* look for the hardware MAC in the neighbour
+table — that is the assumption above, and it finds nothing.
+
+With that, an A/B was watched live for the first time: `autorun.state` polled
+while it ran, `phase=running`, arms appearing one at a time, and the verdict
+collected the moment it finished — no reboot back to host mode, no startup
+manager, nobody in the room.
+
+### A trap that bit immediately
+
+A watcher probing `192.168.1.150` with `HostKeyAlias=tolken-bench` while that
+address was still **host mode** pinned host mode's key under the bench alias, and
+every later bench connection then failed with REMOTE HOST IDENTIFICATION HAS
+CHANGED. That is exactly the two-installs-one-alias hazard the ssh config warns
+about, arriving from the direction the warning did not cover: not a changed key
+on one host, but the *right* key stored under the *wrong* alias. Pin the alias
+only after confirming which install answers.
+
+### What this means for the architecture
+
+The planted agent exists because the run could not be driven. It can be. So the
+`bench/mac-lane.sh` shape — state on the driver, reach in per phase — is
+available for the A/B lane too, which would remove the self-deleting job, the
+defuse-the-daemon race, the stay-up heuristic, and the whole "discovered only
+after the reboot" class. Tailscale on the install is still the better answer
+(a name that does not move, no jump host, no scan), but it is no longer the
+*only* one, and it is no longer blocking.
+
+## SIP forbids stopping *any* system agent, and the variance numbers, refined (2026-08-24)
+
+Two corrections to the sections above, both measured on the running install.
+
+### "Remove the mechanism" is not available on this volume at all
+
+`launchctl bootout` fails for every Apple-shipped service here, not just the
+software updater:
+
+```
+system/com.apple.softwareupdated          could not boot out ... still loaded
+gui/501/com.apple.notificationcenterui.agent
+    Boot-out failed: 150: Operation not permitted while System Integrity
+    Protection is engaged
+```
+
+That error is the general case. **SIP is enabled on the benchmark volume, so no
+system daemon or per-user agent can be unloaded**, and the whole "stop the thing
+rather than ask it politely" strategy is closed — for updates, for notifications,
+and for anything else Apple ships.
+
+(Worth noting the label was *also* wrong in the first attempt:
+`com.apple.notificationcenterui` is the plist *filename*; the label inside it is
+`com.apple.notificationcenterui.agent`, and macOS 26 answers "Could not find
+service" for the former. The code now reads the label out of the plist. Fixing it
+only changed the error from "no such service" to "SIP forbids it", which is the
+more useful answer.)
+
+So the honest options for notifications and update scans on this install are:
+
+1. **Disable SIP on the benchmark volume.** One `csrutil disable` from Recovery,
+   once, per volume — and defensible precisely here: this install is disposable
+   cattle with no data, `diskutil apfs deleteVolume` is the way back, and it is
+   not the volume anyone works on. It is the only thing that makes bootout work.
+2. **Detect rather than prevent**, which is what the lane does now: per-arm scan
+   evidence, named in the summary before any number.
+3. Not the radio — see the section above on why that trade is wrong.
+
+Until SIP is off, the `notifs:`/`scanner:` lines in `macos_noise` are reporting a
+condition nothing in software can currently fix. They stay warnings for that
+reason.
+
+### The variance numbers, with 16 runs instead of 6
+
+The earlier claim — "no measurable machine-level noise between runs" — was drawn
+from six runs inside a **12-minute** window. Over a **30-minute** session with 16
+runs it does not quite hold:
+
+| | 6 runs / 12 min | 16 runs / 30 min |
+|---|---|---|
+| predicted run-mean SE from iteration noise | 0.331% | 0.330% |
+| observed between-run sd (pooled within arm) | 0.313% | **0.378%** |
+| implied run-level term | 0 | **~0.18%** |
+
+So there *is* a run-level term, it is small, and it only shows up over a longer
+session. The practical consequences are unchanged — iteration noise still
+dominates, `--count` and `--rounds` both still buy precision — but the floor is
+not zero, and a very long experiment will not keep improving as 1/sqrt(n) for
+ever. Interleaving remains what protects the comparison from it.
+
+Also worth recording: **absolute scores drifted ~2% between sessions** (42.4-42.5
+at 00:35, 43.0-43.4 at 03:35, same builds and same plan). Within a session the
+arms are stable to 0.4%; across sessions they are not comparable at all. Never
+compare an arm measured today against one measured yesterday — which is exactly
+what `--patch` prevents by building and staging both arms in one invocation.
+
+### And the effect size settled as n grew
+
+The same patch measured 1.05% at 3 rounds a side and **0.63% at 8** — the
+small-n estimate was inflated by about 60%. Both were significant; only the
+second is a number worth quoting. A lane that stops at 3 rounds will
+systematically overstate the effects it does detect.
+
 ## What has to exist
 
 **A macOS install on another volume, personalised for this Mac.** Copying an
