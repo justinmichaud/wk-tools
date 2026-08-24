@@ -156,6 +156,19 @@ report() {
     log  "  container:      $cont  (the same one the running system is on)"
     log  "  free in it:     $(gb "$free") GB   (need $NEED_GB GB to proceed)"
     log  "  volume name:    $VOLUME"
+    # Said in the report, not only at the moment it is needed. Whether the bench
+    # install will have a tailnet identity decides whether an A/B can be watched
+    # or has to be collected on foot, and that is worth knowing before a person
+    # commits to provisioning rather than after.
+    local _k="${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"
+    if [ -s "$_k" ]; then
+        log  "  tailscale key:  present ($_k)"
+    else
+        log  "  tailscale key:  MISSING -- the bench install will have no tailnet"
+        log  "                  identity, so 'wk bench mac-ab' cannot watch a run"
+        log  "                  or collect it without the startup manager."
+        log  "                  './setup --stage benchkey' asks for one."
+    fi
     if volume_exists; then
         if volume_is_system; then
             local v
@@ -463,13 +476,73 @@ PLIST
     # The auth key is a secret and therefore never in this repository: it comes
     # from ~/.config/wk/tailscale-authkey on the driving Mac, which is
     # machine-local state exactly like the Wi-Fi passphrase.
-    local akey="$HOME/.config/wk/tailscale-authkey"
-    if [ -s "$akey" ]; then
+    # ASKED FOR, not described. This block used to warn that
+    # ~/.config/wk/tailscale-authkey did not exist and tell the reader to go and
+    # make it -- for two days, every run, while the item it gates is the one that
+    # decides whether a benchmark run can be observed at all. `wk_tailscale_authkey`
+    # prompts (hidden input, stored 0600, validated, asked once) and only warns
+    # if there is no terminal to ask at.
+    local akey
+    if akey=$(wk_tailscale_authkey); then
         install -m 0600 "$akey" "$root/usr/local/share/wk-bench/tailscale-authkey"
         log "  tailscale: auth key staged into the package"
     else
-        warn "  no $akey -- the bench install will have no tailnet identity,"
-        warn "  so it will only be reachable at whatever DHCP address it gets"
+        warn "  no tailscale auth key, so the bench install will have no tailnet"
+        warn "  identity: reachable only at whatever DHCP address it gets, and not"
+        warn "  at all from a driver that reaches this Mac over the tailnet."
+    fi
+
+    # The Tailscale package itself, fetched rather than built.
+    #
+    # Corrected 2026-08-24, and the correction is the reason this step existed
+    # only as a warning for two days: the comment above used to say the binaries
+    # had to be cross-compiled with a Go toolchain, so the whole item looked
+    # gated behind installing a compiler and was skipped every time.
+    #
+    # It is not. The *static tarballs* are Linux-only, but macOS ships as
+    # `Tailscale-<ver>-macos.pkg`, and that package is the **macsys/standalone**
+    # variant: it carries a real LaunchDaemon
+    # (`io.tailscale.ipn.macsys.tssentineld`, RunAtLoad, KeepAlive) plus a CLI at
+    # `Contents/MacOS/Tailscale`, and `installer -pkg … -target /` is a
+    # non-interactive install. Verified by expanding the package, 2026-08-24.
+    #
+    # Cached next to the auth key, because this is fetched once per machine and a
+    # provisioning step that needs the network every time is a provisioning step
+    # that fails on the day the network is the thing being fixed.
+    local tspkg_cache="$HOME/.config/wk/Tailscale-macos.pkg"
+    if [ ! -s "$tspkg_cache" ]; then
+        log "  tailscale: fetching the macOS package (once)"
+        # The filename is read off the index rather than assembled from the JSON
+        # `TarballsVersion`. Both agree today (1.102.3, and the assembled URL
+        # returns 200 -- checked 2026-08-24), but the tarballs are the *Linux*
+        # artefacts and there is no macOS version field, so the agreement is a
+        # coincidence of release process rather than a promise. Scraping the name
+        # the index actually publishes cannot drift; the assembled URL is the
+        # fallback for the day the index format changes instead.
+        local tsname tsver
+        tsname=$(curl -fsS 'https://pkgs.tailscale.com/stable/' 2>/dev/null \
+                 | grep -oE 'Tailscale-[0-9.]+-macos\.pkg' | sort -u | tail -1)
+        if [ -z "$tsname" ]; then
+            tsver=$(curl -fsS 'https://pkgs.tailscale.com/stable/?mode=json' 2>/dev/null \
+                    | sed -n 's/.*"TarballsVersion": *"\([^"]*\)".*/\1/p' | head -1)
+            [ -n "$tsver" ] && tsname="Tailscale-$tsver-macos.pkg"
+        fi
+        if [ -n "$tsname" ]; then
+            mkdir -p "$(dirname "$tspkg_cache")"
+            curl -fsSL -o "$tspkg_cache.part" \
+                "https://pkgs.tailscale.com/stable/$tsname" \
+                && mv "$tspkg_cache.part" "$tspkg_cache" \
+                || { rm -f "$tspkg_cache.part"; warn "  tailscale: download failed"; }
+        else
+            warn "  tailscale: could not determine which package to fetch"
+        fi
+    fi
+    if [ -s "$tspkg_cache" ]; then
+        install -m 0644 "$tspkg_cache" \
+            "$root/usr/local/share/wk-bench/Tailscale-macos.pkg"
+        log "  tailscale: package staged ($(du -h "$tspkg_cache" | awk '{print $1}'))"
+    else
+        warn "  tailscale: no package staged; firstboot will say so and carry on"
     fi
 
     # Whoever can already reach host mode should be able to reach bench mode.
@@ -574,6 +647,40 @@ write_wifi_conf() {
     info "  wifi: '$ssid' written into the bench payload"
 }
 
+# --- everything this needs from a person, asked before anything starts --------
+#
+# ASK UP FRONT. The tailscale key is used deep inside `do_install` ->
+# `do_build_pkg`, which on `--all` is *after* creating an APFS volume and
+# downloading a ~15 GB installer. A credential prompt an hour into a command is
+# not an offer -- and if `--all` exits early wanting `--version`, the prompt is
+# never reached at all, which is exactly how this stayed unconfigured while
+# appearing to be offered.
+#
+# So it is gathered here, first, next to the reasoning about what it buys. The
+# other two secrets in the package are not asked for because they are not the
+# person's to give: the Wi-Fi passphrase comes from this Mac's System keychain
+# and authorized_keys from this account, both read at package time.
+gather_secrets() {
+    info "what this needs from you, before anything is created or downloaded"
+
+    if [ -s "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" ]; then
+        log "  tailscale auth key: already stored"
+    else
+        log "  The benchmark install needs its own tailnet identity. It is a"
+        log "  different OS from this one, so it does not inherit this Mac's."
+        log "  Without it the install is reachable only at a DHCP address on this"
+        log "  LAN -- and not at all from a driver that reaches this Mac by its"
+        log "  tailnet name, which is how 'wk bench mac-ab' is driven. That is the"
+        log "  difference between an A/B you can watch and one you have to walk"
+        log "  over and collect."
+        wk_tailscale_authkey >/dev/null \
+            || warn "  continuing without a tailnet identity for the bench install"
+    fi
+
+    # And the one genuinely unavoidable one, named now rather than sprung later.
+    log "  sudo: startosinstall needs a volume owner's password (once, at --install)"
+}
+
 # --- re-arming an install that is already there -------------------------------
 #
 # `--install` refuses once the volume carries macOS, which is right: reinstalling
@@ -660,6 +767,38 @@ do_repair() {
         log "  would copy this Mac's Wi-Fi identity into the bench payload"
     else
         write_wifi_conf "$S/usr/local/share/wk-bench/wifi.conf"
+    fi
+
+    # The tailscale bits, which --repair did not lay down at all until
+    # 2026-08-24 -- so re-arming first boot on an installed volume could never
+    # give it a tailnet identity, however many keys were configured. That is the
+    # only route to a tailnet identity on a volume that already has macOS, since
+    # --install refuses to run twice.
+    local akey
+    if akey=$(wk_tailscale_authkey); then
+        if [ -n "$DRY" ]; then
+            log "  would stage the tailscale auth key into the volume payload"
+        else
+            sudo install -m 0600 "$akey" "$S/usr/local/share/wk-bench/tailscale-authkey" \
+                && changed "tailscale auth key staged" \
+                || warn "  could not stage the tailscale auth key"
+        fi
+    else
+        warn "  no tailscale auth key: this install will stay unobservable"
+    fi
+    local tspkg="$HOME/.config/wk/Tailscale-macos.pkg"
+    if [ -s "$tspkg" ]; then
+        if [ -n "$DRY" ]; then
+            log "  would stage $(basename "$tspkg") into the volume payload"
+        else
+            sudo install -m 0644 "$tspkg" \
+                "$S/usr/local/share/wk-bench/Tailscale-macos.pkg" \
+                && changed "tailscale package staged" \
+                || warn "  could not stage the tailscale package"
+        fi
+    elif [ -s "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" ]; then
+        warn "  a key is configured but $tspkg is not cached."
+        warn "  './setup --stage benchkey' fetches it (no compiler involved)."
     fi
 
     # Re-create the daemon the last run deleted. RunAtLoad only; it removes
@@ -809,7 +948,7 @@ case "${ACTION:---report}" in
     --report|--status) report ;;
     --create)    do_create ;;
     --fetch)     do_fetch "$VER" ;;
-    --install)   do_install ;;
+    --install)   gather_secrets; do_install ;;
     --provision) do_provision ;;
     --build-pkg) do_build_pkg >/dev/null ;;
     --repair)    do_repair ;;
@@ -818,6 +957,7 @@ case "${ACTION:---report}" in
     # sensible successor. It stops where the machine reboots -- everything after
     # that belongs to Setup Assistant and then to --provision.
     --all)
+        gather_secrets
         do_create
         if [ -z "$(find_installer)" ]; then
             [ -n "$VER" ] || die "no installer downloaded and no --version given.
@@ -828,5 +968,23 @@ case "${ACTION:---report}" in
             info "installer already downloaded: $(find_installer)"
         fi
         do_install
+
+        # NOT A NO-OP WHEN EVERYTHING EXISTS. `--all` used to run three steps
+        # that each said "nothing to do" and then exit satisfied, on a machine
+        # whose provisioning was incomplete -- observed 2026-08-24 on tolken,
+        # where all three no-opped while the bench install had no tailnet
+        # identity and therefore no way to be watched or collected from.
+        #
+        # `--all` means "get this machine to a working benchmark install", so
+        # when the volume is already installed it goes on to the one route that
+        # can still change anything: re-arming first boot, which is where the
+        # tailscale payload is laid down. --install refuses to run twice, by
+        # design, so this is not a second install.
+        if volume_exists && volume_is_system; then
+            info "the volume is installed; completing provisioning"
+            log  "  (--install cannot run twice, so anything still missing is"
+            log  "   re-armed through first boot instead)"
+            do_repair
+        fi
         ;;
 esac

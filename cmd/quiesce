@@ -57,7 +57,62 @@ on)
             AMPLibraryAgent bird cloudd ReportCrash 2>/dev/null || true
         touch "$STATE/daemons_paused"
         info "background daemons paused"
-        warn "set Do Not Disturb by hand -- it cannot be scripted reliably"
+        # NOTIFICATIONS: REMOVE THE THING THAT DRAWS, RATHER THAN ASK IT NICELY.
+        #
+        # This line used to read `warn "set Do Not Disturb by hand -- it cannot
+        # be scripted reliably"`, which is true about Do Not Disturb and useless
+        # here: this command's whole purpose is an unattended run, so "by hand"
+        # means "not at all". Notifications were therefore live through every
+        # benchmark this lane has ever taken. Observed on the benchmark install's
+        # own screen, 2026-08-24 -- banners visible after a full A/B.
+        #
+        # A banner is not a cosmetic problem. It is compositor work in the middle
+        # of a measurement and it can take focus, and a browser that loses focus
+        # is throttled to the silent exit-124 timeout that `screen_blocker`
+        # exists to prevent and cannot see (a banner is not a frontmost
+        # application).
+        #
+        # So the Focus/DND setting is not touched at all. Notification Center is
+        # *booted out* instead: it cannot draw a banner if it is not running.
+        # That needs no root (a gui/<uid> domain agent), no TCC prompt, and no
+        # knowledge of where Apple keeps Focus state this year -- and it is
+        # per-login and self-reversing, which is the shape of everything else
+        # here. Verified by asking whether the process is gone, not by the exit
+        # status of the bootout.
+        if pgrep -x NotificationCenter >/dev/null 2>&1; then
+            launchctl bootout "gui/$(id -u)/com.apple.notificationcenterui" >/dev/null 2>&1 || true
+            sleep 1
+            if pgrep -x NotificationCenter >/dev/null 2>&1; then
+                warn "NotificationCenter is still running -- a banner can appear mid-run"
+            else
+                info "NotificationCenter stopped (no banners can be drawn)"
+                touch "$STATE/notifications_stopped"
+            fi
+        else
+            info "NotificationCenter was not running"
+        fi
+
+        # THE SCREEN LOCK, which nothing in this repository had ever touched --
+        # `screensaver` and `askForPassword` appear in no file. The handoff's
+        # provisioning list claims "sleep and screen saver off"; it was never
+        # implemented, and on 2026-08-24 the benchmark install locked itself
+        # while sitting on a finished job.
+        #
+        # It matters more than it looks, because a benchmark generates no
+        # keyboard or mouse input: the idle timer runs at full CPU load exactly
+        # as it does on an abandoned machine. So the screensaver can start, and
+        # the lock behind it can engage, *during* a run -- and a locked screen is
+        # the same "nowhere to draw" failure as a stolen focus.
+        #
+        # `caffeinate -dimsu` above prevents display sleep, which usually
+        # suppresses the screensaver too; this makes it explicit rather than
+        # relying on that coupling. -currentHost because that is where the
+        # screensaver's idleTime actually lives.
+        defaults -currentHost write com.apple.screensaver idleTime -int 0 2>/dev/null || true
+        defaults write com.apple.screensaver askForPassword -int 0 2>/dev/null || true
+        v=$(defaults -currentHost read com.apple.screensaver idleTime 2>/dev/null || echo "?")
+        [ "$v" = 0 ] && info "screensaver disabled (idleTime=0)" \
+                     || warn "screensaver idleTime reads '$v' -- the screen can still lock mid-run"
 
         # Reported at the moment it matters -- just before a run, not in a
         # status command nobody ran -- and deliberately not fixed: see
@@ -76,6 +131,16 @@ off)
             kill "$(cat "$STATE/caffeinate.pid")" 2>/dev/null || true
             rm -f "$STATE/caffeinate.pid"
             info "caffeinate stopped"
+        fi
+        # Notification Center comes back on its own at the next login, so there
+        # is nothing to undo on a benchmark install that reboots. Restarted here
+        # anyway for the workstation case, where `quiesce off` is expected to
+        # hand the desktop back exactly as it was found.
+        if [ -f "$STATE/notifications_stopped" ]; then
+            launchctl kickstart "gui/$(id -u)/com.apple.notificationcenterui" >/dev/null 2>&1 \
+                || open -a NotificationCenter >/dev/null 2>&1 || true
+            rm -f "$STATE/notifications_stopped"
+            info "NotificationCenter restarted"
         fi
         if [ -f "$STATE/daemons_paused" ]; then
             killall -CONT photoanalysisd mediaanalysisd suggestd \

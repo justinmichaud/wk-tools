@@ -834,8 +834,16 @@ PYEOF
 # rewrite=1 maps store paths to /bench, which is where the workspace sees them;
 # rewrite=0 leaves them as host paths, which is what the staged macOS tree needs
 # (it runs compare-results on this machine, with no workspace and no /bench).
+#
+# One path per line, and never a space-joined string: the benchmark volume is
+# named `WK Bench` by default, so every result path on it contains spaces and a
+# space-joined list cannot be split back into the paths that went into it.
+# Word-splitting one is how a clean six-run A/B produced no verdict on
+# 2026-08-23 -- `wk bench mac-ab --collect` died with
+# `FileNotFoundError: '/Volumes/WK'` while all six results sat on the volume
+# intact. Callers read this into an array and pass "${arr[@]}".
 _compare_files() {
-    local spec="$1" which="$2" rewrite="${3:-1}" out="" one f
+    local spec="$1" which="$2" rewrite="${3:-1}" n=0 one f
     local IFS=,
     for one in $spec; do
         [ -n "$one" ] || continue
@@ -843,10 +851,23 @@ _compare_files() {
         [ -f "$f" ] || f="$one"
         [ -f "$f" ] || die "no such run in $which: $one"
         [ "$rewrite" = 1 ] && f="${f/#$BENCH_DIR//bench}"
-        out="$out $f"
+        printf '%s\n' "$f"
+        n=$((n + 1))
     done
-    [ -n "$out" ] || die "no runs given for $which"
-    printf '%s' "${out# }"
+    [ "$n" -gt 0 ] || die "no runs given for $which"
+}
+
+# Newline-separated paths into an array. Spelled out rather than `mapfile`
+# because this half runs on the Mac, where `wk` is bash 3.2.
+_lines_into() {  # $1 = array name, $2 = newline-separated string
+    local __name="$1" __one
+    eval "$__name=()"
+    while IFS= read -r __one; do
+        [ -n "$__one" ] || continue
+        eval "$__name+=(\"\$__one\")"
+    done <<EOF
+$2
+EOF
 }
 
 cmd_compare() {
@@ -857,8 +878,9 @@ cmd_compare() {
     # print the same warning N times.
     local aspec="$1" bspec="$2" ws="${3:-}"
     local a="${aspec%%,*}" b="${bspec%%,*}"
-    local ca cb
-    ca=$(_compare_files "$aspec" "-a"); cb=$(_compare_files "$bspec" "-b")
+    local ca_s cb_s ca cb
+    ca_s=$(_compare_files "$aspec" "-a"); cb_s=$(_compare_files "$bspec" "-b")
+    _lines_into ca "$ca_s"; _lines_into cb "$cb_s"
     local fa="$BENCH_DIR/$a/result.json" fb="$BENCH_DIR/$b/result.json"
     [ -f "$fa" ] || fa="$a"
     [ -f "$fb" ] || fb="$b"
@@ -966,10 +988,10 @@ PYEOF
     On a benchmark install:  $STAGED_PY -m pip install --user scipy
     (it is a 30 MB download and the only thing here that needs the network)"
         fi
-        local ha hb
-        ha=$(_compare_files "$aspec" "-a" 0); hb=$(_compare_files "$bspec" "-b" 0)
-        # shellcheck disable=SC2086
-        "$STAGED_PY" -u "$staged_cmp" -a $ha -b $hb --breakdown
+        local ha_s hb_s ha hb
+        ha_s=$(_compare_files "$aspec" "-a" 0); hb_s=$(_compare_files "$bspec" "-b" 0)
+        _lines_into ha "$ha_s"; _lines_into hb "$hb_s"
+        "$STAGED_PY" -u "$staged_cmp" -a "${ha[@]}" -b "${hb[@]}" --breakdown
         return 0
     fi
 
@@ -1031,7 +1053,7 @@ except Exception: print('')" 2>/dev/null)" = 1 ]; then
     # file or directory". It works on macOS, which is presumably why it is
     # still there.
     t_exec "$ws" bash -lc "cd /src/WebKit && python3 -u Tools/Scripts/compare-results \
-        -a $ca -b $cb --breakdown"
+        -a $(sh_quote "${ca[@]}") -b $(sh_quote "${cb[@]}") --breakdown"
 }
 
 # The compare-results that belongs to the staged tree, if there is one on this

@@ -86,7 +86,7 @@ when the bench account auto-logs in. Nothing in the path needs a password:
 | planting | `~bench` is uid 501 too, so its `LaunchAgents` is writable from host mode |
 | the reboot | `osascript … restart` restarts as the logged-in user |
 | the run | the bench account has NOPASSWD sudo on that install, so `wk quiesce` works with nobody to ask |
-| coming back | the autorun reboots when it finishes |
+| coming back | the autorun reboots when it finishes, or stays up if this volume is the firmware default (a reboot would only land back here) |
 
 **The ordering is the safety, and it is the rpi4's self-disarm reached without a
 firmware register.** The autorun advances its state file *before* it runs
@@ -96,10 +96,13 @@ a hang, a power cut and a timed-out run all land on a boot that knows the job
 was attempted and does not attempt it again.
 
 **And it cannot loop.** If the firmware default is the benchmark volume, the
-reboot at the end lands back in bench mode — where the state file says the job
-is finished, so the autorun removes its own agent and **halts** rather than
-running again. Worst case is a machine that is off, not a machine in a loop, and
-the person who powers it on picks a disk once.
+autorun does not reboot at the end at all: it removes its own agent and **stays
+up**, because a reboot would land back in bench mode and the machine would halt
+with the results on a disk nothing can reach. Nothing starts again either way —
+staying up is as loop-free as halting and leaves the numbers collectable over
+the network. See "What the first unattended A/B actually produced" below; this
+paragraph used to say "halts", and the reason it no longer does is that halting
+cost a completed experiment an evening.
 
 **Interleaved, not blocked.** `A B A B …`, because the machine drifts: the SSD
 warms, the fans spin up, the thermal budget twenty minutes in is not the one at
@@ -227,6 +230,203 @@ machine is the one where the place is a person:
 `wk boot mbp` checks what it can, records the intent, and prints the ritual.
 It reboots nothing, and `wk boot mbp --status` reports the machine as *armed
 and waiting for a person* rather than as something that will move by itself.
+
+## What the first unattended A/B actually produced, 2026-08-23
+
+The lane ran. Planted at 18:32Z, rebooted into bench mode, six runs interleaved
+`A B A B A B` across three rounds, `phase=done outcome=ran`, one attempt, no
+retries, nobody in the room. That part of this document can stop being
+conditional.
+
+Three things were wrong anyway, and only one of them was visible from over
+there.
+
+**The verdict was unreadable, and the runs were fine.** `wk bench mac-ab
+--collect` died with `FileNotFoundError: '/Volumes/WK'` while all six results
+sat on the volume intact. `_compare_files` in `cmd/bench` returned its paths as
+a space-joined string and both callers word-split it — and every path on this
+volume contains spaces, because the volume is called `WK Bench`. The join was
+never reversible. It now emits one path per line, `_lines_into` reads that into
+an array (spelled out rather than `mapfile`: `wk` is bash 3.2 on the Mac), and
+the container call goes through `sh_quote` instead of a bare splat. The A/A then
+read back off the same untouched files: `pValue = 0.877`, not significant, arm
+means 42.117 against 42.142. A ~0.1% noise floor on the aggregate over three
+rounds a side, which is the number the whole control exists to produce.
+
+Worth noticing that the bug lived in the one code path a volume with a space in
+its name is guaranteed to hit, and the volume name is this document's own
+default.
+
+**A software-update scan ran through the middle of round 1 arm A, and every
+setting said updates were off.** `LastSuccessfulBackgroundMSUScanDate` on the
+volume reads 18:36:59Z; that arm ran 18:35:14 → 18:37:00. The autorun had
+written `AutomaticCheckEnabled false` at 18:34:43Z and *read it back as 0* — the
+log says so. Two minutes later the scan happened anyway.
+
+So the entry above about setting it "rather than requesting it" and reading it
+back was answering the wrong question. The readback was true. The inference from
+it was false: **reading a preference tells you what the preference says, never
+what the daemon will do.** The setting is not the mechanism.
+
+What changed:
+
+- the autorun **boots the scanner out** (`launchctl bootout
+  system/com.apple.softwareupdated`, and the mobile one) rather than only
+  deprecating it. Per-boot and self-reversing, which is the shape of everything
+  else in `wk quiesce`.
+- it samples the scan timestamps **either side of every individual arm** and
+  writes `clean` or `scanned` as a fifth column in `runs.tsv`. Per arm, because
+  that is the resolution the answer is useful at — one contaminated arm out of
+  six is a number to distrust, not a reason to throw away the other five. The
+  stamp is sorted before comparing, since `defaults write` re-serialises that
+  plist and a reordered dict would otherwise read as a scan that never happened.
+- `wk bench ab-summary` names the scanned arms **before** it prints any number.
+
+And what deliberately did *not* change: the `scanner is loaded` reading in
+`lib/quiet.sh` warns, it does not fail. Making it fatal was the first version
+and it is the wrong shape here — whether `bootout` is permitted under SIP cannot
+be established from host mode (root there costs a password, and the benchmark
+install is not running to be asked), so a fatal check is one whose passing is
+unknown until after the reboot, and if it does not pass it fails every arm of
+every round and hands back a volume with no numbers on it. That is the failure
+this lane has already paid for three times. The hard check lives where the
+evidence is, not where the configuration is.
+
+**Finishing by halting left the results somewhere nothing could reach them.**
+The autorun ended with a reboot; the firmware default is `WK Bench`; so it
+landed back in bench mode, took the `phase = done` branch, and halted. A
+completed A/B — six good runs, already on the disk — on a powered-off Mac. The
+halt was protecting against a boot loop, which is real, but powering the machine
+off is not the only way to not loop.
+
+When this volume is the firmware default the autorun now **stays up** instead:
+job done, agent removed, nothing starts again. It reads the default the same way
+`wk boot mbp --status` does: last colon-field of `boot-volume` against the booted
+volume's APFS group.
+
+**And the reason first given for that change was wrong, which is worth keeping
+because the mistake is a trap this repository had already mapped.** It was
+justified as "the numbers are collectable the moment they exist, because remote
+login is on over there". That is false from any machine that reaches this Mac
+through the tailnet. `tolken` is a MagicDNS name for the *host* install; the
+bench install is a different OS with its own network stack and no tailscale, so
+it has no tailnet identity at all. `tolken-bench` deliberately carries no
+`HostName` and needs a hand-written `config.d/local` stanza, which rpi5 does not
+have, and rpi5 has no LAN or mDNS path to the machine either. So bench mode is
+not reachable from the driver, staying up or not.
+
+`dotfiles/ssh/config` says all of this, in the stanza that records it costing
+most of an evening on 2026-08-22 — and it was not read before the claim above
+was written. Second time that paragraph has been right and unread.
+
+What staying up is actually worth, then, is narrower and still real: it is not
+*worse* than halting (both need one human action) and it leaves the machine in a
+state you can look at rather than powered off. What would make the original claim
+true is the one thing this lane still does not have — a tailnet identity on the
+benchmark install, which is exactly what `bench/mac-bench-firstboot.sh` is
+already written to install and has never been given an auth key to do.
+
+The pattern all three share is the one already at the top of this file, arriving
+from a new direction: **on this lane the thing that can only be discovered after
+the reboot has to be refused, verified, or defused before it** — and a check
+that reads a setting is not a verification.
+
+## The reboot had never worked, and three quiet properties were fiction (2026-08-24)
+
+The evening's real finding, and it reframes several entries above: **`phase_go`
+had never rebooted this machine.**
+
+`osascript -e 'tell application "System Events" to restart'` returns **0 without
+rebooting** when there is no GUI session to carry it out — and host mode normally
+sits at the login window, which is exactly that case. `lsappinfo front` =
+`loginwindow`, rc=0, `kern.boottime` unchanged. Behind it, `|| sudo -n shutdown
+-r now` could never have covered for it: host mode has no blanket NOPASSWD, only
+`wk-quiesce-priv` and `wk-tftpd`. Both ends were silenced, so the `||` chain saw
+success. The lane announced a reboot, waited out its head start, found the
+machine answering, and reported *"back in HOST mode"* — indistinguishable from a
+real reboot that landed there. A planted job went unconsumed and the cycle
+produced nothing.
+
+That is the fourth member of the family: `nvram boot-volume` (exits 0, changes
+nothing), `systemsetup -getremotelogin` (exits 0, refuses to answer),
+`AutomaticCheckEnabled` (reads back 0, scans anyway), and now this. **Every
+"cycle produced nothing" entry above should be re-read with it in mind** — the
+causes recorded next to them may be the causes of something else.
+
+What replaces it: the **loginwindow restart Apple event**, which needs no
+password, no sudo and no GUI session, because loginwindow is running in every
+state this machine is ever in. And, more importantly, the reboot is now
+**verified** — `phase_go` does not return until the machine stops answering, and
+`phase_wait` compares `kern.boottime` against the pre-reboot value, so a machine
+on the same boot can never again be called "back". That is a distinct
+`noreboot` outcome, because "never rebooted" and "not answering" have opposite
+remedies.
+
+### The scanner cannot be stopped on this install
+
+`launchctl bootout system/com.apple.softwareupdated` is **SIP-protected and
+fails** — measured on the real volume, both daemons, and a scan then ran through
+round 1 arm B anyway (00:37:21Z, inside 00:37:19 → 00:39:05). So all three routes
+to "do not scan" are closed: the preference does not hold, the daemon cannot be
+booted out, and the radio must not be turned off (below).
+
+Which is why the scanner reading in `lib/quiet.sh` **warns and does not fail**,
+and that decision was tested rather than argued: had it been fatal, all six arms
+of that A/B would have failed and the evening would have produced nothing. The
+per-arm scan evidence caught the one contaminated arm exactly and the summary
+named it before any number. Detection where prevention is impossible.
+
+### Why the radio is not turned off during a run
+
+A run here uses no network — the payload is pinned precisely so — so the obvious
+remaining move is to drop the Wi-Fi for the duration of each arm. It was written
+and removed the same evening.
+
+**A measurement fix must never be able to make the machine unreachable.** The
+radio version was guarded by a trap, and a trap is not a guarantee: a panic, a
+power cut, a SIGKILL or the watchdog's own reboot all leave the interface down,
+and in bench mode that is unrecoverable without walking to the machine. It trades
+a contaminated number for a machine nobody can reach — the wrong trade on a lane
+whose scarcest resource is a trip to the keyboard. It would also disable
+tailscale, the one change that would make this install observable at all.
+
+The scoped version, if it is ever needed, is to deny only Apple's update
+endpoints in `/etc/hosts` on the volume: it removes what a scan needs without
+removing what anything else needs, and it cannot cost reachability.
+
+### Two quiet properties that were asserted and never implemented
+
+`screensaver`, `askForPassword`, Siri, analytics and login items appear in the
+provisioning list above and in **no file in this repository**. Notifications had
+one line of treatment: `warn "set Do Not Disturb by hand"`, in a lane whose whole
+premise is that nobody is in the room. And `macos_noise` — the "measured rather
+than assumed" half — checked none of them. That is why all three were found by
+looking at the machine's screen rather than by any check: *the gaps were exactly
+where nothing looked.*
+
+- **Notifications**: `wk quiesce` now boots out NotificationCenter rather than
+  configuring Focus — it cannot draw a banner if it is not running, it needs no
+  root and no knowledge of where Apple keeps Focus state this year, and it is
+  verified by asking whether the process is gone. A banner is compositor work
+  inside the measurement and can take focus, and `screen_blocker` cannot see one
+  (a banner is not a frontmost application).
+- **The screen lock**: disabled at run time *and* **settled at plant time, before
+  the reboot**, which is the half that was missing. Those are per-user
+  preferences and `~bench` is uid 501, so they are writable while the volume is
+  merely mounted — like the staging and the agent — and `wk bench mac-ab`
+  **refuses to plant** if `idleTime` does not read back 0. It matters more than it
+  looks: a benchmark makes no keyboard or mouse input, so the idle timer runs at
+  full load exactly as it does on an abandoned machine.
+
+### The bench account's password
+
+`dscl . -passwd` is a *change* operation and wants the old password, so on every
+re-run — the normal case, this script being idempotent by design — it failed with
+`eDSAuthFailed`. The account kept its creation password, the login keychain
+drifted, and autologin raised the SecurityAgent panel that sat on the screen
+through an entire A/B. `sysadminctl -resetPasswordFor` is the administrative
+reset and needs no old password; the result is then checked with
+`dscl . -authonly`, which is evidence rather than an exit status.
 
 ## What has to exist
 

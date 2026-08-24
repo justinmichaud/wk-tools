@@ -127,12 +127,37 @@ fi
 # and the run looks like a hang rather than an error. Needs FileVault off, which
 # is why the install must not enable it.
 if [ -n "$PW" ]; then
-    # Set the password again, directly. `sysadminctl -addUser -password` warned
-    # "No clear text password or interactive option was specified" and the
-    # account came out without one autologin could use. `dscl . -passwd` as root
-    # is unambiguous.
-    dscl . -passwd "/Users/$BENCH_USER" "$PW" 2>/dev/null \
-        || say "WARNING: dscl could not set $BENCH_USER's password"
+    # Set the password, by a route that works on a RE-RUN.
+    #
+    # `dscl . -passwd /Users/<u> <new>` was here and it is the wrong tool for
+    # this job: it is a *change* operation and wants the old password, so on any
+    # re-run -- which is the normal case, this script being idempotent by design
+    # -- it fails with `DS error: eDSAuthFailed`. Measured on the real volume
+    # 2026-08-23 and again 2026-08-24. The account keeps whatever password it was
+    # created with, the login keychain drifts from it, and autologin then raises
+    # the SecurityAgent unlock panel that sat on the screen through an entire A/B.
+    #
+    # `sysadminctl -resetPasswordFor` is the administrative *reset*: as root it
+    # needs no old password, which is exactly the difference that matters here.
+    #
+    # And then it is CHECKED, because this file already records two macOS tools
+    # in this same area that exit 0 without acting (`sysadminctl -autologin`,
+    # `SACSetAutoLoginPassword error:22`, exit 0). `dscl . -authonly` is the only
+    # answer that is evidence: it authenticates the account with the password and
+    # fails if that is not the account's password. Everything downstream --
+    # kcpassword, autologin, an unattended console session -- is false unless
+    # this passes, so a failure is said loudly rather than logged in passing.
+    sysadminctl -resetPasswordFor "$BENCH_USER" -newPassword "$PW" >/dev/null 2>&1 \
+        || dscl . -passwd "/Users/$BENCH_USER" "$PW" >/dev/null 2>&1 \
+        || true
+    if dscl . -authonly "$BENCH_USER" "$PW" >/dev/null 2>&1; then
+        say "password verified for $BENCH_USER (authonly succeeded)"
+    else
+        say "WARNING: $BENCH_USER's password is NOT what this script set."
+        say "  Autologin will raise a keychain/auth panel, and that panel sits on"
+        say "  top of the benchmark where lsappinfo cannot see it. Every number"
+        say "  from this install is suspect until this line reads 'verified'."
+    fi
 
     # The login keychain, reset to match.
     #
@@ -239,46 +264,81 @@ fi
 # the ssh alias resolved to the *host* install instead -- so every probe
 # answered for the wrong machine and looked like a network fault.
 #
-# `tailscaled` specifically. Tailscale's own variant comparison lists it as the
-# only macOS build that can run *before login*, which is the property that
-# matters here: a benchmark machine reachable only after somebody has logged in
-# is not reachable. `install-system-daemon` copies the binary to /usr/local/bin
-# and writes /Library/LaunchDaemons/com.tailscale.tailscaled.plist.
+# HOW THE BINARY GETS HERE, CORRECTED 2026-08-24. The previous version of this
+# comment said there is "no darwin/arm64 tailscaled to download" and that
+# `tailscale` and `tailscaled` are therefore "cross-compiled (GOOS=darwin
+# GOARCH=arm64)" into the package. That is wrong, and it made this the one item
+# on the provisioning list that appeared to need a Go toolchain -- which is why
+# it stayed unimplemented while everything around it got done.
+#
+# What is true is narrower than the conclusion drawn from it: the *static
+# tarballs* on pkgs.tailscale.com are Linux-only (386, amd64, arm, arm64, mips…
+# -- that `arm64` is Linux arm64). But macOS is shipped, as
+# `Tailscale-<ver>-macos.pkg`, and inspecting it settles what it is:
+#
+#   Contents/Library/LaunchDaemons/io.tailscale.ipn.macsys.tssentineld.plist
+#       RunAtLoad = true, KeepAlive = true, reached over a MachService
+#   Contents/MacOS/Tailscale                     the CLI
+#
+# It is the **macsys (standalone)** variant, and that LaunchDaemon is exactly the
+# "runs before login" property this comment used to say only a compiled
+# `tailscaled` could give us. The old note conflated it with the *App Store*
+# build -- that is the sandboxed one whose CLI needs a session, and the
+# observation about `/Applications/Tailscale.app/Contents/MacOS/Tailscale`
+# hanging over ssh was almost certainly that, or a CLI asked to talk to a daemon
+# that was not yet running.
+#
+# So: no compiler. `installer -pkg … -target /` is a non-interactive install, and
+# the package goes into the provisioning payload like everything else.
 #
 # Failure is reported and not fatal: the machine still has whatever network the
-# step below gives it, and a missing tailnet identity is a nuisance rather than
-# a broken install.
-# The payload carries the two binaries themselves, because there is nowhere to
-# fetch them from. Checked 2026-08-22: pkgs.tailscale.com offers macOS only as
-# `Tailscale-<ver>-macos.pkg` and `.zip` -- the GUI app -- and the static
-# tarballs are Linux-only. There is no darwin/arm64 tailscaled to download.
-#
-# And the GUI app is not a substitute, which was worth finding out by trying:
-# installing the standalone .pkg works fine, but its CLI at
-# /Applications/Tailscale.app/Contents/MacOS/Tailscale *hangs* when run over
-# ssh with no session to talk to. That is the same property Tailscale documents
-# from the other direction -- tailscaled is the only variant that runs before
-# login -- and it is why an app that needs a desktop cannot be the network layer
-# for a machine that is driven headlessly.
-#
-# So `tailscale` and `tailscaled` are cross-compiled (GOOS=darwin GOARCH=arm64)
-# and shipped in the package by `wk bench mac-volume --build-pkg`.
-if [ -r "$PAYLOAD/tailscale-authkey" ] && [ -x "$PAYLOAD/tailscaled" ]; then
-    say "installing tailscaled from the payload"
-    install -m 0755 "$PAYLOAD/tailscaled" /usr/local/bin/tailscaled 2>/dev/null
-    [ -x "$PAYLOAD/tailscale" ] && install -m 0755 "$PAYLOAD/tailscale" /usr/local/bin/tailscale 2>/dev/null
-    if [ -x /usr/local/bin/tailscaled ]; then
-        /usr/local/bin/tailscaled install-system-daemon >/dev/null 2>&1 || say "WARNING: install-system-daemon failed"
-        sleep 5
-        /usr/local/bin/tailscale up --auth-key "$(cat "$PAYLOAD/tailscale-authkey")" \
-            --hostname tolken-bench --accept-dns=false >/dev/null 2>&1 \
-            && say "tailscale: up as tolken-bench" \
-            || say "WARNING: tailscale up failed; the machine has no tailnet identity"
+# step below gives it, and a missing tailnet identity is a nuisance rather than a
+# broken install -- though it is the nuisance that makes this whole install
+# unobservable, so the warning is worth reading.
+TS_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+TS_PKG=$(ls "$PAYLOAD"/Tailscale-*macos.pkg 2>/dev/null | head -1)
+
+if [ -r "$PAYLOAD/tailscale-authkey" ] && [ -n "$TS_PKG" ]; then
+    say "installing Tailscale (standalone/macsys) from $(basename "$TS_PKG")"
+    if installer -pkg "$TS_PKG" -target / >/dev/null 2>&1; then
+        # Verified by asking launchd, not by the installer's exit status -- this
+        # file already records two macOS tools in this area that exit 0 without
+        # acting.
+        if launchctl print system/io.tailscale.ipn.macsys.tssentineld >/dev/null 2>&1; then
+            say "  tailscale system daemon is loaded"
+        else
+            say "  WARNING: the tailscale daemon did not load; giving it a moment"
+            sleep 10
+        fi
+        if [ -x "$TS_CLI" ]; then
+            "$TS_CLI" up --auth-key "$(cat "$PAYLOAD/tailscale-authkey")" \
+                --hostname tolken-bench --accept-dns=false >/dev/null 2>&1 || true
+            # The property, not the command's exit status: does this machine
+            # have a tailnet address?
+            ts_ip=$("$TS_CLI" ip -4 2>/dev/null | head -1)
+            if [ -n "$ts_ip" ]; then
+                say "tailscale: up as tolken-bench at $ts_ip"
+                say "  this install is now reachable by name across a reboot, which is"
+                say "  the thing that makes it observable at all"
+            else
+                say "WARNING: tailscale up did not take; no tailnet address."
+                say "  The install will only be reachable at whatever DHCP address it gets,"
+                say "  and not at all from a driver that reaches this Mac over the tailnet."
+            fi
+        else
+            say "WARNING: $TS_CLI is missing after a successful install"
+        fi
+    else
+        say "WARNING: installer failed on $TS_PKG"
     fi
 elif [ -r "$PAYLOAD/tailscale-authkey" ]; then
-    say "WARNING: an auth key is staged but no tailscaled binary is -- this"
-    say "  install will only be reachable at whatever DHCP address it gets."
-    say "  'wk bench mac-volume --build-pkg' cross-compiles them when Go is available."
+    say "WARNING: an auth key is staged but no Tailscale package is."
+    say "  Put Tailscale-<ver>-macos.pkg in the payload:"
+    say "    curl -LO https://pkgs.tailscale.com/stable/Tailscale-1.102.3-macos.pkg"
+    say "  No compiler is needed -- see the comment here."
+else
+    say "no tailscale auth key in the payload; this install will have no tailnet"
+    say "  identity, so nothing that reaches this Mac over the tailnet can reach it"
 fi
 
 # --- the network, without which none of the above can be reached --------------

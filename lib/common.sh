@@ -214,6 +214,69 @@ confirm() {
     case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
 }
 
+# --- secrets this repository needs but must never contain ---------------------
+#
+# ASK, DO NOT INSTRUCT. The failure this exists to end: a provisioning step that
+# needs a credential printed four lines telling somebody to create a file by
+# hand, warned when the file was absent, and carried on. It was absent every
+# time for two days, so the one item it gated -- a tailnet identity for the
+# benchmark install, and with it any way to observe a run -- never happened,
+# while everything around it got done. A warning that names a manual step is a
+# step that does not get taken.
+#
+# Same discipline as confirm(): no terminal means nobody can answer, so fail
+# loudly instead of blocking forever. An unattended lane that stops on a hidden
+# prompt is a hang, and a hang is worse than a refusal.
+#
+# The value is read with `read -rs` (no echo), never logged, never passed as an
+# argument, and written 0600 through a umask so it is not briefly world-readable.
+prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optional URL
+    local path="$1" what="$2" url="${3:-}" val=""
+
+    [ -s "$path" ] && { printf '%s' "$path"; return 0; }
+
+    if [ ! -t 0 ]; then
+        warn "$what is needed and $path does not exist."
+        warn "  No terminal, so it cannot be asked for here. Re-run interactively."
+        return 1
+    fi
+
+    printf '\n' >&2
+    info "$what is needed, and this repository must not contain it."
+    [ -n "$url" ] && log "  get one here: $url" >&2
+    log "  it is stored at $path (mode 0600) and asked for only once" >&2
+    printf '  paste it (input hidden, empty to skip): ' >&2
+    read -rs val || return 1
+    printf '\n' >&2
+
+    [ -n "$val" ] || { warn "nothing entered; skipping"; return 1; }
+
+    mkdir -p "$(dirname "$path")" || return 1
+    ( umask 077; printf '%s\n' "$val" > "$path" ) || return 1
+    chmod 0600 "$path" 2>/dev/null || true
+    info "stored in $path"
+    printf '%s' "$path"
+}
+
+# The tailscale auth key, resolved rather than assumed present.
+#
+# Validated on the way in, because the failure it prevents is discovered after a
+# reboot on a machine with no way to report it: a mistyped key means `tailscale
+# up` fails during first boot of an install that then has no tailnet identity --
+# which is precisely the state that makes the failure invisible.
+wk_tailscale_authkey() {
+    local path="${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"
+    local p
+    p=$(prompt_secret "$path" "A tailscale auth key (reusable, ephemeral is fine)" \
+        "https://login.tailscale.com/admin/settings/keys") || return 1
+    case "$(head -1 "$p" 2>/dev/null)" in
+        tskey-*) printf '%s' "$p"; return 0 ;;
+        *) warn "$p does not look like a tailscale auth key (expected it to start 'tskey-')."
+           warn "  Leaving it in place rather than deleting it -- check it and re-run."
+           return 1 ;;
+    esac
+}
+
 # --- at exit ------------------------------------------------------------------
 #
 # One EXIT trap for the whole process, and a list of handlers under it.

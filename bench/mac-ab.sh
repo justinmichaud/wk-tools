@@ -5,6 +5,7 @@
 #
 #   wk bench mac-ab [<workspace>] [--plan P] [--rounds N] [--count N]
 #                   [--a <staged-id>] [--b <staged-id>] [--stage]
+#   wk bench mac-ab <workspace> --patch <ref|diff> [--base <ref>] [--rounds N]
 #   wk bench mac-ab --preflight | --status | --collect | --dry-run
 #
 # The difference from `wk bench mac` is where the run is driven from, and it is
@@ -75,6 +76,7 @@ COUNT=""
 TIMEOUT=1800
 SETTLE=90
 A_ID=""; B_ID=""
+PATCH=""; BASE_REF=""; ARMS_PENDING=""
 A_ARGS=""; B_ARGS=""
 WS=""
 DO_STAGE=""
@@ -96,6 +98,14 @@ mac() {
     ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "$@"
 }
 mac_sh() { mac bash -lc "$(sh_quote "$*")"; }
+
+# The machine's hardware UUID, which is what macOS names ByHost preferences by.
+# Read from host mode and used for the bench account's files: it identifies the
+# *machine*, and the two installs are one machine.
+mac_hw_uuid() {
+    mac_sh 'ioreg -rd1 -c IOPlatformExpertDevice' 2>/dev/null \
+        | awk -F'"' '/IOPlatformUUID/{print $4; exit}' | tr -d '\r'
+}
 
 # wk-tools over there, discovered rather than assumed: the two installs have
 # different users and therefore different paths, and hardcoding this machine's
@@ -427,6 +437,130 @@ phase_stage() {
     rwk vm stop "$WS" >/dev/null 2>&1 || warn "  could not stop '$WS'"
 }
 
+# --- building both arms ------------------------------------------------------
+#
+# `--patch` is the whole point of the lane in one command: a patch in, a number
+# out. Without it, getting an A/B number meant ten commands and two by-hand git
+# operations in a guest -- which is how the first real A/B on this machine was
+# run, and it is not a procedure anyone should follow twice.
+#
+# Two builds, two stages, one plant. The baseline is built first and from the
+# same tree, because an A/B whose arms came from different checkouts is not an
+# A/B; and the tree is put back afterwards, because it is somebody's working
+# copy and this command borrows it.
+#
+# `--patch` takes either a git ref (whose tree *is* the patched state) or a diff
+# file on this machine, which is copied over and applied. A ref is the honest
+# default for real work -- it is what a branch under review looks like.
+
+# One command in the build guest, from here, two shells away.
+#
+# Written to a file and then run, rather than piped into `bash`: a script on
+# stdin is consumed by the first thing inside it that reads stdin, which
+# silently truncated the rest. That cost an evening's debugging on 2026-08-23
+# when `wk bench seed` ate the remainder of a staging script and the whole thing
+# exited after its first line looking like a clean success.
+guest_sh() {
+    local b; b=$(printf '%s' "$1" | base64 | tr -d '\n')
+    mac_sh "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new wk-$(sh_quote "$WS") 'printf %s $b | base64 -d > /tmp/wk-guest.sh && bash /tmp/wk-guest.sh'"
+}
+
+guest_src() {
+    local d
+    d=$(guest_sh 'for p in ~/WebKit ~/webkit; do [ -d "$p/.git" ] && { echo "$p"; exit 0; }; done' 2>/dev/null | tr -d '\r' | head -1)
+    [ -n "$d" ] || die "no WebKit checkout found in the build guest '$WS'"
+    printf '%s' "$d"
+}
+
+staged_ids() {
+    mac "ls -1 $(sh_quote "$(bench_root)/staged") 2>/dev/null" 2>/dev/null | tr -d '\r' | sort
+}
+
+# Build the tree as it stands and stage it; print the staged id that appeared.
+#
+# The id is taken as the directory that is new since before the stage rather than
+# parsed out of the log: `wk bench stage` prints a path, but a parse is a second
+# thing to keep in step with its output and this comparison cannot drift.
+build_and_stage() {
+    local label="$1" before after id
+    before=$(staged_ids)
+    info "  building $label"
+    rwk build "$WS" "$CONFIG" >&2 || die "the $label build failed"
+    local payload
+    payload=$(rwk bench seed "$WS" "$PLAN" | tr -d '\r' | tail -1) || payload=""
+    case "$payload" in /*) ;; *) die "could not pin the $PLAN payload for $label" ;; esac
+    info "  staging $label"
+    rwk bench stage "$WS" --to "$MACHINE" --config "$CONFIG" --plan "$PLAN" \
+        --payload "$payload" >&2 || die "staging $label failed"
+    after=$(staged_ids)
+    id=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | tail -1)
+    [ -n "$id" ] || die "staging $label produced no new directory on $VOLUME"
+    log "  $label staged as $id" >&2
+    printf '%s' "$id"
+}
+
+phase_build_ab() {
+    [ -n "$WS" ] || die "--patch needs a workspace to build in (wk bench mac-ab <ws> --patch ...)"
+    [ -n "$DRY" ] && {
+        log "  would build the baseline (${BASE_REF:-current HEAD}) in '$WS' and stage it"
+        log "  would then apply '$PATCH' and stage that as the second arm"
+        # Named rather than left empty. An empty A_ID falls through to the
+        # plant's "default B to A" rule, which then reports a confident A/A
+        # about two builds that do not exist yet -- a dry run describing a plan
+        # that is not the plan. Caught by running it, 2026-08-24.
+        ARMS_PENDING=1
+        A_ID="<baseline ${BASE_REF:-HEAD}, would be built>"
+        B_ID="<patched $PATCH, would be built>"
+        return 0
+    }
+    rwk vm start "$WS" >/dev/null 2>&1 || true
+    local src; src=$(guest_src)
+    log "  checkout: $src"
+
+    # What to put back. A detached HEAD prints nothing for --abbrev-ref, so the
+    # sha is the fallback and it is what actually restores the tree.
+    local orig
+    orig=$(guest_sh "git -C $src symbolic-ref --quiet --short HEAD 2>/dev/null || git -C $src rev-parse HEAD" | tr -d '\r' | head -1)
+    [ -n "$orig" ] || die "could not read the guest checkout's current ref"
+    log "  will restore '$orig' when done"
+
+    local base="${BASE_REF:-$orig}"
+    guest_sh "set -e; git -C $src checkout -q $base" >/dev/null \
+        || die "could not check out the baseline '$base' in the guest"
+    A_ID=$(build_and_stage "baseline ($base)")
+
+    # The patched arm. A readable file here is a diff; anything else is a ref
+    # over there. Applied on top of the baseline, never on top of whatever the
+    # tree happened to be.
+    if [ -f "$PATCH" ]; then
+        log "  applying diff $PATCH"
+        mac "cat > /tmp/wk-ab.patch" < "$PATCH" || die "could not copy the patch to $HOST"
+        guest_sh "set -e; cd $src && git apply --index /tmp/wk-ab.patch" >/dev/null 2>&1 \
+            || { guest_sh "git -C $src checkout -q $orig" >/dev/null 2>&1
+                 die "the patch did not apply cleanly to '$base'; the tree has been put back"; }
+    else
+        log "  checking out patched ref $PATCH"
+        guest_sh "set -e; git -C $src checkout -q $PATCH" >/dev/null \
+            || { guest_sh "git -C $src checkout -q $orig" >/dev/null 2>&1
+                 die "no such ref '$PATCH' in the guest checkout; the tree has been put back"; }
+    fi
+    B_ID=$(build_and_stage "patched ($PATCH)")
+
+    # Put the tree back whatever happened above. It is a working copy this
+    # command borrowed, and leaving it on a build branch is the kind of thing
+    # that is discovered days later.
+    guest_sh "git -C $src checkout -q $orig" >/dev/null 2>&1 \
+        || warn "  could not restore '$orig' in the guest -- the tree is left on the patched ref"
+
+    # Stopping the guest is not tidiness: a running macOS VM was measured at
+    # 233% CPU, and the next thing this lane does is reboot into the install it
+    # is about to measure.
+    info "  stopping the build guest"
+    rwk vm stop "$WS" >/dev/null 2>&1 || warn "  could not stop '$WS'"
+
+    info "arms: A=$A_ID  B=$B_ID"
+}
+
 # --- planting ----------------------------------------------------------------
 #
 # Everything the run needs, written while the volume is merely mounted. Nothing
@@ -439,14 +573,19 @@ phase_plant() {
 
     # Which builds the two arms run. Defaulting B to A is the control, and it is
     # said out loud rather than left to be discovered in the summary.
-    local staged
-    staged=$(mac "ls -1 $(sh_quote "$root/staged") 2>/dev/null" 2>/dev/null | tr -d '\r' | sort)
-    [ -n "$staged" ] || die "nothing staged on $VOLUME -- pass a workspace with --stage"
-    [ -n "$A_ID" ] || A_ID=$(printf '%s' "$staged" | tail -1)
-    [ -n "$B_ID" ] || B_ID="$A_ID"
-    printf '%s\n' "$staged" | grep -qx "$A_ID" || die "no staged build '$A_ID' on $VOLUME. There is:
+    # Skipped entirely when the arms are placeholders from a --patch dry run:
+    # they name builds that do not exist yet, so validating them against the
+    # volume would fail on exactly the run that is meant to change nothing.
+    if [ -z "$ARMS_PENDING" ]; then
+        local staged
+        staged=$(mac "ls -1 $(sh_quote "$root/staged") 2>/dev/null" 2>/dev/null | tr -d '\r' | sort)
+        [ -n "$staged" ] || die "nothing staged on $VOLUME -- pass a workspace with --stage, or --patch to build both arms"
+        [ -n "$A_ID" ] || A_ID=$(printf '%s' "$staged" | tail -1)
+        [ -n "$B_ID" ] || B_ID="$A_ID"
+        printf '%s\n' "$staged" | grep -qx "$A_ID" || die "no staged build '$A_ID' on $VOLUME. There is:
 $(printf '%s' "$staged" | sed 's/^/    /')"
-    printf '%s\n' "$staged" | grep -qx "$B_ID" || die "no staged build '$B_ID' on $VOLUME"
+        printf '%s\n' "$staged" | grep -qx "$B_ID" || die "no staged build '$B_ID' on $VOLUME"
+    fi
 
     info "plant: $PLAN, $ROUNDS round(s), interleaved"
     log  "  arm A: $A_ID${A_ARGS:+  args: $A_ARGS}"
@@ -492,6 +631,50 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
         info "  installing scipy into the bench account's site-packages"
         mac "/usr/bin/python3 -m pip install --quiet --target $(sh_quote "$bh/Library/Python/3.9/lib/python/site-packages") scipy" \
             >/dev/null 2>&1 || warn "  scipy did not install; the A/B will be compared from host mode instead"
+    fi
+
+    # --- the screen lock, settled BEFORE the reboot --------------------------
+    #
+    # This is the governing rule of this lane applied to the class of failure
+    # that had escaped it: anything discoverable only after the reboot has to be
+    # refused, verified or defused before it. The screensaver and its lock were
+    # neither -- nothing in this repository touched them, the handoff's
+    # provisioning list asserted them anyway, and on 2026-08-24 the benchmark
+    # install locked itself. A lock mid-run is the same "nowhere to draw" failure
+    # as a stolen focus, and it is invisible to `screen_blocker`, which asks the
+    # window server for the frontmost *application*.
+    #
+    # It can be settled from here, and that is the point. These are *per-user*
+    # preferences, and ~bench is uid 501 -- this account in host mode -- so they
+    # are writable while the volume is merely mounted, exactly like the staging
+    # and the agent. Written to the file by absolute path, with no cfprefsd on
+    # either side owning it (that volume is not running), then read back. The
+    # ByHost UUID is the machine's, and both installs are the same machine.
+    #
+    # `wk quiesce` enforces the same two settings again at run time. That is not
+    # redundancy for its own sake: this half can be *verified before anything
+    # reboots*, which is the half that was missing, and the run-time half covers
+    # a volume planted by an older tree.
+    local sspath="$bh/Library/Preferences/ByHost/com.apple.screensaver.$(mac_hw_uuid)"
+    mac "mkdir -p $(sh_quote "$bh/Library/Preferences/ByHost")"
+    mac "defaults write $(sh_quote "$sspath") idleTime -int 0" >/dev/null 2>&1 || true
+    mac "defaults write $(sh_quote "$bh/Library/Preferences/com.apple.screensaver") askForPassword -int 0" >/dev/null 2>&1 || true
+    local ssv
+    ssv=$(mac "defaults read $(sh_quote "$sspath") idleTime 2>/dev/null" 2>/dev/null | tr -d '\r ')
+    if [ "$ssv" = 0 ]; then
+        log "  screen lock: screensaver disabled on the volume (idleTime=0, verified)"
+    elif [ -n "$FORCE" ]; then
+        warn "  screen lock: could not disable the screensaver (idleTime reads '${ssv:-unreadable}').
+  --force given, so planting anyway: the screen may lock during a run."
+    else
+        die "could not disable the screensaver on $VOLUME -- idleTime reads '${ssv:-unreadable}'.
+
+    Refused here rather than discovered later. A benchmark makes no keyboard or
+    mouse input, so the idle timer runs at full load exactly as it does on an
+    abandoned machine; the lock behind it ends a run with the silent timeout that
+    nothing over there can report. On 2026-08-24 that install locked itself.
+
+    Nothing has been done to the machine yet. To plant anyway:  --force"
     fi
 
     info "  installing the autorun"
@@ -576,21 +759,88 @@ PLIST
 
 # --- going, and coming back --------------------------------------------------
 
+# The boot this lane started from, so "it came back" can be checked instead of
+# assumed. Set by phase_go and read by phase_wait.
+BOOT_BEFORE=""
+
+mac_boottime() {
+    mac_sh 'sysctl -n kern.boottime 2>/dev/null' 2>/dev/null \
+        | tr -d '\r' | sed -n 's/.*sec *= *\([0-9]*\).*/\1/p' | head -1
+}
+
 phase_go() {
-    [ -n "$DRY" ] && { log "  would reboot $HOST (osascript, no sudo)"; return 0; }
-    info "go: rebooting $HOST"
-    # osascript rather than sudo: a logged-in user may restart their own Mac
-    # without a password, and this account has no passwordless sudo. The `||`
-    # is not a fallback so much as a second spelling for a machine where the
-    # first is refused; if both fail, say so rather than waiting for a reboot
-    # that is not coming.
-    if ! mac 'osascript -e "tell application \"System Events\" to restart" >/dev/null 2>&1 \
-              || sudo -n shutdown -r now >/dev/null 2>&1'; then
-        die "could not reboot $HOST. Nothing has been lost: the job is planted, so
-    rebooting it by hand -- or booting '$VOLUME' from the startup manager --
-    runs the A/B and comes back by itself."
-    fi
-    info "  $HOST is rebooting; the planted job takes it from here"
+    [ -n "$DRY" ] && { log "  would reboot $HOST (loginwindow restart event, no sudo)"; return 0; }
+    BOOT_BEFORE=$(mac_boottime)
+    info "go: rebooting $HOST (boot before: ${BOOT_BEFORE:-unknown})"
+
+    # HOW THIS MACHINE IS ACTUALLY REBOOTED, AND WHY THE OBVIOUS SPELLING IS A
+    # SILENT NO-OP.
+    #
+    # `tell application "System Events" to restart` was here, with
+    # `|| sudo -n shutdown -r now` behind it and both ends silenced. Measured
+    # 2026-08-24, and it is the third member of a family this repository keeps
+    # meeting: **it returns 0 and does not reboot.** `lsappinfo front` was
+    # `loginwindow` -- host mode normally sits at the login screen with nobody
+    # logged into the GUI -- so the restart had no user session to be carried
+    # out in. rc=0, `kern.boottime` unchanged. The lane announced a reboot,
+    # waited out its head start, found the machine answering, and reported
+    # "back in HOST mode" about a machine that had never left. A planted job
+    # went unconsumed and the whole cycle produced nothing, silently.
+    #
+    # (The `sudo -n` behind it could never have covered for it either: host mode
+    # has no blanket NOPASSWD, only wk-quiesce-priv and wk-tftpd. Its failure
+    # was invisible behind the first command's false success.)
+    #
+    # The **loginwindow restart Apple event** works here with no password, no
+    # sudo and no GUI session, because loginwindow is running in every state
+    # this machine is ever in -- it is what the login screen's own Restart
+    # button uses. Written to a file with octal escapes rather than inlined:
+    # the event code is guillemets, and those do not survive being passed
+    # through two shells reliably. The escapes go in printf's *format*, not in
+    # an argument to %s -- printf expands \\ooo in the format only, so the %s
+    # spelling writes the literal text "\\302\\253" into the script and osascript
+    # rejects it. Caught before it ran; it would have looked exactly like the
+    # silent no-op this whole comment is about.
+    #
+    # Backgrounded and its exit status ignored on purpose. A successful reboot
+    # kills the ssh connection carrying it, so "the command failed" and "the
+    # command worked" look identical from here. Which is why the next thing
+    # this function does is stop believing exit statuses altogether.
+    mac_sh 'printf "tell application \"loginwindow\" to \302\253event aevtrrst\302\273\n" > /tmp/wk-restart.scpt
+            (osascript /tmp/wk-restart.scpt >/dev/null 2>&1 &)
+            exit 0' >/dev/null 2>&1 || true
+
+    # THE REBOOT IS VERIFIED, NOT REPORTED. This is the whole lesson of the bug
+    # above: every mechanism available here can claim success without acting, so
+    # the only trustworthy signal is the machine actually going away. Nothing
+    # downstream runs until it has.
+    local waited=0
+    while [ "$waited" -lt 150 ]; do
+        mac_sh true >/dev/null 2>&1 || { info "  $HOST is going down (after ${waited}s)"; return 0; }
+        sleep 5
+        waited=$((waited + 5))
+    done
+
+    # Still answering after two and a half minutes, so the event was refused or
+    # ignored. Try the privileged spelling once -- on a machine that *does* have
+    # passwordless sudo it is the simplest thing that works -- and then give up
+    # loudly rather than waiting an hour for a reboot that is not coming.
+    warn "  the loginwindow restart event did not take; trying sudo -n"
+    mac_sh 'sudo -n shutdown -r now >/dev/null 2>&1' >/dev/null 2>&1 || true
+    waited=0
+    while [ "$waited" -lt 60 ]; do
+        mac_sh true >/dev/null 2>&1 || { info "  $HOST is going down (after sudo)"; return 0; }
+        sleep 5
+        waited=$((waited + 5))
+    done
+
+    die "could not reboot $HOST -- it is still answering, and \`kern.boottime\` is
+    unchanged. Both mechanisms exit 0 without acting, so this is checked rather
+    than trusted; see the comment in phase_go.
+
+    Nothing has been lost: the job is planted, so rebooting the machine by hand
+    -- or booting '$VOLUME' from the startup manager -- runs the A/B and needs
+    nothing further from here."
 }
 
 phase_wait() {
@@ -608,6 +858,15 @@ phase_wait() {
     while :; do
         if mode=$(mac 'cat /etc/wk-image 2>/dev/null | sed -n "s/^id=//p"; echo READY' 2>/dev/null); then
             mode=$(printf '%s' "$mode" | tr -d '\r' | head -1)
+            # Same boot as before means it never rebooted, whatever it says
+            # about its mode. Without this the old code reported "back in HOST
+            # mode" about a machine that had simply never gone down -- the
+            # failure phase_go's comment describes, arriving one function later.
+            local bt; bt=$(mac_boottime)
+            if [ -n "$BOOT_BEFORE" ] && [ "$bt" = "$BOOT_BEFORE" ]; then
+                warn "  $HOST is answering on the SAME boot ($bt) -- it never rebooted"
+                printf 'noreboot'; return 1
+            fi
             case "$mode" in
                 READY) info "  $HOST is back in HOST mode"; printf 'host'; return 0 ;;
                 *)     info "  $HOST answers in BENCH mode ($mode)"; printf 'bench'; return 0 ;;
@@ -682,6 +941,8 @@ while [ $# -gt 0 ]; do
         --count)    COUNT="${2:-}"; shift 2 ;;
         --timeout)  TIMEOUT="${2:-}"; shift 2 ;;
         --settle)   SETTLE="${2:-}"; shift 2 ;;
+        --patch)    PATCH="${2:-}"; shift 2 ;;
+        --base)     BASE_REF="${2:-}"; shift 2 ;;
         --a)        A_ID="${2:-}"; shift 2 ;;
         --b)        B_ID="${2:-}"; shift 2 ;;
         --a-args)   A_ARGS="${2:-}"; shift 2 ;;
@@ -730,7 +991,16 @@ if ! preflight; then
     warn "preflight failed; showing the plan anyway because this is --dry-run"
 fi
 
-[ -n "$DO_STAGE" ] && phase_stage
+# --patch supersedes --stage: it stages both arms itself, and it must run before
+# the plant because the plant validates A_ID and B_ID against what is actually on
+# the volume.
+if [ -n "$PATCH" ]; then
+    [ -z "$DO_STAGE" ] || warn "--stage is redundant with --patch (which stages both arms)"
+    [ -z "$A_ID$B_ID" ] || die "--patch chooses both arms; do not also pass --a/--b"
+    phase_build_ab
+elif [ -n "$DO_STAGE" ]; then
+    phase_stage
+fi
 phase_plant >/dev/null
 
 [ "$ACTION" = plant ] && {
@@ -754,6 +1024,16 @@ case "$came_back" in
         # is what tells them apart: a machine that went to bench mode, ran the
         # A/B and came back, versus one that never left host mode at all.
         phase_collect ;;
+    noreboot)
+        # Distinguished from "not answering" because the remedy is the opposite.
+        # The machine is up, the job is planted and untouched, and nothing is
+        # wrong with the volume -- only the reboot failed. Saying "not
+        # answering" here (which the catch-all used to) sends the reader to look
+        # for an outage that does not exist.
+        warn "$HOST never rebooted, so the A/B has not run."
+        log  "  The job is planted and still valid -- nothing needs re-staging."
+        log  "  Reboot the machine by any means (the startup manager works too)"
+        log  "  and it runs by itself; 'wk bench mac-ab --collect' reads it after." ;;
     *)
         warn "$HOST is not answering."
         log  "  If it went to bench mode, that is expected: that install has no"

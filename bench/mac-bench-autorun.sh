@@ -416,26 +416,96 @@ if pgrep -x SecurityAgent >/dev/null 2>&1; then
         || say "  dismissed"
 fi
 
-# Automatic update checking, turned off here as well as at provisioning time.
+# The software-update scanner, stopped rather than merely asked to stay away.
 #
-# Not belt-and-braces: it is on record as not sticking. This install's own
-# first-boot log says "Automatic checking for updates is turned on" *after*
-# setting it off, and on 2026-08-23 the plist on the volume had no
-# AutomaticCheckEnabled key at all -- while `LastFullSuccessfulDate` showed a
-# software-update scan starting at 15:41:17, which is thirty seconds into a
-# benchmark run. That is a network fetch and a scan inside the measurement.
+# THE SETTING IS NOT THE MECHANISM. That is the finding of 2026-08-23 and it
+# cost a whole A/B before anyone looked for it. This block used to write
+# AutomaticCheckEnabled false and read it back, and the read *succeeded*: the
+# log says `AutomaticCheckEnabled now: 0` at 18:34:43Z. Then
+# `LastSuccessfulBackgroundMSUScanDate` advanced to 18:36:59Z -- inside round 1
+# arm A, which ran 18:35:14 -> 18:37:00. Two minutes after the preference was
+# confirmed off, on the same boot, a scan ran through the middle of the
+# measurement. A network fetch and a burst of CPU, in the one window where the
+# machine is supposed to be doing nothing else.
 #
-# So it is set again, per run, from the side that has passwordless root. Written
-# rather than requested (`softwareupdate --schedule off` is the requester, and it
-# is the thing that does not stick), and read back rather than trusted. Failure
-# is not fatal: `wk quiesce` and the runner's own quiet check both measure this
-# afterwards and get the last word.
-say "turning automatic update checking off"
+# The previous version of this comment called the write "read back rather than
+# trusted" and treated that as sufficient. It was not: the readback was true and
+# the conclusion drawn from it was false. Reading a preference tells you what
+# the preference says, never what the daemon will do.
+#
+# So the daemon is booted out. That is per-boot and self-reversing -- this
+# install reboots when the job ends and every system daemon comes back with it
+# -- which is the same shape as the rest of `wk quiesce`. The preference is
+# still written, because it costs nothing and it is the documented intent; it is
+# simply no longer the thing that is believed.
+say "stopping the software-update scanner"
+for svc in system/com.apple.softwareupdated system/com.apple.mobile.softwareupdated; do
+    if sudo -n launchctl bootout "$svc" >/dev/null 2>&1; then
+        say "  booted out $svc"
+    elif ! sudo -n launchctl print "$svc" >/dev/null 2>&1; then
+        say "  $svc is not loaded"
+    else
+        say "  WARNING: could not boot out $svc and it is still loaded --"
+        say "    a scan can still start inside a run. The per-arm scan check"
+        say "    below will say so if one does."
+    fi
+done
 sudo -n defaults write /Library/Preferences/com.apple.SoftwareUpdate \
     AutomaticCheckEnabled -bool false >/dev/null 2>&1 || true
 sudo -n defaults write /Library/Preferences/com.apple.SoftwareUpdate \
     AutomaticDownload -bool false >/dev/null 2>&1 || true
-say "  AutomaticCheckEnabled now: $(sudo -n defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>&1)"
+
+# The scan timestamps, as evidence rather than as configuration.
+#
+# Read out of the plist file and not through `defaults`: cfprefsd serves this
+# domain differently by privilege and has already been caught, on this exact
+# machine, answering with a value the file does not carry. The file is what
+# survives, so the file is what is compared.
+#
+# Sorted before comparing: `defaults write` rewrites this file at job start and
+# a re-serialised dict can come back in a different order, which an unsorted
+# comparison would report as a scan that never happened.
+#
+# Any of these moving across a benchmark run means a scan happened during it.
+# That does not abort the job -- the run is over by the time it can be known,
+# and abandoning the remaining rounds would throw away good arms to punish a bad
+# one -- but it is recorded against the individual arm, so a contaminated number
+# is visible in the verdict instead of silently averaged into it.
+msu_stamp() {
+    /usr/bin/plutil -p /Library/Preferences/com.apple.SoftwareUpdate.plist 2>/dev/null \
+        | grep -E '"Last[A-Za-z]*Date"' | sort | tr -d ' \n'
+}
+say "  scan stamp before the job: $(msu_stamp)"
+
+# --- why the radio is NOT turned off during a run -----------------------------
+#
+# Both routes to "do not scan" are closed on this install: the preference does
+# not work (measured 2026-08-23 -- read back as off, scan ran anyway) and
+# `launchctl bootout system/com.apple.softwareupdated` is SIP-protected and
+# fails (measured 2026-08-24, both daemons, and a scan then ran through round 1
+# arm B regardless).
+#
+# The obvious third route is to take away what a scan needs: a run here uses no
+# network at all, the payload being pinned precisely so that it does not, so the
+# Wi-Fi could simply be off while an arm runs. That was written and then removed
+# the same evening, and the reason it was removed is the more useful half.
+#
+# **A measurement fix must never be able to make the machine unreachable.** The
+# radio version was guarded by a trap that turned it back on, and a trap is not
+# a guarantee: a panic, a power cut, a SIGKILL, or the watchdog's own reboot all
+# leave the interface down. In bench mode that is unrecoverable without walking
+# to the machine -- this install has no other route in -- so the failure mode of
+# a contaminated number was traded for the failure mode of a machine nobody can
+# reach. On a lane whose scarcest resource is a human trip to the keyboard, that
+# is the wrong trade in every case. It would also disable tailscale, which is
+# the one change that would make this install observable at all.
+#
+# So the scan is not prevented here. It is *detected*, per arm, below, and named
+# in the summary before any number -- which is honest and costs nothing. If it
+# needs to be prevented, the scoped version is to deny only Apple's update
+# endpoints (swscan/gdmf/mesu/xp .apple.com) in /etc/hosts on the volume: that
+# removes what the scan needs without removing what anything else needs, and it
+# cannot make the machine unreachable. Deliberately not done tonight, untested.
 
 say "quiescing"
 "$TOOLS/wk" quiesce on >>"$LOG" 2>&1 || say "WARNING: quiesce reported a problem; the runner will judge it"
@@ -484,14 +554,27 @@ while [ "$r" -le "$ROUNDS" ]; do
         [ -n "$bargs" ] && set -- "$@" --browser-args "$bargs"
         [ -n "$FORCE" ] && set -- "$@" --force
         before=$(newest_result)
+        msu_before=$(msu_stamp)
         if "$TOOLS/wk" "$@" >>"$LOG" 2>&1; then
             say "--- round $r, arm $label: OK ---"
             state_set "ok_${label}_$r" 1
             any_ok=1
+            # Did anything scan through this arm? Asked per arm rather than per
+            # job because that is the resolution the answer is useful at: one
+            # contaminated arm out of six is a number to drop, not a reason to
+            # disbelieve the other five.
+            msu_after=$(msu_stamp)
+            clean=clean
+            if [ "$msu_before" != "$msu_after" ]; then
+                clean=scanned
+                say "    CONTAMINATED: a software-update scan ran during this arm"
+                say "      before: $msu_before"
+                say "      after:  $msu_after"
+            fi
             got=$(newest_result)
             if [ -n "$got" ] && [ "$got" != "$before" ]; then
-                printf '%s\t%s\t%s\t%s\n' "$r" "$label" "$sid" "$got" >> "$RUNS/runs.tsv"
-                say "    -> results/$got"
+                printf '%s\t%s\t%s\t%s\t%s\n' "$r" "$label" "$sid" "$got" "$clean" >> "$RUNS/runs.tsv"
+                say "    -> results/$got ($clean)"
             else
                 say "    WARNING: no new result directory appeared"
             fi
@@ -541,13 +624,62 @@ state_set outcome ran
 state_set finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 say "=== job finished ==="
 
-# The agent stays for exactly one more boot. If that boot happens here, the
-# `phase = done` branch above halts the machine and removes the agent -- which
-# is the only way this volume can tell that it is the firmware default.
 # Killed *and reaped*: without the wait, bash reports the job as
 # "Terminated: 15" into the log after the fact, which reads like a failure in a
 # transcript whose whole purpose is to be read after the machine has gone.
 kill "$WATCHDOG" 2>/dev/null
 wait "$WATCHDOG" 2>/dev/null || true
 trap - EXIT INT TERM
+
+# Is this volume the firmware default? It decides what "finishing" should mean,
+# and the two answers are genuinely different situations rather than a
+# preference.
+#
+# Read the same way `wk boot mbp --status` reads it: `boot-volume` is three
+# colon-separated UUIDs and only the last names anything on the disk -- the APFS
+# volume group. Compare it against the group of the volume that is currently
+# booted, which is this one.
+booted_is_default() {
+    local nv grp
+    nv=$(nvram -p 2>/dev/null | awk '$1 == "boot-volume" { print $2 }' | tr -d '\r')
+    nv="${nv##*:}"
+    [ -n "$nv" ] || return 1
+    grp=$(diskutil info / 2>/dev/null | sed -n 's/.*[Vv]olume [Gg]roup: *//p' | head -1 | tr -d ' \r')
+    [ -n "$grp" ] || return 1
+    [ "$nv" = "$grp" ]
+}
+
+# WHEN THIS VOLUME IS THE FIRMWARE DEFAULT, FINISHING MEANS STAYING UP.
+#
+# The reboot below is right when the default is the *host* volume: it hands the
+# machine back and costs nobody anything. When the default is this volume it is
+# actively harmful, and that is what happened on 2026-08-23. The reboot landed
+# back here, the `phase = done` branch halted the machine, and a completed A/B
+# -- six good runs, already written to the disk -- sat on a powered-off Mac. The
+# numbers existed and nothing could reach them until somebody walked over,
+# pressed the power button and picked a disk. The halt was protecting against a
+# boot loop, which is real, but powering the machine off is not the only way to
+# not loop.
+#
+# Staying up does not loop either: the job is done, the agent is removed, and
+# nothing here starts anything again. What it buys is that the results are
+# reachable the moment they exist -- remote login is on and this install has a
+# network -- so the whole experiment, collection included, needs nobody. The one
+# human step that is genuinely unavoidable on this machine (the firmware will
+# not be told which volume to boot from software; see the header) is then a
+# plain reboot into workstation mode, whenever it suits, rather than a trip to
+# the keyboard before anyone can even read the result.
+if booted_is_default; then
+    say "this volume is the firmware default, so a reboot would land back here and"
+    say "halt -- leaving a finished A/B on a machine nothing can reach. Staying up"
+    say "instead. The agent is removed, so nothing runs again; the numbers are"
+    say "collectable over the network now, and the way back to workstation mode is"
+    say "a plain reboot whenever it suits."
+    remove_agent
+    state_set left_how stayed-up
+    state_set left_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    say "=== staying up in bench mode; nothing further will run ==="
+    exit 0
+fi
+
 leave_bench reboot "job finished"

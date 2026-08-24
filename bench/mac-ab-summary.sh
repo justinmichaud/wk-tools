@@ -65,6 +65,29 @@ emit "A/B summary -- $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 emit "run map: $RUNS"
 emit ""
 
+# Contaminated arms, named before the numbers rather than after them.
+#
+# The autorun writes a fifth column per run: `clean`, or `scanned` if a
+# software-update scan timestamp moved across that arm (2026-08-23 -- one did,
+# through the middle of round 1 arm A, while every preference said updates were
+# off). An arm with a scan in it is still a number, and it is still averaged in
+# below, because dropping data on the strength of a heuristic is its own way to
+# get a wrong answer. But it is said out loud and said first: a difference that
+# lives entirely in a scanned arm is not a difference between builds.
+#
+# Runs from before the column existed have an empty $5 and are not accused of
+# anything.
+scanned=$(awk -F'\t' '$5 == "scanned" { printf "    round %s arm %s\n", $1, $2 }' "$RUNS")
+if [ -n "$scanned" ]; then
+    emit "  WARNING: a software-update scan ran during these arms:"
+    while IFS= read -r line; do emit "$line"; done <<EOF
+$scanned
+EOF
+    emit "  Their numbers are included below. Treat a difference that depends on"
+    emit "  them as unproven."
+    emit ""
+fi
+
 # Per-arm numbers, read out of the results themselves rather than out of the run
 # log: the log is a transcript and the result is the record.
 #

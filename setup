@@ -6,7 +6,8 @@
 #
 #   ./setup              everything for this OS
 #   ./setup --stage X    just one stage (tools, settings, dotfiles, claude,
-#                        mcp, sharing, machine, vmtools, softnet, sdk, quiesce)
+#                        mcp, sharing, machine, vmtools, softnet, sdk,
+#                        benchkey, quiesce)
 #   ./setup --dry-run    report what would change
 
 set -euo pipefail
@@ -92,6 +93,7 @@ run_stage machine  "$HOST_DIR/machine.sh"
 run_stage vmtools  "$HOST_DIR/vmtools.sh"
 run_stage softnet  "$HOST_DIR/softnet.sh"
 run_stage sdk      "$HOST_DIR/sdk.sh"
+run_stage benchkey "$HOST_DIR/benchkey.sh"
 run_stage quiesce  "$WK_ROOT/admin/install.sh"
 
 echo >&2

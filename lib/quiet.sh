@@ -68,14 +68,91 @@ macos_noise() {
     case "$v" in
         0)  log  "  updates:    automatic checking off" ;;
         1)  warn "  updates:    automatic checking is on"; bad=1 ;;
-        # Unreadable is reported as unknown and does NOT fail the check. The
-        # temptation is to treat it as "on" and be safe, but this is the check
-        # that gets --force'd past when it cannot pass, and --force is
-        # all-or-nothing -- so a check that fails on machines it cannot read
-        # ends up disabling every other check too. Say what is known.
-        '') log  "  updates:    unknown (needs root to read; not treated as a failure)" ;;
+        # Unreadable is unknown, and whether unknown is a failure depends on
+        # who is asking. On a workstation there are real reasons root cannot be
+        # had for the asking, and this is the check that gets --force'd past
+        # when it cannot pass -- and --force is all-or-nothing, so a check that
+        # fails on machines it cannot read ends up disabling every other check
+        # too. On a *benchmark install* there is no such excuse: the bench
+        # account has passwordless root by construction, so unreadable there
+        # means something is wrong rather than merely private.
+        '') if [ -f /etc/wk-image ]; then
+                warn "  updates:    unreadable, on an install that has passwordless root."
+                warn "              Not fatal -- see the scanner note below -- but not reassuring."
+            else
+                log  "  updates:    unknown (needs root to read; not treated as a failure)"
+            fi ;;
         *)  log  "  updates:    unknown (AutomaticCheckEnabled=$v)" ;;
     esac
+
+    # Whether a scan can start, which is not the same question as the setting
+    # above and is the one that actually decides a measurement.
+    #
+    # Measured 2026-08-23, and it is the reason this check exists: the autorun
+    # wrote AutomaticCheckEnabled false, read it back as 0, and
+    # `LastSuccessfulBackgroundMSUScanDate` still advanced to 18:36:59Z --
+    # inside round 1 arm A of an A/B that ran 18:35:14 -> 18:37:00. The setting
+    # was off and the scan happened anyway. A scan is a network fetch and a
+    # burst of CPU in the middle of a benchmark, and no amount of reading the
+    # preference would have caught it.
+    #
+    # So ask whether the scanner is loaded, which is a property rather than a
+    # preference. Reported on a benchmark install only: softwareupdated is loaded
+    # on every healthy workstation and saying so there is noise.
+    #
+    # WHY THIS WARNS RATHER THAN FAILS, WHICH IS A DELIBERATE CHOICE AND NOT A
+    # SOFTENING. Making it fatal was the first version. It is the wrong shape for
+    # this lane: whether `launchctl bootout system/com.apple.softwareupdated`
+    # is permitted under SIP cannot be established from host mode -- root there
+    # costs a password, and the benchmark install is not running to be asked.
+    # So a fatal check here is one whose passing is unknown until after the
+    # reboot, and if it does not pass it fails *every arm of every round* and
+    # hands back a volume with no numbers on it. That is precisely the failure
+    # mode this lane has already paid for twice (docs/HANDOFF-mac-perf-mode.md,
+    # "what the first three real cycles cost").
+    #
+    # The hard check lives where the evidence is instead: bench/mac-bench-autorun.sh
+    # samples the scan timestamps either side of every individual arm and marks
+    # the run `scanned` if they moved, and `wk bench ab-summary` names those arms
+    # before it prints any number. A configuration reading cannot be trusted here
+    # -- that is the whole finding of 2026-08-23 -- so it does not get to be the
+    # thing that decides.
+    if [ -f /etc/wk-image ]; then
+        if sudo -n launchctl print system/com.apple.softwareupdated >/dev/null 2>&1; then
+            warn "  scanner:    softwareupdated is LOADED -- a scan can start mid-run."
+            warn "              Per-arm scan evidence is recorded; check the summary."
+        else
+            log "  scanner:    softwareupdated not loaded"
+        fi
+    fi
+
+    # Notifications and the screen lock -- neither of which anything in this
+    # repository measured until 2026-08-24, which is exactly why both were found
+    # by looking at the machine's screen rather than by running a check.
+    #
+    # A banner is compositor work inside the measurement and can take focus; a
+    # lock is "nowhere to draw" outright. Both are invisible to
+    # `screen_blocker`, which asks the window server for the frontmost
+    # *application* -- a banner is not one, and neither is a lock screen.
+    #
+    # Reported on a benchmark install only: on a workstation both are normal and
+    # saying so is noise. Warned rather than failed, for the reason given at
+    # length in the scanner note above -- a fatal check whose passing cannot be
+    # established before the reboot costs the whole cycle when it is wrong.
+    if [ -f /etc/wk-image ]; then
+        if pgrep -x NotificationCenter >/dev/null 2>&1; then
+            warn "  notifs:     NotificationCenter is RUNNING -- a banner can draw mid-run"
+        else
+            log "  notifs:     NotificationCenter not running"
+        fi
+        v=$(defaults -currentHost read com.apple.screensaver idleTime 2>/dev/null || echo "")
+        case "$v" in
+            0)  log  "  screensaver: disabled (idleTime=0)" ;;
+            '') warn "  screensaver: unreadable -- cannot say whether the screen can lock" ;;
+            *)  warn "  screensaver: idleTime=${v}s -- a benchmark makes no input, so this
+              timer runs at full load and the lock behind it ends the run" ;;
+        esac
+    fi
 
     # Sleep is not only a noise source: a display that sleeps mid-run changes
     # what the compositor is doing, and on a laptop the whole machine going to
