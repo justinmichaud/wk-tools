@@ -1,3 +1,11 @@
+WebKitBuild
+dotfiles/zed/prompts
+dotfiles/zed/themes
+.DS_Store
+.idea
+.cache
+compile_commands.json
+
 .DS_Store
 __pycache__/
 *.pyc
@@ -5,8 +13,3 @@ __pycache__/
 # Dotfile backups taken by ./setup when it replaces an existing real file.
 *.wk-backup
 
-# Machine-local target definitions: these name internal hosts and paths.
-/targets/local/
-
-# Site-local WiFi identity for the rpi5 (this repo is public).
-/host/linux/rpi5/rpi5.conf

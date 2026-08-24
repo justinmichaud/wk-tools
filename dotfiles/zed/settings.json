@@ -1,4 +1,17 @@
 {
+  "ssh_connections": [
+    {
+      "host": "rpi5",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/jmichaud/Development/wk-tools"
+          ]
+        }
+      ]
+    }
+  ],
   "project_panel": {
     "dock": "left"
   },
