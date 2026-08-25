@@ -1,61 +1,22 @@
-Defects still owed. A line goes when the work lands, and this file goes when the
-last one does. Everything fixed has a line item in docs/TESTING.md instead; that
-is where the record lives.
+- wk enter does not work across machines
 
-## Blocked on work upstream, or on a build
+- No way to easily close workspaces
 
-- **Eleven of the twenty configurations cannot be built yet**, and each says why
-  in its own `CFG_NEEDS`. Two causes:
+- wk rm shoud take multiple hosts
 
-  1. *No buildroot defconfig.* WebPlatformForEmbedded/buildroot's release-pinned
-     `cog` family is **rpi3, 32-bit, only** --
-     `raspberrypi3_wpe_2_{22,28,38,42,46,50}_cog_defconfig`. The
-     `raspberrypi4_*` defconfigs are `_ml_`/`_weston_`/`_wst_`, on cortex-a72 and
-     a pinned bcm2711 kernel tarball rather than rpi-5.15.y, and none of them
-     pins a WPE release. So rpi4-32, rpi4-64 and rpi5-64 need a defconfig
-     written, per board, and every WebKit/WebKit release needs cog and wpewebkit
-     repointed at a WebKit/WebKit branch.
-  2. *No targets.conf section.* `wpewebkit-2.46-yocto-rpi5-64` only:
-     `webkitglib/2.52` is the one branch with `[rpi5-64bits-mesa]`. A section to
-     add upstream, not a port.
+- bash autocomplete
 
-- **The buildroot builder is not written** (`image/buildroot.sh` refuses and says
-  so). Two halves are owed, in this order:
+- Why is wk sync so slow on rpi5?
 
-  1. `buildroot_build` itself. The whole recipe is recorded at the top of
-     image/buildroot.sh -- tree, pin, host container, job count, download dirs,
-     overlay, output -- and has never been run through
-     that file, which is why it refuses rather than pretending.
+- wk status missing load data for other machines
 
-## Waiting on a decision
+- wk status should load local data quickly first and fill the rest later
 
-- The base snapshot, and whether workspaces share the mirror's objects by
-  alternates. Measured: mirror 13 GB, the single snapshot's `.git`
-  14 GB, and only the 12.5 GB base pack hardlinked between them (`%n links` ==
-  2). Every pack the snapshot fetched after its clone has one link, so each
-  `wk sync` writes the same objects into the mirror and again into the snapshot,
-  and a workspace's own fetch writes them a third time into its overlay upper.
+- rpi3 and 4 rescue images don't have tailscale
 
-  Yes, it is possible, via `git clone --reference`. Refs must NOT be shared -- a
-  ref is mutable and per-workspace, so a shared one means a workspace moving its
-  branch moves the mirror's. Objects are what gets shared, and an alternate beats
-  a hardlink: one 40-byte file, no inode per pack, survives a repack, and sees
-  every newly fetched object the moment the mirror has it.
+- Extract a command to find devices via ssh + nmap on local network
 
-  Two things to agree before building it:
-
-  1. The mirror becomes load-bearing forever -- `git gc --prune` on it would
-     corrupt every workspace borrowing from it. `gc.auto 0` is already set;
-     `wk gc` must refuse to prune it while anything references it. That is one
-     new invariant in exchange for the ones it retires (half-published
-     snapshots, `base_verify`, completion markers, `current_base`, the SNAP
-     column, "N newer snapshots").
-  2. The mirror must be mounted at the **same path** inside a container as on the
-     host, because an alternates path has to resolve on both sides and the
-     relative offsets differ (`/mirror/WebKit.git` vs `$WK_STORE/git/WebKit.git`).
-     Every existing workspace has to be remade.
-
-## Still owed
+- wk status should explain how to generate an image for each member of the fleet (to re-provision it from scratch) and have a small sample command for how to provision each unique role.
 
 - Too many if branches. Everywhere behaviour can change must be tested and
   testable, otherwise the branch does not stay. Needs a starting point: which
@@ -70,32 +31,10 @@ is where the record lives.
   `image/configs/*.conf` are the first set written to one shape; `boot/machines/`,
   `targets/hosts/` and `bridge/hosts/` predate it and do not match each other.
 
+- We need to re-provision rpi3 and 4 from scratch and confirm they work
+
+- Get a wpe-2.38 build working and automated with helpers (tailscale + anything else needed to verify the image) for rpi3. Make a buildroot image for rpi4 2.38 (32-bit) and rpi5 (64-bit) too once that is working. 
+
+- Confirm rpi5 yocto image works
+
 - Ctrl-C does not always work as expected. Not investigated.
-
-- rpi5: **root-caused and fixed in code; the board still needs one interactive
-  run.** Both halves were one bug. The helper *is* installed and byte-identical,
-  but `wk sudo setup`'s `/etc/sudoers.d/zz-<user>-passwd` says `PASSWD: ALL`,
-  `ALL` matches the helper too, and `wk-quiesce` sorted *before* it -- so the
-  carve-out was dead (`sudo -n wk-quiesce-priv status` -> 1), `wk quiesce` and
-  `wk session` prompted for a password in the daily path, and `./setup` reported
-  the helper missing on every run and never converged. That is what "does not
-  persist" was.
-
-  Fixed: the rules are named `zzz-wk-quiesce` / `zzz-wk-card` so they are the
-  last match; `./setup` and `wk doctor` now distinguish "not installed" from
-  "installed but out-ranked"; `wk sudo setup` checks it has not out-ranked them.
-
-  Owed: run `./setup --stage quiesce` on rpi5 **interactively** -- there is no
-  non-interactive sudo there, which is the point of the drop-in, so it cannot be
-  repaired remotely. Every other machine that has run `wk sudo require`/`setup`
-  needs the same run; this Mac still has the old `/etc/sudoers.d/wk-quiesce`.
-
-  Not the cause, checked and ruled out: `./setup` is otherwise idempotent on
-  rpi5 (two consecutive runs, no changes, empty diff), and everything it writes
-  is on the NVMe ext4 root -- no tmpfs, no overlay, and no reboot in 3d21h.
-
-- `wk sync --machine` on a macOS host does the fleet and tooling half and then
-  hands the store half over by naming the command to run. One verb that finishes
-  the job on a Mac needs the dispatcher to split a single invocation across the
-  host and the VM, which is a change to `wk`'s forwarding rather than to
-  `cmd/sync`.
