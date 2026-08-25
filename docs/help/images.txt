@@ -74,8 +74,13 @@ WHY THE IMAGE STAYS WHERE IT WAS BUILT
   rebuild cheap. A built image is an output, and its home is the workspace that
   built it until it is on a card.
 
-  TODO: `$WK_STORE/images/<id>/` with its `disk.img` and manifest is still
-  there, and so are the verbs that read it -- `wk sysimage ls|show|rm|retarget`,
+  `wk sysimage ls` works this way already: it scans where each builder leaves
+  output (`image_workspace_scan`) and reports the workspace, the builder, the
+  size and the path, with no id and no manifest in it. `wk sysimage write
+  --from <path>` is the matching write.
+
+  TODO: `$WK_STORE/images/<id>/` with its `disk.img` and manifest can still be
+  created, and so can the verbs that read it -- `wk sysimage show|rm|retarget`,
   `image_verify`, `image_latest`, `image_ids`, `image_complete`, and the yocto
   import that fills it. docs/TESTING.md, "no image store", is the work list.
 

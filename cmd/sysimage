@@ -59,11 +59,23 @@ usage: wk sysimage <sub>
                                    --no-import; a pmos profile takes --detach
                                    and --resume, and builds on a Linux aarch64
                                    machine over ssh)
-  ls                              images in the store
+  ls                              every image a workspace here has built, and
+                                  where it is. There is no store: the workspace
+                                  that built an image is its name
+                                  (wk help images)
   show <id>                       what an image is, and whether it still is
   disks <machine>                 removable disks attached to that machine
-  write <id> --disk <machine>:<device>
-                                  write the image onto that disk
+  write --from <path> --disk <machine>:<device>
+                                  write that image onto that disk; --from takes
+                                  a path 'wk sysimage ls' printed
+      --rescue                    write it as the board's rescue system: the
+                                  units that hand a machine back stay inert,
+                                  and the rest of the card is left for the
+                                  bench system that goes beside it. One image
+                                  serves both roles -- this is the only
+                                  difference between them
+      --grow | --no-grow          fill the disk with the root partition, or
+                                  leave it at its built size
   retarget <id>                   make an imported image bootable from the
                                   disk its machine actually boots, and give it
                                   the driving ssh key
@@ -112,13 +124,19 @@ driving_key() {
 #
 # `builder` is recorded rather than inferred: it is the difference between two
 # perf numbers, so a run should never have to guess it from the profile name.
+#
+# `role` is the one field here that a later step may rewrite, and the only one
+# that is not a property of the bytes. Every image is built as a bench system;
+# writing a card with --rescue stamps `rescue` here, on the card, because one
+# artifact serves both roles and the disk is the only place the two facts are
+# ever in the same room (disk_seed_role, boot/disk.sh).
 marker_file() {
     cat <<EOF
 id=$ID
 profile=$IMG_PROFILE
 machine=$IMG_MACHINE
 builder=$IMG_BUILDER
-role=${IMG_ROLE:-bench}
+role=bench
 base=${YOC_TARGET:-${BR_DEFCONFIG:-none}}
 built=${BUILT:-${built:-unknown}}
 built_by=$(hostname)
@@ -530,22 +548,25 @@ install_units() {
     if machine_load "${IMG_MACHINE:-}" 2>/dev/null && [ -n "${MACH_DRIVER:-}" ]; then
         load_driver "$MACH_DRIVER" 2>/dev/null || true
     fi
-    # A rescue image gets none of the units below, and that is the whole
-    # difference between a base image and a bench system on the wk side. Every
-    # one of them exists to hand a machine *back*: the watchdog reboots it out
-    # of the system somebody armed, the self-disarm parks the arming medium so
-    # the next boot falls through to the rescue role, and the diagnostics dump
-    # is for reading afterwards off a bench system that wedged. A rescue image
-    # is what all three fall back *to* -- so the watchdog would reboot the
-    # helper every IMG_WATCHDOG seconds for no reason, in the middle of whatever
-    # card it was writing, and the self-disarm would park a medium this image is
-    # not even on. Its job is to stay up, stay reachable, and write and recover
-    # other systems.
-    if [ "${IMG_ROLE:-bench}" = rescue ]; then
-        info "$IMG_PROFILE is a rescue image: no self-return watchdog, no self-disarm"
-        log  "  it is what a board falls back to, so there is nothing to hand it back to"
-        return 0
-    fi
+    # Every unit below goes into every image, and the two that hand a machine
+    # *back* are gated at runtime on /etc/wk/rescue instead of being left out
+    # here. That is what makes one built artifact serve both roles.
+    #
+    # The role is a property of the card, not of the build: a rescue system and
+    # the bench system beside it are the same distribution, built once, and the
+    # only difference between them is a marker `wk sysimage write --rescue`
+    # leaves on the disk. Baking the difference in would mean two bitbakes and
+    # two multi-gigabyte artifacts for one line of behaviour -- and a second
+    # build of the same inputs is the second copy of a fact that CLAUDE.md
+    # forbids, in its most expensive form.
+    #
+    # What the gate protects is real. Both units exist to return a machine to
+    # the system it was already sitting on: the watchdog reboots it out of the
+    # system somebody armed, and the self-disarm parks the arming medium so the
+    # next boot falls through to the rescue. A rescue is what both fall back
+    # *to* -- so on one, the watchdog would reboot the helper every
+    # IMG_WATCHDOG seconds for no reason, in the middle of whatever card it was
+    # writing, and the self-disarm would park a medium this image is not on.
 
     # Which init this image actually runs, read out of the image rather than
     # assumed. Every unit below is a systemd unit, and an image without systemd
@@ -589,6 +610,9 @@ install_units() {
     else
     install_unit "$roff" wk-self-return.service "[Unit]
 Description=Hand the machine back to host mode unless claimed
+# Inert on a rescue system, which is what this would be handing the machine
+# back *to*. The marker is written by 'wk sysimage write --rescue'.
+ConditionPathExists=!/etc/wk/rescue
 [Service]
 Type=oneshot
 ExecStart=/bin/sh -c 'sleep $IMG_WATCHDOG; [ -f /run/wk-keep-running ] || systemctl reboot'
@@ -615,6 +639,9 @@ WantedBy=multi-user.target
         info "installing the self-disarm into the rootfs (the stick stops booting once this image is up)"
         install_unit "$roff" wk-self-disarm.service "[Unit]
 Description=Park this image's second-stage firmware so the next boot is the rescue role
+# A rescue is not on the medium this parks, so on one it would disarm somebody
+# else's arming.
+ConditionPathExists=!/etc/wk/rescue
 DefaultDependencies=no
 After=local-fs.target
 Before=sysinit.target
@@ -743,24 +770,61 @@ cmd_build() {
 
 # --- the rest ----------------------------------------------------------------
 
+# What a workspace's build is doing right now, from the pid the detached build
+# recorded. Evidence, not a claim: `yocto.status` says `state=running` for ever
+# on a detached build (docs/TESTING.md, defects), so it is not asked.
+_ws_building() { # <workspace>
+    local pid
+    pid=$(cat "$(wk_ws_dir "$1")/home/yocto-image.pid" 2>/dev/null) || return 1
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+# The profile a workspace was made for. `yocto-<profile>` is what image/yocto.sh
+# names its workspaces, so this is derivable rather than a second record.
+_ws_profile() { case "$1" in yocto-*) printf '%s' "${1#yocto-}" ;; *) return 1 ;; esac; }
+
 cmd_ls() {
-    local id r n=0
-    for id in $(image_ids | sort); do
+    local n=0 builder ws path bytes mtime prof machine note
+    local rows; rows=$(image_workspace_scan)
+
+    while IFS="$(printf '\t')" read -r builder ws path bytes mtime; do
+        [ -n "${builder:-}" ] || continue
         n=$((n + 1))
-        # The machine, or -- for an image that is not any machine's, which a
-        # phone's is not -- the device it was built for. A blank column here
-        # read as "this image is for nothing".
-        printf '%-34s %-18s %-8s %s\n' \
-            "$id" \
-            "$(manifest_get "$id" machine || true)$(
-                  [ -n "$(manifest_get "$id" machine)" ] || manifest_get "$id" device)" \
-            "$(human_bytes "$(manifest_get "$id" disk_bytes)")" \
-            "$(manifest_get "$id" built)"
-    done
-    [ "$n" -eq 0 ] && log "no images built yet -- 'wk sysimage build <profile>'"
-    for r in $(image_rubble); do
-        warn "$r: rubble from an interrupted build; the next build deletes it"
-    done
+
+        prof=$(_ws_profile "$ws" || printf '')
+        machine=""; note=""
+        if [ -n "$prof" ]; then
+            # In a subshell: loading a profile sets a screenful of globals, and
+            # this is a listing, not a command acting on one image.
+            machine=$( image_profile_load "$prof" >/dev/null 2>&1 \
+                       && printf '%s' "${IMG_MACHINE:-}" ) || true
+            [ -n "$machine" ] || note="this checkout does not define '$prof'"
+        fi
+
+        printf '%-40s %-10s %-8s %-8s %s\n' \
+            "$ws" "${machine:-?}" "$builder" "$(human_bytes "$bytes")" "$mtime"
+        # Where it is. The whole point of there being no store: this path is the
+        # image, and nothing copied it anywhere.
+        printf '    %s\n' "$path"
+        _ws_building "$ws" && printf '    %s\n' "a build is running in this workspace -- these bytes may be the previous one"
+        [ -z "$note" ] || printf '    %s\n' "$note"
+    done <<ROWS
+$rows
+ROWS
+
+    if [ "$n" -eq 0 ]; then
+        log "no workspace here has built an image."
+        log "  'wk sysimage build <profile>' builds one; it stays in the workspace"
+        log "  that built it (wk help images)."
+        return 0
+    fi
+
+    log ""
+    log "$n image$([ "$n" = 1 ] || printf s), each in the workspace that built it."
+    log "  There is no image store: the workspace is the name (wk help images)."
+    log "  To write one:  wk sysimage write --from <path above> --disk <machine>:<device>"
+    log "                 add --rescue for the system a board falls back to"
     return 0
 }
 
@@ -903,6 +967,7 @@ EOF
     eval "$reader" | disk_write_stream "$DISK_DEV"
     disk_unique_identity "$DISK_DEV" "$(_card_root_spec "$DISK_DEV")"
     disk_install_fleet "$DISK_DEV" "$marker" "$(driving_key)"
+    disk_seed_role "$DISK_DEV" "$role"
     disk_seed_tailnet "$DISK_DEV" "$(_tailnet_name_for "${IMG_MACHINE:-}")"
 
     # Growing is opt-in here and that is the point. A card grown to fill has no
@@ -961,6 +1026,13 @@ cmd_write() {
         esac
     done
 
+    # A rescue leaves the rest of the card alone unless told otherwise, because
+    # on the board where that matters most -- the rpi3, one medium holding both
+    # systems -- growing the rescue to fill the card is what makes the board
+    # unable to install a bench system without a person in the room
+    # (`wk help hardware`). Explicit --grow still wins.
+    if [ "$role" = rescue ] && [ -z "$grow_set" ]; then grow=0; fi
+
     # A store-free write is a different path from top to bottom: no manifest to
     # gate on, no id to look up, and the edits happen on the card afterwards.
     if [ -n "$from" ]; then
@@ -974,15 +1046,17 @@ cmd_write() {
         return $?
     fi
 
-    [ -n "$id" ] || die "usage: wk sysimage write <id> --disk <machine>:<device>
-    images:
-$(image_ids | sort | sed 's/^/      /')"
+    [ -n "$id" ] || die "usage: wk sysimage write --from <path> --disk <machine>:<device>
+    An image is bytes a workspace produced, not an id in a catalogue
+    (wk help images), so what identifies one is its path.
+    'wk sysimage ls' lists every image a workspace here has built, with the
+    path to pass to --from."
     [ -n "$spec" ] || die "usage: wk sysimage write $id --disk <machine>:<device>
     'wk sysimage disks <machine>' lists what is attached where."
 
     image_complete "$id" || die "no such image: $id
-    images:
-$(image_ids | sort | sed 's/^/      /')"
+    Nothing here is addressed by id any more (wk help images). 'wk sysimage ls'
+    lists what the workspaces have built; pass its path to --from."
 
     disk_parse "$spec"
     machine_load "$DISK_MACHINE" || die "unknown machine '$DISK_MACHINE'
@@ -1038,7 +1112,10 @@ would write
   onto      $DISK_DEV attached to $DISK_MACHINE ($(m_ssh "lsblk -dno SIZE,TRAN,MODEL $DISK_DEV" 2>/dev/null | tr -s ' '))
   mounted   ${mounted:-nothing}
   method    zstd stream through the card helper, then read back and compare sha256
-  grow      $([ "$grow" = 1 ] && echo "yes, partition 2 to fill the disk" || echo "no (--no-grow)")
+  grow      $([ "$grow" = 1 ] && echo "yes, partition 2 to fill the disk" || echo "no -- the rest of the card is left for a second system")
+  role      $role$([ "$role" = rescue ] \
+      && printf ' -- the self-return watchdog and the self-disarm stay inert on it' \
+      || printf ' -- it returns itself after %s s unless claimed' "${IMG_WATCHDOG:-?}")
 EOF
         [ "$DISK_DEV" = "${MACH_DEVICE:-}" ] && log "  note      $DISK_MACHINE is configured to boot from this disk (wk boot $DISK_MACHINE)"
         log "dry run -- nothing was written."
@@ -1061,6 +1138,7 @@ EOF
     # which is only whoever holds the reader. Read in a subshell on purpose:
     # machine_load would otherwise overwrite the MACH_* of the machine every
     # remote command in this function is talking to.
+    disk_seed_role "$DISK_DEV" "$role"
     disk_seed_tailnet "$DISK_DEV" "$(_tailnet_name_for "$img_machine")"
 
     [ "$grow" = 1 ] && disk_grow "$DISK_DEV"

@@ -5,9 +5,9 @@
 # payloads (CLAUDE.md, "smallest possible state": "could a read recompute
 # this value, or only re-download/rebuild it?" -- only rebuild).
 #
-#   cache/images/<file>       the distro base, downloaded once, verified by
-#                             the sha256 the spec pins. Re-downloadable, so a
-#                             cache in the honest sense.
+#   cache/images/<file>       a fetched base, downloaded once, verified by the
+#                             sha256 the spec pins. Re-downloadable, so a cache
+#                             in the honest sense.
 #   images/<id>/disk.img      the built image
 #   images/<id>/manifest      what it is, written LAST -- this is the gate
 
@@ -67,7 +67,7 @@ image_build_locations() {
     # the build workspace, which is the workspace's own disk and is reclaimed by
     # removing the workspace.
     printf '%s\n' "$WK_STORE/cache/yocto"
-    # builder: distro, fetch -- downloaded bases, keyed by checksum. An input
+    # builder: fetch -- downloaded bases, keyed by checksum. An input
     # rather than an output, kept deliberately, and listed so that "everywhere a
     # build leaves bytes" is one list rather than a memory.
     printf '%s\n' "$(image_cache_dir)"
@@ -347,11 +347,70 @@ image_root_word() {
 # nothing, or dying, depending on what was installed. The second is that a
 # flock is held by the file descriptor and therefore by every process that
 # inherits it, which is the property that made it wrong for workspaces too.
+# --- images, where the builders left them ------------------------------------
+#
+# The model (`wk help images`): a workspace produces an image, and that is the
+# whole of what an image is. It is not imported, catalogued or given a second
+# name -- the workspace that built it already names it. So "which images are
+# there" is answered by looking, now, at the places builders leave output.
+#
+# Declared per builder rather than guessed, for the same reason
+# image_build_locations is: a glob that is a guess is a glob that misses the
+# newest builder, and what it misses is a multi-gigabyte artifact somebody is
+# looking for.
+#
+# One line per image, tab-separated: builder, workspace, path, bytes, mtime.
+#
+# The path is host-visible even though the build ran in a container: a container
+# workspace mounts /src/WebKit as an overlay whose upper layer is
+# ws/<name>/changes (targets/container.sh), and a freshly built image is always
+# a new file, so it is always in that upper layer. Nothing needs to exec into
+# the container to find it.
+image_workspace_scan() {
+    local ws name f
+
+    [ -d "$WK_STORE/ws" ] || return 0
+
+    for ws in "$WK_STORE/ws"/*; do
+        [ -d "$ws" ] || continue
+        name=$(basename "$ws")
+
+        # builder: yocto -- bitbake writes the wic beside the rootfs tarball, in
+        # the cross-toolchain build tree (yocto_image_dir, image/yocto.sh). The
+        # target directory is globbed rather than derived from the profile, so a
+        # workspace whose profile this checkout no longer defines is still found.
+        for f in "$ws"/changes/WebKitBuild/CrossToolChains/*/build/image/*.wic.xz; do
+            [ -f "$f" ] || continue
+            printf 'yocto\t%s\t%s\t%s\t%s\n' "$name" "$f" \
+                "$(file_bytes "$f")" "$(_scan_mtime "$f")"
+        done
+
+        # builder: buildroot -- genimage assembles the whole card into
+        # output/images, and the profile names which file is the image
+        # (BR_IMAGE). Globbed for the same reason.
+        for f in "$ws"/changes/WebKitBuild/buildroot/*/output/images/*.img; do
+            [ -f "$f" ] || continue
+            printf 'buildroot\t%s\t%s\t%s\t%s\n' "$name" "$f" \
+                "$(file_bytes "$f")" "$(_scan_mtime "$f")"
+        done
+    done
+    return 0
+}
+
+# ISO-8601 UTC, on both platforms: BSD stat takes -f, GNU stat takes -c.
+_scan_mtime() {
+    local e
+    e=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null) || return 0
+    date -u -d "@$e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -r "$e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || printf '%s' "$e"
+}
+
 image_lock() {
     hold_lock image-store -w "${WK_LOCK_WAIT:-300}"
 }
 
-# The base distro image, downloaded once and pinned by sha256.
+# A fetched base image, downloaded once and pinned by sha256.
 #
 # Resumable, because this is 1.3 GB over the workstation's WiFi and an
 # interrupted download that had to start again would make rule 2 expensive

@@ -128,6 +128,12 @@ hosts and machines
                             write an image onto a removable disk attached to a
                             fleet machine (never that machine's own system
                             disk; writing one does not make anything boot it)
+  find [machine]            every device on every segment this machine can
+                            reach, and everything wk knows about each one: the
+                            MAC, which fleet machine it is, what the tailnet
+                            says, and what /etc/wk-image says over ssh. For the
+                            case the tailnet rule leaves open -- a board that is
+                            not on it, or is and is not answering
   boot <machine>            put a machine into bench mode for one boot
                             (--status|--keep|--back|--disarm|--diag|--dry-run)
                             (--system|--address|--status|--stop|--dry-run)
@@ -361,6 +367,11 @@ is_host_only() {
         # its own copy of this refusal, with a comment saying it belonged here
         # -- it does, next to the commands it is the same rule as.
         sysimage|boot) return 0 ;;
+        # Sweeping a segment means being on it. A workspace is on a bridged
+        # container network and can see none of the fleet, so the answer from in
+        # there would be an empty listing rather than a refusal -- which is the
+        # worst shape a probe can have.
+        find) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -430,6 +441,9 @@ is_host_command() {
         # looked in an empty store inside a Linux guest with no route to any
         # of it.
         sysimage|boot) return 0 ;;
+        # The neighbour tables it reads are this machine's, and the ssh hops it
+        # makes start here.
+        find) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -465,6 +479,10 @@ is_readonly_report() {
         # by construction (bridge/bin/wk-bridge-healthcheck says so in its
         # first line, and exits non-zero rather than repairing anything).
         "bridge ls"|"bridge status") return 0 ;;
+        # `wk find` sends packets and changes nothing on anything. It is the
+        # command you reach for when a machine is not answering, so it must
+        # never be the command that starts something to answer.
+        find|"find "*) return 0 ;;
         # `wk remotes --fix` writes: it re-asserts the wiring. Named here so
         # the *bare* form below can be read-only without this one sneaking in.
         "remotes --fix") return 1 ;;

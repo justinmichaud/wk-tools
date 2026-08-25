@@ -547,6 +547,59 @@ def render_text(doc, colour):
             meta(f, "  " + " " * fw + "  ")
         align(_fleet_start)
 
+        # How each machine is made again from nothing.
+        #
+        # Composed by the machine's own boot driver from the fields its conf
+        # declares (b_reprovision), so nothing here is a second copy of a fact
+        # and a lane that changes shape changes this with it. Printed after the
+        # table rather than inside it: it is several lines per machine, and the
+        # table's job is the one-line answer.
+        recipes = [f for f in doc["fleet"] if f.get("reprovision")]
+        if recipes:
+            heading("re-provisioning",
+                    "each machine from nothing -- 'wk help hardware' for why the lanes differ")
+            for f in recipes:
+                out.append("  " + paint(f.get("machine", ""), "dim", colour)
+                           + "  " + paint(f.get("role", ""), "dim", colour))
+                for line in f["reprovision"].split("\n"):
+                    if not line.strip():
+                        continue
+                    # A line that is indented in the driver is a note about the
+                    # command above it, not a command -- so it stays dim and the
+                    # commands stay copyable.
+                    if line.startswith(" "):
+                        out.append("          " + paint(line.strip(), "dim", colour))
+                    else:
+                        out.append("      " + line)
+                out.append("")
+
+            # And the one command each *role* is provisioned by, which is the
+            # question the per-machine recipes above do not answer: those say
+            # how a particular board is rebuilt, and this says which verb to
+            # reach for when the thing in front of you is a kind of thing.
+            #
+            # Derived from what the fleet actually holds -- a role nothing here
+            # plays contributes no line, so this cannot drift into advertising a
+            # lane that was removed.
+            roles = []
+            if any(f.get("role") == "bench-device" for f in doc["fleet"]):
+                roles.append(("a rescue system",
+                              "wk sysimage write <id> --disk <machine>:<device> --rescue"))
+                roles.append(("a bench system",
+                              "wk sysimage write <id> --disk <machine>:<device>"))
+            if doc.get("bridges"):
+                roles.append(("a tailnet bridge", "wk bridge provision <name>"))
+            if any(f.get("role") == "workstation" for f in doc["fleet"]):
+                roles.append(("a workstation", "./setup"))
+            if roles:
+                out.append("  " + paint("by role", "dim", colour)
+                           + "  " + paint("one image serves both board roles; the marker on the "
+                                          "card is the only difference", "dim", colour))
+                lw = max(len(r[0]) for r in roles)
+                for what, cmd in roles:
+                    out.append("      " + paint(what.ljust(lw), "dim", colour) + "   " + cmd)
+                out.append("")
+
     if doc["bridges"]:
         heading("tailnet bridges", "probed: the segment, the role, and its own health check")
         bw = max(len(b.get("name", "")) for b in doc["bridges"])

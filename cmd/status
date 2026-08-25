@@ -1113,7 +1113,7 @@ report_fleet_device() {
 }
 
 _fleet_probe() {
-    local m="$1" role mode media armed rec
+    local m="$1" role mode media armed rec reprov
     (
         set +e
         export WK_SSH_TIMEOUT="${WK_FLEET_TIMEOUT:-4}"
@@ -1159,6 +1159,12 @@ _fleet_probe() {
             armed=""
         fi
         media=$(b_media 2>/dev/null || printf 'unknown')
+        # How this machine is made again from nothing, asked of its driver
+        # rather than kept anywhere: each lane composes its own steps from the
+        # fields the conf already declares (b_reprovision, boot/<driver>.sh).
+        # A driver with none contributes no line, which is the honest answer for
+        # a lane whose recipe nobody has written yet.
+        reprov=$(b_reprovision 2>/dev/null || true)
         rec_start fleet
         rec_set machine "$m"
         rec_set role    "$role"
@@ -1168,6 +1174,7 @@ _fleet_probe() {
         rec_set conf    "boot/machines/$m.conf"
         rec_opt tailnet "$(reach_tailnet "$m")"
         rec_opt direct  "$(reach_without_tailnet "$m")"
+        rec_opt reprovision "$reprov"
         rec_emit
     )
 }

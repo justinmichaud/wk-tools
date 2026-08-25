@@ -1,0 +1,507 @@
+#!/usr/bin/env bash
+#
+# wk find -- every device on every segment this machine can reach, and
+# everything wk knows about each one.
+#
+# The question this answers is the 2am one: a board is not answering to its
+# name, and the name is all there is (CLAUDE.md, "a node is reached by its
+# tailnet name, and how to reach it is not written down"). That rule is right,
+# and it leaves exactly one hole -- a machine that is *not* on the tailnet, or
+# is on it and not answering, has no address anybody may write down and
+# therefore no address at all. The two boards here are precisely that case: the
+# rpi3 answers to an mDNS name when it feels like it, the rpi4 sits on a phone's
+# USB-ethernet segment, and a bench system on either carries no tailscale at
+# all, by design.
+#
+# So this derives the answer instead of storing it, the same way lib/reach.sh
+# does for the tailnet -- by looking, now, from wherever there is to look from.
+#
+# --- the shape ---------------------------------------------------------------
+#
+#   a vantage    a place a sweep can run: this machine, for every subnet it has
+#                an address on, and each bridge phone, for the segment it
+#                routes. A segment nothing here sits on cannot be swept, and
+#                saying so is the useful answer -- the rpi4's cable is
+#                unreachable exactly when its bridge has lost its adapter, and
+#                then no board on it is at fault.
+#
+#   the sweep    nmap, and only nmap. One tool, everywhere, so that a device
+#                found on one segment means the same as a device found on
+#                another -- a second sweeper chosen by what happens to be
+#                installed is the shape CLAUDE.md rules out, and the copy that
+#                runs is the one on the machine nobody tested. A vantage without
+#                it loses its own line and names the remedy; it does not quietly
+#                fall back to something worse.
+#
+#   the answer   the neighbour table, not nmap's verdict. This matters and is
+#                easy to get backwards: unprivileged nmap probes tcp/80 and
+#                tcp/443 and calls a host with both closed `down`, while the
+#                board it just ARPed for is sitting right there. What the sweep
+#                is *for* is generating the traffic that fills the table; what
+#                answers "is something at this address, and what is its
+#                hardware address" is the table itself. That also makes this
+#                indifferent to whether nmap had privilege, which is the
+#                property that lets it run over a BatchMode ssh as an ordinary
+#                user -- and `wk` does not call sudo on a workstation.
+#
+#   heuristics   everything this repo already declares, joined to what was
+#                found: a MAC that is a fleet machine's, a MAC a bridge pins a
+#                lease for, an OUI that is a Raspberry Pi, an address the
+#                tailnet knows a peer at. None of it is stored here; all of it
+#                is read from the confs that own it.
+#
+#   ssh          and then the device is asked. A board that answers ssh has
+#                /etc/wk-image on it, which names the image it booted, its
+#                builder and its role -- so "there is something at 10.99.1.10"
+#                becomes "that is rpi4 running a rescue built on the 22nd", and
+#                that is the difference between a scan and an answer.
+#
+# Read-only from end to end. It changes nothing, on any machine, and every probe
+# is bounded -- a scan that overruns loses its own line rather than the listing.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/reach.sh"
+. "$WK_ROOT/image/profiles.sh"
+. "$WK_ROOT/boot/machines.sh"
+
+usage() {
+    cat >&2 <<'EOF'
+usage: wk find [<machine>] [options]
+
+  (no argument)      every device on every segment this machine can reach
+  <machine>          only the device that is that fleet machine, and say which
+                     segment it was found on
+
+  --segment <cidr>   sweep this instead of the ones that are derived
+  --vantage <name>   sweep from this machine only (a fleet name, or 'local')
+  --no-ssh           do not ask anything that answers; MACs and names only
+  --timeout <s>      per-sweep ceiling (default 60)
+
+What it is for: a machine that is not on the tailnet, or is on it and not
+answering, has no address anybody may write down -- so this looks instead of
+remembering. Nothing is changed and nothing is stored.
+EOF
+    exit 2
+}
+
+WANT=""; ONE_SEGMENT=""; ONE_VANTAGE=""; NO_SSH=""; SWEEP_TIMEOUT=60
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --segment) ONE_SEGMENT="${2:-}"; [ -n "$ONE_SEGMENT" ] || die "--segment needs a CIDR"; shift 2 ;;
+        --vantage) ONE_VANTAGE="${2:-}"; [ -n "$ONE_VANTAGE" ] || die "--vantage needs a machine, or 'local'"; shift 2 ;;
+        --no-ssh)  NO_SSH=1; shift ;;
+        --timeout) SWEEP_TIMEOUT="${2:-}"; shift 2 ;;
+        -h|--help) usage ;;
+        -*) die "unknown option: $1" ;;
+        *)  [ -z "$WANT" ] || die "unexpected argument: $1"; WANT="$1"; shift ;;
+    esac
+done
+
+case "$SWEEP_TIMEOUT" in ''|*[!0-9]*) die "--timeout takes seconds" ;; esac
+
+# --- what this repo already declares ----------------------------------------
+#
+# Read, never sourced. A conf is a shell file and a report has no business
+# executing one to print a line of it -- the same rule reach_bridged keeps.
+
+# <mac> <machine>, for every fleet machine that declares one.
+fleet_macs() {
+    local f m mac
+    for f in "$WK_ROOT"/boot/machines/*.conf; do
+        [ -f "$f" ] || continue
+        m=$(basename "$f" .conf)
+        mac=$(sed -n 's/^MACH_MAC=//p' "$f" | tail -1 | tr -d '"'"'"' ' | tr 'A-Z' 'a-z')
+        [ -n "$mac" ] && printf '%s %s\n' "$mac" "$m"
+    done
+}
+
+# <mac> <ip> <name> <bridge>, for every lease a bridge pins.
+bridge_leases() {
+    local f b
+    for f in "$WK_ROOT"/bridge/hosts/*.conf; do
+        [ -f "$f" ] || continue
+        b=$(basename "$f" .conf)
+        sed -n '/^BR_LEASES=/,/"[[:space:]]*$/p' "$f" 2>/dev/null \
+            | tr -d '"' | tr ' \t' '\n\n' \
+            | awk -F, -v b="$b" 'NF>=3 { print tolower($1), $2, $3, b }'
+    done
+}
+
+# The OUI, for the vendors that matter here. Not a database: three prefixes the
+# Raspberry Pi Foundation owns and the one the phones' USB adapters synthesise,
+# because "what kind of thing is this" is the only question a vendor answers
+# and a full IEEE table would be a megabyte of fact nobody reads.
+oui_vendor() {
+    case "$(printf '%s' "$1" | tr 'A-Z' 'a-z' | cut -c1-8)" in
+        b8:27:eb)             echo "Raspberry Pi (pre-4)" ;;
+        d8:3a:dd|dc:a6:32|e4:5f:01|2c:cf:67)
+                              echo "Raspberry Pi" ;;
+        00:00:00)             echo "synthesised (USB adapter, no EEPROM)" ;;
+        *)                    echo "" ;;
+    esac
+}
+
+# --- vantages ----------------------------------------------------------------
+#
+# "<name> <cidr>" per line. `local` is this machine, and it is first because a
+# segment this machine sits on needs no hop and no other machine to be up.
+#
+# tailscale0 is deliberately not swept. It is a /32 on a mesh, not a broadcast
+# domain -- there is no neighbour table to fill and nothing to ARP for, and the
+# tailnet already answers for itself (reach_tailnet).
+local_segments() {
+    ip -4 -o addr show 2>/dev/null | awk '
+        $2 == "lo" || $2 == "tailscale0" { next }
+        {
+            split($4, a, "/")
+            split(a[1], o, ".")
+            print "local", o[1] "." o[2] "." o[3] ".0/" a[2], $2
+        }'
+}
+
+# Every bridge that declares a segment, reached at its own ssh name. A bridge
+# that is down contributes a vantage that cannot be swept, which is the answer
+# rather than an omission: the boards behind it are unreachable *because* of
+# that, and a listing that silently dropped the segment would report them as
+# absent.
+bridge_segments() {
+    local f b seg ssh
+    for f in "$WK_ROOT"/bridge/hosts/*.conf; do
+        [ -f "$f" ] || continue
+        b=$(basename "$f" .conf)
+        seg=$(sed -n 's/^BR_SEGMENT=//p' "$f" | tail -1 | tr -d '"'"'"' ')
+        ssh=$(sed -n 's/^BR_SSH=//p'     "$f" | tail -1 | tr -d '"'"'"' ')
+        [ -n "$seg" ] || continue
+        printf '%s %s %s\n' "${ssh:-$b}" "$seg" "$b"
+    done
+}
+
+vantages() {
+    if [ -n "$ONE_SEGMENT" ]; then
+        printf '%s %s %s\n' "${ONE_VANTAGE:-local}" "$ONE_SEGMENT" "given"
+        return 0
+    fi
+    { local_segments; bridge_segments; } \
+        | while read -r name cidr via; do
+              [ -z "$ONE_VANTAGE" ] || [ "$name" = "$ONE_VANTAGE" ] || continue
+              printf '%s %s %s\n' "$name" "$cidr" "$via"
+          done
+}
+
+# --- the sweep ---------------------------------------------------------------
+#
+# Run on the vantage, whichever machine that is, and the same command in both
+# cases -- `local` runs it here rather than taking a second path through ssh to
+# itself.
+#
+# `-sn` is a host sweep with no port scan; `-n` keeps DNS out of it, because a
+# resolver that is slow is not a property of the segment and a name here would
+# be a second answer to a question the confs already answer. --host-timeout
+# bounds each address so one black-holing address cannot eat the ceiling.
+on_vantage() { # <vantage> <command...>
+    if [ "$1" = local ]; then
+        shift
+        bash -c "$*"
+    else
+        local v="$1"; shift
+        ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$v" "$*"
+    fi
+}
+
+# Does this vantage have the one sweeper there is?
+#
+# Refused rather than worked around. A ping loop written here would find fewer
+# devices, on the segment that matters most, on the day something is already
+# wrong -- and it would be a second implementation of the one behaviour this
+# command has (CLAUDE.md, "one path, not two").
+vantage_can_sweep() { # <vantage>
+    on_vantage "$1" 'command -v nmap >/dev/null 2>&1 || PATH=$PATH:/usr/sbin:/sbin command -v nmap >/dev/null 2>&1' \
+        >/dev/null 2>&1
+}
+
+# "<ip> <mac> <state>" for every address on <cidr> that the vantage's kernel has
+# a hardware address for, after the sweep has given it a reason to.
+#
+# FAILED and INCOMPLETE are dropped: those are entries for addresses that
+# answered nothing when last asked, which on a segment with DHCP is precisely a
+# stale lease. Keeping them would report the rpi3 at both of the two addresses
+# it was once seen holding, and neither would be where it is.
+sweep() { # <vantage> <cidr>
+    local v="$1" cidr="$2"
+    on_vantage "$v" "PATH=\$PATH:/usr/sbin:/sbin
+        nmap -sn -n --host-timeout 5s $(sh_quote "$cidr") >/dev/null 2>&1 || true
+        ip neigh show 2>/dev/null" \
+      | awk -v net="${cidr%/*}" -v bits="${cidr#*/}" '
+            # Only addresses inside the segment that was swept. Without this the
+            # table answers for every segment the vantage is on at once, and a
+            # device on one is reported as being on all of them.
+            # Integer division rather than a bitmask: and() is a gawk
+            # extension, and this command runs on a macOS workstation too,
+            # where awk is the BSD one and has no such function. Dividing both
+            # addresses by the size of the host part compares exactly the
+            # network parts and nothing else.
+            function n(a,   p, v, i) { split(a, p, "."); v = 0
+                for (i = 1; i <= 4; i++) v = v * 256 + p[i]
+                return v }
+            function net_of(a) { return int(n(a) / hosts) }
+            BEGIN { hosts = 2 ^ (32 - bits); base = net_of(net) }
+            /^[0-9]+\./ && !/FAILED|INCOMPLETE/ {
+                ip = $1; mac = ""; state = "?"
+                for (i = 2; i <= NF; i++) {
+                    if ($i == "lladdr") mac = tolower($(i+1))
+                    else if ($i ~ /^(REACHABLE|STALE|DELAY|PROBE|PERMANENT|NOARP)$/) state = $i
+                }
+                if (mac == "") next
+                if (net_of(ip) != base) next
+                print ip, mac, state
+            }'
+}
+
+# --- asking a device what it is ----------------------------------------------
+#
+# Two destinations, tried in order, and the order is the whole subtlety.
+#
+# A fleet machine in host mode is reached over Tailscale SSH, which
+# authenticates through the tailnet and has no authorized key at all -- so the
+# same machine that answers instantly to `ssh rpi5` refuses its own LAN address
+# with "Permission denied (publickey)". A *bench* system on the same board is
+# the exact opposite: it carries no tailscale, so its name reaches nothing and
+# the address plus the driving key is the only way in.
+#
+# One command has to cover both, because which of the two a board is running is
+# the thing being found out. So: the declared name first when there is one,
+# then the address. Not a fallback in the sense CLAUDE.md rules out -- these are
+# two different machines that happen to share a socket, not two ways to do one
+# thing, and neither is the untested path.
+#
+# The host key is deliberately not checked on the address. These are boards that
+# boot a different image on demand and each one brings its own key, at the same
+# address -- the same conclusion boot/machines.sh reached for i_ssh, and pinning
+# one here could only produce the man-in-the-middle warning it looks exactly
+# like.
+_probe_cmd='cat /etc/wk-image 2>/dev/null
+    echo "uname=$(uname -srm 2>/dev/null)"
+    echo "host=$(hostname 2>/dev/null)"
+    command -v tailscale >/dev/null 2>&1 && echo "tailscale=yes" || echo "tailscale=no"
+    [ -e /etc/wk/rescue ] && echo "marker=rescue" || echo "marker=none"'
+
+probe_ssh() { # <ip> [declared-ssh-name]
+    [ -z "$NO_SSH" ] || return 0
+    local ip="$1" name="${2:-}" out=""
+
+    if [ -n "$name" ]; then
+        out=$(capped 8 ssh -o BatchMode=yes -o ConnectTimeout=4 -o LogLevel=ERROR \
+                  "$name" "$_probe_cmd" 2>/dev/null) || out=""
+        [ -z "$out" ] || { printf '%s\n' "$out"; return 0; }
+    fi
+
+    capped 8 ssh -o BatchMode=yes -o ConnectTimeout=4 \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        "$(id -un)@$ip" "$_probe_cmd" 2>/dev/null || true
+}
+
+# The ssh name a fleet machine declares, if this device is one.
+declared_ssh() { # <machine>
+    [ -n "${1:-}" ] || return 0
+    ( machine_load "$1" >/dev/null 2>&1 && printf '%s' "${MACH_SSH:-}" ) || true
+}
+
+field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
+
+# --- report ------------------------------------------------------------------
+
+# The inner loop over addresses is itself a subshell (it reads from a pipe on
+# purpose -- the rows are sorted before they are printed), so what it found is
+# recorded in a file rather than a variable. One line per device.
+HITS=$(mktemp)
+_hits_cleanup() { rm -f "$HITS"; }
+wk_atexit _hits_cleanup
+
+FLEET=$(fleet_macs)
+LEASES=$(bridge_leases)
+PEERS=$(wk_tailscale_peers)
+
+# "<ip> <name>" for the nodes that declare no MAC anywhere.
+#
+# A bridge phone is the case, and the omission is deliberate rather than an
+# oversight: its downstream adapter belongs to whichever dock is plugged in, and
+# a stale MAC in a conf is a bridge that comes up with no segment at all
+# (bridge/hosts/*.conf says so). So it cannot be recognised the way a board is.
+#
+# What it can be recognised by is the address it is answering at right now,
+# computed the same way everything else here computes one -- by looking
+# (reach_without_tailnet, lib/reach.sh) rather than by reading it off a list.
+# Nothing is stored: this is rebuilt every run and is empty when the node is
+# down, which is the correct answer then.
+declared_addrs() {
+    local f b addr
+    for f in "$WK_ROOT"/bridge/hosts/*.conf; do
+        [ -f "$f" ] || continue
+        b=$(basename "$f" .conf)
+        addr=$(reach_without_tailnet "$b" 2>/dev/null | awk '{print $1}')
+        case "$addr" in
+            [0-9]*.[0-9]*) printf '%s %s\n' "$addr" "$b" ;;
+        esac
+    done
+}
+ADDRS=$(declared_addrs)
+
+# Resolve a wanted machine to its MAC up front, so that "not found" can say
+# what was being looked for rather than merely printing nothing.
+WANT_MAC=""
+if [ -n "$WANT" ]; then
+    WANT_MAC=$(printf '%s\n' "$FLEET" | awk -v m="$WANT" '$2 == m { print $1; exit }')
+    [ -n "$WANT_MAC" ] || die "'$WANT' is not a fleet machine with a declared MAC.
+    A machine is found here by its hardware address, which is the one fact a
+    board keeps across every image it boots -- so a machine that declares none
+    cannot be looked for.
+    machines:
+$(machine_list | sed 's/^/      /')"
+fi
+
+# A here-string rather than a pipe: `vantages | while` puts the loop in a
+# subshell, where every count it keeps is lost at the closing `done` -- and the
+# summary is the half that answers "was the thing I asked for anywhere".
+SEEN=0; SWEPT=0; BLIND=0
+while read -r vname cidr via; do
+    [ -n "$vname" ] || continue
+    label="$cidr"
+    case "$via" in
+        given) where="as asked" ;;
+        *)     [ "$vname" = local ] && where="on $via, from this machine" \
+                                   || where="through $via" ;;
+    esac
+
+    if ! vantage_can_sweep "$vname"; then
+        warn "$label ($where): cannot be swept"
+        if [ "$vname" = local ]; then
+            log  "  nmap is not installed here, and there is deliberately no second sweeper."
+            log  "  './setup' installs it."
+        else
+            log  "  $vname is unreachable, or has no nmap. Every device on this segment is"
+            log  "  reached through it, so none of them is at fault for being absent here."
+            log  "  wk bridge status $via"
+        fi
+        BLIND=$((BLIND + 1))
+        continue
+    fi
+
+    rows=$(capped "$SWEEP_TIMEOUT" sweep "$vname" "$cidr" 2>/dev/null || true)
+    SWEPT=$((SWEPT + 1))
+
+    if [ -z "$rows" ]; then
+        info "$label ($where): nothing answered"
+        continue
+    fi
+
+    info "$label ($where)"
+    printf '%s\n' "$rows" | sort -t. -k4 -n | while read -r ip mac state; do
+        [ -z "$WANT_MAC" ] || [ "$mac" = "$WANT_MAC" ] || continue
+
+        machine=$(printf '%s\n' "$FLEET"  | awk -v m="$mac" '$1 == m { print $2; exit }')
+        lease=$(printf '%s\n' "$LEASES"   | awk -v m="$mac" '$1 == m { print $3 " (" $4 " pins " $2 ")"; exit }')
+        leasename=$(printf '%s\n' "$LEASES" | awk -v m="$mac" '$1 == m { print $3; exit }')
+        bridgename=$(printf '%s\n' "$ADDRS" | awk -v i="$ip" '$1 == i { print $2; exit }')
+        vendor=$(oui_vendor "$mac")
+
+        # Asked before the tailnet lookup, because the name it answers with is
+        # the best key there is. A bridge phone declares no MAC anywhere on
+        # purpose -- the adapter is a property of the dock, and a stale MAC in a
+        # conf is a bridge with no segment -- so the only thing that ties the
+        # address on the wire to the peer on the mesh is what the machine calls
+        # itself.
+        info_out=$(probe_ssh "$ip" "${bridgename:-$(declared_ssh "$machine")}")
+        hn=$(field "$info_out" host)
+
+        # Joined on the *name*, never on the address. A peer's tailnet address
+        # is a 100.64/10 one on a mesh and this is a LAN address on a wire; the
+        # two are never equal, so matching them would report every machine here
+        # as absent from a tailnet it is sitting on. The name is what the two
+        # namespaces share -- which is CLAUDE.md's rule arrived at from the
+        # other side.
+        peer=""
+        for _n in $machine $leasename $bridgename $hn; do
+            peer=$(printf '%s\n' "$PEERS" | awk -F'\t' -v n="$_n" '$1 == n { print $1 " at " $2 " (" $3 ")"; exit }')
+            [ -z "$peer" ] || break
+        done
+
+        # The identifying line: what it is, if this repo knows, and otherwise
+        # what its hardware says it is.
+        printf '  %-15s %-17s %-9s %s\n' "$ip" "$mac" "$state" \
+            "${machine:-${bridgename:-${hn:-$vendor}}}"
+
+        [ -z "$machine" ] || printf '    %-16s %s\n' "fleet machine" \
+            "$machine -- boot/machines/$machine.conf${vendor:+, $vendor}"
+        [ -n "$machine" ] || [ -z "$vendor" ] || printf '    %-16s %s\n' "hardware" "$vendor"
+        [ -z "$lease" ]   || printf '    %-16s %s\n' "reserved as" "$lease"
+        [ -z "$bridgename" ] || printf '    %-16s %s\n' "tailnet bridge" \
+            "$bridgename -- bridge/hosts/$bridgename.conf"
+
+        # Only claimed about a device this repo can put a name to. "Not on the
+        # tailnet" is a real finding about one of ours and a meaningless one
+        # about a neighbour's printer -- and a listing that says it of every
+        # address on the house LAN teaches the reader to skip the line.
+        if [ -n "$machine" ] || [ -n "$leasename" ] || [ -n "$bridgename" ] || [ -n "$hn" ]; then
+            if [ -n "$peer" ]; then
+                printf '    %-16s %s\n' "on the tailnet" "as $peer"
+            else
+                printf '    %-16s %s\n' "on the tailnet" \
+                    "not as any name this repo knows -- this address is how it is reached"
+            fi
+        fi
+
+        if [ -n "$info_out" ]; then
+            id=$(field "$info_out" id); role=$(field "$info_out" role)
+            prof=$(field "$info_out" profile); bld=$(field "$info_out" builder)
+            ts=$(field "$info_out" tailscale); mk=$(field "$info_out" marker)
+            un=$(field "$info_out" uname)
+            [ -z "$hn" ] || printf '    %-16s %s\n' "answers ssh as" "$hn${un:+  ($un)}"
+            if [ -n "$id" ]; then
+                printf '    %-16s %s\n' "running" "$id"
+                printf '    %-16s %s\n' "  profile" "${prof:-unrecorded}${bld:+, built by $bld}"
+                printf '    %-16s %s\n' "  role" \
+                    "${role:-unrecorded}$([ "$mk" = rescue ] && printf ' (the card carries the rescue marker)')"
+            else
+                printf '    %-16s %s\n' "running" \
+                    "no /etc/wk-image -- not a system wk wrote"
+            fi
+            [ "$ts" = yes ] || printf '    %-16s %s\n' "tailscale" \
+                "not installed on it, so its name cannot be how it is reached"
+        elif [ -z "$NO_SSH" ] && { [ -n "$machine" ] || [ -n "$leasename" ] || [ -n "$bridgename" ]; }; then
+            # Said only about a machine that should have answered. Every other
+            # address on the segment declining an ssh connection is not news.
+            printf '    %-16s %s\n' "ssh" "no answer as $(id -un)"
+        fi
+        echo "$ip" >> "$HITS"
+    done
+done <<VANTAGES
+$(vantages)
+VANTAGES
+
+SEEN=$(wc -l < "$HITS" | tr -d ' ')
+
+# The summary, and its whole job is to make an empty listing mean something.
+#
+# "Nothing was found" and "there was nowhere to look" are different answers, and
+# the second one is the one that names a remedy. A board absent from a segment
+# nobody could sweep is not evidence about the board.
+log ""
+if [ -n "$WANT" ]; then
+    if [ "$SEEN" -gt 0 ]; then
+        info "$WANT is up, at the address above ($WANT_MAC)"
+    else
+        warn "$WANT ($WANT_MAC) is on none of the $SWEPT segment$([ "$SWEPT" = 1 ] || printf s) that could be swept"
+        log  "  Either it is powered off, or it is on a segment nothing here can see."
+        [ "$BLIND" -eq 0 ] || log "  $BLIND segment$([ "$BLIND" = 1 ] && printf ' was' || printf 's were') unsweepable -- see above; the board may be on one of those."
+        log  "  A board is found by its hardware address, so this is a fact about the"
+        log  "  wire and not about a name: nothing here is stale."
+    fi
+else
+    info "$SEEN device$([ "$SEEN" = 1 ] || printf s) on $SWEPT segment$([ "$SWEPT" = 1 ] || printf s)$(
+        [ "$BLIND" -eq 0 ] || printf ', %s unsweepable' "$BLIND")"
+fi
+
+exit 0

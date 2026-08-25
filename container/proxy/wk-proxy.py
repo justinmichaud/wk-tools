@@ -179,6 +179,25 @@ ALLOWED_HOSTS = {
     "kernel.org": (80, 443),           # mirrors. is one of poky's default PREMIRRORS
     "videolan.org": (80, 443),         # code. -- dav1d
     "metacpan.org": (80, 443),         # cpan. -- Archive-Zip
+    # hunspell/hyphen, which meta-webkit fetches at WebKit 2.52 and did not at
+    # 2.48 -- so this appeared the first time a 2.52 image was built.
+    #
+    # A suffix, where every other entry that could be a hostname is one, and it
+    # is forced rather than chosen: `downloads.sourceforge.net` answers a
+    # download with a 302 to a per-request mirror subdomain
+    # (`gigenet.dl.sourceforge.net` on the run that produced this line), so
+    # allowing only the name in the recipe allows the redirect and refuses the
+    # bytes. 443 alone -- the recipe's URL is https, and nothing here needs the
+    # port-80 argument the yocto mirror entries make.
+    #
+    # For the sandbox audit (docs/HANDOFF-sandboxing.md): this is a widening,
+    # and it is the same kind as the five entries above it -- a host a build
+    # fetches declared sources from, reached only through the proxy, with
+    # BLOCKED_NETS unchanged so the name cannot resolve onto the LAN or the
+    # tailnet. No allowed mirror carries this tarball: sources.openembedded.org,
+    # downloads.yoctoproject.org/mirror/sources and mirrors.kernel.org were all
+    # checked and answer 404 or nothing.
+    "sourceforge.net": (443,),         # downloads. + its dl. mirrors -- hyphen
     # github.com and githubusercontent.com are already allowed above, and carry
     # meta-openembedded, meta-webkit, meta-clang, meta-browser and the
     # Raspberry Pi firmware and kernel.

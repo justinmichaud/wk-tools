@@ -8,8 +8,13 @@ HOMEPAGE = "https://tailscale.com"
 # contain one -- so the checksum is over a file this layer ships, which is a
 # thing that can actually be verified, rather than over a copy of the common
 # BSD-3-Clause text that only looks like the same statement.
+#
+# Addressed through ${WORKDIR} and not as a bare `file://LICENSE`, because a
+# LIC_FILES_CHKSUM path is resolved relative to ${S} -- and ${S} here is the
+# unpacked release tarball, which is exactly the thing that has no LICENSE in
+# it. A file this layer ships lands in ${WORKDIR}, one level up.
 LICENSE = "BSD-3-Clause"
-LIC_FILES_CHKSUM = "file://LICENSE;md5=cadeae10a8856ddfdb129866b75b33e3"
+LIC_FILES_CHKSUM = "file://${WORKDIR}/LICENSE;md5=cadeae10a8856ddfdb129866b75b33e3"
 
 require ${THISDIR}/tailscale-release.inc
 PV = "${TS_VERSION}"

@@ -76,3 +76,19 @@ b_media() {
         "$MACH_DEVICE" "${id:-no wk system (wk sysimage write puts one there)}" \
         "${order:+ (eeprom $order)}"
 }
+
+# How this machine's bench lane is made from nothing.
+#
+# Only the stick. The NVMe workstation install is not wk's to write and is never
+# touched (`wk help hardware`), so there is no rescue to make here -- the
+# workstation *is* the fallback, and it is the one medium in the fleet this
+# command must never name.
+b_reprovision() {
+    cat <<REPROV
+wk sysimage build $MACH_PROFILE
+    in a workspace; hours
+wk sysimage write <id> --disk $MACH_NAME:$MACH_DEVICE
+wk boot $MACH_NAME
+    one shot; it reverts by itself
+REPROV
+}

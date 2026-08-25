@@ -42,3 +42,26 @@ b_evidence() {
 b_media() {
     printf 'SD card %s holds both systems by design (wk help hardware); card swaps hands-on until stage-2 arming lands' "$MACH_DEVICE"
 }
+
+# How this board is made from nothing, derived rather than written down.
+#
+# Every line is composed from what this machine's conf already declares -- its
+# profile, its device, its driver -- so there is no second copy to go stale when
+# one of them changes. `wk help hardware` has the reasoning for the arrangement
+# and it is not repeated here.
+#
+# One medium, so the two systems share it and the rescue is written without
+# growing: what is left of the card is where the bench system goes. The first
+# write is hands-on because the card has to be carried to the board; every write
+# after it is not.
+b_reprovision() {
+    cat <<REPROV
+wk sysimage build $MACH_PROFILE
+    in a workspace; hours
+wk sysimage write <id> --disk <reader>:$MACH_DEVICE --rescue
+    no --grow: the rest of the card is where the bench system goes
+    then carry the card to $MACH_NAME and power it on
+wk sysimage write <id> --disk <reader>:$MACH_DEVICE
+    the bench system, into the second slot
+REPROV
+}

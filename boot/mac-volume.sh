@@ -370,3 +370,21 @@ b_media() {
         printf "bench volume '%s' MISSING -- docs/HANDOFF-mac-perf-mode.md creates it" "$MACH_VOLUME"
     fi
 }
+
+# How this Mac's benchmark install is made from nothing.
+#
+# No image and no card: an APFS volume in its own container, made and populated
+# on the Mac itself. And the last step cannot be automated at all -- Apple
+# Silicon boot volume selection goes through a LocalPolicy in the machine's own
+# secure storage, so it is a person holding the power button, every time
+# (docs/HANDOFF-boot.md).
+b_reprovision() {
+    cat <<REPROV
+wk bench mac-volume --create
+    a second APFS volume in its own container, on the Mac
+wk bench mac-volume --install
+wk bench mac-volume --provision
+hold the power button and pick the volume
+    hands-on, always: firmware owns this choice, not the OS
+REPROV
+}

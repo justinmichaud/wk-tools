@@ -290,11 +290,12 @@ disk_install_fleet() { # <device> <marker> <ssh public key>
 #             down somewhere, which is the whole thing the rule forbids.
 #
 # Only for an image that asked for it, and the card is asked rather than
-# guessed. A card with no wk-tailnet-join is a bench system (image/profiles.sh:
-# "the image has no tailscale and never will"), a bridge image or a rescue, and
-# for one of those this would resolve the fleet's auth key, send it to whichever
-# machine holds the reader and write it to a file there -- a credential in one
-# more place, for a disk that has nothing to spend it.
+# guessed. Every image this repo builds carries the join, so the answer is
+# normally yes -- but an image built with the tailnet layer off (--no-tailnet),
+# or one somebody else made, has none. For one of those this would resolve the
+# fleet's auth key, send it to whichever machine holds the reader and write it
+# to a file there -- a credential in one more place, for a disk that has nothing
+# to spend it.
 disk_seed_tailnet() { # <device> <tailnet hostname>
     local dev="$1" name="$2" keyfile joins tag="${WK_TAILNET_TAG:-tag:wk}"
 
@@ -338,6 +339,47 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
         || die "could not seed the tailnet identity onto $dev.
     The image is written; it would boot with no tailnet identity and be
     reachable only over whatever LAN it lands on."
+}
+
+# Which role the system on this card plays, stamped onto the card itself.
+#
+# The role is the *only* difference between a rescue system and the bench system
+# beside it: the same distribution, built once, written twice. So it cannot be a
+# property of the image -- one artifact serves both -- and it is not a record
+# kept on the workstation either, because the question "is this a rescue" is
+# asked by the board, on a boot where nothing here is reachable.
+#
+# So it lives on the disk, as one file. Every image carries the units that hand
+# a machine back, each one `ConditionPathExists=!/etc/wk/rescue` (cmd/sysimage,
+# install_units), and this is what creates or removes that path. A bench card is
+# a card with the marker absent rather than one with a second flag saying so --
+# an absence cannot disagree with the units that read it.
+#
+# `wk sysimage write` calls this on every write, for both roles, so a card
+# rewritten from rescue to bench loses the marker rather than keeping it. That
+# is the crash-only property applied to a field: the final state is declared,
+# not diffed.
+disk_seed_role() { # <device> <bench|rescue>
+    local dev="$1" role="$2"
+
+    case "$role" in
+        bench|rescue) ;;
+        *) die "internal: '$role' is not a role" ;;
+    esac
+
+    if [ "$role" = rescue ]; then
+        info "marking $dev a rescue system -- no self-return watchdog, no self-disarm"
+        log  "  it is what a board falls back to, so there is nothing to hand it back to"
+    else
+        debug "marking $dev a bench system (the rescue marker is removed if it was there)"
+    fi
+
+    card_priv role "$dev" "$role" >/dev/null \
+        || die "could not set the role on $dev.
+    The image is written, and the role decides whether this system reboots
+    itself every few minutes. Refusing to leave that unknown: a rescue that
+    carries a live self-return watchdog reboots the helper in the middle of
+    whatever card it is writing."
 }
 
 # Grow the last partition to fill the disk.

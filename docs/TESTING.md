@@ -1214,6 +1214,82 @@ reached through a ProxyJump), driven from the macOS host.
 - [ ] mDNS is the only lookup here that goes on the wire, and it is bounded: a
       `.local` name nothing answers for must cost 2s, not the resolver's default
 
+### Finding a machine that is not answering to its name — `wk find`
+- [V] every device on every segment this machine can reach, and the vantages are
+      derived rather than listed: this machine for each subnet it holds an
+      address on (`ip -4 -o addr`, minus `lo` and `tailscale0`), and each bridge
+      for the segment its conf declares (`BR_SEGMENT`). Measured from moose:
+      `192.168.1.0/24` on `wlo1` and `192.168.122.0/24` on `virbr0`, plus
+      `10.99.1.0/24` through tailnet-bridge-generic
+- [V] the answer is the **neighbour table**, not nmap's verdict. Unprivileged
+      nmap probes tcp/80 and tcp/443 and calls a host with both closed `down`
+      while the board it just ARPed for is sitting there; the sweep exists to
+      generate the traffic that fills the table. That is also what makes this
+      indifferent to whether nmap had privilege, which is what lets it run as an
+      ordinary user — `wk` does not call sudo on a workstation
+- [V] `FAILED` and `INCOMPLETE` entries are dropped: on a segment with DHCP those
+      are stale leases, and the rpi3 has been observed holding two addresses at
+      once on one interface. Keeping them would report a board at an address it
+      is not at
+- [V] rows are filtered to the segment that was swept. Without that the table
+      answers for every segment the vantage is on at once, and one device is
+      reported as being on all of them. Measured: with the filter, `virbr0`
+      correctly reports nothing rather than repeating the WiFi segment
+- [V] the CIDR match is integer division, not `and()` — that is a gawk extension
+      and this command runs from a macOS workstation too, where awk is the BSD
+      one and has no such function
+- [V] one sweeper, everywhere. A vantage without nmap **refuses and names the
+      remedy** rather than falling back to a ping loop: a fallback chosen by what
+      happens to be installed is the path that runs on the machine nobody tested,
+      on the day something is already wrong (CLAUDE.md, "one path, not two").
+      Measured: tailnet-bridge-generic has no nmap, and the line says every device
+      on that segment is reached through it so none of them is at fault
+- [V] nmap is declared, not assumed: `host/linux/apt.txt` for the workstation and
+      `PMO_PACKAGES` for the bridge image, which is the only machine that can see
+      the rpi4's cable
+- [V] the tailnet cross-reference joins on the **name**, never the address. A
+      peer's address is a 100.64/10 one on a mesh and a found address is on a
+      wire; matching them reports every machine as absent from a tailnet it is
+      sitting on. Measured: rpi5 at `192.168.1.165` shown `as rpi5 at
+      100.124.124.108 (up)`
+- [V] the ssh probe tries the declared name **before** the address. A fleet
+      machine in host mode is reached over Tailscale SSH, which has no authorized
+      key at all, so the same machine that answers `ssh rpi5` instantly refuses
+      its own LAN address with `Permission denied (publickey)`; a bench system on
+      the same board is the exact opposite. Not two ways to do one thing — two
+      different systems that share a socket
+- [V] "not on the tailnet" is claimed only about a device this repo can name. It
+      is a real finding about one of ours and a meaningless one about a
+      neighbour's printer, and a listing that says it of every address on the
+      house LAN teaches the reader to skip the line
+- [V] the summary distinguishes "nothing was found" from "there was nowhere to
+      look", and only the second names a remedy: a board absent from a segment
+      nobody could sweep is not evidence about the board
+- [V] read-only from end to end, and never forwarded into a workspace — a
+      sandbox is on a bridged container network and can see none of the fleet, so
+      the answer from in there would be an empty listing rather than a refusal
+- [ ] `wk find <machine>` against a board that is actually up. Both boards were
+      powered off when this was written, which is what the command correctly
+      reported
+
+### Re-provisioning is derived, not written down
+- [V] `wk status` ends with how each fleet machine is made again from nothing,
+      composed by that machine's own boot driver from the fields its conf already
+      declares (`b_reprovision`, `boot/<driver>.sh`) — so there is no second copy
+      to go stale, and the prose that used to sit in `boot/machines/rpi3.conf`
+      and `rpi4.conf` is gone rather than duplicated
+- [V] a driver with no `b_reprovision` contributes no line, which is the honest
+      answer for a lane whose recipe nobody has written. All five machines have
+      one: benchvm, mbp, rpi3, rpi4, rpi5
+- [V] and one sample per **role** — a rescue, a bench system, a bridge, a
+      workstation — derived from what the fleet actually holds, so it cannot
+      drift into advertising a lane that was removed
+- [V] `wk sysimage ls` names where each image lives and the store's own path,
+      including when the store is empty. An id is not a path and there is
+      deliberately no rule for turning one into the other from outside
+      `lib/image.sh`, so a reader who wanted to hash or copy an image had to ask
+      and was not told
+
 ### The bridges are probed, not just declared
 - [V] each bridge is asked, in parallel and under a ceiling of its own: is it
       reachable, does it carry the role, what does its own health check say, and
@@ -3334,9 +3410,10 @@ upstream in six layers".
       . `joins <device>` is a read-only helper verb that reports
       whether the written system carries `wk-tailnet-join`; without it the key
       would be read, sent to whichever machine holds the reader and written to a
-      file there on every write -- including the bench images, which carry no
-      tailscale and never will. Folding it into `tailnet` is not possible: that
-      verb cannot look until the key is already on its stdin.
+      file there on every write -- including for an image built with the tailnet
+      layer off, or one somebody else made, which has nothing to spend it.
+      Folding it into `tailnet` is not possible: that verb cannot look until the
+      key is already on its stdin.
 - [ ] the fleet and tailnet edits are **read back before the card is
       unmounted**, on the far side, since the only end that can see
       the card is the end holding the privilege: a non-empty `/etc/wk-image`, an
@@ -3396,6 +3473,23 @@ upstream in six layers".
       `cmd/disk`, `cmd/selftest`. `image/fetch.sh` is the exception and stays: a
       downloaded distro base keyed by its checksum is a re-fetchable input, not
       a built output.
+- [V] `wk sysimage ls` is store-free: it scans the places each builder leaves
+      output (`image_workspace_scan`, lib/image.sh) and reports the workspace,
+      the machine, the builder, the size, the mtime and **the path**, with no id
+      and no manifest anywhere in it. Measured: it found the two images that
+      were still sitting in `yocto-downstream-wpe-2.46-rpi4` and
+      `yocto-downstream-yocto-wpe-2.48-rpi3-32` after the store was deleted,
+      which is the model's own argument made concrete — what the store held were
+      copies, and removing it cost nothing
+- [V] a workspace whose profile this checkout no longer defines is still listed,
+      and says so. The scan globs the builder's output directory instead of
+      deriving it from the profile, so a tombstoned name is a note on the row
+      rather than a row that is missing
+- [V] "is a build running in this workspace" comes from the recorded pid, not
+      from `yocto.status` — that file says `state=running` for ever on a detached
+      build (see the defects table), so the listing does not ask it
+- [V] `wk sysimage write` with no argument names `--from <path>` and points at
+      `wk sysimage ls`, rather than printing an empty list of ids
 - [ ] identity without a catalogue: `/etc/wk-image` is written at *write* time
       from the profile, the workspace, the build time and the sha256 of the
       bytes as they stream past. Stronger than a store id — it names content
@@ -3424,16 +3518,33 @@ upstream in six layers".
       image" rather than "bench mode", and `wk status`'s fleet line says "not a
       bench system". A board on its base image is also *armable* again — that
       state must not match `bench*`, which refuses it with "already in bench mode".
-- [V] a rescue image gets no self-return watchdog and no self-disarm
-      (`IMG_ROLE=rescue`, image/profiles.sh; recorded as `role=` in
-      `/etc/wk-image`). Both units exist to hand a machine *back* to what it
-      falls back to, and a rescue image is that thing — so on one, the watchdog
-      is a 15-minute reboot in the middle of whatever card the helper is
-      writing, and the self-disarm parks a medium the image is not even on.
-- [!] the rpi4's SD card holds a *bench*-profile image acting as its rescue, so
-      it carries a 900-second self-return watchdog and reboots itself every 15
-      minutes when the board is sitting on it. Rewrite it with a rescue-role
-      image; needs a build and a card.
+- [ ] **the role is a property of the card, not of the build.** One image serves
+      both: every image carries the self-return watchdog and the self-disarm, and
+      both are `ConditionPathExists=!/etc/wk/rescue` (`install_units`,
+      cmd/sysimage), so `wk sysimage write --rescue` decides which they are by
+      leaving a marker (`disk_seed_role`, boot/disk.sh; `role` in
+      admin/wk-card-priv). Both units exist to hand a machine *back* to what it
+      falls back to, and a rescue is that thing — so on one the watchdog is a
+      15-minute reboot in the middle of whatever card the helper is writing, and
+      the self-disarm parks a medium the image is not even on. What must be
+      checked on hardware: the marker lands, `systemctl show wk-self-return`
+      reports the condition unmet, and the board does **not** reboot after
+      `IMG_WATCHDOG` seconds.
+- [ ] there is no `IMG_ROLE` and no rescue *profile*. A second config differing
+      by one line would be two bitbakes and two multi-gigabyte artifacts of
+      identical bytes — the forbidden second copy of a fact, in its most
+      expensive form. `wk sysimage ls` shows the role each stored image was
+      written as, and `unrecorded` for one built before the field existed, which
+      is honest rather than defaulting to `bench` about exactly the images most
+      likely to be carrying a live watchdog nobody expects.
+- [ ] a write with `--rescue` leaves the rest of the card alone unless `--grow`
+      is given. On the rpi3, where one medium holds both systems, growing the
+      rescue to fill the card is what makes the board unable to install a bench
+      system without a person in the room.
+- [!] the rpi4's SD card holds an image written as a *bench* system, so it
+      carries a 900-second self-return watchdog and reboots itself every 15
+      minutes when the board is sitting on it. Rewriting it is one flag on the
+      write, not a second build; needs a card.
 - [ ] the rpi3 gets its second system, on the same card. It is
       written up in `wk help hardware` ("why the three Pis are arranged
       differently") with the priority order it follows in CLAUDE.md: quality of
@@ -3546,12 +3657,15 @@ upstream in six layers".
       `image_addr`'s MAC → ARP → mDNS ladder and `MACH_MAC` in
       `boot/machines.sh` for a booted bench system. The rule is that none of
       that exists — a node is on the tailnet and its name is the whole address
-      (CLAUDE.md, "Cattle, not pets"). What stands in the way is a decision, not
-      an accident: the bench images carry no tailscale ("no tailscale and never
-      will", `image/profiles.sh`), so the fix belongs in provisioning — an image
-      that joins the tailnet on first boot — and not in `wk pi setup` against a
-      running board, which is an in-place upgrade of a guest. Until then the jump
-      hop stays, and with it the bounds its stanza has to carry.
+      (CLAUDE.md, "Cattle, not pets"). The fix is built and belongs where it
+      belongs — in provisioning: every image now carries tailscale and joins on
+      first boot (`image/yocto/meta-wk-tailnet`, `BR_OVERLAY_TAILSCALE`), with
+      the key arriving on the card and not in the artifact. What is left is
+      writing the two cards, because both boards are still running images built
+      before that layer existed. Until they are rewritten the jump hop stays, and
+      with it the bounds its stanza has to carry. `wk find` is what locates
+      either board in the meantime, and it stays useful afterwards: a bench
+      system is the one thing here that deliberately has no name.
 - [V] one tailscale auth key for the whole fleet, in one place, used by every
       path that joins anything to it: `wk pi setup`, `wk bridge setup` and the
       Mac bench volume all resolve it through `wk_tailscale_authkey`
@@ -3572,7 +3686,7 @@ upstream in six layers".
       Mac bench first boot were fixed to match, and the Mac install
       now advertises `tag:wk` like every other wk-managed node instead of
       joining untagged and key-expiring in 180 days.
-- [V] the Yocto images are built with tailscale in them, from a layer of their
+- [ ] the Yocto images are built with tailscale in them, from a layer of their
       own: `image/yocto/meta-wk-tailnet`, added to bblayers beside `meta-wk` and
       deliberately *not* part of it — that layer's rule is that it may change
       how an image is built and never what is in it, and this changes what is in
@@ -3581,6 +3695,27 @@ upstream in six layers".
       places rather than something hidden in a layer. `wk sysimage build
       … --no-tailnet` builds without it, for a measurement that has to compare
       against numbers taken before it existed.
+
+      Not yet verified, and it was marked as though it were: the layer had never
+      been through a build. The first one to reach it failed at
+      `do_populate_lic` — a `LIC_FILES_CHKSUM` path is resolved relative to
+      `${S}`, and `${S}` is the unpacked release tarball, which is exactly the
+      thing with no LICENSE in it (that is why the layer ships one). Addressed
+      through `${WORKDIR}` now. A recipe that has never been built is not a
+      recipe that works, and the checkbox is what said otherwise.
+- [V] a WebKit 2.52 yocto build reaches `hyphen`, which meta-webkit did not
+      fetch at 2.48, and it comes from SourceForge — so the egress allowlist
+      needed `sourceforge.net` (container/proxy/wk-proxy.py). A suffix rather
+      than the recipe's hostname, and forced: `downloads.sourceforge.net`
+      answers with a 302 to a per-request mirror subdomain, so allowing only the
+      name in the recipe allows the redirect and refuses the bytes. Checked
+      first that no already-allowed mirror carries it —
+      `sources.openembedded.org`, `downloads.yoctoproject.org/mirror/sources`
+      and `mirrors.kernel.org` all answer 404 or nothing — because a mirror
+      would have cost no boundary change at all.
+      Seeding the tarball into `DL_DIR` by hand was the other option and is
+      rejected on principle: it is a fact living in one machine's cache, which
+      is the pet the cattle rule exists to refuse.
 - [V] the tailscale release is pinned in one file for both halves of the fleet:
       `meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc` carries
       the version and a published sha256 per architecture, the recipe `require`s

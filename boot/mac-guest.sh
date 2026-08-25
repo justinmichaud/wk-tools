@@ -180,3 +180,17 @@ b_media() {
     st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$MACH_GUEST")" 2>/dev/null || echo absent )
     printf 'a Tart guest, %s (%s); no physical media' "$MACH_GUEST" "${st:-unknown}"
 }
+
+# How this guest is made from nothing.
+#
+# A guest, so there is no medium and nothing to carry: it is cloned from the
+# golden base and thrown away. That is the whole point of it -- it rehearses the
+# macOS lane without needing the Mac.
+b_reprovision() {
+    cat <<REPROV
+wk vm base
+    the golden guest every vm workspace is cloned from
+wk vm new $MACH_NAME
+wk bench stage <ws> --to $MACH_NAME
+REPROV
+}

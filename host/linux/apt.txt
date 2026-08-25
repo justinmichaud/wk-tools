@@ -72,3 +72,13 @@ wayland-utils
 mesa-vulkan-drivers
 grim
 wlr-randr
+
+# Finding a machine that is not answering to its name (cmd/find).
+#
+# A node is reached by its tailnet name and how to reach it is not written down
+# (CLAUDE.md), which leaves exactly one case open: a machine that is not on the
+# tailnet, or is and is not answering, has no address anybody may keep. `wk
+# find` sweeps for it instead of remembering, and nmap is the one sweeper --
+# there is deliberately no second one, because a fallback chosen by what
+# happens to be installed is the path that runs on the machine nobody tested.
+nmap

@@ -28,23 +28,23 @@ rpi5 and rpi4 have both been through the whole cycle with no hands on the board.
   arrangement it needs is written up where design belongs — `wk help hardware`, "why the three Pis are arranged
   differently", plus the binding priority order in CLAUDE.md. What is *left* is
   the work:
-    1. a rescue-role system for slot A (`IMG_ROLE=rescue`, so no self-return
-       watchdog and no self-disarm) and a bench system for slot B;
-    2. a slot-aware `wk sysimage write`, which today writes one whole system to
+    1. a slot-aware `wk sysimage write`, which today writes one whole system to
        one whole device and cannot put a system into a slot without destroying
        the other;
-    3. arming for `boot/pi-sd.sh` — `root=` plus the bench kernel installed onto
+    2. arming for `boot/pi-sd.sh` — `root=` plus the bench kernel installed onto
        the shared boot partition — and the revert that goes with a stage-2
        arming, which is an initramfs fallback or a rescue-side pivot, because a
        kernel that cannot mount the armed root would otherwise panic-loop;
-    4. the BusyBox equivalents of the self-return watchdog and self-disarm, for
+    3. the BusyBox equivalents of the self-return watchdog and self-disarm, for
        an image with no systemd.
-  None of it is startable from a workstation alone: (1) needs a build, (2) and
-  (3) need the card, and the first write is hands-on.
-- **The rpi4's SD holds a bench-profile image acting as its rescue**, so it
-  carries a 900-second self-return watchdog and reboots itself every 15 minutes
-  while the board sits on it. Rewrite it with a rescue-role image; needs a build
-  and a card.
+  Both remaining items need the card in hand, and the first write is hands-on.
+  What the role *is* no longer needs building: one image serves both, and
+  `wk sysimage write --rescue` decides which by leaving a marker the units read
+  (`disk_seed_role`, boot/disk.sh).
+- **Both boards are still running images built before the tailnet layer**, so
+  neither is on the tailnet and the rpi4's SD carries a live 900-second
+  self-return watchdog that reboots it every 15 minutes while the board sits on
+  it. Rewriting either is a build and a card write, not a design question.
 - **`/usr/bin/tee` is NOPASSWD on moose** — passwordless write to any file, so
   equivalent to NOPASSWD root. Worth narrowing; an input to
   `docs/HANDOFF-sandboxing.md`.

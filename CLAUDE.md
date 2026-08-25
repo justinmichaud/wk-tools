@@ -85,9 +85,17 @@ reasoning; this is the binding statement.
 
   Open violations, and they are the reason the machinery above still exists:
   rpi3 (an mDNS name) and rpi4 (a bridge-segment address behind a `ProxyJump`)
-  are the only fleet machines not on the tailnet, and the bench images
-  deliberately carry no tailscale (`image/profiles.sh`: "the image has no
-  tailscale and never will"). docs/TESTING.md, section 7, carries the item.
+  are the only fleet machines not on the tailnet. Every image this repo builds
+  now carries tailscale and the first-boot join (`image/yocto/meta-wk-tailnet`,
+  and `BR_OVERLAY_TAILSCALE` for buildroot); what the two boards are still
+  running predates that layer, so the violation is a card that has not been
+  rewritten rather than a rule with an exception in it. docs/TESTING.md,
+  section 7, carries the item.
+
+  What closes the case the rule leaves open -- a node that is *not* on the
+  tailnet, or is and is not answering, has no address anybody may write down --
+  is `wk find`, which sweeps for it instead of remembering. That is not a second
+  copy of a fact: it is a measurement, taken at the moment it is needed.
 
 `docs/HANDOFF-reprovision.md` is the punch-list for the day this is tested by
 an actual rebuild.

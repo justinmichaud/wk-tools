@@ -237,3 +237,23 @@ b_media() {
     printf 'USB stick %s holds %s, %s; SD card is the rescue' \
         "$MACH_DEVICE" "${id:-no wk system (wk sysimage write puts one there)}" "${state:-unreadable}"
 }
+
+# How this board is made from nothing, composed from what its conf declares.
+#
+# Two media, two roles, and the order matters: the rescue goes on first, because
+# it is what the board falls back to if anything about the stick is wrong. A
+# board with a bench system and no rescue is a board that needs a person the
+# first time a write goes badly.
+b_reprovision() {
+    cat <<REPROV
+wk sysimage build $MACH_PROFILE
+    in a workspace; hours
+wk sysimage write <id> --disk <reader>:${MACH_ROOT%p[0-9]} --rescue
+    the SD card -- the system this board falls back to
+wk pi boot-order $MACH_NAME usb-first
+wk sysimage write <id> --disk $MACH_NAME:$MACH_DEVICE
+    the stick -- the system it is measured on
+wk boot $MACH_NAME
+    one shot; it reverts by itself
+REPROV
+}

@@ -1,10 +1,9 @@
 # Named system profiles -- the spec that `wk sysimage build` executes.
 #
-# The name carries the category (docs/HANDOFF-vocabulary.md, "Systems, named
-# by what they are for"): perf-<distro>-<device> for measurement-grade
-# systems seeded from a general-purpose distribution, downstream-<builder>-
-# <release>-<device>[-width] for the public embedded images. Adding a
-# category later is adding a profile.
+# A configuration is named for what it is -- project, release, builder, board,
+# width (docs/HANDOFF-vocabulary.md, "Systems, named by what they are for") --
+# and lives in image/configs as a file. The phones and the fetched service
+# image are the exceptions, being one of a kind rather than points in a matrix.
 #
 # The rule this file exists to keep (docs/HANDOFF-boot.md, "One-command
 # reproducible, everywhere"): the spec lives in the repo, not on a machine.
@@ -14,38 +13,40 @@
 #
 # A profile sets:
 #
-#   IMG_BUILDER      which mechanism builds it:
-#                      distro -- download a pinned distro image and seed it
-#                        (cloud-init, minutes, unprivileged, done on the host)
-#                      yocto  -- bitbake a whole distribution from source in a
-#                        workspace (hours, tens of gigabytes; image/yocto.sh)
-#                    The two share only the store and the flashing path. Every
-#                    field below marked (distro) is meaningless to the yocto
-#                    builder and is not set by a yocto profile -- a profile that
-#                    set them anyway would be describing a seeding step that
-#                    never runs.
+#   IMG_BUILDER      which mechanism builds it, and there are four:
+#                      yocto     -- bitbake a whole distribution from source in
+#                        a workspace (hours, tens of gigabytes; image/yocto.sh)
+#                      buildroot -- the WPE fork's release-pinned cog
+#                        defconfigs, in a workspace (image/buildroot.sh)
+#                      pmos      -- postmarketOS for a phone, by pmbootstrap on
+#                        a Linux aarch64 machine over ssh (image/pmos.sh)
+#                      fetch     -- downloaded and pinned by content rather than
+#                        built; the only builder whose output is an input
+#                        (image/fetch.sh)
+#                    They share the flashing path and nothing else. A field one
+#                    builder reads is not set by a profile for another -- it
+#                    would be describing a step that never runs.
 #   IMG_MACHINE      the fleet machine it is built for (boot/machines.sh)
 #   IMG_ARCH         the image's architecture
 #   IMG_HOSTNAME     what it calls itself once booted
-#   IMG_ROLE         what this image is *for*: `bench` (the default) or
-#                    `rescue`. A rescue image is the resilient helper a board
-#                    falls back to on the medium wk never writes -- its job is
-#                    to keep the board reachable and to let another system be
-#                    written and recovered, and it is never measured. The
-#                    difference is not cosmetic: a rescue image gets no
-#                    self-return watchdog and no self-disarm, because both exist
-#                    to hand a machine *back* to the thing it is already sitting
-#                    on -- and a 15-minute reboot in the middle of writing a
-#                    card is the helper sabotaging the one job it has.
-#                    Which system is running is answered by evidence rather than
-#                    by this field (b_system_kind, boot/machines.sh): the medium
-#                    the running root is on. This is what the image says it is,
-#                    and it is recorded in /etc/wk-image so a board can be asked.
 #   IMG_WATCHDOG     seconds before the self-return reboot, unless kept. Every
-#                    profile that can be *booted as a bench system* wants one --
-#                    it is what hands the machine back when a run wedges it. A
-#                    rescue image wants none, and says so with IMG_ROLE.
+#                    profile wants one -- it is what hands the machine back when
+#                    a run wedges it. On a card written as a rescue the unit is
+#                    installed and stays inert, so this value is what a bench
+#                    system does and a rescue simply never reaches it.
 #   IMG_SPEC_DIR     the profile's own files
+#
+# There is deliberately no role field. A rescue system and the bench system
+# beside it are the same distribution, built once from the same profile; the
+# only difference is a marker on the card, written by `wk sysimage write
+# --rescue` and read by the units that hand a machine back
+# (`ConditionPathExists=!/etc/wk/rescue`). A profile field would be a second
+# way to say one thing, and the expensive kind: it would mean two bitbakes and
+# two multi-gigabyte artifacts of identical bytes.
+#
+# Which system is *running* is a third question again, and answered by evidence
+# rather than by either of them (b_system_kind, boot/machines.sh): the medium
+# the running root is on.
 #
 # A yocto profile sets these instead (image/yocto.sh reads them):
 #
@@ -63,25 +64,12 @@
 #                    WPE/Chromium performance"), and it is about half the build
 #                    -- see the profile for the numbers.
 #
-# The two labels are not cosmetic and not optional. A distro image and an
-# install made from the same distro image carry the *same* filesystem labels --
-# `writable` and `system-boot` on Ubuntu -- and this image is written to a stick
-# that stays plugged into a machine whose workstation install came from the same
-# family. Booted with both attached, `root=LABEL=writable` in the image's
-# cmdline is ambiguous, and which disk wins is a property of enumeration order.
-# Worse, `/boot/firmware` mounted by label could put the image's kernel updates
-# on the workstation's firmware partition -- the exact separation this whole
-# design exists to preserve. So the image is relabelled at build time, and its
-# cmdline and fstab are rewritten to match.
-#
-# Why a whole distro image rather than a rootfs built from a package list: the
-# one thing that has to work on first boot is the network, and the last three
-# attempts at this failed there and nowhere else. Ubuntu on this board, associating with this AP on
-# channel 52, is the one configuration that is *known* to work -- so the image
-# is that configuration, modified as little as possible. A slim
-# built-from-scratch rootfs is the next increment if one is ever wanted;
-# building it first would have meant debugging a new rootfs and a new radio
-# setup at the same time.
+# Identity is stamped per disk at write time rather than carried by the image,
+# and that is not cosmetic. Two cards written from one image are twins in every
+# namespace -- same MBR signature, same filesystem labels -- so `root=LABEL=` or
+# a `PARTUUID=` from the image resolves to whichever disk the firmware
+# enumerated first. `disk_unique_identity` (boot/disk.sh) gives each copy its
+# own and rewrites the cmdline and fstab to match.
 
 # Where a WebKit-runtime configuration lives: one file per configuration, in
 # this repository, named for what it is -- project, release, builder, board,
@@ -165,7 +153,6 @@ image_profile_load() {
     # refuses an empty one by name.
     IMG_BUILDER=""
     IMG_MACHINE=""; IMG_ARCH=""; IMG_HOSTNAME=""; IMG_WATCHDOG=""
-    IMG_ROLE=bench
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
     YOC_CHROMIUM=1; YOC_REMOTE=origin; YOC_LOCAL_LAYER=1
     CFG_PROJECT=""; CFG_RELEASE=""; CFG_BRANCH=""; CFG_REMOTE=""; CFG_NEEDS=""
@@ -178,9 +165,9 @@ image_profile_load() {
     PMO_KERNEL_APORT=""; PMO_KCONFIG=""
 
     # A WebKit-runtime configuration is a file, and it answers first: what is
-    # true of one is data, not a branch. Everything else -- the perf distro
-    # images, the phones, the fetched rescue -- is still a case arm below,
-    # because each of those is one of a kind rather than a point in a matrix.
+    # true of one is data, not a branch. Everything else -- the two phones and
+    # the fetched service image -- is still a case arm below, because each of
+    # those is one of a kind rather than a point in a matrix.
     local _cfg
     _cfg=$(image_config_file "$1")
     if [ -f "$_cfg" ]; then
@@ -316,7 +303,14 @@ image_profile_load() {
         # else, and mDNS is the only thing that works with no configuration on
         # either end. Enabled in the image by image/pmos-build.sh, because
         # installing a package does not enable its OpenRC service.
-        PMO_PACKAGES="openssh,nftables,dnsmasq,chrony,tailscale,jq,iw,ethtool,logrotate,zram-init,v4l-utils,networkmanager,avahi"
+        # nmap is here for the one job a bridge has that nothing else can do:
+        # its segment is a cable behind a phone, so this is the only machine in
+        # the fleet that can see the boards on it. `wk find` sweeps from
+        # whichever machine is on the segment, with nmap and nothing else --
+        # there is deliberately no second sweeper -- so a bridge without it
+        # makes every board behind it unfindable, which reads exactly like
+        # every board behind it being dead.
+        PMO_PACKAGES="openssh,nftables,dnsmasq,chrony,tailscale,jq,iw,ethtool,logrotate,zram-init,v4l-utils,networkmanager,avahi,nmap"
         PMO_EXTRA_SPACE=512
 
         # The build host, which has to be a machine on the WiFi the phone will
