@@ -6,7 +6,7 @@
 #   wk sysimage ls
 #   wk sysimage show <id>
 #   wk sysimage disks <machine>
-#   wk sysimage write <id> --disk <machine>:<device>
+#   wk sysimage write --from <path> --disk <machine>:<device>
 #   wk sysimage rm <id>
 #
 # An image is a whole machine, built from a spec in this repo, that a machine
@@ -725,7 +725,19 @@ WantedBy=multi-user.target
 cmd_build() {
     local profile="${1:-}"
     [ -n "$profile" ] || usage
-    image_profile_load "$profile" || die "unknown profile '$profile' (wk sysimage ls)"
+
+    # Every configuration there is, and nothing built. `wk sysimage ls` answers
+    # the other question -- which images *exist* -- and the two are not the same
+    # question now that an image is bytes in a workspace rather than a row in a
+    # catalogue: a configuration can be buildable and have been built never.
+    if [ "$profile" = --list ]; then
+        image_profile_list
+        exit 0
+    fi
+
+    image_profile_load "$profile" || die "unknown profile '$profile'.
+    'wk sysimage build --list' has every configuration; 'wk sysimage ls' has
+    every image a workspace here has already built."
     shift
 
     # A configuration that declares what it is missing is refused here, in the
@@ -857,7 +869,8 @@ $(machine_list | sed 's/^/      /')"
     log "removable disks attached to $machine:"
     disk_list
     log ""
-    log "  write one with:  wk sysimage write <id> --disk $machine:<device>"
+    log "  write one with:  wk sysimage write --from <path> --disk $machine:<device>"
+    log "  ('wk sysimage ls' prints the paths)"
     log "  a machine's own system disk is never listed and never writable."
 }
 
@@ -901,25 +914,93 @@ _root_line() {
 # a catalogue, which is what makes a catalogue unnecessary -- and the hash is
 # read off the source before the write, so the marker describes the bytes that
 # actually went on.
+# The decompressor a path needs, by what it is, or `cat`.
+#
+# A yocto build leaves its image as `<recipe>.wic.xz` and nothing decompresses it
+# on the way to a card any more -- the store used to, on import, and there is no
+# store (wk help images). Writing the compressed stream straight to a disk
+# produces a card that is not bootable and a sha256 that describes the wrong
+# bytes, and neither failure says anything at the time.
+#
+# Named extensions rather than sniffing content: what the builders here produce
+# is known (yocto: .wic.xz; buildroot: an uncompressed .img from genimage), and a
+# reader that guesses is a reader that guesses wrong on the day somebody adds a
+# format. Anything unrecognised is passed through unchanged, which is correct for
+# a raw image and is what the refusal below catches when it is not.
+_from_filter() { # <path> -- prints the command that turns those bytes into an image
+    case "$1" in
+        *.xz)  printf 'xz -dc'  ;;
+        *.zst) printf 'zstd -dc' ;;
+        *.gz)  printf 'gzip -dc' ;;
+        *)     printf 'cat' ;;
+    esac
+}
+
 _from_reader() { # <spec> -- prints a command that emits the image on stdout
+    local filter
+    filter=$(_from_filter "${1#vm:}")
     case "$1" in
         vm:*) is_macos || die "--from vm:<path> is for reading a container workspace's
     output out of this machine's podman VM, and this is not a macOS host. Give a
     plain path."
-              printf 'podman machine ssh %s -- sudo cat %s' \
-                  "${WK_MACHINE:-wk}" "$(sh_quote "${1#vm:}")" ;;
+              printf 'podman machine ssh %s -- sudo cat %s | %s' \
+                  "${WK_MACHINE:-wk}" "$(sh_quote "${1#vm:}")" "$filter" ;;
         *)    [ -r "$1" ] || die "no image at $1
     An image lives where the workspace that built it put it (wk help images). If
     that is inside this machine's podman VM, say so: --from vm:$1"
-              printf 'cat %s' "$(sh_quote "$1")" ;;
+              if [ "$filter" = cat ]; then
+                  printf 'cat %s' "$(sh_quote "$1")"
+              else
+                  printf '%s %s' "$filter" "$(sh_quote "$1")"
+              fi ;;
+    esac
+}
+
+# The profile a path implies, from the workspace in it.
+#
+# `image/yocto.sh` names its workspaces `yocto-<profile>` and the image sits
+# under `$WK_STORE/ws/<workspace>/...`, so the path already carries the answer
+# and asking for --profile as well is asking somebody to retype a fact. Only
+# used when --profile was not given; an explicit one always wins.
+_profile_from_path() { # <path>
+    local ws
+    ws=$(printf '%s' "$1" | sed -n 's|.*/ws/\([^/]*\)/.*|\1|p')
+    case "$ws" in
+        yocto-*) printf '%s' "${ws#yocto-}" ;;
+        *) return 1 ;;
     esac
 }
 
 cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role>
     local from="$1" spec="$2" dry="$3" grow="$4" profile="$5" role="$6"
-    local reader sha size marker
+    local reader sha size marker base
 
     reader=$(_from_reader "$from")
+
+    # Derived before the profile is used for anything, so that the machine the
+    # image is for -- which decides the tailnet name the card is seeded with --
+    # is known on a write that named only a path.
+    if [ -z "$profile" ]; then
+        profile=$(_profile_from_path "${from#vm:}" || true)
+        [ -z "$profile" ] || debug "profile '$profile' derived from the path"
+    fi
+    # Probed in a subshell before it is loaded for real, and that is not
+    # defensiveness: image_profile_load *dies* on a name it does not define --
+    # every tombstone in image/profiles.sh is a `die` -- and `die` exits. An
+    # `|| warn` cannot catch an exit, so calling it directly here ends the whole
+    # command, silently if its output was redirected. The subshell turns that
+    # exit into a status, and the message it would have printed is worth showing.
+    if [ -n "$profile" ]; then
+        local _perr
+        if _perr=$( image_profile_load "$profile" 2>&1 >/dev/null ); then
+            image_profile_load "$profile" >/dev/null 2>&1 || true
+        else
+            warn "this write cannot tell which machine the card is for, so there is no
+  firmware check and no tailnet name to seed. Pass --profile with a
+  configuration this checkout defines."
+            [ -z "$_perr" ] || printf '%s\n' "$_perr" | sed 's/^/    /' >&2
+        fi
+    fi
 
     disk_parse "$spec"
     machine_load "$DISK_MACHINE" || die "unknown machine '$DISK_MACHINE'
@@ -938,7 +1019,16 @@ $(machine_list | sed 's/^/      /')"
     size=$(eval "$reader" | wc -c | tr -d ' ')
     disk_refuse_unless_safe "$DISK_DEV" "$size"
 
-    marker="id=$(basename "${from#vm:}" .img)-$(printf '%s' "$sha" | cut -c1-12)
+    # The id names what this is and which bytes it is, and nothing else -- there
+    # is no catalogue for it to be a slot in (wk help images). The profile when
+    # there is one, because that is what the image *is*; otherwise the file's
+    # own name with the compression suffix taken off, since the bytes that reach
+    # the card are the decompressed ones and an id ending `.wic.xz` would
+    # describe a stream nobody wrote.
+    base=$(basename "${from#vm:}")
+    base=${base%.xz}; base=${base%.zst}; base=${base%.gz}
+    base=${base%.wic}; base=${base%.img}
+    marker="id=${profile:-$base}-$(printf '%s' "$sha" | cut -c1-12)
 profile=${profile:-unknown}
 machine=${IMG_MACHINE:-}
 role=$role
@@ -1187,7 +1277,7 @@ cmd_flash() {
     So the disk is named, and the verb says what it does to it:
 
         wk sysimage disks $machine                  what is attached over there
-        wk sysimage write <id> --disk $machine:<device>
+        wk sysimage write --from <path> --disk $machine:<device>
 
     Booting it is still a separate step, and still one-shot:  wk boot $machine"
 }

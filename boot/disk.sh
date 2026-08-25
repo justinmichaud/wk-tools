@@ -374,8 +374,28 @@ disk_seed_role() { # <device> <bench|rescue>
         debug "marking $dev a bench system (the rescue marker is removed if it was there)"
     fi
 
-    card_priv role "$dev" "$role" >/dev/null \
-        || die "could not set the role on $dev.
+    local out rc=0
+    out=$(card_priv role "$dev" "$role" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && return 0
+
+    # An older helper has no `role` verb at all, and its dispatch answers an
+    # unknown one with its usage line. That is a provisioning fact about the
+    # machine holding the reader, not a fault of this disk, and it has a
+    # one-line remedy -- so it is worth telling apart from a refusal.
+    case "$out" in
+        *'usage: wk-card-priv'*)
+            die "$MACH_NAME's card helper is older than this checkout: it has no 'role'
+    verb, so the rescue marker cannot be written and this card would boot
+    carrying a live self-return watchdog.
+    The image is written; the role is not set.
+    Remedy, from a terminal on $MACH_NAME (its sudo asks for a password, which
+    is why this end cannot do it):
+        wk sync --target $MACH_NAME
+        ./setup --stage quiesce" ;;
+    esac
+
+    die "could not set the role on $dev:
+$(printf '%s\n' "$out" | sed 's/^/    /')
     The image is written, and the role decides whether this system reboots
     itself every few minutes. Refusing to leave that unknown: a rescue that
     carries a live self-return watchdog reboots the helper in the middle of

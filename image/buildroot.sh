@@ -18,8 +18,31 @@
 #   tree        WebPlatformForEmbedded/buildroot, branch `wpe`, pinned 2020.02.
 #               A fork, not upstream buildroot: the release-pinned `cog`
 #               defconfigs only exist there.
-#   host        an `ubuntu:20.04` container inside a container workspace.
-#               buildroot 2020.02 does not build on a current distro.
+#   host        an `ubuntu:20.04` container. buildroot 2020.02 does not build on
+#               a current distro.
+#
+#               **This is the blocker, and it is environmental rather than
+#               unwritten.** The scouting run nested that container inside a
+#               container workspace, by hand, outside `wk`. A workspace cannot
+#               do it: the SDK image is Ubuntu 24.04 and carries no container
+#               runtime at all -- no podman, no docker, no buildah -- and it is
+#               also missing `rsync` and `bc`, which buildroot needs of its
+#               host. Measured, not assumed.
+#
+#               So there are three ways out, and picking one is a design
+#               decision rather than a detail:
+#                 1. give the buildroot lane its own container on the host,
+#                    beside the workspaces rather than inside one. Closest to
+#                    what a workspace already is, and the one that keeps "a
+#                    build runs in a container wk manages".
+#                 2. carry a container runtime in the workspace image. The SDK
+#                    image is not this repository's, so this is somebody else's
+#                    tree to change.
+#                 3. make buildroot 2020.02 build on 24.04. The arm64 libffi
+#                    wall is already handled (BR_EXTERNAL below); what is
+#                    unmeasured is everything after it, and finding out costs a
+#                    long build that may fail late.
+#               TODO: none of them is chosen. Until one is, this refuses.
 #   jobs        -j6 measured right on a 19 GB VM: a WPE compile is ~2 GB.
 #   downloads   BR2_DL_DIR and BR2_CCACHE_DIR under $WK_STORE/cache/buildroot,
 #               which lib/store.sh already reserves and targets/container.sh
@@ -78,18 +101,21 @@ buildroot_build() {
         shift
     done
 
-    die "the buildroot builder is not written yet, so '$profile' cannot be built.
+    die "the buildroot builder is not written, so '$profile' cannot be built.
 
     The configuration is real and complete -- $(image_config_file "$profile") --
-    and its defconfig ($BR_DEFCONFIG) exists in
+    and its defconfig (${BR_DEFCONFIG:-none}) exists in
     ${BR_TREE_URL:-the fork} on branch ${BR_TREE_BRANCH:-wpe}. The BR2_EXTERNAL
-    tree it needs on an arm64 build host is written too
-    ($WK_ROOT/image/buildroot/external). What is missing is the mechanism:
-    buildroot_build itself, in image/buildroot.sh, which carries the whole
-    recipe the scouting run established -- clone and pin the tree,
-    apply the defconfig, assemble the overlay, build in an ubuntu:20.04
-    container in a workspace, and hand output/images/${BR_IMAGE:-the image} to
-    the manifest step the yocto builder already uses.
+    tree it needs on an arm64 build host is written
+    ($WK_ROOT/image/buildroot/external), and so is the tailnet overlay
+    ($WK_ROOT/image/buildroot/tailnet-overlay.sh, verified: it stages the pinned
+    tailscale binaries, the join and the BusyBox S99 script).
 
-    A hand-built image from that run is what the rpi3 has been measured on."
+    What blocks it is the build host, not the code. buildroot 2020.02 needs an
+    ubuntu:20.04 userspace, and a workspace cannot provide one: the SDK image is
+    Ubuntu 24.04 with no container runtime in it -- no podman, docker or buildah
+    -- and without rsync or bc either. image/buildroot.sh, 'what the scouting
+    run established', has the three ways out and says that none is chosen.
+
+    Choosing one is the next step, and it is a design decision."
 }

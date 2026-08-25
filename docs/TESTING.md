@@ -3490,6 +3490,50 @@ upstream in six layers".
       build (see the defects table), so the listing does not ask it
 - [V] `wk sysimage write` with no argument names `--from <path>` and points at
       `wk sysimage ls`, rather than printing an empty list of ids
+- [V] `wk sysimage build --list` exists. Three tombstones in image/profiles.sh
+      had been naming it as the remedy and no such flag had ever been
+      implemented — a refusal pointing at a command that does not run is a dead
+      end, which is the thing a refusal is required not to be. It lists every
+      configuration; `wk sysimage ls` lists every image actually built, and those
+      are different questions now that an image is bytes in a workspace rather
+      than a row in a catalogue: a configuration can be buildable and never have
+      been built
+- [V] **the store-free write decompresses.** A yocto build leaves
+      `<recipe>.wic.xz`, the store used to decompress it on import, and there is
+      no store — so `--from` had been writing the compressed stream to the card:
+      an unbootable disk, and a sha256 over bytes nobody wrote, with nothing said
+      at the time. `_from_filter` maps the extension to a decompressor
+      (.xz/.zst/.gz), and anything else passes through as a raw image. Verified
+      against a real workspace image: the file begins `fd 37 7a 58 5a` and the
+      decompressed stream begins with MBR bootstrap
+- [V] the profile is derived from the path (`_profile_from_path`) — the image
+      lives under `ws/yocto-<profile>/`, so the path already carries the answer
+      and `--profile` is not a fact to retype. An explicit `--profile` still wins
+- [V] a profile name this checkout does not define is **warned about, not fatal**,
+      and the tombstone's own guidance is printed. `image_profile_load` answers a
+      retired name with `die`, and `die` exits — so `image_profile_load … ||
+      warn` ends the whole command, silently when its output is redirected. The
+      probe runs in a subshell, which turns that exit into a status
+- [V] the image id names the profile and the content hash, not the file it
+      arrived in: an id ending `.wic.xz` would describe a stream that never
+      reached the card
+- [V] a card helper older than this checkout is told apart from a refusal. Its
+      dispatch answers an unknown verb with its usage line, so `disk_seed_role`
+      matches that and names the remedy (`wk sync`, then `./setup --stage
+      quiesce` on the machine holding the reader) instead of reporting a usage
+      error about a disk
+- [ ] the `--from` write does **not** run `image_check_boot_files` or
+      `image_check_root`, which the store-backed write does: those read the
+      image, and the store-free path streams it. Low risk for a freshly built
+      yocto image, whose boot tree is complete by construction — but it is the
+      check that keeps a *partial* tree off a card, and a board that commits to
+      an incomplete medium loses its fall-through and needs a hand on the power
+      supply (docs/HANDOFF-boot.md, "the residual hands-on case").
+- [ ] the `--from` write installs the identity marker and the driving key on the
+      card, but not the systemd units (`install_units` still edits an image, not
+      a disk). Correct by accident for a **rescue**, which wants none of them;
+      a gap for a bench system, which wants the watchdog and the self-disarm.
+      Same work item as moving every image edit onto the card.
 - [ ] identity without a catalogue: `/etc/wk-image` is written at *write* time
       from the profile, the workspace, the build time and the sha256 of the
       bytes as they stream past. Stronger than a store id — it names content
@@ -3500,6 +3544,28 @@ upstream in six layers".
       on the rpi5: sfdisk, debugfs, mcopy, bmaptool, e2fsck) and has
       to be reachable for the write to happen at all — so a macOS driver needs
       no Linux tooling and the "mac portion" of `wk sysimage` stops existing.
+- [V] the buildroot lane's blocker is the build *host*, not the missing code,
+      and it is measured rather than assumed: a container workspace is Ubuntu
+      24.04 with no container runtime in it at all (no podman, docker or
+      buildah) and no `rsync` or `bc`, so it cannot provide the ubuntu:20.04
+      userspace buildroot 2020.02 needs. The scouting run nested that container
+      by hand, outside `wk`, which is why the recipe read as though a workspace
+      could. `wk sysimage build <a buildroot config>` now refuses by naming
+      that, and image/buildroot.sh carries the three ways out with none chosen.
+- [V] the tailnet overlay is verified end to end for the 32-bit case: it
+      resolves the pin from `tailscale-release.inc`, fetches, checks the sha256,
+      and stages `usr/bin/tailscale`, `usr/sbin/tailscaled`,
+      `usr/sbin/wk-tailnet-join` and `etc/init.d/S99tailscale` — 65 MB, all
+      world-readable regular files, no credential in it.
+- [!] `wpewebkit-2.38-buildroot-rpi4-32` cannot be built at all, and the reason
+      is upstream: the fork ships release-pinned `_wpe_<rel>_cog_` defconfigs
+      for **rpi3 only** (2.22, 2.28, 2.38, 2.42, 2.46, 2.50, next — checked
+      against the branch, 31 raspberrypi defconfigs). Its rpi4 defconfigs
+      (`raspberrypi4_wpe_defconfig` and the `_ml_`/`_weston_`/`_wst_` variants)
+      are 32-bit but pin no WPE release. Deriving one means merging the release
+      pin and cog selection from the rpi3 defconfig onto the rpi4 board bits,
+      and it needs the board to validate — a guess at another board's kernel
+      config is how a working image stops booting.
 - [ ] the order: the **buildroot lane is new code, so write it store-free from
       the start** — it proves the model end to end without touching a working
       path, and it is what the WPE 2.38 image needs anyway. Then the yocto lane,
