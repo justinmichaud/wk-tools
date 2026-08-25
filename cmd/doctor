@@ -94,14 +94,14 @@ fi
 # --- root costs a password ------------------------------------------------------
 # Reported on every run rather than remembered anywhere, because it is exactly
 # the kind of fact that changes underneath you: a site sudoers update, a
-# reinstall, or a `wk sudo require` that was forced past. The check itself
+# reinstall, or a `wk sudo setup` that was forced past. The check itself
 # never prompts (`wk sudo status` is all `sudo -n`), so doctor stays usable
 # without a terminal.
 section "root access"
 if _sudo=$("$WK_ROOT/cmd/sudo" status --quiet 2>&1); then
     ok "sudo: $_sudo"
 else
-    miss "sudo: $_sudo" "wk sudo require"
+    miss "sudo: $_sudo" "wk sudo setup"
 fi
 
 # --- config links ----------------------------------------------------------------
@@ -141,14 +141,12 @@ local_state() { # <path> <kind> <how to get it back>
 local_state "$WK_STORE/bench"                      backed-up   "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement"
 local_state "$WK_STORE/secrets"                    regenerable "wk key register makes new deploy keys (revoke the old ones on GitHub)"
 local_state "$WK_STORE/secrets/claude-credentials.json" re-authable "claude login in one workspace re-seeds it"
-local_state "$HOME/.config/wk/targets"             backed-up   "this device's own view of shared targets; recreate by hand from wk help machines"
 # The fleet's one tailscale auth key (wk_tailscale_authkey, lib/common.sh).
 # re-authable rather than backed-up on purpose: a new tagged key from the admin
 # console is as good as the old one, and the nodes already on the tailnet do not
 # care -- a tagged node never key-expires. Losing it costs nothing but the walk
 # to the console; what it must never be is in the repo.
 local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "a new tag:wk key (reusable, not ephemeral, longest expiry) from https://login.tailscale.com/admin/settings/keys; joined nodes are unaffected"
-local_state "$WK_ROOT/targets/local"               backed-up   "machine-local target definitions (gitignored: internal hosts and paths)"
 # What the request broker did, on this machine, for workspaces that could not do
 # it themselves. Regenerable in the only sense that matters here: nothing reads
 # an old record to decide anything -- a machine's state is always read back from
@@ -215,8 +213,22 @@ fi
 # --- benchmarking (Linux) ----------------------------------------------------------
 if is_linux; then
     section "benchmarking"
-    check "privileged helper (wk quiesce / wk session)" "./setup --stage quiesce  (interactive sudo)" \
-        test -x /usr/local/libexec/wk-quiesce-priv
+    # The property, not the file. `test -x` answers "is the helper installed",
+    # which is not the question: a helper whose sudoers rule is out-ranked is
+    # installed, executable, root-owned and useless -- `wk quiesce` prompts for a
+    # password every time. rpi5 was in exactly that state on 2026-08-25 with
+    # doctor reporting it fine, because `wk sudo setup`'s `zz-<user>-passwd`
+    # sorted after `/etc/sudoers.d/wk-quiesce` and `PASSWD: ALL` matched the
+    # helper too. Asking the helper is what tells the two apart.
+    if [ ! -x /usr/local/libexec/wk-quiesce-priv ]; then
+        miss "privileged helper (wk quiesce / wk session)" \
+             "./setup --stage quiesce  (interactive sudo)"
+    elif sudo -n /usr/local/libexec/wk-quiesce-priv status >/dev/null 2>&1; then
+        ok "privileged helper (wk quiesce / wk session)"
+    else
+        miss "privileged helper: installed, but its sudoers rule is not in force" \
+             "sudo -l shows the include order; /etc/sudoers.d/zzz-wk-quiesce must be the last match -- ./setup --stage quiesce"
+    fi
     case " $(id -nG "$(id -un)" 2>/dev/null) " in
         *" render "*) ok "render group configured" ;;
         *) miss "render group configured" "./setup --stage tools, then log out and in" ;;

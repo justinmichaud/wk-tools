@@ -46,7 +46,7 @@ require_name "$TARGET"
 # workspace dies, and it needs the target conf this command is about to delete.
 if [ "$ACTION" = rm ]; then
     target_kind "$TARGET" >/dev/null 2>&1 \
-        || die "no target conf for '$TARGET' ($(target_conf "$TARGET")) -- nothing to remove"
+        || die "no target conf for '$TARGET' ($(target_registry_conf "$TARGET")) -- nothing to remove"
     load_target "$TARGET"
     [ "$WK_TARGET_KIND" = remote ] \
         || die "'$TARGET' is a $WK_TARGET_KIND target -- this only removes remote machines"
@@ -60,7 +60,7 @@ if [ "$ACTION" = rm ]; then
     Remove them first (wk rm <name>) -- that deletes their remote checkouts,
     which needs the target this command was about to forget."
 
-    conf=$(target_conf "$TARGET")
+    conf=$(target_registry_conf "$TARGET")
 
     if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$WK_REMOTE_HOST" true 2>/dev/null; then
         warn "cannot reach $WK_REMOTE_HOST -- the machine keeps whatever it has."
@@ -91,7 +91,11 @@ if [ "$ACTION" = rm ]; then
     done
     rm -f \"\$HOME/.wk-remote\" \"\$HOME/.config/wk/targets/$TARGET.conf\"" \
         | while read -r rc; do changed "removed the wk-tools line from $rc"; done
-    changed "removed the marker and $TARGET.conf from $WK_REMOTE_HOST"
+    # The marker, and the conf a machine provisioned before 2026-08-25 has
+    # beside it. Nothing writes the second one any more -- the driver computes
+    # what it held from the marker -- but a box that was set up while it did
+    # still has one, and leaving it is leaving a file that claims a target.
+    changed "removed the marker from $WK_REMOTE_HOST"
 
     # The root: the pushed tools, the caches, the mirror, and any checkouts
     # this workstation has no record of -- on a shared home those may belong
@@ -111,17 +115,16 @@ if [ "$ACTION" = rm ]; then
         fi
     fi
 
-    rm -f "$conf"
-    changed "removed $conf"
-    # Forgetting a machine means forgetting it everywhere, and the registry is
-    # the half this command must not touch: it is a tracked file, shared with
-    # every other device, and deleting it here would show up as an unexplained
-    # working-tree change in whatever else is going on in this repository.
-    [ -f "$(target_registry_conf "$TARGET")" ] && {
-        warn "'$TARGET' is still in the shared registry, so it is still a target here"
-        log  "  remove it everywhere: git rm $(target_registry_conf "$TARGET") && commit"
-    }
-    info "'$TARGET' is gone -- 'wk remote setup $TARGET' brings it back"
+    # The conf is a tracked file in this repository, so deprovisioning the
+    # machine and forgetting it are two different acts with two different blast
+    # radii. This command does the machine; the file is a commit, and it is left
+    # to be made deliberately -- deleting a tracked file here would show up as
+    # an unexplained working-tree change in whatever else is going on in this
+    # repository, and would forget the machine on every other device too.
+    info "$WK_REMOTE_HOST is deprovisioned"
+    log  "  it is still a target here, because the registry still names it:"
+    log  "      git rm $conf && git commit"
+    log  "  that forgets it on every device. 'wk remote setup $TARGET' brings it back."
     exit 0
 fi
 
@@ -131,7 +134,7 @@ fi
 # on it -- but this command's whole job is to set the machine up, so writing
 # the two lines is part of that rather than a prerequisite for it.
 if ! target_kind "$TARGET" >/dev/null 2>&1; then
-    conf=$(target_conf "$TARGET")
+    conf=$(target_registry_conf "$TARGET")
     info "no target conf yet: $conf"
     log  "  probing $TARGET over ssh..."
     ssh -o BatchMode=yes -o ConnectTimeout=10 "$TARGET" true 2>/dev/null \
@@ -143,32 +146,29 @@ if ! target_kind "$TARGET" >/dev/null 2>&1; then
     # for destructive actions only.
     ensure_dir "$(dirname "$conf")"
     cat > "$conf" <<EOF
-# A shared build machine, reached through the ssh entry of the same name.
-# Written by 'wk remote setup'.
+# $TARGET -- a shared build machine, reached through the ssh entry of the same
+# name. Written by 'wk remote setup'; commit it to give every device this target.
+#
+# Everything here is a fact about the *machine*, true no matter which device is
+# driving it. There is no per-device half -- see target_registry_dir in
+# lib/target.sh for why.
 #
 # WK_REMOTE_ROOT defaults to ~/wk on the machine.
 #
-# There is deliberately no job ceiling here. The job count is derived per
-# build from what this machine has free at the time -- a fixed number would be
-# wrong on the day the machine changes, and it was: 16 on a box with 250 GB
-# and 80 cores.
+# There is deliberately no job ceiling here. The job count is derived per build
+# from what this machine has free at the time -- a fixed number would be wrong
+# on the day the machine changes, and it was: 16 on a box with 250 GB and 80
+# cores.
 #
 # WK_TARGET_CMAKE, if set, is added to the CMake flags of every build on this
 # machine. For a port or a toolchain quirk that belongs to the machine rather
 # than to the configuration:
 #
 #   WK_TARGET_CMAKE=-DENABLE_JOURNALD_LOG=OFF
-#
-# This file is *this device's* view of the machine, and no other device has it.
-# What is true about the machine itself -- its CMake flags, whether it is a
-# build box or a workstation -- belongs in the shared registry in the
-# repository instead, where every device gets it by pulling:
-#
-#   targets/hosts/$TARGET.conf
 EOF
     changed "wrote $conf"
-    log  "  this device only. To give every device this target, put what is true"
-    log  "  of the machine in $(target_registry_conf "$TARGET") and commit it."
+    log  "  a tracked file: 'git add $(basename "$(dirname "$conf")")/$(basename "$conf")' and commit"
+    log  "  it to give every device this target."
 fi
 
 load_target "$TARGET"
@@ -257,7 +257,7 @@ if ! "$WK_ROOT/cmd/sudo" status --target "$TARGET" >/dev/null 2>&1; then
             || barrier "sudo on '$TARGET' still grants root without a password."
     else
         barrier "sudo on '$TARGET' grants root without a password, and this machine
-    runs unattended builds. 'wk sudo require --target $TARGET' fixes it in one
+    runs unattended builds. 'wk sudo setup --target $TARGET' fixes it in one
     file that no sysadmin has to approve."
     fi
 fi

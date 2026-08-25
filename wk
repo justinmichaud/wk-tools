@@ -79,14 +79,14 @@ workspaces
   start                     bring them all back
 
 sources and disk
-  sync --tools              refresh the wk-tools copy on every machine (the
-                            podman VM, each build box, each running guest; a
-                            peer workstation pulls its own)
-  sync [<workspace>]        fetch every remote into the mirror, publish a base
-                            snapshot, then fetch in every workspace -- from that
-                            mirror, so nothing crosses the network twice -- or
-                            in the one named. --target <t> refreshes a machine's
-                            tooling and its own mirror
+  sync [<workspace>]        bring WebKit up to date. One verb, three scopes:
+                            bare, the workspace you are in (it asks if there are
+                            several); --machine, everything here -- the mirror, a
+                            new base snapshot, every workspace, and every copy of
+                            wk-tools this machine owns; --all, every other
+                            machine too. A workspace fetches from the mirror, so
+                            nothing crosses the network twice, and a rebase onto
+                            origin/main is what moves onto it -- no remaking
   skills <sub>              status|diff|pull|push the shared, mutable skills
   key <sub>                 register|check the fork push keys (uses gh)
   sudo status|require       make root cost a password every time, here or on
@@ -120,8 +120,9 @@ hosts and machines
                             the golden guest every vm workspace is cloned from:
                             build it, fast-forward its checkout, remake it, or
                             erase it (it is the largest thing on the machine)
-  pi <sub>                  setup: onto the tailnet; boot-order: the
-                            EEPROM's only writer
+  pi <sub>                  test boards, end to end -- 'wk pi -h' is the
+                            lifecycle: flash, boot-order, setup onto the
+                            tailnet, deploy a build, bench it
   sysimage <sub>            bootable systems: build|ls|show|disks|write|rm
       write <id> --disk <machine>:<device>
                             write an image onto a removable disk attached to a
@@ -275,14 +276,20 @@ is_targetless() {
     #
     # `ws_target` is safe to ask here: it is a file test per configured target
     # and starts nothing (lib/target.sh).
-    # `wk sync --tools` reaches every machine this workstation drives -- the
-    # podman VM, each build box, each running guest, and a peer that pulls its
-    # own. Forwarded into the VM it would run on the one machine that can see
-    # none of them, and would have refreshed the copy it is already running
-    # from and nothing else.
+    # `wk sync --machine` and `wk sync --all` reach every machine this
+    # workstation drives -- the podman VM, each build box, each running guest,
+    # and a peer that pulls its own. Forwarded into the VM they would run on the
+    # one machine that can see none of them, and would refresh the copy the VM is
+    # already running from and nothing else.
+    #
+    # A workspace-scoped `wk sync` still forwards: the workspaces and the store
+    # it fetches from are both in there, and so is the autodetect that decides
+    # which workspace is meant -- the host cannot see $WK_STORE/ws at all.
     if [ "$1" = sync ]; then
         local _a
-        for _a in "$@"; do [ "$_a" = --tools ] && return 0; done
+        for _a in "$@"; do
+            case "$_a" in --machine|--all) return 0 ;; esac
+        done
     fi
 
     if [ "$1" = bench ] && [ "${2:-}" = seed ] && [ -n "${3:-}" ]; then
@@ -306,12 +313,6 @@ is_targetless() {
     fi
     case "$1${2:+ $2}" in
         "build --list") return 0 ;;
-        # `wk sync --target <machine>` acts on the far end of an ssh, so the
-        # one thing it must not do is run inside the podman VM: the VM has no
-        # route to that machine and its own copy of wk-tools is the thing being
-        # replaced. A bare `wk sync` still forwards -- the container store it
-        # publishes into is in there.
-        "sync --target"|"sync --target="*) return 0 ;;
         # The two halves of a bare-metal benchmark run. Neither acts on a
         # container workspace and neither may be forwarded into the podman VM:
         # `stage` copies a build out of a *guest* onto a disk attached to this

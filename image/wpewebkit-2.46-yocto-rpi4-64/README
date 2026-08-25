@@ -1,4 +1,6 @@
-Spec dir for downstream-wpe-2.46-rpi4.
+Spec dir for wpewebkit-2.46-yocto-rpi4-64 (renamed from
+downstream-wpe-2.46-rpi4 on 2026-08-25: a configuration is named for the
+project it is built from, and this one is WPEWebKit's wpe-2.46).
 
 cmdline.txt.append.disabled -- forces a display that is not physically there.
 **DISABLED 2026-08-21 after it took the board off the network.** The mechanism

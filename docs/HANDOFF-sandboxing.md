@@ -86,7 +86,7 @@ every surface added since the request:
   NOPASSWD root (`docs/HANDOFF-boot.md`); and **the rpi5 grants
   `(ALL) NOPASSWD: ALL`** — `sudo -n -l` on the board shows it, so root costs
   nothing at all there, and `wk sudo status` is what reports it. Remedy:
-  `wk sudo require`. Fix the rpi5 now; narrowing moose's grant is the audit's.
+  `wk sudo setup`. Fix the rpi5 now; narrowing moose's grant is the audit's.
 
 Run it alongside `docs/Security/HANDOFF-tailscale.md`: its items 5-7 are the
 same question asked from the network side.

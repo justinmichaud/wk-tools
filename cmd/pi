@@ -40,7 +40,87 @@ TS_VERSION="${TS_VERSION:-$(ts_release_field TS_VERSION)}"
 TAG="${WK_PI_TAG:-tag:wk}"
 
 ACTION="${1:-}"; HOST="${2:-}"
+# The whole board lifecycle, in the order it is done, because the four commands
+# that make up "flash, connect and set up a Pi" live under three different verbs
+# and the order between them is not guessable from any one of them.
+#
+# Printed by `wk pi` with no argument and by `wk pi -h`; -h exits 0, because
+# asking for help is not an error.
+pi_usage() {
+    cat <<'EOF'
+wk pi -- Raspberry Pi test boards: get one running, then measure on it.
+
+A board runs a *bench system* on removable media. Its own workstation install,
+where it has one, is never touched: `wk sysimage write` refuses the disk a
+machine boots from, and `wk boot` is a one-shot the board returns from by
+itself. `wk help hardware` has the per-board arrangement and why they differ.
+
+FROM A BARE BOARD
+
+  1. build a system          wk sysimage build <profile>
+                             `wk sysimage -h` lists the profiles. Yocto profiles
+                             are hours and want --detach.
+  2. find the disk           wk sysimage disks <machine>
+                             the removable disk plugged into that board -- not
+                             the board's own system disk, which is refused.
+  3. write it                wk sysimage write <id> --disk <machine>:<device>
+                             writing a disk does not make anything boot it.
+  4. let it boot the disk    wk pi boot-order <ssh-host> usb-first
+                             rpi4/rpi5 firmware order. Omit the order and it
+                             comes from the machine's role (bench-device ->
+                             usb-first). --revert puts it back; --dry-run first.
+                             The rpi3 has no programmable order -- its card is
+                             swapped by hand.
+  5. boot it                 wk boot <machine>
+                             arms the one-shot and reboots. --status says what
+                             mode it is in, --diag reads the bench system's own
+                             account of a boot that never appeared, --back
+                             returns now.
+
+CONNECTING TO IT
+
+  A board is reached by its tailnet name, and a fresh bench system is not on
+  the tailnet yet -- so the first connection is the LAN address or the mDNS
+  name that `wk status` prints under "without tailscale" for that machine.
+
+  6. put it on the tailnet   wk pi setup <ssh-host>
+                             copies the pinned tailscale binaries onto a
+                             writable partition, adds an init script and brings
+                             the node up tagged. No image rebuild, no package
+                             manager, no libc dependency -- which is what makes
+                             it work on a slim Yocto image.
+                             After this the board answers to its tailnet name
+                             and `wk status` reports it reached.
+
+MEASURING ON IT
+
+  7. put WebKit on it        wk pi deploy <workspace> <machine>
+                                 [--slot NAME] [--skeleton|--skeleton-only]
+                             the image is a runtime and carries no browser, so
+                             this is how one gets there. --slot puts a build
+                             beside an existing one rather than over it, which
+                             is what makes an A/B possible without redeploying
+                             between runs.
+  8. run a plan              wk pi bench <machine> <plan>
+                                 [--slot NAME] [--count N] [--timeout S]
+                             wk pi bench <machine> <plan> --ab A,B [--rounds N]
+                             WebKit's own run-benchmark on a booted bench
+                             system. Refuses host mode, and reports what the
+                             number is worth. --ab alternates two deployed
+                             slots (A B A B ...) so thermal drift lands on both
+                             arms instead of only the second; each run is
+                             recorded separately and `wk bench compare` does the
+                             statistics. A run with no display attached needs
+                             --force: compositing falls to the CPU, which
+                             measures the renderer as much as the browser.
+
+Flashing is not here: it is an image operation, so it is `wk sysimage write`
+(step 3) for every machine and every medium.
+EOF
+}
+
 case "$ACTION" in
+    -h|--help|help|"") pi_usage; exit 0 ;;
     setup|boot-order) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>" ;;
     # deploy takes a *workspace* and a fleet machine, not an ssh host: it has
     # to reach into the build to make the archive and onto the board to unpack
@@ -51,25 +131,7 @@ case "$ACTION" in
     # from the store by profile. See boot/disk.sh.
     # Kept only to say where it went; see below.
     flash) : ;;
-    *) die "usage: wk pi setup <ssh-host>
-       wk pi deploy <workspace> <machine> [--slot NAME] [--skeleton|--skeleton-only]
-         puts a cross-built WebKit on the board -- the image is the runtime
-         and carries no browser, so this is how one gets there
-         --slot puts it beside an existing build rather than over it, which is
-         what makes an A/B possible without redeploying between runs
-       wk pi bench <machine> <plan> [--slot NAME] [--count N] [--timeout S]
-       wk pi bench <machine> <plan> --ab A,B [--rounds N]
-         runs the plan through WebKit's own run-benchmark on a booted bench
-         system -- refuses host mode, and reports what the number is worth
-         --ab alternates two deployed slots (A B A B ...) so that thermal drift
-         lands on both arms instead of only the second; each run is recorded
-         separately, and 'wk bench compare' does the statistics
-         a run with no display attached needs --force: compositing falls to the
-         CPU, which measures the renderer as much as the browser
-       wk pi boot-order <ssh-host> [<order>] [--dry-run] [--revert]
-         orders: usb-first  local -- omitted, it comes from the machine's
-         role in boot/machines.sh (bench-device: usb-first; else local)
-       (flashing moved: 'wk sysimage write <id> --disk <machine>:<device>')" ;;
+    *) pi_usage >&2; die "unknown subcommand: $ACTION" ;;
 esac
 shift 2 2>/dev/null || true
 

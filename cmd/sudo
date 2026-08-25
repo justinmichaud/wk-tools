@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# wk sudo status|require -- make root cost a password, every time, everywhere.
+# wk sudo status|setup -- make root cost a password, on a short leash, everywhere.
 #
 # Two things have to be true on a machine before an unattended agent runs
 # anything on it, and neither is true by default:
@@ -9,30 +9,43 @@
 #                 ALL` from the site's own sudoers drop-in. Anything running as
 #                 you on that box is root for the asking, including something
 #                 that got there by accident.
-#   no timestamp. sudo remembers that you authenticated for five minutes by
+#   a short window. sudo remembers that you authenticated for five minutes by
 #                 default. Five minutes is a window, and "look for a live sudo
 #                 timestamp and use it" is a thing agents have actually done
-#                 here. timestamp_timeout=0 closes it: every sudo asks.
+#                 here.
+#
+# The window is 30 seconds (WK_SUDO_TIMEOUT below), and that number is a
+# deliberate change from 0. `timestamp_timeout=0` -- every single sudo
+# authenticates -- is the stricter setting and was what this installed first,
+# and the cost showed up immediately in the commands that legitimately need root
+# several times in a row: `./setup`'s last three stages, `admin/install.sh`, and
+# this command's own install-then-verify. Six prompts in ninety seconds is how a
+# person ends up looking for the switch that turns the whole thing off, which
+# loses more than the window ever cost. 30 seconds covers one command's own
+# privileged sequence and is closed again long before anything unattended comes
+# back to look for it.
 #
 # The fix is one drop-in file, and the reason it works is sudoers' last-match
 # rule: `/etc/sudoers.d/zz-<user>-passwd` sorts after the site's own file, so
 # its `PASSWD: ALL` overrides an earlier `NOPASSWD: ALL` without touching -- or
-# needing permission to touch -- anything the sysadmins own.
+# needing permission to touch -- anything the sysadmins own. That include
+# directory is honoured on macOS as well as on Linux, which is why one
+# implementation serves both.
 #
 #   wk sudo status                  what this machine does today
-#   wk sudo require                 install the drop-in here (asks for your password)
-#   wk sudo status  --target <t>    the same, on a configured machine
-#   wk sudo require --target <t>    ...
-#   wk sudo status  --all           every configured machine, and this one
+#   wk sudo setup                   install the drop-in here (asks for your password)
+#   wk sudo status --target <t>     the same, on a configured machine
+#   wk sudo setup  --target <t>     ...
+#   wk sudo status --all            every configured machine, and this one
 #
-# `require` never edits an existing file and never removes one: it writes a
+# `setup` never edits an existing file and never removes one: it writes a
 # file of its own, validates it with `visudo -c` before installing it and
 # again afterwards, and then *tests the property* -- clears the timestamp and
 # checks that sudo asks. A sudoers change that cannot be undone by hand is the
 # one mistake that locks you out of your own machine, so nothing here is done
 # on faith.
 #
-#   0  a password is required, with no timestamp window
+#   0  a password is required, and the timestamp window is 30 seconds or less
 #   1  it is not (status), or the action failed
 #   2  usage
 
@@ -46,6 +59,13 @@ in_workspace && die "'wk sudo' hardens a machine you log into, and this is works
     '$(wk_self)' -- a container's sudoers belong to the image and the
     workspace is the blast radius anyway. Run it on the host."
 
+# The window, in the two spellings the rest of this file needs: sudoers wants
+# minutes (fractional is fine -- sudo 1.8.6 and later, which is everything here)
+# and a person reading a verdict line wants seconds. Declared once, because a
+# number that appears twice is a number that disagrees with itself.
+WK_SUDO_TIMEOUT_MIN="${WK_SUDO_TIMEOUT_MIN:-0.5}"
+WK_SUDO_TIMEOUT_DESC="30 seconds"
+
 ACTION=status
 TARGET=""
 ALL=""
@@ -56,11 +76,15 @@ QUIET=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        status|require) ACTION="$1"; shift ;;
+        status|setup) ACTION="$1"; shift ;;
+        # Renamed 2026-08-25, to the verb every other fleet command uses
+        # (`wk remote setup`, `wk bridge setup`, `wk pi setup`). Refused by name
+        # rather than accepted quietly, so there is one spelling.
+        require) die "'wk sudo require' is now 'wk sudo setup'" ;;
         --target) TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
         --all)    ALL=1; shift ;;
         --quiet)  QUIET=1; shift ;;
-        -h|--help) log "usage: wk sudo [status|require] [--target <name>|--all]"; exit 2 ;;
+        -h|--help) log "usage: wk sudo [status|setup] [--target <name>|--all]"; exit 2 ;;
         *) die "unknown option: $1" ;;
     esac
 done
@@ -88,11 +112,11 @@ DROPIN="/etc/sudoers.d/zz-${USER_NAME}-passwd"
 #
 # so the grep matched the line that had already been overridden and reported a
 # correctly hardened machine as wide open. `wk remote setup` then offered to fix
-# it on every run, and `require` -- whose own short-circuit looked for a file it
+# it on every run, and `setup` -- whose own short-circuit looked for a file it
 # cannot see -- re-installed and asked for the password every time.
 #
 # What still cannot be learned without authenticating is the timeout, when the
-# listing is not readable; saying so is better than guessing, and `require` is
+# listing is not readable; saying so is better than guessing, and `setup` is
 # idempotent so there is no cost to running it anyway.
 probe_local() {
     local out rc=0 free=no timeout="" rules last blanket=unknown
@@ -125,9 +149,24 @@ probe_local() {
     echo "blanket=$blanket"
     echo "scoped=$(printf '%s\n' "$rules" | grep -c 'NOPASSWD:' || true)"
 
-    timeout=$(printf '%s\n' "$out" | sed -n 's/.*timestamp_timeout=\([0-9-]*\).*/\1/p' | head -1)
+    # The dot matters: the window is fractional minutes now, and a class of
+    # `[0-9-]` reads `0.5` as `0` -- which is a different policy reported as if
+    # it were the one asked for.
+    timeout=$(printf '%s\n' "$out" | sed -n 's/.*timestamp_timeout=\([0-9.-]*\).*/\1/p' | head -1)
     echo "timeout=${timeout:-unset}"
 }
+
+# Is a timeout the one this command installs? Compared as a number, not as a
+# string: sudo echoes back what the file said, and `0.50`, `.5` and `0.5` are
+# the same policy written three ways.
+timeout_is_ours() {
+    [ -n "${1:-}" ] || return 1
+    awk -v a="$1" -v b="$WK_SUDO_TIMEOUT_MIN" \
+        'BEGIN { exit !(a + 0 == b + 0) }' 2>/dev/null
+}
+
+# How to say a timeout in seconds, for a machine that has one we did not install.
+timeout_secs() { awk -v m="$1" 'BEGIN { printf "%g", m * 60 }' 2>/dev/null; }
 
 # 0 when this machine is as it should be. The two facts are independent: a
 # machine with no NOPASSWD and a five-minute window still hands root to
@@ -165,17 +204,29 @@ verdict_local() {
         return 1
     fi
 
+    # A timeout of 0 is *stricter* than what this installs and is therefore not
+    # a failure: a machine hardened harder than asked is done, and re-installing
+    # over it to widen the window to 30 seconds would be this command loosening
+    # a policy somebody chose. Anything longer than ours is the failure.
+    if timeout_is_ours "$timeout"; then
+        printf 'a password is required, and the timestamp lasts %s' "$WK_SUDO_TIMEOUT_DESC"
+        # Whoever provides it. The property is the machine's, not this
+        # command's, and a machine already hardened by a site policy or by
+        # hand is done -- there is nothing for `setup` to add, and saying
+        # "installed by wk" about a file wk did not write would be worse
+        # than saying nothing.
+        [ -f "$DROPIN" ] && printf ' (%s)' "$DROPIN"
+        printf '\n'; return 0
+    fi
+
     case "$timeout" in
-        0) printf 'a password is required, and no timestamp is kept (timeout 0)'
-           # Whoever provides it. The property is the machine's, not this
-           # command's, and a machine already hardened by a site policy or by
-           # hand is done -- there is nothing for `require` to add, and saying
-           # "installed by wk" about a file wk did not write would be worse
-           # than saying nothing.
+        0|0.0|.0) printf 'a password is required, and no timestamp is kept at all (timeout 0)'
+           printf ' -- stricter than the %s this installs, so nothing to do' "$WK_SUDO_TIMEOUT_DESC"
            [ -f "$DROPIN" ] && printf ' (%s)' "$DROPIN"
            printf '\n'; return 0 ;;
         unset) printf "a password is required, but sudo keeps a timestamp (timeout unset -- sudo's default)\n"; return 1 ;;
-        *) printf 'a password is required, but sudo keeps a timestamp for %s minute(s)\n' "$timeout"; return 1 ;;
+        *) printf 'a password is required, but sudo keeps a timestamp for %s minute(s) (%s seconds) -- wanted %s\n' \
+               "$timeout" "$(timeout_secs "$timeout")" "$WK_SUDO_TIMEOUT_DESC"; return 1 ;;
     esac
 }
 
@@ -199,7 +250,7 @@ visudo_resolve() {
 }
 
 # --- install the drop-in -----------------------------------------------------
-require_local() {
+setup_local() {
     local tmp grp rc=0 _v
 
     visudo_resolve
@@ -212,21 +263,23 @@ require_local() {
     # asked for a password. What matters is whether root costs a password here;
     # if it does, there is nothing to install.
     if _v=$(verdict_local); then
-        info "already required on $(hostname -s): $_v"
+        info "already set up on $(hostname -s): $_v"
         return 0
     fi
 
     tmp=$(mktemp)
     cat > "$tmp" <<EOF
-# Installed by 'wk sudo require'. Do not edit; re-run the command instead.
+# Installed by 'wk sudo setup'. Do not edit; re-run the command instead.
 #
 # Sorted after the site's own drop-ins on purpose: sudoers takes the LAST
 # match, so this re-imposes a password over a NOPASSWD granted elsewhere
 # without modifying a file somebody else owns.
 #
-# timestamp_timeout=0 means every sudo authenticates -- no five-minute window
-# for something running as $USER_NAME to walk through.
-Defaults:$USER_NAME timestamp_timeout=0
+# timestamp_timeout=$WK_SUDO_TIMEOUT_MIN is a $WK_SUDO_TIMEOUT_DESC window --
+# long enough for one command's own privileged sequence, and closed again long
+# before anything unattended comes back looking for it. Not sudo's default five
+# minutes, and not 0: see the top of cmd/sudo for why neither.
+Defaults:$USER_NAME timestamp_timeout=$WK_SUDO_TIMEOUT_MIN
 $USER_NAME ALL=(ALL:ALL) PASSWD: ALL
 EOF
 
@@ -260,14 +313,42 @@ EOF
         log  "  something later in the include order is granting NOPASSWD -- 'sudo -l' shows the order"
         return 1
     fi
-    changed "sudo on $(hostname -s) now asks for a password every time"
+    changed "sudo on $(hostname -s) now asks for a password, and forgets after $WK_SUDO_TIMEOUT_DESC"
+
+    # ...and that it did not take the deliberate exceptions with it.
+    #
+    # This file's own reading of sudoers says only *blanket* rules count and
+    # that "a NOPASSWD scoped to one program is how the deliberate exceptions
+    # work -- wk's own quiesce helper is exactly that". The rule installed above
+    # is `PASSWD: ALL`, and `ALL` matches those programs too, so whether they
+    # survive is a question of include order and nothing else. It was answered
+    # wrongly for months: `/etc/sudoers.d/wk-quiesce` sorts before
+    # `zz-<user>-passwd`, so installing this killed the carve-out it is written
+    # not to touch -- measured on rpi5, 2026-08-25, where `sudo -n
+    # wk-quiesce-priv status` returned 1 with the helper installed and correct.
+    # admin/install.sh names them `zzz-` now so they are the last match.
+    #
+    # Checked here rather than assumed, because this is the command that can
+    # break them and the failure is silent: `wk quiesce` and `wk session` simply
+    # start asking for a password in the daily path.
+    local _h _broke=""
+    for _h in /usr/local/libexec/wk-quiesce-priv /usr/local/libexec/wk-card-priv; do
+        [ -x "$_h" ] || continue
+        sudo -n "$_h" status >/dev/null 2>&1 || _broke="$_broke $_h"
+    done
+    if [ -n "$_broke" ]; then
+        warn "the drop-in is in force, but it now out-ranks a privileged helper:$_broke"
+        log  "  those grants exist so 'wk quiesce' and 'wk session' need no password."
+        log  "  './setup --stage quiesce' reinstalls their rules under names that sort last."
+        return 1
+    fi
 }
 
 # --- one machine, or several -------------------------------------------------
 #
 # A configured machine answers for itself: `wk remote setup` puts wk-tools on
 # it, so the far side runs exactly this file rather than a second
-# implementation reached over ssh. `require` there needs a terminal, because
+# implementation reached over ssh. `setup` there needs a terminal, because
 # sudo is going to ask for a password.
 on_target() {
     local t="$1" act="$2" rc=0 out
@@ -276,13 +357,13 @@ on_target() {
         printf '%-22s %s\n' "$t" "no wk-tools there yet -- 'wk remote setup $t'"
         return 1
     fi
-    if [ "$act" = require ]; then
-        t_wk_tty sudo require || rc=$?
+    if [ "$act" = setup ]; then
+        t_wk_tty sudo setup || rc=$?
         return "$rc"
     fi
     out=$(t_wk sudo status --quiet 2>&1) || rc=$?
     printf '%-22s %s\n' "$t" "$out"
-    [ "$rc" -eq 0 ] || log "  fix: wk sudo require --target $t"
+    [ "$rc" -eq 0 ] || log "  fix: wk sudo setup --target $t"
     return "$rc"
 }
 
@@ -299,7 +380,7 @@ if [ -n "$ALL" ]; then
     # on printf's status, which is not the answer to anything.
     rc=0; v=$(verdict_local) || rc=$?
     printf '%-22s %s\n' "$(hostname -s)" "$v"
-    [ "$rc" -eq 0 ] || log "  fix: wk sudo require"
+    [ "$rc" -eq 0 ] || log "  fix: wk sudo setup"
     bump "$rc"
     for t in $(target_all); do
         case "$t" in container|vm|local) continue ;; esac
@@ -319,12 +400,12 @@ status)
     fi
     printf '%-22s %s\n' "$(hostname -s)" "$v"
     if [ "$rc" -ne 0 ]; then
-        log "  fix: wk sudo require"
+        log "  fix: wk sudo setup"
         log "  every other machine: wk sudo status --all"
     fi
     exit "$rc"
     ;;
-require)
-    require_local
+setup)
+    setup_local
     ;;
 esac

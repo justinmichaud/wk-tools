@@ -101,7 +101,7 @@ t_sync() {
     fi
     ( WK_VMTOOLS_ONLY=tools . "$WK_ROOT/host/macos/vmtools.sh" ) \
         || die "could not push wk-tools into the podman VM"
-    log "  the mirror and snapshots in there are a plain 'wk sync' away"
+    log "  the mirror and snapshots in there are a plain 'wk sync --machine' away"
 }
 
 # The architecture this workspace was created with, recorded at creation

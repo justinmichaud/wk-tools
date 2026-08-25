@@ -160,15 +160,17 @@ rpi3 -- bench-device (Raspberry Pi 3, armv7l, 931 MB)
               ever reads the card's FAT -- booting the bench root against the
               rescue's kernel leaves the modules mismatched, which looks like
               a broken image rather than a mismatched boot.
-  today       one system, the base image
-              (`downstream-yocto-wpe-2.48-rpi3-32-20260822T205734Z`), so there
-              is nothing here a benchmark may run against and `wk pi bench
-              rpi3` refuses. The second slot is not built yet.
-  systems     Yocto in both widths (`downstream-yocto-wpe-2.48-rpi3-32` /
-              `-64`), and the buildroot WPE 2.38 image that matches what this
-              board has historically run -- there is no distro base for a
-              32-bit Pi, and 931 MB makes the 64-bit system deliberately
-              marginal.
+  today       one system, the base image (built from what is now called
+              `webkit-2.52-yocto-rpi3-32`), so there is nothing here a benchmark
+              may run against and `wk pi bench rpi3` refuses. The second slot is
+              not built yet.
+  systems     32-bit only, which is the whole set for this board: Yocto
+              (`webkit-2.52-yocto-rpi3-32`) and buildroot
+              (`wpewebkit-2.38-buildroot-rpi3-32`, which is what this board has
+              historically run). There is no distro base for a 32-bit Pi, and
+              the 64-bit rpi3 system is gone -- 931 MB made it a marginal
+              comparison rather than a system worth keeping a configuration
+              for.
 
 tolken / mbp -- workstation (Apple Silicon Mac)
   host mode   your macOS install. Never written by wk.

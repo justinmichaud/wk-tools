@@ -177,14 +177,13 @@ workspace uses on itself, which is how `wk build` works from inside one; it is
 never a target you ask for.
 
 `remote` is the one target you can have several of, so a remote target is named
-after the machine — `--target devbox-arm64-2`. A target is configured in two
-places, and which one a fact belongs in is the distinction:
-`targets/hosts/<name>.conf` in this repository holds what is true of the
-machine (its ssh destination, the CMake flags its toolchain needs, whether it
-is a build box or another workstation), so every device that pulls the
-repository has that target; `~/.config/wk/targets/<name>.conf` holds this
-device's own view of it and overrides the shared one line by line.
-`wk remote setup <machine>` provisions one, without ever needing root on it,
+after the machine — `--target devbox-arm64-2`. A target is configured in one
+place: `targets/hosts/<name>.conf` in this repository, holding what is true of
+the machine (its ssh destination, the CMake flags its toolchain needs, whether
+it is a build box or another workstation), so every device that pulls the
+repository has that target. There is no per-device half — everything in a conf
+is a fact about the machine, and the only genuinely per-device state is keys and
+secrets. `wk remote setup <machine>` provisions one, without ever needing root on it,
 and leaves `wk` usable *on* the machine as well as against it.
 `wk sync --target <machine>` refreshes what it keeps: its copy of wk-tools and
 its WebKit mirror.

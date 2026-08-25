@@ -121,14 +121,22 @@ Skip this if you are not benchmarking. Everything else works without it.
 ```sh
 wk sudo status          # here
 wk sudo status --all    # and on every configured machine
-wk sudo require         # install the drop-in (asks for your password)
+wk sudo setup           # install the drop-in (asks for your password)
 ```
 
 Two defaults are worth closing on every machine you log into: sudo keeps a
 five-minute timestamp, and Igalia's build machines grant `NOPASSWD: ALL`. One
 drop-in of your own — `/etc/sudoers.d/zz-<user>-passwd`, which sorts after the
-site's file and therefore wins — closes both. `wk doctor` reports the state on
-every run.
+site's file and therefore wins — closes both, leaving a 30-second window.
+`wk doctor` reports the state on every run.
+
+The two privileged helpers are the deliberate exceptions, and their rules are
+named `zzz-wk-quiesce` and `zzz-wk-card` so that they sort after *that* file and
+survive it. They did not until 2026-08-25: `PASSWD: ALL` matches every command,
+so while they were called `wk-quiesce` and `wk-card` the blanket rule out-ranked
+them, `wk quiesce` and `wk session` prompted for a password on every call, and
+`./setup` reported the helper missing on every run while it sat there
+installed.
 
 ---
 
@@ -264,19 +272,18 @@ that already works, and set it up once:
 wk remote setup devbox-arm64-2
 ```
 
-That probes the machine, writes `~/.config/wk/targets/devbox-arm64-2.conf` if
-there is none, pushes wk-tools, and configures your shell there. That conf is
-*this device's* view of the machine; what is true of the machine itself belongs
-in `targets/hosts/devbox-arm64-2.conf` in the repository, which every device
-gets by pulling (see `targets/hosts/buildbox4.conf` for a machine whose
-toolchain needs three CMake flags on every build). **It never
+That probes the machine, writes `targets/hosts/devbox-arm64-2.conf` if there is
+none, pushes wk-tools, and configures your shell there. That conf is the only
+place the machine is configured, it is in this repository, and committing it
+gives every device the target (see `targets/hosts/buildbox4.conf` for a machine
+whose toolchain needs three CMake flags on every build). **It never
 needs root** — a build box belongs to everyone who logs into it, so nothing is
 installed, nothing outside `$HOME` is touched, and anything it finds worth
 removing is a question rather than an action. Edit the conf for whatever
 differs from the defaults:
 
 ```sh
-# ~/.config/wk/targets/devbox-arm64-2.conf
+# targets/hosts/devbox-arm64-2.conf
 WK_REMOTE_ROOT=/home/you/wk    # defaults to ~/wk on the box
 WK_REMOTE_REFERENCE=/var/...   # a WebKit repo to clone from; usually detected
 ```
@@ -669,13 +676,10 @@ Three limits to know about:
 
 ## Moving to another machine
 
-Nothing is machine-specific except what `wk backup` captures and
-`~/.config/wk/targets/*.conf` — the *device's own overrides* for the machines
-above. Since 2026-08-19 the machines themselves are in the repository
-(`targets/hosts/*.conf`), so a re-install no longer loses every remote target:
-it loses only whatever that device had overridden, and a fresh clone knows the
-whole fleet. On the new
-machine, clone and `./setup`. To carry your current desktop settings across,
+Nothing is machine-specific except what `wk backup` captures, and keys and
+secrets. The machines are all in the repository (`targets/hosts/*.conf`), so a
+re-install loses no target at all: a fresh clone knows the whole fleet. On the
+new machine, clone and `./setup`. To carry your current desktop settings across,
 run `wk backup` on the old one first and commit the result — it writes live
 settings back into `host/macos/defaults.conf`, `host/macos/symbolichotkeys.plist`
 and `host/linux/config.dconf`.

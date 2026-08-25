@@ -53,16 +53,58 @@ outside the runner's coverage is only as fresh as the last human pass.
       matched the line already overridden — reporting a correctly hardened
       machine as wide open. The verdict now starts from `sudo -n true`, which
       is evidence rather than a reading
-- [ ] `wk sudo require` installs `/etc/sudoers.d/zz-<user>-passwd`, validates
+### The deliberate exceptions survive the blanket rule
+- [V] the two privileged helpers' sudoers rules are named `zzz-wk-quiesce` and
+      `zzz-wk-card`, so they are the **last match** in `/etc/sudoers.d` and
+      out-rank `zz-<user>-passwd`. Verified on rpi5 that `zzz-` sorts after
+      `zz-<user>-passwd` in both `LC_ALL=C` and the machine's own `en_CA.UTF-8`
+- [!] the bug this fixes, measured on rpi5 2026-08-25 with both helpers
+      installed, root-owned and byte-identical to the repo:
+      `sudo -n /usr/local/libexec/wk-quiesce-priv status` returned **1**.
+      `wk sudo setup`'s `zz-<user>-passwd` says `PASSWD: ALL`, `ALL` matches the
+      helper too, and `wk-quiesce` sorted before it — so the carve-out was dead,
+      `wk quiesce` and `wk session` prompted for a password in the daily path,
+      and `./setup` reported the helper "not installed" on every run
+- [ ] the repair needs one interactive run on each affected machine:
+      `./setup --stage quiesce`. rpi5 is still in the broken state — no
+      non-interactive sudo is available there to fix it remotely
+- [V] the install removes the old-named file in the same branch that writes the
+      new one. An opportunistic `sudo -n true` guard was written first and was
+      wrong: it is false on exactly the machines that have the problem, because
+      `zz-<user>-passwd` is what makes sudo ask
+- [V] `wk doctor` tests the **property**, not the file: `test -x` on the helper
+      reported a green tick for a helper that was installed and useless. It now
+      asks the helper and distinguishes "not installed" from "installed, but its
+      sudoers rule is not in force", which have different fixes
+- [V] `./setup --stage quiesce` makes the same distinction rather than saying
+      "not installed" about a file that is present — that message sent the
+      reader to reinstall it, which changes nothing
+- [ ] `wk sudo setup` checks after installing that it has not out-ranked either
+      helper, and says so if it has. This is the command that can break them and
+      the failure is otherwise silent
+
+- [ ] `wk sudo setup` installs `/etc/sudoers.d/zz-<user>-passwd`, validates
       with `visudo -c` before and after, and then proves the property: `sudo -k`
       followed by `sudo -n true` fails
-- [V] `wk sudo require --target <machine>` is idempotent: with the property
-      already true it says "already required" and does **not** prompt or
+- [ ] the window it installs is **30 seconds** (`timestamp_timeout=0.5`), not
+      sudo's default five minutes and not 0 — renamed from `wk sudo require`
+      and changed from 0 on 2026-08-25, because `./setup`'s last three stages
+      and this command's own install-then-verify each prompted separately
+- [ ] a machine already at `timestamp_timeout=0` is left alone and reported as
+      done: stricter than what this installs is not a failure, and re-installing
+      over it would be wk *widening* a window somebody chose
+- [ ] the timeout is compared as a number, so `0.50`, `.5` and `0.5` are one
+      policy; a longer one is reported in both minutes and seconds
+- [ ] the same command on macOS: `/etc/sudoers.d` is honoured there (the
+      quiesce drop-in proves it), `visudo` is at `/usr/sbin/visudo`, and the
+      file is installed root:wheel rather than root:root
+- [V] `wk sudo setup --target <machine>` is idempotent: with the property
+      already true it says "already set up" and does **not** prompt or
       re-install (measured on buildbox4, 2026-08-19). It gates on the property
       and not on `[ -f "$DROPIN" ]`, which is false whenever the remote login
       name differs from this machine's — the normal case for a shared box, and
       the reason every run used to ask for a password
-- [ ] `wk sudo require --target <machine>` on a machine that needs it: the
+- [ ] `wk sudo setup --target <machine>` on a machine that needs it: the
       password prompt gets a terminal over ssh
 - [V] `wk sudo status --all` walks every configured machine and names the fix
       per machine
@@ -754,8 +796,7 @@ Verified 2026-08-19 against `devbox-arm64-2` (80 cores, 250 GB, Debian 12,
 reached through a ProxyJump), driven from the macOS host.
 
 - [V] a machine name is a target: `--target devbox-arm64-2` resolves through
-      `targets/hosts/<name>.conf` in this repository, or
-      `~/.config/wk/targets/<name>.conf` for this device alone
+      `targets/hosts/<name>.conf` in this repository, and nowhere else
 - [V] an unconfigured name is refused, and the error prints the conf to write
 - [V] two remote targets in one process do not inherit each other's host,
       root or capacity
@@ -1283,6 +1324,61 @@ reached through a ProxyJump), driven from the macOS host.
       would clone into a repository with no branches) and every other upstream is
       namespaced. A fifth upstream must need no change here beyond `wk_remotes`
 
+#### Scope, not mechanism — `wk sync`'s three forms
+- [V] the flags name *how far*, never which mechanism: bare (the workspace you
+      are in), `--machine`, `--all`. Before 2026-08-25 there were five spellings
+      across two axes — `--target container` for the copy of wk-tools in the VM,
+      `--tools` for the copies everywhere else, `--target <machine>` for a build
+      box, a bare `wk sync` for the store, and `--all` accepted and *ignored* —
+      so the caller had to know which noun held the stale copy before they could
+      ask for it to be refreshed, which is backwards: not knowing is the reason
+      to run the command
+- [V] `--tools` and `--target` are refused by name, each naming the scope that
+      replaced it, so there is one spelling rather than two
+- [ ] bare, inside a workspace: that workspace, with no argument
+- [ ] bare, on a host with exactly one workspace: that one, and it says so
+- [ ] bare, on a host with several: it lists them and asks, with "all of them
+      and this machine's mirror, snapshot and tooling" as the last choice. It
+      does not guess — a wrong guess fetches in somebody else's workspace
+- [ ] bare, on a host with several and **no terminal**: refused, naming the two
+      scopes that need no answer. A prompt nobody can answer must not block
+- [V] bare, on a host with none: says so and does the machine instead
+- [V] `--machine` on a **macOS** host does the fleet and tooling half here and
+      then says the store half is in the podman VM, naming what to run. It used
+      to attempt it and print `mkdir: /var/lib/wk: Permission denied`, which
+      names neither the machine nor the remedy (`store_is_local`, lib/store.sh)
+- [ ] `--machine` on a Linux workstation does all of it in one place
+- [ ] `--all` additionally walks every other machine's own store
+- [V] the closing note says what to *do* — `git rebase origin/main` — and nothing
+      about the snapshot. What was there explained that a workspace stays pinned
+      to the snapshot it was made on and that "only a new workspace gets a new
+      one", which is true of the implementation and reads as "remake the
+      container to get current WebKit". It is the sentence that made a person
+      believe exactly that, and it was wrong: every workspace has today's
+      upstream in it the moment the command finishes
+- [ ] the `wk` dispatcher does not forward `--machine`/`--all` into the podman
+      VM (the VM can see none of the fleet), and still forwards a
+      workspace-scoped sync (the workspaces, the store and the autodetect that
+      picks between them are all in there)
+
+#### `wk sync --tools` — every copy of this repository, and the truth about it
+- [V] the podman VM and both build boxes take the push and `wk status` then
+      reports them `in sync` (measured 2026-08-25)
+- [V] a **peer** is checked after its pull, not merely reported: `git pull
+      --ff-only` on moose cannot converge while this checkout is dirty, and the
+      command used to print `pulled` and exit 0 while `wk status` went on saying
+      DIFFERS — offering as the remedy the pull that had just run. It now prints
+      `pulled, still DIFFERS (<theirs>, this machine has <mine>)` and names the
+      reason on this side (measured 2026-08-25)
+- [V] the reason is the specific one: uncommitted changes here / N commits ahead
+      of the upstream / no upstream for this branch / same commit, so the
+      difference is untracked or excluded files
+- [V] the command exits **non-zero** when any target did not converge. It exited
+      0 regardless, which made the warning decoration
+- [ ] `wk status`'s fix for a behind peer is `commit and push here first` while
+      this checkout is dirty, and `wk sync --tools` once it is clean — never a
+      `git pull` that provably cannot converge
+
 - [ ] `wk backup` → `./setup` round-trips with no spurious changes
 - [ ] `wk backup`'s junk filters strip what they claim (weather location,
       WiFi UUIDs, last-folder paths, timestamps)
@@ -1774,9 +1870,12 @@ command that asked for it.
 
 ### The target registry — one list of machines, shared by git
 - [V] `targets/hosts/<name>.conf` in this repository makes a machine a target
-      on every device that pulls it; `~/.config/wk/targets/<name>.conf` still
-      overrides it line by line (sourced second, so a device's own conf keeps
-      the registry's answer for everything it does not mention)
+      on every device that pulls it, and is the only place a target is
+      configured — the per-device override directory is gone (2026-08-25), and
+      with it two of `wk doctor`'s machine-local entries
+- [ ] on the machine itself, `WK_REMOTE_LOCAL` and the root are computed from
+      `~/.wk-remote` rather than read from a second conf beside it: `wk ls` on
+      buildbox4 resolves its own workspaces with no ssh
 - [V] `wk build bb4 gtk-release-asan` needs no `--cmake` any more: buildbox4's
       three clang-19 flags are in its registry conf and land in every build's
       CMake flags (`--dry-run` shows them, 2026-08-19)
@@ -1813,6 +1912,25 @@ command that asked for it.
       `--target` disambiguates
 - [ ] a target that cannot be probed during resolution is reported
       unreachable by name — never silently left out of the view
+
+### One column per section — `wk status`'s text view
+- [V] every label/value line in a machine's block shares one label column,
+      computed from the widest label present. Before 2026-08-25 the width was a
+      constant 14 and three separate hardcoded pairs: every label wider than 14
+      (`without tailscale`, `push (podman VM)`, `wk-tools (in the podman VM)`)
+      pushed its own value to a column of its own, and the wk-tools and push-key
+      rows were laid out by `%-30s %-14s`, which lined up with nothing above them
+- [V] the fleet section and the bridges section each get one column for the whole
+      section, not one per row — otherwise `from` lands in a different place on
+      every machine in the same list
+- [V] a continuation line (a `fix`, a remedy) is blank in the label column and
+      indents to the value, rather than starting a column of its own
+- [V] the wk-tools row leads with the **tree hash**, which is the answer. The
+      commit follows only when there is one: every rsynced copy reports `-` for
+      it (they are copied `--exclude .git`), so it was a column of dashes with no
+      heading sitting between the label and the verdict
+- [ ] `--json` and `--html` are unaffected: the alignment is the text renderer's,
+      and the page has its own layout
 
 ### The fleet walk — `wk status` reaches every workstation that is up
 - [V] a bare `wk status` sshes into each listed workstation that answers, runs
@@ -2770,6 +2888,54 @@ on the writing side passed while it happened.
       is about and which no test has exercised (the rpi4 has no bmaptool, so
       every write to it takes the dd path today)
 
+### One file per configuration — `image/configs/`
+- [V] every WebKit-runtime configuration is a file in `image/configs`, named
+      `<project>-<release>-<builder>-<board>-<width>`, and `image_profile_load`
+      sources it. What used to be there was three `case` arms with a nested
+      `case` inside one of them — the shape CLAUDE.md says is being replaced —
+      and the only things they actually disagreed about were the branch, the
+      targets.conf section and the hostname
+- [V] the naming is the **project**, never upstream/downstream. Those words were
+      actively wrong here: `downstream-yocto-wpe-2.48-*` set
+      `YOC_BRANCH=webkitglib/2.48`, a branch in WebKit/WebKit, so five profiles
+      wore a `downstream-` prefix while building from upstream. A configuration
+      named for the repository it comes from cannot make that mistake
+- [V] the set is twenty: WPEWebKit 2.38 (buildroot), WPEWebKit 2.46 (buildroot
+      and yocto) and WebKit 2.52 (buildroot and yocto), each across rpi3-32,
+      rpi4-32, rpi4-64 and rpi5-64. The rpi3 is 32-bit only here and the rpi5 is
+      64-bit only, so "32 and 64 on every board" is four combinations, not six
+- [V] every retired name is refused by name and points at its replacement:
+      `downstream-wpe-2.46-rpi4` → `wpewebkit-2.46-yocto-rpi4-64`, the four 2.48
+      ones → their `webkit-2.52-yocto-*` equivalents, and `-rpi3-64` → "the rpi3
+      is 32-bit here"
+- [V] a configuration that cannot be built declares `CFG_NEEDS` and is refused in
+      the **first second**, naming the missing input and where it goes — not in
+      hour four of a bitbake. Eleven of the twenty are in that state today
+- [V] the reasons are checked facts, not guesses (2026-08-25):
+      WPEWebKit's releases are 2.20/2.22/2.28/2.30/2.36/2.38/2.42/2.46/2.50 —
+      there is no wpe-2.48 and no wpe-2.52; `wpe-2.38` carries no `Tools/yocto`
+      at all, which is why it is buildroot-only; `webkitglib/2.52` is the only
+      branch with an `[rpi5-64bits-mesa]` section, so moving to 2.52 retires the
+      old rpi5 profile's "needs one section added upstream"; and the buildroot
+      fork's release-pinned `cog` defconfigs are **rpi3, 32-bit, only**
+      (`raspberrypi3_wpe_2_{22,28,38,42,46,50}_cog_defconfig`), so every other
+      board and every WebKit/WebKit release needs a defconfig written
+- [ ] `wk sysimage ls` lists all twenty with their one-line blurbs, and marks the
+      ones that are not buildable yet
+
+### The buildroot builder — owed
+- [!] `buildroot_build` (image/buildroot.sh) refuses: the builder is not written.
+      The configurations are real and two of them name a defconfig that exists
+      upstream today, so what is missing is the mechanism between the two. The
+      refusal names both halves that are owed
+- [!] `image/buildroot/external/` does not exist. docs/TESTING.md has recorded it
+      as done since 2026-08-24 ("fixed in image/buildroot/external/") and the
+      directory was never committed. Without it no buildroot build here completes
+      on an arm64 host, which is both this Mac and moose
+- [V] the tailnet overlay half **is** written and verified
+      (`image/buildroot/tailnet-overlay.sh`, `S99tailscale`), and each buildroot
+      config points at it with `BR_OVERLAY_TAILSCALE`
+
 ### Building a Yocto system — `wk sysimage build downstream-yocto-wpe-2.48-rpi4`
 
 The second builder behind the same verb. What is checked here is the seam
@@ -3040,6 +3206,18 @@ egress list that cannot be "every upstream in six layers".
 - [V] `wk doctor` ends its config half with the machine-local-state section:
       everything a rebuild cannot get from this repo, each entry declared as
       regenerable, re-authable, or backed-up, with how to get it back
+
+### The board lifecycle in one place — `wk pi -h`
+
+- [ ] `wk pi -h` and a bare `wk pi` print the whole sequence — build a system,
+      find the disk, write it, set the boot order, boot it, put it on the
+      tailnet, deploy a build, bench it — and exit 0. Asking for help is not an
+      error, and before 2026-08-25 it was: `-h` fell through to `die`, so it
+      exited 1 with `error:` in front of a usage that named neither flashing nor
+      connecting
+- [ ] the flashing step is named as `wk sysimage write` rather than described as
+      moved: one path for every machine and every medium
+- [ ] an unknown subcommand prints the same page on stderr and exits 1
 
 ### The EEPROM's only writer — `wk pi boot-order`
 

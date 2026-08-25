@@ -33,6 +33,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/image/yocto.sh"
+. "$WK_ROOT/image/buildroot.sh"
 . "$WK_ROOT/image/pmos.sh"
 . "$WK_ROOT/image/fetch.sh"
 
@@ -956,6 +957,19 @@ cmd_build() {
     image_profile_load "$profile" || die "unknown profile '$profile' (wk sysimage ls)"
     shift
 
+    # A configuration that declares what it is missing is refused here, in the
+    # first second, rather than in hour four of a bitbake or hour eight of a
+    # buildroot run. CFG_NEEDS is the config file's own statement of the input it
+    # does not have -- a defconfig nobody has written, a targets.conf section
+    # that is not on the branch -- and it names the remedy because a refusal that
+    # does not is a dead end (CLAUDE.md, "Refusals").
+    [ -z "${CFG_NEEDS:-}" ] || die "'$profile' cannot be built yet:
+
+    $CFG_NEEDS
+
+    The configuration is declared in $(image_config_file "$profile"), which is
+    where the missing piece goes once it exists."
+
     # Two builders, one verb, dispatched on the profile rather than on a flag:
     # which mechanism makes an image is a property of the image, and asking the
     # caller to say it as well would be a second copy of one fact -- and one
@@ -976,6 +990,14 @@ cmd_build() {
 
     if [ "${IMG_BUILDER:-distro}" = pmos ]; then
         pmos_build "$profile" "$@"
+        return $?
+    fi
+
+    # Buildroot, like yocto, needs a workspace target resolved before the builder
+    # can refuse a remote or VM one.
+    if [ "${IMG_BUILDER:-distro}" = buildroot ]; then
+        load_target "${WK_TARGET:-$(default_target)}"
+        buildroot_build "$profile" "$@"
         return $?
     fi
 

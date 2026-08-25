@@ -372,12 +372,40 @@ def render_text(doc, colour):
         out.append("")
         out.append(paint(name, "head", colour) + (paint("   " + tag, "dim", colour) if tag else ""))
 
+    # A label/value line is buffered rather than formatted, because its column
+    # width is not known until every label in the section has been seen.
+    #
+    # It used to be the constant 14, and that is what made one machine's block
+    # read as three ragged tables: every label wider than 14 -- "without
+    # tailscale", "push (podman VM)", "wk-tools (in the podman VM)" -- pushed
+    # its own value out to a column of its own, and the wk-tools and push-key
+    # rows were formatted by a *separate* pair of hardcoded widths (30 and 14)
+    # that lined up with nothing above them. One section, one column.
+    class Kv(tuple):
+        __slots__ = ()
+
     def kv(label, value, indent="  "):
-        """A label and its answer. The label column is one width for the whole
-        block, and never runs into the value: a label longer than the column
-        ("push (podman VM)") used to."""
-        lab = label.ljust(14) if len(label) < 14 else label + "  "
-        out.append(indent + paint(lab, "dim", colour) + value)
+        out.append(Kv((indent, label, value)))
+
+    def align(start):
+        """Give every buffered line in out[start:] one label column.
+
+        Called at the end of a section. The width is the widest label actually
+        present and never less than 14, so a section of short labels does not
+        pull its values left of where every other section puts them.
+        """
+        labels = [k[1] for k in out[start:] if isinstance(k, Kv)]
+        if not labels:
+            return
+        w = max([len(l) for l in labels] + [14])
+        for i in range(start, len(out)):
+            if not isinstance(out[i], Kv):
+                continue
+            indent, label, value = out[i]
+            # An empty label is a continuation of the line above -- a fix, a
+            # remedy -- so it is spaces, not a painted blank.
+            lab = label.ljust(w) if label else " " * w
+            out[i] = indent + (paint(lab, "dim", colour) if label else lab) + " " + value
 
     def meta(obj, indent="  "):
         """How a machine is reached, and which file said it exists. Both are
@@ -399,6 +427,7 @@ def render_text(doc, colour):
 
     for m in doc["machines"]:
         heading(m["name"], "this machine" if m.get("self") else "")
+        _machine_start = len(out)
         meta(m)
 
         if not any(g["workspaces"] for g in m["methods"]) and not m["raw"]:
@@ -475,24 +504,36 @@ def render_text(doc, colour):
         for f in m["facts"]:
             if f.get("type") == "wk-tools":
                 what = "wk-tools" + (" (%s)" % f["copy"] if f.get("copy") else "")
-                ver = (f.get("sha") or "-") + ("+dirty" if f.get("dirty") else "")
-                out.append("  %-30s %-14s %s  %s"
-                           % (what, ver, f.get("tree", "?"),
-                              paint("in sync", "good", colour) if f.get("insync")
-                              else paint("DIFFERS from the workstation (%s)" % f.get("expect", "?"),
-                                         "bad", colour)))
+                # The tree hash is the answer; the commit is context, and only
+                # when there is one. Every rsynced copy reports `-` for it --
+                # they are copied with `--exclude .git` -- so it was a column of
+                # dashes with no heading in the common case, sitting between the
+                # label and the thing the reader came for.
+                verdict = (paint("in sync", "good", colour) if f.get("insync")
+                           else paint("DIFFERS from the workstation (%s)" % f.get("expect", "?"),
+                                      "bad", colour))
+                extra = ""
+                if f.get("sha") and f["sha"] != "-":
+                    extra = paint("  at %s%s" % (f["sha"], "+dirty" if f.get("dirty") else ""),
+                                  "dim", colour)
+                elif f.get("dirty"):
+                    extra = paint("  +dirty", "dim", colour)
+                kv(what, "%s  %s%s" % (f.get("tree", "?"), verdict, extra))
                 # The command, not "push it there": which one it is depends on
                 # what kind of copy this is, and none of the three is guessable.
                 if f.get("fix"):
-                    out.append("  %-30s %s" % ("", paint(f["fix"], "busy", colour)))
+                    kv("", paint(f["fix"], "busy", colour))
             elif f.get("type") == "key":
-                out.append("  %-30s %s" % ("push key", f.get("text", "")))
+                kv("push key", f.get("text", ""))
+
+        align(_machine_start)
 
     if doc["fleet"]:
         heading("fleet", "role, mode, and the media wk owns (wk help hardware)")
         fw = max([len(f.get("machine", "")) for f in doc["fleet"]] + [7])
         rw = max([len(f.get("role", "")) for f in doc["fleet"]] + [4])
         mw = max([len(f.get("mode", "")) for f in doc["fleet"]] + [4])
+        _fleet_start = len(out)
         for f in doc["fleet"]:
             out.append("  %s  %s  %s  %s"
                        % (f.get("machine", "").ljust(fw),
@@ -504,10 +545,12 @@ def render_text(doc, colour):
                            paint("** armed for %s -- wk boot %s --status **"
                                  % (f["armed"], f.get("machine", "")), "busy", colour)))
             meta(f, "  " + " " * fw + "  ")
+        align(_fleet_start)
 
     if doc["bridges"]:
         heading("tailnet bridges", "probed: the segment, the role, and its own health check")
         bw = max(len(b.get("name", "")) for b in doc["bridges"])
+        _bridge_start = len(out)
         for b in doc["bridges"]:
             out.append("  %s  %-10s %-14s %s"
                        % (b.get("name", "").ljust(bw), b.get("device", "?"), b.get("segment", "?"),
@@ -525,6 +568,7 @@ def render_text(doc, colour):
             if b.get("note"):
                 out.append(pad + paint(b["note"], "dim", colour))
             notes(b.get("notes"), pad)
+        align(_bridge_start)
 
     out.append("")
     return "\n".join(out)

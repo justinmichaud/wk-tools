@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-#
 # ./setup --stage benchkey -- the credentials the macOS benchmark lane needs.
 #
 # A ./setup stage rather than something the bench commands warn about, because
@@ -16,11 +14,14 @@
 # and stored 0600. Skipping is fine and says what is lost.
 #
 # Only on the Mac that has the benchmark volume: nothing else uses this.
-set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-. "$WK_ROOT/lib/common.sh"
+#
+# Sourced by ./setup, like every other stage, so WK_ROOT, the shell options and
+# common.sh are already in scope. It used to re-derive its own WK_ROOT from
+# `dirname $0` -- and `$0` in a sourced file is the *sourcing* script, so under
+# `wk setup` it resolved two levels above the checkout and the stage died on a
+# missing lib/common.sh. Stages do not have their own root.
 
-is_macos || { debug "benchkey: macOS only"; exit 0; }
+is_macos || { debug "benchkey: macOS only"; return 0; }
 
 KEY="${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"
 

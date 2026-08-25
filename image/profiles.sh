@@ -98,7 +98,54 @@
 # building it first would have meant debugging a new rootfs and a new radio
 # setup at the same time.
 
+# Where a WebKit-runtime configuration lives: one file per configuration, in
+# this repository, named for what it is -- project, release, builder, board,
+# width.
+#
+# They used to be `case` arms in image_profile_load, and the shape was the one
+# CLAUDE.md says is being replaced: a case statement naming a device. Six arms
+# covered one release on four board/width combinations, three of the four sharing
+# a single arm with a nested `case` to pull them apart -- so adding a release
+# meant editing code, and the two facts that actually differ per configuration
+# (which defconfig, which targets.conf section) were buried among the ones that
+# do not.
+#
+# Naming, decided 2026-08-25: the *project* -- WebKit or WPEWebKit -- and never
+# "upstream" or "downstream". Those two words were actively wrong here:
+# `downstream-yocto-wpe-2.48-*` set YOC_BRANCH=webkitglib/2.48, which is a branch
+# in WebKit/WebKit, so five profiles wore a `downstream-` prefix while building
+# from upstream. A configuration named for the repository it comes from cannot
+# make that mistake.
+image_config_dir()  { echo "$WK_ROOT/image/configs"; }
+image_config_file() { echo "$(image_config_dir)/$1.conf"; }
+
+# Every configuration there is, from the files themselves rather than a list
+# kept beside them.
+image_config_names() {
+    local f
+    for f in "$(image_config_dir)"/*.conf; do
+        [ -f "$f" ] || continue
+        basename "$f" .conf
+    done
+}
+
+# One line each: the blurb is the config file's third line, which is where the
+# generator and every hand edit put it.
+image_config_list() {
+    local n f blurb needs
+    for n in $(image_config_names); do
+        f=$(image_config_file "$n")
+        blurb=$(sed -n '3s/^# //p' "$f")
+        needs=$(grep -c '^CFG_NEEDS=' "$f" 2>/dev/null || true)
+        printf '%s\n' "$n"
+        printf '            %s\n' "$blurb"
+        [ "${needs:-0}" -eq 0 ] || printf '            %s\n' \
+            "-- not buildable yet; 'wk sysimage build $n' says what it needs"
+    done
+}
+
 image_profile_list() {
+    image_config_list
     cat <<'EOF'
 perf-linux-rpi5
             Ubuntu 26.04 server, aarch64, for the rpi5's USB one-shot: no
@@ -109,31 +156,6 @@ perf-linux-rpi4
 perf-linux-rpi3
             refused, and says why: Ubuntu ships no armhf raspi image, and a
             32-bit run wants a 32-bit system rather than an arm64 one
-
-downstream-wpe-2.46-rpi4
-            the known-good pairing: WPE 2.46 from the downstream
-            WebPlatformForEmbedded/WPEWebKit repo. The image is the branch's
-            own, unmodified; the build needs the pseudo bump this host's kernel
-            requires (--no-local-layer to re-test that).
-downstream-yocto-wpe-2.48-rpi4
-            WPE WebKit 2.48's own Yocto image for the rpi4 (aarch64,
-            scarthgap, weston): the runtime the 2.48 release branch pins,
-            bitbaked from source in a workspace. Hours, not minutes. Needs
-            image/yocto/meta-wk to build at all -- see the pseudo story in
-            docs/HANDOFF-yocto.md.
-downstream-yocto-wpe-2.48-rpi4-32
-            the same distribution, 32-bit: a 32-bit kernel and userspace, which
-            is what a 32-bit perf run has to measure -- not a 32-bit process on
-            a 64-bit kernel's compat layer
-downstream-yocto-wpe-2.48-rpi3-32
-            and for the rpi3, whose native width this is
-downstream-yocto-wpe-2.48-rpi3-64
-            the rpi3 as aarch64. Marginal at 931 MB, and there so that "slower,
-            or just out of memory" is answerable
-downstream-yocto-wpe-2.48-rpi5
-            the rpi5 running what ships, on its USB stick, leaving the NVMe
-            workstation alone. Needs one section added to targets.conf upstream
-            -- the local.conf and the MACHINE are already there
 
 bridge-pinephone
             postmarketOS for the PinePhone, as tailnet-bridge-generic: pmbootstrap
@@ -171,27 +193,68 @@ image_profile_load() {
     IMG_PACKAGES=""; IMG_NETWORK=""; IMG_LABEL_ROOT=""; IMG_LABEL_BOOT=""
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
     YOC_CHROMIUM=1; YOC_REMOTE=origin; YOC_LOCAL_LAYER=1
+    CFG_PROJECT=""; CFG_RELEASE=""; CFG_BRANCH=""; CFG_REMOTE=""; CFG_NEEDS=""
+    BR_TREE_URL=""; BR_TREE_BRANCH=""; BR_TREE_TAG=""; BR_DEFCONFIG=""
+    BR_OVERLAY_TAILSCALE=""; BR_EXTERNAL=""; BR_IMAGE=""
     FET_URL=""; FET_SHA256=""; FET_XZ=""; FET_NOTE=""; FET_DEVICE=""
     PMO_DEVICE=""; PMO_UI=""; PMO_CHANNEL=""; PMO_PMB_VERSION=""
     PMO_USER=""; PMO_PASSWORD=""; PMO_PACKAGES=""; PMO_EXTRA_SPACE=""
     PMO_BRIDGE=""; PMO_BUILD_HOST=""; PMO_WIFI_BANDS=""
     PMO_KERNEL_APORT=""; PMO_KCONFIG=""
 
+    # A WebKit-runtime configuration is a file, and it answers first: what is
+    # true of one is data, not a branch. Everything else -- the perf distro
+    # images, the phones, the fetched rescue -- is still a case arm below,
+    # because each of those is one of a kind rather than a point in a matrix.
+    local _cfg
+    _cfg=$(image_config_file "$1")
+    if [ -f "$_cfg" ]; then
+        # shellcheck disable=SC1090
+        . "$_cfg"
+        return 0
+    fi
+
     case "$1" in
-    # The old names, refused by name: every profile was renamed on 2026-08-20
-    # to carry its category (docs/HANDOFF-vocabulary.md). One spelling, so the
-    # old one points at the new one rather than quietly meaning it.
+    # The old names, refused by name. Two rounds of renaming: 2026-08-20 gave
+    # every profile its category (docs/HANDOFF-vocabulary.md), and 2026-08-25
+    # replaced upstream/downstream with the project a configuration is built
+    # from. One spelling, so an old name points at the new one rather than
+    # quietly meaning it.
     rpi5-perf|rpi4-perf|rpi3-perf|rpi4-wpe-2.48|rpi4-wpe-2.48-32|rpi3-wpe-2.48-32|rpi3-wpe-2.48-64|rpi5-wpe-2.48|mac-bench)
         die "profile '$1' was renamed (docs/HANDOFF-vocabulary.md, 'Systems'):
     rpi5-perf        -> perf-linux-rpi5
     rpi4-perf        -> perf-linux-rpi4
     rpi3-perf        -> perf-linux-rpi3
-    rpi4-wpe-2.48    -> downstream-yocto-wpe-2.48-rpi4
-    rpi4-wpe-2.48-32 -> downstream-yocto-wpe-2.48-rpi4-32
-    rpi3-wpe-2.48-32 -> downstream-yocto-wpe-2.48-rpi3-32
-    rpi3-wpe-2.48-64 -> downstream-yocto-wpe-2.48-rpi3-64
-    rpi5-wpe-2.48    -> downstream-yocto-wpe-2.48-rpi5
+    rpi4-wpe-2.48    -> webkit-2.52-yocto-rpi4-64
+    rpi4-wpe-2.48-32 -> webkit-2.52-yocto-rpi4-32
+    rpi3-wpe-2.48-32 -> webkit-2.52-yocto-rpi3-32
+    rpi3-wpe-2.48-64 -> rpi3 is 32-bit here; use webkit-2.52-yocto-rpi3-32
+    rpi5-wpe-2.48    -> webkit-2.52-yocto-rpi5-64
     mac-bench        -> perf-macos-tolken"
+        ;;
+    # The 2.48 and 2.46 profiles, retired 2026-08-25. `downstream-yocto-wpe-2.48-*`
+    # was misnamed rather than merely ugly: it set YOC_BRANCH=webkitglib/2.48,
+    # a branch in *WebKit/WebKit*, so it was an upstream configuration wearing a
+    # `downstream-` prefix. There is no wpe-2.48 in WPEWebKit at all (its
+    # releases run 2.36, 2.38, 2.42, 2.46, 2.50), which is why the old comment
+    # had to explain that "webkitglib/2.48 is the release branch for both GLib
+    # ports". The set is now three releases named for their project.
+    downstream-wpe-2.46-rpi4|downstream-yocto-wpe-2.48-rpi4|downstream-yocto-wpe-2.48-rpi4-32|downstream-yocto-wpe-2.48-rpi3-32|downstream-yocto-wpe-2.48-rpi3-64|downstream-yocto-wpe-2.48-rpi5)
+        die "profile '$1' is gone (2026-08-25). Configurations are named for the
+    project they are built from -- WebKit or WPEWebKit -- because 'downstream'
+    was wrong: every 2.48 profile built from webkitglib/2.48, which is a branch
+    in WebKit/WebKit.
+
+    WPEWebKit releases here are 2.38 and 2.46; WebKit's is 2.52. So:
+
+        downstream-wpe-2.46-rpi4          -> wpewebkit-2.46-yocto-rpi4-64
+        downstream-yocto-wpe-2.48-rpi4    -> webkit-2.52-yocto-rpi4-64
+        downstream-yocto-wpe-2.48-rpi4-32 -> webkit-2.52-yocto-rpi4-32
+        downstream-yocto-wpe-2.48-rpi3-32 -> webkit-2.52-yocto-rpi3-32
+        downstream-yocto-wpe-2.48-rpi3-64 -> the rpi3 is 32-bit here
+        downstream-yocto-wpe-2.48-rpi5    -> webkit-2.52-yocto-rpi5-64
+
+    'wk sysimage build --list' has all twenty."
         ;;
     perf-linux-rpi5)
         IMG_NETWORK=wifi-from-machine
@@ -442,168 +505,15 @@ image_profile_load() {
                 ;;
         esac
         ;;
-    # --- yocto ------------------------------------------------------------
+    # --- yocto and buildroot ---------------------------------------------
     #
-    # A different mechanism entirely, and the profile says so in one field
-    # rather than by which other fields happen to be set. Nothing below is a
-    # distro base, a cloud-init seed, or a filesystem relabel: bitbake builds
-    # the whole distribution, partitions it with wic, and the result enters the
-    # store as an image like any other -- which is the entire reason to put it
-    # here rather than in a command of its own. `wk sysimage write`, `wk sysimage
-    # show` and the SD-card path then work on it unchanged.
-    downstream-wpe-2.46-rpi4)
-        # The known-good configuration, and the reason it exists as a profile of
-        # its own rather than as a flag on the 2.48 one: it is a different
-        # *repository*, not just a different branch. `wpe-2.46` lives in
-        # WebPlatformForEmbedded/WPEWebKit -- the downstream WPE repo, wired as
-        # `wpe` (lib/store.sh) -- where 2.48's `webkitglib/2.48` is upstream
-        # WebKit/WebKit. A `git fetch origin wpe-2.46` finds nothing at all,
-        # which is why YOC_REMOTE had to exist before this profile could.
-        #
-        # Known-good means: it is the pairing that has actually built and run
-        # (Ubuntu 24.04 build host + this branch), and the `rpi3` skill already
-        # clones exactly this branch for the 32-bit board. So it is the profile
-        # to reach for when the question is "is my change the problem, or is the
-        # configuration?" -- and it carries **no local fixes** for that reason.
-        IMG_BUILDER=yocto
-        IMG_MACHINE=rpi4
-        IMG_ARCH=arm64
-        YOC_REMOTE=wpe
-        YOC_BRANCH=wpe-2.46
-        YOC_TARGET=rpi4-64bits-mesa
-        YOC_IMAGE=webkit-dev-ci-tools
-        YOC_RM_WORK=1
-        YOC_CHROMIUM=0
-        # Tested unmodified on 2026-08-21, and it does not build here. The
-        # finding, because it is the useful half of this profile: with no local
-        # layer the build dies in `do_package` on `update-rc.d` and `base-files`
-        # with pseudo's own signature --
-        #
-        #   got *at() syscall for unknown directory, fd 4
-        #   unknown base path for fd 4, path sbin
-        #   tar: ./usr/sbin: Cannot mkdir: Bad address
-        #
-        # byte for byte what recipes-devtools/pseudo/pseudo_%.bbappend
-        # documents. So the pseudo bug is a property of **pseudo plus this
-        # host's kernel** (7.0.11 aarch64), not of the release branch: 2.46
-        # pins poky 6879650b, whose pseudo is the same 1.9.0-era fakeroot 2.48
-        # pins, and it fails identically. A branch cannot be known-good against
-        # a kernel that postdates its pseudo.
-        #
-        # So the layer stays on, and that does *not* compromise "the image
-        # works without changes": pseudo is a build-time fakeroot and is never
-        # installed into the image. What it changes is how the image is built,
-        # not what the image contains. `--no-local-layer` re-runs the
-        # experiment on a host where it might pass.
-        YOC_LOCAL_LAYER=1
-        IMG_HOSTNAME=raspberrypi4-64
-        IMG_WATCHDOG=900
-        ;;
-    downstream-yocto-wpe-2.48-rpi4)
-        IMG_BUILDER=yocto
-        IMG_MACHINE=rpi4
-        IMG_ARCH=arm64
-        # The version pin, and the only one. Tools/yocto on this branch names
-        # poky, meta-openembedded, meta-raspberrypi, meta-webkit, meta-clang
-        # and meta-browser by commit, so pinning the branch pins the whole
-        # distribution -- and pins it to the same tree the WebKit that will run
-        # on the board is built from, which is what makes the pair coherent.
-        # `webkitglib/2.48` is the release branch for both GLib ports; there is
-        # no separate `wpe-2.48` in WebKit/WebKit.
-        YOC_BRANCH=webkitglib/2.48
-        YOC_TARGET=rpi4-64bits-mesa
-        # targets.conf's image_basename for that target. Named here as well so
-        # a missing or renamed section fails with "that target is gone" rather
-        # than with bitbake's own error four hours in.
-        YOC_IMAGE=webkit-dev-ci-tools
-        YOC_RM_WORK=1
-        # Chromium out. The branch's own local-rpi4-64bits-mesa.conf adds it --
-        # "Add chromium to image to be able to compare WPE/Chromium
-        # performance" -- and that is a real reason on a fleet built for
-        # comparative benchmarking. It is also, by a wide margin, the most
-        # expensive thing in the build: measured here, chromium-ozone-wayland
-        # and gn-native were 21 GB of TMPDIR *each*, with rust-native,
-        # cargo-native, rust-llvm-native and mozjs-115 behind them, and roughly
-        # half of the 13,379 tasks. This profile exists to get a WPE runtime
-        # onto the rpi4, so it is off, and `--chromium` puts it back for the day
-        # the comparison is the point.
-        YOC_CHROMIUM=0
-        IMG_WATCHDOG=900
-        # What the board calls itself. Yocto takes it from MACHINE and there is
-        # no cloud-init here to override it, so this is recorded rather than
-        # applied -- it is what `wk sysimage show` should be able to answer.
-        IMG_HOSTNAME=raspberrypi4-64
-        ;;
-    # The 32-bit half of the same distribution, and the reason 32-bit is not a
-    # separate problem to solve.
-    #
-    # A 32-bit perf run measures a 32-bit *system* -- a 32-bit kernel and a
-    # 32-bit userspace -- and not a 32-bit process borrowing a 64-bit kernel's
-    # compat layer. The two differ in syscall path, page size and pointer
-    # width in the kernel, so a number from one is not a number from the other,
-    # and the armhf port that ships to customers runs the first.
-    #
-    # Which is why the base for this is Yocto rather than a distro image.
-    # Ubuntu 26.04 publishes **no armhf raspi image at all** (checked
-    # 2026-08-20: `arm64` desktop and server, and nothing else), so the obvious
-    # route does not exist; and `Tools/yocto/targets.conf` on this branch
-    # already carries `rpi3-32bits-mesa`, `rpi3-32bits-userland`,
-    # `rpi4-32bits-mesa` and `rpi3-64bits-mesa` beside the 64-bit rpi4 target.
-    # The 32-bit systems were already buildable; nothing had named them.
-    #
-    # This also answers the question the rpi3 entry above was waiting on. It
-    # asked for "a 32-bit base for this profile, or an explicit 'the rpi3
-    # becomes arm64'", and the answer is neither: the rpi3's perf system is a
-    # Yocto build, in whichever width the run is measuring, and no distro base
-    # is involved.
-    downstream-yocto-wpe-2.48-rpi4-32|downstream-yocto-wpe-2.48-rpi3-32|downstream-yocto-wpe-2.48-rpi3-64|downstream-yocto-wpe-2.48-rpi5)
-        IMG_BUILDER=yocto
-        YOC_BRANCH=webkitglib/2.48
-        YOC_IMAGE=webkit-dev-ci-tools
-        YOC_RM_WORK=1
-        YOC_CHROMIUM=0
-        # Same as the distro profiles, and for the same reason: these images
-        # are booted as bench systems, and a bench system with no self-return
-        # is a board that stays borrowed until somebody notices.
-        IMG_WATCHDOG=900
-        case "$1" in
-            downstream-yocto-wpe-2.48-rpi4-32)
-                IMG_MACHINE=rpi4; IMG_ARCH=armhf
-                YOC_TARGET=rpi4-32bits-mesa; IMG_HOSTNAME=raspberrypi4 ;;
-            downstream-yocto-wpe-2.48-rpi3-32)
-                IMG_MACHINE=rpi3; IMG_ARCH=armhf
-                # `-mesa`, not `-userland`: targets.conf offers both for the
-                # rpi3 and the userland one is the closed Broadcom stack. Mesa
-                # is what the rpi4 targets use, so it is the one that keeps a
-                # rpi3 number and a rpi4 number describing the same graphics
-                # path. `-userland` is a deliberate second profile if it is
-                # ever wanted, not a default.
-                YOC_TARGET=rpi3-32bits-mesa; IMG_HOSTNAME=raspberrypi3 ;;
-            downstream-yocto-wpe-2.48-rpi5)
-                IMG_MACHINE=rpi5; IMG_ARCH=arm64
-                # The rpi5 as a Yocto system, so that the board can be measured
-                # running what ships rather than only a distro -- without
-                # touching its NVMe workstation, which is untouched here for
-                # the same reason it is untouched by perf-linux-rpi5: the image goes
-                # on the USB stick and the firmware one-shot boots it.
-                #
-                # `targets.conf` has no [rpi5-64bits-mesa] section on this
-                # branch, and everything it would need is already there:
-                # `Tools/yocto/rpi/local-rpi5-64bits-mesa.conf` is shipped, and
-                # the pinned meta-raspberrypi carries `raspberrypi5.conf`. The
-                # section is the only missing piece, so yocto_build refuses
-                # with the eight lines to add rather than failing inside
-                # bitbake.
-                YOC_TARGET=rpi5-64bits-mesa; IMG_HOSTNAME=raspberrypi5 ;;
-            downstream-yocto-wpe-2.48-rpi3-64)
-                IMG_MACHINE=rpi3; IMG_ARCH=arm64
-                # Buildable, and marginal on this board: 931 MB of RAM, no
-                # swap. It exists so that "is the 64-bit port slower here, or
-                # just short of memory" is answerable, which is a question the
-                # 32-bit-only rpi3 could never be asked.
-                YOC_TARGET=rpi3-64bits-mesa; IMG_HOSTNAME=raspberrypi3-64 ;;
-        esac
-        ;;
+    # Not here. Every WebKit-runtime configuration -- both builders, three
+    # releases, four board/width combinations -- is a file in image/configs,
+    # sourced at the top of this function. What used to be here was three case
+    # arms and a nested case inside one of them, and the only things they
+    # actually disagreed about were the branch, the targets.conf section and the
+    # hostname. See image_config_dir above for why that became data.
+
     *)  return 1 ;;
     esac
 }

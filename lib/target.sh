@@ -317,7 +317,7 @@ t_wk()        { return 1; }         # t_wk <args...>, its exit status is the ans
 t_wk_detach() { return 1; }   # t_wk_detach <args...>
 
 # t_wk with a terminal, for the far-side commands that have to ask a human
-# something -- `wk sudo require` is going to prompt for a password, and ssh
+# something -- `wk sudo setup` is going to prompt for a password, and ssh
 # gives a command no tty unless it is asked to.
 t_wk_tty()    { t_wk "$@"; }
 
@@ -667,7 +667,7 @@ target_all() {
     local me=""
     if ! in_remote_host && [ -z "${WK_IN_VM:-}" ]; then
         me=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
-        for d in "$(target_registry_dir)" "$(target_conf_dir)"; do
+        for d in "$(target_registry_dir)"; do
             [ -d "$d" ] || continue
             for f in "$d"/*.conf; do
                 [ -f "$f" ] || continue
@@ -702,36 +702,35 @@ target_all() {
 # and the conf next to that name says which driver to use and how to reach it.
 # Everything downstream keeps working unchanged because the registry already
 # records a target per workspace as an opaque string.
-# A target is configured in two places, and which one a fact belongs in is the
-# whole distinction:
 #
-#   targets/hosts/<name>.conf   in this repository, and therefore on every
-#                               device that pulls it. What is true about the
-#                               *machine* no matter who is driving it: the ssh
-#                               destination, the CMake flags its toolchain
-#                               needs, whether it is a build box or a
-#                               workstation of its own.
-#   ~/.config/wk/targets/…      this device's own view of the same machine, and
-#                               what only it can know: a different ssh alias, a
-#                               root somewhere else, a job ceiling for a link
-#                               that is not the machine's fault.
+# One place, `targets/hosts/<name>.conf`, in this repository and therefore on
+# every device that pulls it. A target's conf says what is true about the
+# *machine* no matter who is driving it: the ssh destination, the CMake flags
+# its toolchain needs, whether it is a build box or a workstation of its own.
+# None of that is knowledge about the device doing the driving, so none of it is
+# machine-local -- and the addressing in it is accepted as published (CLAUDE.md,
+# "Refusals, secrets and privilege"), so there is nothing here to keep back.
 #
-# The registry exists because the machine-local half was the *only* half, and a
-# machine you had configured on one device did not exist on the others: a
-# reinstall lost every target, buildbox4's build flags had to be re-typed on
-# every command from every device, and `wk status` on the Mac could not say a
-# word about the Linux workstation because it had never heard of it. None of
-# that is per-device knowledge; it is knowledge about the machine, and it
-# belongs where the rest of this tooling lives.
+# There was a second layer, `~/.config/wk/targets/<name>.conf`, overriding the
+# registry line by line. It is gone, and the two reasons are the repo's own
+# rules. It was a second copy of a fact -- the machine-local files on this
+# workstation had drifted to *pure comments*, still listed by `wk doctor` as
+# state to back up, describing overrides that no longer existed. And it was a
+# second path through target resolution, exercised only on the device that
+# happened to have a file (CLAUDE.md, "One path, not two"): a machine
+# configured on one device did not exist on the others, a reinstall lost every
+# target, and buildbox4's build flags had to be re-typed everywhere.
 #
-# No new machinery, deliberately: the registry is committed files. A device
-# gets a new machine by pulling, and `wk remote setup`/`t_sync_tools` already
-# push the whole tree to the machines themselves. Adding one is an edit and a
-# commit, not a command that writes to git on your behalf.
+# What is genuinely per-device is a *key or a secret*, and none of those live in
+# a target conf. What is genuinely per-invocation is the environment, which
+# still wins over a conf (_target_reset_vars).
+#
+# No new machinery, deliberately: the registry is committed files. A device gets
+# a new machine by pulling, and `wk remote setup`/`t_sync_tools` already push
+# the whole tree to the machines themselves. Adding one is an edit and a commit,
+# not a command that writes to git on your behalf.
 target_registry_dir() { echo "$WK_ROOT/targets/hosts"; }
 target_registry_conf(){ echo "$(target_registry_dir)/$1.conf"; }
-target_conf_dir() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/wk/targets"; }
-target_conf()     { echo "$(target_conf_dir)/$1.conf"; }
 
 # The driver a target name selects. The built-in kinds are their own kind;
 # anything else must have a conf, and a conf that does not say otherwise
@@ -741,20 +740,13 @@ target_kind() {
     case "$1" in
         container|vm|remote|local) echo "$1"; return 0 ;;
     esac
-    # Either conf makes the target exist; the local one answers first, because
-    # it is the overriding half -- a device that says a machine is something
-    # other than what the registry says gets to. A conf that names no kind
-    # falls through to the other one, and then to `remote`, which is the only
-    # kind worth naming after a machine.
-    local c k="" found=""
-    for c in "$(target_conf "$1")" "$(target_registry_conf "$1")"; do
-        [ -f "$c" ] || continue
-        found=1
-        [ -n "$k" ] && continue
-        k=$(awk -F= '/^[[:space:]]*WK_TARGET_KIND[[:space:]]*=/ {
-                gsub(/[ \t"'"'"']/, "", $2); print $2; exit }' "$c")
-    done
-    [ -n "$found" ] || return 1
+    # The registry conf makes the target exist. A conf that names no kind falls
+    # through to `remote`, which is the only kind worth naming after a machine.
+    local c k=""
+    c=$(target_registry_conf "$1")
+    [ -f "$c" ] || return 1
+    k=$(awk -F= '/^[[:space:]]*WK_TARGET_KIND[[:space:]]*=/ {
+            gsub(/[ \t"'"'"']/, "", $2); print $2; exit }' "$c")
     echo "${k:-remote}"
 }
 
@@ -1151,7 +1143,7 @@ load_target() {
             WK_REMOTE_HOST=$t      # an ssh destination that already works
             WK_REMOTE_ROOT=/home/you/wk
 
-    or in $(target_conf "$t") for this device alone."
+    'wk remote setup $t' writes it for you."
 
     # Set before either file is read: a driver that can have several instances
     # has to know which one it is, and both the conf and the driver's own
@@ -1182,18 +1174,13 @@ load_target() {
     # shellcheck disable=SC1090
     . "$WK_ROOT/lib/target.sh"
 
-    # The confs first and the driver second, so that the driver's own
-    # ${VAR:-default} assignments fill in only what the confs left unsaid.
-    #
-    # Registry, then local: last assignment wins in a sourced file, so the
-    # device's own conf overrides the shared one line by line rather than all
-    # or nothing. A local conf that sets one variable keeps the registry's
-    # answer for every other.
-    for conf in "$(target_registry_conf "$t")" "$(target_conf "$t")"; do
-        [ -f "$conf" ] || continue
+    # The conf first and the driver second, so that the driver's own
+    # ${VAR:-default} assignments fill in only what the conf left unsaid.
+    conf=$(target_registry_conf "$t")
+    if [ -f "$conf" ]; then
         # shellcheck disable=SC1090
         . "$conf"
-    done
+    fi
     # shellcheck disable=SC1090
     . "$WK_ROOT/targets/$kind.sh"
 }

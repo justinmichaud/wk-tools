@@ -19,8 +19,9 @@
 #
 #   wk new bug-238 --target devbox-arm64-2
 #
-# with ~/.config/wk/targets/devbox-arm64-2.conf holding whatever differs from
-# the defaults below:
+# with targets/hosts/devbox-arm64-2.conf -- in this repository, so every device
+# gets the machine by pulling -- holding whatever differs from the defaults
+# below:
 #
 #   WK_REMOTE_HOST=devbox-arm64-2  # ssh destination; defaults to the target name
 #   WK_REMOTE_ROOT=/home/you/wk    # defaults to ~/wk on the box
@@ -30,9 +31,8 @@
 #   WK_REMOTE_PEER=1               # a workstation of its own, not a build box
 #   WK_REMOTE_TOOLS=Development/…  # its wk-tools, if not $root/tools
 #
-# ...or, for a machine every device should know about, in the shared registry
-# instead: targets/hosts/<name>.conf, which is in this repository (see
-# target_registry_conf in lib/target.sh).
+# That is the only place a target is configured; see target_registry_dir in
+# lib/target.sh for why there is no per-device half.
 #
 # --- peers -------------------------------------------------------------------
 #
@@ -79,6 +79,28 @@ WK_REMOTE_HOST="${WK_REMOTE_HOST:-}"
 # side does not know what that expands to. _remote_probe resolves it, once.
 WK_REMOTE_ROOT="${WK_REMOTE_ROOT:-}"
 
+# --- am I the machine this target names? -------------------------------------
+#
+# Computed, from the one file that is evidence of it: ~/.wk-remote, which
+# `wk remote setup` writes on the box and which already records `target=` and
+# `root=`. If it names this target, then this process is running *on* the
+# machine and the driver drops the ssh step (WK_REMOTE_LOCAL) and takes the root
+# from the marker rather than from a probe of itself.
+#
+# It used to be a second conf file -- ~/.config/wk/targets/<t>.conf on the box,
+# written by remote/provision.sh, holding WK_TARGET_KIND, WK_REMOTE_LOCAL and
+# WK_REMOTE_ROOT. Every one of those three restated something the marker beside
+# it already said, which is the "no caching of facts" rule (CLAUDE.md, "State
+# and lifecycle" 1): a read can recompute all of it, so a second copy is a bug
+# even while it is still equal. It could also drift -- a target renamed in the
+# registry left the box answering for the old name -- and it was the last thing
+# keeping the per-device conf directory alive.
+if [ -z "${WK_REMOTE_LOCAL:-}" ] && in_remote_host \
+   && [ "$(wk_remote_field target)" = "${WK_TARGET:-remote}" ]; then
+    WK_REMOTE_LOCAL=1
+    [ -n "$WK_REMOTE_ROOT" ] || WK_REMOTE_ROOT="$(wk_remote_field root)"
+fi
+
 # A ceiling on the job count, on top of the polite calculation. Not a
 # performance knob -- the point is that a 96-core machine shared by six people
 # should not hand any one of them 48 jobs just because the load average
@@ -112,12 +134,11 @@ else
     WK_STORE="${WK_REMOTE_STORE:-$(wk_state_dir)/remote/${WK_TARGET:-remote}}"
 fi
 
-# Whether this process is running *on* the target. `wk remote setup` writes
-# WK_REMOTE_LOCAL=1 into the conf it leaves on the machine itself, so the same
-# driver drives the same workspaces from either end -- from the workstation
-# over ssh, and from a shell on the box with no ssh at all. One code path, so
-# the two can never answer differently about where a checkout is or how many
-# jobs a build gets.
+# Whether this process is running *on* the target -- set just above from
+# ~/.wk-remote. The same driver drives the same workspaces from either end:
+# from the workstation over ssh, and from a shell on the box with no ssh at
+# all. One code path, so the two can never answer differently about where a
+# checkout is or how many jobs a build gets.
 _remote_is_local() { [ -n "${WK_REMOTE_LOCAL:-}" ]; }
 
 # Another workstation rather than a build box -- see "peers" at the top.
@@ -126,8 +147,8 @@ _remote_peer() { [ -n "${WK_REMOTE_PEER:-}" ]; }
 _remote_require() {
     _remote_is_local && return 0
     [ -n "$WK_REMOTE_HOST" ] || die "target '${WK_TARGET:-remote}' has no host to reach.
-    Set WK_REMOTE_HOST in $(target_conf "${WK_TARGET:-remote}"), or name the
-    target after a machine your ~/.ssh/config already knows:
+    Set WK_REMOTE_HOST in $(target_registry_conf "${WK_TARGET:-remote}"), or
+    name the target after a machine your ~/.ssh/config already knows:
         wk new <name> --target devbox-arm64-2"
 }
 
@@ -674,7 +695,7 @@ t_wk_detach() {
                 >/dev/null 2>&1 </dev/null & echo \$!"
 }
 
-# The same, with a pty: `wk sudo require` over there prompts for a password,
+# The same, with a pty: `wk sudo setup` over there prompts for a password,
 # and sudo refuses to read one without a terminal.
 t_wk_tty() {
     if _remote_is_local; then

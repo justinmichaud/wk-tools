@@ -36,7 +36,7 @@ with its own host mode, which wk must never touch.
    `docs/HANDOFF-sdcard.md`.
 2. **A recorded system for the first card.** The rpi4's card holds a
    hand-flashed image nothing in this repo produces.
-   `wk sysimage build downstream-yocto-wpe-2.48-rpi4` produces an equivalent, so
+   `wk sysimage build webkit-2.52-yocto-rpi4-64` produces an equivalent, so
    this is a naming and flashing problem rather than a build one. `seed` may
    never need a profile of its own — a seed's job is to boot and answer ssh so
    `wk provision` can do the rest, and the downstream Yocto image already does

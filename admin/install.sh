@@ -10,10 +10,40 @@
 # would be a trivially exploitable root escalation -- editing the file, or
 # checking out a branch, would change what runs as root.
 
+# --- why the file names begin zzz- -------------------------------------------
+#
+# sudo reads /etc/sudoers.d in lexical order and takes the LAST rule that
+# matches. `wk sudo setup` installs `zz-<user>-passwd`, whose whole job is to
+# re-impose `PASSWD: ALL` over a site's blanket `NOPASSWD: ALL` -- and `ALL`
+# matches every command, including these two helpers. So while these files were
+# called `wk-quiesce` and `wk-card` they sorted *before* it and their grants were
+# dead the moment `wk sudo setup` ran on the machine.
+#
+# Measured on rpi5, 2026-08-25, with both installed and correct:
+#
+#     $ sudo -n /usr/local/libexec/wk-quiesce-priv status ; echo $?
+#     1
+#
+# That is the entire point of the carve-out gone: `wk quiesce` and `wk session`
+# prompt for a password on every call, in the daily path, which is what a
+# privileged helper exists to avoid. It also made `./setup` report the helper
+# "not installed" on every non-interactive run while it sat there installed --
+# the reported defect.
+#
+# `zzz-` sorts after `zz-<user>-passwd` under LC_ALL=C ('-' is 0x2D, 'z' is
+# 0x7A), so these two rules are last and win. That is the correct precedence and
+# not a trick: cmd/sudo's own reading of sudoers already says only *blanket*
+# rules count, and that "a NOPASSWD scoped to one program is how the deliberate
+# exceptions work". These are those exceptions. No dot in either name, because
+# sudo skips files that have one.
 _libexec=/usr/local/libexec
 _target="$_libexec/wk-quiesce-priv"
 _source="$WK_ROOT/admin/wk-quiesce-priv"
-_sudoers=/etc/sudoers.d/wk-quiesce
+_sudoers=/etc/sudoers.d/zzz-wk-quiesce
+# The name these rules had before 2026-08-25. Removed rather than left: an
+# earlier file granting the same path is a second copy of a privilege rule, and
+# the copy that loses is the one that reads as if it were in force.
+_sudoers_old=/etc/sudoers.d/wk-quiesce
 
 if [ ! -f "$_source" ]; then
     warn "quiesce helper missing at $_source; skipping"
@@ -36,9 +66,9 @@ _owner=$(stat -c '%U' "$_target" 2>/dev/null || stat -f '%Su' "$_target" 2>/dev/
 _rule="$(id -un) ALL=(root) NOPASSWD: $_target"
 
 # Whether the rule works, not whether it reads a particular way. The rule
-# grants exactly one path, so `sudo -n test -r /etc/sudoers.d/wk-quiesce` is
-# itself denied -- and reading the failure as "not installed" made every
-# non-interactive run report the helper missing while it sat there working.
+# grants exactly one path, so `sudo -n test -r "$_sudoers"` is itself denied --
+# and reading the failure as "not installed" made every non-interactive run
+# report the helper missing while it sat there working.
 _sudoers_ok=0
 if [ -x "$_target" ] && sudo -n "$_target" status >/dev/null 2>&1; then
     _sudoers_ok=1
@@ -50,8 +80,20 @@ elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
     # Installing needs a real sudo prompt. Skip rather than abort: this stage
     # is independent of everything else, and failing the whole setup over a
     # benchmarking convenience would be the wrong trade.
-    warn "quiesce helper not installed: sudo needs a terminal"
-    log  "  run this from an interactive shell:  ./setup --stage quiesce"
+    #
+    # Which of the two is wrong decides what the reader should do, so they are
+    # not reported as one thing. Saying "not installed" about a helper that is
+    # installed and merely out-ranked sent the reader to reinstall it, which
+    # changes nothing -- the file was never the problem.
+    if [ "$_needs_install" -eq 0 ]; then
+        warn "the quiesce helper is installed, but its sudoers rule is not in force"
+        log  "  something later in the include order grants PASSWD over it."
+        log  "  'sudo -l' shows the order; $_sudoers has to be the last match."
+        log  "  from an interactive shell:  ./setup --stage quiesce"
+    else
+        warn "quiesce helper not installed: sudo needs a terminal"
+        log  "  run this from an interactive shell:  ./setup --stage quiesce"
+    fi
 else
     info "installing the quiesce helper (requires sudo once)"
 
@@ -71,6 +113,14 @@ else
     if sudo visudo -cqf "$_tmp"; then
         sudo install -o root -m 0440 "$_tmp" "$_sudoers"
         changed "installed $_sudoers"
+        # The old name, now that the new one is in place. Here rather than
+        # earlier: a `sudo -n true` guard would be false on exactly the machines
+        # that have the problem -- `zz-<user>-passwd` is what makes sudo ask, and
+        # it is the reason the old file lost. This branch already has sudo.
+        if [ -f "$_sudoers_old" ]; then
+            sudo rm -f "$_sudoers_old"
+            changed "removed $_sudoers_old (it sorted before zz-<user>-passwd and was dead)"
+        fi
     else
         rm -f "$_tmp"
         die "generated sudoers rule failed validation; nothing was installed"
@@ -95,7 +145,8 @@ fi
 # where the account is already root.
 _card_target="$_libexec/wk-card-priv"
 _card_source="$WK_ROOT/admin/wk-card-priv"
-_card_sudoers=/etc/sudoers.d/wk-card
+_card_sudoers=/etc/sudoers.d/zzz-wk-card
+_card_sudoers_old=/etc/sudoers.d/wk-card
 
 if [ ! -f "$_card_source" ]; then
     warn "card helper missing at $_card_source; skipping"
@@ -115,8 +166,16 @@ else
     if [ "$_card_needs" -eq 0 ] && [ "$_card_ok" -eq 1 ]; then
         unchanged "card helper and sudoers rule"
     elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
-        warn "card helper not installed: sudo needs a terminal"
-        log  "  run this from an interactive shell:  ./setup --stage quiesce"
+        # Installed but out-ranked is a different problem from absent, and it has
+        # a different fix -- see the quiesce half above.
+        if [ "$_card_needs" -eq 0 ]; then
+            warn "the card helper is installed, but its sudoers rule is not in force"
+            log  "  'sudo -l' shows the order; $_card_sudoers has to be the last match."
+            log  "  from an interactive shell:  ./setup --stage quiesce"
+        else
+            warn "card helper not installed: sudo needs a terminal"
+            log  "  run this from an interactive shell:  ./setup --stage quiesce"
+        fi
     else
         info "installing the card helper (requires sudo once)"
         sudo install -d -o root -g root -m 0755 "$_libexec"
@@ -128,6 +187,10 @@ else
         if sudo visudo -cqf "$_card_tmp"; then
             sudo install -o root -m 0440 "$_card_tmp" "$_card_sudoers"
             changed "installed $_card_sudoers"
+            if [ -f "$_card_sudoers_old" ]; then
+                sudo rm -f "$_card_sudoers_old"
+                changed "removed $_card_sudoers_old (it sorted before zz-<user>-passwd and was dead)"
+            fi
         else
             rm -f "$_card_tmp"
             die "generated card sudoers rule failed validation; nothing was installed"
@@ -147,7 +210,7 @@ else
         unchanged "card helper permissions ($_card_perm)"
     fi
 fi
-unset _card_target _card_source _card_sudoers _card_needs _card_owner _card_ok _card_tmp _card_perm
+unset _card_target _card_source _card_sudoers _card_sudoers_old _card_needs _card_owner _card_ok _card_tmp _card_perm
 
 # --- privileged files this repo has retired -----------------------------------
 #
@@ -199,7 +262,7 @@ fi
 # Verify the guarantee the sudoers rule depends on, every run. A world- or
 # group-writable helper would mean anyone who can write it gets root.
 if [ ! -f "$_target" ]; then
-    unset _libexec _target _source _sudoers _needs_install _owner _rule _sudoers_ok _tmp
+    unset _libexec _target _source _sudoers _sudoers_old _needs_install _owner _rule _sudoers_ok _tmp
     return 0 2>/dev/null || true
 fi
 _perm=$(stat -c '%a' "$_target" 2>/dev/null || stat -f '%Lp' "$_target" 2>/dev/null || echo "")
@@ -267,4 +330,4 @@ done
 fi
 unset _u _link
 
-unset _libexec _target _source _sudoers _needs_install _owner _rule _sudoers_ok _tmp _perm _sessenv _sessline _tmp2
+unset _libexec _target _source _sudoers _sudoers_old _needs_install _owner _rule _sudoers_ok _tmp _perm _sessenv _sessline _tmp2

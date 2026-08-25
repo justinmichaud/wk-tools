@@ -1227,7 +1227,9 @@ chk_unknown_target() {
     local out rc=0
     out=$(WK_TARGET=nosuchtarget-selftest "$WK" ls 2>&1) || rc=$?
     [ "$rc" -ne 0 ] || { echo "an unknown target was accepted"; return 1; }
-    grep -q 'targets/nosuchtarget-selftest.conf' <<<"$out" \
+    # The registry path, which is now the only one: the error used to end with
+    # the per-device conf as well, and that was the half this grep matched.
+    grep -q 'targets/hosts/nosuchtarget-selftest.conf' <<<"$out" \
         || { echo "the error does not name the conf to write: $out"; return 1; }
 }
 
@@ -1812,7 +1814,7 @@ chk_push_keys_not_copied() {
 
 chk_remote_confs_resolve() {
     local d f n bad="" any=""
-    d=$(target_conf_dir)
+    d=$(target_registry_dir)
     [ -d "$d" ] || { echo "no machines configured in $d"; return 77; }
     for f in "$d"/*.conf; do
         [ -f "$f" ] || continue
@@ -1826,7 +1828,7 @@ chk_remote_confs_resolve() {
 
 chk_remote_reachable() {
     local d f n any="" bad=""
-    d=$(target_conf_dir)
+    d=$(target_registry_dir)
     [ -d "$d" ] || { echo "no machines configured"; return 77; }
     for f in "$d"/*.conf; do
         [ -f "$f" ] || continue

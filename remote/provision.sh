@@ -12,8 +12,9 @@
 #
 # What it leaves behind:
 #
-#   ~/.wk-remote                        this machine hosts wk workspaces
-#   ~/.config/wk/targets/<target>.conf  ... and drives them without ssh
+#   ~/.wk-remote                        this machine hosts wk workspaces, which
+#                                       target it is, and where its root is --
+#                                       the remote driver computes the rest
 #   ~/.bashrc + ~/.zshrc + ~/.bash_profile
 #                                       source the shared rc, which puts `wk`
 #                                       on PATH and moves bash aside for zsh
@@ -33,7 +34,6 @@ WK_ROOT="$TOOLS"
 
 TARGET="${WK_REMOTE_TARGET:-}"
 ROOT="${WK_REMOTE_ROOT:-$HOME/wk}"
-REFERENCE="${WK_REMOTE_REFERENCE:-}"
 
 [ -n "$TARGET" ] || die "WK_REMOTE_TARGET is not set (run this through 'wk remote setup')"
 
@@ -72,19 +72,12 @@ target=$TARGET
 root=$ROOT
 EOF
 
-# The same conf the workstation has, plus WK_REMOTE_LOCAL: on this machine the
-# driver runs its commands directly instead of over an ssh connection to
-# itself. One driver, one set of paths, one job policy, from either end.
-ensure_dir "$HOME/.config/wk" 0755
-ensure_dir "$HOME/.config/wk/targets" 0755
-write_file "$HOME/.config/wk/targets/$TARGET.conf" 0644 <<EOF
-# Written by remote/provision.sh on $(hostname). This is the machine itself.
-WK_TARGET_KIND=remote
-WK_REMOTE_LOCAL=1
-WK_REMOTE_ROOT=$ROOT
-${REFERENCE:+WK_REMOTE_REFERENCE=$REFERENCE}
-EOF
-
+# No second conf beside the marker. There used to be one -- restating
+# WK_TARGET_KIND, WK_REMOTE_LOCAL and WK_REMOTE_ROOT, all three of which the
+# marker above already says -- and the remote driver now computes them from it
+# (targets/remote.sh, "am I the machine this target names?"). The registry conf
+# in the repository is the only place a target is configured, and it is here
+# already: this whole tree is rsynced onto the machine.
 # --- the push keys, and how ssh finds them -----------------------------------
 #
 # A build machine is not a container: there is no read-only mount and no

@@ -247,18 +247,13 @@ machine_seen() {
         rec_opt tailnet "$(reach_tailnet "$m")"
         rec_opt direct  "$(reach_without_tailnet "$m")"
     fi
-    # Which file said this machine exists. Two of them can: the registry in this
-    # repository, which every device gets by pulling, and this device's own view
-    # of the same machine. Both are named when both are there, because "where
-    # did that come from" is a question with two possible answers.
+    # Which file said this machine exists -- the registry in this repository,
+    # which every device gets by pulling. Relative to the checkout: a path under
+    # this repository is a file anybody reading this can open, and the absolute
+    # form is one machine's layout rather than the fact.
     _conf=""
-    for _c in "$(target_conf "$m")" "$(target_registry_conf "$m")"; do
-        [ -f "$_c" ] || continue
-        # Relative to the checkout when it is in it: a path under this
-        # repository is a file anybody reading this can open, and the absolute
-        # form is one machine's layout rather than the fact.
-        _conf="$_conf${_conf:+, }${_c#$WK_ROOT/}"
-    done
+    _c=$(target_registry_conf "$m")
+    [ -f "$_c" ] && _conf="${_c#$WK_ROOT/}"
     rec_opt conf "$_conf"
     rec_emit
 }
@@ -1028,12 +1023,22 @@ report_machine() {
         #                   policy the containers run under).
         #   a build box     the same push, by machine name.
         #   a peer          a workstation runs a git checkout of its own, and
-        #                   nothing here pushes to it: it pulls.
+        #                   nothing here pushes to it: it pulls -- which can
+        #                   only work when what this machine has is committed
+        #                   and pushed. With a dirty tree here the pull is a
+        #                   no-op, so offering it as the remedy sends the reader
+        #                   to run a command that provably cannot converge (it
+        #                   is what `wk sync --tools` had just run). The fix is
+        #                   the step that is actually missing, and it is here.
         if [ "$theirs" != "$mine" ]; then
             if [ -n "${WK_IN_VM:-}" ]; then
                 rec_set fix "wk sync --target container"
             elif [ -n "${WK_REMOTE_PEER:-}" ]; then
-                rec_set fix "ssh $label 'cd $(t_tools "" 2>/dev/null || echo wk-tools) && git pull'"
+                if [ -n "$(git -C "$WK_ROOT" status --porcelain 2>/dev/null)" ]; then
+                    rec_set fix "commit and push here first -- a peer pulls, and this checkout is dirty"
+                else
+                    rec_set fix "wk sync --tools   (pulls on $label, and says so if it still differs)"
+                fi
             else
                 rec_set fix "wk sync --target $label"
             fi

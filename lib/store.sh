@@ -36,6 +36,21 @@ _wk_default_store() {
 
 WK_STORE="${WK_STORE:-$(_wk_default_store)}"
 
+# Is the store on *this* machine, or somewhere this machine only drives?
+#
+# On a Linux workstation and inside the podman VM it is here. On a macOS
+# workstation it is not: $WK_STORE is the VM's /var/lib/wk, a path the Mac can
+# neither create nor read -- so a command that acts on the store has to be
+# forwarded rather than attempted. `mkdir: /var/lib/wk: Permission denied` is
+# what attempting it looks like, and it says nothing about which machine to run
+# on instead.
+store_is_local() {
+    [ -n "${WK_IN_VM:-}" ] && return 0
+    [ "$(uname -s)" != Darwin ] && return 0
+    # A Mac with a real /var/lib/wk it owns is possible and is still local.
+    [ -d "$WK_STORE" ] && [ -w "$WK_STORE" ]
+}
+
 # This device's own state, on the host, whatever $WK_STORE happens to be.
 #
 # It was defined in lib/target.sh, which is where the first caller happened to

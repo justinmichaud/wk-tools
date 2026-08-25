@@ -26,26 +26,28 @@ MACHINES
   generated `wk-<workspace>` aliases are a different file, ~/.ssh/config.d/wk,
   written and removed by wk itself.)
 
-WHICH CONF, AND WHY THERE ARE TWO
+ONE CONF, IN THE REPOSITORY
 
-  targets/hosts/<name>.conf     in this repository, and therefore on every
-                                device that pulls it. What is true about the
-                                *machine* no matter who is driving: its ssh
-                                destination, the CMake flags its toolchain
-                                needs, whether it is a build box or a
-                                workstation of its own.
-  ~/.config/wk/targets/<n>.conf this device's own view of the same machine, and
-                                only what it alone can know: a different alias,
-                                a root somewhere else, a ceiling for a link
-                                that is not the machine's fault.
+  targets/hosts/<name>.conf     the only place a machine is configured. In this
+                                repository, and therefore on every device that
+                                pulls it. What is true about the *machine* no
+                                matter who is driving: its ssh destination, the
+                                CMake flags its toolchain needs, whether it is a
+                                build box or a workstation of its own.
 
-  The registry is read first and the local conf second, and a conf is sourced
-  shell, so the local one overrides the shared one *line by line* -- setting one
-  variable keeps the registry's answer for everything else.
+  Adding a machine is an edit and a commit; `wk remote setup <name>` writes the
+  file for you. There is no per-device half. There was one --
+  ~/.config/wk/targets/<name>.conf, overriding the registry line by line -- and
+  it went on 2026-08-25: a machine configured on one device did not exist on the
+  others, a reinstall lost every target, and the files left on this workstation
+  had drifted to pure comments while `wk doctor` still listed them as state to
+  back up. Everything in a conf is a fact about the machine, the addressing in
+  it is accepted as published, and a second copy of a fact is a bug even while
+  it is still equal.
 
-  Almost everything belongs in the registry. It exists because the local half
-  used to be the only half: a reinstall lost every target, and a machine's build
-  flags had to be re-typed on every device. Adding one is an edit and a commit.
+  The genuinely per-device things are keys and secrets, and none of those live
+  in a target conf. The genuinely per-invocation ones are environment variables,
+  which still win over the conf.
 
   What the conf can say (targets/remote.sh has the full list):
 
