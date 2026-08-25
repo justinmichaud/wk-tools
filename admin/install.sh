@@ -140,9 +140,10 @@ fi
 # happily overwrite a running system, and the boot check is what makes the grant
 # safe rather than merely plausible.
 #
-# Installed on the machines that hold card readers. Everywhere else it is absent
-# and `boot/disk.sh` falls back to plain sudo, which is what works on a board
-# where the account is already root.
+# Installed on the machines that hold card readers. Everywhere else it is
+# absent, and `boot/disk.sh` refuses rather than falling back: there is no
+# inline-sudo way in, by design (CLAUDE.md, "One path, not two"), so a machine
+# without the helper cannot write a disk and says so with this stage's name.
 _card_target="$_libexec/wk-card-priv"
 _card_source="$WK_ROOT/admin/wk-card-priv"
 _card_sudoers=/etc/sudoers.d/zzz-wk-card

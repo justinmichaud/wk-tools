@@ -43,6 +43,40 @@
 #
 # Requires machine_load() to have run, so MACH_SSH/MACH_ROOT/MACH_DEVICE are set.
 
+# --- the privileged half ------------------------------------------------------
+#
+# One spelling for every privileged step on the machine the disk is attached to:
+# `sudo -n`, a fixed path, a fixed verb, and arguments the helper checks against
+# what they are allowed to be rather than trusting this end. There is no second
+# way in -- no inline sudo, no "run it directly if the helper is missing". A
+# fallback here is the path that runs on the machine nobody tested, on the day
+# something is already wrong (CLAUDE.md, "One path, not two").
+#
+# stdin passes straight through, which is how the image reaches `write` and the
+# tailscale auth key reaches `tailnet` without either touching a command line.
+CARD_PRIV=/usr/local/libexec/wk-card-priv
+
+card_priv() { # <verb> [args...]
+    m_ssh "sudo -n $CARD_PRIV $(sh_quote "$@")"
+}
+
+# Asked once, before the first refusal that would otherwise report it as a
+# property of the disk.
+#
+# Without this the machine's own "command not found" arrives indented inside
+# "rpi5 will not write /dev/mmcblk0", which reads as a disk that was rejected
+# rather than a machine that was never provisioned -- and names no remedy. The
+# helper is installed by `./setup` on the machines that hold card readers, so
+# its absence is a provisioning fact and the fix is one line long.
+card_priv_require() {
+    card_priv status >/dev/null 2>&1 && return 0
+    die "$MACH_NAME cannot write a disk: its card helper is missing, or its
+    sudoers rule is not in force. Everything privileged here goes through it and
+    there is deliberately no second way in.
+    What fails:  sudo -n $CARD_PRIV status
+    The remedy, from a terminal on $MACH_NAME:  ./setup --stage quiesce"
+}
+
 # The partition device for a disk, which is not a suffix you can assume:
 # /dev/sda -> /dev/sda2, but /dev/mmcblk0 -> /dev/mmcblk0p2, and likewise for
 # nvme and loop. Getting this wrong grows the wrong filesystem, or none.
@@ -110,6 +144,7 @@ EOF
 disk_refuse_unless_safe() {
     local dev="$1" bytes="$2" out dev_bytes size
 
+    card_priv_require
     out=$(card_priv check "$dev" 2>&1) || die "$MACH_NAME will not write $dev:
 $(printf '%s\n' "$out" | sed 's/^/    /')
     Disks there:
@@ -228,6 +263,108 @@ disk_unique_identity() {
     m_ssh "lsblk -no PARTUUID $(sh_quote "$(disk_part "$dev" 2)")" 2>/dev/null | tr -d '\r ' \
         | grep -qx "$new-02" \
         || die "$dev did not take the new identity; refusing to leave it ambiguous"
+}
+
+# What makes a written disk part of the fleet, rather than a system that boots
+# and is invisible: the identity marker every wk-written system carries
+# (/etc/wk-image), which is what `b_probe` reads to tell a bench system from a
+# machine that never left host mode, and the driving machine's ssh key in root's
+# authorized_keys. A Yocto image ships `PermitRootLogin yes` with an empty root
+# password -- something a person can use and `ssh -o BatchMode=yes` cannot -- so
+# without the key the board comes up perfectly and nothing here can reach it.
+#
+# Both values go over as base64 on the command line. Neither is a secret (the
+# marker is provenance, the key is a public key), both are multi-line, and the
+# encoding is what lets the helper check them against a character set before it
+# decodes anything -- a stronger position than escaping them through ssh into
+# sudo. It is also the fix for the failure recorded in docs/TESTING.md: they
+# were once split out of one stdin on a blank line, `sed` read the stream in
+# buffered chunks, and every card came out with a perfect marker and an empty
+# authorized_keys.
+disk_install_fleet() { # <device> <marker> <ssh public key>
+    local dev="$1" marker="$2" key="$3" m64 k64
+    m64=$(printf '%s' "$marker" | base64 | tr -d '\n\r ')
+    k64=$(printf '%s' "$key"    | base64 | tr -d '\n\r ')
+    [ -n "$m64" ] && [ -n "$k64" ] \
+        || die "refusing to install a fleet identity with an empty marker or key"
+
+    info "installing the identity marker and the driving key on $dev"
+    card_priv fleet "$dev" "$m64" "$k64" >/dev/null \
+        || die "could not install the fleet integration on $dev.
+    The image is written, but the board would boot with no /etc/wk-image and no
+    key in root's authorized_keys: unreachable by anything here, and
+    indistinguishable from the machine's host mode."
+}
+
+# The tailnet identity, onto the card that was just written.
+#
+# This is the half of "everything wk touches is on the tailnet" that cannot live
+# in the image. The image carries tailscale and the join
+# (image/yocto/meta-wk-tailnet); what it must not carry is the auth key or the
+# name, and for different reasons:
+#
+#   the key   is a credential, and an image is an artifact that is stored,
+#             compressed, copied between machines and kept after it is
+#             superseded. A key baked into one is a key in every copy of it,
+#             revocable only by revoking it for the whole fleet. On a card it
+#             exists for one boot -- wk-tailnet-join deletes it once it has been
+#             spent.
+#   the name  is a property of the machine the card goes into, not of the image:
+#             the same image is written for more than one board, and the name a
+#             node has to answer to is the fleet's name for the machine. An
+#             image that joined under its own hostname would be on the tailnet
+#             under a name nothing else here uses -- which is a mapping, written
+#             down somewhere, which is the whole thing the rule forbids.
+#
+# Only for an image that asked for it, and the card is asked rather than
+# guessed. A card with no wk-tailnet-join is a bench system (image/profiles.sh:
+# "the image has no tailscale and never will"), a bridge image or a rescue, and
+# for one of those this would resolve the fleet's auth key, send it to whichever
+# machine holds the reader and write it to a file there -- a credential in one
+# more place, for a disk that has nothing to spend it.
+disk_seed_tailnet() { # <device> <tailnet hostname>
+    local dev="$1" name="$2" keyfile joins tag="${WK_TAILNET_TAG:-tag:wk}"
+
+    # Three outcomes, not two: yes, no, and "the question was not answered".
+    # A grep that finds nothing looks exactly like a no, and a no here means the
+    # board silently boots without a tailnet identity -- the state the fleet
+    # rule exists to end, arrived at by a helper that failed rather than by a
+    # decision anyone made.
+    joins=$(card_priv joins "$dev" 2>&1) \
+        || die "could not tell whether $dev joins the tailnet on first boot:
+$(printf '%s\n' "$joins" | sed 's/^/    /')
+    The image is written. Refusing to guess: a card that joins and was not
+    seeded comes up with no tailnet identity, and a card that does not would be
+    left holding a credential it cannot spend."
+    case "$joins" in
+        *'tailnet-join: yes'*) ;;
+        *'tailnet-join: no'*)
+            debug "$dev carries no wk-tailnet-join, so there is nothing to seed"
+            return 0 ;;
+        *) die "$MACH_NAME's card helper did not say whether $dev joins the tailnet
+    (it said: ${joins:-nothing}). Refusing to guess, for the same reason." ;;
+    esac
+
+    [ -n "$name" ] || barrier "this image joins the tailnet on first boot, and nothing here
+    knows what name it should answer to -- the image records no machine, so the
+    card would join under the image's own hostname and be reachable by a name
+    the fleet does not use. Write it for a machine, or --force to let it pick."
+
+    keyfile=$(wk_tailscale_authkey) || barrier "this image joins the tailnet on first boot and there is no auth
+    key here to give it. The board would boot reachable only over whatever LAN
+    it lands on, which is the state the fleet rule exists to end (CLAUDE.md,
+    'Cattle, not pets')."
+    [ -n "${keyfile:-}" ] || return 0   # forced past the barrier
+
+    info "seeding the tailnet identity onto $dev -- it joins as '$name' ($tag) on first boot"
+    # The key goes in over the same ssh and never onto a command line, the same
+    # rule as everywhere else it moves; the helper reads it off stdin. What was
+    # written is read back before it is unmounted, on the far side, because the
+    # only end that can see the card is the end holding the privilege.
+    card_priv tailnet "$dev" "$name" "$tag" < "$keyfile" >/dev/null \
+        || die "could not seed the tailnet identity onto $dev.
+    The image is written; it would boot with no tailnet identity and be
+    reachable only over whatever LAN it lands on."
 }
 
 # Grow the last partition to fill the disk.

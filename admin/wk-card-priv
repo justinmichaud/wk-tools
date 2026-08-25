@@ -160,16 +160,25 @@ check_hex() {
 # A scratch mountpoint of this helper's own making. The caller never names a
 # path: "mount this device at that path" is a different and much larger grant
 # than "mount this device somewhere and edit two files in it".
-with_mount() { # <partition> <function> [args...]
+with_mount() { # [-r] <partition> <function> [args...]
+    local ro=""
+    [ "${1:-}" = -r ] && { ro="-o ro"; shift; }
     local p="$1" fn="$2"; shift 2
-    local m; m=$(mktemp -d /run/wk-card.XXXXXX)
-    mount "$p" "$m" || { rmdir "$m"; fail "could not mount $p"; }
-    "$fn" "$m" "$@"
-    local rc=$?
+    local m rc; m=$(mktemp -d /run/wk-card.XXXXXX)
+    # shellcheck disable=SC2086
+    mount $ro "$p" "$m" || { rmdir "$m"; fail "could not mount $p"; }
+    # The edit runs under a trap rather than a bare call, because the two ways
+    # it can end both skip the line after it: `set -e` on a non-zero return, and
+    # `fail`, which exits. Either one used to leave the card mounted -- and a
+    # mounted card is one the gate refuses, so the next verb blames the disk for
+    # the previous verb's failure.
+    trap 'umount "$m" 2>/dev/null || true; rmdir "$m" 2>/dev/null || true' EXIT
+    rc=0; "$fn" "$m" "$@" || rc=$?
+    trap - EXIT
     umount "$m" || true
     rmdir "$m" || true
     sync
-    return $rc
+    return "$rc"
 }
 
 # --- the verbs ---------------------------------------------------------------
@@ -206,6 +215,13 @@ _fleet_edit() { # <mountpoint> <marker> <pubkey>
     printf '%s\n' "$key" > "$m$home/.ssh/authorized_keys"
     chmod 0600 "$m$home/.ssh/authorized_keys"
     chown -R 0:0 "$m$home/.ssh"
+
+    # Read back, because this failure is invisible from the writing side: a card
+    # with a perfect marker and an empty authorized_keys boots and cannot be
+    # reached, and that is exactly how it went wrong once (docs/TESTING.md).
+    grep -q . "$m/etc/wk-image" || fail "the identity marker did not land on this disk"
+    grep -q '^ssh-\|^ecdsa-\|^sk-' "$m$home/.ssh/authorized_keys" \
+        || fail "the driving key did not land in $home/.ssh/authorized_keys"
 }
 
 # fleet <device> <marker-base64> <ssh-public-key-base64>
@@ -242,6 +258,32 @@ _tailnet_edit() { # <mountpoint> <hostname> <tag> <keyfile>
     cat "$keyfile" > "$m/etc/wk/tailscale-authkey"
     chmod 0600 "$m/etc/wk/tailscale-authkey"
     chown -R 0:0 "$m/etc/wk"
+
+    # What can be read back is. The key deliberately is not printed: its size
+    # and mode answer "did it land", and echoing a credential to prove it
+    # arrived would be the same mistake as putting it on a command line.
+    grep -qx "hostname=$host" "$m/etc/wk/tailnet.conf" \
+        || fail "the tailnet name did not survive the write to this disk"
+    [ "$(stat -c '%a' "$m/etc/wk/tailscale-authkey")" = 600 ] \
+        && [ -s "$m/etc/wk/tailscale-authkey" ] \
+        || fail "the auth key did not land on this disk as a 0600 file"
+}
+
+_joins_probe() { # <mountpoint>
+    [ -x "$1/usr/sbin/wk-tailnet-join" ] && say "tailnet-join: yes" || say "tailnet-join: no"
+}
+
+# joins <device> -- does the system on this disk join the tailnet on first boot?
+#
+# Read-only, and a verb of its own because the answer decides whether the
+# driving end resolves the fleet's auth key at all. Folded into `tailnet` it
+# could not: the key has to be on stdin before that verb can look. So a bench
+# image -- which carries no tailscale and never will (image/profiles.sh) --
+# would have the fleet's credential read, sent here and written to a file, every
+# time a card was written, for a disk with nothing to spend it.
+v_joins() {
+    local dev; dev=$(gate "${1:-}")
+    with_mount -r "$(part "$dev" 2)" _joins_probe
 }
 
 # tailnet <device> <hostname> <tag>   -- the auth key arrives on stdin.
@@ -340,11 +382,12 @@ case "$verb" in
     check)    v_check    "$@" ;;
     write)    v_write    "$@" ;;
     fleet)    v_fleet    "$@" ;;
+    joins)    v_joins    "$@" ;;
     tailnet)  v_tailnet  "$@" ;;
     identity) v_identity "$@" ;;
     grow)     v_grow     "$@" ;;
     unmount)  v_unmount  "$@" ;;
     verify)   v_verify   "$@" ;;
     eject)    v_eject    "$@" ;;
-    *) fail "usage: wk-card-priv status|check|write|fleet|tailnet|identity|grow|unmount|verify|eject <device> [...]" ;;
+    *) fail "usage: wk-card-priv status|check|write|fleet|joins|tailnet|identity|grow|unmount|verify|eject <device> [...]" ;;
 esac

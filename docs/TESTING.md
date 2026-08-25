@@ -2928,10 +2928,23 @@ on the writing side passed while it happened.
       The configurations are real and two of them name a defconfig that exists
       upstream today, so what is missing is the mechanism between the two. The
       refusal names both halves that are owed
-- [!] `image/buildroot/external/` does not exist. docs/TESTING.md has recorded it
-      as done since 2026-08-24 ("fixed in image/buildroot/external/") and the
-      directory was never committed. Without it no buildroot build here completes
-      on an arm64 host, which is both this Mac and moose
+- [ ] `image/buildroot/external/` is **written** (2026-08-25) and has never been
+      run through a build. It had been recorded as done since 2026-08-24
+      ("fixed in image/buildroot/external/") with the directory never committed,
+      which is the whole reason it is spelled out here: without it no buildroot
+      build completes on an arm64 host, which is both this Mac and moose. What
+      it does is the change upstream buildroot made for host-python between
+      2021.02 and 2021.08, applied from outside the tree -- confirmed against
+      the pin, where `HOST_PYTHON_CONF_OPTS` has no `--with-system-ffi` and
+      `HOST_PYTHON_DEPENDENCIES` no `host-libffi`, while the fork's `wpe` head
+      has both. Three lines, and the third is the one that is easy to miss:
+      appending to `HOST_PYTHON_DEPENDENCIES` reaches recipe-time expansion but
+      **not** the order-only prerequisite of a rule pkg-generic.mk defined
+      before external.mk was read, so host-libffi would never actually be built
+      first. Checked as make semantics against a reproduction of buildroot's
+      own rule shape (with the third line: host-libffi builds before configure;
+      without it: never builds), which is the part that is checkable with no
+      build. The build itself is owed
 - [V] the tailnet overlay half **is** written and verified
       (`image/buildroot/tailnet-overlay.sh`, `S99tailscale`), and each buildroot
       config points at it with `BR_OVERLAY_TAILSCALE`
@@ -3338,6 +3351,36 @@ egress list that cannot be "every upstream in six layers".
       `tag=tag:wk`), the auth key at 0600, and `wk-image.id` on the FAT. A
       fixture *without* `wk-tailnet-join` was correctly skipped by the tailnet
       seeding rather than left holding a credential it cannot spend.
+- [ ] **every disk verb the write path calls is defined** (2026-08-25).
+      Moving `boot/disk.sh` onto the card helper deleted `disk_seed_tailnet` and
+      never wrote `card_priv` or `disk_install_fleet`, so `wk sysimage write`
+      died at its first refusal with `boot/disk.sh: line 113: card_priv: command
+      not found` indented inside "rpi5 will not write /dev/mmcblk0" -- which
+      reads as a rejected disk, not an absent function. Two more were waiting
+      after the image was on the card. All three are written; `wk selftest` now
+      greps command-position calls against the definitions, because bash
+      resolves a function name when the line runs and the line that runs this
+      one needs a card in a reader. Not yet run against hardware.
+- [ ] a machine whose card helper is missing or out-ranked says so, with the
+      remedy (2026-08-25). `card_priv_require` asks it `status` before the first
+      refusal, so "this machine was never provisioned" is not reported as a
+      property of the disk. Checked at a terminal, not against a machine without
+      the helper.
+- [ ] the tailnet seed asks the card before it resolves the fleet's key
+      (2026-08-25). `joins <device>` is a read-only helper verb that reports
+      whether the written system carries `wk-tailnet-join`; without it the key
+      would be read, sent to whichever machine holds the reader and written to a
+      file there on every write -- including the bench images, which carry no
+      tailscale and never will. Folding it into `tailnet` is not possible: that
+      verb cannot look until the key is already on its stdin.
+- [ ] the fleet and tailnet edits are **read back before the card is
+      unmounted** (2026-08-25), on the far side, since the only end that can see
+      the card is the end holding the privilege: a non-empty `/etc/wk-image`, an
+      `ssh-`/`ecdsa-`/`sk-` line in root's authorized_keys, the tailnet hostname
+      as written, and a non-empty 0600 auth key. `with_mount` now unmounts under
+      a trap, so an edit that fails or calls `fail` no longer leaves the card
+      mounted -- which the gate refuses, making the next verb blame the disk for
+      the previous verb's failure.
 - [!] `disk_install_fleet` shipped the driving key over one stdin split on a
       blank line, and the key was lost every time: `sed` reads in buffered
       chunks, so the first reader swallowed the whole stream and the second got
@@ -3347,7 +3390,13 @@ egress list that cannot be "every upstream in six layers".
       secret (the marker is metadata, the driving key is public; the tailscale
       auth key still goes over stdin, where one reader consumes it). Found by
       reading a written card back, not by review — the failure is invisible from
-      the writing side.
+      the writing side. The function was then lost in the move onto the card
+      helper and rewritten on 2026-08-25 in the shape the helper takes: both
+      values base64 on the command line, checked against a character set before
+      anything decodes them, and the far side reads back a non-empty
+      `/etc/wk-image` and an `ssh-`/`ecdsa-`/`sk-` line in authorized_keys
+      before it unmounts — so the invisible half is now checked where the card
+      is, which is the only end that can see it. Not yet run against hardware.
 - [V] `wk sysimage write --from <path|vm:path>` writes an image that is in no
       store (2026-08-24): it reads the bytes where the builder left them —
       including out of this machine's podman VM, which a macOS driver cannot
@@ -3468,11 +3517,17 @@ egress list that cannot be "every upstream in six layers".
       arm64 host** — its bundled 2013-era libffi's `aarch64/sysv.S` no longer
       assembles, and the build dies at `sharedmods`. An architecture problem and
       not an old-distribution one: on x86_64 that file is never compiled, which
-      is why this tree has always built on moose. Fixed in
-      `image/buildroot/external/` — a BR2_EXTERNAL tree this repo owns rather
-      than a patch against somebody else's vendor branch, since buildroot
-      already gives the *target* python `--with-system-ffi` and ships a
-      host-libffi package and simply never joins the two for the host build.
+      is why this tree has always built on moose. The fix is **identified and
+      not written**: `image/buildroot/external/`, a BR2_EXTERNAL tree this repo
+      owns rather than a patch against somebody else's vendor branch, since
+      buildroot already gives the *target* python `--with-system-ffi` and ships
+      a host-libffi package and simply never joins the two for the host build.
+      This line said "Fixed in" from 2026-08-24 until 2026-08-25 and the
+      directory was never committed; the owed item is in "The buildroot builder
+      — owed" above, and confirmed against the pin on 2026-08-25:
+      `HOST_PYTHON_CONF_OPTS` at tag 2020.02 carries no `--with-system-ffi` and
+      `HOST_PYTHON_DEPENDENCIES` no `host-libffi`, while the fork's `wpe` branch
+      head has both — so the difference is the pin, not the fork.
 - [V] an image without systemd does not get systemd units written into it and
       called a watchdog. `install_units` reads the init out of the rootfs
       (`/lib/systemd/systemd` or `/usr/lib/systemd/systemd`, via debugfs) and
@@ -3487,29 +3542,6 @@ egress list that cannot be "every upstream in six layers".
       has a second root slot, and a watchdog with nowhere to return to is a
       reboot loop rather than a safety net. It becomes real with the two-slot
       card (docs/HANDOFF-boot.md, "The rpi3").
-- [V] a base image is never mistaken for a bench system (2026-08-24). Every
-      image wk writes carries `/etc/wk-image`, so `b_probe` calling anything
-      with a marker `bench <id>` meant a board that had fallen back to the
-      medium it is never armed from — an unarmed stick, a stick that would not
-      boot, or the rpi3, which has only ever had one medium — reported bench
-      mode and `wk pi bench` measured it. The evidence that settles it was
-      already declared and simply never asked for: `MACH_ROOT` is the root
-      device that is never written to, `MACH_DEVICE` is the medium systems are
-      written onto, and `b_system_kind` compares the running root against both.
-      `wk pi bench` refuses a base image by name, `wk boot --status` says "base
-      image" rather than "bench mode", and `wk status`'s fleet line says "not a
-      bench system". A board on its base image is also *armable* again — that
-      state used to match `bench*` and be refused with "already in bench mode".
-- [V] a rescue image gets no self-return watchdog and no self-disarm
-      (`IMG_ROLE=rescue`, image/profiles.sh; recorded as `role=` in
-      `/etc/wk-image`). Both units exist to hand a machine *back* to what it
-      falls back to, and a rescue image is that thing — so on one, the watchdog
-      is a 15-minute reboot in the middle of whatever card the helper is
-      writing, and the self-disarm parks a medium the image is not even on.
-- [!] the rpi4's SD card holds a *bench*-profile image acting as its rescue, so
-      it carries a 900-second self-return watchdog and reboots itself every 15
-      minutes when the board is sitting on it. Rewrite it with a rescue-role
-      image; needs a build and a card.
 - [ ] the rpi3 has no bench system at all and therefore cannot be measured: one
       medium, so `MACH_ROOT` is on `MACH_DEVICE` and every root on that card is
       the base image. Which shape fixes it turns on a fact nobody here has

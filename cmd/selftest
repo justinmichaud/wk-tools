@@ -865,6 +865,50 @@ chk_gc_searches_every_build_location() {
     [ -z "$bad" ] || { echo "$bad"; return 1; }
 }
 
+# The same defect class one layer out: a configuration that names something this
+# repo is supposed to provide, and does not provide it. `BR_EXTERNAL=1` stood in
+# twelve configs for a year with `image/buildroot/external/` never committed, and
+# docs/TESTING.md recorded it as fixed the whole time -- so the only thing that
+# would have caught it was asking the filesystem.
+chk_buildroot_external_exists() {
+    local d="$WK_ROOT/image/buildroot/external" f bad="" users
+    users=$(grep -l '^BR_EXTERNAL=1' "$WK_ROOT"/image/configs/*.conf 2>/dev/null | wc -l | tr -d ' ')
+    [ "$users" -gt 0 ] || return 0
+    for f in external.desc external.mk Config.in; do
+        [ -f "$d/$f" ] || bad="$bad
+  $users configuration(s) set BR_EXTERNAL=1 and image/buildroot/external/$f does not exist"
+    done
+    [ -z "$bad" ] || { echo "$bad"; return 1; }
+    grep -q '^name: ' "$d/external.desc" || { echo "external.desc has no name:, so BR2_EXTERNAL_<NAME>_PATH is never set"; return 1; }
+}
+
+# A caller with no callee is invisible in bash until the line runs, and the line
+# that runs here needs a card in a reader on a machine in another room.
+#
+# Not hypothetical: moving the disk path onto the card helper deleted
+# `disk_seed_tailnet` and never wrote `card_priv` or `disk_install_fleet`, and
+# the first anyone knew was `card_priv: command not found` arriving indented
+# inside a refusal about a disk -- reading as a disk that was rejected. Two more
+# were waiting after the image was already on the card, which is the expensive
+# half: a written card that nothing can reach.
+#
+# Command position only, so that `disk_bytes=` (a manifest key) and
+# `manifest_get "$id" disk_bytes` are not read as calls.
+chk_disk_verbs_are_defined() {
+    local name bad="" defs used
+    defs=$(grep -hoE '^[a-z_]+\(\)' \
+             "$WK_ROOT/boot/disk.sh" "$WK_ROOT/boot/machines.sh" \
+             "$WK_ROOT/lib/common.sh" "$WK_ROOT/cmd/sysimage" | tr -d '()')
+    used=$(sed 's/#.*//' "$WK_ROOT/cmd/sysimage" "$WK_ROOT/boot/disk.sh" \
+           | grep -hoE '(^|[;&|(}[:space:]])(disk_[a-z_]+|card_priv[a-z_]*)([[:space:]]|$)' \
+           | grep -oE '(disk_[a-z_]+|card_priv[a-z_]*)' | sort -u)
+    for name in $used; do
+        printf '%s\n' "$defs" | grep -qx "$name" || bad="$bad
+  $name is called and defined nowhere -- the write dies on the line that calls it"
+    done
+    [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
 # The card helper's grant is what its gate refuses, so the gate is the thing to
 # check -- and most of it is checkable with no card and no root, by reading the
 # script. What cannot be checked here (does it actually refuse a running disk on
@@ -878,7 +922,7 @@ chk_card_helper_gate() {
     # Every verb that touches a device must run the gate. A verb that skips it
     # is a hole in a NOPASSWD grant, which is the one bug class here that
     # matters more than any other.
-    for v in v_check v_write v_fleet v_tailnet v_identity v_grow v_eject; do
+    for v in v_check v_write v_fleet v_joins v_tailnet v_identity v_grow v_eject; do
         sed -n "/^$v() {/,/^}/p" "$f" | grep -q 'gate ' \
             || bad="$bad
   $v does not call gate, so it would act on a device nothing validated"
@@ -2243,6 +2287,8 @@ if want quick; then
     check "no auth key is ever written into an image"                     chk_no_authkey_in_an_image
     check "a base image is never mistaken for a bench system"             chk_base_image_not_benchable
     check "every builder's output has somewhere"                          chk_gc_searches_every_build_location
+    check "\`image/buildroot/external/\` is **written**"                   chk_buildroot_external_exists
+    check "every disk verb the write path calls is defined"               chk_disk_verbs_are_defined
     check "disk the machine is not running from"                          chk_card_helper_gate
     check "a workspace may not reboot a workstation, whatever"            chk_broker_refuses_a_workstation
     check "an unknown plan is refused, naming the allowlist that decides it" chk_broker_plan_allowlist

@@ -27,17 +27,19 @@
 #               already exports. image_build_locations already declares it, so
 #               `wk gc` already reclaims it.
 #   external    BR_EXTERNAL -> image/buildroot/external, a BR2_EXTERNAL tree this
-#               repository owns. It carries the one fix the scouting run needed:
-#               host-python-2.7's bundled 2013-era libffi cannot assemble
-#               aarch64/sysv.S, so the build dies at `sharedmods` on an arm64
-#               build host. An architecture problem, not an old-distro one -- on
-#               x86_64 that file is never compiled, which is why this tree always
-#               built on moose. Buildroot ships host-libffi and gives the
-#               *target* python --with-system-ffi, and never joins the two for
-#               the host build.
-#               **That tree does not exist yet either.** TESTING.md says "fixed
-#               in image/buildroot/external/" and the directory was never
-#               committed; image/buildroot holds only the tailnet overlay.
+#               repository owns. **Written 2026-08-25.** It carries the one fix
+#               the scouting run needed: host-python-2.7's bundled 2013-era
+#               libffi cannot assemble aarch64/sysv.S, so the build dies at
+#               `sharedmods` on an arm64 build host. An architecture problem,
+#               not an old-distro one -- on x86_64 that file is never compiled,
+#               which is why this tree always built on moose. Buildroot ships
+#               host-libffi and gives the *target* python --with-system-ffi, and
+#               at the pin never joins the two for the host build; upstream
+#               joined them itself between 2021.02 and 2021.08, so the tree
+#               applies the upstream change from outside rather than inventing
+#               one. Never run through a build -- what is checked is the make
+#               semantics it depends on (external.mk says which, and why an
+#               appended dependency is not enough on its own).
 #   overlay     BR2_ROOTFS_OVERLAY, assembled by
 #               image/buildroot/tailnet-overlay.sh <arch> <staging>. This part is
 #               written and verified. Only world-readable regular files: the
@@ -54,8 +56,9 @@
 #
 # --- what is owed, in order --------------------------------------------------
 #
-#   1. image/buildroot/external/, with the host-libffi fix. Nothing builds on an
-#      arm64 host without it, and this Mac and moose are both arm64.
+#   1. image/buildroot/external/, with the host-libffi fix. DONE 2026-08-25;
+#      nothing builds on an arm64 host without it, and this Mac and moose are
+#      both arm64.
 #   2. this function: clone-and-pin the tree per configuration, apply the
 #      defconfig, write the overlay, build in an ubuntu:20.04 container in a
 #      workspace, and hand output/images/$BR_IMAGE to the same manifest step the
@@ -84,15 +87,14 @@ buildroot_build() {
 
     The configuration is real and complete -- $(image_config_file "$profile") --
     and its defconfig ($BR_DEFCONFIG) exists in
-    ${BR_TREE_URL:-the fork} on branch ${BR_TREE_BRANCH:-wpe}. What is missing is
-    the mechanism, and two things are owed before it works:
-
-      1. image/buildroot/external, a BR2_EXTERNAL tree with the host-libffi fix.
-         Without it no buildroot build here completes on an arm64 host, which is
-         both this Mac and moose. docs/TESTING.md records it as done; the
-         directory was never committed.
-      2. buildroot_build itself, in image/buildroot.sh, which carries the whole
-         recipe the 2026-08-24 scouting run established.
+    ${BR_TREE_URL:-the fork} on branch ${BR_TREE_BRANCH:-wpe}. The BR2_EXTERNAL
+    tree it needs on an arm64 build host is written too
+    ($WK_ROOT/image/buildroot/external). What is missing is the mechanism:
+    buildroot_build itself, in image/buildroot.sh, which carries the whole
+    recipe the 2026-08-24 scouting run established -- clone and pin the tree,
+    apply the defconfig, assemble the overlay, build in an ubuntu:20.04
+    container in a workspace, and hand output/images/${BR_IMAGE:-the image} to
+    the manifest step the yocto builder already uses.
 
     A hand-built image from that run is what the rpi3 has been measured on."
 }

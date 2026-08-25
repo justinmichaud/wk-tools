@@ -1,0 +1,12 @@
+# No packages.
+#
+# A br2-external tree must have a Config.in, and this one has nothing to put in
+# it: the tree exists to carry build fixes against the pinned buildroot
+# (external.mk), not to add packages. Everything this repo installs into an
+# image arrives through BR2_ROOTFS_OVERLAY instead
+# (image/buildroot/tailnet-overlay.sh), which is the mechanism for files rather
+# than for recipes.
+#
+# When a package does become necessary, it goes in package/<name>/ beside this
+# file and is sourced from here. Not before: an empty menu in menuconfig is one
+# more thing that looks like it does something.
