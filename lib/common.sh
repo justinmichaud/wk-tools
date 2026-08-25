@@ -194,6 +194,58 @@ status_render() {
         ${WK_STATUS_HTML_OUT:+--out "$WK_STATUS_HTML_OUT"}
 }
 
+# Which view a bare `wk status` is, decided in one place because two decide it:
+# cmd/status renders on Linux and the dispatcher renders on a macOS host, and a
+# default that differed between them would make `wk status` mean two things on
+# one fleet.
+#
+# The page is the primary view -- it is where the colour and the structure are,
+# and a fleet is a thing you look *at* rather than parse. But this command's
+# stdout is also read: `wk selftest` parses the table, `wk status --wait`
+# branches on the exit code, and an agent driving this repository has neither a
+# browser nor a terminal. A served page would hang all three where a table
+# returned. So the page is the default only where every one of these holds, and
+# each is a way somebody is not a person at a terminal:
+#
+#   a tty on stdout    a pipe or a redirect is a program reading this.
+#   nothing said       WK_STATUS_VIEW is the explicit answer, and CI is
+#                      automation saying so about itself. NO_COLOR is the
+#                      convention for "render me plainly", and a page is the
+#                      opposite of that.
+#   somewhere to open it   inside a workspace there is no browser and no display
+#                      (and no host network to reach one on), and over ssh with
+#                      no DISPLAY the browser would open on the machine nobody
+#                      is sitting at.
+#
+# `--text` asks for the table from a terminal anyway, and `--web` asks for the
+# page from anywhere; this only decides what a bare invocation means.
+#
+# It *sets a variable* rather than printing the answer, and that is the whole
+# reason it is shaped this way: both callers would naturally write
+# `MODE=$(status_default_mode)`, and inside a command substitution fd 1 is a
+# pipe -- so `[ -t 1 ]` would be asking about the pipe this function's own
+# answer travels down, and would say "not a terminal" on a terminal, every
+# time. A variable is read by the substitution's subshell just as well
+# (a subshell inherits the shell's variables), and cannot be wrong.
+status_default_mode() {
+    WK_STATUS_DEFAULT_MODE=text
+    if [ -n "${WK_STATUS_VIEW:-}" ]; then
+        WK_STATUS_DEFAULT_MODE="$WK_STATUS_VIEW"
+        return 0
+    fi
+    [ -t 1 ]               || return 0
+    [ -z "${CI:-}" ]       || return 0
+    [ -z "${NO_COLOR:-}" ] || return 0
+    # Guarded rather than assumed: this file is sourced by things that do not
+    # source lib/target.sh, and a missing function under `set -u` would take the
+    # whole command down to answer a question about formatting.
+    if command -v in_workspace >/dev/null 2>&1 && in_workspace; then return 0; fi
+    if [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ] && [ -z "${DISPLAY:-}" ]; then return 0; fi
+    WK_STATUS_DEFAULT_MODE=web
+    return 0
+}
+WK_STATUS_DEFAULT_MODE=text
+
 wk_machine_name() {
     { hostname -s 2>/dev/null || echo here; } | tr '[:upper:]' '[:lower:]'
 }

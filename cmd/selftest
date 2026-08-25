@@ -153,6 +153,22 @@ shell_files() {
     local f
     find "$WK_ROOT" -type f -not -path '*/.git/*' -not -path '*/__pycache__/*' 2>/dev/null \
     | while read -r f; do
+        # A shebang, *or* a name ending in .sh -- and the second half is not
+        # tidiness. Selecting by shebang alone excluded every sourced library
+        # in the tree (lib/, boot/, targets/, image/, host/: a sourced file has
+        # no shebang), which is most of the shell here and all of the shell that
+        # `wk` loads before it does anything. So the check that exists to keep
+        # this tree loadable under the bash macOS actually ships was not looking
+        # at the files that stop it loading.
+        #
+        # It cost exactly that: `boot/machines.sh` could not be *loaded* by bash
+        # 3.2 at all -- a `case` inside a `$( … )`, which 3.2 parses only with
+        # parenthesised patterns -- so `wk boot`, `wk pi` and `wk status`'s fleet
+        # block would have died on any Mac without homebrew's bash. Found
+        # 2026-08-25, invisible until then.
+        case "$f" in
+            *.sh) echo "$f"; continue ;;
+        esac
         case "$(head -1 "$f" 2>/dev/null)" in
             '#!'*bash*|'#!'*/sh|'#!'*/sh\ *) echo "$f" ;;
         esac
@@ -196,6 +212,97 @@ chk_parse() {
 $(shell_files)
 EOF
     [ -z "$bad" ] || { echo "does not parse:$bad"; return 1; }
+}
+
+# --- the fleet-request broker -------------------------------------------------
+#
+# The broker is the one door out of the sandbox, so what is checked here is the
+# *narrowness* of it: that its policy refuses what it should, and that a
+# workspace with no broker listening gets a refusal that names the door rather
+# than a stack trace about a missing file.
+#
+# In-process against the real policy code and the real boot/machines/*.conf,
+# rather than against a running broker: this section may not use ssh, and the
+# refusals are decided before anything is reached anyway. That is the property
+# -- a machine is refused on its declaration, not on whether it answers.
+_broker_policy() { # <python body>
+    python3 - "$WK_ROOT" <<EOF 2>&1
+import importlib.util, sys
+root = sys.argv[1]
+spec = importlib.util.spec_from_file_location(
+    "wkbroker", root + "/container/broker/wk-broker.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+$1
+EOF
+}
+
+chk_broker_refuses_a_workstation() {
+    local out
+    out=$(_broker_policy '
+bench = [n for n, v in m.fleet().items() if v["role"] == "bench-device"]
+work  = [n for n, v in m.fleet().items() if v["role"] != "bench-device"]
+if not bench or not work:
+    print("FLEET", bench, work); raise SystemExit(0)
+for n in work:
+    try:
+        m.want_bench_device({"machine": n})
+    except m.Refused as e:
+        if "bench-device" not in e.why:
+            print("WRONGREASON", n, e.why); raise SystemExit(0)
+    else:
+        print("ACCEPTED", n); raise SystemExit(0)
+print("OK")') || { echo "the policy would not load: $out"; return 1; }
+    case "$out" in
+        *OK*) ;;
+        *FLEET*) echo "no fleet to test against: $out"; return 77 ;;
+        *) echo "a workstation was not refused as a bench device: $out"; return 1 ;;
+    esac
+}
+
+chk_broker_plan_allowlist() {
+    local out
+    out=$(_broker_policy '
+try:
+    m.want_plan({"plan": "speedometer99"})
+except m.Refused as e:
+    if "allowlist" not in e.why:
+        print("WRONGREASON", e.why); raise SystemExit(0)
+else:
+    print("ACCEPTED"); raise SystemExit(0)
+one = sorted(m.ALLOWED_PLANS)[0]
+if m.want_plan({"plan": one}) != one:
+    print("REFUSEDALLOWED", one); raise SystemExit(0)
+# A name that is not a name must never reach a lookup at all.
+for bad in ("../../etc/passwd", "-rf", "a b"):
+    try:
+        m.want_plan({"plan": bad})
+    except m.Refused:
+        continue
+    print("ACCEPTEDBAD", bad); raise SystemExit(0)
+print("OK")') || { echo "the policy would not load: $out"; return 1; }
+    case "$out" in
+        *OK*) ;;
+        *) echo "the plan allowlist is not closed: $out"; return 1 ;;
+    esac
+}
+
+# Two refusals from one fake workspace, and the difference between them is the
+# whole point: a verb the broker serves says "ask the broker, and here is how to
+# start one"; a verb it does not serve says "this acts on a host" and stops.
+chk_broker_door_is_narrow() {
+    local out rc
+    rc=0; out=$(WK_BROKER_SOCKET="$TMP/no-such-broker.sock" \
+                as_workspace pi setup some-host 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "'wk pi setup' was accepted inside a workspace"; return 1; }
+    grep -q "acts on a host" <<<"$out" \
+        || { echo "'wk pi setup' refused for some other reason: $out"; return 1; }
+
+    rc=0; out=$(WK_BROKER_SOCKET="$TMP/no-such-broker.sock" \
+                as_workspace boot rpi4 --status 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || { echo "'wk boot' answered inside a workspace with no broker"; return 1; }
+    grep -q "setup --stage broker" <<<"$out" \
+        || { echo "the refusal does not name the stage that opens the door: $out"; return 1; }
 }
 
 # --- bridge: the spec, with no phone in the room ------------------------------
@@ -1986,6 +2093,96 @@ chk_boot_files_accepts_autodetected_kernel() {
         || { echo "an auto-detected kernel8.img image was refused: $out"; return 1; }
 }
 
+# `wk status`'s concurrency helper, on its own: the order it emits in and the
+# verdict it carries back.
+#
+# Lifted by name and driven with fake writers, because the two things this has
+# to guarantee are the two that a real fleet cannot be made to demonstrate on
+# demand -- a probe that finishes last must still appear where it started, and a
+# subshell's exit status must reach the parent's `worst`. Both were bugs waiting
+# in the obvious version of this: concatenating in completion order (a listing
+# that reshuffles between refreshes), and losing the exit code in the fork
+# (which is this command's whole contract).
+chk_status_parallel_keeps_its_order() {
+    local out rc=0
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/lib/common.sh"
+    eval "$(sed -n '/^bump()/,/^}/p'      "$WK_ROOT/cmd/status")"
+    eval "$(sed -n '/^par_begin()/,/^}/p' "$WK_ROOT/cmd/status")"
+    eval "$(sed -n '/^par_run()/,/^}/p'   "$WK_ROOT/cmd/status")"
+    eval "$(sed -n '/^par_join()/,/^}/p'  "$WK_ROOT/cmd/status")"
+
+    worst=0
+    # Deliberately finishing in the reverse of the order they start, so anything
+    # that concatenated as it finished would come back c b a.
+    _slow() { sleep "$1"; printf '%s\n' "$2" >&3; exit "$3"; }
+
+    par_begin
+    par_run a _slow 3 a 2
+    par_run b _slow 2 b 4
+    par_run c _slow 1 c 0
+    # Into a file rather than `$( ... )`: a command substitution is a subshell,
+    # and the jobs par_run started belong to *this* shell -- `wait` in there
+    # cannot see them and returns at once, which is a green test of nothing.
+    par_join 3> "$TMP/par-out"
+    out=$(cat "$TMP/par-out")
+
+    [ "$out" = "$(printf 'a\nb\nc')" ] || {
+        echo "records came back in finishing order, not starting order: $(printf '%s' "$out" | tr '\n' ' ')"
+        rc=1; }
+    [ "$worst" = 4 ] || { echo "the worst exit status did not come back: worst=$worst, wanted 4"; rc=1; }
+    return "$rc"
+}
+
+# Nothing in a listing may block without a bound of its own, and the tailnet
+# lookup was the one thing in lib/reach.sh that could.
+#
+# A local call to a daemon is not the same as a call that returns: a wedged
+# tailscaled answers neither, and the CLI has no timeout of its own. When that
+# happened here (2026-08-24) every reach lookup in the walk hung on it and
+# `wk status --web` never got as far as serving a page.
+#
+# Hermetic: a stub CLI that never answers, put where the real lookup finds it.
+chk_reach_tailnet_cannot_hang() {
+    local t0 d
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/lib/common.sh"
+    eval "$(sed -n '/^wk_tailscale_peers()/,/^}/p' "$WK_ROOT/lib/reach.sh")"
+    # The once-per-process memo the function reads before anything else; lifted
+    # by name, this arrives without the file-scope initialisers it has there.
+    _WK_TS_PEERS=""; _WK_TS_READ=""
+
+    printf '#!/bin/sh\nsleep 30\n' > "$TMP/tailscale"
+    chmod +x "$TMP/tailscale"
+    wk_tailscale_cli() { printf '%s' "$TMP/tailscale"; }
+
+    t0=$(date +%s)
+    WK_TAILSCALE_TIMEOUT=1 wk_tailscale_peers >/dev/null 2>&1 || true
+    d=$(( $(date +%s) - t0 ))
+    [ "$d" -le 8 ] || { echo "a tailscale CLI that never answers held the walk ${d}s"; return 1; }
+}
+
+# A bare `wk status` opens the page at a terminal -- and must not, anywhere
+# else. This checks the half that matters: everything that is not a person at a
+# terminal has to get the table, because `wk selftest` parses that table and
+# `wk status --wait` branches on the exit code, and a served page would hang
+# both. (The tty half needs a pty and is verified by hand.)
+chk_status_default_view() {
+    local rc=0 m
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/lib/common.sh"
+    # This check's own stdout is a pipe, which is exactly the "not a person"
+    # case -- so the plain call is the redirected one.
+    status_default_mode; m="$WK_STATUS_DEFAULT_MODE"
+    [ "$m" = text ] || { echo "a redirected stdout defaulted to '$m', not the table"; rc=1; }
+
+    ( WK_STATUS_VIEW=json; status_default_mode; [ "$WK_STATUS_DEFAULT_MODE" = json ] ) \
+        || { echo "WK_STATUS_VIEW did not decide the view"; rc=1; }
+    ( CI=1; status_default_mode; [ "$WK_STATUS_DEFAULT_MODE" = text ] ) \
+        || { echo "CI did not fall back to the table"; rc=1; }
+    return "$rc"
+}
+
 if want quick; then
     section "quick -- no workspace, no podman, no ssh"
     check "every shell file parses under both bash 5 and bash 3.2"        chk_parse
@@ -2045,6 +2242,12 @@ if want quick; then
     check "a base image is never mistaken for a bench system"             chk_base_image_not_benchable
     check "every builder's output has somewhere"                          chk_gc_searches_every_build_location
     check "disk the machine is not running from"                          chk_card_helper_gate
+    check "a workspace may not reboot a workstation, whatever"            chk_broker_refuses_a_workstation
+    check "an unknown plan is refused, naming the allowlist that decides it" chk_broker_plan_allowlist
+    check "names the socket and the stage that opens it"                  chk_broker_door_is_narrow
+    check "never in the order they finished, so a slow probe changes when a line" chk_status_parallel_keeps_its_order
+    check "local call to the daemon, which is not the same as a call that returns" chk_reach_tailnet_cannot_hang
+    check "a bare \`wk status\` **at a terminal opens the page**"           chk_status_default_view
 fi
 
 if want state; then

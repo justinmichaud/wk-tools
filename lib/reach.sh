@@ -30,9 +30,26 @@
 # already run in parallel under a ceiling (`capped`, lib/common.sh), so nothing
 # below may block without one of its own.
 
-# The tailnet's view, once per process. `tailscale status` is a local call to
-# the daemon -- no network -- but it is not free, and a fleet listing asks about
-# every machine it has.
+# The tailnet's view, once per process, and under a ceiling.
+#
+# `tailscale status` is a local call to the daemon -- no network -- but it is
+# not free, and a fleet listing asks about every machine it has. Hence "once".
+#
+# The ceiling is the other half, and it was missing: this file's own preamble
+# says nothing below it may block without a bound of its own, and this was the
+# one thing in it that could. A *local* call is not the same as a call that
+# returns -- a wedged tailscaled answers neither, and the CLI has no timeout of
+# its own. Caught here 2026-08-24, with the daemon in exactly that state (`the
+# Tailscale CLI failed to start: Failed to save preferences`): every reach
+# lookup in the walk hung on it, and `wk status --web` never reached the point
+# of serving a page. That is the same shape of failure as the jump hop that
+# stopped the fleet block, and it gets the same answer (`capped`,
+# lib/common.sh), for the same reason: a probe that overruns must lose its own
+# line, never the listing.
+#
+# Nothing is lost when it fires: reach_tailnet says nothing about a machine the
+# tailnet has not answered for, and reach_without_tailnet is the whole point of
+# there being a second answer.
 _WK_TS_PEERS=""
 _WK_TS_READ=""
 
@@ -51,7 +68,10 @@ wk_tailscale_peers() {
     _WK_TS_READ=1
     local cli
     cli=$(wk_tailscale_cli) || return 0
-    _WK_TS_PEERS=$( "$cli" status --json 2>/dev/null | python3 -c '
+    local raw
+    raw=$(capped "${WK_TAILSCALE_TIMEOUT:-4}" "$cli" status --json 2>/dev/null) || raw=""
+    [ -n "$raw" ] || return 0
+    _WK_TS_PEERS=$( printf '%s' "$raw" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)

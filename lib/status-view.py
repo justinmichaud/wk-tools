@@ -132,8 +132,19 @@ def read_doc(path):
 # One place where a state word becomes a colour, because a state that is red in
 # the terminal and grey on the page is two answers to one question.
 
-GOOD = ("ok", "present", "running", "host mode", "up")
-BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held")
+# Matched on the *first word*, because most of these states are phrases: "bench
+# mode", "base image -- not a bench system", "role installed", "no answer within
+# 20s". The page is handed these four lists rather than carrying a second copy
+# (page(), below) -- when it did carry one the two had already drifted, and `up`,
+# `clean`, `finished` and `held` were coloured in the terminal and plain on the
+# page.
+GOOD = ("ok", "present", "running", "host mode", "up", "bench", "open")
+BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held",
+        # A board that fell back to its base image is not a bench system, and
+        # reading it as one is how an unarmed board came to be benchmarked; a
+        # bridge with the role installed but no way to run its health check
+        # from here is likewise an answer that is not yet "good".
+        "base", "role")
 BAD = (
     "unhealthy",
     "failed",
@@ -142,7 +153,7 @@ BAD = (
     "broken",
     "unreachable",
     "gave-up",
-    "error",
+    "error", "closed",
 )
 IDLE = ("absent", "none", "stopped", "exited", "-", "clean", "finished", "off")
 
@@ -191,7 +202,6 @@ ANSI = {
     "bold": "\033[1m",
     "dim": "\033[2m",
     "head": "\033[1;36m",
-    "rule": "\033[2m",
 }
 
 # Six columns, and the one that was dropped is `ws`: it repeated the state word
@@ -224,8 +234,17 @@ def ws_work_hue(ws):
     return "idle"
 
 
-def ws_branch(ws):
+def ws_branch(ws, cap=40):
+    """The branch, and how far it has drifted from its upstream.
+
+    Capped for the table, because a column is as wide as the widest thing in it
+    and a WebKit bug branch is a sentence: one 78-character name pushed BUILD --
+    the column somebody is actually reading -- off the side of the terminal.
+    The page shows the whole thing; this is the view where width is scarce.
+    """
     b = ws.get("branch") or "-"
+    if len(b) > cap:
+        b = b[: cap - 1] + "\u2026"
     if ws.get("behind"):
         b += " \u2193%s" % ws["behind"]
     if ws.get("ahead"):
@@ -285,22 +304,49 @@ def disk_hue(pct):
     return "bad" if pct >= 90 else "busy" if pct >= 75 else "good"
 
 
+def load_hue(load, cores):
+    """Load against cores, which is the only reading of a load average that
+    means anything: 8 is idle on a 64-core build box and desperate on a Pi."""
+    try:
+        load, cores = float(load), int(cores)
+    except (TypeError, ValueError):
+        return ""
+    if not cores:
+        return ""
+    return "bad" if load > cores else "busy" if load > cores / 2.0 else "good"
+
+
+def where_word(obj):
+    """Which of a machine's two of something this is, as a column-heading word.
+
+    "in the podman VM" reads as a phrase in the middle of a sentence and as
+    noise next to a label; the record carries the sentence form because the
+    collector is the one that knows.
+    """
+    return (obj.get("where") or "").replace("in the ", "").replace("the ", "")
+
+
 def paint(text, key, colour):
     if not colour or not ANSI.get(key):
         return text
     return "%s%s%s" % (ANSI[key], text, RESET)
 
 
-def rule(widths, left, mid, right, fill="─"):
-    return left + mid.join(fill * (w + 2) for w in widths) + right
-
-
 def render_text(doc, colour):
-    """The listing as one table per method group, all to the same widths.
+    """The listing as plain aligned columns.
 
-    One set of widths for the whole listing, and that is the point: per-group
-    widths made every block line up with itself and with nothing else, so the
-    eye had to find the columns again at every heading.
+    Deliberately the plainest thing that carries the facts. The page is what
+    this fleet is looked at with now -- `wk status` at a terminal opens it
+    (status_default_mode, lib/common.sh) -- and this is what a pipe, a redirect,
+    `wk selftest` and an agent get. That reader wants the columns to line up and
+    wants nothing else: the box-drawn grid this used to build, with its rules,
+    its corner glyphs and its blank-celled continuation rows, was a second
+    showpiece to keep correct for somebody who now has a better one.
+
+    The one piece of machinery kept is a single set of column widths for the
+    whole listing. Per-group widths made every block line up with itself and
+    with nothing else, so the eye had to find the columns again at every heading
+    -- and it is four lines, not machinery.
     """
     out = []
 
@@ -310,41 +356,46 @@ def render_text(doc, colour):
             for ws in g["workspaces"]:
                 for i, c in enumerate(ws_cells(ws)):
                     w[i] = max(w[i], len(c))
-    # The inside of a row: every column, two spaces of padding each, and the
-    # separators between them.
-    inner = sum(w) + 3 * len(w) - 1
 
     def row(cells, hues=None):
+        # Every column padded but the last, so a row does not end in a field of
+        # spaces -- with colour on, the reset sequence sits after them and no
+        # amount of stripping afterwards can find them.
         hues = hues or {}
-        parts = [paint(c.ljust(w[i]), hues.get(i, ""), colour) for i, c in enumerate(cells)]
-        return "  │ " + " │ ".join(parts) + " │"
-
-    def span(text, hue=""):
-        """A line that crosses the whole table -- a note, an error, a hint."""
-        return "  │ " + paint(text.ljust(inner - 2), hue, colour) + " │"
+        last = len(cells) - 1
+        return "    " + "  ".join(
+            paint(c if i == last else c.ljust(w[i]), hues.get(i, ""), colour)
+            for i, c in enumerate(cells)
+        )
 
     def heading(name, tag=""):
-        # Ruled to the table's own width, so a section reads as the width of
-        # what is under it rather than as an arbitrary line.
         out.append("")
-        out.append(paint(name, "head", colour) + ("   " + paint(tag, "dim", colour) if tag else ""))
-        out.append(paint("═" * (inner + 4), "rule", colour))
+        out.append(paint(name, "head", colour) + (paint("   " + tag, "dim", colour) if tag else ""))
+
+    def kv(label, value, indent="  "):
+        """A label and its answer. The label column is one width for the whole
+        block, and never runs into the value: a label longer than the column
+        ("push (podman VM)") used to."""
+        lab = label.ljust(14) if len(label) < 14 else label + "  "
+        out.append(indent + paint(lab, "dim", colour) + value)
 
     def meta(obj, indent="  "):
-        """How a machine is reached, and which file said it exists.
-
-        Both are calculated (lib/reach.sh) rather than read from anywhere, and
-        both are printed dim: they are the answer to a question asked when
-        something is wrong, and they must not compete with the states above.
-        """
+        """How a machine is reached, and which file said it exists. Both are
+        calculated at read time (lib/reach.sh) and both are dim: they answer a
+        question asked when something above them is wrong."""
         if obj.get("tailnet"):
-            out.append(indent + paint("reached    ", "dim", colour) + obj["tailnet"])
+            kv("reached", obj["tailnet"], indent)
         if obj.get("direct"):
-            out.append(
-                indent + paint("or without tailscale  ", "dim", colour) + obj["direct"]
-            )
+            kv("without tailscale", obj["direct"], indent)
         if obj.get("conf"):
-            out.append(indent + paint("from       ", "dim", colour) + paint(obj["conf"], "dim", colour))
+            kv("from", paint(obj["conf"], "dim", colour), indent)
+
+    def notes(items, indent="      "):
+        for n in items or []:
+            hue = "busy" if n.get("level") == "warn" else "dim"
+            for i, text in enumerate(n.get("text", "").split("\n")):
+                out.append(indent + paint(("! " if i == 0 and hue == "busy" else "  ")
+                                          + text.strip(), hue, colour))
 
     for m in doc["machines"]:
         heading(m["name"], "this machine" if m.get("self") else "")
@@ -358,109 +409,58 @@ def render_text(doc, colour):
                 continue
             out.append("")
             out.append("  " + paint(g["name"], "bold", colour))
-            out.append("  " + paint(rule(w, "┌", "┬", "┐"), "rule", colour))
-            out.append(row([h.upper() for h in COLUMNS]))
-            out.append("  " + paint(rule(w, "├", "┼", "┤"), "rule", colour))
+            out.append(row([h.upper() for h in COLUMNS], {i: "dim" for i in range(len(COLUMNS))}))
             for ws in g["workspaces"]:
                 subs = ws.get("subs") or []
                 out.append(row(ws_cells(ws), ws_hues(ws)))
-                # Everything else this workspace has been asked to do, under its
-                # own row and in its own column.
+                # Everything else this workspace was asked to do, one per line
+                # under its row rather than as a row with the identity blanked.
                 for sub in subs[1:]:
-                    out.append(
-                        row(
-                            ["", "", "", "", "", sub_text(sub)],
-                            {5: severity(sub.get("state"))},
-                        )
-                    )
-                for n in ws.get("notes", []):
-                    hue = "busy" if n["level"] == "warn" else "dim"
-                    mark = "! " if n["level"] == "warn" else "  "
-                    for i, text in enumerate(n["text"].split("\n")):
-                        out.append(span((mark if i == 0 else "  ") + text.strip(), hue))
-            out.append("  " + paint(rule(w, "└", "┴", "┘"), "rule", colour))
+                    out.append("      " + paint(sub_text(sub), severity(sub.get("state")), colour))
+                notes(ws.get("notes"))
 
-        # What the machine is, apart from the workspaces on it. Every line here
-        # is a thing that breaks a build or costs work, and the colour is the
-        # point: this block is read at a glance or not at all.
-        # One label column for the whole block, wide enough for the widest label
-        # there is, so the values line up with each other and with nothing else.
-        def hrow(label, value, hue=""):
-            # Padded to the column, and never *into* the value: a label longer
-            # than the column ("push (podman VM)") ran straight into its own
-            # answer.
-            lab = label.ljust(14) if len(label) < 14 else label + "  "
-            out.append("  " + paint(lab, "dim", colour) + paint(value, hue, colour))
-
-        def where_label(name, obj):
-            # "in the podman VM" reads as a phrase in the middle of a sentence
-            # (the disk line uses it that way) and as noise in a column heading.
-            w = (obj.get("where") or "").replace("in the ", "").replace("the ", "")
-            return "%s (%s)" % (name, w) if w else name
-
+        # What the machine is, apart from the workspaces on it. Every line is a
+        # thing that breaks a build or costs work.
+        if any(m.get(k) for k in ("disk", "services", "switches", "capacity", "locks")) or m.get("bench"):
+            out.append("")
         for d in m.get("disk") or []:
             tail = ""
             if d.get("snapshots"):
                 tail = "  ·  %s snapshot%s" % (d["snapshots"], "" if d["snapshots"] == "1" else "s")
                 if d.get("reclaimable") and d["reclaimable"] != "0":
                     tail += paint(", %s reclaimable (wk gc)" % d["reclaimable"], "busy", colour)
-            where = " (%s)" % d["where"] if d.get("where") else ""
-            hrow(
-                "disk",
-                "%s used   %s free of %s%s"
-                % (
-                    paint(d.get("used_pct", "?") + "%", disk_hue(d.get("used_pct")), colour),
-                    gb(d.get("free_mb")),
-                    gb(d.get("total_mb")),
-                    paint(where, "dim", colour),
-                )
-                + tail,
-            )
+            kv("disk" + (" (%s)" % where_word(d) if where_word(d) else ""),
+               "%s used   %s free of %s%s"
+               % (paint((d.get("used_pct", "?") or "?") + "%", disk_hue(d.get("used_pct")), colour),
+                  gb(d.get("free_mb")), gb(d.get("total_mb")), tail))
         for sv in m.get("services") or []:
-            hrow(sv.get("name", "?"), sv.get("state", "?"), severity(sv.get("state")))
+            kv(sv.get("name", "?"), paint(sv.get("state", "?"), severity(sv.get("state")), colour))
             if sv.get("fix"):
-                hrow("", sv["fix"], "busy")
+                kv("", paint(sv["fix"], "busy", colour))
         for sw in m.get("switches") or []:
-            hrow(
-                where_label(sw.get("name", "?"), sw),
-                paint(sw.get("state", "?"), "good" if sw.get("state") == "on" else "busy", colour)
-                + paint("   " + sw.get("detail", ""), "dim", colour),
-            )
+            kv(sw.get("name", "?") + (" (%s)" % where_word(sw) if where_word(sw) else ""),
+               paint(sw.get("state", "?"), "good" if sw.get("state") == "on" else "busy", colour)
+               + paint("   " + sw.get("detail", ""), "dim", colour))
         for cap in m.get("capacity") or []:
             if not cap.get("cores"):
                 continue
-            load, cores = cap.get("load"), cap.get("cores")
-            hue = ""
-            try:
-                hue = "bad" if float(load) > int(cores) else "busy" if float(load) > int(cores) / 2 else "good"
-            except (TypeError, ValueError):
-                pass
-            hrow(
-                where_label("load", cap),
-                "%s of %s cores   %s free of %s"
-                % (paint(load or "?", hue, colour), cores, gb(cap.get("free_mb")), gb(cap.get("mem_mb"))),
-            )
+            kv("load" + (" (%s)" % where_word(cap) if where_word(cap) else ""),
+               "%s of %s cores   %s free of %s"
+               % (paint(cap.get("load") or "?", load_hue(cap.get("load"), cap.get("cores")), colour),
+                  cap.get("cores"), gb(cap.get("free_mb")), gb(cap.get("mem_mb"))))
         for lk in m.get("locks") or []:
             # A lock whose holder is gone is not a lock: the next taker breaks
-            # it. Saying "alive" or "stale" is the difference between waiting and
+            # it. "held" against "stale" is the difference between waiting and
             # not.
-            state = "held" if lk.get("alive") else "stale"
-            hrow(
-                "lock",
-                "%s  %s  %s"
-                % (
-                    lk.get("resource", "?"),
-                    paint(state, "busy" if lk.get("alive") else "bad", colour),
-                    paint("pid %s  %s" % (lk.get("pid", "?"), lk.get("cmd", "")), "dim", colour),
-                ),
-            )
+            kv("lock", "%s  %s  %s"
+               % (lk.get("resource", "?"),
+                  paint("held" if lk.get("alive") else "stale",
+                        "busy" if lk.get("alive") else "bad", colour),
+                  paint("pid %s  %s" % (lk.get("pid", "?"), lk.get("cmd", "")), "dim", colour)))
         b = m.get("bench")
         if b:
-            hrow(
-                "bench",
-                "%s  %s"
-                % (b.get("run", "?"), paint(b.get("state", "?"), severity(b.get("state")), colour)),
-            )
+            kv("bench", "%s  %s" % (b.get("run", "?"),
+                                    paint(b.get("state", "?"), severity(b.get("state")), colour)))
 
         # A machine that could not answer in records: its own listing, as it
         # sent it, rather than nothing.
@@ -468,9 +468,7 @@ def render_text(doc, colour):
             out.append("")
             for ln in r.get("text", "").split("\n"):
                 out.append("  " + paint(ln, "dim", colour))
-            for n in r.get("notes", []):
-                for ln in n["text"].split("\n"):
-                    out.append("  " + paint(ln.strip(), "busy", colour))
+            notes(r.get("notes"), "  ")
 
         if m["facts"]:
             out.append("")
@@ -478,16 +476,11 @@ def render_text(doc, colour):
             if f.get("type") == "wk-tools":
                 what = "wk-tools" + (" (%s)" % f["copy"] if f.get("copy") else "")
                 ver = (f.get("sha") or "-") + ("+dirty" if f.get("dirty") else "")
-                tail = (
-                    paint("in sync", "good", colour)
-                    if f.get("insync")
-                    else paint(
-                        "DIFFERS from the workstation (%s)" % f.get("expect", "?"),
-                        "bad",
-                        colour,
-                    )
-                )
-                out.append("  %-30s %-14s %s  %s" % (what, ver, f.get("tree", "?"), tail))
+                out.append("  %-30s %-14s %s  %s"
+                           % (what, ver, f.get("tree", "?"),
+                              paint("in sync", "good", colour) if f.get("insync")
+                              else paint("DIFFERS from the workstation (%s)" % f.get("expect", "?"),
+                                         "bad", colour)))
                 # The command, not "push it there": which one it is depends on
                 # what kind of copy this is, and none of the three is guessable.
                 if f.get("fix"):
@@ -497,69 +490,41 @@ def render_text(doc, colour):
 
     if doc["fleet"]:
         heading("fleet", "role, mode, and the media wk owns (wk help hardware)")
-        fw = [
-            max([len(f.get("machine", "")) for f in doc["fleet"]] + [7]),
-            max([len(f.get("role", "")) for f in doc["fleet"]] + [4]),
-            max([len(f.get("mode", "")) for f in doc["fleet"]] + [4]),
-        ]
+        fw = max([len(f.get("machine", "")) for f in doc["fleet"]] + [7])
+        rw = max([len(f.get("role", "")) for f in doc["fleet"]] + [4])
+        mw = max([len(f.get("mode", "")) for f in doc["fleet"]] + [4])
         for f in doc["fleet"]:
-            out.append(
-                "  %s  %s  %s  %s"
-                % (
-                    f.get("machine", "").ljust(fw[0]),
-                    paint(f.get("role", "").ljust(fw[1]), "dim", colour),
-                    paint(f.get("mode", "").ljust(fw[2]), severity(f.get("mode")), colour),
-                    f.get("media", ""),
-                )
-            )
+            out.append("  %s  %s  %s  %s"
+                       % (f.get("machine", "").ljust(fw),
+                          paint(f.get("role", "").ljust(rw), "dim", colour),
+                          paint(f.get("mode", "").ljust(mw), severity(f.get("mode")), colour),
+                          f.get("media", "")))
             if f.get("armed"):
-                out.append(
-                    "  %s  %s"
-                    % (
-                        " " * fw[0],
-                        paint(
-                            "** armed for %s -- wk boot %s --status **"
-                            % (f["armed"], f.get("machine", "")),
-                            "busy",
-                            colour,
-                        ),
-                    )
-                )
-            meta(f, "  " + " " * fw[0] + "  ")
+                out.append("  %s  %s" % (" " * fw,
+                           paint("** armed for %s -- wk boot %s --status **"
+                                 % (f["armed"], f.get("machine", "")), "busy", colour)))
+            meta(f, "  " + " " * fw + "  ")
 
     if doc["bridges"]:
         heading("tailnet bridges", "probed: the segment, the role, and its own health check")
         bw = max(len(b.get("name", "")) for b in doc["bridges"])
         for b in doc["bridges"]:
-            out.append(
-                "  %s  %-10s %-14s %s"
-                % (
-                    b.get("name", "").ljust(bw),
-                    b.get("device", "?"),
-                    b.get("segment", "?"),
-                    paint(b.get("state", "?"), severity(b.get("state")), colour),
-                )
-            )
+            out.append("  %s  %-10s %-14s %s"
+                       % (b.get("name", "").ljust(bw), b.get("device", "?"), b.get("segment", "?"),
+                          paint(b.get("state", "?"), severity(b.get("state")), colour)))
             pad = "  " + " " * bw + "  "
             if b.get("health"):
-                out.append(pad + paint("health     ", "dim", colour) + b["health"])
+                kv("health", b["health"], pad)
             if "role_insync" in b:
-                out.append(
-                    pad
-                    + paint("role       ", "dim", colour)
-                    + (
-                        paint("this repository's", "good", colour)
-                        if b["role_insync"]
-                        else paint(
-                            "older than this repository -- wk bridge setup %s" % b.get("name", ""),
-                            "bad",
-                            colour,
-                        )
-                    )
-                )
+                kv("role",
+                   paint("this repository's", "good", colour) if b["role_insync"]
+                   else paint("older than this repository -- wk bridge setup %s" % b.get("name", ""),
+                              "bad", colour),
+                   pad)
             meta(b, pad)
             if b.get("note"):
                 out.append(pad + paint(b["note"], "dim", colour))
+            notes(b.get("notes"), pad)
 
     out.append("")
     return "\n".join(out)
@@ -569,83 +534,184 @@ def render_text(doc, colour):
 #
 # Self-contained: no CDN, no font host, no framework. A page served from a
 # laptop to look at a fleet must not depend on the network the fleet is the
-# reason you are worried about.
+# reason you are worried about -- and a status page that cannot render because
+# a stylesheet host is unreachable is the exact failure it exists to report on.
+#
+# This is the primary view now (status_default_mode, lib/common.sh): a bare
+# `wk status` at a terminal opens it. So it is built to be read at a glance and
+# not merely to contain the facts -- the same document underneath, arranged so
+# that the things that cost time or work are the things the eye lands on:
+#
+#   the verdict     the exit code, in the words cmd/status's header gives it,
+#                   coloured, at the top. That code is the command's contract
+#                   and it was previously visible only to `echo $?`.
+#   what is wrong   a strip of counts, and only of things that are non-zero: a
+#                   listing with nothing wrong shows nothing there rather than
+#                   six zeroes to read past.
+#   pressure        disk and load as bars against their own ceiling, because
+#                   "92%" and "1.32" are numbers whose meaning is the ratio.
+#   work at risk    unpushed commits and a dirty tree, in the column consulted
+#                   before `wk rm`.
+#   a stale lock    one whose holder is gone is not a lock at all, and it reads
+#                   exactly like one that is held.
+#
+# The state vocabulary is injected rather than written twice (__SEV__ below).
+# It used to be a second copy in JavaScript, and the two had already drifted:
+# `up`, `clean`, `finished` and `held` were coloured in the terminal and plain
+# on the page, which is a listing that answers a question two ways.
 
 PAGE = """<!doctype html>
 <meta charset="utf-8">
 <title>wk status</title>
 <style>
+  /* Light is the base and dark redefines only the tokens, so no colour has its
+     single definition inside a media query. */
   :root {
     color-scheme: light dark;
-    --bg: #fbfbfa; --fg: #1c1c1a; --dim: #6b6b66; --line: #dcdcd6;
-    --card: #ffffff; --good: #1a7f37; --busy: #9a6700; --bad: #c02a2a; --idle: #86867e;
+    --bg:#f7f7f5; --fg:#1b1b19; --dim:#6d6d67; --faint:#8e8e87;
+    --line:#e0e0d9; --card:#ffffff; --sunk:#f0f0ec;
+    --good:#127a33; --busy:#8a5b00; --bad:#b3261e; --idle:#8a8a82; --accent:#2d5fa8;
+    --good-bg:#e4f4e8; --busy-bg:#fdf1d6; --bad-bg:#fbe6e4; --idle-bg:#eeeeea;
+    --accent-bg:#e6eefb;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#16171a; --fg:#e6e6e3; --dim:#9a9a94; --line:#2c2e33;
-            --card:#1c1e22; --good:#4ac26b; --busy:#d4a72c; --bad:#ff6b6b; --idle:#75757040; }
+    :root {
+      --bg:#131417; --fg:#e7e7e3; --dim:#9b9b95; --faint:#7c7c76;
+      --line:#2a2c31; --card:#1a1c20; --sunk:#212429;
+      --good:#5fd07f; --busy:#e0b23c; --bad:#ff7b70; --idle:#84847d; --accent:#7fa9ee;
+      --good-bg:#16301f; --busy-bg:#332a12; --bad-bg:#37201e; --idle-bg:#23252a;
+      --accent-bg:#1b2536;
+    }
   }
-  * { box-sizing: border-box; }
-  body { margin:0; padding:2rem 2.5rem 4rem; background:var(--bg); color:var(--fg);
-         font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
-  h1 { font-size:1.1rem; margin:0 0 .25rem; letter-spacing:.02em; }
-  .sub { color:var(--dim); margin-bottom:2rem; }
-  .machine { margin:0 0 2.5rem; }
-  .machine > h2 { font-size:1rem; margin:0 0 .75rem; padding-bottom:.4rem;
-                  border-bottom:2px solid var(--line); }
-  .machine > h2 .tag { color:var(--dim); font-weight:400; margin-left:.75rem; font-size:.85em; }
-  .method { margin:0 0 1.5rem; }
-  .method > h3 { font-size:.8rem; text-transform:uppercase; letter-spacing:.08em;
-                 color:var(--dim); margin:0 0 .5rem; font-weight:600; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:0 0 4rem; background:var(--bg); color:var(--fg);
+         font:13.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .wrap { max-width:1400px; margin:0 auto; padding:1.5rem 1.75rem; }
+
+  /* --- the top: the verdict, then only what is wrong --- */
+  .top { border-bottom:1px solid var(--line); background:var(--card); }
+  .top .wrap { padding-bottom:1rem; }
+  .title { display:flex; align-items:baseline; gap:.9rem; flex-wrap:wrap; }
+  h1 { font-size:1.05rem; margin:0; letter-spacing:.04em; }
+  .verdict { font-weight:700; }
+  .attn { display:flex; gap:.45rem; flex-wrap:wrap; margin-top:.7rem; }
+  .attn:empty { display:none; }
+  .allclear { margin-top:.7rem; color:var(--good); }
+
+  /* --- chips: one shape for every state word in the listing --- */
+  .chip { display:inline-block; padding:.08rem .5rem; border-radius:999px;
+          font-size:.8rem; font-weight:600; white-space:nowrap;
+          background:var(--idle-bg); color:var(--idle); }
+  .chip.good{background:var(--good-bg);color:var(--good)}
+  .chip.busy{background:var(--busy-bg);color:var(--busy)}
+  .chip.bad {background:var(--bad-bg); color:var(--bad)}
+  .chip.idle{background:var(--idle-bg);color:var(--idle)}
+  .chip.accent{background:var(--accent-bg);color:var(--accent)}
+  .chip .n { font-variant-numeric:tabular-nums; }
+
+  h2 { font-size:1rem; margin:0; letter-spacing:.02em; }
+  .tag { color:var(--dim); font-weight:400; font-size:.82em; margin-left:.6rem; }
+  section.machine { margin:1.75rem 0 0; }
+  .mhead { display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap;
+           border-bottom:2px solid var(--line); padding-bottom:.45rem; margin-bottom:.75rem; }
+  .mhead .spacer { flex:1; }
+
+  /* --- the tiles: what a machine is, apart from the workspaces on it --- */
+  .tiles { display:grid; gap:.55rem; margin:0 0 1rem;
+           grid-template-columns:repeat(auto-fill,minmax(15rem,1fr)); }
+  .tile { background:var(--card); border:1px solid var(--line); border-radius:7px;
+          padding:.5rem .65rem; }
+  .tile .tk { color:var(--dim); font-size:.75rem; text-transform:uppercase;
+              letter-spacing:.07em; margin-bottom:.2rem; }
+  .tile .tv { font-size:.92rem; }
+  .tile .tv b { font-variant-numeric:tabular-nums; font-weight:700; }
+  .tile .sub { color:var(--faint); font-size:.8rem; }
+  /* A ratio, drawn as a ratio: "92%" and "1.32" are numbers whose whole
+     meaning is what they are a fraction of. */
+  .meter { height:5px; border-radius:3px; background:var(--sunk); margin-top:.4rem;
+           overflow:hidden; }
+  .meter i { display:block; height:100%; background:var(--idle); }
+  .meter.good i{background:var(--good)} .meter.busy i{background:var(--busy)}
+  .meter.bad  i{background:var(--bad)}
+
+  /* --- the workspace tables --- */
+  .method { margin:0 0 1.1rem; }
+  .method > h3 { font-size:.75rem; text-transform:uppercase; letter-spacing:.09em;
+                 color:var(--dim); margin:0 0 .35rem; font-weight:700; }
   table { border-collapse:collapse; width:100%; background:var(--card);
-          border:1px solid var(--line); border-radius:6px; overflow:hidden; }
-  th { text-align:left; font-size:.72rem; text-transform:uppercase; letter-spacing:.06em;
-       color:var(--dim); font-weight:600; padding:.5rem .75rem; border-bottom:1px solid var(--line); }
-  td { padding:.4rem .75rem; border-top:1px solid var(--line); vertical-align:top;
+          border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  th { text-align:left; font-size:.7rem; text-transform:uppercase; letter-spacing:.07em;
+       color:var(--dim); font-weight:700; padding:.45rem .7rem;
+       border-bottom:1px solid var(--line); background:var(--sunk); }
+  td { padding:.38rem .7rem; border-top:1px solid var(--line); vertical-align:top;
        white-space:nowrap; }
-  tr.sub td, tr.note td { border-top:none; }
+  tr.sub td, tr.note td { border-top:none; padding-top:0; }
   td.wide { white-space:normal; }
-  .good { color:var(--good); } .busy { color:var(--busy); }
-  .bad  { color:var(--bad); }  .idle { color:var(--idle); }
-  .note { color:var(--dim); white-space:pre-wrap; font-size:.92em; }
+  td.name { font-weight:700; }
+  /* The row of a workspace that needs a person, marked on the row itself: a
+     coloured word in one cell is a thing to find, and this is a thing to see. */
+  tr.attention td { background:var(--bad-bg); }
+  tr.attention td.name { box-shadow:inset 3px 0 0 var(--bad); }
+  tr.working td { background:var(--busy-bg); }
+  tr.working td.name { box-shadow:inset 3px 0 0 var(--busy); }
+  .good{color:var(--good)} .busy{color:var(--busy)} .bad{color:var(--bad)}
+  .idle{color:var(--idle)} .dim{color:var(--dim)}
+  .note { color:var(--dim); white-space:pre-wrap; font-size:.88em; }
   .note.warn { color:var(--busy); }
-  .meta { color:var(--dim); font-size:.88em; margin:.25rem 0 .75rem; }
-  .meta .k { display:inline-block; min-width:11rem; opacity:.75; }
-  .health { font-size:.95em; }
-  .health .k { min-width:9rem; }
-  code.fix { background:var(--bg); border:1px solid var(--line); border-radius:4px;
-             padding:0 .35rem; color:var(--busy); }
-  .facts { margin:.5rem 0 0; color:var(--dim); font-size:.92em; }
-  .facts .bad { color:var(--bad); }
-  pre.raw { background:var(--card); border:1px solid var(--line); border-radius:6px;
-            padding:.75rem; overflow-x:auto; margin:.5rem 0 0; }
-  .fleet td:first-child, .bridges td:first-child { font-weight:600; }
+  .meta { color:var(--faint); font-size:.84em; margin:.2rem 0 .8rem; }
+  .meta .k { display:inline-block; min-width:11rem; }
+  code.fix { background:var(--sunk); border:1px solid var(--line); border-radius:4px;
+             padding:0 .35rem; color:var(--busy); font-weight:600; }
+  .facts { margin:.4rem 0 0; color:var(--dim); font-size:.88em; }
+  pre.raw { background:var(--card); border:1px solid var(--line); border-radius:7px;
+            padding:.7rem; overflow-x:auto; margin:.4rem 0 0; font-size:.85em; }
+
+  /* --- the fleet board --- */
+  .board { display:grid; gap:.6rem; grid-template-columns:repeat(auto-fill,minmax(17rem,1fr)); }
+  .dev { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--idle);
+         border-radius:7px; padding:.6rem .75rem; }
+  .dev.good{border-left-color:var(--good)} .dev.busy{border-left-color:var(--busy)}
+  .dev.bad {border-left-color:var(--bad)}
+  /* A board actually running a bench system is the one state on this board
+     that changes what you may do with the machine, so it is the loud one. */
+  .dev.bench { border-left-color:var(--accent); background:var(--accent-bg); }
+  .dev .dn { font-weight:700; font-size:.95rem; }
+  .dev .dr { color:var(--dim); font-size:.8rem; }
+  .dev .dm { margin:.3rem 0; }
+  .dev .media { color:var(--faint); font-size:.82em; white-space:normal; }
+  .armed { margin-top:.4rem; color:var(--busy); font-weight:600; font-size:.85em; }
+
   footer { position:fixed; right:1rem; bottom:.75rem; color:var(--dim); font-size:.8rem;
-           background:var(--bg); padding:.25rem .5rem; border-radius:4px; }
-  footer .spin { color:var(--busy); }
+           background:var(--card); border:1px solid var(--line);
+           padding:.3rem .6rem; border-radius:999px; }
+  footer .spin { color:var(--busy); font-weight:600; }
   /* The server has gone away -- the page is still showing the last listing it
      had, and every word of it may be hours old. Grey and a red frame, because
      the danger here is reading a stale fleet as a current one. */
   body.gone { filter:grayscale(1) opacity(.55); }
   body.gone::after { content:""; position:fixed; inset:0; pointer-events:none;
                      border:6px solid var(--bad); }
-  body.gone footer { filter:none; color:var(--bad); font-weight:600; }
+  body.gone footer { filter:none; color:var(--bad); font-weight:700; }
 </style>
 <body>
-<div id="app"></div>
+<div class="top"><div class="wrap">
+  <div class="title"><h1>wk status</h1><span id="verdict" class="chip verdict">…</span>
+    <span id="counts" class="dim"></span></div>
+  <div id="attn" class="attn"></div>
+</div></div>
+<div class="wrap"><div id="app"></div></div>
 <footer id="foot">loading…</footer>
 <script>
-const ESC = s => String(s == null ? "" : s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
-const GOOD = ["ok","present","running","host mode"], BUSY = ["creating","starting","building","fixing"],
-      BAD = ["failed","oom","stalled","broken","unreachable","gave-up","error"],
-      IDLE = ["absent","none","stopped","exited","-"];
+const ESC = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// The state vocabulary, from lib/status-view.py -- one list, not a second copy
+// that drifts from it.
+const SEV = __SEV__;
 function sev(w) {
   w = String(w || "").split(" ")[0].toLowerCase();
-  if (GOOD.includes(w)) return "good";
-  if (BUSY.includes(w)) return "busy";
-  if (BAD.includes(w)) return "bad";
-  if (IDLE.includes(w)) return "idle";
+  for (const k of ["good","busy","bad","idle"]) if (SEV[k].includes(w)) return k;
   return "";
 }
+const chip = (w, k) => `<span class="chip ${k === undefined ? sev(w) : k}">${ESC(w)}</span>`;
 function subText(s) {
   let out = `${s.kind}=${s.state}`;
   let bits = [s.config, s.arch].filter(Boolean);
@@ -657,68 +723,132 @@ function subText(s) {
   return out;
 }
 // How a machine is reached and where it was declared -- calculated, never
-// stored (lib/reach.sh), and shown dim: it is what somebody wants when
+// stored (lib/reach.sh), and shown faint: it is what somebody wants when
 // something above it is wrong.
 function meta(o) {
   const rows = [];
-  if (o.tailnet) rows.push(`<div><span class="k">reached</span> ${ESC(o.tailnet)}</div>`);
-  if (o.direct)  rows.push(`<div><span class="k">or without tailscale</span> ${ESC(o.direct)}</div>`);
-  if (o.conf)    rows.push(`<div><span class="k">from</span> ${ESC(o.conf)}</div>`);
+  if (o.tailnet) rows.push(`<div><span class="k">reached</span>${ESC(o.tailnet)}</div>`);
+  if (o.direct)  rows.push(`<div><span class="k">without tailscale</span>${ESC(o.direct)}</div>`);
+  if (o.conf)    rows.push(`<div><span class="k">from</span>${ESC(o.conf)}</div>`);
   return rows.length ? `<div class="meta">${rows.join("")}</div>` : "";
 }
-function GB(mb) {
-  const n = parseInt(mb, 10);
-  if (isNaN(n)) return "?";
-  return n >= 1024 ? Math.round(n/1024) + "G" : n + "M";
+const GB = mb => { const n = parseInt(mb, 10); return isNaN(n) ? "?" : (n >= 1024 ? Math.round(n/1024) + "G" : n + "M"); };
+// The thresholds are "will the next build fit", not tidiness: a WebKit build
+// tree is tens of gigabytes, so 90% of a disk this size is already a build that
+// may not finish.
+function diskHue(p) { const n = parseInt(p,10); return isNaN(n) ? "" : n >= 90 ? "bad" : n >= 75 ? "busy" : "good"; }
+function loadHue(l, c) { l = parseFloat(l); c = parseInt(c,10);
+  return (isNaN(l) || !c) ? "" : l > c ? "bad" : l > c/2 ? "busy" : "good"; }
+const where = o => (o.where || "").replace("in the ","").replace("the ","");
+function meter(pct, hue) {
+  const p = Math.max(0, Math.min(100, pct));
+  return `<div class="meter ${hue}"><i style="width:${p}%"></i></div>`;
 }
-function diskHue(p) {
-  const n = parseInt(p, 10);
-  if (isNaN(n)) return "";
-  return n >= 90 ? "bad" : n >= 75 ? "busy" : "good";
-}
+function tile(k, v, m) { return `<div class="tile"><div class="tk">${ESC(k)}</div>
+  <div class="tv">${v}</div>${m || ""}</div>`; }
+
 // What the machine is, apart from the workspaces on it: the things that break a
-// build or cost work. Same facts and same colours as the terminal, from the same
-// document.
-function health(m) {
-  const r = [];
+// build or cost work, each as one tile, each with its number against the
+// ceiling that number means anything relative to.
+function tiles(m) {
+  const t = [];
   for (const d of m.disk || []) {
-    let tail = "";
-    if (d.snapshots) {
-      tail = ` · ${ESC(d.snapshots)} snapshot${d.snapshots === "1" ? "" : "s"}`;
-      if (d.reclaimable && d.reclaimable !== "0")
-        tail += `<span class="busy">, ${ESC(d.reclaimable)} reclaimable (wk gc)</span>`;
-    }
-    r.push(`<div><span class="k">disk${d.where ? " (" + ESC(d.where) + ")" : ""}</span>
-      <span class="${diskHue(d.used_pct)}">${ESC(d.used_pct)}% used</span>
-      ${GB(d.free_mb)} free of ${GB(d.total_mb)}${tail}</div>`);
+    const pct = parseInt(d.used_pct, 10);
+    let sub = `${GB(d.free_mb)} free of ${GB(d.total_mb)}`;
+    if (d.snapshots) sub += ` · ${ESC(d.snapshots)} snapshot${d.snapshots === "1" ? "" : "s"}`;
+    if (d.reclaimable && d.reclaimable !== "0")
+      sub += ` · <span class="busy">${ESC(d.reclaimable)} reclaimable (wk gc)</span>`;
+    t.push(tile("disk" + (where(d) ? " · " + where(d) : ""),
+      `<b class="${diskHue(d.used_pct)}">${ESC(d.used_pct || "?")}%</b> used
+       <span class="sub">${sub}</span>`, meter(pct, diskHue(d.used_pct))));
   }
-  for (const sv of m.services || [])
-    r.push(`<div><span class="k">${ESC(sv.name)}</span><span class="${sev(sv.state)}">${ESC(sv.state)}</span>`
-      + (sv.fix ? ` <code class="fix">${ESC(sv.fix)}</code>` : "") + `</div>`);
-  for (const sw of m.switches || [])
-    r.push(`<div><span class="k">${ESC(sw.name)}${sw.where ? " (" + ESC(sw.where) + ")" : ""}</span>
-      <span class="${sw.state === "on" ? "good" : "busy"}">${ESC(sw.state)}</span> ${ESC(sw.detail || "")}</div>`);
   for (const c of m.capacity || []) {
     if (!c.cores) continue;
-    const load = parseFloat(c.load), cores = parseInt(c.cores, 10);
-    const hue = isNaN(load) ? "" : load > cores ? "bad" : load > cores/2 ? "busy" : "good";
-    r.push(`<div><span class="k">load${c.where ? " (" + ESC(c.where) + ")" : ""}</span>
-      <span class="${hue}">${ESC(c.load || "?")}</span> of ${ESC(c.cores)} cores ·
-      ${GB(c.free_mb)} free of ${GB(c.mem_mb)}</div>`);
+    const hue = loadHue(c.load, c.cores), pct = (parseFloat(c.load) / parseInt(c.cores,10)) * 100;
+    t.push(tile("load" + (where(c) ? " · " + where(c) : ""),
+      `<b class="${hue}">${ESC(c.load || "?")}</b> of ${ESC(c.cores)} cores
+       <span class="sub">${GB(c.free_mb)} free of ${GB(c.mem_mb)}</span>`, meter(pct, hue)));
   }
+  for (const sv of m.services || [])
+    t.push(tile(sv.name, chip(sv.state) + (sv.fix ? ` <code class="fix">${ESC(sv.fix)}</code>` : "")));
+  for (const sw of m.switches || [])
+    t.push(tile(sw.name + (where(sw) ? " · " + where(sw) : ""),
+      chip(sw.state, sw.state === "on" ? "good" : "busy") +
+      ` <span class="sub">${ESC(sw.detail || "")}</span>`));
   for (const lk of m.locks || [])
-    r.push(`<div><span class="k">lock</span>${ESC(lk.resource)}
-      <span class="${lk.alive ? "busy" : "bad"}">${lk.alive ? "held" : "stale"}</span>
-      pid ${ESC(lk.pid || "?")} ${ESC(lk.cmd || "")}</div>`);
+    // A lock whose holder is gone is not a lock: the next taker breaks it, and
+    // it looks exactly like one that is held.
+    t.push(tile("lock · " + ESC(lk.resource),
+      chip(lk.alive ? "held" : "stale", lk.alive ? "busy" : "bad") +
+      ` <span class="sub">pid ${ESC(lk.pid || "?")} ${ESC(lk.cmd || "")}</span>`));
   if (m.bench)
-    r.push(`<div><span class="k">bench</span>${ESC(m.bench.run)}
-      <span class="${sev(m.bench.state)}">${ESC(m.bench.state)}</span></div>`);
-  return r.length ? `<div class="meta health">${r.join("")}</div>` : "";
+    t.push(tile("bench", chip(m.bench.state) + ` <span class="sub">${ESC(m.bench.run)}</span>`));
+  return t.length ? `<div class="tiles">${t.join("")}</div>` : "";
 }
+
+// The exit code, in cmd/status's own words. It is this command's whole contract
+// and on a page it was previously invisible.
+const VERDICT = {
+  0: ["good", "idle, or the last build succeeded"],
+  1: ["bad",  "a build failed"],
+  2: ["busy", "a build is running, or a workspace is being created"],
+  3: ["bad",  "a build stalled and was killed"],
+  4: ["bad",  "a workspace needs a person"],
+};
+// Only what is wrong, and only when it is: a listing with nothing to say shows
+// nothing here rather than a row of zeroes to read past.
+function summary(doc) {
+  let ws = 0, attn = 0, running = 0, failed = 0, stale = 0, full = 0, drift = 0,
+      unpushed = 0, away = 0, oldrole = 0, bench = 0;
+  for (const m of doc.machines) {
+    for (const g of m.methods) for (const w of g.workspaces) {
+      ws++;
+      if (["creating","broken","unreachable"].includes(w.ws)) attn++;
+      if (w.unpushed) unpushed += parseInt(w.unpushed, 10) || 0;
+      for (const s of w.subs || []) {
+        if (s.state === "running" || s.state === "building") running++;
+        if (["failed","oom","stalled","gave-up","error"].includes(s.state)) failed++;
+      }
+    }
+    for (const lk of m.locks || []) if (!lk.alive) stale++;
+    for (const d of m.disk || []) if (parseInt(d.used_pct,10) >= 90) full++;
+    for (const f of m.facts || []) if (f.type === "wk-tools" && !f.insync) drift++;
+  }
+  for (const f of doc.fleet || []) {
+    if (String(f.mode || "").startsWith("bench")) bench++;
+    if (String(f.mode || "").startsWith("unreachable") || String(f.mode || "").startsWith("no answer")) away++;
+  }
+  for (const b of doc.bridges || []) if (b.role_insync === false) oldrole++;
+  const bits = [
+    [attn,     "bad",    n => `${n} workspace${n>1?"s":""} needing a person`],
+    [failed,   "bad",    n => `${n} failed`],
+    [stale,    "bad",    n => `${n} stale lock${n>1?"s":""}`],
+    [full,     "bad",    n => `${n} disk${n>1?"s":""} over 90%`],
+    [running,  "busy",   n => `${n} running`],
+    [unpushed, "busy",   n => `${n} unpushed commit${n>1?"s":""}`],
+    [drift,    "busy",   n => `${n} wk-tools ${n>1?"copies":"copy"} behind`],
+    [oldrole,  "busy",   n => `${n} bridge role${n>1?"s":""} older than the repo`],
+    [away,     "idle",   n => `${n} board${n>1?"s":""} not answering`],
+    [bench,    "accent", n => `${n} board${n>1?"s":""} in bench mode`],
+  ];
+  return { ws, chips: bits.filter(b => b[0] > 0).map(b => chip(b[2](b[0]), b[1])) };
+}
+
 function render(doc) {
+  const s = summary(doc);
+  const [vk, vt] = VERDICT[doc.exit] || ["", "exit " + doc.exit];
+  const v = document.getElementById("verdict");
+  v.className = "chip verdict " + vk;
+  v.textContent = doc.exit + " · " + vt;
+  document.getElementById("counts").textContent =
+    `${doc.machines.length} machine${doc.machines.length===1?"":"s"} · ${s.ws} workspace${s.ws===1?"":"s"}`;
+  document.getElementById("attn").innerHTML =
+    s.chips.length ? s.chips.join("") : '<span class="allclear">nothing wants attention</span>';
+
   const parts = [];
   for (const m of doc.machines) {
-    parts.push(`<section class="machine"><h2>${ESC(m.name)}${m.self ? '<span class="tag">this machine</span>' : ""}</h2>${meta(m)}`);
+    parts.push(`<section class="machine"><div class="mhead"><h2>${ESC(m.name)}</h2>` +
+      (m.self ? '<span class="tag">this machine</span>' : "") + `</div>${meta(m)}${tiles(m)}`);
     for (const g of m.methods) {
       if (!g.workspaces.length) continue;
       parts.push(`<div class="method"><h3>${ESC(g.name)}</h3><table>
@@ -733,28 +863,31 @@ function render(doc) {
         let branch = w.branch || "-";
         if (w.behind) branch += ` ↓${w.behind}`;
         if (w.ahead) branch += ` ↑${w.ahead}`;
-        parts.push(`<tr>
-          <td>${ESC(w.name)}</td>
-          <td class="${sev(w.state)}">${ESC(w.state)}</td>
-          <td>${ESC(branch)}</td>
+        // The row itself carries the verdict, not only one cell of it.
+        const needs = ["creating","broken","unreachable"].includes(w.ws);
+        const busy = subs.some(x => x.state === "running" || x.state === "building");
+        const cls = needs ? "attention" : busy ? "working" : "";
+        parts.push(`<tr class="${cls}">
+          <td class="name">${ESC(w.name)}</td>
+          <td>${chip(w.state)}</td>
+          <td title="${ESC(w.branch || "")}">${ESC(branch)}</td>
           <td class="${work.length ? "busy" : "idle"}">${ESC(workTxt)}</td>
           <td class="${w.base_behind ? "busy" : "idle"}" title="${ESC(w.base || "")}">${w.base_behind ? "-" + ESC(w.base_behind) : ""}</td>
           <td class="${subs[0] ? sev(subs[0].state) : ""}">${subs[0] ? ESC(subText(subs[0])) : ""}</td></tr>`);
-        for (const s of subs.slice(1))
-          parts.push(`<tr class="sub"><td colspan="5"></td><td class="${sev(s.state)}">${ESC(subText(s))}</td></tr>`);
+        for (const x of subs.slice(1))
+          parts.push(`<tr class="sub"><td colspan="5"></td><td class="${sev(x.state)}">${ESC(subText(x))}</td></tr>`);
         for (const n of (w.notes || []))
           parts.push(`<tr class="note"><td colspan="6" class="wide"><div class="note ${n.level === "warn" ? "warn" : ""}">${ESC(n.text)}</div></td></tr>`);
       }
       parts.push(`</table></div>`);
     }
-    parts.push(health(m));
     const facts = (m.facts || []).map(f => {
       if (f.type === "wk-tools") {
         const what = "wk-tools" + (f.copy ? ` (${f.copy})` : "");
         const ver = (f.sha || "-") + (f.dirty ? "+dirty" : "");
         return `<div>${ESC(what)} ${ESC(ver)} ${ESC(f.tree)} ` + (f.insync
-          ? `<span class="good">in sync</span>`
-          : `<span class="bad">DIFFERS from the workstation (${ESC(f.expect)})</span>`
+          ? chip("in sync", "good")
+          : chip("differs from the workstation (" + (f.expect || "?") + ")", "bad")
             + (f.fix ? ` <code class="fix">${ESC(f.fix)}</code>` : "")) + `</div>`;
       }
       return `<div>push key ${ESC(f.text)}</div>`;
@@ -763,35 +896,45 @@ function render(doc) {
     for (const r of (m.raw || []))
       parts.push(`<pre class="raw">${ESC(r.text)}</pre>` +
         (r.notes || []).map(n => `<div class="note warn">${ESC(n.text)}</div>`).join(""));
+    if (!m.methods.some(g => g.workspaces.length) && !(m.raw || []).length)
+      parts.push(`<div class="idle">(no workspaces on it)</div>`);
     parts.push(`</section>`);
   }
+
   if (doc.fleet && doc.fleet.length) {
-    parts.push(`<section class="machine"><h2>fleet<span class="tag">role, mode, and the media wk owns</span></h2>
-      <table class="fleet"><tr><th>machine</th><th>role</th><th>mode</th><th>media</th></tr>`);
+    parts.push(`<section class="machine"><div class="mhead"><h2>fleet</h2>
+      <span class="tag">role, mode, and the media wk owns — wk help hardware</span></div>
+      <div class="board">`);
     for (const f of doc.fleet) {
-      parts.push(`<tr><td>${ESC(f.machine)}</td><td class="idle">${ESC(f.role)}</td>
-        <td class="${sev(f.mode)}">${ESC(f.mode)}</td><td class="wide">${ESC(f.media || "")}</td></tr>`);
-      if (f.armed) parts.push(`<tr class="note"><td colspan="4" class="wide"><div class="note warn">armed for ${ESC(f.armed)} — wk boot ${ESC(f.machine)} --status</div></td></tr>`);
-      const fm = meta(f);
-      if (fm) parts.push(`<tr class="note"><td colspan="4" class="wide">${fm}</td></tr>`);
+      const bench = String(f.mode || "").startsWith("bench");
+      parts.push(`<div class="dev ${bench ? "bench" : sev(f.mode)}">
+        <div class="dn">${ESC(f.machine)} <span class="dr">${ESC(f.role || "")}</span></div>
+        <div class="dm">${chip(f.mode)}</div>
+        <div class="media">${ESC(f.media || "")}</div>` +
+        (f.armed ? `<div class="armed">armed for ${ESC(f.armed)} — wk boot ${ESC(f.machine)} --status</div>` : "") +
+        meta(f) + `</div>`);
     }
-    parts.push(`</table></section>`);
+    parts.push(`</div></section>`);
   }
+
   if (doc.bridges && doc.bridges.length) {
-    parts.push(`<section class="machine"><h2>tailnet bridges<span class="tag">probed: the segment, the role, and its own health check</span></h2>
-      <table class="bridges"><tr><th>bridge</th><th>device</th><th>segment</th><th>state</th><th>role</th></tr>`);
+    parts.push(`<section class="machine"><div class="mhead"><h2>tailnet bridges</h2>
+      <span class="tag">probed: the segment, the role, and its own health check</span></div>
+      <table><tr><th>bridge</th><th>device</th><th>segment</th><th>state</th><th>role</th><th>health</th></tr>`);
     for (const b of doc.bridges) {
+      // A role older than this repository's is the one thing here that has a
+      // command attached to it, so it is a chip and not a sentence to find.
       const role = b.role_insync === undefined ? ""
-        : b.role_insync ? `<span class="good">this repository's</span>`
-        : `<span class="bad">older — wk bridge setup ${ESC(b.name)}</span>`;
-      parts.push(`<tr><td>${ESC(b.name)}</td><td>${ESC(b.device)}</td><td>${ESC(b.segment)}</td>
-        <td class="${sev(b.state)}">${ESC(b.state || "?")}</td><td class="wide">${role}</td></tr>`);
+        : b.role_insync ? chip("this repository's", "good")
+        : chip("older — wk bridge setup " + b.name, "bad");
+      parts.push(`<tr><td class="name">${ESC(b.name)}</td><td>${ESC(b.device)}</td><td>${ESC(b.segment)}</td>
+        <td>${chip(b.state || "?")}</td><td class="wide">${role}</td>
+        <td class="wide dim">${ESC(b.health || "")}</td></tr>`);
       const extra = [];
-      if (b.health) extra.push(`<div><span class="k">health</span> ${ESC(b.health)}</div>`);
       if (b.note) extra.push(`<div class="note">${ESC(b.note)}</div>`);
       const bm = meta(b);
-      if (extra.length || bm) parts.push(`<tr class="note"><td colspan="5" class="wide"><div class="meta">${extra.join("")}</div>${bm}</td></tr>`);
-      for (const n of (b.notes || [])) parts.push(`<tr class="note"><td colspan="5" class="wide"><div class="note warn">${ESC(n.text)}</div></td></tr>`);
+      if (extra.length || bm) parts.push(`<tr class="note"><td colspan="6" class="wide">${extra.join("")}${bm}</td></tr>`);
+      for (const n of (b.notes || [])) parts.push(`<tr class="note"><td colspan="6" class="wide"><div class="note warn">${ESC(n.text)}</div></td></tr>`);
     }
     parts.push(`</table></section>`);
   }
@@ -800,17 +943,16 @@ function render(doc) {
 const LIVE = __LIVE__;
 if (!LIVE) { render(__DOC__); document.getElementById("foot").textContent = "static page — wk status --web for a live one"; }
 else {
-  let last = 0, busy = false;
+  let last = 0;
   async function poll() {
     try {
       const r = await fetch("status.json", { cache: "no-store" });
       const p = await r.json();
       if (p.stamp !== last) { last = p.stamp; render(p.doc); }
-      busy = p.refreshing;
       document.body.classList.remove("gone");
       const age = Math.round((Date.now()/1000) - p.stamp);
-      document.getElementById("foot").innerHTML = busy
-        ? '<span class="spin">refreshing…</span>'
+      document.getElementById("foot").innerHTML = p.refreshing
+        ? '<span class="spin">walking the fleet…</span>'
         : `updated ${age}s ago · every ${p.interval}s`;
     } catch (e) {
       // Not a footer note: a page that stopped updating looks exactly like one
@@ -826,8 +968,10 @@ else {
 
 
 def page(doc, live):
-    return PAGE.replace("__LIVE__", "true" if live else "false").replace(
-        "__DOC__", json.dumps(doc) if not live else "null"
+    return (
+        PAGE.replace("__LIVE__", "true" if live else "false")
+        .replace("__SEV__", json.dumps({"good": GOOD, "busy": BUSY, "bad": BAD, "idle": IDLE}))
+        .replace("__DOC__", json.dumps(doc) if not live else "null")
     )
 
 
@@ -845,7 +989,13 @@ class Live:
 
     def __init__(self, interval):
         self.interval = max(5, int(interval))
+        # Two locks with two jobs: `lock` guards the document while it is being
+        # swapped under a request, and `busy` guards the *right to walk*. One
+        # lock could not do both -- holding it for the whole walk would block
+        # every page poll for the walk's entire duration, which is the thing the
+        # timer exists to keep off the request path.
         self.lock = threading.Lock()
+        self.busy = threading.Lock()
         self.doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
         self.stamp = 0
         self.refreshing = False
@@ -862,30 +1012,63 @@ class Live:
             ).encode()
 
     def refresh_once(self):
-        with self.lock:
-            self.refreshing = True
-        wk = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wk")
+        # One walk at a time, ever. `wk status` on this fleet takes tens of
+        # seconds and can take minutes when the tailnet is down -- longer than
+        # any sensible interval -- so a timer that fired regardless would have
+        # two walks probing the same boards over the same phone at once. That is
+        # not merely wasteful: measured here 2026-08-24, two fleet blocks
+        # running together disagreed with each other about which boards were up,
+        # and neither answer was a fleet that had changed.
+        #
+        # A refusal rather than a queue, because the answer a second walk would
+        # give is the answer the first one is already about to give. Non-blocking
+        # for the same reason: a caller told "no" here has lost nothing.
+        if not self.busy.acquire(blocking=False):
+            return
         try:
-            out = subprocess.run(
-                [wk, "status", "--json"],
-                capture_output=True,
-                text=True,
-                timeout=300,
-            ).stdout
-            doc = json.loads(out) if out.strip().startswith("{") else None
-        except Exception as exc:  # a refresh that fails must not stop the loop
-            print("wk status --web: refresh failed: %s" % exc, file=sys.stderr)
+            with self.lock:
+                self.refreshing = True
+            wk = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wk"
+            )
             doc = None
-        with self.lock:
-            if doc is not None:
-                self.doc = doc
-                self.stamp = int(time.time())
-            self.refreshing = False
+            try:
+                # --json, and not --records: this asks for the same document
+                # every other view is drawn from, through the same dispatcher a
+                # person would type -- so the page cannot be showing a listing
+                # assembled differently from the one the terminal gets.
+                #
+                # WK_STATUS_VIEW so the walk cannot decide it is a person at a
+                # terminal and try to serve a second page from inside this one.
+                env = dict(os.environ, WK_STATUS_VIEW="json")
+                out = subprocess.run(
+                    [wk, "status", "--json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    env=env,
+                ).stdout
+                doc = json.loads(out) if out.strip().startswith("{") else None
+            except Exception as exc:  # a refresh that fails must not stop the loop
+                print("wk status --web: refresh failed: %s" % exc, file=sys.stderr)
+            with self.lock:
+                if doc is not None:
+                    self.doc = doc
+                    self.stamp = int(time.time())
+                self.refreshing = False
+        finally:
+            self.busy.release()
 
     def loop(self):
         while True:
+            started = time.time()
             self.refresh_once()
-            time.sleep(self.interval)
+            # The interval is a gap between walks, not a period to fire on: a
+            # walk that overran its interval must not be followed immediately by
+            # another, and one that was quick must not wait the whole interval
+            # again on top of the time it already took. A second of floor so a
+            # fleet that answers instantly cannot become a spin.
+            time.sleep(max(1.0, self.interval - (time.time() - started)))
 
 
 def serve(doc, port, interval):

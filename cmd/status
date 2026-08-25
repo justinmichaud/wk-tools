@@ -18,6 +18,15 @@
 #      answer. Distinct from 3 on purpose -- 3 is a build to re-run, 4 is a
 #      workspace to repair, and an agent branching on this should not conflate
 #      them.
+#
+# At a terminal, with nothing else said, this opens the page (`--web`): it is
+# where the colour and the structure are, and a fleet is a thing to look at.
+# Anything that is not a person at a terminal -- a pipe, a redirect, a
+# workspace, CI, an agent -- gets the plain table instead, because this
+# command's stdout is read and its exit code is branched on. `--text` asks for
+# the table anyway. The decision is one function, status_default_mode in
+# lib/common.sh, because on a macOS host the dispatcher renders and here it does
+# not, and a default that differed between them would be two commands.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -117,6 +126,65 @@ note_warn() { _notes="$_notes${_notes:+,}{\"level\":\"warn\",\"text\":\"$(_jesc 
 # "the same workspace" and a renderer's way of saying nothing at all.
 _subs=""
 sub_add() { _subs="$_subs${_subs:+,}$1"; }
+
+# --- several probes at once, without shuffling the listing --------------------
+#
+# A listing is almost entirely waiting. An ssh to a machine that is off costs
+# WK_SSH_TIMEOUT; a workspace's git probe costs a container or guest round trip;
+# a board on a phone-linked segment costs its own ceiling. Done one after
+# another that is the *sum* of every wait, and this fleet has enough machines
+# that are away that the sum was most of the wall clock. Done at once it is the
+# longest single wait. The fleet-device and bridge blocks were already shaped
+# this way; everything else was not.
+#
+# Four things make the shape safe, and each one is a way it has gone wrong:
+#
+#   a file per writer   fd 3 is a byte stream, and two writers on one descriptor
+#                       interleave mid-line. That does not lose a record, it
+#                       makes an unparseable one -- and the renderer drops it.
+#   a fixed order       the parent concatenates in the order it *started* them,
+#                       never the order they finished. A slow probe then changes
+#                       when a line appears and never where; a listing that
+#                       reshuffles between refreshes cannot be read at a glance,
+#                       which is the whole point of the page.
+#   the worst status    this command's contract is its exit code and a subshell
+#                       cannot raise the parent's `worst`. Each carries its own
+#                       out as its exit status, and `wait <pid>` brings it back.
+#   stdin from /dev/null   several ssh at once must not compete for a terminal,
+#                       and a background job that reads one is stopped by
+#                       SIGTTIN rather than answered.
+#
+# `wait` is always by pid, never bare: a bare `wait` waits for every background
+# job this process has, which here would include the fleet probes deliberately
+# left running beside the walk.
+_par_dir=""
+_par_names=""
+_par_pids=""
+
+par_begin() {
+    _par_dir=$(mktemp -d "${TMPDIR:-/tmp}/wk-status.XXXXXX")
+    _par_names=""
+    _par_pids=""
+}
+
+# par_run <name> <command...> -- <name> is both the file and the position in the
+# finished listing, so it must be unique among the batch. Target and workspace
+# names are (valid_name, lib/common.sh), which is why they are what is used.
+par_run() {
+    local n="$1"; shift
+    "$@" 3> "$_par_dir/$n" </dev/null &
+    _par_names="$_par_names $n"
+    _par_pids="$_par_pids $!"
+}
+
+par_join() {
+    local n p rc
+    for p in $_par_pids; do rc=0; wait "$p" || rc=$?; bump "$rc"; done
+    for n in $_par_names; do cat "$_par_dir/$n" >&3 2>/dev/null || true; done
+    rm -rf "$_par_dir"
+    _par_dir=""; _par_names=""; _par_pids=""
+    return 0
+}
 
 # --- which machine, and what kind of thing on it ------------------------------
 #
@@ -564,6 +632,65 @@ report_health() {
         rec_emit
     fi
 
+    # --- the request broker: the one door out of the sandbox
+    #
+    # Two facts, and they are asked of different things. Whether the door is
+    # *open* is the socket -- a service that is active without a socket serves
+    # nobody, which is why this looks at the file rather than at systemd. What is
+    # *in flight* is derived from the process table the way the broker itself
+    # derives it (`in_flight` in container/broker/wk-broker.py): a status file
+    # saying `running` is a claim, and a broker killed mid-request leaves exactly
+    # such a file behind.
+    # Only from the machine itself, never from inside the podman VM: the broker
+    # is the *workstation's* door and there is one of it, unlike the disk and
+    # the push switch, which this machine genuinely has two of. Asked in there,
+    # the VM answered "closed" about a door that was open two feet away -- its
+    # ssh session has no XDG_RUNTIME_DIR, so it looked for the socket somewhere
+    # the forward does not publish it.
+    local _bsock _brdir _bn=0 _brid _bst
+    # Resolved the way the broker itself resolves it (socket_path in
+    # container/broker/wk-broker.py): the runtime directory when there is one,
+    # and the state directory on macOS, which has none. Guessing a path here
+    # reported a door as closed while it was open two feet away -- the listing
+    # has to ask the same question the thing being asked about answers.
+    if [ -n "${WK_BROKER_SOCKET:-}" ]; then
+        _bsock="$WK_BROKER_SOCKET"
+    elif [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+        _bsock="$XDG_RUNTIME_DIR/wk/broker.sock"
+    else
+        _bsock="$(wk_state_dir)/broker.sock"
+    fi
+    _brdir="$(wk_state_dir)/broker"
+    # An `if` around this block and not a `return`: everything after it -- the
+    # proxy, the locks, the push switch, the load -- is reported by both halves
+    # on purpose, and returning early took the podman VM's half of all of it
+    # away along with the broker line.
+    if [ -z "${WK_IN_VM:-}" ] && { [ -S "$_bsock" ] || [ -d "$_brdir" ]; }; then
+        if [ -d "$_brdir" ]; then
+            for _brid in "$_brdir"/*; do
+                [ -f "$_brid/status" ] || continue
+                [ "$(kv_field "$_brid/status" state)" = running ] || continue
+                _bst=$(kv_field "$_brid/status" pid)
+                [ -n "$_bst" ] && kill -0 "$_bst" 2>/dev/null || continue
+                _bn=$((_bn + 1))
+                note "in flight: $(basename "$_brid") -- $(kv_field "$_brid/status" stage)"
+            done
+        fi
+        rec_start service
+        rec_set machine "$m"
+        rec_set name    "request broker"
+        if [ -S "$_bsock" ]; then
+            # The count in the state word rather than beside it: a service line
+            # is one word wide in both renderers, and "open" alone answers a
+            # narrower question than the one being asked.
+            rec_set state "open ($_bn in flight)"
+        else
+            rec_set state "closed"
+            rec_set fix   "./setup --stage broker   (a workspace cannot ask for a bench run without it)"
+        fi
+        rec_emit
+    fi
+
     # --- the egress proxy, where there is one to have
     if have systemctl && systemctl --user cat wk-proxy.service >/dev/null 2>&1; then
         rec_start service
@@ -683,7 +810,6 @@ report_health() {
 }
 
 _tooling_said=""
-_health_said=""
 report_self() {
     local ver sha dirty tree
     [ -z "${WK_EXPECT_TREE:-}" ] || return 0
@@ -725,13 +851,24 @@ if [ "${1:-}" = --no-fleet ]; then FLEET=""; DEVICES=""; shift; fi
 # How this listing is going to be looked at. One walk feeds all of them
 # (`collect` at the bottom); this only decides where the records go afterwards.
 #
-#   text      an aligned table on a terminal (the default)
-#   json      the records, merged into one document -- and the same document the
-#             other two are drawn from, so they cannot disagree
+#   web       the page, served, opened, and refreshed while it is open -- what a
+#             bare `wk status` means at a terminal (status_default_mode,
+#             lib/common.sh, which is also what the macOS dispatcher asks)
+#   text      plain aligned columns; what a bare `wk status` means everywhere
+#             else, and what `--text` asks for from a terminal
+#   json      the records, merged into one document -- and the same document
+#             every other view is drawn from, so they cannot disagree
 #   html      that document as a page, written to a file
-#   web       the page, served, opened, and refreshed while it is open
 #   records   the raw stream, for whoever is assembling a bigger listing
-MODE=text
+# Called here rather than substituted into the assignment: it asks whether
+# *this* stdout is a terminal, and inside a command substitution that is the
+# substitution's pipe (status_default_mode, lib/common.sh).
+status_default_mode
+MODE="$WK_STATUS_DEFAULT_MODE"
+# Whether the view was *asked for* or merely defaulted to. Two things below
+# override a default that would open a page and must not override a flag: one
+# named workspace, and --wait.
+MODE_ASKED=""
 RECORDS=""
 WEB_PORT="${WK_STATUS_PORT:-0}"
 WEB_INTERVAL="${WK_STATUS_INTERVAL:-20}"
@@ -757,11 +894,16 @@ while [ $# -gt 0 ]; do
         --no-fleet)  FLEET=""; DEVICES=""; shift ;;   # also accepted after --wait, not only first
         --no-devices) DEVICES=""; shift ;;
         --records)   RECORDS=1; shift ;;
-        --json)      MODE=json; shift ;;
-        --html)      MODE=html
+        --json)      MODE=json; MODE_ASKED=1; shift ;;
+        # The table, from a terminal, where a bare invocation would open the
+        # page. Named for what it is rather than --no-web: a flag whose name is
+        # a negation of a default is a flag that has to be re-read every time
+        # the default moves.
+        --text|--cli) MODE=text; MODE_ASKED=1; shift ;;
+        --html)      MODE=html; MODE_ASKED=1
                      case "${2:-}" in -*|"") ;; *) HTML_OUT="$2"; shift ;; esac
                      shift ;;
-        --web)       MODE=web; shift ;;
+        --web)       MODE=web; MODE_ASKED=1; shift ;;
         --port)      WEB_PORT="${2:-0}"; shift 2 ;;
         --port=*)    WEB_PORT="${1#*=}"; shift ;;
         --interval)  WEB_INTERVAL="${2:-20}"; shift 2 ;;
@@ -774,6 +916,23 @@ while [ $# -gt 0 ]; do
 done
 # shellcheck disable=SC2086 -- deliberate re-splitting of the collected words.
 set -- $_args
+
+# Two shapes of this command are not "look at the fleet", and for both of them a
+# page is the wrong answer -- so the default is withdrawn, and only the default:
+#
+#   one named workspace   the page is a fleet board, and a board with one row on
+#                         it is a worse answer than the row. It also arrives
+#                         differently depending on where the workspace lives --
+#                         a container one is answered inside the podman VM,
+#                         where there is no terminal and no browser -- and one
+#                         command that opens a page for a guest and prints a
+#                         table for a container is two commands.
+#   --wait                the entire question is "is it finished", and the
+#                         answer is the line and the exit code. A server that
+#                         then blocks until ctrl-c buries both.
+if [ -z "$MODE_ASKED" ] && [ "$MODE" = web ] && { [ $# -gt 0 ] || [ -n "$WAIT" ]; }; then
+    MODE=text
+fi
 
 # WK_ROW_LABEL is read by this_machine() above -- it is the name the asking
 # machine knows this one by, and a machine answering for itself cannot know what
@@ -1242,26 +1401,49 @@ order_targets() {
     done | sort -k1,1 -k2,2 | awk '{print $2}'
 }
 
-# One target's workspaces, under the machine and method they belong to.
+# Which target reports this machine's own health, decided before the walk forks.
 #
-# The heading before the rows and the flush after them, because a delegated
-# target prints its own rows from another process: this side has to have said
-# which machine they are about before that starts, and has to have emptied its
-# own buffer so the two do not interleave.
+# It used to be whichever target got there first (`_health_said`), which a
+# parallel walk cannot mean: on a Linux workstation the container target and the
+# vm target are both this machine, so both would emit a disk, a load and a push
+# switch -- and *which store* the numbers were about would depend on which
+# subshell finished first. A listing whose disk figure changes between refreshes
+# without the disk changing is worse than no figure.
+#
+# The rule is the serial walk's own, made explicit: the first target, in the
+# walk's order, that does not delegate (a machine that answers for itself
+# reports its own health, in its own records) and whose workspaces are on this
+# machine. Both are readable from the conf alone -- a remote target is a machine
+# of its own unless its conf says it *is* this one (WK_REMOTE_LOCAL, which is
+# what `wk remote setup` leaves on a build box) -- so deciding this costs no
+# probe and cannot itself be the slow thing.
+health_owner() {
+    local t
+    for t in $(order_targets "$@"); do
+        case "$(target_kind "$t" 2>/dev/null)" in
+            remote) ( load_target "$t" >/dev/null 2>&1
+                      [ -n "${WK_REMOTE_LOCAL:-}" ] ) || continue ;;
+        esac
+        printf '%s\n' "$t"
+        return 0
+    done
+    return 0
+}
+
 # One target's workspaces, as records, under the machine and method they belong
 # to. The two group fields travel in globals because `report` is called per
 # workspace from three places and threading them through every call would say
 # the same thing three times.
 _group_machine=""
 _group_method=""
+_health_owner=""
 report_target() {
-    local t="$1" rc=0
+    local t="$1" rc=0 ws
     _group_machine="$(machine_of "$t")"
     _group_method="$(method_of)"
     machine_seen "$_group_machine"
 
     if t_has_wk; then
-        found=1
         # The machine answers for itself, in the same records. An older copy
         # over there has never heard of the flag, so `delegate` captures its
         # text instead and emits it as one `raw` record -- see delegate().
@@ -1275,19 +1457,42 @@ report_target() {
     if [ -n "${2:-}" ]; then
         report "$2"
     else
-        for ws in $(target_workspaces); do found=1; report "$ws"; done
+        # One workspace's row costs one exec into the container or guest that
+        # holds it (report_ws: origin, dirty, unpushed, drift -- deliberately
+        # one round trip, and half a second of it in a WebKit checkout). Those
+        # execs share nothing, so the target's cost is one of them rather than
+        # all of them.
+        par_begin
+        for ws in $(target_workspaces); do par_run "$ws" _report_ws_par "$ws"; done
+        par_join
     fi
     if [ -n "$FLEET" ]; then
         report_machine "$t"
         # This machine's own tooling belongs to this machine, and the walk is
         # the only place that knows we are on it.
-        if [ "$_group_machine" = "$(this_machine)" ] && [ -z "$_health_said" ]; then
-            _health_said=1
+        if [ "$_group_machine" = "$(this_machine)" ] && [ "$t" = "$_health_owner" ]; then
             report_self
             report_health "$_group_machine"
         fi
     fi
     return 0
+}
+
+# One workspace, in a process of its own. Its verdict is the only thing that
+# crosses back, and it crosses as an exit status because that is the one channel
+# a subshell has (par_run).
+_report_ws_par() { report "$1"; exit "$worst"; }
+
+# One target, likewise -- and the driver is loaded *in here*, which is the same
+# reason prefetch_targets forks per target: a driver overrides shell functions,
+# a function definition outlives the load, and the first driver's t_branch
+# answering for the second target's workspaces is a wrong answer that looks
+# entirely plausible (measured 2026-08-19, lib/target.sh).
+_report_target_par() {
+    local t="$1"
+    load_target "$t"
+    report_target "$t"
+    exit "$worst"
 }
 
 # --- collection, and then whoever is looking at it ----------------------------
@@ -1308,21 +1513,73 @@ collect() {
         FLEET=""
         report_target "$TARGET" "$1"
     else
-        found=0
         _TARGETS=$(walk_targets)
+
         # Every machine asked at once, before the first record is written; the
         # walk below is unchanged and finds them already answered
         # (prefetch_targets, lib/target.sh).
         # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
         prefetch_targets $_TARGETS
         wk_atexit prefetch_done
+
+        # The boards and the phones start now and are collected at the end.
+        #
+        # They are the listing's longest pole -- a board that is off costs its
+        # ceiling, a bridge runs a health check on a phone over a radio -- and
+        # they share nothing at all with the target walk: no driver, no store,
+        # no ssh to the same machine. Paying for them *beside* the walk
+        # therefore costs the listing nothing, where paying for them after it
+        # cost their whole duration. Their records still land where they always
+        # did, after every machine and before the exit record, because the
+        # parent decides where they go and not they.
+        #
+        # The two blocks stay in step with each other inside that one subshell,
+        # and this is the correction to the first attempt at it: a bridged board
+        # is reached *through* the phone the bridge block ssh's into, so probing
+        # both at once has the fleet block dialling rpi4 across the same USB
+        # ethernet the bridge block is running a health check over. Measured
+        # here 2026-08-24: run together the two blocks took 26 s and then 50 s,
+        # and disagreed with themselves between the runs -- rpi4 `bench mode`
+        # one time and `unreachable via tailnet-bridge-generic` the next, rpi5
+        # answering and then not. Neither number was a fleet that had changed.
+        # In step they are the 18 s they were, and they say the same thing twice.
+        #
+        # After the prefetch and not before it, which is the other thing that
+        # was tried and measured. Starting these beside the prefetch as well
+        # looks strictly better -- more overlap -- and is not: with the tailnet
+        # wedged, `wk status --json` went 21.1 s -> 26.3 s / 29.6 s. The two
+        # blocks do not contend for a machine but they do contend for the
+        # resolver, and a wedged one serialises name lookups that a warm one
+        # answers instantly. So the prefetch gets the resolver to itself, and
+        # the boards overlap the walk it was paid for.
+        _dev_dir=""
+        _dev_pid=""
+        if [ -n "$DEVICES" ]; then
+            _dev_dir=$(mktemp -d "${TMPDIR:-/tmp}/wk-status.XXXXXX")
+            ( report_fleet_devices 3> "$_dev_dir/fleet"
+              report_bridges       3> "$_dev_dir/bridges" ) </dev/null &
+            _dev_pid=$!
+        fi
+
+        # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
+        _health_owner=$(health_owner $_TARGETS)
+
         # shellcheck disable=SC2086 -- same, and order_targets takes them as words.
+        par_begin
         for TARGET in $(order_targets $_TARGETS); do
-            load_target "$TARGET"
-            report_target "$TARGET"
+            par_run "$TARGET" _report_target_par "$TARGET"
         done
-        [ -z "$DEVICES" ] || report_fleet_devices
-        [ -z "$DEVICES" ] || report_bridges
+        par_join
+
+        if [ -n "$_dev_dir" ]; then
+            # By pid, never a bare `wait`: a bare wait is a promise about every
+            # background job this shell has, which during the walk is every
+            # target as well.
+            wait "$_dev_pid" 2>/dev/null || true
+            cat "$_dev_dir/fleet"   >&3 2>/dev/null || true
+            cat "$_dev_dir/bridges" >&3 2>/dev/null || true
+            rm -rf "$_dev_dir"
+        fi
     fi
 
     # The exit status, in the stream. It is this command's whole contract for a

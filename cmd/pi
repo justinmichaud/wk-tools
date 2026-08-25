@@ -1139,6 +1139,61 @@ cmd_boot_order() {
     log  "  undo with:   wk pi boot-order $HOST local"
 }
 
+# --- inside a workspace, deploy and bench are requests -------------------------
+#
+# `wk pi` is host-only and stays host-only: putting a device on the tailnet
+# needs an auth key and writing an EEPROM boot order needs the board. Two of
+# its verbs, though, are exactly the outcomes a sandboxed benchmark run has to
+# have and cannot produce -- put this build on the board, and run this plan on
+# it -- so in a workspace those two become a request over the socket, performed
+# by the broker on the workstation (lib/broker.sh).
+#
+# Parsed here rather than forwarded as a line: what crosses is a verb and a
+# handful of validated words, so the broker's vocabulary is the limit and not
+# whatever this file happens to accept. An option outside that vocabulary is
+# refused by name here rather than dropped -- a request that silently ran
+# without the flag it was given is the worst of the three available outcomes.
+if in_workspace; then
+    . "$WK_ROOT/lib/broker.sh"
+    case "$ACTION" in
+        deploy|bench) ;;
+        *) broker_no_route "'wk pi $ACTION'" "wk pi $ACTION ..." ;;
+    esac
+    broker_present || broker_no_route "'wk pi $ACTION'" "wk pi $ACTION $HOST $*"
+
+    # One bare word is expected after the top-level shift: the machine for
+    # `deploy` (whose first argument is the workspace, taken into $HOST), the
+    # plan for `bench`. Everything else is either a vocabulary word or a
+    # refusal.
+    _pos=""; _opts=""; _slot=""; _extra=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --slot)     _slot="${2:-}"; shift ;;
+            --count)    _opts="$_opts count=${2:-}"; shift ;;
+            --skeleton) _opts="$_opts skeleton=1" ;;
+            -*)         _extra="$_extra $1" ;;
+            *)          if [ -n "$_pos" ]; then _extra="$_extra $1"; else _pos="$1"; fi ;;
+        esac
+        shift
+    done
+    [ -z "$_extra" ] || die "the request broker's vocabulary does not carry:$_extra
+    A request is a fixed set of outcomes, not this command's option list, and
+    the set is in container/broker/wk-broker.py -- deliberately smaller than
+    what this command accepts at a keyboard, because each argument that crosses
+    the boundary is one more thing that has to be validated out there.
+    Run it on the workstation instead:  wk pi $ACTION $HOST $_pos$_extra"
+    [ -z "$_slot" ] || _opts="$_opts slot=$_slot"
+
+    _rc=0
+    # shellcheck disable=SC2086  -- $_opts is a list of validated key=value words
+    if [ "$ACTION" = deploy ]; then
+        broker_call stage machine="$_pos" workspace="$HOST" $_opts || _rc=$?
+    else
+        broker_call run machine="$HOST" plan="$_pos" $_opts || _rc=$?
+    fi
+    exit "$_rc"
+fi
+
 # $HOST holds $2, which for `deploy` is the workspace -- the argument order is
 # <workspace> <machine>, so the machine is what is left after the top-level
 # shift. Named locally rather than reusing $HOST, which means an ssh host

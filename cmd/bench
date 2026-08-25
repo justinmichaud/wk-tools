@@ -1184,6 +1184,24 @@ staged_compare_tool() {
 cmd_stage() {
     local ws="$1" machine="" config="" plan="" payload="" dry=""
     shift
+
+    # This copies a build onto a disk that is *mounted on the workstation*, so
+    # it cannot be done from inside a workspace and never will be -- there is no
+    # such disk in here. It is not a request either: the request broker's
+    # staging verb is the device lane's (`wk pi deploy`), because that is the
+    # one that puts a build on a machine over the network rather than onto a
+    # volume in the same computer.
+    #
+    # Said here rather than left to fail further down, where the message is
+    # about a driver having no b_bench_root and reads as a missing feature.
+    if in_workspace; then
+        die "'wk bench stage' copies a build onto a benchmark volume attached to the
+    workstation, and this is workspace '$(wk_self)' -- there is no such volume
+    here and no route to one.
+    To put a build on a bench *device* from in here, which is a request the
+    broker does serve:  wk pi deploy $ws <machine>
+    For the macOS lane, run it on the Mac:  wk bench stage $ws --to <machine>"
+    fi
     while [ $# -gt 0 ]; do
         case "$1" in
             --to)      machine="${2:-}"; shift 2 ;;

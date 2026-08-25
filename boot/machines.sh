@@ -46,6 +46,29 @@ machine_list() {
     done
 }
 
+# The same registry, in fields rather than in prose.
+#
+# `machine_list` is for a person reading a terminal; this is for anything that
+# has to *decide* on a declaration -- today the request broker
+# (container/broker/wk-broker.py), which refuses a machine that is not
+# MACH_ROLE=bench-device and needs the field to say so. It exists here rather
+# than as a parser in the caller for the reason lib/reach.sh gives for reading
+# a conf instead of sourcing one, turned around: a conf is a shell file, so the
+# thing that must know what is *in* it uses the loader that already knows how,
+# and there is never a second reader to keep in step with the first.
+#
+# Tab-separated, one machine per line: name, role, os, profile, note.
+machine_declare() {
+    local f n
+    for f in "$(machines_dir)"/*.conf; do
+        [ -f "$f" ] || continue
+        n=$(basename "$f" .conf)
+        machine_load "$n" 2>/dev/null || continue
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+            "$n" "${MACH_ROLE:-workstation}" "${MACH_OS:-any}" "${MACH_PROFILE:-}" "$MACH_NOTE"
+    done
+}
+
 machine_load() {
     local f
     f="$(machines_dir)/$1.conf"
@@ -293,16 +316,28 @@ machine_armed_barrier() { # <what this command would do>
 # the subshell that computed it is gone by the time anyone acts on it.
 # What a system says about itself and what it is actually running from, in one
 # round trip. The second half is the one that was missing.
+# Every `case` pattern below opens with `(`, and that is not a style choice:
+# bash 3.2 -- which is the bash macOS ships, and the one this repository is
+# required to run under -- cannot parse a `case` inside a `$( … )` unless the
+# patterns are parenthesised on both sides. Its parser counts the closing `)` of
+# a pattern as the end of the command substitution and then finds a `;;` it has
+# no grammar for.
+#
+# The failure is at *load* time, not at use: `. boot/machines.sh` aborts, so
+# `wk boot`, `wk pi` and `wk status`'s fleet block all die on a stock Mac. It
+# went unnoticed because `bash` here is homebrew's 5.2 and because the parse
+# check in `cmd/selftest` picks files by shebang -- which no sourced library
+# has. Found 2026-08-25 by an agent that ran it under /bin/bash.
 _b_probe_sh=$(cat <<'EOS'
 cat /etc/wk-image 2>/dev/null
 rd=$(findmnt -no SOURCE / 2>/dev/null || true)
 [ -n "$rd" ] || rd=$(awk '$2 == "/" { print $1; exit }' /proc/mounts 2>/dev/null)
 case "$rd" in
-  /dev/root|"") rd=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | head -1) ;;
+  (/dev/root|"") rd=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | head -1) ;;
 esac
 case "$rd" in
-  PARTUUID=*) rd=$(readlink -f "/dev/disk/by-partuuid/${rd#PARTUUID=}" 2>/dev/null || echo "$rd") ;;
-  UUID=*)     rd=$(readlink -f "/dev/disk/by-uuid/${rd#UUID=}" 2>/dev/null || echo "$rd") ;;
+  (PARTUUID=*) rd=$(readlink -f "/dev/disk/by-partuuid/${rd#PARTUUID=}" 2>/dev/null || echo "$rd") ;;
+  (UUID=*)     rd=$(readlink -f "/dev/disk/by-uuid/${rd#UUID=}" 2>/dev/null || echo "$rd") ;;
 esac
 printf 'rootdev=%s\n' "$rd"
 EOS

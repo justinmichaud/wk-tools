@@ -127,6 +127,58 @@ Run these inside the podman VM on macOS, and directly on Linux.
       reloaded, so a refusal was logged for a name the allowlist plainly
       contained until somebody re-ran `./setup`
 
+### The fleet-request broker — the one door out of the sandbox
+`container/broker/wk-broker.py`, reached at `/run/wk/broker.sock`. The
+workspace holds no key, no route and no shell; it asks for an *outcome* from a
+fixed vocabulary and the workstation performs it with the same `wk boot` /
+`wk pi` commands a person would. Everything here was exercised from the
+container workspace `238-tolken-backports` on tolken, 2026-08-24.
+
+- [V] `capabilities` lists only machines declared `MACH_ROLE=bench-device`, and
+      names how each one is reached — the rpi4 as `10.99.1.10 (through
+      tailnet-bridge-generic)`, the rpi3 by mDNS, derived through `lib/reach.sh`
+      rather than written down anywhere
+- [V] arming a machine that is not a bench device is refused, because
+      a workspace may not reboot a workstation, whatever `wk boot` would
+      allow at a keyboard
+- [V] an unknown machine is refused, naming what the fleet actually declares
+- [V] an unknown plan is refused, naming the allowlist that decides it
+- [V] an option the vocabulary does not carry (`--ab a,b`) is refused **by
+      name** rather than dropped — a request that ran without the flag it was
+      given is worse than one that did not run
+- [V] the verbs that are not requests stay refused inside a workspace:
+      `wk pi setup` (an auth key), `wk pi boot-order` (a firmware register),
+      `wk boot --diag` (mounting a boot partition on the workstation)
+- [V] `--force` does not cross the boundary: `wk boot <m> --dry-run --force` in
+      a workspace runs `wk boot <m> --dry-run` out there, and the request
+      record proves the flag never reached the argv
+- [V] a dry-run arm resolves everything and arms nothing, and its output is
+      streamed back line by line with the command's own exit code
+- [V] a second request naming a machine that already has one in flight is
+      refused by name, with the id of the one that holds it
+- [V] every request leaves a record (argv, log, status) and `status
+      request=<id>` reads the result back after the connection is gone
+- [V] on a macOS workstation the socket is published into the podman machine
+      over ssh, so a container that already existed sees it at
+      `/run/wk/broker.sock` with no container change
+- [V] with no broker listening at all, `wk boot <m>` inside a workspace refuses
+      in the shape every other refusal here has:
+      it names the socket and the stage that opens it, rather than failing on
+      a missing file
+- [ ] the broker survives a reboot of the workstation (LaunchAgent on macOS,
+      systemd `--user` with lingering on Linux) — not yet rebooted
+- [ ] the Linux half: `./setup --stage broker` installs and starts
+      `wk-broker.service`, and a workspace on that machine sees the socket
+      without any forward at all
+- [ ] a *real* arming: `arm`, `keep`, `run`, `release` against a board that is
+      actually powered on. Only the refusal and dry-run paths have been
+      exercised; nothing has been rebooted through this door
+- [ ] a request whose caller disconnects mid-run still finishes and records its
+      result (the code drops a broken pipe deliberately; unproven)
+- [ ] a gpu-class plan on a board with no display is refused through the broker
+      and **cannot** be forced through it — the refusal `wk pi bench` already
+      makes, with the one way past it removed
+
 ### A barrier can be forced, loudly (`--force`)
 - [V] a barrier refuses by default and names `--force`
 - [V] `--force` turns it into a warning at the point of bypass **and** a
@@ -859,7 +911,7 @@ reached through a ProxyJump), driven from the macOS host.
       host -- they say it is stopped and point at `wk start` / `wk vm ls`.
       Booting it used to cost a macOS guest its memory budget: `wk vm start`
       then refused, because both want the whole envelope
-### The listing's shape — one document, three views
+### The listing's shape — one document, four views
 - [V] `wk status --json` is the listing as one document, and the terminal table
       and the page are rendered *from* it (`lib/status-view.py`) rather than
       printed alongside it — so a number that appears in one and not the other
@@ -911,9 +963,132 @@ reached through a ProxyJump), driven from the macOS host.
       grey with a red frame and the footer reads "this listing is frozen". A page
       that has stopped updating looks exactly like one that is current, and this
       listing is the thing people act on
-- [ ] the page's own refresh survives the fleet being slow: a walk that takes
-      longer than the interval must not stack up walks
+- [V] the page's own refresh survives the fleet being slow: a walk that takes
+      longer than the interval must not stack up walks. One walk at a time and a
+      refusal rather than a queue (the answer a second walk would give is the
+      one the first is about to give), and the interval is a *gap* between walks
+      rather than a period to fire on. Measured 2026-08-24 with a 15 s walk on a
+      20 s interval: stamps 21–23 s apart, never two walks at once
 - [ ] `NO_COLOR` and a redirected stdout both drop the colour from the table
+
+### The page is the view, and the table is what a program gets
+- [V] a bare `wk status` **at a terminal opens the page**; everything else gets
+      the table. The three tests are a tty on stdout, nothing saying otherwise
+      (`WK_STATUS_VIEW`, `CI`, `NO_COLOR`) and somewhere to open a browser (not
+      inside a workspace, not over ssh with no `DISPLAY`). Every one of them is
+      a way of not being a person at a terminal, and this command's stdout is
+      read: `wk selftest` parses the table and `wk status --wait` branches on
+      the exit code, and a served page would hang both
+- [V] one function decides it (`status_default_mode`, `lib/common.sh`) because
+      two processes render — cmd/status on Linux, the dispatcher on a macOS host
+      — and a default that differed between them would be two commands with one
+      name. It *sets a variable* rather than printing: both callers would
+      naturally write `MODE=$(status_default_mode)`, and inside a command
+      substitution `[ -t 1 ]` asks about the substitution's own pipe
+- [V] `--text` (or `--cli`) asks for the table from a terminal anyway
+- [V] the page default is withdrawn, and only the default, for the two shapes
+      that are not "look at the fleet": one **named workspace** (a fleet board
+      with one row on it is worse than the row, and a container one is answered
+      inside the podman VM where there is no browser at all) and **`--wait`**
+      (the whole question is whether it is finished, and a server that blocks
+      until ctrl-c buries the line and the exit code)
+- [V] exit codes are unchanged by any of it: 4 with two `creating` vm
+      workspaces, whether the view is text, json, html or the page
+- [V] the terminal view is **plain aligned columns** — the box-drawn grid, its
+      rules and its blank-celled continuation rows are gone. One set of widths
+      for the whole listing is kept, because per-group widths made every block
+      line up with itself and with nothing else. A branch name is capped at 40
+      characters there: one 78-character WebKit branch pushed the BUILD column
+      off the side of the terminal, and the page shows the whole thing
+
+### The page, and what it is for
+- [V] the **exit code is on the page**, in cmd/status's own words ("4 · a
+      workspace needs a person"), coloured. It is this command's whole contract
+      and it used to be visible only to `echo $?`
+- [V] an **attention strip** of counts, and only of what is non-zero: workspaces
+      needing a person, failed builds, stale locks, disks over 90%, builds
+      running, unpushed commits, wk-tools copies behind, bridge roles older than
+      the repo, boards not answering, boards in bench mode. A listing with
+      nothing to say says "nothing wants attention" rather than ten zeroes
+- [V] **disk and load are drawn as ratios**, with a bar against their own
+      ceiling: "92%" and "1.32" are numbers whose whole meaning is what they are
+      a fraction of, and 8 is idle on a build box and desperate on a Pi
+- [V] a workspace that **needs a person** colours its whole row, not one cell of
+      it; one with a build running colours it amber. A coloured word in one
+      column is a thing to find
+- [V] the fleet is a **board** of cards, one per device, and a board actually in
+      bench mode is the loud one — it is the state that changes what may be done
+      with the machine. A bridge whose role is **older than this repository**
+      carries the chip with `wk bridge setup <name>` in it
+- [V] the state vocabulary is **injected into the page from the renderer**, not
+      written twice. The second copy had already drifted: `up`, `clean`,
+      `finished` and `held` were coloured in the terminal and plain on the page
+- [V] still self-contained (no CDN, no font host, no framework), still
+      127.0.0.1 only, still light and dark, and still greys itself behind a red
+      frame when the server goes away. Verified 2026-08-24 on port 8797: `/` and
+      `/status.json` served, 404 for anything else, connection refused on the
+      LAN address
+
+### The walk is parallel
+- [V] the target walk forks one subshell per target and the per-workspace probes
+      fork one per workspace, in the shape the fleet block already had. A
+      workspace row costs one exec into the container or guest that holds it,
+      and a machine that is away costs `WK_SSH_TIMEOUT`; serially the listing
+      was the sum of every wait
+- [V] the two halves of a macOS listing (the podman VM's containers, this
+      machine's targets out here) are collected **at the same time** rather than
+      one after the other. They ask entirely different machines
+- [V] the boards and the bridges are probed **beside** the target walk rather
+      than after it — they share no machine with it — but **in step with each
+      other**, which is the correction to the first attempt: rpi4 is reached
+      *through* the phone the bridge block ssh's into. Measured 2026-08-24, run
+      together: 26 s and then 50 s, disagreeing with themselves between the runs
+      (rpi4 `bench mode` one time, `unreachable via tailnet-bridge-generic` the
+      next). Neither answer was a fleet that had changed
+- [V] they start **after** the prefetch and not beside it, which is the other
+      arrangement that was tried: more overlap, and measurably worse — with the
+      tailnet wedged, `wk status --json` went 21.1 s → 26.3 s / 29.6 s. The two
+      do not contend for a machine but they do contend for the resolver, and a
+      wedged resolver serialises lookups a warm one answers instantly
+- [V] every concurrent writer gets **a file of its own**, because fd 3 is a byte
+      stream and two writers on one descriptor interleave mid-line — which does
+      not lose a record, it makes an unparseable one
+- [V] the parent concatenates in the order it **started** them and
+      never in the order they finished, so a slow probe changes when a line
+      appears and never where. Verified 2026-08-24: three runs, identical
+      machine, method, workspace, fleet and bridge order
+- [V] each subshell carries its verdict out as its **exit status** and the
+      parent takes the worst, because a subshell cannot raise the parent's
+      `worst` and the exit code is this command's contract. `wait` is always by
+      pid, never bare: a bare `wait` would also wait for the fleet probes
+      deliberately left running beside the walk
+- [V] which target reports the machine's own health (disk, load, push, locks) is
+      decided **before** the walk forks, from the confs alone. "Whichever got
+      there first" is not a rule a parallel walk can have: on a Linux
+      workstation the container and vm targets are both this machine, and *which
+      store* the disk figure was about would depend on which subshell finished
+      first
+- [V] measured 2026-08-24 on the real fleet (four machines, two of them
+      unreachable, the tailnet wedged), the same tree either side of the change
+      apart from the walk: a bare `wk status` 46.0 s / 47.4 s → 21.1 s / 21.1 s;
+      `--json` 46.8 s / 46.7 s → 21.1 s / 21.3 s; the target walk alone
+      (`--no-devices`) 25.1 s → 11.1 s. With the tailnet healthy earlier the
+      same day the before figure was 41.8 s
+- [V] the parallel walk produces the **same document**: machines, methods,
+      workspace set, disk, capacity, facts, switches, services, fleet and
+      bridges all identical to the serial one, exit code included
+
+### Nothing in a listing may block without a bound
+- [V] `tailscale status --json` is bounded (`capped`, `lib/reach.sh`). It is a
+      local call to the daemon, which is not the same as a call that returns: a
+      wedged tailscaled answers neither and the CLI has no timeout of its own.
+      Caught 2026-08-24 with the daemon in exactly that state ("the Tailscale
+      CLI failed to start: Failed to save preferences") — every reach lookup in
+      the walk hung on it and `wk status --web` never reached the point of
+      serving a page. Same shape as the jump hop that stopped the fleet block,
+      and the same answer: a probe that overruns loses its own line, never the
+      listing. Nothing is lost when it fires, because a path without tailscale
+      is the whole reason there is a second answer
 
 ### What a machine is, apart from the workspaces on it
 - [V] **disk, where the store actually lives**: percentage used (green under 75,
@@ -944,6 +1119,16 @@ reached through a ProxyJump), driven from the macOS host.
 - [V] **the newest benchmark run**, and whether it produced a result: a run
       directory with `env.json` and no `result.json` is either happening now or
       it died, and either way it is a machine not to touch
+- [V] **the request broker**, once per machine and only from the machine that
+      owns the door: open with the number of requests in flight, or closed with
+      `./setup --stage broker` named. In flight is derived from the process
+      table the way the broker derives it (`in_flight`), not believed from a
+      status file. Two mistakes made and fixed while wiring it, both the kind
+      this listing exists to prevent: the socket path was *guessed* rather than
+      resolved the way `socket_path` resolves it, so the page called a door
+      closed while it was open two feet away; and skipping the line inside the
+      podman VM with an early `return` took that half's proxy, push and load
+      lines away with it
 - [ ] the health block is empty and silent on a machine that has none of these
       (no store, no proxy unit, no locks)
 
@@ -1195,7 +1380,16 @@ reached through a ProxyJump), driven from the macOS host.
       guest), reports ok/--/?? per item, and exits 1 when something is missing
 - [ ] `wk doctor` on a freshly set-up machine reports everything ok, and each
       `--` line's printed fix actually clears that line when run
-- [V] every shell file parses under both bash 5 and bash 3.2
+- [V] every shell file parses under both bash 5 and bash 3.2 — **including the
+      sourced libraries**, which the check used to skip: it selected files by
+      shebang, and a sourced file has none, so `lib/`, `boot/`, `targets/`,
+      `image/` and `host/` were all unexamined. That is most of the shell in the
+      tree and all of the shell `wk` loads before it does anything, and it hid a
+      real one: `boot/machines.sh` could not be *loaded* by bash 3.2 (a `case`
+      inside a `$( … )`, which 3.2 parses only with parenthesised patterns), so
+      `wk boot`, `wk pi` and `wk status`'s fleet block would have died on any Mac
+      without homebrew's bash. Fixed and re-checked 2026-08-25: every sourced
+      library parses *and* loads under /bin/bash 3.2.57
 - [V] `wk selftest --quick` passes on a set-up machine, needs no workspace, no
       podman and no ssh, and starts nothing — in particular it leaves the
       podman machine exactly as it found it

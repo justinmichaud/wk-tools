@@ -40,7 +40,9 @@ workspaces
                             build survives this connection going away
   status [name]             build/container state, then the fleet: each
                             device's role, mode and wk-owned media; exit code
-                            is machine-readable
+                            is machine-readable. At a terminal this opens the
+                            page below; anything reading it gets the table
+    --text                  the table, from a terminal (--cli is the same word)
     --wait [--timeout S]    block while it is busy, then report once -- instead
                             of polling a pid in a loop, which is not a fact this
                             end can know for a build driven over ssh
@@ -364,6 +366,29 @@ is_host_only() {
     esac
 }
 
+# The host-only commands a workspace may nonetheless *ask for*, through the
+# request broker (container/broker/wk-broker.py, lib/broker.sh).
+#
+# This is not a hole in the list above and it is deliberately not a general
+# one: the command still cannot run in here, still has no route to the
+# hardware, and still holds no key. What changes is that the refusal is
+# delegated to the command, which turns the invocation into a request over a
+# unix socket and prints the workstation's own words back. The broker refuses
+# on every ground `wk boot` refuses on, plus the ones only a boundary cares
+# about -- a machine that is not a bench device, a plan that is not allowlisted,
+# a barrier that only a person may cross.
+#
+# Named by subcommand where the command has several, because most of them are
+# not requests at all: `wk pi setup` puts a device on the tailnet with an auth
+# key, and `wk pi boot-order` writes a firmware register. Those stay refused.
+is_brokerable() {
+    case "$1${2:+ $2}" in
+        boot|"boot "*) return 0 ;;
+        "pi deploy"|"pi bench") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Creating and destroying a workspace belongs to the machine that keeps the
 # record of it. A shared build box is the far end of a target, not the owner of
 # one: it holds checkouts, and the registry that says which target a workspace
@@ -577,16 +602,33 @@ machine_running() {
 # on a macOS host the process that renders is this one rather than either half
 # that collects. Printed rather than assigned so the parse can shift freely.
 status_view_env() {
-    local mode=text out="" port="" interval=""
+    # The default is the shared one (status_default_mode, lib/common.sh) rather
+    # than a word written here: on a macOS host *this* process renders and on
+    # Linux cmd/status does, and a bare `wk status` that meant a page on one and
+    # a table on the other would be two commands with one name. Computed by
+    # bare_report *before* this is substituted, because the question it answers
+    # is whether stdout is a terminal and in here stdout is this substitution's
+    # pipe (status_default_mode, lib/common.sh).
+    local mode="${WK_STATUS_DEFAULT_MODE:-text}"
+    # Seeded from the environment for the same reason the mode is: cmd/status
+    # honours WK_STATUS_PORT and WK_STATUS_INTERVAL, and on a macOS host it is
+    # not the process that renders -- so without this the two variables worked
+    # on Linux and were silently ignored here, which is one command with two
+    # behaviours.
+    local out="" port="${WK_STATUS_PORT:-}" interval="${WK_STATUS_INTERVAL:-}"
+    # Asked for, as against defaulted to -- see the --wait clause below.
+    local asked="" wait=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --json) mode=json ;;
-            --web)  mode=web ;;
+            --json) mode=json; asked=1 ;;
+            --web)  mode=web;  asked=1 ;;
+            --text|--cli) mode=text; asked=1 ;;
+            --wait) wait=1 ;;
             # The raw stream, which is what the halves speak to each other. Not
             # a view, and useful for exactly one thing: seeing what a collector
             # actually said when a listing looks wrong.
             --records) mode=records ;;
-            --html) mode=html
+            --html) mode=html; asked=1
                     case "${2:-}" in -*|"") ;; *) out="$2"; shift ;; esac ;;
             --port)      port="${2:-}"; shift ;;
             --port=*)    port="${1#*=}" ;;
@@ -595,6 +637,12 @@ status_view_env() {
         esac
         shift
     done
+    # `--wait` is not "look at the fleet": the whole question is whether the
+    # thing is finished, and the answer is the line and the exit code. A page
+    # that then blocks until ctrl-c buries both. Same rule as cmd/status's, and
+    # it has to be here as well because on a macOS host this is the process that
+    # would do the serving.
+    if [ -z "$asked" ] && [ -n "$wait" ] && [ "$mode" = web ]; then mode=text; fi
     printf 'WK_STATUS_MODE=%s\n' "$(sh_quote "$mode")"
     printf 'WK_STATUS_HTML_OUT=%s\n' "$(sh_quote "$out")"
     printf 'WK_STATUS_PORT=%s\n' "$(sh_quote "$port")"
@@ -657,12 +705,35 @@ bare_report() {
         # halves only collect -- and it has to know where a page goes and which
         # port to serve it on. A function, so the parse can shift its own
         # arguments without disturbing the ones being handed to the halves.
+        #
+        # The default view is decided here rather than in there, because in
+        # there stdout is the substitution's pipe and the question is whether
+        # stdout is a terminal (status_default_mode, lib/common.sh).
+        status_default_mode
         eval "$(status_view_env ${@+"$@"})"
         _mode="$WK_STATUS_MODE"
         export WK_STATUS_HTML_OUT WK_STATUS_PORT WK_STATUS_INTERVAL
 
+        # Both halves at once, into files of their own.
+        #
+        # They ask entirely different machines -- one goes into the podman VM
+        # over its own ssh, the other walks the guests and every build box out
+        # here -- so run one after the other the listing waited for the sum of
+        # two independent waits. Neither can write into the same file as the
+        # other while it runs (a record stream interleaves mid-line, which makes
+        # an unparseable record rather than a lost one), so each gets a file and
+        # the parent concatenates them in the order they have always been in:
+        # the VM's containers, then this machine's targets.
+        #
+        # Stdin from /dev/null for both, and that is not caution: a background
+        # job that reads the terminal is stopped by SIGTTIN, and `podman machine
+        # ssh` inherits stdin.
+        _recs_vm=$(mktemp)
+        _recs_host=$(mktemp)
+        _vm_pid=""
+        _host_pid=""
+
         if machine_running; then
-            rc=0
             ( WK_EXPECT_TREE=$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)
               export WK_EXPECT_TREE
               WK_ROW_LABEL="$_self" WK_HOST_SELF=1
@@ -670,19 +741,27 @@ bare_report() {
               # from out here and the VM can see none of them, but the machine
               # facts that *are* in there -- the wk-tools every container mounts,
               # the keys in that store -- are worth having.
-              forward_to_vm "$cmd" --records --no-devices ${@+"$@"} ) >> "$_recs" || rc=$?
-            _bump "$rc"
+              forward_to_vm "$cmd" --records --no-devices ${@+"$@"} ) \
+                > "$_recs_vm" </dev/null &
+            _vm_pid=$!
         elif command -v podman >/dev/null 2>&1; then
             warn "the podman machine '$WK_MACHINE' is stopped, so container workspaces are not included"
             log  "  'wk start' to bring it up"
         fi
 
         if [ -n "$hosts" ]; then
-            rc=0
-            WK_TARGET="${hosts# }" WK_ROW_LABEL="$_self" WK_HOST_SELF=1 \
-                "$impl" --records ${@+"$@"} >> "$_recs" || rc=$?
-            _bump "$rc"
+            ( WK_TARGET="${hosts# }" WK_ROW_LABEL="$_self" WK_HOST_SELF=1 \
+                exec "$impl" --records ${@+"$@"} ) > "$_recs_host" </dev/null &
+            _host_pid=$!
         fi
+
+        # By pid: a bare `wait` would be a promise about every background job
+        # this shell ever starts, and the exit code of each half is half of this
+        # command's own contract.
+        if [ -n "$_vm_pid" ];   then rc=0; wait "$_vm_pid"   || rc=$?; _bump "$rc"; fi
+        if [ -n "$_host_pid" ]; then rc=0; wait "$_host_pid" || rc=$?; _bump "$rc"; fi
+        cat "$_recs_vm" "$_recs_host" > "$_recs" 2>/dev/null || true
+        rm -f "$_recs_vm" "$_recs_host"
 
         status_render "$_mode" "$_recs"
         rm -f "$_recs"
@@ -746,8 +825,46 @@ forward_to_vm() {
 
     # -- separates our args from ssh's. WK_IN_VM stops the VM-side wk from
     # trying to forward again if anything is ever misconfigured.
-    exec podman machine ssh "$WK_MACHINE" -- \
-        "WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }${WK_EXPECT_TREE:+WK_EXPECT_TREE=$(sh_quote "${WK_EXPECT_TREE:-}") }${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }${WK_HOST_SELF:+WK_HOST_SELF=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
+    local _cmd
+    _cmd="WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }${WK_EXPECT_TREE:+WK_EXPECT_TREE=$(sh_quote "${WK_EXPECT_TREE:-}") }${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }${WK_HOST_SELF:+WK_HOST_SELF=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
+
+    # A terminal does not survive `podman machine ssh`: it runs ssh without
+    # asking for a pty, so the far side sees no tty at all. Measured 2026-08-25
+    # -- `host: TTY` out here, `VM: NOTTY` one hop in.
+    #
+    # Everything forwarded that needs to *ask* something is unanswerable as a
+    # result. `wk rm <container workspace>` warned that it held 154,339 modified
+    # files, asked for confirmation, found no terminal, and declined with advice
+    # -- "re-run interactively" -- that could not be followed, because the
+    # person had been interactive the whole time. The destructive command was
+    # the one this hit, which is the worst place for it.
+    #
+    # So when this end really is a terminal, the hop is made with ssh directly
+    # and `-t`, from the machine's own connection details (the same three fields
+    # host/macos/vmtools.sh uses). Same host, same key, same command; the only
+    # difference is the pty.
+    #
+    # Both ends of the pipe are checked, not just stdin: a pty rewrites line
+    # endings, and `wk status`'s halves have their stdout redirected into a
+    # records file while stdin is still the terminal. Requiring both keeps the
+    # bytes clean exactly when something is reading them.
+    #
+    # The host key is not pinned, for podman's own reason: the machine's key is
+    # regenerated whenever it is recreated, and it is reached at 127.0.0.1 on a
+    # forwarded port that is this user's alone.
+    if [ -t 0 ] && [ -t 1 ]; then
+        local _p _k _u
+        _p=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.Port}}' 2>/dev/null) || _p=""
+        _k=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.IdentityPath}}' 2>/dev/null) || _k=""
+        _u=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.RemoteUsername}}' 2>/dev/null) || _u=""
+        if [ -n "$_p" ] && [ -n "$_k" ] && [ -n "$_u" ]; then
+            exec ssh -t -p "$_p" -i "$_k" \
+                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o LogLevel=ERROR "$_u@127.0.0.1" "$_cmd"
+        fi
+    fi
+
+    exec podman machine ssh "$WK_MACHINE" -- "$_cmd"
 }
 
 main() {
@@ -796,7 +913,7 @@ main() {
     done
     set -- ${_rest[@]+"${_rest[@]}"}
 
-    if in_workspace && is_host_only "$cmd"; then
+    if in_workspace && is_host_only "$cmd" && ! is_brokerable "$cmd" "${1:-}"; then
         die "'wk $cmd' acts on a host, and this is workspace '$(wk_self)'.
     Run it on the host instead."
     fi

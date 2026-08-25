@@ -49,6 +49,22 @@ every surface added since the request:
   workspace's; the wider allowlist was taken instead as a deliberate call, and
   the audit should decide whether it stays. Nothing else in the tree fetches
   from these hosts.
+- **The fleet-request broker** (`container/broker/wk-broker.py`, added
+  2026-08-24). A second unix socket in the one directory a workspace can see,
+  and the only path from inside the sandbox to physical hardware: it accepts
+  seven verbs (`capabilities`, `status`, `stage`, `arm`, `keep`, `run`,
+  `release`, `disarm`) and turns each into a fixed `wk boot` / `wk pi` argv on
+  the workstation. It is a *narrowing* — a workspace could not reach a board at
+  all before, and still cannot reach one directly — but it is new surface and
+  the audit should treat it as such. What to attack, specifically: the argument
+  validation (`NAME_RE`, `want_*`), the claim that no request word ever reaches
+  a shell, the claim that `WK_FORCE` cannot be set from a request, and the
+  per-machine in-flight lock. The one verb that removes a safety net is `keep`,
+  which cancels a board's self-return watchdog; `build_keep` argues for it.
+  On macOS the socket reaches the containers through an `ssh -R` remote unix
+  forward the broker holds open into the podman machine — a Mac-initiated
+  connection with no listener on any network address, which is its own thing to
+  look at.
 - **Remote targets** — shared build machines a workspace's work runs on.
 - **The tailnet bridges** — `wk bridge`, camera streaming, and a routed
   10.99.x segment reachable from the workstation.

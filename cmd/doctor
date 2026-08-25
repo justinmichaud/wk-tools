@@ -40,6 +40,16 @@ probe_store() {
         echo proxy=no
     fi
     [ -s "$WK_STORE/pi-hosts" ] && echo pihosts=ok || echo pihosts=no
+    # The fleet-request broker's socket, asked where the *containers* are.
+    #
+    # Deliberately the socket and not the service, and the two are not the same
+    # question on macOS: the broker runs on the Mac and publishes its socket in
+    # here over ssh, so a broker that is up with a broken forward looks
+    # perfectly healthy from out there and is unreachable from every workspace.
+    # This probe runs where a workspace stands, which is the only place the
+    # answer means anything.
+    [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/broker.sock" ] \
+        && echo broker=ok || echo broker=no
 }
 if [ "${1:-}" = --probe-store ]; then
     probe_store
@@ -139,6 +149,11 @@ local_state "$HOME/.config/wk/targets"             backed-up   "this device's ow
 # to the console; what it must never be is in the repo.
 local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "a new tag:wk key (reusable, not ephemeral, longest expiry) from https://login.tailscale.com/admin/settings/keys; joined nodes are unaffected"
 local_state "$WK_ROOT/targets/local"               backed-up   "machine-local target definitions (gitignored: internal hosts and paths)"
+# What the request broker did, on this machine, for workspaces that could not do
+# it themselves. Regenerable in the only sense that matters here: nothing reads
+# an old record to decide anything -- a machine's state is always read back from
+# the machine -- so losing the directory costs the words, not a fact.
+local_state "$(wk_state_dir)/broker"               regenerable "request records (argv, log, status) the fleet-request broker writes; the next request makes new ones"
 local_state "$HOME/.ssh/config.d/local"            backed-up   "hand-written ssh entries (host/dotfiles.sh moves them here and owns the rest)"
 # This machine's key for reaching its own container workspaces' sshd, over the
 # `podman exec` transport `wk zed` uses (zed_key, lib/target.sh). Regenerable
@@ -168,6 +183,13 @@ report_store() { # <probe output>
     [ "$(v skills)" = ok ] && ok "shared skills seeded"   || miss "shared skills seeded" "wk skills push"
     [ "$(v proxy)" = ok ]  && ok "egress proxy running"   || miss "egress proxy running" "./setup --stage sdk, then systemctl --user status wk-proxy"
     [ "$(v pihosts)" = ok ] && ok "pi-hosts populated"    || miss "pi-hosts populated" "wk pi setup rpi5 / rpi4  (skip if no Pi devices)"
+    # Named for what a workspace loses without it, not for the service: the
+    # socket is the whole of a workspace's route to a bench device, and its
+    # absence reads as "wk boot refuses in here", which is also what a correctly
+    # locked-down workspace looks like.
+    [ "$(v broker)" = ok ]  && ok "fleet-request broker reachable from workspaces" \
+                           || miss "fleet-request broker reachable from workspaces" \
+                                   "./setup --stage broker  (macOS: it also publishes the socket into the VM)"
 }
 
 section "workspaces store"

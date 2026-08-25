@@ -286,6 +286,20 @@ _wk_ps_build=""
   _wk_ps_build="${XDG_STATE_HOME:-$HOME/.local/state}/wk/ws/$_wk_ps_ws/build.status"
 
 if [ -n "$ZSH_VERSION" ]; then
+  # The line editor's keymap, chosen here rather than inherited.
+  #
+  # zsh picks vi mode when $EDITOR or $VISUAL contains "vi" -- so which keymap
+  # you get depends on which editor happens to be installed on the machine. On
+  # this Mac helix is absent, section 6 below falls through to `vim`, and zsh
+  # therefore came up in *viins*, where ^A and ^E are `self-insert`: they type a
+  # character instead of moving to the start or end of the line. The same rc on
+  # a machine with helix gives emacs bindings, so the two behaved differently
+  # for a reason nothing on screen mentioned (found 2026-08-25 in Zed's
+  # terminal: `bindkey -lL main` answered `bindkey -A viins main`).
+  #
+  # So it is stated. WK_ZSH_VI=1 for anyone who wants the other one.
+  if [ -z "${WK_ZSH_VI:-}" ]; then bindkey -e; else bindkey -v; fi
+
   setopt PROMPT_SUBST
   # zstat, so the index size below costs no process. Absent on nothing this runs
   # on, but the prompt must survive it being absent anyway.

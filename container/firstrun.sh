@@ -28,6 +28,18 @@ else
     log "WARNING: no egress proxy socket at /run/wk/proxy.sock -- no network"
 fi
 
+# --- the fleet-request door ---------------------------------------------------
+# Reported at first run rather than discovered later. Without it `wk boot` and
+# `wk pi deploy|bench` refuse in here, which is also exactly what a correctly
+# locked-down workspace looks like -- so the two are worth telling apart before
+# anybody spends an afternoon on it. Nothing is started or retried: the socket
+# belongs to the workstation and appears here when it is there.
+if [ -S /run/wk/broker.sock ]; then
+    log "fleet-request broker present -- wk boot / wk pi deploy|bench become requests"
+else
+    log "no fleet-request broker at /run/wk/broker.sock -- no bench device from here"
+fi
+
 # --- identity ----------------------------------------------------------------
 git config --global user.name  "Justin Michaud"
 git config --global user.email "jmichaud@igalia.com"

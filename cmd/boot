@@ -34,17 +34,19 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/boot/machines.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# Both of these act on physical machines: a boot device, a firmware register, a
-# disk image measured in gigabytes. None of that exists in a workspace, and the
-# sandbox cannot reach the machine that has it. The rule now lives in `wk`'s
-# is_host_only list, where it is one line next to every other command of the
-# same kind; this stays as the second half of it, for the case the dispatcher
-# cannot cover -- cmd/boot run directly, which is how a hook or a script that
-# knows the path invokes it.
-if in_workspace; then
-    die "'wk $(basename "$0")' acts on a host and its hardware, and this is
-    workspace '$(wk_self)'. Run it on the workstation instead."
-fi
+# This acts on a physical machine: a boot device, a firmware register, a disk
+# image measured in gigabytes. None of that exists in a workspace and the
+# sandbox cannot reach the machine that has it -- so nothing below this point
+# runs in there, and that has not changed.
+#
+# What has changed is what happens instead. A mode transition is precisely the
+# outcome a sandboxed benchmark run needs and cannot produce, so the invocation
+# becomes a *request* over the one socket a workspace can see, performed out
+# there by a broker that refuses on the same evidence this file does
+# (lib/broker.sh; container/broker/wk-broker.py). The routing happens after the
+# arguments are parsed, so that what crosses the socket is a verb and a machine
+# rather than a command line -- see the block below the parser.
+. "$WK_ROOT/lib/broker.sh"
 
 usage() {
     cat >&2 <<'EOF'
@@ -91,6 +93,43 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# --- inside a workspace, this is a request ------------------------------------
+#
+# Before machine_load, and long before any driver: everything below reaches
+# hardware, and the whole point is that this end reaches nothing. What goes
+# over the socket is the action word and the machine name -- never these
+# arguments as a string, and never a command -- so the broker's vocabulary is
+# what limits this, not what this file chooses to send.
+#
+# Two actions are deliberately not requestable, and the refusals say so rather
+# than being silently absent:
+#
+#   --diag reads the bench system's boot partition by mounting it on the
+#   workstation. It is a debugging read of a disk, not an outcome a benchmark
+#   needs, and the sandbox has no business mounting filesystems out there.
+#
+# (--keep *is* requestable: the self-return watchdog would otherwise cut every
+# run longer than the manifest's interval, which on this fleet is most of them.
+# container/broker/wk-broker.py's build_keep carries that argument.)
+if in_workspace; then
+    broker_present || broker_no_route "'wk boot'" "wk boot $MACHINE"
+    _rc=0
+    case "$ACTION" in
+        arm)    broker_call arm     machine="$MACHINE" \
+                    ${IMAGE:+system="$IMAGE"} ${DRY:+dry_run=1} || _rc=$? ;;
+        status) broker_call status  machine="$MACHINE" || _rc=$? ;;
+        keep)   broker_call keep    machine="$MACHINE" ${DRY:+dry_run=1} || _rc=$? ;;
+        back)   broker_call release machine="$MACHINE" ${DRY:+dry_run=1} || _rc=$? ;;
+        disarm) broker_call disarm  machine="$MACHINE" ${DRY:+dry_run=1} || _rc=$? ;;
+        diag)   die "'wk boot $MACHINE --diag' mounts that machine's boot partition on the
+    workstation to read the system's own account of its last boot. That is a
+    disk read, not a mode transition, and it is not in the request broker's
+    vocabulary -- a workspace has no business mounting a filesystem out there.
+    Run it on the workstation:  wk boot $MACHINE --diag" ;;
+    esac
+    exit "$_rc"
+fi
 
 machine_load "$MACHINE" || die "unknown machine '$MACHINE' (wk boot --list)"
 
