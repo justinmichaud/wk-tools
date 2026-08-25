@@ -209,6 +209,63 @@ xcode)
     [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && args+=("COMPILATION_CACHE_ENABLE_CACHING=NO")
     ;;
 *)
+    # Does the tree that is already here agree with the configuration being
+    # asked for? Two mechanisms already exist upstream and between them they
+    # leave one gap, which is the one that matters.
+    #
+    # build-webkit removes CMakeCache.txt by itself when its own argument string
+    # changes (removeCMakeCache, build-webkit:303), and for an ordinary -D that
+    # is the whole answer -- cmake re-runs and the new value takes.
+    #
+    # Six variables are not ordinary. WebKit calls them identity variables --
+    # CMAKE_BUILD_TYPE, PORT, DEVELOPER_MODE, ENABLE_SANITIZERS, WEBKIT_SDK_NAME,
+    # CMAKE_OSX_SYSROOT -- and stamps them in .webkit-config-stamp *outside* the
+    # cache, precisely so that wiping the cache cannot quietly revert them
+    # (Source/cmake/WebKitCommon.cmake:9). Change one and configure stops dead:
+    #
+    #   CMAKE_BUILD_TYPE changed from 'Release' to 'RelWithDebInfo'. This build
+    #   directory's identity variables must not change after the first
+    #   configure. Delete the build directory and reconfigure.
+    #
+    # That is a good refusal and a bad place to meet it: partway into a build
+    # somebody asked for, with a manual rm -rf as the only way forward. So the
+    # remedy it names is applied here instead, before the build starts.
+    #
+    # The stamp is read rather than a record of our own being kept beside it --
+    # WebKit owns this fact and writes it in one place -- and the *names* come
+    # from the stamp too, so the list above can grow upstream without this going
+    # stale. Wiping rather than refusing, because `wk build <ws> <config>` has
+    # already said which configuration it wants and the tree there is not it.
+    if [ -n "$cmakeargs" ] && [ -f "${WK_BUILD_DIR:-}/.webkit-config-stamp" ]; then (
+        # A subshell: the comparison needs `set --` to word-split the flag
+        # string the way a shell would, and this script's own "$@" is the
+        # caller's passthrough arguments, which reach build-webkit at the bottom.
+        stamp="$WK_BUILD_DIR/.webkit-config-stamp"
+        stale=""
+        eval "set -- $cmakeargs"
+        while IFS='=' read -r name prev; do
+            [ -n "$name" ] || continue
+            # Last -D wins, which is what cmake itself does with a repeat.
+            want=""
+            for a in "$@"; do
+                case "$a" in -D"$name"=*) want=${a#-D"$name"=} ;; esac
+            done
+            # Not named on this command line at all: the cache keeps what it
+            # has and the stamp still describes it. Only a stated, different
+            # value is a change.
+            [ -n "$want" ] || continue
+            [ "$want" = "$prev" ] && continue
+            stale="$stale  $name: '$prev' -> '$want'
+"
+        done < "$stamp"
+        [ -n "$stale" ] || exit 0
+        echo "wiping $WK_BUILD_DIR -- WebKit's identity variables changed:" >&2
+        printf '%s' "$stale" >&2
+        echo "  a build directory cannot be reconfigured across these" >&2
+        echo "  (Source/cmake/WebKitCommon.cmake:29), so it is rebuilt from scratch" >&2
+        rm -rf "$WK_BUILD_DIR"
+    ); fi
+
     [ -n "$cmakeargs" ] && args+=(--cmakeargs="$cmakeargs")
     args+=("--makeargs=-j$jobs")
     ;;

@@ -271,6 +271,11 @@ t_mem_mb()     { envelope_mem_mb; }  # t_mem_mb <name>
 # already gives you a terminal.
 t_exec_tty()   { t_exec "$@"; }
 
+# lldb options a target needs before it can launch anything, as words for the
+# command line. Nothing, for a machine that behaves like one -- the override
+# that exists is targets/container.sh, and it says why there.
+t_lldb_opts()  { :; }               # t_lldb_opts
+
 # The exec `wk build` uses, which is the same one everywhere except where a
 # build specifically has to be serialised. On a shared machine two of your own
 # builds must not stack, and the lock that guarantees it belongs on the build

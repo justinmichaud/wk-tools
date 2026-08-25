@@ -1,18 +1,26 @@
-# HANDOFF — MiniBrowser on Linux: the debugging half
+# HANDOFF — MiniBrowser on Linux: profiling it
 
-Running MiniBrowser graphically and interacting with it is done: `wk gui <ws>
-[url]` drives it in the host's graphical session (needs `wk session on`;
-`--software` falls back to llvmpipe). What is missing is debugging it.
+Running MiniBrowser graphically is done (`wk gui <ws> [url]`, needs `wk session
+on`; `--software` falls back to llvmpipe). Debugging it is done too, as
+`wk gui --lldb [ui|web]` and `wk test --layout --lldb [web|ui]` — see
+"Debugging (Linux, the CMake ports)" in `docs/TESTING.md` for what was verified
+and at what cost.
 
-Reference: https://github.com/justinmichaud/justinmichaud.github.io/wiki/Debugging-WPE-Linux-(desktop)
+What is left is the profiler.
 
 ## Remaining
 
-- **Attach a debugger on Linux.** `wk gui --lldb` refuses today with "--lldb is
-  only wired up for the Apple ports" (`cmd/gui:116`).
-- **Debug a single layout test.**
-- **Do not let prewarm processes, PSON or site isolation attach the debugger to
-  the wrong process.**
-
-All three are specced as `wk debug` in `docs/Urgent/HANDOFF-debug.md`, which is
-also unbuilt. Build them there, once.
+- **`wk profile <ws> --browser` on the CMake ports.** It refuses today
+  (`cmd/profile:162`), and for a reason that is no longer true: "the browser is
+  started by Tools/Scripts/run-minibrowser and the process that matters is a
+  child of it, so a profiler pointed at the launcher records the launcher".
+  run-minibrowser splits `WEBKIT_MINI_BROWSER_PREFIX` and prepends it to the
+  MiniBrowser command it builds (`webkitpy/port/{gtk,wpe}.py`), which is exactly
+  how `wk gui --lldb` now gets a debugger in front of the right binary while
+  keeping the port's own environment. samply goes in the same place.
+- **Which process, then.** `--browser` would profile the UI process, which
+  spends its life in a run loop; the web process is nearly always the subject,
+  and `--attach $(config_web_process_name)` already reaches it. Whether
+  `--browser` should mean "the UI process" or "the browser, web process
+  included" is the open question, and it is the same one `--lldb ui` versus
+  `--lldb web` answered for the debugger.

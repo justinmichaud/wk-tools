@@ -196,6 +196,58 @@ sh_quote() {
     printf '%s' "$out"
 }
 
+# --- which lldb, decided where it is going to run ------------------------------
+# A shell fragment to put in front of a command being run in a workspace. It
+# sets $LLDB to a debugger that starts there, or fails the command with a reason
+# instead of leaving one to be worked out from a loader error.
+#
+# `lldb` is not the answer, and is wrong in the least helpful way available. The
+# wkdev image puts /opt/swift/usr/bin first on PATH, and the Swift toolchain's
+# lldb is linked against libxml2.so.2 while the image ships libxml2.so.16 -- so
+# it does not start at all:
+#
+#   lldb: error while loading shared libraries: libxml2.so.2: cannot open
+#         shared object file: No such file or directory
+#
+# before saying anything about itself, which reads as a broken workspace rather
+# than as the wrong binary. That same image carries a working /usr/bin/lldb-22
+# that nothing was reaching (measured in a 2.53-v9 container, 2026-08-24).
+#
+# So a candidate is *run* rather than merely found, and neither the shadowing
+# nor the version number is written down: both belong to an image this repo does
+# not build, and a pinned `lldb-22` would be a second copy of a fact that goes
+# stale at the next bump. Newest first, so a bump is picked up rather than
+# stepped over. macOS has one lldb, it is first, and it answers.
+lldb_prelude() {
+    cat <<'EOF'
+LLDB=""
+for _c in lldb $(ls /usr/bin/lldb-[0-9]* 2>/dev/null | sort -Vr); do
+    command -v "$_c" >/dev/null 2>&1 || continue
+    "$_c" --version >/dev/null 2>&1 && { LLDB="$_c"; break; }
+done
+[ -n "$LLDB" ] || { printf 'error: no lldb here that will start -- `lldb` resolves to %s\n' \
+    "$(command -v lldb || echo 'nothing')" >&2; exit 127; }
+EOF
+}
+
+# lldb options that keep the debugger on the process it was pointed at, as words
+# for the command line.
+#
+# WebKit is several processes and the debugger has to be told which one it is
+# for. `~/.lldbinit` here says `settings set target.process.follow-fork-mode
+# child` (dotfiles/lldbinit:10, carried in from a personal dotfile), and against
+# a browser that is not a preference, it is a bug: MiniBrowser's first act is to
+# fork a network process, so the debugger walks out of the UI process a second
+# after `run` and every breakpoint that was set in it stops meaning anything.
+#
+# Stated here rather than fixed there because a command must not depend on what
+# a user's ~/.lldbinit happens to say, in either direction: `-O` runs after the
+# init file, so this wins wherever it is used, and nothing about someone's own
+# lldb setup has to change for `wk gui --lldb` to land in the right process.
+lldb_pin_opts() {
+    printf '%s' "-O 'settings set target.process.follow-fork-mode parent'"
+}
+
 confirm() {
     local prompt="$1"
     [ -n "${WK_YES:-}" ] && return 0

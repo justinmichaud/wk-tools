@@ -163,8 +163,9 @@ else
 fi
 
 # --lldb is a layout-test flow: the JSC suite runs a shell, and `wk run --lldb`
-# already debugs that. It also needs a process name to wait for, which is only
-# known for the Apple ports (build/configs.sh).
+# already debugs that. It also needs a process to wait for by name, which
+# build/configs.sh answers per port -- and which a jsc-only config has no answer
+# to, because it builds neither of these binaries.
 #
 #   --lldb, --lldb web   the web process the test runs in -- its JS, its layout,
 #                        its rendering, and so nearly always the right one
@@ -176,7 +177,7 @@ if [ -n "$LLDB" ]; then
         web) ATTACH=$(config_web_process_name) ;;
         ui)  ATTACH=$(config_test_runner_name) ;;
     esac
-    [ -n "$ATTACH" ] || die "--lldb is only wired up for the Apple ports (docs/Urgent/HANDOFF-linux-minibrower.md)"
+    [ -n "$ATTACH" ] || die "'$CONFIG' builds no layout-test binaries to debug -- use a wpe-*, gtk-* or mac-* config"
     [ $# -gt 0 ] || die "--lldb needs a test to debug, e.g. fast/dom/Element/id-attribute.html"
     # One driver, so there is exactly one process of either kind to catch.
     JOBS=1
@@ -240,7 +241,7 @@ if [ -n "$DRY" ]; then
     # The debugger is the foreground half of a debug run and the run itself is
     # the background half; a dry run that showed only the second would describe
     # a command nobody is about to issue.
-    [ -n "$LLDB" ] && log "  in front of: lldb -o 'process attach --name $ATTACH --waitfor'"
+    [ -n "$LLDB" ] && log "  in front of: lldb $(lldb_pin_opts) -o 'process attach --name $ATTACH --waitfor'"
     exit 0
 fi
 
@@ -265,8 +266,9 @@ if [ -n "$LLDB" ]; then
     info "debugging $* ($CONFIG) in '$NAME', lldb waiting for $ATTACH"
     log  "  it attaches as that process starts; 'continue' runs the test"
     log  "  test output: /tmp/wk-test-lldb.log (in the workspace)"
-    t_exec_tty "$NAME" bash -lc "( sleep 2; $CMD >/tmp/wk-test-lldb.log 2>&1 ) & \
-        exec lldb -o $(sh_quote "process attach --name $ATTACH --waitfor")"
+    t_exec_tty "$NAME" bash -lc "$(lldb_prelude)
+( sleep 2; $CMD >/tmp/wk-test-lldb.log 2>&1 ) & \
+        exec \"\$LLDB\" $(lldb_pin_opts) -o $(sh_quote "process attach --name $ATTACH --waitfor")"
     exit 0
 fi
 

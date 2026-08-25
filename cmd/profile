@@ -160,11 +160,14 @@ if [ -n "$ATTACH" ]; then
 elif [ -n "$BROWSER" ]; then
     case "$CFG_BUILDSYS" in
         xcode) ;;
+        # The web process is named per port, so the remedy has to be too:
+        # '--attach WebKitWebProcess' is right for GTK and waits forever on WPE,
+        # which is the failure this message exists to prevent.
         *) die "--browser is wired up for the Apple ports only.
     On the CMake ports the browser is started by Tools/Scripts/run-minibrowser
     and the process that matters is a child of it, so a profiler pointed at the
     launcher records the launcher. Profile the web process with
-    '--attach WebKitWebProcess' once it is up, or use the jsc shell.
+    '--attach $(config_web_process_name)' once it is up, or use the jsc shell.
     See docs/Urgent/HANDOFF-linux-minibrower.md." ;;
     esac
     BIN=$(config_browser_path "$SRC")

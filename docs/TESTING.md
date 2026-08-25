@@ -332,11 +332,162 @@ Run these inside the podman VM on macOS, and directly on Linux.
 - [V] `wk run <ws> -- -e 'print(1+1)'` prints 2
 - [V] `wk run <ws> --config wpe-release` starts (finds `WebKitBuild/WPE/...`
       and does not clobber `LD_LIBRARY_PATH`)
-- [ ] `wk build <ws> gtk-release`, `wpe-release`
+- [V] `wk build <ws> wpe-release` succeeds. On 80 cores, and the debug info is
+      most of it: 4m47s / 11.3GB peak / 1.9GB tree before release builds carried
+      any, 24m2s / 82.5GB peak / 5.9GB tree after
+- [V] `wk build <ws> gtk-release` succeeds (24m47s, 96973MB peak, 5393 `.dwo`)
 - [ ] `wk test <ws>` (JSC suite) and `wk test <ws> --layout`
 - [V] every build writes `compile_commands.json` by default
 - [V] `wk logs <ws>` shows `(none)` under errors for a successful build
 - [ ] `wk bench` produces per-subtest results with confidence intervals
+
+### Release builds carry debug info  (the CMake ports)
+- [V] every release config is `CMAKE_BUILD_TYPE=RelWithDebInfo` with the
+      optimization flags pinned to `-O3 -g -DNDEBUG`. The pin is the point:
+      CMake's own RelWithDebInfo is **-O2**, so adopting the build type alone
+      would have dropped every release build — and every benchmark number — by
+      an optimization level. Read out of a configured cache, not assumed
+- [V] `GCC_OFFLINEASM_SOURCE_MAP` comes on with the build type, which is what
+      gives the offlineasm-generated LLInt line information
+- [V] `DEBUG_FISSION=ON` is stated rather than defaulted, because its default
+      cannot fire: `OptionsCommon.cmake:175` tests `ENABLE_DEVELOPER_MODE`, and
+      `WebKitCommon.cmake:338` includes `OptionsCommon` *before* the
+      `Options${PORT}` that defines it. Measured off, with zero `.dwo` files, in
+      a tree that had asked for RelWithDebInfo and nothing else
+- [V] what fission is worth here: 10G -> 5.9G tree, 1.9G -> 737M for
+      libWPEWebKit, 98.4GB -> 82.5GB peak build memory, 26m2s -> 24m2s. lldb
+      still resolves source from the 5471 `.dwo` files
+- [V] a build directory whose identity variables changed is wiped and rebuilt
+      rather than failing partway in. WebKit stamps those six outside the cache
+      (`.webkit-config-stamp`) and refuses to reconfigure across them; upstream's
+      own `removeCMakeCache` handles every *other* changed flag, and both paths
+      were seen firing on the correct half
+- [V] the same for `gtk-release`: RelWithDebInfo, `-O3 -g -DNDEBUG`,
+      `DEBUG_FISSION=ON`, `GCC_OFFLINEASM_SOURCE_MAP=ON`
+- [ ] the two `-asan` configs, which this moved from an accidental -O2 to a
+      stated -O3
+
+### Debugging  (Linux, the CMake ports)
+Verified 2026-08-24 in a `wpe-release` container workspace, wkdev-sdk
+2.53-v9, aarch64. The two entries first are not conveniences: without either,
+every one of the four below fails before the program starts.
+- [V] the debugger is *resolved*, not assumed. The image's PATH puts
+      `/opt/swift/usr/bin` first and that lldb cannot start at all — linked
+      against `libxml2.so.2` in an image shipping `libxml2.so.16`, so it dies
+      in the loader before printing its version. `lldb_prelude` runs each
+      candidate newest-first and lands on the working `/usr/bin/lldb-22`
+- [V] a container cannot turn ASLR off, and lldb tries to by default:
+      `personality set failed: Function not implemented`, which is podman's
+      seccomp answering ENOSYS rather than EPERM. `t_lldb_opts` sets
+      `target.disable-aslr false`, and `process launch` then works
+- [V] the debugger stays in the process it was pointed at.
+      `dotfiles/lldbinit:10` says `follow-fork-mode child`, so before
+      `lldb_pin_opts` the session left MiniBrowser for `WPENetworkProcess`
+      seconds after `run` — observed, `stop reason = exec`, with the UI
+      process's breakpoints re-resolving in the child
+- [V] `wk run <ws> --config wpe-release --lldb -- -e 'print(6*7)'` stops at
+      entry; a breakpoint on `JSC::Interpreter::executeProgram` resolves in
+      `libWPEWebKit-2.0.so.1` and hits; `42` prints; exit 0
+- [V] `wk gui <ws> --lldb` holds MiniBrowser before `main` with a backtrace
+      through `__libc_start_call_main`, and stays there while the browser
+      spawns its children. The debugger reaches the binary through
+      run-minibrowser's own `WEBKIT_MINI_BROWSER_PREFIX` hook, so the port
+      still sets `WEBKIT_EXEC_PATH` and the rest — `lldb -- run-minibrowser`
+      would have debugged Python
+- [V] `wk gui <ws> --lldb web <url>` attaches to `WPEWebProcess` as it launches
+      and a breakpoint on `WebCore::Document::implicitClose` hits on the real
+      page load
+- [V] `wk test <ws> --layout --lldb <test>` attaches the web process the run
+      spawns; the same breakpoint hits with a full symbolicated stack —
+      `FrameLoader::checkCallImplicitClose` → `WebPage::WebPage` →
+      `IPC::Connection::dispatchMessage` → `WebProcessMain`
+- [V] `wk test <ws> --layout --lldb ui <test>` attaches WebKitTestRunner:
+      `WTR::TestController::runTest` ← `runTestingServerLoop` ← `main`
+- [V] a config with no browser is refused by name rather than by platform —
+      `'jsc-release' builds no browser to drive` from `wk gui`, and the layout
+      equivalent from `wk test`
+- [V] `--waitfor` on the *first* web process is the right process: prewarming
+      does not happen until a page has already loaded
+      (`didReachGoodTimeToPrewarm`, `WebPageProxy.cpp:1231`)
+- [!] but only until the page navigates. A cross-site navigation swaps the page
+      into a new web process and leaves lldb in the old one — measured, with the
+      document URL read at every `Document::implicitClose`: the attached process
+      renders the empty document and `a.html`, then nothing, while the server
+      logs `b.html` being fetched by somebody else.
+
+      **PSON cannot be turned off on WPE or GTK4**, so this is described rather
+      than fixed. `ProcessSwapOnCrossSiteNavigation` is a stable preference
+      MiniBrowser exposes through `--features`, and setting it is inert here:
+
+          bool processSwapsOnNavigation() const
+          { return m_processSwapsOnNavigationFromClient
+                       .value_or(m_processSwapsOnNavigationFromExperimentalFeatures); }
+
+      `WebKitWebContext.cpp:444` calls `setProcessSwapsOnNavigation(true)`
+      unconditionally on these ports, so the client value is always engaged and
+      `value_or` never reaches the preference. Measured as well as read:
+      `--features=-ProcessSwapOnCrossSiteNavigation` changes neither the
+      documents the attached process sees nor the process count.
+- [V] so the debugger finds the page instead of being told where it went.
+      `follow-page` (`container/lldb/webprocess.py`, imported and aliased by
+      `wk gui --lldb web`) attaches to *every* web process and asks each one what
+      it holds, which takes two reads and needs both:
+
+          pid 2501045  pages=1 suspended=1   <- attached, page already gone
+          pid 2501296  pages=1 suspended=0   <- the live page
+          pid 2502198  pages=? suspended=?   <- prewarmed, still starting
+
+      `pages` is `WebProcess::m_pageMap`'s key count; `suspended` is
+      `m_hasSuspendedPageProxy`, which the UI process sets on the process a page
+      was swapped *out* of (`WebProcessProxy.cpp:2559`). Page count alone is not
+      enough — two processes report a page after a swap and the stale one is the
+      one you are attached to.
+
+      Verified end to end: the original attach sees the empty document and
+      `a.html` and then goes quiet; `follow-page` detaches the stale and
+      prewarmed processes, keeps 2501296 stopped, and a breakpoint set there
+      catches that page's next navigation (`c.html`). Two refusals are verified
+      too — it declines rather than guesses when more than one process holds a
+      live page, and it says "still inside the 30 s launch pause" when a
+      candidate cannot be asked yet
+- [V] `m_pageMap`'s count is read out of memory, not asked for: WTF keeps it in
+      the words before the table (`keyCountOffset = -3`, `HashTable.h:614`), and
+      calling `size()` in the inferior takes SIGSEGV
+- [V] `reattach` remains for the other case — catching the next web process at
+      *launch*, before it runs, rather than finding the one that already has the
+      page. Breakpoints do not survive either move; both messages say so
+- [ ] site isolation, which splits one page across processes per site. Off by
+      default (`SiteIsolation (unstable)`) and untried
+- [V] all of the above against `gtk-release` as well. Every mode behaves
+      identically — `wk run --lldb` stops in `JSCConfig.h:161` in
+      `libjavascriptcoregtk-6.0.so.1`; `wk gui --gtk --lldb` stops at
+      `main.c:1016`; `--lldb web` attaches `WebKitWebProcess` and hits
+      `Document.cpp:4323` in `libwebkitgtk-6.0.so.4`; the layout-test modes
+      attach the web process and `WTR::TestController::runTest`
+      (`TestController.cpp:3304`, with the test path as an argument); and
+      `follow-page` picks the live page out of three processes after a
+      cross-site swap, which then renders `c.html`
+- [V] the 15-character `comm` truncation, which only GTK reaches:
+      `WebKitWebProcess` is 16 characters and the kernel records
+      `WebKitWebProces`. `follow-page` matches on `name[:15]` and finds all
+      three; lldb's own `--waitfor` matches the full name regardless, so it
+      reads the command line rather than `comm`. Matching on `comm` is the
+      better of the two here — a `pgrep -f WebKitWebProcess` in the test
+      harness also matched the shell that mentioned the name, and `comm` did not
+- [!] two things the GTK MiniBrowser does not have: `--headless` and
+      `--features`. The first did not matter — GTK loads a page in a screen-off
+      session where WPE needed `--headless` — and the second means the PSON
+      preference was never reachable there in any case
+- [ ] a page that renders. These ran with the session off, where WPE gets no
+      output and a page never finishes loading — the `--lldb web` and layout
+      runs above used `-- --headless` and the test runner's own surface to get
+      a real load. `wk session on` first is what an interactive session wants
+- [V] source-level debugging, which is what the release configs now carry debug
+      info for. `wk run --lldb` stops in `JSCConfig.h:161` with the source line
+      and the inlined frame; `wk gui --lldb` stops at `main.cpp:768` with
+      argument values; the web process gives a full source backtrace —
+      `Document.cpp:4323` -> `FrameLoader.cpp:1106` -> `FrameLoader.cpp:1030` —
+      with WebKit's own summaries rendering `this`
 
 ### Babysit — `wk build --babysit` (landed 2026-08-19, zero lines here until now)
 - [ ] the E2E: plant a compile error, `--babysit`, disconnect the terminal,

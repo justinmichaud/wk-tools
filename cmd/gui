@@ -108,14 +108,6 @@ case "$CFG_BUILDSYS:$CFG_PORT" in
 esac
 [ -n "$FULLSCREEN" ] || FS_FLAG=""
 
-# Nothing here has been run against a CMake port's debugger: the web process is
-# named differently, the launch goes through run-minibrowser rather than the
-# binary, and a wrong process name fails as a debugger that waits forever --
-# the least debuggable failure of the lot. See docs/Urgent/HANDOFF-linux-minibrower.md.
-if [ -n "$DEBUG" ] && [ "$CFG_BUILDSYS" != xcode ]; then
-    die "--lldb is only wired up for the Apple ports (docs/Urgent/HANDOFF-linux-minibrower.md)"
-fi
-
 # about:blank when no page is named. A workspace does reach the network -- the
 # proxy's allowlist, which the guest's system proxy now points at, so real pages
 # load -- but picking one on the user's behalf would mean guessing which, and a
@@ -188,14 +180,39 @@ TYPE_FLAG="--$(printf '%s' "$CFG_TYPE" | tr 'A-Z' 'a-z')"
 # because `lldb -- <cmd>` has to be handed the command *without* the
 # assignments -- they belong to lldb itself, which passes its environment on to
 # what it launches.
+#
+# UI_PREFIX is how `--lldb ui` gets a debugger in front of the browser, and the
+# two build systems need opposite shapes. The Apple bundle is exec'd directly,
+# so lldb goes on the front of the command and there is nothing to arrange.
+#
+# The CMake ports cannot be driven that way. Their launch is a Python script,
+# so `lldb -- Tools/Scripts/run-minibrowser` debugs Python and the browser it
+# eventually spawns is a grandchild the debugger never sees. run-minibrowser
+# has the hook for exactly this: WEBKIT_MINI_BROWSER_PREFIX is split and
+# prepended to the MiniBrowser command it assembles
+# (webkitpy/port/{gtk,wpe}.py, `shlex.split(...) + command`), so the debugger
+# goes in *there* -- after the port has set WEBKIT_EXEC_PATH,
+# WEBKIT_INJECTED_BUNDLE_PATH, WEBKIT_INSPECTOR_RESOURCES_PATH and
+# LD_LIBRARY_PATH, which is the environment that would otherwise have to be
+# reproduced here by hand and kept in step with upstream forever.
+#
+# The prompt behaves the same either way: `lldb -- <binary> <args>` loads the
+# program without running it, so breakpoints go in before `run`.
 if [ "$CFG_BUILDSYS" = xcode ]; then
     LAUNCH_ENV=$(config_browser_env "$SRC")
     LAUNCH_CMD="$(sh_quote "$BROWSER") $(config_browser_url_flag) $(sh_quote "$URL") $EXTRA"
+    UI_PREFIX=""
 else
     # WPE_BROWSER is what the benchmark driver sets, and the wkdev image's
     # run-minibrowser consults it to decide which WPE browser to launch.
     LAUNCH_ENV="WPE_BROWSER=minibrowser $RUN_ENV"
     LAUNCH_CMD="Tools/Scripts/run-minibrowser $CFG_PORT $TYPE_FLAG -- $FS_FLAG $(sh_quote "$URL") $EXTRA"
+    # \$LLDB stays literal: it is resolved by lldb_prelude in the workspace,
+    # not here -- this end has no lldb to name and would be naming the wrong
+    # one. t_lldb_opts is the opposite, a fact about the target that only this
+    # end knows. run-minibrowser shlex.splits the value, so the quoting inside
+    # it survives as one argument.
+    UI_PREFIX="WEBKIT_MINI_BROWSER_PREFIX=\"\$LLDB $(t_lldb_opts) $(lldb_pin_opts) --\""
 fi
 
 case "$DEBUG" in
@@ -207,19 +224,46 @@ case "$DEBUG" in
 ui)
     info "MiniBrowser ($CONFIG) in '$NAME' under lldb -> $URL"
     log  "  'run' starts it; breakpoints can go in first"
-    t_exec_tty "$NAME" bash -lc "cd $SRC && $LAUNCH_ENV exec lldb -- $LAUNCH_CMD"
+    if [ "$CFG_BUILDSYS" = xcode ]; then
+        RUN="cd $SRC && $LAUNCH_ENV exec \"\$LLDB\" $(t_lldb_opts) $(lldb_pin_opts) -- $LAUNCH_CMD"
+    else
+        RUN="cd $SRC && $LAUNCH_ENV $UI_PREFIX exec $LAUNCH_CMD"
+    fi
+    t_exec_tty "$NAME" bash -lc "$(lldb_prelude)
+$RUN"
     ;;
 web)
     WEB_PROC=$(config_web_process_name)
     info "MiniBrowser ($CONFIG) in '$NAME' -> $URL, lldb waiting for $WEB_PROC"
     log  "  it attaches as the page's process starts; 'continue' lets it run"
+    # PSON is not switchable off here, so it is described instead of fought.
+    # `reattach` is the whole remedy and is spelled out because a debugger
+    # sitting in a process the page has left looks exactly like a debugger
+    # working -- there is no error, the breakpoints simply stop being reached.
+    log  "  a cross-site navigation moves the page to a *new* process and leaves"
+    log  "  lldb in the old one, silently -- breakpoints just stop being reached."
+    log  "  'follow-page' attaches to every $WEB_PROC, asks each which one holds"
+    log  "  the live page, and stays there ('reattach' catches the next one at"
+    log  "  launch instead, for debugging it from the start). Re-set breakpoints."
     log  "  browser output: /tmp/wk-gui.log (in the workspace)"
     # Order matters and the sleep is the whole trick: lldb has to be waiting
     # before the browser starts, or --waitfor sits there through the launch it
-    # was meant to catch. The pause environment gives it a further 5 s of margin
-    # inside the web process itself.
-    t_exec_tty "$NAME" bash -lc "cd $SRC && \
+    # was meant to catch. The pause environment gives it a further margin inside
+    # the web process itself -- 5 s on the Apple ports, 30 s on the GLib ones.
+    #
+    # The first web process is the page's, so this attaches to the right one:
+    # prewarming is not done at start-up but on the first
+    # didReachGoodTimeToPrewarm (WebPageProxy.cpp:1231), which is a page that
+    # has already loaded -- in a process this debugger is by then inside.
+    # Navigating away is the case that does move: PSON swaps in a new process
+    # and lldb stays with the old one.
+    t_exec_tty "$NAME" bash -lc "$(lldb_prelude)
+cd $SRC && \
         ( sleep 2; $LAUNCH_ENV $(config_web_process_pause_env) $LAUNCH_CMD >/tmp/wk-gui.log 2>&1 ) & \
-        exec lldb -o $(sh_quote "process attach --name $WEB_PROC --waitfor")"
+        exec \"\$LLDB\" $(lldb_pin_opts) \
+            -o $(sh_quote "command script import $(t_tools "$NAME")/container/lldb/webprocess.py") \
+            -o $(sh_quote "command alias follow-page wk-follow-page $WEB_PROC") \
+            -o $(sh_quote "command alias reattach process attach --name $WEB_PROC --waitfor") \
+            -o $(sh_quote "process attach --name $WEB_PROC --waitfor")"
     ;;
 esac

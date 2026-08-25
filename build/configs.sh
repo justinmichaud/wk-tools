@@ -121,6 +121,54 @@ config_build_dir() {
     esac
 }
 
+# What "release, with debug info" means on the CMake ports, in one place because
+# every release config needs the same three flags and two of them are not
+# obvious.
+#
+# The build type is RelWithDebInfo for what WebKit hangs off that *name*, not
+# for CMake's idea of it:
+#
+#   DEBUG_FISSION            -gsplit-dwarf: the debug info lands in .dwo files
+#                            beside the objects instead of going through the
+#                            linker, which is what makes "release with -g"
+#                            affordable on this codebase.
+#   GCC_OFFLINEASM_SOURCE_MAP  line information for the offlineasm-generated
+#                            LLInt, same file (:200). A JSC stack that passes
+#                            through the interpreter is otherwise raw addresses.
+#
+# The optimization flags are pinned, and that is the load-bearing half. CMake's
+# own RelWithDebInfo is `-O2 -g -DNDEBUG` where Release is `-O3 -DNDEBUG` --
+# read out of a configured cache, not assumed -- so adopting the build type
+# alone would drop every release build by an optimization level. This repo
+# exists to produce benchmark numbers; a silent -O3 -> -O2 is the worst
+# available way to change them. Release goes on meaning -O3, and gains -g.
+#
+# The two -asan configs already said RelWithDebInfo and so were already building
+# at -O2 by accident. They use this too, which moves them to -O3: an accidental
+# value replaced by a stated one, and a sanitizer build that now optimizes like
+# the release build whose crash it is reproducing.
+#
+# The quotes survive: build-webkit runs `system("cmake @args")`, joined and
+# parsed by a shell (webkitdirs.pm:2966), so a -D value with spaces in it
+# reaches CMake as one argument.
+_CFG_RELWITHDEBINFO='-DCMAKE_BUILD_TYPE=RelWithDebInfo'
+_CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DCMAKE_C_FLAGS_RELWITHDEBINFO=\"-O3 -g -DNDEBUG\""
+_CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DCMAKE_CXX_FLAGS_RELWITHDEBINFO=\"-O3 -g -DNDEBUG\""
+
+# DEBUG_FISSION is stated rather than left to its default, because its default
+# cannot fire on these ports. OptionsCommon.cmake:175 gates
+# ENABLE_DEBUG_FISSION_DEFAULT on ENABLE_DEVELOPER_MODE -- but
+# WebKitCommon.cmake:338 includes OptionsCommon *before* Options${PORT}, and
+# ENABLE_DEVELOPER_MODE is what Options${PORT} sets (OptionsWPE.cmake:46,
+# OptionsGTK.cmake:77). So at the moment the test runs the variable is not yet
+# defined, the default is computed as OFF, and no WPE or GTK build has ever
+# turned fission on by itself. Measured: DEBUG_FISSION:BOOL=OFF and zero .dwo
+# files in a RelWithDebInfo tree that had asked for nothing else.
+#
+# `option()` honours a value already in the cache, so naming it here is enough
+# and nothing upstream has to change.
+_CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DDEBUG_FISSION=ON"
+
 config_load() {
     CFG_PORT=""; CFG_TYPE=""; CFG_ARGS=""; CFG_CMAKE=""
     CFG_BUILDSYS=cmake
@@ -137,12 +185,12 @@ config_load() {
         jsc-release)
             CFG_PORT="--jsc-only"; CFG_TYPE=Release
             CFG_ARGS="--release"
-            CFG_CMAKE="-DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DENABLE_OFFLINE_ASM_ALT_ENTRY=0"
+            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DENABLE_OFFLINE_ASM_ALT_ENTRY=0"
             ;;
         jsc-release-asan)
             CFG_PORT="--jsc-only"; CFG_TYPE=Release
             CFG_ARGS="--release --asan"
-            CFG_CMAKE="-DCMAKE_BUILD_TYPE=RelWithDebInfo -DDEVELOPER_MODE=ON -DUSE_LIBBACKTRACE=OFF"
+            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DDEVELOPER_MODE=ON -DUSE_LIBBACKTRACE=OFF"
             ;;
         gtk-debug)
             CFG_PORT="--gtk"; CFG_TYPE=Debug
@@ -152,17 +200,17 @@ config_load() {
         gtk-release)
             CFG_PORT="--gtk"; CFG_TYPE=Release
             CFG_ARGS="--release"
-            CFG_CMAKE="-DDEVELOPER_MODE=ON"
+            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DDEVELOPER_MODE=ON"
             ;;
         gtk-release-asan)
             CFG_PORT="--gtk"; CFG_TYPE=Release
             CFG_ARGS="--release --asan --no-fatal-warnings"
-            CFG_CMAKE="-DCMAKE_BUILD_TYPE=RelWithDebInfo -DDEVELOPER_MODE=ON -DUSE_LIBBACKTRACE=OFF -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF"
+            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DDEVELOPER_MODE=ON -DUSE_LIBBACKTRACE=OFF -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF"
             ;;
         wpe-release)
             CFG_PORT="--wpe"; CFG_TYPE=Release
             CFG_ARGS="--release --no-fatal-warnings"
-            CFG_CMAKE="-DDEVELOPER_MODE=ON -DENABLE_WPE_PLATFORM=ON -DENABLE_THUNDER=OFF"
+            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DDEVELOPER_MODE=ON -DENABLE_WPE_PLATFORM=ON -DENABLE_THUNDER=OFF"
             ;;
         # --- Apple ports ------------------------------------------------------
         # No port flag: build-webkit treats Apple Cocoa as the default on
@@ -321,6 +369,11 @@ config_build_env() {
         "WK_BUILDSYS=$CFG_BUILDSYS"
         "WK_BUILD_ARGS=$CFG_PORT $CFG_ARGS"
         "WK_BUILD_CMAKE=$cmakeargs"
+        # Where this config's tree is, so the far side can tell whether the one
+        # already there was configured with these flags. Derived here rather
+        # than re-derived over there, for the reason every other path in this
+        # file is: four ports lay their trees out four ways.
+        "WK_BUILD_DIR=$(config_build_dir "$src")"
         "WK_MB_PER_JOB=$WK_MB_PER_JOB"
     )
     # Only when the config asks for it: the Apple configs leave these empty on
@@ -480,14 +533,27 @@ config_browser_env() {
 # the process a page or a layout test actually runs in, and the one worth
 # attaching to -- the UI process spends its life in a run loop.
 #
-# Empty for the CMake ports on purpose rather than guessed: nothing here has
-# been run against them, and a wrong name fails as "the debugger is still
-# waiting", which is the least debuggable failure of the lot. The Linux half is
-# docs/Urgent/HANDOFF-linux-minibrower.md.
+# One name per port, and none of them is guessed: each is the CMake target's own
+# output name, from the port file that sets it -- PlatformWPE.cmake:16 gives
+# WebProcess_OUTPUT_NAME WPEWebProcess, PlatformGTK.cmake:11 gives
+# WebKitWebProcess. A wrong name here does not fail, it *waits*: `--waitfor`
+# sits there for a process that will never be launched, which reads as a hung
+# debugger rather than as a typo.
+#
+# Not the GLib prgname. WebProcessMainWPE.cpp:82 calls g_set_prgname(
+# "WPEWebProcess") for GStreamer's benefit, which is the same string by
+# coincidence of naming and would still be the wrong thing to read: it is set
+# from inside the process, after launch, and the debugger matches on what
+# exec'd.
+#
+# jsc-only builds no web process and keeps the empty string, which is what the
+# callers refuse on.
 config_web_process_name() {
-    case "$CFG_BUILDSYS" in
-        xcode) echo "com.apple.WebKit.WebContent.Development" ;;
-        *)     echo "" ;;
+    case "$CFG_BUILDSYS:$CFG_PORT" in
+        xcode:*)     echo "com.apple.WebKit.WebContent.Development" ;;
+        cmake:--wpe) echo "WPEWebProcess" ;;
+        cmake:--gtk) echo "WebKitWebProcess" ;;
+        *)           echo "" ;;
     esac
 }
 
@@ -495,23 +561,42 @@ config_web_process_name() {
 # is what makes the UI process debuggable at all here: its stdin and stdout are
 # the test protocol, so `--wrapper 'lldb'` would put a debugger's prompt in the
 # middle of a pipe webkitpy is talking on. An attach touches no file descriptor.
+#
+# The CMake ports build it under the same name -- it is the one binary in
+# WebKitBuild/<Port>/<Type>/bin that both build systems agree on -- so the case
+# is spelled out per port rather than defaulted, to keep jsc-only, which has no
+# test runner, on the empty string the callers refuse.
 config_test_runner_name() {
-    case "$CFG_BUILDSYS" in
-        xcode) echo "WebKitTestRunner" ;;
-        *)     echo "" ;;
+    case "$CFG_BUILDSYS:$CFG_PORT" in
+        xcode:*)                 echo "WebKitTestRunner" ;;
+        cmake:--wpe|cmake:--gtk) echo "WebKitTestRunner" ;;
+        *)                       echo "" ;;
     esac
 }
 
 # An environment assignment that makes the web process sleep immediately after
 # launch, so a waiting debugger attaches before it does anything: 5 s on the
-# Apple ports (WebProcessCocoa.mm:655).
+# Apple ports (WebProcessCocoa.mm:655), 30 s on the GLib ones
+# (WebProcessMainWPE.cpp:74, WebProcessMainGtk.cpp:75).
 #
 # Belt and braces. `--waitfor` on its own was measured attaching during dyld
 # start-up, well before main; the pause is what keeps that from being a race a
 # faster machine could win.
+#
+# One variable, spelled twice. The Apple ports need the __XPC_ doubling because
+# the web process is an XPC service launchd starts, and launchd is what turns
+# __XPC_FOO into FOO for it; the GLib ports fork their children from the UI
+# process, so the plain name is simply inherited and the doubled one would be
+# read by nobody.
+#
+# Both readers sit inside `#if ENABLE(DEVELOPER_MODE)`. Every CMake config in
+# this file passes -DDEVELOPER_MODE=ON, so this holds for all of them -- but a
+# build without it ignores the variable silently, and the attach goes back to
+# being the race this exists to remove.
 config_web_process_pause_env() {
     case "$CFG_BUILDSYS" in
         xcode) echo "__XPC_WEBKIT_PAUSE_WEB_PROCESS_ON_LAUNCH=1" ;;
+        cmake) echo "WEBKIT_PAUSE_WEB_PROCESS_ON_LAUNCH=1" ;;
         *)     echo "" ;;
     esac
 }

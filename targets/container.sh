@@ -387,6 +387,42 @@ t_exec() {
     _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --quiet --name "$c" --exec -- $(_wrap_cmd) "$@"
 }
 
+# A container cannot turn ASLR off, and lldb tries to by default -- so without
+# this every `process launch` in a workspace dies before the program starts:
+#
+#   error: Cannot launch '...': personality set failed: Function not implemented
+#
+# personality(ADDR_NO_RANDOMIZE) is not in podman's default seccomp allow-list,
+# and a blocked syscall there returns ENOSYS rather than EPERM, so lldb reads it
+# as "this kernel has no personality()" and gives up. Nothing is wrong with the
+# workspace and nothing about the message says which knob to turn, which is the
+# whole reason it is turned here instead of being met once per session.
+#
+# The cost is only that addresses move between runs. Not weakening the sandbox
+# to get it back: the flag exists to make a debugger's life easier, and the
+# boundary is worth more than repeatable addresses.
+#
+# stop-on-exec is the second half, and it is not a container thing at all -- it
+# is what makes debugging a *browser* possible. WebKit's UI process spawns a
+# network process, then a web process, then a GPU process, and lldb's default is
+# to stop the session at each one's exec:
+#
+#   Process 2104478 stopped
+#   * thread #6, name = 'WPENetworkProce', stop reason = exec
+#
+# which takes the debugger away from the process the breakpoints were set in and
+# hands it one nobody asked for. That is `wk gui --lldb ui` being hijacked by
+# the first child, every time, a few seconds after `run`.
+#
+# It belongs here anyway rather than in cmd/gui, because both halves are the
+# same statement -- the options this target needs before lldb is usable at all
+# -- and `--lldb web`, which attaches to a child on purpose, sets nothing here
+# and is unaffected: it names the process it wants.
+t_lldb_opts() {
+    printf '%s' "-O 'settings set target.disable-aslr false'"
+    printf '%s' " -O 'settings set target.process.stop-on-exec false'"
+}
+
 # The container's home is the workspace's own `home/` directory on the host,
 # bind-mounted (`--home $ws/home` in t_create). Naming it here is what lets the
 # host follow a detached build's log with a plain `tail -f`.
