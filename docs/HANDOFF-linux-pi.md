@@ -27,8 +27,8 @@ all.
    (`docs/Security/HANDOFF-tailscale.md`.)
 5. **`host/linux/rpi5/` needs an owner.** Its stability half (fan, WiFi, fstab,
    the NUMA kernel) is workstation setup and belongs in that board's own
-   `./setup` run; its perf half belongs to `perf-linux-rpi5`, which does not
-   carry it yet. Today the whole tree is hand-restored state that nothing
+   `./setup` run; its perf half belongs to the board's bench system,
+   `webkit-2.52-yocto-rpi5-64`, which does not carry it yet. Today the whole tree is hand-restored state that nothing
    recreates (`host/linux/rpi5/HANDOFF.md`).
 
 ## What has changed under this, and does not replace it

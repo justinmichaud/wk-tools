@@ -8,16 +8,17 @@ splits in two:
 - the **stability half** — fan, WiFi, fstab/indexer, the NUMA kernel — applies
   to the installed OS, i.e. host mode;
 - the **perf half** — overclock, v3d, perf governor, swap off — belongs to the
-  bench system the board boots for a run (`perf-linux-rpi5`).
+  bench system the board boots for a run (`webkit-2.52-yocto-rpi5-64`).
 
 Governor and swap-off are already baked into every system by `cmd/sysimage`.
 
 ## Remaining
 
 - **The overclock has not moved to the bench system.**
-  `image/perf-linux-rpi5/config.txt.append` says so in place: when an `oc`
-  profile arrives it sets `arm_freq`/`over_voltage` in *that* file, per image.
-  `image/perf-linux-rpi4/config.txt.append` is the worked example
+  `image/webkit-2.52-yocto-rpi5-64/config.txt.append` says so in place: when an
+  `oc` profile arrives it sets `arm_freq`/`over_voltage` in *that* file, per
+  image. `image/webkit-2.52-yocto-rpi4-64/config.txt.append` is the worked
+  example
   (`arm_freq=1500`, `force_turbo`). A run already records the `profile` it
   booted (`cmd/bench`, `wk_image_profile`), so an `oc` profile becomes a series
   of its own the moment it exists.

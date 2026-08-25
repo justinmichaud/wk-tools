@@ -422,11 +422,10 @@ gdm)
 off)
     run_priv session-off || die "the helper failed to turn the screen off"
 
-    # Two separate claims, and they used to be conflated: the placeholder
-    # compositor is running (so fbcon can't repaint the console over the top),
-    # *and* its outputs have been modeset off (so the monitor has no signal and
-    # sleeps). The second is the one that used to be missing entirely, which is
-    # why it is now checked from sysfs rather than announced.
+    # Two separate claims, easily conflated: the placeholder compositor is
+    # running (so fbcon can't repaint the console over the top), *and* its
+    # outputs have been modeset off (so the monitor has no signal and sleeps).
+    # The second is checked from sysfs rather than announced.
     lit=$(_lit_connectors not-ast)
     if [ -n "$lit" ]; then
         warn "the screen is black but still lit: $lit"
@@ -452,9 +451,9 @@ off)
 status)
     # Everything here is readable without privilege -- unit state, the socket,
     # the display manager, the compositor's mode -- so status does not go
-    # through the helper at all. It used to, and a failure inside the helper
-    # then meant no status output whatsoever, which is the opposite of what a
-    # status command is for.
+    # through the helper at all: a failure inside the helper would then mean no
+    # status output whatsoever, which is the opposite of what a status command
+    # is for.
     unit=$(systemctl is-active wk-session 2>/dev/null | head -1 || true)
     dm=$(systemctl is-active gdm3 2>/dev/null | head -1 || true)
     [ -n "$dm" ] || dm=$(systemctl is-active gdm 2>/dev/null | head -1 || true)

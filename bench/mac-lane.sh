@@ -188,8 +188,7 @@ lane_state_dir() { echo "$(wk_state_dir)/mac-lane"; }
 # ${HOST}.state made the rehearsal and the real run write the *same* file.
 # Having just finished a benchvm lane, an `mbp` lane would have read
 # `done_through=collect` and skipped build, stage, arm and run -- reporting a
-# complete lane for a benchmark volume it had never touched. Found 2026-08-22,
-# before it could do that.
+# complete lane for a benchmark volume it has never touched.
 lane_state()     { echo "$(lane_state_dir)/${HOST}-${MACHINE}.state"; }
 
 # `|| true` is load-bearing, not defensive habit. Under `set -o pipefail` a
@@ -235,7 +234,7 @@ rwk() {
     # is the form -- `wk enter` execs its argument directly rather than through
     # a shell (so `cd x && y` fails as "No such file or directory"), and `wk`
     # is not on the guest's PATH (so a bare `wk` fails as "command not found").
-    # Both established by trying them, 2026-08-22.
+    # Both established by trying them.
     if [ "$mode" = bench ] && [ "$SHAPE" = guest ]; then
         local guest inner
         guest=$(lane_guest)
@@ -425,7 +424,7 @@ preflight() {
     if [ -n "$there" ] && [ -n "$here" ] && [ "$there" != "$here" ]; then
         warn "  wk-tools on $HOST is a different tree than this one"
         log  "  here $here, there $there -- 'wk sync --target' or a git pull over there"
-        log  "  (not fatal: the lane only uses verbs both copies have had for a while)"
+        log  "  (not fatal: the lane only uses long-standing verbs)"
     fi
 
     # The volume. `wk boot mbp --status` is the authority and already
@@ -440,11 +439,10 @@ preflight() {
         fail=1
     fi
     # Matched on the *positive* signal, not on a list of ways it can be absent.
-    # The first version of this grepped for "not attached" and friends, and
-    # passed a machine whose status said `benchmark_volume=WK Bench (not
-    # attached)` because that spelling was not in the list -- a preflight that
-    # reports ready and then fails at the stage, which is the exact failure the
-    # preflight exists to prevent. boot/mac-volume.sh emits
+    # Grepping for "not attached" and friends passes a machine whose status
+    # says `benchmark_volume=WK Bench (not attached)`, because that spelling is
+    # not in the list -- a preflight that reports ready and then fails at the
+    # stage, which is the exact failure the preflight exists to prevent. boot/mac-volume.sh emits
     # `(attached at <path>)` and nothing else means attached, so that is what
     # is required. A new spelling on the driver's side then fails closed.
     # `[[:space:]]*` is not defensive noise: the driver indents these lines by
@@ -465,8 +463,8 @@ preflight() {
         # mac_volume_present means mounted *and* a macOS system volume. Saying
         # only "not there" about a volume that is sitting mounted in /Volumes is
         # how somebody goes looking for a disk problem instead of running the
-        # install -- which is exactly the state this Mac was in on 2026-08-22,
-        # with an empty 'WK Bench' created and no macOS on it yet.
+        # install. An empty 'WK Bench' with no macOS on it yet is exactly that
+        # state.
         warn "  the benchmark volume is not usable yet: either absent, or present"
         warn "  but not a macOS system volume (an empty one mounts fine and boots nothing)"
         log  "  it is a second macOS install, made *from* that machine, named '$(printf '%s\n' "$bootstat" | sed -n 's/^[[:space:]]*benchmark_volume=\([^(]*\)(.*/\1/p' | sed 's/ *$//')'."
@@ -552,8 +550,8 @@ _lane_cleanup() {
 }
 
 ensure_build_guest() {
-    # Both shapes, and the guard that used to be here ("guest only") was a
-    # confusion between the two guests in play. The *bench* target differs by
+    # Both shapes. A "guest only" guard here would confuse the two guests in
+    # play: the *bench* target differs by
     # shape -- a VM for the rehearsal, a volume for the real thing -- but the
     # *build* always happens in a macOS vm workspace on tolken, because that is
     # where builds belong and the benchmark install must never gain a toolchain.
@@ -587,12 +585,11 @@ phase_build() {
     # those from the guest, which is what made this look like a working build.
     # (docs/TESTING.md records the same $WK_STORE trap for the image store.)
     #
-    # Measured 2026-08-22. Two failure modes came out of it, and the second is
-    # the dangerous one: polling `wk status` straight after a detach reads the
-    # *previous* build's `ok`, so the lane reported success in seconds, staged a
-    # two-day-old build, and would have published a number for a tree nobody had
-    # just compiled -- it printed `8m1s`, the figure recorded for the build of
-    # 2026-08-20.
+    # Two failure modes, and the second is the dangerous one: polling
+    # `wk status` straight after a detach reads the *previous* build's `ok`, so
+    # the lane reports success in seconds, stages a days-old build, and
+    # publishes a number for a tree nobody just compiled -- with the previous
+    # build's duration printed beside it.
     #
     # In the foreground the exit status is the build's own, there is nothing to
     # poll and nothing stale to believe, and the output streams where it can be
@@ -641,11 +638,10 @@ phase_stage() {
     # the difference between a machine with one VM on it and a machine with a
     # spare macOS guest burning cores next to a benchmark.
     #
-    # It used to be stopped only for the guest shape, on the reasoning that the
-    # volume shape reboots and takes every host-side guest with it. That is true
-    # only if the lane reaches the reboot: this one died at the stage and left
-    # `bench-build` running for three quarters of an hour, which a person
-    # noticed and the tooling did not.
+    # Stopped for both shapes. "The volume shape reboots and takes every
+    # host-side guest with it" is true only if the lane reaches the reboot: one
+    # that dies at the stage leaves `bench-build` running for as long as it
+    # takes a person to notice, because nothing here would.
     stop_build_guest
 }
 
@@ -659,10 +655,10 @@ phase_arm() {
 # Put the machine where a person can act on it, then tell them what to do --
 # on *this* screen, which is the one they are looking at.
 #
-# The alternative, and what this used to do, was print a ritual into a terminal
-# on the machine that was about to be rebooted out from under it and then wait.
-# That asks somebody to read instructions on a screen that is going away, and to
-# remember them across a shutdown. Shutting the machine down *first* means the
+# The alternative is to print a ritual into a terminal on the machine that is
+# about to be rebooted out from under it and then wait -- which asks somebody to
+# read instructions on a screen that is going away, and to remember them across
+# a shutdown. Shutting the machine down *first* means the
 # only instruction left is which disk to pick, and it is on the driving machine
 # where it stays readable.
 #
@@ -745,10 +741,8 @@ phase_run() {
     # Nothing else may be running on the machine while it is being measured, and
     # for the guest shape that is not automatic: the build guest was started for
     # the build and the stage, and leaving it up means a second macOS VM
-    # competing for the same CPUs *during the measurement*. Found 2026-08-22 by
-    # someone looking at the screen and seeing two windows -- an earlier comment
-    # here claimed the build guest "is not left running past the collect", which
-    # was true of the intent and false of the code.
+    # competing for the same CPUs *during the measurement*. Nothing reports it;
+    # it is two windows on a screen nobody is watching.
     #
     # Not for the volume shape: there the machine reboots into the bench install,
     # so every guest on the host side is gone by construction.
@@ -773,10 +767,9 @@ phase_run() {
         # the only machine in the fleet that is both. And one quiet check cannot
         # pass in a guest regardless: `softwareupdate --schedule off` reports
         # "on" afterwards no matter what is written to AutomaticCheckEnabled.
-        # That one really is a guest quirk, recorded in
-        # docs/HANDOFF-mac-perf-mode.md and confirmed here 2026-08-22 -- it
+        # That one really is a guest quirk (docs/HANDOFF-mac-perf-mode.md): it
         # persists with Setup Assistant dismissed, so it is not a pane holding
-        # the decision open, which is what this code first assumed.
+        # the decision open.
         #
         # But --force is all-or-nothing: it forces *every* preflight failure,
         # so using it for the benign one also forces past a real one. That is
@@ -791,17 +784,17 @@ phase_run() {
         # the answer.
         # Asked through lib/quiet.sh's screen_blocker, the same function
         # `wk bench staged` uses -- not a second list of apps here. A narrower
-        # copy of this check is what let `Software Update` through after
-        # `Setup Assistant` was dismissed: the runner failed it correctly and
-        # this forced past it, because "the dangerous condition" had been
-        # spelled out in two places and only one of them was right.
+        # copy of this check is what lets `Software Update` through after
+        # `Setup Assistant` is dismissed: the runner fails it correctly and this
+        # forces past it, because "the dangerous condition" is spelled out in
+        # two places and only one of them is right.
         local front
         front=$(rbench_sh 'cd ~/wk-tools && . lib/common.sh && . lib/quiet.sh && screen_blocker' 2>/dev/null | tr -d "\r") || front="?"
         if [ -n "$front" ] && [ "$front" != "?" ]; then
             die "'$front' owns the guest's screen.
   A benchmark in a background window is throttled by the browser, so the run
-  makes no progress and times out with no error -- exit 124, measured
-  2026-08-22. --force would hide this, which is why it is checked first.
+  makes no progress and times out with no error -- exit 124. --force would hide
+  this, which is why it is checked first.
   Clear it:
     wk enter $(lane_guest) bash -lc 'sudo touch /var/db/.AppleSetupDone; sudo pkill -f \"$front.app\"'"
         elif [ "$front" = "?" ]; then

@@ -195,10 +195,10 @@ _pmos_built_at() {
         | sed -n 's/^\(....\)\(..\)\(..\)T\(..\)\(..\)\(..\)Z$/\1-\2-\3T\4:\5:\6Z/p'
 }
 
-# Import what the build host produced. The compressed image and its block map
-# come over; disk.img is made here by decompressing, because that is what the
-# store's contract is built on -- one artifact, one hash, `image_verify` and
-# every reader downstream.
+# Import what the build host produced. The compressed image comes over and
+# disk.img is made here by decompressing: one artifact, one hash, and every
+# reader downstream sees the same bytes. The compressed copy is a wire format
+# and is deleted once it is unpacked.
 pmos_import() {
     local id="$1" out dir
     out=$(pmos_out "$id"); dir=$(image_dir "$id")
@@ -210,17 +210,16 @@ pmos_import() {
 
     mkdir -p "$dir"
 
-    info "importing disk.wic.xz and its block map from $(pmos_host)"
+    info "importing disk.wic.xz from $(pmos_host)"
     _pmos_sh "cat $out/disk.wic.xz" > "$dir/disk.wic.xz" \
         || die "could not copy the image out of $(pmos_host)"
-    _pmos_sh "cat $out/disk.bmap" > "$dir/disk.bmap" \
-        || die "could not copy the block map out of $(pmos_host)"
 
     # Decompressed here rather than sent raw: the compressed file is a fraction
     # of the size over a WiFi link, and the raw image is derivable from it.
     info "decompressing (the store holds the raw image, and hashes it)"
     xz -dc "$dir/disk.wic.xz" > "$dir/disk.img" \
         || die "what came out of $(pmos_host) is not valid xz"
+    rm -f "$dir/disk.wic.xz"
 
     local result; result=$(_pmos_sh "cat $out/result") \
         || die "could not read the build's result block from $(pmos_host)"
@@ -260,8 +259,6 @@ built_by=$(hostname)
 wk_tools=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
 disk_bytes=$(file_bytes "$dir/disk.img")
 disk_sha256=$here
-wic_xz=disk.wic.xz
-bmap=disk.bmap
 EOF
     unset -f _pmos_field
 }
@@ -359,7 +356,6 @@ pmos_ensure_packages() {
         missing="$missing $1"; pkgs="$pkgs $2"
     }
     _pmos_need kpartx multipath-tools
-    _pmos_need bmaptool bmap-tools
     _pmos_need xz xz-utils
     _pmos_sh "python3 -c 'import ensurepip'" >/dev/null 2>&1 \
         || { missing="$missing python3-venv"; pkgs="$pkgs python3-venv"; }
@@ -427,9 +423,8 @@ pmos_running() {
 # A poll, not `ssh tail -f`, and both halves of that are deliberate. `tail -f`
 # has no idea when the build is over, so it needs a process to watch -- and
 # `--pid=$(pgrep ...)` with nothing to match becomes `--pid=` and then a plain
-# `tail -f` that never returns: the first version of this hung for as long as it
-# was left, on a build that had already failed, holding the image-store lock the
-# whole time. Polling ends when the rc file appears, which is the same evidence
+# `tail -f` that never returns -- hanging for as long as it is left, on a build
+# that has already failed, holding the image-store lock the whole time. Polling ends when the rc file appears, which is the same evidence
 # the exit status is read from, so the follow cannot outlive the build or end
 # before it.
 #
@@ -473,12 +468,12 @@ pmos_find_build() {
 #
 # The uplink credential is copied from the build host's own association, which
 # is what keeps the PSK off every wire and out of every log. The cost of that
-# shortcut is that the *band* comes along implicitly, and nothing used to notice
-# when it was a band the target has no radio for.
+# shortcut is that the *band* comes along implicitly, so something has to notice
+# when it is a band the target has no radio for.
 #
-# It cost an afternoon on 2026-08-21. rpi5 is dual-band and was associated with
-# the house SSID on channel 52; the PinePhone's radio is an RTL8723CS, which is
-# 802.11 b/g/n and single-band. The image was built with a perfectly valid
+# A dual-band board associated with the house SSID on channel 52 hands over a
+# 5 GHz network; the PinePhone's radio is an RTL8723CS, 802.11 b/g/n and
+# single-band. The image is then built with a perfectly valid
 # credential for a network the phone's hardware cannot see, booted, and showed
 # every neighbour's 2.4 GHz network except the one it wanted. Everything else
 # about that image was correct, which is what made it expensive: the card, the
@@ -486,9 +481,9 @@ pmos_find_build() {
 # nobody had compared.
 #
 # The question this asks is deliberately *not* "which band is the build host
-# on". The first version of this check asked that, and it was wrong within the
-# hour: the SSID gained a 2.4 GHz radio while rpi5 stayed associated on 5 GHz,
-# which is a build that works and a check that refuses it. What matters is
+# on", which goes wrong the moment the SSID gains a 2.4 GHz radio while the
+# build host stays associated on 5 GHz: a build that works and a check that
+# refuses it. What matters is
 # whether the SSID the credential names is *on the air* in a band the phone
 # supports -- so that is what gets looked at, with a scan from the machine that
 # is about to copy the credential.
@@ -642,7 +637,7 @@ pmos_build() {
     else
         pmos_spawn "$id"
         if [ -n "$detach" ]; then
-            info "building $id on $(pmos_host); this connection is no longer involved"
+            info "building $id on $(pmos_host); this connection is not involved"
             log  "  follow:  ssh $(pmos_ssh) tail -f $(pmos_log "$id")"
             log  "  finish:  wk sysimage build $profile --resume   (imports it into the store)"
             return 0

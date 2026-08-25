@@ -47,12 +47,11 @@ say() { echo "[wk-bench] $*"; }
 # access is autologin and administrative access is the sudoers rule below, so
 # there is no path that asks a human for this string -- which is why it is
 # generated here and not printed.
-# The password is loaded first and unconditionally. It used to be read only in
-# the branch that *creates* the account, so a re-run over an existing account
-# set PW="" and then skipped autologin entirely -- "autologin left alone (no
-# password on hand for an existing user)", on the machine whose whole problem
-# was that autologin had never worked. The repair run therefore repaired
-# everything except the thing it was run for.
+# The password is loaded first and unconditionally. Read only in the branch that
+# *creates* the account, a re-run over an existing account sets PW="" and skips
+# autologin entirely -- "autologin left alone (no password on hand for an
+# existing user)" -- so a repair run repairs everything except autologin, which
+# is usually the thing it was run for.
 if [ -r "$PAYLOAD/password" ]; then
     PW=$(cat "$PAYLOAD/password")
 else
@@ -132,10 +131,10 @@ if [ -n "$PW" ]; then
     # `dscl . -passwd /Users/<u> <new>` was here and it is the wrong tool for
     # this job: it is a *change* operation and wants the old password, so on any
     # re-run -- which is the normal case, this script being idempotent by design
-    # -- it fails with `DS error: eDSAuthFailed`. Measured on the real volume
-    # 2026-08-23 and again 2026-08-24. The account keeps whatever password it was
-    # created with, the login keychain drifts from it, and autologin then raises
-    # the SecurityAgent unlock panel that sat on the screen through an entire A/B.
+    # -- it fails with `DS error: eDSAuthFailed`. The account keeps whatever
+    # password it was created with, the login keychain drifts from it, and
+    # autologin raises a SecurityAgent unlock panel that can stand on the screen
+    # through an entire A/B.
     #
     # `sysadminctl -resetPasswordFor` is the administrative *reset*: as root it
     # needs no old password, which is exactly the difference that matters here.
@@ -161,8 +160,8 @@ if [ -n "$PW" ]; then
 
     # The login keychain, reset to match.
     #
-    # This is the fix for a dialog that sat on the benchmark install's screen
-    # through an entire A/B (2026-08-23): `dscl . -passwd` fails here with
+    # This is what keeps a dialog off the benchmark install's screen for a whole
+    # A/B: `dscl . -passwd` fails here with
     # `DS error: eDSAuthFailed` on a re-run -- it needs the *old* password to
     # change one, and this script does not have it -- so the account password and
     # the login keychain's password drift apart. autologin then logs the account
@@ -264,12 +263,8 @@ fi
 # the ssh alias resolved to the *host* install instead -- so every probe
 # answered for the wrong machine and looked like a network fault.
 #
-# HOW THE BINARY GETS HERE, CORRECTED 2026-08-24. The previous version of this
-# comment said there is "no darwin/arm64 tailscaled to download" and that
-# `tailscale` and `tailscaled` are therefore "cross-compiled (GOOS=darwin
-# GOARCH=arm64)" into the package. That is wrong, and it made this the one item
-# on the provisioning list that appeared to need a Go toolchain -- which is why
-# it stayed unimplemented while everything around it got done.
+# HOW THE BINARY GETS HERE. Nothing is cross-compiled and no Go toolchain is
+# involved: there is a signed macOS package, and it is what gets installed.
 #
 # What is true is narrower than the conclusion drawn from it: the *static
 # tarballs* on pkgs.tailscale.com are Linux-only (386, amd64, arm, arm64, mips…
@@ -280,13 +275,10 @@ fi
 #       RunAtLoad = true, KeepAlive = true, reached over a MachService
 #   Contents/MacOS/Tailscale                     the CLI
 #
-# It is the **macsys (standalone)** variant, and that LaunchDaemon is exactly the
-# "runs before login" property this comment used to say only a compiled
-# `tailscaled` could give us. The old note conflated it with the *App Store*
-# build -- that is the sandboxed one whose CLI needs a session, and the
-# observation about `/Applications/Tailscale.app/Contents/MacOS/Tailscale`
-# hanging over ssh was almost certainly that, or a CLI asked to talk to a daemon
-# that was not yet running.
+# It is the **macsys (standalone)** variant, and its LaunchDaemon is what gives
+# the "runs before login" property this needs. Not to be confused with the *App
+# Store* build: that one is sandboxed, its CLI needs a session, and
+# `/Applications/Tailscale.app/Contents/MacOS/Tailscale` hangs over ssh.
 #
 # So: no compiler. `installer -pkg … -target /` is a non-interactive install, and
 # the package goes into the provisioning payload like everything else.
@@ -479,14 +471,14 @@ fi
 #
 # That is what was here, and it meant this script had never once removed itself:
 # booting out the label terminates the job, which is the process running these
-# very lines, so `rm -f` below never ran. The log said "removing the first-boot
-# daemon" ten times between 2026-08-22 and 2026-08-23 while both files sat
-# untouched with their original mtimes.
+# very lines, so the `rm -f` below never runs. The log says "removing the
+# first-boot daemon" on every boot while both files sit untouched with their
+# original mtimes.
 #
-# It was not merely untidy. Every boot of the benchmark install therefore
-# re-ran provisioning, which `rsync --delete`s wk-tools back to the payload copy
-# and then reboots the machine a minute later -- so a run planted by
-# `wk bench mac-ab` had its tooling replaced under it and was cut off mid-flight.
+# Not merely untidy. Every boot of the benchmark install then re-runs
+# provisioning, which `rsync --delete`s wk-tools back to the payload copy and
+# reboots the machine a minute later -- so a run planted by `wk bench mac-ab`
+# has its tooling replaced under it and is cut off mid-flight.
 # Two whole cycles were spent on that before the cause was found. (The same
 # suicide, in the same shape, was found in bench/mac-bench-autorun.sh a few
 # hours earlier -- worth knowing that this is an easy mistake to make twice.)

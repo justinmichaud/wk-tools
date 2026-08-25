@@ -15,9 +15,9 @@
 #
 # --- scope, and why it is not a noun -----------------------------------------
 #
-# It used to be spelled by naming the thing: `--target container` for the copy of
+# Not spelled by naming the thing -- `--target container` for the copy of
 # wk-tools in the podman VM, `--tools` for the copies everywhere else, `--target
-# <machine>` for a build box, a bare `wk sync` for the store, and `--all` for
+# <machine>` for a build box, a bare `wk sync` for the store, `--all` for
 # nothing at all -- it was accepted and ignored, a no-op kept as a spelling of
 # the default. Five spellings across two axes, and the caller had to know which
 # noun held the stale copy before they could ask for it to be refreshed. That is
@@ -242,9 +242,9 @@ sync_tools() {
         ) || _bad=$((_bad + 1))
     done
     info "'wk status' compares every copy against this one"
-    # Non-zero when something did not converge. It used to exit 0 regardless,
-    # which made the warning decoration: a caller could not tell a fleet that
-    # took the tooling from one that did not, and neither could a person reading
+    # Non-zero when something did not converge. Exiting 0 regardless makes the
+    # warning decoration: a caller cannot tell a fleet that took the tooling
+    # from one that did not, and neither can a person reading
     # only the last line.
     if [ "$_bad" -ne 0 ]; then
         warn "$_bad target(s) did not take the tooling -- see above"
@@ -379,9 +379,9 @@ git -C "$MIRROR" symbolic-ref HEAD "refs/heads/$(wk_mirror_branches | awk '{prin
 # to build a snapshot and would undo the saving above.
 git -C "$MIRROR" config remote.origin.tagOpt --no-tags
 
-# Every remote, every time (wk_mirror_default_remotes). What used to be here was
-# `origin` by default and everything else behind `--all`, which meant the mirror
-# was reliably missing whichever branch somebody was about to want.
+# Every remote, every time (wk_mirror_default_remotes). `origin` by default with
+# everything else behind `--all` leaves the mirror reliably missing whichever
+# branch somebody is about to want.
 _to_fetch=$(wk_mirror_default_remotes)
 info "fetching $_to_fetch (origin: $(wk_mirror_branches))"
 
@@ -599,9 +599,9 @@ sync_workspaces ""
 
 # What the reader can do now, and nothing about how the store is laid out.
 #
-# The note that used to be here explained that a workspace stays pinned to the
-# snapshot it was created from and that "only a new workspace gets a new one" --
-# which is true of the implementation and reads as "remake the container to get
+# "A workspace stays pinned to the snapshot it was created from, and only a new
+# workspace gets a new one" is true of the implementation and reads as "remake
+# the container to get
 # current WebKit". That is exactly wrong, and it is the sentence that made a
 # person believe it: every workspace has today's upstream in it the moment this
 # command finishes. Moving onto it is a rebase, not a rebuild.

@@ -1,7 +1,6 @@
 # HANDOFF — the device lifecycle, and the words it uses
 
-The rename landed 2026-08-20 and the old spellings are refused by name. This
-file is what the words mean and what is still missing from the lifecycle they
+Old spellings are refused by name. This file is what the words mean and what is still missing from the lifecycle they
 describe. The binding repo-wide rules live in `CLAUDE.md`; the machine roster
 lives in `boot/machines/*.conf` and `wk help hardware`.
 
@@ -17,7 +16,7 @@ with its own host mode, which wk must never touch.
     3  wk provision <machine>                                       [PARTIAL]
        tailnet, keys, boot order
     ---------------------------------------------------------------------------
-    4  wk sysimage build perf-linux-<machine>                       [built]
+    4  wk sysimage build <profile>                                  [built]
     5  wk sysimage write <id> --disk <machine>:<device>             [built]
     6  wk boot <machine>            host mode -> bench mode, one shot [built]
     7  wk bench stage / staged      the run                          [upstream]
@@ -94,7 +93,7 @@ to customers runs the first. A number from one is not a number from the other,
 which is why the run has to record `kernel_arch` beside `arch`
 (the run records `kernel_arch` beside `arch`).
 
-**The layers** (decided 2026-08-20; binding for new code, per `CLAUDE.md`).
+**The layers** (binding for new code, per `CLAUDE.md`).
 Command names are minted only when a layer gains a second consumer.
 
 | word | layer | rule |

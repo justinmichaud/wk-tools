@@ -174,9 +174,9 @@ fi
 # over ssh from inside a guest will not work; push over HTTPS, or do it from
 # the host. The Linux workspaces solve this with container/proxy/ssh-proxy.py
 # and the same trick would work here, but it is not wired up yet.
-# No default for the address. 192.168.64.1 used to stand here -- Tart's stock
-# vmnet gateway -- but this repo puts guests on WK_VM_SUBNET (192.168.2.x), so
-# the fallback was an address nothing listens on. Guessing wrong here is silent
+# No default for the address. Tart's stock vmnet gateway, 192.168.64.1, is the
+# obvious one and is wrong: this repo puts guests on WK_VM_SUBNET (192.168.2.x),
+# so that fallback is an address nothing listens on. Guessing wrong here is silent
 # and expensive: the guest gets a proxy it cannot reach, every fetch times out,
 # and the failure is indistinguishable from Softnet correctly denying traffic.
 # The caller knows the real address; if it did not pass one, say so and stop.
@@ -234,10 +234,10 @@ WK_VM_DISPLAY_H="${WK_VM_DISPLAY#*x}"
 # nothing else touches it.
 sudo -n sysadminctl -screenLock off -password "$WK_VM_PASSWORD" 2>/dev/null ||     echo "warning: could not turn off the screen lock; the guest may come up locked" >&2
 
-# 4. macOS's own post-login Setup Assistant panes. Reported from the outside
-#    2026-08-20 -- "it looks stuck on Update Automatically" -- and it was not
-#    stuck: `/var/db/.AppleSetupDone` was present, auto-login had happened and
-#    the console belonged to the admin user. What was on the screen was the
+# 4. macOS's own post-login Setup Assistant panes. From the outside this reads
+#    as "stuck on Update Automatically" and is not stuck:
+#    `/var/db/.AppleSetupDone` is present, auto-login has happened and the
+#    console belongs to the admin user. What is on the screen is the
 #    *post*-login assistant (Setup Assistant.app's mbusertrampoline), which
 #    asks about automatic updates, Siri, appearance and analytics on the first
 #    login of a new install -- and every clone of the base is a new install by

@@ -132,9 +132,9 @@ site's file and therefore wins — closes both, leaving a 30-second window.
 
 The two privileged helpers are the deliberate exceptions, and their rules are
 named `zzz-wk-quiesce` and `zzz-wk-card` so that they sort after *that* file and
-survive it. They did not until 2026-08-25: `PASSWD: ALL` matches every command,
-so while they were called `wk-quiesce` and `wk-card` the blanket rule out-ranked
-them, `wk quiesce` and `wk session` prompted for a password on every call, and
+survive it. Without the `zzz-` prefix `PASSWD: ALL` matches every command and
+the blanket rule out-ranks them, so `wk quiesce` and `wk session` prompt for a
+password on every call, and
 `./setup` reported the helper missing on every run while it sat there
 installed.
 
@@ -419,7 +419,7 @@ manager, and leaves the screen dark rather than restoring it; getting a
 desktop back afterwards is `wk session gdm`, covered below, not `off` and a
 wait.
 
-"Dark" takes two things, and for a while it only did one of them.
+"Dark" takes two things, and one of them is easy to miss.
 
 Stopping the compositor and trusting the kernel's own console to blank a
 now-masterless output was the original design, and this machine's NVIDIA driver
@@ -504,18 +504,18 @@ no equivalent, so pinning it works the other way around. `wk session gdm --bmc`
 strips the GPU of the udev tags that make it a member of any seat -- the same
 tags that would come off if it were physically unplugged -- so it is on
 neither seat0 nor anywhere else, and mutter has nothing left to pick but the
-`ast`. Retagging it onto a *different* seat instead of off every seat was the
-first attempt, and the wrong one: logind creates a real seat for wherever it's
-retagged to, and gdm starts a greeter on every seat it finds, so that produced
-two live desktops -- one per chip -- instead of the one that was asked for.
+`ast`. Retagging it onto a *different* seat instead of off every seat is the
+wrong move: logind creates a real seat for wherever it's retagged to, and gdm
+starts a greeter on every seat it finds, so that produces two live desktops --
+one per chip -- instead of the one that was asked for.
 Plain `wk session gdm` hides the `ast` instead, so the desktop can't land on
 the management chip by mistake. Either way the hide is undone by
 `wk session off` or by starting any other session mode; nothing here leaves a
 device permanently missing.
 
 The hide only reaches a compositor that asks logind for its devices, and that
-caveat is load-bearing rather than theoretical. `wk session gdm --bmc` used to
-hide the GPU successfully and put the desktop on the monitor anyway: Ubuntu's
+caveat is load-bearing rather than theoretical: `wk session gdm --bmc` can hide
+the GPU successfully and put the desktop on the monitor anyway, because Ubuntu's
 `61-gdm.rules` sends this machine to `gdm_prefer_xorg` the moment it sees
 `nvidia_drm` with `modeset=Y` — the branch ends in an unconditional `GOTO`, so
 every driver version takes it — and NVIDIA's Xorg driver never opens
@@ -586,7 +586,7 @@ itself:
 > traffic is attributed to its tags rather than to the user who set it up — so a
 > grant written only as `autogroup:member → *` would not authorise anything moose
 > originates, and the path to a Pi from a workspace goes *through* moose. The live
-> tailnet already permits this (verified 2026-08-19 with
+> tailnet already permits this (checked with
 > `tailscale ping --icmp rpi5`, which is subject to ACLs, unlike a plain
 > `tailscale ping`); the note is here so a future tightening of the policy keeps
 > a tag-sourced grant such as:
@@ -650,7 +650,7 @@ Measured on the same M4, guest at 9 vCPU / 20 GB:
 |---|---|
 | `wk new --target vm` | ~1 s |
 | `wk vm start`, cold boot to ssh | ~10 s |
-| `wk build mac-release`, cold (there is no ccache here) | ~86–99 min across measured rebuilds (the 2026-08-18 base rebuild, with `--export-compile-commands` on, took 85.8 min) |
+| `wk build mac-release`, cold (there is no ccache here) | ~86–99 min across measured rebuilds; a base rebuild with `--export-compile-commands` on is at the low end |
 
 Three limits to know about:
 

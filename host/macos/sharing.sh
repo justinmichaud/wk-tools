@@ -6,8 +6,8 @@
 # macOS ships it off, so a new workstation answers nothing on port 22, and every
 # fleet verb aimed at it -- `wk status`, `wk sync --target`, the whole macOS
 # benchmark lane -- fails identically and unhelpfully. It cost this exact
-# session: tolken could not be inspected at all until it was turned on by hand,
-# 2026-08-22, which is a stage that should have existed.
+# session: without it a machine cannot be inspected at all until somebody turns
+# it on by hand.
 #
 # Why a stage of its own rather than a line in settings.sh or machine.sh:
 # settings.sh is user-level `defaults` with no sudo anywhere in it, and
@@ -34,10 +34,9 @@ _want_remote_login=1
 #
 # `systemsetup -getremotelogin` is the obvious reader and is unusable here: it
 # requires admin, answers "You need administrator access to run this tool...
-# exiting!" -- and **exits 0 while doing so**, so even the status code lies. A
-# first version of this trusted it and treated the unreadable answer as "off",
-# which would have made ./setup ask for a password on every single run of an
-# already-configured machine. That breaks this script's one contract: a second
+# exiting!" -- and **exits 0 while doing so**, so even the status code lies.
+# Trusting it and treating the unreadable answer as "off" makes ./setup ask for
+# a password on every single run of an already-configured machine. That breaks this script's one contract: a second
 # run must report no changes.
 #
 # launchctl's disabled-override table is readable by anyone and is exactly what

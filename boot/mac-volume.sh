@@ -7,12 +7,12 @@
 # authenticated user action -- System Settings' Startup Disk, or the startup
 # manager you reach by holding the power button. `bless --setBoot` is
 # superseded for this purpose (its `folder` option survives on Apple Silicon
-# only for external media). Established 2026-08-19 and recorded in
-# docs/HANDOFF-boot.md as tier 2; nothing here tries to work around it,
-# because an automation that cannot exist is worse than a documented ritual.
+# only for external media). docs/HANDOFF-boot.md records it as tier 2; nothing
+# here tries to work around it, because an automation that cannot exist is worse
+# than a documented ritual.
 #
-# Re-tested 2026-08-23 with SIP *disabled* and root, because that is the obvious
-# reason to expect a different answer: `nvram boot-volume=<other group>` exits 0
+# True with SIP *disabled* and root as well, which is the obvious reason to
+# expect a different answer: `nvram boot-volume=<other group>` exits 0
 # and changes nothing, `bless --setBoot` refuses by documentation, and
 # `systemsetup -getstartupdisk` answers "(null)". SIP is not the gate. What the
 # test did buy is that the firmware's *own* choice is readable, which is what
@@ -39,9 +39,9 @@
 # over there, and the numbers come back with `bench_host=image` on them. What a
 # person does is choose a disk twice.
 #
-# UNVERIFIED against hardware as of 2026-08-20: there is no benchmark volume on
-# this machine yet, so everything below has been exercised only in the states
-# that exist without one -- probe, status, evidence, and the refusals. What
+# TODO: UNVERIFIED against hardware. With no benchmark volume on this machine,
+# everything below is exercised only in the states that exist without one --
+# probe, status, evidence, and the refusals. What
 # needs a volume is marked where it appears.
 
 # Another arming model, next to `one-shot` (rpi5), `medium` (rpi4) and
@@ -160,10 +160,9 @@ b_evidence() {
 # Which install the firmware says it will boot next, and what that is worth.
 #
 # This is the one fact that decides whether a benchmark cycle on this machine
-# costs a person nothing or costs them one trip to the keyboard, and until
-# 2026-08-23 nothing here reported it -- so "hands-on" was stated as a property
-# of the machine when it is really a property of *which way round the default
-# currently points*.
+# costs a person nothing or costs them one trip to the keyboard, so it is
+# reported: "hands-on" is not a property of the machine, it is a property of
+# *which way round the default currently points*.
 #
 # The firmware publishes its choice as `boot-volume` in IODeviceTree:/options,
 # three colon-separated UUIDs of which only the last identifies anything on this
@@ -179,8 +178,8 @@ b_evidence() {
 #   That is a feature of the reading: it says where the *next plain reboot*
 #   goes, which is the question a lane actually asks.
 #
-#   it cannot be written. Tested 2026-08-23 in a macOS guest with SIP disabled
-#   and root: `nvram boot-volume=<other group>` exits 0 and changes nothing --
+#   it cannot be written. Even in a macOS guest with SIP disabled and root,
+#   `nvram boot-volume=<other group>` exits 0 and changes nothing --
 #   the value lands in the 7C436110-… namespace and is discarded, while
 #   IODeviceTree:/options keeps the firmware's own across a reboot.
 #   `bless --setBoot` is documented as unsupported on Apple Silicon and

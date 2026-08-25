@@ -44,10 +44,9 @@ macos_noise() {
     # Read the setting, not `softwareupdate --schedule`.
     #
     # On macOS 26 that command reports "Automatic checking for updates is turned
-    # on" with AutomaticCheckEnabled set to 0 in the very plist it describes --
-    # verified on real hardware 2026-08-22, after the same disagreement in a
-    # guest had been written off as a virtualisation quirk twice. It is not a
-    # quirk and it is not the guest: the reader is simply wrong, the same way
+    # on" with AutomaticCheckEnabled set to 0 in the very plist it describes.
+    # This is true on real hardware as well as in a guest, so it is not a
+    # virtualisation quirk: the reader is simply wrong, the same way
     # `systemsetup -getremotelogin` needs admin and exits 0 while refusing to
     # answer (host/macos/sharing.sh).
     #
@@ -88,11 +87,9 @@ macos_noise() {
     # Whether a scan can start, which is not the same question as the setting
     # above and is the one that actually decides a measurement.
     #
-    # Measured 2026-08-23, and it is the reason this check exists: the autorun
-    # wrote AutomaticCheckEnabled false, read it back as 0, and
-    # `LastSuccessfulBackgroundMSUScanDate` still advanced to 18:36:59Z --
-    # inside round 1 arm A of an A/B that ran 18:35:14 -> 18:37:00. The setting
-    # was off and the scan happened anyway. A scan is a network fetch and a
+    # This is why the check exists: with AutomaticCheckEnabled written false
+    # and read back as 0, `LastSuccessfulBackgroundMSUScanDate` still advances
+    # inside an arm. The setting is off and the scan happens anyway. A scan is a network fetch and a
     # burst of CPU in the middle of a benchmark, and no amount of reading the
     # preference would have caught it.
     #
@@ -101,7 +98,7 @@ macos_noise() {
     # on every healthy workstation and saying so there is noise.
     #
     # WHY THIS WARNS RATHER THAN FAILS, WHICH IS A DELIBERATE CHOICE AND NOT A
-    # SOFTENING. Making it fatal was the first version. It is the wrong shape for
+    # SOFTENING. Fatal is the wrong shape for
     # this lane: whether `launchctl bootout system/com.apple.softwareupdated`
     # is permitted under SIP cannot be established from host mode -- root there
     # costs a password, and the benchmark install is not running to be asked.
@@ -114,9 +111,8 @@ macos_noise() {
     # The hard check lives where the evidence is instead: bench/mac-bench-autorun.sh
     # samples the scan timestamps either side of every individual arm and marks
     # the run `scanned` if they moved, and `wk bench ab-summary` names those arms
-    # before it prints any number. A configuration reading cannot be trusted here
-    # -- that is the whole finding of 2026-08-23 -- so it does not get to be the
-    # thing that decides.
+    # before it prints any number. A configuration reading cannot be trusted
+    # here, so it does not get to be the thing that decides.
     if [ -f /etc/wk-image ]; then
         if sudo -n launchctl print system/com.apple.softwareupdated >/dev/null 2>&1; then
             warn "  scanner:    softwareupdated is LOADED -- a scan can start mid-run."
@@ -126,11 +122,7 @@ macos_noise() {
         fi
     fi
 
-    # Notifications and the screen lock -- neither of which anything in this
-    # repository measured until 2026-08-24, which is exactly why both were found
-    # by looking at the machine's screen rather than by running a check.
-    #
-    # A banner is compositor work inside the measurement and can take focus; a
+    # Notifications and the screen lock. A banner is compositor work inside the measurement and can take focus; a
     # lock is "nowhere to draw" outright. Both are invisible to
     # `screen_blocker`, which asks the window server for the frontmost
     # *application* -- a banner is not one, and neither is a lock screen.
@@ -183,18 +175,18 @@ macos_noise() {
 # or nothing. macOS puts several of these in front of a fresh install and they
 # all have the same effect: a benchmark in a background window is throttled by
 # the browser, so the run makes no progress and times out with no error at all
-# (run-benchmark exit 124, measured 2026-08-22).
+# (run-benchmark exit 124).
 #
 # Here, and not in the two places that ask, for the reason at the top of this
-# file. The first version lived in cmd/bench with a list of three apps while the
-# lane deciding whether to --force past it kept its own list of one -- so
-# `Setup Assistant` was caught and `Software Update`, which came to the front the
+# file. Split between cmd/bench and the lane that decides whether to --force
+# past it, the two lists drift -- one catches `Setup Assistant` and the other
+# misses `Software Update`, which comes to the front the
 # moment Setup Assistant was dismissed, was forced straight through. One list,
 # two callers.
 #
 # ASKED AS "WHAT IS FRONTMOST", NOT "WHAT IS RUNNING"
 #
-# The first version pattern-matched process command lines for `<app>.app` and
+# Pattern-matching process command lines for `<app>.app` would
 # was wrong in the worst direction: `softwareupdated` and `suhelperd` live
 # *inside* `Software Update.app/Contents/Resources/`, run on every healthy Mac,
 # and matched. The check failed on a machine whose screen was perfectly free --
@@ -216,13 +208,11 @@ WK_SCREEN_BLOCKERS="${WK_SCREEN_BLOCKERS:-Setup Assistant|Software Update|Instal
 # frontmost application, so `lsappinfo front` answers "Finder" while a password
 # sheet sits on top of everything.
 #
-# Found the way these things are always found -- somebody looked at the screen.
-# 2026-08-23, during an A/B on the benchmark install: `the screen is free` passed
-# on every preflight while an authentication dialog had been up for five minutes.
-# (The run survived it, and that is luck rather than reassurance: arm A scored
-# 42.176 against a 42.774 baseline, so MiniBrowser was getting focus. A panel
-# that *had* taken focus would have produced the silent exit-124 timeout this
-# whole area exists to prevent.)
+# `the screen is free` passes every preflight while an authentication dialog
+# stands in front of the machine, because the window server is asked about the
+# frontmost *application* and a sheet belongs to no application. A panel that
+# takes focus produces the silent exit-124 timeout this whole area exists to
+# prevent, and nothing in a preflight would say so.
 #
 # SecurityAgent is a reliable signal precisely because it is not a daemon: it
 # runs only while it has a panel up. The host install, idle, does not have it in

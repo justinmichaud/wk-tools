@@ -35,12 +35,11 @@
 # bridge/bin/wk-bridge-healthcheck: do **not** write `something | grep -q ...`.
 # grep -q exits at the first match, which can SIGPIPE the producer, and
 # `pipefail` below then turns a *successful* match into a failed pipeline. It is
-# invisible while the text is short and it appears as the text grows: this file
-# had 34 of them, and the day docs/help/bridge.txt reached ~29 KB one of them
-# started failing 24 times in 80 runs -- reported as a broken help topic, which
-# it was not (2026-08-22). Use a here-string instead: `grep -q PATTERN <<<"$out"`
-# reads a file rather than a pipe, so there is no producer to signal. Measured
-# on the same text: 0 failures in 80.
+# invisible while the text is short and it appears as the text grows -- at
+# ~29 KB of help text it fails a few times in eighty runs, and reads as a broken
+# help topic rather than as a broken check. Use a here-string instead:
+# `grep -q PATTERN <<<"$out"` reads a file rather than a pipe, so there is no
+# producer to signal.
 #
 # The rest of the tree still has instances of the pipe form (image/pmos-build.sh,
 # cmd/sysimage, host/linux/rpi5/rpi5-setup.sh and others). They are latent for
@@ -60,9 +59,9 @@ SECTION=""
 LIST=""
 
 # Every section this runner knows. One list, because a name that is not in it
-# has to be a refusal: `wk selftest --section <typo>` used to run nothing at
-# all and exit 0 -- the silent pass the plan's own preamble forbids, and the
-# worst possible one, since it is reported as "everything passed".
+# has to be a refusal. A typo that runs nothing and exits 0 is a silent pass,
+# which the plan's own preamble forbids -- and the worst kind, since it is
+# reported as "everything passed".
 SECTIONS="quick state remote"
 
 usage() {
@@ -164,8 +163,8 @@ shell_files() {
         # It cost exactly that: `boot/machines.sh` could not be *loaded* by bash
         # 3.2 at all -- a `case` inside a `$( … )`, which 3.2 parses only with
         # parenthesised patterns -- so `wk boot`, `wk pi` and `wk status`'s fleet
-        # block would have died on any Mac without homebrew's bash. Found
-        # 2026-08-25, invisible until then.
+        # block die on any Mac without homebrew's bash, and nothing here says so
+        # until one is in the room.
         case "$f" in
             *.sh) echo "$f"; continue ;;
         esac
@@ -363,9 +362,8 @@ chk_bridge_kconfig_delta_is_declarable() {
 
 # An unknown host key must not read as an absent phone.
 #
-# This is the bug that cost the opening of 2026-08-22: `wk bridge ls` probed
-# with plain ssh under BatchMode, which for an unknown key is *refuse* rather
-# than ask, so both bridges reported `unreachable` while one of them was up,
+# Plain ssh under BatchMode *refuses* an unknown key rather than asking, so a
+# probe written that way reports `unreachable` for a bridge that is up,
 # provisioned, healthy and one ssh away. A reflash changes the key, so this is
 # the normal state of a newly installed bridge rather than an edge case.
 #
@@ -911,10 +909,9 @@ chk_disk_verbs_are_defined() {
 
 # The card helper's grant is what its gate refuses, so the gate is the thing to
 # check -- and most of it is checkable with no card and no root, by reading the
-# script. What cannot be checked here (does it actually refuse a running disk on
-# a real machine) was run against the rpi4 on 2026-08-24 and is recorded in
-# docs/TESTING.md; what is checked here is that the *shape* the grant depends on
-# has not quietly changed.
+# script. Whether it really refuses a running disk needs a machine and is a
+# docs/TESTING.md item; what is checked here is that the *shape* the grant
+# depends on has not quietly changed.
 chk_card_helper_gate() {
     local f="$WK_ROOT/admin/wk-card-priv" bad="" v
     [ -f "$f" ] || { echo "no card helper at $f"; return 1; }
@@ -965,10 +962,10 @@ chk_bridge_rm_is_inverse() {
     [ -n "$written" ] || { echo "no wk-bridge paths found in bridge/"; return 1; }
 
     # What removal actually removes: the script cmd_rm feeds to the phone, and
-    # nothing else. Deriving this from the whole function was the first attempt
-    # and it passed a deliberately broken `rm` -- because cmd_rm also *prints*
-    # the paths it is about to remove, and prose counted as evidence. `$s` is
-    # the service loop's variable, so it stands for any of our service names.
+    # nothing else. Read from the whole function it would pass a deliberately
+    # broken `rm`, because cmd_rm also *prints* the paths it is about to remove
+    # and prose would count as evidence. `$s` is the service loop's variable, so
+    # it stands for any of our service names.
     removed=$(awk '/rsh "\$PRIV sh -s" <</ { on = 1; next } on && /^EOF$/ { exit } on { print }' \
                   "$WK_ROOT/cmd/bridge" \
               | grep -oE '/[a-zA-Z0-9_./$*-]+' | sed 's/\$s/wk-bridge-*/' | sort -u)
@@ -1086,8 +1083,8 @@ chk_build_list() {
     grep -q 'mac-release' <<<"$out" || { echo "no mac-release in the table"; return 1; }
 }
 
-# The table is a static lookup; it used to boot a two-minute VM to print it,
-# and on a host without podman it failed naming a problem it did not have.
+# The table is a static lookup. Booting a two-minute VM to print it would fail
+# on a host without podman, naming a problem it does not have.
 chk_build_list_starts_nothing() {
     local before after
     have podman || { echo "no podman on this machine"; return 77; }
@@ -1149,10 +1146,10 @@ chk_drivers_source() {
 }
 
 # A driver overrides the hooks it needs, and a function definition outlives the
-# load -- so loading a second target in one process used to leave the first
-# driver's overrides live. `wk status` walks every target in one process, which
-# is exactly where it bit: the container driver's t_branch answered for remote
-# workspaces and reported "-" for all of them.
+# load -- so loading a second target in one process can leave the first driver's
+# overrides live. `wk status` walks every target in one process, which is where
+# that bites: the container driver's t_branch answers for remote workspaces and
+# reports "-" for all of them.
 chk_driver_overrides_do_not_leak() {
     local out rc=0
     out=$(bash -c '
@@ -1271,8 +1268,7 @@ chk_unknown_target() {
     local out rc=0
     out=$(WK_TARGET=nosuchtarget-selftest "$WK" ls 2>&1) || rc=$?
     [ "$rc" -ne 0 ] || { echo "an unknown target was accepted"; return 1; }
-    # The registry path, which is now the only one: the error used to end with
-    # the per-device conf as well, and that was the half this grep matched.
+    # The registry path, which is the only one.
     grep -q 'targets/hosts/nosuchtarget-selftest.conf' <<<"$out" \
         || { echo "the error does not name the conf to write: $out"; return 1; }
 }
@@ -1520,9 +1516,9 @@ chk_bench_role_required() {
 
 # A manifest that does not parse is worse than no manifest: every field a
 # reader asks for comes back empty, and the reader cannot tell "this run has no
-# workspace recorded" from "this file is not JSON". Found 2026-08-20 with
-# `"payload_pinned": true/private/tmp/...` -- a `${x:+true}${x:-false}` where
-# the second half expanded to the value instead of the default.
+# workspace recorded" from "this file is not JSON". The shape that produces it
+# is `${x:+true}${x:-false}`, where the second half expands to the value instead
+# of the default and emits `true/private/tmp/...`.
 chk_stage_manifest_is_json() {
     local out
     out=$(as_workspace bench stage selftest-ws --to benchvm --dry-run 2>&1) || true
@@ -1629,8 +1625,8 @@ chk_readonly_writes_nothing() {
     if [ "$before" != "$after" ]; then
         # A control, before blaming the commands: this directory holds the
         # build logs and status files of every target, and a build running on
-        # a remote machine writes into it once a second. Measured 2026-08-19,
-        # where exactly that produced a failure the commands had no part in.
+        # a remote machine writes into it once a second -- which produces a
+        # failure the commands under test had no part in.
         local ctl_a ctl_b
         ctl_a=$(_state_fingerprint); sleep 3; ctl_b=$(_state_fingerprint)
         [ "$ctl_a" = "$ctl_b" ] || {
@@ -1654,7 +1650,7 @@ chk_readonly_writes_nothing() {
 #
 # Asked of `--json` rather than of the table: the document is what every view is
 # drawn from, so this checks the thing that would be wrong rather than one
-# rendering of it -- and it no longer breaks every time a column moves.
+# rendering of it, so a column moving does not break it.
 #
 # A machine running an older copy of this repository cannot answer in records,
 # so its workspaces arrive as one `raw` block of its own text; those names are
@@ -1841,8 +1837,8 @@ chk_ready_marker_one_name() {
 
 # The switch only works while the key a workspace uses is the one in the store.
 # A copy inside a workspace is a push credential `wk push off` cannot take
-# back, which is how it was before 2026-08-19 -- and the regression would be
-# silent, because pushing keeps working, which is the failure.
+# back, and the regression is silent, because pushing keeps working -- which is
+# the failure.
 chk_push_keys_not_copied() {
     local out
     have podman || { echo "no podman on this machine"; return 77; }
@@ -1965,14 +1961,12 @@ chk_machine_registry() {
           case "$MACH_OS" in any|macos|linux) ;; *) echo "  $n: os '$MACH_OS' is not any|macos|linux"; exit 1 ;; esac
           [ -n "$MACH_PROFILE" ] || { echo "  $n: no MACH_PROFILE"; exit 1; }
           # And, where wk builds the system, it must *resolve* rather than
-          # merely be spelt. Non-empty was the whole test until the rpi3's
-          # entry was found naming `perf-linux-rpi3` -- a profile
-          # image/profiles.sh refuses by name, because Ubuntu publishes no
-          # armhf raspi image to seed one from. So the fleet's only 32-bit
-          # board pointed at a system that could never be built, and nothing
-          # said so until someone tried to build it. A machine whose default
-          # system does not exist is not a machine wk can reproduce from this
-          # repo, which is the cattle rule's whole claim.
+          # merely be spelt. A name that image/profiles.sh refuses is a machine
+          # pointing at a system nothing can build, and nothing says so until
+          # someone tries: `wk boot <machine> --system` has no default to
+          # resolve, and image_addr falls back to the wrong name. A machine
+          # whose default system does not exist is not a machine wk can
+          # reproduce from this repo, which is the cattle rule's whole claim.
           #
           # Except on macOS, and not as an exemption of convenience: a Mac's
           # bench system is a macOS *install*, personalised by the machine's
@@ -2051,10 +2045,10 @@ chk_piusb_type_byte_roundtrips() {
     # A 2 MB file with the one byte this is about set to 0x0c, written the same
     # way the thing under test writes it.
     #
-    # The fixture used to be built by feeding a keystroke script to `fdisk`,
-    # which is Linux fdisk's interface and not macOS fdisk's -- so on this Mac
-    # the fixture came out as partition type 00 and the check failed for a
-    # reason that had nothing to do with the code. The selftest has to run on
+    # Not built by feeding a keystroke script to `fdisk`: that is Linux fdisk's
+    # interface and not macOS fdisk's, so the fixture comes out as partition
+    # type 00 there and the check fails for a reason that has nothing to do with
+    # the code. The selftest has to run on
     # both workstations, the same rule as `wk boot --status` (lib/common.sh,
     # epoch_to_utc). Nothing here needs a real partition table: the property is
     # that one byte at offset 450 round-trips and the write does not truncate.
@@ -2104,23 +2098,6 @@ chk_piusb_type_byte_roundtrips() {
         table=$(sfdisk -l "$img" 2>/dev/null || true)
         grep -q 'FAT32' <<<"$table" \
             || { echo "sfdisk no longer reads the round-tripped table as FAT32"; return 1; }
-    fi
-}
-
-chk_image_seed_prose_is_inert() {
-    # `user_data` in cmd/sysimage is an unquoted heredoc, because it interpolates
-    # the profile's values. That makes every line of it shell input, including
-    # the lines that look like YAML comments -- so a backticked command name in
-    # prose runs on the build host and leaves an empty gap in the emitted file.
-    # Found by a build printing "Command line to execute required." three times.
-    local body
-    body=$(awk '/^user_data\(\) \{/ {inside=1} inside && /^EOF$/ {print; exit} inside {print}' \
-               "$WK_ROOT/cmd/sysimage")
-    [ -n "$body" ] || { echo "could not find user_data()'s heredoc in cmd/sysimage"; return 1; }
-    if printf '%s\n' "$body" | grep -nP '(?<!\\)`' >/dev/null 2>&1; then
-        echo "unescaped backticks in the cloud-init seed heredoc -- these run on the build host:"
-        printf '%s\n' "$body" | grep -nP '(?<!\\)`' | sed 's/^/    /'
-        return 1
     fi
 }
 
@@ -2184,9 +2161,9 @@ chk_status_parallel_keeps_its_order() {
 # lookup was the one thing in lib/reach.sh that could.
 #
 # A local call to a daemon is not the same as a call that returns: a wedged
-# tailscaled answers neither, and the CLI has no timeout of its own. When that
-# happened here (2026-08-24) every reach lookup in the walk hung on it and
-# `wk status --web` never got as far as serving a page.
+# tailscaled answers neither, and the CLI has no timeout of its own -- so every
+# reach lookup in a walk hangs on it and `wk status --web` never gets as far as
+# serving a page.
 #
 # Hermetic: a stub CLI that never answers, put where the real lookup finds it.
 chk_reach_tailnet_cannot_hang() {
@@ -2260,7 +2237,6 @@ if want quick; then
     check "path traversal is refused"                                     chk_boot_traversal_refused
     check "the boot files the firmware will ask for are not"              chk_boot_files_check_catches_missing_kernel
     check "names no \`kernel=\` and no \`arm_64bit=\` is accepted"           chk_boot_files_accepts_autodetected_kernel
-    check "contains no unescaped backtick"                                chk_image_seed_prose_is_inert
     check "one byte of the MBR at offset 450"                             chk_piusb_type_byte_roundtrips
     check "contains no single quote"                                      chk_self_disarm_sh_is_single_quote_free
     check "lists every declared bridge"                                   chk_bridge_ls

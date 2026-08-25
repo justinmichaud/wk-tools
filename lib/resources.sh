@@ -49,7 +49,7 @@ WK_HEADLESS_RESERVE_MB="${WK_HEADLESS_RESERVE_MB:-2048}"
 # that have no reason to know about workspaces.
 # Where the headless marker lives, in one place.
 #
-# It used to be spelled three ways -- `/var/lib/wk/.headless` here,
+# Not three spellings -- `/var/lib/wk/.headless` here,
 # `$WK_STORE/.headless` in the Linux machine stage, `{{ wk_root }}/.headless` in
 # the podman VM's playbook -- and they agree only when $WK_STORE happens to be
 # /var/lib/wk. On a workstation whose store is under XDG they do not, so a

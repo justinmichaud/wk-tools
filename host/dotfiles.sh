@@ -1,8 +1,7 @@
 # Deploy host dotfiles. Shared by macOS and Linux.
 #
-# The set is deliberately tiny. Editor and terminal configuration used to live
-# here for helix, kitty and sway; helix is now installed inside workspaces and
-# the others are gone, so Zed is the only editor config the host still needs.
+# The set is deliberately tiny: helix is installed inside workspaces, and Zed is
+# the only editor config the host needs.
 #
 # Files are symlinked rather than copied so edits in the repo take effect
 # immediately and `git status` shows drift. Anything already present and not a
@@ -18,8 +17,8 @@ ensure_dir "$HOME/.ssh" 0700
 ensure_dir "$HOME/.ssh/config.d" 0700
 link_config "$WK_ROOT/dotfiles/ssh/config" "$HOME/.ssh/config.d/wk-tools"
 
-# This used to prepend the Include and leave whatever was already below it,
-# which reads as harmless: the Include is first, ssh takes the first value it
+# Prepending the Include and leaving whatever is already below it reads as
+# harmless: the Include is first, ssh takes the first value it
 # sees for each keyword, so the repo's copy already won any name the two
 # shared. The entries sharing *no* name were the problem. Nothing re-read them
 # and nothing reconciled them, so they kept resolving long after they had

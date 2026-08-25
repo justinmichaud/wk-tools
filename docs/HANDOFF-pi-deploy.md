@@ -3,8 +3,7 @@
 Both verbs are built and both have run on hardware: `wk pi deploy <ws> <machine>
 [--slot]` and `wk pi bench <machine> <plan> [--slot|--ab|--count|--timeout]`
 (`cmd/pi`), with `wk pi setup` provisioning the WebKit tree on the board.
-Speedometer 3 completed on the rpi4 on 2026-08-22 — the first browser benchmark
-this fleet has produced on a bench device.
+Speedometer 3 completes on the rpi4.
 
 ## Remaining
 

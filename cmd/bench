@@ -207,9 +207,9 @@ SOFTWARE_REASON=""
 BROWSER_ARGS=""
 
 # The synopsis, from the file's own header, so there is one copy of it. Taken
-# by *shape* rather than by line number, which is what it used to be: adding a
-# verb to the header pushed the last lines out of a fixed `sed -n 3,16p` and
-# the usage ended mid-sentence. Everything indented under the header, up to the
+# by *shape* rather than by line number: a fixed `sed -n 3,16p` drops the last
+# lines the moment a verb is added to the header, and the usage ends
+# mid-sentence. Everything indented under the header, up to the
 # first line of prose, is the synopsis; the `# ` markers go.
 usage() {
     awk 'NR < 3 { next }
@@ -330,8 +330,8 @@ else:
     # git's runtime state, and git's fsmonitor leaves a Unix domain socket at
     # `.git/fsmonitor--daemon.ipc`. Nothing can copy a socket. Staging this
     # payload onto the Mac's benchmark volume died on
-    # `rsync: mkstempsock: Invalid argument` (openrsync, 2026-08-23) and `cp -R`
-    # skips it with a warning, which is the same problem arriving quietly.
+    # `rsync: mkstempsock: Invalid argument` under openrsync, and `cp -R` skips
+    # it with a warning, which is the same problem arriving quietly.
     #
     # Dropping it also makes the snapshot deterministic: whether a socket exists
     # depended on whether a daemon had happened to start, so two seeds of the
@@ -470,8 +470,8 @@ preflight() {
     for f in "$WK_STORE"/ws/*/build.status; do
         [ -f "$f" ] || continue
         # `build_live`, not a grep for the state: a build killed with -9 leaves
-        # `state=running` behind for ever, and this check used to refuse every
-        # later benchmark because of it (lib/detach.sh).
+        # `state=running` behind for ever, which would refuse every later
+        # benchmark (lib/detach.sh).
         if build_live "$f"; then
             busy=$((busy + 1))
         fi
@@ -900,10 +900,9 @@ PYEOF
 # One path per line, and never a space-joined string: the benchmark volume is
 # named `WK Bench` by default, so every result path on it contains spaces and a
 # space-joined list cannot be split back into the paths that went into it.
-# Word-splitting one is how a clean six-run A/B produced no verdict on
-# 2026-08-23 -- `wk bench mac-ab --collect` died with
-# `FileNotFoundError: '/Volumes/WK'` while all six results sat on the volume
-# intact. Callers read this into an array and pass "${arr[@]}".
+# Word-splitting one is how a clean six-run A/B produces no verdict:
+# `wk bench mac-ab --collect` dies with `FileNotFoundError: '/Volumes/WK'`
+# while every result sits on the volume intact. Callers read this into an array and pass "${arr[@]}".
 _compare_files() {
     local spec="$1" which="$2" rewrite="${3:-1}" n=0 one f
     local IFS=,
@@ -1152,8 +1151,8 @@ staged_compare_tool() {
 # necessary and neither is negotiable. A guest cannot produce a number worth
 # keeping -- it shares a CPU with a desktop, its GPU is paravirtualised and its
 # scheduler is somebody else's -- and the bare-metal role cannot build, because
-# a benchmark install with Xcode and a checkout on it is no longer a benchmark
-# install: it is a second workstation, drifting from the first.
+# a benchmark install with Xcode and a checkout on it is not a benchmark
+# install at all: it is a second workstation, drifting from the first.
 #
 # So the build stays where builds are cheap and reproducible, and what crosses
 # the boundary is the product. Which is a *copy*, not a transfer: while this
@@ -1323,10 +1322,10 @@ cmd_stage() {
     #     libJavaScriptCore.a 2.8G   TestWebKitAPI.build 1.4G
     #     XCBuildData 856M    WebKitLegacy.build 861M   libwebrtc.build 829M
     #
-    # All of it link-time or compile-time only. The first attempt excluded
-    # `*.noindex` and `DerivedData`, which live under `WebKitBuild/DerivedData`
-    # -- a *sibling* of Release, not inside it -- so it excluded nothing at all
-    # and started sending 37 GB across the wire.
+    # All of it link-time or compile-time only. Excluding `*.noindex` and
+    # `DerivedData` excludes nothing: they live under `WebKitBuild/DerivedData`,
+    # a *sibling* of Release rather than something inside it, and 37 GB goes
+    # across the wire.
     #
     # What a machine that will never compile anything needs is the frameworks,
     # the dylibs, the XPC services and MiniBrowser.app: what the browser driver
@@ -1347,7 +1346,7 @@ cmd_stage() {
         mkdir -p "$assemble/payload"
         # --exclude .git, for the payload a caller passed by hand.
         #
-        # `wk bench seed` no longer leaves one, but `--payload <dir>` takes any
+        # `wk bench seed` leaves no `.git`, but `--payload <dir>` takes any
         # directory and a working clone is the obvious thing to point it at --
         # and a working clone can contain git's fsmonitor socket, which no copy
         # tool can reproduce. The benchmark install has no use for the history
@@ -1381,8 +1380,8 @@ EOF
         # it: a delivery is minutes of rsync and can be interrupted, and rsync
         # gives no order guarantee -- so a stage.json carried along with the
         # bulk arrives at some arbitrary moment and a half-delivered payload
-        # looks finished. Measured 2026-08-20: a killed `wk bench stage` left
-        # 13 GB in the guest with a perfectly good manifest on top of it.
+        # looks finished: a killed `wk bench stage` leaves 13 GB in the guest
+        # with a perfectly good manifest on top of it.
         mv "$assemble/stage.json" "$assemble/.stage.json.pending"
         b_bench_put "$assemble" "$dest" || die "could not deliver the payload to $machine"
         mv "$assemble/.stage.json.pending" "$assemble/stage.json"
@@ -1408,10 +1407,8 @@ EOF
 # machine has been rebooted into its benchmark install, the payload is on the
 # volume that is now `/`, and this runs it and records what it ran on.
 #
-# What was unknown until it was measured (2026-08-20, on this Mac, against a
-# `Tools/Scripts` tree copied out of a base snapshot -- all four verified, and
-# every one of them would otherwise have been discovered in bench mode
-# with the machine already rebooted):
+# What has to be measured rather than assumed, because each one is otherwise
+# discovered in bench mode with the machine already rebooted:
 #
 #   run-benchmark drives from a *partial* tree.  `Tools/Scripts` alone is
 #   enough: `--list-plans` runs to completion with no checkout root, no
@@ -1458,9 +1455,8 @@ EOF
 #   a macOS guest   /usr/bin/python3 shims to the *Xcode* python3, also 3.9.6,
 #                   with no pyobjc at all -- and neither has Homebrew's
 #
-# Measured on both, 2026-08-20. So the runner looks for one and names what it
-# found; hardcoding the path would have been right on the machine it was
-# written on and wrong on the first one it was used on.
+# So the runner looks for one and names what it found: a hardcoded path is right
+# on the machine it is written on and wrong on the next one.
 staged_python() {
     local p
     for p in "${WK_BENCH_PYTHON:-}" /usr/bin/python3 \
@@ -1698,10 +1694,9 @@ cmd_staged() {
     # in a background window is throttled by the browser itself: no error, no
     # crash, just no progress until run-benchmark gives up (exit 124).
     #
-    # Measured 2026-08-22 in a bench guest. The console check above passed
-    # (`admin is logged in at the screen`) and the run burned its entire timeout
-    # with no error. Nothing in the preflight was looking at the screen, so
-    # nothing could say why.
+    # The console check above passes (`admin is logged in at the screen`) and
+    # the run burns its entire timeout with no error. Nothing in the preflight
+    # is looking at the screen, so nothing can say why.
     #
     # The near-miss worth recording: the only failing check at the time was
     # `quiet machine`, complaining about an update schedule -- and that was a
@@ -1730,8 +1725,8 @@ cmd_staged() {
     # And the panel that is not an application. screen_blocker cannot see a modal
     # authentication sheet -- macOS draws it from SecurityAgent, which never
     # becomes the frontmost *application*, so the check above passes with a
-    # password dialog on top of everything (measured 2026-08-23, five minutes of
-    # it, through six preflights).
+    # password dialog on top of everything, through as many preflights as are
+    # asked.
     local panel; panel=$(auth_panel)
     if [ -n "$panel" ]; then
         check no "no auth panel" "$panel has a modal dialog up -- it is above the browser"
@@ -1784,10 +1779,10 @@ cmd_staged() {
     #
     # Only when it is a payload for *this* plan, and that qualification was
     # missing. A pinned payload is one benchmark's checkout -- `wk bench stage
-    # --payload` copies in whatever `wk bench seed <ws> <plan>` fetched -- but
-    # this used it for any plan the run happened to ask for. Measured
-    # 2026-08-23 in the guest rehearsal: a tree staged for jetstream2.2, run
-    # with --plan speedometer3.0, handed run-benchmark JetStream as
+    # --payload` copies in whatever `wk bench seed <ws> <plan>` fetched, so
+    # using it for any plan the run happens to ask for mismatches them: a tree
+    # staged for jetstream2.2, run with --plan speedometer3.0, hands
+    # run-benchmark JetStream as
     # `--local-copy` and died inside `patch` with "No file to patch. Skipping…"
     # and then a temp-file error, twelve lines deep in a traceback that names
     # neither the payload nor the plan.
@@ -1973,10 +1968,9 @@ case "${1:-}" in
     # another machine. cmd_stage already makes this argument for itself and this
     # is the same one: the build the macOS lane measures comes out of a macOS
     # guest, so the plan file to read the payload's origin from is in a guest
-    # too, and `wk bench seed <guest-ws> speedometer3.0` died on the target
-    # check before it could read anything. Found 2026-08-23, seeding a pinned
-    # Speedometer for the Mac's benchmark volume, which has no network to fetch
-    # it with at run time.
+    # too, and `wk bench seed <guest-ws> speedometer3.0` dies on the target
+    # check before it can read anything -- while the volume it is seeding for
+    # has no network to fetch the benchmark with at run time.
     #
     # The clone still happens here, on the workstation, which is the machine
     # that has a route to GitHub.

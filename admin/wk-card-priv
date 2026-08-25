@@ -7,10 +7,10 @@
 # handful of mounts, and none of that is available to an unprivileged user. The
 # machines that hold card readers are *workstations*, where this repo's rule is
 # that sudo prompts (CLAUDE.md) -- and a prompt cannot happen down a BatchMode
-# ssh with no terminal, which is how `wk sysimage write` reaches them. Measured
-# on rpi5, 2026-08-24: every privileged step died with "sudo: a terminal is
-# required to authenticate". So the choice was a password prompt nobody can
-# answer, a blanket NOPASSWD, or this: one path, a fixed verb list, and a device
+# ssh with no terminal, which is how `wk sysimage write` reaches them: every
+# privileged step dies with "sudo: a terminal is required to authenticate". So
+# the choice is a password prompt nobody can answer, a blanket NOPASSWD, or
+# this: one path, a fixed verb list, and a device
 # gate that cannot be argued with.
 #
 # Everything here must be safe to grant unconditionally, because granting it is
@@ -169,9 +169,9 @@ with_mount() { # [-r] <partition> <function> [args...]
     mount $ro "$p" "$m" || { rmdir "$m"; fail "could not mount $p"; }
     # The edit runs under a trap rather than a bare call, because the two ways
     # it can end both skip the line after it: `set -e` on a non-zero return, and
-    # `fail`, which exits. Either one used to leave the card mounted -- and a
-    # mounted card is one the gate refuses, so the next verb blames the disk for
-    # the previous verb's failure.
+    # `fail`, which exits. Either one would otherwise leave the card mounted --
+    # and a mounted card is one the gate refuses, so the next verb blames the
+    # disk for the previous verb's failure.
     trap 'umount "$m" 2>/dev/null || true; rmdir "$m" 2>/dev/null || true' EXIT
     rc=0; "$fn" "$m" "$@" || rc=$?
     trap - EXIT

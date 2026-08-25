@@ -119,10 +119,9 @@ build_live() { # <status-file> [log]
 # log is truncated: this is a new run, and the previous attempt's words are not
 # this one's.
 #
-# Not tidiness. Measured 2026-08-19, re-running `wk new` over a half-made
-# workspace: the waiter's first poll read the *previous* attempt's file, found
-# `state=creating` with a pid that had been killed minutes ago, and reported
-# the run it had just started as crashed -- while the new driver went on to
+# Not tidiness. Re-running `wk new` over a half-made workspace, the waiter's
+# first poll reads the *previous* attempt's file, finds `state=creating` with a
+# pid killed minutes ago, and reports the run it has just started as crashed -- while the new driver went on to
 # finish the workspace perfectly. A stale `state=failed` would have done the
 # same thing faster.
 #

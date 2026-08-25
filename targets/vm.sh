@@ -88,7 +88,6 @@ WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 # has /usr/local/bin, a non-interactive ssh has only
 # /usr/bin:/bin:/usr/sbin:/sbin. The guest therefore booted by hand and never
 # when driven from another machine -- which is every fleet verb there is.
-# Found 2026-08-22, arming benchvm over ssh from rpi5.
 case ":$PATH:" in
     *":$(dirname "$WK_SOFTNET_BIN"):"*) ;;
     *) PATH="$(dirname "$WK_SOFTNET_BIN"):$PATH"; export PATH ;;
@@ -652,10 +651,10 @@ _write_claude_config() {
 # The guest's *system* proxy, which is not the same thing as the environment
 # variables provisioning writes into ~/.zprofile.
 #
-# Measured 2026-08-18: WebKit's network process does not read
-# http_proxy/https_proxy. MiniBrowser loading https://webkit.org/ produced a
-# blank window and not one line in the host proxy log, while curl to the same
-# host from the same guest went straight through. So every egress check --
+# WebKit's network process does not read http_proxy/https_proxy: MiniBrowser
+# loading https://webkit.org/ gives a blank window and not one line in the host
+# proxy log, while curl to the same host from the same guest goes straight
+# through. So every egress check --
 # all of which used curl -- passed, while the browser the guest exists to run
 # could reach nothing at all. A blank page and a denied page look identical,
 # which is why this went unnoticed through a whole round of GPU work.
@@ -813,9 +812,8 @@ _prebuild_base() {
 
     # Detached, and polled -- NOT a foreground `ssh <long command>`.
     #
-    # This build takes over an hour and it used to run in the foreground of one
-    # ssh session, which meant any blip on that connection killed it. That is
-    # not hypothetical: the last base prebuild died at
+    # This build takes over an hour, and in the foreground of one ssh session
+    # any blip on that connection kills it: a base prebuild dies at
     # "client_loop: send disconnect: Broken pipe" with no BUILD SUCCEEDED, an
     # hour and a half in, and left a base that looked built but was not. A
     # build that dies at minute 95 is the slowest possible outcome, so the
@@ -831,7 +829,7 @@ _prebuild_base() {
     while [ -z "$rc" ]; do
         sleep 30
         # A failed poll means the connection blipped, not that the build died --
-        # keep waiting. The build itself is no longer attached to this ssh.
+        # keep waiting. The build itself is not attached to this ssh.
         rc=$(_ssh "$ip" "cat $rrc 2>/dev/null" 2>/dev/null | tr -dc '0-9')
         [ -n "$rc" ] && break
         mins=$(( ($(date +%s) - t0) / 60 ))
@@ -960,9 +958,9 @@ _vm_configured() { _vm_get "$(_vm "$1")" "$2"; }
 #
 # The exclusion is not a nicety: the caller is about to start or re-use *that*
 # guest, and counting it as competition with itself makes the check refuse
-# something that fits exactly. Measured 2026-08-20: `wk vm base --refresh` on a
-# base that was already running reported "-20480MB is unspoken for" -- the
-# guest's own allocation, subtracted twice.
+# something that fits exactly: `wk vm base --refresh` on a base that is already
+# running reports "-20480MB is unspoken for", the guest's own allocation
+# subtracted twice.
 _committed_mem_mb() {
     local skip="${1:-}" total=0 v m
     for v in $(_local_vms | jq -r '.[]|select(.State=="running")|.Name'); do
@@ -1053,10 +1051,10 @@ _base_exists() { [ "$(_vm_state "$WK_VM_BASE")" != absent ]; }
 # Existing is not the same as finished, and treating it as such is how a broken
 # base gets inherited by every workspace cloned from it.
 #
-# Measured 2026-08-20: `wk vm base` pulled 68.8 GB, cloned the guest, and then
-# refused to start it because the podman machine held the whole memory
-# envelope. The next run found a VM by that name and reported "golden base is
-# ready" in half a second -- an unprovisioned macOS image with no Xcode
+# Without it, `wk vm base` pulls 68.8 GB, clones the guest, and then refuses to
+# start it because the podman machine holds the whole memory envelope. The next
+# run finds a VM by that name and reports "golden base is ready" in half a
+# second -- an unprovisioned macOS image with no Xcode
 # licence, no checkout and no prebuild, which every `wk vm new` would have
 # copied.
 #

@@ -216,9 +216,9 @@ if is_linux; then
     # The property, not the file. `test -x` answers "is the helper installed",
     # which is not the question: a helper whose sudoers rule is out-ranked is
     # installed, executable, root-owned and useless -- `wk quiesce` prompts for a
-    # password every time. rpi5 was in exactly that state on 2026-08-25 with
-    # doctor reporting it fine, because `wk sudo setup`'s `zz-<user>-passwd`
-    # sorted after `/etc/sudoers.d/wk-quiesce` and `PASSWD: ALL` matched the
+    # password every time, with doctor reporting it fine. That happens whenever
+    # `wk sudo setup`'s `zz-<user>-passwd` sorts after the helper's own rule and
+    # `PASSWD: ALL` matches the
     # helper too. Asking the helper is what tells the two apart.
     if [ ! -x /usr/local/libexec/wk-quiesce-priv ]; then
         miss "privileged helper (wk quiesce / wk session)" \

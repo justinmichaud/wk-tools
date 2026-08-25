@@ -61,8 +61,8 @@ ALLOWED_HOSTS = {
     # machine, a service or a network nobody expects a WebKit checkout to talk
     # to. `apt-get install` from Ubuntu's own archive is not that, and neither
     # is an editor: both are ordinary things to do in a development container,
-    # and refusing them buys nothing an audit would thank us for (user's call,
-    # 2026-08-24). Signatures are apt's own, and the BLOCKED_NETS check below is
+    # and refusing them buys nothing an audit would thank us for. Signatures
+    # are apt's own, and the BLOCKED_NETS check below is
     # unchanged -- so none of these names can become a route onto the LAN or the
     # tailnet, which is the property that actually matters.
     #

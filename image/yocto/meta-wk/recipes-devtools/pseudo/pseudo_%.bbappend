@@ -70,7 +70,7 @@ SRC_URI:remove = "file://0001-configure-Prune-PIE-flags.patch \
 # first place. If that ever changes, this line has to be reconsidered before the
 # namespacing is removed.
 #
-# Unconditional, and it was `:class-native` until 2026-08-21. pseudo is built
+# Unconditional rather than `:class-native`. pseudo is built
 # once per variant, and the variant that matters here was the one nobody had
 # reached yet: `--stage image` builds **pseudo-native**, `populate_sdk` builds
 # **nativesdk-pseudo**, and a `:class-native` override does not touch the

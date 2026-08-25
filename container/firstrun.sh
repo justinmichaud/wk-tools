@@ -177,8 +177,8 @@ fi
 #
 # Wrapped so a failure here cannot cost the workspace anything that matters.
 # An editor is a convenience; the lldb config and the shell rc set up below are
-# not, and `set -e` used to throw both away because a helix tarball did not
-# unpack the way this expected.
+# not, and under `set -e` a helix tarball that does not unpack the way this
+# expects throws both away.
 _install_helix() {
     local ver=25.07 arch hxarch tmp
     arch=$(uname -m)
@@ -230,9 +230,9 @@ fi
 # `cd` moves the working directory of every `ssh <ws> <command>`, every rsync
 # and every file transfer -- which is a relative path landing in the checkout
 # instead of the home directory. It cost a debugging round when Zed uploaded its
-# server to `~/.zed_server/...` and sftp resolved that against /src/WebKit
-# (2026-08-24; `wk zed` now asks sshd for internal-sftp, which runs no shell at
-# all, and this guard is the other half of the same fix).
+# server to `~/.zed_server/...` and sftp resolves that against /src/WebKit.
+# (`wk zed` asks sshd for internal-sftp, which runs no shell at all, and this
+# guard is the other half of the same fix.)
 grep -qF 'wk-tools/shell/bashrc' "$HOME/.bashrc" 2>/dev/null || \
     printf '\n. %s/shell/bashrc\nexport PATH="%s:$HOME/.local/bin:$PATH"\ncase $- in *i*) cd %s ;; esac\n' \
         "$WK_TOOLS" "$WK_TOOLS" "$SRC" >> "$HOME/.bashrc"

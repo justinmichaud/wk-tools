@@ -1,8 +1,7 @@
 where a system image comes from, and how it reaches a card
 
 wk help images -- a bench system is bytes a workspace produced. It is not an
-artifact this repository stores, catalogues or imports, and that is a decision
-rather than an omission (2026-08-24).
+artifact this repository catalogues or imports.
 
 THE MODEL
 
@@ -16,52 +15,101 @@ THE MODEL
   fact in wk is answered: read it now, from the thing itself. Nothing is written
   down that could disagree with it later.
 
-  Writing a card streams those bytes to the machine holding the reader, and then
-  edits the card in place. Nothing is copied into a store on the way, nothing is
-  hashed into a catalogue, and no step "publishes" anything.
+  Writing a card streams those bytes to the machine holding the reader. Nothing
+  is copied into a store on the way, nothing is hashed into a catalogue, and no
+  step "publishes" anything.
 
-WHY NOT A STORE
+WHAT BUILDS ONE
 
-  An image store buys a name for something that already has one -- the workspace
-  that built it -- and charges for it: a copy of every image, a manifest that is
-  a second statement of what the image is, an import step that can half-finish,
-  rubble to clean up when it does, and a compressed copy plus a block map that
-  have to be re-derived whenever anything edits the image. Every one of those is
-  a fact kept in two places, which is the shape docs/HANDOFF-workspace-state.md
-  exists to refuse.
+  Four builders, and a profile names the one that makes it (IMG_BUILDER,
+  image/profiles.sh). There is no default: a profile that names no builder is
+  refused.
+
+    yocto      bitbake, in a container workspace. The perf systems for every
+               Pi in the fleet.
+    buildroot  a pinned buildroot tree, in a container workspace. The WPE
+               release configurations.  TODO: the builder is not written; the
+               refusal says what is owed.
+    pmos       pmbootstrap, on a Linux aarch64 machine over ssh. The phones,
+               which are bridges rather than machines.
+    fetch      downloaded and pinned by content, not built here at all. One
+               image: the PinePhone's service image, which is what turns the
+               phone's internal storage into a disk this repo can write.
+
+  A perf system is one of those, or it is macOS. Every builder produces its
+  image where it builds it, which is what makes "the image lives where the
+  builder left it" a rule with no exception.
+
+  What a *board* needs in order to be measured belongs to the profile that is
+  measured on it, not to the mechanism that built it: `config.txt.append` in the
+  profile's spec directory carries firmware settings, and `wk sysimage build`
+  applies them for any builder. The rpi4's clock pinning is the example that
+  matters -- a Pi 4 idles at 600 MHz and ramps on demand, so a run that starts
+  cold spends its first samples on a CPU that is still climbing, and DVFS
+  ramping inside a measurement is variance that has nothing to do with the code
+  under test.
+
+  TODO: moose has no bench system. It gets one as a Yocto layer of this
+  repository's own -- docs/Urgent/HANDOFF-moose-bench.md is the work list.
+
+WHY THE IMAGE STAYS WHERE IT WAS BUILT
+
+  A second copy under a catalogue id buys a name for something that already has
+  one -- the workspace that built it -- and charges for it: a copy of every
+  image, a manifest that is a second statement of what the image is, an import
+  step that can half-finish, and rubble to clean up when it does. Every one of
+  those is a fact kept in two places, which is the shape
+  docs/HANDOFF-workspace-state.md exists to refuse.
 
   It also puts credentials in the wrong place. The fleet integration writes a
-  driving ssh key and (now) a tailnet auth key; done at import, those live inside
-  a stored artifact that gets compressed, copied between machines and kept after
-  it is superseded. Done on the card, they exist on exactly one disk, for one
-  boot in the auth key's case.
+  driving ssh key, and the tailnet auth key reaches the card; inside a stored
+  artifact those get compressed, copied between machines, and kept after the
+  artifact is superseded. The auth key in particular exists for one boot and is
+  spent by the join, so it belongs on the disk that is about to boot and
+  nowhere else.
 
   This does not overturn the artifact-store carve-out in CLAUDE.md. A downloaded
-  distro base keyed by its checksum, ccache, sstate, buildroot's dl -- those are
-  re-fetchable or re-derivable inputs, and keeping them is what makes a rebuild
-  cheap. A *built image* is an output, and its home is the workspace that built
-  it until it is on a card.
+  base keyed by its checksum, ccache, sstate, buildroot's dl -- those are
+  re-fetchable or re-derivable *inputs*, and keeping them is what makes a
+  rebuild cheap. A built image is an output, and its home is the workspace that
+  built it until it is on a card.
 
-WHAT IDENTITY MEANS WITHOUT A STORE
+  TODO: `$WK_STORE/images/<id>/` with its `disk.img` and manifest is still
+  there, and so are the verbs that read it -- `wk sysimage ls|show|rm|retarget`,
+  `image_verify`, `image_latest`, `image_ids`, `image_complete`, and the yocto
+  import that fills it. docs/TESTING.md, "no image store", is the work list.
 
-  A board still has to be able to say what it is running -- `b_probe` reads
-  `/etc/wk-image` and every verb here depends on it. Without a store there is no
-  catalogue id to write there, so the marker is written *at write time* from what
-  is actually being written: the profile, the workspace, the build time, and the
-  sha256 of the bytes as they go past. That is a stronger identity than a store
-  id, because it names the content rather than the slot in a catalogue, and it
-  costs nothing -- the writer is already reading every byte.
+WHAT IDENTITY MEANS
 
-WHERE THE WORK HAPPENS, AND WHY THE DRIVING MACHINE NEEDS NO TOOLS
+  A board has to be able to say what it is running: `b_probe` reads
+  `/etc/wk-image` and every verb here depends on it. That marker is the only
+  record of what an image is, and it lives *inside the image*, written by the
+  build from the profile, the workspace, the build time and the sha256 of the
+  bytes. It names content rather than a slot in a catalogue, and it costs
+  nothing -- the writer is already reading every byte.
 
-  Every edit an image needs -- the identity marker, the driving ssh key, a unique
-  disk identity, the root retarget, the kernel command line, the tailnet key and
-  name -- is offset-addressed work with `sfdisk`, `debugfs` and `mtools`. Those
-  are Linux tools, and this fleet is driven from a Mac as often as not.
+  Everything else about an image is either in that marker, derivable from
+  `profile` plus this repository, or recomputable from the bytes. So there is
+  nothing a manifest beside the image could say that is not already answerable,
+  and anything it did say could only ever disagree.
 
-  So they run where the card is. The machine holding the reader has them (checked
-  2026-08-24 on the rpi5: sfdisk, debugfs, mcopy, bmaptool, e2fsck, zstd, xz),
-  it is the machine that must be reachable for the write to happen at all, and
-  editing the card rather than the image means the edits apply to the thing that
-  will actually boot. A macOS driver needs none of it; a workspace's container
-  produces the bytes and the reader consumes them.
+WHERE THE WORK HAPPENS
+
+  An image needs edits before it can be driven: the identity marker, the driving
+  ssh key, a unique disk identity, a portable root reference, the kernel command
+  line and the firmware settings. All of it is offset-addressed work with
+  `sfdisk`, `debugfs` and `mtools` -- Linux tools, and this fleet is driven from
+  a Mac as often as not.
+
+  They run where the image is, in the workspace that built it. Every workspace
+  container mounts this repository read-only at /opt/wk-tools, so the tooling is
+  already there, and editing the image rather than the card means one edited
+  artifact however many cards are written from it.
+
+  What is genuinely per-card is done to the card and nowhere else: a unique disk
+  identity, so two cards written from one image cannot be confused for each
+  other, and the tailnet auth key, which is spent on first boot.
+
+  TODO: the edits run on the driving machine today, against a copy pulled out of
+  the workspace by the yocto import. Moving them into the workspace is the same
+  work item as removing the store.

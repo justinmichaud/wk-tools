@@ -38,9 +38,9 @@ ONE CONF, IN THE REPOSITORY
   Adding a machine is an edit and a commit; `wk remote setup <name>` writes the
   file for you. There is no per-device half. There was one --
   ~/.config/wk/targets/<name>.conf, overriding the registry line by line -- and
-  it went on 2026-08-25: a machine configured on one device did not exist on the
-  others, a reinstall lost every target, and the files left on this workstation
-  had drifted to pure comments while `wk doctor` still listed them as state to
+  and it is gone: a machine configured on one device did not exist on the
+  others, a reinstall lost every target, and such files drift to pure comments
+  while `wk doctor` still lists them as state to
   back up. Everything in a conf is a fact about the machine, the addressing in
   it is accepted as published, and a second copy of a fact is a bug even while
   it is still equal.
@@ -114,8 +114,8 @@ ANOTHER WORKSTATION
 
   A peer is asked and not driven. `wk status` and `wk ls` here delegate to that
   machine's own wk and report what it says -- which is the entire reason peers
-  exist, since a target list used to be machine-local and neither workstation
-  could say a word about the other. Nothing is pushed to it (it keeps its own
+  exist -- a machine-local target list leaves neither workstation able to say a
+  word about the other. Nothing is pushed to it (it keeps its own
   checkout, under git), and `wk new --target <peer>` and `wk rm --target <peer>`
   are refused, naming the machine to run them on.
 

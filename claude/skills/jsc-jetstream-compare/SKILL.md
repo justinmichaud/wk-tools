@@ -722,9 +722,6 @@ name in there. The host drives it with `wk build <ws> …`, reads progress with 
 `wk logs <ws>`, and nothing on the host reaches into the workspace's filesystem — so write results
 where the run can read them back, not where the host expects to find them.
 
-(The `wkdev-enter` containers this section used to describe, and their mapped `~/Development/32`
-prefix, are gone.)
-
 ### Browser runs on Linux: find the Wayland display (wkdev container)
 
 A browser round on Linux (MiniBrowser GTK, Chrome) needs a live display, and inside a wkdev

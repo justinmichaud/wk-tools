@@ -1,22 +1,10 @@
 # Writing an image onto a disk that is attached to a machine.
 #
-# The vocabulary, because the old one actively misled
-# ---------------------------------------------------
-# This used to be two commands, `wk image flash <machine>` and `wk pi flash
-# <machine> --device`, and both names were wrong in the same way:
+# The vocabulary
+# --------------
+# One verb, and it says what it does to what:
 #
-#   "flash <machine>" reads as *reflash that machine* -- replace its OS, lose
-#   what is on it. That is not what happens and never was. The machine's own
-#   system disk is refused outright; what gets written is a removable disk that
-#   happens to be plugged into it.
-#
-#   "flash" also implies permanence, and there is none. A machine boots one of
-#   these disks *once*, by a firmware one-shot, and returns to host mode by
-#   itself (`wk boot`).
-#
-# So there is one verb, and it says what it does to what:
-#
-#   wk sysimage write <id> --disk <machine>:<device>
+#   wk sysimage write <image> --disk <machine>:<device>
 #
 # `<machine>:<device>` rather than a bare machine, because the containment is
 # the thing people get wrong: the disk is *at* the machine, the machine is not
@@ -33,13 +21,12 @@
 #
 # Where the work happens
 # ----------------------
-# On the machine, over ssh, and through one privileged helper --
-# `admin/wk-card-priv`, invoked as `sudo -n`. Not "where sudo is passwordless",
-# which is what this said and was never true of a workstation: sudo there wants
-# a password and a terminal, and there is no terminal down a BatchMode ssh.
-# There is deliberately no second, inline-sudo way in. The workstation this runs
-# *from* still has no privileged component ("no root, and no firewall"), and the
-# disk is over there anyway. This end decides and reports.
+# On the machine, over ssh, through one privileged helper -- `admin/wk-card-priv`,
+# invoked as `sudo -n`. sudo on a workstation wants a password and a terminal,
+# and a BatchMode ssh has no terminal to offer one on, so the helper is the only
+# way privilege is reached here: there is no inline-sudo path beside it. The
+# workstation this runs *from* has no privileged component ("no root, and no
+# firewall"), and the disk is over there anyway. This end decides and reports.
 #
 # Requires machine_load() to have run, so MACH_SSH/MACH_ROOT/MACH_DEVICE are set.
 
@@ -136,11 +123,10 @@ EOF
 # May this device be written? Asked of the helper, which is the machine that
 # will do the writing and the only implementation of the rule.
 #
-# It used to be a second copy of the same checks, here -- whole disk, removable
-# or usb/mmc, not the machine's own root. Two implementations of "is this safe"
-# is one that can drift into permitting what the other refuses, and the one that
-# matters is the one holding the privilege. So this asks, and adds the single
-# question the helper cannot answer: does the image fit.
+# One implementation, and it is the one holding the privilege: a second copy of
+# "is this safe" is a copy that can drift into permitting what the other
+# refuses. So this asks, and adds the single question the helper cannot answer:
+# does the image fit.
 disk_refuse_unless_safe() {
     local dev="$1" bytes="$2" out dev_bytes size
 
@@ -176,19 +162,14 @@ disk_unmount() {
 $(m_ssh "lsblk -lno NAME,MOUNTPOINT $(sh_quote "$dev")" 2>/dev/null | awk 'NF > 1 { print "    /dev/" $1 " at " $2 }')"
 }
 
-# There is one way to put an image on a card, and that is the point.
+# One way to put an image on a card, and that is the point: a second writer is a
+# second code path that can only be tested with hardware in hand, for one
+# behaviour -- and the one that runs least often is the one that runs on the day
+# something is already wrong.
 #
-# There used to be two: a bmaptool path that sent the compressed image plus a
-# block map and wrote only the mapped blocks, and a dd path for machines without
-# bmaptool. Two writers is two code paths that can only be tested with hardware
-# in hand, for one behaviour -- and the fast one existed to consume `disk.wic.xz`
-# and `disk.bmap`, which were *store* artifacts. With no store there is nothing
-# to feed it (wk help images), so it went with the store rather than being kept
-# as a second thing to keep working. What is left streams the image through the
-# privileged helper, which is also the only route to a raw device here.
-#
-# If a write ever becomes too slow to bear, the answer is to make the one path
-# faster, not to add a second one back.
+# The image streams through the privileged helper, which is also the only route
+# to a raw device here. If a write becomes too slow to bear, make this path
+# faster.
 
 disk_write_stream() { # <device>   -- image bytes on stdin
     local dev="$1" remote_zstd=no
@@ -214,22 +195,14 @@ disk_write_dd() {
     disk_write_stream "$dev" < "$img"
 }
 
-# Read back what was written and compare hashes.
-#
-# Only valid after a dd write, and the reason is worth stating carefully now
-# that disk_write_bmap zeros first.
-#
-# It used to be that a bmap write left the unmapped regions holding whatever
-# they held before, so comparing the whole span compared bytes nobody wrote.
-# That is what the zeroing fixed. What has not changed is that bmaptool's
-# checksums cover only the blocks it writes -- a strictly weaker claim than a
-# read-back, not a stronger one, and believing otherwise is what let a corrupt
-# card through on 2026-08-22. A read-back over the bmap path is now meaningful
-# whenever the image's unmapped regions really are holes; that is true of every
-# image refresh_fast_path re-derived, and not guaranteed of a map bitbake wrote
-# from free-space data, so it is not switched on here blindly.
 # Read the card back and compare it with what was sent. The read needs
 # privilege, so it is a verb rather than a second way in.
+#
+# Unconditional, over the whole span: every byte of the image was sent, so
+# comparing every byte is a claim about the disk rather than about the writer.
+# A checksum computed by whatever did the writing is a strictly weaker claim --
+# it says the bytes it chose to write arrived, and says nothing about the ones
+# it skipped.
 disk_verify_dd() {
     local img="$1" dev="$2" bytes local_sha remote_sha
     bytes=$(file_bytes "$img")

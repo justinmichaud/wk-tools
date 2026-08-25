@@ -6,8 +6,8 @@
 # other people's machines. Some of them will hand you sudo and it still does
 # not matter -- a tool that installs packages, edits /etc or changes a login
 # shell on a box six other people are logged into is a tool that gets banned,
-# and then the sandbox story has a hole in it where the build machine used to
-# be. So: everything lives under $HOME, every prerequisite is checked rather
+# and then the sandbox story has a hole in it where the build machine belongs.
+# So: everything lives under $HOME, every prerequisite is checked rather
 # than installed, and anything missing is reported instead of fixed.
 #
 # What it leaves behind:
@@ -72,9 +72,9 @@ target=$TARGET
 root=$ROOT
 EOF
 
-# No second conf beside the marker. There used to be one -- restating
-# WK_TARGET_KIND, WK_REMOTE_LOCAL and WK_REMOTE_ROOT, all three of which the
-# marker above already says -- and the remote driver now computes them from it
+# No second conf beside the marker. One would restate WK_TARGET_KIND,
+# WK_REMOTE_LOCAL and WK_REMOTE_ROOT, all three of which the marker above
+# already says, and the remote driver computes them from it
 # (targets/remote.sh, "am I the machine this target names?"). The registry conf
 # in the repository is the only place a target is configured, and it is here
 # already: this whole tree is rsynced onto the machine.

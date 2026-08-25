@@ -293,9 +293,9 @@ if [ -n "$ZSH_VERSION" ]; then
   # this Mac helix is absent, section 6 below falls through to `vim`, and zsh
   # therefore came up in *viins*, where ^A and ^E are `self-insert`: they type a
   # character instead of moving to the start or end of the line. The same rc on
-  # a machine with helix gives emacs bindings, so the two behaved differently
-  # for a reason nothing on screen mentioned (found 2026-08-25 in Zed's
-  # terminal: `bindkey -lL main` answered `bindkey -A viins main`).
+  # a machine with helix gives emacs bindings, so the two behave differently for
+  # a reason nothing on screen mentions (in Zed's terminal `bindkey -lL main`
+  # answers `bindkey -A viins main`).
   #
   # So it is stated. WK_ZSH_VI=1 for anyone who wants the other one.
   if [ -z "${WK_ZSH_VI:-}" ]; then bindkey -e; else bindkey -v; fi

@@ -29,9 +29,11 @@ https://github.com/justinmichaud/webkit-container-sdk/tree/dev/cross-builds-oc
   <profile> --stage webkit` against the target's own yocto SDK — and `wk pi
   deploy` is the transfer helper this file asked for. The case only the sysroot
   flow can serve is a target with no SDK of its own, riscv64 above all.
-- **The test target, still never attempted**: the rpi5's `perf-linux-rpi5`
-  bench system — a slim distro with no SDK, which is exactly the condition a
-  sysroot cross build has to satisfy — with a GTK MiniBrowser as the payload.
+- **The test target, still never attempted**: a slim system with no SDK of its
+  own, which is exactly the condition a sysroot cross build has to satisfy, with
+  a GTK MiniBrowser as the payload. Every system this repo builds for a Pi is a
+  yocto or buildroot one that *has* an SDK, so picking the target is part of
+  this work rather than a given.
   Build the system and the sysroot from the *same tree* and the ABI question
   answers itself.
 - **Debugging and perf-testing a cross-built binary** are both untried, and

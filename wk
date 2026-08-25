@@ -239,9 +239,9 @@ resolve_target() {
     # registry when it has one, and otherwise whichever target's own store on
     # this machine holds a workspace of that name. The fallback matters here
     # more than anywhere: a `wk new` that died before registering leaves a
-    # workspace on a build box, and this used to answer `container`, forward
-    # the command into the podman VM and have it report "no such workspace"
-    # about a checkout that exists.
+    # workspace on a build box. Answering `container` there forwards the
+    # command into the podman VM, which reports "no such workspace" about a
+    # checkout that exists.
     #
     # Still a file test per configured target and nothing else -- no ssh, and
     # nothing started, which is what this function has to remain.
@@ -271,8 +271,7 @@ is_targetless() {
     # to a Linux VM that has never heard of the guest: on this Mac it started
     # the podman machine and then failed to find `bench-build`, so the payload
     # was silently not pinned and the run fell back to cloning Speedometer over
-    # the network *during the measurement*. Found 2026-08-23, staging for
-    # `wk bench mac-ab`.
+    # the network *during the measurement*.
     #
     # `ws_target` is safe to ask here: it is a file test per configured target
     # and starts nothing (lib/target.sh).
@@ -333,9 +332,8 @@ is_targetless() {
         # `ab-summary` reads result files sitting on a volume attached to *this*
         # machine. Forwarded, the first asked a Linux guest to ssh to tolken and
         # the second looked for `/Volumes/WK Bench - Data/...` in a guest that
-        # has never seen it -- and on the Mac, which has no podman at all, both
-        # died on "podman is required" before printing anything. Found
-        # 2026-08-23 running `wk bench ab-summary` on tolken.
+        # has never seen it -- and on a Mac, which has no podman at all, both
+        # die on "podman is required" before printing anything.
         "bench mac"|"bench mac-volume"|"bench mac-ab"|"bench ab-summary") return 0 ;;
     esac
     return 1
@@ -696,9 +694,8 @@ bare_report() {
     # and what decides the column widths from the whole listing rather than from
     # whichever half a group came from.
     #
-    # It also means the halves no longer have to agree between themselves about
-    # who printed what: they cannot, being two processes, and the flag they used
-    # to pass for it is gone.
+    # It also means the halves never have to agree between themselves about who
+    # printed what -- they cannot, being two processes.
     if [ "$cmd" = status ]; then
         _recs=$(mktemp)
         # The view the person asked for. Parsed here as well as in cmd/status
@@ -830,14 +827,14 @@ forward_to_vm() {
     _cmd="WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }${WK_EXPECT_TREE:+WK_EXPECT_TREE=$(sh_quote "${WK_EXPECT_TREE:-}") }${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }${WK_HOST_SELF:+WK_HOST_SELF=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
 
     # A terminal does not survive `podman machine ssh`: it runs ssh without
-    # asking for a pty, so the far side sees no tty at all. Measured 2026-08-25
-    # -- `host: TTY` out here, `VM: NOTTY` one hop in.
+    # asking for a pty, so the far side sees no tty at all: `host: TTY` out
+    # here, `VM: NOTTY` one hop in.
     #
     # Everything forwarded that needs to *ask* something is unanswerable as a
     # result. `wk rm <container workspace>` warned that it held 154,339 modified
     # files, asked for confirmation, found no terminal, and declined with advice
     # -- "re-run interactively" -- that could not be followed, because the
-    # person had been interactive the whole time. The destructive command was
+    # person was interactive the whole time. The destructive command is
     # the one this hit, which is the worst place for it.
     #
     # So when this end really is a terminal, the hop is made with ssh directly
@@ -881,9 +878,8 @@ main() {
         # Advertised in the help but implemented by the top-level script, so it
         # has no cmd/ file for the dispatch below to find.
         setup) exec "$WK_ROOT/setup" "$@" ;;
-        # Renamed 2026-08-20 (docs/HANDOFF-vocabulary.md): a bootable artifact
-        # is a *system*, never bare "image" -- the old word also meant three
-        # other things. One spelling, so the old one points rather than works.
+        # A bootable artifact is a *system*, never bare "image", which means
+        # three other things here. One spelling, and this name points at it.
         image) die "'wk image' is renamed: wk sysimage" ;;
     esac
 
@@ -987,10 +983,9 @@ main() {
             # container over `podman exec` (container/ssh-transport.sh) because
             # a container has no network interface to reach it by.
             #
-            # Forwarded whole, which is what this used to do, it looked for
-            # /Applications/Zed.app inside a Linux VM and reported "zed is not
-            # installed" about a Mac that has it. Measured 2026-08-19; the
-            # refusal that replaced it is gone now that there is a route.
+            # Forwarded whole it would look for /Applications/Zed.app inside a
+            # Linux VM and report "zed is not installed" about a Mac that has
+            # it.
             case " $* " in
                 *" --zed "*)
                     _zargs=(); _zname=""

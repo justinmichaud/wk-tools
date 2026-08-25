@@ -224,8 +224,8 @@ cmd_status() {
             # sitting on its base image: the resilient helper it falls back to,
             # whose job is to be reachable and to let another system be written
             # and recovered -- never to be measured. Nothing is wrong here, and
-            # saying "bench mode" about it (which this did until 2026-08-24) is
-            # what let a benchmark run against it.
+            # saying "bench mode" about it is what lets a benchmark run against
+            # it.
             log "$MACHINE: base image -- system ${MODE#base } on $MACH_ROOT (booted $BOOTED)"
             log "  this is the fallback helper, not a bench system. To measure something,"
             log "  arm a system on $MACH_DEVICE:  wk boot $MACHINE --system <id>"
@@ -343,15 +343,14 @@ cmd_arm() {
             # state to arm *from*, not a failure. A stopped guest is what the
             # rehearsal looks like between runs, and refusing here made
             # `wk boot benchvm` impossible in exactly the state it exists for --
-            # the guest had to already be running to be told to start.
-            # Found 2026-08-22, driving the lane against benchvm.
+            # the guest would have to already be running to be told to start.
             [ "${BOOT_ARMING:-}" = guest ] || die "$MACHINE is not reachable over ssh in host mode.
     Arming is an ssh command, so there is nothing to arm from here." ;;
         bench*) die "$MACHINE is already in bench mode (system ${MODE#bench }).
     'wk boot $MACHINE --back' returns it first." ;;
         # `base*` is deliberately not refused here: a board on its base image is
-        # the normal state to arm *from*, and it used to match `bench*` -- so
-        # arming an unarmed board was refused with "already in bench mode".
+        # the normal state to arm *from*, and matching it against `bench*`
+        # refuses an unarmed board with "already in bench mode".
     esac
 
     # What "the system" is depends on the arming model, and for one machine it
@@ -369,7 +368,7 @@ cmd_arm() {
     # Sent down the store path it died on `no system built for benchvm yet --
     # 'wk sysimage build perf-macos-benchvm'`, advising a command that cannot
     # exist for this machine. Its identity is the guest's name, which is what
-    # `wk vm ls` shows and what b_arm starts. Found 2026-08-22.
+    # `wk vm ls` shows and what b_arm starts.
     guest)
         [ -n "$IMAGE" ] || IMAGE="${MACH_GUEST:-}"
         [ -n "$IMAGE" ] || die "$MACHINE has no guest configured (MACH_GUEST)" ;;
@@ -455,8 +454,8 @@ EOF
     # Falling through here did exactly that -- `guest` matched neither the
     # one-shot nor the medium branch, so b_arm was never called at all and the
     # only thing that ran was the reboot, which stopped the guest that was
-    # supposed to be starting. `wk boot benchvm` reported success, rc=0, having
-    # done the precise opposite of arming. Found 2026-08-22.
+    # supposed to be starting -- `wk boot benchvm` reports success, rc=0, having
+    # done the precise opposite of arming.
     #
     # No record_write: unlike every other model, arming here is not an intent
     # that has to survive until a reboot -- it is the state change itself, and

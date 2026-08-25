@@ -6,7 +6,7 @@
 # stanza says and with the defaults for the rest. The defaults are `ask` and no
 # timeout, which is a fleet listing that stops dead on a question about the
 # gateway -- the same failure the bridge stanzas at the bottom of this file
-# carry the long version of, seen there first (2026-08-24).
+# carry the long version of.
 #
 # accept-new, for the reason `wk bridge ls` gives: it accepts a key never seen
 # before and still refuses one that has *moved*, and the refusal is the half
@@ -113,8 +113,7 @@ Host tolken
 # Same reasoning as the Pi bench images logging in as `root` rather than as
 # anybody: an impersonal account is the point, and macOS just has no usable
 # root login to be the impersonal one.
-# HostName is deliberately NOT `tolken`, and this is the correction to an error
-# that cost most of an evening on 2026-08-22.
+# HostName is deliberately NOT `tolken`.
 #
 # `tolken` resolves through MagicDNS to the tailnet address of the *host*
 # install. The bench install is a different operating system with its own
@@ -147,8 +146,8 @@ Host tolken-bench
 # alternative spelling.
 #
 # Reached through the tailnet bridge, at the address that bridge reserves for
-# it -- not by mDNS on the house LAN, which is what this said until
-# 2026-08-22. The board sits on the cable behind `tailnet-bridge-generic`
+# it -- not by mDNS on the house LAN. The board sits on the cable behind
+# `tailnet-bridge-generic`
 # (that segment is the reason that bridge exists), so `raspberrypi4-64.local`
 # resolves nowhere from here: the phone is the only thing on the board's L2,
 # and mDNS does not cross it. The board looked simply absent -- `wk boot rpi4
@@ -284,9 +283,9 @@ Host moosebmc
 # BatchMode=yes -o ConnectTimeout=4 rpi4-test` builds the hop as `ssh -l user
 # -p 22 -W '[10.99.1.10]:22' tailnet-bridge-generic` and passes nothing else,
 # so the hop runs with whatever this file says for the bridge, and with the
-# defaults for anything it does not. On 2026-08-24 that was
-# StrictHostKeyChecking=ask: the phone's key was in known_hosts under
-# `tailnet-bridge-generic.local` and three LAN addresses but not under its
+# defaults for anything it does not -- StrictHostKeyChecking=ask among them. A
+# phone whose key is in known_hosts under `tailnet-bridge-generic.local` and
+# three LAN addresses, but not under its
 # tailnet name, so `wk status`'s fleet block -- probing the rpi4, output going
 # to a file -- printed "Are you sure you want to continue connecting" onto the
 # terminal and waited there forever. Non-interactively the same hop fails with

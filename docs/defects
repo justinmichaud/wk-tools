@@ -5,7 +5,7 @@ is where the record lives.
 ## Blocked on work upstream, or on a build
 
 - **Eleven of the twenty configurations cannot be built yet**, and each says why
-  in its own `CFG_NEEDS`. Two causes, both checked 2026-08-25:
+  in its own `CFG_NEEDS`. Two causes:
 
   1. *No buildroot defconfig.* WebPlatformForEmbedded/buildroot's release-pinned
      `cog` family is **rpi3, 32-bit, only** --
@@ -22,19 +22,15 @@ is where the record lives.
 - **The buildroot builder is not written** (`image/buildroot.sh` refuses and says
   so). Two halves are owed, in this order:
 
-  1. `image/buildroot/external/`, a BR2_EXTERNAL tree with the host-libffi fix.
-     docs/TESTING.md has recorded this as done since 2026-08-24 and **the
-     directory was never committed**. Without it no buildroot build here
-     completes on an arm64 host, which is both this Mac and moose.
-  2. `buildroot_build` itself. The whole recipe from the 2026-08-24 scouting run
-     is recorded at the top of image/buildroot.sh -- tree, pin, host container,
-     job count, download dirs, overlay, output -- and has never been run through
+  1. `buildroot_build` itself. The whole recipe is recorded at the top of
+     image/buildroot.sh -- tree, pin, host container, job count, download dirs,
+     overlay, output -- and has never been run through
      that file, which is why it refuses rather than pretending.
 
 ## Waiting on a decision
 
 - The base snapshot, and whether workspaces share the mirror's objects by
-  alternates. Measured 2026-08-25: mirror 13 GB, the single snapshot's `.git`
+  alternates. Measured: mirror 13 GB, the single snapshot's `.git`
   14 GB, and only the 12.5 GB base pack hardlinked between them (`%n links` ==
   2). Every pack the snapshot fetched after its clone has one link, so each
   `wk sync` writes the same objects into the mirror and again into the snapshot,

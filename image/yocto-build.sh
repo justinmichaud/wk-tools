@@ -259,8 +259,8 @@ init_workdir() {
 # Guarded by a marker so it is idempotent. This function runs on every build,
 # including the ones that resume an interrupted one, and three copies of
 # `INHERIT += "rm_work"` is not the same as one.
-# Rewritten on every run, not skipped when present. An earlier version returned
-# early if the marker was there, which made every flag that lands in local.conf
+# Rewritten on every run, not skipped when present. Returning early when the
+# marker is there makes every flag that lands in local.conf
 # -- rm_work, chromium, the job counts -- take effect only on the run that
 # happened to create the file. A knob that silently does nothing on the second
 # invocation is worse than no knob.
@@ -534,8 +534,8 @@ case "$STAGE" in
         #     to a "default MiniBrowser" that does not exist.
         #
         # This repo builds images to benchmark them, so WPEPlatform wins and the
-        # 1.1 API is the half that goes. Flipped 2026-08-22 after the driver
-        # failure above; the previous choice cost a rebuild to learn.
+        # 1.1 API is the half that goes -- the driver failure above is what
+        # the other choice costs, and it costs a rebuild to learn.
         #
         # It cannot go on the command line as a second `--cmakeargs`, because
         # build-webkit takes only one and the last wins: that would silently

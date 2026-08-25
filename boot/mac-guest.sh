@@ -32,7 +32,7 @@ BOOT_ARMING=guest
 # stopped -- which made `--status` wrong and `b_arm` fatal ("there is no guest
 # 'wk-bench'"), i.e. this driver could never arm. Hidden by the workspace being
 # called `wk-bench`, so the correct tart name is the double-prefixed
-# `wk-wk-bench` and the wrong one looks entirely plausible. Fixed 2026-08-22.
+# `wk-wk-bench` and the wrong one looks entirely plausible.
 
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
@@ -167,7 +167,7 @@ b_bench_put() {
 # called it unprobeable. The difference was PATH: a non-interactive ssh to a Mac
 # gets /usr/bin:/bin:/usr/sbin:/sbin and nothing else, so `command -v tart`
 # answers "no" on a machine running tart with three VMs on it. Any probe that
-# duplicates a resolver instead of calling it will drift from it. 2026-08-22.
+# duplicates a resolver instead of calling it will drift from it.
 b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; _tart_bin >/dev/null 2>&1 ); }
 
 # The wk-managed media, in one line, for the fleet block in `wk status`.

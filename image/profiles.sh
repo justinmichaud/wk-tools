@@ -26,9 +26,6 @@
 #                    never runs.
 #   IMG_MACHINE      the fleet machine it is built for (boot/machines.sh)
 #   IMG_ARCH         the image's architecture
-#   IMG_BASE_URL     (distro) distro base, pinned
-#   IMG_BASE_SHA256  (distro) ... and pinned by content, not by name
-#   IMG_BASE_KIND    (distro) which seeding dialect the base speaks
 #   IMG_HOSTNAME     what it calls itself once booted
 #   IMG_ROLE         what this image is *for*: `bench` (the default) or
 #                    `rescue`. A rescue image is the resilient helper a board
@@ -48,18 +45,6 @@
 #                    profile that can be *booted as a bench system* wants one --
 #                    it is what hands the machine back when a run wedges it. A
 #                    rescue image wants none, and says so with IMG_ROLE.
-#   IMG_GROW         (distro) whether cloud-init may grow the root partition
-#   IMG_PACKAGES     (distro) packages installed on first boot (needs egress)
-#   IMG_NETWORK      (distro) how the image gets on the network:
-#                      wifi-from-machine -- copy the credential off the target
-#                        board itself, so the PSK never travels through a log
-#                        or an agent's context. Requires the board to be up,
-#                        which is the price of not handling the secret here.
-#                      wired -- DHCP on eth0, no secret at all, so the image
-#                        builds with the target powered off. This is why a
-#                        cabled test device is easier to serve than the rpi5.
-#   IMG_LABEL_ROOT   (distro) the image's own root filesystem label
-#   IMG_LABEL_BOOT   (distro) ... and its boot filesystem label
 #   IMG_SPEC_DIR     the profile's own files
 #
 # A yocto profile sets these instead (image/yocto.sh reads them):
@@ -102,18 +87,18 @@
 # this repository, named for what it is -- project, release, builder, board,
 # width.
 #
-# They used to be `case` arms in image_profile_load, and the shape was the one
+# Data rather than `case` arms in image_profile_load, which is the shape
 # CLAUDE.md says is being replaced: a case statement naming a device. Six arms
-# covered one release on four board/width combinations, three of the four sharing
+# cover one release on four board/width combinations, three of the four sharing
 # a single arm with a nested `case` to pull them apart -- so adding a release
 # meant editing code, and the two facts that actually differ per configuration
 # (which defconfig, which targets.conf section) were buried among the ones that
 # do not.
 #
-# Naming, decided 2026-08-25: the *project* -- WebKit or WPEWebKit -- and never
-# "upstream" or "downstream". Those two words were actively wrong here:
-# `downstream-yocto-wpe-2.48-*` set YOC_BRANCH=webkitglib/2.48, which is a branch
-# in WebKit/WebKit, so five profiles wore a `downstream-` prefix while building
+# Named for the *project* -- WebKit or WPEWebKit -- and never "upstream" or
+# "downstream". Those two words are actively wrong here: a configuration setting
+# YOC_BRANCH=webkitglib/2.48 builds from a branch in WebKit/WebKit, so a
+# `downstream-` prefix on it describes
 # from upstream. A configuration named for the repository it comes from cannot
 # make that mistake.
 image_config_dir()  { echo "$WK_ROOT/image/configs"; }
@@ -147,16 +132,6 @@ image_config_list() {
 image_profile_list() {
     image_config_list
     cat <<'EOF'
-perf-linux-rpi5
-            Ubuntu 26.04 server, aarch64, for the rpi5's USB one-shot: no
-            sandbox, perf_event_paranoid ours to set, WiFi baked in
-perf-linux-rpi4
-            the same, cabled: DHCP on eth0, no credential, so it builds with
-            the board switched off
-perf-linux-rpi3
-            refused, and says why: Ubuntu ships no armhf raspi image, and a
-            32-bit run wants a 32-bit system rather than an arm64 one
-
 bridge-pinephone
             postmarketOS for the PinePhone, as tailnet-bridge-generic: pmbootstrap
             on a Linux aarch64 machine, ssh key and WiFi baked in, the bridge
@@ -184,13 +159,13 @@ image_profile_load() {
     # Reset every field a profile may set, so a second load in one process
     # cannot inherit the first profile's answers. `wk boot --list` loads one
     # profile per machine in a loop, and a yocto profile that silently kept the
-    # previous profile's IMG_BASE_URL would describe an image that does not
+    # previous profile's YOC_TARGET would describe an image that does not
     # exist.
-    IMG_BUILDER=distro
-    IMG_MACHINE=""; IMG_ARCH=""; IMG_BASE_KIND=""; IMG_BASE_URL=""
-    IMG_BASE_SHA256=""; IMG_HOSTNAME=""; IMG_WATCHDOG=""; IMG_GROW=""
+    # No default: a profile that names no builder is a bug, and cmd_build
+    # refuses an empty one by name.
+    IMG_BUILDER=""
+    IMG_MACHINE=""; IMG_ARCH=""; IMG_HOSTNAME=""; IMG_WATCHDOG=""
     IMG_ROLE=bench
-    IMG_PACKAGES=""; IMG_NETWORK=""; IMG_LABEL_ROOT=""; IMG_LABEL_BOOT=""
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
     YOC_CHROMIUM=1; YOC_REMOTE=origin; YOC_LOCAL_LAYER=1
     CFG_PROJECT=""; CFG_RELEASE=""; CFG_BRANCH=""; CFG_REMOTE=""; CFG_NEEDS=""
@@ -215,16 +190,13 @@ image_profile_load() {
     fi
 
     case "$1" in
-    # The old names, refused by name. Two rounds of renaming: 2026-08-20 gave
-    # every profile its category (docs/HANDOFF-vocabulary.md), and 2026-08-25
-    # replaced upstream/downstream with the project a configuration is built
-    # from. One spelling, so an old name points at the new one rather than
-    # quietly meaning it.
+    # Tombstones: one spelling per configuration, so a name that is not it
+    # points at the one that is rather than quietly meaning something.
     rpi5-perf|rpi4-perf|rpi3-perf|rpi4-wpe-2.48|rpi4-wpe-2.48-32|rpi3-wpe-2.48-32|rpi3-wpe-2.48-64|rpi5-wpe-2.48|mac-bench)
-        die "profile '$1' was renamed (docs/HANDOFF-vocabulary.md, 'Systems'):
-    rpi5-perf        -> perf-linux-rpi5
-    rpi4-perf        -> perf-linux-rpi4
-    rpi3-perf        -> perf-linux-rpi3
+        die "there is no profile '$1'. Use:
+    rpi5-perf        -> webkit-2.52-yocto-rpi5-64
+    rpi4-perf        -> webkit-2.52-yocto-rpi4-64
+    rpi3-perf        -> webkit-2.52-yocto-rpi3-32
     rpi4-wpe-2.48    -> webkit-2.52-yocto-rpi4-64
     rpi4-wpe-2.48-32 -> webkit-2.52-yocto-rpi4-32
     rpi3-wpe-2.48-32 -> webkit-2.52-yocto-rpi3-32
@@ -232,18 +204,15 @@ image_profile_load() {
     rpi5-wpe-2.48    -> webkit-2.52-yocto-rpi5-64
     mac-bench        -> perf-macos-tolken"
         ;;
-    # The 2.48 and 2.46 profiles, retired 2026-08-25. `downstream-yocto-wpe-2.48-*`
-    # was misnamed rather than merely ugly: it set YOC_BRANCH=webkitglib/2.48,
-    # a branch in *WebKit/WebKit*, so it was an upstream configuration wearing a
-    # `downstream-` prefix. There is no wpe-2.48 in WPEWebKit at all (its
+    # Tombstones for the `downstream-` spellings. There is no wpe-2.48 in
+    # WPEWebKit at all (its
     # releases run 2.36, 2.38, 2.42, 2.46, 2.50), which is why the old comment
     # had to explain that "webkitglib/2.48 is the release branch for both GLib
     # ports". The set is now three releases named for their project.
     downstream-wpe-2.46-rpi4|downstream-yocto-wpe-2.48-rpi4|downstream-yocto-wpe-2.48-rpi4-32|downstream-yocto-wpe-2.48-rpi3-32|downstream-yocto-wpe-2.48-rpi3-64|downstream-yocto-wpe-2.48-rpi5)
-        die "profile '$1' is gone (2026-08-25). Configurations are named for the
-    project they are built from -- WebKit or WPEWebKit -- because 'downstream'
-    was wrong: every 2.48 profile built from webkitglib/2.48, which is a branch
-    in WebKit/WebKit.
+        die "there is no profile '$1'. Configurations are named for the project
+    they are built from -- WebKit or WPEWebKit -- and webkitglib/2.48 is a
+    branch in WebKit/WebKit.
 
     WPEWebKit releases here are 2.38 and 2.46; WebKit's is 2.52. So:
 
@@ -256,105 +225,17 @@ image_profile_load() {
 
     'wk sysimage build --list' has all twenty."
         ;;
-    perf-linux-rpi5)
-        IMG_NETWORK=wifi-from-machine
-        IMG_MACHINE=rpi5
-        IMG_ARCH=arm64
-        IMG_BASE_KIND=ubuntu-raspi
-        # Ubuntu 26.04 LTS preinstalled server. The same base as the board's
-        # own workstation install, deliberately: that install drives this radio
-        # onto this AP today, which is the property three earlier attempts on a
-        # Raspberry Pi OS base could not get.
-        IMG_BASE_URL=https://cdimage.ubuntu.com/releases/26.04/release/ubuntu-26.04-preinstalled-server-arm64+raspi.img.xz
-        IMG_BASE_SHA256=10604098a0c4eeb7359e58e12b01badbce8c74b0d53b414e633ba0b047b512cd
-        # The hostname keeps the old short form: it is what the system calls
-        # itself on mDNS, and the flashed stick already announces it.
-        IMG_HOSTNAME=rpi5-perf
-        # 15 minutes: long enough to ssh in and claim the board for a real
-        # session, short enough that a wedged boot costs one coffee rather than
-        # a trip to the device. `wk boot rpi5 --keep` is what claims it.
-        IMG_WATCHDOG=900
-        # Off, and this is the subtle one. A distro image that grows its root
-        # and reboots itself spends the one-shot on the first boot, lands back
-        # on the workstation, and the image never finishes coming up. The stick
-        # is 29 GB against a ~4 GB image; the unused space stays unused, and
-        # build products belong on a payload partition anyway, never in the
-        # image.
-        IMG_GROW=off
-        # perf is the one tool the profiling consumer cannot supply itself:
-        # `perf inject` is what turns a JIT dump into resolvable symbols. It
-        # needs egress on first boot, which this image has once the radio is
-        # up -- and if it fails, cloud-init records the failure and sshd is
-        # still running, which is the failure mode to want.
-        #
-        # avahi-daemon earns its place for a different reason: the image has no
-        # tailscale -- "and never will" was the decision here until 2026-08-24,
-        # when the fleet rule went the other way: everything wk touches is on
-        # the tailnet, and a node is reached by its tailnet name with nothing
-        # about how to reach it written down (CLAUDE.md, "Cattle, not pets").
-        # The Yocto images have that now, from a layer of their own
-        # (image/yocto/meta-wk-tailnet); this is the *distro* builder, which
-        # needs the same treatment and has not had it yet
-        # (docs/TESTING.md, section 7). Until then it is reachable only over the
-        # LAN, and
-        # `rpi5-perf.local` is the one name for it that does not depend on the
-        # driving machine's ARP cache being warm. The workstation already
-        # resolves .local (nss-mdns, avahi running), so this closes the loop
-        # with one package.
-        IMG_PACKAGES="linux-tools-raspi avahi-daemon"
-        IMG_LABEL_ROOT=wk-image-root   # ext4, <= 16 chars
-        IMG_LABEL_BOOT=WK-IMG-BOOT     # FAT, <= 11 chars, upper case
+    # Tombstone: a name the tooling refuses so it points somewhere instead of
+    # failing as "unknown profile".
+    perf-linux-rpi3|perf-linux-rpi4|perf-linux-rpi5)
+        die "there is no '$1'. A perf system is built by yocto or buildroot, or
+    it is macOS (wk help images). For this board:
+
+        perf-linux-rpi3  -> webkit-2.52-yocto-rpi3-32   (32-bit, its native width)
+        perf-linux-rpi4  -> webkit-2.52-yocto-rpi4-64
+        perf-linux-rpi5  -> webkit-2.52-yocto-rpi5-64"
         ;;
-    perf-linux-rpi3)
-        # Refused rather than built, because the obvious thing here is wrong.
-        # The rpi3 is the fleet's only 32-bit board -- armv7l, a buildroot/WPE
-        # rig with 931 MB and no swap -- and it is that deliberately: this repo
-        # carries a whole armhf story (`wk new --arch armhf`) and the rpi3 is
-        # where 32-bit gets exercised on real hardware. Handing it the arm64
-        # base the other profiles use would boot (the Cortex-A53 is 64-bit
-        # capable) and would quietly convert the one device that tests 32-bit
-        # into another 64-bit one.
-        #
-        # This used to wait on a decision -- "a 32-bit base for this profile, or
-        # an explicit 'the rpi3 becomes arm64'". The decision was taken on
-        # 2026-08-20 and it was neither, so the refusal stays but the reason
-        # changed: there is no armhf Ubuntu raspi image to build this *from*
-        # (26.04 publishes arm64 desktop and arm64 server, and nothing else),
-        # and the rpi3's perf systems are Yocto builds instead -- which
-        # targets.conf already had targets for in both widths.
-        die "there is no perf-linux-rpi3, and there will not be one.
 
-    'perf-linux-*' profiles are seeded from Ubuntu's preinstalled raspi image,
-    and Ubuntu 26.04 publishes no armhf one -- arm64 desktop and arm64 server,
-    and nothing else. There is nothing to seed a 32-bit rpi3 system from.
-
-    A 32-bit perf run has to measure a 32-bit kernel and userspace rather than
-    a 32-bit process on a 64-bit kernel, so the answer is not to build this
-    board an arm64 system either. Use the Yocto profiles, which exist in both
-    widths:
-
-        wk sysimage build downstream-yocto-wpe-2.48-rpi3-32   its native width
-        wk sysimage build downstream-yocto-wpe-2.48-rpi3-64   marginal, for comparison
-
-    docs/HANDOFF-vocabulary.md, '32-bit and 64-bit', has the whole argument."
-        ;;
-    perf-linux-rpi4)
-        # Cabled, so no credential is involved and the image builds with the
-        # board switched off -- which is the whole difference between these and
-        # the rpi5's profile.
-        IMG_NETWORK=wired
-        IMG_MACHINE=rpi4
-        IMG_ARCH=arm64
-        IMG_BASE_KIND=ubuntu-raspi
-        IMG_BASE_URL=https://cdimage.ubuntu.com/releases/26.04/release/ubuntu-26.04-preinstalled-server-arm64+raspi.img.xz
-        IMG_BASE_SHA256=10604098a0c4eeb7359e58e12b01badbce8c74b0d53b414e633ba0b047b512cd
-        IMG_HOSTNAME=rpi4-perf
-        IMG_WATCHDOG=900
-        IMG_GROW=off
-        IMG_PACKAGES="linux-tools-raspi avahi-daemon"
-        IMG_LABEL_ROOT=wk-image-root
-        IMG_LABEL_BOOT=WK-IMG-BOOT
-        ;;
     # --- fetch --------------------------------------------------------------
     #
     # Not built here, and that is the point: Jumpdrive is the PinePhone
@@ -367,10 +248,10 @@ image_profile_load() {
         IMG_MACHINE=""
         FET_DEVICE=pine64-pinephone
         FET_URL=https://github.com/dreemurrs-embedded/Jumpdrive/releases/download/0.8/pine64-pinephone.img.xz
-        # Recorded from the artifact this repo actually fetched (2026-08-21).
-        # Upstream publishes no checksum file, so the pin is "what we verified
-        # once" rather than "what they said" -- which is still the property that
-        # matters: it cannot change underneath us without this failing.
+        # Recorded from the artifact this repo fetched. Upstream publishes no
+        # checksum file, so the pin is "what we verified" rather than "what they
+        # said" -- which is still the property that matters: it cannot change
+        # underneath us without this failing.
         FET_SHA256=a8c9e0252e070e1737c14ca7c8cac515d3196148ded1af98c2bf8e9350d970be
         FET_XZ=1
         FET_NOTE="Jumpdrive 0.8: boots from a card and exports the phone's eMMC over USB"
@@ -463,8 +344,8 @@ image_profile_load() {
                 # CONFIG_SUNXI_WATCHDOG unset, while the A64's device tree
                 # declares the watchdog at 0x1c20ca0 (`allwinner,sun50i-a64-wdt`).
                 # So the hardware is present, the DT node is present, and the
-                # driver that would bind them is simply not built -- measured on
-                # the phone 2026-08-22. Nothing in userspace substitutes: this is
+                # driver that would bind them is simply not built. Nothing in
+                # userspace substitutes: this is
                 # the only thing that recovers a kernel that has stopped
                 # scheduling, on the one device here that cannot be walked up to.
                 #
@@ -484,10 +365,10 @@ image_profile_load() {
                 # the build host's own association, and a build host on a 5 GHz
                 # SSID therefore produces an image that is *guaranteed* to boot
                 # into isolation -- it has a perfectly good PSK for a network
-                # the phone's hardware cannot see. That happened here
-                # (2026-08-21): rpi5 associated on channel 52, and the phone
-                # came up showing every neighbour's 2.4 GHz network and not the
-                # one it was built for. pmos_check_uplink_band refuses it now.
+                # the phone's hardware cannot see. A board associated on channel
+                # 52 hands over a 5 GHz network, and the phone comes up showing
+                # every neighbour's 2.4 GHz network and not the one it was built
+                # for. pmos_check_uplink_band refuses that.
                 PMO_WIFI_BANDS="2.4"
                 ;;
             bridge-librem5)
@@ -509,10 +390,9 @@ image_profile_load() {
     #
     # Not here. Every WebKit-runtime configuration -- both builders, three
     # releases, four board/width combinations -- is a file in image/configs,
-    # sourced at the top of this function. What used to be here was three case
-    # arms and a nested case inside one of them, and the only things they
-    # actually disagreed about were the branch, the targets.conf section and the
-    # hostname. See image_config_dir above for why that became data.
+    # sourced at the top of this function. As case arms they would disagree
+    # about the branch, the targets.conf section and the hostname and nothing
+    # else. See image_config_dir above for why that is data.
 
     *)  return 1 ;;
     esac

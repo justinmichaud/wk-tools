@@ -1,9 +1,9 @@
 # HANDOFF — workspace state and readiness: the open list
 
 Readiness gating, the status-file schema, the locks and the clobber detection
-all landed. The rules this file used to state — smallest state, crash-only,
-wipe over repair, one lock per mutated resource, detect un-managed clobbering —
-now live in `CLAUDE.md` and bind the whole repo.
+are all built. The rules behind them — smallest state, crash-only, wipe over
+repair, one lock per mutated resource, detect un-managed clobbering — live in
+`CLAUDE.md` and bind the whole repo.
 
 `docs/TESTING.md` is the verification authority: the "Babysit" subsection of §1
 and §6 "State, concurrency and clobbering" (the per-command interruption matrix,

@@ -111,9 +111,9 @@ where() {
     echo absent
 }
 
-# Copies of a key inside a workspace's own home, which older workspaces have:
-# firstrun used to `install` the key rather than link it, and a copy is a key
-# this switch cannot reach. They are removed rather than reported, because the
+# Copies of a key inside a workspace's own home, which a workspace has whenever
+# firstrun `install`ed the key rather than linking it. A copy is a key this
+# switch cannot reach. They are removed rather than reported, because the
 # original is in the store and a copy has nothing in it to lose.
 #
 # A symlink is the current arrangement and is left alone -- it is the thing
@@ -202,10 +202,9 @@ on)
     # The switch is one of two things a push needs, and this one cannot see the
     # other: whether GitHub has this machine's key. Every machine has its own
     # (GitHub refuses one deploy key on two repositories but takes many on one),
-    # so a machine set up later has a key nobody registered -- measured
-    # 2026-08-19 on buildbox4, where the switch was ON, the wiring was right,
-    # the alias resolved, and the push was still "Permission denied
-    # (publickey)". Only the host can ask GitHub, so this names the command
+    # so a machine set up later has a key nobody registered: the switch is ON,
+    # the wiring is right, the alias resolves, and the push is still "Permission
+    # denied (publickey)". Only the host can ask GitHub, so this names the command
     # rather than pretending to know.
     log "  a push also needs this machine's key registered:  wk key check"
     ;;

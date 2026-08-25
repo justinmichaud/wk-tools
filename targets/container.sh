@@ -21,9 +21,9 @@ fi
 # register-sdk-on-host.sh, which is a shell-rc thing we deliberately do not use.
 export WKDEV_SDK="$WK_SDK"
 
-# One sandbox model, both hosts. The macOS VM used to run a second one --
-# rootful podman on a bridge with the egress policy in nftables -- and a
-# boundary implemented twice is a boundary understood once and verified never.
+# One sandbox model, both hosts. A second one -- rootful podman on a bridge with
+# the egress policy in nftables -- is a boundary implemented twice, which is a
+# boundary understood once and verified never.
 #
 # The nftables model also forced rootful podman, because rootless podman has no
 # filterable forward path: its network helper re-emits container traffic from
@@ -87,8 +87,7 @@ _ctr() { echo "wk-$1"; }
 # rsync, and until this existed the only thing that refreshed it was
 # `./setup --stage vmtools` -- so a command added to this repo was "unknown
 # command" inside every container, and a build ran the old build half, until
-# somebody remembered. Measured 2026-08-19 with `wk remotes`, which the VM had
-# never heard of.
+# somebody remembers.
 #
 # The store half -- the mirror and the base snapshots, which live in the VM too
 # -- is what a plain `wk sync` does (it is forwarded in there); this is
@@ -125,10 +124,10 @@ t_list() {
 #
 # Two names accepted, and only one written. `.wk-firstrun-complete` is what
 # firstrun.sh wrote before the marker became the contract, and every container
-# workspace made before 2026-08-19 has it -- read as absent, those would all
-# have been reported half-made and offered for destruction. It means exactly
-# what the new name means, so it counts. New workspaces write `.wk-ready`;
-# this clause can go when no pre-marker workspace is left anywhere.
+# workspace made before the marker became the contract has it, and reading it as
+# absent reports those half-made and offers them for destruction. It means
+# exactly what `.wk-ready` means, so it counts.
+# TODO: this clause can go once no pre-marker workspace is left anywhere.
 t_created() {
     local h; h="$(wk_ws_dir "$1")/home"
     [ -f "$h/$WK_READY_MARKER" ] || [ -f "$h/.wk-firstrun-complete" ]
@@ -348,11 +347,11 @@ t_create() {
     install -m 0755 "$WK_ROOT/container/firstrun.sh" "$ws/home/.wkdev-firstrun"
 
     # Last, and that is the point: base-id is the completion marker this target
-    # is read by (ws_state in lib/target.sh). Written first -- as it used to be
-    # -- a `wk new` killed during wkdev-create left a workspace that pinned a
-    # snapshot, looked finished to every command, and had no container; and a
-    # re-run re-pinned base-id over the `changes/` layer the first attempt had
-    # already started, which is undefined behaviour with the overlay.
+    # is read by (ws_state in lib/target.sh). Written first, a `wk new` killed
+    # during wkdev-create leaves a workspace that pins a snapshot, looks
+    # finished to every command and has no container -- and a re-run re-pins
+    # base-id over a `changes/` layer that is already started, which is
+    # undefined behaviour with the overlay.
     #
     # It is also what `wk gc` counts as a snapshot's refcount, so writing it
     # last is only safe because gc and new take the store lock (lib/common.sh).
@@ -595,8 +594,8 @@ _ctr_home() { echo "/home/$(_ctr_user "$1")"; }
 #               file transfer began in the checkout instead of the home
 #               directory, and Zed's upload of its own server binary, which
 #               names a path relative to `~`, failed with "No such file or
-#               directory" against a directory that was plainly there. Measured
-#               2026-08-24 with `sftp -b`: `pwd` answered /src/WebKit.
+#               directory" against a directory that is plainly there --
+#               `sftp -b`'s `pwd` answers /src/WebKit.
 #               internal-sftp runs inside sshd, with no shell in the way.
 t_ssh_sshd_cmd() {
     local name="$1" u h
@@ -607,8 +606,8 @@ t_ssh_sshd_cmd() {
     # arriving this way had none of the proxy variables the container was
     # created with -- and a container has no other route out. Everything worked
     # under `wk enter` and nothing worked in Zed's terminal: no DNS, no github,
-    # no Claude. Measured 2026-08-25 (`http_proxy=[]` over ssh against
-    # `http_proxy=[http://127.0.0.1:3128]` under `wk enter`).
+    # no Claude -- `http_proxy=[]` over ssh against
+    # `http_proxy=[http://127.0.0.1:3128]` under `wk enter`.
     #
     # ensure-bridge, for the same reason every other exec path runs it: the
     # variables point at 127.0.0.1:3128, and what listens there is a forwarder

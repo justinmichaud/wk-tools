@@ -39,10 +39,9 @@
 # says nothing below it may block without a bound of its own, and this was the
 # one thing in it that could. A *local* call is not the same as a call that
 # returns -- a wedged tailscaled answers neither, and the CLI has no timeout of
-# its own. Caught here 2026-08-24, with the daemon in exactly that state (`the
-# Tailscale CLI failed to start: Failed to save preferences`): every reach
-# lookup in the walk hung on it, and `wk status --web` never reached the point
-# of serving a page. That is the same shape of failure as the jump hop that
+# its own. With the daemon in that state (`the Tailscale CLI failed to start:
+# Failed to save preferences`) every reach lookup in the walk hangs on it, and
+# `wk status --web` never reaches the point of serving a page. That is the same shape of failure as the jump hop that
 # stopped the fleet block, and it gets the same answer (`capped`,
 # lib/common.sh), for the same reason: a probe that overruns must lose its own
 # line, never the listing.

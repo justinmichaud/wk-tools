@@ -6,10 +6,10 @@
 #
 # --- host-python 2.7 cannot build on an arm64 build host ----------------------
 #
-# Measured 2026-08-24, scouting `raspberrypi3_wpe_2_38_cog_defconfig` in an
-# ubuntu:20.04 container: the toolchain builds (host-gcc-final 9.2.0) and then
-# host-python-2.7.17 dies at `sharedmods`, because its bundled 2013-era libffi's
-# `aarch64/sysv.S` no longer assembles. An *architecture* problem and not an
+# Building `raspberrypi3_wpe_2_38_cog_defconfig` in an ubuntu:20.04 container,
+# the toolchain builds (host-gcc-final 9.2.0) and then host-python-2.7.17 dies
+# at `sharedmods`, because its bundled 2013-era libffi's `aarch64/sysv.S` does
+# not assemble. An *architecture* problem and not an
 # old-distro one -- on x86_64 that file is never compiled, which is why this
 # tree always built on moose and fails on this Mac.
 #
@@ -21,10 +21,10 @@
 #   HOST_PYTHON_CONF_OPTS  += --with-system-ffi
 #   HOST_PYTHON_DEPENDENCIES = host-expat host-libffi host-zlib
 #
-# -- and the fork's `wpe` branch head carries it too. The pin does not, checked
-# 2026-08-25 against tag 2020.02 in both trees. So the difference is the pin,
-# not the fork, and the fix here is the upstream one applied from outside rather
-# than a patch against somebody else's vendor branch.
+# -- and the fork's `wpe` branch head carries it too. Tag 2020.02 does not, in
+# either tree, so the difference is the pin and not the fork. The fix here is
+# the upstream one applied from outside rather than a patch against somebody
+# else's vendor branch.
 #
 # Both lines are idempotent: on a pin that already has the fix, the option is
 # passed twice and the ordering is already guaranteed.

@@ -8,8 +8,8 @@ line, in the order the walk found things. Several processes can write to it --
 on a macOS host a listing is assembled by this machine's own targets out here
 and its containers inside the podman VM, and two JSON *documents* cannot be
 concatenated where two streams of lines can. Merging by machine name here is
-also what retired the flag those two halves used to pass between them to agree
-on which of them had already printed a heading.
+also what saves the two halves from having to tell each other which of them has
+already printed a heading.
 
 Every view is drawn from the same merged document, which is the point: a number
 that appears in the terminal and not in the browser is impossible rather than
@@ -339,9 +339,9 @@ def render_text(doc, colour):
     this fleet is looked at with now -- `wk status` at a terminal opens it
     (status_default_mode, lib/common.sh) -- and this is what a pipe, a redirect,
     `wk selftest` and an agent get. That reader wants the columns to line up and
-    wants nothing else: the box-drawn grid this used to build, with its rules,
-    its corner glyphs and its blank-celled continuation rows, was a second
-    showpiece to keep correct for somebody who now has a better one.
+    wants nothing else. A box-drawn grid -- rules, corner glyphs, blank-celled
+    continuation rows -- is a second showpiece to keep correct for a reader who
+    already has a better one.
 
     The one piece of machinery kept is a single set of column widths for the
     whole listing. Per-group widths made every block line up with itself and
@@ -375,8 +375,8 @@ def render_text(doc, colour):
     # A label/value line is buffered rather than formatted, because its column
     # width is not known until every label in the section has been seen.
     #
-    # It used to be the constant 14, and that is what made one machine's block
-    # read as three ragged tables: every label wider than 14 -- "without
+    # Measured rather than a constant. At a fixed 14 a machine's block reads as
+    # three ragged tables: every label wider than that -- "without
     # tailscale", "push (podman VM)", "wk-tools (in the podman VM)" -- pushed
     # its own value out to a column of its own, and the wk-tools and push-key
     # rows were formatted by a *separate* pair of hardcoded widths (30 and 14)
@@ -600,9 +600,9 @@ def render_text(doc, colour):
 #                   exactly like one that is held.
 #
 # The state vocabulary is injected rather than written twice (__SEV__ below).
-# It used to be a second copy in JavaScript, and the two had already drifted:
-# `up`, `clean`, `finished` and `held` were coloured in the terminal and plain
-# on the page, which is a listing that answers a question two ways.
+# A second copy in JavaScript drifts from this one: `up`, `clean`, `finished`
+# and `held` end up coloured in the terminal and plain on the page, which is a
+# listing that answers a question two ways.
 
 PAGE = """<!doctype html>
 <meta charset="utf-8">
@@ -1059,10 +1059,10 @@ class Live:
         # One walk at a time, ever. `wk status` on this fleet takes tens of
         # seconds and can take minutes when the tailnet is down -- longer than
         # any sensible interval -- so a timer that fired regardless would have
-        # two walks probing the same boards over the same phone at once. That is
-        # not merely wasteful: measured here 2026-08-24, two fleet blocks
-        # running together disagreed with each other about which boards were up,
-        # and neither answer was a fleet that had changed.
+        # two walks probing the same boards over the same phone at once. Not
+        # merely wasteful: two fleet blocks running together disagree with each
+        # other about which boards are up, and neither answer is a fleet that
+        # has changed.
         #
         # A refusal rather than a queue, because the answer a second walk would
         # give is the answer the first one is already about to give. Non-blocking

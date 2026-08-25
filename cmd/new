@@ -11,9 +11,9 @@
 # machine and this command waits for it in the foreground. The connection that
 # typed the command can then die -- a closed laptop, a tool call's timeout, a
 # dropped ssh -- without taking the creation with it, and re-running `wk new`
-# is the resume. Nothing about that is optional for a remote target, where the
-# whole of creation used to hang off one ssh: cut it mid-clone and the far side
-# kept a partial checkout that every command read as a finished workspace.
+# is the resume. Nothing about that is optional for a remote target: with the
+# whole of creation hanging off one ssh, cutting it mid-clone leaves the far
+# side a partial checkout that every command reads as a finished workspace.
 #
 # The two halves:
 #
@@ -205,8 +205,7 @@ if [ -n "$DETACHED" ]; then
     # needs in order to *find* a creation that died half-way. Registered last --
     # as it was -- a `wk new` killed during the clone left a checkout on a build
     # box and nothing anywhere saying which box, so every command fell back to
-    # the container target and reported "no such workspace" about it. Measured
-    # 2026-08-19 with `wk pr db …`.
+    # the container target and reports "no such workspace" about it.
     #
     # It is not a fact this depends on being true: ws_target derives the same
     # answer from the stores when the entry is missing, and `wk rm` forgets it
@@ -248,9 +247,9 @@ if [ -n "$DETACHED" ]; then
     # VM has none until it boots, and a shared build machine is in
     # ~/.ssh/config under its own name already.
     #
-    # And no alias for a container, deliberately. It used to get `HostName
-    # localhost`, which was fiction twice over: on a Linux workstation it
-    # pointed Zed at the host's own filesystem, which has no /src/WebKit, and on
+    # And no alias for a container, deliberately. `HostName localhost` is
+    # fiction twice over: on a Linux workstation it points Zed at the host's own
+    # filesystem, which has no /src/WebKit, and on
     # a macOS host this half runs *inside* the podman VM, so the entry was
     # written where Zed is not. A container is reached over `podman exec`
     # instead (targets/container.sh), and the alias that spells that is written

@@ -14,7 +14,7 @@
 # that has grown a scheduler has started to become a workstation.
 #
 # That shape needs one thing this machine does not have: **a network in bench
-# mode.** Measured 2026-08-23 -- tolken is Wi-Fi only, and the benchmark
+# mode.** tolken is Wi-Fi only, and the benchmark
 # install's com.apple.airport.preferences.plist has an empty PreferredOrder, so
 # it joins nothing and answers nowhere. Giving it credentials means writing
 # SystemConfiguration and reading the System keychain, both of which need root
@@ -29,7 +29,7 @@
 # WHY IT CANNOT SIMPLY REBOOT BACK INTO HOST MODE
 #
 # There is no software boot-volume switch on Apple Silicon. Tested rather than
-# read, 2026-08-23, in a macOS guest with SIP *disabled* and root:
+# read, in a macOS guest with SIP *disabled* and root:
 #
 #   nvram boot-volume=<other group>   exits 0 and changes nothing. The value
 #                                     lands in the 7C436110-… namespace and is
@@ -155,10 +155,10 @@ leave_bench() {
 #
 # The plist and *only* the plist. `launchctl bootout gui/<uid>/com.wk.bench-ab`
 # was here and it is the same suicide as `kill $$`: this script is that agent's
-# own child, so booting the label out kills the caller mid-function. Measured in
-# the guest rehearsal 2026-08-23 -- the log ends after the message explaining
-# what it was about to do, the plist was still in place, and the machine never
-# halted. Which is the worst of the three outcomes: a benchmark install left
+# own child, so booting the label out kills the caller mid-function: the log
+# ends after the message explaining what it was about to do, the plist is still
+# in place, and the machine never halts. Which is the worst of the three
+# outcomes: a benchmark install left
 # running with nobody driving it, in the one branch whose entire job is to stop
 # that.
 #
@@ -173,9 +173,9 @@ remove_agent() {
 # --- defusing the first-boot daemon -----------------------------------------
 #
 # bench/mac-bench-firstboot.sh is provisioning that runs once and removes
-# itself. Until 2026-08-23 it could not remove itself -- it booted out its own
-# launchd label, which killed it before the `rm` -- so it ran on *every* boot,
-# and two things it does are fatal to a run planted here:
+# itself. If it cannot -- booting out its own launchd label kills it before the
+# `rm` -- it runs on *every* boot, and two things it does are fatal to a run
+# planted here:
 #
 #   it rsyncs --delete its own copy of wk-tools over ~bench/Development/wk-tools,
 #   replacing this lane's tooling with whatever the install was built with; and
@@ -350,9 +350,8 @@ sleep "$SETTLE"
 
 # The per-user temp directory, waited for rather than assumed.
 #
-# Found in the guest rehearsal, 2026-08-23, and it is exactly the class of
-# failure this whole design exists to keep off the real machine: the first arm
-# died 20 s after login with
+# Exactly the class of failure this whole design exists to keep off the real
+# machine: an arm dies 20 s after login with
 #
 #   patch: Can't create '/var/folders/…/T/patchXXXX' … No such file or directory
 #
@@ -380,7 +379,7 @@ fi
 cancel_pending_reboot
 
 # Whatever owns the front window would throttle MiniBrowser into a timeout with
-# no error (measured 2026-08-22). `wk bench staged` refuses on it, but on a
+# no error. `wk bench staged` refuses on it, but on a
 # machine nobody can reach a refusal is as expensive as a hang -- so try to
 # clear it first, and let the runner have the last word.
 if [ -r "$TOOLS/lib/quiet.sh" ]; then
@@ -399,8 +398,7 @@ fi
 #
 # macOS draws it from SecurityAgent, which never becomes the frontmost
 # *application*, so `lsappinfo front` says "Finder" with a password sheet on top
-# of everything. Found by somebody looking at the screen, 2026-08-23, five
-# minutes into a run that had passed "the screen is free" six times.
+# of everything -- while "the screen is free" passes every time it is asked.
 #
 # SIGKILL, and that is not impatience: SIGTERM does not work. SecurityAgent holds
 # XPC transactions open while its sheet is modal and logs
@@ -418,12 +416,10 @@ fi
 
 # The software-update scanner, stopped rather than merely asked to stay away.
 #
-# THE SETTING IS NOT THE MECHANISM. That is the finding of 2026-08-23 and it
-# cost a whole A/B before anyone looked for it. This block used to write
-# AutomaticCheckEnabled false and read it back, and the read *succeeded*: the
-# log says `AutomaticCheckEnabled now: 0` at 18:34:43Z. Then
-# `LastSuccessfulBackgroundMSUScanDate` advanced to 18:36:59Z -- inside round 1
-# arm A, which ran 18:35:14 -> 18:37:00. Two minutes after the preference was
+# THE SETTING IS NOT THE MECHANISM. Writing AutomaticCheckEnabled false and
+# reading it back *succeeds* -- the log says `AutomaticCheckEnabled now: 0` --
+# and `LastSuccessfulBackgroundMSUScanDate` still advances inside an arm, two
+# minutes after the preference was
 # confirmed off, on the same boot, a scan ran through the middle of the
 # measurement. A network fetch and a burst of CPU, in the one window where the
 # machine is supposed to be doing nothing else.
@@ -437,7 +433,7 @@ fi
 # install reboots when the job ends and every system daemon comes back with it
 # -- which is the same shape as the rest of `wk quiesce`. The preference is
 # still written, because it costs nothing and it is the documented intent; it is
-# simply no longer the thing that is believed.
+# simply not the thing that is believed.
 say "stopping the software-update scanner"
 for svc in system/com.apple.softwareupdated system/com.apple.mobile.softwareupdated; do
     if sudo -n launchctl bootout "$svc" >/dev/null 2>&1; then
@@ -480,10 +476,9 @@ say "  scan stamp before the job: $(msu_stamp)"
 # --- why the radio is NOT turned off during a run -----------------------------
 #
 # Both routes to "do not scan" are closed on this install: the preference does
-# not work (measured 2026-08-23 -- read back as off, scan ran anyway) and
+# not work -- it reads back as off and a scan runs anyway -- and
 # `launchctl bootout system/com.apple.softwareupdated` is SIP-protected and
-# fails (measured 2026-08-24, both daemons, and a scan then ran through round 1
-# arm B regardless).
+# fails for both daemons, with a scan running through an arm regardless.
 #
 # The obvious third route is to take away what a scan needs: a run here uses no
 # network at all, the payload being pinned precisely so that it does not, so the
@@ -532,9 +527,9 @@ newest_result() { ls -1 "$WK_AB_ROOT/results" 2>/dev/null | sort | tail -1; }
 # Whether anything at all has worked yet. A whole round failing means the *next*
 # round will fail the same way -- the build, the payload and the machine do not
 # change between rounds -- so finishing the schedule buys nothing and costs the
-# machine's time in a mode nobody can reach. Found 2026-08-23: a lane staged
-# without a pinned payload burnt six arms on the same missing benchmark and then
-# handed back a volume with no numbers on it.
+# machine's time in a mode nobody can reach: a lane staged without a pinned
+# payload burns every arm on the same missing benchmark and hands back a volume
+# with no numbers on it.
 #
 # Deliberately not "abort on the first failure": one flaky arm is exactly what
 # more rounds are for. It is a whole round with nothing in it that is fatal.
@@ -653,11 +648,10 @@ booted_is_default() {
 #
 # The reboot below is right when the default is the *host* volume: it hands the
 # machine back and costs nobody anything. When the default is this volume it is
-# actively harmful, and that is what happened on 2026-08-23. The reboot landed
-# back here, the `phase = done` branch halted the machine, and a completed A/B
-# -- six good runs, already written to the disk -- sat on a powered-off Mac. The
-# numbers existed and nothing could reach them until somebody walked over,
-# pressed the power button and picked a disk. The halt was protecting against a
+# actively harmful: the reboot lands back here, the `phase = done` branch halts
+# the machine, and a completed A/B -- six good runs, already written to the disk
+# -- sits on a powered-off Mac. The numbers exist and nothing can reach them
+# until somebody walks over, presses the power button and picks a disk. The halt was protecting against a
 # boot loop, which is real, but powering the machine off is not the only way to
 # not loop.
 #

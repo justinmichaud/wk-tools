@@ -205,9 +205,9 @@ t_branch() {
     # Only a workspace that exists and finished being made has a branch to
     # ask about, and only a machine that answers can be asked. Anything else
     # is `-`: asking would mean an exec into a container that is still being
-    # provisioned, or -- measured 2026-08-19, in `wk status` against a machine
-    # that was off -- resolving a remote path, which reaches for the capacity
-    # probe and dies with a connection error in the middle of a listing.
+    # provisioned, or resolving a remote path against a machine that is off --
+    # which reaches for the capacity probe and dies with a connection error in
+    # the middle of a listing.
     case "$(t_info "$1")" in
         absent|creating|broken|unreachable) echo -; return 0 ;;
     esac
@@ -365,9 +365,8 @@ target_forget() { rm -f "$(wk_state_dir)/targets/$1"; }
 # The store walk is what fixes a real failure. A `wk new` that dies before it
 # registers -- an ssh cut, a killed driver, a wk-tools update mid-run -- leaves
 # a workspace on a machine and no record of which machine, and every command
-# then fell back to `container`, asked podman, and answered "no such
-# workspace: <name>" about a checkout sitting on a build box. Measured
-# 2026-08-19 with `wk pr db …`, whose clone was complete on devbox-arm64-2.
+# then falls back to `container`, asks podman, and answers "no such workspace:
+# <name>" about a checkout sitting complete on a build box.
 #
 # A file test per configured target, nothing started and no ssh: a remote
 # target's host-side store is on this machine (it holds the build log), and a
@@ -454,9 +453,9 @@ wk_self() { wk_marker_field name; }
 # *absent*. A workspace name on the command line inside a workspace is refused
 # rather than accepted.
 #
-# It used to be accepted, silently, when it happened to be this workspace's own
-# name -- `wk build bug-238 jsc-release` in bug-238 built exactly what
-# `wk build jsc-release` builds. Which is worse than it looks: it is the host
+# Accepting it silently when it happens to be this workspace's own name --
+# `wk build bug-238 jsc-release` in bug-238 building exactly what
+# `wk build jsc-release` builds -- is worse than it looks: it is the host
 # form typed in the wrong place, so the next thing typed is usually the host
 # form for a *different* workspace, and that one cannot work in here at all.
 # Two spellings of one command also means everything written about the in-here
@@ -661,9 +660,9 @@ target_all() {
     # ...and not inside the podman VM either, for the same reason: the whole
     # repository is rsynced in there, so the VM would walk every machine in the
     # registry and pay an ssh timeout each for machines it has no key, route or
-    # business reaching. The VM holds the container store; it drives nothing.
-    # (Measured 2026-08-19: a forwarded half doing four probes it could never
-    # answer, which is most of what a bare `wk status` was waiting for.)
+    # business reaching. The VM holds the container store; it drives nothing --
+    # a forwarded half doing four probes it can never answer is most of what a
+    # bare `wk status` waits for.
     local me=""
     if ! in_remote_host && [ -z "${WK_IN_VM:-}" ]; then
         me=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
@@ -713,10 +712,10 @@ target_all() {
 #
 # There was a second layer, `~/.config/wk/targets/<name>.conf`, overriding the
 # registry line by line. It is gone, and the two reasons are the repo's own
-# rules. It was a second copy of a fact -- the machine-local files on this
-# workstation had drifted to *pure comments*, still listed by `wk doctor` as
-# state to back up, describing overrides that no longer existed. And it was a
-# second path through target resolution, exercised only on the device that
+# rules. It is a second copy of a fact -- machine-local files drift to *pure
+# comments*, still listed by `wk doctor` as state to back up, describing
+# overrides that do not exist. And it is a second path through target
+# resolution, exercised only on the device that
 # happened to have a file (CLAUDE.md, "One path, not two"): a machine
 # configured on one device did not exist on the others, a reinstall lost every
 # target, and buildbox4's build flags had to be re-typed everywhere.
@@ -883,8 +882,7 @@ ws_create_log()  { echo "$(ws_state_dir)/$1.log"; }
 # `wk new` is a workstation command: a machine that only *hosts* workspaces
 # refuses it (is_lifecycle in `wk`), because the record of which target a
 # workspace belongs to lives on the workstation. So printing it bare on a build
-# box sends somebody straight to a refusal -- which is what the readiness
-# refusal did, reported 2026-08-19 from a shell on devbox-arm64-2.
+# box sends somebody straight to a refusal.
 ws_remake_hint() {
     if in_remote_host; then
         printf 'from the workstation:  wk new %s --target %s' "$1" "$(wk_remote_field target)"
@@ -947,10 +945,9 @@ wait_ready() {
                 # that finished and never got its marker -- a driver killed one
                 # step from the end, a wk-tools update mid-run -- looks exactly
                 # like one cut in the middle, and only the person looking at it
-                # can tell which. Reported 2026-08-19: `wk claude db --force`
-                # on the build machine, where the workspace was complete, the
-                # refusal was absolute, and the repair it named is a command
-                # that machine does not accept.
+                # can tell which. On a build machine that means an absolute
+                # refusal over a complete workspace, naming a repair that
+                # machine does not accept.
                 #
                 # Under --force this returns and the caller acts on the
                 # workspace as it is; the warning is repeated when the command
@@ -1162,11 +1159,11 @@ load_target() {
     # And the *functions*, which is the other half of the same problem this
     # file already warns about for variables. A driver overrides the hooks it
     # needs and a function definition outlives the load, so the first driver's
-    # override was still live when the second target was loaded: measured
-    # 2026-08-19, `wk status` on a build machine walked container first, and
-    # every remote workspace's branch was then read by the container driver's
-    # t_branch -- which looks for an overlay that is not there and answered
-    # `-` for all of them, plausibly and wrongly.
+    # override stays live when the second target is loaded: `wk status` on a
+    # build machine walks container first, and every remote workspace's branch
+    # is then read by the container driver's t_branch -- which looks for an
+    # overlay that is not there and answers `-` for all of them, plausibly and
+    # wrongly.
     #
     # Re-sourcing this file restores every default before the driver replaces
     # what it means to replace. It is only function definitions; the running

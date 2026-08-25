@@ -105,8 +105,8 @@ resolving into RFC1918 or the tailnet range. Nothing in the daily path needs a
 privilege: `wk` never calls `sudo` on Linux.
 
 **macOS uses the same proxy**, running inside the podman VM as a `systemd
---user` service. It used to be rootful podman plus nftables; that is gone, and
-the `WK_SANDBOX` comment in `targets/container.sh` records why.
+--user` service. The `WK_SANDBOX` comment in `targets/container.sh` says why
+there is one sandbox model and not two.
 
 Linux does not copy the macOS design because it cannot. Rootless podman has no
 filterable forward path — its network helper re-emits container traffic from

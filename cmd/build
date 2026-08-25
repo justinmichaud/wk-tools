@@ -389,9 +389,9 @@ if [ -n "$DRY" ]; then
     # runs its *own* copy of build-in-target.sh (bind-mounted for a container,
     # rsynced for a guest or a machine), and a copy that predates WK_DRY_RUN
     # does not decline: it ignores an environment variable it has never heard
-    # of and builds. Measured the hard way on 2026-08-19 -- a dry run against a
-    # build box with a stale tree started a real build-webkit in a workspace
-    # somebody was already building in, and rewrote that build directory's
+    # of and builds -- so a dry run against a build box with a stale tree starts
+    # a real build-webkit in a workspace somebody is already building in, and
+    # rewrites that build directory's
     # options file. A flag an old copy ignores is a flag that builds.
     _bit="$(t_tools "$NAME")/build/build-in-target.sh"
     if ! t_exec "$NAME" grep -q WK_DRY_RUN "$_bit" 2>/dev/null; then
@@ -505,8 +505,8 @@ RUNNING=$(printf 'state=running\nconfig=%s\narch=%s\nstarted=%s\nlog=%s\n' \
 printf '%s\n' "$RUNNING" > "$STATUS"
 printf '%s\n' "$RUNNING" | t_state_put "$NAME"
 
-# ccache is on. jscb-configure used to pass --no-use-ccache unconditionally,
-# which meant the shared cache never did anything for JSC builds.
+# ccache is on: `--no-use-ccache` passed unconditionally by jscb-configure means
+# the shared cache does nothing for JSC builds.
 ARCH_LABEL=$(arch_label "$ARCH")
 info "building $CONFIG${ARCH_LABEL:+ ($ARCH_LABEL)} in '$NAME' with -j$JOBS (nice $NICE)"
 log  "  log: $LOG"

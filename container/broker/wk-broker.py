@@ -220,9 +220,9 @@ image_ids
 # daemon and `reach_without_tailnet` reads two conf files and may do an mDNS
 # lookup. Run together under one ceiling, a slow or wedged tailscaled swallowed
 # the bridge answer as well, and the reply said "no route derived" about a board
-# whose address is pinned by MAC in a file. Observed here twice in a row with
-# different answers, 2026-08-24 -- which is exactly the kind of intermittent
-# that gets blamed on the hardware.
+# whose address is pinned by MAC in a file -- two runs in a row give different
+# answers, which is exactly the kind of intermittent that gets blamed on the
+# hardware.
 _REACH_TAILNET_SH = f'''
 set -euo pipefail
 WK_ROOT={json.dumps(WK_ROOT)}
@@ -780,8 +780,8 @@ class Broker:
         # task. As a task it was cancelled the instant `wait()` returned, so
         # everything the command printed in its last 400 ms went to the log and
         # not to the caller -- which for `wk boot --status` is the entire
-        # output, since it prints and exits. Measured here, 2026-08-24: the
-        # exit code arrived and not one line of the reason for it.
+        # output, since it prints and exits: the exit code arrives and not one
+        # line of the reason for it.
         waiter = asyncio.ensure_future(proc.wait())
         pos = 0
         deadline = time.time() + RUN_TIMEOUT

@@ -47,8 +47,7 @@ WHAT THE RESCUE IS ACTUALLY FOR: NOBODY TOUCHES THE BOARDS
 
 WHY THE THREE PIS ARE ARRANGED DIFFERENTLY
 
-  Decided 2026-08-24, in this order of priority (CLAUDE.md carries the binding
-  statement):
+  In this order of priority (CLAUDE.md carries the binding statement):
 
     1  the quality of the result. The measured system's storage and bus are
        part of the measurement.
@@ -112,16 +111,16 @@ rpi5 -- workstation (Raspberry Pi 5, WiFi only)
   host mode   its own Ubuntu install on the NVMe. Never written by wk.
   bench mode  a USB stick (any stick comfortably over the ~4.6 GB image; the
               one in it is 29 GB) holding a system from `wk sysimage build
-              perf-linux-rpi5`. The firmware one-shot picks the stick for one
-              boot and the board hands itself back -- nothing physical after
-              the stick is first written.
-  network     WiFi is its only link, so the bench system bakes the credential
-              in at build time (read off the running board, never through a
-              log) and announces itself as rpi5-perf.local over mDNS.
+              webkit-2.52-yocto-rpi5-64`. The firmware one-shot picks the stick
+              for one boot and the board hands itself back -- nothing physical
+              after the stick is first written.
+  network     WiFi is its only link. The bench system joins the tailnet on
+              first boot from a key seeded onto the card (meta-wk-tailnet), so
+              it is reached by its tailnet name like everything else here.
 
 rpi4 -- bench-device (Raspberry Pi 4B, 4 GB, wired)
-  bench mode  a USB stick holding `perf-linux-rpi4` (or a downstream yocto
-              system). Armed on the medium itself: one byte of the stick's
+  bench mode  a USB stick holding `webkit-2.52-yocto-rpi4-64`. Armed on the
+              medium itself: one byte of the stick's
               MBR flips it bootable/unbootable, so arming needs no firmware
               write per run.
   rescue      the SD card, holding the WebKit Dev@CI Yocto image -- what the
@@ -131,8 +130,8 @@ rpi4 -- bench-device (Raspberry Pi 4B, 4 GB, wired)
               usb-first`): with the default SD-first order, a written stick
               never boots and the board comes up looking normal on the wrong
               root.
-  network     wired, and since 2026-08-22 *behind* tailnet-bridge-generic
-              rather than on the house LAN: the phone's segment is the only
+  network     wired, and *behind* tailnet-bridge-generic rather than on the
+              house LAN: the phone's segment is the only
               thing on the board's L2, so it answers at 10.99.1.10 through a
               ProxyJump and raspberrypi4-64.local resolves nowhere. That
               address is the bridge's reservation against the board's MAC,
@@ -149,8 +148,8 @@ rpi3 -- bench-device (Raspberry Pi 3, armv7l, 931 MB)
               limitation: its Ethernet is a USB device, so a bench root on a
               stick would share a bus with the traffic the benchmark
               generates. See WHY THE THREE PIS ARE ARRANGED DIFFERENTLY above.
-              (The USB-boot OTP fuse is reported already blown, which this
-              design no longer needs either way -- it arms in stage 2.)
+              (The USB-boot OTP fuse is reported already blown; this design
+              does not need it either way -- it arms in stage 2.)
   rescue      a rescue-role system on that card, never measured, whose job is
               to stay up, stay on the tailnet, and write and recover the
               bench system beside it.
@@ -204,8 +203,8 @@ tailnet bridges -- the out-of-band path (see `wk help bridge`)
   camera streaming to watch a screen remotely. The phone, dock and adapter are
   the hardware; `wk bridge setup <name>` does the rest. Two of them:
 
-    tailnet-bridge-generic     the PinePhone, live since 2026-08-22 -- pmOS on
-      (PinePhone)              its internal storage, on the tailnet as
+    tailnet-bridge-generic     the PinePhone -- pmOS on its internal storage,
+      (PinePhone)              on the tailnet as
                                tag:bridge, routing 10.99.1.0/24 for the
                                rpi3/rpi4 cable, with the rpi4 on its reserved
                                10.99.1.10. Its dock must have ethernet on the

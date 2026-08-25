@@ -9,9 +9,9 @@ set -u
 command -v stress-ng >/dev/null || { echo "installing stress-ng..."; apt-get install -y stress-ng >/dev/null 2>&1; }
 
 # vcgencmd (temp/clock/throttle) needs /dev/vcio, which is root-only. Without sudo
-# it returns nothing, temp/throttle monitoring is blank, and the empty $t used to
-# make the awk comparison below fail with a syntax error (harmless, but looks like
-# an error). Warn loudly — stress-ng itself still runs and its exit code is valid.
+# it returns nothing, temp/throttle monitoring is blank, and an empty $t makes
+# the awk comparison below fail with a syntax error (harmless, but looks like an
+# error). Warn loudly — stress-ng itself still runs and its exit code is valid.
 [ "$(id -u)" -eq 0 ] || echo "WARNING: not running as root — vcgencmd sensors need sudo; temp/throttle will be blank. For full monitoring: sudo bash $0"
 
 echo "Clock: $(vcgencmd measure_clock arm 2>/dev/null | cut -d= -f2 | awk '{printf "%.0f MHz",$1/1e6}')   throttled: $(vcgencmd get_throttled 2>/dev/null)"

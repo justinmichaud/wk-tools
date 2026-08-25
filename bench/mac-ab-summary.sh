@@ -68,9 +68,9 @@ emit ""
 # Contaminated arms, named before the numbers rather than after them.
 #
 # The autorun writes a fifth column per run: `clean`, or `scanned` if a
-# software-update scan timestamp moved across that arm (2026-08-23 -- one did,
-# through the middle of round 1 arm A, while every preference said updates were
-# off). An arm with a scan in it is still a number, and it is still averaged in
+# software-update scan timestamp moved across that arm. It happens with every
+# preference saying updates are off. An arm with a scan in it is still a number,
+# and it is still averaged in
 # below, because dropping data on the strength of a heuristic is its own way to
 # get a wrong answer. But it is said out loud and said first: a difference that
 # lives entirely in a scanned arm is not a difference between builds.
@@ -91,9 +91,9 @@ fi
 # Per-arm numbers, read out of the results themselves rather than out of the run
 # log: the log is a transcript and the result is the record.
 #
-# One python per arm, handed every path at once. The first version put a heredoc
-# inside a command substitution inside a `while read` fed by a pipe -- three
-# things competing for one stdin -- and printed nothing at all for either arm
+# One python per arm, handed every path at once. A heredoc inside a command
+# substitution inside a `while read` fed by a pipe is three things competing for
+# one stdin, and prints nothing at all for either arm
 # while the comparison below worked perfectly. A summary that silently omits its
 # own numbers is worse than one that fails.
 arm_numbers() {  # $1 = comma-separated result.json paths
@@ -164,8 +164,8 @@ done
 #
 # The missing half of every "not significant". A null result means nothing on its
 # own: it is only informative next to the smallest difference the run had the
-# power to find. Measured on this lane 2026-08-24 -- 0.31% run-to-run sd, so
-# three rounds a side resolve only about 0.75%. A patch worth 0.4% is invisible
+# power to find. On this lane, 0.31% run-to-run sd, so three rounds a side
+# resolve only about 0.75%. A patch worth 0.4% is invisible
 # here, and "not significant" is the wrong word for it.
 #
 # The decomposition behind this is worth stating because it is counter-intuitive.

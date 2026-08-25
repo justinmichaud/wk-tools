@@ -27,12 +27,12 @@ TAILNET BRIDGES
                                on the house network reaching either.
 
   `wk bridge ls` lists what is declared and what answers. Its state column has
-  a word for the case that used to hide: a phone that answers with a host key
+  a word for the case that otherwise hides: a phone that answers with a host key
   that is not the one on record reads `key-changed`, not `unreachable`. A
   reflash changes the key, so that is the *normal* state of a freshly installed
-  bridge -- and reporting it as absence sent the diagnosis at the phone's radio
-  instead of at known_hosts (seen 2026-08-22, with both bridges reading
-  `unreachable` while one of them was up, provisioned and healthy). Drop the
+  bridge -- and reporting it as absence aims the diagnosis at the phone's radio
+  instead of at known_hosts, for a bridge that is up, provisioned and healthy.
+  Drop the
   stale line with `ssh-keygen -R <name>`; anything that is not a reflash is
   worth reading first.
 
@@ -60,9 +60,9 @@ THE TWO LANES
   option. A bridge writes leases, logs and tailscale state for months, and a
   microSD is the part of a phone most likely to wear out or work loose -- so the
   card is the rescue copy, never the system. Writing the bridge image to the card
-  and letting the phone boot that is quicker to reach and used to be offered
-  here; it is gone, because it left the bridge living on the one component most
-  likely to fail. GETTING IT ONTO INTERNAL STORAGE below has the mechanism.
+  and booting the phone from it is quicker to reach and is not offered here: it
+  leaves the bridge living on the one component most likely to fail. GETTING IT
+  ONTO INTERNAL STORAGE below has the mechanism.
 
   A phone Jumpdrive does not cover is refused by name rather than quietly
   falling back to the card. Today that means the Librem 5, and the refusal names
@@ -150,7 +150,7 @@ THE TWO LANES
                      which is the recovery path when WiFi and ssh are both gone.
                      Password authentication over the network is off.
     mDNS             avahi, with the service enabled in the image -- one of
-                     several ways in, and no longer the one everything rests on.
+                     several ways in, and not the one everything rests on.
                      See FIRST CONTACT below: an access point that does not
                      forward multicast between its radios breaks mDNS while
                      leaving the phone perfectly reachable, which is a failure
@@ -182,10 +182,10 @@ FIRST CONTACT, AND WHY IT IS NOT JUST mDNS
   therefore has to land in a window while somebody is at the phone; every run
   after it can be driven from anywhere, because by then the phone stays up.
 
-  mDNS was that something, and it was too fragile to be the only one. The
-  failure that settled it (2026-08-21): the phone's avahi was running and
-  publishing `tailnet-bridge-generic.local` correctly -- a unicast mDNS query
-  aimed straight at its address returned the right answer -- but the access point
+  mDNS is too fragile to be the only one. The failure it produces: the phone's
+  avahi is running and publishing `tailnet-bridge-generic.local` correctly -- a
+  unicast mDNS query aimed straight at its address returns the right answer --
+  but the access point
   does not forward multicast between its 2.4 GHz and 5 GHz radios, and the phone
   was on the band the workstation was not. Unicast worked the whole time;
   multicast never arrived. No amount of code here fixes an access point.
@@ -216,12 +216,12 @@ FIRST CONTACT, AND WHY IT IS NOT JUST mDNS
   Two things about it were learned the hard way and are worth not re-learning.
 
   It asks in parallel with a one-second deadline, so a round costs a second
-  rather than a second per host: the first version asked over ssh instead --
-  two accounts, two handshakes, two timeouts each -- and took 100 seconds.
+  rather than a second per host. Asking over ssh instead -- two accounts, two
+  handshakes, two timeouts each -- takes 100 seconds.
 
   And the sweep that populates the neighbour table is bounded to 32 at a time.
-  254 pings at once with a one-second timeout gave a false negative on a phone
-  that had been up for an hour, because that many simultaneous ARP resolutions
+  254 pings at once with a one-second timeout give a false negative on a phone
+  that has been up for an hour, because that many simultaneous ARP resolutions
   thrash the table; and it is 254 packets across the very link the phone depends
   on, aimed at a radio bridge/devices.sh describes as dropping associations
   under load. The neighbour table is asked *first* and the sweep only happens if
@@ -283,8 +283,8 @@ GETTING IT ONTO INTERNAL STORAGE
   makes this the recoverable path: the eMMC install underneath is untouched, and
   removing the card puts the phone back exactly as it was.
 
-  The build host needs a few packages of its own (kpartx, bmap-tools,
-  python3-venv, python3-yaml). They are not in host/linux/apt.txt because
+  The build host needs a few packages of its own (kpartx, python3-venv,
+  python3-yaml). They are not in host/linux/apt.txt because
   multipath-tools brings a multipathd daemon no other Linux host here wants, so
   the builder asks once, on the machine that needs them.
 
@@ -384,8 +384,8 @@ DECLARING AND PROVISIONING ONE
   a node *advertises* a route. A route first advertised before the policy
   existed stays unapproved forever afterwards, because re-running setup
   re-asserts the same value and `tailscale set` with an unchanged value is a
-  no-op. Seen exactly so on 2026-08-22: policy in place, every check green
-  except the one that matters, `PrimaryRoutes` null. Withdrawing and
+  no-op. It looks like this: policy in place, every check green except the one
+  that matters, `PrimaryRoutes` null. Withdrawing and
   re-advertising forces the evaluation, and `wk bridge setup` now does that by
   itself whenever it finds the route advertised but not primary -- conditional,
   because on a working bridge it would drop the segment for a second for
@@ -434,9 +434,9 @@ THINGS THAT WILL BITE YOU
   the exact symptom of a card that is not there at all: the phone boots its
   internal storage and never mentions the card. PINE64 lists "the microSD card
   is in the wrong slot" first among the reasons a PinePhone will not boot one,
-  which is a good indication of how often it is that. It cost an afternoon here
-  once (2026-08-21), after the image, the write and the SPL offset had all been
-  verified byte for byte and were all fine.
+  which is a good indication of how often it is that -- including after the
+  image, the write and the SPL offset have all been verified byte for byte and
+  are all fine.
 
   Nothing else about SD boot needs configuring, and it is worth knowing that so
   you do not go looking. The A64 boot ROM loads 32 KB from sector 16 of the SD
@@ -475,21 +475,20 @@ THINGS THAT WILL BITE YOU
   And the rule is written *from the adapter's own MAC*, which means a run with
   no adapter enumerated writes neither it nor the address. So an adapter
   plugged in after that run comes up unnamed and unaddressed, and the fix is to
-  run `wk bridge setup` again rather than to wait. This used to claim the
-  interface would be "matched by MAC when it appears"; nothing had been written
-  that could match it.
+  run `wk bridge setup` again rather than to wait. Nothing is written that could
+  match the interface by MAC when it appears, so waiting achieves nothing.
 
   That second run does not need a hand at the phone any more either. udev's
   NAME= only applies when a device appears, so an adapter that is already up
-  cannot be renamed by it -- which is why this used to end with "re-plug the
-  dock, or reboot the phone". A *downed* link can be renamed, so setup now
+  cannot be renamed by it -- which would leave "re-plug the dock, or reboot the
+  phone" as the only advice. A *downed* link can be renamed, so setup
   brings it down, renames it, and hands it back to NetworkManager, and the udev
-  rule is what makes it survive the next boot. Verified across a reboot on
-  2026-08-22: lan0 comes back named and addressed with nothing touched.
+  rule is what makes it survive the next boot: across a reboot, lan0 comes back
+  named and addressed with nothing touched.
 
   If the interface never appears at all, there are three faults and they look
-  identical from the outside. `wk bridge status` now tells them apart, because
-  the guess it used to print sent an afternoon at the wrong one.
+  identical from the outside, and `wk bridge status` tells them apart rather
+  than guessing -- a guess here sends an afternoon at the wrong one.
 
     the port is not in host mode      the dock is refusing a USB Data Role
                                       Swap. Both phones have one port and
@@ -512,8 +511,8 @@ THINGS THAT WILL BITE YOU
   enumerates happily, its downstream ports read `not attached` forever, and
   every host-mode assertion succeeds and changes nothing.
 
-  Both halves of that were measured here on 2026-08-22, which is what makes it
-  a rule rather than a theory. A generic VIA VL813 dock: role swap fine, phone
+  Both halves of that are measured rather than assumed. A generic VIA VL813
+  dock: role swap fine, phone
   charging, hub up, four ports empty, no NIC, unusable. **The PinePhone's own
   dock: works** -- its ethernet is a CoreChips 0fe6:9900 "10/100M LAN" on the
   USB2 path, claimed by `cdc_ether` with nothing extra installed, up at
@@ -531,7 +530,7 @@ THINGS THAT WILL BITE YOU
   100 Mb/s, so only the USB bus speed gives it away -- `wk bridge status`
   prints it and fails on anything below high speed.
 
-  How it happens on a PinePhone (2026-08-22): the dock asks for the data-role
+  How it happens on a PinePhone: the dock asks for the data-role
   swap itself and the phone is host by 3.5 s, but at 13 s the pmOS initramfs
   sets up its USB-gadget network and flips the phy back to peripheral with a hub
   attached. EHCI then fails for a minute and gives up at 77 s, the port falls to

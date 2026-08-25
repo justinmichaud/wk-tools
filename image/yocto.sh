@@ -239,7 +239,7 @@ yocto_check_target() {
         conf_bblayers_path = rpi/bblayers.conf
         conf_local_path = rpi/local-$YOC_TARGET.conf
         image_basename = $YOC_IMAGE
-        image_types = tar.xz wic.xz wic.bmap
+        image_types = tar.xz wic.xz
         patch_file_path = meta-openembedded_and_meta-webkit.patch
 
     The sections that do exist here are:
@@ -418,9 +418,9 @@ yocto_wait() {
 # faster, but it is an implementation detail of one target -- and this same
 # import has to work the day the build runs in the macOS podman VM.
 #
-# Not `t_exec <ws> cat` either, which was the first attempt: that goes through
-# an interactive-shell wrapper and is not a byte pipe. A 1396-byte test image
-# arrived as 1399 bytes and xz refused it, which is why t_pull exists.
+# Not `t_exec <ws> cat` either: that goes through an interactive-shell wrapper
+# and is not a byte pipe -- a 1396-byte test image arrives as 1399 bytes and xz
+# refuses it, which is why t_pull exists.
 yocto_import() {
     local ws="$1" target="$2" recipe="$3" id="$4"
     local dir src_dir wic
@@ -444,19 +444,6 @@ yocto_import() {
     xz -dc "$dir/image.wic.xz" > "$dir/disk.img" \
         || die "the image copied out of '$ws' is not valid xz"
     rm -f "$dir/image.wic.xz"
-
-    # The compressed wic and its block map, which is what makes writing a card
-    # fast: bmaptool sends the 573 MB compressed image instead of the 4 GB raw
-    # one and writes only the blocks the map says are in use, checksumming each
-    # against the map as it goes. It needs a seekable file, so it cannot work on
-    # a stream -- which is exactly why the compressed original has to be kept
-    # rather than regenerated. boot/disk.sh picks the path.
-    local wic_xz="$src_dir/$recipe.wic.xz" bmap="$src_dir/$recipe.wic.bmap"
-    if t_exec "$ws" test -f "$bmap"; then
-        info "importing $recipe.wic.xz and its block map (the fast write path)"
-        t_pull "$ws" "$wic_xz" "$dir/disk.wic.xz" || die "could not import the compressed image"
-        t_pull "$ws" "$bmap" "$dir/disk.bmap" || die "could not import the block map"
-    fi
 
     # The rootfs tarball as well. Not needed to write a disk, and kept anyway:
     # a tarball is the honest archival form of a rootfs -- readable without a
@@ -556,9 +543,8 @@ yocto_build() {
     # and `webkit` builds the toolchain on the way through (build-webkit's
     # --cross-target does that itself). So the stages are a *depth*, not a
     # pipeline this end has to sequence -- which is what makes `--detach`
-    # honest. An earlier version spawned a list of stages and returned after
-    # the first, so a detached `--stage image` would have synced the layers and
-    # stopped.
+    # honest. Spawning a list of stages and returning after the first means a
+    # detached `--stage image` syncs the layers and stops.
     stage="${stage:-image}"
     case "$stage" in
         layers|fetch|image|toolchain|webkit) ;;
@@ -741,11 +727,8 @@ EOF
     install_disk_id
     retarget_root "$SEED"
     apply_cmdline_append "$SEED"
+    apply_config_append "$SEED"
     rm -rf "$SEED"; SEED=""
-
-    # After the edits, so the compressed copy describes the image that is
-    # actually in the store rather than what came out of bitbake.
-    refresh_fast_path "$dir"
 
     info "hashing the image"
     local sha; sha=$(sha256sum "$dir/disk.img" | cut -d' ' -f1)
@@ -762,7 +745,7 @@ EOF
     # `watchdog` is here rather than looked up from the profile because the
     # image is what is booting and its profile may have changed since; `wk boot`
     # reads it to say how long an unclaimed machine takes to hand itself back.
-    # `branch_remote` is here because a branch name alone no longer says which
+    # `branch_remote` is here because a branch name alone does not say which
     # repository a system came from -- wpe-2.46 is the downstream WPE repo,
     # webkitglib/2.48 is upstream WebKit.
     {
@@ -787,14 +770,6 @@ wk_tools=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
 disk_bytes=$(file_bytes "$dir/disk.img")
 disk_sha256=$sha
 EOF
-        if [ -f "$dir/disk.bmap" ]; then
-            cat <<EOF
-wic_xz=disk.wic.xz
-bmap=disk.bmap
-wic_xz_bytes=$(file_bytes "$dir/disk.wic.xz")
-wic_of=$sha
-EOF
-        fi
         if [ -f "$dir/rootfs.tar.xz" ]; then
             cat <<EOF
 rootfs_tar=rootfs.tar.xz

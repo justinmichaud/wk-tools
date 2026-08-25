@@ -41,8 +41,8 @@ REQUIRED_DISTRO_FEATURES = "systemd"
 SYSTEMD_SERVICE:${PN} = "tailscaled.service wk-tailnet-join.service"
 
 # tailscaled programs the host firewall on startup. The images this layer is
-# built into carry iptables and no nft (checked on the running rpi4 image,
-# 2026-08-24); naming it here is what keeps that true rather than incidental.
+# built into carry iptables and no nft; naming it here is what keeps that true
+# rather than incidental.
 RDEPENDS:${PN} += "iptables"
 
 # Prebuilt, static, and already stripped: the three QA checks that exist for

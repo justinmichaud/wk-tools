@@ -30,9 +30,9 @@ SINCE_DATE=$(date -v-7d +%Y-%m-%d 2>/dev/null || date -d '7 days ago' +%Y-%m-%d)
 
 REPO_FULL=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 
-# The GitHub login, asked of GitHub. It used to be `$USER` -- the *unix*
-# account name, which is the same string here and is not the same string
-# everywhere, and which under `set -u` is not even guaranteed to be set (an
+# The GitHub login, asked of GitHub. Not `$USER` -- the *unix* account name,
+# which happens to match here and does not everywhere, and which under `set -u`
+# is not even guaranteed to be set (an
 # agent or a cron job inherits no login shell). Every search below is scoped by
 # it, so getting it wrong does not fail: it reports somebody else's week, or an
 # empty one, with no sign that anything went wrong.

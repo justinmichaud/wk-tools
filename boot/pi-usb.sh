@@ -19,12 +19,11 @@
 #   permanently, and arming is whether the stick presents a *bootable
 #   partition* for the firmware to find -- which is one byte of the MBR.
 #
-# **Not the second-stage file, and this distinction cost a power cycle.** The
-# first version of this driver disarmed by renaming `start4.elf` aside, on the
-# reasoning that a device the firmware cannot boot is a device it skips. That
-# reasoning was drawn from the right observation and the wrong state: what was
-# actually watched skipping, on this board on 2026-08-20, was a stick carrying
-# a single **ext4** partition and no FAT at all. A stick with a perfectly valid
+# **Not the second-stage file, and the distinction is worth a power cycle.**
+# Disarming by renaming `start4.elf` aside rests on "a device the firmware
+# cannot boot is a device it skips" -- which is drawn from the right observation
+# and the wrong state: what is watched skipping is a stick carrying a single
+# **ext4** partition and no FAT at all. A stick with a perfectly valid
 # FAT boot partition that happens to be missing `start4.elf` is a different
 # thing entirely, and the firmware **halts** on it -- the same halt, reached
 # from a new direction, and the board went silent mid-afternoon.
@@ -185,9 +184,9 @@ b_self_disarm_sh() {
     # **No single quote may appear in what this returns.** It is interpolated
     # into a systemd `ExecStart=/bin/sh -c '...'`, which is single-quoted, so
     # one of its own would close that string early and hand systemd three
-    # fragments instead of one command. The first version emitted
-    # `printf '\203'` and did exactly that -- caught by reading the unit out of
-    # a built image rather than by the board failing to come back, which is the
+    # fragments instead of one command: `printf '\203'` does exactly that. Read
+    # the unit out of a built image rather than waiting for the board to fail to
+    # come back, which is the
     # only other way it was going to be found. wk selftest asserts it now.
     printf "%s" "b=/boot/firmware; [ -d \$b ] || b=/boot; \
 p=\$(findmnt -no SOURCE \$b) && \

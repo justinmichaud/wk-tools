@@ -2,8 +2,8 @@
 #
 # Why this is not a layer on the wkdev SDK image
 # ---------------------------------------------
-# It was, for a while, and every problem that cost a debugging cycle came from
-# that decision. The SDK image is Ubuntu 26.04: GCC 15, Python 3.14, glibc 2.43.
+# Every problem worth a debugging cycle here comes from trying. The SDK image is
+# Ubuntu 26.04: GCC 15, Python 3.14, glibc 2.43.
 # Yocto scarthgap is from 2024 and its supported build hosts stop at Ubuntu
 # 24.04. Five distinct failures came out of the gap, in this order:
 #

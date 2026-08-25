@@ -10,6 +10,7 @@
 #                             cache in the honest sense.
 #   images/<id>/disk.img      the built image
 #   images/<id>/manifest      what it is, written LAST -- this is the gate
+
 #
 # The manifest being written last is the whole publishing protocol, and it is
 # rule 2 (crash-only) applied here: a build killed at any point leaves a
@@ -79,13 +80,6 @@ image_build_locations() {
 
 image_store_dir() { echo "$(_image_root)/images"; }
 
-# The compressed original and its block map, when the builder kept them. The
-# yocto and pmos builders have them (bitbake's wic output; xz plus `bmaptool
-# create`); the distro builder edits a raw image in place and has nothing to
-# map. Both optional -- their absence picks the dd path in boot/disk.sh, it is
-# not an error.
-image_wic()       { echo "$(image_store_dir)/$1/disk.wic.xz"; }
-image_bmap()      { echo "$(image_store_dir)/$1/disk.bmap"; }
 image_cache_dir() { echo "$(_image_root)/cache/images"; }
 image_dir()       { echo "$(image_store_dir)/$1"; }
 image_disk()      { echo "$(image_store_dir)/$1/disk.img"; }
@@ -157,35 +151,7 @@ image_verify() {
     return 1
 }
 
-# Whether the compressed copy still describes the image lying beside it.
-#
-# They are two files and only one of them is what the builder produced. The
-# yocto import decompresses bitbake's wic into disk.img and *then* edits it --
-# the fleet integration, the root retarget -- so disk.wic.xz can easily
-# describe a system that no longer exists. The bmap write path reads only the
-# compressed copy and never disk.img, so writing from a stale one succeeds,
-# reports success, and puts a disk on a board with none of that work on it.
-#
-# So the fast path is opt-in by provenance rather than by existence: `wic_of`
-# records the disk.img sha256 the compressed copy was derived from, and only an
-# exact match takes it. An image built before this field existed has no
-# `wic_of` and takes the slow path -- the safe direction to be wrong in.
-image_fast_path_ok() {
-    local id="$1" of want
-    of=$(manifest_get "$id" wic_of 2>/dev/null) || return 1
-    [ -n "$of" ] || return 1
-    want=$(manifest_get "$id" disk_sha256) || return 1
-    [ "$of" = "$want" ]
-}
 
-# What the image's kernel command line says its root filesystem is.
-#
-# Read out of the image's own boot partition with mtools at a byte offset -- no
-# mount, no privilege, the same trick the rest of this file relies on. Ubuntu's
-# raspi images keep cmdline.txt under the os_prefix directory the firmware
-# selects, so both places are tried.
-#
-# Prints the raw `root=` value, or nothing if there is no cmdline to read.
 # The byte offset of the image's boot partition, from its own partition table.
 # Factored out because three readers now want it and each one computing it again
 # is three chances to disagree about which partition is the boot one.
@@ -197,6 +163,14 @@ image_boot_offset() {
     echo "$offset"
 }
 
+# What the image's kernel command line says its root filesystem is.
+#
+# Read out of the image's own boot partition with mtools at a byte offset -- no
+# mount, no privilege, the same trick the rest of this file relies on. Ubuntu's
+# raspi images keep cmdline.txt under the os_prefix directory the firmware
+# selects, so both places are tried.
+#
+# Prints the raw `root=` value, or nothing if there is no cmdline to read.
 image_root_spec() {
     local id="$1" disk offset p
     disk=$(image_disk "$id"); [ -f "$disk" ] || return 0
@@ -298,7 +272,6 @@ image_check_root() {
 # sitting in a file and can be read in a second -- rather than discovered on a
 # board.
 #
-# It first happened on 2026-08-20 and cost the rpi4 two power cycles.
 #
 #   image_check_boot_files <id> <machine>
 image_check_boot_files() {
@@ -367,10 +340,10 @@ image_root_word() {
 # concurrent builds would race on the same rubble-cleanup and on the shared
 # base download.
 #
-# The general lock (hold_lock, lib/common.sh) rather than a flock of its own,
-# which is what this used to be. Two reasons, and the first is not a tidiness
-# argument: macOS ships no flock(1) at all, so the one command in here that a
-# Mac can run -- writing a disk attached to a fleet machine -- was locking
+# The general lock (hold_lock, lib/common.sh) rather than a flock of its own.
+# Two reasons, and the first is not a tidiness argument: macOS ships no flock(1)
+# at all, so the one command in here that a Mac can run -- writing a disk
+# attached to a fleet machine -- would be locking
 # nothing, or dying, depending on what was installed. The second is that a
 # flock is held by the file descriptor and therefore by every process that
 # inherits it, which is the property that made it wrong for workspaces too.

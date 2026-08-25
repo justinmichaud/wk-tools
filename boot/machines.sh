@@ -91,9 +91,9 @@ machine_load() {
     MACH_ROLE=workstation
     # Which host can drive this machine: `any` (reached over ssh from
     # anywhere), or an OS name for a machine that answers only for itself
-    # (the mbp) or needs host-only tooling (tart). Not cosmetic:
-    # `wk boot mbp --status` run from Linux used to probe the *driving*
-    # machine and report a confident answer about the wrong computer.
+    # (the mbp) or needs host-only tooling (tart). Not cosmetic: without it
+    # `wk boot mbp --status` run from Linux probes the *driving* machine and
+    # reports a confident answer about the wrong computer.
     MACH_OS=any
     # shellcheck disable=SC1090
     . "$f"
@@ -196,8 +196,7 @@ image_hostname() {
 # at the same address as the last. So the second image ever booted on a machine
 # arrived with a changed key, `accept-new` refused it (that mode accepts keys
 # it has never seen, not keys that have moved), and `wk boot --status` reported
-# a running, healthy, pingable board as unreachable. Watched happen on the
-# rpi4, 2026-08-20.
+# a running, healthy, pingable board as unreachable.
 #
 # So nothing is pinned here. That is not a shrug: a key with no continuity
 # across builds cannot authenticate anything, and pinning one can only produce
@@ -327,7 +326,7 @@ machine_armed_barrier() { # <what this command would do>
 # `wk boot`, `wk pi` and `wk status`'s fleet block all die on a stock Mac. It
 # went unnoticed because `bash` here is homebrew's 5.2 and because the parse
 # check in `cmd/selftest` picks files by shebang -- which no sourced library
-# has. Found 2026-08-25 by an agent that ran it under /bin/bash.
+# has, so nothing else catches it until this runs under /bin/bash.
 _b_probe_sh=$(cat <<'EOS'
 cat /etc/wk-image 2>/dev/null
 rd=$(findmnt -no SOURCE / 2>/dev/null || true)

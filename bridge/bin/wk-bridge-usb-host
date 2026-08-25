@@ -59,7 +59,7 @@ done
 # A downstream NIC can enumerate perfectly and still be forty times too slow,
 # and nothing above notices because host mode is *correct* in that state.
 #
-# What happens on a PinePhone (measured 2026-08-22): the dock asks for the data
+# What happens on a PinePhone: the dock asks for the data
 # role swap itself and the phone is host by 3.5 s, but at 13 s the pmOS
 # initramfs sets up its USB-gadget network and flips the phy back to peripheral
 # (`Changing dr_mode to 2`) with a hub physically attached. EHCI then spends a

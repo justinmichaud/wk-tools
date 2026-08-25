@@ -254,11 +254,11 @@ cmd_deploy() {
         || die "'$ws' is not a workspace this machine knows (wk ls)"
 
     # Somewhere to stage a payload, needed by both transports below -- so it is
-    # created before the branch chooses one. It was created inside the
-    # built-product-archive path once, which left the tar path pulling into
-    # "$PI_TMP/..." with PI_TMP unset: podman was asked to write `/wk-webkit.tgz`
-    # and refused to make `/` writable, which is a confusing way to be told a
-    # variable is empty.
+    # created before the branch chooses one. Created inside the
+    # built-product-archive path, it leaves the tar path pulling into
+    # "$PI_TMP/..." with PI_TMP unset: podman is asked to write
+    # `/wk-webkit.tgz` and refuses to make `/` writable, which is a confusing
+    # way to be told a variable is empty.
     PI_TMP=$(mktemp -d)
     wk_atexit _pi_tmp_cleanup
 
@@ -270,8 +270,8 @@ cmd_deploy() {
     # build image did not have -- and cannot be given at runtime, because
     # ports.ubuntu.com is not in the egress allowlist and widening that to
     # install a zip is the wrong trade. container/yocto/Containerfile carries
-    # `zip` now, so a workspace made after 2026-08-22 takes the documented path;
-    # one made before it takes the tar below rather than being unusable.
+    # `zip`, so a workspace built from it takes the documented path; one
+    # without takes the tar below rather than being unusable.
     if ! t_exec "$ws" bash -c 'command -v zip >/dev/null' 2>/dev/null; then
         warn "the build container has no 'zip', so built-product-archive cannot run.
   Falling back to a plain tar of bin/ and lib/ -- the same bytes, without the
@@ -327,10 +327,10 @@ cmd_deploy() {
 # `Release` with no suffix is slot "a" and the historical path, so every
 # existing invocation and every deployed board keeps working untouched.
 #
-# Slots exist because the comment below used to end "and a board only ever
-# holds one build", which made an A/B of two WebKits a reflash-per-side
-# affair -- minutes of copying between every pair of numbers, on a board whose
-# thermal state drifts over exactly that timescale. Two builds side by side
+# Slots exist because a board that holds one build makes an A/B of two WebKits
+# a reflash-per-side affair -- minutes of copying between every pair of numbers,
+# on a board whose thermal state drifts over exactly that timescale. Two builds
+# side by side
 # turn that into an alternation, which is the design that actually controls
 # for drift (see cmd_bench's --ab).
 #
@@ -417,10 +417,10 @@ pi_skeleton() {
     A Yocto image has no apt either; the tree has to be copied in instead."
     # Detached on the board, with a log, and resumable -- for the same reason
     # `wk build` is: this is minutes of work over a channel that can drop, and
-    # the first attempt was killed at "Updating files: 42%" by a timeout on
-    # *this* end. The objects survived that (2.8 GB, right branch) and only the
-    # working tree was half-written, so a re-run completes the checkout instead
-    # of fetching it all again.
+    # a checkout killed at "Updating files: 42%" by a timeout on *this* end
+    # leaves the objects intact (2.8 GB, right branch) with only the working
+    # tree half-written, so a re-run completes it instead of fetching it all
+    # again.
     #
     # --quiet on both: git's progress meter emitted several thousand
     # "Updating files: N%" lines into the log, which buries everything else.
@@ -538,8 +538,8 @@ signal.pause()'
 
 # Save the run where `wk bench compare` will find it.
 #
-# It used to print run-benchmark's JSON to stdout and stop there, which made an
-# on-board number a thing you had to keep in a terminal scrollback. The store is
+# Printing run-benchmark's JSON to stdout and stopping there makes an on-board
+# number a thing you have to keep in a terminal scrollback. The store is
 # the only place `wk bench compare` looks (BENCH_DIR, cmd/bench), so a result
 # that never lands there cannot be compared against anything -- and comparing
 # two runs is most of why anyone takes one. That gap is what an A/B of a kernel
@@ -731,9 +731,8 @@ cmd_bench() {
     # change against itself -- and a ruinous thing to do by accident, because
     # the result looks exactly like a real one and lands in the same store.
     #
-    # This used to warn and carry on, which is the shape that loses the
-    # distinction: a warning scrolls past, and six months later the number is
-    # just a number. cmd/bench makes the same call for the same reason (a
+    # Warning and carrying on is the shape that loses the distinction: a
+    # warning scrolls past, and six months later the number is just a number. cmd/bench makes the same call for the same reason (a
     # gpu-class plan on a machine with no GPU is refused there too), and
     # --force is the one way through in both.
     if [ -z "$connected" ] && [ -z "${WK_FORCE:-}" ]; then
@@ -1122,8 +1121,8 @@ cmd_boot_order() {
     #
     # onboard is preferred where it exists, because it edits the *running*
     # EEPROM image and so changes only what was asked for; recovery replaces
-    # the whole image with a pinned release. This used to refuse outright when
-    # onboard was missing, which grounded the fleet's own rpi4.
+    # the whole image with a pinned release. Refusing outright when onboard is
+    # missing grounds a board that has no rpi-eeprom-config.
     local method=onboard
     if ! rsh 'command -v rpi-eeprom-config >/dev/null 2>&1'; then
         method=recovery
@@ -1426,8 +1425,7 @@ if ! grep -qxF "$TSIP" "$PI_FILE" 2>/dev/null; then
 fi
 
 # The file *is* the policy: the egress proxy re-reads it on every request, so
-# a device added here is reachable immediately with nothing to reload. (The
-# nftables replay this used to do is gone with the packet filter itself.)
+# a device added here is reachable immediately with nothing to reload.
 info "allowed $TSIP (the egress proxy re-reads $PI_FILE per request)"
 
 cat >&2 <<EOF

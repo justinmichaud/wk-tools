@@ -1,6 +1,10 @@
-# --- wk sysimage: perf-linux-rpi4 -----------------------------------------------------
-# Appended by `wk sysimage build` to the base image's own config.txt. The base's
-# copy is what makes the base bootable, so this only ever adds.
+# --- wk sysimage: webkit-2.52-yocto-rpi4-64 ---------------------------------
+# Appended by `wk sysimage build` to the image's own config.txt (the firmware
+# reads it off the boot partition whatever the OS is). Only ever adds: the
+# image's own copy is what makes it bootable.
+#
+# What is in here is what this *board* needs in order to be measured, so it
+# belongs to whichever profile is measured on it.
 
 [all]
 # Pin the ARM clock, because a benchmark measures whatever the clock was doing.
@@ -19,14 +23,16 @@ force_turbo=1
 arm_freq=1500
 arm_freq_min=1500
 
-# 1500 and not 1800, deliberately. 1800 needs `arm_boost=1` -- which the Ubuntu
-# base sets in its own `[pi4]` block -- and the boost clock is the one this
-# board is least able to hold: a Pi 4 with no heatsink throttles under sustained
-# load, and a run that throttles partway is worse than a slower run that does
-# not, because it is quietly two measurements. 1500 MHz is this board's rated
-# base clock, so it is the fastest number it can be expected to hold flat.
+# 1500 and not 1800, deliberately. 1800 needs `arm_boost=1`, and the boost clock
+# is the one this board is least able to hold: a Pi 4 with no heatsink throttles
+# under sustained load, and a run that throttles partway is worse than a slower
+# run that does not, because it is quietly two measurements. 1500 MHz is this
+# board's rated base clock, so it is the fastest number it can be expected to
+# hold flat.
 #
-# `[all]` comes after the base's `[pi4]` section, so this wins.
+# Set here rather than assumed absent: whether a given image's config.txt turns
+# boost on is not something to find out from a benchmark result. `[all]` is
+# appended last, so this wins wherever it is set.
 arm_boost=0
 
 # The overclock deliberately does NOT live here, and must never be written to

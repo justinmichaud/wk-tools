@@ -259,8 +259,8 @@ _reseat() {
 # already hidden just rewrites the same rule and finds it already satisfied.
 #
 # This strips the device's seat tags rather than moving it to a different
-# seat -- ID_SEAT="something-else" was the first attempt, and it doesn't
-# hide the device, it relocates it: logind creates a real seat for
+# seat. ID_SEAT="something-else" does not hide the device, it relocates it:
+# logind creates a real seat for
 # "something-else", and gdm, being seat-aware, starts its own greeter on
 # every seat it finds -- so the result was two live sessions, one on each
 # chip, instead of one. Removing `master-of-seat` (what makes a device
@@ -491,9 +491,9 @@ outputs_power() {
 #        reads sysfs. Holding master sidesteps that bug instead of relying on a
 #        DPMS path this driver doesn't implement.
 #
-#        Holding master is not on its own enough, and for a while it was all
-#        this did: a compositor that holds an output and paints it black is
-#        still scanning out a real mode, so the monitor has a signal and stays
+#        Holding master is not on its own enough: a compositor that holds an
+#        output and paints it black is still scanning out a real mode, so the
+#        monitor has a signal and stays
 #        lit. `outputs_off` below is the other half -- it modesets the outputs
 #        off through wlr-output-management once the compositor is up, which
 #        does reach hardware because it is modesetting rather than fb_blank.
@@ -751,9 +751,9 @@ session_stop() {
     seat_restore
 }
 
-# `session off` used to just be session_stop -- tear everything down and trust
+# `session off` is not just session_stop -- tearing everything down and trusting
 # the kernel's own fbcon to blank the now-masterless outputs. On this board's
-# NVIDIA driver that trust was misplaced: fb_blank stops the console from
+# NVIDIA driver that trust is misplaced: fb_blank stops the console from
 # being redrawn but never reaches real hardware, so whatever frame was last
 # latched in the scanout buffer stayed on the physical monitor indefinitely --
 # invisible to every check that reads sysfs, because sysfs faithfully reported

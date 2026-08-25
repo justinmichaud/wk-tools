@@ -19,7 +19,7 @@
 # called `wk-quiesce` and `wk-card` they sorted *before* it and their grants were
 # dead the moment `wk sudo setup` ran on the machine.
 #
-# Measured on rpi5, 2026-08-25, with both installed and correct:
+# What it looks like with both installed and correct:
 #
 #     $ sudo -n /usr/local/libexec/wk-quiesce-priv status ; echo $?
 #     1
@@ -40,9 +40,9 @@ _libexec=/usr/local/libexec
 _target="$_libexec/wk-quiesce-priv"
 _source="$WK_ROOT/admin/wk-quiesce-priv"
 _sudoers=/etc/sudoers.d/zzz-wk-quiesce
-# The name these rules had before 2026-08-25. Removed rather than left: an
-# earlier file granting the same path is a second copy of a privilege rule, and
-# the copy that loses is the one that reads as if it were in force.
+# Names these rules may carry on a machine provisioned earlier. Removed rather
+# than left: a second file granting the same path is a second copy of a privilege
+# rule, and the copy that loses is the one that reads as if it were in force.
 _sudoers_old=/etc/sudoers.d/wk-quiesce
 
 if [ ! -f "$_source" ]; then

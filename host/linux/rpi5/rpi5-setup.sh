@@ -11,23 +11,23 @@
 # Tunables (override via env, e.g.  BROWSER=vivaldi bash rpi5-setup.sh):
 BROWSER="${BROWSER:-flatpak-chromium}"   # flatpak-chromium | vivaldi | brave | none
 REMOVE_FIREFOX="${REMOVE_FIREFOX:-yes}"  # yes | no
-# CPU baseline: 2800 @ +50mV. 2900 passed a 10-min stress-ng --verify torture
-# (2026-07-04, worst 76.8C, throttled 0x0) but proved UNSTABLE in real use: the box
-# hard-locked with NO kernel log twice on 2026-07-14 — once right after a kernel
-# build and once at near-idle — so 2900 is not a safe 24/7 clock on this chip.
+# CPU baseline: 2800 @ +50mV. 2900 passes a 10-min stress-ng --verify torture
+# (worst 76.8C, throttled 0x0) and is UNSTABLE in real use: the box hard-locks
+# with NO kernel log, once right after a kernel build and once at near-idle, so
+# 2900 is not a safe 24/7 clock on this chip.
 # Dropped to 2800 for headroom. 3.0GHz is UNSTABLE even at +50mV, and +50mV already
 # pins VDD_CORE at the ~1.0V hardware cap (measured 1.000V under load), so more
 # over_voltage_delta buys nothing. Re-validate any higher clock with a LONG sustained
 # all-core load (a full kernel build), not just a 10-min stress-ng, before trusting it.
-ARM_FREQ="${ARM_FREQ:-2800}"             # 2800 = stable after 2900 hard-locked in real use (2026-07-14)
+ARM_FREQ="${ARM_FREQ:-2800}"             # 2800 = stable; 2900 hard-locks in real use
 V3D_FREQ="${V3D_FREQ:-1200}"             # 960 stock; 1000 current; 1200 ran earlier — re-test w/ glmark2 before raising
 OVER_VOLTAGE_DELTA="${OVER_VOLTAGE_DELTA:-50000}"  # µV; 50mV = at the ~1.0V core cap; higher adds no real voltage
 # NUMA emulation is FIRMWARE-DRIVEN on Pi 5: with SDRAM_BANKLOW set, the bootloader banks the
 # SDRAM and auto-appends the OPTIMAL numa=fake=N (RPi rule: log2(N)=high-bank-bits → 8 on this
 # 16GB dual-rank board) whenever numa_policy is present. So the real levers are the EEPROM bank
 # split + the interleave policy, NOT a hardcoded node count. Validated ON here: 8 nodes,
-# interleave:0-7 (2026-07-04, kernel 7.0.6-numa). The oft-quoted "numa=fake=4 → +6%/+18%" was
-# early 8GB testing; 8 is correct for 16GB. Requires a CONFIG_NUMA_EMU kernel — see rpi5-numa-README.md.
+# interleave:0-7 (kernel 7.0.6-numa). The oft-quoted "numa=fake=4 → +6%/+18%" is
+# 8GB testing; 8 is correct for 16GB. Requires a CONFIG_NUMA_EMU kernel — see rpi5-numa-README.md.
 NUMA_FAKE="${NUMA_FAKE:-auto}"            # auto = let the bootloader pick optimal N; a number forces numa=fake=N; 0/off disables
 NUMA_POLICY="${NUMA_POLICY:-interleave}"  # round-robin allocations across nodes — the actual memory-bandwidth win
 SDRAM_BANKLOW="${SDRAM_BANKLOW:-1}"       # Pi5 EEPROM memory banking (Pi4=3). Enables NUMA auto-split + best mem perf. Empty = leave EEPROM as-is
@@ -356,8 +356,8 @@ sudo tee /usr/local/sbin/rpi5-wifi-watchdog >/dev/null <<'WDEOF'
 # PATIENT then ESCALATING: let NetworkManager's own reconnect try first (~100s),
 # then nudge, then networking off/on, then reload the driver as a last resort.
 # Deliberately NO 'nmcli device disconnect' — that blocks autoconnect and fights
-# NM's own recovery (the bug in the first version, which bounced every ~2min and
-# actually prevented reconnection).
+# NM's own recovery, which bounces the link every ~2min and prevents
+# reconnection outright.
 IFACE="${IFACE:-wlan0}"; INTERVAL="${INTERVAL:-20}"; THRESHOLD="${THRESHOLD:-5}"; COOLDOWN="${COOLDOWN:-40}"
 connected() { local gw; gw="$(ip route | awk '/^default/{print $3; exit}')"; [ -n "$gw" ] && ping -c1 -W2 "$gw" >/dev/null 2>&1; }
 fails=0; step=0

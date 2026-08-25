@@ -80,8 +80,8 @@ rm -rf "$STAGE"
 # Regular, world-readable files and nothing else. An overlay is copied into the
 # target tree by rsync running as *the build user*, which is not the user that
 # assembled it -- so a mode-0700 directory in here is a build that dies at
-# `target-finalize` with rsync error 23 (measured 2026-08-24, on the state
-# directory this used to ship). Anything that needs restrictive permissions is
+# `target-finalize` with rsync error 23. Anything that needs restrictive
+# permissions is
 # created at boot by S99tailscale, where the mode is the running system's
 # business and no build user has to be able to read it.
 mkdir -p "$STAGE/usr/bin" "$STAGE/usr/sbin" "$STAGE/etc/init.d"

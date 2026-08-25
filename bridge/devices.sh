@@ -22,9 +22,9 @@
 #                  another, so this is operational rather than trivia
 #   DEV_NOTE       one line, for the listing
 #
-# It used to carry the pmOS codename, the WiFi part and the battery node as
-# well. All three were dead: the codename is image/profiles.sh's (one source of
-# truth for what gets built), the health check finds the battery by globbing
+# Not the pmOS codename, the WiFi part or the battery node: the codename is
+# image/profiles.sh's (one source of truth for what gets built), the health
+# check finds the battery by globbing
 # /sys/class/power_supply rather than being told, and the WiFi part turned out
 # to be prose rather than a value -- both phones' radios drop associations, which
 # is why the watchdog ladder is not device-specific:
@@ -35,12 +35,12 @@
 #               way a link bounce does not clear
 #
 # Two more that are prose for the same reason, both measured on the PinePhone
-# on 2026-08-22 and both about the *downstream* leg rather than the uplink:
+# and both about the *downstream* leg rather than the uplink:
 #
 #   the port is USB 2.0, full stop, and it decides which docks can work. The
 #   A64 has one OTG controller and one USB 2.0 host controller and no
-#   SuperSpeed anywhere; the USB-C carries DP alt mode, not USB3. Two docks
-#   were tried here on 2026-08-22 and the difference between them is entirely
+#   SuperSpeed anywhere; the USB-C carries DP alt mode, not USB3. The
+#   difference between a dock that works here and one that does not is entirely
 #   this:
 #
 #     a generic USB-C dock   its ethernet hangs off its own USB3 hub, so the

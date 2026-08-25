@@ -109,7 +109,7 @@ $(bridge_device_list | sed 's/^/      /')"
 # Every ssh this command makes, optionally through a jump host.
 #
 # --via exists because "the workstation can reach the phone" stopped being true
-# in a way no code fixes: measured 2026-08-21, this access point does not bridge
+# in a way no code fixes: this access point does not bridge
 # its 2.4 GHz radio to its 5 GHz radio or the wired LAN at layer 2. Every 5 GHz
 # and wired host reaches every other; the phone, the only 2.4 GHz client, answers
 # ARP to none of them. A machine that *is* on the phone's segment can still
@@ -138,17 +138,16 @@ _reaches() { # <destination>
 # It has to be found automatically, because the name will *never* resolve before
 # the first provision on this network. `tailscale up` is what creates the tailnet
 # name, and mDNS -- the only other thing that would answer -- is broken here in
-# a way no code can fix: measured 2026-08-21, the phone's avahi was running and
-# publishing correctly, but the access point declines to forward multicast
+# a way no code can fix: the phone's avahi runs and publishes correctly, and the
+# access point still declines to forward multicast
 # between its 2.4 GHz and 5 GHz radios and the phone is on the band the
 # workstation is not.
 #
 # The thing that survived that measurement is what this is built on. *Unicast*
 # mDNS works perfectly: a query aimed straight at an address, port 5353, asking
 # for the phone's own name, is answered by the phone and by nothing else. It
-# needs no credentials, and it took 34 ms against a live responder here -- as
-# against two ssh handshakes and their timeouts, which is what an earlier version
-# of this used and why it took 100 seconds.
+# needs no credentials, and it costs 34 ms against a live responder -- as
+# against two ssh handshakes and their timeouts, which is 100 seconds.
 #
 # So: collect candidate addresses, ask each one whether it is the phone, believe
 # the one that says yes. Identification is still the host stating its own name;
@@ -200,11 +199,11 @@ _bridge_dig() { # <address>
 # Ask every address in this machine's /24 whether it is the phone.
 #
 # Every address, not the neighbour table, and that correction is the whole
-# function. The first version built its candidate set from ARP and swept the
-# subnet with ICMP to populate it -- and the sweep added *nothing*: macOS
-# `arp -an` lists only resolved entries, so a sweep helps only for hosts that
-# answer ping. Measured: 8.5 seconds of sweeping, zero new candidates, and a
-# phone that was up the whole time never even got asked. ARP is not a list of
+# function. Building the candidate set from ARP and sweeping the subnet with
+# ICMP to populate it adds *nothing*: macOS `arp -an` lists only resolved
+# entries, so a sweep helps only for hosts that answer ping -- 8.5 seconds of
+# sweeping, zero new candidates, and a phone that is up the whole time never
+# gets asked. ARP is not a list of
 # hosts that exist.
 #
 # A unicast mDNS query needs neither. The kernel resolves the address while
@@ -294,17 +293,14 @@ bridge_discover() {
 #                       right answer for every run after the first.
 #   <hostname>.local    mDNS.
 #
-# mDNS is tried and not relied on. It fails here in a way no code can fix:
-# measured on 2026-08-21, the phone's avahi was running and publishing correctly
-# -- a unicast mDNS query aimed at its address returned the right answer --
-# while the access point declined to forward the multicast between its 2.4 GHz
-# and 5 GHz radios. When it does not answer, `--at` is the way in.
+# mDNS is tried and not relied on. It fails here in a way no code can fix: the
+# phone's avahi runs and publishes correctly -- a unicast mDNS query aimed at
+# its address returns the right answer -- while the access point declines to
+# forward the multicast between its 2.4 GHz and 5 GHz radios. When it does not
+# answer, `--at` is the way in.
 #
-# There was a fourth attempt for a while: sweep the subnet and ask every host
-# with port 22 open what it was called. It is gone, and why is worth recording.
-# It was built because the workstation could not reach the phone -- which turned
-# out to be neither topology nor configuration but clients reassociating while
-# the access point's channel was being changed underneath the diagnosis. There
+# Sweeping the subnet and asking every host with port 22 open what it is called
+# is not a fourth route, and is deliberately not here. There
 # was nothing to route around. What it left was thirty seconds per invocation
 # and a subnet-wide ping sweep across the very link the target depends on, aimed
 # at a radio this repo documents as dropping associations under load. `--at`
@@ -393,8 +389,8 @@ bridge_bootstrap_root() {
     info "giving root the same ssh key, so provisioning needs no password"
     log  "  pmbootstrap installs the key for '$BR_USER' only, and that account cannot"
     log  "  become root without one. Using PMO_PASSWORD from image/profiles.sh, which"
-    log  "  is deliberately not a secret; images built after 2026-08-21 do this at"
-    log  "  build time and skip this step entirely."
+    log  "  is deliberately not a secret. An image that sets it at build time"
+    log  "  skips this step entirely."
 
     # -tt because doas reads its prompt from a tty and refuses a pipe outright.
     # One doas invocation, so one prompt to answer.
@@ -515,7 +511,7 @@ usage() {
 # and BatchMode -- which is refuse, not ask -- an unknown key fails exactly
 # like a phone that is switched off, so `wk bridge ls` reported *both* bridges
 # `unreachable` while the PinePhone was up, provisioned, healthy and one ssh
-# away (2026-08-22, the first thing seen in that session). `accept-new` is the
+# away. `accept-new` is the
 # mode that fits: it accepts a key never seen before and still refuses one that
 # has *moved*, which is the distinction worth keeping -- root on a bridge is
 # equivalent to whatever is behind it, so a changed key is something to look at
@@ -599,10 +595,10 @@ cmd_ls() {
 #
 # A bridge writes leases, logs and tailscale state for months, and a microSD is
 # the part of a phone most likely to wear out or work loose -- so the card is the
-# rescue copy, never the system. There used to be a second route here, writing
-# the bridge image to the card and letting the phone boot that, and it is gone
-# on purpose: it was quicker to reach and it left the bridge living on the one
-# component most likely to fail, which is the whole thing this avoids.
+# rescue copy, never the system. Writing the bridge image to the card and
+# letting the phone boot that is quicker to reach and is deliberately not a
+# route here: it leaves the bridge living on the one component most likely to
+# fail, which is the whole thing this avoids.
 #
 # The way in is Jumpdrive: a service image that boots from the card and exports
 # the phone's internal storage as USB mass storage. That turns "flash a phone"
@@ -628,9 +624,9 @@ profile_field() {
 profile_names() { image_profile_list | awk '/^[a-z0-9-]+$/ { print $1 }'; }
 
 # The two lookups below share a shape and deliberately not an abstraction. The
-# first attempt here was one `profile_matching <test-command>` helper, and it
-# silently matched nothing: a command passed as a string and run unquoted is
-# word-split *without* quote removal, so the argument arrived still wrapped in
+# obvious abstraction is one `profile_matching <test-command>` helper, and it
+# silently matches nothing: a command passed as a string and run unquoted is
+# word-split *without* quote removal, so the argument arrives still wrapped in
 # its own quotes. A five-line loop written twice is worth more than a helper
 # that takes code as data.
 #
@@ -744,9 +740,8 @@ wait_for_phone() {
         if [ $((now - last_disc)) -ge "$DISCOVER_EVERY" ]; then
             last_disc="$now"
             # One line per round from bridge_discover itself, saying what it
-            # actually looked at. The first version reprinted the same two-line
-            # banner every five seconds and said nothing about what it found,
-            # which is worse than silence.
+            # actually looked at. Reprinting the same banner every five seconds
+            # while saying nothing about what it found is worse than silence.
             BRIDGE_ELAPSED=$(printf '%d:%02d' $((now / 60)) $((now % 60)))
             printf '\n' >&2
             if resolve_ssh < /dev/null; then return 0; fi
@@ -813,14 +808,12 @@ wait_for_disks() {
 #                              other disk
 #   size                       the eMMC is 16, 32 or 128 GB and the card is
 #                              whatever card you own, and those sets overlap.
-#                              Measured here (2026-08-21): the eMMC came up
-#                              29.1 GB, against a 29 GB USB boot stick on the
-#                              very same machine
+#                              Measured: an eMMC at 29.1 GB against a 29 GB USB
+#                              boot stick on the very same machine
 #
-# The SCSI model string is the exception, and an earlier version of this comment
-# had it wrong -- it claimed both LUNs carry identical strings because they are
-# one gadget. They do not: Jumpdrive 0.8 labels them `e eMMC` and `e microSD`,
-# which says outright which is which. That is used below, but as corroboration
+# The SCSI model string is the exception. The two LUNs do not carry identical
+# strings: Jumpdrive 0.8 labels them `e eMMC` and `e microSD`, which says
+# outright which is which. That is used below, but as corroboration
 # rather than as the answer, because those strings are an undocumented cosmetic
 # choice of one release and the point of this function is to not depend on what a
 # release happens to do.
@@ -874,9 +867,9 @@ device_head_sha() {
 
 # What the phone is presenting over USB, when it is not presenting storage.
 #
-# The timeout this serves used to say "one of three things went wrong" and leave
-# you to work out which. But the phone is not silent when Jumpdrive fails to
-# boot -- it comes up on its own OS instead, and postmarketOS's default USB
+# A timeout that says "one of three things went wrong" leaves you to work out
+# which. The phone is not silent when Jumpdrive fails to boot -- it comes up on
+# its own OS instead, and postmarketOS's default USB
 # gadget is MTP with Pine64's own vendor id. That is positive evidence of
 # exactly which failure this is, so it is worth reading rather than listing
 # possibilities.
@@ -1422,9 +1415,9 @@ cmd_setup() {
             log  "  using the key in \$WK_BRIDGE_AUTHKEY"
         elif keyfile=$(wk_tailscale_authkey); then
             # The fleet's one key, from the one place it lives -- the same key
-            # `wk pi setup` and the Mac bench volume join with. It used to be a
-            # `read` here, which meant a second copy of the same credential and
-            # a phone that could only be provisioned by hand.
+            # `wk pi setup` and the Mac bench volume join with. A `read` here
+            # would be a second copy of the same credential and a phone that
+            # could only be provisioned by hand.
             authkey=$(head -1 "$keyfile")
         else
             log  "  no key available, so this run applies the role without joining"

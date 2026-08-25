@@ -77,9 +77,9 @@ QUIET=""
 while [ $# -gt 0 ]; do
     case "$1" in
         status|setup) ACTION="$1"; shift ;;
-        # Renamed 2026-08-25, to the verb every other fleet command uses
-        # (`wk remote setup`, `wk bridge setup`, `wk pi setup`). Refused by name
-        # rather than accepted quietly, so there is one spelling.
+        # `setup` is the verb every other fleet command uses (`wk remote
+        # setup`, `wk bridge setup`, `wk pi setup`). Other spellings are refused
+        # by name rather than accepted quietly, so there is one.
         require) die "'wk sudo require' is now 'wk sudo setup'" ;;
         --target) TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
         --all)    ALL=1; shift ;;
@@ -323,10 +323,10 @@ EOF
     # is `PASSWD: ALL`, and `ALL` matches those programs too, so whether they
     # survive is a question of include order and nothing else. It was answered
     # wrongly for months: `/etc/sudoers.d/wk-quiesce` sorts before
-    # `zz-<user>-passwd`, so installing this killed the carve-out it is written
-    # not to touch -- measured on rpi5, 2026-08-25, where `sudo -n
-    # wk-quiesce-priv status` returned 1 with the helper installed and correct.
-    # admin/install.sh names them `zzz-` now so they are the last match.
+    # `zz-<user>-passwd`, so installing this kills the carve-out it is written
+    # not to touch: `sudo -n wk-quiesce-priv status` returns 1 with the helper
+    # installed and correct. admin/install.sh names them `zzz-` so they are the
+    # last match.
     #
     # Checked here rather than assumed, because this is the command that can
     # break them and the failure is silent: `wk quiesce` and `wk session` simply

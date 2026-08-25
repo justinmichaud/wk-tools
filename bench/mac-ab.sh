@@ -11,7 +11,7 @@
 # The difference from `wk bench mac` is where the run is driven from, and it is
 # forced by the machine rather than chosen: **the benchmark install has no
 # network.** tolken is Wi-Fi only and that install joins nothing (an empty
-# PreferredOrder in its own airport preferences, measured 2026-08-23), so the
+# PreferredOrder in its own airport preferences), so the
 # phase-by-phase ssh the lane in bench/mac-lane.sh depends on has nowhere to
 # connect. Giving it credentials needs the System keychain and
 # SystemConfiguration, both root, in the mode where root costs a password.
@@ -36,7 +36,7 @@
 #   coming back      the autorun reboots when it finishes.
 #
 # One thing is not, and no flag can make it so: **which volume the firmware
-# boots.** Tested 2026-08-23 in a macOS guest with SIP disabled and root --
+# boots.** Even in a macOS guest with SIP disabled and root,
 # `nvram boot-volume=<other group>` exits 0 and changes nothing (the value goes
 # to the 7C436110-… namespace and is discarded; IODeviceTree:/options keeps the
 # firmware's own value across a reboot), `bless --setBoot` says "not supported
@@ -136,11 +136,9 @@ bwk() { mac_sh "cd $(sh_quote "$(bench_root)/wk-tools") && ./wk $*"; }
 # is `/Volumes/WK Bench - Data/…` -- two spaces in the default name -- and how
 # rsync sends that depends on both ends: GNU rsync 3.2.4+ transmits arguments in
 # the protocol (secluded-args on by default) and the raw path works, while an
-# escaped path then arrives with its backslashes intact and fails. Measured
-# 2026-08-23 against this Mac, which ships openrsync: the escaped form failed
-# with `open: No such file or directory` on a path containing literal
-# backslashes, and the unescaped form worked. Both statements are true of *this
-# pair of rsyncs* and neither is true in general.
+# escaped path arrives with its backslashes intact and fails with `open: No
+# such file or directory` on a path containing literal backslashes. That is
+# true of openrsync, which is what this Mac ships, and not true in general.
 #
 # tar over ssh has no such dependency: the remote path appears once, inside a
 # command this side quotes, and every tar there has ever been extracts a
@@ -160,12 +158,11 @@ put_file() {  # $1 = local file, $2 = remote path
 
 # $1 = local dir, $2 = remote dir -- replaced wholesale, then *verified*.
 #
-# The verification is the point, and it is here because its absence cost a whole
-# cycle on 2026-08-23: this function reported success, the lane went on to reboot
-# the machine, and the tree on the volume was still the one from the day before.
-# The benchmark install therefore ran an older `lib/quiet.sh` -- the version that
-# reads `softwareupdate --schedule`, which the current one documents as lying on
-# macOS 26 -- so every arm failed its `quiet machine` check on a machine that was
+# The verification is the point. Without it this function reports success, the
+# lane reboots the machine, and the tree on the volume is still the previous
+# one -- so the benchmark install runs an older `lib/quiet.sh`, one that reads
+# `softwareupdate --schedule`, which this repository documents as lying on
+# macOS 26, and every arm fails its `quiet machine` check on a machine that is
 # correctly configured, after the reboot, where nothing could say so.
 #
 # What was wrong underneath is less interesting than the shape of the mistake:
@@ -308,11 +305,11 @@ preflight() {
         log "  note nothing planted yet; --plant puts this lane's own tree at $root/wk-tools" >&2
     fi
 
-    # Provisioning that should have finished. A volume provisioned before
-    # 2026-08-23 carries a first-boot daemon that could not remove itself, and
-    # it reverts tooling and reboots the machine a minute into a run. The autorun
-    # defuses it, but saying so here is the difference between a cycle that looks
-    # inexplicable and one that was expected to need a first pass.
+    # Provisioning that should have finished. A first-boot daemon that cannot
+    # remove itself reverts tooling and reboots the machine a minute into a run.
+    # The autorun defuses it, and saying so here is the difference between a
+    # cycle that looks inexplicable and one that is expected to need a first
+    # pass.
     if mac "test -f $(sh_quote "$bh/../../Library/LaunchDaemons/com.wk.bench-firstboot.plist")" 2>/dev/null; then
         log "  note the first-boot daemon is still installed on this volume. It reverts" >&2
         log "       tooling and reboots the machine ~1 min into a boot; the autorun" >&2
@@ -394,11 +391,12 @@ phase_stage() {
   clone $PLAN itself, so the benchmark install needs a working network *and*
   the two arms could in principle get different revisions of the benchmark."
     else
-        # A refusal, not a warning, and this is the lesson of 2026-08-23.
+        # A refusal, not a warning.
         #
-        # The lane staged with no pinned payload, said so as a warning, and went
-        # ahead. The benchmark install then had no route out -- its Wi-Fi is its
-        # own and its remembered-networks list can be empty -- so every arm died
+        # Staging with no pinned payload and saying so as a warning goes ahead
+        # anyway. The benchmark install then has no route out -- its Wi-Fi is
+        # its own and its remembered-networks list can be empty -- so every arm
+        # dies
         # in run-benchmark's fetch, on a machine with no network to report it
         # over, and the whole cycle spent a reboot and half an hour to produce
         # nothing. By the time that is knowable the machine is gone.
@@ -410,8 +408,7 @@ phase_stage() {
 
     Each run would clone the benchmark itself, over a network the benchmark
     install may not have -- and if it does not, every arm fails after the
-    reboot, where nothing can say so. That happened on 2026-08-23 and cost a
-    whole cycle.
+    reboot, where nothing can say so.
 
     Pin it here, where the network is:
         wk bench seed $WS $PLAN
@@ -457,9 +454,9 @@ phase_stage() {
 #
 # Written to a file and then run, rather than piped into `bash`: a script on
 # stdin is consumed by the first thing inside it that reads stdin, which
-# silently truncated the rest. That cost an evening's debugging on 2026-08-23
-# when `wk bench seed` ate the remainder of a staging script and the whole thing
-# exited after its first line looking like a clean success.
+# silently truncates the rest: `wk bench seed` eats the remainder of a staging
+# script and the whole thing exits after its first line looking like a clean
+# success.
 guest_sh() {
     local b; b=$(printf '%s' "$1" | base64 | tr -d '\n')
     mac_sh "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new wk-$(sh_quote "$WS") 'printf %s $b | base64 -d > /tmp/wk-guest.sh && bash /tmp/wk-guest.sh'"
@@ -507,7 +504,7 @@ phase_build_ab() {
         # Named rather than left empty. An empty A_ID falls through to the
         # plant's "default B to A" rule, which then reports a confident A/A
         # about two builds that do not exist yet -- a dry run describing a plan
-        # that is not the plan. Caught by running it, 2026-08-24.
+        # that is not the plan.
         ARMS_PENDING=1
         A_ID="<baseline ${BASE_REF:-HEAD}, would be built>"
         B_ID="<patched $PATCH, would be built>"
@@ -610,16 +607,15 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     # ~bench/Development/wk-tools -- where the install's own copy lives -- and
     # that turned out to be the one directory on the volume that something else
     # rewrites: bench/mac-bench-firstboot.sh `rsync --delete`s its payload copy
-    # over it on every boot it runs, so a correctly planted tree was replaced by
-    # an older one between the plant and the run. Two cycles were lost to it
-    # (2026-08-23), and the second one is the instructive half: `put_tree`
-    # verified the tree, the verification was true when it was made, and the
-    # tree was still gone by the time the benchmark read it.
+    # over it on every boot it runs, so a correctly planted tree is replaced by
+    # an older one between the plant and the run. `put_tree` verifies the tree,
+    # the verification is true when it is made, and the tree is gone by the time
+    # the benchmark reads it.
     #
     # /var/wk is this lane's own directory. Nothing in provisioning writes into
     # it beyond creating it, so a tree here survives a boot that re-runs
-    # provisioning -- and the run no longer depends on what the install happens
-    # to carry, which is a better property to have anyway.
+    # provisioning, and the run does not depend on what the install happens to
+    # carry.
     info "  syncing wk-tools onto the volume"
     put_tree "$WK_ROOT" "$root/wk-tools" \
         || die "could not sync wk-tools onto the bench volume"
@@ -638,9 +634,9 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     # This is the governing rule of this lane applied to the class of failure
     # that had escaped it: anything discoverable only after the reboot has to be
     # refused, verified or defused before it. The screensaver and its lock were
-    # neither -- nothing in this repository touched them, the handoff's
-    # provisioning list asserted them anyway, and on 2026-08-24 the benchmark
-    # install locked itself. A lock mid-run is the same "nowhere to draw" failure
+    # neither: nothing in this repository touches them and a provisioning list
+    # that asserts them anyway leaves the benchmark install free to lock itself.
+    # A lock mid-run is the same "nowhere to draw" failure
     # as a stolen focus, and it is invisible to `screen_blocker`, which asks the
     # window server for the frontmost *application*.
     #
@@ -672,7 +668,7 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     Refused here rather than discovered later. A benchmark makes no keyboard or
     mouse input, so the idle timer runs at full load exactly as it does on an
     abandoned machine; the lock behind it ends a run with the silent timeout that
-    nothing over there can report. On 2026-08-24 that install locked itself.
+    nothing over there can report.
 
     Nothing has been done to the machine yet. To plant anyway:  --force"
     fi
@@ -776,13 +772,13 @@ phase_go() {
     # HOW THIS MACHINE IS ACTUALLY REBOOTED, AND WHY THE OBVIOUS SPELLING IS A
     # SILENT NO-OP.
     #
-    # `tell application "System Events" to restart` was here, with
-    # `|| sudo -n shutdown -r now` behind it and both ends silenced. Measured
-    # 2026-08-24, and it is the third member of a family this repository keeps
-    # meeting: **it returns 0 and does not reboot.** `lsappinfo front` was
-    # `loginwindow` -- host mode normally sits at the login screen with nobody
-    # logged into the GUI -- so the restart had no user session to be carried
-    # out in. rc=0, `kern.boottime` unchanged. The lane announced a reboot,
+    # `tell application "System Events" to restart`, with
+    # `|| sudo -n shutdown -r now` behind it and both ends silenced, is the
+    # third member of a family this repository keeps meeting: **it returns 0 and
+    # does not reboot.** `lsappinfo front` is `loginwindow` -- host mode sits at
+    # the login screen with nobody logged into the GUI -- so the restart has no
+    # user session to be carried out in. rc=0, `kern.boottime` unchanged, and
+    # the lane announces a reboot,
     # waited out its head start, found the machine answering, and reported
     # "back in HOST mode" about a machine that had never left. A planted job
     # went unconsumed and the whole cycle produced nothing, silently.
@@ -1027,9 +1023,9 @@ case "$came_back" in
     noreboot)
         # Distinguished from "not answering" because the remedy is the opposite.
         # The machine is up, the job is planted and untouched, and nothing is
-        # wrong with the volume -- only the reboot failed. Saying "not
-        # answering" here (which the catch-all used to) sends the reader to look
-        # for an outage that does not exist.
+        # wrong with the volume -- only the reboot failed. A catch-all "not
+        # answering" here sends the reader to look for an outage that does not
+        # exist.
         warn "$HOST never rebooted, so the A/B has not run."
         log  "  The job is planted and still valid -- nothing needs re-staging."
         log  "  Reboot the machine by any means (the startup manager works too)"

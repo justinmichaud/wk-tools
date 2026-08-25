@@ -17,8 +17,8 @@
 #     order -- so a wedged image recovers by itself;
 #   * undo is a command, not a trip to the device.
 #
-# Confirmed live on this board 2026-08-19, and the return path was confirmed
-# both ways (a power cycle and a self-reboot each land back on the NVMe).
+# The return path holds both ways: a power cycle and a self-reboot each land
+# back on the NVMe.
 
 # How this machine is armed. The two models differ in where the intent lives:
 # a one-shot writes it into the machine's firmware and a record beside it,

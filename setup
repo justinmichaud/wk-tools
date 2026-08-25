@@ -30,7 +30,7 @@ done
 
 # Stages are independent, so one failing must not skip the rest.
 #
-# They used to be sourced directly, which meant `set -e` inside a stage aborted
+# Not sourced directly: `set -e` inside a stage would then abort
 # the whole script -- and the stages that need a password (packages, the group
 # membership, the privileged helper) are the last three. A machine could come
 # back from ./setup with no quiesce helper and no indication that a stage had

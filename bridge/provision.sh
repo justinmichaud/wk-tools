@@ -159,9 +159,8 @@ enable_svc() {
 # are right, `rc-update show` lists them, and `rc-status` does not: they are
 # invisible to the dependency tree and so they never start at boot.
 #
-# That is precisely what happened on 2026-08-21: a phone that provisioned
-# cleanly, passed its health check, and then came back from a reboot with all
-# four bridge services stopped. `mtime` is not a safe clock on a device whose
+# The result is a phone that provisions cleanly, passes its health check, and
+# comes back from a reboot with all four bridge services stopped. `mtime` is not a safe clock on a device whose
 # clock is not safe either, so the cache is rebuilt explicitly rather than left
 # to a timestamp comparison.
 refresh_deptree() {
@@ -197,10 +196,10 @@ OPTIONAL="logrotate zram-init v4l-utils"
 # --- 1. stop it disappearing -------------------------------------------------
 #
 # This goes first, before anything that takes time, and the ordering is the
-# whole point. It used to be step 4, after the package check -- and an
-# unprovisioned phone suspends on idle, so a run could lose the device it was
-# provisioning partway through and leave a half-applied role behind. On this
-# fleet that happened repeatedly: the phone answered, work started, phosh idled
+# whole point. Later in the sequence -- after the package check, say -- an
+# unprovisioned phone suspends on idle, so a run loses the device it is
+# provisioning partway through and leaves a half-applied role behind: the phone
+# answers, work starts, phosh idles
 # it off the network, and every later step failed against a host that was no
 # longer there.
 #
@@ -405,8 +404,8 @@ if [ -z "$BR_LAN_MAC" ]; then
     warn "  with no adapter there is nothing to match and neither file is"
     warn "  written. An adapter plugged in later comes up unnamed and"
     warn "  unaddressed until 'wk bridge setup $BR_NAME' is run again."
-    warn "  (This used to claim the interface would be 'matched by MAC when it"
-    warn "  appears'. Nothing had been written that could match it.)"
+    warn "  (Nothing is written that could match the interface by MAC when it"
+    warn "  appears, so waiting for it achieves nothing.)"
 else
     # A udev rule, not a systemd .link file: pmOS has eudev and no
     # systemd-networkd. Renaming at all is what makes every other file here
@@ -459,9 +458,9 @@ EOF
     # plugged-in dock leaves the adapter under its kernel name, everything named
     # $BR_IF matches nothing, and the bridge looks provisioned but dead.
     #
-    # This used to say so and stop -- "re-plug the dock, or reboot the phone,
-    # then re-run this" -- which is a hand at the phone for something the kernel
-    # will do on request. A downed link can be renamed, so it is renamed here
+    # Saying so and stopping -- "re-plug the dock, or reboot the phone, then
+    # re-run this" -- asks for a hand at the phone for something the kernel will
+    # do on request. A downed link can be renamed, so it is renamed here
     # and the udev rule above is what makes it survive the next boot. The whole
     # point of a bridge is being reachable without going to it.
     if [ ! -e "/sys/class/net/$BR_IF" ]; then
@@ -474,7 +473,7 @@ EOF
         done
         if [ -z "$cur" ]; then
             warn "$BR_IF does not exist and no interface holds $BR_LAN_MAC --"
-            warn "  the adapter went away between detection and now. Re-run this."
+            warn "  the adapter has gone between detection and now. Re-run this."
         else
             info "renaming $cur to $BR_IF in place"
             # NetworkManager will not let go of a device it is managing, and a
@@ -698,7 +697,7 @@ rtcsync
 # useful time. A clock at 1970 fails every TLS certificate check there is, so
 # nothing that matters works -- \`tailscale up\` cannot reach its coordination
 # server, apk cannot fetch, and the failure reads as "no internet" while ping
-# and DNS are both fine. Found exactly that way on 2026-08-21.
+# and DNS are both fine.
 #
 # -1 rather than a count: the offset recurs on every boot, so a limit of "the
 # first few updates" would fix the first boot and no other.
@@ -868,8 +867,8 @@ elif [ "$TS_STATE" = Running ] && [ "$TS_TAGS" != none ]; then
     # it never has on a re-run -- so a route first advertised before the policy
     # existed stays unapproved no matter how many times this runs, and the
     # bridge sits there healthy with nothing behind it reachable. That is
-    # exactly what happened on 2026-08-22: the policy was pasted, every check
-    # stayed green except the one that matters, and `PrimaryRoutes` was null.
+    # exactly what a pasted policy produces: every check green except the one
+    # that matters, and `PrimaryRoutes` null.
     #
     # Withdrawing and re-advertising forces the evaluation. Conditional on the
     # route not already being primary, because on a working bridge this would

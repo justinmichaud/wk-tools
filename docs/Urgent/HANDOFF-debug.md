@@ -1,6 +1,6 @@
 # HANDOFF — crash loops, and the provisioning debugging needs
 
-The attach recipes this file used to own are built. There is no `wk debug`
+The attach recipes are built. There is no `wk debug`
 verb and there will not be one: a debugger is not a different way of running
 something, so it is a flag on the verb that already runs it —
 `wk run --lldb` (jsc), `wk gui --lldb [ui|web]` (MiniBrowser),

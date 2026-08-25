@@ -89,7 +89,7 @@ sudo reboot
 ```
 </details>
 
-## Best configuration (researched 2026-07-04) — let the firmware pick, don't hardcode 4
+## Best configuration — let the firmware pick, don't hardcode 4
 NUMA on the Pi 5 is **firmware-driven**, and the running box is already at the optimum:
 ```
 8 NUMA nodes, mempolicy 'interleave:0-7', SDRAM_BANKLOW=1 (bootloader default on 2712)

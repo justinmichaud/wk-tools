@@ -167,9 +167,9 @@ while :; do
     # the point: losing the segment is a dock or a cable, and rebooting the
     # phone over it would take out the uplink that is the only way to be told
     # about any of this. Re-assert host mode and say so.
-    # Every pass, not only when the interface is missing. It used to run only in
-    # that branch, which meant the fault it now also fixes was invisible to the
-    # ladder: a NIC that fell to the companion full-speed controller is *present*
+    # Every pass, not only when the interface is missing. Run only in that
+    # branch, the second fault it fixes is invisible to the ladder: a NIC that
+    # fell to the companion full-speed controller is *present*
     # and *host mode is correct*, it is merely forty times too slow, so nothing
     # here ever looked at it. The script itself is cheap and idempotent -- a few
     # sysfs reads and an early exit when there is nothing to do.
@@ -182,10 +182,9 @@ while :; do
             log "$iface came back"
         else
             # Not "check the dock, its power and the cable", which is what
-            # this said and was wrong here more often than right: the phone
-            # observed on 2026-08-22 had a dock that was powered, cabled, in
-            # host mode and enumerating a hub, and the NIC still never
-            # appeared. wk-bridge-healthcheck tells the three cases apart;
+            # that is wrong here more often than right: a dock can be powered,
+            # cabled, in host mode and enumerating a hub with the NIC still
+            # never appearing. wk-bridge-healthcheck tells the three cases apart;
             # this line points at it rather than guessing at one of them.
             log "$iface still absent -- wk-bridge-healthcheck says which fault"
         fi
@@ -216,8 +215,8 @@ while :; do
         # Two passes before acting, except just after a boot, where one is
         # right: nothing has ever been established on this link, so there is no
         # settled client to disturb -- and a boot is exactly when the wait is
-        # worst. Measured 2026-08-22: after a reboot of the phone the rpi4's
-        # DHCPDISCOVER landed 134 s later. That is the *board's* retry schedule,
+        # worst: after a reboot of the phone a board's DHCPDISCOVER can land
+        # 134 s later. That is the *board's* retry schedule,
         # not this phone's readiness: its first request goes out when the kernel
         # enumerates the adapter, seconds in, and no amount of starting dnsmasq
         # earlier can beat that. Flapping the link is the only thing that makes

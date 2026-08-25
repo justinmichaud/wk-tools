@@ -1,11 +1,9 @@
-Spec dir for wpewebkit-2.46-yocto-rpi4-64 (renamed from
-downstream-wpe-2.46-rpi4 on 2026-08-25: a configuration is named for the
-project it is built from, and this one is WPEWebKit's wpe-2.46).
+Spec dir for wpewebkit-2.46-yocto-rpi4-64 (WPEWebKit's wpe-2.46 on the rpi4,
+64-bit).
 
 cmdline.txt.append.disabled -- forces a display that is not physically there.
-**DISABLED 2026-08-21 after it took the board off the network.** The mechanism
-is described below and is still believed right; what was wrong was proving it.
-See "The incident" at the end.
+**Disabled. Do not enable it by writing it straight to the bench stick**; the
+last section says what to do instead.
 
 The rpi4 is headless: both HDMI connectors read `disconnected`, so weston's DRM
 backend has no output and weston.service fails. Speedometer is gpu-class by
@@ -29,40 +27,31 @@ mistaken for one taken against real hardware. Delete this file when a dummy
 plug or a monitor is attached, and the image goes back to negotiating a mode.
 
 
-## The incident, 2026-08-21
+## Why it is disabled, and how to enable it safely
 
-This setting was written into the image, the image was written to the stick, and
-the stick was booted, in one step. The board never came back: pingable for a
-minute or two while resetting ssh mid-key-exchange, then gone from the
-neighbour table entirely. It needs a person to pull the stick.
+Forcing a mode on a connector with nothing attached leaves vc4's KMS driver
+waiting on hardware that will not answer, and a driver that hangs in probe hangs
+the boot. "A display setting cannot stop userspace" is false when the setting is
+handled by a driver that boot waits on. The board comes up pingable for a minute
+or two, resets ssh mid-key-exchange, and then leaves the neighbour table; it
+needs a person to pull the stick.
 
-**Established 2026-08-22 by removing one variable:** the same image, same
-stick, same everything, with `video=HDMI-A-1:1920x1080M@60D` deleted from
-cmdline.txt and nothing else changed, boots and is reachable. So this setting
-is the cause, and the 2.46 image is fine.
-
-Why it can break a boot, which was not obvious and was argued the wrong way
-first: forcing a mode on a connector with nothing attached leaves vc4's KMS
-driver waiting on hardware that will not answer, and a driver that hangs in
-probe hangs the boot. "A display setting cannot stop userspace" is false when
-the setting is handled by a driver that boot waits on.
-
-What made it unrecoverable is worth more than the cause:
+Three things make that unrecoverable, and each is worth knowing on its own:
 
 - **An armed stick that boots but hangs is sticky.** Firmware finds
-  `start4.elf`, so it keeps choosing the stick; a power cycle re-enters the
-  same hang rather than falling through to the SD rescue. The self-disarm lives
-  in the rootfs and never runs. `docs/HANDOFF-boot.md` records this residual
-  hands-on case in its traps -- this is it happening.
-- **These images carry no `panic=10`.** The distro profiles set it, so a distro
-  image that cannot find its root reboots; a Yocto image hangs. Adding it here
-  would not have helped on its own (the reboot would re-enter the same stick),
-  but the asymmetry is undocumented and worth knowing.
-- **There is no console.** moose's BMC would have shown the boot; the rpi4 has
-  no such path, and `docs/Urgent/HANDOFF-moose-bench.md`'s "get the console working
-  before the first risky boot" applies to every board, not just moose.
+  `start4.elf`, so it keeps choosing the stick; a power cycle re-enters the same
+  hang rather than falling through to the SD rescue. The self-disarm lives in
+  the rootfs and never runs. `docs/HANDOFF-boot.md` records this residual
+  hands-on case in its traps.
+- **These images carry no `panic=10`,** so a Yocto image that cannot find its
+  root hangs where one that sets it would reboot. It would not help here on its
+  own -- the reboot re-enters the same stick -- but the asymmetry is worth
+  knowing.
+- **There is no console.** moose's BMC would show the boot; the rpi4 has no such
+  path, and `docs/Urgent/HANDOFF-moose-bench.md`'s "get the console working
+  before the first risky boot" applies to every board.
 
-The order that was available and was not taken: put `video=` on the **SD**
-system first, where a bad kernel argument still leaves the stick as an unarmed
-fall-through, and only bake it into the stick once it has booted something.
-Re-enable this file by dropping the `.disabled` suffix, and do it that way.
+So: put `video=` on the **SD** system first, where a bad kernel argument still
+leaves the stick as an unarmed fall-through, and bake it into the stick only
+once it has booted something. Re-enable this file by dropping the `.disabled`
+suffix, and do it in that order.

@@ -75,9 +75,9 @@ PURGE_PMOS=""
 PURGE_BUILDS=""
 [ "${1:-}" = --purge-builds ] && PURGE_BUILDS=1
 
-# Validated rather than ignored, which is what this command used to do with an
-# unrecognised argument. That was harmless while every flag was a no-op or a
-# refresh; it is not harmless next to a flag that erases the mirror, because a
+# Validated rather than ignored. Ignoring an unrecognised argument is harmless
+# while every flag is a no-op or a refresh; it is not harmless next to a flag
+# that erases the mirror, because a
 # typo would run a full ordinary gc and report success at doing something else.
 case "${1:-}" in
     ''|--refresh-net|--purge-mirror|--purge-pmos|--purge-builds) ;;
@@ -106,16 +106,9 @@ esac
 # `wk sync --target container`).
 
 # --- boot images ---------------------------------------------------------------
-gc_images() {
-    # Nothing to prune without the image store's own path helpers -- which is
-    # the case in a podman VM whose copy of the tree predates them.
-    command -v image_store_dir >/dev/null 2>&1 || return 0
-    # One lock per mutated resource (rule 4): `wk sysimage build` holds this
-    # while it imports, and pruning "all but the newest per profile" against a
-    # store that is gaining one is how the newest gets deleted.
-    image_lock
+#
 # 4.6 GB each, and a profile gets rebuilt every time its spec changes, so this
-# is the fastest-growing thing in the store by a wide margin. Two rules, both
+# is the fastest-growing thing in the store by a wide margin. Three sweeps, all
 # conservative:
 #
 #   * rubble first -- a directory with no manifest is an interrupted build,
@@ -125,11 +118,27 @@ gc_images() {
 #     the device does not hold a reference back. The newest of each profile is
 #     therefore kept unconditionally, because it is the one `wk boot` would
 #     arm, and older ones are re-buildable from a spec in the repo.
-# Sourced before the test, not inside it: the store's location is
-# image_store_dir's answer and not $WK_STORE/images -- on a macOS host those are
-# two different places (lib/image.sh says why), and testing the wrong one means
-# gc reports reclaiming nothing, for ever, on the machine that has the images.
-if [ -d "$(image_store_dir)" ]; then
+#   * then any compressed copy or block map beside an image that is *kept*.
+#     Nothing reads either -- boot/disk.sh streams disk.img, which is the whole
+#     image -- so they are bytes with no purpose, and a store can hold gigabytes
+#     of them.
+#
+# One sweep, and it resolves the store's path through image_store_dir rather
+# than assuming `$WK_STORE/images`: on a macOS host those are two different
+# places (lib/image.sh says why), and a sweep against the wrong one silently
+# reclaims nothing on the machine that has the images.
+gc_images() {
+    # Nothing to prune without the image store's own path helpers -- which is
+    # the case in a podman VM whose copy of the tree predates them.
+    command -v image_store_dir >/dev/null 2>&1 || return 0
+    [ -d "$(image_store_dir)" ] || return 0
+
+    # One lock per mutated resource (rule 4): `wk sysimage build` holds this
+    # while it imports, and pruning "all but the newest per profile" against a
+    # store that is gaining one is how the newest gets deleted.
+    image_lock
+
+    local id profile newest f sz stranded=""
 
     for id in $(image_rubble); do
         info "removing rubble from an interrupted image build: $id"
@@ -144,8 +153,33 @@ if [ -d "$(image_store_dir)" ]; then
         rm -rf "$(image_dir "$id")"
     done
 
-    # The served copy of an image that is no longer there is just bytes. The
-fi
+    for id in $(image_ids); do
+        for f in disk.wic.xz disk.bmap; do
+            [ -f "$(image_dir "$id")/$f" ] || continue
+            stranded="$stranded $(image_dir "$id")/$f"
+        done
+    done
+    if [ -n "$stranded" ]; then
+        # shellcheck disable=SC2086
+        sz=$(du -ch $stranded 2>/dev/null | tail -1 | cut -f1)
+        info "removing compressed copies the retired bmaptool writer left behind (${sz:-?})"
+        # shellcheck disable=SC2086
+        rm -f $stranded
+        # A manifest that names a file which is not there is a record
+        # disagreeing with the disk, and `wk sysimage show` prints it. The
+        # fields go with the files.
+        for id in $(image_ids); do
+            sed -i.bak -E '/^(wic_xz|bmap|wic_xz_bytes|wic_of)=/d' "$(image_manifest "$id")" 2>/dev/null \
+                && rm -f "$(image_manifest "$id").bak"
+        done
+    fi
+
+    # Nothing writes serve/, so anything under it is unreferenced bytes.
+    if [ -d "$WK_STORE/serve" ]; then
+        info "removing the retired serve/ tree ($(du -sh "$WK_STORE/serve" 2>/dev/null | cut -f1))"
+        rm -rf "${WK_STORE:?}/serve"
+    fi
+    return 0
 }
 
 # The pmos build hosts: pmbootstrap's chroots and the builds waiting to be
@@ -406,42 +440,6 @@ fi
 gc_images   # (defined above; the store's images)
 gc_build_outputs  # ...and everywhere else a build can leave bytes
 gc_pmos     # ...and the build hosts' caches, on the machine that can reach them
-
-# --- boot images ---------------------------------------------------------------
-# 4.6 GB each, and a profile gets rebuilt every time its spec changes, so this
-# is the fastest-growing thing in the store by a wide margin. Two rules, both
-# conservative:
-#
-#   * rubble first -- a directory with no manifest is an interrupted build,
-#     which every reader already ignores and nothing can be pinned to.
-#   * then all but the newest complete image per profile. Unlike a base
-#     snapshot there is no pin to consult: an image is written to a device and
-#     the device does not hold a reference back. The newest of each profile is
-#     therefore kept unconditionally, because it is the one `wk boot` would
-#     arm, and older ones are re-buildable from a spec in the repo.
-if [ -d "$WK_STORE/images" ]; then
-    . "$WK_ROOT/lib/image.sh"
-
-    for id in $(image_rubble); do
-        info "removing rubble from an interrupted image build: $id"
-        rm -rf "$(image_dir "$id")"
-    done
-
-    for id in $(image_ids | sort); do
-        profile=$(manifest_get "$id" profile) || continue
-        newest=$(image_latest "$profile" 2>/dev/null) || continue
-        [ "$id" = "$newest" ] && continue
-        info "removing superseded image $id ($(du -sh "$(image_dir "$id")" 2>/dev/null | cut -f1))"
-        rm -rf "$(image_dir "$id")"
-    done
-
-    # Nothing writes serve/ any more, so whatever is under it is a leftover
-    # from an older revision of this repo -- reclaim it whole.
-    if [ -d "$WK_STORE/serve" ]; then
-        info "removing the retired serve/ tree ($(du -sh "$WK_STORE/serve" 2>/dev/null | cut -f1))"
-        rm -rf "${WK_STORE:?}/serve"
-    fi
-fi
 
 # --- return free space to the host ------------------------------------------
 # Only with passwordless sudo (the podman VM has it; a workstation may not):

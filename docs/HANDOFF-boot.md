@@ -24,10 +24,8 @@ rpi5 and rpi4 have both been through the whole cycle with no hands on the board.
   Entirely unbuilt — `docs/Urgent/HANDOFF-moose-bench.md`.
 - **The rpi3 has no bench system**, so it cannot be measured and `wk pi bench
   rpi3` refuses: its card holds one system
-  (`downstream-yocto-wpe-2.48-rpi3-32-20260822T205734Z`, built before the
-  2026-08-25 rename) and that system is the
-  base image. The arrangement it needs was decided on 2026-08-24 and is written
-  up where design belongs — `wk help hardware`, "why the three Pis are arranged
+  (`webkit-2.52-yocto-rpi3-32`) and that system is the base image. The
+  arrangement it needs is written up where design belongs — `wk help hardware`, "why the three Pis are arranged
   differently", plus the binding priority order in CLAUDE.md. What is *left* is
   the work:
     1. a rescue-role system for slot A (`IMG_ROLE=rescue`, so no self-return
@@ -62,8 +60,8 @@ authenticated and hands-on, always.
 
 **Apple Silicon's boot volume cannot be selected remotely, at all** — boot
 volume selection goes through a LocalPolicy in the machine's own secure storage.
-Re-tested 2026-08-23 with SIP *disabled* and passwordless root, because "SIP is
-off now" is the obvious reason to expect otherwise: `nvram boot-volume` exits 0
+True with SIP *disabled* and passwordless root as well, which is the obvious
+reason to expect otherwise: `nvram boot-volume` exits 0
 and changes nothing, `bless --setBoot` says it is unsupported on Apple Silicon,
 `systemsetup -getstartupdisk` prints `(null)`, and `bputil` sets security policy
 rather than selecting a volume. The gate is firmware ownership, not SIP. What

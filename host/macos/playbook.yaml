@@ -114,9 +114,9 @@
         - "'already requested' not in (pkgs.stderr | default(''))"
 
     - name: Create the workspace bridge network
-      # VESTIGIAL (2026-08-20): this bridge belonged to the old rootful-podman
-      # + nftables model, which targets/container.sh's WK_SANDBOX comment
-      # records as replaced by `--network none` plus the user proxy. Left in
+      # VESTIGIAL: this bridge belongs to a rootful-podman + nftables model
+      # that targets/container.sh's WK_SANDBOX comment rules out in favour of
+      # `--network none` plus the user proxy. Left in
       # place because removing it is only testable on the macOS host -- take
       # it out there, together with the nftables task below, and prove the
       # round trip with `podman machine rm` + `./setup`.
@@ -134,8 +134,8 @@
         - "'already used' not in (netcreate.stderr | default(''))"
 
     - name: Enable nftables at boot
-      # VESTIGIAL (2026-08-20): see the bridge task above -- the egress policy
-      # is the user proxy now, and nothing writes an nftables ruleset any more.
+      # VESTIGIAL: see the bridge task above -- the egress policy is the user
+      # proxy, and nothing writes an nftables ruleset.
       ansible.builtin.systemd_service:
         name: nftables
         enabled: true

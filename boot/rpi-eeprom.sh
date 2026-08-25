@@ -28,8 +28,8 @@
 #   is no way to modify the running EEPROM's own image without reading it back,
 #   and reading it back is the part that needs the tooling this board lacks. So
 #   the bootloader is *upgraded* to the pinned release below and the board's
-#   existing configuration is carried across on top of it. On the fleet's rpi4
-#   that took it from 2023-01-11 to 2026-05-17.
+#   existing configuration is carried across on top of it, so a board can jump
+#   several years of firmware in one step.
 # - **It takes effect on the next boot, not now.** recovery.bin runs from the
 #   ROM, so nothing has changed until the board has been through a power cycle
 #   or a reboot.

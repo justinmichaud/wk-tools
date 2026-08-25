@@ -1,6 +1,10 @@
-# --- wk sysimage: perf-linux-rpi5 -----------------------------------------------------
-# Appended by `wk sysimage build` to the base image's own config.txt. The base's
-# copy is what makes the base bootable, so this only ever adds.
+# --- wk sysimage: webkit-2.52-yocto-rpi5-64 ---------------------------------
+# Appended by `wk sysimage build` to the image's own config.txt (the firmware
+# reads it off the boot partition whatever the OS is). Only ever adds: the
+# image's own copy is what makes it bootable.
+#
+# What is in here is what this *board* needs in order to be measured, so it
+# belongs to whichever profile is measured on it.
 
 [all]
 # Pi 5 firmware rejects kernels that lack Ubuntu's trailer, and marks their

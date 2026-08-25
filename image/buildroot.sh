@@ -8,9 +8,8 @@
 #
 # --- what the scouting run established ---------------------------------------
 #
-# A build was done by hand on 2026-08-24 (docs/TESTING.md, the wpe-2.38 items),
-# deliberately outside `wk`, because buildroot 2020.02 on a modern host was the
-# unknown and the lane should be written around what actually works. It produced
+# A build done by hand outside `wk`, because buildroot 2020.02 on a modern host
+# is the unknown and the lane should be written around what works. It produced
 # a bootable `sdcard.img` for the rpi3, with tailscale in it. So the recipe below
 # is recorded evidence, not a design sketch -- but it has never been run *through
 # this file*, and until it has, claiming otherwise in code would be the worst of
@@ -27,19 +26,18 @@
 #               already exports. image_build_locations already declares it, so
 #               `wk gc` already reclaims it.
 #   external    BR_EXTERNAL -> image/buildroot/external, a BR2_EXTERNAL tree this
-#               repository owns. **Written 2026-08-25.** It carries the one fix
-#               the scouting run needed: host-python-2.7's bundled 2013-era
+#               repository owns. It carries the one fix the scouting run needed: host-python-2.7's bundled 2013-era
 #               libffi cannot assemble aarch64/sysv.S, so the build dies at
 #               `sharedmods` on an arm64 build host. An architecture problem,
 #               not an old-distro one -- on x86_64 that file is never compiled,
 #               which is why this tree always built on moose. Buildroot ships
 #               host-libffi and gives the *target* python --with-system-ffi, and
-#               at the pin never joins the two for the host build; upstream
-#               joined them itself between 2021.02 and 2021.08, so the tree
-#               applies the upstream change from outside rather than inventing
-#               one. Never run through a build -- what is checked is the make
-#               semantics it depends on (external.mk says which, and why an
-#               appended dependency is not enough on its own).
+#               at the pin never joins the two for the host build; upstream does
+#               join them in a later release, so the tree applies that change
+#               from outside rather than inventing one. TODO: never run through
+#               a build -- what is checked is the make semantics it depends on
+#               (external.mk says which, and why an appended dependency is not
+#               enough on its own).
 #   overlay     BR2_ROOTFS_OVERLAY, assembled by
 #               image/buildroot/tailnet-overlay.sh <arch> <staging>. This part is
 #               written and verified. Only world-readable regular files: the
@@ -56,15 +54,12 @@
 #
 # --- what is owed, in order --------------------------------------------------
 #
-#   1. image/buildroot/external/, with the host-libffi fix. DONE 2026-08-25;
-#      nothing builds on an arm64 host without it, and this Mac and moose are
-#      both arm64.
-#   2. this function: clone-and-pin the tree per configuration, apply the
+#   1. this function: clone-and-pin the tree per configuration, apply the
 #      defconfig, write the overlay, build in an ubuntu:20.04 container in a
 #      workspace, and hand output/images/$BR_IMAGE to the same manifest step the
 #      yocto builder uses. Container-only, and refused elsewhere for the reasons
 #      yocto_build gives.
-#   3. the ten configurations whose defconfig does not exist upstream -- every
+#   2. the ten configurations whose defconfig does not exist upstream -- every
 #      board but the rpi3, and every WebKit/WebKit release. Each says what it
 #      needs in its own CFG_NEEDS, so they refuse individually and correctly
 #      already; deriving those defconfigs is a separate piece of work per board.
@@ -91,7 +86,7 @@ buildroot_build() {
     tree it needs on an arm64 build host is written too
     ($WK_ROOT/image/buildroot/external). What is missing is the mechanism:
     buildroot_build itself, in image/buildroot.sh, which carries the whole
-    recipe the 2026-08-24 scouting run established -- clone and pin the tree,
+    recipe the scouting run established -- clone and pin the tree,
     apply the defconfig, assemble the overlay, build in an ubuntu:20.04
     container in a workspace, and hand output/images/${BR_IMAGE:-the image} to
     the manifest step the yocto builder already uses.

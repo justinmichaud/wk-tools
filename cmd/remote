@@ -91,9 +91,9 @@ if [ "$ACTION" = rm ]; then
     done
     rm -f \"\$HOME/.wk-remote\" \"\$HOME/.config/wk/targets/$TARGET.conf\"" \
         | while read -r rc; do changed "removed the wk-tools line from $rc"; done
-    # The marker, and the conf a machine provisioned before 2026-08-25 has
-    # beside it. Nothing writes the second one any more -- the driver computes
-    # what it held from the marker -- but a box that was set up while it did
+    # The marker, and the conf a machine provisioned by an older revision has
+    # beside it. Nothing writes the second one -- the driver computes what it
+    # held from the marker -- but a box that was set up with one
     # still has one, and leaving it is leaving a file that claims a target.
     changed "removed the marker from $WK_REMOTE_HOST"
 
@@ -200,9 +200,8 @@ log "  $r_host: $r_os, $r_arch, $r_cores cores, $((r_mem / 1024)) GB, ${r_freegb
 log "  root: $(_remote_root)   jobs: derived per build from what is free"
 [ "$r_zsh" = - ]    && warn "no zsh (needs root to install; bash stays)"    || log "  zsh: $r_zsh"
 [ "$r_ccache" = - ] && warn "no ccache (every build starts cold)"           || log "  ccache: $r_ccache"
-# What used to be here: a refusal when the machine had no flock(1), because two
-# of your own builds could not otherwise be serialised. It has nothing to check
-# any more -- the build lock is lib/lockrun.sh in the wk-tools this command is
+# No flock(1) check: the build lock is lib/lockrun.sh in the wk-tools this
+# command is
 # about to push, and needs nothing installed (lib/common.sh, "locks").
 
 # A shared WebKit repository, if the machine advertises one. Worth reporting

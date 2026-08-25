@@ -53,8 +53,7 @@ worst=0
 # work at all: it is assembled by two processes -- this machine's own targets
 # out here, its containers inside the podman VM -- and two JSON documents cannot
 # be concatenated where two streams of lines can. The renderer merges by machine
-# name, which also retires the flag those two halves used to pass between them
-# to agree on who printed a heading.
+# name, so neither half has to tell the other who printed a heading.
 #
 # A machine that answers for itself is asked for the same stream. One running an
 # older copy of this repository has never heard of the flag, so its text is
@@ -73,12 +72,11 @@ _jesc() {
     # Colour first, and not as a nicety: a health check on a phone prints ANSI
     # sequences, and a raw ESC inside a JSON string is an unescapable control
     # character -- `json.loads` rejects the whole record, so the renderer drops
-    # the bridge from the listing entirely. Found exactly that way, 2026-08-24:
-    # the one bridge that answered was the one that disappeared.
+    # the bridge from the listing entirely -- so the one bridge that answers is
+    # the one that disappears.
     # Walked rather than pattern-substituted, because a glob cannot say "digits
     # and semicolons until an m": `[0-9;]*m` is one character from that set
-    # followed by *anything*, which ate the whole line the first time this was
-    # written. No extglob either -- `wk` runs under macOS's bash 3.2 and a shopt
+    # followed by *anything*, which eats the whole line. No extglob either -- `wk` runs under macOS's bash 3.2 and a shopt
     # toggled inside a helper is a setting the caller did not ask for.
     local head tail
     while [ "${s#*$'\033'}" != "$s" ]; do
@@ -121,9 +119,9 @@ note()      { _notes="$_notes${_notes:+,}{\"level\":\"info\",\"text\":\"$(_jesc 
 note_warn() { _notes="$_notes${_notes:+,}{\"level\":\"warn\",\"text\":\"$(_jesc "$*")\"}"; }
 
 # The sub-states of one workspace -- its build, its tests, its babysitter --
-# collected as they are found and emitted with it. They used to be rows of their
-# own with the identity columns blanked out, which is a table's way of saying
-# "the same workspace" and a renderer's way of saying nothing at all.
+# collected as they are found and emitted with it. Rows of their own with the
+# identity columns blanked would be a table's way of saying "the same
+# workspace" and a renderer's way of saying nothing at all.
 _subs=""
 sub_add() { _subs="$_subs${_subs:+,}$1"; }
 
@@ -259,9 +257,9 @@ machine_seen() {
 }
 
 # One record per workspace: what it is, and everything it has been asked to do.
-# The build, the tests and the babysitter used to be rows of their own with the
-# identity columns blanked -- which is a table's way of saying "still the same
-# workspace" and means nothing at all to a renderer that is not a table.
+# The build, the tests and the babysitter belong to it rather than being rows of
+# their own with the identity columns blanked -- which is a table's way of saying
+# "still the same workspace" and means nothing to a renderer that is not a table.
 report() {
     local ws="$1"
     _subs=""
@@ -313,9 +311,8 @@ report_ws() {
     # drifted from upstream.
     #
     # One exec, because each one is a container round trip -- and one that was
-    # already being paid for the origin check alone. Measured in a WebKit
-    # checkout, 2026-08-24: status -uno 524ms, ls-files 395ms, the two rev-lists
-    # 47ms.
+    # already being paid for the origin check alone. In a WebKit checkout:
+    # status -uno ~520ms, ls-files ~400ms, the two rev-lists ~50ms.
     #
     # A wrong `origin` is worth a line in the listing rather than only in
     # `wk remotes`: it is silent, it changes what `git log origin/main` means
@@ -514,9 +511,9 @@ report_one() {
 }
 
 # One named workspace resolves to its own target; the bare listing walks every
-# target there is. Loading one target and reporting everything through it --
-# which is what this used to do -- silently reported vm workspaces as absent,
-# because the container driver has never heard of them.
+# target there is. Loading one target and reporting everything through it would
+# silently report vm workspaces as absent, because the container driver has
+# never heard of them.
 # A target that is a machine of its own answers for itself.
 #
 # Not politeness: the build state that matters lives over there. A build can be
@@ -571,8 +568,8 @@ delegate() {
 # because the store and the tooling copies are all somewhere else.
 # --- what a machine is, apart from the workspaces on it -----------------------
 #
-# Everything here answers a question that used to be asked only after something
-# had already gone wrong:
+# Everything here answers a question that is otherwise asked only after
+# something has already gone wrong:
 #
 #   disk      every `wk sync` publishes a snapshot and only `wk gc` reclaims
 #             one. A full store kills a 39 GB build in a way that reads as a
@@ -934,9 +931,8 @@ fi
 # to call itself in somebody else's listing (inside the podman VM, `hostname` is
 # not even the right answer).
 #
-# It used to qualify a TARGET column, `moose:container`, which is where the
-# machine and the method were squashed together. The column is gone and the
-# heading says both.
+# The heading says the machine and the method separately, rather than squashing
+# them into one `moose:container` column.
 #
 # An environment variable and not a flag, because the far side may be an older
 # checkout of this repository (see t_wk in targets/remote.sh). Same mechanism in
@@ -999,8 +995,8 @@ report_machine() {
         # podman VM this is the tree every container bind-mounts, and it belongs
         # to the same machine as the host's checkout -- two copies of one
         # repository on one machine, which is exactly the thing that goes stale
-        # unnoticed. The `@container` label it used to carry said this by
-        # accident; the `copy` field says it on purpose.
+        # unnoticed. The `copy` field says so on purpose, rather than leaving
+        # it to be inferred from a label.
         rec_start fact
         # The machine, not the target: `container` is how this device *reaches*
         # a machine's workspaces, and a fact about a copy of wk-tools belongs to
@@ -1081,12 +1077,12 @@ EOF
 # connect; it does not bound a driver that makes four of them, and it does not
 # reach a *jump* hop at all -- options on an ssh command line are not passed to
 # the ProxyJump child, which runs with the defaults and is free to ask a
-# question. That is what stopped `wk status` on 2026-08-24: the rpi4 is reached
-# through `tailnet-bridge-generic`, the bridge's tailnet name had no
-# known_hosts line of its own (its .local name and its LAN addresses did), and
-# the jump asked "Are you sure you want to continue connecting" -- on the
-# terminal, from a subshell whose stdout was a file and whose stderr was
-# /dev/null, with nothing in this block's 4-second budget able to stop it.
+# question. That is enough to stop `wk status` outright: the rpi4 is reached
+# through `tailnet-bridge-generic`, and a bridge whose tailnet name has no
+# known_hosts line makes the jump ask "Are you sure you want to continue
+# connecting" -- on the terminal, from a subshell whose stdout is a file and
+# whose stderr is /dev/null, with nothing in this block's budget able to stop
+# it.
 #
 # dotfiles/ssh/config is where that hop got its bounds, because a jump host
 # reads only its own stanza. `capped` is here because the next unbounded thing
@@ -1133,8 +1129,8 @@ _fleet_probe() {
                 host)    mode="host mode" ;;
                 # The base image the board falls back to, told apart from a
                 # system somebody armed by the medium the running root is on
-                # (b_system_kind, boot/machines.sh). It used to read as "bench
-                # mode", which is how an unarmed board came to be benchmarked.
+                # (b_system_kind, boot/machines.sh). Reading it as "bench
+                # mode" is how an unarmed board gets benchmarked.
                 base*)   mode="base image -- not a bench system" ;;
                 bench*)  mode="bench mode" ;;
                 # Which bridge, when there is one. A board behind a phone's USB
@@ -1211,13 +1207,12 @@ bridge_role_sum() {
 
 # One bridge, probed. Bounded and read-only, and it costs one ssh.
 #
-# This block used to declare and never probe, on the grounds that a phone in a
-# drawer should not slow a listing down. That reasoning stands for the *cost*
-# and not for the answer: a bridge is a machine this repository provisions and
-# depends on, and "declared" says nothing about whether the segment behind it is
-# up. So it is probed like every fleet device -- in parallel, under a ceiling,
-# and a phone that does not answer costs its line and not the listing (asked for
-# 2026-08-24).
+# Probed rather than merely declared: a bridge is a machine this repository
+# provisions and depends on, and "declared" says nothing about whether the
+# segment behind it is up. A phone in a drawer must not slow the listing down,
+# which is a statement about cost and not about the answer -- so it is probed
+# like every fleet device, in parallel and under a ceiling, and one that does
+# not answer costs its own line and not the listing.
 _bridge_probe() {
     local n="$1" conf="$2" want="$3" out state="" role="" sum="" health="" line="" _bridge_script
     # One round trip for everything: reachable, role present, which role, and
@@ -1251,9 +1246,9 @@ _bridge_probe() {
     # A ceiling of its own, and larger than a fleet device's: this runs the
     # bridge's health check on the phone, which takes several seconds of its
     # own -- and a probe killed mid-run loses *everything*, because the remote
-    # shell buffers its stdout when it is not a tty. Measured 2026-08-24: at the
-    # fleet's 4s the root attempt was killed and came back empty, which read as
-    # "root does not work here" and sent every probe down the doas path.
+    # shell buffers its stdout when it is not a tty. At the fleet's 4s the root
+    # attempt is killed and comes back empty, which reads as "root does not work
+    # here" and sends every probe down the doas path.
     # ConnectTimeout stays short: a phone in a drawer should still cost seconds.
     out=$( capped "${WK_BRIDGE_TIMEOUT:-20}" ssh -o BatchMode=yes -l root \
              -o ConnectTimeout="${WK_FLEET_TIMEOUT:-4}" "$n" "$_bridge_script" 2>/dev/null ) || out=""
@@ -1408,11 +1403,10 @@ order_targets() {
 
 # Which target reports this machine's own health, decided before the walk forks.
 #
-# It used to be whichever target got there first (`_health_said`), which a
-# parallel walk cannot mean: on a Linux workstation the container target and the
-# vm target are both this machine, so both would emit a disk, a load and a push
-# switch -- and *which store* the numbers were about would depend on which
-# subshell finished first. A listing whose disk figure changes between refreshes
+# Not whichever target gets there first, which a parallel walk cannot mean: on a
+# Linux workstation the container target and the vm target are both this
+# machine, so both would emit a disk, a load and a push switch -- and *which
+# store* the numbers were about would depend on which subshell finished first. A listing whose disk figure changes between refreshes
 # without the disk changing is worse than no figure.
 #
 # The rule is the serial walk's own, made explicit: the first target, in the
@@ -1492,7 +1486,7 @@ _report_ws_par() { report "$1"; exit "$worst"; }
 # reason prefetch_targets forks per target: a driver overrides shell functions,
 # a function definition outlives the load, and the first driver's t_branch
 # answering for the second target's workspaces is a wrong answer that looks
-# entirely plausible (measured 2026-08-19, lib/target.sh).
+# entirely plausible (lib/target.sh).
 _report_target_par() {
     local t="$1"
     load_target "$t"
@@ -1539,13 +1533,13 @@ collect() {
         # parent decides where they go and not they.
         #
         # The two blocks stay in step with each other inside that one subshell,
-        # and this is the correction to the first attempt at it: a bridged board
-        # is reached *through* the phone the bridge block ssh's into, so probing
-        # both at once has the fleet block dialling rpi4 across the same USB
-        # ethernet the bridge block is running a health check over. Measured
-        # here 2026-08-24: run together the two blocks took 26 s and then 50 s,
-        # and disagreed with themselves between the runs -- rpi4 `bench mode`
-        # one time and `unreachable via tailnet-bridge-generic` the next, rpi5
+        # and they are in step for a reason: a bridged board is reached
+        # *through* the phone the bridge block ssh's into, so probing both at
+        # once has the fleet block dialling rpi4 across the same USB ethernet
+        # the bridge block is running a health check over. Run together the two
+        # blocks take 26 s and then 50 s and disagree with themselves between
+        # runs -- rpi4 `bench mode` one time and `unreachable via
+        # tailnet-bridge-generic` the next, rpi5
         # answering and then not. Neither number was a fleet that had changed.
         # In step they are the 18 s they were, and they say the same thing twice.
         #

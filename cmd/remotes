@@ -26,9 +26,9 @@
 # They drift for two ordinary reasons: a workspace made before that authority
 # existed keeps what `git clone --shared <mirror>` left it -- origin pointing at
 # the mirror, pushable -- and anything can run `git remote set-url` later.
-# Measured 2026-08-19, `bb4` on buildbox4 had exactly the first case, with
-# `fork` pushing over https, while `db` on devbox-arm64-2 was correct: nothing
-# reported the difference, and a push from bb4 could not have worked whatever
+# A box can have exactly the first case, with `fork` pushing over https, while
+# another is correct -- and nothing else reports the difference. A push from the
+# first cannot work whatever
 # the switch said.
 #
 #   wk remotes             every workspace this machine can see

@@ -1,6 +1,6 @@
 # HANDOFF — the sandbox escape audit
 
-The mechanisms this file used to also describe are built and in daily use:
+These mechanisms are built and in daily use:
 `wk push on|off|status` (deploy keys held outside the workspace; `wk claude`
 turns the switch off before an agent takes over), sudo costing a password
 everywhere, and `wk <command> --force` as the one loud way past a barrier.
@@ -41,7 +41,7 @@ every surface added since the request:
   audit itself. `BLOCKED_NETS` and the exact-match `pi-hosts` exemption are the
   compensating controls, and both TESTING.md lines for them are unticked.
 - **`apt` from the Ubuntu archive** (`ports.`/`archive.`/`security.ubuntu.com`,
-  added 2026-08-24 so `wk zed` can install openssh-server in a workspace, which
+  so `wk zed` can install openssh-server in a workspace, which
   is the only thing an editor can talk to over the `podman exec` transport). A
   workspace already has `sudo`, so what this permits is any package in the
   distribution, installed inside the sandbox. The alternative on the table was a
@@ -49,8 +49,8 @@ every surface added since the request:
   workspace's; the wider allowlist was taken instead as a deliberate call, and
   the audit should decide whether it stays. Nothing else in the tree fetches
   from these hosts.
-- **The fleet-request broker** (`container/broker/wk-broker.py`, added
-  2026-08-24). A second unix socket in the one directory a workspace can see,
+- **The fleet-request broker** (`container/broker/wk-broker.py`).
+  A second unix socket in the one directory a workspace can see,
   and the only path from inside the sandbox to physical hardware: it accepts
   seven verbs (`capabilities`, `status`, `stage`, `arm`, `keep`, `run`,
   `release`, `disarm`) and turns each into a fixed `wk boot` / `wk pi` argv on

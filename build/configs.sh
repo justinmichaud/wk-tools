@@ -276,7 +276,7 @@ config_load() {
 # cache, and Xcode scheduling work inside each job -- and the same number is an
 # underestimate that shows up as the memory watchdog killing a healthy build.
 #
-# Measured 2026-08-20, in the golden base: `-j9` derived from 13824 MB at
+# In the golden base: `-j9` derived from 13824 MB at
 # 1536 MB/job peaked at **16593 MB** and was killed at 95% of the way through a
 # mac-release. At 3072 the same guest derived `-j6` and an 18432 MB budget, and
 # the build finished at a peak of **16783 MB**.
@@ -302,8 +302,8 @@ config_build_env() {
     local src="$1" jobs="$2" nice="$3" arch="${4:-native}"
 
     # --- Apple ports: pin where the output and the caches go -----------------
-    # Nothing here used to be set at all, and the defaults are worse than they
-    # look. Xcode's own default puts the content-addressed compilation cache
+    # Set explicitly, because the defaults are worse than they look: Xcode's
+    # own default puts the content-addressed compilation cache
     # and the module cache in ~/Library/Developer/Xcode/DerivedData -- one
     # machine-wide directory per *user*, not per checkout, per config or per
     # workspace. Measured in a guest after one mac-release: 9.6 GB of

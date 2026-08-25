@@ -54,8 +54,8 @@ die()  { printf '    ERROR: %s\n' "$*" >&2; exit 1; }
 #
 # Not defensive programming for its own sake: this host roams between two APs on
 # one SSID, and a blip of a few seconds at minute one killed a build that would
-# otherwise have taken twenty (observed 2026-08-20 -- "Failed to connect ...
-# after 30 ms", with the same fetch succeeding immediately afterwards). Anything
+# otherwise have taken twenty -- "Failed to connect ... after 30 ms", with the
+# same fetch succeeding immediately afterwards. Anything
 # that reaches the network here gets wrapped.
 retry() {
     n=0
@@ -84,11 +84,10 @@ for t in python3 git xz; do
 done
 command -v kpartx    >/dev/null 2>&1 || missing="$missing kpartx(multipath-tools)"
 command -v losetup   >/dev/null 2>&1 || missing="$missing losetup(util-linux)"
-command -v bmaptool  >/dev/null 2>&1 || missing="$missing bmaptool(bmap-tools)"
 python3 -c 'import ensurepip' 2>/dev/null || missing="$missing python3-venv"
 python3 -c 'import yaml' 2>/dev/null || missing="$missing python3-yaml"
 [ -z "$missing" ] || die "missing on this host:$missing
-    sudo apt install -y multipath-tools bmap-tools python3-venv python3-yaml xz-utils git"
+    sudo apt install -y multipath-tools python3-venv python3-yaml xz-utils git"
 sudo -n true 2>/dev/null || die "sudo needs a password here.
     pmbootstrap mounts chroots and loop devices; it cannot do that
     non-interactively without passwordless sudo."
@@ -97,8 +96,8 @@ sudo -n true 2>/dev/null || die "sudo needs a password here.
 # --- pmbootstrap -------------------------------------------------------------
 #
 # From a pinned git tag, in a venv of its own. Not from PyPI: every pmbootstrap
-# release there is yanked (checked 2026-08-20 -- 1.0.1 through 2.1.0, all of
-# them), so `pip install pmbootstrap` fails with "no matching distribution" and
+# release there is yanked -- 1.0.1 through 2.1.0, all of them -- so
+# `pip install pmbootstrap` fails with "no matching distribution" and
 # the project's own distribution channel is the git repository. Not from apt
 # either: Ubuntu does not carry it.
 step "pmbootstrap $PMO_PMB_VERSION"
@@ -135,8 +134,8 @@ if [ ! -d "$WORK" ]; then
 elif [ ! -f "$WORK/version" ]; then
     # A work folder with no version file is one pmbootstrap refuses to migrate
     # ("we can't migrate that automatically") -- and an empty directory left by
-    # a failed first attempt looks exactly like that. Stamp it rather than
-    # making a person delete it.
+    # an empty directory left by a failed run looks exactly like that. Stamp it
+    # rather than making a person delete it.
     printf '%s\n' "$WORK_VERSION" > "$WORK/version"
     info "stamped $WORK with version $WORK_VERSION"
 fi
@@ -244,8 +243,7 @@ info "$CFG"
 #                     option is absent entirely.
 #   the checksums     the APKBUILD's sha512sums cover the config file, so
 #                     editing it makes abuild stop with "Use 'abuild checksum'"
-#                     -- which is what the first attempt at this hit, and it
-#                     names neither the config nor the reason.
+#                     -- an error that names neither the config nor the reason.
 #   pkgrel            bumped, and by a lot. Without it the package version is
 #                     identical to the one already in the local repo from a
 #                     previous build, and pmbootstrap reuses that apk: the
@@ -275,8 +273,8 @@ if [ -n "${PMO_KCONFIG:-}" ]; then
 
     for opt in $PMO_KCONFIG; do
         name=${opt%%=*}
-        # Read *before* editing. The first version of this printed the value it
-        # had just written and called it the old one.
+        # Read *before* editing, or what is printed as the old value is the
+        # one that was just written.
         was=$(sed -n "s/^$name=/=/p;s/^# $name is not set\$/unset/p" "$KCFG" | tr '\n' ' ')
         if grep -q "^$name=" "$KCFG" 2>/dev/null; then
             sed -i "s|^$name=.*|$opt|" "$KCFG"
@@ -442,9 +440,9 @@ for doc in docs:
             # reservation, appear as the same device in a router client list,
             # and be recognised by anything that filters or approves devices.
             # A randomised address arrives as a new unknown device on every
-            # association. Observed 2026-08-21: the phone came up as
-            # 2e:30:b8:f5:ce:48, locally-administered, and was reachable from
-            # nothing on the LAN despite holding a lease.
+            # association: the phone comes up on a locally-administered
+            # address and is reachable from nothing on the LAN despite holding
+            # a lease.
             # (No apostrophes in here: this block is inside a single-quoted
             # shell string, and one apostrophe ends it.)
             print("cloned-mac-address=permanent")
@@ -487,8 +485,7 @@ info "uplink: $ssid (the PSK stayed on this host)"
 # only, and that user cannot become root without a password: doas prompts, and
 # `wk bridge setup` is non-interactive over ssh by design, so the provisioner
 # died on its first privileged write with "'doas' needs a password". Which is a
-# phone that is reachable, healthy, and impossible to provision -- found the
-# hard way on 2026-08-21, after everything else about the image was verified.
+# phone that is reachable, healthy, and impossible to provision.
 #
 # Root by key rather than a passwordless doas rule for the console user, because
 # they are the same authority and only one of them says so out loud. sshd's
@@ -520,8 +517,7 @@ fi
 # Both are in bridge/provision.sh as well, and belonged here all along. The role
 # applies them, but the role is applied *over ssh* -- so a phone that needs them
 # in order to answer ssh can never receive them, and the first provision becomes
-# a race against the phone disappearing. That is not hypothetical: it cost most
-# of 2026-08-21.
+# a race against the phone disappearing.
 #
 #   power save    the RTL8723CS powers its RF side down when idle and misses
 #                 frames aimed at it. The phone can still *initiate* -- it wakes
@@ -584,16 +580,13 @@ rmdir "$OUT/mnt"
 
 # --- the artifacts -----------------------------------------------------------
 #
-# A block map and a compressed image, which is the fast write path: bmaptool
-# sends the compressed file and writes only the blocks the map says are in use,
-# checksumming each against the map as it goes. A phone image is mostly empty
-# space, so this is the difference between sending a few hundred megabytes and
-# sending all of it. boot/disk.sh picks the path from what the store holds.
-step "Block map and compression"
+# A compressed image, because this comes back over WiFi and a phone image is
+# mostly empty space: the difference between sending a few hundred megabytes and
+# sending all of it. A *wire* format and nothing more -- the driving end
+# decompresses it and deletes it.
+step "Compression"
 raw_bytes=$(stat -c %s "$img")
 raw_sha=$(sha256sum "$img" | cut -d' ' -f1)
-bmaptool create -o "$OUT/disk.bmap" "$img" >/dev/null 2>&1 \
-    || die "bmaptool could not map $img"
 xz -T0 -3 -c "$img" > "$OUT/disk.wic.xz" || die "could not compress $img"
 
 cat > "$OUT/result" <<EOF
@@ -608,7 +601,6 @@ uplink_ssid=$ssid
 raw_bytes=$raw_bytes
 raw_sha256=$raw_sha
 wic_xz_bytes=$(stat -c %s "$OUT/disk.wic.xz")
-bmap_bytes=$(stat -c %s "$OUT/disk.bmap")
 EOF
 
 step "Done"

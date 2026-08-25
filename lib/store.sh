@@ -22,8 +22,8 @@
 # for it and has no other user; under the user's own data directory on a Linux
 # workstation, because nothing here needs to be system-owned and a store that
 # needs root to create is a store that needs root to repair. An existing
-# /var/lib/wk still wins if it is ours, so a machine set up before this change
-# keeps working without moving a hundred gigabytes.
+# /var/lib/wk wins if it is ours, so a machine already holding one keeps working
+# without moving a hundred gigabytes.
 _wk_default_store() {
     if [ -n "${WK_IN_VM:-}" ] || [ "$(uname -s)" = Darwin ]; then
         echo /var/lib/wk
@@ -67,11 +67,10 @@ store_is_local() {
 # store to `/images` and pruned, listed and wrote nothing, with no error but a
 # `command not found` on stderr.
 #
-# Moved again 2026-08-22, and out of this file entirely: `wk_state_dir` is now
-# in lib/common.sh. Here was still not low enough -- `wk` sources target.sh
-# without store.sh, so target_all() lost it again on macOS hosts. The reasoning
-# above is why it kept happening and is kept here for that; the definition and
-# the rest of the story are in common.sh.
+# `wk_state_dir` lives in lib/common.sh and not here: `wk` sources target.sh
+# without store.sh, so anything defined here is missing from target_all() on a
+# macOS host. The reasoning above is why the level matters; the definition is in
+# common.sh.
 
 # ccache ceiling, shared by every workspace.
 #
@@ -265,11 +264,10 @@ wk_wiring_script() {
 # was cloned from, which is the exact failure the wiring script was written to
 # prevent -- and anyone can run `git remote set-url` in a checkout afterwards.
 #
-# Measured 2026-08-19: `bb4` on buildbox4 had `origin` = /home/…/wk/mirror with
-# pushing *enabled* to it, `fork` with an https push URL (so no deploy key can
-# ever be offered, whatever `wk push` says), and no `core.sshCommand`. `db` on
-# devbox-arm64-2, created after the wiring landed, was correct. Nothing reported
-# the difference.
+# The shape this catches, seen on a real build box: `origin` = /home/…/wk/mirror
+# with pushing *enabled* to it, `fork` with an https push URL (so no deploy key
+# can ever be offered, whatever `wk push` says), and no `core.sshCommand`.
+# Nothing else reports any of it.
 #
 # Prints one `problem: …` line per fault and exits 1 if there were any, so a
 # caller can relay it without parsing. A snippet for the same reason as the
@@ -377,12 +375,12 @@ fi
     done
     # Which repository the *branch* points at, which is the same separation one
     # level up -- and a fault rather than a note, because the rule is absolute:
-    # we never push to origin, always to the fork (2026-08-19). A working branch
-    # tracking origin/<x> therefore cannot be pushed by a bare `git push` at
-    # all, and when origin used to be a local mirror (the fault above) that
-    # tracking ref meant a different repository than it does once the wiring is
-    # corrected -- measured on bb4, whose branch tracked origin/eng/... for a
-    # branch that exists on the fork and nowhere upstream.
+    # we never push to origin, always to the fork. A working branch tracking
+    # origin/<x> therefore cannot be pushed by a bare `git push` at all -- and
+    # where origin is a local mirror (the fault above) that tracking ref names a
+    # different repository than it does once the wiring is correct, so a branch
+    # tracks origin/eng/... for a branch that exists on the fork and nowhere
+    # upstream.
     #
     # Following an upstream branch is the one exception, and it is exactly the
     # mirrored ones: nobody pushes those either, so tracking them is not a push
@@ -517,8 +515,8 @@ wk_mirror_branches() {
 
 # What a plain `wk sync` fetches: all of them.
 #
-# There used to be a default of `origin` and a `--all` for the rest, and the
-# economy was not worth what it cost. Both upstreams are upstreams *here* (the
+# Not `origin` by default with a `--all` for the rest: the economy is not worth
+# what it costs. Both upstreams are upstreams *here* (the
 # board images are built from the WPE release branches), and both forks are
 # where this fleet's own work lives -- a fork branch that is in the mirror is a
 # branch `wk pr` can check out into a fresh workspace without going to GitHub at
@@ -653,9 +651,9 @@ unreferenced_bases() {
 
     # The newest published snapshot is referenced by policy even when no
     # workspace pins it: it is what the next `wk new` gets, and re-fetching it
-    # costs minutes. Here rather than in `wk gc`, which is where the exception
-    # used to live -- `wk ls` then reported as reclaimable exactly the snapshot
-    # gc would refuse to remove.
+    # costs minutes. Here rather than in `wk gc`: with the exception only over
+    # there, `wk ls` reports as reclaimable exactly the snapshot gc refuses to
+    # remove.
     local keep; keep=$(current_base 2>/dev/null || true)
 
     for base in $(ls -1 "$(wk_base_dir)" 2>/dev/null); do

@@ -298,7 +298,7 @@ sh_quote() {
 #
 # before saying anything about itself, which reads as a broken workspace rather
 # than as the wrong binary. That same image carries a working /usr/bin/lldb-22
-# that nothing was reaching (measured in a 2.53-v9 container, 2026-08-24).
+# that nothing reaches.
 #
 # So a candidate is *run* rather than merely found, and neither the shadowing
 # nor the version number is written down: both belong to an image this repo does
@@ -454,9 +454,9 @@ wk_tailscale_authkey() {
 # `trap _lock_release_all EXIT`, and so did `barrier`, `cmd/new`'s driver,
 # `cmd/image`'s seed cleanup and four commands' prefetch reapers -- and bash
 # keeps only the last one set. Every one of those was correct on its own and
-# silently disabled whichever had been set before it, which for a lock means
-# the lock outlives the command that took it and is cleared only by the next
-# taker's liveness check. That works (that is why the bug was invisible), but
+# silently disables whichever was set before it, which for a lock means the
+# lock outlives the command that took it and is cleared only by the next
+# taker's liveness check. That works, which is why it is invisible, but
 # it turns "the lock dies with its holder" from a property into a repair.
 #
 # So handlers register instead of trapping. Registration is idempotent and
@@ -507,9 +507,9 @@ wk_atexit() {
 # -o BatchMode=yes rpi4-test` builds its ProxyJump as `ssh -l user -p 22 -W
 # host:port <bridge>` and passes nothing else, so the hop through the phone runs
 # with the defaults -- unbounded, and free to ask a question on the terminal.
-# That is what hung `wk status`'s fleet block (2026-08-24): a host-key prompt
-# for the bridge, from a probe whose output was going to a file, with nothing in
-# the fleet listing's 4-second budget able to stop it. The options a jump hop
+# That is enough to hang `wk status`'s fleet block: a host-key prompt for the
+# bridge, from a probe whose output goes to a file, with nothing in the fleet
+# listing's 4-second budget able to stop it. The options a jump hop
 # does read are the ones in its own `Host` stanza (dotfiles/ssh/config sets
 # them there for the bridges), and this is the backstop for everything that
 # cannot be reached that way.
@@ -584,15 +584,15 @@ barrier() {
 # with its holder.
 #
 # One mechanism on every host: a symlink whose target string names the holder.
-# Two earlier attempts are recorded here, because both were tried and both were
-# wrong in ways that only appear when something is killed.
+# Two mechanisms that look right and are not, in ways that only appear when
+# something is killed:
 #
 #   `flock` is held by the open file description, so *every process that
 #   inherits the descriptor* holds it. `wk new` starts a container, and podman
 #   leaves `conmon` behind supervising it -- with our lock fd inherited and the
-#   lock held for as long as the workspace exists. Measured 2026-08-19: after
-#   one `wk new`, conmon held ws-<name>.lock and the next `wk build` on that
-#   workspace waited on it forever. bash cannot mark a redirection
+#   lock held for as long as the workspace exists: after one `wk new`, conmon
+#   holds ws-<name>.lock and the next `wk build` on that workspace waits on it
+#   forever. bash cannot mark a redirection
 #   close-on-exec, so there is no fix that keeps the fd; `flock --close` only
 #   applies to flock's own `-c` command form, which would mean re-exec'ing
 #   every command under it. It is also one more thing to install -- macOS
@@ -602,8 +602,8 @@ barrier() {
 #   inheritance and introduces a window: the directory exists for a moment
 #   before the pid file in it does, and a process killed inside that window
 #   leaves a lock whose holder cannot be named -- indistinguishable from a live
-#   one, and so waited out in full. Found 2026-08-19 by a `wk rm` that sat out
-#   its entire timeout on rubble (docs/HANDOFF-yocto.md).
+#   one, and so waited out in full -- a `wk rm` sitting out its entire timeout
+#   on rubble.
 #
 # A symlink has neither problem. `ln -s` is atomic *and* carries the payload
 # with it, so a lock can never exist without a holder written in it; there is
@@ -634,7 +634,7 @@ barrier() {
 # ws_busy_reason in lib/target.sh -- and the two are used together.
 # This machine's own state directory, and the parent of wk_lock_dir's.
 #
-# It lives here, and not in lib/store.sh where it was, because it had already
+# It lives here, and not in lib/store.sh, because it has already
 # been moved once for this exact failure and the move did not go far enough.
 # store.sh's own comment records the first round: a helper reachable only
 # through lib/target.sh silently disappeared for every command that sourced
@@ -645,9 +645,9 @@ barrier() {
 # target.sh but *not* store.sh, and target_all() in target.sh calls this -- so
 # on a macOS host, where `wk ls` and `wk status` walk targets inside `wk`
 # itself rather than exec'ing cmd/ls (which does source store.sh), the walk
-# died on `wk_state_dir: command not found` and reported a truncated,
-# confident-looking workspace list. Found 2026-08-22 on tolken, where it hid
-# the two macOS guests the benchmark lane needs.
+# dies on `wk_state_dir: command not found` and reports a truncated,
+# confident-looking workspace list -- hiding, for instance, the macOS guests the
+# benchmark lane needs.
 #
 # common.sh is the floor: every file that sources store.sh sources this too
 # (checked, all 35 of them), so there is no lower level for it to fall out of.
@@ -947,7 +947,7 @@ WK_IMAGE_MARKER="${WK_IMAGE_MARKER:-/etc/wk-image}"
 
 # The bench system's own id, or empty in host mode.
 wk_image_id() { sed -n 's/^id=//p' "$WK_IMAGE_MARKER" 2>/dev/null || true; }
-# The profile it was built from -- `perf-linux-rpi5`, `downstream-yocto-...`.
+# The profile it was built from -- `webkit-2.52-yocto-rpi5-64`, and so on.
 # Two systems from two profiles are two configurations of the machine (clocks,
 # fan policy, kernel), so a run records this beside the id: the id says which
 # artifact, the profile says which configuration it stands for.

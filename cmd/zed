@@ -9,8 +9,7 @@
 #
 #   container   no network interface at all, so no address: the route is the ssh
 #               protocol over `podman exec` (container/ssh-transport.sh), and
-#               the sshd at the far end of it is installed on first use. This is
-#               the case that used to be refused outright on a macOS host.
+#               the sshd at the far end of it is installed on first use.
 #   vm          a macOS guest with an address of its own, which changes on every
 #               boot -- the alias is rewritten when it starts.
 #   remote      a machine already in ~/.ssh/config under its own name.

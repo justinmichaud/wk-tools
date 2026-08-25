@@ -24,7 +24,7 @@
 # removable but is *not the storage the machine normally runs on*, so anything
 # the benchmark touches on disk is measured against different hardware than host
 # mode uses. A second volume in the internal container removes that variable,
-# which is the one that cannot be corrected for afterwards. Chosen 2026-08-22.
+# which is the one that cannot be corrected for afterwards.
 #
 # What it costs, recorded because it is the half that is easy to forget:
 #
@@ -128,9 +128,9 @@ free_bytes_of_container() {
 
 # Both of these read the real disk, under --dry-run exactly as otherwise.
 #
-# An earlier version had --dry-run *simulate* the volume its own --create step
-# would have made, so that `--all --dry-run` could walk the whole chain. That
-# was wrong and is worth recording as wrong: it made the dry run a second code
+# --dry-run does not *simulate* the volume its own --create step would make, so
+# that `--all --dry-run` can walk the whole chain. That would make the dry run a
+# second code
 # path with its own model of the disk, and a dry run that reasons about a
 # fictional machine can pass while the real path fails -- which is precisely
 # the evidence it was supposed to provide. --dry-run is the real path with
@@ -476,12 +476,12 @@ PLIST
     # The auth key is a secret and therefore never in this repository: it comes
     # from ~/.config/wk/tailscale-authkey on the driving Mac, which is
     # machine-local state exactly like the Wi-Fi passphrase.
-    # ASKED FOR, not described. This block used to warn that
-    # ~/.config/wk/tailscale-authkey did not exist and tell the reader to go and
-    # make it -- for two days, every run, while the item it gates is the one that
-    # decides whether a benchmark run can be observed at all. `wk_tailscale_authkey`
-    # prompts (hidden input, stored 0600, validated, asked once) and only warns
-    # if there is no terminal to ask at.
+    # ASKED FOR, not described. Warning that ~/.config/wk/tailscale-authkey
+    # does not exist and telling the reader to go and make it is a warning
+    # printed on every run, gating the one item that decides whether a benchmark
+    # run can be observed at all. `wk_tailscale_authkey` prompts (hidden input,
+    # stored 0600, validated, asked once) and only warns if there is no terminal
+    # to ask at.
     local akey
     if akey=$(wk_tailscale_authkey); then
         install -m 0600 "$akey" "$root/usr/local/share/wk-bench/tailscale-authkey"
@@ -494,17 +494,13 @@ PLIST
 
     # The Tailscale package itself, fetched rather than built.
     #
-    # Corrected 2026-08-24, and the correction is the reason this step existed
-    # only as a warning for two days: the comment above used to say the binaries
-    # had to be cross-compiled with a Go toolchain, so the whole item looked
-    # gated behind installing a compiler and was skipped every time.
-    #
-    # It is not. The *static tarballs* are Linux-only, but macOS ships as
+    # No Go toolchain is involved, whatever the tarball page suggests. The
+    # *static tarballs* are Linux-only, but macOS ships as
     # `Tailscale-<ver>-macos.pkg`, and that package is the **macsys/standalone**
     # variant: it carries a real LaunchDaemon
     # (`io.tailscale.ipn.macsys.tssentineld`, RunAtLoad, KeepAlive) plus a CLI at
     # `Contents/MacOS/Tailscale`, and `installer -pkg … -target /` is a
-    # non-interactive install. Verified by expanding the package, 2026-08-24.
+    # non-interactive install, which expanding the package confirms.
     #
     # Cached next to the auth key, because this is fetched once per machine and a
     # provisioning step that needs the network every time is a provisioning step
@@ -513,10 +509,9 @@ PLIST
     if [ ! -s "$tspkg_cache" ]; then
         log "  tailscale: fetching the macOS package (once)"
         # The filename is read off the index rather than assembled from the JSON
-        # `TarballsVersion`. Both agree today (1.102.3, and the assembled URL
-        # returns 200 -- checked 2026-08-24), but the tarballs are the *Linux*
-        # artefacts and there is no macOS version field, so the agreement is a
-        # coincidence of release process rather than a promise. Scraping the name
+        # `TarballsVersion`. The two agree in practice, but the tarballs are
+        # the *Linux* artefacts and there is no macOS version field, so the
+        # agreement is a coincidence of release process rather than a promise. Scraping the name
         # the index actually publishes cannot drift; the assembled URL is the
         # fallback for the day the index format changes instead.
         local tsname tsver
@@ -572,8 +567,8 @@ PLIST
     # launchd has already scanned /Library/LaunchDaemons. So a RunAtLoad daemon
     # dropped then does not run until the *next* boot, and with Setup Assistant
     # suppressed and no account created there is nothing to trigger a next boot.
-    # Measured 2026-08-22: the volume booted, ran for minutes (wifi.log, asl),
-    # and never opened the daemon's StandardOutPath.
+    # The volume boots, runs for minutes (wifi.log, asl), and never opens the
+    # daemon's StandardOutPath.
     #
     # The postinstall runs while that system is up, so it can bootstrap the job
     # itself. `|| true` throughout: a failure here must not fail the OS install,
@@ -688,9 +683,9 @@ gather_secrets() {
 # first-boot machinery back on a volume that already booted, so the next boot
 # re-provisions it.
 #
-# Needed because the first attempt half-worked: the account, sudoers, marker,
-# quieting and wk-tools all landed, but Remote Login and autologin did not -- and
-# the daemon had already removed itself, so nothing would retry. Everything here
+# Needed because provisioning can half-land: the account, sudoers, marker,
+# quieting and wk-tools arrive, Remote Login and autologin do not, and the
+# daemon has already removed itself, so nothing retries. Everything here
 # is written from host mode onto the mounted volume, which is the one moment the
 # bench install is editable without being running.
 do_repair() {
@@ -710,9 +705,9 @@ do_repair() {
     # Set fails when it does not.
     #
     # The stderr redirects are on PlistBuddy only, not on the whole statement:
-    # an earlier version wrapped these in `run ... 2>/dev/null`, which swallowed
-    # `run`'s own "would run" line and made --dry-run silently skip printing the
-    # single most important step in this function.
+    # wrapping these in `run ... 2>/dev/null` swallows `run`'s own "would run"
+    # line and makes --dry-run silently skip printing the single most important
+    # step in this function.
     if [ -f "$dis" ]; then
         if [ -n "$DRY" ]; then
             log "  would set com.openssh.sshd=false (i.e. enabled) in $dis"
@@ -769,11 +764,10 @@ do_repair() {
         write_wifi_conf "$S/usr/local/share/wk-bench/wifi.conf"
     fi
 
-    # The tailscale bits, which --repair did not lay down at all until
-    # 2026-08-24 -- so re-arming first boot on an installed volume could never
-    # give it a tailnet identity, however many keys were configured. That is the
-    # only route to a tailnet identity on a volume that already has macOS, since
-    # --install refuses to run twice.
+    # The tailscale bits. This is the only route to a tailnet identity on a
+    # volume that already has macOS, since --install refuses to run twice -- so
+    # leaving them out here means no amount of configured keys can give an
+    # installed volume an identity.
     local akey
     if akey=$(wk_tailscale_authkey); then
         if [ -n "$DRY" ]; then
@@ -969,11 +963,11 @@ case "${ACTION:---report}" in
         fi
         do_install
 
-        # NOT A NO-OP WHEN EVERYTHING EXISTS. `--all` used to run three steps
-        # that each said "nothing to do" and then exit satisfied, on a machine
-        # whose provisioning was incomplete -- observed 2026-08-24 on tolken,
-        # where all three no-opped while the bench install had no tailnet
-        # identity and therefore no way to be watched or collected from.
+        # NOT A NO-OP WHEN EVERYTHING EXISTS. Three steps that each say
+        # "nothing to do" and then exit satisfied leave a machine whose
+        # provisioning is incomplete: all three no-op while the bench install
+        # has no tailnet identity and therefore no way to be watched or
+        # collected from.
         #
         # `--all` means "get this machine to a working benchmark install", so
         # when the volume is already installed it goes on to the one route that

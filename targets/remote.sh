@@ -87,9 +87,9 @@ WK_REMOTE_ROOT="${WK_REMOTE_ROOT:-}"
 # machine and the driver drops the ssh step (WK_REMOTE_LOCAL) and takes the root
 # from the marker rather than from a probe of itself.
 #
-# It used to be a second conf file -- ~/.config/wk/targets/<t>.conf on the box,
-# written by remote/provision.sh, holding WK_TARGET_KIND, WK_REMOTE_LOCAL and
-# WK_REMOTE_ROOT. Every one of those three restated something the marker beside
+# Not a second conf file -- ~/.config/wk/targets/<t>.conf on the box, holding
+# WK_TARGET_KIND, WK_REMOTE_LOCAL and WK_REMOTE_ROOT. Each of those three
+# restates something the marker beside
 # it already said, which is the "no caching of facts" rule (CLAUDE.md, "State
 # and lifecycle" 1): a read can recompute all of it, so a second copy is a bug
 # even while it is still equal. It could also drift -- a target renamed in the
@@ -496,9 +496,9 @@ t_create() {
         # The clone comes from it, and then origin is re-pointed at
         # WebKit/WebKit like everywhere else -- the machine's copy stays as
         # `shared`, which is what a fast, ten-minutes-fresh local mirror should
-        # be called. It was origin until 2026-08-19, which made `git log
-        # origin/main` in a remote workspace answer for that box's last fetch
-        # rather than for upstream.
+        # be called. Calling it `origin` makes `git log origin/main` in a
+        # remote workspace answer for that box's last fetch rather than for
+        # upstream.
         info "cloning from $ref (this machine's shared WebKit, hardlinked)"
         _rsh_q "set -e
             mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
@@ -670,10 +670,10 @@ t_has_wk() {
 # Two variables travel with a delegated command, as environment and not as
 # arguments, and the reason is version skew: a *peer* runs its own checkout of
 # this repository, kept by git, so the two sides are the same code only after
-# both have pulled. An argument an old copy has never heard of is fatal there --
-# measured 2026-08-19, when `--label` reached a workstation on an older tree and
-# `require_name --label` killed the delegated status, dropping that machine's
-# workspaces out of the listing while `wk ls`, which happened to ignore extra
+# both have pulled. An argument an old copy has never heard of is fatal there:
+# `--label` reaching a workstation on an older tree makes `require_name --label`
+# kill the delegated status, dropping that machine's workspaces out of the
+# listing while `wk ls`, which ignores extra
 # arguments, still showed them. An unknown *variable* is ignored by every
 # version, so the old side answers as it always did.
 t_wk() {

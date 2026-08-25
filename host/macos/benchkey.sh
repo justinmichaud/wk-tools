@@ -16,9 +16,9 @@
 # Only on the Mac that has the benchmark volume: nothing else uses this.
 #
 # Sourced by ./setup, like every other stage, so WK_ROOT, the shell options and
-# common.sh are already in scope. It used to re-derive its own WK_ROOT from
-# `dirname $0` -- and `$0` in a sourced file is the *sourcing* script, so under
-# `wk setup` it resolved two levels above the checkout and the stage died on a
+# common.sh are already in scope. Re-deriving its own WK_ROOT from `dirname $0`
+# does not work: `$0` in a sourced file is the *sourcing* script, so under
+# `wk setup` it resolves two levels above the checkout and the stage dies on a
 # missing lib/common.sh. Stages do not have their own root.
 
 is_macos || { debug "benchkey: macOS only"; return 0; }

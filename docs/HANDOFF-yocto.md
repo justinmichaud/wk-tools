@@ -34,7 +34,7 @@ WebKit against the target's own SDK (3736/3736, `libWPEWebKit-1.1.so`).
    `wk rm` — which would discard an hours-long `populate_sdk` toolchain that
    lives in the workspace (unlike sstate and DL_DIR, which are in the store).
    **Add it the next time that workspace is recreated for another reason.**
-5. **Tailscale on the rpi target** — written, not yet built (2026-08-24). It is
+5. **Tailscale on the rpi target** — written, not yet built. It is
    a layer of its own, `image/yocto/meta-wk-tailnet`, and deliberately not a
    recipe in `meta-wk`: that layer may only change how an image is *built*
    (item 3 above is the open question about it), and this changes what is in
@@ -64,13 +64,8 @@ WebKit against the target's own SDK (3736/3736, `libWPEWebKit-1.1.so`).
    on macOS *is* a container target, so it should work, subject to the VM's disk
    being big enough.
 7. **The rpi3 targets** — `webkit-2.52-yocto-rpi3-32` (then named
-   `downstream-yocto-wpe-2.48-rpi3-32`) **has** been
-   built (2026-08-22, on moose:
-   `downstream-yocto-wpe-2.48-rpi3-32-20260822T205734Z`, 3.3 GB — the id keeps
-   the name it was built under) and written to
-   the board's SD card; `-64` has not. This item said the opposite until
-   2026-08-24, and the correction matters for more than tidiness: that image is
-   the board's **base image**, the only system on its only medium, so the rpi3
+   `webkit-2.52-yocto-rpi3-32`) **has** been built (3.3 GB) and written to the
+   board's SD card; `-64` has not. That image is the board's **base image**, the only system on its only medium, so the rpi3
    has no bench system at all and `wk pi bench rpi3` now refuses it by design
    (docs/TESTING.md §7). The board is off.
 
