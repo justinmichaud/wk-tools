@@ -617,11 +617,39 @@ cmd_bench() {
     # 1. Bench mode or nothing, and it is not softened here: a run on a machine that never left host mode is a
     # measurement of a desktop with a browser on it, which is a different thing
     # wearing the same number. The evidence is the image's own marker.
-    local sysid
-    sysid=$(m_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null | tr -d '\r')
+    local sysid probe rootdev kind
+    probe=$(m_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r')
+    sysid=$(  printf '%s\n' "$probe" | sed -n 's/^id=//p'      | head -1)
+    rootdev=$(printf '%s\n' "$probe" | sed -n 's/^rootdev=//p' | head -1)
     [ -n "$sysid" ] || die "$machine is not running a wk bench system (no /etc/wk-image).
     A benchmark runs in bench mode or it does not run:
         wk boot $machine --system <id>   then   wk boot $machine --keep"
+
+    # A marker is not enough, and this is the refusal that was missing. Every
+    # image wk writes carries /etc/wk-image, the base image included -- so a
+    # board that fell back to the medium it is never armed from (an unarmed
+    # stick, a stick that would not boot, or a board that has only ever had one
+    # medium) passed this check and got measured. The base image is a helper
+    # for flashing and recovering other systems; a number taken from it is a
+    # number from the wrong system, and it is indistinguishable from a real one
+    # afterwards. Evidence, not the record: which device the running root is on.
+    kind=$(b_system_kind "$rootdev")
+    if [ "$kind" = base ]; then
+        die "$machine is running its **base image** ($sysid, root on $rootdev), not a
+    bench system. That image is the resilient helper the board falls back to --
+    it exists to keep the board reachable and to let another system be written
+    and recovered, and it is never the thing to measure.
+
+    Arm a bench system on $MACH_DEVICE and boot it:
+        wk boot $machine --system <id>   then   wk boot $machine --keep
+
+    'wk boot $machine --status' says what is there now."
+    fi
+    if [ "$kind" = unknown ]; then
+        warn "cannot tell which medium $machine booted from (root: ${rootdev:-unknown})."
+        warn "  proceeding, but check 'wk boot $machine --status': a run against the"
+        warn "  base image is a number from the wrong system."
+    fi
 
     # 1b. Is there a display? Asked here, ahead of the build check, and that
     # ordering is deliberate: this refusal cannot be satisfied by anything the

@@ -40,6 +40,15 @@ every surface added since the request:
   user-generated content and ad/analytics networks. The file flags this for the
   audit itself. `BLOCKED_NETS` and the exact-match `pi-hosts` exemption are the
   compensating controls, and both TESTING.md lines for them are unticked.
+- **`apt` from the Ubuntu archive** (`ports.`/`archive.`/`security.ubuntu.com`,
+  added 2026-08-24 so `wk zed` can install openssh-server in a workspace, which
+  is the only thing an editor can talk to over the `podman exec` transport). A
+  workspace already has `sudo`, so what this permits is any package in the
+  distribution, installed inside the sandbox. The alternative on the table was a
+  derived image built *outside* the sandbox, where the network is not the
+  workspace's; the wider allowlist was taken instead as a deliberate call, and
+  the audit should decide whether it stays. Nothing else in the tree fetches
+  from these hosts.
 - **Remote targets** — shared build machines a workspace's work runs on.
 - **The tailnet bridges** — `wk bridge`, camera streaming, and a routed
   10.99.x segment reachable from the workstation.

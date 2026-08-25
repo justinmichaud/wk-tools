@@ -291,19 +291,82 @@ machine_armed_barrier() { # <what this command would do>
 # downstream has to talk to whatever actually answered, and a probe whose
 # channel is discovered in a command substitution loses it on the way out --
 # the subshell that computed it is gone by the time anyone acts on it.
+# What a system says about itself and what it is actually running from, in one
+# round trip. The second half is the one that was missing.
+_b_probe_sh=$(cat <<'EOS'
+cat /etc/wk-image 2>/dev/null
+rd=$(findmnt -no SOURCE / 2>/dev/null || true)
+[ -n "$rd" ] || rd=$(awk '$2 == "/" { print $1; exit }' /proc/mounts 2>/dev/null)
+case "$rd" in
+  /dev/root|"") rd=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null | head -1) ;;
+esac
+case "$rd" in
+  PARTUUID=*) rd=$(readlink -f "/dev/disk/by-partuuid/${rd#PARTUUID=}" 2>/dev/null || echo "$rd") ;;
+  UUID=*)     rd=$(readlink -f "/dev/disk/by-uuid/${rd#UUID=}" 2>/dev/null || echo "$rd") ;;
+esac
+printf 'rootdev=%s\n' "$rd"
+EOS
+)
+
+# base | bench | unknown, from the device the running root is on.
+#
+# This is the distinction the fleet did not have, and its absence was not
+# cosmetic: `b_probe` called anything carrying /etc/wk-image a bench system, and
+# every image wk writes carries one -- including the base image on the medium
+# that is never written to. So a board that fell back to its base image (an
+# unarmed stick, a stick that would not boot, an rpi3, which has only ever had
+# the one medium) reported `bench <id>` and `wk pi bench` measured it. The
+# number that comes out of that looks exactly like a real one.
+#
+# The machine conf already declares both halves and has all along: MACH_ROOT is
+# "the root device of its host mode -- never written to", and MACH_DEVICE is the
+# medium wk writes systems onto. So this needs no new state, only for the
+# question to be asked. MACH_ROOT is tested first, because on a one-medium board
+# (the rpi3: MACH_ROOT=/dev/mmcblk0p2, MACH_DEVICE=/dev/mmcblk0) both patterns
+# match and the base answer is the true one -- and stays true the day that board
+# grows a second root slot, which lands on neither.
+b_system_kind() { # <root device>
+    local rd="${1:-}"
+    [ -n "$rd" ] || { printf 'unknown'; return 0; }
+    case "$rd" in "${MACH_ROOT:-@none@}"*) printf 'base'; return 0 ;; esac
+    case "$rd" in "${MACH_DEVICE:-@none@}"*) printf 'bench'; return 0 ;; esac
+    printf 'unknown'
+}
+
+# Which mode is answering, and on which channel. Evidence, never the record:
+# a system writes an identity marker, the host install does not, and *which
+# medium the running root is on* says whether that system is the one somebody
+# armed or the base image the board falls back to.
 b_probe() {
-    local id
+    local out id role rootdev kind
     if m_ssh true >/dev/null 2>&1; then
         MODE_CHANNEL=host
-        id=$(m_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null || true)
-        MODE="host"
-        [ -n "$id" ] && MODE="bench $id"
-        return 0
+        out=$(m_ssh "$_b_probe_sh" 2>/dev/null || true)
+    elif out=$(i_ssh "$_b_probe_sh" 2>/dev/null) && printf '%s' "$out" | grep -q '^id='; then
+        MODE_CHANNEL=bench
+    else
+        MODE_CHANNEL=none; MODE=unreachable; return 0
     fi
-    if id=$(i_ssh 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null' 2>/dev/null) && [ -n "$id" ]; then
-        MODE_CHANNEL=bench; MODE="bench $id"; return 0
-    fi
-    MODE_CHANNEL=none; MODE=unreachable
+
+    id=$(     printf '%s\n' "$out" | sed -n 's/^id=//p'      | head -1 | tr -d '\r')
+    role=$(   printf '%s\n' "$out" | sed -n 's/^role=//p'    | head -1 | tr -d '\r')
+    rootdev=$(printf '%s\n' "$out" | sed -n 's/^rootdev=//p' | head -1 | tr -d '\r')
+
+    if [ -z "$id" ]; then MODE="host"; return 0; fi
+
+    kind=$(b_system_kind "$rootdev")
+    # The image's own word is the fallback, not the answer: it is right about
+    # what the image was built to be and cannot know which medium it was
+    # written to. The device knows, so it wins wherever it is conclusive.
+    case "$kind" in
+        base)  MODE="base $id" ;;
+        bench) MODE="bench $id" ;;
+        *)     case "$role" in
+                   rescue) MODE="base $id" ;;
+                   *)      MODE="bench $id" ;;
+               esac ;;
+    esac
+    return 0
 }
 
 # Can this host probe this machine at all? Most machines are reached over

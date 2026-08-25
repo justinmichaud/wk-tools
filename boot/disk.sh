@@ -33,9 +33,13 @@
 #
 # Where the work happens
 # ----------------------
-# On the machine, over ssh, where sudo is passwordless. The workstation
-# deliberately has no privileged component ("no root, and no firewall"),
-# and the disk is over there anyway. This end decides and reports.
+# On the machine, over ssh, and through one privileged helper --
+# `admin/wk-card-priv`, invoked as `sudo -n`. Not "where sudo is passwordless",
+# which is what this said and was never true of a workstation: sudo there wants
+# a password and a terminal, and there is no terminal down a BatchMode ssh.
+# There is deliberately no second, inline-sudo way in. The workstation this runs
+# *from* still has no privileged component ("no root, and no firewall"), and the
+# disk is over there anyway. This end decides and reports.
 #
 # Requires machine_load() to have run, so MACH_SSH/MACH_ROOT/MACH_DEVICE are set.
 
@@ -95,43 +99,25 @@ EOF
     [ "$n" -gt 0 ] || printf '    (none -- no removable disk is attached to %s)\n' "$MACH_NAME"
 }
 
-# Refuse before writing, in the order in which a mistake would cost most. Every
-# branch names the disk and the reason: "permission denied", or a silent success
-# on the wrong disk, are the two outcomes worth spending lines to avoid.
+# May this device be written? Asked of the helper, which is the machine that
+# will do the writing and the only implementation of the rule.
+#
+# It used to be a second copy of the same checks, here -- whole disk, removable
+# or usb/mmc, not the machine's own root. Two implementations of "is this safe"
+# is one that can drift into permitting what the other refuses, and the one that
+# matters is the one holding the privilege. So this asks, and adds the single
+# question the helper cannot answer: does the image fit.
 disk_refuse_unless_safe() {
-    local dev="$1" bytes="$2" type tran rm size dev_bytes root_src
+    local dev="$1" bytes="$2" out dev_bytes size
 
-    m_ssh "test -b $(sh_quote "$dev")" 2>/dev/null || die "$dev is not a block device on $MACH_NAME.
+    out=$(card_priv check "$dev" 2>&1) || die "$MACH_NAME will not write $dev:
+$(printf '%s\n' "$out" | sed 's/^/    /')
     Disks there:
 $(disk_list)"
-
-    read -r type tran rm size <<EOF
-$(m_ssh "lsblk -dno TYPE,TRAN,RM,SIZE $(sh_quote "$dev")" 2>/dev/null)
-EOF
-    [ "$type" = disk ] || die "$dev on $MACH_NAME is a '$type', not a whole disk.
-    An image carries its own partition table, so it goes to the disk --
-    /dev/sdb, not /dev/sdb1."
-
-    # The mistake this whole file exists to make impossible.
-    if [ "${rm:-0}" != 1 ] && [ "$tran" != usb ] && [ "$tran" != mmc ]; then
-        die "refusing to write $dev on $MACH_NAME: it is not removable (RM=${rm:-?}) and
-    its transport is '${tran:-unknown}', not usb or mmc. That is the signature
-    of a fixed disk -- a machine's own system disk is never a target here.
-    Disks there:
-$(disk_list)"
-    fi
-
-    # And the checks removability cannot make: a genuinely removable disk that
-    # genuinely holds the machine's system.
-    case "$dev" in
-        "${MACH_ROOT%%[0-9p]*}"*) die "refusing to write $dev: that is $MACH_NAME's own root disk ($MACH_ROOT)" ;;
-    esac
-    root_src=$(m_ssh "findmnt -no SOURCE /" 2>/dev/null || true)
-    case "$root_src" in
-        "$dev"*) die "refusing to write $dev: $MACH_NAME's root filesystem is on it ($root_src)" ;;
-    esac
+    debug "$out"
 
     dev_bytes=$(m_ssh "lsblk -bdno SIZE $(sh_quote "$dev")" 2>/dev/null | tr -dc '0-9')
+    size=$(m_ssh "lsblk -dno SIZE $(sh_quote "$dev")" 2>/dev/null | tr -d ' \r')
     [ -n "$dev_bytes" ] && [ "$dev_bytes" -ge "$bytes" ] \
         || die "$dev on $MACH_NAME is ${size:-unknown}, smaller than the image ($(human_bytes "$bytes"))"
 }
@@ -145,130 +131,52 @@ disk_mounted() {
 # erase the disk, and a desktop automounter having grabbed the card is not a
 # reason to send someone back to a hand-typed umount.
 disk_unmount() {
-    local dev="$1" p
-    while IFS= read -r p; do
-        [ -n "$p" ] || continue
-        info "unmounting $p on $MACH_NAME"
-        m_ssh "udisksctl unmount -b $(sh_quote "$p") >/dev/null 2>&1 || sudo umount $(sh_quote "$p")" \
-            || die "could not unmount $p on $MACH_NAME"
-    done <<EOF
-$(m_ssh "lsblk -lno NAME,MOUNTPOINT $(sh_quote "$dev")" 2>/dev/null | awk 'NF > 1 { print "/dev/" $1 }')
-EOF
-    return 0
+    local dev="$1"
+    # Through the helper, like every other privileged step here. It is the one
+    # verb allowed to see mounted filesystems -- unmounting them is its purpose
+    # -- and it still refuses a disk this machine is running from.
+    card_priv unmount "$dev" >/dev/null \
+        || die "could not unmount what is on $dev on $MACH_NAME.
+    Something is using it:
+$(m_ssh "lsblk -lno NAME,MOUNTPOINT $(sh_quote "$dev")" 2>/dev/null | awk 'NF > 1 { print "    /dev/" $1 " at " $2 }')"
 }
 
-# Which write method this image and this machine can use.
+# There is one way to put an image on a card, and that is the point.
 #
-#   bmap  -- the image has a block map and a compressed original, and the
-#            machine has bmaptool. Sends the *compressed* image (573 MB for a
-#            4 GB wic) and writes only the blocks the map says are in use,
-#            checksumming each one as it goes.
-#   dd    -- everything else: stream the raw image through zstd into dd.
-disk_method() {
-    local id="$1"
-    if [ -f "$(image_bmap "$id")" ] && [ -f "$(image_wic "$id")" ]; then
-        # Provenance before speed. A compressed copy that predates the last
-        # edit to disk.img would write a board that boots without the fleet
-        # integration or the retargeted root, and would do it silently -- see
-        # image_fast_path_ok.
-        if ! image_fast_path_ok "$id"; then
-            warn "$id's compressed copy does not record which disk.img it came from,
-  so it may not be the image beside it. Writing the raw image instead (slower,
-  and verified by read-back). 'wk sysimage retarget $id' re-derives it." >&2
-            echo dd; return 0
-        fi
-        if m_ssh 'command -v bmaptool >/dev/null' 2>/dev/null; then
-            echo bmap; return 0
-        fi
-        # Said out loud rather than fallen back from quietly. The image *has* a
-        # block map, so the slow path here is a missing package on one machine,
-        # not a property of the image -- and the difference is sending 4 GB
-        # instead of 573 MB and writing every byte instead of the used ones.
-        warn "$MACH_NAME has no bmaptool, so this falls back to streaming the whole
-  raw image. The image has a block map; installing the package makes writes
-  much faster:  ssh $MACH_SSH sudo apt install -y bmap-tools" >&2
-    fi
-    echo dd
-}
+# There used to be two: a bmaptool path that sent the compressed image plus a
+# block map and wrote only the mapped blocks, and a dd path for machines without
+# bmaptool. Two writers is two code paths that can only be tested with hardware
+# in hand, for one behaviour -- and the fast one existed to consume `disk.wic.xz`
+# and `disk.bmap`, which were *store* artifacts. With no store there is nothing
+# to feed it (wk help images), so it went with the store rather than being kept
+# as a second thing to keep working. What is left streams the image through the
+# privileged helper, which is also the only route to a raw device here.
+#
+# If a write ever becomes too slow to bear, the answer is to make the one path
+# faster, not to add a second one back.
 
-# bmaptool needs a file it can seek in, so the image has to land on the machine
-# before it can be written -- it cannot be streamed. That is why the *compressed*
-# wic is what gets copied: 573 MB instead of 4 GB, and bmaptool reads .xz
-# directly. The temp copy is removed even if the write fails.
-DISK_STAGING=""
-_disk_staging_cleanup() {
-    [ -n "${DISK_STAGING:-}" ] || return 0
-    m_ssh "rm -rf $DISK_STAGING" >/dev/null 2>&1 || true
-    DISK_STAGING=""
-    return 0
-}
-
-disk_write_bmap() {
-    local id="$1" dev="$2" wic bmap remote
-    wic=$(image_wic "$id"); bmap=$(image_bmap "$id")
-    remote=$(m_ssh 'mktemp -d /var/tmp/wk-write.XXXXXX' | tr -d '\r\n')
-    [ -n "$remote" ] || die "could not make a staging directory on $MACH_NAME"
-
-    info "sending $(basename "$wic") ($(human_bytes "$(file_bytes "$wic")")) and its block map to $MACH_NAME"
-    # Registered rather than trapped, and the path goes in a global for it to
-    # read: this command holds the image-store lock, and a `trap ... EXIT` here
-    # would replace the release with the staging cleanup (lib/common.sh,
-    # wk_atexit). Self-cancelling -- the normal path clears the variable.
-    DISK_STAGING="$remote"
-    wk_atexit _disk_staging_cleanup
-    m_ssh "cat > $remote/disk.wic.xz" < "$wic" || die "could not copy the image to $MACH_NAME"
-    m_ssh "cat > $remote/disk.bmap"   < "$bmap" || die "could not copy the block map to $MACH_NAME"
-
-    # Zero the image's extent first, and this is a correctness step rather than
-    # hygiene.
-    #
-    # bmaptool writes only the mapped blocks; the unmapped ones keep whatever the
-    # destination already held. The note on disk_verify_dd below says so, and the
-    # note in cmd/sysimage's refresh_fast_path argues it is safe because a hole is
-    # "filesystem free space that was never written". That argument holds for a
-    # blank card and fails for a reused one, because free space is not
-    # don't-care: on FAT, a free directory slot and a free FAT entry are *defined*
-    # as zeros, so leaving a previous filesystem's bytes there does not leave
-    # unused space, it leaves entries. Measured 2026-08-22 writing an rpi3 image
-    # onto a card that had held a PinePhone system: 100 MB of the 130 MB boot
-    # partition went unwritten, the root directory region among it, and the
-    # result mounted with garbage entries beside the real ones, an I/O error on
-    # readdir, and fsck reporting files with start clusters past the end of the
-    # partition. Every block bmaptool did write was correct and checksummed --
-    # which is exactly why nothing caught it. The map's checksums cover what was
-    # written, never what was not, and the bmap path has no read-back check.
-    #
-    # Only the image's own extent, not the whole card: what lies past it is not
-    # this image's business, and on a 64 GB card holding a 3.3 GB image, zeroing
-    # the rest would cost far more than the write.
-    local bytes
-    bytes=$(file_bytes "$(image_disk "$id")")
-    info "zeroing the first $(human_bytes "$bytes") of $dev (bmaptool skips holes; a reused disk keeps its old bytes there)"
-    m_ssh "sudo blkdiscard -z --offset 0 --length $bytes $(sh_quote "$dev") 2>/dev/null \
-           || sudo dd if=/dev/zero of=$(sh_quote "$dev") bs=4M count=$(( (bytes + 4194303) / 4194304 )) conv=fsync status=none" \
-        || die "could not zero $dev on $MACH_NAME before writing"
-
-    info "writing with bmaptool -- mapped blocks only, each checksummed against the map"
-    m_ssh "sudo bmaptool copy --bmap $remote/disk.bmap $remote/disk.wic.xz $(sh_quote "$dev")" \
-        || die "bmaptool failed writing to $dev on $MACH_NAME"
-    m_ssh "sync"
-    m_ssh "rm -rf $remote" >/dev/null 2>&1 || true
-    DISK_STAGING=""
-}
-
-# Stream the raw image over ssh into dd. zstd on both ends when both have it --
-# a wic image is mostly unallocated space and text, and this goes over a tailnet.
-disk_write_dd() {
-    local img="$1" dev="$2" bytes remote_zstd=no
-    bytes=$(file_bytes "$img")
+disk_write_stream() { # <device>   -- image bytes on stdin
+    local dev="$1" remote_zstd=no
     m_ssh 'command -v zstd >/dev/null' && remote_zstd=yes
-    info "writing $(basename "$img") to $dev on $MACH_NAME ($((bytes / 1024 / 1024)) MB, zstd=$remote_zstd)"
+    info "writing to $dev on $MACH_NAME (streamed, zstd=$remote_zstd)"
+    # The decompression runs unprivileged on the far side; only the plain stream
+    # reaches the privileged writer, so the verb stays "write these bytes to
+    # that device" and nothing more.
     if [ "$remote_zstd" = yes ] && have zstd; then
-        zstd -3 -c "$img" | m_ssh "zstd -dc | sudo dd of=$(sh_quote "$dev") bs=4M conv=fsync status=none"
+        zstd -3 -c | m_ssh "zstd -dc | sudo -n $CARD_PRIV write $(sh_quote "$dev")"
     else
-        m_ssh "sudo dd of=$(sh_quote "$dev") bs=4M conv=fsync status=none" < "$img"
+        card_priv write "$dev"
     fi
-    m_ssh "sync"
+}
+
+# Writing a file is writing a stream with the file on stdin, and it is spelled
+# that way rather than reimplemented: two ways to put bytes on a card is two
+# code paths to test, on hardware, for one behaviour.
+disk_write_dd() {
+    local img="$1" dev="$2" bytes
+    bytes=$(file_bytes "$img")
+    info "writing $(basename "$img") ($((bytes / 1024 / 1024)) MB)"
+    disk_write_stream "$dev" < "$img"
 }
 
 # Read back what was written and compare hashes.
@@ -285,65 +193,31 @@ disk_write_dd() {
 # whenever the image's unmapped regions really are holes; that is true of every
 # image refresh_fast_path re-derived, and not guaranteed of a map bitbake wrote
 # from free-space data, so it is not switched on here blindly.
+# Read the card back and compare it with what was sent. The read needs
+# privilege, so it is a verb rather than a second way in.
 disk_verify_dd() {
     local img="$1" dev="$2" bytes local_sha remote_sha
     bytes=$(file_bytes "$img")
-    info "verifying by reading it back"
-    local_sha=$(sha256sum "$img" | cut -d' ' -f1)
-    remote_sha=$(m_ssh "sudo head -c $bytes $(sh_quote "$dev") | sha256sum" | cut -d' ' -f1)
-    [ "$local_sha" = "$remote_sha" ] || die "read-back mismatch on $dev
-    wrote  $local_sha
-    read   $remote_sha
-    The disk did not store what was sent. Try another disk or another port."
-    info "read-back matches"
+    info "verifying $dev against $(basename "$img")"
+    local_sha=$(head -c "$bytes" "$img" | shasum -a 256 2>/dev/null | cut -d' ' -f1)
+    remote_sha=$(card_priv verify "$dev" "$bytes" | tr -d '\r' | tail -1)
+    [ -n "$remote_sha" ] || die "could not read $dev back on $MACH_NAME"
+    [ "$local_sha" = "$remote_sha" ] \
+        || die "$dev does not match the image that was written to it
+    image: $local_sha
+    disk:  $remote_sha"
+    debug "verified $bytes bytes"
 }
 
-# Make the written disk's identity its own.
-#
-# A raw image write copies the MBR disk signature along with everything else,
-# and `PARTUUID=` *is* that signature plus a partition number. So every disk
-# ever written from one image answers to the same `root=`, and which one the
-# kernel picks when two are attached is enumeration order.
-#
-# That is not a hypothetical. The rpi4's SD rescue and its bench stick were
-# written from the same Yocto wic; both carried `0x076c4a2a`; the board loaded
-# the *stick's* kernel and mounted the *card's* root filesystem, and came up as
-# a system that was neither of the two -- with the stick's fleet integration
-# missing, because the running rootfs was the card's. `/proc/cmdline` said
-# `root=PARTUUID=076c4a2a-02` and `findmnt /` said `/dev/mmcblk0p2`, which is
-# the whole bug in two lines. It is the same ambiguity image/profiles.sh
-# records for filesystem labels, reached through the partition table instead,
-# and it survives every check on the writing side because nothing about the
-# write is wrong.
-#
-# So uniqueness is stamped per *disk*, here, where the ambiguity actually
-# lives. The image keeps a portable root spec -- that is what lets it be
-# written to a card or a stick at all -- and this makes the copy on this disk
-# name itself. Both readers have to agree: `root=` in cmdline.txt, which the
-# kernel resolves, and `/boot` in /etc/fstab, which mount(8) resolves later.
-#
-# After the read-back verification, necessarily: this changes the disk on
-# purpose, so the bytes stop matching the image here and not before.
 disk_unique_identity() {
-    local dev="$1" spec="$2" old new p1 p2
+    local dev="$1" spec="$2" old new
     case "$spec" in PARTUUID=*) ;; *) return 0 ;; esac
     old=${spec#PARTUUID=}; old=${old%-*}
     new=$(od -An -tx4 -N4 /dev/urandom | tr -d ' \n')
     [ -n "$new" ] || { warn "could not generate a disk identity; $dev keeps $old"; return 0; }
-    p1=$(disk_part "$dev" 1); p2=$(disk_part "$dev" 2)
 
     info "stamping a unique identity on $dev (0x$old -> 0x$new), so it cannot be confused with another copy"
-    m_ssh "set -e
-        sudo sfdisk --disk-id $(sh_quote "$dev") 0x$new >/dev/null
-        m=\$(mktemp -d)
-        sudo mount $(sh_quote "$p1") \$m
-        sudo sed -i 's/PARTUUID=$old-/PARTUUID=$new-/g' \$m/cmdline.txt
-        sudo umount \$m
-        sudo mount $(sh_quote "$p2") \$m
-        [ -f \$m/etc/fstab ] && sudo sed -i 's/PARTUUID=$old-/PARTUUID=$new-/g' \$m/etc/fstab
-        sudo umount \$m
-        rmdir \$m
-        sync" >/dev/null 2>&1 \
+    card_priv identity "$dev" "$old" "$new" \
         || die "could not stamp a unique identity on $dev.
     The image is written and verified, but its root is still PARTUUID=$old-2 --
     the same as any other disk written from this image. Booted next to one of
@@ -351,97 +225,9 @@ disk_unique_identity() {
 
     # Read back rather than trusted: this is the check whose absence let the
     # original confusion reach a board.
-    m_ssh "sudo blkid -o value -s PARTUUID $(sh_quote "$p2")" 2>/dev/null | tr -d '\r\n ' \
+    m_ssh "lsblk -no PARTUUID $(sh_quote "$(disk_part "$dev" 2)")" 2>/dev/null | tr -d '\r ' \
         | grep -qx "$new-02" \
         || die "$dev did not take the new identity; refusing to leave it ambiguous"
-}
-
-# The tailnet identity, onto the card that was just written.
-#
-# This is the half of "everything wk touches is on the tailnet" that cannot live
-# in the image. The image carries tailscale and the join
-# (image/yocto/meta-wk-tailnet); what it must not carry is the auth key or the
-# name, and for different reasons:
-#
-#   the key   is a credential, and an image is an artifact that is stored,
-#             compressed, copied between machines and kept after it is
-#             superseded. A key baked into one is a key in every copy of it,
-#             revocable only by revoking it for the whole fleet. On a card it
-#             exists for one boot -- wk-tailnet-join deletes it once it has been
-#             spent.
-#   the name  is a property of the machine the card goes into, not of the image:
-#             the same image is written for more than one board, and the name a
-#             node has to answer to is the fleet's name for the machine. An
-#             image that joined under its own hostname would be on the tailnet
-#             under a name nothing else here uses -- which is a mapping, written
-#             down somewhere, which is the whole thing the rule forbids.
-#
-# Only for an image that asked for it. The probe is the image's own join script:
-# a card with no wk-tailnet-join is a bridge image, a rescue system or an older
-# build, and seeding a key into one would be leaving a credential on a disk that
-# has nothing to spend it.
-disk_seed_tailnet() { # <device> <tailnet hostname>
-    local dev="$1" name="$2" p2 keyfile tag="${WK_TAILNET_TAG:-tag:wk}"
-    p2=$(disk_part "$dev" 2)
-
-    m_ssh "set -e
-        m=\$(mktemp -d)
-        sudo mount $(sh_quote "$p2") \$m
-        test -x \$m/usr/sbin/wk-tailnet-join && echo has-join || true
-        sudo umount \$m; rmdir \$m" 2>/dev/null | grep -q has-join || {
-        debug "$p2 carries no wk-tailnet-join, so there is nothing to seed"
-        return 0
-    }
-
-    [ -n "$name" ] || barrier "this image joins the tailnet on first boot, and nothing here
-    knows what name it should answer to -- the image records no machine, so the
-    card would join under the image's own hostname and be reachable by a name
-    the fleet does not use. Write it for a machine, or --force to let it pick."
-
-    keyfile=$(wk_tailscale_authkey) || barrier "this image joins the tailnet on first boot and there is no auth
-    key here to give it. The board would boot reachable only over whatever LAN
-    it lands on, which is the state the fleet rule exists to end (CLAUDE.md,
-    'Cattle, not pets')."
-    [ -n "${keyfile:-}" ] || return 0   # forced past the barrier
-
-    info "seeding the tailnet identity onto $p2 -- it joins as '$name' ($tag) on first boot"
-    # The key goes in over the same ssh and never onto a command line, the same
-    # rule as everywhere else it moves. `dd` rather than a redirect inside
-    # `sudo sh -c`, so that nothing here has to nest three levels of quoting
-    # around a secret.
-    m_ssh "set -e
-        m=\$(mktemp -d)
-        sudo mount $(sh_quote "$p2") \$m
-        sudo mkdir -p \$m/etc/wk
-        sudo chmod 0755 \$m/etc/wk
-        printf 'hostname=%s\ntag=%s\n' $(sh_quote "$name") $(sh_quote "$tag") \
-            | sudo tee \$m/etc/wk/tailnet.conf >/dev/null
-        sudo chmod 0644 \$m/etc/wk/tailnet.conf
-        sudo dd of=\$m/etc/wk/tailscale-authkey status=none
-        sudo chmod 0600 \$m/etc/wk/tailscale-authkey
-        sudo chown 0:0 \$m/etc/wk/tailnet.conf \$m/etc/wk/tailscale-authkey
-        sudo umount \$m; rmdir \$m
-        sync" < "$keyfile" \
-        || die "could not seed the tailnet identity onto $p2.
-    The image is written; it will boot with no tailnet identity and be reachable
-    only over whatever LAN it lands on."
-
-    # Read back what can be read back. The key deliberately is not: its size and
-    # mode answer 'did it land', and printing a credential to prove it arrived
-    # would be the same mistake as putting it on a command line.
-    local got
-    got=$(m_ssh "set -e
-        m=\$(mktemp -d)
-        sudo mount -o ro $(sh_quote "$p2") \$m
-        sudo sed -n 's/^hostname=//p' \$m/etc/wk/tailnet.conf | head -1
-        sudo stat -c '%a %s' \$m/etc/wk/tailscale-authkey
-        sudo umount \$m; rmdir \$m" 2>/dev/null | tr '\r' ' ')
-    case "$got" in
-        *"$name"*"600 "*) debug "tailnet identity verified on $p2" ;;
-        *) die "the tailnet identity did not survive the write to $p2 (read back: ${got:-nothing}).
-    Refusing to report a card as seeded when the board would come up with no
-    tailnet identity and nothing to say so." ;;
-    esac
 }
 
 # Grow the last partition to fill the disk.
@@ -450,34 +236,12 @@ disk_seed_tailnet() { # <device> <tailnet hostname>
 # of it unreachable -- and what then fails is a build or a benchmark run out of
 # disk, hours later and a long way from this decision.
 disk_grow() {
-    local dev="$1" part; part=$(disk_part "$dev" 2)
-    info "growing $part to fill the disk"
-
-    # Two ways, because "install growpart" is not advice every machine here can
-    # take: cloud-utils is a Debian package and the rpi4's rescue system is a
-    # Yocto image with no apt at all. It does ship sfdisk, partx and resize2fs,
-    # which between them do the same job -- `, +` keeps partition 2's start and
-    # takes it to the end of the disk, which is the whole of what growpart was
-    # doing here.
-    if m_ssh 'command -v growpart >/dev/null' 2>/dev/null; then
-        m_ssh "sudo growpart $(sh_quote "$dev") 2" >/dev/null 2>&1 \
-            || { log "  (nothing to grow -- it already fills the disk)"; return 0; }
-    elif m_ssh 'command -v sfdisk >/dev/null' 2>/dev/null; then
-        m_ssh "printf ', +\n' | sudo sfdisk -N 2 --no-reread --force $(sh_quote "$dev")" >/dev/null 2>&1 \
-            || { log "  (nothing to grow -- it already fills the disk)"; return 0; }
-        m_ssh "sudo partx -u $(sh_quote "$dev")" >/dev/null 2>&1 || true
-    else
-        warn "$MACH_NAME has neither growpart nor sfdisk; the root partition stays the image's size"
-        return 0
-    fi
-    m_ssh "sudo e2fsck -fy $(sh_quote "$part") >/dev/null 2>&1; true"
-    m_ssh "sudo resize2fs $(sh_quote "$part")" >/dev/null 2>&1 \
-        || warn "resize2fs failed on $part; the filesystem is still the image's size"
-    m_ssh "sync"
+    local dev="$1"
+    info "growing the last partition to fill $dev"
+    card_priv grow "$dev" >/dev/null \
+        || die "could not grow the root partition on $dev"
 }
 
-# Cut power so the disk is safe to pull. Best-effort: it needs udisks, and a
-# synced disk is already safe to remove in practice.
 disk_eject() {
     local dev="$1"
     m_ssh "command -v udisksctl >/dev/null" || return 0

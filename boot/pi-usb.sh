@@ -218,6 +218,18 @@ b_media() {
     local id state
     case "${MODE:-}" in
         bench*) printf 'booted from its USB stick (system %s); SD card is the rescue' "${MODE#bench }"; return 0 ;;
+        # The board is on its SD card: the base image, reachable, and the stick
+        # can be read from here like it can from host mode -- so this says what
+        # is on the stick rather than stopping at "not a bench system". It used
+        # to fall into the last case and report a reachable board unreachable,
+        # which is the mistake the whole `base` distinction exists to stop
+        # making in the other direction.
+        base*)  id=$(b_device_image 2>/dev/null || true)
+                state=$(piusb_state 2>/dev/null) || true
+                printf 'booted its SD card -- the base image (%s), not a bench system; USB stick %s holds %s, %s' \
+                    "${MODE#base }" "$MACH_DEVICE" \
+                    "${id:-no wk system (wk sysimage write puts one there)}" "${state:-unreadable}"
+                return 0 ;;
         host)   ;;
         *)      printf 'USB stick %s: state unknown (board unreachable); SD card is the rescue' "$MACH_DEVICE"; return 0 ;;
     esac

@@ -55,6 +55,37 @@ ALLOWED_HOSTS = {
     # is a build dependency rather than an escape hatch.
     "pypi.org": (443,),
     "pythonhosted.org": (443,),
+    # The distribution archive, so a workspace can install a package.
+    #
+    # What this boundary is for is unusual traffic -- a workspace reaching a
+    # machine, a service or a network nobody expects a WebKit checkout to talk
+    # to. `apt-get install` from Ubuntu's own archive is not that, and neither
+    # is an editor: both are ordinary things to do in a development container,
+    # and refusing them buys nothing an audit would thank us for (user's call,
+    # 2026-08-24). Signatures are apt's own, and the BLOCKED_NETS check below is
+    # unchanged -- so none of these names can become a route onto the LAN or the
+    # tailnet, which is the property that actually matters.
+    #
+    # The immediate need was `wk zed`: Zed drives the system `ssh`, the
+    # workspace has no network interface at all, so the transport is the ssh
+    # protocol over `podman exec` (container/ssh-transport.sh) -- and the far
+    # end of that has to be a real sshd, which the SDK image does not carry.
+    #
+    # Three hostnames rather than the `ubuntu.com` suffix, because the suffix
+    # would also cover every other host under that domain -- these are the two
+    # the image's sources.list names (ports. on arm, archive. on x86_64) plus
+    # security., which apt-get update reads on the same run. Port 80 as well as
+    # 443: apt's configured URIs are http, and it verifies the signature rather
+    # than the transport.
+    "ports.ubuntu.com": (80, 443),
+    "archive.ubuntu.com": (80, 443),
+    "security.ubuntu.com": (80, 443),
+    # Zed's own CDN, for the same reason. Its remote server asks this for the
+    # agent registry as it starts, and the refusal was a red line in the log of
+    # every remote session -- an editor failing at something that has nothing to
+    # do with what the boundary is watching for. The server binary itself comes
+    # from github.com, already above.
+    "agentclientprotocol.com": (443,),
 
     # --- browsing and benchmarking -------------------------------------------
     # Everything below exists so a workspace can actually drive a browser at

@@ -32,15 +32,81 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # a target on the far end of an ssh, and taking this machine's store lock to
 # fetch on another one would block a local sync for the duration.
 TARGET=""
+ONLY=""
+TOOLS=""
 _ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --target)   TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
         --target=*) TARGET="${1#*=}"; shift ;;
-        *)          _ARGS+=("$1"); shift ;;
+        # Kept as a spelling of the default rather than removed silently: it
+        # was in SETUP.md and in muscle memory, and it now asks for what already
+        # happens.
+        --all)      shift ;;
+        --tools)    TOOLS=1; shift ;;
+        -*)         die "unknown option: $1
+    usage: wk sync [<workspace>] [--all] [--target <machine>]" ;;
+        # A workspace name: fetch that one rather than every one of them.
+        *)          [ -z "$ONLY" ] || die "one workspace at a time (got '$ONLY' and '$1')"
+                    ONLY="$1"; require_name "$ONLY"; _ARGS+=("$1"); shift ;;
     esac
 done
 set -- ${_ARGS[@]+"${_ARGS[@]}"}
+
+# --tools: the tooling on every machine, and nothing else.
+#
+# Every machine here runs a *copy* of this repository -- rsynced into the podman
+# VM, rsynced onto a build box, its own git checkout on a peer workstation -- and
+# a stale copy fails as "unknown option" from a command that works perfectly on
+# the machine you typed it on. `wk status` says which are behind; this is the
+# one command that fixes all of them.
+#
+# No mirror and no snapshot: this is about the tooling, and a full sync is
+# minutes of fetch that somebody asking for `--tools` did not ask for.
+if [ -n "$TOOLS" ]; then
+    _bad=0
+    for _t in $(target_all); do
+        # A subshell per target, with its own driver: a driver is a sourced file
+        # that sets globals, and one target's overrides outliving it is a bug
+        # this repository has already had.
+        (
+            load_target "$_t" >/dev/null 2>&1 || exit 3
+            case "$WK_TARGET_KIND" in
+            container)
+                # The copy every container bind-mounts. On a Linux workstation
+                # that is this checkout and there is nothing to push, which
+                # t_sync says in those words.
+                t_sync ;;
+            vm)
+                # Per guest, and only the ones that are up: a guest's copy is
+                # inside it, and booting one to refresh a file would be a
+                # side effect nobody asked this command for.
+                for _g in $(target_workspaces); do
+                    [ "$(t_info "$_g" 2>/dev/null)" = running ] || {
+                        printf '  %-24s %s\n' "$_g" "not running -- skipped" >&2; continue; }
+                    t_sync_tools "$_g" && printf '  %-24s ok\n' "$_g" >&2
+                done ;;
+            remote)
+                if [ -n "${WK_REMOTE_PEER:-}" ]; then
+                    # A workstation runs a checkout of its own, under git, and
+                    # rsyncing over it would throw away whatever it had
+                    # uncommitted. So it pulls -- and --ff-only, because a
+                    # merge on somebody else's machine is not this command's to
+                    # make.
+                    _h=$(t_ssh_host "" 2>/dev/null) || exit 0
+                    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$_h" \
+                        "cd $(sh_quote "$(t_tools "")") && git pull --ff-only" >&2 \
+                        && printf '  %-24s pulled\n' "$_t" >&2
+                else
+                    t_sync_tools "" && printf '  %-24s pushed\n' "$_t" >&2
+                fi ;;
+            esac
+        ) || _bad=$((_bad + 1))
+    done
+    [ "$_bad" -eq 0 ] || warn "$_bad target(s) did not take the tooling -- see above"
+    info "'wk status' compares every copy against this one"
+    exit 0
+fi
 
 if [ -n "$TARGET" ]; then
     # Named, or walked onto by `--target all`. A driver may reasonably do more
@@ -130,18 +196,11 @@ git -C "$MIRROR" symbolic-ref HEAD "refs/heads/$(wk_mirror_branches | awk '{prin
 # to build a snapshot and would undo the saving above.
 git -C "$MIRROR" config remote.origin.tagOpt --no-tags
 
-# Only origin by default. The other remotes are registered above so they are
-# there when wanted, but fetching every branch of WPEWebKit and both forks
-# multiplies the mirror's size for histories that are almost never checked out.
-# `wk sync --all` fetches them; a workspace can also fetch any of them straight
-# from GitHub, which the egress policy allows.
-if [ "${1:-}" = --all ]; then
-    _to_fetch=$(wk_remotes | awk '{print $1}')
-    info "fetching all upstreams"
-else
-    _to_fetch=origin
-    info "fetching origin ($(wk_mirror_branches)) -- 'wk sync --all' for every remote"
-fi
+# Every remote, every time (wk_mirror_default_remotes). What used to be here was
+# `origin` by default and everything else behind `--all`, which meant the mirror
+# was reliably missing whichever branch somebody was about to want.
+_to_fetch=$(wk_mirror_default_remotes)
+info "fetching $_to_fetch (origin: $(wk_mirror_branches))"
 
 # Fetch each remote separately rather than `remote update`: one unreachable
 # fork (renamed, made private, network blip) would otherwise abort the whole
@@ -242,8 +301,127 @@ mv "$NEW_DIR/sha.tmp" "$NEW_DIR/sha"
 
 info "published base $NEW_ID ($(cut -c1-10 < "$NEW_DIR/sha"))"
 
-_running=$(list_workspaces | wc -l | tr -d ' ')
-if [ "$_running" -gt 0 ]; then
-    log "note: $_running existing workspace(s) stay on their pinned snapshot and are unaffected"
-    log "      run 'wk gc' to reclaim snapshots once nothing references them"
-fi
+# --- 3. the workspaces --------------------------------------------------------
+#
+# A snapshot is what a *new* workspace starts from. It does nothing at all for
+# the ones that already exist: a workspace's checkout is an overlay whose lower
+# layer is the snapshot it was pinned to at creation, and that pin never moves.
+# So the second half of "sync" is this one -- every workspace fetches too, and
+# one command means "everything here knows about today's upstream".
+#
+# The fetch happens *inside* the workspace and its source is the mirror, mounted
+# read-only at /mirror (targets/container.sh). That is the point of doing it
+# here rather than leaving each workspace to `git fetch` for itself: the objects
+# are already on this disk, so nothing crosses the network and nothing is
+# downloaded twice. A workspace made before that mount existed has no /mirror,
+# and falls back to its own remotes -- which is the slow path, over the egress
+# proxy, and it says so.
+#
+# Driven from the host, because that is where the command belongs: inside a
+# workspace `wk sync` is refused for the same reason `wk gc` is (it acts on a
+# store the workspace cannot see).
+#
+# One at a time, and a failure is per workspace: a stopped container or a guest
+# that is not booted must cost that line and not the run.
+
+# The refspecs a workspace fetches from the mirror with.
+#
+# The mirror's layout dictates them: origin's branches are its own heads,
+# because `git clone` copies refs/heads and ignores refs/remotes -- so a mirror
+# that filed origin under refs/remotes would clone into a repository with no
+# branches. Every other upstream is therefore namespaced, and each maps onto the
+# same namespace in the workspace.
+mirror_refspecs() {
+    local r out="+refs/heads/*:refs/remotes/origin/*"
+    for r in $(wk_mirror_default_remotes); do
+        [ "$r" = origin ] && continue
+        out="$out +refs/remotes/$r/*:refs/remotes/$r/*"
+    done
+    printf '%s' "$out"
+}
+
+sync_workspaces() {
+    local only="$1" ws st n=0 bad=0 rc out specs
+    local -a names=()
+    specs=$(mirror_refspecs)
+    if [ -n "$only" ]; then
+        names=("$only")
+    else
+        for ws in $(list_workspaces); do names+=("$ws"); done
+    fi
+    [ "${#names[@]}" -gt 0 ] || return 0
+
+    info "fetching in ${#names[@]} workspace(s) -- $(wk_mirror_default_remotes)"
+    for ws in "${names[@]}"; do
+        # Each workspace in a subshell with its own driver loaded: a driver is a
+        # sourced file that sets globals, and one target's overrides outliving it
+        # is a bug this repository has already had (`wk status` read every
+        # remote workspace's branch with the container driver's function).
+        (
+            load_target "$(ws_target "$ws")" >/dev/null 2>&1 || exit 3
+            st=$(ws_state "$ws" 2>/dev/null) || st=absent
+            if [ "$st" != present ]; then
+                printf '  %-24s %s\n' "$ws" "$st -- skipped" >&2
+                exit 2
+            fi
+            printf '  %-24s ' "$ws" >&2
+
+            # One exec, and it says which source it used: from /mirror when the
+            # workspace has it (no network, the objects are already on this
+            # disk), and otherwise from the workspace's own remotes over the
+            # egress proxy -- which is the slow path, and worth naming, because
+            # the fix is to remake a workspace that predates the mount.
+            #
+            # Only the remotes it actually has, in that fallback: one made
+            # before `wpe` was wired in has no such remote, and naming it would
+            # fail the whole fetch over a remote that was never there.
+            out=$(t_exec "$ws" sh -c "cd $(sh_quote "$(t_src "$ws")") || exit 1
+                    if [ -d /mirror/WebKit.git ]; then
+                        git fetch --prune --quiet /mirror/WebKit.git $specs || exit 1
+                        echo from=mirror
+                        exit 0
+                    fi
+                    rc=0
+                    for r in $(wk_mirror_default_remotes); do
+                        git remote get-url \"\$r\" >/dev/null 2>&1 || continue
+                        git fetch --prune --quiet \"\$r\" || rc=1
+                    done
+                    echo from=remotes
+                    exit \$rc" 2>/dev/null) && rc=0 || rc=$?
+            if [ "$rc" = 0 ]; then
+                case "$out" in
+                    *from=mirror*)  echo "ok  (from the mirror)" >&2 ;;
+                    *)              echo "ok  (over the network: this workspace has no /mirror -- remake it to get one)" >&2 ;;
+                esac
+                exit 0
+            fi
+            echo "FAILED (continuing)" >&2
+            exit 1
+        ) && rc=0 || rc=$?
+        # `( … )` on its own line is a compound command, and under `set -e` a
+        # non-zero one ends the run -- which here would be one unreachable
+        # workspace ending a sync that has more to do.
+        case "$rc" in
+            0)   n=$((n + 1)) ;;
+            2)   [ -z "$only" ] || die "workspace '$only' is not there to fetch in
+    ('wk status $only' says what it is; 'wk ls' lists the ones there are)" ;;
+            *)   bad=$((bad + 1)) ;;
+        esac
+    done
+    [ "$bad" -eq 0 ] || warn "$bad workspace(s) did not fetch -- 'wk enter <ws>' and try it by hand"
+    return 0
+}
+
+sync_workspaces "$ONLY"
+
+# Said plainly, because the previous wording ("updates their remotes, not the
+# layer underneath them") answered a question nobody had asked. What it means:
+# the fetch above brought each workspace's `origin/…` refs up to date, so
+# `git log origin/main` and a rebase onto it see today's upstream. What it did
+# *not* do is move the snapshot the workspace is built on -- that is the
+# overlay's lower layer, pinned when the workspace was made, and only a new
+# workspace gets a new one.
+log "note: every workspace's origin/… refs are current now. The snapshot each one"
+log "      is built on is still the one it was created from -- 'wk status' says how"
+log "      many newer ones there are, and only a new workspace gets a new one."
+log "      'wk gc' reclaims snapshots once nothing references them."

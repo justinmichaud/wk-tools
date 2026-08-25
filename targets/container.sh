@@ -254,6 +254,23 @@ t_create() {
     # that is t_destroy's job, or the workspace leaks forever.
     local overlay="$base:/src/WebKit:O,upperdir=$ws/changes,workdir=$ws/overlay-work"
 
+    # The mirror, read-only, at /mirror.
+    #
+    # It is the one copy of every upstream this machine has, and until it was
+    # mounted a workspace could only refresh itself by fetching WebKit from
+    # GitHub again -- through the egress proxy, over the network, into its own
+    # object store, once per workspace. `wk sync` now fetches in here from that
+    # path instead: no network, and the bytes are already on this disk.
+    #
+    # Read-only, and that is the whole safety argument: the mirror is what every
+    # base snapshot is cloned from, so a workspace that could write to it could
+    # change what every future workspace builds. Reading it costs nothing and
+    # risks nothing.
+    #
+    # The directory above the bare repo is mounted rather than the repo itself,
+    # so a second mirror alongside it (another project, one day) needs no second
+    # mount and no recreated containers.
+    #
     # The ccache settings are not decoration. WebKit's own CMake sets these on
     # Apple only (Source/cmake/WebKitCCache.cmake), so on Linux every compile
     # that uses the precompiled header is reported "Could not use precompiled
@@ -264,6 +281,7 @@ t_create() {
     flags=(
         --additional-flags
         "--volume ${WK_TOOLS_SRC:-$WK_ROOT}:/opt/wk-tools:ro
+         --volume $(dirname "$(wk_mirror)"):/mirror:ro
          --volume $overlay
          --volume $WK_STORE/cache/ccache:/ccache
          --volume $WK_STORE/cache/yocto:/cache/yocto
@@ -492,6 +510,245 @@ t_enter() {
     # Interactive shells do not go through t_exec, so start the bridge first.
     _podman exec -d "$c" /opt/wk-tools/container/proxy/ensure-bridge.sh true 2>/dev/null || true
     _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --name "$c"
+}
+
+# --- an ssh route into the container, for Zed ---------------------------------
+#
+# Zed edits a remote project over ssh and nothing else: it drives the system
+# `ssh` binary, so whatever wk does here has to end in something that speaks the
+# ssh protocol. A container workspace has no network interface at all
+# (`--network none`, and that is the boundary -- see _sdk_opts), so there is no
+# address to give it and never will be.
+#
+# What there is, on both hosts, is `podman exec`. sshd's inetd mode (`-i`) is
+# exactly a protocol conversation on stdin/stdout, so one exec is a complete
+# transport: `ProxyCommand container/ssh-transport.sh <name>`. Nothing listens,
+# nothing is published, and the sandbox is untouched -- the route is the same
+# privilege that `wk enter` already has, spelled as a socket ssh can use.
+#
+# This is also what makes one mechanism serve both hosts, which the old
+# `HostName localhost` alias could not: on a Linux workstation that alias
+# pointed Zed at the *host's* filesystem (there is no /src/WebKit out there),
+# and on a macOS host it was written inside the podman VM, where Zed is not.
+# The ProxyCommand carries no address, so it is correct from wherever podman is
+# reached -- and that is this machine in both cases.
+
+# How the *host* reaches podman. Inside the VM (and on Linux) podman is local;
+# from a macOS host it is the machine's rootless connection, named explicitly
+# because podman's default connection here is the *rootful* one (`wk-root`) and
+# the workspaces are rootless -- a `podman exec` through the default sees a
+# different set of containers and reports the workspace as absent.
+_hpodman() {
+    if [ -n "${WK_IN_VM:-}" ] || ! is_macos; then
+        podman "$@"
+    else
+        podman -c "${WK_MACHINE:-wk}" "$@"
+    fi
+}
+
+# The workspace user, asked of the container rather than assumed.
+#
+# `WKDEV_CONTAINER_USER` above is the *invoking* user, and on a macOS host that
+# is the wrong answer by construction: the container was created by the forwarded
+# half of `wk new` running inside the podman VM, so its user is the VM's `core`
+# while this side is a person's Mac account. The container's own working
+# directory is its home, which is the one place both hosts agree.
+_ctr_user() {
+    local c home
+    c=$(_ctr "$1")
+    home=$(_hpodman inspect "$c" --format '{{.Config.WorkingDir}}' 2>/dev/null) || home=""
+    case "$home" in
+        /home/?*) printf '%s' "${home#/home/}" ;;
+        *) return 1 ;;
+    esac
+}
+
+_ctr_home() { echo "/home/$(_ctr_user "$1")"; }
+
+# The sshd command line, in one place because two callers need to agree on it:
+# this file, which installs what it names, and container/ssh-transport.sh, which
+# runs it.
+#
+#   -i          inetd mode: the protocol on stdin/stdout, no listener at all.
+#   -e          log to stderr, which ssh shows -- the only diagnostics there
+#               are, since nothing here has a journal. At ERROR, because the
+#               default level narrates every accepted key and every disconnect
+#               onto the terminal of whoever opened the editor.
+#   -f /dev/null  no config file. Everything is stated below, so a workspace
+#               cannot end up with a different server than the one wk asked for.
+#   UsePAM no   there is no session manager in here to answer to, and PAM would
+#               add /etc/pam.d/sshd to the list of things that must be right.
+#   AllowUsers  the workspace user and nobody else: the exec that starts this is
+#               root's, and without this a root login would be permitted by a
+#               server whose whole purpose is to open one account's checkout.
+#   SetEnv      the egress environment, because sshd gives a session a
+#               sanitised one and a container has no other way out. *One*
+#               option with every assignment in it, not one option each: ssh
+#               config keywords take the first value obtained and ignore the
+#               rest, so six `-o SetEnv=` flags set exactly one variable --
+#               which is how a session ended up with `http_proxy` and no
+#               `https_proxy`, and curl resolving github.com by itself.
+#   internal-sftp  rather than the sftp-server binary, and this one is load
+#               bearing: an external subsystem is started through the user's
+#               login shell, and bash run by sshd reads ~/.bashrc -- which in a
+#               workspace ends in `cd /src/WebKit` (container/firstrun.sh). So
+#               file transfer began in the checkout instead of the home
+#               directory, and Zed's upload of its own server binary, which
+#               names a path relative to `~`, failed with "No such file or
+#               directory" against a directory that was plainly there. Measured
+#               2026-08-24 with `sftp -b`: `pwd` answered /src/WebKit.
+#               internal-sftp runs inside sshd, with no shell in the way.
+t_ssh_sshd_cmd() {
+    local name="$1" u h
+    u=$(_ctr_user "$name") || return 1
+    h="/home/$u"
+    # SetEnv, and it is the difference between a usable session and a useless
+    # one: sshd hands the login shell a *sanitised* environment, so a shell
+    # arriving this way had none of the proxy variables the container was
+    # created with -- and a container has no other route out. Everything worked
+    # under `wk enter` and nothing worked in Zed's terminal: no DNS, no github,
+    # no Claude. Measured 2026-08-25 (`http_proxy=[]` over ssh against
+    # `http_proxy=[http://127.0.0.1:3128]` under `wk enter`).
+    #
+    # ensure-bridge, for the same reason every other exec path runs it: the
+    # variables point at 127.0.0.1:3128, and what listens there is a forwarder
+    # this starts. Wrapping sshd means every session inherits a bridge that is
+    # already up.
+    printf '%s' "mkdir -p /run/sshd && exec /opt/wk-tools/container/proxy/ensure-bridge.sh \
+/usr/sbin/sshd -i -e -f /dev/null \
+-o HostKey=$h/.wk-ssh/ssh_host_ed25519_key \
+-o AuthorizedKeysFile=.ssh/authorized_keys \
+-o UsePAM=no -o PidFile=none -o PermitRootLogin=no -o AllowUsers=$u -o LogLevel=ERROR \
+-o Subsystem='sftp internal-sftp' \
+-o 'SetEnv=http_proxy=http://127.0.0.1:3128 https_proxy=http://127.0.0.1:3128 \
+HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
+no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1'"
+}
+
+# The transport itself: one exec, from whichever machine runs Zed.
+#
+# /run/sshd is created here rather than at install time on purpose -- /run is a
+# tmpfs that podman remakes on every container start, so a directory created
+# once is a directory that is missing after the first `wk stop`. sshd exits with
+# "Missing privilege separation directory" when it is not there, which over a
+# ProxyCommand reads as an ssh that closed for no reason.
+# No `exec`: _hpodman is a shell function, and exec can only replace this
+# process with a real program (`exec t_exec ...` fails with "not found" -- the
+# same trap cmd/enter carries a note about). One extra process on a connection
+# Zed opens a handful of times is not worth a second spelling of the podman
+# invocation.
+t_ssh_exec() {
+    local name="$1" cmd
+    cmd=$(t_ssh_sshd_cmd "$name") \
+        || die "workspace '$name' has no container to reach (podman does not know it)"
+    _hpodman exec -i "$(_ctr "$name")" /bin/sh -c "$cmd"
+}
+
+# Everything the transport above needs, made true. Idempotent and cheap to
+# re-run: every step is a test of the thing itself, so this is the resume for a
+# `wk zed` that was interrupted half-way (CLAUDE.md, crash-only).
+#
+#   sshd          the SDK image carries openssh-client only, so the server is
+#                 installed on first use -- through the egress proxy, which is
+#                 why ports.ubuntu.com is in the allowlist (container/proxy/
+#                 wk-proxy.py carries the trade-off this was accepted under).
+#                 Wrapped in ensure-bridge.sh for the same reason t_spawn is:
+#                 this bypasses wkdev-enter, and without the bridge the
+#                 workspace has no egress at all and apt fails on a name lookup.
+#   host key      in the workspace's home, which is a directory on the machine
+#                 that holds the workspace -- so it survives a container restart
+#                 without being state anybody has to manage.
+#   authorized_keys  this machine's zed key, appended if it is not already
+#                 there. The key is generated here and never leaves this
+#                 machine; the workspace holds the public half.
+#
+# t_ssh_prepare <name>
+t_ssh_prepare() {
+    local name="$1" c u h pub waited=0 said=""
+    c=$(_ctr "$name")
+
+    # The user first, because everything below is a path in that user's home --
+    # and because failing to find one is the honest answer to "is this a
+    # workspace at all", which on a macOS host cannot be asked of the store
+    # (see below).
+    u=$(_ctr_user "$name") \
+        || die "no container workspace called '$name' on this machine.
+    'wk ls' lists the ones there are, and 'wk start' brings the podman machine up
+    if it is stopped. (An editor reaches a container over podman from here: the
+    workspace has no network interface, so there is no other route in.)"
+    h="/home/$u"
+
+    # Readiness, asked of the container rather than of the store, because this
+    # function runs on the machine Zed runs on: on a macOS host the store this
+    # workspace lives in is inside the podman VM, so ws_state -- which every
+    # other command gates on -- cannot be computed out here at all. The marker
+    # is the same one (firstrun writes it as its last act); only the way of
+    # reading it differs.
+    #
+    # The path is spelled out rather than written `~`: these execs run as root,
+    # so a tilde is /root and the test would never come true -- which is a wait
+    # that ends at the timeout with the workspace perfectly ready.
+    #
+    # A wait rather than a refusal, for wait_ready's reason: creation is
+    # asynchronous, and an editor opened on a checkout that is still being
+    # cloned is a tree of missing files. `.wk-firstrun-complete` is accepted
+    # alongside the marker for t_created's reason, and goes when that clause does.
+    while ! _hpodman exec "$c" /bin/sh -c \
+            "test -f '$h/$WK_READY_MARKER' || test -f '$h/.wk-firstrun-complete'" 2>/dev/null; do
+        _hpodman container exists "$c" 2>/dev/null \
+            || die "the container for '$name' is gone -- 'wk status $name' says what is left"
+        [ -n "$said" ] || { info "waiting for '$name' to finish being created"; said=1; }
+        [ "$waited" -lt "${WK_READY_WAIT:-1800}" ] \
+            || die "'$name' is still being created after ${waited}s.
+    It is detached, so it is still going -- 'wk status $name' says where."
+        sleep 2; waited=$((waited + 2))
+    done
+    [ -z "$said" ] || info "'$name' is ready"
+
+    if ! _hpodman exec "$c" test -x /usr/sbin/sshd 2>/dev/null; then
+        info "installing openssh-server in '$name' (once per workspace; Zed needs an sshd to talk to)"
+        # The grep drops apt's "configured multiple times" warnings, which the
+        # SDK image produces by the screenful on every update (it carries an
+        # armhf sources file alongside the native one) and which say nothing
+        # about this install. Everything else apt has to say is kept.
+        _hpodman exec "$c" /opt/wk-tools/container/proxy/ensure-bridge.sh \
+            /bin/sh -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server' \
+            2>&1 | { grep -vE '^W: (Target|Skipping)' >&2 || true; } || die "could not install openssh-server in '$name', and Zed needs that one package.
+    A refused fetch is logged by the egress proxy as 'DENY <host>:<port>' -- it
+    runs as the wk-proxy user service on the machine that holds the containers
+    (journalctl --user -u wk-proxy), and its allowlist is
+    container/proxy/wk-proxy.py."
+        _hpodman exec "$c" test -x /usr/sbin/sshd \
+            || die "openssh-server installed in '$name' and there is still no /usr/sbin/sshd"
+    fi
+
+    # As the workspace user, not root: a host key root owns is a host key sshd
+    # can read and the workspace cannot regenerate, and every file under this
+    # home belongs to that user.
+    _hpodman exec --user "$u" "$c" /bin/sh -c "
+        set -e
+        install -d -m 0700 '$h/.wk-ssh' '$h/.ssh'
+        [ -f '$h/.wk-ssh/ssh_host_ed25519_key' ] ||
+            ssh-keygen -q -t ed25519 -N '' -C 'wk-$name host key' \
+                -f '$h/.wk-ssh/ssh_host_ed25519_key'
+        touch '$h/.ssh/authorized_keys'
+        chmod 0600 '$h/.ssh/authorized_keys'" \
+        || die "could not prepare the ssh identity in '$name'"
+
+    pub=$(zed_key_pub) || die "could not create this machine's zed key"
+    if ! _hpodman exec --user "$u" "$c" grep -qsF "$pub" "$h/.ssh/authorized_keys"; then
+        printf '%s\n' "$pub" | _hpodman exec -i --user "$u" "$c" \
+            /bin/sh -c "cat >> '$h/.ssh/authorized_keys'" \
+            || die "could not authorise this machine's zed key in '$name'"
+        changed "authorised this machine's zed key in '$name'"
+    fi
+
+    # Rewritten every time rather than only when absent: the alias is derived
+    # from the workspace's own user and from where this checkout is, and both
+    # can change under it (a workspace recreated on the other host, a wk-tools
+    # moved). Recomputing it costs nothing and cannot go stale.
+    ssh_alias_set "$name" "wk-$name.container.invalid" "$u" "$(zed_key)" \
+        "ProxyCommand $WK_ROOT/container/ssh-transport.sh $name"
 }
 
 t_destroy() {

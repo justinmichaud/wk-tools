@@ -163,6 +163,41 @@ kv_field() {
 # binary inside the app bundle. A drag-installed Zed.app has no symlink and is
 # still installed -- cmd/doctor already accepts it as such, so the commands
 # that launch it have to as well.
+# This machine's name, as everything else in this repository spells a machine:
+# lower-case, short. macOS reports the hostname with whatever capitalisation it
+# was set up with ("Tolken") while the ssh aliases, the target confs and the
+# fleet entries are all lower-case -- and two spellings of one machine in one
+# listing read as two machines.
+# The one way this repository turns a stream of status records into something a
+# person looks at -- a table, a page, or a served page that keeps itself current.
+#
+# Here rather than in cmd/status because the *dispatcher* needs it too: on a
+# macOS host a listing is assembled by two processes (this machine's targets out
+# here, its containers inside the podman VM) and neither of them is the thing
+# that renders it.
+#
+# python3 rather than more shell, and no third-party library: aligning columns
+# across a listing whose widths are not known until it is complete, and emitting
+# a page, are both a page of python and neither is a page of bash. Nothing on
+# the fleet may need `pip install` to run `wk status` -- every machine here has
+# python3 and none of them is allowed to need anything else.
+status_render() {
+    local mode="$1" recs="$2"
+    # The stream itself renders nothing: it *is* the answer, and passing it
+    # through the renderer would merge away the thing being looked at.
+    [ "$mode" != records ] || { cat "$recs"; return 0; }
+    require python3 "python3 renders 'wk status'; it ships with macOS and with every
+    distribution here, so a machine without it is a machine with something else wrong"
+    python3 "$WK_ROOT/lib/status-view.py" "$mode" "$recs" \
+        ${WK_STATUS_PORT:+--port "$WK_STATUS_PORT"} \
+        ${WK_STATUS_INTERVAL:+--interval "$WK_STATUS_INTERVAL"} \
+        ${WK_STATUS_HTML_OUT:+--out "$WK_STATUS_HTML_OUT"}
+}
+
+wk_machine_name() {
+    { hostname -s 2>/dev/null || echo here; } | tr '[:upper:]' '[:lower:]'
+}
+
 zed_cli() {
     if have zed; then echo zed; return 0; fi
     local c=/Applications/Zed.app/Contents/MacOS/cli

@@ -28,9 +28,18 @@ first.
 1. **Smallest possible state, no caching of facts.** Every fact is recomputed
    from evidence at read time and lives in exactly one place per machine; a
    second copy is a bug even while it is still equal. Stores of *artifacts*
-   keyed by content — ccache, base snapshots, seeded benchmark payloads — are
-   not caches of facts. The test: could a read recompute this value, or only
-   re-download/rebuild it?
+   keyed by content — ccache, base snapshots, seeded benchmark payloads,
+   downloaded distro bases — are not caches of facts. The test: could a read
+   recompute this value, or only re-download/rebuild it?
+
+   **A built system image is not one of them** (2026-08-24). A workspace
+   produces an image; wk detects that it did and writes it to a card. It is not
+   imported, stored, catalogued or otherwise treated specially, and no manifest
+   restates what it is — the store bought a second name for something the
+   workspace already names, and charged a copy, an import that can half-finish,
+   and a compressed duplicate to re-derive on every edit. `wk help images` has
+   the model, including what identity means without a catalogue and why every
+   edit belongs on the card rather than on the image.
 2. **Crash-only, guaranteed final state.** Every mutating command can be killed
    at any point and re-run, and the re-run converges to the declared final
    state. "Already exists" is never the answer to a half-made thing.
@@ -84,6 +93,30 @@ reasoning; this is the binding statement.
 `docs/HANDOFF-reprovision.md` is the punch-list for the day this is tested by
 an actual rebuild.
 
+## What a bench lane optimises for, in this order (binding, 2026-08-24)
+
+1. **The quality of the result.** The measured system's storage and bus are part
+   of the measurement. Where a board's media differ in a way that touches a run,
+   the bench system goes on the better one and the rest of the design bends
+   around that.
+2. **Durability and recoverability.** Every board keeps a rescue a failed bench
+   system cannot take down, and a revert that does not depend on the bench
+   system working. Firmware-enforced fall-through beats a software one; separate
+   media beat separate partitions.
+3. **The fewest unique configurations**, so that a change is not three device
+   tests. Third, and it may not buy uniformity by moving a bench root onto a
+   worse bus (1) or by putting a rescue in the same failure domain as the thing
+   it rescues (2).
+
+The consequence reads like a contradiction and is not: the three Pis end up with
+**different hardware arrangements and the same code**. Each arrangement is forced
+by 1 and 2 — `wk help hardware` shows the derivation per board. What 3 governs is
+everything above the medium: one image model (a base image is never measured),
+one write path, one arming interface (`b_arm` / `b_disarm` / `b_self_disarm_sh`),
+one set of refusals. The per-board difference is one function — how the running
+system is selected — and everything above it is exercised by whichever board is
+in the room.
+
 ## Layering (binding for new code)
 
 `home` / `lab` / `wk` / `field` / `stock`, with a one-way dependency rule — the
@@ -92,6 +125,33 @@ WebKit. Decided 2026-08-20 and recorded in `docs/HANDOFF-vocabulary.md`, "The
 layers". Existing code catches up in `docs/HANDOFF-architecture-review.md`; new
 code is expected to land on the right side of it. No CLI is minted until a layer
 has a second consumer.
+
+## One path, not two (binding, 2026-08-24)
+
+**Do not create an explosion in the possible paths that need testing.** Every
+alternative is a second implementation of one behaviour: it fails differently,
+it is exercised half as often, and in this repo testing it means hardware in
+hand — a card in a reader, a board that has to be power-cycled by a person. Two
+paths do not cost twice; they cost every combination of the two, forever.
+
+What this rules out, with the examples that produced the rule:
+
+- **Fallbacks.** "Use the privileged helper, or inline `sudo` if it is absent"
+  was written and removed the same day. The fallback is the path that runs on
+  the machine nobody tested, on the day something is already wrong.
+- **Two ways to do one thing.** There were two card writers, bmaptool and dd,
+  chosen by what the machine had installed. The fast one existed to consume
+  store artifacts; when the store went, it went with it rather than being kept
+  working. If the remaining path is too slow, make *it* faster.
+- **Two implementations of one rule.** "May this disk be written" lived both in
+  `disk_refuse_unless_safe` and in the helper's gate. Two copies of a safety
+  rule is one that can drift into permitting what the other refuses — and the
+  copy that matters is the one holding the privilege. The caller asks it now.
+
+When a second path is genuinely unavoidable, it is not enough to write it: it
+has to be exercised by something, or it must refuse rather than silently
+degrade. A path that only runs when the first one fails, and is never tested, is
+not a safety net. It is a second bug waiting for the worst moment.
 
 ## Testing and documentation
 
@@ -116,9 +176,16 @@ has a second consumer.
   2026-08-19); a credential crossing that line is a bug regardless. Machine-local
   values go in gitignored per-machine conf files because they are per-machine,
   not because they are secret.
-- **`wk` never calls `sudo` on the workstation without a password prompt.** The
-  privileged helper (`admin/wk-quiesce-priv`) is the one carve-out. Do not add
-  NOPASSWD grants; the direction of travel is narrowing the ones that exist.
+- **`wk` never calls `sudo` on the workstation without a password prompt.** Two
+  privileged helpers are the carve-outs — `admin/wk-quiesce-priv`, and since
+  2026-08-24 `admin/wk-card-priv`, because writing a card is `dd` plus mounts on
+  a machine reached by a BatchMode ssh that has no terminal to prompt on. Do not
+  add more; the direction of travel is narrowing the ones that exist. What earns
+  one is not need but *shape*: a fixed verb list, no passthrough, no argument
+  that becomes part of a command, and a gate narrower than the capability
+  sounds. The card helper may only touch a usb or mmc **whole disk the machine
+  is not running from** — the boot check is the load-bearing half, since every
+  board here boots from exactly the kind of device the transport check allows.
 - **A refusal must say why and name the remedy**, and a barrier that can be
   crossed is crossed by an explicit `--force` that records itself. Never
   silently degrade — an unavailable profiler, an unpinnable CPU or a missing

@@ -517,16 +517,24 @@ chk_fleet_probe_capped() {
     local out t0 d
     # shellcheck disable=SC1090
     . "$WK_ROOT/lib/common.sh"
+    # The record emitter as well as the function under test, and fd 3 opened
+    # onto stdout, because that is where a record goes. Lifted by name rather
+    # than by assuming a `printf`: what this checks is that a machine dropped
+    # for time still *says something*, and how `wk status` says things is not
+    # this check's business -- it was coupled to the old printf and broke on a
+    # refactor that had kept the behaviour perfectly.
+    eval "$(sed -n '/^_jesc()/,/^}/p'      "$WK_ROOT/cmd/status")"
+    eval "$(sed -n '/^rec_start()/,/^}/p'  "$WK_ROOT/cmd/status")"
     eval "$(sed -n '/^report_fleet_device()/,/^}/p' "$WK_ROOT/cmd/status")"
 
     _fleet_probe() { sleep 30; }
     WK_FLEET_TIMEOUT=1
 
-    t0=$(date +%s); out=$(report_fleet_device rpi4 2>/dev/null); d=$(( $(date +%s) - t0 ))
+    t0=$(date +%s); out=$(report_fleet_device rpi4 3>&1 2>/dev/null); d=$(( $(date +%s) - t0 ))
     [ "$d" -le 10 ] || { echo "a probe that never returns held the fleet block ${d}s"; return 1; }
     case "$out" in
         *rpi4*) ;;
-        *) echo "a probe killed for time left its machine out of the listing: '$out'"; return 1 ;;
+        *) echo "a probe killed for time said nothing about its machine: '$out'"; return 1 ;;
     esac
 }
 
@@ -638,6 +646,15 @@ chk_tailscale_pin_is_one_file() {
     grep -q 'tailscale-release.inc' "$WK_ROOT/cmd/pi" || bad="$bad
   cmd/pi does not read the release .inc, so a board gets whatever version is
       written in cmd/pi"
+    # The third installer: the buildroot images have no recipe and no systemd,
+    # so they take the same bytes through a rootfs overlay -- and the same join
+    # script, from the same file, rather than a copy that drifts.
+    grep -q 'tailscale-release.inc' "$WK_ROOT/image/buildroot/tailnet-overlay.sh" || bad="$bad
+  the buildroot overlay does not read the release .inc"
+    grep -q 'meta-wk-tailnet/recipes-network/tailscale/files/wk-tailnet-join' \
+        "$WK_ROOT/image/buildroot/tailnet-overlay.sh" || bad="$bad
+  the buildroot overlay ships its own copy of wk-tailnet-join instead of the
+      one the Yocto images run"
     # And no second copy of the version hiding in the pusher.
     grep -qE '^TS_VERSION="\$\{TS_VERSION:-[0-9]' "$WK_ROOT/cmd/pi" && bad="$bad
   cmd/pi still carries a literal tailscale version"
@@ -662,6 +679,121 @@ $hits"
       carries the join has nothing to join with"
         return 1
     }
+}
+
+# The base image is not a bench system, and the fleet has to be able to tell --
+# which for months it could not: every image wk writes carries /etc/wk-image, so
+# "has a marker" meant "is a bench system", and a board that had fallen back to
+# the medium it is never armed from was measured like one. This is the
+# classifier, checked against both boards' declared media, with no board in the
+# room.
+chk_base_image_not_benchable() {
+    local bad="" got
+    # shellcheck disable=SC1090
+    . "$WK_ROOT/lib/common.sh"
+    . "$WK_ROOT/lib/image.sh" 2>/dev/null || true
+    . "$WK_ROOT/image/profiles.sh"
+    . "$WK_ROOT/boot/machines.sh"
+
+    machine_load rpi4 || { echo "no rpi4 machine conf"; return 1; }
+    for pair in "/dev/sda2 bench" "/dev/mmcblk0p2 base" " unknown"; do
+        set -- $pair
+        got=$(b_system_kind "${2:+$1}")
+        [ "$got" = "${2:-$1}" ] || bad="$bad
+  rpi4: root on ${1:-<nothing>} classified '$got', expected '${2:-$1}'"
+    done
+
+    # The rpi3's decided shape (`wk help hardware`): one card, two systems --
+    # the rescue on MACH_ROOT and the bench system in a second root beside it,
+    # because that board's Ethernet is a USB device and its bench root must not
+    # share that bus. So the same question -- which medium is this root on --
+    # answers it here too, with MACH_ROOT tested first because on this board both
+    # patterns match.
+    machine_load rpi3 || { echo "no rpi3 machine conf"; return 1; }
+    got=$(b_system_kind /dev/mmcblk0p2)
+    [ "$got" = base ] || bad="$bad
+  rpi3: its rescue root classified '$got', expected 'base'"
+    got=$(b_system_kind /dev/mmcblk0p4)
+    [ "$got" = bench ] || bad="$bad
+  rpi3: a bench slot on the same card classified '$got', expected 'bench'"
+
+    # And the refusal that uses it.
+    grep -q 'b_system_kind' "$WK_ROOT/cmd/pi" || bad="$bad
+  wk pi bench does not ask which medium the board booted from, so a base image
+      passes its check exactly as it did before"
+    [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
+# Every builder's output has somewhere `wk gc` looks.
+#
+# With no image store, output lives wherever the builder that made it put it --
+# so the set of places to search grows with the set of builders, and a search
+# that is a guess is one that misses the newest one. The list is declared
+# (image_build_locations, lib/image.sh) with a `# builder: <name>` annotation per
+# entry, and this checks the annotations against the builders that actually
+# exist in image/profiles.sh. A builder added without a line there is caught
+# here rather than by somebody wondering where 60 GB went.
+chk_gc_searches_every_build_location() {
+    local builders declared b bad=""
+    builders=$(sed -n 's/^[[:space:]]*IMG_BUILDER=\([a-z]*\).*/\1/p' \
+                   "$WK_ROOT/image/profiles.sh" | sort -u)
+    # One annotation can name more than one builder, so split on the comma
+    # *and* trim each piece before cutting the prose off it -- cutting at the
+    # first space without trimming first turns " fetch -- ..." into nothing,
+    # which is a check that passes while missing a builder.
+    declared=$(sed -n '/^image_build_locations()/,/^}/p' "$WK_ROOT/lib/image.sh" \
+             | sed -n 's/^[[:space:]]*#[[:space:]]*builder:[[:space:]]*//p' \
+             | tr ',' '\n' \
+             | sed 's/^[[:space:]]*//; s/[[:space:]].*$//' \
+             | grep . | sort -u)
+
+    for b in $builders; do
+        printf '%s\n' "$declared" | grep -qx "$b" || bad="$bad
+  IMG_BUILDER=$b has no entry in image_build_locations, so wk gc does not know
+      where that builder leaves its output"
+    done
+
+    grep -q 'image_build_locations' "$WK_ROOT/cmd/gc" || bad="$bad
+  wk gc does not read image_build_locations, so the list is a list of nothing"
+    [ -z "$bad" ] || { echo "$bad"; return 1; }
+}
+
+# The card helper's grant is what its gate refuses, so the gate is the thing to
+# check -- and most of it is checkable with no card and no root, by reading the
+# script. What cannot be checked here (does it actually refuse a running disk on
+# a real machine) was run against the rpi4 on 2026-08-24 and is recorded in
+# docs/TESTING.md; what is checked here is that the *shape* the grant depends on
+# has not quietly changed.
+chk_card_helper_gate() {
+    local f="$WK_ROOT/admin/wk-card-priv" bad="" v
+    [ -f "$f" ] || { echo "no card helper at $f"; return 1; }
+
+    # Every verb that touches a device must run the gate. A verb that skips it
+    # is a hole in a NOPASSWD grant, which is the one bug class here that
+    # matters more than any other.
+    for v in v_check v_write v_fleet v_tailnet v_identity v_grow v_eject; do
+        sed -n "/^$v() {/,/^}/p" "$f" | grep -q 'gate ' \
+            || bad="$bad
+  $v does not call gate, so it would act on a device nothing validated"
+    done
+
+    # The two-item transport list, stated as such.
+    sed -n '/^gate()/,/^}/p' "$f" | grep -q 'usb|mmc' || bad="$bad
+  gate no longer restricts the transport to usb and mmc"
+    sed -n '/^gate()/,/^}/p' "$f" | grep -q 'booted_disks' || bad="$bad
+  gate no longer checks whether the machine is running from the disk -- every
+      board here boots from exactly the kind of device the transport check allows"
+
+    # No passthrough: the dispatcher's default must not run anything.
+    sed -n '/^case "\$verb" in/,/^esac/p' "$f" | grep -q '\*) fail' || bad="$bad
+  the verb dispatcher has a default that is not a refusal"
+
+    # And the install must copy it root-owned rather than pointing sudoers at
+    # the repo, which would make a branch checkout a root escalation.
+    grep -q 'install -o root -m 0755 "\$_card_source" "\$_card_target"' \
+        "$WK_ROOT/admin/install.sh" || bad="$bad
+  admin/install.sh does not install the card helper root-owned"
+    [ -z "$bad" ] || { echo "$bad"; return 1; }
 }
 
 chk_bridge_rm_is_inverse() {
@@ -1367,17 +1499,89 @@ chk_readonly_writes_nothing() {
 # which is what a macOS host did for as long as `wk ls` was forwarded whole
 # into the podman VM.
 #
-# stdout only: every warning, header and note goes to stderr, so the rows are
-# the answer. In `wk status` a workspace's own line starts at column 1 and its
-# build/test/babysit lines are indented, which is what separates them here.
+# Asked of `--json` rather than of the table: the document is what every view is
+# drawn from, so this checks the thing that would be wrong rather than one
+# rendering of it -- and it no longer breaks every time a column moves.
+#
+# A machine running an older copy of this repository cannot answer in records,
+# so its workspaces arrive as one `raw` block of its own text; those names are
+# taken from that text the same way `wk ls`'s are, or a stale build box would
+# read as a disagreement between the two commands.
 chk_ls_status_same_names() {
     local a b
     a=$("$WK" ls 2>/dev/null | tail -n +2 | awk 'NF {print $1}' | sort -u)
-    b=$("$WK" status 2>/dev/null | awk '/^[^ ]/ && NF {print $1}' | sort -u)
+    b=$("$WK" status --json 2>/dev/null | python3 -c '
+import json, re, sys
+doc = json.load(sys.stdin)
+names = []
+for m in doc["machines"]:
+    for g in m["methods"]:
+        names += [w["name"] for w in g["workspaces"]]
+    for r in m.get("raw", []):
+        names += [ln.split()[0] for ln in r.get("text", "").splitlines()
+                  if ln[:1] not in ("", " ")]
+print("\n".join(sorted(set(names))))' | sort -u)
     [ "$a" = "$b" ] || {
         echo "wk ls lists: $(printf '%s' "$a" | tr '\n' ' ')"
         echo "wk status  : $(printf '%s' "$b" | tr '\n' ' ')"
         return 1; }
+}
+
+# One entry per machine in a `wk status` listing, and every entry a machine.
+#
+# Two processes assemble that listing on a macOS host -- this machine's own
+# targets out here, its containers inside the podman VM -- and a third answers
+# for each build box. They cannot agree between themselves about what to call
+# this machine (`hostname` in the podman VM is `localhost`), so the records they
+# write carry the name and the merge is by that name. Both halves of getting it
+# wrong are checked here, because both have happened: the same machine appearing
+# twice under two spellings, and a *target* name (`container`, `vm`) arriving
+# where a machine name belongs -- which grew a machine called "container" with
+# nothing on it, holding the podman VM's own facts.
+chk_status_one_machine_each() {
+    # Captured rather than piped: this command's exit status is meaningful (4 is
+    # "a workspace needs a person", and there is usually one), and `pipefail`
+    # would make that the check's own verdict.
+    local doc; doc=$("$WK" status --json 2>/dev/null) || true
+    printf '%s' "$doc" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+names = [m["name"] for m in doc["machines"]]
+bad = []
+dup = {n for n in names if names.count(n) > 1}
+if dup:
+    bad.append("named more than once: " + ", ".join(sorted(dup)))
+kinds = {"container", "vm", "local", "remote", "localhost"}
+wrong = kinds.intersection(names)
+if wrong:
+    bad.append("a target kind where a machine belongs: " + ", ".join(sorted(wrong)))
+if not names:
+    bad.append("no machines at all")
+if bad:
+    print("; ".join(bad))
+    raise SystemExit(1)
+'
+}
+
+# `wk zed` refuses inside a workspace, and says where to run it.
+#
+# A workspace has no Zed and never will -- a container has no display, and a
+# macOS guest is driven from the host -- so the honest answer is the refusal
+# and the command to type outside. Without it the failure is "zed is not
+# installed", which is the same words the *host* prints when Zed really is
+# missing, about a machine where it cannot be installed.
+#
+# Hermetic: the marker is what makes a machine a workspace (wk_marker,
+# lib/target.sh), and WK_MARKER moves it.
+chk_zed_refuses_inside_a_workspace() {
+    local out rc=0
+    printf 'name=selftest-ws\nsrc=/src/WebKit\n' > "$TMP/ws-marker"
+    out=$(WK_MARKER="$TMP/ws-marker" "$WK" zed something 2>&1) || rc=$?
+    [ "$rc" != 0 ] || { echo "opened an editor from inside a workspace"; return 1; }
+    case "$out" in
+        *"wk zed selftest-ws"*) return 0 ;;
+        *) echo "$out"; return 1 ;;
+    esac
 }
 
 # The five words ws_state can answer, each from the evidence that decides it.
@@ -1838,6 +2042,9 @@ if want quick; then
     check "the Yocto images are built with tailscale in them"             chk_tailnet_layer_is_wired
     check "the tailscale release is pinned in one file"                   chk_tailscale_pin_is_one_file
     check "no auth key is ever written into an image"                     chk_no_authkey_in_an_image
+    check "a base image is never mistaken for a bench system"             chk_base_image_not_benchable
+    check "every builder's output has somewhere"                          chk_gc_searches_every_build_location
+    check "disk the machine is not running from"                          chk_card_helper_gate
 fi
 
 if want state; then
@@ -1849,6 +2056,8 @@ if want state; then
     check "five words, each from the evidence that decides it"             chk_ws_state_words
     check "a status file written by an older schema"                      chk_status_files_are_claims
     check "every driver writes the same completion marker"                chk_ready_marker_one_name
+    check "names each machine once"                                       chk_status_one_machine_each
+    check "there is no Zed in here"                                       chk_zed_refuses_inside_a_workspace
 fi
 
 if want remote; then

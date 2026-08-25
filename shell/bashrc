@@ -232,6 +232,177 @@ if [ -s "$HISTFILE" ]; then
 fi
 unset _wk_hb_dir _wk_f
 
+# =============================================================================
+# 5b. Prompt
+# =============================================================================
+# What a shell here has to answer before anything is typed: which machine this
+# is, what that machine currently *is* (a workstation, a machine booted into a
+# bench system, a shared build box, or a workspace), where you are, and what git
+# thinks of it. Every one of those has been got wrong at a terminal -- a build
+# started on the wrong machine, a benchmark run against a host install, an edit
+# made in the wrong checkout of the same repository -- and none of them is
+# visible in zsh's default prompt.
+#
+# Two rules, because this runs before every command:
+#
+#   Nothing that forks unless it must. The machine, the role and the workspace
+#   are read once when this file is sourced -- none of them can change under a
+#   running shell -- and the git branch is read out of .git/HEAD rather than
+#   asked of git.
+#
+#   Nothing that can block. No ssh, no podman, and above all no `wk status`:
+#   that command walks the fleet over the network, and a prompt that waits on a
+#   radio-linked phone is a terminal you cannot type in.
+
+# What this machine is, from local evidence only:
+#
+#   ~/.wk-workspace   this machine *is* a workspace, and names it (lib/target.sh)
+#   ~/.wk-remote      the far end of a remote target: a shared build box
+#   /etc/wk-image     a system wk built and booted for measuring -- the same
+#                     marker `wk boot --status` reads, so the prompt cannot
+#                     disagree with it about which mode a machine is in
+#
+# In that order, because they are increasingly less specific about what the
+# shell is sitting in.
+_wk_ps_role=host
+_wk_ps_name=$( { hostname -s 2>/dev/null || echo '?'; } | tr '[:upper:]' '[:lower:]' )
+_wk_ps_ws=""
+if [ -f "$HOME/.wk-workspace" ]; then
+  _wk_ps_role=ws
+  _wk_ps_ws=$(sed -n 's/^name=//p' "$HOME/.wk-workspace" 2>/dev/null | tail -1)
+  [ -n "$_wk_ps_ws" ] || _wk_ps_ws="${WK_WORKSPACE:-workspace}"
+  _wk_ps_name="$_wk_ps_ws"
+elif [ -f "$HOME/.wk-remote" ]; then
+  _wk_ps_role=shared
+elif [ -f /etc/wk-image ]; then
+  _wk_ps_role=bench
+fi
+
+# Where a build in *this* workspace records itself (targets/local.sh keeps its
+# own store in XDG state, because the host's is not visible from in here). Only
+# a workspace has one, and reading it is one small file rather than a command.
+_wk_ps_build=""
+[ "$_wk_ps_role" = ws ] && \
+  _wk_ps_build="${XDG_STATE_HOME:-$HOME/.local/state}/wk/ws/$_wk_ps_ws/build.status"
+
+if [ -n "$ZSH_VERSION" ]; then
+  setopt PROMPT_SUBST
+  # zstat, so the index size below costs no process. Absent on nothing this runs
+  # on, but the prompt must survive it being absent anyway.
+  zmodload zsh/stat 2>/dev/null || true
+
+  # The path, fish-style: every component but the last cut to its first letter,
+  # and only once the whole thing is long enough to crowd the line. A prompt
+  # that wraps is worse than a prompt that abbreviates -- and the last component
+  # is the one being worked in, so it stays whole.
+  _wk_ps_cwd() {
+    local p=${PWD/#$HOME/'~'}
+    if (( ${#p} <= 38 )); then print -rn -- "$p"; return; fi
+    local -a seg=("${(@s:/:)p}")
+    local i n=$#seg out=""
+    for (( i = 1; i <= n; i++ )); do
+      if (( i == n )) || (( ${#seg[i]} <= 1 )); then out+="${seg[i]}"
+      else out+="${seg[i][1]}"; fi
+      (( i < n )) && out+="/"
+    done
+    print -rn -- "$out"
+  }
+
+  # The branch, read rather than asked: `git rev-parse` is two processes and a
+  # lock, and .git/HEAD is one line. Walks up because a prompt is often several
+  # directories inside the checkout, and follows the `gitdir:` indirection so a
+  # worktree and a submodule answer too.
+  #
+  # Dirtiness is the expensive half and is spelled honestly: `*` means git was
+  # asked and said yes, and `?` means it was not asked at all because the index
+  # is too big to walk before every prompt -- which is precisely the case in a
+  # WebKit checkout (a ~50 MB index; `git diff` there is seconds, not
+  # milliseconds). Never a blank where a `*` might belong.
+  _wk_ps_git() {
+    local d=$PWD g="" head br dirty="" l
+    while [[ -n $d ]]; do
+      [[ -e $d/.git ]] && { g=$d/.git; break; }
+      d=${d%/*}
+    done
+    [[ -n $g ]] || return 0
+    if [[ -f $g ]]; then
+      read -r l < $g
+      g=${l#gitdir: }
+      [[ $g == /* ]] || g=$d/$g
+    fi
+    [[ -r $g/HEAD ]] || return 0
+    read -r head < $g/HEAD
+    case $head in
+      ref:*) br=${head##*/} ;;
+      *)     br="detached ${head[1,8]}" ;;
+    esac
+    if [[ -r $g/index ]]; then
+      local -a st
+      if zstat -A st +size $g/index 2>/dev/null && (( st[1] < 20971520 )); then
+        command git diff --quiet --ignore-submodules HEAD -- 2>/dev/null || dirty='*'
+      else
+        dirty='?'
+      fi
+    fi
+    print -rn -- " %F{magenta}${br}${dirty}%f"
+  }
+
+  # A build running in this workspace, from the status file the build itself
+  # wrote. `running` in that file is a claim rather than a fact -- lib/detach.sh
+  # is what adjudicates it, and this prompt is not going to -- so the word shown
+  # is the file's own and `wk status` remains the place that checks.
+  _wk_ps_buildmark() {
+    [[ -n $_wk_ps_build && -r $_wk_ps_build ]] || return 0
+    local state="" config="" l
+    while IFS= read -r l; do
+      case $l in
+        state=*)  state=${l#state=} ;;
+        config=*) config=${l#config=} ;;
+      esac
+    done < $_wk_ps_build
+    [[ $state == running ]] || return 0
+    print -rn -- " %F{yellow}building ${config}%f"
+  }
+
+  # host green, bench red, a shared box and a workspace blue: the two that are
+  # somebody else's machine or somebody else's sandbox read the same, and the
+  # one that means "this reboot is a measurement" does not read like the others.
+  case $_wk_ps_role in
+    bench)  _wk_ps_hue=red ;;
+    ws)     _wk_ps_hue=blue ;;
+    shared) _wk_ps_hue=blue ;;
+    *)      _wk_ps_hue=green ;;
+  esac
+
+  # %(?..) is zsh's own "last command failed": the code is worth having and a
+  # green arrow over a failed command is not. Everything else in the line is a
+  # fact about where you are.
+  PROMPT='%F{cyan}${_wk_ps_name}%f:%F{${_wk_ps_hue}}${_wk_ps_role}%f $(_wk_ps_cwd)$(_wk_ps_git)$(_wk_ps_buildmark)%(?.. %F{red}exit %?%f) %(!.#.❯) '
+fi
+
+if [ -n "$BASH_VERSION" ]; then
+  # The fallback, for a machine with no zsh (`shell/bashrc` execs zsh when it
+  # finds one, so this is the boards and the odd stripped image). Same facts,
+  # fewer of them: bash has no way to run this without a subshell per prompt, so
+  # only the branch is worth the fork and the dirty check is not.
+  _wk_ps_bash_git() {
+    local d=$PWD g="" head
+    while [ -n "$d" ]; do
+      [ -e "$d/.git" ] && { g="$d/.git"; break; }
+      d=${d%/*}
+    done
+    [ -n "$g" ] || return 0
+    [ -f "$g" ] && g=$(sed -n 's/^gitdir: //p' "$g")
+    [ -r "$g/HEAD" ] || return 0
+    head=$(cat "$g/HEAD")
+    case $head in
+      ref:*) printf ' %s' "${head##*/}" ;;
+      *)     printf ' detached %s' "$(printf '%s' "$head" | cut -c1-8)" ;;
+    esac
+  }
+  PS1='\[\033[36m\]'"$_wk_ps_name"'\[\033[0m\]:'"$_wk_ps_role"' \w$(_wk_ps_bash_git) \$ '
+fi
+
 fi  # _WK_INTERACTIVE
 unset _WK_INTERACTIVE
 

@@ -9,6 +9,105 @@ lives on media of its own, so entering and leaving it never touches the host
 install. Every bench system is bytes on a local device, put there by
 `wk sysimage write` -- no machine here boots from a server.
 
+WHAT THE RESCUE IS ACTUALLY FOR: NOBODY TOUCHES THE BOARDS
+
+  The requirement, and the thing every arrangement below serves: a board is
+  installed once and never handled again. Not "rarely" -- never, as a design
+  constraint, because a fleet that needs hands is a fleet that stops being used.
+
+  That is what a rescue *is*. `wk sysimage write <id> --disk <machine>:<device>`
+  writes to a disk attached to a machine it reaches over ssh, so:
+
+    the rpi4  runs its SD rescue, writes its own USB stick over the network,
+              arms it with one byte of that stick's MBR, reboots itself, and
+              disarms itself on the way up. No hands, ever.
+    the rpi5  the same, with its NVMe host install as the rescue and the
+              firmware one-shot as the arming.
+    the rpi3  cannot, today, and the reason is the whole of it: one medium and
+              one system, so nothing on the board can write a system without
+              overwriting the filesystem it is running from. No rescue means
+              nothing to do the writing.
+
+  Two things make the rpi3's first transition awkward and one of them is
+  self-inflicted: a running system cannot repartition the disk it booted from,
+  and `wk sysimage write` grows the rootfs to fill the card, so there is no free
+  space to carve a second slot out of. The way out without hands is to boot
+  something that is not that card -- write a rescue to a USB stick from the
+  running system, flip the *SD's* partition type byte so the ROM skips it (the
+  rpi4's trick, applied to the other medium), let the USB rescue repartition and
+  rewrite the SD, then flip back. The stick stays afterwards as a second,
+  independent rescue. The risk is one window with no fall-through: if the stick
+  does not boot once the SD is disarmed, that board needs hands -- which is the
+  visit the hands-on alternative was going to spend anyway.
+
+  THE GAP NO SOFTWARE CLOSES: nothing here can power a Pi on. moose has a BMC;
+  the boards have nothing. Every remote path above assumes the board is powered,
+  so "never touch them again" is not literally true until a switchable plug or
+  PoE exists.
+
+WHY THE THREE PIS ARE ARRANGED DIFFERENTLY
+
+  Decided 2026-08-24, in this order of priority (CLAUDE.md carries the binding
+  statement):
+
+    1  the quality of the result. The measured system's storage and bus are
+       part of the measurement.
+    2  durability and recoverability. A rescue a failed bench system cannot
+       take down, and a revert that does not need the bench system to work.
+    3  the fewest unique configurations, so a change is not three device tests.
+
+  Three never overrules one or two, and that is what makes the boards differ:
+
+  The rpi3's Ethernet is a USB device. On a Pi 3 the NIC is a hub-plus-NIC
+  chip hanging off the SoC's single USB 2.0 port, so every byte to a USB stick
+  shares 480 Mb/s with every byte of network traffic -- on the board whose
+  benchmarks load pages over that network, and which swaps at 931 MB. The SD is
+  on its own controller. So the bench root goes on the SD, and (because the
+  Pi 3's ROM boot order is fixed at SD-then-USB, so nothing on USB boots while
+  the SD is bootable) the rescue has to live on that same card. One medium, two
+  systems: forced by 1, then by the hardware.
+
+  The rpi4's Ethernet is not. It has a dedicated GbE controller and a
+  separate USB 3.0 host, so a stick root neither contends with the network nor
+  crawls. Its bench system stays on the stick and its rescue stays on the
+  SD -- two media, two failure domains, and the fall-through is enforced by
+  firmware rather than by software. Priority 2 keeps it that way even though
+  priority 3 would rather it looked like the rpi3.
+
+  The rpi5 is a workstation. Its rescue is its own NVMe install, which is a
+  better rescue than any slot wk could write, so its stick holds only a bench
+  system. Nothing to unify here: "the rescue is the machine's own host install"
+  is the same model, with the rescue supplied by the machine.
+
+  What *is* shared, and is where priority 3 is actually spent: one image model
+  (base image versus bench system, and the base is never measured), one write
+  path, one arming interface (`b_arm` / `b_disarm` / `b_self_disarm_sh`), one
+  set of refusals. The per-board difference is one function -- how the running
+  system is selected -- and everything above it is exercised by whichever board
+  is in the room.
+
+TWO BOOT STAGES, WHICH IS WHERE ARMING HAPPENS
+
+  Every arming decision here is a choice about which of these to use, and
+  confusing them makes "the firmware never boots the stick" sound impossible:
+
+    stage 1, firmware   the ROM picks a boot *device*, loads bootcode/start.elf
+                        from its FAT, reads config.txt, and loads the kernel,
+                        dtb and overlays from that same FAT. BOOT_ORDER and the
+                        USB-boot OTP fuse govern this stage. The rpi4 and rpi5
+                        are armed here.
+    stage 2, kernel     the kernel mounts whatever `root=` names, on any block
+                        device it has a driver for. Nothing in this stage cares
+                        where stage 1 read from.
+
+  A board armed in stage 2 keeps its rescue medium bootable at all times, which
+  is why the rpi3 is armed there: the SD boots as it always has, and `root=`
+  selects which system on it runs. The cost is that a revert cannot rely on the
+  new system running -- a kernel that cannot mount the armed root panics,
+  reboots, and reads the same cmdline again -- so that board needs an initramfs
+  fallback or a rescue-side pivot, where the rpi4 gets the same property free
+  from the firmware skipping an unbootable stick.
+
 rpi5 -- workstation (Raspberry Pi 5, WiFi only)
   host mode   its own Ubuntu install on the NVMe. Never written by wk.
   bench mode  a USB stick (any stick comfortably over the ~4.6 GB image; the
@@ -45,15 +144,31 @@ rpi4 -- bench-device (Raspberry Pi 4B, 4 GB, wired)
               UASP SSD on the USB 3 port is the real substrate when numbers
               start to matter.
 
-rpi3 -- bench-device (Raspberry Pi 3, armv7l, 931 MB; not provisioned)
-  bench mode  its SD card, and only its SD card: USB or network boot would
-              burn a one-way OTP bit for a capability nothing needs, so the
-              door stays shut. Swapping what the card holds is hands-on
-              today (`wk sysimage write` from a machine with the card in a
-              reader, then walk the card over).
-  systems     Yocto only, in both widths (`downstream-yocto-wpe-2.48-rpi3-32`
-              / `-64`) -- there is no distro base for a 32-bit Pi, and 931 MB
-              makes the 64-bit system deliberately marginal.
+rpi3 -- bench-device (Raspberry Pi 3, armv7l, 931 MB)
+  media       the SD card and nothing else, by decision rather than by
+              limitation: its Ethernet is a USB device, so a bench root on a
+              stick would share a bus with the traffic the benchmark
+              generates. See WHY THE THREE PIS ARE ARRANGED DIFFERENTLY above.
+              (The USB-boot OTP fuse is reported already blown, which this
+              design no longer needs either way -- it arms in stage 2.)
+  rescue      a rescue-role system on that card, never measured, whose job is
+              to stay up, stay on the tailnet, and write and recover the
+              bench system beside it.
+  bench mode  a second root on the same card, selected by `root=` on the
+              shared boot partition. Its kernel has to be installed onto that
+              boot partition too (`os_prefix=`), because the firmware only
+              ever reads the card's FAT -- booting the bench root against the
+              rescue's kernel leaves the modules mismatched, which looks like
+              a broken image rather than a mismatched boot.
+  today       one system, the base image
+              (`downstream-yocto-wpe-2.48-rpi3-32-20260822T205734Z`), so there
+              is nothing here a benchmark may run against and `wk pi bench
+              rpi3` refuses. The second slot is not built yet.
+  systems     Yocto in both widths (`downstream-yocto-wpe-2.48-rpi3-32` /
+              `-64`), and the buildroot WPE 2.38 image that matches what this
+              board has historically run -- there is no distro base for a
+              32-bit Pi, and 931 MB makes the 64-bit system deliberately
+              marginal.
 
 tolken / mbp -- workstation (Apple Silicon Mac)
   host mode   your macOS install. Never written by wk.

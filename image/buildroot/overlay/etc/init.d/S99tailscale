@@ -1,0 +1,70 @@
+#!/bin/sh
+#
+# Start tailscaled, then join the tailnet if a key came with the card.
+#
+# BusyBox init, so an S-script and not a systemd unit: this is the 32-bit
+# buildroot image (WPE 2.38 + cog), which has no service manager. The Yocto
+# images do the same two things with `tailscaled.service` and
+# `wk-tailnet-join.service` from image/yocto/meta-wk-tailnet; the join script
+# itself is byte-identical between them on purpose -- the sequencing differs
+# because the init systems differ, and nothing else does.
+#
+# Same reason the whole fleet does this: a node is reached by its tailnet name
+# and nothing about how to reach it is written down (CLAUDE.md, "Cattle, not
+# pets"). Without it this board is an address in somebody's ARP table.
+
+DAEMON=/usr/sbin/tailscaled
+STATE=/var/lib/tailscale
+SOCK=/run/tailscale/tailscaled.sock
+
+start() {
+    [ -x "$DAEMON" ] || { echo "no $DAEMON"; return 0; }
+    printf 'Starting tailscaled: '
+    # 0700 set here rather than shipped in the overlay: an overlay is rsynced by
+    # the build user, and a directory that user cannot read fails the build.
+    mkdir -p "$STATE" /run/tailscale
+    chmod 0700 "$STATE"
+    # --state on the rootfs and not under /run: a tagged node keeps its identity
+    # for ever, but only if the state survives the reboot. The key that joined
+    # it is deleted once spent, so a lost state file is a board that cannot get
+    # back on the tailnet without being written again.
+    # start-stop-daemon when BusyBox was built with it, and a plain background
+    # launch when it was not. Not defensive padding: whether that applet exists
+    # is a line in somebody else's BusyBox config, and an init script that
+    # silently does nothing is exactly how a board comes up looking fine and
+    # off the tailnet.
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -q -b -m -p /run/tailscaled.pid -x "$DAEMON" -- \
+            --state="$STATE/tailscaled.state" --socket="$SOCK" >/var/log/tailscaled.log 2>&1
+    else
+        "$DAEMON" --state="$STATE/tailscaled.state" --socket="$SOCK" \
+            >/var/log/tailscaled.log 2>&1 &
+        echo $! > /run/tailscaled.pid
+    fi
+    echo "OK"
+
+    # The join is a one-shot and says so in its own output; it is run here
+    # rather than from a second script because BusyBox init has no ordering to
+    # express "after tailscaled" other than being the next line.
+    i=0
+    while [ ! -S "$SOCK" ] && [ $i -lt 30 ]; do i=$((i + 1)); sleep 1; done
+    [ -x /usr/sbin/wk-tailnet-join ] && /usr/sbin/wk-tailnet-join
+    return 0
+}
+
+stop() {
+    printf 'Stopping tailscaled: '
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -K -q -p /run/tailscaled.pid
+    else
+        [ -r /run/tailscaled.pid ] && kill "$(cat /run/tailscaled.pid)" 2>/dev/null
+    fi
+    echo "OK"
+}
+
+case "$1" in
+    start) start ;;
+    stop)  stop ;;
+    restart|reload) stop; start ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

@@ -247,12 +247,15 @@ if [ -n "$DETACHED" ]; then
     # An address is known up front only when the target is already reachable; a
     # VM has none until it boots, and a shared build machine is in
     # ~/.ssh/config under its own name already.
-    case "$WK_TARGET_KIND" in
-        container)
-            ssh_alias_set "$NAME" localhost "$(id -un)"
-            changed "ssh alias wk-$NAME"
-            ;;
-    esac
+    #
+    # And no alias for a container, deliberately. It used to get `HostName
+    # localhost`, which was fiction twice over: on a Linux workstation it
+    # pointed Zed at the host's own filesystem, which has no /src/WebKit, and on
+    # a macOS host this half runs *inside* the podman VM, so the entry was
+    # written where Zed is not. A container is reached over `podman exec`
+    # instead (targets/container.sh), and the alias that spells that is written
+    # by `wk zed` on the machine the editor runs on -- the only machine that can
+    # write it correctly.
 
     status_write "$SF" state=present "pid=$$" stage=ready "log=$LOG" "target=$TARGET"
     info "workspace '$NAME' created"
@@ -329,6 +332,7 @@ fi
 case "$WK_TARGET_KIND" in
 vm)
     log "  wk vm start $NAME       boot it (an ssh alias is written then)"
+    log "  wk zed $NAME            the checkout, in Zed (once it is up)"
     log "  wk build $NAME mac-release"
     ;;
 remote)
@@ -341,31 +345,36 @@ remote)
     # No ssh route when this command is running on the machine itself, and then
     # there is nothing useful to say about zed.
     _host=$(t_ssh_host "$NAME" 2>/dev/null) \
-        && log "  zed ssh://$_host$(t_src "$NAME")"
+        && log "  wk zed $NAME            the checkout, in Zed (ssh://$_host$(t_src "$NAME"))"
     log ""
     log "  no sandbox on a shared machine, so 'wk claude' and 'wk verify' refuse."
     ;;
 *)
-    # The alias itself is written by the driver, as part of creating the
-    # workspace; this is only the advice that follows from it.
+    # `wk zed` rather than a `zed ssh://…` line: a container has no address, so
+    # the alias that reaches it is a ProxyCommand over `podman exec` and it is
+    # written -- with the sshd it needs -- on first use. The command is the
+    # honest spelling of that; the url would be a route that does not exist yet.
     log "  wk enter $NAME          shell"
     log "  wk build $NAME <config> build"
     log "  wk claude $NAME         sandboxed agent"
-    log "  zed ssh://wk-$NAME$(t_src "$NAME")"
+    log "  wk zed $NAME            the checkout, in Zed"
     ;;
 esac
 
 # The workspace exists either way by here; not opening an editor is a warning,
 # not a failure. A vm workspace has no route until it boots, so zed on it is
 # necessarily a second step.
+#
+# cmd/zed owns every part of the launch -- the readiness gate, a container's
+# transport, the alias and the app itself -- so this is one call and not a
+# second copy of it. No lock to drop before it: everything that mutates happened
+# in the detached driver, which has already exited and released its own.
+#
+# Not `exec`, and not fatal: the workspace exists, and `wk new` said so. An
+# editor that could not be opened -- no Zed installed, a guest that has not
+# booted yet -- must not turn a successful creation into a failed command, or
+# the next thing anybody does is create it again.
 if [ -n "$ZED" ]; then
-    # No lock to drop before the exec: everything that mutates happened in the
-    # detached driver, which has already exited and released its own.
-    if ! Z=$(zed_cli); then
-        warn "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)"
-    elif ! _zhost=$(t_ssh_host "$NAME" 2>/dev/null); then
-        warn "'$NAME' is not reachable yet -- open it later with: wk enter $NAME --zed"
-    else
-        exec "$Z" "ssh://$_zhost$(t_src "$NAME")"
-    fi
+    "$WK_ROOT/cmd/zed" "$NAME" \
+        || warn "'$NAME' is there; opening it in Zed is what failed (above) -- 'wk zed $NAME' retries"
 fi

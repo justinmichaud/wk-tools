@@ -69,16 +69,23 @@ PURGE=""
 PURGE_PMOS=""
 [ "${1:-}" = --purge-pmos ] && PURGE_PMOS=1
 
+# And the build trees themselves. Same shape again, and the same reason it is a
+# flag rather than the default: a buildroot tree is hours of compilation and a
+# yocto cache is what makes the next build minutes instead of a day.
+PURGE_BUILDS=""
+[ "${1:-}" = --purge-builds ] && PURGE_BUILDS=1
+
 # Validated rather than ignored, which is what this command used to do with an
 # unrecognised argument. That was harmless while every flag was a no-op or a
 # refresh; it is not harmless next to a flag that erases the mirror, because a
 # typo would run a full ordinary gc and report success at doing something else.
 case "${1:-}" in
-    ''|--refresh-net|--purge-mirror|--purge-pmos) ;;
+    ''|--refresh-net|--purge-mirror|--purge-pmos|--purge-builds) ;;
     *) die "unknown option '$1'
-    usage: wk gc [--purge-mirror] [--purge-pmos]
+    usage: wk gc [--purge-mirror] [--purge-pmos] [--purge-builds]
       --purge-mirror  erase the master git store (wk sync refetches it)
       --purge-pmos    erase the pmbootstrap chroots on the pmos build hosts
+      --purge-builds  erase the build trees images come out of (hours to rebuild)
                       (the next image build there refetches them)
       (--refresh-net is kept as a no-op)" ;;
 esac
@@ -159,6 +166,38 @@ gc_pmos() {
     return 0
 }
 
+# --- everywhere a build leaves bytes ------------------------------------------
+#
+# With no image store, "reclaim the images" stops being one directory: output
+# lives where the builder left it. This walks the declared list
+# (image_build_locations, lib/image.sh) and reports every entry with its size,
+# so the answer to "where did 60 GB go" is on screen rather than in somebody's
+# memory of which builder ran last.
+#
+# It reports and does not delete. A buildroot tree is hours of compilation and a
+# yocto cache is what makes the next build minutes instead of a day, so removing
+# either is a decision -- `wk gc --purge-builds` is where that decision is made.
+# Saying nothing would be worse than either: bytes nothing mentions are bytes
+# nobody reclaims.
+gc_build_outputs() {
+    command -v image_build_locations >/dev/null 2>&1 || return 0
+    local d sz any=""
+    for d in $(image_build_locations); do
+        [ -d "$d" ] || continue
+        sz=$(du -sh "$d" 2>/dev/null | cut -f1)
+        [ -n "$any" ] || info "build output, wherever a builder left it:"
+        any=1
+        log "  ${sz:-?}  $d"
+        if [ -n "${PURGE_BUILDS:-}" ]; then
+            info "  removing $d (--purge-builds)"
+            rm -rf "${d:?}"
+        fi
+    done
+    [ -n "$any" ] || return 0
+    [ -n "${PURGE_BUILDS:-}" ] || log "  kept -- 'wk gc --purge-builds' removes them"
+    return 0
+}
+
 # --- a macOS host: do this machine's half, hand the rest to the VM -----------
 #
 # Placed before the store work below, because on a Mac $WK_STORE is the VM's
@@ -170,6 +209,11 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     info "this machine's half: boot images and the pmos build hosts"
     gc_images
     gc_pmos
+    # Both halves report their own build locations, because each machine has
+    # different ones: on a Mac the buildroot and yocto trees are inside the VM
+    # and the downloaded bases are out here, so a single report would be half an
+    # answer wherever it ran.
+    gc_build_outputs
 
     if command -v podman >/dev/null 2>&1 \
        && [ "$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null)" = running ]; then
@@ -360,6 +404,7 @@ if [ -d "$(ws_state_dir)" ]; then
 fi
 
 gc_images   # (defined above; the store's images)
+gc_build_outputs  # ...and everywhere else a build can leave bytes
 gc_pmos     # ...and the build hosts' caches, on the machine that can reach them
 
 # --- boot images ---------------------------------------------------------------

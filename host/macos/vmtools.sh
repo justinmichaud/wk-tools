@@ -53,7 +53,38 @@ fi
 # command added here was "unknown command" inside every container until somebody
 # remembered to re-run setup. An environment variable rather than an argument
 # because this file is *sourced* by ./setup, and $1 there is setup's own.
+
+# The egress policy is *part of* the tooling that was just pushed, so it is
+# applied here rather than only by a full `./setup`.
+#
+# Restarted only when the policy itself changed. An unconditional restart would
+# fit the "regenerate, never accumulate" rule, but it also drops every
+# workspace's egress for a moment, and this file is meant to be runnable while a
+# build is fetching something. The per-device part (pi-hosts) is re-read per
+# request and needs no restart at all.
+_proxy_policy_hash() { cksum < "$WK_ROOT/container/proxy/wk-proxy.py" | awk '{print $1}'; }
+
+# Only when it is already running: starting it is the full setup's job (the unit
+# is installed further down), and a `wk sync --target container` on a machine
+# that has never been set up should not report a failure to start something it
+# was not asked to install. Returns non-zero when there was nothing running to
+# reload, which is what the full path branches on.
+_proxy_policy_reload() {
+    local want; want=$(_proxy_policy_hash)
+    _rsh 'systemctl --user is-active --quiet wk-proxy.service' || return 1
+    if [ "$(_rsh 'cat /var/lib/wk/.proxy-policy 2>/dev/null' || true)" = "$want" ]; then
+        unchanged "wk-proxy running"
+        return 0
+    fi
+    _rsh "systemctl --user restart wk-proxy.service && echo $want > /var/lib/wk/.proxy-policy"
+    changed "restarted wk-proxy (policy changed)"
+}
+
 if [ "${WK_VMTOOLS_ONLY:-}" = tools ]; then
+    # A pushed policy that is not the running one is the same bug as a pushed
+    # `wk` that no container can see: it is silent, and it shows up as a fetch
+    # being refused for a name the allowlist plainly contains.
+    _proxy_policy_reload || true
     return 0 2>/dev/null || exit 0
 fi
 
@@ -213,24 +244,12 @@ else
     changed "installed wk-proxy.service in the machine"
 fi
 
-# Restarted only when the policy itself changed. An unconditional restart would
-# fit the "regenerate, never accumulate" rule, but it also drops every
-# workspace's egress for a moment, and ./setup is meant to be runnable while a
-# build is fetching something. The per-device part (pi-hosts) is re-read per
-# request and needs no restart at all.
-_policy_hash=$(cksum < "$WK_ROOT/container/proxy/wk-proxy.py" | awk '{print $1}')
-if _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
-    if [ "$(_rsh 'cat /var/lib/wk/.proxy-policy 2>/dev/null' || true)" = "$_policy_hash" ]; then
-        unchanged "wk-proxy running"
-    else
-        _rsh "systemctl --user restart wk-proxy.service && echo $_policy_hash > /var/lib/wk/.proxy-policy"
-        changed "restarted wk-proxy (policy changed)"
-    fi
-else
+_proxy_policy_reload || true
+if ! _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
     _rsh 'systemctl --user enable --now wk-proxy.service' >/dev/null 2>&1 \
         || warn "could not start wk-proxy.service -- workspaces will have no egress"
     if _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
-        _rsh "echo $_policy_hash > /var/lib/wk/.proxy-policy"
+        _rsh "echo $(_proxy_policy_hash) > /var/lib/wk/.proxy-policy"
         changed "started wk-proxy.service in the machine"
     fi
 fi

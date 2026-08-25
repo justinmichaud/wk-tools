@@ -140,6 +140,12 @@ local_state "$HOME/.config/wk/targets"             backed-up   "this device's ow
 local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "a new tag:wk key (reusable, not ephemeral, longest expiry) from https://login.tailscale.com/admin/settings/keys; joined nodes are unaffected"
 local_state "$WK_ROOT/targets/local"               backed-up   "machine-local target definitions (gitignored: internal hosts and paths)"
 local_state "$HOME/.ssh/config.d/local"            backed-up   "hand-written ssh entries (host/dotfiles.sh moves them here and owns the rest)"
+# This machine's key for reaching its own container workspaces' sshd, over the
+# `podman exec` transport `wk zed` uses (zed_key, lib/target.sh). Regenerable
+# without asking anybody: it authenticates this machine to containers this
+# machine owns, and the next `wk zed` authorises whatever key it finds -- so
+# losing it costs one launch, not access to anything.
+local_state "$(wk_state_dir)/ssh/zed_ed25519"      regenerable "wk zed makes a new one and re-authorises it in the workspace"
 if [ "$(wk_os)" = linux ]; then
     # The WiFi identity lives on the rpi5 itself and nowhere else.
     [ "$(hostname)" != rpi5 ] || \

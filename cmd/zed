@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+#
+# wk zed <workspace>            -- open a workspace's checkout in Zed
+# wk zed --tools [<machine>|<workspace>]
+#                               -- open a wk-tools copy in Zed
+#
+# One command for "put an editor on that", because every target reaches it
+# differently and none of the differences are a person's business:
+#
+#   container   no network interface at all, so no address: the route is the ssh
+#               protocol over `podman exec` (container/ssh-transport.sh), and
+#               the sshd at the far end of it is installed on first use. This is
+#               the case that used to be refused outright on a macOS host.
+#   vm          a macOS guest with an address of its own, which changes on every
+#               boot -- the alias is rewritten when it starts.
+#   remote      a machine already in ~/.ssh/config under its own name.
+#
+# `wk enter <ws> --zed` and `wk new <ws> --zed` are the same launch and call
+# this: one implementation, so a fix to the transport is not three fixes.
+#
+# --tools exists because this repository is the thing most often being edited
+# *about* a machine, and every machine runs a copy of it -- a workstation's
+# checkout, a build box's rsynced tree, the podman VM's, a workspace's
+# bind-mounted /opt/wk-tools. `wk status` reports which of those are stale; this
+# is how you go and look at one.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+TOOLS=""
+NAME=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tools) TOOLS=1; shift ;;
+        -*) die "unknown option: $1
+    usage: wk zed <workspace>        the checkout
+           wk zed --tools [<machine>|<workspace>]" ;;
+        *)  [ -z "$NAME" ] || die "one name at a time (got '$NAME' and '$1')"
+            NAME="$1"; shift ;;
+    esac
+done
+
+# Zed runs where the person is, and that is never inside a workspace: a
+# container has no display and no Zed, and a macOS guest is driven from out
+# here. Said plainly rather than discovered as "zed: not found".
+if in_workspace; then
+    die "'wk zed' opens an editor, and this is workspace '$(wk_self)' -- there is no
+    Zed in here. Run it on the workstation:  wk zed $(wk_self)"
+fi
+
+Z=$(zed_cli) || die "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)
+    https://zed.dev/download -- 'wk doctor' checks for it"
+
+# --- --tools ------------------------------------------------------------------
+#
+# The local checkout is a path and not an ssh url: this is the machine Zed is
+# running on, and a remote-development session against localhost would be a
+# slower way to open a directory that is right there.
+if [ -n "$TOOLS" ]; then
+    if [ -z "$NAME" ] || [ "$NAME" = here ] || [ "$NAME" = "$(hostname -s 2>/dev/null)" ]; then
+        exec "$Z" "$WK_ROOT"
+    fi
+
+    # A machine first, and by a definite test: a target is a conf file
+    # (`target_kind`), so "is this a machine" has an answer that costs nothing
+    # and cannot be confused with a guess. Anything else is taken as a
+    # workspace name, which is what a person is most likely to be holding.
+    #
+    # A workspace named after a machine therefore loses this one spelling, and
+    # keeps the other: `wk zed <name>` is still that workspace's checkout.
+    if [ "$(target_kind "$NAME" 2>/dev/null)" = remote ]; then
+        load_target "$NAME"
+        # No workspace name to give: t_tools and t_ssh_host both answer for the
+        # machine itself, which is what was asked about.
+        host=$(t_ssh_host "" 2>/dev/null) \
+            || die "target '$NAME' is this machine -- 'wk zed --tools' opens this checkout"
+        exec "$Z" "ssh://$host$(t_tools "")"
+    fi
+
+    case "$(target_kind "$NAME" 2>/dev/null)" in
+    container|vm|local)
+        die "'$NAME' is a kind of target, not a machine. What holds a copy of
+    wk-tools is a machine or a workspace:
+        wk zed --tools            this checkout
+        wk zed --tools moose      a machine's copy
+        wk zed --tools <ws>       /opt/wk-tools as that workspace sees it" ;;
+    esac
+
+    require_name "$NAME"
+    TARGET="$(ws_target "$NAME")"
+    load_target "$TARGET"
+    t_ssh_prepare "$NAME"
+    host=$(t_ssh_host "$NAME") || die "'$NAME' is not running, so nothing in it can be opened"
+    exec "$Z" "ssh://$host$(t_tools "$NAME")"
+fi
+
+# --- a workspace --------------------------------------------------------------
+require_name "$NAME"
+TARGET="$(ws_target "$NAME")"
+load_target "$TARGET"
+
+# The readiness gate, and which gate depends on who can see the evidence.
+#
+# For a container the driver asks the container (t_ssh_prepare): on a macOS host
+# the store this workspace lives in is inside the podman VM, so nothing out here
+# can read the marker file that ws_state is derived from -- and this command
+# runs out here, because Zed and podman are both out here.
+#
+# For every other target the record is host-side and wait_ready is the answer,
+# including its own reason for waiting: opening an editor on a checkout that is
+# still being cloned shows up as a tree of missing files. It stays in the
+# foreground on purpose -- if this end dies, creation continues detached and
+# re-running this command is the resume.
+[ "$WK_TARGET_KIND" = container ] || wait_ready "$NAME"
+
+t_ssh_prepare "$NAME"
+
+host=$(t_ssh_host "$NAME") || die "'$NAME' is not running, so there is no route to it.
+    A macOS guest needs booting first:  wk vm start $NAME"
+
+exec "$Z" "ssh://$host$(t_src "$NAME")"

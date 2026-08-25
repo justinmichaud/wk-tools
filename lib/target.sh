@@ -93,6 +93,13 @@ t_prefetch()   { :; }
 # workspace differently from the way it was made.
 t_wiring_args() { printf '\n\n\n'; }
 t_ssh_host()   { echo "wk-$1"; }
+
+# Everything a target needs made true before an editor is pointed at it over
+# ssh -- an sshd, a key, an alias. Nothing for a target that is already an ssh
+# destination: a macOS guest and a shared build machine answer on port 22 as
+# themselves, and their alias is written when they are created or booted. The
+# container driver is the one that has work to do here (targets/container.sh).
+t_ssh_prepare() { :; }
 t_needs_base() { return 0; }
 t_start()      { :; }
 t_stop()       { :; }
@@ -543,18 +550,28 @@ ssh_alias_remove() {
     mv "$tmp" "$conf"
 }
 
-# ssh_alias_set <name> <hostname> <user>
+# ssh_alias_set <name> <hostname> <user> [identity] [extra-line...]
+#
+# The extra lines are for a target that is not reached by address at all: a
+# container workspace has no interface and is reached by a ProxyCommand over
+# `podman exec`, and that line is as much a part of "how this workspace is
+# reached" as a hostname is for the others. Passed in rather than branched on
+# here, because which lines are needed is the driver's knowledge.
 ssh_alias_set() {
     local name="$1" hostname="$2" user="$3" conf extra
     conf=$(wk_ssh_conf)
     ensure_dir "$(dirname "$conf")" 0700
     ssh_alias_remove "$name"
 
-    # A per-target identity only when there is one. The container workspaces
-    # authenticate as the invoking user through the podman machine and have no
-    # key of their own.
+    # A per-target identity only when there is one. A macOS guest has a key of
+    # its own; a container workspace authorises this machine's zed key
+    # (zed_key, below).
     extra=""
-    [ -n "${4:-}" ] && extra="    IdentityFile $4"
+    [ -n "${4:-}" ] && extra="    IdentityFile $4
+    IdentitiesOnly yes"
+    shift 4 2>/dev/null || shift $#
+    while [ $# -gt 0 ]; do extra="$extra
+    $1"; shift; done
 
     cat >> "$conf" <<EOF
 
@@ -566,6 +583,34 @@ Host wk-$name
     UserKnownHostsFile /dev/null
 $extra
 EOF
+}
+
+# --- the zed key --------------------------------------------------------------
+# One key per machine, for reaching a container workspace's sshd over the
+# `podman exec` transport (targets/container.sh).
+#
+# Not one of the deploy keys under $WK_STORE/secrets: those are push-only
+# credentials for GitHub that `wk push` switches on and off, and a workspace
+# reads them read-only. This is the opposite direction -- this machine
+# authenticating to its own containers -- so it is machine-local, generated on
+# demand, and regenerable at any moment (`wk doctor` says so). Nothing outside
+# this machine ever needs the private half, and every workspace that trusts it
+# is one `wk zed` away from trusting a new one.
+#
+# Its own key rather than reusing ~/.ssh/id_ed25519 for the same reason the vm
+# driver has one: a person's key may be passphrase-protected, held in an agent,
+# or absent, and an editor launch is not the place to discover that.
+zed_key() { echo "$(wk_state_dir)/ssh/zed_ed25519"; }
+
+zed_key_pub() {
+    local k; k=$(zed_key)
+    if [ ! -f "$k" ]; then
+        ensure_dir "$(dirname "$k")" 0700
+        ssh-keygen -q -t ed25519 -N '' -C "wk zed key ($(hostname -s 2>/dev/null || echo host))" \
+            -f "$k" || return 1
+        changed "generated this machine's zed key ($k)"
+    fi
+    cat "$k.pub"
 }
 
 # Every registered target, plus container, which is the default and is what

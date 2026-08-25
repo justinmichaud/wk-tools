@@ -28,7 +28,7 @@ wk build bug-238 jsc-release
 wk run bug-238 -- -e '1+1'
 wk claude bug-238          # sandboxed agent, permissions relaxed
 wk rm bug-238              # reclaims everything it created
-zed ssh://wk-bug-238/src/WebKit
+wk zed bug-238
 ```
 
 Creating a workspace costs one overlay mount, not a clone. The base snapshot is

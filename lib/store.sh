@@ -500,6 +500,17 @@ wk_mirror_branches() {
     echo "${WK_MIRROR_BRANCHES:-main}"
 }
 
+# What a plain `wk sync` fetches: all of them.
+#
+# There used to be a default of `origin` and a `--all` for the rest, and the
+# economy was not worth what it cost. Both upstreams are upstreams *here* (the
+# board images are built from the WPE release branches), and both forks are
+# where this fleet's own work lives -- a fork branch that is in the mirror is a
+# branch `wk pr` can check out into a fresh workspace without going to GitHub at
+# all. A remote that is fetched only when somebody remembers a flag is a remote
+# that is missing exactly when it is wanted.
+wk_mirror_default_remotes() { wk_remotes | awk 'NF {printf "%s%s", sep, $1; sep=" "} END {print ""}'; }
+
 store_init() {
     ensure_dir "$WK_STORE"
     ensure_dir "$WK_STORE/git"

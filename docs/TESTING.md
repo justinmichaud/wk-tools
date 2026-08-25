@@ -116,6 +116,16 @@ Run these inside the podman VM on macOS, and directly on Linux.
       (temporarily break one token to prove the check can fail)
 - [ ] one `claude login` in a workspace seeds `/secrets` and a second
       workspace inherits it
+- [ ] the egress allowlist carries `ports.`/`archive.`/`security.ubuntu.com`
+      (2026-08-24), so a workspace can `apt-get install` — which is what
+      `wk zed` uses to put an sshd in one, and is also any other package in the
+      distribution, in a workspace that already has sudo. A deliberate widening
+      taken over the alternative (a derived image built outside the sandbox);
+      `docs/HANDOFF-sandboxing.md` carries it for the audit
+- [ ] `wk sync --target container` applies a changed egress policy rather than
+      only pushing it: the tools-only path used to return before the proxy was
+      reloaded, so a refusal was logged for a name the allowlist plainly
+      contained until somebody re-ran `./setup`
 
 ### A barrier can be forced, loudly (`--force`)
 - [V] a barrier refuses by default and names `--force`
@@ -849,6 +859,245 @@ reached through a ProxyJump), driven from the macOS host.
       host -- they say it is stopped and point at `wk start` / `wk vm ls`.
       Booting it used to cost a macOS guest its memory budget: `wk vm start`
       then refused, because both want the whole envelope
+### The listing's shape — one document, three views
+- [V] `wk status --json` is the listing as one document, and the terminal table
+      and the page are rendered *from* it (`lib/status-view.py`) rather than
+      printed alongside it — so a number that appears in one and not the other
+      is impossible rather than merely unlikely. Measured 2026-08-24: four
+      machines, five workspaces, the fleet and the bridges, exit 4
+- [V] the collectors emit **records** — one JSON object per line — and the
+      renderer merges them by machine name. That is what makes a macOS listing
+      work: it is assembled by two processes (this machine's targets out here,
+      its containers inside the podman VM) and two JSON documents cannot be
+      concatenated where two streams of lines can. It also retired the flag the
+      two halves used to pass between them to agree on who had printed a heading
+- [V] `wk status` **names each machine once** and groups what is on it by
+      method: the machine as a heading, `container` / `macOS guest` / `native`
+      under it, workspaces in a table under that. It used to squash both into
+      one `moose:container` column, and this Mac's own containers were printed
+      after every shared build machine because they come from the forwarded half
+- [V] the columns line up across the **whole** listing, not per group: one set
+      of widths, computed after the last machine has answered. Per-group widths
+      made every block line up with itself and with nothing else, so the eye had
+      to find the columns again at every heading
+- [V] a machine running an **older** copy of wk-tools cannot answer in records —
+      it rejects `--records` as a workspace name — so it is asked again in the
+      vocabulary it has and its own listing is carried as one `raw` block, under
+      its heading, with a note naming `wk remote setup <machine>`. Measured
+      2026-08-24 against buildbox4 and devbox-arm64-2, both on an older tree
+- [V] the fleet block is printed **once**. The forwarded half used to print a
+      second one, from inside the podman VM, saying "unknown from here" about
+      every board in it — the devices are reached over ssh from the host and the
+      VM can see none of them. It runs with `--no-devices`, which keeps the half
+      of the machine facts that *is* in there: the copy of wk-tools every
+      container bind-mounts, and the keys in that store
+- [V] `wk status --json` covers everything a bare `wk status` covers. A flag is
+      not a subject: counting arguments to decide what to forward — which is
+      what the dispatcher did — sent `--json` down the forward-it-whole path, so
+      it answered for this machine's containers and silently left out its guests
+      and every build machine (`bare_subject` in `wk`)
+- [V] `wk status --web` serves the page on **127.0.0.1 only**, opens a browser,
+      and keeps it current: the page polls this process every 1.5 s and this
+      process re-runs the walk every `--interval` seconds (default 20, minimum
+      5). A page that re-ran the walk per request would put a browser's refresh
+      rate onto a phone-linked Pi. Measured 2026-08-24 on port 8792
+- [V] the page is self-contained — no CDN, no font host, no framework. A page
+      served from a laptop to look at a fleet must not depend on the network the
+      fleet is the reason to be worried about
+- [V] `wk status --html [file]` writes that page once and serves nothing
+- [V] a port already in use is a refusal naming the likely cause (the last
+      `--web` still running, whose page is already live) rather than a traceback
+- [V] when the server stops, the page says so unmistakably: the whole thing goes
+      grey with a red frame and the footer reads "this listing is frozen". A page
+      that has stopped updating looks exactly like one that is current, and this
+      listing is the thing people act on
+- [ ] the page's own refresh survives the fleet being slow: a walk that takes
+      longer than the interval must not stack up walks
+- [ ] `NO_COLOR` and a redirected stdout both drop the colour from the table
+
+### What a machine is, apart from the workspaces on it
+- [V] **disk, where the store actually lives**: percentage used (green under 75,
+      yellow to 89, red at 90 — the thresholds are "will the next build fit",
+      not tidiness), free and total, the snapshot count, and how many `wk gc`
+      would reclaim. A macOS host reports two, labelled: the podman VM's store
+      (where builds fill a disk) and its own (guests, Tart images, the VM's disk
+      image). `df`, never `du` — walking a 200 GB store to answer would cost
+      more than the build
+- [V] **the egress proxy**, where there is a unit to ask about. If it is down
+      every workspace has no network and every build fails as a hundred
+      unrelated fetch errors; the line names `systemctl --user start wk-proxy`
+- [V] **the locks held right now**, with the holder's pid and command — and
+      `held` against `stale` for one whose holder is gone, because a lock dies
+      with its holder and the next taker breaks it. "Waiting for the store lock"
+      had no way to find out what was holding it
+- [V] **the push switch in words** (`on` / `off` / `partly on` / `no keys`, with
+      the count live and held back), per store — it was inferable only from the
+      phrase "held back" on a key line
+- [V] **capacity**: load against cores, free against total memory, per machine —
+      what decides where to send a build. On a macOS host both the VM's and the
+      Mac's are reported and labelled, because 9 cores and 10 cores are both
+      true about different things
+- [V] **quiesced or not**: a machine left pretending to be a measurement
+      instrument (caffeinate, paused daemons, the raiser) says so, with
+      `wk quiesce off` named. That state is invisible and it changes every
+      number taken on the machine
+- [V] **the newest benchmark run**, and whether it produced a result: a run
+      directory with `env.json` and no `result.json` is either happening now or
+      it died, and either way it is a machine not to touch
+- [ ] the health block is empty and silent on a machine that has none of these
+      (no store, no proxy unit, no locks)
+
+### What is *in* a workspace, before anything destructive
+- [V] every workspace row carries **work that exists nowhere else**: commits not
+      pushed, dirty files, untracked files — or `clean`. The model here is
+      wipe-over-repair (`wk rm` and remake), and until now the listing consulted
+      before doing that said nothing about what would be lost
+- [V] and **how far the checkout has drifted**: `main ↓424` against its upstream,
+      `↑` for commits ahead. Measured 2026-08-24
+- [V] and **which snapshot it is standing on** (`SNAP -2`): the overlay's lower
+      layer is pinned at creation, so this is the honest answer to "I ran
+      `wk sync` and nothing moved"
+- [V] all of it in **one exec** per workspace — the same round trip the origin
+      check already paid for. Measured in a WebKit checkout: `status -uno`
+      524 ms, `ls-files` 395 ms, both rev-lists 47 ms
+- [ ] a workspace whose exec fails (stopped container, guest not booted) shows
+      the row without the extra fields rather than an error
+
+### Every machine says how to reach it, and where it was declared
+- [V] each machine, fleet device and bridge carries **how it is reached now**
+      (its tailnet address and whether the tailnet says it is up) and **a path
+      without tailscale** — and both are calculated at read time, never stored
+      (`lib/reach.sh`). Measured 2026-08-24: moose `100.84.25.21 (up)` /
+      `192.168.1.40 (mDNS moose.local)`; buildbox4 not on the tailnet at all and
+      `jmichaud@buildbox4 (through igalia.com)` from `ssh -G`; rpi4
+      `10.99.1.10 (through tailnet-bridge-generic)`, composed from the board's
+      `MACH_BRIDGE` and that bridge's `BR_LEASES`; rpi5 tailnet-only, and the
+      listing says nothing rather than inventing a second route
+- [V] the derivations are ssh's and the tailnet's own: `ssh -G` resolves the
+      config (Host blocks, Includes, ProxyJump) without connecting, and
+      `tailscale status --json` is asked once per run. Neither is a table in
+      this repository, which is the rule the fleet has (CLAUDE.md, "a node is
+      reached by its tailnet name and how to reach it is not written down") —
+      and the question it left unanswered, "and when the tailnet is down?", now
+      has a computed answer
+- [V] every line that came out of a conf names the conf it came from, relative
+      to the checkout: `targets/hosts/buildbox4.conf`, `boot/machines/rpi4.conf`,
+      `bridge/hosts/<name>.conf`. A machine declared twice (the registry and this
+      device's own view) names both files
+- [ ] mDNS is the only lookup here that goes on the wire, and it is bounded: a
+      `.local` name nothing answers for must cost 2s, not the resolver's default
+
+### The bridges are probed, not just declared
+- [V] each bridge is asked, in parallel and under a ceiling of its own: is it
+      reachable, does it carry the role, what does its own health check say, and
+      is the role **this repository's**. Measured 2026-08-24:
+      tailnet-bridge-generic `up`, "All checks passed.", role older than the
+      repo (49386 bytes installed against 49940 here) with
+      `wk bridge setup tailnet-bridge-generic` named; the BMC bridge unreachable
+- [V] "up to date" is a checksum of the files provision.sh installs
+      (`bridge/bin/*` then `bridge/init.d/*`, in that order on both sides) rather
+      than a version somebody has to remember to bump — the same trick the
+      wk-tools tree hash plays, for the same reason
+- [V] the probe's ceiling is its own (20s, `WK_BRIDGE_TIMEOUT`) and larger than a
+      fleet device's, because it runs a health check on a phone: at the fleet's
+      4s the root attempt was killed and came back **empty** — a remote shell
+      buffers its stdout when it is not a tty — which read as "root does not
+      work here" and sent every probe down a doas path that needs a tty
+- [V] a health check that cannot run for want of privilege is reported as
+      "role installed" with the reason, not as "unhealthy": that is a verdict
+      about this end's route, not about the bridge
+- [ ] a bridge that is on the tailnet but whose *segment* is down is
+      distinguishable from one that is simply off
+
+### Opening a workspace in an editor — `wk zed`
+- [V] `wk zed <ws>` opens the checkout, whatever the target is, and
+      `wk enter <ws> --zed` / `wk new <ws> --zed` are the same launch: they call
+      it rather than carrying a copy
+- [V] a stale copy of wk-tools names the command that fixes it, and which
+      command that is depends on what kind of copy it is: `wk sync --target
+      container` for the tree inside the podman VM, `wk sync --target <machine>`
+      for a build box, and a `git pull` over there for a peer workstation, which
+      runs a checkout of its own that nothing here pushes to. It used to say
+      "push it there" and name nothing
+- [V] `wk zed --tools` opens this checkout locally (a path, not an ssh url to
+      the machine you are sitting at); `wk zed --tools <machine>` opens that
+      machine's copy — `ssh://buildbox4/home/…/wk/tools`, checked 2026-08-24 —
+      and `wk zed --tools <ws>` the `/opt/wk-tools` a workspace bind-mounts
+- [V] inside a workspace it refuses: **there is no Zed in here**, and it names
+      the command to run on the workstation instead. Encoded in
+      `wk selftest --section state`
+- [V] Zed's own upload path works through the transport: it tries to fetch its
+      server binary *inside* the workspace first (no DNS in there, correctly
+      refused), then uploads the 36 MB binary over sftp and runs it — measured
+      2026-08-24, `/src/WebKit` opened with 109,621 entries and three
+      zed-remote-server processes alive in the container. Two things had to be
+      true for that: `internal-sftp` rather than the sftp-server binary (an
+      external subsystem is started through the login shell, and bash run by
+      sshd reads `~/.bashrc`, which ends in `cd /src/WebKit` — so an upload to
+      `~/.zed_server/…` failed against a directory that was plainly there), and
+      the same `cd` guarded on an interactive shell in `container/firstrun.sh`
+- [ ] a language server that wants the network from inside a workspace is
+      refused by the allowlist and says so rather than hanging (Zed's ACP
+      registry fetch does exactly this today; nothing has been added for it)
+- [ ] `wk new --zed` warns instead of failing when the launch cannot happen —
+      the workspace is created either way, and its exit status says so
+- [ ] `wk rm <ws>` takes the `Host wk-<name>` alias with it, ProxyCommand and
+      all, and a later `ssh wk-<name>` is an unknown host rather than a hang.
+      On a macOS host that removal happens **out here**: `wk rm` of a container
+      is forwarded, and the forwarded half would strike an entry out of the
+      VM's own `~/.ssh`, where nothing reads one
+
+### The prompt — what a shell says before you type
+- [V] the shared rc sets a prompt carrying the machine, what that machine
+      currently is (`host` / `bench` / `shared` / `ws`), the working directory,
+      the git branch, and the exit code of the last command when it was not 0.
+      Measured 2026-08-24: `tolken:host ~/Development/wk-tools main* ❯` on the
+      host, `238-tolken-backports:ws …` inside a workspace (bash there — the
+      image has no zsh, and the fallback carries the same facts)
+- [V] it forks nothing it does not have to: the machine, the role and the
+      workspace are read once at rc load, and the branch comes from `.git/HEAD`
+      rather than from `git rev-parse`. ~42 ms per prompt in this checkout, and
+      all of it the one `git diff --quiet` that decides the dirty mark
+- [V] the dirty mark is honest: `*` means git was asked and said yes, `?` means
+      it was **not** asked because the index is over 20 MB — which is every
+      WebKit checkout, where the answer costs seconds. Never a blank where a
+      `*` might belong
+- [ ] a machine in bench mode says `bench` (the `/etc/wk-image` marker, the same
+      evidence `wk boot --status` reads) — untested on a booted bench system
+
+### `wk sync` — the master copy, then everything that clones from it
+- [V] a plain `wk sync` fetches **every remote** — origin, wpe, fork and forkwpe.
+      The old default of origin-alone-unless-`--all` meant the mirror was
+      reliably missing whichever branch somebody was about to want; `--all` is
+      still accepted and now asks for what already happens
+- [V] the mirror is mounted read-only into every new container at `/mirror`, and
+      a workspace's fetch comes from **there**: no network, and the objects are
+      already on the disk. Measured 2026-08-25 on a fresh workspace —
+      `ok (from the mirror)`, and 586 remote-tracking refs afterwards (242 wpe,
+      226 forkwpe, 116 fork, 2 origin) with the egress proxy untouched
+- [V] read-only, and that is the safety argument: the mirror is what every base
+      snapshot is cloned from, so a workspace that could write it could change
+      what every future workspace builds
+- [V] a workspace made before that mount says so rather than failing — it falls
+      back to its own remotes over the proxy and the line reads
+      `ok (over the network: this workspace has no /mirror -- remake it to get one)`
+- [V] and then every workspace fetches too, which is the half that was missing:
+      a new snapshot does nothing for the workspaces that already exist, since
+      they stay pinned to the one they were made on. Measured 2026-08-24:
+      mirror (origin ok, wpe ok) → snapshot published → `238-tolken-backports ok`
+- [V] `wk sync <workspace>` does the same for one of them; a name that is not
+      there is refused rather than skipped
+- [V] a workspace that is not `present` costs a line saying which state it is in,
+      and not the run; the same for one whose fetch fails
+- [V] only the remotes a workspace actually has are fetched: one made before
+      `wpe` was wired in has no such remote, and naming it would fail the whole
+      fetch over a remote that was never there
+- [ ] `wk sync` inside a workspace is still refused, naming the host command
+- [ ] the refspecs follow the mirror's own layout: origin's branches are its
+      heads (a clone ignores refs/remotes, so a mirror that filed origin there
+      would clone into a repository with no branches) and every other upstream is
+      namespaced. A fifth upstream must need no change here beyond `wk_remotes`
+
 - [ ] `wk backup` → `./setup` round-trips with no spurious changes
 - [ ] `wk backup`'s junk filters strip what they claim (weather location,
       WiFi UUIDs, last-folder paths, timestamps)
@@ -1274,14 +1523,19 @@ command that asked for it.
       which printed "waiting for 'zedgate' to finish being created (at: init)"
       and held — no editor — until creation finished, then "'zedgate' is ready"
       and on to the launch
-- [!] and the launch is where it ends on a macOS host, for a container
-      workspace: it was forwarded into the podman VM, looked for
+- [V] and the launch works on a macOS host too, for a container workspace, which
+      it did not: it was forwarded into the podman VM, looked for
       `/Applications/Zed.app` in a Linux VM and reported "zed is not installed"
-      about a Mac that has it. Two reasons it cannot work as it stands, both now
-      in the refusal: Zed runs on the host and the container is inside a VM with
-      no ssh route in from here, and the generated `wk-<name>` alias is written
-      by whichever side ran `wk new` — the VM. Refused on the host now, naming a
-      macOS guest or a remote target instead
+      about a Mac that has it — and behind that, the `wk-<name>` alias was
+      written by whichever side ran `wk new` (the VM), pointing at a `localhost`
+      which has no /src/WebKit on either host. Both are gone: `wk zed` is a host
+      command, and a container is reached by the ssh protocol over `podman exec`
+      (`container/ssh-transport.sh`), so no address and no interface are needed.
+      Measured 2026-08-24 on tolken against 238-tolken-backports: openssh-server
+      installed into the workspace on first use, the zed key generated and
+      authorised, `ssh wk-238-tolken-backports` landed in /src/WebKit as `core`,
+      and `scp` through the same transport round-tripped a file byte-exact —
+      which is Zed's own upload path
 - [ ] against `broken` it refuses with the repair command
 
 ### Un-managed commands clobbering the record
@@ -2625,6 +2879,276 @@ egress list that cannot be "every upstream in six layers".
       "unknown from here" rather than reporting the driving machine's own
       marker, and the block is skipped inside a workspace (no network, five
       timeouts to say so).
+- [V] the tailnet overlay for a buildroot image assembles from the same pin as
+      everything else: `image/buildroot/tailnet-overlay.sh <arch> <staging>`
+      reads the version and sha256 from
+      `meta-wk-tailnet/.../tailscale-release.inc`, verifies the tarball before
+      unpacking it, and installs the *same* `wk-tailnet-join` file the Yocto
+      images run — three installers (image recipe, buildroot overlay, `wk pi
+      setup`), one pin, one join script. Checked for `arm`: 32-bit ARM,
+      statically linked, 64 MB, plus an `S99tailscale` for BusyBox init, which
+      is what that image has instead of systemd units. It carries no credential:
+      the key and the fleet name arrive with the card.
+- [V] **wpe-2.38 for the rpi3 builds, with tailscale in it** (2026-08-24, on
+      this Mac's podman VM). It is a *buildroot* image and not a Yocto one,
+      which was itself part of the confusion: `wpe-2.38` carries no
+      `Tools/yocto` (`wpe-2.42` is the earliest that does), and what matches
+      this board is `WebPlatformForEmbedded/buildroot`'s
+      `raspberrypi3_wpe_2_38_cog_defconfig` — buildroot 2020.02, WPE WebKit
+      2.38 at `79cd67f78d314cc5507723552b111ccc890f2e62`, cog 0.16.0, kernel
+      `rpi-5.15.y`, dropbear, BusyBox init. Verified in the built tree:
+      `tailscale`/`tailscaled` present and ELF 32-bit ARM statically linked,
+      `wk-tailnet-join` and `S99tailscale` installed (and `rcS` does run
+      `/etc/init.d/S??*`), `/var` and `/var/lib` real directories on the rootfs
+      so tailnet state survives a reboot, **no `/etc/wk`** — the image carries
+      no credential — root's home `/root` for the driving key dropbear reads,
+      and `sdcard.img` partitioned p1 32M FAT32-LBA bootable + p2 700M Linux.
+      Three things had to be found on the way, all recorded where they bite:
+      host-python's arm64 libffi (`image/buildroot/external/`), this
+      defconfig's tar-only filesystem output — it builds no `rootfs.ext4`, so
+      the board's own genimage config had nothing to assemble — and an overlay
+      that must contain only world-readable files, because `target-finalize`
+      rsyncs it as the build user (a 0700 state directory failed the build with
+      rsync error 23; the mode is set at boot instead).
+- [ ] the 2.38 image reaches the board **without anyone touching it**. The
+      card-carrying plan was wrong and is withdrawn: `wk sysimage write` already
+      writes a disk attached to a machine it reaches over ssh, which is how the
+      rpi4 writes its own stick while running its rescue. The rpi3 cannot only
+      because it has one medium and one system. The remote transition, in order:
+      write a rescue to a USB stick from the running board; flip the SD's MBR
+      partition type to 0x83 so the ROM skips it; let the USB rescue repartition
+      and rewrite the SD as rescue + bench with free space left over; flip back.
+      One window without fall-through, at the step where the SD is disarmed and
+      the stick has not yet proved it boots.
+- [!] nothing in this fleet can power a Pi on. moose has a BMC; the boards have
+      nothing, and the rpi3 is off right now. Every remote path assumes power,
+      so "never touch the boards" is not literally met until a switchable plug
+      or PoE exists. Hardware, not code.
+- [V] there is **one** privileged path to a card and no fallback (2026-08-24).
+      Everything that needs privilege on the machine holding the disk goes
+      through `admin/wk-card-priv`: the write, the unmount, the identity stamp,
+      the fleet integration, the tailnet seed, the grow, the read-back verify.
+      The inline-`sudo` alternative was written and removed the same day — a
+      fallback is the path that runs on the machine nobody tested, on the day
+      something is already wrong. `boot/disk.sh` now contains no inline `sudo`
+      at all; the single remaining mention is the helper's own invocation inside
+      the decompression pipeline, where `zstd -dc` runs unprivileged and only
+      the plain stream reaches the writer.
+- [V] the bmaptool writer is gone, and with it a second hardware-tested path.
+      It existed to consume `disk.wic.xz` and `disk.bmap` — store artifacts — so
+      it had no inputs once the store went. `disk_write_dd` is now `disk_write_stream`
+      with a file on stdin rather than a second implementation of the same
+      thing. CLAUDE.md, "One path, not two", carries the rule this came from.
+- [V] "may this disk be written" has one implementation, in the helper's gate.
+      `disk_refuse_unless_safe` used to be a second copy of the same checks and
+      now asks the helper, adding only the question the helper cannot answer:
+      does the image fit. Two copies of a safety rule is one that can drift into
+      permitting what the other refuses.
+- [V] the card helper (`admin/wk-card-priv`) may only write a **usb or mmc whole
+      disk the machine is not running from**, checked against real hardware on
+      the rpi4 (2026-08-24). `/dev/sda` — USB, so it *passes* the transport
+      check — was refused because the board's root is `/dev/sda2`, which is the
+      case that matters: every board here boots from exactly the kind of device
+      the transport check allows, so the boot check is the load-bearing half.
+      `/dev/mmcblk0` (mmc, not booted) was permitted. Also refused: a loop
+      device (`is a 'loop', not a whole disk`), a partition rather than a disk,
+      `/dev/null` (not a block device), a path traversal, and a device name with
+      a shell metacharacter in it. It is the second NOPASSWD grant in this repo
+      and CLAUDE.md now says so, with what earns one: a fixed verb list, no
+      passthrough, no argument that becomes part of a command, and a gate
+      narrower than the capability sounds.
+- [V] the card-side fleet integration was **run against a real device and read
+      back** (2026-08-24, on the rpi4 in bench mode, which is the one machine in
+      the fleet where privileged commands need no password): a fixture with the
+      real layout — FAT boot partition, ext4 root, a passwd file — took the
+      identity marker, the driving key (101 bytes, `ssh-ed25519 …`, 0600
+      root:root inside a 0700 `.ssh`), `/etc/wk/tailnet.conf` (`hostname=rpi3`,
+      `tag=tag:wk`), the auth key at 0600, and `wk-image.id` on the FAT. A
+      fixture *without* `wk-tailnet-join` was correctly skipped by the tailnet
+      seeding rather than left holding a credential it cannot spend.
+- [!] `disk_install_fleet` shipped the driving key over one stdin split on a
+      blank line, and the key was lost every time: `sed` reads in buffered
+      chunks, so the first reader swallowed the whole stream and the second got
+      nothing. The card came out with a perfect marker and an **empty**
+      authorized_keys — a board that boots and cannot be reached. Fixed by
+      passing both on the command line, which is safe because neither is a
+      secret (the marker is metadata, the driving key is public; the tailscale
+      auth key still goes over stdin, where one reader consumes it). Found by
+      reading a written card back, not by review — the failure is invisible from
+      the writing side.
+- [V] `wk sysimage write --from <path|vm:path>` writes an image that is in no
+      store (2026-08-24): it reads the bytes where the builder left them —
+      including out of this machine's podman VM, which a macOS driver cannot
+      open directly — hashes them for the identity, refuses a disk that cannot
+      hold them, streams them to the machine the disk is attached to, and then
+      edits the *card*: unique disk identity, identity marker, driving key,
+      tailnet name and key. No manifest, no id lookup, no import, and no Linux
+      image-editing tools on the driving machine. Exercised as far as hardware
+      allows: it read the 733 MB 2.38 image through the VM and refused
+      `rpi5:/dev/mmcblk0` with the disks that *are* attached, because there is
+      no card in the reader.
+- [V] a store-free write does **not** grow the root partition unless asked.
+      Growing to fill is what leaves a card with one system and no room for a
+      second, which is the state that makes a board need a person — so `--grow`
+      is opt-in on this path and the reason is printed when it is skipped.
+- [V] every builder's output has somewhere `wk gc` looks. There is no store, so
+      output lives where the builder left it and the set of places grows with
+      the set of builders; `image_build_locations` declares them with a
+      `# builder: <name>` annotation each, `wk gc` walks them and reports every
+      one with its size, and `wk selftest` checks the annotations against the
+      `IMG_BUILDER` values in `image/profiles.sh`. Reporting rather than
+      deleting: a buildroot tree is hours and a yocto cache is what makes the
+      next build minutes, so `--purge-builds` is where that decision is made.
+- [ ] **no image store** (decided 2026-08-24, `wk help images`): a workspace
+      produces an image, wk detects that it did, and `wk sysimage write` streams
+      it to a card. What leaves the tree: `images/<id>/` with its `disk.img`,
+      `disk.wic.xz`, `disk.bmap` and manifest; the import step and the rubble a
+      half-finished one leaves; `image_verify`, `image_latest`, `image_ids`,
+      `image_complete`, `image_fast_path_ok` and the fast-path re-derivation;
+      and `wk sysimage rm`'s reason to exist. Eleven files touch it today —
+      `cmd/sysimage`, `lib/image.sh`, `image/yocto.sh`, `image/pmos.sh`,
+      `image/fetch.sh`, `boot/disk.sh`, `cmd/boot`, `cmd/bridge`, `cmd/gc`,
+      `cmd/disk`, `cmd/selftest`. `image/fetch.sh` is the exception and stays: a
+      downloaded distro base keyed by its checksum is a re-fetchable input, not
+      a built output.
+- [ ] identity without a catalogue: `/etc/wk-image` is written at *write* time
+      from the profile, the workspace, the build time and the sha256 of the
+      bytes as they stream past. Stronger than a store id — it names content
+      rather than a slot — and free, since the writer reads every byte anyway.
+- [ ] every image edit moves onto the card, on the machine holding the reader:
+      identity marker, driving key, unique disk identity, root retarget, cmdline
+      append, tailnet key and name. That machine has the tools (checked
+      2026-08-24 on the rpi5: sfdisk, debugfs, mcopy, bmaptool, e2fsck) and has
+      to be reachable for the write to happen at all — so a macOS driver needs
+      no Linux tooling and the "mac portion" of `wk sysimage` stops existing.
+- [ ] the order: the **buildroot lane is new code, so write it store-free from
+      the start** — it proves the model end to end without touching a working
+      path, and it is what the WPE 2.38 image needs anyway. Then the yocto lane,
+      then pmos/bridge last, because that one is exercised only with a phone in
+      hand and is the worst thing to refactor blind.
+- [V] a base image is never mistaken for a bench system (2026-08-24). Every
+      image wk writes carries `/etc/wk-image`, so `b_probe` calling anything
+      with a marker `bench <id>` meant a board that had fallen back to the
+      medium it is never armed from — an unarmed stick, a stick that would not
+      boot, or the rpi3, which has only ever had one medium — reported bench
+      mode and `wk pi bench` measured it. The evidence that settles it was
+      already declared and simply never asked for: `MACH_ROOT` is the root
+      device that is never written to, `MACH_DEVICE` is the medium systems are
+      written onto, and `b_system_kind` compares the running root against both.
+      `wk pi bench` refuses a base image by name, `wk boot --status` says "base
+      image" rather than "bench mode", and `wk status`'s fleet line says "not a
+      bench system". A board on its base image is also *armable* again — that
+      state used to match `bench*` and be refused with "already in bench mode".
+- [V] a rescue image gets no self-return watchdog and no self-disarm
+      (`IMG_ROLE=rescue`, image/profiles.sh; recorded as `role=` in
+      `/etc/wk-image`). Both units exist to hand a machine *back* to what it
+      falls back to, and a rescue image is that thing — so on one, the watchdog
+      is a 15-minute reboot in the middle of whatever card the helper is
+      writing, and the self-disarm parks a medium the image is not even on.
+- [!] the rpi4's SD card holds a *bench*-profile image acting as its rescue, so
+      it carries a 900-second self-return watchdog and reboots itself every 15
+      minutes when the board is sitting on it. Rewrite it with a rescue-role
+      image; needs a build and a card.
+- [ ] the rpi3 gets its second system, on the same card. Decided 2026-08-24 and
+      written up in `wk help hardware` ("why the three Pis are arranged
+      differently") with the priority order it follows in CLAUDE.md: quality of
+      results first, durability second, fewest configurations third. The board's
+      Ethernet is a USB device, so its bench root belongs on the SD; its ROM
+      prefers the SD, so the rescue lives there too. Left to build, in order:
+      a rescue-role system for the first slot and a bench system for the second;
+      a slot-aware `wk sysimage write` (today it writes one whole system to one
+      whole device); stage-2 arming in `boot/pi-sd.sh` — `root=` plus the bench
+      kernel installed onto the shared boot partition — and the revert that a
+      stage-2 arming needs, since a kernel that cannot mount the armed root
+      panic-loops; and the BusyBox equivalents of the watchdog and self-disarm.
+- [ ] the rpi4 keeps two media and the rpi5 keeps its NVMe host install, and
+      neither is changed for uniformity's sake: separate media are separate
+      failure domains and the rpi4's fall-through is enforced by firmware, both
+      of which outrank the third priority. What is shared across all three is
+      the code above the medium — one image model, one write path, one arming
+      interface, one set of refusals — which is where "don't make me test on
+      three boards" is actually paid for.
+- [V] the tailnet overlay for a buildroot image assembles from the same pin as
+      everything else: `image/buildroot/tailnet-overlay.sh <arch> <staging>`
+      reads the version and sha256 from
+      `meta-wk-tailnet/.../tailscale-release.inc`, verifies the tarball before
+      unpacking it, and installs the *same* `wk-tailnet-join` file the Yocto
+      images run — three installers (image recipe, buildroot overlay, `wk pi
+      setup`), one pin, one join script. Checked for `arm`: 32-bit ARM,
+      statically linked, 64 MB, plus an `S99tailscale` for BusyBox init, which
+      is what that image has instead of systemd units. It carries no credential:
+      the key and the fleet name arrive with the card.
+- [ ] **wpe-2.38 for the rpi3 builds.** It is a *buildroot* image and not a
+      Yocto one, which is itself part of the confusion: `wpe-2.38` carries no
+      `Tools/yocto` (the earliest downstream branch that does is `wpe-2.42`),
+      and what matches the board is
+      `WebPlatformForEmbedded/buildroot`'s `raspberrypi3_wpe_2_38_cog_defconfig`
+      — buildroot 2020.02, WPE 2.38 + cog on weston, cortex-a53 32-bit, kernel
+      `rpi-5.15.y`, dropbear, BusyBox init, genimage → `sdcard.img`. Building
+      now in an `ubuntu:20.04` container in this Mac's podman VM (`-j6`: 19 GB
+      of RAM against ~2 GB per WPE compile), tree and downloads under
+      `/var/lib/wk/cache/buildroot`, which `lib/store.sh` already reserves and
+      `targets/container.sh` already exports `BR2_DL_DIR` for. Deliberately a
+      scouting run outside `wk`: buildroot 2020.02 on a modern host was the
+      unknown, and the lane should be written around what actually works. What
+      it found, and the reason the run was worth making: the toolchain builds
+      fine (host-gcc-final 9.2.0), but **host-python-2.7.17 cannot build on an
+      arm64 host** — its bundled 2013-era libffi's `aarch64/sysv.S` no longer
+      assembles, and the build dies at `sharedmods`. An architecture problem and
+      not an old-distribution one: on x86_64 that file is never compiled, which
+      is why this tree has always built on moose. Fixed in
+      `image/buildroot/external/` — a BR2_EXTERNAL tree this repo owns rather
+      than a patch against somebody else's vendor branch, since buildroot
+      already gives the *target* python `--with-system-ffi` and ships a
+      host-libffi package and simply never joins the two for the host build.
+- [V] an image without systemd does not get systemd units written into it and
+      called a watchdog. `install_units` reads the init out of the rootfs
+      (`/lib/systemd/systemd` or `/usr/lib/systemd/systemd`, via debugfs) and
+      refuses rather than filling `/etc/systemd/system` on an image where
+      nothing will ever start them — which would report a board as carrying a
+      self-return watchdog it does not have, and the watchdog exists precisely
+      for the run nobody is watching. The rpi3's WPE 2.38 image is the first
+      one whose answer is "no": buildroot, BusyBox init.
+- [ ] the BusyBox half of the fleet integration — S-script equivalents of the
+      self-return watchdog and the self-disarm. Deliberately not written yet:
+      on the rpi3 there is nothing for a self-disarm to disarm until its card
+      has a second root slot, and a watchdog with nowhere to return to is a
+      reboot loop rather than a safety net. It becomes real with the two-slot
+      card (docs/HANDOFF-boot.md, "The rpi3").
+- [V] a base image is never mistaken for a bench system (2026-08-24). Every
+      image wk writes carries `/etc/wk-image`, so `b_probe` calling anything
+      with a marker `bench <id>` meant a board that had fallen back to the
+      medium it is never armed from — an unarmed stick, a stick that would not
+      boot, or the rpi3, which has only ever had one medium — reported bench
+      mode and `wk pi bench` measured it. The evidence that settles it was
+      already declared and simply never asked for: `MACH_ROOT` is the root
+      device that is never written to, `MACH_DEVICE` is the medium systems are
+      written onto, and `b_system_kind` compares the running root against both.
+      `wk pi bench` refuses a base image by name, `wk boot --status` says "base
+      image" rather than "bench mode", and `wk status`'s fleet line says "not a
+      bench system". A board on its base image is also *armable* again — that
+      state used to match `bench*` and be refused with "already in bench mode".
+- [V] a rescue image gets no self-return watchdog and no self-disarm
+      (`IMG_ROLE=rescue`, image/profiles.sh; recorded as `role=` in
+      `/etc/wk-image`). Both units exist to hand a machine *back* to what it
+      falls back to, and a rescue image is that thing — so on one, the watchdog
+      is a 15-minute reboot in the middle of whatever card the helper is
+      writing, and the self-disarm parks a medium the image is not even on.
+- [!] the rpi4's SD card holds a *bench*-profile image acting as its rescue, so
+      it carries a 900-second self-return watchdog and reboots itself every 15
+      minutes when the board is sitting on it. Rewrite it with a rescue-role
+      image; needs a build and a card.
+- [ ] the rpi3 has no bench system at all and therefore cannot be measured: one
+      medium, so `MACH_ROOT` is on `MACH_DEVICE` and every root on that card is
+      the base image. Which shape fixes it turns on a fact nobody here has
+      checked — this repo assumed the USB-boot OTP fuse is unburned, and the
+      owner says it is already blown (2026-08-24; automatic on a 3B+).
+      `cat /proc/device-tree/model` and `vcgencmd otp_dump | grep '^17:'` settle
+      it on a board that is up. Blown → a stick is the bench medium and
+      `boot/pi-usb.sh` is most of the answer, minding that the Pi 3's ROM tries
+      the SD *before* USB. Unblown → a second root partition on the card. Either
+      way `boot/pi-sd.sh` needs an arming model; today it refuses rather than
+      pretends.
 - [V] no fleet probe can outlive its ceiling, and one that hits it still gets a
       line (2026-08-24). `wk status` hung outright: the rpi4 is reached through
       `tailnet-bridge-generic`, and options on an ssh command line do not reach
@@ -3379,8 +3903,9 @@ in the file because each one already cost a debugging session.
 | the guest desktop is visible after a reboot | three independent things hiding it -- screen saver, display sleep, and the screen *lock* -- where disabling any two is not enough |
 | `WK_TARGET=vm wk gc` runs at all | cmd/gc sourcing a driver without lib/target.sh (`wk_state_dir: command not found`, verified 2026-08-19) |
 | `wk selftest --section <typo>` fails | the runner exiting 0 having run nothing -- the silent pass the plan's own preamble forbids |
-| no `Host wk-<name>` alias for a container workspace | a fictional `HostName localhost` entry pointing zed at the host's own filesystem -- containers have no sshd |
-| `--zed` on a container workspace is refused on a macOS host | "zed is not installed" from inside the podman VM, about a Mac that has it -- and, behind that, an editor opened on an alias only the VM can resolve |
+| a container workspace's `Host wk-<name>` alias is a ProxyCommand, not a hostname | the fictional `HostName localhost` it used to carry, pointing zed at the host's own filesystem -- a container has no interface and no address, so any hostname there is a guess |
+| `wk zed` refuses inside a workspace | "zed is not installed" from a machine where it cannot be installed -- the same words the host prints when Zed really is missing |
+| `wk status` names each machine once, and every name is a machine | two processes assembling one listing and disagreeing about what this machine is called (`hostname` in the podman VM is `localhost`), and a *target* name arriving where a machine name belongs -- which grew a machine called "container" holding the VM's own facts |
 | `wk status` with the podman machine stopped leaves it stopped | a read-only report booting a VM as a side effect |
 | a workspace's `~/.ssh/id_*` are symlinks, not files | a copied deploy key: one the push switch cannot take back, and one that survives a key rotation as a dead key |
 | `origin` is `WebKit/WebKit` in every target's checkout | the remote build machine pointing origin at the box's own shared clone, so `git log origin/main` answered for that box's last fetch |

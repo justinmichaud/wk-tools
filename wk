@@ -29,6 +29,12 @@ workspaces
                             --no-wait returns as soon as it is under way
   ls                        list workspaces
   enter <name> [--zed|cmd]  interactive shell (GPU/desktop integration on Linux)
+  zed <name>                open its checkout in Zed, whatever it takes to get
+                            there (a container has no address: the route is the
+                            ssh protocol over `podman exec`)
+      --tools [<machine>|<name>]
+                            open a wk-tools copy instead -- this checkout, a
+                            machine's, or the one a workspace bind-mounts
   build <name> <config>     build, with derived job count and nice level
       --detach              run it on the machine that builds and return; the
                             build survives this connection going away
@@ -38,6 +44,11 @@ workspaces
     --wait [--timeout S]    block while it is busy, then report once -- instead
                             of polling a pid in a loop, which is not a fact this
                             end can know for a build driven over ssh
+    --json                  the same listing as one document -- and the one every
+                            view here is drawn from, so they cannot disagree
+    --web [--port N]        serve it as a page, open a browser, and keep it
+        [--interval S]      current while it is open (127.0.0.1 only)
+    --html [file]           write that page once, without serving anything
   logs <name> [-f|--all]    build log, errors first
   run <name> [--config C] [--lldb] [args]   run jsc from the workspace build
   gui <name> [url]          MiniBrowser in the seat, launched as perf runs do
@@ -66,8 +77,14 @@ workspaces
   start                     bring them all back
 
 sources and disk
-  sync [--all|--target <t>] fetch all upstreams, publish a new base snapshot
-                            (--target: refresh a machine's tooling and mirror)
+  sync --tools              refresh the wk-tools copy on every machine (the
+                            podman VM, each build box, each running guest; a
+                            peer workstation pulls its own)
+  sync [<workspace>]        fetch every remote into the mirror, publish a base
+                            snapshot, then fetch in every workspace -- from that
+                            mirror, so nothing crosses the network twice -- or
+                            in the one named. --target <t> refreshes a machine's
+                            tooling and its own mirror
   skills <sub>              status|diff|pull|push the shared, mutable skills
   key <sub>                 register|check the fork push keys (uses gh)
   sudo status|require       make root cost a password every time, here or on
@@ -256,6 +273,16 @@ is_targetless() {
     #
     # `ws_target` is safe to ask here: it is a file test per configured target
     # and starts nothing (lib/target.sh).
+    # `wk sync --tools` reaches every machine this workstation drives -- the
+    # podman VM, each build box, each running guest, and a peer that pulls its
+    # own. Forwarded into the VM it would run on the one machine that can see
+    # none of them, and would have refreshed the copy it is already running
+    # from and nothing else.
+    if [ "$1" = sync ]; then
+        local _a
+        for _a in "$@"; do [ "$_a" = --tools ] && return 0; done
+    fi
+
     if [ "$1" = bench ] && [ "${2:-}" = seed ] && [ -n "${3:-}" ]; then
         [ "$(ws_target "$3" 2>/dev/null)" = container ] || return 0
         return 1
@@ -363,6 +390,10 @@ is_lifecycle() {
 is_host_command() {
     case "$1" in
         setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|bridge|key|report|sudo|version|stop|start|disk|help|-h|--help) return 0 ;;
+        # zed is an editor on this machine. Every route it takes is one this
+        # machine has -- an ssh alias out here, or `podman exec` into the VM --
+        # and forwarded into the VM there is no Zed to run at all.
+        zed) return 0 ;;
         # gc, because what it reclaims is on two machines when the workstation is
         # a Mac: the container store inside the podman VM, and the image store
         # and the pmos build hosts' caches out here. Forwarded whole it pruned
@@ -540,6 +571,55 @@ machine_running() {
 # Not exec'd, unlike every other forward, so the two halves' exit codes can be
 # combined: this command promises a machine-readable status and a caller must
 # not be told about the containers alone.
+# The rendering half of `wk status`'s arguments, as assignments to eval.
+#
+# `wk status --html <path>` and `--web --port N` say where the output goes, and
+# on a macOS host the process that renders is this one rather than either half
+# that collects. Printed rather than assigned so the parse can shift freely.
+status_view_env() {
+    local mode=text out="" port="" interval=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --json) mode=json ;;
+            --web)  mode=web ;;
+            # The raw stream, which is what the halves speak to each other. Not
+            # a view, and useful for exactly one thing: seeing what a collector
+            # actually said when a listing looks wrong.
+            --records) mode=records ;;
+            --html) mode=html
+                    case "${2:-}" in -*|"") ;; *) out="$2"; shift ;; esac ;;
+            --port)      port="${2:-}"; shift ;;
+            --port=*)    port="${1#*=}" ;;
+            --interval)  interval="${2:-}"; shift ;;
+            --interval=*) interval="${1#*=}" ;;
+        esac
+        shift
+    done
+    printf 'WK_STATUS_MODE=%s\n' "$(sh_quote "$mode")"
+    printf 'WK_STATUS_HTML_OUT=%s\n' "$(sh_quote "$out")"
+    printf 'WK_STATUS_PORT=%s\n' "$(sh_quote "$port")"
+    printf 'WK_STATUS_INTERVAL=%s\n' "$(sh_quote "$interval")"
+}
+
+# Whether a listing command was asked about everything or about one workspace.
+# Flags and their values are not a subject; a bare word is.
+bare_subject() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --port|--interval|--timeout)
+                shift; [ $# -gt 0 ] && shift ;;
+            # --html takes an optional path, so only a non-flag word after it is
+            # its value rather than a workspace name.
+            --html)
+                shift
+                case "${1:-}" in -*|"") ;; *) shift ;; esac ;;
+            -*) shift ;;
+            *)  return 1 ;;
+        esac
+    done
+    return 0
+}
+
 bare_report() {
     local impl="$1" cmd="$2" t hosts='' rc worst=0
     shift 2
@@ -553,29 +633,75 @@ bare_report() {
         hosts="$hosts $t"
     done
 
+    # This machine's own name, for both halves: the container store is inside
+    # the podman VM, where `hostname` is the VM's and means nothing to anybody
+    # -- so the records it writes have to be told which machine they are about.
+    # WK_HOST_SELF says it is *this* machine rather than one being asked about,
+    # which is what earns the "this machine" note in the heading.
+    _self=$(wk_machine_name)
+
+    # `wk status` is assembled from two halves and rendered once. Both write
+    # *records* (one JSON object per line) into the same file, and the renderer
+    # merges them by machine name -- which is what lets this machine's guests and
+    # its containers appear under one heading although two processes found them,
+    # and what decides the column widths from the whole listing rather than from
+    # whichever half a group came from.
+    #
+    # It also means the halves no longer have to agree between themselves about
+    # who printed what: they cannot, being two processes, and the flag they used
+    # to pass for it is gone.
+    if [ "$cmd" = status ]; then
+        _recs=$(mktemp)
+        # The view the person asked for. Parsed here as well as in cmd/status
+        # because on this host *this* process is the one that renders -- the two
+        # halves only collect -- and it has to know where a page goes and which
+        # port to serve it on. A function, so the parse can shift its own
+        # arguments without disturbing the ones being handed to the halves.
+        eval "$(status_view_env ${@+"$@"})"
+        _mode="$WK_STATUS_MODE"
+        export WK_STATUS_HTML_OUT WK_STATUS_PORT WK_STATUS_INTERVAL
+
+        if machine_running; then
+            rc=0
+            ( WK_EXPECT_TREE=$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)
+              export WK_EXPECT_TREE
+              WK_ROW_LABEL="$_self" WK_HOST_SELF=1
+              # --no-devices, not --no-fleet: the boards are reached over ssh
+              # from out here and the VM can see none of them, but the machine
+              # facts that *are* in there -- the wk-tools every container mounts,
+              # the keys in that store -- are worth having.
+              forward_to_vm "$cmd" --records --no-devices ${@+"$@"} ) >> "$_recs" || rc=$?
+            _bump "$rc"
+        elif command -v podman >/dev/null 2>&1; then
+            warn "the podman machine '$WK_MACHINE' is stopped, so container workspaces are not included"
+            log  "  'wk start' to bring it up"
+        fi
+
+        if [ -n "$hosts" ]; then
+            rc=0
+            WK_TARGET="${hosts# }" WK_ROW_LABEL="$_self" WK_HOST_SELF=1 \
+                "$impl" --records ${@+"$@"} >> "$_recs" || rc=$?
+            _bump "$rc"
+        fi
+
+        status_render "$_mode" "$_recs"
+        rm -f "$_recs"
+        exit "$worst"
+    fi
+
     if [ -n "$hosts" ]; then
         rc=0; WK_TARGET="${hosts# }" "$impl" ${@+"$@"} || rc=$?
         _bump "$rc"
     fi
 
     if machine_running; then
-        # What the forwarded half compares its tooling against: this machine's
-        # tree, since this is where its copy is pushed from. Without it the
-        # podman VM compares itself with itself and calls a stale copy "in
-        # sync" -- true, and not the question being asked.
-        if [ "$cmd" = status ]; then
-            WK_EXPECT_TREE=$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)
-            export WK_EXPECT_TREE
-        fi
         # The forwarded half is the second half of one listing, so it prints
-        # rows and neither a header nor an empty-listing note. `wk status`
-        # needs no such flag: its rows carry no header, and its own
-        # "(no workspaces)" line is already conditional on the whole walk.
+        # rows and neither a header nor an empty-listing note.
         rc=0
         if { [ "$cmd" = ls ] || [ "$cmd" = remotes ]; } && [ -n "$hosts" ]; then
-            ( forward_to_vm "$cmd" --continued ${@+"$@"} ) || rc=$?
+            ( WK_ROW_LABEL="$_self"; forward_to_vm "$cmd" --continued ${@+"$@"} ) || rc=$?
         else
-            ( forward_to_vm "$cmd" ${@+"$@"} ) || rc=$?
+            ( WK_ROW_LABEL="$_self"; forward_to_vm "$cmd" ${@+"$@"} ) || rc=$?
         fi
         _bump "$rc"
     elif command -v podman >/dev/null 2>&1; then
@@ -587,6 +713,7 @@ bare_report() {
 
 forward_to_vm() {
     require podman "podman is required; install the official pkg from podman.io"
+    local _self_name; _self_name=$(wk_machine_name)
 
     podman machine inspect "$WK_MACHINE" >/dev/null 2>&1 \
         || die "podman machine '$WK_MACHINE' does not exist -- run ./setup first"
@@ -607,10 +734,20 @@ forward_to_vm() {
         podman machine start "$WK_MACHINE" >&2
     fi
 
+    # Everything the VM reports is about *this* machine: it holds this machine's
+    # container store and nothing else, and its own hostname ("localhost") means
+    # nothing to anybody out here. So it is told what to call itself, unless the
+    # caller has already said (bare_report does, for the half it prints first).
+    #
+    # Without this, `wk status <a container workspace>` -- which forwards whole,
+    # arguments and all -- headed this machine's own workspace `localhost`.
+    : "${WK_ROW_LABEL:=$_self_name}"
+    : "${WK_HOST_SELF:=1}"
+
     # -- separates our args from ssh's. WK_IN_VM stops the VM-side wk from
     # trying to forward again if anything is ever misconfigured.
     exec podman machine ssh "$WK_MACHINE" -- \
-        "WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }${WK_EXPECT_TREE:+WK_EXPECT_TREE=$(sh_quote "${WK_EXPECT_TREE:-}") }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
+        "WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }${WK_EXPECT_TREE:+WK_EXPECT_TREE=$(sh_quote "${WK_EXPECT_TREE:-}") }${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }${WK_HOST_SELF:+WK_HOST_SELF=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
 }
 
 main() {
@@ -725,36 +862,67 @@ main() {
     which runs MiniBrowser on the guest's own desktop with the real GPU."
             fi
 
-            # --zed is the same shape of impossibility, and it was failing the
-            # long way round: forwarded into the VM, where it looked for
-            # /Applications/Zed.app and reported "zed is not installed" about a
-            # Mac that has it. Measured 2026-08-19 against a fresh container
-            # workspace -- the readiness gate held correctly, waited for
-            # creation to finish, and then said that.
+            # --zed is an editor on *this* machine, and the container it is
+            # being pointed at is inside the VM. So the two halves run where
+            # they belong: any workspace work is forwarded, and the launch
+            # happens out here, through cmd/zed -- which reaches into the
+            # container over `podman exec` (container/ssh-transport.sh) because
+            # a container has no network interface to reach it by.
             #
-            # It cannot work as it stands, for a second reason the message has
-            # to carry: the generated alias is written by whichever side ran
-            # `wk new`, and for a container on macOS that is the VM. So
-            # `wk-<name>` exists in the VM's ssh config and not in this
-            # machine's, and even a Zed launched here would have nothing to
-            # resolve -- the container is inside a Linux VM with no route in
-            # from the host.
+            # Forwarded whole, which is what this used to do, it looked for
+            # /Applications/Zed.app inside a Linux VM and reported "zed is not
+            # installed" about a Mac that has it. Measured 2026-08-19; the
+            # refusal that replaced it is gone now that there is a route.
             case " $* " in
                 *" --zed "*)
-                    die "a container workspace on a macOS host cannot be opened in Zed: Zed runs
-    here, the container runs inside the podman VM, and there is no ssh route
-    from this machine into it (the generated 'wk-<name>' alias is written in
-    the VM, not here).
-    Use a macOS guest -- 'wk vm new <name>', then 'wk enter <name> --zed' --
-    or a remote target, both of which Zed can reach directly." ;;
+                    _zargs=(); _zname=""
+                    for _a in "$@"; do
+                        case "$_a" in
+                            --zed) continue ;;
+                            -*) ;;
+                            *) [ -n "$_zname" ] || _zname="$_a" ;;
+                        esac
+                        _zargs+=("$_a")
+                    done
+                    [ -n "$_zname" ] || die "'wk $cmd --zed' needs a workspace name"
+                    # A subshell, because forward_to_vm ends in exec: without
+                    # one, the creation would replace this process and the
+                    # editor would never be opened.
+                    if [ "$cmd" = new ]; then
+                        ( forward_to_vm "$cmd" ${_zargs[@]+"${_zargs[@]}"} ) \
+                            || die "creating '$_zname' failed, so nothing was opened.
+    What it managed to say is above; a re-run destroys the rubble and retries."
+                    fi
+                    exec "$WK_ROOT/cmd/zed" "$_zname" ;;
             esac
+
+            # `wk rm` of a container workspace: the workspace is destroyed in
+            # there, and the ssh alias that reached it is out here (cmd/zed
+            # writes it on the machine the editor runs on, which is the only
+            # machine that can). The forwarded half would remove an entry from
+            # the VM's own ~/.ssh, where nothing reads one -- so this end takes
+            # its own, after the far side has said the workspace is gone.
+            if [ "$cmd" = rm ] && [ -n "${1:-}" ]; then
+                case "${1:-}" in -*) ;; *) _rmname="$1" ;; esac
+                ( forward_to_vm "$cmd" "$@" ) || exit $?
+                [ -z "${_rmname:-}" ] || ssh_alias_remove "$_rmname"
+                exit 0
+            fi
 
             # Before the readonly-report shortcut below, which would answer
             # for the containers alone and exit.
-            if [ $# -eq 0 ]; then
-                case "$cmd" in
-                    status|ls) bare_report "$impl" "$cmd" ;;
-                esac
+            #
+            # "Bare" is about the *subject*, not the argument count: `wk status`
+            # and `wk status --json` are both "everything there is", and only a
+            # workspace name makes it something narrower. Counting arguments --
+            # which is what this did -- sent `wk status --json` down the
+            # forward-it-whole path, so it answered for this machine's
+            # containers and silently left out its guests and every build box.
+            if [ "$cmd" = status ] && bare_subject "$@"; then
+                bare_report "$impl" "$cmd" "$@"
+            fi
+            if [ $# -eq 0 ] && [ "$cmd" = ls ]; then
+                bare_report "$impl" "$cmd"
             fi
             # `wk remotes` is the same shape of report -- every workspace there
             # is -- and it keeps that meaning with its one flag, which is why it

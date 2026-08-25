@@ -1,0 +1,67 @@
+where a system image comes from, and how it reaches a card
+
+wk help images -- a bench system is bytes a workspace produced. It is not an
+artifact this repository stores, catalogues or imports, and that is a decision
+rather than an omission (2026-08-24).
+
+THE MODEL
+
+  A workspace builds an image. `wk sysimage build <profile>` drives a build in a
+  workspace -- bitbake for the Yocto profiles, buildroot for the WPE ones -- and
+  what comes out is a file in that workspace's build tree. That is the whole of
+  what an image is.
+
+  wk *detects* one rather than recording it. "Has this workspace built an image,
+  and when" is answered by looking at the workspace, the same way every other
+  fact in wk is answered: read it now, from the thing itself. Nothing is written
+  down that could disagree with it later.
+
+  Writing a card streams those bytes to the machine holding the reader, and then
+  edits the card in place. Nothing is copied into a store on the way, nothing is
+  hashed into a catalogue, and no step "publishes" anything.
+
+WHY NOT A STORE
+
+  An image store buys a name for something that already has one -- the workspace
+  that built it -- and charges for it: a copy of every image, a manifest that is
+  a second statement of what the image is, an import step that can half-finish,
+  rubble to clean up when it does, and a compressed copy plus a block map that
+  have to be re-derived whenever anything edits the image. Every one of those is
+  a fact kept in two places, which is the shape docs/HANDOFF-workspace-state.md
+  exists to refuse.
+
+  It also puts credentials in the wrong place. The fleet integration writes a
+  driving ssh key and (now) a tailnet auth key; done at import, those live inside
+  a stored artifact that gets compressed, copied between machines and kept after
+  it is superseded. Done on the card, they exist on exactly one disk, for one
+  boot in the auth key's case.
+
+  This does not overturn the artifact-store carve-out in CLAUDE.md. A downloaded
+  distro base keyed by its checksum, ccache, sstate, buildroot's dl -- those are
+  re-fetchable or re-derivable inputs, and keeping them is what makes a rebuild
+  cheap. A *built image* is an output, and its home is the workspace that built
+  it until it is on a card.
+
+WHAT IDENTITY MEANS WITHOUT A STORE
+
+  A board still has to be able to say what it is running -- `b_probe` reads
+  `/etc/wk-image` and every verb here depends on it. Without a store there is no
+  catalogue id to write there, so the marker is written *at write time* from what
+  is actually being written: the profile, the workspace, the build time, and the
+  sha256 of the bytes as they go past. That is a stronger identity than a store
+  id, because it names the content rather than the slot in a catalogue, and it
+  costs nothing -- the writer is already reading every byte.
+
+WHERE THE WORK HAPPENS, AND WHY THE DRIVING MACHINE NEEDS NO TOOLS
+
+  Every edit an image needs -- the identity marker, the driving ssh key, a unique
+  disk identity, the root retarget, the kernel command line, the tailnet key and
+  name -- is offset-addressed work with `sfdisk`, `debugfs` and `mtools`. Those
+  are Linux tools, and this fleet is driven from a Mac as often as not.
+
+  So they run where the card is. The machine holding the reader has them (checked
+  2026-08-24 on the rpi5: sfdisk, debugfs, mcopy, bmaptool, e2fsck, zstd, xz),
+  it is the machine that must be reachable for the write to happen at all, and
+  editing the card rather than the image means the edits apply to the thing that
+  will actually boot. A macOS driver needs none of it; a workspace's container
+  produces the bytes and the reader consumes them.

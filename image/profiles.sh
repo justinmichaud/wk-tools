@@ -30,9 +30,24 @@
 #   IMG_BASE_SHA256  (distro) ... and pinned by content, not by name
 #   IMG_BASE_KIND    (distro) which seeding dialect the base speaks
 #   IMG_HOSTNAME     what it calls itself once booted
+#   IMG_ROLE         what this image is *for*: `bench` (the default) or
+#                    `rescue`. A rescue image is the resilient helper a board
+#                    falls back to on the medium wk never writes -- its job is
+#                    to keep the board reachable and to let another system be
+#                    written and recovered, and it is never measured. The
+#                    difference is not cosmetic: a rescue image gets no
+#                    self-return watchdog and no self-disarm, because both exist
+#                    to hand a machine *back* to the thing it is already sitting
+#                    on -- and a 15-minute reboot in the middle of writing a
+#                    card is the helper sabotaging the one job it has.
+#                    Which system is running is answered by evidence rather than
+#                    by this field (b_system_kind, boot/machines.sh): the medium
+#                    the running root is on. This is what the image says it is,
+#                    and it is recorded in /etc/wk-image so a board can be asked.
 #   IMG_WATCHDOG     seconds before the self-return reboot, unless kept. Every
 #                    profile that can be *booted as a bench system* wants one --
-#                    it is what hands the machine back when a run wedges it.
+#                    it is what hands the machine back when a run wedges it. A
+#                    rescue image wants none, and says so with IMG_ROLE.
 #   IMG_GROW         (distro) whether cloud-init may grow the root partition
 #   IMG_PACKAGES     (distro) packages installed on first boot (needs egress)
 #   IMG_NETWORK      (distro) how the image gets on the network:
@@ -152,6 +167,7 @@ image_profile_load() {
     IMG_BUILDER=distro
     IMG_MACHINE=""; IMG_ARCH=""; IMG_BASE_KIND=""; IMG_BASE_URL=""
     IMG_BASE_SHA256=""; IMG_HOSTNAME=""; IMG_WATCHDOG=""; IMG_GROW=""
+    IMG_ROLE=bench
     IMG_PACKAGES=""; IMG_NETWORK=""; IMG_LABEL_ROOT=""; IMG_LABEL_BOOT=""
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
     YOC_CHROMIUM=1; YOC_REMOTE=origin; YOC_LOCAL_LAYER=1

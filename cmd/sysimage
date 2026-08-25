@@ -133,6 +133,7 @@ id=$ID
 profile=$IMG_PROFILE
 machine=$IMG_MACHINE
 builder=${IMG_BUILDER:-distro}
+role=${IMG_ROLE:-bench}
 base=$([ -n "${IMG_BASE_URL:-}" ] && basename "$IMG_BASE_URL" || printf '%s' "${YOC_TARGET:-none}")
 built=${BUILT:-${built:-unknown}}
 built_by=$(hostname)
@@ -784,6 +785,48 @@ install_units() {
     if machine_load "${IMG_MACHINE:-}" 2>/dev/null && [ -n "${MACH_DRIVER:-}" ]; then
         load_driver "$MACH_DRIVER" 2>/dev/null || true
     fi
+    # A rescue image gets none of the units below, and that is the whole
+    # difference between a base image and a bench system on the wk side. Every
+    # one of them exists to hand a machine *back*: the watchdog reboots it out
+    # of the system somebody armed, the self-disarm parks the arming medium so
+    # the next boot falls through to the rescue role, and the diagnostics dump
+    # is for reading afterwards off a bench system that wedged. A rescue image
+    # is what all three fall back *to* -- so the watchdog would reboot the
+    # helper every IMG_WATCHDOG seconds for no reason, in the middle of whatever
+    # card it was writing, and the self-disarm would park a medium this image is
+    # not even on. Its job is to stay up, stay reachable, and write and recover
+    # other systems.
+    if [ "${IMG_ROLE:-bench}" = rescue ]; then
+        info "$IMG_PROFILE is a rescue image: no self-return watchdog, no self-disarm"
+        log  "  it is what a board falls back to, so there is nothing to hand it back to"
+        return 0
+    fi
+
+    # Which init this image actually runs, read out of the image rather than
+    # assumed. Every unit below is a systemd unit, and an image without systemd
+    # would take all of them without complaint: the files land in
+    # /etc/systemd/system, nothing ever starts them, and `wk sysimage` reports
+    # that it installed a self-return watchdog onto a board that has none. A
+    # board that reports itself protected and is not is worse than one that
+    # says it is not -- the whole point of the watchdog is the run nobody is
+    # watching.
+    #
+    # This is not hypothetical: the rpi3's WPE 2.38 image is buildroot with
+    # BusyBox init (docs/TESTING.md §7), so it is the first image here whose
+    # answer is "no". What it needs instead is S-scripts, and they are not
+    # written yet -- there is nothing for a self-disarm to disarm on that board
+    # until its card has a second root slot, and a watchdog with nowhere to
+    # return to is a reboot loop. So this refuses to pretend, and says which
+    # half is missing.
+    if ! debugfs -R "stat /lib/systemd/systemd" "$DISK?offset=$roff" 2>/dev/null | grep -q '^Inode:' \
+       && ! debugfs -R "stat /usr/lib/systemd/systemd" "$DISK?offset=$roff" 2>/dev/null | grep -q '^Inode:'; then
+        warn "$IMG_PROFILE has no systemd, so the self-return watchdog and the self-disarm
+  were NOT installed. This image carries its identity marker and the driving key
+  and nothing else: a run that wedges the board will not hand it back, and on a
+  medium-armed machine the medium stays armed until something disarms it."
+        return 0
+    fi
+
     # The .wants directory need not exist in a stock image.
     debugfs -w -R "mkdir /etc/systemd/system/multi-user.target.wants" \
         "$DISK?offset=$roff" >/dev/null 2>&1 || true
@@ -793,7 +836,6 @@ install_units() {
     # TimeoutStartSec=infinity is load-bearing: systemd's default 90 s start
     # timeout kills a Type=oneshot that sleeps longer than that before it can
     # ever fire.
-    #
     # Skipped rather than written empty when a profile names no watchdog: the
     # unit would be `sleep ` with no argument, which fails on every boot and
     # looks in the journal exactly like a watchdog that ran.
@@ -1196,17 +1238,161 @@ _root_line() {
     fi
 }
 
+# Writing an image that is not in a store, because there is no store.
+#
+# `--from` is the whole of the model in `wk help images`: a workspace built an
+# image, the bytes are wherever it put them, and this moves them onto a card and
+# then edits the card. Nothing is imported, catalogued or hashed into a
+# directory of artifacts on the way.
+#
+# Two spellings of where the bytes are, and the second is not a convenience:
+#
+#   --from /path                a file this machine can read
+#   --from vm:/path             a file inside this machine's podman VM, which is
+#                               where a container workspace's build output lives
+#                               and which a macOS driver cannot open directly.
+#
+# The identity written onto the card is derived here rather than looked up:
+# `<name>-<first 12 of the sha256>`. That names the content instead of a slot in
+# a catalogue, which is what makes a catalogue unnecessary -- and the hash is
+# read off the source before the write, so the marker describes the bytes that
+# actually went on.
+_from_reader() { # <spec> -- prints a command that emits the image on stdout
+    case "$1" in
+        vm:*) is_macos || die "--from vm:<path> is for reading a container workspace's
+    output out of this machine's podman VM, and this is not a macOS host. Give a
+    plain path."
+              printf 'podman machine ssh %s -- sudo cat %s' \
+                  "${WK_MACHINE:-wk}" "$(sh_quote "${1#vm:}")" ;;
+        *)    [ -r "$1" ] || die "no image at $1
+    An image lives where the workspace that built it put it (wk help images). If
+    that is inside this machine's podman VM, say so: --from vm:$1"
+              printf 'cat %s' "$(sh_quote "$1")" ;;
+    esac
+}
+
+cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role>
+    local from="$1" spec="$2" dry="$3" grow="$4" profile="$5" role="$6"
+    local reader sha size marker
+
+    reader=$(_from_reader "$from")
+
+    disk_parse "$spec"
+    machine_load "$DISK_MACHINE" || die "unknown machine '$DISK_MACHINE'
+    machines:
+$(machine_list | sed 's/^/      /')"
+    m_reachable || die "$DISK_MACHINE is not reachable over ssh, and the disk is attached to it."
+    [ -n "$DISK_DEV" ] || { log "disks attached to $DISK_MACHINE:"; disk_list
+        die "say which one: --disk $DISK_MACHINE:<device>"; }
+
+    # Read once for the size and the hash, before anything is written: the
+    # marker has to describe the bytes that go on the card, and a card that
+    # cannot fit them should be refused before it is erased.
+    info "reading $from"
+    sha=$(eval "$reader" | shasum -a 256 2>/dev/null | cut -d' ' -f1)
+    [ -n "$sha" ] || die "could not read the image through: $reader"
+    size=$(eval "$reader" | wc -c | tr -d ' ')
+    disk_refuse_unless_safe "$DISK_DEV" "$size"
+
+    marker="id=$(basename "${from#vm:}" .img)-$(printf '%s' "$sha" | cut -c1-12)
+profile=${profile:-unknown}
+machine=${IMG_MACHINE:-}
+role=$role
+built_by=$(hostname)
+wk_tools=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
+source=$from
+sha256=$sha"
+
+    if [ -n "$dry" ]; then
+        cat >&2 <<EOF
+would write
+  image     $from ($(human_bytes "$size"))
+  identity  $(printf '%s' "$marker" | sed -n 's/^id=//p')
+  onto      $DISK_DEV attached to $DISK_MACHINE
+  then      unique disk identity, fleet integration (marker + driving key),
+            tailnet identity, $([ "$grow" = 1 ] && echo "grow to fill" || echo "NO grow -- the rest of the card is left for a second system")
+EOF
+        log "dry run -- nothing was written."
+        return 0
+    fi
+
+    warn "this ERASES $DISK_DEV on $DISK_MACHINE, whatever is on it now."
+    confirm "write $from onto $DISK_DEV attached to $DISK_MACHINE?" || die "not written"
+
+    disk_unmount "$DISK_DEV"
+    eval "$reader" | disk_write_stream "$DISK_DEV"
+    disk_unique_identity "$DISK_DEV" "$(_card_root_spec "$DISK_DEV")"
+    disk_install_fleet "$DISK_DEV" "$marker" "$(driving_key)"
+    disk_seed_tailnet "$DISK_DEV" "$(_tailnet_name_for "${IMG_MACHINE:-}")"
+
+    # Growing is opt-in here and that is the point. A card grown to fill has no
+    # room for a second system, and a board with one system has no rescue -- so
+    # it cannot install anything without a person, which is the state this whole
+    # design exists to leave behind (wk help hardware).
+    if [ "$grow" = 1 ]; then
+        disk_grow "$DISK_DEV"
+    else
+        log "  the root partition was left at its built size, so the rest of the card"
+        log "  is free for a second system. --grow fills it instead."
+    fi
+    disk_eject "$DISK_DEV"
+    info "$DISK_DEV on $DISK_MACHINE now holds $(printf '%s' "$marker" | sed -n 's/^id=//p')"
+}
+
+# The `root=` the freshly written card's own cmdline names, read off the card.
+#
+# `disk_unique_identity` stamps a new disk identity and rewrites every reference
+# to the old one, so it has to be told what the old one was. With a store that
+# came from the manifest; without one it comes from the only place that is
+# certainly right -- the boot partition that was just written.
+_card_root_spec() { # <device>
+    local p1; p1=$(disk_part "$1" 1)
+    m_ssh "set -e
+        m=\$(mktemp -d)
+        sudo mount -o ro $(sh_quote "$p1") \$m
+        for f in \$m/cmdline.txt \$m/current/cmdline.txt; do
+            [ -f \"\$f\" ] || continue
+            tr ' ' '\n' < \"\$f\" | sed -n 's/^root=//p' | head -1
+            break
+        done
+        sudo umount \$m; rmdir \$m" 2>/dev/null | tr -d '\r' | head -1
+}
+
+# The fleet's name for a machine, without clobbering the MACH_* of the machine
+# every remote command here is talking to.
+_tailnet_name_for() {
+    [ -n "${1:-}" ] || return 0
+    ( machine_load "$1" >/dev/null 2>&1 && printf '%s' "${MACH_SSH:-}" ) || true
+}
+
 cmd_write() {
-    local id="" spec="" dry="" grow=1
+    local id="" spec="" dry="" grow=1 grow_set="" from="" profile="" role=bench
     while [ $# -gt 0 ]; do
         case "$1" in
             --disk)    spec="${2:-}"; [ -n "$spec" ] || die "--disk needs <machine>:<device>"; shift 2 ;;
+            --from)    from="${2:-}"; [ -n "$from" ] || die "--from needs a path, or vm:<path>"; shift 2 ;;
+            --profile) profile="${2:-}"; shift 2 ;;
+            --rescue)  role=rescue; shift ;;
             --dry-run) dry=1; shift ;;
-            --no-grow) grow=0; shift ;;
+            --grow)    grow=1; grow_set=1; shift ;;
+            --no-grow) grow=0; grow_set=1; shift ;;
             -*) die "unknown option: $1" ;;
             *)  [ -z "$id" ] || die "unexpected argument: $1"; id="$1"; shift ;;
         esac
     done
+
+    # A store-free write is a different path from top to bottom: no manifest to
+    # gate on, no id to look up, and the edits happen on the card afterwards.
+    if [ -n "$from" ]; then
+        [ -z "$id" ] || die "give --from <path> or an image id, not both"
+        [ -n "$spec" ] || die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>"
+        # Default for a store-free write: leave the rest of the card alone, so
+        # there is room for the second system that makes the board able to
+        # provision itself. The id path keeps its grow-to-fill default.
+        [ -n "$grow_set" ] || grow=0
+        cmd_write_from "$from" "$spec" "$dry" "$grow" "$profile" "$role"
+        return $?
+    fi
 
     [ -n "$id" ] || die "usage: wk sysimage write <id> --disk <machine>:<device>
     images:
@@ -1258,8 +1444,7 @@ $(machine_list | sed 's/^/      /')"
     fi
     image_check_root "$id" "$DISK_DEV" "$DISK_MACHINE"
 
-    local method mounted
-    method=$(disk_method "$id")
+    local mounted
     mounted=$(disk_mounted "$DISK_DEV")
 
     if [ -n "$dry" ]; then
@@ -1272,7 +1457,7 @@ would write
       || printf 'not checked -- this image is not %s'"'"'s, so its firmware is not the one that will read it' "$DISK_MACHINE")
   onto      $DISK_DEV attached to $DISK_MACHINE ($(m_ssh "lsblk -dno SIZE,TRAN,MODEL $DISK_DEV" 2>/dev/null | tr -s ' '))
   mounted   ${mounted:-nothing}
-  method    $([ "$method" = bmap ] && echo "bmaptool -- sends $(human_bytes "$(file_bytes "$(image_wic "$id")")") compressed, writes mapped blocks only, checksums each" || echo "zstd stream into dd, then read back and compare sha256")
+  method    zstd stream through the card helper, then read back and compare sha256
   grow      $([ "$grow" = 1 ] && echo "yes, partition 2 to fill the disk" || echo "no (--no-grow)")
 EOF
         [ "$DISK_DEV" = "${MACH_DEVICE:-}" ] && log "  note      $DISK_MACHINE is configured to boot from this disk (wk boot $DISK_MACHINE)"
@@ -1287,12 +1472,8 @@ EOF
     confirm "write $id onto $DISK_DEV attached to $DISK_MACHINE?" || die "not written"
 
     disk_unmount "$DISK_DEV"
-    if [ "$method" = bmap ]; then
-        disk_write_bmap "$id" "$DISK_DEV"
-    else
-        disk_write_dd "$(image_disk "$id")" "$DISK_DEV"
-        [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_dd "$(image_disk "$id")" "$DISK_DEV"
-    fi
+    disk_write_dd "$(image_disk "$id")" "$DISK_DEV"
+    [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_dd "$(image_disk "$id")" "$DISK_DEV"
     disk_unique_identity "$DISK_DEV" "$(image_root_spec "$id")"
 
     # The name this card's board answers to on the tailnet, which is the fleet's
@@ -1300,10 +1481,7 @@ EOF
     # which is only whoever holds the reader. Read in a subshell on purpose:
     # machine_load would otherwise overwrite the MACH_* of the machine every
     # remote command in this function is talking to.
-    local tn_name=""
-    [ -z "$img_machine" ] \
-        || tn_name=$( machine_load "$img_machine" >/dev/null 2>&1 && printf '%s' "${MACH_SSH:-}" )
-    disk_seed_tailnet "$DISK_DEV" "$tn_name"
+    disk_seed_tailnet "$DISK_DEV" "$(_tailnet_name_for "$img_machine")"
 
     [ "$grow" = 1 ] && disk_grow "$DISK_DEV"
     disk_eject "$DISK_DEV"

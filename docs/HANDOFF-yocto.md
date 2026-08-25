@@ -63,9 +63,14 @@ WebKit against the target's own SDK (3736/3736, `libWPEWebKit-1.1.so`).
    of CPU; a macOS VM workspace has no store-backed Yocto cache). The podman VM
    on macOS *is* a container target, so it should work, subject to the VM's disk
    being big enough.
-7. **The rpi3 targets** — `downstream-yocto-wpe-2.48-rpi3-32` and `-64` are
-   declared in `image/profiles.sh` and neither has been built; the board is
-   unprovisioned and off.
+7. **The rpi3 targets** — `downstream-yocto-wpe-2.48-rpi3-32` **has** been
+   built (2026-08-22, on moose:
+   `downstream-yocto-wpe-2.48-rpi3-32-20260822T205734Z`, 3.3 GB) and written to
+   the board's SD card; `-64` has not. This item said the opposite until
+   2026-08-24, and the correction matters for more than tidiness: that image is
+   the board's **base image**, the only system on its only medium, so the rpi3
+   has no bench system at all and `wk pi bench rpi3` now refuses it by design
+   (docs/TESTING.md §7). The board is off.
 
 ## Constraints and traps that bind this work
 

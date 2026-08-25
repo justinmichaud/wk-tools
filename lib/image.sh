@@ -38,6 +38,45 @@ _image_root() {
         printf '%s' "$WK_STORE"
     fi
 }
+# Every place a build can leave an image, declared in one list.
+#
+# This exists because there is no image store (`wk help images`): output lives
+# wherever the builder that made it put it, so "where are the images" stops
+# being "one directory" and becomes a question with as many answers as there are
+# builders. A list that is *declared* is the only kind `wk gc` can search
+# exhaustively -- a search that guesses is a search that misses the newest
+# builder, and the thing it misses is tens of gigabytes.
+#
+# The rule that goes with it: **a new builder adds a line here in the same
+# change that adds the builder.** `wk selftest` checks that every IMG_BUILDER in
+# image/profiles.sh has one, so a builder without a location is a failure rather
+# than a slow leak.
+#
+# Paths, one per line, and it is not an error for one to be absent -- a machine
+# that has never run a given builder simply has none of its output.
+image_build_locations() {
+    # Each line is annotated with the builder it belongs to, and `wk selftest`
+    # reads those annotations: a builder in image/profiles.sh with no line here
+    # is a failure, not a slow leak.
+    # builder: buildroot -- one tree per profile, and the whole output/ of each
+    # is the expensive part (tens of GB), with the finished images in
+    # output/images.
+    printf '%s\n' "$WK_STORE/cache/buildroot"
+    # builder: yocto -- DL_DIR and sstate. The images themselves come out inside
+    # the build workspace, which is the workspace's own disk and is reclaimed by
+    # removing the workspace.
+    printf '%s\n' "$WK_STORE/cache/yocto"
+    # builder: distro, fetch -- downloaded bases, keyed by checksum. An input
+    # rather than an output, kept deliberately, and listed so that "everywhere a
+    # build leaves bytes" is one list rather than a memory.
+    printf '%s\n' "$(image_cache_dir)"
+    # builder: pmos -- the phone images' build output lives on the pmos build
+    # host, not here; gc_pmos prunes it there. Listed for completeness so that
+    # the builder is accounted for rather than silently absent.
+    # builder: none -- the retiring image store itself, while it still exists.
+    printf '%s\n' "$(image_store_dir)"
+}
+
 image_store_dir() { echo "$(_image_root)/images"; }
 
 # The compressed original and its block map, when the builder kept them. The

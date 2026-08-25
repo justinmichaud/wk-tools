@@ -60,6 +60,13 @@ b_media() {
     local id order
     case "${MODE:-}" in
         bench*) printf 'booted from its USB stick (system %s); NVMe untouched' "${MODE#bench }"; return 0 ;;
+        # Not expected on this board -- its MACH_ROOT is the NVMe workstation
+        # install, which carries no marker and therefore reads as host mode --
+        # but answered rather than falling into "unreachable" below, because a
+        # reachable machine reported unreachable is a wrong answer whichever
+        # way it is arrived at.
+        base*)  printf 'booted %s -- a wk system on the medium that is never armed (%s)' \
+                    "${MACH_ROOT:-its base medium}" "${MODE#base }"; return 0 ;;
         host)   ;;
         *)      printf 'USB stick %s: state unknown (board unreachable)' "$MACH_DEVICE"; return 0 ;;
     esac

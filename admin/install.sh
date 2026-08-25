@@ -78,6 +78,77 @@ else
     rm -f "$_tmp"
 fi
 
+# --- the card helper ----------------------------------------------------------
+#
+# The second privileged helper, and the second NOPASSWD grant in this repo. The
+# rule against adding these is in CLAUDE.md and it stands; what earns the
+# exception is the same thing that earned the first one -- a fixed verb list, no
+# passthrough, and a gate that is narrower than the thing it protects. This one
+# may only touch a **usb or mmc whole disk that the machine is not running
+# from**, which is a smaller grant than "write a card" sounds like: the fleet's
+# boards boot from SD cards and USB sticks, so the transport check alone would
+# happily overwrite a running system, and the boot check is what makes the grant
+# safe rather than merely plausible.
+#
+# Installed on the machines that hold card readers. Everywhere else it is absent
+# and `boot/disk.sh` falls back to plain sudo, which is what works on a board
+# where the account is already root.
+_card_target="$_libexec/wk-card-priv"
+_card_source="$WK_ROOT/admin/wk-card-priv"
+_card_sudoers=/etc/sudoers.d/wk-card
+
+if [ ! -f "$_card_source" ]; then
+    warn "card helper missing at $_card_source; skipping"
+elif ! is_linux; then
+    # macOS holds no card readers in this fleet, and its `dd`/`lsblk` are not
+    # the ones this helper is written against. Absent rather than half-working.
+    unchanged "card helper (linux only)"
+else
+    _card_needs=0
+    if [ ! -f "$_card_target" ] || ! cmp -s "$_card_source" "$_card_target"; then _card_needs=1; fi
+    _card_owner=$(stat -c '%U' "$_card_target" 2>/dev/null || echo "")
+    [ -f "$_card_target" ] && [ "$_card_owner" != root ] && _card_needs=1
+
+    _card_ok=0
+    if [ -x "$_card_target" ] && sudo -n "$_card_target" status >/dev/null 2>&1; then _card_ok=1; fi
+
+    if [ "$_card_needs" -eq 0 ] && [ "$_card_ok" -eq 1 ]; then
+        unchanged "card helper and sudoers rule"
+    elif ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
+        warn "card helper not installed: sudo needs a terminal"
+        log  "  run this from an interactive shell:  ./setup --stage quiesce"
+    else
+        info "installing the card helper (requires sudo once)"
+        sudo install -d -o root -g root -m 0755 "$_libexec"
+        sudo install -o root -m 0755 "$_card_source" "$_card_target"
+        changed "installed $_card_target"
+
+        _card_tmp="$(mktemp)"
+        printf '%s\n' "$(id -un) ALL=(root) NOPASSWD: $_card_target" > "$_card_tmp"
+        if sudo visudo -cqf "$_card_tmp"; then
+            sudo install -o root -m 0440 "$_card_tmp" "$_card_sudoers"
+            changed "installed $_card_sudoers"
+        else
+            rm -f "$_card_tmp"
+            die "generated card sudoers rule failed validation; nothing was installed"
+        fi
+        rm -f "$_card_tmp"
+    fi
+
+    # The same guarantee the rule depends on, checked every run: a helper anyone
+    # but root can write is a root escalation, not a helper.
+    if [ -f "$_card_target" ]; then
+        _card_perm=$(stat -c '%a' "$_card_target" 2>/dev/null || echo "")
+        case "$_card_perm" in
+            ''|*[!0-7]*) die "could not read the mode of $_card_target -- refusing to vouch for $_card_sudoers" ;;
+            *[2367])     die "$_card_target is world-writable (mode $_card_perm) -- remove $_card_sudoers now" ;;
+            ?[2367]?)    die "$_card_target is group-writable (mode $_card_perm) -- remove $_card_sudoers now" ;;
+        esac
+        unchanged "card helper permissions ($_card_perm)"
+    fi
+fi
+unset _card_target _card_source _card_sudoers _card_needs _card_owner _card_ok _card_tmp _card_perm
+
 # --- privileged files this repo has retired -----------------------------------
 #
 # Anything this stage installed in the past and no longer installs. A machine

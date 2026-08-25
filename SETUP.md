@@ -205,7 +205,7 @@ For more:
 
 ```sh
 WK_MIRROR_BRANCHES="main safari-7620-branch" wk sync
-wk sync --all          # every configured remote, not just origin
+wk sync                # every remote, then a fetch inside every workspace
 ```
 
 A workspace can also fetch any branch straight from GitHub on demand.
@@ -241,8 +241,9 @@ wk claude bug-238            # sandboxed agent
 wk rm    bug-238             # reclaims everything it created
 ```
 
-`wk build --list` shows the configs. `zed ssh://wk-bug-238/src/WebKit` opens it
-in Zed.
+`wk build --list` shows the configs. `wk zed bug-238` opens the checkout in Zed
+-- including a container workspace on this Mac, which is reached over `podman
+exec` because a container has no network interface to give it an address.
 
 The same commands work *inside* a workspace, with the name left out — there is
 exactly one workspace in there and it is the machine:

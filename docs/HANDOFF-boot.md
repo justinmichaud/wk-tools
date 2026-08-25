@@ -22,9 +22,30 @@ rpi5 and rpi4 have both been through the whole cycle with no hands on the board.
   UEFI `BootNext`, which supersedes the BMC-virtual-media idea: a service
   processor emulating USB storage puts itself inside every root-filesystem read.
   Entirely unbuilt — `docs/Urgent/HANDOFF-moose-bench.md`.
-- **The rpi3** — provision it, then `wk sysimage write` its SD card. Its driver
-  is a hands-on stub until then. The OTP door stays shut for good: it bought
-  only boot modes this design retired.
+- **The rpi3 has no bench system**, so it cannot be measured and `wk pi bench
+  rpi3` refuses: its card holds one system
+  (`downstream-yocto-wpe-2.48-rpi3-32-20260822T205734Z`) and that system is the
+  base image. The arrangement it needs was decided on 2026-08-24 and is written
+  up where design belongs — `wk help hardware`, "why the three Pis are arranged
+  differently", plus the binding priority order in CLAUDE.md. What is *left* is
+  the work:
+    1. a rescue-role system for slot A (`IMG_ROLE=rescue`, so no self-return
+       watchdog and no self-disarm) and a bench system for slot B;
+    2. a slot-aware `wk sysimage write`, which today writes one whole system to
+       one whole device and cannot put a system into a slot without destroying
+       the other;
+    3. arming for `boot/pi-sd.sh` — `root=` plus the bench kernel installed onto
+       the shared boot partition — and the revert that goes with a stage-2
+       arming, which is an initramfs fallback or a rescue-side pivot, because a
+       kernel that cannot mount the armed root would otherwise panic-loop;
+    4. the BusyBox equivalents of the self-return watchdog and self-disarm, for
+       an image with no systemd.
+  None of it is startable from a workstation alone: (1) needs a build, (2) and
+  (3) need the card, and the first write is hands-on.
+- **The rpi4's SD holds a bench-profile image acting as its rescue**, so it
+  carries a 900-second self-return watchdog and reboots itself every 15 minutes
+  while the board sits on it. Rewrite it with a rescue-role image; needs a build
+  and a card.
 - **`/usr/bin/tee` is NOPASSWD on moose** — passwordless write to any file, so
   equivalent to NOPASSWD root. Worth narrowing; an input to
   `docs/HANDOFF-sandboxing.md`.
@@ -32,7 +53,9 @@ rpi5 and rpi4 have both been through the whole cycle with no hands on the board.
 ## The shape that constrains anything built here
 
 **Five machines, five last miles.** rpi5: USB one-shot over ssh. rpi4: local USB
-boot, armed on the medium itself, over ssh. rpi3: hands-on until provisioned.
+boot, armed on the medium itself, over ssh. rpi3: hands-on until its card has a
+second root slot -- one medium means one system, and that system is its base
+image.
 moose: its own UEFI `BootNext`, over ssh, but needing interactive sudo. MBP:
 authenticated and hands-on, always.
 
