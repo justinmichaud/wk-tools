@@ -128,7 +128,12 @@ wk sudo setup                  # closes sudo's 5-minute timestamp and NOPASSWD
 wk key register                # generates a deploy key, prints the URL to add it
 wk push on                     # exposes the key to workspaces
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
+eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```
+
+Boards that reach the bench over WiFi (`MACH_NET=wifi`) take their credentials
+from `$WK_STORE/secrets/wifi` on the writing machine (`ssid=` and `psk=` lines,
+never in git); `wk sysimage write` refuses without them.
 
 ```sh
 wk new bug-238
@@ -147,7 +152,8 @@ command for what is not.
 
 ```sh
 wk new bug-238                          # instant overlay, any checkout size
-wk build bug-238 jsc-release
+wk build bug-238 jsc-release            # prints the exact build line it runs
+wk build bug-238 jsc-release --no-defaults   # ignore the machine's WK_BUILD_ARGS
 wk run   bug-238 -- -e 'print(1+1)'
 wk test  bug-238
 wk logs  bug-238 --follow               # the build log, noise stripped
@@ -167,7 +173,9 @@ wk vm stop mac-rel
 **A shared build machine**
 
 ```sh
-wk remote setup buildbox4               # probes it over ssh, writes targets/hosts/buildbox4.conf
+wk remote setup buildbox4               # probes it over ssh, writes targets/hosts/buildbox4.conf,
+                                        # installs WebKit's build dependencies (one sudo prompt)
+                                        # WK_BUILD_ARGS= in that conf is appended to every build there
 wk new big-build --target buildbox4
 wk build big-build jsc-release          # sized from that machine's live load
 wk remote rm buildbox4                  # undo it; git rm the conf to forget it for good
@@ -247,6 +255,9 @@ MACH_MAC=<aa:bb:cc:dd:ee:ff>  # its NIC's address, for 'wk find' pre-tailnet
 MACH_BRIDGE=<bridge-name>     # only if it sits behind a tailnet bridge
 MACH_ROLE=workstation|bench-device
 MACH_OS=any
+MACH_NET=wifi|ethernet        # how the board reaches the network at the bench
+MACH_DTB=<file.dtb>           # the device tree a Pi image boots with; empty otherwise
+MACH_BENCH_SSH=<name>         # a Mac's bench install, if it has its own address
 MACH_NOTE="one line, for the listing"
 ```
 

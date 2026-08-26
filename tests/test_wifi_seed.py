@@ -144,7 +144,7 @@ class TestImageWantsWifi(WkTest):
     def test_only_rpi3_rpi4_rpi5_want_wifi(self):
         """WiFi is derived from IMG_MACHINE, for exactly the fleet's Pi boards"""
         script = f'''
-. "{REPO}/lib/common.sh"; . "{REPO}/boot/disk.sh"
+. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"; . "{REPO}/boot/disk.sh"
 for m in rpi3 rpi4 rpi5 mbp benchvm bogus ""; do
     if _image_wants_wifi "$m"; then echo "$m=yes"; else echo "$m=no"; fi
 done
@@ -174,7 +174,7 @@ class TestWifiPreflight(WkTest):
     def _preflight(self, machine, store):
         script = f'''
 export WK_STORE={store}
-. "{REPO}/lib/common.sh"; . "{REPO}/boot/disk.sh"
+. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"; . "{REPO}/boot/disk.sh"
 {_lift(REPO / "cmd" / "sysimage", "_wifi_creds_preflight")}
 _wifi_creds_preflight {machine!r}
 '''
@@ -351,5 +351,144 @@ class TestTailnetNameCollision(WkTest):
             self.assertIn("_tailnet_name_preflight", m.group(0), f"{fn} does not run the name-collision check")
 
 
+# --------------------------------------------------------------------------- #
+# _tailnet_key_preflight (cmd/sysimage) -- the hard counterpart of
+# _wifi_creds_preflight: an unresolved machine name or a missing tailnet auth
+# key refuses the write outright, with no --force, before anything is erased
+# (disk_seed_tailnet, boot/disk.sh, assumes both are already guaranteed and no
+# longer barriers on them itself).
+# --------------------------------------------------------------------------- #
+
+def _tailnet_key_preflight(machine, authkey_path, force=False):
+    script = f'''
+. "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"
+{_lift(REPO / "cmd" / "sysimage", "_tailnet_name_for")}
+{_lift(REPO / "cmd" / "sysimage", "_tailnet_key_preflight")}
+_tailnet_key_preflight {machine!r}
+'''
+    env = {"WK_TS_AUTHKEY": authkey_path}
+    if force:
+        env["WK_FORCE"] = "1"
+    return bash(script, env=env)
+
+
+class TestTailnetKeyPreflight(WkTest):
+    def test_refuses_with_no_machine_name_and_names_the_remedy(self):
+        """an unresolved machine name refuses, and names --machine as the remedy"""
+        key = self.tmp / "authkey"
+        key.write_text("tskey-abc123\n")
+        cp = _tailnet_key_preflight("", str(key))
+        self.assertNotEqual(cp.returncode, 0, "wrote nothing, but did not refuse")
+        self.assertIn("--machine", cp.stdout + cp.stderr)
+
+    def test_refuses_with_no_key_and_names_the_remedy(self):
+        """no tailnet auth key on this machine refuses, and names 'wk key tailnet'"""
+        cp = _tailnet_key_preflight("rpi3", str(self.tmp / "no-such-key"))
+        self.assertNotEqual(cp.returncode, 0, "wrote nothing, but did not refuse")
+        self.assertIn("wk key tailnet", cp.stdout + cp.stderr)
+
+    def test_wk_force_does_not_cross_the_missing_machine_name_refusal(self):
+        """WK_FORCE=1 changes nothing -- there is no --force past this"""
+        key = self.tmp / "authkey2"
+        key.write_text("tskey-abc123\n")
+        cp = _tailnet_key_preflight("", str(key), force=True)
+        self.assertNotEqual(cp.returncode, 0, "WK_FORCE=1 let an unresolved machine name through")
+
+    def test_wk_force_does_not_cross_the_missing_key_refusal(self):
+        """WK_FORCE=1 changes nothing -- there is no --force past this"""
+        cp = _tailnet_key_preflight("rpi3", str(self.tmp / "still-no-key"), force=True)
+        self.assertNotEqual(cp.returncode, 0, "WK_FORCE=1 let a missing tailnet key through")
+
+    def test_passes_with_a_resolved_machine_and_a_present_key(self):
+        """a real machine name and a present key pass, with nothing left to refuse"""
+        key = self.tmp / "authkey3"
+        key.write_text("tskey-abc123\n")
+        cp = _tailnet_key_preflight("rpi3", str(key))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# wk-tailnet-join (image/yocto/meta-wk-tailnet/recipes-network/tailscale/files
+# -- byte-identical on the buildroot side, installed by
+# image/buildroot/tailnet-overlay.sh) -- run against relocated paths and a
+# stub tailscale, since the real paths are /etc/wk and /usr/bin/tailscale and
+# this is not the image.
+# --------------------------------------------------------------------------- #
+
+TAILNET_JOIN_DIR = REPO / "image" / "yocto" / "meta-wk-tailnet" / "recipes-network" / "tailscale" / "files"
+TAILNET_JOIN = TAILNET_JOIN_DIR / "wk-tailnet-join"
+
+
+def _tailnet_join_script(tmp):
+    """A runnable copy of wk-tailnet-join with KEY/CONF/TS relocated under
+    tmp (a HOME/ROOT override, since the real script hardcodes /etc/wk and
+    /usr/bin/tailscale) and a stub `tailscale` standing in for the real one --
+    the script's own logic runs unmodified, against files this test controls,
+    with no real tailnet daemon or auth key touched."""
+    text = TAILNET_JOIN.read_text()
+    key, conf, ts = tmp / "tailscale-authkey", tmp / "tailnet.conf", tmp / "tailscale"
+    text = text.replace("KEY=/etc/wk/tailscale-authkey", f"KEY={key}")
+    text = text.replace("CONF=/etc/wk/tailnet.conf", f"CONF={conf}")
+    text = text.replace("TS=/usr/bin/tailscale", f"TS={ts}")
+    script = tmp / "wk-tailnet-join"
+    script.write_text(text)
+    script.chmod(0o755)
+    # Answers "not on the tailnet" to `ip -4` (and anything else), so the
+    # script falls through to the key check this test is after rather than
+    # taking the "already joined" early exit.
+    ts.write_text("#!/bin/sh\nexit 1\n")
+    ts.chmod(0o755)
+    return script
+
+
+class TestTailnetJoinScript(WkTest):
+    def test_missing_key_exits_nonzero_and_names_the_remedy(self):
+        """no auth key on disk: loud, non-zero, names the missing file and the remedy"""
+        script = _tailnet_join_script(self.tmp)
+        cp = subprocess.run(["sh", str(script)], capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        out = cp.stdout + cp.stderr
+        self.assertIn("tailscale-authkey", out, "does not name the missing file")
+        self.assertIn("wk sysimage write --machine", out, "does not name the remedy")
+
+    def test_already_joined_with_no_key_is_not_a_failure(self):
+        """a later boot -- already on the tailnet, key long since spent -- is quiet and clean"""
+        script = _tailnet_join_script(self.tmp)
+        ts = self.tmp / "tailscale"
+        # Answers "already joined" to `ip -4` and everything else; no key file
+        # exists, the same as any boot after the first.
+        ts.write_text('#!/bin/sh\nif [ "$1" = ip ]; then echo 100.1.1.1; exit 0; fi\nexit 0\n')
+        ts.chmod(0o755)
+        cp = subprocess.run(["sh", str(script)], capture_output=True, text=True, timeout=10)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+    def test_service_unit_does_not_gate_on_the_key_file(self):
+        """the systemd unit runs every boot rather than skipping quietly when the key is gone"""
+        # static: an active ConditionPathExists= on the key would skip this
+        # unit silently on exactly the boot that has to be loud about its
+        # absence -- the comment explaining why there is none may still say
+        # the word, so this checks for a live directive line, not the prose.
+        unit = (TAILNET_JOIN_DIR / "wk-tailnet-join.service").read_text()
+        self.assertNotRegex(unit, r"(?m)^ConditionPathExists")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWifiJoinScriptIsLoud(unittest.TestCase):
+    """wk-wifi-join refuses loudly, not quietly, when the card carries no credentials"""
+
+    SCRIPT = (REPO / "image/yocto/meta-wk-wifi/recipes-connectivity/wk-wifi-join/files/wk-wifi-join")
+    SERVICE = SCRIPT.with_name("wk-wifi-join.service")
+
+    def test_missing_conf_exits_nonzero_and_names_the_remedy(self):  # static
+        text = self.SCRIPT.read_text()
+        line = next(l for l in text.splitlines() if l.startswith('[ -r "$CONF" ]'))
+        self.assertIn("exit 1", line)
+        self.assertIn("wk sysimage write", line)
+        self.assertNotIn("exit 0", line)
+
+    def test_service_has_no_condition_that_skips_the_loud_boot(self):  # static
+        self.assertNotIn("ConditionPathExists", self.SERVICE.read_text())
+

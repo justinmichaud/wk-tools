@@ -468,16 +468,12 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
     (it said: ${joins:-nothing}). Refusing to guess, for the same reason." ;;
     esac
 
-    [ -n "$name" ] || barrier "this image joins the tailnet on first boot, and nothing here
-    knows what name it should answer to -- the image records no machine, so the
-    card would join under the image's own hostname and be reachable by a name
-    the fleet does not use. Write it for a machine, or --force to let it pick."
-
-    keyfile=$(wk_tailscale_authkey) || barrier "this image joins the tailnet on first boot and there is no auth
-    key here to give it. The board would boot reachable only over whatever LAN
-    it lands on, which is the state the fleet rule exists to end (CLAUDE.md,
-    'Cattle, not pets')."
-    [ -n "${keyfile:-}" ] || return 0   # forced past the barrier
+    # The name and the key are both guaranteed present here -- the write
+    # preflight (_tailnet_key_preflight, cmd/sysimage) refuses the write
+    # outright, with no --force, before anything is erased. This assumes
+    # rather than re-deciding (CLAUDE.md, "One path, not two").
+    keyfile=$(wk_tailscale_authkey) || die "the tailnet auth key present moments ago at the write preflight is
+    gone now, and $dev is already erased. Set one and retry:  wk key tailnet"
 
     info "seeding the tailnet identity onto $dev -- it joins as '$name' ($tag) on first boot"
     # The key goes in over the same ssh and never onto a command line, the same
@@ -491,26 +487,20 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
 }
 
 # Does this board's rescue/bench system bring up WiFi? A hardware fact about
-# the board (IMG_MACHINE, from image/configs, names the same board
-# boot/machines/<name>.conf does), so it belongs in that registry as a
-# declared field -- CLAUDE.md, "new devices arrive as config, never code...
-# a case statement naming a machine is the shape being replaced" -- not
-# computed here from the board's identity.
+# the board, so it is a declared field on the same registry entry
+# boot/machines/<name>.conf already is (MACH_NET=wifi|ethernet, boot/machines.sh)
+# -- CLAUDE.md, "new devices arrive as config, never code... a case statement
+# naming a machine is the shape being replaced" -- not computed here from the
+# board's identity. A machine this fleet adds later needs no line here at all.
 #
-# TODO: this is that case statement, kept only because nothing in
-# boot/machines/*.conf says "no cable at the bench" today and this task may
-# not edit conf files to add one. The fix is one field -- MACH_FAMILY=rpi (or
-# whatever the MACH_DTB work another task is landing settles on for "this is
-# one of the Pis") -- read the same way every other MACH_* field is:
-#     _image_wants_wifi() { machine_load "${1:-}" 2>/dev/null && [ "${MACH_FAMILY:-}" = rpi ]; }
-# Once that field exists on rpi3.conf, rpi4.conf and rpi5.conf, delete the
-# case arm below and the machines this fleet adds later need no line here at
-# all -- which is the whole point of a declared field over a name check.
+# Loaded in a subshell, the same reason _tailnet_name_for (cmd/sysimage) is:
+# every caller here has its own machine already loaded (DISK_MACHINE, most of
+# the time), and machine_load sets MACH_* directly rather than scoped to a
+# call -- loading a second machine in place would clobber it out from under
+# whatever the caller reads next.
 _image_wants_wifi() { # <IMG_MACHINE, which is boot/machines/<name>.conf's name>
-    case "${1:-}" in
-        rpi3|rpi4|rpi5) return 0 ;;
-        *) return 1 ;;
-    esac
+    [ -n "${1:-}" ] || return 1
+    ( machine_load "$1" >/dev/null 2>&1 && [ "${MACH_NET:-}" = wifi ] )
 }
 
 # The fleet's one WiFi identity, resolved from the one place it lives -- the

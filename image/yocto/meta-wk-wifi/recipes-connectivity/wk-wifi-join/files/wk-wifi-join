@@ -30,9 +30,11 @@ CONF=/etc/wpa_supplicant/wpa_supplicant-wlan0.conf
 WPA=/usr/sbin/wpa_supplicant
 
 say() { echo "wk-wifi-join: $*"; }
+# The console too: a board with no uplink has no other way to be heard.
+shout() { say "$*"; [ -w /dev/console ] && echo "wk-wifi-join: $*" > /dev/console; return 0; }
 
-[ -r "$CONF" ] || { say "no $CONF -- this card carries no WiFi identity; 'wk sysimage write' seeds one"; exit 0; }
-[ -x "$WPA" ]  || { say "no $WPA -- a WiFi credential is seeded but this image cannot spend it"; exit 0; }
+[ -r "$CONF" ] || { shout "no $CONF -- this card carries no WiFi identity and cannot join the network; re-write it: wk sysimage write --machine <name>"; exit 1; }
+[ -x "$WPA" ]  || { shout "no $WPA -- a WiFi credential is seeded but this image cannot spend it"; exit 1; }
 
 # The wireless interface, found rather than assumed: `wlan0` is the common
 # case, but nothing here should hardcode a name the kernel is free to pick

@@ -33,6 +33,10 @@
 #                                machine's own system disk -- only a removable
 #                                disk plugged into it -- and writing it does
 #                                not make anything boot it ('wk boot' does)
+#       --machine <name>         the fleet machine (boot/machines/<name>.conf)
+#                                the card is for, when the id's manifest or
+#                                --profile does not already say -- the tailnet
+#                                name the card joins under comes from here
 #       --rescue                 write it as the board's rescue system: the
 #                                units that hand a machine back stay inert
 #       --grow | --no-grow       fill the disk with the root partition, or
@@ -881,25 +885,36 @@ _from_filter() { # <path> -- prints the command that turns those bytes into an i
 # to answer a prompt.
 #
 # So the question is asked here instead, while refusing still costs nothing.
-# At a terminal this prompts once and stores it; without one it refuses and
-# names the command that sets it. A barrier, not a hard error: a card
-# deliberately written for a board that will never join the tailnet is a
-# real thing to want, it just has to be said out loud.
-_tailnet_key_preflight() {
+# Unconditional, no --force: a card written with no tailnet identity is a
+# board reachable only over whatever LAN it lands on, and that is not a
+# real thing to want -- it is the state the fleet rule exists to end
+# (CLAUDE.md, "Cattle, not pets"). The preflight decides this; disk_seed_tailnet
+# (boot/disk.sh) assumes it and no longer asks.
+#
+# Takes the fleet machine (IMG_MACHINE / the manifest's `machine`, whichever
+# the caller has), not the tailnet name, because an unresolved machine is the
+# other way this card would come up unreachable by name: with no machine,
+# disk_seed_tailnet has no name to join under either.
+_tailnet_key_preflight() { # <IMG_MACHINE>
+    local name; name=$(_tailnet_name_for "${1:-}")
+    [ -n "$name" ] || die "this image joins the tailnet on first boot, and nothing here
+    knows what name it should answer to -- the image records no machine, so the
+    card would join under the image's own hostname and come up unreachable by
+    its fleet name.
+    Give it one:  --machine <name>"
     wk_tailscale_authkey_present && return 0
     wk_tailscale_authkey >/dev/null 2>&1 && return 0
-    barrier "there is no tailnet auth key on this machine, so the card this is about
+    die "there is no tailnet auth key on this machine, so the card this is about
     to write would boot with no tailnet identity -- reachable only over whatever
-    LAN it lands on, which is the state the fleet rule exists to end.
+    LAN it lands on, unreachable by its fleet name, which is the state the fleet
+    rule exists to end.
     Set one first:  wk key tailnet"
 }
 
 # The fleet's WiFi identity, asked for before anything is erased -- the same
-# reason _tailnet_key_preflight exists, but unconditional rather than a
-# barrier: rpi3/rpi4/rpi5 have no cable at the bench, so a missing WiFi
-# credential is not "deliberately built without" the way a missing tailnet key
-# can be (that board still has Ethernet) -- it is a card with no network at
-# all. --force does not cross this.
+# reason _tailnet_key_preflight exists and, like it, a `die` no --force
+# crosses: rpi3/rpi4/rpi5 have no cable at the bench, so a card with no WiFi
+# credential seeded is a card with no network at all.
 _wifi_creds_preflight() { # <IMG_MACHINE>
     _image_wants_wifi "${1:-}" || return 0
     disk_wifi_creds_present && return 0
@@ -1015,8 +1030,8 @@ _profile_from_path() { # <path>
     esac
 }
 
-cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role>
-    local from="$1" spec="$2" dry="$3" grow="$4" profile="$5" role="$6"
+cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role> <machine override>
+    local from="$1" spec="$2" dry="$3" grow="$4" profile="$5" role="$6" mach="${7:-}"
     local reader sha size marker base
 
     reader=$(_from_reader "$from")
@@ -1045,6 +1060,9 @@ cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role>
             [ -z "$_perr" ] || printf '%s\n' "$_perr" | sed 's/^/    /' >&2
         fi
     fi
+    # --machine wins over whatever the profile said (or failed to say): the
+    # remedy the write preflight names for an unresolved machine.
+    [ -z "$mach" ] || IMG_MACHINE="$mach"
 
     disk_parse "$spec"
     machine_load "$DISK_MACHINE" || die "unknown machine '$DISK_MACHINE'
@@ -1103,7 +1121,7 @@ EOF
         return 0
     fi
 
-    _tailnet_key_preflight
+    _tailnet_key_preflight "${IMG_MACHINE:-}"
     _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}")"
     _wifi_creds_preflight "${IMG_MACHINE:-}"
 
@@ -1163,12 +1181,13 @@ _tailnet_name_for() {
 }
 
 cmd_write() {
-    local id="" spec="" dry="" grow=1 grow_set="" from="" profile="" role=bench
+    local id="" spec="" dry="" grow=1 grow_set="" from="" profile="" role=bench mach=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --disk)    spec="${2:-}"; [ -n "$spec" ] || die "--disk needs <machine>:<device>"; shift 2 ;;
             --from)    from="${2:-}"; [ -n "$from" ] || die "--from needs a path, or vm:<path>"; shift 2 ;;
             --profile) profile="${2:-}"; shift 2 ;;
+            --machine) mach="${2:-}"; [ -n "$mach" ] || die "--machine needs a name"; shift 2 ;;
             --rescue)  role=rescue; shift ;;
             --dry-run) dry=1; shift ;;
             --grow)    grow=1; grow_set=1; shift ;;
@@ -1177,6 +1196,13 @@ cmd_write() {
             *)  [ -z "$id" ] || die "unexpected argument: $1"; id="$1"; shift ;;
         esac
     done
+    # Validated once, here, regardless of which path below spends it: the
+    # tailnet name a card is seeded with (_tailnet_name_for) comes from
+    # boot/machines/<name>.conf, so a name that is not one is worth saying so
+    # before anything is read or erased.
+    [ -z "$mach" ] || machine_load "$mach" >/dev/null 2>&1 || die "unknown machine '$mach' for --machine
+    machines:
+$(machine_list | sed 's/^/      /')"
 
     # A rescue leaves the rest of the card alone unless told otherwise, because
     # on the board where that matters most -- the rpi3, one medium holding both
@@ -1194,7 +1220,7 @@ cmd_write() {
         # there is room for the second system that makes the board able to
         # provision itself. The id path keeps its grow-to-fill default.
         [ -n "$grow_set" ] || grow=0
-        cmd_write_from "$from" "$spec" "$dry" "$grow" "$profile" "$role"
+        cmd_write_from "$from" "$spec" "$dry" "$grow" "$profile" "$role" "$mach"
         return $?
     fi
 
@@ -1242,6 +1268,10 @@ $(machine_list | sed 's/^/      /')"
     # phone, so checking it against the reader's firmware would refuse a
     # perfectly good image for a machine that is never going to boot it.
     local img_machine boot_checked=""; img_machine=$(manifest_get "$id" machine)
+    # --machine wins over the manifest's own word (or its absence) -- same
+    # override the --from path applies, and the remedy the write preflight
+    # names for a machine it cannot resolve.
+    [ -z "$mach" ] || img_machine="$mach"
     if [ -n "$img_machine" ] && [ "$img_machine" = "$DISK_MACHINE" ]; then
         image_check_boot_files "$id" "$DISK_MACHINE"
         boot_checked=1
@@ -1287,7 +1317,7 @@ EOF
 
     image_verify "$id" || die "refusing to write an image that does not match its manifest"
 
-    _tailnet_key_preflight
+    _tailnet_key_preflight "$img_machine"
     _tailnet_name_preflight "$(_tailnet_name_for "$img_machine")"
     _wifi_creds_preflight "$img_machine"
 

@@ -27,7 +27,21 @@ Audit all subcommands for consistency
 
 Make sure commands never ignore a paramater, and halt if a misleading param is provided.
 
-all commands by default should operate on the local machine. --target should give a target. --target-all should operate on all machines. Commands inside a workspace should operate there and only there.
+all commands by default should operate on the local machine. --target should give a target. --all should operate on all machines. Commands inside a workspace should operate there and only there.
+
+ex of failure:
+
+wk push off --all
+buildbox4             error: 'wk push' acts on a workstation's own store or hardware, and this is
+buildbox4                 the shared build machine for target 'buildbox4'.
+buildbox4                 Run it on the workstation instead. What works here: ls, status, build,
+buildbox4                 run, test, logs, enter.
+devbox-arm64-2        error: 'wk push' acts on a workstation's own store or hardware, and this is
+devbox-arm64-2            the shared build machine for target 'devbox-arm64-2'.
+devbox-arm64-2            Run it on the workstation instead. What works here: ls, status, build,
+devbox-arm64-2            run, test, logs, enter.
+moose                 ==> push is already OFF
+moose                   workspaces keep their remotes and can fetch; a push is refused at the door.
 
 Every command that needs a lock should have a lock. Locks should be hooked up to status, doctor and gc.
 
@@ -89,3 +103,5 @@ audit every command for bugs like this: one section gets some feature, but not a
 Testing: we need some actual unit tests, not a document. Everything that does not need real hardware to run. Use vms or containers where possible, clean up after each test. Everything gets a test. These should be regression tests, not change tests.
 
 Then remove the testing doc, it isn't catching regressions.
+
+wk claude should support -l and --continue, or otherwise support --rc mode so I can launch agents in the desktop app

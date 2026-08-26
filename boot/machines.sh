@@ -26,6 +26,10 @@ command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 #                 sharing this machine's hardware (bench/mac-lane.sh's
 #                 tolken/tolken-bench split); empty for a machine with only
 #                 one install
+#   MACH_NET      wifi|ethernet -- how this machine's rescue/bench images
+#                 reach the network (_image_wants_wifi, boot/disk.sh), a
+#                 hardware fact about the board rather than something to
+#                 infer from its name
 
 # vcgencmd is on every Pi image; rpi-eeprom-config, the fleet's own rpi4
 # lacks, so it is tried second. See boot/rpi-eeprom.sh for the writing half.
@@ -67,7 +71,7 @@ machine_load() {
     # first machine's answers (same rule as image_profile_load).
     MACH_SSH=""; MACH_DRIVER=""; MACH_DEVICE=""; MACH_ROOT=""; MACH_PROFILE=""
     MACH_NOTE=""; MACH_MAC=""; MACH_LOCAL=""; MACH_VOLUME=""; MACH_DTB=""
-    MACH_BENCH_SSH=""
+    MACH_BENCH_SSH=""; MACH_NET=""
     # Declared, not discovered: readable when the machine is unreachable.
     MACH_BRIDGE=""
     MACH_ROLE=workstation

@@ -26,6 +26,18 @@ TS=/usr/bin/tailscale
 
 say() { echo "wk-tailnet-join: $*"; }
 
+# say(), plus /dev/console: a oneshot's stdout already reaches the journal
+# under systemd, and BusyBox init already runs this with stdout on the
+# console, but neither alone covers both cases -- and a board this fails on
+# is exactly the board an operator is looking at a console for. Used only for
+# the one failure that should never pass unnoticed: the card was written with
+# no tailnet identity to give this node.
+shout() {
+    say "$*"
+    [ -w /dev/console ] && echo "wk-tailnet-join: $*" > /dev/console 2>/dev/null
+    return 0
+}
+
 [ -x "$TS" ] || { say "no $TS -- nothing to join with"; exit 0; }
 
 # Already on the tailnet? Then this is a later boot, and the only thing left to
@@ -39,9 +51,9 @@ if "$TS" ip -4 >/dev/null 2>&1; then
 fi
 
 if [ ! -r "$KEY" ]; then
-    say "no auth key at $KEY, so this node has no tailnet identity."
-    say "  it was written by something that had no key; 'wk sysimage write' seeds one."
-    exit 0
+    shout "no auth key at $KEY -- this node has no tailnet identity and cannot join."
+    shout "  remedy: wk sysimage write --machine <name>  (rewrite the card with a key)"
+    exit 1
 fi
 
 # The name and the tag come with the key, because neither is a property of the

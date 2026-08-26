@@ -318,5 +318,24 @@ class TestPiConfsSetDtb(unittest.TestCase):
                 self.assertTrue(fields["MACH_DTB"], f"{path.name} sets MACH_DTB to an empty value")
 
 
+class TestMachinesSetNet(unittest.TestCase):
+    """_image_wants_wifi (boot/disk.sh) keys on MACH_NET rather than a case
+    arm naming machines, so every boot/machines conf has to set it to one of
+    the two words that function checks against."""
+
+    def test_every_machine_conf_sets_mach_net(self):
+        for path in conf_files("boot/machines"):
+            with self.subTest(machine=path.stem):
+                value = None
+                for line in path.read_text().splitlines():
+                    m = re.match(r'^MACH_NET=(.*)$', line)
+                    if m:
+                        value = m.group(1).strip().strip('"')
+                self.assertIn(
+                    value, ("wifi", "ethernet"),
+                    f"{path.name} sets MACH_NET to {value!r}, not 'wifi' or 'ethernet'",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

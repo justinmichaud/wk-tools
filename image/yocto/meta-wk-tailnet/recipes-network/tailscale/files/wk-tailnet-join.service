@@ -7,10 +7,10 @@ Documentation=https://github.com/justinmichaud/wk-tools
 # "could not connect to the local API" from this.
 Requires=tailscaled.service
 After=tailscaled.service
-# Nothing to do without a key, and the common case after the first boot is that
-# there is none. Skipping is cheaper and quieter than starting to find out --
-# the script still handles the file vanishing between here and there.
-ConditionPathExists=/etc/wk/tailscale-authkey
+# No ConditionPathExists on the key: a board that already joined checks
+# tailscale's own state and exits quietly, same cost either boot, but a card
+# that never got a key has to run this to say so -- gating on the file would
+# skip the unit silently on exactly the boot that needs to be loud.
 
 [Service]
 Type=oneshot

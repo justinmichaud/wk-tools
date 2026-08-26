@@ -170,14 +170,9 @@ each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] `wk enter` across machines
 - [ ] closing a workspace without removing it
 - [ ] `wk rm` and `wk pr` accept several workspaces / infer the workspace
-- [ ] bash completion
 - [ ] `wk sync` is slow on rpi5 — measure before theorising
 - [ ] every command's `--help` prints the actual command line it would run
       and the configurations it accepts
-- [ ] default build args in a remote's conf
-- [ ] a low-parallelism warning; the stale load average after a killed build
-      restarts; ccache caching the build number
-- [ ] `Tools/gtk/install-dependencies` via sudo on remote hosts
 - [ ] every `WK_*` override read with a default (71 of them) is either
       documented where the user meets it and exercised by a check, or
       removed

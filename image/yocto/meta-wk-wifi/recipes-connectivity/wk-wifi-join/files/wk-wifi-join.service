@@ -9,7 +9,6 @@ Before=network.target
 Wants=network-pre.target
 # Nothing to do without a credential, and the common case on a board with a
 # cable is that this never runs at all -- Ethernet is untouched either way.
-ConditionPathExists=/etc/wpa_supplicant/wpa_supplicant-wlan0.conf
 
 [Service]
 Type=oneshot

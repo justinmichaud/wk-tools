@@ -31,8 +31,7 @@ Board-specific and bridge-specific work lives in `docs/HANDOFF-boot.md`,
       of the two is wrong
 - [ ] a bridge that is on the tailnet but whose *segment* is down needs to be
       distinguishable from one that is simply off
-- [ ] `wk status` shows other machines' load, renders local data first, and
-      names the command that re-provisions each fleet role from scratch
+- [ ] `wk status` renders local data first
 
 ## The image store is being removed
 
@@ -109,7 +108,4 @@ an unreachable one.
 - [ ] after the seeding refusal lands (tailnet and WiFi seeds block a write
       instead of no-op'ing), re-write the rpi4 card with `--machine rpi4` and
       confirm it joins
-- [ ] `wk sysimage write` refuses when the tailnet already has a node named
-      after the machine (online or offline; `<name>-N` too): the join would be
-      renamed. No --force; the remedy is removing the stale node
 
