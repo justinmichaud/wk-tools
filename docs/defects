@@ -8,11 +8,19 @@
 
 - Why is wk sync so slow on rpi5?
 
+- wk pr inside workspace should not take a workspace param (this goes for all workspace commands)
+
+- wk build should have help option, and should print the build command used. Should also list possible configurations, and customization options like --no-asan, cmakeargs, etc. This also applies to all commands
+
+- Allow storing default build args in remote configs
+
+- Warn if parallelism is too low. There is also a problem if you kill and restart the build, the load average hangs and we get low paralellism. CCache caches build number too, fix that.
+
+- sudo Tools/gtk/install-dependencies on remote hosts
+
 - wk status missing load data for other machines
 
 - wk status should load local data quickly first and fill the rest later
-
-- rpi3 and 4 rescue images don't have tailscale
 
 - Extract a command to find devices via ssh + nmap on local network
 
