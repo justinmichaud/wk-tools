@@ -32,7 +32,7 @@ mtools
 
 # The pmos image builder (image/pmos.sh), which runs on a Linux aarch64 machine
 # over ssh and needs root there. pmbootstrap partitions an image file with
-# kpartx and loop devices, and the write path that follows wants a block map:
+# kpartx and loop devices:
 #
 #   multipath-tools  carries kpartx, which is the name pmbootstrap asks for --
 #                    and the one place where the program and the package are
@@ -40,13 +40,10 @@ mtools
 #                    daemon, which no other Linux host here has a use for; it is
 #                    installed anyway, because a build host that needs a manual
 #                    apt line is not "one command to flash a phone".
-#   bmap-tools       `bmaptool create`, so a card write sends 500 MB instead of
-#                    3 GB and writes only the blocks in use
 #   python3-venv     pmbootstrap is pinned to a git tag in a venv of its own;
 #                    every PyPI release of it is yanked
 #   xz-utils         the compressed image the store keeps
 multipath-tools
-bmap-tools
 python3-venv
 xz-utils
 

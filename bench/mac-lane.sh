@@ -62,11 +62,15 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/boot/machines.sh"
 
 # The fleet name of the machine, and the profile its bench install must claim.
 # Both come from boot/machines/mbp.conf rather than being repeated here, so a
 # renamed volume or profile stays a one-line edit in the machine's conf.
-MACHINE="${WK_MAC_MACHINE:-mbp}"
+# Defaulting to mbp (not requiring --machine every time) is deliberate, unlike
+# HOST/BENCH_HOST below: there is one real Mac to bench, and benchvm is
+# explicitly the rehearsal you ask for by name.
+MACHINE="${WK_MAC_MACHINE:-mbp}"  # static
 
 # Which shape of bench mode this machine has, read from its own conf rather
 # than decided here -- boot/machines.sh is the registry and duplicating its
@@ -107,10 +111,12 @@ lane_guest() {
 }
 
 # ssh destinations. Two, because there are two installs -- see the header.
-# Overridable because the bench install's network identity is its own: it has
-# its own tailscale state, or none, in which case it needs a .local name.
-HOST="${WK_MAC_SSH:-tolken}"
-BENCH_HOST="${WK_MAC_BENCH_SSH:-tolken-bench}"
+# Default to MACHINE's own conf (MACH_SSH / MACH_BENCH_SSH,
+# boot/machines/<machine>.conf) once MACHINE is final (see below, after
+# argument parsing); --host/--bench-host or WK_MAC_SSH/WK_MAC_BENCH_SSH still
+# win outright.
+HOST="${WK_MAC_SSH:-}"
+BENCH_HOST="${WK_MAC_BENCH_SSH:-}"
 
 # Where this repository lives on the Mac -- and there are *two* answers, which
 # is the whole reason this is not one variable.
@@ -160,7 +166,7 @@ usage() {
   <workspace>         the macOS workspace whose build is measured
   --plan <name>       which benchmark (default: speedometer3.0)
   --config <name>     which build (default: mac-release)
-  --host <dest>       ssh destination for host mode (default: tolken)
+  --host <dest>       ssh destination for host mode (default: the machine's MACH_SSH)
   --count <n>         iterations, passed to the runner
   --payload <dir>     a pinned benchmark checkout, passed to the stage
   --timeout <s>       how long one iteration may take
@@ -180,7 +186,7 @@ EOF
 # key=value and nothing else. A `#` line in a manifest heredoc is not a
 # comment, it is prose written into the record where a reader greps for `^key=`
 # and finds nothing -- which is how three lines of explanation ended up inside
-# a real manifest (docs/TESTING.md). The explanation belongs in the shell.
+# a real manifest. The explanation belongs in the shell.
 
 lane_state_dir() { echo "$(wk_state_dir)/mac-lane"; }
 # Keyed by machine as well as host, and that is not cosmetic: `mbp` and
@@ -193,11 +199,10 @@ lane_state()     { echo "$(lane_state_dir)/${HOST}-${MACHINE}.state"; }
 
 # `|| true` is load-bearing, not defensive habit. Under `set -o pipefail` a
 # `sed` on a state file that does not exist yet fails the whole pipeline, and
-# `set -e` then kills the script at the *first* read -- which is every fresh
-# lane. The symptom was a run that printed the preflight and then simply
-# stopped, with no error and exit 0, because the failure was in a command
-# substitution being assigned. A missing state file is the normal starting
-# state, so it has to read as empty rather than as an error.
+# `set -e` then kills the script at the *first* read -- silently, since the
+# failure is inside a command substitution being assigned, which is every
+# fresh lane. A missing state file is the normal starting state, so it has to
+# read as empty rather than as an error.
 state_get() { sed -n "s/^$1=//p" "$(lane_state)" 2>/dev/null | tail -1 || true; }
 
 state_set() {
@@ -217,9 +222,11 @@ state_set() {
 
 # --- reaching the machine ----------------------------------------------------
 
+# `mac_ssh` (boot/machines.sh) is shared with bench/mac-ab.sh's `mac` -- the
+# two are one lane in two files, and a ConnectTimeout that meant something
+# different in each half was exactly this kind of bug waiting to be measured.
 ssh_to() {
-    local dest="$1"; shift
-    ssh -o BatchMode=yes -o ConnectTimeout=10 "$dest" "$@"
+    mac_ssh "$@"
 }
 
 # A wk command over there, in a named mode. The mode is not decoration: it
@@ -438,19 +445,15 @@ preflight() {
         warn "  wk boot $MACHINE --status exited $rc"
         fail=1
     fi
-    # Matched on the *positive* signal, not on a list of ways it can be absent.
-    # Grepping for "not attached" and friends passes a machine whose status
-    # says `benchmark_volume=WK Bench (not attached)`, because that spelling is
-    # not in the list -- a preflight that reports ready and then fails at the
-    # stage, which is the exact failure the preflight exists to prevent. boot/mac-volume.sh emits
-    # `(attached at <path>)` and nothing else means attached, so that is what
-    # is required. A new spelling on the driver's side then fails closed.
-    # `[[:space:]]*` is not defensive noise: the driver indents these lines by
-    # two spaces under the machine's own heading, so a `^`-anchored match never
-    # fired -- and because this fails closed, it would have blocked the lane
-    # even once the volume was attached. Verified against real output with
-    # `cat -A` rather than read off the echo in boot/mac-volume.sh, which is
-    # where the indentation is added by the caller and so is invisible.
+    # Matched on the *positive* signal, not on a list of ways it can be absent:
+    # grepping for "not attached" and friends passes a status of
+    # `benchmark_volume=WK Bench (not attached)` if that exact spelling is not
+    # in the list, which is the failure the preflight exists to prevent.
+    # boot/mac-volume.sh emits `(attached at <path>)` and nothing else means
+    # attached, so a new spelling on the driver's side fails closed instead.
+    # `[[:space:]]*` matters: boot/mac-volume.sh indents these lines by two
+    # spaces under the machine's own heading, so a `^`-anchored match never
+    # fires against real output.
     if [ "$SHAPE" = guest ]; then
         # Nothing to check: the guest either exists and carries a marker or
         # b_arm refuses, and that refusal is better than a copy of it here.
@@ -551,13 +554,11 @@ _lane_cleanup() {
 
 ensure_build_guest() {
     # Both shapes. A "guest only" guard here would confuse the two guests in
-    # play: the *bench* target differs by
-    # shape -- a VM for the rehearsal, a volume for the real thing -- but the
-    # *build* always happens in a macOS vm workspace on tolken, because that is
-    # where builds belong and the benchmark install must never gain a toolchain.
-    # So the build guest needs starting either way, and skipping it for the
-    # volume shape failed the real lane on its first run with
-    # "'bench-build' is not running".
+    # play: the *bench* target differs by shape -- a VM for the rehearsal, a
+    # volume for the real thing -- but the *build* always happens in a macOS vm
+    # workspace on tolken, because that is where builds belong and the
+    # benchmark install must never gain a toolchain. So the build guest needs
+    # starting either way.
     rwk host vm start "$WS" >/dev/null 2>&1 || rwk host vm start "$WS"
     if [ -z "$_BUILD_GUEST_STARTED" ]; then
         _BUILD_GUEST_STARTED=1
@@ -583,7 +584,7 @@ phase_build() {
     # exist there. detach_run's status file cannot be written and the wrapper
     # dies. `wk status` and `wk logs` still answer, because the vm driver reads
     # those from the guest, which is what made this look like a working build.
-    # (docs/TESTING.md records the same $WK_STORE trap for the image store.)
+    #
     #
     # Two failure modes, and the second is the dangerous one: polling
     # `wk status` straight after a detach reads the *previous* build's `ok`, so
@@ -755,7 +756,6 @@ phase_run() {
         # Quiet the machine first. `wk bench staged` checks quietness and
         # refuses without it -- it does not do the quieting, and saying so in
         # its preflight ("'wk quiesce on' first") makes that the caller's job.
-        # This was missing, and the run refused on it.
         info "  quiescing the bench install"
         rwk bench quiesce on || warn "  quiesce reported a problem; the run will judge it"
     else
@@ -772,11 +772,10 @@ phase_run() {
         # the decision open.
         #
         # But --force is all-or-nothing: it forces *every* preflight failure,
-        # so using it for the benign one also forces past a real one. That is
-        # not hypothetical -- it is what happened. An unanswered Setup Assistant
-        # owned the front window, MiniBrowser never became active, Speedometer
-        # was throttled in the background and run-benchmark timed out at exit
-        # 124, while the only complaint on screen was the update schedule.
+        # so using it for the benign one also forces past a real one -- an
+        # unanswered Setup Assistant owning the front window, MiniBrowser never
+        # becoming active, and run-benchmark timing out at exit 124 with only
+        # the update-schedule complaint on screen to explain it.
         #
         # So the lane asserts the dangerous condition itself before forcing the
         # harmless one. `wk bench staged` now has a "the screen is free" check
@@ -871,14 +870,31 @@ done
 
 SHAPE=$(lane_shape)
 
+# MACHINE is final now that argument parsing is done -- this is where its
+# MACH_SSH becomes HOST's default, so `--machine benchvm` picks up benchvm's
+# own conf rather than staying pinned to whatever MACHINE was at startup.
+if [ -z "$HOST" ]; then
+    machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk boot --list)"
+    HOST="${MACH_SSH:-}"
+    [ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no MACH_SSH"
+fi
+# BENCH_HOST only exists for the volume shape (a guest's bench mode is reached
+# through the host instead, never over a second ssh alias -- rwk, below), so a
+# guest's empty MACH_BENCH_SSH is not a conf bug and must not die here.
+if [ "$SHAPE" = volume ] && [ -z "$BENCH_HOST" ]; then
+    machine_load "$MACHINE" >/dev/null 2>&1
+    BENCH_HOST="${MACH_BENCH_SSH:-}"
+    [ -n "$BENCH_HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no MACH_BENCH_SSH -- needed to reach its bench-mode install"
+fi
+
 # The Mac cannot drive its own lane: the driver has to outlive a reboot of the
 # machine it is driving. Refused here rather than discovered at phase 4, with
 # the machine already armed.
-# Case-folded, and with `tr` rather than ${v,,} because macOS ships bash 3.2.
-# This machine reports `Tolken` from `hostname -s` while every config here
-# spells it `tolken`, so a case-sensitive comparison made the guard silently
-# never fire -- which is worse than not having it, because the refusal it is
-# supposed to produce would instead have been a reboot killing the driver.
+# Case-folded, and with `tr` rather than ${v,,} because macOS ships bash 3.2:
+# this machine reports `Tolken` from `hostname -s` while every config here
+# spells it `tolken`, and a case-sensitive comparison would let the guard
+# silently never fire -- worse than not having it, since the refusal it is
+# meant to produce would instead be a reboot killing the driver.
 _lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 if [ "$SHAPE" = volume ] && is_macos && [ "$(_lc "$(hostname -s 2>/dev/null)")" = "$(_lc "$HOST")" ]; then
     die "this lane cannot be driven from the machine it measures -- the reboot
@@ -930,11 +946,9 @@ past() {
     local p order
     # The order is the shape's, not a constant, because the guest stages *after*
     # entering bench mode and the volume stages before. A single hardcoded list
-    # silently skipped the guest's stage phase: `mark reboot` sat past `stage`
-    # in the list, so `past stage` answered true for work that had never run,
-    # and the lane went from build straight to the benchmark with nothing
-    # staged. A high-water mark only means anything against the order actually
-    # walked.
+    # wrong for one shape would place `stage` past `reboot`, so `past stage`
+    # answers true for work that never ran -- a high-water mark only means
+    # anything against the order actually walked.
     if [ "$SHAPE" = guest ]; then order="build arm reboot stage run collect back"
     else                          order="build stage arm reboot run back collect"
     fi

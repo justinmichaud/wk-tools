@@ -71,7 +71,7 @@ b_media() {
         *)      printf 'USB stick %s: state unknown (board unreachable)' "$MACH_DEVICE"; return 0 ;;
     esac
     id=$(b_device_image 2>/dev/null || true)
-    order=$(b_evidence 2>/dev/null | sed -n 's/^eeprom_boot_order=//p' | head -1)
+    order=$(b_evidence 2>/dev/null | kv_get eeprom_boot_order)
     printf 'USB stick %s holds %s; NVMe workstation untouched%s' \
         "$MACH_DEVICE" "${id:-no wk system (wk sysimage write puts one there)}" \
         "${order:+ (eeprom $order)}"

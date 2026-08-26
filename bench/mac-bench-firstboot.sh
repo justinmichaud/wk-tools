@@ -7,21 +7,17 @@
 # install. Runs as root from a LaunchDaemon, removes that LaunchDaemon when it
 # finishes, and is the reason nobody has to sit at this machine.
 #
-# WHY A FIRST-BOOT DAEMON AND NOT A PACKAGE POSTINSTALL SCRIPT
+# WHY A FIRST-BOOT DAEMON AND NOT A PACKAGE POSTINSTALL SCRIPT: a package
+# installed by startosinstall runs against a volume that is not running (`$3`
+# is a mount point, not a system) -- so a postinstall creating a user offline
+# means hand-editing dslocal and hoping it matches what opendirectoryd would
+# have written, a known source of accounts that exist but cannot log in. The
+# package only drops files in place; everything needing a *running* system
+# (sysadminctl, systemsetup, pmset) happens here, at first boot.
 #
-# A package installed by startosinstall runs against a volume that is not
-# running: `$3` is a mount point, not a system. Creating a user there means
-# `dscl -f <target>/var/db/dslocal/nodes/Default localonly`, setting the login
-# keychain by hand, and hoping the offline record matches what a running
-# opendirectoryd would have written -- a well-known source of accounts that
-# exist but cannot log in. Everything here needs a *running* system, so the
-# package's job is reduced to the one thing that is genuinely safe offline
-# (dropping files in place), and the work happens at first boot where
-# `sysadminctl`, `systemsetup` and `pmset` are talking to a live machine.
-#
-# Idempotent throughout: it can be re-run by hand after a failure without
-# undoing what already worked, because the failure mode of a half-provisioned
-# benchmark install is a number that looks fine.
+# Idempotent throughout, so a failure can be repaired by re-running rather than
+# reprovisioning: the failure mode of a half-provisioned install is a number
+# that looks fine.
 
 set -uo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -41,17 +37,16 @@ say() { echo "[wk-bench] $*"; }
 
 # --- the account -------------------------------------------------------------
 #
-# A random password, and nothing ever needs to know it. It exists only because
-# `sysadminctl -autologin` writes /etc/kcpassword from a real credential, and
-# because an account with no password cannot be an autologin account. Console
-# access is autologin and administrative access is the sudoers rule below, so
-# there is no path that asks a human for this string -- which is why it is
-# generated here and not printed.
-# The password is loaded first and unconditionally. Read only in the branch that
-# *creates* the account, a re-run over an existing account sets PW="" and skips
-# autologin entirely -- "autologin left alone (no password on hand for an
-# existing user)" -- so a repair run repairs everything except autologin, which
-# is usually the thing it was run for.
+# A random password nothing ever needs to know: `sysadminctl -autologin` writes
+# /etc/kcpassword from a real credential, and an account with no password
+# cannot be an autologin account. Console access is autologin and
+# administrative access is the sudoers rule below, so nothing asks a human for
+# this string.
+#
+# Loaded first and unconditionally, but read only in the branch that *creates*
+# the account -- a re-run over an existing account sets PW="" and skips
+# autologin, so a repair run repairs everything except autologin (usually what
+# it was run for).
 if [ -r "$PAYLOAD/password" ]; then
     PW=$(cat "$PAYLOAD/password")
 else
@@ -67,17 +62,12 @@ else
         || say "WARNING: sysadminctl -addUser failed"
 fi
 
-# The failsafe, and it is the most important line in this file.
-#
-# The package sets /var/db/.AppleSetupDone so Setup Assistant never runs. If the
-# account this script creates does not exist, that combination is an install
-# with no users and no setup assistant: a login window offering nothing, no ssh
-# account to reach, and Recovery as the only way back in. Locking a machine out
-# of itself is a worse outcome than a manual setup.
-#
-# So if there is no account, the marker comes back off and the next boot asks a
-# person, which is exactly the state this whole package exists to avoid -- and
-# exactly the right state to fall back to.
+# The failsafe, and the most important lines in this file: the package sets
+# /var/db/.AppleSetupDone so Setup Assistant never runs, and if the account
+# this script creates does not exist that combination is a login window
+# offering nothing, no ssh account, and Recovery as the only way back in --
+# locking the machine out of itself. So absent the account, the marker comes
+# back off and the next boot asks a person instead.
 if ! id -u "$BENCH_USER" >/dev/null 2>&1; then
     say "FAILSAFE: '$BENCH_USER' does not exist after creation; restoring Setup Assistant"
     rm -f /var/db/.AppleSetupDone
@@ -88,24 +78,17 @@ fi
 
 # --- sudo without a password, deliberately -----------------------------------
 #
-# This is a real grant and it is made on purpose, so it is worth being explicit
-# about why it is defensible *here* and would not be on a workstation:
+# Defensible here and not on a workstation, for three reasons: this install is
+# cattle (no user data, no keys, no checkout -- `wk bench mac-volume` remakes
+# it with one command); the alternative defeats the purpose (`wk bench staged`
+# runs `wk quiesce`, which needs root, unattended -- a password prompt there is
+# a hang, and one after a reboot into another OS is the most expensive kind to
+# debug); and the machine's *other* install is unaffected (separate volume
+# group, accounts, sudoers).
 #
-#   * this install is cattle. It carries no user data, no keys that matter, no
-#     checkout, and `wk bench mac-volume` can delete and remake it with one
-#     command. Its whole contents are a staged build and a result file.
-#   * the alternative defeats the purpose. `wk bench staged` runs `wk quiesce`,
-#     which needs root, on a machine with nobody sitting at it. A password
-#     prompt in the middle of an unattended benchmark is a hang, and a hang
-#     that only happens after a reboot into another OS is the most expensive
-#     kind to debug.
-#   * the machine's *other* install is unaffected. Separate volume group,
-#     separate accounts, separate sudoers. This grants nothing on Macintosh HD.
-#
-# Not the wk-quiesce NOPASSWD rule, which names one fixed helper path: that one
-# is a narrow grant on a workstation, and this is a broad grant on a disposable
-# machine. Two different judgements, and conflating them would quietly widen
-# the workstation's.
+# Not the wk-quiesce NOPASSWD rule, which names one fixed helper path: that is
+# a narrow grant on a workstation, this a broad grant on a disposable machine,
+# and conflating them would quietly widen the workstation's.
 if [ ! -f /etc/sudoers.d/wk-bench ]; then
     printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$BENCH_USER" > /etc/sudoers.d/wk-bench
     chmod 0440 /etc/sudoers.d/wk-bench
@@ -126,26 +109,19 @@ fi
 # and the run looks like a hang rather than an error. Needs FileVault off, which
 # is why the install must not enable it.
 if [ -n "$PW" ]; then
-    # Set the password, by a route that works on a RE-RUN.
-    #
-    # `dscl . -passwd /Users/<u> <new>` was here and it is the wrong tool for
-    # this job: it is a *change* operation and wants the old password, so on any
-    # re-run -- which is the normal case, this script being idempotent by design
-    # -- it fails with `DS error: eDSAuthFailed`. The account keeps whatever
-    # password it was created with, the login keychain drifts from it, and
-    # autologin raises a SecurityAgent unlock panel that can stand on the screen
-    # through an entire A/B.
-    #
+    # Set the password by a route that works on a RE-RUN: `dscl . -passwd` is a
+    # *change* operation needing the old password, so it fails with
+    # `DS error: eDSAuthFailed` on every re-run, leaving the account's password
+    # drifted from the login keychain -- and autologin then raises a
+    # SecurityAgent unlock panel that can sit on screen through an entire A/B.
     # `sysadminctl -resetPasswordFor` is the administrative *reset*: as root it
-    # needs no old password, which is exactly the difference that matters here.
+    # needs no old password.
     #
-    # And then it is CHECKED, because this file already records two macOS tools
-    # in this same area that exit 0 without acting (`sysadminctl -autologin`,
-    # `SACSetAutoLoginPassword error:22`, exit 0). `dscl . -authonly` is the only
-    # answer that is evidence: it authenticates the account with the password and
-    # fails if that is not the account's password. Everything downstream --
-    # kcpassword, autologin, an unattended console session -- is false unless
-    # this passes, so a failure is said loudly rather than logged in passing.
+    # Checked afterwards, not trusted: two macOS tools in this file already exit
+    # 0 without acting (`sysadminctl -autologin` / `SACSetAutoLoginPassword
+    # error:22`). `dscl . -authonly` is the only answer that is evidence --
+    # everything downstream (kcpassword, autologin, an unattended console
+    # session) is false unless this passes.
     sysadminctl -resetPasswordFor "$BENCH_USER" -newPassword "$PW" >/dev/null 2>&1 \
         || dscl . -passwd "/Users/$BENCH_USER" "$PW" >/dev/null 2>&1 \
         || true
@@ -158,23 +134,14 @@ if [ -n "$PW" ]; then
         say "  from this install is suspect until this line reads 'verified'."
     fi
 
-    # The login keychain, reset to match.
+    # The login keychain, reset to match: the same password drift described
+    # above leaves the keychain's own password stale, and autologin then raises
+    # a SecurityAgent unlock panel `lsappinfo front` cannot see (lib/quiet.sh,
+    # auth_panel).
     #
-    # This is what keeps a dialog off the benchmark install's screen for a whole
-    # A/B: `dscl . -passwd` fails here with
-    # `DS error: eDSAuthFailed` on a re-run -- it needs the *old* password to
-    # change one, and this script does not have it -- so the account password and
-    # the login keychain's password drift apart. autologin then logs the account
-    # in and macOS raises a keychain-unlock panel, drawn by SecurityAgent, which
-    # `lsappinfo front` cannot see (lib/quiet.sh, auth_panel).
-    #
-    # Deleting the keychain is the right remedy *here* specifically because this
-    # install is cattle: it holds no secrets worth keeping -- no Apple ID, no
-    # certificates, no saved passwords, nothing but whatever a browser benchmark
-    # happens to store. macOS recreates an empty login keychain, matched to the
-    # account, at the next login. On a workstation this would be vandalism; on a
-    # volume `diskutil apfs deleteVolume` can replace in one command it is
-    # provisioning.
+    # Deleting it is right specifically because this install is cattle -- no
+    # Apple ID, no certificates, nothing but whatever a benchmark stores -- and
+    # macOS recreates an empty one, matched to the account, at next login.
     home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
     if [ -n "$home" ] && [ -d "$home/Library/Keychains" ]; then
         rm -rf "$home/Library/Keychains" \
@@ -183,19 +150,16 @@ if [ -n "$PW" ]; then
             || say "WARNING: could not reset the login keychain; expect an unlock prompt"
     fi
 
-    # Autologin, written rather than requested.
-    #
-    # `sysadminctl -autologin set` logged `SACSetAutoLoginPassword error:22` and
-    # *exited 0*, so the script reported success about a machine that then asked
-    # for a password -- twice. Autologin is two pieces of state and both can be
-    # written directly, which removes the dependency on a tool that lies:
+    # Autologin, written rather than requested: `sysadminctl -autologin set`
+    # logged `SACSetAutoLoginPassword error:22` and *exited 0*, reporting
+    # success about a machine that then asked for a password. Both pieces of
+    # autologin state are written directly instead:
     #
     #   /etc/kcpassword                     the password, XORed with a fixed key
     #   com.apple.loginwindow autoLoginUser  who to log in
     #
-    # The key and the padding rule are Apple's, unchanged for many releases: pad
-    # the password with NULs to a multiple of 12 (a full extra block when it is
-    # already a multiple), then XOR with the repeating key.
+    # Key and padding rule are Apple's: pad with NULs to a multiple of 12 (a
+    # full extra block when already one), then XOR with the repeating key.
     /usr/bin/python3 - "$PW" <<'KCP' 2>/dev/null || say "WARNING: could not write /etc/kcpassword"
 import sys, os
 KEY = bytes([0x7D,0x89,0x52,0x23,0xD2,0xBC,0xDD,0xEA,0xA3,0xB9,0x1F])
@@ -212,7 +176,7 @@ KCP
         || say "WARNING: could not set autoLoginUser"
 
     # Verified by its artefacts, not by an exit status. Test the property, not
-    # the command (docs/TESTING.md).
+    # the command.
     if [ -f /etc/kcpassword ] \
        && [ "$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null)" = "$BENCH_USER" ]; then
         say "autologin set for $BENCH_USER (kcpassword written, autoLoginUser set)"
@@ -225,16 +189,12 @@ else
 fi
 
 # --- reachable ---------------------------------------------------------------
-# launchctl, not `systemsetup -setremotelogin on`.
-#
-# systemsetup failed here with nothing but "could not enable remote login", and
-# that failure is why the machine had no ssh at all -- every other fix needed a
-# person at the keyboard because of it. It wants Full Disk Access, which a
-# LaunchDaemon on a fresh install has not been granted and cannot ask for.
-#
-# Remote Login *is* a launchd override, so setting the override is the same
-# switch without the TCC prompt. Verified afterwards by asking launchctl rather
-# than by trusting either command.
+# launchctl, not `systemsetup -setremotelogin on`: that command failed here
+# with just "could not enable remote login" -- it wants Full Disk Access, which
+# a fresh-install LaunchDaemon cannot be granted or ask for. Remote Login *is*
+# a launchd override, so setting the override is the same switch without the
+# TCC prompt. Verified afterwards by asking launchctl, not by trusting either
+# command.
 launchctl enable system/com.openssh.sshd 2>/dev/null || true
 launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
 systemsetup -setremotelogin on >/dev/null 2>&1 || true
@@ -257,35 +217,21 @@ fi
 
 # --- tailscale, so this machine has an address that does not move -------------
 #
-# Installed and authenticated here rather than left to a person, because the
-# alternative is what happened while this volume was being brought up: the
-# install had no tailnet identity, its LAN address changed between reboots, and
-# the ssh alias resolved to the *host* install instead -- so every probe
-# answered for the wrong machine and looked like a network fault.
+# Installed and authenticated here, not left to a person: without it the LAN
+# address changes between reboots and the ssh alias resolves to the *host*
+# install instead, so every probe answers for the wrong machine.
 #
-# HOW THE BINARY GETS HERE. Nothing is cross-compiled and no Go toolchain is
-# involved: there is a signed macOS package, and it is what gets installed.
+# HOW THE BINARY GETS HERE: no cross-compile, no Go toolchain -- a signed
+# macOS package (`Tailscale-<ver>-macos.pkg`) is installed with
+# `installer -pkg ... -target /`. The static tarballs on pkgs.tailscale.com are
+# Linux-only despite the `arm64` name; this is the **macsys (standalone)**
+# variant, identified by its LaunchDaemon
+# (Contents/Library/LaunchDaemons/io.tailscale.ipn.macsys.tssentineld.plist,
+# RunAtLoad/KeepAlive), which is what gives "runs before login". Not the App
+# Store build: that one is sandboxed and its CLI needs a session, hanging over ssh.
 #
-# What is true is narrower than the conclusion drawn from it: the *static
-# tarballs* on pkgs.tailscale.com are Linux-only (386, amd64, arm, arm64, mips…
-# -- that `arm64` is Linux arm64). But macOS is shipped, as
-# `Tailscale-<ver>-macos.pkg`, and inspecting it settles what it is:
-#
-#   Contents/Library/LaunchDaemons/io.tailscale.ipn.macsys.tssentineld.plist
-#       RunAtLoad = true, KeepAlive = true, reached over a MachService
-#   Contents/MacOS/Tailscale                     the CLI
-#
-# It is the **macsys (standalone)** variant, and its LaunchDaemon is what gives
-# the "runs before login" property this needs. Not to be confused with the *App
-# Store* build: that one is sandboxed, its CLI needs a session, and
-# `/Applications/Tailscale.app/Contents/MacOS/Tailscale` hangs over ssh.
-#
-# So: no compiler. `installer -pkg … -target /` is a non-interactive install, and
-# the package goes into the provisioning payload like everything else.
-#
-# Failure is reported and not fatal: the machine still has whatever network the
-# step below gives it, and a missing tailnet identity is a nuisance rather than a
-# broken install -- though it is the nuisance that makes this whole install
+# Failure is reported, not fatal: a missing tailnet identity is a nuisance, not
+# a broken install -- though it is the nuisance that makes the install
 # unobservable, so the warning is worth reading.
 TS_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
 TS_PKG=$(ls "$PAYLOAD"/Tailscale-*macos.pkg 2>/dev/null | head -1)
@@ -303,15 +249,13 @@ if [ -r "$PAYLOAD/tailscale-authkey" ] && [ -n "$TS_PKG" ]; then
             sleep 10
         fi
         if [ -x "$TS_CLI" ]; then
-            # `file:` and not the key itself: argv is world readable, so
-            # `--auth-key tskey-...` hands the fleet's key to anything with a
-            # shell here. Same spelling, same reason, as bridge/provision.sh
-            # and `wk pi setup`.
+            # `file:` not the key itself: argv is world readable, so
+            # `--auth-key tskey-...` would hand the fleet's key to anything with
+            # a shell here (same reason bridge/provision.sh and `wk pi setup`
+            # use it).
             #
-            # --advertise-tags: this install is a wk-managed node like any
-            # other, and a tagged node never key-expires. Untagged, it works for
-            # 180 days and then drops off the tailnet -- taking its name, which
-            # is the only way anything reaches it, with it.
+            # --advertise-tags: a tagged node never key-expires; untagged, it
+            # drops off the tailnet after 180 days, taking its only name with it.
             "$TS_CLI" up --auth-key "file:$PAYLOAD/tailscale-authkey" \
                 --advertise-tags=tag:wk \
                 --hostname tolken-bench --accept-dns=false >/dev/null 2>&1 || true
@@ -345,18 +289,14 @@ fi
 
 # --- the network, without which none of the above can be reached --------------
 #
-# The thing that made three reboots look like ssh failures: a fresh macOS
-# install has no Wi-Fi credentials, and this Mac is on Wi-Fi (en0). Remote Login
-# was genuinely on -- the log said so -- and there was simply no route to the
-# machine. An install that cannot join a network is an install nobody can drive,
-# whatever else is configured correctly.
+# What made three reboots look like ssh failures: a fresh macOS install has no
+# Wi-Fi credentials, and Remote Login being genuinely on does not matter with
+# no route to the machine at all.
 #
-# The SSID and passphrase come from the payload, put there by
-# `wk bench mac-volume` from this Mac's own keychain. They are written onto the
-# bench volume in the clear, which is worth being explicit about: it is the same
-# physical machine, the same disk and the same network the credentials already
-# belong to, and the volume is disposable -- but it is a secret at rest, and
-# `diskutil apfs deleteVolume` is what removes it.
+# SSID and passphrase come from the payload, put there by `wk bench mac-volume`
+# from this Mac's own keychain, and land on the bench volume in the clear --
+# the same physical disk and network the credentials already belong to, and a
+# disposable volume `diskutil apfs deleteVolume` removes along with them.
 if [ -r "$PAYLOAD/wifi.conf" ]; then
     # shellcheck disable=SC1090
     . "$PAYLOAD/wifi.conf"
@@ -385,20 +325,14 @@ fi
 
 # --- where staged builds land ------------------------------------------------
 #
-# Created here, as root on the running bench install, because this is the only
-# moment it is cheap. From host mode the same directory is
-# `/Volumes/<name> - Data/private/var/wk`, sitting under a root-owned
-# /private/var -- so creating it there needs sudo, and `wk bench stage` runs
-# unattended over ssh where a sudo prompt is a hang.
+# Created here, as root, because this is the only cheap moment: from host mode
+# the same directory is `/Volumes/<name> - Data/private/var/wk` under a
+# root-owned /private/var, so creating it there needs sudo -- and `wk bench
+# stage` runs unattended over ssh, where a sudo prompt is a hang.
 #
-# Owned by the bench account rather than root for the same reason: staging
-# writes as the *host* account and the benchmark reads as this one, and both
-# are uid 501 (the first account on each install), so one owner satisfies both
-# sides without either needing privilege.
-#
-# Without this a person has to remember a chown before every re-provision,
-# which the cattle rule's fourth obligation exists to forbid:
-# provisioning is a verb, not a wiki page.
+# Owned by the bench account, not root: staging writes as the *host* account
+# and the benchmark reads as this one, and both are uid 501 (the first account
+# on each install), so one owner satisfies both without either needing privilege.
 install -d -o "$BENCH_USER" -g staff -m 0755 /var/wk 2>/dev/null \
     && say "staging root /var/wk ready, owned by $BENCH_USER" \
     || say "WARNING: could not create /var/wk -- staging will fail from host mode"
@@ -463,28 +397,14 @@ fi
 
 # --- done, and gone ----------------------------------------------------------
 #
-# The daemon removes itself rather than guarding on a stamp file. A first-boot
-# job that stays loaded is a job that runs again after a crash and re-randomises
-# the account password out from under the autologin that depends on it.
-# The plist and the script, and *not* `launchctl bootout` on this daemon's own
-# label -- which is `kill $$` with extra steps.
-#
-# That is what was here, and it meant this script had never once removed itself:
-# booting out the label terminates the job, which is the process running these
-# very lines, so the `rm -f` below never runs. The log says "removing the
-# first-boot daemon" on every boot while both files sit untouched with their
-# original mtimes.
-#
-# Not merely untidy. Every boot of the benchmark install then re-runs
-# provisioning, which `rsync --delete`s wk-tools back to the payload copy and
-# reboots the machine a minute later -- so a run planted by `wk bench mac-ab`
-# has its tooling replaced under it and is cut off mid-flight.
-# Two whole cycles were spent on that before the cause was found. (The same
-# suicide, in the same shape, was found in bench/mac-bench-autorun.sh a few
-# hours earlier -- worth knowing that this is an easy mistake to make twice.)
-#
-# Removing the files is sufficient: launchd has the job loaded for this boot
-# either way, and there is no next boot for it to be loaded from.
+# The daemon removes itself rather than guarding on a stamp file: a first-boot
+# job that stays loaded runs again after a crash and re-randomises the account
+# password out from under autologin. Removing the plist and script is
+# sufficient, and is deliberately NOT `launchctl bootout` on this daemon's own
+# label: that terminates the process running these very lines before the
+# `rm -f` below executes, so the files are never actually removed and every
+# reboot silently re-runs provisioning -- rsync --delete on wk-tools included,
+# which cuts off any in-flight bench run.
 say "removing the first-boot daemon"
 rm -f "$DAEMON" "$SELF"
 if [ -f "$DAEMON" ]; then

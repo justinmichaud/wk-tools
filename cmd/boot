@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
-# wk boot <machine> -- put a machine from host mode into bench mode for one
-# boot, and take it back out again.
+# wk boot <machine> [options] -- put a machine into bench mode for one boot, then back
+#
+# wk: where=host name=none group=hosts broker *
+# wk: readonly --status,--diag
 #
 #   wk boot <machine> [--system <id>] [--dry-run]  arm the one-shot and reboot
 #   wk boot <machine> --status                     what mode it is in, and why
@@ -48,34 +50,11 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # rather than a command line -- see the block below the parser.
 . "$WK_ROOT/lib/broker.sh"
 
-usage() {
-    cat >&2 <<'EOF'
-usage: wk boot <machine> [options]
-
-  (no options)        arm the one-shot and reboot into the bench system
-  --system <id>       which system (default: the newest for this machine)
-  --status            the machine's role and mode, its announced transition,
-                      and the evidence for all of it
-  --diag              the bench system's own account of its last boot, read off
-                      its boot device -- works when it never appeared
-  --keep              claim a running bench system: cancel its self-return
-                      watchdog
-  --back              reboot back to host mode now
-  --disarm            cancel an arming that has not been spent yet
-  --dry-run           resolve everything, change nothing
-  --list              machines with a boot driver
-
-machines:
-EOF
-    machine_list | sed 's/^/  /' >&2
-    exit 2
-}
-
 [ "${1:-}" = --list ] && { machine_list; exit 0; }
 
 MACHINE="${1:-}"; shift 2>/dev/null || true
-[ -n "$MACHINE" ] || usage
-case "$MACHINE" in -*) usage ;; esac
+[ -n "$MACHINE" ] || die "usage: wk boot <machine> [options]; see wk boot -h"
+case "$MACHINE" in -*) die "usage: wk boot <machine> [options]; see wk boot -h" ;; esac
 
 ACTION=arm; IMAGE=""; DRY=""
 while [ $# -gt 0 ]; do
@@ -95,23 +74,17 @@ while [ $# -gt 0 ]; do
 done
 
 # --- inside a workspace, this is a request ------------------------------------
-#
 # Before machine_load, and long before any driver: everything below reaches
 # hardware, and the whole point is that this end reaches nothing. What goes
 # over the socket is the action word and the machine name -- never these
-# arguments as a string, and never a command -- so the broker's vocabulary is
+# arguments as a string, never a command -- so the broker's vocabulary is
 # what limits this, not what this file chooses to send.
 #
-# Two actions are deliberately not requestable, and the refusals say so rather
-# than being silently absent:
-#
-#   --diag reads the bench system's boot partition by mounting it on the
-#   workstation. It is a debugging read of a disk, not an outcome a benchmark
-#   needs, and the sandbox has no business mounting filesystems out there.
-#
-# (--keep *is* requestable: the self-return watchdog would otherwise cut every
-# run longer than the manifest's interval, which on this fleet is most of them.
-# container/broker/wk-broker.py's build_keep carries that argument.)
+# --diag is deliberately not requestable: it reads the bench system's boot
+# partition by mounting it on the workstation, a debugging disk read rather
+# than an outcome a benchmark needs. --keep *is* requestable: the self-return
+# watchdog would otherwise cut every run longer than the manifest's interval,
+# which on this fleet is most of them (container/broker/wk-broker.py's build_keep).
 if in_workspace; then
     broker_present || broker_no_route "'wk boot'" "wk boot $MACHINE"
     _rc=0
@@ -159,16 +132,15 @@ read_state() {
     BOOTED=$(b_booted_at)
     BOOT_ID=$(b_boot_id)
     RECORD=$(record_read)
-    ARMED_AT=$(printf '%s\n' "$RECORD" | sed -n 's/^armed_at=//p')
-    ARMED_IMG=$(printf '%s\n' "$RECORD" | sed -n 's/^image=//p')
-    ARMED_BY=$(printf '%s\n' "$RECORD" | sed -n 's/^armed_by=//p')
-    ARMED_BOOT=$(printf '%s\n' "$RECORD" | sed -n 's/^armed_boot_id=//p')
+    ARMED_AT=$(kv_get armed_at <<<"$RECORD")
+    ARMED_IMG=$(kv_get image <<<"$RECORD")
+    ARMED_BY=$(kv_get armed_by <<<"$RECORD")
+    ARMED_BOOT=$(kv_get armed_boot_id <<<"$RECORD")
 
     # Spent: the machine has booted since the arming, so the one-shot is gone
-    # whichever way it landed. Decided by boot id, not by clocks -- the first
-    # version of this compared the driving host's UTC stamp against the
-    # machine's boot time and called a plainly-spent arming "armed", because
-    # the two ends were six hours apart in a string nobody had converted.
+    # whichever way it landed. Decided by boot id, not by clocks -- the driving
+    # host and the machine can disagree about the time without either clock
+    # being wrong, and a boot id cannot.
     SPENT=no
     if [ -n "$ARMED_BOOT" ] && [ -n "$BOOT_ID" ]; then
         if [ "$ARMED_BOOT" != "$BOOT_ID" ]; then SPENT=yes; fi
@@ -441,7 +413,7 @@ EOF
         # half-happen, so its record goes in before it; a ritual printed to a
         # person cannot, so recording an intent that the checks then refuse
         # would leave the machine "armed" for a volume that is not even
-        # attached. Found by running exactly that.
+        # attached.
         b_arm
         record_write "$IMAGE" "$MACH_PROFILE" "${MACH_VOLUME:-}" ""
         info "$MACHINE is armed on paper: the record says the next mode is bench ('$IMAGE')"
@@ -451,11 +423,9 @@ EOF
     fi
     # A guest, and it returns early for the same reason hands-on does: the
     # generic tail below ends in b_reboot, and for a guest b_reboot is *stop*.
-    # Falling through here did exactly that -- `guest` matched neither the
-    # one-shot nor the medium branch, so b_arm was never called at all and the
-    # only thing that ran was the reboot, which stopped the guest that was
-    # supposed to be starting -- `wk boot benchvm` reports success, rc=0, having
-    # done the precise opposite of arming.
+    # `guest` must match here and not fall through to the one-shot or medium
+    # branches, or b_arm never runs and the only thing that fires is the
+    # reboot -- which stops the guest that was supposed to be starting.
     #
     # No record_write: unlike every other model, arming here is not an intent
     # that has to survive until a reboot -- it is the state change itself, and

@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
 #
-# wk new <name> -- create a workspace named after the task it is for.
+# wk new <name> -- create a workspace named after the task it is for
+# wk: where=workspace name=required lifecycle post=zed group=workspaces
 #
-# Costs one overlay mount regardless of how large the checkout is: there is no
-# clone and no copy, because the base snapshot is shared read-only and this
-# workspace only ever writes to its own layer. On the other targets it is a
-# guest clone or a git clone over ssh, and those take minutes.
-#
-# Which is why creation is *detached*: the driver runs under nohup on this
-# machine and this command waits for it in the foreground. The connection that
-# typed the command can then die -- a closed laptop, a tool call's timeout, a
-# dropped ssh -- without taking the creation with it, and re-running `wk new`
-# is the resume. Nothing about that is optional for a remote target: with the
-# whole of creation hanging off one ssh, cutting it mid-clone leaves the far
-# side a partial checkout that every command reads as a finished workspace.
+# Costs one overlay mount regardless of checkout size -- no clone, no copy,
+# since the base snapshot is shared read-only. Other targets take minutes (a
+# guest clone, a git clone over ssh), which is why creation is *detached*: the
+# driver runs under nohup and this command waits in the foreground, so a
+# dropped connection does not take the creation with it -- re-running `wk new`
+# resumes it. For a remote target this is load-bearing: cutting the one ssh
+# mid-clone would otherwise leave a partial checkout every command reads as done.
 #
 # The two halves:
 #
@@ -26,6 +22,12 @@
 #
 # `--no-wait` returns as soon as the driver is started, for a script that has
 # something else to do; `wk status <name>` and the log say where it got to.
+#
+#   --target <target>   which target to create it on (default: container)
+#   --base <id>          which base snapshot to build from (default: current)
+#   --arch <arch>        the architecture the workspace itself runs (container only)
+#   --zed                open the checkout in Zed once it is ready
+#   --no-wait            return once creation has started, without waiting for it
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -62,7 +64,7 @@ NO_WAIT=""
 # which is the only way the two halves cannot drift apart.
 DETACHED=""
 
-NAME="${1:-}"; shift || true
+NAME="${WK_NAME:-}"
 require_name "$NAME"
 
 while [ $# -gt 0 ]; do
@@ -134,12 +136,10 @@ if [ -n "$DETACHED" ]; then
         release_locks
     }
 
-    # A refusal is not a failed creation, and must not be recorded as one: this
-    # driver changed nothing, and the workspace it declined to touch may be a
-    # perfectly good one whose status file says so. Said with a flag rather
-    # than by dropping the trap, because the trap is shared now (wk_atexit,
-    # lib/common.sh) and dropping it would take the lock release with it --
-    # which is the class of bug that motivated sharing it in the first place.
+    # A refusal is not a failed creation and must not be recorded as one --
+    # this driver changed nothing, and the declined workspace may be a good
+    # one whose own status file says so. A flag rather than dropping the
+    # shared exit trap (wk_atexit), which would drop the lock release too.
     REFUSED=""
     refuse() {
         REFUSED=1
@@ -148,15 +148,12 @@ if [ -n "$DETACHED" ]; then
     }
 
     # One lock per mutated resource (rule 4): this workspace, so two
-    # `wk new <same-name>` cannot both create, and the store, so `wk gc` cannot
-    # prune the snapshot being pinned between the moment it is resolved here and
-    # the moment the driver records the pin. Both are dropped when this process
-    # ends, however it ends.
+    # `wk new <same-name>` cannot both create, and the store, so `wk gc`
+    # cannot prune the snapshot being pinned between resolving it here and the
+    # driver recording the pin. Both drop when this process ends, however.
     #
-    # The store lock is asked for shared and taken exclusively (lib/common.sh has
-    # no shared mode), so a create and a `wk sync` serialise instead of
-    # overlapping. The cost is a wait; the alternative is a snapshot that moves
-    # under a workspace being built on it.
+    # The store lock is asked shared, taken exclusive (no shared mode exists),
+    # so a create and a `wk sync` serialise rather than race a moving snapshot.
     hold_lock "ws-$NAME"
     if t_needs_base; then hold_lock store -s; fi
 
@@ -167,15 +164,12 @@ if [ -n "$DETACHED" ]; then
 
     stage checking
 
-    # Crash-only creation (rules 2 and 3): converge by remaking, never by
-    # repairing and never by refusing. A workspace that never finished creating
-    # holds nothing of value -- no build, no branch, no uncommitted work -- so
-    # the cheap, total answer is to destroy the rubble and start again, and say
-    # so. The two states this cannot converge are the two where something else
-    # is at stake: a finished workspace, and one whose environment was removed
-    # from under it by something that is not wk (rule 5) -- whose overlay layer
-    # may still hold a day of work, which is why this refuses instead of
-    # wiping.
+    # Crash-only creation (rules 2, 3): converge by remaking, never repairing
+    # or refusing. An unfinished workspace holds nothing of value (no build,
+    # no branch), so the cheap answer is to destroy the rubble and retry. The
+    # two states that cannot converge this way are a finished workspace, and
+    # one whose environment vanished from under it (rule 5) -- its overlay
+    # layer may still hold real work, which is why that refuses instead.
     case "$(ws_state "$NAME")" in
     present)
         refuse "workspace '$NAME' already exists (target '$TARGET').
@@ -199,17 +193,14 @@ if [ -n "$DETACHED" ]; then
         ;;
     esac
 
-    # The record before the thing it describes, which is the mirror image of
-    # `wk rm`'s rule that the record outlives it: what the registry answers is
-    # "which machine is this name on", and that is exactly what a later command
-    # needs in order to *find* a creation that died half-way. Registered last --
-    # as it was -- a `wk new` killed during the clone left a checkout on a build
-    # box and nothing anywhere saying which box, so every command fell back to
-    # the container target and reports "no such workspace" about it.
+    # The record before the thing it describes -- the mirror of `wk rm`'s rule
+    # that the record outlives it. A later command needs the registry to find
+    # a creation that died half-way; without it, every command falls back to
+    # the default target and reports "no such workspace".
     #
-    # It is not a fact this depends on being true: ws_target derives the same
-    # answer from the stores when the entry is missing, and `wk rm` forgets it
-    # once the artifacts are gone.
+    # Not a fact this depends on: ws_target derives the same answer from the
+    # stores when the entry is missing, and `wk rm` forgets it once the
+    # artifacts are gone.
     target_register "$NAME" "$TARGET"
 
     # Only the overlay scheme has base snapshots. A macOS VM's "base" is the golden
@@ -228,12 +219,11 @@ if [ -n "$DETACHED" ]; then
     stage create
     t_create "$NAME" "$BASE" "$ARCH"
 
-    # Creation is asynchronous on some targets -- a container is started and
-    # then provisioned from inside -- and a workspace that is half-initialised
-    # looks exactly like a working one until the first thing that needs the
-    # missing part. Waiting for the marker is what makes "created" mean
-    # "usable", and a failure here is a failure of the whole creation: the
-    # rubble stays, reads as `creating` to everything, and a re-run remakes it.
+    # Creation is asynchronous on some targets -- a container starts, then is
+    # provisioned from inside -- and a half-initialised workspace looks
+    # working until something needs the missing part. Waiting for the marker
+    # makes "created" mean "usable"; a failure here leaves rubble that reads
+    # as `creating`, and a re-run remakes it.
     stage init
     t_ready "$NAME" || die "'$NAME' was created but never finished initialising -- the push
     keys, the Claude CLI, the lldb config and the shell rc are set up at first
@@ -243,18 +233,14 @@ if [ -n "$DETACHED" ]; then
     # The ssh alias, last: it points at something that has to exist first.
     stage register
 
-    # An address is known up front only when the target is already reachable; a
-    # VM has none until it boots, and a shared build machine is in
-    # ~/.ssh/config under its own name already.
+    # An address is known up front only when the target is already reachable;
+    # a VM has none until it boots, and a build machine is already in
+    # ~/.ssh/config under its own name.
     #
-    # And no alias for a container, deliberately. `HostName localhost` is
-    # fiction twice over: on a Linux workstation it points Zed at the host's own
-    # filesystem, which has no /src/WebKit, and on
-    # a macOS host this half runs *inside* the podman VM, so the entry was
-    # written where Zed is not. A container is reached over `podman exec`
-    # instead (targets/container.sh), and the alias that spells that is written
-    # by `wk zed` on the machine the editor runs on -- the only machine that can
-    # write it correctly.
+    # No alias for a container: `HostName localhost` would point Zed at the
+    # wrong filesystem (the host's, or inside the podman VM, neither of which
+    # has /src/WebKit). A container is reached over `podman exec` instead, and
+    # `wk zed` writes that alias on the machine the editor actually runs on.
 
     status_write "$SF" state=present "pid=$$" stage=ready "log=$LOG" "target=$TARGET"
     info "workspace '$NAME' created"
@@ -335,10 +321,9 @@ vm)
     log "  wk build $NAME mac-release"
     ;;
 remote)
-    # No generated alias here, and not for want of an address: the machine is
-    # already in ~/.ssh/config with whatever ProxyJump and key it needs, and a
-    # second entry pointing at it would be a second thing to keep right. So
-    # zed and ssh use the name you already use.
+    # No generated alias here: the machine is already in ~/.ssh/config with
+    # whatever ProxyJump and key it needs, and a second entry would be a
+    # second thing to keep right. zed and ssh use the name you already use.
     log "  wk build $NAME <config> build (polite: sized from that machine's load)"
     log "  wk enter $NAME          shell, in the checkout"
     # No ssh route when this command is running on the machine itself, and then
@@ -349,10 +334,10 @@ remote)
     log "  no sandbox on a shared machine, so 'wk claude' and 'wk verify' refuse."
     ;;
 *)
-    # `wk zed` rather than a `zed ssh://…` line: a container has no address, so
-    # the alias that reaches it is a ProxyCommand over `podman exec` and it is
-    # written -- with the sshd it needs -- on first use. The command is the
-    # honest spelling of that; the url would be a route that does not exist yet.
+    # `wk zed`, not a `zed ssh://…` line: a container has no address, so the
+    # alias that reaches it is a ProxyCommand over `podman exec`, written on
+    # first use. The command names that; the url would be a route that
+    # doesn't exist yet.
     log "  wk enter $NAME          shell"
     log "  wk build $NAME <config> build"
     log "  wk claude $NAME         sandboxed agent"
@@ -360,19 +345,13 @@ remote)
     ;;
 esac
 
-# The workspace exists either way by here; not opening an editor is a warning,
-# not a failure. A vm workspace has no route until it boots, so zed on it is
-# necessarily a second step.
+# The workspace exists either way by here; not opening an editor is a
+# warning, not a failure. cmd/zed owns every part of the launch (readiness
+# gate, transport, alias, app), so this is one call, not a second copy of it.
 #
-# cmd/zed owns every part of the launch -- the readiness gate, a container's
-# transport, the alias and the app itself -- so this is one call and not a
-# second copy of it. No lock to drop before it: everything that mutates happened
-# in the detached driver, which has already exited and released its own.
-#
-# Not `exec`, and not fatal: the workspace exists, and `wk new` said so. An
-# editor that could not be opened -- no Zed installed, a guest that has not
-# booted yet -- must not turn a successful creation into a failed command, or
-# the next thing anybody does is create it again.
+# Not `exec`, and not fatal: `wk new` already said the workspace exists. An
+# editor that fails to open -- no Zed, an unbooted guest -- must not turn a
+# successful creation into a failed command.
 if [ -n "$ZED" ]; then
     "$WK_ROOT/cmd/zed" "$NAME" \
         || warn "'$NAME' is there; opening it in Zed is what failed (above) -- 'wk zed $NAME' retries"

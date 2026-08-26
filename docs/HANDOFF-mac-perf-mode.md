@@ -13,7 +13,7 @@ remains is below.
 ## Remaining
 
 - **The `stage`/`staged` half has never run against the real install.** Three
-  unticked lines in `docs/TESTING.md`: a real measured run staged from a guest,
+  things unverified: a real measured run staged from a guest,
   the full `wk boot mbp` lifecycle against a real benchmark install rather than
   a disposable volume, and `wk bench stage <ws> --to mbp` from a macOS guest
   onto the volume. `wk bench compare` between a bench-mode result and a
@@ -194,5 +194,4 @@ A `wk bench staged` run on the benchmark install producing a `result.json` and
 an `env.json` with `bench_host=image` and `role_marker_overridden: false`,
 readable from host mode after `wk boot mbp --back`, and comparable against a
 container run with `wk bench compare` printing exactly the axis warnings it
-should. Then tick the `[ ]` lines under "The bare-metal benchmark run" and "The
-Mac: a mode transition nobody can automate" in `docs/TESTING.md`.
+should.

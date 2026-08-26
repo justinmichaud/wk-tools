@@ -8,66 +8,60 @@
 #
 # WHY THE RUN DRIVES ITSELF HERE, WHEN bench/mac-lane.sh SAYS IT MUST NOT
 #
-# mac-lane.sh holds the state on another machine and reaches into bench mode
-# over ssh once per phase, for a good reason: state on the machine being
-# measured is state that has to be maintained there, and a benchmark install
-# that has grown a scheduler has started to become a workstation.
+# mac-lane.sh holds state on another machine and reaches into bench mode over
+# ssh once per phase: state on the machine being measured has to be
+# maintained there, and a benchmark install that has grown a scheduler has
+# started to become a workstation.
 #
-# That shape needs one thing this machine does not have: **a network in bench
-# mode.** tolken is Wi-Fi only, and the benchmark
-# install's com.apple.airport.preferences.plist has an empty PreferredOrder, so
-# it joins nothing and answers nowhere. Giving it credentials means writing
-# SystemConfiguration and reading the System keychain, both of which need root
-# in host mode, which an unattended agent does not have.
+# That shape needs a network in bench mode, which this machine does not
+# have: tolken is Wi-Fi only, and the benchmark install's
+# com.apple.airport.preferences.plist has an empty PreferredOrder, so it
+# joins nothing. Giving it credentials means writing SystemConfiguration and
+# reading the System keychain, both of which need root in host mode, which
+# an unattended agent does not have.
 #
-# So the choice is not "driven remotely" versus "self-driving". It is
-# "self-driving" versus "not run at all", and what makes it defensible is that
-# nothing here persists: one job file, one agent, both removed by the run that
-# consumed them, and no decision of its own -- every parameter comes from the
-# job that was planted with it.
+# So the choice is "self-driving" versus "not run at all", made defensible
+# by nothing here persisting: one job file, one agent, both removed by the
+# run that consumed them, and no decision of its own -- every parameter
+# comes from the job that was planted with it.
 #
 # WHY IT CANNOT SIMPLY REBOOT BACK INTO HOST MODE
 #
-# There is no software boot-volume switch on Apple Silicon. Tested rather than
-# read, in a macOS guest with SIP *disabled* and root:
+# There is no software boot-volume switch on Apple Silicon. Tested rather
+# than read, in a macOS guest with SIP *disabled* and root:
 #
-#   nvram boot-volume=<other group>   exits 0 and changes nothing. The value
-#                                     lands in the 7C436110-… namespace and is
-#                                     discarded; IODeviceTree:/options still
-#                                     holds the firmware's own, and so does
-#                                     `nvram -p` before and after a reboot.
+#   nvram boot-volume=<other group>   exits 0 and changes nothing; the value
+#                                     is discarded and IODeviceTree:/options
+#                                     keeps the firmware's own.
 #   bless --setBoot                   "not supported on Apple Silicon based
 #                                     systems", in its own man page.
-#   systemsetup -getstartupdisk       prints "(null)"; -liststartupdisks prints
-#                                     nothing at all.
+#   systemsetup -getstartupdisk       prints "(null)".
 #
-# SIP is not what gates it -- the variable is firmware-owned, not
-# SIP-protected -- so disabling SIP buys nothing here. What is left is the
-# firmware's own default, and the only thing this script can do about it is
+# SIP is not the gate -- the variable is firmware-owned -- so what is left
+# is the firmware's own default, and the only thing this script can do is
 # reboot and see where it lands:
 #
-#   default is Macintosh HD   the reboot below returns the machine to host mode
-#                             and the whole cycle cost nobody anything.
-#   default is WK Bench       the reboot lands back here. The state file then
-#                             says the job is finished, and this script shuts
-#                             the machine *down* rather than running again --
-#                             so the worst case is a machine that is off, not a
-#                             machine in a loop, and the person who powers it on
-#                             picks a disk once.
+#   default is Macintosh HD   the reboot below returns the machine to host
+#                             mode and the cycle cost nobody anything.
+#   default is WK Bench       the reboot lands back here. The state file
+#                             then says the job is finished, and this script
+#                             halts rather than running again -- so the
+#                             worst case is a machine that is off, and the
+#                             person who powers it on picks a disk once.
 #
 # THE ORDER OF OPERATIONS IS THE SAFETY
 #
-# Everything that can strand this machine is done before anything that can take
-# a long time:
+# Everything that can strand this machine is done before anything that can
+# take a long time:
 #
-#   1. the state file is advanced *first*, so a panic, a hang, a power cut or a
-#      watchdog reboot all land on a boot that knows the job was attempted and
-#      does not attempt it again. The rpi4 image self-disarms on boot for the
-#      same reason (docs/HANDOFF-boot.md); this is the same property reached
+#   1. the state file is advanced *first*, so a panic, a hang, a power cut
+#      or a watchdog reboot all land on a boot that knows the job was
+#      attempted and does not attempt it again -- the same property the
+#      rpi4 image gets by self-disarming (docs/HANDOFF-boot.md), reached
 #      without a firmware register to clear.
-#   2. a watchdog is armed before the first run, and it reboots the machine
-#      whatever happens to the run. An unattended benchmark that hangs is
-#      otherwise a machine nobody can reach, on a volume with no network.
+#   2. a watchdog is armed before the first run and reboots the machine
+#      whatever happens: an unattended benchmark that hangs is otherwise a
+#      machine nobody can reach, on a volume with no network.
 #   3. the hand-back is in a trap, so it happens on the error path too.
 
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -153,17 +147,11 @@ leave_bench() {
 # disabled: a disabled agent is a thing to remember, and the next
 # `wk bench mac-ab` plants a fresh one anyway.
 #
-# The plist and *only* the plist. `launchctl bootout gui/<uid>/com.wk.bench-ab`
-# was here and it is the same suicide as `kill $$`: this script is that agent's
-# own child, so booting the label out kills the caller mid-function: the log
-# ends after the message explaining what it was about to do, the plist is still
-# in place, and the machine never halts. Which is the worst of the three
-# outcomes: a benchmark install left
-# running with nobody driving it, in the one branch whose entire job is to stop
-# that.
-#
-# Deleting the file is sufficient anyway. Nothing loads it again until a login,
-# and there is not going to be another login before the halt below.
+# The plist and *only* the plist: `launchctl bootout gui/<uid>/com.wk.bench-ab`
+# is the same suicide as `kill $$`, since this script is that agent's own
+# child -- booting the label out kills the caller mid-function, leaving the
+# plist in place and the machine never halted. Deleting the file is
+# sufficient anyway: nothing loads it again before the halt below.
 remove_agent() {
     [ -f "$AGENT_PLIST" ] || return 0
     rm -f "$AGENT_PLIST"
@@ -173,31 +161,25 @@ remove_agent() {
 # --- defusing the first-boot daemon -----------------------------------------
 #
 # bench/mac-bench-firstboot.sh is provisioning that runs once and removes
-# itself. If it cannot -- booting out its own launchd label kills it before the
-# `rm` -- it runs on *every* boot, and two things it does are fatal to a run
-# planted here:
+# itself. If it cannot -- booting out its own launchd label kills it before
+# the `rm` -- it runs on *every* boot, and two things it does are fatal to a
+# run planted here: it rsyncs --delete its own copy of wk-tools over
+# ~bench/Development/wk-tools, replacing this lane's tooling with whatever
+# the install was built with, and it ends with `shutdown -r +1`, rebooting
+# the machine about a minute into the benchmark.
 #
-#   it rsyncs --delete its own copy of wk-tools over ~bench/Development/wk-tools,
-#   replacing this lane's tooling with whatever the install was built with; and
-#
-#   it ends with `shutdown -r +1`, so the machine reboots about a minute into
-#   the benchmark.
-#
-# That is exactly what happened to the cycles at 15:41Z and 17:51Z: the second
-# one got two preflights in before the machine went down under it.
-#
-# The daemon is fixed now, but a volume provisioned before the fix still carries
-# the broken copy, and this script cannot assume it is running on a freshly
-# provisioned install -- so it defuses what it finds.
+# The daemon is fixed now, but a volume provisioned before the fix still
+# carries the broken copy, and this script cannot assume it is running on a
+# freshly provisioned install -- so it defuses what it finds.
 #
 # THE ORDER MATTERS, AND SO DOES DOING IT TWICE.
 #
-# The daemon and this agent start within two seconds of each other (17:51:12 and
-# 17:51:14 in the log), so a check for an already-scheduled reboot loses a race
-# it cannot see: the `shutdown` is scheduled a minute *later*. So the script is
-# killed first -- that removes the race rather than reacting to it -- and the
-# check for a pending shutdown is repeated after the settle, where anything that
-# slipped through will have appeared.
+# The daemon and this agent start within seconds of each other, so a check
+# for an already-scheduled reboot loses a race it cannot see: the `shutdown`
+# is scheduled a minute *later*. So the script is killed first -- removing
+# the race rather than reacting to it -- and the check for a pending
+# shutdown is repeated after the settle, where anything that slipped
+# through will have appeared.
 FB_PLIST=/Library/LaunchDaemons/com.wk.bench-firstboot.plist
 FB_SELF=/usr/local/libexec/wk-bench-firstboot.sh
 
@@ -290,12 +272,11 @@ NARMS=$(jf n_arms);      NARMS="${NARMS:-2}"
 SETTLE=$(jf settle);     SETTLE="${SETTLE:-90}"
 # --force, carried in the job rather than decided here.
 #
-# It exists for the guest rehearsal and for nothing else: a macOS guest cannot
-# pass the quiet check (`softwareupdate --schedule off` does not stick there, and
-# `wk quiesce` refuses inside a workspace), so a rehearsal that could not force
-# would only ever exercise the refusal. On the real volume it stays empty, and
-# the result records `forced` either way -- which is the whole point of the flag
-# being in the record instead of in the operator's memory.
+# It exists for the guest rehearsal and for nothing else: a macOS guest
+# cannot pass the quiet check (`softwareupdate --schedule off` does not
+# stick there, and `wk quiesce` refuses inside a workspace), so a rehearsal
+# that could not force would only ever exercise the refusal. On the real
+# volume it stays empty, and the result records `forced` either way.
 FORCE=$(jf force)
 
 say "job: plan=$PLAN rounds=$ROUNDS arms=$NARMS timeout=${TIMEOUT}s count=${COUNT:-default}${FORCE:+ FORCED}"
@@ -348,19 +329,16 @@ trap 'kill "$WATCHDOG" 2>/dev/null; leave_bench reboot "run finished or failed"'
 say "settling for ${SETTLE}s"
 sleep "$SETTLE"
 
-# The per-user temp directory, waited for rather than assumed.
-#
-# Exactly the class of failure this whole design exists to keep off the real
-# machine: an arm dies 20 s after login with
+# The per-user temp directory, waited for rather than assumed: an arm can
+# die soon after login with
 #
 #   patch: Can't create '/var/folders/…/T/patchXXXX' … No such file or directory
 #
 # run-benchmark applies a plan's patch through `patch`, which writes into
-# DARWIN_USER_TEMP_DIR -- and that directory is created by the per-user
-# bootstrap, which at login has not necessarily happened yet. The second arm,
-# sixteen seconds later, was fine. So the failure is a race with the session
-# coming up, it costs a whole arm of the A/B, and on the real volume it would
-# have been discovered as a missing number with nobody there to see why.
+# DARWIN_USER_TEMP_DIR -- created by the per-user bootstrap, which at login
+# has not necessarily happened yet. The failure is a race with the session
+# coming up, and on the real volume it would show up as a missing number
+# with nobody there to see why.
 for _t in 1 2 3 4 5 6 7 8 9 10 11 12; do
     _tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)
     [ -n "$_tmp" ] && [ -d "$_tmp" ] && [ -w "$_tmp" ] && break
@@ -394,17 +372,15 @@ if [ -r "$TOOLS/lib/quiet.sh" ]; then
     fi
 fi
 
-# The modal authentication panel, which the check above cannot see.
+# The modal authentication panel, which the check above cannot see: macOS
+# draws it from SecurityAgent, which never becomes the frontmost
+# *application*, so `lsappinfo front` says "Finder" with a password sheet on
+# top of everything.
 #
-# macOS draws it from SecurityAgent, which never becomes the frontmost
-# *application*, so `lsappinfo front` says "Finder" with a password sheet on top
-# of everything -- while "the screen is free" passes every time it is asked.
-#
-# SIGKILL, and that is not impatience: SIGTERM does not work. SecurityAgent holds
-# XPC transactions open while its sheet is modal and logs
-# "Remaining transactions after SIGTERM: 2" twice a second indefinitely --
-# `killall` left it running with the dialog still up. The pending authorization
-# simply fails, which on a disposable benchmark install is the correct outcome.
+# SIGKILL, not SIGTERM: SecurityAgent holds XPC transactions open while its
+# sheet is modal and logs "Remaining transactions after SIGTERM" forever
+# instead of exiting. The pending authorization simply fails, which on a
+# disposable benchmark install is the correct outcome.
 if pgrep -x SecurityAgent >/dev/null 2>&1; then
     say "a modal authentication panel is up (SecurityAgent) -- dismissing it"
     sudo -n killall -9 SecurityAgent >/dev/null 2>&1 || true
@@ -414,26 +390,19 @@ if pgrep -x SecurityAgent >/dev/null 2>&1; then
         || say "  dismissed"
 fi
 
-# The software-update scanner, stopped rather than merely asked to stay away.
+# The software-update scanner, stopped rather than merely asked to stay
+# away.
 #
-# THE SETTING IS NOT THE MECHANISM. Writing AutomaticCheckEnabled false and
-# reading it back *succeeds* -- the log says `AutomaticCheckEnabled now: 0` --
-# and `LastSuccessfulBackgroundMSUScanDate` still advances inside an arm, two
-# minutes after the preference was
-# confirmed off, on the same boot, a scan ran through the middle of the
-# measurement. A network fetch and a burst of CPU, in the one window where the
-# machine is supposed to be doing nothing else.
+# THE SETTING IS NOT THE MECHANISM: writing AutomaticCheckEnabled false and
+# reading it back succeeds, yet `LastSuccessfulBackgroundMSUScanDate` can
+# still advance inside an arm on the same boot -- a preference tells you
+# what the preference says, never what the daemon will do.
 #
-# The previous version of this comment called the write "read back rather than
-# trusted" and treated that as sufficient. It was not: the readback was true and
-# the conclusion drawn from it was false. Reading a preference tells you what
-# the preference says, never what the daemon will do.
-#
-# So the daemon is booted out. That is per-boot and self-reversing -- this
-# install reboots when the job ends and every system daemon comes back with it
-# -- which is the same shape as the rest of `wk quiesce`. The preference is
-# still written, because it costs nothing and it is the documented intent; it is
-# simply not the thing that is believed.
+# So the daemon is booted out instead. That is per-boot and self-reversing
+# -- this install reboots when the job ends and every system daemon comes
+# back with it, the same shape as the rest of `wk quiesce`. The preference
+# is still written, since it costs nothing and is the documented intent; it
+# is simply not the thing that is believed.
 say "stopping the software-update scanner"
 for svc in system/com.apple.softwareupdated system/com.apple.mobile.softwareupdated; do
     if sudo -n launchctl bootout "$svc" >/dev/null 2>&1; then
@@ -453,20 +422,17 @@ sudo -n defaults write /Library/Preferences/com.apple.SoftwareUpdate \
 
 # The scan timestamps, as evidence rather than as configuration.
 #
-# Read out of the plist file and not through `defaults`: cfprefsd serves this
-# domain differently by privilege and has already been caught, on this exact
-# machine, answering with a value the file does not carry. The file is what
-# survives, so the file is what is compared.
+# Read out of the plist file and not through `defaults`: cfprefsd serves
+# this domain differently by privilege and has answered with a value the
+# file does not carry. The file is what survives, so the file is compared --
+# sorted, since `defaults write` rewrites it at job start and a
+# re-serialised dict can come back in a different order.
 #
-# Sorted before comparing: `defaults write` rewrites this file at job start and
-# a re-serialised dict can come back in a different order, which an unsorted
-# comparison would report as a scan that never happened.
-#
-# Any of these moving across a benchmark run means a scan happened during it.
-# That does not abort the job -- the run is over by the time it can be known,
-# and abandoning the remaining rounds would throw away good arms to punish a bad
-# one -- but it is recorded against the individual arm, so a contaminated number
-# is visible in the verdict instead of silently averaged into it.
+# Any of these moving across a benchmark run means a scan happened during
+# it. That does not abort the job -- abandoning the remaining rounds would
+# throw away good arms to punish a bad one -- but it is recorded against the
+# individual arm, so a contaminated number is visible in the verdict instead
+# of silently averaged into it.
 msu_stamp() {
     /usr/bin/plutil -p /Library/Preferences/com.apple.SoftwareUpdate.plist 2>/dev/null \
         | grep -E '"Last[A-Za-z]*Date"' | sort | tr -d ' \n'
@@ -475,43 +441,32 @@ say "  scan stamp before the job: $(msu_stamp)"
 
 # --- why the radio is NOT turned off during a run -----------------------------
 #
-# Both routes to "do not scan" are closed on this install: the preference does
-# not work -- it reads back as off and a scan runs anyway -- and
+# Both routes to "do not scan" are closed on this install: the preference
+# does not work -- it reads back as off and a scan runs anyway -- and
 # `launchctl bootout system/com.apple.softwareupdated` is SIP-protected and
-# fails for both daemons, with a scan running through an arm regardless.
+# fails.
 #
-# The obvious third route is to take away what a scan needs: a run here uses no
-# network at all, the payload being pinned precisely so that it does not, so the
-# Wi-Fi could simply be off while an arm runs. That was written and then removed
-# the same evening, and the reason it was removed is the more useful half.
+# Turning Wi-Fi off during an arm was tried and rejected: **a measurement
+# fix must never be able to make the machine unreachable.** A trap that
+# turns the radio back on is not a guarantee -- a panic, a power cut, a
+# SIGKILL, or the watchdog's own reboot all leave the interface down, and in
+# bench mode that is unrecoverable without walking to the machine. It would
+# also disable tailscale, the one thing that makes this install observable
+# at all.
 #
-# **A measurement fix must never be able to make the machine unreachable.** The
-# radio version was guarded by a trap that turned it back on, and a trap is not
-# a guarantee: a panic, a power cut, a SIGKILL, or the watchdog's own reboot all
-# leave the interface down. In bench mode that is unrecoverable without walking
-# to the machine -- this install has no other route in -- so the failure mode of
-# a contaminated number was traded for the failure mode of a machine nobody can
-# reach. On a lane whose scarcest resource is a human trip to the keyboard, that
-# is the wrong trade in every case. It would also disable tailscale, which is
-# the one change that would make this install observable at all.
-#
-# So the scan is not prevented here. It is *detected*, per arm, below, and named
-# in the summary before any number -- which is honest and costs nothing. If it
-# needs to be prevented, the scoped version is to deny only Apple's update
-# endpoints (swscan/gdmf/mesu/xp .apple.com) in /etc/hosts on the volume: that
-# removes what the scan needs without removing what anything else needs, and it
-# cannot make the machine unreachable. Deliberately not done tonight, untested.
+# So the scan is not prevented, only *detected*, per arm below, and named
+# in the summary before any number. A scoped alternative -- denying only
+# Apple's update endpoints in /etc/hosts -- would remove what the scan
+# needs without risking reachability, but is not done here, untested.
 
 say "quiescing"
 "$TOOLS/wk" quiesce on >>"$LOG" 2>&1 || say "WARNING: quiesce reported a problem; the runner will judge it"
 
-# Which result belongs to which arm, recorded as it happens.
-#
-# It cannot be recovered afterwards from the file names: `wk bench staged` names
-# a result `<stamp>-<plan>-<staged-id>`, and an A/A control runs both arms out of
-# the *same* staged payload -- so the two arms produce names that differ only by
-# their timestamp, and nothing in them says which side they were. So the arm
-# label is written down at the moment it is known, next to the run it names.
+# Which result belongs to which arm, recorded as it happens: it cannot be
+# recovered afterwards from the file names, since `wk bench staged` names a
+# result `<stamp>-<plan>-<staged-id>` and an A/A control runs both arms out
+# of the *same* staged payload -- the two arms differ only by timestamp,
+# and nothing in the name says which side they were.
 RUNS="$WK_AB_ROOT/ab/$(state_get job_stamp)"
 [ -n "$(state_get job_stamp)" ] || RUNS="$WK_AB_ROOT/ab/unstamped"
 mkdir -p "$RUNS" 2>/dev/null
@@ -520,19 +475,17 @@ newest_result() { ls -1 "$WK_AB_ROOT/results" 2>/dev/null | sort | tail -1; }
 # --- the A/B -----------------------------------------------------------------
 #
 # Interleaved (A B A B …) rather than blocked (A A B B), because the machine
-# drifts: the SSD warms, the fans spin up, the chip's thermal budget is not what
-# it was twenty minutes ago. Blocking the arms puts all of that drift on one
-# side of the comparison and calls it a result. `wk pi bench --ab` interleaves
-# for the same reason.
-# Whether anything at all has worked yet. A whole round failing means the *next*
-# round will fail the same way -- the build, the payload and the machine do not
-# change between rounds -- so finishing the schedule buys nothing and costs the
-# machine's time in a mode nobody can reach: a lane staged without a pinned
-# payload burns every arm on the same missing benchmark and hands back a volume
-# with no numbers on it.
+# drifts: the SSD warms, the fans spin up, the thermal budget is not what it
+# was twenty minutes ago. Blocking the arms puts all of that drift on one
+# side of the comparison. `wk pi bench --ab` interleaves for the same
+# reason.
 #
-# Deliberately not "abort on the first failure": one flaky arm is exactly what
-# more rounds are for. It is a whole round with nothing in it that is fatal.
+# any_ok tracks whether anything has worked yet: a whole round failing means
+# the next round fails the same way too, since the build, payload and
+# machine do not change between rounds, so finishing the schedule only
+# burns time on an unreachable machine. Not "abort on the first failure",
+# though -- one flaky arm is what more rounds are for; it is a whole round
+# with nothing in it that is fatal.
 any_ok=""
 
 r=1
@@ -590,17 +543,13 @@ while [ "$r" -le "$ROUNDS" ]; do
     r=$((r + 1))
 done
 
-# Deliberately no `wk quiesce off`.
-#
-# `quiesce off` is written for a workstation: it turns Spotlight indexing and
-# automatic update checking back *on*, because on the machine somebody works on
-# those are the normal state and quieting them is the temporary condition. Here
-# it is the other way round. The benchmark install's permanent state is quiet --
-# bench/mac-bench-firstboot.sh sets exactly those two off at provisioning time
-# and means it -- so running `off` at the end of a run would undo provisioning
-# and leave the *next* measurement to be taken on a machine that has started
-# indexing. The install is cattle with no desktop and nobody at it; there is
-# nothing here that wants Spotlight back.
+# Deliberately no `wk quiesce off`: it is written for a workstation, where
+# Spotlight indexing and update checking are the normal state and quieting
+# them is temporary. Here it is the reverse -- the benchmark install's
+# permanent state is quiet (bench/mac-bench-firstboot.sh sets both off at
+# provisioning time and means it) -- so running `off` would undo
+# provisioning and leave the next measurement on a machine that has started
+# indexing.
 say "leaving the machine quiesced (its permanent state; see the comment here)"
 
 # --- the verdict, written where the results are ------------------------------
@@ -626,43 +575,38 @@ kill "$WATCHDOG" 2>/dev/null
 wait "$WATCHDOG" 2>/dev/null || true
 trap - EXIT INT TERM
 
-# Is this volume the firmware default? It decides what "finishing" should mean,
-# and the two answers are genuinely different situations rather than a
-# preference.
+# Is this volume the firmware default? It decides what "finishing" means --
+# the two answers are genuinely different situations, not a preference.
 #
-# Read the same way `wk boot mbp --status` reads it: `boot-volume` is three
-# colon-separated UUIDs and only the last names anything on the disk -- the APFS
-# volume group. Compare it against the group of the volume that is currently
-# booted, which is this one.
+# Read the same way `wk boot mbp --status` does: `boot-volume` is three
+# colon-separated UUIDs and only the last names anything on the disk -- the
+# APFS volume group -- compared against the group of the volume booted now.
 booted_is_default() {
     local nv grp
-    nv=$(nvram -p 2>/dev/null | awk '$1 == "boot-volume" { print $2 }' | tr -d '\r')
+    nv=$(python3 "$TOOLS/lib/wkmac.py" boot-volume 2>/dev/null)
     nv="${nv##*:}"
     [ -n "$nv" ] || return 1
-    grp=$(diskutil info / 2>/dev/null | sed -n 's/.*[Vv]olume [Gg]roup: *//p' | head -1 | tr -d ' \r')
+    grp=$(python3 "$TOOLS/lib/wkmac.py" volume-group / 2>/dev/null | tr -d ' \r')
     [ -n "$grp" ] || return 1
     [ "$nv" = "$grp" ]
 }
 
 # WHEN THIS VOLUME IS THE FIRMWARE DEFAULT, FINISHING MEANS STAYING UP.
 #
-# The reboot below is right when the default is the *host* volume: it hands the
-# machine back and costs nobody anything. When the default is this volume it is
-# actively harmful: the reboot lands back here, the `phase = done` branch halts
-# the machine, and a completed A/B -- six good runs, already written to the disk
-# -- sits on a powered-off Mac. The numbers exist and nothing can reach them
-# until somebody walks over, presses the power button and picks a disk. The halt was protecting against a
-# boot loop, which is real, but powering the machine off is not the only way to
-# not loop.
+# The reboot below is right when the default is the *host* volume: it hands
+# the machine back at no cost. When the default is this volume it is
+# actively harmful -- the reboot lands back here, the `phase = done` branch
+# halts the machine, and a completed A/B sits unreachable on a powered-off
+# Mac until somebody walks over and picks a disk. Halting protects against
+# a boot loop, but powering off is not the only way to avoid one.
 #
-# Staying up does not loop either: the job is done, the agent is removed, and
-# nothing here starts anything again. What it buys is that the results are
-# reachable the moment they exist -- remote login is on and this install has a
-# network -- so the whole experiment, collection included, needs nobody. The one
-# human step that is genuinely unavoidable on this machine (the firmware will
-# not be told which volume to boot from software; see the header) is then a
-# plain reboot into workstation mode, whenever it suits, rather than a trip to
-# the keyboard before anyone can even read the result.
+# Staying up does not loop either: the job is done, the agent is removed,
+# and nothing here starts anything again. What it buys is that the results
+# are reachable the moment they exist, over the network, so the one human
+# step that is genuinely unavoidable on this machine (the firmware cannot
+# be told which volume to boot from software; see the header) becomes a
+# plain reboot whenever it suits, rather than a trip to the keyboard before
+# anyone can read the result.
 if booted_is_default; then
     say "this volume is the firmware default, so a reboot would land back here and"
     say "halt -- leaving a finished A/B on a machine nothing can reach. Staying up"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# wk doctor -- what is provisioned on this machine, and what is still missing.
+# wk doctor -- what is provisioned on this machine, and what is still missing
+# wk: where=local name=none readonly group=hosts
 #
 # The reinstall companion: `./setup` is the automated path, but several pieces
 # are deliberately manual (interactive sudo, credentials, hardware) and after a
@@ -75,7 +76,8 @@ info "wk doctor on $(wk_os) ($(hostname))"
 section "host tools"
 if is_macos; then
     check "Xcode command line tools" "xcode-select --install"     xcode-select -p
-    check "podman"                   "install the official pkg (SETUP.md 0)" have podman
+    check "podman"                   "install the official pkg from podman.io" have podman
+    check "tart (wk vm only)"        "hand-installed from tart.run; ./setup does not install it" have tart
     check "zed"        "https://zed.dev/download" sh -c 'command -v zed || [ -d /Applications/Zed.app ]'
     check "tailscale"  "https://tailscale.com/download/macos" \
         sh -c 'command -v tailscale || [ -d /Applications/Tailscale.app ]'
@@ -90,14 +92,11 @@ check "gh"               "install gh, then: gh auth login" have gh
 if have gh; then
     check "gh authenticated" "gh auth login   (then: wk key register)" gh auth status
 fi
-# The fleet's tailnet auth key. Checked here rather than only listed under
-# machine-local state below, because its absence is not a backup question: it is
-# what a freshly written card spends to join the tailnet, and without it a board
-# comes up reachable only over whatever LAN it lands on. `wk sysimage write`
-# refuses on it, so a missing key is a card write that will not happen.
-#
-# The predicate does not prompt (wk_tailscale_authkey_present, lib/common.sh) --
-# a read-only report must never be the thing that asks for a credential.
+# The fleet's tailnet auth key, checked here rather than only listed under
+# machine-local state below: its absence isn't a backup question, it's what a
+# freshly written card spends to join the tailnet -- `wk sysimage write`
+# refuses without it. The predicate never prompts (wk_tailscale_authkey_present,
+# lib/common.sh); a read-only report must never ask for a credential.
 check "tailnet auth key" "wk key tailnet" wk_tailscale_authkey_present
 
 # --- root costs a password ------------------------------------------------------
@@ -156,6 +155,13 @@ local_state "$WK_STORE/secrets/claude-credentials.json" re-authable "claude logi
 # care -- a tagged node never key-expires. Losing it costs nothing but the walk
 # to the console; what it must never be is in the repo.
 local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "wk key tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected"
+# The fleet's one WiFi identity (disk_wifi_creds_path, boot/disk.sh) -- what
+# lets rpi3/rpi4/rpi5's rescue and bench images reach a network from the desk,
+# where none of the three has a cable. re-authable rather than backed-up: the
+# SSID and passphrase are already known to whoever is at the bench, and
+# nothing here can look them up on its own. `wk sysimage write` refuses a
+# rpi3/rpi4/rpi5 card with none present, and does not take --force.
+local_state "${WK_WIFI_CREDS:-$WK_STORE/secrets/wifi}" re-authable "hand-create it: ssid=<network> and psk=<passphrase> lines, mode 0600"
 # What the request broker did, on this machine, for workspaces that could not do
 # it themselves. Regenerable in the only sense that matters here: nothing reads
 # an old record to decide anything -- a machine's state is always read back from
@@ -169,9 +175,14 @@ local_state "$HOME/.ssh/config.d/local"            backed-up   "hand-written ssh
 # losing it costs one launch, not access to anything.
 local_state "$(wk_state_dir)/ssh/zed_ed25519"      regenerable "wk zed makes a new one and re-authorises it in the workspace"
 if [ "$(wk_os)" = linux ]; then
-    # The WiFi identity lives on the rpi5 itself and nowhere else.
-    [ "$(hostname)" != rpi5 ] || \
+    # The WiFi identity lives on the rpi5 itself and nowhere else. "This
+    # machine is rpi5" is read off the registry (boot/machines/rpi5.conf's
+    # MACH_SSH, which is also its tailnet name -- CLAUDE.md, "a node is
+    # reached by its tailnet name") rather than a second "rpi5" literal here.
+    . "$WK_ROOT/boot/machines.sh"
+    if machine_load rpi5 2>/dev/null && [ "$(wk_machine_name)" = "$MACH_SSH" ]; then
         local_state "$WK_ROOT/host/linux/rpi5/rpi5.conf" backed-up "site WiFi identity (gitignored: repo is public); rpi5.conf.example documents the shape"
+    fi
     local_state /var/lib/tailscale                 re-authable "tailscale up re-authenticates; the node name survives via the admin console"
 fi
 unset -f local_state
@@ -222,13 +233,12 @@ fi
 # --- benchmarking (Linux) ----------------------------------------------------------
 if is_linux; then
     section "benchmarking"
-    # The property, not the file. `test -x` answers "is the helper installed",
-    # which is not the question: a helper whose sudoers rule is out-ranked is
-    # installed, executable, root-owned and useless -- `wk quiesce` prompts for a
-    # password every time, with doctor reporting it fine. That happens whenever
-    # `wk sudo setup`'s `zz-<user>-passwd` sorts after the helper's own rule and
-    # `PASSWD: ALL` matches the
-    # helper too. Asking the helper is what tells the two apart.
+    # The property, not the file: `test -x` answers "is the helper installed",
+    # not whether it works. A helper whose sudoers rule is out-ranked is
+    # installed, executable, root-owned and useless -- `wk quiesce` prompts for
+    # a password every time while doctor reports it fine, whenever `wk sudo
+    # setup`'s `zz-<user>-passwd` sorts after the helper's rule and matches it
+    # too. Asking the helper is what tells the two apart.
     if [ ! -x /usr/local/libexec/wk-quiesce-priv ]; then
         miss "privileged helper (wk quiesce / wk session)" \
              "./setup --stage quiesce  (interactive sudo)"
@@ -261,7 +271,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
             miss "golden base VM 'wk-base'" "wk vm base  (hours: image pull + prebuild)"
         fi
     else
-        unk "tart not installed" "SETUP.md section 8 -- only needed for Apple-port builds"
+        unk "tart not installed" "README.md, Setup -- only needed for Apple-port builds"
     fi
 fi
 
@@ -274,5 +284,5 @@ fi
 warn "$missing item(s) missing -- each line above names its fix; the order that"
 log  "works from bare metal: ./setup -> the interactive stages it lists ->"
 log  "gh auth login -> wk key register -> wk sync -> (optional) wk pi setup,"
-log  "wk vm base -> claude login in the first workspace. See SETUP.md."
+log  "wk vm base -> claude login in the first workspace. See README.md."
 exit 1

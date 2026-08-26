@@ -17,7 +17,7 @@ to execute all of it.
 ## Remaining — abstraction candidates
 
 - **The layering** (`home` / `lab` / `wk` / `field` / `stock`, one-way
-  dependency rule; recorded in `docs/HANDOFF-vocabulary.md` and binding for new
+  dependency rule; recorded in `wk help design` and binding for new
   code via `CLAUDE.md`). **Nothing has moved**: no directory moves, and no grep
   selftest that the lab layer knows no WebKit. The largest item here.
 - **The target-driver contract** (`t_create`/`t_exec`/`t_info`/`t_list`/

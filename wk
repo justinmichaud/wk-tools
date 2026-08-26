@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# wk -- WebKit development workspaces.
+# wk -- WebKit development workspaces. `wk` lists the commands, `wk help` prints
+# README.md, and `wk <command> -h` explains one command.
 #
-# On Linux (and inside the podman VM) this dispatches straight to cmd/<name>.
-# On macOS most commands have nothing to act on locally, because workspaces
-# live inside the VM; those are forwarded over `podman machine ssh`. Inside a
-# workspace nothing is forwarded at all -- the target is the machine itself.
-# This file must therefore stay bash 3.2 compatible -- macOS ships bash 3.2 and the whole
-# point of the design is that the host installs nothing extra.
+# Every command is a file under cmd/, and declares in its header what it acts
+# on (see "declarations" below). This file reads that declaration and does,
+# once for every command, what would otherwise be re-decided in each: resolve
+# the workspace name, refuse a name inside a workspace, wait for a workspace to
+# be ready, decide where the command runs, and forward container work into the
+# podman VM on a macOS host. bash 3.2 throughout: macOS ships nothing newer.
 
 set -euo pipefail
 
@@ -17,610 +18,321 @@ WK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
-usage() {
-    cat >&2 <<'EOF'
-usage: wk <command> [args]
+# --- declarations -------------------------------------------------------------
+#
+# Line 2 of cmd/<name> is its synopsis:   # wk <name> <args> -- <summary>
+# and one or more `# wk:` lines in the first 15 lines declare its shape:
+#
+#   where=host       this workstation's store or hardware; never forwarded,
+#                    refused inside a workspace and on a shared build host
+#   where=local      runs wherever it is invoked; never forwarded
+#   where=workspace  acts on a workspace: the name is resolved here, the
+#                    target decides where it runs
+#   where=dynamic    the command answers `wk <cmd> --where <args>` itself
+#   name=required|optional|none   how the workspace name arrives
+#   ready=yes        wait for the workspace to finish creating first
+#   group=<g>        which block of `wk help` lists it
+#   lifecycle        creates or destroys the workspace record (new, rm)
+#   readonly [<subverbs>]   changes nothing; never starts the podman machine
+#   broker <subverbs>|*     allowed inside a workspace, through the broker
+#   forward no       a workspace command that runs on the host regardless
+#   outside          a workspace command refused inside a workspace: it must
+#                    look at the workspace from the host
+#   bare merged      with no workspace named, report on every target here
+#   post <hook>      zed | ssh-alias-remove, after the forwarded half
+#   needs <a,b>      tools and standing this command cannot start without:
+#                    a command name (gh, tart, nmap...), `gh-auth` (a logged-in
+#                    gh), or `tailnet` (this machine is on the tailnet). Checked
+#                    before anything runs, so the refusal names the remedy up front
+#   sub <a,b> where=<w> name=<n>[@2]   per-subverb override of where and/or
+#                    name; @2 means the name is the positional after the subverb
+#   flag <--x,--y> where=<w>  per-flag override of where
 
-workspaces
-  new <name> [--target T] [--zed] [--no-wait]
-                            create a workspace (container | vm | remote, or a
-                            machine in ~/.config/wk/targets/); --zed opens it.
-                            Creation is detached and survives this connection;
-                            --no-wait returns as soon as it is under way
-  ls                        list workspaces
-  enter <name> [--zed|cmd]  interactive shell (GPU/desktop integration on Linux)
-  zed <name>                open its checkout in Zed, whatever it takes to get
-                            there (a container has no address: the route is the
-                            ssh protocol over `podman exec`)
-      --tools [<machine>|<name>]
-                            open a wk-tools copy instead -- this checkout, a
-                            machine's, or the one a workspace bind-mounts
-  build <name> <config>     build, with derived job count and nice level
-      --detach              run it on the machine that builds and return; the
-                            build survives this connection going away
-  status [name]             build/container state, then the fleet: each
-                            device's role, mode and wk-owned media; exit code
-                            is machine-readable. At a terminal this opens the
-                            page below; anything reading it gets the table
-    --text                  the table, from a terminal (--cli is the same word)
-    --wait [--timeout S]    block while it is busy, then report once -- instead
-                            of polling a pid in a loop, which is not a fact this
-                            end can know for a build driven over ssh
-    --json                  the same listing as one document -- and the one every
-                            view here is drawn from, so they cannot disagree
-    --web [--port N]        serve it as a page, open a browser, and keep it
-        [--interval S]      current while it is open (127.0.0.1 only)
-    --html [file]           write that page once, without serving anything
-  logs <name> [-f|--all]    build log, errors first
-  run <name> [--config C] [--lldb] [args]   run jsc from the workspace build
-  gui <name> [url]          MiniBrowser in the seat, launched as perf runs do
-  test <name> [args]        run tests
-  bench <name> <plan>       run a benchmark, with preflight and provenance
-      stage <ws> --to <machine>
-                            put a build where a machine's bench mode will find
-                            it (build in the guest, run on the machine itself)
-      staged [--plan P]     run it, in the bench mode booted for it; refused
-                            in host mode, which is not the same
-                            machine underneath
-      mac <ws> [--plan P]   the whole macOS lane in one command, driven from
-                            another machine: build, stage, arm, wait for the
-                            one step a person has to do, run, come back
-      mac-volume [--create|--install|--provision]
-                            make that Mac's benchmark install, on a second
-                            APFS volume in its own container (runs on the Mac)
-  profile <name> [file.js]  where the time went: JSC's own profilers, samply,
-                            or Instruments -- one flag each, no env-var walls
-      --mode <m>            sampling (default) | bytecode | samply |
-                            instruments | heaptrack | massif | native
-  verify <name> [--gpu]     prove the sandbox holds, by testing it
-  claude <name>             launch Claude inside the workspace, sandboxed
-  rm <name>                 destroy a workspace and everything it created
-  stop [--keep-vm]          shut down all containers and the VM; nothing is lost
-  start                     bring them all back
+decl_load() { # <impl>
+    D_WHERE=workspace D_NAME=none D_READY=no D_GROUP=other D_LIFECYCLE=""
+    D_READONLY="" D_BROKER="" D_FORWARD=yes D_BARE="" D_POST="" D_SUB="" D_FLAG="" D_OUTSIDE="" D_NEEDS=""
+    local line tok
+    set -f   # `broker *` is a word, not a glob
+    while IFS= read -r line; do
+        case "$line" in "# wk:"*) ;; *) continue ;; esac
+        line=${line#"# wk:"}
+        case "$line" in
+            " sub "*)  D_SUB="$D_SUB
+${line# sub }" ; continue ;;
+            " flag "*) D_FLAG="$D_FLAG
+${line# flag }" ; continue ;;
+        esac
+        for tok in $line; do
+            case "$tok" in
+                where=*)  D_WHERE=${tok#where=} ;;
+                name=*)   D_NAME=${tok#name=} ;;
+                ready=*)  D_READY=${tok#ready=} ;;
+                group=*)  D_GROUP=${tok#group=} ;;
+                lifecycle) D_LIFECYCLE=1 ;;
+                readonly) D_READONLY=yes ;;
+                broker)   D_BROKER=pending ;;
+                needs)    D_NEEDS=pending ;;
+                forward=no) D_FORWARD=no ;;
+                outside)  D_OUTSIDE=1 ;;
+                bare=merged) D_BARE=merged ;;
+                post=*)   D_POST=${tok#post=} ;;
+                *)  case "$D_NEEDS:$D_READONLY:$D_BROKER" in
+                        pending:*)     D_NEEDS=$tok ;;
+                        *:yes:pending) D_BROKER=$tok ;;
+                        *:yes:*)       D_READONLY=$tok ;;
+                        *:*:pending)   D_BROKER=$tok ;;
+                    esac ;;
+            esac
+        done
+    done < <(head -15 "$1")
+    set +f
+    [ "$D_BROKER" = pending ] && D_BROKER="*"
+    [ "$D_NEEDS" = pending ] && D_NEEDS=""
+    return 0
+}
 
-sources and disk
-  sync [<workspace>]        bring WebKit up to date. One verb, three scopes:
-                            bare, the workspace you are in (it asks if there are
-                            several); --machine, everything here -- the mirror, a
-                            new base snapshot, every workspace, and every copy of
-                            wk-tools this machine owns; --all, every other
-                            machine too. A workspace fetches from the mirror, so
-                            nothing crosses the network twice, and a rebase onto
-                            origin/main is what moves onto it -- no remaking
-  skills <sub>              status|diff|pull|push the shared, mutable skills
-  key <sub>                 register|check the fork push keys (uses gh)
-      tailnet               the fleet's tailnet auth key -- what a freshly
-                            written card spends to join on first boot. Asked for
-                            once and kept per machine; --replace rotates it
-  sudo status|require       make root cost a password every time, here or on
-                            a configured machine (--target T, --all)
-  push on|off|status        whether workspaces may push to git at all; off is
-                            what `wk claude` sets before an agent takes over
-                            (--target T, --all: the machine that holds the key)
-  remotes [ws] [--fix]      is origin upstream, and can fork be pushed to?
-  pick [ws] <commit>...     cherry-pick WebKit commits onto this branch, by
-                            identifier (287654@main) or sha; resolves without
-                            the network and checks the resolution before picking
-  pr [ws] <user>:<branch>   check out a PR head from WebKit or WPEWebKit; warns
-                            only when your own work is at stake
-  report                    weekly GitHub activity summary (uses gh)
-  gc                        prune snapshots, images and caches; reclaim disk
-      --purge-mirror        erase the master git store -- the bare mirror and
-                            every base snapshot; 'wk sync' refetches them
-      --purge-pmos          erase the pmbootstrap chroots on the pmos build
-                            hosts (~8 GB each; the next build refetches them)
-  disk                      what is stored on this machine, where, and the
-                            total (read-only; 'wk help disk' says what to erase)
-
-hosts and machines
-  setup                     idempotent host bootstrap (also: ./setup)
-  doctor                    what is provisioned here and what is missing (read-only)
-  selftest [--quick]        run docs/TESTING.md against this machine
-  version                   which wk-tools this machine runs (sha and tree hash)
-  backup                    write live desktop settings back into the repo
-  vm <sub>                  macOS VM lifecycle: ls|new|start|stop|ip|enter|sync|base|rm
-      base [--refresh|--rebuild|--rm]
-                            the golden guest every vm workspace is cloned from:
-                            build it, fast-forward its checkout, remake it, or
-                            erase it (it is the largest thing on the machine)
-  pi <sub>                  test boards, end to end -- 'wk pi -h' is the
-                            lifecycle: flash, boot-order, setup onto the
-                            tailnet, deploy a build, bench it
-  sysimage <sub>            bootable systems: build|ls|show|disks|write|rm
-      write <id> --disk <machine>:<device>
-                            write an image onto a removable disk attached to a
-                            fleet machine (never that machine's own system
-                            disk; writing one does not make anything boot it)
-  find [machine]            every device on every segment this machine can
-                            reach, and everything wk knows about each one: the
-                            MAC, which fleet machine it is, what the tailnet
-                            says, and what /etc/wk-image says over ssh. For the
-                            case the tailnet rule leaves open -- a board that is
-                            not on it, or is and is not answering
-  boot <machine>            put a machine into bench mode for one boot
-                            (--status|--keep|--back|--disarm|--diag|--dry-run)
-                            (--system|--address|--status|--stop|--dry-run)
-  remote setup|rm <target>  provision a shared build machine, or undo that
-                            and forget it (never needs root)
-  bridge <sub>              ls|provision|setup|status|rm a tailnet bridge: a
-                            phone routing a segment (a BMC port, a test board
-                            on a cable) onto the tailnet. Declared in
-                            bridge/hosts/<name>.conf; 'wk help bridge'
-    bridge provision <name> the whole path -- images, card, phone, role -- with
-                            a prompt at each step that needs a hand. Installs to
-                            the phone's internal storage through Jumpdrive; the
-                            card ends up as the rescue copy
-  quiesce on|off|status     quiet the machine for benchmarking
-  session on|gdm|off|status a real GPU session, or a real desktop (Linux)
-    session on [--bmc]      benchmark kiosk; --bmc moves it to the BMC to
-                            watch over KVM-over-IP -- slower, never for numbers
-    session gdm [--bmc]     the actual display manager and desktop instead;
-                            --bmc hides the GPU from seat0 so it lands on the BMC
-    session off             screen held dark on every output (not literally
-                            nothing running -- some drivers won't blank for
-                            real otherwise); nothing restarts on its own
-  mcp                       MCP server, for the Claude Desktop app
-
-  Inside a workspace the name is implicit and there is no host to reach:
-  `wk build <config>`, `wk run -- <args>`, `wk test <args>` act on this machine.
-
-  `wk <command> --explain` says what a command does, what it acts on, whether
-  it changes anything, and how to preview it -- without running it.
-
-  `wk <command> --force` turns a refusal that exists because of a rule -- an
-  unfiltered guest, passwordless sudo -- into a loud warning, repeated when
-  the command ends. It does not force past a missing workspace or a failed
-  build: those are not rules, they are facts.
-
-  WK_DEBUG=1 for verbose output.
-EOF
-    help_topics >&2
+# A bad invocation: the synopsis, and where the rest of the help is.
+usage_die() { # <cmd> <impl> [why]
+    [ -z "${3:-}" ] || warn "$3"
+    log "usage: wk $(synopsis "$2" | sed 's/ -- .*//')"
+    log "       wk $1 -h for the rest"
     exit 2
 }
 
-# --- help topics -------------------------------------------------------------
-#
-# `wk --explain` answers "what does this one command do". A topic answers the
-# question underneath that: what a target *is*, which one to put a workspace on,
-# where the disk went, how a machine becomes a target here. Neither is derivable
-# from the other -- the first is a fact about an implementation and is derived
-# from it, the second is a decision, and a decision has to be written down.
-#
-# The topics are files under docs/help/, one per topic, first line a summary.
-# Files rather than heredocs in here for two reasons: this listing is then
-# derived from what exists rather than being a second list to keep right, and
-# the prose is readable (and greppable, and reviewable in a diff) without being
-# indented inside a shell function.
-help_dir() { echo "$WK_ROOT/docs/help"; }
-
-help_topics() {
-    local f n
-    [ -d "$(help_dir)" ] || return 0
-    printf '\nconcepts -- wk help <topic>\n'
-    for f in "$(help_dir)"/*.txt; do
-        [ -f "$f" ] || continue
-        n=$(basename "$f" .txt)
-        printf '  %-25s %s\n' "$n" "$(head -1 "$f")"
-    done
+# The synopsis: the first `# wk <name> ... -- <summary>` line of the header.
+synopsis() { # <impl>
+    head -5 "$1" | sed -n 's/^# wk //p' | head -1
 }
 
-help_topic() {
-    local f; f="$(help_dir)/$1.txt"
-    if [ ! -f "$f" ]; then
-        warn "no help topic '$1'"
-        help_topics >&2
-        exit 2
-    fi
-    # From the second line: the first is the one-line summary the listing above
-    # prints, and repeating it as the page's own first line reads like a stutter.
-    tail -n +2 "$f"
-    exit 0
-}
-
-# Which target a command will act on.
-#
-# This has to be answered *before* anything is forwarded, because only the
-# container target lives inside the podman VM. A vm or remote workspace is
-# driven from the host -- forwarding it would run tart or ssh from inside a
-# Linux guest that has neither, and the resulting error would point at the
-# wrong machine entirely.
-#
-# The order matters: an explicit WK_TARGET wins, then a `--target` on this
-# command line (which is how `wk new` chooses), then what the workspace was
-# registered as when it was created. Anything unregistered is a container,
-# because that is both the default and what every workspace predating the
-# registry is.
-resolve_target() {
-    local prev='' a name=''
-
-    [ -n "${WK_TARGET:-}" ] && { printf '%s' "$WK_TARGET"; return 0; }
-
-    for a in "$@"; do
-        if [ "$prev" = --target ]; then printf '%s' "$a"; return 0; fi
-        prev="$a"
-        case "$a" in
-            -*) ;;
-            *)  [ -z "$name" ] && name="$a" ;;
-        esac
-    done
-
-    # The same answer every command gets (ws_target, lib/target.sh): the
-    # registry when it has one, and otherwise whichever target's own store on
-    # this machine holds a workspace of that name. The fallback matters here
-    # more than anywhere: a `wk new` that died before registering leaves a
-    # workspace on a build box. Answering `container` there forwards the
-    # command into the podman VM, which reports "no such workspace" about a
-    # checkout that exists.
-    #
-    # Still a file test per configured target and nothing else -- no ssh, and
-    # nothing started, which is what this function has to remain.
-    if [ -n "$name" ]; then ws_target "$name"; return 0; fi
-    printf '%s' container
-}
-
-# Invocations that act on no target at all, so there is nothing to forward and
-# nothing to start. `wk build --list` prints the config table and stops; today
-# it forwards, which boots the podman machine for nothing -- and on a host
-# without podman it fails with "podman is required", naming a problem the
-# command does not have.
-is_targetless() {
-    # A comparison of two *files on this machine* is host-side: a result taken
-    # in bench mode lives on that machine's own volume, not in the
-    # container store, and forwarding the command into the podman VM looks for
-    # those paths in a Linux guest that has never seen them ("no such run", of
-    # a file sitting right there). A comparison of two run *ids* still
-    # forwards, because those runs and compare-results both live in there.
-    # Seeding a benchmark payload for a workspace that is not a container.
-    #
-    # `wk bench seed <ws> <plan>` reads the plan file out of the workspace and
-    # clones the benchmark into this machine's own cache. For a *container*
-    # workspace both of those live inside the podman VM, so it must forward. For
-    # a macOS guest -- which is where the Apple ports are built, and therefore
-    # the only place the macOS lane can read a plan from -- forwarding sends it
-    # to a Linux VM that has never heard of the guest: on this Mac it started
-    # the podman machine and then failed to find `bench-build`, so the payload
-    # was silently not pinned and the run fell back to cloning Speedometer over
-    # the network *during the measurement*.
-    #
-    # `ws_target` is safe to ask here: it is a file test per configured target
-    # and starts nothing (lib/target.sh).
-    # `wk sync --machine` and `wk sync --all` reach every machine this
-    # workstation drives -- the podman VM, each build box, each running guest,
-    # and a peer that pulls its own. Forwarded into the VM they would run on the
-    # one machine that can see none of them, and would refresh the copy the VM is
-    # already running from and nothing else.
-    #
-    # A workspace-scoped `wk sync` still forwards: the workspaces and the store
-    # it fetches from are both in there, and so is the autodetect that decides
-    # which workspace is meant -- the host cannot see $WK_STORE/ws at all.
-    if [ "$1" = sync ]; then
-        local _a
-        for _a in "$@"; do
-            case "$_a" in --machine|--all) return 0 ;; esac
-        done
-    fi
-
-    if [ "$1" = bench ] && [ "${2:-}" = seed ] && [ -n "${3:-}" ]; then
-        [ "$(ws_target "$3" 2>/dev/null)" = container ] || return 0
-        return 1
-    fi
-    if [ "$1" = bench ] && [ "${2:-}" = compare ]; then
-        local _a _one
-        for _a in "$@"; do
-            # An arm may be several runs, comma-separated (`wk bench compare
-            # a1,a2 b1,b2`), so the whole argument is not a file even when every
-            # part of it is. Testing the argument as one string answered "not
-            # host-side" for a comparison of files sitting on this machine and
-            # forwarded it into the podman VM, where those paths do not exist.
-            local IFS=,
-            for _one in $_a; do
-                [ -f "$_one" ] && return 0
-            done
-        done
-        return 1
-    fi
-    case "$1${2:+ $2}" in
-        "build --list") return 0 ;;
-        # The two halves of a bare-metal benchmark run. Neither acts on a
-        # container workspace and neither may be forwarded into the podman VM:
-        # `stage` copies a build out of a *guest* onto a disk attached to this
-        # machine, and `staged` runs on the machine that booted the benchmark
-        # install. Forwarded, both resolved the word after `bench` as a
-        # workspace name and reported "no such workspace: staged".
-        "bench stage"|"bench staged") return 0 ;;
-        # The macOS lane and the thing that builds the install it runs in, for
-        # the same reason and with the same symptom. `mac-volume` acts on this
-        # Mac's own APFS container -- forwarded it asked a Linux guest about
-        # `diskutil` and died on `podman is required` before reaching any of
-        # it. `mac` is refused on macOS anyway (it must outlive a reboot of the
-        # machine it measures), but only if it gets far enough to say so:
-        # forwarded, the refusal never prints and the podman machine boots for
-        # a command that was never going to run there.
-        # ...and the two verbs the unattended A/B added, for exactly the same
-        # reason. `mac-ab` reaches another machine over ssh and reboots it;
-        # `ab-summary` reads result files sitting on a volume attached to *this*
-        # machine. Forwarded, the first asked a Linux guest to ssh to tolken and
-        # the second looked for `/Volumes/WK Bench - Data/...` in a guest that
-        # has never seen it -- and on a Mac, which has no podman at all, both
-        # die on "podman is required" before printing anything.
-        "bench mac"|"bench mac-volume"|"bench mac-ab"|"bench ab-summary") return 0 ;;
-    esac
+# Is <word> in the comma list <list>, or is the list "*"?
+in_list() { # <word> <list>
+    [ -n "$2" ] || return 1
+    [ "$2" = "*" ] && return 0
+    case ",$2," in *",$1,"*) return 0 ;; esac
     return 1
 }
 
-# Commands that only mean anything on a host, and are refused inside a workspace.
-#
-# Not the same list as is_host_command below: that one is about *forwarding*
-# (which of them the podman machine must not be handed), this one is about the
-# machine they act on. Every one of these operates on a host's hardware or on
-# the host's store -- the seat, the display, tart, the Pis, the snapshot mirror
-# -- and none of that exists in a workspace. Left to run they either no-op
-# against an empty store and report success, or do real work in the wrong place:
-# `wk sync` inside a container would fetch a 13 GB mirror into a directory that
-# is discarded with the workspace.
-#
-# Deliberately not listed: build, run, test, logs, status, ls, pr, skills --
-# those act on the checkout or on the workspace, which is exactly what is here.
-is_host_only() {
-    case "$1" in
-        setup|backup|vm|mcp|quiesce|session|pi|remote|bridge|stop|start|sync|gc) return 0 ;;
-        # The fleet and the image store: a boot device, a firmware register, a
-        # disk measured in gigabytes. None of it exists in a workspace and the
-        # sandbox cannot reach the machine that has it. Each of these carried
-        # its own copy of this refusal, with a comment saying it belonged here
-        # -- it does, next to the commands it is the same rule as.
-        sysimage|boot) return 0 ;;
-        # Sweeping a segment means being on it. A workspace is on a bridged
-        # container network and can see none of the fleet, so the answer from in
-        # there would be an empty listing rather than a refusal -- which is the
-        # worst shape a probe can have.
-        find) return 0 ;;
-        *) return 1 ;;
-    esac
+# The value of <key>= from a `sub` line whose verb list holds <subverb>.
+sub_override() { # <key> <subverb>
+    local e verbs tok
+    while IFS= read -r e; do
+        [ -n "$e" ] || continue
+        verbs=${e%% *}
+        in_list "$2" "$verbs" || continue
+        for tok in ${e#* }; do
+            case "$tok" in "$1="*) printf '%s' "${tok#*=}"; return 0 ;; esac
+        done
+    done <<EOF
+$D_SUB
+EOF
+    return 1
 }
 
-# The host-only commands a workspace may nonetheless *ask for*, through the
-# request broker (container/broker/wk-broker.py, lib/broker.sh).
-#
-# This is not a hole in the list above and it is deliberately not a general
-# one: the command still cannot run in here, still has no route to the
-# hardware, and still holds no key. What changes is that the refusal is
-# delegated to the command, which turns the invocation into a request over a
-# unix socket and prints the workstation's own words back. The broker refuses
-# on every ground `wk boot` refuses on, plus the ones only a boundary cares
-# about -- a machine that is not a bench device, a plan that is not allowlisted,
-# a barrier that only a person may cross.
-#
-# Named by subcommand where the command has several, because most of them are
-# not requests at all: `wk pi setup` puts a device on the tailnet with an auth
-# key, and `wk pi boot-order` writes a firmware register. Those stay refused.
-is_brokerable() {
-    case "$1${2:+ $2}" in
-        boot|"boot "*) return 0 ;;
-        "pi deploy"|"pi bench") return 0 ;;
-        *) return 1 ;;
-    esac
+# How the name arrives for this invocation, after the sub overrides.
+cmd_name() { # <args...>
+    local n
+    n=$(sub_override name "${1:-}") || n="$D_NAME"
+    printf '%s' "$n"
 }
 
-# Creating and destroying a workspace belongs to the machine that keeps the
-# record of it. A shared build box is the far end of a target, not the owner of
-# one: it holds checkouts, and the registry that says which target a workspace
-# belongs to -- and therefore where `wk build bug-238` should go -- lives on the
-# workstation. A `wk new` there would write half that state on the wrong
-# machine, and a `wk rm` there would delete the checkout while the workstation
-# went on listing it.
-is_lifecycle() {
-    case "$1" in
-        new|rm) return 0 ;;
-        *) return 1 ;;
-    esac
+# Where this invocation runs, after the sub/flag overrides.
+cmd_where() { # <impl> <args...>
+    local impl="$1" w e verbs a; shift
+    w=$(sub_override where "${1:-}") || w="$D_WHERE"
+    while IFS= read -r e; do
+        [ -n "$e" ] || continue
+        verbs=${e%% where=*}
+        for a in "$@"; do in_list "$a" "$verbs" && w=${e##*where=}; done
+    done <<EOF
+$D_FLAG
+EOF
+    if [ "$w" = dynamic ]; then
+        w=$("$impl" --where "$@") || die "'wk $(basename "$impl") --where' did not answer"
+    fi
+    printf '%s' "$w"
 }
 
-# Commands that act on the host itself and are never forwarded into the VM.
-#
-# `report` is here because it is `gh` and nothing else: the authenticated GitHub
-# CLI lives on the host, the same reason `key` does. Forwarded, it ran in the
-# podman machine, which has neither gh nor a credential to give it one.
-# `disk` is here because the numbers that matter are host-side: the podman VM's
-# disk image and the Tart guests are files on this machine, and the store inside
-# the VM is asked for over one ssh -- but only when the machine is already
-# running, which forwarding the whole command could not preserve.
-is_host_command() {
-    case "$1" in
-        setup|doctor|selftest|backup|vm|mcp|quiesce|session|pi|remote|bridge|key|report|sudo|version|stop|start|disk|help|-h|--help) return 0 ;;
-        # zed is an editor on this machine. Every route it takes is one this
-        # machine has -- an ssh alias out here, or `podman exec` into the VM --
-        # and forwarded into the VM there is no Zed to run at all.
-        zed) return 0 ;;
-        # gc, because what it reclaims is on two machines when the workstation is
-        # a Mac: the container store inside the podman VM, and the image store
-        # and the pmos build hosts' caches out here. Forwarded whole it pruned
-        # the first and silently left the other two -- so cmd/gc owns the split
-        # now and pipes its own container half into the VM.
-        gc) return 0 ;;
-        # The image store and the fleet drivers are this machine's: the store
-        # is under the host's $WK_STORE and the boot drivers reach machines
-        # over ssh from here. Forwarded into the podman VM they would have
-        # looked in an empty store inside a Linux guest with no route to any
-        # of it.
-        sysimage|boot) return 0 ;;
-        # The neighbour tables it reads are this machine's, and the ssh hops it
-        # makes start here.
-        find) return 0 ;;
-        *) return 1 ;;
-    esac
+cmd_readonly() { # <subverb>
+    [ -n "$D_READONLY" ] || return 1
+    [ "$D_READONLY" = yes ] && return 0
+    in_list "${1:-}" "$D_READONLY"
 }
 
-# Commands that report and change nothing. They still forward when the podman
-# machine is already up -- the container store lives in there and nothing on the
-# host can read it -- but they must never *start* it to answer.
+# What a command declared it needs, checked before it starts. One message shape
+# for every command; `wk doctor` is where the remedies live.
 #
-# Starting it costs the whole memory envelope on a macOS host: `wk ls` booted
-# the machine, and `wk vm start` then refused for want of memory, naming a
-# conflict the user had not created. That is a steep price for a listing, and
-# the same fault `wk build --list` had before it became targetless.
-#
-# The list is the four commands rule 6 names (docs/HANDOFF-workspace-state.md):
-# status, ls, logs, doctor. `doctor` never reaches the forward -- it is a host
-# command and answers here, asking the machine only when it is already running
-# -- but it is named anyway, because the rule is about the command and not
-# about which branch of this file happens to implement it today.
-# A subcommand can be read-only where its command is not: `wk push status`
-# lists where the deploy keys are and changes nothing, and booting a VM to
-# answer it would be the same fault this list exists to prevent.
-is_readonly_report() {
-    case "$1${2:+ $2}" in
-        "push status") return 0 ;;
-        # Reading the image store, and asking a machine what it is attached to
-        # or which role it is in. Every one of these changes nothing -- and
-        # `wk boot --status` in particular has to stay that way, because it is
-        # what you run when you are not sure what a machine is doing.
-        "sysimage ls"|"sysimage show"|"sysimage disks") return 0 ;;
-        "boot --status"|"boot --diag") return 0 ;;
-        # A bridge listing reads conf files and asks each phone whether it
-        # answers; `status` runs the on-device health check, which is read-only
-        # by construction (bridge/bin/wk-bridge-healthcheck says so in its
-        # first line, and exits non-zero rather than repairing anything).
-        "bridge ls"|"bridge status") return 0 ;;
-        # `wk find` sends packets and changes nothing on anything. It is the
-        # command you reach for when a machine is not answering, so it must
-        # never be the command that starts something to answer.
-        find|"find "*) return 0 ;;
-        # `wk remotes --fix` writes: it re-asserts the wiring. Named here so
-        # the *bare* form below can be read-only without this one sneaking in.
-        "remotes --fix") return 1 ;;
-    esac
-    case "$1" in
-        ls|status|logs|doctor|version|remotes|disk) return 0 ;;
-        *) return 1 ;;
-    esac
+# <subverb>, when given, lets a `sub <verbs> needs=<list>` line override the
+# top-level list for that one subverb -- `wk quiesce status`/`wk session
+# status` read what they can without the helper and must not be blocked by
+# the same `needs` that gates `on`/`off`/`gdm`. Reuses sub_override rather
+# than inventing a second per-subverb mechanism.
+check_needs() { # <cmd> [<subverb>]
+    local n missing="" needs="$D_NEEDS" ov
+    if [ -n "${2:-}" ] && ov=$(sub_override needs "$2"); then needs="$ov"; fi
+    [ -n "$needs" ] || return 0
+    for n in $(printf '%s' "$needs" | tr , ' '); do
+        case "$n" in
+            gh-auth) command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 \
+                         || missing="$missing
+    gh-auth    gh is not logged in: gh auth login" ;;
+            tailnet) tailscale status >/dev/null 2>&1 \
+                         || missing="$missing
+    tailnet    this machine is not on the tailnet: tailscale up" ;;
+            quiesce-helper)
+                [ -x /usr/local/libexec/wk-quiesce-priv ] \
+                    && sudo -n /usr/local/libexec/wk-quiesce-priv status >/dev/null 2>&1 \
+                        || missing="$missing
+    quiesce-helper    the privileged quiesce/session helper is not set up: ./setup --stage quiesce" ;;
+            *)       command -v "$n" >/dev/null 2>&1 \
+                         || missing="$missing
+    $n    not installed here" ;;
+        esac
+    done
+    [ -z "$missing" ] || die "'wk $1' cannot start here:$missing
+    wk doctor says how to get each of these."
 }
 
-# --- what is this command? ---------------------------------------------------
-#
-# `wk <cmd> --explain` answers "what does this do, what will it touch, and how
-# do I ask it to show me before it acts" -- for an agent, which otherwise has
-# to read the implementation or guess from the name, and for anyone at a
-# terminal wondering whether a command is safe to run here.
-#
-# Every fact printed is derived, and none of it is written twice:
-#
-#   what it does   the command's own header comment, which is the file's
-#                  documentation and sits next to the code it describes. A
-#                  second copy in a table here would be a copy to keep right.
-#   what it acts on / whether it changes anything
-#                  the same lists the dispatcher itself branches on, so a
-#                  command that says "read-only" is read-only by the same
-#                  test that stops it starting the podman machine.
-#   how to preview it
-#                  by looking for a --dry-run in the implementation, which is
-#                  the only honest source for whether one exists.
-#   usage          the line `wk help` already prints for it.
-#
-# Answered here, before any target is resolved and before anything is
-# forwarded: explaining a command must never start a machine, and must work on
-# a host where the thing it describes cannot even run.
-explain_cmd() {
-    local cmd="$1" impl="$2" line
+# The <n>th positional argument (1-based) -- where the workspace name sits:
+# first, or second after a subverb.
+positional() { # <n> <args...>
+    local n="$1" a i=0; shift
+    for a in "$@"; do
+        case "$a" in -*) ;; *) i=$((i + 1)); [ "$i" -eq "$n" ] && { printf '%s' "$a"; return 0; } ;; esac
+    done
+    return 1
+}
 
-    printf 'wk %s\n' "$cmd"
+# ARGS = <args...> without the <n>th positional.
+without_positional() { # <n> <args...>
+    local n="$1" a i=0; shift
+    ARGS=()
+    for a in "$@"; do
+        case "$a" in -*) ;; *) i=$((i + 1)); [ "$i" -eq "$n" ] && continue ;; esac
+        ARGS+=("$a")
+    done
+}
 
-    # `|| true`: usage() ends in `exit 2`, and under `set -o pipefail` that
-    # status becomes the assignment's, which would end this shell before it
-    # printed anything at all.
-    # The entry `wk help` prints for it, continuation lines included -- several
-    # are two lines and the second one carries the qualifier that matters, and
-    # the sub-flags under a command (`build --detach`, `image write`) are
-    # indented six rather than eight, which an earlier threshold cut off
-    # exactly where the interesting part started.
-    # `|| true`: usage() ends in `exit 2`, and under `set -o pipefail` that
-    # status becomes the assignment's, which would end this shell before it
-    # printed anything at all.
-    line=$( (usage 2>&1 || true) | awk -v c="$cmd" '
-        $0 ~ "^  " c "( |$)" { on = 1; sub(/^  */, ""); print "  usage: " $0; next }
-        on && /^ {6,}/       { sub(/^    /, ""); print "         " $0; next }
-        on                   { exit }' ) || true
-    [ -n "$line" ] && printf '%s\n' "$line"
+# Where the name sits in argv: 1, or the @N of the name declaration.
+name_slot() { # <name-decl>
+    case "$1" in *@*) printf '%s' "${1#*@}" ;; *) printf 1 ;; esac
+}
 
-    if is_readonly_report "$cmd"; then
-        printf '  changes things: no -- read-only absolutely (starts nothing, writes nothing, repairs nothing)\n'
-        # ...with the one exception a report is allowed to have: a command whose
-        # own text offers --fix has a writing form, and claiming otherwise about
-        # the command as a whole would be the kind of overstatement this line
-        # exists to prevent.
-        grep -q -- '--fix' "$impl" 2>/dev/null && \
-            printf '                  ...except with --fix, which is the only form here that writes\n'
+# --- usage, derived from the commands themselves ------------------------------
+
+usage() {
+    {
+        printf 'usage: wk <command> [args]\n'
+        usage_group workspaces "workspaces"
+        usage_group sources    "sources and disk"
+        usage_group hosts      "hosts and machines"
+        usage_group other      "other"
+        cat <<'EOF'
+
+  Inside a workspace the name is implicit: `wk build <config>`, `wk run -- <args>`
+  act on this machine.
+
+  wk <command> -h          what it does, what it acts on, whether it changes anything
+  wk <command> --force     cross a refusal that exists because of a rule; the
+                           warning repeats when the command ends. It does not
+                           force past a missing workspace or a failed build
+  WK_DEBUG=1               verbose output
+EOF
+        printf '\n  wk help                  README.md: architecture, setup, every workflow by example\n'
+    } >&2
+    exit 2
+}
+
+usage_group() { # <group> <title>
+    local f n syn line printed=""
+    for f in "$WK_ROOT"/cmd/*; do
+        [ -f "$f" ] && [ -x "$f" ] || continue
+        decl_load "$f"
+        [ "$D_GROUP" = "$1" ] || continue
+        n=$(basename "$f")
+        line=$(synopsis "$f")
+        syn=${line%% -- *}
+        [ -n "$printed" ] || { printf '\n%s\n' "$2"; printed=1; }
+        printf '  %-32s %s\n' "$syn" "${line#* -- }"
+    done
+}
+
+# `wk --declarations`: one line per command, machine-readable, so
+# `wk completion` reads what `wk`'s own usage reads rather than re-parsing
+# cmd/* a second way. Tab-separated: name, where, name=<required|optional|
+# none>, group, synopsis (the part before " -- ").
+dump_declarations() {
+    local f n line syn
+    for f in "$WK_ROOT"/cmd/*; do
+        [ -f "$f" ] && [ -x "$f" ] || continue
+        decl_load "$f"
+        n=$(basename "$f")
+        line=$(synopsis "$f")
+        syn=${line%% -- *}
+        printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$D_WHERE" "$D_NAME" "$D_GROUP" "$syn"
+    done
+}
+
+# --- help ---------------------------------------------------------------------
+#
+# README.md is the one document: architecture, setup, every workflow by example.
+help_doc() {
+    local f="$WK_ROOT/README.md"
+    if [ -t 1 ] && command -v less >/dev/null 2>&1; then less "$f"; else cat "$f"; fi
+    exit 0
+}
+
+# `wk <cmd> -h`: the one help path for every command. The header comment of
+# cmd/<name> is the reference text; the declaration says what it acts on.
+explain_cmd() { # <cmd> <impl>
+    local cmd="$1" impl="$2"
+    printf 'wk %s\n\n' "$(synopsis "$impl")"
+    if cmd_readonly; then
+        printf '  changes things: no -- starts nothing, writes nothing, repairs nothing\n'
     else
         printf '  changes things: yes\n'
     fi
-
-    if is_host_only "$cmd"; then
-        printf "  runs on: a host's own store or hardware; refused inside a workspace and on a build machine\n"
-    elif is_lifecycle "$cmd"; then
-        printf '  runs on: the workstation that keeps the workspace record\n'
-    elif is_host_command "$cmd"; then
-        printf '  runs on: this machine, never forwarded\n'
-    else
-        printf "  runs on: the workspace's target (forwarded into the podman VM for a container workspace on macOS)\n"
-    fi
-
-    if grep -q -- '--dry-run' "$impl" 2>/dev/null; then
-        printf '  preview: wk %s ... --dry-run resolves everything and changes nothing\n' "$cmd"
-        # Where the dry run does not stop at "this is what I resolved" but
-        # prints the commands themselves, say so -- that is the question
-        # --explain gets asked next, and the answer is a different flag rather
-        # than a longer explanation here. This file explains *the command*; the
-        # dry run reports what an actual invocation would do, which only the
-        # command (and, for a build, the target) can know.
-        grep -q 'WK_DRY_RUN' "$impl" 2>/dev/null && \
-            printf '           ...and prints the exact commands it would run, the far side%s\n' "'s included"
-    fi
-
-    # The header comment: everything from the line after the shebang to the
-    # first line that is not a comment. Blank comment lines are kept, because
-    # they are the paragraph breaks.
+    case "$D_WHERE" in
+        host)  printf "  runs on: this host's own store or hardware; refused inside a workspace and on a build machine\n" ;;
+        local) printf '  runs on: this machine, never forwarded\n' ;;
+        *)     if [ -n "$D_LIFECYCLE" ]; then
+                   printf '  runs on: the workstation that keeps the workspace record\n'
+               else
+                   printf "  runs on: the workspace's target (forwarded into the podman VM for a container workspace on macOS)\n"
+               fi ;;
+    esac
+    grep -q -- '--dry-run' "$impl" 2>/dev/null \
+        && printf '  preview: wk %s ... --dry-run resolves everything and changes nothing\n' "$cmd"
     printf '\nwhat it does (from %s):\n' "${impl#$WK_ROOT/}"
-    # Two shapes, because one command is python: a `#` comment block, or a
-    # module docstring. Both are the file's own first words about itself.
     awk 'NR == 1 { next }
-         NR == 2 && /^"""/ { doc = 1; sub(/^"""[[:space:]]*/, "")
-                             if ($0 != "") { seen = 1; print "  " $0 }
-                             next }
-         doc && /"""/ { exit }
-         doc { if ($0 == "" && !seen) next
-               seen = 1; print "  " $0; next }
-         /^#!/ { next }
-         /^#/  { sub(/^# ?/, "")
-                 if ($0 == "" && !seen) next        # the blank line under the shebang
-                 seen = 1; print "  " $0; next }
+         /^# wk:/ { next }
+         /^# wk [a-z]/ && !seen { next }
+         /^#/  { sub(/^# ?/, ""); if ($0 == "" && !seen) next; seen = 1; print "  " $0; next }
          { exit }' "$impl"
     exit 0
+}
+
+# --- which target, and whether to forward -------------------------------------
+#
+# Only the container target lives inside the podman VM; vm and remote
+# workspaces are driven from the host. An explicit WK_TARGET wins, then a
+# `--target` on the command line (how `wk new` chooses), then the registry --
+# a file test per target, no ssh, nothing started.
+resolve_target() {
+    local prev='' a name=''
+    [ -n "${WK_TARGET:-}" ] && { printf '%s' "$WK_TARGET"; return 0; }
+    for a in "$@"; do
+        if [ "$prev" = --target ]; then printf '%s' "$a"; return 0; fi
+        prev="$a"
+        case "$a" in -*) ;; *) [ -z "$name" ] && name="$a" ;; esac
+    done
+    if [ -n "$name" ]; then ws_target "$name"; return 0; fi
+    printf '%s' container
 }
 
 machine_running() {
     [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ]
 }
 
-# A bare `wk ls` or `wk status` reports on every target there is -- and on a
-# macOS host that claim was false. The dispatcher forwards a bare report into
-# the podman VM, whose registry has never heard of a macOS guest or a shared
-# build machine: both are driven from out here, and both were silently missing
-# from the one command whose whole job is "what is happening". `wk ls` had it
-# worse: it was forwarded whole, so it never mentioned them at all.
-#
-# So both go through here, and "the workspaces" means the same set in each:
-# the host-side targets are walked in one pass out here (WK_TARGET takes a
-# list, and cmd/ls and cmd/status share walk_targets), and the container half
-# is forwarded, because that store is only readable in there.
-#
-# Not exec'd, unlike every other forward, so the two halves' exit codes can be
-# combined: this command promises a machine-readable status and a caller must
-# not be told about the containers alone.
-# The rendering half of `wk status`'s arguments, as assignments to eval.
-#
-# `wk status --html <path>` and `--web --port N` say where the output goes, and
-# on a macOS host the process that renders is this one rather than either half
-# that collects. Printed rather than assigned so the parse can shift freely.
 status_view_env() {
     # The default is the shared one (status_default_mode, lib/common.sh) rather
     # than a word written here: on a macOS host *this* process renders and on
@@ -669,8 +381,6 @@ status_view_env() {
     printf 'WK_STATUS_INTERVAL=%s\n' "$(sh_quote "$interval")"
 }
 
-# Whether a listing command was asked about everything or about one workspace.
-# Flags and their values are not a subject; a bare word is.
 bare_subject() {
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -823,7 +533,7 @@ forward_to_vm() {
         # callers is a guard that a later path can walk past -- which is
         # exactly what was observed. It also closes the window between a
         # caller's own machine_running check and this one.
-        if is_readonly_report "$1" "${2:-}"; then
+        if cmd_readonly "${2:-}"; then
             warn "the podman machine '$WK_MACHINE' is stopped, so its store cannot be read"
             log  "  'wk start' to bring it up -- 'wk $1' will not start it"
             exit 0
@@ -886,201 +596,133 @@ forward_to_vm() {
     exec podman machine ssh "$WK_MACHINE" -- "$_cmd"
 }
 
+
+# --- main ---------------------------------------------------------------------
+
 main() {
     [ $# -ge 1 ] || usage
-    local cmd="$1" _a _seen_dashdash="" _rest; shift
-
+    local cmd="$1" _a _seen_dashdash="" _rest where name=""; shift
     case "$cmd" in
-        # A topic argument makes this a question about a concept rather than
-        # about a command -- and, like --explain, it must be answerable
-        # anywhere: inside a workspace, on a build box, on a host with no
-        # podman. Nothing below this point is reached.
-        help|-h|--help) [ $# -ge 1 ] && help_topic "$1"; usage ;;
-        # Advertised in the help but implemented by the top-level script, so it
-        # has no cmd/ file for the dispatch below to find.
+        help|-h|--help) help_doc ;;
         setup) exec "$WK_ROOT/setup" "$@" ;;
-        # A bootable artifact is a *system*, never bare "image", which means
-        # three other things here. One spelling, and this name points at it.
         image) die "'wk image' is renamed: wk sysimage" ;;
+        --declarations) dump_declarations; exit 0 ;;
     esac
-
     local impl="$WK_ROOT/cmd/$cmd"
-
-    # Validate before forwarding. Otherwise a typo starts the VM and then fails
-    # inside it, which is slow and reports the wrong problem.
     [ -x "$impl" ] || { warn "unknown command: $cmd"; usage; }
+    decl_load "$impl"
 
-    # Before every refusal and every forward below: --explain is a question
-    # about the command, not a use of it, so it must be answerable inside a
-    # workspace, on a shared build machine, and on a host with no podman.
-    # Only before a `--`: everything after that belongs to whatever the command
-    # runs (`wk run <ws> -- --explain` is jsc's argument, not ours).
-    #
-    # --force is taken off the line here and passed as WK_FORCE, so every
-    # command gets it without each one having to parse a flag it would then
-    # have to remember to reject in the wrong place. Commands that already had
-    # a --force of their own (wk bench) honour the variable as well.
     _rest=()
     for _a in ${@+"$@"}; do
         case "$_seen_dashdash:$_a" in
-            :--explain) explain_cmd "$cmd" "$impl" ;;
-            :--force)   WK_FORCE=1; export WK_FORCE; continue ;;
-            :--)        _seen_dashdash=1 ;;
+            :-h|:--help|:--explain) explain_cmd "$cmd" "$impl" ;;
+            :--force) WK_FORCE=1; export WK_FORCE; continue ;;
+            :--)      _seen_dashdash=1 ;;
         esac
         _rest+=("$_a")
     done
     set -- ${_rest[@]+"${_rest[@]}"}
 
-    if in_workspace && is_host_only "$cmd" && ! is_brokerable "$cmd" "${1:-}"; then
+    where=$(cmd_where "$impl" "$@")
+
+    # A host command inside a workspace or on a shared build host acts on a
+    # store that is not here.
+    if in_workspace && { [ "$where" = host ] || [ -n "$D_OUTSIDE" ]; } && ! in_list "${1:-}" "$D_BROKER"; then
+        if [ -n "$D_OUTSIDE" ]; then
+            die "'wk $cmd' acts on a host, and this is workspace '$(wk_self)'.
+    From the host:  wk $cmd $(wk_self)"
+        fi
         die "'wk $cmd' acts on a host, and this is workspace '$(wk_self)'.
     Run it on the host instead."
     fi
-
-    # A shared build machine is not a workstation either, and it is not the
-    # owner of the workspaces it holds.
-    #
-    # The host-only list acts on a host's own store or hardware, and two of
-    # them would do more than no-op, which is why this is a refusal rather than
-    # a matter of taste: `wk sync` would build a 13 GB mirror in a home
-    # directory whose MOTD asks everyone to keep disk use down, and `wk gc`
-    # would prune a store that is not where this machine's workspaces come
-    # from.
-    if in_remote_host && is_host_only "$cmd"; then
+    if in_remote_host && [ "$where" = host ]; then
         die "'wk $cmd' acts on a workstation's own store or hardware, and this is
     the shared build machine for target '$(wk_remote_field target)'.
     Run it on the workstation instead. What works here: ls, status, build,
     run, test, logs, enter."
     fi
-
-    if in_remote_host && is_lifecycle "$cmd"; then
+    if in_remote_host && [ -n "$D_LIFECYCLE" ]; then
         die "workspaces are created and destroyed from the workstation, and this is
     the shared build machine for target '$(wk_remote_field target)'.
     Run 'wk $cmd' there: it keeps the record of which target a workspace
-    belongs to, and that record is what sends a later 'wk build' back here.
-    What works here: build, run, test, logs, status, ls, enter."
+    belongs to, and that record is what sends a later 'wk build' back here."
     fi
 
+    # What the command needs, checked after the refusals about where it may run
+    # and before anything starts. On a macOS host a container command is
+    # answered in the podman VM, which has its own tools; the check runs there.
+    { [ "$where" = workspace ] && is_macos && [ -z "${WK_IN_VM:-}" ] && ! in_workspace \
+        && [ "$D_FORWARD" = yes ] && [ "$(resolve_target "$@")" = container ]; } || check_needs "$cmd" "${1:-}"
+
+    [ "$where" = workspace ] || exec "$impl" "$@"
+
+    # --- a workspace command ---------------------------------------------------
+    local decl slot; decl=$(cmd_name "$@"); slot=$(name_slot "$decl")
+    if ! in_workspace && [ "${decl%@*}" = required ]; then
+        positional "$slot" "$@" >/dev/null || usage_die "$cmd" "$impl"
+    fi
     if in_workspace; then
-        # Inside a workspace every command acts on this machine. There is no
-        # podman machine to forward to and there never can be -- a container has
-        # no podman, a macOS guest has no nested virtualisation -- and the
-        # workspace is the thing the command means. An explicit WK_TARGET still
-        # wins, so a workspace can be told to act as something else if it ever
-        # has the means to.
-        : "${WK_TARGET:=local}"
-        export WK_TARGET
-    elif is_macos && [ -z "${WK_IN_VM:-}" ] && ! is_host_command "$cmd" \
-            && ! is_targetless "$cmd" "$@"; then
-        if [ "$(resolve_target "$@")" = container ]; then
-            # Answering "there is nothing to say, and here is why" beats both
-            # booting a VM for it and printing an empty table from a store that
-            # is not this machine's.
-            # A container workspace on a macOS host has no seat and never can
-            # have one: the podman machine is a Linux VM with no GPU (SETUP.md
-            # says so as a permanent property), and there is no host compositor
-            # for it to draw into -- macOS has no Wayland socket to pass in.
-            # Forwarded, `wk gui` would run inside the podman VM, where
-            # `is_linux` is true, fail the seat check, and advise `wk session
-            # on`, which refuses on macOS. Better to say the true thing here,
-            # where both facts are known.
-            #
-            # VNC/SPICE into the container is the option not taken. It would
-            # mean a compositor and a VNC server inside the workspace, both
-            # installed through the egress allowlist, to reach a
-            # software-rendered browser -- while the same machine has an
-            # accelerated one a `wk vm new` away. Worth building only if a
-            # container-only workspace ever has to be looked at.
-            if [ "$cmd" = gui ]; then
-                die "a container workspace on a macOS host has no display, and cannot get one:
-    the podman machine has no GPU and there is no compositor to draw into.
-    Use a macOS guest instead -- 'wk vm new <name>', then 'wk gui <name>',
-    which runs MiniBrowser on the guest's own desktop with the real GPU."
-            fi
-
-            # --zed is an editor on *this* machine, and the container it is
-            # being pointed at is inside the VM. So the two halves run where
-            # they belong: any workspace work is forwarded, and the launch
-            # happens out here, through cmd/zed -- which reaches into the
-            # container over `podman exec` (container/ssh-transport.sh) because
-            # a container has no network interface to reach it by.
-            #
-            # Forwarded whole it would look for /Applications/Zed.app inside a
-            # Linux VM and report "zed is not installed" about a Mac that has
-            # it.
-            case " $* " in
-                *" --zed "*)
-                    _zargs=(); _zname=""
-                    for _a in "$@"; do
-                        case "$_a" in
-                            --zed) continue ;;
-                            -*) ;;
-                            *) [ -n "$_zname" ] || _zname="$_a" ;;
-                        esac
-                        _zargs+=("$_a")
-                    done
-                    [ -n "$_zname" ] || die "'wk $cmd --zed' needs a workspace name"
-                    # A subshell, because forward_to_vm ends in exec: without
-                    # one, the creation would replace this process and the
-                    # editor would never be opened.
-                    if [ "$cmd" = new ]; then
-                        ( forward_to_vm "$cmd" ${_zargs[@]+"${_zargs[@]}"} ) \
-                            || die "creating '$_zname' failed, so nothing was opened.
+        : "${WK_TARGET:=local}"; export WK_TARGET
+        name=$(wk_self)
+        if [ "${decl%@*}" != none ] && [ "$(positional "$slot" "$@" || true)" = "$name" ]; then
+            die "this is workspace '$name', and there is no workspace argument in here --
+    every command acts on this one. Drop the name: wk $cmd"
+        fi
+    elif is_macos && [ -z "${WK_IN_VM:-}" ] && [ "$D_FORWARD" = yes ] \
+            && [ "$(resolve_target "$@")" = container ]; then
+        # A container workspace on a macOS host lives in the podman VM; the
+        # VM's own `wk` resolves the name and waits for readiness there.
+        if [ "$D_POST" = zed ] && in_list --zed "$(printf '%s,' "$@")"; then
+            ARGS=(); for _a in "$@"; do [ "$_a" = --zed ] || ARGS+=("$_a"); done
+            name=$(positional 1 ${ARGS[@]+"${ARGS[@]}"}) \
+                || die "'wk $cmd --zed' needs a workspace name"
+            ( forward_to_vm "$cmd" ${ARGS[@]+"${ARGS[@]}"} ) \
+                || die "'wk $cmd $name' failed, so nothing was opened.
     What it managed to say is above; a re-run destroys the rubble and retries."
-                    fi
-                    exec "$WK_ROOT/cmd/zed" "$_zname" ;;
-            esac
+            exec "$WK_ROOT/cmd/zed" "$name"
+        fi
+        if [ "$D_POST" = ssh-alias-remove ]; then
+            name=$(positional 1 "$@" || true)
+            ( forward_to_vm "$cmd" "$@" ) || exit $?
+            [ -z "$name" ] || ssh_alias_remove "$name"
+            exit 0
+        fi
+        if [ "$D_BARE" = merged ] && bare_subject "$@"; then
+            bare_report "$impl" "$cmd" "$@"
+        fi
+        if cmd_readonly "${1:-}" && ! command -v podman >/dev/null 2>&1; then
+            warn "podman is not installed, so there are no container workspaces to read"
+            log  "  './setup' installs it; 'wk vm ls' lists the macOS guests, which do not need it"
+            exit 0
+        fi
+        forward_to_vm "$cmd" "$@"
+    fi
 
-            # `wk rm` of a container workspace: the workspace is destroyed in
-            # there, and the ssh alias that reached it is out here (cmd/zed
-            # writes it on the machine the editor runs on, which is the only
-            # machine that can). The forwarded half would remove an entry from
-            # the VM's own ~/.ssh, where nothing reads one -- so this end takes
-            # its own, after the far side has said the workspace is gone.
-            if [ "$cmd" = rm ] && [ -n "${1:-}" ]; then
-                case "${1:-}" in -*) ;; *) _rmname="$1" ;; esac
-                ( forward_to_vm "$cmd" "$@" ) || exit $?
-                [ -z "${_rmname:-}" ] || ssh_alias_remove "$_rmname"
-                exit 0
-            fi
-
-            # Before the readonly-report shortcut below, which would answer
-            # for the containers alone and exit.
-            #
-            # "Bare" is about the *subject*, not the argument count: `wk status`
-            # and `wk status --json` are both "everything there is", and only a
-            # workspace name makes it something narrower. Counting arguments --
-            # which is what this did -- sent `wk status --json` down the
-            # forward-it-whole path, so it answered for this machine's
-            # containers and silently left out its guests and every build box.
-            if [ "$cmd" = status ] && bare_subject "$@"; then
-                bare_report "$impl" "$cmd" "$@"
-            fi
-            if [ $# -eq 0 ] && [ "$cmd" = ls ]; then
-                bare_report "$impl" "$cmd"
-            fi
-            # `wk remotes` is the same shape of report -- every workspace there
-            # is -- and it keeps that meaning with its one flag, which is why it
-            # is matched with an argument where status and ls are not.
-            if [ "$cmd" = remotes ] && { [ $# -eq 0 ] || [ "${1:-}" = --fix ]; }; then
-                bare_report "$impl" remotes ${1:+"$1"}
-            fi
-
-            # A machine that is merely stopped is handled inside
-            # forward_to_vm, which is the one place that could start it and so
-            # the one place the rule has to hold. This is the other half: no
-            # podman at all, where there is nothing to forward to and `require
-            # podman` would report a missing package rather than an empty
-            # listing.
-            if is_readonly_report "$cmd" "${1:-}" && ! command -v podman >/dev/null 2>&1; then
-                warn "podman is not installed, so there are no container workspaces to read"
-                log  "  './setup' installs it; 'wk vm ls' lists the macOS guests, which do not need it"
-                exit 0
-            fi
-            forward_to_vm "$cmd" "$@"
+    # Running here: resolve the name once, and the command reads WK_NAME.
+    case "${decl%@*}" in
+        required)
+            if [ -z "$name" ]; then
+                name=$(positional "$slot" "$@")
+                without_positional "$slot" "$@"; set -- ${ARGS[@]+"${ARGS[@]}"}
+            fi ;;
+        optional)
+            if [ -z "$name" ]; then
+                _a=$(positional "$slot" "$@" || true)
+                if [ -n "$_a" ] && ws_exists "$_a"; then
+                    name="$_a"; without_positional "$slot" "$@"; set -- ${ARGS[@]+"${ARGS[@]}"}
+                fi
+            fi ;;
+    esac
+    if [ -n "$name" ]; then
+        WK_NAME="$name"; export WK_NAME
+        if [ "$D_READY" = yes ]; then
+            command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+            # Inside a workspace the marker is the proof it exists.
+            in_workspace || ws_exists "$name" || usage_die "$cmd" "$impl" "no such workspace: $name"
+            load_target "$(ws_target "$name")"
+            wait_ready "$name"
         fi
     fi
-
     exec "$impl" "$@"
 }
-
 main "$@"

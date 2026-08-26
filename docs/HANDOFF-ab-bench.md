@@ -31,13 +31,13 @@ system: the rescue.
   card. `wk sysimage write` writes one whole system to one whole device and
   cannot put one into a slot — `docs/HANDOFF-boot.md` items 1–3. The rescue was
   written `--rescue` (so un-grown): 55 GB of that card is free and waiting.
-- **rpi4**: decided and now recorded — **rescue on the USB stick, bench system
-  on the SD** (`rpi4.conf`, `wk help hardware`). It follows from the boot order:
-  the board is usb-first, so the stick is what an untouched board comes up on and
-  that has to be the system which answers. The arming byte is unchanged pointing
-  the other way — a stick typed 0x0c boots the rescue, 0x83 steps the firmware
-  over it onto the SD for one boot.
-  The USB already holds the rescue, so what is owed is the **SD**: it still
+  The remote transition is worked out but never run: write the rescue to the
+  USB stick from the running board, flip the SD's MBR type to `0x83`, let the
+  USB rescue repartition and rewrite the SD as rescue+bench, flip the type
+  back — one window in that sequence with no fall-through if it fails.
+- **rpi4**: rescue on the USB stick, bench system on the SD (`rpi4.conf`,
+  `wk help hardware` has why). The USB already holds the rescue, so what is
+  owed is the **SD**: it still
   carries a pre-tailnet bench image with no tailscale in it. Needs the card in a
   reader.
   Owed with it: `b_media` and `b_system_kind` (boot/pi-usb.sh, boot/machines.sh)
@@ -45,28 +45,42 @@ system: the rescue.
   Re-read both against this arrangement before trusting what `wk boot
   rpi4 --status` says about which system is running.
 
-## 3. buildroot 2.38 on the rpi4
+## 3. The buildroot builder itself is not written
 
-`wpewebkit-2.38-buildroot-rpi3-32` builds and produces a bootable `sdcard.img`
-with tailscale in it. The rpi4 configuration has not been built.
+`buildroot_build` (`image/buildroot.sh`) refuses: the configurations are real
+— `wpewebkit-2.38-buildroot-rpi3-32` builds and produces a bootable
+`sdcard.img` with tailscale in it, and the rpi4 config now has a derived
+defconfig too (`image/buildroot/external/configs/README` has the derivation
+line by line: the fork's release-pinned `_wpe_<rel>_cog_` defconfigs are
+rpi3-only, so the rpi4 defconfig borrows the rpi3 config's release/cog pinning
+and `raspberrypi4_wpe_defconfig`'s six board-specific lines) — but the
+mechanism between "a real defconfig" and "a build" is missing on the driver
+side.
 
-**Re-check the whole defconfig question before building anything.** This
-repository currently points that configuration at a defconfig it derives itself
-(`image/buildroot/external/configs`, README carries the derivation), on the
-conclusion that the fork ships no release-pinned rpi4 defconfig. That conclusion
-is disputed -- the upstream rpi4 defconfig is in use by others -- so the
-derivation may be unnecessary and may be actively wrong. Before spending a build:
-
-- list what the fork actually ships (`make list-defconfigs` in the pinned tree,
-  not the GitHub API), on the commit `BR_TREE_COMMIT` names;
-- try `raspberrypi4_wpe_defconfig` as it ships, and work out where the WPE
-  release pinning comes from in it -- if it comes from the tree rather than the
-  defconfig name, there was never anything to derive;
-- delete the derived defconfig and its README if that is the answer. A config
-  this repo maintains and does not need is worse than none.
+- [ ] write `buildroot_build` (host driver) + `image/buildroot-build.sh`
+      (in-workspace worker), the same host/worker split the yocto lane uses.
+      A dry run is verified; a real build is what is owed
+- [ ] `image/buildroot/external/` (the `HOST_PYTHON_CONF_OPTS`/
+      `HOST_PYTHON_DEPENDENCIES` libffi fix, applied from outside the tree)
+      has never been run through a build. Without it no buildroot build
+      completes on an arm64 host — both this Mac's podman VM and moose —
+      because host-python-2.7.17's bundled libffi does not assemble on arm64.
+      The three-line fix is checked as make semantics against buildroot's own
+      rule shape; the build itself is owed
+- [ ] once the builder exists: `wpewebkit-2.38-buildroot-rpi4-32`, never built
+      or booted — validating the derived defconfig needs the board
+- [ ] the rpi5's 64-bit buildroot 2.38 configuration, once the above is settled
+- [ ] the build host is Ubuntu 22.04 in its own workspace
+      (`container/buildroot/Containerfile`, `BUILDROOT_BASE_IMAGE`) — the host
+      the wiki's own recipe was driven on. `-j` is memory-sized (2048 MB/job)
+      and capped at 16, because a 2020 buildroot building 2009-era tarballs is
+      where broken parallel Makefile rules live
 
 Expect new egress refusals either way, and add them the way the existing ones
-got there: from a `DENY` line in the proxy log, not in anticipation.
+got there: from a `DENY` line in the proxy log, not in anticipation
+(`BR2_PRIMARY_SITE` covers most of it; `sources.buildroot.net`,
+`ftpmirror.gnu.org` and `wpewebkit.org` are the fallbacks already allowed from
+real refusals).
 
 ## 4. `wk pi bench --ab` has never run
 

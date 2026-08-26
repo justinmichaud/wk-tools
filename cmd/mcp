@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
-"""
-wk mcp -- an MCP server exposing workspace management to the Claude Desktop app.
-
-This is what lets the desktop app spin up a workspace on its own, the way the
-cloud container feature does: ask it to look at a bug, and it creates a named
-workspace and works inside it.
-
-Two properties matter more than features here, because unlike `wk claude` this
-process runs on the *host*, outside the sandbox:
-
-  Only the driver contract is exposed. There is no generic exec tool, no
-  argument that becomes a host path, and no way to name a directory outside a
-  workspace. Every call bottoms out in `wk <subcommand> <validated-name>`, and
-  the name is checked against a strict pattern before it is used.
-
-  Creation is bounded. An agent that can make workspaces can fill a disk, so
-  there is a ceiling on how many can exist at once.
-
-No third-party dependencies: raw JSON-RPC over stdio, so the host needs nothing
-installed beyond the python3 that ships with the Xcode command line tools.
-"""
+#
+# wk mcp -- MCP server exposing workspace management to the Claude Desktop app
+# wk: where=host name=none group=hosts needs python3
+#
+# Lets the desktop app spin up a workspace on its own, the way the cloud
+# container feature does: ask it to look at a bug, and it creates a named
+# workspace and works inside it.
+#
+# Two properties matter more than features here, because unlike `wk claude`
+# this process runs on the *host*, outside the sandbox:
+#
+#   Only the driver contract is exposed. There is no generic exec tool, no
+#   argument that becomes a host path, and no way to name a directory outside
+#   a workspace. Every call bottoms out in `wk <subcommand> <validated-name>`,
+#   and the name is checked against a strict pattern before it is used.
+#
+#   Creation is bounded. An agent that can make workspaces can fill a disk, so
+#   there is a ceiling on how many can exist at once (WK_MCP_MAX_WORKSPACES).
+#
+# No third-party dependencies: raw JSON-RPC over stdio, so the host needs
+# nothing installed beyond the python3 that ships with the Xcode command line
+# tools.
+#
+# Tools exposed over MCP: workspace_create, workspace_list, workspace_build,
+# workspace_exec, workspace_status, workspace_destroy.
 
 import json
 import os

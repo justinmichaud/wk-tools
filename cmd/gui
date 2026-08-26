@@ -1,34 +1,29 @@
 #!/usr/bin/env bash
 #
-# wk gui <workspace> [url] [--config C] [--wpe|--gtk|--mac] [--lldb [ui|web]]
-#        [-- browser args]
+# wk gui <workspace> [<url>] [flags] -- run MiniBrowser in the benchmark seat
+# wk: where=workspace name=required ready=yes forward=no group=workspaces
 #
 # MiniBrowser in the benchmark seat -- the same launch a perf run performs,
 # without the benchmark around it.
 #
-# run-benchmark does not start the browser in any clever way: its Linux drivers
-# (webkitpy/benchmark_runner/browser_driver/linux_minibrowser{wpe,gtk}_driver.py)
-# run `Tools/Scripts/run-minibrowser --wpe -- --fullscreen URL` inside the
-# workspace, and the compositor's socket is already in the container's
-# environment because targets/container.sh puts it there. So this command is
-# thin on purpose: what it buys is the port flag, the build type and the
-# fullscreen spelling all coming from the same config the build did, plus a
-# refusal when there is no session to draw into.
+#   [<url>]                page to load (default: about:blank)
+#   --config <config>      build config to run (default: per-host/workspace)
+#   --wpe, --gtk, --mac    shorthand for --config wpe-release / gtk-release / mac-release
+#   --no-fullscreen        skip the port's fullscreen flag
+#   --lldb [ui|web]        run under lldb: "ui" (default) stops before start;
+#                          "web" runs normally and attaches to the web process
+#   -- <args>              extra arguments passed straight to the browser
 #
-# The two ports spell fullscreen differently -- WPE takes --fullscreen, GTK
-# takes --full-screen -- which is exactly the kind of thing that turns into ten
-# minutes of "why is it a 800x600 window" when it is typed by hand.
+# Mirrors run-benchmark's own launch (Tools/Scripts/run-minibrowser, the same
+# config-derived port/build/fullscreen flags) so nothing drifts from what a
+# perf run actually does, and refuses when there is no session to draw into.
 #
-# The Apple ports have no seat to check. A macOS guest *is* a desktop, drawn in
-# tart's own window on the host, and the browser it runs there gets the
-# paravirtualised GPU (measured: hardware Metal, `Apple GPU` in WebGL). What
-# takes the place of the seat check is the launch itself, which cannot go
-# through `open -a` and has to name the page as `--url` -- both in
-# build/configs.sh, with what was measured.
+# WPE takes --fullscreen, GTK takes --full-screen; the Apple port has no seat
+# check and no such flag -- the guest's own desktop is the display, and
+# MiniBrowser is exec'd directly with --url (build/configs.sh has both).
 #
-# --lldb is here rather than in a command of its own because a debugger is not
-# a different way of running the browser, it is the same launch with something
-# watching it:
+# --lldb lives here, not in its own command, because a debugger is the same
+# launch with something watching it:
 #
 #   --lldb, --lldb ui   the browser under lldb, stopped before it starts
 #   --lldb web          the browser running normally, with lldb attached to the
@@ -45,23 +40,12 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/build/configs.sh"
 
-# Inside a workspace there is no name to give: every command acts on this one,
-# and the name form is refused rather than quietly accepted (refuse_ws_name,
-# lib/target.sh). Everything else on the command line is this command's own
-# argument, including the very first word.
-NAME="${1:-}"
-if in_workspace; then
-    refuse_ws_name "$NAME" gui "[<url>]"
-    NAME=$(wk_self)
-else
-    shift || true
-fi
+NAME="${WK_NAME:-}"
 require_name "$NAME"
 
-# The config a bare `wk gui` means. WPE is the browser the benchmark seat runs
-# on Linux; on a macOS host the Apple port is the only browser there is, and
-# wpe-release would resolve a build tree a guest can never have. Inside a
-# workspace the marker already answers this -- see build/configs.sh.
+# WPE is the Linux benchmark browser; on a macOS host the Apple port is the
+# only one there, and wpe-release names a build tree a guest never has.
+# Inside a workspace the marker in build/configs.sh already answers this.
 _gui_default_config() {
     if in_workspace; then default_config
     elif is_macos;   then echo mac-release
@@ -108,20 +92,23 @@ case "$CFG_BUILDSYS:$CFG_PORT" in
 esac
 [ -n "$FULLSCREEN" ] || FS_FLAG=""
 
-# about:blank when no page is named. A workspace does reach the network -- the
-# proxy's allowlist, which the guest's system proxy now points at, so real pages
-# load -- but picking one on the user's behalf would mean guessing which, and a
-# host outside the allowlist fails in a way that reads as a broken browser.
+# about:blank by default: picking a real page for the user would be guessing
+# which one, and one outside the proxy allowlist fails like a broken browser.
 [ -n "$URL" ] || URL="about:blank"
 
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
-# One gate for "is this workspace usable yet" (wait_ready, lib/target.sh):
-# `absent` is still refused by name, and everything else -- a creation still
-# running, one whose driver died, an environment removed from under the record,
-# a machine that will not answer -- gets the words that fit it there rather
-# than "no such workspace", which is what this said about all four.
-wait_ready "$NAME"
+
+# A container workspace on macOS has no display and never can: the podman
+# machine is a Linux VM with no GPU or Wayland socket to draw into. This
+# doesn't forward into the VM (forward=no), so it must say so itself rather
+# than let a misleading `wk session on` fail inside there instead.
+if is_macos && [ "$WK_TARGET_KIND" = container ]; then
+    die "a container workspace on a macOS host has no display, and cannot get one:
+    the podman machine has no GPU and there is no compositor to draw into.
+    Use a macOS guest instead -- 'wk vm new <name>', then 'wk gui <name>',
+    which runs MiniBrowser on the guest's own desktop with the real GPU."
+fi
 
 SRC=$(t_src "$NAME")
 BROWSER=$(config_browser_path "$SRC")
@@ -129,30 +116,21 @@ t_exec "$NAME" test -x "$BROWSER" 2>/dev/null \
     || die "no MiniBrowser at $BROWSER -- wk build $NAME $CONFIG"
 
 # --- the seat ----------------------------------------------------------------
-# The workspace sees the compositor at a fixed path; what matters is whether one
-# is running on the host, not whether this ssh shell has a display.
-#
-# A macOS guest has its own desktop and needs none of this, which is why the
-# whole block -- seat, BMC software rendering, WPE's DRM device inference -- is
-# gated on the host being Linux rather than on the config.
+# What matters is whether a compositor is running on the host, not whether this
+# ssh shell has a display. A macOS guest has its own desktop and needs none of
+# this, which is why seat/BMC/DRM handling below gates on host-is-Linux.
 RUN_ENV=""
 if is_linux; then
     SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
     [ -S "$SOCK" ] || die "no graphical session -- 'wk session on', or 'wk session on --bmc' to watch it over the BMC"
     session_mode_warn || true
 
-    # In a BMC session the compositor itself is software-rendered, and it cannot
-    # import a dmabuf the NVIDIA driver allocated. Left alone, the browser picks
-    # the NVIDIA EGL vendor anyway -- the render node is still there -- and the
-    # result is a window that stays black, which reads as a WebKit bug rather
-    # than as a display path that cannot work. Pinning the client to Mesa and
-    # turning the dmabuf renderer off is what makes the picture appear.
-    #
-    # That's the GL/EGL side. WPE also runs its own, separate DRM device
-    # inference for its display backend, independent of which renderer ends up
-    # drawing -- left alone it says so on stderr ("Infered DRM device ... but
-    # multiple were found") and picks by enumeration order, which is the GPU
-    # exactly as often as the ast. WPE_DRM_DEVICE is its own explicit override.
+    # A BMC session is software-rendered and can't import an NVIDIA dmabuf;
+    # left alone the browser still picks the NVIDIA EGL vendor and the window
+    # stays black rather than erroring, which reads as a WebKit bug. Pinning
+    # Mesa and disabling the dmabuf renderer fixes it. WPE also does its own,
+    # separate DRM device inference for its backend and picks by enumeration
+    # order when ambiguous -- WPE_DRM_DEVICE overrides that explicitly.
     if [ "$(session_mode)" = bmc ]; then
         RUN_ENV="WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe"
         RUN_ENV="$RUN_ENV __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json"
@@ -170,34 +148,23 @@ fi
 TYPE_FLAG="--$(printf '%s' "$CFG_TYPE" | tr 'A-Z' 'a-z')"
 
 # --- the launch --------------------------------------------------------------
-# Two shapes, because the ports launch differently and always have: the CMake
-# ports through Tools/Scripts/run-minibrowser, which knows their layout and
-# their loader variables, and the Apple bundle by exec'ing the binary inside it,
-# because `open -a` is refused (LaunchServices -10825) and would detach the
-# process from this shell even when it is not.
+# Two shapes: CMake ports launch via Tools/Scripts/run-minibrowser (Python,
+# knows their loader vars), the Apple bundle is exec'd directly because
+# `open -a` is refused (LaunchServices -10825) and would detach it anyway.
 #
-# Environment and command line stay separate rather than being one string,
-# because `lldb -- <cmd>` has to be handed the command *without* the
-# assignments -- they belong to lldb itself, which passes its environment on to
-# what it launches.
+# Env and command line stay separate because `lldb -- <cmd>` needs the bare
+# command, without the assignments -- those belong to lldb, which passes its
+# own environment through to what it launches.
 #
-# UI_PREFIX is how `--lldb ui` gets a debugger in front of the browser, and the
-# two build systems need opposite shapes. The Apple bundle is exec'd directly,
-# so lldb goes on the front of the command and there is nothing to arrange.
+# UI_PREFIX puts `--lldb ui` in front of the Apple bundle directly, but the
+# CMake ports can't be driven that way: run-minibrowser is Python, and the
+# browser it spawns is a grandchild the debugger never sees. Its
+# WEBKIT_MINI_BROWSER_PREFIX hook (webkitpy/port/{gtk,wpe}.py) inserts lldb
+# after the port has set WEBKIT_EXEC_PATH and the rest of the launch
+# environment, so it never has to be reproduced here by hand.
 #
-# The CMake ports cannot be driven that way. Their launch is a Python script,
-# so `lldb -- Tools/Scripts/run-minibrowser` debugs Python and the browser it
-# eventually spawns is a grandchild the debugger never sees. run-minibrowser
-# has the hook for exactly this: WEBKIT_MINI_BROWSER_PREFIX is split and
-# prepended to the MiniBrowser command it assembles
-# (webkitpy/port/{gtk,wpe}.py, `shlex.split(...) + command`), so the debugger
-# goes in *there* -- after the port has set WEBKIT_EXEC_PATH,
-# WEBKIT_INJECTED_BUNDLE_PATH, WEBKIT_INSPECTOR_RESOURCES_PATH and
-# LD_LIBRARY_PATH, which is the environment that would otherwise have to be
-# reproduced here by hand and kept in step with upstream forever.
-#
-# The prompt behaves the same either way: `lldb -- <binary> <args>` loads the
-# program without running it, so breakpoints go in before `run`.
+# Either way, `lldb -- <binary> <args>` loads without running, so breakpoints
+# go in before `run`.
 if [ "$CFG_BUILDSYS" = xcode ]; then
     LAUNCH_ENV=$(config_browser_env "$SRC")
     LAUNCH_CMD="$(sh_quote "$BROWSER") $(config_browser_url_flag) $(sh_quote "$URL") $EXTRA"
@@ -236,27 +203,18 @@ web)
     WEB_PROC=$(config_web_process_name)
     info "MiniBrowser ($CONFIG) in '$NAME' -> $URL, lldb waiting for $WEB_PROC"
     log  "  it attaches as the page's process starts; 'continue' lets it run"
-    # PSON is not switchable off here, so it is described instead of fought.
-    # `reattach` is the whole remedy and is spelled out because a debugger
-    # sitting in a process the page has left looks exactly like a debugger
-    # working -- there is no error, the breakpoints simply stop being reached.
     log  "  a cross-site navigation moves the page to a *new* process and leaves"
     log  "  lldb in the old one, silently -- breakpoints just stop being reached."
     log  "  'follow-page' attaches to every $WEB_PROC, asks each which one holds"
     log  "  the live page, and stays there ('reattach' catches the next one at"
     log  "  launch instead, for debugging it from the start). Re-set breakpoints."
     log  "  browser output: /tmp/wk-gui.log (in the workspace)"
-    # Order matters and the sleep is the whole trick: lldb has to be waiting
-    # before the browser starts, or --waitfor sits there through the launch it
-    # was meant to catch. The pause environment gives it a further margin inside
-    # the web process itself -- 5 s on the Apple ports, 30 s on the GLib ones.
-    #
-    # The first web process is the page's, so this attaches to the right one:
-    # prewarming is not done at start-up but on the first
-    # didReachGoodTimeToPrewarm (WebPageProxy.cpp:1231), which is a page that
-    # has already loaded -- in a process this debugger is by then inside.
-    # Navigating away is the case that does move: PSON swaps in a new process
-    # and lldb stays with the old one.
+    # lldb has to be waiting before the browser starts, or --waitfor sits
+    # through the launch it meant to catch; the pause env gives a further
+    # margin inside the web process (5s Apple, 30s GLib). The first web
+    # process is the page's -- prewarming happens on the first
+    # didReachGoodTimeToPrewarm (WebPageProxy.cpp:1231), well after load,
+    # not at start-up -- so this attaches to the right one by construction.
     t_exec_tty "$NAME" bash -lc "$(lldb_prelude)
 cd $SRC && \
         ( sleep 2; $LAUNCH_ENV $(config_web_process_pause_env) $LAUNCH_CMD >/tmp/wk-gui.log 2>&1 ) & \

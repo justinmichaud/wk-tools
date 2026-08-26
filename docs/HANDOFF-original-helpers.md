@@ -42,7 +42,7 @@ one machine — but that dropping one should be a decision.
    the browser. A real gap for macOS browser runs.
 5. **Per-subtest confidence intervals** — `wk bench compare` runs
    `compare-results --breakdown`, which should cover what `js3-ci.py` did.
-   Check one run against it and tick the TESTING.md line. Silent while open: the
+   Check one run against it. Silent while open: the
    numbers still appear, they are just worth less.
 6. **Baseline builds for ad-hoc runs.** Every `bench-*` script assumed a second
    tree at `WebKitBuildBaseline/` built from ToT. A workspace holds one checkout

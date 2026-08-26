@@ -177,7 +177,7 @@ image_root_spec() {
     offset=$(image_boot_offset "$disk") || return 0
     for p in ::/current/cmdline.txt ::cmdline.txt; do
         MTOOLS_SKIP_CHECK=1 mtype -i "$disk@@$offset" "$p" 2>/dev/null \
-            | tr ' ' '\n' | sed -n 's/^root=//p' | head -1 && return 0
+            | tr ' ' '\n' | kv_get root && return 0
     done
     return 0
 }
@@ -278,7 +278,6 @@ image_check_boot_files() {
     local id="$1" machine="$2" disk offset dtb work out
 
     dtb=$(image_dtb_for "$machine")
-    [ -n "$dtb" ] || { debug "no device tree known for '$machine'; not checking boot files"; return 0; }
 
     disk=$(image_disk "$id"); [ -f "$disk" ] || return 0
     offset=$(image_boot_offset "$disk") || return 0
@@ -310,14 +309,16 @@ $(printf '%s\n' "$out" | sed 's/^/      /')
 }
 
 # The device tree a board asks its firmware for. A fact about the machine, and
-# the one thing image_check_boot_files cannot read out of the image.
+# the one thing image_check_boot_files cannot read out of the image. Read off
+# the machine's own conf (MACH_DTB, boot/machines/*.conf) rather than named
+# here a second time; a machine reaching this call is always one whose boot
+# files matter, so a missing MACH_DTB is a conf bug, not a machine that has
+# none by nature -- it dies rather than silently skipping the check.
 image_dtb_for() {
-    case "$1" in
-        rpi5) echo bcm2712-rpi-5-b.dtb ;;
-        rpi4) echo bcm2711-rpi-4-b.dtb ;;
-        rpi3) echo bcm2710-rpi-3-b.dtb ;;
-        *)    echo "" ;;
-    esac
+    . "$WK_ROOT/boot/machines.sh"
+    machine_load "$1" 2>/dev/null || die "image_dtb_for: unknown machine '$1'"
+    [ -n "$MACH_DTB" ] || die "image_dtb_for: '$1' (boot/machines/$1.conf) sets no MACH_DTB"
+    printf '%s' "$MACH_DTB"
 }
 
 # Every class image_root_class can return needs a word here. `portable` and

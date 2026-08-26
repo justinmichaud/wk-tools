@@ -58,9 +58,8 @@ WK_VM_USER="${WK_VM_USER:-admin}"
 # reach.
 #
 # That address is NOT vmnet's usual 192.168.64.1: Softnet runs its own network
-# and puts the host at 192.168.2.1. Discovered from the live interface where
-# possible, because assuming it is how this was wrong the first time -- the
-# proxy failed to bind an address that did not exist on this machine.
+# and puts the host at 192.168.2.1. Discovered from the live interface, not
+# assumed -- the address is machine-specific.
 WK_VM_SUBNET="${WK_VM_SUBNET:-192.168.2}"
 WK_VM_PROXY_PORT="${WK_VM_PROXY_PORT:-3128}"
 
@@ -81,13 +80,11 @@ WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 # must outlive the shell that starts it).
 #
 # We verify softnet by absolute path below, but tart resolves it through PATH
-# when it builds the guest's network -- so the guard passed and the boot died
-# with `InitializationFailed(why: "softnet not found in PATH")`. A guard that
-# checks a binary one way while its consumer finds it another way is false
-# confidence, and this one is invisible interactively: a login shell on the Mac
-# has /usr/local/bin, a non-interactive ssh has only
-# /usr/bin:/bin:/usr/sbin:/sbin. The guest therefore booted by hand and never
-# when driven from another machine -- which is every fleet verb there is.
+# when it builds the guest's network, so a guard that only checks the binary
+# is false confidence -- `InitializationFailed(why: "softnet not found in
+# PATH")` is possible even with a passing guard. This is invisible
+# interactively: a login shell on the Mac has /usr/local/bin, a non-interactive
+# ssh has only /usr/bin:/bin:/usr/sbin:/sbin -- every fleet verb there is.
 case ":$PATH:" in
     *":$(dirname "$WK_SOFTNET_BIN"):"*) ;;
     *) PATH="$(dirname "$WK_SOFTNET_BIN"):$PATH"; export PATH ;;
@@ -99,16 +96,16 @@ esac
 # Resolved lazily, not at source time. Sourcing a driver must not require the
 # caller to have sourced lib/resources.sh first -- `wk start` and `wk stop`
 # load this file only to stop a guest, and calling envelope_cores() while the
-# file is being read made them fail with "command not found".
+# file is being read would fail them with "command not found".
 #
-# Laziness alone was not enough, though: it moved the failure from source time
-# to call time rather than removing it. `wk boot benchvm` loads this driver to
-# start a guest, does not source lib/resources.sh, and died on
-# `envelope_mem_mb: command not found` at rc=127 with the guest half-started.
-# So the dependency is declared here, guarded, the same way targets/local.sh
-# already declares it -- a driver that needs a library should say so rather
-# than hope its caller did. Sourcing is safe to repeat: lib/resources.sh is
-# only `${VAR:-default}` assignments and function definitions.
+# Laziness alone is not enough: a caller that loads this driver to start a
+# guest without sourcing lib/resources.sh would still hit
+# `envelope_mem_mb: command not found` at call time, with the guest
+# half-started. So the dependency is declared here, guarded, the same way
+# targets/local.sh already declares it -- a driver that needs a library should
+# say so rather than hope its caller did. Sourcing is safe to repeat:
+# lib/resources.sh is only `${VAR:-default}` assignments and function
+# definitions.
 command -v envelope_mem_mb >/dev/null 2>&1 || . "$WK_ROOT/lib/resources.sh"
 WK_VM_BASE_CPUS="${WK_VM_BASE_CPUS:-}"
 WK_VM_BASE_MEM_MB="${WK_VM_BASE_MEM_MB:-}"
@@ -134,19 +131,17 @@ WK_VM_BASE_PREBUILD="${WK_VM_BASE_PREBUILD:-mac-release}"
 #   Debug build tree   ~78 GB   (unstripped, full DWARF; ~2x Release)
 #
 # Room for two builds plus margin is therefore ~278 GB, rounded to 320. The
-# stock 140 GB does not even fit one: the first real build here ran 38 minutes
-# and died with "No space left on device", which xcodebuild reported as "the
-# Xcode build system has crashed" -- pointing nowhere near the cause.
+# stock 140 GB does not fit even one build: it runs out with "No space left on
+# device", which xcodebuild reports as "the Xcode build system has crashed" --
+# pointing nowhere near the cause.
 #
 # This is a ceiling, not an allocation. The disk is sparse and the clones are
 # copy-on-write, so an unused gigabyte here costs nothing. What it can do is
 # overcommit the *host*, which _check_host_disk is for.
 WK_VM_DISK_GB="${WK_VM_DISK_GB:-320}"
 
-# Guest display size. The stock image is 1024x768, which is too small to do any
-# real browser work in, and nothing ever changed it -- t_create set cpu, memory,
-# mac and serial and left the display alone, so every workspace inherited it.
-# Points, not pixels: tart defaults the unit to "pt" for a macOS guest.
+# Guest display size, in points, not pixels (tart defaults the unit to "pt"
+# for a macOS guest).
 #
 # Deliberately SMALLER than the host desktop, and this is the whole trick.
 # Tart pins the window's *minimum* content size to this resolution
@@ -165,10 +160,8 @@ WK_VM_DISK_GB="${WK_VM_DISK_GB:-320}"
 # you actually want for MiniBrowser. That path only exists if the window can be
 # resized in the first place.
 #
-# Upstream considers this working as intended: PR #1086 proposed dropping the
-# minimum and was rejected (issue #1087), the recommendation there being to
-# make the configured display small. Unchanged as of tart 2.35.0, the newest
-# release, so do not expect this to be fixed for you.
+# Upstream treats this as working as intended (tart #1086, rejected; #1087),
+# and recommends exactly this workaround.
 WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
 
 # Host space that must remain for a guest to have somewhere to grow into. A
@@ -226,7 +219,7 @@ _tart() {
       curl -fsSLO https://github.com/cirruslabs/tart/releases/latest/download/tart.tar.gz
       tar -xzf tart.tar.gz -C ~/.local/share/tart/
       ln -sfn ~/.local/share/tart/tart.app/Contents/MacOS/tart ~/.local/bin/tart
-    Licence: FSL-1.1-ALv2; internal use is a Permitted Purpose (SETUP.md section 8)."
+    Licence: FSL-1.1-ALv2; internal use is a Permitted Purpose (README.md, Setup)."
     "$bin" "$@"
 }
 
@@ -406,12 +399,11 @@ _proxy_pidfile() { echo "$WK_VM_DIR/proxy.pid"; }
 # Is there a proxy for the guest to reach? Ask the socket, not the pidfile.
 #
 # The pidfile records whoever started it last, and a proxy routinely outlives
-# the shell that recorded it -- one from an earlier session is still listening
-# while $WK_VM_DIR/proxy.pid names a process that is long gone. Trusting the
-# file alone, `wk vm start` then tried to bind an address it already owned, got
-# EADDRINUSE, and reported "the guest will have no egress at all" while egress
-# was working perfectly. That is the worst possible direction for this check to
-# be wrong in: it says the boundary failed open when it did not.
+# the shell that recorded it -- one from an earlier session can still be
+# listening while $WK_VM_DIR/proxy.pid names a process that is long gone.
+# Trusting the file alone risks reporting "the guest will have no egress at
+# all" while egress is working fine -- the worst possible direction for this
+# check to be wrong in, since it says the boundary failed open when it did not.
 _proxy_running() {
     local pf; pf=$(_proxy_pidfile)
     [ -f "$pf" ] && kill -0 "$(cat "$pf" 2>/dev/null)" 2>/dev/null && return 0
@@ -500,7 +492,7 @@ _boot() {
         # to put it back. A macOS guest is the one workspace kind that has a
         # real GPU (Virtualization.framework backs its Metal stack with the
         # host's; a Linux guest gets no GPU device at all, which is why the
-        # podman machine can never be accelerated -- see SETUP.md). The window
+        # podman machine can never be accelerated -- see README.md). The window
         # presents that framebuffer directly. --no-graphics does not take the
         # GPU away, but the only way back to the screen is then VNC or Screen
         # Sharing, which capture and re-encode every frame: fine for poking at
@@ -516,8 +508,8 @@ _boot() {
     # The default dhcp resolver works behind Softnet -- measured. Tart's
     # documentation warns that the *arp* resolver does not, which is easy to
     # over-read; the agent resolver also works but is slower to become
-    # available during boot, and using it here cost a 180 s timeout on a guest
-    # that had in fact started perfectly.
+    # available during boot and can time out here on a guest that has in fact
+    # started fine.
     ip=$(_tart ip "$v" --wait "$wait" 2>/dev/null | grep .) \
         || die "$v did not come up within ${wait}s; see $runlog"
 
@@ -566,17 +558,11 @@ t_pull() {
 # will run it (build in the guest, run on bare metal) and that tree is tens of thousands of files.
 t_pull_dir() {
     local name="$1" src="$2" dest="$3"; shift 3
-    local ex=()
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --exclude) ex+=("--exclude" "${2:-}"); shift 2 ;;
-            *) die "t_pull_dir: unknown option $1" ;;
-        esac
-    done
+    _t_pull_dir_excludes "$@"
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
     mkdir -p "$dest"
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    rsync -a --delete ${ex[@]+"${ex[@]}"} -e "ssh $(_ssh_opts)" \
+    rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} -e "ssh $(_ssh_opts)" \
         "$WK_VM_USER@$ip:$src/" "$dest/"
 }
 
@@ -626,14 +612,11 @@ _write_marker() {
 
 # The agent's own configuration: CLAUDE.md, settings, hooks and skills.
 #
-# Provisioning links these (vm/provision-base.sh), and in a live guest they were
-# simply absent -- `~/.claude` held only the `backups` and `downloads` that
-# Claude itself creates at runtime. Same family as the missing egress block: a
-# provisioning step that did not run, inherited by every clone of the base. The
-# effect is worse than it sounds, because it is silent: `wk claude` starts an
-# agent that has never been told it is in a workspace, what `wk` can do for it,
-# or that the host filesystem is out of reach -- it just behaves like an agent
-# on a strange machine.
+# Provisioning links these (vm/provision-base.sh); if that step ever did not
+# run, a clone inherits the gap silently -- `wk claude` starts an agent that
+# has never been told it is in a workspace, what `wk` can do for it, or that
+# the host filesystem is out of reach, and it just behaves like an agent on a
+# strange machine.
 #
 # Symlinks into $HOME/wk-tools rather than copies, exactly as provisioning does
 # it: `wk build` re-rsyncs that tree with --delete on every run, so a copy would
@@ -654,10 +637,8 @@ _write_claude_config() {
 # WebKit's network process does not read http_proxy/https_proxy: MiniBrowser
 # loading https://webkit.org/ gives a blank window and not one line in the host
 # proxy log, while curl to the same host from the same guest goes straight
-# through. So every egress check --
-# all of which used curl -- passed, while the browser the guest exists to run
-# could reach nothing at all. A blank page and a denied page look identical,
-# which is why this went unnoticed through a whole round of GPU work.
+# through. A curl-based egress check can therefore pass while the browser
+# reaches nothing at all -- a blank page and a denied page look identical.
 #
 # Set from the host at start rather than baked into the golden base: the
 # address is discovered from the live interface (_proxy_addr) and can change,
@@ -735,14 +716,24 @@ _write_lldbinit() {
 # shared directory is exactly the host-filesystem hole this target exists to
 # not have. The cost is that the tooling has to be pushed on every build, and
 # rsync makes that a no-op when nothing changed.
+#
+# _push_tools <name> <ip> is the rsync line itself, shared with _prebuild_base
+# and _provision_base -- both push this same tree into a *running* guest, and
+# kept apart from the marker write below: the golden base is deliberately
+# never marked as a workspace (see t_start), so the rsync has to be callable
+# without it.
+_push_tools() {
+    local name="$1" ip="$2"
+    rsync -az --delete --exclude '.git/' \
+        -e "ssh $(_ssh_opts)" \
+        "$WK_ROOT/" "$WK_VM_USER@$ip:$(t_tools "$name")/"
+}
+
 t_sync_tools() {
     local name="$1"
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
     debug "syncing wk-tools -> $name"
-    rsync -az --delete --exclude '.git/' \
-        -e "ssh $(_ssh_opts)" \
-        "$WK_ROOT/" "$WK_VM_USER@$ip:$(t_tools "$name")/"
-
+    _push_tools "$name" "$ip"
     _write_marker "$name" "$ip"
 }
 
@@ -803,8 +794,7 @@ _prebuild_base() {
     log  "  This is the slow one and it happens once. Every workspace cloned"
     log  "  from this base inherits the build tree and the compilation cache."
 
-    rsync -az --delete --exclude '.git/' -e "ssh $(_ssh_opts)" \
-        "$WK_ROOT/" "$WK_VM_USER@$ip:$(t_tools "$WK_VM_BASE")/"
+    _push_tools "$WK_VM_BASE" "$ip"
 
     config_build_env "$(t_src "$WK_VM_BASE")" "$jobs" 10
     local cmd
@@ -813,29 +803,25 @@ _prebuild_base() {
     # Detached, and polled -- NOT a foreground `ssh <long command>`.
     #
     # This build takes over an hour, and in the foreground of one ssh session
-    # any blip on that connection kills it: a base prebuild dies at
-    # "client_loop: send disconnect: Broken pipe" with no BUILD SUCCEEDED, an
-    # hour and a half in, and left a base that looked built but was not. A
-    # build that dies at minute 95 is the slowest possible outcome, so the
-    # build is started with nohup, its exit status is written to a file in the
-    # guest, and this side merely watches for that file. Dropping the poll
-    # connection now costs one retry instead of the whole build.
+    # any blip on that connection kills it, leaving a base that looks built but
+    # is not -- the slowest possible failure. So the build is started with
+    # nohup, its exit status is written to a file in the guest, and this side
+    # merely watches for that file. Dropping the poll connection now costs one
+    # retry instead of the whole build.
+    #
+    # detach_remote/detach_wait_remote (lib/detach.sh) own the nohup spelling
+    # and the poll loop now -- the same shape image/pmos.sh's build uses, so
+    # there is one place that decides how "start it over there and wait" works
+    # instead of each driver inventing its own. `_prebuild_ssh` binds the ip
+    # this one prebuild is talking to, since the shared functions take a
+    # plain ssh-fn and know nothing about VMs.
+    command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     local rlog="/tmp/wk-base-build.log" rrc="/tmp/wk-base-build.rc"
-    local inner="( $cmd ) > $rlog 2>&1; echo \$? > $rrc"
-    _ssh "$ip" "rm -f $rrc; nohup bash -lc $(sh_quote "$inner") >/dev/null 2>&1 </dev/null & disown" \
+    detach_remote _prebuild_ssh "$rlog" "$rrc" -- bash -lc "$cmd" \
         || die "could not start the base prebuild"
 
-    local t0; t0=$(date +%s) rc="" mins=0
-    while [ -z "$rc" ]; do
-        sleep 30
-        # A failed poll means the connection blipped, not that the build died --
-        # keep waiting. The build itself is not attached to this ssh.
-        rc=$(_ssh "$ip" "cat $rrc 2>/dev/null" 2>/dev/null | tr -dc '0-9')
-        [ -n "$rc" ] && break
-        mins=$(( ($(date +%s) - t0) / 60 ))
-        [ $(( mins % 10 )) -eq 0 ] && [ "$mins" -gt 0 ] && \
-            info "base prebuild still running (${mins}m)"
-    done
+    local t0; t0=$(date +%s)
+    local rc; rc=$(detach_wait_remote _prebuild_ssh "$rlog" "$rrc")
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
     scp -q $(_ssh_opts) "$WK_VM_USER@$ip:$rlog" "$WK_VM_DIR/base-build.log" 2>/dev/null || true
 
@@ -854,12 +840,22 @@ _prebuild_base() {
 
 # --- helpers -----------------------------------------------------------------
 
+# _unpinned_host_key_opts lives in lib/reach.sh, not boot/machines.sh: boot
+# already depends on this file (`load_target vm`, boot/mac-guest.sh), so this
+# file cannot depend back on boot without a cycle, and lib/reach.sh is the one
+# place both can reach it from.
+command -v _unpinned_host_key_opts >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
+
 _ssh_opts() {
     # ServerAliveInterval matters more than it looks: provisioning and builds
     # both go quiet for long stretches, and without keepalives a NAT timeout
     # drops the connection mid-build and reports it as a build failure.
-    printf '%s' "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
--o LogLevel=ERROR -o ConnectTimeout=10 -o BatchMode=yes \
+    # _ssh_opts_base (lib/target.sh) is the BatchMode/ConnectTimeout every
+    # driver wants; a guest's key is minted fresh on every clone, at the same
+    # address, which is exactly what _unpinned_host_key_opts is for
+    # (lib/reach.sh; boot/machines.sh's m_ssh_opts and i_ssh share it for the
+    # same reason). What is left is this guest's own key and keepalives.
+    printf '%s' "$(_ssh_opts_base "${WK_SSH_TIMEOUT:-10}") $(_unpinned_host_key_opts) \
 -o ServerAliveInterval=60 -o ServerAliveCountMax=10 -i $WK_VM_KEY"
 }
 
@@ -868,6 +864,12 @@ _ssh() {
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
     ssh $(_ssh_opts) "$WK_VM_USER@$ip" "$@"
 }
+
+# The ssh-fn detach_remote/detach_wait_remote (lib/detach.sh) want: a callable
+# that takes just a command line. `ip` is `_prebuild_base`'s own local, in
+# scope here through bash's dynamic scoping because this is only ever called
+# while that frame is still on the stack.
+_prebuild_ssh() { _ssh "$ip" "$@"; }
 
 _ip() {
     local v; v=$(_vm "$1")
@@ -1049,20 +1051,13 @@ $advice
 _base_exists() { [ "$(_vm_state "$WK_VM_BASE")" != absent ]; }
 
 # Existing is not the same as finished, and treating it as such is how a broken
-# base gets inherited by every workspace cloned from it.
-#
-# Without it, `wk vm base` pulls 68.8 GB, clones the guest, and then refuses to
-# start it because the podman machine holds the whole memory envelope. The next
-# run finds a VM by that name and reports "golden base is ready" in half a
-# second -- an unprovisioned macOS image with no Xcode
-# licence, no checkout and no prebuild, which every `wk vm new` would have
-# copied.
+# base -- one that failed provisioning partway, with no Xcode licence, no
+# checkout or no prebuild -- gets inherited by every workspace cloned from it.
 #
 # So the base gets the same completion protocol as every other artifact here
 # (lib/image.sh's manifest, lib/store.sh's snapshot sha, `.wk-ready` for a
 # workspace): **a marker written last**, and anything without one is rubble to
-# be destroyed and remade rather than repaired (docs/HANDOFF-workspace-state.md,
-# rules 2 and 3).
+# be destroyed and remade rather than repaired (README.md, rules 2 and 3).
 _base_marker() { echo "$WK_VM_DIR/base.ready"; }
 
 _base_ready() { _base_exists && [ -f "$(_base_marker)" ]; }
@@ -1146,11 +1141,10 @@ _provision_base() {
     # the image's default password and without leaving password auth working
     # afterwards. On every later run the key is already in there, and ssh is the
     # better question to ask: `tart ip --wait` answers as soon as the guest has
-    # an address, which is well before the agent is listening, so a refresh that
-    # went straight to `tart exec` got "VM is not running" and died -- twice,
-    # measured, on a base that was perfectly healthy and whose ssh worked
-    # seconds later. Ask what is actually needed, and only fall back to the
-    # agent when it is not already true.
+    # an address, well before the agent is listening, so going straight to
+    # `tart exec` can find "VM is not running" on a base whose ssh works seconds
+    # later. Ask what is actually needed, and only fall back to the agent when
+    # it is not already true.
     if _wait_ssh "$ip"; then
         debug "ssh already works in '$WK_VM_BASE'; no key to install"
     else
@@ -1198,15 +1192,14 @@ _provision_base() {
     # The whole tree, not just the provisioning script: provision-base.sh links
     # ~/.claude (settings, hooks, CLAUDE.md, skills) out of it, and a guest
     # without those runs a skip-permissions agent with no policy at all.
-    rsync -az --delete --exclude '.git/' -e "ssh $(_ssh_opts)" \
-        "$WK_ROOT/" "$WK_VM_USER@$ip:$(t_tools "$WK_VM_BASE")/"
+    _push_tools "$WK_VM_BASE" "$ip"
     # _proxy_addr, not $WK_VM_PROXY_ADDR. The variable is normally *unset* --
     # it is an override, and the address is otherwise derived from the bridge
-    # that only exists once a guest is running. Passing the raw variable sent
-    # an empty value, provision-base.sh fell back to its hardcoded Tart default
-    # of 192.168.64.1, and the guest was left pointing at an address nothing
-    # listens on: every fetch inside the guest timed out, which looks exactly
-    # like the egress filter doing its job rather than a misconfiguration.
+    # that only exists once a guest is running. The raw variable would pass an
+    # empty value, sending provision-base.sh to its hardcoded Tart default of
+    # 192.168.64.1 -- an address nothing listens on, so every fetch inside the
+    # guest would time out looking exactly like the egress filter doing its
+    # job rather than a misconfiguration.
     _ssh "$ip" "env WK_VM_PROXY_ADDR=$(sh_quote "$(_proxy_addr)") WK_VM_PROXY_PORT=$(sh_quote "$WK_VM_PROXY_PORT") WK_VM_DISPLAY=$(sh_quote "$WK_VM_DISPLAY") bash $(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
         || die "base provisioning failed"
 

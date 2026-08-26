@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# wk pr [workspace] <user>:<branch> -- check out a PR head, from either project.
+# wk pr [<workspace>] <user>:<branch> -- check out a PR head, from either project
+# wk: where=workspace name=optional ready=yes group=sources
 #
 # GitHub's own syntax for a PR head, pasted straight from the page:
 #
@@ -29,6 +30,9 @@
 #
 # Runs in the workspace, like `wk build`: from a host, name it; from inside
 # one, do not.
+#
+#   --force   take the PR head even when the local branch has commits it
+#             does not, discarding them
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,26 +41,18 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-usage() {
-    if in_workspace; then log "usage: wk pr <user>:<branch>"
-    else log "usage: wk pr <workspace> <user>:<branch>"; fi
-    exit 2
-}
-
-# The workspace name is optional inside one, exactly as in `wk build`: there is
-# one workspace in here and it is this machine. A PR argument always contains a
-# colon, which is what tells the two forms apart -- a workspace name cannot
-# contain one (valid_name).
-NAME=""; SPEC=""
-case "${1:-}" in
-    '') usage ;;
-    *:*) SPEC="$1"; in_workspace && NAME=$(wk_self) || usage ;;
-    *)  refuse_ws_name "$1" pr "<user>:<branch>"
-        NAME="$1"; SPEC="${2:-}"; [ -n "$SPEC" ] || usage ;;
-esac
+# The workspace name arrives as $WK_NAME (the dispatcher resolves it inside a
+# workspace, and on a host by checking the first word against the registry).
+NAME="${WK_NAME:-}"
+SPEC="${1:-}"
+[ -n "$NAME" ] && [ -n "$SPEC" ] \
+    || die "usage: wk pr [<workspace>] <user>:<branch>; see wk pr -h"
 shift $#
 
-case "$SPEC" in *:*) ;; *) usage ;; esac
+case "$SPEC" in
+    *:*) ;;
+    *) die "usage: wk pr [<workspace>] <user>:<branch>; see wk pr -h" ;;
+esac
 PR_USER="${SPEC%%:*}"
 BRANCH="${SPEC#*:}"
 [ -n "$PR_USER" ] && [ -n "$BRANCH" ] || die "expected <user>:<branch>, got '$SPEC'"
@@ -65,24 +61,14 @@ require_name "$NAME"
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-# The same gate as build, run, test and claude (wait_ready, lib/target.sh):
-# this checks out a branch *in* the workspace, so it needs one that finished
-# being made. `absent` is still refused by name; a creation that died, an
-# environment removed by hand and a machine that will not answer each get the
-# words that fit -- this said "no such workspace" about all four.
-wait_ready "$NAME"
-
 SRC=$(t_src "$NAME")
 
 # --- 1. which project, and what is here already ------------------------------
-#
-# One round trip that changes nothing: which of the projects has this branch,
-# what the head is, whether a remote for that user already exists, and what
-# the local side looks like. Everything that follows is decided from this, out
-# here, where the answers can be reported.
-#
-# `git ls-remote` over HTTPS is anonymous and needs no credential -- the same
-# reason fetching a fork works while `wk push` is off.
+# One round trip that changes nothing: which project has this branch, what
+# the head is, whether a remote for this user exists, what the local side
+# looks like. Everything that follows is decided from this, out here.
+# `git ls-remote` over HTTPS is anonymous, the same reason a fork fetches
+# while `wk push` is off.
 probe=$(t_exec "$NAME" bash -c "
     cd $(sh_quote "$SRC") || exit 1
     for repo in $(wk_pr_repos | tr '\n' ' '); do
@@ -118,8 +104,8 @@ esac
 REPO=$(printf '%s' "$found" | awk '{print $1}')
 URL=$(printf '%s' "$found"  | awk '{print $2}')
 HEAD_SHA=$(printf '%s' "$found" | awk '{print $3}')
-LOCAL_SHA=$(printf '%s\n' "$probe" | sed -n 's/^local=//p')
-DIRTY=$(printf '%s\n' "$probe" | sed -n 's/^dirty=//p')
+LOCAL_SHA=$(kv_get local <<<"$probe")
+DIRTY=$(kv_get dirty <<<"$probe")
 REMOTE=$(printf '%s\n' "$probe" | sed -n 's/^remote=//p' | awk -v u="$URL" '$2 == u {print $1; exit}')
 
 # The name a new remote gets. The user's, with the project appended when it is

@@ -1,0 +1,75 @@
+#!/bin/sh
+#
+# Bring up WiFi from a credential seeded onto the card, every boot.
+#
+# Unlike wk-tailnet-join's key, a WiFi credential is not single-use: the radio
+# has to associate again on every boot, so /etc/wpa_supplicant/wpa_supplicant-
+# wlan0.conf is read every time and never deleted -- it is the card's WiFi
+# identity, seeded by `wk sysimage write` (disk_seed_wifi, boot/disk.sh)
+# exactly like the driving ssh key, and for the same reason: this is per-card
+# state, not something an image ships baked in (an image is stored, copied and
+# kept after it is superseded; a credential inside one is a credential in
+# every copy of it).
+#
+# Ethernet is untouched by this: an image built with this layer still DHCPs
+# eth0 the way it always has, and this only ever adds wlan0 alongside it -- a
+# board with a cable plugged in keeps using it, uninterrupted, and this is
+# what reaches the network when it does not (CLAUDE.md, "Cattle, not pets":
+# the board on the desk with no cable still has to be reachable).
+#
+# Exits 0 on every path that is not a failure of this node's own doing,
+# because a boot is not a failure just because nobody staged a credential: an
+# image written by something that had none is a board with no WiFi identity,
+# not a broken one. Same rule wk-tailnet-join follows.
+#
+# POSIX sh, no jq: this runs on the same slim images wk-tailnet-join does.
+
+set -u
+
+CONF=/etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+WPA=/usr/sbin/wpa_supplicant
+
+say() { echo "wk-wifi-join: $*"; }
+
+[ -r "$CONF" ] || { say "no $CONF -- this card carries no WiFi identity; 'wk sysimage write' seeds one"; exit 0; }
+[ -x "$WPA" ]  || { say "no $WPA -- a WiFi credential is seeded but this image cannot spend it"; exit 0; }
+
+# The wireless interface, found rather than assumed: `wlan0` is the common
+# case, but nothing here should hardcode a name the kernel is free to pick
+# differently on another board.
+IFACE=""
+for c in /sys/class/net/wlan*; do
+    [ -e "$c" ] || continue
+    IFACE=$(basename "$c")
+    break
+done
+[ -n "$IFACE" ] || { say "no wlan* interface on this board -- nothing to bring up"; exit 0; }
+
+# Already running (a re-run, or a supervisor restart): starting a second
+# instance against the same interface fights the first one for the control
+# socket rather than replacing it.
+if pgrep -f "wpa_supplicant .*-i$IFACE" >/dev/null 2>&1; then
+    say "wpa_supplicant is already running on $IFACE"
+else
+    mkdir -p /var/run/wpa_supplicant
+    say "starting wpa_supplicant on $IFACE"
+    "$WPA" -B -i"$IFACE" -c"$CONF" -Dnl80211,wext -P "/run/wpa_supplicant-$IFACE.pid" 2>&1 \
+        || { say "wpa_supplicant failed to start on $IFACE -- the credential may be malformed"; exit 1; }
+fi
+
+# A lease, however this image gets one: whichever DHCP client is present is
+# used, and the absence of both is reported rather than left to read as a
+# silent hang -- the same "detect, don't assume" rule S99tailscale follows for
+# start-stop-daemon.
+if command -v udhcpc >/dev/null 2>&1; then
+    udhcpc -i "$IFACE" -n -q -t 5 >/dev/null 2>&1 \
+        && say "$IFACE has a DHCP lease" \
+        || say "udhcpc on $IFACE did not get a lease -- association may have failed"
+elif command -v dhclient >/dev/null 2>&1; then
+    dhclient "$IFACE" >/dev/null 2>&1 \
+        && say "$IFACE has a DHCP lease" \
+        || say "dhclient on $IFACE did not get a lease -- association may have failed"
+else
+    say "no udhcpc and no dhclient on this image -- $IFACE may be associated but cannot lease an address"
+    exit 1
+fi

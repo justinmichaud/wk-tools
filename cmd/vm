@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# wk vm <sub> -- disposable macOS VMs for building the Apple ports.
+# wk vm <sub> -- disposable macOS VMs for building the Apple ports
+# wk: where=host name=none group=hosts needs tart
 #
 # macOS has no container primitive for macOS userspace -- Apple's `container`
 # CLI runs Linux containers -- so isolation for an Apple-port build means a
@@ -8,14 +9,25 @@
 #
 # This is lifecycle only. Everything else -- build, test, run, claude, rm --
 # goes through the ordinary commands, because `wk new <name> --target vm`
-# registers the target and they resolve it from there. `wk vm new` is a
-# shorthand for that one case.
+# registers the target and they resolve it from there.
+#
+#   ls                        list guests and their state
+#   new <name>                create a guest, cloned from the golden base
+#   start <name>              boot it, write its ssh alias (wk-<name>)
+#   stop <name>               shut it down
+#   ip <name>                 its current address
+#   enter <name>              interactive shell
+#   sync <name>               push this working tree of wk-tools into it
+#   rm <name>                 destroy it and forget the target
 #
 # `wk vm base` is the exception that is not lifecycle-per-workspace: the golden
-# guest every workspace is cloned from. It is built once (hours), fast-forwarded
-# week to week (--refresh), remade (--rebuild) or erased (--rm) -- and it is by
-# a wide margin the largest thing wk stores on a macOS host, which `wk disk`
-# reports and `wk help disk` explains.
+# guest every workspace is cloned from.
+#
+#   base                      build it if missing, otherwise report it ready
+#   base --refresh            fast-forward its checkout in place (cheap)
+#   base --rebuild            delete and rebuild it from the pulled image
+#   base --rm                 erase it (and, on confirmation, the pulled
+#                             image cache) -- existing workspaces are unaffected
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -93,16 +105,14 @@ base)
         _ensure_base
         ;;
     --rm)
-        # Erasing the largest single thing on the machine, which is why it is a
-        # command rather than a note in the docs: 162 GB measured on this host,
-        # and nothing else here comes close.
+        # Erasing the largest single thing on the machine (162 GB measured
+        # here), so a command rather than a docs note.
         #
-        # Two artifacts, asked about separately because they cost differently to
-        # get back: the golden guest (hours -- Xcode, a checkout and a full
+        # Two artifacts, asked separately since they cost differently to get
+        # back: the golden guest (hours -- Xcode, a checkout, a full
         # mac-release prebuild) and the pulled OCI image it was cloned from (a
-        # download). Existing workspaces are unaffected either way: a `tart
-        # clone` is an independent guest, and APFS keeps the blocks alive for as
-        # long as anything references them.
+        # download). Existing workspaces are unaffected: a `tart clone` is
+        # independent, and APFS keeps referenced blocks alive.
         _base_exists || die "no golden base '$WK_VM_BASE' on this machine -- nothing to erase.
     'wk vm base' builds one; 'wk disk' says what everything here costs."
         sz=$(du -sh "${TART_HOME:-$HOME/.tart}/vms/$WK_VM_BASE" 2>/dev/null | cut -f1 | tr -d ' ' || echo '?')
@@ -126,11 +136,10 @@ base)
         exit 0
         ;;
     --refresh)
-        # The cheap one, and the one you actually want week to week: boot the
-        # existing base, fast-forward its checkout, shut it down. New
-        # workspaces then start from current main instead of from whenever the
-        # base was first built. Existing workspaces are unaffected -- they are
-        # already independent clones.
+        # The cheap one, wanted week to week: boot the existing base,
+        # fast-forward its checkout, shut it down, so new workspaces start
+        # from current main instead of whenever the base was first built.
+        # Existing workspaces are unaffected -- already independent clones.
         _base_exists || die "no golden base yet -- run 'wk vm base'"
         # A refresh re-runs provisioning, which ends by writing the marker --
         # so a refresh is also how a base that lost its marker gets one back,
@@ -141,7 +150,7 @@ base)
         _ensure_base
         ;;
     *)
-        die "usage: wk vm base [--refresh|--rebuild|--rm]"
+        die "usage: wk vm base [--refresh|--rebuild|--rm]; see wk vm -h"
         ;;
     esac
     info "golden base '$WK_VM_BASE' is ready"
@@ -155,6 +164,6 @@ rm)
     ;;
 *)
     die "usage: wk vm ls|new|start|stop|ip|enter|sync|rm <name>
-       wk vm base [--refresh|--rebuild|--rm]"
+       wk vm base [--refresh|--rebuild|--rm]; see wk vm -h"
     ;;
 esac

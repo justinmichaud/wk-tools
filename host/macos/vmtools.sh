@@ -23,9 +23,18 @@ _ssh_port=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.Port}}')
 _ssh_key=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.IdentityPath}}')
 _ssh_user=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.RemoteUsername}}')
 
+# _unpinned_host_key_opts (lib/reach.sh) is right for this machine too: a
+# podman machine is recreated by ./setup, not upgraded in place (CLAUDE.md,
+# "no in-place upgrades"), so its host key is exactly as disposable as a
+# board's bench image. -p/-i/BatchMode/ConnectTimeout are what remain
+# genuinely this machine's own -- a random port and a generated key,
+# discovered fresh from `podman machine inspect` every run.
+command -v _unpinned_host_key_opts >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
+
 _rsh() {
-    ssh -q -p "$_ssh_port" -i "$_ssh_key" \
-        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    # shellcheck disable=SC2046
+    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" $(_unpinned_host_key_opts) \
+        -p "$_ssh_port" -i "$_ssh_key" \
         "$_ssh_user@localhost" "$@"
 }
 

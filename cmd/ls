@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 #
-# wk ls -- workspaces, what they are pinned to, and what they cost on disk.
+# wk ls -- workspaces, what they are pinned to, and what they cost on disk
+# wk: where=workspace name=none bare=merged readonly group=workspaces
 #
-# Disk is shown because the overlay layers are the one thing that grows without
-# bound between `wk gc` runs, and they are invisible to `podman ps`.
+# One line per workspace, on every target this machine knows:
+#
+#   NAME      the workspace
+#   TARGET    where it lives (container, vm, or a machine)
+#   STATE     the environment's own word: running, exited, present, creating
+#   BASE      the snapshot its checkout is pinned to (`wk help design`)
+#   ARCH      what it builds natively; blank when that is the host's own
+#   CHANGES   disk its own writes take -- the overlay layer, which grows
+#             without bound between `wk gc` runs and is invisible to podman
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -12,22 +20,16 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 
 # Every target, from the same walk `wk status` uses (walk_targets, then
-# target_workspaces per target). Listing only the default target is how the two
-# commands came to disagree about what "the workspaces" are: on a macOS host
-# this one was forwarded into the podman VM and answered for containers alone,
-# so a vm or remote workspace showed up in `wk status` and not here.
+# target_workspaces per target): listing only the default target is how the
+# two commands came to disagree about "the workspaces" -- a vm or remote
+# workspace showed up in `wk status` and not here. TARGET is a column for the
+# same reason: with more than one, a bare name says nothing about the machine.
 #
-# TARGET is therefore a column: with more than one of them in the listing, a
-# bare name says nothing about which machine it is on.
-#
-# BASE and CHANGES are overlay concepts and only mean anything for the
-# container target. A macOS VM has neither -- its equivalents are the golden
-# image and the guest's own disk -- so `wk vm ls` is what lists those.
-#
-# ARCH is here rather than left to `wk build` to mention, because it is the one
-# property of a workspace that cannot be seen from inside it: the kernel is the
-# host's, so an armhf container reports aarch64 from uname, and a workspace
-# whose architecture is invisible is one whose builds are a surprise.
+# BASE and CHANGES are overlay concepts, meaningful only for the container
+# target -- a macOS VM's equivalents are the golden image and the guest's own
+# disk, which `wk vm ls` lists. ARCH is here because it's the one workspace
+# property invisible from inside it: the kernel is the host's, so an armhf
+# container reports aarch64 from uname.
 
 # --continued: this listing is the second half of one being assembled from two
 # machines. On a macOS host `wk ls` walks the host-side targets out here and
@@ -38,19 +40,15 @@ CONTINUED=""
 [ "${1:-}" = --continued ] && { CONTINUED=1; shift; }
 
 # WK_ROW_LABEL: the name the *asking* machine knows this one by.
+# A peer's own vocabulary (`container`, `vm`) collides with the same words
+# used for a different machine's containers in somebody else's listing, so
+# the asker passes the name it asked about and rows are qualified with it:
+# `moose:container`. A build box needs none of this, since its target name
+# *is* the label -- hence qualifying rather than always prefixing.
 #
-# A machine of its own answers for its own workspaces, in its own vocabulary --
-# and for a peer workstation that vocabulary is `container` and `vm`, which in
-# somebody else's listing is the same word this machine uses for a different
-# machine's containers. So the asker passes the name it asked about, and rows
-# whose target does not already carry it are qualified with it:
-# `moose:container`. A build box needs none of this -- its own target name *is*
-# the label -- which is why this qualifies rather than always prefixing.
-#
-# Environment rather than a flag: a peer runs its own checkout of this
-# repository, so the far side may not know a flag added here yet -- and an
-# unknown flag there is fatal where an unknown variable is ignored (t_wk,
-# targets/remote.sh).
+# Environment, not a flag: the far side may be an older checkout that
+# doesn't know a new flag, and an unknown flag there is fatal where an
+# unknown variable is ignored (t_wk, targets/remote.sh).
 LABEL="${WK_ROW_LABEL:-}"
 _col() { if [ -z "$LABEL" ] || [ "$1" = "$LABEL" ]; then printf '%s' "$1"; else printf '%s:%s' "$LABEL" "$1"; fi; }
 
@@ -71,9 +69,8 @@ for TARGET in $TARGETS; do
 
     # A machine of its own answers for itself, exactly as in `wk status`: the
     # workspaces are over there, and so is every fact about them. Without this
-    # the two commands disagreed again -- `wk status` delegated and listed a
-    # peer workstation's workspaces while this one, walking a local store that
-    # has never heard of them, reported nothing.
+    # `wk status` and `wk ls` disagreed again -- one delegated to a peer's
+    # workspaces while this one, walking a local store, reported nothing.
     if t_has_wk; then
         rc=0
         WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued || rc=$?
@@ -102,15 +99,13 @@ if [ "$found" -ne 1 ] && [ -z "$CONTINUED" ]; then
 fi
 
 # The snapshot store is per target and only exists where the overlay scheme
-# does, so this is reported per target rather than once for whatever driver
-# happened to be loaded last -- which on a multi-target walk was a store the
-# numbers did not come from.
-# ...and not at all when this listing is one machine's contribution to
-# somebody else's: --label means the rows are going into a fleet table on
-# another computer, and that machine's snapshot store is not the reader's to
-# act on. `wk gc` and `wk new` there are run there. (--continued alone is the
-# other case and does still print it: the podman VM's store is the *only* copy
-# of the store the macOS host is asking about.)
+# does, reported per target rather than once for whatever driver was loaded
+# last on a multi-target walk.
+#
+# Not at all when contributing to somebody else's listing: with a label, that
+# machine's store isn't the reader's to act on (`wk gc`/`wk new` run there).
+# --continued alone still prints it -- the podman VM's store is the *only*
+# copy the macOS host is asking about.
 [ -z "$LABEL" ] || exit 0
 
 _multi=""

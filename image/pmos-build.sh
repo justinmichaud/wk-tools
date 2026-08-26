@@ -1,17 +1,13 @@
 #!/bin/sh
 # Build a postmarketOS system with pmbootstrap. Runs on a Linux aarch64
-# machine, over ssh from image/pmos.sh, which copies this file there.
+# machine, over ssh from image/pmos.sh, which copies this file there --
+# pmbootstrap is Linux-only and needs root (loop devices, chroots, kpartx),
+# and the workstation driving this is a Mac, the same split `wk sysimage
+# write` already lives with.
 #
-# Why remotely at all: pmbootstrap is Linux-only and needs root (loop devices,
-# chroots, kpartx), and the workstation driving all this is a Mac. That is the
-# same split `wk sysimage write` already lives with -- the unprivileged half
-# here, the privileged half on the machine that has the hardware -- so the
-# build host is chosen for being able to do the work, and nothing about it is
-# assumed beyond a package list this checks.
-#
-# Native, not emulated: both phones are aarch64, so an aarch64 build host runs
-# the target's own architecture and pmbootstrap never starts qemu. On anything
-# else this refuses rather than quietly taking ten times as long.
+# Native, not emulated: both phones are aarch64, so an aarch64 build host
+# runs the target's own architecture and pmbootstrap never starts qemu. On
+# anything else this refuses rather than quietly taking ten times as long.
 #
 # Inputs, all from the environment (image/pmos.sh sets every one):
 #
@@ -50,13 +46,11 @@ info() { printf '    %s\n' "$*"; }
 warn() { printf '    WARN: %s\n' "$*"; }
 die()  { printf '    ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Three attempts, because the build host is on WiFi.
-#
-# Not defensive programming for its own sake: this host roams between two APs on
-# one SSID, and a blip of a few seconds at minute one killed a build that would
-# otherwise have taken twenty -- "Failed to connect ... after 30 ms", with the
-# same fetch succeeding immediately afterwards. Anything
-# that reaches the network here gets wrapped.
+# Three attempts, because the build host is on WiFi: it roams between two
+# APs on one SSID, and a blip of a few seconds at minute one once killed a
+# build that would otherwise have taken twenty ("Failed to connect ... after
+# 30 ms", with the same fetch succeeding immediately after). Anything that
+# reaches the network here gets wrapped.
 retry() {
     n=0
     while :; do
@@ -95,11 +89,10 @@ sudo -n true 2>/dev/null || die "sudo needs a password here.
 
 # --- pmbootstrap -------------------------------------------------------------
 #
-# From a pinned git tag, in a venv of its own. Not from PyPI: every pmbootstrap
-# release there is yanked -- 1.0.1 through 2.1.0, all of them -- so
-# `pip install pmbootstrap` fails with "no matching distribution" and
-# the project's own distribution channel is the git repository. Not from apt
-# either: Ubuntu does not carry it.
+# From a pinned git tag, in a venv of its own -- not from PyPI, where every
+# release is yanked (1.0.1 through 2.1.0, all of them: `pip install
+# pmbootstrap` fails with "no matching distribution"), and not from apt,
+# which Ubuntu does not carry.
 step "pmbootstrap $PMO_PMB_VERSION"
 have_ver=""
 [ -x "$PMB" ] && have_ver=$("$PMB" --version 2>/dev/null || true)
@@ -116,15 +109,12 @@ fi
 
 # --- the work folder ---------------------------------------------------------
 #
-# Prepared here rather than by `pmbootstrap init`, because init cannot be driven
-# non-interactively: it prompts for the work path before it reads anything, and
-# `-y` does not answer that prompt (it only suppresses "are you sure"). Feeding
-# it a script of answers would be a guess about question order that breaks on
-# any upstream edit.
-#
-# What init does that matters is exactly two things: a version file, and a
-# pmaports clone. Both are done here, and the pmbootstrap version is pinned
-# above so the version number cannot drift underneath us.
+# Prepared here rather than by `pmbootstrap init`, which cannot be driven
+# non-interactively (it prompts for the work path before reading anything,
+# and `-y` only suppresses "are you sure" -- a script of answers would be a
+# guess about question order that breaks on any upstream edit). What init
+# does that matters is exactly two things -- a version file and a pmaports
+# clone -- both done here, with the version pinned above.
 step "Work folder"
 WORK_VERSION=8
 if [ ! -d "$WORK" ]; then
@@ -133,22 +123,20 @@ if [ ! -d "$WORK" ]; then
     info "created $WORK (version $WORK_VERSION)"
 elif [ ! -f "$WORK/version" ]; then
     # A work folder with no version file is one pmbootstrap refuses to migrate
-    # ("we can't migrate that automatically") -- and an empty directory left by
-    # an empty directory left by a failed run looks exactly like that. Stamp it
-    # rather than making a person delete it.
+    # ("we can't migrate that automatically") -- and an empty directory left
+    # by a failed run looks exactly like that. Stamp it rather than making a
+    # person delete it.
     printf '%s\n' "$WORK_VERSION" > "$WORK/version"
     info "stamped $WORK with version $WORK_VERSION"
 fi
 
 # pmaports, on the channel's branch -- and `origin/master` fetched as well.
-#
-# Two non-obvious things, both of which fail in a way that names the wrong
-# problem. pmbootstrap reads channels.cfg from `origin/master`, but pmaports'
-# default branch is `main`, so a single-branch clone leaves it unable to resolve
-# any channel at all ("Failed to read channels.cfg from 'origin/master'"). And
-# the channel has to be one channels.cfg actually lists: `v26.06` exists as a
-# branch, is not a released channel, and picking it gets you a KeyError rather
-# than a sentence.
+# Two things fail in a way that names the wrong problem: pmbootstrap reads
+# channels.cfg from `origin/master`, but pmaports' default branch is `main`,
+# so a single-branch clone can't resolve any channel at all ("Failed to read
+# channels.cfg from 'origin/master'"); and the channel has to be one
+# channels.cfg actually lists -- `v26.06` exists as a branch, is not a
+# released channel, and picking it gets a KeyError rather than a sentence.
 step "pmaports ($PMO_CHANNEL)"
 if [ ! -d "$APORTS/.git" ]; then
     mkdir -p "$(dirname "$APORTS")"
@@ -202,55 +190,39 @@ info "$CFG"
 
 # --- install -----------------------------------------------------------------
 #
-# --no-firewall, because the bridge role owns the firewall: it installs one
-# nftables table of its own and disables the packaged service, and two things
-# writing one ruleset is how tailscale's chains get flushed by accident.
-#
-# --password is documented by pmbootstrap as a dummy for automation, handled in
-# plain text and logged -- which is exactly what it is here. It is the console
-# password on the phone's own screen, and the phone's screen is the recovery
-# path of last resort; over the network nothing can use it, because
-# bridge/provision.sh turns password authentication off.
-#
+# --no-firewall because the bridge role owns the firewall (its own nftables
+# table, packaged service disabled) -- two things writing one ruleset is how
+# tailscale's chains get flushed by accident. --password is pmbootstrap's
+# documented automation dummy, handled in plain text and logged -- exactly
+# what it is here: the console password on the phone's own screen, useless
+# over the network since bridge/provision.sh turns password auth off.
 # --no-split gives one combined image file, which is what a card wants.
-# Shut down whatever the last run left behind, first.
 #
-# pmbootstrap leaves its chroots bind-mounted and the previous image attached to
-# a loop device when it finishes -- it says so ("chroot is still active") and
-# does not clean up on its own. The next install then fails at
-# `mkfs.ext4 ... /dev/installp2`, because that mapping still belongs to the
-# image before it. Observed exactly once, which was one run too many: this is
-# the difference between "idempotent" and "works the first time".
-# Placed after the Config step above and not next to the pmaports checkout it
-# edits: the checksum run below is `pmbootstrap`, and pmbootstrap needs the
-# config file that step writes. Aports first, config, then this.
+# Shut down whatever the last run left behind first: pmbootstrap leaves its
+# chroots bind-mounted and the previous image on a loop device without
+# cleaning up ("chroot is still active"), and the next install then fails at
+# `mkfs.ext4 ... /dev/installp2` on a mapping that still belongs to the old
+# image. Placed after Config, not next to the pmaports checkout it edits: the
+# checksum run below is `pmbootstrap`, which needs the config file Config wrote.
 # --- the kernel config delta -------------------------------------------------
 #
 # A profile may declare kernel options its device needs and pmOS does not set
-# (PMO_KCONFIG, PMO_KERNEL_APORT in image/profiles.sh). Applied here rather
-# than kept as a patch file, because the thing being changed is one line of a
-# generated defconfig and a patch against it would conflict on every pmaports
-# bump; and applied *after* the checkout above, because that checkout is
-# `git checkout -B` against upstream and resets the tree every run -- a hand
-# edit in the aport does not survive one build, which is exactly why this is
-# code and not an instruction.
+# (PMO_KCONFIG, PMO_KERNEL_APORT in image/profiles.sh) -- applied here rather
+# than as a patch file, since the change is one line of a generated defconfig
+# and a patch would conflict on every pmaports bump, and applied *after* the
+# checkout above, since `git checkout -B` resets the tree every run.
 #
-# Three things have to happen together or the build fails in a way that reads
-# like something else:
+# Three things have to happen together or the build fails in a way that
+# reads like something else:
 #
-#   the option        replaced in place whether pmOS spells it `# ... is not
-#                     set` or assigns it something else, and appended if the
-#                     option is absent entirely.
-#   the checksums     the APKBUILD's sha512sums cover the config file, so
-#                     editing it makes abuild stop with "Use 'abuild checksum'"
-#                     -- an error that names neither the config nor the reason.
-#   pkgrel            bumped, and by a lot. Without it the package version is
-#                     identical to the one already in the local repo from a
-#                     previous build, and pmbootstrap reuses that apk: the
-#                     config change is applied, checksummed, and silently not
-#                     built. +100 puts it somewhere no upstream pkgrel will
-#                     reach, so a patched kernel is always distinguishable from
-#                     a stock one by version alone.
+#   the option     replaced in place whether pmOS spells it `# ... is not
+#                  set` or assigns it something else, appended if absent.
+#   the checksums  the APKBUILD's sha512sums cover the config file, so
+#                  editing it makes abuild stop with "Use 'abuild checksum'".
+#   pkgrel         bumped by a lot, or pmbootstrap reuses the previous
+#                  build's identical-version apk and silently skips the
+#                  change. +100 keeps a patched kernel distinguishable from
+#                  stock by version alone.
 if [ -n "${PMO_KCONFIG:-}" ]; then
     step "Kernel config delta ($PMO_KERNEL_APORT)"
     [ -n "${PMO_KERNEL_APORT:-}" ] \
@@ -258,13 +230,12 @@ if [ -n "${PMO_KCONFIG:-}" ]; then
     KDIR="$APORTS/$PMO_KERNEL_APORT"
     [ -d "$KDIR" ] || die "no such aport in pmaports $PMO_CHANNEL: $PMO_KERNEL_APORT"
 
-    # The config fragment for the architecture being built. Named by the aport's
-    # own $CARCH convention, and there is exactly one for aarch64.
-    # The glob directly rather than `ls | head -1`. This script runs `set -eu`
-    # without pipefail, so that pipeline would not actually misfire here -- but
-    # `head` closing a pipe early is the shape that bit cmd/selftest 32 times
-    # (its header has the measurement), and it buys nothing when there is one
-    # such config per architecture.
+    # The config fragment for the architecture being built, named by the
+    # aport's own $CARCH convention -- globbed directly rather than `ls |
+    # head -1`. This runs `set -eu` without pipefail so that would not
+    # actually misfire here, but `head` closing a pipe early is the shape
+    # that bit cmd/selftest 32 times, and there is exactly one such config
+    # per architecture anyway.
     KCFG=""
     for f in "$KDIR"/config-*.aarch64; do
         [ -f "$f" ] && { KCFG="$f"; break; }
@@ -307,11 +278,10 @@ step "Shutting down any previous chroot"
 "$PMB" -c "$CFG" -y shutdown >/dev/null 2>&1 || warn "pmbootstrap shutdown reported a problem; continuing"
 
 step "pmbootstrap install ($PMO_DEVICE, $PMO_UI, +${PMO_EXTRA_SPACE}M)"
-# The artifacts, not the directory. $OUT is where this run's *log* lives -- the
-# caller redirected into it before this script started -- so `rm -rf "$OUT"`
-# unlinks the log mid-run: the shell keeps writing to a file nobody can open,
-# and the failure that follows is invisible from the outside. Cost an hour to
-# find, because it presents as "the build never started".
+# The artifacts, not the directory: $OUT is where this run's *log* lives (the
+# caller redirected into it before this script started), so `rm -rf "$OUT"`
+# would unlink the log mid-run -- the shell keeps writing to a file nobody
+# can open, and the failure that follows looks like "the build never started".
 mkdir -p "$OUT"
 rm -f "$OUT/disk.wic.xz" "$OUT/disk.bmap" "$OUT/result"
 add=""
@@ -342,24 +312,13 @@ info "image: $img ($(du -h "$img" | cut -f1))"
 
 # --- the bootloader, which pmbootstrap has already written --------------------
 #
-# Nothing to do here, and that is worth writing down because a previous version
-# of this file did it by hand and broke the image.
+# Nothing to do here: pmbootstrap embeds each device's firmware into the
+# image at the offset the device declares -- its own log says so ("Embed
+# firmware u-boot/... at offset 8 with step size 1024"), in units of 1024
+# bytes, not sectors.
 #
-# pmbootstrap embeds each device's firmware into the image it produces, at the
-# offset the device declares -- its own log says so ("Embed firmware
-# u-boot/... at offset 8 with step size 1024"), and an image built before this
-# section existed has the i.MX IVT header at exactly 33 KiB on a Librem 5. The
-# offset is in units of 1024 bytes, not sectors.
-#
-# The manual version came from checking the wrong address: 512-byte sector 8 is
-# byte 4096, the firmware is at byte 8192, so "sector 8 is all zeros" was true
-# and meaningless. Writing the SPL there then overlapped pmbootstrap's copy and
-# replaced a working bootloader with a misaligned one -- a hand-written step
-# that turned a good image into an unbootable card.
-#
-# What is left is the check, which is cheap and which would have caught that:
-# read back the byte the boot ROM will read and refuse to ship an image whose
-# firmware is not there.
+# What is left is the check, which is cheap: read back the byte the boot ROM
+# will read and refuse to ship an image whose firmware is not there.
 step "Checking the bootloader pmbootstrap embedded"
 DEVICEINFO=$(find "$APORTS/device" -name deviceinfo -path "*device-$PMO_DEVICE/*" | head -1)
 [ -n "$DEVICEINFO" ] || die "no deviceinfo for $PMO_DEVICE under $APORTS/device"
@@ -390,27 +349,20 @@ fi
 
 # --- seeding the image -------------------------------------------------------
 #
-# Two things go in that pmbootstrap cannot put there, and both are about the
-# phone being *reachable* the first time it boots -- which is the whole
-# difference between a card you can provision over the wire and a card that
-# needs a person holding the phone.
+# Two things go in that pmbootstrap cannot put there, both about the phone
+# being *reachable* the first time it boots -- the difference between a card
+# provisioned over the wire and one that needs a person holding the phone:
+# the WiFi credential (the uplink *is* WiFi, so an image without it comes up
+# in isolation) and avahi enabled (until `wk bridge setup` runs `tailscale
+# up` there is no tailnet name or knowable DHCP address, so <hostname>.local
+# is the whole of first contact).
 #
-#   the WiFi credential   the phone's uplink *is* WiFi; there is no cable, so an
-#                         image without it comes up in isolation
-#   avahi, enabled        until `wk bridge setup` runs `tailscale up` there is no
-#                         tailnet name, and the DHCP address is not knowable in
-#                         advance, so <hostname>.local is the whole of first
-#                         contact
-#
-# The credential is read from this host's own connection, on this host, so the
-# PSK never travels through a log, a command line, or an agent's context -- the
-# same rule image/profiles.sh's `wifi-from-machine` follows for the Pis. The
-# bssid is deliberately not copied: this house has two APs on one SSID and the
-# phone is expected to roam, and a pinned bssid turns a roam into an outage.
-#
-# One mount for both, and the mount is here rather than on the workstation for
-# the reason everything else in this file is: this is the machine that already
-# needs root to build at all.
+# The credential is read from this host's own connection, so the PSK never
+# travels through a log, command line, or agent context -- the same rule
+# `wifi-from-machine` follows for the Pis (image/profiles.sh). The bssid is
+# deliberately not copied: this house has two APs on one SSID, and a pinned
+# bssid turns a roam into an outage. One mount for both, here rather than on
+# the workstation: this machine already needs root to build.
 step "Seeding the image"
 keyfile=$(mktemp)
 chmod 600 "$keyfile"
@@ -479,26 +431,19 @@ sudo -n install -o 0 -g 0 -m 0600 "$keyfile" \
     "$OUT/mnt/etc/NetworkManager/system-connections/wk-uplink.nmconnection"
 info "uplink: $ssid (the PSK stayed on this host)"
 
-# The same ssh key for root, and not as a convenience.
+# The same ssh key for root, not as a convenience: pmbootstrap's
+# `ssh_keys`/`ssh_key_glob` install the key for the console user only, who
+# cannot become root without a password -- doas prompts, and `wk bridge
+# setup` is non-interactive over ssh, so the provisioner would die on its
+# first privileged write on a phone that is otherwise reachable and healthy.
+# Root by key rather than a passwordless doas rule: they are the same
+# authority and only one says so out loud; sshd's `prohibit-password` here
+# permits exactly the holder of this key, and bridge/provision.sh turns
+# password auth off again explicitly.
 #
-# pmbootstrap's `ssh_keys`/`ssh_key_glob` install the key for the console user
-# only, and that user cannot become root without a password: doas prompts, and
-# `wk bridge setup` is non-interactive over ssh by design, so the provisioner
-# died on its first privileged write with "'doas' needs a password". Which is a
-# phone that is reachable, healthy, and impossible to provision.
-#
-# Root by key rather than a passwordless doas rule for the console user, because
-# they are the same authority and only one of them says so out loud. sshd's
-# default here is `prohibit-password`, so this permits exactly one thing: the
-# holder of this key. Password authentication over the network stays off, and
-# bridge/provision.sh turns it off again explicitly.
-# `sudo -n test`, not a bare test. pmbootstrap creates the account's .ssh as
-# mode 700 owned by the image's own uid, and this script runs unprivileged --
-# so reading through that directory needs search permission the builder does
-# not have, and a plain `[ -f ... ]` comes back false on a file that is plainly
-# there. Measured: the first build with this block warned "no authorized_keys
-# for user in the image" while `find` as root listed it. Every neighbouring
-# operation here already uses sudo; this test was the one that did not.
+# `sudo -n test`, not a bare test: pmbootstrap's account .ssh is mode 700
+# owned by the image's own uid, so a plain `[ -f ... ]` comes back false on
+# a file that is plainly there.
 if sudo -n test -f "$OUT/mnt/home/$PMO_USER/.ssh/authorized_keys"; then
     sudo -n install -d -o 0 -g 0 -m 0700 "$OUT/mnt/root/.ssh"
     sudo -n install -o 0 -g 0 -m 0600 \
@@ -511,22 +456,16 @@ else
     warn "  the console user cannot become root without typing a password."
 fi
 
-# The two settings a fresh phone must already have, because without them it is
-# not reliably reachable and therefore cannot be provisioned.
-#
-# Both are in bridge/provision.sh as well, and belonged here all along. The role
-# applies them, but the role is applied *over ssh* -- so a phone that needs them
-# in order to answer ssh can never receive them, and the first provision becomes
-# a race against the phone disappearing.
+# The two settings a fresh phone must already have, or it is not reliably
+# reachable and cannot be provisioned. Both are in bridge/provision.sh too,
+# but the role applies them *over ssh* -- a phone that needs them to answer
+# ssh can never receive them there.
 #
 #   power save    the RTL8723CS powers its RF side down when idle and misses
-#                 frames aimed at it. The phone can still *initiate* -- it wakes
-#                 to transmit -- so it reaches its router while answering
-#                 nothing, ARP included, which reads exactly like a phone that
-#                 is not on the network. Realtek power management on this part is
-#                 known-broken upstream, to the point that distributions carry
-#                 patches whose only job is to disable it.
-#   never sleep   an unprovisioned phone idles off the network after a few
+#                 frames aimed at it, though it can still *initiate* -- known-
+#                 broken upstream, with distro patches whose only job is
+#                 disabling it.
+#   never sleep   an unprovisioned phone idles off the network in a few
 #                 minutes, taking the uplink with it.
 sudo -n install -d -o 0 -g 0 -m 0755 "$OUT/mnt/etc/NetworkManager/conf.d"
 printf '%s\n' \

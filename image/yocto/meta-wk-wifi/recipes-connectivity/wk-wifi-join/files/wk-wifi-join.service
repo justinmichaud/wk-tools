@@ -1,0 +1,23 @@
+[Unit]
+Description=Bring up WiFi from a credential seeded onto the card (wk)
+Documentation=https://github.com/justinmichaud/wk-tools
+# Before network.target rather than After it: this brings an interface up,
+# it does not depend on one already being up, and network-online.target would
+# wait on the very interface this is trying to bring online.
+After=network-pre.target
+Before=network.target
+Wants=network-pre.target
+# Nothing to do without a credential, and the common case on a board with a
+# cable is that this never runs at all -- Ethernet is untouched either way.
+ConditionPathExists=/etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/wk-wifi-join
+RemainAfterExit=yes
+# Association plus a DHCP lease, bounded the same way wk-tailnet-join.service
+# bounds waiting for tailscaled: a failure here must not hold the boot.
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

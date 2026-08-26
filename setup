@@ -178,7 +178,7 @@ log "wk doctor shows what is provisioned and what still needs a manual step"
 if is_macos && [ "$STAGE" = all ]; then
     _todo=""
     if ! have tart && [ ! -x "$HOME/.local/bin/tart" ]; then
-        _todo="$_todo\n  - tart is not installed; 'wk vm' (Apple ports) is unavailable -- SETUP.md section 8"
+        _todo="$_todo\n  - tart is not installed; 'wk vm' (Apple ports) is unavailable -- README.md, Setup"
     elif ! [ -x "${WK_SOFTNET_BIN:-/usr/local/bin/softnet}" ]; then
         _todo="$_todo\n  - softnet is not installed; 'wk vm start' refuses to boot a guest: ./setup --stage softnet"
     fi

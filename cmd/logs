@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
-# wk logs <workspace> [--follow] -- the build log, with the noise stripped.
+# wk logs <workspace> [--follow] -- the build log, with the noise stripped
+# wk: where=workspace name=required group=workspaces readonly
 #
-# ninja writes progress with carriage returns, so a raw `tail` shows one
-# unreadable smear. This normalises that and, by default, shows the parts worth
-# reading rather than the last N lines -- after a failure the tail is usually
-# unrelated, because compilers keep going past the first error.
+# ninja writes progress with carriage returns; this normalises that and shows
+# the parts worth reading -- the tail after a failure is usually unrelated.
+#
+#   --follow, -f   stream the log live
+#   --all, -a      print the full normalised log
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,31 +16,13 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/watchdog.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# Inside a workspace there is no name to give: every command acts on this one,
-# and the name form is refused rather than quietly accepted (refuse_ws_name,
-# lib/target.sh). Everything else on the command line is this command's own
-# argument, including the very first word.
-NAME="${1:-}"
-if in_workspace; then
-    refuse_ws_name "$NAME" logs "[-f]"
-    NAME=$(wk_self)
-else
-    shift || true
-fi
+NAME="${WK_NAME:-}"
 require_name "$NAME"
 
-# The log lives wherever that workspace's target keeps its state, which is not
-# the same place for a container and a macOS VM.
 load_target "$(ws_target "$NAME")"
 
-# The canonical log for a target that is a machine of its own is on that
-# machine -- written there by the build itself, whichever end started it. Ask
-# it rather than reading the transcript this side happens to hold, which is
-# empty for every build driven from the other one.
-#
-# The whole command goes over, arguments included, so --all and --follow behave
-# the same as they do locally. A ctrl-c out of --follow closes the connection,
-# which ends the `tail -f` with it.
+# A target that is a machine of its own writes the log there; forward the
+# whole command so ctrl-c out of --follow ends the remote `tail -f` too.
 if t_has_wk; then
     rc=0
     t_wk logs "$NAME" ${@+"$@"} || rc=$?
@@ -59,8 +43,7 @@ log ""
 log "last output:"
 tr '\r' '\n' < "$LOG" | grep -v '^$' | tail -15 | sed 's/^/  /'
 log ""
-# The name is part of the hint on a host and noise inside a workspace, where it
-# is implicit and the command as printed would still work either way.
+# implicit inside a workspace; noise outside it
 _hint=""; in_workspace || _hint=" $NAME"
 log "  wk logs$_hint --all     full log"
 log "  wk logs$_hint --follow  live"

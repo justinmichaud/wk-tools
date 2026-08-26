@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# wk sync -- bring WebKit, and the tooling, up to date. One verb, three scopes.
+# wk sync [<workspace>] [--machine|--all] -- bring WebKit and the tooling up to date
+# wk: where=workspace name=optional outside group=sources needs git,rsync
+# wk: flag --machine,--all where=host
 #
 # Safe to run at any time, including while workspaces are building. Running
 # workspaces stay pinned to the snapshot they were created from and are never
@@ -14,28 +16,13 @@
 #   wk sync --all              ...and every other machine and workspace there is
 #
 # --- scope, and why it is not a noun -----------------------------------------
+# The axis is *how far* (workspace, machine, everywhere), not which mechanism
+# holds the stale copy -- the caller should not have to know that before
+# asking for a refresh. Nothing below takes the name of a mechanism.
 #
-# Not spelled by naming the thing -- `--target container` for the copy of
-# wk-tools in the podman VM, `--tools` for the copies everywhere else, `--target
-# <machine>` for a build box, a bare `wk sync` for the store, `--all` for
-# nothing at all -- it was accepted and ignored, a no-op kept as a spelling of
-# the default. Five spellings across two axes, and the caller had to know which
-# noun held the stale copy before they could ask for it to be refreshed. That is
-# backwards: not knowing is the reason to run the command.
-#
-# So the axis is *how far*, and the command works out what that covers. A
-# workspace, this machine, or everywhere. Nothing below takes the name of a
-# mechanism.
-#
-# The store half is this machine's and has no target: a container, a macOS guest
-# and a workspace acting on itself all take their base from it. A machine
-# reached over ssh keeps its own -- its copy of wk-tools and, unless it has a
-# shared WebKit of its own, its own mirror -- and none of it is refreshed by
-# anything above. That was the gap: `wk sync` on a remote target did nothing for
-# it, and the only thing that ever updated the far side was `wk new` (the
-# mirror) and `wk build` (the tooling), so a machine you had not built on
-# answered every delegated command from whatever copy it was left with. The
-# driver decides what its far side is; see t_sync in targets/remote.sh.
+# The store half is this machine's alone; a remote target keeps its own copy
+# of wk-tools and, without a shared WebKit, its own mirror. See t_sync in
+# targets/remote.sh for what a target's far side is.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,20 +31,22 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 
 # --- a machine of its own ----------------------------------------------------
-# Before store_init and before the store lock: neither has anything to do with
-# a target on the far end of an ssh, and taking this machine's store lock to
-# fetch on another one would block a local sync for the duration.
+# Before store_init and before the store lock: neither concerns a target on
+# the far end of an ssh, and taking this machine's lock to fetch on another
+# would block a local sync for no reason.
+#
+# --machine/--all switch to where=host, skipping $WK_NAME resolution, so a
+# workspace name given alongside one is still parsed here and caught by the
+# "ask for different things" check below rather than silently ignored.
 SCOPE=""
-ONLY=""
+ONLY="${WK_NAME:-}"
 TARGET=""
-_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --machine)  SCOPE=machine; shift ;;
         --all)      SCOPE=all; shift ;;
-        # The old spellings, refused by name. Each named a mechanism, and the
-        # scope flags cover all of them; a silent alias would leave two ways to
-        # ask one question (CLAUDE.md, "One path, not two").
+        # The old spellings, refused by name rather than silently aliased --
+        # two ways to ask one question (CLAUDE.md, "One path, not two").
         --tools)    die "'wk sync --tools' is now part of a scope, not a flag of its own.
     The tooling is one of the things that goes stale on a machine, so it is
     refreshed with everything else there:
@@ -75,78 +64,63 @@ while [ $# -gt 0 ]; do
     usage: wk sync [<workspace>] [--machine|--all]" ;;
         # A workspace name: that one rather than the one you are in.
         *)          [ -z "$ONLY" ] || die "one workspace at a time (got '$ONLY' and '$1')"
-                    ONLY="$1"; require_name "$ONLY"; _ARGS+=("$1"); shift ;;
+                    ONLY="$1"; require_name "$ONLY"; shift ;;
     esac
 done
-set -- ${_ARGS[@]+"${_ARGS[@]}"}
 
 [ -z "$ONLY" ] || [ -z "$SCOPE" ] \
     || die "'$ONLY' and --$SCOPE ask for different things: one workspace, or all of them."
 
 # --- autodetect, then ask ----------------------------------------------------
+# With nothing named, the answer is "the workspace you're in" -- worked out
+# rather than asked for. Inside a workspace $WK_NAME is already set, so this
+# block never runs there.
 #
-# With no workspace named and no scope given, the answer is "the one you are
-# working in" -- and the command works out what that is rather than making the
-# caller say it.
-#
-# Inside a workspace there is nothing to work out. On a host there is, and the
-# rule is: one workspace is unambiguous and is used; several is a question, and
-# it is *asked* rather than guessed or refused, because a wrong guess here
-# fetches in somebody else's workspace and a refusal sends the reader to read
-# this file. No terminal means no question can be asked, so it refuses there and
-# names the two scopes that need no answer.
+# On a host: one workspace is unambiguous and used; several is asked, not
+# guessed or refused -- a wrong guess fetches in somebody else's workspace,
+# and a refusal just sends the reader here. No terminal means no question can
+# be asked, so it refuses and names the two scopes that need no answer.
 if [ -z "$SCOPE" ] && [ -z "$ONLY" ]; then
-    if in_workspace; then
-        ONLY=$(wk_self)
-    else
-        _ws=$(list_workspaces)
-        _n=$(printf '%s\n' "$_ws" | grep -c . || true)
-        case "${_n:-0}" in
-            0) info "no workspaces on this machine, so there is nothing to fetch in."
-               log  "  syncing the machine instead: the mirror, a new snapshot and the tooling."
-               SCOPE=machine ;;
-            1) ONLY="$_ws"
-               info "one workspace here, so that is the one: $ONLY"
-               log  "  'wk sync --machine' for the mirror, the snapshot and the tooling too" ;;
-            *) if [ ! -t 0 ]; then
-                   die "several workspaces here and no terminal to ask which:
+    _ws=$(list_workspaces)
+    _n=$(printf '%s\n' "$_ws" | grep -c . || true)
+    case "${_n:-0}" in
+        0) info "no workspaces on this machine, so there is nothing to fetch in."
+           log  "  syncing the machine instead: the mirror, a new snapshot and the tooling."
+           SCOPE=machine ;;
+        1) ONLY="$_ws"
+           info "one workspace here, so that is the one: $ONLY"
+           log  "  'wk sync --machine' for the mirror, the snapshot and the tooling too" ;;
+        *) if [ ! -t 0 ]; then
+               die "several workspaces here and no terminal to ask which:
     $(printf '%s ' $_ws)
     Name one, or give a scope: 'wk sync --machine', 'wk sync --all'."
-               fi
-               info "several workspaces on this machine:"
-               _i=0
-               for _w in $_ws; do _i=$((_i + 1)); printf '  %2d) %s\n' "$_i" "$_w" >&2; done
-               printf '  %2d) %s\n' "$((_i + 1))" "all of them, and this machine's mirror, snapshot and tooling (--machine)" >&2
-               printf 'which? [1-%d] ' "$((_i + 1))" >&2
-               read -r _pick </dev/tty || _pick=""
-               case "$_pick" in
-                   ''|*[!0-9]*) die "nothing chosen -- name a workspace, or 'wk sync --machine'" ;;
-               esac
-               if [ "$_pick" -eq "$((_i + 1))" ]; then
-                   SCOPE=machine
-               elif [ "$_pick" -ge 1 ] && [ "$_pick" -le "$_i" ]; then
-                   ONLY=$(printf '%s\n' "$_ws" | sed -n "${_pick}p")
-               else
-                   die "$_pick is not one of them"
-               fi ;;
-        esac
-    fi
+           fi
+           info "several workspaces on this machine:"
+           _i=0
+           for _w in $_ws; do _i=$((_i + 1)); printf '  %2d) %s\n' "$_i" "$_w" >&2; done
+           printf '  %2d) %s\n' "$((_i + 1))" "all of them, and this machine's mirror, snapshot and tooling (--machine)" >&2
+           printf 'which? [1-%d] ' "$((_i + 1))" >&2
+           read -r _pick </dev/tty || _pick=""
+           case "$_pick" in
+               ''|*[!0-9]*) die "nothing chosen -- name a workspace, or 'wk sync --machine'" ;;
+           esac
+           if [ "$_pick" -eq "$((_i + 1))" ]; then
+               SCOPE=machine
+           elif [ "$_pick" -ge 1 ] && [ "$_pick" -le "$_i" ]; then
+               ONLY=$(printf '%s\n' "$_ws" | sed -n "${_pick}p")
+           else
+               die "$_pick is not one of them"
+           fi ;;
+    esac
 fi
 
-# --tools: the tooling on every machine, and nothing else.
+# Only the tooling; no mirror and no snapshot, since a full sync is minutes of
+# fetch nobody asking for tooling wanted.
 #
-# Every machine here runs a *copy* of this repository -- rsynced into the podman
-# VM, rsynced onto a build box, its own git checkout on a peer workstation -- and
-# a stale copy fails as "unknown option" from a command that works perfectly on
-# the machine you typed it on. `wk status` says which are behind; this is the
-# one command that fixes all of them.
-#
-# No mirror and no snapshot: this is about the tooling, and a full sync is
-# minutes of fetch that somebody asking for `--tools` did not ask for.
-# Why a peer's `git pull` could not reach this machine's tree. The answer is
-# always on this side -- a peer pulls from the shared upstream, so anything this
-# machine has not published is invisible to it -- and it is worth naming
-# precisely, because the three cases have three different fixes.
+# Why a peer's `git pull` could not reach this machine's tree: the answer is
+# always on this side -- a peer pulls from the shared upstream, so anything
+# this machine hasn't published is invisible to it. Named precisely, because
+# the three cases have three different fixes.
 _peer_why_behind() {
     local dirty="" ahead="" branch="" up=""
     git -C "$WK_ROOT" rev-parse --git-dir >/dev/null 2>&1 || {
@@ -170,22 +144,17 @@ _peer_why_behind() {
     fi
 }
 
-# The tooling on every machine. Part of --machine and --all rather than a flag,
-# because a stale copy of this repository is one of the two things that goes out
-# of date on a machine and the caller should not have to know which of them they
-# meant.
-#
-# Every machine here runs a *copy* of this repository -- rsynced into the podman
-# VM, rsynced onto a build box, its own git checkout on a peer workstation -- and
-# a stale copy fails as "unknown option" from a command that works perfectly on
-# the machine you typed it on. `wk status` says which are behind; this is what
-# fixes all of them.
+# The tooling on every machine, as part of --machine/--all rather than its own
+# flag -- the caller shouldn't have to know it's one of the two things that go
+# stale. Every machine runs a *copy* of this repo (rsynced into the podman VM,
+# onto a build box, or its own git checkout on a peer) and a stale one fails as
+# "unknown option" from a command that works fine where it was typed.
+# `wk status` says which copies are behind; this fixes them.
 sync_tools() {
     local _bad=0 _t
     for _t in $(target_all); do
-        # A subshell per target, with its own driver: a driver is a sourced file
-        # that sets globals, and one target's overrides outliving it is a bug
-        # this repository has already had.
+        # A subshell per target: a driver is a sourced file that sets globals,
+        # and letting one target's overrides outlive it corrupts the next.
         (
             load_target "$_t" >/dev/null 2>&1 || exit 3
             case "$WK_TARGET_KIND" in
@@ -205,21 +174,16 @@ sync_tools() {
                 done ;;
             remote)
                 if [ -n "${WK_REMOTE_PEER:-}" ]; then
-                    # A workstation runs a checkout of its own, under git, and
-                    # rsyncing over it would throw away whatever it had
-                    # uncommitted. So it pulls -- and --ff-only, because a
-                    # merge on somebody else's machine is not this command's to
-                    # make.
+                    # A workstation runs its own checkout under git; rsyncing
+                    # over it would throw away uncommitted work, so it pulls
+                    # instead -- --ff-only, since a merge on someone else's
+                    # machine isn't this command's to make.
                     #
-                    # And then it is *checked*, which is the half that was
-                    # missing. A pull can only bring a peer level with this
-                    # machine if what this machine has is committed and pushed;
-                    # with a dirty tree here it succeeds, says "Already up to
-                    # date", and converges nothing -- and this command printed
-                    # "pulled" and exited 0 while `wk status` went on reporting
-                    # the peer as behind, offering the pull that had just run as
-                    # the remedy. A sync that cannot converge has to say so and
-                    # name the reason, which is on this side, not the peer's.
+                    # Then checked: a pull only brings a peer level if what
+                    # this machine has is committed and pushed. A dirty tree
+                    # here lets the pull succeed while converging nothing, so
+                    # that has to be caught and named rather than reported as
+                    # success.
                     _h=$(t_ssh_host "" 2>/dev/null) || exit 0
                     ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$_h" \
                         "cd $(sh_quote "$(t_tools "")") && git pull --ff-only" >&2 \
@@ -267,11 +231,9 @@ sync_far_stores() {
 }
 
 # --- one workspace -----------------------------------------------------------
-#
-# The default scope, and the answer to "you should not need to recreate a
-# container to get up to date WebKit": the fetch happens *inside* the workspace,
-# from the mirror mounted at /mirror, so `git log origin/main` and a rebase see
-# today's upstream without anything being remade.
+# The default scope: the fetch happens *inside* the workspace, from the mirror
+# mounted at /mirror, so `git log origin/main` and a rebase see today's
+# upstream without anything being remade.
 if [ -z "$SCOPE" ]; then
     # No store lock and no snapshot: this touches one workspace's own object
     # store and nothing this machine shares.
@@ -281,27 +243,18 @@ if [ -z "$SCOPE" ]; then
     exit 0
 fi
 
-# Every copy of this repository on this machine, and on every other one when the
-# scope is everywhere. Part of the scope rather than a flag: the tooling is one
-# of the two things that go stale on a machine, and the caller should not have to
-# know which of the two they meant.
-#
-# Before the store half, not after it: on a Mac the store half is not this
-# machine's to do and the fleet is, so doing the fleet first means `--machine`
-# always accomplishes the part it can before saying where the rest lives.
+# Before the store half, not after: on a Mac the store half isn't this
+# machine's to do, but the fleet is -- so `--machine` always accomplishes the
+# part it can before saying where the rest lives.
 sync_tools || true
 [ "$SCOPE" = all ] && sync_far_stores
 
 # --- the store half, and where it can run ------------------------------------
-#
-# On a Linux workstation the store is this machine's and all of this runs here.
-# On a macOS workstation it is not: $WK_STORE is /var/lib/wk *inside the podman
-# VM*, which the Mac can neither create nor read -- so the mirror, the snapshot
-# and the workspaces are all in there, while the fleet is reachable only from out
-# here. `--machine` on a Mac is therefore genuinely two halves on two machines.
-#
-# Said, rather than attempted: what attempting it looked like was
-# `mkdir: /var/lib/wk: Permission denied`, which names no machine and no remedy.
+# On Linux the store is this machine's, so all of this runs here. On macOS
+# $WK_STORE is /var/lib/wk *inside the podman VM*, unreadable from out here --
+# so the mirror, snapshot and workspaces are all in there, and `--machine` on
+# a Mac is genuinely two halves on two machines. Said rather than attempted:
+# a bare permission error there would name no machine and no remedy.
 if ! store_is_local; then
     echo >&2
     info "the mirror, the snapshot and the workspaces are in the podman VM, not out here"
@@ -346,17 +299,11 @@ wk_remotes | while read -r name url; do
         info "added remote $name"
     fi
 
-    # origin's branches become the mirror's OWN heads; every other upstream is
-    # namespaced under refs/remotes/<name>/.
-    #
-    # This asymmetry is load-bearing. `git clone` copies refs/heads and ignores
-    # refs/remotes, so a mirror that filed origin under refs/remotes/origin/
-    # would have an empty refs/heads and clone into a repository with no
-    # branches at all.
-    #
-    # Only the branches from wk_mirror_branches are carried: mirroring all ~920
-    # of WebKit's branches costs tens of gigabytes for histories that are never
-    # checked out.
+    # origin's branches become the mirror's OWN heads (git clone copies
+    # refs/heads, ignores refs/remotes -- filing origin there would clone an
+    # empty repo); every other upstream is namespaced under refs/remotes/<name>/.
+    # Only wk_mirror_branches are carried: all ~920 of WebKit's branches would
+    # cost tens of gigabytes for histories nobody checks out.
     if [ "$name" = origin ]; then
         git -C "$MIRROR" config --unset-all "remote.$name.fetch" 2>/dev/null || true
         for _b in $(wk_mirror_branches); do
@@ -412,11 +359,10 @@ NEW_TREE="$NEW_DIR/WebKit"
 
 PREV_ID=$(current_base 2>/dev/null || true)
 
-# A previous snapshot is only useful if it is a working checkout. If it is not
-# -- a half-published snapshot from an interrupted sync, or a directory that was
-# never one -- hardlinking it and then fetching into it fails with "not a git
-# repository" *after* doing all the copying, and leaves a second broken snapshot
-# behind for the next run to trip over in the same way.
+# A previous snapshot is only useful if it's a working checkout. If not -- a
+# half-published snapshot from an interrupted sync, or never one at all --
+# hardlinking then fetching fails with "not a git repository" *after* copying
+# everything, leaving a second broken snapshot for the next run to trip on.
 if [ -n "$PREV_ID" ] && [ ! -d "$(base_path "$PREV_ID")/.git" ]; then
     warn "previous snapshot $PREV_ID is not a git checkout; ignoring it"
     log  "  (remove it with: wk gc)"
@@ -424,9 +370,9 @@ if [ -n "$PREV_ID" ] && [ ! -d "$(base_path "$PREV_ID")/.git" ]; then
 fi
 
 # Rule 5: when the record and the machine disagree, say so rather than trust
-# either. Hardlinking from a snapshot somebody fetched into still produces a
-# correct new snapshot -- it records its own HEAD -- but the old one is broken
-# for everything pinned to it, and that is worth a name and a line.
+# either. Hardlinking from a broken snapshot still produces a correct new one
+# (it records its own HEAD) -- but the old one stays broken for everything
+# pinned to it, worth naming.
 if [ -n "$PREV_ID" ] && ! _why=$(base_verify "$PREV_ID"); then
     warn "$_why"
 fi
@@ -448,15 +394,13 @@ else
     git clone --quiet "$MIRROR" "$NEW_TREE"
 fi
 
-# Point the snapshot's remotes at GitHub rather than at the mirror it was
-# cloned from, and add the forks. The mirror lives in the VM and is
-# deliberately not mounted into workspaces, so a snapshot keeping it as origin
-# would hand every workspace a remote it cannot reach -- and no mirror remote
-# is added here for the same reason.
+# Point the snapshot's remotes at GitHub rather than the mirror it was cloned
+# from, and add the forks. The mirror lives in the VM and isn't mounted into
+# workspaces, so keeping it as origin would hand every workspace an
+# unreachable remote.
 #
-# The wiring itself is wk_wiring_script's, shared with every other target, so
-# "origin is WebKit/WebKit and my forks are already there" is one statement in
-# one place rather than four that drifted.
+# The wiring is wk_wiring_script's, shared with every target, so "origin is
+# WebKit/WebKit and forks are already there" is one statement, not four.
 info "wiring snapshot remotes for workspace use"
 sh -c "$(wk_wiring_script "$NEW_TREE")"
 
@@ -485,35 +429,20 @@ mv "$NEW_DIR/sha.tmp" "$NEW_DIR/sha"
 info "published base $NEW_ID ($(cut -c1-10 < "$NEW_DIR/sha"))"
 
 # --- 3. the workspaces --------------------------------------------------------
+# A snapshot only starts a *new* workspace; an existing one's checkout is an
+# overlay pinned to its creation-time snapshot, which never moves. So every
+# workspace fetches too -- "everything here knows about today's upstream".
 #
-# A snapshot is what a *new* workspace starts from. It does nothing at all for
-# the ones that already exist: a workspace's checkout is an overlay whose lower
-# layer is the snapshot it was pinned to at creation, and that pin never moves.
-# So the second half of "sync" is this one -- every workspace fetches too, and
-# one command means "everything here knows about today's upstream".
+# Fetched from /mirror (targets/container.sh), so nothing crosses the network
+# twice; a workspace made before that mount exists falls back to its own
+# remotes over the egress proxy, and says so.
 #
-# The fetch happens *inside* the workspace and its source is the mirror, mounted
-# read-only at /mirror (targets/container.sh). That is the point of doing it
-# here rather than leaving each workspace to `git fetch` for itself: the objects
-# are already on this disk, so nothing crosses the network and nothing is
-# downloaded twice. A workspace made before that mount existed has no /mirror,
-# and falls back to its own remotes -- which is the slow path, over the egress
-# proxy, and it says so.
-#
-# Driven from the host, because that is where the command belongs: inside a
-# workspace `wk sync` is refused for the same reason `wk gc` is (it acts on a
-# store the workspace cannot see).
-#
-# One at a time, and a failure is per workspace: a stopped container or a guest
-# that is not booted must cost that line and not the run.
+# Driven from the host, same as `wk gc`: it acts on a store the workspace
+# can't see, so it's refused from inside one. One workspace's failure -- a
+# stopped container, an unbooted guest -- costs that line, not the run.
 
-# The refspecs a workspace fetches from the mirror with.
-#
-# The mirror's layout dictates them: origin's branches are its own heads,
-# because `git clone` copies refs/heads and ignores refs/remotes -- so a mirror
-# that filed origin under refs/remotes would clone into a repository with no
-# branches. Every other upstream is therefore namespaced, and each maps onto the
-# same namespace in the workspace.
+# The refspecs a workspace fetches with, mirroring the mirror's own layout
+# (origin under refs/heads, everything else namespaced -- see above).
 mirror_refspecs() {
     local r out="+refs/heads/*:refs/remotes/origin/*"
     for r in $(wk_mirror_default_remotes); do
@@ -536,10 +465,8 @@ sync_workspaces() {
 
     info "fetching in ${#names[@]} workspace(s) -- $(wk_mirror_default_remotes)"
     for ws in "${names[@]}"; do
-        # Each workspace in a subshell with its own driver loaded: a driver is a
-        # sourced file that sets globals, and one target's overrides outliving it
-        # is a bug this repository has already had (`wk status` read every
-        # remote workspace's branch with the container driver's function).
+        # Each workspace in a subshell with its own driver: letting one
+        # target's overrides outlive it corrupts the next target's read.
         (
             load_target "$(ws_target "$ws")" >/dev/null 2>&1 || exit 3
             st=$(ws_state "$ws" 2>/dev/null) || st=absent
@@ -549,15 +476,13 @@ sync_workspaces() {
             fi
             printf '  %-24s ' "$ws" >&2
 
-            # One exec, and it says which source it used: from /mirror when the
-            # workspace has it (no network, the objects are already on this
-            # disk), and otherwise from the workspace's own remotes over the
-            # egress proxy -- which is the slow path, and worth naming, because
-            # the fix is to remake a workspace that predates the mount.
+            # One exec that says which source it used: /mirror when present,
+            # else the workspace's own remotes over the slow egress-proxy path
+            # (naming the fix: remake a workspace that predates the mount).
             #
-            # Only the remotes it actually has, in that fallback: one made
-            # before `wpe` was wired in has no such remote, and naming it would
-            # fail the whole fetch over a remote that was never there.
+            # Only the remotes it actually has: one made before `wpe` was
+            # wired in has no such remote, and naming it would fail the whole
+            # fetch over one that was never there.
             out=$(t_exec "$ws" sh -c "cd $(sh_quote "$(t_src "$ws")") || exit 1
                     if [ -d /mirror/WebKit.git ]; then
                         git fetch --prune --quiet /mirror/WebKit.git $specs || exit 1
@@ -597,15 +522,9 @@ sync_workspaces() {
 
 sync_workspaces ""
 
-# What the reader can do now, and nothing about how the store is laid out.
-#
-# "A workspace stays pinned to the snapshot it was created from, and only a new
-# workspace gets a new one" is true of the implementation and reads as "remake
-# the container to get
-# current WebKit". That is exactly wrong, and it is the sentence that made a
-# person believe it: every workspace has today's upstream in it the moment this
-# command finishes. Moving onto it is a rebase, not a rebuild.
-#
-# The snapshot is how workspaces share a checkout on disk. It is not a version of
-# WebKit anybody has to track, so it is not reported as one.
+# What the reader can do now, not how the store is laid out: every workspace
+# already has today's upstream the moment this command finishes -- moving
+# onto it is a rebase, not a rebuild. The snapshot is how workspaces share a
+# checkout on disk, not a version of WebKit anybody tracks, so it isn't
+# reported as one.
 log "'git rebase origin/main' in a workspace moves it onto what was just fetched."

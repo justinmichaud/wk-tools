@@ -65,9 +65,15 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/boot/machines.sh"
 
-HOST="${WK_MAC_SSH:-tolken}"
-MACHINE="${WK_MAC_MACHINE:-mbp}"
+# Defaults to MACHINE's own conf (MACH_SSH, boot/machines/<machine>.conf) once
+# MACHINE is final, after argument parsing -- see below; --host or WK_MAC_SSH
+# still win outright.
+HOST="${WK_MAC_SSH:-}"
+# Defaulting to mbp is deliberate, unlike HOST above: there is one real Mac to
+# bench, and benchvm is explicitly the rehearsal you ask for by name.
+MACHINE="${WK_MAC_MACHINE:-mbp}"  # static
 VOLUME="${WK_BENCH_VOLUME:-WK Bench}"
 PLAN="${WK_MAC_PLAN:-speedometer3.0}"
 CONFIG="${WK_MAC_CONFIG:-mac-release}"
@@ -92,10 +98,12 @@ usage() { sed -n '4,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 # --- reaching the Mac --------------------------------------------------------
 #
 # One helper, so there is one place that decides how a command gets over there
-# and one place a --dry-run can intercept. BatchMode: an unattended lane that
-# stops at a password prompt is a hang, and it should read as a failure instead.
+# and one place a --dry-run can intercept. `mac_ssh` (boot/machines.sh) is
+# shared with bench/mac-lane.sh's `ssh_to` -- the two are one lane in two
+# files, and a ConnectTimeout that meant something different in each half was
+# exactly this kind of bug waiting to be measured.
 mac() {
-    ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "$@"
+    mac_ssh "$HOST" "$@"
 }
 mac_sh() { mac bash -lc "$(sh_quote "$*")"; }
 
@@ -166,10 +174,8 @@ put_file() {  # $1 = local file, $2 = remote path
 # correctly configured, after the reboot, where nothing could say so.
 #
 # What was wrong underneath is less interesting than the shape of the mistake:
-# a transfer whose success was inferred from an exit status rather than from the
-# far end. docs/TESTING.md's first rule is "test the property, not the
-# configuration", and this broke it. So the tree is now checked by asking the
-# other side for a file that only the new tree has.
+# Test the property, not the configuration: the tree is checked by asking the
+# other side for a file that only the new tree has, not by rsync's exit status.
 put_tree() {
     local src="$1" dst="$2"
     tar -cf - --exclude '.git' -C "$src" . \
@@ -334,11 +340,11 @@ preflight() {
     # evidence there is, and the startup manager can override it without
     # updating it.
     local bv grp
-    bv=$(mac 'nvram -p 2>/dev/null | awk -F"\t" "\$1==\"boot-volume\"{print \$2}"' 2>/dev/null | tr -d '\r')
+    bv=$(mac "python3 $(sh_quote "$(host_tools)/lib/wkmac.py") boot-volume" 2>/dev/null | tr -d '\r')
     grp="${bv##*:}"
     local bench_grp host_grp
-    bench_grp=$(mac "diskutil info $(sh_quote "/Volumes/$VOLUME") 2>/dev/null | sed -n 's/.*APFS Volume Group: *//p'" 2>/dev/null | tr -d '\r' | head -1)
-    host_grp=$(mac "diskutil info / 2>/dev/null | sed -n 's/.*APFS Volume Group: *//p'" 2>/dev/null | tr -d '\r' | head -1)
+    bench_grp=$(mac "python3 $(sh_quote "$(host_tools)/lib/wkmac.py") volume-group $(sh_quote "/Volumes/$VOLUME")" 2>/dev/null | tr -d '\r')
+    host_grp=$(mac "python3 $(sh_quote "$(host_tools)/lib/wkmac.py") volume-group /" 2>/dev/null | tr -d '\r')
     log "" >&2
     log "  the firmware's boot-volume names:" >&2
     if [ -n "$grp" ] && [ "$grp" = "$bench_grp" ]; then
@@ -892,7 +898,7 @@ phase_collect() {
         warn "  no autorun state on the volume -- the agent never ran"
     fi
 
-    local stamp; stamp=$(printf '%s\n' "$st" | sed -n 's/^job_stamp=//p' | tail -1)
+    local stamp; stamp=$(kv_get job_stamp <<<"$st")
     local runs="$root/ab/$stamp/runs.tsv"
     if [ -n "$stamp" ] && mac "test -f $(sh_quote "$runs")" 2>/dev/null; then
         log ""
@@ -967,6 +973,15 @@ while [ $# -gt 0 ]; do
                     WS="$1"; shift ;;
     esac
 done
+
+# MACHINE is final now that argument parsing is done -- this is where its
+# MACH_SSH becomes HOST's default, so `--machine benchvm` picks up benchvm's
+# own conf rather than staying pinned to whatever MACHINE was at startup.
+if [ -z "$HOST" ]; then
+    machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk boot --list)"
+    HOST="${MACH_SSH:-}"
+    [ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no MACH_SSH"
+fi
 
 # The driver cannot live on the machine it reboots. Same guard, and the same
 # reason, as bench/mac-lane.sh: phase_go takes the shell with it.

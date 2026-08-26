@@ -9,8 +9,6 @@ and `boot/rpi-eeprom.sh` handle Pi firmware; `boot/check-boot-files.py` models
 what firmware asks of a boot tree and runs before anything touches a disk. The
 rpi5 and rpi4 have both been through the whole cycle with no hands on the board.
 
-`docs/TESTING.md` §7 is the verification ledger.
-
 ## Remaining
 
 - **Nothing gates on an armed machine.** The display half landed — `wk status`
@@ -49,67 +47,53 @@ rpi5 and rpi4 have both been through the whole cycle with no hands on the board.
   equivalent to NOPASSWD root. Worth narrowing; an input to
   `docs/HANDOFF-sandboxing.md`.
 
+## Owed — unverified on real hardware
+
+- [ ] the rescue marker plus both self-return/self-disarm units, checked end to
+      end on a real board: marker lands, `systemctl show wk-self-return`
+      reports the condition unmet, and the board actually reboots unattended
+      within the profile's watchdog period after `IMG_WATCHDOG` fires
+- [ ] no `IMG_ROLE`/rescue profile exists yet; `wk sysimage ls` reports
+      `unrecorded` role for pre-field images — decide what it should say
+- [ ] a `--rescue` write without `--grow` leaves the rest of a shared card
+      alone (the rpi3 two-slot case) — unverified
+- [ ] a profile's `config.txt.append` reaches the image for every builder
+      (rpi4 clock pinning, rpi5 `os_check=0`) — idempotent by marker, read
+      back after write, never run against a real image
+- [ ] `kill -9` mid-`wk sysimage build`, re-run converges at every point
+- [ ] two `wk sysimage build` at once: the second waits rather than racing the
+      first's cleanup
+- [ ] with the boot device absent, arming falls through to host mode rather
+      than hanging at firmware
+- [ ] armed-and-not-yet-rebooted is reported ARMED, exit 2, with the
+      "next reboot leaves this role" warning
+- [ ] a machine armed to leave host mode shows the transition on its `wk
+      status` line (system id, who armed it, when); after reboot the walk
+      reports the new mode or off-ssh
+- [ ] an armed machine still in host mode long after arming (or back in host
+      mode with the record uncleared) is flagged as desync
+- [ ] `wk help hardware` needs hand-checking against `boot/machines.sh` and
+      its drivers whenever either changes — nothing enforces the two agree
+
 ## The shape that constrains anything built here
 
 **Five machines, five last miles.** rpi5: USB one-shot over ssh. rpi4: local USB
 boot, armed on the medium itself, over ssh. rpi3: hands-on until its card has a
 second root slot -- one medium means one system, and that system is its base
-image.
-moose: its own UEFI `BootNext`, over ssh, but needing interactive sudo. MBP:
-authenticated and hands-on, always.
-
-**Apple Silicon's boot volume cannot be selected remotely, at all** — boot
-volume selection goes through a LocalPolicy in the machine's own secure storage.
-True with SIP *disabled* and passwordless root as well, which is the obvious
-reason to expect otherwise: `nvram boot-volume` exits 0
-and changes nothing, `bless --setBoot` says it is unsupported on Apple Silicon,
-`systemsetup -getstartupdisk` prints `(null)`, and `bputil` sets security policy
-rather than selecting a volume. The gate is firmware ownership, not SIP. What
-*is* available is reading it: `nvram -p` publishes `boot-volume` as three
-colon-separated UUIDs whose last field is the APFS volume group, so
-`wk boot mbp --status` reports `firmware_default=` — evidence, not a promise,
-since the startup manager boots a volume once without updating the variable.
-
-**Every bench lane boots local media**, and two properties follow. A local root
-keeps the network out of the measurement. And a board offered a medium it
-cannot boot *falls through* to the next entry and comes up on its rescue system,
-reachable — where firmware that gets partway into a boot tree and no further
-**halts**, a state whose only exit is a hand on the power supply.
+image. moose: its own UEFI `BootNext`, over ssh, but needing interactive sudo.
+MBP: authenticated and hands-on, always -- `wk help hardware` has why Apple
+Silicon rules out anything else.
 
 ## Traps
 
-- **An image that cannot be reached must return the machine by itself.** Every
-  system carries a watchdog that self-disarms and reboots; without it a failed
-  boot is a trip to the machine.
 - **The residual hands-on case, and it is real**: a medium complete enough for
   firmware to commit to it (a `start4.elf` is there) but that then hangs takes
   the fall-through away — the board keeps choosing that medium, a power cycle
   re-enters the same hang instead of landing on the rescue system, and the
   self-disarm never runs because it lives in the rootfs. Observed on the rpi4
-  with a downstream Yocto image (`docs/TESTING.md`). `boot/check-boot-files.py`
+  with a downstream Yocto image. `boot/check-boot-files.py`
   is what keeps a *partial* tree from being written; a complete tree that hangs
   later is what nothing can catch from here.
-- **A check that reads a different copy of the thing it checks is not a check** —
-  verify the artifact that will actually be written or booted, not its source.
-- **First contact with an unreachable board is physical.** Every arming
-  mechanism here is an ssh command, so the tooling removes the *second* trip to
-  a device and never the first.
-- **A power cycle is not a reboot.** The Pi's one-shot register is reset-safe on
-  purpose and survives a warm reboot, so after pulling the plug confirm which
-  mode the board landed in rather than assuming.
 - **Do not put the overclock in the EEPROM.** `SDRAM_BANKLOW` and `BOOT_ORDER`
   are firmware state shared by both modes; an overclock written there overclocks
   host mode too, which is the exact split this design preserves.
-- **The rpi5 has no `cmdline.txt`** — boot args come from
-  `/proc/device-tree/chosen/bootargs`, injected by firmware. Check what is
-  already injected before adding any by hand.
-- **`os_check=0` belongs in the *image's* `config.txt`.** Pi 5 firmware rejects
-  kernels lacking Ubuntu's trailer and anything we build is "locally built" by
-  that definition; the host's config.txt does nothing for the image.
-- **Two disks written from one image are twins in every namespace** — same MBR
-  signature, so `PARTUUID=` resolves to whichever the firmware enumerated
-  first. Identity is stamped per disk at write time; keep it that way
-  (`docs/HANDOFF-sdcard.md`).
-- **The Mac's boot volume cannot be switched by script.** A plan that depends on
-  rebooting the MBP into the benchmark install remotely is wrong; say so rather
-  than building it.

@@ -104,11 +104,10 @@ yocto_ensure_image() {
 
     # The tag carries the base's tag *and* a digest of the Containerfile, so
     # editing the spec builds a new image instead of silently reusing the old
-    # one. Learned the hard way: a marker file was added to the Containerfile,
-    # the tag did not change, `podman image exists` said yes, and every
-    # workspace made from it went on lacking the marker -- which looked exactly
-    # like the change not working. Same reasoning as `IMG_BASE_SHA256` in the
-    # distro profiles: name a build product by what went into it.
+    # one -- without the digest, `podman image exists` would say yes for an
+    # image missing whatever the spec just gained, indistinguishable from the
+    # edit not working. Same reasoning as `IMG_BASE_SHA256` in the distro
+    # profiles: name a build product by what went into it.
     derived="localhost/wk-yocto-host:${base##*:}-$(sha256sum "$spec" | cut -c1-8)"
 
     if podman image exists "$derived" 2>/dev/null; then
@@ -141,12 +140,10 @@ yocto_ensure_image() {
 yocto_ensure_ws() {
     local ws="$1" branch="$2"
 
-    # Unconditionally, and *before* the existence check. Doing it only on
-    # creation is a trap this walked straight into: an edit to the Containerfile
-    # changed the wanted tag, an existing workspace meant the build never asked
-    # for the image, and every run went on using a container made from the old
-    # one -- which looked exactly like the edit having no effect. `podman image
-    # exists` makes the current case free.
+    # Unconditionally, and *before* the existence check -- doing it only on
+    # creation would mean an existing workspace never re-asks for the image
+    # after the Containerfile changes, silently building against the old one.
+    # `podman image exists` makes the current case free.
     yocto_ensure_image
 
     if [ "$(t_info "$ws")" = absent ]; then
@@ -208,7 +205,7 @@ yocto_ensure_ws() {
 #
 # Evidence, not the status file: the pid is read from the workspace and tested
 # in the workspace, because that is the only namespace the number means
-# anything in (docs/HANDOFF-workspace-state.md -- "status files are claims").
+# anything in (README.md, "the state rules").
 # Does the branch actually have a section for the target this profile names?
 #
 # Asked here rather than left to bitbake, because the failure is otherwise a
@@ -255,9 +252,9 @@ yocto_running() {
 
 # Every stage, not just the one being asked for. Two bitbakes in one build
 # directory is the thing bitbake's own lock exists to prevent, and the stages
-# share a build directory -- so "is *anything* running in here" is the question,
-# and asking it per stage is what let a `--stage fetch` start on top of a live
-# `--stage image` and get as far as two cookers before anyone noticed.
+# share a build directory -- so "is *anything* running in here" is the
+# question. Checking only the requested stage would let `--stage fetch` start
+# on top of a live `--stage image`, getting as far as two cookers.
 #
 # Prints the stage it found, so the refusal can name it.
 YOCTO_STAGES="layers fetch image toolchain webkit"
@@ -368,6 +365,17 @@ yocto_stop() {
 # and say something every WK_HEARTBEAT_SECONDS so a watcher never has to guess
 # whether to keep waiting.
 #
+# Not the ssh-reached shape lib/detach.sh's `detach_wait_remote` covers
+# (targets/vm.sh, image/pmos.sh): this build is started through `t_spawn`
+# (targets/container.sh), because a detached process does not survive a
+# `podman exec` client the way it survives an ssh session closing, which is
+# measured rather than assumed there -- and its log is a host bind mount
+# (`$(t_home)/yocto-*.log` inside the workspace is `$(yocto_log ...)` out
+# here), not something only the far side can read. So staleness is asked of
+# `log_age` (lib/detach.sh) directly, the same rule `build_live` uses for a
+# local build, rather than a poll of a remote size -- there is nothing remote
+# to poll.
+#
 # It does NOT kill a stalled build. run_watched aborts at WK_ABORT_SECONDS
 # because a stalled compile is dead; a bitbake task can legitimately be silent
 # for a long time (a kernel compile behind one recipe's serial task, a large
@@ -375,21 +383,21 @@ yocto_stop() {
 # sstate cannot always give back. So a stall here is reported and left alone.
 yocto_wait() {
     local ws="$1" stage="$2"
-    local log start last_size=0 last_change now size idle warned=0 last_beat
+    local log start now idle warned=0 last_beat
     log=$(yocto_log "$ws" "$stage")
-    start=$(date +%s); last_change=$start; last_beat=$start
+    command -v log_age >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
+    start=$(date +%s); last_beat=$start
 
     while yocto_running "$ws" "$stage"; do
         # A slower poll than run_watched's: each check is a container exec,
         # and over a six-hour build a ten-second interval is two thousand of
         # them for a question whose answer changes once.
         sleep "${WK_YOCTO_POLL_SECONDS:-30}"
-        size=$(file_bytes "$log"); now=$(date +%s)
-        if [ "$size" != "$last_size" ]; then
-            last_size=$size; last_change=$now; warned=0
-        fi
-        idle=$(( now - last_change ))
-        if [ "$idle" -ge "${WK_STALL_SECONDS:-900}" ] && [ "$warned" -eq 0 ]; then
+        now=$(date +%s)
+        idle=$(log_age "$log" 2>/dev/null) || idle=0
+        if [ "$idle" -lt "${WK_STALL_SECONDS:-900}" ]; then
+            warned=0
+        elif [ "$warned" -eq 0 ]; then
             warn "no output for ${idle}s in '$ws' -- not killing it; a bitbake task
   can be silent for a long time. Look:  tail -f $log"
             warned=1
@@ -489,6 +497,7 @@ would build image $IMG_PROFILE (builder: yocto)
   webkit jobs $(WK_MB_PER_JOB=2560 build_jobs) (2560 MB/job -- WebCore's unified sources OOM'd at -j79)
   local fixes $([ "${YOC_LOCAL_LAYER:-1}" = 0 ] && echo "none -- the branch's own configuration, unmodified" || echo "image/yocto/meta-wk is added to bblayers (build-time only)")
   tailnet     $([ "${YOC_TAILNET:-1}" = 0 ] && echo "off -- the board is reachable only over whatever LAN it lands on" || echo "tailscale in the image (meta-wk-tailnet); the card carries the key")
+  wifi        $(_image_wants_wifi "${IMG_MACHINE:-}" && echo "wk-wifi-join in the image (meta-wk-wifi); the card carries the credential" || echo "not needed -- $IMG_MACHINE has a cable")
   disk free   $(df -h --output=avail "$WK_STORE" 2>/dev/null | tail -1 | tr -d ' ')
   into        $(image_dir "<profile>-<stamp>")
 EOF
@@ -702,13 +711,11 @@ EOF
     # --status` cannot tell a board running it from a board that never left its
     # host mode, and on the rpi4 the stick would stay armed for ever.
     #
-    # The distro builder has done this all along, inside `relabel`, which is
-    # why it took wanting a Yocto image on the rpi5 to notice that the two
-    # builders shared nothing after the manifest.
+    # The distro builder has done this all along, inside `relabel`.
     # $ID, not just the local $id: marker_file and install_disk_id both read
-    # the global, and without it a Yocto image got `id=` with nothing after it
-    # -- an identity marker that identifies nothing, which every reader of it
-    # treats as "some wk image" rather than as this one.
+    # the global, and without it the identity marker gets `id=` with nothing
+    # after it -- identifying nothing, so every reader treats it as "some wk
+    # image" rather than as this one.
     ID="$id"
     DISK="$dir/disk.img"
     FAT_OFFSET=$(fat_offset "$DISK")
@@ -738,9 +745,8 @@ EOF
     #
     # Nothing but key=value inside the heredoc below. It is an unquoted heredoc
     # writing a record that other code parses, so a `#` comment in it is not a
-    # comment -- it is three lines of prose in the manifest, which is how
-    # `watchdog` arrived with a paragraph above it. (`manifest_get` greps
-    # `^key=` and shrugged, which is why it took reading one to notice.)
+    # comment -- it is prose in the manifest, silently ignored by
+    # `manifest_get`'s `^key=` grep rather than rejected.
     #
     # `watchdog` is here rather than looked up from the profile because the
     # image is what is booting and its profile may have changed since; `wk boot`

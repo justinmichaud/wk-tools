@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 #
-# wk enter <workspace> -- interactive shell in a workspace.
+# wk enter <workspace> -- interactive shell in a workspace
+# wk: where=workspace name=required ready=yes group=workspaces
 #
-# On Linux this is also where GPU and desktop integration happens: benchmarks
-# need real acceleration, so the Wayland socket and /dev/dri are passed in.
-# Note that display integration and network isolation are independent -- the
+# Opens an interactive shell in the workspace, or runs a given command there
+# and exits. On Linux this is also where GPU and desktop integration happens:
+# benchmarks need real acceleration, so the Wayland socket and /dev/dri are
+# passed in. Display integration and network isolation are independent -- the
 # workspace keeps the GPU while still being unable to reach the LAN.
+#
+#   --zed        open the workspace in Zed instead of a shell
+#   [--] <cmd>   run one command there and exit, instead of a shell. The `--`
+#                is optional (matching `wk run`'s convention for anyone who
+#                types it out of habit) and is dropped rather than handed to
+#                the workspace as the first word of its command.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,11 +21,17 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-NAME="${1:-}"; shift || true
+NAME="${WK_NAME:-}"
 require_name "$NAME"
 
 ZED=""
-[ "${1:-}" = --zed ] && { ZED=1; shift; }
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --zed) ZED=1; shift ;;
+        --)    shift; break ;;
+        *)     break ;;
+    esac
+done
 
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"

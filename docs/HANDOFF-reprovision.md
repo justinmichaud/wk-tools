@@ -70,6 +70,13 @@ forgetting it is only discovered after a reboot into a mode you cannot log into.
   from `hostname -s` while every config spells it `tolken`. `wk bench mac`
   case-folds for this reason; anything else comparing the two is suspect.
 
+## Owed — unverified
+
+- [ ] a second device: fresh clone + `./setup` picks up every registry
+      machine as a target with no state copied from the first
+- [ ] confirm `./setup` killed mid-stage still converges (a re-run completes
+      only what's missing, and a second full run reports no changes)
+
 ## While you are in there — cheap only at install time
 
 - **Command Line Tools** (`xcode-select --install`). The benchmark driver's

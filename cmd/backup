@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 #
-# wk backup -- write live desktop settings back into the repo.
+# wk backup -- write live desktop settings back into the repo
+# wk: where=host name=none group=hosts
 #
-# The inverse of ./setup, so the pair is a real round trip. Two rules make the
-# output restorable rather than merely complete:
+# The inverse of ./setup, so the pair is a real round trip. No subverbs or
+# flags: it reads this host's own live settings and writes whichever files
+# apply --
+#
+#   macOS   host/macos/defaults.conf (refreshed value by value, comments and
+#           ordering kept) and host/macos/symbolichotkeys.plist
+#   Linux   host/linux/config.dconf, filtered to drop machine-specific and
+#           secret entries
+#
+# Two rules make the output restorable rather than merely complete:
 #
 #   Only settings that were deliberate choices are captured. macOS reports 574
 #   preference domains, nearly all of them window positions and per-app state;

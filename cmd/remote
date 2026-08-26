@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# wk remote setup <target> -- provision a shared build machine.
+# wk remote setup|rm <target> -- provision or deprovision a shared build machine
+# wk: where=host name=none group=hosts needs ssh,rsync
 #
 # The companion to `wk pi setup`: it works against a live machine over ssh and
 # changes nothing about how that machine is installed. Here the constraint is
@@ -32,9 +33,9 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 ACTION="${1:-}"; TARGET="${2:-}"
 case "$ACTION" in setup|rm) [ -n "$TARGET" ] || ACTION="" ;; esac
-[ -n "$ACTION" ] && [ -n "$TARGET" ] || die "usage: wk remote setup|rm <target>
+[ -n "$ACTION" ] && [ -n "$TARGET" ] || die "usage: wk remote setup|rm <target>; see wk remote -h
     <target> is a machine: an ssh destination that already works, which
-    becomes the target name. See SETUP.md, \"Shared build machines\"."
+    becomes the target name. See README.md, Workflows."
 
 require_name "$TARGET"
 
@@ -155,10 +156,9 @@ if ! target_kind "$TARGET" >/dev/null 2>&1; then
 #
 # WK_REMOTE_ROOT defaults to ~/wk on the machine.
 #
-# There is deliberately no job ceiling here. The job count is derived per build
-# from what this machine has free at the time -- a fixed number would be wrong
-# on the day the machine changes, and it was: 16 on a box with 250 GB and 80
-# cores.
+# There is deliberately no job ceiling here. The job count is derived per
+# build from what this machine has free at the time -- a fixed number would
+# be wrong on the day the machine changes.
 #
 # WK_TARGET_CMAKE, if set, is added to the CMake flags of every build on this
 # machine. For a port or a toolchain quirk that belongs to the machine rather
@@ -238,27 +238,75 @@ _rsh_q "env WK_REMOTE_TARGET=$(sh_quote "$TARGET") \
           WK_REMOTE_REFERENCE=$(sh_quote "$REF") \
           bash $(sh_quote "$(t_tools '')/remote/provision.sh")"
 
+# The same install claude/install.sh does on this workstation, run over there:
+# same symlinks, but settings.json gets Bash(wk *) merged into settings-host.json
+# rather than linked as-is (WK_CLAUDE_REMOTE=1 -- claude/install.sh, "why").
+# Needs no root, same as everything else provisioning leaves behind.
+_rsh_q "env WK_ROOT=$(sh_quote "$(t_tools '')") WK_CLAUDE_REMOTE=1 bash -c '
+    set -euo pipefail
+    . \"\$WK_ROOT/lib/common.sh\"
+    . \"\$WK_ROOT/claude/install.sh\"
+'" && changed "linked ~/.claude on $r_host (settings-host.json + Bash(wk *))"
+
 # --- root on a machine you share ---------------------------------------------
-#
 # Igalia's build machines grant `(ALL : ALL) NOPASSWD: ALL`, so anything
-# running as you on one of them is root for the asking. That is the machine
-# where wk runs long unattended builds, so it is the machine where it matters
-# most -- and the fix needs no sysadmin: one drop-in of your own, sorted last.
+# running as you is root for the asking -- on the machine that runs long
+# unattended builds, where it matters most. The fix needs no sysadmin: one
+# drop-in of your own, sorted last.
 #
-# A barrier rather than a refusal you cannot get past: `--force` proceeds with
-# the warning repeated at the end, for when the machine is needed now and the
-# password can wait. `wk doctor` and `wk sudo status --all` go on saying so
-# either way, because they recompute it.
+# A barrier, not an unpassable refusal: `--force` proceeds with the warning
+# repeated at the end. `wk doctor`/`wk sudo status --all` keep saying so
+# either way, since they recompute it.
 if ! "$WK_ROOT/cmd/sudo" status --target "$TARGET" >/dev/null 2>&1; then
     warn "$("$WK_ROOT/cmd/sudo" status --target "$TARGET" 2>&1 | head -2)"
     if confirm "require a password for sudo on $r_host now?"; then
-        "$WK_ROOT/cmd/sudo" require --target "$TARGET" \
+        "$WK_ROOT/cmd/sudo" setup --target "$TARGET" \
             || barrier "sudo on '$TARGET' still grants root without a password."
     else
         barrier "sudo on '$TARGET' grants root without a password, and this machine
     runs unattended builds. 'wk sudo setup --target $TARGET' fixes it in one
     file that no sysadmin has to approve."
     fi
+fi
+
+# --- WebKit's own dependency installers ---------------------------------------
+# Tools/gtk/install-dependencies (and Tools/wpe/install-dependencies, on a
+# machine whose conf sets WK_TARGET_WPE -- this driver builds whichever port a
+# workspace asks for, and not every shared box is meant to carry WPE's package
+# list) needs packages that nothing above this line installs, and provisioning
+# never touches a package manager on its own (the one rule in remote/provision.sh:
+# nothing there may need root). Both scripts re-exec themselves under sudo when
+# not already root, so this step only has to give that sudo a real terminal to
+# prompt on (CLAUDE.md: wk never calls sudo without a password prompt).
+#
+# Run from whatever WebKit this machine already has -- the shared repository it
+# advertises ($REF, above) or the mirror this driver keeps otherwise
+# (_remote_mirror_update, the same choice t_create makes) -- extracted with
+# `git archive` rather than cloning a second checkout just to run two scripts.
+if [ -t 0 ] && [ -t 1 ]; then
+    info "Tools/*/install-dependencies on $r_host"
+    dep_src="$REF"
+    if [ -z "$dep_src" ]; then
+        _remote_mirror_update "$(_remote_root)"
+        dep_src="$(_remote_root)/mirror"
+    fi
+    dep_dirs="Tools/gtk"
+    [ -n "${WK_TARGET_WPE:-}" ] && dep_dirs="$dep_dirs Tools/wpe"
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    # `trap ... 0` (EXIT's numeric spelling): a brand-new bash process on the
+    # far machine, nothing to do with this side's wk_atexit registry
+    # (lib/common.sh, "only lib/common.sh takes the EXIT trap") -- spelled
+    # this way so a grep for that rule does not have to know the difference.
+    ssh -t $(_ssh_opts) "$WK_REMOTE_HOST" "set -e
+        tmp=\$(mktemp -d)
+        trap 'rm -rf \"\$tmp\"' 0
+        git -C $(sh_quote "$dep_src") archive main -- $dep_dirs | tar -x -C \"\$tmp\"
+        for d in $dep_dirs; do \"\$tmp/\$d/install-dependencies\"; done" \
+        && changed "ran Tools/*/install-dependencies on $r_host ($dep_dirs)" \
+        || warn "Tools/*/install-dependencies failed on $r_host -- re-run 'wk remote setup $TARGET' once it's fixed"
+else
+    warn "no terminal here -- skipping Tools/*/install-dependencies on $r_host."
+    log  "  it needs an interactive sudo prompt; re-run 'wk remote setup $TARGET' from a terminal."
 fi
 
 # --- offer to clean up -------------------------------------------------------

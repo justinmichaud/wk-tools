@@ -56,7 +56,7 @@ NEED_FREE_GB=60
 
 _free_gb() { df -g /System/Volumes/Data | awk 'NR==2 {print $4}'; }
 
-_store=$(diskutil apfs list | sed -n 's/.*Physical Store \(disk[0-9]*s[0-9]*\).*/\1/p' | head -1)
+_store=$(python3 "$WK_TOOLS_DIR/lib/wkmac.py" physical-store 2>/dev/null)
 if [ -n "$_store" ]; then
     # `0` means "use all available space". Recent macOS expands the container
     # by itself on first boot after the disk grows, in which case this returns

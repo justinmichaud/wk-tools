@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
 #
-# wk version -- which wk-tools this machine is running.
+# wk version [--tree] -- which wk-tools this machine is running
+# wk: where=local name=none readonly group=hosts
 #
-# Every machine in the fleet runs a *copy* of this repository: the podman VM
-# gets one over rsync, so does every build machine and every macOS guest. They
-# go stale silently, and a stale copy fails in the least helpful way there is --
-# `error: unknown option --quiet` from a command that works perfectly on the
-# machine you typed it on. That happened three times in one afternoon while the
-# push-key work was landing, which is why this exists.
+# Every machine in the fleet runs an rsynced *copy* of this repository, which
+# goes stale silently and then fails in confusing ways.
 #
 # Two identifiers, because neither is enough on its own:
 #
 #   sha     the git commit, when there is a git checkout here. Only the
-#           workstation has one -- the copies are rsynced with `--exclude .git`
-#           -- so this is `-` on most machines, and it says nothing about
-#           uncommitted edits by itself.
+#           workstation has one -- copies are rsynced with `--exclude .git`
+#           -- so this is `-` elsewhere and says nothing about uncommitted
+#           edits by itself.
 #   tree    a hash of the file contents, computed identically everywhere and
-#           over exactly what rsync copies. This is the one that answers "is
-#           that machine running what I am running", including when what I am
-#           running has never been committed.
+#           over exactly what rsync copies. This answers "is that machine
+#           running what I am running", including uncommitted work.
 #
-# Both are derived on every call. Nothing is written down: a recorded version
-# is a claim that outlives the thing it describes, and the tree is right here
-# to be read.
+# Both are derived on every call; nothing is written down.
 #
 #   wk version            the two identifiers, one per line
 #   wk version --tree     just the tree hash (what a caller compares)
@@ -41,23 +35,13 @@ fi
 
 _sha256() { $SHA256; }
 
-# The content of the tree, and nothing else about it.
+# Paths are relative to the root, since the root differs per machine and
+# hashing absolute paths would make two identical trees look different.
+# `.git` is excluded because it is not part of what runs; `lock.mdb` because
+# an LMDB lock file is rewritten by any process that opens the database, a
+# read included, which otherwise reports permanent false drift.
 #
-# Paths are relative to the root, because they are absolutely different on
-# every machine (/opt/wk-tools, ~/wk/wk-tools, the checkout here) and hashing
-# them would make two identical trees look different. `.git` is excluded for
-# the same reason it is excluded from the rsync: it is not part of what runs.
-#
-# Sorted under LC_ALL=C so two machines with different locales agree on the
-# order, which is otherwise a difference that is not a difference.
-#
-# `lock.mdb` for the same reason, arrived at the hard way: an LMDB lock file is
-# rewritten by any process that *opens* the database, a read included, and one
-# is checked in under dotfiles/zed. So every machine reported "wk-tools DIFFERS
-# from the workstation" immediately after a successful sync, permanently --
-# which is worse than no check at all, because a drift warning that is always
-# on is a drift warning nobody reads. (The file has no business being tracked
-# either; excluding it here is the half that does not touch anyone's data.)
+# Sorted under LC_ALL=C so two machines with different locales agree on order.
 tree_hash() {
     # shellcheck disable=SC2086 -- $SHA256 is a deliberate command word list.
     ( cd "$WK_ROOT" && \
@@ -83,5 +67,5 @@ case "${1:-}" in
     printf 'tree=%s\n'  "$(tree_hash)"
     printf 'root=%s\n'  "$WK_ROOT"
     ;;
-*) log "usage: wk version [--tree]"; exit 2 ;;
+*) die "usage: wk version [--tree]; see wk version -h" ;;
 esac

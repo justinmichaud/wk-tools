@@ -1,12 +1,34 @@
 #!/usr/bin/env bash
 #
-# wk build <workspace> <config> -- build WebKit or JSC.
+# wk build <workspace> <config> -- build WebKit or JSC
+# wk: where=workspace name=required ready=yes group=workspaces
+# wk: flag --list where=local
 #
 # The reason to use this rather than calling build-webkit directly: the job
 # count is derived from memory actually available right now, and the build runs
 # where the scheduler and the OOM killer will pick it over your desktop
 # session. A plain `ninja -j$(nproc)` on a WebKit link step is the reliable way
 # to make a machine stop responding.
+#
+#   --list                 print the available configs (wk build --list) and exit
+#   --dry-run              resolve everything and print the exact command line
+#                          this build would run, prefixed `running:`; build nothing
+#   --no-defaults          skip this target's WK_BUILD_ARGS conf default (below)
+#   --detach                hand the build to the machine that runs it, and return
+#   --babysit[=model]       run under a Claude fix loop until it builds or gives up
+#   --branch <name>         check out this branch first
+#   --mem-budget <MB>       memory ceiling for the watchdog
+#   --mem-floor <MB>        memory floor for the watchdog
+#   --cmake <flags>         extra CMake flags, added to the config's own (repeatable)
+#   --env NAME=VALUE        extra environment for the build, overriding the config's (repeatable)
+#   --                      everything after this goes to build-webkit verbatim
+#
+# A real build prints its exact build-webkit command line first -- one line,
+# prefixed `running:` -- so it can be reproduced by hand outside wk without
+# guessing at flags; --dry-run prints that identical line and builds nothing.
+# A target with WK_BUILD_ARGS set in its targets/hosts/<name>.conf (see
+# buildbox4.conf for WK_TARGET_CMAKE, the same idea) has its default flags
+# folded into that line automatically; --no-defaults leaves them out.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,37 +58,28 @@ fi
 DRY=""
 [ "${1:-}" = --dry-run ] && { DRY=1; shift; }
 
-# There is no workspace name inside a workspace: there is exactly one, it is
-# this machine, and `wk build <config>` is the form claude/CLAUDE.md documents
-# and the only one available in there. The name form is refused rather than
-# accepted as a synonym (refuse_ws_name, lib/target.sh).
-NAME="${1:-}"; CONFIG="${2:-}"
+# Inside a workspace there is exactly one name (this machine), and
+# `wk build <config>` is the only form claude/CLAUDE.md documents there. The
+# dispatcher resolves $WK_NAME and drops it on a host, so what's left is the
+# config either way -- except in here, where a second word is a mistaken name.
+NAME="${WK_NAME:-}"
 if in_workspace; then
-    # The one exception the refusal has to make for itself: a workspace named
-    # after a config still has to be able to build that config, so in a
-    # workspace called `jsc-release`, `wk build jsc-release` is the config and
-    # not the name. Configs are a closed list, so this is decidable.
-    config_load "$NAME" 2>/dev/null || refuse_ws_name "$NAME" build "<config>"
-    # A name *and* a config, where the name is not this workspace's, is the host
-    # form typed in the wrong place. Read literally it would build this
-    # workspace and report the config as unknown, which explains neither half.
-    if [ -n "$CONFIG" ] && config_load "$CONFIG" 2>/dev/null; then
-        die "no such workspace: $NAME -- this is workspace '$(wk_self)', so the
-    form in here is 'wk build $CONFIG' with no name"
+    # A name *and* a config, where the first word is not this workspace's own
+    # name, is the host form typed in the wrong place: read literally it would
+    # build this workspace and report the second word as an unknown config,
+    # which explains neither half.
+    if [ -n "${2:-}" ] && config_load "${2:-}" 2>/dev/null; then
+        die "no such workspace: ${1:-} -- this is workspace '$NAME', so the
+    form in here is 'wk build ${2:-}' with no name"
     fi
-    NAME=$(wk_self); CONFIG="${1:-}"
-    shift 1 2>/dev/null || true
-else
-    shift 2 2>/dev/null || true
 fi
+CONFIG="${1:-}"
+shift 1 2>/dev/null || true
 
 # --dry-run: resolve everything and print what would happen, build nothing.
-#
-# Here because a cold Apple-port build is ~99 minutes, so "does `wk build` reach
-# the right target with the right config and job count" cannot be answered by
-# running one -- which is exactly the question a workspace's first in-workspace
-# build asks. Taken off what is left of the argument list, which is otherwise
-# passed through to the build untouched.
+# Here because a cold Apple-port build is ~99 minutes, so "does this reach the
+# right target with the right config and job count" can't be answered by
+# running one -- the exact question a workspace's first build asks.
 [ "${1:-}" = --dry-run ] && { DRY=1; shift; }
 
 require_name "$NAME"
@@ -81,20 +94,16 @@ config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-# The lifecycle, not the environment (ws_state in lib/target.sh): a container
-# somebody removed by hand is not "no such workspace", and answering that sends
-# a person looking for a name they typed correctly. Every other state gets its
-# own words from wait_ready further down; `absent` is the one that has to be
-# refused before the config, the job count and the flags are resolved.
+# This target's own default build flags, if its conf sets any
+# (targets/hosts/<name>.conf; load_target just sourced it -- the same
+# mechanism WK_TARGET_CMAKE already uses). Captured now, ahead of the flag
+# parsing below, because --no-defaults has to be able to override it.
+TARGET_BUILD_ARGS="${WK_BUILD_ARGS:-}"
+
+# The dispatcher already waited for the workspace (ready=yes) and refused
+# absent/broken/unreachable with its own words before this ran; this is just
+# the state for the dry-run report below.
 WS_STATE=$(ws_state "$NAME")
-case "$WS_STATE" in
-    absent) die "no such workspace: $NAME" ;;
-    # Neither of these gets better by resolving a config and a job count first
-    # -- one needs a repair and the other needs a network -- and wait_ready is
-    # where both are worded, so it is asked now rather than at the gate below.
-    # It does not wait for either.
-    broken|unreachable) wait_ready "$NAME" ;;
-esac
 
 # The workspace's own architecture, from the driver rather than from a flag.
 # It was fixed when the workspace was created and cannot change afterwards --
@@ -102,16 +111,59 @@ esac
 # nothing to get wrong per build. The flags it implies are in lib/arch.sh.
 ARCH=$(t_arch "$NAME")
 
-# Our own flags are taken off the argument list; everything left is passed
+# Named here, ahead of everything that resolves or writes, because --detach
+# (below) needs them before this process forks off the build it does not wait
+# for: it writes the running record itself rather than leaving a window where
+# `wk status` reads whatever the previous build left behind.
+WS=$(wk_ws_dir "$NAME")
+LOG="$WS/build.log"
+STATUS="$WS/build.status"
+
+# The one writer for build.status, for every state. Written here and, for a
+# target that's a machine of its own, pushed there too (t_state_put is a
+# no-op elsewhere), so `wk status` gets the same answer from either end.
+#
+# `running` carries no exit/finished/seconds/peak_mb and touches the log
+# fresh, so a reader judging liveness by log age (build_live, lib/detach.sh)
+# has real evidence rather than a stale mtime from whatever wrote last.
+write_status() {
+    local state="$1" rc="${2:-}" content
+    if [ "$state" = running ]; then
+        ensure_dir "$WS" >/dev/null
+        : > "$LOG"
+        content=$(cat <<EOF
+state=running
+config=$CONFIG
+arch=$ARCH
+started=$STARTED
+log=$LOG
+EOF
+)
+    else
+        content=$(cat <<EOF
+state=$state
+config=$CONFIG
+arch=$ARCH
+exit=$rc
+started=$STARTED
+finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+seconds=$(( $(date +%s) - START_EPOCH ))
+log=$LOG
+peak_mb=${MEM_PEAK:-}
+EOF
+)
+    fi
+    printf '%s\n' "$content" > "$STATUS"
+    printf '%s\n' "$content" | t_state_put "$NAME"
+}
+
+# Our own flags are taken off the argument list; everything left passes
 # through to the build untouched.
 #
-# --sysroot is reserved, so that the day it exists it cannot be confused with
-# --arch: --arch is what the workspace runs; --sysroot would be what a build
-# targets from a native workspace. They are different mechanisms with
-# different flags (see lib/arch.sh), and silently passing this through to
-# build-webkit -- which has no such option -- would fail 40 lines into a perl
-# script.
-BABYSIT=""; BRANCH=""; EXTRA_CMAKE=""; MEM_BUDGET=""; MEM_FLOOR=""; DETACH=""; _PASS=()
+# --sysroot is reserved so it can't be confused with --arch (which workspace
+# runs vs. what a build targets, see lib/arch.sh) -- silently passing it
+# through would fail 40 lines into a perl script instead of here.
+BABYSIT=""; BRANCH=""; EXTRA_CMAKE=""; MEM_BUDGET=""; MEM_FLOOR=""; DETACH=""; NO_DEFAULTS=""; _PASS=()
 # Newline-separated, because an environment value may contain spaces. Held in a
 # variable rather than written as a literal so the quoting stays readable.
 EXTRA_ENV=""; _NL='
@@ -119,6 +171,7 @@ EXTRA_ENV=""; _NL='
 while [ $# -gt 0 ]; do
     case "$1" in
         --detach)    DETACH=1; shift ;;
+        --no-defaults) NO_DEFAULTS=1; shift ;;
         --babysit)   BABYSIT="${WK_BABYSIT_MODEL:-haiku}"; shift ;;
         --babysit=*) BABYSIT="${1#*=}"; shift ;;
         --branch)    BRANCH="${2:-}"; [ -n "$BRANCH" ] || die "--branch needs a name"; shift 2 ;;
@@ -134,33 +187,25 @@ while [ $# -gt 0 ]; do
         --mem-floor=*)  MEM_FLOOR="${1#*=}"; shift ;;
 
         # Extra CMake flags for this build, *added* to the config's own.
-        # Repeatable, and quoted as one argument per use:
+        # Repeatable, quoted as one argument per use:
         #
         #   wk build ws jsc-release --cmake '-DENABLE_X=ON -DENABLE_Y=OFF'
         #
-        # This exists because the obvious spelling is a trap. build-webkit
-        # takes --cmakeargs as a single option, so a second one on the command
-        # line replaces the first: passing --cmakeargs by hand silently drops
-        # every flag the config sets (DEVELOPER_MODE, USE_LIBBACKTRACE, the
-        # architecture's flags) and builds something else entirely, with no
-        # sign that it happened. Appended last, so where the same -D appears
-        # twice the one typed here wins -- cmake takes the last value.
+        # Exists because the obvious spelling is a trap: build-webkit takes
+        # --cmakeargs as a single option, so passing it by hand silently
+        # replaces the config's own flags rather than adding to them.
+        # Appended last, so where a -D repeats, the one typed here wins.
         --cmake)     [ -n "${2:-}" ] || die "--cmake needs at least one flag"
                      EXTRA_CMAKE="$EXTRA_CMAKE $2"; shift 2 ;;
         --cmake=*)   EXTRA_CMAKE="$EXTRA_CMAKE ${1#*=}"; shift ;;
 
-        # One environment variable for this build, added last so it *overrides*
-        # what the config sets rather than merely joining it (`env` takes the
-        # last assignment of a name). Repeatable:
+        # One environment variable for this build, added last so it
+        # *overrides* the config's own (`env` takes the last assignment).
+        # Repeatable: wk build ws jsc-release --env CC=gcc-14 --env CXX=g++-14
         #
-        #   wk build ws jsc-release --env CC=gcc-14 --env CXX=g++-14
-        #
-        # This exists because the environment was the one half of a build that
-        # could not be steered from the command line. Exporting CC here does
-        # nothing: the build runs in the target -- another container, another
-        # machine -- and only what config_build_env carries gets there. So a
-        # one-off compiler, a CFLAGS, a ccache setting all meant editing a
-        # config or a conf.
+        # Exists because the environment couldn't be steered from the command
+        # line otherwise: exporting CC here does nothing, since the build runs
+        # in the target and only what config_build_env carries gets there.
         --env)       [ -n "${2:-}" ] || die "--env needs NAME=VALUE"
                      case "$2" in
                          [A-Za-z_]*=*) ;;
@@ -195,14 +240,14 @@ while [ $# -gt 0 ]; do
 done
 set -- ${_PASS[@]+"${_PASS[@]}"}
 
+[ -z "$NO_DEFAULTS" ] || TARGET_BUILD_ARGS=""
+
 # --babysit: hand the whole thing to a detached loop (build/babysit.sh) that
 # rebuilds after every fix a sandboxed Claude makes, and exit. nohup and no
-# terminal, so the loop belongs to nobody's ssh session; `wk status` renders
-# its state file and the report says afterwards what was done.
+# terminal, so the loop belongs to nobody's ssh session.
 #
-# Refused where `wk claude` would refuse -- the fixer runs through it, so the
-# sandbox rules are its rules -- and refused from inside a workspace, where
-# there is no host store for the state and no second sandbox to start.
+# Refused where `wk claude` would refuse (the fixer runs through it) and
+# refused from inside a workspace, which has no host store or second sandbox.
 if [ -n "$BABYSIT" ]; then
     in_workspace && die "--babysit runs on the host: it re-runs 'wk build' and starts
     Claude in the workspace, neither of which works from in here"
@@ -247,43 +292,48 @@ if [ -n "$BABYSIT" ]; then
 fi
 
 # --detach: hand the build to the machine that will run it and come back.
+# A WebKit build is tens of minutes and the connection driving it is not:
+# anything that kills the driver (a timeout, a closed laptop, a dropped ssh)
+# takes the build with it, leaving `build.status` stuck at `running`.
+# Detaching moves the process to the far end of that fragility.
 #
-# A WebKit build is tens of minutes and the connection driving it is not.
-# Anything that kills the driver -- a tool call's timeout, a closed laptop, a
-# dropped ssh -- takes the build with it today, at whatever object it had
-# reached, and leaves `build.status` still saying `running`. Detaching moves
-# the process to the far end of that fragility: the machine that builds owns
-# it, and this end is free to go away.
+# Where it detaches *to* needs no special-casing: a container build on a
+# macOS host was already forwarded into the podman VM, so the nohup happens
+# there; a remote target hands the command to that machine's own `wk`.
 #
-# Where it detaches *to* depends on where the work is, and this needs no
-# special-casing because of where this file is already running: a container
-# build on a macOS host was forwarded into the podman VM before it got here,
-# so the nohup happens in the VM; a remote target hands the command to that
-# machine's own `wk` over ssh and drops the connection.
-#
-# Deliberately after --dry-run and the babysitter, which detach in their own
-# ways, and before anything that writes: the detached run does all of it
-# again, including taking the lock.
+# After --dry-run and the babysitter (which detach their own ways) and
+# before the lock and checkout: the detached run takes both itself, over
+# there. What happens here first is the one write that can't wait for it.
 if [ -n "$DETACH" ]; then
+    # _ALL_ARGS was captured after the dispatcher already resolved and dropped
+    # the workspace name from the argument list (it is $WK_NAME now, not $1),
+    # so the recursive `wk build` this reassembles -- on this machine or, via
+    # t_wk_detach, on the remote one -- needs it put back on the front, or the
+    # far dispatcher has nothing to resolve a name from.
     _det=()
+    in_workspace || _det+=("$NAME")
     for _a in ${_ALL_ARGS[@]+"${_ALL_ARGS[@]}"}; do
         [ "$_a" = --detach ] && continue
         _det+=("$_a")
     done
 
+    # Written before the child exists, not after: the alternative is a window
+    # between this command returning and the child reaching its own first
+    # write, in which `wk status` reads whatever the previous build in this
+    # workspace left behind -- an "ok" or a "failed" from an hour ago,
+    # answering for a build that has not run yet.
+    STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    write_status running
+
     if t_has_wk && t_wk_detach build ${_det[@]+"${_det[@]}"} >/dev/null 2>&1; then
         info "building $CONFIG in '$NAME' on $TARGET, detached -- this end can go away"
     else
-        # detach_run rather than a nohup of our own (lib/detach.sh): the same
-        # stdin-closed, both-streams-redirected launch the babysitter gets,
-        # from one implementation instead of two.
+        # detach_run rather than a nohup of our own: the same launch the
+        # babysitter gets, from one implementation instead of two.
         #
-        # No status file passed, and that is not an omission: the re-run writes
-        # build.status itself, and a build's liveness is the age of its log
-        # rather than a pid (cmd/status) -- so nothing here can tell last run's
-        # file from a build that is running right now, and the honest move is
-        # to leave it to the child that owns it.
-        WS=$(wk_ws_dir "$NAME")
+        # No status file passed here: the child rewrites build.status when
+        # it gets there (a repeat, not a regression), and liveness is the
+        # log's age (cmd/status), not a pid -- so it's left to the child.
         _pid=$(detach_run "" "$WS/detached.log" -- \
             "$WK_ROOT/wk" build ${_det[@]+"${_det[@]}"})
         info "building $CONFIG in '$NAME', detached as pid $_pid -- this end can go away"
@@ -298,26 +348,14 @@ POLITE=""
 NICE=10
 if [ "$WK_TARGET_KIND" = remote ]; then POLITE=1; NICE=19; fi
 
-# Size the build from what the *target* has, not from this machine's free
-# memory. Inside a container the kernel still reports the whole machine's
-# MemAvailable, so deriving jobs from it picks a number the cgroup will
-# OOM-kill mid-link; and for a macOS VM this half runs on the host, whose
-# memory has nothing to do with what the guest was booted with.
+# Size the build from what the *target* has, not this machine's free memory:
+# inside a container the kernel still reports the whole machine's
+# MemAvailable, which the cgroup will OOM-kill mid-link for; a macOS VM's
+# host memory has nothing to do with the guest's.
 #
-# For a remote target none of the local numbers mean anything at all -- it is
-# somebody else's machine, reached over ssh -- so the driver's answers replace
-# the measurement instead of capping it, and the load average has to come from
-# over there as well. See avail_mem_mb().
-if [ "$WK_TARGET_KIND" = remote ]; then
-    WK_AVAIL_MB=$(t_mem_mb "$NAME")
-    WK_CGROUP_CORES=$(t_cores "$NAME")
-    WK_LOAD=$(t_load "$NAME")
-    export WK_AVAIL_MB WK_CGROUP_CORES WK_LOAD
-else
-    WK_CGROUP_MB=$(t_mem_mb "$NAME")
-    WK_CGROUP_CORES=$(t_cores "$NAME")
-    export WK_CGROUP_MB WK_CGROUP_CORES
-fi
+# For a remote target no local number means anything -- the driver's answers
+# replace the measurement instead of capping it. See avail_mem_mb().
+export_target_resources "$NAME"
 
 # Extra CMake flags from the command line, read by config_build_env when it
 # assembles WK_BUILD_CMAKE. An environment variable rather than a parameter
@@ -330,6 +368,15 @@ export WK_EXTRA_CMAKE
 # appends each line to CFG_ENV last so it overrides the config's own.
 WK_EXTRA_ENV="$EXTRA_ENV"
 export WK_EXTRA_ENV
+
+# This target's own default build flags (WK_BUILD_ARGS in its conf, captured
+# above as TARGET_BUILD_ARGS before --no-defaults could clear it). A name of
+# its own, not WK_BUILD_ARGS itself: config_build_env already writes an
+# environment variable of that name into CFG_ENV for the config's own
+# --port/--release flags, and reusing it here would silently replace those
+# rather than add to them.
+WK_TARGET_BUILD_ARGS="$TARGET_BUILD_ARGS"
+export WK_TARGET_BUILD_ARGS
 
 # Flags win over the environment; both are read by config_build_env, which is
 # what carries them into the target.
@@ -362,6 +409,7 @@ if [ -n "$DRY" ]; then
     [ -n "$BRANCH" ] && log "  branch:    $BRANCH (would be checked out first)"
     log "  config:    $CONFIG ($CFG_BUILDSYS${CFG_PORT:+ $CFG_PORT}${CFG_ARGS:+ $CFG_ARGS})"
     [ -n "${WK_TARGET_CMAKE:-}" ] && log "  machine:   $WK_TARGET_CMAKE (WK_TARGET_CMAKE, from $TARGET's conf)"
+    [ -n "$TARGET_BUILD_ARGS" ] && log "  defaults:  $TARGET_BUILD_ARGS (WK_BUILD_ARGS, from $TARGET's conf; --no-defaults skips it)"
     [ -n "$WK_EXTRA_CMAKE" ] && log "  --cmake:   $WK_EXTRA_CMAKE (added to the config's)"
     [ -n "$WK_EXTRA_ENV" ] && log "  --env:     $(printf '%s' "$WK_EXTRA_ENV" | tr '\n' ' ')(overrides the config's)"
     [ $# -gt 0 ] && log "  passed on: $* (straight to build-webkit)"
@@ -374,25 +422,17 @@ if [ -n "$DRY" ]; then
 
     # ...and the commands *that* runs, from the half that knows them
     # (WK_DRY_RUN in build/build-in-target.sh). Asked through the target's own
-    # exec path rather than reconstructed here: whether ionice and choom exist,
-    # what the cgroup clamps the job count to, which build settings the Apple
-    # path adds and what the architecture wrapper is are all resolved inside the
-    # target, and a rendering out here would be a second implementation of that
-    # file -- right until the day they disagree, which is the day it matters.
+    # exec path, not reconstructed here: ionice, choom, cgroup clamps, the
+    # Apple path's settings are all resolved inside the target, and rendering
+    # them out here would be a second implementation that can disagree.
     #
-    # t_exec, deliberately not t_exec_build: the build path takes that machine's
-    # build lock, and a dry run that waited an hour behind somebody's link step
-    # would be answering a question nobody is still asking.
+    # t_exec, not t_exec_build: the build path takes that machine's build
+    # lock, and a dry run shouldn't wait an hour behind somebody's link step.
     #
-    # Guarded on the far copy understanding the flag, and this guard is not
-    # belt-and-braces -- it is the whole safety of the mechanism. Every target
-    # runs its *own* copy of build-in-target.sh (bind-mounted for a container,
-    # rsynced for a guest or a machine), and a copy that predates WK_DRY_RUN
-    # does not decline: it ignores an environment variable it has never heard
-    # of and builds -- so a dry run against a build box with a stale tree starts
-    # a real build-webkit in a workspace somebody is already building in, and
-    # rewrites that build directory's
-    # options file. A flag an old copy ignores is a flag that builds.
+    # Guarded on the far copy understanding the flag -- not belt-and-braces,
+    # the whole safety of the mechanism: a copy predating WK_DRY_RUN ignores
+    # the variable and builds for real, so an old tree turns a dry run into a
+    # real build-webkit inside somebody else's workspace.
     _bit="$(t_tools "$NAME")/build/build-in-target.sh"
     if ! t_exec "$NAME" grep -q WK_DRY_RUN "$_bit" 2>/dev/null; then
         warn "  the wk-tools in '$NAME' predates --dry-run's target half, so the commands"
@@ -400,10 +440,9 @@ if [ -n "$DRY" ]; then
         log  "  push this tree there first:  wk sync --target $TARGET"
         exit 0
     fi
-    if _cmds=$(t_exec "$NAME" env "${CFG_ENV[@]}" WK_DRY_RUN=1 \
+    if _cmd=$(t_exec "$NAME" env "${CFG_ENV[@]}" WK_DRY_RUN=1 \
             "$_bit" ${@+"$@"} 2>/dev/null); then
-        log "  and then, in the target:"
-        printf '%s\n' "$_cmds" | tr -d '\r' | sed 's/^/    /' >&2
+        log "  running:   $(printf '%s' "$_cmd" | tr -d '\r')"
     else
         warn "  could not ask '$NAME' itself what it would run -- the lines above are"
         log  "  this side's half of it. Is the workspace up? (wk status $NAME)"
@@ -411,39 +450,23 @@ if [ -n "$DRY" ]; then
     exit 0
 fi
 
-# One gate, before anything is written: a build must not start on a workspace
-# that is still being created (lib/target.sh, wait_ready). It returns at once
-# for a finished workspace, waits while a detached `wk new` is still working,
-# and refuses -- naming the repair -- for the three states no amount of waiting
-# fixes: a creation whose driver is gone, an environment removed from under the
-# record, and a machine that will not answer.
+# One lock per mutated resource (rule 4): this workspace, for the rest of
+# this process. Everything below writes to the checkout and status files,
+# and two builds interleaved in one workspace corrupt both.
 #
-# Bounded, because this is a build and not a watch: a creation that has not
-# finished in half an hour is something to look at rather than to keep waiting
-# on. `--babysit` inherits the gate for free, since it re-runs this command.
-wait_ready "$NAME" "${WK_BUILD_READY_WAIT:-1800}"
-
-# One lock per mutated resource (rule 4): this workspace, for the rest of this
-# process. Everything above resolves and reports; everything below writes to
-# the checkout and to the status files, and two builds interleaved in one
-# workspace corrupt both the build directory and the record of it.
-#
-# Taken after --dry-run and after the --babysit dispatch above: neither of
-# those builds anything, and the babysitter re-runs `wk build`, which takes
-# this lock itself for each attempt. A remote target locks here *and* on the
-# far machine (targets/remote.sh) -- this one serialises this workstation's own
-# builds, that one serialises the machine's.
+# After --dry-run and --babysit above, neither of which builds anything. A
+# remote target locks here *and* on the far machine (targets/remote.sh): this
+# serialises the workstation's own builds, that one the machine's.
 hold_lock "ws-$NAME" -w "${WK_BUILD_LOCK_WAIT:-3600}"
 
 # And the half the lock cannot cover: a job detached *into* the workspace
 # outlives the command that started it, so it holds no lock out here
-# (ws_busy_reason, lib/target.sh). A six-hour Yocto build and this build would
-# share one checkout and one WebKitBuild, and neither would survive it.
+# (ws_busy_reason, lib/target.sh). A six-hour Yocto build sharing one
+# checkout with this one would not survive it.
 #
-# A barrier and not a refusal: the evidence is a pid in a namespace this end
-# cannot inspect further, so a workspace where that number has been reused
-# names a job that is not really there -- and only the person looking at it can
-# tell. --force says so and proceeds.
+# A barrier, not a refusal: the evidence is a pid this end can't fully
+# inspect, so a reused pid names a job that isn't really there -- only a
+# person looking at it can tell. --force says so and proceeds.
 if _busy=$(ws_busy_reason "$NAME"); then
     barrier "'$NAME' already has a detached job running in it: $_busy
     Two builds in one checkout corrupt both, and this one would be the second.
@@ -471,39 +494,9 @@ fi
 # workspace looking like it is building forever.
 t_sync_tools "$NAME"
 
-WS=$(wk_ws_dir "$NAME")
-LOG="$WS/build.log"
-STATUS="$WS/build.status"
-
 STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 START_EPOCH=$(date +%s)
-
-# Written here, and -- for a target that is a machine of its own -- pushed
-# there too, so that `wk status` gets the same answer from either end instead
-# of whichever half of the truth it is standing on. t_state_put is a no-op
-# everywhere else.
-write_status() {
-    local content
-    content=$(cat <<EOF
-state=$1
-config=$CONFIG
-arch=$ARCH
-exit=${2:-}
-started=$STARTED
-finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-seconds=$(( $(date +%s) - START_EPOCH ))
-log=$LOG
-peak_mb=${MEM_PEAK:-}
-EOF
-)
-    printf '%s\n' "$content" > "$STATUS"
-    printf '%s\n' "$content" | t_state_put "$NAME"
-}
-
-RUNNING=$(printf 'state=running\nconfig=%s\narch=%s\nstarted=%s\nlog=%s\n' \
-    "$CONFIG" "$ARCH" "$STARTED" "$LOG")
-printf '%s\n' "$RUNNING" > "$STATUS"
-printf '%s\n' "$RUNNING" | t_state_put "$NAME"
+write_status running
 
 # ccache is on: `--no-use-ccache` passed unconditionally by jscb-configure means
 # the shared cache does nothing for JSC builds.
@@ -516,6 +509,16 @@ log  "  stall warning after ${WK_STALL_SECONDS}s of silence; abort after ${WK_AB
 # prebuild, so the two cannot drift into building subtly different things.
 config_build_env "$(t_src "$NAME")" "$JOBS" "$NICE" "$ARCH"
 
+# The exact command about to run, fetched the same way --dry-run gets it
+# (build-in-target.sh's own WK_DRY_RUN rendering) so the two can never
+# disagree, and printed before the build starts so it can be reproduced by
+# hand outside wk without guessing at flags. Best-effort: this is a
+# reproducibility courtesy, never a reason to hold up the build it describes.
+_bit="$(t_tools "$NAME")/build/build-in-target.sh"
+if _cmd=$(t_exec "$NAME" env "${CFG_ENV[@]}" WK_DRY_RUN=1 "$_bit" ${@+"$@"} 2>/dev/null); then
+    log "running:   $(printf '%s' "$_cmd" | tr -d '\r')"
+fi
+
 set +e
 # t_exec_build, not t_exec: on a shared machine the build is the one thing that
 # has to be serialised against your own other builds, and the lock that does it
@@ -526,13 +529,10 @@ run_watched "$LOG" -- \
 rc=$?
 set -e
 
-# What the memory watchdog saw, lifted out of the log it wrote it to.
-#
-# The log is the one channel that survives everything: a dropped ssh, a killed
-# driver, a build started from the other end. Reading the markers back here is
-# what turns "the build died" into "the build was killed for using 96 GB
-# against a 94 GB budget", which is the difference between a mystery and a
-# job count to change.
+# What the memory watchdog saw, lifted out of the log it wrote it to. The
+# log is the one channel that survives everything (a dropped ssh, a killed
+# driver), and reading the markers back turns "the build died" into "killed
+# for using 96 GB against a 94 GB budget" -- a mystery vs. a job count to fix.
 MEM_PEAK=$(grep -a 'wk: memory: peak' "$LOG" 2>/dev/null | tail -1 \
            | sed -n 's/.*peak \([0-9]*\)MB.*/\1/p' || true)
 MEM_KILLED=""
@@ -567,17 +567,12 @@ case $rc in
     log "first error(s):"
     first_error "$LOG" | sed 's/^/  /' || true
 
-    # One failure that reads as a broken checkout and is neither: Xcode's build
-    # description is a derived artifact under WebKitBuild/<config>/XCBuildData,
-    # and a build that was interrupted -- or a tree cloned from a guest whose
-    # build was -- can leave it in a state the next build cannot use. The
-    # symptom is exit 65 and "unable to open .../manifest.json" for a hash that
-    # is not there. Nothing in the source is wrong and a clean build is an hour
-    # of penance for it; deleting the derived directory is the whole repair.
-    #
-    # Named rather than done automatically: this is somebody's build tree, and
-    # "wk deleted things and retried" is a worse first experience than one line
-    # saying exactly what to remove.
+    # One failure that reads as a broken checkout and isn't: Xcode's build
+    # description (WebKitBuild/<config>/XCBuildData) can be left unusable by
+    # an interrupted build -- exit 65, "unable to open .../manifest.json".
+    # Nothing in the source is wrong; deleting the derived directory is the
+    # whole repair, but named rather than done automatically, since this is
+    # somebody's build tree.
     if grep -q 'xcbuilddata/manifest.json' "$LOG" 2>/dev/null; then
         log ""
         warn "that is Xcode's build description, not your code."

@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+#
+# wk completion bash|zsh -- print a shell completion script for wk
+#
+# wk: where=local name=none group=hosts
+#
+# `wk completion bash` (or `wk completion zsh`) prints a script meant to be
+# eval'd by your shell's rc; `shell/bashrc` does this automatically for both
+# shells, guarded on `wk` actually being on PATH. It completes:
+#
+#   - command names, read from `wk --declarations` -- the same source `wk`'s
+#     own usage reads, so there is one parser for "what commands exist"
+#   - workspace names, for a command whose declaration takes one, from local
+#     state only (see list_workspaces_local below) -- never from `wk ls`,
+#     which can reach every configured host and, on a macOS workstation, can
+#     start the podman machine just to answer a TAB press
+#   - each command's own --flags, parsed out of its own `-h` text
+#
+# One completion function, in bash syntax, serves both shells: bash registers
+# it directly with `complete -F`; zsh loads `bashcompinit` (which makes zsh
+# understand bash's completion API) and registers the very same function the
+# same way. Two implementations of one completer is exactly the shape
+# CLAUDE.md rules out ("One path, not two") -- it would fail differently for
+# each shell and only get exercised by whichever one somebody is typing in.
+#
+# Two hidden verbs the generated script calls back into at completion time,
+# never at shell-startup time (so a slow answer costs a TAB press, not every
+# new shell):
+#
+#   wk completion --list-workspaces   workspace names, from local state
+#   wk completion --flags <cmd>       that command's own --flags
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/store.sh"
+
+usage() {
+    die "usage: wk completion bash|zsh -- print a shell completion script for wk.; see wk completion -h"
+}
+
+# Every workspace name this machine already knows about, without starting
+# anything or reaching anywhere:
+#
+#   - $(wk_state_dir)/targets/<name> is the per-workspace target registry
+#     (target_register, lib/target.sh) -- one file per workspace, on every
+#     target, written at `wk new` and removed at `wk rm`. Reading its
+#     directory listing is a `ls`, nothing more.
+#   - a workspace made before that registry existed, or on a target whose
+#     store simply lives on this machine (a Linux workstation's container
+#     store, or a Mac's own /var/lib/wk when it happens to have one --
+#     store_is_local, lib/store.sh), can exist without a registry entry.
+#     list_workspaces (lib/store.sh) reads that store's `ws/` directory --
+#     again a bare `ls`, not a walk of any other target.
+#
+# What this deliberately does not do: ask a remote target, or a macOS host's
+# podman VM, for its workspaces. Both require a live connection this function
+# must never open just to answer a TAB press, and the VM case would start the
+# podman machine outright (forward_to_vm, `wk`) -- exactly what a completion
+# hook must not do.
+list_workspaces_local() {
+    local d f name seen=" "
+    d="$(wk_state_dir)/targets"
+    if [ -d "$d" ]; then
+        for f in "$d"/*; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+            case "$seen" in *" $name "*) continue ;; esac
+            seen="$seen$name "
+            printf '%s\n' "$name"
+        done
+    fi
+    store_is_local || return 0
+    local w
+    for w in $(list_workspaces 2>/dev/null || true); do
+        case "$seen" in *" $w "*) continue ;; esac
+        seen="$seen$w "
+        printf '%s\n' "$w"
+    done
+}
+
+# Every `--flag` word in <cmd>'s own `-h` text. The header comment is the
+# reference text (`explain_cmd`, `wk`) -- a human reading `wk build -h` sees
+# exactly the flags this offers, so there is one place that can drift, not
+# two independent option-parsing implementations.
+list_flags() {
+    local cmd="$1"
+    "$WK_ROOT/wk" "$cmd" -h 2>/dev/null \
+        | grep -oE -- '--[a-zA-Z][a-zA-Z0-9-]*' \
+        | sort -u
+}
+
+case "${1:-}" in
+    --list-workspaces) list_workspaces_local; exit 0 ;;
+    --flags)
+        [ $# -ge 2 ] || usage
+        list_flags "$2"
+        exit 0 ;;
+esac
+
+case "${1:-}" in
+    bash|zsh) ;;
+    *) usage ;;
+esac
+SHELL_NAME="$1"
+
+# The one completion function, bash syntax, shared by both shells. `wk` here
+# is `${COMP_WORDS[0]}` -- whatever the user actually typed -- not a fixed
+# path, so a wrapper or an alias completes the same way it runs.
+_completion_function() {
+    cat <<'FUNC'
+_wk_completion() {
+    local cur bin cmd_line dname flags ws
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    bin="${COMP_WORDS[0]}"
+
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "$("$bin" --declarations 2>/dev/null | cut -f1)" -- "$cur") )
+        return 0
+    fi
+
+    cmd_line=$("$bin" --declarations 2>/dev/null | awk -F'\t' -v c="${COMP_WORDS[1]}" '$1 == c { print; exit }')
+    [ -n "$cmd_line" ] || return 0
+    dname=$(printf '%s' "$cmd_line" | cut -f3)
+
+    case "$cur" in
+        -*)
+            flags=$("$bin" completion --flags "${COMP_WORDS[1]}" 2>/dev/null)
+            COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
+            return 0 ;;
+    esac
+
+    case "$dname" in
+        required|optional)
+            # Only while no positional has been typed yet -- a workspace name
+            # is offered once, in its own slot, not at every later word.
+            local i seen=0
+            i=2
+            while [ "$i" -lt "$COMP_CWORD" ]; do
+                case "${COMP_WORDS[$i]}" in -*) ;; *) seen=1 ;; esac
+                i=$((i + 1))
+            done
+            if [ "$seen" -eq 0 ]; then
+                ws=$("$bin" completion --list-workspaces 2>/dev/null)
+                COMPREPLY=( $(compgen -W "$ws" -- "$cur") )
+            fi
+            ;;
+    esac
+    return 0
+}
+complete -F _wk_completion wk
+FUNC
+}
+
+printf '# wk %s completion -- generated by `wk completion %s`; eval this in your rc.\n' \
+    "$SHELL_NAME" "$SHELL_NAME"
+
+if [ "$SHELL_NAME" = zsh ]; then
+    cat <<'ZSHPRELUDE'
+autoload -U +X bashcompinit && bashcompinit
+ZSHPRELUDE
+fi
+
+_completion_function

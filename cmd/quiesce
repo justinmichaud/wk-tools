@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
 #
-# wk quiesce on|off|status -- quiet the machine for benchmarking.
+# wk quiesce on|off|status -- quiet the machine for benchmarking
 #
-# Split in two: the privileged actions go through the sudoers-allowlisted
-# helper, and everything that needs no privilege stays here. Keeping the
-# unprivileged half out of the root helper is what lets the root helper stay a
-# short, auditable, fixed allowlist.
+# wk: where=host name=none group=hosts needs quiesce-helper
+# wk: sub status needs=
+#
+# Privileged actions go through the sudoers-allowlisted helper
+# (wk-quiesce-priv); everything that needs no privilege stays here. Keeping
+# the unprivileged half out of the root helper keeps the root helper a short,
+# auditable, fixed allowlist.
+#
+#   on      quiet the machine: pause background daemons, disable the
+#           screensaver and lock screen, disable App Nap and keep MiniBrowser
+#           frontmost (macOS), stop Notification Center, keep the display
+#           awake. Settles for WK_SETTLE_SECONDS (default 30) before
+#           returning.
+#   off     undo everything `on` did, reading both this machine's state
+#           directory and the legacy $TMPDIR one so nothing is left stranded.
+#   status  what is quiesced right now, plus the privileged helper's own
+#           account of what it did.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,29 +35,38 @@ ACTION="${1:-status}"
 # One state directory per machine, not one per shell.
 #
 # Not `${TMPDIR:-/tmp}/wk-quiesce`: on macOS $TMPDIR is per-user *and
-# per-session*, so a terminal and an ssh login get different values, and
-# `wk quiesce on` at the keyboard and `wk quiesce off` over ssh look in two
-# different directories -- the caffeinate pid was invisible to the `off` that
-# should have killed it, and SIGSTOPped daemons stayed stopped with nothing
-# recording that they were. Both are exactly the state a benchmark install is
-# left in by an unattended lane, which drives it over ssh.
+# per-session*, so a terminal and an ssh login get different values -- `on`
+# at the keyboard and `off` over ssh would look in two different directories
+# and leave state stranded, exactly the situation an unattended benchmark
+# lane (which runs this over ssh) needs undone.
 STATE="${WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce}"
 # A session left behind by the older location is still undoable: `off` reads
 # both, so a machine quiesced by yesterday's wk-tools is not stranded.
 LEGACY_STATE="${TMPDIR:-/tmp}/wk-quiesce"
 
 run_priv() {
-    if [ -x "$PRIV" ]; then
-        sudo -n "$PRIV" "$1" 2>/dev/null && return 0
-        warn "passwordless sudo unavailable; re-run ./setup to install the sudoers rule"
-        sudo "$PRIV" "$1"
-    else
-        warn "$PRIV is not installed; run ./setup. Continuing with unprivileged steps only."
-    fi
+    [ -x "$PRIV" ] || die "$PRIV is not installed, so the privileged half of quiesce
+    cannot run.
+    Remedy:  ./setup --stage quiesce"
+    sudo -n "$PRIV" "$1" || die "passwordless sudo is not set up for $PRIV.
+    Remedy:  ./setup --stage quiesce"
+}
+
+# Interrupting `on` partway through -- most likely during the settle sleep at
+# the end, but nothing rules out earlier -- must not leave the machine wedged
+# between states: daemons killall-STOPped forever with nobody left to CONT
+# them, or NotificationCenter booted out with nothing to restart it. `off`
+# already undoes exactly what `on` did, one idempotent step per artifact in
+# $STATE, so INT/TERM during `on` runs it rather than inventing a second
+# unwind path.
+_quiesce_on_interrupted() {
+    warn "interrupted -- undoing what 'quiesce on' already did"
+    "$0" off || true
 }
 
 case "$ACTION" in
 on)
+    on_interrupt _quiesce_on_interrupted
     run_priv on
     mkdir -p "$STATE"
 
@@ -52,13 +74,10 @@ on)
         # Keep the machine awake for the whole run without touching power
         # settings permanently.
         if [ ! -f "$STATE/caffeinate.pid" ]; then
-            # stdin, stdout and stderr all detached, and that is not tidiness:
-            # a backgrounded process that keeps the inherited descriptors open
-            # holds an ssh session open with it, because ssh waits for the
-            # streams and not for the shell. `wk quiesce on` over ssh therefore
-            # hangs for ever instead of returning -- and driving the benchmark
-            # install from another machine is the only way this command is ever
-            # run unattended.
+            # stdin/stdout/stderr all detached: a backgrounded process holding
+            # the inherited descriptors keeps an ssh session open with it (ssh
+            # waits for the streams, not the shell), so `on` over ssh would
+            # hang forever instead of returning.
             caffeinate -dimsu </dev/null >/dev/null 2>&1 &
             echo $! > "$STATE/caffeinate.pid"
             info "caffeinate started"
@@ -70,39 +89,20 @@ on)
             AMPLibraryAgent bird cloudd ReportCrash 2>/dev/null || true
         touch "$STATE/daemons_paused"
         info "background daemons paused"
-        # NOTIFICATIONS: REMOVE THE THING THAT DRAWS, RATHER THAN ASK IT NICELY.
+        # DND can't be scripted reliably and this command's whole point is
+        # unattended, so it isn't touched. Instead Notification Center itself
+        # is booted out: it can't draw a banner if it isn't running, which
+        # matters because a banner is compositor work that can steal focus --
+        # and a MiniBrowser that loses focus gets rAF-throttled into the
+        # silent exit-124 timeout. Booting needs no root and is self-reversing
+        # at next login.
         #
-        # "set Do Not Disturb by hand -- it cannot be scripted reliably" is
-        # true about Do Not Disturb and useless here: this command's whole
-        # purpose is an unattended run, so "by hand" means "not at all", and
-        # notifications stay live through every benchmark the lane takes.
-        #
-        # A banner is not a cosmetic problem. It is compositor work in the middle
-        # of a measurement and it can take focus, and a browser that loses focus
-        # is throttled to the silent exit-124 timeout that `screen_blocker`
-        # exists to prevent and cannot see (a banner is not a frontmost
-        # application).
-        #
-        # So the Focus/DND setting is not touched at all. Notification Center is
-        # *booted out* instead: it cannot draw a banner if it is not running.
-        # That needs no root (a gui/<uid> domain agent), no TCC prompt, and no
-        # knowledge of where Apple keeps Focus state this year -- and it is
-        # per-login and self-reversing, which is the shape of everything else
-        # here. Verified by asking whether the process is gone, not by the exit
-        # status of the bootout.
-        # THE LABEL IS NOT WHAT IT LOOKS LIKE. `com.apple.notificationcenterui`
-        # is the *plist filename* and not the label inside it: macOS 26 answers
-        # "Could not find service com.apple.notificationcenterui in domain for
-        # user gui: 501", the agent keeps running, and the warning below fires
-        # on every arm. The label is
-        # `com.apple.notificationcenterui.agent` -- read out of
-        # /System/Library/LaunchAgents/com.apple.notificationcenterui.plist.
-        #
-        # So the label is *discovered* from the plist where possible and only
-        # falls back to a guess, and either way the verdict comes from `pgrep`
-        # rather than from launchctl's exit status. Same rule as everywhere else
-        # on this platform: ask whether the thing is gone, not whether the
-        # command said so.
+        # `com.apple.notificationcenterui` is the plist *filename*, not its
+        # label -- macOS 26 answers "could not find service" for it while the
+        # agent keeps running. The real label,
+        # com.apple.notificationcenterui.agent, is read from the plist where
+        # possible; either way the verdict comes from `pgrep`, not launchctl's
+        # exit status.
         if pgrep -x NotificationCenter >/dev/null 2>&1; then
             nc_label=$(/usr/libexec/PlistBuddy -c 'Print :Label' \
                 /System/Library/LaunchAgents/com.apple.notificationcenterui.plist 2>/dev/null)
@@ -122,46 +122,28 @@ on)
             info "NotificationCenter was not running"
         fi
 
-        # THE SCREEN LOCK, which nothing in this repository had ever touched --
-        # `screensaver` and `askForPassword` appear in no file. The handoff's
-        # provisioning list claims "sleep and screen saver off" and nothing
-        # implements it, so the benchmark install locks itself while sitting on
-        # a finished job.
-        #
-        # It matters more than it looks, because a benchmark generates no
-        # keyboard or mouse input: the idle timer runs at full CPU load exactly
-        # as it does on an abandoned machine. So the screensaver can start, and
-        # the lock behind it can engage, *during* a run -- and a locked screen is
-        # the same "nowhere to draw" failure as a stolen focus.
-        #
-        # `caffeinate -dimsu` above prevents display sleep, which usually
-        # suppresses the screensaver too; this makes it explicit rather than
-        # relying on that coupling. -currentHost because that is where the
-        # screensaver's idleTime actually lives.
+        # A benchmark generates no keyboard/mouse input, so the idle timer
+        # runs at full CPU load same as an abandoned machine -- the
+        # screensaver and lock screen can engage *during* a run, the same
+        # "nowhere to draw" failure as a stolen focus. `caffeinate -dimsu`
+        # above usually suppresses this via display sleep; this makes it
+        # explicit. -currentHost is where idleTime actually lives.
         defaults -currentHost write com.apple.screensaver idleTime -int 0 2>/dev/null || true
         defaults write com.apple.screensaver askForPassword -int 0 2>/dev/null || true
         v=$(defaults -currentHost read com.apple.screensaver idleTime 2>/dev/null || echo "?")
         [ "$v" = 0 ] && info "screensaver disabled (idleTime=0)" \
                      || warn "screensaver idleTime reads '$v' -- the screen can still lock mid-run"
 
-        # APP NAP AND THE RAISER -- the last thing the pre-wk quiesce.sh did
-        # that this command did not.
+        # MiniBrowser is launched via a raw exec (so DYLD_FRAMEWORK_PATH
+        # reaches it), so macOS never *activates* it; an unfocused window's
+        # page is marked hidden and rAF throttled -- the run loop of every
+        # benchmark here -- ending in a stalled, silent exit-124.
         #
-        # A custom-build MiniBrowser is launched by the benchmark driver through
-        # a raw exec, so that DYLD_FRAMEWORK_PATH reaches it; macOS therefore
-        # never *activates* it. An unactivated, occluded or unfocused window has
-        # its page marked hidden, and a hidden page has requestAnimationFrame
-        # throttled -- which is the run loop of JetStream3, Speedometer and
-        # MotionMark alike. The failure is not a slow number, it is a stalled
-        # run that ends in the silent exit-124 timeout.
-        #
-        # Two halves, because either alone is insufficient: App Nap off stops
+        # Two halves, since either alone is insufficient: App Nap off stops
         # the throttling policy, and the raiser keeps the window frontmost so
-        # the page is never marked hidden in the first place. The raiser only
-        # acts when MiniBrowser is not already frontmost, so it costs the
-        # WindowServer nothing on a well-behaved run, and it is a no-op while no
-        # MiniBrowser is running -- which is what makes it safe to leave up for
-        # a whole quiesced window spanning many relaunches.
+        # the page is never hidden. The raiser only acts when MiniBrowser
+        # isn't already frontmost, so it's a no-op on a well-behaved run or
+        # when nothing is running -- safe to leave up across many relaunches.
         defaults write org.webkit.MiniBrowser NSAppSleepDisabled -bool YES 2>/dev/null \
             && { touch "$STATE/appnap_disabled"; info "App Nap disabled for MiniBrowser"; } \
             || warn "could not disable App Nap for MiniBrowser -- rAF may be throttled mid-run"
@@ -185,9 +167,8 @@ while True:
             a.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
     time.sleep(INTERVAL)
 RAISEREOF
-            # Detached like caffeinate above, and for the same reason: a
-            # background process holding this ssh session's descriptors holds
-            # the session open with it.
+            # Detached like caffeinate above, same reason (ssh waits on the
+            # descriptors).
             /usr/bin/python3 "$STATE/raiser.py" 1 </dev/null >"$STATE/raiser.log" 2>&1 &
             echo $! > "$STATE/raiser.pid"
             info "raiser started -- MiniBrowser is kept frontmost during runs"
@@ -204,7 +185,7 @@ RAISEREOF
         macos_noise || warn "the machine is noisier than a benchmark install should be (above)"
     fi
 
-    sleep "${WK_SETTLE_SECONDS:-30}"
+    wk_sleep "${WK_SETTLE_SECONDS:-30}"
     info "quiesced; settle time elapsed"
     ;;
 
@@ -257,11 +238,12 @@ off)
     ;;
 
 status)
-    # The privileged half's account is a claim -- it says what it did, from a
-    # process that is gone -- and the block under it is what this machine says
-    # now. They are labelled rather than merged, because when they disagree the
-    # disagreement is the finding.
-    _claim=$(run_priv status 2>&1 || true)
+    # The privileged half's claim and what this machine says now are labelled
+    # rather than merged, because their disagreement is the finding.
+    # `|| true` guards the assignment: run_priv now dies on a missing helper,
+    # and that failure becomes the claim rather than aborting this read-only
+    # report.
+    _claim=$(run_priv status 2>&1) || true
     if [ -n "$_claim" ]; then
         log "  the privileged half's own account:"
         printf '%s\n' "$_claim" | sed 's/^/    /' >&2
@@ -281,6 +263,6 @@ status)
     ;;
 
 *)
-    die "usage: wk quiesce on|off|status"
+    die "usage: wk quiesce on|off|status -- quiet the machine for benchmarking.; see wk quiesce -h"
     ;;
 esac

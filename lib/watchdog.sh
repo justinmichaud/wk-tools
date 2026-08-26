@@ -72,6 +72,13 @@ _stall_report() {
 # run_watched <logfile> -- <command...>
 #
 # Returns the command's exit status, or 124 if it was killed for stalling.
+#
+# INT/TERM while this is watching: the command being watched is a foreground
+# child of this process (not detached, unlike lib/detach.sh's jobs), so an
+# interrupt here means stop it, not merely stop watching it -- otherwise a
+# Ctrl-C during a build leaves the compiler running unattended. `on_interrupt`
+# (lib/common.sh) covers the case a real terminal's process-group delivery
+# does not: a signal sent to this pid alone still needs to reach the child.
 run_watched() {
     local log="$1"; shift
     [ "${1:-}" = -- ] && shift
@@ -80,11 +87,19 @@ run_watched() {
     "$@" >>"$log" 2>&1 &
     local pid=$!
 
+    _run_watched_interrupted() {
+        kill -TERM "$pid" 2>/dev/null || true
+        wk_sleep 2
+        kill -KILL "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    }
+    on_interrupt _run_watched_interrupted
+
     local start last_size=0 last_change last_beat warned=0
     start=$(_now); last_change=$start; last_beat=$start
 
     while kill -0 "$pid" 2>/dev/null; do
-        sleep "$WK_POLL_SECONDS"
+        wk_sleep "$WK_POLL_SECONDS"
 
         local size now idle
         size=$(_fsize "$log"); now=$(_now)

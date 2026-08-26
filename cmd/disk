@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# wk disk -- everything wk is storing on this machine, with the total.
+# wk disk -- everything wk is storing on this machine, with the total
+#
+# wk: where=local name=none readonly group=sources
 #
 # The question this answers is "where did the disk go", and nothing else could:
 # the bytes are in three places that no single `du` reaches, and two of them are
@@ -185,7 +187,7 @@ fi
 
 case "${1:-}" in
     '') ;;
-    *) die "usage: wk disk        (read-only; 'wk help disk' explains what to erase)" ;;
+    *) die "usage: wk disk; see wk disk -h" ;;
 esac
 
 info "wk disk on $(wk_os) ($(hostname -s 2>/dev/null || hostname))"

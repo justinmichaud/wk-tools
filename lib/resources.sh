@@ -7,62 +7,53 @@
 
 # Headroom left to the host, never handed to a VM or a build.
 #
-# One core. On Apple silicon the intent is "all the performance cores go to the
-# VM, the host keeps one efficiency core" -- on this M4 that is 4P + 6E, so the
-# VM gets 9 and the host keeps 1.
+# One core: on Apple silicon the intent is "performance cores go to the VM,
+# host keeps one efficiency core" -- on this M4 (4P + 6E) the VM gets 9.
 #
-# Note this is a *count*, not an affinity. Virtualization.framework takes a vCPU
-# count and macOS places those threads itself; there is no way to pin vCPUs to
-# performance cores. It works out in practice because the scheduler puts busy VM
-# threads on P-cores and leaves light host work on an E-core, but do not read
-# this as hard partitioning.
+# A *count*, not an affinity: Virtualization.framework takes a vCPU count and
+# macOS places those threads itself, so there is no way to pin vCPUs to
+# performance cores. Works out in practice because the scheduler puts busy VM
+# threads on P-cores, but this is not hard partitioning.
 #
-# Memory reserve stays generous: a desktop that has swapped is unusable in a way
-# that a desktop short of one core is not.
+# Memory reserve stays generous: a desktop that has swapped is unusable in a
+# way a desktop short of one core is not.
 WK_RESERVE_CORES="${WK_RESERVE_CORES:-1}"
 WK_RESERVE_MB="${WK_RESERVE_MB:-12288}"
 
-# A headless machine needs far less. The wk VM has no GUI to protect, and the
-# macOS host already subtracted its own reserve when it sized the VM -- applying
-# the desktop reserve again inside would double-count it and leave containers
-# with a fraction of the memory actually available.
-# Zero cores held back inside the VM: the workspace is the only workload there,
-# and the VM's own kernel and podman are not CPU-bound. Holding one back would
-# cost ~11% of the build for nothing.
+# A headless machine needs far less: the wk VM has no GUI to protect, and the
+# macOS host already subtracted its own reserve when sizing the VM -- reserving
+# again inside would double-count it and starve containers.
+# Zero cores held back inside the VM: the workspace is the only workload there
+# and the VM's kernel/podman are not CPU-bound; holding one back costs ~11% of
+# the build for nothing.
 WK_HEADLESS_RESERVE_CORES="${WK_HEADLESS_RESERVE_CORES:-0}"
 WK_HEADLESS_RESERVE_MB="${WK_HEADLESS_RESERVE_MB:-2048}"
 
-# The marker is written by the provisioning playbook, so this is an explicit
-# fact about the machine rather than a guess from $DISPLAY.
+# The marker is written by the provisioning playbook: an explicit fact about
+# the machine rather than a guess from $DISPLAY.
 #
-# A workspace counts, and for the same reason rather than by analogy: the host
-# already subtracted its own reserve when it sized this guest or this
-# container's cgroup, so taking a second desktop-sized reserve out in here
-# double-counts it. This is the Darwin path specifically -- avail_mem_mb() reads
-# MemAvailable and the cgroup on Linux, but on macOS it can only subtract the
-# reserve from the total. Measured in a 20 GB guest: `wk build mac-release` from
-# inside sized itself from 8192 MB and picked -j5, where the same build driven
-# from the host picked -j9. A guest with a window on screen is still not a
-# machine with a desktop session to protect.
-#
-# Guarded by command -v: lib/resources.sh is sourced on its own by host scripts
-# that have no reason to know about workspaces.
+# A workspace counts for the same reason: the host already subtracted its own
+# reserve when it sized this guest or container's cgroup, so a second
+# desktop-sized reserve here double-counts it. Darwin-specific -- avail_mem_mb()
+# reads MemAvailable and the cgroup on Linux, but on macOS can only subtract
+# the reserve from the total. Measured in a 20 GB guest: `wk build mac-release`
+# sized itself from 8192 MB and picked -j5, where the same build driven from
+# the host picked -j9. A guest with a window on screen is still not a machine
+# with a desktop session to protect.
+
 # Where the headless marker lives, in one place.
 #
-# Not three spellings -- `/var/lib/wk/.headless` here,
-# `$WK_STORE/.headless` in the Linux machine stage, `{{ wk_root }}/.headless` in
-# the podman VM's playbook -- and they agree only when $WK_STORE happens to be
-# /var/lib/wk. On a workstation whose store is under XDG they do not, so a
-# marker could sit in one path while the code that acts on it read the other,
-# and the machine would size its builds for a desktop that is not there (or the
-# reverse). Both are checked, and both are named here rather than spelled out
-# at each use: the fixed path because the VM's playbook writes it before any wk
-# has run, and the store path because that is where this machine's own state
-# goes.
+# Not three spellings -- `/var/lib/wk/.headless` here, `$WK_STORE/.headless` in
+# the Linux machine stage, `{{ wk_root }}/.headless` in the podman VM's
+# playbook -- agreeing only when $WK_STORE happens to be /var/lib/wk. On a
+# workstation whose store is under XDG they do not, so a marker could sit in
+# one path while the code that acts on it reads the other. Both are checked:
+# the fixed path because the VM's playbook writes it before any wk has run,
+# the store path because that is this machine's own state.
 #
-# $WK_STORE is not always set: this file is sourced on its own by host scripts
-# that have no reason to know about workspaces, which is the same reason
-# is_headless guards its in_workspace call.
+# $WK_STORE is not always set and command -v guards in_workspace: this file is
+# sourced on its own by host scripts that have no reason to know about
+# workspaces.
 headless_markers() { printf '%s\n' "${WK_STORE:-}/.headless" /var/lib/wk/.headless; }
 
 is_headless() {
@@ -77,17 +68,17 @@ is_headless() {
 reserve_cores() { is_headless && echo "$WK_HEADLESS_RESERVE_CORES" || echo "$WK_RESERVE_CORES"; }
 reserve_mb()    { is_headless && echo "$WK_HEADLESS_RESERVE_MB"    || echo "$WK_RESERVE_MB"; }
 
-# Working set of a C++ compile job.
+# Working set of a C++ compile job, for the CMake ports.
 #
-# The old bashrc used 4 GB, which was really sized for the handful of enormous
-# DFG/FTL translation units and for link steps. Applied to every job it is far
-# too pessimistic: it caps an 18 GB container at 4 jobs on an 8-core machine,
-# leaving half the CPU idle for the whole build. Typical WebKit TUs peak nearer
-# 1-1.5 GB, so 1.5 GB keeps the cap honest without throttling the common case;
-# the cgroup clamp in build/build-in-target.sh is the real safety net.
-# ...for the CMake ports. The Apple build wants twice this and says so itself
-# (config_mb_per_job, build/configs.sh), which is why this records whether the
-# value was *asked for*: a default may be replaced by the config, an explicit
+# 4 GB (sized for the handful of enormous DFG/FTL TUs and link steps) applied
+# to every job is far too pessimistic: it caps an 18 GB container at 4 jobs on
+# an 8-core machine. Typical WebKit TUs peak nearer 1-1.5 GB, so 1.5 GB keeps
+# the cap honest without throttling the common case; the cgroup clamp in
+# build/build-in-target.sh is the real safety net.
+#
+# The Apple build wants twice this and says so itself (config_mb_per_job,
+# build/configs.sh), which is why this records whether the value was *asked
+# for*: a default may be replaced by the config, an explicit
 # `WK_MB_PER_JOB=3072 wk build ...` may not.
 WK_MB_PER_JOB_EXPLICIT="${WK_MB_PER_JOB:+1}"
 WK_MB_PER_JOB="${WK_MB_PER_JOB:-1536}"
@@ -108,17 +99,15 @@ host_mem_mb() {
 #
 # A cgroup limit, when present, wins over MemAvailable: inside a container the
 # kernel still reports the whole machine's free memory, so sizing a build from
-# MemAvailable happily picks a job count the cgroup will OOM-kill. That is not
-# hypothetical -- it is exactly how the first JSC build here died.
+# MemAvailable can pick a job count the cgroup OOM-kills.
 avail_mem_mb() {
     local cg=/sys/fs/cgroup/memory.max avail=""
 
-    # A target that is another machine entirely replaces the measurement rather
-    # than capping it. What this host has free says nothing about a build
-    # running at the far end of an ssh connection, and taking the smaller of
-    # the two -- which is what a cap does -- would size a 250 GB build box from
-    # a laptop. WK_CGROUP_MB below stays a cap, because a container really is
-    # this machine, with a limit on top.
+    # A remote target replaces the measurement rather than capping it: what
+    # this host has free says nothing about a build over ssh, and taking the
+    # smaller of the two would size a 250 GB build box from a laptop.
+    # WK_CGROUP_MB below stays a cap -- a container really is this machine,
+    # with a limit on top.
     if [ -n "${WK_AVAIL_MB:-}" ]; then echo "$WK_AVAIL_MB"; return 0; fi
 
     if is_linux && [ -r /proc/meminfo ]; then
@@ -174,6 +163,26 @@ envelope_mem_mb() {
     echo "$m"
 }
 
+# Size a run from the target it will actually happen on, not from this
+# machine. A remote target is somebody else's machine entirely, reached over
+# ssh: its numbers replace this one's rather than capping them, and the load
+# average has to come from over there too, or a build/test starts as if the
+# far end were idle. Anything else -- container, vm, local -- is this machine
+# with a limit on top, so its numbers stay a cap. Both `wk build` and `wk
+# test` size their run this way; call this after `load_target` has resolved
+# the target `name` lives on.
+export_target_resources() {
+    local name="$1"
+    if [ "$WK_TARGET_KIND" = remote ]; then
+        WK_AVAIL_MB=$(t_mem_mb "$name"); WK_CGROUP_CORES=$(t_cores "$name")
+        WK_LOAD=$(t_load "$name")
+        export WK_AVAIL_MB WK_CGROUP_CORES WK_LOAD
+    else
+        WK_CGROUP_MB=$(t_mem_mb "$name"); WK_CGROUP_CORES=$(t_cores "$name")
+        export WK_CGROUP_MB WK_CGROUP_CORES
+    fi
+}
+
 # --- build parallelism -------------------------------------------------------
 # build_jobs [loadavg-aware]
 #
@@ -199,6 +208,17 @@ build_jobs() {
         # a macOS host does not exist at all, which reads as an idle machine).
         local load
         load=${WK_LOAD:-$(awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0)}
+
+        # A load average is an exponential decay over its own window, so a
+        # build that was killed keeps its dead compilers' cores "spoken for"
+        # for up to a minute after they are gone. Memory has no such lag -- a
+        # killed process's RSS is back the instant it is reaped -- so when the
+        # machine already looks memory-idle (by_mem, above, covers the whole
+        # box) but the load average still claims most of it, that average is
+        # almost certainly stale rather than a second build actually running,
+        # and is halved rather than trusted outright.
+        [ "$by_mem" -ge "$cores" ] && [ "$load" -gt $(( cores / 2 )) ] && load=$(( load / 2 ))
+
         by_cpu=$(( cores - load ))
         # Never take more than half a shared box, however idle it looks.
         local half=$(( cores / 2 ))
@@ -220,12 +240,34 @@ build_jobs() {
 
 # Print the derivation so the choice is never a mystery when a build misbehaves.
 explain_jobs() {
-    local polite="${1:-}" jobs
+    local polite="${1:-}" jobs cores by_mem
     jobs=$(build_jobs "$polite")
     # Report the cores the job count was actually derived from. When the caller
     # supplied a cap -- a cgroup limit, or a guest's vCPU count -- printing the
     # host's core count instead makes the derivation look wrong every time.
-    log "resources: ${jobs} jobs (cores=${WK_CGROUP_CORES:-$(host_cores)} avail=$(avail_mem_mb)MB @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${WK_LOAD:-0}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
+    cores=${WK_CGROUP_CORES:-$(host_cores)}
+    log "resources: ${jobs} jobs (cores=${cores} avail=$(avail_mem_mb)MB @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${WK_LOAD:-0}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
+
+    # Below half the target's own cores is worth a person looking at, unless
+    # WK_MAX_JOBS is why -- that is a deliberate policy cap, not a problem.
+    # Named by whichever of memory or load is actually binding (by_mem, the
+    # same figure build_jobs derived jobs from), so the fix is obvious rather
+    # than a mystery: more memory / a lower WK_MB_PER_JOB, or -- on a shared
+    # machine -- the load average is real and this is genuinely busy.
+    if [ -z "${WK_MAX_JOBS:-}" ] && [ "$jobs" -lt $(( cores / 2 )) ]; then
+        by_mem=$(( $(avail_mem_mb) / WK_MB_PER_JOB ))
+        if [ "$by_mem" -le "$jobs" ]; then
+            warn "parallelism: ${jobs} jobs is under half of ${cores} cores -- the memory
+  envelope only fits $by_mem at ${WK_MB_PER_JOB}MB/job ($(avail_mem_mb)MB available)."
+        elif [ -n "$polite" ]; then
+            warn "parallelism: ${jobs} jobs is under half of ${cores} cores -- load average
+  ${WK_LOAD:-0} is treated as that many cores already spoken for on this shared machine."
+        else
+            warn "parallelism: ${jobs} jobs is under half of ${cores} cores -- ${cores} is
+  this target's own ceiling (a reserve held back for the host, or a fixed vCPU/cgroup count)."
+        fi
+    fi
+
     echo "$jobs"
 }
 

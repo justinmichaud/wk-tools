@@ -31,9 +31,9 @@
 #     somebody is using.
 #   - Nothing is read from the environment; sudo's env_reset plus the explicit
 #     PATH below means a hostile environment cannot redirect a binary.
-#   - The one secret this handles -- a tailscale auth key -- arrives on stdin.
-#     Arguments are world-readable in /proc; the marker and the ssh *public* key
-#     are arguments because neither is a secret.
+#   - The secrets this handles -- a tailscale auth key, a WiFi passphrase --
+#     arrive on stdin. Arguments are world-readable in /proc; the marker and
+#     the ssh *public* key are arguments because neither is a secret.
 #
 # Linux cannot make a #! script setuid -- the kernel ignores the bit -- so a
 # sudoers rule is the mechanism, not a shell wrapper around a setuid binary.
@@ -240,7 +240,7 @@ _fleet_edit() { # <mountpoint> <marker> <pubkey>
 
     # Read back, because this failure is invisible from the writing side: a card
     # with a perfect marker and an empty authorized_keys boots and cannot be
-    # reached, and that is exactly how it went wrong once (docs/TESTING.md).
+    # reached, and that is exactly how it went wrong once.
     grep -q . "$m/etc/wk-image" || fail "the identity marker did not land on this disk"
     grep -q '^ssh-\|^ecdsa-\|^sk-' "$m$home/.ssh/authorized_keys" \
         || fail "the driving key did not land in $home/.ssh/authorized_keys"
@@ -350,6 +350,77 @@ v_tailnet() {
     with_mount "$(part "$dev" 2)" _tailnet_edit "$host" "$tag" "$tmp" || rc=$?
     rm -f "$tmp"
     [ "$rc" -eq 0 ] && say "tailnet identity seeded on $dev (joins as $host, $tag)"
+    return "$rc"
+}
+
+_wifi_joins_probe() { # <mountpoint>
+    [ -x "$1/usr/sbin/wk-wifi-join" ] && say "wifi-join: yes" || say "wifi-join: no"
+}
+
+# wifi-joins <device> -- does the system on this disk bring up WiFi on first
+# boot? Read-only, the same shape as `joins` and for the same reason: the
+# answer decides whether the driving end resolves the fleet's WiFi credential
+# at all.
+v_wifi_joins() {
+    local dev; dev=$(gate "${1:-}")
+    with_mount -r "$(part "$dev" 2)" _wifi_joins_probe
+}
+
+# A value that has to sit inside a double-quoted wpa_supplicant string,
+# checked against what it is allowed to be rather than escaped (the same rule
+# check_name/check_b64 follow above): a quote or backslash in an SSID or
+# passphrase would otherwise let it break out of the string it is written
+# into, and a newline would let it start a second line of the conf file.
+check_wifi_value() { # <what> <value>
+    case "${2:-}" in
+        '') deny "$1 is empty" ;;
+        *[\"\\]*) deny "$1 contains a '\"' or '\\', which a wpa_supplicant conf cannot carry quoted" ;;
+    esac
+    case "$2" in
+        *[[:cntrl:]]*) deny "$1 contains a control character" ;;
+    esac
+}
+
+_wifi_edit() { # <mountpoint> <ssid> <psk>
+    local m="$1" ssid="$2" psk="$3" d="$1/etc/wpa_supplicant" f
+    f="$d/wpa_supplicant-wlan0.conf"
+    mkdir -p "$d"; chmod 0755 "$d"
+    {
+        printf 'ctrl_interface=/var/run/wpa_supplicant\n'
+        printf 'update_config=0\n\n'
+        printf 'network={\n'
+        printf '    ssid="%s"\n' "$ssid"
+        printf '    psk="%s"\n' "$psk"
+        printf '}\n'
+    } > "$f"
+    chmod 0600 "$f"; chown 0:0 "$f"
+
+    # Read back, because a write that did not land is invisible from here. The
+    # passphrase deliberately is not printed: its presence and mode answer "did
+    # it land", the same rule the tailnet key follows. Fixed-string match
+    # (-F), not a pattern: an SSID is free text and must not be read as a regex.
+    grep -qxF "    ssid=\"$ssid\"" "$f" \
+        || fail "the SSID did not survive the write to this disk"
+    [ "$(stat -c '%a' "$f")" = 600 ] && [ -s "$f" ] \
+        || fail "the WiFi credential did not land on this disk as a 0600 file"
+}
+
+# wifi <device> -- the SSID and passphrase arrive on stdin, as ssid=/psk=
+# lines (the same shape `wk sysimage write` reads them from on the driving
+# end, so the file that is asked for is the file that is sent).
+v_wifi() {
+    local dev tmp ssid psk rc
+    dev=$(gate "${1:-}")
+    tmp=$(mktemp /run/wk-card-wifi.XXXXXX); chmod 0600 "$tmp"
+    cat > "$tmp"
+    ssid=$(sed -n 's/^ssid=//p' "$tmp" | head -1)
+    psk=$(sed -n 's/^psk=//p' "$tmp" | head -1)
+    rm -f "$tmp"
+    check_wifi_value "the SSID" "$ssid"
+    check_wifi_value "the passphrase" "$psk"
+    rc=0
+    with_mount "$(part "$dev" 2)" _wifi_edit "$ssid" "$psk" || rc=$?
+    [ "$rc" -eq 0 ] && say "WiFi credentials seeded on $dev (ssid=$ssid)"
     return "$rc"
 }
 
@@ -488,11 +559,13 @@ case "$verb" in
     joins)    v_joins    "$@" ;;
     whose)    v_whose    "$@" ;;
     tailnet)  v_tailnet  "$@" ;;
+    wifi-joins) v_wifi_joins "$@" ;;
+    wifi)     v_wifi     "$@" ;;
     identity) v_identity "$@" ;;
     role)     v_role     "$@" ;;
     grow)     v_grow     "$@" ;;
     unmount)  v_unmount  "$@" ;;
     verify)   v_verify   "$@" ;;
     eject)    v_eject    "$@" ;;
-    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|identity|role|grow|unmount|verify|eject <device> [...]" ;;
+    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi|identity|role|grow|unmount|verify|eject <device> [...]" ;;
 esac

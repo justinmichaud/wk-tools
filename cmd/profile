@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 #
-# wk profile [<workspace>] [--mode M] [file.js | --browser [url] | --attach P]
+# wk profile [<workspace>] [flags] [file.js] -- profile a jsc or browser run
+# wk: where=workspace name=optional ready=yes group=workspaces
 #
 # Where the time went -- with the env-var wall for each profiler written down
 # once, here, instead of in three wiki pages and two skills.
 #
-# The recipes this replaces were the longest copy-paste blocks in the wiki
-# (`JSC-Samply---perf`, `Debugging-WPE-Linux-(desktop)`,
-# `WPE-memory-usage-investigation`), and the jsc-profile and jsc-marker-trace
-# skills re-taught them with host paths baked in -- `~/Development/samply`, a
-# WebKitBuild directory spelled per port, a DYLD_/LD_ variable spelled per
-# platform. Every one of those is derivable from the workspace and the config,
-# and none of it should be typed again.
+# Replaces the longest copy-paste blocks in the wiki (JSC-Samply---perf,
+# Debugging-WPE-Linux, WPE-memory-usage-investigation) and two skills that
+# re-taught them with host paths baked in. Everything here is derivable from
+# the workspace and the config, and none of it should be typed again.
 #
 # Which profiler, and why it is a choice at all:
 #
@@ -35,15 +33,28 @@
 #   heaptrack   allocations rather than time (Linux ports only).
 #   massif      the same question asked of the peak, through valgrind.
 #
-# What this deliberately does not do is decide *what* to profile: the run is
-# the jsc shell with your file, or MiniBrowser with your page, or an attach to
-# something already running. A profiler that also picks the workload is a
-# benchmark, and that is `wk bench`.
+# What this doesn't decide is *what* to profile: the run is the jsc shell
+# with your file, MiniBrowser with your page, or an attach to something
+# already running. A profiler that also picks the workload is a benchmark --
+# that's `wk bench`. Artifacts stay in the workspace; `--fetch` copies them
+# out through t_pull, since `t_exec <ws> cat` silently corrupts a binary.
 #
-# The artifacts stay in the workspace, next to the build that produced them,
-# and `--fetch` copies them out to this machine for a UI that runs here. The
-# copy goes through t_pull, because a profile is exactly the kind of binary
-# that `t_exec <ws> cat` silently corrupts (lib/target.sh).
+#   --mode <m>        sampling (default) | bytecode | samply | instruments |
+#                     heaptrack | massif | native  (native = instruments on the
+#                     Apple ports, samply everywhere else)
+#   --config <c>      which build to profile (default: the workspace's own)
+#   --browser [url]   profile MiniBrowser on that page instead of the jsc shell
+#   --attach <pid|name>
+#                     profile something already running in the workspace
+#   --jit-dump        JS/JIT frame names for the native profilers
+#   --markers         JSC's interval text markers, for splitting a trace by phase
+#   --top <n>         how many functions/bytecodes the sampling report prints
+#   --fetch [dir]     copy the artifacts to this machine when the run ends
+#   --env NAME=VALUE  one more variable for the run (repeatable)
+#   --list            print the available modes and exit
+#   --dry-run         print the environment and the command, run nothing
+#
+# Everything after `--` is passed to what is being profiled.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -54,41 +65,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 MODES="sampling bytecode samply instruments heaptrack massif"
 
-usage() {
-    cat >&2 <<'EOF'
-usage: wk profile [<workspace>] [--mode <mode>] [options] [file.js | -- args]
-
-  --mode <m>        sampling (default) | bytecode | samply | instruments |
-                    heaptrack | massif | native  (native = instruments on the
-                    Apple ports, samply everywhere else)
-  --config <c>      which build to profile (default: the workspace's own)
-  --browser [url]   profile MiniBrowser on that page instead of the jsc shell
-  --attach <pid|name>
-                    profile something already running in the workspace
-  --jit-dump        JS/JIT frame names for the native profilers
-  --markers         JSC's interval text markers, for splitting a trace by phase
-  --top <n>         how many functions/bytecodes the sampling report prints
-  --fetch [dir]     copy the artifacts to this machine when the run ends
-  --env NAME=VALUE  one more variable for the run (repeatable)
-  --dry-run         print the environment and the command, run nothing
-
-Everything after `--` is passed to what is being profiled.
-EOF
-    exit 2
-}
-
-# Inside a workspace there is no name to give: every command acts on this one
-# (refuse_ws_name, lib/target.sh).
-NAME="${1:-}"
-if in_workspace; then
-    refuse_ws_name "$NAME" profile "[--mode <mode>] [file.js]"
-    NAME=$(wk_self)
-else
-    case "$NAME" in
-        ''|-*) ;;              # a flag, or nothing: no name was given
-        *) shift ;;
-    esac
-fi
+NAME="${WK_NAME:-}"
 
 MODE=sampling
 CONFIG="${WK_CONFIG:-}"
@@ -113,10 +90,9 @@ while [ $# -gt 0 ]; do
 ${2:-}"; shift 2 ;;
         --dry-run) DRY=1; shift ;;
         --list)    printf '%s\n' $MODES; exit 0 ;;
-        -h|--help) usage ;;
         --)        shift; while [ $# -gt 0 ]; do ARGS+=("$1"); shift; done ;;
         -*)        die "unknown option: $1
-    'wk profile --help' lists them." ;;
+    'wk profile -h' lists them." ;;
         *)         ARGS+=("$1"); shift ;;
     esac
 done
@@ -143,7 +119,6 @@ esac
 
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
-wait_ready "$NAME"
 
 SRC=$(t_src "$NAME")
 VAR=$(config_run_var)

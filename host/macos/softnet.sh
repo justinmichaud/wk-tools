@@ -27,7 +27,7 @@ WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 
 # Only meaningful if the macOS VM target is in use at all.
 if ! have tart && [ ! -x "$HOME/.local/bin/tart" ]; then
-    debug "tart not installed; skipping softnet (see SETUP.md section 8)"
+    debug "tart not installed; skipping softnet (see README.md, Setup)"
     return 0 2>/dev/null || true
 fi
 

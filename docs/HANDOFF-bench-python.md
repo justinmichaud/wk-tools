@@ -29,4 +29,8 @@ One Python program (`cmd/mcp` is the precedent: Python-only, stdlib-only).
 - The store format is about to gain a second producer — `wk pi bench` needs to
   file on-board runs where `wk bench ls`/`compare` can see them
   (`docs/HANDOFF-pi-deploy.md`). Design for that rather than around it.
-- Add a TESTING.md line item and a `wk selftest` check.
+- Add a `tests/` case and a `wk selftest` check.
+- [ ] confirm `wk bench` killed during seed re-fetches the whole payload and
+      prunes leaked `.tmp-*` dirs (`wk gc`); killed during a run leaves an
+      `env.json` with no `result.json`, reading as crashed and never
+      comparable.

@@ -7,7 +7,7 @@
 #
 # The problem it solves: WebKit moves a page between processes. A cross-site
 # navigation swaps in a fresh web process (PSON, which cannot be turned off on
-# these ports -- see docs/TESTING.md), and the debugger is left attached to a
+# these ports), and the debugger is left attached to a
 # process the page has left. Nothing announces this. There is no error and no
 # exit; the breakpoints simply stop being reached, which reads as "my breakpoint
 # is wrong" rather than "I am in the wrong process".

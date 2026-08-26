@@ -1,437 +1,326 @@
 # wk-tools
 
-WebKit/JSC development environment for macOS and Ubuntu 26.04.
+`wk` builds, runs, tests and benchmarks WebKit/JSC in disposable, sandboxed
+workspaces so the host stays clean, and it drives a small fleet of build
+machines and Raspberry Pi/Mac benchmark boards, each reached by its tailnet
+name. One CLI, `wk`, covers every workflow below.
 
-The organising idea: **the host stays boring.** Toolchains, checkouts, build
-trees, caches and the coding agent all live in disposable workspaces. macOS
-installs nothing at all; Linux installs stock apt packages plus Tailscale.
+## Architecture
+
+**workspace** — a named, disposable environment for one task: a checkout, a
+build tree, an agent's blast radius. `wk new` creates one, `wk rm` destroys it
+completely. It remembers the target it was created on.
+
+**target** — where a command's work actually happens. Four kinds behind one
+driver contract: `container` (rootless podman, the default, the only sandboxed
+target on Linux — on macOS it lives inside a podman VM), `vm` (a macOS guest
+under Tart, for the Apple ports only), `remote` (a shared build machine or
+another workstation, named after the machine, no sandbox), `local` (the
+degenerate driver a workspace uses on itself, which is what makes `wk build`
+work from inside one). A workspace remembers its target; `--target` belongs to
+`wk new` alone.
+
+**machine** — a computer `wk` drives as a build target, declared once in
+`targets/hosts/<name>.conf`: a shared build box, or a peer workstation. This
+registry is distinct from two others: a **fleet device** (a board or Mac `wk`
+can boot into a measured system, `boot/machines/<name>.conf`) and a **bridge**
+(a phone routing an unreachable segment onto the tailnet,
+`bridge/hosts/<name>.conf`). Never call a fleet device or a bridge a bare
+"machine".
+
+**bench system** — the system on a fleet device that gets measured: built by
+`wk sysimage build`, written to a card by `wk sysimage write`, armed for one
+boot by `wk boot`. It never shares a medium with the device's own recovery
+path where the hardware allows separating them.
+
+**rescue** — what a board falls back to, and is reached by, whenever its bench
+system is disarmed, unbootable, or was never written. On a workstation the
+rescue is the host install itself; on a bench-device it is a system `wk` owns
+on its own medium.
+
+**arm/disarm** — select, or deselect, what a fleet device boots next
+(`wk boot`). Every armed system disarms and reverts itself after one boot;
+nothing here is a persistent switch.
+
+**bridge** — a phone with two network legs (house WiFi, USB-C Ethernet to an
+isolated segment) that routes that segment onto the tailnet, so a bench device
+or a BMC behind it is reachable without the house network reaching either.
+Provisioned with `wk bridge`.
+
+**store** — `$WK_STORE`, the one place on a machine for artifacts kept by
+reference count or content key, never by hand: base snapshots, seeded
+benchmark payloads, bench results, credentials. On macOS it is two halves —
+the podman VM's copy and this device's own — because a Mac cannot write
+`/var/lib/wk`. A built system image is deliberately *not* in it: it is an
+artifact the workspace that built it already names, so a second, catalogued
+copy would be one fact kept twice.
+
+**the state rules** — every mutating command keeps the smallest possible
+state (a fact is recomputed from evidence at read time, never cached, except
+for re-fetchable/re-derivable artifacts like ccache or a base snapshot); is
+crash-only (killed at any point, a re-run converges to the declared final
+state, "already exists" is never the answer to a half-made thing); wipes
+rather than repairs (destroying and recreating beats patching around an
+unexpected state); takes one lock per mutated resource; believes the machine
+over its own record when the two disagree; and never lets a read-only command
+(`wk status`, `wk ls`, `wk logs`, `wk doctor`) change anything or block on a
+run it is only reporting.
+
+## Local vs remote
+
+Every `wk <cmd> -h` prints a `runs on:` line, and commands fall into three
+groups:
+
+- **The workspace's target.** `build`, `run`, `test`, `claude`, `bench`,
+  `profile`, `status`, `ls`, `sync`, `enter`, `logs`, `gui`, `zed`. On a macOS
+  host, a `container` workspace's command is forwarded into the podman VM over
+  `podman machine ssh`; a `vm` or `remote` workspace's command runs directly
+  from the host.
+- **This host's own store or hardware, refused inside a workspace and on a
+  build machine.** `remote`, `key`, `push`, `sudo`, `quiesce`, `session`,
+  `boot`, `pi`, `sysimage`, `bridge`, `vm`, `find`, `backup`, `start`, `stop`,
+  `gc`. These act on fleet devices, bridges, or this machine's own
+  provisioning, so they never run against a checkout inside a sandbox, and a
+  shared build box refuses them too — a build box builds, it does not own
+  fleet hardware.
+- **This machine, never forwarded.** `disk`, `doctor`, `version`, `selftest` —
+  read-only reports about the machine you typed the command on.
+
+`wk new` and `wk rm` run on "the workstation that keeps the workspace record"
+— even for a `remote` workspace, because the record of which target a
+workspace belongs to lives here, not on the machine doing the build.
+
+A machine is named by its tailnet name and nothing else — no `.local`
+address, no IP, no ssh `ProxyJump` stored anywhere in this repo. `wk ls` and
+`wk status` show every target and every fleet device in one listing with a
+`TARGET`/machine column, so which machine answered a command is always in the
+same output as the command's result, never left to be inferred.
+
+## Setup
+
+Prerequisites:
+
+- macOS: Xcode command line tools (`xcode-select --install`), podman from
+  <https://podman.io> (the official installer, not Homebrew), Tailscale
+  (<https://tailscale.com/download/macos>), Zed (<https://zed.dev/download>,
+  only for `wk zed`), Tart (<https://tart.run>, only for building Apple
+  ports).
+- Ubuntu 26.04: nothing beforehand — `./setup` installs the stock apt packages
+  and Tailscale itself.
+- Both: a GitHub fork of WebKit under your own account
+  (`github.com/<you>/WebKit`) — every push writes there, never to a shared
+  maintainer's URL. Membership of a tailnet you administer (the first device
+  on a tailnet needs admin rights to add others). A card reader on a machine
+  `wk` can reach, only if writing the first medium for an unprovisioned bench
+  board.
+
+Steps:
+
+```sh
+git clone https://github.com/justinmichaud/wk-tools ~/Development/wk-tools
+cd ~/Development/wk-tools
+./setup                        # idempotent; a second run in a row prints no changes
+```
+
+```sh
+./setup --stage quiesce        # one sudo prompt; installs the quiesce/session helper
+wk sudo setup                  # closes sudo's 5-minute timestamp and NOPASSWD
+wk key register                # generates a deploy key, prints the URL to add it
+wk push on                     # exposes the key to workspaces
+wk sync                        # clones WebKit into the mirror, publishes a snapshot
+```
+
+```sh
+wk new bug-238
+wk build bug-238 jsc-release
+wk run   bug-238 -- -e '1+1'
+wk test  bug-238
+wk rm    bug-238
+```
+
+`wk doctor` is the checklist at any point: what is provisioned, and the exact
+command for what is not.
+
+## Workflows
+
+**Container workspace, full cycle**
+
+```sh
+wk new bug-238                          # instant overlay, any checkout size
+wk build bug-238 jsc-release
+wk run   bug-238 -- -e 'print(1+1)'
+wk test  bug-238
+wk logs  bug-238 --follow               # the build log, noise stripped
+wk rm    bug-238                        # reclaims everything it created
+```
+
+**macOS VM workspace, for the Apple ports**
+
+```sh
+./setup --stage softnet                 # once; installs the guest's egress filter
+wk new mac-rel --target vm              # builds the golden base the first time (hours, once)
+wk vm start mac-rel
+wk build mac-rel mac-release
+wk vm stop mac-rel
+```
+
+**A shared build machine**
+
+```sh
+wk remote setup buildbox4               # probes it over ssh, writes targets/hosts/buildbox4.conf
+wk new big-build --target buildbox4
+wk build big-build jsc-release          # sized from that machine's live load
+wk remote rm buildbox4                  # undo it; git rm the conf to forget it for good
+```
+
+**Sync (this machine, or everywhere)**
+
+```sh
+wk sync                                 # the workspace you're in
+wk sync bug-238                         # a named one
+wk sync --machine                       # mirror, snapshot, every workspace and wk-tools copy here
+wk sync --all                           # ...and every other machine too
+```
+
+**Profile a run**
+
+```sh
+wk profile bug-238 script.js                    # sampling profiler (default), jsc shell
+wk profile bug-238 --mode samply --browser       # native sampling, MiniBrowser
+wk profile bug-238 --mode bytecode --fetch       # per-bytecode tier report, copied out
+```
+
+**Benchmark in a workspace, and compare two runs**
+
+```sh
+wk quiesce on
+wk session on
+wk bench bug-238 speedometer3
+wk bench bug-238 motionmark1.3.1 --count 5
+wk bench compare <run-a> <run-b>                 # warns if class/runner/host differ
+```
+
+**Put a build on a fleet device and bench it there**
+
+```sh
+wk sysimage build wpewebkit-2.38-buildroot-rpi3-32 --detach   # hours; poll with wk status
+wk sysimage disks <writer>                       # removable disks on the machine holding the card reader
+wk sysimage write --from <path> --disk <writer>:/dev/sdX
+wk boot rpi3                                     # one-shot: arms, reboots, self-reverts
+# a write refuses, with no --force, when the tailnet auth key or the board's
+# WiFi credentials are missing, or when the tailnet already has a node named
+# rpi3 -- a fresh join would come up as rpi3-1 and nothing could reach it.
+# Remove the stale node in the admin console first.
+wk pi deploy bug-238 rpi3 --skeleton              # once per board
+wk pi bench rpi3 speedometer3
+wk pi bench rpi3 speedometer3 --ab A,B --rounds 5 # interleaved A/B between two deployed slots
+```
+
+Or stage a workspace build straight onto bench media without a full image
+rebuild:
+
+```sh
+wk bench stage bug-238 --to rpi3
+wk bench staged --plan speedometer3
+wk bench staged --ls                             # what is staged, and what ran
+```
+
+**The Mac lane**
+
+```sh
+wk boot mbp --status                             # which side the firmware default is on
+wk bench mac-ab mac-rel                          # stages, plants a launch agent, reboots, reads back
+                                                  # needs one action at the keyboard per experiment
+```
+
+**Add a new fleet device**
+
+Write `boot/machines/<name>.conf`:
+
+```sh
+MACH_SSH=<name>               # tailnet name, once provisioned
+MACH_DRIVER=<driver>          # boot/<driver>.sh -- which mechanism arms it
+MACH_DEVICE=<device>          # the block device an image is written to
+MACH_ROOT=<device>            # its host mode's root device -- never written to
+MACH_PROFILE=<profile>        # its default system profile ('wk sysimage -h')
+MACH_MAC=<aa:bb:cc:dd:ee:ff>  # its NIC's address, for 'wk find' pre-tailnet
+MACH_BRIDGE=<bridge-name>     # only if it sits behind a tailnet bridge
+MACH_ROLE=workstation|bench-device
+MACH_OS=any
+MACH_NOTE="one line, for the listing"
+```
+
+```sh
+git add boot/machines/<name>.conf && git commit
+wk boot --list                                   # picks it up
+```
+
+**Provision a bridge phone**
+
+The phone runs postmarketOS (a `pine64-pinephone` or `purism-librem5` image
+that `wk bridge provision` builds); the one step no command does is holding the
+phone's buttons to boot the Jumpdrive card when prompted.
+
+```sh
+wk bridge provision tailnet-bridge-generic       # image, card, phone, role, tailnet policy, health check
+# prompts at the two steps that need a hand: the physical card, and pasting
+# the tailnet policy it prints into the admin console
+wk bridge setup tailnet-bridge-generic           # idempotent re-apply, after any change
+wk bridge status tailnet-bridge-generic
+```
+
+**Quiesce and session, before any measurement**
+
+```sh
+wk quiesce on            # pause background daemons, disable screensaver/App Nap
+wk session on             # a real compositor on the attached monitor
+wk quiesce status
+wk session status
+wk quiesce off
+wk session off
+```
+
+**`wk claude` in a workspace**
+
+```sh
+wk claude bug-238                # verifies the sandbox first, refuses to start if it fails
+wk claude bug-238 -r             # resume
+wk claude bug-238 --continue
+```
+
+A `remote` target has no sandbox to verify; `wk claude` there stops at a
+barrier that only an explicit `--force` crosses.
+
+**Housekeeping**
+
+```sh
+wk doctor                # what is provisioned, what is missing, and the command to fix it
+wk status                # every target and fleet device, without guessing
+wk disk                  # where the disk went, with the total
+wk gc                    # reclaim disk by reference count; never loses work
+wk gc --purge-mirror     # also erase the git mirror and every base snapshot (refused with a live workspace)
+```
+
+**Reprovision a machine from scratch**
 
 ```sh
 git clone https://github.com/justinmichaud/wk-tools ~/Development/wk-tools
 cd ~/Development/wk-tools && ./setup
+wk sync
 ```
 
-`./setup` is idempotent — run it whenever you sit down. A second run in a row
-reports no changes.
-
-**Setting up a new machine from scratch: see [SETUP.md](SETUP.md).**
-
-## Workspaces
-
-A workspace is a named, disposable environment for one task.
+Every machine this repo knows is itself in the repo (`targets/hosts/*.conf`,
+`boot/machines/*.conf`), so a fresh clone already knows the whole fleet.
+Nothing else is machine-specific except what `wk backup` captures, and keys
+and secrets, which never live in git. Last resort, discarding a macOS host's
+whole container store:
 
 ```sh
-wk sync                    # fetch all upstreams, publish a base snapshot
-wk new bug-238             # instant, regardless of checkout size
-wk new arm-bug --arch armhf   # a native 32-bit workspace (Linux only)
-wk build bug-238 jsc-release
-wk run bug-238 -- -e '1+1'
-wk claude bug-238          # sandboxed agent, permissions relaxed
-wk rm bug-238              # reclaims everything it created
-wk zed bug-238
+podman machine rm wk && ./setup && wk sync
 ```
 
-Creating a workspace costs one overlay mount, not a clone. The base snapshot is
-shared and read-only; each workspace writes only to its own copy-on-write
-layer.
-
-### Architecture
-
-`--arch armhf` makes the workspace itself 32-bit: an armhf image, an armhf
-clang, armhf libraries, all executing natively — this Neoverse-N1 runs AArch32
-at EL0, which is why this exists on the Linux workstation and can never exist
-on Apple Silicon. Everything in there is native, so the configs mean what they
-always meant: `wk build arm-bug jsc-release` is a 32-bit JSC. The architecture
-is fixed at creation, recorded with the workspace, and shown by `wk ls`.
-
-Three different things could all be called "building 32-bit here", and they get
-three different words so no flag is ever a guess about which was meant:
-
-| word | what it is | where |
-|---|---|---|
-| `--arch` | the workspace's own userland, executed natively | `wk new` |
-| `--sysroot` | a *cross* build from a native workspace — another arch's libraries, `-m32`, an aarch64 clang | `wk build`, reserved, not implemented |
-| `--target` | another machine entirely — a Pi, a remote box, a machine booted into a bench system | `wk new` |
-
-The armhf image has no NVIDIA userspace and never will, so an armhf workspace
-is a software-rendering workspace. That is fine for JSC and for CPU-class
-benchmarks, and it is not a rendering measurement — see below.
-
-### Why snapshots rather than one shared checkout
-
-`git fetch` into a tree that a workspace has mounted would corrupt it. The
-kernel is explicit:
-
-> Changes to the underlying filesystems while part of a mounted overlay
-> filesystem are not allowed. If the underlying filesystem is changed, the
-> behavior of the overlay is undefined.
-
-So `wk sync` never modifies a tree in use. It fetches into a bare mirror, then
-publishes a *new* snapshot hardlinked from the previous one. Existing
-workspaces stay pinned to the snapshot they were created from, and keep
-working. `wk gc` reclaims snapshots once nothing references them.
-
-Hardlinking the base to the working copy — the obvious idea — cannot work:
-`link(2)` returns `EXDEV` across mounts, and hardlinked files share an inode,
-so a read-only base would force every working copy read-only too.
-
-## Isolation
-
-A workspace cannot reach the host filesystem, and this is structural rather
-than a convention. On macOS the podman machine is created with no virtiofs
-mounts at all, so the VM cannot see `/Users`; `setup` verifies this on every
-run and refuses to continue if it is not true. On Linux there is no VM, so the
-equivalent is the container's own mount set: the SDK's host-session integration
-— the host home directory, the session D-Bus socket, the keyring, the whole
-runtime directory — is turned off with `--isolated`, and the workspace is given
-the few trees it actually needs. That matters more than it sounds: the session
-bus alone is a full host escape, and it is not a network problem, so no
-firewall addresses it.
-
-Network egress is allowlisted by hostname: Anthropic, GitHub, PyPI, the
-Raspberry Pi test devices, the benchmark hosts, and — a deliberate widening,
-recorded in the proxy itself — a fixed set of top sites plus the CDN domains
-they cannot render without, so MiniBrowser can be driven at real pages.
-Everything else, including the whole local network, is refused: nothing on the
-list may resolve into RFC1918 or the tailnet range. *How* that is enforced
-differs by host, and the difference is the most important thing in this file.
-
-**Linux: there is no network interface.** A workspace runs with
-`--network none`. Its namespace has loopback and nothing else — no address, no
-route, no resolver — so there is nothing to filter and nothing to bypass. Its
-one channel is a unix socket to an egress proxy running as an ordinary
-`systemd --user` service, which allowlists by hostname and refuses anything
-resolving into RFC1918 or the tailnet range. Nothing in the daily path needs a
-privilege: `wk` never calls `sudo` on Linux.
-
-**macOS uses the same proxy**, running inside the podman VM as a `systemd
---user` service. The `WK_SANDBOX` comment in `targets/container.sh` says why
-there is one sandbox model and not two.
-
-Linux does not copy the macOS design because it cannot. Rootless podman has no
-filterable forward path — its network helper re-emits container traffic from
-the init namespace, in a cgroup scope with a random name — so nftables would
-have meant keeping rootful podman, and under rootful podman a container escape
-is a root escape. Removing the interface removes the need for the filter.
-
-Either way the claim is checked by testing it, never by reading the
-configuration that was supposed to produce it:
-
-```sh
-wk verify bug-238    # from inside the workspace: no interface, allowlist
-                     # enforced, no path with the proxy bypassed, no host files
-```
-
-`wk claude` runs that first for container workspaces and refuses to start if
-anything fails. A firewall
-that failed to load and a proxy that is not running both look perfectly fine
-from the host's config files, and both fail open.
-
-Tailscale ACLs are defence in depth, never the boundary: Tailscale's own
-documentation notes that ACLs "don't affect local network traffic".
-
-A macOS VM workspace of the `vm` target is filtered too, by different means:
-Tart runs **Softnet**, a userspace packet filter, as a subprocess on the host,
-default-denying everything except the address where the same `wk-proxy.py`
-listens. The filter is outside the guest on purpose — `pf` inside it would be
-modifiable by whatever is being sandboxed. Softnet needs root, so it is
-installed SUID once at setup time; `wk` still never calls sudo. The boundary is
-measured the same way the container's is — the guest reaches the allowlist only
-through the proxy, cannot reach the LAN, and cannot bypass Softnet
-(docs/TESTING.md, "Sandbox"). Until `./setup --stage softnet` has run,
-`wk vm start` refuses to boot a guest at all; booting with the open network
-takes an explicit `WK_VM_UNFILTERED=1`, and `wk claude` refuses a guest booted
-that way.
-
-Workstations are never sandboxed. They join the tailnet normally and keep full
-access to everything.
-
-## Resources
-
-Builds should never make the machine unusable. Three layers:
-
-- The VM (macOS) or container (Linux) is capped at `cores - 1` and
-  `memory - 12 GB`, so the host always keeps headroom (a headless machine
-  holds back less — there is no desktop to protect).
-- Builds run niced and `ionice`d, inside a systemd scope on Linux.
-- Build processes get a raised `oom_score_adj`, so the OOM killer takes the
-  build rather than your session.
-
-Job count is derived from memory actually available, never from core count
-alone — a WebKit link step is what turns a `-j$(nproc)` build into a hung
-machine. `wk build` prints the numbers it chose.
-
-## Targets
-
-Every command runs against a target, behind one driver contract:
-
-| Target | Isolation | Notes |
-|---|---|---|
-| `container` | overlay + no network interface + no host mounts | the default |
-| `vm` | VM + Softnet default-deny + the same proxy | Apple ports, Tart; 2 running guests per host |
-| `remote` | **none** | shared build boxes; polite, no containers |
-| `local` | n/a — it *is* the workspace | what `wk` uses inside a container or guest |
-
-Work never runs directly on a workstation. `local` is the degenerate driver a
-workspace uses on itself, which is how `wk build` works from inside one; it is
-never a target you ask for.
-
-`remote` is the one target you can have several of, so a remote target is named
-after the machine — `--target devbox-arm64-2`. A target is configured in one
-place: `targets/hosts/<name>.conf` in this repository, holding what is true of
-the machine (its ssh destination, the CMake flags its toolchain needs, whether
-it is a build box or another workstation), so every device that pulls the
-repository has that target. There is no per-device half — everything in a conf
-is a fact about the machine, and the only genuinely per-device state is keys and
-secrets. `wk remote setup <machine>` provisions one, without ever needing root on it,
-and leaves `wk` usable *on* the machine as well as against it.
-`wk sync --target <machine>` refreshes what it keeps: its copy of wk-tools and
-its WebKit mirror.
-
-A machine in the registry can also be another *workstation* rather than a build
-box (`WK_REMOTE_PEER=1`): one that is asked and not driven, so `wk status` and
-`wk ls` report what is building over there while `wk new`, `wk rm` and the
-tooling push are refused. That is what makes one workstation's view include the
-other's.
-
-A workspace remembers the target it was created with, so only `wk new` ever
-needs `--target`. On macOS that also decides whether a command is forwarded
-into the podman VM at all: only container workspaces live there.
-
-Shared build machines are treated as someone else's machine too — job count
-comes from *that* machine's live load average and free memory, builds run at
-`nice 19`, and a build lock (`lib/lockrun.sh`) stops two of your own builds
-from stacking. There is
-no sandbox there, so `wk verify` refuses a remote target outright — there is
-nothing to measure — and `wk claude` stops at a barrier that says exactly
-that; only `--force` proceeds, loudly.
-
-`wk help targets` is the same ground as a decision — which target a piece of
-work belongs on, and what a container costs against a macOS guest — and
-`wk help machines` is how a machine becomes a target here in the first place.
-
-## Disk
-
-```sh
-wk disk                # every place wk stores something here, with the total
-wk gc                  # prune by reference count; can never lose work
-wk gc --purge-mirror   # erase the master git store (wk sync refetches it)
-wk gc --purge-pmos     # erase a phone-image build host's chroots (~8 GB)
-wk vm base --rm        # erase the golden macOS image (hours to rebuild)
-```
-
-Three things dominate, and none of them is visible from the others: the golden
-macOS base VM (162 GB measured here — Xcode, a checkout and a full build, sealed
-so every `wk vm new` is an instant clone), the podman VM's sparse disk image
-(which is where the whole container store lives on macOS), and the master git
-store — the bare mirror plus the base snapshots hardlinked from it. `wk disk`
-counts all three in one read-only report and never starts anything to do it;
-`wk help disk` says what is safe to erase and what it costs to get back.
-
-It also counts what is *not* on this machine: a pmos build host keeps about 8 GB
-of pmbootstrap chroots, and nothing else would ever mention them — the machine
-that has them does not know they are wk's. On a macOS host `wk gc` therefore runs
-in two halves, one out here and one inside the podman VM, because that is where
-the two stores are.
-
-## Claude
-
-`wk claude <name>` runs the agent inside a workspace with permissions relaxed,
-because the workspace is the blast radius. It runs `wk verify` first and
-refuses to start unless the boundary measurably holds.
-
-Claude Desktop can create and drive workspaces itself through the MCP server
-registered by `setup` (`cmd/mcp`). That server exposes only the driver
-contract — no generic host exec — and caps how many workspaces can exist.
-
-Credentials do not transfer from the host: Claude Code uses the macOS Keychain
-on Darwin and `~/.claude/.credentials.json` on Linux. One `claude login` inside
-the first container workspace seeds a shared volume for all of them. macOS VM
-workspaces cannot use that volume at all — the Keychain is not a file to share —
-so log in once inside the golden base and every clone inherits it.
-
-## Tailnet bridges
-
-Some things cannot join a tailnet and cannot be reached from anywhere useful: a
-BMC on a dedicated management port, a test board on a cable. A **bridge** is a
-phone that routes such a segment onto the tailnet — WiFi one side, USB-C
-Ethernet the other, `tailscaled` advertising the subnet in between. Behind one,
-moose is reachable while it is powered off or has no working OS, and a
-workspace can reach the rpi3 and rpi4 without anything on the house network
-reaching either.
-
-```sh
-wk bridge provision <name>   # all of it: image, card, phone, role
-wk bridge ls                 # what is declared, and what answers
-wk bridge setup <name>       # just the role: idempotent, re-run after any change
-wk bridge status <name>      # the on-device health check, read-only
-wk bridge rm <name>          # removes the role, leaves the OS
-```
-
-`provision` is the whole path as one verb, and what it mostly does is stop in
-the right places. It builds what it needs, writes a card, and then blocks —
-because the next step is a hand, and it would rather tell you about the wall
-charger and the dock's power-before-connect at the moment they matter than in
-prose read a month earlier. Then it picks the story back up, applies the role,
-and blocks once more on the one thing it cannot do: the tailnet policy. It does
-not call the bridge finished until the phone's own `tailscale status` shows the
-route as primary, because an unapproved route is the failure that looks like
-success.
-
-By default it installs to the phone's **internal storage**, which is where a
-bridge should live — it writes leases, logs and tailscale state for months, and a
-microSD is the part of a phone most likely to work loose. Getting there goes
-through Jumpdrive: a service image that boots from the card and exports internal
-storage as USB mass storage, which turns "flash a phone" into "write a removable
-disk attached to a machine" — the path `wk sysimage write` already has, refusals
-included. The card is then the rescue copy, and putting it back boots Jumpdrive
-again with the install untouched. There is no second route: writing the bridge
-image to the card and letting the phone boot that is quicker to reach and leaves
-the bridge living on the component most likely to fail, so it is deliberately
-not offered. A phone Jumpdrive does not cover — which today means the Librem 5 —
-is refused by name, naming the fetch profile that would fix it.
-
-One detail there is worth knowing because the obvious approach is dangerous:
-Jumpdrive exports the SD card as well as the eMMC, so "the new disk" is usually
-two, and one of them is the Jumpdrive currently running. provision takes a
-baseline of the machine's disks before the phone is attached and finds the
-phone's by difference; when that difference is more than one disk it prints them
-with sizes and asks. Guessing by LUN order would work today and is still a
-guess, against a destructive write.
-
-Nothing in that chain holds a tailscale credential, deliberately. Minting a
-tagged auth key and writing the policy both need an API key, and a repository
-holding a policy-write one is a repository whose compromise rewrites every ACL
-you have — so provision asks and waits rather than acquiring the ability. The
-steps underneath are still ordinary commands, which is what makes a
-half-finished run recoverable by hand:
-
-```sh
-wk sysimage build bridge-pinephone            # a pmOS system for the phone
-wk sysimage write <id> --disk rpi5:/dev/mmcblk0
-                             # ...card into the phone, power on...
-wk bridge setup <name>       # the role, over ssh
-```
-
-Flashing is a command too. The image is built by pmbootstrap on a Linux aarch64
-machine over ssh (`rpi5` by default) because pmbootstrap is Linux-only and needs
-root, and both phones are aarch64 so nothing is emulated. It bakes in the ssh
-key, the bridge's hostname, the role's packages, and the WiFi credential —
-copied from the build host's own connection *on that host*, so the PSK never
-travels through a log or an agent's context. What comes back is an image in the
-store like any other, written to a card with the same verified path everything
-else uses.
-
-A bridge is declared in `bridge/hosts/<name>.conf` — the same shared-plus-local
-split targets use — and provisioned over ssh by `bridge/provision.sh`, which is
-the single source of truth for what is on the phone. That is the point of it:
-the predecessor of this role was one hand-built Librem 5 whose configuration
-lived on the device, with a README admitting it was the only copy in existence.
-
-Both phones run postmarketOS, which is what makes one provisioner cover both.
-Getting the card into the phone is hands-on; everything either side of that is a
-command, and `wk bridge provision` is the two halves with the hand in between. `wk help bridge` has both, and the traps — the wall charger, the
-kill switches, why a bridge is never powered off.
-
-## Layout
-
-```
-setup              host bootstrap                lib/       shared helpers
-wk                 the CLI                       cmd/       one file per subcommand
-host/              per-OS setup and settings     targets/   container, vm, remote, local
-dotfiles/          host dotfiles (Zed only)      claude/    settings, skills, hooks, CLAUDE.md
-container/         workspace-side setup          build/     configs + the in-target build
-container/proxy/   the egress boundary           container/gpu/  the EGL probe
-admin/             quiesce + session helper      vm/        macOS guest provisioning
-image/             system profiles + builders    boot/      the fleet: machines + boot drivers
-bridge/            tailnet-bridge devices        remote/    build-machine provisioning
-shell/             shared shell rc               docs/      handoffs and design notes
-
-```
-
-## Benchmarking
-
-```sh
-wk quiesce on              # no password: setup installs a validated sudoers rule
-wk session on              # a real GPU session on the attached monitor (Linux)
-wk bench bug-238 speedometer3
-wk bench compare <run-a> <run-b>
-```
-
-A session names its DRM device explicitly, and the mode decides whether a
-number means anything. `on` is a measurable kiosk on the GPU. `on --bmc` moves
-the session to the BMC's display chip so it can be watched over KVM-over-IP —
-software-rendered, recorded in `/run/wk-session-mode`, and never a number to
-compare with anything; `wk bench` refuses it and `wk test --gpu`, `wk enter`
-and `wk gui` warn. `gdm [--bmc]` starts the actual display manager and desktop
-instead, for debugging that needs more than a kiosk's one window. `off`
-modesets every output dark and holds a placeholder compositor so the console
-cannot repaint over it; a desktop comes back with `wk session gdm`, not with
-`off` and a wait. `wk session status` reports the mode, the greeter type and
-whether outputs are still lit.
-
-The mechanics — why each mode works the way it does on a machine with an
-NVIDIA GPU and a BMC display chip on the same seat — are in SETUP.md
-section 6.
-
-```sh
-wk session on --bmc        # watchable over KVM-over-IP; never for numbers
-wk session gdm --bmc       # a real desktop, forced onto the BMC's chip
-wk session off             # outputs modeset off; back with wk session gdm
-wk gui bug-238 [url]       # MiniBrowser in the seat, launched as perf runs do
-```
-
-Linux cannot make a `#!` script setuid — the kernel ignores the bit — so the
-privileged half is a `NOPASSWD` rule naming one root-owned path, installed only
-after `visudo -c` validates it, and re-checked for writability on every setup
-run. The command set behind it is a fixed allowlist with no passthrough:
-quiesce on/off/status, and session on/on-bmc/gdm/gdm-bmc/stop/off/status.
-
-`wk bench` wraps `run-benchmark` and `compare-results` rather than replacing
-them. What it adds is the part that decides whether a number means anything:
-
-- **it checks the environment before the run, not after.** Hardware renderer
-  (a MotionMark score from llvmpipe is not a slow result, it is a different
-  measurement), a real compositor, the performance governor, no other build
-  running, an idle machine. A failed check refuses the run; `--force` records
-  the result as forced so it can never be quietly compared with a clean one.
-- **it pins the payload.** run-benchmark otherwise clones Speedometer, or
-  fetches MotionMark file by file from the GitHub API, on every run. Seeded
-  once into the shared cache and keyed by commit.
-- **it records provenance.** Kernel, driver version, governor, container caps,
-  WebKit sha and renderer land next to the result, because two JSONs with no
-  provenance are not a comparison.
-
-Three axes decide what a run needs and what it may be compared with. All three
-are derived rather than passed, recorded with the result, and warned about by
-`wk bench compare` when two runs disagree:
-
-- **class** — what the benchmark measures, from the plan. Speedometer and
-  MotionMark are gpu-class and need a real compositor on a real GPU. JetStream
-  and the other JS benchmarks are cpu-class: the GPU is not part of the
-  measurement, so the run is not refused for lacking one and is not marked as
-  degraded for it. That is what makes an armhf workspace — or any machine with
-  no display — somewhere a JetStream number can honestly be taken.
-- **runner** — what executes it, from the config's port. A browser port runs
-  the plan in MiniBrowser through `run-benchmark`, which is the official number
-  for every plan. A JSCOnly port runs the benchmark's own `cli.js` in the jsc
-  shell, which is the only thing a JSCOnly tree can do; it writes the same
-  result JSON, so `wk bench compare` and `compare-results` work unchanged.
-- **host** — where it ran. `wk bench <ws>` runs in a workspace and records
-  `container`: cgroup limits, a shared kernel, a desktop underneath. A run on
-  the bare machine records `image`: `wk sysimage build <profile>` builds a
-  bootable system from a spec in this repo, `wk boot <machine>` puts a fleet
-  machine into bench mode for one boot (and hands it back), and
-  `wk bench stage --to <machine>` / `wk bench staged` carry the build over and
-  run it there. The two are not comparable — one has a desktop underneath it
-  and one is the whole machine — and `wk bench compare` warns.
-
-  On the Mac, `wk bench mac-ab <ws>` runs a whole interleaved A/B on the bench
-  install without anyone driving it: it stages the build, plants the job and a
-  one-shot launch agent on the volume while it is merely mounted, reboots, and
-  reads the numbers back afterwards. The one thing it cannot do is choose which
-  volume the firmware boots — that is not a SIP restriction and no amount of
-  root changes it (`docs/HANDOFF-boot.md` has the tests) — so a cycle costs one
-  authenticated action at the keyboard, on whichever side the firmware default
-  is not, and `wk boot mbp --status` says which side that is. One action per
-  experiment, not per run: the planted job holds every round of every arm.
+## Where the rest is
+
+`wk help` prints this file; `wk <command> -h` prints what any single command
+does, what it acts on, and whether it changes anything. CLAUDE.md is for
+anyone editing this repository itself.

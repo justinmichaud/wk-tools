@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# Run wk-wifi-join once at boot, after networking (S40network brings up
+# eth0's DHCP) so a board with a cable already has it and this only ever adds
+# wlan0 alongside it.
+#
+# BusyBox init, so an S-script and not a systemd unit -- the same reason
+# S99tailscale is one. wk-wifi-join itself is the same file the Yocto images
+# run (image/buildroot/wifi-overlay.sh installs the one copy at
+# image/yocto/meta-wk-wifi/recipes-connectivity/wk-wifi-join/files/wk-wifi-join);
+# nothing here duplicates its logic, only its scheduling.
+
+start() {
+    [ -x /usr/sbin/wk-wifi-join ] && /usr/sbin/wk-wifi-join
+    return 0
+}
+
+stop() {
+    return 0
+}
+
+case "$1" in
+    start) start ;;
+    stop)  stop ;;
+    restart|reload) stop; start ;;
+    *) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

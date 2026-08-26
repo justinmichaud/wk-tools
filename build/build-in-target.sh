@@ -79,14 +79,12 @@ if [ "$arch" != native ]; then
     export LDFLAGS="${WK_ARCH_LDFLAGS:-} ${LDFLAGS:-}"
 fi
 
-# The personality wrapper, and it is load-bearing rather than cosmetic. The
-# kernel is the host's, so `uname -m` in an armhf container answers aarch64;
-# CMake takes CMAKE_SYSTEM_PROCESSOR from it and WebKitCommon.cmake:167 turns
-# aarch64 into WTF_CPU_ARM64. Without linux32 a 32-bit compiler therefore
-# builds a tree configured for 64-bit ARM, and the first thing to notice is the
-# assembler, thousands of files in. Outermost of the wrappers because the
-# personality is inherited: cmake, ninja and every compiler underneath need it,
-# not just build-webkit.
+# The personality wrapper, load-bearing rather than cosmetic: the kernel is
+# the host's, so `uname -m` in an armhf container answers aarch64, and CMake
+# takes CMAKE_SYSTEM_PROCESSOR from it (WebKitCommon.cmake:167 turns aarch64
+# into WTF_CPU_ARM64). Without linux32 a 32-bit compiler builds a tree
+# configured for 64-bit ARM. Outermost of the wrappers because the personality
+# is inherited: cmake, ninja and every compiler underneath need it too.
 wrapper=${WK_ARCH_WRAPPER:-}
 
 # Arrays, not a flat string: --cmakeargs carries several -D flags as ONE
@@ -100,10 +98,10 @@ args=()
 # shellcheck disable=SC2206 -- deliberate word splitting of the config string.
 args+=(${WK_BUILD_ARGS:-})
 
-# compile_commands.json, always. Every build produces it, on every port and
-# every target, because a checkout without it is a checkout where clangd, Zed
-# and every editor-driven jump-to-definition quietly stops working -- and the
-# person who needs it is never the person running the build.
+# compile_commands.json, always: every build produces it, on every port and
+# target, because a checkout without it is one where clangd, Zed and every
+# editor-driven jump-to-definition quietly stops working -- and the person who
+# needs it is never the person running the build.
 #
 # It is free on the CMake ports (one -D flag, CMake writes the file as a side
 # effect). On the Apple ports it is not: it expands to four build settings, one
@@ -131,29 +129,28 @@ xcode)
     args+=(-jobs "$jobs")
 
     # Where the products go. build-webkit hands anything it does not recognise
-    # straight to xcodebuild (Getopt::Long is in pass_through mode there, and
-    # buildXcodeScheme appends the leftovers at webkitdirs.pm:2420), so a build
-    # setting written here reaches the build system unchanged.
+    # straight to xcodebuild (Getopt::Long is pass_through there; buildXcodeScheme
+    # appends the leftovers at webkitdirs.pm:2420), so a build setting written
+    # here reaches the build system unchanged.
     #
-    # WEBKIT_OUTPUTDIR on its own is not enough, and the failure would be
-    # silent. webkitdirs turns it into SYMROOT/OBJROOT (:460) and Xcode then
-    # appends the configuration name to SYMROOT to get the products directory
-    # -- while webkitdirs itself reports the products as being in
-    # WEBKIT_OUTPUTDIR with no configuration subdirectory at all
-    # (:1195-1196). Left alone the two disagree by exactly one level, and every
-    # WebKit script that resolves a path for itself -- run-minibrowser,
-    # run-webkit-tests, webkit-build-directory -- looks one directory above the
-    # frameworks. WK_CONFIGURATION_BUILD_DIR is WebKit's own hook for pinning
-    # that directory (Configurations/WebKitProjectPaths.xcconfig:36-41, which
-    # every project picks up through CommonBase.xcconfig), so setting it makes
-    # the build agree with what webkitdirs already claims -- and with
-    # config_build_dir() on this side.
+    # WEBKIT_OUTPUTDIR alone is not enough, and the failure would be silent:
+    # webkitdirs turns it into SYMROOT/OBJROOT (:460) and Xcode appends the
+    # configuration name to SYMROOT for the products directory, while
+    # webkitdirs itself reports products as being in WEBKIT_OUTPUTDIR with no
+    # configuration subdirectory (:1195-1196). Left alone the two disagree by
+    # one level, and every WebKit script that resolves its own path
+    # (run-minibrowser, run-webkit-tests, webkit-build-directory) looks one
+    # directory above the frameworks. WK_CONFIGURATION_BUILD_DIR is WebKit's
+    # own hook for pinning that directory
+    # (Configurations/WebKitProjectPaths.xcconfig:36-41, picked up through
+    # CommonBase.xcconfig), so setting it agrees with what webkitdirs already
+    # claims -- and with config_build_dir() on this side.
     #
-    # SHARED_PRECOMPS_DIR has to be repeated by hand. webkitdirs only passes it
-    # when it computed the product directory itself: :461 sits under the
+    # SHARED_PRECOMPS_DIR has to be repeated by hand: webkitdirs only passes it
+    # when it computed the product directory itself (:461, under the
     # `if (!defined($baseProductDir))` branch at :401, which WEBKIT_OUTPUTDIR
-    # skips. Without it all four Apple configs would go back to sharing one
-    # precompiled-header directory, which is half of what this change is for.
+    # skips). Without it all four Apple configs share one precompiled-header
+    # directory, half of what this change is for.
     if [ -n "${WEBKIT_OUTPUTDIR:-}" ]; then
         args+=("WK_CONFIGURATION_BUILD_DIR=$WEBKIT_OUTPUTDIR")
         args+=("SHARED_PRECOMPS_DIR=$WEBKIT_OUTPUTDIR/PrecompiledHeaders")
@@ -162,80 +159,76 @@ xcode)
     # Where the caches go: the two big ones by name, and NOT -derivedDataPath.
     #
     # The two settings pin what is actually large -- 9.6 GB of compilation CAS
-    # and 1.6 GB of module cache, measured after one mac-release -- and they are
-    # build settings, so every xcodebuild in the build inherits them.
+    # and 1.6 GB of module cache, measured after one mac-release -- as build
+    # settings, so every xcodebuild in the build inherits them.
     #
-    # -derivedDataPath is a *flag*, and that is the problem. build-webkit runs
-    # xcodebuild twice: the scheme build, and then Tools/Scripts/build-imagediff,
-    # which uses buildXCodeProject (webkitdirs.pm:2399) -- `-project`, no
-    # `-scheme`. Every argument we pass reaches both, and xcodebuild refuses:
+    # -derivedDataPath is a *flag*, and that is the problem: build-webkit runs
+    # xcodebuild twice, the scheme build and then Tools/Scripts/build-imagediff
+    # via buildXCodeProject (webkitdirs.pm:2399, `-project`, no `-scheme`).
+    # Every argument reaches both, and xcodebuild refuses on the second:
     #
     #   xcodebuild: error: The flag -scheme, -testProductsPath, or -xctestrun
     #   is required when specifying -derivedDataPath.
     #
     # Measured on a full base prebuild: `** BUILD SUCCEEDED ** [5149 sec]`
     # followed immediately by that error, exit 64, and no ImageDiff -- which
-    # every pixel and reftest comparison needs. A build that reports failure
-    # after succeeding is bad; one that quietly skips a tool the tests need is
-    # worse, and the two arrived together.
+    # every pixel and reftest comparison needs.
     #
-    # Nothing is lost by dropping it. The products, intermediates and
+    # Nothing is lost by dropping it: products, intermediates and
     # XCBuildData/build.db already follow WEBKIT_OUTPUTDIR through
     # SYMROOT/OBJROOT, indexing is off (COMPILER_INDEX_STORE_ENABLE=NO), and
-    # the caches are named above -- so the machine-wide DerivedData root is left
-    # holding nothing that matters.
+    # the caches are named above, so the machine-wide DerivedData root holds
+    # nothing that matters.
     if [ -n "${WK_DERIVED_DATA:-}" ]; then
         args+=("COMPILATION_CACHE_CAS_PATH=$WK_DERIVED_DATA/CompilationCache.noindex")
         args+=("MODULE_CACHE_DIR=$WK_DERIVED_DATA/ModuleCache.noindex")
     fi
 
-    # The escape hatch for debugging Swift types, and the reason it exists:
+    # The escape hatch for debugging Swift types.
     #
     # With caching on -- WebKit's default, CommonBase.xcconfig:82-83 -- the
-    # explicit precompiled modules under WebKitBuild/SwiftExplicitPrecompiledModules
-    # record their dependencies as `llvmcas:/<hash>` rather than as paths, so
-    # the debug info is only as durable as the CAS. Measured in a guest: the
-    # .pcm files were all still on disk, but `llvm-cas --print-kind` reported
-    # "unknown object" for the ids inside them, and lldb printed a hundred
-    # `llvmcas:/... does not exist` warnings while resolving one breakpoint,
-    # ending in "Debugging will be degraded due to missing types". A cache is
-    # entitled to evict; debug info pointing into one is the mistake.
+    # explicit precompiled modules under
+    # WebKitBuild/SwiftExplicitPrecompiledModules record their dependencies as
+    # `llvmcas:/<hash>` rather than as paths, so debug info is only as durable
+    # as the CAS. Measured in a guest: the .pcm files were still on disk, but
+    # `llvm-cas --print-kind` reported "unknown object" for the ids inside
+    # them, and lldb printed a hundred `llvmcas:/... does not exist` warnings
+    # resolving one breakpoint, ending in "Debugging will be degraded due to
+    # missing types".
     #
-    # It costs a full rebuild to switch, because a build with different
-    # settings shares nothing with the cached one, so this is deliberately not
-    # the default: C++ debugging is unaffected either way -- breakpoints,
-    # source lines and WebKit's own lldb summaries all measured working with
-    # caching on -- and only Swift-interop types are degraded.
+    # Costs a full rebuild to switch, since a build with different settings
+    # shares nothing with the cached one -- deliberately not the default: C++
+    # debugging (breakpoints, source lines, WebKit's own lldb summaries) is
+    # unaffected either way, and only Swift-interop types are degraded.
     [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && args+=("COMPILATION_CACHE_ENABLE_CACHING=NO")
     ;;
 *)
-    # Does the tree that is already here agree with the configuration being
-    # asked for? Two mechanisms already exist upstream and between them they
-    # leave one gap, which is the one that matters.
+    # Does the tree that is already here agree with the configuration asked
+    # for? Two mechanisms exist upstream and between them leave one gap.
     #
-    # build-webkit removes CMakeCache.txt by itself when its own argument string
-    # changes (removeCMakeCache, build-webkit:303), and for an ordinary -D that
-    # is the whole answer -- cmake re-runs and the new value takes.
+    # build-webkit removes CMakeCache.txt itself when its own argument string
+    # changes (removeCMakeCache, build-webkit:303) -- for an ordinary -D that
+    # is the whole answer, cmake re-runs and the new value takes.
     #
     # Six variables are not ordinary. WebKit calls them identity variables --
     # CMAKE_BUILD_TYPE, PORT, DEVELOPER_MODE, ENABLE_SANITIZERS, WEBKIT_SDK_NAME,
     # CMAKE_OSX_SYSROOT -- and stamps them in .webkit-config-stamp *outside* the
-    # cache, precisely so that wiping the cache cannot quietly revert them
+    # cache, precisely so wiping the cache cannot quietly revert them
     # (Source/cmake/WebKitCommon.cmake:9). Change one and configure stops dead:
     #
     #   CMAKE_BUILD_TYPE changed from 'Release' to 'RelWithDebInfo'. This build
     #   directory's identity variables must not change after the first
     #   configure. Delete the build directory and reconfigure.
     #
-    # That is a good refusal and a bad place to meet it: partway into a build
-    # somebody asked for, with a manual rm -rf as the only way forward. So the
-    # remedy it names is applied here instead, before the build starts.
+    # A good refusal met in a bad place: partway into a build somebody asked
+    # for, with a manual rm -rf as the only way forward. The remedy it names
+    # is applied here instead, before the build starts.
     #
-    # The stamp is read rather than a record of our own being kept beside it --
-    # WebKit owns this fact and writes it in one place -- and the *names* come
-    # from the stamp too, so the list above can grow upstream without this going
-    # stale. Wiping rather than refusing, because `wk build <ws> <config>` has
-    # already said which configuration it wants and the tree there is not it.
+    # The stamp is read rather than kept as a record of our own -- WebKit owns
+    # this fact and the *names* come from the stamp too, so the list above can
+    # grow upstream without this going stale. Wiping rather than refusing,
+    # since `wk build <ws> <config>` has already said which configuration it
+    # wants and the tree there is not it.
     if [ -n "$cmakeargs" ] && [ -f "${WK_BUILD_DIR:-}/.webkit-config-stamp" ]; then (
         # A subshell: the comparison needs `set --` to word-split the flag
         # string the way a shell would, and this script's own "$@" is the
@@ -273,23 +266,22 @@ esac
 
 # --- the memory watchdog -----------------------------------------------------
 #
-# Started here, in the background, and pointed at *this* shell's pid -- the
-# `exec` below replaces this process without changing its pid, so from the
-# watchdog's side it is watching the build itself and every compiler under it.
+# Started here, in the background, pointed at *this* shell's pid: the `exec`
+# below replaces this process without changing its pid, so the watchdog is
+# watching the build itself and every compiler under it.
 #
-# The budget is what the job count was derived from: jobs x the per-job working
-# set. That is a prediction (lib/resources.sh sizes from memory free at the
-# time), and this is the thing that notices when the prediction was wrong --
-# before the OOM killer picks a victim, which on a shared machine may be
-# somebody else's work entirely.
+# The budget is what the job count was derived from: jobs x the per-job
+# working set. That is a prediction (lib/resources.sh sizes from memory free
+# at the time), and this notices when the prediction was wrong, before the
+# OOM killer picks a victim -- which on a shared machine may be somebody
+# else's work entirely.
 #
-# The floor is generous by default and the budget has one too: a single WebKit
-# link step can want several GB on its own, so a small job count must not mean
-# a budget a normal build trips over.
-# The floor applies to the *derived* budget only. A number that was asked for
-# explicitly is the answer, not a suggestion -- silently raising it to 8 GB is
-# how a --mem-budget of 200 produced a build that was never watched, which is
-# worse than refusing the flag would have been.
+# The floor is generous by default, and so is the derived budget's own floor:
+# a single WebKit link step can want several GB on its own, so a small job
+# count must not mean a budget a normal build trips over. Applies to the
+# *derived* budget only -- an explicit --mem-budget is the answer, not a
+# suggestion; silently raising a --mem-budget of 200 to 8 GB produced a build
+# that was never watched, worse than refusing the flag would have been.
 if [ -n "${WK_MEM_BUDGET_MB:-}" ]; then
     mem_budget=$WK_MEM_BUDGET_MB
 else
@@ -312,17 +304,18 @@ command -v choom  >/dev/null 2>&1 && pre="$pre choom -n 500 --"
 
 # WK_DRY_RUN: print the command and build nothing.
 #
-# The point of doing it *here* rather than reconstructing the line in cmd/build
-# is that this is the half that knows. Whether ionice and choom exist, what the
-# cgroup clamped the job count to, which build settings the Apple path adds,
-# what the architecture wrapper is -- all of it is resolved in the target and
-# none of it is knowable from outside. A rendering in the caller would be a
-# second implementation of this file, and would be wrong on the day they differ.
+# Done *here* rather than reconstructed in cmd/build because this is the half
+# that knows: whether ionice and choom exist, what the cgroup clamped the job
+# count to, which build settings the Apple path adds, what the architecture
+# wrapper is -- all resolved in the target. A rendering in the caller would be
+# a second implementation of this file, wrong on the day they differ.
 #
 # The same quoting `set -x` would use, so what is printed can be pasted into a
-# shell in the checkout and run.
+# shell in the checkout and run. One line, `cd` joined onto the command with
+# `&&`, because cmd/build prints this verbatim after `running:` -- two lines
+# there would break across a "the command was:" sentence a person is reading.
 if [ -n "${WK_DRY_RUN:-}" ]; then
-    printf 'cd %s\n' "$(_q "$SRC")"
+    printf 'cd %s && ' "$(_q "$SRC")"
     # shellcheck disable=SC2086 -- $wrapper and $pre are deliberate word lists.
     set -- $wrapper $pre nice -n "$nicelevel" \
         Tools/Scripts/build-webkit "${args[@]}" ${@+"$@"}

@@ -57,6 +57,17 @@
 #               written and verified. Only world-readable regular files: the
 #               overlay is rsynced at target-finalize as the build user, and a
 #               0700 directory in it failed the build with rsync error 23.
+#   wifi        image/buildroot/wifi-overlay.sh <staging>, the same shape,
+#               written but -- like everything else in this file -- never run.
+#               It carries no binary (wpa_supplicant is a package the
+#               defconfig selects, not a downloaded static build), only
+#               wk-wifi-join and the S-init line that spends the credential
+#               the card seeds. TODO: the rpi3 and rpi5 defconfigs are the
+#               WPE fork's own and live outside this repo -- unlike rpi4's
+#               (image/buildroot/external/configs, which this repo owns and
+#               which now selects BR2_PACKAGE_WPA_SUPPLICANT), so whether they
+#               compile wpa_supplicant at all is unverified until one is
+#               built.
 #   output      genimage -> output/images/sdcard.img. The cog defconfigs'
 #               filesystem output is tar-only -- no rootfs.ext4 -- so the board's
 #               own genimage config had nothing to assemble until that was fixed.
@@ -64,12 +75,13 @@
 #               init out of the rootfs and refuses rather than writing units
 #               nothing will start. The S99tailscale script is the equivalent,
 #               and the BusyBox halves of the self-return watchdog and the
-#               self-disarm are still owed (docs/TESTING.md).
+#               self-disarm are still owed.
 #
 # --- what is owed, in order --------------------------------------------------
 #
 #   1. this function: clone-and-pin the tree per configuration, apply the
-#      defconfig, write the overlay, build in the workspace, and leave
+#      defconfig, write the overlay(s) -- tailnet-overlay.sh and, per
+#      --overlay-wifi, wifi-overlay.sh -- build in the workspace, and leave
 #      output/images/$BR_IMAGE where it lands -- there is no store to import it
 #      into (wk help images). Container-only, and refused elsewhere for the
 #      reasons yocto_build gives.
@@ -182,9 +194,11 @@ buildroot_build() {
     # live. Going far past the only value with evidence behind it risks losing
     # an hours-long build to a race in somebody else's Makefile, and the cores
     # are not the scarce thing here anyway.
-    local jobs overlay_arch dl cc
+    local jobs overlay_arch overlay_wifi dl cc
     jobs=$(WK_MB_PER_JOB=2048 WK_MAX_JOBS=16 build_jobs)
     overlay_arch="${BR_OVERLAY_TAILSCALE:-}"
+    overlay_wifi=""
+    _image_wants_wifi "${IMG_MACHINE:-}" && overlay_wifi=1
     dl="$WK_STORE/cache/buildroot/downloads"
     cc="$WK_STORE/cache/buildroot/ccache"
 
@@ -198,6 +212,7 @@ would build image $profile (builder: buildroot)
   host image   $BUILDROOT_BASE_IMAGE + container/buildroot/Containerfile
   jobs         -j$jobs (memory-sized at 2048 MB/job)
   overlay      ${overlay_arch:-none -- this image would join no tailnet}
+  wifi overlay $([ -n "$overlay_wifi" ] && echo "wk-wifi-join (image/buildroot/wifi-overlay.sh); the card carries the credential" || echo "none -- ${IMG_MACHINE:-this board} has a cable")
   DL_DIR       $dl
   output       in the workspace, under output/images (there is no store)
 EOF
@@ -229,6 +244,7 @@ EOF
             ${BR_IMAGE:+--image "$BR_IMAGE"} \
             --jobs "$jobs" \
             ${overlay_arch:+--overlay-arch "$overlay_arch"} \
+            ${overlay_wifi:+--overlay-wifi 1} \
             --dl-dir "$dl" \
             --ccache-dir "$cc" \
             ${BR_ROOTFS_SIZE:+--rootfs-size "$BR_ROOTFS_SIZE"} \

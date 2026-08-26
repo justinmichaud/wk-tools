@@ -1,19 +1,32 @@
 #!/usr/bin/env bash
 #
-# wk pi setup <host> -- put a Raspberry Pi test device on the tailnet.
+# wk pi <verb> <args> -- Raspberry Pi test boards: get one on the tailnet, then run WebKit on it
 #
-# Works against a running device over SSH and requires no image rebuild. That
-# constraint is what shapes the whole script: these boards run whatever slim
-# image the lane they serve produced -- the rpi4 is on the WebKit Dev@CI Yocto
-# image today -- and rebuilding one to add a package is not an option.
+# wk: where=host name=none group=hosts broker deploy,bench needs ssh,python3
 #
-# Tailscale ships pure-Go static binaries with no libc dependency, including a
-# 32-bit ARM build, so provisioning is: copy two binaries to a writable
-# partition, add an init script, and bring the node up tagged.
+# A board runs a bench system on removable media; its own workstation install
+# is never touched. `wk help hardware` has the per-board arrangement.
 #
-# The Pis sit on the house LAN (the isolated-guest-network premise is retired
-# -- docs/HANDOFF-linux-pi.md); what lets a workspace reach a test board and
-# nothing else is the proxy allowlist fed from pi-hosts, not the topology.
+#   wk pi setup <ssh-host>                put it on the tailnet: copies pinned
+#                                         tailscale binaries onto a writable
+#                                         partition; no image rebuild
+#   wk pi boot-order <ssh-host> <order>   rpi4/rpi5 firmware boot order;
+#                                         --revert undoes it, --dry-run previews
+#   wk pi deploy <workspace> <machine>    put a cross build on the board
+#       [--slot NAME] [--skeleton|--skeleton-only] [--libs-only]
+#                                         --slot lands beside an existing build;
+#                                         --skeleton clones the tree the board's
+#                                         scripts need; --skeleton-only stops there
+#   wk pi bench <machine> <plan>          run a benchmark on a booted bench
+#       [--slot NAME] [--count N] [--timeout S] [--keep-session]
+#                                         system; refuses host mode and a
+#                                         missing display without --force
+#       --ab A,B [--rounds N]             interleaved A/B between two deployed
+#                                         slots, compared with wk bench compare
+#
+# Bare-board order: wk sysimage build/disks/write, wk pi boot-order, wk boot,
+# then wk pi setup once it answers on the tailnet. Flashing lives in
+# wk sysimage write, not here.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,6 +37,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/image/profiles.sh"
 . "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/boot/rpi-eeprom.sh"
+. "$WK_ROOT/lib/detach.sh"
 # For `deploy`, which reaches into a build workspace as well as onto a board.
 . "$WK_ROOT/lib/target.sh"
 
@@ -40,110 +54,20 @@ TS_VERSION="${TS_VERSION:-$(ts_release_field TS_VERSION)}"
 TAG="${WK_PI_TAG:-tag:wk}"
 
 ACTION="${1:-}"; HOST="${2:-}"
-# The whole board lifecycle, in the order it is done, because the four commands
-# that make up "flash, connect and set up a Pi" live under three different verbs
-# and the order between them is not guessable from any one of them.
-#
-# Printed by `wk pi` with no argument and by `wk pi -h`; -h exits 0, because
-# asking for help is not an error.
-pi_usage() {
-    cat <<'EOF'
-wk pi -- Raspberry Pi test boards: get one running, then measure on it.
-
-A board runs a *bench system* on removable media. Its own workstation install,
-where it has one, is never touched: `wk sysimage write` refuses the disk a
-machine boots from, and `wk boot` is a one-shot the board returns from by
-itself. `wk help hardware` has the per-board arrangement and why they differ.
-
-FROM A BARE BOARD
-
-  1. build a system          wk sysimage build <profile>
-                             `wk sysimage -h` lists the profiles. Yocto profiles
-                             are hours and want --detach.
-  2. find the disk           wk sysimage disks <machine>
-                             the removable disk plugged into that board -- not
-                             the board's own system disk, which is refused.
-  3. write it                wk sysimage write <id> --disk <machine>:<device>
-                             writing a disk does not make anything boot it.
-  4. let it boot the disk    wk pi boot-order <ssh-host> usb-first
-                             rpi4/rpi5 firmware order. Omit the order and it
-                             comes from the machine's role (bench-device ->
-                             usb-first). --revert puts it back; --dry-run first.
-                             The rpi3 has no programmable order -- its card is
-                             swapped by hand.
-  5. boot it                 wk boot <machine>
-                             arms the one-shot and reboots. --status says what
-                             mode it is in, --diag reads the bench system's own
-                             account of a boot that never appeared, --back
-                             returns now.
-
-CONNECTING TO IT
-
-  A board is reached by its tailnet name, and a fresh bench system is not on
-  the tailnet yet -- so the first connection is the LAN address or the mDNS
-  name that `wk status` prints under "without tailscale" for that machine.
-
-  6. put it on the tailnet   wk pi setup <ssh-host>
-                             copies the pinned tailscale binaries onto a
-                             writable partition, adds an init script and brings
-                             the node up tagged. No image rebuild, no package
-                             manager, no libc dependency -- which is what makes
-                             it work on a slim Yocto image.
-                             After this the board answers to its tailnet name
-                             and `wk status` reports it reached.
-
-MEASURING ON IT
-
-  7. put WebKit on it        wk pi deploy <workspace> <machine>
-                                 [--slot NAME] [--skeleton|--skeleton-only]
-                             the image is a runtime and carries no browser, so
-                             this is how one gets there. --slot puts a build
-                             beside an existing one rather than over it, which
-                             is what makes an A/B possible without redeploying
-                             between runs.
-  8. run a plan              wk pi bench <machine> <plan>
-                                 [--slot NAME] [--count N] [--timeout S]
-                             wk pi bench <machine> <plan> --ab A,B [--rounds N]
-                             WebKit's own run-benchmark on a booted bench
-                             system. Refuses host mode, and reports what the
-                             number is worth. --ab alternates two deployed
-                             slots (A B A B ...) so thermal drift lands on both
-                             arms instead of only the second; each run is
-                             recorded separately and `wk bench compare` does the
-                             statistics. A run with no display attached needs
-                             --force: compositing falls to the CPU, which
-                             measures the renderer as much as the browser.
-
-Flashing is not here: it is an image operation, so it is `wk sysimage write`
-(step 3) for every machine and every medium.
-EOF
-}
-
 case "$ACTION" in
-    -h|--help|help|"") pi_usage; exit 0 ;;
-    setup|boot-order) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>" ;;
+    setup|boot-order) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>; see wk pi -h" ;;
     # deploy takes a *workspace* and a fleet machine, not an ssh host: it has
     # to reach into the build to make the archive and onto the board to unpack
     # it, and the board is named the way every other fleet verb names one.
     deploy|bench) : ;;
-    # `flash` takes a *fleet machine* rather than an ssh host: the refusals need
-    # MACH_ROOT to know which disk is that machine's own, and the image comes
-    # from the store by profile. See boot/disk.sh.
     # Kept only to say where it went; see below.
     flash) : ;;
-    *) pi_usage >&2; die "unknown subcommand: $ACTION" ;;
+    *) die "usage: wk pi <verb> <args>; see wk pi -h" ;;
 esac
 shift 2 2>/dev/null || true
 
 rsh() { ssh -o BatchMode=yes "$HOST" "$@"; }
 
-# `wk pi flash` existed for about an hour and is folded into `wk sysimage write`.
-#
-# It was the same operation as the other flashing verb -- same store, same
-# verification, same unmount, same refusals -- differing only in device policy,
-# and the stricter policy was right for both. Two commands owning the image
-# store's internals was the cost of keeping them apart. boot/disk.sh has the
-# argument, including why neither was called the right thing.
 if [ "$ACTION" = flash ]; then
     die "'wk pi flash' is gone -- it and 'wk image flash' were one operation.
 
@@ -330,9 +254,8 @@ cmd_deploy() {
 # Slots exist because a board that holds one build makes an A/B of two WebKits
 # a reflash-per-side affair -- minutes of copying between every pair of numbers,
 # on a board whose thermal state drifts over exactly that timescale. Two builds
-# side by side
-# turn that into an alternation, which is the design that actually controls
-# for drift (see cmd_bench's --ab).
+# side by side turn that into an alternation, which is the design that
+# actually controls for drift (see cmd_bench's --ab).
 #
 # The name is restricted to a short alphanumeric because it becomes a directory
 # on the board and arrives from the command line.
@@ -352,18 +275,16 @@ pi_check_slot() {
     esac
 }
 
-#
 # It carries the same bytes built-product-archive would, minus the archive
-# format and its manifest -- so `built-product-archive extract` is not what
-# unpacks it, and the board's build directory is written directly. The
-# destination is `WebKitBuild/WPE/Release`, *not* the cross-target-suffixed name
-# the workspace uses (`Release_rpi4-64bits-mesa`): run-benchmark is pointed at
-# the former, and a board only ever holds one build.
+# format and its manifest, so the board's build directory is written
+# directly. The destination is `WebKitBuild/WPE/Release`, *not* the
+# cross-target-suffixed name the workspace uses (`Release_rpi4-64bits-mesa`):
+# run-benchmark is pointed at the former, and a board only ever holds one build.
 #
 # Staged through a file rather than piped out of the container: a `t_exec ... |
 # tar -x` puts a container exec's stdout straight into an extractor, and
-# anything that exec prints ahead of the bytes (an init log, a shell banner)
-# corrupts the stream. image/yocto.sh records that exact trap for disk images.
+# anything printed ahead of the bytes (an init log, a shell banner) corrupts
+# the stream. image/yocto.sh records that exact trap for disk images.
 pi_deploy_tar() {
     local ws="$1" machine="$2" target="$3" slot="${4:-a}" b="/src/WebKit/WebKitBuild/WPE"
     local dest; dest=$(pi_build_dir "$slot")
@@ -442,20 +363,16 @@ pi_skeleton() {
     m_ssh "cd /WebKit && rm -rf WebKit && mv WebKit.part WebKit && mkdir -p WebKit/WebKitBuild" \
         || die "could not put the skeleton in place on $machine"
 
-    # Three empty directories, and they are load-bearing.
+    # Three empty directories, and they are load-bearing: webkitdirs.pm walks
+    # up looking for `-d Source && -d Source/WebCore && -d
+    # Source/JavaScriptCore` (determineSourceDir). A Tools-only tree fails
+    # that, so `webkit-build-directory` dies and run-benchmark's WPE driver
+    # falls back to "Using default MiniBrowser" -- a browser that doesn't
+    # exist here, so the run sits there having launched nothing, reading like
+    # a hung benchmark rather than a missing directory.
     #
-    # webkitdirs.pm walks up from FindBin looking for a top-level checkout, and
-    # its test is `-d Source && -d Source/WebCore && -d Source/JavaScriptCore`
-    # (determineSourceDir). A Tools-only tree fails it, so
-    # `webkit-build-directory` dies with "Could not find top level webkit
-    # directory", and run-benchmark's WPE driver answers that by falling back to
-    # "Using default MiniBrowser" -- a browser that does not exist here. The run
-    # then sits there having launched nothing, which reads like a hung benchmark
-    # rather than a missing directory.
-    #
-    # The test is `-d` only: nothing reads what is inside. So the skeleton stays
-    # ~4,400 files instead of 427,711, and the scripts still resolve the build
-    # directory correctly.
+    # The test is `-d` only, so the skeleton stays ~4,400 files instead of
+    # 427,711, and the scripts still resolve the build directory correctly.
     m_ssh 'mkdir -p /WebKit/WebKit/Source/WebCore /WebKit/WebKit/Source/JavaScriptCore' \
         || die "could not create the source-tree markers on $machine"
     m_ssh 'cd /WebKit/WebKit && perl Tools/Scripts/webkit-build-directory --configuration --release --wpe' \
@@ -482,28 +399,20 @@ pi_skeleton() {
 # `run-minibrowser` at browserbench.org tells you the run *finished* and nothing
 # about what it scored (the rpi3 skill's §5 says so at length, having tried).
 # run-benchmark also clones the benchmark and serves it from a local webserver
-# -- `speedometer3.plan` names `WebKit/Speedometer.git` at `release/3.0` -- which
-# is how the content origin ends up on loopback rather than across the internet,
-# the rule for a measured run: nothing in the run path may be a network mount.
-# Both properties
-# come free with the official harness and neither can be bolted onto a URL.
+# (speedometer3.plan names WebKit/Speedometer.git at release/3.0), keeping the
+# content origin on loopback rather than the internet -- nothing in a measured
+# run path may be a network mount. Both properties come free with the official
+# harness and neither can be bolted onto a URL.
 pi_bench_env() {
-    # For the headless session the environment is the one we just created, not
-    # whatever a login session left behind.
-    # LD_LIBRARY_PATH always, whichever session: a cross build's RPATH names the
-    # *workspace's* build directory
-    # (/src/WebKit/WebKitBuild/WPE/Release_<target>/lib), which does not exist on
-    # the board, so the loader finds nothing and MiniBrowser dies with
-    # "libWPEWebKit-1.1.so.0: cannot open shared object file". `run-minibrowser`
-    # papers over this by exporting the path itself (webkitdirs), but
-    # run-benchmark's WPE driver execs MiniBrowser directly and does not -- so
-    # the harness that produces a score is exactly the one that needs this said
-    # out loud.
-    # WEBKIT_INJECTED_BUNDLE_PATH for the same class of reason: the bundle's
-    # location is compiled in as an *install* prefix
-    # (/usr/local/lib/wpe-webkit-2.0/injected-bundle), and a deployed build was
-    # never installed -- so the web process starts and then warns "Error loading
-    # the injected bundle", which is easy to read as cosmetic and is not.
+    # LD_LIBRARY_PATH always: a cross build's RPATH names the *workspace's*
+    # build directory, which doesn't exist on the board, so the loader finds
+    # nothing and MiniBrowser dies with "cannot open shared object file".
+    # `run-minibrowser` papers over this (webkitdirs), but run-benchmark's WPE
+    # driver execs MiniBrowser directly and doesn't.
+    #
+    # WEBKIT_INJECTED_BUNDLE_PATH for the same reason: its location is
+    # compiled in as an install prefix, and a deployed build was never
+    # installed, so the web process warns "Error loading the injected bundle".
     local b="${1:?pi_bench_env needs a build directory}/lib"
     local libs="export LD_LIBRARY_PATH=$b WEBKIT_INJECTED_BUNDLE_PATH=$b"
     if [ "${PI_SESSION:-}" = headless-rdp ]; then
@@ -569,53 +478,34 @@ pi_bench_record() {
     local karch
     karch=$(m_ssh 'uname -m' 2>/dev/null | tr -d '\r')
 
-    WK_M_PLAN="$plan" WK_M_MACHINE="$machine" WK_M_SYSTEM="$sysid" \
-    WK_M_KERNEL="$kernel" WK_M_KARCH="$karch" WK_M_GOV="$gov" \
-    WK_M_THROTTLED="$throttled" WK_M_ROOT="$root_dev" WK_M_RENDERER="$renderer" \
-    WK_M_SESSION="$session" WK_M_COUNT="$count" WK_M_FORCED="${WK_FORCE:-}" \
-    WK_M_SLOT="$slot" WK_M_SHA="$sha" WK_M_WS="$bws" \
-    python3 - "$dir/env.json" <<'PYEOF'
-import json, os, sys
-g = os.environ.get
-plan = g("WK_M_PLAN") or ""
-cpu = plan.startswith(("jetstream", "octane", "kraken", "sunspider", "ares6", "jsbench"))
-json.dump({
-    "plan": plan,
-    # The workspace that deployed this slot, read back from the board's
-    # .wk-slot marker. It is not where the run happened -- that was the board --
-    # but it is the checkout whose Tools/ matches the binary that produced these
-    # numbers, which is exactly what `wk bench compare` needs to run
-    # compare-results in. Leaving it empty made every on-board run
-    # uncomparable ("cannot find a workspace to run compare-results in").
-    "workspace": g("WK_M_WS") or "",
-    "config": "wpe-release", "browser": "minibrowser-wpe",
-    "count": g("WK_M_COUNT") or "", "forced": bool(g("WK_M_FORCED")),
-    # The three axes. bench_host is "image" for the reason cmd/bench's staged
-    # record says: this path is only reachable against a booted bench system,
-    # which is checked before the run rather than asserted here.
-    "class": "cpu" if cpu else "gpu", "runner": "browser",
-    "arch": g("WK_M_KARCH") or "native", "bench_host": "image",
+    # The three axes: class from the plan (a CPU-bound suite counts differently
+    # from a GPU one), runner is always "browser" here, bench_host is "image"
+    # because this path is only reachable against a booted bench system.
+    local class=gpu
+    case "$plan" in
+        jetstream*|octane*|kraken*|sunspider*|ares6*|jsbench*) class=cpu ;;
+    esac
     # Software compositing is never incidental on these boards -- there is
     # either a panel or there is not -- and --force is what allows the second.
-    "software": g("WK_M_RENDERER") == "pixman",
-    "software_reason": ("no display attached; weston rdp + pixman"
-                        if g("WK_M_RENDERER") == "pixman" else ""),
-    "session_mode": g("WK_M_SESSION") or "",
-    "gpu_renderer": g("WK_M_RENDERER") or "",
-    "machine": g("WK_M_MACHINE"),
-    "system": g("WK_M_SYSTEM"),
-    # Which build directory on the board produced this, and what commit was in
-    # it. The slot alone is a label; the sha is what makes an A/B answerable
-    # after the boards have moved on to something else.
-    "build_slot": g("WK_M_SLOT"),
-    "webkit_sha": g("WK_M_SHA") or "",
-    "host": {
-        "kernel": g("WK_M_KERNEL"), "kernel_arch": g("WK_M_KARCH"),
-        "governor": g("WK_M_GOV"), "throttled": g("WK_M_THROTTLED"),
-        "root_device": g("WK_M_ROOT"),
-    },
-}, open(sys.argv[1], "w"), indent=2)
-PYEOF
+    local software="" software_reason=""
+    if [ "$renderer" = pixman ]; then
+        software=1
+        software_reason="no display attached; weston rdp + pixman"
+    fi
+
+    # workspace is the checkout whose Tools/ matches the binary that produced
+    # these numbers -- read back from the board's .wk-slot marker -- which is
+    # what `wk bench compare` needs to run compare-results in.
+    python3 "$WK_ROOT/lib/wkdata.py" env-record "$dir/env.json" \
+        plan="$plan" workspace="${bws:-}" config=wpe-release browser=minibrowser-wpe \
+        count="${count:-}" class="$class" runner=browser \
+        arch="${karch:-native}" bench_host=image \
+        software_reason="$software_reason" \
+        session_mode="${session:-}" gpu_renderer="${renderer:-}" \
+        machine="$machine" system="$sysid" build_slot="$slot" webkit_sha="${sha:-}" \
+        host.kernel="$kernel" host.kernel_arch="$karch" host.governor="$gov" \
+        host.throttled="$throttled" host.root_device="$root_dev" \
+        --bool forced="${WK_FORCE:-}" --bool software="$software"
     PI_LAST_RUN=$(basename "$dir")
     log "  recorded    $PI_LAST_RUN"
 }
@@ -681,8 +571,8 @@ cmd_bench() {
     # wearing the same number. The evidence is the image's own marker.
     local sysid probe rootdev kind
     probe=$(m_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r')
-    sysid=$(  printf '%s\n' "$probe" | sed -n 's/^id=//p'      | head -1)
-    rootdev=$(printf '%s\n' "$probe" | sed -n 's/^rootdev=//p' | head -1)
+    sysid=$(kv_get id <<<"$probe")
+    rootdev=$(kv_get rootdev <<<"$probe")
     [ -n "$sysid" ] || die "$machine is not running a wk bench system (no /etc/wk-image).
     A benchmark runs in bench mode or it does not run:
         wk boot $machine --system <id>   then   wk boot $machine --keep"
@@ -803,7 +693,7 @@ cmd_bench() {
         #
         # This is the honest headless answer, and it is *not* the same as
         # forcing a mode with `video=`: that hangs vc4 in probe and takes the
-        # board off the network (docs/TESTING.md). Software compositing costs a
+        # board off the network. Software compositing costs a
         # comparable number, which is recorded rather than hidden.
         renderer=pixman; session=headless-rdp
         info "  no display attached: RDP virtual head + pixman (software) compositing"
@@ -882,56 +772,55 @@ pi_bench_once() {
     # and take the run with it. Log and result are named per slot so two halves
     # of an A/B cannot overwrite each other's evidence.
     local logf="/tmp/wk-bench-$plan-$slot.log" res="/tmp/wk-bench-$plan-$slot.json"
+    local rcf="/tmp/wk-bench-$plan-$slot.rc"
     local args="--plan $(sh_quote "$plan") --browser minibrowser-wpe --platform linux"
     args="$args --build-directory $(sh_quote "$bdir")"
     args="$args --output-file $(sh_quote "$res")"
     [ -n "$count" ] && args="$args --count $(sh_quote "$count")"
 
     info "running $plan on $machine from slot '$slot' (detached; log $logf)"
-    # The braces and the outer redirection are what make this detached, and
-    # without them it only looked it.
-    #
-    # `setsid ... >log 2>&1 &` redirects the *child*; the backgrounded compound
-    # still holds the ssh channel's own stdout and stderr, and sshd keeps the
-    # channel open until every inheritor of those closes them. Measured on the
-    # rpi4: a 25-second job returned after 26.4 seconds, not the 3 the `sleep 3`
-    # asks for. So the channel was held for the whole of a Speedometer round --
-    # precisely the thing the comment above says detaching avoids, and a
-    # dropped ssh really would have taken the run with it.
-    #
-    # Worse, it made the wait loop below decorative: m_ssh returned only once
-    # the run was over, so the first poll always succeeded, every run recorded
-    # "result after 0s" whatever it took, and --timeout and the early crash
-    # check were unreachable code. Redirecting the group's own stdio closes the
-    # last handle and the call returns in 3.5s.
-    m_ssh "cd /WebKit/WebKit && rm -f $(sh_quote "$logf") $(sh_quote "$res") &&
-        { setsid bash -c '$(pi_bench_env "$bdir") && exec Tools/Scripts/run-benchmark $args' \
-            </dev/null >$(sh_quote "$logf") 2>&1 & } </dev/null >/dev/null 2>&1
-        sleep 3; echo started" >/dev/null 2>&1 \
+    # The stale result from a previous run in this slot is not evidence of
+    # this one; detach_remote truncates the log itself, but the json output
+    # lives at a path of run-benchmark's own choosing and is this call's to
+    # clear.
+    m_ssh "rm -f $(sh_quote "$res")" >/dev/null 2>&1 || true
+    detach_remote m_ssh "$logf" "$rcf" -- \
+        bash -c "cd /WebKit/WebKit && $(pi_bench_env "$bdir") && exec Tools/Scripts/run-benchmark $args" \
         || die "could not start the benchmark on $machine"
 
-    # Wait on the result file, not on a process: run-benchmark writes it when
-    # it has a score, which is the only completion signal that means what it
-    # says. A vanished process could be a crash, and a quiet log could be a
-    # long subtest.
-    local waited=0 cap="${timeout_s:-3600}"
-    while [ "$waited" -lt "$cap" ]; do
-        if m_ssh "test -s $(sh_quote "$res")" 2>/dev/null; then
-            log "  result      after ${waited}s"
-            pi_bench_record "$machine" "$plan" "$sysid" "$kernel" "$gov" \
-                "$throttled" "$root_dev" "$renderer" "$session" "$count" \
-                "$logf" "$res" "$slot" "$(pi_slot_sha "$bdir")" "$(pi_slot_ws "$bdir")"
-            return 0
-        fi
-        # A crash is worth reporting early rather than at the timeout.
-        if m_ssh "grep -qiE 'Traceback|Crash!|cannot open display|assertion failed' $(sh_quote "$logf")" 2>/dev/null; then
+    # The abort pattern is the same early-crash regex this used to grep for by
+    # hand every 20s; detach_wait_remote now does that polling and returns
+    # `aborted` the moment it matches, rather than waiting out the timeout.
+    local start; start=$(date +%s)
+    local rc; rc=$(detach_wait_remote m_ssh "$logf" "$rcf" 20 0 "${timeout_s:-3600}" \
+        'Traceback|Crash!|cannot open display|assertion failed') || true
+    local waited=$(( $(date +%s) - start ))
+
+    case "$rc" in
+        aborted)
             warn "the run from slot '$slot' reported a failure; its log follows"
             m_ssh "tail -30 $(sh_quote "$logf")"
             return 1
-        fi
-        sleep 20; waited=$((waited + 20))
-    done
-    warn "no result from slot '$slot' after ${cap}s -- the run may still be going"
+            ;;
+        timeout|'')
+            warn "no result from slot '$slot' after ${timeout_s:-3600}s -- the run may still be going"
+            m_ssh "tail -20 $(sh_quote "$logf")"
+            return 1
+            ;;
+    esac
+
+    # Wait on the result file, not the process's exit code: run-benchmark
+    # writes it when it has a score, which is the only completion signal that
+    # means what it says. A process that exited without one is still a
+    # failure, just not the same failure as a timeout.
+    if m_ssh "test -s $(sh_quote "$res")" 2>/dev/null; then
+        log "  result      after ${waited}s"
+        pi_bench_record "$machine" "$plan" "$sysid" "$kernel" "$gov" \
+            "$throttled" "$root_dev" "$renderer" "$session" "$count" \
+            "$logf" "$res" "$slot" "$(pi_slot_sha "$bdir")" "$(pi_slot_ws "$bdir")"
+        return 0
+    fi
+    warn "no result from slot '$slot' after ${waited}s -- the run may still be going"
     m_ssh "tail -20 $(sh_quote "$logf")"
     return 1
 }
@@ -1137,7 +1026,7 @@ cmd_boot_order() {
     fi
 
     local order
-    order=$(printf '%s\n' "$current" | sed -n 's/^BOOT_ORDER=//p' | head -1)
+    order=$(kv_get BOOT_ORDER <<<"$current")
     [ -n "$order" ] || order=0xf41
 
     # The network-boot keys come out unconditionally: nothing here writes
@@ -1314,10 +1203,9 @@ else
     warn "  if it does not, fall back to a Pi-originated reverse tunnel (still no image change)"
 fi
 
-# The published checksum for this arch, from the same file as the version. It
-# was a pipe straight from the internet into `tar` on the board and nothing
-# checked what arrived -- on a device whose whole job is to run other people's
-# code and report numbers about it.
+# The published checksum for this arch, from the same file as the version,
+# checked before the tarball is unpacked on a device whose whole job is to run
+# other people's code and report numbers about it.
 TS_SHA256=$(ts_release_field "TS_SHA256_$TS_ARCH")
 [ -n "$TS_SHA256" ] || die "$TS_RELEASE declares no TS_SHA256_$TS_ARCH.
     Add the published checksum for that architecture:
@@ -1328,20 +1216,17 @@ rsh "set -e
     cd '$DEST'
     if [ ! -x '$DEST/tailscaled' ]; then
         url=https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz
-        (command -v curl >/dev/null && curl -fsSL \"\$url\" -o ts.tgz || wget -qO ts.tgz \"\$url\")
+        # wget and sha256sum, not curl or openssl: every image this repo builds
+        # is at least busybox, and busybox carries the first of each pair and
+        # never the second. One path, checked and refused rather than guessed.
+        command -v wget >/dev/null \
+            || { echo 'no wget on this board; refusing to fetch tailscale unverified' >&2; exit 1; }
+        wget -qO ts.tgz \"\$url\"
         # Verified before it is unpacked, not after: an archive that is not the
-        # one this fleet pinned must never be written to the disk at all. A
-        # board with no sha256 tool refuses rather than proceeding unchecked --
-        # 'no checksum here' is not a reason to trust the bytes.
-        if command -v sha256sum >/dev/null; then
-            echo '$TS_SHA256  ts.tgz' | sha256sum -c - >/dev/null
-        elif command -v openssl >/dev/null; then
-            got=\$(openssl dgst -sha256 -r ts.tgz | cut -d' ' -f1)
-            [ \"\$got\" = '$TS_SHA256' ] || { echo \"tailscale tarball sha256 \$got, expected $TS_SHA256\" >&2; exit 1; }
-        else
-            echo 'no sha256sum or openssl on this board; refusing to unpack an unverified tarball' >&2
-            exit 1
-        fi
+        # one this fleet pinned must never be written to the disk at all.
+        command -v sha256sum >/dev/null \
+            || { echo 'no sha256sum on this board; refusing to unpack an unverified tarball' >&2; exit 1; }
+        echo '$TS_SHA256  ts.tgz' | sha256sum -c - >/dev/null
         tar xzf ts.tgz --strip-components=1 \
                   'tailscale_${TS_VERSION}_${TS_ARCH}/tailscale' \
                   'tailscale_${TS_VERSION}_${TS_ARCH}/tailscaled'

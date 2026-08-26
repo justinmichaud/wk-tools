@@ -56,6 +56,11 @@ yet listed.
    pass across the directory, not one file.
 4. Confirm the round trip as on Linux.
 
+## Owed — unverified
+
+- [ ] confirm `wk backup` killed mid-write leaves repo files whole or
+      unchanged (cmp-guarded), never truncated
+
 ## Three things that make this bigger than it was
 
 - **The macOS bench install is a second machine's worth of settings**, and what

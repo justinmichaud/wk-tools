@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# wk push on|off|status -- whether a workspace can push to git at all.
+# wk push on|off|status -- whether a workspace can push to git at all
+# wk: where=host name=none group=sources
+# wk: readonly status
 #
 # The rule this implements, from docs/HANDOFF-sandboxing.md: only the person at
 # the keyboard pushes. An agent in a workspace must not be able to publish
@@ -23,7 +25,7 @@
 # That is the whole design. There is no state file to disagree with reality,
 # nothing to restore after a crash, and `status` is a directory listing rather
 # than a claim -- the same rule the rest of the workspace state follows
-# (docs/HANDOFF-workspace-state.md).
+# (README.md).
 #
 # `wk claude` turns it off before handing over control, which is the case the
 # switch exists for; see the note there about when it turns it back on.
@@ -59,7 +61,7 @@ while [ $# -gt 0 ]; do
         on|off|status) ACTION="$1"; shift ;;
         --target) TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
         --all) TARGET=--all; shift ;;
-        *) log "usage: wk push [on|off|status] [--target <name>|--all]"; exit 2 ;;
+        *) die "usage: wk push on|off|status; see wk push -h" ;;
     esac
 done
 
@@ -81,13 +83,8 @@ if [ -n "$TARGET" ]; then
         return "$rc"
     }
     if [ "$TARGET" = --all ]; then
-        worst=0
-        for t in $(target_all); do
-            case "$t" in container|vm|local) continue ;; esac
-            rc=0; _one "$t" || rc=$?
-            [ "$rc" -gt "$worst" ] && worst=$rc
-        done
-        exit "$worst"
+        rc=0; for_each_machine _one || rc=$?
+        exit "$rc"
     fi
     _one "$TARGET"
     exit $?
@@ -111,13 +108,10 @@ where() {
     echo absent
 }
 
-# Copies of a key inside a workspace's own home, which a workspace has whenever
-# firstrun `install`ed the key rather than linking it. A copy is a key this
-# switch cannot reach. They are removed rather than reported, because the
-# original is in the store and a copy has nothing in it to lose.
-#
-# A symlink is the current arrangement and is left alone -- it is the thing
-# that makes the switch work.
+# Copies of a key inside a workspace's own home (from firstrun `install`ing
+# it rather than linking it) are keys this switch cannot reach, so they are
+# removed rather than reported -- the original is in the store and a copy
+# has nothing to lose. A symlink is the current arrangement and is left alone.
 copies() {
     local d f r
     [ -d "$WK_STORE/ws" ] || return 0
@@ -146,14 +140,10 @@ EOF
     [ "$n" -eq 0 ] || info "removed $n key copy/copies left in workspace homes"
 }
 
-# Every private key in the directory, not only the ones wk_push_forks names.
-#
-# The switch's promise is "no push credential is reachable from a workspace",
-# and a key it does not know about is exactly as usable as one it does -- a
-# `build_key` left over from before there was one key per fork sat in there for
-# months, and an agent could have pushed with it by naming it directly. The
-# public halves stay: they are not credentials, and `wk key check`/`show` need
-# them while push is off.
+# Every private key in the directory, not only the ones wk_push_forks names:
+# the switch's promise is "no push credential is reachable", and an old or
+# hand-added key here is exactly as usable as one it knows about. Public
+# halves stay -- not credentials, and `wk key check`/`show` need them while off.
 private_keys_in() {
     local d="$1" f
     [ -d "$d" ] || return 0
@@ -172,12 +162,10 @@ move_keys() {
         b=$(basename "$f")
         mv "$f" "$to/$b"
         chmod 0600 "$to/$b"
-        # The public half goes with it. It is not a credential and every
-        # reader here falls back to the held directory for it -- but ssh will
-        # offer a public key it can find beside the IdentityFile path even
-        # when it cannot sign with it, so leaving it behind makes an ssh -v
-        # transcript in the off position read exactly like the on position
-        # until the signature fails. One place, one answer.
+        # The public half goes with it: not a credential, but ssh will offer
+        # a public key it finds beside IdentityFile even without the private
+        # half, so leaving it behind makes an off transcript look like an on
+        # one until the signature fails. One place, one answer.
         [ -f "$from/$b.pub" ] && mv "$from/$b.pub" "$to/$b.pub"
         moved=$((moved + 1))
     done <<EOF
@@ -199,13 +187,11 @@ on)
     fi
     log "  every workspace can push to the forks now, including any agent in one."
     log "  'wk push off' when you are done; 'wk claude' turns it off by itself."
-    # The switch is one of two things a push needs, and this one cannot see the
-    # other: whether GitHub has this machine's key. Every machine has its own
-    # (GitHub refuses one deploy key on two repositories but takes many on one),
-    # so a machine set up later has a key nobody registered: the switch is ON,
-    # the wiring is right, the alias resolves, and the push is still "Permission
-    # denied (publickey)". Only the host can ask GitHub, so this names the command
-    # rather than pretending to know.
+    # The switch is one of two things a push needs; the other, whether GitHub
+    # has this machine's key, it can't see. A machine set up later can have
+    # the switch ON, wiring right, alias resolving, and still get "Permission
+    # denied (publickey)" -- only the host can ask GitHub, so this names the
+    # command rather than pretending to know.
     log "  a push also needs this machine's key registered:  wk key check"
     ;;
 
@@ -261,7 +247,6 @@ status)
     ;;
 
 *)
-    log "usage: wk push on|off|status"
-    exit 2
+    die "usage: wk push on|off|status; see wk push -h"
     ;;
 esac

@@ -622,7 +622,7 @@ def build_status(args):
 # `mutates` decides one thing: whether this verb takes the machine, so that a
 # second request naming it is refused while the first is in flight. A status
 # read changes nothing and must never be blocked by a run it is asking about --
-# rule 6 in docs/HANDOFF-workspace-state.md, read-only is read-only absolutely.
+# rule 6 in README.md, read-only is read-only absolutely.
 #
 # Every verb leaves a request record, mutating or not, because the record *is*
 # the log the caller streams from and reads back afterwards.

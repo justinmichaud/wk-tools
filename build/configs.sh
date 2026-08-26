@@ -1,8 +1,4 @@
-# Named build configurations.
-#
-# One place, replacing the init-debug / init-release / init-ios-release scripts
-# and the five different WebKit root conventions they carried between them.
-# A config sets:
+# Named build configurations. One place; a config sets:
 #
 #   CFG_PORT      the WebKit port  (jsc-only, gtk, wpe, or empty for Apple)
 #   CFG_TYPE      Debug | Release
@@ -15,28 +11,25 @@
 # completely different channels. CMake ports get it via --makeargs=-jN, while
 # the Apple ports run xcodebuild, which ignores --makeargs entirely and wants
 # `-jobs N` passed through to it. Getting this wrong does not fail -- it
-# silently builds at xcodebuild's own default parallelism, which is sized from
-# core count and is exactly the thing this whole system exists to avoid.
+# silently builds at xcodebuild's own default parallelism, sized from core
+# count, exactly what this whole system exists to avoid.
 #
-# WebKit is built with clang, not the distro default.
-#
-# This is not a preference. GCC fails outright on aarch64 in
-# JSObject::crashDueToEmptyValueAtValidOffset, which uses register variables
-# inside an #if CPU(ARM64) block:
+# WebKit is built with clang, not the distro default. Not a preference: GCC
+# fails outright on aarch64 in JSObject::crashDueToEmptyValueAtValidOffset,
+# which uses register variables inside an #if CPU(ARM64) block:
 #
 #   error: optimization may eliminate reads and/or writes to register
 #          variables [-Werror=volatile-register-var]
 #
 # The wkdev image defaults c++ to GCC 15, so leaving the compiler unset means
 # every aarch64 JSC build dies partway through Source/JavaScriptCore/runtime.
+# Linux-specific: on macOS the Xcode toolchain is the only option, and forcing
+# CC/CXX there would override the SDK's own choice for no benefit, so the
+# Apple configs leave both unset.
 #
-# This is Linux-specific. On macOS the Xcode toolchain is the only option, and
-# forcing CC/CXX there would override the SDK's own choice for no benefit, so
-# the Apple configs leave both unset.
-#
-# Job count and nice level are NOT set here -- they are derived per machine at
-# build time by lib/resources.sh, because a number that is right on a 10-core
-# laptop will hang a Raspberry Pi and waste a build server.
+# Job count and nice level are NOT set here -- derived per machine at build
+# time by lib/resources.sh, since a number right on a 10-core laptop will
+# hang a Raspberry Pi and waste a build server.
 
 config_list() {
     cat <<'EOF'
@@ -73,31 +66,29 @@ command -v arch_canon >/dev/null 2>&1 || . "$WK_ROOT/lib/arch.sh"
 #
 # Each port gets its own directory -- WebKitBuild/JSCOnly/Release,
 # WebKitBuild/WPE/Release, WebKitBuild/GTK/Release -- so a workspace can hold a
-# JSC build and a browser build at once without one clobbering the other. This
-# is derived rather than assumed because getting it wrong is quiet: `wk run`
-# reports "no such file", and `wk bench` reports "no MiniBrowser", both of which
-# read as "the build failed" rather than "you looked in the wrong place".
-# The Apple ports add a fourth layout: no port directory, and an SDK suffix for
-# anything embedded (webkitdirs.pm appends it for isEmbeddedWebKit()), so a bare
-# Release/ is only ever right for the Mac itself. The authority for the CMake
-# side is usesPerConfigurationBuildDirectory() in the same file.
+# JSC build and a browser build at once without one clobbering the other.
+# Derived rather than assumed because getting it wrong is quiet: `wk run`
+# reports "no such file" and `wk bench` reports "no MiniBrowser", both reading
+# as "the build failed" rather than "you looked in the wrong place". The
+# Apple ports add a fourth layout: no port directory, and an SDK suffix for
+# anything embedded (webkitdirs.pm appends it for isEmbeddedWebKit()), so a
+# bare Release/ is only ever right for the Mac itself. The authority for the
+# CMake side is usesPerConfigurationBuildDirectory() in the same file.
 #
-# The `-asan` suffix on the Apple side is ours, not Xcode's. Xcode has no
-# directory for a sanitizer: --asan only adds ENABLE_ADDRESS_SANITIZER=YES to
-# the xcodebuild command line, and webkitdirs.pm:3132-3133 says so outright --
-# "Xcode toggles ASan within Debug/Release, so its path is unchanged". So
-# mac-release and mac-release-asan resolved to the *same* Release/ directory,
-# and building one after the other left a tree that was half instrumented and
-# half not. That is not a build failure; it is a crash a week later in
-# something that was linked against both halves.
+# The `-asan` suffix on the Apple side is ours, not Xcode's: Xcode has no
+# directory for a sanitizer, and webkitdirs.pm:3132-3133 says so outright --
+# "Xcode toggles ASan within Debug/Release, so its path is unchanged". Without
+# it, mac-release and mac-release-asan resolved to the *same* Release/
+# directory, leaving a tree half instrumented and half not after building one
+# after the other -- not a build failure, a crash a week later in something
+# linked against both halves.
 #
 # The suffix only becomes true because config_build_env() exports
-# WEBKIT_OUTPUTDIR to exactly this path -- a name here that the build does not
-# honour would be the same quiet lie in the other direction. It is derived from
-# CFG_ARGS rather than from a separate flag because the --asan in CFG_ARGS *is*
-# what changes the products; a second field could drift out of step with it.
-# CMake is left alone: those ports encode the sanitizer in CMAKE_BUILD_TYPE and
-# their directory names are upstream's, not ours, to choose.
+# WEBKIT_OUTPUTDIR to exactly this path. Derived from CFG_ARGS rather than a
+# separate flag because the --asan in CFG_ARGS *is* what changes the
+# products; a second field could drift out of step with it. CMake is left
+# alone: those ports encode the sanitizer in CMAKE_BUILD_TYPE and their
+# directory names are upstream's, not ours, to choose.
 # What a config contributes to --cmakeargs, for an error message that has to
 # name what would have been lost.
 config_cmake_summary() {
@@ -121,52 +112,50 @@ config_build_dir() {
     esac
 }
 
-# What "release, with debug info" means on the CMake ports, in one place because
-# every release config needs the same three flags and two of them are not
+# What "release, with debug info" means on the CMake ports, in one place
+# because every release config needs the same three flags and two are not
 # obvious.
 #
 # The build type is RelWithDebInfo for what WebKit hangs off that *name*, not
 # for CMake's idea of it:
 #
-#   DEBUG_FISSION            -gsplit-dwarf: the debug info lands in .dwo files
+#   DEBUG_FISSION            -gsplit-dwarf: debug info lands in .dwo files
 #                            beside the objects instead of going through the
-#                            linker, which is what makes "release with -g"
-#                            affordable on this codebase.
+#                            linker, making "release with -g" affordable here.
 #   GCC_OFFLINEASM_SOURCE_MAP  line information for the offlineasm-generated
 #                            LLInt, same file (:200). A JSC stack that passes
 #                            through the interpreter is otherwise raw addresses.
 #
-# The optimization flags are pinned, and that is the load-bearing half. CMake's
-# own RelWithDebInfo is `-O2 -g -DNDEBUG` where Release is `-O3 -DNDEBUG` --
-# read out of a configured cache, not assumed -- so adopting the build type
-# alone would drop every release build by an optimization level. This repo
-# exists to produce benchmark numbers; a silent -O3 -> -O2 is the worst
-# available way to change them. Release goes on meaning -O3, and gains -g.
+# The optimization flags are pinned, the load-bearing half: CMake's own
+# RelWithDebInfo is `-O2 -g -DNDEBUG` where Release is `-O3 -DNDEBUG` -- read
+# out of a configured cache, not assumed -- so adopting the build type alone
+# would drop every release build by an optimization level. This repo exists
+# to produce benchmark numbers; a silent -O3 -> -O2 is the worst way to
+# change them. Release goes on meaning -O3, and gains -g.
 #
-# The two -asan configs already said RelWithDebInfo and so were already building
-# at -O2 by accident. They use this too, which moves them to -O3: an accidental
-# value replaced by a stated one, and a sanitizer build that now optimizes like
-# the release build whose crash it is reproducing.
+# The two -asan configs already said RelWithDebInfo and so were building at
+# -O2 by accident; this moves them to -O3, a sanitizer build that now
+# optimizes like the release build whose crash it is reproducing.
 #
 # The quotes survive: build-webkit runs `system("cmake @args")`, joined and
-# parsed by a shell (webkitdirs.pm:2966), so a -D value with spaces in it
-# reaches CMake as one argument.
+# parsed by a shell (webkitdirs.pm:2966), so a -D value with spaces reaches
+# CMake as one argument.
 _CFG_RELWITHDEBINFO='-DCMAKE_BUILD_TYPE=RelWithDebInfo'
 _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DCMAKE_C_FLAGS_RELWITHDEBINFO=\"-O3 -g -DNDEBUG\""
 _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DCMAKE_CXX_FLAGS_RELWITHDEBINFO=\"-O3 -g -DNDEBUG\""
 
-# DEBUG_FISSION is stated rather than left to its default, because its default
-# cannot fire on these ports. OptionsCommon.cmake:175 gates
-# ENABLE_DEBUG_FISSION_DEFAULT on ENABLE_DEVELOPER_MODE -- but
-# WebKitCommon.cmake:338 includes OptionsCommon *before* Options${PORT}, and
-# ENABLE_DEVELOPER_MODE is what Options${PORT} sets (OptionsWPE.cmake:46,
-# OptionsGTK.cmake:77). So at the moment the test runs the variable is not yet
-# defined, the default is computed as OFF, and no WPE or GTK build has ever
-# turned fission on by itself. Measured: DEBUG_FISSION:BOOL=OFF and zero .dwo
-# files in a RelWithDebInfo tree that had asked for nothing else.
+# DEBUG_FISSION is stated rather than left to its default, because its
+# default cannot fire on these ports: OptionsCommon.cmake:175 gates
+# ENABLE_DEBUG_FISSION_DEFAULT on ENABLE_DEVELOPER_MODE, but
+# WebKitCommon.cmake:338 includes OptionsCommon *before* Options${PORT}, which
+# is what sets ENABLE_DEVELOPER_MODE (OptionsWPE.cmake:46, OptionsGTK.cmake:77)
+# -- so the variable is undefined when the test runs, the default computes OFF,
+# and no WPE or GTK build has ever turned fission on by itself. Measured:
+# DEBUG_FISSION:BOOL=OFF and zero .dwo files in a tree that asked for nothing
+# else.
 #
-# `option()` honours a value already in the cache, so naming it here is enough
-# and nothing upstream has to change.
+# `option()` honours a value already in the cache, so naming it here is
+# enough and nothing upstream has to change.
 _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DDEBUG_FISSION=ON"
 
 config_load() {
@@ -242,20 +231,20 @@ config_load() {
     esac
 
     # How much memory a job of *this* build system is worth, decided here so
-    # that everything downstream agrees: the job count (build_jobs, which reads
-    # WK_MB_PER_JOB), the memory budget the watchdog enforces (jobs x this),
-    # and the value carried into the target. Setting it only in the environment
-    # handed to the far side left the job count derived from the CMake figure,
-    # which is how a mac-release came to be built with -j9 and killed at
-    # 16.6 GB. An explicit WK_MB_PER_JOB from the caller still wins.
+    # everything downstream agrees: the job count (build_jobs, reads
+    # WK_MB_PER_JOB), the watchdog's budget (jobs x this), and the value
+    # carried into the target. Setting it only in the far side's environment
+    # left the job count derived from the CMake figure, which is how a
+    # mac-release came to be built with -j9 and killed at 16.6 GB. An explicit
+    # WK_MB_PER_JOB from the caller still wins.
     [ -n "${WK_MB_PER_JOB_EXPLICIT:-}" ] || WK_MB_PER_JOB=$(config_mb_per_job)
     return 0
 }
 
 # The environment a build runs with, assembled into the CFG_ENV array. Both
-# `wk build` and the golden-base prebuild go through this, because two call
-# sites spelling the same environment by hand is how they end up building
-# different things.
+# `wk build` and the golden-base prebuild go through this: two call sites
+# spelling the same environment by hand is how they end up building different
+# things.
 #
 # An array, not a string: WK_BUILD_ARGS holds several words as ONE value, and
 # any string form of this gets word-split into `WK_BUILD_ARGS=` plus a stray
@@ -264,33 +253,28 @@ config_load() {
 # config_load must have run first. Sets CFG_ENV.
 #
 # The architecture is the workspace's, from t_arch, and is passed in rather
-# than read here: this function is also what the golden-base prebuild uses, and
-# a build environment that went looking for the current workspace would be
-# assembling one thing while describing another.
-# How much memory one compile job is worth, which is a property of the build
-# system and not of the machine.
+# than read here: this function is also what the golden-base prebuild uses,
+# and a build environment that went looking for the current workspace would
+# assemble one thing while describing another.
+# How much memory one compile job is worth, a property of the build system,
+# not of the machine.
 #
-# 1536 MB is right for the CMake ports and was measured there (lib/resources.sh
-# explains it): typical WebKit translation units peak near 1-1.5 GB. The Apple
-# build is a different shape -- unified sources, a content-addressed compilation
-# cache, and Xcode scheduling work inside each job -- and the same number is an
-# underestimate that shows up as the memory watchdog killing a healthy build.
+# 1536 MB is right for the CMake ports, measured there (lib/resources.sh
+# explains it): typical WebKit TUs peak near 1-1.5 GB. The Apple build is a
+# different shape -- unified sources, a content-addressed compilation cache,
+# Xcode scheduling work inside each job -- and the same number underestimates,
+# showing up as the memory watchdog killing a healthy build.
 #
-# In the golden base: `-j9` derived from 13824 MB at
-# 1536 MB/job peaked at **16593 MB** and was killed at 95% of the way through a
-# mac-release. At 3072 the same guest derived `-j6` and an 18432 MB budget, and
-# the build finished at a peak of **16783 MB**.
+# In the golden base: `-j9` derived from 13824 MB at 1536 MB/job peaked at
+# **16593 MB** and was killed 95% of the way through a mac-release. At 3072
+# the same guest derived `-j6` and an 18432 MB budget, finishing at a peak of
+# **16783 MB**.
 #
-# Read those two together, because they say something the fix alone does not:
-# the peak barely moved with a third fewer jobs, so it is dominated by one step
-# -- the big link -- rather than by parallelism. What was actually wrong was
-# the *budget*; the job count mostly buys wall-clock. An Apple build of WebKit
-# on this machine wants about 17 GB whatever it is told to do, and a budget
-# derived from the CMake figure is below that for any plausible job count.
-#
-# `claude/CLAUDE.md` already told agents to pass `WK_MB_PER_JOB=3072` by hand
-# for exactly this; a default that needs a manual override on one of the two
-# build systems is a wrong default.
+# The peak barely moved with a third fewer jobs, so it is dominated by one
+# step -- the big link -- rather than by parallelism. The *budget* was wrong;
+# job count mostly buys wall-clock. An Apple build here wants about 17 GB
+# whatever it is told to do, below what the CMake figure derives for any
+# plausible job count.
 config_mb_per_job() {
     case "$CFG_BUILDSYS" in
         xcode) echo 3072 ;;
@@ -302,37 +286,34 @@ config_build_env() {
     local src="$1" jobs="$2" nice="$3" arch="${4:-native}"
 
     # --- Apple ports: pin where the output and the caches go -----------------
-    # Set explicitly, because the defaults are worse than they look: Xcode's
-    # own default puts the content-addressed compilation cache
-    # and the module cache in ~/Library/Developer/Xcode/DerivedData -- one
-    # machine-wide directory per *user*, not per checkout, per config or per
-    # workspace. Measured in a guest after one mac-release: 9.6 GB of
-    # CompilationCache.noindex and 1.6 GB of ModuleCache.noindex there, while
-    # the products sat in the checkout's WebKitBuild. On the macOS remote
-    # target that single directory would be shared by every workspace and every
-    # other person on the box.
+    # Set explicitly: Xcode's own default puts the compilation cache and the
+    # module cache in ~/Library/Developer/Xcode/DerivedData -- one machine-wide
+    # directory per *user*, not per checkout, config or workspace. Measured in
+    # a guest after one mac-release: 9.6 GB of CompilationCache.noindex and
+    # 1.6 GB of ModuleCache.noindex there. On the macOS remote target that
+    # directory would be shared by every workspace and every other person on
+    # the box.
     #
-    # Both paths are derived from $src, which is the target's own checkout
-    # path, so they are per workspace by construction and they stay on the
-    # guest's APFS volume rather than on a virtiofs --dir share, where a CAS
-    # would cost more than it saves. Deriving them from a fixed path also keeps
-    # them stable across `wk vm base --refresh`: provisioning does a `git reset
-    # --hard`, which does not touch untracked WebKitBuild, so a refreshed base
-    # still has its warm cache.
+    # Both paths are derived from $src, the target's own checkout path, so
+    # they are per workspace by construction and stay on the guest's APFS
+    # volume rather than a virtiofs --dir share, where a CAS would cost more
+    # than it saves. Deriving them from a fixed path also keeps them stable
+    # across `wk vm base --refresh`: provisioning's `git reset --hard` does
+    # not touch untracked WebKitBuild, so a refreshed base keeps its warm
+    # cache.
     #
     # WEBKIT_OUTPUTDIR is honoured at webkitdirs.pm:399 and becomes
-    # SYMROOT/OBJROOT at :460, which is what finally gives mac-release-asan a
-    # tree of its own, gives each config its own XCBuildData/build.db
-    # (webkitdirs.pm:3149: "build.db is shared across Xcode configurations"),
-    # and -- as a side effect worth knowing about -- makes webkitdirs skip the
-    # whole IDEBuildLocationStyle block at :401-441, so a stray Xcode user
+    # SYMROOT/OBJROOT at :460, giving mac-release-asan a tree of its own and
+    # each config its own XCBuildData/build.db (:3149: "build.db is shared
+    # across Xcode configurations") -- and, as a side effect, makes webkitdirs
+    # skip the IDEBuildLocationStyle block at :401-441, so a stray Xcode user
     # default can no longer silently relocate the output from under us.
     #
     # One DerivedData for all configs, deliberately: the CAS is
     # content-addressed and the module cache is keyed by build settings, so
-    # sharing them across configs is the point of having them. Only the things
-    # that are *not* content-addressed -- products, intermediates, build.db,
-    # precompiled headers -- have to be separated per config.
+    # sharing them is the point of having them. Only what is *not*
+    # content-addressed -- products, intermediates, build.db, precompiled
+    # headers -- is separated per config.
     local out=""
     if [ "$CFG_BUILDSYS" = xcode ]; then
         out=$(config_build_dir "$src")
@@ -359,15 +340,36 @@ config_build_env() {
     # /ccache is the container's bind-mounted store cache and the default for
     # everything that has one; a target on another machine sets WK_CCACHE_DIR
     # to a directory that exists over there. See t_ccache_dir.
+    #
+    # The sloppiness/basedir/nohashdir settings used to live only in
+    # targets/container.sh's podman --env flags, so a remote or vm target's
+    # ccache got none of them: nothing there desensitises __DATE__/__TIME__/
+    # __TIMESTAMP__ (CCACHE_SLOPPINESS's time_macros -- the JSCOnly build hits
+    # this in the __TIMESTAMP__ fallback of JSCBytecodeCacheVersion.cpp) or
+    # the mtime/ctime of a regenerated header (the glib ports' BuildRevision.h,
+    # rewritten by Tools/glib/apply-build-revision-to-files.py -- which already
+    # only touches the file when its content actually changed, so this is
+    # belt-and-braces for it rather than the whole fix). Set here, once, so
+    # every target kind gets the same tuning for the one process that matters
+    # -- the build itself -- via `env`, which wins over whatever a container's
+    # own baked-in flags already said.
     CFG_ENV=(
         "CCACHE_DIR=${WK_CCACHE_DIR:-/ccache}"
+        "CCACHE_BASEDIR=$src"
+        "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime"
+        "CCACHE_NOHASHDIR=true"
         "NUMBER_OF_PROCESSORS=$jobs"
         "CMAKE_BUILD_PARALLEL_LEVEL=$jobs"
         "WK_JOBS=$jobs"
         "WK_NICE=$nice"
         "WK_SRC=$src"
         "WK_BUILDSYS=$CFG_BUILDSYS"
-        "WK_BUILD_ARGS=$CFG_PORT $CFG_ARGS"
+        # WK_TARGET_BUILD_ARGS is this target's own conf default (WK_BUILD_ARGS
+        # in targets/hosts/<name>.conf, cmd/build), folded in last so it adds to
+        # the config's own port/type flags rather than the other way round. A
+        # name of its own -- not WK_BUILD_ARGS -- because that name is already
+        # taken by the very variable being assembled here.
+        "WK_BUILD_ARGS=$CFG_PORT $CFG_ARGS${WK_TARGET_BUILD_ARGS:+ $WK_TARGET_BUILD_ARGS}"
         "WK_BUILD_CMAKE=$cmakeargs"
         # Where this config's tree is, so the far side can tell whether the one
         # already there was configured with these flags. Derived here rather
@@ -406,19 +408,16 @@ config_build_env() {
     fi
     # compile_commands.json is on by default; this only carries the opt-out
     # through to the build half, which runs in the target and cannot see the
-    # caller's environment.
-    # The memory watchdog's knobs, carried into the target only when set: the
-    # build half runs over there and cannot see this caller's environment, and
-    # an empty value is not the same as an unset one for a script that has its
-    # own defaults.
+    # caller's environment. Same reason the memory watchdog's knobs below are
+    # carried through only when set -- an empty value is not the same as an
+    # unset one for a script that has its own defaults.
     [ -n "${WK_MEM_BUDGET_MB:-}" ] && CFG_ENV+=("WK_MEM_BUDGET_MB=$WK_MEM_BUDGET_MB")
     [ -n "${WK_MEM_FLOOR_MB:-}" ]  && CFG_ENV+=("WK_MEM_FLOOR_MB=$WK_MEM_FLOOR_MB")
     [ -n "${WK_MEM_INTERVAL:-}" ]  && CFG_ENV+=("WK_MEM_INTERVAL=$WK_MEM_INTERVAL")
 
     [ -n "${WK_NO_COMPILE_COMMANDS:-}" ] && CFG_ENV+=("WK_NO_COMPILE_COMMANDS=1")
-    # Same shape, for the CAS: build-in-target.sh explains what it buys and what
-    # it costs. Carried through here because the build half runs in the target
-    # and cannot see the caller's environment.
+    # Same shape, for the CAS: build-in-target.sh explains what it buys and
+    # costs.
     [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && CFG_ENV+=("WK_NO_COMPILATION_CACHE=1")
 
     # Last, and that is the whole mechanism: `wk build … --env CC=gcc-14`.
@@ -579,15 +578,14 @@ config_test_runner_name() {
 # Apple ports (WebProcessCocoa.mm:655), 30 s on the GLib ones
 # (WebProcessMainWPE.cpp:74, WebProcessMainGtk.cpp:75).
 #
-# Belt and braces. `--waitfor` on its own was measured attaching during dyld
-# start-up, well before main; the pause is what keeps that from being a race a
+# Belt and braces: `--waitfor` on its own was measured attaching during dyld
+# start-up, well before main, so the pause keeps that from being a race a
 # faster machine could win.
 #
-# One variable, spelled twice. The Apple ports need the __XPC_ doubling because
-# the web process is an XPC service launchd starts, and launchd is what turns
+# One variable, spelled twice. The Apple ports need the __XPC_ doubling
+# because the web process is an XPC service launchd starts, which turns
 # __XPC_FOO into FOO for it; the GLib ports fork their children from the UI
-# process, so the plain name is simply inherited and the doubled one would be
-# read by nobody.
+# process, so the plain name is simply inherited.
 #
 # Both readers sit inside `#if ENABLE(DEVELOPER_MODE)`. Every CMake config in
 # this file passes -DDEVELOPER_MODE=ON, so this holds for all of them -- but a

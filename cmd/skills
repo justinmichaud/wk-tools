@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
 #
-# wk skills -- manage the shared, mutable skills directory.
+# wk skills status|diff|pull|push -- manage the shared, mutable skills directory
+# wk: where=host name=none group=sources needs rsync
 #
-# Every workspace mounts the same writable /skills, so an agent that improves a
-# skill improves it for all of them and the change outlives the workspace. The
-# risk with that is silent drift: edits accumulate in the VM and never reach
-# the repo, so they are neither reviewed nor backed up.
-#
-# This command closes that loop.
+# Every workspace mounts the same writable /skills, so an edit benefits every
+# workspace but risks silent drift: it may never reach the repo for review.
 #
 #   wk skills status   what differs between the shared copy and the repo
 #   wk skills diff     the actual diff
 #   wk skills pull     shared -> repo, so `git diff` shows it and you can commit
 #   wk skills push     repo -> shared, discarding workspace edits
 #
-# Direction matters: pull is the common case, because the shared copy is where
-# work happens. push is destructive and asks first.
+# pull is the common direction; push is destructive and asks first.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,8 +21,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SHARED="$WK_STORE/skills"
 REPO="$WK_ROOT/claude/skills"
 
-# On macOS the shared copy lives in the VM, so operate over the machine's ssh.
-# On Linux (and inside the VM) both paths are local.
+# The shared copy lives in the VM on macOS; this must run from there.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     die "run this inside the VM: wk skills $* (the shared copy lives there)"
 fi
@@ -90,6 +85,6 @@ push)
     ;;
 
 *)
-    die "usage: wk skills status|diff|pull|push"
+    die "usage: wk skills status|diff|pull|push; see wk skills -h"
     ;;
 esac

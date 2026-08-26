@@ -1,57 +1,40 @@
 # Boot driver: this Mac, into a benchmark macOS install on another volume.
 #
-# The odd one out in the fleet, in three ways that all follow from one fact:
-# **Apple Silicon cannot be handed an image over the wire, and cannot be told
-# from software which volume to boot.** Boot volume selection goes through a
-# LocalPolicy held in the machine's own secure storage, changed only by an
-# authenticated user action -- System Settings' Startup Disk, or the startup
-# manager you reach by holding the power button. `bless --setBoot` is
-# superseded for this purpose (its `folder` option survives on Apple Silicon
-# only for external media). docs/HANDOFF-boot.md records it as tier 2; nothing
-# here tries to work around it, because an automation that cannot exist is worse
-# than a documented ritual.
+# Apple Silicon cannot be handed an image over the wire or told from software
+# which volume to boot: boot volume selection goes through a LocalPolicy in
+# the machine's own secure storage, changed only by an authenticated user
+# action (Startup Disk, or the startup manager reached by holding the power
+# button). `bless --setBoot` no longer works for this (its `folder` option
+# survives only for external media). docs/HANDOFF-boot.md records this as
+# tier 2.
 #
-# True with SIP *disabled* and root as well, which is the obvious reason to
-# expect a different answer: `nvram boot-volume=<other group>` exits 0
-# and changes nothing, `bless --setBoot` refuses by documentation, and
-# `systemsetup -getstartupdisk` answers "(null)". SIP is not the gate. What the
-# test did buy is that the firmware's *own* choice is readable, which is what
-# mac_firmware_default() below reports and what decides which side of a
-# benchmark cycle costs a person anything.
+# Consequences, compared with the Pi drivers:
 #
-# So, compared with the Pi drivers:
+#   * no image *file* -- what boots is an installed, personalised macOS
+#     volume. `wk sysimage write` must never be pointed at this machine, and
+#     the install is maintained per Mac even when contents are identical.
+#   * arming is a person: this driver checks what it can, records the
+#     intent, and prints the ritual; the reboot is a human act.
+#   * the machine drives itself, since this is the only Apple Silicon machine
+#     here (MACH_LOCAL in boot/machines.sh) -- the shell that arms the
+#     transition is about to be rebooted out from under itself.
 #
-#   * there is no image *file*. What boots is an installed, personalised macOS
-#     volume -- `wk sysimage write` cannot produce one and must never be pointed
-#     at this machine. An install per Mac, maintained per Mac, even when the
-#     contents are identical.
-#   * arming is a person. This driver checks what it can, records the intent,
-#     and prints the ritual; the reboot into the other role is a human act.
-#   * the machine drives itself. There is one Apple Silicon machine here, so
-#     the transition is arranged from inside the role being left (MACH_LOCAL
-#     in boot/machines.sh), and the shell that arms it is a shell that is about
-#     to be rebooted out from under itself.
+# The rest is not manual: the build happens in a macOS guest, the payload is
+# staged onto the benchmark volume from here while it is merely mounted, the
+# record says which build is over there, and results come back with
+# `bench_host=image` on them. What a person does is choose a disk twice.
 #
-# Why bother at all, when the run needs someone in the room: because the *rest*
-# of it is exactly the same problem the Pi has, and none of it is manual. The
-# build happens in a macOS guest, the payload is staged onto the benchmark
-# volume from here while it is merely mounted, the record says which build is
-# over there, and the numbers come back with `bench_host=image` on them. What a
-# person does is choose a disk twice.
-#
-# TODO: UNVERIFIED against hardware. With no benchmark volume on this machine,
-# everything below is exercised only in the states that exist without one --
-# probe, status, evidence, and the refusals. What
-# needs a volume is marked where it appears.
+# TODO: unverified against hardware -- with no benchmark volume on this
+# machine, only the states that exist without one (probe, status, evidence,
+# refusals) are exercised. What needs a volume is marked where it appears.
 
-# Another arming model, next to `one-shot` (rpi5), `medium` (rpi4) and
-# `server` (rpi3):
-# the intent is recorded and the act is a person's. cmd/boot branches on it
-# rather than assuming a firmware call it can make.
+# Another arming model, alongside `one-shot` (rpi5), `medium` (rpi4) and
+# `server` (rpi3): the intent is recorded and the act is a person's; cmd/boot
+# branches on it rather than assuming a firmware call it can make.
 BOOT_ARMING=hands-on
 
-# Not used: there is no boot order to write. Named, as other drivers do,
-# so that a reader comparing drivers sees a difference rather than an omission.
+# No boot order to write; named like other drivers so a diff shows a
+# difference rather than an omission.
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
 
@@ -75,19 +58,13 @@ mac_volume_present() {
 # --- which mode is answering --------------------------------------------------
 #
 # The same rule as every other driver -- the bench system writes an identity
-# marker and the host install does not -- with the one difference that both
-# modes are
-# reached the same way, because both are this machine. There is no channel to
-# discover, so MODE_CHANNEL is always `host` and r_ssh runs locally.
+# marker, the host install does not -- but both modes are reached the same
+# way, since both are this machine: MODE_CHANNEL is always `host`.
 b_probe() {
     local id
-    # This driver's every question is asked of the machine it is running on --
-    # `diskutil`, `bless`, `sysctl kern.boottime` -- because MACH_LOCAL says
-    # there is no other way to reach an Apple Silicon machine. Which means that
-    # from anywhere else, the honest answer is "not here", and that has to be
-    # said *before* the first macOS-only command rather than discovered by it:
-    # run from Linux, this exited 127 partway through printing a status, which
-    # is worse than either answering or refusing.
+    # Refuse before the first macOS-only command: run elsewhere, `diskutil`/
+    # `bless`/`sysctl` fail partway through printing a status instead of
+    # cleanly saying "not here".
     if ! is_macos; then
         MODE_CHANNEL=none; MODE=unreachable
         return 0
@@ -98,21 +75,14 @@ b_probe() {
     return 0
 }
 
-# macOS has no /proc, so the two facts the shared implementations read out of it
-# come from sysctl instead.
+# No /proc on macOS: kern.boottime stands in for both facts the shared code
+# needs. It changes every boot, serving as boot_id, and gives boot time
+# directly, avoiding `uptime`'s local-time output (see boot/machines.sh).
 #
-# kern.boottime is the only per-boot value there is here, and it does the same
-# job as Linux's random boot_id for the one question that matters -- "has this
-# machine rebooted since it was armed" -- because it changes on every boot. It
-# is a clock reading rather than a random token, so it is *also* the answer to
-# "when did it boot", and both are taken from it rather than from `uptime`,
-# whose output is local time and reparses as UTC (the trap boot/machines.sh
-# records for the Linux side).
 # The brace in the pattern is load-bearing: the value reads
-# `{ sec = 1786800736, usec = 451078 } Sat Aug 15 ...`, and a pattern that only
-# asks for `sec = ` matches the *last* one -- greedy -- and returns the
-# microseconds. That is a plausible-looking number, which is how it came back
-# as a 1970 boot date the first time.
+# `{ sec = 1786800736, usec = 451078 } Sat Aug 15 ...`, and a pattern anchored
+# only on `sec = ` matches greedily to the last one, returning usec -- a
+# plausible but wrong number.
 _mac_boottime() { sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ *sec *= *\([0-9][0-9]*\).*/\1/p'; }
 
 # `|| true` for the same reason the Linux driver has it: a boot id that cannot
@@ -131,22 +101,15 @@ b_booted_at() {
 # is even possible: which volume is booted right now, and whether the other one
 # is attached.
 b_evidence() {
-    # Both facts below are read off the machine this is running on, which is
-    # only the right machine when that is this Mac. Said plainly instead when
-    # it is not: the `df /` fallback answered with the *driving* machine's root
-    # volume, so `wk boot mbp --status` from Linux reported an Ubuntu LVM path
-    # as the Mac's booted volume -- a confident answer to a question that was
-    # never asked of the right computer.
+    # Accurate only when run on this Mac: elsewhere `df /` would report the
+    # driving machine's own root volume as if it were this Mac's.
     if ! is_macos; then
         echo "booted_volume=unknown (this is not that Mac; MACH_LOCAL machines answer only for themselves)"
         echo "benchmark_volume=$MACH_VOLUME (cannot be seen from here)"
         return 0
     fi
 
-    # `diskutil info /`'s own labelled output rather than its plist: the plist
-    # puts key and value on separate lines, so reading it with sed is a
-    # two-line state machine to get a string that the plain form prints once.
-    local root; root=$(diskutil info / 2>/dev/null | sed -n 's/^ *Volume Name: *//p' | head -1)
+    local root; root=$(python3 "$WK_ROOT/lib/wkmac.py" volume-name / 2>/dev/null)
     [ -n "$root" ] || root=$(df / | awk 'NR==2 {print $1}')
     echo "booted_volume=$root"
     if mac_volume_present; then
@@ -157,41 +120,32 @@ b_evidence() {
     echo "firmware_default=$(mac_firmware_default)"
 }
 
-# Which install the firmware says it will boot next, and what that is worth.
-#
-# This is the one fact that decides whether a benchmark cycle on this machine
-# costs a person nothing or costs them one trip to the keyboard, so it is
-# reported: "hands-on" is not a property of the machine, it is a property of
-# *which way round the default currently points*.
+# Which install the firmware says it will boot next -- the one fact that
+# decides whether a benchmark cycle costs a person nothing or one trip to
+# the keyboard.
 #
 # The firmware publishes its choice as `boot-volume` in IODeviceTree:/options,
-# three colon-separated UUIDs of which only the last identifies anything on this
-# disk: the APFS *volume group*. `diskutil` gives the same UUID for each install,
-# so the two can simply be compared.
+# three colon-separated UUIDs of which only the last identifies anything on
+# this disk: the APFS volume group. `diskutil` gives the same UUID per
+# install, so the two are simply compared.
 #
-# Two things it is honest about rather than quiet about:
+# It is evidence, not a promise: the startup manager boots a volume *once*
+# without updating this variable, so a machine last started that way reports
+# a default it is not currently running -- it names the *next plain reboot*,
+# which is the question a lane actually asks.
 #
-#   it is evidence, not a promise. The startup manager boots a volume *once*
-#   without updating this variable, so a machine that was last started that way
-#   reports a default it is not currently running -- which is exactly the state
-#   this Mac was found in (booted Macintosh HD, boot-volume naming WK Bench).
-#   That is a feature of the reading: it says where the *next plain reboot*
-#   goes, which is the question a lane actually asks.
-#
-#   it cannot be written. Even in a macOS guest with SIP disabled and root,
-#   `nvram boot-volume=<other group>` exits 0 and changes nothing --
-#   the value lands in the 7C436110-… namespace and is discarded, while
-#   IODeviceTree:/options keeps the firmware's own across a reboot.
-#   `bless --setBoot` is documented as unsupported on Apple Silicon and
-#   `systemsetup -getstartupdisk` answers "(null)". SIP is not the gate; the
-#   variable is firmware-owned. So this driver reports and never sets.
+# It cannot be written, even as root with SIP disabled: `nvram
+# boot-volume=<other group>` exits 0 but the value is discarded, `bless
+# --setBoot` is unsupported on Apple Silicon, and `systemsetup
+# -getstartupdisk` answers "(null)". The variable is firmware-owned, so this
+# driver reports and never sets it.
 mac_volume_group() {  # $1 = mount point
-    diskutil info "$1" 2>/dev/null | sed -n 's/^ *APFS Volume Group: *//p' | head -1
+    python3 "$WK_ROOT/lib/wkmac.py" volume-group "$1" 2>/dev/null
 }
 
 mac_firmware_default() {
     local bv grp host_grp bench_grp
-    bv=$(nvram -p 2>/dev/null | awk -F'\t' '$1 == "boot-volume" { print $2 }')
+    bv=$(python3 "$WK_ROOT/lib/wkmac.py" boot-volume 2>/dev/null)
     [ -n "$bv" ] || { printf 'unknown (the firmware publishes no boot-volume)'; return 0; }
     grp="${bv##*:}"
     host_grp=$(mac_volume_group /)
@@ -208,16 +162,14 @@ mac_firmware_default() {
 
 # --- the record ---------------------------------------------------------------
 #
-# In this user's own state directory rather than /var/lib/wk, and that is a
-# deliberate difference from the Pi drivers: on a board the record belongs to
-# the machine and passwordless sudo is there to write it, while here every
-# `sudo` is a password prompt (docs/HANDOFF-sandboxing.md keeps it that way).
-# A record of intent is not worth a password, and this machine has exactly one
-# person driving it -- so the machine's record and the user's are the same
-# record. It stays one copy, which is the property rule 1 asks for.
+# Lives in this user's state directory, not /var/lib/wk: on a board the
+# record belongs to the machine and passwordless sudo writes it, but here
+# every `sudo` is a password prompt (docs/HANDOFF-sandboxing.md), and this
+# machine has exactly one person driving it, so the machine's record and the
+# user's are the same record.
 #
-# It has to live on the *normal* role's disk, like every other arming record:
-# the benchmark volume has its own home directory and cannot see this one.
+# Lives on the *normal* role's disk, like every other arming record: the
+# benchmark volume has its own home directory and cannot see this one.
 MACH_RECORD="$(wk_state_dir)/boot-armed"
 
 record_write() {
@@ -308,39 +260,29 @@ b_reboot() {
 
 # --- where a staged payload goes ----------------------------------------------
 #
-# A path on *this* machine, because that is the whole reason this transition is
-# cheap: the other role's disk is merely a mounted volume while we are in the
-# host mode, so staging a build onto it is a copy and not a transfer.
+# A path on *this* machine: staging a build is a copy onto a mounted volume,
+# not a network transfer like the Pi images (docs/HANDOFF-boot.md,
+# "Storage"). A driver whose other role is only reachable over the network
+# leaves this unset, and `wk bench stage` refuses it by name.
 #
-# The Pi images have an equivalent and it is not this: their payload is pushed
-# over ssh to a machine that is already running the image, onto a partition
-# that exists for it (docs/HANDOFF-boot.md, "Storage"). A driver whose other
-# role is only reachable over the network leaves this unset, and `wk bench
-# stage` refuses it by name rather than inventing a transport.
-# Fails when the disk is not attached, rather than printing a path under a
-# mount point that is not mounted: /Volumes/<name>/var/wk on an absent volume
-# is a perfectly creatable directory on the *internal* disk, and a payload
-# staged there would be invisible to the role it was staged for and invisible
-# to whoever staged it.
-# The *Data* volume, not the system volume, and this is not a detail: since APFS
-# volume groups the system volume is sealed and read-only (`csrutil
-# authenticated-root` is enabled), so `/Volumes/WK Bench/var/wk` cannot be
-# created at all -- staging died on `mkdir: /Volumes/WK Bench/var/wk:
-# Permission denied` the first time this driver ever met a real volume, having
-# been written and reviewed against one that did not exist yet.
+# Fails when the disk is not attached rather than printing a path under an
+# unmounted mount point: that path is a creatable directory on the
+# *internal* disk, and a payload staged there is invisible to both the role
+# it was staged for and whoever staged it.
 #
-# `/var` does not exist on the data volume either: on the *running* system it is
-# a firmlink, and from outside the pair is mounted as two volumes with the real
-# directory at `private/var`. So the same bytes are `/var/wk` to the booted
-# bench install and `/Volumes/<name> - Data/private/var/wk` to host mode staging
-# them, and both spellings have to appear because both are correct from where
-# they are said.
+# The *Data* volume, not the system volume: under APFS the system volume is
+# sealed and read-only (`csrutil authenticated-root`), so nothing can be
+# created on it.
+#
+# `/var` does not exist on the Data volume by that name: it is a firmlink on
+# the *running* system, and mounts outside it as `private/var`. So the same
+# bytes are `/var/wk` to the booted bench install and
+# `/Volumes/<name> - Data/private/var/wk` to host-mode staging.
 mac_volume_data_path() {
     local d="/Volumes/$MACH_VOLUME - Data"
     [ -d "$d" ] && { printf '%s' "$d"; return 0; }
-    # No data volume: a plain volume rather than a group. Then the system
-    # volume is the only place there is, and its writability is the caller's
-    # problem to report rather than this function's to hide.
+    # No data volume: a plain volume rather than a group. The system volume
+    # is the only place there is; its writability is the caller's to report.
     printf '%s' "$(mac_volume_path)"
 }
 
@@ -355,7 +297,7 @@ b_bench_root() {
 
 # A MACH_LOCAL machine answers only for itself: probing it from anywhere else
 # reads the *driving* machine's marker and reports a confident wrong answer
-# (the b_evidence comment above records the df / version of that mistake).
+# (the same trap b_evidence above avoids).
 b_probeable() { is_macos; }
 
 # The wk-managed media, in one line, for the fleet block in `wk status`.
@@ -371,13 +313,9 @@ b_media() {
     fi
 }
 
-# How this Mac's benchmark install is made from nothing.
-#
-# No image and no card: an APFS volume in its own container, made and populated
-# on the Mac itself. And the last step cannot be automated at all -- Apple
-# Silicon boot volume selection goes through a LocalPolicy in the machine's own
-# secure storage, so it is a person holding the power button, every time
-# (docs/HANDOFF-boot.md).
+# How this Mac's benchmark install is made from nothing: an APFS volume in
+# its own container, made and populated on the Mac itself. The last step is
+# always a person holding the power button (LocalPolicy, see file header).
 b_reprovision() {
     cat <<REPROV
 wk bench mac-volume --create

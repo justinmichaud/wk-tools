@@ -27,6 +27,15 @@ earlier means auditing again.
 That incident list is the test plan. None of it has been re-attempted against
 the current tree.
 
+## Remaining — still asked, not yet built
+
+- **A way to fully disable `git commit` inside a container**, for whoever wants
+  it off entirely rather than gated by the push switch.
+- **Audit that every interactive prompt in the tree guards a destructive
+  action and nothing else prompts**: `wk rm`, `wk vm rm`, `wk vm base
+  --rebuild`/`--rm`, `wk gc --purge-mirror`, `wk remote rm`, `wk skills`,
+  `wk pr`'s `reset --hard`.
+
 ## Remaining — the surface to cover
 
 One holistic pass over the system as it actually ships: session D-Bus, host
@@ -39,7 +48,7 @@ every surface added since the request:
   set with their CDNs**, on ports 80 and 443 — so a workspace can reach
   user-generated content and ad/analytics networks. The file flags this for the
   audit itself. `BLOCKED_NETS` and the exact-match `pi-hosts` exemption are the
-  compensating controls, and both TESTING.md lines for them are unticked.
+  compensating controls, and neither has a test yet.
 - **`apt` from the Ubuntu archive** (`ports.`/`archive.`/`security.ubuntu.com`,
   so `wk zed` can install openssh-server in a workspace, which
   is the only thing an editor can talk to over the `podman exec` transport). A

@@ -53,50 +53,43 @@ store_is_local() {
 
 # This device's own state, on the host, whatever $WK_STORE happens to be.
 #
-# It was defined in lib/target.sh, which is where the first caller happened to
-# live: the workspace registry, which has to be readable before a target is
-# resolved. It belongs here, because the question it answers is the one this
-# file exists for -- where does something live when $WK_STORE is somebody else's
-# path. Both users are that shape: the registry (target-dependent $WK_STORE
-# cannot say which target a workspace is on) and the image store (on a macOS
-# host $WK_STORE is the podman VM's /var/lib/wk, which the Mac cannot create).
+# Answers the question this file exists for: where does something live when
+# $WK_STORE is somebody else's path. Two users are that shape: the workspace
+# registry (target-dependent $WK_STORE cannot say which target a workspace is
+# on) and the image store (on a macOS host $WK_STORE is the podman VM's
+# /var/lib/wk, which the Mac cannot create).
 #
-# Moved because a helper reachable only through lib/target.sh is a helper that
-# silently disappears: lib/image.sh started calling it, and every command that
-# sources image.sh without target.sh -- cmd/pi among them -- resolved the image
-# store to `/images` and pruned, listed and wrote nothing, with no error but a
-# `command not found` on stderr.
-#
-# `wk_state_dir` lives in lib/common.sh and not here: `wk` sources target.sh
-# without store.sh, so anything defined here is missing from target_all() on a
-# macOS host. The reasoning above is why the level matters; the definition is in
-# common.sh.
+# `wk_state_dir` itself lives in lib/common.sh, not here or in lib/target.sh:
+# a helper reachable only through a higher-sourced file silently disappears
+# for any command that sources a lower one without it -- `wk` sources
+# target.sh without store.sh, so anything defined only here is missing from
+# target_all() on a macOS host, and common.sh is the floor every such file
+# sources.
 
 # ccache ceiling, shared by every workspace.
 #
-# Measured: a full WPE release build plus two JSC release builds came to 364 MB
-# across ~6,200 cached objects. Release objects compress well, so the number is
-# far lower than intuition suggests.
+# Measured: a full WPE release build plus two JSC release builds came to
+# 364 MB across ~6,200 cached objects -- release objects compress well, far
+# lower than intuition suggests.
 #
-# Debug builds are the real driver -- unstripped objects with full DWARF run
-# roughly 8-10x release, so a full debug WebKit build is on the order of 3-4 GB
-# of cache. 40 GB therefore holds well over two full builds of any
+# Debug builds are the real driver: unstripped objects with full DWARF run
+# roughly 8-10x release, so a full debug WebKit build is on the order of
+# 3-4 GB of cache. 40 GB holds well over two full builds of any
 # configuration, with room for several ports side by side, and still leaves
 # most of the 200 GB disk for snapshots and workspaces.
 WK_CCACHE_MAXSIZE="${WK_CCACHE_MAXSIZE:-40G}"
 
 # The ccache ceiling, written the same way everywhere.
 #
-# ccache's own default is 5 GB, which a couple of WebKit builds blow through, so
-# every cache this repo creates records the real limit in its own config as well
-# as receiving it in the environment -- otherwise `ccache -s` on the machine
-# reports 5 GB and the next reader concludes the cache is misconfigured.
+# ccache's own default is 5 GB, which a couple of WebKit builds blow through,
+# so every cache this repo creates records the real limit in its own config
+# as well as receiving it in the environment -- otherwise `ccache -s` on the
+# machine reports 5 GB and the next reader concludes the cache is
+# misconfigured.
 #
-# One function because there were two spellings of this: the store's wrote only
-# when the file was absent and took the size from $WK_CCACHE_MAXSIZE, while the
-# remote target's overwrote on every provision with its own inline `40G`
-# default. Two defaults for one policy is how they drift, and the drift shows up
-# as a cache that is silently smaller than the one beside it.
+# One function rather than two spellings of the same policy, which is how a
+# store cache and a remote target's cache would silently drift to different
+# sizes.
 #
 # Writes the value in, never a path out: the caller says where.
 ccache_conf_render() { printf 'max_size = %s\n' "$WK_CCACHE_MAXSIZE"; }
@@ -111,23 +104,21 @@ wk_ws_dir()   { echo "$WK_STORE/ws/$1"; }
 # Upstreams kept in the single mirror, so a workspace can check out a branch
 # from any of them without another fetch.
 #
-# All HTTPS, including the forks: these are public repositories and fetching is
-# anonymous, so the mirror needs no credential at all. Pushing is a separate
-# concern handled per-workspace by the deploy key, which is scoped to the fork.
-# Using SSH here would make `wk sync` fail on any machine without that key.
+# All HTTPS, including the forks: these are public repositories and fetching
+# is anonymous, so the mirror needs no credential at all. Pushing is a
+# separate concern handled per-workspace by the deploy key, scoped to the
+# fork -- SSH here would make `wk sync` fail on any machine without that key.
 # This list is also what a workspace's remotes are wired from
 # (wk_wiring_script), so it is the one place a project is added.
 #
-# The wiki's own set for a WebKit checkout is origin, wpe, fork, forkwpe and
-# `igalia`
-# (ssh://git@gitlab.igalia.com:4429/teams/compilers/javascriptcore/web-kit.git).
-# The first four are here; igalia is deliberately not, and the reason is the
-# sandbox rather than an oversight: a workspace holds deploy keys for the two
-# forks and no personal key, and the egress allowlist permits igalia.com on 80
-# and 443 only -- not gitlab's ssh port 4429 (container/proxy/wk-proxy.py). A
-# remote that cannot authenticate or connect from where it is written is worse
-# than no remote: it fails at fetch time, in a workspace, with an ssh error.
-# Add it here the day a workspace has a way to reach it.
+# The wiki's own set for a WebKit checkout also has `igalia`
+# (ssh://git@gitlab.igalia.com:4429/...), deliberately absent here: a
+# workspace holds deploy keys for the two forks and no personal key, and the
+# egress allowlist permits igalia.com on 80 and 443 only, not gitlab's ssh
+# port 4429 (container/proxy/wk-proxy.py). A remote that cannot authenticate
+# or connect from where it is written is worse than no remote -- it fails at
+# fetch time, in a workspace, with an ssh error. Add it here the day a
+# workspace has a way to reach it.
 wk_remotes() {
     cat <<'EOF'
 origin   https://github.com/WebKit/WebKit.git
@@ -171,28 +162,27 @@ EOF
 
 # The remote wiring every WebKit checkout gets, as a portable `sh` snippet.
 #
-# One authority for three questions that were being answered separately, and
-# differently, in four places:
+# One authority for three questions:
 #
-#   origin is WebKit/WebKit. Always, on every target. A workspace whose origin
-#   is a machine-local mirror answers `git log origin/main` with whatever that
-#   mirror last fetched, and `git push origin` with something even worse -- and
-#   the remote build machine's driver did exactly that, pointing origin at the
-#   box's shared clone because it is closer. Closeness is what a second remote
-#   is for; the name `origin` means upstream.
+#   origin is WebKit/WebKit. Always, on every target. A workspace whose
+#   origin is a machine-local mirror answers `git log origin/main` with
+#   whatever that mirror last fetched, and `git push origin` with something
+#   even worse. Closeness is what a second remote is for; the name `origin`
+#   means upstream.
 #
 #   Pushing to origin fails immediately rather than after an auth round trip.
 #   There is no write access to WebKit/WebKit and never will be.
 #
-#   Every fork in wk_push_forks is present, with an https fetch URL and an ssh
-#   push URL through its own host alias -- one deploy key per fork, which is
-#   the only way GitHub allows two. Whether the key is *there* is a separate
+#   Every fork in wk_push_forks is present, with an https fetch URL and an
+#   ssh push URL through its own host alias -- one deploy key per fork, the
+#   only way GitHub allows two. Whether the key is *there* is a separate
 #   question, and a switch: see `wk push`.
 #
-# A snippet rather than a shell function because the checkout is very often not
-# on this machine: the base snapshot is here, a remote workspace's checkout is
-# at the far end of an ssh, and a guest's is inside a VM. The words have to
-# travel; the list of forks must not be retyped to make that happen.
+# A snippet rather than a shell function because the checkout is very often
+# not on this machine: the base snapshot is here, a remote workspace's
+# checkout is at the far end of an ssh, and a guest's is inside a VM. The
+# words have to travel; the list of forks must not be retyped to make that
+# happen.
 #
 #   wk_wiring_script <src> [<extra-remote-name> <extra-remote-url> [<ssh-config>]]
 #
@@ -200,10 +190,10 @@ EOF
 # build machine's shared clone, or our own mirror. Fetch-only by nature.
 #
 # The optional ssh config is for a machine where the aliases cannot live in
-# ~/.ssh/config: a shared build box, whose home directory is the user's own and
-# often several machines'. There the checkout carries `core.sshCommand`
-# instead, so the push URLs resolve through a file wk owns and nothing outside
-# the wk root is edited.
+# ~/.ssh/config: a shared build box, whose home directory is the user's own
+# and often several machines'. There the checkout carries `core.sshCommand`
+# instead, so the push URLs resolve through a file wk owns and nothing
+# outside the wk root is edited.
 wk_wiring_script() {
     local src="$1" extra_name="${2:-}" extra_url="${3:-}" ssh_config="${4:-}"
     printf 'set -e
@@ -223,12 +213,9 @@ wk_wiring_script() {
 ' "$remote" "$alias" "$repo"
     done
     # The other upstreams, fetch-only, from the same list the mirror carries.
-    #
-    # `wpe` is the one this was missing, and it is the wiki's own set that says
-    # so (WebKit-JSC-Container-Development-Setup: origin, wpe, fork, forkwpe).
-    # Without it a workspace cannot `git fetch wpe` at all -- so a WPEWebKit
-    # branch cannot be looked at, while `wk pr` accepts PRs from that project
-    # and the mirror has been carrying its objects all along.
+    # `wpe` matters here: without it a workspace cannot `git fetch wpe` at
+    # all, so a WPEWebKit branch cannot be looked at even though `wk pr`
+    # accepts PRs from that project and the mirror carries its objects.
     #
     # Pushing to them is refused for exactly the reason origin is: we never
     # push to an upstream, always to a fork.
@@ -257,29 +244,28 @@ wk_wiring_script() {
 
 # The same wiring, as a *check* rather than an assertion.
 #
-# `wk_wiring_script` is the authority on what a checkout's remotes should be,
-# and until this existed nothing ever asked whether they still were. They drift
-# for two reasons, both real: a workspace made before the wiring existed keeps
-# whatever `git clone` left it with -- `origin` pointing at the local mirror it
-# was cloned from, which is the exact failure the wiring script was written to
-# prevent -- and anyone can run `git remote set-url` in a checkout afterwards.
+# `wk_wiring_script` is the authority on what a checkout's remotes should be.
+# They drift for two reasons: a workspace made before the wiring existed
+# keeps whatever `git clone` left it with -- `origin` pointing at the local
+# mirror it was cloned from, the exact failure the wiring script prevents --
+# and anyone can run `git remote set-url` in a checkout afterwards.
 #
-# The shape this catches, seen on a real build box: `origin` = /home/…/wk/mirror
-# with pushing *enabled* to it, `fork` with an https push URL (so no deploy key
-# can ever be offered, whatever `wk push` says), and no `core.sshCommand`.
-# Nothing else reports any of it.
+# The shape this catches, seen on a real build box: `origin` =
+# /home/…/wk/mirror with pushing *enabled* to it, `fork` with an https push
+# URL (so no deploy key can ever be offered, whatever `wk push` says), and no
+# `core.sshCommand`. Nothing else reports any of it.
 #
 # Prints one `problem: …` line per fault and exits 1 if there were any, so a
 # caller can relay it without parsing. A snippet for the same reason as the
 # wiring: the checkout is usually on another machine.
 #
-# A non-empty second argument skips the checks that are about the *environment*
-# rather than the tree -- whether ssh can resolve the fork's host alias from
-# here. A base snapshot is a template nobody pushes from, and it lives in the
-# podman VM, which has no alias config and needs none: the aliases are written
-# into each workspace (container/firstrun.sh) and into a build machine's own ssh
-# config. Asking the environment question of a snapshot means reporting a fault
-# that no re-wiring can ever clear.
+# A non-empty second argument skips the checks that are about the
+# *environment* rather than the tree -- whether ssh can resolve the fork's
+# host alias from here. A base snapshot is a template nobody pushes from, and
+# lives in the podman VM, which has no alias config and needs none: the
+# aliases are written into each workspace (container/firstrun.sh) and into a
+# build machine's own ssh config. Asking the environment question of a
+# snapshot means reporting a fault that no re-wiring can ever clear.
 #
 #   wk_wiring_check_script <src> [<skip-env>]
 wk_wiring_check_script() {
@@ -373,18 +359,15 @@ fi
 fi
 ' "$alias" "$alias" "$alias" "$alias"
     done
-    # Which repository the *branch* points at, which is the same separation one
-    # level up -- and a fault rather than a note, because the rule is absolute:
-    # we never push to origin, always to the fork. A working branch tracking
-    # origin/<x> therefore cannot be pushed by a bare `git push` at all -- and
-    # where origin is a local mirror (the fault above) that tracking ref names a
-    # different repository than it does once the wiring is correct, so a branch
-    # tracks origin/eng/... for a branch that exists on the fork and nowhere
-    # upstream.
+    # Which repository the *branch* points at, which is the same separation
+    # one level up -- and a fault rather than a note, because the rule is
+    # absolute: we never push to origin, always to the fork. A working branch
+    # tracking origin/<x> therefore cannot be pushed by a bare `git push` at
+    # all -- and where origin is a local mirror (the fault above) that
+    # tracking ref names a different repository than it does once the wiring
+    # is correct, so a branch tracks origin/eng/... for a branch that exists
+    # on the fork and nowhere upstream.
     #
-    # Following an upstream branch is the one exception, and it is exactly the
-    # mirrored ones: nobody pushes those either, so tracking them is not a push
-    # waiting to fail.
     # Following an upstream's own branches is the exception -- nobody pushes
     # those either, so tracking one is not a push waiting to fail.
     local keep='""' _u _r _f
@@ -548,22 +531,23 @@ base_path() { echo "$(wk_base_dir)/$1/WebKit"; }
 
 # --- the snapshot completion marker -----------------------------------------
 #
-# `wk sync` publishes by hardlinking the previous snapshot, fetching into it and
-# checking it out -- minutes of work, at the end of which the directory becomes
-# a usable base. Killed anywhere in the middle it leaves a directory that is
-# newer than every good one, and `current_base` was `ls | tail -1`: the next
-# `wk new` pinned the rubble, and the next `wk sync` hardlinked from it.
+# `wk sync` publishes by hardlinking the previous snapshot, fetching into it
+# and checking it out -- minutes of work, at the end of which the directory
+# becomes a usable base. Killed anywhere in the middle it leaves a directory
+# newer than every good one, so `current_base` cannot simply be `ls | tail
+# -1`: that pins the rubble to the next `wk new` and hardlinks the next
+# `wk sync` from it.
 #
 # So the recorded sha -- which existed already, as a cache nothing read -- is
-# written last and becomes the publication gate. Present means published; absent
-# means "still being made, or was being made when something killed it", and
-# every reader ignores it. It is the same pattern as the firstrun marker, and
-# the same one the workspace lifecycle uses.
+# written last and becomes the publication gate. Present means published;
+# absent means "still being made, or was being made when something killed
+# it", and every reader ignores it. The same pattern as the firstrun marker,
+# and the one the workspace lifecycle uses.
 #
 # It is also the tamper evidence: a by-hand `git fetch` or checkout inside a
-# published snapshot moves HEAD away from the recorded sha, and a snapshot whose
-# tree no longer matches what was published is refused by name rather than
-# silently handed to a workspace.
+# published snapshot moves HEAD away from the recorded sha, and a snapshot
+# whose tree no longer matches what was published is refused by name rather
+# than silently handed to a workspace.
 base_sha_file() { echo "$(wk_base_dir)/$1/sha"; }
 
 base_complete() { [ -s "$(base_sha_file "$1")" ]; }

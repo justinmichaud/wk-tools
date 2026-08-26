@@ -10,6 +10,20 @@ Speedometer 3 completes on the rpi4.
 - **`wk pi bench` prints `result after 0s`** for a run that took 22 minutes. The
   elapsed counter is wrong; the result is not. Cosmetic, and printed next to a
   number.
+- **The result is printed and not saved.** Nothing files it beside `wk bench`'s
+  own runs, so `wk bench ls`/`compare` cannot see an on-board result — the
+  remaining half of "record provenance next to `wk bench`'s results". Two
+  on-board runs cannot currently be compared to each other by any means the
+  tool offers, which is most of why anyone takes a second one. Once fixed,
+  `wk bench compare` needs scipy in the workspace that built the thing being
+  compared — a plain yocto workspace is Ubuntu 24.04 and PEP 668 refuses a bare
+  `pip3 install --user`; `--break-system-packages` with `--user` is the answer,
+  since the workspace is disposable by construction.
+- **`wk pi bench --ab` should compare only rounds where both arms finished.** A
+  surviving arm whose partner crashed biases the comparison (a crash usually
+  correlates with the heavier binary under a memory ceiling) — drop it from the
+  comparison but keep it in the store, since the run that finished is still
+  evidence about why its partner did not.
 - **The skeleton is not a skeleton.** `wk pi setup` does a `--depth 1` clone —
   427,711 files, ~4.2 GB, slower onto a Pi's USB stick than cross-building
   WebKit was. The board only needs the scripts it runs there
@@ -26,6 +40,10 @@ Speedometer 3 completes on the rpi4.
 - **`zip` is missing from the yocto workspace image**, so `wk pi deploy` falls
   back to a plain tar instead of the documented `built-product-archive` path
   (`docs/HANDOFF-yocto.md` item 5).
+- **Test a new boot cmdline arg on the SD (unarmed fall-through) before
+  risking it on the bench stick.**
+- **The rpi4's bench stick is still hand-stamped**, not reproduced by `wk
+  sysimage write` — needs a confirmed erase to redo it by code.
 
 ## Constraints that bind the remaining work
 

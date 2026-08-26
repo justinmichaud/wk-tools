@@ -62,7 +62,7 @@ if have tart || [ -x "$HOME/.local/bin/tart" ]; then
 elif [ -d "$HOME/.tart" ]; then
     warn "~/.tart exists but tart is not on PATH -- 'wk vm' will not work"
 else
-    debug "tart not installed; 'wk vm' unavailable (see SETUP.md section 8)"
+    debug "tart not installed; 'wk vm' unavailable (see README.md, Setup)"
 fi
 
 unset _missing

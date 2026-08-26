@@ -2,22 +2,16 @@
 
 The last machine in the fleet with no bench mode. Nothing here is built: no
 `boot/machines/moose.conf`, no `boot/uefi-bootnext.sh`, no `efibootmgr` in the
-tree, no bench profile for it. Nothing here has ever rebooted moose.
+tree, no bench profile for it. Nothing here has ever rebooted moose. `wk help
+hardware` has the design (a RAM root off a USB stick, armed by
+`efibootmgr --bootnext`); this is the build list underneath it.
 
-**The design, from measurements taken on the machine: a RAM root off a USB
-stick, armed by `efibootmgr --bootnext`.** moose is a System76
-Thelio Astra (Ampere Altra, aarch64, AMI UEFI `2.01.SYS01`, Secure Boot off,
-125 GB RAM, one NVMe). `--bootnext` is consumed by firmware on the next boot and
-cleared, so the arming model is `one-shot` — the same shape `boot/rpi5-usb.sh`
-already implements. The BMC is the recovery console and the power switch, never
-the boot medium: virtual media puts a service processor inside every root-filesystem
-read, and needs an image server besides. This supersedes the BMC-virtual-media
-row in `docs/HANDOFF-boot.md`.
-
-A RAM root is what keeps storage out of the measurement (`root_device=ram` is
-its own series, and cheap flash is then fine because the stick is read only at
-boot). A plain second partition on the stick is the fallback if `--bootnext`
-turns out not to work on this firmware.
+moose is a System76 Thelio Astra (Ampere Altra, aarch64, AMI UEFI
+`2.01.SYS01`, Secure Boot off, 125 GB RAM, one NVMe). A RAM root is what keeps
+storage out of the measurement (`root_device=ram` is its own series, and cheap
+flash is then fine because the stick is read only at boot). A plain second
+partition on the stick is the fallback if `--bootnext` turns out not to work
+on this firmware.
 
 ## Remaining — in this order
 

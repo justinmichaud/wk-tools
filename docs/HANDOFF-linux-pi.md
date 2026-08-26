@@ -30,6 +30,15 @@ all.
    `./setup` run; its perf half belongs to the board's bench system,
    `webkit-2.52-yocto-rpi5-64`, which does not carry it yet. Today the whole tree is hand-restored state that nothing
    recreates (`host/linux/rpi5/HANDOFF.md`).
+6. **Confirm `wk pi setup` killed mid-push converges** on re-run with no
+   duplicate or stale `pi-hosts` address.
+7. **`wk provision <machine>` / `wk unprovision <machine>`.** `wk pi setup`
+   (tailnet, key, allowlist) and `wk pi boot-order` are most of what
+   provisioning a board needs, but nothing walks the two together from a
+   blank card to an answering tailnet name, and nothing removes a device
+   cleanly. One interactive command composing them, with the hands-on steps
+   (a card in a reader, a power cable) as prompts rather than documentation,
+   is the shape to build.
 
 ## What has changed under this, and does not replace it
 

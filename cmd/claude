@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 #
-# wk claude <workspace> -- run Claude inside a workspace.
+# wk claude <workspace> [claude options] -- run Claude inside a workspace
+# wk: where=workspace name=required ready=yes group=workspaces
 #
 # Permissions are relaxed because the workspace is the blast radius, not the
-# machine. That is only a defensible trade if the boundary actually holds, so
-# this checks it before handing over control rather than trusting that setup
-# ran correctly at some point in the past.
+# machine; this checks the boundary holds before handing over control, rather
+# than trusting that setup ran correctly at some point in the past.
+#
+# The workspace name comes first; everything after it is Claude's, verbatim:
+#
+#   wk claude bb4 -r          resume, in bb4
+#   wk claude bb4 --continue  and so on
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,93 +18,44 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# The workspace name is a *word* on the command line rather than the first
-# argument, so Claude's own options can come on either side of it:
-#
-#   wk claude bb4 -r          resume, in bb4
-#   wk claude -r bb4          the same command
-#   wk claude --continue bb4  and so on
-#
-# Everything that is not the name is Claude's, verbatim -- which it always was
-# (`$@` reaches the launch below untouched), but the name had to come first, so
-# `wk claude -r bb4` answered "invalid name '-r'" and looked like a passthrough
-# that did not work.
-#
-# Which bare word is the name is decided by the registry rather than by
-# position, because bare words are not all names: `-r <session-id>` and a
-# prompt are bare words too, and guessing "the first one" would send a session
-# id to require_name. target_of is a file test, no ssh and nothing started.
-# When nothing on the line is a registered workspace the first bare word is
-# taken anyway -- there has to be one for the error to be about.
-NAME=""; _FIRST_BARE=""
-for _a in ${@+"$@"}; do
-    case "$_a" in --) break ;; -*) continue ;; esac
-    if target_of "$_a" >/dev/null 2>&1; then NAME="$_a"; break; fi
-    [ -n "$_FIRST_BARE" ] || _FIRST_BARE="$_a"
-done
-[ -n "$NAME" ] || NAME="$_FIRST_BARE"
-
-_PASS=(); _dropped=""
-for _a in ${@+"$@"}; do
-    if [ -z "$_dropped" ] && [ -n "$NAME" ] && [ "$_a" = "$NAME" ]; then _dropped=1; continue; fi
-    _PASS+=("$_a")
-done
-set -- ${_PASS[@]+"${_PASS[@]}"}
-
+# The dispatcher takes the first non-flag word as the name and strips it,
+# leaving Claude's own options in order. A bare session id ahead of the name
+# (`wk claude -r <id> <ws>`) is taken by position, not by checking which word
+# is a real workspace -- put it after instead: `wk claude <ws> -r <id>`.
+NAME="${WK_NAME:-}"
 require_name "$NAME"
 
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-# One gate for "is this workspace usable yet" (wait_ready, lib/target.sh):
-# `absent` is still refused by name, and everything else -- a creation still
-# running, one whose driver died, an environment removed from under the record,
-# a machine that will not answer -- gets the words that fit it there rather
-# than "no such workspace", which is what this said about all four.
-wait_ready "$NAME"
-
-# Which binary to hand over to. `claude` from the workspace's own PATH
-# everywhere provisioning installed it -- a container, a guest -- and a
-# specific path on a shared machine, where what is on PATH may be somebody
-# else's broken system-wide install (see the remote branch below).
+# `claude` from PATH everywhere provisioning installed it (container, guest);
+# a specific path only on a shared machine, where PATH may resolve to
+# somebody else's broken system-wide install (see the remote branch below).
 CLAUDE_BIN=claude
 
-# ...and which permission mode it starts in, which is a property of the
-# boundary rather than a preference.
-#
-# --dangerously-skip-permissions is the point of a *sandbox*: inside a
-# disposable workspace with no host filesystem, prompting for each edit buys
-# nothing and prevents unattended work. A shared build machine is the one
-# target where that reasoning does not hold -- your own uid, other people's
-# work on the same filesystem, nothing disposable about it -- and skipping
-# permissions there was the barrier's warning being ignored by the very next
-# line. Forcing past the barrier says "run an agent on that machine anyway",
-# not "and give it everything".
-#
-# So: auto there. It still runs unattended for the ordinary work -- reading,
-# editing the checkout, building -- and stops to ask before the things that
-# leave it.
+# ...and which permission mode it starts in, a property of the boundary, not
+# a preference. --dangerously-skip-permissions is the point of a sandbox:
+# inside a disposable workspace, prompting for each edit buys nothing. A
+# shared build machine has no such boundary -- your own uid, other people's
+# work on the same filesystem -- so it gets auto instead: unattended for
+# ordinary work (reading, editing, building), asking before anything that
+# leaves the machine.
 CLAUDE_MODE=(--dangerously-skip-permissions)
 
 # --- verify the sandbox ------------------------------------------------------
-# Relaxed permissions are defensible only while the boundary holds, and what the
-# boundary *is* differs by target -- so this dispatches on the target rather
-# than applying one test everywhere.
+# Relaxed permissions are defensible only while the boundary holds, and what
+# it *is* differs by target -- so this dispatches on the target.
 
 if [ "$WK_TARGET_KIND" = local ]; then
-    # Claude is already in here -- this *is* the workspace, and the host verified
-    # the boundary when it started this one. Launching another agent from inside
-    # would nest a relaxed-permission session in a sandbox nothing re-measured,
-    # which is the one thing the check below exists to prevent.
+    # This *is* the workspace already; the host verified the boundary when it
+    # started it. Nesting another relaxed session here would skip that
+    # verification, which is what this refusal prevents.
     die "already inside workspace '$(wk_self)' -- run 'claude' directly"
 fi
 
 if [ "$WK_TARGET_KIND" = remote ]; then
-    # A barrier, not a refusal: it is the user's machine and their call. But it
-    # is the one target with no boundary of any kind -- a shared box, your own
-    # uid, other people's work on the same filesystem, and `--dangerously-skip-
-    # permissions` on top. Nothing here is contained, so the warning is the
-    # containment.
+    # A barrier, not a refusal -- it's the user's machine and their call. This
+    # is the one target with no boundary at all, so the warning is the containment.
     barrier "'$NAME' is on the shared build machine '$TARGET', which has no sandbox at
     all: no container, no separate uid, no filesystem boundary, and other
     people's work on the same machine. An agent there is an agent on that
@@ -107,19 +63,11 @@ if [ "$WK_TARGET_KIND" = remote ]; then
 
     # Forced, and now it has to actually work.
     #
-    # Test the property, not the file -- the same rule `wk sudo` follows. A
-    # shared build box very often has a Claude CLI on PATH that *somebody else*
-    # installed system-wide with npm, and an npm install runs on that machine's
-    # own node: measured on devbox-arm64-2, `/usr/local/bin/claude` under node
-    # v16.19.0 dies before printing anything with "ReferenceError:
-    # ReadableStream is not defined" (it became a global in node 18). Checking
-    # `command -v claude` said yes to that, and wk handed the session over to a
-    # program that cannot start.
-    #
-    # So: find one that *runs*, prefer the one in your own home, and launch it
-    # by path. By path because PATH ordering is not ours to fix on a machine we
-    # share -- with /usr/local/bin ahead of ~/.local/bin, installing a working
-    # one would still leave the broken one selected.
+    # Test the property, not the file (same rule as `wk sudo`): a shared box's
+    # `claude` on PATH may be someone else's npm install running under too old
+    # a node (Claude Code needs 18+) and dying silently. So find one that
+    # *runs*, prefer the one in your own home, and launch it by path -- PATH
+    # ordering on a shared machine is not ours to fix.
     CLAUDE_BIN=$(t_exec "$NAME" bash -lc '
         for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)"; do
             [ -n "$c" ] && [ -x "$c" ] || continue
@@ -129,38 +77,28 @@ if [ "$WK_TARGET_KIND" = remote ]; then
 
     if [ -z "$CLAUDE_BIN" ]; then
         warn "there is no Claude CLI on $TARGET that runs"
-        # What was found and why it does not work, because "install it?" is a
-        # question somebody can only answer knowing that. Single-quoted, so it
-        # is the *far* side's shell that expands $c and $(node -v) -- with one
-        # deliberate exception, the target's name, which only this side knows.
+        # Single-quoted so the *far* side's shell expands $c and $(node -v);
+        # only $TARGET, which just this side knows, is substituted here.
         _diag=$(t_exec "$NAME" bash -lc '
             c=$(command -v claude 2>/dev/null) || true
             if [ -n "$c" ]; then
                 echo "  on PATH:  $c"
                 echo "  node:     $(node -v 2>&1 | head -1)  (Claude Code needs 18 or newer)"
-                # Not the error text, deliberately. When an npm-installed
-                # Claude dies on an old node, what it prints is a file URL and
-                # then the whole offending line of minified bundle -- tens of
-                # kilobytes with the actual sentence somewhere inside it. Any
-                # grep clever enough to find it is a grep that will print
-                # minified JavaScript on the day it guesses wrong, so this
-                # names the command that shows it instead.
+                # Not the error text: an old-node npm install dies printing a
+                # file URL and kilobytes of minified bundle, so this names the
+                # command that shows it instead of trying to grep it out.
                 echo "  it fails to start; see for yourself:  ssh '"$TARGET"' claude --version"
             else
                 echo "  nothing called claude is on PATH in a login shell there"
             fi' 2>/dev/null) || true
-        # Captured and then printed, rather than redirected in place: the
-        # obvious `2>/dev/null >&2` sends stdout to whatever fd 2 is *now*,
-        # which is the /dev/null the first redirection just made -- so the
-        # diagnosis went nowhere.
+        # Captured then printed rather than redirected in place: `2>/dev/null
+        # >&2` would send stdout to the /dev/null the first redirect just made.
         [ -z "$_diag" ] || printf '%s\n' "$_diag" >&2
 
-        # Offered, never assumed: installing an agent onto a machine other
-        # people share is a decision about their machine as much as yours, and
-        # `confirm` declines by itself when there is nobody to ask. The same
-        # installer the container and the guest use -- one command, one place
-        # it comes from -- and it carries its own runtime into your home
-        # directory, so it neither needs nor touches the shared node.
+        # Offered, never assumed: installing onto a shared machine is a
+        # decision about someone else's machine too (`confirm` declines when
+        # there's nobody to ask). Same installer as container/guest, and it
+        # carries its own runtime, so it doesn't touch the shared node.
         if confirm "install one on $TARGET now (into your own ~/.local, as you)?"; then
             t_exec "$NAME" bash -lc 'curl -fsSL https://claude.ai/install.sh | bash' \
                 || die "the installer failed on $TARGET"
@@ -186,26 +124,22 @@ if [ "$WK_TARGET_KIND" = remote ]; then
 fi
 
 if [ "$WK_TARGET_KIND" = container ]; then
-    # `wk verify` measures the properties from inside the workspace: no network
-    # interface, egress refused outside the allowlist, no path with the proxy
-    # bypassed, no host filesystem. If any of that has regressed -- a
-    # hand-edited container, a proxy that is not running -- the right response
-    # is to stop, not to start an autonomous agent anyway.
+    # `wk verify` measures container properties from inside: no network
+    # interface, egress refused outside the allowlist, no host filesystem. If
+    # any of that regressed, the right response is to stop, not proceed anyway.
     "$WK_ROOT/cmd/verify" "$NAME" \
         || barrier "the sandbox around '$NAME' is not intact (see above), and relaxed
     permissions are only defensible while it is."
 fi
 
 if [ "$WK_TARGET_KIND" = vm ]; then
-    # Deliberately NOT `wk verify`. Every property that check measures is a
-    # container property -- no network interface, a unix-socket proxy -- and a
-    # macOS guest has none of them by construction. Its egress is filtered from
-    # the *host* by Softnet instead, which cannot be measured from in here.
+    # Deliberately NOT `wk verify`: every property it measures is a container
+    # property, and a macOS guest has none of them by construction. Its egress
+    # is filtered on the *host* by Softnet instead, unmeasurable from in here.
     #
-    # Two checks. The filter must exist now, and the guest must not have been
-    # *booted* without it -- Softnet applies at `tart run`, so a binary
-    # installed after boot filters nothing until the guest restarts. The boot
-    # writes the marker; both fail closed, matching the container path above.
+    # Two checks: the filter must exist now, and the guest must not have been
+    # *booted* without it -- Softnet applies at `tart run`, so installing it
+    # after boot filters nothing until restart. Both fail closed.
     if [ -f "$WK_VM_DIR/$NAME.unfiltered" ] && [ -z "${WK_VM_UNFILTERED:-}" ]; then
         barrier "'$NAME' was booted with NO egress filter.
     Restart it filtered:  wk vm stop $NAME && wk vm start $NAME
@@ -227,24 +161,18 @@ if [ "$WK_TARGET_KIND" = vm ]; then
 fi
 
 # --- git push: off while an agent has the keyboard ---------------------------
+# The one thing a disposable workspace cannot contain is a push -- it leaves
+# the blast radius by definition. So the deploy keys are held back for the
+# duration (`wk push`, which moves them out of the mount rather than setting
+# a flag an agent could clear).
 #
-# The one thing a disposable workspace cannot contain is a push: it leaves the
-# blast radius by definition, and the failures that produced this rule were
-# exactly that -- work overwritten on a fork, comments posted to reviewers. So
-# the deploy keys are held back for the duration (`wk push`, which moves them
-# out of the mount rather than setting a flag an agent could clear).
+# Turned back on only for an interactive session, where somebody is there to
+# notice: a headless run re-enters this command every few minutes via the
+# babysitter's fix loop, and leaving push on between attempts would be the
+# switch flapping open unattended. Off is also the safe crash/kill direction.
 #
-# Turned back on afterwards only for an interactive session, where somebody is
-# there to notice: a headless run is the babysitter's fix loop, which re-enters
-# this command every few minutes, and leaving push on between its attempts
-# would be the switch flapping open for hours unattended. Off is also where a
-# crash, a kill or a dropped ssh leaves it, which is the safe direction.
-#
-# Container targets only, because that is where the deploy keys are: they live
-# in the podman VM's store and are mounted into containers. A macOS guest has
-# no push credential at all -- nothing installs one -- so there is nothing to
-# hold back, and touching the switch from here would only turn push off for
-# unrelated container workspaces.
+# Container targets only: the deploy keys live in the podman VM's store and
+# mount only into containers. A macOS guest has none to hold back.
 PUSH_WAS_ON=""
 if [ "$WK_TARGET_KIND" = container ] && "$WK_ROOT/wk" push status >/dev/null 2>&1; then
     PUSH_WAS_ON=1
@@ -267,15 +195,11 @@ wk_atexit restore_push
 
 info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
 
-# The permission mode was chosen with the boundary, up where the boundary is
-# known (CLAUDE_MODE).
-#
-# Headless when there is no terminal: `wk build --babysit`'s fix loop runs
-# this under nohup with `-p`, and t_exec_tty would demand a tty from a process
-# that owns none. Same sandbox checks either way -- that is why the babysitter
-# comes through here instead of running claude itself.
-# Not exec'd, so the EXIT trap above still runs when Claude exits: the session
-# is the thing being bounded, and the switch has to close behind it.
+# CLAUDE_MODE was chosen above, with the boundary. Headless when there's no
+# terminal: the babysitter's fix loop runs this under nohup with `-p`, and
+# t_exec_tty would demand a tty from a process that owns none -- same sandbox
+# checks either way, which is why it comes through here rather than running
+# claude directly. Not exec'd, so the EXIT trap still runs when Claude exits.
 rc=0
 if [ -t 0 ] && [ -t 1 ]; then
     t_exec_tty "$NAME" env WK_WORKSPACE="$NAME" \

@@ -1,51 +1,37 @@
 # Boot driver: a Pi that boots an image from its USB stick, with the SD card
 # behind it as the rescue role.
 #
-# This exists because the rpi4 can have neither of the other two mechanisms and
-# needs the property both of them provide.
+# This exists because the rpi4 has neither of the other two mechanisms and
+# needs the property both provide.
 #
-# `boot/rpi5-usb.sh` uses `set_reboot_order` through the firmware mailbox --
-# a genuine one-shot, and Raspberry Pi 5 only. Arming the medium itself is the
-# answer here, and the property that makes it the right one for a benchmark is
-# fall-through: a board offered a stick with nothing bootable on it skips to
-# the next entry and comes up on its rescue system, reachable. Firmware that
-# gets as far as start4.elf and no further *halts* instead -- no fall-through,
-# nothing over the wire -- and a lane that runs unattended cannot have a state
-# whose only exit is a hand on the power supply.
-#
-# So the arming moves to the boot medium:
+# `boot/rpi5-usb.sh` arms through the firmware mailbox (`set_reboot_order`),
+# a genuine one-shot, Raspberry Pi 5 only. Here arming moves to the boot
+# medium instead, since a board offered a stick with nothing bootable on it
+# falls through to the next entry; firmware that gets as far as start4.elf
+# and no further *halts* instead, with nothing over the wire to recover it.
 #
 #   BOOT_ORDER is USB -> SD -> restart (`wk pi boot-order <host> usb-first`),
 #   permanently, and arming is whether the stick presents a *bootable
-#   partition* for the firmware to find -- which is one byte of the MBR.
+#   partition* for the firmware to find -- one byte of the MBR.
 #
-# **Not the second-stage file, and the distinction is worth a power cycle.**
-# Disarming by renaming `start4.elf` aside rests on "a device the firmware
-# cannot boot is a device it skips" -- which is drawn from the right observation
-# and the wrong state: what is watched skipping is a stick carrying a single
-# **ext4** partition and no FAT at all. A stick with a perfectly valid
-# FAT boot partition that happens to be missing `start4.elf` is a different
-# thing entirely, and the firmware **halts** on it -- the same halt, reached
-# from a new direction, and the board went silent mid-afternoon.
+# Not the second-stage file: renaming `start4.elf` aside still halts the
+# firmware when a valid FAT partition is present but incomplete, rather than
+# skipping. Disarming instead flips partition 1's MBR type byte from 0x0c
+# (FAT32 LBA) to 0x83 (Linux), so the firmware finds no boot filesystem at
+# all and moves to the SD card -- nothing erased, the 4.6 GB on the stick
+# untouched.
 #
-# So the disarm now reproduces the state that was observed to skip: partition
-# 1's type byte in the MBR is flipped from 0x0c (FAT32 LBA) to 0x83 (Linux), so
-# the firmware finds no boot filesystem on the device at all and moves to the
-# SD card. Nothing is erased, no filesystem is touched, and the 4.6 GB on the
-# stick stays exactly where it is -- the partition is still there and still
-# mountable by anything that looks at the superblock rather than the table.
-#
-# One byte, written with dd at a fixed offset rather than through sfdisk,
-# because the self-disarm runs *from* that disk with partition 2 mounted as
-# root: a tool that rewrites the table asks the kernel to re-read it, and a
+# Written with dd at a fixed offset rather than through sfdisk: the
+# self-disarm runs *from* that disk with partition 2 mounted as root, and a
+# tool that rewrites the table asks the kernel to re-read it, while a
 # surgical write to offset 450 asks nothing of anybody.
 #
-# **And it is still a one-shot**, which is the part worth reading twice. The
-# image disarms *itself* on first boot -- it renames its own start4.elf aside
-# before the benchmark starts -- so any later reboot falls through to the SD
-# card. That is the same "reverts by itself unless claimed" property the rpi5
-# gets from the firmware, reached without the primitive the Pi 4 does not have.
-# A run that wedges the board costs a reboot, not a journey.
+# Still a one-shot: the image disarms *itself* on first boot, renaming its
+# own start4.elf aside before the benchmark starts, so any later reboot
+# falls through to the SD card -- the same "reverts by itself unless
+# claimed" property the rpi5 gets from firmware, reached without the
+# primitive the Pi 4 does not have. A run that wedges the board costs a
+# reboot, not a journey.
 #
 # The failure modes, all of which end somewhere reachable:
 #
@@ -78,15 +64,12 @@ PIUSB_TYPE_DISARMED=83   # Linux -- no boot filesystem, as far as firmware sees
 
 # The stick, as the board has it right now.
 #
-# Not `$MACH_DEVICE` directly, and the difference is the whole point: that is a
-# kernel name from a conf, and kernel names are assigned in enumeration order.
-# This board has exactly one SD and one USB, so "the USB" is unambiguous
-# evidence and survives the stick being swapped for another -- where the name
-# does not (disk_resolve_own, boot/disk.sh).
+# Not `$MACH_DEVICE` directly: that is a kernel name from a conf, assigned in
+# enumeration order, while "the USB" is unambiguous evidence that survives
+# the stick being swapped for another (disk_resolve_own, boot/disk.sh).
 #
-# Resolved once per process. Both the read and the write below use it, because
-# two resolutions could land on different disks and the read-back would then be
-# confirming a byte on a stick nobody wrote to.
+# Resolved once per process: two resolutions could land on different disks,
+# and the read-back would then confirm a byte on a stick nobody wrote to.
 _PIUSB_DEV=""
 piusb_dev() {
     [ -n "$_PIUSB_DEV" ] || _PIUSB_DEV=$(disk_own_or_declared)
@@ -105,17 +88,14 @@ _piusb_type() {
 
 # Write it, then read it back.
 #
-# printf's octal escape rather than a here-doc, so exactly one byte leaves the
-# shell; conv=notrunc because dd would otherwise truncate the whole device to
-# one byte, which on a boot medium is not a recoverable mistake.
+# printf's octal escape rather than a here-doc, so exactly one byte leaves
+# the shell; conv=notrunc because dd would otherwise truncate the whole
+# device to one byte.
 #
-# The read-back is not ceremony. This byte decides whether the board comes back
-# at all: leave it 0x0c when it should be 0x83 and the next boot finds a FAT
-# partition it cannot complete from, which halts the firmware and costs a trip
-# to the device. A write that silently did nothing -- a full filesystem, a
-# stick that went read-only, an sudo that failed in a way ssh swallowed --
-# looks exactly like a write that worked, right up until the machine does not
-# come back. So it is confirmed here, where saying so is free.
+# The read-back is not ceremony: this byte decides whether the board comes
+# back at all, and a write that silently did nothing (a full filesystem, a
+# read-only stick, an sudo failure ssh swallowed) looks exactly like one
+# that worked, right up until the machine does not come back.
 _piusb_set_type() {
     local hex="$1" got
     m_ssh "printf '\\$(printf '%03o' 0x$hex)' \
@@ -183,32 +163,28 @@ b_disarm_note() {
 
 # The other half of the one-shot, and the half that runs *inside* the image.
 #
-# `wk sysimage build` installs this as an early systemd unit, so a booted image
-# takes its own start4.elf out of the firmware's way before it does anything
-# else. From then on the stick is not bootable and any reboot -- clean, panic,
-# watchdog or power cut -- lands on the SD card, reachable.
+# `wk sysimage build` installs this as an early systemd unit, so a booted
+# image takes its own start4.elf out of the firmware's way before it does
+# anything else; from then on any reboot -- clean, panic, watchdog or power
+# cut -- lands on the SD card.
 #
-# The driver owns this rather than the image profile because it is the same
-# mechanism as b_arm read backwards, and a second copy of the two filenames is
-# a second place for them to disagree. Inside the image the stick's boot
-# partition is its own /boot/firmware.
-#
-# No systemd calls in here. The unit is something systemd *orders*; a unit that
-# asks systemd to do work while systemd is waiting for it is the deadlock
-# recorded in cmd/image's bootcmd comment.
+# The driver owns this rather than the image profile: it is the same
+# mechanism as b_arm read backwards, and a second copy of the two filenames
+# is a second place for them to disagree. No systemd calls in here -- the
+# unit is something systemd *orders*, and asking it to do work while it
+# waits for this is the deadlock recorded in cmd/image's bootcmd comment.
 b_self_disarm_sh() {
-    # The disk this is running from, derived at run time: the image cannot be
-    # told which device it was written to, because the whole point is that it
-    # is the same image whatever it was written to. /boot/firmware is its own
-    # boot partition, so its parent is the disk whose table to edit.
+    # The disk this is running from, derived at run time: the image cannot
+    # be told which device it was written to, since it is the same image
+    # whatever it was written to. /boot/firmware is its own boot partition,
+    # so its parent is the disk whose table to edit.
     #
-    # **No single quote may appear in what this returns.** It is interpolated
-    # into a systemd `ExecStart=/bin/sh -c '...'`, which is single-quoted, so
-    # one of its own would close that string early and hand systemd three
-    # fragments instead of one command: `printf '\203'` does exactly that. Read
-    # the unit out of a built image rather than waiting for the board to fail to
-    # come back, which is the
-    # only other way it was going to be found. wk selftest asserts it now.
+    # **No single quote may appear in what this returns.** It is
+    # interpolated into a systemd `ExecStart=/bin/sh -c '...'`, single-quoted,
+    # so one of its own would close that string early and hand systemd three
+    # fragments instead of one command -- `printf '\203'` does exactly that.
+    # wk selftest asserts this against a built image, since a failure here
+    # only otherwise shows up as a board that does not come back.
     printf "%s" "b=/boot/firmware; [ -d \$b ] || b=/boot; \
 p=\$(findmnt -no SOURCE \$b) && \
 d=/dev/\$(lsblk -no PKNAME \"\$p\") && \
@@ -223,11 +199,10 @@ b_evidence() {
     m_ssh "$EEPROM_CONFIG_CMD" \
         | sed -n 's/^BOOT_ORDER=/eeprom_boot_order=/p' || true
 
-    # Captured first, then judged. `$(cmd || echo unreadable)` *appends* the
-    # fallback to whatever the command already printed, so a call that answered
-    # and then exited nonzero reported both -- a status line reading
-    # "usb_stick=disarmed" followed by a bare "unreadable", which is two
-    # answers to one question and no way to tell which is live.
+    # Captured first, then judged: `$(cmd || echo unreadable)` *appends* the
+    # fallback to whatever the command already printed, so a call that
+    # answered and then exited nonzero would report both -- two answers to
+    # one question with no way to tell which is live.
     local state
     state=$(piusb_state 2>/dev/null) || true
     printf 'usb_stick=%s\n' "${state:-unreadable}"
@@ -238,12 +213,10 @@ b_media() {
     local id state
     case "${MODE:-}" in
         bench*) printf 'booted from its USB stick (system %s); SD card is the rescue' "${MODE#bench }"; return 0 ;;
-        # The board is on its SD card: the base image, reachable, and the stick
-        # can be read from here like it can from host mode -- so this says what
-        # is on the stick rather than stopping at "not a bench system". It used
-        # to fall into the last case and report a reachable board unreachable,
-        # which is the mistake the whole `base` distinction exists to stop
-        # making in the other direction.
+        # The board is on its SD card: the base image, reachable, and the
+        # stick can be read from here like it can from host mode -- so this
+        # reports what is on the stick rather than stopping at "not a bench
+        # system", which would report a reachable board as unreachable.
         base*)  id=$(b_device_image 2>/dev/null || true)
                 state=$(piusb_state 2>/dev/null) || true
                 printf 'booted its SD card -- the base image (%s), not a bench system; USB stick %s holds %s, %s' \

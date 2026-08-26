@@ -90,11 +90,12 @@ well as the inside, so a result from in here would mean nothing.
 
 ## Network
 
-**In a Linux workspace**, egress is restricted to the Anthropic API, GitHub, and
-the two Raspberry Pi test devices over Tailscale. Everything else — including
-the rest of the local network — is dropped by a firewall you cannot see or
-modify. If a fetch fails, that is expected: find another way rather than trying
-to work around it.
+**In a Linux workspace**, egress goes through one proxy that allows a fixed set
+of hostnames -- `ALLOWED_HOSTS` in `container/proxy/wk-proxy.py` is the list,
+and the only one -- plus the fleet's test devices over Tailscale. Everything
+else, the rest of the local network included, is dropped by a boundary you
+cannot see or modify. If a fetch fails, that is expected: find another way
+rather than trying to work around it.
 
 **In a macOS workspace the same allowlist applies**, enforced differently: the
 guest has a real network interface, and Softnet — a packet filter running on

@@ -1,30 +1,52 @@
 #!/usr/bin/env bash
 #
-# wk start -- bring everything back up after `wk stop`.
+# wk start [<workspace>] -- bring one workspace back up, or everything
+# wk: where=workspace name=optional forward=no group=hosts needs podman
 #
-# Starts the podman machine, then every workspace container that exists.
-# Container init does not re-run: .wkdev-init guards its task list behind
-# /run/.wkdev-init-done, so a restart is quick and does not re-provision.
+# With a workspace named, brings only that workspace's environment back
+# through the driver contract (t_start) -- a container's machine started if
+# it was not already, then the container itself; a macOS guest booted. A
+# target with no notion of starting a single workspace (a remote build
+# machine is always reachable; a workspace cannot start itself) says so and
+# does nothing else.
+#
+# `forward=no`, the same reason `wk stop` gives: this has to run on the host
+# that holds the environment, never forwarded into the podman VM.
+#
+# With no workspace, starts the podman machine, then every workspace
+# container that exists. Container init does not re-run: .wkdev-init guards
+# its task list behind /run/.wkdev-init-done, so a restart is quick and does
+# not re-provision. macOS guests are listed rather than started (they compete
+# with the podman machine for memory, so bringing every guest up unattended
+# would swap) -- `wk start <that-workspace>` is how to bring one back.
+#
+#   wk start                 the podman machine, then every container
+#   wk start <workspace>     only that workspace's environment
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
-# Named _in_machine because targets/vm.sh, sourced below, defines its own _vm().
-_in_machine() {
-    if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-        podman machine ssh "$WK_MACHINE" "$@" </dev/null
-    else
-        bash -c "$*" </dev/null
-    fi
-}
+NAME="${WK_NAME:-}"
 
+# --- one workspace ------------------------------------------------------------
+if [ -n "$NAME" ]; then
+    [ $# -eq 0 ] || die "'wk start $NAME' takes no options"
+    TARGET="$(ws_target "$NAME")"
+    load_target "$TARGET"
+    [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+    t_start "$NAME"
+    exit 0
+fi
+
+# --- everything ----------------------------------------------------------------
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    state=$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null || echo absent)
+    state=$(_machine_state "$WK_MACHINE")
     [ "$state" = absent ] && die "no machine '$WK_MACHINE' -- run ./setup"
     if [ "$state" != running ]; then
         info "starting machine '$WK_MACHINE'"
@@ -44,12 +66,9 @@ else
     info "no stopped containers"
 fi
 
-# macOS VMs are deliberately NOT started here. They do not share the podman
-# machine's memory -- they compete with it -- so bringing both up unattended is
-# how the desktop ends up swapping. Say they are there and let the choice be
-# made explicitly.
+# macOS VMs are not started here: they compete with the podman machine for
+# memory, so bringing both up unattended causes swapping. List them instead.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    . "$WK_ROOT/lib/target.sh"
     . "$WK_ROOT/targets/vm.sh"
     if _tart_bin >/dev/null 2>&1; then
         _guests=$(t_list 2>/dev/null | awk -F'\t' '$2 != "running" { print $1 }' | tr '\n' ' ')

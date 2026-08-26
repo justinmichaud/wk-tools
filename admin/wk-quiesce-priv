@@ -181,10 +181,9 @@ gpu_card() {
 # it would; nothing on seat0, including mutter, can open a device it was never
 # handed.
 #
-# Moving it to a different seat, rather than off every seat, was the first
-# attempt, and the wrong one: giving it a distinct ID_SEAT makes logind create
-# a real seat there, and gdm starts a greeter on every seat it finds -- so
-# instead of one session on the intended chip, it was two, one per chip.
+# Not a distinct ID_SEAT instead: that makes logind create a real seat, and
+# gdm starts a greeter on every seat it finds -- one session per chip instead
+# of one.
 #
 # The rule lives under /run, not /etc, so a crashed helper never leaves a
 # device permanently hidden -- it disappears at the next boot even if nothing
@@ -209,10 +208,8 @@ seat0_has_card() {
 # its cardN-CONNECTOR-M children. 71-seat.rules tags both with `seat` and
 # `master-of-seat` -- KERNEL=="card[0-9]*" matches a connector's name too, one
 # digit then anything -- so a rule (or a re-trigger) that only reaches the
-# bare card leaves every connector still fully on seat0, which is indeed what
-# happened on the first cut of this: the card itself came off the seat while
-# every one of its outputs stayed on, right where a display manager still
-# looks for something to show on.
+# bare card leaves every connector still fully on seat0, right where a display
+# manager still looks for something to show on.
 _card_paths() {
     local card="$1" p
     for p in "/sys/class/drm/$card" "/sys/class/drm/$card"-*; do
@@ -258,15 +255,13 @@ _reseat() {
 # Hide $1 (a card basename) from seat0. Idempotent: re-hiding a card that is
 # already hidden just rewrites the same rule and finds it already satisfied.
 #
-# This strips the device's seat tags rather than moving it to a different
-# seat. ID_SEAT="something-else" does not hide the device, it relocates it:
-# logind creates a real seat for
-# "something-else", and gdm, being seat-aware, starts its own greeter on
-# every seat it finds -- so the result was two live sessions, one on each
-# chip, instead of one. Removing `master-of-seat` (what makes a device
-# define a seat at all) and `seat` (what makes it a member of one) leaves
-# the device with no seat whatsoever, which is what "hidden" actually needs
-# to mean: nothing to enumerate, nowhere for gdm to open a second display.
+# This strips the device's seat tags rather than relocating it to a distinct
+# ID_SEAT (see "removing a DRM device from every seat" above for why that
+# fails). Removing
+# `master-of-seat` (what makes a device define a seat at all) and `seat`
+# (what makes it a member of one) leaves the device with no seat whatsoever,
+# which is what "hidden" actually needs to mean: nothing to enumerate, nowhere
+# for gdm to open a second display.
 seat_hide() {
     local card="$1"
     {
@@ -314,12 +309,11 @@ seat_restore() {
 # properties and no seat tags whatsoever. There is nothing there for
 # TAG-="seat" to remove.
 #
-# Which is exactly how `session-gdm-bmc` came to be a no-op that reported
-# success: the hide worked -- card2 lost `seat` and `master-of-seat` from its
-# CURRENT_TAGS -- and Xorg went on enumerating the monitor through a device the
-# hide cannot see, so the desktop appeared on the real display every time. The
-# same gap is why a connector's sysfs `enabled` under-reports an X greeter:
-# NVKMS modesets outside DRM.
+# So a seat0 hide can report success -- the tags really are gone -- while Xorg
+# goes on enumerating the monitor through a device the hide never touched, and
+# the desktop still lands on the real display. The same gap is why a
+# connector's sysfs `enabled` under-reports an X greeter: NVKMS modesets
+# outside DRM.
 #
 # So the greeter is put on Wayland, where the mechanism is real. gdm's own
 # runtime-config tool is what writes it -- the same tool 61-gdm.rules uses to
@@ -370,22 +364,18 @@ wait_seat0_quiet() {
 }
 
 # --- turning the outputs off, as opposed to painting them black --------------
-# Holding DRM master with nothing to draw is only half of `off`, and for a long
-# time it was the only half: cage came up, painted black, and the monitor sat
-# there lit and black. That is what the implementation asked for. A held CRTC is
+# Holding DRM master with nothing to draw is only half of `off`: a held CRTC is
 # still scanning out a real mode -- 1024x600@59.8 here -- so the monitor has a
-# perfectly good signal to display, and displays it. Nothing in that path ever
-# asks the connector to power down, and nothing in cage ever will: 0.1.5 has no
-# idle timeout, no `wlr-output-power-management`, and no option that touches
-# DPMS.
+# perfectly good signal to display, and displays it. Nothing in that path asks
+# the connector to power down, and nothing in cage 0.1.5 will: no idle timeout,
+# no `wlr-output-power-management`, no option that touches DPMS.
 #
 # What it does export is `wlr-output-management` v4, and that protocol's
 # disable_head is not a paint -- it is an atomic commit with the CRTC off. The
 # connector goes enabled -> disabled and dpms On -> Off, the signal stops, and
-# the monitor drops into standby for want of one. It reaches hardware because it
-# is ordinary modesetting, which is exactly what fbcon's `fb_blank` was not --
-# that is the path that quietly did nothing on this driver and sent the whole
-# design down the "hold it black instead" road in the first place.
+# the monitor drops into standby for want of one. It reaches hardware because
+# it is ordinary modesetting, unlike fbcon's `fb_blank` (see session_off,
+# below), which quietly does nothing on this driver.
 #
 # Disabling every head does not release the device: wlroots keeps the DRM fd
 # open, so fbcon still cannot get back in and repaint. Both halves are needed --
@@ -474,38 +464,27 @@ outputs_power() {
 #        compare with anything.
 #
 #        Rendering on the GPU and scanning out on the BMC, with wlroots copying
-#        each finished frame across, was tried and dropped: on this board's
-#        NVIDIA + ast pairing the copy never works -- the compositor comes up
-#        but every frame fails to produce a GLES2 FBO ("EGLImage not
+#        each finished frame across, does not work on this board's NVIDIA +
+#        ast pairing: every frame fails to produce a GLES2 FBO ("EGLImage not
 #        supported"), so the BMC connector never gets an output, silently and
-#        forever. That failure doesn't even show up as the compositor refusing
-#        to start, which is the one thing this helper relies on to fail loudly.
-#        Software rendering is slower but it actually shows something.
-#   off  the screen-off placeholder. This is what `session-off` actually
-#        starts, not a lack of one: releasing DRM master entirely and trusting
-#        the kernel's own fbcon to blank the screen was the first design, and
-#        on this board's NVIDIA driver `fb_blank` never reaches real hardware
-#        -- it stops the console from being redrawn but leaves whatever frame
-#        was already latched in the scanout buffer on screen, forever, on a
-#        real monitor watched by a person rather than a test harness that only
-#        reads sysfs. Holding master sidesteps that bug instead of relying on a
-#        DPMS path this driver doesn't implement.
+#        forever -- without even the compositor refusing to start, which is
+#        the one thing this helper relies on to fail loudly. Software
+#        rendering is slower but it actually shows something.
+#   off  the screen-off placeholder `session-off` starts, not an absence of
+#        one: on this board's NVIDIA driver `fb_blank` never reaches real
+#        hardware, so releasing DRM master and trusting fbcon to blank the
+#        screen leaves whatever frame was already latched in the scanout
+#        buffer on screen, forever. Holding master plus `outputs_off` (see
+#        "turning the outputs off" above) is what actually reaches dark.
 #
-#        Holding master is not on its own enough: a compositor that holds an
-#        output and paints it black is still scanning out a real mode, so the
-#        monitor has a signal and stays
-#        lit. `outputs_off` below is the other half -- it modesets the outputs
-#        off through wlr-output-management once the compositor is up, which
-#        does reach hardware because it is modesetting rather than fb_blank.
-#
-#        The device list is the GPU alone, not both chips, and that is a
-#        limitation rather than a choice: wlroots takes the first entry in
-#        WLR_DRM_DEVICES as primary and needs a renderer that can copy frames
-#        to any secondary, which pixman cannot do for a device with no render
-#        node. Naming both got one head, silently -- the same silent drop the
-#        mirror attempt hit. So `off` darkens the monitor and leaves the BMC's
-#        chip showing whatever was last latched into it; `wk session status`
-#        prints a `lit:` line so that is visible rather than assumed.
+#        The device list is the GPU alone, not both chips: wlroots takes the
+#        first entry in WLR_DRM_DEVICES as primary and needs a renderer that
+#        can copy frames to any secondary, which pixman cannot do for a device
+#        with no render node -- naming both silently drops one head, the same
+#        way the mirror attempt above drops its frames. So `off` darkens the
+#        monitor and leaves the BMC's chip showing whatever was last latched
+#        into it; `wk session status` prints a `lit:` line so that is visible
+#        rather than assumed.
 session_on() {
     local mode="${1:-gpu}"
     local user uid runtime gpu bmc devices cage_args renderer allow_sw

@@ -1,20 +1,13 @@
 # The fleet: which machines can be booted into an image, and how.
 #
-# One verb (`wk boot`) with one driver per machine, which is the shape
-# targets/*.sh already uses -- because entering bench mode is not one
-# mechanism. The Pi 5 takes a firmware one-shot over SSH, the rpi4 arms its
-# own stick, moose would take BMC virtual media, and the MBP cannot be booted
-# remotely at all: its driver is hands-on by nature (Apple Silicon's boot
-# volume selection goes through a LocalPolicy in the machine's own secure
-# storage -- there is nothing to hand an image to over the wire). See
-# docs/HANDOFF-boot.md, "the headline".
-#
-# Reaching a machine is lib/reach.sh's, and this file needs it: `image_addr`
-# asks the tailnet first and falls back to a sweep. Sourced here rather than left
-# to each caller, because four of them (cmd/boot, cmd/sysimage, cmd/pi,
-# cmd/bench) load this file and not that one -- so a dependency left to the
-# caller is a dependency that is missing in most of them. Guarded, so loading
-# both in either order is the same.
+# One verb (`wk boot`) with one driver per machine: entering bench mode is not
+# one mechanism (Pi 5 firmware one-shot over SSH, rpi4 arms its own stick,
+# moose BMC virtual media, MBP not remotely bootable -- Apple Silicon's boot
+# volume selection is a LocalPolicy in its own secure storage). See
+# docs/HANDOFF-boot.md.
+# Sourced here since five callers (cmd/boot, cmd/sysimage, cmd/pi, cmd/bench,
+# cmd/doctor) load this file and not lib/reach.sh. Guarded so loading both is
+# order-safe.
 command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 
 # A machine sets:
@@ -25,23 +18,21 @@ command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 #   MACH_ROOT     the root device of its host mode -- never written to
 #   MACH_PROFILE  its default system profile
 #   MACH_NOTE     one line, for the listing
+#   MACH_DTB      the device tree its firmware boots (image_dtb_for,
+#                 lib/image.sh); empty for a machine with no board firmware
+#                 to ask -- only image_check_boot_files reads it, and only
+#                 for a machine an image is actually built for
+#   MACH_BENCH_SSH  the ssh destination for a *second*, same-address install
+#                 sharing this machine's hardware (bench/mac-lane.sh's
+#                 tolken/tolken-bench split); empty for a machine with only
+#                 one install
 
-# Reading the bootloader's configuration, on a board that may have no eeprom
-# tooling. vcgencmd is part of the VideoCore userland every Pi image carries;
-# rpi-eeprom-config is a Raspberry Pi OS package, and asking it first is how a
-# driver ends up with an empty answer on the fleet's own rpi4 -- guessing about
-# the board whose boot order was the question. Both print the same text.
-#
-# Here rather than in one driver because two of them read it. See
-# boot/rpi-eeprom.sh for the writing half.
+# vcgencmd is on every Pi image; rpi-eeprom-config, the fleet's own rpi4
+# lacks, so it is tried second. See boot/rpi-eeprom.sh for the writing half.
 EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-config 2>/dev/null || true'
 
-# The registry: one conf per machine under boot/machines/, the same shape as
-# targets/hosts/*.conf -- adding a device is adding a file, and changing a
-# role is editing one field, never code (docs/HANDOFF-vocabulary.md, the
-# lifecycle; the cattle-not-pets rule in CLAUDE.md). Each conf
-# also opens with its device's from-nothing recipe, so the file that defines
-# a machine is the file that says how to reproduce it.
+# One conf per machine, the same shape as targets/hosts/*.conf; each conf
+# opens with its device's from-nothing recipe.
 machines_dir() { echo "$WK_ROOT/boot/machines"; }
 
 machine_list() {
@@ -54,18 +45,8 @@ machine_list() {
     done
 }
 
-# The same registry, in fields rather than in prose.
-#
-# `machine_list` is for a person reading a terminal; this is for anything that
-# has to *decide* on a declaration -- today the request broker
-# (container/broker/wk-broker.py), which refuses a machine that is not
-# MACH_ROLE=bench-device and needs the field to say so. It exists here rather
-# than as a parser in the caller for the reason lib/reach.sh gives for reading
-# a conf instead of sourcing one, turned around: a conf is a shell file, so the
-# thing that must know what is *in* it uses the loader that already knows how,
-# and there is never a second reader to keep in step with the first.
-#
-# Tab-separated, one machine per line: name, role, os, profile, note.
+# Fields, not prose, for anything that has to *decide* (container/broker/
+# wk-broker.py refuses non-bench-device). Tab-separated: name/role/os/profile/note.
 machine_declare() {
     local f n
     for f in "$(machines_dir)"/*.conf; do
@@ -82,45 +63,25 @@ machine_load() {
     f="$(machines_dir)/$1.conf"
     [ -f "$f" ] || return 1
     MACH_NAME="$1"
-    # Reset every field a conf may set, so a second load in one process cannot
-    # inherit the first machine's answers -- the same rule, for the same
-    # reason, as image_profile_load.
+    # Reset every field, so a second load in one process cannot inherit the
+    # first machine's answers (same rule as image_profile_load).
     MACH_SSH=""; MACH_DRIVER=""; MACH_DEVICE=""; MACH_ROOT=""; MACH_PROFILE=""
-    MACH_NOTE=""; MACH_MAC=""; MACH_LOCAL=""; MACH_VOLUME=""
-    # The tailnet bridge a machine sits behind, if any (bridge/hosts/<name>.conf).
-    # Declared, not discovered -- the same rule as BR_CARD, and for a stronger
-    # reason: this field exists to be readable when the machine is *not*
-    # answering, so anything that had to probe to establish it would be
-    # unavailable at exactly the moment it is wanted. It changes nothing about
-    # how a machine is reached (that is ssh's ProxyJump); it is what lets an
-    # unreachable board name the next thing to check instead of reading as a
-    # dead board. dotfiles/ssh/config records the session that cost.
+    MACH_NOTE=""; MACH_MAC=""; MACH_LOCAL=""; MACH_VOLUME=""; MACH_DTB=""
+    MACH_BENCH_SSH=""
+    # Declared, not discovered: readable when the machine is unreachable.
     MACH_BRIDGE=""
     MACH_ROLE=workstation
-    # Which host can drive this machine: `any` (reached over ssh from
-    # anywhere), or an OS name for a machine that answers only for itself
-    # (the mbp) or needs host-only tooling (tart). Not cosmetic: without it
-    # `wk boot mbp --status` run from Linux probes the *driving* machine and
-    # reports a confident answer about the wrong computer.
+    # `any`, or an OS name for a machine that answers only for itself (mbp)
+    # or needs host-only tooling (tart).
     MACH_OS=any
     # shellcheck disable=SC1090
     . "$f"
     [ -n "$MACH_DRIVER" ] && [ -n "$MACH_NOTE" ] || return 1
 }
 
-# The reverse lookup: an ssh destination -> the machine it reaches.
-#
-# `wk pi` takes an ssh host, because putting a device on the tailnet is a thing
-# you do to a device rather than to a fleet entry, and it long predates the
-# fleet. But its EEPROM half needs MACH_ROLE -- a bench device wants USB
-# *first* in BOOT_ORDER and a workstation wants the network nibble gone -- and
-# looking the argument up with machine_load only works when the two names
-# coincide. They do not for the rpi4, whose ssh name is rpi4-test on purpose,
-# so the one board that must have USB first was silently getting the
-# workstation default.
-#
-# Machine names win over ssh names: `wk pi boot-order rpi4` should mean the
-# fleet's rpi4 even if some host is called that.
+# The reverse lookup: an ssh destination -> the machine it reaches. Needed
+# because the ssh name and machine name can differ (rpi4's ssh name is
+# rpi4-test); machine names win over ssh names.
 machine_by_ssh() {
     local want="$1" m
     machine_load "$want" 2>/dev/null && return 0
@@ -138,17 +99,10 @@ load_driver() {
     . "$d"
 }
 
-# ssh to a machine in host mode. BatchMode so an unreachable machine
-# fails immediately instead of prompting into a script, ConnectTimeout because
-# every fleet probe is bounded (the reliability contract in
-# docs/HANDOFF-workspace-state.md).
-#
-# MACH_LOCAL is the case where the machine under test *is* the machine driving
-# -- which is not an edge case but the normal shape for the MBP: it is the only
-# Apple Silicon machine here, so nothing else can drive its transition, and bench
-# mode is reached by rebooting this very shell out from under itself.
-# Running the same commands locally keeps every driver written against one
-# spelling; what changes is only who executes them.
+# BatchMode so an unreachable machine fails immediately instead of prompting
+# into a script; ConnectTimeout because every fleet probe is bounded.
+# MACH_LOCAL is the MBP's shape: bench mode is reached by rebooting this
+# shell out from under itself, run locally so every driver shares one spelling.
 m_ssh() {
     if [ -n "${MACH_LOCAL:-}" ]; then
         bash -c "$*"
@@ -159,75 +113,36 @@ m_ssh() {
         $(m_ssh_opts) "$MACH_SSH" "$@"
 }
 
-# The options a board needs, in code rather than in an ssh config stanza.
-#
-# There is no entry for these machines anywhere (dotfiles/ssh/config says why):
-# a node this repo owns is on the tailnet and its name is the whole address, so
-# storing one would be a second copy of a fact. What a *board* additionally
-# needs is not reachability and belongs here:
-#
-#   -l root          the driving key goes into root's authorized_keys
-#                    (disk_install_fleet), and the images permit root login. Who
-#                    to be is a property of the image, not a route to it.
-#
-#   host key         a board boots a different image on demand and each one
-#                    generates its own key, at the same name. Pinning could only
-#                    produce the man-in-the-middle warning it looks exactly like,
-#                    so nothing is pinned -- the same conclusion i_ssh reaches,
-#                    now reached once for both.
-#
-#   LogLevel ERROR   with known-hosts at /dev/null ssh announces a
-#                    permanently-added key on every connection. A warning that
-#                    fires unconditionally trains the eye to skip where real ones
-#                    appear; ERROR keeps a failure to connect audible.
-#
-# Keyed on MACH_ROLE, which is already declared, rather than on a new field: a
-# bench-device is precisely the kind of machine whose system is replaced on
-# demand. A workstation's key is stable and is left checked, because relaxing it
-# there would be a downgrade for nothing.
+# In code, not an ssh config stanza: a node this repo owns is on the tailnet,
+# so storing one there is a second copy of a fact.
+#   -l root    the driving key is in root's authorized_keys.
+#   host key   each image boots with its own fresh key
+#              (_unpinned_host_key_opts, shared with i_ssh).
+# Keyed on MACH_ROLE: a bench-device's system is replaced on demand; a
+# workstation's key stays checked.
 m_ssh_opts() {
     [ "${MACH_ROLE:-}" = bench-device ] || return 0
-    printf '%s' "-l root -o StrictHostKeyChecking=no \
-                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+    printf '%s' "-l root $(_unpinned_host_key_opts)"
 }
+
+# _unpinned_host_key_opts is in lib/reach.sh, already in scope via the source at top.
 
 m_reachable() { m_ssh true >/dev/null 2>&1; }
 
-# --- reaching the bench system ------------------------------------------------------
-#
-# The same way as host mode: by the tailnet name. A bench system is not the
-# exception it used to be -- every image this repo builds carries tailscale and
-# joins on first boot, bench systems included -- so the board answers to the
-# fleet's name for it in either mode, and there is nothing here to look up.
-#
-# When the tailnet cannot name it -- a board with no uplink, or an image built
-# with `--no-tailnet` for a measurement that has to compare against numbers
-# taken before the layer existed -- the fallback is a sweep for the hardware
-# address, which is the one fact the board keeps across every image it boots.
-# That is `reach_enumerate` (lib/reach.sh), shared with `wk find` and
-# `wk status`, and it stores nothing: the answer is only true when it is taken.
-#
-# There is no mDNS here. A `.local` name does not cross a bridge segment and
-# needs a resolver on this end, and a board the tailnet cannot name has no
-# uplink -- which a second naming service would not fix either.
-#
-# WK_IMAGE_HOST overrides everything, for a network where neither works.
+# --- reaching the bench system -----------------------------------------------
+# By the tailnet name; falls back to a MAC sweep (`reach_enumerate`,
+# lib/reach.sh) when it can't. No mDNS. WK_IMAGE_HOST overrides all.
 image_addr() {
     local a=''
     [ -n "${WK_IMAGE_HOST:-}" ] && { printf '%s' "$WK_IMAGE_HOST"; return 0; }
 
-    # The tailnet's own answer, if it has one. MACH_SSH is the name the card was
-    # seeded to join under (_tailnet_name_for, cmd/sysimage), so the two cannot
-    # disagree about what the board calls itself.
+    # MACH_SSH is the name the card was seeded to join under (_tailnet_name_for).
     a=$(reach_tailnet "${MACH_SSH:-$MACH_NAME}" 2>/dev/null | awk '{print $1}')
     [ -n "$a" ] && { printf '%s' "$a"; return 0; }
 
     [ -n "${MACH_MAC:-}" ] || { printf '%s' "${MACH_SSH:-$MACH_NAME}"; return 0; }
     a=$(reach_enumerate "$MACH_MAC" 2>/dev/null | awk '{print $1}')
-    # The name, when even a sweep says nothing. It will fail to resolve, and that
-    # is the honest outcome: a board that is neither on the tailnet nor on a
-    # segment we can see is not reachable, and an address invented here would
-    # only move the failure somewhere less obvious.
+    # A failed sweep still returns the name, to fail resolving it honestly.
     printf '%s' "${a:-${MACH_SSH:-$MACH_NAME}}"
 }
 
@@ -236,60 +151,32 @@ image_hostname() {
         || printf '%s' "$MACH_NAME"
 }
 
-# The bench system's host key is not the host install's, and never will be:
-# they are different installs on the same hardware, on the same address. A shared
-# known_hosts would report that as the man-in-the-middle warning it looks
-# exactly like.
-#
-# A separate file was the first answer and it was not enough, because the key
-# does not change *once* -- it changes every build. `wk sysimage build` produces a
-# fresh rootfs, ssh generates a fresh host key in it, and the next image boots
-# at the same address as the last. So the second image ever booted on a machine
-# arrived with a changed key, `accept-new` refused it (that mode accepts keys
-# it has never seen, not keys that have moved), and `wk boot --status` reported
-# a running, healthy, pingable board as unreachable.
-#
-# So nothing is pinned here. That is not a shrug: a key with no continuity
-# across builds cannot authenticate anything, and pinning one can only produce
-# false alarms of exactly the kind that just cost an hour. What identifies a
-# bench system is `/etc/wk-image`, which b_probe reads and which names the build --
-# and that is a stronger statement than a key would be, because it says *which*
-# image answered rather than merely that something did.
-#
-# The same conclusion `dotfiles/ssh/config` already reached for the rescue
-# role: "the host key is deliberately not pinned. The whole point of this board
-# is that it boots a different image on demand, and each one brings its own."
+# Different installs at the same address would trip a man-in-the-middle
+# warning in a shared known_hosts (_unpinned_host_key_opts, shared with m_ssh_opts).
 i_ssh() {
+    # shellcheck disable=SC2046
     ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -o LogLevel=ERROR \
+        $(_unpinned_host_key_opts) \
         "$(id -un)@$(image_addr)" "$@"
 }
 
+# By ssh alias -- host or bench mode, whichever `dest` names. Shared by
+# bench/mac-lane.sh and bench/mac-ab.sh so both halves agree on the timeout.
+# No unpinned-host-key handling: stable macOS installs, not a regenerating board.
+mac_ssh() {
+    local dest="$1"; shift
+    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$dest" "$@"
+}
+
 # --- the arming record -------------------------------------------------------
-#
-# `wk boot` is a mode transition, and no probe can derive the *intent* half in
-# full: once armed, the firmware register and the running system look exactly
-# as they did a moment before. So arming leaves a small record of intent --
-# and exactly one copy of it, on the machine it describes, next to the boot
-# mechanism it describes. A second copy on the driving workstation would be
-# two records of one fact, which rule 1 forbids even while they still agree.
-#
-# Everything else about the transition is derived from evidence: whether the
-# machine has booted since the arming, and what it says it is when it answers.
+# `wk boot` is a mode transition, and no probe can derive the *intent* half:
+# once armed, the firmware register and running system look unchanged. So
+# arming leaves one record of intent on the machine it describes -- a second
+# copy on the driving workstation would be two records of one fact (rule 1).
 MACH_RECORD=/var/lib/wk/boot-armed
 
-# Written by the machine, on the machine, and stamped with the machine's own
-# boot id and clock. Only `armed_by` comes from here, because only this end
-# knows it. The boot id is the load-bearing field: "has this arming been
-# spent" is then a comparison of two values from one kernel, not of two
-# machines' wall clocks.
-#
-# It comes through `b_boot_id` rather than out of /proc directly, because a
-# boot id is a per-platform question -- Linux has one to read and macOS has to
-# derive one from kern.boottime -- and a record whose id is written by one rule
-# and read by another compares two different things and always disagrees.
+# Stamped with its own boot id: "has this arming been spent" is then a
+# comparison of two values from one kernel, not two machines' wall clocks.
 record_write() {
     m_ssh "sudo mkdir -p $(dirname $MACH_RECORD) && sudo tee $MACH_RECORD >/dev/null <<EOF
 image=$1
@@ -302,40 +189,29 @@ armed_boot_id=$(b_boot_id)
 EOF"
 }
 
-# Only host mode can be asked: the record lives on the host install's root,
-# and a bench system does not mount it. Answering "no record" from inside
-# bench mode would be a lie, so the caller gets nothing and decides on
-# evidence instead.
+# Only host mode: the record lives on the host install's root, which a bench
+# system does not mount. Returns nothing rather than a lying "no record".
 record_read() {
     [ "${MODE_CHANNEL:-host}" = host ] || return 0
     m_ssh "sudo cat $MACH_RECORD 2>/dev/null" || true
 }
 record_clear() { m_ssh "sudo rm -f $MACH_RECORD"; }
 
-# Refuse to mutate a machine that is between `wk boot` and the reboot it asked
-# for. Load the machine first; this probes it.
-#
-# An arming is a one-shot the machine has *not yet consumed*, so in that window
-# the filesystem answering ssh is not the one the machine is about to run.
-# Writing the medium it is armed for destroys the boot it was asked to make;
-# deploying a build into the system that is answering puts the files on the
-# disk it is about to leave. Both look like they worked, and both are only
-# discovered after the reboot -- which is the expensive place to discover
-# anything about a board.
-#
-# Evidence rather than the record alone, the same rule `wk boot --status` uses:
-# a record whose boot id is not the machine's current one has been *spent*, and
-# refusing on a spent record would refuse every command after every bench run.
-# A machine already in bench mode is not armed for anything -- the transition
-# has happened -- so it passes.
+# Refuse to mutate a machine between `wk boot` and the reboot it asked for.
+# Load the machine first; this probes it. In that window the filesystem
+# answering ssh is not the one about to run, so writing or deploying lands on
+# the disk about to be left -- both look like they worked and fail silently.
+# Evidence, not the record alone: a record whose boot id is not the current
+# one has been *spent* (else this would refuse every command after every
+# bench run).
 machine_armed_barrier() { # <what this command would do>
     local what="$1" rec img armed_boot now_boot
     b_probe >/dev/null 2>&1 || true
     [ "${MODE:-}" = host ] || return 0
     rec=$(record_read 2>/dev/null || true)
-    img=$(printf '%s\n' "$rec" | sed -n 's/^image=//p' | head -1)
+    img=$(kv_get image <<<"$rec")
     [ -n "$img" ] || return 0
-    armed_boot=$(printf '%s\n' "$rec" | sed -n 's/^armed_boot_id=//p' | head -1)
+    armed_boot=$(kv_get armed_boot_id <<<"$rec")
     now_boot=$(b_boot_id 2>/dev/null || true)
     if [ -n "$armed_boot" ] && [ -n "$now_boot" ] && [ "$armed_boot" != "$now_boot" ]; then
         return 0    # spent: the machine has rebooted since it was armed
@@ -347,37 +223,20 @@ machine_armed_barrier() { # <what this command would do>
 }
 
 # --- shared driver parts -----------------------------------------------------
-#
-# Machine-independent, so they live here rather than in any one driver: only
-# the *arming* mechanism differs between a Pi 5 (a firmware one-shot), a Pi 4
-# (server-side, because set_reboot_order is Pi 5 only) and moose (BMC virtual
-# media). Everything else -- which role answered, when it booted, rebooting it,
-# writing its boot device, reading its offline dump -- is the same work.
+# Only the *arming* mechanism differs per machine (Pi 5 firmware one-shot,
+# Pi 4 server-side, moose BMC virtual media); everything else is shared here.
 
 # Which mode is answering, and on which channel. Evidence, never the record:
-# a bench system writes an identity marker and the host install does not, and
-# the two are reached completely differently -- the host install over the
-# tailnet, the bench system over the LAN, because it carries no tailscale and
-# never will.
+# a bench system writes an identity marker the host install does not. Sets
+# MODE and MODE_CHANNEL rather than printing, since a channel found in a
+# command substitution is gone by the time anyone acts on it.
 #
-# Sets MODE and MODE_CHANNEL, rather than printing the mode: everything
-# downstream has to talk to whatever actually answered, and a probe whose
-# channel is discovered in a command substitution loses it on the way out --
-# the subshell that computed it is gone by the time anyone acts on it.
-# What a system says about itself and what it is actually running from, in one
-# round trip. The second half is the one that was missing.
-# Every `case` pattern below opens with `(`, and that is not a style choice:
-# bash 3.2 -- which is the bash macOS ships, and the one this repository is
-# required to run under -- cannot parse a `case` inside a `$( … )` unless the
-# patterns are parenthesised on both sides. Its parser counts the closing `)` of
-# a pattern as the end of the command substitution and then finds a `;;` it has
-# no grammar for.
-#
-# The failure is at *load* time, not at use: `. boot/machines.sh` aborts, so
-# `wk boot`, `wk pi` and `wk status`'s fleet block all die on a stock Mac. It
-# went unnoticed because `bash` here is homebrew's 5.2 and because the parse
-# check in `cmd/selftest` picks files by shebang -- which no sourced library
-# has, so nothing else catches it until this runs under /bin/bash.
+# Every `case` pattern below opens with `(`: bash 3.2 -- the bash macOS ships
+# -- cannot parse a `case` inside a `$( … )` without both-sided parens, or its
+# parser reads the closing `)` as the end of the substitution and finds a
+# `;;` it has no grammar for. The failure is at *load* time: `.
+# boot/machines.sh` aborts, so `wk boot`, `wk pi` and `wk status` all die on
+# a stock Mac.
 _b_probe_sh=$(cat <<'EOS'
 cat /etc/wk-image 2>/dev/null
 rd=$(findmnt -no SOURCE / 2>/dev/null || true)
@@ -393,23 +252,9 @@ printf 'rootdev=%s\n' "$rd"
 EOS
 )
 
-# base | bench | unknown, from the device the running root is on.
-#
-# This is the distinction the fleet did not have, and its absence was not
-# cosmetic: `b_probe` called anything carrying /etc/wk-image a bench system, and
-# every image wk writes carries one -- including the base image on the medium
-# that is never written to. So a board that fell back to its base image (an
-# unarmed stick, a stick that would not boot, an rpi3, which has only ever had
-# the one medium) reported `bench <id>` and `wk pi bench` measured it. The
-# number that comes out of that looks exactly like a real one.
-#
-# The machine conf already declares both halves and has all along: MACH_ROOT is
-# "the root device of its host mode -- never written to", and MACH_DEVICE is the
-# medium wk writes systems onto. So this needs no new state, only for the
-# question to be asked. MACH_ROOT is tested first, because on a one-medium board
-# (the rpi3: MACH_ROOT=/dev/mmcblk0p2, MACH_DEVICE=/dev/mmcblk0) both patterns
-# match and the base answer is the true one -- and stays true the day that board
-# grows a second root slot, which lands on neither.
+# base | bench | unknown, from the device the running root is on -- not from
+# /etc/wk-image alone, since every image carries that marker. MACH_ROOT is
+# tested first: on a one-medium board (rpi3) both patterns match.
 b_system_kind() { # <root device>
     local rd="${1:-}"
     [ -n "$rd" ] || { printf 'unknown'; return 0; }
@@ -418,10 +263,7 @@ b_system_kind() { # <root device>
     printf 'unknown'
 }
 
-# Which mode is answering, and on which channel. Evidence, never the record:
-# a system writes an identity marker, the host install does not, and *which
-# medium the running root is on* says whether that system is the one somebody
-# armed or the base image the board falls back to.
+# Evidence, never the record: which medium the running root is on.
 b_probe() {
     local out id role rootdev kind
     if m_ssh true >/dev/null 2>&1; then
@@ -433,16 +275,15 @@ b_probe() {
         MODE_CHANNEL=none; MODE=unreachable; return 0
     fi
 
-    id=$(     printf '%s\n' "$out" | sed -n 's/^id=//p'      | head -1 | tr -d '\r')
-    role=$(   printf '%s\n' "$out" | sed -n 's/^role=//p'    | head -1 | tr -d '\r')
-    rootdev=$(printf '%s\n' "$out" | sed -n 's/^rootdev=//p' | head -1 | tr -d '\r')
+    id=$(     kv_get id      <<<"$out")
+    role=$(   kv_get role    <<<"$out")
+    rootdev=$(kv_get rootdev <<<"$out")
 
     if [ -z "$id" ]; then MODE="host"; return 0; fi
 
     kind=$(b_system_kind "$rootdev")
-    # The image's own word is the fallback, not the answer: it is right about
-    # what the image was built to be and cannot know which medium it was
-    # written to. The device knows, so it wins wherever it is conclusive.
+    # The device wins wherever conclusive; the image's own word is the
+    # fallback only.
     case "$kind" in
         base)  MODE="base $id" ;;
         bench) MODE="bench $id" ;;
@@ -454,19 +295,11 @@ b_probe() {
     return 0
 }
 
-# Can this host probe this machine at all? Most machines are reached over
-# ssh and the answer is yes from anywhere; the two mac drivers override it,
-# because a MACH_LOCAL machine answers only for itself and a guest needs
-# tart. Callers that cannot probe say "unknown from here" instead of printing
-# a confident answer read off the wrong computer -- the mistake the mac
-# driver's b_evidence records.
+# Mac drivers override this: a MACH_LOCAL machine answers only for itself.
 b_probeable() { :; }
 
-# One line: the wk-managed media on this machine, and what is on it right
-# now. Every driver overrides this with its own hardware's sentence (the
-# fleet block in `wk status` prints it, and `wk help hardware` is the prose
-# version); this default exists so a driver without one still answers.
-# Callers run b_probe first, so MODE/MODE_CHANNEL are set.
+# One line: the wk-managed media on this machine and what is on it now.
+# Every driver overrides this; this default exists so one without one still answers.
 b_media() {
     [ -n "${MACH_DEVICE:-}" ] || { printf 'no wk-managed media declared'; return 0; }
     printf 'media %s (this driver says nothing more about it)' "$MACH_DEVICE"
@@ -481,45 +314,26 @@ r_ssh() {
     esac
 }
 
-# From /proc/stat's btime, which is epoch seconds and therefore has no timezone
-# to get wrong. `uptime -s` is the obvious source and the wrong one: it prints
-# *local* time, and `date -u -d "<local string>"` re-reads that string as UTC --
-# -u applies to parsing as well as printing -- so a machine six hours off UTC
-# reports a boot six hours in the past, silently.
-#
-# The remote program contains no `$`, deliberately. An awk one-liner sent
-# through ssh has three shells to survive and its `$2` did not: the value that
-# came back was wrong in a way that looked plausible, which is the worst kind.
-# sed needs no field reference, so there is nothing left to mis-expand, and the
-# formatting happens here where the quoting is visible.
+# From /proc/stat's btime, epoch seconds with no timezone to get wrong;
+# `uptime -s` prints *local* time and re-reading it as UTC misreports silently.
 b_booted_at() {
     local btime
     btime=$(r_ssh 'sed -n "s/^btime //p" /proc/stat' 2>/dev/null | tr -dc '0-9') || true
     [ -n "$btime" ] || return 0
-    # Through the shared helper: BSD date has no `-d`, and this command is
-    # driven from both workstations (lib/common.sh, epoch_to_utc).
+    # BSD date has no `-d`.
     epoch_to_utc "$btime"
 }
 
-# The kernel's own identifier for this boot. This is what makes "has the
-# machine rebooted since it was armed" answerable without comparing two
-# machines' clocks -- it is a fresh random value per boot, and nothing about it
-# can drift, skew or be misparsed.
+# A fresh random value per boot, so "has it rebooted" needs no clock
+# comparison. Linux only; macOS derives one from kern.boottime instead.
 b_boot_id() { r_ssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true; }
 
-# The image's own account of the boot, read off its boot partition from the
-# other role. This is the channel that matters when the thing that failed is
-# the network: the image writes the dump to its FAT partition 75 s in, and the
-# workstation can read it afterwards without the image ever having been
-# reachable. Three blind attempts became one answer the day this existed.
-#
-# Mounted read-only and unmounted again. Nothing on the image is modified, and
-# nothing about the workstation's own filesystems is touched.
+# Read off the boot partition from host mode: the image writes the dump
+# there 75 s in, readable even if the image was never reachable.
 b_diag() {
     local part="${MACH_DEVICE}1"
-    # An automounter usually has the partition already -- the workstation's
-    # desktop session mounts a stick the moment it appears. Read it where it
-    # is rather than failing, and only mount when nothing else has.
+    # An automounter usually has the partition already; read it where it is,
+    # and only mount when nothing else has.
     m_ssh "set -e
         at=\$(findmnt -rno TARGET '$part' | head -1)
         if [ -n \"\$at\" ]; then
@@ -535,19 +349,13 @@ b_diag() {
 }
 
 b_reboot() {
-    # Detached, and after a delay: the reboot kills the ssh session, and an
-    # ssh that is killed mid-command exits nonzero, which under `set -e` would
-    # report a successful arming as a failure.
+    # Detached, and after a delay: the reboot kills the ssh session, which
+    # would otherwise exit nonzero and, under `set -e`, read as a failure.
     r_ssh "sudo systemd-run --on-active=3 --unit=wk-boot-reboot /sbin/reboot" >/dev/null
 }
 
-# Which image is on the machine's boot device, by name.
-#
-# Read off the boot partition, which is FAT and therefore mountable anywhere,
-# rather than by hashing the device against the image: a booted image writes to
-# its own boot partition, so the bytes stop matching exactly when the image
-# starts working. Reads an existing mount when the desktop's automounter
-# already has the device, and mounts read-only only when nothing else does.
+# Read off the FAT boot partition rather than by hashing the device: a
+# booted image writes to its own boot partition, so the bytes stop matching.
 b_device_image() {
     local part="${MACH_DEVICE}1"
     m_ssh "at=\$(findmnt -rno TARGET '$part' | head -1)
@@ -556,79 +364,4 @@ b_device_image() {
         sudo mount -o ro '$part' /mnt/wk-id 2>/dev/null || exit 0
         cat /mnt/wk-id/wk-image.id 2>/dev/null
         sudo umount /mnt/wk-id" 2>/dev/null | tr -d '\r\n ' || true
-}
-
-# --- writing the image -------------------------------------------------------
-#
-# The write happens on the machine, not from here: the board has passwordless
-# sudo and the workstation deliberately has no privileged component at all
-# ("no root, and no firewall"). So the image is streamed
-# over ssh into a `dd` on the far side.
-b_flash() {
-    local img="$1" dev="$2" bytes tran remote_zstd sha_local sha_remote
-
-    bytes=$(stat -c %s "$img")
-
-    # Refusals, in the order that a mistake would be most expensive.
-    #
-    # The transport check is the load-bearing one: `removable` is 0 for a USB
-    # SSD, so it cannot be the discriminator, while a device reached over USB
-    # is by construction not this board's NVMe workstation disk.
-    tran=$(m_ssh "lsblk -dno TRAN $dev 2>/dev/null" | tr -d ' ') \
-        || die "$dev does not exist on $MACH_NAME"
-    [ "$tran" = usb ] || die "refusing to write $dev on $MACH_NAME: transport is '${tran:-unknown}', not usb.
-    This driver only writes the machine's attached USB device. The workstation
-    install is on $MACH_ROOT and is never a target."
-
-    case "$dev" in
-        "$MACH_ROOT"*) die "refusing to write $dev: that is $MACH_NAME's own root device" ;;
-    esac
-
-    # Unmounted rather than refused. The caller has already agreed to erase
-    # this device, and an automount or a leftover forensics mount is not a
-    # reason to make the reproducible verb fall back to a hand-typed umount --
-    # which is exactly the wiki recipe this whole step exists to delete. It is
-    # still done here, after the confirmation, and never to anything that is
-    # not the device being written.
-    local mounted
-    mounted=$(m_ssh "findmnt -rno SOURCE,TARGET | awk '\$1 ~ /^$(printf '%s' "$dev" | sed 's|/|\\/|g')/ { print \$2 }'" || true)
-    if [ -n "$mounted" ]; then
-        info "unmounting on $MACH_NAME: $(printf '%s' "$mounted" | tr '\n' ' ')"
-        m_ssh "for m in $(printf '%s' "$mounted" | tr '\n' ' '); do sudo umount \"\$m\"; done" \
-            || die "could not unmount everything on $dev"
-    fi
-
-    m_ssh "test \$(lsblk -bdno SIZE $dev) -ge $bytes" \
-        || die "$dev is smaller than the image ($bytes bytes)"
-
-    # zstd on both ends when both have it: this is a 4 GB write across the same
-    # WiFi that everything else here shares, and an image is mostly zeroes and
-    # text. Plain dd when either end lacks it, because a missing compressor is
-    # not a reason to fail.
-    remote_zstd=no
-    m_ssh 'command -v zstd >/dev/null' && remote_zstd=yes
-
-    info "writing $(basename "$img") to $dev on $MACH_NAME ($((bytes / 1024 / 1024)) MB, zstd=$remote_zstd)"
-    if [ "$remote_zstd" = yes ] && have zstd; then
-        zstd -3 -c "$img" | m_ssh "zstd -dc | sudo dd of=$dev bs=4M conv=fsync status=none"
-    else
-        m_ssh "sudo dd of=$dev bs=4M conv=fsync status=none" < "$img"
-    fi
-
-    # Read back exactly as many bytes as were written and compare hashes. The
-    # alternative -- trusting dd's exit status -- cannot see a stick that
-    # accepted the write and stored something else, which is the failure mode
-    # that costs a boot attempt to discover.
-    if [ -n "${WK_NO_VERIFY:-}" ]; then
-        warn "skipping read-back verification (WK_NO_VERIFY)"
-        return 0
-    fi
-    info "verifying the write by reading it back"
-    sha_local=$(sha256sum "$img" | cut -d' ' -f1)
-    sha_remote=$(m_ssh "sudo head -c $bytes $dev | sha256sum" | cut -d' ' -f1)
-    [ "$sha_local" = "$sha_remote" ] || die "read-back mismatch on $dev
-    wrote  $sha_local
-    read   $sha_remote
-    The device did not store what was sent. Try another port or another stick."
-    info "read-back matches"
 }

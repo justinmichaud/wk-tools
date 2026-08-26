@@ -1,64 +1,36 @@
-# Writing a Pi 4's bootloader EEPROM from a board that has no eeprom tooling.
+# Writes a Pi 4's bootloader EEPROM with nothing but `vcgencmd` on the board:
+# the ROM runs recovery.bin from the boot partition before anything else, and
+# recovery.bin flashes pieeprom.upd (checked against pieeprom.sig) and then
+# deletes itself. Staging those three files is done from the machine driving
+# this, over ssh, so the board needs no eeprom tooling of its own.
 #
-# `wk pi boot-order` was written against Raspberry Pi OS, where
-# `rpi-eeprom-config --apply` does the whole job on the board. The fleet's rpi4
-# does not run Raspberry Pi OS -- it runs the WebKit Dev@CI Yocto image, whose
-# 668-package manifest carries `vcgencmd` and nothing else from the rpi-eeprom
-# package: no rpi-eeprom-config, no rpi-eeprom-update, no flashrom. So on the
-# fleet's own rpi4, the writer refused.
+# Two consequences, both surfaced at the confirm prompt:
 #
-# It refused for a good reason and the reason is worth keeping: it is a check
-# that the machine is a Pi whose firmware configuration can be written *from
-# the running system*. What was wrong is treating that as the only way in.
+# - **The whole EEPROM image is replaced, not just its config section.**
+#   There is no way to read the running image back without the tooling the
+#   board lacks, so the bootloader is upgraded to the pinned release below
+#   and the board's existing configuration is carried across on top of it.
+# - **It takes effect on the next boot, not now.** recovery.bin only runs
+#   from the ROM.
 #
-# The way in that needs nothing on the board:
+# recovery.bin verifies pieeprom.upd's SHA-256 against pieeprom.sig before
+# writing anything, so a corrupt transfer flashes nothing.
 #
-#   the ROM runs recovery.bin from the boot partition before it runs anything
-#   else, and recovery.bin flashes pieeprom.upd (checked against pieeprom.sig)
-#   and then deletes itself.
-#
-# Every part of that is a *file*, so the work moves to the machine driving the
-# operation -- which already has python3 and a network -- and the board's side
-# is three files and a reboot. This is what `rpi-eeprom-update` does on Pi OS;
-# the only thing lifted out is that it does it locally.
-#
-# Two consequences to be honest about, both surfaced at the confirm prompt:
-#
-# - **The whole EEPROM image is replaced, not just its config section.** There
-#   is no way to modify the running EEPROM's own image without reading it back,
-#   and reading it back is the part that needs the tooling this board lacks. So
-#   the bootloader is *upgraded* to the pinned release below and the board's
-#   existing configuration is carried across on top of it, so a board can jump
-#   several years of firmware in one step.
-# - **It takes effect on the next boot, not now.** recovery.bin runs from the
-#   ROM, so nothing has changed until the board has been through a power cycle
-#   or a reboot.
-#
-# The failure mode is the mild one: recovery.bin verifies pieeprom.upd against
-# the SHA-256 in pieeprom.sig before it writes anything, so a corrupt transfer
-# flashes nothing and the board boots as it did before.
-#
-# Sourced by cmd/pi, and it uses that command's `rsh` and `$HOST` rather than
-# opening its own connections: `wk pi` is where the ssh destination is resolved
-# and refused, and a second opinion about how to reach the board is a second
-# place for it to be wrong.
+# Sourced by cmd/pi, using that command's `rsh` and `$HOST`: the ssh
+# destination is resolved and refused there, so this has no second opinion
+# about how to reach the board.
 
-# The pinned upstream artefacts.
+# The pinned upstream artefacts: three files fetched by commit-addressed raw
+# URL and pinned by sha256, the same contract as `image_fetch_base` in
+# lib/image.sh -- cheaper than cloning the 106 MB tree for 660 KB of files.
 #
-# Three files rather than the repository, and not the release tarball either:
-# GitHub's tarball of this commit is 106 MB, of which this needs 660 KB. Each
-# file is fetched by commit-addressed raw URL and pinned by sha256 -- the same
-# contract as `image_fetch_base` in lib/image.sh, for the same reason.
+# firmware-2711 is the BCM2711 (Pi 4 / CM4 / Pi 400) tree and the only one
+# fetched; eeprom_check_soc refuses any other SoC.
 #
-# firmware-2711 is the Pi 4 / CM4 / Pi 400 tree (BCM2711) and is the only one
-# fetched, which is why eeprom_check_soc refuses anything else rather than
-# quietly flashing a Pi 5 with a Pi 4 bootloader.
-#
-# `default` rather than `latest`: it is the channel `rpi-eeprom-update` installs
-# when nobody asks for anything, so it is the image with the most boards behind
-# it. Bumping the pin means bumping all three values together -- the image
-# filename carries its own date, so a stale pair fails the checksum rather than
-# mixing releases.
+# `default` is the channel `rpi-eeprom-update` installs when nothing is
+# asked for, so it has the most boards behind it. Bump all three pins
+# together -- the image filename carries its own date, so a stale pair
+# fails the checksum instead of mixing releases.
 EEPROM_COMMIT=86759b04b22173e10186139ac3ae4debcd0d7252
 EEPROM_IMAGE=pieeprom-2026-05-17.bin
 
@@ -149,17 +121,11 @@ eeprom_bootfs() {
     echo "$found"
 }
 
-# Remove a consumed update from the boot partition.
-#
-# recovery.bin renames itself to RECOVERY.000 once it has flashed, but nothing
-# clears the pieeprom.upd and pieeprom.sig it read -- rpi-eeprom-update does
-# that itself on the next run, and there is no rpi-eeprom-update here. Left
-# behind they are inert (the bootloader compares versions and skips an update
-# it already has) but not harmless to read: a board carrying a staged update it
-# has already applied looks exactly like a board with one still pending.
-#
-# Called only when the running firmware already reports what was asked for,
-# which is the one moment it is certain the staged files have been consumed.
+# Removes a consumed update: recovery.bin renames itself to RECOVERY.000 but
+# leaves pieeprom.upd/pieeprom.sig behind, and a staged update that has
+# already been applied looks identical to one still pending. Called only
+# once the running firmware reports what was asked for -- the one moment
+# that is certain.
 eeprom_clear_staged() {
     local bootfs
     bootfs=$(eeprom_bootfs 2>/dev/null) || return 0
@@ -181,10 +147,9 @@ eeprom_stage_recovery() {
         || die "rpi-eeprom-config could not apply that configuration to $EEPROM_IMAGE"
 
     # pieeprom.sig is what makes a half-written transfer harmless: recovery.bin
-    # hashes the image and refuses it on a mismatch. Three lines, generated here
-    # rather than by the upstream rpi-eeprom-digest shell script, because that
-    # is all rpi-eeprom-digest writes for an unsigned update and shipping a
-    # fourth pinned file to run `sha256sum` would be silly.
+    # hashes the image and refuses it on a mismatch. Written here rather than
+    # via the upstream rpi-eeprom-digest script, which needs a fourth pinned
+    # file for this.
     {
         sha256sum "$work/pieeprom.upd" | cut -d' ' -f1
         echo "ts: $(date -u +%s)"

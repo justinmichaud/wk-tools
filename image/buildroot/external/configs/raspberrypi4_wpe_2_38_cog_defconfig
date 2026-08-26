@@ -58,6 +58,12 @@ BR2_PACKAGE_RPI_BT_FIRMWARE=y
 BR2_PACKAGE_RPI_FIRMWARE=y
 BR2_PACKAGE_RPI_FIRMWARE_INSTALL_VCDBG=y
 BR2_PACKAGE_RPI_WIFI_FIRMWARE=y
+# wpa_supplicant, so this board can bring up WiFi from a credential seeded
+# onto the card (wk-wifi-join, image/buildroot/wifi-overlay.sh) -- this board
+# has no cable at the bench, same as rpi3 and rpi5.
+BR2_PACKAGE_WPA_SUPPLICANT=y
+BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
+BR2_PACKAGE_WPA_SUPPLICANT_WEXT=y
 BR2_PACKAGE_RNG_TOOLS=y
 BR2_PACKAGE_CA_CERTIFICATES=y
 BR2_PACKAGE_ORC=y

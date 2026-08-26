@@ -176,7 +176,7 @@ report() {
                     "/Volumes/$VOLUME/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null || echo '?')
             log "  state:          a macOS $v system volume -- installed"
             if [ -f "/Volumes/$VOLUME/etc/wk-image" ]; then
-                log "  marker:         $(sed -n 's/^id=//p' "/Volumes/$VOLUME/etc/wk-image")"
+                log "  marker:         $(kv_field "/Volumes/$VOLUME/etc/wk-image" id)"
             else
                 warn "  marker:         MISSING -- bench mode would report itself as host mode"
                 log  "                  --provision writes it (run it in bench mode)"
@@ -852,7 +852,7 @@ do_provision() {
     #    answered; without it `wk bench staged` refuses, correctly.
     local marker=/etc/wk-image
     if [ -f "$marker" ]; then
-        unchanged "marker $marker: $(sed -n 's/^id=//p' "$marker")"
+        unchanged "marker $marker: $(kv_field "$marker" id)"
     else
         if [ -n "$DRY" ]; then
             log "  would write $marker:  id=$PROFILE-$(date -u +%Y-%m) / profile=$PROFILE"

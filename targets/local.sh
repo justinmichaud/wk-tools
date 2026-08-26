@@ -27,14 +27,20 @@ _local_arch=$(wk_marker_field arch)
 
 # Build logs and status files.
 #
-# Not the host's store: it is not visible from in here. A container gets the
-# checkout, the caches and the tooling bind-mounted and nothing else, and a
-# macOS guest has no host filesystem at all -- by design, in both cases. So the
-# workspace keeps its own, which is enough for `wk status` and `wk logs` inside
-# the workspace to read back what `wk build` inside it wrote.
+# Not the host's store, as a rule: a macOS guest has no host filesystem at
+# all, and a plain remote machine's workstation-side store is a different
+# machine entirely -- by design, in both cases, so the workspace keeps its
+# own, which is enough for `wk status` and `wk logs` inside the workspace to
+# read back what `wk build` inside it wrote.
+#
+# A container is the one exception with something to point at: its own
+# workspace directory is bind-mounted at the same absolute path the host
+# resolves for it (targets/container.sh, t_create), and WK_LOCAL_STORE names
+# that path -- so build.status written in here is the same file `wk status`
+# reads out there, one path instead of a private copy neither side can see.
 #
 # XDG state rather than data: build logs and status files are exactly that.
-WK_STORE="${XDG_STATE_HOME:-$HOME/.local/state}/wk"
+WK_STORE="${WK_LOCAL_STORE:-${XDG_STATE_HOME:-$HOME/.local/state}/wk}"
 mkdir -p "$WK_STORE/ws/$_local_name"
 
 t_src()   { echo "$_local_src"; }
@@ -87,6 +93,14 @@ t_destroy() {
 }
 
 t_enter() { die "already inside workspace '$_local_name'"; }
+
+# Refused for the same reason t_destroy is: the host owns the container or
+# guest this process is running in, and stopping it from inside would be this
+# shell cutting off the ground it stands on mid-command.
+t_stop() { die "a workspace cannot stop itself -- run 'wk stop $_local_name' on the host"; }
+
+# A workspace that can run this command is, by definition, already started.
+t_start() { die "a workspace cannot start itself -- run 'wk start $_local_name' on the host"; }
 
 t_ssh_host() { die "a workspace has no ssh route to itself"; }
 

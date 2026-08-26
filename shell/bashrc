@@ -461,3 +461,26 @@ export PATH
 
 # Scroll-back-clearing clear.
 alias clear="clear && printf '\033[3J'"
+
+# =============================================================================
+# 7. Completion
+# =============================================================================
+# After PATH (section 6), so `command -v wk` sees what that section just put
+# there. Interactive only, like the history and prompt settings above -- a
+# completion table means nothing to a script, and re-checked rather than
+# reusing $_WK_INTERACTIVE, which section 5b already unset.
+#
+# One command generates both shells' scripts (`wk completion bash`/`zsh`,
+# cmd/completion) -- this just decides which to ask for and evals it, so a
+# workspace shell picks it up exactly the same way a host shell does.
+case $- in
+  *i*)
+    if command -v wk >/dev/null 2>&1; then
+      if [ -n "$ZSH_VERSION" ]; then
+        eval "$(wk completion zsh 2>/dev/null)"
+      elif [ -n "$BASH_VERSION" ]; then
+        eval "$(wk completion bash 2>/dev/null)"
+      fi
+    fi
+    ;;
+esac

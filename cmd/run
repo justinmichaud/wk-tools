@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 #
-# wk run <workspace> [config] -- run jsc from a workspace build.
+# wk run <workspace> [config] -- run jsc from a workspace build
+# wk: where=workspace name=required ready=yes group=workspaces
 #
-# Replaces jscr/jscd/jscrb and friends, which each hardcoded a different
-# WebKitBuild path and a different notion of where the checkout lived.
+# Runs the jsc binary a build produced, from the workspace's own build tree on
+# its target, so the shell you are in never needs the build's paths or env.
+# Everything after `--` goes to jsc verbatim.
+#
+#   --config <config>   the build config to run (default: default_config)
+#   --lldb              run jsc under lldb instead of directly
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -12,17 +17,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/build/configs.sh"
 
-# Inside a workspace there is no name to give: every command acts on this one,
-# and the name form is refused rather than quietly accepted (refuse_ws_name,
-# lib/target.sh). Everything else on the command line is this command's own
-# argument, including the very first word.
-NAME="${1:-}"
-if in_workspace; then
-    refuse_ws_name "$NAME" run "[--config <config>] [args...]"
-    NAME=$(wk_self)
-else
-    shift || true
-fi
+NAME="${WK_NAME:-}"
 require_name "$NAME"
 
 CONFIG="${WK_CONFIG:-$(default_config)}"
@@ -40,27 +35,17 @@ config_load "$CONFIG" || die "unknown config '$CONFIG'"
 
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
-# One gate for "is this workspace usable yet" (wait_ready, lib/target.sh):
-# `absent` is still refused by name, and everything else -- a creation still
-# running, one whose driver died, an environment removed from under the record,
-# a machine that will not answer -- gets the words that fit it there rather
-# than "no such workspace", which is what this said about all four.
-wait_ready "$NAME"
 
-# Where the products landed, and what the loader needs to find them, both come
-# from build/configs.sh -- four ports lay their trees out four ways and the
-# Apple build resolves frameworks rather than shared libraries, so hardcoding
-# either here is how the old jscr/jscd scripts each ended up wrong.
+# Layout comes from build/configs.sh: four ports lay trees out four ways and
+# the Apple build resolves frameworks rather than shared libraries.
 SRC=$(t_src "$NAME")
 JSC=$(config_jsc_path "$SRC")
 VAR=$(config_run_var)
 DIR=$(config_run_dir "$SRC")
 
-# Run through a login shell so the loader variable can be *prepended* to what
-# the environment already provides. Passing `env LD_LIBRARY_PATH=...` instead
-# replaces it, and the wkdev image ships libwpe and the rest of the jhbuild
-# prefix that way -- so the WPE and GTK binaries then fail to start with a
-# missing-library error for a library that was on the path all along.
+# Login shell so the loader variable is *prepended*, not replaced: `env
+# LD_LIBRARY_PATH=...` would drop the wkdev image's jhbuild prefix and break
+# WPE/GTK binaries that depend on a library already on the path.
 PRELUDE="export $VAR=\"$DIR\${${VAR}:+:\${${VAR}}}\""
 
 # validateOptions catches typo'd JSC flags, which otherwise fail silently and
@@ -72,10 +57,8 @@ else
     CMD="$PRELUDE; export JSC_validateOptions=1; exec $(sh_quote "$JSC") --validateOptions=1 $(sh_quote "$@")"
 fi
 
-# A debugger needs a terminal and ssh allocates one only when asked. Without
-# this the lldb prompt comes up in a session with no pty: it prints, it accepts
-# nothing, and ctrl-c kills the whole thing rather than interrupting the
-# inferior -- which reads as "lldb is broken in a workspace".
+# ssh allocates a pty only when asked; without one lldb prints but accepts no
+# input, and ctrl-c kills the session instead of interrupting the inferior.
 if [ -n "$DEBUGGER" ]; then
     t_exec_tty "$NAME" bash -lc "$CMD"
 else

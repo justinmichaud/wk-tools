@@ -41,7 +41,12 @@
 # One directory per image id under a root the build host owns, so a build that
 # is interrupted leaves rubble that names itself and the next one does not
 # inherit it.
-pmos_host()      { echo "${WK_PMOS_HOST:-${PMO_BUILD_HOST:-rpi5}}"; }
+# PMO_BUILD_HOST is the profile's own answer (image/profiles.sh) -- not
+# repeated here as a second "rpi5" that could drift from it.
+pmos_host() {
+    [ -n "${PMO_BUILD_HOST:-}" ] || die "this pmos profile sets no PMO_BUILD_HOST (image/profiles.sh)"
+    echo "${WK_PMOS_HOST:-$PMO_BUILD_HOST}"
+}
 pmos_root()      { echo "${WK_PMOS_ROOT:-\$HOME/wk-pmos}"; }
 pmos_out()       { echo "$(pmos_root)/out/$1"; }
 pmos_log()       { echo "$(pmos_root)/out/$1/build.log"; }
@@ -59,15 +64,28 @@ pmos_ssh() {
     fi
 }
 
-# Keepalives, because the build host is on WiFi and it roams. ConnectTimeout
-# only covers the handshake: a connection that stalls *after* connecting hangs
-# until TCP gives up, which for a poll loop means it stops reporting and never
-# notices. Four missed 15s probes and the ssh dies, the poll retries, and the
-# build -- which is detached on the far side -- carries on regardless.
+# The options for reaching the build host: the fleet's own rule (`m_ssh_opts`,
+# boot/machines.sh) when it names a fleet machine -- so a build host that is
+# also a bench-device gets the same root-login and unpinned-key handling any
+# other connection to it would -- plus keepalives, which every pmos build
+# needs and a plain fleet connection does not: the build host is on WiFi and
+# it roams. ConnectTimeout only covers the handshake -- a connection that
+# stalls *after* connecting hangs until TCP gives up, which for a poll loop
+# means it stops reporting and never notices. Four missed 15s probes and the
+# ssh dies, the poll retries, and the build -- which is detached on the far
+# side -- carries on regardless.
+#
+# `machine_load` runs here, not inside `pmos_ssh`, so MACH_ROLE is set before
+# `m_ssh_opts` reads it regardless of the order ssh(1)'s argv is built in.
+pmos_ssh_opts() {
+    machine_load "$(pmos_host)" >/dev/null 2>&1
+    printf '%s' "-o BatchMode=yes -o ConnectTimeout=${WK_SSH_TIMEOUT:-10} $(m_ssh_opts) \
+-o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+}
+
 _pmos_sh() {
-    ssh -o BatchMode=yes -o ConnectTimeout=10 \
-        -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
-        "$(pmos_ssh)" "$@"
+    # shellcheck disable=SC2046
+    ssh $(pmos_ssh_opts) "$(pmos_ssh)" "$@"
 }
 
 # Ask the build host something whose answer may legitimately be "nothing":
@@ -315,25 +333,30 @@ pmos_spawn() {
     or watch it:  ssh $(pmos_ssh) tail -f \$HOME/wk-pmos/out/*/build.log"
 
     info "starting the build on $(pmos_host) (it survives this connection)"
-    # setsid + nohup: the build must not be in this ssh session's process group,
-    # or the connection closing takes it down -- which is the whole point.
-    _pmos_sh "setsid nohup env \
-        PMO_ID=$(sh_quote "$id") \
-        PMO_DEVICE=$(sh_quote "$PMO_DEVICE") \
-        PMO_UI=$(sh_quote "$PMO_UI") \
-        PMO_CHANNEL=$(sh_quote "$PMO_CHANNEL") \
-        PMO_PMB_VERSION=$(sh_quote "$PMO_PMB_VERSION") \
-        PMO_USER=$(sh_quote "$PMO_USER") \
-        PMO_PASSWORD=$(sh_quote "$PMO_PASSWORD") \
-        PMO_PACKAGES=$(sh_quote "$PMO_PACKAGES") \
-        PMO_EXTRA_SPACE=$(sh_quote "$PMO_EXTRA_SPACE") \
-        PMO_KERNEL_APORT=$(sh_quote "${PMO_KERNEL_APORT:-}") \
-        PMO_KCONFIG=$(sh_quote "${PMO_KCONFIG:-}") \
-        PMO_HOSTNAME=$(sh_quote "$IMG_HOSTNAME") \
-        PMO_KEYFILE=$(pmos_root)/driving-key.pub \
-        PMO_ROOT=$(pmos_root) \
-        sh $(pmos_root)/pmos-build.sh > $(pmos_log "$id") 2>&1; \
-        echo \$? > $(pmos_rc "$id")" >/dev/null 2>&1 &
+    # detach_remote (lib/detach.sh) owns the nohup/disown spelling and the
+    # log/rc-file convention now -- the same shape targets/vm.sh's base
+    # prebuild uses. Each PMO_* value is its own argv item rather than a
+    # pre-quoted string, so detach_remote quotes them the same way this used
+    # to by hand.
+    command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
+    detach_remote _pmos_sh "$(pmos_log "$id")" "$(pmos_rc "$id")" -- \
+        env \
+        PMO_ID="$id" \
+        PMO_DEVICE="$PMO_DEVICE" \
+        PMO_UI="$PMO_UI" \
+        PMO_CHANNEL="$PMO_CHANNEL" \
+        PMO_PMB_VERSION="$PMO_PMB_VERSION" \
+        PMO_USER="$PMO_USER" \
+        PMO_PASSWORD="$PMO_PASSWORD" \
+        PMO_PACKAGES="$PMO_PACKAGES" \
+        PMO_EXTRA_SPACE="$PMO_EXTRA_SPACE" \
+        PMO_KERNEL_APORT="${PMO_KERNEL_APORT:-}" \
+        PMO_KCONFIG="${PMO_KCONFIG:-}" \
+        PMO_HOSTNAME="$IMG_HOSTNAME" \
+        PMO_KEYFILE="$(pmos_root)/driving-key.pub" \
+        PMO_ROOT="$(pmos_root)" \
+        sh "$(pmos_root)/pmos-build.sh" \
+        || die "could not start the build on $(pmos_host)"
     # The launcher returns immediately; give the far side a moment to create the
     # log, so the follow below has something to read.
     sleep 3
@@ -424,33 +447,19 @@ pmos_running() {
 # has no idea when the build is over, so it needs a process to watch -- and
 # `--pid=$(pgrep ...)` with nothing to match becomes `--pid=` and then a plain
 # `tail -f` that never returns -- hanging for as long as it is left, on a build
-# that has already failed, holding the image-store lock the whole time. Polling ends when the rc file appears, which is the same evidence
-# the exit status is read from, so the follow cannot outlive the build or end
-# before it.
+# that has already failed, holding the image-store lock the whole time. Polling
+# ends when the rc file appears, which is the same evidence the exit status is
+# read from, so the follow cannot outlive the build or end before it.
 #
-# A dropped connection costs one poll rather than the run: each round is its own
-# ssh, and the offset is the only state.
+# detach_wait_remote (lib/detach.sh) owns the poll now, in its streaming mode:
+# 5s, not the shared default of 30, because this is the attended path -- a
+# human is watching the log scroll, and a build that finished inside 30s would
+# otherwise report nothing at all until the next tick.
 pmos_follow() {
-    local id="$1" rc="" seen=0 size log rcfile
-    log=$(pmos_log "$id"); rcfile=$(pmos_rc "$id")
+    local id="$1" rc
+    command -v detach_wait_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     info "following the build on $(pmos_host) -- ^C stops watching, not building"
-    while :; do
-        size=$(_pmos_ask "wc -c < $log" | tr -d ' \n')
-        case "$size" in ''|*[!0-9]*) size=$seen ;; esac
-        if [ "$size" -gt "$seen" ]; then
-            _pmos_sh "tail -c +$((seen + 1)) $log" >&2 || true
-            seen="$size"
-        fi
-        rc=$(_pmos_ask "cat $rcfile" | tr -d ' \n')
-        [ -n "$rc" ] && break
-        sleep 5
-    done
-    # One last read: the build writes its final lines and the rc file in quick
-    # succession, and stopping at the rc file alone loses the end of the log --
-    # which is exactly the part that says what went wrong.
-    size=$(_pmos_ask "wc -c < $log" | tr -d ' \n')
-    case "$size" in ''|*[!0-9]*) size=$seen ;; esac
-    [ "$size" -gt "$seen" ] && { _pmos_sh "tail -c +$((seen + 1)) $log" >&2 || true; }
+    rc=$(detach_wait_remote _pmos_sh "$(pmos_log "$id")" "$(pmos_rc "$id")" 5 1)
     [ -n "$rc" ] || die "lost track of the build on $(pmos_host).
     It may still be running. 'wk sysimage build $IMG_PROFILE --resume' picks it
     back up; the log is $(pmos_log "$id")."

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 #
-# wk zed <workspace>            -- open a workspace's checkout in Zed
-# wk zed --tools [<machine>|<workspace>]
-#                               -- open a wk-tools copy in Zed
+# wk zed <workspace> -- open a workspace's checkout in Zed
+# wk: where=workspace name=optional forward=no outside group=workspaces
+#
+# Refused inside a workspace: Zed runs where the person is, and a container has
+# no display and a macOS guest is driven from the host.
 #
 # One command for "put an editor on that", because every target reaches it
 # differently and none of the differences are a person's business:
@@ -22,6 +24,10 @@
 # checkout, a build box's rsynced tree, the podman VM's, a workspace's
 # bind-mounted /opt/wk-tools. `wk status` reports which of those are stale; this
 # is how you go and look at one.
+#
+#   --tools [<machine>|<workspace>]   open a wk-tools copy instead of the
+#                                     checkout: a machine's, a workspace's, or
+#                                     (with no argument) this one
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,26 +35,20 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
+# The name arrives as $WK_NAME, resolved by the dispatcher, wherever it fell
+# relative to --tools on the command line; anything left over here is a
+# second one.
 TOOLS=""
-NAME=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --tools) TOOLS=1; shift ;;
         -*) die "unknown option: $1
     usage: wk zed <workspace>        the checkout
            wk zed --tools [<machine>|<workspace>]" ;;
-        *)  [ -z "$NAME" ] || die "one name at a time (got '$NAME' and '$1')"
-            NAME="$1"; shift ;;
+        *) die "one name at a time (got '${WK_NAME:-}' and '$1')" ;;
     esac
 done
-
-# Zed runs where the person is, and that is never inside a workspace: a
-# container has no display and no Zed, and a macOS guest is driven from out
-# here. Said plainly rather than discovered as "zed: not found".
-if in_workspace; then
-    die "'wk zed' opens an editor, and this is workspace '$(wk_self)' -- there is no
-    Zed in here. Run it on the workstation:  wk zed $(wk_self)"
-fi
+NAME="${WK_NAME:-}"
 
 Z=$(zed_cli) || die "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)
     https://zed.dev/download -- 'wk doctor' checks for it"
@@ -63,13 +63,11 @@ if [ -n "$TOOLS" ]; then
         exec "$Z" "$WK_ROOT"
     fi
 
-    # A machine first, and by a definite test: a target is a conf file
-    # (`target_kind`), so "is this a machine" has an answer that costs nothing
-    # and cannot be confused with a guess. Anything else is taken as a
-    # workspace name, which is what a person is most likely to be holding.
-    #
-    # A workspace named after a machine therefore loses this one spelling, and
-    # keeps the other: `wk zed <name>` is still that workspace's checkout.
+    # A machine first, by a definite test: a target is a conf file
+    # (`target_kind`), so "is this a machine" costs nothing and can't be
+    # confused with a guess. Anything else is taken as a workspace name.
+    # A workspace named after a machine loses this spelling but keeps the
+    # other: `wk zed <name>` is still that workspace's checkout.
     if [ "$(target_kind "$NAME" 2>/dev/null)" = remote ]; then
         load_target "$NAME"
         # No workspace name to give: t_tools and t_ssh_host both answer for the
@@ -100,20 +98,6 @@ fi
 require_name "$NAME"
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
-
-# The readiness gate, and which gate depends on who can see the evidence.
-#
-# For a container the driver asks the container (t_ssh_prepare): on a macOS host
-# the store this workspace lives in is inside the podman VM, so nothing out here
-# can read the marker file that ws_state is derived from -- and this command
-# runs out here, because Zed and podman are both out here.
-#
-# For every other target the record is host-side and wait_ready is the answer,
-# including its own reason for waiting: opening an editor on a checkout that is
-# still being cloned shows up as a tree of missing files. It stays in the
-# foreground on purpose -- if this end dies, creation continues detached and
-# re-running this command is the resume.
-[ "$WK_TARGET_KIND" = container ] || wait_ready "$NAME"
 
 t_ssh_prepare "$NAME"
 

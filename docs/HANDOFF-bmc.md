@@ -37,33 +37,30 @@ second one and is not provisioned.
   captured nowhere — the one piece of this fleet that no conf reproduces.
 - Battery care for both phones: `docs/Urgent/HUMAN-battery.md`.
 
-## What the first bridge taught — do not re-derive
+## Untested — written, needs the hardware in a specific state
 
-- **Which dock, and it is the phone's property, not the dock's.** The A64 has no
-  SuperSpeed anywhere, so a dock whose NIC sits behind its own USB3 hub can only
-  ever present its USB2 hub — role swap perfect, power perfect, downstream ports
-  `not attached` forever. The PinePhone's own dock puts its NIC on the USB2 path
-  and works. Ask of any dock which hub its NIC is behind.
-- **A pasted tailnet policy does not take effect on its own.** `autoApprovers`
-  is evaluated when a node *advertises*, and re-running setup re-asserts an
-  unchanged value, which `tailscale set` treats as a no-op — so a route
-  advertised before the policy existed stays unapproved indefinitely with every
-  other check green. Setup now re-advertises when it finds the route advertised
-  but not primary.
-- **A board that moves networks breaks in DNS first.** The rpi4 kept its old
-  lease alongside the new one: egress fine, DNS dead, stale nameservers at route
-  metric 10 against the bridge's 1002. It looks like a broken bridge and is a
-  client that has not let go.
-- **The udev rule must not match a synthetic MAC.** pmOS sets
-  `cloned-mac-address=stable`, so the segment interface runs on a hashed address
-  while the naming rule applies at `ACTION=="add"`, when the hardware address is
-  still in place. Autodetection reads `ethtool -P` and the keyfile pins
-  `cloned-mac-address=permanent` on that leg.
-- **dnsmasq is `after net`, not `need net`.** The board asks for DHCP on
-  carrier-up, which is when the kernel enumerates the adapter; `need net` put
-  dnsmasq behind that and the first request was always lost. netwatch also flaps
-  the link when it sees carrier with no lease for two passes — the only way to
-  make a client that has given up ask again.
-- **The fleet finds a board behind a bridge by its reserved address**, jumping
-  through the phone (`dotfiles/ssh/config`), with the bare address matched as a
-  Host pattern so `wk boot`'s bench-mode channel gets the jump too.
+- **A board on `lan0` gets its reserved address and is reachable from a
+  workspace over the tailnet** — needs `autoApprovers` actually evaluated
+  (below) *and* the USB-C Ethernet dock physically attached; the segment itself
+  (DHCP to rpi3/rpi4) has never been exercised.
+- **`autoApprovers` for `10.99.1.0/24` is evaluated only when a node
+  *advertises* a route** — a route advertised before the policy existed stays
+  unapproved forever; re-running setup re-asserts the same value and
+  `tailscale set` with an unchanged value is a no-op. Setup now withdraws and
+  re-advertises whenever the route is up but not primary, but this is the
+  failure that looks exactly like success and is worth re-checking after any
+  policy edit.
+- **`wk bridge tailnet <name>`** — untested, the one remaining step needing a
+  credential fetched by hand.
+- **`BR_CAMERA=http` streaming** — unproven on both phones; libcamera-era
+  sensors do not always present a format ffmpeg will open.
+- **The escalation ladder's reboot budget** — pull the AP, watch
+  `wk-bridge-netwatch` climb, confirm it stops at the budget rather than
+  rebooting forever.
+- **`wk bridge provision tailnet-bridge-generic` on the eMMC route, end to
+  end** — Jumpdrive to the card, phone cabled to rpi5, internal storage
+  appearing as a new USB disk (found by content-diff against a baseline, since
+  Jumpdrive exports the SD card too), the bridge image written there, the card
+  out, and the phone coming up on its own install and answering
+  `wk bridge setup` at `<hostname>.local`.
+

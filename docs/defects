@@ -1,48 +1,91 @@
+- rpi4 is connected directly to ethernet with a freshly-flashed recovery usb. Why is it not connecting?
+
+- wk zed is broken:
+wk zed image-decoders
+error: one name at a time (got '' and 'image-decoders')
+
+Do an audit over every command and look for obvious breakage like this. This should be all abstracted using a common helper and/or library, not bespoke for each subcommand.
+
 - wk enter does not work across machines
 
 - No way to easily close workspaces
 
-- wk rm shoud take multiple hosts
+- wk rm shoud take multiple hosts (again audit all commands)
 
-- bash autocomplete
+- bash autocomplete (all commands)
 
 - Why is wk sync so slow on rpi5?
 
-- wk pr inside workspace should not take a workspace param (this goes for all workspace commands)
+- wk pr inside workspace should not take a workspace param (this goes for all workspace commands). If the command can't be done inside the workspace, it should give you the command to run outside. Tasks like wk sync should be able to be done from inside the workspace, to support a rebase + push workflow.
 
-- wk build should have help option, and should print the build command used. Should also list possible configurations, and customization options like --no-asan, cmakeargs, etc. This also applies to all commands
-
+- wk build should have help option, and should print the build command used for easy reproduction. Should also list possible configurations, and customization options like --no-asan, cmakeargs, etc. This also applies to all commands. Should also list any default options for this host and let you skip them.
 - Allow storing default build args in remote configs
 
+- every command option should have a consistent default, override, etc. They should all behave consistently where it makes sense.
+
+Audit all subcommands for consistency
+
+Make sure commands never ignore a paramater, and halt if a misleading param is provided.
+
+all commands by default should operate on the local machine. --target should give a target. --target-all should operate on all machines. Commands inside a workspace should operate there and only there.
+
+Every command that needs a lock should have a lock. Locks should be hooked up to status, doctor and gc.
+
+push should work for WPEWebKit fork too. Confirm that this push and pull workflow actually uses hard links, and that a pr can be created, rebased off origin, wpe, and pushed / pulled from either fork without having a bunch of copies of every remote's refs. Git fetch all should be almost instant.
+
+Document a solid design for the UX when handling multiple machines. It should be clear when something is local or remote.
+
 - Warn if parallelism is too low. There is also a problem if you kill and restart the build, the load average hangs and we get low paralellism. CCache caches build number too, fix that.
+
+again audit all commands. Warn for things that make sense (missing credentials, sudo, etc) up front. Block for safety, but allow forcing.
 
 - sudo Tools/gtk/install-dependencies on remote hosts
 
 - wk status missing load data for other machines
 
+audit every command for bugs like this: one section gets some feature, but not all
+
 - wk status should load local data quickly first and fill the rest later
 
-- Extract a command to find devices via ssh + nmap on local network
-
-- wk status should explain how to generate an image for each member of the fleet (to re-provision it from scratch) and have a small sample command for how to provision each unique role.
+- wk status should explain how to generate an image for each member of the fleet (to re-provision it from scratch) and have a small sample command for how to provision each unique role. wk status should never make any data up. Text should be concise and readable.
 
 - Too many if branches. Everywhere behaviour can change must be tested and
-  testable, otherwise the branch does not stay. Needs a starting point: which
-  file or command to take first. `cmd/status` (1200 lines) and
-  `targets/container.sh` (39 KB) are the two with the most.
+  testable, otherwise the branch does not stay. No proliferation of configs or options, especally if this might be used on other people's machines.
 
+- Never assume something about my setup. This should be flexible, work with different configs, sets of hardware, and be extensible. Don't repeat yourself. Abstract wherever possible.
+  
 - Docs need to be more concise and higher-level. README.md is 24 KB and
   SETUP.md is 33 KB; docs/TESTING.md is 1000 line items. The `docs/help/` pages
   are the concise layer and the two top-level files largely restate them.
+
+  Replace this with one single doc. It should give an arch overview, and a sample of every supported workflow with commands by example. Very short, to the point. Never ramble, never assume anything about the user's setup, never reference the past or alternate versions of the future.
 
 - Conf files need to be more consistent; no stupid comments. The twenty new
   `image/configs/*.conf` are the first set written to one shape; `boot/machines/`,
   `targets/hosts/` and `bridge/hosts/` predate it and do not match each other.
 
-- We need to re-provision rpi3 and 4 from scratch and confirm they work
+- rpi3b+/rpi4/rpi5 should be configured to use wifi instead of ethernet for rescue and bench images. The credentials should come from the host. This should block deployment.
+- Confirm rpi5 yocto image works and can be deployed.
 
-- Get a wpe-2.38 build working and automated with helpers (tailscale + anything else needed to verify the image) for rpi3. Make a buildroot image for rpi4 2.38 (32-bit) and rpi5 (64-bit) too once that is working. 
+- Ctrl-C does not always work as expected in various wk commands.
 
-- Confirm rpi5 yocto image works
+- For remote hosts:
 
-- Ctrl-C does not always work as expected. Not investigated.
+.claude/settings.json
+@@ -6,5 +6,10 @@
+         "path": ".claude/plugins"
+       }
+     }
++  },
++  "permissions": {
++    "allow": [
++      "Bash(wk *)"
++    ]
+   }
+ }
+
+- wk zed should work from inside a workspace, even on a remote box, by giving you a command to run on your local machine to launch zed or connect.
+
+Testing: we need some actual unit tests, not a document. Everything that does not need real hardware to run. Use vms or containers where possible, clean up after each test. Everything gets a test. These should be regression tests, not change tests.
+
+Then remove the testing doc, it isn't catching regressions.

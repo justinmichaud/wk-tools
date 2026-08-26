@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# wk test <workspace> [--layout] [--config C] [--lldb [web|ui]] [paths...]
+# wk test <workspace> [flags] [paths...] -- run the JSC or layout test suites
+# wk: where=workspace name=required ready=yes group=workspaces
 #
 # Runs the JSC or layout test suites with the same reportability as `wk build`:
 # a watchdog that detects a silent run rather than waiting on it, a status file
@@ -14,6 +15,13 @@
 # workspace on macOS -- the podman VM has no /dev/dri to pass through -- so
 # without llvmpipe the runner either fails to start or silently produces
 # garbage. On Linux with a real seat, pass --gpu to use the real device.
+#
+#   --config <config>   the build config to test (default: last built, or default_config)
+#   --layout             run the layout-test suite instead of the JSC suite
+#   --gpu                use the real GPU for layout tests (Linux only)
+#   --lldb [web|ui]      debug one layout test: "web" (default) attaches to the
+#                        web process, "ui" to WebKitTestRunner
+#   --dry-run            print the resolved run and stop
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,17 +33,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/build/configs.sh"
 
-# Inside a workspace there is no name to give: every command acts on this one,
-# and the name form is refused rather than quietly accepted (refuse_ws_name,
-# lib/target.sh). Everything else on the command line is this command's own
-# argument, including the very first word.
-NAME="${1:-}"
-if in_workspace; then
-    refuse_ws_name "$NAME" test "[--layout <test>]"
-    NAME=$(wk_self)
-else
-    shift || true
-fi
+NAME="${WK_NAME:-}"
 require_name "$NAME"
 
 # Resolved after the options, so the workspace's own history can answer when
@@ -96,45 +94,27 @@ fi
 
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
-# One gate for "is this workspace usable yet" (wait_ready, lib/target.sh):
-# `absent` is still refused by name, and everything else -- a creation still
-# running, one whose driver died, an environment removed from under the record,
-# a machine that will not answer -- gets the words that fit it there rather
-# than "no such workspace", which is what this said about all four.
-#
-# Not for a dry run: that resolves and prints, and printing must not wait for a
-# workspace that is still being made. It reports the state it saw instead.
+# The dispatcher already waited for the workspace to be ready (ready=yes), so
+# it is present by the time we get here; this just reads the state for the
+# dry-run report below.
 if [ -n "$DRY" ]; then
     WS_STATE=$(ws_state "$NAME")
-    [ "$WS_STATE" != absent ] || die "no such workspace: $NAME"
 else
-    wait_ready "$NAME"
     WS_STATE=present
 fi
 
 lower=$(echo "$CFG_TYPE" | tr '[:upper:]' '[:lower:]')
 SRC=$(t_src "$NAME")
 
-# The same personality wrapper the build ran under, and for a sharper reason
-# here: the test scripts ask the machine what architecture it is. `uname -m` in
-# an armhf container answers with the host's aarch64, webkitdirs turns that into
-# arm64 (it reads CMAKE_SYSTEM_PROCESSOR out of `cmake --system-information`,
-# which is the host's), and run-javascriptcore-tests passes the answer to
-# run-jsc-stress-tests as --arch. That would select 64-bit expectations for a
-# 32-bit binary -- FTL and SIMD platform checks, 36-bit address-space
-# assumptions -- and report the results as if they were meant.
+# The same personality wrapper the build ran under, sharper here: the test
+# scripts ask the machine its architecture. `uname -m` in an armhf container
+# answers aarch64, webkitdirs turns that into arm64 (via cmake
+# --system-information), and run-javascriptcore-tests passes it to
+# run-jsc-stress-tests as --arch -- selecting 64-bit expectations for a
+# 32-bit binary and reporting the results as if they were meant.
 ARCH=$(t_arch "$NAME")
 WRAP=$(arch_wrapper "$ARCH")
-if [ "$WK_TARGET_KIND" = remote ]; then
-    # Another machine entirely: its numbers replace this one's rather than
-    # capping them, exactly as in cmd/build.
-    WK_AVAIL_MB=$(t_mem_mb "$NAME"); WK_CGROUP_CORES=$(t_cores "$NAME")
-    WK_LOAD=$(t_load "$NAME")
-    export WK_AVAIL_MB WK_CGROUP_CORES WK_LOAD
-else
-    WK_CGROUP_MB=$(t_mem_mb "$NAME"); WK_CGROUP_CORES=$(t_cores "$NAME")
-    export WK_CGROUP_MB WK_CGROUP_CORES
-fi
+export_target_resources "$NAME"
 POLITE=""
 [ "$WK_TARGET_KIND" = remote ] && POLITE=1
 JOBS=$(build_jobs "$POLITE")
@@ -193,12 +173,11 @@ if [ -n "$LLDB" ]; then
     unset _t
 fi
 
-# The Apple configs no longer live where a bare run-webkit-tests would look for
-# them: mac-release-asan builds into Release-asan/, and only WEBKIT_OUTPUTDIR
-# tells webkitdirs so. Without this the runner resolves the *non*-sanitized
-# tree and tests mac-release while reporting mac-release-asan -- a green run
-# for a binary nobody asked about. Same answer config_build_env() gives the
-# build, from the same function, so the two cannot disagree.
+# The Apple configs don't build into the directory a bare run-webkit-tests
+# would look in: mac-release-asan builds into Release-asan/, and only
+# WEBKIT_OUTPUTDIR tells webkitdirs so -- without it the runner resolves the
+# *non*-sanitized tree and reports a green mac-release-asan for mac-release.
+# Same answer config_build_env() gives the build, so the two can't disagree.
 OUT_ENV=""
 [ "$CFG_BUILDSYS" = xcode ] && OUT_ENV="WEBKIT_OUTPUTDIR=$(config_build_dir "$SRC")"
 
@@ -251,17 +230,15 @@ fi
 t_sync_tools "$NAME"
 
 # --- debugging one test ------------------------------------------------------
-# Everything below this point -- watchdog, status file, failure summary --
-# exists to make an unattended run *reportable*, and all of it is wrong here.
-# The watchdog kills the job after WK_ABORT_SECONDS (1800) of silence, and a
-# process sitting at a breakpoint is silent by definition, so it would end a
-# debugging session with "TESTS STALLED"; the status file would then record a
-# verdict about a run nobody asked for a verdict on.
+# Everything below -- watchdog, status file, failure summary -- exists to
+# make an unattended run *reportable*, and all of it is wrong here: the
+# watchdog kills a silent job after WK_ABORT_SECONDS (1800s), and a process
+# at a breakpoint is silent by definition, so it would end the session with
+# "TESTS STALLED" for a verdict nobody asked for.
 #
-# The shape is the same as `wk gui --lldb web`: lldb goes first and waits, the
-# run starts behind it, and the attach lands as the web process is created.
-# Anything else races -- by the time a run has printed enough for a human to
-# type an attach command, the process to attach to has come and gone.
+# Same shape as `wk gui --lldb web`: lldb waits first, the run starts behind
+# it, and the attach lands as the web process is created. Anything else
+# races -- by the time a run prints enough to type an attach, the process is gone.
 if [ -n "$LLDB" ]; then
     info "debugging $* ($CONFIG) in '$NAME', lldb waiting for $ATTACH"
     log  "  it attaches as that process starts; 'continue' runs the test"

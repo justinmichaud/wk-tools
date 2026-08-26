@@ -1,11 +1,12 @@
 # HANDOFF — the yocto builder: what is left
 
 `wk sysimage build <downstream-yocto-*>` works end to end: both builders behind
-one verb, the stages, the detach model with `--stop`, the preflight, and the
-import into the store with a manifest written last. The full 2.48 build ran
-(13,130 tasks, 0 errors), the image booted the rpi4 from its USB stick and
-handed the board back by itself, and `--stage webkit` has since cross-built
-WebKit against the target's own SDK (3736/3736, `libWPEWebKit-1.1.so`).
+one verb, the stages, the detach model with `--stop`, and the preflight. The
+full 2.48 build ran (13,130 tasks, 0 errors), the image booted the rpi4 from
+its USB stick and handed the board back by itself, and `--stage webkit` has
+since cross-built WebKit against the target's own SDK (3736/3736,
+`libWPEWebKit-1.1.so`). The image store this section used to describe is being
+removed — `docs/HANDOFF-fleet.md` has what is left of that.
 
 ## Remaining
 
@@ -34,25 +35,25 @@ WebKit against the target's own SDK (3736/3736, `libWPEWebKit-1.1.so`).
    `wk rm` — which would discard an hours-long `populate_sdk` toolchain that
    lives in the workspace (unlike sstate and DL_DIR, which are in the store).
    **Add it the next time that workspace is recreated for another reason.**
-5. **Tailscale on the rpi target** — written, not yet built. It is
-   a layer of its own, `image/yocto/meta-wk-tailnet`, and deliberately not a
-   recipe in `meta-wk`: that layer may only change how an image is *built*
-   (item 3 above is the open question about it), and this changes what is in
-   one. The recipe installs upstream's pinned static build — a Yocto image has
-   no apt, and compiling tailscale here would mean a Go toolchain and a module
-   cache for a binary upstream publishes as pure-Go, static, and with the
-   32-bit ARM build the rpi3 needs. The pin (version + sha256 per arch) is one
-   file that `wk pi setup` reads too, so the pushed-onto-a-board copy and the
-   in-the-image copy cannot drift.
+5. **Tailscale on the rpi target** — the layer (`image/yocto/meta-wk-tailnet`,
+   deliberately not part of `meta-wk`: that layer may only change how an image
+   is *built*, item 3 above, and this changes what is *in* one) has now been
+   through a build, and the first attempt failed at `do_populate_lic` —
+   `LIC_FILES_CHKSUM` resolves relative to `${S}`, the unpacked release
+   tarball, which has no LICENSE in it (that is why the layer ships one).
+   Fixed by resolving through `${WORKDIR}` instead. A recipe that has never
+   been built is not a recipe that works, so this needs a clean run to
+   actually confirm now that the known bug is fixed. `IMAGE_INSTALL:append`
+   adds the package; `wk sysimage build … --no-tailnet` builds without it, for
+   a measurement that has to compare against pre-tailnet numbers.
 
    What is left is the running of it, in this order, and none of it can be done
    from a workstation alone: **build** (`wk sysimage build <profile>` — the
-   first build with the layer is also the first test of the recipe), **write**
-   (`disk_seed_tailnet` puts the key and the fleet's name for the board onto the
-   card, never into the image), **boot**, and confirm the board answers to its
-   own tailnet name. Only then do the stored-reachability deletions in
-   `docs/TESTING.md` §7 — the `.local` names, the `10.99.1.10` stanza, the
-   `ProxyJump`, `image_addr`'s ARP ladder and `MACH_MAC`.
+   fixed layer's first real test), **write** (`disk_seed_tailnet` puts the key
+   and the fleet's name for the board onto the card, never into the image),
+   **boot**, and confirm the board answers to its own tailnet name. Only then
+   do the stored-reachability deletions — `docs/HANDOFF-fleet.md`,
+   "Removing the fallback-address plumbing".
 
    The thing this changes for a *workspace* (`docs/HANDOFF-linux-pi.md`): a
    board on the tailnet is reachable by the egress proxy's `pi-hosts`
@@ -66,8 +67,14 @@ WebKit against the target's own SDK (3736/3736, `libWPEWebKit-1.1.so`).
 7. **The rpi3 targets** — `webkit-2.52-yocto-rpi3-32` (then named
    `webkit-2.52-yocto-rpi3-32`) **has** been built (3.3 GB) and written to the
    board's SD card; `-64` has not. That image is the board's **base image**, the only system on its only medium, so the rpi3
-   has no bench system at all and `wk pi bench rpi3` now refuses it by design
-   (docs/TESTING.md §7). The board is off.
+   has no bench system at all and `wk pi bench rpi3` now refuses it by design.
+   The board is off. See `docs/HANDOFF-boot.md` and `docs/HANDOFF-ab-bench.md`
+   for the second-slot work this needs.
+8. **A second `wk sysimage build` of the same profile** has never been timed to
+   confirm sstate reuse actually makes it dramatically faster than the first.
+9. **First boot is slow (~17 min)** because `packages:` installs over WiFi —
+   move anything that does not need a per-machine secret into the rootfs at
+   build time instead.
 
 ## Constraints and traps that bind this work
 

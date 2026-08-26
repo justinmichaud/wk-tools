@@ -1,27 +1,25 @@
 # Target driver: a shared, multi-user build machine.
 #
-# No containers here. These boxes are other people's build machines too, and
-# they typically have no rootless podman, no overlay support and no appetite
-# for a stranger's storage tree. So a workspace is a plain checkout under your
-# own home directory.
+# No containers: these are other people's build machines too, with no
+# rootless podman, no overlay support, and no appetite for a stranger's
+# storage tree. A workspace is a plain checkout under your own home
+# directory.
 #
-# The design consequence is that isolation is gone -- there is no firewall, no
-# read-only base and no disposable layer. Anything running here is trusted, and
-# `wk claude` deliberately refuses to run against a remote target, as does
-# `wk verify`, which measures a boundary this target has never claimed.
+# Isolation is gone as a result -- no firewall, no read-only base, no
+# disposable layer. Anything running here is trusted, and `wk claude` and
+# `wk verify` refuse to run against a remote target.
 #
-# What matters instead is being a good guest. Every build here is sized from
-# the *remote* machine's load and free memory, niced to the floor, and
-# serialised against other wk builds by the same user.
+# Every build here is sized from the *remote* machine's load and free
+# memory, niced to the floor, and serialised against other wk builds by the
+# same user.
 #
-# This is also the only target you can have several of, which is why one is
-# named after the machine rather than after the driver:
+# The only target you can have several of, so one is named after the machine
+# rather than the driver:
 #
 #   wk new bug-238 --target devbox-arm64-2
 #
-# with targets/hosts/devbox-arm64-2.conf -- in this repository, so every device
-# gets the machine by pulling -- holding whatever differs from the defaults
-# below:
+# with targets/hosts/devbox-arm64-2.conf holding whatever differs from the
+# defaults below:
 #
 #   WK_REMOTE_HOST=devbox-arm64-2  # ssh destination; defaults to the target name
 #   WK_REMOTE_ROOT=/home/you/wk    # defaults to ~/wk on the box
@@ -31,39 +29,34 @@
 #   WK_REMOTE_PEER=1               # a workstation of its own, not a build box
 #   WK_REMOTE_TOOLS=Development/…  # its wk-tools, if not $root/tools
 #
-# That is the only place a target is configured; see target_registry_dir in
-# lib/target.sh for why there is no per-device half.
+# See target_registry_dir in lib/target.sh for why there is no per-device
+# config file.
 #
 # --- peers -------------------------------------------------------------------
 #
 # WK_REMOTE_PEER marks the one case that is not a build box: another
-# *workstation*. The Linux workstation and this Mac are both machines that own
-# workspaces -- containers or guests, a store, a mirror, a git checkout of this
-# repository -- and neither is the far end of the other. Before this, the only
-# way to make one visible from the other was to provision it as a build box,
-# which would have been actively wrong: `wk remote setup` writes ~/.wk-remote,
-# and that marker makes the machine refuse `wk sync`, `wk gc` and `wk new` *on
-# itself* (`wk` dispatch, in_remote_host). A workstation cannot be told it is
-# somebody's build box without ceasing to be a workstation.
+# workstation, which owns its own workspaces (containers, guests, a store, a
+# mirror) rather than being the far end of this one. Provisioning it as a
+# build box (`wk remote setup`) would make it refuse `wk sync`, `wk gc` and
+# `wk new` on itself (`wk` dispatch, in_remote_host) -- a workstation cannot
+# be told it is somebody's build box without ceasing to be a workstation.
 #
-# So a peer is a target that can be *asked* and not driven:
+# A peer is a target that can be *asked* and not driven:
 #
-#   asked    t_has_wk is true without the marker, so `wk status` and `wk ls`
-#            delegate to the machine's own wk and report what it says. That is
-#            the whole reason peers exist: `wk status` on the Mac said nothing
-#            about the Linux box, because it had never heard of it.
-#   not driven  no tooling is pushed (it has its own checkout, kept by git),
-#            and creation and destruction are refused -- a workstation's
-#            workspaces are containers and guests, which this driver knows
-#            nothing about and would replace with a plain checkout.
+#   asked      t_has_wk is true without the marker, so `wk status` and
+#              `wk ls` delegate to the machine's own wk and report what it
+#              says.
+#   not driven no tooling is pushed (it keeps its own checkout, by git), and
+#              creation and destruction are refused -- a workstation's
+#              workspaces are containers and guests, which this driver knows
+#              nothing about and would replace with a plain checkout.
 #
-# The bare name `remote` still works for a one-off, and then WK_REMOTE_HOST
-# has to come from the environment -- there is no machine name to infer it
-# from.
+# The bare name `remote` still works for a one-off, with WK_REMOTE_HOST from
+# the environment -- there is no machine name to infer it from.
 #
-# `wk remote setup <target>` provisions a machine for all of this, and needs no
-# root on it. Nothing here ever does: a shared box is somebody else's, and a
-# tool that wants sudo on it is a tool that does not get used.
+# `wk remote setup <target>` provisions a machine for all of this and needs
+# no root on it: a shared box is somebody else's, and a tool that wants sudo
+# on it is a tool that does not get used.
 
 # The ssh destination defaults to the target's own name, because a machine you
 # can already reach is a machine that already has an entry in ~/.ssh/config --
@@ -81,53 +74,39 @@ WK_REMOTE_ROOT="${WK_REMOTE_ROOT:-}"
 
 # --- am I the machine this target names? -------------------------------------
 #
-# Computed, from the one file that is evidence of it: ~/.wk-remote, which
-# `wk remote setup` writes on the box and which already records `target=` and
-# `root=`. If it names this target, then this process is running *on* the
-# machine and the driver drops the ssh step (WK_REMOTE_LOCAL) and takes the root
-# from the marker rather than from a probe of itself.
+# Computed from ~/.wk-remote, written by `wk remote setup` and recording
+# `target=` and `root=`. If it names this target, this process is running
+# *on* the machine: the driver drops the ssh step (WK_REMOTE_LOCAL) and takes
+# the root from the marker rather than probing itself.
 #
-# Not a second conf file -- ~/.config/wk/targets/<t>.conf on the box, holding
-# WK_TARGET_KIND, WK_REMOTE_LOCAL and WK_REMOTE_ROOT. Each of those three
-# restates something the marker beside
-# it already said, which is the "no caching of facts" rule (CLAUDE.md, "State
-# and lifecycle" 1): a read can recompute all of it, so a second copy is a bug
-# even while it is still equal. It could also drift -- a target renamed in the
-# registry left the box answering for the old name -- and it was the last thing
-# keeping the per-device conf directory alive.
+# Not a second conf file: restating WK_TARGET_KIND/WK_REMOTE_LOCAL/
+# WK_REMOTE_ROOT there would duplicate what the marker already says
+# (CLAUDE.md, "State and lifecycle" 1) and could drift if the target were
+# renamed in the registry.
 if [ -z "${WK_REMOTE_LOCAL:-}" ] && in_remote_host \
    && [ "$(wk_remote_field target)" = "${WK_TARGET:-remote}" ]; then
     WK_REMOTE_LOCAL=1
     [ -n "$WK_REMOTE_ROOT" ] || WK_REMOTE_ROOT="$(wk_remote_field root)"
 fi
 
-# A ceiling on the job count, on top of the polite calculation. Not a
-# performance knob -- the point is that a 96-core machine shared by six people
-# should not hand any one of them 48 jobs just because the load average
-# happened to be low in the second we looked.
-# No job ceiling of its own. It had one -- WK_REMOTE_MAX_JOBS, 16 by default --
-# and a fixed number is exactly the thing this repo's resource policy says not
-# to have: it was too small on a 250 GB build box and would be too large on a
-# small one, and it went stale the moment the machine changed. The job count is
-# derived per build from what that machine has free *at the time*
-# (_remote_probe reads MemAvailable and the load average on every invocation),
-# which is the number that decides whether a link step survives.
-#
-# WK_MAX_JOBS is still honoured if something in the environment sets it, as a
-# deliberate one-off; nothing configures it any more.
+# No fixed job ceiling: a number that fits a 250 GB build box is wrong for a
+# small one, and goes stale the moment either machine changes. The job count
+# is derived per build from what the machine has free *at the time*
+# (_remote_probe reads MemAvailable and the load average on every
+# invocation). WK_MAX_JOBS is still honoured if the environment sets it.
 
 # Host-side state, per machine. $WK_STORE defaults to /var/lib/wk, which is
-# right inside the podman VM and wrong on a workstation driving a build
-# somewhere else; and it has to be per target, because two remote machines can
-# each have a workspace of the same name and `wk status` walks the store of
-# every target it knows.
+# right inside the podman VM but wrong on a workstation driving a build
+# elsewhere, and has to be per target since two remote machines can each
+# have a workspace of the same name.
 #
-# What lives here is only what this side produces: the build log and the build
-# status. The checkout, the build tree and the ccache are all on the far end,
-# where they belong.
-# On the machine itself the state *is* the workspace directory: `$root/ws/<name>`
-# already holds the checkout, and putting build.log and build.status beside it
-# is what makes one copy canonical no matter which end started the build.
+# What lives here is only what this side produces: the build log and build
+# status. The checkout, build tree and ccache are all on the far end.
+#
+# On the machine itself the state *is* the workspace directory:
+# `$root/ws/<name>` already holds the checkout, so putting build.log and
+# build.status beside it keeps one copy canonical regardless of which end
+# started the build.
 if [ -n "${WK_REMOTE_LOCAL:-}" ] && [ -n "${WK_REMOTE_ROOT:-}" ]; then
     WK_STORE="${WK_REMOTE_STORE:-$WK_REMOTE_ROOT}"
 else
@@ -154,19 +133,18 @@ _remote_require() {
 
 # ssh, multiplexed and never interactive. A remote target answers `t_info`,
 # `t_src`, `t_tools` and the capacity probe through this, several times per
-# command, and every one of those is a full handshake through a jump host
-# without a shared connection -- seconds each, on a link where the work itself
-# is a single build. The socket expires by itself, so nothing has to clean it
-# up.
+# command, each a full handshake through a jump host without a shared
+# connection. The socket expires by itself, so nothing has to clean it up.
 #
-# ConnectTimeout because `wk status` walks every target it knows: a machine
-# that is off, or off this network, must cost ten seconds and not a TCP
-# timeout. BatchMode because none of this may ever stop to ask for a
-# passphrase -- a prompt in the middle of `wk build` is a hang with a cursor.
+# ConnectTimeout: `wk status` walks every target it knows, and an off machine
+# must cost ten seconds, not a TCP timeout. BatchMode: none of this may stop
+# to ask for a passphrase -- a prompt mid-`wk build` is a hang with a cursor.
+# _ssh_opts_base (lib/target.sh) supplies those two; the rest here is
+# ControlMaster muxing, worth it for several questions per command.
 _ssh_opts() {
     local d; d="$(wk_state_dir)/ssh"
     mkdir -p "$d" 2>/dev/null || true
-    printf '%s' "-o BatchMode=yes -o ConnectTimeout=${WK_SSH_TIMEOUT:-10} -o ControlMaster=auto -o ControlPath=$d/%h-%p-%r -o ControlPersist=60"
+    printf '%s' "$(_ssh_opts_base "${WK_SSH_TIMEOUT:-10}") -o ControlMaster=auto -o ControlPath=$d/%h-%p-%r -o ControlPersist=60"
 }
 
 _rsh() {
@@ -181,21 +159,17 @@ _rsh() {
     ssh $(_ssh_opts) "$WK_REMOTE_HOST" "$@"
 }
 
-# ssh for *questions* -- everything that asks the machine something rather than
-# handing it work. `-n`, so it can never read this side's stdin.
-#
-# That is not a precaution, it is a fix. ssh reads stdin eagerly and forwards
-# it whether or not the remote command wants it, and these run inside command
-# substitutions that inherit whatever stdin their caller had. Two ways it bit:
-# the build status arrived on the machine as an empty file, because resolving
-# the destination path in the same pipeline drank the content; and a `du` in
-# `wk remote setup`'s cleanup loop could swallow the answer being typed at the
-# confirmation prompt right after it.
+# ssh for *questions* -- everything that asks the machine something rather
+# than handing it work. `-n`, because ssh reads stdin eagerly and forwards it
+# whether or not the remote command wants it, and these run inside command
+# substitutions that inherit whatever stdin their caller had -- without `-n` a
+# question run in the same pipeline as something reading stdin can drink that
+# input instead of answering.
 #
 # t_exec, t_exec_tty, t_wk and t_state_put deliberately do *not* use it: a
-# command run in the workspace may legitimately be fed something. A *build* is
-# not one of those -- it reads nothing, and `run_watched` puts it in the
-# background, where an ssh reaching for the terminal earns a SIGTTIN.
+# command run in the workspace may legitimately be fed something. A *build*
+# is not -- it reads nothing, and `run_watched` backgrounds it, where an ssh
+# reaching for the terminal earns a SIGTTIN.
 _rsh_q() {
     _remote_require
     if _remote_is_local; then
@@ -206,40 +180,35 @@ _rsh_q() {
     ssh -n $(_ssh_opts) "$WK_REMOTE_HOST" "$@"
 }
 
-# One round trip, cached for the life of this process: the remote home (which
-# is what $WK_REMOTE_ROOT defaults to), the core count, the load average and
-# the memory actually free.
+# One round trip, cached for the life of this process: the remote home (what
+# $WK_REMOTE_ROOT defaults to), core count, load average and memory actually
+# free. Everything that sizes a build comes from this and nothing local --
+# lib/resources.sh measures the machine it runs on, which for every other
+# target is right and for this one never is.
 #
-# Everything that sizes a build here comes from this and from nothing local.
-# The machine driving the build may be a laptop with 8 cores and the build may
-# be running on 80; lib/resources.sh measures the machine it runs on, which for
-# every other target is the right one and for this one is never.
-# The two halves are split because reporting and working want different
-# answers to "the machine did not reply". A build cannot proceed without the
-# numbers and says so with the ssh command to try; `wk status` must never die
-# over an unreachable machine -- the core requirement is that it reports
-# unreachable, with the timeout that decided it, and carries on with the rest
-# of the fleet.
+# Reporting and working want different answers to "the machine did not
+# reply": a build cannot proceed and says so with the ssh command to try;
+# `wk status` must never die over an unreachable machine, only report it and
+# carry on with the rest of the fleet. Both outcomes are cached for the
+# process, since `wk status` asks per workspace and a ConnectTimeout on each
+# would turn a listing into a minute of waiting.
 #
-# The failure is remembered for the life of this process, exactly as the
-# success is: `wk status` asks about every workspace on the machine, and one
-# ConnectTimeout per question would turn a listing into a minute of waiting.
-# The four questions, as one shell snippet, because two callers ask them: the
-# probe below and the parallel prefetch further down. One copy, or the prefetch
-# fills the cache with fields the reader parses differently.
+# The four questions are one shell snippet because two callers ask them --
+# the probe below and the parallel prefetch further down -- and a second copy
+# would parse differently from the prefetch's cache.
 _remote_probe_cmd() {
     printf '%s' 'echo "$HOME"; nproc; awk "{print int(\$1)}" /proc/loadavg;
                  awk "/^MemAvailable:/ {print int(\$2/1024)}" /proc/meminfo'
 }
 
-# Where a prefetched answer for *this* target would be, if a command asked for
-# one (prefetch_targets, lib/target.sh). Empty when nothing did.
+# Where a prefetched answer for *this* target would be, if a command asked
+# for one (prefetch_targets, lib/target.sh). Empty when nothing did.
 #
-# A file rather than an inherited variable because the prefetch happens in a
-# subshell per target -- that is what makes it parallel -- and a subshell cannot
-# hand a value back to its parent. It lives for the length of one command and is
-# removed with it: this is the same per-process memo _WK_REMOTE_PROBED already
-# is, not a cache of a fact that outlives the asking (docs/HANDOFF-workspace-state.md).
+# A file, not an inherited variable: the prefetch runs in a subshell per
+# target (that is what makes it parallel), and a subshell cannot hand a
+# value back to its parent. It lives and dies with one command, the same
+# per-process memo _WK_REMOTE_PROBED already is, not a cache that outlives
+# the asking.
 _remote_probe_file() {
     [ -n "${WK_PREFETCH_DIR:-}" ] || return 0
     printf '%s/%s.probe' "$WK_PREFETCH_DIR" "${WK_TARGET:-remote}"
@@ -295,22 +264,19 @@ _remote_probe() {
 
 # A shared WebKit repository on the machine, to clone workspaces from.
 #
-# Igalia's build boxes carry one and say so in the MOTD -- buildbox4's reads
-# "instead of cloning the git repo from webkit.org, clone the one from
-# /var/git/WebKit.git (is updated every 10 minutes)", and notes that a local
-# clone hardlinks `.git/objects` and so costs almost nothing. Since the same
-# MOTD asks everyone to keep disk use down, and our own mirror is 13 GB, using
-# theirs is not a micro-optimisation: it is the difference between following
-# the house rules on a shared machine and not.
+# Igalia's build boxes advertise one in the MOTD (buildbox4: "clone the one
+# from /var/git/WebKit.git", updated every 10 minutes) -- a local clone
+# hardlinks `.git/objects`, so using it costs almost nothing next to a 13 GB
+# mirror of our own on a machine whose MOTD asks everyone to keep disk use
+# down.
 #
-# Advertised or configured, and nothing else. A path that merely exists is
-# somebody's checkout, not an invitation; a path in the MOTD is the sysadmins
-# telling every user to clone it. WK_REMOTE_REFERENCE overrides, for a machine
-# that has one and does not announce it.
+# Advertised or configured, nothing else: a path that merely exists is
+# somebody's checkout, not an invitation, while a path in the MOTD is the
+# sysadmins telling every user to clone it. WK_REMOTE_REFERENCE overrides,
+# for a machine that has one and does not announce it.
 #
-# Verified before use, because buildbox4 advertises a path that is not there --
-# the MOTD outlived the repository. An unchecked hint would turn every `wk new`
-# into a confusing clone failure.
+# Verified before use: a MOTD can outlive the repository it names, and an
+# unchecked hint would turn every `wk new` into a confusing clone failure.
 _remote_reference() {
     [ -n "${_WK_REMOTE_REF_PROBED:-}" ] && { printf '%s' "$WK_REMOTE_REFERENCE"; return 0; }
     _WK_REMOTE_REF_PROBED=1
@@ -333,21 +299,16 @@ _remote_reference() {
     printf '%s' "$WK_REMOTE_REFERENCE"
 }
 
-# The mirror this driver keeps when the machine has no shared repository of its
-# own, and the fetch into it.
+# The mirror this driver keeps when the machine has no shared repository of
+# its own, and the fetch into it. Both halves live here because both callers
+# need both: `t_create` clones from it, `t_sync` refreshes it, and a sync
+# that assumed the mirror already existed would fail on the machine most
+# likely to sync first -- one that has never made one.
 #
-# Both halves live here because both callers need both: `t_create` clones a new
-# workspace from it, and `t_sync` refreshes it -- and a sync that assumed the
-# mirror already existed would fail on the machine that has never made one,
-# which is exactly the machine somebody is most likely to sync first.
-#
-# Only main is mirrored, matching wk_mirror_branches: WebKit has ~920 branches
-# and the ones that are not main are not what a workspace starts from. Anything
-# else is still one `git fetch` away inside the workspace.
-#
-# gc.auto is off for the same reason it is off in the local mirror: the
-# workspaces borrow its objects through --shared, and a repack underneath a
-# live clone is how that arrangement breaks.
+# Only main is mirrored, matching wk_mirror_branches: WebKit has ~920
+# branches, and anything besides main is one `git fetch` away inside the
+# workspace. gc.auto is off, as in the local mirror: workspaces borrow its
+# objects through --shared, and a repack underneath a live clone breaks that.
 _remote_mirror_update() {
     local root="$1"
     info "updating the WebKit mirror on $WK_REMOTE_HOST (first run clones it)"
@@ -385,11 +346,10 @@ _remote_home() { _remote_probe; printf '%s' "$_WK_REMOTE_HOME"; }
 # wk-tools is pushed to the remote root rather than per workspace: it is the
 # same tree for all of them, and `wk build` re-rsyncs it on every run.
 #
-# WK_REMOTE_TOOLS overrides, which is how a peer is reached: its wk-tools is a
-# git checkout it maintains itself, wherever that machine keeps it. A relative
-# path is relative to the *remote* home -- the conf is sourced on this side, so
-# writing $HOME in it would expand to the wrong machine's home, silently and
-# plausibly.
+# WK_REMOTE_TOOLS overrides, which is how a peer is reached: its wk-tools is
+# a git checkout it maintains itself. A relative path is relative to the
+# *remote* home -- the conf is sourced on this side, so writing $HOME in it
+# would silently expand to the wrong machine's home.
 t_tools() {
     case "${WK_REMOTE_TOOLS:-}" in
         "") echo "$(_remote_root)/tools" ;;
@@ -403,15 +363,15 @@ t_tools() {
 # maintains itself.
 t_needs_base() { return 1; }
 
-# The ssh destination is the one already configured -- not a generated wk-<name>
-# alias. A generated alias could not carry the ProxyJump the real entry has,
-# and a second entry pointing at the same machine is a second thing to keep
-# right.
-# Non-zero rather than fatal when there is none, which is the contract the vm
-# driver already follows for a guest that is not running: `wk enter --zed`
-# treats it as "no route", and `wk new` simply leaves the line out. On the
-# machine itself there is no route and never will be -- it would be an ssh loop
-# back to the host you are typing on.
+# The ssh destination is the one already configured, not a generated
+# wk-<name> alias: a generated alias could not carry the real entry's
+# ProxyJump, and a second entry for the same machine is a second thing to
+# keep right.
+#
+# Non-zero rather than fatal when there is none, matching the vm driver's
+# contract for a guest that is not running (`wk enter --zed` treats it as
+# "no route"). On the machine itself there is no route and never will be --
+# that would be an ssh loop back to the host you are typing on.
 t_ssh_host() {
     _remote_is_local && return 1
     _remote_require; echo "$WK_REMOTE_HOST"
@@ -438,11 +398,9 @@ t_list() {
 #   `.wk-ready`                     present
 #   the machine did not answer      unreachable, never absent
 #
-# The marker is the point of the exercise. Before it, a workspace whose clone
-# died half-way had a directory and a partial checkout, `t_info` called it
-# present, `wk new` refused it as "already exists" and `wk build` built the
-# rubble -- and none of that was visible from the machine itself, which is
-# where the marker now is.
+# The marker is the point: without it, a half-cloned workspace reads as
+# present, `wk new` refuses it as "already exists", and `wk build` builds
+# the rubble.
 t_info() {
     local ws out
     _remote_probe_try || { echo unreachable; return 0; }
@@ -485,20 +443,15 @@ t_create() {
     ref=$(_remote_reference)
 
     if [ -n "$ref" ]; then
-        # The machine's own shared repository, advertised in its MOTD. A plain
-        # local clone, which git makes with hardlinks -- so this costs the
-        # working tree and essentially no object storage, and unlike --shared
-        # it does not leave the workspace depending on a repository the
-        # sysadmins repack on a schedule. That is the whole point of using
-        # theirs: no 13 GB mirror of our own on a machine whose MOTD asks
-        # everyone to keep disk use down.
+        # A plain local clone, which git makes with hardlinks -- costs the
+        # working tree and essentially no object storage, and unlike
+        # --shared does not leave the workspace depending on a repository
+        # the sysadmins repack on a schedule.
         #
-        # The clone comes from it, and then origin is re-pointed at
-        # WebKit/WebKit like everywhere else -- the machine's copy stays as
-        # `shared`, which is what a fast, ten-minutes-fresh local mirror should
-        # be called. Calling it `origin` makes `git log origin/main` in a
-        # remote workspace answer for that box's last fetch rather than for
-        # upstream.
+        # origin is then re-pointed at WebKit/WebKit like everywhere else;
+        # the machine's copy stays as `shared`, since calling it `origin`
+        # would make `git log origin/main` answer for that box's last fetch
+        # rather than upstream.
         info "cloning from $ref (this machine's shared WebKit, hardlinked)"
         _rsh_q "set -e
             mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
@@ -520,14 +473,12 @@ t_create() {
         _remote_wire "$ws/WebKit"
     fi
 
-    # The same ceiling and the same words as every other cache here
-    # (ccache_conf_render, lib/store.sh) -- rendered on this side and written on
-    # that one, so the far machine needs no wk-tools to get it right. Only when
-    # absent, matching the store's rule: a machine whose ccache has been tuned
-    # by hand keeps that tuning.
-    # Guarded like the other cross-file helpers here: not every caller of this
-    # driver sources lib/store.sh, and a `command not found` in a command
-    # substitution would write an empty config rather than fail.
+    # Same ceiling and words as every other cache (ccache_conf_render,
+    # lib/store.sh), rendered here and written there so the far machine needs
+    # no wk-tools to get it right. Only when absent, so hand-tuned ccache
+    # survives. Guarded because not every caller of this driver sources
+    # lib/store.sh; unguarded, a `command not found` in a command
+    # substitution would silently write an empty config.
     command -v ccache_conf_render >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
     _rsh_q "[ -f $(sh_quote "$root/cache/ccache/ccache.conf") ] ||
             printf %s $(sh_quote "$(ccache_conf_render)") \
@@ -561,40 +512,30 @@ t_pull() {
 
 t_pull_dir() {
     local name="$1" src="$2" dest="$3"; shift 3
-    local ex=()
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --exclude) ex+=("--exclude" "${2:-}"); shift 2 ;;
-            *) die "t_pull_dir: unknown option $1" ;;
-        esac
-    done
+    _t_pull_dir_excludes "$@"
     mkdir -p "$dest"
     if _remote_is_local; then
-        rsync -a --delete ${ex[@]+"${ex[@]}"} "$src/" "$dest/"; return
+        rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} "$src/" "$dest/"; return
     fi
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    rsync -a --delete ${ex[@]+"${ex[@]}"} -e "ssh $(_ssh_opts)" \
+    rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} -e "ssh $(_ssh_opts)" \
         "$WK_REMOTE_HOST:$src/" "$dest/"
 }
 
-# The build, and only the build, is serialised: two of your own builds must not
-# stack on a machine you are already sharing with other people, and putting the
-# lock on t_exec instead would silently block every `wk run` and every one-line
-# probe behind an hour-long build.
+# The build, and only the build, is serialised: two of your own builds must
+# not stack on a machine already shared with other people, and locking
+# t_exec instead would silently block every `wk run` and one-line probe
+# behind an hour-long build.
 #
-# The lock is taken *on the machine that builds*, by lib/lockrun.sh in the copy
-# of wk-tools that t_sync_tools has just pushed there. It cannot be taken here:
-# a lock dies with its holder, and the holder that matters is the build, not
-# the ssh session -- which a detached build outlives by hours.
+# The lock is taken *on the machine that builds*, by lib/lockrun.sh in the
+# copy of wk-tools t_sync_tools has just pushed there -- it cannot be taken
+# here, since a lock dies with its holder and the holder that matters is the
+# build, not the ssh session a detached build outlives by hours. Not a
+# `flock`: its descriptor is inherited, so anything the build leaves running
+# would hold the machine's lock for as long as it lives (lib/common.sh).
 #
-# It was a `flock` on a file under the remote root, and stopped being one for
-# the reason lib/common.sh gives: the descriptor is inherited, so anything the
-# build leaves running holds the machine's build lock for as long as it lives.
-# The lock is now this repo's one mechanism on both ends, which also means one
-# fewer thing a shared machine has to have installed.
-#
-# nice and ionice are here as well as in build-in-target.sh: this end knows the
-# target is shared, and the lock has to be outside them either way.
+# nice and ionice are here as well as in build-in-target.sh: this end knows
+# the target is shared, and the lock has to be outside them either way.
 t_exec_build() {
     local name="$1"; shift
     local log tee_to
@@ -641,15 +582,14 @@ t_state_put() {
         | _rsh "cat > $(sh_quote "$ws/build.status")" || true
 }
 
-# `wk`, run on the machine itself.
+# `wk`, run on the machine itself: it answers about its own workspaces with
+# its own store, where the canonical build state lives, so `wk status` and
+# `wk logs` ask it rather than reporting the half of the truth this side
+# holds.
 #
-# It answers about its own workspaces with its own store, which is where the
-# canonical build state lives -- so `wk status` and `wk logs` here ask it
-# rather than reporting the half of the truth this side happens to hold.
-#
-# Refused unless the machine has been provisioned: `wk remote setup` is what
-# puts wk-tools and the marker there, and without them the command would either
-# not exist or would resolve a target it has never heard of.
+# Refused unless the machine has been provisioned: `wk remote setup` puts
+# wk-tools and the marker there, and without them the command would either
+# not exist or resolve a target it has never heard of.
 t_has_wk() {
     _remote_is_local && return 1
     # Before resolving the remote root, which is what `t_tools` needs and which
@@ -667,15 +607,12 @@ t_has_wk() {
     _rsh_q "test -f \$HOME/.wk-remote && test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
 }
 
-# Two variables travel with a delegated command, as environment and not as
-# arguments, and the reason is version skew: a *peer* runs its own checkout of
-# this repository, kept by git, so the two sides are the same code only after
-# both have pulled. An argument an old copy has never heard of is fatal there:
-# `--label` reaching a workstation on an older tree makes `require_name --label`
-# kill the delegated status, dropping that machine's workspaces out of the
-# listing while `wk ls`, which ignores extra
-# arguments, still showed them. An unknown *variable* is ignored by every
-# version, so the old side answers as it always did.
+# Two variables travel with a delegated command as environment, not as
+# arguments: a *peer* runs its own checkout of this repository, kept by git,
+# so the two sides are the same code only after both have pulled. An unknown
+# argument is fatal on an old copy (`require_name --label` on a tree that
+# predates `--label` kills the delegated status), while an unknown variable
+# is silently ignored, so the old side answers as it always did.
 t_wk() {
     _rsh "cd \$HOME && \
         ${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }\
@@ -683,13 +620,11 @@ t_wk() {
         $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@")"
 }
 
-# Detached on the machine, so this end can go away.
-#
-# nohup and </dev/null, and the redirections matter as much as the nohup:
-# ssh's own session ends when its channel closes, and a child still holding
-# the tty or the pipe is killed with it. The log is not lost -- the far-side
-# `wk build` writes build.log and build.status beside the checkout, which is
-# where `wk logs` and `wk status` already look.
+# Detached on the machine, so this end can go away. The redirections matter
+# as much as nohup: ssh's own session ends when its channel closes, and a
+# child still holding the tty or the pipe is killed with it. The log is not
+# lost -- the far-side `wk build` writes build.log and build.status beside
+# the checkout, which is where `wk logs` and `wk status` already look.
 t_wk_detach() {
     _rsh_q "cd \$HOME && nohup $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@") \
                 >/dev/null 2>&1 </dev/null & echo \$!"
@@ -766,16 +701,16 @@ t_sync_tools() {
         "$WK_ROOT/" "$WK_REMOTE_HOST:$dest/"
 }
 
-# See t_wiring_args in lib/target.sh. The machine's own shared WebKit when it
-# advertises one (fetch-only, hardlinked, and the house rules ask us to use it),
-# our own mirror otherwise -- and the ssh config under the wk root either way,
-# which is what makes the fork push URLs resolve on a box whose ~/.ssh is not
-# ours to edit.
-# Wire a checkout on the machine, from the three lines above -- so creation and
-# `wk remotes --fix` cannot drift apart. `origin` is upstream on every target,
-# which is the point of doing this at all: `git clone --shared <mirror>` leaves
-# origin pointing at the mirror, and a workspace whose origin is a local copy
-# answers `git log origin/main` for whatever that copy last fetched.
+# See t_wiring_args in lib/target.sh: the machine's own shared WebKit when
+# it advertises one, our own mirror otherwise, and the ssh config under the
+# wk root either way -- which is what makes fork push URLs resolve on a box
+# whose ~/.ssh is not ours to edit.
+#
+# Wired from the three lines above so creation and `wk remotes --fix` cannot
+# drift apart. `origin` stays upstream on every target: `git clone --shared
+# <mirror>` leaves origin pointing at the mirror otherwise, and a workspace
+# whose origin is a local copy answers `git log origin/main` for whatever
+# that copy last fetched.
 _remote_wire() {
     local src="$1" n u c
     { read -r n; read -r u; read -r c; } <<EOF
@@ -799,24 +734,23 @@ t_wiring_args() {
 # `wk sync`, for a machine of its own.
 #
 # On a host, sync means the store: a bare mirror of every upstream plus the
-# hardlinked base snapshots the overlay scheme is built on. None of that exists
-# here -- a workspace is a plain checkout -- so a bare `wk sync` is refused on
-# this machine (`wk` dispatch, is_host_only) and this is what takes its place:
-# the two things that *do* go stale on the far end of a target.
+# hardlinked base snapshots the overlay scheme is built on. None of that
+# exists here, so a bare `wk sync` is refused on this machine (`wk`
+# dispatch, is_host_only), and this is what takes its place: the two things
+# that *do* go stale on the far end of a target.
 #
-# The tooling first, because it is the one that fails confusingly. Every
-# delegated command runs the machine's own copy of wk-tools, so a stale copy
-# answers a question this side did not ask -- `unknown option --quiet` from a
-# command that works perfectly where it was typed, three times in one
-# afternoon. `wk status` already names the drift; without this there was
-# nothing to name as the fix but a full `wk remote setup`.
+# The tooling first, since it fails confusingly: every delegated command
+# runs the machine's own copy of wk-tools, so a stale copy answers a
+# question this side did not ask (`unknown option --quiet` from a command
+# that works fine where it was typed). `wk status` names the drift; without
+# this the only fix was a full `wk remote setup`.
 #
 # Then the WebKit objects, and which ones depends on where the machine's
-# workspaces come from: our own mirror is ours to fetch, a shared repository in
-# the machine's MOTD is not -- it belongs to the sysadmins, is updated by them
-# every ten minutes, and fetching into it would be writing to somebody else's
-# repository. Said rather than silently skipped, because "wk sync did nothing
-# and reported success" is indistinguishable from a bug.
+# workspaces come from: our own mirror is ours to fetch, a shared repository
+# in the MOTD is not -- it belongs to the sysadmins and fetching into it
+# would be writing to somebody else's repository. Said rather than silently
+# skipped, because "wk sync did nothing and reported success" is
+# indistinguishable from a bug.
 t_sync() {
     local ref
     _remote_probe

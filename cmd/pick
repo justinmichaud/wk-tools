@@ -1,32 +1,23 @@
 #!/usr/bin/env bash
 #
-# wk pick [workspace] <commit>... -- cherry-pick WebKit commits onto this branch.
+# wk pick [<workspace>] <commit>... -- cherry-pick WebKit commits onto this branch
+# wk: where=workspace name=optional ready=yes group=sources
 #
-# The release-branch ritual, encoded. The wiki's version is: collect the commit
-# identifiers from the bug or the PR, resolve each `NNNNNN@main` to a ToT sha by
-# hand -- historically a re-typed throwaway python snippet, or a `git log --grep`
-# over a trailer -- and feed the shas to `git cherry-pick --stdin`.
+# Encodes the release-branch ritual: resolve each `NNNNNN@main` identifier to a
+# ToT sha and feed the shas to `git cherry-pick --stdin`.
 #
-# Each argument is either a WebKit identifier (`287654@main`) or an ordinary
-# sha/ref. They are picked in the order given, oldest first if you give them in
-# that order; the command does not reorder them, because which order a series
-# applies in is the picker's decision and getting it wrong is visible.
+# Each argument is a WebKit identifier (`287654@main`) or a sha/ref, picked in
+# the order given -- order is the caller's decision and is never reordered.
 #
 #   wk pick 287654@main 287655@main       # in a workspace
 #   wk pick relbranch 287654@main         # from the host, naming the workspace
 #
-# HOW AN IDENTIFIER IS RESOLVED, AND WHY IT IS THEN CHECKED.
+# An identifier is a position: `N@main` is the Nth commit in main's first-parent
+# history, so the sha is arithmetic (`main~(count - N)`) and needs no network.
+# The result is verified against the commit's own `Canonical link:` trailer
+# before picking; a mismatch falls back to a bounded search around the estimate.
 #
-# A WebKit identifier is a position: `N@main` is the Nth commit in main's
-# first-parent history. So the sha is arithmetic -- `main~(count - N)` -- and
-# needs no network, which matters because a workspace has none to commits.
-# webkit.org. Arithmetic is also exactly the kind of thing that is off by one
-# and looks right, so the result is *verified* against the commit's own
-# `Canonical link:` trailer before anything is picked, and a mismatch falls back
-# to a bounded search around the estimate rather than guessing.
-#
-# Nothing is committed on your behalf beyond the picks themselves, and a dirty
-# tree is refused rather than carried into a conflict.
+# A dirty tree is refused rather than carried into a conflict.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,38 +26,20 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-usage() {
-    if in_workspace; then log "usage: wk pick <commit>...        (287654@main, or a sha)"
-    else log "usage: wk pick <workspace> <commit>...  (287654@main, or a sha)"; fi
-    exit 2
-}
-
-# The workspace name is optional inside one, exactly as in `wk pr`. A commit
-# argument is an identifier (`287654@main`) or a sha; a workspace name is
-# neither, so the two forms are told apart by shape rather than by counting.
-[ $# -ge 1 ] || usage
-NAME=""
-case "$1" in
-    *@*) in_workspace && NAME=$(wk_self) || usage ;;
-    *)   if in_workspace && printf '%s' "$1" | grep -qE '^[0-9a-fA-F]{7,40}$'; then
-             NAME=$(wk_self)
-         else
-             refuse_ws_name "$1" pick "<commit>..."
-             NAME="$1"; shift
-             [ $# -ge 1 ] || usage
-         fi ;;
-esac
+# $WK_NAME: the dispatcher resolves it inside a workspace, and on a host by
+# checking the first word against the registry (so a bare identifier or sha
+# there is left as a commit argument rather than mistaken for a name).
+NAME="${WK_NAME:-}"
+[ -n "$NAME" ] && [ $# -ge 1 ] \
+    || die "usage: wk pick [<workspace>] <commit>...; see wk pick -h"
 
 require_name "$NAME"
 load_target "$(ws_target "$NAME")"
-wait_ready "$NAME"
 SRC=$(t_src "$NAME")
 
-# The identifiers, as given. Order is the caller's.
 SPECS="$*"
 
-# One round trip, like `wk pr`: everything the decision needs, read out here
-# where it can be reported.
+# One round trip, like `wk pr`: everything the decision needs, read out here.
 probe=$(t_exec "$NAME" bash -c "
     cd $(sh_quote "$SRC") || exit 1
     echo \"branch=\$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"
@@ -74,17 +47,15 @@ probe=$(t_exec "$NAME" bash -c "
     echo \"picking=\$(test -d .git/sequencer && echo yes || echo no)\"
 " 2>/dev/null | tr -d '\r') || die "could not reach the checkout in '$NAME'"
 
-BRANCH=$(printf '%s\n' "$probe" | sed -n 's/^branch=//p')
-DIRTY=$(printf '%s\n' "$probe"  | sed -n 's/^dirty=//p')
-PICKING=$(printf '%s\n' "$probe" | sed -n 's/^picking=//p')
+BRANCH=$(kv_get branch <<<"$probe")
+DIRTY=$(kv_get dirty <<<"$probe")
+PICKING=$(kv_get picking <<<"$probe")
 
 [ "$PICKING" = no ] || die "a cherry-pick is already in progress in '$NAME'.
     Finish it first:  git cherry-pick --continue   (or --abort)"
 
-# A dirty tree is a barrier rather than a warning here, unlike `wk pr`: a
-# checkout carries local changes across harmlessly, and a cherry-pick merges
-# into them -- so a conflict arrives mixed with your own edits and there is no
-# clean way back out.
+# A barrier rather than a warning, unlike `wk pr`: a cherry-pick merges into
+# local changes, so a conflict arrives mixed with your own edits.
 if [ "${DIRTY:-0}" -gt 0 ] 2>/dev/null; then
     barrier "'$NAME' has $DIRTY uncommitted change(s), and a cherry-pick
     conflicts into them. Commit or stash first (git stash push)."
@@ -180,8 +151,7 @@ SHAS=$(printf '%s\n' "$resolved" | awk '{print $2}')
 #
 # `--stdin` so the whole series is one invocation and one sequencer state: a
 # conflict stops it where it stopped, and `git cherry-pick --continue` in the
-# workspace resumes it, which is the ordinary git thing to do and needs no verb
-# of its own here.
+# workspace resumes it.
 if t_exec "$NAME" bash -c "
     cd $(sh_quote "$SRC") &&
     printf '%s\n' $(sh_quote "$SHAS") | git cherry-pick --stdin

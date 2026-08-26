@@ -33,5 +33,6 @@
   "autoCompactEnabled": false,
   "precomputeCompactionEnabled": false,
   "remoteControlAtStartup": true,
-  "agentPushNotifEnabled": true
+  "agentPushNotifEnabled": true,
+  "model": "claude-fable-5[1m]"
 }

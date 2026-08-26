@@ -59,12 +59,16 @@ _guest_ip() {
 # Every command to the machine goes over ssh to the guest. The generic m_ssh in
 # boot/machines.sh cannot do it: a guest's address is not in anyone's ssh
 # config and changes with every boot.
+#
+# BatchMode and ConnectTimeout are not spelled here: targets/vm.sh's
+# `_ssh_opts` already carries them (`_ssh_opts_base`, lib/target.sh), on top of
+# the guest's own key and keepalives -- spelling them again here would be a
+# second copy that could disagree with the first.
 m_ssh() {
     local ip; ip=$(_guest_ip) || return 1
     ( load_target vm >/dev/null 2>&1
       # shellcheck disable=SC2046 -- deliberate word splitting of the options.
-      ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" \
-          $(_ssh_opts) "$WK_VM_USER@$ip" "$@" )
+      ssh $(_ssh_opts) "$WK_VM_USER@$ip" "$@" )
 }
 
 b_probe() {

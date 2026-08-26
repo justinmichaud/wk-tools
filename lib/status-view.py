@@ -471,12 +471,23 @@ def render_text(doc, colour):
                paint(sw.get("state", "?"), "good" if sw.get("state") == "on" else "busy", colour)
                + paint("   " + sw.get("detail", ""), "dim", colour))
         for cap in m.get("capacity") or []:
+            label = "load" + (" (%s)" % where_word(cap) if where_word(cap) else "")
             if not cap.get("cores"):
+                # A probe that did not answer says so here rather than the
+                # line vanishing, which reads as "this machine has no load" --
+                # the one thing that is never true.
+                if cap.get("note"):
+                    kv(label, paint(cap["note"], "bad", colour))
                 continue
-            kv("load" + (" (%s)" % where_word(cap) if where_word(cap) else ""),
-               "%s of %s cores   %s free of %s"
+            # A remote target's free memory is measured with no total beside
+            # it (t_mem_mb there is MemAvailable, not a size, targets/remote.sh)
+            # -- so the total is only ever printed when there is one.
+            free = "%s free" % gb(cap.get("free_mb"))
+            if cap.get("mem_mb"):
+                free += " of %s" % gb(cap.get("mem_mb"))
+            kv(label, "%s of %s cores   %s"
                % (paint(cap.get("load") or "?", load_hue(cap.get("load"), cap.get("cores")), colour),
-                  cap.get("cores"), gb(cap.get("free_mb")), gb(cap.get("mem_mb"))))
+                  cap.get("cores"), free))
         for lk in m.get("locks") or []:
             # A lock whose holder is gone is not a lock: the next taker breaks
             # it. "held" against "stale" is the difference between waiting and
@@ -860,11 +871,21 @@ function tiles(m) {
        <span class="sub">${sub}</span>`, meter(pct, diskHue(d.used_pct))));
   }
   for (const c of m.capacity || []) {
-    if (!c.cores) continue;
+    const label = "load" + (where(c) ? " · " + where(c) : "");
+    if (!c.cores) {
+      // A probe that did not answer says so on the tile rather than the
+      // tile vanishing, which reads as "nothing is using this machine".
+      if (c.note) t.push(tile(label, chip(c.note, "bad")));
+      continue;
+    }
     const hue = loadHue(c.load, c.cores), pct = (parseFloat(c.load) / parseInt(c.cores,10)) * 100;
-    t.push(tile("load" + (where(c) ? " · " + where(c) : ""),
+    // A remote target's free memory has no total beside it (t_mem_mb there
+    // is MemAvailable, not a size, targets/remote.sh) -- print one only when
+    // there is one.
+    const free = c.mem_mb ? `${GB(c.free_mb)} free of ${GB(c.mem_mb)}` : `${GB(c.free_mb)} free`;
+    t.push(tile(label,
       `<b class="${hue}">${ESC(c.load || "?")}</b> of ${ESC(c.cores)} cores
-       <span class="sub">${GB(c.free_mb)} free of ${GB(c.mem_mb)}</span>`, meter(pct, hue)));
+       <span class="sub">${free}</span>`, meter(pct, hue)));
   }
   for (const sv of m.services || [])
     t.push(tile(sv.name, chip(sv.state) + (sv.fix ? ` <code class="fix">${ESC(sv.fix)}</code>` : "")));

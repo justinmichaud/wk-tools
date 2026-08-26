@@ -57,7 +57,7 @@ cat > "$_plist_new" <<EOF
          else, and everything this runs is a command: podman for the forward
          into the machine, ssh and tailscale for the fleet. /opt/podman/bin is
          where the official macOS pkg puts podman -- which is the install
-         SETUP.md calls for -- and it is on no default PATH, so leaving it out
+         README.md calls for -- and it is on no default PATH, so leaving it out
          cost the forward silently on the first run here. -->
     <key>PATH</key><string>/opt/podman/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>

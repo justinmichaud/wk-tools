@@ -1,10 +1,26 @@
 #!/usr/bin/env bash
 #
-# wk stop -- shut everything down without destroying anything.
+# wk stop [<workspace>] [--keep-vm] -- shut down one workspace, or everything
+# wk: where=workspace name=optional forward=no group=hosts needs podman
 #
-# Stops every workspace container and then the podman machine, which is what
-# actually returns CPU and memory to the host: a stopped container inside a
-# running VM still costs you the VM's whole allocation.
+# With a workspace named, stops only that workspace's environment -- its
+# container stopped, its macOS guest stopped -- through the driver contract
+# (t_stop), and leaves every other workspace, and the podman machine itself,
+# exactly as they were. Nothing on disk is touched, the same guarantee the
+# bare form makes, narrowed to one workspace. A target with no notion of
+# stopping a single workspace (a shared remote build machine; a workspace
+# asked to stop itself) refuses and says why, rather than silently doing
+# nothing.
+#
+# `forward=no`: this always runs on the host that holds the environment,
+# never forwarded into the podman VM the way `wk build`/`wk enter` are --
+# stopping the VM's own containers *from* the VM would stop the ssh session
+# forwarding the command mid-word.
+#
+# With no workspace, stops every workspace container and then the podman
+# machine, which is what actually returns CPU and memory to the host: a
+# stopped container inside a running VM still costs you the VM's whole
+# allocation.
 #
 # Nothing is deleted. The overlay layer, the build tree, the home directory and
 # the container itself all persist -- that is exactly why the overlay is
@@ -15,36 +31,40 @@
 # whether or not anything is building in it, so it is the largest thing on the
 # machine by some way.
 #
-#   wk stop              macOS VMs, containers, then the machine
-#   wk stop --keep-vm    macOS VMs and containers, leave the machine running
+#   wk stop                  macOS VMs, containers, then the machine
+#   wk stop --keep-vm        macOS VMs and containers, leave the machine running
+#   wk stop <workspace>      only that workspace's environment
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
+
+NAME="${WK_NAME:-}"
+
+# --- one workspace ------------------------------------------------------------
+if [ -n "$NAME" ]; then
+    [ $# -eq 0 ] || die "'wk stop $NAME' takes no options -- --keep-vm only applies to a bare 'wk stop'"
+    TARGET="$(ws_target "$NAME")"
+    load_target "$TARGET"
+    [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+    t_stop "$NAME"
+    exit 0
+fi
+
+# --- everything ----------------------------------------------------------------
 KEEP_VM=""
 [ "${1:-}" = --keep-vm ] && KEEP_VM=1
-
-# On macOS this half runs on the host, so reach into the machine for the
-# containers. Named _in_machine rather than _vm because targets/vm.sh defines
-# its own _vm(), and sourcing that below would otherwise clobber this silently.
-_in_machine() {
-    if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-        podman machine ssh "$WK_MACHINE" "$@" </dev/null
-    else
-        bash -c "$*" </dev/null
-    fi
-}
 
 # Deliberately before the podman-machine check: if the machine is already
 # stopped, a running macOS VM is *still* holding memory, and exiting early
 # without touching it would report "nothing to do" while 20 GB stayed spoken
 # for.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    . "$WK_ROOT/lib/target.sh"
     . "$WK_ROOT/targets/vm.sh"
     if _tart_bin >/dev/null 2>&1; then
         for _guest in $(t_list 2>/dev/null | awk -F'\t' '$2 == "running" { print $1 }'); do
@@ -54,7 +74,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
 fi
 
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    state=$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null || echo absent)
+    state=$(_machine_state "$WK_MACHINE")
     if [ "$state" != running ]; then
         info "machine '$WK_MACHINE' is already $state -- nothing to do"
         exit 0

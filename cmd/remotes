@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
 # wk remotes [<workspace>] [--fix] -- are this checkout's git remotes right?
+# wk: where=workspace name=optional bare=merged group=sources
+# wk: readonly
 #
 # One question, asked of the workspace rather than of a record: does `origin`
 # mean upstream, and can `fork` actually be pushed to?
@@ -22,27 +24,23 @@
 #           `wk push on` will make a push work.
 #
 # Both are asserted at creation (wk_wiring_script, lib/store.sh -- one
-# authority, used by every driver) and neither was ever *checked* afterwards.
-# They drift for two ordinary reasons: a workspace made before that authority
-# existed keeps what `git clone --shared <mirror>` left it -- origin pointing at
-# the mirror, pushable -- and anything can run `git remote set-url` later.
-# A box can have exactly the first case, with `fork` pushing over https, while
-# another is correct -- and nothing else reports the difference. A push from the
-# first cannot work whatever
-# the switch said.
+# authority, used by every driver) and never *checked* afterwards. They drift
+# two ordinary ways: a workspace made before that authority existed keeps what
+# `git clone --shared <mirror>` left it (origin pointing at the mirror,
+# pushable), and anything can run `git remote set-url` later -- and nothing
+# else reports the difference, so a push from a mis-wired box cannot work
+# whatever `wk push` says.
 #
 #   wk remotes             every workspace this machine can see
 #   wk remotes <ws>        one of them, with its remotes printed
 #   wk remotes <ws> --fix  re-assert the wiring (idempotent)
 #   wk remotes --fix       ...for every workspace that needs it
 #
-# --fix is a re-assertion and not a repair in the wipe-over-repair sense: the
-# wiring is *derived* -- the same script that creates it runs again -- so there
-# is nothing here that can converge on a half-state. What it touches is git
-# config and nothing else: the remotes, `core.sshCommand`, and the current
-# branch's *upstream* when that upstream is a remote nobody pushes to. No
-# commit, no index, no working tree, and never a branch that already points at
-# a fork.
+# --fix is a re-assertion, not a repair in the wipe-over-repair sense: the
+# wiring is *derived* (the same script that creates it runs again), so there
+# is nothing to converge on a half-state. Touches only git config -- remotes,
+# `core.sshCommand`, and the current branch's *upstream* when that upstream
+# is a remote nobody pushes to -- never a commit, index, or working tree.
 #
 #   0  every checkout is wired correctly (or --fix made it so)
 #   1  something is wrong (and --fix was not given)
@@ -54,7 +52,6 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 
 FIX=""
-NAME=""
 # --continued: this is the second half of one listing being assembled from two
 # machines (bare_report in `wk`), so the empty-listing note and the closing
 # hint belong to the half that knows whether anything was listed at all.
@@ -63,14 +60,11 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --fix) FIX=1; shift ;;
         --continued) CONTINUED=1; shift ;;
-        -h|--help) log "usage: wk remotes [<workspace>] [--fix]"; exit 2 ;;
         -*) die "unknown option: $1" ;;
-        *)  refuse_ws_name "$1" remotes "[--fix]"
-            NAME="$1"; shift ;;
+        *)  die "unexpected argument: $1" ;;
     esac
 done
-# Inside a workspace there is one checkout and it is this machine's.
-in_workspace && NAME=$(wk_self)
+NAME="${WK_NAME:-}"
 
 worst=0
 
@@ -198,17 +192,14 @@ for TARGET in $_TARGETS; do
         [ "$rc" -gt "$worst" ] && worst="$rc"
     done
 
-    # The base snapshot, which is where every *future* workspace on this target
-    # gets its remotes from. `container/firstrun.sh` re-asserts the wiring in
-    # each new workspace, so a stale snapshot is not fatal -- but it is the same
-    # fault one step upstream, and the snapshot in the podman VM had it:
-    # `origin` pushable over https and `fork` pushing to github.com directly
-    # rather than through the alias that selects its deploy key. Published
-    # before the wiring authority existed, and nothing has looked at it since.
+    # The base snapshot, where every *future* workspace on this target gets
+    # its remotes from. `container/firstrun.sh` re-asserts the wiring per new
+    # workspace, so a stale snapshot isn't fatal -- but it's the same fault
+    # one step upstream, and this repo's own podman VM snapshot had it
+    # (published before the wiring authority existed).
     #
-    # Checked here rather than in a command of its own because it is the same
-    # question about the same kind of tree. It is this machine's store, so it is
-    # read directly: no driver, nothing started.
+    # Checked here, not in a command of its own: same question, same kind of
+    # tree. It's this machine's store, read directly -- no driver, nothing started.
     if t_needs_base; then
         # base_path is the checkout itself, not the directory holding it.
         _base=$(current_base 2>/dev/null || true)
