@@ -89,6 +89,9 @@ sources and disk
                             origin/main is what moves onto it -- no remaking
   skills <sub>              status|diff|pull|push the shared, mutable skills
   key <sub>                 register|check the fork push keys (uses gh)
+      tailnet               the fleet's tailnet auth key -- what a freshly
+                            written card spends to join on first boot. Asked for
+                            once and kept per machine; --replace rotates it
   sudo status|require       make root cost a password every time, here or on
                             a configured machine (--target T, --all)
   push on|off|status        whether workspaces may push to git at all; off is

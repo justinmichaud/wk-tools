@@ -194,6 +194,35 @@ fi
 BB_THREADS=$(( JOBS / 4 )); [ "$BB_THREADS" -lt 1 ] && BB_THREADS=1
 PAR_MAKE=$(( JOBS / BB_THREADS ))
 
+# The recipes that are worth more than their quarter of the machine.
+#
+# The product above is the right shape while many recipes run at once, and the
+# wrong shape at the ends of a build. Measured by buildstats on a 79-job host:
+#
+#   clang-native        146 min of do_compile
+#   rust-llvm-native     58 min
+#   gcc                  16 min      <- and everything below here is noise
+#
+# Those two are 3.4 hours between them, they land where little else is running,
+# and while they run 76 of 80 cores are idle. bitbake cannot notice that and
+# rebalance -- PARALLEL_MAKE is fixed for the whole build -- so the fix is to
+# name the recipes that deserve the whole machine and give it to them.
+#
+# Sized by cores rather than by memory, and that is the correction that makes it
+# safe to be this generous: an LLVM compile was *measured* at ~334 MB peak here,
+# not the ~2.5 GB a WebKit unified source needs, so even -j79 of them is ~26 GB.
+# What is genuinely memory-hungry in an LLVM build is the link step, and that is
+# bounded per-recipe where it belongs (image/yocto/meta-wk/recipes-devtools/
+# clang). Raising this without that bound is what would OOM the machine.
+#
+# Both spellings of each: `clang` and `clang-native` are separate overrides, and
+# the native ones are the expensive half. An override naming a recipe this
+# configuration does not build is inert, which is why the list can be a list
+# rather than a lookup.
+BIG_RECIPES="clang clang-native clang-cross-arm clang-cross-aarch64
+             llvm llvm-native rust-llvm rust-llvm-native
+             mozjs-115 boost gdb linux-raspberrypi"
+
 WORKDIR="$SRC/WebKitBuild/CrossToolChains/$TARGET"
 CONF="$WORKDIR/build/conf/local.conf"
 
@@ -206,6 +235,7 @@ say "stage         $STAGE"
 say "chromium      $([ "$CHROMIUM" = 0 ] && echo 'dropped (about half the build; --chromium puts it back)' || echo 'in the image (--chromium)')"
 say "branch        $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?') at $(git rev-parse --short HEAD 2>/dev/null || echo '?')"
 say "jobs          BB_NUMBER_THREADS=$BB_THREADS PARALLEL_MAKE=-j$PAR_MAKE (from $JOBS)"
+say "  long poles    -j$JOBS for $(printf '%s' "$BIG_RECIPES" | wc -w | tr -d ' ') named recipes (clang, rust-llvm, ...); links bounded in meta-wk"
 say "DL_DIR        $DL_DIR"
 say "SSTATE_DIR    $SSTATE_DIR"
 say "locale        $LANG"
@@ -288,7 +318,20 @@ configure_local_conf() {
         printf 'SSTATE_DIR = "%s"\n\n' "$SSTATE_DIR"
 
         printf 'BB_NUMBER_THREADS = "%s"\n' "$BB_THREADS"
-        printf 'PARALLEL_MAKE = "-j %s"\n\n' "$PAR_MAKE"
+        printf 'PARALLEL_MAKE = "-j %s"\n' "$PAR_MAKE"
+        printf '\n# The long poles get the whole machine; see image/yocto-build.sh.\n'
+        for _r in $BIG_RECIPES; do
+            printf 'PARALLEL_MAKE:pn-%s = "-j %s"\n' "$_r" "$JOBS"
+        done
+
+        # The safety net under all of it, and the reason a static cap is not
+        # needed: bitbake stops launching new tasks while the kernel reports
+        # memory stall, so the machine throttles itself on evidence instead of
+        # on a number guessed here. Microseconds of stall per second; 10000 is
+        # 1%, which a healthy build never reaches. Where /proc/pressure cannot
+        # be read -- an older kernel, some container configurations -- bitbake
+        # says so and carries on unregulated, so this cannot fail a build.
+        printf '\nBB_PRESSURE_MAX_MEMORY = "10000"\n\n'
 
         # One host for almost every fetch. Two things come out of this: the
         # build stops depending on a hundred upstream servers still being up

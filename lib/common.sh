@@ -432,6 +432,27 @@ prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optiona
 # reboot on a machine with no way to report it: a mistyped key means `tailscale
 # up` fails during first boot of an install that then has no tailnet identity --
 # which is precisely the state that makes the failure invisible.
+# Where the fleet's one tailnet auth key lives. One definition, because three
+# things ask about it and they must not disagree: `wk doctor` reports it,
+# `wk sysimage write` refuses without it, and `wk key tailnet` sets it.
+wk_tailscale_authkey_path() { printf '%s' "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"; }
+
+# Is it there, and does it look like one? Answers without prompting and without
+# side effects, which is what makes it safe for `wk doctor` -- a read-only
+# report must never be the thing that asks for a credential.
+#
+# The shape is checked, not just the presence: an empty file, or one holding an
+# error message somebody pasted, would otherwise read as "provisioned" right up
+# until a card was written with it.
+wk_tailscale_authkey_present() {
+    local p; p=$(wk_tailscale_authkey_path)
+    [ -s "$p" ] || return 1
+    case "$(head -1 "$p" 2>/dev/null)" in
+        tskey-*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 wk_tailscale_authkey() {
     local path="${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"
     local p

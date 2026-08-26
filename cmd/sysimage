@@ -936,6 +936,50 @@ _from_filter() { # <path> -- prints the command that turns those bytes into an i
     esac
 }
 
+# The device to write, when the caller named a machine but no device.
+#
+# Resolved from the *image's own* target machine: the profile says which board
+# this image is for, that board's conf declares its medium by serial, and the
+# serial is matched against what is actually plugged into the reader right now
+# (disk_for_machine, boot/disk.sh). So `--disk rpi5` is enough, and the device
+# it picks cannot be the wrong one -- a serial is a property of the hardware,
+# where `/dev/sdb` is a property of the order things were enumerated in.
+#
+# Silent when it cannot answer: the caller then gets the listing and the "say
+# which one" it would have got anyway, which is the right outcome for a medium
+# that is not plugged in.
+# The tailnet key, asked for *before* anything is erased.
+#
+# Every image this repo builds joins the tailnet on first boot, spending a key
+# the card carries (disk_seed_tailnet, boot/disk.sh). That seeding happens after
+# the image has been streamed to the disk -- which is the right place to *do* it
+# and the worst possible place to discover the key is missing: the card is
+# already erased and half provisioned, and on a machine with no terminal the
+# prompt cannot even be answered.
+#
+# So the question is asked here instead, while refusing still costs nothing. At
+# a terminal this prompts once and stores it; without one it refuses and names
+# the command that sets it. A barrier rather than a hard error, because a card
+# deliberately written for a board that will never be on the tailnet is a real
+# thing to want -- it just has to be said out loud.
+_tailnet_key_preflight() {
+    wk_tailscale_authkey_present && return 0
+    wk_tailscale_authkey >/dev/null 2>&1 && return 0
+    barrier "there is no tailnet auth key on this machine, so the card this is about
+    to write would boot with no tailnet identity -- reachable only over whatever
+    LAN it lands on, which is the state the fleet rule exists to end.
+    Set one first:  wk key tailnet"
+}
+
+_resolve_disk_dev() { # <image machine>
+    local m="${1:-}" dev
+    [ -n "$m" ] || return 1
+    dev=$(disk_for_machine "$m" 2>/dev/null) || return 1
+    [ -n "$dev" ] || return 1
+    info "$m's medium is $dev on $DISK_MACHINE (matched by serial, not by name)"
+    DISK_DEV="$dev"
+}
+
 _from_reader() { # <spec> -- prints a command that emits the image on stdout
     local filter
     filter=$(_from_filter "${1#vm:}")
@@ -1007,6 +1051,7 @@ cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role>
     machines:
 $(machine_list | sed 's/^/      /')"
     m_reachable || die "$DISK_MACHINE is not reachable over ssh, and the disk is attached to it."
+    [ -n "$DISK_DEV" ] || _resolve_disk_dev "${IMG_MACHINE:-}" || true
     [ -n "$DISK_DEV" ] || { log "disks attached to $DISK_MACHINE:"; disk_list
         die "say which one: --disk $DISK_MACHINE:<device>"; }
 
@@ -1045,16 +1090,25 @@ would write
   onto      $DISK_DEV attached to $DISK_MACHINE
   then      unique disk identity, fleet integration (marker + driving key),
             tailnet identity, $([ "$grow" = 1 ] && echo "grow to fill" || echo "NO grow -- the rest of the card is left for a second system")
+  tailnet   $(wk_tailscale_authkey_present \
+                && printf 'auth key present -- the card joins as this board on first boot' \
+                || printf 'NO auth key -- the real write refuses here (wk key tailnet)')
 EOF
         log "dry run -- nothing was written."
         return 0
     fi
+
+    _tailnet_key_preflight
 
     warn "this ERASES $DISK_DEV on $DISK_MACHINE, whatever is on it now."
     confirm "write $from onto $DISK_DEV attached to $DISK_MACHINE?" || die "not written"
 
     disk_unmount "$DISK_DEV"
     eval "$reader" | disk_write_stream "$DISK_DEV"
+    # Before anything else touches the card: every step after this reads the
+    # partition table the image was supposed to bring, so a bad write shows up
+    # as a confusing failure in whichever of them runs first.
+    [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_stream "$DISK_DEV" "$size" "$sha"
     disk_unique_identity "$DISK_DEV" "$(_card_root_spec "$DISK_DEV")"
     disk_install_fleet "$DISK_DEV" "$marker" "$(driving_key)"
     disk_seed_role "$DISK_DEV" "$role"
@@ -1159,6 +1213,9 @@ $(machine_list | sed 's/^/      /')"
     # No device: say what is there rather than guessing. Guessing which /dev/sd*
     # is the card is the mistake this command exists to make impossible.
     if [ -z "$DISK_DEV" ]; then
+        _resolve_disk_dev "$(manifest_get "$id" machine 2>/dev/null)" || true
+    fi
+    if [ -z "$DISK_DEV" ]; then
         log "disks attached to $DISK_MACHINE:"
         disk_list
         die "say which one: --disk $DISK_MACHINE:<device>"
@@ -1203,6 +1260,9 @@ would write
   mounted   ${mounted:-nothing}
   method    zstd stream through the card helper, then read back and compare sha256
   grow      $([ "$grow" = 1 ] && echo "yes, partition 2 to fill the disk" || echo "no -- the rest of the card is left for a second system")
+  tailnet   $(wk_tailscale_authkey_present \
+                && printf 'auth key present -- the card joins as this board on first boot' \
+                || printf 'NO auth key -- the real write refuses here (wk key tailnet)')
   role      $role$([ "$role" = rescue ] \
       && printf ' -- the self-return watchdog and the self-disarm stay inert on it' \
       || printf ' -- it returns itself after %s s unless claimed' "${IMG_WATCHDOG:-?}")
@@ -1213,6 +1273,8 @@ EOF
     fi
 
     image_verify "$id" || die "refusing to write an image that does not match its manifest"
+
+    _tailnet_key_preflight
 
     warn "this ERASES $DISK_DEV on $DISK_MACHINE, whatever is on it now."
     [ -n "$mounted" ] && printf '%s\n' "$mounted" | sed 's/^/    /' >&2

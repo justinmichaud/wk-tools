@@ -76,9 +76,30 @@ PIUSB_TYPE_OFFSET=450
 PIUSB_TYPE_ARMED=0c      # FAT32 LBA -- what `wk sysimage write` leaves behind
 PIUSB_TYPE_DISARMED=83   # Linux -- no boot filesystem, as far as firmware sees
 
+# The stick, as the board has it right now.
+#
+# Not `$MACH_DEVICE` directly, and the difference is the whole point: that is a
+# kernel name from a conf, and kernel names are assigned in enumeration order.
+# This board has exactly one SD and one USB, so "the USB" is unambiguous
+# evidence and survives the stick being swapped for another -- where the name
+# does not (disk_resolve_own, boot/disk.sh).
+#
+# Resolved once per process. Both the read and the write below use it, because
+# two resolutions could land on different disks and the read-back would then be
+# confirming a byte on a stick nobody wrote to.
+_PIUSB_DEV=""
+piusb_dev() {
+    [ -n "$_PIUSB_DEV" ] || _PIUSB_DEV=$(disk_own_or_declared)
+    [ -n "$_PIUSB_DEV" ] || die "cannot tell which disk on $MACH_NAME is its boot stick.
+    Its conf says ${MACH_DEVICE:-nothing}, and the board does not agree or could not be
+    asked. Refusing to write a partition type byte to a disk chosen by name:
+    on this board that byte decides whether it comes back at all."
+    printf '%s' "$_PIUSB_DEV"
+}
+
 # Read partition 1's type byte, as two lowercase hex digits.
 _piusb_type() {
-    m_ssh "sudo dd if=$MACH_DEVICE bs=1 skip=$PIUSB_TYPE_OFFSET count=1 status=none | od -An -tx1" \
+    m_ssh "sudo dd if=$(piusb_dev) bs=1 skip=$PIUSB_TYPE_OFFSET count=1 status=none | od -An -tx1" \
         2>/dev/null | tr -d ' \r\n'
 }
 
@@ -98,7 +119,7 @@ _piusb_type() {
 _piusb_set_type() {
     local hex="$1" got
     m_ssh "printf '\\$(printf '%03o' 0x$hex)' \
-        | sudo dd of=$MACH_DEVICE bs=1 seek=$PIUSB_TYPE_OFFSET count=1 conv=notrunc status=none \
+        | sudo dd of=$(piusb_dev) bs=1 seek=$PIUSB_TYPE_OFFSET count=1 conv=notrunc status=none \
         && sync" || return 1
     got=$(_piusb_type)
     [ "$got" = "$hex" ] || die "$MACH_DEVICE's partition type on $MACH_NAME still reads

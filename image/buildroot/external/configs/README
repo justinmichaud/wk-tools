@@ -1,0 +1,37 @@
+Defconfigs this repository derives, because the fork does not ship them.
+
+The WPE buildroot fork release-pins its `cog` defconfigs for the **rpi3 only** --
+raspberrypi3_wpe_{2_22,2_28,2_38,2_42,2_46,2_50}_cog_defconfig -- and its rpi4
+defconfigs (raspberrypi4_wpe_defconfig and the _ml_/_weston_/_wst_ variants) pin
+no WPE release at all. So "WPEWebKit 2.38 on an rpi4" is a configuration that
+exists here and nowhere upstream, and the only honest way to have it is to derive
+it from the two that do exist.
+
+raspberrypi4_wpe_2_38_cog_defconfig is raspberrypi3_wpe_2_38_cog_defconfig with
+six changes, each taken from raspberrypi4_wpe_defconfig rather than invented:
+
+  BR2_cortex_a53 -> BR2_cortex_a72          the SoC
+  DTS bcm2710-rpi-3-b... -> bcm2711-rpi-4-b the board
+  post-build.sh, post-image.sh              board/raspberrypi3 -> board/raspberrypi4
+  post-script args                          the rpi3 set carries --rpi-wifi and
+                                            --overclock-pi3, which name the wrong
+                                            board; the rpi4 set is used instead
+  COG_PLATFORM_DRM instead of the default   cog drives KMS directly on this board
+  BR2_TARGET_ROOTFS_EXT2*                   the rpi3 2.38 defconfig emits a
+                                            tarball only, which leaves genimage
+                                            nothing to assemble into an
+                                            sdcard.img
+
+What is deliberately *not* changed is the kernel: the release-pinned rpi-5.15.y
+with board/raspberrypi/rpi34-linux-5.15.config. That config is named for the rpi3
+*and* the rpi4 and exists in the fork's tree, so keeping it is what makes this
+still a 2.38 configuration rather than a different distribution wearing the
+release's name. The rpi4_wpe defconfig's own kernel -- a tarball pinned to one
+commit with the in-tree bcm2711 defconfig -- is not release-pinned and would
+break that.
+
+TODO: **this has never been built.** Every line above is derived from a
+defconfig that ships, but the combination has not been compiled, let alone
+booted, and the buildroot builder itself is not written (image/buildroot.sh says
+what blocks it). Validating it needs the board: a wrong kernel config or DTS on
+a board nobody can boot is exactly the failure that looks like dead hardware.

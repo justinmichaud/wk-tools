@@ -90,6 +90,15 @@ check "gh"               "install gh, then: gh auth login" have gh
 if have gh; then
     check "gh authenticated" "gh auth login   (then: wk key register)" gh auth status
 fi
+# The fleet's tailnet auth key. Checked here rather than only listed under
+# machine-local state below, because its absence is not a backup question: it is
+# what a freshly written card spends to join the tailnet, and without it a board
+# comes up reachable only over whatever LAN it lands on. `wk sysimage write`
+# refuses on it, so a missing key is a card write that will not happen.
+#
+# The predicate does not prompt (wk_tailscale_authkey_present, lib/common.sh) --
+# a read-only report must never be the thing that asks for a credential.
+check "tailnet auth key" "wk key tailnet" wk_tailscale_authkey_present
 
 # --- root costs a password ------------------------------------------------------
 # Reported on every run rather than remembered anywhere, because it is exactly
@@ -146,7 +155,7 @@ local_state "$WK_STORE/secrets/claude-credentials.json" re-authable "claude logi
 # console is as good as the old one, and the nodes already on the tailnet do not
 # care -- a tagged node never key-expires. Losing it costs nothing but the walk
 # to the console; what it must never be is in the repo.
-local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "a new tag:wk key (reusable, not ephemeral, longest expiry) from https://login.tailscale.com/admin/settings/keys; joined nodes are unaffected"
+local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "wk key tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected"
 # What the request broker did, on this machine, for workspaces that could not do
 # it themselves. Regenerable in the only sense that matters here: nothing reads
 # an old record to decide anything -- a machine's state is always read back from

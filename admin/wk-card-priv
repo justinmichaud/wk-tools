@@ -197,6 +197,28 @@ v_write() {
     say "writing to $dev"
     dd of="$dev" bs=4M conv=fsync status=none
     sync
+
+    # Make the kernel look at the table it was just handed.
+    #
+    # Writing a whole disk replaces its partition table, and the kernel goes on
+    # using the one it read when the disk appeared. Everything after this asks
+    # the kernel rather than the platter -- `lsblk` for the sizes, and the mount
+    # of partition 2 for the fleet integration -- so without this the disk
+    # reports the partitions it used to have. On a disk that had none, the
+    # symptom is fatal and obvious: /dev/<dev>p2 does not exist. On one that had
+    # a partition at the same offset, it is worse, because everything appears to
+    # work and only the sizes are wrong.
+    #
+    # Best-effort on purpose: this fails with EBUSY if anything is still holding
+    # the disk, and that is not a reason to fail a write whose bytes are already
+    # down and synced. It is reported rather than swallowed, so a stale view is
+    # something the log can be asked about afterwards.
+    if blockdev --rereadpt "$dev" 2>/dev/null; then
+        say "partition table re-read"
+    else
+        say "could not re-read the partition table (something still holds $dev);"
+        say "  the bytes are written -- the kernel's view of the partitions is stale"
+    fi
     say "written"
 }
 
@@ -267,6 +289,30 @@ _tailnet_edit() { # <mountpoint> <hostname> <tag> <keyfile>
     [ "$(stat -c '%a' "$m/etc/wk/tailscale-authkey")" = 600 ] \
         && [ -s "$m/etc/wk/tailscale-authkey" ] \
         || fail "the auth key did not land on this disk as a 0600 file"
+}
+
+_whose_probe() { # <mountpoint>
+    local f="$1/etc/wk-image"
+    if [ -r "$f" ]; then
+        # Only the identifying fields, and only ones this repo writes. Not the
+        # whole file: it is small and harmless today, but a verb that prints
+        # whatever it finds on a disk is a verb whose output grows with the
+        # disk's content rather than with what was asked for.
+        sed -n 's/^\(id\|machine\|profile\|role\|builder\)=/&/p' "$f"
+    else
+        echo "marker: none"
+    fi
+}
+
+# whose <device> -- which machine's system is on this disk, from the disk.
+#
+# Read-only, and the reason it exists rather than a stored note on the driving
+# side: a disk's identity is written *into* it at write time (/etc/wk-image),
+# so the disk can be asked. Anything kept out here would be a second copy of
+# that -- and the copy that goes stale the first time somebody swaps a stick.
+v_whose() {
+    local dev; dev=$(gate "${1:-}")
+    with_mount -r "$(part "$dev" 2)" _whose_probe
 }
 
 _joins_probe() { # <mountpoint>
@@ -440,6 +486,7 @@ case "$verb" in
     write)    v_write    "$@" ;;
     fleet)    v_fleet    "$@" ;;
     joins)    v_joins    "$@" ;;
+    whose)    v_whose    "$@" ;;
     tailnet)  v_tailnet  "$@" ;;
     identity) v_identity "$@" ;;
     role)     v_role     "$@" ;;
@@ -447,5 +494,5 @@ case "$verb" in
     unmount)  v_unmount  "$@" ;;
     verify)   v_verify   "$@" ;;
     eject)    v_eject    "$@" ;;
-    *) fail "usage: wk-card-priv status|check|write|fleet|joins|tailnet|identity|role|grow|unmount|verify|eject <device> [...]" ;;
+    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|identity|role|grow|unmount|verify|eject <device> [...]" ;;
 esac

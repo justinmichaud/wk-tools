@@ -19,6 +19,16 @@
 #   wk key check      verify each key authenticates with write access
 #   wk key show       print the public keys
 #   wk key ensure     create missing keys without registering them
+#   wk key tailnet    the fleet's tailnet auth key: report it, or ask for it
+#
+# The tailnet key is the odd one here and belongs anyway. It is not a deploy
+# key and never reaches GitHub -- it is what a freshly written card spends on
+# its first boot to join the tailnet (disk_seed_tailnet, boot/disk.sh). What it
+# has in common with the rest is the only thing that matters for where it
+# lives: it is a credential this repository must never contain, kept per
+# machine, and previously it had no command at all -- it appeared as a prompt
+# from whatever happened to need it, which for a card write is *after* the card
+# has been erased.
 #
 # Runs on the host: `gh` and its credentials are here, while the private keys
 # stay in the VM and are never copied out.
@@ -140,6 +150,48 @@ if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
 fi
 
 case "$ACTION" in
+# The fleet's tailnet auth key. Host-local, and deliberately not in the VM with
+# the deploy keys: the machine that writes a card is the machine that needs it.
+tailnet)
+    _tspath=$(wk_tailscale_authkey_path)
+    case "${2:-}" in
+        --replace)
+            wk_tailscale_authkey_present \
+                || die "there is no tailnet key here to replace ($_tspath).
+    'wk key tailnet' asks for one."
+            # Removed before asking, because prompt_secret returns an existing
+            # file untouched -- so a replace that did not clear first would
+            # report success and change nothing.
+            rm -f "$_tspath"
+            info "removed the old key; the nodes already on the tailnet are unaffected"
+            log  "  a tagged node does not key-expire, so rotating this costs nothing"
+            ;;
+        "") ;;
+        *) die "usage: wk key tailnet [--replace]" ;;
+    esac
+
+    if wk_tailscale_authkey_present; then
+        info "tailnet auth key: present ($_tspath)"
+        log  "  starts $(head -c 11 "$_tspath")…, mode $(stat -c '%a' "$_tspath" 2>/dev/null || stat -f '%Lp' "$_tspath" 2>/dev/null)"
+        log  "  'wk key tailnet --replace' rotates it"
+        exit 0
+    fi
+
+    # prompt_secret does the asking, the mode and the storing -- one
+    # implementation, so this verb cannot disagree with the prompt that appears
+    # when some other command needs the key first.
+    if wk_tailscale_authkey >/dev/null; then
+        info "stored -- 'wk sysimage write' will seed it onto the cards it writes"
+        exit 0
+    fi
+    die "no tailnet auth key, so a card written now would boot with no tailnet
+    identity -- reachable only over whatever LAN it lands on, which is the state
+    the fleet rule exists to end (CLAUDE.md, 'Cattle, not pets').
+    It must be tagged tag:wk, reusable and NOT ephemeral, longest expiry:
+        https://login.tailscale.com/admin/settings/keys
+    Then run this again, from a terminal."
+    ;;
+
 # One public key, nothing else: what a workstation reads over ssh when it is
 # registering this machine's key. `show` is the human version.
 pub)
@@ -304,6 +356,6 @@ EOF
     ;;
 
 *)
-    die "usage: wk key register|check|show|ensure"
+    die "usage: wk key register|check|show|ensure|tailnet"
     ;;
 esac

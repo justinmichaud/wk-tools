@@ -90,6 +90,21 @@ outside the runner's coverage is only as fresh as the last human pass.
       sudo's default five minutes and not 0 — renamed from `wk sudo require`
       and changed from 0, because `./setup`'s last three stages
       and this command's own install-then-verify each prompted separately
+- [V] **`./setup` asks for a password once, not once per stage.** The 30-second
+      window is sized for one command's privileged sequence, and setup is one
+      command whose privileged steps are minutes apart — `apt-get install` sits
+      between them, so the window closes in the gaps and each later stage
+      prompts again. `sudo_prime` authenticates once up front and a refresher
+      holds that window open for exactly as long as setup runs. The policy is
+      unchanged: still 30 seconds, still closed the moment setup exits.
+- [V] and the refresher cannot outlive setup. `wk_atexit` traps EXIT only, so a
+      killed setup need not run it — and an orphaned refresher would renew root
+      authentication for ever, which is the one thing a short window exists to
+      prevent. The loop tests its parent each pass, capping the leak at one
+      15-second interval however setup dies. Verified by `kill -9` on the
+      parent: the loop stopped, and no further refreshes happened
+- [V] it is skipped where there is nothing to hold open: `--dry-run`, no tty to
+      prompt on, or a machine where `sudo -n true` already succeeds
 - [ ] a machine already at `timestamp_timeout=0` is left alone and reported as
       done: stricter than what this installs is not a failure, and re-installing
       over it would be wk *widening* a window somebody chose
@@ -3490,6 +3505,53 @@ upstream in six layers".
       build (see the defects table), so the listing does not ask it
 - [V] `wk sysimage write` with no argument names `--from <path>` and points at
       `wk sysimage ls`, rather than printing an empty list of ids
+- [V] `wk sysimage disks <machine>` says what each disk **contains**, not just
+      its kernel name: the filesystem labels it carries, or "empty -- no
+      partition table". One ssh round trip, nothing mounted. Measured on rpi5
+      with three disks attached at once — which is precisely the situation where
+      a kernel name is not an identity
+- [V] and the labels are **reported rather than interpreted**. Reading
+      `WK-IMG-BOOT`/`wk-image-root` as "holds a wk system" was wrong the moment
+      it met a real card: those labels come from the distro-seeding path, and a
+      yocto image labels its partitions `boot`/`root` like anything else — so
+      the freshly written rpi3 rescue read as *not* a wk system while rpi5's
+      older stick read as one. Reading the identity marker would be the honest
+      test, and it is on ext4 and would cost a privileged mount per disk, which
+      a listing has no business doing. Whose a disk is comes from the serial
+- [V] **nothing stores which medium is which.** An earlier attempt declared a
+      `MACH_MEDIUM_SERIAL` per machine, and that was the same bug it was meant to
+      fix, one level up: a serial is a second copy of a fact, and the first
+      swapped stick makes it a lie. The identity is written *into* an image at
+      write time (`/etc/wk-image`, `machine=`), so the disk is asked instead --
+      `whose` (admin/wk-card-priv, read-only) and `disk_image_machine`
+      (boot/disk.sh). Swapping a stick or a card needs no edit anywhere
+- [V] a machine's own medium resolves from the machine, in two steps that are
+      both evidence (`disk_resolve_own`): the only disk of that transport, which
+      is the normal case and is why the rpi4's one SD and one USB need nothing
+      further; failing that, the one holding this machine's own system, which is
+      how the fleet's card reader tells its own stick from another board's.
+      Nothing is printed when neither answers, so the caller refuses rather than
+      picks. Measured on rpi5 with two USB sticks attached and a helper too old
+      to identify them: it refused instead of guessing
+- [V] the transport is derived from the declared device name
+      (`disk_tran_of_name`) rather than declared beside it -- a conf naming both
+      would state one fact twice, and the two could disagree
+- [V] **the arming path no longer trusts a kernel name.** `pi-usb.sh` writes a
+      partition-type byte straight to the device, and that byte decides whether
+      the board comes back at all; on a machine that doubles as the card reader,
+      another board's stick can take the name the conf uses. Both the write and
+      its read-back now go through one resolution per process (`piusb_dev`), so
+      they cannot end up talking about different disks
+- [V] "this disk has no marker" and "this end cannot look" are reported as
+      different things (`disk_can_identify`). rpi5's helper predates the `whose`
+      verb, and calling that "no wk system on it" said a freshly written card was
+      blank -- the listing now omits the claim and names the remedy once
+- [V] and when the conf's `MACH_DEVICE` names a different disk from the one
+      carrying wk's labels, it says so rather than believing the conf. `sda` and
+      `sdb` are assigned in enumeration order, so two sticks in one reader swap
+      names across a reboot; rule 5 (CLAUDE.md) is that the machine wins and the
+      command says so, and the cost of getting it wrong here is erasing the
+      wrong system
 - [V] `wk sysimage build --list` exists. Three tombstones in image/profiles.sh
       had been naming it as the remedy and no such flag had ever been
       implemented — a refusal pointing at a command that does not run is a dead
@@ -3498,6 +3560,35 @@ upstream in six layers".
       are different questions now that an image is bytes in a workspace rather
       than a row in a catalogue: a configuration can be buildable and never have
       been built
+- [V] **the streamed write no longer eats its own image.** `disk_write_stream`
+      takes the image on stdin and began by probing the far side for zstd with
+      `m_ssh` — and ssh reads stdin, so the probe swallowed a chunk of the image
+      before `dd` ever ran. The helper then reported `written` for whatever
+      survived. Observed on the first real card write: the card came back with
+      no partition table and the failure surfaced two steps later as `special
+      device /dev/mmcblk0p2 does not exist`, which describes the symptom and not
+      the cause. The fix is `</dev/null` on the probe — the same rule
+      `cmd/key`'s `in_vm` already keeps, for the same reason. Only the `--from`
+      path was affected; the store-backed one uses `disk_write_dd`
+- [V] a whole-disk write **re-reads the partition table** before anything else
+      looks at the disk (`v_write`, admin/wk-card-priv). The kernel keeps the
+      table it read when the disk appeared, and every step after the write asks
+      the kernel rather than the platter -- `lsblk` for sizes, and the mount of
+      partition 2 for the fleet integration. On a disk that had no table the
+      symptom is fatal and obvious (`/dev/…p2 does not exist`); on one that had
+      a partition at the same offset it is worse, because everything appears to
+      work and only the sizes are wrong. Observed both ways in one session: the
+      rpi3 card (no previous table) picked the new one up, while the rpi4 stick
+      went on reporting its old 29.4G root for an image whose root is 5G.
+      Best-effort -- EBUSY is reported, not fatal, since the bytes are already
+      down and synced
+- [V] and a streamed write is now **read back** (`disk_verify_stream`), which is
+      what made the above silent rather than loud. The caller already hashes and
+      sizes the decompressed stream before writing, so the check costs nothing
+      new, and the hashing runs on the machine holding the card — what crosses
+      the network is a hash, not the image. Verified by the sha of the first 512
+      bytes: expected `76f4d0a9…`, on the card `076a27c7…`, which is how the bad
+      write was identified at all
 - [V] **the store-free write decompresses.** A yocto build leaves
       `<recipe>.wic.xz`, the store used to decompress it on import, and there is
       no store — so `--from` had been writing the compressed stream to the card:
@@ -3557,15 +3648,21 @@ upstream in six layers".
       and stages `usr/bin/tailscale`, `usr/sbin/tailscaled`,
       `usr/sbin/wk-tailnet-join` and `etc/init.d/S99tailscale` — 65 MB, all
       world-readable regular files, no credential in it.
-- [!] `wpewebkit-2.38-buildroot-rpi4-32` cannot be built at all, and the reason
-      is upstream: the fork ships release-pinned `_wpe_<rel>_cog_` defconfigs
-      for **rpi3 only** (2.22, 2.28, 2.38, 2.42, 2.46, 2.50, next — checked
-      against the branch, 31 raspberrypi defconfigs). Its rpi4 defconfigs
-      (`raspberrypi4_wpe_defconfig` and the `_ml_`/`_weston_`/`_wst_` variants)
-      are 32-bit but pin no WPE release. Deriving one means merging the release
-      pin and cog selection from the rpi3 defconfig onto the rpi4 board bits,
-      and it needs the board to validate — a guess at another board's kernel
-      config is how a working image stops booting.
+- [ ] `wpewebkit-2.38-buildroot-rpi4-32` has a defconfig now, derived rather
+      than fabricated: the fork release-pins `_wpe_<rel>_cog_` defconfigs for
+      **rpi3 only** (checked against the branch: 31 raspberrypi defconfigs), and
+      its rpi4 ones pin no release. So the rpi3 2.38 config supplies the release
+      and cog pinning and `raspberrypi4_wpe_defconfig` supplies the six
+      board-specific lines — SoC, DTS, the two board scripts, their args, the cog
+      platform, and the ext4 output the rpi3 config lacks.
+      `image/buildroot/external/configs/README` has it line by line.
+      The kernel is deliberately *not* taken from the rpi4 config: the release
+      pin is rpi-5.15.y with `board/raspberrypi/rpi34-linux-5.15.config`, which
+      is named for both boards and exists in the fork's tree. Taking the rpi4
+      one — a tarball pinned to a single commit — would make this a different
+      distribution wearing 2.38's name.
+      **Never built, let alone booted**, and the builder itself is still blocked
+      on the build-host question above. Validating it needs the board.
 - [ ] the order: the **buildroot lane is new code, so write it store-free from
       the start** — it proves the model end to end without touching a working
       path, and it is what the WPE 2.38 image needs anyway. Then the yocto lane,
@@ -3732,6 +3829,29 @@ upstream in six layers".
       with it the bounds its stanza has to carry. `wk find` is what locates
       either board in the meantime, and it stays useful afterwards: a bench
       system is the one thing here that deliberately has no name.
+- [V] **`wk key tailnet` is how the key is set**, and it is the only command
+      that asks. Before it, the key had no command at all: it appeared as a
+      prompt from whichever thing happened to need it first, and for a card
+      write that is *after* the card has been erased. `--replace` rotates it,
+      clearing first because `prompt_secret` returns an existing file untouched
+      — so a replace that did not clear would report success and change nothing
+- [V] **`wk sysimage write` refuses without it, before anything is erased.**
+      The seeding itself necessarily happens after the image is streamed
+      (`disk_seed_tailnet`), which is the right place to do it and the worst
+      place to discover the key is missing — the card is already half
+      provisioned, and on a machine with no terminal the prompt cannot be
+      answered. The preflight asks at the top instead: it prompts once at a
+      terminal, and barriers without one. A barrier rather than an error,
+      because a card for a board that will never be on the tailnet is a real
+      thing to want — it just has to be said with `--force`
+- [V] `--dry-run` reports the key's absence rather than staying silent, so the
+      preview is a genuine preflight: `tailnet   NO auth key -- the real write
+      refuses here (wk key tailnet)`
+- [V] `wk doctor` checks it and names the fix, using a predicate that does not
+      prompt (`wk_tailscale_authkey_present`) — a read-only report must never be
+      the thing that asks for a credential. The shape is checked and not just
+      the presence: an empty file, or one holding a pasted error message, would
+      otherwise read as provisioned until a card was written with it
 - [V] one tailscale auth key for the whole fleet, in one place, used by every
       path that joins anything to it: `wk pi setup`, `wk bridge setup` and the
       Mac bench volume all resolve it through `wk_tailscale_authkey`
@@ -3782,6 +3902,41 @@ upstream in six layers".
       Seeding the tarball into `DL_DIR` by hand was the other option and is
       rejected on principle: it is a fact living in one machine's cache, which
       is the pet the cattle rule exists to refuse.
+- [V] **the long poles get the whole machine.** bitbake's parallelism is the
+      product of `BB_NUMBER_THREADS` and `PARALLEL_MAKE` (19 x 4 here), which is
+      right while many recipes run and wrong at the ends of a build: with one
+      recipe left, `-j4` leaves 76 of 80 cores idle for hours. Measured by
+      buildstats -- clang-native 146 min of do_compile, rust-llvm-native 58 min,
+      then a cliff to 16 min. `PARALLEL_MAKE:pn-<recipe> = "-j <all>"` for twelve
+      named recipes (image/yocto-build.sh); verified in the generated local.conf.
+      **Measured on the next build**, same recipe, same machine, from buildstats
+      either side: clang-native **8759s at -j4 -> 1407s at -j79**, a 6.2x
+      speedup and over two hours saved on one recipe. `ninja -v -j 79` observed
+      running for it, and no OOM -- the link bound below is what makes that safe.
+      Held across the whole rpi4 build: clang-native 23.4 min and the aarch64
+      target clang 24.5 min, against the same 146-minute baseline, with peak
+      memory 23 GB of 125, zero swap and exactly one link step in flight
+- [V] and it is sized by **cores, not memory**, on a measurement rather than an
+      assumption: an LLVM compile peaks around **334 MB** here, not the ~2.5 GB a
+      WebKit unified source needs, so even -j79 of them is ~26 GB of 125 GB. The
+      first attempt capped this at 24 on a guessed 2 GB/job and was throttling
+      compiles to guard against something compiles do not do
+- [V] what is actually memory-hungry is the **link** step, and it is bounded
+      where that is a property of LLVM rather than of the machine:
+      `LLVM_PARALLEL_LINK_JOBS` in `image/yocto/meta-wk/recipes-devtools/clang`.
+      meta-clang bounds neither its own `PARALLEL_MAKE` nor its link jobs, so
+      links inherit the `-j` — raising it without this bound would put dozens of
+      multi-gigabyte links in flight and OOM the machine. The split is
+      deliberate: the `-j` is machine-dependent and lives in the script that
+      already owns parallelism; the link bound is constant and lives in the
+      layer chartered for build-time-only recipe fixes
+- [V] `BB_PRESSURE_MAX_MEMORY` is the safety net under both, so the machine
+      throttles on kernel-reported stall instead of on a number guessed here.
+      bitbake 2.8.1 supports it, PSI is present on this kernel, and its reader
+      is wrapped in try/except — a host that cannot read `/proc/pressure` gets a
+      note and an unregulated build, never a failure
+- [V] none of it invalidates sstate: `PARALLEL_MAKE` is in poky's
+      `BB_BASEHASH_IGNORE_VARS`, checked in bitbake.conf rather than assumed
 - [V] the tailscale release is pinned in one file for both halves of the fleet:
       `meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc` carries
       the version and a published sha256 per architecture, the recipe `require`s
