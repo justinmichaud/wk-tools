@@ -157,7 +157,10 @@ wk build bug-238 jsc-release --no-defaults   # ignore the machine's WK_BUILD_ARG
 wk run   bug-238 -- -e 'print(1+1)'
 wk test  bug-238
 wk logs  bug-238 --follow               # the build log, noise stripped
-wk rm    bug-238                        # reclaims everything it created
+wk enter bug-238 -- ls                  # a shell, or one command, in it -- any target
+wk stop  bug-238                        # park it: environment stopped, everything kept
+wk start bug-238
+wk rm    bug-238 other-ws               # reclaims everything each created
 ```
 
 **macOS VM workspace, for the Apple ports**

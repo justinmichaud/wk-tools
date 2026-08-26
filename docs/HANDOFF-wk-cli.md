@@ -7,8 +7,6 @@ lane-specific items live in the other `docs/HANDOFF-*.md` files.
 
 ## Known defects
 
-- [!] container workspace build state is recorded twice: host `wk status`
-      reads `build=none` for a build the workspace itself recorded
 - [!] a remote build's ssh carries no signal on disconnect; ctrl-c or a stall
       abort leaves the compiler running while the next `wk build` waits
       behind the lock
@@ -72,6 +70,9 @@ each a `kill -9` mid-command plus a re-run that must converge:
       (keyed per machine, derived not configured)
 
 ## `wk zed` — unverified
+
+- [ ] `wk zed --url <ws>` prints the `zed ssh://…` URL without opening Zed, so the
+      in-workspace refusal can name a command to run on the local machine
 
 - [ ] a language server that wants the network from inside a workspace is
       refused by the allowlist and says so rather than hanging (Zed's ACP
@@ -167,9 +168,6 @@ each a `kill -9` mid-command plus a re-run that must converge:
       from a previous run can read as stalled for one poll
 - [ ] `wk ls` inside a workspace prints `?`/`-` for BASE/CHANGES instead of a
       not-applicable marker
-- [ ] `wk enter` across machines
-- [ ] closing a workspace without removing it
-- [ ] `wk rm` and `wk pr` accept several workspaces / infer the workspace
 - [ ] `wk sync` is slow on rpi5 — measure before theorising
 - [ ] every command's `--help` prints the actual command line it would run
       and the configurations it accepts
