@@ -83,19 +83,23 @@ reasoning; this is the binding statement.
   bounds, because ssh passes a jump child none of the options on its command
   line.
 
-  Open violations, and they are the reason the machinery above still exists:
-  rpi3 (an mDNS name) and rpi4 (a bridge-segment address behind a `ProxyJump`)
-  are the only fleet machines not on the tailnet. Every image this repo builds
-  now carries tailscale and the first-boot join (`image/yocto/meta-wk-tailnet`,
-  and `BR_OVERLAY_TAILSCALE` for buildroot); what the two boards are still
-  running predates that layer, so the violation is a card that has not been
-  rewritten rather than a rule with an exception in it. docs/TESTING.md,
-  section 7, carries the item.
+  The rule holds with no exceptions among the machines this repo images. Every
+  image it builds carries tailscale and joins on first boot -- bench systems
+  included -- so `dotfiles/ssh/config` has no entry for a board or a Mac at all,
+  and `m_ssh` supplies the login user and the ephemeral-host-key handling a board
+  needs, because those are properties of the image rather than routes to it.
+  What remains in that file is only what cannot be on the tailnet: Igalia's build
+  boxes through the company gateway, and moose's BMC through the phone in front
+  of it.
 
-  What closes the case the rule leaves open -- a node that is *not* on the
-  tailnet, or is and is not answering, has no address anybody may write down --
-  is `wk find`, which sweeps for it instead of remembering. That is not a second
-  copy of a fact: it is a measurement, taken at the moment it is needed.
+  What answers when the tailnet cannot -- a board with no uplink, or one not yet
+  joined -- is enumeration: `reach_enumerate` (lib/reach.sh) sweeps for the
+  machine's hardware address on the segments this machine can see, and `wk find`
+  and `wk status` share that one implementation. There is no name lookup below
+  the tailnet and no mDNS anywhere; a second naming service would not find a
+  board that has no uplink either. Nothing it discovers is written down: the
+  answer is only true at the moment it is taken, which is why rpi3 answered at
+  .169, .171 and now .180 without anything needing an edit.
 
 `docs/HANDOFF-reprovision.md` is the punch-list for the day this is tested by
 an actual rebuild.

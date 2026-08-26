@@ -198,6 +198,26 @@ ALLOWED_HOSTS = {
     # downloads.yoctoproject.org/mirror/sources and mirrors.kernel.org were all
     # checked and answer 404 or nothing.
     "sourceforge.net": (443,),         # downloads. + its dl. mirrors -- hyphen
+
+    # The buildroot lane. `sources.buildroot.net` is buildroot's own mirror of
+    # every package it knows how to fetch, and image/buildroot-build.sh points
+    # BR2_PRIMARY_SITE at it for the same reason yocto-build.sh points at the
+    # OpenEmbedded mirror: one host answers almost every fetch, so the set of
+    # names that has to be allowed collapses to something a person can read.
+    # Port 80 as well as 443 because buildroot's own default for it is http.
+    #
+    # gnu.org is the fallback that is actually needed: `ftpmirror.gnu.org` is
+    # where several host tools come from when the mirror does not carry the
+    # exact version a 2020 tree pins. Both names came out of a build's own
+    # refusals (DENY sources.buildroot.net:80, DENY ftpmirror.gnu.org:80), not
+    # from guessing at a list.
+    "sources.buildroot.net": (80, 443),
+    "gnu.org": (80, 443),              # ftp. and ftpmirror. -- host tools
+    # WPE's own release host, and not covered by `webkit.org` above -- a
+    # different domain. libwpe, wpebackend-fdo and cog tarballs come from here
+    # and the buildroot mirror does not carry them (it answers 404, which is how
+    # this was found).
+    "wpewebkit.org": (80, 443),
     # github.com and githubusercontent.com are already allowed above, and carry
     # meta-openembedded, meta-webkit, meta-clang, meta-browser and the
     # Raspberry Pi firmware and kernel.

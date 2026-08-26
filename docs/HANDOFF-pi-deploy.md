@@ -7,12 +7,6 @@ Speedometer 3 completes on the rpi4.
 
 ## Remaining
 
-- **The result is printed, not stored.** Nothing files an on-board run beside
-  `wk bench`'s results, so `wk bench ls`/`compare` cannot see it and two on-board
-  runs cannot be compared to each other by any means the tool offers. This is
-  the remaining half of "record provenance next to `wk bench`'s results", and it
-  is one piece of work with the missing provenance fields in
-  the provenance fields in `cmd/bench`.
 - **`wk pi bench` prints `result after 0s`** for a run that took 22 minutes. The
   elapsed counter is wrong; the result is not. Cosmetic, and printed next to a
   number.
@@ -26,8 +20,9 @@ Speedometer 3 completes on the rpi4.
   `display_forced` after the mode was removed from the stick's cmdline by hand,
   so the run warns about something it is not doing. Reconcile provenance and
   disk.
-- **A real-display run has never happened** on the rpi4, and the rpi3 has never
-  been through any of this — it is unprovisioned and off.
+- **A real-display run has never happened** on the rpi4. The rpi3 now runs a
+  rescue and is on the tailnet, but neither board has a bench system to measure —
+  `docs/HANDOFF-ab-bench.md` is the work list for getting an A/B off them.
 - **`zip` is missing from the yocto workspace image**, so `wk pi deploy` falls
   back to a plain tar instead of the documented `built-product-archive` path
   (`docs/HANDOFF-yocto.md` item 5).

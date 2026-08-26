@@ -9,6 +9,14 @@
 # storage -- there is nothing to hand an image to over the wire). See
 # docs/HANDOFF-boot.md, "the headline".
 #
+# Reaching a machine is lib/reach.sh's, and this file needs it: `image_addr`
+# asks the tailnet first and falls back to a sweep. Sourced here rather than left
+# to each caller, because four of them (cmd/boot, cmd/sysimage, cmd/pi,
+# cmd/bench) load this file and not that one -- so a dependency left to the
+# caller is a dependency that is missing in most of them. Guarded, so loading
+# both in either order is the same.
+command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
+
 # A machine sets:
 #
 #   MACH_SSH      ssh destination in host mode
@@ -144,40 +152,83 @@ load_driver() {
 m_ssh() {
     if [ -n "${MACH_LOCAL:-}" ]; then
         bash -c "$*"
-    else
-        ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$MACH_SSH" "$@"
+        return $?
     fi
+    # shellcheck disable=SC2086
+    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" \
+        $(m_ssh_opts) "$MACH_SSH" "$@"
+}
+
+# The options a board needs, in code rather than in an ssh config stanza.
+#
+# There is no entry for these machines anywhere (dotfiles/ssh/config says why):
+# a node this repo owns is on the tailnet and its name is the whole address, so
+# storing one would be a second copy of a fact. What a *board* additionally
+# needs is not reachability and belongs here:
+#
+#   -l root          the driving key goes into root's authorized_keys
+#                    (disk_install_fleet), and the images permit root login. Who
+#                    to be is a property of the image, not a route to it.
+#
+#   host key         a board boots a different image on demand and each one
+#                    generates its own key, at the same name. Pinning could only
+#                    produce the man-in-the-middle warning it looks exactly like,
+#                    so nothing is pinned -- the same conclusion i_ssh reaches,
+#                    now reached once for both.
+#
+#   LogLevel ERROR   with known-hosts at /dev/null ssh announces a
+#                    permanently-added key on every connection. A warning that
+#                    fires unconditionally trains the eye to skip where real ones
+#                    appear; ERROR keeps a failure to connect audible.
+#
+# Keyed on MACH_ROLE, which is already declared, rather than on a new field: a
+# bench-device is precisely the kind of machine whose system is replaced on
+# demand. A workstation's key is stable and is left checked, because relaxing it
+# there would be a downgrade for nothing.
+m_ssh_opts() {
+    [ "${MACH_ROLE:-}" = bench-device ] || return 0
+    printf '%s' "-l root -o StrictHostKeyChecking=no \
+                 -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 }
 
 m_reachable() { m_ssh true >/dev/null 2>&1; }
 
 # --- reaching the bench system ------------------------------------------------------
 #
-# The host-mode destination is no use here: that channel is Tailscale SSH,
-# and the bench system carries no tailscale. So it is found the
-# way anything on a LAN is found -- by its hardware address in the driving
-# machine's neighbour table, which is evidence read at the moment it is needed
-# and stored nowhere. mDNS is the fallback for a cold ARP cache, and
-# WK_IMAGE_HOST overrides both for a network where neither works.
+# The same way as host mode: by the tailnet name. A bench system is not the
+# exception it used to be -- every image this repo builds carries tailscale and
+# joins on first boot, bench systems included -- so the board answers to the
+# fleet's name for it in either mode, and there is nothing here to look up.
+#
+# When the tailnet cannot name it -- a board with no uplink, or an image built
+# with `--no-tailnet` for a measurement that has to compare against numbers
+# taken before the layer existed -- the fallback is a sweep for the hardware
+# address, which is the one fact the board keeps across every image it boots.
+# That is `reach_enumerate` (lib/reach.sh), shared with `wk find` and
+# `wk status`, and it stores nothing: the answer is only true when it is taken.
+#
+# There is no mDNS here. A `.local` name does not cross a bridge segment and
+# needs a resolver on this end, and a board the tailnet cannot name has no
+# uplink -- which a second naming service would not fix either.
+#
+# WK_IMAGE_HOST overrides everything, for a network where neither works.
 image_addr() {
     local a=''
     [ -n "${WK_IMAGE_HOST:-}" ] && { printf '%s' "$WK_IMAGE_HOST"; return 0; }
-    # Entries this MAC has held before are still in the table, and a board that
-    # takes a fresh DHCP lease per boot leaves several -- the rpi4 was observed
-    # holding three at once, two of them dead. So the state word decides:
-    # REACHABLE first, then anything the kernel still considers usable, and
-    # FAILED/INCOMPLETE never (those are entries for addresses that answered
-    # nothing when last asked, which is precisely a stale lease).
-    if [ -n "${MACH_MAC:-}" ]; then
-        local table
-        table=$(ip neigh show 2>/dev/null \
-            | awk -v m="$MACH_MAC" 'tolower($5) == tolower(m) && $1 ~ /^[0-9]+\./')
-        a=$(printf '%s\n' "$table" | awk '/REACHABLE/ { print $1; exit }')
-        [ -n "$a" ] || a=$(printf '%s\n' "$table" \
-            | awk '!/FAILED|INCOMPLETE/ && NF { print $1; exit }')
-    fi
-    [ -n "$a" ] || a="$(image_hostname).local"
-    printf '%s' "$a"
+
+    # The tailnet's own answer, if it has one. MACH_SSH is the name the card was
+    # seeded to join under (_tailnet_name_for, cmd/sysimage), so the two cannot
+    # disagree about what the board calls itself.
+    a=$(reach_tailnet "${MACH_SSH:-$MACH_NAME}" 2>/dev/null | awk '{print $1}')
+    [ -n "$a" ] && { printf '%s' "$a"; return 0; }
+
+    [ -n "${MACH_MAC:-}" ] || { printf '%s' "${MACH_SSH:-$MACH_NAME}"; return 0; }
+    a=$(reach_enumerate "$MACH_MAC" 2>/dev/null | awk '{print $1}')
+    # The name, when even a sweep says nothing. It will fail to resolve, and that
+    # is the honest outcome: a board that is neither on the tailnet nor on a
+    # segment we can see is not reachable, and an address invented here would
+    # only move the failure somewhere less obvious.
+    printf '%s' "${a:-${MACH_SSH:-$MACH_NAME}}"
 }
 
 image_hostname() {

@@ -68,10 +68,23 @@ WHY THE THREE PIS ARE ARRANGED DIFFERENTLY
 
   The rpi4's Ethernet is not. It has a dedicated GbE controller and a
   separate USB 3.0 host, so a stick root neither contends with the network nor
-  crawls. Its bench system stays on the stick and its rescue stays on the
-  SD -- two media, two failure domains, and the fall-through is enforced by
-  firmware rather than by software. Priority 2 keeps it that way even though
-  priority 3 would rather it looked like the rpi3.
+  crawls. Two media, two failure domains, and the fall-through is enforced by
+  firmware rather than by software.
+
+  Nothing here is a preference. Every difference between the three boards is
+  what that board's firmware leaves available -- which medium it will boot, in
+  what order, and what it does when the first one is not bootable. Where the
+  arrangements look inconsistent it is because the firmware is, and the code
+  above the medium is the same for all three (`b_arm`/`b_disarm`, one image
+  model, one write path). Read anything below as a consequence, not a choice.
+
+  Which system goes on which medium follows from the boot order. This board is
+  usb-first, so whatever is on the stick is what a board left alone comes up on
+  -- and the system that should be is the rescue. So the **rescue is on the USB
+  stick and the bench system is on the SD**, and the arming byte works the same
+  way pointing the other direction: a stick typed 0x0c boots the rescue, and
+  typing it 0x83 steps the firmware over it onto the SD's bench system for one
+  boot. The default state of an untouched board is the one that answers.
 
   The rpi5 is a workstation. Its rescue is its own NVMe install, which is a
   better rescue than any slot wk could write, so its stick holds only a bench

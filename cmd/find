@@ -151,16 +151,6 @@ oui_vendor() {
 # tailscale0 is deliberately not swept. It is a /32 on a mesh, not a broadcast
 # domain -- there is no neighbour table to fill and nothing to ARP for, and the
 # tailnet already answers for itself (reach_tailnet).
-local_segments() {
-    ip -4 -o addr show 2>/dev/null | awk '
-        $2 == "lo" || $2 == "tailscale0" { next }
-        {
-            split($4, a, "/")
-            split(a[1], o, ".")
-            print "local", o[1] "." o[2] "." o[3] ".0/" a[2], $2
-        }'
-}
-
 # Every bridge that declares a segment, reached at its own ssh name. A bridge
 # that is down contributes a vantage that cannot be swept, which is the answer
 # rather than an omission: the boards behind it are unreachable *because* of
@@ -183,7 +173,7 @@ vantages() {
         printf '%s %s %s\n' "${ONE_VANTAGE:-local}" "$ONE_SEGMENT" "given"
         return 0
     fi
-    { local_segments; bridge_segments; } \
+    { reach_segments_local | sed 's/^/local /'; bridge_segments; } \
         | while read -r name cidr via; do
               [ -z "$ONE_VANTAGE" ] || [ "$name" = "$ONE_VANTAGE" ] || continue
               printf '%s %s %s\n' "$name" "$cidr" "$via"
@@ -192,71 +182,20 @@ vantages() {
 
 # --- the sweep ---------------------------------------------------------------
 #
-# Run on the vantage, whichever machine that is, and the same command in both
-# cases -- `local` runs it here rather than taking a second path through ssh to
-# itself.
+# The sweep is lib/reach.sh's (reach_sweep), and deliberately not a second copy
+# of it: `wk status` falls back to the same primitive to say where an off-tailnet
+# machine is, and two implementations of "what is on this wire" would eventually
+# disagree about it. What this file adds is the *vantages* -- which segments
+# there are and who can see them -- not how a segment is read.
 #
-# `-sn` is a host sweep with no port scan; `-n` keeps DNS out of it, because a
-# resolver that is slow is not a property of the segment and a name here would
-# be a second answer to a question the confs already answer. --host-timeout
-# bounds each address so one black-holing address cannot eat the ceiling.
-on_vantage() { # <vantage> <command...>
-    if [ "$1" = local ]; then
-        shift
-        bash -c "$*"
-    else
-        local v="$1"; shift
-        ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$v" "$*"
-    fi
-}
-
-# Does this vantage have the one sweeper there is?
-#
-# Refused rather than worked around. A ping loop written here would find fewer
-# devices, on the segment that matters most, on the day something is already
-# wrong -- and it would be a second implementation of the one behaviour this
-# command has (CLAUDE.md, "one path, not two").
+# A vantage without nmap loses its own line and names the remedy. There is no
+# ping-loop fallback: a second sweeper chosen by what happens to be installed is
+# the path that runs on the machine nobody tested, on the day something is
+# already wrong (CLAUDE.md, "one path, not two").
 vantage_can_sweep() { # <vantage>
-    on_vantage "$1" 'command -v nmap >/dev/null 2>&1 || PATH=$PATH:/usr/sbin:/sbin command -v nmap >/dev/null 2>&1' \
-        >/dev/null 2>&1
-}
-
-# "<ip> <mac> <state>" for every address on <cidr> that the vantage's kernel has
-# a hardware address for, after the sweep has given it a reason to.
-#
-# FAILED and INCOMPLETE are dropped: those are entries for addresses that
-# answered nothing when last asked, which on a segment with DHCP is precisely a
-# stale lease. Keeping them would report the rpi3 at both of the two addresses
-# it was once seen holding, and neither would be where it is.
-sweep() { # <vantage> <cidr>
-    local v="$1" cidr="$2"
-    on_vantage "$v" "PATH=\$PATH:/usr/sbin:/sbin
-        nmap -sn -n --host-timeout 5s $(sh_quote "$cidr") >/dev/null 2>&1 || true
-        ip neigh show 2>/dev/null" \
-      | awk -v net="${cidr%/*}" -v bits="${cidr#*/}" '
-            # Only addresses inside the segment that was swept. Without this the
-            # table answers for every segment the vantage is on at once, and a
-            # device on one is reported as being on all of them.
-            # Integer division rather than a bitmask: and() is a gawk
-            # extension, and this command runs on a macOS workstation too,
-            # where awk is the BSD one and has no such function. Dividing both
-            # addresses by the size of the host part compares exactly the
-            # network parts and nothing else.
-            function n(a,   p, v, i) { split(a, p, "."); v = 0
-                for (i = 1; i <= 4; i++) v = v * 256 + p[i]
-                return v }
-            function net_of(a) { return int(n(a) / hosts) }
-            BEGIN { hosts = 2 ^ (32 - bits); base = net_of(net) }
-            /^[0-9]+\./ && !/FAILED|INCOMPLETE/ {
-                ip = $1; mac = ""; state = "?"
-                for (i = 2; i <= NF; i++) {
-                    if ($i == "lladdr") mac = tolower($(i+1))
-                    else if ($i ~ /^(REACHABLE|STALE|DELAY|PROBE|PERMANENT|NOARP)$/) state = $i
-                }
-                if (mac == "") next
-                if (net_of(ip) != base) next
-                print ip, mac, state
-            }'
+    [ "$1" = local ] && { have nmap; return $?; }
+    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$1" \
+        'PATH=$PATH:/usr/sbin:/sbin; command -v nmap >/dev/null 2>&1' </dev/null >/dev/null 2>&1
 }
 
 # --- asking a device what it is ----------------------------------------------
@@ -371,7 +310,7 @@ while read -r vname cidr via; do
     label="$cidr"
     case "$via" in
         given) where="as asked" ;;
-        *)     [ "$vname" = local ] && where="on $via, from this machine" \
+        *)     [ "$vname" = local ] && where="from this machine" \
                                    || where="through $via" ;;
     esac
 
@@ -389,7 +328,7 @@ while read -r vname cidr via; do
         continue
     fi
 
-    rows=$(capped "$SWEEP_TIMEOUT" sweep "$vname" "$cidr" 2>/dev/null || true)
+    rows=$(WK_SWEEP_TIMEOUT="$SWEEP_TIMEOUT" reach_sweep "$cidr" "$vname" 2>/dev/null || true)
     SWEPT=$((SWEPT + 1))
 
     if [ -z "$rows" ]; then

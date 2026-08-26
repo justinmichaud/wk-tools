@@ -1,0 +1,95 @@
+# The workspace image for a buildroot build: a host old enough for the pin.
+#
+# Why 22.04 and not the SDK image, and not 24.04 either
+# -----------------------------------------------------
+# The tree is WebPlatformForEmbedded/buildroot pinned at 2020.02, because that
+# is what the fork's WPE branches are pinned to and the release-pinned `cog`
+# defconfigs only exist there. A 2020 buildroot builds 2009-era tarballs with
+# whatever compiler the host has, and the further the host moves the more of
+# them stop compiling -- the same gap container/yocto/Containerfile documents
+# for scarthgap, one release older.
+#
+# 22.04 is not a guess. It is the host the recipe on the wiki
+# ("Building WPEWebKit for 32-bit Raspberry Pi 3 (Buildroot DRM config)") was
+# actually driven on, in a devcontainer, and it produced a booting image. That
+# makes it the one version here with evidence behind it, which beats picking the
+# newest thing that might work.
+#
+# The packages below are that recipe's list -- `file cpio bc libncurses-dev` --
+# plus the rest of buildroot's own documented host requirements, plus what the
+# workspace scaffolding needs. The recipe only had to name four because its
+# devcontainer base already carried the others; a bare ubuntu:22.04 does not.
+#
+# Built by image/buildroot.sh, tagged localhost/wk-buildroot-host:<ubuntu tag>.
+
+ARG BASE=ubuntu:22.04
+FROM ${BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Three groups, for the same reason the Yocto image splits them: they answer to
+# different authorities.
+#
+#   buildroot's own "System requirements / Mandatory packages" list. `bc`,
+#   `cpio`, `file` and `libncurses-dev` are the four the wiki recipe had to add
+#   by hand; the rest are in that list and were present in its base image.
+#   `rsync` matters more than it looks: BR2_ROOTFS_OVERLAY is copied in with it
+#   at target-finalize, which is how the tailnet overlay reaches the image.
+#   `which` is on that list as a *program* and is not a package here: it ships
+#   in debianutils, the same way container/yocto/Containerfile carries it.
+#
+#   What this repository's own steps need on top: genimage assembles the card
+#   image, and the external tree's fix builds a host python.
+#
+#   What the workspace scaffolding needs -- same set as the Yocto image, for the
+#   same reason: wkdev-create's .wkdev-init creates the container user, and
+#   container/firstrun.sh fetches over the egress proxy.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        \
+        bc \
+        binutils \
+        build-essential \
+        bzip2 \
+        cpio \
+        debianutils \
+        file \
+        gzip \
+        libncurses-dev \
+        make \
+        patch \
+        perl \
+        python3 \
+        rsync \
+        sed \
+        tar \
+        unzip \
+        wget \
+        xz-utils \
+        \
+        git \
+        libssl-dev \
+        pkg-config \
+        \
+        bash \
+        ca-certificates \
+        curl \
+        iproute2 \
+        less \
+        locales \
+        passwd \
+        procps \
+        sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen && locale-gen
+
+# Free uid 1000, so wkdev-create can map the host user in. 22.04 does not ship
+# the default `ubuntu` account that 23.04 introduced, so this is a no-op here
+# and is kept because the base tag is a build arg -- a newer base must not
+# reintroduce the failure container/yocto/Containerfile describes.
+RUN userdel -r ubuntu 2>/dev/null || true
+
+RUN printf '%s\n' \
+        'Built by wk (container/buildroot/Containerfile) as a buildroot build host.' \
+        'Not a wkdev-sdk image. See sdk-patches/apply.sh section 13.' \
+        > /etc/wk-container

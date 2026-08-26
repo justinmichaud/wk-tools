@@ -1215,6 +1215,49 @@ reached through a ProxyJump), driven from the macOS host.
       `10.99.1.10 (through tailnet-bridge-generic)`, composed from the board's
       `MACH_BRIDGE` and that bridge's `BR_LEASES`; rpi5 tailnet-only, and the
       listing says nothing rather than inventing a second route
+- [V] **tailscale is the only way a machine this repo images is reached.**
+      `dotfiles/ssh/config` has no entry for a board or a Mac -- an entry would be
+      a second copy of a fact, and the copy that goes stale. `m_ssh` supplies what
+      a board needs and an ssh stanza used to (`-l root`, no host-key pinning,
+      LogLevel ERROR), keyed on the `MACH_ROLE=bench-device` already declared,
+      because a board boots a different image on demand and each brings its own
+      key. Verified: `m_ssh` reaches rpi3 with no stanza anywhere
+- [V] **mDNS is gone**, from `lib/reach.sh`, from `image_addr` and from the
+      machine confs. A `.local` name does not cross a bridge segment and needs a
+      resolver on this end; and since every image now carries tailscale, a board
+      the tailnet cannot name has no uplink, which no second naming service would
+      fix either
+- [V] `reach_bridged` is gone with it. It composed an address out of
+      `MACH_BRIDGE` plus the bridge's `BR_LEASES` -- two declared facts, but the
+      composition was still a stored route, which is the thing the rule forbids
+- [V] **one enumeration helper, shared.** `reach_enumerate` (lib/reach.sh)
+      sweeps for a machine's hardware address on the segments this machine can
+      see; `wk status` uses it for its "without tailscale" line and `wk find`
+      uses the same `reach_sweep` for whole segments, so the two cannot disagree
+      about what is on the wire. Nothing it finds is stored -- measured: rpi3 has
+      answered at .169, .171 and now .180 with no edit anywhere
+- [V] it is skipped when the tailnet already answered, and that is not an
+      optimisation. The fleet walk gives each machine a few seconds and a sweep
+      takes far longer, so an unconditional sweep does not slow the listing --
+      it loses the line to its own ceiling. Measured: rpi4's row read "no answer
+      within 20s" until enumeration was made conditional
+- [V] and when the sweep cannot answer inside a listing's budget it says so and
+      names the command whose job that is: `not on the tailnet -- wk find rpi4
+      sweeps for it`, rather than reporting the machine absent
+- [V] the rpi4 is named `rpi4`. It was `rpi4-test` to keep a hand-written `Host
+      rpi4` from resolving to a shared Igalia build box; with no ssh entry for
+      the board at all, and MagicDNS doing the resolving, that collision cannot
+      happen and the suffix was carrying a reason that had expired
+- [V] the bench-system channel uses tailscale too. `image_addr` asks the tailnet
+      for `MACH_SSH` -- the name the card was seeded to join under, so the two
+      cannot disagree -- then falls back to the shared sweep, then to the name
+      itself, which fails to resolve honestly rather than inventing an address.
+      Measured: rpi3 -> 100.96.153.36, rpi4 -> `rpi4` (neither on the tailnet nor
+      on a segment this machine can see)
+- [V] `boot/machines.sh` sources `lib/reach.sh` itself, guarded. Four commands
+      load the first and not the second (`cmd/boot`, `cmd/sysimage`, `cmd/pi`,
+      `cmd/bench`), so a dependency left to the caller is one that is missing in
+      most of them -- `image_addr` would have failed in all four
 - [V] the derivations are ssh's and the tailnet's own: `ssh -G` resolves the
       config (Host blocks, Includes, ProxyJump) without connecting, and
       `tailscale status --json` is asked once per run. Neither is a table in
@@ -1283,6 +1326,11 @@ reached through a ProxyJump), driven from the macOS host.
 - [V] read-only from end to end, and never forwarded into a workspace — a
       sandbox is on a bridged container network and can see none of the fleet, so
       the answer from in there would be an empty listing rather than a refusal
+- [ ] an A/B number off either Pi. Both boards run a rescue and neither has a
+      bench system beside it, so `wk pi bench --ab` has never run.
+      `docs/HANDOFF-ab-bench.md` is the work list; note item 5 — nothing in this
+      repo or in WebKit's `compare-results` emits a histogram, so that is work
+      rather than a check.
 - [ ] `wk find <machine>` against a board that is actually up. Both boards were
       powered off when this was written, which is what the command correctly
       reported
@@ -1612,6 +1660,15 @@ reached through a ProxyJump), driven from the macOS host.
 - [V] a topic is answerable wherever `--explain` is — inside a workspace, on a
       build machine, on a host with no podman — because nothing is resolved,
       forwarded or started to print one
+
+- [V] `wk help lifecycle` is every command the whole cycle takes -- rescue,
+      bench, A/B -- in order, with no prose between them. Deliberately commands
+      rather than concepts, which is the opposite of the rest of this section and
+      is the point: the sequence is the thing that was hard to reconstruct, not
+      any one verb. Every command in it was checked to exist before it was
+      written down (`wk pi deploy|bench`, `--ab`, `--skeleton`, `wk bench
+      ls|compare`, the plan names) -- a recipe naming a command that does not run
+      is the dead end `wk sysimage build --list` was.
 
 ### Disk: counting it, and erasing the masters
 - [V] `wk disk` reports the three places the bytes are — the podman VM's sparse
@@ -3525,14 +3582,25 @@ upstream in six layers".
       write time (`/etc/wk-image`, `machine=`), so the disk is asked instead --
       `whose` (admin/wk-card-priv, read-only) and `disk_image_machine`
       (boot/disk.sh). Swapping a stick or a card needs no edit anywhere
-- [V] a machine's own medium resolves from the machine, in two steps that are
-      both evidence (`disk_resolve_own`): the only disk of that transport, which
-      is the normal case and is why the rpi4's one SD and one USB need nothing
-      further; failing that, the one holding this machine's own system, which is
-      how the fleet's card reader tells its own stick from another board's.
-      Nothing is printed when neither answers, so the caller refuses rather than
-      picks. Measured on rpi5 with two USB sticks attached and a helper too old
-      to identify them: it refused instead of guessing
+- [V] a machine's own medium resolves by **exclusion**, not recognition
+      (`disk_resolve_own`): take the disks of the expected transport, drop the
+      ones whose marker names another machine, and if one is left it is this
+      machine's. Recognition was tried first and is not enough -- it wanted a
+      disk whose marker names this machine, and this machine's own medium may
+      carry no marker at all: rpi5's stick was written by a path predating
+      markers, so the disk that is obviously its own is the one that cannot prove
+      it. Exclusion needs no marker on the disk it selects, only on the ones it
+      rejects.
+      Measured on rpi5 with three media attached and nothing stored anywhere:
+      its own medium -> /dev/sda (because /dev/sdb says it is rpi4's), rpi4's
+      system -> /dev/sdb, rpi3's -> /dev/mmcblk0
+- [V] one disk of the expected transport short-circuits all of it, which is why
+      the rpi4's one SD and one USB need no marker and no conf entry, and why
+      swapping either just works
+- [ ] two *unmarked* disks of the same transport is the residual ambiguity: it
+      refuses and lists, which is honest but is the one case where swapping a
+      stick on the card reader needs the device named once. It resolves itself
+      the moment that stick is written, because then it has a marker
 - [V] the transport is derived from the declared device name
       (`disk_tran_of_name`) rather than declared beside it -- a conf naming both
       would state one fact twice, and the two could disagree
@@ -3635,14 +3703,53 @@ upstream in six layers".
       on the rpi5: sfdisk, debugfs, mcopy, bmaptool, e2fsck) and has
       to be reachable for the write to happen at all — so a macOS driver needs
       no Linux tooling and the "mac portion" of `wk sysimage` stops existing.
-- [V] the buildroot lane's blocker is the build *host*, not the missing code,
-      and it is measured rather than assumed: a container workspace is Ubuntu
-      24.04 with no container runtime in it at all (no podman, docker or
-      buildah) and no `rsync` or `bc`, so it cannot provide the ubuntu:20.04
-      userspace buildroot 2020.02 needs. The scouting run nested that container
-      by hand, outside `wk`, which is why the recipe read as though a workspace
-      could. `wk sysimage build <a buildroot config>` now refuses by naming
-      that, and image/buildroot.sh carries the three ways out with none chosen.
+- [V] the tree is pinned to a **commit on the `wpe` branch**, not to the
+      `2020.02` tag the configs used to name. That tag is the buildroot version
+      the branch is based on, not a place the tree can stand: the release-pinned
+      cog defconfigs were added afterwards, so checking it out removes the
+      configuration the profile names. Found by running it -- the build stood the
+      tree at `5f5477b0ab Update for 2020.02` and died at `No rule to make
+      target 'raspberrypi3_wpe_2_38_cog_defconfig'`. Confirmed against the
+      remote: that file is present on `wpe` and Not Found at `2020.02`. A branch
+      is not a pin either, which is why it is neither
+- [V] the buildroot lane's egress is the yocto lane's shape:
+      `BR2_PRIMARY_SITE` points at `sources.buildroot.net`, so one host answers
+      almost every fetch and the allowlist stays readable. Deliberately not
+      `PRIMARY_SITE_ONLY` -- a 2020 tree pins versions the mirror does not carry,
+      and it answers 404 for them (`libwpe-1.14.0` is one), so forbidding the
+      upstream fallback outright would fail those.
+- [V] the fallbacks are allowed **from a build's own refusals, not in
+      anticipation**: `sources.buildroot.net`, `ftpmirror.gnu.org` and
+      `wpewebkit.org`, each named by a `DENY` line in the proxy log. The last is
+      the one worth recording -- the allowlist already had `webkit.org`, and WPE
+      releases are on a different domain, which is invisible until libwpe is the
+      package that will not download.
+- [ ] **the buildroot builder is written**: `buildroot_build` (driver, host
+      side) plus `image/buildroot-build.sh` (worker, in the workspace), the same
+      split the yocto lane uses and spawned the same way. It clones and pins the
+      tree, assembles the tailnet overlay, applies the defconfig with this
+      repo's `BR2_EXTERNAL`, appends `BR2_DL_DIR`/`BR2_CCACHE_DIR`/
+      `BR2_ROOTFS_OVERLAY` and resolves them with `olddefconfig`, then builds
+      with `FORCE_UNSAFE_CONFIGURE=1`. Output stays in the workspace -- there is
+      no store to import it into. Dry run verified; a real build is running.
+- [V] the build host is **Ubuntu 22.04 in a workspace of its own**
+      (`container/buildroot/Containerfile`, `BUILDROOT_BASE_IMAGE`), reached
+      through `WK_SDK_IMAGE` -- the mechanism image/yocto.sh has always used, so
+      no container inside a container and no runtime in the SDK image. Earlier
+      notes here claimed a workspace could not provide this and listed three
+      unchosen options; that was wrong on both counts.
+- [V] 22.04 is not a guess: it is the host the wiki recipe ("Building WPEWebKit
+      for 32-bit Raspberry Pi 3 (Buildroot DRM config)") was actually driven on,
+      and it produced a booting image. Its four added packages -- `file`,
+      `cpio`, `bc`, `libncurses-dev` -- are in the Containerfile with the rest of
+      buildroot's documented host requirements. `which` is on that list as a
+      *program* and is not a package on Ubuntu; it ships in `debianutils`, which
+      the first build proved by failing on it
+- [V] `-j` is memory-sized (2048 MB/job, measured) and then **capped at 16**,
+      because 8 is the only value with evidence behind it and a 2020 buildroot
+      building 2009-era tarballs is where broken parallel rules live. Losing an
+      hours-long build to a race in somebody else's Makefile costs more than the
+      cores save
 - [V] the tailnet overlay is verified end to end for the 32-bit case: it
       resolves the pin from `tailscale-release.inc`, fetches, checks the sha256,
       and stages `usr/bin/tailscale`, `usr/sbin/tailscaled`,

@@ -139,90 +139,24 @@ Host tolken-bench
   ServerAliveInterval 30
   ServerAliveCountMax 6
 
-# The rpi4 test board. Named rpi4-test rather than rpi4 because the fleet name
-# is boot/machines.sh's, not ssh's -- `wk boot rpi4` resolves the machine and
-# reaches for MACH_SSH, and keeping the two namespaces apart is what makes a
-# hand-written `Host rpi4` a mistake ./setup can detect rather than a plausible
-# alternative spelling.
+# There are deliberately no entries for the fleet's boards or Macs.
 #
-# Reached through the tailnet bridge, at the address that bridge reserves for
-# it -- not by mDNS on the house LAN. The board sits on the cable behind
-# `tailnet-bridge-generic`
-# (that segment is the reason that bridge exists), so `raspberrypi4-64.local`
-# resolves nowhere from here: the phone is the only thing on the board's L2,
-# and mDNS does not cross it. The board looked simply absent -- `wk boot rpi4
-# --status` said "unreachable ... a plain outage" about a board that was up,
-# linked and one hop away.
+# A node this repo owns is on the tailnet and its name is the whole address
+# (CLAUDE.md, "Cattle, not pets"). Every image it builds carries tailscale and
+# joins on first boot -- bench systems included -- so `rpi3`, `rpi4` and the rest
+# resolve through MagicDNS with nothing written here. An entry for one of them
+# could only be a second copy of a fact, and the copy that goes stale.
 #
-# The address is safe to write down for the same reason `moosebmc`'s is:
-# bridge/hosts/tailnet-bridge-generic.conf pins it by MAC (BR_LEASES) against
-# the MAC boot/machines/rpi4.conf declares, and that MAC is the one thing the
-# board keeps across every image it boots. So 10.99.1.10 survives a reflash,
-# which .local never did.
+# What that leaves this file for is the machines that *cannot* be on the tailnet:
+# Igalia's shared build boxes, reached through the company gateway, and moose's
+# BMC, reached through the phone in front of it. Both are jumps, and a jump host
+# carries its own options because ssh passes a ProxyJump child none of the ones
+# on the command line.
 #
-# ProxyJump rather than a route: reaching 10.99.1.0/24 directly needs
-# `--accept-routes`, which is off here. Jumping through the phone needs nothing
-# turned on anywhere -- the same choice `moosebmc` makes below.
-#
-# The *address* is a Host pattern too, and that is load-bearing rather than
-# tidy. `wk boot`'s bench-mode channel (`i_ssh`, boot/machines.sh) reaches a
-# booted system by bare address with no jump host of its own; a stanza matching
-# the literal address is what gives it one. A bench system on this board lands
-# on 10.99.1.10 as well -- same NIC, same MAC, same reservation -- so one entry
-# covers both modes. The user differs and is meant to: `Host rpi4-test` logs in
-# as root, while `i_ssh`'s explicit `<you>@10.99.1.10` wins over the User below,
-# which is what that channel wants.
-#
-# If the cable ever goes back to the house switch, `WK_RPI4_SSH` overrides
-# MACH_SSH and `raspberrypi4-64.local` is the name to point it at.
-#
-# The host key is deliberately not pinned. The whole point of this board is
-# that it boots a different image on demand, and each one brings its own key.
-#
-# LogLevel goes with that and is not cosmetic. With the known-hosts file at
-# /dev/null, ssh "permanently adds" the key on *every* connection and says so,
-# which put seven identical warnings into one `wk sysimage write` -- and a
-# warning that fires unconditionally is worse than silence, because it trains
-# the eye to skip the place real warnings appear. ERROR, not QUIET: a failure
-# to connect still has to be audible.
-Host rpi4-test 10.99.1.10
-  HostName 10.99.1.10
-  User root
-  ProxyJump tailnet-bridge-generic
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  LogLevel ERROR
-
-# The rpi3 test board. `Host rpi3` and not `rpi3-test`: unlike the rpi4, no
-# shared build box has ever answered to this name, so there is no collision to
-# keep the namespaces apart from -- and MACH_SSH in boot/machines/rpi3.conf
-# already spells it `rpi3`, which is the name this has to match.
-#
-# HostName is the mDNS name, not an address, and that is the load-bearing part.
-# This board is on the house LAN with no reservation anyone here controls, and
-# it was seen holding *two* DHCP leases at once on one interface (192.168.1.169
-# and .171, both live on eth0) -- the same firmware-and-kernel-disagree-about-
-# the-client-identifier behaviour the rpi4 conf describes. An address written
-# here would be right until the next lease. The image runs avahi and announces
-# `raspberrypi3`, and moose resolves it through nss-mdns (`mdns4_minimal` in
-# /etc/nsswitch.conf), so the name is the stable half.
-#
-# No ProxyJump: this board is cabled to the house LAN directly, not onto the
-# phone's segment. bridge/hosts/tailnet-bridge-generic.conf still calls
-# 10.99.1.0/24 "the rpi3/rpi4 cable" -- only the rpi4 has ever appeared there.
-#
-# The host key is deliberately not pinned, for the rpi4's reason: the whole
-# point of this board is that it boots a different image on demand and each one
-# brings its own key. LogLevel ERROR goes with that -- with known-hosts at
-# /dev/null ssh announces a permanently-added key on every single connection,
-# and a warning that fires unconditionally trains the eye to skip the place
-# real warnings appear.
-Host rpi3
-  HostName raspberrypi3.local
-  User root
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  LogLevel ERROR
+# The login user and the host-key handling the boards need are in `m_ssh`
+# (boot/machines.sh) rather than here: a board boots a different image on demand
+# and each one brings its own key, and that is a property of the machine the tool
+# can act on, not a route anybody has to store.
 
 # The tailnet bridges: phones routing a segment that cannot join the tailnet
 # itself (moose's BMC port, the rpi3/rpi4 cable). `wk bridge` drives them over
@@ -272,24 +206,24 @@ Host moosebmc
 # The tailnet bridges themselves, and -- because these two names are also the
 # jump hosts above -- the only place a jump hop's options can be written.
 #
-# Scaffolding, and dated as such. A node this repo owns is reached by its tailnet
-# name with nothing written down (CLAUDE.md, "Cattle, not pets"); the rpi4 is
-# jumped through this phone only because it is not on the tailnet yet, and the
-# day it joins, that hop and everything below that serves it goes. What stays is
-# the BMC's hop, because a BMC cannot hold a tailnet identity, and `wk bridge`'s
-# own connections to the phones, which pass their options themselves.
+# What is jumped through a phone, and what is not. A node this repo owns is
+# reached by its tailnet name with nothing written down (CLAUDE.md, "Cattle, not
+# pets"), so the boards are not here: they carry tailscale and answer to their
+# names. What stays is the BMC's hop -- a BMC cannot hold a tailnet identity --
+# and `wk bridge`'s own connections to the phones, which pass their options
+# themselves.
 #
 # Options given on an ssh command line do not reach a ProxyJump child. `ssh -o
-# BatchMode=yes -o ConnectTimeout=4 rpi4-test` builds the hop as `ssh -l user
-# -p 22 -W '[10.99.1.10]:22' tailnet-bridge-generic` and passes nothing else,
+# BatchMode=yes -o ConnectTimeout=4 moosebmc` builds the hop as `ssh -l user
+# -p 22 -W '[10.99.0.2]:2200' librem5-oob` and passes nothing else,
 # so the hop runs with whatever this file says for the bridge, and with the
 # defaults for anything it does not -- StrictHostKeyChecking=ask among them. A
-# phone whose key is in known_hosts under `tailnet-bridge-generic.local` and
-# three LAN addresses, but not under its
-# tailnet name, so `wk status`'s fleet block -- probing the rpi4, output going
-# to a file -- printed "Are you sure you want to continue connecting" onto the
-# terminal and waited there forever. Non-interactively the same hop fails with
-# `Host key verification failed`, which reads as a dead board.
+# phone whose key is in known_hosts under its `.local` name and three LAN
+# addresses, but not under its tailnet name, is a first contact -- so a fleet
+# listing whose output goes to a file printed "Are you sure you want to continue
+# connecting" onto the terminal and waited there forever. Non-interactively the
+# same hop fails with `Host key verification failed`, which reads as dead
+# hardware behind it.
 #
 # So: accept-new here, for the reason `wk bridge ls` gives for using it on the
 # phones directly -- it accepts a key never seen before and still refuses one

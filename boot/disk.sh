@@ -188,33 +188,50 @@ disk_tran_of_name() {
 # stick can take the name the conf uses, and the arming path writes a partition
 # type byte straight to it. That is the harm this exists to prevent.
 #
-# Two ways to answer, in order, and both are evidence:
+# The rule is **exclusion**, not recognition, and that distinction is the whole
+# of why this works:
 #
-#   the only one   a board with one disk of that transport has no ambiguity to
-#                  resolve. This is the normal case -- the rpi4 has exactly one
-#                  SD and one USB -- and it is what makes swapping a stick just
-#                  work: a fresh, unmarked stick is still the only USB.
-#   the marked one  more than one, so ask what is on them. This machine's own
-#                  system says which disk is this machine's, and a stick written
-#                  for another board says it is not.
+#   start with the disks of the expected transport. One of them and there is
+#   nothing to resolve -- the normal case, and what makes swapping a stick just
+#   work, because a fresh unmarked stick is still the only USB.
 #
-# Prints nothing when neither answers, which leaves the caller to refuse rather
-# than pick. Silence here is "the machine did not say", never "use the conf".
+#   then drop the ones that say they are somebody else's. A system written for
+#   another board names that board in its marker, and that is a definite
+#   statement about what a disk is *not*.
+#
+#   if one is left, it is this machine's.
+#
+# Recognition was tried first and is not enough: it asked for a disk whose marker
+# names this machine, and this machine's own medium may carry no marker at all --
+# rpi5's stick was written by a path that predates markers, so the disk that is
+# obviously its own is the one that cannot prove it. Exclusion needs no marker on
+# the disk it selects, only on the ones it rejects.
+#
+# Prints nothing when more than one survives, which leaves the caller to refuse
+# rather than pick. Silence is "the machine did not say", never "use the conf".
 disk_resolve_own() {
-    local want same n dev
+    local want same n dev owner left=""
     want=$(disk_tran_of_name "${MACH_DEVICE:-}")
     [ -n "$want" ] || return 1
 
     same=$(disk_candidates | awk -v t="$want" '$3 == t { print $1 }')
     n=$(printf '%s\n' "$same" | grep -c . || true)
-
-    if [ "$n" = 1 ]; then printf '%s' "$same"; return 0; fi
     [ "$n" = 0 ] && return 1
+    if [ "$n" = 1 ]; then printf '%s' "$same"; return 0; fi
 
     for dev in $same; do
-        [ "$(disk_image_machine "$dev" || true)" = "$MACH_NAME" ] && { printf '%s' "$dev"; return 0; }
+        owner=$(disk_image_machine "$dev" || true)
+        # Another machine's system: definitely not this machine's medium.
+        [ -n "$owner" ] && [ "$owner" != "$MACH_NAME" ] && continue
+        # This machine's own system named outright ends it -- no need to keep
+        # looking, and it is the strongest evidence available.
+        [ "$owner" = "$MACH_NAME" ] && { printf '%s' "$dev"; return 0; }
+        left="$left $dev"
     done
-    return 1
+
+    set -- $left
+    [ "$#" = 1 ] || return 1
+    printf '%s' "$1"
 }
 
 # The device the machine's own medium is at right now, for a caller that is
