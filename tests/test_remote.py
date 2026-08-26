@@ -14,6 +14,48 @@ import unittest
 from tests.support import REPO, WkTest, bash, requires_machine
 
 
+class TestUnregisteredWorkspaceResolves(WkTest):
+    """a remote workspace with no registry entry here still resolves"""
+
+    def test_unregistered_remote_workspace_resolves(self):
+        """ws_exists/ws_target find a remote workspace the registry misses"""
+        # A scratch WK_ROOT whose targets/hosts holds only the fake conf, so
+        # the walk cannot reach the real fleet: the real lib/ and target
+        # drivers, symlinked (load_target re-sources both from $WK_ROOT).
+        fake_root = self.tmp / "wk-root"
+        (fake_root / "targets" / "hosts").mkdir(parents=True)
+        (fake_root / "lib").symlink_to(REPO / "lib")
+        for sh in (REPO / "targets").glob("*.sh"):
+            (fake_root / "targets" / sh.name).symlink_to(sh)
+        root = self.tmp / "root"
+        (root / "ws" / "tws").mkdir(parents=True)
+        (root / "ws" / "tws" / ".wk-ready").write_text("")
+        store = self.tmp / "store"
+        store.mkdir()
+        # WK_REMOTE_LOCAL drives the remote driver without ssh; the store is
+        # a different directory from the root, so only t_info -- not the
+        # host-side directory test -- can find the workspace.
+        (fake_root / "targets" / "hosts" / "fakebox.conf").write_text(
+            "WK_TARGET_KIND=remote\n"
+            "WK_REMOTE_LOCAL=1\n"
+            f"WK_REMOTE_ROOT={root}\n"
+            f"WK_REMOTE_STORE={store}\n"
+        )
+        cp = bash('''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/target.sh"
+ws_exists tws || { echo "ws_exists missed tws"; exit 1; }
+t=$(ws_target tws)
+[ "$t" = fakebox ] || { echo "ws_target said '$t'"; exit 1; }
+! ws_exists not-a-workspace || { echo "ws_exists found a ghost"; exit 1; }
+''', env={
+            "WK_ROOT": str(fake_root),
+            "XDG_STATE_HOME": str(self.tmp / "state"),
+        })
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+
 def _configured_remote_machines():
     """Every machine conf in targets/hosts whose kind resolves to `remote`
     -- pure logic, no ssh, mirrors target_kind()'s own resolution."""

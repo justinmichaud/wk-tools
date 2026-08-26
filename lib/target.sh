@@ -266,33 +266,39 @@ target_forget() { rm -f "$(wk_state_dir)/targets/$1"; }
 # Which target a *named* workspace lives on, so `wk build`, `wk pr` and the
 # macOS dispatcher cannot reach three different machines for one name.
 # Three sources in order: an explicit WK_TARGET overrides everything; the
-# registry is the fast path, only a cache of a recomputable fact; this
-# machine's own stores are asked directly. The store walk fixes a real
-# failure: a `wk new` that dies before registering (an ssh cut, a killed
-# driver) leaves a workspace with no record of which machine, and every
-# command falls back to `container` and answers "no such workspace" about a
-# complete checkout. A file test per target, nothing started, no ssh; loaded
-# in a subshell so nothing leaks into the caller.
+# registry is the fast path, only a cache of a recomputable fact; then every
+# target is asked directly (ws_on_target). The walk fixes a real failure: a
+# workspace with no registry entry here -- a `wk new` that died before
+# registering, or one created onto a shared build machine from another
+# workstation -- must still resolve, or every command falls back to
+# `container` and answers "no such workspace" about a complete checkout.
 #
-# The container target is the one exception, and worth special-casing rather
-# than living with: on a macOS host its workspaces (registry entry and all)
-# are inside the podman VM, so the directory test above always misses one --
-# unregistered or not -- and every *other* caller of "does this name exist"
-# is saved from that by forwarding the whole command into the VM before this
-# ever runs (only where=workspace commands with forward=no ask it out here).
-# t_info asks the VM directly over the same podman connection Zed's transport
-# uses (container.sh's _hpodman) -- still no ssh, and a stopped machine
-# answers "absent" in the time one failed connection takes, not a timeout.
+# Whether <name> is a workspace on target <t>, asked of the machine that
+# holds the store. Two tests, because each sees what the other cannot: the
+# workspace directory is evidence only where the store is on this machine
+# (and it alone sees a broken workspace, whose environment is gone); t_info
+# is the driver's own answer from wherever the store really is -- the podman
+# VM on a macOS host, a build box over ssh -- and an off machine answers
+# within its ConnectTimeout rather than hanging. Only a definite state
+# counts: "unreachable" is not evidence the workspace exists. lib/store.sh
+# and the driver load in a subshell, so neither the driver's functions nor
+# store.sh's default $WK_STORE outlive the question.
+ws_on_target() { # <target> <name>
+    ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+      load_target "$1" >/dev/null 2>&1 || exit 1
+      [ -d "$(wk_ws_dir "$2")" ] && exit 0
+      command -v t_info >/dev/null 2>&1 || exit 1
+      case "$(t_info "$2" 2>/dev/null)" in
+          absent|unreachable|"") exit 1 ;;
+          *) exit 0 ;;
+      esac )
+}
+
 ws_exists() { # <name>
     local name="$1" t
     target_of "$name" >/dev/null 2>&1 && return 0
     for t in $(target_all 2>/dev/null); do
-        ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
-          load_target "$t" >/dev/null 2>&1
-          [ -d "$(wk_ws_dir "$name")" ] && exit 0
-          [ "$t" = container ] && command -v t_info >/dev/null 2>&1 \
-              && [ "$(t_info "$name" 2>/dev/null)" != absent ]
-        ) && return 0
+        ws_on_target "$t" "$name" && return 0
     done
     return 1
 }
@@ -302,15 +308,7 @@ ws_target() {
     if [ -n "${WK_TARGET:-}" ]; then printf '%s' "$WK_TARGET"; return 0; fi
     if target_of "$name" 2>/dev/null; then return 0; fi
     for t in $(target_all 2>/dev/null); do
-        # lib/store.sh inside the subshell: not every caller has it (`wk pr`
-        # doesn't), and sourcing it sets a default $WK_STORE that must not
-        # outlive the question.
-        if ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
-             load_target "$t" >/dev/null 2>&1
-             [ -d "$(wk_ws_dir "$name")" ] ); then
-            printf '%s' "$t"
-            return 0
-        fi
+        if ws_on_target "$t" "$name"; then printf '%s' "$t"; return 0; fi
     done
     default_target
 }
