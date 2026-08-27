@@ -8,8 +8,8 @@ Look at all the different ways we build or configure images:
 - mac vm images
 
 Look at all the different ways we benchmark:
-- rebooting rpi5, macOS or moose into a generated and transient, 100% reproducable perf testing image (yocto on every Linux machine, moose included)
-- rebooting rpi5, rpi4 or rpi3 into a yocto webkit image
+- rebooting macOS into a 100% reproducable perf testing install
+- rebooting moose, rpi5, rpi4 or rpi3 into a yocto webkit image
 - benchmarking MiniBrowser or JSC cli in a container for faster tests
 
 We need a way to manage this complexity. In addition, we need to have a common way to get results and display them, including displaying a histogram and html result summary.

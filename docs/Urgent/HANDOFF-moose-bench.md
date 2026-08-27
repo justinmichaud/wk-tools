@@ -2,7 +2,11 @@
 
 `wk help hardware` has the design (a RAM root off a USB stick, armed by `efibootmgr --bootnext`).
 
-## Remaining, in this order
+block if bmc is not reachable
+
+we should generate a yocto image for moose for consistency
+
+## Remaining, in this order (out of date, double check this )
 
 - [ ] prove `--bootnext` and `toram` work on this AMI firmware: write a stock Ubuntu Server arm64 live ISO to a spare stick, append `toram` to its kernel command line, boot it once with `--bootnext` [needs moose]
 - [ ] add `boot/machines/moose.conf` and `boot/uefi-bootnext.sh` (same `b_*` driver contract as `boot/rpi5-usb.sh`), dry-run only; `wk boot moose` must report that arming needs interactive sudo rather than failing under `sudo -n` [needs moose]

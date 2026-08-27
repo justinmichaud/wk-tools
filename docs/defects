@@ -1,3 +1,22 @@
+- Confirm new recovery images for rpi3 and rpi4 build and write fine. Both sd card (rpi3) and second usb stick (rpi4) are connected to rpi5, so no intervention is needed. I give you permission to do this.
+  (agent: both images are built for real on moose -- see decision 1. The
+  writes wait on decisions 1 and 2. The first-ever buildroot image,
+  wpewebkit-2.38 rpi3, finished on moose at 20:08: sdcard.img 1.6 GB,
+  `stage 'image' done` after the freshness check. `wk sysimage ls` prints `?`
+  in its machine column -- the profile is not derived from a buildroot
+  workspace path; owed with the image-store removal.)
+- Confirm rpi5 2.54 yocto image works and can be deployed.
+  (agent: built for real on moose, 19:27; the write waits on decisions 1-3)
+- We need to re-provision rpi3 and 4 from scratch and confirm they work.
+
+- Build the following configs, confirm they work, and are suitable for use in an A/B test:
+  - WPE 2.38 X (buildroot) X (rpi3 32-bit, rpi4 32-bit, rpi5 64-bit)
+  - WPE 2.46 X (buildroot, yocto ) X (rpi3 32-bit, rpi4 32-bit, rpi5 64-bit)
+  - WPE 2.52 X (yocto) X (rpi3 32-bit, rpi4 32-bit, rpi5 64-bit)
+
+Confirm they can run an A/B test. Make the test have the same code on both side, and meausre the varience we can measure reliably. Confirm they connect only through tailscale, and that we can generate subtest results and a histogram. then do handoff-benchmarking-variance.
+
+
 Your scope is everything. Keep going until every defect and handoff item is done. You will be running unattended soon, so prioritize user intervention first. Surface decisions that need to be made here in this file at the top.
 
 Use cheaper subagents with smaller models wherever possible.
@@ -153,6 +172,45 @@ Everything else below proceeds without you.
 
 Defects:
 
+- Fetch is still very very slow (ex: yocto-downstream-wpe-2.46-rpi4 is taking 15+ minutes). Snapshots don't make sense, why are they needed? We can't do hard links from local copies? Check fetch perf, and disk space usage. Look for optimizations, or a beter design overall.
+
+- home and end don't work in zsh on linux from a mac terminal. Confirm home, end, ctrl a, ctrl e, etc... all work
+
+- The lifecycle notes are confusing:
+
+wk sysimage write --from <path> --disk <writer>:/dev/sdX
+wk boot rpi3                                     # one-shot: arms, reboots, self-reverts
+
+We should first explain how to use --rescue, then explain how to one-shot boot an image. This should also explain what to do if something goes wrong (remove the stick/sd), and which boot order the pis get set to / which device rescue should go on (and how, it doesn't mention which command sets this up, burns the fuse for rpi3, etc). Same goes for the moose and macos, which should be explained in this help doc too.
+
+-  issues with pi setup:
+
+wk pi setup rpi3-bench
+==> probing rpi3-bench
+Host key verification failed.
+error: cannot ssh to rpi3-bench
+
+Then, once sshing manually:
+
+jmichaud@rpi3-bench: Permission denied (publickey,password).
+error: cannot ssh to rpi3-bench
+
+ssh root@rpi3-bench works just fine.
+
+Also: how are A/B runs set up? Do they need a fresh skeleton webkit copied over after flashing the bench image every time?
+
+- wk zed not working when workspace is on another machine:
+
+tolken:host ~/Development/wk-tools main* ❯ wk zed stringimpl238
+warning: no such workspace: stringimpl238 -- 'wk ls' lists them
+usage: wk zed <workspace>
+       wk zed -h for the rest
+
+
+THis seems like a symptom of not handiling workspaces at a high enough level of abstraction. This should not be bespoke.
+
+- Help options should always list all valid values for params
+
 - Audit what tools are needed on the host macOS and Linux systems; keep the
   host minimal and use containers / VMs where reasonable. (agent: the
   inventory is done -- every host tool classified; what must stay is the
@@ -160,17 +218,6 @@ Defects:
   display/GPU stack of a bench box, the card machine's media tools and the
   developer's identities (gh, zed). Dropped now: host ccache (the workspace
   image has its own). The decisions and the rest are docs/HANDOFF-host-tools.md.)
-
-- Confirm new recovery images for rpi3 and rpi4 build and write fine. Both sd card (rpi3) and second usb stick (rpi4) are connected to rpi5, so no intervention is needed. I give you permission to do this.
-  (agent: both images are built for real on moose -- see decision 1. The
-  writes wait on decisions 1 and 2. The first-ever buildroot image,
-  wpewebkit-2.38 rpi3, finished on moose at 20:08: sdcard.img 1.6 GB,
-  `stage 'image' done` after the freshness check. `wk sysimage ls` prints `?`
-  in its machine column -- the profile is not derived from a buildroot
-  workspace path; owed with the image-store removal.)
-
-- Confirm rpi5 2.54 yocto image works and can be deployed.
-  (agent: built for real on moose, 19:27; the write waits on decisions 1-3)
 
 - wk status should load local data quickly first and fill the rest later.
   (agent: the streaming render is in; a bare `wk status` also hung forever --
