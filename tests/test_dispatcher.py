@@ -6,7 +6,7 @@ Run: python3 -m unittest tests.test_dispatcher -v
 """
 import unittest
 
-from tests.support import REPO, WkTest, fake_workspace, run
+from tests.support import REPO, WkTest, fake_workspace, rand_suffix, run
 
 
 class TestHelpAndDeclarations(WkTest):
@@ -201,3 +201,151 @@ status_default_mode; m="$WK_STATUS_DEFAULT_MODE"
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnknownWorkspaceName(WkTest):
+    """A name no workspace answers to is the dispatcher's to refuse, once, for
+    every command that takes one -- so no command ignores it, and none reports
+    it as an argument it never expected."""
+
+    # Every workspace command that takes a name and does not create or destroy
+    # one. `new` and `rm` are the lifecycle pair: they are handed a name with
+    # nothing behind it. The rest need nothing installed to reach the refusal,
+    # which is why `start`/`stop` (needs podman) and `bench` (needs a plan) are
+    # exercised through the declaration check below rather than by running.
+    COMMANDS = (
+        "build", "claude", "enter", "gui", "logs", "pick", "pr", "profile",
+        "remotes", "run", "status", "sync", "test", "verify", "zed",
+    )
+
+    def test_every_command_refuses_a_name_no_workspace_answers_to(self):
+        """an unknown workspace name is refused, with the synopsis, exit 2"""
+        name = "nosuchws-" + rand_suffix()
+        for c in self.COMMANDS:
+            with self.subTest(cmd=c):
+                cp = run(c, name)
+                out = cp.stdout + cp.stderr
+                self.assertEqual(cp.returncode, 2, f"'wk {c} {name}' exited {cp.returncode}:\n{out}")
+                self.assertIn(f"no such workspace: {name}", out)
+                self.assertIn(f"usage: wk {c}", out, f"the refusal does not print the synopsis:\n{out}")
+
+    def test_a_workspace_command_never_ignores_the_name_it_was_given(self):
+        """`wk stop <unknown>` refuses rather than acting on every workspace"""
+        # The failure this pins: `optional` used to mean "take the positional
+        # only if it names a workspace", so a typo fell through to a command
+        # that read it as "no name given" -- all of them.
+        name = "nosuchws-" + rand_suffix()
+        cp = run("stop", name)
+        out = cp.stdout + cp.stderr
+        self.assertNotEqual(cp.returncode, 0, f"'wk stop {name}' was accepted:\n{out}")
+        self.assertNotIn("stopping", out, f"'wk stop {name}' acted on something:\n{out}")
+
+    def test_name_declarations_are_one_of_three_words(self):
+        """every `name=` in a declaration is required, optional or none"""
+        import os
+        import re
+
+        bad = []
+        for f in sorted((REPO / "cmd").iterdir()):
+            if not (f.is_file() and os.access(f, os.X_OK)):
+                continue
+            for line in f.read_text(errors="replace").splitlines()[:15]:
+                if not line.startswith("# wk:"):
+                    continue
+                for tok in re.findall(r"name=(\S*)", line):
+                    if tok.split("@")[0] not in ("required", "optional", "none"):
+                        bad.append(f"{f.name}: name={tok}")
+        self.assertEqual(bad, [], f"declarations the dispatcher cannot read: {bad}")
+
+
+class TestZedNames(WkTest):
+    """`wk zed` is the one command whose name may be a machine instead of a
+    workspace, and the only one that resolves a name itself."""
+
+    def test_a_workspace_name_is_refused_by_the_dispatcher(self):
+        """`wk zed <unknown>` names the mistake, not a second argument"""
+        name = "nosuchws-" + rand_suffix()
+        cp = run("zed", name)
+        out = cp.stdout + cp.stderr
+        self.assertIn(f"no such workspace: {name}", out, out)
+        self.assertNotIn("one name at a time", out, out)
+
+    def test_tools_takes_a_name_the_dispatcher_does_not_answer_for(self):
+        """`wk zed --tools <unknown>` is zed's own refusal, naming both kinds"""
+        # `flag --tools name=none` hands the name through; before it, the
+        # dispatcher consumed nothing and zed read the leftover as a second
+        # name -- which is what `wk zed --tools <machine>` always hit.
+        name = "nosuchws-" + rand_suffix()
+        cp = run("zed", "--tools", name)
+        out = cp.stdout + cp.stderr
+        self.assertNotEqual(cp.returncode, 0, out)
+        if "zed is not installed" in out:
+            self.skipTest("zed is not installed here, so the name is never reached")
+        self.assertIn(f"no machine or workspace named '{name}'", out, out)
+
+    def test_two_names_are_still_two_names(self):
+        """a second name is refused by name"""
+        cp = run("zed", "--tools", "one-" + rand_suffix(), "two-" + rand_suffix())
+        out = cp.stdout + cp.stderr
+        if "zed is not installed" in out:
+            self.skipTest("zed is not installed here, so the names are never reached")
+        self.assertIn("one name at a time", out, out)
+
+
+class TestFlagNameOverride(WkTest):
+    """`flag <--x> name=<n>` is how a flag says the name does not arrive the
+    way the command's other invocations bring it -- because it is a machine
+    (`wk zed --tools`), or because the flag answers without one."""
+
+    def test_a_flag_can_answer_without_a_workspace(self):
+        """`wk profile --list` prints the modes rather than asking for a name"""
+        cp = run("profile", "--list")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("sampling", cp.stdout + cp.stderr)
+
+    def test_the_override_applies_only_to_that_flag(self):
+        """without the flag the same command still wants a name"""
+        cp = run("profile")
+        self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
+        self.assertIn("usage: wk profile", cp.stdout + cp.stderr)
+
+
+class TestTopLevelCallOrder(WkTest):
+    """bash resolves a function when the call runs, so a command that calls one
+    of its own functions at top level before defining it fails at that line --
+    `bash -n` sees nothing wrong. `wk sync <workspace>` did exactly this."""
+
+    def test_no_command_calls_a_function_it_has_not_defined_yet(self):
+        """every function a command calls at top level is defined above it"""
+        import os
+        import re
+
+        bad = []
+        for f in sorted((REPO / "cmd").iterdir()):
+            if not (f.is_file() and os.access(f, os.X_OK)):
+                continue
+            lines = f.read_text(errors="replace").splitlines()
+            # A function body in this tree opens with `name() {` in column 0
+            # and closes with `}` in column 0; anything between the two is
+            # resolved when that function is called, not where it is written.
+            defined = {}
+            body_of = [None] * len(lines)
+            cur = None
+            for i, line in enumerate(lines):
+                m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\s*$", line)
+                if m and cur is None:
+                    cur = m.group(1)
+                    defined.setdefault(cur, i)
+                body_of[i] = cur
+                if cur is not None and line == "}":
+                    cur = None
+            for i, line in enumerate(lines):
+                if body_of[i] is not None or line.lstrip().startswith("#"):
+                    continue
+                m = re.match(r"^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*([A-Za-z_][A-Za-z0-9_]*)\b", line)
+                if not m:
+                    continue
+                fn = m.group(1)
+                if fn in defined and defined[fn] > i:
+                    bad.append(f"{f.name}:{i + 1}: calls {fn}(), defined at line {defined[fn] + 1}")
+        self.assertEqual(bad, [], "functions called before they are defined: " + "; ".join(bad))

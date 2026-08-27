@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk pr [<workspace>] <user>:<branch> -- check out a PR head, from either project
-# wk: where=workspace name=optional ready=yes group=sources
+# wk: where=workspace name=required ready=yes group=sources
 #
 # GitHub's own syntax for a PR head, pasted straight from the page:
 #

@@ -7,8 +7,8 @@
 # Everything here is the recipe from the wiki page "Building WPEWebKit for
 # 32-bit Raspberry Pi 3 (Buildroot DRM config)", which is the one version of
 # this that has produced a booting image, plus what this repository adds: the
-# tailnet overlay, the BR2_EXTERNAL fix, and caches that live in the store so a
-# rebuild is cheap.
+# tailnet and wifi overlays, the BR2_EXTERNAL libffi fix, and caches that live
+# in the store so a rebuild is cheap.
 #
 # Nothing here may fail silently: this runs detached and its log is the only
 # account of what happened.
@@ -17,7 +17,7 @@ set -euo pipefail
 
 SRC=/src/WebKit
 TREE_URL=""; TREE_BRANCH=""; TREE_COMMIT=""; DEFCONFIG=""; EXTERNAL=0
-IMAGE=""; JOBS=""; OVERLAY_ARCH=""; DL_DIR=""; CCACHE_DIR=""; NAME=""; ROOTFS_SIZE=""
+IMAGE=""; JOBS=""; OVERLAY_ARCH=""; OVERLAY_WIFI=0; NAME=""; ROOTFS_SIZE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -30,8 +30,7 @@ while [ $# -gt 0 ]; do
         --image)       IMAGE="${2:-}"; shift 2 ;;
         --jobs)        JOBS="${2:-}"; shift 2 ;;
         --overlay-arch) OVERLAY_ARCH="${2:-}"; shift 2 ;;
-        --dl-dir)      DL_DIR="${2:-}"; shift 2 ;;
-        --ccache-dir)  CCACHE_DIR="${2:-}"; shift 2 ;;
+        --overlay-wifi) OVERLAY_WIFI="${2:-0}"; shift 2 ;;
         --rootfs-size) ROOTFS_SIZE="${2:-}"; shift 2 ;;
         *) echo "buildroot-build.sh: unknown option: $1" >&2; exit 2 ;;
     esac
@@ -40,10 +39,55 @@ done
 say()  { printf 'wk-buildroot: %s\n' "$*"; }
 fail() { printf 'wk-buildroot: error: %s\n' "$*" >&2; exit 1; }
 
+# The image stage's completion evidence -- a function of its own, the same
+# shape as image/yocto-build.sh's verify_image_freshness, for the same reason:
+# `make` exits 0 on a tree it decided had nothing left to do (a second run
+# against an unchanged .config, or one whose only change never reached the
+# genimage step), and a "done" printed from that exit code would be exactly
+# the staleness that function exists to catch on the Yocto side -- a build
+# that reports success and hands back yesterday's card image. So the named
+# image's mtime has to be at least as new as this build's own start, checked
+# with a portable `stat` (GNU's -c, BSD/macOS's -f).
+verify_image_freshness() { # <path to the named image> <build start epoch seconds>
+    local img="$1" start="$2" mtime
+    [ -f "$img" ] || fail "the configuration names '$(basename "$img")' and make
+    reported success, but $img does not exist. A cog defconfig whose
+    filesystem output is tar-only builds no card image, so genimage has
+    nothing to assemble -- that is a defconfig question (BR2_TARGET_ROOTFS_EXT2
+    above should have prevented it here), not something this stage can call
+    done."
+    mtime=$(stat -c %Y "$img" 2>/dev/null || stat -f %m "$img" 2>/dev/null) \
+        || fail "could not read the mtime of $img"
+    [ "$mtime" -ge "$start" ] || fail "make reported success but $img is older
+    than this build started. That should be impossible for a defconfig
+    producing a fresh genimage run every time -- if this fires, something
+    upstream of genimage started skipping work it used to always do, the same
+    trap verify_image_freshness (image/yocto-build.sh) guards against for
+    bitbake."
+}
+
 [ -n "$NAME" ]      || fail "--name is required"
 [ -n "$TREE_URL" ]  || fail "--tree-url is required"
 [ -n "$DEFCONFIG" ] || fail "--defconfig is required"
 [ -n "$JOBS" ]      || JOBS=$(nproc 2>/dev/null || echo 4)
+
+# BR2_DL_DIR and BR2_CCACHE_DIR arrive as environment variables -- the
+# container's store-backed cache mount (targets/container.sh) sets them --
+# rather than as flags on this script. The same reasoning image/yocto-build.sh
+# gives for DL_DIR/SSTATE_DIR: a host path handed in from image/buildroot.sh
+# would name nothing inside this container, and the container's own
+# environment is already the one true copy of where the mount landed. Their
+# absence means the store mount itself is missing, not that the cache is
+# merely unset -- so it fails here rather than quietly building inside the
+# workspace, where `wk rm` would throw the downloads away with it.
+for _d in "${BR2_DL_DIR:-}" "${BR2_CCACHE_DIR:-}"; do
+    [ -n "$_d" ] || fail "BR2_DL_DIR/BR2_CCACHE_DIR are not set in this workspace.
+    They come from the container's store-backed cache mount
+    (targets/container.sh); without them buildroot's download and ccache
+    caches would land in the workspace and die with it."
+    mkdir -p "$_d" || fail "cannot create $_d"
+    [ -w "$_d" ] || fail "$_d is not writable"
+done
 
 WORKDIR="$SRC/WebKitBuild/buildroot/$NAME"
 say "tree        $TREE_URL @ ${TREE_COMMIT:-${TREE_BRANCH:-HEAD}}"
@@ -92,14 +136,24 @@ cd "$WORKDIR"
 # BR2_ROOTFS_OVERLAY is buildroot's one supported way to add files to an image
 # without writing a package, and it is copied in at target-finalize -- the very
 # end -- so this can be assembled now and costs only the last step if it
-# changes. The script is this repository's and is verified; it carries no
-# credential, because the tailnet key arrives with the card and not the image.
+# changes. Both scripts are this repository's and carry no credential: the
+# tailnet key and the wifi passphrase arrive with the card, not the image.
+# BR2_ROOTFS_OVERLAY takes a space-separated list, so both overlays sit side by
+# side when both are wanted rather than needing to be merged into one staging
+# directory.
 OVERLAY=""
 if [ -n "$OVERLAY_ARCH" ]; then
-    OVERLAY="$WORKDIR/wk-overlay"
+    OVERLAY="$WORKDIR/wk-overlay-tailnet"
     say "assembling the tailnet overlay ($OVERLAY_ARCH)"
     /opt/wk-tools/image/buildroot/tailnet-overlay.sh "$OVERLAY_ARCH" "$OVERLAY" \
         || fail "could not assemble the tailnet overlay"
+fi
+if [ "$OVERLAY_WIFI" = 1 ]; then
+    WIFI_OVERLAY="$WORKDIR/wk-overlay-wifi"
+    say "assembling the wifi overlay"
+    /opt/wk-tools/image/buildroot/wifi-overlay.sh "$WIFI_OVERLAY" \
+        || fail "could not assemble the wifi overlay"
+    OVERLAY="${OVERLAY:+$OVERLAY }$WIFI_OVERLAY"
 fi
 
 # --- the configuration -------------------------------------------------------
@@ -155,8 +209,9 @@ make $BR_EXT "$DEFCONFIG" || fail "no such defconfig: $DEFCONFIG
             ;;
     esac
     echo "BR2_PRIMARY_SITE=\"https://sources.buildroot.net\""
-    [ -z "$DL_DIR" ]    || echo "BR2_DL_DIR=\"$DL_DIR\""
-    [ -z "$CCACHE_DIR" ] || { echo "BR2_CCACHE=y"; echo "BR2_CCACHE_DIR=\"$CCACHE_DIR\""; }
+    echo "BR2_DL_DIR=\"$BR2_DL_DIR\""
+    echo "BR2_CCACHE=y"
+    echo "BR2_CCACHE_DIR=\"$BR2_CCACHE_DIR\""
     [ -z "$OVERLAY" ]   || echo "BR2_ROOTFS_OVERLAY=\"$OVERLAY\""
 } >> .config
 # shellcheck disable=SC2086
@@ -171,6 +226,12 @@ done
 # FORCE_UNSAFE_CONFIGURE=1 because the workspace user is uid 0 in some
 # configurations and several 2009-era configure scripts refuse to run as root;
 # the wiki recipe carries the same flag for the same reason.
+#
+# The start time is taken right here, not at the top of the script: cloning
+# and pinning the tree can legitimately take minutes and touches nothing under
+# output/, so it must not count against the freshness check below -- only the
+# build that is about to run should have to have produced the evidence.
+build_start=$(date +%s)
 say "building (this is hours, and the log below is the whole account of it)"
 # shellcheck disable=SC2086
 FORCE_UNSAFE_CONFIGURE=1 make $BR_EXT -j"$JOBS" \
@@ -185,10 +246,11 @@ OUT="$WORKDIR/output/images"
 [ -d "$OUT" ] || fail "the build reported success but produced no $OUT"
 say "images built at:"
 ls -1 "$OUT" | sed 's/^/  -   /'
-if [ -n "$IMAGE" ] && [ ! -f "$OUT/$IMAGE" ]; then
-    say "NOTE: the configuration names '$IMAGE' and it is not there."
-    say "  A cog defconfig whose filesystem output is tar-only builds no card"
-    say "  image, so genimage has nothing to assemble. That is a defconfig"
-    say "  question, not a build failure."
+
+# See verify_image_freshness above: only now, with the artifact checked
+# against this run's own start time, may the stage call itself done.
+if [ -n "$IMAGE" ]; then
+    verify_image_freshness "$OUT/$IMAGE" "$build_start"
+    say "$IMAGE is fresh"
 fi
 say "stage 'image' done"

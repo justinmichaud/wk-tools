@@ -29,7 +29,13 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 #   where=workspace  acts on a workspace: the name is resolved here, the
 #                    target decides where it runs
 #   where=dynamic    the command answers `wk <cmd> --where <args>` itself
-#   name=required|optional|none   how the workspace name arrives
+#   name=required|optional|none   how the workspace name arrives. Outside a
+#                    workspace the first positional is the name; inside one it
+#                    is implicit and every positional belongs to the command.
+#                    `optional` differs from `required` only in what a missing
+#                    one means: all of them, or none. Either way a name that no
+#                    workspace answers to is refused here, so no command has to
+#                    decide what a name it does not recognise meant.
 #   ready=yes        wait for the workspace to finish creating first
 #   group=<g>        which block of `wk help` lists it
 #   lifecycle        creates or destroys the workspace record (new, rm)
@@ -46,7 +52,7 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 #                    before anything runs, so the refusal names the remedy up front
 #   sub <a,b> where=<w> name=<n>[@2]   per-subverb override of where and/or
 #                    name; @2 means the name is the positional after the subverb
-#   flag <--x,--y> where=<w>  per-flag override of where
+#   flag <--x,--y> where=<w>|name=<n>   per-flag override of where and/or name
 
 decl_load() { # <impl>
     D_WHERE=workspace D_NAME=none D_READY=no D_GROUP=other D_LIFECYCLE=""
@@ -128,26 +134,38 @@ EOF
     return 1
 }
 
-# How the name arrives for this invocation, after the sub overrides.
+# The value of <key>= from a `flag` line naming a flag that is in <args...>.
+flag_override() { # <key> <args...>
+    local key="$1" e flags a tok found=""; shift
+    while IFS= read -r e; do
+        [ -n "$e" ] || continue
+        flags=${e%% *}
+        for a in ${1+"$@"}; do
+            in_list "$a" "$flags" || continue
+            for tok in ${e#* }; do
+                case "$tok" in "$key="*) found=${tok#*=} ;; esac
+            done
+        done
+    done <<EOF
+$D_FLAG
+EOF
+    [ -n "$found" ] || return 1
+    printf '%s' "$found"
+}
+
+# How the name arrives for this invocation, after the flag and sub overrides.
 cmd_name() { # <args...>
     local n
-    n=$(sub_override name "${1:-}") || n="$D_NAME"
+    n=$(flag_override name ${1+"$@"}) || n=$(sub_override name "${1:-}") || n="$D_NAME"
     printf '%s' "$n"
 }
 
 # Where this invocation runs, after the sub/flag overrides.
 cmd_where() { # <impl> <args...>
-    local impl="$1" w e verbs a; shift
-    w=$(sub_override where "${1:-}") || w="$D_WHERE"
-    while IFS= read -r e; do
-        [ -n "$e" ] || continue
-        verbs=${e%% where=*}
-        for a in "$@"; do in_list "$a" "$verbs" && w=${e##*where=}; done
-    done <<EOF
-$D_FLAG
-EOF
+    local impl="$1" w; shift
+    w=$(flag_override where ${1+"$@"}) || w=$(sub_override where "${1:-}") || w="$D_WHERE"
     if [ "$w" = dynamic ]; then
-        w=$("$impl" --where "$@") || die "'wk $(basename "$impl") --where' did not answer"
+        w=$("$impl" --where ${1+"$@"}) || die "'wk $(basename "$impl") --where' did not answer"
     fi
     printf '%s' "$w"
 }
@@ -699,26 +717,35 @@ main() {
     fi
 
     # Running here: resolve the name once, and the command reads WK_NAME.
+    # The positional at the slot is the name whatever it says -- what it says
+    # is checked below, in one place, rather than by each command in its own
+    # words or not at all.
     case "${decl%@*}" in
-        required)
-            if [ -z "$name" ]; then
-                name=$(positional "$slot" "$@")
-                without_positional "$slot" "$@"; set -- ${ARGS[@]+"${ARGS[@]}"}
-            fi ;;
-        optional)
+        required|optional)
             if [ -z "$name" ]; then
                 _a=$(positional "$slot" "$@" || true)
-                if [ -n "$_a" ] && ws_exists "$_a"; then
+                if [ -n "$_a" ]; then
                     name="$_a"; without_positional "$slot" "$@"; set -- ${ARGS[@]+"${ARGS[@]}"}
                 fi
             fi ;;
     esac
     if [ -n "$name" ]; then
         WK_NAME="$name"; export WK_NAME
+        command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+        # A name nothing answers to is refused here, once, for every command.
+        # Left to reach the command it is either ignored -- `wk stop <typo>`
+        # stopped every workspace on the machine -- or reported as an argument
+        # the command never expected, which names neither the mistake nor the
+        # remedy. The synopsis comes with it, because giving one argument where
+        # two go is the other way to arrive here (`wk build jsc-release`).
+        #
+        # Inside a workspace the marker is the proof it exists, and a lifecycle
+        # command is the one handed a name with nothing behind it yet.
+        if [ -z "$D_LIFECYCLE" ] && ! in_workspace; then
+            ws_exists "$name" \
+                || usage_die "$cmd" "$impl" "no such workspace: $name -- 'wk ls' lists them"
+        fi
         if [ "$D_READY" = yes ]; then
-            command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
-            # Inside a workspace the marker is the proof it exists.
-            in_workspace || ws_exists "$name" || usage_die "$cmd" "$impl" "no such workspace: $name"
             load_target "$(ws_target "$name")"
             wait_ready "$name"
         fi

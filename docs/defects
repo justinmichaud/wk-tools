@@ -1,10 +1,9 @@
 - rpi4 is connected directly to ethernet with a freshly-flashed recovery usb. Why is it not connecting?
 
-- wk zed is broken:
-wk zed image-decoders
-error: one name at a time (got '' and 'image-decoders')
-
-Do an audit over every command and look for obvious breakage like this. This should be all abstracted using a common helper and/or library, not bespoke for each subcommand.
+- Audit every command for breakage of the shape `wk zed <workspace>` had: an
+  argument the command re-decides for itself and then mishandles. The workspace
+  name is now the dispatcher's alone; the other arguments -- configs, flags,
+  paths, subverbs -- are still parsed command by command.
 
 - wk enter does not work across machines
 

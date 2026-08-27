@@ -1,19 +1,17 @@
 # The buildroot builder: sourced by cmd/sysimage, dispatched on IMG_BUILDER.
 #
-# Not written yet, and this file exists to say so in the first second of
-# `wk sysimage build` rather than let a configuration that cannot be built look
-# like one that can. The configurations are real -- image/configs holds twelve
-# buildroot ones -- and two of them name a defconfig that exists upstream today;
-# what is missing is the mechanism between the config file and an image.
+# The same host/worker split the yocto lane uses (image/yocto.sh /
+# image/yocto-build.sh): this file drives a container workspace and
+# `image/buildroot-build.sh` is what runs inside it, from /opt/wk-tools so the
+# two halves cannot skew. A configuration that cannot be built yet refuses in
+# the first second (CFG_NEEDS, cmd_build) rather than hours into a compile.
 #
-# --- what the scouting run established ---------------------------------------
+# --- the recipe, and why each piece is what it is -----------------------------
 #
-# A build done by hand outside `wk`, because buildroot 2020.02 on a modern host
-# is the unknown and the lane should be written around what works. It produced
-# a bootable `sdcard.img` for the rpi3, with tailscale in it. So the recipe below
-# is recorded evidence, not a design sketch -- but it has never been run *through
-# this file*, and until it has, claiming otherwise in code would be the worst of
-# the three options.
+# What follows was first run by hand outside `wk`, because buildroot 2020.02 on
+# a modern host was the unknown and the lane was written around what works: it
+# produced a bootable `sdcard.img` for the rpi3, with tailscale in it. The
+# recipe below is that evidence, carried into this file and buildroot-build.sh.
 #
 #   tree        WebPlatformForEmbedded/buildroot, branch `wpe`, pinned 2020.02.
 #               A fork, not upstream buildroot: the release-pinned `cog`
@@ -37,58 +35,63 @@
 #   jobs        -j6 measured right on a 19 GB VM: a WPE compile is ~2 GB.
 #   downloads   BR2_DL_DIR and BR2_CCACHE_DIR under $WK_STORE/cache/buildroot,
 #               which lib/store.sh already reserves and targets/container.sh
-#               already exports. image_build_locations already declares it, so
+#               already mounts and exports -- buildroot-build.sh reads them from
+#               its own environment rather than being handed a path on the
+#               command line, the same reason yocto-build.sh reads DL_DIR and
+#               SSTATE_DIR that way: a host path hits nothing inside the
+#               container it runs in, and the container's own environment is
+#               already the one true copy of where the mount landed.
+#               image_build_locations already declares the directory, so
 #               `wk gc` already reclaims it.
 #   external    BR_EXTERNAL -> image/buildroot/external, a BR2_EXTERNAL tree this
-#               repository owns. It carries the one fix the scouting run needed: host-python-2.7's bundled 2013-era
-#               libffi cannot assemble aarch64/sysv.S, so the build dies at
-#               `sharedmods` on an arm64 build host. An architecture problem,
-#               not an old-distro one -- on x86_64 that file is never compiled,
-#               which is why this tree always built on moose. Buildroot ships
-#               host-libffi and gives the *target* python --with-system-ffi, and
-#               at the pin never joins the two for the host build; upstream does
-#               join them in a later release, so the tree applies that change
-#               from outside rather than inventing one. TODO: never run through
-#               a build -- what is checked is the make semantics it depends on
-#               (external.mk says which, and why an appended dependency is not
-#               enough on its own).
+#               repository owns. It carries the one fix a build needs: host-
+#               python-2.7's bundled 2013-era libffi cannot assemble
+#               aarch64/sysv.S, so the build dies at `sharedmods` on an arm64
+#               build host. An architecture problem, not an old-distro one --
+#               on x86_64 that file is never compiled, which is why this tree
+#               always built on moose. Buildroot ships host-libffi and gives the
+#               *target* python --with-system-ffi, and at the pin never joins
+#               the two for the host build; upstream does join them in a later
+#               release, so the tree applies that change from outside
+#               (external.mk) rather than patching somebody else's vendor
+#               branch or sedding its Makefile.
 #   overlay     BR2_ROOTFS_OVERLAY, assembled by
-#               image/buildroot/tailnet-overlay.sh <arch> <staging>. This part is
-#               written and verified. Only world-readable regular files: the
-#               overlay is rsynced at target-finalize as the build user, and a
-#               0700 directory in it failed the build with rsync error 23.
-#   wifi        image/buildroot/wifi-overlay.sh <staging>, the same shape,
-#               written but -- like everything else in this file -- never run.
-#               It carries no binary (wpa_supplicant is a package the
-#               defconfig selects, not a downloaded static build), only
-#               wk-wifi-join and the S-init line that spends the credential
-#               the card seeds. TODO: the rpi3 and rpi5 defconfigs are the
-#               WPE fork's own and live outside this repo -- unlike rpi4's
-#               (image/buildroot/external/configs, which this repo owns and
-#               which now selects BR2_PACKAGE_WPA_SUPPLICANT), so whether they
-#               compile wpa_supplicant at all is unverified until one is
-#               built.
-#   output      genimage -> output/images/sdcard.img. The cog defconfigs'
-#               filesystem output is tar-only -- no rootfs.ext4 -- so the board's
-#               own genimage config had nothing to assemble until that was fixed.
+#               image/buildroot/tailnet-overlay.sh <arch> <staging>. Only
+#               world-readable regular files: the overlay is rsynced at
+#               target-finalize as the build user, and a 0700 directory in it
+#               failed a build with rsync error 23.
+#   wifi        image/buildroot/wifi-overlay.sh <staging>, the same shape. It
+#               carries no binary (wpa_supplicant is a package the defconfig
+#               selects, not a downloaded static build), only wk-wifi-join and
+#               the S-init line that spends the credential the card seeds.
+#               TODO: the rpi3 defconfig is the WPE fork's own; whether it
+#               compiles wpa_supplicant at all is unverified until a build runs.
+#   output      genimage -> output/images/$BR_IMAGE. The cog defconfigs'
+#               filesystem output is tar-only -- no rootfs.ext4 -- so the
+#               board's own genimage config has nothing to assemble unless
+#               buildroot-build.sh adds BR2_TARGET_ROOTFS_EXT2, which it does
+#               whenever the profile names a `.img`. The completion line is
+#               conditioned on that file's mtime being newer than the run's own
+#               start, the same rule yocto-build.sh applies to its image
+#               directory: a helper (or here, a `make` with nothing to do)
+#               reporting success proves nothing on its own.
 #   init        BusyBox, so no systemd units: install_units already reads the
 #               init out of the rootfs and refuses rather than writing units
-#               nothing will start. The S99tailscale script is the equivalent,
-#               and the BusyBox halves of the self-return watchdog and the
+#               nothing will start. The S99tailscale script is the equivalent.
+#               TODO: the BusyBox halves of the self-return watchdog and the
 #               self-disarm are still owed.
 #
 # --- what is owed, in order --------------------------------------------------
 #
-#   1. this function: clone-and-pin the tree per configuration, apply the
-#      defconfig, write the overlay(s) -- tailnet-overlay.sh and, per
-#      --overlay-wifi, wifi-overlay.sh -- build in the workspace, and leave
-#      output/images/$BR_IMAGE where it lands -- there is no store to import it
-#      into (wk help images). Container-only, and refused elsewhere for the
-#      reasons yocto_build gives.
-#   2. the ten configurations whose defconfig does not exist upstream -- every
-#      board but the rpi3, and every WebKit/WebKit release. Each says what it
-#      needs in its own CFG_NEEDS, so they refuse individually and correctly
-#      already; deriving those defconfigs is a separate piece of work per board.
+#   1. a real build, through this file: the mechanism below has never been run
+#      end to end, only checked by dry run and by reading the make semantics
+#      the external tree depends on.
+#   2. the nine configurations whose defconfig does not exist upstream and is
+#      not yet derived here either -- every board/release combination but
+#      wpewebkit-2.38 and wpewebkit-2.46 on the rpi3, and wpewebkit-2.38 on the
+#      rpi4 (image/buildroot/external/configs, itself unbuilt). Each says what
+#      it needs in its own CFG_NEEDS, so they refuse individually and
+#      correctly already; deriving each remaining defconfig is separate work.
 
 BUILDROOT_BASE_IMAGE="${WK_BUILDROOT_BASE:-docker.io/library/ubuntu:22.04}"
 
@@ -199,7 +202,14 @@ buildroot_build() {
     overlay_arch="${BR_OVERLAY_TAILSCALE:-}"
     overlay_wifi=""
     _image_wants_wifi "${IMG_MACHINE:-}" && overlay_wifi=1
-    dl="$WK_STORE/cache/buildroot/downloads"
+    # Display only, for the dry run's `du -sh` and to spell out what
+    # lib/store.sh already reserves (store_init) and targets/container.sh
+    # already mounts and exports as BR2_DL_DIR/BR2_CCACHE_DIR. Not passed to
+    # buildroot-build.sh: a host path handed to a process running inside the
+    # container would name nothing there, and the container already has the
+    # right (container-side) path in its own environment -- passing one here
+    # would be a second, disagreeing copy of the same fact.
+    dl="$WK_STORE/cache/buildroot/dl"
     cc="$WK_STORE/cache/buildroot/ccache"
 
     if [ -n "$dry" ]; then
@@ -213,7 +223,8 @@ would build image $profile (builder: buildroot)
   jobs         -j$jobs (memory-sized at 2048 MB/job)
   overlay      ${overlay_arch:-none -- this image would join no tailnet}
   wifi overlay $([ -n "$overlay_wifi" ] && echo "wk-wifi-join (image/buildroot/wifi-overlay.sh); the card carries the credential" || echo "none -- ${IMG_MACHINE:-this board} has a cable")
-  DL_DIR       $dl
+  DL_DIR       $dl ($(du -sh "$dl" 2>/dev/null | cut -f1 || echo "not created yet")) -- BR2_DL_DIR in the container
+  CCACHE_DIR   $cc ($(du -sh "$cc" 2>/dev/null | cut -f1 || echo "not created yet")) -- BR2_CCACHE_DIR in the container
   output       in the workspace, under output/images (there is no store)
 EOF
         log "dry run -- nothing was built."
@@ -221,7 +232,6 @@ EOF
     fi
 
     buildroot_ensure_ws "$ws"
-    mkdir -p "$dl" "$cc"
 
     local log pid
     log=$(buildroot_log "$ws" image); pid=$(buildroot_pidfile "$ws" image)
@@ -245,8 +255,6 @@ EOF
             --jobs "$jobs" \
             ${overlay_arch:+--overlay-arch "$overlay_arch"} \
             ${overlay_wifi:+--overlay-wifi 1} \
-            --dl-dir "$dl" \
-            --ccache-dir "$cc" \
             ${BR_ROOTFS_SIZE:+--rootfs-size "$BR_ROOTFS_SIZE"} \
         || die "could not start the build in '$ws'"
 
@@ -261,7 +269,7 @@ $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
     if [ -n "$detach" ]; then
         info "running detached in '$ws' -- this end can go away"
         log  "  follow:  tail -f $log"
-        log  "  it stays in the workspace that built it (wk help images), and"
+        log  "  it stays in the workspace that built it (wk help), and"
         log  "  'wk sysimage ls' finds it once it is there"
         return 0
     fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk pick [<workspace>] <commit>... -- cherry-pick WebKit commits onto this branch
-# wk: where=workspace name=optional ready=yes group=sources
+# wk: where=workspace name=required ready=yes group=sources
 #
 # Encodes the release-branch ritual: resolve each `NNNNNN@main` identifier to a
 # ToT sha and feed the shas to `git cherry-pick --stdin`.

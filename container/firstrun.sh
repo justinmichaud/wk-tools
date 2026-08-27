@@ -171,6 +171,101 @@ else
     log "no shared Claude credentials yet -- run 'claude login' once; it will persist"
 fi
 
+# --- profiling tools -----------------------------------------------------------
+# docs/Urgent/HANDOFF-profile.md: nothing installed these, so 'wk profile'
+# refused every native mode by name and the only way through was a
+# hand-installed binary at a host path. heaptrack, valgrind (its massif tool)
+# and sysprof-cli are distro packages; samply ships no .deb, so it is fetched
+# from its own pinned GitHub release and checksummed, the same shape as the
+# helix install below. Wrapped the same way and for the same reason: a
+# profiler is not load-bearing for the workspace the way the shell rc and lldb
+# config are, so its failure is reported and not fatal.
+#
+# This is where it actually has to run: the workspace image is
+# ghcr.io/igalia/wkdev-sdk, pulled pre-built (this repo owns no Containerfile
+# for it, only sdk-patches/apply.sh, which patches the SDK's *scripts*, not
+# its filesystem). The two Containerfiles this repo does own
+# (container/buildroot, container/yocto) build separate cross-compile hosts
+# that 'wk profile' never runs against; they carry the same install for
+# parity, in case that changes, but this firstrun hook is the path that
+# actually reaches a `wk build`/`wk profile` workspace today.
+_install_profilers() {
+    if sudo apt-get update -qq >/dev/null 2>&1 \
+       && sudo apt-get install -y --no-install-recommends heaptrack valgrind sysprof >/dev/null 2>&1; then
+        log "heaptrack, valgrind and sysprof-cli installed"
+    else
+        warn "apt install of heaptrack/valgrind/sysprof failed -- check egress. Retry by hand:
+         sudo apt-get update && sudo apt-get install heaptrack valgrind sysprof
+         Until then 'wk profile --mode heaptrack|massif' refuses by name."
+    fi
+
+    if command -v samply >/dev/null 2>&1; then
+        log "samply already present"
+        return 0
+    fi
+    local ver=0.13.1 sarch sum tmp got
+    case "$(uname -m)" in
+        x86_64)  sarch=x86_64-unknown-linux-gnu
+                 sum=61875daad67888798690dea3cb2748279df6ac299c5c6a857d67eed7642473d9 ;;
+        aarch64) sarch=aarch64-unknown-linux-gnu
+                 sum=aa465162b62830168775b7ff4804bc35049436dcbc29bb3d1ea9f580380ea06a ;;
+        *)       warn "samply: no linux/$(uname -m) release published upstream (github.com/mstange/samply), skipping"
+                 return 0 ;;
+    esac
+    tmp=$(mktemp -d)
+    if curl -fsSL -o "$tmp/samply.tar.xz" \
+           "https://github.com/mstange/samply/releases/download/samply-v${ver}/samply-${sarch}.tar.xz"; then
+        got=$(sha256sum "$tmp/samply.tar.xz" | awk '{print $1}')
+        # The tarball is not flat -- it unpacks to samply-<target>/samply
+        # beside its README/LICENSE/RELEASES files, one top-level directory
+        # per target triple, confirmed by listing the archive rather than
+        # assumed.
+        if [ "$got" = "$sum" ] \
+           && tar -xJf "$tmp/samply.tar.xz" -C "$tmp" \
+           && sudo install -m 0755 "$tmp/samply-${sarch}/samply" /usr/local/bin/samply; then
+            log "samply $ver installed (github.com/mstange/samply, sha256 verified)"
+        else
+            warn "samply $ver download did not verify (expected sha256 $sum) -- not installed"
+        fi
+    else
+        warn "samply download failed -- check egress. 'wk profile --mode samply' will refuse by name."
+    fi
+    rm -rf "$tmp"
+}
+_install_profilers
+
+# --- core dumps ------------------------------------------------------------
+# docs/Urgent/HANDOFF-debug.md: without a core_pattern that writes somewhere
+# writable and a ulimit that allows a dump at all, a crash has nothing to hand
+# back but an exit code -- which is what 'wk run --until-crash' needs most.
+#
+# core_pattern is a kernel-global sysctl on the host, but per-pid-namespace
+# once a process owns one: a rootless podman container gets its own user and
+# pid namespace, and the mapped root inside holds CAP_SYS_ADMIN *in that
+# namespace* without the host-level --cap-add=SYS_ADMIN grant
+# sdk-patches/apply.sh gates behind --unsafe-caps (that grant is about the
+# host's own namespace, not this one). So this is attempted with sudo and
+# warned about, not treated as fatal: an environment where it does not apply
+# (a shared host pid namespace) is not this hook's problem to solve, only to
+# report -- the same shape as the helix and profiler installs above.
+CORE_DIR="$HOME/wk-cores"
+install -d "$CORE_DIR"
+if sudo sh -c "echo '$CORE_DIR/core.%e.%p.%t' > /proc/sys/kernel/core_pattern" 2>/dev/null; then
+    log "core_pattern -> $CORE_DIR/core.<comm>.<pid>.<time>"
+else
+    warn "could not set core_pattern (this container's pid namespace may not own it) -- check:
+         cat /proc/sys/kernel/core_pattern"
+fi
+grep -qF 'ulimit -c unlimited' "$HOME/.bashrc" 2>/dev/null || \
+    printf '\nulimit -c unlimited\n' >> "$HOME/.bashrc"
+log "ulimit -c unlimited added to .bashrc"
+
+# The ddebs debug-symbol repository (ddebs.ubuntu.com) is not set up here: it
+# needs a host this repo's egress proxy does not allow
+# (container/proxy/wk-proxy.py's ALLOWED_HOSTS), and widening that allowlist
+# is a call this hook does not get to make on its own -- see
+# docs/Urgent/HANDOFF-debug.md.
+
 # --- editors -----------------------------------------------------------------
 # helix is workspace-only now: it needs the checkout's clangd and compile
 # commands, which only exist here.

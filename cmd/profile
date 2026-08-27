@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # wk profile [<workspace>] [flags] [file.js] -- profile a jsc or browser run
-# wk: where=workspace name=optional ready=yes group=workspaces
+# wk: where=workspace name=required ready=yes group=workspaces
+# wk: flag --list name=none
 #
 # Where the time went -- with the env-var wall for each profiler written down
 # once, here, instead of in three wiki pages and two skills.

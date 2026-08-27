@@ -230,6 +230,85 @@ sync_far_stores() {
     done
 }
 
+# The refspecs a workspace fetches with, mirroring the mirror's own layout
+# (origin under refs/heads, everything else namespaced -- see above).
+mirror_refspecs() {
+    local r out="+refs/heads/*:refs/remotes/origin/*"
+    for r in $(wk_mirror_default_remotes); do
+        [ "$r" = origin ] && continue
+        out="$out +refs/remotes/$r/*:refs/remotes/$r/*"
+    done
+    printf '%s' "$out"
+}
+
+sync_workspaces() {
+    local only="$1" ws st n=0 bad=0 rc out specs
+    local -a names=()
+    specs=$(mirror_refspecs)
+    if [ -n "$only" ]; then
+        names=("$only")
+    else
+        for ws in $(list_workspaces); do names+=("$ws"); done
+    fi
+    [ "${#names[@]}" -gt 0 ] || return 0
+
+    info "fetching in ${#names[@]} workspace(s) -- $(wk_mirror_default_remotes)"
+    for ws in "${names[@]}"; do
+        # Each workspace in a subshell with its own driver: letting one
+        # target's overrides outlive it corrupts the next target's read.
+        (
+            load_target "$(ws_target "$ws")" >/dev/null 2>&1 || exit 3
+            st=$(ws_state "$ws" 2>/dev/null) || st=absent
+            if [ "$st" != present ]; then
+                printf '  %-24s %s\n' "$ws" "$st -- skipped" >&2
+                exit 2
+            fi
+            printf '  %-24s ' "$ws" >&2
+
+            # One exec that says which source it used: /mirror when present,
+            # else the workspace's own remotes over the slow egress-proxy path
+            # (naming the fix: remake a workspace that predates the mount).
+            #
+            # Only the remotes it actually has: one made before `wpe` was
+            # wired in has no such remote, and naming it would fail the whole
+            # fetch over one that was never there.
+            out=$(t_exec "$ws" sh -c "cd $(sh_quote "$(t_src "$ws")") || exit 1
+                    if [ -d /mirror/WebKit.git ]; then
+                        git fetch --prune --quiet /mirror/WebKit.git $specs || exit 1
+                        echo from=mirror
+                        exit 0
+                    fi
+                    rc=0
+                    for r in $(wk_mirror_default_remotes); do
+                        git remote get-url \"\$r\" >/dev/null 2>&1 || continue
+                        git fetch --prune --quiet \"\$r\" || rc=1
+                    done
+                    echo from=remotes
+                    exit \$rc" 2>/dev/null) && rc=0 || rc=$?
+            if [ "$rc" = 0 ]; then
+                case "$out" in
+                    *from=mirror*)  echo "ok  (from the mirror)" >&2 ;;
+                    *)              echo "ok  (over the network: this workspace has no /mirror -- remake it to get one)" >&2 ;;
+                esac
+                exit 0
+            fi
+            echo "FAILED (continuing)" >&2
+            exit 1
+        ) && rc=0 || rc=$?
+        # `( … )` on its own line is a compound command, and under `set -e` a
+        # non-zero one ends the run -- which here would be one unreachable
+        # workspace ending a sync that has more to do.
+        case "$rc" in
+            0)   n=$((n + 1)) ;;
+            2)   [ -z "$only" ] || die "workspace '$only' is not there to fetch in
+    ('wk status $only' says what it is; 'wk ls' lists the ones there are)" ;;
+            *)   bad=$((bad + 1)) ;;
+        esac
+    done
+    [ "$bad" -eq 0 ] || warn "$bad workspace(s) did not fetch -- 'wk enter <ws>' and try it by hand"
+    return 0
+}
+
 # --- one workspace -----------------------------------------------------------
 # The default scope: the fetch happens *inside* the workspace, from the mirror
 # mounted at /mirror, so `git log origin/main` and a rebase see today's
@@ -440,85 +519,6 @@ info "published base $NEW_ID ($(cut -c1-10 < "$NEW_DIR/sha"))"
 # Driven from the host, same as `wk gc`: it acts on a store the workspace
 # can't see, so it's refused from inside one. One workspace's failure -- a
 # stopped container, an unbooted guest -- costs that line, not the run.
-
-# The refspecs a workspace fetches with, mirroring the mirror's own layout
-# (origin under refs/heads, everything else namespaced -- see above).
-mirror_refspecs() {
-    local r out="+refs/heads/*:refs/remotes/origin/*"
-    for r in $(wk_mirror_default_remotes); do
-        [ "$r" = origin ] && continue
-        out="$out +refs/remotes/$r/*:refs/remotes/$r/*"
-    done
-    printf '%s' "$out"
-}
-
-sync_workspaces() {
-    local only="$1" ws st n=0 bad=0 rc out specs
-    local -a names=()
-    specs=$(mirror_refspecs)
-    if [ -n "$only" ]; then
-        names=("$only")
-    else
-        for ws in $(list_workspaces); do names+=("$ws"); done
-    fi
-    [ "${#names[@]}" -gt 0 ] || return 0
-
-    info "fetching in ${#names[@]} workspace(s) -- $(wk_mirror_default_remotes)"
-    for ws in "${names[@]}"; do
-        # Each workspace in a subshell with its own driver: letting one
-        # target's overrides outlive it corrupts the next target's read.
-        (
-            load_target "$(ws_target "$ws")" >/dev/null 2>&1 || exit 3
-            st=$(ws_state "$ws" 2>/dev/null) || st=absent
-            if [ "$st" != present ]; then
-                printf '  %-24s %s\n' "$ws" "$st -- skipped" >&2
-                exit 2
-            fi
-            printf '  %-24s ' "$ws" >&2
-
-            # One exec that says which source it used: /mirror when present,
-            # else the workspace's own remotes over the slow egress-proxy path
-            # (naming the fix: remake a workspace that predates the mount).
-            #
-            # Only the remotes it actually has: one made before `wpe` was
-            # wired in has no such remote, and naming it would fail the whole
-            # fetch over one that was never there.
-            out=$(t_exec "$ws" sh -c "cd $(sh_quote "$(t_src "$ws")") || exit 1
-                    if [ -d /mirror/WebKit.git ]; then
-                        git fetch --prune --quiet /mirror/WebKit.git $specs || exit 1
-                        echo from=mirror
-                        exit 0
-                    fi
-                    rc=0
-                    for r in $(wk_mirror_default_remotes); do
-                        git remote get-url \"\$r\" >/dev/null 2>&1 || continue
-                        git fetch --prune --quiet \"\$r\" || rc=1
-                    done
-                    echo from=remotes
-                    exit \$rc" 2>/dev/null) && rc=0 || rc=$?
-            if [ "$rc" = 0 ]; then
-                case "$out" in
-                    *from=mirror*)  echo "ok  (from the mirror)" >&2 ;;
-                    *)              echo "ok  (over the network: this workspace has no /mirror -- remake it to get one)" >&2 ;;
-                esac
-                exit 0
-            fi
-            echo "FAILED (continuing)" >&2
-            exit 1
-        ) && rc=0 || rc=$?
-        # `( … )` on its own line is a compound command, and under `set -e` a
-        # non-zero one ends the run -- which here would be one unreachable
-        # workspace ending a sync that has more to do.
-        case "$rc" in
-            0)   n=$((n + 1)) ;;
-            2)   [ -z "$only" ] || die "workspace '$only' is not there to fetch in
-    ('wk status $only' says what it is; 'wk ls' lists the ones there are)" ;;
-            *)   bad=$((bad + 1)) ;;
-        esac
-    done
-    [ "$bad" -eq 0 ] || warn "$bad workspace(s) did not fetch -- 'wk enter <ws>' and try it by hand"
-    return 0
-}
 
 sync_workspaces ""
 

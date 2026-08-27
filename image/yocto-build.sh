@@ -463,6 +463,62 @@ run_helper() {
         || fail "$what failed"
 }
 
+# --- 5. the image stage's own completion evidence ----------------------------
+#
+# cross-toolchain-helper's build_image() (Tools/Scripts/cross-toolchain-helper)
+# treats the mere *presence* of a file at build/image/<recipe>.<ext> as proof
+# the image is current, and returns success without ever calling bitbake:
+#
+#   def build_image(self):
+#       if self._check_if_image_built_and_print_paths():
+#           return True
+#       ...
+#
+# That directory is a copy the helper makes from tmp/deploy/images the one
+# time it *does* build -- so once an image has been built there once, every
+# later `--build-image` for that target, from any local.conf or layer change,
+# reports "Images built at: ..." from yesterday's copy and never touches
+# bitbake. There is no flag to turn this off: --build-image takes no "force".
+# The only way to make it build for real is to remove what it is checking
+# for -- bitbake's own sstate cache is the legitimate cache that then keeps an
+# unchanged rebuild fast, which this is not.
+clear_stale_image_copies() {
+    local dir="$1"
+    if [ -d "$dir" ]; then
+        say "clearing $dir so the helper cannot report a previous run's image as this one's"
+        rm -rf "$dir"
+    fi
+}
+
+# The backstop for the above: even with the copy cleared first, the
+# completion line ("stage 'image' done") must be evidence, not an echo of
+# the helper's exit code -- a helper that changes how it decides an image is
+# current, or any other path back to the same shortcut, would otherwise be
+# silent here exactly the way it was silent on moose. Fails loudly rather
+# than trusting the exit status alone.
+verify_image_freshness() { # <dir> <start-epoch-seconds>
+    local dir="$1" start="$2" f mtime newest=0 found=0
+    [ -d "$dir" ] \
+        || fail "bitbake produced no image directory at $dir; the helper reported
+    success but left nothing behind."
+    for f in "$dir"/*; do
+        [ -f "$f" ] || continue
+        found=1
+        mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null) || continue
+        [ "$mtime" -gt "$newest" ] && newest="$mtime"
+    done
+    [ "$found" = 1 ] \
+        || fail "bitbake produced no image directory at $dir; the helper reported
+    success but left nothing behind."
+    [ "$newest" -ge "$start" ] \
+        || fail "bitbake produced no new image; the helper reported a stale one.
+    Newest file in $dir is older than this stage's own start time, which should
+    be impossible: yocto-build.sh clears that directory before every image
+    stage precisely so the helper cannot hand back an old copy. If this fires,
+    cross-toolchain-helper changed how it decides an image is built, and
+    clear_stale_image_copies (image/yocto-build.sh) needs to change with it."
+}
+
 case "$STAGE" in
     layers)
         init_workdir
@@ -497,7 +553,10 @@ case "$STAGE" in
         configure_local_conf
         configure_bblayers
         clear_hosttools
+        clear_stale_image_copies "$WORKDIR/build/image"
+        image_stage_start=$(date +%s)
         run_helper "bitbake ${IMAGE:-the image} (rootfs + kernel + wic)" --build-image
+        verify_image_freshness "$WORKDIR/build/image" "$image_stage_start"
         ;;
     toolchain)
         init_workdir

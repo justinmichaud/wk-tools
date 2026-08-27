@@ -2,6 +2,7 @@
 #
 # wk zed <workspace> -- open a workspace's checkout in Zed
 # wk: where=workspace name=optional forward=no outside group=workspaces
+# wk: flag --tools name=none
 #
 # Refused inside a workspace: Zed runs where the person is, and a container has
 # no display and a macOS guest is driven from the host.
@@ -35,20 +36,23 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# The name arrives as $WK_NAME, resolved by the dispatcher, wherever it fell
-# relative to --tools on the command line; anything left over here is a
-# second one.
+# Without --tools the name is a workspace, resolved and checked by the
+# dispatcher, and arrives as $WK_NAME. With it the name may be a machine
+# instead, which the dispatcher does not answer for (`flag --tools name=none`),
+# so it is still in argv wherever it fell. Either way there is one name, and a
+# second is the mistake worth naming.
 TOOLS=""
+NAME="${WK_NAME:-}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --tools) TOOLS=1; shift ;;
         -*) die "unknown option: $1
     usage: wk zed <workspace>        the checkout
            wk zed --tools [<machine>|<workspace>]" ;;
-        *) die "one name at a time (got '${WK_NAME:-}' and '$1')" ;;
+        *) [ -z "$NAME" ] || die "one name at a time (got '$NAME' and '$1')"
+           NAME="$1"; shift ;;
     esac
 done
-NAME="${WK_NAME:-}"
 
 Z=$(zed_cli) || die "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)
     https://zed.dev/download -- 'wk doctor' checks for it"
@@ -87,6 +91,11 @@ if [ -n "$TOOLS" ]; then
     esac
 
     require_name "$NAME"
+    # Neither a machine nor a workspace: said here rather than by the
+    # dispatcher, because this is the one place a machine name is also an
+    # answer and the dispatcher only knows about workspaces.
+    ws_exists "$NAME" || die "no machine or workspace named '$NAME'
+    'wk ls' lists the workspaces, 'wk status' the machines."
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
     t_ssh_prepare "$NAME"
