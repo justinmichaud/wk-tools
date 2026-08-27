@@ -128,6 +128,23 @@ stage_sysctl() { # <staging dir> <name> <body>
     printf '%s' "$3" > "$1/sysctl.d/$2"
 }
 
+# What an image runs to park its own arming, from the driver of the machine
+# the *image* is for: a board that arms a medium (pi-usb) has one, a board
+# whose card swap is hands-on has none, and neither is an error.
+#
+# In a subshell, like _tailnet_name_for and for the same reason: MACH_* names
+# the machine holding the card reader, which is what every card edit is
+# addressed to, and loading another machine here sends the rest of the write
+# to the wrong board.
+_self_disarm_for() { # <machine>
+    [ -n "${1:-}" ] || return 0
+    ( machine_load "$1" >/dev/null 2>&1 || exit 0
+      [ -n "${MACH_DRIVER:-}" ] || exit 0
+      load_driver "$MACH_DRIVER" >/dev/null 2>&1 || exit 0
+      command -v b_self_disarm_sh >/dev/null 2>&1 || exit 0
+      b_self_disarm_sh ) || true
+}
+
 # Everything a rootfs needs to be a *fleet* system rather than merely a
 # bootable one: no self-return watchdog means a medium-armed stick stays armed
 # forever. Staged at write time, not baked in per builder.
@@ -142,14 +159,8 @@ stage_sysctl() { # <staging dir> <name> <body>
 # helper installs nothing and says so (disk_install_units).
 # TODO: buildroot/BusyBox-init images need S-scripts instead; until then they
 # get neither watchdog nor self-disarm.
-stage_units() { # <staging dir>
-    local seed="$1"
-    # For b_self_disarm_sh. A missing driver is not an error -- most profiles
-    # (the yocto ones) name a target, not a fleet entry, and just have
-    # nothing to disarm.
-    if machine_load "${IMG_MACHINE:-}" 2>/dev/null && [ -n "${MACH_DRIVER:-}" ]; then
-        load_driver "$MACH_DRIVER" 2>/dev/null || true
-    fi
+stage_units() { # <staging dir> <self-disarm command, empty when nothing to park>
+    local seed="$1" disarm="${2:-}"
 
     # TimeoutStartSec=infinity is load-bearing: systemd's default 90 s start
     # timeout kills a Type=oneshot that sleeps longer than that before it can
@@ -181,7 +192,7 @@ WantedBy=multi-user.target
     # "image came up and then wedged" window as small as possible;
     # DefaultDependencies=no with After=local-fs.target is safe because a
     # rename on an already-mounted filesystem cannot block on systemd.
-    if command -v b_self_disarm_sh >/dev/null 2>&1; then
+    if [ -n "$disarm" ]; then
         info "staging the self-disarm (the stick stops booting once this image is up)"
         stage_unit "$seed" wk-self-disarm.service "[Unit]
 Description=Park this image's second-stage firmware so the next boot is the rescue role
@@ -194,7 +205,7 @@ Before=sysinit.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c '$(b_self_disarm_sh)'
+ExecStart=/bin/sh -c '$disarm'
 [Install]
 WantedBy=sysinit.target
 "
@@ -744,7 +755,7 @@ source=$from"
         SEED=$(mktemp -d)
         wk_atexit _seed_cleanup
         mkdir -p "$SEED/systemd" "$SEED/sysctl.d"
-        stage_units "$SEED"
+        stage_units "$SEED" "$(_self_disarm_for "${IMG_MACHINE:-}")"
         disk_install_units "$DISK_DEV" "$SEED"
         _seed_cleanup
 

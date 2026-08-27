@@ -647,5 +647,69 @@ esac
         self.assertNotIn("reading ", out, out)
 
 
+class TestTheWriteStaysAddressedToTheReader(WkTest):
+    """A card is written by the machine holding the reader, for whatever board
+    the image is for -- rarely the same machine. Composing the units needs the
+    *image* machine's driver (its self-disarm), so that lookup happens in a
+    subshell: MACH_* is what every card edit is addressed to, and loading
+    another machine into this shell sends the rest of the write to the wrong
+    board."""
+
+    _LIFTED = _lift(SYSIMAGE, "_self_disarm_for", "stage_unit", "stage_sysctl", "stage_units")
+
+    def _sh(self, body, machine="rpi5"):
+        return self.bash(f"""
+set -eu
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/boot/machines.sh"
+{self._LIFTED}
+IMG_PROFILE=test-profile IMG_WATCHDOG=600
+machine_load {machine}
+{body}
+""")
+
+    def test_staging_the_units_leaves_the_reader_machine_loaded(self):
+        seed = self.tmp / "seed"
+        (seed / "systemd").mkdir(parents=True)
+        (seed / "sysctl.d").mkdir(parents=True)
+        cp = self._sh(f"""
+IMG_MACHINE=rpi3     # the image is for another board, whose ssh name differs
+stage_units {seed} "$(_self_disarm_for "$IMG_MACHINE")" >/dev/null 2>&1
+printf 'name=%s ssh=%s role=%s driver=%s\n' \
+    "$MACH_NAME" "$MACH_SSH" "$MACH_ROLE" "$MACH_DRIVER"
+""")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(
+            cp.stdout.strip(),
+            "name=rpi5 ssh=rpi5 role=workstation driver=rpi5-usb",
+            "staging the units re-aimed the write at the image's machine:\n"
+            + cp.stdout + cp.stderr,
+        )
+
+    def test_a_medium_armed_board_gets_its_drivers_self_disarm(self):
+        # rpi4 arms its stick (pi-usb, BOOT_ARMING=medium), so its image parks
+        # it on first boot; rpi3's card swap is hands-on and parks nothing.
+        cp = self._sh('_self_disarm_for rpi4')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("conv=notrunc", cp.stdout, cp.stdout + cp.stderr)
+        self.assertNotIn("'", cp.stdout, "a quote here would split systemd's ExecStart")
+
+    def test_a_hands_on_board_has_nothing_to_park(self):
+        for machine in ("rpi3", "nosuchmachine", ""):
+            with self.subTest(machine=machine):
+                cp = self._sh(f'_self_disarm_for {machine or '""'}')
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertEqual(cp.stdout, "", cp.stdout + cp.stderr)
+
+    def test_the_self_disarm_unit_is_skipped_when_there_is_nothing_to_park(self):
+        seed = self.tmp / "seed2"
+        (seed / "systemd").mkdir(parents=True)
+        (seed / "sysctl.d").mkdir(parents=True)
+        cp = self._sh(f'stage_units {seed} "" >/dev/null 2>&1; ls {seed}/systemd')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("wk-self-disarm.service", cp.stdout, cp.stdout)
+        self.assertIn("wk-self-return.service", cp.stdout, cp.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
