@@ -18,6 +18,13 @@
 # At a terminal, with nothing else said, this opens the page (`--web`).
 # Anything else (a pipe, CI, an agent) gets the plain table; `--text` asks
 # for the table anyway.
+#
+#   WK_WAIT_TIMEOUT=<s>     default for --timeout when --wait is given with
+#                           none (0, the default, waits forever)
+#   WK_WAIT_INTERVAL=<s>    how often --wait polls (default 5)
+#   WK_FLEET_TIMEOUT=<s>    ceiling on one fleet-device probe (default 4)
+#   WK_BRIDGE_TIMEOUT=<s>   ceiling on one bridge-phone health check
+#                           (default 20; slower than a fleet probe on purpose)
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -127,6 +134,10 @@ machine_of() {
         this_machine
     fi
 }
+
+# The same answer from outside the job, before its driver is loaded: in a
+# subshell, so the driver's overrides die with it (health_owner's idiom).
+machine_of_target() { ( load_target "$1" >/dev/null 2>&1; machine_of "$1" ); }
 
 # One record per machine, so a machine with nothing on it still appears --
 # the answer that says the podman machine is stopped rather than that the
@@ -593,6 +604,8 @@ report_health() {
     rec_emit
 
     # --- quiesced? the state a benchmark leaves a machine in
+    # WK_QUIESCE_STATE: same override cmd/quiesce reads (its own comment,
+    # near its STATE=, has why); tests/test_quiesce.py drives it.
     local qs="${WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce}"
     if [ -d "$qs" ]; then
         local bits=""
@@ -1253,7 +1266,8 @@ collect() {
             # A placeholder a streaming reader can show while this one is
             # still in flight, named for the target -- for a remote one
             # *is* the machine name, so the real block answers to the same.
-            printf '{"kind":"probing","name":"%s"}\n' "$(_jesc "$TARGET")" >&3
+            printf '{"kind":"probing","name":"%s","machine":"%s"}\n' \
+                "$(_jesc "$TARGET")" "$(_jesc "$(machine_of_target "$TARGET")")" >&3
             par_run "$TARGET" _report_target_par "$TARGET"
         done
         if [ -n "$DEVICES" ]; then

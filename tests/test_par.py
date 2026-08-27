@@ -56,7 +56,9 @@ echo "worst=$worst"
         for job in ("ok", "returns", "exits", "dies", "trips"):
             self.assertIn(f'{{"job":"{job}"}}', records)
         self.assertNotIn("unreachable", records)
-        self.assertEqual(records.count('{"kind":"flush"}'), 5)
+        for job in ("ok", "returns", "exits", "dies", "trips"):
+            self.assertIn(f'{{"kind":"flush","job":"{job}"}}', records)
+        self.assertEqual(records.count('"kind":"flush"'), 5)
 
     def test_par_join_reports_the_worst_status_in_start_order(self):
         """the non-streaming join keeps start order and raises the worst status"""

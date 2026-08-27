@@ -332,6 +332,25 @@ config_web_process_name() {
     esac
 }
 
+# The network and GPU process names, same shape as config_web_process_name
+# and the same use: naming a process to attach to. CMake ports only --
+# Source/WebKit/Platform{WPE,GTK}.cmake:17-18.
+config_network_process_name() {
+    case "$CFG_BUILDSYS:$CFG_PORT" in
+        cmake:--wpe) echo "WPENetworkProcess" ;;
+        cmake:--gtk) echo "WebKitNetworkProcess" ;;
+        *)           echo "" ;;
+    esac
+}
+
+config_gpu_process_name() {
+    case "$CFG_BUILDSYS:$CFG_PORT" in
+        cmake:--wpe) echo "WPEGPUProcess" ;;
+        cmake:--gtk) echo "WebKitGPUProcess" ;;
+        *)           echo "" ;;
+    esac
+}
+
 # The layout-test driver, for the same attach: its stdin/stdout are the test
 # protocol, which `--wrapper 'lldb'` would otherwise interrupt.
 config_test_runner_name() {

@@ -37,6 +37,18 @@
 # targets/local.sh is the degenerate case: the target is the machine already
 # running the command (see "am I a workspace?" below).
 
+# WK_READY_TIMEOUT/WK_READY_WAIT (below, t_ready/wait_ready): how long to
+# poll a workspace that is still being created before giving up, overridable
+# for a target genuinely slower than these assume.
+# WK_MARKER/WK_REMOTE_MARKER (below, wk_marker/wk_remote_marker): the marker
+# file paths that say "this machine IS a workspace" / "IS a remote target's
+# host" -- overridable so a test can run marker-gated code (in_workspace,
+# in_remote_host) without writing into this machine's real $HOME.
+# WK_NO_DELEGATE (below, walk_targets): set by one machine answering another
+# workstation's fleet-wide `wk ls`/`wk status`, so it reports only what it
+# holds instead of delegating to every machine *it* knows too.
+# WK_TARGET_KIND: set by load_target from the target name; never hand-set.
+
 t_src()        { echo "/src/WebKit"; }
 t_arch()       { echo native; }      # only the container driver differs; see lib/arch.sh
 t_tools()      { echo "/opt/wk-tools"; }
@@ -176,6 +188,7 @@ t_exec_build() { t_exec "$@"; }
 # a second copy on the driving side would go stale.
 t_status_put() { local n="$1" ws; ws="$(wk_ws_dir "$n")"; cat > "$ws/build.status"; }
 t_has_wk()    { return 1; }         # is there a far side that can answer?
+t_far_side()  { echo none; }        # answering | unreachable | no-wk | none (not a machine of its own)
 t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
 t_wk_detach() { return 1; }         # t_wk_detach <args...> -- runs on the far machine and returns at once
 t_wk_tty()    { t_wk "$@"; }        # t_wk with a terminal, for far-side commands that prompt a human
@@ -449,6 +462,20 @@ for_each_machine() {
     return "$worst"
 }
 
+# machine_answers <target> -- 0 when the target's own machine can run `wk`
+# for it; otherwise prints the fan-out line (`wk push --all`, `wk sudo
+# --all`) saying why not, and returns 1. Down and unprovisioned are told
+# apart because their remedies differ.
+machine_answers() {
+    case "$(t_far_side)" in
+        answering)   return 0 ;;
+        unreachable) printf '%-22s %s\n' "$1" "unreachable over ssh ($(wk_ssh_timeout)s) -- off, or not on the tailnet" ;;
+        no-wk)       printf '%-22s %s\n' "$1" "no wk-tools there yet -- 'wk remote setup $1'" ;;
+        *)           printf '%-22s %s\n' "$1" "not a machine of its own" ;;
+    esac
+    return 1
+}
+
 # --- the podman machine (macOS) -----------------------------------------------
 # Every workspace container lives inside one podman machine, so `wk
 # start`/`wk stop` run a command inside it from the host.
@@ -620,7 +647,7 @@ wait_ready() {
     Repair:  wk rm $name    (then 'wk new $name' if you still want it)"
             ;;
         unreachable)
-            die "'$name' lives on a machine that did not answer (${WK_SSH_TIMEOUT:-10}s).
+            die "'$name' lives on a machine that did not answer ($(wk_ssh_timeout)s).
     Nothing is wrong with the workspace as far as this end can tell -- it
     cannot be reached to ask. Try again, or check the route:
         ssh -o BatchMode=yes ${WK_REMOTE_HOST:-the machine} true"
@@ -687,6 +714,9 @@ ws_busy_reason() {
 # own machine and writes the answer where the serial pass will find it
 # (t_prefetch, _remote_probe_file in targets/remote.sh); best-effort, a
 # prefetch that fails leaves no file, and the walk asks the machine directly.
+# WK_PREFETCH_DIR: not a setting -- this process sets it for itself (below)
+# and every subshell it starts, to hand a probe's answer back without a
+# variable a subshell cannot export to its parent. Plumbing, not a knob.
 prefetch_targets() {
     local t
     [ $# -gt 0 ] || return 0

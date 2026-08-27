@@ -49,6 +49,8 @@ unset _others _m _img _sz
 
 _cores=$(envelope_cores)
 _mem=$(envelope_mem_mb)
+# WK_DISK_GB overrides the machine's virtual disk size, set only at creation
+# (podman machine cannot resize one afterwards).
 _disk="${WK_DISK_GB:-200}"
 
 if podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then

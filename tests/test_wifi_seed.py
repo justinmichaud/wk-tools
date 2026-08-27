@@ -1,14 +1,18 @@
 """WiFi credential seeding: rpi3/rpi4/rpi5 have no cable at the bench, so
 their rescue and bench images bring up WiFi from a credential `wk sysimage
 write` seeds onto the card -- the same shape as the tailnet auth key
-(disk_seed_tailnet, boot/disk.sh), one seed further. See boot/disk.sh
-(disk_wifi_creds_path/present, disk_seed_wifi, _image_wants_wifi),
-admin/wk-card-priv (v_wifi, v_wifi_joins, check_wifi_value, _wifi_edit) and
-cmd/sysimage (_wifi_creds_preflight).
+(disk_seed_tailnet, boot/disk.sh), one seed further. There is no hand-made
+credential file: the credential is this machine's own WiFi connection,
+extracted at write time by the privileged card helper (which already runs as
+root on the machine holding the reader) from that machine's netplan --
+ordinary `sudo -n` is not passwordless there, only the helper is. See
+boot/disk.sh (disk_seed_wifi, _image_wants_wifi), admin/wk-card-priv
+(v_wifi_host, v_wifi_from_host, v_wifi_joins, _netplan_wifi,
+check_wifi_value, _wifi_edit, the embedded netplan
+parser, standalone and testable) and cmd/sysimage (_wifi_creds_preflight).
 
 Run: python3 -m unittest tests.test_wifi_seed -v
 """
-import os
 import re
 import subprocess
 import tempfile
@@ -19,6 +23,16 @@ from tests.support import REPO, WkTest, bash, requires_machine, run
 
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
+
+
+def _netplan_parser_source():
+    """The python `_netplan_wifi` (admin/wk-card-priv) feeds to python3 -c,
+    lifted from the helper's text so the exact code that runs as root is
+    what is tested -- there is no second copy of it anywhere."""
+    text = CARD_PRIV.read_text(errors="replace")
+    m = re.search(r"python3 -c '\n(.*?)\n' > \"\$tmp\"", text, re.S)
+    assert m, "no embedded netplan parser in admin/wk-card-priv"
+    return m.group(1)
 
 
 def _lift(path, func):
@@ -34,17 +48,17 @@ def _lift(path, func):
 
 
 class TestCardHelperWifiGate(WkTest):
-    def test_wifi_verb_refuses_a_non_gated_device_not_a_crash(self):
-        """the helper's wifi verb refuses a non-gated device, not a crash"""
+    def test_wifi_from_host_verb_refuses_a_non_gated_device_not_a_crash(self):
+        """the helper's wifi-from-host verb refuses a non-gated device, not a crash"""
         # admin/wk-card-priv is installed root:0755 by admin/install.sh; the
         # checked-in copy is not marked executable, so this runs it through
         # bash directly -- the same thing `sudo -n <path>` does on the far
         # end, minus the sudo this machine (and this test) is not root on.
         cp = subprocess.run(
-            ["bash", str(CARD_PRIV), "wifi", "/dev/null"],
-            input="ssid=x\npsk=y\n", capture_output=True, text=True, timeout=10,
+            ["bash", str(CARD_PRIV), "wifi-from-host", "/dev/null"],
+            capture_output=True, text=True, timeout=10,
         )
-        self.assertNotEqual(cp.returncode, 0, "a non-root, non-gated call to 'wifi' succeeded")
+        self.assertNotEqual(cp.returncode, 0, "a non-root, non-gated call to 'wifi-from-host' succeeded")
         out = cp.stdout + cp.stderr
         # A controlled refusal names itself; a crash is a bash traceback
         # (unbound variable, "command not found", a bare stack of line
@@ -67,26 +81,155 @@ gate /dev/null
         self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
         self.assertIn("not a block device", cp.stdout + cp.stderr)
 
-    def test_wifi_and_wifi_joins_call_the_gate(self):
-        """v_wifi and v_wifi_joins call gate, like every other verb"""
+    def test_wifi_from_host_and_wifi_joins_call_the_gate(self):
+        """v_wifi_from_host and v_wifi_joins call gate, like every other device verb"""
         # static, the same shape as test_quick.py's test_card_helper_gate
         text = CARD_PRIV.read_text(errors="replace")
         bad = []
-        for v in ("v_wifi", "v_wifi_joins"):
+        for v in ("v_wifi_from_host", "v_wifi_joins"):
             m = re.search(rf"(?ms)^{v}\(\) \{{.*?^\}}", text)
             if not m or "gate " not in m.group(0):
                 bad.append(f"{v} does not call gate")
         self.assertEqual(bad, [], "; ".join(bad))
 
-    def test_wifi_verb_is_in_the_dispatcher_and_usage(self):
-        """wifi and wifi-joins are dispatched, and named in the usage line"""
+    def test_wifi_host_takes_no_device_and_does_not_gate(self):
+        """wifi-host is a read-only probe of this machine, not a card -- no gate"""
+        text = CARD_PRIV.read_text(errors="replace")
+        m = re.search(r"(?ms)^v_wifi_host\(\) \{.*?^\}", text)
+        self.assertIsNotNone(m, "v_wifi_host not found")
+        self.assertNotIn("gate ", m.group(0), "v_wifi_host gates a device it never touches")
+
+    def test_wifi_verbs_are_in_the_dispatcher_and_usage(self):
+        """wifi-host, wifi-from-host and wifi-joins are dispatched, and named in the usage line"""
         text = CARD_PRIV.read_text(errors="replace")
         case_m = re.search(r'(?ms)^case "\$verb" in.*?^esac', text)
         self.assertIsNotNone(case_m, "no verb dispatcher found")
         body = case_m.group(0)
         self.assertRegex(body, r"wifi-joins\)\s*v_wifi_joins")
-        self.assertRegex(body, r"\bwifi\)\s*v_wifi\b")
-        self.assertIn("wifi-joins|wifi", text, "the usage line does not name the wifi verbs")
+        self.assertRegex(body, r"wifi-host\)\s*v_wifi_host")
+        self.assertRegex(body, r"wifi-from-host\)\s*v_wifi_from_host")
+        self.assertNotRegex(body, r"\bwifi\)\s*v_wifi\b",
+                             "the old stdin-credentials 'wifi' verb is still dispatched")
+        for name in ("wifi-joins", "wifi-host", "wifi-from-host"):
+            self.assertIn(name, text, f"the usage line does not name {name}")
+
+
+class TestWifiHostVerb(unittest.TestCase):
+    """v_wifi_host's output shape: it names the SSID and never the PSK."""
+
+    def _wifi_host(self, found, ssid="", psk=""):
+        # printf's FORMAT argument is what interprets \n; ssid/psk arrive as
+        # %s substitutions so a value cannot inject a second line.
+        stub = (
+            f'_netplan_wifi() {{ tmp=$(mktemp); printf "ssid=%s\\npsk=%s\\n" {ssid!r} {psk!r} > "$tmp"; printf "%s" "$tmp"; }}'
+            if found else '_netplan_wifi() { return 3; }'
+        )
+        script = f'''
+say() {{ printf 'wk-card-priv: %s\\n' "$*"; }}
+{stub}
+{_lift(CARD_PRIV, "v_wifi_host")}
+v_wifi_host
+'''
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+
+    def test_yes_shape_names_the_ssid_never_the_psk(self):
+        cp = self._wifi_host(True, ssid="MyNet", psk="hunter2")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("wifi-host: yes ssid=MyNet", cp.stdout)
+        self.assertNotIn("hunter2", cp.stdout + cp.stderr, "the passphrase leaked into wifi-host's output")
+
+    def test_no_shape(self):
+        cp = self._wifi_host(False)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("wifi-host: no", cp.stdout)
+
+
+def _have_python_yaml():
+    return subprocess.run(
+        ["python3", "-c", "import yaml"], capture_output=True, timeout=10,
+    ).returncode == 0
+
+
+@unittest.skipUnless(_have_python_yaml(), "no python3 yaml module on this machine")
+class TestNetplanWifiParser(unittest.TestCase):
+    """admin/wk-card-priv's embedded netplan parser against synthetic
+    netplan yaml. Skipped, not faked, when this machine's python3 has no
+    yaml module (macOS): the helper only ever runs on a Linux machine, where
+    netplan itself depends on python3-yaml."""
+
+    def _run(self, yaml_text):
+        return subprocess.run(
+            ["python3", "-c", _netplan_parser_source()],
+            input=yaml_text, capture_output=True, text=True, timeout=10,
+        )
+
+    def test_finds_a_bare_password(self):
+        yaml_text = '''
+network:
+  wifis:
+    wlan0:
+      access-points:
+        "TestNet":
+          password: "hunter2"
+'''
+        cp = self._run(yaml_text)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout, "ssid=TestNet\npsk=hunter2\n")
+
+    def test_finds_a_networkmanager_style_auth_password(self):
+        """NetworkManager writes netplan with auth.password, not a bare password"""
+        yaml_text = '''
+network:
+  wifis:
+    NM-uuid:
+      access-points:
+        "NMNet":
+          auth:
+            key-management: psk
+            password: "s3cret!"
+'''
+        cp = self._run(yaml_text)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout, "ssid=NMNet\npsk=s3cret!\n")
+
+    def test_no_password_anywhere_exits_3(self):
+        yaml_text = '''
+network:
+  wifis:
+    wlan0:
+      access-points:
+        "OpenNet": {}
+'''
+        cp = self._run(yaml_text)
+        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout, "")
+
+    def test_empty_input_exits_3(self):
+        cp = self._run("")
+        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+
+
+class TestNoWifiCredsFile(unittest.TestCase):
+    """No hand-made WiFi credentials file survives anywhere the old design
+    used to read it: the credential comes from the disk machine's own WiFi
+    connection now (wifi-host/wifi-from-host, admin/wk-card-priv)."""
+
+    def test_no_reference_to_the_old_wifi_creds_file(self):
+        paths = []
+        for d in ("cmd", "lib", "boot", "admin"):
+            paths += sorted((REPO / d).rglob("*"))
+        paths.append(REPO / "README.md")
+        bad = []
+        for p in paths:
+            if not p.is_file():
+                continue
+            try:
+                text = p.read_text(errors="replace")
+            except OSError:
+                continue
+            if ".config/wk/wifi" in text or "WK_WIFI_CREDS" in text or "disk_wifi_creds" in text:
+                bad.append(str(p.relative_to(REPO)))
+        self.assertEqual(bad, [], f"still references the old WiFi credentials file: {bad}")
 
 
 class TestWifiConfContent(WkTest):
@@ -171,25 +314,33 @@ done
 
 
 class TestWifiPreflight(WkTest):
-    def _preflight(self, machine, creds_path):
+    def _preflight(self, machine, card_priv_output, card_priv_rc=0):
+        """Runs the real _wifi_creds_preflight with card_priv stubbed --
+        exactly the shape it is invoked in, m_ssh included, but without a
+        real machine or ssh session: the preflight asks $DISK_MACHINE
+        (already loaded by cmd_write_from at this point), never a local
+        file, so what it needs stubbed is card_priv's answer."""
         script = f'''
 . "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"; . "{REPO}/boot/disk.sh"
 {_lift(REPO / "cmd" / "sysimage", "_wifi_creds_preflight")}
+DISK_MACHINE="stub-disk-machine"
+card_priv() {{ printf '%s\\n' {card_priv_output!r}; exit {card_priv_rc}; }}
 _wifi_creds_preflight {machine!r}
 '''
-        return bash(script, env={"WK_WIFI_CREDS": creds_path})
+        return bash(script)
 
-    def test_refuses_a_wifi_board_with_no_credentials_and_names_the_remedy(self):
-        """refuses a WiFi board with no credentials, and names the remedy"""
-        with tempfile.TemporaryDirectory() as store:
-            creds = str(Path(store) / "wifi")
-            cp = self._preflight("rpi3", creds)
-            self.assertNotEqual(cp.returncode, 0, "wrote nothing, but did not refuse")
-            out = cp.stdout + cp.stderr
-            self.assertIn("no uplink", out)
-            self.assertIn("ssid=", out)
-            self.assertIn("psk=", out)
-            self.assertIn(creds, out, "the refusal does not name where to put credentials")
+    def test_refuses_a_wifi_board_when_the_disk_machine_is_not_on_wifi(self):
+        """refuses a WiFi board when the disk machine's own wifi-host says no, and names the remedy"""
+        cp = self._preflight("rpi3", "wifi-host: no")
+        self.assertNotEqual(cp.returncode, 0, "wifi-host: no, but did not refuse")
+        out = cp.stdout + cp.stderr
+        self.assertIn("no uplink", out)
+        self.assertIn("stub-disk-machine", out, "the refusal does not name the disk machine")
+
+    def test_refuses_when_card_priv_itself_fails(self):
+        """an ssh/helper failure asking wifi-host refuses too -- no answer is not a yes"""
+        cp = self._preflight("rpi5", "wk-card-priv: connection refused", card_priv_rc=1)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
     def test_force_does_not_cross_the_wifi_barrier(self):
         """--force does not appear anywhere in the wifi preflight -- there is no override"""
@@ -204,25 +355,21 @@ _wifi_creds_preflight {machine!r}
         self.assertNotIn("barrier", body, "the wifi preflight is crossable, like a barrier")
         self.assertIn("die ", body)
 
-    def test_passes_for_a_wired_board_with_no_credentials(self):
+    def test_passes_for_a_wired_board_regardless_of_the_disk_machine(self):
         """a board with a cable needs no WiFi credential at all"""
-        with tempfile.TemporaryDirectory() as store:
-            cp = self._preflight("mbp", str(Path(store) / "wifi"))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        cp = self._preflight("mbp", "wifi-host: no")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
-    def test_passes_for_a_wifi_board_once_credentials_exist(self):
-        """passes once ssid=/psk= are on disk"""
-        with tempfile.TemporaryDirectory() as store:
-            creds = Path(store) / "wifi"
-            creds.write_text("ssid=TestNet\npsk=hunter22\n")
-            cp = self._preflight("rpi4", str(creds))
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+    def test_passes_for_a_wifi_board_when_the_disk_machine_is_on_wifi(self):
+        """passes once the disk machine's own wifi-host says yes"""
+        cp = self._preflight("rpi4", "wifi-host: yes ssid=TestNet")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
 
 class TestSysimageWriteDryRun(WkTest):
     @requires_machine("rpi3")
-    def test_write_dry_run_reports_missing_wifi_credentials(self):
-        """`wk sysimage write --dry-run` reports missing WiFi credentials for a wifi board"""
+    def test_write_dry_run_reports_the_disk_machines_wifi_state(self):
+        """`wk sysimage write --dry-run` reports the disk machine's own WiFi state for a wifi board"""
         # Exercises the real command end to end (--from, so no store/manifest
         # is needed) against a profile this checkout defines, rather than a
         # lifted function -- the dry run path itself is what has to print the
@@ -240,7 +387,7 @@ class TestSysimageWriteDryRun(WkTest):
                 env={"WK_STORE": store},
             )
             out = cp.stdout
-            self.assertRegex(out, r"(?m)^\s*wifi\s+NO credentials", out)
+            self.assertRegex(out, r"(?m)^\s*wifi\s+(NO --|rpi3 is on WiFi)", out)
 
     def test_build_dry_run_shows_wifi_wired_into_yocto_and_buildroot(self):
         """`wk sysimage build --dry-run` names the wifi layer/overlay for both builders"""

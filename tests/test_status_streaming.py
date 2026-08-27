@@ -59,11 +59,11 @@ def _machine_lines(name):
     machine/workspace records, and the flush that ends its batch -- exactly
     what one par_run job in cmd/status's collector produces."""
     return [
-        _rec(kind="probing", name=name),
+        _rec(kind="probing", name=name, machine=name),
         _rec(kind="machine", name=name, self=(name == "alpha")),
         _rec(kind="workspace", machine=name, method="container", name="ws-" + name,
              state="present", ws="present"),
-        _rec(kind="flush"),
+        _rec(kind="flush", job=name),
     ]
 
 
@@ -198,6 +198,36 @@ class TestTextStreamsAsRecordsArrive(unittest.TestCase):
         self.assertGreater(block_at, probing_at)
 
         self.assertEqual(proc.wait(timeout=5), 0, proc.stderr.read())
+
+
+class TestOneBlockPerMachine(unittest.TestCase):
+    """a machine fed by two jobs (a macOS host's container and vm targets)
+    is drawn once, after both have flushed -- never once per flush"""
+
+    def test_two_jobs_one_machine_one_block(self):
+        recs = os.path.join(tempfile.mkdtemp(prefix="wk-status-stream-"), "records")
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", os.path.dirname(recs)]))
+        with open(recs, "w") as fh:
+            fh.write(_rec(kind="probing", name="container", machine="host"))
+            fh.write(_rec(kind="probing", name="vm", machine="host"))
+            fh.write(_rec(kind="machine", name="host", self=True))
+            fh.write(_rec(kind="workspace", machine="host", method="container",
+                          name="ws-c", state="present", ws="present"))
+            fh.write(_rec(kind="flush", job="container"))
+            fh.write(_rec(kind="workspace", machine="host", method="macOS guest",
+                          name="ws-v", state="present", ws="present"))
+            fh.write(_rec(kind="flush", job="vm"))
+            fh.write(_rec(kind="exit", code=0))
+        cp = subprocess.run([sys.executable, str(STATUS_VIEW), "text", recs],
+                            cwd=str(REPO), capture_output=True, text=True,
+                            env=dict(os.environ, NO_COLOR="1"), timeout=30)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        headings = [l for l in cp.stdout.splitlines() if l.startswith("host ")]
+        self.assertEqual(len(headings), 1, cp.stdout)
+        self.assertIn("ws-c", cp.stdout)
+        self.assertIn("ws-v", cp.stdout)
+        # both flushes precede the one block: nothing printed between them
+        self.assertLess(cp.stdout.index("probing vm"), cp.stdout.index("host "))
 
 
 class TestJsonModeUnchangedByStreamMarkers(unittest.TestCase):

@@ -6,6 +6,24 @@ set -euo pipefail
 WK_ROOT="${WK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export WK_ROOT
 
+# --- plumbing, documented once here rather than at every read site -----------
+# WK_MACHINE, WK_IN_VM, WK_ROOT, WK_STORE, WK_DEBUG, WK_QUIET, WK_FORCE,
+# WK_YES, WK_CMD: set by the dispatcher (`wk`) or a driver for its own child
+# processes -- which podman machine, whether this shell is already inside the
+# VM, the repo root, the workspace store, and the --debug/--quiet/--force/
+# --yes flags forwarded as environment so a delegated `wk` (macOS -> VM,
+# workstation -> remote) sees the same choice the top-level invocation made.
+# Not a knob a person turns by hand outside that forwarding.
+#
+# WK_TS_AUTHKEY: the one tailnet auth key's path, overridable for a machine
+# that keeps it somewhere other than $HOME/.config/wk/tailscale-authkey (see
+# wk_tailscale_authkey_path below); tests/test_wifi_seed.py points it at a
+# scratch file so a test never touches this machine's own key.
+#
+# WK_IMAGE_MARKER (below): overridable so a benchmark and host role can be
+# rehearsed on one machine at once without a real second machine.
+# WK_SESSION_MODE_FILE (below): the graphical session's mode marker path.
+
 # --- logging -----------------------------------------------------------------
 # Colours only when stderr is a tty, so logs stay clean when redirected.
 if [ -t 2 ]; then
@@ -46,6 +64,14 @@ have() { command -v "$1" >/dev/null 2>&1; }
 require() {
     have "$1" || die "${2:-$1 is required but not installed}"
 }
+
+# The one ssh connect timeout, read in every ssh wrapper across the tree
+# (boot/machines.sh, lib/reach.sh, lib/target.sh, targets/remote.sh,
+# targets/vm.sh, cmd/find, cmd/status, cmd/sync, host/macos/vmtools.sh,
+# image/pmos.sh) so a longer timeout for a slow link is one setting, not one
+# per file. WK_SSH_TIMEOUT overrides it; the default (10s) matches what every
+# one of those files used before this existed.
+wk_ssh_timeout() { printf '%s' "${WK_SSH_TIMEOUT:-10}"; }
 
 # --- idempotent file operations ----------------------------------------------
 
@@ -112,13 +138,13 @@ ensure_dir() {
 }
 
 # --- sizes -------------------------------------------------------------------
-# `stat -c %s` is GNU, `stat -f %z` is BSD; the image store spans both kinds
-# of machine, so every size needs both spellings. GNU first: it fails
-# outright on BSD, so trying it first is safe. The reverse is not: GNU
-# `stat -f` means *filesystem* status and reads its argument as a path, so
-# `stat -f %z file` looks for a file called `%z` and prints a filesystem
-# block for `file` -- BSD first would give every Linux caller a paragraph of
-# statistics before the number it asked for.
+# `stat -c %s` is GNU, `stat -f %z` is BSD; the fleet's image paths and card
+# writes span both kinds of machine, so every size needs both spellings. GNU
+# first: it fails outright on BSD, so trying it first is safe. The reverse is
+# not: GNU `stat -f` means *filesystem* status and reads its argument as a
+# path, so `stat -f %z file` looks for a file called `%z` and prints a
+# filesystem block for `file` -- BSD first would give every Linux caller a
+# paragraph of statistics before the number it asked for.
 file_bytes() {
     stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0
 }
@@ -566,6 +592,9 @@ barrier() {
 # common.sh is the floor.
 wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
 
+# WK_LOCK_DIR: tests/test_concurrency.py, tests/test_pr_workflow.py and
+# tests/test_quick.py all point this at a scratch directory, so a test never
+# takes a lock that could collide with a real `wk` command running here.
 wk_lock_dir() { echo "${WK_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/wk/locks}"; }
 
 # Two lists answering two questions: _WK_LOCK_HELD is what *this* scope must
@@ -791,8 +820,8 @@ utc_to_epoch() {
 # --- which role is this machine in? ------------------------------------------
 # A machine booted into an image says so in one file, absent from every
 # normal install. One name for it: the boot driver, `wk bench staged`, and
-# the image's provisioning all read it. Overridable so both roles can be
-# exercised without a second machine.
+# the image's provisioning all read it. WK_IMAGE_MARKER overrides the path,
+# so both roles can be exercised without a second machine.
 WK_IMAGE_MARKER="${WK_IMAGE_MARKER:-/etc/wk-image}"
 
 wk_image_id() { kv_field "$WK_IMAGE_MARKER" id 2>/dev/null || true; }   # the bench system's own id, or empty in host mode
@@ -806,6 +835,8 @@ in_bench_mode() { [ -f "$WK_IMAGE_MARKER" ]; }
 # `wk session` can start the compositor a few ways, indistinguishable from
 # the Wayland socket alone, and only one makes a number that comes out
 # meaningful. The privileged helper records which one in a file under /run.
+# WK_SESSION_MODE_FILE overrides the path, so session_mode() is testable
+# without root or a real session.
 WK_SESSION_MODE_FILE="${WK_SESSION_MODE_FILE:-/run/wk-session-mode}"
 
 # gpu | bmc | off | none

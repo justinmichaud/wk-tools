@@ -8,7 +8,7 @@
 # workspaces stay pinned to the snapshot they were created from and are never
 # touched; only workspaces created after this runs pick up the new one.
 #
-#   wk sync                    the workspace you are working in
+#   wk sync                    one workspace on this machine (asked, when several)
 #   wk sync <workspace>        that one
 #   wk sync --machine          everything on this machine: the mirror, a new
 #                              snapshot, every workspace here, and every copy of
@@ -19,6 +19,10 @@
 #                              lines for the mirror fetch, the snapshot
 #                              publish, the checkout/reset/clean, and each
 #                              workspace's fetch
+#
+#   WK_BRANCH=<branch>         the snapshot publishes this branch instead of
+#                              origin/main (a release branch); every workspace
+#                              made from it starts there
 #
 # The scope is *how far* (workspace, machine, everywhere), never the name of
 # a mechanism -- the store half is this machine's alone; a remote target
@@ -50,15 +54,11 @@ snapshot_current() {
     [ -n "$1" ] && [ "$1" = "$2" ]
 }
 
-# sync_scope_decide <in_workspace 0|1> <workspace-count> <has-tty 0|1> [<pick>]
-# -- the pure decision behind "autodetect, then ask" below: given whether
-# this run is already inside a workspace, how many workspaces are on the
-# host, whether stdin is a terminal to ask on, and (only once the menu has
-# been printed and read) the number picked, names the outcome on stdout:
-#   here          already in a workspace -- that one, no menu (cmd/sync's own
-#                 call always passes in_workspace=0 here: WK_NAME already
-#                 filled in ONLY before this block runs, so this branch is
-#                 reached only by a test driving the function directly)
+# sync_scope_decide <workspace-count> <has-tty 0|1> [<pick>]
+# -- the pure decision behind "autodetect, then ask" below: given how many
+# workspaces are on the host, whether stdin is a terminal to ask on, and
+# (only once the menu has been printed and read) the number picked, names
+# the outcome on stdout:
 #   empty         no workspaces here -- sync the machine instead
 #   one           exactly one -- that one, unambiguous
 #   refuse        several, and no terminal to ask on
@@ -71,8 +71,7 @@ snapshot_current() {
 # function decided; the branching lives here so a test can drive every
 # outcome on a faked workspace count and pick, with no terminal or workspace.
 sync_scope_decide() {
-    local in_ws="$1" n="$2" tty="$3" pick="${4:-}"
-    [ "$in_ws" = 1 ] && { printf 'here\n'; return 0; }
+    local n="$1" tty="$2" pick="${3:-}"
     [ "$n" -eq 0 ] && { printf 'empty\n'; return 0; }
     [ "$n" -eq 1 ] && { printf 'one\n'; return 0; }
     [ "$tty" = 1 ] || { printf 'refuse\n'; return 0; }
@@ -143,9 +142,7 @@ if [ -z "$SCOPE" ] && [ -z "$ONLY" ]; then
     _n=$(printf '%s\n' "$_ws" | grep -c . || true)
     _n="${_n:-0}"
     _tty=0; [ -t 0 ] && _tty=1
-    # 0: not in_workspace -- guaranteed, since WK_NAME would already have
-    # filled in ONLY above and this block would not have been reached.
-    _decision=$(sync_scope_decide 0 "$_n" "$_tty")
+    _decision=$(sync_scope_decide "$_n" "$_tty")
     case "$_decision" in
         empty)
             info "no workspaces on this machine, so there is nothing to fetch in."
@@ -166,7 +163,7 @@ if [ -z "$SCOPE" ] && [ -z "$ONLY" ]; then
             printf '  %2d) %s\n' "$((_i + 1))" "all of them, and this machine's mirror, snapshot and tooling (--machine)" >&2
             printf 'which? [1-%d] ' "$((_i + 1))" >&2
             read -r _pick </dev/tty || _pick=""
-            _decision=$(sync_scope_decide 0 "$_n" 1 "$_pick")
+            _decision=$(sync_scope_decide "$_n" 1 "$_pick")
             case "$_decision" in
                 all)      SCOPE=machine ;;
                 pick\ *)  ONLY=$(printf '%s\n' "$_ws" | sed -n "${_decision#pick }p") ;;

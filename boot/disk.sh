@@ -21,6 +21,17 @@ card_priv() { # <verb> [args...]
     m_ssh "sudo -n $CARD_PRIV $(sh_quote "$@")"
 }
 
+# `wk sysimage write --dry-run` runs the same sequence of steps as the write
+# it is reporting; every step that would change the card asks this first, so
+# what a dry run says is what the write does rather than a second description
+# of it that can drift. Set by the caller for the length of one command.
+DISK_DRY=""
+disk_would() { # <what this step would do>
+    [ -n "$DISK_DRY" ] || return 1
+    log "  would $1"
+    return 0
+}
+
 # Asked once, before the first refusal that would otherwise blame the disk
 # for a missing helper: without this, "command not found" arrives indented
 # inside "rpi5 will not write /dev/mmcblk0" and names no remedy.
@@ -177,11 +188,10 @@ disk_contents() {
         $2 == "part" && $4 != "" {
             lab = ($3 == "" ? "-" : $3)
             labels["/dev/" $4] = labels["/dev/" $4] (labels["/dev/" $4] ? "," : "") lab
-            if (lab == "WK-IMG-BOOT" || lab == "wk-image-root") wk["/dev/" $4] = 1
         }
         END {
             for (d in labels)
-                print d "\t" "labels: " labels[d] (wk[d] ? "  (written by the distro path)" : "")
+                print d "\t" "labels: " labels[d]
         }'
 }
 
@@ -242,9 +252,12 @@ EOF
 
 # May this device be written? Asked of the helper, the only implementation
 # of the rule -- a second copy can drift into permitting what the other
-# refuses. Adds the one question the helper cannot answer: does the image fit.
+# refuses. Whether the image *fits* is not asked here: the image is a stream
+# read once and written as it arrives, so its size is not known until it has
+# gone past; a card too small for it runs out of space part-written, which is
+# what disk_write_source reports.
 disk_refuse_unless_safe() {
-    local dev="$1" bytes="$2" out dev_bytes size
+    local dev="$1" out
 
     card_priv_require
     out=$(card_priv check "$dev" 2>&1) || die "$MACH_NAME will not write $dev:
@@ -252,16 +265,12 @@ $(printf '%s\n' "$out" | sed 's/^/    /')
     Disks there:
 $(disk_list)"
     debug "$out"
-
-    dev_bytes=$(m_ssh "lsblk -bdno SIZE $(sh_quote "$dev")" 2>/dev/null | tr -dc '0-9')
-    size=$(m_ssh "lsblk -dno SIZE $(sh_quote "$dev")" 2>/dev/null | tr -d ' \r')
-    [ -n "$dev_bytes" ] && [ "$dev_bytes" -ge "$bytes" ] \
-        || die "$dev on $MACH_NAME is ${size:-unknown}, smaller than the image ($(human_bytes "$bytes"))"
 }
 
-disk_mounted() {
-    m_ssh "lsblk -lno NAME,MOUNTPOINT $(sh_quote "$1")" 2>/dev/null \
-        | awk 'NF > 1 { print "/dev/" $1 " on " $2 }'
+# How big the disk is, in bytes and as the machine words it, for a message
+# about a write that did not fit.
+disk_size() { # <device>
+    m_ssh "lsblk -dno SIZE $(sh_quote "$1")" 2>/dev/null | tr -d ' \r'
 }
 
 # Unmount, after the confirmation and never before: the caller has agreed to
@@ -269,6 +278,7 @@ disk_mounted() {
 # reason to send someone back to a hand-typed umount.
 disk_unmount() {
     local dev="$1"
+    disk_would "unmount whatever is mounted from $dev on $MACH_NAME" && return 0
     # Through the helper, like every other privileged step: it still refuses
     # a disk this machine is running from.
     card_priv unmount "$dev" >/dev/null \
@@ -279,7 +289,10 @@ $(m_ssh "lsblk -lno NAME,MOUNTPOINT $(sh_quote "$dev")" 2>/dev/null | awk 'NF > 
 
 disk_write_stream() { # <device>   -- image bytes on stdin
     local dev="$1" remote_zstd=no
-    m_ssh 'command -v zstd >/dev/null' && remote_zstd=yes
+    # `< /dev/null`, like every other probe here: ssh forwards its own stdin
+    # to the far side, and this one's stdin is the image -- bytes it read to
+    # ask a yes/no question are bytes the write never sees.
+    m_ssh 'command -v zstd >/dev/null' < /dev/null && remote_zstd=yes
     info "writing to $dev on $MACH_NAME (streamed, zstd=$remote_zstd)"
     # Decompression runs unprivileged on the far side; only the plain stream
     # reaches the privileged writer.
@@ -290,39 +303,52 @@ disk_write_stream() { # <device>   -- image bytes on stdin
     fi
 }
 
-# Writing a file is writing a stream with the file on stdin -- one writer,
-# not a second one to test on hardware.
-disk_write_dd() {
-    local img="$1" dev="$2" bytes
-    bytes=$(file_bytes "$img")
-    info "writing $(basename "$img") ($((bytes / 1024 / 1024)) MB)"
-    disk_write_stream "$dev" < "$img"
+# The image's own bytes, from wherever the source is onto the card, in one
+# pass: nothing is materialized on this machine, which is what lets a driving
+# machine with no Linux tooling write a card -- every edit the image needs is
+# made afterwards, on the card (admin/wk-card-priv). The stream is metered as
+# it goes past, since the read-back below has to compare the disk against
+# *something* and there is no local copy to re-read.
+#   disk_write_source <device> <reader command> <file to leave "<bytes> <sha>" in>
+disk_write_source() {
+    local dev="$1" reader="$2" meta="$3"
+    disk_would "stream the image onto $dev on $MACH_NAME, and read it back to verify" && return 0
+    eval "$reader" | disk_stream_meter "$meta" | disk_write_stream "$dev" \
+        || die "could not write the image onto $dev on $MACH_NAME.
+    It was read through:  $reader
+    $dev is $(disk_size "$dev"); an image larger than that runs out of space
+    part-written, and the read that fed it can fail on its own account."
+}
+
+# stdin to stdout unchanged, with the byte count and sha256 of everything that
+# went past left in <file>. A filter in the pipeline rather than `tee` into
+# two process substitutions, whose completion this shell cannot wait for: the
+# numbers have to be final by the time the pipeline returns.
+disk_stream_meter() { # <file>
+    python3 -c '
+import hashlib, sys
+out, digest, n = sys.stdout.buffer, hashlib.sha256(), 0
+while True:
+    chunk = sys.stdin.buffer.read(1 << 20)
+    if not chunk:
+        break
+    n += len(chunk)
+    digest.update(chunk)
+    out.write(chunk)
+out.flush()
+with open(sys.argv[1], "w") as fh:
+    fh.write("%d %s\n" % (n, digest.hexdigest()))
+' "$1"
 }
 
 # Read the card back and compare with what was sent -- privileged, hence a
 # verb rather than a second way in, and unconditional over the whole span: a
 # checksum from whatever did the writing only claims the bytes it chose to
-# write arrived, and says nothing about the ones it skipped.
-disk_verify_dd() {
-    local img="$1" dev="$2" bytes local_sha remote_sha
-    bytes=$(file_bytes "$img")
-    info "verifying $dev against $(basename "$img")"
-    local_sha=$(head -c "$bytes" "$img" | shasum -a 256 2>/dev/null | cut -d' ' -f1)
-    remote_sha=$(card_priv verify "$dev" "$bytes" | tr -d '\r' | tail -1)
-    [ -n "$remote_sha" ] || die "could not read $dev back on $MACH_NAME"
-    [ "$local_sha" = "$remote_sha" ] \
-        || die "$dev does not match the image that was written to it
-    image: $local_sha
-    disk:  $remote_sha"
-    debug "verified $bytes bytes"
-}
-
-# The streamed write has no local file to re-read, so the caller passes the
-# size and hash it already computed instead of a path. Otherwise the same
-# claim as disk_verify_dd: read the disk back rather than trust a checksum
-# from whatever wrote it.
+# write arrived, and says nothing about the ones it skipped. The size and
+# hash are the stream's own (disk_stream_meter), there being no local copy.
 disk_verify_stream() { # <device> <bytes> <sha256>
     local dev="$1" bytes="$2" want="$3" got
+    disk_would "read $dev back and compare it with the image streamed to it" && return 0
     info "verifying $dev against the image that was streamed to it"
     got=$(card_priv verify "$dev" "$bytes" | tr -d '\r' | tail -1)
     [ -n "$got" ] || die "could not read $dev back on $MACH_NAME"
@@ -333,8 +359,156 @@ disk_verify_stream() { # <device> <bytes> <sha256>
     debug "verified $bytes bytes"
 }
 
-disk_unique_identity() {
-    local dev="$1" spec="$2" old new
+# --- the edits an image needs, made on the card -------------------------------
+# Every one of them used to be made on a local copy of the image before it was
+# streamed, with mtools, debugfs and sfdisk -- tooling a macOS workstation
+# does not have, editing bytes that were then written in place of the image's
+# own. Each is a verb of the card helper now: the bytes written are the
+# image's, and what is edited is the card.
+
+# A card that took an image has a partition table. One that took a stream
+# with a shell banner ahead of it -- a container exec, an ssh session with
+# something to say -- hashes perfectly against what was sent and has none.
+disk_parts_present() { # <device>
+    local dev="$1" out
+    disk_would "check that $dev came out of this with a partition table" && return 0
+    out=$(card_priv parts "$dev" 2>&1) \
+        || die "$dev has no readable partition table after the write:
+$(printf '%s\n' "$out" | sed 's/^/    /')
+    Something was written ahead of the image bytes on the way out, or the
+    source is not a disk image at all."
+    debug "$out"
+}
+
+# The `root=` on the card's own kernel command line, read off the card: what
+# the board will look for when it boots this disk, rather than what the image
+# it came from said before anything edited it.
+disk_root_spec() { # <device>
+    local dev="$1"
+    disk_would "read the root= on $dev's kernel command line" && return 0
+    card_priv root-spec "$dev" 2>/dev/null | tr -d '\r' | kv_get root
+}
+
+# Give the card a root reference that survives the kind of device it was
+# written to (`retarget`, admin/wk-card-priv). Which cards need it is decided
+# here, by the one classifier there is (image_root_class, lib/image.sh); a
+# card whose root is already portable is left alone.
+disk_retarget_root() { # <device>
+    local dev="$1" spec class
+    disk_would "retarget $dev's root= to a PARTUUID of $dev, so it boots from any device" && return 0
+    spec=$(disk_root_spec "$dev")
+    [ -n "$spec" ] || die "$dev has no cmdline.txt to read a root from, and this image was
+    written as one that boots by firmware and cmdline.txt."
+    class=$(image_root_class "$spec")
+    case "$class" in
+        portable) debug "$dev's root is already portable ($spec); nothing to retarget"; return 0 ;;
+        network)  die "$dev names a network root ($spec). Nothing here boots that way." ;;
+    esac
+    info "retargeting $dev's root: $spec -> a PARTUUID of this disk (boots from any device)"
+    card_priv retarget "$dev" \
+        || die "could not retarget $dev's root.
+    The image is written; its kernel command line still says root=$spec, which
+    is a promise about a device rather than about a filesystem -- in another
+    reader it names somebody else's disk."
+}
+
+# Kernel command-line additions a profile declares. base64 on the way, like
+# the identity marker: the helper checks the value against a character set
+# before anything decodes it.
+disk_cmdline_append() { # <device> <text>
+    local dev="$1" add="$2" b64
+    [ -n "$add" ] || return 0
+    disk_would "append to $dev's kernel command line: $add" && return 0
+    b64=$(printf '%s' "$add" | base64 | tr -d '\n\r ')
+    card_priv cmdline-append "$dev" "$b64" \
+        || die "could not append to $dev's kernel command line ($add).
+    The image is written; the board would boot without what this profile asks
+    its kernel for."
+}
+
+# Firmware settings a profile declares, appended to the config.txt a Pi's
+# firmware reads whatever the OS is. A setting that fails to land fails
+# nothing and makes every number worse, so this is a refusal, not a warning.
+disk_config_append() { # <device> <block>
+    local dev="$1" block="$2" b64
+    [ -n "$block" ] || return 0
+    disk_would "append this profile's firmware block to $dev's config.txt" && return 0
+    b64=$(printf '%s' "$block" | base64 | tr -d '\n\r ')
+    card_priv config-append "$dev" "$b64" \
+        || die "could not append the firmware block to $dev's config.txt.
+    The image is written; the board would come up at whatever clock it felt
+    like, and nothing later would say so."
+}
+
+# Which system this card holds, on the boot partition, where `wk boot` reads
+# it off a disk that is not running.
+disk_boot_id() { # <device> <id>
+    local dev="$1" id="$2"
+    disk_would "name the system on $dev's boot partition '$id'" && return 0
+    card_priv boot-id "$dev" "$id" >/dev/null \
+        || die "could not write the identity onto $dev's boot partition.
+    The image is written, but 'wk boot' refuses a disk it cannot name."
+}
+
+# The units that make a booted image a fleet system, composed by the caller
+# (their bodies come from the profile) and installed here as a tar the helper
+# unpacks into two fixed directories under /etc.
+disk_install_units() { # <device> <staging directory>
+    local dev="$1" dir="$2" out rc=0
+    disk_would "install the fleet units and the profiling knobs into $dev's rootfs" && return 0
+    out=$(tar -cf - -C "$dir" systemd sysctl.d | card_priv units "$dev" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || die "could not install the fleet units on $dev:
+$(printf '%s\n' "$out" | sed 's/^/    /')
+    The image is written; a run that wedges the board would not hand it back."
+    case "$out" in
+        *'no systemd on this disk'*)
+            warn "this image has no systemd, so the self-return watchdog and the self-disarm
+  were NOT installed. The card carries its identity marker and the driving key
+  and nothing else: a run that wedges the board will not hand it back, and on a
+  medium-armed machine the medium stays armed until something disarms it." ;;
+        *) debug "$out" ;;
+    esac
+}
+
+# Will the firmware find everything it needs to reach a kernel? Asked of the
+# card, after every edit that changes its boot partition, because what the
+# board will boot is what is on the disk. A kernel that cannot find its root
+# panics and reboots (`panic=10`); firmware that cannot find a kernel
+# **halts** -- no retry, no fall-through, no way back over the wire.
+# Does the system on this card name a root it can find on the device it is
+# on? The spec is read off the card; the comparison is image_check_root
+# (lib/image.sh), the one classifier there is.
+disk_check_root() { # <device> <what-it-is>
+    local dev="$1" what="$2"
+    disk_would "check that the system on $dev names a root it can find on $dev" && return 0
+    image_check_root "$(disk_root_spec "$dev")" "$dev" "$what"
+}
+
+disk_check_boot_files() { # <device> <machine> <dtb>
+    local dev="$1" machine="$2" dtb="$3" out rc=0
+    disk_would "check that every file a $machine's firmware asks for resolves on $dev" && return 0
+    out=$(card_priv boot-check "$dev" "$dtb" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && { debug "$out"; return 0; }
+    die "$dev is missing files a $machine needs to reach its kernel:
+
+$(printf '%s\n' "$out" | sed 's/^/      /')
+
+    Firmware that cannot find a kernel halts. It does not move on to the next
+    BOOT_ORDER entry and it does not come back, so booting this card would cost
+    a trip to the board rather than a reboot.
+
+    The image is the problem, not the disk: rebuild it, or check what its
+    config.txt names against what its boot partition holds, and write again."
+}
+
+# The old identity is read off the card, now, rather than taken from what
+# anything computed before the write: every reference to it on the card
+# (cmdline.txt, /etc/fstab) is rewritten from it, and a stale one would
+# rewrite nothing while reporting success.
+disk_unique_identity() { # <device>
+    local dev="$1" spec old new
+    disk_would "stamp a unique disk identity on $dev, so two cards written from one image cannot be confused" && return 0
+    spec=$(disk_root_spec "$dev")
     case "$spec" in PARTUUID=*) ;; *) return 0 ;; esac
     old=${spec#PARTUUID=}; old=${old%-*}
     new=$(od -An -tx4 -N4 /dev/urandom | tr -d ' \n')
@@ -363,6 +537,7 @@ disk_unique_identity() {
 # line, so the helper can check them against a character set before decoding.
 disk_install_fleet() { # <device> <marker> <ssh public key>
     local dev="$1" marker="$2" key="$3" m64 k64
+    disk_would "install the identity marker and the driving ssh key on $dev" && return 0
     m64=$(printf '%s' "$marker" | base64 | tr -d '\n\r ')
     k64=$(printf '%s' "$key"    | base64 | tr -d '\n\r ')
     [ -n "$m64" ] && [ -n "$k64" ] \
@@ -385,6 +560,7 @@ disk_install_fleet() { # <device> <marker> <ssh public key>
 # would put a credential on a disk with nothing to spend it.
 disk_seed_tailnet() { # <device> <tailnet hostname>
     local dev="$1" name="$2" keyfile joins tag="${WK_TAILNET_TAG:-tag:wk}"
+    disk_would "seed the tailnet identity on $dev (it would join as '$name', $tag)" && return 0
 
     # Three outcomes: yes, no, and "the question was not answered" -- a grep
     # finding nothing looks like a no, and a no here means the board boots
@@ -429,25 +605,16 @@ _image_wants_wifi() { # <IMG_MACHINE, which is boot/machines/<name>.conf's name>
     ( machine_load "$1" >/dev/null 2>&1 && [ "${MACH_NET:-}" = wifi ] )
 }
 
-# One file for the fleet's WiFi identity, same shape as
-# wk_tailscale_authkey_path (lib/common.sh). Not $WK_STORE/secrets/wifi: on
-# macOS $WK_STORE resolves inside the podman VM, unwritable from this host
-# command.
-disk_wifi_creds_path() { printf '%s' "${WK_WIFI_CREDS:-$HOME/.config/wk/wifi}"; }
-
-# No prompting, no side effects: a read-only report must never be the thing
-# that asks for a credential.
-disk_wifi_creds_present() {
-    local p; p=$(disk_wifi_creds_path)
-    [ -s "$p" ] || return 1
-    grep -q '^ssid=' "$p" && grep -q '^psk=' "$p"
-}
-
 # Unlike disk_seed_tailnet this is a barrier, not a warning: rpi3/rpi4/rpi5
-# have no cable at the bench, so a card with no WiFi credential seeded has
-# no LAN at all -- no --force past that.
+# have no cable at the bench, so a card with no WiFi credential seeded has no
+# LAN at all -- no --force past that. There is no hand-made credential file:
+# the card takes its credential from $DISK_MACHINE's own WiFi connection,
+# read by the card helper as root (wifi-host/wifi-from-host,
+# admin/wk-card-priv). _wifi_creds_preflight (cmd/sysimage) asks wifi-host
+# before anything is erased; this assumes that already passed.
 disk_seed_wifi() { # <device> <IMG_MACHINE>
-    local dev="$1" mach="$2" creds joins
+    local dev="$1" mach="$2" joins
+    disk_would "seed $MACH_NAME's own WiFi credential on $dev, for a board with no cable" && return 0
 
     _image_wants_wifi "$mach" || { debug "$mach has a cable, or is not one of this fleet's boards; nothing to seed"; return 0; }
 
@@ -466,16 +633,8 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
     (it said: ${joins:-nothing}). Refusing to guess, for the same reason." ;;
     esac
 
-    creds=$(disk_wifi_creds_path)
-    disk_wifi_creds_present || die "$mach has no cable at the bench, and its rescue/bench images bring up
-    WiFi from a credential seeded onto the card -- there is none at $creds.
-    A board with no uplink is unreachable, which is worse than refusing, so this
-    does not take --force.
-    Set it:
-        printf 'ssid=<network>\npsk=<passphrase>\n' > $creds"
-
-    info "seeding the fleet's WiFi identity onto $dev"
-    card_priv wifi "$dev" < "$creds" >/dev/null \
+    info "seeding $MACH_NAME's own WiFi credential onto $dev"
+    card_priv wifi-from-host "$dev" >/dev/null \
         || die "could not seed WiFi credentials onto $dev.
     The image is written; $mach has no cable at the bench, so it would boot with
     no way to reach a network at all."
@@ -490,6 +649,7 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
 # so the final state is declared, not diffed.
 disk_seed_role() { # <device> <bench|rescue>
     local dev="$1" role="$2"
+    disk_would "mark $dev a $role system" && return 0
 
     case "$role" in
         bench|rescue) ;;
@@ -518,8 +678,7 @@ disk_seed_role() { # <device> <bench|rescue>
     carrying a live self-return watchdog.
     The image is written; the role is not set.
     Remedy, from a terminal on $MACH_NAME (its sudo asks for a password, which
-    is why this end cannot do it):
-        wk sync --target $MACH_NAME
+    is why this end cannot do it): update its wk-tools checkout, then
         ./setup --stage quiesce" ;;
     esac
 
@@ -536,6 +695,7 @@ $(printf '%s\n' "$out" | sed 's/^/    /')
 # and what then fails is a build or benchmark run out of disk, hours later.
 disk_grow() {
     local dev="$1"
+    disk_would "grow the last partition to fill $dev" && return 0
     info "growing the last partition to fill $dev"
     card_priv grow "$dev" >/dev/null \
         || die "could not grow the root partition on $dev"
@@ -543,6 +703,7 @@ disk_grow() {
 
 disk_eject() {
     local dev="$1"
+    disk_would "flush and power off $dev" && return 0
     m_ssh "command -v udisksctl >/dev/null" || return 0
     m_ssh "udisksctl power-off -b $(sh_quote "$dev")" >/dev/null 2>&1 \
         && info "powered off $dev -- safe to remove" \

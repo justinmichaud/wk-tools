@@ -20,6 +20,11 @@
 # privilege granted deliberately during setup, never taken in the daily
 # path. `wk` itself still never calls sudo.
 
+# WK_SOFTNET_VERSION pins the release this stage installs; WK_SOFTNET_BIN
+# overrides the install path. cmd/claude, cmd/doctor, setup and targets/vm.sh
+# all read WK_SOFTNET_BIN the same way, with the same default, to find the
+# binary this stage installed -- one path, read consistently rather than
+# passed around.
 WK_SOFTNET_VERSION="${WK_SOFTNET_VERSION:-0.23.0}"
 WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 

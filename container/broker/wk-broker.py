@@ -49,9 +49,11 @@ relay:
      prevent.
 
   2. Only a machine this host can actually drive (MACH_OS), only a system that
-     is in this machine's image store, only a plan in ALLOWED_PLANS below, and
-     only a name that is a name (no path separators, no leading dash, nothing
-     that could be read as an option by anything downstream).
+     `wk boot` finds verified present on the device's own boot partition (it
+     reads the id `b_device_image` puts there, not a catalogue), only a plan
+     in ALLOWED_PLANS below, and only a name that is a name (no path
+     separators, no leading dash, nothing that could be read as an option by
+     anything downstream).
 
   3. No barrier may be crossed from in here. `WK_FORCE` is never set from a
      request and never inherited into one: `wk <command> --force` is the loud,
@@ -178,11 +180,12 @@ _TIMED_OUT = object()
 def _bash(script, *args):
     """Run a fragment against this repo's own libraries and return its stdout.
 
-    Everything the broker needs to know about the fleet, the image store and
-    how a machine is reached is already computed by shell in this repository,
-    at read time, from evidence. Re-deriving any of it in Python would be a
-    second implementation of a fact -- and it is the copy in the boundary that
-    would go stale, which is the failure that reads as broken hardware.
+    Everything the broker needs to know about the fleet, what system a device
+    is holding and how a machine is reached is already computed by shell in
+    this repository, at read time, from evidence. Re-deriving any of it in
+    Python would be a second implementation of a fact -- and it is the copy in
+    the boundary that would go stale, which is the failure that reads as
+    broken hardware.
 
     Bounded and read-only: these fragments source libraries and print, they do
     not reach a machine. `reach_without_tailnet` is the one that can touch the
@@ -892,7 +895,7 @@ async def publish_into_machine(machine, local_sock):
     $XDG_RUNTIME_DIR/wk is already the one they bind-mount at /run/wk and there
     is nothing to do. On macOS they do not: the containers live inside a Fedora
     CoreOS guest and mount *its* runtime directory, while everything this
-    broker calls -- the tailnet, the ssh identities, the image store, the fleet
+    broker calls -- the tailnet, the ssh identities, the boot and image
     drivers -- is out here on the Mac and cannot move in there.
 
     So the door is held open from this side, by ssh with a remote unix-socket

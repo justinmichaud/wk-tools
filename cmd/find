@@ -373,9 +373,9 @@ while read -r vname cidr via; do
                 [ -z "$hn" ] || printf '    %-16s %s\n' "answers ssh as" "$hn${un:+  ($un)}"
                 if [ -n "$id" ]; then
                     printf '    %-16s %s\n' "running" "$id"
-                    printf '    %-16s %s\n' "  profile" "${prof:-unrecorded}${bld:+, built by $bld}"
+                    printf '    %-16s %s\n' "  profile" "${prof:-not in its marker}${bld:+, built by $bld}"
                     printf '    %-16s %s\n' "  role" \
-                        "${role:-unrecorded}$([ "$mk" = rescue ] && printf ' (the card carries the rescue marker)')"
+                        "${role:-not in its marker -- a card written before roles existed; rewrite it}$([ "$mk" = rescue ] && printf ' (the card carries the rescue marker)')"
                 else
                     printf '    %-16s %s\n' "running" \
                         "no /etc/wk-image -- not a system wk wrote"

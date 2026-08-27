@@ -258,11 +258,31 @@ grep -qF 'ulimit -c unlimited' "$HOME/.bashrc" 2>/dev/null || \
     printf '\nulimit -c unlimited\n' >> "$HOME/.bashrc"
 log "ulimit -c unlimited added to .bashrc"
 
-# The ddebs debug-symbol repository (ddebs.ubuntu.com) is not set up here: it
-# needs a host this repo's egress proxy does not allow
-# (container/proxy/wk-proxy.py's ALLOWED_HOSTS), and widening that allowlist
-# is a call this hook does not get to make on its own -- see
-# docs/Urgent/HANDOFF-debug.md.
+# The ddebs debug-symbol archive backtraces glibc/Mesa/GTK and the rest of the
+# base image with real symbols instead of `??` -- docs/Urgent/HANDOFF-debug.md.
+# ddebs.ubuntu.com is in the egress allowlist (container/proxy/wk-proxy.py's
+# ALLOWED_HOSTS); ubuntu-dbgsym-keyring itself comes from the regular archive,
+# already allowed above.
+DDEBS_SOURCES=/etc/apt/sources.list.d/ddebs.list
+if [ -f "$DDEBS_SOURCES" ]; then
+    log "ddebs.ubuntu.com already provisioned ($DDEBS_SOURCES)"
+else
+    _ddebs_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+    log "provisioning ddebs.ubuntu.com for $_ddebs_codename"
+    if sudo apt-get update -qq >/dev/null 2>&1 \
+       && sudo apt-get install -y --no-install-recommends ubuntu-dbgsym-keyring >/dev/null 2>&1 \
+       && printf 'deb http://ddebs.ubuntu.com %s main restricted universe multiverse\ndeb http://ddebs.ubuntu.com %s-updates main restricted universe multiverse\ndeb http://ddebs.ubuntu.com %s-proposed main restricted universe multiverse\n' \
+              "$_ddebs_codename" "$_ddebs_codename" "$_ddebs_codename" \
+              | sudo tee "$DDEBS_SOURCES" >/dev/null \
+       && sudo apt-get update -qq >/dev/null 2>&1; then
+        log "ddebs.ubuntu.com added ($DDEBS_SOURCES) -- 'sudo apt-get install <pkg>-dbgsym' now works"
+    else
+        warn "ddebs.ubuntu.com provisioning failed -- check egress. Retry by hand:
+         sudo apt-get install ubuntu-dbgsym-keyring
+         sudo tee $DDEBS_SOURCES <<<'deb http://ddebs.ubuntu.com $_ddebs_codename main restricted universe multiverse'
+         sudo apt-get update"
+    fi
+fi
 
 # --- editors -----------------------------------------------------------------
 # helix and lazygit are workspace-only: helix needs the checkout's clangd and

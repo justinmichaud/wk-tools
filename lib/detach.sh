@@ -176,8 +176,11 @@ detach_remote() {
 # bytes to stderr, for `pmos_follow`. [abort-re]: a wedged browser writes a
 # traceback but no result, so every poll also greps <log>. The loop sleeps
 # in wk_sleep's 1s chunks so a signal isn't deferred until `sleep 30` elapses.
+# The poll interval has no environment override: every caller already
+# passes it as the [interval] positional argument, so a second knob for the
+# same thing would be a second, untested path to the same value.
 detach_wait_remote() {
-    local sshfn="$1" log="$2" rc="$3" interval="${4:-${WK_DETACH_POLL_SECONDS:-30}}"
+    local sshfn="$1" log="$2" rc="$3" interval="${4:-30}"
     local stream="${5:-0}" timeout="${6:-0}" abort_re="${7:-}"
     local start now last_size=0 last_change last_beat warned=0 size rcval idle waited
 
@@ -215,11 +218,15 @@ detach_wait_remote() {
         fi
 
         idle=$(( now - last_change ))
-        if [ "$idle" -ge "${WK_STALL_SECONDS:-900}" ] && [ "$warned" -eq 0 ]; then
+        # Same name and default as lib/watchdog.sh's WK_STALL_SECONDS -- one
+        # value, so setting it once covers a stall warning whether the job
+        # is watched here or in the foreground.
+        if [ "$idle" -ge "${WK_STALL_SECONDS:-300}" ] && [ "$warned" -eq 0 ]; then
             warn "no output for ${idle}s -- not stopping it; a detached job can be
   silent for a long time. Look on the far side:  tail -f $log"
             warned=1
         fi
+        # Same name and default as lib/watchdog.sh's WK_HEARTBEAT_SECONDS.
         if [ "$stream" != 1 ] && [ $(( now - last_beat )) -ge "${WK_HEARTBEAT_SECONDS:-300}" ]; then
             log "  ... still running ($(( (now - start) / 60 ))m)"
             last_beat=$now

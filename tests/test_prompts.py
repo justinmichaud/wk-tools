@@ -6,9 +6,9 @@ named here as owed work if it is not.
 
 This is a point-in-time audit, not a general-purpose scanner: the expected
 site lists below are (file, exact prompt text) snapshots of cmd/*, lib/*.sh,
-boot/*.sh, bench/*.sh and image/*.sh as of this writing -- keyed on the
-prompt text rather than a line number because several of these files were
-observed changing line count *during the writing of this test* (an
+boot/*.sh, bench/*.sh, image/*.sh and admin/* as of this writing -- keyed on
+the prompt text rather than a line number because several of these files
+were observed changing line count *during the writing of this test* (an
 unrelated concurrent edit elsewhere in the tree); a line-number key would
 have failed on every unrelated line added above it, which is not what this
 audit is for. A new prompt, a reworded one, or a deleted one still fails
@@ -16,11 +16,20 @@ the relevant test -- on purpose, so it is looked at and the list updated
 deliberately rather than drifting unnoticed. Failure messages report the
 line grep finds *right now*, for whoever is looking.
 
+Beyond the (file, text) classification, TestConfirmSitesArePrecededByDestructiveWording
+re-derives "destructive" a second, independent way: it greps the ~10 lines
+leading into each confirm() call for an actual destructive verb/word
+(erase, delete, remove, overwrite, destroy, ...) or an already-present
+`warn` saying as much, rather than trusting DESTRUCTIVE_SITES' own
+say-so -- so a site added to that set without any such wording nearby is
+still caught.
+
 Run: python3 -m unittest tests.test_prompts -v
 """
 
 import os
 import pty
+import re
 import subprocess
 import unittest
 
@@ -28,12 +37,13 @@ from tests.support import REPO, bash
 
 
 # --- what gets audited --------------------------------------------------------
-# The exact directory/glob set docs/HANDOFF-test-runner.md names: cmd/* (every
-# file directly under cmd/, which all lack an extension) and lib/, boot/,
+# cmd/* and admin/* (every file directly under each, which mostly lack an
+# extension -- admin/wk-card-priv, admin/wk-quiesce-priv) plus lib/, boot/,
 # bench/, image/'s own *.sh files -- not their subdirectories (image/yocto/...
 # is recipe metadata, not a wk command).
 def _target_files():
     files = [p for p in sorted((REPO / "cmd").iterdir()) if p.is_file()]
+    files += [p for p in sorted((REPO / "admin").iterdir()) if p.is_file()]
     for d in ("lib", "boot", "bench", "image"):
         files += sorted((REPO / d).glob("*.sh"))
     return [p.relative_to(REPO) for p in files]
@@ -127,6 +137,10 @@ EXPECTED_SAFE_RAW_READS = {
         "reads three lines from a heredoc, not a terminal",
     ("cmd/sync", 'read -r _pick </dev/tty || _pick=""'):
         "reads a menu number (which workspace, or --machine) -- a choice among several, not a yes/no destructive decision",
+    ("admin/wk-card-priv", 'read -r type tran <<EOF'):
+        "reads two fields from a heredoc, not a terminal",
+    ("cmd/sysimage", 'read -r bytes sha < "$WRITE_META"'):
+        "reads the stream meter's byte count and hash from a file, not a terminal",
 }
 
 
@@ -196,6 +210,79 @@ class TestConfirmSitesAreDestructive(unittest.TestCase):
             )
 
 
+# A destructive verb/word, or a warn()-shaped statement of one (ERASES,
+# deletes, removes, overwrite -- CLAUDE.md's own examples, plus the other
+# words the tree actually uses for the same thing: destroy, wipe,
+# deprovision, rebuild, drop, replace, "cannot be undone").
+DESTRUCTIVE_WORD_RE = re.compile(
+    r"destroy|erase|delet|remov|overwrit|wipe|deprovision|rebuild|drop|"
+    r"replac|cannot be undone",
+    re.IGNORECASE,
+)
+
+# confirm() site(s) that guard something genuinely destructive but where
+# DESTRUCTIVE_WORD_RE finds nothing in the ~10 lines leading into the
+# prompt -- the hazard is stated further up the file, past this check's
+# window. A name, not a fix: none of these files are in the set this task
+# may edit.
+DESTRUCTIVE_WORDING_TOO_FAR = {
+    ("bench/mac-bench-volume.sh",
+     'confirm "start the install onto \'$VOLUME\' now?" || { log "nothing done"; return 0; }'):
+        "installing macOS overwrites the target volume; the hazard "
+        "(\"NEXT IS THE PART THAT ... REBOOTS THIS MACHINE\") is stated "
+        "~50 lines above the confirm, past the ~10-line window this check reads",
+}
+
+
+def _confirm_context(path, lineno, before=10):
+    """The `before` lines leading into (and including) line `lineno` of
+    `path` -- the window TestConfirmSitesArePrecededByDestructiveWording
+    reads, matching the ~10 lines the task asked for."""
+    text = (REPO / path).read_text(errors="replace").splitlines()
+    start = max(0, lineno - before)
+    return "\n".join(text[start:lineno])
+
+
+class TestConfirmSitesArePrecededByDestructiveWording(unittest.TestCase):
+    """Automated half of (c), independent of DESTRUCTIVE_SITES' own
+    classification: every confirm() call site must have an actual
+    destructive verb/word (or an already-printed warn() saying as much) in
+    the ~10 lines leading into the prompt -- so a site added to
+    DESTRUCTIVE_SITES without any such wording nearby is caught here
+    rather than only trusted."""
+
+    def test_every_confirm_site_has_destructive_wording_nearby(self):
+        found = _confirm_sites()
+        unworded = []
+        for (path, text), lineno in found.items():
+            if (path, text) in DESTRUCTIVE_WORDING_TOO_FAR:
+                continue
+            ctx = _confirm_context(path, lineno)
+            if not DESTRUCTIVE_WORD_RE.search(ctx):
+                unworded.append((path, lineno, text))
+        self.assertEqual(
+            unworded, [],
+            "confirm() site(s) with no destructive verb/word in the ~10 "
+            f"lines leading into the prompt: {unworded}",
+        )
+
+    def test_the_far_wording_exception_is_still_accurate(self):
+        found = _confirm_sites()
+        for key, reason in DESTRUCTIVE_WORDING_TOO_FAR.items():
+            self.assertIn(
+                key, found,
+                f"{key}: no longer found ({reason}) -- update DESTRUCTIVE_WORDING_TOO_FAR",
+            )
+            path, _ = key
+            lineno = found[key]
+            ctx = _confirm_context(path, lineno)
+            self.assertIsNone(
+                DESTRUCTIVE_WORD_RE.search(ctx),
+                f"{key}: now has destructive wording nearby -- drop it from "
+                "DESTRUCTIVE_WORDING_TOO_FAR",
+            )
+
+
 class TestConfirmDefaultsToNoAndDeclinesWithoutATerminal(unittest.TestCase):
     """(b): confirm()'s own behaviour, driven directly -- no wk command, no
     workspace, no store."""
@@ -216,6 +303,24 @@ class TestConfirmDefaultsToNoAndDeclinesWithoutATerminal(unittest.TestCase):
             cwd=str(REPO),
             env={**os.environ, "WK_ROOT": str(REPO)},
             stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertIn("RC=1", cp.stdout, cp.stderr)
+        self.assertIn("declining", cp.stderr)
+        self.assertIn("no terminal", cp.stderr)
+
+    def test_declines_a_piped_yes_because_a_pipe_is_not_a_tty(self):
+        # `echo n | ...` (and, tellingly, `echo y | ...`) both hit the same
+        # [ ! -t 0 ] branch as the DEVNULL case above: a pipe is not a
+        # terminal either, so the reply's content never even gets read --
+        # there is no way to answer "yes" without a real tty or WK_YES.
+        cp = subprocess.run(
+            ["bash", "-c", self.SCRIPT],
+            cwd=str(REPO),
+            env={**os.environ, "WK_ROOT": str(REPO)},
+            input="y\n",
             capture_output=True,
             text=True,
             timeout=20,

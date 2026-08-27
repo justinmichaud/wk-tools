@@ -44,8 +44,8 @@ yocto_status() { echo "$(wk_ws_dir "$1")/yocto.status"; }
 
 # A plain Ubuntu, not the wkdev SDK image: 24.04 is a supported Yocto
 # scarthgap build host, and the SDK image is three releases past one
-# (container/yocto/Containerfile). Overridable for the day the pinned poky
-# moves to a release whose supported host is newer.
+# (container/yocto/Containerfile). WK_YOCTO_BASE overrides it, for the day
+# the pinned poky moves to a release whose supported host is newer.
 YOCTO_BASE_IMAGE="${WK_YOCTO_BASE:-docker.io/library/ubuntu:24.04}"
 
 # The workspace image for a Yocto build, built if it is not already there.
@@ -168,6 +168,8 @@ $(t_exec "$ws" bash -c "sed -n 's/^\[\(.*\)\]/      \1/p' $conf" 2>/dev/null | t
 
 # Evidence, not the status file: the pid is read from the workspace and
 # tested in the workspace, the only namespace the number means anything in.
+# The wrapper outlives a failed command briefly, so a restart inside that
+# window is refused as "already running" until it exits or `--stop`.
 yocto_running() {
     local ws="$1" stage="$2" pid
     pid=$(cat "$(yocto_pidfile "$ws" "$stage")" 2>/dev/null | tr -dc '0-9') || true
@@ -277,6 +279,7 @@ yocto_wait() {
 
     while yocto_running "$ws" "$stage"; do
         # Slower than run_watched's poll: each check is a container exec.
+        # WK_YOCTO_POLL_SECONDS overrides the interval.
         sleep "${WK_YOCTO_POLL_SECONDS:-30}"
         now=$(date +%s)
         idle=$(log_age "$log" 2>/dev/null) || idle=0

@@ -1,37 +1,26 @@
 #!/usr/bin/env bash
 #
-# Runs once, inside the golden base VM, over ssh from targets/vm.sh.
+# Runs once, inside the golden base VM, over ssh from targets/vm.sh. Paid here
+# exactly once so every workspace inherits it for free via `tart clone` (APFS
+# copy-on-write): Xcode's first-launch components, the WebKit clone, the
+# Claude CLI.
 #
-# Everything expensive about a macOS build environment is paid here exactly
-# once -- Xcode's first-launch components, the WebKit clone, the Claude CLI --
-# and every workspace inherits the result through `tart clone`, which is an
-# APFS copy-on-write operation. That is the entire reason the base exists:
-# without it, each workspace would re-clone a multi-gigabyte repository.
-#
-# Constraints:
-#
-#   bash 3.2. This is the macOS system bash and there is no other one here.
-#   Idempotent. It is re-run by `wk vm base --rebuild` and after any change to
-#   this file, so every step checks before acting.
+# bash 3.2: the macOS system bash, and there is no other one here.
 
 set -euo pipefail
 
 MARKER="$HOME/.wk-provisioned"
 SRC="$HOME/WebKit"
-# The tree targets/vm.sh rsyncs in (t_tools). Named once, here, because two
-# steps below read it and they are far apart.
+# The tree targets/vm.sh rsyncs in (t_tools).
 WK_TOOLS_DIR="$HOME/wk-tools"
 
 say() { printf '==> %s\n' "$*" >&2; }
 
 # --- Xcode -------------------------------------------------------------------
-# The prebuilt image ships Xcode, which is the whole reason to start from it:
-# a from-scratch install is multi-hour and needs an Apple ID. What it does not
-# always ship is an accepted licence or the first-launch components, and both
-# fail the build far downstream with an error that does not mention either.
-# `| head -1` would SIGPIPE xcodebuild and make the pipeline fail even on
-# success, so the fallback fires alongside the real answer. sed reads its input
-# to the end and does not.
+# The image ships Xcode but not always an accepted licence or first-launch
+# components; both fail the build far downstream with an unrelated error.
+# sed (not `| head -1`) avoids SIGPIPEing xcodebuild, which would fail the
+# pipeline even on success.
 _xcode=$(xcodebuild -version 2>/dev/null | sed -n 1p) || true
 [ -n "$_xcode" ] || {
     echo "error: no usable Xcode in this image" >&2
@@ -42,24 +31,18 @@ sudo xcodebuild -license accept >/dev/null 2>&1 || true
 sudo xcodebuild -runFirstLaunch >/dev/null 2>&1 || true
 
 # --- claim the whole disk ------------------------------------------------------
-# Growing the virtual disk is only half of it: the guest's APFS container still
-# spans the old size, so the extra space is invisible until the container is
-# resized to fill its physical store. Without this the build dies with
-# "No space left on device" while the host thinks the guest has 100 GB spare.
-#
-# A Release build tree runs to tens of gigabytes on top of a ~19 GB checkout,
-# so this is the floor below which a build is not worth starting.
+# Growing the virtual disk doesn't grow the guest's APFS container; without a
+# resize the build dies with "No space left" while the host sees free space.
+# 60G is the floor below which a Release build (tens of GB on a ~19G checkout)
+# is not worth starting.
 NEED_FREE_GB=60
 
 _free_gb() { df -g /System/Volumes/Data | awk 'NR==2 {print $4}'; }
 
 _store=$(python3 "$WK_TOOLS_DIR/lib/wkmac.py" physical-store 2>/dev/null)
 if [ -n "$_store" ]; then
-    # `0` means "use all available space". Recent macOS expands the container
-    # by itself on first boot after the disk grows, in which case this returns
-    # error -69743 ("new size must be different") -- which is success wearing
-    # an error's clothes. So the outcome is judged on free space afterwards,
-    # not on the exit status.
+    # 0 = all available space. macOS may auto-expand already, returning error
+    # -69743 as success in disguise -- judged by free space after, not exit status.
     _out=$(sudo diskutil apfs resizeContainer "$_store" 0 2>&1) || true
 fi
 
@@ -74,26 +57,21 @@ else
 fi
 
 # --- keep the guest awake ----------------------------------------------------
-# A headless VM that goes to sleep mid-link looks exactly like a stalled build,
-# and the watchdog would eventually kill it as one. There is no display and no
-# battery here, so there is nothing to save.
+# A sleeping headless VM looks like a stalled build to the watchdog, which
+# would kill it as one; there's no display or battery here to save power for.
 sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true
 sudo systemsetup -setcomputersleep Never >/dev/null 2>&1 || true
 
 # --- the checkout ------------------------------------------------------------
-# Single branch, matching what the Linux mirror carries. WebKit has ~920
-# branches and the rest cost tens of gigabytes for histories nobody checks out;
-# a workspace that needs one can fetch it on demand.
+# Single branch (~920 total in WebKit; the rest cost tens of GB nobody checks
+# out) -- a workspace that needs one fetches it on demand.
 if [ -d "$SRC/.git" ]; then
     say "WebKit checkout present, fetching"
     git -C "$SRC" fetch --quiet origin main || true
     git -C "$SRC" reset --hard --quiet origin/main || true
 elif [ -d /tmp/wk-seed.git ]; then
-    # The host had a checkout and rsync'd a bare copy of main in. Cloning from
-    # it is a local clone inside the guest, so it hardlinks instead of copying
-    # and finishes in seconds. origin is then re-pointed at GitHub and fetched,
-    # so the result is indistinguishable from a fresh network clone -- the seed
-    # only saves the download, it never decides what the checkout contains.
+    # Local clone from the host's rsync'd bare seed hardlinks and finishes in
+    # seconds; origin is then re-pointed at GitHub so the result matches a fresh clone.
     say "cloning WebKit from the host-provided seed"
     git clone --quiet --branch main /tmp/wk-seed.git "$SRC"
     git -C "$SRC" remote set-url origin https://github.com/WebKit/WebKit.git
@@ -105,17 +83,12 @@ else
     git clone --quiet --single-branch --branch main \
         https://github.com/WebKit/WebKit.git "$SRC"
 fi
-# origin is WebKit/WebKit and the forks are already there -- the same wiring
-# every other target's checkout gets, from the one place that knows the list
-# (wk_wiring_script in lib/store.sh, part of the tree rsynced in above).
+# origin is WebKit/WebKit; forks are wired the same way every checkout gets,
+# from wk_wiring_script (lib/store.sh). Run in a subshell because those files
+# define their own log()/warn(); must not clash with this script's.
 #
-# In a subshell, because those files are written for `wk` and define log(),
-# warn() and a shell mode of their own; this script has its own and neither
-# should be able to surprise the other.
-#
-# Whether a push from in here can *authenticate* is a separate switch -- see
-# `wk push`. A guest has no deploy key today, so the push URL is a URL that
-# fails at the door rather than one that quietly pushes.
+# A guest has no deploy key, so a push from here fails at the door rather than
+# silently succeeding -- see `wk push`.
 _wiring=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_wiring_script "$2"' \
               _ "$WK_TOOLS_DIR" "$SRC" 2>/dev/null) \
     && sh -c "$_wiring" \
@@ -125,15 +98,13 @@ _wiring=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_wiring_script "
 say "WebKit at $(git -C "$SRC" rev-parse --short HEAD)"
 
 # --- Claude Code -------------------------------------------------------------
-# Its own installer, to its own path: it self-updates into
-# ~/.local/share/claude/versions/, so a binary copied anywhere else can never
-# update itself.
+# Its own installer, to ~/.local/share/claude/versions/: a binary copied
+# elsewhere can't self-update.
 #
-# Credentials do NOT come across. On Darwin the CLI keeps them in the login
-# Keychain, not in ~/.claude/.credentials.json, so the shared-secrets volume
-# that works for the Linux workspaces has nothing to share here. Expect one
-# `claude login` per VM; it survives cloning if you log in before the base is
-# shut down, because the Keychain is part of the disk image.
+# Credentials live in the login Keychain on Darwin, not
+# ~/.claude/.credentials.json, so the Linux workspaces' shared-secrets volume
+# has nothing to share here -- log in once per VM before shutdown and the
+# Keychain survives cloning.
 if command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/bin/claude" ]; then
     say "Claude CLI present"
 else
@@ -142,15 +113,13 @@ else
         echo "warning: Claude CLI install failed; 'wk claude' will not work here" >&2
 fi
 
-# The workspace-side Claude config, same entries container/firstrun.sh links in
-# a container. Without this the guest runs a skip-permissions agent with no
-# CLAUDE.md, no settings and no skills. The caller rsyncs the whole wk-tools
-# tree in before running this script.
+# Same Claude config entries container/firstrun.sh links in a container;
+# without them the guest runs a skip-permissions agent with no CLAUDE.md,
+# settings or skills.
 #
-# Skills are a read-only symlink into the synced tree here, unlike a
-# container's shared mutable /skills volume: `wk build` re-rsyncs the tree with
-# --delete on every run, so in-guest skill edits would be silently clobbered --
-# better they fail to write than quietly vanish.
+# Skills are a read-only symlink here, not a mutable volume: `wk build`
+# re-rsyncs with --delete, so an in-guest skill edit should fail to write
+# rather than silently vanish on the next sync.
 if [ -d "$WK_TOOLS_DIR/claude" ]; then
     mkdir -p "$HOME/.claude"
     ln -sfn "$WK_TOOLS_DIR/claude/settings.json" "$HOME/.claude/settings.json"
@@ -163,20 +132,14 @@ else
 fi
 
 # --- egress ---------------------------------------------------------------
-# The guest's only route out is the proxy on the host: Softnet denies
-# everything else. Nothing here resolves names itself -- the proxy does that,
-# on the other side of the boundary -- so no resolver is needed or wanted.
+# The guest's only route out is the host proxy; Softnet denies everything else.
+# ssh doesn't honour http_proxy, so `git push` over ssh from inside a guest
+# fails -- push over HTTPS or from the host instead.
 #
-# Anything that speaks HTTP honours these. What does NOT is ssh, so `git push`
-# over ssh from inside a guest will not work; push over HTTPS, or do it from
-# the host. The Linux workspaces solve this with container/proxy/ssh-proxy.py
-# and the same trick would work here, but it is not wired up yet.
-# No default for the address. Tart's stock vmnet gateway, 192.168.64.1, is the
-# obvious one and is wrong: this repo puts guests on WK_VM_SUBNET (192.168.2.x),
-# so that fallback is an address nothing listens on. Guessing wrong here is silent
-# and expensive: the guest gets a proxy it cannot reach, every fetch times out,
-# and the failure is indistinguishable from Softnet correctly denying traffic.
-# The caller knows the real address; if it did not pass one, say so and stop.
+# No default address: Tart's stock gateway (192.168.64.1) is wrong for guests
+# on WK_VM_SUBNET (192.168.2.x), and a wrong guess fails silently
+# (indistinguishable from Softnet denying traffic), so an unset
+# WK_VM_PROXY_ADDR is a hard stop.
 if [ -z "${WK_VM_PROXY_ADDR:-}" ]; then
     echo "provision-base: WK_VM_PROXY_ADDR was not passed in; refusing to guess" >&2
     echo "  (the guest would silently get an unreachable proxy and no egress)" >&2
@@ -197,56 +160,35 @@ EOF
     fi
 done
 
-# The image's own account password. The Cirrus Labs images ship admin/admin and
-# sysadminctl needs it to change the lock setting. This is not a secret and is
-# not protecting anything: the guest holds no credentials, its egress is
-# filtered by Softnet outside the guest, and it is destroyed with `wk rm`. It is
-# recorded here so the lock setting below can always be reached -- a guest
-# whose password nobody knows is a guest you can be locked out of.
+# Cirrus Labs images ship admin/admin; sysadminctl needs it to change the lock
+# setting below. Not a secret worth protecting: the guest holds no credentials,
+# is Softnet-filtered, and is destroyed with `wk rm`.
 WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"
 
-# Split WK_VM_DISPLAY ("1920x1080") for the login agent below. Passed in by the
-# caller so the guest and `tart set --display` cannot disagree.
+# WK_VM_DISPLAY ("1920x1080") is passed in so the guest and `tart set --display` cannot disagree.
 WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
 WK_VM_DISPLAY_W="${WK_VM_DISPLAY%x*}"
 WK_VM_DISPLAY_H="${WK_VM_DISPLAY#*x}"
 
 # --- the screen ------------------------------------------------------------
-# A macOS guest exists to be looked at: it is the only workspace kind with a
-# real GPU, and MiniBrowser is meant to be interacted with. All of the below is
-# about making sure the window actually shows a usable desktop rather than a
-# password prompt nobody knows the answer to.
+# A macOS guest is the only workspace kind with a real GPU and a window meant
+# to be looked at, so it must come up on a usable desktop, not a password prompt.
 #
-# Three separate mechanisms conspire to hide the desktop, and disabling any two
-# of them is not enough:
+# Three separate mechanisms hide the desktop; disabling any two is not enough:
 #
-#   1. the screen saver          -- idleTime
-#   2. display sleep             -- pmset, and it is not sufficient on its own
-#   3. the screen *lock*         -- a separate setting from either of the above
-#
-# The lock is the one that actually blocks login: it is controlled by
-# sysadminctl independently of the screen saver and askForPassword settings,
-# and disabling only those two leaves the guest behind "Enter Password" on
-# every boot.
+#   1. the screen saver   -- idleTime
+#   2. display sleep      -- pmset (not sufficient alone)
+#   3. the screen *lock*  -- sysadminctl, independent of the other two, and the
+#      one that actually blocks login
 sudo -n sysadminctl -screenLock off -password "$WK_VM_PASSWORD" 2>/dev/null ||     echo "warning: could not turn off the screen lock; the guest may come up locked" >&2
 
-# 4. macOS's own post-login Setup Assistant panes. From the outside this reads
-#    as "stuck on Update Automatically" and is not stuck:
-#    `/var/db/.AppleSetupDone` is present, auto-login has happened and the
-#    console belongs to the admin user. What is on the screen is the
-#    *post*-login assistant (Setup Assistant.app's mbusertrampoline), which
-#    asks about automatic updates, Siri, appearance and analytics on the first
-#    login of a new install -- and every clone of the base is a new install by
-#    that measure.
+# 4. Setup Assistant's post-login panes (Siri, appearance, analytics) run on
+#    every clone -- each clone is a new install by macOS's own reckoning, even
+#    though auto-login and .AppleSetupDone are already satisfied.
 #
-#    Harmless for ssh and for builds, which is why it went unnoticed; not
-#    harmless for anything that draws. It sits modal in front of the desktop,
-#    so a browser window under it is occluded -- and an occluded window has its
-#    timers throttled, which is a benchmark measuring the wrong thing rather
-#    than failing.
-#
-#    Answering the panes in advance is the documented way to stop them: each
-#    `DidSee*` key is what the assistant sets when you click through it.
+#    Modal in front of the desktop: occludes any drawing window, which throttles
+#    its timers -- a benchmark measuring the wrong thing rather than failing.
+#    Each `DidSee*` key below is what the assistant sets when clicked through.
 for _k in DidSeeCloudSetup DidSeeSiriSetup DidSeeAppearanceSetup           DidSeePrivacy DidSeeTrueTone DidSeeAccessibility DidSeeSyncSetup; do
     defaults write com.apple.SetupAssistant "$_k" -bool true
 done
@@ -260,8 +202,7 @@ defaults write com.apple.screensaver askForPassword -int 0
 defaults write com.apple.screensaver askForPasswordDelay -int 0
 sudo -n pmset -a displaysleep 0 sleep 0 disablesleep 1 2>/dev/null || true
 
-# pmset settings alone do not keep the display awake. A held power assertion
-# does, so hold one for the life of the guest.
+# pmset alone doesn't keep the display awake; hold a power assertion for the guest's life.
 sudo -n tee /Library/LaunchDaemons/org.wk.nosleep.plist >/dev/null <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -276,18 +217,14 @@ PLIST
 sudo -n launchctl bootout system/org.wk.nosleep 2>/dev/null || true
 sudo -n launchctl bootstrap system /Library/LaunchDaemons/org.wk.nosleep.plist 2>/dev/null || true
 
-# Resolution. Set once at login to whatever the VM was configured with, so the
-# guest does not come up on a stale saved mode. After this, --display-refit
-# takes over and the guest tracks the window as it is resized or
-# full-screened, so do NOT raise this to "something big": the configured size
-# is a *floor* on the tart window (see WK_VM_DISPLAY in targets/vm.sh), and a
-# large one is what makes the window unresizable.
+# Set once at login to the VM's configured size so it doesn't come up on a
+# stale saved mode; --display-refit then tracks the window on resize. Do NOT
+# raise this "big" -- it's a floor on the tart window (WK_VM_DISPLAY in
+# targets/vm.sh), and a large floor makes the window unresizable.
 #
-# `tart set --display WxH` sets what the virtual display is *capable* of, not
-# the mode the guest picks, so ask CoreGraphics directly for the mode at every
-# login, once the display is awake -- the same call errors against a sleeping
-# display, which is why this is a login agent and not a one-shot during
-# provisioning.
+# `tart set --display WxH` sets display capability, not the picked mode, and
+# the CoreGraphics call to pick it errors against a sleeping display -- hence
+# a login agent, not a one-shot during provisioning.
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/wk-set-display.m" <<'OBJC'
 #import <Foundation/Foundation.h>
@@ -328,8 +265,7 @@ cat > "$HOME/Library/LaunchAgents/org.wk.display.plist" <<PLIST
 </dict></plist>
 PLIST
 
-# ~/.local/bin is not on the default macOS PATH, and `wk build` runs commands
-# through a login shell specifically so this file is read.
+# ~/.local/bin isn't on default macOS PATH; `wk build` uses a login shell so this file is read.
 if ! grep -q 'wk-tools: PATH' "$HOME/.zprofile" 2>/dev/null; then
     cat >> "$HOME/.zprofile" <<'EOF'
 # wk-tools: PATH
@@ -344,26 +280,14 @@ EOF
 fi
 
 # --- webkitpy's autoinstalled packages ----------------------------------------
-# run-webkit-tests is python and imports webkitpy, which downloads its own
-# dependencies from PyPI on first use into Tools/Scripts/libraries/autoinstalled
-# (11 MB, measured). That download lands wherever it first happens -- which,
-# left alone, is inside every new workspace, so each one pays it again, and each
-# one pays it at the worst moment: the first test run.
+# run-webkit-tests downloads webkitpy's PyPI dependencies (11 MB, measured)
+# into Tools/Scripts/libraries/autoinstalled on first use; warming it here puts
+# it in the golden image, free for every workspace via the APFS clone.
 #
-# Warming it here puts it in the golden image instead, where the APFS clone
-# makes it free for every workspace.
-#
-# With the proxy variables explicitly *cleared*, which is the opposite of what
-# it looks like it should want. The base is not a workspace: it boots without
-# Softnet (targets/vm.sh passes the filter flags in t_start only), so it has
-# the open network on plain vmnet -- 192.168.64.x, gateway 192.168.64.1 --
-# while the block written above names the Softnet gateway, 192.168.2.1, which
-# exists only while a filtered *workspace* guest is running. That block is
-# written for the clones, and inside the base it points at an unreachable
-# proxy.
-#
-# Best-effort and quiet on failure. This is a cache, not a dependency -- a base
-# that skipped it still works, it just pays the download later.
+# Proxy vars are explicitly cleared: unlike a workspace, the base boots without
+# Softnet, on the open 192.168.64.x vmnet -- the Softnet-gateway proxy block
+# written above is for clones and points nowhere reachable from inside the base.
+# Best-effort: a base that skips this just pays the download later, per workspace.
 if [ -d "$SRC/Tools/Scripts" ]; then
     say "warming webkitpy's autoinstalled packages"
     ( cd "$SRC" && env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
@@ -375,10 +299,8 @@ if [ -d "$SRC/Tools/Scripts" ]; then
 fi
 
 # --- what is deliberately absent ---------------------------------------------
-# ccache. There is no Homebrew here and no signed installer for it, and the
-# Xcode build does not use it unless WK_USE_CCACHE=YES finds one on PATH. A mac
-# build is therefore always a real build; budget accordingly, and prefer
-# incremental builds in a long-lived workspace over recreating one.
+# ccache: no Homebrew or signed installer here, and Xcode only uses it via
+# WK_USE_CCACHE=YES finding one on PATH. A mac build is always a real build.
 
 date -u +%Y-%m-%dT%H:%M:%SZ > "$MARKER"
 say "base provisioning complete"

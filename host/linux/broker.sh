@@ -41,9 +41,10 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 
 # Not sandboxed the way wk-proxy is: the proxy only opens sockets, but this
-# one runs \`wk boot\`/\`wk pi\`, reading the image store and ssh-ing to a
-# board -- it is the thing with the privilege. What bounds it instead is the
-# vocabulary: seven commands against machines the fleet declares as bench devices.
+# one runs \`wk boot\`/\`wk pi\`, reading what system a device's own boot
+# partition holds and ssh-ing to a board -- it is the thing with the
+# privilege. What bounds it instead is the vocabulary: seven commands against
+# machines the fleet declares as bench devices.
 PrivateTmp=yes
 
 [Install]

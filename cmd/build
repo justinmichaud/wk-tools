@@ -20,6 +20,13 @@
 #   --cmake <flags>         extra CMake flags, added to the config's own (repeatable)
 #   --env NAME=VALUE        extra environment for the build, overriding the config's (repeatable)
 #   --                      everything after this goes to build-webkit verbatim
+#
+#   WK_BABYSIT_MODEL=<model>    the model bare `--babysit` (no `=model`) uses
+#                               (default haiku)
+#   WK_BABYSIT_ATTEMPTS=<n>     fixes the babysitter tries before giving up
+#                               (default 5)
+#   WK_BUILD_LOCK_WAIT=<s>      how long a build waits for another build on
+#                               the same workspace before giving up (default 3600)
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

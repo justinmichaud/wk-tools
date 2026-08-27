@@ -27,6 +27,9 @@
 
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
+# Set by the LaunchAgent plist `wk bench mac-ab` writes (bench/mac-ab.sh),
+# always to /var/wk; the fallback here only lets this run by hand, off the
+# agent, for debugging.
 WK_AB_ROOT="${WK_AB_ROOT:-/var/wk}"
 JOB="$WK_AB_ROOT/job.json"
 STATE="$WK_AB_ROOT/autorun.state"

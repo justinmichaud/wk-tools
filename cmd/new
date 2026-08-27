@@ -30,6 +30,10 @@
 #   --no-wait            return once creation has started, without waiting for it
 #   --pr <spec>          check it out onto a PR head once ready -- the same
 #                        spec `wk pr` takes: <user>:<branch>, <n>, or wpe:<n>
+#
+#   WK_NEW_TIMEOUT=<s>   how long this end waits for the driver before giving
+#                        up (default 3600); the driver itself is unaffected
+#                        and 'wk status <name>' still finds it when it ends
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -122,6 +126,9 @@ if [ -n "$DETACHED" ]; then
     # its timeout deciding from the process table alone.
     _driver_exit() {
         [ -n "${REFUSED:-}" ] && return 0
+        # WK_EXIT_STATUS: published by the atexit trap (_wk_run_atexit,
+        # lib/common.sh) to this process's exit code before atexit handlers
+        # run; the ":-0" only guards a handler invoked some other way.
         [ "${WK_EXIT_STATUS:-0}" -eq 0 ] || \
             status_write "$SF" state=failed "pid=$$" "stage=$CUR" "log=$LOG" "target=$TARGET"
         release_locks

@@ -772,14 +772,19 @@ def render_text_stream(fh, out, colour):
     exists to remove. In practice "this machine" still tends to print first:
     a local target has no network round trip to wait through.
 
-    A `{"kind":"probing","name":...}` record (emitted for every target before
-    its probe starts) gets a one-line placeholder immediately, so a slow or
-    dead machine is *visibly* still being asked about rather than silently
-    missing -- the placeholder is not erased when the real block follows (this
-    is a stream, not a terminal being redrawn in place), so "replaced" means
-    "the real answer appears right after it", and a machine that never
-    answers keeps only the placeholder, which is the honest state of the
-    world rather than invented data.
+    A `{"kind":"probing","name":<target>,"machine":<machine>}` record
+    (emitted for every target before its probe starts) gets a one-line
+    placeholder immediately, so a slow or dead machine is *visibly* still
+    being asked about rather than silently missing. The placeholder is not
+    erased when the real block follows (this is a stream, not a terminal
+    being redrawn in place), and a machine that never answers keeps only the
+    placeholder, which is the honest state of the world rather than invented
+    data.
+
+    A machine's block is drawn exactly once: when the last job feeding it
+    has flushed. On a macOS host two targets (container, vm) are one
+    machine, so drawing at every flush would print that block twice, the
+    second a superset of the first.
 
     Fleet devices and tailnet bridges print once, at the end: they are one
     more job in the same batch (see cmd/status), not a machine, and they are
@@ -788,15 +793,16 @@ def render_text_stream(fh, out, colour):
     uses.
     """
     merger = Merger()
-    probing = {}     # name -> still waiting on a machine record to match it
-    dirty = set()     # machine names with unprinted records since the last flush
+    probing = {}     # target -> still waiting on a machine record to match it
+    pending = {}     # machine -> targets whose job has not flushed yet
+    drawn = set()    # machines whose block is out
 
-    def flush():
+    def draw(machine):
         for m in merger.doc["machines"]:
-            if m["name"] in dirty:
+            if m["name"] == machine and machine not in drawn:
+                drawn.add(machine)
                 for line in render_machine_block(m, colour):
                     out.write(line + "\n")
-        dirty.clear()
         out.flush()
 
     for line in fh:
@@ -810,20 +816,25 @@ def render_text_stream(fh, out, colour):
         kind = r.get("kind")
         if kind == "probing":
             name = r.get("name", "?")
+            pending.setdefault(r.get("machine", name), set()).add(name)
             if name not in merger.index and name not in probing:
                 probing[name] = True
                 out.write(paint("  probing %s…" % name, "dim", colour) + "\n")
                 out.flush()
             continue
         if kind == "flush":
-            flush()
+            job = r.get("job")
+            for machine, jobs in pending.items():
+                jobs.discard(job)
+                if not jobs:
+                    draw(machine)
             continue
         name = merger.feed(r)
         if name is not None:
             probing.pop(name, None)
-            dirty.add(name)
 
-    flush()
+    for m in merger.doc["machines"]:
+        draw(m["name"])
     tail = render_fleet_and_bridges(merger.doc, colour)
     for line in tail:
         out.write(line + "\n")

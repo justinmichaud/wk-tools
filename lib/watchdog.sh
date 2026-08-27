@@ -8,10 +8,15 @@
 # Everything here writes to stderr so it interleaves with, but never
 # corrupts, the command's own output.
 
+# WK_POLL_SECONDS, WK_STALL_SECONDS, WK_ABORT_SECONDS, WK_HEARTBEAT_SECONDS:
+# overridable for a slower or noisier build than the defaults below assume.
+# WK_STALL_SECONDS and WK_HEARTBEAT_SECONDS share a name and a default with
+# lib/detach.sh's remote poll loop -- one value for "silence before warning"
+# and "how often to say still going" everywhere a job is watched.
 WK_POLL_SECONDS="${WK_POLL_SECONDS:-15}"      # how often to check for progress
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-300}"   # silence before warning
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-1800}"  # silence before giving up
-WK_HEARTBEAT_SECONDS="${WK_HEARTBEAT_SECONDS:-60}"
+WK_HEARTBEAT_SECONDS="${WK_HEARTBEAT_SECONDS:-300}"  # how often to say "still going"
 
 _now() { date +%s; }
 _fsize() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0; }

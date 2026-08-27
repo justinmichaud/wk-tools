@@ -75,7 +75,6 @@ section "host tools"
 if is_macos; then
     check "Xcode command line tools" "xcode-select --install"     xcode-select -p
     check "podman"                   "install the official pkg from podman.io" have podman
-    check "tart (wk vm only)"        "hand-installed from tart.run; ./setup does not install it" have tart
     check "zed"        "https://zed.dev/download" sh -c 'command -v zed || [ -d /Applications/Zed.app ]'
     check "tailscale"  "https://tailscale.com/download/macos" \
         sh -c 'command -v tailscale || [ -d /Applications/Tailscale.app ]'
@@ -127,9 +126,27 @@ check "shell rc sources shell/bashrc" "./setup --stage dotfiles" \
 #   backed-up     genuinely machine-local data; if it is not in your backups,
 #                 it is lost with the disk
 section "machine-local state (everything a rebuild cannot get from this repo)"
+# On macOS the store is the podman VM's, so a path under it is asked for in
+# there -- only while the machine is running, since doctor starts nothing.
+podman_machine_running() {
+    have podman && [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" = running ]
+}
 local_state() { # <path> <kind> <how to get it back>
     local path="$1" kind="$2" how="$3" disp
     disp="${path/#$HOME/\~}"
+    if is_macos && [ -z "${WK_IN_VM:-}" ] && [ "${path#"$WK_STORE"/}" != "$path" ]; then
+        disp="$disp (podman VM)"
+        if ! podman_machine_running; then
+            unk "$disp -- not visible while the podman machine is stopped" "$kind: $how"
+            return 0
+        fi
+        if podman machine ssh "$WK_MACHINE" -- "test -e $(sh_quote "$path")" </dev/null >/dev/null 2>&1; then
+            ok "$disp ($kind) -- $how"
+        else
+            unk "$disp (absent)" "$kind: $how"
+        fi
+        return 0
+    fi
     if [ -e "$path" ]; then
         ok "$disp ($kind) -- $how"
     else
@@ -146,12 +163,6 @@ local_state "$WK_STORE/secrets/claude-credentials.json" re-authable "claude logi
 # re-authable, not backed-up: a new tagged key from the admin console is as
 # good as the old one, and a tagged node never key-expires.
 local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "wk key tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected"
-# The fleet's one WiFi identity (disk_wifi_creds_path, boot/disk.sh) -- what
-# lets rpi3/rpi4/rpi5's rescue and bench images reach a network from the
-# desk, where none of the three has a cable. Host-local, since this write
-# happens on the host and $WK_STORE is the podman VM's store on macOS.
-# `wk sysimage write` refuses a rpi3/rpi4/rpi5 card with none present.
-local_state "${WK_WIFI_CREDS:-$HOME/.config/wk/wifi}" re-authable "hand-create it: ssid=<network> and psk=<passphrase> lines, mode 0600"
 # What the request broker did, on this machine, for workspaces that could
 # not do it themselves. Regenerable: a machine's state is always read back
 # from the machine, so losing the directory costs the words, not a fact.
@@ -198,7 +209,7 @@ section "workspaces store"
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     if ! have podman || ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
         miss "podman machine '$WK_MACHINE'" "./setup --stage machine"
-    elif [ "$(podman machine inspect "$WK_MACHINE" --format '{{.State}}' 2>/dev/null)" != running ]; then
+    elif ! podman_machine_running; then
         unk "podman machine '$WK_MACHINE' is stopped" "wk start, then re-run wk doctor for the store checks"
     else
         ok "podman machine '$WK_MACHINE' running"

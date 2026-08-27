@@ -1,12 +1,25 @@
 # HANDOFF — cross-compile targets (`--sysroot`)
 
-Not started. The word is reserved and the refusals are in place: `wk new
---sysroot` and `wk build --sysroot` both die pointing here (`cmd/new:76`,
-`cmd/build:188`), and `lib/arch.sh` is the vocabulary that keeps the two
-mechanisms apart.
+Build WebKit on a fast machine (an arm64 or x86_64 workstation, or a Mac)
+against another distribution's sysroot, and run, test and debug the result on
+a real board running that distribution -- an Ubuntu rpi3, a riscv64 board --
+in minutes rather than the hours a yocto image costs, with clangd working
+against the same build tree. The same mechanism is the basis for running
+JSTests under QEMU (aarch64, x86_64) for EWS.
 
-Reference implementation:
+Not yocto, not buildroot: those build a whole *system*; this builds one
+WebKit for a system that already exists. If the sysroot can come out of a
+yocto SDK, that route is fine too.
+
+Reference implementation (sysroot generation works; a WebKit build against
+it has not been run):
 https://github.com/justinmichaud/webkit-container-sdk/tree/dev/cross-builds-oc
+-- `wkdev-sdk-bakery --mode=build --name=wkdev-sysroot --arch=<arch>`, then
+`wkdev-cross-sysroot --arch=<arch> --release=<release>` unpacks under
+`~/.cache/wkdev-cross` and writes the CMake toolchain file (armhf, arm64,
+riscv64, ppc64el). Upstreaming is two commits, `60bf63e60` (cross-compile
+against a sysroot) and `3d8e55c92` (drop the armhf multiarch toolchain),
+cherry-picked onto `Igalia/webkit-container-sdk@main`.
 
 ## What this is *not*
 
@@ -15,8 +28,8 @@ https://github.com/justinmichaud/webkit-container-sdk/tree/dev/cross-builds-oc
 
 |  | `--arch armhf` | `--sysroot <name>` |
 |---|---|---|
-| the workspace | *is* armhf | stays aarch64 |
-| the compiler | the image's native armhf clang | aarch64 clang |
+| the workspace | *is* armhf | stays the build machine's arch |
+| the compiler | the image's native armhf clang | the build machine's clang |
 | the libraries | the image's own | another rootfs, mounted in |
 | the flags | `linux32`, `-march=armv7-a+fp` | `-m32`, `--sysroot`, `CMAKE_LIBRARY_ARCHITECTURE`, `CMAKE_PREFIX_PATH` |
 | what it can target | only what this CPU executes | anything with a sysroot, riscv64 included |
@@ -24,48 +37,19 @@ https://github.com/justinmichaud/webkit-container-sdk/tree/dev/cross-builds-oc
 
 ## Remaining
 
-- **Decide whether this is still worth building, and for what.** WebKit is
-  already cross-built for a board by a *different* route — `wk sysimage build
-  <profile> --stage webkit` against the target's own yocto SDK — and `wk pi
-  deploy` is the transfer helper this file asked for. The case only the sysroot
-  flow can serve is a target with no SDK of its own, riscv64 above all.
-- **The test target, still never attempted**: a slim system with no SDK of its
-  own, which is exactly the condition a sysroot cross build has to satisfy, with
-  a GTK MiniBrowser as the payload. Every system this repo builds for a Pi is a
-  yocto or buildroot one that *has* an SDK, so picking the target is part of
-  this work rather than a given.
-  Build the system and the sysroot from the *same tree* and the ABI question
-  answers itself.
-- **Debugging and perf-testing a cross-built binary** are both untried, and
-  `wk debug` does not exist at all (`docs/Urgent/HANDOFF-debug.md`).
-- **Where it plugs in**, when it is built:
-  - `lib/arch.sh` is the vocabulary file; a sysroot is not an `arch` and must
-    not become a value of one (`arch_canon` already refuses `riscv64` with that
-    explanation).
-  - the build directory needs a component for a cross build, since unlike a
-    native armhf workspace it shares a checkout with the native builds beside
-    it — `WebKitBuild/cross-<sysroot>/…`, decided in `config_build_dir`
-    (`build/configs.sh`).
-  - the flags belong beside `arch_cflags`/`arch_ldflags`, keyed by sysroot.
-
-## Facts worth not re-deriving
-
-- **The mechanism**: `wkdev-sdk-bakery --mode=build --name=wkdev-sysroot
-  --arch=<arch>`, then `wkdev-cross-sysroot --arch=<arch> --release=<release>`
-  unpacks under `~/.cache/wkdev-cross` and writes the CMake toolchain file.
-  Supported: armhf, arm64, riscv64, ppc64el.
-- **Sysroot generation is exercised here; a cross *build* of WebKit against it
-  is not.** moose holds the branch at `3d8e55c`, a 1.9 GB unpacked
-  ubuntu-noble-armhf sysroot and a locally built `wkdev-sysroot:noble-armhf`,
-  and no `cross-*` build directory anywhere.
-- **The multiarch path is deliberately gone** on that branch; `wkdev-sysroot:*`
-  is the only cross mechanism there, so `wkdev-sdk:24.04_arm32_arm64` is
-  irrelevant to this work.
-- **The sysroot release is a floor, not a match**: glibc is backwards but not
-  forwards compatible, so the sysroot must come from the *oldest* target it has
-  to run on.
-- **Upstreaming is two named commits**, not a branch merge — `60bf63e60`
-  (cross-compile against a sysroot) and `3d8e55c92` (drop the armhf multiarch
-  toolchain), cherry-picked onto `Igalia/webkit-container-sdk@main`. The rest of
-  `-oc` is unrelated Swift-toolchain work. That is an item in
-  `docs/HANDOFF-architecture-review.md`.
+- [ ] the first target: an Ubuntu rpi3, built from x86_64 or a Mac, GTK or
+      WPE MiniBrowser as the payload; the sysroot comes from the *oldest*
+      release the binary has to run on (glibc is backwards compatible only)
+- [ ] `wk build <ws> <config> --sysroot <name>`: the build directory gets a
+      component (`WebKitBuild/cross-<sysroot>/…`, decided in `config_build_dir`,
+      build/configs.sh) since it shares a checkout with the native builds;
+      the flags sit beside `arch_cflags`/`arch_ldflags` (lib/arch.sh), keyed
+      by sysroot -- a sysroot is not an `arch` and `arch_canon` keeps refusing
+      `riscv64` as one
+- [ ] `wk new --sysroot` and `wk build --sysroot` stop refusing (`cmd/new`,
+      `cmd/build`) once the above exists
+- [ ] transfer and run: `wk pi deploy` onto a board running the target
+      distribution; `wk run`/`wk gui --lldb` against the deployed copy
+- [ ] clangd against the cross build tree (docs/Urgent/HUMAN-clangd.md)
+- [ ] riscv64: build on the arm64 workstation, run and debug on the board
+- [ ] JSTests under QEMU user-mode for aarch64 and x86_64, as an EWS lane

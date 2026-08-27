@@ -2,6 +2,14 @@
 #
 # rootless podman, --userns keep-id, --network none: no network interface,
 # egress only through the proxy's unix socket, no privilege needed anywhere.
+#
+# WK_SDK overrides where the SDK lives (tests/test_build_perf.py points it
+# at a scratch copy). WK_SDK_IMAGE overrides which SDK image a workspace is
+# created from -- set by image/buildroot.sh and image/yocto.sh when they
+# need a non-default one, not normally hand-set. WK_CONTAINER_USER overrides
+# the user a workspace runs as, in place of $(id -un). WK_TOOLS_SRC is the
+# bind-mount source for /opt/wk-tools; plumbing, set only inside the VM
+# (below), never by a person.
 
 if [ -n "${WK_IN_VM:-}" ]; then
     WK_SDK="${WK_SDK:-/opt/webkit-container-sdk}"

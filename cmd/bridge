@@ -35,6 +35,10 @@
 #   --no-tailnet                 (setup) stop after the role, before tailscale
 #   --dry-run                    (provision/setup) resolve everything, write
 #                             nothing
+#
+#   WK_BRIDGE_AUTHKEY=<key>       (setup) the tailnet auth key, for a run with
+#                             nobody there to paste one in; otherwise this
+#                             machine's own fleet key (wk_tailscale_authkey)
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

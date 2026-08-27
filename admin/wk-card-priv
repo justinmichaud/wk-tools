@@ -34,6 +34,10 @@
 #   - Secrets (a tailscale auth key, a WiFi passphrase) arrive on stdin,
 #     never as arguments, which are world-readable in /proc; the marker
 #     and the ssh *public* key are arguments because neither is a secret.
+#   - What arrives on stdin is data, never code: an image goes to a gated
+#     device, a key to a file, a unit archive to two fixed directories under
+#     /etc, each under a size bound. Nothing a caller sends is executed, and
+#     no file root runs is a path a caller names.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -360,6 +364,71 @@ check_wifi_value() { # <what> <value>
     esac
 }
 
+# The credential itself is never hand-made: it is this machine's own WiFi
+# connection, read as root. Netplan is the one form read -- on these
+# machines NetworkManager writes its connections as netplan
+# (/etc/netplan/90-NM-*.yaml), so a netplan reader is also the
+# NetworkManager reader, and there is nothing else to read besides.
+# Embedded rather than a sibling file: admin/install.sh installs this helper
+# alone. tests/test_wifi_seed.py lifts the python from here to test it.
+_netplan_wifi() { # -> a 0600 temp file holding ssid=/psk=, or returns 3
+    local tmp; tmp=$(mktemp /run/wk-card-wifi.XXXXXX); chmod 0600 "$tmp"
+    if cat /etc/netplan/*.yaml 2>/dev/null | python3 -c '
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+for doc in docs:
+    for _, dev in (doc.get("network", {}).get("wifis") or {}).items():
+        for ssid, ap in (dev.get("access-points") or {}).items():
+            psk = ((ap.get("auth") or {}).get("password") or ap.get("password") or "")
+            if psk:
+                print("ssid=%s" % ssid)
+                print("psk=%s" % psk)
+                sys.exit(0)
+sys.exit(3)
+' > "$tmp"; then
+        printf '%s' "$tmp"
+    else
+        rm -f "$tmp"
+        return 3
+    fi
+}
+
+# wifi-host -- read-only: is this machine (the one holding the card reader)
+# on a WiFi network with a credential, and what is it called? No device
+# argument and nothing gated -- it touches no disk, only its own netplan.
+# The PSK is read and discarded immediately; only the SSID is ever said.
+# `wk sysimage write`'s preflight asks this before anything is erased.
+v_wifi_host() {
+    local tmp ssid
+    if tmp=$(_netplan_wifi); then
+        ssid=$(sed -n 's/^ssid=//p' "$tmp" | head -1)
+        rm -f "$tmp"
+        say "wifi-host: yes ssid=$ssid"
+    else
+        say "wifi-host: no"
+    fi
+}
+
+# wifi-from-host <device> -- seeds this machine's own WiFi credential
+# (_netplan_wifi) onto partition 2, the same edit the old stdin-fed `wifi`
+# verb made. The PSK never leaves root: it is never an argument, an
+# environment variable, or a line this helper prints.
+v_wifi_from_host() {
+    local dev tmp ssid psk rc
+    dev=$(gate "${1:-}")
+    tmp=$(_netplan_wifi) \
+        || fail "no WiFi credential in this machine's netplan; the write preflight (wifi-host) should have refused before $dev was touched"
+    ssid=$(sed -n 's/^ssid=//p' "$tmp" | head -1)
+    psk=$(sed -n 's/^psk=//p' "$tmp" | head -1)
+    rm -f "$tmp"
+    check_wifi_value "the SSID" "$ssid"
+    check_wifi_value "the passphrase" "$psk"
+    rc=0
+    with_mount "$(part "$dev" 2)" _wifi_edit "$ssid" "$psk" || rc=$?
+    [ "$rc" -eq 0 ] && say "WiFi credentials seeded on $dev (ssid=$ssid)"
+    return "$rc"
+}
+
 _wifi_edit() { # <mountpoint> <ssid> <psk>
     local m="$1" ssid="$2" psk="$3" d="$1/etc/wpa_supplicant" f
     f="$d/wpa_supplicant-wlan0.conf"
@@ -381,25 +450,6 @@ _wifi_edit() { # <mountpoint> <ssid> <psk>
         || fail "the SSID did not survive the write to this disk"
     [ "$(stat -c '%a' "$f")" = 600 ] && [ -s "$f" ] \
         || fail "the WiFi credential did not land on this disk as a 0600 file"
-}
-
-# wifi <device> -- the SSID and passphrase arrive on stdin, as ssid=/psk=
-# lines (the same shape `wk sysimage write` reads them from on the driving
-# end, so the file that is asked for is the file that is sent).
-v_wifi() {
-    local dev tmp ssid psk rc
-    dev=$(gate "${1:-}")
-    tmp=$(mktemp /run/wk-card-wifi.XXXXXX); chmod 0600 "$tmp"
-    cat > "$tmp"
-    ssid=$(sed -n 's/^ssid=//p' "$tmp" | head -1)
-    psk=$(sed -n 's/^psk=//p' "$tmp" | head -1)
-    rm -f "$tmp"
-    check_wifi_value "the SSID" "$ssid"
-    check_wifi_value "the passphrase" "$psk"
-    rc=0
-    with_mount "$(part "$dev" 2)" _wifi_edit "$ssid" "$psk" || rc=$?
-    [ "$rc" -eq 0 ] && say "WiFi credentials seeded on $dev (ssid=$ssid)"
-    return "$rc"
 }
 
 _id_edit() { # <mountpoint> <old> <new>
@@ -522,6 +572,380 @@ v_eject() {
     say "$dev flushed"
 }
 
+# --- every edit an image needs, made on the card ------------------------------
+#
+# `wk sysimage write` streams an image's own bytes onto the card and then
+# makes each edit here, on the machine holding the reader: the driving end
+# never opens a Linux filesystem, so it needs no mtools, no debugfs and no
+# sfdisk -- none of which a macOS workstation has. Same rules as the verbs
+# above: the device is gated, text arrives base64 and is checked against a
+# character set, an archive arrives on stdin under a size bound, and nothing
+# from a caller becomes part of a command line.
+
+# The model of what a Pi's firmware asks of a boot tree
+# (boot/check-boot-files.py in wk-tools), installed root-owned beside this
+# helper: root runs it, so it may not be a path a caller names, and there is
+# no second copy of the model here to drift from that one.
+# TODO: admin/install.sh installs this helper alone; until it installs the
+# checker beside it, `boot-check` refuses and says so.
+CHECK_BOOT_FILES=/usr/local/libexec/wk-check-boot-files.py
+
+# Text that ends up inside a file on the card, checked against what it is
+# allowed to be rather than escaped -- the same rule as check_name. Printable
+# ASCII and whitespace only: anything else in a config.txt is not a config.txt.
+check_text() { # <what> <text>
+    case "${2:-}" in
+        '') deny "$1 is empty" ;;
+    esac
+    case "$2" in
+        *[![:print:][:space:]]*) deny "$1 has a character outside printable ASCII" ;;
+    esac
+    [ "${#2}" -le 4096 ] || deny "$1 is longer than 4096 bytes"
+}
+
+# The card's own partition table, from the card. sfdisk speaks JSON and
+# python reads it: this repo does not parse JSON in bash.
+_table() { # <device> -- 'signature=<hex>' and 'partitions=<n>'
+    sfdisk -J "$1" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    table = json.load(sys.stdin)["partitiontable"]
+except Exception:
+    sys.exit(3)
+sig = str(table.get("id", ""))
+if sig.lower().startswith("0x"):
+    sig = sig[2:]
+print("signature=%s" % sig)
+print("partitions=%d" % len(table.get("partitions") or []))
+'
+}
+
+# parts <device> -- the card's own partition table: its MBR signature and how
+# many partitions it has. Read-only. `wk sysimage write` asks straight after
+# the write, because a stream that arrived with a shell banner ahead of it
+# hashes perfectly against itself and carries no table at all.
+v_parts() {
+    local dev out
+    dev=$(gate "${1:-}")
+    out=$(_table "$dev") || deny "'$dev' has no readable partition table"
+    printf '%s\n' "$out"
+}
+
+# The one place the two spellings of a Pi boot tree are ordered: Ubuntu's
+# raspi images keep their cmdline under the os_prefix directory the firmware
+# selects, and an image carrying both boots the one under the prefix.
+_boot_file() { # <mountpoint> <name> -- the path the firmware would read, or nothing
+    local m="$1" name="$2" f
+    for f in "$m/current/$name" "$m/$name"; do
+        [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+    done
+    return 1
+}
+
+_root_spec_probe() { # <mountpoint>
+    local f spec
+    f=$(_boot_file "$1" cmdline.txt) || return 0
+    spec=$(tr ' ' '\n' < "$f" | sed -n 's/^root=//p' | head -1)
+    [ -n "$spec" ] && printf 'root=%s\n' "$spec"
+    return 0
+}
+
+# root-spec <device> -- the `root=` the card's own kernel command line names,
+# read off the card. Read-only, and the answer nothing here keeps a copy of:
+# what the card boots from is written into the card.
+v_root_spec() {
+    local dev; dev=$(gate "${1:-}")
+    with_mount -r "$(part "$dev" 1)" _root_spec_probe
+}
+
+_retarget_boot() { # <mountpoint> <partuuid of partition 2>
+    local m="$1" root="$2" f
+    f=$(_boot_file "$m" cmdline.txt) || fail "no cmdline.txt on this disk's boot partition"
+    # Rewritten in python, with both values as arguments: a root= read off a
+    # card is data, and data spliced into a sed script is a sed script.
+    python3 -c '
+import sys
+path, new = sys.argv[1], sys.argv[2]
+with open(path, errors="replace") as fh:
+    words = fh.read().split()
+with open(path, "w") as fh:
+    fh.write(" ".join(new if w.startswith("root=") else w for w in words) + "\n")
+' "$f" "root=PARTUUID=$root"
+    grep -qF "root=PARTUUID=$root" "$f" || fail "root= did not survive the rewrite on this disk"
+}
+
+_retarget_fstab() { # <mountpoint> <partuuid of partition 1> <partuuid of partition 2>
+    local m="$1" boot="$2" root="$3" f="$1/etc/fstab"
+    [ -f "$f" ] || { say "no /etc/fstab on this disk"; return 0; }
+    # The root line is usually /dev/root, which the kernel fills in and which
+    # is right already; it is the /boot line that names a card. Read back in
+    # the same pass: a line left naming a device by path is a /boot that
+    # mounts somebody else's disk.
+    python3 -c '
+import sys
+path, boot, root = sys.argv[1], sys.argv[2], sys.argv[3]
+def retarget(line):
+    fields = line.split()
+    if not fields or line.lstrip().startswith("#") or not fields[0].startswith("/dev/"):
+        return line
+    want = boot if fields[0].endswith("1") else root if fields[0].endswith("2") else ""
+    return line.replace(fields[0], want, 1) if want else line
+lines = [retarget(l) for l in open(path, errors="replace").read().splitlines(True)]
+with open(path, "w") as fh:
+    fh.write("".join(lines))
+left = [l.split()[0] for l in lines
+        if l.split() and not l.lstrip().startswith("#")
+        and l.split()[0].startswith("/dev/")
+        and (l.split()[0].endswith("1") or l.split()[0].endswith("2"))]
+if left:
+    sys.exit("still by device path: " + ", ".join(left))
+' "$f" "PARTUUID=$boot" "PARTUUID=$root" \
+        || fail "/etc/fstab on this disk still names a partition by device path"
+}
+
+# retarget <device> -- make the card name its own partitions by PARTUUID, so
+# it boots from whatever device it is put in. A wic image says
+# `root=/dev/mmcblk0p2` because its wks file did: a promise about a device,
+# and on a USB stick a promise about somebody else's. Both places that name a
+# device are rewritten -- the kernel's root=, resolved by the kernel, and
+# /boot in /etc/fstab, mounted by userspace after -- because fixing only the
+# first leaves an empty /boot. Which cards need it is the caller's question
+# (image_root_class, lib/image.sh); this one does it.
+v_retarget() {
+    local dev out sig root boot
+    dev=$(gate "${1:-}")
+    out=$(_table "$dev") || deny "'$dev' has no readable partition table to take a PARTUUID from"
+    sig=$(printf '%s\n' "$out" | sed -n 's/^signature=//p')
+    case "$sig" in
+        ''|*[!0-9a-fA-F]*) deny "'$dev' has no MBR disk signature, so a PARTUUID cannot name its partitions" ;;
+    esac
+    root=$(printf '%08x-%02d' "$((0x$sig))" 2)
+    boot=$(printf '%08x-%02d' "$((0x$sig))" 1)
+    with_mount "$(part "$dev" 1)" _retarget_boot "$root"
+    with_mount "$(part "$dev" 2)" _retarget_fstab "$boot" "$root"
+    say "$dev boots by PARTUUID=$root now, whatever device it is in"
+}
+
+_cmdline_append_edit() { # <mountpoint> <text>
+    local m="$1" add="$2" f
+    f=$(_boot_file "$m" cmdline.txt) || fail "no cmdline.txt on this disk's boot partition to append to"
+    if grep -qF -- "$add" "$f"; then
+        say "the kernel command line on this disk already carries: $add"
+        return 0
+    fi
+    # One line, always: the firmware reads the first line only, so a trailing
+    # newline would silently drop everything after it.
+    printf '%s %s\n' "$(tr -d '\r\n' < "$f")" "$add" > "$f.wk"
+    mv "$f.wk" "$f"
+    grep -qF -- "$add" "$f" || fail "the kernel command line addition did not land on this disk"
+}
+
+# cmdline-append <device> <base64 text> -- kernel command-line additions a
+# profile declares, appended to what the image already had. base64 on argv
+# like `fleet`'s marker, so the value can be checked against a character set
+# before anything decodes it. Idempotent by content.
+v_cmdline_append() {
+    local dev add
+    dev=$(gate "${1:-}")
+    check_b64 "${2:-}"
+    add=$(printf '%s' "$2" | base64 -d) || deny "the cmdline addition is not valid base64"
+    check_text "the cmdline addition" "$add"
+    case "$add" in
+        *$'\n'*) deny "a kernel command line is one line" ;;
+    esac
+    with_mount "$(part "$dev" 1)" _cmdline_append_edit "$add"
+    say "kernel cmdline on $dev += $add"
+}
+
+_config_append_edit() { # <mountpoint> <block> <marker line>
+    local m="$1" block="$2" marker="$3" f
+    f=$(_boot_file "$m" config.txt) || fail "no config.txt on this disk's boot partition to append to"
+    if grep -qxF -- "$marker" "$f"; then
+        say "config.txt on this disk already carries that block"
+        return 0
+    fi
+    printf '\n%s\n' "$block" >> "$f"
+    # Read back: a firmware setting that did not land is a board that runs at
+    # whatever clock it felt like, with nothing to notice by.
+    grep -qxF -- "$marker" "$f" || fail "config.txt on this disk did not take the block"
+}
+
+# config-append <device> <base64 block> -- firmware settings a profile
+# declares, appended to the config.txt a Pi's firmware reads whatever the OS
+# is. Idempotent by the block's own first line, which has to be the
+# `# --- wk sysimage: <profile> ---` banner: one fact, carried by the text
+# itself rather than repeated in a second argument that could disagree.
+v_config_append() {
+    local dev block marker
+    dev=$(gate "${1:-}")
+    check_b64 "${2:-}"
+    block=$(printf '%s' "$2" | base64 -d) || deny "the config.txt block is not valid base64"
+    check_text "the config.txt block" "$block"
+    marker=$(printf '%s\n' "$block" | head -1)
+    case "$marker" in
+        "# --- wk sysimage: "*) ;;
+        *) deny "a config.txt block starts with its own '# --- wk sysimage: <profile> ---' line,
+    which is what makes appending it twice a no-op" ;;
+    esac
+    with_mount "$(part "$dev" 1)" _config_append_edit "$block" "$marker"
+    say "config.txt on $dev carries $marker"
+}
+
+_boot_id_edit() { # <mountpoint> <id>
+    printf '%s\n' "$2" > "$1/wk-image.id"
+    grep -qxF -- "$2" "$1/wk-image.id" \
+        || fail "the identity did not survive the write to the boot partition"
+}
+
+# boot-id <device> <id> -- which system this card holds, on the **boot
+# partition**, a different file from /etc/wk-image in the rootfs: `wk boot`
+# reads it off a disk that is not running, without mounting anything ext4.
+v_boot_id() {
+    local dev
+    dev=$(gate "${1:-}")
+    check_name "${2:-}"
+    with_mount "$(part "$dev" 1)" _boot_id_edit "$2"
+    say "$dev's boot partition names this system $2"
+}
+
+# The unit archive's members, checked before anything is unpacked: exactly
+# `systemd/<name>.service` and `sysctl.d/<name>.conf`, so nothing can land
+# outside the two directories this verb writes -- a traversal, an absolute
+# path and a nested directory are all refused by the same rule.
+_units_names() { # <tar file>
+    local list name
+    list=$(tar -tf "$1") || deny "the unit archive is not a tar file"
+    [ -n "$list" ] || deny "the unit archive is empty"
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        case "$name" in
+            systemd/|sysctl.d/|./) continue ;;
+            systemd/*.service|sysctl.d/*.conf) ;;
+            *) deny "'$name' is not something this verb may write: a unit archive holds
+    systemd/<name>.service and sysctl.d/<name>.conf, and nothing else" ;;
+        esac
+        case "${name#*/}" in
+            ''|.*|*/*|*[!a-zA-Z0-9@._-]*) deny "'$name' is not a plain file name" ;;
+        esac
+    done <<EOF
+$list
+EOF
+}
+
+# What tar actually produced, after the fact: whatever a tar implementation
+# makes of a member name, only plain files and the two directories get copied
+# onto the card.
+_units_unpacked() { # <directory>
+    local p
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        if [ -L "$p" ]; then deny "the unit archive carries a symlink ($p)"; fi
+        if [ ! -f "$p" ] && [ ! -d "$p" ]; then deny "the unit archive carries something that is not a file ($p)"; fi
+    done <<EOF
+$(find "$1" -mindepth 1)
+EOF
+}
+
+_unit_target() { # <unit file> -- the target its [Install] section asks for
+    sed -n 's/^WantedBy=[[:space:]]*//p' "$1" | head -1 | tr -d ' \r'
+}
+
+_units_edit() { # <mountpoint> <staging directory>
+    local m="$1" work="$2" f name target n=0
+    # Which init this image runs, read out of the image rather than assumed:
+    # an image without systemd would take these units without complaint, land
+    # them where they never start, and report a watchdog installed on a board
+    # that has none.
+    if [ ! -e "$m/lib/systemd/systemd" ] && [ ! -e "$m/usr/lib/systemd/systemd" ]; then
+        say "units: no systemd on this disk; nothing installed"
+        return 0
+    fi
+    mkdir -p "$m/etc/systemd/system"
+    for f in "$work"/systemd/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        # `systemctl enable` never runs against a card, so the unit's own
+        # WantedBy= is what decides where it is symlinked -- the same fact
+        # systemd would read, rather than a second one passed beside it.
+        target=$(_unit_target "$f")
+        case "$target" in
+            *.target) ;;
+            *) fail "$name declares no WantedBy= target, so nothing would ever start it" ;;
+        esac
+        case "$target" in
+            *[!a-z0-9@.-]*) fail "'$target' is not a systemd target name" ;;
+        esac
+        cat "$f" > "$m/etc/systemd/system/$name"
+        chmod 0644 "$m/etc/systemd/system/$name"; chown 0:0 "$m/etc/systemd/system/$name"
+        mkdir -p "$m/etc/systemd/system/$target.wants"
+        ln -sf "/etc/systemd/system/$name" "$m/etc/systemd/system/$target.wants/$name"
+        [ -s "$m/etc/systemd/system/$name" ] && [ -L "$m/etc/systemd/system/$target.wants/$name" ] \
+            || fail "$name did not land on this disk"
+        n=$((n + 1))
+    done
+    for f in "$work"/sysctl.d/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        mkdir -p "$m/etc/sysctl.d"
+        cat "$f" > "$m/etc/sysctl.d/$name"
+        chmod 0644 "$m/etc/sysctl.d/$name"; chown 0:0 "$m/etc/sysctl.d/$name"
+        [ -s "$m/etc/sysctl.d/$name" ] || fail "$name did not land on this disk"
+        n=$((n + 1))
+    done
+    say "units: installed $n file(s)"
+}
+
+# units <device> -- the systemd units and sysctl drop-ins that make a booted
+# image a *fleet* system (a self-return watchdog, a self-disarm, the
+# profiling knobs), as a tar on stdin: the bodies are composed where the
+# profile's values are, and land here in two fixed directories under /etc.
+# On stdin, not argv, because a unit is a file rather than a word -- and
+# bounded, because stdin from a caller is not a promise about size.
+UNITS_MAX=1048576
+v_units() {
+    local dev tmp work rc
+    dev=$(gate "${1:-}")
+    tmp=$(mktemp /run/wk-card-units.XXXXXX); chmod 0600 "$tmp"
+    head -c "$((UNITS_MAX + 1))" > "$tmp"
+    if [ "$(stat -c '%s' "$tmp")" -gt "$UNITS_MAX" ]; then
+        rm -f "$tmp"; deny "the unit archive is larger than $UNITS_MAX bytes"
+    fi
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"; deny "no unit archive arrived on stdin"
+    fi
+    _units_names "$tmp" || { rm -f "$tmp"; fail "could not read the unit archive"; }
+    work=$(mktemp -d /run/wk-card-units.XXXXXX)
+    tar -xf "$tmp" -C "$work" || { rm -rf "$work" "$tmp"; fail "could not unpack the unit archive"; }
+    rm -f "$tmp"
+    _units_unpacked "$work"
+    rc=0
+    with_mount "$(part "$dev" 2)" _units_edit "$work" || rc=$?
+    rm -rf "$work"
+    return "$rc"
+}
+
+_boot_check_run() { # <mountpoint> <dtb>
+    python3 "$CHECK_BOOT_FILES" --root "$1" --dtb "$2"
+}
+
+# boot-check <device> <dtb> -- will this card's firmware find everything it
+# needs to reach a kernel? Read-only, and asked of the card rather than of
+# the image it came from: what the board will boot is what is on the disk.
+# A kernel that cannot find its root panics and reboots; firmware that cannot
+# find a kernel **halts**, which costs a trip to the board.
+v_boot_check() {
+    local dev rc=0
+    dev=$(gate "${1:-}")
+    check_name "${2:-}"
+    [ -r "$CHECK_BOOT_FILES" ] || deny "there is no boot-file checker at $CHECK_BOOT_FILES on this
+    machine. It is boot/check-boot-files.py from wk-tools, installed root-owned
+    beside this helper -- root runs it, so it cannot be a path a caller names.
+    Remedy, from a terminal on this machine:  ./setup --stage quiesce"
+    with_mount -r "$(part "$dev" 1)" _boot_check_run "$2" || rc=$?
+    [ "$rc" -eq 0 ] || fail "this card's boot partition is missing files a $2 board's firmware asks for"
+    say "boot-check: every file the firmware asks for resolves"
+}
+
 # --- dispatch ----------------------------------------------------------------
 #
 # One case, one verb, no default that runs anything. An unknown verb is a usage
@@ -537,12 +961,21 @@ case "$verb" in
     whose)    v_whose    "$@" ;;
     tailnet)  v_tailnet  "$@" ;;
     wifi-joins) v_wifi_joins "$@" ;;
-    wifi)     v_wifi     "$@" ;;
+    wifi-host) v_wifi_host "$@" ;;
+    wifi-from-host) v_wifi_from_host "$@" ;;
     identity) v_identity "$@" ;;
     role)     v_role     "$@" ;;
     grow)     v_grow     "$@" ;;
     unmount)  v_unmount  "$@" ;;
     verify)   v_verify   "$@" ;;
     eject)    v_eject    "$@" ;;
-    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi|identity|role|grow|unmount|verify|eject <device> [...]" ;;
+    parts)    v_parts    "$@" ;;
+    root-spec) v_root_spec "$@" ;;
+    retarget) v_retarget "$@" ;;
+    cmdline-append) v_cmdline_append "$@" ;;
+    config-append)  v_config_append  "$@" ;;
+    boot-id)  v_boot_id  "$@" ;;
+    units)    v_units    "$@" ;;
+    boot-check) v_boot_check "$@" ;;
+    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi-host|wifi-from-host|identity|role|grow|unmount|verify|eject|parts|root-spec|retarget|cmdline-append|config-append|boot-id|units|boot-check <device> [...]" ;;
 esac

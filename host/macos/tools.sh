@@ -27,6 +27,9 @@ check_tool zsh       "zsh"       "it ships with macOS at /bin/zsh -- if this is 
 check_tool podman    "podman"    "https://podman.io/docs/installation#macos (official .pkg, not brew)"
 check_tool git       "git"       "xcode-select --install"
 check_tool tailscale "Tailscale" "https://tailscale.com/download/macos"
+# Optional: only `wk find` (the LAN sweep for a board off the tailnet) needs it,
+# and it refuses by name without it. Noted, not counted missing.
+have nmap && unchanged "nmap present ($(command -v nmap))" || log "nmap absent -- only 'wk find' needs it (nmap.org, the .dmg)"
 
 if [ -d /Applications/Zed.app ]; then
     unchanged "Zed present"

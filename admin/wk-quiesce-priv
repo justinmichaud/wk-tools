@@ -117,12 +117,19 @@ perf_off() {
 # root compositor would make that a much more interesting thing to talk to.
 WK_SESSION_CONF=/usr/local/libexec/wk-session.env
 WK_SESSION_UNIT=wk-session
-WK_SESSION_TTY=${WK_SESSION_TTY:-/dev/tty2}
+# Hardcoded, not an override point: every caller runs `sudo -n "$PRIV" <verb>`
+# with no `VAR=value` prefix, and sudo's env_reset (this file's own header)
+# would drop one anyway (admin/install.sh, "WK_SESSION_TTY ... hardcoded").
+WK_SESSION_TTY=/dev/tty2
 WK_SESSION_MODE_FILE=/run/wk-session-mode
 
 session_user() {
     [ -r "$WK_SESSION_CONF" ] || return 1
     # shellcheck disable=SC1090
+    # WK_SESSION_USER comes from this root-owned file (admin/install.sh
+    # writes it at setup time), never from the caller's environment -- the
+    # `:-` below is checking whether the sourced file set it, not reading
+    # an override sudo would have stripped anyway.
     . "$WK_SESSION_CONF"
     [ -n "${WK_SESSION_USER:-}" ] || return 1
     id -u "$WK_SESSION_USER" >/dev/null 2>&1 || return 1

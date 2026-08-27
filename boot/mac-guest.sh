@@ -1,67 +1,41 @@
 # Boot driver: a macOS guest standing in for a machine in bench mode.
 #
-# Not a machine that boots an image -- a guest that *is* one. It exists for two
-# reasons, and the first is the reason it was written:
+# Rehearses the bare-metal boot path end to end, and answers mechanism-only
+# questions (does the staged tree carry everything, does the payload survive
+# the crossing, is the record complete) without taking the workstation away
+# from its user. A guest shares its host's CPU and a paravirtualised GPU, so
+# runs from here are marked accordingly and are not comparable with anything.
 #
-#   the whole path can be rehearsed.  Building in one guest and running in
-#   another exercises every step of the bare-metal design -- stage the product
-#   across a machine boundary, find it in the other role, run it there, record
-#   what it ran on, read the result back -- with nothing hands-on in the middle
-#   and nothing that needs a reboot. What it cannot rehearse is the number: a
-#   guest shares a CPU with a desktop and its GPU is paravirtualised, which is
-#   the whole reason the real role is bare metal. Runs from here are marked
-#   accordingly and are not comparable with anything.
-#
-#   some questions are about the mechanism, not the machine.  "Does the staged
-#   tree carry everything run-benchmark needs", "does the payload survive the
-#   crossing", "is the record complete" -- all answerable in a guest, in
-#   minutes, without taking the workstation away from its user for an hour.
-#
-# The transition here is scriptable, which is exactly what the MBP's is not:
-# putting this machine into its role is `wk vm start`. So the arming model is
-# neither one-shot, nor server, nor hands-on -- it is `guest`, and cmd/boot
-# treats it as one more way to arrive at the same place.
+# The transition here is scriptable (`wk vm start`), unlike the MBP's, so
+# BOOT_ARMING is `guest` -- neither one-shot, server, nor hands-on.
 
 BOOT_ARMING=guest
 
-# MACH_GUEST is a *workspace* name, and the vm target speaks two namespaces:
-# `_vm()` maps a workspace to the tart VM that backs it by prefixing `wk-`.
-# t_start, t_stop and _ip all take the workspace name and map it themselves;
-# `_vm_state` takes the mapped name. Passing it the unmapped one is a probe
-# that always answers `absent` -- easy to miss because the workspace here is
-# itself called `wk-bench`, so the correct tart name, the double-prefixed
-# `wk-wk-bench`, looks entirely plausible.
+# MACH_GUEST is a workspace name; t_start/t_stop/_ip map it to the tart VM
+# themselves, but _vm_state wants the already-mapped name from _vm(). Passing
+# the unmapped name silently answers "absent" -- easy to miss since the
+# workspace is itself "wk-bench", so "wk-wk-bench" looks plausible too.
 
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
 
-# The guest, and where its payloads live *inside* it.
+# WK_BENCH_GUEST overrides which vm workspace stands in for this machine, so
+# two rehearsals (or a rehearsal and a test) can run against different
+# guests without colliding.
 MACH_GUEST="${WK_BENCH_GUEST:-wk-bench}"
 
-# The same path a real benchmark install uses, deliberately: `/var/wk` is where
-# `wk bench staged` looks when it finds itself in bench mode, and a
-# rehearsal that used a different path would be rehearsing a different thing.
-# It is created on first delivery -- a guest has passwordless sudo, and this is
-# the only thing here that needs it.
+# Matches the path `wk bench staged` expects in bench mode -- a rehearsal on a
+# different path would rehearse a different thing. Created on first delivery;
+# the guest's passwordless sudo is needed only for this.
 BENCH_GUEST_ROOT=/var/wk
 
-# Every one of these ends in `|| true` or an explicit `return 0` for the same
-# reason: a machine that is off is a normal state, not a failure.
+# `|| true` / `return 0` throughout: a guest that is off is a normal state, not a failure.
 _guest_ip() {
-    # Through the vm driver, which owns everything about guests -- their
-    # names, their addresses, their ssh options -- rather than reimplementing
-    # any of it here.
     ( load_target vm >/dev/null 2>&1; _ip "$MACH_GUEST" 2>/dev/null ) || return 1
 }
 
-# Every command to the machine goes over ssh to the guest. The generic m_ssh in
-# boot/machines.sh cannot do it: a guest's address is not in anyone's ssh
-# config and changes with every boot.
-#
-# BatchMode and ConnectTimeout are not spelled here: targets/vm.sh's
-# `_ssh_opts` already carries them (`_ssh_opts_base`, lib/target.sh), on top of
-# the guest's own key and keepalives -- spelling them again here would be a
-# second copy that could disagree with the first.
+# A guest's address is not in any ssh config and changes with every boot, so
+# the generic m_ssh in boot/machines.sh cannot be reused here.
 m_ssh() {
     local ip; ip=$(_guest_ip) || return 1
     ( load_target vm >/dev/null 2>&1
@@ -79,10 +53,8 @@ b_probe() {
     return 0
 }
 
-# `|| true` on both, and it is load-bearing rather than defensive: cmd/boot
-# runs under `set -euo pipefail`, so a guest that is merely *off* -- which is
-# the normal state of a benchmark machine between runs -- would otherwise end
-# the command in silence, with no output and no error, at the first probe.
+# Load-bearing, not defensive: cmd/boot runs under set -euo pipefail, so an
+# off guest (normal between runs) would otherwise abort the command silently.
 _guest_boot_sec() {
     m_ssh 'sysctl -n kern.boottime' 2>/dev/null \
         | sed -n 's/.*{ *sec *= *\([0-9][0-9]*\).*/\1/p' || true
@@ -104,10 +76,6 @@ b_evidence() {
     return 0
 }
 
-# Arming is starting the guest, and there is nothing to record on the machine
-# that the machine does not already say: it either answers with a marker or it
-# does not. So the record stays where cmd/boot puts it and the arming itself is
-# a state change nobody has to remember.
 b_arm() {
     local st
     st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$MACH_GUEST")" 2>/dev/null )
@@ -133,11 +101,8 @@ b_reboot() {
 b_diag() { m_ssh 'cat /var/log/wk-diag.txt 2>/dev/null || echo "(no diag on the guest)"'; }
 
 # --- where a staged payload goes ---------------------------------------------
-#
-# Inside the guest, so it is reached over ssh rather than as a path here. That
-# is the difference this driver exists to exercise: the MBP's benchmark disk is
-# *mounted* while it is being staged onto, and every other machine in the fleet
-# is a machine you have to send the payload to.
+# Reached over ssh, not as a local path: unlike the MBP (whose benchmark disk
+# is mounted while staging), every other machine takes the payload over the wire.
 b_bench_root() { printf '%s' "$BENCH_GUEST_ROOT"; }
 b_bench_local() { return 1; }
 
@@ -160,13 +125,9 @@ b_bench_put() {
       rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
 }
 
-# The guest exists only where tart does. Asked through the vm driver's own
-# resolver, not with a bare `command -v tart`: the resolver (_tart_bin) also
-# falls back to ~/.local/bin/tart and to the .app inside ~/.local/share, which
-# is where the signed bundle has to live. A non-interactive ssh session gets
-# /usr/bin:/bin:/usr/sbin:/sbin and nothing else, so `command -v tart` answers
-# "no" on a machine running tart with three VMs on it. Any probe that
-# duplicates a resolver instead of calling it will drift from it.
+# Probed through the vm driver's own resolver (_tart_bin), not a bare
+# `command -v tart`: a non-interactive ssh session's PATH is just
+# /usr/bin:/bin:/usr/sbin:/sbin, so that answers "no" even with tart running.
 b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; _tart_bin >/dev/null 2>&1 ); }
 
 # The wk-managed media, in one line, for the fleet block in `wk status`.
@@ -180,11 +141,7 @@ b_media() {
     printf 'a Tart guest, %s (%s); no physical media' "$MACH_GUEST" "${st:-unknown}"
 }
 
-# How this guest is made from nothing.
-#
-# A guest, so there is no medium and nothing to carry: it is cloned from the
-# golden base and thrown away. That is the whole point of it -- it rehearses the
-# macOS lane without needing the Mac.
+# No medium to carry: cloned from the golden base and thrown away.
 b_reprovision() {
     cat <<REPROV
 wk vm base

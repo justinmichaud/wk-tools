@@ -1,26 +1,8 @@
 #!/bin/sh
-# Load the driver for this device's hardware watchdog, if there is one to load.
-#
-# There are three states and they look identical from userspace: the kernel has
-# no driver for the watchdog node, the driver is a module nobody has loaded, or
-# there is no watchdog node at all. Only the middle one is fixable from here,
-# and this is the thing that fixes it.
-#
-# By the device's own MODALIAS out of sysfs, so no module name appears in this
-# file. That matters more than it looks: it works unchanged on a device whose
-# kernel names the driver something else, and it does nothing at all where the
-# node or the driver is missing -- rather than failing loudly about a module
-# that was never going to exist. On a PinePhone the node is
-# `1c20ca0.watchdog`, its alias is
-# `of:NwatchdogT(null)Callwinner,sun50i-a64-wdt...`, and the module behind it is
-# built because image/profiles.sh patches CONFIG_SUNXI_WATCHDOG=m into the
-# kernel aport -- that file says why this repo touches anybody's kconfig.
-#
-# Run from two places and idempotent in both: `wk bridge setup`, so a phone
-# gets its watchdog without a reboot, and wk-bridge-watchdog's start_pre, so a
-# boot does not depend on udev's coldplug having autoloaded it. Exit 0 whatever
-# happens -- a device with no watchdog is a supported configuration, and
-# wk-bridge-healthcheck is what reports the consequence.
+# Loads the driver for this device's hardware watchdog, if it has one.
+# Matched by the device's own MODALIAS from sysfs (works across kernels,
+# no-ops where absent). PinePhone needs sun50i-a64-wdt, built via
+# image/profiles.sh's CONFIG_SUNXI_WATCHDOG=m; always exits 0, since no watchdog is valid too.
 set -u
 
 [ -e /dev/watchdog ] && exit 0

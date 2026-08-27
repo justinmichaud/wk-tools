@@ -47,8 +47,9 @@ par_join() {
 # par_join_stream -- the same batch, but a job's records reach fd 3 in
 # completion order, not start order, so a slow job no longer holds back
 # everything after it. A `{"kind":"flush"}` record follows each job's
-# records, telling a streaming reader (lib/status-view.py) it's safe to
-# draw what has accumulated. Polled, not `wait -n`: bash 3.2 has no such builtin.
+# records, naming the job, so a streaming reader (lib/status-view.py) can
+# draw a machine once every job feeding it is in. Polled, not `wait -n`:
+# bash 3.2 has no such builtin.
 par_join_stream() {
     local n p rc pending="$_par_names" next
     while [ -n "$pending" ]; do
@@ -58,7 +59,7 @@ par_join_stream() {
                 rc=$(cat "$_par_dir/$n.rc" 2>/dev/null); rc="${rc:-4}"
                 bump "$rc"
                 cat "$_par_dir/$n" >&3 2>/dev/null || true
-                printf '{"kind":"flush"}\n' >&3
+                printf '{"kind":"flush","job":"%s"}\n' "$n" >&3
             else
                 next="$next $n"
             fi

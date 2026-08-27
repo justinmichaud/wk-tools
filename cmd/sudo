@@ -9,9 +9,9 @@
 # cached-credential window (sudo's default is five minutes, long enough for
 # a live timestamp to be found and used by accident).
 #
-# The window installed is 30 seconds (WK_SUDO_TIMEOUT below): long enough for
-# one command's own privileged sequence, short enough to close again before
-# anything unattended returns. The fix is one drop-in file,
+# The window installed is 30 seconds (WK_SUDO_TIMEOUT_MIN below, in minutes):
+# long enough for one command's own privileged sequence, short enough to close
+# again before anything unattended returns. The fix is one drop-in file,
 # `/etc/sudoers.d/zz-<user>-passwd`, relying on sudoers' last-match rule to
 # override an earlier NOPASSWD without touching a file the sysadmins own.
 #
@@ -40,9 +40,10 @@ in_workspace && die "'wk sudo' hardens a machine you log into, and this is works
 
 # The window, in the two spellings the rest of this file needs: sudoers
 # wants minutes (fractional is fine, sudo 1.8.6+), a verdict line wants
-# seconds. Declared once, so the two can't disagree.
+# seconds. Derived from the one value, so a WK_SUDO_TIMEOUT_MIN override
+# cannot leave the description naming the default instead.
 WK_SUDO_TIMEOUT_MIN="${WK_SUDO_TIMEOUT_MIN:-0.5}"
-WK_SUDO_TIMEOUT_DESC="30 seconds"
+WK_SUDO_TIMEOUT_DESC="$(awk -v m="$WK_SUDO_TIMEOUT_MIN" 'BEGIN { printf "%g seconds", m * 60 }')"
 
 ACTION=status
 TARGET=""
@@ -261,10 +262,7 @@ EOF
 on_target() {
     local t="$1" act="$2" rc=0 out
     load_target "$t"
-    if ! t_has_wk; then
-        printf '%-22s %s\n' "$t" "no wk-tools there yet -- 'wk remote setup $t'"
-        return 1
-    fi
+    machine_answers "$t" || return 1
     if [ "$act" = setup ]; then
         t_wk_tty sudo setup || rc=$?
         return "$rc"

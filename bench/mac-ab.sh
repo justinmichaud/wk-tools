@@ -31,6 +31,11 @@
 # already it), never one per run -- the planted job holds every round of
 # every arm. The autorun advances its state before it runs anything, counts
 # its attempts, and carries a watchdog, so no path loops or hangs.
+#
+# WK_MAC_MACHINE/SSH/PLAN/CONFIG/TOOLS/BOOT_WAIT are the same environment
+# overrides as bench/mac-lane.sh, documented once in that file's header.
+# WK_BENCH_VOLUME (below) is documented in bench/mac-bench-volume.sh, the
+# APFS volume this lane stages onto.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -626,6 +631,12 @@ PYEOF
     # restart) and no StartInterval (this is a one-shot job, not a
     # schedule). The agent removes itself when the job it was planted for is
     # done.
+    #
+    # WK_AB_ROOT below is plumbing, not a user override: this plist is the
+    # only thing that sets it for mac-bench-autorun.sh, always to /var/wk,
+    # the same convention $root (bench_root) names. That script's own
+    # `${WK_AB_ROOT:-/var/wk}` fallback exists only so it can be run by hand
+    # for debugging, off the agent.
     mac "cat > $(sh_quote "$bh/Library/LaunchAgents/com.wk.bench-ab.plist")" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

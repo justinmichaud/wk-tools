@@ -1,25 +1,7 @@
 # HANDOFF — memory benchmarking
 
-Fixed-core-count runs are done (`wk bench --cores`, `wk pi bench --cores`).
-Memory charts are not started. Reference: wiki
-`Memory-benchmark-charts-(2.52)` and `WPE-memory-usage-investigation`.
+## Remaining
 
-## Remaining — memory charts (`wk bench mem <ws> <plan>`)
-
-- **The recurring experiment patches are files now, but not the patches
-  themselves.** `container/bin/patches/{startMemorySampler,disable-prewarming,
-  memory-pressure-300mb}.patch` exist as named, documented stubs -- what each
-  has to do is written down in the file that will hold it -- but not as real
-  diffs: those were never in this repository, and the wiki pages this
-  handoff's own reference line names 404 from here and are not indexed
-  anywhere a web search reaches, which reads as Igalia-internal rather than
-  lost. Capture each from wherever it is still re-applied by copy-paste today
-  (`git diff > container/bin/patches/<name>.patch` in a checkout that has it)
-  and these three TODOs are done.
-- **The run**: build (patched as asked), drive MiniBrowser at the plan, collect
-  the `WebKitWebProcess` logs, plot (`--include c,k --max-seconds N`), and drop
-  the chart and raw logs beside the result with `wk bench`'s provenance
-  treatment — a chart with no sha or config recorded is as uncomparable as a
-  score without one.
-- Works on the Linux reference target first; WPE/GTK/JSCOnly follow unchanged,
-  macOS needs its own confirmation.
+- [ ] capture `container/bin/patches/{startMemorySampler,disable-prewarming,memory-pressure-300mb}.patch` as real diffs from wherever they are still re-applied by copy-paste today (`git diff > container/bin/patches/<name>.patch` in a checkout that has it) [needs a checkout carrying the patches]
+- [ ] build `wk bench mem <ws> <plan>`: build patched, drive MiniBrowser at the plan, collect the `WebKitWebProcess` logs, plot (`--include c,k --max-seconds N`), and drop the chart and raw logs beside the result with `wk bench`'s provenance treatment [decision]
+- [ ] confirm the memory-chart path on WPE/GTK/JSCOnly and macOS beyond the Linux reference target [needs those targets]

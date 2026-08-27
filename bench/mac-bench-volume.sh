@@ -27,6 +27,22 @@
 # Does not go into the `wk quiesce` privileged helper: "create a volume" and
 # "run startosinstall as root" are once-per-machine, not the small,
 # reversible, per-run actions that allowlist stays auditable by granting.
+#
+# Environment overrides:
+#   WK_BENCH_VOLUME    the APFS volume's name (default: WK Bench; also read by
+#                       bench/mac-ab.sh and boot/machines/mbp.conf's MACH_VOLUME --
+#                       one name, keep them in agreement)
+#   WK_BENCH_NEED_GB    headroom the host install must keep free, in GiB
+#                       (default: 120)
+#   WK_BENCH_NO_PKG     non-empty skips building the provisioning package
+#                       during --install -- Setup Assistant then runs and
+#                       needs a person, the opposite of the point, so this is
+#                       for debugging --install itself
+#   WK_BENCH_ADMIN      the volume-owner account startosinstall authorises as
+#                       (default: this account)
+#   WK_BENCH_PASSWORD    the bench account's password, embedded into the
+#                       package for mac-bench-firstboot.sh (default: benchbench,
+#                       a known constant -- see the password's own comment below)
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -332,6 +348,12 @@ do_build_pkg() {
 
     install -m 0755 "$WK_ROOT/bench/mac-bench-firstboot.sh" \
                     "$root/usr/local/libexec/wk-bench-firstboot.sh"
+    # A plain file copy, exactly like the script above: `--installpackage`
+    # lands the whole root tree as real files on the target, so firstboot
+    # sources this at the same relative path rather than a second copy of
+    # its functions being pasted into firstboot.sh.
+    install -m 0644 "$WK_ROOT/bench/mac-quiet-hosts.sh" \
+                    "$root/usr/local/libexec/wk-bench-quiet-hosts.sh"
 
     # RunAtLoad with no KeepAlive: it removes itself on success, and
     # KeepAlive would resurrect a job that has deleted its own script.
@@ -582,6 +604,8 @@ do_repair() {
     # The script and its daemon, fresh, plus the payload bits the script reads.
     run sudo install -m 0755 "$WK_ROOT/bench/mac-bench-firstboot.sh" \
         "$S/usr/local/libexec/wk-bench-firstboot.sh"
+    run sudo install -m 0644 "$WK_ROOT/bench/mac-quiet-hosts.sh" \
+        "$S/usr/local/libexec/wk-bench-quiet-hosts.sh"
 
     local pw="${WK_BENCH_PASSWORD:-benchbench}"
     local pwfile; pwfile="$(wk_state_dir)/bench-password"
@@ -727,6 +751,26 @@ do_provision() {
     # `grep -c` prints 0 *and* exits 1 when it counts nothing, so the old
     # `|| echo 0` appended a second zero on its own line.
     log "    timemachine destinations: $(tmutil destinationinfo 2>/dev/null | grep -c '^Name' || true)"
+
+    # 2b. The scanner check above can only report; this is the fix. Same
+    #     function mac-bench-firstboot.sh calls at first boot, sourced
+    #     rather than reimplemented, so there is one merge/write path for
+    #     /etc/hosts. Needs root, which `sudo bash -c` gets from the caller
+    #     -- the function itself never calls sudo, so it also runs unmodified
+    #     under a plain test as a non-root user against a temp file.
+    . "$WK_ROOT/bench/mac-quiet-hosts.sh"
+    if [ -n "$DRY" ]; then
+        info "software-update endpoint denial in /etc/hosts"
+        wk_bench_hosts_apply /etc/hosts 1
+    elif wk_bench_hosts_present /etc/hosts; then
+        unchanged "hosts: update endpoints already denied"
+    else
+        if sudo bash -c ". $(sh_quote "$WK_ROOT/bench/mac-quiet-hosts.sh"); wk_bench_hosts_apply /etc/hosts"; then
+            changed "hosts: update endpoints denied"
+        else
+            warn "  hosts: could not deny update endpoints in /etc/hosts (see above)"
+        fi
+    fi
 
     # 3. The python the benchmark driver needs: Apple's /usr/bin/python3 has
     #    pyobjc, a Homebrew python3 does not.

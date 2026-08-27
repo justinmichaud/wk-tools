@@ -6,6 +6,7 @@
 
 set -euo pipefail
 SRC=/opt/wk-tools/container/gpu/gpu-probe.c
+# WK_GPU_PROBE_BIN overrides where the built probe binary lands.
 BIN=${WK_GPU_PROBE_BIN:-/tmp/.wk-gpu-probe}
 
 if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then

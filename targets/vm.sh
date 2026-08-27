@@ -24,6 +24,26 @@
 # turns the filter off for a guest that needs the open network, and says so
 # loudly: quietly less confined than it looks is worse than openly unconfined.
 
+# Every WK_VM_*/WK_HOST_* name in this file is overridable; documented here
+# once rather than at each read:
+#   WK_VM_IMAGE            the OCI image a fresh golden base is cloned from
+#   WK_VM_BASE              the golden base VM's own name (tests/test_prompts.py
+#                            and tests/test_clobbering.py/test_registry_free.py
+#                            point WK_VM_BASE/WK_VM_STORE at a fake one)
+#   WK_VM_MAX                running-guest ceiling (Apple permits 2 per host)
+#   WK_VM_USER                the account every guest is provisioned with
+#   WK_VM_CPUS/WK_VM_MEM_MB    a workspace guest's allocation (default: the envelope)
+#   WK_VM_BASE_CPUS/_MEM_MB    the golden base's allocation (default: the same envelope)
+#   WK_VM_BASE_PREBUILD       config pre-built into the base; empty disables it
+#   WK_VM_DISK_GB              the sparse disk ceiling every guest is cloned with
+#   WK_VM_DISPLAY               the guest's minimum window content size
+#   WK_VM_SHARE                proceed past the memory-budget refusal anyway
+#   WK_VM_UNFILTERED            boot with no Softnet egress filter (see above)
+#   WK_HOST_FREE_MIN_GB/_WARN_GB   host disk headroom the sparse guest disk needs
+#   WK_HOST_WEBKIT               a host checkout to seed the golden base from
+#   WK_VM_STORE                  where this driver's own state lives (below)
+#   WK_VM_SUBNET/WK_VM_PROXY_ADDR/WK_VM_PROXY_PORT/WK_SOFTNET_BIN
+#       the guest-facing bridge and egress proxy (below)
 WK_VM_IMAGE="${WK_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
 WK_VM_BASE="${WK_VM_BASE:-wk-base}"
 WK_VM_MAX="${WK_VM_MAX:-2}"
@@ -631,7 +651,7 @@ _ssh_opts() {
     # the connection mid-build and reports it as a build failure. A guest's
     # key is minted fresh on every clone at the same address, which is what
     # _unpinned_host_key_opts (lib/reach.sh) is for.
-    printf '%s' "$(_ssh_opts_base "${WK_SSH_TIMEOUT:-10}") $(_unpinned_host_key_opts) \
+    printf '%s' "$(_ssh_opts_base "$(wk_ssh_timeout)") $(_unpinned_host_key_opts) \
 -o ServerAliveInterval=60 -o ServerAliveCountMax=10 -i $WK_VM_KEY"
 }
 

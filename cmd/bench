@@ -55,8 +55,22 @@
 #   WK_BENCH_ASLR=off          disable ASLR for the run (Linux; setarch -R)
 #   WK_BENCH_ENV_PAD=<bytes>   export a dummy env var of this size first
 #   WK_BENCH_PATH_PAD=<n>      run through a symlink padded to <n> characters
+#   WK_BENCH_SHARED_CACHE=avoid   disable macOS's dyld shared cache (variance probe)
 #   every knob is off by default and is recorded into the result's
 #   `configuration`, which `wk bench report` groups variance by.
+#
+#   WK_BENCH_MACHINE=<mbp|benchvm>   which fleet Mac this is, in host mode --
+#                              nothing here can tell on its own
+#   WK_BENCH_ROOT=<dir>        where staged payloads live, instead of the
+#                              bench volume (host-mode testing)
+#   WK_BENCH_PYTHON=<path>     the python3 to run staged benchmarks with,
+#                              instead of searching for one with `objc`
+#   WK_BENCH_MAX_LOAD=<n>      1-minute load average above which preflight
+#                              calls the machine busy (default 4)
+#   WK_STALL_SECONDS=<s>       silence before preflight warns (default 900;
+#                              longer than a build's, since a benchmark
+#                              reports once per subtest)
+#   WK_ABORT_SECONDS=<s>       silence before a run is given up on (default 5400)
 #
 # Tools/Scripts/run-benchmark does the run; everything here decides whether
 # the number means anything: the environment is checked before the run (a
@@ -92,17 +106,17 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
+# A benchmark is legitimately silent for much longer than a build: MotionMark
+# reports once per subtest and a subtest can run for minutes. Raised here,
+# before lib/watchdog.sh is sourced, so its own `:-300`/`:-1800` defaults
+# find these already set instead of locking in first.
+WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
+WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 . "$WK_ROOT/lib/watchdog.sh"
 # Shared with `wk quiesce`, which does the quieting: one answer to "is it
 # quiet", not two that can disagree.
 . "$WK_ROOT/lib/quiet.sh"
 . "$WK_ROOT/build/configs.sh"
-
-# A benchmark is legitimately silent for much longer than a build: MotionMark
-# reports once per subtest and a subtest can run for minutes. Raised here
-# rather than teaching the build watchdog about benchmarks.
-WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
-WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/arch.sh"
@@ -273,7 +287,11 @@ bench_padded_path() {
     fi
     local pad=""
     while [ "${#pad}" -lt "$n" ]; do pad="${pad}p"; done
-    local dir="/tmp/wk-bench-pad-$pad" link="$dir/$(basename "$target")"
+    # Two statements, not `local dir=X link=$dir/Y`: bash expands every
+    # value in one `local` before assigning any of them, so a combined form
+    # gives link=$target's basename at the filesystem root, not under $dir.
+    local dir="/tmp/wk-bench-pad-$pad"
+    local link="$dir/$(basename "$target")"
     if [ -n "$runner" ]; then
         "$runner" mkdir -p "$dir" >/dev/null 2>&1
         "$runner" ln -sf "$target" "$link" >/dev/null 2>&1
@@ -303,8 +321,9 @@ bench_configuration_args() {
 CONFIG="${WK_CONFIG:-wpe-release}"
 # Defaulted from the config's port below: the two ports have different
 # run-benchmark drivers (minibrowser-wpe, minibrowser-gtk), and picking the
-# wrong one fails in a way that looks like a broken build.
-BROWSER="${WK_BENCH_BROWSER:-}"
+# wrong one fails in a way that looks like a broken build. `--browser` is
+# the one override point (below); an env var would be a second one.
+BROWSER=""
 COUNT=""
 # --force is consumed by `wk` and arrives as WK_FORCE.
 FORCE="${WK_FORCE:-}"
@@ -930,6 +949,9 @@ cmd_report() {
     wkdata report "$join" "$join_b" ${extra[@]+"${extra[@]}"}
 }
 
+# Two arms from different sessions differ by ~2% on identical builds; arms
+# interleaved in one session hold to 0.4%. A comparison across sessions is
+# reported with that caveat, never as a measurement of the change.
 cmd_compare() {
     cmd_report "$@" --text
 }

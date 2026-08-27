@@ -44,6 +44,10 @@
 #
 # Owed work: docs/HANDOFF-ab-bench.md #3.
 
+# WK_BUILDROOT_BASE overrides the build host image, pinned at 22.04 because
+# buildroot 2020.02 needs it (above); overriding it without also repinning
+# buildroot is a build that stops compiling, so this exists for testing a
+# newer host ahead of that repin, not for routine use.
 BUILDROOT_BASE_IMAGE="${WK_BUILDROOT_BASE:-docker.io/library/ubuntu:22.04}"
 
 buildroot_workdir()  { echo "/src/WebKit/WebKitBuild/buildroot/$1"; }

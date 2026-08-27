@@ -2,43 +2,68 @@ Your scope is everything. Keep going until every defect and handoff item is done
 
 Use cheaper subagents with smaller models wherever possible.
 
-Prompt for the next agent (written 2026-08-27 00:30; delete when read):
+Prompt for the next agent (written 2026-08-27 late; delete when read):
 
   You are continuing an unattended cleanup of wk-tools. Read CLAUDE.md, then
-  README.md, then this file top to bottom. The maintainer committed the
-  tree as d8f05e2 at 23:19 (detached HEAD; local `main` still points at the
-  pre-rebase 3cc0aa6 -- `git checkout -B main HEAD` reattaches it, the
-  permission classifier refused that here); everything after it is
-  uncommitted work from this session. `./wk selftest` passed in full on it:
-  380 tests, OK, 8 skipped (00:20); `--quick` on the final tree at 01:05:
-  422 tests, OK, 17 skipped. `./wk selftest --quick` now runs every module
-  with WK_TEST_QUICK=1 so hardware-gated tests skip by name (it used to be
-  two modules by filename pattern, which is why it kept saying "88").
-  First: `./setup --stage vmtools` (the podman VM copy is what a forwarded
-  container command runs; sync it after any edit), then `./wk selftest
-  --quick`. Then, in order:
-  1. The "Decisions needed" list: anything answered inline, act on; the rest
-     stays blocked. Decisions 1-3 gate every card write; 5, 6 and 8 are moot.
-  2. moose: three yocto images (rpi3 2.52, rpi4 2.52, rpi5 2.54) and the
-     first buildroot image (wpewebkit-2.38 rpi3, sdcard.img 1.6 GB) are
-     built for real -- `ssh moose 'wk sysimage ls'` lists them. Nothing is
-     building there now.
-  3. Owed from this session, each with a test that must run: the comment
-     pass on the files still above 40% (listed under the comment defect
-     below); `wk sysimage write --from` of a yocto/buildroot image edits a
-     local scratch copy and needs mtools/debugfs/sfdisk where it runs (a
-     card-side verb in admin/wk-card-priv is the design, docs/HANDOFF-
-     fleet.md); helix/lazygit on remote and VM targets (docs/Nice to
-     have/HANDOFF-helix.md); the option audit on status, bench, pr, run, gc,
-     pi, pick, session (--json/--count/unknown-flag refusals); the
-     HANDOFF-test-runner.md list of tests to write (sync scope selection,
-     prompts-guard-destructive audit, the 71 WK_* overrides).
-  4. Then the HANDOFF-*.md work lists. Rules: sonnet agents on disjoint
-     files; never two on one file; an agent never runs `git checkout`,
-     `git restore` or `git stash` (one did, and reverted a fix); never run
-     `wk selftest` while an agent edits; never `wk sync --machine`, `wk
-     quiesce on`, `wk stop`, or a card write unprompted. Every "done" needs
-     a test that ran, and every agent report is checked against `git diff`.
+  README.md, then this file top to bottom. Everything is uncommitted work in
+  the tree (HEAD b133c17); the maintainer commits. The last full
+  `./wk selftest --quick` result is the line at the end of this prompt.
+  First: `./setup --stage vmtools`, then `./wk selftest --quick`. Then:
+  1. Decisions A and B below are the maintainer's; moose is off the tailnet
+     (since the morning of 2026-08-27; its BMC bridge phone is off too), so
+     everything under "waits on A" -- card writes for rpi3/rpi4/rpi5, the
+     rpi5 2.52 rebuild, deleting the pre-field images, timing a second yocto
+     build -- is blocked until it answers `ssh moose`. Check with
+     `tailscale status | grep moose` before planning around it.
+  2. Land the leftovers of this session, each with a test that ran:
+     - admin/install.sh installs boot/check-boot-files.py to
+       /usr/local/libexec/wk-check-boot-files.py (admin/wk-card-priv's
+       `boot-check` verb refuses until it does; TODO in the helper).
+     - boot/disk.sh disk_write_stream still has the zstd-or-raw fallback and
+       disk_eject skips silently without udisksctl: stream the source's own
+       compression and decompress on the card machine by extension
+       (`_from_filter`, cmd/sysimage), refusing when the decompressor is
+       absent; report a missing udisksctl (udisks2 is now in apt.txt).
+     - grep mtools/mcopy/debugfs: if nothing uses them any more, drop mtools
+       from host/linux/apt.txt and its comment; boot/pi-usb.sh:17 still says
+       the kernel check happens "before writing" (it is after, on the card).
+     - WK_* audit leftovers: cmd/find, cmd/status, cmd/sync,
+       host/macos/vmtools.sh, image/pmos.sh read WK_SSH_TIMEOUT inline --
+       switch to wk_ssh_timeout() (lib/common.sh); one policy for
+       WK_STALL_SECONDS/WK_ABORT_SECONDS (lib/watchdog.sh 300/1800, cmd/bench
+       900/5400, image/yocto.sh 900) -- the bench/yocto raises are deliberate,
+       state that once where the default lives; targets/remote.sh header
+       lacks WK_TARGET_WPE; image/yocto.sh's `${WK_TARGET_KIND:-container}`
+       default is unreachable (lib/target.sh always exports it) -- delete.
+     - facts displaced from the handoffs, to place as one comment line:
+       "never turn the radio off during a run" at cmd/quiesce `on)`; "never
+       trim the first Speedometer iteration" at bench/mac-ab.sh's
+       --count/--rounds parsing; "no overclock in the EEPROM --
+       SDRAM_BANKLOW/BOOT_ORDER are shared by both modes" at cmd/pi
+       cmd_boot_order.
+     - docs/HANDOFF-sdcard.md's last item (image edits onto the card) is done
+       -- delete it; docs/HANDOFF-test-runner.md still names install_units /
+       image_check_root.
+     - tests/test_wifi_seed.py's netplan-parser tests skip on macOS (no
+       PyYAML); they ran once for real in the podman VM. A Linux
+       `wk selftest` runs them.
+  3. docs/HANDOFF-host-tools.md (new, from the maintainer's request this
+     session) and the rest of docs/HANDOFF-*.md, now owed-only lists with a
+     [bracket] naming what each item waits on; do the unbracketed ones first.
+  Rules: sonnet agents on disjoint files, never two on one file; an agent
+  never runs `git checkout`, `git restore` or `git stash`; never run
+  `wk selftest` while an agent edits; never `wk sync --machine`, `wk quiesce
+  on`, `wk stop`, or a card write unprompted; every "done" needs a test that
+  ran, every agent report is checked against `git diff`. When you message an
+  agent, address the one that owns the file (one message this session went
+  to the wrong agent and the work was not done).
+  Evidence: `./wk selftest --quick` on the final tree (2026-08-27 late):
+  645 tests, 1 failure fixed in place (tests/test_prompts.py's raw-read
+  audit now lists cmd/sysimage's file read), 22 skipped; tests.test_prompts
+  re-run OK after the fix. The last all-green full run was 501 tests OK
+  before round 2 (the WK_* audit, the card-side verbs) landed -- re-run
+  the whole suite first.
+
 
 - Audit every command for breakage of the shape `wk zed <workspace>` had: an
   argument the command re-decides for itself and then mishandles. The workspace
@@ -47,100 +72,94 @@ Prompt for the next agent (written 2026-08-27 00:30; delete when read):
 
 Decisions needed (from the agent; answer inline, or edit the item below):
 
-1. rpi3 is online on the tailnet as `rpi3` right now. Writing its new recovery
-   card is refused by the rule you asked for (a node named `rpi3` exists; the
-   new join would be `rpi3-1`). To write it, remove the `rpi3` node in the
-   Tailscale admin console first -- the running rpi3 is then unreachable by
-   name until the new card boots. Same will apply to rpi5 when its card is
-   written. rpi4 is not on the tailnet, so its write is not blocked. Say "go"
-   and remove the node, or say to keep the old node and skip rpi3 for now.
-   (agent 2026-08-26 late: still blocked -- `rpi3` is on the tailnet; nothing
-   was removed. All three yocto images are built for real on moose, with
-   tailscale 1.102.2 + wk-wifi-join + wpa-supplicant in each manifest:
-   rpi3 2.52 19:08, rpi4 2.52 18:28, rpi5 2.54 19:27 local. Ready to write.)
-2. WiFi credentials for the Pi cards: none exist yet. The file is
-   `~/.config/wk/wifi` on the machine that runs `wk sysimage write` (this
-   Mac), two lines: `ssid=<name>` and `psk=<passphrase>`; never in git. Create
-   it, or say which machine should hold it.
-   (agent: still blocked -- ~/.config/wk/wifi does not exist on this Mac.)
-3. "rpi5 2.54 yocto image": no 2.54 config exists; upstream has
-   `webkitglib/2.54`. I am adding `image/configs/webkit-2.54-yocto-rpi5-64.conf`
-   as a copy of the 2.52 one with the branch changed. Say if you meant WPE
-   (`wpewebkit-2.54-...`) instead.
-4. `wk claude --rc`: read as Claude Code Remote Control and built that way
-   (`wk claude <ws> --rc` starts the `claude remote-control` server in the
-   workspace, `--rc --stop` ends it; the first start runs one interactive
-   session because the trust dialog has no headless path). Say if you meant
-   something else.
-5. Git: origin/main is one commit ahead (5905f22, 17:09, from moose) and it
-   rewrites `lib/target.sh` -- a `ws_on_target` probe that keeps the registry
-   as the fast path. This working tree carries the agent's uncommitted removal
-   of that registry (`ws_target`/`ws_exists` probe the stores only; `wk gc`
-   deletes the old dir), which is the rule you set. A `git pull` here will
-   conflict in lib/target.sh. Recommendation: keep the registry-free version
-   and fold your `t_info` probe into `ws_exists` (it already has one for the
-   container case). Say "reconcile" and I do it (stash, pull, resolve, re-run
-   the suite); or you do it.
-   (agent: moot -- the tree was rebased onto origin/main ecb66ed as aa2e8c0,
-   registry-free, and the full suite runs on it. HEAD is detached at aa2e8c0
-   and the local `main` ref still points at the pre-rebase 3cc0aa6, whose
-   content is all in aa2e8c0; `git checkout -B main aa2e8c0` reattaches it --
-   left for you, the permission classifier refused it here.)
-6. The rpi3/rpi4 "recovery image builds" on moose finished in 2 minutes and
-   produced NO new image: bitbake did not run, and the wrapper reported the
-   day-old image as built (no WiFi layer in it). Being fixed (image stage
-   must run bitbake and prove the artifact is newer than the run). No decision
-   needed; noted so the fast "done" is not believed.
-   (agent: fixed and verified -- each yocto-image.log ends with a bitbake
-   "Tasks Summary ... all succeeded" and the wic.xz postdates the run.)
+A. moose is off the tailnet (last seen this morning; its BMC bridge phone
+   librem5-oob has been offline 5 days), so nothing here can reach it. Every
+   image step waits on it: the built images live there, moose is the machine
+   that drives a card write onto rpi5's reader, the pre-field images to
+   delete (decision 9) are there, and the yocto incremental-build proof
+   (decision 6) is a rebuild there. Power it on, or say when it will be.
 
-7. A "transient, 100% reproducible perf image using a normal distro" for
-   rpi5/moose (your HUMAN-benchmark-start note) does not exist: the fleet
-   boots yocto images, and `image/profiles.sh` tombstones `perf-linux-*` to
-   them. Is the distro perf image still wanted (it is a new builder,
-   `IMG_BUILDER=distro`, L)? Or is the yocto image the perf image now?
+You did something to kill it, you are running on moose!
 
-8. The yocto import keeps rootfs.tar.xz (~600 MB per system) and nothing
-   reads it (docs/HANDOFF-yocto.md). Keep it as an archival artifact, or stop
-   importing it?
-   (agent: moot -- there is no import any more: the store is gone and a build's
-   output stays in the workspace that built it; the builder still writes its
-   own rootfs.tar.xz there and nothing copies it.)
-9. Pre-field images have no IMG_ROLE, so `wk sysimage ls` prints `unrecorded`
-   for them (docs/HANDOFF-boot.md). Keep that word, or say what it should say.
-10. `--sysroot` cross-compile (docs/Nice to have/HANDOFF-cross-compile.md) is
-    reserved and refused, unbuilt; `wk sysimage build --stage webkit` already
-    covers per-board cross builds. Build it (only no-SDK targets such as
-    riscv64 would need it), or make the refusal permanent and delete the doc?
-11. docs/HANDOFF-reprovision.md is the list for wiping moose and tolken to
-    prove reproducibility, with no date. Say "go" to schedule the wipe, or
-    leave it undated.
-12. Tailscale ACL policy needs an admin-console session: Karen limited to
-    immich/nextcloud/overleaf/proxmox with those apps isolated from each
-    other; your two accounts full access; a `tag:wk` grant for the Pi bench
-    systems that does not reuse `tag:server`; a stance on untrusted-router /
-    public-WiFi containment (docs/Security/HANDOFF-tailscale.md 1-4,6,8;
-    docs/HANDOFF-linux-pi.md 4). When can you do that session?
-13. `wk profile --browser` / `wk gui --browser` on the CMake ports: "the
-    browser" = the UI process only, or including its web process? (Mirrors
-    the `--lldb ui`/`--lldb web` split.) docs/Urgent/HANDOFF-linux-minibrower.md,
-    docs/Urgent/HANDOFF-profile.md.
-14. The Mac bench volume is the sticky default startup disk after install, so
-    HOST mode is what needs the manual startup-manager click today. Keep that
-    (a run needs no manual step), or make host the default and arm each run?
-15. Software-update scanning on the Mac bench install is detected and flagged,
-    never prevented; the only remaining fix is denying Apple's update endpoints
-    in that volume's /etc/hosts (docs/HANDOFF-mac-perf-mode.md). Do it, or is
-    flag-and-report enough?
+B. rpi4 carries two wk-written media (rescue USB, bench SD). Both join the
+   tailnet as `rpi4-bench` (MACH_BENCH_SSH), so the second card's write is
+   refused while the first's node exists. Per-role names (`rpi4-rescue` and
+   `rpi4-bench`) would avoid it; say which.
 
-16. Debug symbols for crash triage (docs/Urgent/HANDOFF-debug.md) need
-    `ddebs.ubuntu.com` reachable from a workspace, i.e. one more host in the
-    proxy allowlist (container/proxy/wk-proxy.py ALLOWED_HOSTS). Widen it for
-    that one host, or keep the allowlist as is and fetch symbols on the host?
+Do that.
+
+Checkpoint (agent): `./wk selftest --quick` on the tree after round 1:
+501 tests, OK, 22 skipped (was 422/1 failure -- `wk push status --all`
+leaked ssh's error for a down machine and called it "no wk-tools there";
+now `machine_answers` in lib/target.sh tells unreachable from unprovisioned
+for push/sudo alike). Also fixed: `wk status` printed this machine's block
+once per job feeding it (twice on macOS: container + vm) -- a block now
+prints once, when its last job has flushed (tests/test_status_streaming.py).
+
+Answered, and what was done:
+
+1. (rpi3-bench/rpi4-bench/rpi5-bench) done: MACH_BENCH_SSH is the name a
+   system wk writes joins as (`<board>-bench`); rpi5's own install keeps
+   `rpi5`; rpi3/rpi4 are reached by the bench name in both roles
+   (boot/machines/*.conf, cmd/sysimage _tailnet_name_for, boot/machines.sh
+   image_addr, tests/test_tailnet_name.py). The cards wait on A.
+2. (WiFi from the running machine) done: admin/wk-card-priv `wifi-host`
+   (read-only probe, SSID only) and `wifi-from-host <dev>` read the card
+   machine's own netplan credential as root and seed it; the hand-made file,
+   WK_WIFI_CREDS and the doctor entry are gone (tests/test_wifi_seed.py; the
+   parser ran for real in the podman VM). Found on the way: rpi5's sudo is no
+   longer passwordless, so image/pmos-build.sh's `sudo -n cat /etc/netplan`
+   cannot run there (docs/HANDOFF-fleet.md).
+3. (2.52, not 2.54) done: the 2.54 conf is deleted. The rpi5 image on
+   moose is 2.54 and needs rebuilding as webkit-2.52-yocto-rpi5-64 -- waits on A.
+4. done (nothing to change).
+6. (yocto incremental) the fix is structural, not one-time: upstream
+   cross-toolchain-helper's build_image() returns early when
+   build/image/<recipe>.<ext> exists (verified in WebKit main, line 488);
+   image/yocto-build.sh deletes that copy before every image stage and then
+   requires the newest artifact to postdate the stage's start
+   (clear_stale_image_copies, verify_image_freshness; tests/test_yocto_stage.py).
+   bitbake's own incrementality (sstate) is untouched. A timed second build
+   on moose is the remaining evidence -- waits on A.
+7. (distro perf image) scrubbed: HANDOFF-bench-unify item and the
+   HUMAN-benchmark-start line; `perf-linux-*` stays only as a tombstone
+   naming the yocto profile.
+8. (image store) done: no mention outside cmd/sysimage's tombstones;
+   tests/test_image_store_gone.py polices definitions, calls and the phrase.
+   The audit found no other cached fact; two stale labels (lib/store.sh,
+   cmd/disk) fixed.
+9. (pre-field images) the `unrecorded` word is gone (cmd/find says what is
+   missing and names the remedy); deleting the images on moose waits on A.
+10. (--sysroot) the doc is rewritten from your notes as owed work
+    (docs/Nice to have/HANDOFF-cross-compile.md); still Nice to have.
+11. (reprovision) order written into docs/HANDOFF-reprovision.md: rpi5 by
+    hand first, then moose, then tolken, each gated on wk doctor and a clean
+    wk backup diff. The settings audit itself is docs/HANDOFF-settings-audit.md.
+12. (Tailscale ACL) yours, at the end.
+13. (--browser) done in code: `wk profile --browser` on GTK/WPE profiles the
+    web process by default (samply attaches by name), `--process
+    ui|web|network|gpu` for the rest; every combination is dry-run tested,
+    none has run on a board yet (docs/Urgent/HANDOFF-profile.md).
+14. (Mac sticky startup disk) kept as is.
+15. (software-update denial in /etc/hosts) done in code: one function
+    (bench/mac-quiet-hosts.sh) applied by first boot and by --provision,
+    reported by wk quiesce status; verification on the real bench volume and
+    the deep-quiescing programme are owed in docs/HANDOFF-mac-perf-mode.md.
+16. (ddebs) done: ddebs.ubuntu.com allowlisted (the VM's proxy restarted on
+    the policy change) and firstrun provisions the ddebs apt source; existing
+    workspaces need `wk rm`/`wk new` to get it.
 
 Everything else below proceeds without you.
 
 Defects:
+
+- Audit what tools are needed on the host macOS and Linux systems; keep the
+  host minimal and use containers / VMs where reasonable. (agent: the
+  inventory is done -- every host tool classified; what must stay is the
+  runtime (podman, tart+softnet), the proxy/broker pythons, tailscale, the
+  display/GPU stack of a bench box, the card machine's media tools and the
+  developer's identities (gh, zed). Dropped now: host ccache (the workspace
+  image has its own). The decisions and the rest are docs/HANDOFF-host-tools.md.)
 
 - Confirm new recovery images for rpi3 and rpi4 build and write fine. Both sd card (rpi3) and second usb stick (rpi4) are connected to rpi5, so no intervention is needed. I give you permission to do this.
   (agent: both images are built for real on moose -- see decision 1. The

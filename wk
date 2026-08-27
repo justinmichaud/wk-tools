@@ -9,6 +9,27 @@
 # the workspace name, refuse a name inside a workspace, wait for a workspace to
 # be ready, decide where the command runs, and forward container work into the
 # podman VM on a macOS host. bash 3.2 throughout: macOS ships nothing newer.
+#
+# --- environment protocol -----------------------------------------------------
+# Set here for a forwarded or delegated child and read by cmd/* and lib/*;
+# a command reads these rather than inventing its own version of one:
+#   WK_NAME         the workspace name this invocation resolved to (main)
+#   WK_TARGET       which target answers -- an explicit value skips
+#                   discovery, else lib/target.sh's default_target
+#   WK_CONFIG       the build config an already-forwarded command inherits
+#   WK_IN_VM        this is the re-invocation inside the podman VM; stops it
+#                   forwarding a second time
+#   WK_ROW_LABEL    the machine name a forwarded or delegated command's
+#                   records should claim, when it is not the one asked
+#   WK_HOST_SELF    set alongside WK_ROW_LABEL: this row is *this* machine,
+#                   not one being asked about (bare_report, forward_to_vm)
+#   WK_EXPECT_TREE  the tree hash bare_report already computed, so the VM
+#                   half of `wk status` need not recompute it
+#   WK_NO_DELEGATE  set by a command already walking the fleet, so a machine
+#                   it asks reports only what it holds and asks nobody
+#   WK_QUIET        --quiet: drop info/log narration (lib/common.sh)
+#   WK_FORCE        --force: cross a refusal that exists because of a rule
+#                   (lib/common.sh's barrier)
 
 set -euo pipefail
 
@@ -364,7 +385,9 @@ status_view_env() {
     # a table on the other would be two commands with one name. Computed by
     # bare_report *before* this is substituted, because the question it answers
     # is whether stdout is a terminal and in here stdout is this substitution's
-    # pipe (status_default_mode, lib/common.sh).
+    # pipe (status_default_mode, lib/common.sh). WK_STATUS_DEFAULT_MODE is
+    # that function's return value, not a knob to set by hand -- the ":-text"
+    # only guards a call site that runs before status_default_mode has.
     local mode="${WK_STATUS_DEFAULT_MODE:-text}"
     # Seeded from the environment for the same reason the mode is: cmd/status
     # honours WK_STATUS_PORT and WK_STATUS_INTERVAL, and on a macOS host it is

@@ -66,20 +66,17 @@ ALLOWED_HOSTS = {
     # unchanged -- so none of these names can become a route onto the LAN or the
     # tailnet, which is the property that actually matters.
     #
-    # The immediate need was `wk zed`: Zed drives the system `ssh`, the
-    # workspace has no network interface at all, so the transport is the ssh
-    # protocol over `podman exec` (container/ssh-transport.sh) -- and the far
-    # end of that has to be a real sshd, which the SDK image does not carry.
-    #
-    # Three hostnames rather than the `ubuntu.com` suffix, because the suffix
-    # would also cover every other host under that domain -- these are the two
-    # the image's sources.list names (ports. on arm, archive. on x86_64) plus
-    # security., which apt-get update reads on the same run. Port 80 as well as
-    # 443: apt's configured URIs are http, and it verifies the signature rather
-    # than the transport.
+    # Explicit hostnames rather than the `ubuntu.com` suffix, because the
+    # suffix would also cover every other host under that domain -- these are
+    # the two the image's sources.list names (ports. on arm, archive. on
+    # x86_64), security., which apt-get update reads on the same run, and
+    # ddebs., the debug-symbol archive (container/firstrun.sh provisions it;
+    # docs/Urgent/HANDOFF-debug.md). Port 80 as well as 443: apt's configured
+    # URIs are http, and it verifies the signature rather than the transport.
     "ports.ubuntu.com": (80, 443),
     "archive.ubuntu.com": (80, 443),
     "security.ubuntu.com": (80, 443),
+    "ddebs.ubuntu.com": (80, 443),     # debug symbols for backtraces through system libraries
     # Zed's own CDN, for the same reason. Its remote server asks this for the
     # agent registry as it starts, and the refusal was a red line in the log of
     # every remote session -- an editor failing at something that has nothing to
@@ -236,7 +233,9 @@ ALLOWED_HOSTS = {
 # them. Without this an allowlisted name whose DNS is wrong -- or hostile --
 # becomes a route onto the LAN, which is precisely what the boundary exists to
 # prevent. The workstation is an unrestricted tailnet node, so this matters more
-# here than it would on an isolated machine.
+# here than it would on an isolated machine. The boards sit on the house LAN,
+# not an isolated segment: this block and the pi-hosts exemption below are
+# the whole boundary between a workspace and them.
 BLOCKED_NETS = [
     ipaddress.ip_network(n) for n in (
         "0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16",

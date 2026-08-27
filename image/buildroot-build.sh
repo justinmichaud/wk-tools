@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 #
-# The in-workspace half of a buildroot image build. Driven by image/buildroot.sh
-# via t_spawn, and run from /opt/wk-tools -- the read-only mount of this repo --
-# so the two halves cannot skew.
+# The in-workspace half of a buildroot image build, driven by
+# image/buildroot.sh via t_spawn from /opt/wk-tools (the read-only repo mount).
 #
-# Everything here is the recipe from the wiki page "Building WPEWebKit for
-# 32-bit Raspberry Pi 3 (Buildroot DRM config)", which is the one version of
-# this that has produced a booting image, plus what this repository adds: the
-# tailnet and wifi overlays, the BR2_EXTERNAL libffi fix, and caches that live
-# in the store so a rebuild is cheap.
-#
-# Nothing here may fail silently: this runs detached and its log is the only
-# account of what happened.
+# Follows the wiki recipe "Building WPEWebKit for 32-bit Raspberry Pi 3
+# (Buildroot DRM config)" -- the only version known to produce a booting
+# image -- plus this repo's tailnet/wifi overlays, BR2_EXTERNAL libffi fix,
+# and store-backed caches. Runs detached: nothing here may fail silently,
+# since the log is the only account of what happened.
 
 set -euo pipefail
 
@@ -39,15 +35,10 @@ done
 say()  { printf 'wk-buildroot: %s\n' "$*"; }
 fail() { printf 'wk-buildroot: error: %s\n' "$*" >&2; exit 1; }
 
-# The image stage's completion evidence -- a function of its own, the same
-# shape as image/yocto-build.sh's verify_image_freshness, for the same reason:
-# `make` exits 0 on a tree it decided had nothing left to do (a second run
-# against an unchanged .config, or one whose only change never reached the
-# genimage step), and a "done" printed from that exit code would be exactly
-# the staleness that function exists to catch on the Yocto side -- a build
-# that reports success and hands back yesterday's card image. So the named
-# image's mtime has to be at least as new as this build's own start, checked
-# with a portable `stat` (GNU's -c, BSD/macOS's -f).
+# make exits 0 on a tree with nothing left to do, so success alone does not
+# mean a fresh image -- the named image's mtime must be at least as new as
+# this build's own start (portable stat: GNU's -c, BSD/macOS's -f). Same
+# shape as image/yocto-build.sh's verify_image_freshness, same reason.
 verify_image_freshness() { # <path to the named image> <build start epoch seconds>
     local img="$1" start="$2" mtime
     [ -f "$img" ] || fail "the configuration names '$(basename "$img")' and make
@@ -71,15 +62,11 @@ verify_image_freshness() { # <path to the named image> <build start epoch second
 [ -n "$DEFCONFIG" ] || fail "--defconfig is required"
 [ -n "$JOBS" ]      || JOBS=$(nproc 2>/dev/null || echo 4)
 
-# BR2_DL_DIR and BR2_CCACHE_DIR arrive as environment variables -- the
-# container's store-backed cache mount (targets/container.sh) sets them --
-# rather than as flags on this script. The same reasoning image/yocto-build.sh
-# gives for DL_DIR/SSTATE_DIR: a host path handed in from image/buildroot.sh
-# would name nothing inside this container, and the container's own
-# environment is already the one true copy of where the mount landed. Their
-# absence means the store mount itself is missing, not that the cache is
-# merely unset -- so it fails here rather than quietly building inside the
-# workspace, where `wk rm` would throw the downloads away with it.
+# BR2_DL_DIR/BR2_CCACHE_DIR come from the container's store-backed cache mount
+# (targets/container.sh), not as flags: a host path from image/buildroot.sh
+# would name nothing inside this container. Their absence means the mount is
+# missing, so this fails rather than building inside the workspace, where
+# `wk rm` would discard the downloads with it.
 for _d in "${BR2_DL_DIR:-}" "${BR2_CCACHE_DIR:-}"; do
     [ -n "$_d" ] || fail "BR2_DL_DIR/BR2_CCACHE_DIR are not set in this workspace.
     They come from the container's store-backed cache mount
@@ -96,15 +83,11 @@ say "workdir     $WORKDIR"
 say "jobs        -j$JOBS"
 say "host        $( . /etc/os-release; echo "$PRETTY_NAME"), gcc $(gcc -dumpversion 2>/dev/null || echo '?')"
 
-# --- the tree ----------------------------------------------------------------
-#
-# Pinned to a tag when the configuration names one, which every WPE
-# configuration here does: the fork's WPE branches are pinned to 2020.02 and the
-# release-pinned cog defconfigs only make sense against it.
-#
-# Re-used when it is already there and already at the pin. A buildroot tree with
-# an output/ directory is tens of gigabytes of work, and the point of it living
-# in the workspace is that a second run continues rather than starts again.
+# --- the tree ------------------------------------------------------------
+# Every WPE configuration here pins to 2020.02, since the release-pinned cog
+# defconfigs only make sense against it. Re-used when already at the pin: an
+# output/ tree is tens of gigabytes, so a second run continues rather than
+# re-cloning.
 if [ -d "$WORKDIR/.git" ]; then
     say "tree already present; fetching the pin"
     git -C "$WORKDIR" fetch --tags origin "${TREE_BRANCH:-HEAD}" \
@@ -116,11 +99,9 @@ else
         || fail "could not clone $TREE_URL"
 fi
 if [ -n "$TREE_COMMIT" ]; then
-    # A commit, not a tag. The fork's `2020.02` tag is the buildroot version its
-    # WPE branch is based on, and the release-pinned cog defconfigs were added to
-    # the branch after it -- so standing the tree at that tag removes the
-    # configuration the profile names. Fetched by sha because a shallow clone or
-    # an older fetch may not have it yet.
+    # Not the tag: the cog defconfigs were added to the branch after 2020.02,
+    # so standing at the tag alone would remove the configuration the profile
+    # names. Fetched by sha since a shallow clone may not have it yet.
     git -C "$WORKDIR" fetch origin "$TREE_COMMIT" 2>/dev/null || true
     git -C "$WORKDIR" checkout --detach "$TREE_COMMIT" \
         || fail "$TREE_URL has no commit $TREE_COMMIT.
@@ -131,16 +112,11 @@ fi
 
 cd "$WORKDIR"
 
-# --- the overlay -------------------------------------------------------------
-#
-# BR2_ROOTFS_OVERLAY is buildroot's one supported way to add files to an image
-# without writing a package, and it is copied in at target-finalize -- the very
-# end -- so this can be assembled now and costs only the last step if it
-# changes. Both scripts are this repository's and carry no credential: the
-# tailnet key and the wifi passphrase arrive with the card, not the image.
-# BR2_ROOTFS_OVERLAY takes a space-separated list, so both overlays sit side by
-# side when both are wanted rather than needing to be merged into one staging
-# directory.
+# --- the overlay -----------------------------------------------------------
+# BR2_ROOTFS_OVERLAY copies files in at target-finalize without needing a
+# package; it takes a space-separated list, so both overlays sit side by side.
+# Neither script carries a credential: the tailnet key and wifi passphrase
+# arrive with the card, not the image.
 OVERLAY=""
 if [ -n "$OVERLAY_ARCH" ]; then
     OVERLAY="$WORKDIR/wk-overlay-tailnet"
@@ -156,11 +132,9 @@ if [ "$OVERLAY_WIFI" = 1 ]; then
     OVERLAY="${OVERLAY:+$OVERLAY }$WIFI_OVERLAY"
 fi
 
-# --- the configuration -------------------------------------------------------
-#
-# BR2_EXTERNAL is passed on every make, not just the first: buildroot records it
-# in output/.br-external.mk, and a later make without it fails on the recorded
-# path rather than quietly dropping the tree.
+# --- the configuration -----------------------------------------------------
+# BR2_EXTERNAL must be passed on every make: buildroot records it in
+# output/.br-external.mk, and a later make without it fails on the recorded path.
 BR_EXT=""
 [ "$EXTERNAL" = 1 ] && BR_EXT="BR2_EXTERNAL=/opt/wk-tools/image/buildroot/external"
 
@@ -170,37 +144,18 @@ make $BR_EXT "$DEFCONFIG" || fail "no such defconfig: $DEFCONFIG
     'make list-defconfigs' in $WORKDIR shows what the tree has, and the external
     tree adds this repository's own (image/buildroot/external/configs)."
 
-# The fragments this repository adds on top of the defconfig, appended and then
-# resolved by olddefconfig so that a setting which implies others gets them.
-#
-# Written to the .config rather than passed as make variables because that is
-# what survives the recursive makes buildroot does internally.
+# Fragments appended then resolved by olddefconfig, so a setting that implies
+# others gets them. Written to .config, not make vars, since only .config
+# survives buildroot's recursive makes.
 {
     echo ""
     echo "# --- added by wk (image/buildroot-build.sh) ---"
-    # One host for almost every fetch, the same trick the yocto lane uses with
-    # the OpenEmbedded mirror: buildroot mirrors every package it knows about at
-    # sources.buildroot.net, so the build stops depending on a hundred upstreams
-    # still being up and serving the same bytes -- and, because a workspace
-    # reaches the network only through a hostname allowlist, the set of names
-    # that has to be allowed collapses to something a person can read.
-    #
-    # Not PRIMARY_SITE_ONLY: a 2020 tree pins versions the mirror does not
-    # always carry, and forbidding the upstream fallback outright would fail
-    # those. Fallbacks that hit the egress allowlist show up in the proxy log
-    # as DENY lines, naming the host to add.
-    # The filesystem genimage assembles the card out of.
-    #
-    # The release-pinned cog defconfigs emit a *tarball only* -- no rootfs.ext4 --
-    # so the board's own genimage config has nothing to assemble and the build
-    # ends with a kernel, some dtbs and a tar. That is not a failure and it is
-    # not a card either: the wiki recipe stops there and copies files by hand.
-    # A configuration that names an .img wants the image, so the filesystem it
-    # is made from is added here.
-    #
-    # Sized from the configuration rather than from the content: buildroot needs
-    # the number before the rootfs exists, so it cannot be derived, and one too
-    # small fails at image time after the whole build.
+    # sources.buildroot.net mirrors nearly every package, keeping the network
+    # allowlist short; not PRIMARY_SITE_ONLY since a 2020 tree pins versions
+    # the mirror may lack (a DENY in the proxy log names the host to add). The
+    # cog defconfigs emit a tarball only, so a configuration naming an .img
+    # needs the filesystem added here, sized from the configuration since
+    # buildroot needs the number before the rootfs exists.
     case "${IMAGE:-}" in
         *.img)
             echo "BR2_TARGET_ROOTFS_EXT2=y"
@@ -221,34 +176,25 @@ for v in BR2_DL_DIR BR2_CCACHE_DIR BR2_ROOTFS_OVERLAY; do
     grep -q "^$v=" .config && say "  $(grep "^$v=" .config)"
 done
 
-# --- the build ---------------------------------------------------------------
-#
-# FORCE_UNSAFE_CONFIGURE=1 because the workspace user is uid 0 in some
-# configurations and several 2009-era configure scripts refuse to run as root;
-# the wiki recipe carries the same flag for the same reason.
-#
-# The start time is taken right here, not at the top of the script: cloning
-# and pinning the tree can legitimately take minutes and touches nothing under
-# output/, so it must not count against the freshness check below -- only the
-# build that is about to run should have to have produced the evidence.
+# --- the build ---------------------------------------------------------
+# FORCE_UNSAFE_CONFIGURE=1: the workspace user is uid 0 in some configs, and
+# several 2009-era configure scripts refuse to run as root (the wiki recipe
+# carries the same flag). Start time taken here, not at the top: cloning and
+# pinning can take minutes and touches nothing under output/, so it must not
+# count against the freshness check below.
 build_start=$(date +%s)
 say "building (this is hours, and the log below is the whole account of it)"
 # shellcheck disable=SC2086
 FORCE_UNSAFE_CONFIGURE=1 make $BR_EXT -j"$JOBS" \
     || fail "buildroot failed. The last lines above are the failing package."
 
-# --- what came out -----------------------------------------------------------
-#
-# Left where buildroot put it. There is no store to import it into (wk help
-# images): the workspace that built an image is its name, and `wk sysimage ls`
-# finds it by looking here.
+# --- what came out -----------------------------------------------------
+# Left where buildroot put it; `wk sysimage ls` finds it by looking here.
 OUT="$WORKDIR/output/images"
 [ -d "$OUT" ] || fail "the build reported success but produced no $OUT"
 say "images built at:"
 ls -1 "$OUT" | sed 's/^/  -   /'
 
-# See verify_image_freshness above: only now, with the artifact checked
-# against this run's own start time, may the stage call itself done.
 if [ -n "$IMAGE" ]; then
     verify_image_freshness "$OUT/$IMAGE" "$build_start"
     say "$IMAGE is fresh"

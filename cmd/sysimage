@@ -12,9 +12,10 @@
 #
 # There is no image store (`wk help`): a build leaves its bytes wherever its
 # builder put them -- a workspace, a build host -- and `wk sysimage write
-# --from` edits and streams them onto a card in one pass, unprivileged except
-# for the write itself, which happens on the target machine, over ssh, where
-# sudo is passwordless.
+# --from` streams those bytes onto a card in one pass. The card takes the
+# image's own bytes; every edit an image needs is made afterwards, on the
+# card, by the machine holding the reader (admin/wk-card-priv) -- so this
+# machine needs no tooling that can read a Linux filesystem.
 #
 #   build <profile> [--dry-run]  build from the spec in this repo. A yocto
 #                                profile also takes --workspace, --stage,
@@ -27,7 +28,8 @@
 #                                (wk help)
 #   disks <machine>             removable disks attached to that machine
 #   write --from <path> --disk <machine>:<device>
-#                                edit and write that image to that disk;
+#                                write that image to that disk, and make it a
+#                                fleet system on the card;
 #                                --from takes a path 'wk sysimage ls' printed
 #                                (or vm:<path>, inside this machine's podman
 #                                VM). Never touches a machine's own system
@@ -70,14 +72,29 @@ if in_workspace; then
     workspace '$(wk_self)'. Run it on the workstation instead."
 fi
 
+# Where the units are composed before they are handed to the card as one
+# archive (disk_install_units): scratch, removed either way the process ends.
 _seed_cleanup() { [ -n "${SEED:-}" ] && rm -rf "$SEED"; SEED=""; return 0; }
 
-# The local, materialized copy of a --from write's source, decompressed once
-# and edited in place before streaming to the card: scratch, removed either
-# way the process ends.
-_disk_cleanup() { [ -n "${WRITE_TMP:-}" ] && rm -f "$WRITE_TMP"; WRITE_TMP=""; return 0; }
+# Where the streamed write leaves the byte count and hash of what went past
+# (disk_stream_meter, boot/disk.sh): the image itself is never materialized
+# here, but the read-back verify needs something to compare against.
+_disk_cleanup() { [ -n "${WRITE_META:-}" ] && rm -f "$WRITE_META"; WRITE_META=""; return 0; }
 
-# --- the seed ----------------------------------------------------------------
+# --- what a written system is called, and whose key it takes -------------------
+
+# The name a written system is known by: the profile it was built from (or,
+# with no profile, the source file's own name), and the first 12 hex of the
+# sha256 of the bytes that went onto the card. One expression, so the dry run
+# and the write cannot name a system differently -- before the write there is
+# no hash to name it by, and it says so.
+_image_id() { # <name> <sha256 of the written bytes, empty before the write>
+    if [ -n "${2:-}" ]; then
+        printf '%s-%.12s' "$1" "$2"
+    else
+        printf '%s-<the written image sha256>' "$1"
+    fi
+}
 
 # The public key the image will accept. Reaching the board over Tailscale SSH
 # needs no key at all, so a working session is not evidence the image has the
@@ -90,355 +107,49 @@ driving_key() {
     cat "$k"
 }
 
-# --- FAT surgery, without a mount --------------------------------------------
+# --- what a fleet system carries -----------------------------------------------
 #
-# mtools addresses a filesystem inside an image file directly, at a byte
-# offset, which keeps this whole command unprivileged. MTOOLS_SKIP_CHECK is
-# needed because an image's sector count is rarely a whole number of tracks,
-# which mtools otherwise refuses.
-mt() {
-    local prog="$1"; shift
-    MTOOLS_SKIP_CHECK=1 "$prog" -i "$DISK@@$FAT_OFFSET" "$@"
+# The bodies below are composed here, where the profile's values are
+# (IMG_WATCHDOG, the machine's driver, the spec's own append files), and land
+# on the card through a card-helper verb (boot/disk.sh): nothing on this
+# machine opens a filesystem inside an image, so a driving machine needs no
+# mtools, debugfs or sfdisk.
+
+# One unit, staged for `disk_install_units`, under the name systemd will know
+# it by. `systemctl enable` never runs against a card, so the unit's own
+# WantedBy= is what decides which <target>.wants it is symlinked into -- the
+# same fact systemd reads, stated once, in the unit.
+stage_unit() { # <staging dir> <name> <body>
+    printf '%s' "$3" > "$1/systemd/$2"
 }
 
-# Byte offset of a partition, from the table in the file itself. No loop
-# device, no root -- the same trick the FAT seeding relies on, and e2fsprogs
-# speaks it natively through `file?offset=N`.
-part_offset() {
-    local img="$1" n="$2"
-    sfdisk -J "$img" | python3 -c '
-import json, sys
-p = json.load(sys.stdin)["partitiontable"]["partitions"]
-print(p[int(sys.argv[1]) - 1]["start"] * 512)' "$n"
-}
-
-fat_offset() {
-    local img="$1"
-    # Partition 1 is the firmware/boot FAT on every Pi image.
-    sfdisk -J "$img" \
-        | sed -n 's/.*"start": *\([0-9]*\).*/\1/p' \
-        | head -1 \
-        | awk '{ print $1 * 512 }'
-}
-
-# Install a systemd unit into the image's rootfs, enabled, without cloud-init:
-# a failure earlier than cloud-init (an unread seed, a hung stage) would
-# strand a board with nothing to hand it back if the watchdog depended on it
-# to arm. Units are written with their <target>.wants symlinks at build time
-# and start whether cloud-init runs or not; only what genuinely needs it (an
-# authorized key, rendered network config) is left to it.
-#
-#   install_unit <rootfs-offset> <name> <body> [target]
-#
-# `target` is a real argument, not a constant: `systemctl enable` never runs
-# here, so a unit asking for one target but symlinked into another silently
-# loses its ordering.
-install_unit() {
-    local roff="$1" name="$2" body="$3" target="${4:-multi-user.target}"
-    printf '%s' "$body" > "$SEED/$name"
-    debugfs -w -R "mkdir /etc/systemd/system/$target.wants" \
-        "$DISK?offset=$roff" >/dev/null 2>&1 || true
-    debugfs -w -f - "$DISK?offset=$roff" >/dev/null 2>&1 <<EOF
-cd /etc/systemd/system
-rm $name
-write $SEED/$name $name
-sif $name mode 0100644
-sif $name uid 0
-sif $name gid 0
-symlink /etc/systemd/system/$target.wants/$name /etc/systemd/system/$name
-EOF
-    debugfs -R "stat /etc/systemd/system/$name" "$DISK?offset=$roff" 2>/dev/null \
-        | grep -q '^Inode:' || die "could not install $name into the image"
-}
-
-# --- making an image bootable from the disk it is written to -------------------
-
-# The MBR partition UUID of one partition: the disk signature, then the
-# partition number. `PARTUUID=` is resolved inside the kernel
-# (`devt_from_partuuid`) with no help from userspace; `LABEL=` needs an
-# initramfs to do the lookup, and a Yocto wic image has none -- the firmware
-# loads kernel8.img and the kernel mounts its root directly.
-image_partuuid() {
-    local img="$1" n="$2" sig
-    sig=$(sfdisk -J "$img" 2>/dev/null | sed -n 's/.*"id": *"0x\([0-9a-fA-F]*\)".*/\1/p' | head -1)
-    [ -n "$sig" ] || return 1
-    printf '%08x-%02d' "$((0x$sig))" "$n"
-}
-
-# Give an image a root reference that survives being written to a different
-# kind of device than its recipe assumed. bitbake writes `root=/dev/mmcblk0p2`
-# because its wks file says so -- a promise about a device, not a filesystem;
-# written to a USB stick, the kernel looks for root on an SD card that isn't
-# there. Rewrites both places that name a device by path to name a
-# *partition* instead: kernel `root=` is resolved by the kernel, `/boot` in
-# /etc/fstab by mount(8) after userspace is up, so fixing only the first
-# leaves an empty /boot. Unprivileged, in place, nothing mounted: mtools for
-# the FAT, debugfs for the ext4, both addressing a filesystem at a byte offset.
-retarget_root() {
-    local seed="$1" roff spec class uuid_root uuid_boot cmdline_path
-    roff=$(part_offset "$DISK" 2)
-
-    spec=$(cmdline_root_spec)
-    [ -n "$spec" ] || die "$DISK has no cmdline.txt to read a root from"
-    class=$(image_root_class "$spec")
-    case "$class" in
-        portable)
-            debug "root is already portable ($spec); nothing to retarget"
-            return 0 ;;
-        network)
-            die "$DISK names a network root ($spec). Nothing here boots that way." ;;
-    esac
-
-    uuid_root=$(image_partuuid "$DISK" 2) \
-        || die "could not read the disk signature out of $DISK's partition table"
-    uuid_boot=$(image_partuuid "$DISK" 1)
-
-    info "retargeting the root: $spec -> PARTUUID=$uuid_root (boots from any device)"
-
-    # The kernel command line.
-    for cmdline_path in ::/current/cmdline.txt ::cmdline.txt; do
-        if mt mtype "$cmdline_path" > "$seed/cmdline.txt" 2>/dev/null; then
-            sed -i "s|root=$spec|root=PARTUUID=$uuid_root|" "$seed/cmdline.txt"
-            grep -q "root=PARTUUID=$uuid_root" "$seed/cmdline.txt" \
-                || die "could not rewrite root= in $cmdline_path"
-            mt mcopy -o "$seed/cmdline.txt" "$cmdline_path"
-            debug "rewrote $cmdline_path"
-            break
-        fi
-    done
-
-    # /etc/fstab, for every device path in it. The root line is usually
-    # `/dev/root`, which the kernel fills in and which is right already; it is
-    # the /boot line that names a card.
-    if debugfs -R "cat /etc/fstab" "$DISK?offset=$roff" 2>/dev/null > "$seed/fstab.old"; then
-        sed -e "s|^/dev/mmcblk0p1[[:space:]]|PARTUUID=$uuid_boot\t|" \
-            -e "s|^/dev/sda1[[:space:]]|PARTUUID=$uuid_boot\t|" \
-            -e "s|^/dev/mmcblk0p2[[:space:]]|PARTUUID=$uuid_root\t|" \
-            -e "s|^/dev/sda2[[:space:]]|PARTUUID=$uuid_root\t|" \
-            "$seed/fstab.old" > "$seed/fstab"
-        if ! cmp -s "$seed/fstab.old" "$seed/fstab"; then
-            debugfs -w -f - "$DISK?offset=$roff" >/dev/null 2>&1 <<EOF
-rm /etc/fstab
-cd /etc
-write $seed/fstab fstab
-sif fstab mode 0100644
-sif fstab uid 0
-sif fstab gid 0
-EOF
-            e2fsck -fy "$DISK?offset=$roff" >/dev/null 2>&1 || true
-            debugfs -R "cat /etc/fstab" "$DISK?offset=$roff" 2>/dev/null \
-                | grep -q "PARTUUID=$uuid_boot" \
-                || die "/etc/fstab did not survive the rewrite"
-            info "  and /etc/fstab's /boot -> PARTUUID=$uuid_boot"
-        fi
-    fi
-}
-
-# The image's own cmdline root=, read from $DISK rather than looked up, so
-# this works mid-build.
-cmdline_root_spec() {
-    local p
-    for p in ::/current/cmdline.txt ::cmdline.txt; do
-        mt mtype "$p" 2>/dev/null | tr ' ' '\n' | kv_get root \
-            | grep . && return 0
-    done
-    return 1
-}
-
-# The image's identity, on the **boot partition** (FAT), a different file
-# from /etc/wk-image in the rootfs: `b_device_image` (boot/machines.sh) reads
-# it off a disk that is not running, without mounting anything ext4. Not
-# byte-matched against the image, which stops holding the moment a booted
-# image writes to its own boot partition. One writer, called from every
-# write (cmd_write_from): `wk boot` refuses a disk with no id.
-install_disk_id() {
-    printf '%s\n' "$ID" > "$SEED/wk-image.id"
-    mt mcopy -o "$SEED/wk-image.id" ::wk-image.id
-    mt mtype ::wk-image.id 2>/dev/null | grep -qxF "$ID" \
-        || die "the identity did not survive the write to the boot partition"
-}
-
-# Kernel command-line additions this profile declares, appended to whatever
-# the image already had. The sibling of `config.txt.append`, one layer up:
-# that tells the firmware, this tells the kernel (e.g. forcing a KMS output
-# on a headless board for a gpu-class benchmark). Appended, not replacing,
-# and idempotent by marker.
-CMDLINE_MARKER='# wk:'
-apply_cmdline_append() {
-    local seed="$1" add f path
-    f="$IMG_SPEC_DIR/cmdline.txt.append"
-    [ -f "$f" ] || return 0
-    add=$(grep -vE '^\s*(#|$)' "$f" | tr '\n' ' ' | sed 's/ *$//')
-    [ -n "$add" ] || return 0
-
-    for path in ::/current/cmdline.txt ::cmdline.txt; do
-        if mt mtype "$path" > "$seed/cmdline.txt" 2>/dev/null; then
-            if grep -qF "$add" "$seed/cmdline.txt"; then
-                debug "cmdline already carries: $add"
-                return 0
-            fi
-            info "kernel cmdline += $add  (from $(basename "$IMG_SPEC_DIR")/cmdline.txt.append)"
-            # One line, always: the firmware reads the first line only, so a
-            # trailing newline from the spec file would silently drop it all.
-            printf '%s %s\n' "$(tr -d '\r\n' < "$seed/cmdline.txt")" "$add" > "$seed/cmdline.new"
-            mv "$seed/cmdline.new" "$seed/cmdline.txt"
-            mt mcopy -o "$seed/cmdline.txt" "$path"
-            CMDLINE_APPENDED="$add"
-            return 0
-        fi
-    done
-    die "no cmdline.txt in the image's boot partition to append to"
-}
-
-# Firmware settings this profile declares, appended to config.txt, which a
-# Raspberry Pi's firmware reads off the boot partition regardless of the OS
-# on it. Clock pinning matters: a board that idles low and ramps on demand
-# turns DVFS ramping into measurement variance, and a setting that fails to
-# land fails no build -- it just makes every number worse with nothing to
-# notice by, which is why the block is read back below.
-apply_config_append() {
-    local seed="$1" f path
-    f="$IMG_SPEC_DIR/config.txt.append"
-    [ -f "$f" ] || return 0
-
-    for path in ::/current/config.txt ::config.txt; do
-        mt mtype "$path" > "$seed/config.txt" 2>/dev/null || continue
-        if grep -qF "# --- wk sysimage: $IMG_PROFILE ---" "$seed/config.txt"; then
-            debug "config.txt already carries $IMG_PROFILE's block"
-            return 0
-        fi
-        info "config.txt += $(basename "$IMG_SPEC_DIR")/config.txt.append (firmware settings)"
-        printf '\n' >> "$seed/config.txt"
-        cat "$f" >> "$seed/config.txt"
-        mt mcopy -o "$seed/config.txt" "$path"
-        # Read back, because a firmware setting that did not land is a board
-        # that measures at whatever clock it felt like -- and nothing says so.
-        mt mtype "$path" 2>/dev/null | grep -qF "# --- wk sysimage: $IMG_PROFILE ---" \
-            || die "config.txt did not take $IMG_PROFILE's firmware block"
-        return 0
-    done
-    die "no config.txt in the image's boot partition to append to"
-}
-
-# The ssh key that makes the fleet integration usable: `b_probe`, `wk boot
-# --back` and `wk bench` all drive the board **over ssh**. A Yocto image
-# ships `PermitRootLogin yes` with an empty root password, which
-# `ssh -o BatchMode=yes` cannot offer -- without a key the image boots
-# perfectly and is invisible to every verb here.
-install_driving_key() {
-    local roff="$1" home ssh
-    # Asked of the image rather than assumed: Yocto puts root in /home/root,
-    # Debian and Ubuntu in /root, and the wrong directory fails as silently
-    # as writing nothing.
-    home=$(debugfs -R "cat /etc/passwd" "$DISK?offset=$roff" 2>/dev/null \
-        | awk -F: '$1 == "root" { print $6 }' | head -1)
-    [ -n "$home" ] || die "no root entry in the image's /etc/passwd"
-    ssh="$home/.ssh"
-
-    driving_key > "$SEED/authorized_keys"
-    info "installing the driving ssh key into the image ($ssh)"
-    debugfs -w -f - "$DISK?offset=$roff" >/dev/null 2>&1 <<EOF
-mkdir $ssh
-cd $ssh
-rm authorized_keys
-write $SEED/authorized_keys authorized_keys
-sif authorized_keys mode 0100600
-sif authorized_keys uid 0
-sif authorized_keys gid 0
-sif $ssh mode 040700
-sif $ssh uid 0
-sif $ssh gid 0
-EOF
-    e2fsck -fy "$DISK?offset=$roff" >/dev/null 2>&1 || true
-    debugfs -R "cat $ssh/authorized_keys" "$DISK?offset=$roff" 2>/dev/null \
-        | grep -q 'ssh-' || die "the driving key did not survive the write into the image"
-}
-
-# Write a plain file into the image's rootfs at build time -- same reasoning
-# as install_unit: cloud-init is late enough that a file it writes can land
-# after the reader that wants it has already run, and on a one-shot image
-# "takes effect on the second boot" means "never."
-install_file() {
-    local roff="$1" path="$2" body="$3" mode="${4:-0100644}"
-    local dir base tmp
-    dir=$(dirname "$path"); base=$(basename "$path")
-    tmp="$SEED/.rootfs-$base"
-    printf '%s' "$body" > "$tmp"
-    debugfs -w -R "mkdir $dir" "$DISK?offset=$roff" >/dev/null 2>&1 || true
-    debugfs -w -f - "$DISK?offset=$roff" >/dev/null 2>&1 <<EOF
-cd $dir
-rm $base
-write $tmp $base
-sif $base mode $mode
-sif $base uid 0
-sif $base gid 0
-EOF
-    debugfs -R "stat $path" "$DISK?offset=$roff" 2>/dev/null \
-        | grep -q '^Inode:' || die "could not install $path into the image"
-    rm -f "$tmp"
+# A file for /etc/sysctl.d on the card, same staging, same one verb.
+stage_sysctl() { # <staging dir> <name> <body>
+    printf '%s' "$3" > "$1/sysctl.d/$2"
 }
 
 # Everything a rootfs needs to be a *fleet* system rather than merely a
-# bootable one: no `/etc/wk-image` leaves `b_probe` unable to tell the board
-# apart from host mode, and no self-return watchdog means a medium-armed
-# stick stays armed forever. Applied once at write time (cmd_write_from),
-# not baked in per builder.
-#   install_fleet_integration <rootfs-offset> <marker text>
-install_fleet_integration() {
-    local roff="$1" marker="$2"
-
-    # In the rootfs, not only in cloud-init's write_files: "which OS am I
-    # talking to" must be answerable on a boot where cloud-init did not run
-    # -- a Yocto image has no cloud-init at all.
-    printf '%s\n' "$marker" > "$SEED/wk-image"
-    debugfs -w -f - "$DISK?offset=$roff" >/dev/null 2>&1 <<EOF
-cd /etc
-rm wk-image
-write $SEED/wk-image wk-image
-sif wk-image mode 0100644
-sif wk-image uid 0
-sif wk-image gid 0
-EOF
-    debugfs -R "stat /etc/wk-image" "$DISK?offset=$roff" 2>/dev/null \
-        | grep -q '^Inode:' || die "could not write the identity marker into the image"
-
-    install_units "$roff"
-}
-
-install_units() {
-    local roff="$1"
+# bootable one: no self-return watchdog means a medium-armed stick stays armed
+# forever. Staged at write time, not baked in per builder.
+#
+# Every unit here goes into every image; the two that hand a machine *back*
+# are gated at runtime on /etc/wk/rescue (a marker `wk sysimage write
+# --rescue` leaves), which is what makes one built artifact serve both roles.
+# Ungated, the watchdog would reboot the helper every IMG_WATCHDOG seconds
+# mid-write, and self-disarm would park a medium the image isn't on.
+#
+# An image with no systemd takes none of them: the card is asked, and the
+# helper installs nothing and says so (disk_install_units).
+# TODO: buildroot/BusyBox-init images need S-scripts instead; until then they
+# get neither watchdog nor self-disarm.
+stage_units() { # <staging dir>
+    local seed="$1"
     # For b_self_disarm_sh. A missing driver is not an error -- most profiles
     # (the yocto ones) name a target, not a fleet entry, and just have
     # nothing to disarm.
     if machine_load "${IMG_MACHINE:-}" 2>/dev/null && [ -n "${MACH_DRIVER:-}" ]; then
         load_driver "$MACH_DRIVER" 2>/dev/null || true
     fi
-    # Every unit below goes into every image; the two that hand a machine
-    # *back* are gated at runtime on /etc/wk/rescue (a marker `wk sysimage
-    # write --rescue` leaves), which is what makes one built artifact serve
-    # both roles. Ungated, the watchdog would reboot the helper every
-    # IMG_WATCHDOG seconds mid-write, and self-disarm would park a medium
-    # the image isn't on.
-
-    # Which init this image runs, read out of the image rather than assumed:
-    # an image without systemd would take these units without complaint,
-    # land them where they never start, and report a watchdog installed on
-    # a board that has none. TODO: buildroot/BusyBox-init images need
-    # S-scripts instead; until then they get neither watchdog nor self-disarm.
-    if ! debugfs -R "stat /lib/systemd/systemd" "$DISK?offset=$roff" 2>/dev/null | grep -q '^Inode:' \
-       && ! debugfs -R "stat /usr/lib/systemd/systemd" "$DISK?offset=$roff" 2>/dev/null | grep -q '^Inode:'; then
-        warn "$IMG_PROFILE has no systemd, so the self-return watchdog and the self-disarm
-  were NOT installed. This image carries its identity marker and the driving key
-  and nothing else: a run that wedges the board will not hand it back, and on a
-  medium-armed machine the medium stays armed until something disarms it."
-        return 0
-    fi
-
-    # The .wants directory need not exist in a stock image.
-    debugfs -w -R "mkdir /etc/systemd/system/multi-user.target.wants" \
-        "$DISK?offset=$roff" >/dev/null 2>&1 || true
-
-    info "installing the self-return watchdog and the diagnostics dump into the rootfs"
 
     # TimeoutStartSec=infinity is load-bearing: systemd's default 90 s start
     # timeout kills a Type=oneshot that sleeps longer than that before it can
@@ -449,7 +160,7 @@ install_units() {
     if [ -z "${IMG_WATCHDOG:-}" ]; then
         warn "$IMG_PROFILE sets no IMG_WATCHDOG, so this image will not hand its machine back"
     else
-    install_unit "$roff" wk-self-return.service "[Unit]
+    stage_unit "$seed" wk-self-return.service "[Unit]
 Description=Hand the machine back to host mode unless claimed
 # Inert on a rescue system, which is what this would be handing the machine
 # back *to*. The marker is written by 'wk sysimage write --rescue'.
@@ -471,8 +182,8 @@ WantedBy=multi-user.target
     # DefaultDependencies=no with After=local-fs.target is safe because a
     # rename on an already-mounted filesystem cannot block on systemd.
     if command -v b_self_disarm_sh >/dev/null 2>&1; then
-        info "installing the self-disarm into the rootfs (the stick stops booting once this image is up)"
-        install_unit "$roff" wk-self-disarm.service "[Unit]
+        info "staging the self-disarm (the stick stops booting once this image is up)"
+        stage_unit "$seed" wk-self-disarm.service "[Unit]
 Description=Park this image's second-stage firmware so the next boot is the rescue role
 # A rescue is not on the medium this parks, so on one it would disarm somebody
 # else's arming.
@@ -486,12 +197,12 @@ RemainAfterExit=yes
 ExecStart=/bin/sh -c '$(b_self_disarm_sh)'
 [Install]
 WantedBy=sysinit.target
-" sysinit.target
+"
     fi
 
     # The profiling knobs this image exists for, in the rootfs so
     # systemd-sysctl reads them on the boot that matters.
-    install_file "$roff" /etc/sysctl.d/90-wk-perf.conf "kernel.perf_event_paranoid = -1
+    stage_sysctl "$seed" 90-wk-perf.conf "kernel.perf_event_paranoid = -1
 kernel.kptr_restrict = 0
 "
 
@@ -499,7 +210,7 @@ kernel.kptr_restrict = 0
     # config.txt.append): with `ondemand` still selected, the kernel can ask
     # for a lower operating point regardless. Best-effort -- a kernel with no
     # cpufreq driver for this board has nothing to set.
-    install_unit "$roff" wk-cpu-governor.service "[Unit]
+    stage_unit "$seed" wk-cpu-governor.service "[Unit]
 Description=Pin every CPU to the performance governor for the duration
 After=local-fs.target
 [Service]
@@ -514,7 +225,7 @@ WantedBy=multi-user.target
     # A run that swaps is a run whose number means nothing. A guard, not a
     # change (the base ships none): swap added later by a package or a stray
     # dphys-swapfile would otherwise be invisible variance.
-    install_unit "$roff" wk-no-swap.service "[Unit]
+    stage_unit "$seed" wk-no-swap.service "[Unit]
 Description=Refuse to carry swap, so a benchmark cannot page
 After=local-fs.target
 [Service]
@@ -528,7 +239,7 @@ WantedBy=multi-user.target
     # Written where the driving machine can read it offline, by mounting the
     # boot device from the machine's other role -- the channel that still
     # works when the network is what failed.
-    install_unit "$roff" wk-diag.service "[Unit]
+    stage_unit "$seed" wk-diag.service "[Unit]
 Description=Dump boot and network state where it can be read offline
 After=network.target cloud-init.service
 [Service]
@@ -547,6 +258,28 @@ ExecStart=/bin/sh -c 'wk_bootfs() { for d in /boot/firmware /boot; do \
 [Install]
 WantedBy=multi-user.target
 "
+}
+
+# Kernel command-line additions this profile declares, as one line: the
+# sibling of `config.txt.append`, one layer up -- that tells the firmware,
+# this tells the kernel (e.g. forcing a KMS output on a headless board for a
+# gpu-class benchmark). The file is in this repo, so it is read here; the
+# card is where it is appended, idempotently (disk_cmdline_append).
+cmdline_append_text() {
+    local f="${IMG_SPEC_DIR:-}/cmdline.txt.append"
+    [ -f "$f" ] || return 0
+    grep -vE '^\s*(#|$)' "$f" | tr '\n' ' ' | sed 's/ *$//' || true
+}
+
+# Firmware settings this profile declares, as the block they are appended as.
+# Clock pinning matters: a board that idles low and ramps on demand turns DVFS
+# ramping into measurement variance. The block carries its own
+# `# --- wk sysimage: <profile> ---` first line, which is what makes appending
+# it twice a no-op.
+config_append_text() {
+    local f="${IMG_SPEC_DIR:-}/config.txt.append"
+    [ -f "$f" ] || return 0
+    cat "$f"
 }
 
 # --- build -------------------------------------------------------------------
@@ -698,18 +431,6 @@ $(machine_list | sed 's/^/      /')"
 # from or any other removable disk plugged into it: same verification, same
 # unmount, same refusals, and the stricter device policy is right for both.
 
-# What the dry run says about an image's root, including when it says
-# nothing: a phone's bootloader has no cmdline.txt to read, which is a
-# question that does not apply to it rather than a fault in it.
-_root_line() {
-    local spec; spec=$(image_root_spec "$1")
-    if [ -z "$spec" ]; then
-        printf 'not declared in a cmdline.txt -- this image does not boot that way'
-    else
-        printf '%s -- %s' "$spec" "$(image_root_word "$(image_root_class "$spec")")"
-    fi
-}
-
 # `--from` is the whole write model: a workspace built an image, the bytes
 # are wherever it put them, and this moves them onto a card and edits it.
 # Two spellings of where the bytes are:
@@ -762,17 +483,29 @@ _tailnet_key_preflight() { # <IMG_MACHINE>
     Set one first:  wk key tailnet"
 }
 
-# The fleet's WiFi identity, asked for before anything is erased -- same
-# reason as _tailnet_key_preflight, and like it a `die` no --force crosses.
+# $DISK_MACHINE's own WiFi connection, asked for before anything is erased --
+# same reason as _tailnet_key_preflight, and like it a `die` no --force
+# crosses. There is no credential file to check: the card takes its
+# credential from the machine holding the reader, not from IMG_MACHINE (the
+# board being imaged), so this asks $DISK_MACHINE (already loaded by
+# cmd_write_from) rather than reading anything local.
 _wifi_creds_preflight() { # <IMG_MACHINE>
+    local out
     _image_wants_wifi "${1:-}" || return 0
-    disk_wifi_creds_present && return 0
+    out=$(card_priv wifi-host 2>&1) \
+        || die "could not tell whether $DISK_MACHINE is on WiFi:
+$(printf '%s\n' "$out" | sed 's/^/    /')
+    A board with no uplink is unreachable, which is worse than refusing, so
+    there is no --force past this."
+    case "$out" in
+        *'wifi-host: yes'*) return 0 ;;
+    esac
     die "$1 has no cable at the bench, and its rescue/bench images bring up WiFi
-    from a credential seeded onto the card -- there is none here. A board with
-    no uplink is unreachable, which is worse than refusing, so there is no
-    --force past this.
-    Set it:
-        printf 'ssid=<network>\npsk=<passphrase>\n' > $(disk_wifi_creds_path)"
+    from a credential taken from $DISK_MACHINE's own connection -- $DISK_MACHINE
+    is not on WiFi. A board with no uplink is unreachable, which is worse than
+    refusing, so there is no --force past this.
+    Join $DISK_MACHINE to the WiFi the board will use; the card takes its
+    credential from that machine's own connection."
 }
 
 # <name> already on the tailnet, online or offline -- exact, or as the
@@ -867,7 +600,7 @@ _profile_from_path() { # <path>
 
 cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role> <machine override>
     local from="$1" spec="$2" dry="$3" grow="$4" profile="$5" role="$6" mach="${7:-}"
-    local reader size marker base fleet_edit=""
+    local reader marker base fleet_edit="" bytes="" sha="" cmdline_add="" config_add=""
 
     reader=$(_from_reader "$from")
 
@@ -907,41 +640,87 @@ $(machine_list | sed 's/^/      /')"
     [ -n "$DISK_DEV" ] || { log "disks attached to $DISK_MACHINE:"; disk_list
         die "say which one: --disk $DISK_MACHINE:<device>"; }
 
-    # A fleet board built by this repo (yocto, buildroot) is edited locally
-    # before it goes on the card: identity marker, systemd units, driving
-    # key, root retargeted to survive a different device than the recipe
-    # assumed. An image this repo did not build -- Jumpdrive (fetch), a
-    # phone (pmos) -- gets only the identity marker and driving key, on the
-    # card (disk_install_fleet).
+    # A fleet board built by this repo (yocto, buildroot) gets the whole
+    # integration on the card once the image is on it: systemd units, a root
+    # retargeted to survive a different device than the recipe assumed, the
+    # profile's cmdline and firmware additions, and the firmware check. An
+    # image this repo did not build -- Jumpdrive (fetch), a phone (pmos) --
+    # gets the identity marker and the driving key, which every wk-written
+    # disk carries, and nothing else.
     case "${IMG_BUILDER:-}" in yocto|buildroot) fleet_edit=1 ;; esac
 
-    # Read once, decompressing on the way, into a local scratch file: one
-    # read of the source instead of two, and every check below reads the
-    # exact bytes about to be written rather than a hypothesis about them.
-    info "reading $from"
-    WRITE_TMP=$(mktemp)
-    wk_atexit _disk_cleanup
-    eval "$reader" > "$WRITE_TMP" || die "could not read the image through: $reader"
-    size=$(file_bytes "$WRITE_TMP")
-    [ "$size" -gt 0 ] || die "$from read as 0 bytes through: $reader"
-    disk_refuse_unless_safe "$DISK_DEV" "$size"
+    # The profile's own files, read here because they are in this checkout;
+    # they are applied on the card (disk_cmdline_append, disk_config_append).
+    if [ -n "$fleet_edit" ]; then
+        cmdline_add=$(cmdline_append_text)
+        config_add=$(config_append_text)
+    fi
 
-    # A container exec or ssh session can print something of its own ahead
-    # of the bytes -- an initialisation log, a shell banner -- and a
-    # contaminated image would hash perfectly and fail on the board.
-    sfdisk -J "$WRITE_TMP" >/dev/null 2>&1 \
-        || die "$from has no readable partition table once decompressed.
-    Something was written ahead of the image bytes on the way out, or this is
-    not a disk image at all."
-
-    # The id names what this is and which bytes it was read from: the
-    # profile when there is one, otherwise the file's own name with the
-    # compression suffix taken off. From the *source* bytes, computed once,
-    # so it does not chase the edits below around.
+    # The name this system will be known by, once its bytes have been through
+    # (the hash is of the bytes actually written): the profile when there is
+    # one, otherwise the source file's own name with the compression suffix
+    # taken off.
     base=$(basename "${from#vm:}")
     base=${base%.xz}; base=${base%.zst}; base=${base%.gz}
     base=${base%.wic}; base=${base%.img}
-    ID="${profile:-$base}-$(shasum -a 256 "$WRITE_TMP" | cut -c1-12)"
+
+    # May this device be written at all -- asked before anything is erased,
+    # and the last question this end can answer about the disk on its own.
+    disk_refuse_unless_safe "$DISK_DEV"
+
+    if [ -n "$dry" ]; then
+        cat >&2 <<EOF
+would write
+  image     $from
+            streamed as it is read: the card takes the image's own bytes, and
+            every edit is made afterwards, on the card
+  onto      $DISK_DEV attached to $DISK_MACHINE
+  identity  $(_image_id "${profile:-$base}" "")
+  as        $([ -n "$fleet_edit" ] \
+                && echo "a fleet system: identity marker, driving key, systemd units, retargeted root" \
+                || echo "written as built -- not a fleet board build (${IMG_BUILDER:-unknown profile}); identity marker and driving key only")
+  tailnet   $(wk_tailscale_authkey_present \
+                && printf 'auth key present -- the card joins as this board on first boot' \
+                || printf 'NO auth key -- the real write refuses here (wk key tailnet)')
+  wifi      $(_image_wants_wifi "${IMG_MACHINE:-}" \
+                && { card_priv wifi-host 2>&1 | grep -q 'wifi-host: yes' \
+                       && printf '%s is on WiFi -- the card brings up WiFi on every boot, from its credential' "$DISK_MACHINE" \
+                       || printf 'NO -- %s is not on WiFi; the real write refuses here (no --force)' "$DISK_MACHINE"; } \
+                || printf 'not needed -- this board has a cable')
+EOF
+        [ "$DISK_DEV" = "${MACH_DEVICE:-}" ] && log "  note      $DISK_MACHINE is configured to boot from this disk (wk boot $DISK_MACHINE)"
+        log "then, in order:"
+        # The steps report themselves from here down (disk_would,
+        # boot/disk.sh) rather than being described a second time.
+        DISK_DRY=1
+    else
+        _tailnet_key_preflight "${IMG_MACHINE:-}"
+        _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}")"
+        _wifi_creds_preflight "${IMG_MACHINE:-}"
+
+        warn "this ERASES $DISK_DEV on $DISK_MACHINE, whatever is on it now."
+        confirm "write $from onto $DISK_DEV attached to $DISK_MACHINE?" || die "not written"
+    fi
+
+    # --- the card, from here down --------------------------------------------
+    disk_unmount "$DISK_DEV"
+
+    WRITE_META=$(mktemp)
+    wk_atexit _disk_cleanup
+    disk_write_source "$DISK_DEV" "$reader" "$WRITE_META"
+    if [ -z "$DISK_DRY" ]; then
+        read -r bytes sha < "$WRITE_META"
+        [ "${bytes:-0}" -gt 0 ] || die "$from read as 0 bytes through: $reader"
+    fi
+    _disk_cleanup
+
+    # Before anything else touches the card: every step after this reads the
+    # partition table the image was supposed to bring, so a bad write shows up
+    # as a confusing failure in whichever of them runs first.
+    [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_stream "$DISK_DEV" "$bytes" "$sha"
+    disk_parts_present "$DISK_DEV"
+
+    ID=$(_image_id "${profile:-$base}" "$sha")
     marker="id=$ID
 profile=${profile:-unknown}
 machine=${IMG_MACHINE:-}
@@ -951,103 +730,43 @@ built_by=$(hostname)
 wk_tools=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)
 source=$from"
 
-    local boot_checked="" root_line=""
     if [ -n "$fleet_edit" ]; then
-        DISK="$WRITE_TMP"
-        FAT_OFFSET=$(fat_offset "$DISK")
-        [ -n "$FAT_OFFSET" ] && [ "$FAT_OFFSET" -gt 0 ] \
-            || die "could not find the boot partition in $from"
+        disk_retarget_root "$DISK_DEV"
+        disk_cmdline_append "$DISK_DEV" "$cmdline_add"
+        disk_config_append "$DISK_DEV" "$config_add"
+        disk_boot_id "$DISK_DEV" "$ID"
+    fi
+
+    disk_unique_identity "$DISK_DEV"
+    disk_install_fleet "$DISK_DEV" "$marker" "$(driving_key)"
+
+    if [ -n "$fleet_edit" ]; then
         SEED=$(mktemp -d)
         wk_atexit _seed_cleanup
+        mkdir -p "$SEED/systemd" "$SEED/sysctl.d"
+        stage_units "$SEED"
+        disk_install_units "$DISK_DEV" "$SEED"
+        _seed_cleanup
 
-        info "adding the fleet integration (identity marker, watchdog, self-disarm)"
-        install_fleet_integration "$(part_offset "$DISK" 2)" "$marker"
-        install_driving_key "$(part_offset "$DISK" 2)"
-        install_disk_id
-
-        # Keyed off cmdline.txt, which only a Raspberry Pi firmware image
-        # has: checked once, non-fatally, rather than letting retarget_root's
-        # own `die` fire on an image with no such file.
-        if cmdline_root_spec >/dev/null 2>&1; then
-            retarget_root "$SEED"
-            apply_cmdline_append "$SEED"
-            apply_config_append "$SEED"
-        else
-            debug "no cmdline.txt in this image; not retargeting root or appending cmdline/config"
-        fi
-        rm -rf "$SEED"; SEED=""
-
-        # Two checks, in the order the board will hit them: can the firmware
-        # reach a kernel, then can that kernel reach its root. Only when the
-        # image is *for* this machine -- the wrong question for a card about
-        # to be carried elsewhere.
+        # Two checks, in the order the board will hit them, and against the
+        # card as the edits above left it: can the firmware reach a kernel,
+        # then can that kernel reach its root. The first is only worth asking
+        # when the image is *for* this machine -- the wrong question about a
+        # card that is about to be carried elsewhere.
         local img_machine="${IMG_MACHINE:-}"
         if [ -n "$img_machine" ] && [ "$img_machine" = "$DISK_MACHINE" ]; then
-            image_check_boot_files "$DISK" "$DISK_MACHINE"
-            boot_checked=1
+            disk_check_boot_files "$DISK_DEV" "$DISK_MACHINE" "$(image_dtb_for "$DISK_MACHINE")"
         elif [ -n "$img_machine" ]; then
             log "  (not checking $DISK_MACHINE's boot files: this is $img_machine's image, so this card goes elsewhere)"
         else
             log "  (not checking $DISK_MACHINE's boot files: no machine is known for this image)"
         fi
-        image_check_root "$DISK" "$DISK_DEV" "$DISK_MACHINE"
-        root_line=" ($(_root_line "$DISK"))"
-    fi
-    # The final bytes' own hash, for disk_verify_stream's post-write
-    # read-back -- distinct from $ID's hash, which names the *source*.
-    local sha; sha=$(shasum -a 256 "$WRITE_TMP" | cut -d' ' -f1)
-
-    if [ -n "$dry" ]; then
-        cat >&2 <<EOF
-would write
-  image     $from ($(human_bytes "$size"))
-  identity  $ID
-  onto      $DISK_DEV attached to $DISK_MACHINE
-  edited    $([ -n "$fleet_edit" ] \
-                && echo "yes -- identity marker, systemd units, driving key, retargeted root$root_line" \
-                || echo "no -- not a fleet board build (${IMG_BUILDER:-unknown profile}); written as built")
-  boot part $([ -n "$fleet_edit" ] \
-                && { [ -n "$boot_checked" ] \
-                       && printf 'every file a %s'"'"'s firmware asks for resolves (checked before this line)' "$DISK_MACHINE" \
-                       || printf 'not checked -- see above' ; } \
-                || printf 'not checked -- not a fleet board build')
-  then      unique disk identity, tailnet identity,
-            $([ "$grow" = 1 ] && echo "grow to fill" || echo "NO grow -- the rest of the card is left for a second system")
-  tailnet   $(wk_tailscale_authkey_present \
-                && printf 'auth key present -- the card joins as this board on first boot' \
-                || printf 'NO auth key -- the real write refuses here (wk key tailnet)')
-  wifi      $(_image_wants_wifi "${IMG_MACHINE:-}" \
-                && { disk_wifi_creds_present \
-                       && printf 'credentials present -- the card brings up WiFi on every boot' \
-                       || printf 'NO credentials -- the real write refuses here (no --force)'; } \
-                || printf 'not needed -- this board has a cable')
-EOF
-        [ "$DISK_DEV" = "${MACH_DEVICE:-}" ] && log "  note      $DISK_MACHINE is configured to boot from this disk (wk boot $DISK_MACHINE)"
-        log "dry run -- nothing was written."
-        return 0
+        disk_check_root "$DISK_DEV" "$DISK_MACHINE"
     fi
 
-    _tailnet_key_preflight "${IMG_MACHINE:-}"
-    _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}")"
-    _wifi_creds_preflight "${IMG_MACHINE:-}"
-
-    warn "this ERASES $DISK_DEV on $DISK_MACHINE, whatever is on it now."
-    confirm "write $from onto $DISK_DEV attached to $DISK_MACHINE?" || die "not written"
-
-    disk_unmount "$DISK_DEV"
-    disk_write_stream "$DISK_DEV" < "$WRITE_TMP"
-    # Before anything else touches the card: every step after this reads the
-    # partition table the image was supposed to bring, so a bad write shows
-    # up as a confusing failure in whichever of them runs first.
-    [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_stream "$DISK_DEV" "$size" "$sha"
-    disk_unique_identity "$DISK_DEV" "$(_card_root_spec "$DISK_DEV")"
-    # A fleet board already carries its marker and driving key, written into
-    # the bytes above; an image this repo did not build still needs them.
-    [ -n "$fleet_edit" ] || disk_install_fleet "$DISK_DEV" "$marker" "$(driving_key)"
     disk_seed_role "$DISK_DEV" "$role"
     disk_seed_tailnet "$DISK_DEV" "$(_tailnet_name_for "${IMG_MACHINE:-}")"
     disk_seed_wifi "$DISK_DEV" "${IMG_MACHINE:-}"
-    _disk_cleanup
 
     # Growing is opt-in: a card grown to fill has no room for a second
     # system, and a board with one system has no rescue -- it cannot install
@@ -1055,10 +774,15 @@ EOF
     if [ "$grow" = 1 ]; then
         disk_grow "$DISK_DEV"
     else
-        log "  the root partition was left at its built size, so the rest of the card"
+        log "  the root partition is left at its built size, so the rest of the card"
         log "  is free for a second system. --grow fills it instead."
     fi
     disk_eject "$DISK_DEV"
+
+    if [ -n "$dry" ]; then
+        log "dry run -- nothing was written."
+        return 0
+    fi
     info "$DISK_DEV on $DISK_MACHINE now holds $ID"
 
     if [ "$DISK_DEV" = "${MACH_DEVICE:-}" ]; then
@@ -1083,28 +807,12 @@ EOF
     fi
 }
 
-# The `root=` the freshly written card's own cmdline names, read off the
-# card: `disk_unique_identity` stamps a new disk identity and rewrites every
-# reference to the old one, so it needs the old one read fresh, not trusted
-# from what retarget_root computed before the write.
-_card_root_spec() { # <device>
-    local p1; p1=$(disk_part "$1" 1)
-    m_ssh "set -e
-        m=\$(mktemp -d)
-        sudo mount -o ro $(sh_quote "$p1") \$m
-        for f in \$m/cmdline.txt \$m/current/cmdline.txt; do
-            [ -f \"\$f\" ] || continue
-            tr ' ' '\n' < \"\$f\" | sed -n 's/^root=//p' | head -1
-            break
-        done
-        sudo umount \$m; rmdir \$m" 2>/dev/null | tr -d '\r' | head -1
-}
-
-# The fleet's name for a machine, without clobbering the MACH_* of the machine
-# every remote command here is talking to.
+# The name a system written for a machine joins the tailnet as (MACH_BENCH_SSH,
+# boot/machines.sh), so a workstation's own install keeps its name. In a
+# subshell: the MACH_* of the machine holding the card reader stay loaded.
 _tailnet_name_for() {
     [ -n "${1:-}" ] || return 0
-    ( machine_load "$1" >/dev/null 2>&1 && printf '%s' "${MACH_SSH:-}" ) || true
+    ( machine_load "$1" >/dev/null 2>&1 && printf '%s' "${MACH_BENCH_SSH:-}" ) || true
 }
 
 cmd_write() {

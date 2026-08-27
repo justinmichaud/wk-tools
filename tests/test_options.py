@@ -402,5 +402,84 @@ class TestSecondHalfUnknownFlagRefused(WkTest):
         self.assertIn("everything after it is Claude's, verbatim", text)
 
 
+class TestPiPickSessionOptions(WkTest):
+    """The third half of the option-consistency audit (docs/defects): pi,
+    pick, session. Each case here parses (and refuses) before touching a
+    machine or network, so it needs no hardware."""
+
+    def test_pi_setup_unknown_flag_refused(self):
+        """`wk pi setup <host>` takes no flags at all; previously anything
+        past the host was silently dropped rather than refused."""
+        cp = run_impl("pi", "setup", "somehost", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_pi_setup_extra_positional_refused(self):
+        cp = run_impl("pi", "setup", "somehost", "extra-garbage")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+        self.assertIn("unexpected argument", cp.stdout)
+
+    def test_pi_deploy_unknown_flag_refused(self):
+        cp = run_impl("pi", "deploy", "somews", "somemachine", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_pi_deploy_extra_positional_refused(self):
+        cp = run_impl("pi", "deploy", "somews", "somemachine", "extra")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+        self.assertIn("unexpected argument", cp.stdout)
+
+    def test_pi_bench_unknown_flag_refused(self):
+        cp = run_impl("pi", "bench", "somemachine", "someplan", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_pi_bench_extra_positional_refused(self):
+        cp = run_impl("pi", "bench", "somemachine", "someplan", "extra")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+        self.assertIn("unexpected argument", cp.stdout)
+
+    def test_pi_bench_count_documented_as_iterations_per_run(self):
+        text = (REPO / "cmd" / "pi").read_text()
+        self.assertIn("iterations per run", text)
+
+    def test_pi_boot_order_unknown_flag_refused(self):
+        cp = run_impl("pi", "boot-order", "somehost", "local", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_pi_boot_order_extra_positional_refused(self):
+        cp = run_impl("pi", "boot-order", "somehost", "local", "extra")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+        self.assertIn("unexpected argument", cp.stdout)
+
+    def test_pi_flash_tombstone_names_sysimage_not_an_image_store(self):
+        """there is no image store (a built image stays in the workspace
+        that built it); the tombstone used to point at one that doesn't
+        exist."""
+        text = (REPO / "cmd" / "pi").read_text()
+        self.assertIn("it lives with wk sysimage", text)
+        self.assertNotIn("it lives with the image store", text)
+
+    def test_pick_help_prints_synopsis(self):
+        """bare `wk pick -h`-shaped help (run with no args and no name) is
+        the dispatcher's job; this confirms cmd/pick's own header still
+        carries the synopsis the dispatcher's -h reads out of it."""
+        text = (REPO / "cmd" / "pick").read_text()
+        self.assertIn("wk pick [<workspace>] <commit>...", text)
+
+    @unittest.skipUnless(platform.system() == "Linux", "wk session is Linux-only")
+    def test_session_extra_positional_refused(self):
+        """`wk session status extra` -- a stray word past the action is
+        refused by the same loop that refuses an unknown flag, since neither
+        matches the one recognised token (--bmc/--mirror)."""
+        cp = run_impl("session", "status", "extra")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
 if __name__ == "__main__":
     unittest.main()

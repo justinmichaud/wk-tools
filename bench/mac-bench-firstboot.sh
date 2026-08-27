@@ -13,6 +13,13 @@
 # opendirectoryd -- a known source of accounts that exist but cannot log in.
 # Idempotent throughout, so a failure is repaired by re-running rather than
 # reprovisioning.
+#
+# WK_BENCH_USER (default: bench) and WK_BENCH_PASSWORD (default: benchbench,
+# bench/mac-bench-volume.sh) name and set the account; a LaunchDaemon has no
+# environment to inherit, so in the real flow these only ever take their
+# defaults -- the account's real password comes from $PAYLOAD/password
+# instead, written by `wk bench mac-volume --build-pkg`. The env vars exist
+# so this script is runnable by hand, off the daemon, for debugging.
 
 set -uo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -271,6 +278,27 @@ tmutil disablelocal >/dev/null 2>&1 || true
 say "quieted: spotlight=$(mdutil -a -s 2>&1 | tr '\n' ' ' | sed 's/  */ /g')"
 say "updates schedule: $(softwareupdate --schedule 2>&1 | tail -1)"
 say "filevault: $(fdesetup status 2>&1 | head -1)"
+
+# The schedule preference above does not stop softwareupdated from checking
+# in anyway (lib/quiet.sh's "scanner: softwareupdated is LOADED" warning);
+# this is the fix, not another report of the same fault. Sourced from the
+# payload -- same function text as do_provision's, installed next to this
+# script by do_build_pkg/do_repair -- and run directly, since this daemon is
+# already root.
+QUIET_HOSTS=/usr/local/libexec/wk-bench-quiet-hosts.sh
+if [ -r "$QUIET_HOSTS" ]; then
+    # shellcheck disable=SC1090
+    . "$QUIET_HOSTS"
+    if wk_bench_hosts_present /etc/hosts; then
+        say "hosts: update endpoints already denied"
+    elif wk_bench_hosts_apply /etc/hosts; then
+        say "hosts: update endpoints denied"
+    else
+        say "WARNING: could not deny update endpoints in /etc/hosts"
+    fi
+else
+    say "WARNING: $QUIET_HOSTS missing from the payload; update endpoints not denied"
+fi
 
 # Carried in the package rather than fetched: `wk bench staged` cannot be
 # the thing that needs provisioning first. wk-tools only -- a WebKit

@@ -40,6 +40,18 @@
 #                     Apple ports, samply everywhere else)
 #   --config <c>      which build to profile (default: the workspace's own)
 #   --browser [url]   profile MiniBrowser on that page instead of the jsc shell
+#   --process <p>     which of MiniBrowser's processes: ui | web (default) |
+#                     network | gpu. On the Apple ports the browser is profiled
+#                     directly and this is refused. On the CMake ports (GTK/WPE),
+#                     'ui' puts the recorder in front of the launch itself
+#                     (WEBKIT_MINI_BROWSER_PREFIX, the hook `wk gui --lldb ui`
+#                     also uses); web/network/gpu launch the browser and attach
+#                     once the named process appears -- first cut: a fixed wait,
+#                     then the newest process of that name, so it may not be
+#                     mid-load. Only --mode samply attaches; sampling/bytecode
+#                     set environment variables the whole process tree inherits
+#                     and refuse --process; heaptrack/massif are not wired up
+#                     for a browser yet (docs/Urgent/HANDOFF-linux-minibrower.md).
 #   --attach <pid|name>
 #                     profile something already running in the workspace
 #   --jit-dump        JS/JIT frame names for the native profilers
@@ -69,7 +81,8 @@ PRIV=/usr/local/libexec/wk-quiesce-priv
 
 MODE=sampling
 CONFIG="${WK_CONFIG:-}"
-BROWSER=""; URL=""; ATTACH=""; JITDUMP=""; MARKERS=""; TOP=""
+BROWSER=""; URL=""; PROCESS=web; PROCESS_EXPLICIT=""
+ATTACH=""; JITDUMP=""; MARKERS=""; TOP=""
 FETCH=""; FETCH_DIR=""; DRY=""; EXTRA_ENV=""
 ARGS=()
 
@@ -80,6 +93,8 @@ while [ $# -gt 0 ]; do
         --config)  CONFIG="${2:-}"; shift 2 ;;
         --browser) BROWSER=1; shift
                    case "${1:-}" in ''|-*) ;; *) URL="$1"; shift ;; esac ;;
+        --process) PROCESS="${2:-}"; PROCESS_EXPLICIT=1; shift 2 ;;
+        --process=*) PROCESS="${1#*=}"; PROCESS_EXPLICIT=1; shift ;;
         --attach)  ATTACH="${2:-}"; [ -n "$ATTACH" ] || die "--attach needs a pid or a process name"; shift 2 ;;
         --jit-dump) JITDUMP=1; shift ;;
         --markers) MARKERS=1; shift ;;
@@ -92,12 +107,17 @@ ${2:-}"; shift 2 ;;
         --list)    printf '%s\n' $MODES; exit 0 ;;
         --)        shift; while [ $# -gt 0 ]; do ARGS+=("$1"); shift; done ;;
         -*)        die "usage: wk profile [<workspace>] [--mode <m>] [--config <c>] [--browser [url]]
-    [--attach <pid|name>] [--jit-dump] [--markers] [--top <n>] [--fetch [dir]]
-    [--env NAME=VALUE] [--list] [--dry-run] [--] [file.js]; unknown option: $1
-    'wk profile -h' lists them." ;;
+    [--process ui|web|network|gpu] [--attach <pid|name>] [--jit-dump] [--markers]
+    [--top <n>] [--fetch [dir]] [--env NAME=VALUE] [--list] [--dry-run] [--] [file.js]
+    unknown option: $1; 'wk profile -h' lists them." ;;
         *)         ARGS+=("$1"); shift ;;
     esac
 done
+
+case "$PROCESS" in
+    ui|web|network|gpu) ;;
+    *) die "no such process '$PROCESS' -- there are: ui web network gpu" ;;
+esac
 
 require_name "$NAME"
 
@@ -118,6 +138,11 @@ esac
     the browser under the profiler, the other profiles a process that is
     already running. Pick one."
 
+[ -n "$PROCESS_EXPLICIT" ] && [ -z "$BROWSER" ] && \
+    die "--process only makes sense with --browser: it names which of
+    MiniBrowser's own processes (ui, web, network, gpu) to point the profiler
+    at, and without --browser there is no MiniBrowser to name one of."
+
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
@@ -125,29 +150,101 @@ SRC=$(t_src "$NAME")
 VAR=$(config_run_var)
 DIR=$(config_run_dir "$SRC")
 
+# --- where the recording lands ------------------------------------------------
+# Not /tmp: a profile is worth more than the ten minutes it took to record,
+# and /tmp on a container workspace is the first thing a restart takes away.
+# Computed before "what is being profiled" below: the CMake --browser
+# --process web/network/gpu shape needs it there, to name samply's own file.
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+RUN="$STAMP-$MODE"
+OUTDIR="$(t_home "$NAME")/wk-profile/$RUN"
+
 # --- what is being profiled ---------------------------------------------------
 #
 # One of three shapes, each resolving to a command in the workspace. The jsc
 # shell is the default: one process, one workload, nothing else in the way.
+MB_PREFIX=""      # set below when --process ui's recorder belongs in
+                  # WEBKIT_MINI_BROWSER_PREFIX, not prepended to TARGET_CMD
+CMAKE_BROWSER=""  # set below for any CMake --browser run, to keep the mode
+                  # case's own WRAP out of TARGET_CMD -- this shape builds its
+                  # own command line instead (prefix env var, or launch+attach)
 if [ -n "$ATTACH" ]; then
     SUBJECT="attach:$ATTACH"
     TARGET_CMD=""
 elif [ -n "$BROWSER" ]; then
-    case "$CFG_BUILDSYS" in
-        xcode) ;;
-        # The web process is named per port, so the remedy names it too.
-        *) die "--browser is wired up for the Apple ports only.
-    On the CMake ports the browser is started by Tools/Scripts/run-minibrowser
-    and the process that matters is a child of it, so a profiler pointed at the
-    launcher records the launcher. Profile the web process with
-    '--attach $(config_web_process_name)' once it is up, or use the jsc shell.
-    See docs/Urgent/HANDOFF-linux-minibrower.md." ;;
-    esac
-    BIN=$(config_browser_path "$SRC")
     [ -n "$URL" ] || URL="about:blank"
-    SUBJECT="MiniBrowser $URL"
-    TARGET_CMD="$(sh_quote "$BIN") $(config_browser_url_flag) $(sh_quote "$URL")"
-    [ ${#ARGS[@]} -gt 0 ] && TARGET_CMD="$TARGET_CMD $(sh_quote "${ARGS[@]}")"
+    BIN=$(config_browser_path "$SRC")
+    case "$CFG_BUILDSYS" in
+    xcode)
+        [ -z "$PROCESS_EXPLICIT" ] || \
+            die "--process is not wired up for the Apple ports: MiniBrowser is profiled
+    directly here, not through a process picker. '--attach
+    $(config_web_process_name)' reaches the web process once it is up."
+        SUBJECT="MiniBrowser $URL"
+        TARGET_CMD="$(sh_quote "$BIN") $(config_browser_url_flag) $(sh_quote "$URL")"
+        [ ${#ARGS[@]} -gt 0 ] && TARGET_CMD="$TARGET_CMD $(sh_quote "${ARGS[@]}")"
+        ;;
+    *)
+        CMAKE_BROWSER=1
+        # MiniBrowser is a grandchild of Tools/Scripts/run-minibrowser here, so a
+        # profiler pointed at the launcher would record the launcher, not
+        # MiniBrowser. run-minibrowser reads WEBKIT_MINI_BROWSER_PREFIX after
+        # setting up the port's own launch environment and splits it in front of
+        # the MiniBrowser command it builds (webkitpy/port/{gtk,wpe}.py) -- the
+        # same hook `wk gui --lldb ui` uses to put lldb in front of the same
+        # binary.
+        case "$MODE" in
+            heaptrack|massif)
+                die "--browser --mode $MODE is not wired up on the CMake ports: $MODE has to
+    be there from the process's first allocation, and its own launch line is a
+    shell fragment ('cd <dir> && $MODE'), not the plain command
+    WEBKIT_MINI_BROWSER_PREFIX needs. Owed --
+    docs/Urgent/HANDOFF-linux-minibrower.md. Use --mode samply against the
+    browser, or profile the jsc shell instead." ;;
+        esac
+        if [ -n "$PROCESS_EXPLICIT" ]; then
+            case "$MODE" in
+                sampling|bytecode)
+                    die "--process is meaningless with --mode $MODE: it sets environment
+    variables the whole browser process tree inherits, not a wrapper pointed at
+    one process. Drop --process, or use --mode samply to pick one." ;;
+            esac
+        fi
+        TYPE_FLAG="--$(printf '%s' "$CFG_TYPE" | tr 'A-Z' 'a-z')"
+        LAUNCH_ENV="WPE_BROWSER=minibrowser"
+        LAUNCH_CMD="Tools/Scripts/run-minibrowser $CFG_PORT $TYPE_FLAG -- $(sh_quote "$URL")"
+        [ ${#ARGS[@]} -gt 0 ] && LAUNCH_CMD="$LAUNCH_CMD $(sh_quote "${ARGS[@]}")"
+        if [ "$MODE" = samply ] && [ "$PROCESS" != ui ]; then
+            # samply cannot be a prefix of a process the UI process spawns later,
+            # so it attaches instead: launch the browser, wait for the named
+            # process to appear, then `samply record -p <pid>`. First cut -- a
+            # fixed wait, then the newest process of that name, which is not
+            # necessarily mid-load (docs/Urgent/HANDOFF-debug.md's prewarming
+            # note is why that is still the page's process and not a leftover
+            # prewarm one).
+            case "$PROCESS" in
+                web)     PROC_NAME=$(config_web_process_name) ;;
+                network) PROC_NAME=$(config_network_process_name) ;;
+                gpu)     PROC_NAME=$(config_gpu_process_name) ;;
+            esac
+            [ -n "$PROC_NAME" ] || die "no $PROCESS process for '$CONFIG' ($CFG_BUILDSYS:$CFG_PORT)"
+            SUBJECT="MiniBrowser $URL, samply attaching to the newest $PROC_NAME after launch"
+            TARGET_CMD="$LAUNCH_ENV $LAUNCH_CMD >$(sh_quote "$OUTDIR/browser.log") 2>&1 &
+sleep 5
+_pid=\$(pgrep -n -x $(sh_quote "$PROC_NAME") 2>/dev/null) || true
+[ -n \"\$_pid\" ] || { echo \"error: no $PROC_NAME appeared within 5s of launching MiniBrowser -- see $(sh_quote "$OUTDIR/browser.log")\" >&2; exit 1; }
+echo \"attaching samply to $PROC_NAME pid \$_pid\" >&2
+exec samply record --save-only -o $(sh_quote "$OUTDIR/profile.json") -p \"\$_pid\""
+        else
+            SUBJECT="MiniBrowser $URL"
+            if [ "$MODE" = samply ]; then
+                SUBJECT="$SUBJECT (process: ui, samply prefixed via WEBKIT_MINI_BROWSER_PREFIX)"
+                MB_PREFIX=1
+            fi
+            TARGET_CMD="$LAUNCH_ENV $LAUNCH_CMD"
+        fi
+        ;;
+    esac
 else
     BIN=$(config_jsc_path "$SRC")
     SUBJECT="jsc${ARGS[0]:+ ${ARGS[0]}}"
@@ -155,13 +252,6 @@ else
     # the file name is silently handed to the script as an argument instead.
     TARGET_CMD=""
 fi
-
-# --- where the recording lands ------------------------------------------------
-# Not /tmp: a profile is worth more than the ten minutes it took to record,
-# and /tmp on a container workspace is the first thing a restart takes away.
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-RUN="$STAMP-$MODE"
-OUTDIR="$(t_home "$NAME")/wk-profile/$RUN"
 
 # --- the environment ----------------------------------------------------------
 # The loader variable is prepended, not replaced: a plain assignment would
@@ -296,6 +386,18 @@ heaptrack|massif)
     fi
     ;;
 esac
+
+# A CMake --browser run builds its own command line above (a prefix env var,
+# or a launch-then-attach script) instead of leaning on WRAP the way the jsc
+# shell and --attach do: prepending WRAP here would wrap the wrong binary --
+# Tools/Scripts/run-minibrowser, not MiniBrowser -- or double up the attach
+# script already assembled. --process ui moves it into
+# WEBKIT_MINI_BROWSER_PREFIX instead, the hook run-minibrowser reads after
+# setting up the port's own launch environment (webkitpy/port/{gtk,wpe}.py).
+if [ -n "$CMAKE_BROWSER" ]; then
+    [ -n "$MB_PREFIX" ] && add_env "WEBKIT_MINI_BROWSER_PREFIX=$(sh_quote "$WRAP")"
+    WRAP=""
+fi
 
 # --- what has to be true before anything runs ---------------------------------
 

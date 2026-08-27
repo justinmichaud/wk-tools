@@ -59,6 +59,8 @@ fi
 # $WK_STORE defaults to /var/lib/wk, wrong here, and is per target since two
 # remote machines can each have a workspace of the same name. Only the build
 # log and status live here -- checkout, build tree and ccache are on the far end.
+# WK_REMOTE_STORE overrides that per-target default; tests/test_remote.py
+# points it at a scratch directory so a test never writes under a real $HOME.
 if [ -n "${WK_REMOTE_LOCAL:-}" ] && [ -n "${WK_REMOTE_ROOT:-}" ]; then
     WK_STORE="${WK_REMOTE_STORE:-$WK_REMOTE_ROOT}"
 else
@@ -86,7 +88,7 @@ _remote_require() {
 _ssh_opts() {
     local d; d="$(wk_state_dir)/ssh"
     mkdir -p "$d" 2>/dev/null || true
-    printf '%s' "$(_ssh_opts_base "${WK_SSH_TIMEOUT:-10}") -o ControlMaster=auto -o ControlPath=$d/%h-%p-%r -o ControlPersist=60"
+    printf '%s' "$(_ssh_opts_base "$(wk_ssh_timeout)") -o ControlMaster=auto -o ControlPath=$d/%h-%p-%r -o ControlPersist=60"
 }
 
 _rsh() {
@@ -215,7 +217,7 @@ _remote_probe_try() {
             _WK_REMOTE_DOWN=1
             return 1
         fi
-    elif ! out=$(_rsh_q "$(_remote_probe_cmd)"); then
+    elif ! out=$(_rsh_q "$(_remote_probe_cmd)" 2>/dev/null); then
         _WK_REMOTE_DOWN=1
         return 1
     fi
@@ -232,7 +234,7 @@ _remote_probe_try() {
 }
 
 _remote_probe() {
-    _remote_probe_try || die "cannot reach '$WK_REMOTE_HOST' over ssh (${WK_SSH_TIMEOUT:-10}s).
+    _remote_probe_try || die "cannot reach '$WK_REMOTE_HOST' over ssh ($(wk_ssh_timeout)s).
     This target has no way in but ssh, and it is not interactive: the key,
     the ProxyJump and the host entry all have to work non-interactively.
     Try:  ssh -o BatchMode=yes $WK_REMOTE_HOST true"
@@ -499,6 +501,14 @@ t_has_wk() {
         return $?
     fi
     _rsh_q "test -f \$HOME/.wk-remote && test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
+}
+
+t_far_side() {
+    if _remote_is_local; then echo none
+    elif ! _remote_probe_try; then echo unreachable
+    elif t_has_wk; then echo answering
+    else echo no-wk
+    fi
 }
 
 # Two variables travel as environment, not arguments: an unknown argument is

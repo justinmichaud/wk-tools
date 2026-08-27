@@ -38,15 +38,16 @@ store_is_local() {
     [ -d "$WK_STORE" ] && [ -w "$WK_STORE" ]
 }
 
-# `wk_state_dir` (lib/common.sh) answers where something lives when
-# $WK_STORE is somebody else's path -- the workspace registry and the image
-# store. It lives in common.sh, not here: a helper reachable only through a
+# `wk_state_dir` (lib/common.sh) answers where host-side state (logs, keys,
+# remote build status) lives when $WK_STORE is somebody else's path -- the
+# podman VM's, on macOS. It lives in common.sh, not here: a helper reachable only through a
 # higher-sourced file disappears for any command that sources a lower one
 # without it, and common.sh is the floor every such file sources.
 
 # ccache ceiling, shared by every workspace. Sized for several full debug
 # builds side by side (the expensive case: unstripped objects with full
 # DWARF), leaving most of the 200 GB disk for snapshots and workspaces.
+# WK_CCACHE_MAXSIZE overrides the ceiling, for a store on a smaller disk.
 WK_CCACHE_MAXSIZE="${WK_CCACHE_MAXSIZE:-40G}"
 
 # ccache's own default is 5 GB, which a couple of WebKit builds blow

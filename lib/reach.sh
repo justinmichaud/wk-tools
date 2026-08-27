@@ -15,6 +15,8 @@
 
 # The tailnet's view, once per process, under a ceiling: a wedged
 # tailscaled has no timeout of its own and would otherwise hang the walk.
+# WK_TAILSCALE_TIMEOUT overrides it; tests/test_quick.py sets it to 1 against
+# a stub `tailscale` that never answers, to prove the walk does not hang.
 _WK_TS_PEERS=""
 _WK_TS_READ=""
 
@@ -112,10 +114,13 @@ reach_segments_local() {
 # one that is (a bridge phone, for its cable), so it's the caller's to name.
 reach_sweep() { # <cidr> [vantage]
     local cidr="$1" van="${2:-}" pre=""
-    [ -z "$van" ] || [ "$van" = local ] || pre="ssh -o BatchMode=yes -o ConnectTimeout=${WK_SSH_TIMEOUT:-10} $van"
+    [ -z "$van" ] || [ "$van" = local ] || pre="ssh -o BatchMode=yes -o ConnectTimeout=$(wk_ssh_timeout) $van"
     if [ -z "$pre" ]; then
         have nmap || return 1
-        capped "${WK_SWEEP_TIMEOUT:-60}" nmap -sn -n --host-timeout 5s "$cidr" >/dev/null 2>&1 || true
+        # No override: nothing in the tree or its tests ever wanted a sweep
+        # longer or shorter than this, and a person tuning it would not know
+        # this file exists to look in.
+        capped 60 nmap -sn -n --host-timeout 5s "$cidr" >/dev/null 2>&1 || true
         ip neigh show 2>/dev/null
     else
         # nmap and ip live in sbin on some of these; a login shell isn't guaranteed.

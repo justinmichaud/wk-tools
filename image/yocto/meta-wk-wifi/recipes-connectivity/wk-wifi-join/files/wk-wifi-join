@@ -2,27 +2,13 @@
 #
 # Bring up WiFi from a credential seeded onto the card, every boot.
 #
-# Unlike wk-tailnet-join's key, a WiFi credential is not single-use: the radio
-# has to associate again on every boot, so /etc/wpa_supplicant/wpa_supplicant-
-# wlan0.conf is read every time and never deleted -- it is the card's WiFi
-# identity, seeded by `wk sysimage write` (disk_seed_wifi, boot/disk.sh)
-# exactly like the driving ssh key, and for the same reason: this is per-card
-# state, not something an image ships baked in (an image is stored, copied and
-# kept after it is superseded; a credential inside one is a credential in
-# every copy of it).
+# Unlike wk-tailnet-join's key, a WiFi credential is not single-use -- the
+# radio must associate every boot, so wpa_supplicant-wlan0.conf is read every
+# time and never deleted. Seeded by `wk sysimage write` (disk_seed_wifi,
+# boot/disk.sh): per-card state, not baked into the image.
 #
-# Ethernet is untouched by this: an image built with this layer still DHCPs
-# eth0 the way it always has, and this only ever adds wlan0 alongside it -- a
-# board with a cable plugged in keeps using it, uninterrupted, and this is
-# what reaches the network when it does not (CLAUDE.md, "Cattle, not pets":
-# the board on the desk with no cable still has to be reachable).
-#
-# Exits 0 on every path that is not a failure of this node's own doing,
-# because a boot is not a failure just because nobody staged a credential: an
-# image written by something that had none is a board with no WiFi identity,
-# not a broken one. Same rule wk-tailnet-join follows.
-#
-# POSIX sh, no jq: this runs on the same slim images wk-tailnet-join does.
+# Only ever adds wlan0 alongside eth0's existing DHCP; a board with a cable
+# keeps using it. Exits 0 on any failure that isn't this node's own, POSIX sh, same as wk-tailnet-join.
 
 set -u
 
@@ -36,9 +22,7 @@ shout() { say "$*"; [ -w /dev/console ] && echo "wk-wifi-join: $*" > /dev/consol
 [ -r "$CONF" ] || { shout "no $CONF -- this card carries no WiFi identity and cannot join the network; re-write it: wk sysimage write --machine <name>"; exit 1; }
 [ -x "$WPA" ]  || { shout "no $WPA -- a WiFi credential is seeded but this image cannot spend it"; exit 1; }
 
-# The wireless interface, found rather than assumed: `wlan0` is the common
-# case, but nothing here should hardcode a name the kernel is free to pick
-# differently on another board.
+# Found, not assumed: the kernel is free to name it other than wlan0.
 IFACE=""
 for c in /sys/class/net/wlan*; do
     [ -e "$c" ] || continue
@@ -47,9 +31,7 @@ for c in /sys/class/net/wlan*; do
 done
 [ -n "$IFACE" ] || { say "no wlan* interface on this board -- nothing to bring up"; exit 0; }
 
-# Already running (a re-run, or a supervisor restart): starting a second
-# instance against the same interface fights the first one for the control
-# socket rather than replacing it.
+# A second instance fights the first for the control socket rather than replacing it.
 if pgrep -f "wpa_supplicant .*-i$IFACE" >/dev/null 2>&1; then
     say "wpa_supplicant is already running on $IFACE"
 else
@@ -59,10 +41,7 @@ else
         || { say "wpa_supplicant failed to start on $IFACE -- the credential may be malformed"; exit 1; }
 fi
 
-# A lease, however this image gets one: whichever DHCP client is present is
-# used, and the absence of both is reported rather than left to read as a
-# silent hang -- the same "detect, don't assume" rule S99tailscale follows for
-# start-stop-daemon.
+# Whichever DHCP client is present is used; the absence of both is reported, not left to read as a silent hang.
 if command -v udhcpc >/dev/null 2>&1; then
     udhcpc -i "$IFACE" -n -q -t 5 >/dev/null 2>&1 \
         && say "$IFACE has a DHCP lease" \

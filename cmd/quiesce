@@ -35,6 +35,8 @@ ACTION="${1:-status}"
 # $TMPDIR is per-user *and per-session*, so a terminal and an ssh login get
 # different values -- `on` at the keyboard and `off` over ssh (an unattended
 # benchmark lane) would look in two different directories and strand state.
+# WK_QUIESCE_STATE overrides it; tests/test_quiesce.py drives this to point
+# off the real machine, and cmd/status reads the same override to report it.
 STATE="${WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce}"
 # An older wk-tools wrote its state here; not read or migrated, but `status`
 # names it so a person can `rm -rf` it themselves.

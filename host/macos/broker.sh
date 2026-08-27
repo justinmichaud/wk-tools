@@ -9,8 +9,8 @@
 # egress proxy is installed in there (host/macos/vmtools.sh) rather than out
 # here. The broker cannot follow it in. Everything it does is on this Mac: the
 # tailnet identity, the ssh config that reaches the rpi4 through its bridge,
-# the image store, `wk boot`'s drivers. A copy in the guest would have none of
-# it and no route to any of it.
+# `wk boot`'s and `wk sysimage`'s drivers. A copy in the guest would have none
+# of it and no route to any of it.
 #
 # So the process runs here and the *socket* is published in there, by the
 # broker itself, over ssh with a remote unix-socket forward (see

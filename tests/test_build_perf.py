@@ -1,9 +1,8 @@
 """Build performance fixes: JSC-only configs ask ccache for explicitly
 (build/configs.sh), a workspace's WebKitBuild is a bind-mounted plain
 directory rather than overlay upperdir churn (targets/container.sh's
-t_create), the WiFi credential path is real on the host that has to write it
-(boot/disk.sh), and cmd/sudo requires visudo outright rather than falling
-back to a second lookup path.
+t_create), and cmd/sudo requires visudo outright rather than falling back to
+a second lookup path.
 
 Run: python3 -m unittest tests.test_build_perf -v
 """
@@ -147,45 +146,6 @@ class TestContainerWebKitBuildMount(WkTest):
         # The directory it mounts has to actually exist, or podman would be
         # asked to bind-mount nothing.
         self.assertTrue(ws_build.is_dir(), f"{ws_build} was never created")
-
-
-# --------------------------------------------------------------------------- #
-# Item 5: disk_wifi_creds_path (boot/disk.sh) is a per-user host path, the
-# same shape as wk_tailscale_authkey_path (lib/common.sh) -- not
-# $WK_STORE/secrets/wifi, which on macOS resolves inside the podman VM, a
-# filesystem the host writing the card cannot reach at all.
-# --------------------------------------------------------------------------- #
-
-class TestWifiCredsPath(WkTest):
-    def _path(self, env=None):
-        script = f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/boot/disk.sh"
-disk_wifi_creds_path
-'''
-        cp = bash(script, env=env)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout.strip()
-
-    def test_default_is_under_the_users_config_directory(self):
-        """with no override, the path is ~/.config/wk/wifi -- real on the host, unlike $WK_STORE"""
-        env = dict(os.environ)
-        env.pop("WK_WIFI_CREDS", None)
-        home = env.get("HOME", "")
-        self.assertEqual(self._path(env), f"{home}/.config/wk/wifi")
-
-    def test_WK_WIFI_CREDS_overrides_it(self):
-        """WK_WIFI_CREDS, the same override shape as WK_TS_AUTHKEY, wins"""
-        self.assertEqual(self._path({"WK_WIFI_CREDS": "/tmp/some-other-wifi-file"}),
-                          "/tmp/some-other-wifi-file")
-
-    def test_does_not_default_through_WK_STORE(self):
-        """static: the old $WK_STORE/secrets/wifi default is gone from disk.sh"""
-        text = (REPO / "boot" / "disk.sh").read_text()
-        m = re.search(r"^disk_wifi_creds_path\(\)\s*\{[^}]*\}", text, re.MULTILINE)
-        self.assertIsNotNone(m, "disk_wifi_creds_path not found in boot/disk.sh")
-        self.assertNotIn("WK_STORE", m.group(0),
-                          "disk_wifi_creds_path still defaults through WK_STORE")
 
 
 # --------------------------------------------------------------------------- #

@@ -1,30 +1,24 @@
 #!/bin/sh
 # Escalating recovery for a WiFi-uplinked tailscale subnet router.
 #
-# The bridge's whole value is being reachable when the thing behind it is not,
-# which means the failure it must survive is its own uplink dropping while
-# nobody is watching. Both phones' WiFi parts are the weakest component in the
-# path -- the Librem 5's RS9116 wedges its firmware in a way a link bounce does
-# not clear, and the PinePhone's 8723cs drops associations under load -- so
-# recovery is a ladder rather than a retry: each consecutive failed check
-# climbs one rung, and any success resets to the bottom.
+# Both phones' WiFi is the weakest link: the Librem 5's RS9116 wedges its
+# firmware in a way a link bounce does not clear, and the PinePhone's 8723cs
+# drops associations under load. So recovery is a ladder, not a retry -- each
+# consecutive failed check climbs one rung, any success resets to the bottom:
 #
-#   1      log only. Most failures are a roam, and a roam recovers itself.
+#   1      log only (most failures are a roam that recovers itself)
 #   2-3    bounce the WiFi interface
 #   4-5    restart NetworkManager
 #   6-7    reload the WiFi driver module
 #   8-9    restart tailscaled
-#   10+    reboot -- rate limited, and never in the first 15 minutes of uptime
+#   10+    reboot -- rate limited, never in the first 15 minutes of uptime
 #
-# The rate limit is the part that matters: an unconditional reboot rung turns a
-# fault that would have cleared into a machine that reboots forever, and this
-# is the device you cannot walk up to. Uptime and a reboot budget in
-# /var/lib are both checked, so the loop cannot outrun its own history.
+# The rate limit matters: an unconditional reboot rung turns a clearing fault
+# into a device that reboots forever and that you cannot walk up to.
 #
-# A loop under supervise-daemon rather than a timer firing a one-shot: OpenRC
-# has no timer units, busybox cron's finest granularity is a minute of its own
-# choosing, and the counter is simpler as a variable in a process that lives
-# than as a file in /run that has to be interpreted after a crash.
+# Runs under supervise-daemon rather than a cron/timer one-shot: OpenRC has no
+# timer units, and the escalation counter is a live variable rather than a
+# file that would need to survive a crash.
 set -u
 
 INTERVAL="${WK_BRIDGE_NETWATCH_INTERVAL:-60}"
@@ -35,19 +29,17 @@ REBOOT_WINDOW=21600     # ...6 hours
 
 iface=lan0
 segment=""
-# Defaulted for the same reason the two above are: this script runs `set -u`, so
-# a conf written by an older provision.sh -- or none at all -- must not turn a
-# health check into an unbound-variable crash in the recovery loop.
+# Defaulted like the two above: `set -u` must not turn a missing or older conf
+# into an unbound-variable crash.
 leases=""
 leasefile=/var/lib/misc/dnsmasq.leases
 [ -f /etc/wk-bridge.conf ] && . /etc/wk-bridge.conf
 
 log() { logger -t wk-bridge-netwatch -- "$*"; printf 'wk-bridge-netwatch: %s\n' "$*"; }
 
-# Service names differ between distributions and even between packagings of the
-# same one (NetworkManager vs networkmanager, tailscale vs tailscaled), and a
-# restart aimed at a name that does not exist is a rung of this ladder that
-# silently does nothing. So the name is resolved from what is installed.
+# Service names differ between distros and packagings (NetworkManager vs
+# networkmanager); a restart aimed at a name that doesn't exist silently does
+# nothing, so it is resolved from what is actually installed.
 svc() {
     local n
     for n in "$@"; do
@@ -61,14 +53,11 @@ svc() {
 NM_SVC=$(svc networkmanager NetworkManager) || NM_SVC=""
 TS_SVC=$(svc tailscale tailscaled) || TS_SVC=""
 
-# Is anything actually behind us? Asked of the *reservations*, because they are
-# the addresses this bridge exists to make reachable and they are declared
-# rather than discovered -- so a yes is unambiguous. A segment with no
-# reservations declared falls back to the lease file, which is the only evidence
-# there is in that case.
-#
-# This is the signal the recovery rung below keys on. The lease file is not:
-# these leases are infinite, so it records history rather than the present.
+# Asked of the *reservations*, not the lease file: they're declared rather
+# than discovered, so a yes is unambiguous. A segment with none declared falls
+# back to the lease file -- the only evidence there is in that case, but not a
+# reliable one, since these leases never expire and it records history, not
+# the present.
 segment_answers() {
     local l ip any=""
     for l in $leases; do
@@ -88,9 +77,8 @@ wifi_if() {
 
 healthy() {
     # `-o`, not `-br`: BusyBox ip has no brief mode and exits 1 with a usage
-    # message, which would read back empty on every check and set this ladder
-    # climbing -- interface bounce, NetworkManager restart, driver reload,
-    # reboot -- against a working uplink.
+    # message, which would read back empty and climb this ladder against a
+    # working uplink.
     addr=$(ip -4 -o addr show dev "$WIFI" 2>/dev/null | awk '{print $4; exit}')
     [ -n "$addr" ] || { log "no IPv4 address on $WIFI"; return 1; }
 
@@ -106,10 +94,8 @@ healthy() {
     [ "$(printf '%s' "$st" | jq -r '.Self.Online')" = true ] \
         || { log "tailscale reports self offline"; return 1; }
 
-    # Noted, never escalated on. An unapproved route is a tailnet-policy
-    # problem: no amount of rebooting this phone will approve it, and treating
-    # it as a fault would put the device in a reboot loop over a console
-    # setting. `wk bridge status` is where this is meant to be noticed.
+    # Noted, never escalated on: an unapproved route is a tailnet-policy
+    # problem no reboot fixes. `wk bridge status` is where this gets noticed.
     if [ -n "$segment" ]; then
         printf '%s' "$st" | jq -e --arg r "$segment" \
             '.Self.PrimaryRoutes // [] | index($r)' >/dev/null 2>&1 \
@@ -121,10 +107,8 @@ healthy() {
 reload_wifi_driver() {
     drv=$(basename "$(readlink -f "/sys/class/net/$WIFI/device/driver" 2>/dev/null)" 2>/dev/null)
     [ -n "$drv" ] || return 1
-    # The bus module is what gets removed; its dependencies follow (rsi_sdio
-    # pulls rsi_91x, 8723cs is one module). Sleeps rather than a wait loop: the
-    # firmware upload is what takes the time and nothing observable happens
-    # first.
+    # Sleeps rather than a wait loop: the firmware upload is what takes the
+    # time, and nothing observable happens before it finishes.
     log "reloading wifi driver module '$drv'"
     modprobe -r "$drv" 2>/dev/null || true
     sleep 3
@@ -155,21 +139,17 @@ while :; do
     WIFI=$(wifi_if)
     [ -n "$WIFI" ] || { log "no wifi device present"; WIFI=wlan0; }
 
-    # Belt and braces, every pass: power save comes back on after a
-    # reassociation on both parts, and it is the single most reliable way to
-    # turn a working uplink into one that answers every third ping.
+    # Every pass: power save comes back on after a reassociation on both
+    # ends, and is the single most reliable way to turn a working uplink into
+    # one that answers every third ping.
     iw dev "$WIFI" set power_save off 2>/dev/null || true
 
-    # The downstream leg is checked but never escalated on, and the asymmetry is
-    # the point: losing the segment is a dock or a cable, and rebooting the
-    # phone over it would take out the uplink that is the only way to be told
-    # about any of this. Re-assert host mode and say so.
-    # Every pass, not only when the interface is missing. Run only in that
-    # branch, the second fault it fixes is invisible to the ladder: a NIC that
-    # fell to the companion full-speed controller is *present*
-    # and *host mode is correct*, it is merely forty times too slow, so nothing
-    # here ever looked at it. The script itself is cheap and idempotent -- a few
-    # sysfs reads and an early exit when there is nothing to do.
+    # Downstream leg: checked but never escalated on -- losing it is a dock or
+    # cable fault, and rebooting the phone over it would take out the uplink
+    # that is the only way to be told about any of this. Run every pass, not
+    # only when the interface is missing: a NIC fallen to the companion
+    # full-speed controller is present and in host mode, merely forty times
+    # too slow, which is invisible to every other check here.
     /usr/local/sbin/wk-bridge-usb-host 2>/dev/null || true
 
     if [ ! -e "/sys/class/net/$iface" ]; then
@@ -178,48 +158,26 @@ while :; do
         if [ -e "/sys/class/net/$iface" ]; then
             log "$iface came back"
         else
-            # Not "check the dock, its power and the cable", which is what
-            # that is wrong here more often than right: a dock can be powered,
-            # cabled, in host mode and enumerating a hub with the NIC still
-            # never appearing. wk-bridge-healthcheck tells the three cases apart;
-            # this line points at it rather than guessing at one of them.
+            # Not "check the dock/power/cable": a dock can be powered, cabled
+            # and in host mode with the NIC still never enumerating.
+            # wk-bridge-healthcheck tells the cases apart; this just points at it.
             log "$iface still absent -- wk-bridge-healthcheck says which fault"
         fi
     elif [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = 1 ] \
          && ! segment_answers; then
-        # Carrier, and nothing on the segment answers. A client asks for an
-        # address when it sees the link come up, so a client that asked into the
-        # window before dnsmasq was listening -- or gave up after enough silence
-        # -- stays without one, and nothing on this phone can reach into it and
-        # make it ask again. Except taking the carrier away and giving it back,
-        # which every DHCP client treats as a new link.
-        #
-        # The trigger is reachability, not an empty lease file: these leases
-        # are infinite, so a client that already has an address re-uses it
-        # after a carrier drop by ARP alone and never files another request --
-        # watching the lease file would miss that case entirely.
-        #
-        # Two consecutive passes first, because one can legitimately catch a
-        # board that is still booting, and flapping the link under a client
-        # mid-DISCOVER makes it worse. And once per episode, not once per pass:
-        # an empty segment is a normal state -- nothing plugged in at the far
-        # end yet -- and a bridge that flaps its own link every minute forever
-        # is a fault, not a recovery.
+        # Carrier up but nothing answers: a client asks for an address only
+        # when the link comes up, so one that missed that window stays without
+        # one -- only taking the carrier away and back makes it ask again.
+        # Reachability, not an empty lease file, is the trigger: these leases
+        # never expire, so an already-addressed client re-uses it via ARP
+        # after a carrier drop and never files another request.
         nopeer=$((nopeer + 1))
-        # Two passes before acting, except just after a boot, where one is
-        # right: nothing has ever been established on this link, so there is no
-        # settled client to disturb -- and a boot is exactly when the wait is
-        # worst: after a reboot of the phone a board's DHCPDISCOVER can land
-        # 134 s later. That is the *board's* retry schedule,
-        # not this phone's readiness: its first request goes out when the kernel
-        # enumerates the adapter, seconds in, and no amount of starting dnsmasq
-        # earlier can beat that. Flapping the link is the only thing that makes
-        # a backed-off client ask again, and doing it at the first pass turns
-        # two minutes into about twenty seconds.
-        #
-        # Once per episode either way, tracked by a flag rather than by the
-        # counter -- with only the counter, flapping at pass 1 and still seeing
-        # nothing at pass 2 would flap twice.
+        # Two passes before flapping, except right after this phone's own
+        # boot: measured, a board's DHCPDISCOVER can land 134s after this
+        # phone reboots (its own retry schedule, not this phone's readiness),
+        # so flapping on pass 1 there turns a two-minute wait into ~20s. Once
+        # per episode either way, via a flag rather than the counter, so two
+        # failing passes in a row don't flap twice.
         up=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 999)
         if [ -z "$flapped" ] && { [ "$nopeer" -ge 2 ] || [ "$up" -lt 180 ]; }; then
             flapped=1

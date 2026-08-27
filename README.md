@@ -132,10 +132,10 @@ wk sync                        # clones WebKit into the mirror, publishes a snap
 eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```
 
-Boards that reach the bench over WiFi (`MACH_NET=wifi`) take their credentials
-from `~/.config/wk/wifi` on the writing machine (`ssid=` and `psk=` lines,
-never in git; override with `WK_WIFI_CREDS`); `wk sysimage write` refuses
-without them.
+Boards that reach the bench over WiFi (`MACH_NET=wifi`) take their credential
+from the WiFi connection of the machine holding the card reader, read by the
+privileged card helper at write time -- there is no hand-made credential file;
+`wk sysimage write` refuses when that machine is not on WiFi.
 
 ```sh
 wk new bug-238
@@ -200,7 +200,7 @@ wk pr open bug-238                       # from the host: push the branch, open 
 **Sync (this machine, or everywhere)**
 
 ```sh
-wk sync                                 # the workspace you're in
+wk sync                                 # one workspace here; asked when there are several
 wk sync bug-238                         # a named one
 wk sync --machine                       # mirror, snapshot, every workspace and wk-tools copy here
 wk sync --all                           # ...and every other machine too
@@ -234,7 +234,8 @@ wk sysimage write --from <path> --disk <writer>:/dev/sdX
 wk boot rpi3                                     # one-shot: arms, reboots, self-reverts
 # a write refuses, with no --force, when the tailnet auth key or the board's
 # WiFi credentials are missing, or when the tailnet already has a node named
-# rpi3 -- a fresh join would come up as rpi3-1 and nothing could reach it.
+# rpi3-bench -- a fresh join would come up as rpi3-bench-1 and nothing could
+# reach it.
 # Remove the stale node in the admin console first.
 wk pi deploy bug-238 rpi3 --skeleton              # once per board
 wk pi bench rpi3 speedometer3
@@ -274,7 +275,8 @@ MACH_ROLE=workstation|bench-device
 MACH_OS=any
 MACH_NET=wifi|ethernet        # how the board reaches the network at the bench
 MACH_DTB=<file.dtb>           # the device tree a Pi image boots with; empty otherwise
-MACH_BENCH_SSH=<name>         # a Mac's bench install, if it has its own address
+MACH_BENCH_SSH=<name>-bench   # what a system wk writes for it joins the tailnet as;
+                              # the machine's own install keeps MACH_SSH
 MACH_NOTE="one line, for the listing"
 ```
 

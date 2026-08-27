@@ -1,66 +1,15 @@
-"""Pure image/disk logic that needs no card in a reader: `image_boot_offset`'s
-partition-table parsing (lib/image.sh), `_image_wants_wifi`'s conf lookup
-(boot/disk.sh) and `disk_refuse_unless_safe`'s size check (boot/disk.sh).
-Each drives the real function against a stub of the one external tool it
-shells out to (`sfdisk`, a faked `machine_load`, `lsblk` via a stubbed
-`card_priv`/`m_ssh MACH_LOCAL=1`) rather than reimplementing the logic here.
+"""Pure image/disk logic that needs no card in a reader: `_image_wants_wifi`'s
+conf lookup (boot/disk.sh) and `disk_refuse_unless_safe`'s refusal (boot/disk.sh),
+which asks the card helper -- the only implementation of the rule -- rather
+than deciding a second time on this side. Each drives the real function
+against a stub of the one thing it shells out to (a faked `machine_load`, a
+stubbed `card_priv`) rather than reimplementing the logic here.
 
 Run: python3 -m unittest tests.test_disk_logic -v
 """
 import unittest
 
-from tests.support import REPO, WkTest, bash, stub_path
-
-
-_SFDISK_ONE_BOOT_PARTITION = '''#!/bin/sh
-case "$*" in
-  *-J*) cat <<'JSON'
-{"partitiontable": {"label": "gpt", "partitions": [
-  {"node": "/dev/loop0p1", "start": 8192, "size": 1048576, "type": "0700"},
-  {"node": "/dev/loop0p2", "start": 1056768, "size": 20971520, "type": "8300"}
-]}}
-JSON
-  ;;
-esac
-'''
-
-_SFDISK_NO_PARTITIONS = '''#!/bin/sh
-echo '{"partitiontable": {"partitions": []}}'
-'''
-
-_LSBLK_SIZE = '''#!/bin/sh
-case "$*" in
-  *-bdno*) echo "${LSBLK_BYTES:-0}" ;;
-  *-dno*)  echo "${LSBLK_HUMAN:-0}" ;;
-esac
-'''
-
-
-class TestImageBootOffset(WkTest):
-    def test_parses_the_first_partitions_start_into_a_byte_offset(self):
-        with stub_path({"sfdisk": _SFDISK_ONE_BOOT_PARTITION}) as binp:
-            script = f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/image.sh"
-image_boot_offset /fake/disk.img
-'''
-            cp = self.bash(script, env={"PATH": f"{binp}:/usr/bin:/bin"})
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            # start=8192 sectors * 512 bytes/sector.
-            self.assertEqual(cp.stdout.strip(), "4194304", cp.stdout + cp.stderr)
-
-    def test_a_partition_table_with_no_start_fails_rather_than_guesses(self):
-        with stub_path({"sfdisk": _SFDISK_NO_PARTITIONS}) as binp:
-            script = f'''
-. "{REPO}/lib/common.sh"
-. "{REPO}/lib/image.sh"
-image_boot_offset /fake/disk.img
-'''
-            cp = self.bash(script, env={"PATH": f"{binp}:/usr/bin:/bin"})
-            self.assertNotEqual(
-                cp.returncode, 0,
-                f"an empty partition table should not resolve to a boot offset: {cp.stdout}",
-            )
+from tests.support import REPO, WkTest, bash
 
 
 class TestImageWantsWifi(WkTest):
@@ -101,46 +50,43 @@ _image_wants_wifi {machine} && echo YES || echo NO
 
 
 class TestDiskRefuseUnlessSafe(WkTest):
-    """The size half of `disk_refuse_unless_safe` (boot/disk.sh): the
-    privileged safety check itself (`card_priv check`) is stubbed out --
-    that is admin/wk-card-priv's own contract, not this function's -- and
-    what is exercised for real is the size comparison against a fake
-    `lsblk`, reached through `m_ssh` with MACH_LOCAL=1 so it runs the fake
-    tool locally instead of over ssh."""
+    """`disk_refuse_unless_safe` (boot/disk.sh) is the one pre-erase question
+    this end asks about a device, and it asks the card helper: the rule lives
+    where the privilege is, and a second copy here could drift into permitting
+    what the helper refuses. Whether the *image* fits is not asked -- the
+    source is a stream, read once as it is written -- so what is exercised
+    here is the refusal and what it says, with `card_priv` stubbed for the
+    helper's answer and `disk_list` for the listing it appends."""
 
-    def _script(self, device_bytes, human, image_bytes):
+    def _script(self, check_output, check_rc):
         return f'''
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
 . "{REPO}/boot/disk.sh"
 MACH_LOCAL=1 MACH_NAME=testmach MACH_SSH=testmach
-card_priv() {{ return 0; }}
-LSBLK_BYTES={device_bytes} LSBLK_HUMAN={human}
-export LSBLK_BYTES LSBLK_HUMAN
-disk_refuse_unless_safe /dev/sdX {image_bytes}
+card_priv() {{
+    [ "$1" = status ] && return 0
+    printf '%s\\n' {check_output!r}
+    return {check_rc}
+}}
+disk_list() {{ printf '    (none)\\n'; }}
+disk_refuse_unless_safe /dev/sdX
 echo OK
 '''
 
-    def test_a_disk_at_least_as_big_as_the_image_is_allowed(self):
-        with stub_path({"lsblk": _LSBLK_SIZE}) as binp:
-            cp = self.bash(
-                self._script(68719476736, "64G", 1_000_000),
-                env={"PATH": f"{binp}:/usr/bin:/bin"},
-            )
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("OK", cp.stdout, cp.stdout)
+    def test_a_device_the_helper_allows_is_allowed(self):
+        cp = self.bash(self._script("/dev/sdX may be written: usb 64G", 0))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("OK", cp.stdout, cp.stdout)
 
-    def test_a_disk_smaller_than_the_image_is_refused(self):
-        with stub_path({"lsblk": _LSBLK_SIZE}) as binp:
-            cp = self.bash(
-                self._script(1000, "1000B", 2000),
-                env={"PATH": f"{binp}:/usr/bin:/bin"},
-            )
-            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn(
-                "smaller than the image", cp.stdout + cp.stderr,
-                cp.stdout + cp.stderr,
-            )
+    def test_a_device_the_helper_refuses_is_refused_here_too(self):
+        cp = self.bash(self._script(
+            "wk-card-priv: REFUSED: '/dev/sdX' is on transport 'nvme'", 3))
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        out = cp.stdout + cp.stderr
+        self.assertIn("will not write /dev/sdX", out, out)
+        # The helper's own words, not a second explanation invented here.
+        self.assertIn("transport 'nvme'", out, out)
 
 
 if __name__ == "__main__":

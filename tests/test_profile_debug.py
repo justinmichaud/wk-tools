@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WK, run
+from tests.support import REPO, WK, fake_workspace, run
 
 PROFILE = REPO / "cmd" / "profile"
 QUIESCE_PRIV = REPO / "admin" / "wk-quiesce-priv"
@@ -96,6 +96,116 @@ class ProfileModeRefusalTest(unittest.TestCase):
         # for a mode this file itself declares valid.
         cp = run_profile("--mode", "sampling", "--dry-run", env={"WK_NAME": "test-ws"})
         self.assertNotIn("no such mode", cp.stdout, cp.stdout)
+
+
+class ProfileBrowserProcessTest(unittest.TestCase):
+    """`wk profile <ws> --browser --process <p>` on the CMake ports (GTK/WPE)
+    -- docs/Urgent/HANDOFF-linux-minibrower.md's "which process" decision
+    (docs/defects 13: web is the priority, but the other three are cheap
+    enough to wire up too). Every check here is a --dry-run against a
+    FakeWorkspace (tests/support.py): a marker naming a checkout that exists,
+    so config_load/t_exec resolve without a real workspace, VM or ssh."""
+
+    # config -> {process: the name config_<process>_process_name reports}
+    PORT_PROCESS_NAMES = {
+        "wpe-release": {"web": "WPEWebProcess", "network": "WPENetworkProcess", "gpu": "WPEGPUProcess"},
+        "gtk-release": {"web": "WebKitWebProcess", "network": "WebKitNetworkProcess", "gpu": "WebKitGPUProcess"},
+    }
+
+    def test_process_ui_prefixes_samply_via_mini_browser_prefix(self):
+        """--process ui puts samply in WEBKIT_MINI_BROWSER_PREFIX, not in front of
+        run-minibrowser itself"""
+        with fake_workspace() as ws:
+            for config in self.PORT_PROCESS_NAMES:
+                cp = ws.run("profile", "--config", config, "--browser", "--process", "ui",
+                             "--mode", "samply", "--dry-run")
+                self.assertEqual(cp.returncode, 0, f"{config}: {cp.stdout}")
+                self.assertIn("WEBKIT_MINI_BROWSER_PREFIX=", cp.stdout, f"{config}: {cp.stdout}")
+                self.assertIn("samply record", cp.stdout, f"{config}: {cp.stdout}")
+                self.assertIn("run-minibrowser", cp.stdout, f"{config}: {cp.stdout}")
+                # the prefix wraps MiniBrowser, not the launcher: samply must not
+                # also appear as a bare prefix of the run-minibrowser line itself
+                launch_line = next(l for l in cp.stdout.splitlines() if "run-minibrowser" in l)
+                self.assertNotIn("samply", launch_line, f"{config}: {cp.stdout}")
+
+    def test_process_web_network_gpu_attach_by_pid_after_launch(self):
+        """--process web (the default)/network/gpu launch MiniBrowser, then
+        `samply record -p <pid>` the newest matching process by name"""
+        with fake_workspace() as ws:
+            for config, names in self.PORT_PROCESS_NAMES.items():
+                for process, proc_name in names.items():
+                    args = ["profile", "--config", config, "--browser", "--mode", "samply", "--dry-run"]
+                    if process != "web":
+                        args += ["--process", process]
+                    cp = ws.run(*args)
+                    self.assertEqual(cp.returncode, 0, f"{config}/{process}: {cp.stdout}")
+                    self.assertIn(proc_name, cp.stdout, f"{config}/{process}: {cp.stdout}")
+                    self.assertIn("pgrep", cp.stdout, f"{config}/{process}: {cp.stdout}")
+                    self.assertIn("samply record", cp.stdout, f"{config}/{process}: {cp.stdout}")
+                    self.assertIn(" -p ", cp.stdout, f"{config}/{process}: {cp.stdout}")
+
+    def test_default_process_is_web(self):
+        """with no --process at all, --browser --mode samply attaches to the web process"""
+        with fake_workspace() as ws:
+            cp = ws.run("profile", "--config", "wpe-release", "--browser", "--mode", "samply", "--dry-run")
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+            self.assertIn("WPEWebProcess", cp.stdout, cp.stdout)
+            self.assertNotIn("WPENetworkProcess", cp.stdout, cp.stdout)
+            self.assertNotIn("WPEGPUProcess", cp.stdout, cp.stdout)
+
+    def test_apple_port_browser_path_is_unchanged(self):
+        """mac-* --browser still profiles MiniBrowser directly, exactly as before"""
+        with fake_workspace() as ws:
+            cp = ws.run("profile", "--config", "mac-release", "--browser", "--dry-run")
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+            self.assertIn("MiniBrowser.app/Contents/MacOS/MiniBrowser", cp.stdout, cp.stdout)
+            self.assertIn("--url", cp.stdout, cp.stdout)
+            self.assertNotIn("WEBKIT_MINI_BROWSER_PREFIX", cp.stdout, cp.stdout)
+
+            # --process is not wired up for the Apple ports -- refused, naming the
+            # --attach remedy, rather than silently ignored
+            cp = ws.run("profile", "--config", "mac-release", "--browser", "--process", "web", "--dry-run")
+            self.assertNotEqual(cp.returncode, 0, cp.stdout)
+            self.assertIn("not wired up for the Apple ports", cp.stdout, cp.stdout)
+            self.assertIn("--attach", cp.stdout, cp.stdout)
+
+    def test_process_with_a_non_wrapper_mode_refuses_naming_the_remedy(self):
+        """--process with --mode sampling (an environment-variable mode, not a
+        process wrapper) is refused, naming --mode samply as the remedy"""
+        with fake_workspace() as ws:
+            cp = ws.run("profile", "--config", "gtk-release", "--browser", "--process", "ui",
+                         "--mode", "sampling", "--dry-run")
+            self.assertNotEqual(cp.returncode, 0, cp.stdout)
+            self.assertIn("meaningless", cp.stdout, cp.stdout)
+            self.assertIn("--mode samply", cp.stdout, cp.stdout)
+
+            # sampling/bytecode --browser on the CMake ports keeps working when
+            # --process is not given at all -- only the explicit combination refuses
+            cp = ws.run("profile", "--config", "gtk-release", "--browser", "--mode", "sampling", "--dry-run")
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+
+    def test_unknown_process_value_is_refused(self):
+        """unknown --process is refused naming the valid ones"""
+        cp = run_profile("--process", "bogus", "--dry-run", env={"WK_NAME": "test-ws"})
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("no such process", cp.stdout, cp.stdout)
+        for p in ("ui", "web", "network", "gpu"):
+            self.assertIn(p, cp.stdout, f"refusal does not name '{p}': {cp.stdout}")
+
+    def test_process_without_browser_is_refused(self):
+        """--process without --browser names nothing to point at, and is refused"""
+        cp = run_profile("--process", "ui", "--dry-run", env={"WK_NAME": "test-ws"})
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("--browser", cp.stdout, cp.stdout)
+
+    def test_heaptrack_massif_browser_on_cmake_ports_refuses_owed(self):
+        """heaptrack/massif --browser on the CMake ports refuses -- not wired up
+        yet, rather than silently building a broken command line"""
+        with fake_workspace() as ws:
+            for mode in ("heaptrack", "massif"):
+                cp = ws.run("profile", "--config", "gtk-release", "--browser", "--mode", mode, "--dry-run")
+                self.assertNotEqual(cp.returncode, 0, f"{mode}: {cp.stdout}")
+                self.assertIn("not wired up", cp.stdout, f"{mode}: {cp.stdout}")
 
 
 class QuiesceHelperVerbTest(unittest.TestCase):

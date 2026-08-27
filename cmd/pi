@@ -27,6 +27,10 @@
 #       --ab A,B [--rounds N]             interleaved A/B between two deployed
 #                                         slots, compared with wk bench compare
 #
+#   WK_PI_TAG=<tag>                       the tailscale tag 'wk pi setup'
+#                                         advertises when it brings a board up
+#                                         (default tag:wk)
+#
 # Bare-board order, one step each. Flashing is wk sysimage write, not a verb
 # here: it is an image operation shared by every machine and medium.
 #   wk sysimage build <profile>                  build the image
@@ -90,12 +94,21 @@ case "$ACTION" in
 esac
 shift 2 2>/dev/null || true
 
+# setup takes only the ssh-host consumed above; deploy/bench/boot-order parse
+# the rest of $@ themselves below.
+if [ "$ACTION" = setup ] && [ $# -gt 0 ]; then
+    case "$1" in
+        -*) die "usage: wk pi setup <ssh-host>; unknown option: $1; see wk pi -h" ;;
+        *)  die "usage: wk pi setup <ssh-host>; unexpected argument: $1; see wk pi -h" ;;
+    esac
+fi
+
 rsh() { ssh -o BatchMode=yes "$HOST" "$@"; }
 
 if [ "$ACTION" = flash ]; then
     die "'wk pi flash' is gone -- it and 'wk image flash' were one operation.
 
-    Writing a disk is an image operation, so it lives with the image store, and
+    Writing a disk is an image operation, so it lives with wk sysimage, and
     the disk is named rather than the machine:
 
         wk sysimage disks $HOST                  what is attached over there
@@ -151,12 +164,13 @@ cmd_deploy() {
             # still running, since the two do not depend on each other.
             --skeleton-only) skeleton=1; skeleton_only=1 ;;
             --libs-only) libs_only=1 ;;
-            *) die "unknown option: $1" ;;
+            -*) die "usage: wk pi deploy <workspace> <machine> [--slot NAME] [--skeleton|--skeleton-only] [--libs-only]; unknown option: $1; see wk pi -h" ;;
+            *)  die "usage: wk pi deploy <workspace> <machine> [--slot NAME] [--skeleton|--skeleton-only] [--libs-only]; unexpected argument: $1; see wk pi -h" ;;
         esac
         shift
     done
     [ -n "$ws" ] && [ -n "$machine" ] \
-        || die "usage: wk pi deploy <workspace> <machine> [--slot NAME] [--skeleton] [--libs-only]"
+        || die "usage: wk pi deploy <workspace> <machine> [--slot NAME] [--skeleton|--skeleton-only] [--libs-only]; see wk pi -h"
 
     machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
     machine_armed_barrier "A deploy now lands in the system that is answering, and the
@@ -538,23 +552,24 @@ cmd_bench() {
             --ab)      ab="${2:-}"
                        case "$ab" in
                            *,*) ;;
-                           *) die "--ab takes two slot names separated by a comma, e.g. --ab a,b" ;;
+                           *) die "usage: wk pi bench <machine> <plan> --ab A,B [--rounds N]; --ab takes two slot names separated by a comma, e.g. --ab a,b; see wk pi -h" ;;
                        esac
                        pi_check_slot "${ab%%,*}"; pi_check_slot "${ab##*,}"
                        [ "${ab%%,*}" != "${ab##*,}" ] \
-                           || die "--ab needs two different slots (got '${ab%%,*}' twice).
+                           || die "usage: wk pi bench <machine> <plan> --ab A,B [--rounds N]; --ab needs two different slots (got '${ab%%,*}' twice).
     Two runs from one build directory measure the same binary twice, which is a
     repeatability check rather than an A/B -- '--count N' is the way to ask for
     that."
                        shift ;;
             --rounds)  rounds="${2:-}"; shift ;;
-            *) die "unknown option: $1" ;;
+            -*) die "usage: wk pi bench <machine> <plan> [--slot NAME] [--ab A,B [--rounds N]] [--count N] [--timeout S] [--cores <set>]; unknown option: $1; see wk pi -h" ;;
+            *)  die "usage: wk pi bench <machine> <plan> [--slot NAME] [--ab A,B [--rounds N]] [--count N] [--timeout S] [--cores <set>]; unexpected argument: $1; see wk pi -h" ;;
         esac
         shift
     done
     [ -n "$machine" ] && [ -n "$plan" ] \
         || die "usage: wk pi bench <machine> <plan> [--slot NAME] [--ab A,B [--rounds N]]
-                                    [--count N] [--timeout S] [--cores <set>]"
+                                    [--count N] [--timeout S] [--cores <set>]; see wk pi -h"
     [ -z "$cores" ] || python3 "$WK_ROOT/lib/wkdata.py" cores-valid "$cores" \
         || die "--cores '$cores' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)"
 
@@ -942,7 +957,8 @@ cmd_boot_order() {
         case "$1" in
             --dry-run)   dry=1 ;;
             --revert)    revert=1 ;;
-            *) die "unknown option: $1" ;;
+            -*) die "usage: wk pi boot-order <ssh-host> <order> [--revert] [--dry-run]; unknown option: $1; see wk pi -h" ;;
+            *)  die "usage: wk pi boot-order <ssh-host> <order> [--revert] [--dry-run]; unexpected argument: $1; see wk pi -h" ;;
         esac
         shift
     done

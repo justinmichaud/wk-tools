@@ -69,10 +69,7 @@ if [ -n "$TARGET" ]; then
     _one() {
         local t="$1" rc=0 out
         load_target "$t"
-        if ! t_has_wk; then
-            printf '%-22s %s\n' "$t" "no wk-tools there yet -- 'wk remote setup $t'"
-            return 1
-        fi
+        machine_answers "$t" || return 1
         out=$(t_wk push "$ACTION" 2>&1) || rc=$?
         printf '%s\n' "$out" | sed "s/^/$(printf '%-22s' "$t")/"
         return "$rc"

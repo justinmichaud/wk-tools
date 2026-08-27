@@ -1,15 +1,16 @@
-"""The image store is gone (docs/HANDOFF-fleet.md, "The image store is being
-removed"): a build's output lives wherever its builder left it -- a
-workspace, a build host -- and every reader gets there by scanning or by
-`--from <path>`, never by looking an id up in a catalogue.
+"""The image store is gone (docs/HANDOFF-fleet.md, "Images without a store"):
+a build's output lives wherever its builder left it -- a workspace, a build
+host -- and every reader gets there by scanning or by `--from <path>`, never
+by looking an id up in a catalogue.
 
-Covers: none of the store's functions survive anywhere in the tree except as
-a caller wk-tools does not own (cmd/pi, container/broker/wk-broker.py -- both
-outside this change's edit scope, and both named in docs/HANDOFF-fleet.md as
-owed); `wk sysimage rm` is a tombstone naming `wk rm`; `wk boot`'s default
-system is read off the device rather than looked up, and a named --system is
-checked against it; `_ws_profile`/`_profile_from_path` (cmd/sysimage) derive
-a profile from both a yocto and a buildroot workspace path.
+Covers: none of the store's functions survive anywhere in the tree, as a
+definition or a call, under cmd/, lib/, boot/, bench/, image/, container/ or
+host/; the phrase "image store" survives only as cmd/sysimage's own
+tombstones and in this test; `wk sysimage rm` is a tombstone naming `wk rm`;
+`wk boot`'s default system is read off the device rather than looked up, and
+a named --system is checked against it; `_ws_profile`/`_profile_from_path`
+(cmd/sysimage) derive a profile from both a yocto and a buildroot workspace
+path.
 
 Run: python3 -m unittest tests.test_image_store_gone -v
 """
@@ -37,10 +38,9 @@ _RETIRED_FUNCTIONS = (
 
 class TestNoStoreFunctionDefinitionRemains(unittest.TestCase):
     """A function *definition* -- 'name() {' or 'name () {' -- not a mention:
-    the word can still appear in a refusal or a comment (a tombstone), and
-    cmd/pi and container/broker/wk-broker.py still *call* manifest_get and
-    image_ids respectively (owed work outside this change's file list,
-    docs/HANDOFF-fleet.md), which this test does not police."""
+    the word can still appear in a refusal or a comment (a tombstone).
+    TestNoRetiredFunctionCalled, below, polices the other half: that nothing
+    calls one of these names either."""
 
     def test_no_definition_of_any_retired_function(self):
         pattern = re.compile(
@@ -56,6 +56,95 @@ class TestNoStoreFunctionDefinitionRemains(unittest.TestCase):
             for m in pattern.finditer(text):
                 bad.append(f"{f.relative_to(REPO)}: {m.group(0).strip()}")
         self.assertEqual(bad, [], "retired function(s) still defined:\n" + "\n".join(bad))
+
+
+# Where the store's callers used to live -- the directories `wk selftest`
+# treats as shell code, minus tests/ and docs/, which is where the tolerated
+# hits below (owed work outside this change's file list) actually live.
+_SCAN_DIRS = ("cmd", "lib", "boot", "bench", "image", "container", "host")
+
+
+def _scoped_shell_files():
+    return [f for f in shell_files() if f.relative_to(REPO).parts[0] in _SCAN_DIRS]
+
+
+def _inside_quotes(line, col):
+    """True if column `col` of `line` falls inside a "..." string -- the
+    shape a die message or a log line's prose takes, as opposed to a bare
+    command-position call."""
+    in_str = False
+    i = 0
+    while i < col:
+        c = line[i]
+        if c == "\\" and in_str:
+            i += 2
+            continue
+        if c == '"':
+            in_str = not in_str
+        i += 1
+    return in_str
+
+
+_CALL_PATTERNS = {
+    name: re.compile(r"\b" + re.escape(name) + r"\b(?!\s*\(\))")
+    for name in _RETIRED_FUNCTIONS
+}
+
+
+class TestNoRetiredFunctionCalled(unittest.TestCase):
+    """Not just no definition (above) -- no call either, anywhere the store's
+    callers used to live. A retired name may still appear naming what is gone,
+    in a comment or inside a die/log message's "..." string; that is prose,
+    not a call, so it is not flagged."""
+
+    def test_no_call_to_any_retired_function(self):
+        bad = []
+        for f in _scoped_shell_files():
+            try:
+                lines = f.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for lineno, line in enumerate(lines, start=1):
+                if line.lstrip().startswith("#"):
+                    continue
+                for pattern in _CALL_PATTERNS.values():
+                    for m in pattern.finditer(line):
+                        if _inside_quotes(line, m.start()):
+                            continue
+                        bad.append(f"{f.relative_to(REPO)}:{lineno}: {line.strip()}")
+        self.assertEqual(bad, [], "retired function(s) still called:\n" + "\n".join(bad))
+
+
+class TestImageStorePhraseIsTombstoneOnly(unittest.TestCase):
+    """"image store" as a phrase survives only where it names the thing that
+    is gone: cmd/sysimage's header comment and its two tombstone messages
+    (the 'ls' empty-listing note and the 'rm' refusal), plus this test, which
+    is the one place allowed to write the retired name in order to look for
+    it. A hit anywhere else is a regression: this test is meant to fail
+    loudly the next time the phrase leaks somewhere new."""
+
+    _ALLOWED_SUBSTRINGS = (
+        "There is no image store (`wk help`)",  # cmd/sysimage:13, the header
+        "There is no image store: the workspace is the name",  # cmd_ls
+        "there is no image store to remove from",  # cmd_rm
+    )
+
+    def test_phrase_is_tombstone_only(self):
+        bad = []
+        for f in shell_files():
+            try:
+                lines = f.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for lineno, line in enumerate(lines, start=1):
+                if "image store" not in line.lower():
+                    continue
+                if any(s in line for s in self._ALLOWED_SUBSTRINGS):
+                    continue
+                bad.append(f"{f.relative_to(REPO)}:{lineno}: {line.strip()}")
+        self.assertEqual(
+            bad, [], "'image store' survives outside its tombstones:\n" + "\n".join(bad)
+        )
 
 
 class TestSysimageRmIsATombstone(WkTest):

@@ -259,7 +259,7 @@ fi
 # --- this machine's own small change ----------------------------------------
 section "this host"
 if [ -d "$(wk_state_dir)" ]; then
-    row "$(_kb "$(wk_state_dir)")" "host-side state" "logs, keys, target registry"
+    row "$(_kb "$(wk_state_dir)")" "host-side state" "logs, keys, remote build status"
     # On a macOS host the fetch builder's input cache lives in there
     # ($WK_STORE is the podman VM's path, which this machine cannot write).
     # Noted rather than added: it is inside the row above.

@@ -8,7 +8,7 @@ Look at all the different ways we build or configure images:
 - mac vm images
 
 Look at all the different ways we benchmark:
-- rebooting rpi5, macOS or moose into a generated and transient, 100% reproducable perf testing image using a normal distro
+- rebooting rpi5, macOS or moose into a generated and transient, 100% reproducable perf testing image (yocto on every Linux machine, moose included)
 - rebooting rpi5, rpi4 or rpi3 into a yocto webkit image
 - benchmarking MiniBrowser or JSC cli in a container for faster tests
 

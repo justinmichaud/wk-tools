@@ -11,7 +11,10 @@ WK_ARCHES="native armhf"
 # Pinned: `wkdev-create --arch` would otherwise resolve to the aarch64
 # image and hand podman that with --arch=arm. 24.04_arm32_arm64 is not a
 # substitute despite the name -- arm64 with armhf as a foreign multiarch arch.
-WK_IMAGE_ARMHF="${WK_IMAGE_ARMHF:-ghcr.io/igalia/wkdev-sdk:24.04_arm32}"
+# Not an override point: nothing in this tree or its tests ever wants a
+# different armhf image, and a stray env var silently changing which SDK a
+# workspace gets is worse than one pinned constant.
+WK_IMAGE_ARMHF="ghcr.io/igalia/wkdev-sdk:24.04_arm32"
 
 # arch_canon <word> -- the canonical name; aliases like "32" are never stored.
 arch_canon() {

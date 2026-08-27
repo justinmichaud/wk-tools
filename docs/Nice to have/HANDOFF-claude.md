@@ -1,3 +1,4 @@
-Do research on how to back up all claude conversations across all machines
+# HANDOFF — Claude conversations and memory
 
-Do research on how to share memory
+- [ ] research how to back up all Claude conversations across all machines
+- [ ] research how to share memory across machines

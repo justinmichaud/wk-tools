@@ -21,7 +21,10 @@
 # The socket a workspace sees. `/run/wk` is the one directory the container
 # bind-mounts from the host's runtime directory (targets/container.sh), and it
 # already carries the egress proxy's socket -- so this needs no container
-# change and reaches workspaces that already exist.
+# change and reaches workspaces that already exist. WK_BROKER_SOCKET
+# overrides the path; tests/test_dispatcher.py points it at a path with
+# nothing listening, so a host-only refusal is testable from inside a fake
+# workspace without a real broker.
 WK_BROKER_SOCKET="${WK_BROKER_SOCKET:-/run/wk/broker.sock}"
 
 broker_present() { [ -S "$WK_BROKER_SOCKET" ]; }

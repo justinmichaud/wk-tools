@@ -75,6 +75,7 @@ _proxy_policy_reload() {
     changed "restarted wk-proxy (policy changed)"
 }
 
+# WK_VMTOOLS_ONLY=tools stops here (see the comment above this file's rsync).
 if [ "${WK_VMTOOLS_ONLY:-}" = tools ]; then
     # A pushed policy that is not the running one is the same bug as a pushed
     # `wk` that no container can see: it is silent, and it shows up as a fetch

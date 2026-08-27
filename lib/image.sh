@@ -32,32 +32,6 @@ image_build_locations() {
 
 image_cache_dir() { echo "$(_image_root)/cache/images"; }
 
-# The byte offset of the boot partition, from its own table. Factored out so
-# three readers can't disagree on which partition is the boot one.
-image_boot_offset() {
-    local disk="$1" offset
-    offset=$(sfdisk -J "$disk" 2>/dev/null \
-        | sed -n 's/.*"start": *\([0-9]*\).*/\1/p' | head -1 | awk '{print $1 * 512}')
-    [ -n "$offset" ] && [ "$offset" -gt 0 ] || return 1
-    echo "$offset"
-}
-
-# What the kernel command line says the root filesystem is: read via mtools
-# at a byte offset, no mount, no privilege. Ubuntu's raspi images keep
-# cmdline.txt under the os_prefix directory the firmware selects, so both
-# paths are tried. Prints the raw `root=` value, or nothing.
-#   image_root_spec <disk-image-path>
-image_root_spec() {
-    local disk="$1" offset p
-    [ -f "$disk" ] || return 0
-    offset=$(image_boot_offset "$disk") || return 0
-    for p in ::/current/cmdline.txt ::cmdline.txt; do
-        MTOOLS_SKIP_CHECK=1 mtype -i "$disk@@$offset" "$p" 2>/dev/null \
-            | tr ' ' '\n' | kv_get root && return 0
-    done
-    return 0
-}
-
 # Which *kind* of device that root spec names, not the exact path: a card
 # written in one reader is often booted in another, and "SD card" vs "USB
 # disk" is the mistake worth catching.
@@ -86,14 +60,14 @@ device_class() {  # same classification, for a device about to be written
     esac
 }
 
-# Refuse a write whose image cannot boot from its device: without this,
-# the write succeeds and the discovery happens on a headless board that
-# loaded a kernel and then couldn't find `/`.
-#   image_check_root <disk-image-path> <device> <what-it-is>
+# Refuse to leave a card whose system cannot boot from the device it is on:
+# without this the discovery happens on a headless board that loaded a kernel
+# and then couldn't find `/`. The spec is the one the card itself names
+# (disk_root_spec, boot/disk.sh), read after every edit that could change it.
+#   image_check_root <root-spec> <device> <what-it-is>
 # `portable`, `network` and `unknown` all pass: the first works anywhere.
 image_check_root() {
-    local disk="$1" dev="$2" what="$3" spec class want
-    spec=$(image_root_spec "$disk")
+    local spec="$1" dev="$2" what="$3" class want
     class=$(image_root_class "$spec")
     want=$(device_class "$dev")
 
@@ -102,63 +76,23 @@ image_check_root() {
     esac
     [ "$class" = "$want" ] && return 0
     if [ -n "${WK_ANY_ROOT:-}" ]; then
-        warn "this image expects $(image_root_word "$class") and $dev is $(image_root_word "$want");
-  writing anyway (WK_ANY_ROOT). It will not boot -- this proves the transfer only."
+        warn "this system expects $(image_root_word "$class") and $dev is $(image_root_word "$want");
+  left as written (WK_ANY_ROOT). It will not boot -- this proves the transfer only."
         return 0
     fi
 
-    die "this image expects to boot from $(image_root_word "$class"), and $dev is $(image_root_word "$want").
+    die "the system on $dev expects to boot from $(image_root_word "$class"), and $dev is
+    $(image_root_word "$want").
 
-    Its kernel command line says \`root=$spec\`. Written to $dev, the firmware
-    would load the kernel from it and the kernel would then look for its root
-    filesystem on $(image_root_word "$class") -- which is either absent or
-    somebody else's disk. Nothing about the write would fail; the board would.
+    Its kernel command line says \`root=$spec\`. The firmware would load the
+    kernel from $dev and the kernel would then look for its root filesystem on
+    $(image_root_word "$class") -- which is either absent or somebody else's
+    disk. Nothing about the write failed; the board would.
 
     Either write it to $(image_root_word "$class") on $what, or rebuild the
     image for this device -- a wic image's root device comes from the recipe's
     wks file, not from anything this repo sets. Set WK_ANY_ROOT=1 to write it
     anyway (for testing the transfer, which is all it can prove)."
-}
-
-# Refuse a write whose image cannot get as far as its kernel. image_check_root
-# above asks whether the kernel will find its root; this asks whether the
-# *firmware* will find the kernel. A kernel that can't find its root panics
-# and reboots (`panic=10`); firmware that can't find a kernel **halts** --
-# no retry, no fall-through, no way back over the wire -- the difference
-# between an unattended lane and one needing a person in the room.
-#   image_check_boot_files <disk-image-path> <machine>
-image_check_boot_files() {
-    local disk="$1" machine="$2" offset dtb work out
-
-    dtb=$(image_dtb_for "$machine")
-
-    [ -f "$disk" ] || return 0
-    offset=$(image_boot_offset "$disk") || return 0
-
-    command -v mcopy >/dev/null 2>&1 || { debug "no mtools; not checking boot files"; return 0; }
-
-    work=$(mktemp -d)
-    if ! MTOOLS_SKIP_CHECK=1 mcopy -s -i "$disk@@$offset" "::*" "$work/" 2>/dev/null; then
-        rm -rf "$work"
-        debug "could not read this image's boot partition; not checking boot files"
-        return 0
-    fi
-
-    out=$(python3 "$WK_ROOT/boot/check-boot-files.py" \
-              --root "$work" --dtb "$dtb" 2>&1) && { rm -rf "$work"; return 0; }
-    rm -rf "$work"
-
-    die "this image's boot partition is missing files a $machine needs to reach its kernel:
-
-$(printf '%s\n' "$out" | sed 's/^/      /')
-
-    Firmware that cannot find a kernel halts. It does not move on to the next
-    BOOT_ORDER entry and it does not come back, so writing this would cost a
-    trip to the board rather than a reboot.
-
-    Nothing has been written. The image is the problem, not the disk: rebuild
-    it, or check what its config.txt names against what its boot partition
-    holds."
 }
 
 # The device tree a board's firmware wants, from the machine's own conf

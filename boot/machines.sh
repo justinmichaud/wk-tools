@@ -10,8 +10,10 @@ command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 
 # The fields a machine sets are documented in README.md ("Add a new fleet
 # device"). MACH_DTB is empty for a machine with no board firmware to ask.
-# MACH_BENCH_SSH is the ssh destination for a *second*, same-address install
-# sharing this machine's hardware (bench/mac-lane.sh's tolken split).
+# MACH_BENCH_SSH is the tailnet name of the system `wk sysimage write` puts on
+# this machine's medium -- what the card is seeded to join as (`<name>-bench`)
+# and the ssh destination the bench lanes reach it at -- so a workstation
+# (rpi5, tolken) keeps its own name in both roles.
 
 # vcgencmd is on every Pi image; rpi4 lacks rpi-eeprom-config, tried second.
 EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-config 2>/dev/null || true'
@@ -92,7 +94,7 @@ m_ssh() {
         return $?
     fi
     # shellcheck disable=SC2086
-    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" \
+    ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" \
         $(m_ssh_opts) "$MACH_SSH" "$@"
 }
 
@@ -113,8 +115,9 @@ image_addr() {
     local a=''
     [ -n "${WK_IMAGE_HOST:-}" ] && { printf '%s' "$WK_IMAGE_HOST"; return 0; }
 
-    # MACH_SSH is the name the card was seeded to join under (_tailnet_name_for).
-    a=$(reach_tailnet "${MACH_SSH:-$MACH_NAME}" 2>/dev/null | awk '{print $1}')
+    # MACH_BENCH_SSH is the name the card was seeded to join under
+    # (_tailnet_name_for); empty on a machine whose bench system shares its name.
+    a=$(reach_tailnet "${MACH_BENCH_SSH:-${MACH_SSH:-$MACH_NAME}}" 2>/dev/null | awk '{print $1}')
     [ -n "$a" ] && { printf '%s' "$a"; return 0; }
 
     [ -n "${MACH_MAC:-}" ] || { printf '%s' "${MACH_SSH:-$MACH_NAME}"; return 0; }
@@ -132,7 +135,7 @@ image_hostname() {
 # warning in a shared known_hosts (_unpinned_host_key_opts, shared with m_ssh_opts).
 i_ssh() {
     # shellcheck disable=SC2046
-    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" \
+    ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" \
         $(_unpinned_host_key_opts) \
         "$(id -un)@$(image_addr)" "$@"
 }
@@ -141,7 +144,7 @@ i_ssh() {
 # unpinned-host-key handling: stable macOS installs, not a regenerating board.
 mac_ssh() {
     local dest="$1"; shift
-    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$dest" "$@"
+    ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" "$dest" "$@"
 }
 
 # --- the arming record -------------------------------------------------------

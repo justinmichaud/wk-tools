@@ -21,6 +21,29 @@
 #
 # The state file records the phase reached; `--status` reads it without
 # touching the machine, `--reset` forgets it.
+#
+# Environment overrides (a flag, where one exists, wins over its variable):
+#   WK_MAC_MACHINE      which fleet machine to bench (default: mbp; no flag --
+#                        the only way to point this lane at benchvm instead)
+#   WK_MAC_SSH           host-mode ssh destination (flag: --host)
+#   WK_MAC_BENCH_SSH      bench-mode ssh destination (flag: --bench-host; set
+#                         this when the bench install is not on the tailnet,
+#                         docs/HANDOFF-mac-perf-mode.md)
+#   WK_MAC_TOOLS          host-mode wk-tools path, skips ssh discovery
+#   WK_MAC_BENCH_TOOLS     bench-mode wk-tools path, skips ssh discovery
+#   WK_MAC_PLAN           benchmark plan (default: speedometer3.0; flag: --plan)
+#   WK_MAC_CONFIG         build config (default: mac-release; flag: --config)
+#   WK_MAC_TIMEOUT        seconds per iteration (default: 2700; flag: --timeout)
+#   WK_MAC_BOOT_WAIT       seconds to wait for the startup-manager reboot
+#                         (default: 3600; also bench/mac-ab.sh, same default)
+#   WK_MAC_BACK_WAIT       seconds to wait for the plain reboot back to host
+#                         mode (default: 600)
+#   WK_MAC_BUILD_WAIT       seconds to wait for a detached build, only with
+#                         WK_MAC_DETACH set (default: 14400)
+#   WK_MAC_DETACH          build with `wk build --detach` and poll instead of
+#                         waiting in the foreground; works around WK_STORE
+#                         naming a path inside the podman VM that a vm
+#                         workspace on this host does not have (phase_build)
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -89,8 +112,9 @@ WS=""
 TIMEOUT="${WK_MAC_TIMEOUT:-2700}"
 
 # Long: the wait is somebody walking to the machine, shutting it down, holding
-# the power button and authenticating.
-BOOT_WAIT="${WK_MAC_BOOT_WAIT:-1800}"
+# the power button and authenticating. Same default as bench/mac-ab.sh's
+# unattended wait -- one WK_MAC_BOOT_WAIT, one number.
+BOOT_WAIT="${WK_MAC_BOOT_WAIT:-3600}"
 
 # A plain reboot the machine does by itself, back into host mode.
 BACK_WAIT="${WK_MAC_BACK_WAIT:-600}"

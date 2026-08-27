@@ -1,5 +1,18 @@
 # Resource governance: the host GUI must stay interactive and never be the
 # process the OOM killer picks. Every number is derived from this machine.
+#
+# Every WK_* name below is overridable, documented here once rather than at
+# each read:
+#   WK_RESERVE_CORES/WK_RESERVE_MB           held back from a GUI host (below)
+#   WK_HEADLESS_RESERVE_CORES/_MB            held back from a headless one
+#   WK_MB_PER_JOB                            working-set estimate per compile job
+#   WK_MAX_JOBS                              a hard cap on parallelism, policy not capacity
+#   WK_AVAIL_MB/WK_CGROUP_MB/WK_CGROUP_CORES/WK_LOAD
+#       what a build is actually sized against: set by export_target_resources
+#       for a remote or container target, whose numbers replace this
+#       machine's own -- not a knob most callers set directly.
+
+
 
 # Headroom left to the host, never handed to a VM or a build. One core: on
 # Apple silicon, performance cores go to the VM, host keeps an efficiency

@@ -2,21 +2,13 @@
 #
 # Join this node to the tailnet, once, on first boot.
 #
-# The image cannot carry a tailnet identity: it is cattle, it is written to more
-# than one card, and an auth key inside an artifact that lives in an image store
-# is a credential in a place nothing revokes. So the key arrives *with the card*
-# -- `wk sysimage write` seeds /etc/wk/tailscale-authkey and /etc/wk/tailnet.conf
-# onto the disk it just wrote (disk_seed_tailnet, boot/disk.sh) -- and this runs
-# once against them and deletes the key.
-#
-# Exits 0 on every path that is not a failure of this node's own doing, because
-# a boot is not a failure just because nobody staged a key: an image written by
-# something that had none is a board reachable the old way, not a broken board.
-# The journal says which happened, and `wk status` shows the node missing from
-# the tailnet, which is the visible half.
-#
-# POSIX sh, no jq: this runs on a slim Yocto image whose shell is whatever the
-# distro shipped.
+# The same built image is written to more than one card, so it cannot carry a
+# tailnet identity itself -- a baked-in auth key would be a credential nothing
+# revokes. The key arrives with the card instead: `wk sysimage write` seeds
+# /etc/wk/tailscale-authkey and /etc/wk/tailnet.conf (disk_seed_tailnet,
+# boot/disk.sh); this runs once against them and deletes the key. Exits 0
+# whenever the failure isn't this node's own -- a card with no key leaves the
+# board reachable the old way, not broken. POSIX sh, no jq: this Yocto image's shell.
 
 set -u
 
@@ -26,12 +18,7 @@ TS=/usr/bin/tailscale
 
 say() { echo "wk-tailnet-join: $*"; }
 
-# say(), plus /dev/console: a oneshot's stdout already reaches the journal
-# under systemd, and BusyBox init already runs this with stdout on the
-# console, but neither alone covers both cases -- and a board this fails on
-# is exactly the board an operator is looking at a console for. Used only for
-# the one failure that should never pass unnoticed: the card was written with
-# no tailnet identity to give this node.
+# say(), plus /dev/console: covers both systemd (stdout->journal) and BusyBox (stdout->console).
 shout() {
     say "$*"
     [ -w /dev/console ] && echo "wk-tailnet-join: $*" > /dev/console 2>/dev/null
@@ -40,10 +27,8 @@ shout() {
 
 [ -x "$TS" ] || { say "no $TS -- nothing to join with"; exit 0; }
 
-# Already on the tailnet? Then this is a later boot, and the only thing left to
-# do is make sure a spent key is not still lying on the disk. `tailscale ip -4`
-# is the property rather than the daemon's word for it: a running tailscaled
-# with no identity answers nothing here.
+# `tailscale ip -4` checks the property, not the daemon's say-so: a running
+# tailscaled with no identity answers nothing here.
 if "$TS" ip -4 >/dev/null 2>&1; then
     say "already on the tailnet as $("$TS" ip -4 2>/dev/null | head -1)"
     rm -f "$KEY"
@@ -56,11 +41,7 @@ if [ ! -r "$KEY" ]; then
     exit 1
 fi
 
-# The name and the tag come with the key, because neither is a property of the
-# image: the same image is written for more than one machine, and the name this
-# node has to answer to is the fleet's name for the machine the card goes into.
-# Defaults are last-resort only -- a node that joins under the image's hostname
-# is reachable by a name nothing else in the fleet uses.
+# Name and tag come with the key, not the image: the fleet's name for this machine lives with the card.
 HOSTNAME_WANTED=""
 TAG="tag:wk"
 if [ -r "$CONF" ]; then
@@ -73,15 +54,13 @@ fi
 
 say "joining as $HOSTNAME_WANTED ($TAG)"
 
-# `--auth-key file:` and not the key itself: argv is world readable in /proc, and
-# this is a machine other people's benchmarks run on.
+# `--auth-key file:`, not the key itself: argv is world readable in /proc.
 if "$TS" up --auth-key "file:$KEY" \
         --advertise-tags="$TAG" \
         --hostname="$HOSTNAME_WANTED" \
         --accept-dns=false; then
     say "up as $HOSTNAME_WANTED at $("$TS" ip -4 2>/dev/null | head -1)"
-    # Spent, and only now: a key deleted before a successful join is a board
-    # that cannot retry on the next boot.
+    # Deleted only after a successful join, or a failed boot can't retry.
     rm -f "$KEY"
 else
     say "tailscale up failed -- the key is kept so the next boot can retry."

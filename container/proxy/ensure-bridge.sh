@@ -21,6 +21,8 @@ if ! bridge_alive; then
     echo $! > "$PIDFILE"
     # The bridge binds before serving; a short wait avoids a spurious first
     # failure for whatever is about to use it.
+    # WK_PROXY_PORT overrides the port to probe; bridge.py (started above)
+    # reads the same variable, with the same default, to pick what it binds.
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         (exec 3<>/dev/tcp/127.0.0.1/${WK_PROXY_PORT:-3128}) 2>/dev/null && break
         sleep 0.1

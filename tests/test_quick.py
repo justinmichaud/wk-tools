@@ -917,6 +917,49 @@ class TestTailnetHygiene(WkTest):
         self.assertIn("disk_seed_tailnet", sysimage, "nothing seeds the tailnet identity onto a written card")
 
 
+# --------------------------------------------------------------------------- #
+# egress allowlist -- ddebs.ubuntu.com
+# --------------------------------------------------------------------------- #
+
+def _proxy_policy(body):
+    script = f'''
+import importlib.util, sys
+root = {str(REPO)!r}
+spec = importlib.util.spec_from_file_location(
+    "wkproxy", root + "/container/proxy/wk-proxy.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+policy = m.Policy("/tmp")
+{body}
+'''
+    return subprocess.run(["python3", "-c", script], capture_output=True, text=True)
+
+
+class TestProxyAllowlist(WkTest):
+    def test_ddebs_ubuntu_com_allowed_for_apt_only(self):
+        """ddebs.ubuntu.com is reachable on 80/443 for apt, refused elsewhere"""
+        cp = _proxy_policy('''
+r = {p: policy.host_allowed("ddebs.ubuntu.com", p)[0] for p in (80, 443, 22)}
+print("RESULT", r)
+''')
+        self.assertIn(
+            "RESULT {80: True, 443: True, 22: False}", cp.stdout,
+            f"stdout={cp.stdout!r} stderr={cp.stderr!r}",
+        )
+
+    def test_firstrun_provisions_ddebs_source_exactly_once(self):
+        """firstrun.sh writes the ddebs sources file once, guarded by test -f"""
+        # static
+        text = (REPO / "container" / "firstrun.sh").read_text(errors="replace")
+        sources_path = "/etc/apt/sources.list.d/ddebs.list"
+        self.assertEqual(text.count(sources_path), 1,
+                          "the ddebs sources path is defined more than once in firstrun.sh")
+        self.assertIn('if [ -f "$DDEBS_SOURCES" ]', text,
+                       "ddebs provisioning is not guarded by a test -f on the sources file")
+        self.assertIn("ubuntu-dbgsym-keyring", text,
+                       "firstrun.sh does not install ubuntu-dbgsym-keyring")
+
+
 class TestBaseImageAndBuildLocations(WkTest):
     def test_base_image_is_never_mistaken_for_a_bench_system(self):
         """a base image is never mistaken for a bench system"""

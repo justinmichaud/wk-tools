@@ -17,11 +17,13 @@
 # One directory per image id under a root the build host owns, so a build
 # that is interrupted leaves rubble that names itself. PMO_BUILD_HOST is the
 # profile's own answer (image/profiles.sh), not repeated here as a second
-# "rpi5" that could drift from it.
+# "rpi5" that could drift from it. WK_PMOS_HOST overrides which machine
+# builds, e.g. to point a profile at a second aarch64 build host.
 pmos_host() {
     [ -n "${PMO_BUILD_HOST:-}" ] || die "this pmos profile sets no PMO_BUILD_HOST (image/profiles.sh)"
     echo "${WK_PMOS_HOST:-$PMO_BUILD_HOST}"
 }
+# WK_PMOS_ROOT overrides the build root on that host (default: ~/wk-pmos).
 pmos_root()      { echo "${WK_PMOS_ROOT:-\$HOME/wk-pmos}"; }
 pmos_out()       { echo "$(pmos_root)/out/$1"; }
 pmos_log()       { echo "$(pmos_root)/out/$1/build.log"; }

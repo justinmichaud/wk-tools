@@ -3,45 +3,31 @@
 # The set is deliberately tiny: helix is installed inside workspaces, and Zed is
 # the only editor config the host needs.
 #
-# Files are symlinked rather than copied so edits in the repo take effect
-# immediately and `git status` shows drift. Anything already present and not a
-# symlink is moved to <name>.wk-backup exactly once, never clobbered.
+# Symlinked, not copied, so repo edits take effect immediately and `git status`
+# shows drift. Anything already present and not a symlink moves to
+# <name>.wk-backup exactly once, never clobbered.
 
 link_config "$WK_ROOT/dotfiles/zed"     "$HOME/.config/zed"
 link_config "$WK_ROOT/dotfiles/lldbinit" "$HOME/.lldbinit"
 
-# ssh: an Include, and nothing but an Include. Three files sit behind it and
-# each has exactly one owner -- config.d/wk-tools is this repo, config.d/wk is
-# `wk new`, config.d/local is the machine. ~/.ssh/config itself owns nothing.
+# ssh: an Include, and nothing but an Include. config.d/wk-tools is this repo,
+# config.d/wk is `wk new`, config.d/local is the machine; ~/.ssh/config owns nothing.
 ensure_dir "$HOME/.ssh" 0700
 ensure_dir "$HOME/.ssh/config.d" 0700
 link_config "$WK_ROOT/dotfiles/ssh/config" "$HOME/.ssh/config.d/wk-tools"
 
-# Prepending the Include and leaving what is already below it is not enough
-# on its own: ssh takes the first value it sees for each keyword, so the
-# repo's copy already wins any name the two share, but an entry sharing *no*
-# name with the repo's stanzas is never reconciled and keeps resolving even
-# after it stops being true.
-#
-# A fleet name (boot/machines.sh) may not be defined by hand: a hand-written
-# stanza reusing one is a shadow of the fleet's own definition, not a host of
-# its own, and would silently point every wk verb that takes an ssh
-# destination -- including `wk sysimage write`, which aims at a disk -- at
-# whatever the hand-written stanza names instead. Those stanzas are dropped
-# rather than migrated. Everything else moves to config.d/local, where a host
-# belonging to this machine rather than to this repo belongs; a duplicate of
-# something already in dotfiles/ssh/config is dropped too, since carrying it
-# across changes nothing and guessing which of the two the machine actually
-# wanted would.
-#
+# A hand-written stanza reusing a fleet name (boot/machines.sh) would shadow
+# the fleet's own definition and silently redirect wk verbs that take an ssh
+# destination -- including `wk sysimage write`, which aims at a disk. Those
+# stanzas are dropped, not migrated; everything else, plus any duplicate of
+# a stanza dotfiles/ssh/config already carries, moves to config.d/local.
 # After the first run ~/.ssh/config is one line and all of this is a no-op.
 _ssh_conf="$HOME/.ssh/config"
 _ssh_local="$HOME/.ssh/config.d/local"
 _ssh_include='Include config.d/*'
 
-# grep -vxF, not sed: this recognises the one line it writes itself and nothing
-# else, so an Include a person added for their own reasons is content, not
-# syntax, and gets migrated like any other line.
+# grep -vxF (not sed): matches only the exact line this script writes, so a
+# person's own Include is content to migrate, not syntax to strip.
 _ssh_body() { grep -vxF "$_ssh_include" "$_ssh_conf" 2>/dev/null | grep -vE '^[[:space:]]*(#|$)' || true; }
 
 if [ -f "$_ssh_conf" ] && grep -qxF "$_ssh_include" "$_ssh_conf" && [ -z "$(_ssh_body)" ]; then
@@ -53,17 +39,9 @@ else
 
         [ -e "$_ssh_conf.wk-backup" ] || cp -p "$_ssh_conf" "$_ssh_conf.wk-backup"
 
-        # Migrated stanzas go **first**, and any older copy of a name they
-        # define is dropped rather than kept below them: ssh takes the first
-        # value it sees for a keyword, so appending a corrected stanza
-        # underneath a stale one of the same name would file the fix behind
-        # the mistake, permanently, and add another duplicate on every run --
-        # an entry that editing never changes, because the edit is shadowed by
-        # a line the editor never saw.
-        #
-        # Dropping the old copy rather than relying on order also keeps the
-        # file honest -- one stanza per name, and the surviving one is the one
-        # that was written most recently.
+        # Migrated stanzas go first and any older copy of the same name is
+        # dropped, not kept below: ssh takes a keyword's first value, so a
+        # stale copy left in place would shadow every future edit to it.
         _ssh_new=$(mktemp)
         grep -vxF "$_ssh_include" "$_ssh_conf" | awk -v fleet="$_ssh_fleet" '
                 BEGIN {
@@ -86,8 +64,7 @@ else
             printf '# and edit it *here*, not in ~/.ssh/config, which is only an Include and\n'
             printf '# is read after this file.\n\n'
             cat "$_ssh_new"
-            # The previous contents, minus this header and minus any stanza the
-            # migration above has just redefined.
+            # Previous contents, minus this header and any stanza just redefined above.
             if [ -f "$_ssh_local" ]; then
                 awk -v newfile="$_ssh_new" '
                     BEGIN {
@@ -112,13 +89,10 @@ else
         } | write_file "$_ssh_local" 0600
         rm -f "$_ssh_new"; unset _ssh_new
 
-        # Shadowing is reported, not removed. config.d/local is read *before*
-        # config.d/wk-tools, so a hand-written stanza for a name this repo also
-        # defines wins -- and some of those are deliberate (`moose` resolves to
-        # localhost *on* moose, which the repo's own stanza cannot know). A
-        # silent win risks a stanza staying stale after the repo's copy is
-        # corrected, so the collision is said out loud and the choice is left
-        # to a person.
+        # Shadowing is reported, not removed: config.d/local reads before
+        # config.d/wk-tools, so a hand-written stanza sharing a repo name wins,
+        # and some of those are deliberate (`moose` resolving to localhost *on*
+        # moose, which the repo's stanza can't know) -- so the choice is left to a person.
         _ssh_owned=$(awk 'tolower($1) == "host" { for (i = 2; i <= NF; i++) print $i }' \
                         "$WK_ROOT/dotfiles/ssh/config" 2>/dev/null)
         awk -v owned="$_ssh_owned" '
@@ -156,27 +130,19 @@ write_file "$HOME/.gitignore" 0644 <<'EOF'
 compile_commands.json
 EOF
 
-# shell: source the shared rc from whichever startup files exist. Guarded so
-# re-running never appends a second copy.
-#
-# .bash_profile is in this list for the same reason .bashrc and .zshrc are:
-# it's exactly the file a login shell (what ssh starts) reads, so a stale
-# `wk-tools/bashrc` reference here means every ssh session lands in bash and
-# never even reaches the rest of this rc, let alone the bash -> zsh switch
-# it's supposed to make.
+# .bash_profile is included along with .bashrc/.zshrc because it's what a
+# login shell (what ssh starts) reads -- a stale reference here means every
+# ssh session lands in bash and never reaches the bash -> zsh switch below.
 _rc_line=". \"$WK_ROOT/shell/bashrc\""
 for _rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
     [ -f "$_rc" ] || touch "$_rc"
 
-    # Drop stale source lines for paths that no longer exist -- an old
-    # wk-tools/bashrc location and the webkit-container-sdk host registration
-    # (the SDK runs inside the VM instead) -- left in place they error on
-    # every interactive shell.
+    # Drop stale references to a moved wk-tools/bashrc and to the
+    # webkit-container-sdk host registration (the SDK now runs inside the VM).
     if grep -qE 'wk-tools/bashrc|register-sdk-on-host\.sh' "$_rc"; then
         _tmp="$(mktemp)"
-        # `|| true`: grep exits 1 when it prints nothing, which is exactly the
-        # case here if the file contains *only* stale lines -- and under
-        # `set -e` that aborts the whole stage rather than emptying the file.
+        # || true: an all-stale file makes grep match nothing and exit 1,
+        # which under set -e would abort here instead of emptying the file.
         grep -vE '(^|[[:space:]])(source|\.)[[:space:]]+.*(wk-tools/bashrc|register-sdk-on-host\.sh)' "$_rc" > "$_tmp" || true
         mv "$_tmp" "$_rc"
         changed "removed stale source lines from $_rc"

@@ -52,6 +52,20 @@ macos_noise() {
         else
             log "  scanner:    softwareupdated not loaded"
         fi
+
+        # bench/mac-quiet-hosts.sh's own check, not a second one: "denied"
+        # here means exactly what do_provision's read-back means. Read-only.
+        local _qh
+        _qh="$(dirname "${BASH_SOURCE[0]}")/../bench/mac-quiet-hosts.sh"
+        if [ -r "$_qh" ]; then
+            # shellcheck disable=SC1090
+            . "$_qh"
+            if wk_bench_hosts_present /etc/hosts; then
+                log "  hosts:      update endpoints denied"
+            else
+                warn "  hosts:      NOT denied -- wk bench mac-volume --provision"
+            fi
+        fi
     fi
 
     # A banner takes focus, a lock is "nowhere to draw" -- both invisible
@@ -98,6 +112,8 @@ macos_noise() {
 # directly rather than grepping process command lines (which matches
 # daemons like softwareupdated living *inside* an .app bundle); needs no
 # assistive access, unlike System Events, which lies on a fresh install.
+# WK_SCREEN_BLOCKERS overrides the pipe-separated list, for a dialog whose
+# title differs on another macOS locale or version.
 WK_SCREEN_BLOCKERS="${WK_SCREEN_BLOCKERS:-Setup Assistant|Software Update|Installer|Migration Assistant|System Settings}"
 
 # --- the panel that is not an application ------------------------------------

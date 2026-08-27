@@ -16,7 +16,8 @@ _local_arch=$(wk_marker_field arch)
 # Not the host's store: a macOS guest has no host filesystem. WK_LOCAL_STORE
 # is the container exception -- the workspace directory bind-mounted in at
 # the host's own path (targets/container.sh, t_create), so build.status here
-# is what `wk status` reads out there.
+# is what `wk status` reads out there. Plumbing: set by the container
+# driver's own bind mount, not something a person hand-sets.
 WK_STORE="${WK_LOCAL_STORE:-${XDG_STATE_HOME:-$HOME/.local/state}/wk}"
 mkdir -p "$WK_STORE/ws/$_local_name"
 
