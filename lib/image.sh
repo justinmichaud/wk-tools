@@ -41,7 +41,7 @@ _image_root() {
 }
 # Every place a build can leave an image, declared in one list.
 #
-# This exists because there is no image store (`wk help images`): output lives
+# This exists because there is no image store (`wk help`): output lives
 # wherever the builder that made it put it, so "where are the images" stops
 # being "one directory" and becomes a question with as many answers as there are
 # builders. A list that is *declared* is the only kind `wk gc` can search
@@ -350,7 +350,7 @@ image_root_word() {
 # inherits it, which is the property that made it wrong for workspaces too.
 # --- images, where the builders left them ------------------------------------
 #
-# The model (`wk help images`): a workspace produces an image, and that is the
+# The model (`wk help`): a workspace produces an image, and that is the
 # whole of what an image is. It is not imported, catalogued or given a second
 # name -- the workspace that built it already names it. So "which images are
 # there" is answered by looking, now, at the places builders leave output.

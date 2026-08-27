@@ -1,0 +1,25 @@
+# wk memory-experiment patch: 300 MB MemoryPressureMonitor clamp
+#
+# docs/Urgent/HANDOFF-memory.md asks for this to be a file instead of a
+# copy-paste block, so it survives past whoever currently holds it in their
+# head. It is not one yet.
+#
+# TODO: the actual diff. It was not recoverable here -- see
+# startMemorySampler.patch in this directory for why (same wiki pages, same
+# 404s, same reason to capture it from a live checkout with
+# `git diff > container/bin/patches/memory-pressure-300mb.patch` rather than
+# reinvent it from a name).
+#
+# What it has to do: lower the ceiling WebCore's/WTF's MemoryPressureHandler
+# uses to decide the process is under pressure, from whatever the system's
+# real memory reports to a fixed 300 MB -- so a memory-charts run can compare
+# how a page behaves against a small budget on hardware with much more RAM
+# than the target device, without needing that device to reproduce the run.
+# MemoryPressureHandler.cpp/.h (Source/WTF/wtf or Source/WebCore/platform,
+# depending on branch) is where the real threshold lives; this experiment
+# overrides it, most likely behind an environment variable or a debug build
+# flag in whichever checkout still has this patch.
+#
+# Until this is a real diff, applying it is refused rather than silently
+# skipped: `git apply container/bin/patches/memory-pressure-300mb.patch`
+# fails on this file (it is prose, not a patch).

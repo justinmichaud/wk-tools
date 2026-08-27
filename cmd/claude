@@ -11,12 +11,119 @@
 #
 #   wk claude bb4 -r          resume, in bb4
 #   wk claude bb4 --continue  and so on
+#
+# --rc: Claude Code Remote Control (claude.ai/code, the mobile app) instead of
+# a foreground session here -- a persistent server, started detached in the
+# workspace's checkout, left running after this command returns.
+#
+#   wk claude <ws> --rc          start it (a no-op, reported, if already up)
+#   wk claude <ws> --rc --stop   stop it
+#
+# The first start in a fresh workspace needs one interactive `claude` run to
+# accept its workspace trust dialog -- remote-control refuses without it, and
+# nothing short of that is non-interactive (see the block below). This runs
+# 'wk claude <ws>' for you when the workspace has no trust record yet.
 
 set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/detach.sh"
+
+# --- claude remote-control: functions ----------------------------------------
+# Kept together and above everything else in this file so a test can source
+# just these, the way lib/*.sh is sourced elsewhere: `WK_CLAUDE_LIB=1 . cmd/
+# claude` defines them and returns (see the guard below) rather than running
+# require_name, load_target and the sandbox checks that follow. Fakes for
+# t_exec/t_spawn/t_home/t_src, defined by the caller *after* sourcing this
+# (so they win over lib/target.sh's own), are what makes that hermetic --
+# tests/test_claude_rc.py is the one user.
+
+# One status file per workspace, next to build.status/babysit.status
+# (lib/detach.sh's schema: pid=, log=, state=, updated=). Its pid is not a
+# fact this host's own process table can answer for -- it names a process
+# t_spawn started *inside* the target, not one this process forked -- so
+# unlike detach_alive (built for the latter), everything below asks the
+# driver, the same move image/yocto.sh's yocto_running/yocto_stop make for
+# the same reason.
+rc_status_file() { printf '%s' "$(wk_ws_dir "$1")/claude-rc.status"; }
+rc_log()         { printf '%s' "$(t_home "$1")/claude-remote-control.log"; }
+rc_pidfile()     { printf '%s' "$(t_home "$1")/claude-remote-control.pid"; }
+
+rc_alive() {
+    local name="$1" pid
+    pid=$(status_field "$(rc_status_file "$name")" pid)
+    [ -n "$pid" ] || return 1
+    t_exec "$name" kill -0 "$pid" >/dev/null 2>&1
+}
+
+# Minutes since the status file's own `updated=`, for the "already running"
+# report. utc_to_epoch is lib/common.sh's GNU/BSD date bridge.
+rc_minutes() {
+    local upd; upd=$(status_field "$(rc_status_file "$1")" updated)
+    [ -n "$upd" ] || { printf '?'; return 0; }
+    printf '%d' $(( ( $(date -u +%s) - $(utc_to_epoch "$upd") ) / 60 ))
+}
+
+# Start remote-control in <name>, or report it is already running -- a second
+# call is a no-op, found by rc_alive rather than trusted from state= alone
+# (a claim, per lib/detach.sh; the process table is the fact).
+rc_start() {
+    local name="$1" claude_bin="$2" sf log pidf pid i
+    sf=$(rc_status_file "$name")
+
+    if rc_alive "$name"; then
+        info "'$name' claude remote-control already running, $(rc_minutes "$name") minutes, log at $(status_field "$sf" log)"
+        return 0
+    fi
+
+    log=$(rc_log "$name"); pidf=$(rc_pidfile "$name")
+    t_exec "$name" mkdir -p "$(t_home "$name")" >/dev/null 2>&1 || true
+
+    t_spawn "$name" "$log" "$pidf" \
+        env WK_WORKSPACE="$name" bash -lc \
+        "cd $(sh_quote "$(t_src "$name")") && exec $(sh_quote "$claude_bin") remote-control --spawn=same-dir --name $(sh_quote "$name")" \
+        || die "could not start claude remote-control in '$name'"
+
+    # t_spawn's pidfile is inside the target; only container's happens to be
+    # host-visible too (its home is a bind mount), so this reads it back
+    # through the driver rather than assuming that -- right for every target.
+    pid=""; i=0
+    while [ -z "$pid" ]; do
+        pid=$(t_exec "$name" cat "$pidf" 2>/dev/null | tr -d '\r') || pid=""
+        [ -n "$pid" ] && break
+        i=$((i + 1))
+        [ "$i" -gt 50 ] && die "remote-control did not start in '$name' (no pid after 5s)"
+        sleep 0.1
+    done
+
+    status_write "$sf" state=running "pid=$pid" "log=$log"
+    info "claude remote-control running in '$name' (pid $pid), log at $log"
+}
+
+# Stop it, through the driver -- same reasoning as rc_alive. A no-op,
+# reported, when nothing is running.
+rc_stop() {
+    local name="$1" sf pid
+    sf=$(rc_status_file "$name")
+
+    if ! rc_alive "$name"; then
+        info "claude remote-control is not running in '$name'"
+        status_write "$sf" state=stopped
+        return 0
+    fi
+
+    pid=$(status_field "$sf" pid)
+    info "stopping claude remote-control in '$name' (pid $pid)"
+    t_exec "$name" kill "$pid" >/dev/null 2>&1 || true
+    status_write "$sf" state=stopped "pid=$pid" "log=$(status_field "$sf" log)"
+}
+
+# lib/*.sh has no top-level side effect to guard against when sourced; this
+# script does (require_name, load_target, the sandbox checks below), so a
+# caller that wants only the functions above sources this with WK_CLAUDE_LIB=1.
+[ "${WK_CLAUDE_LIB:-}" != 1 ] || return 0
 
 # The dispatcher takes the first non-flag word as the name and strips it,
 # leaving Claude's own options in order. A bare session id ahead of the name
@@ -24,6 +131,21 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # is a real workspace -- put it after instead: `wk claude <ws> -r <id>`.
 NAME="${WK_NAME:-}"
 require_name "$NAME"
+
+# --rc/--rc --stop are wk's own flags, not Claude's, so they come out of argv
+# here rather than riding along to the verbatim pass-through at the bottom.
+RC=""; RC_STOP=""
+_rc_args=()
+for _a in ${@+"$@"}; do
+    case "$_a" in
+        --rc)   RC=1 ;;
+        --stop) RC_STOP=1 ;;
+        *)      _rc_args+=("$_a") ;;
+    esac
+done
+set -- ${_rc_args[@]+"${_rc_args[@]}"}
+[ -z "$RC_STOP" ] || [ -n "$RC" ] || die "--stop only makes sense with --rc: wk claude $NAME --rc --stop"
+[ -z "$RC" ] || [ $# -eq 0 ] || die "wk claude $NAME --rc takes no other options (got: $*)"
 
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
@@ -158,6 +280,49 @@ if [ "$WK_TARGET_KIND" = vm ]; then
     Install it:  ./setup --stage softnet   (needs a terminal)
     (WK_VM_UNFILTERED=1 is the same decision, said the older way.)"
     fi
+fi
+
+# --- wk claude <ws> --rc ------------------------------------------------------
+# Same sandbox gate above this line as a foreground session; what differs is
+# what runs once it holds -- a detached server (rc_start, at the top of this
+# file) instead of a session in this process's own foreground/headless slot.
+if [ -n "$RC" ]; then
+    if [ -n "$RC_STOP" ]; then
+        rc_stop "$NAME"
+        exit 0
+    fi
+
+    # A background server left running unattended is exactly the case `git
+    # push` is held back for (below); a detached remote-control session never
+    # reaches that block itself, so this makes the same call up front, without
+    # a restore -- there is no foreground moment here to notice it and turn
+    # push back on.
+    if [ "$WK_TARGET_KIND" = container ] && "$WK_ROOT/wk" push status >/dev/null 2>&1; then
+        warn "git push is ON -- turning it off before starting remote-control in '$NAME'
+    (it stays off; 'wk push on' when you want it back)"
+        "$WK_ROOT/wk" push off >/dev/null 2>&1 \
+            || die "refusing to start: could not hold back the push keys ('wk push status')"
+    fi
+
+    # remote-control needs the workspace's trust dialog accepted once, and
+    # refuses outright without it ("claude remote-control --help": "Run
+    # `claude` first in the directory to accept the workspace trust dialog").
+    # There is no non-interactive substitute: `claude --help` documents that
+    # -p / a piped stdout *skips* the dialog rather than recording acceptance
+    # of it, and neither `claude config` (not a real subcommand: agents, auth,
+    # doctor, gateway, import, install, mcp, plugin, project, setup-token,
+    # ultrareview, update), nor `claude project` (purge only), nor any flag
+    # sets it. So this does what the tool itself says: run `claude` once,
+    # interactively, and only when nothing has done that yet.
+    if ! rc_alive "$NAME" && ! t_exec "$NAME" test -f "$(t_home "$NAME")/.claude.json" 2>/dev/null; then
+        warn "'$NAME' has no Claude trust record yet -- remote-control refuses to start
+    until the workspace trust dialog is accepted once, interactively. Running
+    'wk claude $NAME' now; accept the dialog, then exit it."
+        "$WK_ROOT/wk" claude "$NAME" || true
+    fi
+
+    rc_start "$NAME" "$CLAUDE_BIN"
+    exit 0
 fi
 
 # --- git push: off while an agent has the keyboard ---------------------------

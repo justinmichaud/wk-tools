@@ -129,6 +129,42 @@ RUN userdel -r ubuntu 2>/dev/null || true
 # than a stub `podman-host`: that file is a working podman wrapper in the SDK
 # image and something would eventually call it. sdk-patches/apply.sh section 13
 # teaches the guard about this one.
+# docs/Urgent/HANDOFF-profile.md's tool list, for parity with the SDK
+# workspace (container/firstrun.sh installs the same set there, which is the
+# image 'wk profile' actually runs against -- this repo owns no Containerfile
+# for the SDK image itself, only sdk-patches/apply.sh, which patches its
+# scripts, not its filesystem). heaptrack, valgrind and sysprof are Ubuntu
+# packages; samply ships no .deb, so it is a pinned, checksummed release
+# tarball from github.com/mstange/samply instead.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        heaptrack \
+        valgrind \
+        sysprof \
+    && rm -rf /var/lib/apt/lists/*
+
+# The release tarball is not flat: it unpacks to samply-<target>/{samply,
+# README.md, LICENSE-*, RELEASES.md}, one top-level directory per target
+# triple -- confirmed by listing both archives this pin ships
+# (samply-x86_64-unknown-linux-gnu.tar.xz, samply-aarch64-unknown-linux-gnu.tar.xz)
+# rather than assumed, so the extract names that directory instead of the
+# bare binary.
+ARG SAMPLY_VERSION=0.13.1
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) sarch=x86_64-unknown-linux-gnu; \
+               sum=61875daad67888798690dea3cb2748279df6ac299c5c6a857d67eed7642473d9 ;; \
+        arm64) sarch=aarch64-unknown-linux-gnu; \
+               sum=aa465162b62830168775b7ff4804bc35049436dcbc29bb3d1ea9f580380ea06a ;; \
+        *) echo "samply: no linux release for $(dpkg --print-architecture), skipping" >&2; exit 0 ;; \
+    esac; \
+    tmp=$(mktemp -d); \
+    curl -fsSL -o "$tmp/samply.tar.xz" "https://github.com/mstange/samply/releases/download/samply-v${SAMPLY_VERSION}/samply-${sarch}.tar.xz"; \
+    got=$(sha256sum "$tmp/samply.tar.xz" | awk '{print $1}'); \
+    [ "$got" = "$sum" ] || { echo "samply-${sarch}.tar.xz sha256 mismatch: got $got, want $sum" >&2; exit 1; }; \
+    tar -xJf "$tmp/samply.tar.xz" -C "$tmp"; \
+    install -m 0755 "$tmp/samply-${sarch}/samply" /usr/local/bin/samply; \
+    rm -rf "$tmp"
+
 RUN printf '%s\n' \
         'Built by wk (container/yocto/Containerfile) as a Yocto build host.' \
         'Not a wkdev-sdk image. See sdk-patches/apply.sh section 13.' \

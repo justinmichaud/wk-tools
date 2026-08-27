@@ -382,6 +382,20 @@ config_build_env() {
     # purpose, and `env CC= ` is not the same as not setting CC at all.
     [ -n "$CFG_CC" ] && CFG_ENV+=("CC=$CFG_CC" "CXX=$CFG_CXX")
 
+    # WK_USE_CCACHE=YES for the JSC-only configs, stated rather than left
+    # implicit: it is the same channel build-webkit's own --use-ccache writes
+    # (Tools/Scripts/build-webkit sets $ENV{WK_USE_CCACHE} only when the flag
+    # is given, otherwise leaves whatever the environment already says), and
+    # it is what Source/cmake/WebKitCCache.cmake reads directly to decide
+    # whether to wire CMAKE_C(XX)_COMPILER_LAUNCHER to ccache at all. Nothing
+    # upstream disables it today, but nothing here said it was wanted either
+    # -- a config that silently depended on ccache being on by default was
+    # one `--no-use-ccache` (this repo's own or a future one) away from every
+    # JSC build going cold with no message. Not on the other ports: they are
+    # not what this is fixing, and CCACHE_DIR/CCACHE_BASEDIR above already
+    # tune the cache that ccache actually being invoked is a precondition for.
+    [ "$CFG_PORT" = --jsc-only ] && CFG_ENV+=("WK_USE_CCACHE=YES")
+
     # Only for a non-native workspace, so a native build's environment is
     # exactly what it was before --arch existed. That is not tidiness: these
     # variables are part of every ccache hash, and adding empty ones would

@@ -45,40 +45,35 @@ system: the rescue.
   Re-read both against this arrangement before trusting what `wk boot
   rpi4 --status` says about which system is running.
 
-## 3. The buildroot builder itself is not written
+## 3. The buildroot builder has never built anything
 
-`buildroot_build` (`image/buildroot.sh`) refuses: the configurations are real
-— `wpewebkit-2.38-buildroot-rpi3-32` builds and produces a bootable
-`sdcard.img` with tailscale in it, and the rpi4 config now has a derived
-defconfig too (`image/buildroot/external/configs/README` has the derivation
-line by line: the fork's release-pinned `_wpe_<rel>_cog_` defconfigs are
-rpi3-only, so the rpi4 defconfig borrows the rpi3 config's release/cog pinning
-and `raspberrypi4_wpe_defconfig`'s six board-specific lines) — but the
-mechanism between "a real defconfig" and "a build" is missing on the driver
-side.
+`buildroot_build` (`image/buildroot.sh`) and `image/buildroot-build.sh`, the
+same host/worker split the yocto lane uses, are written: `wk sysimage build
+wpewebkit-2.38-buildroot-rpi3-32 --dry-run` and the rpi4-32 profile (its
+defconfig is derived — `image/buildroot/external/configs/README` has the
+derivation line by line) name the real workspace, defconfig and cache paths,
+and the image stage's completion line is conditioned on `sdcard.img` being
+newer than the run's own start (`verify_image_freshness`,
+tests/test_buildroot.py), the same rule the Yocto lane carries for its own
+helper's shortcut. `container/buildroot/Containerfile` is the Ubuntu 22.04
+host the wiki's own recipe was driven on. What none of that proves is a build:
 
-- [ ] write `buildroot_build` (host driver) + `image/buildroot-build.sh`
-      (in-workspace worker), the same host/worker split the yocto lane uses.
-      A dry run is verified; a real build is what is owed
-- [ ] `image/buildroot/external/` (the `HOST_PYTHON_CONF_OPTS`/
-      `HOST_PYTHON_DEPENDENCIES` libffi fix, applied from outside the tree)
-      has never been run through a build. Without it no buildroot build
-      completes on an arm64 host — both this Mac's podman VM and moose —
-      because host-python-2.7.17's bundled libffi does not assemble on arm64.
-      The three-line fix is checked as make semantics against buildroot's own
-      rule shape; the build itself is owed
-- [ ] once the builder exists: `wpewebkit-2.38-buildroot-rpi4-32`, never built
-      or booted — validating the derived defconfig needs the board
-- [ ] the rpi5's 64-bit buildroot 2.38 configuration, once the above is settled
-- [ ] the build host is Ubuntu 22.04 in its own workspace
-      (`container/buildroot/Containerfile`, `BUILDROOT_BASE_IMAGE`) — the host
-      the wiki's own recipe was driven on. `-j` is memory-sized (2048 MB/job)
-      and capped at 16, because a 2020 buildroot building 2009-era tarballs is
-      where broken parallel Makefile rules live
+- [ ] a real build, through this mechanism, on either arm64 host (this Mac's
+      podman VM or moose). Nothing has run past a dry run yet, so
+      `image/buildroot/external/external.mk`'s libffi fix — `HOST_PYTHON_CONF_OPTS
+      += --with-system-ffi`, `HOST_PYTHON_DEPENDENCIES += host-libffi`, checked
+      so far only as make semantics against buildroot's own rule shape — is
+      still unverified by anything that actually compiled host-python
+- [ ] once a build succeeds: `wpewebkit-2.38-buildroot-rpi4-32`, whose derived
+      defconfig has never been built or booted — validating it needs the board
+- [ ] the rpi5's 64-bit buildroot 2.38 configuration: no defconfig exists for
+      it yet at all (`image/buildroot/external/configs/README`), upstream or
+      derived, so `wpewebkit-2.38-buildroot-rpi5-64` refuses by name
+      (`CFG_NEEDS`) rather than attempting anything
 
-Expect new egress refusals either way, and add them the way the existing ones
-got there: from a `DENY` line in the proxy log, not in anticipation
-(`BR2_PRIMARY_SITE` covers most of it; `sources.buildroot.net`,
+Expect new egress refusals on the first real build, and add them the way the
+existing ones got there: from a `DENY` line in the proxy log, not in
+anticipation (`BR2_PRIMARY_SITE` covers most of it; `sources.buildroot.net`,
 `ftpmirror.gnu.org` and `wpewebkit.org` are the fallbacks already allowed from
 real refusals).
 
@@ -96,18 +91,4 @@ system delta rather than warning about it.
 
 ## 5. The report `wk bench compare` owes
 
-`wk bench compare` ends in WebKit's `Tools/Scripts/compare-results --breakdown`
-and prints what that produces. What is wanted is specified in
-`docs/Urgent/HUMAN-Benchmarking variance.md`: the compare-results output **plus**
-a histogram of both runs and all subtests, as an HTML report, generated
-automatically -- "everything here should work with one command" -- and score
-compared alongside wall time.
-
-None of that exists yet. compare-results offers `--csv`, `--breakdown`,
-`--detailed-breakdown` and `--category-breakdown` and emits no histogram, and
-nothing in this repository adds one. So this is work, not a check.
-
-The input is already there: `--ab --rounds N` produces N results per arm, each a
-full `result.json` beside its `env.json` in `$WK_STORE/bench`. The report is a
-reader over those, next to `wk bench compare` -- not a change to WebKit's script,
-which belongs to WebKit.
+This is `docs/HANDOFF-bench-unify.md`'s "one record/report" item — see there.

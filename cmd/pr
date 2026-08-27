@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
 #
-# wk pr [<workspace>] <user>:<branch> -- check out a PR head, from either project
-# wk: where=workspace name=required ready=yes group=sources
+# wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
+# wk: where=workspace name=optional ready=yes group=sources
 #
-# GitHub's own syntax for a PR head, pasted straight from the page:
+# Three spellings, all pasted straight from a GitHub page:
 #
 #   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
+#   wk pr 1234          # WebKit/WebKit pull request #1234
+#   wk pr wpe:1234      # WPEWebKit's pull request #1234
 #
-# The branch alone does not say which project it belongs to -- WebKit and
-# WPEWebKit are separate repositories that share a history -- so both are
-# tried: whichever fork of the two has that branch is the one it comes from,
-# and a branch that exists in both is refused by name rather than guessed at.
-# Nothing about the name is parsed for meaning; `eng/…` with slashes in it is
-# an ordinary branch name.
+# <user>:<branch> is a fork's branch. The branch alone does not say which
+# project it belongs to -- WebKit and WPEWebKit are separate repositories
+# that share a history -- so both are tried: whichever fork of the two has
+# that branch is the one it comes from, and a branch that exists in both is
+# refused by name rather than guessed at.
+#
+# A bare number is a pull request against WebKit/WebKit; `wpe:<number>` is
+# one against WPEWebKit. Neither needs the fork-discovery round trip above:
+# GitHub serves a pull request's head under the base repository itself
+# (refs/pull/<n>/head), so the project is already known from the spelling.
+#
+# Either way the branch or pull request is fetched once into this machine's
+# mirror (the same one 'wk sync' keeps, under refs/remotes/pr/...) and the
+# workspace then fetches that one ref from there -- local and near-instant --
+# rather than going to GitHub again on every re-run and every workspace. A
+# workspace with no /mirror (a remote build machine, a guest predating the
+# mount) falls back to fetching straight from GitHub, exactly as before.
 #
 # The remote is added if it is not there (a fork of a project this tooling
 # already knows), the branch is checked out tracking it, and that is all. No
@@ -28,11 +41,25 @@
 #   never overwritten -- it is checked out as it is, and what would be lost is
 #   named. `--force` takes the remote version instead, discarding yours.
 #
+# A fourth form, not a PR at all:
+#
+#   wk pr rebase [<workspace>]
+#
+# fetches this machine's mirror (just enough for origin/main) into the
+# workspace and rebases the current branch onto origin/main -- the reminder
+# 'wk sync' prints after every fetch, as a command rather than a suggestion.
+# Either order works: 'wk pr <ws> rebase' resolves <ws> the ordinary way;
+# 'wk pr rebase <ws>' and a bare 'wk pr rebase' (inside the workspace) are
+# handled here, since "rebase" itself is never mistaken for a workspace name.
+#
 # Runs in the workspace, like `wk build`: from a host, name it; from inside
 # one, do not.
 #
 #   --force   take the PR head even when the local branch has commits it
 #             does not, discarding them
+#
+# TODO: 'wk pr open' -- opening this branch as a PR on GitHub needs gh wired
+# in and is not implemented here.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,134 +72,48 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # workspace, and on a host by checking the first word against the registry).
 NAME="${WK_NAME:-}"
 SPEC="${1:-}"
+
+# 'rebase' is never a workspace name the dispatcher could have resolved (slot
+# 1 only matches a real one), so it always survives as $1 here, whichever
+# order it was typed in. A workspace named afterwards is $2 only when $NAME
+# is still empty -- 'wk pr <ws> rebase' already consumed <ws> as $NAME.
+if [ "$SPEC" = rebase ]; then
+    [ -n "$NAME" ] || NAME="${2:-}"
+    [ -n "$NAME" ] || die "usage: wk pr rebase [<workspace>]; run inside a workspace, or name one; see wk pr -h"
+    shift $#
+    require_name "$NAME"
+    load_target "$(ws_target "$NAME")"
+    SRC=$(t_src "$NAME")
+
+    info "fetching in '$NAME' from the mirror, then rebasing onto origin/main"
+    if t_exec "$NAME" bash -c "
+        set -e
+        cd $(sh_quote "$SRC")
+        if [ -d /mirror/WebKit.git ]; then
+            git fetch --prune --quiet /mirror/WebKit.git '+refs/heads/*:refs/remotes/origin/*'
+        else
+            git fetch --prune --quiet origin
+        fi
+        git rebase origin/main
+    "; then
+        info "'$NAME' is rebased onto origin/main"
+        log  "  $(t_exec "$NAME" bash -c "cd $(sh_quote "$SRC") && git --no-pager log --oneline -1" 2>/dev/null | tr -d '\r')"
+        exit 0
+    else
+        warn "the rebase stopped -- almost always a conflict, and the sequencer holds where."
+        log  "  in the workspace:  git status; git rebase --continue   (or --abort)"
+        exit 1
+    fi
+fi
+
 [ -n "$NAME" ] && [ -n "$SPEC" ] \
-    || die "usage: wk pr [<workspace>] <user>:<branch>; see wk pr -h"
+    || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]'; see wk pr -h"
 shift $#
 
-case "$SPEC" in
-    *:*) ;;
-    *) die "usage: wk pr [<workspace>] <user>:<branch>; see wk pr -h" ;;
-esac
-PR_USER="${SPEC%%:*}"
-BRANCH="${SPEC#*:}"
-[ -n "$PR_USER" ] && [ -n "$BRANCH" ] || die "expected <user>:<branch>, got '$SPEC'"
-
 require_name "$NAME"
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
+load_target "$(ws_target "$NAME")"
 
-SRC=$(t_src "$NAME")
-
-# --- 1. which project, and what is here already ------------------------------
-# One round trip that changes nothing: which project has this branch, what
-# the head is, whether a remote for this user exists, what the local side
-# looks like. Everything that follows is decided from this, out here.
-# `git ls-remote` over HTTPS is anonymous, the same reason a fork fetches
-# while `wk push` is off.
-probe=$(t_exec "$NAME" bash -c "
-    cd $(sh_quote "$SRC") || exit 1
-    for repo in $(wk_pr_repos | tr '\n' ' '); do
-        url=https://github.com/$(sh_quote "$PR_USER")/\$repo.git
-        sha=\$(git ls-remote \"\$url\" refs/heads/$(sh_quote "$BRANCH") 2>/dev/null | awk '{print \$1}')
-        [ -n \"\$sha\" ] && echo \"found=\$repo \$url \$sha\"
-    done
-    # A remote that already points at this user's copy of one of them, so a
-    # second one is not added beside it under a different name.
-    for r in \$(git remote); do
-        u=\$(git remote get-url \"\$r\")
-        case \"\$u\" in
-            *[:/]$(sh_quote "$PR_USER")/*) echo \"remote=\$r \$u\" ;;
-        esac
-    done
-    echo \"head=\$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"
-    echo \"local=\$(git rev-parse --verify --quiet refs/heads/$(sh_quote "$BRANCH") || true)\"
-    echo \"dirty=\$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"
-" 2>/dev/null | tr -d '\r') || die "could not reach the checkout in '$NAME'"
-
-found=$(printf '%s\n' "$probe" | sed -n 's/^found=//p')
-n=$(printf '%s\n' "$found" | grep -c . || true)
-case "$n" in
-0) die "no branch '$BRANCH' in $(wk_pr_repos | tr '\n' '/' | sed 's|/$||') under '$PR_USER'.
-    Checked: $(wk_pr_repos | sed "s|^|https://github.com/$PR_USER/|;s|\$|.git|" | tr '\n' ' ')" ;;
-1) ;;
-*) die "'$BRANCH' exists in more than one of $PR_USER's repositories:
-$(printf '%s\n' "$found" | sed 's/^/    /')
-    They are different projects; check the PR page for which one it is and
-    fetch that remote by hand." ;;
-esac
-
-REPO=$(printf '%s' "$found" | awk '{print $1}')
-URL=$(printf '%s' "$found"  | awk '{print $2}')
-HEAD_SHA=$(printf '%s' "$found" | awk '{print $3}')
-LOCAL_SHA=$(kv_get local <<<"$probe")
-DIRTY=$(kv_get dirty <<<"$probe")
-REMOTE=$(printf '%s\n' "$probe" | sed -n 's/^remote=//p' | awk -v u="$URL" '$2 == u {print $1; exit}')
-
-# The name a new remote gets. The user's, with the project appended when it is
-# not the one `origin` is -- one user can have a PR in both, and two remotes
-# cannot share a name.
-if [ -z "$REMOTE" ]; then
-    REMOTE="$PR_USER"
-    [ "$REPO" = "$(wk_pr_repos | head -1)" ] || REMOTE="$PR_USER-$(printf '%s' "$REPO" | tr 'A-Z' 'a-z')"
-fi
-
-# --- 2. what this would cost -------------------------------------------------
-if [ "${DIRTY:-0}" -gt 0 ] 2>/dev/null; then
-    warn "'$NAME' has $DIRTY uncommitted change(s); the checkout carries them across"
-fi
-
-RESET=""
-if [ -n "$LOCAL_SHA" ] && [ "$LOCAL_SHA" != "$HEAD_SHA" ]; then
-    # Whether it is *your* work at stake is the whole question, so it is asked
-    # of git rather than assumed: commits on the local branch that the PR head
-    # does not have. None of them means the branch is simply behind, and
-    # fast-forwarding it costs nothing.
-    ahead=$(t_exec "$NAME" bash -c "
-        cd $(sh_quote "$SRC") &&
-        git fetch --quiet $(sh_quote "$URL") $(sh_quote "$BRANCH") 2>/dev/null &&
-        git rev-list --count FETCH_HEAD..$(sh_quote "$BRANCH") 2>/dev/null || echo unknown
-    " 2>/dev/null | tr -d '\r' | tail -1)
-
-    case "$ahead" in
-        0)  RESET=1 ;;   # behind or equal: taking the PR head loses nothing
-        unknown)
-            barrier "cannot tell whether '$BRANCH' in '$NAME' has work the PR head does not.
-    Checking it out will leave it as it is."
-            ;;
-        *)
-            if [ -n "${WK_FORCE:-}" ]; then
-                barrier "discarding $ahead local commit(s) on '$BRANCH' in '$NAME'."
-                RESET=1
-            else
-                warn "local '$BRANCH' has $ahead commit(s) the PR head does not have"
-                log  "  it is checked out as it is; nothing is discarded."
-                log  "  to take the PR head instead and lose those commits:"
-                log  "    wk pr${NAME:+ $NAME} $SPEC --force"
-            fi
-            ;;
-    esac
-fi
-
-# --- 3. do it ----------------------------------------------------------------
-t_exec "$NAME" bash -c "
-    set -e
-    cd $(sh_quote "$SRC")
-    git remote get-url $(sh_quote "$REMOTE") >/dev/null 2>&1 \
-        || git remote add $(sh_quote "$REMOTE") $(sh_quote "$URL")
-    git remote set-url $(sh_quote "$REMOTE") $(sh_quote "$URL")
-    git fetch --quiet $(sh_quote "$REMOTE") $(sh_quote "$BRANCH")
-    if git show-ref --verify --quiet refs/heads/$(sh_quote "$BRANCH"); then
-        git checkout --quiet $(sh_quote "$BRANCH")
-        ${RESET:+git reset --hard --quiet $(sh_quote "$REMOTE")/$(sh_quote "$BRANCH")}
-    else
-        git checkout --quiet -b $(sh_quote "$BRANCH") --track $(sh_quote "$REMOTE")/$(sh_quote "$BRANCH")
-    fi
-    git branch --quiet --set-upstream-to=$(sh_quote "$REMOTE")/$(sh_quote "$BRANCH") $(sh_quote "$BRANCH") 2>/dev/null || true
-" || die "could not check out '$BRANCH' in '$NAME'"
-
-info "'$NAME' is on $BRANCH ($REPO, from $REMOTE)"
-# --no-pager, and it is not cosmetic: the driver's exec gives the command a
-# terminal, so `git log` starts a pager and waits for a keystroke that is never
-# coming -- which looks exactly like a fetch that will not finish. Measured
-# once, at seven minutes.
-log  "  $(t_exec "$NAME" bash -c "cd $(sh_quote "$SRC") && git --no-pager log --oneline -1" 2>/dev/null | tr -d '\r')"
+# Everything else -- resolving the spec, fetching it into the mirror once,
+# and checking it out in the workspace from there -- is one function shared
+# with `wk new --pr`, so the two commands cannot drift apart (lib/store.sh).
+wk_pr_checkout "$NAME" "$SPEC"

@@ -17,6 +17,26 @@ Consequences:
   `jsc` skill for WebKit edits) live in `claude/CLAUDE.md` in the wk-tools
   repo and apply inside workspaces.
 
+- **Claude only ever runs inside a workspace.** The in-workspace interface --
+  `wk build <config>`, `wk run -- <args>`, `wk test <args>`, no workspace
+  name -- is load-bearing, not a convenience: it carries the job-count and
+  nice-level policy, and hand-rolling `build-webkit` around it is forbidden.
+- **Never edit wk-tools while a `wk` command is running**, here or on a
+  machine `t_sync_tools` copies the tree to: bash reads a script by byte
+  offset, so a rewritten `cmd/build` resumes a running build mid-word. Check
+  `wk status` first.
+- **Measure before theorising.** When something is unreachable or flaky, take
+  the measurement (packet counts, tcpdump on the far side, timing per
+  candidate) before proposing a cause, and fix the root cause; do not build
+  machinery around a fault nobody has measured.
+- **No in-place upgrades.** A guest, golden base or image that is wrong is
+  fixed by changing the input that produces it (`WK_VM_IMAGE`,
+  `vm/provision-base.sh`, an image config) and rebuilding. Hand-patching a
+  live guest is how to discover the fix, never how to deliver it.
+- **Do not mutate the host or the fleet unprompted.** `wk sync --machine`,
+  `wk quiesce on`, `wk stop`, `wk boot`, card writes and provisioning change
+  real machines; run them only when the user asked for that outcome.
+
 Never use `git push --force` against a shared branch, and never commit unless
 asked.
 
@@ -26,7 +46,7 @@ asked.
 defaults to a 2-minute timeout and maxes out at 10, while a cold WebKit build
 is tens of minutes. A foreground timeout SIGTERMs the local driver, and that
 propagates to the remote ninja -- the build dies at whatever object it had
-reached, leaving `build.status` still saying `running`.
+reached.
 
 So never run one in the foreground. Two ways, and prefer the first:
 

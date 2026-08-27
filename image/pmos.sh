@@ -18,7 +18,7 @@
 # target's own architecture pmbootstrap never starts qemu, and image/pmos-build.sh
 # refuses anything else rather than quietly taking ten times as long.
 #
-# What this is for: the two tailnet bridges (`wk help bridge`). A phone is not a
+# What this is for: the two tailnet bridges (`wk help`). A phone is not a
 # fleet machine -- `wk boot` cannot boot one and nothing here pretends it can --
 # so a bridge profile names a *device* (the pmOS codename) instead of a machine,
 # and the card it lands on is written by the machine that happens to hold the

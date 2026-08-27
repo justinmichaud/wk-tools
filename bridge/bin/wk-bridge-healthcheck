@@ -373,6 +373,6 @@ echo
 if [ "$fail" -eq 0 ]; then
     printf '\033[1;32mAll checks passed.\033[0m\n'
 else
-    printf '\033[1;31mProblems found -- see FAIL lines above, and wk help bridge.\033[0m\n'
+    printf '\033[1;31mProblems found -- see FAIL lines above, and wk help.\033[0m\n'
 fi
 exit "$fail"

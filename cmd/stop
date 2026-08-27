@@ -41,6 +41,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/detach.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
@@ -52,6 +53,24 @@ if [ -n "$NAME" ]; then
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
     [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
+
+    # claude remote-control (`wk claude ... --rc`) is a process started
+    # detached *inside* the target, separate from the environment t_stop below
+    # acts on. container and vm need nothing here -- t_stop suspends the whole
+    # container or guest, taking a live server with it -- but a remote target
+    # has no notion of stopping a single workspace at all (t_stop refuses, a
+    # few lines down), and its "environment" is a checkout on a machine that
+    # keeps running regardless, so this is the one place that stops it there.
+    if [ "$WK_TARGET_KIND" = remote ]; then
+        _rc_sf="$(wk_ws_dir "$NAME")/claude-rc.status"
+        _rc_pid=$([ -f "$_rc_sf" ] && status_field "$_rc_sf" pid || true)
+        if [ -n "$_rc_pid" ] && t_exec "$NAME" kill -0 "$_rc_pid" >/dev/null 2>&1; then
+            info "stopping claude remote-control in '$NAME' (pid $_rc_pid)"
+            t_exec "$NAME" kill "$_rc_pid" >/dev/null 2>&1 || true
+            status_write "$_rc_sf" state=stopped "pid=$_rc_pid"
+        fi
+    fi
+
     t_stop "$NAME"
     exit 0
 fi

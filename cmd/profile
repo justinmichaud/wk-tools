@@ -68,6 +68,11 @@ MODES="sampling bytecode samply instruments heaptrack massif"
 
 NAME="${WK_NAME:-}"
 
+# The privileged helper's own path (cmd/quiesce and cmd/session use the same
+# constant): the sysctl below is a host setting, not a workspace one, and this
+# is the one mechanism that may touch it.
+PRIV=/usr/local/libexec/wk-quiesce-priv
+
 MODE=sampling
 CONFIG="${WK_CONFIG:-}"
 BROWSER=""; URL=""; ATTACH=""; JITDUMP=""; MARKERS=""; TOP=""
@@ -348,15 +353,39 @@ fi
 # them. The sysctl is not namespaced, so a container cannot set it -- which is
 # exactly the failure this check exists to explain, because from inside the
 # workspace it reads as a permission problem with samply.
+#
+# Asked for up front rather than only reported: on Linux, where the workspace's
+# host and the sysctl's host are the same machine, the quiesce helper's
+# perf-on verb (admin/wk-quiesce-priv) is the fixed, reversible way to lower it
+# -- the same pattern cmd/quiesce and cmd/session already use for this helper,
+# not a new one. On macOS the container runs inside the podman VM, a different
+# kernel the helper has no reach into, so the old refusal (by hand, on the
+# machine that runs the workspace) still applies there.
 if [ "$MODE" = samply ] && [ -z "$DRY" ]; then
     _par=$(t_exec "$NAME" cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null | tr -dc '0-9') || _par=""
+    if [ -n "$_par" ] && [ "$_par" -gt 1 ] && is_linux && [ -x "$PRIV" ]; then
+        info "perf_event_paranoid is $_par on this host -- asking the quiesce helper to unrestrict it"
+        sudo -n "$PRIV" perf-on >/dev/null 2>&1 || true
+        _par=$(t_exec "$NAME" cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null | tr -dc '0-9') || _par=""
+    fi
     if [ -n "$_par" ] && [ "$_par" -gt 1 ]; then
-        die "perf_event_paranoid is $_par in '$NAME', and samply needs 1 or less.
+        if ! is_linux; then
+            die "perf_event_paranoid is $_par in '$NAME', and samply needs 1 or less.
     It is a host setting and cannot be written from inside a workspace (the
     sysctl is not namespaced -- sudo in there fails with 'permission denied on
     key'). On the machine that runs the workspace:
         echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
     On a booted benchmark image it is set already (docs/HANDOFF-boot.md)."
+        elif [ ! -x "$PRIV" ]; then
+            die "perf_event_paranoid is $_par in '$NAME', and samply needs 1 or less.
+    The privileged helper that can lower it is not installed on this host.
+    Remedy:  ./setup --stage quiesce"
+        else
+            die "perf_event_paranoid is $_par in '$NAME', and samply needs 1 or less.
+    Asking the quiesce helper ('$PRIV perf-on') did not bring it down --
+    passwordless sudo is likely not set up for it.
+    Remedy:  ./setup --stage quiesce"
+        fi
     fi
 fi
 
@@ -410,15 +439,25 @@ info "recorded in '$NAME': $ARTIFACT"
 
 if [ -n "$FETCH" ]; then
     [ -n "$FETCH_DIR" ] || FETCH_DIR="$(wk_state_dir)/profiles/$NAME/$RUN"
-    mkdir -p "$FETCH_DIR"
-    # One file at a time and by name: t_pull copies a file, and the shapes that
-    # produce several (heaptrack, a marker run) are listed by the workspace
-    # rather than guessed at from here.
-    for _f in $(t_exec "$NAME" bash -lc "ls -1 $(sh_quote "$OUTDIR")" 2>/dev/null | tr -d '\r'); do
-        t_pull "$NAME" "$OUTDIR/$_f" "$FETCH_DIR/$_f" 2>/dev/null \
-            || warn "could not copy $_f out of '$NAME'"
-    done
-    info "copied to $FETCH_DIR"
+    # The whole run directory in one copy (t_pull_dir), not a loop over
+    # t_pull: a loop only reaches files at the top level of $OUTDIR and
+    # silently misses a subdirectory -- which is exactly what instruments'
+    # .trace bundle is, so fetching one used to need 'wk enter' and scp by
+    # hand instead of --fetch. t_pull_dir replaces the destination's
+    # contents rather than merging into them (lib/target.sh), so nothing
+    # from a previous fetch survives into a stale mix.
+    #
+    # This is also the whole answer to viewing a samply profile at
+    # profiler.firefox.com: that host is not in the egress proxy's
+    # allowlist and never will be, but the site uploads nothing -- a
+    # profile.json opens from a local file picker -- so fetching it here
+    # with this and opening it locally is the complete path, not a partial
+    # one waiting on a host to be allowed.
+    if t_pull_dir "$NAME" "$OUTDIR" "$FETCH_DIR" 2>/dev/null; then
+        info "copied to $FETCH_DIR"
+    else
+        warn "could not copy '$OUTDIR' out of '$NAME'"
+    fi
 fi
 
 case "$MODE" in
@@ -429,8 +468,8 @@ samply)
     ;;
 instruments)
     log "  view it:  open $ARTIFACT                 (on the machine that has it)"
-    log "            --fetch brings it here; a .trace is a bundle, so fetch the"
-    log "            directory with 'wk enter $NAME' and scp if it has to move"
+    log "            --fetch brings the whole .trace bundle here (t_pull_dir"
+    log "            copies the directory, not just its top-level files)"
     ;;
 bytecode)
     log "  the summary is above; for the interactive tool:"

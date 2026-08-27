@@ -5,7 +5,7 @@
 # wk: where=host name=none group=hosts broker deploy,bench needs ssh,python3
 #
 # A board runs a bench system on removable media; its own workstation install
-# is never touched. `wk help hardware` has the per-board arrangement.
+# is never touched. `wk help` has the per-board arrangement.
 #
 #   wk pi setup <ssh-host>                put it on the tailnet: copies pinned
 #                                         tailscale binaries onto a writable
@@ -246,6 +246,15 @@ cmd_deploy() {
 }
 
 # The transport of last resort: bin/ and lib/ as a tarball.
+#
+# Not rsync, even though a redeploy re-sends the whole tree over WiFi every
+# time: neither board image carries it. The Yocto image's IMAGE_INSTALL only
+# appends tailscale and wk-wifi-join (image/yocto-build.sh), and the buildroot
+# defconfig (image/buildroot/external/configs/*) has no BR2_PACKAGE_RSYNC --
+# the rsync invocations elsewhere in image/buildroot/ run on the *build* host
+# to assemble the rootfs, not on the board that boots it. One path either way:
+# rather than an rsync branch that only runs when a board happens to have the
+# binary, and is untested everywhere else, every board takes the same tar.
 # Where a build lives on the board, by slot.
 #
 # `Release` with no suffix is slot "a" and the historical path, so every
@@ -445,6 +454,26 @@ os.write(fd,struct.pack("=80s4HI256i",b"wk-bench-seat",3,1,1,1,0,*([0]*256)))
 fcntl.ioctl(fd,IOC(0,U,1,0),0)
 signal.pause()'
 
+# The variance knobs, mirrored from cmd/bench's bench_configuration_args:
+# same WK_BENCH_* env vars, same `configuration.*` fields, same "off
+# contributes nothing" rule, because `wk bench report` groups both a
+# workspace's runs and a board's runs by this one block and a knob that
+# only one caller records would make a container run and a board run look
+# more comparable than they are. Not sourced from cmd/bench (this file
+# does not source that dispatcher) -- kept as one small copy rather than
+# adding a cross-command dependency for three lines.
+pi_bench_configuration_args() {
+    BENCH_CFG_ARGS=()
+    [ "${WK_BENCH_ASLR:-}" = off ] && BENCH_CFG_ARGS+=("configuration.aslr=off")
+    local pad="${WK_BENCH_ENV_PAD:-0}"
+    case "$pad" in ''|*[!0-9]*) pad=0 ;; esac
+    [ "$pad" -gt 0 ] && BENCH_CFG_ARGS+=("configuration.env_pad_bytes=$pad")
+    local pl="${WK_BENCH_PATH_PAD:-0}"
+    case "$pl" in ''|*[!0-9]*) pl=0 ;; esac
+    [ "$pl" -gt 0 ] && BENCH_CFG_ARGS+=("configuration.path_len=$pl")
+    return 0
+}
+
 # Save the run where `wk bench compare` will find it.
 #
 # Printing run-benchmark's JSON to stdout and stopping there makes an on-board
@@ -481,10 +510,10 @@ pi_bench_record() {
     # The three axes: class from the plan (a CPU-bound suite counts differently
     # from a GPU one), runner is always "browser" here, bench_host is "image"
     # because this path is only reachable against a booted bench system.
-    local class=gpu
-    case "$plan" in
-        jetstream*|octane*|kraken*|sunspider*|ares6*|jsbench*) class=cpu ;;
-    esac
+    # bench-class is `wkdata.py`'s own classifier, not a second copy of the
+    # plan-name list -- see cmd/bench's bench_class().
+    local class
+    class=$(python3 "$WK_ROOT/lib/wkdata.py" bench-class "$plan")
     # Software compositing is never incidental on these boards -- there is
     # either a panel or there is not -- and --force is what allows the second.
     local software="" software_reason=""
@@ -496,6 +525,7 @@ pi_bench_record() {
     # workspace is the checkout whose Tools/ matches the binary that produced
     # these numbers -- read back from the board's .wk-slot marker -- which is
     # what `wk bench compare` needs to run compare-results in.
+    pi_bench_configuration_args
     python3 "$WK_ROOT/lib/wkdata.py" env-record "$dir/env.json" \
         plan="$plan" workspace="${bws:-}" config=wpe-release browser=minibrowser-wpe \
         count="${count:-}" class="$class" runner=browser \
@@ -505,6 +535,7 @@ pi_bench_record() {
         machine="$machine" system="$sysid" build_slot="$slot" webkit_sha="${sha:-}" \
         host.kernel="$kernel" host.kernel_arch="$karch" host.governor="$gov" \
         host.throttled="$throttled" host.root_device="$root_dev" \
+        ${BENCH_CFG_ARGS[@]+"${BENCH_CFG_ARGS[@]}"} \
         --bool forced="${WK_FORCE:-}" --bool software="$software"
     PI_LAST_RUN=$(basename "$dir")
     log "  recorded    $PI_LAST_RUN"
@@ -910,9 +941,9 @@ pi_bench_ab() {
     log ""
     log "comparing with compare-results: $kept run(s) per arm, merged"
     log "  a = slot $a   b = slot $b"
-    "$WK_ROOT/wk" bench compare "$a_runs" "$b_runs" \
+    "$WK_ROOT/wk" bench report "$a_runs" "$b_runs" --text \
         || warn "compare-results did not complete; the runs are recorded and can be
-  compared by hand:  wk bench compare $a_runs $b_runs"
+  compared by hand:  wk bench report $a_runs $b_runs --text"
 }
 
 # --- wk pi boot-order ----------------------------------------------------------

@@ -10,10 +10,10 @@ Grouped by what they exercise. Most of these need no hardware — a stub/fake
 target driver (the technique the `state` section already uses for
 `chk_ws_state_words`) or a faked filesystem/status-file state is enough.
 
-**Crash-only convergence** (docs/help/design.txt phase 2/3: kill at the worst
-moment, re-run, reach the declared final state, nothing half-made looks
-complete) — port the whole "Interrupted and restarted" table from the old
-plan as one test class per command, each case a named kill point:
+**Crash-only convergence** (kill at the worst moment, re-run, reach the
+declared final state, nothing half-made looks complete) — port the whole
+"Interrupted and restarted" table from the old plan as one test class per
+command, each case a named kill point:
 `wk new` (container: the two remaining kill points, before-container-exists
 and during `wkdev-create`; `--target vm`; `--target <machine>`, including an
 ssh cut rather than a killed process), `wk rm` (each target, killed between
@@ -37,7 +37,7 @@ from *any* machine that asks, not only the driving one; `wk enter --zed`
 against a `broken` workspace refuses with the repair command.
 
 **Un-managed clobbering is detected, not silently trusted**: `tart delete` by
-hand; deleting `$WK_STORE/ws/<n>` under a live registry entry (`wk gc` refuses
+hand; deleting `$WK_STORE/ws/<n>` under a live workspace (`wk gc` refuses
 to prune what the survivor may still pin); `git fetch` into a published base
 snapshot by hand (the recorded sha no longer matches, refused by name);
 hand-editing `~/.ssh/config.d/wk` — the next `wk vm start` regenerates only
@@ -48,7 +48,7 @@ own, possibly wrong, rules.
 interactive prompt guards a destructive action and nothing else prompts;
 destructive prompts default to No and decline without a terminal.
 
-**Registry/resolution**: a workspace name on two targets refuses and names
+**Resolution**: a workspace name on two targets refuses and names
 both; a target that cannot be probed during resolution is reported
 unreachable by name rather than dropped silently.
 
@@ -74,7 +74,10 @@ producing distinct identities for two disks written from one image;
 `disk_sha256`); `_from_filter`'s decompressor selection by extension;
 `_profile_from_path`'s profile-from-workspace-path derivation; the buildroot
 `HOST_PYTHON_CONF_OPTS`/`HOST_PYTHON_DEPENDENCIES` three-line fix, reproduced
-against buildroot's own rule shape rather than a real build.
+against buildroot's own rule shape rather than a real build; a `--from`
+streamed write's skip of `image_check_boot_files`/`image_check_root` (only
+the store-backed write runs them); a `--from` write installing the identity
+marker and driving key but not the systemd units (`install_units`).
 
 **Named explicitly as needing a check that runs them:**
 §Z): the target-kind dispatch (`container|vm|remote|local`), `arch_is_native`,
@@ -99,8 +102,6 @@ or removed — an audit pass, not a single test.
 Unchanged: `wk doctor` answers "what is provisioned here" by inspecting state,
 read-only, safe anywhere; the test suite answers "does it behave" by running
 commands and may take minutes. Do not merge them.
-
-## Done means
 
 ## Regressions that need a permanent test
 

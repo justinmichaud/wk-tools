@@ -36,7 +36,7 @@
 #   t_created <name>   is creation's completion marker there? (see .wk-ready)
 #   t_ready            block until a new workspace finished initialising
 #   t_exec_build       t_exec, for a build specifically (see below)
-#   t_state_put        keep a copy of the build status where the target is
+#   t_status_put       write the build status where the target's own side is
 #   t_has_wk / t_wk    run `wk` on the target's own machine, if that is one
 
 # targets/local.sh is the degenerate case: the target is the machine
@@ -228,13 +228,15 @@ t_lldb_opts()  { :; }               # t_lldb_opts
 # to t_exec, the lock would also make `wk run`/`wk status` block for no reason.
 t_exec_build() { t_exec "$@"; }
 
-# Build state for a target that is a machine of its own: `wk build` writes
-# status/log on the side driven from, but a build machine has two sides
-# (ssh or a local shell), and seeing only the started half would report
-# `build=none` about a build running in front of you. A driver with a far
-# side keeps the canonical copy there: t_state_put pushes it, t_wk answers
-# by running `wk` there instead of guessing. Both default to "no far side".
-t_state_put() { cat >/dev/null; }   # t_state_put <name>, content on stdin
+# Build state, in exactly one place. Content arrives on stdin (write_status,
+# cmd/build) and this decides where it lands: for a target whose $WK_STORE is
+# already this machine's (container, vm, local) that is here, next to the
+# rest of the workspace's bookkeeping -- the default below. A target that is
+# a *machine of its own* overrides it and writes there instead (over ssh),
+# since that machine's own `wk status` (t_has_wk, t_wk) reads it directly and
+# a second copy on the driving side would go stale the moment the far one
+# changes without anybody re-pushing it.
+t_status_put() { local n="$1" ws; ws="$(wk_ws_dir "$n")"; cat > "$ws/build.status"; }
 t_has_wk()    { return 1; }         # is there a far side that can answer?
 t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
 # Runs on the far machine and returns immediately: a build must not depend
@@ -249,76 +251,62 @@ t_wk_tty()    { t_wk "$@"; }
 # machine instead.
 t_load() { awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0; }
 
-# Per-workspace target registry. `wk build bug-238 ...` must reach the same
-# place `wk new bug-238 --target vm` created, without restating the target
-# on every command, so the choice is recorded once, at creation. Kept on
-# the host under XDG state, not $WK_STORE, since $WK_STORE is itself
-# target-dependent and this is what resolves that.
-target_register() {
-    local name="$1" target="$2" d
-    d="$(wk_state_dir)/targets"
-    mkdir -p "$d"
-    printf '%s\n' "$target" > "$d/$name"
-}
-
-target_forget() { rm -f "$(wk_state_dir)/targets/$1"; }
-
 # Which target a *named* workspace lives on, so `wk build`, `wk pr` and the
 # macOS dispatcher cannot reach three different machines for one name.
-# Three sources in order: an explicit WK_TARGET overrides everything; the
-# registry is the fast path, only a cache of a recomputable fact; then every
-# target is asked directly (ws_on_target). The walk fixes a real failure: a
-# workspace with no registry entry here -- a `wk new` that died before
-# registering, or one created onto a shared build machine from another
-# workstation -- must still resolve, or every command falls back to
-# `container` and answers "no such workspace" about a complete checkout.
+#
+# No registry: every fact here is recomputed from evidence (CLAUDE.md, "no
+# caching of facts"). An explicit WK_TARGET overrides everything; otherwise
+# every target is asked directly (ws_on_target), and nothing is started here.
 #
 # Whether <name> is a workspace on target <t>, asked of the machine that
-# holds the store. Two tests, because each sees what the other cannot: the
+# holds the store. Three tests, because each sees what the others cannot: the
 # workspace directory is evidence only where the store is on this machine
 # (and it alone sees a broken workspace, whose environment is gone); t_info
 # is the driver's own answer from wherever the store really is -- the podman
 # VM on a macOS host, a build box over ssh -- and an off machine answers
-# within its ConnectTimeout rather than hanging. Only a definite state
-# counts: "unreachable" is not evidence the workspace exists. lib/store.sh
-# and the driver load in a subshell, so neither the driver's functions nor
-# store.sh's default $WK_STORE outlive the question.
+# within its ConnectTimeout rather than hanging, and only a definite state
+# counts ("unreachable" is not evidence the workspace exists); and while
+# `wk new` is still creating it, before a store directory exists, its own
+# status file under this target's store is the only evidence, trusted only
+# while the process writing it is alive (dead, it is an unverifiable claim).
+# lib/store.sh, lib/detach.sh and the driver load in a subshell, so nothing
+# outlives the question.
 ws_on_target() { # <target> <name>
     ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+      command -v detach_alive >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
       load_target "$1" >/dev/null 2>&1 || exit 1
       [ -d "$(wk_ws_dir "$2")" ] && exit 0
-      command -v t_info >/dev/null 2>&1 || exit 1
-      case "$(t_info "$2" 2>/dev/null)" in
-          absent|unreachable|"") exit 1 ;;
-          *) exit 0 ;;
-      esac )
+      if command -v t_info >/dev/null 2>&1; then
+          case "$(t_info "$2" 2>/dev/null)" in
+              absent|unreachable|"") ;;
+              *) exit 0 ;;
+          esac
+      fi
+      sf=$(ws_status_file "$2")
+      [ -f "$sf" ] && detach_alive "$sf" )
 }
 
 ws_exists() { # <name>
     local name="$1" t
-    target_of "$name" >/dev/null 2>&1 && return 0
     for t in $(target_all 2>/dev/null); do
         ws_on_target "$t" "$name" && return 0
     done
     return 1
 }
 
-ws_target() {
+ws_target() { # <name>
     local name="$1" t
     if [ -n "${WK_TARGET:-}" ]; then printf '%s' "$WK_TARGET"; return 0; fi
-    if target_of "$name" 2>/dev/null; then return 0; fi
     for t in $(target_all 2>/dev/null); do
         if ws_on_target "$t" "$name"; then printf '%s' "$t"; return 0; fi
     done
+    # Nothing here knows this name. On a macOS host that is also true of a
+    # real container workspace whose VM is stopped -- its store is inside the
+    # podman VM -- so this is "not visible from here", not "does not exist";
+    # default_target's "container" answer is exactly right, and the dispatcher
+    # forwards the command into the VM, where the VM's own wk resolves it for
+    # real. Derived fresh every call, not cached.
     default_target
-}
-
-# The target a workspace was created with, or empty if it is not registered.
-# Container workspaces on Linux predate the registry and are the default, so
-# "not registered" must resolve to container rather than to an error.
-target_of() {
-    local f="$(wk_state_dir)/targets/$1"
-    [ -f "$f" ] && cat "$f" || return 1
 }
 
 # --- am I a workspace? -------------------------------------------------------
@@ -362,9 +350,9 @@ wk_remote_field()    { marker_field "$(wk_remote_marker)" "$1"; }
 wk_self() { wk_marker_field name; }
 
 
-# For a workspace not in the registry: `container` on a host (the default,
-# and what every workspace predating the registry is); `local` inside one,
-# since there's nothing else in there.
+# The target for a workspace ws_target could not find anywhere: `container`
+# on a host, the default and what an unresolved name always means there;
+# `local` inside one, since there's nothing else in there.
 default_target() {
     if in_workspace; then echo local; return 0; fi
     local t; t=$(wk_remote_field target)
@@ -479,29 +467,25 @@ zed_key_pub() {
     cat "$k.pub"
 }
 
-# Every registered target, plus container, which is the default and is what
-# anything unregistered is. Used by commands that report on everything rather
-# than acting on one named workspace.
+# Every target this machine could have a workspace on: container and vm
+# unconditionally (this machine, if either driver is usable at all), the
+# build box this machine is the far end of (if any), and every machine
+# configured under targets/hosts/*.conf. Used by commands that report on
+# everything rather than acting on one named workspace.
 target_all() {
-    local d f t seen=" container "
+    local d f t seen=" container vm "
+    # The two built-in kinds this machine can hold workspaces of directly,
+    # unconditionally -- no registry says so, the drivers just are (a
+    # missing podman or tart answers every later question about them with
+    # nothing, not with a loud failure; see t_list in each).
     echo container
+    echo vm
 
     # On a shared build machine the workspaces were created from somewhere
-    # else, so nothing here is registered -- without this a bare `wk status`
+    # else, so nothing here is configured -- without this a bare `wk status`
     # on the box would report nothing about the ones it has.
     t=$(wk_remote_field target)
     if [ -n "$t" ]; then seen="$seen$t "; echo "$t"; fi
-
-    d="$(wk_state_dir)/targets"
-    if [ -d "$d" ]; then
-        for f in "$d"/*; do
-            [ -f "$f" ] || continue
-            t=$(cat "$f")
-            case "$seen" in *" $t "*) continue ;; esac
-            seen="$seen$t "
-            echo "$t"
-        done
-    fi
 
     # Every machine configured, whether or not a workspace is currently
     # pinned to it -- a machine you set up is a target you have. Two
@@ -660,9 +644,7 @@ _target_reset_vars() {
 # `ws.status` is not evidence and is never believed about a workspace that
 # exists: a claim by the creating process, read only for whether that
 # process is still alive (wait_ready), or, for a marker since emptied,
-# whether it ever said it finished (rule 5). The registry is not consulted
-# either: a cache of which target a workspace was created with, and a
-# workspace that predates it must not read as half-made.
+# whether it ever said it finished (rule 5).
 ws_state() {
     local name="$1" env ws
     env=$(t_info "$name" 2>/dev/null || echo absent)
@@ -715,8 +697,10 @@ ws_create_log()  { echo "$(ws_state_dir)/$1.log"; }
 
 # Where the command that remakes a workspace has to be typed. `wk new` is a
 # workstation command -- a machine that only *hosts* workspaces refuses it
-# (is_lifecycle in `wk`) since the registry lives on the workstation. So
-# printing it bare on a build box sends somebody straight to a refusal.
+# (is_lifecycle in `wk`), since creating and destroying workspaces is done
+# from wherever `wk remote setup`/the registry of machines lives, not from
+# the machine being built on. So printing it bare on a build box sends
+# somebody straight to a refusal.
 ws_remake_hint() {
     if in_remote_host; then
         printf 'from the workstation:  wk new %s --target %s' "$1" "$(wk_remote_field target)"

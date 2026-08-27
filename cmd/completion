@@ -41,42 +41,30 @@ usage() {
 }
 
 # Every workspace name this machine already knows about, without starting
-# anything or reaching anywhere:
-#
-#   - $(wk_state_dir)/targets/<name> is the per-workspace target registry
-#     (target_register, lib/target.sh) -- one file per workspace, on every
-#     target, written at `wk new` and removed at `wk rm`. Reading its
-#     directory listing is a `ls`, nothing more.
-#   - a workspace made before that registry existed, or on a target whose
-#     store simply lives on this machine (a Linux workstation's container
-#     store, or a Mac's own /var/lib/wk when it happens to have one --
-#     store_is_local, lib/store.sh), can exist without a registry entry.
-#     list_workspaces (lib/store.sh) reads that store's `ws/` directory --
-#     again a bare `ls`, not a walk of any other target.
+# anything or reaching anywhere: no registry, just the store each built-in
+# local kind keeps for itself (lib/store.sh's `ws/` directory), read directly
+# -- a bare `ls` per kind, nothing more, and nothing cached between one TAB
+# press and the next.
 #
 # What this deliberately does not do: ask a remote target, or a macOS host's
 # podman VM, for its workspaces. Both require a live connection this function
 # must never open just to answer a TAB press, and the VM case would start the
 # podman machine outright (forward_to_vm, `wk`) -- exactly what a completion
-# hook must not do.
+# hook must not do. A remote target's workspaces live only on the machine
+# itself (targets/remote.sh never mirrors a store locally), so there is no
+# cheap local evidence for them at all; their names are not offered.
 list_workspaces_local() {
-    local d f name seen=" "
-    d="$(wk_state_dir)/targets"
-    if [ -d "$d" ]; then
-        for f in "$d"/*; do
-            [ -f "$f" ] || continue
-            name=$(basename "$f")
+    local seen=" " t name
+    for t in container vm; do
+        for name in $(
+            ( load_target "$t" >/dev/null 2>&1
+              store_is_local || exit 0
+              list_workspaces 2>/dev/null ) 2>/dev/null
+        ); do
             case "$seen" in *" $name "*) continue ;; esac
             seen="$seen$name "
             printf '%s\n' "$name"
         done
-    fi
-    store_is_local || return 0
-    local w
-    for w in $(list_workspaces 2>/dev/null || true); do
-        case "$seen" in *" $w "*) continue ;; esac
-        seen="$seen$w "
-        printf '%s\n' "$w"
     done
 }
 

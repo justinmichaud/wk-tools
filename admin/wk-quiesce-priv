@@ -99,6 +99,26 @@ linux_status() {
     printf 'aslr:      %s\n' "$(sysctl -n kernel.randomize_va_space 2>/dev/null || echo n/a)"
 }
 
+# --- Linux: perf_event_paranoid alone -----------------------------------------
+# A narrower pair than `on`/`off`: samply (wk profile --mode samply) needs only
+# this one sysctl lowered, and asking for the governor pinned, turbo disabled
+# and ASLR off besides -- what a full benchmark quiesce does -- would be asking
+# for a much bigger, and noisier, change than a profiling run wants. `1` is the
+# least-restrictive value that still requires no capability the container
+# lacks; `-1` (fully unrestricted, what `on` sets) is not needed for samply and
+# is not set here.
+perf_on() {
+    sysctl -q -w kernel.perf_event_paranoid=1 \
+        || { echo "wk-quiesce-priv: could not set kernel.perf_event_paranoid" >&2; exit 1; }
+    printf 'perf_event_paranoid: %s (samply/perf unrestricted)\n' "$(sysctl -n kernel.perf_event_paranoid)"
+}
+
+perf_off() {
+    sysctl -q -w kernel.perf_event_paranoid=2 \
+        || { echo "wk-quiesce-priv: could not restore kernel.perf_event_paranoid" >&2; exit 1; }
+    printf 'perf_event_paranoid: %s (restored)\n' "$(sysctl -n kernel.perf_event_paranoid)"
+}
+
 # --- Linux: the benchmark session -------------------------------------------
 # cage is a one-client kiosk compositor: a real DRM session on the real device,
 # without a desktop's worth of background compositing to show up in the numbers.
@@ -790,6 +810,8 @@ case "$os:$action" in
     Linux:session-stop)    session_stop ;;
     Linux:session-off)     session_off ;;
     Linux:session-status)  session_status ;;
+    Linux:perf-on)  perf_on ;;
+    Linux:perf-off) perf_off ;;
     Linux:on)      linux_on ;;
     Linux:status)  linux_status ;;
     Linux:*)       linux_off ;;

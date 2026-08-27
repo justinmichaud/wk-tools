@@ -145,9 +145,16 @@ par_begin() {
 # par_run <name> <command...> -- <name> is both the file and the position in the
 # finished listing, so it must be unique among the batch. Target and workspace
 # names are (valid_name, lib/common.sh), which is why they are what is used.
+#
+# Each job also drops a marker (`$n.rc`, its exit status) the instant it's
+# done -- par_join ignores it (name order is still what it wants), but
+# par_join_stream polls for it, which is what lets that one hand a finished
+# job's records to fd 3 without waiting on the jobs still running beside it.
 par_run() {
     local n="$1"; shift
-    "$@" 3> "$_par_dir/$n" </dev/null &
+    ( "$@" 3> "$_par_dir/$n"; _rc=$?
+      printf '%s' "$_rc" > "$_par_dir/$n.rc"
+      exit "$_rc" ) </dev/null &
     _par_names="$_par_names $n"
     _par_pids="$_par_pids $!"
 }
@@ -156,6 +163,41 @@ par_join() {
     local n p rc
     for p in $_par_pids; do rc=0; wait "$p" || rc=$?; bump "$rc"; done
     for n in $_par_names; do cat "$_par_dir/$n" >&3 2>/dev/null || true; done
+    rm -rf "$_par_dir"
+    _par_dir=""; _par_names=""; _par_pids=""
+    return 0
+}
+
+# par_join_stream -- the same batch, but a job's records reach fd 3 the moment
+# that job finishes, in the order jobs actually complete rather than the order
+# they were started in -- so a slow one in the middle of the batch no longer
+# holds back everything started after it. A `{"kind":"flush"}` record follows
+# each job's records: the signal a streaming reader (lib/status-view.py's text
+# renderer) uses to know a batch just landed and it is safe to draw whatever
+# has accumulated so far.
+#
+# Polled, not `wait -n` -- this shell is bash 3.2 on a macOS host, which has no
+# such builtin, and every board and build box runs whatever bash it has. The
+# `.rc` marker par_run now drops is the portable stand-in; a tenth of a second
+# between checks is nothing next to an ssh round trip.
+par_join_stream() {
+    local n p rc pending="$_par_names" next
+    while [ -n "$pending" ]; do
+        next=""
+        for n in $pending; do
+            if [ -f "$_par_dir/$n.rc" ]; then
+                rc=$(cat "$_par_dir/$n.rc" 2>/dev/null); rc="${rc:-4}"
+                bump "$rc"
+                cat "$_par_dir/$n" >&3 2>/dev/null || true
+                printf '{"kind":"flush"}\n' >&3
+            else
+                next="$next $n"
+            fi
+        done
+        pending="$next"
+        [ -z "$pending" ] || sleep 0.1
+    done
+    for p in $_par_pids; do wait "$p" 2>/dev/null || true; done
     rm -rf "$_par_dir"
     _par_dir=""; _par_names=""; _par_pids=""
     return 0
@@ -245,12 +287,36 @@ report() {
     rec_set method  "$_group_method"
     rec_set name    "$ws"
     report_ws "$ws"
+    report_claude_rc "$ws"
     report_one "$ws" build "$(wk_ws_dir "$ws")/build.status"
     [ -f "$(wk_ws_dir "$ws")/test.status" ] && report_one "$ws" test "$(wk_ws_dir "$ws")/test.status"
     [ -f "$(wk_ws_dir "$ws")/babysit.status" ] && report_babysit "$(wk_ws_dir "$ws")/babysit.status"
     rec_json subs "[$_subs]"
     rec_emit
     return 0
+}
+
+# Claude Code remote-control (`wk claude <ws> --rc`), if this workspace has
+# ever had one: its own status file, next to build.status/test.status
+# (cmd/status's rc_status_file, lib/detach.sh's schema: pid=, state=,
+# updated=). Nothing when the file is absent -- most workspaces have never
+# run `--rc`, and that is not a fact worth a line.
+#
+# The pid it names is not this host's own process table's to answer for: it
+# is a process `t_spawn` started *inside* the target, so liveness is asked
+# through `t_exec`, never a local `kill -0` -- the same move image/yocto.sh's
+# yocto_running makes for a driven pid, for the same reason.
+report_claude_rc() {
+    local ws="$1" sf pid
+    sf="$(wk_ws_dir "$ws")/claude-rc.status"
+    [ -f "$sf" ] || return 0
+    pid=$(status_field "$sf" pid)
+    [ -n "$pid" ] || return 0
+    if t_exec "$ws" kill -0 "$pid" >/dev/null 2>&1; then
+        note "claude rc: alive (pid $pid)"
+    else
+        note "claude rc: stopped"
+    fi
 }
 
 # The lifecycle line, first above everything else: "is this a workspace at
@@ -1057,7 +1123,7 @@ report_capacity_remote() {
 # --- the fleet devices: role, mode, and the media wk owns ---------------------
 # One line per fleet machine: what it is (role), what it is running (mode),
 # and what's on the hardware wk manages for it (the rpi4's USB stick, the
-# Mac's bench volume). `wk help hardware` is the prose version; `wk boot
+# Mac's bench volume). `wk help` is the prose version; `wk boot
 # <machine> --status` is the deep one.
 #
 # Every machine is probed in its own subshell, all at once: one bounded
@@ -1476,6 +1542,15 @@ _report_target_par() {
     exit "$worst"
 }
 
+# The fleet devices and the bridges, as one more par_run job in collect()'s
+# batch -- see the comment there for why they run as one job together and not
+# each as a job of its own.
+_devices_par() {
+    report_fleet_devices
+    report_bridges
+    exit "$worst"
+}
+
 # --- collection, and then whoever is looking at it ----------------------------
 #
 # The walk is a function so that every mode runs the *same* walk: a terminal, a
@@ -1503,33 +1578,27 @@ collect() {
         prefetch_targets $_TARGETS
         wk_atexit prefetch_done
 
-        # The boards and the phones start now and are collected at the end.
-        # They are the listing's longest pole (an off board costs its ceiling,
-        # a bridge health-checks a phone over a radio) and share nothing with
-        # the target walk -- no driver, no store, no shared ssh -- so paying
-        # for them *beside* the walk costs nothing extra. Records still land
-        # after every machine and before the exit record; the parent places
-        # them, not they.
+        # The boards and the phones are one more job in the same batch as the
+        # targets, not a walk apart from it -- so they stream in wherever they
+        # finish rather than always being the thing appended after everything
+        # else has already rendered. They are the listing's longest pole (an
+        # off board costs its ceiling, a bridge health-checks a phone over a
+        # radio) and share nothing with the target walk -- no driver, no
+        # store, no shared ssh -- so paying for them *beside* it costs nothing
+        # extra, and being last to finish is exactly the case par_join_stream
+        # exists for.
         #
-        # The two blocks run inside one subshell, in step, because a bridged
-        # board is reached *through* the same phone the bridge block ssh's
-        # into -- run separately they contend for that link and disagree with
-        # themselves between runs (measured: 26s/50s and flapping answers vs.
-        # 18s and consistent ones in step).
+        # The boards and the phones run inside one job, in step, because a
+        # bridged board is reached *through* the same phone the bridge block
+        # ssh's into -- run separately they contend for that link and disagree
+        # with themselves between runs (measured: 26s/50s and flapping
+        # answers vs. 18s and consistent ones in step).
         #
-        # After the prefetch, not beside it: the two don't contend for a
-        # machine, but they do contend for the resolver, and a wedged one
+        # Started after the prefetch, not beside it: the two don't contend for
+        # a machine, but they do contend for the resolver, and a wedged one
         # serialises lookups a warm one answers instantly (measured:
         # `wk status --json` 21.1s -> 26.3s/29.6s when started together on a
         # wedged tailnet). The prefetch gets the resolver to itself first.
-        _dev_dir=""
-        _dev_pid=""
-        if [ -n "$DEVICES" ]; then
-            _dev_dir=$(mktemp -d "${TMPDIR:-/tmp}/wk-status.XXXXXX")
-            ( report_fleet_devices 3> "$_dev_dir/fleet"
-              report_bridges       3> "$_dev_dir/bridges" ) </dev/null &
-            _dev_pid=$!
-        fi
 
         # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
         _health_owner=$(health_owner $_TARGETS)
@@ -1537,19 +1606,18 @@ collect() {
         # shellcheck disable=SC2086 -- same, and order_targets takes them as words.
         par_begin
         for TARGET in $(order_targets $_TARGETS); do
+            # A placeholder a streaming reader can show while this one is
+            # still in flight -- named for the target, which for a remote one
+            # *is* the machine name (machine_of returns it unchanged), so the
+            # real block that follows answers to the same name. A local
+            # target settles fast enough that the placeholder rarely shows.
+            printf '{"kind":"probing","name":"%s"}\n' "$(_jesc "$TARGET")" >&3
             par_run "$TARGET" _report_target_par "$TARGET"
         done
-        par_join
-
-        if [ -n "$_dev_dir" ]; then
-            # By pid, never a bare `wait`: a bare wait is a promise about every
-            # background job this shell has, which during the walk is every
-            # target as well.
-            wait "$_dev_pid" 2>/dev/null || true
-            cat "$_dev_dir/fleet"   >&3 2>/dev/null || true
-            cat "$_dev_dir/bridges" >&3 2>/dev/null || true
-            rm -rf "$_dev_dir"
+        if [ -n "$DEVICES" ]; then
+            par_run devices _devices_par
         fi
+        par_join_stream
     fi
 
     # The exit status, in the stream. It is this command's whole contract for a
@@ -1570,19 +1638,50 @@ if [ -n "$RECORDS" ]; then
     exit "$worst"
 fi
 
-# Everything else renders, and rendering needs the whole listing: a column is as
-# wide as the widest thing in it, and that is not known until the last machine
-# has answered. So the records go to a file and the renderer reads it once.
-_recs=$(mktemp)
-_recs_cleanup() { rm -f "$_recs"; }
+# Everything else renders. json/html/web still want the whole listing before
+# they say anything -- a column no wider than its heading until the last
+# machine has answered, one page written once -- but the text renderer wants
+# to start before that, on whatever has landed so far (lib/status-view.py's
+# streaming reader). Both read the same record stream; the difference is
+# entirely in when each one chooses to draw, not in a second way of collecting.
+#
+# A fifo instead of a plain file is what makes that possible without a second
+# collection path: `collect` keeps running -- in the background, since a fifo
+# open for writing blocks until something is reading it -- while the renderer
+# reads as it goes. json/html/web read to EOF before producing anything, which
+# is the same wait they always did; only text sees the difference.
+_recs_dir=$(mktemp -d "${TMPDIR:-/tmp}/wk-status.XXXXXX")
+_recs="$_recs_dir/records"
+mkfifo "$_recs"
+_recs_cleanup() { rm -rf "$_recs_dir"; }
 wk_atexit _recs_cleanup
-exec 3> "$_recs"
-collect ${1:+"$1"}
-exec 3>&-
+
+( # A fork's atexit state is a copy of this process's, taken at the fork --
+  # so this subshell's own exit also runs `_recs_cleanup` (registered above)
+  # and removes the fifo's directory entry, before the parent, which is
+  # still reading it, has finished. Left alone rather than fought (only
+  # lib/common.sh may touch `trap ... EXIT` or `_WK_ATEXIT` --
+  # wk_atexit, above): harmless, since an unlink while a reader still has the
+  # fifo open does not disturb that reader, and the parent's own copy of the
+  # same handler -- untouched by anything this subshell does to its own,
+  # forked copy -- still runs the real cleanup once this process actually
+  # ends.
+  exec 3> "$_recs"
+  collect ${1:+"$1"}
+  exit "$worst"
+) </dev/null &
+_collect_pid=$!
 
 # The port, the interval and the output path travel as environment rather than
 # as arguments, because `wk` renders too (bare_report) and it has not parsed
 # them -- it hands over whatever the person typed.
 WK_STATUS_PORT="$WEB_PORT" WK_STATUS_INTERVAL="$WEB_INTERVAL" \
     WK_STATUS_HTML_OUT="$HTML_OUT" status_render "$MODE" "$_recs"
+
+# `collect` ran in its own subshell (mandatory for the fifo above not to
+# deadlock this one waiting on a reader), so its `worst` never touched this
+# process's -- it comes back the one way a subshell can hand one back, its
+# own exit status.
+rc=0; wait "$_collect_pid" || rc=$?
+bump "$rc"
 exit "$worst"

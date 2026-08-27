@@ -177,7 +177,7 @@ refresh_deptree() {
 [ "$(id -u)" -eq 0 ] || die "run as root"
 command -v apk >/dev/null 2>&1 || die "this is not an Alpine/postmarketOS system (no apk).
     The bridge role is pmOS-only on purpose: one provisioner for both phones.
-    Reflash the device with postmarketOS first -- 'wk help bridge'."
+    Reflash the device with postmarketOS first -- 'wk help'."
 command -v rc-update >/dev/null 2>&1 || die "no OpenRC here (rc-update is missing).
     A pmOS image built with systemd is not supported by this role."
 

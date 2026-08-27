@@ -3,9 +3,9 @@
 # wk bench <workspace> <plan> [options] -- run a benchmark and keep the result defensible
 #
 # wk: where=workspace name=required ready=yes group=workspaces needs python3
-# wk: sub stage,staged,mac,mac-volume,mac-ab,ab-summary where=host
-# wk: sub seed,compare where=dynamic
-# wk: sub ls,compare name=none
+# wk: sub stage,staged,mac,mac-volume,mac-ab,ab-summary,compare,report where=host
+# wk: sub seed where=dynamic
+# wk: sub ls,compare,report name=none
 # wk: sub seed name=required@2
 #
 #   wk bench <workspace> <plan> [--config C] [--count N] [--subtests "A B"]
@@ -32,7 +32,13 @@
 #                                          room: plant a job, reboot, read it
 #                                          back. --preflight/--status/--collect
 #   wk bench ab-summary --runs <tsv>       the A/B's own verdict, per arm
-#   wk bench compare <run-a> <run-b> [ws]  compare-results on two saved runs
+#   wk bench report <run-a> <run-b>        Score+Time per subtest, Welch/FDR,
+#       [--html out.html] [--text]        histograms, variance by
+#                                          configuration -- text (default) or
+#                                          one self-contained html file
+#   wk bench compare <run-a> <run-b> [ws]  `wk bench report` in text mode; the
+#                                          third argument is accepted and
+#                                          ignored (kept for old callers)
 #                                          (a or b may be comma-separated runs)
 #   wk bench ls                            saved runs
 #
@@ -40,8 +46,14 @@
 #   the plan in MiniBrowser, a JSCOnly port (jsc-release) runs it in the jsc
 #   shell. The plan decides whether a GPU is required at all.
 #
-# The work is done by Tools/Scripts/run-benchmark and Tools/Scripts/
-# compare-results; everything here decides whether a number means anything:
+#   WK_BENCH_ASLR=off          disable ASLR for the run (Linux; setarch -R)
+#   WK_BENCH_ENV_PAD=<bytes>   export a dummy env var of this size first
+#   WK_BENCH_PATH_PAD=<n>      run through a symlink padded to <n> characters
+#   every knob is off by default and is recorded into the result's
+#   `configuration`, which `wk bench report` groups variance by.
+#
+# The work is done by Tools/Scripts/run-benchmark; everything here decides
+# whether a number means anything:
 #
 #   the environment is checked before the run, not explained afterwards. A
 #   Speedometer score from llvmpipe is not a slow result -- it's a different
@@ -104,10 +116,12 @@ WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 # `wk status` rather than re-derived here.
 . "$WK_ROOT/lib/detach.sh"
 
-# `wk bench --where <args>`: seed and compare are workspace-scoped for one
-# argument shape and host-scoped for another, so the dispatcher asks rather
-# than being told once in the declaration. Same logic the old dispatcher's
-# is_targetless used for these two verbs.
+# `wk bench --where <args>`: seed is workspace-scoped for one argument shape
+# and host-scoped for another, so the dispatcher asks rather than being told
+# once in the declaration. compare/report used to need this too, back when a
+# comparison ran compare-results inside a workspace; now `wk bench report`
+# only ever reads local JSON, so they are plain where=host and never reach
+# here.
 _bench_where() { # <verb> <args...> -- prints host or workspace
     case "${1:-}" in
         seed)
@@ -116,16 +130,6 @@ _bench_where() { # <verb> <args...> -- prints host or workspace
             else
                 printf host
             fi ;;
-        compare)
-            shift
-            local _a _one
-            for _a in "$@"; do
-                local IFS=,
-                for _one in $_a; do
-                    [ -f "$_one" ] && { printf host; return 0; }
-                done
-            done
-            printf workspace ;;
         *) printf host ;;
     esac
 }
@@ -217,11 +221,102 @@ bench_root_device() { # <path>
 # on the rendering it drives, so measuring it with no real display path is
 # measuring something else -- the same rule the jsc-jetstream-compare skill
 # states for Speedometer and MotionMark rounds.
+#
+# The classifier itself is `wkdata.py bench-class`, not a case statement here:
+# `wk pi bench` needs the same answer for the same plan names, and a shell
+# function cannot be called from there without sourcing this whole
+# dispatcher. One list of plan prefixes, in the one place both callers can
+# reach.
 bench_class() {
-    case "$1" in
-        jetstream*|octane*|kraken*|sunspider*|ares6*|jsbench*) echo cpu ;;
-        *) echo gpu ;;
-    esac
+    wkdata bench-class "$1"
+}
+
+# --- variance knobs (docs/Urgent/"Benchmarking variance.md") -----------------
+# Every knob defaults off, and a run that never sets one is recorded with
+# wkdata.py's own "not controlled" configuration -- identical to a run taken
+# before these existed. Turning one on is a deliberate act, recorded into
+# `configuration` (bench_configuration_args below) so `wk bench report` can
+# group variance by it later.
+#
+#   WK_BENCH_ASLR=off          setarch -R: the same address layout on every
+#                               iteration, so one lucky or unlucky slide
+#                               cannot read as a regression. Linux only --
+#                               there is no equivalent toggle on macOS
+#                               (staged_env_json below records the slide
+#                               instead, where it can be read cheaply).
+#   WK_BENCH_ENV_PAD=<bytes>   a dummy environment variable of this size is
+#                               exported before the run: envp's size moves
+#                               where the initial stack starts, the same way
+#                               a different username or PWD does by accident.
+#   WK_BENCH_PATH_PAD=<n>      the binary is run through a symlink whose own
+#                               path is padded to <n> characters, for the
+#                               same reason -- argv[0] and the executable
+#                               path both land on the initial stack.
+
+# bench_aslr_wrap -- the command prefix that pins the address layout, or
+# nothing. Meant to be interpolated straight into a `bash -lc "..."` string
+# built by the caller (run_jsc, the browser run in cmd_run): those already
+# build one shell command as text, and a prefix is simpler than a second
+# indirection layer around every invocation this file makes.
+bench_aslr_wrap() {
+    [ "${WK_BENCH_ASLR:-}" = off ] && printf 'setarch $(uname -m) -R -- '
+}
+
+# bench_env_pad_prelude -- a shell fragment exporting a dummy variable of
+# WK_BENCH_ENV_PAD bytes, or nothing. Emitted as source (not run here) for the
+# same reason as bench_aslr_wrap: it has to land in the same shell as the
+# benchmark it is padding.
+bench_env_pad_prelude() {
+    local n="${WK_BENCH_ENV_PAD:-0}"
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -gt 0 ] || return 0
+    printf 'export WK_BENCH_ENV_PAD_DUMMY="$(head -c %d /dev/zero | tr "\\0" x)"; ' "$n"
+}
+
+# bench_padded_path <run-fn-or-empty> <target> -- a symlink to <target> whose
+# own path is WK_BENCH_PATH_PAD characters longer than <target>'s, created
+# through <run-fn> (a function taking a command, e.g. one that wraps t_exec --
+# empty runs locally, for the staged macOS tree) if the knob is set; <target>
+# unchanged otherwise. The pad directory name is a fixed run of the same
+# character, so the same WK_BENCH_PATH_PAD value always produces the same
+# path and two runs of the same length are the same measurement.
+bench_padded_path() {
+    local runner="$1" target="$2" n="${WK_BENCH_PATH_PAD:-0}"
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    if [ "$n" -le 0 ]; then
+        printf '%s' "$target"
+        return 0
+    fi
+    local pad=""
+    while [ "${#pad}" -lt "$n" ]; do pad="${pad}p"; done
+    local dir="/tmp/wk-bench-pad-$pad" link="$dir/$(basename "$target")"
+    if [ -n "$runner" ]; then
+        "$runner" mkdir -p "$dir" >/dev/null 2>&1
+        "$runner" ln -sf "$target" "$link" >/dev/null 2>&1
+    else
+        mkdir -p "$dir" 2>/dev/null
+        ln -sf "$target" "$link" 2>/dev/null
+    fi
+    printf '%s' "$link"
+}
+
+# bench_configuration_args -- into the global array BENCH_CFG_ARGS, the
+# `wkdata env-record` arguments for the `configuration` block, read straight
+# off the WK_BENCH_* knobs. path_len records the pad *requested* rather than
+# a resolved path's length: the two runners (jsc, a browser) pad a different
+# binary at a different point in cmd_run, and the number that matters for
+# grouping variance is which axis was varied, not the exact string. A knob
+# left off contributes nothing, and wkdata.py's own defaults fill the gap.
+bench_configuration_args() {
+    BENCH_CFG_ARGS=()
+    [ "${WK_BENCH_ASLR:-}" = off ] && BENCH_CFG_ARGS+=("configuration.aslr=off")
+    local pad="${WK_BENCH_ENV_PAD:-0}"
+    case "$pad" in ''|*[!0-9]*) pad=0 ;; esac
+    [ "$pad" -gt 0 ] && BENCH_CFG_ARGS+=("configuration.env_pad_bytes=$pad")
+    local pl="${WK_BENCH_PATH_PAD:-0}"
+    case "$pl" in ''|*[!0-9]*) pl=0 ;; esac
+    [ "$pl" -gt 0 ] && BENCH_CFG_ARGS+=("configuration.path_len=$pl")
+    return 0
 }
 
 CONFIG="${WK_CONFIG:-wpe-release}"
@@ -537,6 +632,15 @@ run_jsc() {
     var=$(config_run_var)
     dir=$(config_run_dir "$src")
 
+    # Path padding runs through the same t_exec this runner already uses, so
+    # the symlink lives in the container the binary will actually run in.
+    if [ "${WK_BENCH_PATH_PAD:-0}" -gt 0 ] 2>/dev/null; then
+        _bench_pad_runner() { t_exec "$ws" "$@"; }
+        jsc=$(bench_padded_path _bench_pad_runner "$jsc")
+    fi
+    local aslr; aslr=$(bench_aslr_wrap)
+    local pad_prelude; pad_prelude=$(bench_env_pad_prelude)
+
     # cli.js takes its options from the shell's script arguments -- everything
     # after `--`, which jsc hands to the script as `scriptArgs`. Its own
     # --help lists them; two are used here.
@@ -569,8 +673,8 @@ run_jsc() {
         set +e
         run_watched "$out/run-$i.log" -- \
             t_exec "$ws" bash -lc "export $var=\"$dir\${${var}:+:\${${var}}}\"; \
-                cd $(sh_quote "$payload_ctr") && \
-                exec $(sh_quote "$jsc") cli.js -- $cliargs"
+                ${pad_prelude}cd $(sh_quote "$payload_ctr") && \
+                exec ${aslr}$(sh_quote "$jsc") cli.js -- $cliargs"
         rc=$?
         set -e
         if [ "$rc" -ne 0 ]; then
@@ -712,6 +816,7 @@ cmd_run() {
     # measurements -- different syscall path, page size and kernel pointer
     # width. A container borrows the host's kernel, so this is the host's
     # answer and is meant to be.
+    bench_configuration_args
     wkdata env-record "$out/env.json" \
         plan="$plan" workspace="$ws" config="$CONFIG" browser="$BROWSER" \
         webkit_sha="$sha" count="$COUNT" local_copy="$seeded" \
@@ -725,7 +830,10 @@ cmd_run() {
         host.nvidia_driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 || true)" \
         host.root_device="$(bench_root_device "$WK_STORE")" \
         host.container_cpus="$(envelope_cores)" host.container_mem_mb="$(envelope_mem_mb)" \
+        ${BENCH_CFG_ARGS[@]+"${BENCH_CFG_ARGS[@]}"} \
         --bool forced="$FORCE" --bool software="$SOFTWARE"
+
+    local wall_start; wall_start=$(date +%s)
 
     # The jsc runner writes its own result.json and reports for itself.
     if [ "$runner" = jsc ]; then
@@ -733,13 +841,14 @@ cmd_run() {
         run_jsc "$ws" "$plan" "$out" "$id" "$seeded" "$seeded_ctr" /src/WebKit
         local jrc=$?
         set -e
+        wkdata env-record "$out/env.json" --update wall_time_s="$(( $(date +%s) - wall_start ))"
         [ "$jrc" -eq 0 ] || exit "$jrc"
 
         info "BENCH OK  $plan -> $out/result.json"
         tr '\r' '\n' < "$out/run-1.log" | grep -iE '^(Score|Total|.*Score:)' \
             | tail -5 | sed 's/^/  /' >&2 || true
         log ""
-        log "  compare with:  wk bench compare <other-run> $id"
+        log "  compare with:  wk bench report <other-run> $id"
         return 0
     fi
 
@@ -765,7 +874,17 @@ cmd_run() {
         browser_args="--headless $browser_args"
     fi
 
-    local args="--plan $plan --browser $BROWSER --build-directory $build_dir"
+    # Path padding, on the build directory rather than one binary inside it:
+    # run-benchmark resolves MiniBrowser/WPEWebProcess relative to
+    # --build-directory itself, so padding that one path pads every binary it
+    # launches.
+    local run_build_dir="$build_dir"
+    if [ "${WK_BENCH_PATH_PAD:-0}" -gt 0 ] 2>/dev/null; then
+        _bench_pad_runner() { t_exec "$ws" "$@"; }
+        run_build_dir=$(bench_padded_path _bench_pad_runner "$build_dir")
+    fi
+
+    local args="--plan $plan --browser $BROWSER --build-directory $run_build_dir"
     args="$args --output-file /bench/$id/result.json --no-adjust-unit --show-iteration-values"
     [ -n "$COUNT" ] && args="$args --count $COUNT"
     [ -n "$seeded_ctr" ] && args="$args --local-copy $seeded_ctr"
@@ -774,10 +893,13 @@ cmd_run() {
     # to the browser, and anything starting with a dash needs the -- separator.
     [ -n "$browser_args" ] && args="$args -- $browser_args"
 
+    local aslr; aslr=$(bench_aslr_wrap)
+    local pad_prelude; pad_prelude=$(bench_env_pad_prelude)
+
     set +e
     run_watched "$out/run.log" -- \
-        t_exec "$ws" bash -lc "cd /src/WebKit && \
-            WK_BENCH_RUN=$id $run_env Tools/Scripts/run-benchmark $args"
+        t_exec "$ws" bash -lc "cd /src/WebKit && ${pad_prelude} \
+            WK_BENCH_RUN=$id $run_env ${aslr}Tools/Scripts/run-benchmark $args"
     local rc=$?
     set -e
 
@@ -788,30 +910,28 @@ cmd_run() {
         exit "$rc"
     fi
 
+    wkdata env-record "$out/env.json" --update wall_time_s="$(( $(date +%s) - wall_start ))"
+
     info "BENCH OK  $plan -> $out/result.json"
     # run-benchmark prints its own summary table; surface the score line rather
     # than making it be looked up.
     tr '\r' '\n' < "$out/run.log" | grep -iE '^(Score|Total|.*Score:)' | tail -5 | sed 's/^/  /' >&2 || true
     log ""
-    log "  compare with:  wk bench compare <other-run> $id"
+    log "  compare with:  wk bench report <other-run> $id"
 }
 
 # --- comparison --------------------------------------------------------------
-# compare-results does the statistics; this only resolves run ids to files and
-# refuses comparisons that are not like for like.
-# Either side may be a comma-separated list of runs.
+# `wkdata.py report` does the statistics; this only resolves run ids to
+# result.json files and refuses a comparison naming nothing. Either side may
+# be a comma-separated list of runs -- an interleaved A/B (`wk pi bench --ab`)
+# produces exactly that shape, N runs per arm, and every run in an arm feeds
+# the same pooled subtest arrays rather than only the last one winning.
 #
-# compare-results takes `-a` and `-b` with nargs='+' and action='append', and
-# its own help says "if more than one JSON is passed as a/b they will be merged
-# when computing the breakdown". An interleaved A/B (`wk pi bench --ab`)
-# produces exactly that shape: N runs per arm, alternated, and the arms are only
-# meaningful pooled. Taking one run per side would have thrown away every round
-# but the last.
-#
-# Resolution is per element and unchanged: a name in the store, or a path.
-# rewrite=1 maps store paths to /bench, which is where the workspace sees them;
-# rewrite=0 leaves them as host paths, which is what the staged macOS tree needs
-# (it runs compare-results on this machine, with no workspace and no /bench).
+# Resolution is per element: a name in the store, or a path. rewrite=1 maps
+# store paths to /bench, which is where a *workspace* would see them; nothing
+# here runs in a workspace any more (`wk bench report` reads local JSON on
+# this host directly, same as the staged macOS tree already did), so every
+# caller below passes rewrite=0.
 #
 # One path per line, and never a space-joined string: the benchmark volume is
 # named `WK Bench` by default, so every result path on it contains spaces and a
@@ -847,120 +967,54 @@ $2
 EOF
 }
 
-cmd_compare() {
-    # aspec/bspec keep the whole arm; a and b are the first run of each, which
-    # is what the axis checks, the count check and the workspace lookup read.
-    # Every run in one arm came off the same board, the same build and the same
-    # session, so the first is representative and checking all of them would
-    # print the same warning N times.
-    local aspec="$1" bspec="$2" ws="${3:-}"
-    local a="${aspec%%,*}" b="${bspec%%,*}"
+# wk bench report <run-a> <run-b> [--html out.html] [--text] -- resolves run
+# ids or paths to result.json files (aspec/bspec, same comma-separated shape
+# as everywhere else in this file) and hands them to `wkdata.py report`,
+# which does the statistics: per-subtest Score and Time, a Welch/FDR
+# p-value, histograms, the axis warnings, variance by `configuration`. No
+# scipy, no webkitpy, no workspace needed to read two saved runs -- so this
+# no longer needs load_bench_target, and reads results equally well from a
+# container's store or a macOS staged tree's results directory.
+#
+# `wk bench compare` is kept as the same call, in text mode: the verb name a
+# script or a habit already uses, not a second implementation.
+cmd_report() {
+    local aspec="" bspec="" html="" text=""
+    local positional=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --html) html="${2:-}"; shift 2 ;;
+            --text) text=1; shift ;;
+            *) positional+=("$1"); shift ;;
+        esac
+    done
+    aspec="${positional[0]:-}"; bspec="${positional[1]:-}"
+    [ -n "$aspec" ] && [ -n "$bspec" ] || die "usage: wk bench report <run-a> <run-b> [--html out.html] [--text]"
+
     local ca_s cb_s ca cb
-    ca_s=$(_compare_files "$aspec" "-a"); cb_s=$(_compare_files "$bspec" "-b")
+    ca_s=$(_compare_files "$aspec" "-a" 0); cb_s=$(_compare_files "$bspec" "-b" 0)
     _lines_into ca "$ca_s"; _lines_into cb "$cb_s"
-    local fa="$BENCH_DIR/$a/result.json" fb="$BENCH_DIR/$b/result.json"
-    [ -f "$fa" ] || fa="$a"
-    [ -f "$fb" ] || fb="$b"
 
-    # The record sits next to the result, so a run named by path -- which is
-    # how a result on a benchmark volume is named, since it is not in this
-    # machine's store -- gets its axes checked like any other. Without this the
-    # one comparison the bench_host axis exists for (image against container)
-    # was the one that silently skipped the check.
-    local ea="$BENCH_DIR/$a/env.json" eb="$BENCH_DIR/$b/env.json"
-    [ -f "$ea" ] || ea="$(dirname "$fa")/env.json"
-    [ -f "$eb" ] || eb="$(dirname "$fb")/env.json"
-
-    # Comparing a forced run, or two different plans, is almost never what was
-    # meant. Say so rather than printing a confident p-value. The checker
-    # itself -- every axis it looks at and why -- lives in lib/wkdata.py,
-    # axis_check(): domain knowledge belongs in one place, not copied here.
-    wkdata axis-check "$ea" "$eb" >&2 || true
-
-    # A staged tree can do the statistics itself, and in bench mode it
-    # is the only thing that can: that machine has no workspace, no container
-    # and no checkout -- it has the Tools/ tree the run came with. Taken before
-    # the workspace path below, because when both exist the staged one is the
-    # one that matches the results being compared.
-    local staged_cmp=""
-    if is_macos && staged_cmp=$(staged_compare_tool); then
-        if ! "$STAGED_PY" -c 'import scipy' >/dev/null 2>&1; then
-            die "compare-results needs scipy, and $STAGED_PY does not have it.
-    On a benchmark install:  $STAGED_PY -m pip install --user scipy
-    (it is a 30 MB download and the only thing here that needs the network)"
-        fi
-        local ha_s hb_s ha hb
-        ha_s=$(_compare_files "$aspec" "-a" 0); hb_s=$(_compare_files "$bspec" "-b" 0)
-        _lines_into ha "$ha_s"; _lines_into hb "$hb_s"
-        "$STAGED_PY" -u "$staged_cmp" -a "${ha[@]}" -b "${hb[@]}" --breakdown
-        return 0
-    fi
-
-    # compare-results is a WebKit script and needs webkitpy, so it runs in the
-    # workspace like everything else.
-    if [ -z "$ws" ]; then
-        ws=$(wkdata get "$BENCH_DIR/$b/env.json" workspace)
-    fi
-    [ -n "$ws" ] || die "cannot find a workspace to run compare-results in (pass one as the third argument)"
-    load_bench_target "$ws"
-    [ "$(t_info "$ws")" != absent ] \
-        || die "cannot find a workspace to run compare-results in (pass one as the third argument)"
-
-    # A single-iteration run has no variance, so every p-value is NaN and
-    # compare-results dies inside its own significance sort with a bare
-    # AssertionError. Say so here rather than letting a traceback be the
-    # explanation.
+    # A single-iteration run has no variance, so its p-values are all "-".
+    # Said here rather than left to be noticed in the table.
+    local a="${aspec%%,*}" b="${bspec%%,*}" r
     for r in "$a" "$b"; do
         if [ "$(wkdata get "$BENCH_DIR/$r/env.json" count 2>/dev/null)" = 1 ]; then
-            warn "run '$r' has count=1: compare-results cannot compute significance"
+            warn "run '$r' has count=1: no p-value can be computed"
             log  "  re-run with --count 2 or more for a comparison with statistics"
         fi
     done
 
-    # compare-results needs scipy for its significance test, and the SDK image
-    # does not carry it. Installed on demand rather than in firstrun.sh: it is
-    # a 30 MB download that most workspaces never need, and the egress policy
-    # already allows PyPI because build-webkit depends on it.
-    if ! t_exec "$ws" python3 -c 'import scipy' >/dev/null 2>&1; then
-        info "installing scipy for compare-results (once per workspace)"
-        # Two attempts, and the second is not a shrug.
-        #
-        # The SDK image takes the first. A yocto build workspace is plain
-        # Ubuntu 24.04 (container/yocto/Containerfile), which is PEP 668
-        # "externally managed", and there pip refuses outright without it --
-        # exactly the workspace whose cross-built WebKit an on-board run needs
-        # to compare.
-        #
-        # --break-system-packages is safe *with --user*, whatever the name
-        # suggests: it writes ~/.local/lib and touches no distro package. And
-        # the workspace is disposable by construction; `wk rm` is the undo.
-        t_exec "$ws" bash -lc 'pip3 install --user --quiet scipy' >/dev/null 2>&1 \
-            || t_exec "$ws" bash -lc 'pip3 install --user --quiet --break-system-packages scipy' \
-            || die "could not install scipy in '$ws'; compare-results cannot run.
-    Try by hand:  wk enter $ws -- pip3 install --user --break-system-packages scipy"
-        t_exec "$ws" python3 -c 'import scipy' >/dev/null 2>&1 \
-            || die "scipy installed into '$ws' but does not import; compare-results cannot run"
-    fi
-
-    # Invoked through python3 rather than executed: compare-results' shebang is
-    # `#!/usr/bin/env python3 -u`, and Linux env does not split arguments in a
-    # shebang, so running it directly fails with "env: 'python3 -u': No such
-    # file or directory". It works on macOS, which is presumably why it is
-    # still there.
-    t_exec "$ws" bash -lc "cd /src/WebKit && python3 -u Tools/Scripts/compare-results \
-        -a $(sh_quote "${ca[@]}") -b $(sh_quote "${cb[@]}") --breakdown"
+    local join; join=$(IFS=,; printf '%s' "${ca[*]}")
+    local join_b; join_b=$(IFS=,; printf '%s' "${cb[*]}")
+    local extra=()
+    [ -n "$html" ] && extra+=("--html" "$html")
+    [ -n "$text" ] && extra+=("--text")
+    wkdata report "$join" "$join_b" ${extra[@]+"${extra[@]}"}
 }
 
-# The compare-results that belongs to the staged tree, if there is one on this
-# machine. Printed rather than returned so the caller can test for it, and
-# resolved through the same staged_root/staged_pick the runner uses -- one
-# answer to "which staged tree", not two.
-staged_compare_tool() {
-    local root dir
-    root=$(staged_root 2>/dev/null) || return 1
-    dir=$(staged_pick "$root" "") || return 1
-    [ -f "$dir/Tools/Scripts/compare-results" ] || return 1
-    printf '%s' "$dir/Tools/Scripts/compare-results"
+cmd_compare() {
+    cmd_report "$@" --text
 }
 
 # --- staging a build onto a machine that will run it --------------------------
@@ -1511,8 +1565,18 @@ cmd_staged() {
     fi
 
     # --- the run ------------------------------------------------------------
+    # Path padding, on the build directory itself (same reasoning as the
+    # Linux browser run in cmd_run): run-benchmark resolves MiniBrowser.app
+    # relative to --build-directory, so padding that one path pads the
+    # actual binary too. Local, not through a runner function: this role has
+    # no t_exec, it *is* the machine.
+    local run_build_dir="$build_dir"
+    if [ "${WK_BENCH_PATH_PAD:-0}" -gt 0 ] 2>/dev/null; then
+        run_build_dir=$(bench_padded_path "" "$build_dir")
+    fi
+
     local args="--plan $plan --browser minibrowser --platform osx"
-    args="$args --build-directory $(sh_quote "$build_dir")"
+    args="$args --build-directory $(sh_quote "$run_build_dir")"
     args="$args --output-file $(sh_quote "$out/result.json") --no-adjust-unit --show-iteration-values"
     [ -n "$COUNT" ] && args="$args --count $COUNT"
     [ -n "$TIMEOUT" ] && args="$args --timeout $TIMEOUT"
@@ -1562,13 +1626,23 @@ cmd_staged() {
     info "$plan on $(sysctl -n hw.model), from '$ws' ($config${sha:+ @${sha:0:10}})"
     log  "  results: $out"
 
+    # WK_BENCH_ENV_PAD's dummy variable and WK_BENCH_SHARED_CACHE=avoid's
+    # DYLD_SHARED_REGION both have to land in the same shell as run-benchmark,
+    # same reason as the Linux runs in cmd_run.
+    local pad_prelude; pad_prelude=$(bench_env_pad_prelude)
+    local shared_cache_env=""
+    [ "${WK_BENCH_SHARED_CACHE:-}" = avoid ] && shared_cache_env="DYLD_SHARED_REGION=avoid "
+
     # In the staged tree, because webkitpy resolves plans and patches relative
     # to itself and autoinstalls into it.
+    local wall_start; wall_start=$(date +%s)
     set +e
     run_watched "$out/run.log" -- \
-        bash -lc "cd $(sh_quote "$dir") && $(sh_quote "$STAGED_PY") $(sh_quote "$runner_script") $args"
+        bash -lc "cd $(sh_quote "$dir") && ${pad_prelude}${shared_cache_env}$(sh_quote "$STAGED_PY") $(sh_quote "$runner_script") $args"
     local rc=$?
     set -e
+    wkdata env-record "$out/env.json" --update wall_time_s="$(( $(date +%s) - wall_start ))" \
+        configuration.aslr="$(mac_aslr_probe)"
 
     staged_restore_desktop
 
@@ -1593,7 +1667,7 @@ cmd_staged() {
     log "  it is on the benchmark volume, so it survives the way back:"
     log "    wk boot mbp --back        reboot back into host mode"
     log "    wk bench staged --ls      list it from over there"
-    log "    wk bench compare <other> $out/result.json"
+    log "    wk bench report <other> $out/result.json"
 }
 
 # What a run that died halfway leaves behind on the desktop.
@@ -1624,11 +1698,21 @@ staged_restore_desktop() {
 #
 # display matters for the same reason as the container schema: MotionMark and
 # Speedometer both scale with the surface being drawn.
+#
+# aslr is written as "unset" here and updated to the real answer after the
+# run (cmd_staged, below): there is no live browser process to probe until
+# then, and unlike WK_BENCH_ASLR=off on Linux, macOS always has *something*
+# to say about it -- so the initial value is provisional, not a knob's
+# default.
 staged_env_json() {
     local f="$1" dir="$2" plan="$3" config="$4" sha="$5" ws="$6" role="$7" faked="${8:-}"
     local therm disp
     therm=$(pmset -g therm 2>/dev/null | sed -n 's/.*CPU_Speed_Limit *= *//p' | head -1)
     disp=$("$STAGED_PY" -c 'from AppKit import NSScreen; f=NSScreen.mainScreen().frame(); print("%dx%d" % (f.size.width, f.size.height))' 2>/dev/null)
+
+    bench_configuration_args
+    local shared_bool=()
+    [ "${WK_BENCH_SHARED_CACHE:-}" = avoid ] && shared_bool=(--bool "configuration.shared_cache=")
 
     wkdata env-record "$f" \
         plan="$plan" workspace="$ws" config="$config" browser="minibrowser" \
@@ -1643,7 +1727,24 @@ staged_env_json() {
         host.kernel_arch="$(uname -m)" host.root_device="$(bench_root_device /)" \
         host.power="$(pmset -g batt 2>/dev/null | head -1)" \
         host.cpu_speed_limit="${therm:-100}" \
+        ${BENCH_CFG_ARGS[@]+"${BENCH_CFG_ARGS[@]}"} ${shared_bool[@]+"${shared_bool[@]}"} \
         --bool forced="$FORCE" --bool role_marker_overridden="$faked"
+}
+
+# ASLR cannot be turned off on Apple Silicon -- there is no setarch
+# equivalent -- so the axis worth recording is what layout actually
+# happened: the load address slide of the browser process, read cheaply with
+# `vmmap -slide` while it (or its just-exited record) is still findable by
+# name; "os-randomised" otherwise, which is still true and says so honestly
+# rather than leaving the field at its "unset" default.
+mac_aslr_probe() {
+    local pid slide
+    pid=$(pgrep -n MiniBrowser 2>/dev/null | head -1)
+    if [ -n "$pid" ]; then
+        slide=$(vmmap -slide "$pid" 2>/dev/null | sed -n 's/^Load Address Slide: *//p' | head -1 | tr -d ' \r')
+        [ -n "$slide" ] && { printf '%s' "$slide"; return 0; }
+    fi
+    printf 'os-randomised'
 }
 
 # --- dispatch ----------------------------------------------------------------
@@ -1651,6 +1752,8 @@ case "${1:-}" in
     ls)      shift; cmd_ls; exit 0 ;;
     compare) shift; [ $# -ge 2 ] || die "usage: wk bench compare <run-a> <run-b> [ws]; see wk bench -h"
              cmd_compare "$@"; exit 0 ;;
+    report)  shift; [ $# -ge 2 ] || die "usage: wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h"
+             cmd_report "$@"; exit 0 ;;
     staged)  shift; cmd_staged "$@"; exit 0 ;;
     # The whole macOS lane rather than one step of it: build, stage, arm, wait
     # for the person at the startup manager, run, come back, read the result.

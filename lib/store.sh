@@ -507,6 +507,304 @@ wk_mirror_branches() {
 # that is missing exactly when it is wanted.
 wk_mirror_default_remotes() { wk_remotes | awk 'NF {printf "%s%s", sep, $1; sep=" "} END {print ""}'; }
 
+# --- PR / pull-request refs, fetched once into the mirror -------------------
+#
+# `wk pr` and `wk new --pr` want a fork's branch, or an upstream's numbered
+# pull request, available to every workspace without a fetch per workspace
+# and per re-run. The mirror already does exactly this for origin/wpe/the two
+# forks (wk_mirror_default_remotes); this is the same idea for the one branch
+# or one pull request a workspace actually wants, fetched under
+# refs/remotes/pr/... so it sits beside the mirror's other remote-tracking
+# refs and is never mistaken for one of the mirror's own branches
+# (refs/heads/main, wk_mirror_branches).
+#
+# A workspace then fetches this one ref from /mirror -- the same local,
+# instant path `wk sync` already gives it for main -- instead of going to
+# GitHub itself. See wk_pr_checkout below for that half.
+
+# The path a PR ref lands under, in the mirror and in a workspace's own
+# remote-tracking namespace alike -- one name so mirror_fetch_pr/
+# mirror_fetch_pull and the workspace-side fetch never disagree about it.
+# Neither includes the refs/remotes/pr/ prefix; every caller adds that once.
+wk_pr_refname()   { printf '%s/%s/%s' "$1" "$2" "$3"; }  # <user> <repo> <branch>
+wk_pull_refname() { printf '%s/%s' "$1" "$2"; }          # <remote> <n>
+
+# The fetch itself, under the store lock the way `wk sync` takes it (rule 4,
+# one lock per mutated resource) -- this mutates the same bare mirror, so it
+# serialises against a publish exactly as a second `wk sync` would.
+_mirror_fetch_do() {  # <src-refspec> <dest-ref> <src-url-or-remote>
+    local srcspec="$1" dest="$2" src="$3" mirror
+    mirror=$(wk_mirror)
+    if [ ! -d "$mirror" ]; then
+        info "creating bare mirror (first run: this clones all of WebKit)"
+        git init --bare "$mirror"
+        git -C "$mirror" config gc.auto 0
+    fi
+    git -C "$mirror" fetch --quiet "$src" "+$srcspec:$dest"
+}
+
+# One fetch underneath mirror_fetch_pr and mirror_fetch_pull. Only called for
+# a workspace that reads this machine's mirror (wk_pr_checkout decides that up
+# front); a fetch that fails is a refusal, never a detour to GitHub.
+_mirror_fetch_into() {  # <src-url-or-remote> <src-refspec> <dest-ref>
+    local src="$1" srcspec="$2" dest="$3"
+    store_is_local || die "the mirror is not this machine's (\$WK_STORE is $WK_STORE); a workspace here cannot read it"
+    store_init
+    with_lock store -- _mirror_fetch_do "$srcspec" "$dest" "$src"
+}
+
+# mirror_fetch_pr <url> <branch> <refname>
+# Fetches <branch> from a fork's <url> into refs/remotes/pr/<refname> in the
+# mirror. <refname> is the caller's (wk_pr_refname above) so the layout lives
+# in one place rather than being rebuilt at each call site. Fetching the same
+# branch again is a no-op once the mirror already has its head.
+mirror_fetch_pr() {  # <url> <branch> <refname>
+    _mirror_fetch_into "$1" "refs/heads/$2" "refs/remotes/pr/$3"
+}
+
+# mirror_fetch_pull <remote> <n>
+# Fetches refs/pull/<n>/head from an upstream (origin or wpe, by remote name)
+# into refs/remotes/pr/<remote>/<n> -- no fork to discover first, since
+# GitHub serves every pull request's head under the base repository itself.
+mirror_fetch_pull() {  # <remote> <n>
+    local remote="$1" n="$2" url
+    url=$(wk_remotes | awk -v r="$remote" '$1 == r {print $2; exit}')
+    [ -n "$url" ] || die "no such upstream remote '$remote' to fetch a pull request from"
+    _mirror_fetch_into "$url" "refs/pull/$n/head" "refs/remotes/pr/$(wk_pull_refname "$remote" "$n")"
+}
+
+# --- the spec, parsed once ---------------------------------------------------
+#
+# `wk pr` and `wk new --pr` accept the same spec, parsed here once so the two
+# commands and the tests all agree what it means:
+#
+#   user:branch   a fork's branch, found by asking each of wk_pr_repos in
+#                 turn which one has it
+#   <n>           WebKit/WebKit pull request #n (refs/pull/<n>/head) -- no
+#                 fork discovery, GitHub serves the head under the base repo
+#   wpe:<n>       WPEWebKit's pull request #n, the same way
+#
+# Sets PR_KIND (user|pull) and either PR_USER/PR_BRANCH or PR_REMOTE/PR_N.
+# Not `local` to any function: they are this call's result, read by the
+# caller immediately after, the same idiom wk_wiring_script's callers use for
+# its own multi-value answers.
+pr_parse_spec() {  # <spec>
+    local spec="$1"
+    PR_KIND="" PR_USER="" PR_BRANCH="" PR_REMOTE="" PR_N=""
+    case "$spec" in
+        [0-9]*)
+            case "$spec" in *[!0-9]*) die "'$spec' is not a pull request number (digits only)" ;; esac
+            PR_KIND=pull; PR_REMOTE=origin; PR_N="$spec" ;;
+        wpe:[0-9]*)
+            PR_N="${spec#wpe:}"
+            case "$PR_N" in *[!0-9]*) die "'$spec' is not a pull request number (digits only)" ;; esac
+            PR_KIND=pull; PR_REMOTE=wpe ;;
+        *:*)
+            PR_USER="${spec%%:*}"; PR_BRANCH="${spec#*:}"
+            [ -n "$PR_USER" ] && [ -n "$PR_BRANCH" ] \
+                || die "expected <user>:<branch>, got '$spec'"
+            PR_KIND=user ;;
+        *)
+            die "'$spec' is not a PR spec: <user>:<branch>, a pull request number, or wpe:<number>" ;;
+    esac
+}
+
+# wk_pr_checkout <name> <spec>
+#
+# Check out a PR head in the workspace <name>: resolve <spec> (pr_parse_spec
+# above), fetch it into the mirror once, and check it out in the workspace
+# from there, falling back to GitHub directly when the mirror is not
+# reachable or the workspace has no /mirror. Shared by `wk pr` and
+# `wk new --pr` so a workspace made with --pr and one made with `wk new` then
+# `wk pr` end up identical -- one implementation, not two call sites that can
+# drift.
+#
+# Assumes what t_exec itself assumes: lib/target.sh is sourced and
+# load_target has already resolved <name>'s target -- true of both callers by
+# the time they reach this, and not restated here.
+#
+# WK_FORCE, read the same way barrier() reads it everywhere else: take the PR
+# head even when a local branch of the same name has commits it does not,
+# discarding them.
+wk_pr_checkout() {  # <name> <spec>
+    local name="$1" spec="$2"
+    local src repo url branch remote head_sha local_sha dirty reset ahead
+    local probe found n mirror_ok mirror_ref add_remote="" src_ref net_refspec fetch_step
+
+    pr_parse_spec "$spec"
+    src=$(t_src "$name")
+    # Where the workspace fetches from is a property of its target: a container
+    # reads this machine's mirror (bind-mounted as /mirror), so the branch is
+    # fetched into the mirror once and every workspace takes it from there; a
+    # vm or remote workspace has no path to that mirror and fetches from GitHub.
+    mirror_ok=""
+    [ "${WK_TARGET_KIND:-}" = container ] && store_is_local && mirror_ok=1
+
+    case "$PR_KIND" in
+    user)
+        # --- which project, from an anonymous ls-remote per candidate repo --
+        # `git ls-remote` over HTTPS is anonymous, the same reason a fork
+        # fetches while `wk push` is off.
+        probe=$(t_exec "$name" bash -c "
+            cd $(sh_quote "$src") || exit 1
+            for r in $(wk_pr_repos | tr '\n' ' '); do
+                u=https://github.com/$(sh_quote "$PR_USER")/\$r.git
+                sha=\$(git ls-remote \"\$u\" refs/heads/$(sh_quote "$PR_BRANCH") 2>/dev/null | awk '{print \$1}')
+                [ -n \"\$sha\" ] && echo \"found=\$r \$u \$sha\"
+            done
+            # A remote that already points at this user's copy of one of
+            # them, so a second one is not added beside it under another name.
+            for rr in \$(git remote); do
+                uu=\$(git remote get-url \"\$rr\")
+                case \"\$uu\" in
+                    *[:/]$(sh_quote "$PR_USER")/*) echo \"remote=\$rr \$uu\" ;;
+                esac
+            done
+            echo \"local=\$(git rev-parse --verify --quiet refs/heads/$(sh_quote "$PR_BRANCH") || true)\"
+            echo \"dirty=\$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"
+        " 2>/dev/null | tr -d '\r') || die "could not reach the checkout in '$name'"
+
+        found=$(printf '%s\n' "$probe" | sed -n 's/^found=//p')
+        n=$(printf '%s\n' "$found" | grep -c . || true)
+        case "$n" in
+        0) die "no branch '$PR_BRANCH' in $(wk_pr_repos | tr '\n' '/' | sed 's|/$||') under '$PR_USER'.
+    Checked: $(wk_pr_repos | sed "s|^|https://github.com/$PR_USER/|;s|\$|.git|" | tr '\n' ' ')" ;;
+        1) ;;
+        *) die "'$PR_BRANCH' exists in more than one of $PR_USER's repositories:
+$(printf '%s\n' "$found" | sed 's/^/    /')
+    They are different projects; check the PR page for which one it is and
+    fetch that remote by hand." ;;
+        esac
+
+        repo=$(printf '%s' "$found" | awk '{print $1}')
+        url=$(printf '%s' "$found"  | awk '{print $2}')
+        head_sha=$(printf '%s' "$found" | awk '{print $3}')
+        local_sha=$(kv_get local <<<"$probe")
+        dirty=$(kv_get dirty <<<"$probe")
+        remote=$(printf '%s\n' "$probe" | sed -n 's/^remote=//p' | awk -v u="$url" '$2 == u {print $1; exit}')
+
+        # The name a new remote gets. The user's, with the project appended
+        # when it is not the one `origin` is -- one user can have a PR in
+        # both, and two remotes cannot share a name.
+        if [ -z "$remote" ]; then
+            remote="$PR_USER"
+            [ "$repo" = "$(wk_pr_repos | head -1)" ] || remote="$PR_USER-$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"
+        fi
+        branch="$PR_BRANCH"
+        add_remote=1
+        src_ref="$branch"
+        mirror_ref="refs/remotes/pr/$(wk_pr_refname "$PR_USER" "$repo" "$branch")"
+
+        [ -z "$mirror_ok" ] || mirror_fetch_pr "$url" "$branch" "$(wk_pr_refname "$PR_USER" "$repo" "$branch")" \
+            || die "could not fetch '$branch' from $url into the mirror; nothing was checked out"
+        ;;
+
+    pull)
+        remote="$PR_REMOTE"
+        url=$(wk_remotes | awk -v r="$remote" '$1 == r {print $2; exit}')
+        [ -n "$url" ] || die "no such upstream remote '$remote'"
+        repo=$(printf '%s' "$url" | sed -E 's#(\.git)?$##; s#.*/##')
+        if [ "$remote" = origin ]; then branch="pr/$PR_N"; else branch="pr/$remote-$PR_N"; fi
+        add_remote=""
+        src_ref="refs/pull/$PR_N/head"
+        mirror_ref="refs/remotes/pr/$(wk_pull_refname "$remote" "$PR_N")"
+
+        probe=$(t_exec "$name" bash -c "
+            cd $(sh_quote "$src") || exit 1
+            echo \"local=\$(git rev-parse --verify --quiet refs/heads/$(sh_quote "$branch") || true)\"
+            echo \"dirty=\$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"
+        " 2>/dev/null | tr -d '\r') || die "could not reach the checkout in '$name'"
+        local_sha=$(kv_get local <<<"$probe")
+        dirty=$(kv_get dirty <<<"$probe")
+
+        head_sha=$(t_exec "$name" bash -c "
+            git ls-remote $(sh_quote "$url") $(sh_quote "$src_ref") 2>/dev/null | awk '{print \$1}'
+        " 2>/dev/null | tr -d '\r')
+        [ -n "$head_sha" ] || die "no pull request #$PR_N on $repo (checked $url)"
+
+        [ -z "$mirror_ok" ] || mirror_fetch_pull "$remote" "$PR_N" \
+            || die "could not fetch pull/$PR_N from $url into the mirror; nothing was checked out"
+        ;;
+    esac
+
+    # --- what this would cost -------------------------------------------------
+    if [ "${dirty:-0}" -gt 0 ] 2>/dev/null; then
+        warn "'$name' has $dirty uncommitted change(s); the checkout carries them across"
+    fi
+
+    reset=""
+    if [ -n "$local_sha" ] && [ "$local_sha" != "$head_sha" ]; then
+        # Whether it is *your* work at stake is the whole question, so it is
+        # asked of git rather than assumed: commits on the local branch that
+        # the PR head does not have. None of them means the branch is simply
+        # behind, and fast-forwarding it costs nothing.
+        ahead=$(t_exec "$name" bash -c "
+            cd $(sh_quote "$src") &&
+            git fetch --quiet $(sh_quote "$url") $(sh_quote "$src_ref") 2>/dev/null &&
+            git rev-list --count FETCH_HEAD..$(sh_quote "$branch") 2>/dev/null || echo unknown
+        " 2>/dev/null | tr -d '\r' | tail -1)
+
+        case "$ahead" in
+            0)  reset=1 ;;   # behind or equal: taking the PR head loses nothing
+            unknown)
+                barrier "cannot tell whether '$branch' in '$name' has work the PR head does not.
+    Checking it out will leave it as it is."
+                ;;
+            *)
+                if [ -n "${WK_FORCE:-}" ]; then
+                    barrier "discarding $ahead local commit(s) on '$branch' in '$name'."
+                    reset=1
+                else
+                    warn "local '$branch' has $ahead commit(s) the PR head does not have"
+                    log  "  it is checked out as it is; nothing is discarded."
+                    log  "  to take the PR head instead and lose those commits:"
+                    log  "    wk pr${name:+ $name} $spec --force"
+                fi
+                ;;
+        esac
+    fi
+
+    # --- do it: from the mirror if it landed there this run, GitHub otherwise -
+    net_refspec="$src_ref:refs/remotes/$remote/$branch"
+    fetch_step="git fetch --quiet $(sh_quote "$remote") $(sh_quote "$net_refspec")"
+    if [ -n "$add_remote" ]; then
+        fetch_step="git remote get-url $(sh_quote "$remote") >/dev/null 2>&1 || git remote add $(sh_quote "$remote") $(sh_quote "$url")
+        git remote set-url $(sh_quote "$remote") $(sh_quote "$url")
+        $fetch_step"
+    fi
+    if [ -n "$mirror_ok" ]; then
+        # The one line `sync_workspaces` uses to fetch from the mounted
+        # mirror (cmd/sync), narrowed to the single ref this needs: a
+        # workspace with no /mirror, or one where this run's fetch into the
+        # mirror did not happen, falls through to the network path above
+        # unchanged.
+        fetch_step="if [ -d /mirror/WebKit.git ] && git -C /mirror/WebKit.git rev-parse --verify --quiet $(sh_quote "$mirror_ref") >/dev/null 2>&1
+        then git fetch --quiet /mirror/WebKit.git $(sh_quote "$mirror_ref:refs/remotes/$remote/$branch")
+        else $fetch_step
+        fi"
+    fi
+
+    t_exec "$name" bash -c "
+        set -e
+        cd $(sh_quote "$src")
+        $fetch_step
+        if git show-ref --verify --quiet refs/heads/$(sh_quote "$branch"); then
+            git checkout --quiet $(sh_quote "$branch")
+            ${reset:+git reset --hard --quiet refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch")}
+        else
+            git checkout --quiet -b $(sh_quote "$branch") --track refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch")
+        fi
+        git branch --quiet --set-upstream-to=refs/remotes/$(sh_quote "$remote")/$(sh_quote "$branch") $(sh_quote "$branch") 2>/dev/null || true
+    " || die "could not check out '$branch' in '$name'"
+
+    info "'$name' is on $branch ($repo, from $remote)"
+    # --no-pager, and it is not cosmetic: the driver's exec gives the command
+    # a terminal, so `git log` starts a pager and waits for a keystroke that
+    # is never coming -- which looks exactly like a fetch that will not
+    # finish. Measured once, at seven minutes.
+    log  "  $(t_exec "$name" bash -c "cd $(sh_quote "$src") && git --no-pager log --oneline -1" 2>/dev/null | tr -d '\r')"
+}
+
 store_init() {
     ensure_dir "$WK_STORE"
     ensure_dir "$WK_STORE/git"

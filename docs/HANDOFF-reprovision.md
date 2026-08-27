@@ -35,8 +35,8 @@ comment explaining why it was different and the `Host tolken-bench` contrast
 paragraph, then `grep -rn justinmichaud . | grep -v '^\./\.git/'`. Two kinds of
 hit and only one is yours: `/Users/justinmichaud` paths go;
 `github.com/justinmichaud/…` (the fork remotes in `lib/store.sh`, `cmd/pr`'s
-example, the clone URLs in README/SETUP) is a **GitHub account name** and must
-not be swept up with it.
+example, the clone URL in README.md) is a **GitHub account name** and must not
+be swept up with it.
 
 ## Remaining — Remote Login, as a first-setup step
 
@@ -91,3 +91,16 @@ forgetting it is only discovered after a reboot into a mode you cannot log into.
 The bench volume's own provisioning list is deliberately not duplicated here:
 `docs/HANDOFF-mac-perf-mode.md`, and `wk bench mac-volume --provision` does most
 of it.
+
+## Machine-local state a rebuild must restore
+
+- [ ] `$WK_STORE/pi-hosts` and the rpi5 tuning tree (`host/linux/rpi5/rpi5.conf`,
+      gitignored) live outside the repo: `wk doctor` lists them as backed-up;
+      confirm a rebuild restores them
+- [ ] `gh auth login` then `wk key register` is a two-step by hand; `./setup`
+      names both
+- [ ] the macOS golden base rebuild is ~3 hours; nothing shortens it
+- [ ] Tart is hand-installed (`~/.local/share/tart/tart.app`, `~/.local/bin/tart`
+      symlinked into the bundle -- the binary needs the bundle's virtualization
+      entitlement); `./setup` verifies presence only
+

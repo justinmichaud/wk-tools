@@ -2,9 +2,8 @@
 
 Running MiniBrowser graphically is done (`wk gui <ws> [url]`, needs `wk session
 on`; `--software` falls back to llvmpipe). Debugging it is done too, as
-`wk gui --lldb [ui|web]` and `wk test --layout --lldb [web|ui]` — see
-"Debugging (Linux, the CMake ports)" in `docs/TESTING.md` for what was verified
-and at what cost.
+`wk gui --lldb [ui|web]` and `wk test --layout --lldb [web|ui]`
+(`docs/Urgent/HANDOFF-debug.md` has what was verified and at what cost).
 
 What is left is the profiler.
 
@@ -18,9 +17,4 @@ What is left is the profiler.
   MiniBrowser command it builds (`webkitpy/port/{gtk,wpe}.py`), which is exactly
   how `wk gui --lldb` now gets a debugger in front of the right binary while
   keeping the port's own environment. samply goes in the same place.
-- **Which process, then.** `--browser` would profile the UI process, which
-  spends its life in a run loop; the web process is nearly always the subject,
-  and `--attach $(config_web_process_name)` already reaches it. Whether
-  `--browser` should mean "the UI process" or "the browser, web process
-  included" is the open question, and it is the same one `--lldb ui` versus
-  `--lldb web` answered for the debugger.
+- **Which process, then** — decision pending (`docs/defects` 13).

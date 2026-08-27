@@ -60,7 +60,6 @@ ls)
 new)
     NAME="${1:-}"; require_name "$NAME"
     t_create "$NAME"
-    target_register "$NAME" vm
     info "created; start it with: wk vm start $NAME"
     ;;
 start)
@@ -160,7 +159,6 @@ rm)
     confirm "delete macOS VM '$NAME'?" || die "aborted"
     t_destroy "$NAME"
     ssh_alias_remove "$NAME"
-    target_forget "$NAME"
     ;;
 *)
     die "usage: wk vm ls|new|start|stop|ip|enter|sync|rm <name>

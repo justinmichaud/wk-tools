@@ -157,11 +157,14 @@ local_state "$WK_STORE/secrets/claude-credentials.json" re-authable "claude logi
 local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "wk key tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected"
 # The fleet's one WiFi identity (disk_wifi_creds_path, boot/disk.sh) -- what
 # lets rpi3/rpi4/rpi5's rescue and bench images reach a network from the desk,
-# where none of the three has a cable. re-authable rather than backed-up: the
-# SSID and passphrase are already known to whoever is at the bench, and
-# nothing here can look them up on its own. `wk sysimage write` refuses a
-# rpi3/rpi4/rpi5 card with none present, and does not take --force.
-local_state "${WK_WIFI_CREDS:-$WK_STORE/secrets/wifi}" re-authable "hand-create it: ssid=<network> and psk=<passphrase> lines, mode 0600"
+# where none of the three has a cable. Host-local, the same shape as the
+# tailnet auth key above and for the same reason: this write happens on the
+# host, and $WK_STORE is the podman VM's store on macOS, not a path the host
+# can write to. re-authable rather than backed-up: the SSID and passphrase
+# are already known to whoever is at the bench, and nothing here can look
+# them up on its own. `wk sysimage write` refuses a rpi3/rpi4/rpi5 card with
+# none present, and does not take --force.
+local_state "${WK_WIFI_CREDS:-$HOME/.config/wk/wifi}" re-authable "hand-create it: ssid=<network> and psk=<passphrase> lines, mode 0600"
 # What the request broker did, on this machine, for workspaces that could not do
 # it themselves. Regenerable in the only sense that matters here: nothing reads
 # an old record to decide anything -- a machine's state is always read back from

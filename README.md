@@ -104,7 +104,8 @@ Prerequisites:
   <https://podman.io> (the official installer, not Homebrew), Tailscale
   (<https://tailscale.com/download/macos>), Zed (<https://zed.dev/download>,
   only for `wk zed`), Tart (<https://tart.run>, only for building Apple
-  ports).
+  ports; install the `.app` bundle and symlink `tart` from inside it -- the
+  binary needs the bundle's entitlement, so a copied-out executable fails).
 - Ubuntu 26.04: nothing beforehand — `./setup` installs the stock apt packages
   and Tailscale itself.
 - Both: a GitHub fork of WebKit under your own account
@@ -132,8 +133,9 @@ eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk complet
 ```
 
 Boards that reach the bench over WiFi (`MACH_NET=wifi`) take their credentials
-from `$WK_STORE/secrets/wifi` on the writing machine (`ssid=` and `psk=` lines,
-never in git); `wk sysimage write` refuses without them.
+from `~/.config/wk/wifi` on the writing machine (`ssid=` and `psk=` lines,
+never in git; override with `WK_WIFI_CREDS`); `wk sysimage write` refuses
+without them.
 
 ```sh
 wk new bug-238
@@ -182,6 +184,15 @@ wk remote setup buildbox4               # probes it over ssh, writes targets/hos
 wk new big-build --target buildbox4
 wk build big-build jsc-release          # sized from that machine's live load
 wk remote rm buildbox4                  # undo it; git rm the conf to forget it for good
+```
+
+**Someone else's PR, a PR by number, a rebase**
+
+```sh
+wk pr bug-238 alice:eng/some-branch      # fetched once into the mirror, then into the workspace
+wk pr bug-238 1234                       # WebKit PR #1234; wpe:1234 for WPEWebKit
+wk pr rebase                             # inside a workspace: fetch main, rebase onto it
+wk new review-1234 --pr 1234             # a fresh workspace straight onto a PR
 ```
 
 **Sync (this machine, or everywhere)**
@@ -300,6 +311,7 @@ wk session off
 wk claude bug-238                # verifies the sandbox first, refuses to start if it fails
 wk claude bug-238 -r             # resume
 wk claude bug-238 --continue
+wk claude bug-238 --rc                   # a Remote Control server the Claude app attaches to; --rc --stop ends it
 ```
 
 A `remote` target has no sandbox to verify; `wk claude` there stops at a

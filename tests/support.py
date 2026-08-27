@@ -209,6 +209,41 @@ def machine_reachable(name, timeout=5):
     return cp.returncode == 0
 
 
+@contextlib.contextmanager
+def stub_path(scripts):
+    """A temp directory, first on PATH, holding one fake executable per
+    `{name: body}` entry -- the technique 'un-managed clobbering' and the
+    disk-logic tests use to drive real driver code (targets/container.sh,
+    targets/vm.sh, boot/disk.sh) against a filesystem-only fake of
+    `podman`/`tart`/`sfdisk`/`lsblk` rather than real hardware or a real VM.
+    `body` is wrapped in a `#!/bin/sh` shebang unless it supplies its own.
+    Yields the bin directory; the caller puts it first on PATH, e.g.
+        env={"PATH": f"{binp}:{os.environ['PATH']}"}
+    """
+    d = tempfile.mkdtemp(prefix="wk-test-stub-bin-")
+    try:
+        for name, body in scripts.items():
+            p = Path(d) / name
+            p.write_text(body if body.startswith("#!") else f"#!/bin/sh\n{body}")
+            p.chmod(0o755)
+        yield Path(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def podman_vm_ssh(command, machine="wk", timeout=60):
+    """Run one command inside the podman VM this repo drives -- the same
+    machine `detach_run`'s driver process lives on once `wk new --target
+    container` forwards there (lib/target.sh's forward_to_vm execs the whole
+    command over `podman machine ssh`). For a test that has to reach in and
+    kill a real driver pid, or read its store, without forwarding a second
+    whole `wk` command to do it."""
+    return subprocess.run(
+        ["podman", "machine", "ssh", machine, "--", command],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
 def requires_machine(name, timeout=5):
     """Skip decorator for a test that reaches a configured machine over
     ssh: it never provisions, reboots or otherwise mutates the machine, and

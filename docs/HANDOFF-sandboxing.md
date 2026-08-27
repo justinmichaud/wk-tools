@@ -92,7 +92,7 @@ every surface added since the request:
 - **Two live sudo grants that contradict the password rule**, both reported by
   the tooling itself rather than found by the audit: moose's `/usr/bin/tee` is
   NOPASSWD, which is passwordless write to any file and therefore equivalent to
-  NOPASSWD root (`docs/HANDOFF-boot.md`); and **the rpi5 grants
+  NOPASSWD root; and **the rpi5 grants
   `(ALL) NOPASSWD: ALL`** — `sudo -n -l` on the board shows it, so root costs
   nothing at all there, and `wk sudo status` is what reports it. Remedy:
   `wk sudo setup`. Fix the rpi5 now; narrowing moose's grant is the audit's.

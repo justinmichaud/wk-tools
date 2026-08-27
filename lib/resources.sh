@@ -41,27 +41,24 @@ WK_HEADLESS_RESERVE_MB="${WK_HEADLESS_RESERVE_MB:-2048}"
 # the host picked -j9. A guest with a window on screen is still not a machine
 # with a desktop session to protect.
 
-# Where the headless marker lives, in one place.
+# Where the headless marker lives: one path, not one spelling per writer.
+# The only place it is ever written is the podman VM's own provisioning
+# (host/macos/playbook.yaml), before any wk command has run inside that VM --
+# so the writer cannot derive $WK_STORE and uses the fixed /var/lib/wk it
+# knows it is creating. `${WK_STORE:-/var/lib/wk}` is that same fixed path
+# by default (macOS and the VM both default $WK_STORE to /var/lib/wk -- see
+# _wk_default_store in lib/store.sh) and only diverges from it when a caller
+# has deliberately pointed $WK_STORE elsewhere, which is exactly the case a
+# reader should follow rather than a second, independently-checked spelling.
 #
-# Not three spellings -- `/var/lib/wk/.headless` here, `$WK_STORE/.headless` in
-# the Linux machine stage, `{{ wk_root }}/.headless` in the podman VM's
-# playbook -- agreeing only when $WK_STORE happens to be /var/lib/wk. On a
-# workstation whose store is under XDG they do not, so a marker could sit in
-# one path while the code that acts on it reads the other. Both are checked:
-# the fixed path because the VM's playbook writes it before any wk has run,
-# the store path because that is this machine's own state.
+# Written at provisioning; read by the resource envelope below.
 #
-# $WK_STORE is not always set and command -v guards in_workspace: this file is
-# sourced on its own by host scripts that have no reason to know about
-# workspaces.
-headless_markers() { printf '%s\n' "${WK_STORE:-}/.headless" /var/lib/wk/.headless; }
+# command -v guards in_workspace: this file is sourced on its own by host
+# scripts that have no reason to know about workspaces.
+headless_marker() { printf '%s' "${WK_STORE:-/var/lib/wk}/.headless"; }
 
 is_headless() {
-    local m
-    for m in $(headless_markers); do
-        [ "$m" = "/.headless" ] && continue
-        [ -f "$m" ] && return 0
-    done
+    [ -f "$(headless_marker)" ] && return 0
     command -v in_workspace >/dev/null 2>&1 && in_workspace
 }
 

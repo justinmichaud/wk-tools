@@ -15,19 +15,26 @@
 #
 #   this end     resolves the target, refuses what should be refused, starts
 #                the driver, and follows its log until it ends. Holds no lock
-#                and mutates nothing, so killing it costs only the waiting.
+#                of its own and creates nothing, so killing it before the
+#                workspace is ready costs only the waiting; --pr's checkout,
+#                once the workspace is ready, is the one thing this end does
+#                that changes something (wk_pr_checkout, lib/store.sh -- the
+#                same function `wk pr` calls).
 #   the driver   (`--_detached`, internal) does everything that changes
 #                anything, under the workspace lock, writing `ws.status` as it
 #                goes and `.wk-ready` next to the workspace as its last act.
 #
 # `--no-wait` returns as soon as the driver is started, for a script that has
 # something else to do; `wk status <name>` and the log say where it got to.
+# Incompatible with --pr, which needs the workspace to be ready first.
 #
 #   --target <target>   which target to create it on (default: container)
 #   --base <id>          which base snapshot to build from (default: current)
 #   --arch <arch>        the architecture the workspace itself runs (container only)
 #   --zed                open the checkout in Zed once it is ready
 #   --no-wait            return once creation has started, without waiting for it
+#   --pr <spec>          check it out onto a PR head once ready -- the same
+#                        spec `wk pr` takes: <user>:<branch>, <n>, or wpe:<n>
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -64,6 +71,12 @@ NO_WAIT=""
 # which is the only way the two halves cannot drift apart.
 DETACHED=""
 
+# A PR spec (see `wk pr -h`) to check out once the workspace is ready. Runs
+# through wk_pr_checkout (lib/store.sh), the same function `wk pr` calls, so
+# a workspace made with --pr and one made with `wk new` then `wk pr` end up
+# identical.
+PR_SPEC=""
+
 NAME="${WK_NAME:-}"
 require_name "$NAME"
 
@@ -74,6 +87,7 @@ while [ $# -gt 0 ]; do
         --arch)   ARCH=$(arch_canon "${2:-}"); shift 2 ;;
         --zed)    ZED=1; shift ;;
         --no-wait) NO_WAIT=1; shift ;;
+        --pr)     PR_SPEC="${2:-}"; [ -n "$PR_SPEC" ] || die "--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>"; shift 2 ;;
         --_detached) DETACHED=1; shift ;;
         --sysroot)
             die "--sysroot is not implemented (docs/Nice to have/HANDOFF-cross-compile.md).
@@ -96,6 +110,17 @@ if ! arch_is_native "$ARCH" && [ "$WK_TARGET_KIND" != container ]; then
     32-bit ARM needs a host that can execute it: this Neoverse-N1 runs AArch32
     at EL0, and Apple Silicon does not, which is why it lives on the Linux
     workstation permanently."
+fi
+
+if [ -n "$PR_SPEC" ]; then
+    # Checked out only once the workspace exists and this end has followed
+    # creation to the end -- --no-wait returns before either is true.
+    [ -z "$NO_WAIT" ] || die "--pr needs the workspace to be ready, and --no-wait returns before it is.
+    Drop --no-wait, or check it out afterwards:  wk pr $NAME $PR_SPEC"
+    # Fail fast, before starting a detached driver: a spec that is not one of
+    # the three shapes 'wk pr' accepts is a mistake worth catching now rather
+    # than after minutes of creation.
+    pr_parse_spec "$PR_SPEC"
 fi
 
 # Refuse before detaching, the same way `wk rm` refuses before prompting: the
@@ -189,19 +214,14 @@ if [ -n "$DETACHED" ]; then
         log  "  (an interrupted 'wk new' leaves this; nothing in it is worth keeping)"
         t_destroy "$NAME" || die "could not destroy the half-made workspace '$NAME'"
         ssh_alias_remove "$NAME"
-        target_forget "$NAME"
         ;;
     esac
 
-    # The record before the thing it describes -- the mirror of `wk rm`'s rule
-    # that the record outlives it. A later command needs the registry to find
-    # a creation that died half-way; without it, every command falls back to
-    # the default target and reports "no such workspace".
-    #
-    # Not a fact this depends on: ws_target derives the same answer from the
-    # stores when the entry is missing, and `wk rm` forgets it once the
-    # artifacts are gone.
-    target_register "$NAME" "$TARGET"
+    # No registry entry to write: `stage()` above already recorded
+    # `target=$TARGET` in the status file, on this target's own store, the
+    # first thing this driver did. That is the only record a creation-in-
+    # flight needs -- ws_target reads it while state is `creating`, and the
+    # store itself once there is one (lib/target.sh).
 
     # Only the overlay scheme has base snapshots. A macOS VM's "base" is the golden
     # guest image, which the driver manages itself, so demanding a snapshot id here
@@ -306,6 +326,13 @@ esac
 
 LABEL=$(arch_label "$ARCH")
 info "workspace '$NAME' ready${LABEL:+ ($LABEL)}"
+
+# --pr, now that the workspace exists and this end has followed it to ready:
+# the same function `wk pr` calls (lib/store.sh), so this is not a second
+# implementation of checking out a PR.
+if [ -n "$PR_SPEC" ]; then
+    wk_pr_checkout "$NAME" "$PR_SPEC"
+fi
 
 # Said once, here, rather than by every later command: an armhf workspace is a
 # software-rendering workspace (no NVIDIA userspace for it), which is fine for

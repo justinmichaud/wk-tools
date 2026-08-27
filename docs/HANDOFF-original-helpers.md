@@ -23,6 +23,8 @@ one machine — but that dropping one should be a decision.
      `wasm-debug`, `wasm-test-v8`. All thin wrappers over `$VM/bin/jsc` plus
      `wabt`; if they come back they belong in `container/bin/`;
    - `bench-js2-simd-nosimd` and `-v8` (SIMD on/off, and against V8);
+   - `report` (the weekly summary, `gh`-authenticated) — nothing in the tree
+     covers it today.
    (The git helpers are done: `wk pr`, `wk pick`, and `git-clean`,
    `commit-count`, `git-sync-fork` in `container/bin/`.)
 2. **The option-toggle A/B benchmark mode** (`bench-js2-cli`,
@@ -55,7 +57,7 @@ one machine — but that dropping one should be a decision.
 `jsc-stress`→`wk test`; the JS2/SP2/JS3 loops→`wk bench`; `bench-show-results*`
 →`wk bench compare`; `quiesce.sh`→`wk quiesce` + `admin/wk-quiesce-priv`;
 `strip-addresses` and `show-profiled-functions`→`container/bin/`; `gpr`→`wk pr`;
-`report`→`wk report`; the profiling runs→`wk profile`; `lldbinit.py`→
+the profiling runs→`wk profile`; `lldbinit.py`→
 `dotfiles/lldbinit` + `container/lldb/`; `rpi5-tune/`→`host/linux/rpi5/`.
 
 Two things from `quiesce.sh` that were hard-won: the raiser above, and **a

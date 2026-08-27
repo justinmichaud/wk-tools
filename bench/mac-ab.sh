@@ -689,11 +689,18 @@ $(printf '%s' "$staged" | sed 's/^/    /')"
     # The job, as json, written through python so that quoting is not a shell
     # problem: staged ids and browser arguments both reach this from a command
     # line and one of them can contain spaces.
+    #
+    # aslr/env_pad/path_pad/shared_cache carry the same WK_BENCH_* variance
+    # knobs cmd/bench's header documents, through to the autorun, which
+    # exports them before calling `wk bench staged` -- one set of knobs for
+    # both the container path and this one, not a macOS-shaped second copy.
     WK_JOB_PLAN="$PLAN" WK_JOB_ROUNDS="$ROUNDS" WK_JOB_TIMEOUT="$TIMEOUT" \
     WK_JOB_COUNT="$COUNT" WK_JOB_SETTLE="$SETTLE" \
     WK_JOB_A="$A_ID" WK_JOB_B="$B_ID" WK_JOB_AA="$A_ARGS" WK_JOB_BA="$B_ARGS" \
     WK_JOB_TOOLS="/var/wk/wk-tools" WK_JOB_BY="$(hostname)" \
     WK_JOB_STAMP="$stamp" WK_JOB_FORCE="$FORCE" \
+    WK_JOB_ASLR="${WK_BENCH_ASLR:-}" WK_JOB_ENVPAD="${WK_BENCH_ENV_PAD:-}" \
+    WK_JOB_PATHPAD="${WK_BENCH_PATH_PAD:-}" WK_JOB_SHARED="${WK_BENCH_SHARED_CACHE:-}" \
     python3 - <<'PYEOF' > "$(wk_state_dir)/mac-ab-job.json"
 import json, os
 g = os.environ.get
@@ -713,6 +720,10 @@ print(json.dumps({
     "created_by": g("WK_JOB_BY"),
     "stamp": g("WK_JOB_STAMP"),
     "force": bool(g("WK_JOB_FORCE")),
+    "aslr": g("WK_JOB_ASLR") or "",
+    "env_pad": g("WK_JOB_ENVPAD") or "",
+    "path_pad": g("WK_JOB_PATHPAD") or "",
+    "shared_cache": g("WK_JOB_SHARED") or "",
 }, indent=2))
 PYEOF
     put_file "$(wk_state_dir)/mac-ab-job.json" "$root/job.json" \

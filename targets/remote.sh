@@ -166,7 +166,7 @@ _rsh() {
 # question run in the same pipeline as something reading stdin can drink that
 # input instead of answering.
 #
-# t_exec, t_exec_tty, t_wk and t_state_put deliberately do *not* use it: a
+# t_exec, t_exec_tty, t_wk and t_status_put deliberately do *not* use it: a
 # command run in the workspace may legitimately be fed something. A *build*
 # is not -- it reads nothing, and `run_watched` backgrounds it, where an ssh
 # reaching for the terminal earns a SIGTTIN.
@@ -193,12 +193,90 @@ _rsh_q() {
 # process, since `wk status` asks per workspace and a ConnectTimeout on each
 # would turn a listing into a minute of waiting.
 #
-# The four questions are one shell snippet because two callers ask them --
-# the probe below and the parallel prefetch further down -- and a second copy
+# The questions are one shell snippet because two callers ask them -- the
+# probe below and the parallel prefetch further down -- and a second copy
 # would parse differently from the prefetch's cache.
+#
+# Cores, load and memory are asked for in raw form (nproc/loadavg/meminfo on
+# Linux; sysctl/vm_stat on Darwin and the BSDs close enough to it) and parsed
+# back on this side by _remote_probe_parse, rather than computed remotely with
+# an inline awk -- a function that only exists as a string baked into an ssh
+# command line cannot be unit-tested on a captured sample. Selected once by
+# the remote's own `uname -s`, not by which tools this side happens to know:
+# a machine answers for itself.
+#
+# ionice is asked for the same way (present or not), since it is util-linux
+# and t_exec_build must not try it on a machine that has no notion of I/O
+# scheduling classes at all.
 _remote_probe_cmd() {
-    printf '%s' 'echo "$HOME"; nproc; awk "{print int(\$1)}" /proc/loadavg;
-                 awk "/^MemAvailable:/ {print int(\$2/1024)}" /proc/meminfo'
+    printf '%s' '
+        echo "$HOME"
+        u=$(uname -s)
+        echo "$u"
+        if [ "$u" = Linux ]; then
+            nproc
+            cat /proc/loadavg
+            echo "===MEM==="
+            cat /proc/meminfo
+        else
+            sysctl -n hw.ncpu
+            sysctl -n vm.loadavg
+            echo "===MEM==="
+            vm_stat
+        fi
+        echo "===IONICE==="
+        command -v ionice >/dev/null 2>&1 && echo yes || echo no'
+}
+
+# The pure half of the probe: cores/load/memory/ionice out of the raw text
+# _remote_probe_cmd gathers (everything after its $HOME line), with no ssh
+# involved -- so a captured sample exercises exactly what a live probe would
+# parse:
+#   bash -c '. targets/remote.sh; _remote_probe_parse <<<"$sample"'
+#
+# Cores need no branch -- both `nproc` and `sysctl -n hw.ncpu` already print a
+# bare integer. Load and memory do: `sysctl -n vm.loadavg` prints
+# "{ 1.23 1.45 1.67 }", the load average as its second field, where
+# /proc/loadavg has it as the first; and `vm_stat` reports free memory in
+# pages, with the page size in its own header line, where /proc/meminfo has
+# MemAvailable in kB directly. Free + inactive + speculative pages is what
+# Activity Monitor calls "available" on Darwin.
+_remote_probe_parse() {
+    local uname cores section=head load_raw="" mem_raw="" ionice=no line
+    { read -r uname; read -r cores; } || return 1
+
+    while IFS= read -r line; do
+        case "$line" in
+            '===MEM===')    section=mem;    continue ;;
+            '===IONICE===') section=ionice; continue ;;
+        esac
+        case "$section" in
+            head)   load_raw="$load_raw$line
+" ;;
+            mem)    mem_raw="$mem_raw$line
+" ;;
+            # A trailing blank line (a sample's own newline plus the one a
+            # here-string adds) must not overwrite the real answer that came
+            # before it.
+            ionice) [ -n "$line" ] && ionice="$line" ;;
+        esac
+    done
+
+    local load mem
+    if [ "$uname" = Linux ]; then
+        load=$(printf '%s' "$load_raw" | awk '{print int($1); exit}')
+        mem=$(printf '%s' "$mem_raw"  | awk '/^MemAvailable:/ {print int($2/1024); exit}')
+    else
+        load=$(printf '%s' "$load_raw" | awk '{print int($2); exit}')
+        mem=$(printf '%s' "$mem_raw" | awk '
+            /page size of/        { match($0, /[0-9]+/); ps = substr($0, RSTART, RLENGTH) }
+            /^Pages free:/        { gsub(/\./, "", $NF); free = $NF }
+            /^Pages inactive:/    { gsub(/\./, "", $NF); inactive = $NF }
+            /^Pages speculative:/ { gsub(/\./, "", $NF); spec = $NF }
+            END { if (ps) printf "%d\n", (free + inactive + spec) * ps / 1024 / 1024 }')
+    fi
+
+    printf '%s\n%s\n%s\n%s\n' "${cores:-1}" "${load:-0}" "${mem:-0}" "$ionice"
 }
 
 # Where a prefetched answer for *this* target would be, if a command asked
@@ -231,7 +309,7 @@ _remote_probe_try() {
     [ -n "${_WK_REMOTE_PROBED:-}" ] && return 0
     [ -n "${_WK_REMOTE_DOWN:-}" ] && return 1
     _remote_require
-    local out f
+    local out f parsed
     # A prefetched answer if one was taken for this command, and the ssh
     # otherwise. Same question, same parsing; the only difference is who waited.
     f=$(_remote_probe_file) || f=""
@@ -247,9 +325,11 @@ _remote_probe_try() {
     fi
 
     _WK_REMOTE_HOME=$(printf '%s\n' "$out" | sed -n 1p)
-    _WK_REMOTE_CORES=$(printf '%s\n' "$out" | sed -n 2p)
-    _WK_REMOTE_LOAD=$(printf '%s\n' "$out" | sed -n 3p)
-    _WK_REMOTE_MEM=$(printf '%s\n' "$out" | sed -n 4p)
+    parsed=$(printf '%s\n' "$out" | tail -n +2 | _remote_probe_parse)
+    _WK_REMOTE_CORES=$(printf '%s\n' "$parsed" | sed -n 1p)
+    _WK_REMOTE_LOAD=$(printf '%s\n' "$parsed" | sed -n 2p)
+    _WK_REMOTE_MEM=$(printf '%s\n' "$parsed" | sed -n 3p)
+    _WK_REMOTE_IONICE=$(printf '%s\n' "$parsed" | sed -n 4p)
 
     [ -n "$WK_REMOTE_ROOT" ] || WK_REMOTE_ROOT="$_WK_REMOTE_HOME/wk"
     _WK_REMOTE_PROBED=1
@@ -338,6 +418,10 @@ t_src()   { echo "$(_remote_ws "$1")/WebKit"; }
 # The remote's own ccache, under the remote root. Deliberately not a shared one
 # somewhere on the box: a cache you do not administer is a cache you can poison
 # for other people, and a good way to become unpopular.
+#
+# A plain '/'-joined path, which is the whole of what a POSIX remote needs --
+# true of Linux, macOS and the BSDs alike; only a non-POSIX remote would need
+# a second spelling here.
 t_ccache_dir() { echo "$(_remote_root)/cache/ccache"; }
 
 # The remote $HOME, from the probe that already asked for it.
@@ -536,9 +620,18 @@ t_pull_dir() {
 #
 # nice and ionice are here as well as in build-in-target.sh: this end knows
 # the target is shared, and the lock has to be outside them either way.
+#
+# ionice only when the probe found one: it is util-linux, so it buys nothing
+# on Darwin or a BSD and there is no portable stand-in worth reaching for.
+# Not a fallback -- the probe already asked the machine once
+# (_remote_probe_parse's ionice line), and a machine without it gets `nice`
+# alone rather than a second, untested scheduling path.
 t_exec_build() {
     local name="$1"; shift
     local log tee_to
+
+    # _remote_ws forces the probe, so _WK_REMOTE_IONICE is already populated
+    # by the time `prio` reads it below.
     log="$(_remote_ws "$name")/build.log"
 
     # Nothing to tee into on the machine itself: $WK_STORE is the remote root
@@ -546,6 +639,9 @@ t_exec_build() {
     # one log interleave, and the result reads like a corrupted build.
     tee_to=" 2>&1 | tee $(sh_quote "$log")"
     _remote_is_local && tee_to=""
+
+    local prio="nice -n 19"
+    [ "${_WK_REMOTE_IONICE:-no}" = yes ] && prio="$prio ionice -c3"
 
     # tee, so the canonical log is written *on the machine that is building*
     # while the same bytes stream back for the watchdog and the terminal here.
@@ -558,17 +654,22 @@ t_exec_build() {
     _rsh_q "set -o pipefail
           cd $(sh_quote "$(t_src "$name")") && \
           $(sh_quote "$(t_tools "$name")/lib/lockrun.sh") remote-build -w 3600 -- \
-          nice -n 19 ionice -c3 $(sh_quote "$@")$tee_to"
+          $prio $(sh_quote "$@")$tee_to"
 }
 
-# The status file, pushed to the machine as it changes.
-#
-# A no-op in local mode, where cmd/build has already written that exact file:
-# $WK_STORE is the remote root there, so the local write and this one are the
-# same path.
-t_state_put() {
+# The status file's one copy, on the machine itself -- never a local shadow.
+# In local mode $WK_STORE is already the remote root, so this is the same
+# write the generic default (lib/target.sh) would do; written out explicitly
+# rather than falling through, since the ssh branch below needs its own
+# path anyway and one function reading both ways is easier to trust than a
+# fallthrough plus an override.
+t_status_put() {
     local name="$1" ws
-    _remote_is_local && { cat >/dev/null; return 0; }
+    if _remote_is_local; then
+        ws="$(wk_ws_dir "$name")"
+        cat > "$ws/build.status"
+        return 0
+    fi
     # Resolved with stdin closed and *before* the pipeline below: the lookup
     # can itself reach the machine, and an ssh in a command substitution reads
     # the stdin it inherits.
@@ -578,8 +679,15 @@ t_state_put() {
     # checkout. A status file pointing at a path that does not exist over there
     # would cost `wk status` its liveness check -- the one part that answers
     # "is it still moving".
+    #
+    # No `|| true`: a write that silently fails leaves `wk status` reporting
+    # whatever was there before, forever, about a build that may have moved
+    # on. Warn instead -- loud, but not fatal to a build that otherwise
+    # succeeded over an ssh hiccup in the one write that records it.
     sed "s|^log=.*|log=$ws/build.log|" \
-        | _rsh "cat > $(sh_quote "$ws/build.status")" || true
+        | _rsh "cat > $(sh_quote "$ws/build.status")" \
+        || warn "could not record '$name's build state on $WK_REMOTE_HOST -- 'wk status $name'
+    may show stale information until it answers again"
 }
 
 # `wk`, run on the machine itself: it answers about its own workspaces with

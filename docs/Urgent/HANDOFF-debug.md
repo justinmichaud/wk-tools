@@ -6,8 +6,8 @@ something, so it is a flag on the verb that already runs it —
 `wk run --lldb` (jsc), `wk gui --lldb [ui|web]` (MiniBrowser),
 `wk test --layout --lldb [web|ui]` (one layout test), on the Apple ports and on
 the CMake ports alike. `cmd/gui:29` states that decision where it is acted on;
-`docs/TESTING.md` has what was verified on each platform, and the three
-image-level obstacles that had to be cleared on Linux first.
+below is what was verified on each platform, and the three image-level
+obstacles that had to be cleared on Linux first.
 
 What is left is one verb, some provisioning, and two processes nobody has
 needed yet.
@@ -18,10 +18,14 @@ needed yet.
   cap the iterations, keep the failing seed and output; under `--under-gdb`,
   drop into the debugger *at* the crash rather than after it. Nothing of this
   exists.
-- **Provisioning that has to exist first.** core_pattern / systemd-coredump and
-  the ddebs debug-symbol repository belong in the workspace image, not in
-  per-session instructions. Without them `--until-crash` has nothing to hand
-  back but an exit code.
+- **The ddebs debug-symbol repository** belongs in the workspace image, not in
+  per-session instructions -- but it needs a host (`ddebs.ubuntu.com`) the
+  egress proxy does not allow (`container/proxy/wk-proxy.py`'s
+  `ALLOWED_HOSTS`), and widening that allowlist is a decision this hook does
+  not get to make on its own. core_pattern and `ulimit -c unlimited` are
+  provisioned now (`container/firstrun.sh`), so `--until-crash` has a core file
+  to hand back; a crash inside a system library (glibc, Mesa, GTK) still
+  backtraces with no symbols until ddebs is decided.
 - **The other two child processes.** `--lldb web` reaches the web process
   because `config_web_process_name` names it per port. The network and GPU
   processes have names in the same files and no caller —
@@ -49,5 +53,4 @@ Verified inert by measurement as well as by reading.
 Since the swap cannot be prevented, `wk gui --lldb web` follows it instead:
 `follow-page` attaches to every web process and asks each one whether it holds a
 live page (`m_pageMap` non-empty and `m_hasSuspendedPageProxy` clear), keeps the
-one that does and detaches the rest. The whole finding, with what was measured,
-is under "Debugging (Linux, the CMake ports)" in `docs/TESTING.md`.
+one that does and detaches the rest.

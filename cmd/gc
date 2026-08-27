@@ -8,11 +8,13 @@
 # `wk gc` can never lose work: rubble from interrupted image builds,
 # superseded boot images, stranded compressed copies beside a kept image,
 # unreferenced base snapshots, dangling podman images/volumes, the mirror
-# (repacked, not erased), ccache, stale benchmark payload seeds, and orphaned
-# creation bookkeeping. Also runs fstrim: the VM's disk image is sparse and
-# never shrinks on its own, so deleting files inside the VM returns no bytes
+# (repacked, not erased), ccache, stale benchmark payload seeds, orphaned
+# creation bookkeeping, and the workspace->target registry every machine
+# used to keep -- `wk gc` is the whole migration off it. Also runs fstrim:
+# the VM's disk image is sparse and never shrinks on its own, so deleting
+# files inside the VM returns no bytes
 # to the host until the guest discards those blocks. `wk disk` says what any
-# of it costs; `wk help disk` is the prose.
+# of it costs; `wk help` is the prose.
 #
 #   --purge-mirror   erase the master git store and every base snapshot (wk
 #                    sync refetches them); refused while any workspace exists
@@ -30,6 +32,7 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/detach.sh"
 # The image store's paths and the pmos build hosts' caches: both live here on
 # a macOS host, not in the VM.
 #
@@ -42,6 +45,15 @@ _source_if_there "$WK_ROOT/lib/image.sh"
 _source_if_there "$WK_ROOT/image/profiles.sh"
 _source_if_there "$WK_ROOT/boot/machines.sh"
 _source_if_there "$WK_ROOT/image/pmos.sh"
+
+# --- migration: the old workspace->target registry --------------------------
+# A cache of a recomputable fact (CLAUDE.md, "no caching of facts"): which
+# target a workspace lives on is derived fresh on every call now (ws_target,
+# lib/target.sh), so nothing reads this directory any more. Removed here as
+# rubble, like any other unreferenced bytes gc finds -- `wk gc` (on the host,
+# and once more inside the podman VM on a Mac, which held its own copy) is
+# the whole migration off it.
+rm -rf "$(wk_state_dir)/targets"
 
 # Through load_target, never by sourcing the driver directly: a driver uses
 # lib/target.sh's helpers at source time, and only load_target does the
@@ -371,21 +383,22 @@ fi
 # --- creation bookkeeping with nothing left to describe ------------------------
 # `wk new` writes $WK_STORE/create/<name>.{status,log} so a later command can
 # tell a half-made workspace from a missing one; `wk rm` removes the pair with
-# the workspace. Nothing removes the pair whose workspace, environment *and*
-# registry entry are all gone -- an interrupted `wk rm`, or a driver that died
-# before registering. Small, and otherwise sits there forever.
+# the workspace. Nothing removes the pair whose workspace and environment are
+# both gone and nothing is creating it any more -- an interrupted `wk rm`, or
+# a driver that died before anything existed. Small, and otherwise sits there
+# forever.
 #
-# The registry is the authority: a status file for a name no target knows
-# describes something that no longer exists. A creation in flight keeps its
-# pair, since the name is registered from the first moment `wk new` acts.
+# No registry: a record speaks for a workspace only while creation is
+# genuinely in flight (the same rule ws_target applies, lib/target.sh) --
+# checked directly against the process table, not a file that outlives it.
+# Once it is dead, only the store answers, asked directly across every
+# target this machine can see (this loop covers this one target's own
+# create/ directory; running gc against every target reaps every one's).
 if [ -d "$(ws_state_dir)" ]; then
     for _sf in "$(ws_state_dir)"/*.status; do
         [ -f "$_sf" ] || continue
         _n=$(basename "$_sf" .status)
-        # `ws_target` cannot answer this: it falls back to the default target
-        # for a name nobody knows, so it never reports "absent". The registry
-        # is asked directly instead.
-        if target_of "$_n" >/dev/null 2>&1; then continue; fi
+        if detach_alive "$_sf"; then continue; fi
         _found=""
         for _t in $(target_all 2>/dev/null); do
             if ( load_target "$_t" >/dev/null 2>&1; [ -d "$(wk_ws_dir "$_n")" ] ); then
@@ -393,7 +406,7 @@ if [ -d "$(ws_state_dir)" ]; then
             fi
         done
         [ -z "$_found" ] || continue
-        info "removing orphaned creation record for '$_n' (no registry entry, no workspace)"
+        info "removing orphaned creation record for '$_n' (no live creation, no workspace)"
         rm -f "$_sf" "$(ws_create_log "$_n")"
     done
     unset _sf _n _t _found

@@ -219,6 +219,7 @@ t_create() {
     ensure_dir "$ws/changes"
     ensure_dir "$ws/overlay-work"
     ensure_dir "$ws/home"
+    ensure_dir "$ws/build"
 
     # Recorded before creation, not after: everything downstream -- the build
     # flags, the benchmark preflight, `wk ls` -- resolves the architecture from
@@ -231,6 +232,20 @@ t_create() {
     # podman also never deletes a user-managed upperdir on removal -- that is
     # t_destroy's job, or the workspace leaks forever.
     local overlay="$base:/src/WebKit:O,upperdir=$ws/changes,workdir=$ws/overlay-work"
+
+    # $ws/build, bind-mounted over the checkout's WebKitBuild: without this,
+    # every object a build writes lands on the overlay's upperdir
+    # ($ws/changes) and pays overlayfs's copy-up on the first write of each
+    # file it touches -- there is nothing to copy up from for a build
+    # directory that never existed in the base snapshot, but the overlay
+    # still walks the lower layer to find that out before creating the upper
+    # one. A plain bind mount is a normal directory with none of that, and is
+    # what makes WebKitBuild a mount point `git status` and an editor see
+    # instead of tracked-repo churn -- WebKit's own .gitignore already excludes
+    # it, so nothing here needs a second ignore rule. A workspace created
+    # before this mount existed keeps its build tree inside the overlay until
+    # it is recreated.
+    local build_mount="$ws/build:/src/WebKit/WebKitBuild"
 
     # The mirror, read-only, at /mirror: the one copy of every upstream this
     # machine has, so `wk sync` refreshes a workspace from disk instead of
@@ -261,6 +276,7 @@ t_create() {
         "--volume ${WK_TOOLS_SRC:-$WK_ROOT}:/opt/wk-tools:ro
          --volume $(dirname "$(wk_mirror)"):/mirror:ro
          --volume $overlay
+         --volume $build_mount
          --volume $ws:/var/lib/wk/ws/$name
          --volume $WK_STORE/cache/ccache:/ccache
          --volume $WK_STORE/cache/yocto:/cache/yocto

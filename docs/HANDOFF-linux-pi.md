@@ -22,9 +22,7 @@ all.
 3. **Confirm the negative**: a second tailnet address that is *not* in the file
    is refused. That is the check that proves the allowlist is an allowlist. It
    matters more now that a second route into that segment exists (below).
-4. **The Tailscale ACL grant** — still owed, and it must not reuse `tag:server`,
-   which covers moose, nextcloud, immich, overleaf and the gateway.
-   (`docs/Security/HANDOFF-tailscale.md`.)
+4. **The Tailscale ACL grant** — decision pending (`docs/defects` 12).
 5. **`host/linux/rpi5/` needs an owner.** Its stability half (fan, WiFi, fstab,
    the NUMA kernel) is workstation setup and belongs in that board's own
    `./setup` run; its perf half belongs to the board's bench system,

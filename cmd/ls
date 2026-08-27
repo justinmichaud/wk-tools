@@ -8,7 +8,7 @@
 #   NAME      the workspace
 #   TARGET    where it lives (container, vm, or a machine)
 #   STATE     the environment's own word: running, exited, present, creating
-#   BASE      the snapshot its checkout is pinned to (`wk help design`)
+#   BASE      the snapshot its checkout is pinned to (`wk help`)
 #   ARCH      what it builds natively; blank when that is the host's own
 #   CHANGES   disk its own writes take -- the overlay layer, which grows
 #             without bound between `wk gc` runs and is invisible to podman

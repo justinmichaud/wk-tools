@@ -80,7 +80,7 @@ b_media() {
 # How this machine's bench lane is made from nothing.
 #
 # Only the stick. The NVMe workstation install is not wk's to write and is never
-# touched (`wk help hardware`), so there is no rescue to make here -- the
+# touched (`wk help`), so there is no rescue to make here -- the
 # workstation *is* the fallback, and it is the one medium in the fleet this
 # command must never name.
 b_reprovision() {

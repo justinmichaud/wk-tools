@@ -117,11 +117,12 @@ ARCH=$(t_arch "$NAME")
 # `wk status` reads whatever the previous build left behind.
 WS=$(wk_ws_dir "$NAME")
 LOG="$WS/build.log"
-STATUS="$WS/build.status"
 
-# The one writer for build.status, for every state. Written here and, for a
-# target that's a machine of its own, pushed there too (t_state_put is a
-# no-op elsewhere), so `wk status` gets the same answer from either end.
+# The one writer for build.status, for every state, and t_status_put decides
+# where it lands: next to $WS for a target whose store is already this
+# machine's, or straight onto the machine's own store over ssh for one that
+# is a machine of its own (targets/remote.sh) -- one copy either way, where
+# `wk status` will actually look for it (directly, or through delegation).
 #
 # `running` carries no exit/finished/seconds/peak_mb and touches the log
 # fresh, so a reader judging liveness by log age (build_live, lib/detach.sh)
@@ -153,8 +154,7 @@ peak_mb=${MEM_PEAK:-}
 EOF
 )
     fi
-    printf '%s\n' "$content" > "$STATUS"
-    printf '%s\n' "$content" | t_state_put "$NAME"
+    printf '%s\n' "$content" | t_status_put "$NAME"
 }
 
 # Our own flags are taken off the argument list; everything left passes

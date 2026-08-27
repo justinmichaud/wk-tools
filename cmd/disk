@@ -40,7 +40,7 @@
 #
 # Erasing any of it is deliberately elsewhere -- `wk gc`, `wk gc --purge-mirror`,
 # `wk vm base --rm`, `wk rm` -- and named per row, so the report says what to
-# run without being able to run it. `wk help disk` is the prose version.
+# run without being able to run it. `wk help` is the prose version.
 
 set -euo pipefail
 # Honouring the environment is what lets the store probe below run *this* copy
@@ -223,7 +223,7 @@ if in_workspace; then
     df -h "$src" 2>/dev/null | sed 's/^/  /' >&2 || true
     log ""
     log "  This workspace is disposable: 'wk rm $(wk_self)' on the host reclaims"
-    log "  all of it at once. 'wk help disk' is the whole-machine picture."
+    log "  all of it at once. 'wk help' is the whole-machine picture."
     exit 0
 fi
 
@@ -353,4 +353,4 @@ fi
 log ""
 df -h "$([ -d "$WK_STORE" ] && echo "$WK_STORE" || echo "$HOME")" 2>/dev/null | sed 's/^/  /' >&2 || true
 log ""
-log "  What to erase, and how:  wk help disk"
+log "  What to erase, and how:  wk help"

@@ -147,7 +147,7 @@ image_profile_load() {
     # Tombstone: refused by name, rather than failing as "unknown profile".
     perf-linux-rpi3|perf-linux-rpi4|perf-linux-rpi5)
         die "there is no '$1'. A perf system is built by yocto or buildroot, or
-    it is macOS (wk help images). For this board:
+    it is macOS (wk help). For this board:
 
         perf-linux-rpi3  -> webkit-2.52-yocto-rpi3-32   (32-bit, its native width)
         perf-linux-rpi4  -> webkit-2.52-yocto-rpi4-64

@@ -1,0 +1,27 @@
+# wk memory-experiment patch: startMemorySampler
+#
+# docs/Urgent/HANDOFF-memory.md asks for this to be a file instead of a
+# copy-paste block, so it survives past whoever currently holds it in their
+# head. It is not one yet.
+#
+# TODO: the actual diff. It was not recoverable here -- it lives only in the
+# wiki pages the handoff names (Memory-benchmark-charts-(2.52),
+# WPE-memory-usage-investigation), which 404 from this machine and are not
+# indexed anywhere a web search reaches, so they read as Igalia-internal
+# rather than public. Capture it from wherever it is still applied by hand
+# today: `git diff` in a checkout that has it, saved over this file as a
+# real unified diff (`git diff > container/bin/patches/startMemorySampler.patch`).
+#
+# What it has to do, from the name and from HANDOFF-memory.md's "collect the
+# WebKitWebProcess logs, plot (--include c,k --max-seconds N)": make the web
+# process call WebCore's memory sampler (WebCore::MemorySampler,
+# start/stop) on a timer for the life of the run, and write each sample as a
+# line container/bin/plot-memory-log.py can read -- see that script's own
+# header for the exact format it accepts, since the original log format went
+# down with the wiki page along with the script that plotted it.
+#
+# Until this is a real diff, applying it is refused rather than silently
+# skipped: `git apply container/bin/patches/startMemorySampler.patch` fails
+# on this file (it is prose, not a patch), which is the correct failure --
+# the alternative is a benchmark that silently ran unpatched and reported
+# numbers from the wrong build.

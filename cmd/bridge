@@ -10,7 +10,7 @@
 # test board on a cable. Spec: bridge/provision.sh, bridge/bin and
 # bridge/hosts/<name>.conf; the phone holds a copy, never the original. It
 # runs postmarketOS; getting pmOS onto the device is a hands-on,
-# once-per-phone job (wk help bridge).
+# once-per-phone job (wk help).
 #
 #   ls                        every declared bridge, and what it answers to
 #   provision <name>          the whole path: image, card, phone, role,
@@ -77,7 +77,7 @@ load_bridge() {
     Declared bridges:$(bridge_names | sed 's/^/ /' | tr -d '\n')
     A bridge is a conf file: $(bridge_registry_dir)/<name>.conf
     (shared, in this repository) or $(bridge_conf_dir)/<name>.conf (this
-    device only). See 'wk help bridge'."
+    device only). See 'wk help'."
 
     BR_NAME="$name"
     BR_DEVICE=""; BR_SSH=""; BR_HOSTNAME=""; BR_TAG=""; BR_SEGMENT=""
@@ -407,7 +407,7 @@ resolve_priv() {
     'wk bridge provision $BR_NAME' does the whole path."
     uid=$(rsh 'id -u') || die "cannot ssh to $BR_SSH.
     A bridge is provisioned over ssh against a phone that is already running
-    postmarketOS and already answers -- 'wk help bridge' covers getting it
+    postmarketOS and already answers -- 'wk help' covers getting it
     there, which is a hands-on job once per phone."
     if [ "$uid" = 0 ]; then PRIV=""; return 0; fi
     if rsh 'command -v doas >/dev/null 2>&1'; then PRIV="doas"
@@ -922,7 +922,7 @@ provision_finish() {
         moved network comes up in isolation. 'wk sysimage show <id>' names the
         SSID it was built with.
     The phone's own screen is the way in when none of that is it -- it is the
-    reason a bridge image keeps a GUI. 'wk help bridge' has the console user
+    reason a bridge image keeps a GUI. 'wk help' has the console user
     and password."
     info "$BR_NAME answers on $BR_SSH"
 

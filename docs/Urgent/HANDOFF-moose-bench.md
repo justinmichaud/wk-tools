@@ -9,9 +9,9 @@ hardware` has the design (a RAM root off a USB stick, armed by
 moose is a System76 Thelio Astra (Ampere Altra, aarch64, AMI UEFI
 `2.01.SYS01`, Secure Boot off, 125 GB RAM, one NVMe). A RAM root is what keeps
 storage out of the measurement (`root_device=ram` is its own series, and cheap
-flash is then fine because the stick is read only at boot). A plain second
-partition on the stick is the fallback if `--bootnext` turns out not to work
-on this firmware.
+flash is then fine because the stick is read only at boot). Prove `--bootnext`
+works (item 1 below); if it does not, choose one mechanism then — a plain
+second partition is not a fallback kept alongside it.
 
 ## Remaining — in this order
 

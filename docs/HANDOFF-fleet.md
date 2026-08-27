@@ -26,12 +26,8 @@ Board-specific and bridge-specific work lives in `docs/HANDOFF-boot.md`,
 - [ ] `wk find <machine>` against a board that is actually powered on and
       answering — both boards were off when this was last run, which is what
       the command correctly reported
-- [!] `wk status` shows `mDNS buildbox4.local` for a host declared without
-      tailscale, contradicting CLAUDE.md's "there is no mDNS anywhere" — one
-      of the two is wrong
 - [ ] a bridge that is on the tailnet but whose *segment* is down needs to be
       distinguishable from one that is simply off
-- [ ] `wk status` renders local data first
 
 ## The image store is being removed
 
@@ -88,8 +84,6 @@ output. Most of this is already built and verified; what is left:
 - [ ] nothing in this fleet can power a Pi on (moose has a BMC; the boards do
       not) — hardware, not code, and the reason "never touch the boards" is
       not literally met yet
-- [ ] `wk help hardware` stays true to `boot/machines.sh` and the drivers —
-      hand-check whenever either changes
 
 ## Removing the fallback-address plumbing
 

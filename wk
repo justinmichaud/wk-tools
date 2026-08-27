@@ -662,8 +662,8 @@ main() {
     if in_remote_host && [ -n "$D_LIFECYCLE" ]; then
         die "workspaces are created and destroyed from the workstation, and this is
     the shared build machine for target '$(wk_remote_field target)'.
-    Run 'wk $cmd' there: it keeps the record of which target a workspace
-    belongs to, and that record is what sends a later 'wk build' back here."
+    Run 'wk $cmd' there: the workstation owns the workspace's store, and a
+    later 'wk build' finds its target from that store."
     fi
 
     # What the command needs, checked after the refusals about where it may run

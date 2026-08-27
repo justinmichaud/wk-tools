@@ -45,7 +45,7 @@ export WK_YES=1
 # -- right for names on different targets, and safe when they are not.
 rm_one() (
     set -euo pipefail
-    local NAME="$1" TARGET ws sf clog n rc left
+    local NAME="$1" TARGET ws sf clog n rc left _t _sf _pid
 
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
@@ -81,13 +81,29 @@ rm_one() (
     if t_needs_base; then hold_lock store -s; fi
 
     # Nothing left but the record: converge on the declared final state rather than
-    # refusing. This is what a `wk rm` killed after the destroy but before the
-    # registry write leaves behind, and re-running it has to finish the job.
+    # refusing. This is what a `wk rm` killed right after `wk new` took its lock
+    # and before anything existed anywhere leaves behind, and re-running it has
+    # to finish the job.
     if [ ! -d "$ws" ] && [ "$(t_info "$NAME")" = absent ]; then
-        if target_of "$NAME" >/dev/null 2>&1 || [ -f "$sf" ]; then
+        # The record may be on a different target than the one this name
+        # resolved to: an abandoned creation that never got far enough to
+        # leave a store anywhere falls back to the default target
+        # (ws_target, lib/target.sh), which is only a guess once nothing
+        # else answers for the name. Every target's own store is asked
+        # directly, in case the dead record is sitting on one of the others.
+        if [ ! -f "$sf" ]; then
+            for _t in $(target_all 2>/dev/null); do
+                [ "$_t" = "$TARGET" ] && continue
+                load_target "$_t"
+                _sf=$(ws_status_file "$NAME")
+                [ -f "$_sf" ] || continue
+                TARGET="$_t"; sf="$_sf"; clog=$(ws_create_log "$NAME")
+                break
+            done
+        fi
+        if [ -f "$sf" ]; then
             rm -f "$sf" "$clog"
             ssh_alias_remove "$NAME"
-            target_forget "$NAME"
             info "'$NAME' had nothing left but its record; forgotten"
             exit 0
         fi
@@ -103,11 +119,27 @@ rm_one() (
 
     confirm "destroy workspace '$NAME' and all its changes?" || die "aborted"
 
-    # Artifacts first, the record last: the record outlives what it describes.
-    # Forgetting the registry entry as part of a sequence that can fail before it
-    # is reached would leave an orphan whose `base-id` pins a snapshot forever,
-    # invisible to `wk ls` and un-removable by name. So: destroy, check what is
-    # actually gone, and only forget once nothing is left to point at.
+    # claude remote-control (`wk claude ... --rc`) is a process started
+    # detached *inside* the target, not part of this workspace's own
+    # environment record. For container and vm that is moot -- t_destroy below
+    # tears down the whole container or guest, taking it with it -- but a
+    # remote target's "environment" is only the checkout on a machine that
+    # keeps running, so a live server there would otherwise outlive the
+    # workspace it was named after.
+    if [ "$WK_TARGET_KIND" = remote ]; then
+        _sf="$(wk_ws_dir "$NAME")/claude-rc.status"
+        _pid=$([ -f "$_sf" ] && status_field "$_sf" pid || true)
+        if [ -n "$_pid" ] && t_exec "$NAME" kill -0 "$_pid" >/dev/null 2>&1; then
+            info "stopping claude remote-control in '$NAME' (pid $_pid)"
+            t_exec "$NAME" kill "$_pid" >/dev/null 2>&1 || true
+            status_write "$_sf" state=stopped "pid=$_pid"
+        fi
+    fi
+
+    # The artifacts first, the bookkeeping last: destroying the environment
+    # before the checked-what-is-left-below is what makes a re-run converge
+    # rather than repeat -- what actually happened is re-derived from
+    # evidence (t_info, $ws) on every attempt, never assumed from a record.
     rc=0
     t_destroy "$NAME" || rc=$?
 
@@ -117,13 +149,12 @@ rm_one() (
 
     if [ -n "$left" ] || [ "$rc" -ne 0 ]; then
         warn "'$NAME' was not fully destroyed; still here:$left"
-        log  "  the registry entry is kept so 'wk rm $NAME' can still find it -- re-run it"
+        log  "  re-run 'wk rm $NAME' -- what is left is exactly what it will find and retry"
         exit 1
     fi
 
     rm -f "$sf" "$clog"
     ssh_alias_remove "$NAME"
-    target_forget "$NAME"
 
     info "workspace '$NAME' destroyed"
 )

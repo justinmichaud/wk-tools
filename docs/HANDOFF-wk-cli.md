@@ -2,7 +2,7 @@
 
 General `wk` mechanics not tied to one board, bridge or bench lane: the
 dispatcher, `wk status`/`wk ls`, `wk sync`, `wk zed`, `wk profile`, `wk gc`,
-the git helpers, and workspace/lock/registry concurrency. Hardware- and
+the git helpers, and workspace/lock concurrency. Hardware- and
 lane-specific items live in the other `docs/HANDOFF-*.md` files.
 
 ## Known defects
@@ -35,8 +35,8 @@ each a `kill -9` mid-command plus a re-run that must converge:
       *any* machine asking, not just the driving one
 - [ ] `tart delete` a guest by hand is detected the same way as a hand-`podman
       rm`
-- [ ] deleting `$WK_STORE/ws/<n>` by hand under a live registry entry is
-      detected, and `wk gc` refuses to prune what the survivor may still pin
+- [ ] deleting `$WK_STORE/ws/<n>` by hand under a live workspace is detected,
+      and `wk gc` refuses to prune what the survivor may still pin
 
 ## Listing (`wk status`/`wk ls`) — unverified
 
@@ -71,8 +71,6 @@ each a `kill -9` mid-command plus a re-run that must converge:
 
 ## `wk zed` — unverified
 
-- [ ] `wk zed --url <ws>` prints the `zed ssh://…` URL without opening Zed, so the
-      in-workspace refusal can name a command to run on the local machine
 
 - [ ] a language server that wants the network from inside a workspace is
       refused by the allowlist and says so rather than hanging (Zed's ACP
@@ -114,9 +112,7 @@ each a `kill -9` mid-command plus a re-run that must converge:
 
 ## Everything else still unticked
 
-- [ ] `wk backup` → `./setup` round-trips with no spurious changes; its junk
-      filters strip what they claim (weather location, WiFi UUIDs,
-      last-folder paths, timestamps) — duplicate of `docs/HANDOFF-settings-audit.md`'s own item, do both together
+- [ ] `wk backup` → `./setup` round-trip: see `docs/HANDOFF-settings-audit.md`
 - [ ] `wk skills` status/diff/pull/push; pull refuses over uncommitted repo
       edits
 - [ ] the skills are workspace-true: an agent started by `wk claude` in a
@@ -129,14 +125,12 @@ each a `kill -9` mid-command plus a re-run that must converge:
       says so without claiming the work stopped
 - [ ] `wk logs <ws> -f` follows a live build
 - [ ] `wk stop --keep-vm` leaves the podman machine running
-- [ ] `wk gc` prunes a creation record whose workspace, environment and
-      registry entry are all gone, and keeps one still in flight (only the
-      first half is exercised, planted by hand)
+- [ ] `wk gc` prunes a creation record whose workspace and environment are
+      both gone, and keeps one still in flight (only the first half is
+      exercised, planted by hand)
 - [ ] `build_live` (lib/detach.sh): a `state=running` file whose log has not
       moved for `WK_STALL_SECONDS` is not live, so a `kill -9`'d build no
       longer refuses every later benchmark
-- [ ] `headless_markers` (lib/resources.sh): a marker in either spelling is
-      seen by both `is_headless` and the Linux stage that removes it
 - [ ] `wk vm rm` removes `<name>.unfiltered`, so a recreated guest of the
       same name is not refused by `wk claude` for the previous guest's sins
 - [ ] `ccache_conf_render` (lib/store.sh) renders the same ceiling for the
@@ -158,7 +152,6 @@ each a `kill -9` mid-command plus a re-run that must converge:
       uploads PRs — `wk push on|off`, `wk remotes --fix`, `wk pr`, `wk pick`
       and `git-sync-fork` all in the loop, including a PR from an armhf
       container where `git-webkit` cannot run
-- [ ] `wk report` prints the weekly summary (needs gh auth)
 - [ ] the MCP server (`wk mcp`) creates and destroys a workspace from Claude
       Desktop, and refuses past its workspace cap
 - [ ] `wk doctor` on a freshly set-up machine reports everything ok, and each
@@ -168,7 +161,6 @@ each a `kill -9` mid-command plus a re-run that must converge:
       from a previous run can read as stalled for one poll
 - [ ] `wk ls` inside a workspace prints `?`/`-` for BASE/CHANGES instead of a
       not-applicable marker
-- [ ] `wk sync` is slow on rpi5 — measure before theorising
 - [ ] every command's `--help` prints the actual command line it would run
       and the configurations it accepts
 - [ ] every `WK_*` override read with a default (71 of them) is either
@@ -190,18 +182,7 @@ each a `kill -9` mid-command plus a re-run that must converge:
       line in the first 15 lines names `where=` (one of
       `host|local|workspace|dynamic`) and `group=`
 
-## From the 2026-08-26 option audit
-
-- [ ] `--quiet` is parsed locally by ~11 commands; handle it once in `wk` like
-      `--force`
-- [ ] `wk ls` and `wk find` gain `--json`, the same record shape `wk status`
-      emits
-- [ ] `--all` means "every machine" in `wk sync` and "every item" elsewhere;
-      one meaning, or two words
-- [ ] `--count` appears in bench, pick, pr, pi, status, sync: confirm one
-      semantics
-- [ ] `wk sync` is slow on rpi5: measure before changing -- time the three
-      stages (mirror fetch over WiFi; checkout reset/clean; per-workspace
-      fetch) with a per-stage timing line under WK_DEBUG, then fix the
-      dominant one
+The option-consistency leftovers (`--quiet`, `--json` on `wk ls`/`wk find`,
+`--all`/`--count` semantics) and the rpi5 `wk sync` slowness are tracked in
+`docs/defects`, not repeated here.
 

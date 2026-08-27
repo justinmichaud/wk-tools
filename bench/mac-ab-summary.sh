@@ -3,11 +3,15 @@
 # wk bench ab-summary -- turn a run of `wk bench mac-ab` into a verdict.
 #
 #   wk bench ab-summary --runs <runs.tsv> [--root <dir>] [--out <file>]
+#                                          (--out also writes <file-without-
+#                                          extension>.html, a self-contained
+#                                          report with histograms)
 #
 # Reads the arm-to-result map the autorun wrote (round, label, staged id,
-# result directory), prints each arm's score, and hands the two arms to
-# `wk bench compare` -- which is where the axis warnings and the p-value come
-# from, and which is deliberately not reimplemented here.
+# result directory) and hands the two arms to `wk bench report` -- which is
+# where the per-subtest Score and Time, the axis warnings, the Welch/FDR
+# p-value and the histograms come from, and which is deliberately not
+# reimplemented here.
 #
 # Runs on the Mac in *either* mode: in bench mode it is the last thing the
 # autorun does, and in host mode it is how the same verdict is re-read after
@@ -88,77 +92,17 @@ EOF
     emit ""
 fi
 
-# Per-arm numbers, read out of the results themselves rather than out of the run
-# log: the log is a transcript and the result is the record.
-#
-# One python per arm, handed every path at once. A heredoc inside a command
-# substitution inside a `while read` fed by a pipe is three things competing for
-# one stdin, and prints nothing at all for either arm
-# while the comparison below worked perfectly. A summary that silently omits its
-# own numbers is worse than one that fails.
-arm_numbers() {  # $1 = comma-separated result.json paths
-    printf '%s' "$1" | tr ',' '\n' | "$PY" -c '
-import json, os, sys
-
-def find(o, key):
-    # metrics.<Score|Time>.current, wherever the suite puts it. Speedometer
-    # nests it under the suite name; other plans nest it differently, and the
-    # shape is the stable part rather than the path.
-    if isinstance(o, dict):
-        m = o.get("metrics")
-        if isinstance(m, dict) and key in m:
-            cur = (m[key] or {}).get("current")
-            if cur is not None:
-                return cur
-        for v in o.values():
-            r = find(v, key)
-            if r is not None:
-                return r
-    return None
-
-def flat(x, acc):
-    if isinstance(x, list):
-        for i in x:
-            flat(i, acc)
-    elif isinstance(x, (int, float)):
-        acc.append(float(x))
-    return acc
-
-for line in sys.stdin:
-    p = line.strip()
-    if not p:
-        continue
-    name = os.path.basename(os.path.dirname(p))
-    try:
-        d = json.load(open(p))
-    except Exception as e:
-        print("  %-44s unreadable (%s)" % (name, e))
-        continue
-    for key in ("Score", "Time"):
-        cur = find(d, key)
-        if cur is None:
-            continue
-        vals = flat(cur, [])
-        if not vals:
-            continue
-        n = len(vals)
-        mean = sum(vals) / n
-        sd = (sum((v - mean) ** 2 for v in vals) / (n - 1)) ** 0.5 if n > 1 else 0.0
-        print("  %-44s %-5s %8.3f  sd %6.3f (%4.1f%%)  n=%d"
-              % (name, key, mean, sd, (100.0 * sd / mean) if mean else 0.0, n))
-        break
-    else:
-        print("  %-44s no Score or Time metric" % name)
-'
-}
-
+# Per-arm numbers are not computed here at all: `wk bench report` below reads
+# every arm's result.json directly (the one result walker now lives in
+# lib/wkdata.py, cmd/bench's `wk bench report`) and shows A and B side by
+# side, per subtest, which is strictly more than one arm's mean printed alone
+# ever was. This just says how many rounds landed in each arm, so a summary
+# with an empty arm is visible before the report below tries to compare it
+# against nothing.
 for l in $labels; do
-    emit "arm $l"
-    while IFS= read -r line; do emit "$line"; done <<EOF
-$(arm_numbers "$(arm_paths "$l")")
-EOF
-    emit ""
+    emit "arm $l: $(arm_paths "$l" | tr ',' '\n' | grep -c .) run(s)"
 done
+emit ""
 
 # WHAT THIS EXPERIMENT COULD HAVE DETECTED.
 #
@@ -271,11 +215,16 @@ if [ -n "$same" ]; then
     emit ""
 fi
 
-# `wk bench compare` rather than compare-results directly: it is the thing that
-# checks the three axes and warns when two runs are not comparable, and that
-# check is the point of having it.
+# `wk bench report` rather than a script of its own: it is the thing that
+# checks the three axes, computes the per-subtest Welch/FDR table and draws
+# the histograms, and that is the whole point of routing through it instead
+# of re-deriving any of it here. An overnight A/B (docs/Urgent/"Benchmarking
+# variance.md" asks for one command producing an html report with no one in
+# the room) gets its html next to the text summary, same basename, when --out
+# names one.
 if [ -n "$OUT" ]; then
-    "$WK_ROOT/cmd/bench" compare "$(arm_paths "$A")" "$(arm_paths "$B")" 2>&1 | tee -a "$OUT"
+    "$WK_ROOT/cmd/bench" report "$(arm_paths "$A")" "$(arm_paths "$B")" \
+        --html "${OUT%.*}.html" --text 2>&1 | tee -a "$OUT"
 else
-    "$WK_ROOT/cmd/bench" compare "$(arm_paths "$A")" "$(arm_paths "$B")" 2>&1
+    "$WK_ROOT/cmd/bench" report "$(arm_paths "$A")" "$(arm_paths "$B")" 2>&1
 fi

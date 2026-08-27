@@ -34,27 +34,37 @@ import webbrowser
 # --- the document -------------------------------------------------------------
 
 
-def merge(lines):
-    """Records -> one document, grouped machine / method / workspace.
+class Merger:
+    """Records -> one document, grouped machine / method / workspace, applied
+    one record at a time.
+
+    A class rather than `merge`'s old run-to-completion loop, because the
+    text renderer wants to draw a machine's block the moment its records stop
+    arriving rather than only once the whole fleet has answered -- and both
+    that streaming reader and `merge` (below, for --json/--html/--web) are
+    the same fold over the same records, so there is exactly one place that
+    knows what a record means.
 
     Order is the order the records arrived in, per group, because that is the
     order the walk found them and it is stable (order_targets in cmd/status
     puts this machine first). Machines are *merged* rather than appended: the
     same machine can be reported by two processes, and it is one machine.
     """
-    doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
-    index = {}
 
-    def machine(name):
-        if name not in index:
+    def __init__(self):
+        self.doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
+        self.index = {}
+
+    def machine(self, name):
+        if name not in self.index:
             m = {"name": name, "self": False, "methods": [], "facts": [], "raw": [],
                  "disk": [], "services": [], "locks": [], "switches": [],
                  "capacity": [], "bench": None}
-            index[name] = m
-            doc["machines"].append(m)
-        return index[name]
+            self.index[name] = m
+            self.doc["machines"].append(m)
+        return self.index[name]
 
-    def method(m, name):
+    def method(self, m, name):
         for g in m["methods"]:
             if g["name"] == name:
                 return g
@@ -62,21 +72,16 @@ def merge(lines):
         m["methods"].append(g)
         return g
 
-    for line in lines:
-        line = line.strip()
-        if not line or not line.startswith("{"):
-            continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            # A record that cannot be read is worth saying so about: it means a
-            # collector wrote something malformed, and silently dropping it is
-            # how a workspace goes missing from a listing that looks complete.
-            print("wk status: unreadable record: %s" % line[:120], file=sys.stderr)
-            continue
+    def feed(self, r):
+        """Fold one record into the document. Returns the name of the
+        machine it belongs to, so a streaming reader knows what just changed
+        -- or None for a record with no single machine (fleet, bridge, exit),
+        or for a stream marker (`probing`, `flush`) it does not know about
+        and leaves for the caller.
+        """
         kind = r.get("kind")
         if kind == "machine":
-            m = machine(r["name"])
+            m = self.machine(r["name"])
             m["self"] = m["self"] or bool(r.get("self"))
             # Everything else the record carries -- how it is reached, which
             # conf declared it -- kept from whichever half knew it. Dropping
@@ -85,41 +90,98 @@ def merge(lines):
             for k in ("tailnet", "direct", "conf"):
                 if r.get(k) and not m.get(k):
                     m[k] = r[k]
+            return m["name"]
         elif kind == "workspace":
-            method(machine(r.get("machine", "?")), r.get("method", "?"))[
+            name = r.get("machine", "?")
+            self.method(self.machine(name), r.get("method", "?"))[
                 "workspaces"
             ].append(r)
+            return name
         elif kind == "fact":
-            machine(r.get("machine", "?"))["facts"].append(r)
+            name = r.get("machine", "?")
+            self.machine(name)["facts"].append(r)
+            return name
         elif kind == "raw":
-            machine(r.get("machine", "?"))["raw"].append(r)
+            name = r.get("machine", "?")
+            self.machine(name)["raw"].append(r)
+            return name
         elif kind == "disk":
-            machine(r.get("machine", "?"))["disk"].append(r)
+            name = r.get("machine", "?")
+            self.machine(name)["disk"].append(r)
+            return name
         elif kind == "service":
-            machine(r.get("machine", "?"))["services"].append(r)
+            name = r.get("machine", "?")
+            self.machine(name)["services"].append(r)
+            return name
         elif kind == "lock":
-            machine(r.get("machine", "?"))["locks"].append(r)
+            name = r.get("machine", "?")
+            self.machine(name)["locks"].append(r)
+            return name
         elif kind == "switch":
-            machine(r.get("machine", "?"))["switches"].append(r)
+            name = r.get("machine", "?")
+            self.machine(name)["switches"].append(r)
+            return name
         elif kind == "capacity":
             # Kept per reporter, not overwritten: on a macOS host the VM and the
             # Mac each answer, and "9 cores" and "10 cores" are both true about
             # different things.
-            m = machine(r.get("machine", "?"))
+            name = r.get("machine", "?")
+            m = self.machine(name)
             if m.get("capacity") is None:
                 m["capacity"] = []
             m["capacity"].append(r)
+            return name
         elif kind == "bench":
-            machine(r.get("machine", "?"))["bench"] = r
+            name = r.get("machine", "?")
+            self.machine(name)["bench"] = r
+            return name
         elif kind == "fleet":
-            doc["fleet"].append(r)
+            self.doc["fleet"].append(r)
+            return None
         elif kind == "bridge":
-            doc["bridges"].append(r)
+            self.doc["bridges"].append(r)
+            return None
         elif kind == "exit":
             # The worst of them, not the last: two halves each report their own,
             # and this command's contract is that a script can branch on it.
-            doc["exit"] = max(doc["exit"], int(r.get("code", 0)))
-    return doc
+            self.doc["exit"] = max(self.doc["exit"], int(r.get("code", 0)))
+            return None
+        return None
+
+
+def parse_record(line):
+    """One line -> a record, or None for a blank one. Raises ValueError
+    (chained from the JSON error) with the offending text attached, so every
+    caller reports an unreadable record the same way instead of each writing
+    its own version of that message."""
+    line = line.strip()
+    if not line or not line.startswith("{"):
+        return None
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise ValueError(line[:120]) from exc
+
+
+def merge(lines):
+    """Records -> one document. See `Merger` -- this is that fold, run to
+    completion over a whole stream, for the three views that only draw once
+    they have seen all of it."""
+    merger = Merger()
+    for line in lines:
+        try:
+            r = parse_record(line)
+        except ValueError as exc:
+            # A record that cannot be read is worth saying so about: it means
+            # a collector wrote something malformed, and silently dropping it
+            # is how a workspace goes missing from a listing that looks
+            # complete.
+            print("wk status: unreadable record: %s" % exc, file=sys.stderr)
+            continue
+        if r is None or r.get("kind") in ("probing", "flush"):
+            continue  # stream-only markers; a one-shot read has no use for them
+        merger.feed(r)
+    return merger.doc
 
 
 def read_doc(path):
@@ -332,215 +394,244 @@ def paint(text, key, colour):
     return "%s%s%s" % (ANSI[key], text, RESET)
 
 
-def render_text(doc, colour):
-    """The listing as plain aligned columns.
+# A label/value line is buffered rather than formatted, because its column
+# width is not known until every label in the section has been seen.
+#
+# Measured rather than a constant. At a fixed 14 a machine's block reads as
+# three ragged tables: every label wider than that -- "without
+# tailscale", "push (podman VM)", "wk-tools (in the podman VM)" -- pushed
+# its own value out to a column of its own, and the wk-tools and push-key
+# rows were formatted by a *separate* pair of hardcoded widths (30 and 14)
+# that lined up with nothing above them. One section, one column.
+class Kv(tuple):
+    __slots__ = ()
 
-    Deliberately the plainest thing that carries the facts. The page is what
-    this fleet is looked at with now -- `wk status` at a terminal opens it
-    (status_default_mode, lib/common.sh) -- and this is what a pipe, a redirect,
-    `wk selftest` and an agent get. That reader wants the columns to line up and
-    wants nothing else. A box-drawn grid -- rules, corner glyphs, blank-celled
-    continuation rows -- is a second showpiece to keep correct for a reader who
-    already has a better one.
 
-    The one piece of machinery kept is a single set of column widths for the
-    whole listing. Per-group widths made every block line up with itself and
-    with nothing else, so the eye had to find the columns again at every heading
-    -- and it is four lines, not machinery.
+def row(cells, widths, hues, colour):
+    # Every column padded but the last, so a row does not end in a field of
+    # spaces -- with colour on, the reset sequence sits after them and no
+    # amount of stripping afterwards can find them.
+    hues = hues or {}
+    last = len(cells) - 1
+    return "    " + "  ".join(
+        paint(c if i == last else c.ljust(widths[i]), hues.get(i, ""), colour)
+        for i, c in enumerate(cells)
+    )
+
+
+class Writer:
+    """The handful of things every section of the text listing needs: a
+    heading, a buffered label/value line whose column lines up with the rest
+    of its section (`align`, called once the section is complete), how a
+    machine or a fleet device is reached, and its notes.
+
+    A machine's own block (`render_machine_block`) and the fleet/bridges tail
+    (`render_fleet_and_bridges`) each build one of these; the whole-document
+    renderer and the streaming one both call the same two functions, so there
+    is one description of what a block looks like, not two that can drift.
     """
-    out = []
 
-    w = [len(h) for h in COLUMNS]
-    for m in doc["machines"]:
-        for g in m["methods"]:
-            for ws in g["workspaces"]:
-                for i, c in enumerate(ws_cells(ws)):
-                    w[i] = max(w[i], len(c))
+    def __init__(self, colour):
+        self.colour = colour
+        self.out = []
 
-    def row(cells, hues=None):
-        # Every column padded but the last, so a row does not end in a field of
-        # spaces -- with colour on, the reset sequence sits after them and no
-        # amount of stripping afterwards can find them.
-        hues = hues or {}
-        last = len(cells) - 1
-        return "    " + "  ".join(
-            paint(c if i == last else c.ljust(w[i]), hues.get(i, ""), colour)
-            for i, c in enumerate(cells)
-        )
+    def heading(self, name, tag=""):
+        self.out.append("")
+        self.out.append(paint(name, "head", self.colour)
+                         + (paint("   " + tag, "dim", self.colour) if tag else ""))
 
-    def heading(name, tag=""):
-        out.append("")
-        out.append(paint(name, "head", colour) + (paint("   " + tag, "dim", colour) if tag else ""))
+    def kv(self, label, value, indent="  "):
+        self.out.append(Kv((indent, label, value)))
 
-    # A label/value line is buffered rather than formatted, because its column
-    # width is not known until every label in the section has been seen.
-    #
-    # Measured rather than a constant. At a fixed 14 a machine's block reads as
-    # three ragged tables: every label wider than that -- "without
-    # tailscale", "push (podman VM)", "wk-tools (in the podman VM)" -- pushed
-    # its own value out to a column of its own, and the wk-tools and push-key
-    # rows were formatted by a *separate* pair of hardcoded widths (30 and 14)
-    # that lined up with nothing above them. One section, one column.
-    class Kv(tuple):
-        __slots__ = ()
-
-    def kv(label, value, indent="  "):
-        out.append(Kv((indent, label, value)))
-
-    def align(start):
+    def align(self, start):
         """Give every buffered line in out[start:] one label column.
 
         Called at the end of a section. The width is the widest label actually
         present and never less than 14, so a section of short labels does not
         pull its values left of where every other section puts them.
         """
-        labels = [k[1] for k in out[start:] if isinstance(k, Kv)]
+        labels = [k[1] for k in self.out[start:] if isinstance(k, Kv)]
         if not labels:
             return
         w = max([len(l) for l in labels] + [14])
-        for i in range(start, len(out)):
-            if not isinstance(out[i], Kv):
+        for i in range(start, len(self.out)):
+            if not isinstance(self.out[i], Kv):
                 continue
-            indent, label, value = out[i]
+            indent, label, value = self.out[i]
             # An empty label is a continuation of the line above -- a fix, a
             # remedy -- so it is spaces, not a painted blank.
             lab = label.ljust(w) if label else " " * w
-            out[i] = indent + (paint(lab, "dim", colour) if label else lab) + " " + value
+            self.out[i] = indent + (paint(lab, "dim", self.colour) if label else lab) + " " + value
 
-    def meta(obj, indent="  "):
+    def meta(self, obj, indent="  "):
         """How a machine is reached, and which file said it exists. Both are
         calculated at read time (lib/reach.sh) and both are dim: they answer a
         question asked when something above them is wrong."""
         if obj.get("tailnet"):
-            kv("reached", obj["tailnet"], indent)
+            self.kv("reached", obj["tailnet"], indent)
         if obj.get("direct"):
-            kv("without tailscale", obj["direct"], indent)
+            self.kv("without tailscale", obj["direct"], indent)
         if obj.get("conf"):
-            kv("from", paint(obj["conf"], "dim", colour), indent)
+            self.kv("from", paint(obj["conf"], "dim", self.colour), indent)
 
-    def notes(items, indent="      "):
+    def notes(self, items, indent="      "):
         for n in items or []:
             hue = "busy" if n.get("level") == "warn" else "dim"
             for i, text in enumerate(n.get("text", "").split("\n")):
-                out.append(indent + paint(("! " if i == 0 and hue == "busy" else "  ")
-                                          + text.strip(), hue, colour))
+                self.out.append(indent + paint(("! " if i == 0 and hue == "busy" else "  ")
+                                          + text.strip(), hue, self.colour))
 
-    for m in doc["machines"]:
-        heading(m["name"], "this machine" if m.get("self") else "")
-        _machine_start = len(out)
-        meta(m)
 
-        if not any(g["workspaces"] for g in m["methods"]) and not m["raw"]:
-            out.append("  " + paint("(no workspaces on it)", "idle", colour))
+def render_machine_block(m, colour, widths=None):
+    """One machine's whole section: heading, how it is reached, its
+    workspace tables, and what it is apart from the workspaces on it.
 
+    `widths` is the column widths for the workspace table. The whole-document
+    renderer measures them once, across every machine, so every table in the
+    listing lines up with every other. The streaming renderer (widths=None)
+    draws a machine before the rest of the fleet is known, so it can only
+    measure that one machine's own workspaces -- the concession streaming
+    makes for not waiting: tables line up within a machine, not across the
+    listing.
+    """
+    w = widths
+    if w is None:
+        w = [len(h) for h in COLUMNS]
         for g in m["methods"]:
-            if not g["workspaces"]:
-                continue
-            out.append("")
-            out.append("  " + paint(g["name"], "bold", colour))
-            out.append(row([h.upper() for h in COLUMNS], {i: "dim" for i in range(len(COLUMNS))}))
             for ws in g["workspaces"]:
-                subs = ws.get("subs") or []
-                out.append(row(ws_cells(ws), ws_hues(ws)))
-                # Everything else this workspace was asked to do, one per line
-                # under its row rather than as a row with the identity blanked.
-                for sub in subs[1:]:
-                    out.append("      " + paint(sub_text(sub), severity(sub.get("state")), colour))
-                notes(ws.get("notes"))
+                for i, c in enumerate(ws_cells(ws)):
+                    w[i] = max(w[i], len(c))
 
-        # What the machine is, apart from the workspaces on it. Every line is a
-        # thing that breaks a build or costs work.
-        if any(m.get(k) for k in ("disk", "services", "switches", "capacity", "locks")) or m.get("bench"):
-            out.append("")
-        for d in m.get("disk") or []:
-            tail = ""
-            if d.get("snapshots"):
-                tail = "  ·  %s snapshot%s" % (d["snapshots"], "" if d["snapshots"] == "1" else "s")
-                if d.get("reclaimable") and d["reclaimable"] != "0":
-                    tail += paint(", %s reclaimable (wk gc)" % d["reclaimable"], "busy", colour)
-            kv("disk" + (" (%s)" % where_word(d) if where_word(d) else ""),
-               "%s used   %s free of %s%s"
-               % (paint((d.get("used_pct", "?") or "?") + "%", disk_hue(d.get("used_pct")), colour),
-                  gb(d.get("free_mb")), gb(d.get("total_mb")), tail))
-        for sv in m.get("services") or []:
-            kv(sv.get("name", "?"), paint(sv.get("state", "?"), severity(sv.get("state")), colour))
-            if sv.get("fix"):
-                kv("", paint(sv["fix"], "busy", colour))
-        for sw in m.get("switches") or []:
-            kv(sw.get("name", "?") + (" (%s)" % where_word(sw) if where_word(sw) else ""),
-               paint(sw.get("state", "?"), "good" if sw.get("state") == "on" else "busy", colour)
-               + paint("   " + sw.get("detail", ""), "dim", colour))
-        for cap in m.get("capacity") or []:
-            label = "load" + (" (%s)" % where_word(cap) if where_word(cap) else "")
-            if not cap.get("cores"):
-                # A probe that did not answer says so here rather than the
-                # line vanishing, which reads as "this machine has no load" --
-                # the one thing that is never true.
-                if cap.get("note"):
-                    kv(label, paint(cap["note"], "bad", colour))
-                continue
-            # A remote target's free memory is measured with no total beside
-            # it (t_mem_mb there is MemAvailable, not a size, targets/remote.sh)
-            # -- so the total is only ever printed when there is one.
-            free = "%s free" % gb(cap.get("free_mb"))
-            if cap.get("mem_mb"):
-                free += " of %s" % gb(cap.get("mem_mb"))
-            kv(label, "%s of %s cores   %s"
-               % (paint(cap.get("load") or "?", load_hue(cap.get("load"), cap.get("cores")), colour),
-                  cap.get("cores"), free))
-        for lk in m.get("locks") or []:
-            # A lock whose holder is gone is not a lock: the next taker breaks
-            # it. "held" against "stale" is the difference between waiting and
-            # not.
-            kv("lock", "%s  %s  %s"
-               % (lk.get("resource", "?"),
-                  paint("held" if lk.get("alive") else "stale",
-                        "busy" if lk.get("alive") else "bad", colour),
-                  paint("pid %s  %s" % (lk.get("pid", "?"), lk.get("cmd", "")), "dim", colour)))
-        b = m.get("bench")
-        if b:
-            kv("bench", "%s  %s" % (b.get("run", "?"),
+    wr = Writer(colour)
+    out = wr.out
+    wr.heading(m["name"], "this machine" if m.get("self") else "")
+    _machine_start = len(out)
+    wr.meta(m)
+
+    if not any(g["workspaces"] for g in m["methods"]) and not m["raw"]:
+        out.append("  " + paint("(no workspaces on it)", "idle", colour))
+
+    for g in m["methods"]:
+        if not g["workspaces"]:
+            continue
+        out.append("")
+        out.append("  " + paint(g["name"], "bold", colour))
+        out.append(row([h.upper() for h in COLUMNS], w, {i: "dim" for i in range(len(COLUMNS))}, colour))
+        for ws in g["workspaces"]:
+            subs = ws.get("subs") or []
+            out.append(row(ws_cells(ws), w, ws_hues(ws), colour))
+            # Everything else this workspace was asked to do, one per line
+            # under its row rather than as a row with the identity blanked.
+            for sub in subs[1:]:
+                out.append("      " + paint(sub_text(sub), severity(sub.get("state")), colour))
+            wr.notes(ws.get("notes"))
+
+    # What the machine is, apart from the workspaces on it. Every line is a
+    # thing that breaks a build or costs work.
+    if any(m.get(k) for k in ("disk", "services", "switches", "capacity", "locks")) or m.get("bench"):
+        out.append("")
+    for d in m.get("disk") or []:
+        tail = ""
+        if d.get("snapshots"):
+            tail = "  ·  %s snapshot%s" % (d["snapshots"], "" if d["snapshots"] == "1" else "s")
+            if d.get("reclaimable") and d["reclaimable"] != "0":
+                tail += paint(", %s reclaimable (wk gc)" % d["reclaimable"], "busy", colour)
+        wr.kv("disk" + (" (%s)" % where_word(d) if where_word(d) else ""),
+              "%s used   %s free of %s%s"
+              % (paint((d.get("used_pct", "?") or "?") + "%", disk_hue(d.get("used_pct")), colour),
+                 gb(d.get("free_mb")), gb(d.get("total_mb")), tail))
+    for sv in m.get("services") or []:
+        wr.kv(sv.get("name", "?"), paint(sv.get("state", "?"), severity(sv.get("state")), colour))
+        if sv.get("fix"):
+            wr.kv("", paint(sv["fix"], "busy", colour))
+    for sw in m.get("switches") or []:
+        wr.kv(sw.get("name", "?") + (" (%s)" % where_word(sw) if where_word(sw) else ""),
+              paint(sw.get("state", "?"), "good" if sw.get("state") == "on" else "busy", colour)
+              + paint("   " + sw.get("detail", ""), "dim", colour))
+    for cap in m.get("capacity") or []:
+        label = "load" + (" (%s)" % where_word(cap) if where_word(cap) else "")
+        if not cap.get("cores"):
+            # A probe that did not answer says so here rather than the
+            # line vanishing, which reads as "this machine has no load" --
+            # the one thing that is never true.
+            if cap.get("note"):
+                wr.kv(label, paint(cap["note"], "bad", colour))
+            continue
+        # A remote target's free memory is measured with no total beside
+        # it (t_mem_mb there is MemAvailable, not a size, targets/remote.sh)
+        # -- so the total is only ever printed when there is one.
+        free = "%s free" % gb(cap.get("free_mb"))
+        if cap.get("mem_mb"):
+            free += " of %s" % gb(cap.get("mem_mb"))
+        wr.kv(label, "%s of %s cores   %s"
+              % (paint(cap.get("load") or "?", load_hue(cap.get("load"), cap.get("cores")), colour),
+                 cap.get("cores"), free))
+    for lk in m.get("locks") or []:
+        # A lock whose holder is gone is not a lock: the next taker breaks
+        # it. "held" against "stale" is the difference between waiting and
+        # not.
+        wr.kv("lock", "%s  %s  %s"
+              % (lk.get("resource", "?"),
+                 paint("held" if lk.get("alive") else "stale",
+                       "busy" if lk.get("alive") else "bad", colour),
+                 paint("pid %s  %s" % (lk.get("pid", "?"), lk.get("cmd", "")), "dim", colour)))
+    b = m.get("bench")
+    if b:
+        wr.kv("bench", "%s  %s" % (b.get("run", "?"),
                                     paint(b.get("state", "?"), severity(b.get("state")), colour)))
 
-        # A machine that could not answer in records: its own listing, as it
-        # sent it, rather than nothing.
-        for r in m["raw"]:
-            out.append("")
-            for ln in r.get("text", "").split("\n"):
-                out.append("  " + paint(ln, "dim", colour))
-            notes(r.get("notes"), "  ")
+    # A machine that could not answer in records: its own listing, as it
+    # sent it, rather than nothing.
+    for r in m["raw"]:
+        out.append("")
+        for ln in r.get("text", "").split("\n"):
+            out.append("  " + paint(ln, "dim", colour))
+        wr.notes(r.get("notes"), "  ")
 
-        if m["facts"]:
-            out.append("")
-        for f in m["facts"]:
-            if f.get("type") == "wk-tools":
-                what = "wk-tools" + (" (%s)" % f["copy"] if f.get("copy") else "")
-                # The tree hash is the answer; the commit is context, and only
-                # when there is one. Every rsynced copy reports `-` for it --
-                # they are copied with `--exclude .git` -- so it was a column of
-                # dashes with no heading in the common case, sitting between the
-                # label and the thing the reader came for.
-                verdict = (paint("in sync", "good", colour) if f.get("insync")
-                           else paint("DIFFERS from the workstation (%s)" % f.get("expect", "?"),
-                                      "bad", colour))
-                extra = ""
-                if f.get("sha") and f["sha"] != "-":
-                    extra = paint("  at %s%s" % (f["sha"], "+dirty" if f.get("dirty") else ""),
-                                  "dim", colour)
-                elif f.get("dirty"):
-                    extra = paint("  +dirty", "dim", colour)
-                kv(what, "%s  %s%s" % (f.get("tree", "?"), verdict, extra))
-                # The command, not "push it there": which one it is depends on
-                # what kind of copy this is, and none of the three is guessable.
-                if f.get("fix"):
-                    kv("", paint(f["fix"], "busy", colour))
-            elif f.get("type") == "key":
-                kv("push key", f.get("text", ""))
+    if m["facts"]:
+        out.append("")
+    for f in m["facts"]:
+        if f.get("type") == "wk-tools":
+            what = "wk-tools" + (" (%s)" % f["copy"] if f.get("copy") else "")
+            # The tree hash is the answer; the commit is context, and only
+            # when there is one. Every rsynced copy reports `-` for it --
+            # they are copied with `--exclude .git` -- so it was a column of
+            # dashes with no heading in the common case, sitting between the
+            # label and the thing the reader came for.
+            verdict = (paint("in sync", "good", colour) if f.get("insync")
+                       else paint("DIFFERS from the workstation (%s)" % f.get("expect", "?"),
+                                  "bad", colour))
+            extra = ""
+            if f.get("sha") and f["sha"] != "-":
+                extra = paint("  at %s%s" % (f["sha"], "+dirty" if f.get("dirty") else ""),
+                              "dim", colour)
+            elif f.get("dirty"):
+                extra = paint("  +dirty", "dim", colour)
+            wr.kv(what, "%s  %s%s" % (f.get("tree", "?"), verdict, extra))
+            # The command, not "push it there": which one it is depends on
+            # what kind of copy this is, and none of the three is guessable.
+            if f.get("fix"):
+                wr.kv("", paint(f["fix"], "busy", colour))
+        elif f.get("type") == "key":
+            wr.kv("push key", f.get("text", ""))
 
-        align(_machine_start)
+    wr.align(_machine_start)
+    return out
+
+
+def render_fleet_and_bridges(doc, colour):
+    """The fleet board and the tailnet bridges: the tail of the listing,
+    printed after every machine because that is what they are -- what wk owns
+    beyond the machines that answer to `wk status` themselves, and (fleet
+    devices, bridges) the listing's own longest pole. A streaming reader
+    holds this for last for exactly that reason: it usually finishes last
+    anyway.
+    """
+    wr = Writer(colour)
+    out = wr.out
 
     if doc["fleet"]:
-        heading("fleet", "role, mode, and the media wk owns (wk help hardware)")
+        wr.heading("fleet", "role, mode, and the media wk owns")
         fw = max([len(f.get("machine", "")) for f in doc["fleet"]] + [7])
         rw = max([len(f.get("role", "")) for f in doc["fleet"]] + [4])
         mw = max([len(f.get("mode", "")) for f in doc["fleet"]] + [4])
@@ -555,8 +646,8 @@ def render_text(doc, colour):
                 out.append("  %s  %s" % (" " * fw,
                            paint("** armed for %s -- wk boot %s --status **"
                                  % (f["armed"], f.get("machine", "")), "busy", colour)))
-            meta(f, "  " + " " * fw + "  ")
-        align(_fleet_start)
+            wr.meta(f, "  " + " " * fw + "  ")
+        wr.align(_fleet_start)
 
         # How each machine is made again from nothing.
         #
@@ -567,8 +658,8 @@ def render_text(doc, colour):
         # table's job is the one-line answer.
         recipes = [f for f in doc["fleet"] if f.get("reprovision")]
         if recipes:
-            heading("re-provisioning",
-                    "each machine from nothing -- 'wk help hardware' for why the lanes differ")
+            wr.heading("re-provisioning",
+                       "each machine from nothing")
             for f in recipes:
                 out.append("  " + paint(f.get("machine", ""), "dim", colour)
                            + "  " + paint(f.get("role", ""), "dim", colour))
@@ -612,7 +703,7 @@ def render_text(doc, colour):
                 out.append("")
 
     if doc["bridges"]:
-        heading("tailnet bridges", "probed: the segment, the role, and its own health check")
+        wr.heading("tailnet bridges", "probed: the segment, the role, and its own health check")
         bw = max(len(b.get("name", "")) for b in doc["bridges"])
         _bridge_start = len(out)
         for b in doc["bridges"]:
@@ -621,21 +712,128 @@ def render_text(doc, colour):
                           paint(b.get("state", "?"), severity(b.get("state")), colour)))
             pad = "  " + " " * bw + "  "
             if b.get("health"):
-                kv("health", b["health"], pad)
+                wr.kv("health", b["health"], pad)
             if "role_insync" in b:
-                kv("role",
-                   paint("this repository's", "good", colour) if b["role_insync"]
-                   else paint("older than this repository -- wk bridge setup %s" % b.get("name", ""),
-                              "bad", colour),
-                   pad)
-            meta(b, pad)
+                wr.kv("role",
+                      paint("this repository's", "good", colour) if b["role_insync"]
+                      else paint("older than this repository -- wk bridge setup %s" % b.get("name", ""),
+                                 "bad", colour),
+                      pad)
+            wr.meta(b, pad)
             if b.get("note"):
                 out.append(pad + paint(b["note"], "dim", colour))
-            notes(b.get("notes"), pad)
-        align(_bridge_start)
+            wr.notes(b.get("notes"), pad)
+        wr.align(_bridge_start)
+
+    return out
+
+
+def render_text(doc, colour):
+    """The listing as plain aligned columns.
+
+    Deliberately the plainest thing that carries the facts. The page is what
+    this fleet is looked at with now -- `wk status` at a terminal opens it
+    (status_default_mode, lib/common.sh) -- and this is what a pipe, a redirect,
+    `wk selftest` and an agent get. That reader wants the columns to line up and
+    wants nothing else. A box-drawn grid -- rules, corner glyphs, blank-celled
+    continuation rows -- is a second showpiece to keep correct for a reader who
+    already has a better one.
+
+    The one piece of machinery kept is a single set of column widths for the
+    whole listing. Per-group widths made every block line up with itself and
+    with nothing else, so the eye had to find the columns again at every heading
+    -- and it is four lines, not machinery. (render_text_stream, below, cannot
+    keep this: the whole listing is exactly what it does not wait for.)
+    """
+    out = []
+
+    w = [len(h) for h in COLUMNS]
+    for m in doc["machines"]:
+        for g in m["methods"]:
+            for ws in g["workspaces"]:
+                for i, c in enumerate(ws_cells(ws)):
+                    w[i] = max(w[i], len(c))
+
+    for m in doc["machines"]:
+        out.extend(render_machine_block(m, colour, w))
+    out.extend(render_fleet_and_bridges(doc, colour))
 
     out.append("")
     return "\n".join(out)
+
+
+def render_text_stream(fh, out, colour):
+    """Draw the text listing as records arrive, instead of waiting for the
+    whole fleet to answer before drawing anything.
+
+    Chosen shape: *arrival order*, not the fixed order the collector started
+    probes in, with a stable heading per machine printed once its own records
+    are complete. cmd/status's par_join_stream hands back a finished job's
+    records as soon as they exist -- true completion order, since bash 3.2 (a
+    macOS host's own bash) has no `wait -n` to ask for anything narrower -- and
+    a `{"kind":"flush"}` record marks where one job's contribution ends.
+    Re-imposing a fixed order here would mean buffering a fast machine's
+    output behind a slower one started earlier, which is the exact wait this
+    exists to remove. In practice "this machine" still tends to print first:
+    a local target has no network round trip to wait through.
+
+    A `{"kind":"probing","name":...}` record (emitted for every target before
+    its probe starts) gets a one-line placeholder immediately, so a slow or
+    dead machine is *visibly* still being asked about rather than silently
+    missing -- the placeholder is not erased when the real block follows (this
+    is a stream, not a terminal being redrawn in place), so "replaced" means
+    "the real answer appears right after it", and a machine that never
+    answers keeps only the placeholder, which is the honest state of the
+    world rather than invented data.
+
+    Fleet devices and tailnet bridges print once, at the end: they are one
+    more job in the same batch (see cmd/status), not a machine, and they are
+    already documented as the listing's longest pole -- holding them for last
+    matches both how they actually arrive and the layout `render_text` already
+    uses.
+    """
+    merger = Merger()
+    probing = {}     # name -> still waiting on a machine record to match it
+    dirty = set()     # machine names with unprinted records since the last flush
+
+    def flush():
+        for m in merger.doc["machines"]:
+            if m["name"] in dirty:
+                for line in render_machine_block(m, colour):
+                    out.write(line + "\n")
+        dirty.clear()
+        out.flush()
+
+    for line in fh:
+        try:
+            r = parse_record(line)
+        except ValueError as exc:
+            print("wk status: unreadable record: %s" % exc, file=sys.stderr)
+            continue
+        if r is None:
+            continue
+        kind = r.get("kind")
+        if kind == "probing":
+            name = r.get("name", "?")
+            if name not in merger.index and name not in probing:
+                probing[name] = True
+                out.write(paint("  probing %s…" % name, "dim", colour) + "\n")
+                out.flush()
+            continue
+        if kind == "flush":
+            flush()
+            continue
+        name = merger.feed(r)
+        if name is not None:
+            probing.pop(name, None)
+            dirty.add(name)
+
+    flush()
+    tail = render_fleet_and_bridges(merger.doc, colour)
+    for line in tail:
+        out.write(line + "\n")
+    out.write("\n")
+    out.flush()
 
 
 # --- the page -----------------------------------------------------------------
@@ -1021,7 +1219,7 @@ function render(doc) {
 
   if (doc.fleet && doc.fleet.length) {
     parts.push(`<section class="machine"><div class="mhead"><h2>fleet</h2>
-      <span class="tag">role, mode, and the media wk owns — wk help hardware</span></div>
+      <span class="tag">role, mode, and the media wk owns</span></div>
       <div class="board">`);
     for (const f of doc.fleet) {
       const bench = String(f.mode || "").startsWith("bench");
@@ -1265,6 +1463,17 @@ def main(argv):
             interval = value or 20
         elif flag == "--out":
             out = value
+
+    if mode == "text":
+        # Streamed straight off the record stream `collect` is still writing
+        # -- cmd/status hands this a fifo for text mode precisely so reading
+        # can start before the last machine has answered. The other views
+        # (below) want the whole document before they draw anything, so they
+        # still read to EOF first; only text sees the difference.
+        colour = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+        with open(recs, encoding="utf-8", errors="replace", buffering=1) as fh:
+            render_text_stream(fh, sys.stdout, colour)
+        return 0
 
     doc = read_doc(recs)
 

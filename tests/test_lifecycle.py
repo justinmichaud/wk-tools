@@ -1,14 +1,17 @@
 """Lifecycle-command tests: `wk enter` across a target (defect 1), the
 per-workspace `wk stop`/`wk start` (defect 2), `wk rm`'s multiple-name form
-(defect 3), and the static --explain/-h checks that need no workspace at
-all.
+(defect 3), a real `wk new` leaving no workspace->target registry entry
+behind (there is no registry any more -- lib/target.sh derives it), and the
+static --explain/-h checks that need no workspace at all.
 
 Run: python3 -m unittest tests.test_lifecycle -v
 Run just the static checks (no podman VM needed): they self-select, since
 the one integration test class self-skips without a running `wk` podman
 machine (see requires_podman_vm in tests/support.py).
 """
+import os
 import unittest
+from pathlib import Path
 
 from tests.support import WkTest, rand_suffix, requires_podman_vm, run
 
@@ -97,6 +100,19 @@ class TestContainerLifecycle(WkTest):
         cp = run("new", self.name, "--target", "container", timeout=600)
         self._created = cp.returncode == 0
         self.assertEqual(cp.returncode, 0, f"wk new failed: {cp.stdout}")
+
+        # No registry: which target a workspace lives on is derived from the
+        # store (or, mid-creation, the status file), never recorded in a
+        # per-workspace file (lib/target.sh, ws_target). This machine may
+        # still carry the directory itself, as rubble from before this --
+        # 'wk gc' is the migration off it (cmd/gc) -- so what is asserted is
+        # narrower: no file *for this workspace* appears in it.
+        state_dir = Path(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))) / "wk"
+        registry_entry = state_dir / "targets" / self.name
+        self.assertFalse(
+            registry_entry.exists(),
+            f"'wk new' should not leave a workspace->target registry entry behind: {registry_entry}",
+        )
 
         # It may still be finishing in the background; wait for it to settle.
         run("status", self.name, "--wait", "--timeout", "300")

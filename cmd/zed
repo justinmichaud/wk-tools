@@ -5,7 +5,17 @@
 # wk: flag --tools name=none
 #
 # Refused inside a workspace: Zed runs where the person is, and a container has
-# no display and a macOS guest is driven from the host.
+# no display and a macOS guest is driven from the host. From the host:
+# wk zed <name>.
+#
+# Also unhelpful as typed from a *shared remote box* reached by a plain ssh
+# (not `wk enter`, so the dispatcher's inside-a-workspace refusal above never
+# sees it): Zed is not installed there and does not belong to the box, so a
+# bare `wk zed <name>` there just dies "zed is not installed". --url is the
+# remedy for both cases: it computes the same ssh:// URL this command would
+# hand to Zed, and prints it instead of launching anything -- no Zed binary
+# required where it runs, since the answer is meant to be copied onto the
+# machine that has one.
 #
 # One command for "put an editor on that", because every target reaches it
 # differently and none of the differences are a person's business:
@@ -29,6 +39,10 @@
 #   --tools [<machine>|<workspace>]   open a wk-tools copy instead of the
 #                                     checkout: a machine's, a workspace's, or
 #                                     (with no argument) this one
+#   --url                             print the ssh:// URL (and the `zed`
+#                                     command line for it) instead of opening
+#                                     Zed -- the one thing this needs is the
+#                                     route, not a local Zed install
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -43,19 +57,38 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # second is the mistake worth naming.
 TOOLS=""
 NAME="${WK_NAME:-}"
+URL_ONLY=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --tools) TOOLS=1; shift ;;
+        --url)   URL_ONLY=1; shift ;;
         -*) die "unknown option: $1
     usage: wk zed <workspace>        the checkout
-           wk zed --tools [<machine>|<workspace>]" ;;
+           wk zed --tools [<machine>|<workspace>]
+           wk zed --url <workspace>  print the route instead of opening it" ;;
         *) [ -z "$NAME" ] || die "one name at a time (got '$NAME' and '$1')"
            NAME="$1"; shift ;;
     esac
 done
 
-Z=$(zed_cli) || die "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)
-    https://zed.dev/download -- 'wk doctor' checks for it"
+# emit <url> -- either hands it to Zed, or -- with --url -- prints it and the
+# exact command line so it can be pasted on the machine that has Zed. One
+# place for this so the three launch sites below cannot say it differently.
+emit() {
+    local url="$1"
+    if [ -n "$URL_ONLY" ]; then
+        printf '%s\n' "$url"
+        log "  zed '$url'"
+        exit 0
+    fi
+    exec "$Z" "$url"
+}
+
+if [ -z "$URL_ONLY" ]; then
+    Z=$(zed_cli) || die "zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)
+    https://zed.dev/download -- 'wk doctor' checks for it, or add --url to print
+    the route instead and open it from a machine that does have Zed"
+fi
 
 # --- --tools ------------------------------------------------------------------
 #
@@ -64,6 +97,11 @@ Z=$(zed_cli) || die "zed is not installed (no 'zed' on PATH, no /Applications/Ze
 # slower way to open a directory that is right there.
 if [ -n "$TOOLS" ]; then
     if [ -z "$NAME" ] || [ "$NAME" = here ] || [ "$NAME" = "$(hostname -s 2>/dev/null)" ]; then
+        if [ -n "$URL_ONLY" ]; then
+            printf '%s\n' "$WK_ROOT"
+            log "  already local -- open it directly:  zed $WK_ROOT"
+            exit 0
+        fi
         exec "$Z" "$WK_ROOT"
     fi
 
@@ -78,7 +116,7 @@ if [ -n "$TOOLS" ]; then
         # machine itself, which is what was asked about.
         host=$(t_ssh_host "" 2>/dev/null) \
             || die "target '$NAME' is this machine -- 'wk zed --tools' opens this checkout"
-        exec "$Z" "ssh://$host$(t_tools "")"
+        emit "ssh://$host$(t_tools "")"
     fi
 
     case "$(target_kind "$NAME" 2>/dev/null)" in
@@ -100,7 +138,7 @@ if [ -n "$TOOLS" ]; then
     load_target "$TARGET"
     t_ssh_prepare "$NAME"
     host=$(t_ssh_host "$NAME") || die "'$NAME' is not running, so nothing in it can be opened"
-    exec "$Z" "ssh://$host$(t_tools "$NAME")"
+    emit "ssh://$host$(t_tools "$NAME")"
 fi
 
 # --- a workspace --------------------------------------------------------------
@@ -113,4 +151,4 @@ t_ssh_prepare "$NAME"
 host=$(t_ssh_host "$NAME") || die "'$NAME' is not running, so there is no route to it.
     A macOS guest needs booting first:  wk vm start $NAME"
 
-exec "$Z" "ssh://$host$(t_src "$NAME")"
+emit "ssh://$host$(t_src "$NAME")"

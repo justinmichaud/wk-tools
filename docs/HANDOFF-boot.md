@@ -43,9 +43,6 @@ rpi5 and rpi4 have both been through the whole cycle with no hands on the board.
   neither is on the tailnet and the rpi4's SD carries a live 900-second
   self-return watchdog that reboots it every 15 minutes while the board sits on
   it. Rewriting either is a build and a card write, not a design question.
-- **`/usr/bin/tee` is NOPASSWD on moose** — passwordless write to any file, so
-  equivalent to NOPASSWD root. Worth narrowing; an input to
-  `docs/HANDOFF-sandboxing.md`.
 
 ## Owed — unverified on real hardware
 

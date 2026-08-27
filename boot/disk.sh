@@ -504,11 +504,18 @@ _image_wants_wifi() { # <IMG_MACHINE, which is boot/machines/<name>.conf's name>
 }
 
 # The fleet's one WiFi identity, resolved from the one place it lives -- the
-# same shape as wk_tailscale_authkey_path (lib/common.sh), kept here rather
-# than there because this file is the one this task may edit. One file for
-# every board rather than one per board: whatever is on the bench answers to
-# the same network.
-disk_wifi_creds_path() { printf '%s' "${WK_WIFI_CREDS:-$WK_STORE/secrets/wifi}"; }
+# same shape and the same directory as wk_tailscale_authkey_path
+# (lib/common.sh: ~/.config/wk/tailscale-authkey, WK_TS_AUTHKEY), kept here
+# rather than there because this file is the one this task may edit. One file
+# for every board rather than one per board: whatever is on the bench answers
+# to the same network.
+#
+# Not $WK_STORE/secrets/wifi: this command runs on the host, and on macOS
+# $WK_STORE resolves inside the podman VM, a filesystem the host cannot write
+# to at all -- the write would target a path that is only ever real on Linux.
+# A per-user file under the host's own home, like the tailnet key, is real on
+# every host this runs on.
+disk_wifi_creds_path() { printf '%s' "${WK_WIFI_CREDS:-$HOME/.config/wk/wifi}"; }
 
 # No prompting, no side effects: a read-only report (`wk doctor`, a dry run)
 # must never be the thing that asks for a credential, the same rule

@@ -52,12 +52,9 @@ if [ "$ACTION" = rm ]; then
     [ "$WK_TARGET_KIND" = remote ] \
         || die "'$TARGET' is a $WK_TARGET_KIND target -- this only removes remote machines"
 
-    regd=""
-    for f in "$(wk_state_dir)/targets"/*; do
-        [ -f "$f" ] || continue
-        [ "$(cat "$f")" = "$TARGET" ] && regd="$regd ${f##*/}"
-    done
-    [ -z "$regd" ] || die "workspaces are still registered to '$TARGET':$regd
+    # The machine's own store is the only record of what lives there.
+    regd=$( (load_target "$TARGET" >/dev/null 2>&1 && t_list 2>/dev/null | cut -f1) | tr '\n' ' ')
+    [ -z "${regd// /}" ] || die "workspaces still live on '$TARGET': $regd
     Remove them first (wk rm <name>) -- that deletes their remote checkouts,
     which needs the target this command was about to forget."
 
@@ -348,24 +345,6 @@ if [ -n "$REF" ]; then
     fi
 fi
 
-# Workspaces the machine has and this workstation does not know about. On a
-# shared home these may belong to another box, so they are described rather
-# than judged.
-ORPHANS=""
-for w in $(t_list 2>/dev/null | cut -f1 || true); do
-    target_of "$w" >/dev/null 2>&1 || ORPHANS="$ORPHANS $w"
-done
-if [ -n "$ORPHANS" ]; then
-    log "  workspaces on $r_host that this machine has no record of:$ORPHANS"
-    log "  (another machine sharing this home may own them -- check before removing)"
-    for w in $ORPHANS; do
-        sz=$(_rsh_q "du -sh $(sh_quote "$(_remote_ws "$w")") 2>/dev/null | cut -f1" || echo '?')
-        if confirm "remove workspace '$w' ($sz) from $r_host?"; then
-            t_destroy "$w"
-            cleaned=$((cleaned + 1))
-        fi
-    done
-fi
 
 [ "$cleaned" -gt 0 ] || log "  nothing removed"
 

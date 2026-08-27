@@ -1,106 +1,136 @@
-- rpi4 is connected directly to ethernet with a freshly-flashed recovery usb. Why is it not connecting?
+Your scope is everything. Keep going until every defect and handoff item is done. You will be running unattended soon, so prioritize user intervention first. Surface decisions that need to be made here in this file at the top.
+
+Use cheaper subagents with smaller models wherever possible.
 
 - Audit every command for breakage of the shape `wk zed <workspace>` had: an
   argument the command re-decides for itself and then mishandles. The workspace
   name is now the dispatcher's alone; the other arguments -- configs, flags,
   paths, subverbs -- are still parsed command by command.
 
-- wk enter does not work across machines
+Decisions needed (from the agent; answer inline, or edit the item below):
 
-- No way to easily close workspaces
+1. rpi3 is online on the tailnet as `rpi3` right now. Writing its new recovery
+   card is refused by the rule you asked for (a node named `rpi3` exists; the
+   new join would be `rpi3-1`). To write it, remove the `rpi3` node in the
+   Tailscale admin console first -- the running rpi3 is then unreachable by
+   name until the new card boots. Same will apply to rpi5 when its card is
+   written. rpi4 is not on the tailnet, so its write is not blocked. Say "go"
+   and remove the node, or say to keep the old node and skip rpi3 for now.
+2. WiFi credentials for the Pi cards: none exist yet. The file is
+   `~/.config/wk/wifi` on the machine that runs `wk sysimage write` (this
+   Mac), two lines: `ssid=<name>` and `psk=<passphrase>`; never in git. Create
+   it, or say which machine should hold it.
+3. "rpi5 2.54 yocto image": no 2.54 config exists; upstream has
+   `webkitglib/2.54`. I am adding `image/configs/webkit-2.54-yocto-rpi5-64.conf`
+   as a copy of the 2.52 one with the branch changed. Say if you meant WPE
+   (`wpewebkit-2.54-...`) instead.
+4. `wk claude --rc`: read as Claude Code Remote Control and built that way
+   (`wk claude <ws> --rc` starts the `claude remote-control` server in the
+   workspace, `--rc --stop` ends it; the first start runs one interactive
+   session because the trust dialog has no headless path). Say if you meant
+   something else.
+5. Git: origin/main is one commit ahead (5905f22, 17:09, from moose) and it
+   rewrites `lib/target.sh` -- a `ws_on_target` probe that keeps the registry
+   as the fast path. This working tree carries the agent's uncommitted removal
+   of that registry (`ws_target`/`ws_exists` probe the stores only; `wk gc`
+   deletes the old dir), which is the rule you set. A `git pull` here will
+   conflict in lib/target.sh. Recommendation: keep the registry-free version
+   and fold your `t_info` probe into `ws_exists` (it already has one for the
+   container case). Say "reconcile" and I do it (stash, pull, resolve, re-run
+   the suite); or you do it.
+6. The rpi3/rpi4 "recovery image builds" on moose finished in 2 minutes and
+   produced NO new image: bitbake did not run, and the wrapper reported the
+   day-old image as built (no WiFi layer in it). Being fixed (image stage
+   must run bitbake and prove the artifact is newer than the run). No decision
+   needed; noted so the fast "done" is not believed.
 
-- wk rm shoud take multiple hosts (again audit all commands)
+7. A "transient, 100% reproducible perf image using a normal distro" for
+   rpi5/moose (your HUMAN-benchmark-start note) does not exist: the fleet
+   boots yocto images, and `image/profiles.sh` tombstones `perf-linux-*` to
+   them. Is the distro perf image still wanted (it is a new builder,
+   `IMG_BUILDER=distro`, L)? Or is the yocto image the perf image now?
 
-- bash autocomplete (all commands)
+8. The yocto import keeps rootfs.tar.xz (~600 MB per system) and nothing
+   reads it (docs/HANDOFF-yocto.md). Keep it as an archival artifact, or stop
+   importing it?
+9. Pre-field images have no IMG_ROLE, so `wk sysimage ls` prints `unrecorded`
+   for them (docs/HANDOFF-boot.md). Keep that word, or say what it should say.
+10. `--sysroot` cross-compile (docs/Nice to have/HANDOFF-cross-compile.md) is
+    reserved and refused, unbuilt; `wk sysimage build --stage webkit` already
+    covers per-board cross builds. Build it (only no-SDK targets such as
+    riscv64 would need it), or make the refusal permanent and delete the doc?
+11. docs/HANDOFF-reprovision.md is the list for wiping moose and tolken to
+    prove reproducibility, with no date. Say "go" to schedule the wipe, or
+    leave it undated.
+12. Tailscale ACL policy needs an admin-console session: Karen limited to
+    immich/nextcloud/overleaf/proxmox with those apps isolated from each
+    other; your two accounts full access; a `tag:wk` grant for the Pi bench
+    systems that does not reuse `tag:server`; a stance on untrusted-router /
+    public-WiFi containment (docs/Security/HANDOFF-tailscale.md 1-4,6,8;
+    docs/HANDOFF-linux-pi.md 4). When can you do that session?
+13. `wk profile --browser` / `wk gui --browser` on the CMake ports: "the
+    browser" = the UI process only, or including its web process? (Mirrors
+    the `--lldb ui`/`--lldb web` split.) docs/Urgent/HANDOFF-linux-minibrower.md,
+    docs/Urgent/HANDOFF-profile.md.
+14. The Mac bench volume is the sticky default startup disk after install, so
+    HOST mode is what needs the manual startup-manager click today. Keep that
+    (a run needs no manual step), or make host the default and arm each run?
+15. Software-update scanning on the Mac bench install is detected and flagged,
+    never prevented; the only remaining fix is denying Apple's update endpoints
+    in that volume's /etc/hosts (docs/HANDOFF-mac-perf-mode.md). Do it, or is
+    flag-and-report enough?
 
-- Why is wk sync so slow on rpi5?
+16. Debug symbols for crash triage (docs/Urgent/HANDOFF-debug.md) need
+    `ddebs.ubuntu.com` reachable from a workspace, i.e. one more host in the
+    proxy allowlist (container/proxy/wk-proxy.py ALLOWED_HOSTS). Widen it for
+    that one host, or keep the allowlist as is and fetch symbols on the host?
 
-- wk pr inside workspace should not take a workspace param (this goes for all workspace commands). If the command can't be done inside the workspace, it should give you the command to run outside. Tasks like wk sync should be able to be done from inside the workspace, to support a rebase + push workflow.
+Everything else below proceeds without you.
 
-- wk build should have help option, and should print the build command used for easy reproduction. Should also list possible configurations, and customization options like --no-asan, cmakeargs, etc. This also applies to all commands. Should also list any default options for this host and let you skip them.
-- Allow storing default build args in remote configs
+Defects:
 
-- every command option should have a consistent default, override, etc. They should all behave consistently where it makes sense.
+- Confirm new recovery images for rpi3 and rpi4 build and write fine. Both sd card (rpi3) and second usb stick (rpi4) are connected to rpi5, so no intervention is needed. I give you permission to do this.
+  (agent: builds started on moose 2026-08-26 17:59 -- `wk status` shows them; the writes
+  wait on decisions 1 and 2 above)
+  (agent: the first yocto "builds" were no-ops -- the helper reused day-old
+  images; fixed, rebuilt for real. rpi4: built 18:28, manifest carries
+  tailscale 1.102.2, wk-wifi-join, wpa-supplicant -- ready to write once
+  decision 2 (WiFi credentials) is answered. rpi3: still rebuilding clang. The WPE 2.38 buildroot image for rpi3 (first-ever run of that
+  builder) stopped at its host container image: a samply install step in
+  container/buildroot/Containerfile extracts the wrong tar member; being
+  fixed, then retried.)
 
-Audit all subcommands for consistency
+- Confirm rpi5 2.54 yocto image works and can be deployed.
+  (agent: image/configs/webkit-2.54-yocto-rpi5-64.conf added; build started on
+  moose; the write waits on decisions 1-3 above)
 
-Make sure commands never ignore a paramater, and halt if a misleading param is provided.
+- wk status should load local data quickly first and fill the rest later.
 
-all commands by default should operate on the local machine. --target should give a target. --all should operate on all machines. Commands inside a workspace should operate there and only there.
+- Audit every subcommand for option consistency: a missing --quiet, --target,
+  --all or --force where a sibling command has one; a parameter silently
+  ignored instead of refused; one section of a command getting a feature a
+  neighbouring section does not. Known leftovers from the 2026-08-26 pass:
+  --quiet is parsed locally by ~11 commands instead of once in the
+  dispatcher, the way --force is; wk ls and wk find have no --json, though
+  wk status does; --all means "every machine" in wk sync and "every item"
+  elsewhere -- one meaning, or two words; --count appears in bench, pick, pr,
+  pi, status and sync with no confirmed single semantics.
 
-ex of failure:
+- High-level docs: an architecture overview and every supported workflow by
+  example, very short. README.md now has a first version of this; the item
+  stays until it is accepted as done.
 
-wk push off --all
-buildbox4             error: 'wk push' acts on a workstation's own store or hardware, and this is
-buildbox4                 the shared build machine for target 'buildbox4'.
-buildbox4                 Run it on the workstation instead. What works here: ls, status, build,
-buildbox4                 run, test, logs, enter.
-devbox-arm64-2        error: 'wk push' acts on a workstation's own store or hardware, and this is
-devbox-arm64-2            the shared build machine for target 'devbox-arm64-2'.
-devbox-arm64-2            Run it on the workstation instead. What works here: ls, status, build,
-devbox-arm64-2            run, test, logs, enter.
-moose                 ==> push is already OFF
-moose                   workspaces keep their remotes and can fetch; a push is refused at the door.
+- Mass deletion of low-level comments and docs that serve no value. Comment
+  density is still ~37% of shell lines; lib/target.sh is 43%.
 
-Every command that needs a lock should have a lock. Locks should be hooked up to status, doctor and gc.
+- docs/Urgent/HUMAN-benchmark-start.md and docs/Urgent/HUMAN-Benchmarking variance.md
+  (agent: done so far -- one result schema with a configuration tuple, `wk
+  bench report` HTML/histograms/score+time/variance-by-configuration, the
+  noise knobs (ASLR, env pad, path pad, shared cache) in every lane; the
+  image/bench-mode unification is planned in docs/HANDOFF-bench-unify.md.
+  Still owed from the notes: Mac bench-mode checks in `wk doctor` (screen
+  state in quiesce, SIP on host / off on bench volume, single manual step),
+  the 8-hour autonomous run driver, one run per side under samply with
+  jitdump, and the VM rehearsal of the whole flow.)
 
-push should work for WPEWebKit fork too. Confirm that this push and pull workflow actually uses hard links, and that a pr can be created, rebased off origin, wpe, and pushed / pulled from either fork without having a bunch of copies of every remote's refs. Git fetch all should be almost instant.
-
-Document a solid design for the UX when handling multiple machines. It should be clear when something is local or remote.
-
-- Warn if parallelism is too low. There is also a problem if you kill and restart the build, the load average hangs and we get low paralellism. CCache caches build number too, fix that.
-
-again audit all commands. Warn for things that make sense (missing credentials, sudo, etc) up front. Block for safety, but allow forcing.
-
-- sudo Tools/gtk/install-dependencies on remote hosts
-
-- wk status missing load data for other machines
-
-audit every command for bugs like this: one section gets some feature, but not all
-
-- wk status should load local data quickly first and fill the rest later
-
-- wk status should explain how to generate an image for each member of the fleet (to re-provision it from scratch) and have a small sample command for how to provision each unique role. wk status should never make any data up. Text should be concise and readable.
-
-- Too many if branches. Everywhere behaviour can change must be tested and
-  testable, otherwise the branch does not stay. No proliferation of configs or options, especally if this might be used on other people's machines.
-
-- Never assume something about my setup. This should be flexible, work with different configs, sets of hardware, and be extensible. Don't repeat yourself. Abstract wherever possible.
-  
-- Docs need to be more concise and higher-level. README.md is 24 KB and
-  SETUP.md is 33 KB; docs/TESTING.md is 1000 line items. The `docs/help/` pages
-  are the concise layer and the two top-level files largely restate them.
-
-  Replace this with one single doc. It should give an arch overview, and a sample of every supported workflow with commands by example. Very short, to the point. Never ramble, never assume anything about the user's setup, never reference the past or alternate versions of the future.
-
-- Conf files need to be more consistent; no stupid comments. The twenty new
-  `image/configs/*.conf` are the first set written to one shape; `boot/machines/`,
-  `targets/hosts/` and `bridge/hosts/` predate it and do not match each other.
-
-- rpi3b+/rpi4/rpi5 should be configured to use wifi instead of ethernet for rescue and bench images. The credentials should come from the host. This should block deployment.
-- Confirm rpi5 yocto image works and can be deployed.
-
-- Ctrl-C does not always work as expected in various wk commands.
-
-- For remote hosts:
-
-.claude/settings.json
-@@ -6,5 +6,10 @@
-         "path": ".claude/plugins"
-       }
-     }
-+  },
-+  "permissions": {
-+    "allow": [
-+      "Bash(wk *)"
-+    ]
-   }
- }
-
-- wk zed should work from inside a workspace, even on a remote box, by giving you a command to run on your local machine to launch zed or connect.
-
-Testing: we need some actual unit tests, not a document. Everything that does not need real hardware to run. Use vms or containers where possible, clean up after each test. Everything gets a test. These should be regression tests, not change tests.
-
-Then remove the testing doc, it isn't catching regressions.
-
-wk claude should support -l and --continue, or otherwise support --rc mode so I can launch agents in the desktop app
+- Then go through all the docs not in a folder

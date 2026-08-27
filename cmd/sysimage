@@ -24,7 +24,7 @@
 #   ls | list                   every image a workspace here has built, and
 #                                where it is -- there is no store; the
 #                                workspace that built an image is its name
-#                                (wk help images)
+#                                (wk help)
 #   show <id>                   what an image is, and whether it still is
 #   disks <machine>             removable disks attached to that machine
 #   write --from <path> --disk <machine>:<device>
@@ -91,7 +91,7 @@ driving_key() {
 # What the image is, in the image, so "which OS am I talking to" is never a
 # guess, and `wk boot --status` can tell the two roles apart by evidence.
 #
-# This is the only record of what an image is (wk help images): everything
+# This is the only record of what an image is (wk help): everything
 # else is either here, derivable from `profile` plus this repo, or
 # recomputable from the bytes. Read back with debugfs, and off a booted board
 # by `b_probe` -- the same fact from the same place.
@@ -702,7 +702,7 @@ cmd_build() {
         buildroot) load_target "${WK_TARGET:-$(default_target)}"; buildroot_build "$profile" "$@"; return $? ;;
         yocto)     load_target "${WK_TARGET:-$(default_target)}"; yocto_build     "$profile" "$@"; return $? ;;
         '')  die "profile '$profile' names no builder.
-    Every profile declares IMG_BUILDER and there is no default (wk help images).
+    Every profile declares IMG_BUILDER and there is no default (wk help).
     image/profiles.sh is where this one is defined." ;;
         *)   die "profile '$profile' names builder '$IMG_BUILDER', which does not exist.
     There are four: yocto, buildroot, pmos, fetch." ;;
@@ -757,13 +757,13 @@ ROWS
     if [ "$n" -eq 0 ]; then
         log "no workspace here has built an image."
         log "  'wk sysimage build <profile>' builds one; it stays in the workspace"
-        log "  that built it (wk help images)."
+        log "  that built it (wk help)."
         return 0
     fi
 
     log ""
     log "$n image$([ "$n" = 1 ] || printf s), each in the workspace that built it."
-    log "  There is no image store: the workspace is the name (wk help images)."
+    log "  There is no image store: the workspace is the name (wk help)."
     log "  To write one:  wk sysimage write --from <path above> --disk <machine>:<device>"
     log "                 add --rescue for the system a board falls back to"
     return 0
@@ -826,7 +826,7 @@ _root_line() {
 
 # Writing an image that is not in a store, because there is no store.
 #
-# `--from` is the whole of the model in `wk help images`: a workspace built an
+# `--from` is the whole of the model in `wk help`: a workspace built an
 # image, the bytes are wherever it put them, and this moves them onto a card
 # and edits it. Nothing is imported, catalogued or hashed into a directory of
 # artifacts on the way.
@@ -1005,7 +1005,7 @@ _from_reader() { # <spec> -- prints a command that emits the image on stdout
               printf 'podman machine ssh %s -- sudo cat %s | %s' \
                   "${WK_MACHINE:-wk}" "$(sh_quote "${1#vm:}")" "$filter" ;;
         *)    [ -r "$1" ] || die "no image at $1
-    An image lives where the workspace that built it put it (wk help images). If
+    An image lives where the workspace that built it put it (wk help). If
     that is inside this machine's podman VM, say so: --from vm:$1"
               if [ "$filter" = cat ]; then
                   printf 'cat %s' "$(sh_quote "$1")"
@@ -1083,7 +1083,7 @@ $(machine_list | sed 's/^/      /')"
     disk_refuse_unless_safe "$DISK_DEV" "$size"
 
     # The id names what this is and which bytes it is, and nothing else -- there
-    # is no catalogue for it to be a slot in (wk help images). The profile when
+    # is no catalogue for it to be a slot in (wk help). The profile when
     # there is one, because that is what the image *is*; otherwise the file's
     # own name with the compression suffix taken off, since the bytes that reach
     # the card are the decompressed ones and an id ending `.wic.xz` would
@@ -1143,7 +1143,7 @@ EOF
     # Growing is opt-in here and that is the point. A card grown to fill has no
     # room for a second system, and a board with one system has no rescue -- so
     # it cannot install anything without a person, which is the state this whole
-    # design exists to leave behind (wk help hardware).
+    # design exists to leave behind (wk help).
     if [ "$grow" = 1 ]; then
         disk_grow "$DISK_DEV"
     else
@@ -1208,7 +1208,7 @@ $(machine_list | sed 's/^/      /')"
     # on the board where that matters most -- the rpi3, one medium holding both
     # systems -- growing the rescue to fill the card is what makes the board
     # unable to install a bench system without a person in the room
-    # (`wk help hardware`). Explicit --grow still wins.
+    # (`wk help`). Explicit --grow still wins.
     if [ "$role" = rescue ] && [ -z "$grow_set" ]; then grow=0; fi
 
     # A store-free write is a different path from top to bottom: no manifest to
@@ -1226,14 +1226,14 @@ $(machine_list | sed 's/^/      /')"
 
     [ -n "$id" ] || die "usage: wk sysimage write --from <path> --disk <machine>:<device>
     An image is bytes a workspace produced, not an id in a catalogue
-    (wk help images), so what identifies one is its path.
+    (wk help), so what identifies one is its path.
     'wk sysimage ls' lists every image a workspace here has built, with the
     path to pass to --from."
     [ -n "$spec" ] || die "usage: wk sysimage write $id --disk <machine>:<device>
     'wk sysimage disks <machine>' lists what is attached where."
 
     image_complete "$id" || die "no such image: $id
-    Nothing here is addressed by id any more (wk help images). 'wk sysimage ls'
+    Nothing here is addressed by id any more (wk help). 'wk sysimage ls'
     lists what the workspaces have built; pass its path to --from."
 
     disk_parse "$spec"

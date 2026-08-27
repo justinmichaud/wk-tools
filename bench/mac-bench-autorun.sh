@@ -279,7 +279,18 @@ SETTLE=$(jf settle);     SETTLE="${SETTLE:-90}"
 # volume it stays empty, and the result records `forced` either way.
 FORCE=$(jf force)
 
+# The variance knobs (cmd/bench's header documents each): exported for the
+# rest of this process so every `"$TOOLS/wk" bench staged` call below picks
+# them up the same way a container run's WK_BENCH_* environment does --
+# cmd_staged reads the identical variable names, so this is the only place
+# that has to know the job carries them.
+export WK_BENCH_ASLR=$(jf aslr)
+export WK_BENCH_ENV_PAD=$(jf env_pad)
+export WK_BENCH_PATH_PAD=$(jf path_pad)
+export WK_BENCH_SHARED_CACHE=$(jf shared_cache)
+
 say "job: plan=$PLAN rounds=$ROUNDS arms=$NARMS timeout=${TIMEOUT}s count=${COUNT:-default}${FORCE:+ FORCED}"
+say "     variance: aslr=${WK_BENCH_ASLR:-unset} env_pad=${WK_BENCH_ENV_PAD:-0} path_pad=${WK_BENCH_PATH_PAD:-0} shared_cache=${WK_BENCH_SHARED_CACHE:-unset}"
 say "     wk-tools=$TOOLS"
 
 [ -x "$TOOLS/wk" ] || {

@@ -132,12 +132,12 @@ printf '%s\\n' "${{COMPREPLY[@]}}"
         """workspace-name completion reads local state, not `wk ls`"""
         tmp = tempfile.mkdtemp(prefix="wk-completion-test-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        targets_dir = os.path.join(tmp, "wk", "targets")
-        os.makedirs(targets_dir)
-        with open(os.path.join(targets_dir, "demo-ws"), "w") as f:
-            f.write("container\n")
+        # No registry: a workspace's own store is what completion reads
+        # (cmd/completion, list_workspaces_local) -- container is the one
+        # built-in kind whose store is plain $WK_STORE.
+        os.makedirs(os.path.join(tmp, "ws", "demo-ws"))
 
-        reply = self._complete([str(WK), "build", ""], 2, env={"XDG_STATE_HOME": tmp})
+        reply = self._complete([str(WK), "build", ""], 2, env={"WK_STORE": tmp})
         self.assertIn("demo-ws", reply)
 
 

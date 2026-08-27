@@ -45,19 +45,16 @@ No machine constraint beyond "wherever the SD card reader physically is."
 - The FEATURE_C12 `tune2fs` workaround is deliberately not implemented — it is
   for old e2fsprogs on the *target*, and nothing has hit it.
 
-## Owed — unverified
+## Owed — unverified, needs a card in a reader
 
 - [ ] a bmap write onto **used** media — every write to the rpi4 today takes
       the dd path (no bmaptool machine involved), so this is untested
 - [ ] two *unmarked* disks of the same transport is a residual ambiguity in
       `disk_resolve_own` — resolves itself once one is written, real until then
-- [ ] a `--from` streamed write skips `image_check_boot_files`/
-      `image_check_root` (only the store-backed write runs them) — low risk
-      for a complete yocto build, a real gap for a partial tree
-- [ ] a `--from` write installs the identity marker and driving key but not
-      the systemd units (`install_units`) — correct by accident for a rescue,
-      a gap for a bench system
 - [ ] every remaining image edit (unique disk identity, root retarget,
       cmdline append, tailnet key/name) still needs moving onto the
       card-holding machine rather than the image, so the "mac portion" of
       `wk sysimage` can stop existing
+
+The rest of this area's logic needs no card — see
+`docs/HANDOFF-test-runner.md`.

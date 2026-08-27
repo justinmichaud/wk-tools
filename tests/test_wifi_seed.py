@@ -171,25 +171,25 @@ done
 
 
 class TestWifiPreflight(WkTest):
-    def _preflight(self, machine, store):
+    def _preflight(self, machine, creds_path):
         script = f'''
-export WK_STORE={store}
 . "{REPO}/lib/common.sh"; . "{REPO}/boot/machines.sh"; . "{REPO}/boot/disk.sh"
 {_lift(REPO / "cmd" / "sysimage", "_wifi_creds_preflight")}
 _wifi_creds_preflight {machine!r}
 '''
-        return bash(script)
+        return bash(script, env={"WK_WIFI_CREDS": creds_path})
 
     def test_refuses_a_wifi_board_with_no_credentials_and_names_the_remedy(self):
         """refuses a WiFi board with no credentials, and names the remedy"""
         with tempfile.TemporaryDirectory() as store:
-            cp = self._preflight("rpi3", store)
+            creds = str(Path(store) / "wifi")
+            cp = self._preflight("rpi3", creds)
             self.assertNotEqual(cp.returncode, 0, "wrote nothing, but did not refuse")
             out = cp.stdout + cp.stderr
             self.assertIn("no uplink", out)
             self.assertIn("ssid=", out)
             self.assertIn("psk=", out)
-            self.assertIn(f"{store}/secrets/wifi", out, "the refusal does not name where to put credentials")
+            self.assertIn(creds, out, "the refusal does not name where to put credentials")
 
     def test_force_does_not_cross_the_wifi_barrier(self):
         """--force does not appear anywhere in the wifi preflight -- there is no override"""
@@ -207,16 +207,15 @@ _wifi_creds_preflight {machine!r}
     def test_passes_for_a_wired_board_with_no_credentials(self):
         """a board with a cable needs no WiFi credential at all"""
         with tempfile.TemporaryDirectory() as store:
-            cp = self._preflight("mbp", store)
+            cp = self._preflight("mbp", str(Path(store) / "wifi"))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
     def test_passes_for_a_wifi_board_once_credentials_exist(self):
         """passes once ssid=/psk= are on disk"""
         with tempfile.TemporaryDirectory() as store:
-            secrets = Path(store) / "secrets"
-            secrets.mkdir(parents=True)
-            (secrets / "wifi").write_text("ssid=TestNet\npsk=hunter22\n")
-            cp = self._preflight("rpi4", store)
+            creds = Path(store) / "wifi"
+            creds.write_text("ssid=TestNet\npsk=hunter22\n")
+            cp = self._preflight("rpi4", str(creds))
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
 

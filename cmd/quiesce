@@ -15,8 +15,8 @@
 #           frontmost (macOS), stop Notification Center, keep the display
 #           awake. Settles for WK_SETTLE_SECONDS (default 30) before
 #           returning.
-#   off     undo everything `on` did, reading both this machine's state
-#           directory and the legacy $TMPDIR one so nothing is left stranded.
+#   off     undo everything `on` did, reading this machine's one state
+#           directory.
 #   status  what is quiesced right now, plus the privileged helper's own
 #           account of what it did.
 
@@ -40,9 +40,10 @@ ACTION="${1:-status}"
 # and leave state stranded, exactly the situation an unattended benchmark
 # lane (which runs this over ssh) needs undone.
 STATE="${WK_QUIESCE_STATE:-$(wk_state_dir)/quiesce}"
-# A session left behind by the older location is still undoable: `off` reads
-# both, so a machine quiesced by yesterday's wk-tools is not stranded.
-LEGACY_STATE="${TMPDIR:-/tmp}/wk-quiesce"
+# An older wk-tools wrote its state here instead. Not read or undone by this
+# one -- one state directory, no migration -- but `status` names it so a
+# person can `rm -rf` it themselves.
+STALE_STATE="${TMPDIR:-/tmp}/wk-quiesce"
 
 run_priv() {
     [ -x "$PRIV" ] || die "$PRIV is not installed, so the privileged half of quiesce
@@ -190,27 +191,22 @@ RAISEREOF
     ;;
 
 off)
-    if is_macos; then
-      # Both directories: this one, and any session left behind by the older
-      # $TMPDIR location. Undoing twice is harmless; missing one is a leak.
-      for _st in "$STATE" "$LEGACY_STATE"; do
-        [ -d "$_st" ] || continue
-        if [ -f "$_st/caffeinate.pid" ]; then
-            kill "$(cat "$_st/caffeinate.pid")" 2>/dev/null || true
-            rm -f "$_st/caffeinate.pid"
+    if is_macos && [ -d "$STATE" ]; then
+        if [ -f "$STATE/caffeinate.pid" ]; then
+            kill "$(cat "$STATE/caffeinate.pid")" 2>/dev/null || true
+            rm -f "$STATE/caffeinate.pid"
             info "caffeinate stopped"
         fi
-        if [ -f "$_st/raiser.pid" ]; then
-            kill "$(cat "$_st/raiser.pid")" 2>/dev/null || true
-            rm -f "$_st/raiser.pid"
+        if [ -f "$STATE/raiser.pid" ]; then
+            kill "$(cat "$STATE/raiser.pid")" 2>/dev/null || true
+            rm -f "$STATE/raiser.pid"
             info "raiser stopped"
         fi
-        if [ -f "$_st/appnap_disabled" ]; then
+        if [ -f "$STATE/appnap_disabled" ]; then
             defaults delete org.webkit.MiniBrowser NSAppSleepDisabled 2>/dev/null || true
-            rm -f "$_st/appnap_disabled"
+            rm -f "$STATE/appnap_disabled"
             info "App Nap restored for MiniBrowser"
         fi
-        STATE="$_st"
         # Notification Center comes back on its own at the next login, so there
         # is nothing to undo on a benchmark install that reboots. Restarted here
         # anyway for the workstation case, where `quiesce off` is expected to
@@ -232,7 +228,6 @@ off)
             rm -f "$STATE/daemons_paused"
             info "background daemons resumed"
         fi
-      done
     fi
     run_priv off
     ;;
@@ -249,8 +244,12 @@ status)
         printf '%s\n' "$_claim" | sed 's/^/    /' >&2
     fi
     log "  measured here, now:"
-    [ -f "$STATE/caffeinate.pid" ] && log "  caffeinate: running" || log "  caffeinate: no"
+    # A pid file left behind by a caffeinate that already died is not
+    # "running" -- kill -0 asks the process, not the file.
+    [ -f "$STATE/caffeinate.pid" ] && kill -0 "$(cat "$STATE/caffeinate.pid")" 2>/dev/null \
+        && log "  caffeinate: running" || log "  caffeinate: no"
     [ -f "$STATE/daemons_paused" ] && log "  daemons:    paused" || log "  daemons:    running"
+    [ -d "$STALE_STATE" ] && log "  stale: $STALE_STATE (an older wk-tools' state; not read -- rm -rf it)"
     if is_macos; then
         [ -f "$STATE/raiser.pid" ] && kill -0 "$(cat "$STATE/raiser.pid")" 2>/dev/null \
             && log "  raiser:     running (MiniBrowser kept frontmost)" \

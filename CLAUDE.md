@@ -30,6 +30,13 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
   `case` arm, a `--force`, a platform special case: each is reachable from
   `wk selftest`, or it is owed work named in a handoff.
   A branch nothing exercises is deleted, not kept in case.
+- **No stored copy of a recomputable fact.** A cache is extra state that drifts
+  and a second code path -- the hit and the miss -- that both need tests. A list
+  of workspaces, a workspace's target, a machine's reachability, a probe's
+  result: recomputed from evidence on every read. Records of a user's choice,
+  locks, logs and measurements are not caches.
+- **Measure before theorising.** A fault is fixed at its root after it has been
+  measured; machinery built around an unmeasured fault is deleted.
 - **No dead code, ever.** A function, file, package or dependency with no
   caller is removed in the change that strands it. Tombstones — a name the
   tooling still refuses, naming its replacement — are the only remnant allowed.
@@ -73,6 +80,8 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
    reports it and believes the machine.
 6. **Read-only is read-only.** A reporting command changes nothing, takes no
    lock, and is never blocked by the work it asks about.
+7. **Prompts guard destructive actions only.** Routine paths never prompt; a
+   destructive prompt defaults to No and declines without a terminal.
 
 ## Cattle, not pets
 
@@ -86,6 +95,8 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
   A `case` statement naming a machine is a bug.
 - Hand-applied settings vanish on a rebuild. Anything missed belongs in
   `./setup` or `wk backup`, not in a person's memory.
+- **No in-place upgrades.** A guest, golden base or image is fixed by changing
+  the input that produces it and rebuilding, never by patching the running copy.
 - **A node is reached by its tailnet name, and how to reach it is not written
   down.** No address, `.local` name, MAC or `ProxyJump` is stored, in
   `dotfiles/ssh/config` or in code. The two things that cannot hold a tailnet

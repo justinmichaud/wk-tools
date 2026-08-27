@@ -3,7 +3,7 @@
 # This driver exists because nothing here can arm the rpi3 *yet* -- not because
 # the board cannot be armed. The arrangement it is heading for (one card holding
 # a rescue and a bench system, selected by `root=`, armed in stage 2) is in
-# `wk help hardware`; what is left to build is in docs/HANDOFF-boot.md.
+# `wk help`; what is left to build is in docs/HANDOFF-boot.md.
 #
 # Until that lands, the lane is a system on local media, written by
 # `wk sysimage write` and booted by putting the card in the slot -- a person's
@@ -31,7 +31,7 @@ b_arm() {
 
 b_evidence() {
     # The lane, not a guess about the fuse: this board is armed in stage 2, so
-    # the USB-boot OTP bit governs nothing here (`wk help hardware`). Nothing has
+    # the USB-boot OTP bit governs nothing here (`wk help`). Nothing has
     # ever read it on this board, and a line of evidence that is really a belief
     # is the worst kind to print beside real ones.
     echo "lane=local SD media, both systems on one card (stage-2 arming)"
@@ -40,14 +40,14 @@ b_evidence() {
 
 # The wk-managed media, in one line, for the fleet block in `wk status`.
 b_media() {
-    printf 'SD card %s holds both systems by design (wk help hardware); card swaps hands-on until stage-2 arming lands' "$MACH_DEVICE"
+    printf 'SD card %s holds both systems by design (wk help); card swaps hands-on until stage-2 arming lands' "$MACH_DEVICE"
 }
 
 # How this board is made from nothing, derived rather than written down.
 #
 # Every line is composed from what this machine's conf already declares -- its
 # profile, its device, its driver -- so there is no second copy to go stale when
-# one of them changes. `wk help hardware` has the reasoning for the arrangement
+# one of them changes. `wk help` has the reasoning for the arrangement
 # and it is not repeated here.
 #
 # One medium, so the two systems share it and the rescue is written without

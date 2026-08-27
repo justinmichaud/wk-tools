@@ -5,13 +5,16 @@ Two related features, neither started. Reference: wiki
 
 ## Remaining — memory charts (`wk bench mem <ws> <plan>`)
 
-- **Rescue `plot-memory-log.py` out of the wiki first.** The ~300-line charting
-  script exists only as a wiki code block; commit it under `container/bin/` so
-  it cannot be lost and the command can call it.
-- **Ship the recurring experiment patches as files** (e.g. `extra/patches/`):
-  the startMemorySampler patch, the disable-prewarming patch, the 300 MB
-  MemoryPressureMonitor clamp. Each is re-applied by copy-paste today.
-  `wk build --patch <name>`, or a documented directory.
+- **The recurring experiment patches are files now, but not the patches
+  themselves.** `container/bin/patches/{startMemorySampler,disable-prewarming,
+  memory-pressure-300mb}.patch` exist as named, documented stubs -- what each
+  has to do is written down in the file that will hold it -- but not as real
+  diffs: those were never in this repository, and the wiki pages this
+  handoff's own reference line names 404 from here and are not indexed
+  anywhere a web search reaches, which reads as Igalia-internal rather than
+  lost. Capture each from wherever it is still re-applied by copy-paste today
+  (`git diff > container/bin/patches/<name>.patch` in a checkout that has it)
+  and these three TODOs are done.
 - **The run**: build (patched as asked), drive MiniBrowser at the plan, collect
   the `WebKitWebProcess` logs, plot (`--include c,k --max-seconds N`), and drop
   the chart and raw logs beside the result with `wk bench`'s provenance

@@ -208,18 +208,16 @@ verdict_local() {
 }
 
 # --- where visudo is ---------------------------------------------------------
-# /usr/sbin is not on a normal user's PATH on Debian-family Linux, so
-# `visudo -c -f` would be "command not found" on exactly the machines this
-# exists for. Resolved once, by name or by path. Not finding it is fatal on
-# purpose (the alternative is installing an unvalidated file), and sets a
-# variable rather than printing one, so `die` kills the command instead of
-# leaving an empty word behind that reports a fake parse failure.
+# Resolved once, by name, with no second lookup path: every fleet machine has
+# visudo on PATH (it ships with the sudo package these machines already
+# require), so a hardcoded fallback location tried only when the first
+# lookup fails would be a second implementation of "where is visudo",
+# exercised only on the day it disagrees with the first. Not finding it is
+# fatal on purpose -- the alternative is installing an unvalidated file.
 VISUDO=""
 visudo_resolve() {
-    if have visudo; then VISUDO=visudo
-    elif [ -x /usr/sbin/visudo ]; then VISUDO=/usr/sbin/visudo
-    else die "visudo is not on PATH and /usr/sbin/visudo does not exist -- refusing to write a sudoers file that cannot be validated"
-    fi
+    require visudo "visudo is required (part of the sudo package) but not on PATH -- refusing to write a sudoers file that cannot be validated"
+    VISUDO=visudo
 }
 
 # --- install the drop-in -----------------------------------------------------
