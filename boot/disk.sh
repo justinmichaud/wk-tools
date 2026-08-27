@@ -6,20 +6,15 @@
 #
 # The work happens on the machine, over ssh, through one privileged helper
 # (`admin/wk-card-priv`, invoked as `sudo -n`) -- the only way in, since a
-# BatchMode ssh has no terminal for sudo to prompt on and the workstation
-# this runs from holds no privilege of its own.
-#
-# Requires machine_load() to have run, so MACH_SSH/MACH_ROOT/MACH_DEVICE are set.
+# BatchMode ssh has no terminal for sudo to prompt on. Requires
+# machine_load() to have run, so MACH_SSH/MACH_ROOT/MACH_DEVICE are set.
 
 # --- the privileged half ------------------------------------------------------
-#
 # One spelling for every privileged step: `sudo -n`, a fixed path, a fixed
 # verb, arguments the helper checks itself rather than trusting this end. No
-# inline sudo, no fallback if the helper is missing (CLAUDE.md, "One path,
-# not two").
-#
-# stdin passes straight through, which is how the image reaches `write` and
-# the tailscale auth key reaches `tailnet` without touching a command line.
+# inline sudo, no fallback if the helper is missing. stdin passes straight
+# through, which is how the image reaches `write` and the tailscale auth key
+# reaches `tailnet` without touching a command line.
 CARD_PRIV=/usr/local/libexec/wk-card-priv
 
 card_priv() { # <verb> [args...]
@@ -28,9 +23,7 @@ card_priv() { # <verb> [args...]
 
 # Asked once, before the first refusal that would otherwise blame the disk
 # for a missing helper: without this, "command not found" arrives indented
-# inside "rpi5 will not write /dev/mmcblk0" and names no remedy. `./setup`
-# installs the helper on machines with card readers, so its absence is a
-# provisioning fact.
+# inside "rpi5 will not write /dev/mmcblk0" and names no remedy.
 card_priv_require() {
     card_priv status >/dev/null 2>&1 && return 0
     die "$MACH_NAME cannot write a disk: its card helper is missing, or its
@@ -71,29 +64,13 @@ disk_candidates() {
         $5 == "disk" && ($4 == 1 || $3 == "usb" || $3 == "mmc") { print }'
 }
 
-# `wk boot` looks like it takes a disk argument it does not, so the listing
-# below marks which one the machine is set up to boot from.
-#
-# What is on each removable disk, as "<disk> <TAB> <description>": kernel
-# names like sda/sdb are enumeration order, not identity, and swap across a
-# reboot, so this reports each disk's filesystem labels read from the disk
-# rather than trusting `MACH_DEVICE`. Labels are reported, not interpreted --
-# `WK-IMG-BOOT`/`wk-image-root` means the distro-seeding path wrote it, and a
-# yocto image labels its partitions `boot`/`root` like any other, so reading
-# either as "holds a wk system" is wrong. The identity marker (/etc/wk-image)
-# would answer that honestly but needs a privileged mount per disk.
-#
-# Which machine's system is on a disk, read from the disk: the identity is
-# written into the image at write time (/etc/wk-image, `machine=`), which
-# replaced a declared serial per machine -- a serial is a second copy of a
-# fact, and the first swapped stick makes it a lie. Empty means a blank disk,
-# one somebody else wrote, or a helper too old to have the verb -- all three
-# are "this repo cannot say", the honest answer that lets the caller ask
-# rather than guess.
-#
-# Whether the machine holding the disks can even answer, asked once and kept
-# apart from the answer: "this disk has no marker" and "this end cannot
-# look" are different facts with different remedies.
+# Kernel names like sda/sdb are enumeration order, not identity, and swap
+# across a reboot, so which disk holds a wk system is read from the disk's
+# identity marker (/etc/wk-image, `machine=`), not from a filesystem label
+# (a yocto image labels boot/root like any other) or a declared serial in a
+# conf (a second copy of a fact the first swapped stick makes a lie). Empty
+# means a blank disk, one somebody else wrote, or a helper too old to have
+# the verb -- kept apart from "this end cannot even look" (disk_can_identify).
 _WK_WHOSE_CAP=""
 disk_can_identify() {
     if [ -z "$_WK_WHOSE_CAP" ]; then
@@ -134,21 +111,13 @@ disk_tran_of_name() {
 }
 
 # The machine's own medium, resolved from the machine rather than trusted
-# from its conf: `MACH_DEVICE` is a kernel name, assigned in enumeration
-# order, and on a board that doubles as the fleet's card reader another
-# board's stick can take that name -- the arming path would then write a
-# partition type byte straight to it.
-#
-# The rule is exclusion, not recognition: start with disks of the expected
-# transport (usually just one, so a fresh unmarked stick still works); drop
-# the ones whose marker names another machine; if one is left, it is this
-# machine's. Recognition was tried first and fails when this machine's own
-# medium carries no marker at all (rpi5's predates markers) -- exclusion
-# needs no marker on the disk it selects, only on the ones it rejects.
-#
-# Prints nothing when more than one survives, leaving the caller to refuse
-# rather than pick: silence means "the machine did not say", never "use the
-# conf".
+# from its conf: `MACH_DEVICE` is a kernel name, and on a board that doubles
+# as the fleet's card reader another board's stick can take that name --
+# the arming path would then write a partition type byte straight to it.
+# Exclusion, not recognition: start with disks of the expected transport,
+# drop the ones marked for another machine; what is left needs no marker of
+# its own. Prints nothing when more than one survives, so the caller refuses
+# rather than picks.
 disk_resolve_own() {
     local want same n dev owner left=""
     want=$(disk_tran_of_name "${MACH_DEVICE:-}")
@@ -174,10 +143,8 @@ disk_resolve_own() {
     printf '%s' "$1"
 }
 
-# The device the machine's own medium is at right now, for a caller that is
-# about to write to it. Falls back to the declared name only when the machine
-# could not be asked, and says so -- a fallback that is silent is one that acts
-# on a stale name without anybody knowing.
+# The device the machine's own medium is at right now. Falls back to the
+# declared name only when the machine could not be asked, and says so.
 disk_own_or_declared() {
     local got
     got=$(disk_resolve_own 2>/dev/null) || got=""
@@ -194,10 +161,8 @@ disk_own_or_declared() {
 }
 
 # disk_for_machine <machine> -- the disk on the machine m_ssh is aimed at
-# that holds <machine>'s system, or nothing. Evidence only: a blank disk
-# matches nothing, which is correct -- the first write to a fresh stick has
-# to name it, and every write after does not, because by then the stick
-# says what it is.
+# that holds <machine>'s system, or nothing. A blank disk matches nothing:
+# the first write to a fresh stick has to name it; every write after does not.
 disk_for_machine() { # <machine>
     local want="$1" dev
     [ -n "$want" ] || return 1
@@ -232,10 +197,8 @@ disk_list() {
         desc=$(printf '%s\n' "$contents" | awk -F'\t' -v d="$name" '$1 == d { print $2; exit }')
         [ -n "$desc" ] || desc="empty -- no partition table"
 
-        # Whose system is on it, read off the disk -- not "whose medium is
-        # this", which nothing here needs to know: a write must avoid
-        # overwriting a system somebody wants. `|| true` because an
-        # unavailable answer is a line of the listing, not the end of it.
+        # `|| true`: an unavailable answer is a line of the listing, not the
+        # end of it.
         owner=$(disk_image_machine "$name" || true)
 
         if [ "$name" = "${MACH_DEVICE:-}" ]; then
@@ -265,11 +228,9 @@ EOF
   Remedy, from a terminal on $MACH_NAME:  ./setup --stage quiesce"
     }
 
-    # Rule 5 (CLAUDE.md): when the record and the machine disagree, the
-    # machine wins and the command says so. `sd*` names are enumeration
-    # order, and this board doubles as the fleet's card reader, so other
-    # boards' media sit beside its own -- writing the conf's name would erase
-    # whichever disk happens to be there now.
+    # The machine wins when the record and it disagree (CLAUDE.md). `sd*`
+    # names are enumeration order, and this board doubles as the fleet's
+    # card reader, so other boards' media sit beside its own.
     local mine
     mine=$(disk_for_machine "$MACH_NAME" 2>/dev/null) || mine=""
     if [ -n "${MACH_DEVICE:-}" ] && [ -n "$mine" ] && [ "$mine" != "$MACH_DEVICE" ]; then
@@ -279,11 +240,9 @@ EOF
     fi
 }
 
-# May this device be written? Asked of the helper, the machine that will do
-# the writing and the only implementation of the rule -- a second copy of
-# "is this safe" is one that can drift into permitting what the other
-# refuses. Adds the one question the helper cannot answer: does the image
-# fit.
+# May this device be written? Asked of the helper, the only implementation
+# of the rule -- a second copy can drift into permitting what the other
+# refuses. Adds the one question the helper cannot answer: does the image fit.
 disk_refuse_unless_safe() {
     local dev="$1" bytes="$2" out dev_bytes size
 
@@ -310,27 +269,20 @@ disk_mounted() {
 # reason to send someone back to a hand-typed umount.
 disk_unmount() {
     local dev="$1"
-    # Through the helper, like every other privileged step here. It is the one
-    # verb allowed to see mounted filesystems -- unmounting them is its purpose
-    # -- and it still refuses a disk this machine is running from.
+    # Through the helper, like every other privileged step: it still refuses
+    # a disk this machine is running from.
     card_priv unmount "$dev" >/dev/null \
         || die "could not unmount what is on $dev on $MACH_NAME.
     Something is using it:
 $(m_ssh "lsblk -lno NAME,MOUNTPOINT $(sh_quote "$dev")" 2>/dev/null | awk 'NF > 1 { print "    /dev/" $1 " at " $2 }')"
 }
 
-# One way to put an image on a card: a second writer would be a second code
-# path testable only with hardware in hand, for one behaviour -- and the one
-# that runs least often is the one that runs on the day something is
-# already wrong. Streams through the privileged helper, the only route to a
-# raw device here; if a write becomes too slow, make this path faster.
 disk_write_stream() { # <device>   -- image bytes on stdin
     local dev="$1" remote_zstd=no
     m_ssh 'command -v zstd >/dev/null' && remote_zstd=yes
     info "writing to $dev on $MACH_NAME (streamed, zstd=$remote_zstd)"
-    # The decompression runs unprivileged on the far side; only the plain stream
-    # reaches the privileged writer, so the verb stays "write these bytes to
-    # that device" and nothing more.
+    # Decompression runs unprivileged on the far side; only the plain stream
+    # reaches the privileged writer.
     if [ "$remote_zstd" = yes ] && have zstd; then
         zstd -3 -c | m_ssh "zstd -dc | sudo -n $CARD_PRIV write $(sh_quote "$dev")"
     else
@@ -338,9 +290,8 @@ disk_write_stream() { # <device>   -- image bytes on stdin
     fi
 }
 
-# Writing a file is writing a stream with the file on stdin, and it is spelled
-# that way rather than reimplemented: two ways to put bytes on a card is two
-# code paths to test, on hardware, for one behaviour.
+# Writing a file is writing a stream with the file on stdin -- one writer,
+# not a second one to test on hardware.
 disk_write_dd() {
     local img="$1" dev="$2" bytes
     bytes=$(file_bytes "$img")
@@ -349,9 +300,9 @@ disk_write_dd() {
 }
 
 # Read the card back and compare with what was sent -- privileged, hence a
-# verb rather than a second way in. Unconditional over the whole span: a
-# checksum computed by whatever did the writing only claims the bytes it
-# chose to write arrived, and says nothing about the ones it skipped.
+# verb rather than a second way in, and unconditional over the whole span: a
+# checksum from whatever did the writing only claims the bytes it chose to
+# write arrived, and says nothing about the ones it skipped.
 disk_verify_dd() {
     local img="$1" dev="$2" bytes local_sha remote_sha
     bytes=$(file_bytes "$img")
@@ -367,9 +318,9 @@ disk_verify_dd() {
 }
 
 # The streamed write has no local file to re-read, so the caller passes the
-# size and hash it already computed (cmd_write_from) instead of a path.
-# Otherwise the same claim as disk_verify_dd: read the disk back rather than
-# trust a checksum from whatever wrote it.
+# size and hash it already computed instead of a path. Otherwise the same
+# claim as disk_verify_dd: read the disk back rather than trust a checksum
+# from whatever wrote it.
 disk_verify_stream() { # <device> <bytes> <sha256>
     local dev="$1" bytes="$2" want="$3" got
     info "verifying $dev against the image that was streamed to it"
@@ -396,23 +347,20 @@ disk_unique_identity() {
     the same as any other disk written from this image. Booted next to one of
     them, the kernel may mount the wrong root."
 
-    # Read back rather than trusted: this is the check whose absence let the
-    # original confusion reach a board.
+    # Read back rather than trusted: a stamp that silently failed would leave
+    # two disks sharing an identity, which is exactly the bug this exists to
+    # prevent.
     m_ssh "lsblk -no PARTUUID $(sh_quote "$(disk_part "$dev" 2)")" 2>/dev/null | tr -d '\r ' \
         | grep -qx "$new-02" \
         || die "$dev did not take the new identity; refusing to leave it ambiguous"
 }
 
 # What makes a written disk part of the fleet: the identity marker every
-# wk-written system carries (/etc/wk-image, read by `b_probe` to tell a
-# bench system from one that never left host mode) and the driving
-# machine's ssh key in root's authorized_keys -- a Yocto image ships
+# wk-written system carries (/etc/wk-image, read by `b_probe`) and the
+# driving machine's ssh key in root's authorized_keys -- a Yocto image ships
 # `PermitRootLogin yes` with an empty root password, usable by a person but
-# not by `ssh -o BatchMode=yes`, so without the key nothing here can reach it.
-#
-# Both values travel as base64 on the command line: neither is a secret, and
-# the encoding lets the helper check them against a character set before
-# decoding, a stronger position than escaping them through ssh into sudo.
+# not by `ssh -o BatchMode=yes`. Both values travel as base64 on the command
+# line, so the helper can check them against a character set before decoding.
 disk_install_fleet() { # <device> <marker> <ssh public key>
     local dev="$1" marker="$2" key="$3" m64 k64
     m64=$(printf '%s' "$marker" | base64 | tr -d '\n\r ')
@@ -428,25 +376,13 @@ disk_install_fleet() { # <device> <marker> <ssh public key>
     indistinguishable from the machine's host mode."
 }
 
-# The tailnet identity, onto the card just written -- the half of
-# "everything wk touches is on the tailnet" that cannot live in the image
-# (image/yocto/meta-wk-tailnet carries tailscale and the join itself).
-#
-# The key is a credential and an image is stored, copied, and kept after
-# it's superseded -- baked in, it is in every copy, revocable only for the
-# whole fleet. On a card it exists for one boot; wk-tailnet-join deletes it
-# once spent.
-#
-# The name is a property of the machine the card goes into, not of the
-# image, since the same image is written for more than one board -- joining
-# under the image's own hostname would put it on the tailnet under a name
-# nothing else here uses.
-#
-# Only for an image that asked for it (the card is asked, not guessed):
-# every image this repo builds carries the join by default, but one built
-# with --no-tailnet, or built elsewhere, has none. For those, resolving and
-# writing the fleet's auth key would put a credential on a disk with nothing
-# to spend it.
+# The tailnet identity, onto the card just written, not baked into the
+# image: an image is stored, copied and kept after it's superseded, so a
+# baked-in key would be in every copy, revocable only for the whole fleet.
+# On a card it exists for one boot -- wk-tailnet-join deletes it once spent.
+# Seeded only for an image that asked for it (the card is asked, not
+# guessed): one built with --no-tailnet has none, and writing the key there
+# would put a credential on a disk with nothing to spend it.
 disk_seed_tailnet() { # <device> <tailnet hostname>
     local dev="$1" name="$2" keyfile joins tag="${WK_TAILNET_TAG:-tag:wk}"
 
@@ -470,73 +406,46 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
 
     # The name and the key are both guaranteed present here -- the write
     # preflight (_tailnet_key_preflight, cmd/sysimage) refuses the write
-    # outright, with no --force, before anything is erased. This assumes
-    # rather than re-deciding (CLAUDE.md, "One path, not two").
+    # outright, with no --force, before anything is erased.
     keyfile=$(wk_tailscale_authkey) || die "the tailnet auth key present moments ago at the write preflight is
     gone now, and $dev is already erased. Set one and retry:  wk key tailnet"
 
     info "seeding the tailnet identity onto $dev -- it joins as '$name' ($tag) on first boot"
-    # The key goes in over the same ssh and never onto a command line, the same
-    # rule as everywhere else it moves; the helper reads it off stdin. What was
-    # written is read back before it is unmounted, on the far side, because the
-    # only end that can see the card is the end holding the privilege.
+    # Goes in over the same ssh and never onto a command line; the helper
+    # reads it off stdin.
     card_priv tailnet "$dev" "$name" "$tag" < "$keyfile" >/dev/null \
         || die "could not seed the tailnet identity onto $dev.
     The image is written; it would boot with no tailnet identity and be
     reachable only over whatever LAN it lands on."
 }
 
-# Does this board's rescue/bench system bring up WiFi? A hardware fact about
-# the board, so it is a declared field on the same registry entry
-# boot/machines/<name>.conf already is (MACH_NET=wifi|ethernet, boot/machines.sh)
-# -- CLAUDE.md, "new devices arrive as config, never code... a case statement
-# naming a machine is the shape being replaced" -- not computed here from the
-# board's identity. A machine this fleet adds later needs no line here at all.
-#
-# Loaded in a subshell, the same reason _tailnet_name_for (cmd/sysimage) is:
-# every caller here has its own machine already loaded (DISK_MACHINE, most of
-# the time), and machine_load sets MACH_* directly rather than scoped to a
-# call -- loading a second machine in place would clobber it out from under
-# whatever the caller reads next.
+# Does this board's rescue/bench system bring up WiFi? A hardware fact, so
+# a declared field (MACH_NET=wifi|ethernet, boot/machines.sh), not computed.
+# Loaded in a subshell: machine_load sets MACH_* directly, and every caller
+# here already has its own machine loaded (DISK_MACHINE) -- loading a second
+# one in place would clobber it.
 _image_wants_wifi() { # <IMG_MACHINE, which is boot/machines/<name>.conf's name>
     [ -n "${1:-}" ] || return 1
     ( machine_load "$1" >/dev/null 2>&1 && [ "${MACH_NET:-}" = wifi ] )
 }
 
-# The fleet's one WiFi identity, resolved from the one place it lives -- the
-# same shape and the same directory as wk_tailscale_authkey_path
-# (lib/common.sh: ~/.config/wk/tailscale-authkey, WK_TS_AUTHKEY), kept here
-# rather than there because this file is the one this task may edit. One file
-# for every board rather than one per board: whatever is on the bench answers
-# to the same network.
-#
-# Not $WK_STORE/secrets/wifi: this command runs on the host, and on macOS
-# $WK_STORE resolves inside the podman VM, a filesystem the host cannot write
-# to at all -- the write would target a path that is only ever real on Linux.
-# A per-user file under the host's own home, like the tailnet key, is real on
-# every host this runs on.
+# One file for the fleet's WiFi identity, same shape as
+# wk_tailscale_authkey_path (lib/common.sh). Not $WK_STORE/secrets/wifi: on
+# macOS $WK_STORE resolves inside the podman VM, unwritable from this host
+# command.
 disk_wifi_creds_path() { printf '%s' "${WK_WIFI_CREDS:-$HOME/.config/wk/wifi}"; }
 
-# No prompting, no side effects: a read-only report (`wk doctor`, a dry run)
-# must never be the thing that asks for a credential, the same rule
-# wk_tailscale_authkey_present follows.
+# No prompting, no side effects: a read-only report must never be the thing
+# that asks for a credential.
 disk_wifi_creds_present() {
     local p; p=$(disk_wifi_creds_path)
     [ -s "$p" ] || return 1
     grep -q '^ssid=' "$p" && grep -q '^psk=' "$p"
 }
 
-# The fleet's WiFi identity, onto the card just written -- the WiFi
-# counterpart of disk_seed_tailnet, and deliberately not a barrier: a missing
-# tailnet key still leaves a board reachable over whatever LAN it lands on,
-# but rpi3/rpi4/rpi5 have no cable at the bench, so a card with no WiFi
-# credential seeded is a card with no LAN at all. There is no --force past
-# that, so this refuses outright rather than warning and continuing.
-#
-# Only for a board this fleet knows has no cable (_image_wants_wifi) and only
-# for an image that carries something to spend the credential on
-# (wk-wifi-join, asked for the same reason `joins` is asked before `tailnet`:
-# an image built with the wifi layer off, or one built elsewhere, has none).
+# Unlike disk_seed_tailnet this is a barrier, not a warning: rpi3/rpi4/rpi5
+# have no cable at the bench, so a card with no WiFi credential seeded has
+# no LAN at all -- no --force past that.
 disk_seed_wifi() { # <device> <IMG_MACHINE>
     local dev="$1" mach="$2" creds joins
 
@@ -572,20 +481,13 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
     no way to reach a network at all."
 }
 
-# Which role the system on this card plays, stamped onto the card itself:
-# the *only* difference between a rescue system and the bench system beside
-# it, so it cannot be a property of the image (one artifact serves both) or
-# a workstation record (the board asks this on a boot when nothing here is
-# reachable).
-#
-# Lives on the disk as one file; every image's units check
-# `ConditionPathExists=!/etc/wk/rescue` (cmd/sysimage, install_units), so a
-# bench card is one with the marker absent rather than a second flag saying
-# so -- an absence cannot disagree with the units that read it.
-#
-# Called on every write, for both roles, so a card rewritten from rescue to
-# bench loses the marker rather than keeping it: the final state is
-# declared, not diffed.
+# Which role the system on this card plays, stamped onto the card itself --
+# the *only* difference between a rescue and a bench system, since one
+# image artifact serves both and the board asks this on a boot when nothing
+# else is reachable. Every image's units check
+# `ConditionPathExists=!/etc/wk/rescue`, so a bench card is one with the
+# marker absent, not a second flag. Called on every write, for both roles,
+# so the final state is declared, not diffed.
 disk_seed_role() { # <device> <bench|rescue>
     local dev="$1" role="$2"
 

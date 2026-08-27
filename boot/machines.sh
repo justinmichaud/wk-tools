@@ -1,47 +1,24 @@
 # The fleet: which machines can be booted into an image, and how.
 #
-# One verb (`wk boot`) with one driver per machine: entering bench mode is not
-# one mechanism (Pi 5 firmware one-shot over SSH, rpi4 arms its own stick,
-# moose BMC virtual media, MBP not remotely bootable -- Apple Silicon's boot
-# volume selection is a LocalPolicy in its own secure storage). See
-# docs/HANDOFF-boot.md.
-# Sourced here since five callers (cmd/boot, cmd/sysimage, cmd/pi, cmd/bench,
-# cmd/doctor) load this file and not lib/reach.sh. Guarded so loading both is
-# order-safe.
+# One verb (`wk boot`) with one driver per machine: entering bench mode is
+# not one mechanism (Pi 5 firmware one-shot over SSH, rpi4 arms its own
+# stick, moose BMC virtual media, MBP not remotely bootable -- Apple
+# Silicon's boot volume selection is a LocalPolicy in its own secure storage).
+#
+# Sourced here, guarded, since five callers load this file and not lib/reach.sh.
 command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 
-# A machine sets:
-#
-#   MACH_SSH      ssh destination in host mode
-#   MACH_DRIVER   boot/<driver>.sh
-#   MACH_DEVICE   the block device the image is written to, on the machine
-#   MACH_ROOT     the root device of its host mode -- never written to
-#   MACH_PROFILE  its default system profile
-#   MACH_NOTE     one line, for the listing
-#   MACH_DTB      the device tree its firmware boots (image_dtb_for,
-#                 lib/image.sh); empty for a machine with no board firmware
-#                 to ask -- only image_check_boot_files reads it, and only
-#                 for a machine an image is actually built for
-#   MACH_BENCH_SSH  the ssh destination for a *second*, same-address install
-#                 sharing this machine's hardware (bench/mac-lane.sh's
-#                 tolken/tolken-bench split); empty for a machine with only
-#                 one install
-#   MACH_NET      wifi|ethernet -- how this machine's rescue/bench images
-#                 reach the network (_image_wants_wifi, boot/disk.sh), a
-#                 hardware fact about the board rather than something to
-#                 infer from its name
+# The fields a machine sets are documented in README.md ("Add a new fleet
+# device"). MACH_DTB is empty for a machine with no board firmware to ask.
+# MACH_BENCH_SSH is the ssh destination for a *second*, same-address install
+# sharing this machine's hardware (bench/mac-lane.sh's tolken split).
 
-# vcgencmd is on every Pi image; rpi-eeprom-config, the fleet's own rpi4
-# lacks, so it is tried second. See boot/rpi-eeprom.sh for the writing half.
+# vcgencmd is on every Pi image; rpi4 lacks rpi-eeprom-config, tried second.
 EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-config 2>/dev/null || true'
 
-# One conf per machine, the same shape as targets/hosts/*.conf; each conf
-# opens with its device's from-nothing recipe.
-#
-# WK_MACHINES_DIR overrides this, read only here: a test's way to drive
-# machine_list/machine_load/report_fleet_devices (cmd/status) against a fake
-# fleet without touching boot/machines/*.conf itself
-# (tests/test_fleet_walk.py's TestFleetWalkBareFormMultiMachine).
+# One conf per machine, the same shape as targets/hosts/*.conf. WK_MACHINES_DIR
+# overrides this, read only here: tests/test_fleet_walk.py's way to drive
+# this against a fake fleet.
 machines_dir() { echo "${WK_MACHINES_DIR:-$WK_ROOT/boot/machines}"; }
 
 machine_list() {
@@ -54,8 +31,8 @@ machine_list() {
     done
 }
 
-# Fields, not prose, for anything that has to *decide* (container/broker/
-# wk-broker.py refuses non-bench-device). Tab-separated: name/role/os/profile/note.
+# Tab-separated fields, not prose, for anything that has to *decide*
+# (container/broker/wk-broker.py refuses non-bench-device).
 machine_declare() {
     local f n
     for f in "$(machines_dir)"/*.conf; do
@@ -72,25 +49,22 @@ machine_load() {
     f="$(machines_dir)/$1.conf"
     [ -f "$f" ] || return 1
     MACH_NAME="$1"
-    # Reset every field, so a second load in one process cannot inherit the
-    # first machine's answers (same rule as image_profile_load).
+    # So a second load in one process cannot inherit the first machine's
+    # answers (same rule as image_profile_load).
     MACH_SSH=""; MACH_DRIVER=""; MACH_DEVICE=""; MACH_ROOT=""; MACH_PROFILE=""
     MACH_NOTE=""; MACH_MAC=""; MACH_LOCAL=""; MACH_VOLUME=""; MACH_DTB=""
     MACH_BENCH_SSH=""; MACH_NET=""
-    # Declared, not discovered: readable when the machine is unreachable.
-    MACH_BRIDGE=""
+    MACH_BRIDGE=""  # declared, not discovered: readable when unreachable
     MACH_ROLE=workstation
-    # `any`, or an OS name for a machine that answers only for itself (mbp)
-    # or needs host-only tooling (tart).
-    MACH_OS=any
+    MACH_OS=any  # or an OS name for a machine that answers only for itself
     # shellcheck disable=SC1090
     . "$f"
     [ -n "$MACH_DRIVER" ] && [ -n "$MACH_NOTE" ] || return 1
 }
 
-# The reverse lookup: an ssh destination -> the machine it reaches. Needed
-# because the ssh name and machine name can differ (rpi4's ssh name is
-# rpi4-test); machine names win over ssh names.
+# The reverse lookup: an ssh destination -> the machine it reaches. The ssh
+# name and machine name can differ (rpi4's ssh name is rpi4-test); machine
+# names win.
 machine_by_ssh() {
     local want="$1" m
     machine_load "$want" 2>/dev/null && return 0
@@ -110,8 +84,8 @@ load_driver() {
 
 # BatchMode so an unreachable machine fails immediately instead of prompting
 # into a script; ConnectTimeout because every fleet probe is bounded.
-# MACH_LOCAL is the MBP's shape: bench mode is reached by rebooting this
-# shell out from under itself, run locally so every driver shares one spelling.
+# MACH_LOCAL (the MBP: reached by rebooting this shell out from under itself)
+# runs locally so every driver shares one spelling.
 m_ssh() {
     if [ -n "${MACH_LOCAL:-}" ]; then
         bash -c "$*"
@@ -122,19 +96,13 @@ m_ssh() {
         $(m_ssh_opts) "$MACH_SSH" "$@"
 }
 
-# In code, not an ssh config stanza: a node this repo owns is on the tailnet,
-# so storing one there is a second copy of a fact.
-#   -l root    the driving key is in root's authorized_keys.
-#   host key   each image boots with its own fresh key
-#              (_unpinned_host_key_opts, shared with i_ssh).
-# Keyed on MACH_ROLE: a bench-device's system is replaced on demand; a
-# workstation's key stays checked.
+# -l root: the driving key is in root's authorized_keys. Keyed on MACH_ROLE:
+# a bench-device's system is replaced on demand and boots with its own
+# fresh host key each time (_unpinned_host_key_opts, shared with i_ssh).
 m_ssh_opts() {
     [ "${MACH_ROLE:-}" = bench-device ] || return 0
     printf '%s' "-l root $(_unpinned_host_key_opts)"
 }
-
-# _unpinned_host_key_opts is in lib/reach.sh, already in scope via the source at top.
 
 m_reachable() { m_ssh true >/dev/null 2>&1; }
 
@@ -169,19 +137,17 @@ i_ssh() {
         "$(id -un)@$(image_addr)" "$@"
 }
 
-# By ssh alias -- host or bench mode, whichever `dest` names. Shared by
-# bench/mac-lane.sh and bench/mac-ab.sh so both halves agree on the timeout.
-# No unpinned-host-key handling: stable macOS installs, not a regenerating board.
+# By ssh alias -- host or bench mode, whichever `dest` names. No
+# unpinned-host-key handling: stable macOS installs, not a regenerating board.
 mac_ssh() {
     local dest="$1"; shift
     ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$dest" "$@"
 }
 
 # --- the arming record -------------------------------------------------------
-# `wk boot` is a mode transition, and no probe can derive the *intent* half:
-# once armed, the firmware register and running system look unchanged. So
-# arming leaves one record of intent on the machine it describes -- a second
-# copy on the driving workstation would be two records of one fact (rule 1).
+# No probe can derive `wk boot`'s *intent* half: once armed, the firmware
+# register and running system look unchanged. So arming leaves one record of
+# intent on the machine it describes, not a second copy on the workstation.
 MACH_RECORD=/var/lib/wk/boot-armed
 
 # Stamped with its own boot id: "has this arming been spent" is then a
@@ -206,13 +172,12 @@ record_read() {
 }
 record_clear() { m_ssh "sudo rm -f $MACH_RECORD"; }
 
-# Refuse to mutate a machine between `wk boot` and the reboot it asked for.
-# Load the machine first; this probes it. In that window the filesystem
-# answering ssh is not the one about to run, so writing or deploying lands on
-# the disk about to be left -- both look like they worked and fail silently.
-# Evidence, not the record alone: a record whose boot id is not the current
-# one has been *spent* (else this would refuse every command after every
-# bench run).
+# Refuse to mutate a machine between `wk boot` and the reboot it asked for:
+# in that window the filesystem answering ssh is not the one about to run,
+# so writing or deploying lands on the disk about to be left, and both look
+# like they worked. Checked against evidence: a record whose boot id is not
+# the current one has been *spent*, or this would refuse every command
+# after every bench run.
 machine_armed_barrier() { # <what this command would do>
     local what="$1" rec img armed_boot now_boot
     b_probe >/dev/null 2>&1 || true
@@ -238,14 +203,10 @@ machine_armed_barrier() { # <what this command would do>
 # Which mode is answering, and on which channel. Evidence, never the record:
 # a bench system writes an identity marker the host install does not. Sets
 # MODE and MODE_CHANNEL rather than printing, since a channel found in a
-# command substitution is gone by the time anyone acts on it.
-#
-# Every `case` pattern below opens with `(`: bash 3.2 -- the bash macOS ships
-# -- cannot parse a `case` inside a `$( … )` without both-sided parens, or its
-# parser reads the closing `)` as the end of the substitution and finds a
-# `;;` it has no grammar for. The failure is at *load* time: `.
-# boot/machines.sh` aborts, so `wk boot`, `wk pi` and `wk status` all die on
-# a stock Mac.
+# command substitution is gone by the time anyone acts on it. Every `case`
+# pattern below opens with `(`: bash 3.2, the bash macOS ships, cannot parse
+# a `case` inside a `$( … )` without both-sided parens, and fails at *load*
+# time -- `wk boot`, `wk pi` and `wk status` all die on a stock Mac without it.
 _b_probe_sh=$(cat <<'EOS'
 cat /etc/wk-image 2>/dev/null
 rd=$(findmnt -no SOURCE / 2>/dev/null || true)

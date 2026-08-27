@@ -29,6 +29,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PRIV=/usr/local/libexec/wk-quiesce-priv
 
 ACTION="${1:-status}"
+[ $# -le 1 ] || die "usage: wk quiesce on|off|status -- quiet the machine for benchmarking.; see wk quiesce -h"
 
 # One state directory per machine, not `${TMPDIR:-/tmp}/wk-quiesce`: on macOS
 # $TMPDIR is per-user *and per-session*, so a terminal and an ssh login get

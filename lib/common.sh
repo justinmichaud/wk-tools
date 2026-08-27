@@ -113,13 +113,12 @@ ensure_dir() {
 
 # --- sizes -------------------------------------------------------------------
 # `stat -c %s` is GNU, `stat -f %z` is BSD; the image store spans both kinds
-# of machine in one operation (built on Linux, written from a Mac), so every
-# size printed needs both spellings. GNU first: it fails outright on BSD, so
-# trying it first is safe. The reverse is not: GNU `stat -f` means
-# *filesystem* status and reads its argument as a path, so `stat -f %z file`
-# looks for a file called `%z` and prints a filesystem block for `file` --
-# BSD first would give every Linux caller a paragraph of statistics before
-# the number it asked for.
+# of machine, so every size needs both spellings. GNU first: it fails
+# outright on BSD, so trying it first is safe. The reverse is not: GNU
+# `stat -f` means *filesystem* status and reads its argument as a path, so
+# `stat -f %z file` looks for a file called `%z` and prints a filesystem
+# block for `file` -- BSD first would give every Linux caller a paragraph of
+# statistics before the number it asked for.
 file_bytes() {
     stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0
 }
@@ -134,11 +133,10 @@ human_bytes() {
     }'
 }
 
-# json_merge_list <key> <file...> -- print {"<key>": [...]} merged from zero or
-# more files, each holding zero or more JSON documents concatenated with no
-# delimiter (one per process contributing to a listing, the same shape `wk
-# status --records` merges line by line). One merge, shared by `wk ls
-# --json`'s peer-target delegation and the dispatcher's host/container split.
+# json_merge_list <key> <file...> -- print {"<key>": [...]} merged from zero
+# or more files, each holding zero or more JSON documents concatenated with
+# no delimiter. Shared by `wk ls --json`'s peer-target delegation and the
+# dispatcher's host/container split.
 json_merge_list() { # <key> <file...>
     local key="$1"; shift
     require python3 "python3 merges 'wk ls --json'; it ships with macOS and every distribution here"
@@ -175,10 +173,8 @@ kv_get() {
 }
 
 # The same from a small text file; empty when the file or key is missing.
-# The one parser for every such file: this and `kv_get` are the only two,
-# and every reader of a `key=value` record (marker_field, status_field, a
-# probe captured from ssh) goes through one or the other -- two copies of a
-# tolerant parse are two tolerances that drift.
+# The one parser for every such record (marker_field, status_field, a probe
+# captured from ssh); two copies of a tolerant parse are two that drift.
 kv_field() {
     local f="$1" k="$2"
     [ -f "$f" ] || return 0
@@ -186,13 +182,10 @@ kv_field() {
 }
 
 
-# The one way this repository turns a stream of status records into a
-# table, a page, or a served page that keeps itself current. Here, not in
-# cmd/status, because the *dispatcher* needs it too: on macOS a listing is
-# assembled by two processes and neither renders it. python3, not more
-# shell: aligning columns whose widths aren't known until complete, and
-# emitting a page, are each a page of python. No fleet machine may need
-# `pip install` to run `wk status` -- all have python3, none need more.
+# Here, not in cmd/status, because the *dispatcher* needs it too: on macOS a
+# listing is assembled by two processes and neither renders it. python3, not
+# more shell: aligning columns whose widths aren't known until complete, and
+# emitting a page, are each a page of python.
 status_render() {
     local mode="$1" recs="$2"
     # The stream itself renders nothing: it *is* the answer.
@@ -207,17 +200,12 @@ status_render() {
 
 # Which view a bare `wk status` is, decided in one place since both
 # cmd/status (Linux) and the dispatcher (macOS) render, and a default that
-# differed would make `wk status` mean two things on one fleet.
-
-# The page is primary, but stdout is also read (`wk selftest` parses the
-# table, `--wait` branches on exit code, an agent has no browser), so the
-# page is default only where every one of these holds: a tty on stdout;
-# nothing said (WK_STATUS_VIEW/CI/NO_COLOR silent); somewhere to open it
-# (no workspace display, no DISPLAY over ssh). `--text`/`--web` override.
-
+# differed would make `wk status` mean two things on one fleet. The page is
+# default only where every one of these holds: a tty on stdout; nothing said
+# (WK_STATUS_VIEW/CI/NO_COLOR silent); somewhere to open it. `--text`/`--web` override.
+#
 # *Sets a variable* rather than printing: inside `MODE=$(status_default_mode)`,
-# fd 1 is the pipe carrying the answer, so `[ -t 1 ]` would always say "not
-# a terminal". A variable is read by the subshell just as well.
+# fd 1 is the pipe carrying the answer, so `[ -t 1 ]` would always say "not a terminal".
 status_default_mode() {
     WK_STATUS_DEFAULT_MODE=text
     if [ -n "${WK_STATUS_VIEW:-}" ]; then
@@ -227,9 +215,9 @@ status_default_mode() {
     [ -t 1 ]               || return 0
     [ -z "${CI:-}" ]       || return 0
     [ -z "${NO_COLOR:-}" ] || return 0
-    # Guarded rather than assumed: this file is sourced by things that do not
-    # source lib/target.sh, and a missing function under `set -u` would take the
-    # whole command down to answer a question about formatting.
+    # Guarded rather than assumed: this file is sourced by things that do
+    # not source lib/target.sh, and a missing function would take the whole
+    # command down to answer a question about formatting.
     if command -v in_workspace >/dev/null 2>&1 && in_workspace; then return 0; fi
     if [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ] && [ -z "${DISPLAY:-}" ]; then return 0; fi
     WK_STATUS_DEFAULT_MODE=web
@@ -282,16 +270,12 @@ sh_quote() {
 # --- which lldb, decided where it is going to run ------------------------------
 # A shell fragment to put in front of a command run in a workspace, setting
 # $LLDB to a debugger that starts there, or failing with a reason.
-
+#
 # `lldb` is not the answer: the wkdev image puts /opt/swift/usr/bin first on
 # PATH, and the Swift toolchain's lldb is linked against libxml2.so.2 while
 # the image ships libxml2.so.16, so it fails to load with an error that
-# reads as a broken workspace rather than the wrong binary. The same image
-# carries a working /usr/bin/lldb-22 that nothing reaches.
-
-# So a candidate is *run*, not merely found: neither the shadowing nor the
-# version belongs to an image this repo builds, and a pinned `lldb-22`
-# would go stale at the next bump. Newest first, so a bump is picked up.
+# reads as a broken workspace rather than the wrong binary. So a candidate
+# is *run*, not merely found, and tried newest first so a bump is picked up.
 lldb_prelude() {
     cat <<'EOF'
 LLDB=""
@@ -305,12 +289,11 @@ EOF
 }
 
 # Keeps the debugger on the process it was pointed at. WebKit is several
-# processes, and `~/.lldbinit` here sets follow-fork-mode child
-# (dotfiles/lldbinit:10) -- against a browser that walks the debugger out of
-# the UI process the moment MiniBrowser forks its network process, so every
-# breakpoint stops meaning anything. Stated here, not fixed there, since a
-# command must not depend on a user's ~/.lldbinit; `-O` runs after the init
-# file, so this wins regardless of anyone's own lldb setup.
+# processes, and `~/.lldbinit` here sets follow-fork-mode child, against a
+# browser that walks the debugger out of the UI process the moment
+# MiniBrowser forks its network process. Stated here, not fixed there, since
+# a command must not depend on a user's ~/.lldbinit; `-O` runs after the
+# init file, so this wins regardless of anyone's own lldb setup.
 lldb_pin_opts() {
     printf '%s' "-O 'settings set target.process.follow-fork-mode parent'"
 }
@@ -333,11 +316,10 @@ confirm() {
 }
 
 # --- secrets this repository needs but must never contain ---------------------
-# ASK, DO NOT INSTRUCT: a manual step named in a warning is a step that
-# does not get taken, silently skipping whatever it gated. Same discipline
-# as confirm(): no terminal, fail loudly rather than block. Read with
-# `read -rs` (no echo), never logged or passed as an argument, written 0600
-# through a umask so it is not briefly world-readable.
+# ASK, DO NOT INSTRUCT: a manual step named in a warning is a step that does
+# not get taken. Same discipline as confirm(): no terminal, fail loudly
+# rather than block. Read with `read -rs` (no echo), never logged or passed
+# as an argument, written 0600 through a umask so it is never world-readable.
 prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optional URL
     local path="$1" what="$2" url="${3:-}" val=""
 
@@ -366,37 +348,26 @@ prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optiona
     printf '%s' "$path"
 }
 
-# The tailscale auth key: one key for the whole fleet, resolved from the
-# one place it lives. One key because everything wk touches is on the
-# tailnet with nothing about how to reach it written down (CLAUDE.md,
-# "Cattle, not pets") -- a join path with a key of its own would be a
-# second copy of a credential and a path that needs somebody at a keyboard.
-
+# The tailscale auth key: one key for the whole fleet, resolved from the one
+# place it lives -- everything wk touches is on the tailnet with nothing
+# about how to reach it written down (CLAUDE.md, "Cattle, not pets").
+#
 # What it has to be, and why:
-#   tagged tag:wk    the tag *is* the permission (owned by the tailnet, not
-#                    a person, never key-expires); untagged goes dark after
+#   tagged tag:wk    the tag *is* the permission; untagged goes dark after
 #                    180 days, which for a name-is-the-address board reads
 #                    as dead hardware.
-#   reusable         one key provisions every device; single-use means a
-#                    credential fetched by hand and pasted into a script.
-#   NOT ephemeral    an ephemeral node is removed from the tailnet when it
-#                    goes offline, and these boards reboot between host and
-#                    bench mode constantly.
-#   longest expiry   only bounds enrolling *new* devices (already-joined
-#                    tagged nodes are unaffected); short expiry buys
-#                    nothing and costs a re-auth mid-something-else.
-
-# Validated on the way in: a mistyped key fails `tailscale up` during first
-# boot, leaving no tailnet identity and no way to report the failure.
-
+#   reusable         one key provisions every device.
+#   NOT ephemeral    an ephemeral node is removed when it goes offline, and
+#                    these boards reboot between host and bench mode constantly.
+#   longest expiry   only bounds enrolling *new* devices.
+#
 # One definition, since `wk doctor`, `wk sysimage write` and `wk key
 # tailnet` must not disagree about where it lives.
 wk_tailscale_authkey_path() { printf '%s' "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"; }
 
 # No prompting, no side effects -- safe for `wk doctor`: a read-only report
 # must never be the thing that asks for a credential. Shape checked, not
-# just presence, since an empty file or a pasted error message would
-# otherwise read as "provisioned".
+# just presence, since an empty file would otherwise read as "provisioned".
 wk_tailscale_authkey_present() {
     local p; p=$(wk_tailscale_authkey_path)
     [ -s "$p" ] || return 1
@@ -426,7 +397,7 @@ wk_tailscale_authkey() {
 # driver) each installing their own would silently disable whoever was set
 # before -- for a lock, outliving the command that took it. So handlers
 # register instead of trapping: idempotent, ordered, a failing handler
-# can't stop the ones after it, and the exit status is preserved.
+# can't stop the ones after it.
 _WK_ATEXIT=""
 
 _wk_run_atexit() {
@@ -455,26 +426,19 @@ wk_atexit() {
 # One rule for the whole tree: a command that holds a lock or has started a
 # background helper (caffeinate, a raiser, a watched build, a `tail -f`
 # reader) traps INT/TERM, stops what it started, and ends with the signal's
-# own exit code -- 130 for INT, 143 for TERM -- so a caller waiting on the
-# exit status sees a signal, not whatever the next line happened to return.
+# own exit code -- 130 for INT, 143 for TERM.
 #
 # Ctrl-C at a real terminal reaches every process in the foreground process
 # group at once, so a plain unhandled default disposition often looks fine.
 # It is not the only way this process is interrupted: a supervisor that
-# tracks one pid (`kill -INT $pid`, exactly what tests/test_interrupt.py and
-# an agent's own tool cancellation do) signals *this* process alone. A
-# background helper started with `&` is in the same process group and dies
-# with it -- but a `nohup`'d or otherwise detached one, or a helper on a
-# machine reached over ssh, is not, and default disposition leaves it
-# running. Hence explicit cleanup rather than relying on group delivery.
+# tracks one pid (`kill -INT $pid`, what tests/test_interrupt.py does)
+# signals *this* process alone, and a `nohup`'d or ssh-reached helper is not
+# in this process group and survives default disposition. Hence explicit
+# cleanup rather than relying on group delivery.
 #
-# `on_interrupt <fn>` registers a handler exactly like `wk_atexit` registers
-# one for EXIT (composing, most-recent-first, idempotent per name is not
-# required since a scope normally registers once) -- but for INT and TERM. On
-# either signal every registered handler runs once, then `exit` is called
-# with the signal's code, which also fires the ordinary EXIT trap
-# (wk_atexit's _lock_release_all, _forced_summary) exactly as a normal exit
-# would. A registered handler needs no re-raise of its own.
+# `on_interrupt <fn>` registers a handler like `wk_atexit` does for EXIT, but
+# for INT and TERM: every registered handler runs once, then `exit` is
+# called with the signal's code, which also fires the ordinary EXIT trap.
 _WK_INTERRUPTED=""
 _WK_ON_INTERRUPT=""
 
@@ -497,20 +461,15 @@ _wk_interrupt() { # <sig>
     esac
 }
 
-# True once this process has caught INT or TERM -- for anything that wants to
-# know rather than simply being torn down (nothing here needs that today, but
-# a handler run from _wk_interrupt can check before doing further work).
+# True once this process has caught INT or TERM -- for anything that wants
+# to know rather than simply being torn down.
 interrupted() { [ -n "$_WK_INTERRUPTED" ]; }
 
-# wk_sleep <seconds> -- `sleep`, but in <=1s chunks.
-#
-# A signal delivered to this process alone (not its process group) still only
-# runs a trap once the *foreground* command returns -- bash defers a pending
-# trap until the command it interrupted finishes (bash(1), SIGNALS) -- so a
-# single `sleep 30` in a poll loop can leave Ctrl-C looking hung for up to
-# 30s even with a trap installed. Chunking is what makes on_interrupt's
-# promise ("ends promptly") true for every poll loop in this tree rather than
-# only the ones a real terminal's process-group delivery happens to cover.
+# wk_sleep <seconds> -- `sleep`, but in <=1s chunks. A signal delivered to
+# this process alone still only runs a trap once the *foreground* command
+# returns -- bash defers a pending trap until the command it interrupted
+# finishes (bash(1), SIGNALS) -- so a single `sleep 30` in a poll loop can
+# leave Ctrl-C looking hung for up to 30s even with a trap installed.
 wk_sleep() { # <seconds>
     local remain="${1:-0}" chunk
     while [ "$remain" -gt 0 ] 2>/dev/null; do
@@ -524,18 +483,14 @@ wk_sleep() { # <seconds>
 # --- a hard ceiling on wall time ----------------------------------------------
 # `timeout(1)` is GNU, absent on macOS, and per-tool timeout flags lie: ssh's
 # `ConnectTimeout` covers only the TCP connect, so a host that accepts port
-# 22 and then says nothing (a phone half-asleep) leaves ssh on its own
-# timers. Worse, options on the command line don't reach a *jump* hop:
-# `ssh -o ConnectTimeout=4 rpi4-test` builds its ProxyJump with nothing
-# else, so the hop through the phone runs unbounded, free to hang on a
-# host-key prompt nothing in the 4-second budget can stop (a jump hop reads
-# only its own `Host` stanza, dotfiles/ssh/config; this is the backstop).
-
+# 22 and then says nothing leaves ssh on its own timers -- and worse, a
+# *jump* hop reads only its own `Host` stanza, so a ProxyJump hop runs
+# unbounded, free to hang on a host-key prompt nothing in the budget can stop.
+#
 # The whole process group is killed, not just the child: TERM to a subshell
 # alone leaves its ssh running, holding the terminal. `set -m` gives the
-# child a process group of its own so one signal
-# reaches everything it started; the plain `kill` after it is the fallback
-# for a shell with no job control.
+# child a process group of its own so one signal reaches everything it
+# started; the plain `kill` after it is the fallback for a shell with no job control.
 capped() { # <seconds> <cmd...>
     local secs="$1"; shift
     # Job control on for exactly one background start, then restored: a
@@ -556,9 +511,10 @@ capped() { # <seconds> <cmd...>
 
 # --- barriers, and getting past one in a hurry --------------------------------
 # A barrier is a refusal that exists because of a rule, not because the
-# command cannot proceed (an unfiltered guest, passwordless sudo). Correctness
-# failures are not barriers -- "no such workspace" is not something to force.
-
+# command cannot proceed (an unfiltered guest, passwordless sudo).
+# Correctness failures are not barriers -- "no such workspace" is not
+# something to force.
+#
 # `wk <command> --force` turns every barrier into a warning, loud and
 # *repeated when the command ends* -- a single line atop a long build is a
 # line nobody sees again. `wk doctor` recomputes the condition on every
@@ -598,41 +554,39 @@ barrier() {
 # readlink, never resolved. A dead holder's lock is broken by a rename over
 # the dead link (never unlink-then-create), so it dies with its holder even
 # under kill -9, and racing breakers settle it by reading back what they wrote.
-
+#
 # Keyed by hostname under the invoking machine's state directory, since a
 # home directory can be shared over NFS and a pid means nothing off its own
 # machine. Cannot serialise against work that is not a process here (a
 # detached build outlives its starting command) -- that half is evidence at
 # the artifact instead (ws_busy_reason, lib/target.sh).
-
+#
 # Lives here, not lib/store.sh: a helper behind a higher-sourced file
-# disappears silently for a command sourcing a lower file without it (`wk`
-# sources common.sh but not always store.sh). common.sh is the floor.
+# disappears silently for a command sourcing a lower file without it.
+# common.sh is the floor.
 wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
 
 wk_lock_dir() { echo "${WK_LOCK_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/wk/locks}"; }
 
-# Two lists answering two questions: _WK_LOCK_HELD is what *this* scope
-# must release when it ends; _WK_LOCK_MINE is what this process already
-# holds, for re-entrancy. They differ inside `with_lock`, which clears the
-# first (its subshell must not release the caller's locks) and keeps the
-# second (a `with_lock X` inside a command already holding X must not wait
-# for itself). Re-entrancy is decided from this list, never the pid in the
-# lock: subshells share `$$`, so parallel ones taking the same lock would
-# each recognise their parent's pid and walk straight in.
+# Two lists answering two questions: _WK_LOCK_HELD is what *this* scope must
+# release when it ends; _WK_LOCK_MINE is what this process already holds,
+# for re-entrancy. They differ inside `with_lock`, which clears the first
+# (its subshell must not release the caller's locks) and keeps the second (a
+# `with_lock X` inside a command already holding X must not wait for
+# itself). Re-entrancy is decided from this list, never the pid in the lock:
+# subshells share `$$`, so parallel ones taking the same lock would each
+# recognise their parent's pid and walk straight in.
 _WK_LOCK_HELD=""
 _WK_LOCK_MINE=""
 _WK_LOCK_PAYLOAD=""
 
-# This scope's identity, written into every lock and compared before
-# releasing one or believing it won a race to break a dead one. Two fields:
-# pid= (is the holder alive? `$$`, for a *later* command's liveness check)
-# and tok= (am I the one that wrote this? `$$` can't say, since every
-# subshell of one command shares it -- two breaking the same dead lock at
-# once would write identical payloads and both think they won; tok is four
-# bytes of urandom, taken once per scope). Computed once and kept, by a call
-# never a substitution -- `$(...)` runs in a subshell, so a payload minted
-# there is lost the moment it's read.
+# This scope's identity, written into every lock: pid= (is the holder
+# alive? `$$`) and tok= (am I the one that wrote this? `$$` can't say, since
+# every subshell of one command shares it -- two breaking the same dead
+# lock at once would write identical payloads and both think they won; tok
+# is four bytes of urandom, taken once per scope). Computed once and kept,
+# by a call never a substitution -- `$(...)` runs in a subshell, so a
+# payload minted there is lost the moment it's read.
 _lock_init() {
     [ -n "$_WK_LOCK_PAYLOAD" ] && return 0
     local tok
@@ -671,9 +625,8 @@ _lock_release_all() {
 
 # Break a lock whose holder is gone -- exactly once, however many takers saw
 # it dead at the same moment. "Is the holder dead" and "replace it" are two
-# operations, and the gap between them races every other taker who read
-# the same thing (B could replace A's fresh lock, thinking it's still
-# dead). So the replacement is a compare-and-swap, atomic via one more
+# operations, and the gap between them races every other taker who read the
+# same thing, so the replacement is a compare-and-swap, atomic via one more
 # atomic create: a short-lived breaker lock held for a readlink and a
 # rename. The swap happens only if the lock still holds the *same* dead
 # payload the caller saw; an overtaken observation does nothing and waits.
@@ -706,7 +659,6 @@ _lock_break() {
 # Takes the lock for the life of this process -- what a long, linear
 # command wants (`wk build` locks its workspace start to exit). Dropped by
 # an EXIT handler, or the next taker's liveness check if that never runs.
-
 # Re-entrant via _WK_LOCK_MINE (never the pid in the lock): without it, a
 # command taking the same resource twice would deadlock against itself.
 # Before an `exec` into something long-lived (`wk new --zed`), call
@@ -732,9 +684,9 @@ hold_lock() {
 
     while :; do
         if [ -d "$f" ] && [ ! -L "$f" ]; then
-            # A lock left by a wk-tools old enough to have used the mkdir form.
-            # Before the `ln`, not after: `ln -s x somedir` succeeds by
-            # creating a link inside the directory instead of failing.
+            # A lock left by an older mkdir-form holder. Checked before the
+            # `ln`: `ln -s x somedir` succeeds by creating a link inside the
+            # directory instead of failing.
             opid=$(cat "$f/pid" 2>/dev/null | tr -dc '0-9') || true
             if [ -z "$opid" ] || ! kill -0 "$opid" 2>/dev/null; then
                 rm -rf "$f"; continue
@@ -793,8 +745,7 @@ with_lock() {
     done
     [ $# -gt 0 ] || die "with_lock: nothing to run"
     # A subshell, so the EXIT handler drops the lock when the command ends,
-    # not this process. `$$` inside it is still this process's pid, the
-    # right holder to record. The held-list is cleared inside it since the
+    # not this process. The held-list is cleared inside it since the
     # subshell inherits this process's list, and would otherwise drop every
     # lock the *caller* still holds, mid-critical-section.
     ( _WK_LOCK_HELD=""; hold_lock "$res" $args; "$@" )
@@ -803,9 +754,8 @@ with_lock() {
 # --- the BMC's DRM device -----------------------------------------------------
 # The kernel driver is the discriminator, never the card number: which
 # /dev/dri/cardN is the ast depends on PCI enumeration order. Shared by
-# cmd/session (points the benchmark compositor at it) and cmd/gui (points a
-# browser client's DRM/EGL inference at it -- left to guess, it picks the
-# GPU, a device the software-rendered compositor never handed it).
+# cmd/session and cmd/gui, whose DRM/EGL inference otherwise picks the GPU,
+# a device the software-rendered compositor never handed it.
 bmc_drm_device() {
     local d c drv
     for d in /sys/class/drm/card[0-9]*; do
@@ -839,17 +789,16 @@ utc_to_epoch() {
 }
 
 # --- which role is this machine in? ------------------------------------------
-# A machine booted into an image (docs/HANDOFF-boot.md) says so in one file,
-# absent from every normal install. One name for it: the boot driver, `wk
-# bench staged`, and the image's provisioning all read it. Overridable so
-# both roles can be exercised without a second machine.
+# A machine booted into an image says so in one file, absent from every
+# normal install. One name for it: the boot driver, `wk bench staged`, and
+# the image's provisioning all read it. Overridable so both roles can be
+# exercised without a second machine.
 WK_IMAGE_MARKER="${WK_IMAGE_MARKER:-/etc/wk-image}"
 
-# The bench system's own id, or empty in host mode.
-wk_image_id() { kv_field "$WK_IMAGE_MARKER" id 2>/dev/null || true; }
-# The profile it was built from. Two systems from two profiles are two
+wk_image_id() { kv_field "$WK_IMAGE_MARKER" id 2>/dev/null || true; }   # the bench system's own id, or empty in host mode
+# The profile it was built from: two systems from two profiles are two
 # configurations (clocks, fan policy, kernel), so a run records this beside
-# the id: the id says which artifact, the profile which configuration.
+# the id.
 wk_image_profile() { kv_field "$WK_IMAGE_MARKER" profile 2>/dev/null || true; }
 in_bench_mode() { [ -f "$WK_IMAGE_MARKER" ]; }
 
@@ -857,7 +806,6 @@ in_bench_mode() { [ -f "$WK_IMAGE_MARKER" ]; }
 # `wk session` can start the compositor a few ways, indistinguishable from
 # the Wayland socket alone, and only one makes a number that comes out
 # meaningful. The privileged helper records which one in a file under /run.
-# Linux-only, absent-means-none: no file on macOS or before the first session.
 WK_SESSION_MODE_FILE="${WK_SESSION_MODE_FILE:-/run/wk-session-mode}"
 
 # gpu | bmc | off | none

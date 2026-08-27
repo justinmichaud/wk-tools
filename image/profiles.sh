@@ -1,8 +1,7 @@
 # Named system profiles -- the spec that `wk sysimage build` executes.
-# A configuration is named for what it is -- project, release, builder,
-# board, width (README.md) -- and lives in image/configs as a file, under
-# version control (docs/HANDOFF-boot.md). The phones and the fetched service
-# image are exceptions, being one of a kind rather than points in a matrix.
+# A configuration lives in image/configs as a file (README.md has the naming
+# scheme). The phones and the fetched service image are exceptions, being
+# one of a kind rather than points in a matrix.
 #
 # A profile sets:
 #   IMG_BUILDER      which mechanism builds it: yocto (bitbake from source,
@@ -13,13 +12,11 @@
 #   IMG_MACHINE      the fleet machine it is built for (boot/machines.sh)
 #   IMG_ARCH         the image's architecture
 #   IMG_HOSTNAME     what it calls itself once booted
-#   IMG_WATCHDOG     seconds before the self-return reboot hands the machine
-#                    back after a wedged run; inert until `wk sysimage write
-#                    --rescue` marks the card
+#   IMG_WATCHDOG     seconds before the self-return reboot after a wedged
+#                    run; inert until `wk sysimage write --rescue` marks the card
 #   IMG_SPEC_DIR     the profile's own files
 # No role field: rescue and bench are the same distribution, distinguished
-# only by a card marker (`wk sysimage write --rescue`); which is *running*
-# is answered by evidence instead (b_system_kind, boot/machines.sh).
+# only by a card marker (`wk sysimage write --rescue`; b_system_kind).
 #
 # A yocto profile sets these instead (image/yocto.sh reads them):
 #   YOC_BRANCH       the WebKit branch whose Tools/yocto config is the spec
@@ -31,13 +28,9 @@
 # an MBR signature, so `root=LABEL=` would resolve to whichever disk the
 # firmware enumerated first. `disk_unique_identity` (boot/disk.sh) fixes it.
 
-# One file per configuration, rather than a `case` arm in image_profile_load
-# (CLAUDE.md: no case statement naming a device). Named for the *project* --
-# WebKit or WPEWebKit -- never "upstream"/"downstream".
 image_config_dir()  { echo "$WK_ROOT/image/configs"; }
 image_config_file() { echo "$(image_config_dir)/$1.conf"; }
 
-# Enumerated from the files themselves, not a list kept beside them.
 image_config_names() {
     local f
     for f in "$(image_config_dir)"/*.conf; do
@@ -88,7 +81,7 @@ image_profile_load() {
     IMG_SPEC_DIR="$WK_ROOT/image/$1"
 
     # Reset every field: `wk boot --list` loops over profiles, and a stale
-    # YOC_TARGET would describe a nonexistent image.
+    # field would describe a nonexistent image.
     IMG_BUILDER=""
     IMG_MACHINE=""; IMG_ARCH=""; IMG_HOSTNAME=""; IMG_WATCHDOG=""
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
@@ -102,8 +95,6 @@ image_profile_load() {
     PMO_BRIDGE=""; PMO_BUILD_HOST=""; PMO_WIFI_BANDS=""
     PMO_KERNEL_APORT=""; PMO_KCONFIG=""
 
-    # A config file answers first: what is true of one configuration is data,
-    # not a branch.
     local _cfg
     _cfg=$(image_config_file "$1")
     if [ -f "$_cfg" ]; then
@@ -154,9 +145,7 @@ image_profile_load() {
         perf-linux-rpi5  -> webkit-2.52-yocto-rpi5-64"
         ;;
 
-    # --- fetch --------------------------------------------------------------
-    # Not built, and that is the point: Jumpdrive turns the phone's internal
-    # storage into a disk this repo's ordinary write path can reach.
+    # --- fetch: Jumpdrive turns the phone's internal storage into a disk --
     recovery-pinephone)
         IMG_BUILDER=fetch
         IMG_ARCH=aarch64
@@ -169,10 +158,7 @@ image_profile_load() {
         FET_NOTE="Jumpdrive 0.8: boots from a card and exports the phone's eMMC over USB"
         ;;
 
-    # --- pmos ---------------------------------------------------------------
-    # A phone, not a machine: `IMG_MACHINE` stays empty since `wk boot`
-    # cannot boot a phone. Both phones share one provisioner
-    # (bridge/provision.sh) and one builder.
+    # --- pmos: both phones share one provisioner (bridge/provision.sh) -----
     bridge-pinephone|bridge-librem5)
         IMG_BUILDER=pmos
         IMG_ARCH=aarch64
@@ -183,12 +169,11 @@ image_profile_load() {
         # phosh: the last way in if WiFi and ssh both fail.
         PMO_UI=phosh
 
-        # A released channel, not edge: `v25.12` is pmaports' "Recommended
-        # for best stability" (Alpine 3.23).
+        # v25.12 is pmaports' "Recommended for best stability" channel.
         PMO_CHANNEL=v25.12
 
-        # Pinned: pmbootstrap's prompts and config format differ by release
-        # (a git tag, since every PyPI release is yanked).
+        # A git tag, not a PyPI version: every PyPI release of pmbootstrap is
+        # yanked, and prompts/config format differ by release.
         PMO_PMB_VERSION=3.9.0
 
         # The known password is the recovery path (bridge/provision.sh turns off network auth).
@@ -208,10 +193,10 @@ image_profile_load() {
                 IMG_HOSTNAME=tailnet-bridge-generic
 
                 # pmOS ships this kernel with CONFIG_SUNXI_WATCHDOG unset
-                # despite the A64 DT declaring the watchdog (0x1c20ca0) --
-                # the only recovery for a hung kernel on a device nobody can
-                # walk up to. `=m` so a bad driver is a modules-file line,
-                # not a reflash. Not set for the Librem 5.
+                # despite the A64 DT declaring the watchdog (0x1c20ca0), the
+                # only recovery for a hung kernel on a device nobody can walk
+                # up to. `=m` so a bad driver is a modules-file line, not a
+                # reflash; not needed for the Librem 5.
                 PMO_KERNEL_APORT=device/community/linux-postmarketos-allwinner
                 PMO_KCONFIG="CONFIG_SUNXI_WATCHDOG=m"
                 # 2.4 GHz only: the RTL8723CS is single-band, else the copied PSK would be unusable.

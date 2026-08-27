@@ -7,7 +7,8 @@
 # VM, a configured machine or a board skip by name when it is absent; a test
 # that creates a workspace removes it in teardown.
 #
-#   --quick       only the modules that need no VM, machine or board
+#   --quick       every test that needs no VM, machine or board; the rest skip
+#                 by name (WK_TEST_QUICK=1, read by tests/support.py's gates)
 #   -v            one line per test
 #   <pattern>     only tests whose name matches (unittest -k)
 
@@ -26,7 +27,5 @@ while [ $# -gt 0 ]; do
 done
 
 cd "$WK_ROOT"
-if [ -n "$QUICK" ]; then
-    exec python3 -m unittest discover -s tests -p 'test_[dq]*.py' $VERBOSE ${PATTERN[@]+"${PATTERN[@]}"}
-fi
+[ -z "$QUICK" ] || { WK_TEST_QUICK=1; export WK_TEST_QUICK; }
 exec python3 -m unittest discover -s tests $VERBOSE ${PATTERN[@]+"${PATTERN[@]}"}

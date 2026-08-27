@@ -207,15 +207,6 @@ WK_ROOT={json.dumps(WK_ROOT)}
 machine_declare
 '''
 
-_IMAGES_SH = f'''
-set -euo pipefail
-WK_ROOT={json.dumps(WK_ROOT)}
-. "$WK_ROOT/lib/common.sh"
-. "$WK_ROOT/lib/store.sh"
-. "$WK_ROOT/lib/image.sh"
-image_ids
-'''
-
 # Two fragments, not one, and deliberately: `reach_tailnet` asks the tailscale
 # daemon and `reach_without_tailnet` reads two conf files and may do an mDNS
 # lookup. Run together under one ceiling, a slow or wedged tailscaled swallowed
@@ -269,14 +260,6 @@ def fleet():
             "note": note,
         }
     return out
-
-
-def systems():
-    """The complete systems in this machine's image store, by id."""
-    listed = _bash(_IMAGES_SH)
-    if listed is _TIMED_OUT:
-        return []
-    return [s for s in listed.split() if s]
 
 
 def reach(machine):
@@ -359,24 +342,14 @@ def want_bench_device(args):
 def want_system(args, machine):
     """A system id, or nothing at all.
 
-    Nothing is the common case and the right default: `wk boot` resolves the
-    newest system for the machine's own profile, which is one place that
-    already knows how. What is refused here is a *named* system that this
-    machine's store does not hold -- because the alternative is discovering it
-    after a board has rebooted into nothing.
+    Nothing is the common case: `wk boot` arms the system the device holds.
+    A named one is checked for shape here and against the device by `wk boot`
+    itself, which refuses before anything reboots.
     """
     sysid = args.get("system")
     if not sysid:
         return None
-    want_name("system", sysid, "omit 'system' to take the newest one built for this machine")
-    have = systems()
-    if sysid not in have:
-        listed = ", ".join(sorted(have)[-6:]) or "(the store is empty)"
-        raise Refused(
-            f"no system '{sysid}' in this machine's image store",
-            f"newest in the store: {listed}. Build one with 'wk sysimage build "
-            f"{machine['profile']}' on the workstation.",
-        )
+    want_name("system", sysid, "omit 'system' to arm the system the device holds")
     return sysid
 
 
@@ -695,7 +668,6 @@ class Broker:
                 "not_bench_devices": refused,
                 "plans": sorted(ALLOWED_PLANS),
                 "slots": sorted(ALLOWED_SLOTS),
-                "systems": sorted(systems())[-10:],
                 "in_flight": [
                     {"request": rid, "machine": st.get("machine"), "verb": st.get("verb")}
                     for rid, st in in_flight()

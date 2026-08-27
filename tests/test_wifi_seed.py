@@ -340,14 +340,19 @@ class TestTailnetNameCollision(WkTest):
         cp = _run_tailnet_preflight("", self.tmp, self.PEERS)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
-    def test_name_collision_preflight_is_wired_into_both_write_paths(self):
-        """cmd_write and cmd_write_from both run the collision check before erasing"""
+    def test_name_collision_preflight_is_wired_into_the_write_path(self):
+        """the one write path (cmd_write_from) runs the collision check before erasing"""
         # static
         text = (REPO / "cmd" / "sysimage").read_text(errors="replace")
+        body = {}
         for fn in ("cmd_write_from", "cmd_write"):
             m = re.search(rf"(?ms)^{fn}\(\).*?(?=^\w[\w_]*\(\) \{{|\Z)", text)
             self.assertIsNotNone(m, f"{fn} not found")
-            self.assertIn("_tailnet_name_preflight", m.group(0), f"{fn} does not run the name-collision check")
+            body[fn] = m.group(0)
+        self.assertIn("_tailnet_name_preflight", body["cmd_write_from"],
+                      "cmd_write_from does not run the name-collision check")
+        self.assertIn("cmd_write_from", body["cmd_write"],
+                      "cmd_write does not delegate to cmd_write_from -- a second write path")
 
 
 # --------------------------------------------------------------------------- #

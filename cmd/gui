@@ -57,8 +57,10 @@ while [ $# -gt 0 ]; do
                          shift ;;
         --no-fullscreen) FULLSCREEN=""; shift ;;
         --)              shift; EXTRA=$(sh_quote "$@"); break ;;
-        -*)              die "unknown option: $1" ;;
-        *)               URL="$1"; shift ;;
+        -*)              die "usage: wk gui <workspace> [<url>] [--config <c>] [--wpe|--gtk|--mac]
+    [--no-fullscreen] [--lldb [ui|web]] [-- <args>]; unknown option: $1; see wk gui -h" ;;
+        *)               [ -z "$URL" ] || die "usage: wk gui <workspace> [<url>]; one url at a time (got '$URL' and '$1'); see wk gui -h"
+                         URL="$1"; shift ;;
     esac
 done
 

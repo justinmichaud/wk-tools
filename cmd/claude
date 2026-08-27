@@ -189,19 +189,12 @@ if [ "$WK_TARGET_KIND" = remote ]; then
         # /dev/null the first redirect just made.
         [ -z "$_diag" ] || printf '%s\n' "$_diag" >&2
 
-        # Offered, never assumed: `confirm` declines when there's nobody to
-        # ask. Same installer as container/guest, with its own runtime, so it
-        # doesn't touch the shared node.
-        if confirm "install one on $TARGET now (into your own ~/.local, as you)?"; then
-            t_exec "$NAME" bash -lc 'curl -fsSL https://claude.ai/install.sh | bash' \
-                || die "the installer failed on $TARGET"
-        else
-            die "not installing. To do it yourself:
-        ssh $TARGET 'curl -fsSL https://claude.ai/install.sh | bash'
-    That install goes in your home directory and carries its own runtime, so it
-    works whatever node the machine has -- and wk runs it by path, so it wins
-    over anything installed system-wide."
-        fi
+        # The same installer as container/guest, into your own ~/.local with
+        # its own runtime: it touches nothing shared, so it is not asked about.
+        info "installing the Claude CLI on $TARGET (your own ~/.local, as you)"
+        t_exec "$NAME" bash -lc 'curl -fsSL https://claude.ai/install.sh | bash' \
+            || die "the installer failed on $TARGET. By hand:
+        ssh $TARGET 'curl -fsSL https://claude.ai/install.sh | bash'"
 
         CLAUDE_BIN=$(t_exec "$NAME" bash -lc '
             for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)"; do

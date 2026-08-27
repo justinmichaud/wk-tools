@@ -40,16 +40,13 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# $WK_STORE is target-dependent and the driver is what knows it: /var/lib/wk in
-# the podman VM, the remote root on a build machine. Loading the target this
-# machine *is* puts the keys where this machine actually keeps them, rather
-# than where a workstation would.
+# $WK_STORE is target-dependent: /var/lib/wk in the podman VM, the remote
+# root on a build machine. Loading the target this machine *is* puts the
+# keys where this machine actually keeps them.
 load_target "$(default_target)" 2>/dev/null || true
 
-# Refused inside a workspace, but *not* on a build machine: the switch acts on
-# the machine that holds the key, and on a shared box that is the box. A
-# workspace can only ever read the key it was given -- which is the whole
-# design -- so throwing the switch from in there is exactly what must not work.
+# Refused inside a workspace, but *not* on a build machine: the switch acts
+# on the machine that holds the key, and on a shared box that is the box.
 in_workspace && die "'wk push' moves the deploy keys, and this is workspace '$(wk_self)'.
     The keys are on the host and a workspace cannot reach them -- which is what
     makes the switch a switch. Run it on the host."
@@ -65,11 +62,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# A build machine keeps its own key under its own wk root, so the switch has to
-# be thrown *there*: the machine answers for itself by running this same file,
-# exactly as `wk sudo` does. The keys are per machine by necessity anyway --
-# GitHub refuses one deploy key on two repositories, but takes many keys on
-# one, so every machine gets its own and can be revoked on its own.
+# A build machine keeps its own key under its own wk root, so the switch has
+# to be thrown *there*: the machine answers for itself by running this same
+# file, exactly as `wk sudo` does.
 if [ -n "$TARGET" ]; then
     _one() {
         local t="$1" rc=0 out
@@ -110,8 +105,8 @@ where() {
 
 # Copies of a key inside a workspace's own home (from firstrun `install`ing
 # it rather than linking it) are keys this switch cannot reach, so they are
-# removed rather than reported -- the original is in the store and a copy
-# has nothing to lose. A symlink is the current arrangement and is left alone.
+# removed rather than reported. A symlink is the current arrangement and is
+# left alone.
 copies() {
     local d f r
     [ -d "$WK_STORE/ws" ] || return 0
@@ -140,10 +135,9 @@ EOF
     [ "$n" -eq 0 ] || info "removed $n key copy/copies left in workspace homes"
 }
 
-# Every private key in the directory, not only the ones wk_push_forks names:
-# the switch's promise is "no push credential is reachable", and an old or
-# hand-added key here is exactly as usable as one it knows about. Public
-# halves stay -- not credentials, and `wk key check`/`show` need them while off.
+# Every private key in the directory, not only the ones wk_push_forks
+# names: an old or hand-added key here is exactly as usable as one it knows
+# about. Public halves stay -- `wk key check`/`show` need them while off.
 private_keys_in() {
     local d="$1" f
     [ -d "$d" ] || return 0
@@ -162,10 +156,8 @@ move_keys() {
         b=$(basename "$f")
         mv "$f" "$to/$b"
         chmod 0600 "$to/$b"
-        # The public half goes with it: not a credential, but ssh will offer
-        # a public key it finds beside IdentityFile even without the private
-        # half, so leaving it behind makes an off transcript look like an on
-        # one until the signature fails. One place, one answer.
+        # The public half goes with it: ssh will offer a public key it finds
+        # beside IdentityFile even without the private half.
         [ -f "$from/$b.pub" ] && mv "$from/$b.pub" "$to/$b.pub"
         moved=$((moved + 1))
     done <<EOF
@@ -187,11 +179,9 @@ on)
     fi
     log "  every workspace can push to the forks now, including any agent in one."
     log "  'wk push off' when you are done; 'wk claude' turns it off by itself."
-    # The switch is one of two things a push needs; the other, whether GitHub
-    # has this machine's key, it can't see. A machine set up later can have
-    # the switch ON, wiring right, alias resolving, and still get "Permission
-    # denied (publickey)" -- only the host can ask GitHub, so this names the
-    # command rather than pretending to know.
+    # The switch is one of two things a push needs; whether GitHub has this
+    # machine's key, it can't see, so this names the command rather than
+    # pretending to know.
     log "  a push also needs this machine's key registered:  wk key check"
     ;;
 

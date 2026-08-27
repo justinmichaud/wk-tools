@@ -29,31 +29,19 @@ Board-specific and bridge-specific work lives in `docs/HANDOFF-boot.md`,
 - [ ] a bridge that is on the tailnet but whose *segment* is down needs to be
       distinguishable from one that is simply off
 
-## The image store is being removed
+## Images without a store
 
-`wk help images` has the model: a built system image is not a cache, so there
-is no catalogue — `wk sysimage ls` scans where each builder actually leaves
-output. Most of this is already built and verified; what is left:
+`wk help images` has the model; `wk sysimage ls` scans where each builder
+leaves output and `wk sysimage write --from <path>` is the one write.
 
-- [ ] finish deleting the store for images everywhere it is still assumed:
-      `image/<id>/` with its manifest, `image_verify`/`image_latest`/`image_ids`/
-      `image_complete`/`image_fast_path_ok`, and `wk sysimage rm`'s reason to
-      exist. Eleven files touch this today (`cmd/sysimage`, `lib/image.sh`,
-      `image/yocto.sh`, `image/pmos.sh`, `image/fetch.sh`, `boot/disk.sh`,
-      `cmd/boot`, `cmd/bridge`, `cmd/gc`, `cmd/disk`, `cmd/selftest`).
-      `image/fetch.sh` is the deliberate exception — a downloaded distro base
-      keyed by checksum is a re-fetchable input, not a built output
-- [ ] every image edit moves onto the card, on the machine holding the reader:
-      identity marker, driving key, unique disk identity, root retarget,
-      cmdline append, tailnet key and name — so a macOS driver needs no Linux
-      tooling and the "mac portion" of `wk sysimage` stops existing
-- [ ] the `--from` write does not run `image_check_boot_files` /
-      `image_check_root` (those read the image; the store-free path streams
-      it) — low risk for a freshly built yocto image, real risk for a partial
-      tree that loses its fall-through
-- [ ] the `--from` write installs the identity marker and driving key but not
-      the systemd units (`install_units` still edits an image, not a disk) —
-      correct by accident for a rescue, a gap for a bench system
+- [ ] every image edit moves onto the card, on the machine holding the reader
+      (a new `admin/wk-card-priv` verb mounting the boot partition and doing
+      the mtools-equivalent edits there), so a macOS driver needs no Linux
+      tooling; today `wk sysimage write` of a yocto/buildroot image edits a
+      local scratch copy first and needs mtools/debugfs/sfdisk where it runs
+- [ ] a listing for pmos builds: their output lives on the build host
+      (`pmos_out`, image/pmos.sh) where no local scan reaches; `wk sysimage
+      build` and `wk bridge provision` report the path, nothing lists it
 - [ ] two *unmarked* disks of the same transport is the residual ambiguity in
       `disk_resolve_own`: it refuses and lists rather than picking, which
       resolves itself the moment either disk is written (then it has a marker)
@@ -76,11 +64,6 @@ output. Most of this is already built and verified; what is left:
 
 ## Board lifecycle and help
 
-- [ ] `wk pi -h` / bare `wk pi` print the whole sequence (build, find the disk,
-      write it, set the boot order, boot it, tailnet, deploy, bench) and exit 0
-- [ ] the flashing step in that help is named as `wk sysimage write`, not
-      described as moved
-- [ ] an unknown `wk pi` subcommand prints the same page on stderr and exits 1
 - [ ] nothing in this fleet can power a Pi on (moose has a BMC; the boards do
       not) — hardware, not code, and the reason "never touch the boards" is
       not literally met yet

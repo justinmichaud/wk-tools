@@ -35,8 +35,8 @@ else
     _missing=$((_missing + 1))
 fi
 
-# Xcode proper is only needed for the Phase 4 macOS VM work, so this is a note
-# rather than a failure.
+# Xcode proper is only needed for the macOS VM lane, so this is a note rather
+# than a failure.
 if xcode-select -p >/dev/null 2>&1; then
     unchanged "Xcode command line tools present"
 else

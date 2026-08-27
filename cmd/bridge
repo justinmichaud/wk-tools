@@ -27,8 +27,8 @@
 #                             written down -- it is a DHCP lease
 #   --disk <machine>:<dev>     (provision) write the card to this disk instead
 #                             of Jumpdrive auto-detection
-#   --image <id>                (provision) use this image instead of the
-#                             store's newest
+#   --image <path>               (provision) write this image instead of
+#                             building or fetching one
 #   --rebuild                   (provision) build a fresh image
 #   --no-write                  (provision) the phone already holds the right
 #                             system; skip writing it
@@ -45,6 +45,9 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # The phone's internal storage arrives as a removable disk on whichever
 # machine it is cabled to -- the same problem `wk sysimage disks` solves.
 . "$WK_ROOT/boot/machines.sh"
+# For pmos_newest_out/pmos_fetch_out: the bridge image is a pmos build, and it
+# stays on its build host until this file copies it down (image_for, below).
+. "$WK_ROOT/image/pmos.sh"
 . "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/bridge/devices.sh"
 
@@ -131,20 +134,17 @@ _reaches() { # <destination>
 # --- finding the phone when its name does not resolve ------------------------
 #
 # The name never resolves before the first provision -- `tailscale up` is what
-# creates it. mDNS is broken here too: the phone's avahi publishes correctly,
-# but the access point declines to forward multicast between its 2.4 GHz and
-# 5 GHz radios, and the phone is on the band the workstation is not.
+# creates it. Multicast mDNS is broken here too: the access point declines to
+# forward multicast between its 2.4 GHz and 5 GHz radios, and the phone is on
+# the band the workstation is not.
 #
 # *Unicast* mDNS works: a query aimed straight at an address, port 5353,
-# asking for the phone's own name, is answered by the phone and nothing else
-# -- no credentials, 34ms against a live responder versus 100s for two ssh
-# handshake timeouts. So: collect candidate addresses, ask each one, believe
-# the one that says yes. Identification is still the host stating its own
-# name; only the question got cheap.
+# asking for the phone's own name, is answered by the phone and nothing else,
+# far cheaper than an ssh handshake timeout per candidate. So: collect
+# candidate addresses, ask each one, believe the one that says yes.
 
 # This machine's /24, from whichever interface holds the default route. A /24
-# is a deliberate assumption -- every network this repo touches uses one, and
-# a wrong guess costs a scan that finds nothing rather than a wrong answer.
+# is a deliberate assumption -- every network this repo touches uses one.
 _bridge_subnet() {
     local ip=""
     if is_macos; then
@@ -187,18 +187,14 @@ _bridge_dig() { # <address>
 # address, not the neighbour table: macOS `arp -an` lists only resolved
 # entries, so ARP is not a list of hosts that exist. A unicast mDNS query
 # needs no ARP -- the kernel resolves the address while sending -- so this
-# asks all 254 directly: 6.4s measured for the whole /24.
-#
-# 48 in flight, because an unbounded fan-out here once put 246 concurrent
-# processes on this machine.
+# asks all 254 directly, 48 in flight to bound concurrent processes.
 
-# Does this address answer ssh, and call itself the phone? The authoritative
-# identification, and the fallback for when mDNS cannot work: avahi renames
-# itself on a name conflict (observed as `tailnet-bridge-generic-2.local`),
-# at which point the phone stops answering for the name it was asked about
-# while staying perfectly reachable. `hostname` over ssh cannot drift like
-# that. Slower than one UDP packet, so it runs second: a TCP probe to gate,
-# then ssh only for the handful that answer.
+# Does this address answer ssh, and call itself the phone? The fallback for
+# when mDNS cannot work: avahi renames itself on a name conflict, at which
+# point the phone stops answering for the name it was asked about while
+# staying perfectly reachable. `hostname` over ssh cannot drift like that.
+# Slower than one UDP packet, so it runs second: a TCP probe to gate, then
+# ssh only for the handful that answer.
 _bridge_ssh_is_phone() { # <address> -> prints the address
     local u got
     capped 4 nc -z "$1" 22 >/dev/null 2>&1 || return 1
@@ -327,13 +323,11 @@ resolve_ssh() {
 # password. pmOS images log in as an ordinary user with doas or sudo, and a
 # provisioner that assumed root would fail on the first write.
 #
-# The password is not a secret -- image/profiles.sh says so at length:
-# pmbootstrap handles it in plain text by design, and it exists as the
-# recovery path on the phone's own screen. That makes it usable for
-# bootstrapping key-based root on a phone whose image did not seed it.
-# Newer images seed root's key at build time (image/pmos-build.sh); a phone
-# flashed from an older card lands here instead. Only ever reached when root
-# does not already work.
+# The password is not a secret (image/profiles.sh): pmbootstrap handles it in
+# plain text by design, and it exists as the recovery path on the phone's own
+# screen, so it is usable for bootstrapping key-based root here. An image
+# that seeds root's key at build time (image/pmos-build.sh) skips this;
+# reached only when root does not already work.
 bridge_bootstrap_root() {
     local prof pw target host
     prof=$(bridge_profile "$BR_NAME" || true)
@@ -352,8 +346,7 @@ bridge_bootstrap_root() {
     # The password is sent after a pause, not immediately: password readers
     # flush pending terminal input before prompting, so writing it up front
     # gets it echoed to the pty and thrown away, and doas waits on input
-    # already consumed. Measured: instant write hangs, three-second delay
-    # authenticates.
+    # already consumed.
     #
     # Deliberately not wrapped in `capped` -- that backgrounds the command,
     # and bash redirects a background job's stdin from /dev/null, so the
@@ -431,21 +424,17 @@ resolve_priv() {
 }
 
 # --- ls ----------------------------------------------------------------------
-# Read-only, and deliberately says both halves: what is declared here, and what
-# the phone answers to. A bridge that exists as a conf file and nothing else is
-# the normal state of one that has not been flashed yet, and it should read that
-# way rather than as an error.
-# One bounded probe. Default StrictHostKeyChecking+BatchMode refuse an
-# unknown key exactly like a switched-off phone, so `wk bridge ls` reported
-# both bridges unreachable while one was up and healthy. `accept-new` accepts
-# a key never seen before but still refuses one that moved -- worth keeping,
-# since root on a bridge is equivalent to whatever is behind it.
+# Read-only, and says both halves: what is declared here, and what the phone
+# answers to. A bridge that exists as a conf file and nothing else reads as
+# the normal state of one not yet flashed, not as an error.
 #
-# A refused key is reported as itself rather than as absence, since a reflash
-# changes the key and "unreachable" would send the diagnosis at the phone's
-# power and radio instead of at known_hosts. Split in two so the judgement
-# half can be tested without a phone: cmd/selftest lifts _ls_classify out of
-# this file and feeds it the two messages ssh actually prints.
+# `accept-new` accepts a key never seen before but still refuses one that
+# moved -- worth keeping, since root on a bridge is equivalent to whatever is
+# behind it. A refused key is reported as itself rather than as absence,
+# since a reflash changes the key and "unreachable" would send the diagnosis
+# at the phone's power and radio instead of at known_hosts. Split in two so
+# the judgement half can be tested without a phone: cmd/selftest lifts
+# _ls_classify out of this file.
 _ls_classify() { # <ssh stderr> -> key-changed | unreachable
     case "$1" in
         *"IDENTIFICATION HAS CHANGED"*|*"Host key verification failed"*)
@@ -495,23 +484,18 @@ cmd_ls() {
 
 # --- provision ---------------------------------------------------------------
 #
-# The whole path, from nothing to a health check, as one verb. Every
-# scriptable step runs, and each step that needs a hand is a prompt at the
-# point it blocks, with the reason beside it -- prose read in advance is
-# prose misremembered for something done once every few months.
-#
-# Deliberately holds no tailscale credential: minting the auth key and
-# writing the tailnet policy stay the operator's (cmd_setup's closing note
-# gives the reason), so provision asks for them and waits.
+# The whole path, from nothing to a health check, as one verb. Each step
+# that needs a hand is a prompt at the point it blocks, with the reason
+# beside it. Holds no tailscale credential: minting the auth key and writing
+# the tailnet policy stay the operator's (cmd_setup's closing note).
 #
 # Installs onto the phone's internal storage, never the card: a bridge
-# writes leases, logs and tailscale state for months, and a microSD is the
-# part most likely to wear out -- so the card stays the rescue copy. The way
-# in is Jumpdrive, a service image that boots from the card and exports the
-# phone's internal storage as USB mass storage, turning "flash a phone" into
-# "write a removable disk attached to a machine" -- `wk sysimage write` with
-# every refusal it already has. That means the phone is cabled to whichever
-# machine holds the card reader (BR_CARD names it).
+# writes leases, logs and tailscale state for months, and a microSD wears
+# out first, so the card stays the rescue copy. Jumpdrive, the service image,
+# boots from the card and exports the phone's internal storage as USB mass
+# storage, turning "flash a phone" into "write a removable disk" --
+# `wk sysimage write` with every refusal it already has. The phone is cabled
+# to whichever machine holds the card reader (BR_CARD names it).
 #
 # Every step is skipped when already done, since the expected use is
 # re-running after whichever step failed. --no-write covers the one thing
@@ -528,12 +512,11 @@ profile_field() {
 profile_names() { image_profile_list | awk '/^[a-z0-9-]+$/ { print $1 }'; }
 
 # The two lookups below share a shape and deliberately not an abstraction: a
-# `profile_matching <test-command>` helper would run its argument word-split
-# without quote removal, silently matching nothing. Neither uses `| head -1`
-# either -- head SIGPIPEs the producer, and under `set -o pipefail` that
-# turns a successful lookup into a failed one. Each loop short-circuits
-# itself instead, in a subshell per profile so image_profile_load's globals
-# do not leak to the caller.
+# `profile_matching <test-command>` helper would word-split its argument
+# without quote removal. Neither uses `| head -1` either -- under
+# `set -o pipefail`, head SIGPIPEs the producer and turns a successful lookup
+# into a failed one. Each runs in a subshell per profile so
+# image_profile_load's globals do not leak to the caller.
 
 # The image profile that builds this bridge's phone. Derived rather than
 # declared twice: image/profiles.sh already records which bridge each pmos
@@ -569,29 +552,63 @@ recovery_profile() {
     return 1
 }
 
-# An image of a profile, built if the store has none. Echoes the id.
+# An image for a profile, as a local path ready for
+# 'wk sysimage write --from' -- there is no store to look one up in (wk
+# help), so getting one is a property of which builder made it. Every
+# profile a bridge touches is a fetch (the service image) or a pmos build
+# (the phone's own system), so this dispatches the same way 'wk sysimage
+# build' does.
 #
 # --rebuild is the caller's business, not this function's: it takes `force` so
 # that "the newest one will do" and "I want a fresh one" are one code path with
 # one set of failure messages.
 image_for() {
+    local profile="$1" force="${2:-}"
+    image_profile_load "$profile" || die "unknown profile '$profile' (image/profiles.sh)"
+    case "$IMG_BUILDER" in
+        fetch) _fetch_image_for "$force" ;;
+        pmos)  _pmos_image_for "$profile" "$force" ;;
+        *) die "internal: '$profile' is a '$IMG_BUILDER' profile, and 'wk bridge' only
+    knows how to get an image from a fetch or a pmos profile." ;;
+    esac
+}
+
+# A fetch profile's image is its cached download (image_fetch_base,
+# lib/image.sh) -- pinned by content, so a second call costs nothing and
+# --rebuild has no fresher copy to make; asked for anyway, so a caller need
+# not know that about this one builder.
+_fetch_image_for() {
+    local force="${1:-}"
+    [ -z "$force" ] || debug "fetch profiles are pinned by content -- --rebuild re-verifies rather than re-downloading"
+    image_fetch_base "$FET_URL" "$FET_SHA256"
+}
+
+_pmos_image_cleanup() { [ -n "${PMOS_IMAGE_TMP:-}" ] && rm -f "$PMOS_IMAGE_TMP"; PMOS_IMAGE_TMP=""; return 0; }
+
+# A pmos profile's image is built on its build host and stays there
+# (image/pmos.sh, pmos_newest_out/pmos_fetch_out) until the bytes are needed
+# locally, which is here -- copied into a scratch file this process cleans up
+# on exit, the newest finished build unless --rebuild asked for one.
+_pmos_image_for() {
     local profile="$1" force="${2:-}" id
-    if [ -z "$force" ] && id=$(image_latest "$profile" 2>/dev/null); then
-        info "using $id from the store"
+    if [ -z "$force" ] && id=$(pmos_newest_out "$profile" 2>/dev/null); then
+        info "using $id from $(pmos_host)"
         log  "  --rebuild builds a fresh one instead"
-        printf '%s' "$id"
-        return 0
-    fi
-    if [ -n "$force" ]; then
-        info "building a new $profile (--rebuild)"
     else
-        info "no $profile image in the store yet -- building one"
+        if [ -n "$force" ]; then
+            info "building a new $profile (--rebuild)"
+        else
+            info "no finished $profile build on $(pmos_host) yet -- building one"
+        fi
+        "$WK_ROOT/wk" sysimage build "$profile" >&2 \
+            || die "the $profile build failed -- nothing was written to any disk"
+        image_profile_load "$profile" >/dev/null 2>&1
+        id=$(pmos_newest_out "$profile") \
+            || die "the $profile build reported success but left no finished build on $(pmos_host)"
     fi
-    "$WK_ROOT/wk" sysimage build "$profile" >&2 \
-        || die "the $profile build failed -- nothing was written to any disk"
-    id=$(image_latest "$profile") \
-        || die "the $profile build reported success but left no image in the store"
-    printf '%s' "$id"
+    PMOS_IMAGE_TMP=$(mktemp)
+    wk_atexit _pmos_image_cleanup
+    pmos_fetch_out "$id" "$PMOS_IMAGE_TMP"
 }
 
 # Wait for a person. Not `confirm`: there is nothing being decided here, the run
@@ -604,20 +621,15 @@ pause() {
     read -r _reply || die "aborted -- nothing further was changed"
 }
 
-# Poll until the phone answers on the network, or give up saying what it is ever.
+# Poll until the phone answers, or give up. resolve_ssh is one attempt at
+# both names; this is that in a loop, since a phone booting pmOS takes a
+# minute or two -- phosh comes up, and the RTL8723CS takes its time to
+# associate -- and a single attempt would fail on every first boot.
 #
-# resolve_ssh is one attempt at both names; this is that in a loop, because a
-# phone booting pmOS is a minute or two -- phosh comes up, and the RTL8723CS
-# takes its time to associate -- and a single attempt would fail on every first
-# boot.
-# Poll until the phone answers.
-#
-# Two cadences, and the split is not cosmetic. The cheap attempts -- the conf's
-# name and mDNS -- are a couple of packets and run on every tick. Discovery
-# sweeps a subnet, so it runs every DISCOVER_EVERY seconds instead: the first
-# version called the whole of resolve_ssh on every five-second tick and
-# therefore re-swept the subnet a dozen times a minute, across the very link the
-# phone it was looking for depends on.
+# Two cadences: the cheap attempts (the conf's name and mDNS) run on every
+# tick, but discovery sweeps a subnet, so it runs only every DISCOVER_EVERY
+# seconds -- resweeping on every tick would load the very link the phone
+# depends on.
 wait_for_phone() {
     local budget="${1:-420}" start="$SECONDS" last_disc=-999 now
     local DISCOVER_EVERY=60
@@ -648,18 +660,17 @@ wait_for_phone() {
 # --- finding the phone's storage once Jumpdrive has exported it ---------------
 #
 # By difference, not by recognition. What Jumpdrive exports has no name worth
-# matching on -- it is a generic USB mass-storage LUN -- so the honest question
-# is "which disks were not here before the phone was plugged in", and the answer
-# is exact. Matching on a model string or a size would be a guess, and the cost
-# of a wrong guess here is overwriting the machine's own boot stick.
+# matching on -- it is a generic USB mass-storage LUN -- so the question is
+# "which disks were not here before the phone was plugged in." Matching on a
+# model string or a size would be a guess, and the cost of a wrong guess here
+# is overwriting the machine's own boot stick.
 
 # `<dev> <size>` for every removable disk on a machine, one per line, sorted.
 # `< /dev/null` for the same reason device_head_sha has it: disk_candidates
-# reaches the machine over ssh, ssh forwards its stdin to the far side, and both
-# callers below run this in a poll loop against a terminal. Without the
-# redirect, every poll swallows whatever the operator has typed since the last
-# one -- including the newline meant for the *next* prompt, which is how a
-# `pause` gets answered by nobody.
+# reaches the machine over ssh, which forwards stdin to the far side, and both
+# callers below poll this against a terminal -- without the redirect, every
+# poll would swallow whatever the operator typed since, including the
+# newline meant for the *next* prompt.
 disks_now() {
     disk_candidates < /dev/null | awk '{ print $1, $2 }' | sort
 }
@@ -685,44 +696,25 @@ wait_for_disks() {
 
 # Which of the new disks is the phone's internal storage.
 #
-# Automatically, and by content rather than by position or by name.
-#
 # Jumpdrive on a PinePhone exports the SD card *as well as* the eMMC, as two
-# separate LUNs, so "the disk that appeared" is normally two disks -- and one of
-# them is the Jumpdrive card that is currently running. Writing the bridge image
-# to that one destroys the tool being used to do the writing and leaves the eMMC
-# untouched, with the phone coming back up on a half-written card.
+# separate LUNs, so "the disk that appeared" is normally two disks -- one of
+# them the Jumpdrive card currently running. Writing the bridge image to that
+# one destroys the tool doing the writing and leaves the eMMC untouched, with
+# the phone coming back up on a half-written card.
 #
-# Everything that looks like a discriminator here is a guess:
+# LUN/enumeration order and size are both guesses: order can be reordered by
+# a firmware or Jumpdrive release, and eMMC/card size ranges overlap. The
+# SCSI model string (Jumpdrive 0.8 labels them `e eMMC` and `e microSD`) is
+# used only as corroboration, since it is an undocumented cosmetic choice of
+# one release. What is certain: we wrote the Jumpdrive card ourselves,
+# minutes ago, and verified the read-back, so the card is *the exported disk
+# whose head matches the image we just wrote* and the other one is the eMMC
+# by elimination. The labels are then checked against that conclusion; if
+# they disagree, the assumption to re-examine is this file's.
 #
-#   LUN or enumeration order   works until a firmware or Jumpdrive release
-#                              reorders it, and then it silently means the
-#                              other disk
-#   size                       the eMMC is 16, 32 or 128 GB and the card is
-#                              whatever card you own, and those sets overlap.
-#                              Measured: an eMMC at 29.1 GB against a 29 GB USB
-#                              boot stick on the very same machine
-#
-# The SCSI model string is the exception. The two LUNs do not carry identical
-# strings: Jumpdrive 0.8 labels them `e eMMC` and `e microSD`, which says
-# outright which is which. That is used below, but as corroboration
-# rather than as the answer, because those strings are an undocumented cosmetic
-# choice of one release and the point of this function is to not depend on what a
-# release happens to do.
-#
-# What depends on no release at all: we wrote the Jumpdrive card ourselves,
-# minutes ago, and verified the read-back. So its first mebibyte is a known
-# quantity, and the card is *the exported disk whose head matches the image we
-# just wrote*. The other one is the eMMC, by elimination, with no ordering
-# assumed and nothing recognised. Then the labels are checked against that
-# conclusion: two independent signals agreeing is worth the few lines it costs,
-# and if they ever disagree the assumption to re-examine is this file'"'"'s.
-#
-# The two ways this can fail to be decisive are both reported rather than
-# guessed past: nothing matched (so the card is not among the exported disks,
-# which means these are not the disks we think they are) and everything matched
-# (two disks carrying the same image -- ambiguous, and not something to resolve
-# by picking one).
+# Both failure modes are reported rather than guessed past: nothing matched
+# (these are not the disks we think they are), or everything matched (two
+# disks carrying the same image -- ambiguous, not resolved by picking one).
 CARD_HEAD_BYTES=1048576
 
 # The head of a local image file, hashed.
@@ -730,20 +722,17 @@ image_head_sha() {
     dd if="$1" bs="$CARD_HEAD_BYTES" count=1 2>/dev/null | sha256sum | cut -d' ' -f1
 }
 
-# The head of a block device on the card machine, hashed there. `sudo` because a
-# raw block device is not world readable, and the same passwordless sudo
-# `wk sysimage write` already relies on.
+# The head of a block device on the card machine, hashed there. `sudo`
+# because a raw block device is not world readable.
 #
-# `< /dev/null` is load-bearing. ssh reads stdin and forwards it to the far
-# side, so calling this inside a `while read` loop hands the loop's own input to
-# ssh -- which ate every candidate after the first and made a two-disk export
-# look like a one-disk one. The caller builds an array for the same reason;
-# this redirect is here so the function is safe wherever it is called from.
-# The length is checked, not just the hash, and that is not belt-and-braces: a
-# device that reads zero bytes -- pulled, asleep, or refusing -- hashes to the
-# sha256 of the empty string, which is a perfectly valid-looking digest that
-# matches nothing. Unguarded, such a disk is classified "not the Jumpdrive card"
-# and therefore *selected as the eMMC*, which is a write aimed at a disk that
+# `< /dev/null` is load-bearing: ssh forwards stdin to the far side, so
+# calling this inside a `while read` loop would hand the loop's own input to
+# ssh and eat every candidate after the first.
+#
+# The length is checked, not just the hash: a device that reads zero bytes
+# hashes to the sha256 of the empty string, a valid-looking digest that
+# matches nothing -- unguarded, such a disk is classified "not the Jumpdrive
+# card" and therefore *selected as the eMMC*, a write aimed at a disk that
 # could not even be read. A short read is an error here, never a hash.
 device_head_sha() {
     local out bytes sha
@@ -759,16 +748,12 @@ device_head_sha() {
 
 # What the phone is presenting over USB, when it is not presenting storage.
 #
-# A timeout that says "one of three things went wrong" leaves you to work out
-# which. The phone is not silent when Jumpdrive fails to boot -- it comes up on
-# its own OS instead, and postmarketOS's default USB
-# gadget is MTP with Pine64's own vendor id. That is positive evidence of
-# exactly which failure this is, so it is worth reading rather than listing
-# possibilities.
+# The phone is not silent when Jumpdrive fails to boot -- it comes up on its
+# own OS instead, and postmarketOS's default USB gadget is MTP with Pine64's
+# own vendor id, positive evidence of exactly which failure this is.
 #
 # Reported, never acted on: this tells a person which of two very different
-# problems they have (a card that is not being read, versus a cable that is not
-# carrying data), and both fixes are hands-on.
+# problems they have, and both fixes are hands-on.
 phone_usb_note() {
     local usb
     usb=$(m_ssh "lsusb 2>/dev/null" < /dev/null 2>/dev/null) || return 0
@@ -805,8 +790,8 @@ identify_internal_storage() {
     log  "  the card is whichever exported disk matches the Jumpdrive we just wrote;"
     log  "  the eMMC is the other one. Nothing is assumed about LUN order."
 
-    # Collected before any of it is hashed: the hashing talks over ssh, and a
-    # loop whose body runs ssh cannot also be reading from a heredoc.
+    # Collected before hashing: a loop whose body runs ssh cannot also be
+    # reading from a heredoc.
     local devs=() sizes=() i
     while read -r dev size; do
         [ -n "$dev" ] || continue
@@ -869,10 +854,10 @@ $(printf '%s\n' "$candidates" | sed 's/^/      /')
             ;;
     esac
 
-    # Corroboration from a signal that has nothing to do with the hash: the
-    # label Jumpdrive puts on the LUN. If the disk the content check chose is
-    # the one calling itself microSD, the two signals disagree -- and a
-    # destructive write is not the place to pick a favourite.
+    # Corroboration from a signal unrelated to the hash: the label Jumpdrive
+    # puts on the LUN. If the disk the content check chose calls itself
+    # microSD, the two signals disagree, and a destructive write is not the
+    # place to pick a favourite.
     local model
     model=$(m_ssh "lsblk -dno MODEL $(sh_quote "$emmc")" < /dev/null 2>/dev/null \
             | tr -d '\r' | sed 's/[[:space:]]*$//')
@@ -890,13 +875,10 @@ $(printf '%s\n' "$candidates" | sed 's/^/      /')
     printf '%s' "$emmc"
 }
 
-# Is the segment actually routed?
-#
-# This is the failure that looks like success, and it is worth one function of
-# its own: without `autoApprovers` for the segment the bridge is up, healthy,
-# tagged and advertising -- and nothing behind it is reachable, because the
-# route is waiting on a click nobody made. The phone's own view of tailscale is
-# the honest answer here; the admin console's is the thing being verified.
+# Is the segment actually routed? Without `autoApprovers` the bridge is up,
+# healthy, tagged and advertising -- and nothing behind it is reachable,
+# because the route is waiting on a click nobody made. The phone's own view
+# of tailscale is the honest answer; the admin console's is what is verified.
 route_approved() {
     local r
     r=$(rsh "$PRIV tailscale status --json --peers=false 2>/dev/null \
@@ -904,9 +886,7 @@ route_approved() {
     case "$r" in *"$BR_SEGMENT"*) return 0 ;; *) return 1 ;; esac
 }
 
-# The half that is identical whichever storage the image landed on: the phone
-# comes up, the role goes on, the policy gets applied, and the route is checked
-# rather than assumed.
+# The half that is identical whichever storage the image landed on.
 provision_finish() {
     info "waiting for $BR_NAME (up to 7 minutes)"
     log  "  trying, in order: its conf name, $BR_HOSTNAME.local, and a unicast mDNS"
@@ -927,9 +907,8 @@ provision_finish() {
     info "$BR_NAME answers on $BR_SSH"
 
     # --- the role ---
-    # cmd_setup, not a copy of it: it is the idempotent half and it is what
-    # every re-run after today uses. It resolves privilege itself, prompts for
-    # the auth key only when the node actually needs one, and prints the policy.
+    # cmd_setup, not a copy of it: the idempotent half every re-run uses. It
+    # resolves privilege itself and prompts for the auth key only when needed.
     log ""
     cmd_setup
 
@@ -942,9 +921,9 @@ provision_finish() {
     fi
 
     # --- the policy ---
-    # The one thing setup printed and could not apply. Asked for here, and then
-    # *verified*, because "I pasted it" and "the route is live" are different
-    # claims and only the second one matters.
+    # The one thing setup printed and could not apply: asked for here, then
+    # *verified*, since "I pasted it" and "the route is live" are different
+    # claims.
     log ""
     if route_approved; then
         info "$BR_SEGMENT is approved and live -- the tailnet policy is already in place"
@@ -980,9 +959,8 @@ provision_finish() {
     log  "  reach something behind it: $(bridge_reach_hint)"
 }
 
-# What to try, to prove the segment is reachable -- without pretending to know
-# what is on it. The conf's reservations are the only list of that which exists,
-# and a bridge whose segment holds nothing named yet gets the honest version.
+# What to try, to prove the segment is reachable, without pretending to know
+# what is on it beyond the conf's own reservations.
 bridge_reach_hint() {
     local first
     first=$(printf '%s' "${BR_LEASES:-}" | tr ' ' '\n' | sed -n '1s/^[^,]*,\([^,]*\).*/\1/p')
@@ -1000,17 +978,17 @@ cmd_provision() {
             --at)       BR_AT="${2:-}"; [ -n "${BR_AT:-}" ] || die "--at needs a host or address"; shift 2 ;;
             --no-tailnet) BR_NO_TAILNET=1; shift ;;
             --disk)     disk="${2:-}";  [ -n "$disk" ]  || die "--disk needs <machine>:<device>"; shift 2 ;;
-            --image)    image="${2:-}"; [ -n "$image" ] || die "--image needs an image id"; shift 2 ;;
+            --image)    image="${2:-}"; [ -n "$image" ] || die "--image needs a path"; shift 2 ;;
             --rebuild)  rebuild=1; shift ;;
             --no-write) no_write=1; shift ;;
             --dry-run)  dry=1; shift ;;
             *) die "unknown option: $1
     wk bridge provision <name> [--at <host>] [--disk <machine>:<dev>]
-                               [--image <id>] [--rebuild] [--no-write] [--dry-run]" ;;
+                               [--image <path>] [--rebuild] [--no-write] [--dry-run]" ;;
         esac
     done
     [ -z "$rebuild" ] || [ -z "$image" ] \
-        || die "--rebuild and --image contradict each other: one builds a new image, the other names an existing one."
+        || die "--rebuild and --image contradict each other: one builds a new image, the other names a local file."
     [ -z "$no_write" ] || { [ -z "$rebuild" ] && [ -z "$image" ]; } \
         || die "--no-write says the phone already holds its system, so there is no image for --image or --rebuild to be about."
 
@@ -1032,18 +1010,15 @@ cmd_provision() {
         [ "$cardmach" != "$card" ] && [ -n "${card#*:}" ] \
             || die "'$card' is not <machine>:<device> -- e.g. rpi5:/dev/mmcblk0."
 
-        # A named image is checked here, with the rest of the arguments, rather
-        # than at the point it gets written -- so `--dry-run` catches it, which
-        # is the run somebody makes *because* they are unsure. A profile
-        # mismatch is refused rather than warned about: the wrong phone's image
-        # is a card that does not boot, and the symptom is a black screen with
-        # nothing on it to read.
+        # A named image is checked here, with the rest of the arguments,
+        # rather than at the point it gets written, so `--dry-run` catches it.
+        # There is no manifest to check its profile against (wk help): a path
+        # that is not this phone's build is a card that does not boot, with a
+        # black screen unreadable from the bytes alone -- on the caller to
+        # have gotten right.
         if [ -n "$image" ]; then
-            image_complete "$image" || die "no such image: $image
-    'wk sysimage ls' lists the store."
-            local named; named=$(manifest_get "$image" profile || true)
-            [ "$named" = "$profile" ] || die "$image is a '$named' image, and $BR_NAME is built by '$profile'.
-    --image chooses which build, not which phone."
+            [ -r "$image" ] || die "no image at $image
+    'wk sysimage build $profile' leaves one on its build host; copy it here first."
         fi
 
         recovery=$(recovery_profile "$profile" || true)
@@ -1070,8 +1045,9 @@ cmd_provision() {
         elif [ -n "$rebuild" ]; then
             log  "  image:    a new build (--rebuild)"
         else
-            local have; have=$(image_latest "$profile" 2>/dev/null || true)
-            log  "  image:    ${have:-none in the store yet, so it gets built}"
+            local have
+            have=$( image_profile_load "$profile" >/dev/null 2>&1 && pmos_newest_out "$profile" 2>/dev/null || true )
+            log  "  image:    ${have:-none finished on its build host yet, so it gets built}"
         fi
     else
         log  "  image:    not touched (--no-write: the phone already holds its system)"
@@ -1083,7 +1059,7 @@ cmd_provision() {
         local n=0
         _step() { n=$((n + 1)); log "  $n. $*"; }
         if [ -z "$no_write" ]; then
-            _step "build $recovery and $profile, unless the store already has them"
+            _step "build $recovery and $profile, unless a finished one is already there"
             _step "write $recovery to $card"
             _step "stop, and ask you to put the card in the phone, cable the phone to"
             log   "     $cardmach, and power it on"
@@ -1109,14 +1085,11 @@ cmd_provision() {
         return 0
     fi
 
-    # A terminal, checked here rather than three steps in. Several of the steps
-    # below are a person, so a run with nobody watching cannot finish -- and
-    # finding that out *after* erasing a disk is the version of this that costs
-    # something.
+    # A terminal, checked here rather than three steps in: several steps below
+    # are a person, and finding that out *after* erasing a disk costs something.
     if [ ! -t 0 ]; then
-        # Assembled rather than interpolated: a `$(...)` inside the string
-        # eats its own trailing newline, which silently ran the last two lines
-        # of this message together.
+        # Assembled rather than interpolated: a `$(...)` inside the string eats
+        # its own trailing newline, running the last two lines together.
         local why parts
         if [ -n "$no_write" ]; then
             why="Applying the tailnet policy is a person, so it cannot run unattended."
@@ -1125,7 +1098,7 @@ cmd_provision() {
             why="Several of its steps are a person -- the card into the phone, the phone
     recabled, the policy into the console -- so it cannot run unattended."
             parts="        wk sysimage build $profile
-        wk sysimage write <id> --disk $card
+        wk sysimage write --from <path> --disk $card
 "
         fi
         die "wk bridge provision needs a terminal.
@@ -1138,22 +1111,19 @@ $parts        WK_BRIDGE_AUTHKEY=tskey-... wk bridge setup $BR_NAME"
         [ -n "$image" ] || image=$(image_for "$profile" "$rebuild")
         local jd; jd=$(image_for "$recovery" "")
 
-        # --no-grow: Jumpdrive is a 41 MB service image and growing its root to
-        # fill a 64 GB card is work done to a filesystem that is discarded the
-        # moment the phone reboots. It also keeps the card's head byte-identical
-        # to the image, which is what identify_internal_storage matches on.
+        # --no-grow: Jumpdrive's root is discarded the moment the phone
+        # reboots, and growing it would break the head byte-identity
+        # identify_internal_storage matches on.
         info "writing $jd to $card"
-        "$WK_ROOT/wk" sysimage write "$jd" --disk "$card" --no-grow \
+        "$WK_ROOT/wk" sysimage write --from "$jd" --disk "$card" --no-grow \
             || die "the card was not written -- nothing on the phone has changed"
 
         machine_load "$cardmach" \
             || die "unknown machine '$cardmach' (from $([ -n "$disk" ] && echo --disk || echo BR_CARD)=$card)"
         m_reachable || die "$cardmach is not reachable, and it is where the phone's storage will appear."
 
-        # The baseline is taken *now*, with the phone not yet attached, so that
-        # "which disks are the phone's" is a difference rather than a
-        # recognition problem. The content check that follows narrows that set
-        # to one; this narrows the universe to the set.
+        # Taken *now*, with the phone not yet attached, so "which disks are
+        # the phone's" is a difference rather than a recognition problem.
         local baseline; baseline=$(disks_now)
         debug "disks on $cardmach before the phone: $(printf '%s' "$baseline" | tr '\n' ' ')"
 
@@ -1181,12 +1151,12 @@ $parts        WK_BRIDGE_AUTHKEY=tskey-... wk bridge setup $BR_NAME"
         log ""
 
         local target
-        target=$(identify_internal_storage "$new" "$(image_disk "$jd")")
+        target=$(identify_internal_storage "$new" "$jd")
 
         info "writing $image to $cardmach:$target"
         log  "  every refusal 'wk sysimage write' has applies here: it checks the disk"
         log  "  is removable, is not $cardmach's own root, and is big enough."
-        "$WK_ROOT/wk" sysimage write "$image" --disk "$cardmach:$target" \
+        "$WK_ROOT/wk" sysimage write --from "$image" --disk "$cardmach:$target" \
             || die "the phone's internal storage was not written.
     Nothing is lost: the card still holds Jumpdrive, so re-running this picks up
     from the same place. 'wk bridge provision $BR_NAME' is idempotent."
@@ -1249,11 +1219,10 @@ cmd_setup() {
 
     resolve_priv
 
-    # pmOS or nothing, checked here so the message arrives before the copy
-    # rather than from the far side after it. The Librem 5 is the live case:
-    # it still runs the PureOS/systemd configuration this role replaces, and
-    # half-applying Alpine service files onto it would leave a bridge that is
-    # neither one thing nor the other.
+    # pmOS or nothing, checked here so the message arrives before the copy.
+    # The Librem 5 is the live case: half-applying Alpine service files onto
+    # its PureOS/systemd configuration would leave a bridge that is neither
+    # one thing nor the other.
     rsh 'command -v apk >/dev/null 2>&1' \
         || die "$BR_SSH is not running postmarketOS (no apk).
     The bridge role is pmOS-only on purpose: one provisioner for both phones,
@@ -1297,19 +1266,14 @@ cmd_setup() {
         log  "  the exact outage this device exists to prevent."
         log  "  generate one at https://login.tailscale.com/admin/settings/keys"
         # The environment, when there is one: this command is otherwise
-        # unscriptable, and the first provisioning run of a phone is exactly the
-        # moment somebody wants to drive it from a script (or hand it to an
-        # agent) without typing a secret into a prompt. Single-use either way --
-        # provision.sh deletes the key file the moment tailscale has consumed it,
-        # and nothing at this end writes it down.
+        # unscriptable. Single-use either way -- provision.sh deletes the key
+        # file the moment tailscale has consumed it.
         if [ -n "${WK_BRIDGE_AUTHKEY:-}" ]; then
             authkey="$WK_BRIDGE_AUTHKEY"
             log  "  using the key in \$WK_BRIDGE_AUTHKEY"
         elif keyfile=$(wk_tailscale_authkey); then
             # The fleet's one key, from the one place it lives -- the same key
-            # `wk pi setup` and the Mac bench volume join with. A `read` here
-            # would be a second copy of the same credential and a phone that
-            # could only be provisioned by hand.
+            # `wk pi setup` and the Mac bench volume join with.
             authkey=$(head -1 "$keyfile")
         else
             log  "  no key available, so this run applies the role without joining"
@@ -1318,10 +1282,9 @@ cmd_setup() {
     fi
 
     # The key never appears on a command line, on either side: argv is world
-    # readable in /proc, and a `tailscale up --authkey=...` in the phone's
-    # process table is a credential anyone with a shell there can read. It goes
-    # over the same ssh, into a 0600 file on tmpfs, and provision.sh deletes it
-    # the moment it has been used. Nothing writes it down at this end at all.
+    # readable in /proc, so a `tailscale up --authkey=...` would be a
+    # credential anyone with a shell there can read. It goes over the same
+    # ssh, into a 0600 file on tmpfs, and provision.sh deletes it once used.
     if [ -n "$authkey" ]; then
         printf '%s\n' "$authkey" \
             | rsh "$PRIV sh -c 'umask 077; cat > /run/wk-bridge-authkey'" \
@@ -1356,10 +1319,10 @@ cmd_setup() {
         return 0
     fi
 
-    # The one thing this cannot apply, and must therefore print: the tailnet
-    # policy. Applying it needs an API key with policy-write scope, and a
-    # repository that held one would be a repository whose compromise rewrites
-    # every ACL you have. So it is a paste, once, per bridge.
+    # The one thing this cannot apply, and must print instead: applying the
+    # tailnet policy needs an API key with policy-write scope, and a
+    # repository holding one is a repository whose compromise rewrites every
+    # ACL. So it is a paste, once, per bridge.
     cat >&2 <<EOF
 
 Remaining manual step -- the tailnet policy, in the admin console.
@@ -1394,12 +1357,10 @@ EOF
 
 # --- tailnet -----------------------------------------------------------------
 #
-# The last step, on its own, because it is the only one that needs a credential
-# a person has to go and fetch -- and because `tailscale up --advertise-tags` is
-# settable only at login, which makes it the one part of the role that is not
-# freely repeatable. Splitting it out means everything else can be applied,
-# verified and iterated on without a key in hand, which is what the rest of this
-# command became usable for.
+# The last step, on its own: it is the only one needing a credential a person
+# has to go fetch, and `tailscale up --advertise-tags` is settable only at
+# login, so it is not freely repeatable. Splitting it out means everything
+# else can be applied and verified without a key in hand.
 cmd_tailnet() {
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1483,13 +1444,12 @@ rm -f /etc/wk-bridge.conf \
 rm -rf /usr/local/lib/wk-bridge
 nmcli connection reload >/dev/null 2>&1 || true
 
-# The sshd drop-in goes last and the daemon is only reloaded if it still parses:
-# locking yourself out of the phone is the one mistake here with no remote fix.
-# The drop-in goes; the `Include` line provisioning added to sshd_config
-# stays, and so does chrony.conf's `include`. Both are includes of a glob that
-# now matches nothing, which OpenSSH and chrony both tolerate -- and editing a
-# file we do not own, to remove one line, on the way out, is how a
-# deprovisioning ends up being the thing that breaks sshd.
+# The sshd drop-in goes last and the daemon is only reloaded if it still
+# parses: locking yourself out of the phone is the one mistake here with no
+# remote fix. The `Include` line provisioning added to sshd_config stays (and
+# so does chrony.conf's `include`) -- both tolerate an include of a glob that
+# matches nothing, and editing a file we do not own to remove one line is how
+# a deprovisioning ends up breaking sshd.
 rm -f /etc/ssh/sshd_config.d/10-wk-bridge.conf
 if sshd -t 2>/dev/null; then
     rc-service sshd reload >/dev/null 2>&1 || true

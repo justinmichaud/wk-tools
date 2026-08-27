@@ -11,6 +11,7 @@
 #   wk bench <workspace> <plan> [--config C] [--count N] [--subtests "A B"]
 #                                [--software] [--force] [--browser-args "..."]
 #                                [--cores <set>]
+#       --count N                          iterations per run (default: run-benchmark's own)
 #       --cores 0-3                       pin the run to this Linux cpu list
 #                                          (taskset -c) -- 0-3, 2,3, 0-1,4, 7.
 #                                          Refused on a macOS guest or host:
@@ -194,32 +195,23 @@ bench_root_device() { # <path>
         "${tran:-unknown}" "$([ "$rota" = 0 ] && echo ssd || echo rotational)" "$trim"
 }
 
-# What the benchmark measures, and therefore what the machine has to
-# provide. gpu-class is the default for anything unclassified: guessing gpu
-# fails as an easy refusal, guessing cpu fails as a MotionMark score from
-# llvmpipe that looks like a regression.
-#
-# Speedometer is gpu-class even though it's mostly script: its score depends
-# on the rendering it drives, so a run with no real display path measures
-# something else.
-#
-# The classifier is `wkdata.py bench-class`, not a case statement here: `wk
-# pi bench` needs the same answer for the same plan names.
+# What the benchmark measures. gpu-class is the default for anything
+# unclassified: guessing gpu fails as an easy refusal, guessing cpu fails as
+# a MotionMark score from llvmpipe that looks like a regression. Speedometer
+# is gpu-class despite being mostly script, since its score depends on the
+# rendering it drives. The classifier is `wkdata.py bench-class`, not a case
+# statement here, so `wk pi bench` can share it.
 bench_class() {
     wkdata bench-class "$1"
 }
 
 # --- variance knobs -----------------------------------------------------
-# A run that sets none of these is recorded with wkdata.py's "not
-# controlled" configuration. Turning one on is deliberate, and recorded into
-# `configuration` (bench_configuration_args below) so `wk bench report` can
-# group variance by it. WK_BENCH_ASLR, WK_BENCH_ENV_PAD and WK_BENCH_PATH_PAD
-# are listed above (wk bench -h); ASLR is setarch -R, the same address
-# layout every iteration so one lucky or unlucky slide cannot read as a
-# regression -- Linux only, macOS has no equivalent toggle (staged_env_json
-# below records the slide instead). ENV_PAD and PATH_PAD both move where the
-# initial stack starts: envp's size and the executable's own path both land
-# on it, the same way a different username or PWD does by accident.
+# WK_BENCH_ASLR, WK_BENCH_ENV_PAD and WK_BENCH_PATH_PAD are listed above (wk
+# bench -h). Turning one on is recorded into `configuration`
+# (bench_configuration_args below) so `wk bench report` can group variance
+# by it. ASLR (Linux only, setarch -R) fixes the address layout every
+# iteration. ENV_PAD and PATH_PAD both move where the initial stack starts:
+# envp's size and the executable's own path both land on it.
 
 # bench_aslr_wrap -- the command prefix that pins the address layout, or
 # nothing. Interpolated straight into a `bash -lc "..."` string built by the
@@ -238,13 +230,11 @@ bench_cores_valid() {
     wkdata cores-valid "$1"
 }
 
-# bench_cores_refusal <target> <os> -- prints why --cores cannot be honoured,
-# or nothing if it can. Pure function of the two facts that decide it, so it
-# can be tested with no workspace. <target> is the workspace's `ws_target`;
-# <os> is `wk_os` for the machine that actually runs the benchmark under
-# that target. A `vm` target is always a macOS guest; `local` on macOS is a
-# macOS guest or host running the benchmark directly. Both have no per-run
-# pin, only the vCPU count chosen when the guest was created.
+# bench_cores_refusal <target> <os> -- prints why --cores cannot be
+# honoured, or nothing if it can. <target> is the workspace's `ws_target`;
+# <os> is `wk_os` for the machine that runs the benchmark. A `vm` target and
+# `local` on macOS both have no per-run pin, only the vCPU count chosen when
+# the guest was created.
 bench_cores_refusal() {
     local target="$1" os="$2"
     if [ "$target" = vm ] || { [ "$target" = local ] && [ "$os" = macos ]; }; then
@@ -272,11 +262,8 @@ bench_env_pad_prelude() {
 
 # bench_padded_path <run-fn-or-empty> <target> -- a symlink to <target> whose
 # own path is WK_BENCH_PATH_PAD characters longer than <target>'s, created
-# through <run-fn> (a function taking a command, e.g. one that wraps t_exec;
-# empty runs locally, for the staged macOS tree) if the knob is set,
-# <target> unchanged otherwise. The pad directory name is a fixed run of the
-# same character, so the same WK_BENCH_PATH_PAD value always produces the
-# same path.
+# through <run-fn> (empty runs locally, for the staged macOS tree) if the
+# knob is set, <target> unchanged otherwise.
 bench_padded_path() {
     local runner="$1" target="$2" n="${WK_BENCH_PATH_PAD:-0}"
     case "$n" in ''|*[!0-9]*) n=0 ;; esac
@@ -298,11 +285,9 @@ bench_padded_path() {
 }
 
 # bench_configuration_args -- into the global array BENCH_CFG_ARGS, the
-# `wkdata env-record` arguments for the `configuration` block, read straight
-# off the WK_BENCH_* knobs. path_len records the pad *requested* rather than
-# a resolved path's length: the two runners (jsc, a browser) pad a different
-# binary at a different point, and what matters for grouping variance is
-# which axis was varied, not the exact string.
+# `wkdata env-record` arguments for the `configuration` block. path_len
+# records the pad *requested*, not a resolved path's length: what matters
+# for grouping variance is which axis was varied, not the exact string.
 bench_configuration_args() {
     BENCH_CFG_ARGS=()
     [ "${WK_BENCH_ASLR:-}" = off ] && BENCH_CFG_ARGS+=("configuration.aslr=off")
@@ -422,8 +407,8 @@ seed_payload() {
 }
 
 # --- preflight ---------------------------------------------------------------
-# Each check answers one question that would otherwise be answered by "the
-# number looked odd, I wonder why".
+# Each check answers one question otherwise answered by "the number looked
+# odd, I wonder why".
 PREFLIGHT_FAILS=0
 PREFLIGHT_NOTES=""
 
@@ -489,13 +474,12 @@ preflight() {
     GPU_RENDERER=$(awk -F'renderer=' '/renderer=/{sub(/ *\|.*/,"",$2); print $2; exit}' /tmp/.wk-bench-verify.$$ 2>/dev/null || true)
     rm -f /tmp/.wk-bench-verify.$$
 
-    # 3. a real compositor on the real monitor. The socket says a compositor
-    #    is there, not what it is drawing on: `wk session on --bmc` puts the
-    #    session on the BMC's software-rendered display chip, invisible both
-    #    from the socket and from the GPU probe above (which asks the
-    #    *client* its EGL vendor, still NVIDIA when the compositor behind it
-    #    is llvmpipe). The mode `wk session` recorded is the only place the
-    #    difference shows.
+    # 3. a real compositor: the socket says one is there, not what it is
+    #    drawing on. `wk session on --bmc` puts the session on the BMC's
+    #    software-rendered display chip, invisible both from the socket and
+    #    from the GPU probe above (which asks the *client* its EGL vendor,
+    #    still NVIDIA when the compositor behind it is llvmpipe). The mode
+    #    `wk session` recorded is the only place the difference shows.
     local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
     SESSION_MODE=$(session_mode)
     if [ "$class" = cpu ] || [ -n "$SOFTWARE" ]; then
@@ -504,17 +488,15 @@ preflight() {
         check no  "graphical session" "no compositor -- wk session on"
     else
         case "$SESSION_MODE" in
-            # none: a session wk did not start, i.e. somebody's own desktop.
-            # Whether that one is on the GPU is what the renderer check above
-            # answers; there is no recorded mode to judge.
+            # none: a session wk did not start, i.e. somebody's own desktop --
+            # the renderer check above already answers whether it's on the GPU.
             gpu|none) check yes "graphical session" "$sock ($SESSION_MODE)" ;;
             *)        check no  "graphical session" \
                           "session mode '$SESSION_MODE' -- watchable over the BMC, not measurable; wk session on" ;;
         esac
     fi
 
-    # 4. quiesced. The governor is the one that actually moves scores; the rest
-    #    is recorded so a surprising result can be explained later.
+    # 4. quiesced: the governor is what actually moves scores.
     local gov
     gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)
     if [ "$gov" = performance ]; then
@@ -523,8 +505,8 @@ preflight() {
         check no  "cpu governor" "$gov -- wk quiesce on"
     fi
 
-    # 5. the machine is actually idle. A build in another workspace is the
-    #    single most likely reason a benchmark run is quietly wrong here.
+    # 5. idle: a build in another workspace is the single most likely
+    #    reason a benchmark run is quietly wrong here.
     local load busy f
     load=$(awk '{print $1}' /proc/loadavg)
 
@@ -548,8 +530,7 @@ preflight() {
         check yes "machine idle" "load $load, no wk builds"
     fi
 
-    # 6. thermals, informational: an aarch64 workstation under a long
-    #    MotionMark run is the case where this matters.
+    # 6. thermals, informational.
     local temp=""
     for z in /sys/class/thermal/thermal_zone*/temp; do
         [ -r "$z" ] || continue
@@ -614,15 +595,12 @@ run_jsc() {
     local cores_wrap; cores_wrap=$(bench_cores_wrap)
     local pad_prelude; pad_prelude=$(bench_env_pad_prelude)
 
-    # cli.js takes its options from the shell's script arguments -- everything
-    # after `--`, which jsc hands to the script as `scriptArgs` (its own
-    # --help lists them).
-    #
-    # Passed as flags rather than set as globals: the driver reads them off a
-    # JetStreamParams object built from these arguments and ignores a global
-    # of the same name (JetStreamDriver.js:3263, utils/params.js). It also
-    # rejects a flag it does not know, so a payload too old for this
-    # interface fails loudly here rather than reporting nothing this can parse.
+    # cli.js takes its options from the shell's script arguments, everything
+    # after `--`. Passed as flags rather than set as globals: the driver
+    # reads them off a JetStreamParams object built from these arguments and
+    # ignores a global of the same name (JetStreamDriver.js:3263,
+    # utils/params.js), and rejects a flag it does not know, so a payload
+    # too old for this interface fails loudly here.
     local cliargs="--dump-json-results"
     if [ -n "$SUBTESTS" ]; then
         cliargs="$cliargs --test=$(printf '%s' "$SUBTESTS" | tr ' ' ',')"
@@ -693,12 +671,10 @@ cmd_run() {
     kraken, sunspider, ares6 -- which the jsc shell can drive directly."
     fi
 
-    # An armhf workspace is permanently software-rendering: the NVIDIA
-    # userspace has to match the host kernel driver and is published for
-    # aarch64 only, so a rendering benchmark here measures llvmpipe wearing
-    # MotionMark's name. cpu-class plans are unaffected. A real 32-bit
-    # rendering number needs the device, not a container -- `wk pi bench`,
-    # which records bench_host=image.
+    # An armhf workspace is permanently software-rendering (the NVIDIA
+    # userspace is aarch64-only), so a rendering benchmark here measures
+    # llvmpipe wearing MotionMark's name. A real 32-bit rendering number
+    # needs the device, not a container -- `wk pi bench`.
     if [ "$class" = gpu ] && ! arch_has_gpu "$arch"; then
         die "$plan is gpu-class and '$ws' is an $arch workspace, which has no GPU.
     cpu-class plans (jetstream3, octane, kraken, sunspider) do run in here,
@@ -718,12 +694,9 @@ cmd_run() {
     fi
     [ -n "$SOFTWARE" ] && SOFTWARE_REASON="--software"
 
-    # A cpu-class benchmark in a browser still needs somewhere to put a
-    # window. Where there is no usable display -- no compositor, a session
-    # on the BMC's chip, or a workspace with no GPU -- it runs headless
-    # rather than not running, since the display isn't the measurement. It
-    # is still recorded as a software run, so comparing it against a GPU run
-    # warns.
+    # A cpu-class benchmark still needs a window: with no usable display it
+    # runs headless rather than not at all, since the display isn't the
+    # measurement, and is still recorded as software so comparing it warns.
     if [ "$runner" = browser ] && [ "$class" = cpu ] && [ -z "$SOFTWARE" ]; then
         local sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0"
         if ! arch_has_gpu "$arch" || [ ! -S "$sock" ]; then
@@ -762,16 +735,13 @@ cmd_run() {
     cpu_model=$(awk -F: '/Model name/ {gsub(/^ +/,"",$2); print $2; exit}' <(lscpu) 2>/dev/null || true)
 
     # session_mode is which chip the compositor was on: gpu, bmc (the BMC's
-    # chip, software rendered), or none for somebody's own desktop.
-    #
-    # display matters: MotionMark scores scale with the size of the surface
-    # being animated, and a fullscreen browser's surface is the display mode.
-    #
-    # host.kernel_arch is the *kernel's* width, beside the build's arch
-    # above: an armhf build on an armhf kernel and one on an arm64 kernel
-    # both report arch=armhf but are different measurements (syscall path,
-    # page size, kernel pointer width). A container borrows the host's
-    # kernel, so this is the host's answer.
+    # chip, software rendered), or none for somebody's own desktop. display
+    # matters since MotionMark scores scale with the surface being animated,
+    # a fullscreen browser's surface being the display mode. host.kernel_arch
+    # is the *kernel's* width, beside the build's arch above: an armhf build
+    # on an armhf kernel and one on an arm64 kernel both report arch=armhf
+    # but are different measurements. A container borrows the host's kernel,
+    # so this is the host's answer.
     bench_configuration_args
     wkdata env-record "$out/env.json" \
         plan="$plan" workspace="$ws" config="$CONFIG" browser="$BROWSER" \
@@ -880,16 +850,12 @@ cmd_run() {
 # result.json files and refuses a comparison naming nothing. Either side may
 # be a comma-separated list of runs -- an interleaved A/B (`wk pi bench --ab`)
 # produces exactly that shape, N runs per arm, pooled into the same subtest
-# arrays rather than only the last run winning.
-#
-# Resolution is per element: a name in the store, or a path. rewrite=1 maps a
-# store path to /bench, where a workspace would see it; every caller below
-# passes rewrite=0, since `wk bench report` always reads local JSON directly.
-#
-# One path per line, never a space-joined string: the benchmark volume is
-# named `WK Bench` by default, so a result path on it contains spaces and
-# cannot be word-split back apart. Callers read this into an array and pass
-# "${arr[@]}".
+# arrays. Resolution is per element: a name in the store, or a path.
+# rewrite=1 maps a store path to /bench, where a workspace would see it;
+# every caller below passes rewrite=0, since `wk bench report` always reads
+# local JSON directly. One path per line, never space-joined: the benchmark
+# volume is named `WK Bench` by default, so a result path on it contains
+# spaces and cannot be word-split back apart.
 _compare_files() {
     local spec="$1" which="$2" rewrite="${3:-1}" n=0 one f
     local IFS=,
@@ -920,13 +886,10 @@ EOF
 
 # wk bench report <run-a> <run-b> [--html out.html] [--text] -- resolves run
 # ids or paths to result.json files (aspec/bspec, same comma-separated shape
-# as everywhere else in this file) and hands them to `wkdata.py report`,
-# which does the statistics: per-subtest Score and Time, a Welch/FDR
-# p-value, histograms, the axis warnings, variance by `configuration`. Reads
-# results directly from a container's store or a macOS staged tree, no
-# workspace needed.
-#
-# `wk bench compare` is the same call, in text mode.
+# as elsewhere in this file) and hands them to `wkdata.py report`, which
+# does the statistics, reading results directly from a container's store or
+# a macOS staged tree, no workspace needed. `wk bench compare` is the same
+# call, in text mode.
 cmd_report() {
     local aspec="" bspec="" html="" text=""
     local positional=()
@@ -934,9 +897,14 @@ cmd_report() {
         case "$1" in
             --html) html="${2:-}"; shift 2 ;;
             --text) text=1; shift ;;
+            -*) die "usage: wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h" ;;
+            # A third bare word is `wk bench compare`'s <ws> -- accepted here
+            # (this function backs both) and ignored below; a fourth is not.
             *) positional+=("$1"); shift ;;
         esac
     done
+    [ ${#positional[@]} -le 3 ] \
+        || die "usage: wk bench report <run-a> <run-b> [--html out.html] [--text]; unexpected argument: ${positional[3]}"
     aspec="${positional[0]:-}"; bspec="${positional[1]:-}"
     [ -n "$aspec" ] && [ -n "$bspec" ] || die "usage: wk bench report <run-a> <run-b> [--html out.html] [--text]"
 
@@ -970,9 +938,7 @@ cmd_compare() {
 # Builds inside the VM, runs outside on bare metal (docs/HANDOFF-mac-perf-mode.md).
 # Staging is a copy -- rsync onto a fixed path the other role finds when it
 # boots, while this machine is in host mode and the benchmark volume is
-# mounted.
-#
-# What is staged:
+# mounted. What is staged:
 #
 #   WebKitBuild/<config>   the product being measured.
 #   Tools/                 run-benchmark, webkitpy, plan files -- the
@@ -984,7 +950,6 @@ cmd_compare() {
 #
 # Carries bench_host=image, which `wk bench compare` refuses to compare
 # against a container run.
-#
 # TODO: exercise the run half end to end; only staging (layout, provenance,
 # refusals) is tested so far.
 cmd_stage() {
@@ -1185,29 +1150,23 @@ EOF
 # runs it and records what it ran on.
 #
 #   run-benchmark drives from a *partial* tree: plan files and patches
-#   resolve relative to webkitpy itself (BenchmarkRunner.plan_directory), not
-#   against a checkout, so `Tools/Scripts` alone is enough.
-#
+#   resolve relative to webkitpy itself, not against a checkout, so
+#   `Tools/Scripts` alone is enough.
 #   `--build-directory <dir>` makes the driver launch MiniBrowser.app itself
 #   with DYLD_FRAMEWORK_PATH set, instead of going through
-#   Tools/Scripts/run-minibrowser, which would need a checkout. It requires
+#   Tools/Scripts/run-minibrowser, which would need a checkout; it requires
 #   the build directory contain a *.framework.
-#
-#   the interpreter must have PyObjC: prepare_env imports
-#   `webkitpy.autoinstalled.pyobjc_frameworks`, whose first line is a bare
-#   `import objc`, and pyobjc-core is not autoinstalled. Which python3 has it
-#   varies by machine, so the interpreter is found by property and named
+#   the interpreter must have PyObjC: prepare_env's first import is a bare
+#   `import objc`, and pyobjc-core is not autoinstalled. Which python3 has
+#   it varies by machine, so the interpreter is found by property and named
 #   explicitly (staged_python below), not left to `#!/usr/bin/env python3`.
-#
 #   everything else webkitpy needs it installs itself into the staged tree
-#   on first use, needing the network once (unless staged from a guest where
-#   it already happened).
+#   on first use, needing the network once.
 #
 # The refusal --force does not open: a benchmark runs in bench mode or it
-# does not run. A workstation run shares the machine with a desktop, a
-# podman VM, whatever else is open, and produces a number indistinguishable
-# on paper from a bare-metal one. `--dry-run` still describes it, since
-# describing isn't measuring.
+# does not run, since a workstation run shares the machine with a desktop,
+# a podman VM, whatever else is open, and produces a number indistinguishable
+# on paper from a bare-metal one. `--dry-run` still describes it.
 staged_python() {
     local p
     for p in "${WK_BENCH_PYTHON:-}" /usr/bin/python3 \
@@ -1572,16 +1531,13 @@ staged_restore_desktop() {
 
 # The record, in the same shape `wk bench` writes for a container run, so
 # `wk bench compare` can warn about what differs. bench_host is always
-# "image" here: this path is only reachable from bench mode.
-#
-# `system` is the artifact that booted; `profile` is what it was built from,
-# so a stock and an overclocked profile read as two series, not noise.
-# role_marker_overridden is true when the role was asserted by an override
-# rather than by having booted the image -- a run marked this way is a
-# rehearsal.
-#
-# aslr starts "unset" and is updated to the real answer after the run
-# (cmd_staged, below): there is no live browser process to probe until then.
+# "image" here. `system` is the artifact that booted; `profile` is what it
+# was built from, so a stock and an overclocked profile read as two series,
+# not noise. role_marker_overridden is true when the role was asserted by
+# an override rather than by having booted the image -- a run marked this
+# way is a rehearsal. aslr starts "unset" and is updated to the real answer
+# after the run (cmd_staged, below): there is no live browser process to
+# probe until then.
 staged_env_json() {
     local f="$1" dir="$2" plan="$3" config="$4" sha="$5" ws="$6" role="$7" faked="${8:-}"
     local therm disp
@@ -1666,6 +1622,7 @@ case "${1:-}" in
              # name is still the first argument.
              if [ -n "${WK_NAME:-}" ]; then SEED_WS="$WK_NAME"; else SEED_WS="${1:-}"; shift 2>/dev/null || true; fi
              [ -n "$SEED_WS" ] && [ $# -ge 1 ] || die "usage: wk bench seed <workspace> <plan>; see wk bench -h"
+             [ -z "${2:-}" ] || die "usage: wk bench seed <workspace> <plan>; unexpected argument: $2; see wk bench -h"
              load_target "$(ws_target "$SEED_WS")"
              [ -n "${WK_NAME:-}" ] || wait_ready "$SEED_WS"
              SEED_DIR="$WK_STORE/cache/bench"
@@ -1687,7 +1644,9 @@ while [ $# -gt 0 ]; do
         --software) SOFTWARE=1; shift ;;
         --browser-args) BROWSER_ARGS="${2:-}"; shift 2 ;;
         --cores)    CORES="${2:-}"; shift 2 ;;
-        *) die "unknown option: $1" ;;
+        *) die "usage: wk bench <workspace> <plan> [--config C] [--count N] [--subtests \"A B\"]
+    [--software] [--browser-args \"...\"] [--cores <set>]; see wk bench -h
+    unexpected argument: $1" ;;
     esac
 done
 

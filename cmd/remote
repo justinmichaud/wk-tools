@@ -3,26 +3,17 @@
 # wk remote setup|rm <target> -- provision or deprovision a shared build machine
 # wk: where=host name=none group=hosts needs ssh,rsync
 #
-# The companion to `wk pi setup`: it works against a live machine over ssh and
-# changes nothing about how that machine is installed. Here the constraint is
-# not a read-only rootfs but other people -- a build box belongs to everyone
-# who logs into it, so **this never needs root and never asks for it**, and
-# everything it leaves behind is under $HOME and reversible.
+# A build box belongs to everyone who logs into it, so **this never needs
+# root and never asks for it**, and everything it leaves behind is under
+# $HOME and reversible. After `setup`, a shell there has zsh, `wk` on PATH,
+# and a target resolving to the same workspaces, paths and job policy as the
+# workstation driving it -- with the ssh step dropped. It asks, with the
+# size, before removing anything it finds (an old wk-tools clone, a
+# redundant mirror) -- never a silent tidy-up.
 #
-# What it is for: making `wk` work *on* the box as well as against it. After
-# this, a shell there has zsh, `wk` on PATH, and a target that resolves to the
-# same workspaces, the same paths and the same job policy as the workstation
-# driving it -- with the ssh step dropped.
-#
-# It also asks about what it finds. A shared machine accumulates: an old
-# wk-tools clone, a 13 GB mirror that a system-wide one has made redundant,
-# workspaces nobody remembers. Removing any of that is a decision, so it is a
-# question, once, with the size attached -- never a silent tidy-up.
-#
-# wk remote rm <target> -- the inverse. Undoes everything setup left on the
-# machine (the rc lines, the marker, its conf, and -- asked, with the size --
-# the remote root) and forgets the target here. A machine that is already gone
-# can still be forgotten: unreachable degrades to removing the local conf.
+# wk remote rm <target> -- the inverse: undoes everything setup left on the
+# machine and forgets the target here. A machine that is already gone can
+# still be forgotten: unreachable degrades to removing the local conf.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -41,10 +32,9 @@ require_name "$TARGET"
 [ $# -le 2 ] || die "usage: wk remote setup|rm <target>; see wk remote -h"
 
 # --- rm ------------------------------------------------------------------------
-# The mirror image of setup, in reverse order: the machine first (rc lines,
-# marker, its conf, then the root -- the destructive one -- with its size),
-# the local conf last, so an ssh failure partway leaves a target that can
-# still be re-run. Registered workspaces block it outright: `wk rm` is how a
+# The mirror image of setup, in reverse order: the machine first, the local
+# conf last, so an ssh failure partway leaves a target that can still be
+# re-run. Registered workspaces block it outright: `wk rm` is how a
 # workspace dies, and it needs the target conf this command is about to delete.
 if [ "$ACTION" = rm ]; then
     target_kind "$TARGET" >/dev/null 2>&1 \
@@ -73,10 +63,8 @@ if [ "$ACTION" = rm ]; then
     confirm "deprovision $WK_REMOTE_HOST and remove target '$TARGET'?" \
         || die "aborted -- nothing was changed"
 
-    # Undo remote/provision.sh: the sourced rc line and its comment, the
-    # marker, the machine-side conf. The same grep-into-mktemp shape
-    # provisioning uses for stale lines, and -F for the same reason: these are
-    # paths, not patterns.
+    # The same grep-into-mktemp shape provisioning uses for stale lines, and
+    # -F for the same reason: these are paths, not patterns.
     tools=$(t_tools '')
     info "deprovisioning $WK_REMOTE_HOST"
     _rsh_q "for rc in \"\$HOME/.zshrc\" \"\$HOME/.bashrc\" \"\$HOME/.bash_profile\"; do
@@ -90,16 +78,12 @@ if [ "$ACTION" = rm ]; then
     done
     rm -f \"\$HOME/.wk-remote\" \"\$HOME/.config/wk/targets/$TARGET.conf\"" \
         | while read -r rc; do changed "removed the wk-tools line from $rc"; done
-    # The marker, and the conf a machine provisioned by an older revision has
-    # beside it. Nothing writes the second one -- the driver computes what it
-    # held from the marker -- but a box that was set up with one
-    # still has one, and leaving it is leaving a file that claims a target.
     changed "removed the marker from $WK_REMOTE_HOST"
 
     # The root: the pushed tools, the caches, the mirror, and any checkouts
     # this workstation has no record of -- on a shared home those may belong
-    # to another box, which is why this is a question with the contents named,
-    # never part of the sweep above.
+    # to another box, which is why this is a question with the contents
+    # named, never part of the sweep above.
     root=$(_remote_root)
     if _rsh_q "test -d $(sh_quote "$root")" 2>/dev/null; then
         others=$(t_list 2>/dev/null | cut -f1 | tr '\n' ' ' || true)
@@ -114,12 +98,9 @@ if [ "$ACTION" = rm ]; then
         fi
     fi
 
-    # The conf is a tracked file in this repository, so deprovisioning the
-    # machine and forgetting it are two different acts with two different blast
-    # radii. This command does the machine; the file is a commit, and it is left
-    # to be made deliberately -- deleting a tracked file here would show up as
-    # an unexplained working-tree change in whatever else is going on in this
-    # repository, and would forget the machine on every other device too.
+    # The conf is a tracked file in this repository: deprovisioning the
+    # machine and forgetting it (a commit, on every device) are two
+    # different acts with two different blast radii, left to be made deliberately.
     info "$WK_REMOTE_HOST is deprovisioned"
     log  "  it is still a target here, because the registry still names it:"
     log  "      git rm $conf && git commit"
@@ -128,10 +109,9 @@ if [ "$ACTION" = rm ]; then
 fi
 
 # --- the conf ----------------------------------------------------------------
-# Offered rather than demanded. load_target would refuse an unknown target with
-# the file to write, which is the right answer when a command was going to act
-# on it -- but this command's whole job is to set the machine up, so writing
-# the two lines is part of that rather than a prerequisite for it.
+# Offered rather than demanded: load_target would refuse an unknown target
+# with the file to write, right when a command was going to act on an
+# existing target -- but this command's job is to set the machine up.
 if ! target_kind "$TARGET" >/dev/null 2>&1; then
     conf=$(target_registry_conf "$TARGET")
     info "no target conf yet: $conf"
@@ -141,26 +121,18 @@ if ! target_kind "$TARGET" >/dev/null 2>&1; then
     A target is named after an ssh destination that already works, keys and
     ProxyJump included:  ssh -o BatchMode=yes $TARGET true"
 
-    # Writing the conf is routine and undone by 'wk remote rm' -- prompts are
-    # for destructive actions only.
     ensure_dir "$(dirname "$conf")"
     cat > "$conf" <<EOF
-# $TARGET -- a shared build machine, reached through the ssh entry of the same
-# name. Written by 'wk remote setup'; commit it to give every device this target.
+# $TARGET -- a shared build machine, reached through the ssh entry of the
+# same name. Written by 'wk remote setup'; commit it to give every device
+# this target. Everything here is a fact about the *machine*, true no
+# matter which device is driving it (target_registry_dir, lib/target.sh).
 #
-# Everything here is a fact about the *machine*, true no matter which device is
-# driving it. There is no per-device half -- see target_registry_dir in
-# lib/target.sh for why.
+# WK_REMOTE_ROOT defaults to ~/wk on the machine. There is deliberately no
+# job ceiling: it is derived per build from what this machine has free.
 #
-# WK_REMOTE_ROOT defaults to ~/wk on the machine.
-#
-# There is deliberately no job ceiling here. The job count is derived per
-# build from what this machine has free at the time -- a fixed number would
-# be wrong on the day the machine changes.
-#
-# WK_TARGET_CMAKE, if set, is added to the CMake flags of every build on this
-# machine. For a port or a toolchain quirk that belongs to the machine rather
-# than to the configuration:
+# WK_TARGET_CMAKE, if set, is added to the CMake flags of every build here,
+# for a port or toolchain quirk that belongs to the machine:
 #
 #   WK_TARGET_CMAKE=-DENABLE_JOURNALD_LOG=OFF
 EOF
@@ -199,12 +171,10 @@ log "  root: $(_remote_root)   jobs: derived per build from what is free"
 [ "$r_zsh" = - ]    && warn "no zsh (needs root to install; bash stays)"    || log "  zsh: $r_zsh"
 [ "$r_ccache" = - ] && warn "no ccache (every build starts cold)"           || log "  ccache: $r_ccache"
 # No flock(1) check: the build lock is lib/lockrun.sh in the wk-tools this
-# command is
-# about to push, and needs nothing installed (lib/common.sh, "locks").
+# command is about to push, and needs nothing installed.
 
-# A shared WebKit repository, if the machine advertises one. Worth reporting
-# even when nothing is done with it, because it is the difference between a
-# workspace costing 13 GB and costing a working tree.
+# A shared WebKit repository, if the machine advertises one -- worth
+# reporting even when nothing is done with it.
 REF=$(_remote_reference)
 if [ -n "$REF" ]; then
     info "this machine publishes a WebKit repository: $REF"
@@ -213,12 +183,11 @@ else
     log  "  no shared WebKit repository advertised -- a mirror under the root will be kept instead"
 fi
 
-# The MOTD is also where these machines say a home directory is shared between
-# several of them, and that changes what a workspace name means: the same name
-# on two boxes is the same directory, with one build tree between them.
-# Read once into a variable rather than piped: `cat` of the files that are not
-# there exits non-zero, and under `pipefail` that fails the whole pipeline even
-# when grep matched -- which is exactly how this warning silently never fired.
+# The MOTD is also where these machines say a home directory is shared
+# between several of them, changing what a workspace name means. Read once
+# into a variable rather than piped: `cat` of files that are not there exits
+# non-zero, and under `pipefail` that fails the whole pipeline even when
+# grep matched.
 MOTD=$(_rsh_q 'cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null' 2>/dev/null || true)
 if printf '%s\n' "$MOTD" | grep -qiE 'home *(dir|directory)?.*shared'; then
     warn "this machine says its home directory is shared with other boxes."
@@ -236,10 +205,9 @@ _rsh_q "env WK_REMOTE_TARGET=$(sh_quote "$TARGET") \
           WK_REMOTE_REFERENCE=$(sh_quote "$REF") \
           bash $(sh_quote "$(t_tools '')/remote/provision.sh")"
 
-# The same install claude/install.sh does on this workstation, run over there:
-# same symlinks, but settings.json gets Bash(wk *) merged into settings-host.json
-# rather than linked as-is (WK_CLAUDE_REMOTE=1 -- claude/install.sh, "why").
-# Needs no root, same as everything else provisioning leaves behind.
+# The same install claude/install.sh does on this workstation, run over
+# there: same symlinks, but settings.json gets Bash(wk *) merged into
+# settings-host.json rather than linked as-is (WK_CLAUDE_REMOTE=1).
 _rsh_q "env WK_ROOT=$(sh_quote "$(t_tools '')") WK_CLAUDE_REMOTE=1 bash -c '
     set -euo pipefail
     . \"\$WK_ROOT/lib/common.sh\"
@@ -247,40 +215,26 @@ _rsh_q "env WK_ROOT=$(sh_quote "$(t_tools '')") WK_CLAUDE_REMOTE=1 bash -c '
 '" && changed "linked ~/.claude on $r_host (settings-host.json + Bash(wk *))"
 
 # --- root on a machine you share ---------------------------------------------
-# Igalia's build machines grant `(ALL : ALL) NOPASSWD: ALL`, so anything
-# running as you is root for the asking -- on the machine that runs long
-# unattended builds, where it matters most. The fix needs no sysadmin: one
-# drop-in of your own, sorted last.
-#
-# A barrier, not an unpassable refusal: `--force` proceeds with the warning
-# repeated at the end. `wk doctor`/`wk sudo status --all` keep saying so
-# either way, since they recompute it.
+# A barrier, not a prompt: `--force` proceeds with the warning repeated at
+# the end, and `wk doctor`/`wk sudo status --all` keep saying so.
 if ! "$WK_ROOT/cmd/sudo" status --target "$TARGET" >/dev/null 2>&1; then
     warn "$("$WK_ROOT/cmd/sudo" status --target "$TARGET" 2>&1 | head -2)"
-    if confirm "require a password for sudo on $r_host now?"; then
-        "$WK_ROOT/cmd/sudo" setup --target "$TARGET" \
-            || barrier "sudo on '$TARGET' still grants root without a password."
-    else
-        barrier "sudo on '$TARGET' grants root without a password, and this machine
+    barrier "sudo on '$TARGET' grants root without a password, and this machine
     runs unattended builds. 'wk sudo setup --target $TARGET' fixes it in one
     file that no sysadmin has to approve."
-    fi
 fi
 
 # --- WebKit's own dependency installers ---------------------------------------
 # Tools/gtk/install-dependencies (and Tools/wpe/install-dependencies, on a
-# machine whose conf sets WK_TARGET_WPE -- this driver builds whichever port a
-# workspace asks for, and not every shared box is meant to carry WPE's package
-# list) needs packages that nothing above this line installs, and provisioning
-# never touches a package manager on its own (the one rule in remote/provision.sh:
-# nothing there may need root). Both scripts re-exec themselves under sudo when
-# not already root, so this step only has to give that sudo a real terminal to
-# prompt on (CLAUDE.md: wk never calls sudo without a password prompt).
+# machine whose conf sets WK_TARGET_WPE) needs packages that provisioning
+# never installs on its own (remote/provision.sh's one rule: nothing there
+# may need root). Both scripts re-exec themselves under sudo when not
+# already root, so this step only has to give that sudo a real terminal.
 #
-# Run from whatever WebKit this machine already has -- the shared repository it
-# advertises ($REF, above) or the mirror this driver keeps otherwise
-# (_remote_mirror_update, the same choice t_create makes) -- extracted with
-# `git archive` rather than cloning a second checkout just to run two scripts.
+# Run from whatever WebKit this machine already has -- the shared repository
+# it advertises ($REF) or the mirror this driver keeps otherwise
+# (_remote_mirror_update) -- extracted with `git archive` rather than
+# cloning a second checkout just to run two scripts.
 if [ -t 0 ] && [ -t 1 ]; then
     info "Tools/*/install-dependencies on $r_host"
     dep_src="$REF"
@@ -293,8 +247,7 @@ if [ -t 0 ] && [ -t 1 ]; then
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
     # `trap ... 0` (EXIT's numeric spelling): a brand-new bash process on the
     # far machine, nothing to do with this side's wk_atexit registry
-    # (lib/common.sh, "only lib/common.sh takes the EXIT trap") -- spelled
-    # this way so a grep for that rule does not have to know the difference.
+    # (lib/common.sh, "only lib/common.sh takes the EXIT trap").
     ssh -t $(_ssh_opts) "$WK_REMOTE_HOST" "set -e
         tmp=\$(mktemp -d)
         trap 'rm -rf \"\$tmp\"' 0
@@ -308,17 +261,14 @@ else
 fi
 
 # --- offer to clean up -------------------------------------------------------
-# Asked, never assumed, and each with its size, because on a machine whose MOTD
-# asks everyone to keep disk use down "13 GB" is the whole argument. Declining
-# every one of these leaves a working setup; `confirm` declines by itself when
-# there is no terminal, so an unattended re-run removes nothing.
+# Asked, never assumed, and each with its size. Declining every one of these
+# leaves a working setup; `confirm` declines by itself when there is no
+# terminal, so an unattended re-run removes nothing.
 info "looking for things to clean up"
 cleaned=0
 
-# A wk-tools checkout from before this command existed. Ours now lives under
-# the remote root and is re-pushed on every build, so an older one somewhere
-# else is a second copy that nothing updates -- and, until provisioning just
-# fixed it, the source of a broken line in every interactive shell.
+# An older wk-tools checkout elsewhere: ours now lives under the remote root
+# and is re-pushed on every build, so another copy is one nothing updates.
 OLD_TOOLS=$(_rsh_q 'for d in "$HOME"/Development/wk-tools "$HOME"/wk-tools; do
                       [ -d "$d" ] && echo "$d"
                   done' 2>/dev/null || true)

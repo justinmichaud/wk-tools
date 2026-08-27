@@ -6,6 +6,7 @@ Run: python3 -m unittest tests.test_options -v
 """
 import json
 import os
+import platform
 import subprocess
 import unittest
 from pathlib import Path
@@ -253,6 +254,152 @@ class TestUnknownFlagRefused(WkTest):
         the passthrough a decision rather than an oversight."""
         text = (REPO / "cmd" / "build").read_text()
         self.assertIn("everything left passes\n# through to the build untouched", text)
+
+
+class TestSecondHalfUnknownFlagRefused(WkTest):
+    """The second half of the option-consistency audit (docs/defects):
+    status, bench, pr, run, gc, pick, session, quiesce, test, enter, zed,
+    gui, profile, claude. Each refuses an unknown flag with 'usage:', or --
+    run, enter, claude -- documents a deliberate passthrough to what it runs
+    instead (confirmed by a doc-text test, not a refusal one)."""
+
+    def test_status_unknown_flag(self):
+        cp = run_impl("status", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_status_extra_positional_refused(self):
+        """a second bare word is refused, not silently dropped -- both used
+        to land in $_args with only the first ever read back out."""
+        cp = run_impl("status", "ws1", "ws2")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+        self.assertIn("unexpected argument", cp.stdout)
+
+    def test_bench_unknown_flag(self):
+        cp = run_impl("bench", "someplan", "--bogus", env={"WK_NAME": "fakews"})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_bench_report_extra_positional_refused(self):
+        """a fourth bare argument to 'wk bench report' is refused; the third
+        is `wk bench compare`'s <ws> and stays accepted-and-ignored (see the
+        header comment on cmd/bench's 'compare' line)."""
+        cp = run_impl("bench", "report", "a", "b", "ws", "extra")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_bench_seed_extra_positional_refused(self):
+        cp = run_impl("bench", "seed", "somews", "someplan", "extra")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_bench_count_documented_as_iterations_per_run(self):
+        text = (REPO / "cmd" / "bench").read_text()
+        self.assertIn("iterations per run", text)
+
+    def test_run_passthrough_is_documented(self):
+        """cmd/run hands an unrecognised token to jsc on purpose -- confirm
+        the file still says so."""
+        text = (REPO / "cmd" / "run").read_text()
+        self.assertIn("Everything after `--` goes to jsc verbatim.", text)
+
+    def test_pr_open_unknown_flag(self):
+        """'wk pr open' is the sub-verb with its own flag loop."""
+        cp = run_impl("pr", "open", "somews", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_pr_extra_positional_refused(self):
+        cp = run_impl("pr", "someuser:somebranch", "extra", env={"WK_NAME": "fakews"})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+        self.assertIn("unexpected argument", cp.stdout)
+
+    def test_pr_rebase_extra_positional_refused(self):
+        cp = run_impl("pr", "rebase", "fakews", "extra")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+        self.assertIn("unexpected argument", cp.stdout)
+
+    def test_gc_unknown_flag(self):
+        with temp_store() as store:
+            cp = run_impl("gc", "--bogus", env={
+                "WK_STORE": store["WK_STORE"], "WK_TARGET": "container",
+                "XDG_STATE_HOME": store["WK_STORE"],
+            })
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_gc_second_flag_no_longer_dropped(self):
+        """previously the parser only ever looked at $1: a second flag (a
+        typo next to a real one) was silently ignored instead of applied or
+        refused. It is a real loop over argv now."""
+        with temp_store() as store:
+            cp = run_impl("gc", "--refresh-net", "--bogus", env={
+                "WK_STORE": store["WK_STORE"], "WK_TARGET": "container",
+                "XDG_STATE_HOME": store["WK_STORE"],
+            })
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_pick_requires_at_least_one_commit(self):
+        """wk pick's grammar is variadic commit specs with no flags to typo;
+        the equivalent refusal is a missing commit argument."""
+        cp = run_impl("pick", env={"WK_NAME": "fakews"})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    @unittest.skipUnless(platform.system() == "Linux", "wk session is Linux-only")
+    def test_session_unknown_flag(self):
+        cp = run_impl("session", "on", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_quiesce_unknown_verb(self):
+        cp = run_impl("quiesce", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_quiesce_extra_positional_refused(self):
+        """previously only $1 was ever read as the action; a second word
+        (e.g. a stray flag after 'on') was silently dropped."""
+        cp = run_impl("quiesce", "on", "extra")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_test_unknown_flag(self):
+        cp = run_impl("test", "--bogus", env={"WK_NAME": "fakews"})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_enter_passthrough_is_documented(self):
+        text = (REPO / "cmd" / "enter").read_text()
+        self.assertIn("run one command there and exit", text)
+
+    def test_zed_unknown_flag(self):
+        cp = run_impl("zed", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_gui_unknown_flag(self):
+        cp = run_impl("gui", "--bogus", env={"WK_NAME": "fakews"})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_gui_extra_url_refused(self):
+        cp = run_impl("gui", "url1", "url2", env={"WK_NAME": "fakews"})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_profile_unknown_flag(self):
+        cp = run_impl("profile", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("usage:", cp.stdout)
+
+    def test_claude_passthrough_is_documented(self):
+        text = (REPO / "cmd" / "claude").read_text()
+        self.assertIn("everything after it is Claude's, verbatim", text)
 
 
 if __name__ == "__main__":

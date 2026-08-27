@@ -91,7 +91,9 @@ ${2:-}"; shift 2 ;;
         --dry-run) DRY=1; shift ;;
         --list)    printf '%s\n' $MODES; exit 0 ;;
         --)        shift; while [ $# -gt 0 ]; do ARGS+=("$1"); shift; done ;;
-        -*)        die "unknown option: $1
+        -*)        die "usage: wk profile [<workspace>] [--mode <m>] [--config <c>] [--browser [url]]
+    [--attach <pid|name>] [--jit-dump] [--markers] [--top <n>] [--fetch [dir]]
+    [--env NAME=VALUE] [--list] [--dry-run] [--] [file.js]; unknown option: $1
     'wk profile -h' lists them." ;;
         *)         ARGS+=("$1"); shift ;;
     esac

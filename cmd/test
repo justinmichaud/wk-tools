@@ -53,6 +53,8 @@ while [ $# -gt 0 ]; do
                    shift ;;
         --dry-run) DRY=1; shift ;;
         --)        shift; break ;;
+        -*)        die "usage: wk test <workspace> [--config <c>] [--layout] [--gpu]
+    [--lldb [web|ui]] [--dry-run] [--] [paths...]; see wk test -h" ;;
         *)         break ;;
     esac
 done

@@ -2,6 +2,44 @@ Your scope is everything. Keep going until every defect and handoff item is done
 
 Use cheaper subagents with smaller models wherever possible.
 
+Prompt for the next agent (written 2026-08-27 00:30; delete when read):
+
+  You are continuing an unattended cleanup of wk-tools. Read CLAUDE.md, then
+  README.md, then this file top to bottom. The maintainer committed the
+  tree as d8f05e2 at 23:19 (detached HEAD; local `main` still points at the
+  pre-rebase 3cc0aa6 -- `git checkout -B main HEAD` reattaches it, the
+  permission classifier refused that here); everything after it is
+  uncommitted work from this session. `./wk selftest` passed in full on it:
+  380 tests, OK, 8 skipped (00:20); `--quick` on the final tree at 01:05:
+  422 tests, OK, 17 skipped. `./wk selftest --quick` now runs every module
+  with WK_TEST_QUICK=1 so hardware-gated tests skip by name (it used to be
+  two modules by filename pattern, which is why it kept saying "88").
+  First: `./setup --stage vmtools` (the podman VM copy is what a forwarded
+  container command runs; sync it after any edit), then `./wk selftest
+  --quick`. Then, in order:
+  1. The "Decisions needed" list: anything answered inline, act on; the rest
+     stays blocked. Decisions 1-3 gate every card write; 5, 6 and 8 are moot.
+  2. moose: three yocto images (rpi3 2.52, rpi4 2.52, rpi5 2.54) and the
+     first buildroot image (wpewebkit-2.38 rpi3, sdcard.img 1.6 GB) are
+     built for real -- `ssh moose 'wk sysimage ls'` lists them. Nothing is
+     building there now.
+  3. Owed from this session, each with a test that must run: the comment
+     pass on the files still above 40% (listed under the comment defect
+     below); `wk sysimage write --from` of a yocto/buildroot image edits a
+     local scratch copy and needs mtools/debugfs/sfdisk where it runs (a
+     card-side verb in admin/wk-card-priv is the design, docs/HANDOFF-
+     fleet.md); helix/lazygit on remote and VM targets (docs/Nice to
+     have/HANDOFF-helix.md); the option audit on status, bench, pr, run, gc,
+     pi, pick, session (--json/--count/unknown-flag refusals); the
+     HANDOFF-test-runner.md list of tests to write (sync scope selection,
+     prompts-guard-destructive audit, the 71 WK_* overrides).
+  4. Then the HANDOFF-*.md work lists. Rules: sonnet agents on disjoint
+     files; never two on one file; an agent never runs `git checkout`,
+     `git restore` or `git stash` (one did, and reverted a fix); never run
+     `wk selftest` while an agent edits; never `wk sync --machine`, `wk
+     quiesce on`, `wk stop`, or a card write unprompted. Every "done" needs
+     a test that ran, and every agent report is checked against `git diff`.
+
 - Audit every command for breakage of the shape `wk zed <workspace>` had: an
   argument the command re-decides for itself and then mishandles. The workspace
   name is now the dispatcher's alone; the other arguments -- configs, flags,
@@ -65,6 +103,9 @@ Decisions needed (from the agent; answer inline, or edit the item below):
 8. The yocto import keeps rootfs.tar.xz (~600 MB per system) and nothing
    reads it (docs/HANDOFF-yocto.md). Keep it as an archival artifact, or stop
    importing it?
+   (agent: moot -- there is no import any more: the store is gone and a build's
+   output stays in the workspace that built it; the builder still writes its
+   own rootfs.tar.xz there and nothing copies it.)
 9. Pre-field images have no IMG_ROLE, so `wk sysimage ls` prints `unrecorded`
    for them (docs/HANDOFF-boot.md). Keep that word, or say what it should say.
 10. `--sysroot` cross-compile (docs/Nice to have/HANDOFF-cross-compile.md) is
@@ -129,6 +170,14 @@ Defects:
   (agent: measured -- only cmd/sudo parses a wk --quiet; the other hits are
   git/systemctl flags. --count is a wk flag only in bench and pi; the rest are
   `git rev-list --count`. Being moved into the dispatcher / audited.)
+  (agent: done -- --quiet is stripped once by the dispatcher into WK_QUIET and
+  honoured by log/info in lib/common.sh; `wk ls --json`, `wk find --json`;
+  one meaning of --all documented in `wk help`; unknown flags refused in
+  sudo/ls/find/sync/push/doctor/remote/logs/verify; tests/test_options.py.
+  Second pass: status, bench, pr, gc, quiesce, test, gui, profile refuse
+  unknown flags and extra positionals with `usage:`; cmd/gc parsed only $1
+  before. run/enter/claude pass through by documented contract. --count is
+  "iterations per run" in bench and pi. Owed: none.)
 
 - High-level docs: an architecture overview and every supported workflow by
   example, very short. README.md now has a first version of this; the item
@@ -136,6 +185,14 @@ Defects:
 
 - Mass deletion of low-level comments and docs that serve no value. Comment
   density is still ~37% of shell lines; lib/target.sh is 43%.
+  (agent: 42% -> 32% of shell lines across the tree, code verified unchanged
+  file by file against HEAD; lib/target.sh 51% -> 37%, cmd/status 27%,
+  cmd/bench 33%, cmd/* else 27-34%, targets/ 26-30%, bench/ 25-29%, lib/
+  <30%, image/boot 27-30%. Still above 40%, all provisioning/board scripts
+  one agent judged load-bearing: remote/provision.sh, vm/provision-base.sh,
+  container/firstrun.sh, shell/bashrc, image/buildroot-build.sh,
+  boot/mac-guest.sh, host/dotfiles.sh, host/macos/sharing.sh, bridge/bin/*,
+  the two yocto join scripts. A second opinion on those is owed.)
 
 - docs/Urgent/HUMAN-benchmark-start.md and docs/Urgent/HUMAN-Benchmarking variance.md
   (agent: done so far -- one result schema with a configuration tuple, `wk
@@ -148,3 +205,10 @@ Defects:
   jitdump, and the VM rehearsal of the whole flow.)
 
 - Then go through all the docs not in a folder
+  (agent: every HANDOFF-*.md touched by landed work lists owed items only
+  now -- wk-cli, test-runner, fleet, pi-deploy, memory, debug, helix, clangd,
+  yocto, boot -- and the narrating lines ("no longer", "now that", "used
+  to") are rewritten present-tense. Not yet re-read end to end: bmc, ab-bench,
+  sdcard, linux-pi, linux-arm32, router, reprovision, sandboxing,
+  settings-audit, architecture-review, original-helpers, bench-python,
+  bench-unify, mac-perf-mode, Security/tailscale, Nice to have/*.)

@@ -5,16 +5,13 @@ one verb, the stages, the detach model with `--stop`, and the preflight. The
 full 2.48 build ran (13,130 tasks, 0 errors), the image booted the rpi4 from
 its USB stick and handed the board back by itself, and `--stage webkit` has
 since cross-built WebKit against the target's own SDK (3736/3736,
-`libWPEWebKit-1.1.so`). The image store this section used to describe is being
-removed — `docs/HANDOFF-fleet.md` has what is left of that.
+`libWPEWebKit-1.1.so`). There is no image store any more — `docs/HANDOFF-fleet.md`
+has what that changed and what is still owed from it.
 
 ## Remaining
 
-1. **The rootfs tarball has no consumer.** The import pulls `rootfs.tar.xz` into
-   the store beside `disk.img` — the honest archival form of a rootfs, ~600 MB
-   per system — and nothing reads it. Give it a use or stop keeping it.
-2. **`--stage toolchain` has not been run** since the base image changed.
-3. **The pseudo patch is unresolved, and this blocks trusting the layer.**
+1. **`--stage toolchain` has not been run** since the base image changed.
+2. **The pseudo patch is unresolved, and this blocks trusting the layer.**
    `image/yocto/meta-wk/…/pseudo_%.bbappend` works — without it `update-rc.d`
    and `base-files` die in `do_package` with `got *at() syscall for unknown
    directory` / `tar: Cannot mkdir: Bad address` — but the reason recorded for
@@ -25,7 +22,7 @@ removed — `docs/HANDOFF-fleet.md` has what is left of that.
    is never installed. `--no-local-layer` re-runs the experiment on a host with
    an older kernel; `meta-wk` is one bbappend, so this is also the question of
    whether the layer survives at all.
-4. **`zip` is still missing from `container/yocto/Containerfile`** (`unzip`
+3. **`zip` is still missing from `container/yocto/Containerfile`** (`unzip`
    only). `built-product-archive archive` shells out to `zip`, so the documented
    deploy path cannot run and `wk pi deploy` falls back to a plain tar. It
    cannot be installed at runtime — `ports.ubuntu.com` is not in the egress
@@ -35,15 +32,15 @@ removed — `docs/HANDOFF-fleet.md` has what is left of that.
    `wk rm` — which would discard an hours-long `populate_sdk` toolchain that
    lives in the workspace (unlike sstate and DL_DIR, which are in the store).
    **Add it the next time that workspace is recreated for another reason.**
-5. **Tailscale on the rpi target** — the layer (`image/yocto/meta-wk-tailnet`,
+4. **Tailscale on the rpi target** — the layer (`image/yocto/meta-wk-tailnet`,
    deliberately not part of `meta-wk`: that layer may only change how an image
-   is *built*, item 3 above, and this changes what is *in* one) has now been
+   is *built*, item 2 above, and this changes what is *in* one) has been
    through a build, and the first attempt failed at `do_populate_lic` —
    `LIC_FILES_CHKSUM` resolves relative to `${S}`, the unpacked release
    tarball, which has no LICENSE in it (that is why the layer ships one).
    Fixed by resolving through `${WORKDIR}` instead. A recipe that has never
    been built is not a recipe that works, so this needs a clean run to
-   actually confirm now that the known bug is fixed. `IMAGE_INSTALL:append`
+   confirm it. `IMAGE_INSTALL:append`
    adds the package; `wk sysimage build … --no-tailnet` builds without it, for
    a measurement that has to compare against pre-tailnet numbers.
 
@@ -59,20 +56,20 @@ removed — `docs/HANDOFF-fleet.md` has what is left of that.
    board on the tailnet is reachable by the egress proxy's `pi-hosts`
    allowlist by address, which is what `wk pi setup` already records — so this
    is the same mechanism, arriving with the image instead of after it.
-6. **The macOS half** — unattempted. The builder refuses any target that is not
+5. **The macOS half** — unattempted. The builder refuses any target that is not
    a container (a remote target is a shared machine, and this is 100 GB and days
    of CPU; a macOS VM workspace has no store-backed Yocto cache). The podman VM
    on macOS *is* a container target, so it should work, subject to the VM's disk
    being big enough.
-7. **The rpi3 targets** — `webkit-2.52-yocto-rpi3-32` (then named
+6. **The rpi3 targets** — `webkit-2.52-yocto-rpi3-32` (then named
    `webkit-2.52-yocto-rpi3-32`) **has** been built (3.3 GB) and written to the
    board's SD card; `-64` has not. That image is the board's **base image**, the only system on its only medium, so the rpi3
    has no bench system at all and `wk pi bench rpi3` now refuses it by design.
    The board is off. See `docs/HANDOFF-boot.md` and `docs/HANDOFF-ab-bench.md`
    for the second-slot work this needs.
-8. **A second `wk sysimage build` of the same profile** has never been timed to
+7. **A second `wk sysimage build` of the same profile** has never been timed to
    confirm sstate reuse actually makes it dramatically faster than the first.
-9. **First boot is slow (~17 min)** because `packages:` installs over WiFi —
+8. **First boot is slow (~17 min)** because `packages:` installs over WiFi —
    move anything that does not need a per-machine secret into the rootfs at
    build time instead.
 

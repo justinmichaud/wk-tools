@@ -17,32 +17,26 @@
 #
 # The question this answers is the 2am one: a board is not answering to its
 # name, and the name is all there is (CLAUDE.md, "a node is reached by its
-# tailnet name..."). That leaves one hole: a machine not on the tailnet, or on
-# it and not answering, has no address anybody may write down. The rpi3 (mDNS,
-# unreliable) and rpi4 (a phone's USB-ethernet segment) are that case, and a
-# bench system on either carries no tailscale at all, by design.
-#
-# So this derives the answer instead of storing it, the same way lib/reach.sh
-# does for the tailnet -- by looking, now, from wherever there is to look from.
+# tailnet name..."). A machine not on the tailnet, or on it and not
+# answering, has no address anybody may write down -- the rpi3 (mDNS,
+# unreliable) and rpi4 (a phone's USB-ethernet segment) are that case. So
+# this derives the answer instead of storing it, by looking, now, from
+# wherever there is to look from (lib/reach.sh does the same for the tailnet).
 #
 # --- the shape ---------------------------------------------------------------
 #
-#   a vantage    a place a sweep can run: this machine, for every subnet it has
-#                an address on, and each bridge phone, for the segment it
-#                routes. A segment nothing here sits on can't be swept, and
-#                saying so is the useful answer -- a board is not at fault for
-#                being on a segment its bridge has lost.
+#   a vantage    a place a sweep can run: this machine, for every subnet it
+#                has an address on, and each bridge phone, for the segment
+#                it routes. A segment nothing here sits on can't be swept,
+#                and saying so is the useful answer.
 #
 #   the sweep    nmap, and only nmap, so a device found on one segment means
-#                the same as one found on another. A vantage without it loses
-#                its own line and names the remedy rather than falling back.
+#                the same as one found on another. No ping-loop fallback.
 #
 #   the answer   the neighbour table, not nmap's verdict: unprivileged nmap
 #                probes tcp/80 and 443 and calls a host with both closed
 #                `down` while the board it just ARPed for sits right there.
-#                The sweep generates traffic; the table answers "is something
-#                here, and what's its hardware address" -- and needs no
-#                privilege, which is what lets it run over a plain ssh.
+#                The table needs no privilege, so it runs over a plain ssh.
 #
 #   heuristics   everything this repo already declares, joined to what was
 #                found: a MAC that's a fleet machine's, a MAC a bridge pins a
@@ -51,12 +45,10 @@
 #                is read from the confs that own it.
 #
 #   ssh          and then the device is asked. A board that answers has
-#                /etc/wk-image, naming its image, builder and role -- turning
-#                "something is at 10.99.1.10" into "that's rpi4, a rescue
-#                built on the 22nd".
+#                /etc/wk-image, naming its image, builder and role.
 #
-# Read-only from end to end. It changes nothing, on any machine, and every
-# probe is bounded -- a scan that overruns loses its own line, not the listing.
+# Read-only from end to end, and every probe is bounded -- a scan that
+# overruns loses its own line, not the listing.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -81,9 +73,8 @@ done
 case "$SWEEP_TIMEOUT" in ''|*[!0-9]*) die "--timeout takes seconds" ;; esac
 
 # --- what this repo already declares ----------------------------------------
-#
-# Read, never sourced. A conf is a shell file and a report has no business
-# executing one to print a line of it -- the same rule reach_bridged keeps.
+# Read, never sourced: a conf is a shell file and a report has no business
+# executing one to print a line of it.
 
 # <mac> <machine>, for every fleet machine that declares one.
 fleet_macs() {
@@ -108,10 +99,9 @@ bridge_leases() {
     done
 }
 
-# The OUI, for the vendors that matter here. Not a database: three prefixes the
-# Raspberry Pi Foundation owns and the one the phones' USB adapters synthesise,
-# because "what kind of thing is this" is the only question a vendor answers
-# and a full IEEE table would be a megabyte of fact nobody reads.
+# The OUI, for the vendors that matter here. Not a database: three prefixes
+# the Raspberry Pi Foundation owns and the one the phones' USB adapters
+# synthesise -- a full IEEE table would be a megabyte of fact nobody reads.
 oui_vendor() {
     case "$(printf '%s' "$1" | tr 'A-Z' 'a-z' | cut -c1-8)" in
         b8:27:eb)             echo "Raspberry Pi (pre-4)" ;;
@@ -123,18 +113,15 @@ oui_vendor() {
 }
 
 # --- vantages ----------------------------------------------------------------
+# "<name> <cidr>" per line. `local` is this machine, first because a segment
+# it sits on needs no hop and no other machine to be up. tailscale0 is
+# deliberately not swept: it's a /32 on a mesh, not a broadcast domain, and
+# the tailnet already answers for itself (reach_tailnet).
 #
-# "<name> <cidr>" per line. `local` is this machine, and it is first because a
-# segment this machine sits on needs no hop and no other machine to be up.
-#
-# tailscale0 is deliberately not swept. It is a /32 on a mesh, not a broadcast
-# domain -- there is no neighbour table to fill and nothing to ARP for, and the
-# tailnet already answers for itself (reach_tailnet).
-# Every bridge that declares a segment, reached at its own ssh name. A bridge
-# that is down contributes a vantage that cannot be swept, which is the answer
-# rather than an omission: the boards behind it are unreachable *because* of
-# that, and a listing that silently dropped the segment would report them as
-# absent.
+# Every bridge that declares a segment, reached at its own ssh name. A
+# bridge that is down contributes a vantage that cannot be swept, which is
+# the answer rather than an omission: a listing that silently dropped the
+# segment would report its boards as absent.
 bridge_segments() {
     local f b seg ssh
     for f in "$WK_ROOT"/bridge/hosts/*.conf; do
@@ -160,17 +147,10 @@ vantages() {
 }
 
 # --- the sweep ---------------------------------------------------------------
-#
-# The sweep is lib/reach.sh's (reach_sweep), and deliberately not a second copy
-# of it: `wk status` falls back to the same primitive to say where an off-tailnet
-# machine is, and two implementations of "what is on this wire" would eventually
-# disagree about it. What this file adds is the *vantages* -- which segments
-# there are and who can see them -- not how a segment is read.
-#
-# A vantage without nmap loses its own line and names the remedy. There is no
-# ping-loop fallback: a second sweeper chosen by what happens to be installed is
-# the path that runs on the machine nobody tested, on the day something is
-# already wrong (CLAUDE.md, "one path, not two").
+# The sweep is lib/reach.sh's (reach_sweep), deliberately not a second copy:
+# `wk status` falls back to the same primitive, and two implementations of
+# "what is on this wire" would eventually disagree. What this file adds is
+# the *vantages* -- which segments there are and who can see them.
 vantage_can_sweep() { # <vantage>
     [ "$1" = local ] && { have nmap; return $?; }
     ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$1" \
@@ -178,27 +158,21 @@ vantage_can_sweep() { # <vantage>
 }
 
 # --- asking a device what it is ----------------------------------------------
-#
 # Two destinations, tried in order, and the order is the whole subtlety.
 #
 # A fleet machine in host mode is reached over Tailscale SSH, which
-# authenticates through the tailnet and has no authorized key at all -- so the
-# same machine that answers instantly to `ssh rpi5` refuses its own LAN address
-# with "Permission denied (publickey)". A *bench* system on the same board is
-# the exact opposite: it carries no tailscale, so its name reaches nothing and
-# the address plus the driving key is the only way in.
+# authenticates through the tailnet and has no authorized key at all -- so
+# the same machine that answers instantly to `ssh rpi5` refuses its own LAN
+# address with "Permission denied (publickey)". A *bench* system on the same
+# board is the opposite: it carries no tailscale, so the address plus the
+# driving key is the only way in. Which of the two a board is running is the
+# thing being found out, so the declared name is tried first, then the
+# address -- two different machines sharing a socket, not a fallback.
 #
-# One command has to cover both, because which of the two a board is running is
-# the thing being found out. So: the declared name first when there is one,
-# then the address. Not a fallback in the sense CLAUDE.md rules out -- these are
-# two different machines that happen to share a socket, not two ways to do one
-# thing, and neither is the untested path.
-#
-# The host key is deliberately not checked on the address. These are boards that
-# boot a different image on demand and each one brings its own key, at the same
-# address -- the same conclusion boot/machines.sh reached for i_ssh, and pinning
-# one here could only produce the man-in-the-middle warning it looks exactly
-# like.
+# The host key is deliberately not checked on the address: these boards boot
+# a different image on demand and each brings its own key at the same
+# address, so pinning one here could only produce the man-in-the-middle
+# warning it looks exactly like.
 _probe_cmd='cat /etc/wk-image 2>/dev/null
     echo "uname=$(uname -srm 2>/dev/null)"
     echo "host=$(hostname 2>/dev/null)"
@@ -230,17 +204,15 @@ declared_ssh() { # <machine>
 field() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -1; }
 
 # --- report ------------------------------------------------------------------
-
-# The inner loop over addresses is itself a subshell (it reads from a pipe on
-# purpose -- the rows are sorted before they are printed), so what it found is
-# recorded in a file rather than a variable. One line per device.
+# The inner loop over addresses is itself a subshell (rows are sorted before
+# they are printed), so what it found is recorded in a file rather than a
+# variable. One line per device.
 HITS=$(mktemp)
 _hits_cleanup() { rm -f "$HITS"; }
 wk_atexit _hits_cleanup
 
-# --json: one JSON object per line, written as it is found (vantages and
-# hits), read back and merged into one document at the end (like `wk status
-# --records`) rather than building the arrays as bash variables.
+# --json: one JSON object per line, written as it is found, read back and
+# merged into one document at the end (like `wk status --records`).
 if [ -n "$WANT_JSON" ]; then
     VANTAGES_JSON=$(mktemp)
     HITS_JSON=$(mktemp)
@@ -270,18 +242,12 @@ FLEET=$(fleet_macs)
 LEASES=$(bridge_leases)
 PEERS=$(wk_tailscale_peers)
 
-# "<ip> <name>" for the nodes that declare no MAC anywhere.
-#
-# A bridge phone is the case, and the omission is deliberate rather than an
-# oversight: its downstream adapter belongs to whichever dock is plugged in, and
-# a stale MAC in a conf is a bridge that comes up with no segment at all
-# (bridge/hosts/*.conf says so). So it cannot be recognised the way a board is.
-#
-# What it can be recognised by is the address it is answering at right now,
-# computed the same way everything else here computes one -- by looking
-# (reach_without_tailnet, lib/reach.sh) rather than by reading it off a list.
-# Nothing is stored: this is rebuilt every run and is empty when the node is
-# down, which is the correct answer then.
+# "<ip> <name>" for the nodes that declare no MAC anywhere. A bridge phone
+# is the case: its downstream adapter belongs to whichever dock is plugged
+# in, and a stale MAC in a conf is a bridge that comes up with no segment at
+# all, so it cannot be recognised the way a board is -- only by the address
+# it is answering at right now (reach_without_tailnet, lib/reach.sh),
+# rebuilt every run.
 declared_addrs() {
     local f b addr
     for f in "$WK_ROOT"/bridge/hosts/*.conf; do
@@ -309,8 +275,7 @@ $(machine_list | sed 's/^/      /')"
 fi
 
 # A here-string rather than a pipe: `vantages | while` puts the loop in a
-# subshell, where every count it keeps is lost at the closing `done` -- and the
-# summary is the half that answers "was the thing I asked for anywhere".
+# subshell, where every count it keeps is lost at the closing `done`.
 SEEN=0; SWEPT=0; BLIND=0
 while read -r vname cidr via; do
     [ -n "$vname" ] || continue
@@ -355,12 +320,10 @@ while read -r vname cidr via; do
         bridgename=$(printf '%s\n' "$ADDRS" | awk -v i="$ip" '$1 == i { print $2; exit }')
         vendor=$(oui_vendor "$mac")
 
-        # Asked before the tailnet lookup, because the name it answers with is
-        # the best key there is. A bridge phone declares no MAC anywhere on
-        # purpose -- the adapter is a property of the dock, and a stale MAC in a
-        # conf is a bridge with no segment -- so the only thing that ties the
-        # address on the wire to the peer on the mesh is what the machine calls
-        # itself.
+        # Asked before the tailnet lookup: a bridge phone declares no MAC
+        # anywhere (the adapter belongs to whichever dock is plugged in), so
+        # the only thing that ties the address on the wire to the peer on
+        # the mesh is what the machine calls itself.
         info_out=$(probe_ssh "$ip" "${bridgename:-$(declared_ssh "$machine")}")
         hn=$(field "$info_out" host)
         # Unconditional (field() degrades to empty on an empty info_out): the
@@ -370,12 +333,10 @@ while read -r vname cidr via; do
         ts=$(field "$info_out" tailscale); mk=$(field "$info_out" marker)
         un=$(field "$info_out" uname)
 
-        # Joined on the *name*, never on the address. A peer's tailnet address
-        # is a 100.64/10 one on a mesh and this is a LAN address on a wire; the
-        # two are never equal, so matching them would report every machine here
-        # as absent from a tailnet it is sitting on. The name is what the two
-        # namespaces share -- which is CLAUDE.md's rule arrived at from the
-        # other side.
+        # Joined on the *name*, never the address: a peer's tailnet address
+        # is a 100.64/10 one on a mesh and this is a LAN address on a wire,
+        # never equal, so matching them would report every machine here as
+        # absent from a tailnet it is sitting on.
         peer=""
         for _n in $machine $leasename $bridgename $hn; do
             peer=$(printf '%s\n' "$PEERS" | awk -F'\t' -v n="$_n" '$1 == n { print $1 " at " $2 " (" $3 ")"; exit }')
@@ -397,10 +358,8 @@ while read -r vname cidr via; do
             [ -z "$bridgename" ] || printf '    %-16s %s\n' "tailnet bridge" \
                 "$bridgename -- bridge/hosts/$bridgename.conf"
 
-            # Only claimed about a device this repo can put a name to. "Not on the
-            # tailnet" is a real finding about one of ours and a meaningless one
-            # about a neighbour's printer -- and a listing that says it of every
-            # address on the house LAN teaches the reader to skip the line.
+            # Only claimed about a device this repo can put a name to: "not
+            # on the tailnet" is meaningless about a neighbour's printer.
             if [ -n "$machine" ] || [ -n "$leasename" ] || [ -n "$bridgename" ] || [ -n "$hn" ]; then
                 if [ -n "$peer" ]; then
                     printf '    %-16s %s\n' "on the tailnet" "as $peer"
@@ -424,8 +383,7 @@ while read -r vname cidr via; do
                 [ "$ts" = yes ] || printf '    %-16s %s\n' "tailscale" \
                     "not installed on it, so its name cannot be how it is reached"
             elif [ -z "$NO_SSH" ] && { [ -n "$machine" ] || [ -n "$leasename" ] || [ -n "$bridgename" ]; }; then
-                # Said only about a machine that should have answered. Every other
-                # address on the segment declining an ssh connection is not news.
+                # Said only about a machine that should have answered.
                 printf '    %-16s %s\n' "ssh" "no answer as $(id -un)"
             fi
         fi
@@ -451,11 +409,9 @@ print(json.dumps({
     exit 0
 fi
 
-# The summary, and its whole job is to make an empty listing mean something.
-#
-# "Nothing was found" and "there was nowhere to look" are different answers, and
-# the second one is the one that names a remedy. A board absent from a segment
-# nobody could sweep is not evidence about the board.
+# The summary's whole job is to make an empty listing mean something.
+# "Nothing was found" and "there was nowhere to look" are different answers,
+# and the second one is the one that names a remedy.
 log ""
 if [ -n "$WANT" ]; then
     if [ "$SEEN" -gt 0 ]; then

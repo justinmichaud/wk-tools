@@ -157,6 +157,7 @@ wk new bug-238                          # instant overlay, any checkout size
 wk build bug-238 jsc-release            # prints the exact build line it runs
 wk build bug-238 jsc-release --no-defaults   # ignore the machine's WK_BUILD_ARGS
 wk run   bug-238 -- -e 'print(1+1)'
+wk run   bug-238 --until-crash --max 50 -- crash.js   # repeat until it fails; keeps the log and core
 wk test  bug-238
 wk logs  bug-238 --follow               # the build log, noise stripped
 wk enter bug-238 -- ls                  # a shell, or one command, in it -- any target
@@ -220,6 +221,7 @@ wk quiesce on
 wk session on
 wk bench bug-238 speedometer3
 wk bench bug-238 motionmark1.3.1 --count 5
+wk bench bug-238 jetstream3 --cores 0-3             # pinned with taskset; recorded and compared
 wk bench compare <run-a> <run-b>                 # warns if class/runner/host differ
 ```
 

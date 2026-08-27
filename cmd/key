@@ -3,18 +3,16 @@
 # wk key register|check|show|ensure|tailnet -- the deploy keys workspaces push with
 # wk: where=host name=none group=sources needs gh,gh-auth
 #
-# One key per fork, shared by every workspace. GitHub deploy keys are scoped to
-# a single repository and GitHub refuses the same key on a second one, so
-# multiple push targets means multiple keys. That restriction is worth keeping
-# rather than working around: each key writes to exactly one repository, so a
-# compromised workspace can push to the forks in wk_push_forks and nowhere else.
+# One key per fork, shared by every workspace. GitHub deploy keys are
+# scoped to a single repository and refuses the same key on a second one,
+# so multiple push targets means multiple keys -- worth keeping rather than
+# working around: a compromised workspace can push to the forks in
+# wk_push_forks and nowhere else.
 #
-# Registration goes through the GitHub API, not a browser. The deploy-key page
-# accepts no query-string prefill, so a "pre-filled form" is not actually
-# possible -- but the API takes the title, the key and read_only=false directly,
-# which is better than a filled form anyway: nothing to paste, and no chance of
-# leaving the write checkbox unticked, which is the easy mistake and one that
-# only shows up much later at push time.
+# Registration goes through the GitHub API, not a browser: the deploy-key
+# page accepts no query-string prefill, and the API takes the title, key
+# and read_only=false directly -- no chance of leaving the write checkbox
+# unticked, the easy mistake that only shows up much later at push time.
 #
 #   wk key register   create the keys and register them (idempotent)
 #   wk key check      verify each key authenticates with write access
@@ -22,14 +20,11 @@
 #   wk key ensure     create missing keys without registering them
 #   wk key tailnet    the fleet's tailnet auth key: report it, or ask for it
 #
-# The tailnet key is the odd one here and belongs anyway. It is not a deploy
-# key and never reaches GitHub -- it is what a freshly written card spends on
-# its first boot to join the tailnet (disk_seed_tailnet, boot/disk.sh). What it
-# has in common with the rest is the only thing that matters for where it
-# lives: it is a credential this repository must never contain, kept per
-# machine -- asked for here rather than as a prompt from whatever needs it,
-# because for a card write that need appears only after the card has already
-# been erased.
+# The tailnet key is the odd one here and belongs anyway: not a deploy key,
+# never reaching GitHub, but a credential this repository must never
+# contain, kept per machine -- asked for here rather than as a prompt from
+# whatever needs it, since for a card write that need appears only after
+# the card has already been erased.
 #
 # Runs on the host: `gh` and its credentials are here, while the private keys
 # stay in the VM and are never copied out.
@@ -51,11 +46,10 @@ ACTION="${1:-register}"
 # The keys live in the VM. Read the *public* halves out; the private halves are
 # never copied to the host.
 in_vm() {
-    # </dev/null is essential, not defensive: both podman-machine-ssh and bash -c
-    # read stdin, and every caller here sits inside a `while read` loop fed by a
-    # heredoc. Without it the first iteration swallows the remaining forks and
-    # only one ever gets processed -- which looked exactly like the second fork
-    # being silently skipped.
+    # </dev/null is essential, not defensive: both podman-machine-ssh and
+    # bash -c read stdin, and every caller here sits inside a `while read`
+    # loop fed by a heredoc -- without it the first iteration swallows the
+    # remaining forks.
     if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         podman machine ssh "$WK_MACHINE" "$@" </dev/null
     else
@@ -66,12 +60,11 @@ in_vm() {
 ensure_keys() { in_vm "WK_IN_VM=1 /opt/wk-tools/cmd/key ensure" 2>&1 | sed 's/^/  /'; }
 
 # --- one key per machine, not one key everywhere ------------------------------
-# GitHub refuses the same deploy key on a second repository (one key per
-# fork), but is happy with several keys on one repository -- so every machine
+# GitHub is happy with several keys on one repository, so every machine
 # that pushes gets its own key, registered under its own name, revocable on
-# its own. Copying one key between machines would give that up and put a
-# private key on the wire. The machines: this workstation's store (the podman
-# VM on macOS, local on Linux) and every configured build machine with wk-tools.
+# its own. Copying one key between machines would put a private key on the
+# wire. The machines: this workstation's store (the podman VM on macOS,
+# local on Linux) and every configured build machine with wk-tools.
 key_machines() {
     echo local
     for_each_machine _key_has_wk
@@ -108,10 +101,9 @@ m_sshtest() {
     { ( load_target "$1"; t_wk key sshtest "$2" ) 2>/dev/null || true; } | tr -d '\r'
     return 0
 }
-# The public half. `wk push off` moves only the *private* half out of the
-# mounted directory, so this normally finds it where it always was; the second
-# path is for a key generated while push was off. Registering a key is not the
-# same permission as being able to use one, so both keep working either way.
+# `wk push off` moves only the *private* half out of the mounted directory,
+# so this normally finds the public half where it always was; the second
+# path is for a key generated while push was off.
 pub_of()      { in_vm "cat $WK_STORE/secrets/build_key_$1.pub 2>/dev/null \
                        || cat $WK_STORE/push-keys/build_key_$1.pub 2>/dev/null" | tr -d '\r'; }
 
@@ -128,10 +120,9 @@ if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         key="$WK_STORE/secrets/build_key_$remote"
-        # A key held back by `wk push off` is still this machine's key: it is
-        # in $WK_STORE/push-keys, out of the workspaces' reach on purpose.
-        # Generating a second one here would register a new deploy key and
-        # leave the switch pointing at a dead one.
+        # A key held back by `wk push off` is still this machine's key, in
+        # $WK_STORE/push-keys. Generating a second one here would register a
+        # new deploy key and leave the switch pointing at a dead one.
         if [ -f "$WK_STORE/push-keys/build_key_$remote" ]; then
             unchanged "key for $repo (held back -- 'wk push on' to expose it)"
         elif [ -f "$key" ]; then
@@ -157,9 +148,9 @@ tailnet)
             wk_tailscale_authkey_present \
                 || die "there is no tailnet key here to replace ($_tspath).
     'wk key tailnet' asks for one."
-            # Removed before asking, because prompt_secret returns an existing
-            # file untouched -- so a replace that did not clear first would
-            # report success and change nothing.
+            # Removed before asking: prompt_secret returns an existing file
+            # untouched, so a replace that did not clear first would report
+            # success and change nothing.
             rm -f "$_tspath"
             info "removed the old key; the nodes already on the tailnet are unaffected"
             log  "  a tagged node does not key-expire, so rotating this costs nothing"
@@ -176,8 +167,8 @@ tailnet)
     fi
 
     # prompt_secret does the asking, the mode and the storing -- one
-    # implementation, so this verb cannot disagree with the prompt that appears
-    # when some other command needs the key first.
+    # implementation, so this cannot disagree with the prompt some other
+    # command shows when it needs the key first.
     if wk_tailscale_authkey >/dev/null; then
         info "stored -- 'wk sysimage write' will seed it onto the cards it writes"
         exit 0
@@ -190,8 +181,8 @@ tailnet)
     Then run this again, from a terminal."
     ;;
 
-# One public key, nothing else: what a workstation reads over ssh when it is
-# registering this machine's key. `show` is the human version.
+# What a workstation reads over ssh when registering this machine's key.
+# `show` is the human version.
 pub)
     remote="${2:-}"
     [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
@@ -200,9 +191,9 @@ pub)
     printf '%s\n' "$out"
     ;;
 
-# Does the key on *this* machine authenticate, and as what? Printed raw, for a
-# caller that will interpret it -- which may be another machine, since only the
-# workstation has `gh` and only the machine with the key can offer it.
+# Does the key on *this* machine authenticate, and as what? Printed raw for
+# a caller to interpret, since only the workstation has `gh` and only the
+# machine with the key can offer it.
 sshtest)
     remote="${2:-}"
     [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"

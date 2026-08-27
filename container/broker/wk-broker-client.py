@@ -115,8 +115,6 @@ def report(ev, rc):
             out("  refused by role (a workspace may not reboot a workstation):")
             for name, why in refused.items():
                 out(f"    {name:<10} {why}")
-        systems = ev.get("systems") or []
-        out("  newest systems in the store: " + (", ".join(systems) or "(none)"))
         for f in ev.get("in_flight") or []:
             out(f"  {YEL}in flight:{OFF} {f.get('verb')} on {f.get('machine')} ({f.get('request')})")
     elif kind == "request":

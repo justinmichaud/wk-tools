@@ -95,5 +95,62 @@ class TestSnapshotCurrent(unittest.TestCase):
         self.assertFalse(self._current("", ""))
 
 
+class TestSyncScopeDecide(unittest.TestCase):
+    """sync_scope_decide <in_workspace 0|1> <workspace-count> <has-tty 0|1>
+    [<pick>] is the pure decision behind cmd/sync's "autodetect, then ask":
+    bare / --machine / --all is parsed above it and --machine/--all never
+    reach this function, but a bare `wk sync` with no workspace named does,
+    and this is the whole of what it decides. Driven the same way as
+    snapshot_current -- `. cmd/sync functions` loads it with no network, no
+    store, no workspace and no terminal needed."""
+
+    def _decide(self, in_ws, n, tty, pick=""):
+        cp = bash(
+            ". cmd/sync functions\n"
+            f'sync_scope_decide "{in_ws}" "{n}" "{tty}" "{pick}"\n'
+        )
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        return cp.stdout.strip()
+
+    def test_in_workspace_is_that_one_regardless_of_count_or_tty(self):
+        # cmd/sync's own call site always passes in_workspace=0 -- WK_NAME
+        # already filled in ONLY before this function is ever reached, so
+        # this branch exists for a test to drive directly, not for the real
+        # call site to take.
+        self.assertEqual(self._decide(1, 5, 0), "here")
+
+    def test_no_workspaces_syncs_the_machine(self):
+        self.assertEqual(self._decide(0, 0, 0), "empty")
+        self.assertEqual(self._decide(0, 0, 1), "empty")
+
+    def test_exactly_one_workspace_is_unambiguous(self):
+        self.assertEqual(self._decide(0, 1, 0), "one")
+        self.assertEqual(self._decide(0, 1, 1), "one")
+
+    def test_several_and_no_terminal_refuses(self):
+        self.assertEqual(self._decide(0, 3, 0), "refuse")
+
+    def test_several_and_a_terminal_asks_before_a_pick_is_given(self):
+        self.assertEqual(self._decide(0, 3, 1), "ask")
+
+    def test_picking_the_last_entry_means_all_of_them(self):
+        # n=3: entries 1-3 are workspaces, entry 4 ("all of them ... --machine").
+        self.assertEqual(self._decide(0, 3, 1, "4"), "all")
+
+    def test_picking_a_workspace_number(self):
+        self.assertEqual(self._decide(0, 3, 1, "2"), "pick 2")
+        self.assertEqual(self._decide(0, 3, 1, "1"), "pick 1")
+        self.assertEqual(self._decide(0, 3, 1, "3"), "pick 3")
+
+    def test_picking_nothing_or_non_numeric_is_invalid(self):
+        self.assertEqual(self._decide(0, 3, 1, ""), "ask")  # no pick at all
+        self.assertEqual(self._decide(0, 3, 1, "x"), "invalid")
+        self.assertEqual(self._decide(0, 3, 1, "2.5"), "invalid")
+
+    def test_picking_a_number_outside_the_menu_is_out_of_range(self):
+        self.assertEqual(self._decide(0, 3, 1, "0"), "out-of-range")
+        self.assertEqual(self._decide(0, 3, 1, "5"), "out-of-range")
+
+
 if __name__ == "__main__":
     unittest.main()

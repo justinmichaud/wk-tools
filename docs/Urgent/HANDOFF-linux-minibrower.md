@@ -10,7 +10,7 @@ What is left is the profiler.
 ## Remaining
 
 - **`wk profile <ws> --browser` on the CMake ports.** It refuses today
-  (`cmd/profile:162`), and for a reason that is no longer true: "the browser is
+  (`cmd/profile:162`), for a reason that is false: "the browser is
   started by Tools/Scripts/run-minibrowser and the process that matters is a
   child of it, so a profiler pointed at the launcher records the launcher".
   run-minibrowser splits `WEBKIT_MINI_BROWSER_PREFIX` and prepends it to the

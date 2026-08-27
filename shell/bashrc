@@ -125,9 +125,8 @@ if [ -n "$ZSH_VERSION" ]; then
   HISTSIZE=1200000
   SAVEHIST=1000000
 
-  # macOS ships an /etc/zshrc that sets HISTFILE/HISTSIZE/SAVEHIST to small
-  # values. It runs before ~/.zshrc, so these assignments win — but only if
-  # this file is actually sourced from ~/.zshrc. Verify that.
+  # macOS's /etc/zshrc sets small history limits before ~/.zshrc runs; these
+  # assignments win only because ~/.zshrc sources this file.
 
   setopt EXTENDED_HISTORY        # write timestamp + duration per entry
   setopt APPEND_HISTORY          # append at exit, never truncate the file

@@ -12,7 +12,7 @@ Also good for new contributors
 
 ## Remaining
 
-`targets/remote.sh` no longer assumes Linux: `_remote_probe_cmd` and
+`targets/remote.sh` does not assume Linux: `_remote_probe_cmd` and
 `_remote_probe_parse` branch on the remote's own `uname -s`
 (`nproc`/`/proc/loadavg`/`/proc/meminfo` vs. `sysctl -n hw.ncpu`/`sysctl -n
 vm.loadavg`/`vm_stat`), `t_exec_build` uses `ionice` only when the probe found

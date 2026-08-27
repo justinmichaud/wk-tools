@@ -1,10 +1,13 @@
 # HANDOFF — the boot substrate: what is left
 
 The substrate is built and exercised on hardware. `wk sysimage
-build|ls|show|disks|write|rm` produces and stores systems (unprivileged: mtools
-and e2fsprogs edit images at byte offsets, nothing is mounted, `wk` never calls
-sudo on this host); `wk boot <machine> [--system|--status|--keep|--back|--disarm|
---diag|--dry-run]` arms one boot with a per-machine driver; `wk pi boot-order`
+build|ls|disks|write` produces systems and edits/writes one onto a card --
+there is no store (`docs/HANDOFF-fleet.md`); unprivileged: mtools and
+e2fsprogs edit images at byte offsets, nothing is mounted, `wk` never calls
+sudo on this host, except the write itself, over ssh where sudo is
+passwordless on the target. `wk boot <machine> [--system|--status|--keep|--back|--disarm|
+--diag|--dry-run]` arms one boot with a per-machine driver, its default
+system read off the device rather than looked up; `wk pi boot-order`
 and `boot/rpi-eeprom.sh` handle Pi firmware; `boot/check-boot-files.py` models
 what firmware asks of a boot tree and runs before anything touches a disk. The
 rpi5 and rpi4 have both been through the whole cycle with no hands on the board.
@@ -36,7 +39,7 @@ rpi5 and rpi4 have both been through the whole cycle with no hands on the board.
     3. the BusyBox equivalents of the self-return watchdog and self-disarm, for
        an image with no systemd.
   Both remaining items need the card in hand, and the first write is hands-on.
-  What the role *is* no longer needs building: one image serves both, and
+  The role needs no building: one image serves both, and
   `wk sysimage write --rescue` decides which by leaving a marker the units read
   (`disk_seed_role`, boot/disk.sh).
 - **Both boards are still running images built before the tailnet layer**, so

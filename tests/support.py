@@ -186,10 +186,18 @@ def podman_vm_running(machine="wk"):
     return cp.returncode == 0 and cp.stdout.strip() == "running"
 
 
+def quick_run():
+    """`wk selftest --quick` sets WK_TEST_QUICK=1: every test that needs a
+    VM, a machine or a board skips by name, whatever is actually reachable."""
+    return os.environ.get("WK_TEST_QUICK") == "1"
+
+
 def requires_podman_vm(machine="wk"):
-    """Skip decorator for the one test that needs a real container
-    workspace: it creates one only when the podman VM this repo drives is
-    already up and running, and never starts it itself."""
+    """Skip decorator for a test that needs a real container workspace: it
+    runs only when the podman VM this repo drives is already up, never
+    starts it, and is skipped by --quick."""
+    if quick_run():
+        return unittest.skip("--quick: needs the podman VM")
     return unittest.skipUnless(
         podman_vm_running(machine),
         f"podman machine '{machine}' is not running",
@@ -247,7 +255,10 @@ def podman_vm_ssh(command, machine="wk", timeout=60):
 def requires_machine(name, timeout=5):
     """Skip decorator for a test that reaches a configured machine over
     ssh: it never provisions, reboots or otherwise mutates the machine, and
-    self-skips rather than hanging when the machine does not answer."""
+    self-skips rather than hanging when the machine does not answer, and is
+    skipped by --quick."""
+    if quick_run():
+        return unittest.skip(f"--quick: needs '{name}'")
     return unittest.skipUnless(
         machine_reachable(name, timeout=timeout),
         f"'{name}' is not reachable over ssh (BatchMode)",

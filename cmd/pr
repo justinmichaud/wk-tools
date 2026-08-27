@@ -104,7 +104,12 @@ SPEC="${1:-}"
 
 # 'rebase' never matches a workspace name (survives as $1); a name after it is $2, read if empty.
 if [ "$SPEC" = rebase ]; then
-    [ -n "$NAME" ] || NAME="${2:-}"
+    if [ -n "$NAME" ]; then
+        [ -z "${2:-}" ] || die "usage: wk pr rebase [<workspace>]; unexpected argument: $2; see wk pr -h"
+    else
+        NAME="${2:-}"
+        [ -z "${3:-}" ] || die "usage: wk pr rebase [<workspace>]; unexpected argument: $3; see wk pr -h"
+    fi
     [ -n "$NAME" ] || die "usage: wk pr rebase [<workspace>]; run inside a workspace, or name one; see wk pr -h"
     shift $#
     require_name "$NAME"
@@ -184,6 +189,8 @@ fi
 
 [ -n "$NAME" ] && [ -n "$SPEC" ] \
     || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]', or 'wk pr open <ws> [--draft] [--web]' (from the host); see wk pr -h"
+[ -z "${2:-}" ] \
+    || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>; unexpected argument: $2; see wk pr -h"
 shift $#
 
 require_name "$NAME"

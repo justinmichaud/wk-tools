@@ -44,13 +44,11 @@ hand-editing `~/.ssh/config.d/wk` — the next `wk vm start` regenerates only
 its own block; a delegated `wk status` from an older wk-tools answering by its
 own, possibly wrong, rules.
 
-**Prompts guard destructive actions only**: a repo-wide audit that every
-interactive prompt guards a destructive action and nothing else prompts;
-destructive prompts default to No and decline without a terminal.
-
-**`wk sync` scope selection** (bare / `--machine` / `--all`, and the
-one-workspace / several / none / no-terminal branches) against a faked
-workspace list — pure decision logic, no real machine needed.
+**Prompts guard destructive actions only**: tests/test_prompts.py audits
+this — lib/common.sh's `confirm()` is the one yes/no prompt helper in
+`cmd/*`, `lib/*.sh`, `boot/*.sh`, `bench/*.sh` and `image/*.sh` (no raw
+`read` implements a competing one), and it defaults to No and declines
+without a terminal, and every call site guards a destructive action.
 
 **`wk status` text view**: `--json`/`--html` output is unaffected by the
 column-alignment renderer.

@@ -31,10 +31,6 @@ the current tree.
 
 - **A way to fully disable `git commit` inside a container**, for whoever wants
   it off entirely rather than gated by the push switch.
-- **Audit that every interactive prompt in the tree guards a destructive
-  action and nothing else prompts**: `wk rm`, `wk vm rm`, `wk vm base
-  --rebuild`/`--rm`, `wk gc --purge-mirror`, `wk remote rm`, `wk skills`,
-  `wk pr`'s `reset --hard`.
 
 ## Remaining — the surface to cover
 

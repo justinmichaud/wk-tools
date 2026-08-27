@@ -3,13 +3,13 @@
 # wk verify <workspace> -- prove the sandbox is what it claims to be
 # wk: where=workspace name=required ready=yes outside group=workspaces
 #
-# Refused inside a workspace: a workspace cannot certify its own sandbox, and
-# half the properties below are only visible from the host.
+# Refused inside a workspace: a workspace cannot certify its own sandbox,
+# and half the properties below are only visible from the host.
 #
-# Every property here is checked by testing it from inside the workspace, not by
-# reading the config that was supposed to produce it: a firewall that failed to
-# load, a hand-recreated container, or a dead proxy all look fine from the
-# host's config and all fail open.
+# Every property here is checked by testing it from inside the workspace,
+# not by reading the config that was supposed to produce it: a firewall
+# that failed to load, a hand-recreated container, or a dead proxy all look
+# fine from the host's config and all fail open.
 #
 #   0  every check passed
 #   1  a check failed -- the sandbox is not intact
@@ -38,17 +38,15 @@ case "${1:-}" in
 esac
 [ $# -le 1 ] || die "usage: wk verify <workspace> [--gpu]; see wk verify -h"
 
-# Resolved from the registry: a fixed default would load the container driver
-# for a vm workspace and report "no such workspace" about one that exists.
+# Resolved from the registry: a fixed default would load the container
+# driver for a vm workspace and report "no such workspace" about one that exists.
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
-# A remote target has no boundary: it is a plain checkout on a shared machine,
-# claiming none of the container properties checked below. Running the checks
-# would report failure against promises never made; skipping them would report
-# a green sandbox that does not exist.
+# A remote target claims none of the container properties checked below.
+# Running the checks would report failure against promises never made.
 if [ "$WK_TARGET_KIND" = remote ]; then
     die "'wk verify' proves a sandbox holds, and a remote target has none:
     a plain checkout on a shared machine, no container, no firewall, no
@@ -69,8 +67,7 @@ pass() { printf '  \033[32mok\033[0m    %s\n' "$*" >&2; }
 fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$*" >&2; fails=$((fails + 1)); }
 note() { printf '        %s\n' "$*" >&2; }
 
-# Run a command inside the workspace, capturing output, never failing the script.
-inside() { t_exec "$NAME" bash -lc "$*" 2>/dev/null || true; }
+inside() { t_exec "$NAME" bash -lc "$*" 2>/dev/null || true; }   # never fails the script
 
 info "verifying workspace '$NAME' (${WK_SANDBOX:-$TARGET})"
 
@@ -80,8 +77,7 @@ state=$(t_info "$NAME")
 
 if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     # --- no privilege ---------------------------------------------------------
-    # A rootful container would mean a container escape is a root escape, and
-    # the whole no-sudo design would be a fiction.
+    # A rootful container would mean a container escape is a root escape.
     # Captured rather than piped into `grep -q`: under `set -o pipefail` a
     # `grep -q` that exits early makes the whole pipeline report failure.
     rootless=$(_podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || echo unknown)
@@ -92,8 +88,6 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     fi
 
     # --- no network interface -------------------------------------------------
-    # The boundary itself: anything other than loopback is a path the egress
-    # policy does not see.
     # /proc/net/dev rather than `ip`: iproute2 is not in the SDK image, and a
     # missing-tool false pass would fail in the direction that looks fine.
     ifaces=$(inside "awk -F: 'NR>2 {gsub(/ /,\"\",\$1); printf \"%s \", \$1}' /proc/net/dev")
@@ -111,9 +105,8 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     fi
 
     # --- egress, measured -----------------------------------------------------
-    # Allowed: the API the agent needs. Denied: a host that is not on the list,
-    # and the local network. Direct: with the proxy bypassed there must be no
-    # path at all.
+    # Allowed: the API the agent needs. Denied: a host off the list, and the
+    # local network. Direct: with the proxy bypassed there must be no path at all.
     code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
     [ "$code" = 200 ] && pass "github reachable through the proxy (HTTP $code)" \
                       || fail "github unreachable through the proxy (got '${code:-nothing}')"
@@ -139,9 +132,9 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     esac
 
     # --- no host filesystem ---------------------------------------------------
-    # wkdev mounts the host home at /host/home and the whole runtime directory
-    # (session D-Bus socket included) at /host/run. --isolated turns both off;
-    # this is where that is confirmed rather than assumed.
+    # wkdev mounts the host home at /host/home and the runtime directory
+    # (session D-Bus socket included) at /host/run. --isolated turns both
+    # off; this confirms it rather than assuming it.
     for path in /host/home /host/run /run/user/*/bus /run/dbus/system_bus_socket; do
         found=$(inside "ls -d $path 2>/dev/null | head -1")
         if [ -n "$found" ]; then
@@ -162,11 +155,10 @@ fi
 
 # --- GPU ---------------------------------------------------------------------
 # Informational unless --gpu (the benchmark runner's flag: a Speedometer or
-# MotionMark number from llvmpipe is a different measurement, not a slow one).
-# Probe exit status: 0 hardware, 1 software only, 2 no EGL, 3 build failed.
-#
-# Skipped on another architecture: the NVIDIA userspace is aarch64-only, so
-# nothing is injected and probing would just print Mesa errors about a device
+# MotionMark number from llvmpipe is a different measurement, not a slow
+# one). Probe exit status: 0 hardware, 1 software only, 2 no EGL, 3 build
+# failed. Skipped on another architecture: the NVIDIA userspace is
+# aarch64-only, and probing would just print Mesa errors about a device
 # that was never there.
 if ! arch_has_gpu "$(t_arch "$NAME")"; then
     note "no GPU: an $(t_arch "$NAME") workspace gets none (the NVIDIA userspace is aarch64-only)"

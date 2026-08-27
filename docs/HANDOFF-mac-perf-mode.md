@@ -20,7 +20,7 @@ remains is below.
   container run has not been done either. That is what "done means" below asks
   for.
 - **`wk quiesce status` on the benchmark install, before a run** — unticked, and
-  worth doing now that the scanner is known to run regardless of the preference.
+  the scanner runs regardless of the preference.
 - **The architecture can be simplified and has not been.** The planted agent
   exists because the run was believed undrivable. It is drivable: the bench
   install takes its *own* DHCP lease (private Wi-Fi address is on by default, so
@@ -30,7 +30,7 @@ remains is below.
   shape — state on the driver, reach in per phase — would remove the
   self-deleting job, the defuse-the-daemon race and the stay-up heuristic.
   Tailscale on the install is still the better answer (a name that does not
-  move, no jump host, no scan) and is no longer blocked by anything.
+  move, no jump host, no scan) and nothing blocks it.
 - **Software-update scanning is detected, never prevented**, and all three
   routes are closed: the preference does not hold, `launchctl bootout
   system/com.apple.softwareupdated` is SIP-protected and fails, and the radio

@@ -92,11 +92,6 @@ each a `kill -9` mid-command plus a re-run that must converge:
       heads; every other upstream is namespaced); a fifth upstream needs no
       change here beyond `wk_remotes`
 - [ ] bare, inside a workspace: that workspace, no argument needed
-- [ ] bare, on a host with exactly one workspace: that one, and it says so
-- [ ] bare, on a host with several: lists them and asks, with "all of them
-      and this machine's mirror, snapshot and tooling" as the last choice
-- [ ] bare, on a host with several and no terminal: refused, naming the two
-      scopes that need no answer
 - [ ] `--machine` on a Linux workstation does all of it in one place
 - [ ] `--all` additionally walks every other machine's own store
 - [ ] the dispatcher's forwarding rule for `--machine`/`--all` into the
