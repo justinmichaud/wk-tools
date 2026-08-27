@@ -68,8 +68,9 @@ done
 # to the *companion* OHCI controller, and the dock comes up at full speed: 12
 # Mbit/s instead of 480, capping a 100 Mbit ethernet at about eight.
 #
-# It is a race, so it is intermittent: earlier boots of this same phone landed
-# on EHCI and were fine, which is the worst way for a fault like this to behave.
+# It is a race, so it is intermittent: which controller wins can differ
+# between boots of the same phone, which is the worst way for a fault like
+# this to behave.
 #
 # Recovery is a four-step rebind, and the order is the whole thing: the
 # *companion* has to let go of the device before EHCI will take it.
@@ -79,12 +80,10 @@ done
 #   bind EHCI     it enumerates the re-connecting device, at high speed
 #   bind OHCI     put the companion back for low/full-speed devices
 #
-# Rebinding EHCI *alone* is not enough and that was a real mistake here: it
-# looked right in a hand test where EHCI had just been unbound seconds earlier,
-# shipped, and then ran every sixty seconds against a real degraded boot
-# without ever moving the device off OHCI -- logging a recovery it was not
-# performing. Which is the shape this file warns about elsewhere: a repair that
-# repeats forever is a fault, not a recovery.
+# Rebinding EHCI *alone* is not enough: without first releasing the device
+# from OHCI, the rebind can run indefinitely without ever moving the device
+# off OHCI -- logging a recovery it is not performing. A repair that repeats
+# forever is a fault, not a recovery.
 #
 # Hence the attempt cap. In /run, so its scope is one boot: if the fourth
 # attempt has not worked, something about this dock is not what was measured,

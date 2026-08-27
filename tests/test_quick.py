@@ -1102,11 +1102,10 @@ case "$out" in *rpi4*) ;; *) echo "a probe killed for time said nothing: '$out'"
         script = f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
-for fn in bump par_begin par_run par_join; do
-    body="$(sed -n "/^$fn()/,/^}}/p" "{REPO}/cmd/status")"
-    [ -n "$body" ] || {{ echo "lift $fn failed"; exit 1; }}
-    eval "$body"
-done
+. "{REPO}/lib/par.sh"
+body="$(sed -n "/^bump()/,/^}}/p" "{REPO}/cmd/status")"
+[ -n "$body" ] || {{ echo "lift bump failed"; exit 1; }}
+eval "$body"
 worst=0
 _slow() {{ sleep "$1"; printf '%s\\n' "$2" >&3; exit "$3"; }}
 par_begin

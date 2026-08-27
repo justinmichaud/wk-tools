@@ -1,19 +1,12 @@
 # Run a long command so that its state is never in doubt.
-#
-# Builds fail in three different ways and they look alike from outside:
-#
-#   finished        exit code says what happened
-#   died            process gone, exit code says what happened
-#   hung            process alive, producing nothing, forever
-#
-# Only the third needs machinery, and it is the one that actually costs time,
-# because the natural response is to keep waiting. So: watch the log for
-# progress rather than watching the process for existence. A compiler that is
-# alive but silent for ten minutes is indistinguishable from a deadlock, and
-# should be reported as a problem either way.
-#
-# Everything here writes to stderr so it interleaves with, but never corrupts,
-# the command's own output.
+# Builds fail three ways that look alike from outside: finished (exit code
+# says what happened), died (process gone, exit code says what happened),
+# hung (process alive, producing nothing, forever). Only the third needs
+# machinery, since the natural response is to keep waiting -- so watch the
+# log for progress rather than the process for existence. A compiler alive
+# but silent for ten minutes is indistinguishable from a deadlock.
+# Everything here writes to stderr so it interleaves with, but never
+# corrupts, the command's own output.
 
 WK_POLL_SECONDS="${WK_POLL_SECONDS:-15}"      # how often to check for progress
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-300}"   # silence before warning
@@ -24,15 +17,11 @@ _now() { date +%s; }
 _fsize() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0; }
 
 # Something useful to say in the heartbeat, rather than just "still going".
-#
-# ninja gives a counter, which is the best case: it says how far along the
-# build is. xcodebuild gives no counter at all, so the fallback names the most
-# recent action instead -- that answers "is it moving, and on what", which is
-# the question the heartbeat exists for.
-#
-# Both read only the tail. A verbose xcodebuild log runs to hundreds of
-# megabytes, and re-scanning it every minute would make the watchdog the most
-# expensive thing in the build.
+# ninja gives a counter; xcodebuild gives none, so the fallback names the
+# most recent action instead, answering "is it moving, and on what." Both
+# read only the tail -- a verbose xcodebuild log runs to hundreds of
+# megabytes, and re-scanning it every minute would make the watchdog the
+# most expensive thing in the build.
 _progress_line() {
     local tail_bytes=65536 out
 
@@ -51,9 +40,8 @@ _progress_line() {
     return 1
 }
 
-# Diagnostics printed when a stall is detected. The point is to answer, in one
-# shot, the question you would otherwise spend ten minutes on: is anything
-# actually running, and is it starved?
+# Diagnostics for a detected stall: is anything actually running, and is it
+# starved -- the question you'd otherwise spend ten minutes on.
 _stall_report() {
     local log="$1" idle="$2"
     warn "no output for ${idle}s -- possible stall"
@@ -70,15 +58,12 @@ _stall_report() {
 }
 
 # run_watched <logfile> -- <command...>
-#
 # Returns the command's exit status, or 124 if it was killed for stalling.
-#
-# INT/TERM while this is watching: the command being watched is a foreground
-# child of this process (not detached, unlike lib/detach.sh's jobs), so an
-# interrupt here means stop it, not merely stop watching it -- otherwise a
-# Ctrl-C during a build leaves the compiler running unattended. `on_interrupt`
-# (lib/common.sh) covers the case a real terminal's process-group delivery
-# does not: a signal sent to this pid alone still needs to reach the child.
+# The watched command is a foreground child of this process (not detached,
+# unlike lib/detach.sh's jobs), so INT/TERM here means stop it, not merely
+# stop watching -- otherwise a Ctrl-C during a build leaves the compiler
+# running unattended. `on_interrupt` (lib/common.sh) covers the case a
+# real terminal's process-group delivery doesn't reach the child.
 run_watched() {
     local log="$1"; shift
     [ "${1:-}" = -- ] && shift
@@ -126,7 +111,6 @@ run_watched() {
             warned=1
         fi
 
-        # Liveness, so a watcher never has to guess whether to keep waiting.
         if [ $(( now - last_beat )) -ge "$WK_HEARTBEAT_SECONDS" ]; then
             log "  ... $(_progress_line "$log" || echo running) ($(( (now - start) / 60 ))m elapsed)"
             last_beat=$now
@@ -136,24 +120,16 @@ run_watched() {
     wait "$pid"
 }
 
-# Pull the first real error out of a build log.
-#
-# Without this the answer to "why did it fail" is buried in hundreds of
-# megabytes of progress lines, and the interesting line is near neither end:
-# compilers keep going after the first error, so the tail is usually unrelated.
-# On the real macOS build that found "No space left on device" at line 179,295
-# of 180,000, where the tail said only "the Xcode build system has crashed".
-#
-# Two traps, both hit on real logs rather than imagined:
-#
-#   `error:` as a bare substring matches inside message text. An Objective-C
-#   selector in a deprecation warning -- unarchivedObjectOfClass:fromData:error:
-#   -- turned every one of those warnings into a reported error. Hence the
-#   anchors: a diagnostic is at line start or after ": ".
-#
-#   Warnings can contain error-shaped text. Xcode emits
-#   "warning: llvmcas://...: No such file or directory" by the hundred on a
-#   perfectly good build, so warning lines are dropped outright.
+# Pull the first real error out of a build log: compilers keep going after
+# the first error, so the tail is usually unrelated and the interesting
+# line is buried near neither end.
+# `error:` as a bare substring matches inside message text -- an
+# Objective-C selector like unarchivedObjectOfClass:fromData:error: reads
+# as an error in every deprecation warning that names it. Hence the
+# anchors: a diagnostic is at line start or after ": ". Warnings can also
+# contain error-shaped text (Xcode's "warning: llvmcas://...: No such file
+# or directory" by the hundred on a good build), so warning lines are
+# dropped outright.
 first_error() {
     tr '\r' '\n' < "$1" 2>/dev/null \
         | grep -nE '(^FAILED:|^error:|: error:|: fatal error:|ninja: build stopped|No such file or directory)' \

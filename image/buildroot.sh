@@ -1,97 +1,48 @@
 # The buildroot builder: sourced by cmd/sysimage, dispatched on IMG_BUILDER.
-#
-# The same host/worker split the yocto lane uses (image/yocto.sh /
-# image/yocto-build.sh): this file drives a container workspace and
-# `image/buildroot-build.sh` is what runs inside it, from /opt/wk-tools so the
-# two halves cannot skew. A configuration that cannot be built yet refuses in
-# the first second (CFG_NEEDS, cmd_build) rather than hours into a compile.
+# The same host/worker split the yocto lane uses: this file drives a
+# container workspace and `image/buildroot-build.sh` runs inside it, from
+# /opt/wk-tools so the two halves cannot skew.
 #
 # --- the recipe, and why each piece is what it is -----------------------------
-#
-# What follows was first run by hand outside `wk`, because buildroot 2020.02 on
-# a modern host was the unknown and the lane was written around what works: it
-# produced a bootable `sdcard.img` for the rpi3, with tailscale in it. The
-# recipe below is that evidence, carried into this file and buildroot-build.sh.
 #
 #   tree        WebPlatformForEmbedded/buildroot, branch `wpe`, pinned 2020.02.
 #               A fork, not upstream buildroot: the release-pinned `cog`
 #               defconfigs only exist there.
-#   host        Ubuntu 22.04, as its own workspace image. buildroot 2020.02
-#               builds 2009-era tarballs and the further the host moves the more
-#               of them stop compiling.
-#
-#               22.04 rather than a guess: it is the host the wiki recipe
-#               ("Building WPEWebKit for 32-bit Raspberry Pi 3 (Buildroot DRM
-#               config)") was driven on, and it produced a booting image. Its
-#               four added packages -- file, cpio, bc, libncurses-dev -- are in
-#               container/buildroot/Containerfile with the rest of buildroot's
-#               documented host requirements.
-#
-#               An image builds in *its own workspace*, and a workspace may be
-#               made from a different base than the WebKit SDK -- the mechanism
-#               is WK_SDK_IMAGE and image/yocto.sh has used it since it was
-#               written. So this needs no container inside a container and no
-#               runtime in the SDK image.
-#   jobs        -j6 measured right on a 19 GB VM: a WPE compile is ~2 GB.
-#   downloads   BR2_DL_DIR and BR2_CCACHE_DIR under $WK_STORE/cache/buildroot,
-#               which lib/store.sh already reserves and targets/container.sh
-#               already mounts and exports -- buildroot-build.sh reads them from
-#               its own environment rather than being handed a path on the
-#               command line, the same reason yocto-build.sh reads DL_DIR and
-#               SSTATE_DIR that way: a host path hits nothing inside the
-#               container it runs in, and the container's own environment is
-#               already the one true copy of where the mount landed.
-#               image_build_locations already declares the directory, so
-#               `wk gc` already reclaims it.
-#   external    BR_EXTERNAL -> image/buildroot/external, a BR2_EXTERNAL tree this
-#               repository owns. It carries the one fix a build needs: host-
-#               python-2.7's bundled 2013-era libffi cannot assemble
-#               aarch64/sysv.S, so the build dies at `sharedmods` on an arm64
-#               build host. An architecture problem, not an old-distro one --
-#               on x86_64 that file is never compiled, which is why this tree
-#               always built on moose. Buildroot ships host-libffi and gives the
-#               *target* python --with-system-ffi, and at the pin never joins
-#               the two for the host build; upstream does join them in a later
-#               release, so the tree applies that change from outside
-#               (external.mk) rather than patching somebody else's vendor
-#               branch or sedding its Makefile.
+#   host        Ubuntu 22.04, as its own workspace image (WK_SDK_IMAGE, same
+#               mechanism image/yocto.sh uses): buildroot 2020.02 builds
+#               2009-era tarballs, and a newer host stops compiling them.
+#   downloads   BR2_DL_DIR/BR2_CCACHE_DIR under $WK_STORE/cache/buildroot
+#               (lib/store.sh reserves it, targets/container.sh mounts it);
+#               buildroot-build.sh reads them from its own environment, not
+#               a command-line path -- a host path names nothing in the
+#               container it runs in.
+#   external    BR_EXTERNAL -> image/buildroot/external, a BR2_EXTERNAL tree
+#               this repo owns. It carries the fix an arm64 build host needs:
+#               host-python-2.7's bundled libffi cannot assemble
+#               aarch64/sysv.S, applied from outside (external.mk) rather
+#               than patching the vendor branch.
 #   overlay     BR2_ROOTFS_OVERLAY, assembled by
 #               image/buildroot/tailnet-overlay.sh <arch> <staging>. Only
 #               world-readable regular files: the overlay is rsynced at
-#               target-finalize as the build user, and a 0700 directory in it
-#               failed a build with rsync error 23.
-#   wifi        image/buildroot/wifi-overlay.sh <staging>, the same shape. It
-#               carries no binary (wpa_supplicant is a package the defconfig
-#               selects, not a downloaded static build), only wk-wifi-join and
-#               the S-init line that spends the credential the card seeds.
-#               TODO: the rpi3 defconfig is the WPE fork's own; whether it
-#               compiles wpa_supplicant at all is unverified until a build runs.
+#               target-finalize as the build user, and a 0700 directory in
+#               it fails the build with rsync error 23.
+#   wifi        image/buildroot/wifi-overlay.sh <staging>, the same shape:
+#               wk-wifi-join and the S-init line that spends the credential
+#               the card seeds. TODO: whether the rpi3 defconfig compiles
+#               wpa_supplicant at all is unverified until a build runs.
 #   output      genimage -> output/images/$BR_IMAGE. The cog defconfigs'
-#               filesystem output is tar-only -- no rootfs.ext4 -- so the
-#               board's own genimage config has nothing to assemble unless
-#               buildroot-build.sh adds BR2_TARGET_ROOTFS_EXT2, which it does
-#               whenever the profile names a `.img`. The completion line is
-#               conditioned on that file's mtime being newer than the run's own
-#               start, the same rule yocto-build.sh applies to its image
-#               directory: a helper (or here, a `make` with nothing to do)
-#               reporting success proves nothing on its own.
-#   init        BusyBox, so no systemd units: install_units already reads the
-#               init out of the rootfs and refuses rather than writing units
-#               nothing will start. The S99tailscale script is the equivalent.
-#               TODO: the BusyBox halves of the self-return watchdog and the
-#               self-disarm are still owed.
+#               filesystem output is tar-only, so buildroot-build.sh adds
+#               BR2_TARGET_ROOTFS_EXT2 whenever the profile names a `.img`.
+#               The completion line requires that file's mtime newer than
+#               the run's own start, since a `make` with nothing to do can
+#               report success too.
+#   init        BusyBox, so no systemd units: install_units reads the init
+#               out of the rootfs and refuses rather than writing units
+#               nothing will start. S99tailscale is the equivalent.
+#               TODO: the BusyBox halves of the self-return watchdog and
+#               self-disarm are owed (docs/HANDOFF-boot.md).
 #
-# --- what is owed, in order --------------------------------------------------
-#
-#   1. a real build, through this file: the mechanism below has never been run
-#      end to end, only checked by dry run and by reading the make semantics
-#      the external tree depends on.
-#   2. the nine configurations whose defconfig does not exist upstream and is
-#      not yet derived here either -- every board/release combination but
-#      wpewebkit-2.38 and wpewebkit-2.46 on the rpi3, and wpewebkit-2.38 on the
-#      rpi4 (image/buildroot/external/configs, itself unbuilt). Each says what
-#      it needs in its own CFG_NEEDS, so they refuse individually and
-#      correctly already; deriving each remaining defconfig is separate work.
+# Owed work: docs/HANDOFF-ab-bench.md #3.
 
 BUILDROOT_BASE_IMAGE="${WK_BUILDROOT_BASE:-docker.io/library/ubuntu:22.04}"
 
@@ -99,12 +50,8 @@ buildroot_workdir()  { echo "/src/WebKit/WebKitBuild/buildroot/$1"; }
 buildroot_log()      { echo "$(wk_ws_dir "$1")/home/buildroot-$2.log"; }
 buildroot_pidfile()  { echo "$(wk_ws_dir "$1")/home/buildroot-$2.pid"; }
 
-# The workspace image, built if it is not already there.
-#
-# The same shape as yocto_ensure_image and for the same reasons: one layer on a
-# pinned base, tagged with the base's tag *and* a digest of the Containerfile so
-# that editing the spec builds a new image rather than silently reusing a layer
-# that no longer matches it.
+# Tagged with the base's tag *and* a digest of the Containerfile, so
+# editing the spec builds a new image rather than reusing a stale layer.
 buildroot_ensure_image() {
     local base="$BUILDROOT_BASE_IMAGE" derived spec
     spec="$WK_ROOT/container/buildroot/Containerfile"
@@ -127,12 +74,8 @@ buildroot_ensure_image() {
     export WK_SDK_IMAGE
 }
 
-# Make sure there is a workspace to build in, made from that image.
-#
-# Unconditionally ensures the image *before* the existence check, which is the
-# trap yocto_ensure_ws records: doing it only on creation means an edited
-# Containerfile changes the wanted tag while every run goes on using a container
-# made from the old one.
+# Ensures the image *before* the existence check, so an edited Containerfile
+# changes the wanted tag on every run rather than only on creation.
 buildroot_ensure_ws() {
     local ws="$1"
     buildroot_ensure_image
@@ -184,31 +127,16 @@ buildroot_build() {
         return 0
     fi
 
-    # Memory-sized rather than core-sized, then capped.
-    #
-    # The scouting run measured a WPE compile in this tree at roughly 2 GB a
-    # job, which is what makes -j<cores> the wrong answer on a machine with
-    # more cores than gigabytes-over-two -- the same reasoning the yocto lane
-    # applies to WebKit.
-    #
-    # The cap is the wiki's number, near enough: that recipe drove `make -j 8`
-    # and produced a booting image, and this is a 2020 buildroot building
-    # 2009-era tarballs, which is where packages with broken parallel rules
-    # live. Going far past the only value with evidence behind it risks losing
-    # an hours-long build to a race in somebody else's Makefile, and the cores
-    # are not the scarce thing here anyway.
+    # Memory-sized, then capped near the wiki recipe's own `-j 8`: a WPE
+    # compile here runs roughly 2 GB a job, and 2009-era tarballs are where
+    # broken parallel rules live.
     local jobs overlay_arch overlay_wifi dl cc
     jobs=$(WK_MB_PER_JOB=2048 WK_MAX_JOBS=16 build_jobs)
     overlay_arch="${BR_OVERLAY_TAILSCALE:-}"
     overlay_wifi=""
     _image_wants_wifi "${IMG_MACHINE:-}" && overlay_wifi=1
-    # Display only, for the dry run's `du -sh` and to spell out what
-    # lib/store.sh already reserves (store_init) and targets/container.sh
-    # already mounts and exports as BR2_DL_DIR/BR2_CCACHE_DIR. Not passed to
-    # buildroot-build.sh: a host path handed to a process running inside the
-    # container would name nothing there, and the container already has the
-    # right (container-side) path in its own environment -- passing one here
-    # would be a second, disagreeing copy of the same fact.
+    # Display only, for the dry run; not passed to buildroot-build.sh, whose
+    # own (container-side) environment already has the real path.
     dl="$WK_STORE/cache/buildroot/dl"
     cc="$WK_STORE/cache/buildroot/ccache"
 
@@ -235,8 +163,8 @@ EOF
 
     local log pid
     log=$(buildroot_log "$ws" image); pid=$(buildroot_pidfile "$ws" image)
-    # Truncated, not unlinked: `tail -f` follows an inode, so deleting the log
-    # leaves an existing follower watching a file nobody writes to.
+    # Truncated, not unlinked: `tail -f` follows an inode, so deleting the
+    # log leaves an existing follower watching a file nobody writes to.
     : > "$log"; rm -f "$pid"
 
     info "building $profile in '$ws'"

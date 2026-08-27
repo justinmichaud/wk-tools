@@ -1,42 +1,39 @@
 #!/bin/bash
 #
-# The privileged half of writing a card. Runs as root via a NOPASSWD sudoers
-# rule that names this exact path.
+# The privileged half of writing a card. Runs as root via a NOPASSWD
+# sudoers rule that names this exact path.
 #
-# Why it exists: writing a system to a card is `dd` to a block device plus a
-# handful of mounts, and none of that is available to an unprivileged user. The
-# machines that hold card readers are *workstations*, where this repo's rule is
-# that sudo prompts (CLAUDE.md) -- and a prompt cannot happen down a BatchMode
-# ssh with no terminal, which is how `wk sysimage write` reaches them: every
-# privileged step dies with "sudo: a terminal is required to authenticate". So
-# the choice is a password prompt nobody can answer, a blanket NOPASSWD, or
-# this: one path, a fixed verb list, and a device
-# gate that cannot be argued with.
+# Why it exists: writing a system to a card is `dd` to a block device plus
+# a handful of mounts, unavailable to an unprivileged user. The machines
+# with card readers are *workstations*, where sudo prompts (CLAUDE.md) --
+# but a prompt cannot happen down the BatchMode ssh `wk sysimage write`
+# uses, which has no terminal. So the choice is a password prompt nobody
+# can answer, a blanket NOPASSWD, or this: one path, a fixed verb list, and
+# a device gate that cannot be argued with. Linux cannot make a #! script
+# setuid, so the sudoers rule is the mechanism, not a setuid wrapper.
 #
-# Everything here must be safe to grant unconditionally, because granting it is
-# granting it forever:
+# Everything here must be safe to grant unconditionally, because granting
+# it is granting it forever:
 #
 #   - The verb set is a fixed allowlist. No passthrough, no eval, and no
 #     argument becomes part of a command line.
-#   - **Only USB and SD/MMC whole disks may be touched, ever.** Not "removable"
-#     -- RM=1 is set by things that are not cards, and an internal disk can
-#     present as removable. The transport is the property that means what we
-#     mean, and it is checked against a two-item list.
-#   - **A disk this machine is currently running from is refused**, whatever its
-#     transport: the root filesystem's disk, /boot's, /boot/firmware's, any
-#     swap's, and whatever the kernel command line named as root. On the fleet's
-#     Pis the system disk *is* an SD card or a USB stick, so the transport check
+#   - **Only USB and SD/MMC whole disks may be touched, ever.** Not
+#     "removable" -- RM=1 is set by things that are not cards, and an
+#     internal disk can present as removable. Transport is checked against
+#     a two-item list instead.
+#   - **A disk this machine is currently running from is refused**,
+#     whatever its transport: root's disk, /boot's, /boot/firmware's, any
+#     swap's, and the kernel command line's root=. On the fleet's Pis the
+#     system disk *is* an SD card or USB stick, so the transport check
 #     alone would happily overwrite the running machine.
-#   - A disk with anything mounted from it is refused. A card in use is a card
-#     somebody is using.
-#   - Nothing is read from the environment; sudo's env_reset plus the explicit
-#     PATH below means a hostile environment cannot redirect a binary.
-#   - The secrets this handles -- a tailscale auth key, a WiFi passphrase --
-#     arrive on stdin. Arguments are world-readable in /proc; the marker and
-#     the ssh *public* key are arguments because neither is a secret.
-#
-# Linux cannot make a #! script setuid -- the kernel ignores the bit -- so a
-# sudoers rule is the mechanism, not a shell wrapper around a setuid binary.
+#   - A disk with anything mounted from it is refused: a card in use is a
+#     card somebody is using.
+#   - Nothing is read from the environment; sudo's env_reset plus the
+#     explicit PATH below means a hostile environment cannot redirect a
+#     binary.
+#   - Secrets (a tailscale auth key, a WiFi passphrase) arrive on stdin,
+#     never as arguments, which are world-readable in /proc; the marker
+#     and the ssh *public* key are arguments because neither is a secret.
 
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -49,12 +46,11 @@ fail() { printf 'wk-card-priv: %s\n' "$*" >&2; exit 1; }
 
 # --- the gate ----------------------------------------------------------------
 
-# Every disk this machine is currently running from, by kernel name.
-#
-# Four sources, because no single one is complete: findmnt knows what is mounted
-# now, /proc/swaps knows about swap, and the kernel command line knows what the
-# firmware was told -- which matters when / is on an overlay or an initramfs has
-# moved things around and findmnt no longer names the real device.
+# Every disk this machine is currently running from, by kernel name. Four
+# sources, since no single one is complete: findmnt knows what's mounted,
+# /proc/swaps knows swap, and the kernel command line knows what firmware
+# was told -- which matters when / is on an overlay or findmnt no longer
+# names the real device.
 booted_disks() {
     {
         findmnt -no SOURCE / 2>/dev/null || true
@@ -78,11 +74,9 @@ booted_disks() {
     done | sort -u
 }
 
-# <device> -- returns the validated device path, or refuses.
-#
-# Ordered cheapest-first, but every check runs before anything is written: this
-# is the whole security argument for the sudoers rule, and a check skipped
-# because an earlier one passed is a check that was not made.
+# <device> -- returns the validated device path, or refuses. Ordered
+# cheapest-first, but every check runs before anything is written: this is
+# the whole security argument for the sudoers rule.
 gate() { # <device> [allow-mounted]
     local dev="${1:-}" allow_mounted="${2:-}" type tran name booted mounted
 
@@ -198,21 +192,16 @@ v_write() {
     dd of="$dev" bs=4M conv=fsync status=none
     sync
 
-    # Make the kernel look at the table it was just handed.
+    # Make the kernel look at the table it was just handed: writing a whole
+    # disk replaces its partition table, but the kernel keeps using what it
+    # read when the disk appeared. Everything after this (lsblk, mounting
+    # partition 2) asks the kernel, so without this the disk reports stale
+    # partitions -- fatal and obvious if it had none, silently wrong-sized
+    # if a partition happened to sit at the same offset.
     #
-    # Writing a whole disk replaces its partition table, and the kernel goes on
-    # using the one it read when the disk appeared. Everything after this asks
-    # the kernel rather than the platter -- `lsblk` for the sizes, and the mount
-    # of partition 2 for the fleet integration -- so without this the disk
-    # reports the partitions it used to have. On a disk that had none, the
-    # symptom is fatal and obvious: /dev/<dev>p2 does not exist. On one that had
-    # a partition at the same offset, it is worse, because everything appears to
-    # work and only the sizes are wrong.
-    #
-    # Best-effort on purpose: this fails with EBUSY if anything is still holding
-    # the disk, and that is not a reason to fail a write whose bytes are already
-    # down and synced. It is reported rather than swallowed, so a stale view is
-    # something the log can be asked about afterwards.
+    # Best-effort on purpose: EBUSY here (something still holding the disk)
+    # is not a reason to fail a write whose bytes are already down and
+    # synced, but is reported rather than swallowed.
     if blockdev --rereadpt "$dev" 2>/dev/null; then
         say "partition table re-read"
     else
@@ -238,18 +227,16 @@ _fleet_edit() { # <mountpoint> <marker> <pubkey>
     chmod 0600 "$m$home/.ssh/authorized_keys"
     chown -R 0:0 "$m$home/.ssh"
 
-    # Read back, because this failure is invisible from the writing side: a card
-    # with a perfect marker and an empty authorized_keys boots and cannot be
-    # reached, and that is exactly how it went wrong once.
+    # Read back: a card with a perfect marker and an empty authorized_keys
+    # boots and cannot be reached, invisible from the writing side.
     grep -q . "$m/etc/wk-image" || fail "the identity marker did not land on this disk"
     grep -q '^ssh-\|^ecdsa-\|^sk-' "$m$home/.ssh/authorized_keys" \
         || fail "the driving key did not land in $home/.ssh/authorized_keys"
 }
 
-# fleet <device> <marker-base64> <ssh-public-key-base64>
-#
-# base64 so that neither value has to survive a quoting round trip, and so that
-# both can be checked against a character set before anything decodes them.
+# fleet <device> <marker-base64> <ssh-public-key-base64>. base64 so that
+# neither value has to survive a quoting round trip, and both can be
+# checked against a character set before anything decodes them.
 v_fleet() {
     local dev marker key
     dev=$(gate "${1:-}")
@@ -281,9 +268,8 @@ _tailnet_edit() { # <mountpoint> <hostname> <tag> <keyfile>
     chmod 0600 "$m/etc/wk/tailscale-authkey"
     chown -R 0:0 "$m/etc/wk"
 
-    # What can be read back is. The key deliberately is not printed: its size
-    # and mode answer "did it land", and echoing a credential to prove it
-    # arrived would be the same mistake as putting it on a command line.
+    # What can be read back is; the key is deliberately not printed. Its
+    # size and mode answer "did it land" without echoing a credential.
     grep -qx "hostname=$host" "$m/etc/wk/tailnet.conf" \
         || fail "the tailnet name did not survive the write to this disk"
     [ "$(stat -c '%a' "$m/etc/wk/tailscale-authkey")" = 600 ] \
@@ -294,10 +280,9 @@ _tailnet_edit() { # <mountpoint> <hostname> <tag> <keyfile>
 _whose_probe() { # <mountpoint>
     local f="$1/etc/wk-image"
     if [ -r "$f" ]; then
-        # Only the identifying fields, and only ones this repo writes. Not the
-        # whole file: it is small and harmless today, but a verb that prints
-        # whatever it finds on a disk is a verb whose output grows with the
-        # disk's content rather than with what was asked for.
+        # Only the identifying fields this repo writes, not the whole file:
+        # a verb that prints whatever it finds grows with disk content
+        # rather than with what was asked for.
         sed -n 's/^\(id\|machine\|profile\|role\|builder\)=/&/p' "$f"
     else
         echo "marker: none"
@@ -305,11 +290,9 @@ _whose_probe() { # <mountpoint>
 }
 
 # whose <device> -- which machine's system is on this disk, from the disk.
-#
-# Read-only, and the reason it exists rather than a stored note on the driving
-# side: a disk's identity is written *into* it at write time (/etc/wk-image),
-# so the disk can be asked. Anything kept out here would be a second copy of
-# that -- and the copy that goes stale the first time somebody swaps a stick.
+# Read-only, and asks the disk rather than a stored note: identity is
+# written *into* it at write time (/etc/wk-image), and a second copy out
+# here would go stale the first time somebody swaps a stick.
 v_whose() {
     local dev; dev=$(gate "${1:-}")
     with_mount -r "$(part "$dev" 2)" _whose_probe
@@ -319,15 +302,12 @@ _joins_probe() { # <mountpoint>
     [ -x "$1/usr/sbin/wk-tailnet-join" ] && say "tailnet-join: yes" || say "tailnet-join: no"
 }
 
-# joins <device> -- does the system on this disk join the tailnet on first boot?
-#
-# Read-only, and a verb of its own because the answer decides whether the
-# driving end resolves the fleet's auth key at all. Folded into `tailnet` it
-# could not: the key has to be on stdin before that verb can look. An image
-# built with the tailnet layer off, or one somebody else made, has no
-# wk-tailnet-join -- and without this it would have the fleet's credential
-# read, sent here and written to a file, every time a card was written, for a
-# disk with nothing to spend it.
+# joins <device> -- does the system on this disk join the tailnet on first
+# boot? Read-only, and a verb of its own because the answer decides whether
+# the driving end resolves the fleet's auth key at all -- the key has to be
+# on stdin before `tailnet` can look, so this can't be folded into it.
+# Without this, an image with no wk-tailnet-join would still have the
+# fleet's credential read and sent here for a disk with nothing to spend it.
 v_joins() {
     local dev; dev=$(gate "${1:-}")
     with_mount -r "$(part "$dev" 2)" _joins_probe
@@ -367,10 +347,9 @@ v_wifi_joins() {
 }
 
 # A value that has to sit inside a double-quoted wpa_supplicant string,
-# checked against what it is allowed to be rather than escaped (the same rule
-# check_name/check_b64 follow above): a quote or backslash in an SSID or
-# passphrase would otherwise let it break out of the string it is written
-# into, and a newline would let it start a second line of the conf file.
+# checked against what it's allowed to be rather than escaped (same rule
+# as check_name/check_b64): a quote or backslash would let it break out of
+# the string, a newline would start a second config line.
 check_wifi_value() { # <what> <value>
     case "${2:-}" in
         '') deny "$1 is empty" ;;
@@ -395,10 +374,9 @@ _wifi_edit() { # <mountpoint> <ssid> <psk>
     } > "$f"
     chmod 0600 "$f"; chown 0:0 "$f"
 
-    # Read back, because a write that did not land is invisible from here. The
-    # passphrase deliberately is not printed: its presence and mode answer "did
-    # it land", the same rule the tailnet key follows. Fixed-string match
-    # (-F), not a pattern: an SSID is free text and must not be read as a regex.
+    # Read back, since an unlanded write is invisible from here; the
+    # passphrase itself is not printed (same rule as the tailnet key).
+    # Fixed-string match (-F), not a pattern: an SSID must not be read as regex.
     grep -qxF "    ssid=\"$ssid\"" "$f" \
         || fail "the SSID did not survive the write to this disk"
     [ "$(stat -c '%a' "$f")" = 600 ] && [ -s "$f" ] \
@@ -476,10 +454,10 @@ _role_edit() { # <mountpoint> <role>
     mkdir -p "$m/etc/wk"; chmod 0755 "$m/etc/wk"; chown 0:0 "$m/etc/wk"
 
     # The marker is the whole mechanism, and it is an absence as much as a
-    # presence: every image carries the units that hand a machine back, and
-    # each one is `ConditionPathExists=!/etc/wk/rescue`. So a bench card is a
-    # card with no marker on it, and writing one is removing the file rather
-    # than writing a second flag that could disagree with the first.
+    # presence: every unit that hands a machine back is
+    # `ConditionPathExists=!/etc/wk/rescue`. A bench card has no marker;
+    # writing one removes the file rather than a second flag that could
+    # disagree with the first.
     if [ "$role" = rescue ]; then
         printf 'This system is a rescue: it keeps its board reachable and is never measured.\n' \
             > "$m/etc/wk/rescue"
@@ -488,11 +466,10 @@ _role_edit() { # <mountpoint> <role>
         rm -f "$m/etc/wk/rescue"
     fi
 
-    # And the identity marker's own `role=`, so that a board can be *asked*
-    # what it is rather than having the answer inferred from a file's presence
-    # by every reader separately. One image serves both roles, so the field the
-    # build stamped says `bench` on a card that is a rescue; this is where the
-    # two are reconciled, at the only moment both facts are in one place.
+    # And the identity marker's own `role=`, so a board can be *asked* what
+    # it is rather than inferring it from a file's presence per reader. One
+    # image serves both roles, so this is where the build's stamped role and
+    # the rescue file are reconciled, the only moment both facts are together.
     if [ -f "$f" ]; then
         sed -i "s/^role=.*/role=$role/" "$f"
         grep -qx "role=$role" "$f" \

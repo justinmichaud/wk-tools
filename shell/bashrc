@@ -426,10 +426,6 @@ unset _WK_INTERACTIVE
 # Deliberately minimal. This file sets up history and shell behaviour and
 # nothing else -- build configuration, job counts and toolchain paths belong to
 # `wk` and to the workspace, not to every interactive shell on the host.
-#
-# In particular this file no longer sources webkit-container-sdk's
-# register-sdk-on-host.sh: it was unconditional, so every shell on a machine
-# without that checkout printed an error. The SDK now runs inside the VM.
 
 if command -v hx >/dev/null 2>&1; then
   EDITOR=hx
@@ -441,6 +437,13 @@ fi
 export EDITOR
 export VISUAL="$EDITOR"
 
+# lazygit is installed beside helix (container/firstrun.sh) but has no home
+# inside it: helix's `:sh`/`:!` run a shell command and capture its output,
+# they do not attach a terminal, so nothing in helix can host an interactive
+# TUI. `lg` is the honest integration -- suspend or switch to a second
+# terminal in the workspace and run it there. See container/helix/README.md.
+command -v lazygit >/dev/null 2>&1 && alias lg=lazygit
+
 # Put `wk` on PATH, without disturbing anything already there. $HOME itself is
 # deliberately not on PATH.
 _wk_bin="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)"
@@ -449,9 +452,9 @@ case ":$PATH:" in
   *) [ -n "$_wk_bin" ] && [ -x "$_wk_bin/wk" ] && PATH="$_wk_bin:$PATH" ;;
 esac
 # The small helpers that only make sense inside a workspace -- strip-addresses,
-# show-profiled-functions, git-clean, commit-count, git-sync-fork. They were
-# restored as scripts rather than verbs precisely so the checkout can see them,
-# which only works if they are on PATH.
+# show-profiled-functions, git-clean, commit-count, git-sync-fork -- are
+# scripts rather than verbs precisely so the checkout can see them, which only
+# works if they are on PATH.
 case ":$PATH:" in
   *":$_wk_bin/container/bin:"*) : ;;
   *) [ -n "$_wk_bin" ] && [ -d "$_wk_bin/container/bin" ] && PATH="$_wk_bin/container/bin:$PATH" ;;

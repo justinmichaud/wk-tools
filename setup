@@ -36,9 +36,9 @@ done
 # back from ./setup with no quiesce helper and no indication that a stage had
 # been skipped rather than run.
 #
-# Each stage now runs in a subshell so a failure is contained, and the failures
-# are collected and reported together at the end. The change count survives via
-# an EXIT trap, so it is right even for a stage that died partway.
+# Each stage runs in a subshell so a failure is contained, and the failures are
+# collected and reported together at the end. The change count survives via an
+# EXIT trap, so it is right even for a stage that died partway.
 WK_FAILED_STAGES=""
 
 run_stage() {

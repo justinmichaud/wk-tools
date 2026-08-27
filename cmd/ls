@@ -12,6 +12,9 @@
 #   ARCH      what it builds natively; blank when that is the host's own
 #   CHANGES   disk its own writes take -- the overlay layer, which grows
 #             without bound between `wk gc` runs and is invisible to podman
+#
+#   --json    one JSON document ({"workspaces": [...]}), the same fields as
+#             the table's columns, lower-cased; nothing else on stdout
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,47 +23,47 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 
 # Every target, from the same walk `wk status` uses (walk_targets, then
-# target_workspaces per target): listing only the default target is how the
-# two commands came to disagree about "the workspaces" -- a vm or remote
-# workspace showed up in `wk status` and not here. TARGET is a column for the
-# same reason: with more than one, a bare name says nothing about the machine.
-#
-# BASE and CHANGES are overlay concepts, meaningful only for the container
-# target -- a macOS VM's equivalents are the golden image and the guest's own
-# disk, which `wk vm ls` lists. ARCH is here because it's the one workspace
-# property invisible from inside it: the kernel is the host's, so an armhf
-# container reports aarch64 from uname.
+# target_workspaces per target). BASE and CHANGES are overlay concepts,
+# meaningful only for the container target; `wk vm ls` lists a macOS VM's
+# equivalents. ARCH is the one property invisible from inside a workspace:
+# the kernel is the host's, so an armhf container reports aarch64 from uname.
 
-# --continued: this listing is the second half of one being assembled from two
-# machines. On a macOS host `wk ls` walks the host-side targets out here and
-# forwards the container half into the podman VM; two header rows in one table
-# is not a table, and "no workspaces -- 'wk new' to create one" is false when
-# the other half just listed several.
+# --continued: the second half of a listing assembled from two machines. On
+# a macOS host `wk ls` walks the host-side targets here and forwards the
+# container half into the podman VM; two header rows in one table isn't one.
 CONTINUED=""
-[ "${1:-}" = --continued ] && { CONTINUED=1; shift; }
+JSON=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --continued) CONTINUED=1; shift ;;
+        --json)      JSON=1; shift ;;
+        *) die "usage: wk ls [--json]; see wk ls -h" ;;
+    esac
+done
 
-# WK_ROW_LABEL: the name the *asking* machine knows this one by.
-# A peer's own vocabulary (`container`, `vm`) collides with the same words
-# used for a different machine's containers in somebody else's listing, so
-# the asker passes the name it asked about and rows are qualified with it:
-# `moose:container`. A build box needs none of this, since its target name
-# *is* the label -- hence qualifying rather than always prefixing.
-#
-# Environment, not a flag: the far side may be an older checkout that
-# doesn't know a new flag, and an unknown flag there is fatal where an
-# unknown variable is ignored (t_wk, targets/remote.sh).
+# One JSON document (own rows, or a peer target's own --json output) per
+# append; json_merge_list (lib/common.sh) reads them all back as one array.
+if [ -n "$JSON" ]; then
+    JSON_DOCS=$(mktemp)
+    _ls_json_cleanup() { rm -f "$JSON_DOCS"; }
+    wk_atexit _ls_json_cleanup
+fi
+
+# WK_ROW_LABEL: the name the *asking* machine knows this one by, so rows are
+# qualified against a peer's colliding vocabulary (`container`, `vm`):
+# `moose:container`. Environment, not a flag: an unknown flag on an older
+# far-side checkout is fatal where an unknown variable is ignored (t_wk).
 LABEL="${WK_ROW_LABEL:-}"
 _col() { if [ -z "$LABEL" ] || [ "$1" = "$LABEL" ]; then printf '%s' "$1"; else printf '%s:%s' "$LABEL" "$1"; fi; }
 
-if [ -z "$CONTINUED" ]; then
+if [ -z "$CONTINUED" ] && [ -z "$JSON" ]; then
     printf '%-20s %-18s %-10s %-20s %-8s %8s\n' NAME TARGET STATE BASE ARCH CHANGES
 fi
 
 found=0
 TARGETS=$(walk_targets)
 # One round of probes for every machine at once, rather than one ten-second
-# connect after another as the walk reaches them (prefetch_targets,
-# lib/target.sh). Only the waiting moves; the listing is the same listing.
+# connect after another as the walk reaches them (prefetch_targets, lib/target.sh).
 # shellcheck disable=SC2086 -- deliberate word splitting of the target list.
 prefetch_targets $TARGETS
 wk_atexit prefetch_done
@@ -68,12 +71,14 @@ for TARGET in $TARGETS; do
     load_target "$TARGET"
 
     # A machine of its own answers for itself, exactly as in `wk status`: the
-    # workspaces are over there, and so is every fact about them. Without this
-    # `wk status` and `wk ls` disagreed again -- one delegated to a peer's
-    # workspaces while this one, walking a local store, reported nothing.
+    # workspaces are over there, and so is every fact about them.
     if t_has_wk; then
         rc=0
-        WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued || rc=$?
+        if [ -n "$JSON" ]; then
+            WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued --json >> "$JSON_DOCS" || rc=$?
+        else
+            WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued || rc=$?
+        fi
         [ "$rc" -eq 0 ] && found=1
         continue
     fi
@@ -83,13 +88,27 @@ for TARGET in $TARGETS; do
         state=$(ws_display_state "$ws")
         base=$(ws_base_id "$ws" 2>/dev/null || echo '-')
         size=$(du -sh "$(wk_ws_dir "$ws")/changes" 2>/dev/null | cut -f1 || echo -)
+        if [ -n "$JSON" ]; then
+            python3 -c '
+import json, sys
+print(json.dumps({"workspaces": [{
+    "name": sys.argv[1], "target": sys.argv[2], "state": sys.argv[3],
+    "base": sys.argv[4], "arch": sys.argv[5], "changes": sys.argv[6],
+}]}))' "$ws" "$(_col "$TARGET")" "$state" "$base" "$(t_arch "$ws")" "$size" >> "$JSON_DOCS"
+            continue
+        fi
         printf '%-20s %-18s %-10s %-20s %-8s %8s\n' \
             "$ws" "$(_col "$TARGET")" "$state" "$base" "$(t_arch "$ws")" "$size"
     done
 done
 
-# The advice differs by where you are standing: a shared build machine cannot
-# create one, and saying so beats sending someone to a command that refuses.
+# One document, nothing else on stdout: the advisory text below has no
+# place in a document a caller is about to parse.
+if [ -n "$JSON" ]; then
+    json_merge_list workspaces "$JSON_DOCS"
+    exit 0
+fi
+
 if [ "$found" -ne 1 ] && [ -z "$CONTINUED" ]; then
     if in_remote_host; then
         log "(no workspaces here -- from the workstation: wk new <name> --target $(wk_remote_field target))"
@@ -98,14 +117,10 @@ if [ "$found" -ne 1 ] && [ -z "$CONTINUED" ]; then
     fi
 fi
 
-# The snapshot store is per target and only exists where the overlay scheme
-# does, reported per target rather than once for whatever driver was loaded
-# last on a multi-target walk.
-#
-# Not at all when contributing to somebody else's listing: with a label, that
-# machine's store isn't the reader's to act on (`wk gc`/`wk new` run there).
-# --continued alone still prints it -- the podman VM's store is the *only*
-# copy the macOS host is asking about.
+# The snapshot store is per target, reported per target rather than once for
+# whatever driver was loaded last. Not at all when contributing to somebody
+# else's listing: with a label, that machine's store isn't the reader's to
+# act on (`wk gc`/`wk new` run there).
 [ -z "$LABEL" ] || exit 0
 
 _multi=""
@@ -113,8 +128,6 @@ if [ "$(printf '%s\n' $TARGETS | wc -l | tr -d ' ')" -gt 1 ]; then _multi=1; fi
 for TARGET in $TARGETS; do
     load_target "$TARGET"
     t_needs_base || continue
-    # The blank line belongs to the trailer, so a walk with no snapshot store
-    # in it (the host-side half of a macOS listing) ends where its rows do.
     [ -n "${_spaced:-}" ] || { echo; _spaced=1; }
     cur=$(current_base 2>/dev/null || echo none)
     log "${_multi:+$TARGET: }current base: $cur"

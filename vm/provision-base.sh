@@ -47,9 +47,6 @@ sudo xcodebuild -runFirstLaunch >/dev/null 2>&1 || true
 # resized to fill its physical store. Without this the build dies with
 # "No space left on device" while the host thinks the guest has 100 GB spare.
 #
-# The physical store is read from diskutil rather than assumed to be disk0s2 --
-# it usually is, but hardcoding a device node to then resize it is not a good
-# trade for one line of parsing.
 # A Release build tree runs to tens of gigabytes on top of a ~19 GB checkout,
 # so this is the floor below which a build is not worth starting.
 NEED_FREE_GB=60
@@ -128,9 +125,9 @@ _wiring=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_wiring_script "
 say "WebKit at $(git -C "$SRC" rev-parse --short HEAD)"
 
 # --- Claude Code -------------------------------------------------------------
-# Its own installer, to its own path. It self-updates into
+# Its own installer, to its own path: it self-updates into
 # ~/.local/share/claude/versions/, so a binary copied anywhere else can never
-# update itself -- a mistake already made once in this project.
+# update itself.
 #
 # Credentials do NOT come across. On Darwin the CLI keeps them in the login
 # Keychain, not in ~/.claude/.credentials.json, so the shared-secrets volume
@@ -204,9 +201,8 @@ done
 # sysadminctl needs it to change the lock setting. This is not a secret and is
 # not protecting anything: the guest holds no credentials, its egress is
 # filtered by Softnet outside the guest, and it is destroyed with `wk rm`. It is
-# recorded here because a guest whose password nobody knows is a guest you can
-# be locked out of -- which is exactly what happened before the lock was turned
-# off.
+# recorded here so the lock setting below can always be reached -- a guest
+# whose password nobody knows is a guest you can be locked out of.
 WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"
 
 # Split WK_VM_DISPLAY ("1920x1080") for the login agent below. Passed in by the
@@ -228,10 +224,10 @@ WK_VM_DISPLAY_H="${WK_VM_DISPLAY#*x}"
 #   2. display sleep             -- pmset, and it is not sufficient on its own
 #   3. the screen *lock*         -- a separate setting from either of the above
 #
-# The lock is the one that actually bit: with the screen saver off and
-# askForPassword already 0, the guest still came up behind "Enter Password"
-# after every boot, because the modern lock is controlled by sysadminctl and
-# nothing else touches it.
+# The lock is the one that actually blocks login: it is controlled by
+# sysadminctl independently of the screen saver and askForPassword settings,
+# and disabling only those two leaves the guest behind "Enter Password" on
+# every boot.
 sudo -n sysadminctl -screenLock off -password "$WK_VM_PASSWORD" 2>/dev/null ||     echo "warning: could not turn off the screen lock; the guest may come up locked" >&2
 
 # 4. macOS's own post-login Setup Assistant panes. From the outside this reads
@@ -264,10 +260,8 @@ defaults write com.apple.screensaver askForPassword -int 0
 defaults write com.apple.screensaver askForPasswordDelay -int 0
 sudo -n pmset -a displaysleep 0 sleep 0 disablesleep 1 2>/dev/null || true
 
-# pmset alone did NOT keep the display awake -- measured: displaysleep 0,
-# sleep 0 and SleepDisabled 1 were all already set and the display still slept,
-# which reads as a black screen and then a lock. A held power assertion does
-# work, so hold one for the life of the guest.
+# pmset settings alone do not keep the display awake. A held power assertion
+# does, so hold one for the life of the guest.
 sudo -n tee /Library/LaunchDaemons/org.wk.nosleep.plist >/dev/null <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -283,20 +277,17 @@ sudo -n launchctl bootout system/org.wk.nosleep 2>/dev/null || true
 sudo -n launchctl bootstrap system /Library/LaunchDaemons/org.wk.nosleep.plist 2>/dev/null || true
 
 # Resolution. Set once at login to whatever the VM was configured with, so the
-# guest does not come up on a stale saved mode -- this guest sat at 1024x768
-# through several boots because that was the mode it had last been left in.
-# After this, --display-refit takes over and the guest tracks the window as it
-# is resized or full-screened, so do NOT raise this to "something big": the
-# configured size is a *floor* on the tart window (see WK_VM_DISPLAY in
-# targets/vm.sh), and a large one is what makes the window unresizable.
+# guest does not come up on a stale saved mode. After this, --display-refit
+# takes over and the guest tracks the window as it is resized or
+# full-screened, so do NOT raise this to "something big": the configured size
+# is a *floor* on the tart window (see WK_VM_DISPLAY in targets/vm.sh), and a
+# large one is what makes the window unresizable.
 #
-# `tart set --display WxH` sets what the virtual display is
-# *capable* of, not the mode the guest picks: the guest was offered everything
-# from 1024x576 to 3840x2160 and still sat at 1024x768, and --display-refit did
-# not change that even with tart-guest-agent running. So ask CoreGraphics
-# directly, at every login, once the display is awake -- the same call returns
-# an error if it runs against a sleeping display, which is why this is a login
-# agent and not a one-shot during provisioning.
+# `tart set --display WxH` sets what the virtual display is *capable* of, not
+# the mode the guest picks, so ask CoreGraphics directly for the mode at every
+# login, once the display is awake -- the same call errors against a sleeping
+# display, which is why this is a login agent and not a one-shot during
+# provisioning.
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/wk-set-display.m" <<'OBJC'
 #import <Foundation/Foundation.h>
@@ -368,9 +359,8 @@ fi
 # the open network on plain vmnet -- 192.168.64.x, gateway 192.168.64.1 --
 # while the block written above names the Softnet gateway, 192.168.2.1, which
 # exists only while a filtered *workspace* guest is running. That block is
-# written for the clones, and inside the base it points nowhere: the first
-# attempt here died with "No archives for setuptools-59.8 found", which is what
-# an unreachable proxy looks like from inside webkitpy.
+# written for the clones, and inside the base it points at an unreachable
+# proxy.
 #
 # Best-effort and quiet on failure. This is a cache, not a dependency -- a base
 # that skipped it still works, it just pays the download later.

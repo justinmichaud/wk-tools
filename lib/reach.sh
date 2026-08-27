@@ -10,20 +10,17 @@
 #                   that costs traffic.
 # No name lookup below the tailnet: every image this repo builds joins on
 # first boot, so a board the tailnet cannot name has no uplink either.
-# Everything here is read-only and bounded, called from inside probes that
-# already run in parallel under a ceiling (`capped`, lib/common.sh).
+# Read-only and bounded, called from probes that already run in parallel
+# under a ceiling (`capped`, lib/common.sh).
 
-# The tailnet's view, once per process, under a ceiling: `tailscale status`
-# is a local, non-network call, but not free, and a fleet listing asks about
-# every machine. A wedged tailscaled answers neither and has no timeout of
-# its own, so this would otherwise hang the whole walk.
+# The tailnet's view, once per process, under a ceiling: a wedged
+# tailscaled has no timeout of its own and would otherwise hang the walk.
 _WK_TS_PEERS=""
 _WK_TS_READ=""
 
 wk_tailscale_cli() {
     if have tailscale; then echo tailscale; return 0; fi
-    # macOS's Mac App Store build installs the CLI inside the app bundle.
-    local c=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+    local c=/Applications/Tailscale.app/Contents/MacOS/Tailscale  # App Store build
     [ -x "$c" ] && { echo "$c"; return 0; }
     return 1
 }
@@ -45,7 +42,6 @@ except Exception:
     raise SystemExit(0)
 def row(p, online):
     ips = p.get("TailscaleIPs") or [""]
-    # The short name: what every conf and ssh alias here uses.
     print("\t".join([p.get("HostName", ""), ips[0], "up" if online else "down"]))
 self = d.get("Self")
 if self:
@@ -65,9 +61,8 @@ reach_tailnet() {
     printf '%s (%s)' "$(printf '%s' "$line" | cut -f2)" "$(printf '%s' "$line" | cut -f3)"
 }
 
-# reach_ssh <name> -- what `ssh <name>` would actually dial, as ssh resolves
-# it. `ssh -G` performs the whole config resolution and prints the result
-# without connecting: a calculation, not a second copy of the config.
+# reach_ssh <name> -- what `ssh <name>` would dial. `ssh -G` performs the
+# whole config resolution and prints it without connecting.
 reach_ssh() {
     local name="$1" g host port jump user out
     have ssh || return 0
@@ -85,21 +80,19 @@ reach_ssh() {
 }
 
 # For a host whose key cannot be pinned: a fresh one is generated on every
-# image write, at the same name, so pinning would only produce the
-# man-in-the-middle warning it looks like. LogLevel=ERROR: with known-hosts
-# at /dev/null, ssh announces a permanently-added key every connection,
-# training the eye to skip past where a real one appears. Lives here, not
-# boot/machines.sh, because targets/vm.sh needs it too and boot already
-# depends on targets -- the reverse dependency would be a cycle.
+# image write, so pinning would produce a man-in-the-middle warning.
+# LogLevel=ERROR: with known-hosts at /dev/null, ssh announces a
+# permanently-added key every connection. Lives here, not boot/machines.sh:
+# targets/vm.sh needs it too, and boot depending on targets would be a cycle.
 _unpinned_host_key_opts() {
     printf '%s' "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 }
 
 # --- enumeration: the one fallback there is ------------------------------------
-# What answers when the first way says nothing, by *looking* rather than
-# remembering; nothing here is stored.
+# What answers when the first way says nothing, by *looking*; nothing here
+# is stored.
 
-# Every IPv4 segment this machine is directly on. tailscale0 is excluded: a
+# Every IPv4 segment this machine is directly on. tailscale0 excluded: a
 # /32 on a mesh with no broadcast domain to sweep.
 reach_segments_local() {
     ip -4 -o addr show 2>/dev/null | awk '
@@ -108,14 +101,14 @@ reach_segments_local() {
           print o[1] "." o[2] "." o[3] ".0/" a[2] }'
 }
 
-# reach_sweep <cidr> -- "<ip> <mac> <state>" for every address on that segment
-# the kernel has a hardware address for, after giving it a reason to. nmap
-# generates the traffic; the *neighbour table* is the answer, not a detail:
-# unprivileged nmap probes tcp/80 and tcp/443 and calls a host with both
-# closed `down` while the board it just ARPed for sits there.
+# reach_sweep <cidr> -- "<ip> <mac> <state>" for every address on that
+# segment the kernel has a hardware address for. nmap generates the
+# traffic; the *neighbour table* is the answer, not nmap's own verdict --
+# unprivileged nmap calls a host with tcp/80 and tcp/443 closed `down`
+# while the board it just ARPed for sits there.
 #
 # FAILED and INCOMPLETE are dropped as stale DHCP leases. The vantage
-# defaults to this machine; a segment it is not on can only be swept from
+# defaults to this machine; a segment it's not on can only be swept from
 # one that is (a bridge phone, for its cable), so it's the caller's to name.
 reach_sweep() { # <cidr> [vantage]
     local cidr="$1" van="${2:-}" pre=""
@@ -148,9 +141,8 @@ reach_sweep() { # <cidr> [vantage]
         }'
 }
 
-# reach_enumerate <mac> -- the address that hardware is at right now, or
-# nothing. Shared by `wk status` and `wk find`, so the two cannot disagree
-# about what is on the wire.
+# reach_enumerate <mac> -- the address that hardware is at right now.
+# Shared by `wk status` and `wk find`, so the two can't disagree.
 reach_enumerate() { # <mac>
     local mac hit seg
     mac=$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')
@@ -169,24 +161,21 @@ reach_without_tailnet() {
     local m="$1" ssh_path ts_name mac
 
     # Called from inside the fleet walk, so an unconditional sweep here
-    # would *lose* the line to its own ceiling (measured: rpi4's row became
-    # "no answer within 20s" once enumeration ran for every machine).
+    # would lose the line to its own ceiling.
     [ -z "$(reach_tailnet "$m")" ] || return 0
 
     ssh_path=$(reach_ssh "$m") || ssh_path=""
-    # `ssh -G` answers with the name itself when no HostName is written down --
-    # MagicDNS, worse than silence under "without tailscale".
+    # `ssh -G` answers with the name itself when no HostName is written down
+    # (MagicDNS) -- worse than silence under "without tailscale".
     ts_name="${ssh_path##*@}"; ts_name="${ts_name%%:*}"; ts_name="${ts_name%%  *}"
     if [ -n "$ssh_path" ] && [ "$ts_name" != "$m" ]; then
         printf '%s' "$ssh_path"
         return 0
     fi
 
-    # The hardware address is the one thing a board keeps across every image.
     mac=$(kv_field "$WK_ROOT/boot/machines/$m.conf" MACH_MAC | tr -d '"'"'"' ')
-    [ -n "$mac" ] || return 0
+    [ -n "$mac" ] || return 0  # the one thing a board keeps across every image
 
-    # An unfinished sweep points at `wk find` rather than reporting absence.
-    reach_enumerate "$mac" && return 0
+    reach_enumerate "$mac" && return 0  # an unfinished sweep beats reporting absence
     printf 'not on the tailnet -- wk find %s sweeps for it' "$m"
 }

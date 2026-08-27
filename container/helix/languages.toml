@@ -7,11 +7,72 @@ name = "ruby"
 auto-format = false
 language-servers=[{name="solargraph"}]
 
+# clangd, pointed at a real build's compile_commands.json rather than left to
+# search for one: WebKit's source tree carries none at its root, only inside
+# whichever build directory produced it (build/configs.sh's
+# config_build_dir), and build/build-in-target.sh's --export-compile-commands
+# is on by default so that directory always has one once a build has run.
+#
+# Every container workspace starts on config=jsc-release
+# (container/firstrun.sh's workspace marker; build/configs.sh:
+# jsc-release -> WebKitBuild/JSCOnly/Release), so that is the directory named
+# below. Working a different config instead (gtk-release, jsc-debug, ...)?
+# Build it at least once so its compile_commands.json exists, then repoint
+# this line in ~/.config/helix/languages.toml -- not this file, which a
+# recreated container overwrites -- and restart clangd (`:lsp-restart`).
+#
+# The rest are all about one thing: this is a ~6300-translation-unit tree and
+# a background clangd index of the whole thing is the default. Tuned rather
+# than left in indexing forever competing with a `wk build`:
+#   --background-index         index the whole compilation database, not just
+#                               open files -- otherwise jump-to-definition
+#                               only works inside files already visited.
+#   --background-index-priority=low
+#                               index at low OS scheduling priority so it
+#                               loses to `wk build` and to hx itself instead
+#                               of competing with them.
+#   --pch-storage=memory       precompiled preambles in RAM instead of /tmp;
+#                               faster completion, more RSS -- see
+#                               docs/Urgent/HUMAN-clangd.md if that trades badly
+#                               on a small workspace and OOMs.
+#   --header-insertion=never   WebKit's own include graph already decides
+#                               which header a symbol needs; letting clangd
+#                               guess adds a wrong one as often as a right one
+#                               in a tree this large.
+#   -j=4                       background-index and parsing worker threads.
+#                               Deliberately below the machine's real core
+#                               count so clangd is never the thing that makes
+#                               a concurrent `wk build` slow; raise it in
+#                               ~/.config/helix/languages.toml on a workspace
+#                               with headroom to spare.
+#   --limit-results=200        cap references/completion results so a
+#                               near-global symbol (WTF::String, JSC::JSValue)
+#                               does not hang the UI rendering thousands of
+#                               hits.
+#   --malloc-trim               return freed heap to the OS after indexing
+#                               instead of holding it -- glibc-only, which is
+#                               what every container target runs.
+#   --clang-tidy=false         diagnostics from the compiler are enough for
+#                               editing; clang-tidy's extra checks roughly
+#                               double diagnostic latency for lint WebKit's
+#                               own EWS bots already run.
 [language-server.clangd]
 command = "clangd"
-args = ["--header-insertion=never"]
+args = [
+    "--compile-commands-dir=/src/WebKit/WebKitBuild/JSCOnly/Release",
+    "--background-index",
+    "--background-index-priority=low",
+    "--pch-storage=memory",
+    "--header-insertion=never",
+    "-j=4",
+    "--limit-results=200",
+    "--malloc-trim",
+    "--clang-tidy=false",
+]
 
 [[language]]
 name = "cpp"
 language-servers = ["clangd"]
 roots = [".git", "CMakeLists.txt"]
+# 4 spaces, no tabs -- WebKit's coding style throughout Source/ and JSTests/.
+indent = { tab-width = 4, unit = "    " }

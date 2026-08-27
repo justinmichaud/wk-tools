@@ -95,6 +95,30 @@ def cmd_bench_class(args):
     print("cpu" if plan.startswith(cpu_prefixes) else "gpu")
 
 
+# --- cores-valid / cores-wrap ---------------------------------------------------
+# `--cores <set>`'s cpu-list syntax (0-3, 2,3, 0-1,4, 7) and the `taskset -c
+# <set> ` prefix built from it, the one parser cmd/bench's bench_cores_valid
+# and bench_cores_wrap both call through. A set naming a cpu the machine does
+# not have is left to taskset itself to refuse.
+_CORES_TOKEN = re.compile(r"^[0-9]+(-[0-9]+)?$")
+
+
+def cores_set_valid(spec):
+    return bool(spec) and all(_CORES_TOKEN.match(tok) for tok in spec.split(","))
+
+
+def cmd_cores_valid(args):
+    sys.exit(0 if cores_set_valid(args.set) else 1)
+
+
+# Printed only for a set cores-valid already accepted, so its charset
+# (digits, commas, dashes) needs no shell quoting at the call site.
+def cmd_cores_wrap(args):
+    if not cores_set_valid(args.set):
+        sys.exit("cores-wrap: not a valid cpu list: %s" % args.set)
+    sys.stdout.write("taskset -c %s " % args.set)
+
+
 # --- plan-spec -----------------------------------------------------------------
 # Where a plan's payload comes from, read from the plan JSON on stdin.
 # Prints "<kind> <url> <ref> <subdir>"; a plan with no fetchable source, or an
@@ -297,6 +321,16 @@ def _axis_check_lines(a, b):
         )
     if a.get("local_copy") != b.get("local_copy"):
         lines.append("warning: different benchmark payloads (%s vs %s)" % (a.get("local_copy"), b.get("local_copy")))
+
+    # The core pin (`--cores`, taskset -c); unpinned reads as "" the same as
+    # a record from before the field existed.
+    cores_a = (a.get("cores") or {}).get("set") or ""
+    cores_b = (b.get("cores") or {}).get("set") or ""
+    if cores_a != cores_b:
+        lines.append(
+            "warning: different core pins (%s vs %s)"
+            % (cores_a or "unpinned", cores_b or "unpinned")
+        )
 
     # The machine, for on-board runs. Two boards are two different computers,
     # and an rpi3 score against an rpi4 score is not a comparison however
@@ -818,6 +852,14 @@ def main(argv):
     p = sub.add_parser("ls-summary", help="one `wk bench ls` line for a saved run's env.json")
     p.add_argument("file")
     p.set_defaults(func=cmd_ls_summary)
+
+    p = sub.add_parser("cores-valid", help="exit 0 if <set> is a valid taskset -c cpu list, 1 otherwise")
+    p.add_argument("set")
+    p.set_defaults(func=cmd_cores_valid)
+
+    p = sub.add_parser("cores-wrap", help="print the 'taskset -c <set> ' prefix for a valid cpu list")
+    p.add_argument("set")
+    p.set_defaults(func=cmd_cores_wrap)
 
     p = sub.add_parser("plan-spec", help="a plan's fetchable source, read from stdin")
     p.set_defaults(func=cmd_plan_spec)

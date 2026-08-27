@@ -301,3 +301,30 @@ class TestPushKeysNotCopied(WkTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVmDriverWithoutTart(WkTest):
+    """A machine with no tart has no guests: the vm driver answers `absent`
+    for every name, never an empty string a caller reads as a state. The
+    podman VM is such a machine, and it resolves every forwarded name."""
+
+    def test_no_tart_means_every_guest_is_absent(self):
+        home = self.tmp / "home"
+        home.mkdir()
+        script = f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/lib/target.sh"
+load_target vm >/dev/null 2>&1
+echo "tart=$(command -v tart || echo none)"
+echo "state=$(_vm_state wk-nosuch)"
+echo "info=$(t_info nosuchws)"
+echo "running=$(_running_count)"
+echo "list=[$(t_list)]"
+ws_on_target vm nosuchws && echo "on_target=yes" || echo "on_target=no"
+'''
+        cp = bash(script, env={"HOME": str(home), "PATH": "/usr/bin:/bin"})
+        self.assertEqual(cp.returncode, 0, f"the vm driver failed with no tart: {cp.stdout + cp.stderr}")
+        want = "tart=none\nstate=absent\ninfo=absent\nrunning=0\nlist=[]\non_target=no"
+        self.assertEqual(cp.stdout.strip(), want, f"got:\n{cp.stdout}\nwant:\n{want}")

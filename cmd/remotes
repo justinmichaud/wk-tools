@@ -10,26 +10,20 @@
 # The two names are not interchangeable and the whole push design rests on
 # them being separate:
 #
-#   origin  is WebKit/WebKit, and is fetch-only. `git log origin/main` has to
-#           mean upstream's main -- if origin is the machine's local mirror it
-#           means "whatever that mirror last fetched", which is a different
-#           question with the same spelling. Its push URL is a `no-push://`
-#           address so a stray `git push` fails at once instead of after an
-#           auth round trip, or worse, succeeding somewhere.
+#   origin  is WebKit/WebKit, fetch-only. `git log origin/main` has to mean
+#           upstream's main, not "whatever the local mirror last fetched" --
+#           its push URL is `no-push://` so a stray `git push` fails at once.
 #   fork    is your own fork, fetched over https and *pushed over ssh through
 #           a host alias*. The alias is how one deploy key per fork is
-#           selected (GitHub takes many keys on one repository and refuses one
-#           key on two), so the alias is not cosmetic: an https push URL means
-#           git never consults ssh, never offers a key, and no amount of
-#           `wk push on` will make a push work.
+#           selected (GitHub refuses one key on two repositories), so an
+#           https push URL means git never consults ssh or offers a key, and
+#           no amount of `wk push on` will make a push work.
 #
 # Both are asserted at creation (wk_wiring_script, lib/store.sh -- one
-# authority, used by every driver) and never *checked* afterwards. They drift
-# two ordinary ways: a workspace made before that authority existed keeps what
-# `git clone --shared <mirror>` left it (origin pointing at the mirror,
-# pushable), and anything can run `git remote set-url` later -- and nothing
-# else reports the difference, so a push from a mis-wired box cannot work
-# whatever `wk push` says.
+# authority, used by every driver) and never *checked* afterwards. They drift:
+# a workspace made before that authority existed keeps what `git clone
+# --shared <mirror>` left it, and anything can run `git remote set-url`
+# later -- so a push from a mis-wired box cannot work whatever `wk push` says.
 #
 #   wk remotes             every workspace this machine can see
 #   wk remotes <ws>        one of them, with its remotes printed
@@ -38,9 +32,8 @@
 #
 # --fix is a re-assertion, not a repair in the wipe-over-repair sense: the
 # wiring is *derived* (the same script that creates it runs again), so there
-# is nothing to converge on a half-state. Touches only git config -- remotes,
-# `core.sshCommand`, and the current branch's *upstream* when that upstream
-# is a remote nobody pushes to -- never a commit, index, or working tree.
+# is nothing to converge on. Touches only git config -- remotes,
+# `core.sshCommand`, the branch's upstream -- never a commit or working tree.
 #
 #   0  every checkout is wired correctly (or --fix made it so)
 #   1  something is wrong (and --fix was not given)
@@ -107,11 +100,8 @@ fix_one() {
     local ws="$1" extra_name="" extra_url="" ssh_config=""
     # shellcheck disable=SC2034 -- read into three names used just below.
 
-    # The same arguments the driver used at creation, from the driver itself --
-    # a remote target keeps its ssh aliases in a config file under its own root
-    # (its $HOME is shared with other machines and often other people), and its
-    # local copy of the history is a second remote. Asking the driver means
-    # --fix cannot wire a workspace differently from the way it was created.
+    # The same arguments the driver used at creation, from the driver itself,
+    # so --fix cannot wire a workspace differently from how it was created.
     { read -r extra_name; read -r extra_url; read -r ssh_config; } <<EOF
 $(t_wiring_args)
 EOF
@@ -121,10 +111,9 @@ EOF
         || { warn "could not re-wire '$ws'"; return 1; }
     changed "re-wired '$ws'"
 
-    # ...and the branch, which is the same rule one level down: we never push to
-    # an upstream, so a working branch belongs to its project's fork. Reported
-    # rather than silent -- it is somebody's branch -- and it says so when the
-    # fork does not have it yet, because pushing it is a decision.
+    # ...and the branch, one level down: we never push to an upstream, so a
+    # working branch belongs to its project's fork. Reported, not silent --
+    # it is somebody's branch, and pushing it is a decision.
     _b=$(t_exec "$ws" sh -c "$(wk_branch_upstream_fix_script "$(t_src "$ws")")" 2>/dev/null | tr -d '\r') || _b=""
     [ -z "$_b" ] || printf '%s\n' "$_b" | sed 's/^/  /' >&2
     # Say it worked, from the same check -- a fix that reports success without
@@ -192,14 +181,11 @@ for TARGET in $_TARGETS; do
         [ "$rc" -gt "$worst" ] && worst="$rc"
     done
 
-    # The base snapshot, where every *future* workspace on this target gets
-    # its remotes from. `container/firstrun.sh` re-asserts the wiring per new
-    # workspace, so a stale snapshot isn't fatal -- but it's the same fault
-    # one step upstream, and this repo's own podman VM snapshot had it
-    # (published before the wiring authority existed).
-    #
-    # Checked here, not in a command of its own: same question, same kind of
-    # tree. It's this machine's store, read directly -- no driver, nothing started.
+    # The base snapshot, where every *future* workspace gets its remotes
+    # from. `container/firstrun.sh` re-asserts the wiring per new workspace,
+    # so a stale snapshot isn't fatal, but it's the same fault one step
+    # upstream. Checked here, not a command of its own: this machine's
+    # store, read directly -- no driver, nothing started.
     if t_needs_base; then
         # base_path is the checkout itself, not the directory holding it.
         _base=$(current_base 2>/dev/null || true)

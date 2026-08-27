@@ -38,6 +38,7 @@ case "$ACTION" in setup|rm) [ -n "$TARGET" ] || ACTION="" ;; esac
     becomes the target name. See README.md, Workflows."
 
 require_name "$TARGET"
+[ $# -le 2 ] || die "usage: wk remote setup|rm <target>; see wk remote -h"
 
 # --- rm ------------------------------------------------------------------------
 # The mirror image of setup, in reverse order: the machine first (rc lines,

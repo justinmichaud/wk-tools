@@ -48,10 +48,6 @@ own, possibly wrong, rules.
 interactive prompt guards a destructive action and nothing else prompts;
 destructive prompts default to No and decline without a terminal.
 
-**Resolution**: a workspace name on two targets refuses and names
-both; a target that cannot be probed during resolution is reported
-unreachable by name rather than dropped silently.
-
 **`wk sync` scope selection** (bare / `--machine` / `--all`, and the
 one-workspace / several / none / no-terminal branches) against a faked
 workspace list — pure decision logic, no real machine needed.

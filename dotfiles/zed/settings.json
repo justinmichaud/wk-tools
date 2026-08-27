@@ -76,7 +76,27 @@
   "lsp": {
       "clangd": {
         "binary": {
-          "arguments": ["--header-insertion=never"],
+          // docs/Urgent/HUMAN-clangd.md. clangd needs pointing at a build's
+          // compile_commands.json (WebKit's tree carries none at its root,
+          // only inside whichever build dir produced it -- see
+          // container/helix/languages.toml for the same setting with the
+          // full reasoning); every container workspace starts on
+          // config=jsc-release, which builds to WebKitBuild/JSCOnly/Release.
+          // Working a different config? Build it once, then edit this file's
+          // deployed copy (~/.config/zed/settings.json) to match, and
+          // "editor: restart language server" from the command palette.
+          "arguments": [
+            "--compile-commands-dir=/src/WebKit/WebKitBuild/JSCOnly/Release",
+            "--background-index",
+            "--background-index-priority=low",
+            "--pch-storage=memory",
+            "--header-insertion=never",
+            "-j=4",
+            "--limit-results=200",
+            "--malloc-trim",
+            "--clang-tidy=false",
+            "--enable-config"
+          ],
           "path": "clangd"
         }
       },

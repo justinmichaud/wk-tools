@@ -253,6 +253,12 @@ usage() {
   wk <command> --force     cross a refusal that exists because of a rule; the
                            warning repeats when the command ends. It does not
                            force past a missing workspace or a failed build
+  wk <command> --quiet     drop the info/log narration; a result, a warning
+                           and an error still print. Every command accepts it
+  wk <command> --all       every one of what the command acts on -- every
+                           machine ('wk sync'/'wk push'/'wk sudo'), every line
+                           of the log ('wk logs'); a command's own -h says
+                           what its --all covers
   WK_DEBUG=1               verbose output
 EOF
         printf '\n  wk help                  README.md: architecture, setup, every workflow by example\n'
@@ -515,8 +521,23 @@ bare_report() {
         exit "$worst"
     fi
 
+    # `wk ls --json` is one document from up to two processes, same as the
+    # status halves above -- captured into files and merged (json_merge_list)
+    # instead of streamed, since two JSON documents back to back is not one.
+    _ls_json=""
+    if [ "$cmd" = ls ]; then
+        for _a in ${@+"$@"}; do [ "$_a" = --json ] && _ls_json=1; done
+    fi
+    _ls_local="" _ls_vm=""
+
     if [ -n "$hosts" ]; then
-        rc=0; WK_TARGET="${hosts# }" "$impl" ${@+"$@"} || rc=$?
+        rc=0
+        if [ -n "$_ls_json" ]; then
+            _ls_local=$(mktemp)
+            WK_TARGET="${hosts# }" "$impl" ${@+"$@"} > "$_ls_local" || rc=$?
+        else
+            WK_TARGET="${hosts# }" "$impl" ${@+"$@"} || rc=$?
+        fi
         _bump "$rc"
     fi
 
@@ -525,7 +546,12 @@ bare_report() {
         # rows and neither a header nor an empty-listing note.
         rc=0
         if { [ "$cmd" = ls ] || [ "$cmd" = remotes ]; } && [ -n "$hosts" ]; then
-            ( WK_ROW_LABEL="$_self"; forward_to_vm "$cmd" --continued ${@+"$@"} ) || rc=$?
+            if [ -n "$_ls_json" ]; then
+                _ls_vm=$(mktemp)
+                ( WK_ROW_LABEL="$_self"; forward_to_vm "$cmd" --continued ${@+"$@"} ) > "$_ls_vm" || rc=$?
+            else
+                ( WK_ROW_LABEL="$_self"; forward_to_vm "$cmd" --continued ${@+"$@"} ) || rc=$?
+            fi
         else
             ( WK_ROW_LABEL="$_self"; forward_to_vm "$cmd" ${@+"$@"} ) || rc=$?
         fi
@@ -533,6 +559,11 @@ bare_report() {
     elif command -v podman >/dev/null 2>&1; then
         warn "the podman machine '$WK_MACHINE' is stopped, so container workspaces are not included"
         log  "  'wk start' to bring it up"
+    fi
+
+    if [ -n "$_ls_json" ]; then
+        json_merge_list workspaces "$_ls_local" "$_ls_vm"
+        rm -f "$_ls_local" "$_ls_vm"
     fi
     exit "$worst"
 }
@@ -635,6 +666,7 @@ main() {
         case "$_seen_dashdash:$_a" in
             :-h|:--help|:--explain) explain_cmd "$cmd" "$impl" ;;
             :--force) WK_FORCE=1; export WK_FORCE; continue ;;
+            :--quiet) WK_QUIET=1; export WK_QUIET; continue ;;
             :--)      _seen_dashdash=1 ;;
         esac
         _rest+=("$_a")

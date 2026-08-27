@@ -4,21 +4,18 @@
 # wk: where=workspace name=optional forward=no group=hosts needs podman
 #
 # With a workspace named, brings only that workspace's environment back
-# through the driver contract (t_start) -- a container's machine started if
-# it was not already, then the container itself; a macOS guest booted. A
-# target with no notion of starting a single workspace (a remote build
-# machine is always reachable; a workspace cannot start itself) says so and
-# does nothing else.
+# through the driver contract (t_start): a container's machine started if
+# not already, then the container itself; a macOS guest booted. A target
+# with no notion of starting one workspace says so and does nothing else.
 #
-# `forward=no`, the same reason `wk stop` gives: this has to run on the host
-# that holds the environment, never forwarded into the podman VM.
+# `forward=no`, the same reason `wk stop` gives: runs on the host that holds
+# the environment, never forwarded into the podman VM.
 #
 # With no workspace, starts the podman machine, then every workspace
 # container that exists. Container init does not re-run: .wkdev-init guards
-# its task list behind /run/.wkdev-init-done, so a restart is quick and does
-# not re-provision. macOS guests are listed rather than started (they compete
-# with the podman machine for memory, so bringing every guest up unattended
-# would swap) -- `wk start <that-workspace>` is how to bring one back.
+# its task list behind /run/.wkdev-init-done, so a restart is quick. macOS
+# guests are listed rather than started (see below) -- `wk start
+# <that-workspace>` is how to bring one back.
 #
 #   wk start                 the podman machine, then every container
 #   wk start <workspace>     only that workspace's environment

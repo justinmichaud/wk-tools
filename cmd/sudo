@@ -60,10 +60,6 @@ WK_SUDO_TIMEOUT_DESC="30 seconds"
 ACTION=status
 TARGET=""
 ALL=""
-# The verdict line and nothing else, for the machine that is being asked as
-# part of somebody else's listing: the hints belong to the side that knows the
-# machine by name (`--target <it>`), not to the machine itself.
-QUIET=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -74,7 +70,6 @@ while [ $# -gt 0 ]; do
         require) die "'wk sudo require' is now 'wk sudo setup'" ;;
         --target) TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
         --all)    ALL=1; shift ;;
-        --quiet)  QUIET=1; shift ;;
         *) die "usage: wk sudo status|setup; see wk sudo -h" ;;
     esac
 done
@@ -351,7 +346,9 @@ case "$ACTION" in
 status)
     rc=0
     v=$(verdict_local) || rc=$?
-    if [ -n "$QUIET" ]; then
+    # The hint lines below are log(), already dropped by --quiet
+    # (lib/common.sh); only the hostname prefix needs its own check.
+    if [ -n "${WK_QUIET:-}" ]; then
         printf '%s\n' "$v"
         exit "$rc"
     fi

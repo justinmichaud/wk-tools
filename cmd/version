@@ -3,18 +3,16 @@
 # wk version [--tree] -- which wk-tools this machine is running
 # wk: where=local name=none readonly group=hosts
 #
-# Every machine in the fleet runs an rsynced *copy* of this repository, which
-# goes stale silently and then fails in confusing ways.
+# Every machine in the fleet runs an rsynced *copy* of this repository,
+# which goes stale silently and fails in confusing ways.
 #
-# Two identifiers, because neither is enough on its own:
+# Two identifiers, since neither is enough on its own:
 #
-#   sha     the git commit, when there is a git checkout here. Only the
-#           workstation has one -- copies are rsynced with `--exclude .git`
-#           -- so this is `-` elsewhere and says nothing about uncommitted
-#           edits by itself.
-#   tree    a hash of the file contents, computed identically everywhere and
-#           over exactly what rsync copies. This answers "is that machine
-#           running what I am running", including uncommitted work.
+#   sha     the git commit -- only the workstation has one (copies are
+#           rsynced with --exclude .git), so this is `-` elsewhere and says
+#           nothing about uncommitted edits by itself.
+#   tree    a hash of the file contents, computed identically everywhere.
+#           Answers "is that machine running what I am", uncommitted work included.
 #
 # Both are derived on every call; nothing is written down.
 #
@@ -25,9 +23,8 @@ set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 
-# sha256, whatever this machine calls it. macOS ships `shasum` (perl) and no
-# `sha256sum`; Fedora CoreOS and Ubuntu ship both. A *command*, not a function,
-# because xargs has to be able to exec it.
+# macOS ships `shasum` (perl) and no `sha256sum`; Fedora CoreOS and Ubuntu
+# ship both. A *command*, not a function, since xargs has to exec it.
 if have sha256sum;  then SHA256=sha256sum
 elif have shasum;   then SHA256="shasum -a 256"
 else die "no sha256 program on this machine (sha256sum or shasum)"
@@ -35,13 +32,11 @@ fi
 
 _sha256() { $SHA256; }
 
-# Paths are relative to the root, since the root differs per machine and
-# hashing absolute paths would make two identical trees look different.
-# `.git` is excluded because it is not part of what runs; `lock.mdb` because
-# an LMDB lock file is rewritten by any process that opens the database, a
-# read included, which otherwise reports permanent false drift.
-#
-# Sorted under LC_ALL=C so two machines with different locales agree on order.
+# Paths are relative to the root, since hashing absolute paths would make
+# two identical trees look different. `.git` is excluded as not part of
+# what runs; `lock.mdb` because an LMDB lock file is rewritten by any
+# process that opens the database, even a read, reporting permanent false
+# drift. Sorted under LC_ALL=C so two machines with different locales agree.
 tree_hash() {
     # shellcheck disable=SC2086 -- $SHA256 is a deliberate command word list.
     ( cd "$WK_ROOT" && \

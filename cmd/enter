@@ -4,16 +4,15 @@
 # wk: where=workspace name=required ready=yes group=workspaces
 #
 # Opens an interactive shell in the workspace, or runs a given command there
-# and exits. On Linux this is also where GPU and desktop integration happens:
-# benchmarks need real acceleration, so the Wayland socket and /dev/dri are
-# passed in. Display integration and network isolation are independent -- the
-# workspace keeps the GPU while still being unable to reach the LAN.
+# and exits. On Linux this is also where GPU and desktop integration
+# happens: the Wayland socket and /dev/dri are passed in, independent of
+# network isolation -- the workspace keeps the GPU while still unable to
+# reach the LAN.
 #
 #   --zed        open the workspace in Zed instead of a shell
 #   [--] <cmd>   run one command there and exit, instead of a shell. The `--`
-#                is optional (matching `wk run`'s convention for anyone who
-#                types it out of habit) and is dropped rather than handed to
-#                the workspace as the first word of its command.
+#                is optional (matching `wk run`'s convention) and is dropped
+#                rather than handed to the workspace as the command's first word.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,34 +35,31 @@ done
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-# One implementation of "open this in Zed", in cmd/zed: the readiness gate, the
-# transport a container needs, the alias and the launch are all the same
-# whether the ask came from here, from `wk new --zed`, or from `wk zed`.
+# One implementation of "open this in Zed", in cmd/zed: same readiness gate,
+# transport, alias and launch whether the ask came from here, `wk new
+# --zed`, or `wk zed`.
 if [ -n "$ZED" ]; then
     exec "$WK_ROOT/cmd/zed" "$NAME"
 fi
 
 [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
-# No `exec`: t_exec is a shell function, and exec can only replace the process
-# with a real program. `exec t_exec ...` fails with "t_exec: not found".
+# No `exec`: t_exec is a shell function, and exec only replaces the process
+# with a real program.
 if [ $# -gt 0 ]; then
     t_exec "$NAME" "$@"
     exit $?
 fi
 
-# The workspace sees the compositor at a fixed path, so what matters is whether
-# a session is running here -- not whether this particular shell has one, which
-# it never does over ssh.
+# What matters is whether a session is running here, not whether this
+# particular shell has one, which it never does over ssh.
 if is_linux && [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display/wayland-0" ]; then
     warn "no benchmark session running; GPU-accelerated tests fall back to software rendering"
     log  "  start one with:  wk session on"
 elif is_linux; then
-    # There is a session, but it may be one of the slow ones -- and from inside
-    # the workspace the socket looks identical either way.
+    # May be one of the slow sessions; the socket looks identical either way.
     session_mode_warn || true
 fi
 
-# No `exec` here either: t_enter is a shell function (the vm driver's own
-# t_enter execs ssh itself when that is the right thing).
+# No `exec` here either: t_enter is a shell function.
 t_enter "$NAME"

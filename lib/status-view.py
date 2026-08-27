@@ -38,12 +38,11 @@ class Merger:
     """Records -> one document, grouped machine / method / workspace, applied
     one record at a time.
 
-    A class rather than `merge`'s old run-to-completion loop, because the
-    text renderer wants to draw a machine's block the moment its records stop
-    arriving rather than only once the whole fleet has answered -- and both
-    that streaming reader and `merge` (below, for --json/--html/--web) are
-    the same fold over the same records, so there is exactly one place that
-    knows what a record means.
+    A class rather than a function, because the text renderer wants to draw a
+    machine's block the moment its records stop arriving rather than only
+    once the whole fleet has answered -- and both that streaming reader and
+    `merge` (below, for --json/--html/--web) are the same fold over the same
+    records, so there is exactly one place that knows what a record means.
 
     Order is the order the records arrived in, per group, because that is the
     order the walk found them and it is stable (order_targets in cmd/status
@@ -85,8 +84,8 @@ class Merger:
             m["self"] = m["self"] or bool(r.get("self"))
             # Everything else the record carries -- how it is reached, which
             # conf declared it -- kept from whichever half knew it. Dropping
-            # these was invisible: the machine still appeared, with the answer
-            # to "how do I get there" silently missing.
+            # these would be invisible: the machine still appears, with the
+            # answer to "how do I get there" silently missing.
             for k in ("tailnet", "direct", "conf"):
                 if r.get(k) and not m.get(k):
                     m[k] = r[k]
@@ -197,9 +196,8 @@ def read_doc(path):
 # Matched on the *first word*, because most of these states are phrases: "bench
 # mode", "base image -- not a bench system", "role installed", "no answer within
 # 20s". The page is handed these four lists rather than carrying a second copy
-# (page(), below) -- when it did carry one the two had already drifted, and `up`,
-# `clean`, `finished` and `held` were coloured in the terminal and plain on the
-# page.
+# (page(), below): one shared vocabulary, so a state cannot be coloured in the
+# terminal and plain on the page.
 GOOD = ("ok", "present", "running", "host mode", "up", "bench", "open")
 BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held",
         # A board that fell back to its base image is not a bench system, and
@@ -266,11 +264,8 @@ ANSI = {
     "head": "\033[1;36m",
 }
 
-# Six columns, and the one that was dropped is `ws`: it repeated the state word
-# exactly when it was not `present` (report_ws sets both from ws_state) and said
-# "present" the rest of the time. What took its place is what a person actually
-# needs before touching a workspace -- whether there is work in it that exists
-# nowhere else.
+# Six columns: what a person actually needs before touching a workspace --
+# including whether there is work in it (`work`) that exists nowhere else.
 COLUMNS = ("workspace", "state", "branch", "work", "snap", "build")
 
 
@@ -593,11 +588,11 @@ def render_machine_block(m, colour, widths=None):
     for f in m["facts"]:
         if f.get("type") == "wk-tools":
             what = "wk-tools" + (" (%s)" % f["copy"] if f.get("copy") else "")
-            # The tree hash is the answer; the commit is context, and only
-            # when there is one. Every rsynced copy reports `-` for it --
-            # they are copied with `--exclude .git` -- so it was a column of
-            # dashes with no heading in the common case, sitting between the
-            # label and the thing the reader came for.
+            # The tree hash is the answer; the commit is context, shown only
+            # when there is one. Every rsynced copy reports `-` for it (copied
+            # with `--exclude .git`), so showing it unconditionally would be a
+            # column of dashes sitting between the label and the thing the
+            # reader came for.
             verdict = (paint("in sync", "good", colour) if f.get("insync")
                        else paint("DIFFERS from the workstation (%s)" % f.get("expect", "?"),
                                   "bad", colour))
@@ -843,14 +838,14 @@ def render_text_stream(fh, out, colour):
 # reason you are worried about -- and a status page that cannot render because
 # a stylesheet host is unreachable is the exact failure it exists to report on.
 #
-# This is the primary view now (status_default_mode, lib/common.sh): a bare
-# `wk status` at a terminal opens it. So it is built to be read at a glance and
-# not merely to contain the facts -- the same document underneath, arranged so
-# that the things that cost time or work are the things the eye lands on:
+# This is the view a bare `wk status` opens at a terminal (status_default_mode,
+# lib/common.sh). So it is built to be read at a glance and not merely to
+# contain the facts -- the same document underneath, arranged so that the
+# things that cost time or work are the things the eye lands on:
 #
 #   the verdict     the exit code, in the words cmd/status's header gives it,
-#                   coloured, at the top. That code is the command's contract
-#                   and it was previously visible only to `echo $?`.
+#                   coloured, at the top -- the command's contract, otherwise
+#                   visible only to `echo $?`.
 #   what is wrong   a strip of counts, and only of things that are non-zero: a
 #                   listing with nothing wrong shows nothing there rather than
 #                   six zeroes to read past.
@@ -1102,8 +1097,8 @@ function tiles(m) {
   return t.length ? `<div class="tiles">${t.join("")}</div>` : "";
 }
 
-// The exit code, in cmd/status's own words. It is this command's whole contract
-// and on a page it was previously invisible.
+// The exit code, in cmd/status's own words -- this command's whole contract,
+// otherwise invisible on a page.
 const VERDICT = {
   0: ["good", "idle, or the last build succeeded"],
   1: ["bad",  "a build failed"],

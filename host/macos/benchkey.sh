@@ -1,25 +1,16 @@
 # ./setup --stage benchkey -- the credentials the macOS benchmark lane needs.
 #
-# A ./setup stage rather than something the bench commands warn about, because
-# the warning route was tried and it does not work. `wk bench mac-volume` printed
-# four lines telling the reader to create ~/.config/wk/tailscale-authkey by hand
-# and carried on when it was absent -- and it was absent every time, for two
-# days, while the one thing it gates is a tailnet identity for the benchmark
-# install. Without that identity the install cannot be reached from any driver
-# that reaches this Mac over the tailnet (rpi5 does), which is why the A/B lane
-# plants a job it cannot watch, and why collecting a finished result needs
-# somebody to walk to the machine and pick a disk.
-#
-# So it is asked for, once, here -- next to the other things ./setup asks for --
-# and stored 0600. Skipping is fine and says what is lost.
+# Without a tailnet identity, the benchmark install cannot be reached from a
+# driver that reaches this Mac over the tailnet (rpi5 does): the A/B lane plants
+# a job it cannot watch, and collecting a result needs somebody to walk over.
+# Asked for once, here, next to the other things ./setup asks for, and stored
+# 0600. Skipping is fine and says what is lost.
 #
 # Only on the Mac that has the benchmark volume: nothing else uses this.
 #
-# Sourced by ./setup, like every other stage, so WK_ROOT, the shell options and
-# common.sh are already in scope. Re-deriving its own WK_ROOT from `dirname $0`
-# does not work: `$0` in a sourced file is the *sourcing* script, so under
-# `wk setup` it resolves two levels above the checkout and the stage dies on a
-# missing lib/common.sh. Stages do not have their own root.
+# Sourced by ./setup, so WK_ROOT, the shell options and common.sh are already
+# in scope: re-deriving WK_ROOT from `dirname $0` would resolve two levels
+# above the checkout, since `$0` in a sourced file is the *sourcing* script.
 
 is_macos || { debug "benchkey: macOS only"; return 0; }
 
@@ -43,11 +34,8 @@ else
     fi
 fi
 
-# The Tailscale package, cached next to the key. Fetched here rather than during
-# provisioning for the same reason the key is: a provisioning step that needs the
-# network every time is a step that fails on the day the network is what is being
-# fixed. No compiler is involved -- see bench/mac-bench-volume.sh for why the
-# comment that claimed one was wrong.
+# Cached next to the key, for the same reason: a provisioning step that needs
+# the network every time fails on the day the network is what's being fixed.
 PKG="$HOME/.config/wk/Tailscale-macos.pkg"
 if [ -s "$PKG" ]; then
     info "tailscale package already cached ($(du -h "$PKG" | awk '{print $1}'))"

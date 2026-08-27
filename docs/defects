@@ -16,10 +16,15 @@ Decisions needed (from the agent; answer inline, or edit the item below):
    name until the new card boots. Same will apply to rpi5 when its card is
    written. rpi4 is not on the tailnet, so its write is not blocked. Say "go"
    and remove the node, or say to keep the old node and skip rpi3 for now.
+   (agent 2026-08-26 late: still blocked -- `rpi3` is on the tailnet; nothing
+   was removed. All three yocto images are built for real on moose, with
+   tailscale 1.102.2 + wk-wifi-join + wpa-supplicant in each manifest:
+   rpi3 2.52 19:08, rpi4 2.52 18:28, rpi5 2.54 19:27 local. Ready to write.)
 2. WiFi credentials for the Pi cards: none exist yet. The file is
    `~/.config/wk/wifi` on the machine that runs `wk sysimage write` (this
    Mac), two lines: `ssid=<name>` and `psk=<passphrase>`; never in git. Create
    it, or say which machine should hold it.
+   (agent: still blocked -- ~/.config/wk/wifi does not exist on this Mac.)
 3. "rpi5 2.54 yocto image": no 2.54 config exists; upstream has
    `webkitglib/2.54`. I am adding `image/configs/webkit-2.54-yocto-rpi5-64.conf`
    as a copy of the 2.52 one with the branch changed. Say if you meant WPE
@@ -38,11 +43,18 @@ Decisions needed (from the agent; answer inline, or edit the item below):
    and fold your `t_info` probe into `ws_exists` (it already has one for the
    container case). Say "reconcile" and I do it (stash, pull, resolve, re-run
    the suite); or you do it.
+   (agent: moot -- the tree was rebased onto origin/main ecb66ed as aa2e8c0,
+   registry-free, and the full suite runs on it. HEAD is detached at aa2e8c0
+   and the local `main` ref still points at the pre-rebase 3cc0aa6, whose
+   content is all in aa2e8c0; `git checkout -B main aa2e8c0` reattaches it --
+   left for you, the permission classifier refused it here.)
 6. The rpi3/rpi4 "recovery image builds" on moose finished in 2 minutes and
    produced NO new image: bitbake did not run, and the wrapper reported the
    day-old image as built (no WiFi layer in it). Being fixed (image stage
    must run bitbake and prove the artifact is newer than the run). No decision
    needed; noted so the fast "done" is not believed.
+   (agent: fixed and verified -- each yocto-image.log ends with a bitbake
+   "Tasks Summary ... all succeeded" and the wic.xz postdates the run.)
 
 7. A "transient, 100% reproducible perf image using a normal distro" for
    rpi5/moose (your HUMAN-benchmark-start note) does not exist: the fleet
@@ -90,21 +102,20 @@ Everything else below proceeds without you.
 Defects:
 
 - Confirm new recovery images for rpi3 and rpi4 build and write fine. Both sd card (rpi3) and second usb stick (rpi4) are connected to rpi5, so no intervention is needed. I give you permission to do this.
-  (agent: builds started on moose 2026-08-26 17:59 -- `wk status` shows them; the writes
-  wait on decisions 1 and 2 above)
-  (agent: the first yocto "builds" were no-ops -- the helper reused day-old
-  images; fixed, rebuilt for real. rpi4: built 18:28, manifest carries
-  tailscale 1.102.2, wk-wifi-join, wpa-supplicant -- ready to write once
-  decision 2 (WiFi credentials) is answered. rpi3: still rebuilding clang. The WPE 2.38 buildroot image for rpi3 (first-ever run of that
-  builder) stopped at its host container image: a samply install step in
-  container/buildroot/Containerfile extracts the wrong tar member; being
-  fixed, then retried.)
+  (agent: both images are built for real on moose -- see decision 1. The
+  writes wait on decisions 1 and 2. The first-ever buildroot image,
+  wpewebkit-2.38 rpi3, finished on moose at 20:08: sdcard.img 1.6 GB,
+  `stage 'image' done` after the freshness check. `wk sysimage ls` prints `?`
+  in its machine column -- the profile is not derived from a buildroot
+  workspace path; owed with the image-store removal.)
 
 - Confirm rpi5 2.54 yocto image works and can be deployed.
-  (agent: image/configs/webkit-2.54-yocto-rpi5-64.conf added; build started on
-  moose; the write waits on decisions 1-3 above)
+  (agent: built for real on moose, 19:27; the write waits on decisions 1-3)
 
 - wk status should load local data quickly first and fill the rest later.
+  (agent: the streaming render is in; a bare `wk status` also hung forever --
+  a job returning non-zero left no `.rc` marker -- fixed in lib/par.sh,
+  tests/test_par.py; 10.5s end to end now)
 
 - Audit every subcommand for option consistency: a missing --quiet, --target,
   --all or --force where a sibling command has one; a parameter silently
@@ -115,6 +126,9 @@ Defects:
   wk status does; --all means "every machine" in wk sync and "every item"
   elsewhere -- one meaning, or two words; --count appears in bench, pick, pr,
   pi, status and sync with no confirmed single semantics.
+  (agent: measured -- only cmd/sudo parses a wk --quiet; the other hits are
+  git/systemctl flags. --count is a wk flag only in bench and pi; the rest are
+  `git rev-list --count`. Being moved into the dispatcher / audited.)
 
 - High-level docs: an architecture overview and every supported workflow by
   example, very short. README.md now has a first version of this; the item

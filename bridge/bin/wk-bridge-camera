@@ -19,10 +19,10 @@
 # never be offered to the house WiFi, and binding is how that is enforced --
 # not the firewall, which is a second line for the same rule.
 #
-# UNTESTED on either phone as of writing. Camera support on both is handled by
-# libcamera and the sensors deliver formats plain v4l2 consumers do not always
-# accept; if ffmpeg cannot open the node, the pipeline is what needs replacing
-# here, not the service around it.
+# UNTESTED on either phone. Camera support on both is handled by libcamera and
+# the sensors deliver formats plain v4l2 consumers do not always accept; if
+# ffmpeg cannot open the node, the pipeline is what needs replacing here, not
+# the service around it.
 set -u
 
 camera=off

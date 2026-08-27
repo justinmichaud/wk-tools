@@ -88,12 +88,9 @@ wifi_if() {
 
 healthy() {
     # `-o`, not `-br`: BusyBox ip has no brief mode and exits 1 with a usage
-    # message, so this read back empty on every check -- which made healthy()
-    # return false unconditionally and set this ladder climbing on a working
-    # uplink. Interface bounce, NetworkManager restart, driver reload, and then
-    # reboots against the budget below, forever, on a phone with nothing wrong
-    # with it. The single most damaging line in this role, and invisible until
-    # it ran on the device.
+    # message, which would read back empty on every check and set this ladder
+    # climbing -- interface bounce, NetworkManager restart, driver reload,
+    # reboot -- against a working uplink.
     addr=$(ip -4 -o addr show dev "$WIFI" 2>/dev/null | awk '{print $4; exit}')
     [ -n "$addr" ] || { log "no IPv4 address on $WIFI"; return 1; }
 
@@ -197,13 +194,10 @@ while :; do
         # make it ask again. Except taking the carrier away and giving it back,
         # which every DHCP client treats as a new link.
         #
-        # The trigger is reachability and *not* an empty lease file, which is
-        # what this first tried and was simply wrong: these leases are infinite,
-        # so a client that already has an address re-uses it after a carrier
-        # drop by ARP alone and never files another request. Tested by deleting
-        # the lease file on a working segment -- the flap fired, the board did
-        # not re-ask because it had no need to, and nothing was broken except
-        # this check's opinion of it.
+        # The trigger is reachability, not an empty lease file: these leases
+        # are infinite, so a client that already has an address re-uses it
+        # after a carrier drop by ARP alone and never files another request --
+        # watching the lease file would miss that case entirely.
         #
         # Two consecutive passes first, because one can legitimately catch a
         # board that is still booting, and flapping the link under a client

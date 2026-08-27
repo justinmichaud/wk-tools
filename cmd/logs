@@ -35,6 +35,8 @@ LOG="$(wk_ws_dir "$NAME")/build.log"
 case "${1:-}" in
 --follow|-f) exec tail -f "$LOG" ;;
 --all|-a)    exec tr '\r' '\n' < "$LOG" ;;
+"") ;;
+*) die "usage: wk logs [<workspace>] [--follow|-f|--all|-a]; see wk logs -h" ;;
 esac
 
 log "errors:"

@@ -27,12 +27,10 @@ BOOT_ARMING=guest
 # MACH_GUEST is a *workspace* name, and the vm target speaks two namespaces:
 # `_vm()` maps a workspace to the tart VM that backs it by prefixing `wk-`.
 # t_start, t_stop and _ip all take the workspace name and map it themselves;
-# `_vm_state` takes the mapped name. Three calls here passed the unmapped one,
-# so every state probe answered `absent` about a guest that was sitting there
-# stopped -- which made `--status` wrong and `b_arm` fatal ("there is no guest
-# 'wk-bench'"), i.e. this driver could never arm. Hidden by the workspace being
-# called `wk-bench`, so the correct tart name is the double-prefixed
-# `wk-wk-bench` and the wrong one looks entirely plausible.
+# `_vm_state` takes the mapped name. Passing it the unmapped one is a probe
+# that always answers `absent` -- easy to miss because the workspace here is
+# itself called `wk-bench`, so the correct tart name, the double-prefixed
+# `wk-wk-bench`, looks entirely plausible.
 
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
@@ -85,7 +83,6 @@ b_probe() {
 # runs under `set -euo pipefail`, so a guest that is merely *off* -- which is
 # the normal state of a benchmark machine between runs -- would otherwise end
 # the command in silence, with no output and no error, at the first probe.
-# (Measured: `wk boot benchvm --status` printed nothing and exited 1.)
 _guest_boot_sec() {
     m_ssh 'sysctl -n kern.boottime' 2>/dev/null \
         | sed -n 's/.*{ *sec *= *\([0-9][0-9]*\).*/\1/p' || true
@@ -163,14 +160,12 @@ b_bench_put() {
       rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
 }
 
-# The guest exists only where tart does.
-# Asked through the vm driver's own resolver, not with a bare `command -v tart`.
-# The resolver (_tart_bin) already falls back to ~/.local/bin/tart and to the
-# .app inside ~/.local/share, which is where the signed bundle has to live --
-# so `wk vm ls` was right about this guest at the same moment this function
-# called it unprobeable. The difference was PATH: a non-interactive ssh to a Mac
-# gets /usr/bin:/bin:/usr/sbin:/sbin and nothing else, so `command -v tart`
-# answers "no" on a machine running tart with three VMs on it. Any probe that
+# The guest exists only where tart does. Asked through the vm driver's own
+# resolver, not with a bare `command -v tart`: the resolver (_tart_bin) also
+# falls back to ~/.local/bin/tart and to the .app inside ~/.local/share, which
+# is where the signed bundle has to live. A non-interactive ssh session gets
+# /usr/bin:/bin:/usr/sbin:/sbin and nothing else, so `command -v tart` answers
+# "no" on a machine running tart with three VMs on it. Any probe that
 # duplicates a resolver instead of calling it will drift from it.
 b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; _tart_bin >/dev/null 2>&1 ); }
 

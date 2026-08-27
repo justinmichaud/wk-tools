@@ -4,16 +4,14 @@
 # wk: where=workspace name=required ready=yes group=workspaces
 # wk: flag --list where=local
 #
-# The reason to use this rather than calling build-webkit directly: the job
-# count is derived from memory actually available right now, and the build runs
-# where the scheduler and the OOM killer will pick it over your desktop
-# session. A plain `ninja -j$(nproc)` on a WebKit link step is the reliable way
-# to make a machine stop responding.
+# The job count is derived from memory actually available right now, and the
+# build runs where the scheduler and the OOM killer will pick it over your
+# desktop session.
 #
 #   --list                 print the available configs (wk build --list) and exit
 #   --dry-run              resolve everything and print the exact command line
 #                          this build would run, prefixed `running:`; build nothing
-#   --no-defaults          skip this target's WK_BUILD_ARGS conf default (below)
+#   --no-defaults          skip this target's WK_BUILD_ARGS conf default
 #   --detach                hand the build to the machine that runs it, and return
 #   --babysit[=model]       run under a Claude fix loop until it builds or gives up
 #   --branch <name>         check out this branch first
@@ -22,13 +20,6 @@
 #   --cmake <flags>         extra CMake flags, added to the config's own (repeatable)
 #   --env NAME=VALUE        extra environment for the build, overriding the config's (repeatable)
 #   --                      everything after this goes to build-webkit verbatim
-#
-# A real build prints its exact build-webkit command line first -- one line,
-# prefixed `running:` -- so it can be reproduced by hand outside wk without
-# guessing at flags; --dry-run prints that identical line and builds nothing.
-# A target with WK_BUILD_ARGS set in its targets/hosts/<name>.conf (see
-# buildbox4.conf for WK_TARGET_CMAKE, the same idea) has its default flags
-# folded into that line automatically; --no-defaults leaves them out.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -41,9 +32,8 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/build/configs.sh"
 
-# Kept whole, before any of the parsing below consumes it: `--detach` re-runs
-# this same command on the machine that will do the work, and the only
-# reliable way to reproduce an argument list is to have kept it.
+# Kept whole, before any parsing below consumes it: `--detach` re-runs this
+# same command on the machine that will do the work.
 _ALL_ARGS=("$@")
 
 if [ "${1:-}" = --list ]; then
@@ -52,22 +42,19 @@ if [ "${1:-}" = --list ]; then
     exit 0
 fi
 
-# --dry-run is accepted on either side of the config, because both readings are
-# natural and the name/config parse below would otherwise consume it as one or
-# the other. See the flag itself further down.
+# --dry-run is accepted on either side of the config, since both readings are
+# natural and the name/config parse below would otherwise consume it as one.
 DRY=""
 [ "${1:-}" = --dry-run ] && { DRY=1; shift; }
 
-# Inside a workspace there is exactly one name (this machine), and
-# `wk build <config>` is the only form claude/CLAUDE.md documents there. The
-# dispatcher resolves $WK_NAME and drops it on a host, so what's left is the
-# config either way -- except in here, where a second word is a mistaken name.
+# Inside a workspace there is exactly one name (this machine); the dispatcher
+# resolves $WK_NAME and drops it on a host, so what's left is the config
+# either way -- except in here, where a second word is a mistaken name.
 NAME="${WK_NAME:-}"
 if in_workspace; then
     # A name *and* a config, where the first word is not this workspace's own
     # name, is the host form typed in the wrong place: read literally it would
-    # build this workspace and report the second word as an unknown config,
-    # which explains neither half.
+    # build this workspace and report the second word as an unknown config.
     if [ -n "${2:-}" ] && config_load "${2:-}" 2>/dev/null; then
         die "no such workspace: ${1:-} -- this is workspace '$NAME', so the
     form in here is 'wk build ${2:-}' with no name"
@@ -76,10 +63,6 @@ fi
 CONFIG="${1:-}"
 shift 1 2>/dev/null || true
 
-# --dry-run: resolve everything and print what would happen, build nothing.
-# Here because a cold Apple-port build is ~99 minutes, so "does this reach the
-# right target with the right config and job count" can't be answered by
-# running one -- the exact question a workspace's first build asks.
 [ "${1:-}" = --dry-run ] && { DRY=1; shift; }
 
 require_name "$NAME"
@@ -94,39 +77,26 @@ config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-# This target's own default build flags, if its conf sets any
-# (targets/hosts/<name>.conf; load_target just sourced it -- the same
-# mechanism WK_TARGET_CMAKE already uses). Captured now, ahead of the flag
-# parsing below, because --no-defaults has to be able to override it.
+# This target's own default build flags (targets/hosts/<name>.conf; captured
+# now, ahead of the flag parsing below, since --no-defaults must override it).
 TARGET_BUILD_ARGS="${WK_BUILD_ARGS:-}"
 
-# The dispatcher already waited for the workspace (ready=yes) and refused
-# absent/broken/unreachable with its own words before this ran; this is just
-# the state for the dry-run report below.
-WS_STATE=$(ws_state "$NAME")
+WS_STATE=$(ws_state "$NAME")   # for the dry-run report below
 
-# The workspace's own architecture, from the driver rather than from a flag.
-# It was fixed when the workspace was created and cannot change afterwards --
-# the container is armhf or it is not -- so there is nothing to pass and
-# nothing to get wrong per build. The flags it implies are in lib/arch.sh.
+# Fixed when the workspace was created and cannot change per build -- the
+# container is armhf or it is not. The flags it implies are in lib/arch.sh.
 ARCH=$(t_arch "$NAME")
 
-# Named here, ahead of everything that resolves or writes, because --detach
-# (below) needs them before this process forks off the build it does not wait
-# for: it writes the running record itself rather than leaving a window where
-# `wk status` reads whatever the previous build left behind.
+# Named here, ahead of everything that resolves or writes: --detach (below)
+# writes the running record itself before forking off a build it won't wait
+# for, rather than leaving a window where `wk status` reads a stale one.
 WS=$(wk_ws_dir "$NAME")
 LOG="$WS/build.log"
 
-# The one writer for build.status, for every state, and t_status_put decides
-# where it lands: next to $WS for a target whose store is already this
-# machine's, or straight onto the machine's own store over ssh for one that
-# is a machine of its own (targets/remote.sh) -- one copy either way, where
-# `wk status` will actually look for it (directly, or through delegation).
-#
+# The one writer for build.status; t_status_put decides where it lands.
 # `running` carries no exit/finished/seconds/peak_mb and touches the log
 # fresh, so a reader judging liveness by log age (build_live, lib/detach.sh)
-# has real evidence rather than a stale mtime from whatever wrote last.
+# has real evidence rather than a stale mtime.
 write_status() {
     local state="$1" rc="${2:-}" content
     if [ "$state" = running ]; then
@@ -158,16 +128,12 @@ EOF
 }
 
 # Our own flags are taken off the argument list; everything left passes
-# through to the build untouched.
-#
-# --sysroot is reserved so it can't be confused with --arch (which workspace
-# runs vs. what a build targets, see lib/arch.sh) -- silently passing it
-# through would fail 40 lines into a perl script instead of here.
+# through to the build untouched. --sysroot is reserved so it can't be
+# confused with --arch (lib/arch.sh) -- silently passing it through would
+# fail 40 lines into a perl script instead of here.
 BABYSIT=""; BRANCH=""; EXTRA_CMAKE=""; MEM_BUDGET=""; MEM_FLOOR=""; DETACH=""; NO_DEFAULTS=""; _PASS=()
-# Newline-separated, because an environment value may contain spaces. Held in a
-# variable rather than written as a literal so the quoting stays readable.
 EXTRA_ENV=""; _NL='
-'
+'   # newline-separated, since an environment value may contain spaces
 while [ $# -gt 0 ]; do
     case "$1" in
         --detach)    DETACH=1; shift ;;
@@ -177,35 +143,23 @@ while [ $# -gt 0 ]; do
         --branch)    BRANCH="${2:-}"; [ -n "$BRANCH" ] || die "--branch needs a name"; shift 2 ;;
         --branch=*)  BRANCH="${1#*=}"; shift ;;
 
-        # The memory watchdog's two numbers, as flags rather than only as
-        # environment: a container build on a macOS host is forwarded into the
-        # podman VM over ssh, and only what is on the command line survives
-        # that. Both default to the derivation in build/build-in-target.sh.
+        # Flags, not only environment: a container build on a macOS host is
+        # forwarded into the podman VM over ssh, and only the command line survives.
         --mem-budget)  MEM_BUDGET="${2:-}"; [ -n "$MEM_BUDGET" ] || die "--mem-budget needs MB"; shift 2 ;;
         --mem-budget=*) MEM_BUDGET="${1#*=}"; shift ;;
         --mem-floor)   MEM_FLOOR="${2:-}"; [ -n "$MEM_FLOOR" ] || die "--mem-floor needs MB"; shift 2 ;;
         --mem-floor=*)  MEM_FLOOR="${1#*=}"; shift ;;
 
-        # Extra CMake flags for this build, *added* to the config's own.
-        # Repeatable, quoted as one argument per use:
-        #
-        #   wk build ws jsc-release --cmake '-DENABLE_X=ON -DENABLE_Y=OFF'
-        #
-        # Exists because the obvious spelling is a trap: build-webkit takes
-        # --cmakeargs as a single option, so passing it by hand silently
-        # replaces the config's own flags rather than adding to them.
+        # *Added* to the config's own -- build-webkit's own --cmakeargs is a
+        # single option, so passing it by hand would silently replace them.
         # Appended last, so where a -D repeats, the one typed here wins.
         --cmake)     [ -n "${2:-}" ] || die "--cmake needs at least one flag"
                      EXTRA_CMAKE="$EXTRA_CMAKE $2"; shift 2 ;;
         --cmake=*)   EXTRA_CMAKE="$EXTRA_CMAKE ${1#*=}"; shift ;;
 
-        # One environment variable for this build, added last so it
-        # *overrides* the config's own (`env` takes the last assignment).
-        # Repeatable: wk build ws jsc-release --env CC=gcc-14 --env CXX=g++-14
-        #
-        # Exists because the environment couldn't be steered from the command
-        # line otherwise: exporting CC here does nothing, since the build runs
-        # in the target and only what config_build_env carries gets there.
+        # Added last so it *overrides* the config's own (`env` takes the last
+        # assignment). Exporting CC here does nothing -- the build runs in
+        # the target, and only what config_build_env carries gets there.
         --env)       [ -n "${2:-}" ] || die "--env needs NAME=VALUE"
                      case "$2" in
                          [A-Za-z_]*=*) ;;
@@ -225,9 +179,8 @@ while [ $# -gt 0 ]; do
     Use --cmake instead, which is added to them:
         wk build$(in_workspace || printf ' %s' "$NAME") $CONFIG --cmake $(sh_quote "${1#*=}")"
                      _PASS+=("$1"); shift ;;
-        # Everything after `--` is the build's, verbatim -- including words
-        # that would otherwise be read as ours. Without it there is no way to
-        # pass build-webkit an option this command also defines.
+        # Everything after `--` is the build's, verbatim -- otherwise there
+        # is no way to pass build-webkit an option this command also defines.
         --) shift; _PASS+=(${@+"$@"}); break ;;
 
         --sysroot|--sysroot=*)
@@ -243,11 +196,9 @@ set -- ${_PASS[@]+"${_PASS[@]}"}
 [ -z "$NO_DEFAULTS" ] || TARGET_BUILD_ARGS=""
 
 # --babysit: hand the whole thing to a detached loop (build/babysit.sh) that
-# rebuilds after every fix a sandboxed Claude makes, and exit. nohup and no
-# terminal, so the loop belongs to nobody's ssh session.
-#
-# Refused where `wk claude` would refuse (the fixer runs through it) and
-# refused from inside a workspace, which has no host store or second sandbox.
+# rebuilds after every fix a sandboxed Claude makes, and exit. Refused where
+# `wk claude` would refuse (the fixer runs through it), and from inside a
+# workspace, which has no host store or second sandbox.
 if [ -n "$BABYSIT" ]; then
     in_workspace && die "--babysit runs on the host: it re-runs 'wk build' and starts
     Claude in the workspace, neither of which works from in here"
@@ -258,9 +209,9 @@ if [ -n "$BABYSIT" ]; then
     esac
 
     WS=$(wk_ws_dir "$NAME")
-    # The file is a claim and the process table is the fact (lib/detach.sh), so
-    # both are asked: a state that says "building" whose pid is gone is last
-    # run's file, and starting a second babysitter over it is right.
+    # The file is a claim, the process table is the fact (lib/detach.sh): a
+    # "building" state whose pid is gone is last run's file, and starting a
+    # second babysitter over it is right.
     if [ -f "$WS/babysit.status" ]; then
         _state=$(status_field "$WS/babysit.status" state)
         case "$_DETACH_RUNNING" in
@@ -295,21 +246,13 @@ fi
 # A WebKit build is tens of minutes and the connection driving it is not:
 # anything that kills the driver (a timeout, a closed laptop, a dropped ssh)
 # takes the build with it, leaving `build.status` stuck at `running`.
-# Detaching moves the process to the far end of that fragility.
-#
 # Where it detaches *to* needs no special-casing: a container build on a
 # macOS host was already forwarded into the podman VM, so the nohup happens
 # there; a remote target hands the command to that machine's own `wk`.
-#
-# After --dry-run and the babysitter (which detach their own ways) and
-# before the lock and checkout: the detached run takes both itself, over
-# there. What happens here first is the one write that can't wait for it.
 if [ -n "$DETACH" ]; then
-    # _ALL_ARGS was captured after the dispatcher already resolved and dropped
-    # the workspace name from the argument list (it is $WK_NAME now, not $1),
-    # so the recursive `wk build` this reassembles -- on this machine or, via
-    # t_wk_detach, on the remote one -- needs it put back on the front, or the
-    # far dispatcher has nothing to resolve a name from.
+    # _ALL_ARGS still has the workspace name the dispatcher already resolved
+    # and dropped ($WK_NAME now, not $1); the recursive `wk build` this
+    # reassembles needs it back on the front to resolve a name from.
     _det=()
     in_workspace || _det+=("$NAME")
     for _a in ${_ALL_ARGS[@]+"${_ALL_ARGS[@]}"}; do
@@ -317,23 +260,17 @@ if [ -n "$DETACH" ]; then
         _det+=("$_a")
     done
 
-    # Written before the child exists, not after: the alternative is a window
-    # between this command returning and the child reaching its own first
-    # write, in which `wk status` reads whatever the previous build in this
-    # workspace left behind -- an "ok" or a "failed" from an hour ago,
-    # answering for a build that has not run yet.
+    # Written before the child exists: the alternative is a window in which
+    # `wk status` reads whatever the previous build left behind -- an "ok" or
+    # a "failed" from an hour ago, answering for a build that hasn't run yet.
     STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     write_status running
 
     if t_has_wk && t_wk_detach build ${_det[@]+"${_det[@]}"} >/dev/null 2>&1; then
         info "building $CONFIG in '$NAME' on $TARGET, detached -- this end can go away"
     else
-        # detach_run rather than a nohup of our own: the same launch the
-        # babysitter gets, from one implementation instead of two.
-        #
-        # No status file passed here: the child rewrites build.status when
-        # it gets there (a repeat, not a regression), and liveness is the
-        # log's age (cmd/status), not a pid -- so it's left to the child.
+        # No status file passed here: the child rewrites build.status, and
+        # liveness is the log's age (cmd/status), not a pid.
         _pid=$(detach_run "" "$WS/detached.log" -- \
             "$WK_ROOT/wk" build ${_det[@]+"${_det[@]}"})
         info "building $CONFIG in '$NAME', detached as pid $_pid -- this end can go away"

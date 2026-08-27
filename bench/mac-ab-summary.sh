@@ -18,10 +18,8 @@
 # the machine has come back. The only difference is the path to the results,
 # which is why --root exists.
 #
-# Two arms with the same staged id is not a mistake -- it is the control. An A/A
-# measures the lane's own noise, and there is no honest way to read an A/B
-# without it: a 2% difference means nothing until you know whether the same
-# build twice differs by 3%.
+# Two arms with the same staged id is not a mistake -- it is the A/A control:
+# the noise floor a real A/B needs to be read against (below).
 
 set -uo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -69,18 +67,12 @@ emit "A/B summary -- $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 emit "run map: $RUNS"
 emit ""
 
-# Contaminated arms, named before the numbers rather than after them.
-#
-# The autorun writes a fifth column per run: `clean`, or `scanned` if a
-# software-update scan timestamp moved across that arm. It happens with every
-# preference saying updates are off. An arm with a scan in it is still a number,
-# and it is still averaged in
-# below, because dropping data on the strength of a heuristic is its own way to
-# get a wrong answer. But it is said out loud and said first: a difference that
-# lives entirely in a scanned arm is not a difference between builds.
-#
-# Runs from before the column existed have an empty $5 and are not accused of
-# anything.
+# Contaminated arms, named before the numbers rather than after them (fifth
+# column in $RUNS; docs/HANDOFF-mac-perf-mode.md). Still averaged in below --
+# dropping data on a heuristic is its own way to get a wrong answer -- but
+# said first: a difference that lives entirely in a scanned arm is not a
+# difference between builds. Runs from before the column existed carry no
+# accusation.
 scanned=$(awk -F'\t' '$5 == "scanned" { printf "    round %s arm %s\n", $1, $2 }' "$RUNS")
 if [ -n "$scanned" ]; then
     emit "  WARNING: a software-update scan ran during these arms:"
@@ -92,41 +84,19 @@ EOF
     emit ""
 fi
 
-# Per-arm numbers are not computed here at all: `wk bench report` below reads
-# every arm's result.json directly (the one result walker now lives in
-# lib/wkdata.py, cmd/bench's `wk bench report`) and shows A and B side by
-# side, per subtest, which is strictly more than one arm's mean printed alone
-# ever was. This just says how many rounds landed in each arm, so a summary
-# with an empty arm is visible before the report below tries to compare it
-# against nothing.
+# Per-arm numbers are not computed here: `wk bench report` below reads every
+# arm's result.json directly (lib/wkdata.py, via cmd/bench) and shows A and B
+# side by side, per subtest -- more than one arm's mean alone would say. This
+# just counts rounds per arm, so an empty arm is visible before the report
+# tries to compare it against nothing.
 for l in $labels; do
     emit "arm $l: $(arm_paths "$l" | tr ',' '\n' | grep -c .) run(s)"
 done
 emit ""
 
-# WHAT THIS EXPERIMENT COULD HAVE DETECTED.
-#
-# The missing half of every "not significant". A null result means nothing on its
-# own: it is only informative next to the smallest difference the run had the
-# power to find. On this lane, 0.31% run-to-run sd, so three rounds a side
-# resolve only about 0.75%. A patch worth 0.4% is invisible
-# here, and "not significant" is the wrong word for it.
-#
-# The decomposition behind this is worth stating because it is counter-intuitive.
-# Within a run the iteration scores have sd ~6.8%, but nearly all of that is a
-# *deterministic* dip at the first iteration of each browser launch (with the
-# plan's count=4, positions 1/11/21/31 score ~34 against ~43; Speedometer counts
-# compilation and instantiation there on purpose). Remove that repeating shape
-# and the real per-iteration noise is sd ~0.89, which over 40 iterations predicts
-# a run-mean SE of 0.33% -- against an observed between-run sd of 0.31%. They
-# agree, so **there is no measurable machine-level noise between runs at all**:
-# no thermal drift, no scheduling drift, nothing left for quiescing to remove.
-#
-# Two things follow. Trimming warm-up would be wrong twice over: methodologically
-# (Speedometer means to count it) and statistically (those are the most
-# reproducible values in the run, so dropping them made between-run sd *worse*,
-# 0.313% -> 0.342%). And --count and --rounds are interchangeable levers, both
-# scaling as 1/sqrt(total iterations), so buy precision whichever way is cheaper.
+# A null result means nothing on its own: it is only informative next to the
+# smallest difference this run had the power to find (docs/HANDOFF-mac-perf-
+# mode.md has the noise-floor analysis and the count/rounds tradeoff).
 mde_note() {
     "$PY" - "$RUNS" "$ROOT" <<'MDEPY'
 import json, os, statistics as st, sys
@@ -215,13 +185,11 @@ if [ -n "$same" ]; then
     emit ""
 fi
 
-# `wk bench report` rather than a script of its own: it is the thing that
-# checks the three axes, computes the per-subtest Welch/FDR table and draws
-# the histograms, and that is the whole point of routing through it instead
-# of re-deriving any of it here. An overnight A/B (docs/Urgent/"Benchmarking
-# variance.md" asks for one command producing an html report with no one in
-# the room) gets its html next to the text summary, same basename, when --out
-# names one.
+# `wk bench report` rather than a script of its own: it checks the three
+# axes, computes the per-subtest Welch/FDR table and draws the histograms, so
+# nothing here re-derives any of that. --out also writes html next to the
+# text summary, same basename (docs/Urgent/"Benchmarking variance.md" asks
+# for one command producing a report with no one in the room).
 if [ -n "$OUT" ]; then
     "$WK_ROOT/cmd/bench" report "$(arm_paths "$A")" "$(arm_paths "$B")" \
         --html "${OUT%.*}.html" --text 2>&1 | tee -a "$OUT"

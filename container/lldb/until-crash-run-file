@@ -1,0 +1,7 @@
+process handle SIGUSR1 -n false -p true -s false
+run
+script import lldb, os
+script process = lldb.debugger.GetSelectedTarget().GetProcess()
+script st = process.GetExitStatus() if process.GetState() == lldb.eStateExited else 128 + process.GetSelectedThread().GetStopReasonDataAtIndex(0)
+script open(os.environ["WK_UNTIL_CRASH_STATUS"], "w").write(str(st))
+script lldb.debugger.HandleCommand("quit") if st == 0 else None

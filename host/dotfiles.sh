@@ -17,26 +17,22 @@ ensure_dir "$HOME/.ssh" 0700
 ensure_dir "$HOME/.ssh/config.d" 0700
 link_config "$WK_ROOT/dotfiles/ssh/config" "$HOME/.ssh/config.d/wk-tools"
 
-# Prepending the Include and leaving whatever is already below it reads as
-# harmless: the Include is first, ssh takes the first value it
-# sees for each keyword, so the repo's copy already won any name the two
-# shared. The entries sharing *no* name were the problem. Nothing re-read them
-# and nothing reconciled them, so they kept resolving long after they had
-# stopped being true.
+# Prepending the Include and leaving what is already below it is not enough
+# on its own: ssh takes the first value it sees for each keyword, so the
+# repo's copy already wins any name the two share, but an entry sharing *no*
+# name with the repo's stanzas is never reconciled and keeps resolving even
+# after it stops being true.
 #
-# `Host rpi4` is why this is a migration rather than a comment. It named
-# rpi4-compilers-0, a shared build box behind a ProxyJump, while the fleet's
-# rpi4 (boot/machines.sh) is a 2 GB board on the LAN. Every wk verb that takes
-# an ssh destination would have aimed at the build box, and `wk sysimage write`
-# aims at a disk.
-#
-# So: a fleet name may not be defined by hand. Those stanzas are dropped --
-# they are shadows of a machine, not hosts -- and everything else moves to
-# config.d/local, where a host that belongs to this machine rather than to this
-# repo was always supposed to live. Only fleet names are dropped, deliberately:
-# a duplicate of something in dotfiles/ssh/config was already being shadowed
-# and carrying it across changes nothing, while guessing which of the two the
-# machine actually wanted would.
+# A fleet name (boot/machines.sh) may not be defined by hand: a hand-written
+# stanza reusing one is a shadow of the fleet's own definition, not a host of
+# its own, and would silently point every wk verb that takes an ssh
+# destination -- including `wk sysimage write`, which aims at a disk -- at
+# whatever the hand-written stanza names instead. Those stanzas are dropped
+# rather than migrated. Everything else moves to config.d/local, where a host
+# belonging to this machine rather than to this repo belongs; a duplicate of
+# something already in dotfiles/ssh/config is dropped too, since carrying it
+# across changes nothing and guessing which of the two the machine actually
+# wanted would.
 #
 # After the first run ~/.ssh/config is one line and all of this is a no-op.
 _ssh_conf="$HOME/.ssh/config"
@@ -58,14 +54,12 @@ else
         [ -e "$_ssh_conf.wk-backup" ] || cp -p "$_ssh_conf" "$_ssh_conf.wk-backup"
 
         # Migrated stanzas go **first**, and any older copy of a name they
-        # define is dropped rather than kept below them. Both halves of that
-        # are load-bearing, and getting it backwards was a real bug: ssh takes
-        # the first value it sees for a keyword, so appending a freshly
-        # corrected `Host moosebmc` underneath the stale one filed the fix
-        # behind the mistake, in the same file, permanently -- and added
-        # another duplicate on every run. The symptom is an entry that "keeps
-        # coming back": editing changes nothing, because the edit is shadowed
-        # by a line the editor never saw.
+        # define is dropped rather than kept below them: ssh takes the first
+        # value it sees for a keyword, so appending a corrected stanza
+        # underneath a stale one of the same name would file the fix behind
+        # the mistake, permanently, and add another duplicate on every run --
+        # an entry that editing never changes, because the edit is shadowed by
+        # a line the editor never saw.
         #
         # Dropping the old copy rather than relying on order also keeps the
         # file honest -- one stanza per name, and the surviving one is the one
@@ -121,10 +115,10 @@ else
         # Shadowing is reported, not removed. config.d/local is read *before*
         # config.d/wk-tools, so a hand-written stanza for a name this repo also
         # defines wins -- and some of those are deliberate (`moose` resolves to
-        # localhost *on* moose, which the repo's own stanza cannot know). But a
-        # silent win is how `moosebmc` kept resolving to a dead address after
-        # being corrected in the repo, so the collision is said out loud and
-        # the choice is left to a person.
+        # localhost *on* moose, which the repo's own stanza cannot know). A
+        # silent win risks a stanza staying stale after the repo's copy is
+        # corrected, so the collision is said out loud and the choice is left
+        # to a person.
         _ssh_owned=$(awk 'tolower($1) == "host" { for (i = 2; i <= NF; i++) print $i }' \
                         "$WK_ROOT/dotfiles/ssh/config" 2>/dev/null)
         awk -v owned="$_ssh_owned" '
@@ -167,17 +161,17 @@ EOF
 #
 # .bash_profile is in this list for the same reason .bashrc and .zshrc are:
 # it's exactly the file a login shell (what ssh starts) reads, so a stale
-# `wk-tools/bashrc` reference here after this restructure moved that file
-# means every ssh session lands in bash and never even reaches the rest of
-# this rc, let alone the bash -> zsh switch it's supposed to make.
+# `wk-tools/bashrc` reference here means every ssh session lands in bash and
+# never even reaches the rest of this rc, let alone the bash -> zsh switch
+# it's supposed to make.
 _rc_line=". \"$WK_ROOT/shell/bashrc\""
 for _rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
     [ -f "$_rc" ] || touch "$_rc"
 
-    # Drop references to paths this restructure moved. Left in place they
-    # error on every interactive shell -- the old wk-tools/bashrc and the
-    # webkit-container-sdk registration are both gone, the latter because the
-    # SDK now runs inside the VM rather than on the host.
+    # Drop stale source lines for paths that no longer exist -- an old
+    # wk-tools/bashrc location and the webkit-container-sdk host registration
+    # (the SDK runs inside the VM instead) -- left in place they error on
+    # every interactive shell.
     if grep -qE 'wk-tools/bashrc|register-sdk-on-host\.sh' "$_rc"; then
         _tmp="$(mktemp)"
         # `|| true`: grep exits 1 when it prints nothing, which is exactly the

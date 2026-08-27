@@ -6,43 +6,16 @@
 #
 # Refused inside a workspace: Zed runs where the person is, and a container has
 # no display and a macOS guest is driven from the host. From the host:
-# wk zed <name>.
-#
-# Also unhelpful as typed from a *shared remote box* reached by a plain ssh
-# (not `wk enter`, so the dispatcher's inside-a-workspace refusal above never
-# sees it): Zed is not installed there and does not belong to the box, so a
-# bare `wk zed <name>` there just dies "zed is not installed". --url is the
-# remedy for both cases: it computes the same ssh:// URL this command would
-# hand to Zed, and prints it instead of launching anything -- no Zed binary
-# required where it runs, since the answer is meant to be copied onto the
-# machine that has one.
-#
-# One command for "put an editor on that", because every target reaches it
-# differently and none of the differences are a person's business:
-#
-#   container   no network interface at all, so no address: the route is the ssh
-#               protocol over `podman exec` (container/ssh-transport.sh), and
-#               the sshd at the far end of it is installed on first use.
-#   vm          a macOS guest with an address of its own, which changes on every
-#               boot -- the alias is rewritten when it starts.
-#   remote      a machine already in ~/.ssh/config under its own name.
-#
-# `wk enter <ws> --zed` and `wk new <ws> --zed` are the same launch and call
-# this: one implementation, so a fix to the transport is not three fixes.
-#
-# --tools exists because this repository is the thing most often being edited
-# *about* a machine, and every machine runs a copy of it -- a workstation's
-# checkout, a build box's rsynced tree, the podman VM's, a workspace's
-# bind-mounted /opt/wk-tools. `wk status` reports which of those are stale; this
-# is how you go and look at one.
+# wk zed <name>. `wk enter <ws> --zed` and `wk new <ws> --zed` launch Zed the
+# same way.
 #
 #   --tools [<machine>|<workspace>]   open a wk-tools copy instead of the
 #                                     checkout: a machine's, a workspace's, or
 #                                     (with no argument) this one
 #   --url                             print the ssh:// URL (and the `zed`
 #                                     command line for it) instead of opening
-#                                     Zed -- the one thing this needs is the
-#                                     route, not a local Zed install
+#                                     Zed -- for a machine with no Zed of its
+#                                     own, to paste onto one that has it
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -50,11 +23,8 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# Without --tools the name is a workspace, resolved and checked by the
-# dispatcher, and arrives as $WK_NAME. With it the name may be a machine
-# instead, which the dispatcher does not answer for (`flag --tools name=none`),
-# so it is still in argv wherever it fell. Either way there is one name, and a
-# second is the mistake worth naming.
+# With --tools the name may be a machine, which the dispatcher does not
+# resolve (`flag --tools name=none`), so it comes from argv here, not $WK_NAME.
 TOOLS=""
 NAME="${WK_NAME:-}"
 URL_ONLY=""
@@ -71,9 +41,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# emit <url> -- either hands it to Zed, or -- with --url -- prints it and the
-# exact command line so it can be pasted on the machine that has Zed. One
-# place for this so the three launch sites below cannot say it differently.
+# emit <url> -- hands it to Zed, or with --url prints it: one place for both.
 emit() {
     local url="$1"
     if [ -n "$URL_ONLY" ]; then
@@ -91,10 +59,7 @@ if [ -z "$URL_ONLY" ]; then
 fi
 
 # --- --tools ------------------------------------------------------------------
-#
-# The local checkout is a path and not an ssh url: this is the machine Zed is
-# running on, and a remote-development session against localhost would be a
-# slower way to open a directory that is right there.
+# A path, not an ssh:// url: the local checkout is already where Zed runs.
 if [ -n "$TOOLS" ]; then
     if [ -z "$NAME" ] || [ "$NAME" = here ] || [ "$NAME" = "$(hostname -s 2>/dev/null)" ]; then
         if [ -n "$URL_ONLY" ]; then
@@ -105,15 +70,11 @@ if [ -n "$TOOLS" ]; then
         exec "$Z" "$WK_ROOT"
     fi
 
-    # A machine first, by a definite test: a target is a conf file
-    # (`target_kind`), so "is this a machine" costs nothing and can't be
-    # confused with a guess. Anything else is taken as a workspace name.
-    # A workspace named after a machine loses this spelling but keeps the
-    # other: `wk zed <name>` is still that workspace's checkout.
+    # A machine is tested for first (`target_kind` reads its conf file);
+    # anything else is a workspace name.
     if [ "$(target_kind "$NAME" 2>/dev/null)" = remote ]; then
         load_target "$NAME"
-        # No workspace name to give: t_tools and t_ssh_host both answer for the
-        # machine itself, which is what was asked about.
+        # "" -- t_tools and t_ssh_host answer for the machine itself here.
         host=$(t_ssh_host "" 2>/dev/null) \
             || die "target '$NAME' is this machine -- 'wk zed --tools' opens this checkout"
         emit "ssh://$host$(t_tools "")"
@@ -129,9 +90,7 @@ if [ -n "$TOOLS" ]; then
     esac
 
     require_name "$NAME"
-    # Neither a machine nor a workspace: said here rather than by the
-    # dispatcher, because this is the one place a machine name is also an
-    # answer and the dispatcher only knows about workspaces.
+    # Checked here, not by the dispatcher: with --tools a name may be a machine.
     ws_exists "$NAME" || die "no machine or workspace named '$NAME'
     'wk ls' lists the workspaces, 'wk status' the machines."
     TARGET="$(ws_target "$NAME")"

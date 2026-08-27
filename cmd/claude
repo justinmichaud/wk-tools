@@ -4,8 +4,7 @@
 # wk: where=workspace name=required ready=yes group=workspaces
 #
 # Permissions are relaxed because the workspace is the blast radius, not the
-# machine; this checks the boundary holds before handing over control, rather
-# than trusting that setup ran correctly at some point in the past.
+# machine; this checks the boundary holds before handing over control.
 #
 # The workspace name comes first; everything after it is Claude's, verbatim:
 #
@@ -19,9 +18,8 @@
 #   wk claude <ws> --rc          start it (a no-op, reported, if already up)
 #   wk claude <ws> --rc --stop   stop it
 #
-# The first start in a fresh workspace needs one interactive `claude` run to
-# accept its workspace trust dialog -- remote-control refuses without it, and
-# nothing short of that is non-interactive (see the block below). This runs
+# A fresh workspace needs one interactive `claude` run first, to accept its
+# trust dialog -- remote-control refuses without it, and this runs
 # 'wk claude <ws>' for you when the workspace has no trust record yet.
 
 set -euo pipefail
@@ -32,21 +30,15 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/detach.sh"
 
 # --- claude remote-control: functions ----------------------------------------
-# Kept together and above everything else in this file so a test can source
-# just these, the way lib/*.sh is sourced elsewhere: `WK_CLAUDE_LIB=1 . cmd/
-# claude` defines them and returns (see the guard below) rather than running
-# require_name, load_target and the sandbox checks that follow. Fakes for
-# t_exec/t_spawn/t_home/t_src, defined by the caller *after* sourcing this
-# (so they win over lib/target.sh's own), are what makes that hermetic --
-# tests/test_claude_rc.py is the one user.
+# Kept together and above everything else so a test can source just these:
+# `WK_CLAUDE_LIB=1 . cmd/claude` defines them and returns (guard below)
+# instead of running require_name, load_target and the sandbox checks.
+# Fakes for t_exec/t_spawn/t_home/t_src, defined by the caller afterward so
+# they win over lib/target.sh's own, make that hermetic (tests/test_claude_rc.py).
 
-# One status file per workspace, next to build.status/babysit.status
-# (lib/detach.sh's schema: pid=, log=, state=, updated=). Its pid is not a
-# fact this host's own process table can answer for -- it names a process
-# t_spawn started *inside* the target, not one this process forked -- so
-# unlike detach_alive (built for the latter), everything below asks the
-# driver, the same move image/yocto.sh's yocto_running/yocto_stop make for
-# the same reason.
+# The pid here names a process t_spawn started *inside* the target, not one
+# this process forked, so unlike detach_alive, everything below asks the
+# driver rather than this host's own process table.
 rc_status_file() { printf '%s' "$(wk_ws_dir "$1")/claude-rc.status"; }
 rc_log()         { printf '%s' "$(t_home "$1")/claude-remote-control.log"; }
 rc_pidfile()     { printf '%s' "$(t_home "$1")/claude-remote-control.pid"; }
@@ -58,17 +50,15 @@ rc_alive() {
     t_exec "$name" kill -0 "$pid" >/dev/null 2>&1
 }
 
-# Minutes since the status file's own `updated=`, for the "already running"
-# report. utc_to_epoch is lib/common.sh's GNU/BSD date bridge.
+# Minutes since the status file's `updated=`, for the "already running" report.
 rc_minutes() {
     local upd; upd=$(status_field "$(rc_status_file "$1")" updated)
     [ -n "$upd" ] || { printf '?'; return 0; }
     printf '%d' $(( ( $(date -u +%s) - $(utc_to_epoch "$upd") ) / 60 ))
 }
 
-# Start remote-control in <name>, or report it is already running -- a second
-# call is a no-op, found by rc_alive rather than trusted from state= alone
-# (a claim, per lib/detach.sh; the process table is the fact).
+# A second call is a no-op, found by rc_alive rather than trusted from state=
+# alone: a claim, per lib/detach.sh; the process table is the fact.
 rc_start() {
     local name="$1" claude_bin="$2" sf log pidf pid i
     sf=$(rc_status_file "$name")
@@ -86,9 +76,8 @@ rc_start() {
         "cd $(sh_quote "$(t_src "$name")") && exec $(sh_quote "$claude_bin") remote-control --spawn=same-dir --name $(sh_quote "$name")" \
         || die "could not start claude remote-control in '$name'"
 
-    # t_spawn's pidfile is inside the target; only container's happens to be
-    # host-visible too (its home is a bind mount), so this reads it back
-    # through the driver rather than assuming that -- right for every target.
+    # t_spawn's pidfile is inside the target -- read back through the driver
+    # rather than assumed host-visible, which is only true for container.
     pid=""; i=0
     while [ -z "$pid" ]; do
         pid=$(t_exec "$name" cat "$pidf" 2>/dev/null | tr -d '\r') || pid=""
@@ -102,8 +91,8 @@ rc_start() {
     info "claude remote-control running in '$name' (pid $pid), log at $log"
 }
 
-# Stop it, through the driver -- same reasoning as rc_alive. A no-op,
-# reported, when nothing is running.
+# Through the driver, same reasoning as rc_alive. A no-op, reported, when
+# nothing is running.
 rc_stop() {
     local name="$1" sf pid
     sf=$(rc_status_file "$name")
@@ -120,20 +109,16 @@ rc_stop() {
     status_write "$sf" state=stopped "pid=$pid" "log=$(status_field "$sf" log)"
 }
 
-# lib/*.sh has no top-level side effect to guard against when sourced; this
-# script does (require_name, load_target, the sandbox checks below), so a
-# caller that wants only the functions above sources this with WK_CLAUDE_LIB=1.
+# This script has top-level side effects (require_name, load_target, the
+# sandbox checks below); WK_CLAUDE_LIB=1 sources only the functions above.
 [ "${WK_CLAUDE_LIB:-}" != 1 ] || return 0
 
-# The dispatcher takes the first non-flag word as the name and strips it,
-# leaving Claude's own options in order. A bare session id ahead of the name
-# (`wk claude -r <id> <ws>`) is taken by position, not by checking which word
-# is a real workspace -- put it after instead: `wk claude <ws> -r <id>`.
+# A bare session id ahead of the name (`wk claude -r <id> <ws>`) is taken by
+# position, not by checking which word is real -- put it after instead.
 NAME="${WK_NAME:-}"
 require_name "$NAME"
 
-# --rc/--rc --stop are wk's own flags, not Claude's, so they come out of argv
-# here rather than riding along to the verbatim pass-through at the bottom.
+# wk's own flags come out of argv here, not Claude's, riding to the pass-through below.
 RC=""; RC_STOP=""
 _rc_args=()
 for _a in ${@+"$@"}; do
@@ -150,46 +135,36 @@ set -- ${_rc_args[@]+"${_rc_args[@]}"}
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
 
-# `claude` from PATH everywhere provisioning installed it (container, guest);
-# a specific path only on a shared machine, where PATH may resolve to
-# somebody else's broken system-wide install (see the remote branch below).
+# The permission mode is a property of the boundary, not a preference.
+# --dangerously-skip-permissions is the point of a sandbox: inside a
+# disposable workspace, prompting for each edit buys nothing. A shared build
+# machine has no such boundary, so it gets auto instead: unattended for
+# ordinary work, asking before anything that leaves the machine.
 CLAUDE_BIN=claude
-
-# ...and which permission mode it starts in, a property of the boundary, not
-# a preference. --dangerously-skip-permissions is the point of a sandbox:
-# inside a disposable workspace, prompting for each edit buys nothing. A
-# shared build machine has no such boundary -- your own uid, other people's
-# work on the same filesystem -- so it gets auto instead: unattended for
-# ordinary work (reading, editing, building), asking before anything that
-# leaves the machine.
 CLAUDE_MODE=(--dangerously-skip-permissions)
 
 # --- verify the sandbox ------------------------------------------------------
 # Relaxed permissions are defensible only while the boundary holds, and what
-# it *is* differs by target -- so this dispatches on the target.
+# it *is* differs by target.
 
 if [ "$WK_TARGET_KIND" = local ]; then
-    # This *is* the workspace already; the host verified the boundary when it
-    # started it. Nesting another relaxed session here would skip that
-    # verification, which is what this refusal prevents.
+    # This *is* the workspace already; nesting another relaxed session here
+    # would skip the boundary check the host already did when it started it.
     die "already inside workspace '$(wk_self)' -- run 'claude' directly"
 fi
 
 if [ "$WK_TARGET_KIND" = remote ]; then
-    # A barrier, not a refusal -- it's the user's machine and their call. This
+    # A barrier, not a refusal: it's the user's machine and their call. This
     # is the one target with no boundary at all, so the warning is the containment.
     barrier "'$NAME' is on the shared build machine '$TARGET', which has no sandbox at
     all: no container, no separate uid, no filesystem boundary, and other
     people's work on the same machine. An agent there is an agent on that
     machine, with your access."
 
-    # Forced, and now it has to actually work.
-    #
     # Test the property, not the file (same rule as `wk sudo`): a shared box's
-    # `claude` on PATH may be someone else's npm install running under too old
-    # a node (Claude Code needs 18+) and dying silently. So find one that
-    # *runs*, prefer the one in your own home, and launch it by path -- PATH
-    # ordering on a shared machine is not ours to fix.
+    # `claude` on PATH may be someone else's npm install under too old a node
+    # (Claude Code needs 18+), dying silently. Find one that *runs*, prefer
+    # your own home, and launch it by path.
     CLAUDE_BIN=$(t_exec "$NAME" bash -lc '
         for c in "$HOME/.local/bin/claude" "$(command -v claude 2>/dev/null)"; do
             [ -n "$c" ] && [ -x "$c" ] || continue
@@ -200,27 +175,23 @@ if [ "$WK_TARGET_KIND" = remote ]; then
     if [ -z "$CLAUDE_BIN" ]; then
         warn "there is no Claude CLI on $TARGET that runs"
         # Single-quoted so the *far* side's shell expands $c and $(node -v);
-        # only $TARGET, which just this side knows, is substituted here.
+        # only $TARGET is substituted here.
         _diag=$(t_exec "$NAME" bash -lc '
             c=$(command -v claude 2>/dev/null) || true
             if [ -n "$c" ]; then
                 echo "  on PATH:  $c"
                 echo "  node:     $(node -v 2>&1 | head -1)  (Claude Code needs 18 or newer)"
-                # Not the error text: an old-node npm install dies printing a
-                # file URL and kilobytes of minified bundle, so this names the
-                # command that shows it instead of trying to grep it out.
                 echo "  it fails to start; see for yourself:  ssh '"$TARGET"' claude --version"
             else
                 echo "  nothing called claude is on PATH in a login shell there"
             fi' 2>/dev/null) || true
-        # Captured then printed rather than redirected in place: `2>/dev/null
-        # >&2` would send stdout to the /dev/null the first redirect just made.
+        # Captured then printed: `2>/dev/null >&2` would send stdout to the
+        # /dev/null the first redirect just made.
         [ -z "$_diag" ] || printf '%s\n' "$_diag" >&2
 
-        # Offered, never assumed: installing onto a shared machine is a
-        # decision about someone else's machine too (`confirm` declines when
-        # there's nobody to ask). Same installer as container/guest, and it
-        # carries its own runtime, so it doesn't touch the shared node.
+        # Offered, never assumed: `confirm` declines when there's nobody to
+        # ask. Same installer as container/guest, with its own runtime, so it
+        # doesn't touch the shared node.
         if confirm "install one on $TARGET now (into your own ~/.local, as you)?"; then
             t_exec "$NAME" bash -lc 'curl -fsSL https://claude.ai/install.sh | bash' \
                 || die "the installer failed on $TARGET"
@@ -246,22 +217,20 @@ if [ "$WK_TARGET_KIND" = remote ]; then
 fi
 
 if [ "$WK_TARGET_KIND" = container ]; then
-    # `wk verify` measures container properties from inside: no network
-    # interface, egress refused outside the allowlist, no host filesystem. If
-    # any of that regressed, the right response is to stop, not proceed anyway.
+    # `wk verify` measures container properties from inside; if any regressed,
+    # the right response is to stop, not proceed anyway.
     "$WK_ROOT/cmd/verify" "$NAME" \
         || barrier "the sandbox around '$NAME' is not intact (see above), and relaxed
     permissions are only defensible while it is."
 fi
 
 if [ "$WK_TARGET_KIND" = vm ]; then
-    # Deliberately NOT `wk verify`: every property it measures is a container
-    # property, and a macOS guest has none of them by construction. Its egress
-    # is filtered on the *host* by Softnet instead, unmeasurable from in here.
-    #
-    # Two checks: the filter must exist now, and the guest must not have been
-    # *booted* without it -- Softnet applies at `tart run`, so installing it
-    # after boot filters nothing until restart. Both fail closed.
+    # Not `wk verify`: every property it measures is a container property, and
+    # a macOS guest has none by construction. Its egress is filtered on the
+    # *host* by Softnet, unmeasurable from in here. Two checks: the filter
+    # must exist now, and the guest must not have been *booted* without it --
+    # Softnet applies at `tart run`, so installing it after boot filters
+    # nothing until restart. Both fail closed.
     if [ -f "$WK_VM_DIR/$NAME.unfiltered" ] && [ -z "${WK_VM_UNFILTERED:-}" ]; then
         barrier "'$NAME' was booted with NO egress filter.
     Restart it filtered:  wk vm stop $NAME && wk vm start $NAME
@@ -284,8 +253,8 @@ fi
 
 # --- wk claude <ws> --rc ------------------------------------------------------
 # Same sandbox gate above this line as a foreground session; what differs is
-# what runs once it holds -- a detached server (rc_start, at the top of this
-# file) instead of a session in this process's own foreground/headless slot.
+# what runs once it holds -- a detached server (rc_start, above) instead of a
+# session in this process's own foreground/headless slot.
 if [ -n "$RC" ]; then
     if [ -n "$RC_STOP" ]; then
         rc_stop "$NAME"
@@ -293,10 +262,9 @@ if [ -n "$RC" ]; then
     fi
 
     # A background server left running unattended is exactly the case `git
-    # push` is held back for (below); a detached remote-control session never
-    # reaches that block itself, so this makes the same call up front, without
-    # a restore -- there is no foreground moment here to notice it and turn
-    # push back on.
+    # push` is held back for below; a detached session never reaches that
+    # block itself, so this makes the same call up front, with no restore --
+    # there is no foreground moment here to notice it and turn push back on.
     if [ "$WK_TARGET_KIND" = container ] && "$WK_ROOT/wk" push status >/dev/null 2>&1; then
         warn "git push is ON -- turning it off before starting remote-control in '$NAME'
     (it stays off; 'wk push on' when you want it back)"
@@ -304,16 +272,12 @@ if [ -n "$RC" ]; then
             || die "refusing to start: could not hold back the push keys ('wk push status')"
     fi
 
-    # remote-control needs the workspace's trust dialog accepted once, and
-    # refuses outright without it ("claude remote-control --help": "Run
-    # `claude` first in the directory to accept the workspace trust dialog").
-    # There is no non-interactive substitute: `claude --help` documents that
-    # -p / a piped stdout *skips* the dialog rather than recording acceptance
-    # of it, and neither `claude config` (not a real subcommand: agents, auth,
-    # doctor, gateway, import, install, mcp, plugin, project, setup-token,
-    # ultrareview, update), nor `claude project` (purge only), nor any flag
-    # sets it. So this does what the tool itself says: run `claude` once,
-    # interactively, and only when nothing has done that yet.
+    # remote-control refuses outright without the workspace's trust dialog
+    # accepted once ("claude remote-control --help": "Run `claude` first...").
+    # There is no non-interactive substitute -- neither -p, a piped stdout,
+    # nor any `claude config`/`claude project` subcommand sets it -- so this
+    # does what the tool itself says: run `claude` once, interactively, and
+    # only when nothing has done that yet.
     if ! rc_alive "$NAME" && ! t_exec "$NAME" test -f "$(t_home "$NAME")/.claude.json" 2>/dev/null; then
         warn "'$NAME' has no Claude trust record yet -- remote-control refuses to start
     until the workspace trust dialog is accepted once, interactively. Running
@@ -336,8 +300,8 @@ fi
 # babysitter's fix loop, and leaving push on between attempts would be the
 # switch flapping open unattended. Off is also the safe crash/kill direction.
 #
-# Container targets only: the deploy keys live in the podman VM's store and
-# mount only into containers. A macOS guest has none to hold back.
+# Container only: the deploy keys live in the podman VM's store and mount
+# only into containers. A macOS guest has none to hold back.
 PUSH_WAS_ON=""
 if [ "$WK_TARGET_KIND" = container ] && "$WK_ROOT/wk" push status >/dev/null 2>&1; then
     PUSH_WAS_ON=1
@@ -360,11 +324,9 @@ wk_atexit restore_push
 
 info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
 
-# CLAUDE_MODE was chosen above, with the boundary. Headless when there's no
-# terminal: the babysitter's fix loop runs this under nohup with `-p`, and
-# t_exec_tty would demand a tty from a process that owns none -- same sandbox
-# checks either way, which is why it comes through here rather than running
-# claude directly. Not exec'd, so the EXIT trap still runs when Claude exits.
+# Headless when there's no terminal: the babysitter's fix loop runs this
+# under nohup with `-p`, and t_exec_tty would demand a tty from a process
+# that owns none. Not exec'd, so the EXIT trap still runs when Claude exits.
 rc=0
 if [ -t 0 ] && [ -t 1 ]; then
     t_exec_tty "$NAME" env WK_WORKSPACE="$NAME" \

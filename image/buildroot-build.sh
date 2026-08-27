@@ -187,8 +187,8 @@ make $BR_EXT "$DEFCONFIG" || fail "no such defconfig: $DEFCONFIG
     #
     # Not PRIMARY_SITE_ONLY: a 2020 tree pins versions the mirror does not
     # always carry, and forbidding the upstream fallback outright would fail
-    # those. The fallbacks appear in the proxy log as DENY lines, which is how
-    # gnu.org came to be allowed.
+    # those. Fallbacks that hit the egress allowlist show up in the proxy log
+    # as DENY lines, naming the host to add.
     # The filesystem genimage assembles the card out of.
     #
     # The release-pinned cog defconfigs emit a *tarball only* -- no rootfs.ext4 --

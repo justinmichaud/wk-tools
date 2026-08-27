@@ -46,11 +46,9 @@ info() { printf '    %s\n' "$*"; }
 warn() { printf '    WARN: %s\n' "$*"; }
 die()  { printf '    ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Three attempts, because the build host is on WiFi: it roams between two
-# APs on one SSID, and a blip of a few seconds at minute one once killed a
-# build that would otherwise have taken twenty ("Failed to connect ... after
-# 30 ms", with the same fetch succeeding immediately after). Anything that
-# reaches the network here gets wrapped.
+# Three attempts, because the build host roams WiFi between two APs on one
+# SSID: a brief drop can otherwise fail a fetch outright, minutes into an
+# hours-long build. Anything that reaches the network here gets wrapped.
 retry() {
     n=0
     while :; do
@@ -232,10 +230,8 @@ if [ -n "${PMO_KCONFIG:-}" ]; then
 
     # The config fragment for the architecture being built, named by the
     # aport's own $CARCH convention -- globbed directly rather than `ls |
-    # head -1`. This runs `set -eu` without pipefail so that would not
-    # actually misfire here, but `head` closing a pipe early is the shape
-    # that bit cmd/selftest 32 times, and there is exactly one such config
-    # per architecture anyway.
+    # head -1`, which SIGPIPEs under pipefail; there is exactly one such
+    # config per architecture anyway.
     KCFG=""
     for f in "$KDIR"/config-*.aarch64; do
         [ -f "$f" ] && { KCFG="$f"; break; }

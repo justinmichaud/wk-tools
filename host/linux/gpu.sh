@@ -5,25 +5,23 @@
 # For a Mesa GPU that is one flag: the container's own Mesa drives /dev/dri and
 # nothing else is needed.
 #
-# NVIDIA is the awkward case, because the userspace libraries must match the
-# host's kernel driver exactly (580.173.02 here) and cannot be installed from
-# inside an offline container. Two ways to get them in:
+# NVIDIA is the awkward case: the userspace libraries must match the host's
+# kernel driver exactly and cannot be installed from inside an offline
+# container. Two ways to get them in:
 #
 #   CDI       nvidia-ctk generates /etc/cdi/nvidia.yaml listing every device
-#             node and library to inject. This is what upstream wkdev uses, and
-#             it works rootless. It needs nvidia-container-toolkit, which is
-#             NOT in Ubuntu 26.04: verified against Launchpad, the package is
-#             published in universe for 26.10 (stonking) only. On 26.04 it comes
-#             from NVIDIA's own apt repository, a second third-party repo.
+#             node and library to inject. What upstream wkdev uses, and it
+#             works rootless -- but nvidia-container-toolkit is not in
+#             Ubuntu 26.04, only 26.10, so 26.04 needs NVIDIA's own apt repo.
 #
 #   derived   Work out the same list from ldconfig and the glvnd/EGL vendor
 #             configs, and bind-mount each file at its own path. No extra
-#             package, no extra repository, and the mounts are visible in
-#             `podman inspect` rather than hidden behind a CDI spec.
+#             package or repository, and the mounts are visible in `podman
+#             inspect` rather than hidden behind a CDI spec.
 #
-# The derived path is the default so a stock 26.04 install benchmarks out of the
-# box; CDI is used automatically when it happens to be present, because it also
-# handles the odd corners (nvidia-persistenced sockets, MIG, ldcache updates).
+# derived is the default so a stock 26.04 install benchmarks out of the box;
+# CDI is used automatically when present, since it also handles the odd
+# corners (nvidia-persistenced sockets, MIG, ldcache updates).
 
 # gpu_flags -- print podman flags for GPU access, one per line-continued string.
 gpu_flags() {
@@ -41,8 +39,7 @@ gpu_flags() {
 
     # Counted into a variable rather than `lsmod | grep -q`: grep -q exits at
     # the first match, lsmod takes SIGPIPE, and under `set -o pipefail` the
-    # whole pipeline reports failure -- so the nvidia branch is silently never
-    # taken and the workspace gets llvmpipe. This cost an hour once.
+    # whole pipeline reports failure, silently skipping the nvidia branch.
     local nvidia_modules
     nvidia_modules=$(lsmod 2>/dev/null | grep -c '^nvidia' || true)
     if [ "${nvidia_modules:-0}" -eq 0 ]; then
@@ -70,10 +67,9 @@ _cdi_available() {
     return 1
 }
 
-# Every file the NVIDIA userspace stack needs inside the container, mounted
-# read-only at its own path so the dynamic loader and glvnd find them where
-# they expect. Missing entries are skipped rather than fatal: the set differs
-# between driver branches, and a hard list would rot at the next release.
+# Every file the NVIDIA userspace stack needs, mounted read-only at its own
+# path so the loader and glvnd find them where expected. Missing entries are
+# skipped, not fatal: the set differs between driver branches.
 _nvidia_derived_flags() {
     local out="" f
 

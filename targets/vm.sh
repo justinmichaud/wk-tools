@@ -1,65 +1,38 @@
-# Target driver: a disposable macOS VM, for building the Apple ports.
-#
-# Uses Tart. Four facts shape this driver:
-#
-#   Apple permits exactly two *running* macOS VMs per host, and
-#   Virtualization.framework enforces it -- a third fails with VZErrorDomain
-#   code 6. The limit is on running guests, not created ones, so it is checked
-#   in t_start rather than t_create: refusing to create a VM you have room to
-#   create would be its own kind of wrong.
-#
-#   `tart clone` uses APFS copy-on-write, so cloning a prepared image is
-#   effectively free. That is the whole storage design: a golden base VM is
-#   built once, with Xcode and a WebKit checkout already in it, and every
-#   workspace is a clone of it. Creating a workspace therefore never clones a
-#   repository -- the property the Linux overlay scheme exists to provide,
-#   obtained here from the filesystem instead.
-#
-#   `tart exec` runs commands through the guest agent, which the Cirrus Labs
-#   images ship. That is what makes unattended provisioning possible at all:
-#   the ssh key is injected over the agent, so nothing ever has to type the
-#   image's default password.
-#
-#   A macOS guest cannot be firewalled from outside. See "isolation" below.
+# Target driver: a disposable macOS VM, for building the Apple ports. Uses
+# Tart. Four facts shape this driver: Apple permits exactly two *running*
+# macOS VMs per host, Virtualization.framework-enforced (VZErrorDomain code
+# 6 on a third), checked in t_start rather than t_create since the limit is
+# on running guests; `tart clone` is APFS copy-on-write, so a golden base VM
+# is built once, with Xcode and a WebKit checkout in it, and every workspace
+# is a free clone of it; `tart exec` runs commands through the guest agent
+# the Cirrus Labs images ship, injecting the ssh key without ever typing the
+# default password; and a macOS guest cannot be firewalled from outside (see
+# "isolation" below).
 #
 # --- isolation ----------------------------------------------------------------
-#
 # A macOS guest gets the same three properties a container workspace gets, by
 # different means:
-#
-#   host filesystem   unreachable. No --dir is ever passed, so /Users does not
-#                     exist in the guest by construction.
+#   host filesystem   unreachable: no --dir is ever passed to `tart run`.
 #   disposable        `wk rm` deletes the whole guest.
-#   filtered egress   Softnet, a userspace packet filter that Tart runs as a
+#   filtered egress   Softnet, a userspace packet filter Tart runs as a
 #                     subprocess on the HOST. Default-deny, with one address
-#                     allowed: the host's own, where wk-proxy listens. The
-#                     guest therefore reaches the network only through the same
-#                     hostname allowlist a container uses.
-#
-# The filter is deliberately outside the guest. `pf` inside it would not be a
-# boundary at all: anything running as root in the guest can rewrite it, and
-# "root in the guest" is exactly what is being sandboxed.
-#
-# Softnet needs root (vmnet does), so it is installed SUID root once at setup
-# time by host/macos/softnet.sh. That is the same trade the quiesce helper
-# makes; `wk` itself still never calls sudo.
-#
-# WK_VM_UNFILTERED=1 turns the filter off for a guest that needs the open
-# network. It says so loudly, because a workspace that is quietly less confined
-# than it looks is worse than one that is openly unconfined.
+#                     allowed: the host's own, where wk-proxy listens.
+# The filter is deliberately outside the guest: anything running as root in
+# the guest -- exactly what is being sandboxed -- could rewrite a `pf` inside
+# it. Softnet needs root, so it is installed SUID root once at setup time by
+# host/macos/softnet.sh; `wk` itself still never calls sudo. WK_VM_UNFILTERED=1
+# turns the filter off for a guest that needs the open network, and says so
+# loudly: quietly less confined than it looks is worse than openly unconfined.
 
 WK_VM_IMAGE="${WK_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
 WK_VM_BASE="${WK_VM_BASE:-wk-base}"
 WK_VM_MAX="${WK_VM_MAX:-2}"
 WK_VM_USER="${WK_VM_USER:-admin}"
 
-# The egress boundary for guests. The proxy listens on the host's address on
-# the guest-facing bridge, which is also the one address Softnet lets the guest
-# reach.
-#
-# That address is NOT vmnet's usual 192.168.64.1: Softnet runs its own network
-# and puts the host at 192.168.2.1. Discovered from the live interface, not
-# assumed -- the address is machine-specific.
+# The egress boundary for guests: the proxy listens on the host's address on
+# the guest-facing bridge, the one address Softnet lets the guest reach. NOT
+# vmnet's usual 192.168.64.1 -- Softnet runs its own network, discovered from
+# the live interface since it is machine-specific.
 WK_VM_SUBNET="${WK_VM_SUBNET:-192.168.2}"
 WK_VM_PROXY_PORT="${WK_VM_PROXY_PORT:-3128}"
 
@@ -74,125 +47,62 @@ _proxy_addr() {
 }
 WK_SOFTNET_BIN="${WK_SOFTNET_BIN:-/usr/local/bin/softnet}"
 
-# softnet's directory goes on PATH for *tart's* benefit, not ours, and it is
-# done here rather than at a call site because there are three call sites and
-# two of them bypass _tart() by design (`nohup "$(_tart_bin)" run ...`, which
-# must outlive the shell that starts it).
-#
-# We verify softnet by absolute path below, but tart resolves it through PATH
-# when it builds the guest's network, so a guard that only checks the binary
-# is false confidence -- `InitializationFailed(why: "softnet not found in
-# PATH")` is possible even with a passing guard. This is invisible
-# interactively: a login shell on the Mac has /usr/local/bin, a non-interactive
-# ssh has only /usr/bin:/bin:/usr/sbin:/sbin -- every fleet verb there is.
+# softnet's directory goes on PATH for *tart's* benefit, not ours: tart
+# resolves softnet through PATH when it builds the guest's network, so
+# verifying the binary by absolute path is not enough. A non-interactive
+# ssh -- every fleet verb -- has only /usr/bin:/bin:/usr/sbin:/sbin.
 case ":$PATH:" in
     *":$(dirname "$WK_SOFTNET_BIN"):"*) ;;
     *) PATH="$(dirname "$WK_SOFTNET_BIN"):$PATH"; export PATH ;;
 esac
 
-# The golden base gets the full envelope, because provisioning it ends in a
-# complete WebKit build (see _prebuild_base) rather than just a clone.
-#
-# Resolved lazily, not at source time. Sourcing a driver must not require the
-# caller to have sourced lib/resources.sh first -- `wk start` and `wk stop`
-# load this file only to stop a guest, and calling envelope_cores() while the
-# file is being read would fail them with "command not found".
-#
-# Laziness alone is not enough: a caller that loads this driver to start a
-# guest without sourcing lib/resources.sh would still hit
-# `envelope_mem_mb: command not found` at call time, with the guest
-# half-started. So the dependency is declared here, guarded, the same way
-# targets/local.sh already declares it -- a driver that needs a library should
-# say so rather than hope its caller did. Sourcing is safe to repeat:
-# lib/resources.sh is only `${VAR:-default}` assignments and function
-# definitions.
+# The golden base gets the full envelope: provisioning it ends in a complete
+# WebKit build (_prebuild_base), not just a clone. _base_cpus/_base_mem_mb
+# call envelope_cores/envelope_mem_mb lazily, so sourcing this driver never
+# requires the caller to have sourced lib/resources.sh first (`wk start`/
+# `wk stop` load it only to stop a guest); guarded, like targets/local.sh
+# already does it, since sourcing twice is safe.
 command -v envelope_mem_mb >/dev/null 2>&1 || . "$WK_ROOT/lib/resources.sh"
 WK_VM_BASE_CPUS="${WK_VM_BASE_CPUS:-}"
 WK_VM_BASE_MEM_MB="${WK_VM_BASE_MEM_MB:-}"
 _base_cpus()   { echo "${WK_VM_BASE_CPUS:-$(envelope_cores)}"; }
 _base_mem_mb() { echo "${WK_VM_BASE_MEM_MB:-$(envelope_mem_mb)}"; }
 
-# What the base is built with before it is sealed. Every workspace inherits the
-# result, so this is the single most valuable thing in the image.
-#
-# Empty disables it -- the base is then source-only and the first build in each
-# workspace is a cold 99-minute one.
+# What the base is built with before it is sealed; every workspace inherits
+# the result. Empty disables it -- the base is then source-only and the first
+# build in each workspace is a cold one.
 WK_VM_BASE_PREBUILD="${WK_VM_BASE_PREBUILD:-mac-release}"
 
-# Disk, and this one is not optional.
-#
-# The prepared image ships a 140 GB disk of which the system and Xcode already
-# occupy ~76 GB. Measured on this host, a guest needs:
-#
-#   system + Xcode      76 GB
-#   WebKit checkout     19 GB   (12 GB of it .git)
-#   compilation cache   11 GB   (Xcode CAS + module cache, after a full build)
-#   Release build tree  39 GB
-#   Debug build tree   ~78 GB   (unstripped, full DWARF; ~2x Release)
-#
-# Room for two builds plus margin is therefore ~278 GB, rounded to 320. The
-# stock 140 GB does not fit even one build: it runs out with "No space left on
-# device", which xcodebuild reports as "the Xcode build system has crashed" --
-# pointing nowhere near the cause.
-#
-# This is a ceiling, not an allocation. The disk is sparse and the clones are
-# copy-on-write, so an unused gigabyte here costs nothing. What it can do is
-# overcommit the *host*, which _check_host_disk is for.
+# Disk, and this one is not optional: the prepared image's stock 140 GB does
+# not fit even one build. A ceiling, not an allocation: the disk is sparse
+# and the clones are copy-on-write, so an unused gigabyte costs nothing here
+# and instead risks overcommitting the *host*, which _check_host_disk is for.
 WK_VM_DISK_GB="${WK_VM_DISK_GB:-320}"
 
-# Guest display size, in points, not pixels (tart defaults the unit to "pt"
-# for a macOS guest).
-#
-# Deliberately SMALLER than the host desktop, and this is the whole trick.
-# Tart pins the window's *minimum* content size to this resolution
-# (Run.swift, `.frame(minWidth: config.display.width, ...)`), and AppKit drops
-# NSWindowCollectionBehavior.fullScreenPrimary for fullScreenNone the moment a
-# window's minSize exceeds screen.frame. So setting this to the host's own
-# logical size -- 1920x1080 here -- produces a window that can neither shrink
-# nor go full screen, with its resize corner hanging off the bottom of the
-# screen. Measured on this host: 1080 fails, 1048 is the exact threshold.
-# Bigger is emphatically not better; 3840x2160 would be strictly worse.
-#
-# Small instead, and let the guest follow the window up. --display-refit sets
-# VZVirtualMachineView.automaticallyReconfiguresDisplay, so the *guest* tracks
-# the *window* on every live resize -- go full screen and the guest becomes
-# 1920x1080pt at 2x, i.e. a real 3840x2160 Retina desktop, which is the target
-# you actually want for MiniBrowser. That path only exists if the window can be
-# resized in the first place.
-#
-# Upstream treats this as working as intended (tart #1086, rejected; #1087),
-# and recommends exactly this workaround.
+# Guest display size, in points (tart defaults the unit to "pt"). Deliberately
+# SMALLER than the host desktop: Tart pins the window's *minimum* content
+# size to this resolution, and AppKit drops fullScreenPrimary once minSize
+# exceeds the screen. --display-refit then tracks the *window* on every
+# resize, so full screen gives a real Retina desktop.
 WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
 
-# Host space that must remain for a guest to have somewhere to grow into. A
-# sparse 320 GB disk on a host with 10 GB free is a build failure waiting to
-# happen, and it fails as an I/O error inside the guest rather than as anything
-# that names the real problem.
+# Host space to remain for a sparse guest disk to grow into, or a build
+# fails as an I/O error inside the guest, naming nothing real.
 WK_HOST_FREE_WARN_GB="${WK_HOST_FREE_WARN_GB:-80}"
 WK_HOST_FREE_MIN_GB="${WK_HOST_FREE_MIN_GB:-25}"
 
-# Host-side state for this target. $WK_STORE defaults to /var/lib/wk, which is
-# right inside the podman VM and wrong on a macOS workstation -- vm workspaces
-# run from the host, where nothing may write outside $HOME.
+# $WK_STORE defaults to /var/lib/wk, right inside the podman VM and wrong on
+# a macOS workstation, where nothing may write outside $HOME.
 WK_STORE="${WK_VM_STORE:-$(wk_state_dir)}"
 WK_VM_DIR="$WK_STORE/vm"
 WK_VM_KEY="$WK_VM_DIR/id_ed25519"
 
 # --- the tart binary ---------------------------------------------------------
 # Not installed by ./setup: it needs the com.apple.security.virtualization
-# entitlement, so it has to stay inside the signed app bundle Cirrus Labs ships
-# rather than being copied to a bare path. ~/.local is where a hand-installed
-# bundle lands; PATH wins if the user installed it some other way.
-#
-# The path is resolved through any symlinks, and that matters more than it
-# looks. `tart` on PATH is normally a symlink into the .app, and launching a
-# bundled app through a path *outside* its bundle means LaunchServices never
-# associates the process with the bundle. The window is then created without
-# NSWindowCollectionBehavior.fullScreenPrimary, so the green button zooms
-# instead of entering full screen and there is no way to get it back at
-# runtime. Measured with an otherwise identical binary: launched by its real
-# path inside Contents/MacOS, fullScreenPrimary is true; launched through a
-# symlink to exactly that file, it is false.
+# entitlement, so it stays inside the signed app bundle Cirrus Labs ships
+# rather than being copied to a bare path. Resolved through any symlinks,
+# since launching the bundled app from outside the .app loses
+# fullScreenPrimary (LaunchServices never associates the process with it).
 _tart_bin() {
     local p
     if command -v tart >/dev/null 2>&1; then p=$(command -v tart)
@@ -225,34 +135,48 @@ _tart() {
 
 _vm() { echo "wk-$1"; }
 
-# `tart list` returns both local VMs and cached OCI images in one array, and
-# spells the Source field "local" for the former but "OCI" for the latter --
-# so the comparison is case-folded rather than trusting either spelling.
-_vm_json() { _tart list --format json 2>/dev/null || echo '[]'; }
-_local_vms() { _vm_json | jq '[.[]|select((.Source|ascii_downcase)=="local")]'; }
-
-_vm_state() {
-    _local_vms | jq -r --arg n "$1" '[.[]|select(.Name==$n)][0].State // "absent"'
+# `tart list` mixes local VMs and cached OCI images, spelling Source "local"
+# case-folded. No tart means an empty list, not an empty string, which
+# t_info would read as a state.
+_vm_json() {
+    local bin
+    bin=$(_tart_bin) || { echo '[]'; return 0; }
+    "$bin" list --format json 2>/dev/null || echo '[]'
 }
 
-_running_count() {
-    _local_vms | jq -r '[.[]|select(.State=="running")]|length'
+_vm_query() {
+    _vm_json | python3 -c '
+import json, sys
+q, arg = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
+vms = [v for v in json.load(sys.stdin) if str(v.get("Source", "")).lower() == "local"]
+if q == "state":
+    print(next((v.get("State", "absent") for v in vms if v.get("Name") == arg), "absent"))
+elif q == "running":
+    print("\n".join(v["Name"] for v in vms if v.get("State") == "running"))
+elif q == "running_count":
+    print(sum(1 for v in vms if v.get("State") == "running"))
+elif q == "list":
+    for v in vms:
+        n = v.get("Name", "")
+        if n.startswith("wk-") and n != arg:
+            print(n[3:] + "\t" + v.get("State", ""))
+' "$@"
 }
+
+_vm_state()      { _vm_query state "$1"; }
+_running_count() { _vm_query running_count; }
 
 # --- contract ----------------------------------------------------------------
 
 t_src()   { echo "/Users/$WK_VM_USER/WebKit"; }
 t_tools() { echo "/Users/$WK_VM_USER/wk-tools"; }
 
-# `wk new` resolves a base *snapshot* for the overlay scheme. There are no
-# snapshots here: the golden VM is the base, and cloning it is the checkout.
+# `wk new` resolves a base *snapshot*; there are none here, since cloning
+# the golden VM directly is the checkout.
 t_needs_base() { return 1; }
 
-# Only what this target actually uses. The full store layout is built around
-# the overlay scheme -- a bare mirror, snapshots, the ccache and the Yocto and
-# buildroot download caches -- and none of it exists for a macOS VM, whose
-# equivalents all live inside the guest. Creating those directories anyway
-# would leave a tree of empty stubs that look like they mean something.
+# Only what this target actually uses: the overlay scheme's mirror,
+# snapshots and download caches have no macOS-VM equivalent.
 t_store_init() {
     ensure_dir "$WK_STORE"
     ensure_dir "$WK_STORE/ws"
@@ -260,26 +184,14 @@ t_store_init() {
 }
 
 t_list() {
-    # The golden base is infrastructure, not a workspace, and listing it invites
-    # someone to `wk rm` it -- which would throw away the only expensive thing
-    # here.
-    _local_vms | jq -r --arg base "$WK_VM_BASE" '
-        .[]|select(.Name|startswith("wk-"))
-           |select(.Name != $base)
-           |"\(.Name|ltrimstr("wk-"))\t\(.State)"'
+    # The golden base is infrastructure, not a workspace: listing it invites
+    # `wk rm`, which would throw away the only expensive thing here.
+    _vm_query list "$WK_VM_BASE"
 }
 
-# Creation's completion marker, and the one target where it lives on the host
-# rather than next to the checkout: a workspace here is created by cloning the
-# golden guest, which is not running while that happens, so there is nothing
-# inside it to write to -- and a guest is visible from this host and from
-# nowhere else, so there is no second machine that would need to read it. The
-# host-side workspace directory is where every other host-side fact about this
-# guest already lives.
-#
-# What it rules out: a `tart clone` or the `tart set` after it killed part-way
-# through leaves a VM that `tart list` reports quite happily, with the wrong
-# cpu and memory or an incomplete disk.
+# On the host: the golden guest is not running while the clone happens, so
+# there is nothing to write to yet. Rules out a `tart clone`/`tart set`
+# killed part-way, which `tart list` reports happily regardless.
 t_created() { [ -f "$(wk_ws_dir "$1")/$WK_READY_MARKER" ]; }
 
 t_info() {
@@ -302,9 +214,7 @@ t_create() {
 
     _ensure_base
 
-    # Not fatal -- creating costs nothing but disk, and the guest limit applies
-    # to running VMs. Said here anyway so the ceiling is never a surprise at
-    # the point where it does bite.
+    # Not fatal -- the guest limit applies to running VMs, not created ones.
     local running; running=$(_running_count)
     [ "${running:-0}" -ge "$WK_VM_MAX" ] && \
         warn "$running macOS VM(s) already running; you will have to stop one before starting '$name'"
@@ -312,25 +222,21 @@ t_create() {
     info "cloning $WK_VM_BASE -> $v (APFS copy-on-write)"
     local t0; t0=$(date +%s)
     _tart clone "$WK_VM_BASE" "$v"
-    # --display-refit is repeated on every `tart set`, not just the one that
-    # means to change it: Set.swift assigns displayRefit unconditionally, so any
-    # `tart set` that omits the flag silently clears it (tart issue #1248, still
-    # open on main). Passing it always is cheaper than discovering that later.
+    # --display-refit is passed on every `tart set`, not just the one meant to
+    # change it: Set.swift assigns displayRefit unconditionally, so a
+    # `tart set` that omits the flag silently clears it.
     _tart set "$v" --cpu "$(_vm_cpus)" --memory "$(_vm_mem_mb)" --random-mac --random-serial \
         --display "$WK_VM_DISPLAY" --display-refit
     debug "clone took $(( $(date +%s) - t0 ))s"
 
-    # A clone that took minutes fell back to a real copy instead of using
-    # clonefile(2), and the disk cost then multiplies per workspace. Worth
-    # knowing immediately rather than when the disk fills.
+    # A clone that took minutes fell back to a real copy, not clonefile(2).
     [ $(( $(date +%s) - t0 )) -gt 60 ] && \
         warn "the clone took $(( $(date +%s) - t0 ))s -- APFS copy-on-write may not be in play; check disk use"
 
     ensure_dir "$(wk_ws_dir "$name")"
 
-    # Last: the clone happened, and it was sized. Anything killed before here
-    # leaves a guest with no marker, which every command reads as `creating`
-    # and `wk new` remakes from scratch.
+    # Last: a kill before here leaves a guest read as `creating`, which
+    # `wk new` remakes from scratch.
     : > "$(wk_ws_dir "$name")/$WK_READY_MARKER"
 }
 
@@ -353,10 +259,8 @@ t_start() {
     _check_memory_budget "$name" "$(t_mem_mb "$name")"
     _check_host_disk
 
-    # t_start's stdout is the guest's address, so _boot's is captured and
-    # re-echoed rather than left to fall through. Best-effort marker: a guest
-    # that came up is up, and refusing to report that because one ssh failed
-    # would be the wrong trade.
+    # Best-effort marker below: a guest that came up is up, and refusing to
+    # report that because one ssh failed is the wrong trade.
     ip=$(_boot "$v" 180)
     _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
     _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
@@ -365,20 +269,16 @@ t_start() {
     echo "$ip"
 }
 
-# The tart flags that confine a guest's egress.
-#
-# --net-softnet-block=0.0.0.0/0 is default-deny; the single --net-softnet-allow
-# is the host, where wk-proxy listens. Longest-prefix-match wins in Softnet and
-# a /32 beats the /0, so this is "nothing except the proxy".
+# The tart flags that confine a guest's egress: --net-softnet-block=0.0.0.0/0
+# is default-deny, and longest-prefix-match makes the single
+# --net-softnet-allow "nothing except the proxy".
 _softnet_flags() {
     if [ -n "${WK_VM_UNFILTERED:-}" ]; then
         warn "WK_VM_UNFILTERED=1 -- this guest gets the open network, with no egress filter"
         return 0
     fi
-    # Fail closed: a guest booted without the filter has the open network for
-    # its whole lifetime, because Softnet applies at `tart run` and cannot be
-    # added to a running guest. Booting unfiltered is available, but only by
-    # saying so.
+    # Fail closed: Softnet applies at `tart run` and cannot be added later,
+    # so a guest booted without it has the open network for its whole life.
     [ -x "$WK_SOFTNET_BIN" ] || die "softnet is not installed, so this guest's egress would not be filtered.
     Install it:  ./setup --stage softnet   (needs a terminal for sudo)
     Or set WK_VM_UNFILTERED=1 to boot with the open network anyway."
@@ -387,27 +287,16 @@ _softnet_flags() {
         "--net-softnet-allow=$(_proxy_addr)/32"
 }
 
-# The proxy the guest is allowed to reach: the same wk-proxy.py the containers
-# use, with the same allowlist, listening on TCP because a guest cannot see a
-# unix socket across the hypervisor boundary.
-#
-# Started on demand rather than at login. It binds to the vmnet gateway
-# address, and that interface exists only while a VM is running -- a launchd
-# agent at boot would simply fail to bind.
+# wk-proxy.py, the same one containers use, listening on TCP since a guest
+# cannot see a unix socket. Started on demand, since it binds an address
+# that exists only while a VM is running.
 _proxy_pidfile() { echo "$WK_VM_DIR/proxy.pid"; }
 
-# Is there a proxy for the guest to reach? Ask the socket, not the pidfile.
-#
-# The pidfile records whoever started it last, and a proxy routinely outlives
-# the shell that recorded it -- one from an earlier session can still be
-# listening while $WK_VM_DIR/proxy.pid names a process that is long gone.
-# Trusting the file alone risks reporting "the guest will have no egress at
-# all" while egress is working fine -- the worst possible direction for this
-# check to be wrong in, since it says the boundary failed open when it did not.
+# Ask the socket, not the pidfile: a proxy routinely outlives the shell
+# that recorded it, so the file alone risks a false "no egress".
 _proxy_running() {
     local pf; pf=$(_proxy_pidfile)
     [ -f "$pf" ] && kill -0 "$(cat "$pf" 2>/dev/null)" 2>/dev/null && return 0
-    # Nothing of ours, or nothing at all -- but the address is what matters.
     lsof -nP -iTCP@"$(_proxy_addr)":"$WK_VM_PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1 || return 1
     debug "a proxy is listening on $(_proxy_addr):$WK_VM_PROXY_PORT that this pidfile does not name"
 }
@@ -419,11 +308,7 @@ _start_host_proxy() {
     ensure_dir "$WK_VM_DIR"
     local log="$WK_VM_DIR/proxy.log" addr i=0
 
-    # Wait for the address to actually exist before binding it. The guest
-    # bridge is created as the guest boots and its address is configured a
-    # moment later, so a proxy started the instant `tart ip` answers loses a
-    # race and dies with EADDRNOTAVAIL on an address that appears half a second
-    # afterwards.
+    # A proxy started before the address exists dies with EADDRNOTAVAIL.
     addr=$(_proxy_addr)
     while [ "$i" -lt 30 ]; do
         ifconfig 2>/dev/null | grep -q "inet $addr " && break
@@ -434,8 +319,7 @@ _start_host_proxy() {
         return 1
     fi
 
-    # WK_PROXY_UNIX=0: no unix socket here. That one is for containers, lives
-    # in the podman VM, and has nothing to do with this.
+    # WK_PROXY_UNIX=0: that socket is for containers, in the podman VM.
     WK_PROXY_UNIX=0 \
     WK_PROXY_TCP="$addr:$WK_VM_PROXY_PORT" \
     WK_STORE="$WK_STORE" \
@@ -458,9 +342,8 @@ _start_host_proxy() {
     return 1
 }
 
-# _boot <vm-name> <seconds> -- start a guest if it is not already up, and echo
-# its address once ssh answers. Shared by t_start and base provisioning, which
-# otherwise grow two subtly different copies of the same waiting logic.
+# Shared by t_start and base provisioning, to avoid two copies of the same
+# start-and-wait-for-ssh logic.
 _boot() {
     local v="$1" wait="${2:-180}" ip runlog
 
@@ -468,54 +351,34 @@ _boot() {
     runlog="$WK_VM_DIR/${v#wk-}.run.log"
 
     if [ "$(_vm_state "$v")" != running ]; then
-        # The flags are computed *before* the tart command line: inside the
-        # $(...) below, a die in _softnet_flags would kill only the subshell and
-        # tart would run anyway -- unfiltered, silently. The separate assignment
-        # is what lets the failure actually stop the boot.
+        # Computed *before* the tart command line: inline, a die in
+        # _softnet_flags would kill only the subshell and tart would run
+        # anyway, unfiltered and silent.
         local sflags
         sflags=$(_softnet_flags)
 
-        # Recorded so `wk claude` can tell how this guest was *booted*, which
-        # is what decides whether its egress is filtered -- the binary existing
-        # now says nothing about a guest started before it was installed.
+        # Recorded so `wk claude` can tell how this guest was *booted*.
         if [ -z "$sflags" ]; then
             : > "$WK_VM_DIR/${v#wk-}.unfiltered"
         else
             rm -f "$WK_VM_DIR/${v#wk-}.unfiltered"
         fi
 
-        # nohup, not a bare `&`: the VM must outlive the command that started
-        # it. A backgrounded child of `wk vm start` dies with the terminal,
-        # which looks exactly like the VM crashing on boot.
-        #
-        # Windowed, deliberately -- there is no --no-graphics here and no flag
-        # to put it back. A macOS guest is the one workspace kind that has a
-        # real GPU (Virtualization.framework backs its Metal stack with the
-        # host's; a Linux guest gets no GPU device at all, which is why the
-        # podman machine can never be accelerated -- see README.md). The window
-        # presents that framebuffer directly. --no-graphics does not take the
-        # GPU away, but the only way back to the screen is then VNC or Screen
-        # Sharing, which capture and re-encode every frame: fine for poking at
-        # a UI, worthless for anything measuring rendering. Since interacting
-        # with MiniBrowser is the point of this target, headless is not a mode
-        # worth carrying a second code path for.
+        # nohup, not a bare `&`, or the VM dies with the terminal --
+        # indistinguishable from crashing on boot. Windowed, deliberately: a
+        # macOS guest is the one workspace kind with a real GPU (README.md),
+        # and interacting with MiniBrowser is the point of this target.
         # shellcheck disable=SC2086 -- deliberate word splitting of the flags.
         nohup "$(_tart_bin)" run $sflags "$v" >"$runlog" 2>&1 &
         disown 2>/dev/null || true
         info "booting $v (log: $runlog)"
     fi
 
-    # The default dhcp resolver works behind Softnet -- measured. Tart's
-    # documentation warns that the *arp* resolver does not, which is easy to
-    # over-read; the agent resolver also works but is slower to become
-    # available during boot and can time out here on a guest that has in fact
-    # started fine.
+    # Default dhcp resolver works behind Softnet; the arp resolver does not.
     ip=$(_tart ip "$v" --wait "$wait" 2>/dev/null | grep .) \
         || die "$v did not come up within ${wait}s; see $runlog"
 
-    # Only now can the proxy bind: the guest bridge, and the host address on
-    # it, come into existence with the first running guest. Starting it earlier
-    # fails with EADDRNOTAVAIL on an address that does not exist yet.
+    # Only now can the proxy bind: the guest bridge exists only once running.
     _start_host_proxy || true
 
     _wait_ssh "$ip" || die "$v is up at $ip but ssh never answered; see $runlog"
@@ -532,20 +395,14 @@ t_stop() {
 t_exec() {
     local name="$1"; shift
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    # Two layers of quoting, both needed. ssh joins its command arguments with
-    # spaces and hands the result to a remote shell, so the command has to be
-    # one already-quoted string; and it is wrapped in a *login* shell because
-    # the guest's PATH additions (Claude, ~/.local/bin) live in the profile.
+    # Two layers of quoting: ssh joins its arguments with spaces, so the
+    # command must be one already-quoted string, in a *login* shell for PATH.
     local cmd; cmd=$(sh_quote "$@")
     _ssh "$ip" "bash -lc $(sh_quote "$cmd")"
 }
 
-# One file out of the guest, byte for byte (lib/target.sh, t_pull).
-#
-# scp rather than `t_exec cat`, for the reason the contract gives: a command
-# whose stdout goes through a login shell is not a byte pipe. Here the shell is
-# `bash -lc` over ssh, which is friendlier to binary than wkdev-enter and still
-# not something to hand a 40 MB profile.
+# scp rather than `t_exec cat`: a command whose stdout goes through a login
+# shell is not a byte pipe.
 t_pull() {
     local name="$1" src="$2" dest="$3"
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
@@ -553,9 +410,7 @@ t_pull() {
     scp -q $(_ssh_opts) "$WK_VM_USER@$ip:$src" "$dest"
 }
 
-# A directory out of the guest. rsync over the same ssh options everything
-# else here uses, because this is how a build tree gets to the machine that
-# will run it (build in the guest, run on bare metal) and that tree is tens of thousands of files.
+# rsync, since a build tree is tens of thousands of files.
 t_pull_dir() {
     local name="$1" src="$2" dest="$3"; shift 3
     _t_pull_dir_excludes "$@"
@@ -580,27 +435,11 @@ t_enter() {
     exec ssh -t $(_ssh_opts) "$WK_VM_USER@$ip" "cd $(t_src "$name") 2>/dev/null; exec \$SHELL -l"
 }
 
-# The marker that tells the guest's own wk that it *is* a workspace, and which
-# one -- without it, `wk build` in there tries to reach a podman machine that a
-# macOS guest can never host. See targets/local.sh.
-#
-# Written from the host, not by provisioning, and deliberately not into the
-# golden base: the base is not a workspace, and a marker in it would be
-# inherited by every clone naming the base. The host is also the only side that
-# knows what a clone was called -- left to guess, the guest would fall back to
-# its own hostname, which on a Cirrus Labs image is `Manageds-Virtual-Machine`,
-# a name appearing nowhere in `wk ls`.
-#
-# Called from two places, because either alone leaves a real gap: t_sync_tools,
-# so it is true before every build and test, and t_start, so a guest that is
-# booted and handed straight to `wk claude` has it without a host-side build
-# first -- which is the case that matters most, since that agent's only way to
-# build is this interface. Idempotent and cheap: one ssh.
-#
-# config= is what a bare `wk run` or `wk test` in the guest reaches for. The
-# tree the guest inherited from the base is $WK_VM_BASE_PREBUILD's, and a macOS
-# guest can build nothing but the Apple ports, so the jsc-release default that
-# is right in a container is never right here.
+# The marker that tells the guest's own wk that it *is* a workspace, and
+# which one -- without it, `wk build` in there tries to reach a podman
+# machine a macOS guest can never host (targets/local.sh). Never written into
+# the golden base, since the base is not a workspace. config= is what a bare
+# `wk run`/`wk test` reaches for: a macOS guest builds only the Apple ports.
 _write_marker() {
     local name="$1" ip="$2"
     _ssh "$ip" "printf '%s\n' \
@@ -610,18 +449,10 @@ _write_marker() {
         > \$HOME/.wk-workspace"
 }
 
-# The agent's own configuration: CLAUDE.md, settings, hooks and skills.
-#
-# Provisioning links these (vm/provision-base.sh); if that step ever did not
-# run, a clone inherits the gap silently -- `wk claude` starts an agent that
-# has never been told it is in a workspace, what `wk` can do for it, or that
-# the host filesystem is out of reach, and it just behaves like an agent on a
-# strange machine.
-#
-# Symlinks into $HOME/wk-tools rather than copies, exactly as provisioning does
-# it: `wk build` re-rsyncs that tree with --delete on every run, so a copy would
-# go stale the first time this repo changed, and in-guest edits are better
-# failing than quietly vanishing.
+# The agent's own configuration. Provisioning links these
+# (vm/provision-base.sh); without it `wk claude` starts an agent that was
+# never told it is in a workspace. Symlinks rather than copies: `wk build`
+# re-rsyncs $HOME/wk-tools with --delete on every run, so a copy goes stale.
 _write_claude_config() {
     local name="$1" ip="$2" tools; tools=$(t_tools "$name")
     _ssh "$ip" "[ -d $(sh_quote "$tools/claude") ] || exit 1
@@ -631,26 +462,13 @@ _write_claude_config() {
         done"
 }
 
-# The guest's *system* proxy, which is not the same thing as the environment
-# variables provisioning writes into ~/.zprofile.
-#
-# WebKit's network process does not read http_proxy/https_proxy: MiniBrowser
-# loading https://webkit.org/ gives a blank window and not one line in the host
-# proxy log, while curl to the same host from the same guest goes straight
-# through. A curl-based egress check can therefore pass while the browser
-# reaches nothing at all -- a blank page and a denied page look identical.
-#
-# Set from the host at start rather than baked into the golden base: the
-# address is discovered from the live interface (_proxy_addr) and can change,
-# and an existing guest gets it without a ~3 h rebuild.
-#
-# WK_VM_UNFILTERED turns it back off. An unfiltered guest has the open network
-# and nothing listening on the proxy address, so leaving the setting behind
-# would take the browser offline in the one case where it need not be.
-#
-# Best effort, like the marker: a guest that is up is up, and one failed
-# `sudo -n` should not turn `wk vm start` into an error. It says so, though --
-# the whole point of this function is that the failure is otherwise silent.
+# The guest's *system* proxy, not the environment variables provisioning
+# writes into ~/.zprofile: WebKit's network process does not read
+# http_proxy/https_proxy, so MiniBrowser loading https://webkit.org/ gives a
+# blank window while curl to the same host goes straight through. Set from
+# the host at start since the address (_proxy_addr) can change. Best effort,
+# like the marker: it warns rather than errors, since the failure is
+# otherwise silent.
 _set_guest_proxy() {
     local name="$1" ip="$2" addr=""
     [ -n "${WK_VM_UNFILTERED:-}" ] || addr=$(_proxy_addr)
@@ -662,9 +480,8 @@ addr='$addr'
 port='$WK_VM_PROXY_PORT'
 
 # The service to configure is the one carrying the default route, not a name
-# typed in here: the Cirrus Labs image ships several (com.redhat.spice.0, three
-# tart-version-* entries, Ethernet) and which of them is real is a property of
-# the guest, not of this repo.
+# hardcoded here: the Cirrus Labs image ships several, and which one is real
+# is a property of the guest, not of this repo.
 dev=\$(route -n get default 2>/dev/null | awk '/interface:/{print \$2}')
 [ -n "\$dev" ] || { echo "no default route in the guest" >&2; exit 1; }
 svc=\$(networksetup -listnetworkserviceorder | awk -v d="\$dev" '
@@ -694,15 +511,10 @@ sudo -n networksetup -setproxybypassdomains "\$svc" localhost 127.0.0.1
 EOF
 }
 
-# WebKit's lldb helpers, wired up in the guest the same way container/firstrun.sh
-# wires them up in a container -- summaries for WTF::String, JSValue and the rest,
-# without which a backtrace through JSC is a wall of hex.
-#
-# Written from the host, next to the marker and for the same reasons: it names
-# the workspace's own checkout, and a guest handed straight to `wk claude` would
-# otherwise have no debugger configuration until someone ran provisioning again.
-# Xcode's lldb accepts every setting in dotfiles/lldbinit unchanged (measured on
-# lldb-2100); container/lldb/rr.py is left out because rr is Linux-only.
+# WebKit's lldb helpers, wired up the same way container/firstrun.sh wires
+# them up -- summaries for WTF::String, JSValue and the rest, without which
+# a backtrace through JSC is a wall of hex. container/lldb/rr.py is left out
+# because rr is Linux-only.
 _write_lldbinit() {
     local name="$1" ip="$2"
     {
@@ -712,16 +524,10 @@ _write_lldbinit() {
     } | _ssh "$ip" "cat > \$HOME/.lldbinit"
 }
 
-# rsync rather than a mount: no --dir is ever passed to `tart run`, because a
-# shared directory is exactly the host-filesystem hole this target exists to
-# not have. The cost is that the tooling has to be pushed on every build, and
-# rsync makes that a no-op when nothing changed.
-#
-# _push_tools <name> <ip> is the rsync line itself, shared with _prebuild_base
-# and _provision_base -- both push this same tree into a *running* guest, and
-# kept apart from the marker write below: the golden base is deliberately
-# never marked as a workspace (see t_start), so the rsync has to be callable
-# without it.
+# rsync rather than a mount: no --dir is ever passed to `tart run`, since a
+# shared directory is the host-filesystem hole this target exists not to
+# have. Shared with _prebuild_base and _provision_base, into a *running*
+# golden base.
 _push_tools() {
     local name="$1" ip="$2"
     rsync -az --delete --exclude '.git/' \
@@ -749,32 +555,20 @@ t_destroy() {
         info "deleted VM $v"
     fi
 
-    # The guest's disk goes with `tart delete`, but the host-side status files,
-    # build logs and boot log do not -- and "wk rm reclaims everything it
-    # created" has to stay true here too.
+    # The guest's disk goes with `tart delete`, but the host-side status
+    # files, build logs and boot log do not.
     local ws; ws=$(wk_ws_dir "$name")
     [ -d "$ws" ] && { rm -rf "$ws"; info "removed $ws"; }
     rm -f "$WK_VM_DIR/$name.run.log"
-    # The unfiltered marker too. It records that *this* guest was booted with
-    # the packet filter off, and `wk claude` refuses on it (cmd/claude) -- so a
-    # marker outliving the guest that earned it refuses the next guest of the
-    # same name, which is a false refusal nobody can explain from the message.
+    # The unfiltered marker too, or it would falsely refuse the next guest
+    # of the same name (`wk claude` refuses on it, cmd/claude).
     rm -f "$WK_VM_DIR/$name.unfiltered"
 }
 
-# Build the base once, so every workspace starts warm.
-#
-# This is the whole reason a macOS workspace is usable. A cold Apple-port build
-# is ~1.5 hours; an incremental one on top of an existing tree is minutes. And
-# because `tart clone` is copy-on-write, a 39 GB build tree and a 10 GB
-# compilation cache sitting in the base cost each workspace *nothing* -- the
-# clone is still a second and a megabyte.
-#
-# It is also the answer to "where does the cache live". Xcode's compilation
-# cache (DerivedData/CompilationCache.noindex, content-addressed, ~10 GB after
-# a full build) is inside the guest, so it dies with `wk rm`. Putting it in the
-# base means destroying a workspace never destroys the cache -- the base is not
-# a workspace and `wk rm` refuses to touch it.
+# Build the base once, so every workspace starts warm: `tart clone` is
+# copy-on-write, so the build tree and compilation cache in the base cost
+# each workspace nothing to inherit, and would die with `wk rm` if kept
+# in a workspace instead.
 _prebuild_base() {
     local ip="$1"
     [ -n "$WK_VM_BASE_PREBUILD" ] || { info "base prebuild disabled"; return 0; }
@@ -800,21 +594,10 @@ _prebuild_base() {
     local cmd
     cmd="env $(sh_quote "${CFG_ENV[@]}") $(sh_quote "$(t_tools "$WK_VM_BASE")/build/build-in-target.sh")"
 
-    # Detached, and polled -- NOT a foreground `ssh <long command>`.
-    #
-    # This build takes over an hour, and in the foreground of one ssh session
-    # any blip on that connection kills it, leaving a base that looks built but
-    # is not -- the slowest possible failure. So the build is started with
-    # nohup, its exit status is written to a file in the guest, and this side
-    # merely watches for that file. Dropping the poll connection now costs one
-    # retry instead of the whole build.
-    #
-    # detach_remote/detach_wait_remote (lib/detach.sh) own the nohup spelling
-    # and the poll loop now -- the same shape image/pmos.sh's build uses, so
-    # there is one place that decides how "start it over there and wait" works
-    # instead of each driver inventing its own. `_prebuild_ssh` binds the ip
-    # this one prebuild is talking to, since the shared functions take a
-    # plain ssh-fn and know nothing about VMs.
+    # Detached, and polled -- NOT a foreground `ssh <long command>`: this
+    # build takes over an hour, and any blip on a foreground connection kills
+    # it, leaving a base that looks built but is not. detach_remote/
+    # detach_wait_remote (lib/detach.sh) own the nohup spelling and poll loop.
     command -v detach_remote >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     local rlog="/tmp/wk-base-build.log" rrc="/tmp/wk-base-build.rc"
     detach_remote _prebuild_ssh "$rlog" "$rrc" -- bash -lc "$cmd" \
@@ -840,21 +623,14 @@ _prebuild_base() {
 
 # --- helpers -----------------------------------------------------------------
 
-# _unpinned_host_key_opts lives in lib/reach.sh, not boot/machines.sh: boot
-# already depends on this file (`load_target vm`, boot/mac-guest.sh), so this
-# file cannot depend back on boot without a cycle, and lib/reach.sh is the one
-# place both can reach it from.
 command -v _unpinned_host_key_opts >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 
 _ssh_opts() {
     # ServerAliveInterval matters more than it looks: provisioning and builds
-    # both go quiet for long stretches, and without keepalives a NAT timeout
-    # drops the connection mid-build and reports it as a build failure.
-    # _ssh_opts_base (lib/target.sh) is the BatchMode/ConnectTimeout every
-    # driver wants; a guest's key is minted fresh on every clone, at the same
-    # address, which is exactly what _unpinned_host_key_opts is for
-    # (lib/reach.sh; boot/machines.sh's m_ssh_opts and i_ssh share it for the
-    # same reason). What is left is this guest's own key and keepalives.
+    # go quiet for long stretches, and without keepalives a NAT timeout drops
+    # the connection mid-build and reports it as a build failure. A guest's
+    # key is minted fresh on every clone at the same address, which is what
+    # _unpinned_host_key_opts (lib/reach.sh) is for.
     printf '%s' "$(_ssh_opts_base "${WK_SSH_TIMEOUT:-10}") $(_unpinned_host_key_opts) \
 -o ServerAliveInterval=60 -o ServerAliveCountMax=10 -i $WK_VM_KEY"
 }
@@ -865,10 +641,9 @@ _ssh() {
     ssh $(_ssh_opts) "$WK_VM_USER@$ip" "$@"
 }
 
-# The ssh-fn detach_remote/detach_wait_remote (lib/detach.sh) want: a callable
-# that takes just a command line. `ip` is `_prebuild_base`'s own local, in
-# scope here through bash's dynamic scoping because this is only ever called
-# while that frame is still on the stack.
+# The ssh-fn detach_remote/detach_wait_remote (lib/detach.sh) want. `ip` is
+# `_prebuild_base`'s own local, in scope here through bash's dynamic scoping
+# since this is only ever called while that frame is on the stack.
 _prebuild_ssh() { _ssh "$ip" "$@"; }
 
 _ip() {
@@ -886,8 +661,8 @@ _wait_ssh() {
     return 1
 }
 
-# Free space on the host, in GB. The guest disks are sparse, so what matters is
-# what the host can still back -- not what the guest thinks it has.
+# In GB: the guest disks are sparse, so what matters is what the host can
+# still back, not what the guest thinks it has.
 _host_free_gb() {
     df -g / 2>/dev/null | awk 'NR==2 {print $4}'
 }
@@ -919,10 +694,8 @@ _check_guest_limit() {
 }
 
 # --- resource envelope -------------------------------------------------------
-# The mac VM competes with the podman VM for the same physical memory, and on a
-# 32 GB machine the podman VM alone already holds the entire envelope. Two
-# hypervisors each promised 20 GB is how a desktop starts swapping, so this is
-# checked rather than hoped for.
+# The mac VM competes with the podman VM for the same physical memory, so
+# this is checked rather than hoped for.
 
 _podman_mem_mb() {
     have podman || { echo 0; return; }
@@ -934,38 +707,26 @@ _podman_running() {
     [ "$(podman machine inspect "${WK_MACHINE:-wk}" --format '{{.State}}' 2>/dev/null)" = running ]
 }
 
-# What a *new* VM gets.
 _vm_cpus()   { echo "${WK_VM_CPUS:-$(envelope_cores)}"; }
 _vm_mem_mb() { echo "${WK_VM_MEM_MB:-$(envelope_mem_mb)}"; }
 
-# What an *existing* VM was actually created with, which is a different
-# question and the one that matters when sizing a build. A VM created with
-# WK_VM_MEM_MB=8192 keeps that allocation for life; deriving the job count from
-# the default envelope on a later command would size the build for memory the
-# guest does not have, and the result is an OOM in the middle of a link rather
-# than an obvious error up front.
-# _vm_get <full-vm-name> <field>
+# What an *existing* VM was created with: it keeps that allocation for
+# life, so sizing a build from the default envelope instead risks an OOM.
 _vm_get() {
-    _tart get "$1" --format json 2>/dev/null | jq -r --arg f "$2" '.[$f] // empty'
+    _tart get "$1" --format json 2>/dev/null | python3 -c '
+import json, sys
+v = json.load(sys.stdin).get(sys.argv[1])
+print("" if v is None else v)' "$2"
 }
 
-# _vm_configured <workspace-name> <field>
 _vm_configured() { _vm_get "$(_vm "$1")" "$2"; }
 
-# Memory already promised to running guests. The Apple limit caps the *number*
-# of guests at two, and nothing caps their combined size -- so without this,
-# starting a second 20 GB guest beside a first one is permitted right up to the
-# point where the host starts swapping.
-# What the running guests already hold, optionally excluding one by name.
-#
-# The exclusion is not a nicety: the caller is about to start or re-use *that*
-# guest, and counting it as competition with itself makes the check refuse
-# something that fits exactly: `wk vm base --refresh` on a base that is already
-# running reports "-20480MB is unspoken for", the guest's own allocation
-# subtracted twice.
+# Memory already promised to running guests, optionally excluding one by
+# name so a caller starting or re-using that guest does not count it as
+# competition with itself.
 _committed_mem_mb() {
     local skip="${1:-}" total=0 v m
-    for v in $(_local_vms | jq -r '.[]|select(.State=="running")|.Name'); do
+    for v in $(_vm_query running); do
         [ -n "$skip" ] && [ "$v" = "$skip" ] && continue
         m=$(_vm_get "$v" Memory)
         [ -n "$m" ] && total=$(( total + m ))
@@ -985,7 +746,6 @@ t_mem_mb() {
     _vm_mem_mb
 }
 
-# _check_memory_budget <label> <requested-mb>
 _check_memory_budget() {
     local name="$1" mine="$2" podman_mb guests total budget spare
     podman_mb=0
@@ -1001,14 +761,11 @@ _check_memory_budget() {
         return 0
     fi
 
-    # What would actually fit alongside what is already committed. Suggesting a
-    # number is the difference between a useful refusal and one that just
-    # restates the problem -- and when nothing fits, saying so is the honest
-    # answer.
+    # A useful refusal names a number instead of just restating the problem.
     spare=$(( budget - podman_mb - guests ))
 
-    # Advice, not a command line: this is reached both for a workspace and for
-    # the golden base, and "wk vm start wk-base" is not a thing anyone can run.
+    # Advice, not a command line: this is reached for the golden base too,
+    # and "wk vm start wk-base" is not a thing anyone can run.
     local advice
     if [ "$spare" -ge 4096 ]; then
         advice="      WK_VM_MEM_MB=$spare, then retry
@@ -1044,20 +801,14 @@ $advice
 }
 
 # --- the golden base ---------------------------------------------------------
-# Built once and then never rebuilt, because everything expensive about a macOS
-# build environment -- the Setup Assistant, a multi-hour Xcode install, the
-# WebKit clone -- is paid inside it exactly once and inherited by every clone.
+# Built once, never rebuilt: everything expensive is paid inside it exactly
+# once and inherited by every clone.
 
 _base_exists() { [ "$(_vm_state "$WK_VM_BASE")" != absent ]; }
 
-# Existing is not the same as finished, and treating it as such is how a broken
-# base -- one that failed provisioning partway, with no Xcode licence, no
-# checkout or no prebuild -- gets inherited by every workspace cloned from it.
-#
-# So the base gets the same completion protocol as every other artifact here
-# (lib/image.sh's manifest, lib/store.sh's snapshot sha, `.wk-ready` for a
-# workspace): **a marker written last**, and anything without one is rubble to
-# be destroyed and remade rather than repaired (README.md, rules 2 and 3).
+# Existing is not the same as finished: a base that failed provisioning
+# partway would otherwise be inherited by every clone. Same completion
+# protocol as every other artifact here: a marker written last (README.md).
 _base_marker() { echo "$WK_VM_DIR/base.ready"; }
 
 _base_ready() { _base_exists && [ -f "$(_base_marker)" ]; }
@@ -1083,9 +834,9 @@ _ensure_base() {
     fi
     rm -f "$(_base_marker)"
 
-    require jq "jq is required (macOS ships it at /usr/bin/jq)"
-
-    if ! _tart list --format json --source oci 2>/dev/null | jq -e --arg i "$WK_VM_IMAGE" '.[]|select(.Name==$i)' >/dev/null; then
+    if ! _tart list --format json --source oci 2>/dev/null | python3 -c '
+import json, sys
+sys.exit(0 if any(v.get("Name") == sys.argv[1] for v in json.load(sys.stdin)) else 1)' "$WK_VM_IMAGE"; then
         info "pulling $WK_VM_IMAGE -- tens of GB, once only"
         _tart pull "$WK_VM_IMAGE"
     fi
@@ -1097,22 +848,20 @@ _ensure_base() {
     _provision_base
 }
 
-# Provisioning runs against the base VM only. Every workspace inherits the
-# result through the clone, so nothing here is ever re-run per workspace.
+# Runs against the base VM only; every workspace inherits the result.
 _provision_base() {
     _check_guest_limit
     _check_memory_budget "$WK_VM_BASE" "$(_base_mem_mb)"
     ensure_dir "$WK_VM_DIR" 0700
 
-    # Before booting: tart can only grow a disk, and only while the VM is off.
-    # Idempotent -- asking for a size it already has is accepted and does
-    # nothing, so `wk vm base --refresh` is how an undersized base gets fixed.
+    # tart can only grow a disk while the VM is off; `wk vm base --refresh`
+    # is how an undersized base gets fixed.
     local cur; cur=$(_vm_get "$WK_VM_BASE" Disk)
     if [ -n "$cur" ] && [ "$cur" -lt "$WK_VM_DISK_GB" ]; then
         info "growing the base disk ${cur}GB -> ${WK_VM_DISK_GB}GB"
         _tart set "$WK_VM_BASE" --disk-size "$WK_VM_DISK_GB"
     fi
-    # Also while it is off: the base ends provisioning with a full build, so it
+    # Also while off: the base ends provisioning with a full build, so it
     # needs the same envelope a workspace gets, not a token allocation.
     _tart set "$WK_VM_BASE" --cpu "$(_base_cpus)" --memory "$(_base_mem_mb)"
     _check_host_disk
@@ -1122,11 +871,8 @@ _provision_base() {
         changed "generated the macOS VM ssh key"
     fi
 
-    # A first boot has Setup Assistant work to get through and is much slower
-    # than a warm one, hence the longer wait than t_start uses.
-    #
-    # ssh is not reachable yet on a pristine image -- the key goes in below --
-    # so this waits only for an address, and _boot's ssh probe would time out.
+    # A first boot has Setup Assistant work to get through, hence the longer
+    # wait than t_start uses. ssh is not reachable until the key goes in below.
     local runlog="$WK_VM_DIR/base.run.log"
     local ip
     if [ "$(_vm_state "$WK_VM_BASE")" != running ]; then
@@ -1137,14 +883,9 @@ _provision_base() {
     ip=$(_tart ip "$WK_VM_BASE" --wait 300 2>/dev/null | grep .) \
         || die "base VM did not boot; see $runlog"
 
-    # The guest agent is how the key gets in the FIRST time, without ever typing
-    # the image's default password and without leaving password auth working
-    # afterwards. On every later run the key is already in there, and ssh is the
-    # better question to ask: `tart ip --wait` answers as soon as the guest has
-    # an address, well before the agent is listening, so going straight to
-    # `tart exec` can find "VM is not running" on a base whose ssh works seconds
-    # later. Ask what is actually needed, and only fall back to the agent when
-    # it is not already true.
+    # The guest agent is how the key gets in the FIRST time, without typing
+    # the default password. Later, ssh is the better question to ask: `tart
+    # ip --wait` answers before the agent is listening.
     if _wait_ssh "$ip"; then
         debug "ssh already works in '$WK_VM_BASE'; no key to install"
     else
@@ -1163,16 +904,9 @@ _provision_base() {
         _wait_ssh "$ip" || die "ssh key was installed but ssh still refuses; see $runlog"
     fi
 
-    # Seed the checkout from a clone that already exists on the host, if there
-    # is one. Cloning WebKit from GitHub happens through the egress proxy, and
-    # the same objects are usually sitting on local disk already -- the host's
-    # .git is ~1.8 GB. A bare `git clone --local` hardlinks rather than copies,
-    # so making the seed costs almost nothing, and rsync moves it over the
-    # vmnet bridge rather than the internet.
-    #
-    # Best-effort throughout: if there is no host checkout, or any step fails,
-    # nothing is left behind and provision-base.sh falls back to cloning from
-    # GitHub exactly as before. This must never be the reason a base fails.
+    # Seed the checkout from a clone on the host, if there is one: `git
+    # clone --local` hardlinks rather than copies, so it costs almost
+    # nothing. Best-effort: any failure falls back to cloning from GitHub.
     local hostwk="${WK_HOST_WEBKIT:-$HOME/Development/WebKit}"
     if [ -d "$hostwk/.git" ]; then
         local seed; seed=$(mktemp -d)
@@ -1189,17 +923,11 @@ _provision_base() {
     fi
 
     info "provisioning the base VM (Xcode licence, WebKit checkout, Claude CLI)"
-    # The whole tree, not just the provisioning script: provision-base.sh links
-    # ~/.claude (settings, hooks, CLAUDE.md, skills) out of it, and a guest
-    # without those runs a skip-permissions agent with no policy at all.
+    # The whole tree: provision-base.sh links ~/.claude out of it too.
     _push_tools "$WK_VM_BASE" "$ip"
-    # _proxy_addr, not $WK_VM_PROXY_ADDR. The variable is normally *unset* --
-    # it is an override, and the address is otherwise derived from the bridge
-    # that only exists once a guest is running. The raw variable would pass an
-    # empty value, sending provision-base.sh to its hardcoded Tart default of
-    # 192.168.64.1 -- an address nothing listens on, so every fetch inside the
-    # guest would time out looking exactly like the egress filter doing its
-    # job rather than a misconfiguration.
+    # _proxy_addr, not $WK_VM_PROXY_ADDR: the variable is normally *unset*, so
+    # passing it raw sends provision-base.sh to Tart's hardcoded default of
+    # 192.168.64.1, where nothing listens.
     _ssh "$ip" "env WK_VM_PROXY_ADDR=$(sh_quote "$(_proxy_addr)") WK_VM_PROXY_PORT=$(sh_quote "$WK_VM_PROXY_PORT") WK_VM_DISPLAY=$(sh_quote "$WK_VM_DISPLAY") bash $(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
         || die "base provisioning failed"
 
@@ -1207,8 +935,7 @@ _provision_base() {
 
     info "shutting the base VM down"
     _tart stop "$WK_VM_BASE"
-    # Last, and that is the whole publishing protocol: until this exists the
-    # guest is rubble that the next run destroys.
+    # Last: until this exists the guest is rubble that the next run destroys.
     _base_mark_ready
     changed "golden base VM '$WK_VM_BASE' is ready"
 }

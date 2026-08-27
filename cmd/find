@@ -12,6 +12,8 @@
 #   --vantage <name>   sweep from this machine only (a fleet name, or 'local')
 #   --no-ssh           do not ask anything that answers; MACs and names only
 #   --timeout <s>      per-sweep ceiling (default 60)
+#   --json             one JSON document (vantages, hits, summary) instead of
+#                      the report; nothing else on stdout
 #
 # The question this answers is the 2am one: a board is not answering to its
 # name, and the name is all there is (CLAUDE.md, "a node is reached by its
@@ -63,13 +65,14 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/image/profiles.sh"
 . "$WK_ROOT/boot/machines.sh"
 
-WANT=""; ONE_SEGMENT=""; ONE_VANTAGE=""; NO_SSH=""; SWEEP_TIMEOUT=60
+WANT=""; ONE_SEGMENT=""; ONE_VANTAGE=""; NO_SSH=""; SWEEP_TIMEOUT=60; WANT_JSON=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --segment) ONE_SEGMENT="${2:-}"; [ -n "$ONE_SEGMENT" ] || die "--segment needs a CIDR"; shift 2 ;;
         --vantage) ONE_VANTAGE="${2:-}"; [ -n "$ONE_VANTAGE" ] || die "--vantage needs a machine, or 'local'"; shift 2 ;;
         --no-ssh)  NO_SSH=1; shift ;;
         --timeout) SWEEP_TIMEOUT="${2:-}"; shift 2 ;;
+        --json)    WANT_JSON=1; shift ;;
         -*) die "usage: wk find [<machine>] [options]; see wk find -h" ;;
         *)  [ -z "$WANT" ] || die "unexpected argument: $1"; WANT="$1"; shift ;;
     esac
@@ -235,6 +238,34 @@ HITS=$(mktemp)
 _hits_cleanup() { rm -f "$HITS"; }
 wk_atexit _hits_cleanup
 
+# --json: one JSON object per line, written as it is found (vantages and
+# hits), read back and merged into one document at the end (like `wk status
+# --records`) rather than building the arrays as bash variables.
+if [ -n "$WANT_JSON" ]; then
+    VANTAGES_JSON=$(mktemp)
+    HITS_JSON=$(mktemp)
+    _json_cleanup() { rm -f "$VANTAGES_JSON" "$HITS_JSON"; }
+    wk_atexit _json_cleanup
+fi
+
+# No-ops outside --json, so every call site stays unconditional.
+vantage_json() { # <swept: true|false>
+    [ -n "$WANT_JSON" ] || return 0
+    python3 -c 'import json, sys
+print(json.dumps({"vantage": sys.argv[1], "segment": sys.argv[2], "via": sys.argv[3],
+                   "swept": sys.argv[4] == "true"}))' "$vname" "$cidr" "$via" "$1"
+}
+hit_json() {
+    [ -n "$WANT_JSON" ] || return 0
+    python3 -c 'import json, sys
+k = ["ip", "mac", "state", "machine", "vendor", "lease", "bridge", "hostname",
+     "tailnet_peer", "wk_image_id", "wk_role", "wk_profile", "wk_builder",
+     "tailscale", "marker", "uname"]
+print(json.dumps(dict(zip(k, sys.argv[1:]))))' \
+        "$ip" "$mac" "$state" "${machine:-}" "${vendor:-}" "${leasename:-}" "${bridgename:-}" \
+        "${hn:-}" "${peer:-}" "${id:-}" "${role:-}" "${prof:-}" "${bld:-}" "${ts:-}" "${mk:-}" "${un:-}"
+}
+
 FLEET=$(fleet_macs)
 LEASES=$(bridge_leases)
 PEERS=$(wk_tailscale_peers)
@@ -301,11 +332,13 @@ while read -r vname cidr via; do
             log  "  wk bridge status $via"
         fi
         BLIND=$((BLIND + 1))
+        vantage_json false >> "${VANTAGES_JSON:-/dev/null}"
         continue
     fi
 
     rows=$(WK_SWEEP_TIMEOUT="$SWEEP_TIMEOUT" reach_sweep "$cidr" "$vname" 2>/dev/null || true)
     SWEPT=$((SWEPT + 1))
+    vantage_json true >> "${VANTAGES_JSON:-/dev/null}"
 
     if [ -z "$rows" ]; then
         info "$label ($where): nothing answered"
@@ -330,6 +363,12 @@ while read -r vname cidr via; do
         # itself.
         info_out=$(probe_ssh "$ip" "${bridgename:-$(declared_ssh "$machine")}")
         hn=$(field "$info_out" host)
+        # Unconditional (field() degrades to empty on an empty info_out): the
+        # JSON hit below needs these whether or not the text report is built.
+        id=$(field "$info_out" id); role=$(field "$info_out" role)
+        prof=$(field "$info_out" profile); bld=$(field "$info_out" builder)
+        ts=$(field "$info_out" tailscale); mk=$(field "$info_out" marker)
+        un=$(field "$info_out" uname)
 
         # Joined on the *name*, never on the address. A peer's tailnet address
         # is a 100.64/10 one on a mesh and this is a LAN address on a wire; the
@@ -343,52 +382,52 @@ while read -r vname cidr via; do
             [ -z "$peer" ] || break
         done
 
-        # The identifying line: what it is, if this repo knows, and otherwise
-        # what its hardware says it is.
-        printf '  %-15s %-17s %-9s %s\n' "$ip" "$mac" "$state" \
-            "${machine:-${bridgename:-${hn:-$vendor}}}"
+        if [ -n "$WANT_JSON" ]; then
+            hit_json >> "$HITS_JSON"
+        else
+            # The identifying line: what it is, if this repo knows, and otherwise
+            # what its hardware says it is.
+            printf '  %-15s %-17s %-9s %s\n' "$ip" "$mac" "$state" \
+                "${machine:-${bridgename:-${hn:-$vendor}}}"
 
-        [ -z "$machine" ] || printf '    %-16s %s\n' "fleet machine" \
-            "$machine -- boot/machines/$machine.conf${vendor:+, $vendor}"
-        [ -n "$machine" ] || [ -z "$vendor" ] || printf '    %-16s %s\n' "hardware" "$vendor"
-        [ -z "$lease" ]   || printf '    %-16s %s\n' "reserved as" "$lease"
-        [ -z "$bridgename" ] || printf '    %-16s %s\n' "tailnet bridge" \
-            "$bridgename -- bridge/hosts/$bridgename.conf"
+            [ -z "$machine" ] || printf '    %-16s %s\n' "fleet machine" \
+                "$machine -- boot/machines/$machine.conf${vendor:+, $vendor}"
+            [ -n "$machine" ] || [ -z "$vendor" ] || printf '    %-16s %s\n' "hardware" "$vendor"
+            [ -z "$lease" ]   || printf '    %-16s %s\n' "reserved as" "$lease"
+            [ -z "$bridgename" ] || printf '    %-16s %s\n' "tailnet bridge" \
+                "$bridgename -- bridge/hosts/$bridgename.conf"
 
-        # Only claimed about a device this repo can put a name to. "Not on the
-        # tailnet" is a real finding about one of ours and a meaningless one
-        # about a neighbour's printer -- and a listing that says it of every
-        # address on the house LAN teaches the reader to skip the line.
-        if [ -n "$machine" ] || [ -n "$leasename" ] || [ -n "$bridgename" ] || [ -n "$hn" ]; then
-            if [ -n "$peer" ]; then
-                printf '    %-16s %s\n' "on the tailnet" "as $peer"
-            else
-                printf '    %-16s %s\n' "on the tailnet" \
-                    "not as any name this repo knows -- this address is how it is reached"
+            # Only claimed about a device this repo can put a name to. "Not on the
+            # tailnet" is a real finding about one of ours and a meaningless one
+            # about a neighbour's printer -- and a listing that says it of every
+            # address on the house LAN teaches the reader to skip the line.
+            if [ -n "$machine" ] || [ -n "$leasename" ] || [ -n "$bridgename" ] || [ -n "$hn" ]; then
+                if [ -n "$peer" ]; then
+                    printf '    %-16s %s\n' "on the tailnet" "as $peer"
+                else
+                    printf '    %-16s %s\n' "on the tailnet" \
+                        "not as any name this repo knows -- this address is how it is reached"
+                fi
             fi
-        fi
 
-        if [ -n "$info_out" ]; then
-            id=$(field "$info_out" id); role=$(field "$info_out" role)
-            prof=$(field "$info_out" profile); bld=$(field "$info_out" builder)
-            ts=$(field "$info_out" tailscale); mk=$(field "$info_out" marker)
-            un=$(field "$info_out" uname)
-            [ -z "$hn" ] || printf '    %-16s %s\n' "answers ssh as" "$hn${un:+  ($un)}"
-            if [ -n "$id" ]; then
-                printf '    %-16s %s\n' "running" "$id"
-                printf '    %-16s %s\n' "  profile" "${prof:-unrecorded}${bld:+, built by $bld}"
-                printf '    %-16s %s\n' "  role" \
-                    "${role:-unrecorded}$([ "$mk" = rescue ] && printf ' (the card carries the rescue marker)')"
-            else
-                printf '    %-16s %s\n' "running" \
-                    "no /etc/wk-image -- not a system wk wrote"
+            if [ -n "$info_out" ]; then
+                [ -z "$hn" ] || printf '    %-16s %s\n' "answers ssh as" "$hn${un:+  ($un)}"
+                if [ -n "$id" ]; then
+                    printf '    %-16s %s\n' "running" "$id"
+                    printf '    %-16s %s\n' "  profile" "${prof:-unrecorded}${bld:+, built by $bld}"
+                    printf '    %-16s %s\n' "  role" \
+                        "${role:-unrecorded}$([ "$mk" = rescue ] && printf ' (the card carries the rescue marker)')"
+                else
+                    printf '    %-16s %s\n' "running" \
+                        "no /etc/wk-image -- not a system wk wrote"
+                fi
+                [ "$ts" = yes ] || printf '    %-16s %s\n' "tailscale" \
+                    "not installed on it, so its name cannot be how it is reached"
+            elif [ -z "$NO_SSH" ] && { [ -n "$machine" ] || [ -n "$leasename" ] || [ -n "$bridgename" ]; }; then
+                # Said only about a machine that should have answered. Every other
+                # address on the segment declining an ssh connection is not news.
+                printf '    %-16s %s\n' "ssh" "no answer as $(id -un)"
             fi
-            [ "$ts" = yes ] || printf '    %-16s %s\n' "tailscale" \
-                "not installed on it, so its name cannot be how it is reached"
-        elif [ -z "$NO_SSH" ] && { [ -n "$machine" ] || [ -n "$leasename" ] || [ -n "$bridgename" ]; }; then
-            # Said only about a machine that should have answered. Every other
-            # address on the segment declining an ssh connection is not news.
-            printf '    %-16s %s\n' "ssh" "no answer as $(id -un)"
         fi
         echo "$ip" >> "$HITS"
     done
@@ -397,6 +436,20 @@ $(vantages)
 VANTAGES
 
 SEEN=$(wc -l < "$HITS" | tr -d ' ')
+
+if [ -n "$WANT_JSON" ]; then
+    python3 -c 'import json, sys
+def docs(path):
+    with open(path) as f:
+        return [json.loads(l) for l in f if l.strip()]
+want, want_mac, seen, swept, blind = sys.argv[1:6]
+print(json.dumps({
+    "want": want or None, "want_mac": want_mac or None,
+    "seen": int(seen), "swept": int(swept), "blind": int(blind),
+    "vantages": docs(sys.argv[6]), "hits": docs(sys.argv[7]),
+}))' "$WANT" "$WANT_MAC" "$SEEN" "$SWEPT" "$BLIND" "$VANTAGES_JSON" "$HITS_JSON"
+    exit 0
+fi
 
 # The summary, and its whole job is to make an empty listing mean something.
 #

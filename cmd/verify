@@ -31,7 +31,12 @@ NAME="${WK_NAME:-}"
 require_name "$NAME"
 
 WANT_GPU=""
-[ "${1:-}" = --gpu ] && WANT_GPU=1
+case "${1:-}" in
+    "") ;;
+    --gpu) WANT_GPU=1 ;;
+    *) die "usage: wk verify <workspace> [--gpu]; see wk verify -h" ;;
+esac
+[ $# -le 1 ] || die "usage: wk verify <workspace> [--gpu]; see wk verify -h"
 
 # Resolved from the registry: a fixed default would load the container driver
 # for a vm workspace and report "no such workspace" about one that exists.

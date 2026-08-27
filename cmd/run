@@ -8,7 +8,16 @@
 # Everything after `--` goes to jsc verbatim.
 #
 #   --config <config>   the build config to run (default: default_config)
-#   --lldb              run jsc under lldb instead of directly
+#   --lldb              run jsc under lldb instead of directly; under
+#                       --until-crash, each iteration runs under lldb instead,
+#                       and a crash leaves you at its prompt rather than lldb
+#                       exiting with it
+#   --until-crash       repeat the run until it exits non-zero, in one round
+#                       trip into the workspace; keeps the failing iteration's
+#                       output, prints its exit status, arguments and any core
+#                       file, and exits with that status
+#   --max <n>           cap the iterations under --until-crash (default: 200;
+#                       reaching it without a crash exits 0)
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,12 +31,22 @@ require_name "$NAME"
 
 CONFIG="${WK_CONFIG:-$(default_config)}"
 DEBUGGER=""
+UNTIL_CRASH=""
+MAX=200
 while [ $# -gt 0 ]; do
     case "$1" in
-        --config) CONFIG="${2:-}"; shift 2 ;;
-        --lldb)   DEBUGGER=lldb; shift ;;
-        --)       shift; break ;;
-        *)        break ;;
+        --config)      CONFIG="${2:-}"; shift 2 ;;
+        --lldb)        DEBUGGER=lldb; shift ;;
+        --until-crash) UNTIL_CRASH=1; shift ;;
+        --max)
+            MAX="${2:-}"
+            case "$MAX" in
+                ''|*[!0-9]*) die "--max needs a positive integer iteration count (got '${2:-}')
+    example:  wk run $NAME --until-crash --max 50 -- ..." ;;
+            esac
+            shift 2 ;;
+        --)            shift; break ;;
+        *)             break ;;
     esac
 done
 
@@ -47,6 +66,85 @@ DIR=$(config_run_dir "$SRC")
 # LD_LIBRARY_PATH=...` would drop the wkdev image's jhbuild prefix and break
 # WPE/GTK binaries that depend on a library already on the path.
 PRELUDE="export $VAR=\"$DIR\${${VAR}:+:\${${VAR}}}\""
+
+if [ -n "$UNTIL_CRASH" ]; then
+    # Under the workspace's own home, next to the other per-workspace
+    # artifacts (t_home; cmd/profile's OUTDIR is the same idea): not /tmp,
+    # which a container restart takes away before anyone reads a crash log.
+    HOMEDIR="$(t_home "$NAME")"
+    LOGDIR="$HOMEDIR/until-crash"
+    # Matches container/firstrun.sh's core_pattern -- $CORE_DIR/core.%e.%p.%t
+    # under the same home -- so a core a crashing iteration wrote is found by
+    # being newer than a marker touched just before that iteration ran.
+    CORE_DIR="$HOMEDIR/wk-cores"
+
+    if [ -n "$DEBUGGER" ]; then
+        # Driven by until-crash-run-file: each iteration runs under a plain
+        # lldb session that launches, waits for the stop, writes the
+        # debuggee's exit status (or 128+signal, for a real crash) to
+        # $WK_UNTIL_CRASH_STATUS, and only then quits itself -- but only
+        # when that status is 0. A crash leaves the quit command un-run, so
+        # lldb stays at its prompt with the person, exactly like `wk run
+        # --lldb` without --until-crash.
+        RUNFILE="$(t_tools "$NAME")/container/lldb/until-crash-run-file"
+        CMD="$(lldb_prelude)
+$PRELUDE
+LOGDIR=$(sh_quote "$LOGDIR")
+mkdir -p \"\$LOGDIR\"
+i=0
+while [ \"\$i\" -lt $MAX ]; do
+    i=\$((i + 1))
+    STFILE=\$(mktemp)
+    WK_UNTIL_CRASH_STATUS=\"\$STFILE\" \"\$LLDB\" $(t_lldb_opts) -s $(sh_quote "$RUNFILE") $(sh_quote "$JSC") -- --validateOptions=1 $(sh_quote "$@")
+    STATUS=\$(cat \"\$STFILE\" 2>/dev/null || true)
+    rm -f \"\$STFILE\"
+    case \"\$STATUS\" in
+        ''|0) continue ;;
+    esac
+    echo \"until-crash: iteration \$i exited \$STATUS -- args: $(sh_quote "$@")\" >&2
+    exit \"\$STATUS\"
+done
+echo \"until-crash: reached the cap of $MAX iterations without a crash\"
+exit 0"
+        # A tty for the same reason `--lldb` needs one below.
+        t_exec_tty "$NAME" bash -lc "$CMD"
+    else
+        JSC_INVOKE="$(sh_quote "$JSC") --validateOptions=1 $(sh_quote "$@")"
+        CMD="$PRELUDE
+export JSC_validateOptions=1
+LOGDIR=$(sh_quote "$LOGDIR")
+CORE_DIR=$(sh_quote "$CORE_DIR")
+mkdir -p \"\$LOGDIR\"
+i=0
+while [ \"\$i\" -lt $MAX ]; do
+    i=\$((i + 1))
+    STAMP=\$(date -u +%Y%m%dT%H%M%SZ)-\$i
+    LOG=\"\$LOGDIR/\$STAMP.log\"
+    MARK=\"\$LOGDIR/.mark-\$STAMP\"
+    touch \"\$MARK\"
+    $JSC_INVOKE >\"\$LOG\" 2>&1
+    STATUS=\$?
+    if [ \"\$STATUS\" -eq 0 ]; then
+        rm -f \"\$LOG\" \"\$MARK\"
+        continue
+    fi
+    echo \"until-crash: crashed on iteration \$i (exit \$STATUS)\" >&2
+    echo \"until-crash: args: $(sh_quote "$@")\" >&2
+    echo \"until-crash: log: \$LOG\" >&2
+    CORES=\$(find \"\$CORE_DIR\" -newer \"\$MARK\" -type f 2>/dev/null || true)
+    rm -f \"\$MARK\"
+    if [ -n \"\$CORES\" ]; then
+        echo \"until-crash: core:\" >&2
+        printf '%s\n' \"\$CORES\" | sed 's/^/  /' >&2
+    fi
+    exit \"\$STATUS\"
+done
+echo \"until-crash: reached the cap of $MAX iterations without a crash\"
+exit 0"
+        t_exec "$NAME" bash -lc "$CMD"
+    fi
+    exit $?
+fi
 
 # validateOptions catches typo'd JSC flags, which otherwise fail silently and
 # make a benchmark look like it changed when it never ran the intended path.

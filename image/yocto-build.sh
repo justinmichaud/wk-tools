@@ -1,24 +1,8 @@
 #!/usr/bin/env bash
 #
-# The yocto image build, as it runs INSIDE a workspace. The host half is
-# image/yocto.sh; this is the part that runs where the toolchain, the
-# checkout and the caches are -- split the same way
-# build/build-in-target.sh is split from cmd/build, since assembling a long
-# environment over ssh or through `podman exec` quoting drifts subtly from
-# what was tested.
-#
-# Everything here is one of five things:
-#
-#   1. undoing the SDK's environment, which bitbake refuses to run inside
-#   2. the host-tooling and locale preflight, so a missing package is
-#      reported in the first second rather than by bitbake's sanity checker
-#   2b. re-resolving bitbake's own host-tool symlinks, which it caches
-#   3. local.conf additions -- the caches, the parallelism, the mirror
-#   4. one call to WebKit's own Tools/Scripts/cross-toolchain-helper per stage
-#
-# Nothing here reimplements the Yocto build: cross-toolchain-helper is the
-# upstream interface and stays the interface; what this adds is what it
-# deliberately leaves to whoever drives it.
+# The yocto image build, as it runs INSIDE a workspace; image/yocto.sh is
+# the host half. Tools/Scripts/cross-toolchain-helper stays the upstream
+# interface for the build; this only adds what it leaves to whoever drives it.
 
 set -euo pipefail
 
@@ -45,59 +29,45 @@ done
 say()  { printf 'wk-yocto: %s\n' "$*"; }
 fail() { printf 'wk-yocto: error: %s\n' "$*" >&2; exit 1; }
 
-# Nothing here may fail silently: this script runs detached, so its log is the
-# only channel there is, and `set -euo pipefail` exits with no message at all
-# -- as it did once, after a `find` on a missing directory fed `pipefail` a
-# failure. An ERR trap costs one line and turns that into an address.
+# Runs detached, so this log is the only channel; `set -euo pipefail` alone
+# exits with no message at all.
 trap 'printf "wk-yocto: error: line %s: \"%s\" exited %s\n" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
 
 [ -n "$TARGET" ] || fail "--target is required"
 [ -d "$SRC" ]    || fail "no checkout at $SRC"
 
-# --- 1. undo the SDK's environment -------------------------------------------
-#
-# The wkdev SDK exports a development environment (include paths, pkg-config,
-# library path) so a native WebKit build finds the jhbuild prefix -- poison to
-# a cross build: bitbake's sanity checker refuses to start with
-# LD_LIBRARY_PATH set, and the include/pkg-config paths are worse than a
-# refusal, silently offering the *host's* aarch64 headers to a compiler
+# The wkdev SDK's dev environment is poison to a cross build:
+# LD_LIBRARY_PATH makes bitbake's sanity checker refuse to start, and the
+# include/pkg-config paths silently hand the host's headers to a compiler
 # building for the target. Unset rather than filtered through
-# BB_ENV_PASSTHROUGH: they must be gone for `repo` sync and native tools too.
+# BB_ENV_PASSTHROUGH: `repo` sync and native tools need them gone too.
 unset CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH \
       OBJCPLUS_INCLUDE_PATH PKG_CONFIG_PATH PKG_CONFIG_LIBDIR \
       LD_LIBRARY_PATH LD_PRELOAD 2>/dev/null || true
 
-# DL_DIR and SSTATE_DIR arrive as environment variables (targets/container.sh
-# sets them to the store-backed cache mount), and bitbake filters the
-# environment: without naming them here they are dropped silently, and the
-# cache meant to survive `wk rm` never gets written. Also written into
-# local.conf below, since a bitbake dev shell entered by hand reads the
-# environment and not our local.conf additions.
+# bitbake filters the environment, so DL_DIR/SSTATE_DIR (set by
+# targets/container.sh to the store-backed cache mount) must be named here
+# or they are dropped and the cache meant to survive `wk rm` is never written.
 export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS:-} DL_DIR SSTATE_DIR"
 
-# A UTF-8 locale, or poky's sanity check stops the build. en_US.UTF-8 when the
-# image has it (poky's own documentation names it), C.UTF-8 otherwise -- which
-# is always present on a glibc system and satisfies the same check.
+# A UTF-8 locale, or poky's sanity check stops the build; C.UTF-8 is the
+# fallback always present on a glibc system.
 if locale -a 2>/dev/null | grep -qix 'en_US.utf-\?8'; then
     export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 else
     export LANG=C.UTF-8 LC_ALL=C.UTF-8
 fi
 
-# --- 2. preflight ------------------------------------------------------------
-#
-# Collected and reported together. bitbake's own sanity checker does find
-# these, but one at a time and several minutes in, after the layer sync -- and
-# each missing package costs a whole round trip through that.
+# Collected and reported together, rather than one at a time by bitbake's
+# own sanity checker several minutes in, after the layer sync.
 missing=""
 for t in gawk chrpath diffstat cpio makeinfo socat file zstd \
          xz bzip2 gcc g++ perl python3 git patch which unzip wget; do
     command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
 done
-# lz4 ships the tool under either name depending on the Ubuntu release
-# (liblz4-tool became lz4); the recipes call whichever is on PATH.
+# lz4 ships the tool under either name depending on the Ubuntu release.
 command -v lz4c >/dev/null 2>&1 || command -v lz4 >/dev/null 2>&1 \
-    || missing="$missing lz4" 
+    || missing="$missing lz4"
 python3 -c 'import git' 2>/dev/null || missing="$missing python3-git"
 python3 -c 'import jinja2' 2>/dev/null || missing="$missing python3-jinja2"
 python3 -c 'import pexpect' 2>/dev/null || missing="$missing python3-pexpect"
@@ -113,16 +83,12 @@ if [ -n "$missing" ]; then
     next workspace."
 fi
 
-# bitbake will not run as root, and a container makes that mistake easy to
-# make. Said here rather than discovered from bitbake's own message, which
-# does not mention that this is a container.
 [ "$(id -u)" != 0 ] || fail "bitbake refuses to run as root, and this shell is root.
     A workspace's builds run as the workspace user; something started this one
     with 'podman exec -u root' or similar."
 
-# The caches. Their absence is not fatal -- bitbake would create them -- but
-# their absence *here* means the store mount is missing, and the whole build
-# would then download 12 GB into a layer that `wk rm` deletes.
+# The caches' absence here means the store mount is missing, and the build
+# would download 12 GB into a layer that `wk rm` deletes.
 for d in "${DL_DIR:-}" "${SSTATE_DIR:-}"; do
     [ -n "$d" ] || fail "DL_DIR/SSTATE_DIR are not set in this workspace.
     They come from the container's store-backed cache mount
@@ -132,18 +98,11 @@ for d in "${DL_DIR:-}" "${SSTATE_DIR:-}"; do
     [ -w "$d" ] || fail "$d is not writable"
 done
 
-# --- 2b. the toolchain -------------------------------------------------------
-#
-# There is nothing to install: the workspace image *is* a supported Yocto
-# build host (Ubuntu 24.04, GCC 13, Python 3.12, glibc 2.39), which is what
-# scarthgap was written against (container/yocto/Containerfile has why).
-
 # bitbake does not run tasks with our PATH: it builds `tmp/hosttools`, a
-# directory of symlinks to the host tools it found, and gives tasks *that*
-# as their PATH. It creates each link only when one is missing, so a
-# hosttools directory built by an earlier run can keep pointing at a stale
-# compiler even after this fixes the environment. Symlinks only, so
-# discarding them recompiles nothing.
+# directory of symlinks to the host tools it found, resolved only once per
+# link -- so a hosttools directory built by an earlier run can keep
+# pointing at a stale compiler even after this fixes the environment.
+# Symlinks only, so discarding them recompiles nothing.
 clear_hosttools() {
     if [ -d "$WORKDIR/build/tmp/hosttools" ]; then
         say "clearing tmp/hosttools so bitbake re-resolves the host tools"
@@ -151,50 +110,30 @@ clear_hosttools() {
     fi
 }
 
-# The sstate cache is namespaced by the build-host image -- a correctness
-# requirement, not tidiness: bitbake disables uninative on some hosts
-# ("Disabling uninative so that sstate is not corrupted"), builds with it on
-# and off do not produce interchangeable sstate, and *target* sstate paths
-# carry no host marker to stop bitbake mixing them -- corrupting `do_package`
-# for recipes that then fail pseudo's `*at()` syscall interception. Each
-# build-host image gets its own namespace, making the mixing impossible
-# instead of documented. DL_DIR stays shared: a source tarball is a source
-# tarball whatever built it, and is the 24 GB actually expensive to refill.
+# The sstate cache is namespaced by the build-host image: sstate built with
+# uninative on and off is not interchangeable, and target sstate paths
+# carry no host marker to stop bitbake mixing them, corrupting
+# `do_package`. DL_DIR stays shared: a source tarball is a source tarball
+# whatever built it.
 if [ -n "$SSTATE_NS" ]; then
     SSTATE_DIR="$SSTATE_DIR/$SSTATE_NS"
     export SSTATE_DIR
     mkdir -p "$SSTATE_DIR" || fail "cannot create $SSTATE_DIR"
 fi
 
-# Parallelism. Two knobs, and bitbake needs both: BB_NUMBER_THREADS is how many
-# recipes run at once, PARALLEL_MAKE is the -j inside each one. Their product is
-# the real load, which is why neither is set to the core count.
+# BB_NUMBER_THREADS (recipes at once) times PARALLEL_MAKE (-j inside each)
+# is the real load, so neither alone is set to the core count.
 if [ -z "$JOBS" ]; then
     JOBS=$(nproc 2>/dev/null || echo 4)
 fi
 BB_THREADS=$(( JOBS / 4 )); [ "$BB_THREADS" -lt 1 ] && BB_THREADS=1
 PAR_MAKE=$(( JOBS / BB_THREADS ))
 
-# The recipes that are worth more than their quarter of the machine.
-#
-# The product above is the right shape while many recipes run at once, wrong
-# at the ends of a build. Measured by buildstats on a 79-job host:
-#
-#   clang-native        146 min of do_compile
-#   rust-llvm-native     58 min
-#   gcc                  16 min      <- and everything below here is noise
-#
-# Those two run 3.4 hours between them while 76 of 80 cores idle, and bitbake
-# cannot rebalance mid-build (PARALLEL_MAKE is fixed) -- so the fix is naming
-# the recipes that deserve the whole machine.
-#
-# Sized by cores, not memory: an LLVM compile measured ~334 MB peak here, not
-# the ~2.5 GB a WebKit unified source needs, so even -j79 of them is ~26 GB.
-# The link step is the memory-hungry part, bounded per-recipe where it
-# belongs (image/yocto/meta-wk/recipes-devtools/clang).
-#
-# Both spellings of each (`clang`/`clang-native`): an override naming a
-# recipe this configuration does not build is simply inert.
+# Recipes worth more than their quarter of the machine: a handful of
+# single-threaded compiles run for hours while the rest idles, and bitbake
+# cannot rebalance PARALLEL_MAKE mid-build. Sized by cores, not memory --
+# the link step is the memory-hungry part, bounded per-recipe in
+# image/yocto/meta-wk/recipes-devtools/clang.
 BIG_RECIPES="clang clang-native clang-cross-arm clang-cross-aarch64
              llvm llvm-native rust-llvm rust-llvm-native
              mozjs-115 boost gdb linux-raspberrypi"
@@ -217,9 +156,7 @@ say "SSTATE_DIR    $SSTATE_DIR"
 say "locale        $LANG"
 say "toolchain     gcc $(gcc -dumpversion 2>/dev/null || echo '?'), python $(python3 -c 'import platform; print(platform.python_version())' 2>/dev/null || echo '?')"
 
-# The target has to exist in *this* checkout, and that is a property of the
-# branch rather than of this repo. Checked before anything is created, because
-# the answer is a one-line grep and the alternative is finding out after a
+# Checked before anything is created: cheaper than finding out after a
 # 20-minute layer sync.
 Tools/Scripts/cross-toolchain-helper --print-available-targets --log-level quiet \
     | grep -qx "$TARGET" \
@@ -227,24 +164,19 @@ Tools/Scripts/cross-toolchain-helper --print-available-targets --log-level quiet
     Available here:
 $(Tools/Scripts/cross-toolchain-helper --print-available-targets --log-level quiet | sed 's/^/      /')"
 
-# --- 3. the layer sync -------------------------------------------------------
-#
 # cross-toolchain-helper initialises its workdir inside YoctoCrossBuilder's
 # constructor, so *any* action does it; the cheapest is --bitbake-dev-shell
 # with no stdin, which syncs the layers, writes conf/, and starts a bash
-# that reaches EOF immediately and exits.
-#
-# A step of its own so the expensive stage stays restartable and the cheap
-# stage stays testable: a 20-minute `repo sync` and a multi-hour bitbake
-# have completely different failure modes.
+# that reaches EOF immediately and exits. A step of its own so the
+# expensive stage stays restartable and the cheap stage stays testable.
 init_workdir() {
     if [ -f "$WORKDIR/.target-info-version" ] && [ -f "$CONF" ]; then
         say "layers already synced at $WORKDIR"
         return 0
     fi
     say "syncing Yocto layers (repo sync -- this is the network-bound part)"
-    # The helper downloads the `repo` tool itself and clones git-repo's own
-    # bootstrap, so this step needs egress that the build stage does not.
+    # `repo` fetches the tool itself and git-repo's own bootstrap, so this
+    # step needs egress the build stage does not.
     Tools/Scripts/cross-toolchain-helper --cross-target="$TARGET" \
         --bitbake-dev-shell < /dev/null > /dev/null \
         || fail "the layer sync failed. It is almost always egress: 'repo'
@@ -254,17 +186,9 @@ init_workdir() {
     [ -f "$CONF" ] || fail "the layer sync reported success but wrote no $CONF"
 }
 
-# --- 4. local.conf ----------------------------------------------------------
-#
-# Appended, never rewritten: local.conf is generated from the branch's own
-# rpi/local-*.conf plus cross-toolchain-helper's own appended line, and ours
-# goes last -- which is also what makes it win, since bitbake takes the last
-# assignment.
-#
-# Marked but rewritten from the marker on every run, not skipped when
-# present: a knob (rm_work, chromium, job counts) that takes effect only on
-# the run that created the file is worse than no knob, and it is safe to
-# truncate from the marker to EOF because ours is last.
+# Appended, never rewritten, last -- bitbake takes the last assignment.
+# Rewritten from the marker on every run rather than skipped when present,
+# so a knob (rm_work, chromium, job counts) takes effect immediately.
 MARKER='# --- wk (image/yocto-build.sh) ---'
 configure_local_conf() {
     [ -f "$CONF" ] || fail "no $CONF -- the layer sync did not run"
@@ -279,8 +203,6 @@ configure_local_conf() {
         printf '# Written by image/yocto-build.sh. Edit that, not this: the\n'
         printf '# workdir is wiped whenever the target config changes.\n\n'
 
-        # The caches, by absolute path. Also in the environment, but bitbake
-        # filters that and a value in local.conf cannot be filtered.
         printf 'DL_DIR = "%s"\n' "$DL_DIR"
         printf 'SSTATE_DIR = "%s"\n\n' "$SSTATE_DIR"
 
@@ -291,30 +213,20 @@ configure_local_conf() {
             printf 'PARALLEL_MAKE:pn-%s = "-j %s"\n' "$_r" "$JOBS"
         done
 
-        # The safety net under all of it, and the reason a static cap is
-        # not needed: bitbake stops launching new tasks while the kernel
-        # reports memory stall, throttling on evidence instead of a number
-        # guessed here. 10000 microseconds of stall per second is 1%, which
-        # a healthy build never reaches. Where /proc/pressure cannot be
-        # read -- an older kernel, some container configurations -- bitbake
-        # carries on unregulated rather than failing the build.
+        # bitbake stops launching new tasks while the kernel reports memory
+        # stall, throttling on evidence instead of a guessed static cap.
         printf '\nBB_PRESSURE_MAX_MEMORY = "10000"\n\n'
 
-        # One host for almost every fetch: the build stops depending on a
-        # hundred upstream servers staying up and serving the same bytes,
-        # and -- since a workspace reaches the network only through a
-        # hostname allowlist -- the set of names that has to be allowed
-        # collapses to something a person can read. Not PREMIRRORONLY:
-        # layers outside poky (meta-webkit, meta-clang, meta-raspberrypi)
-        # fetch from github, which the mirror does not carry, so the
-        # upstream fallback has to stay allowed.
+        # One host for almost every fetch keeps the workspace's hostname
+        # allowlist readable. Not PREMIRRORONLY: meta-webkit, meta-clang
+        # and meta-raspberrypi fetch from github, which the mirror lacks.
         printf 'INHERIT += "own-mirrors"\n'
         printf 'SOURCE_MIRROR_URL = "https://downloads.yoctoproject.org/mirror/sources/"\n'
         printf 'BB_GENERATE_MIRROR_TARBALLS = "1"\n\n'
 
-        # A shared workstation's root filesystem is not the build's to fill.
-        # The stock BB_DISKMON_DIRS in the branch's local.conf halts at 100 MB
-        # free, which is far too late on a disk this machine also runs from.
+        # A shared workstation's root filesystem is not the build's to
+        # fill; the branch's own 100 MB floor is too late on a disk this
+        # machine also runs from.
         printf 'BB_DISKMON_DIRS = "\\\n'
         printf '    STOPTASKS,${TMPDIR},10G,100K \\\n'
         printf '    STOPTASKS,${DL_DIR},5G,100K \\\n'
@@ -323,27 +235,10 @@ configure_local_conf() {
         printf '    HALT,${DL_DIR},2G,1K \\\n'
         printf '    HALT,${SSTATE_DIR},2G,1K"\n\n'
 
-        # Chromium. The branch's own local-rpi4-64bits-mesa.conf adds it --
-        # "Add chromium to image to be able to compare WPE/Chromium
-        # performance" -- a real reason on a fleet whose whole purpose is
-        # comparative browser benchmarking, so upstream's choice is the
-        # default here. It is also the most expensive thing in the build by
-        # a wide margin: `chromium-ozone-wayland` and `gn-native` run 21 GB
-        # of TMPDIR each, plus rust-native, cargo-native and
-        # rust-llvm-native behind them, roughly half the tasks. Dropping it
-        # is what to do when the image is wanted for WPE alone or the disk
-        # is tight.
-        # tailscale, from meta-wk-tailnet: the layer carries the recipe,
-        # this is the line that puts it in the image, placed here rather
-        # than in a bbappend so "this image is not stock" stays two
-        # greppable places instead of hidden in a layer.
-        #
-        # This is what makes a booted board reachable by its own name with
-        # nothing written down about how to reach it (CLAUDE.md, "Cattle,
-        # not pets"). The daemon is not free on the machine under test --
-        # the layer conf says what it costs -- and YOC_TAILNET=0 builds the
-        # image without it, for a measurement that has to be comparable
-        # with numbers taken before this existed.
+        # Chromium is on by default, the most expensive part of the build;
+        # --chromium=0 drops it. tailscale (meta-wk-tailnet) makes a booted
+        # board reachable by its own name with nothing written down about
+        # how (CLAUDE.md, "Cattle, not pets"); YOC_TAILNET=0 drops it too.
         if [ "${TAILNET:-1}" = 0 ]; then
             printf '# tailnet: off. This image joins nothing and is reachable only\n'
             printf '# over whatever LAN it lands on.\n\n'
@@ -351,12 +246,9 @@ configure_local_conf() {
             printf 'IMAGE_INSTALL:append = " tailscale"\n\n'
         fi
 
-        # wk-wifi-join, from meta-wk-wifi: unconditional, unlike tailscale's
-        # YOC_TAILNET toggle -- every profile this repo builds targets
-        # rpi3/rpi4/rpi5, none of which has a cable at the bench, so there is
-        # no comparable "measurement built before this existed" to stay
-        # comparable with. The credential it spends comes from the card, never
-        # from here (image/yocto/meta-wk-wifi/conf/layer.conf).
+        # wk-wifi-join (meta-wk-wifi): unconditional, since every profile
+        # here targets a board with no cable at the bench. Credential comes
+        # from the card, never from here.
         printf 'IMAGE_INSTALL:append = " wk-wifi-join"\n\n'
 
         if [ "$CHROMIUM" = 0 ]; then
@@ -365,66 +257,44 @@ configure_local_conf() {
         fi
 
         if [ "$RM_WORK" = 1 ]; then
-            # Measured: with rm_work on, TMPDIR peaks at ~79 GB at 62% of
-            # tasks. rm_work reclaims a recipe's tree only once that
-            # recipe's whole chain finishes, and with ~19 running at once --
-            # two of them Chromium and gn at 21 GB each -- the peak is set
-            # by what is in flight, not by what is done: it is the
-            # difference between finishing and filling the disk, not a way
-            # to keep TMPDIR small.
-            #
-            # What it costs: the unpacked source and build tree of each
-            # recipe survives, which `bitbake -c menuconfig virtual/kernel`
-            # and a devshell want -- so it is a knob (YOC_RM_WORK), not a
-            # fact, and the kernel-configuration flow in the wiki wants it
-            # off. sstate is untouched, so rebuilds stay fast.
+            # rm_work reclaims a recipe's tree only once its whole chain
+            # finishes, so the TMPDIR peak is set by what is in flight, not
+            # by what is done. It costs the unpacked source/build tree,
+            # which `bitbake -c menuconfig virtual/kernel` and a devshell
+            # want -- hence a knob rather than always-on. sstate untouched.
             printf 'INHERIT += "rm_work"\n'
             printf 'RM_WORK_EXCLUDE += "%s"\n\n' "${IMAGE:-webkit-dev-ci-tools}"
         fi
     } >> "$CONF"
 }
 
-# Run a bitbake command directly: cross-toolchain-helper exposes only
-# --build-image, --build-toolchain and a dev shell, so the three lines it
-# uses internally are reproduced here. Two things must match it or the
-# build is subtly different:
-#
-#   the build directory.  `oe-init-build-env <builddir>`, from inside poky.
-#
-#   WEBKIT_CROSS_TARGET/VERSION.  meta-webkit's distro conf falls back to
-#   the machine name and *today's date* when these are absent from
-#   BB_ORIGENV, which lands in DISTRO_VERSION and so in every dependent
-#   signature -- quietly invalidating sstate. Read from the file the helper
-#   already wrote, not recomputed: duplicating that hash here could
-#   disagree with it.
+# cross-toolchain-helper exposes only --build-image, --build-toolchain and
+# a dev shell, so the three lines it uses internally are reproduced here.
+# WEBKIT_CROSS_TARGET/VERSION are read from the file the helper wrote
+# rather than recomputed: absent from BB_ORIGENV, meta-webkit's distro conf
+# falls back to the machine name and *today's date*, quietly invalidating
+# sstate via DISTRO_VERSION.
 bb() {
     local info="$WORKDIR/.target-info-version"
     [ -f "$info" ] || fail "no $info -- the layer sync did not finish"
     WEBKIT_CROSS_TARGET=$(cut -d' ' -f1 < "$info")
     WEBKIT_CROSS_VERSION=$(cut -d' ' -f2 < "$info")
     export WEBKIT_CROSS_TARGET WEBKIT_CROSS_VERSION
-    # `set +u` around the sourcing: oe-init-build-env reads BBSERVER and other
-    # variables it does not first define, so under `set -u` it aborts with
-    # "BBSERVER: unbound variable" -- which is why cross-toolchain-helper runs
-    # it in a plain `bash -c` and why this has to as well. In a subshell, so the
-    # relaxation does not outlive the call.
+    # oe-init-build-env reads BBSERVER and other variables it does not
+    # first define, so `set -u` aborts on it; relaxed in a subshell so it
+    # does not outlive the call.
     ( set +u
       cd "$WORKDIR/sources/poky" \
       && . ./oe-init-build-env "$WORKDIR/build" >/dev/null \
       && bitbake "$@" )
 }
 
-# --- bblayers ----------------------------------------------------------------
-#
-# One extra layer, `image/yocto/meta-wk`, for local fixes -- appended to the
-# generated bblayers.conf rather than the branch's own rpi/bblayers.conf
-# template, same reasoning as the local.conf additions.
-#
-# Rewritten each run for the same reason: a marker-guarded skip would make a
-# layer edit take effect only on the run that created the file.
-#
-# Optional (YOC_LOCAL_LAYER=0 gets the branch's own layer set and nothing
-# else), the only way to find out whether a carried fix still earns its place.
+# One extra layer, `image/yocto/meta-wk`, appended to the generated
+# bblayers.conf rather than the branch's own template, same reasoning as
+# the local.conf additions above. Rewritten each run for the same reason:
+# a marker-guarded skip would make a layer edit take effect only on the
+# run that created the file. Optional (YOC_LOCAL_LAYER=0 gets the branch's
+# own layer set and nothing else).
 BB_MARKER='# --- wk layers (image/yocto-build.sh) ---'
 configure_bblayers() {
     local f="$WORKDIR/build/conf/bblayers.conf"
@@ -443,10 +313,9 @@ configure_bblayers() {
     fi
     printf '\n%s\n' "$BB_MARKER" >> "$f"
 
-    # Three layers, and they are deliberately not one. meta-wk may only change
-    # how the image is built; meta-wk-tailnet and meta-wk-wifi change what is
-    # on the board, which is a different promise and is kept visible by being
-    # a different line here. Each layer's own conf/layer.conf argues its case.
+    # Three layers, deliberately not one: meta-wk only changes how the
+    # image is built; meta-wk-tailnet and meta-wk-wifi change what is on
+    # the board, a different promise kept visible as a different line.
     local dir layer
     for dir in meta-wk meta-wk-tailnet meta-wk-wifi; do
         layer=$(cd "$(dirname "$0")/../image/yocto/$dir" && pwd)
@@ -463,25 +332,11 @@ run_helper() {
         || fail "$what failed"
 }
 
-# --- 5. the image stage's own completion evidence ----------------------------
-#
-# cross-toolchain-helper's build_image() (Tools/Scripts/cross-toolchain-helper)
-# treats the mere *presence* of a file at build/image/<recipe>.<ext> as proof
-# the image is current, and returns success without ever calling bitbake:
-#
-#   def build_image(self):
-#       if self._check_if_image_built_and_print_paths():
-#           return True
-#       ...
-#
-# That directory is a copy the helper makes from tmp/deploy/images the one
-# time it *does* build -- so once an image has been built there once, every
-# later `--build-image` for that target, from any local.conf or layer change,
-# reports "Images built at: ..." from yesterday's copy and never touches
-# bitbake. There is no flag to turn this off: --build-image takes no "force".
-# The only way to make it build for real is to remove what it is checking
-# for -- bitbake's own sstate cache is the legitimate cache that then keeps an
-# unchanged rebuild fast, which this is not.
+# cross-toolchain-helper's build_image() treats the mere *presence* of a
+# file at build/image/<recipe>.<ext> -- a copy it made the one time it did
+# build -- as proof the image is current, and returns without calling
+# bitbake. No flag turns this off; removing what it checks for is the only
+# way to make it build for real.
 clear_stale_image_copies() {
     local dir="$1"
     if [ -d "$dir" ]; then
@@ -490,12 +345,9 @@ clear_stale_image_copies() {
     fi
 }
 
-# The backstop for the above: even with the copy cleared first, the
-# completion line ("stage 'image' done") must be evidence, not an echo of
-# the helper's exit code -- a helper that changes how it decides an image is
-# current, or any other path back to the same shortcut, would otherwise be
-# silent here exactly the way it was silent on moose. Fails loudly rather
-# than trusting the exit status alone.
+# The backstop for the above: the completion line must be evidence, not an
+# echo of the helper's exit code, since a helper that changes how it
+# decides an image is current would otherwise be silent here too.
 verify_image_freshness() { # <dir> <start-epoch-seconds>
     local dir="$1" start="$2" f mtime newest=0 found=0
     [ -d "$dir" ] \
@@ -527,13 +379,10 @@ case "$STAGE" in
         say "layers ready at $WORKDIR"
         ;;
     fetch)
-        # Every source, and nothing built. `-k` is the whole point: without it
-        # bitbake halts on the first unreachable host, so growing the egress
-        # allowlist from evidence would cost one full run per host. With it, one
-        # pass names all of them, and the proxy's log is the list.
-        #
-        # Useful in its own right as well -- it primes DL_DIR, which is the
-        # store-backed cache, so the compile that follows is offline.
+        # `-k` is the whole point: without it bitbake halts on the first
+        # unreachable host, so growing the egress allowlist from evidence
+        # would cost one full run per host. Also primes DL_DIR, so the
+        # compile that follows is offline.
         init_workdir
         configure_local_conf
         configure_bblayers
@@ -566,40 +415,26 @@ case "$STAGE" in
         run_helper "bitbake populate_sdk (the cross toolchain)" --build-toolchain
         ;;
     webkit)
-        # The other half of a useful board: the image is only the runtime, and
-        # carries no WebKit at all (meta-webkit's webkit-dev-ci-tools image is
-        # explicit about that). This cross-builds the checkout against the
-        # image's own toolchain, which is what `built-product-archive` then
-        # packs up for the board.
+        # The image carries no WebKit (meta-webkit's webkit-dev-ci-tools
+        # image is explicit about that); this cross-builds the checkout
+        # against the image's own toolchain for `built-product-archive`.
         init_workdir
         configure_local_conf
         configure_bblayers
         clear_hosttools
         say "cross-building WebKit (WPE, Release) for $TARGET"
-        # The one flag this repo has to add, and why it cannot simply be
-        # passed: wpe-2.46 defaults both ENABLE_WPE_1_1_API and
-        # ENABLE_WPE_PLATFORM on, and CMake refuses the pair outright:
+        # wpe-2.46 defaults both ENABLE_WPE_1_1_API and ENABLE_WPE_PLATFORM
+        # on, and CMake refuses the pair. `run-benchmark`'s WPE driver --
+        # the only thing that produces a *score* -- hardcodes
+        # --use-wpe-platform-api and --maximized
+        # (linux_minibrowserwpe_driver.py:39-40), which a MiniBrowser built
+        # without WPEPlatform rejects outright, so WPEPlatform wins here
+        # over the wiki's `run-minibrowser --wpe -P wl` flow.
         #
-        #   ENABLE_WPE_PLATFORM conflicts with ENABLE_WPE_1_1_API.
-        #   You must disable one or the other.
-        #
-        # Which half to keep depends on what will launch the browser:
-        #   * the wiki's flow (`run-minibrowser --wpe -P wl`) wants
-        #     ENABLE_WPE_1_1_API=ON.
-        #   * `run-benchmark`'s WPE driver -- the only thing that produces a
-        #     *score* -- hardcodes `--use-wpe-platform-api` and
-        #     `--maximized` (linux_minibrowserwpe_driver.py:39-40). A
-        #     MiniBrowser built without WPEPlatform rejects them outright
-        #     ("Cannot parse arguments: Unknown option --maximized"), which
-        #     run-benchmark reports as a bare `exit_code: 1`.
-        #
-        # This repo builds images to benchmark them, so WPEPlatform wins.
-        #
-        # Not a second `--cmakeargs` on the command line: build-webkit takes
-        # only one and the last wins, which would silently drop the
-        # target's own flags (bwrap and xdg-dbus-proxy paths the sandbox
-        # needs). So the target's are *read* out of targets.conf and ours
-        # appended.
+        # Not a second --cmakeargs on the command line: build-webkit takes
+        # only one and the last wins, dropping the target's own flags
+        # (bwrap, xdg-dbus-proxy) -- so the target's are read out of
+        # targets.conf and ours appended.
         # No `local`: this case arm runs at file scope, not in a function.
         tgt_args=$(python3 - "$TARGET" <<'PYEOF'
 import configparser, sys, shlex
@@ -624,20 +459,11 @@ PYEOF
         say "  target flags: ${tgt_args:-none}"
         say "  cmakeargs:    $tgt_cmake $extra"
 
-        # And a job count, because the default is a machine-killer here.
-        #
         # build-webkit appends `-j$(numberOfCPUs)` only when --makeargs
-        # carries no -j, so the default on this host was -j80 -- and
-        # WebCore's unified sources are the largest translation units in
-        # the tree. The OOM killer took cc1plus repeatedly ("fatal error:
-        # Killed signal terminated program cc1plus"), which reads like a
-        # compiler bug and is not one.
-        #
-        # bitbake's own PARALLEL_MAKE was capped (-j4 from 79) by the
-        # envelope; this stage is a cmake/ninja build bitbake never sees,
-        # so nothing applied that reasoning to it. Sized the way every
-        # other build here is (build_jobs, lib/resources.sh) -- the caller
-        # passes the answer.
+        # carries no -j; WebCore's unified sources are the largest
+        # translation units in the tree, so that default OOMs here. This
+        # stage is a cmake/ninja build bitbake never sees, so its own
+        # PARALLEL_MAKE cap does not reach it.
         webkit_makeargs="-j${WEBKIT_JOBS:-8}"
         say "  jobs:         ${WEBKIT_JOBS:-8} (memory-sized; the default -j$(nproc) OOMs on unified sources)"
 

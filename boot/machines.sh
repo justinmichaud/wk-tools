@@ -37,7 +37,12 @@ EEPROM_CONFIG_CMD='vcgencmd bootloader_config 2>/dev/null || sudo rpi-eeprom-con
 
 # One conf per machine, the same shape as targets/hosts/*.conf; each conf
 # opens with its device's from-nothing recipe.
-machines_dir() { echo "$WK_ROOT/boot/machines"; }
+#
+# WK_MACHINES_DIR overrides this, read only here: a test's way to drive
+# machine_list/machine_load/report_fleet_devices (cmd/status) against a fake
+# fleet without touching boot/machines/*.conf itself
+# (tests/test_fleet_walk.py's TestFleetWalkBareFormMultiMachine).
+machines_dir() { echo "${WK_MACHINES_DIR:-$WK_ROOT/boot/machines}"; }
 
 machine_list() {
     local f n

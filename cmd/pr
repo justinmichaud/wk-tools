@@ -2,64 +2,39 @@
 #
 # wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
 # wk: where=workspace name=optional ready=yes group=sources
-#
-# Three spellings, all pasted straight from a GitHub page:
+# wk: sub open where=host needs=gh,gh-auth
 #
 #   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
-#   wk pr 1234          # WebKit/WebKit pull request #1234
-#   wk pr wpe:1234      # WPEWebKit's pull request #1234
+#   wk pr 1234                                 # WebKit/WebKit pull request #1234
+#   wk pr wpe:1234                             # WPEWebKit's pull request #1234
+#   wk pr rebase [<workspace>]                 # rebase the current branch onto origin/main
+#   wk pr open <workspace> [--draft] [--web]   # push the branch and open it as a PR
 #
-# <user>:<branch> is a fork's branch. The branch alone does not say which
-# project it belongs to -- WebKit and WPEWebKit are separate repositories
-# that share a history -- so both are tried: whichever fork of the two has
-# that branch is the one it comes from, and a branch that exists in both is
-# refused by name rather than guessed at.
+# <user>:<branch> is a fork's branch; since the branch alone does not say which project it is
+# from, both are tried, and a branch existing in both is refused by name rather than guessed at.
+# A bare number is a WebKit/WebKit pull request, `wpe:<number>` a WPEWebKit one. Either way it is
+# fetched once into this machine's mirror ('wk sync' keeps it under refs/remotes/pr/...; no
+# /mirror falls back to GitHub directly) and the workspace fetches that ref from there. The remote
+# is added if missing and the branch checked out tracking it -- no confirmation, except for your
+# own work: uncommitted changes are named before anything moves, and a local branch with commits
+# the PR head lacks is never overwritten, only named. `--force` takes the remote version instead.
 #
-# A bare number is a pull request against WebKit/WebKit; `wpe:<number>` is
-# one against WPEWebKit. Neither needs the fork-discovery round trip above:
-# GitHub serves a pull request's head under the base repository itself
-# (refs/pull/<n>/head), so the project is already known from the spelling.
+#   --force   take the PR head even when the local branch has commits it does not, discarding them
 #
-# Either way the branch or pull request is fetched once into this machine's
-# mirror (the same one 'wk sync' keeps, under refs/remotes/pr/...) and the
-# workspace then fetches that one ref from there -- local and near-instant --
-# rather than going to GitHub again on every re-run and every workspace. A
-# workspace with no /mirror (a remote build machine, a guest predating the
-# mount) falls back to fetching straight from GitHub, exactly as before.
+# 'rebase' fetches just enough of the mirror for origin/main into the workspace and rebases the
+# current branch onto it; either argument order works, and a bare 'wk pr rebase' runs inside a
+# workspace. Runs in the workspace, like `wk build`: from a host, name it; from inside one, do not.
 #
-# The remote is added if it is not there (a fork of a project this tooling
-# already knows), the branch is checked out tracking it, and that is all. No
-# confirmation for any of it: fetching, adding a remote and checking out are
-# routine and reversible, and a command that asks four times is a command that
-# gets answered without reading.
+# 'open' pushes the workspace's current branch to its fork and opens it as a pull request with
+# `gh pr create --fill` (title and body from the commits). Runs on the host only and refuses
+# inside a workspace: publishing is the person's act, never an agent's
+# (docs/HANDOFF-sandboxing.md). The project comes from which upstream the branch tracks (`git
+# branch -u origin/main` or `wpe/main`); no upstream, `main`, a detached HEAD, or a dirty tree is
+# refused by name. Pushing needs `wk push on`, which a workspace with the switch off is told to
+# run, never flipped here.
 #
-# The exception, and the only warning this prints, is *your* work:
-#
-#   uncommitted changes in the tree are named before anything moves, because a
-#   checkout carries them across and they are easy to forget;
-#   a local branch of the same name that has commits the PR head does not is
-#   never overwritten -- it is checked out as it is, and what would be lost is
-#   named. `--force` takes the remote version instead, discarding yours.
-#
-# A fourth form, not a PR at all:
-#
-#   wk pr rebase [<workspace>]
-#
-# fetches this machine's mirror (just enough for origin/main) into the
-# workspace and rebases the current branch onto origin/main -- the reminder
-# 'wk sync' prints after every fetch, as a command rather than a suggestion.
-# Either order works: 'wk pr <ws> rebase' resolves <ws> the ordinary way;
-# 'wk pr rebase <ws>' and a bare 'wk pr rebase' (inside the workspace) are
-# handled here, since "rebase" itself is never mistaken for a workspace name.
-#
-# Runs in the workspace, like `wk build`: from a host, name it; from inside
-# one, do not.
-#
-#   --force   take the PR head even when the local branch has commits it
-#             does not, discarding them
-#
-# TODO: 'wk pr open' -- opening this branch as a PR on GitHub needs gh wired
-# in and is not implemented here.
+#   --draft   open it as a draft
+#   --web     open the browser's new-PR form instead of creating it directly
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -68,15 +43,66 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# The workspace name arrives as $WK_NAME (the dispatcher resolves it inside a
-# workspace, and on a host by checking the first word against the registry).
+# pr_open_target <src-dir> -- decides the checked-out branch and project 'wk pr open' opens as
+# (refusals: 'wk pr -h'). Prints "<base-repo>\t<user>:<branch>\t<fork-remote>\t<branch>".
+#
+# A plain function -- no WK_ROOT, no color codes, only git and lib/store.sh tables -- so it ships
+# via `declare -f` into a workspace, and runs the same way against a bare repo in a test.
+pr_open_target() {
+    local src="$1" branch dirty up up_remote up_url up_repo fork url owner base
+    branch=$(git -C "$src" symbolic-ref --quiet --short HEAD 2>/dev/null) || {
+        printf 'error: %s\n' "'wk pr open' needs a branch checked out, not a detached HEAD" >&2
+        return 1
+    }
+    if [ "$branch" = main ]; then
+        printf 'error: %s\n' "'wk pr open' cannot open 'main' as a pull request -- create a branch first" >&2
+        return 1
+    fi
+    dirty=$(git -C "$src" status --porcelain)
+    if [ -n "$dirty" ]; then
+        printf 'error: %s\n' "the tree has uncommitted changes -- commit or stash them: git -C $src status" >&2
+        return 1
+    fi
+    up=$(git -C "$src" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || up=""
+    if [ -z "$up" ]; then
+        printf 'error: %s\n' "'$branch' has no upstream, so 'wk pr open' cannot tell which project it belongs to -- track one first: git branch -u origin/main (WebKit) or wpe/main (WPEWebKit)" >&2
+        return 1
+    fi
+    up_remote="${up%%/*}"
+    up_url=$(git -C "$src" remote get-url "$up_remote" 2>/dev/null) || up_url=""
+    up_repo=$(printf '%s' "$up_url" | sed -E 's#(\.git)?$##; s#.*/##')
+    fork=$(wk_push_forks | awk -v r="$up_repo" 'NF && $2 ~ ("/" r "$") { print $1; exit }')
+    if [ -z "$fork" ]; then
+        printf 'error: %s\n' "'$branch' tracks '$up' ($up_url), not a known upstream (origin or wpe) -- 'wk pr open' only knows WebKit and WPEWebKit" >&2
+        return 1
+    fi
+    url=$(git -C "$src" remote get-url "$fork" 2>/dev/null) || {
+        printf 'error: %s\n' "no '$fork' remote here -- 'wk remotes --fix' wires it" >&2
+        return 1
+    }
+    owner=$(printf '%s' "$url" | sed -E 's#\.git$##; s#.*[:/]([^/]+)/[^/]+$#\1#')
+    base=$(wk_remotes | awk -v r="$up_remote" '$1 == r { print $2; exit }' | sed -E 's#^https://github.com/##; s#\.git$##')
+    printf '%s\t%s\t%s\t%s\n' "$base" "$owner:$branch" "$fork" "$branch"
+}
+
+# pr_open_gh_args <base-repo> <head> [--draft] [--web] -- argv for 'gh pr create', one token per
+# line so a caller reads it into an array without word-splitting. --fill always: title and body
+# come from the branch's commits.
+pr_open_gh_args() {
+    local base="$1" head="$2" a; shift 2
+    printf '%s\n' --repo "$base" --head "$head" --fill
+    for a in "$@"; do
+        case "$a" in
+            --draft|--web) printf '%s\n' "$a" ;;
+        esac
+    done
+}
+
+# $WK_NAME is the resolved workspace name, or empty ('open' is where=host); both then check argv.
 NAME="${WK_NAME:-}"
 SPEC="${1:-}"
 
-# 'rebase' is never a workspace name the dispatcher could have resolved (slot
-# 1 only matches a real one), so it always survives as $1 here, whichever
-# order it was typed in. A workspace named afterwards is $2 only when $NAME
-# is still empty -- 'wk pr <ws> rebase' already consumed <ws> as $NAME.
+# 'rebase' never matches a workspace name (survives as $1); a name after it is $2, read if empty.
 if [ "$SPEC" = rebase ]; then
     [ -n "$NAME" ] || NAME="${2:-}"
     [ -n "$NAME" ] || die "usage: wk pr rebase [<workspace>]; run inside a workspace, or name one; see wk pr -h"
@@ -106,14 +132,62 @@ if [ "$SPEC" = rebase ]; then
     fi
 fi
 
+# 'open' refuses to run bare inside a workspace, so the workspace is always the remaining arg.
+if [ "$SPEC" = open ]; then
+    shift
+    DRAFT="" WEB="" NAME2=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --draft) DRAFT=1; shift ;;
+            --web)   WEB=1; shift ;;
+            -*)      die "usage: wk pr open <workspace> [--draft] [--web]; see wk pr -h" ;;
+            *)
+                [ -z "$NAME2" ] || die "usage: wk pr open <workspace> [--draft] [--web]; see wk pr -h"
+                NAME2="$1"; shift ;;
+        esac
+    done
+    [ -n "$NAME" ] || NAME="$NAME2"
+    [ -n "$NAME" ] || die "usage: wk pr open <workspace> [--draft] [--web]; see wk pr -h"
+    require_name "$NAME"
+    load_target "$(ws_target "$NAME")"
+    SRC=$(t_src "$NAME")
+
+    # Shipped via declare -f, not sourced remotely: a remote /opt/wk-tools may be stale or different.
+    info "reading '$NAME's branch and remotes"
+    _remote_script="$(declare -f wk_remotes wk_push_forks pr_open_target)
+pr_open_target $(sh_quote "$SRC")"
+    TARGET_LINE=$(t_exec "$NAME" bash -c "$_remote_script") \
+        || die "'$NAME' is not ready to open as a pull request -- see above"
+    BASE=$(printf '%s' "$TARGET_LINE" | cut -f1)
+    HEAD=$(printf '%s' "$TARGET_LINE" | cut -f2)
+    FORK=$(printf '%s' "$TARGET_LINE" | cut -f3)
+    BRANCH=$(printf '%s' "$TARGET_LINE" | cut -f4)
+
+    # Checked via the switch, not error text: `wk push status` is the single source of truth here.
+    "$WK_ROOT/wk" push status >/dev/null 2>&1 \
+        || die "'wk pr open' pushes '$BRANCH' to '$FORK', and the deploy key is held back.
+    wk push on"
+
+    info "pushing '$BRANCH' to '$FORK'"
+    t_exec "$NAME" git -C "$SRC" push -u "$FORK" "$BRANCH" \
+        || die "the push to '$FORK' failed -- see above.
+    If the deploy key is the problem:  wk push on"
+
+    GH_ARGS=()
+    while IFS= read -r _a; do GH_ARGS+=("$_a"); done \
+        < <(pr_open_gh_args "$BASE" "$HEAD" ${DRAFT:+--draft} ${WEB:+--web})
+
+    info "opening a pull request: $BASE <- $HEAD"
+    gh pr create "${GH_ARGS[@]}"
+    exit 0
+fi
+
 [ -n "$NAME" ] && [ -n "$SPEC" ] \
-    || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]'; see wk pr -h"
+    || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]', or 'wk pr open <ws> [--draft] [--web]' (from the host); see wk pr -h"
 shift $#
 
 require_name "$NAME"
 load_target "$(ws_target "$NAME")"
 
-# Everything else -- resolving the spec, fetching it into the mirror once,
-# and checking it out in the workspace from there -- is one function shared
-# with `wk new --pr`, so the two commands cannot drift apart (lib/store.sh).
+# Resolving and checking out the spec is shared with `wk new --pr` (lib/store.sh).
 wk_pr_checkout "$NAME" "$SPEC"

@@ -1,29 +1,18 @@
-# Workspace storage: the base-snapshot scheme and the paths built on it.
-#
-# The central problem this solves: a workspace's WebKit tree is the lower layer
-# of a live overlay mount, and the kernel is explicit that "changes to the
-# underlying filesystems while part of a mounted overlay filesystem are not
-# allowed ... the behavior of the overlay is undefined". So `git fetch` must
-# never touch a tree that a workspace is using.
-#
-# The scheme:
-#
-#   git/WebKit.git      a bare mirror. The only thing ever fetched into, and
-#                       never a lower layer, so fetching is always safe.
-#   base/<id>/WebKit    immutable snapshots. A workspace pins one for life.
-#   ws/<name>/changes   that workspace's copy-on-write layer.
-#
-# A new snapshot is `cp -al` from the previous one -- hardlinks, one
-# filesystem, so it costs near-zero time and space -- and is then fetched into.
-# Git creates and renames files rather than writing in place, so the previous
-# snapshot's inodes are untouched and workspaces pinned to it keep working.
+# Workspace storage: base-snapshot scheme built on a bare mirror.
+# git/WebKit.git is the only thing ever fetched into. base/<id>/WebKit are
+# immutable snapshots a workspace pins for life; ws/<name>/changes is that
+# workspace's copy-on-write layer. A workspace's tree is the lower layer of
+# a live overlay mount, and the kernel says changes to a mounted overlay's
+# underlying filesystem are undefined -- so only the mirror is ever fetched
+# into. A new snapshot is `cp -al` from the previous one (hardlinks,
+# near-zero cost) and then fetched into; git creates and renames files
+# rather than writing in place, so a workspace pinned to the previous
+# snapshot is untouched.
 
-# Where everything lives. /var/lib/wk inside the macOS VM, which is provisioned
-# for it and has no other user; under the user's own data directory on a Linux
-# workstation, because nothing here needs to be system-owned and a store that
-# needs root to create is a store that needs root to repair. An existing
-# /var/lib/wk wins if it is ours, so a machine already holding one keeps working
-# without moving a hundred gigabytes.
+# /var/lib/wk inside the macOS VM. On a Linux workstation, the user's own
+# data directory: a store that needs root to create needs root to repair.
+# An existing /var/lib/wk this user owns wins, so a machine already holding
+# one keeps working without moving a hundred gigabytes.
 _wk_default_store() {
     if [ -n "${WK_IN_VM:-}" ] || [ "$(uname -s)" = Darwin ]; then
         echo /var/lib/wk
@@ -37,13 +26,11 @@ _wk_default_store() {
 WK_STORE="${WK_STORE:-$(_wk_default_store)}"
 
 # Is the store on *this* machine, or somewhere this machine only drives?
-#
 # On a Linux workstation and inside the podman VM it is here. On a macOS
-# workstation it is not: $WK_STORE is the VM's /var/lib/wk, a path the Mac can
-# neither create nor read -- so a command that acts on the store has to be
-# forwarded rather than attempted. `mkdir: /var/lib/wk: Permission denied` is
-# what attempting it looks like, and it says nothing about which machine to run
-# on instead.
+# workstation $WK_STORE is the VM's /var/lib/wk, a path the Mac can neither
+# create nor read -- so a command that acts on the store has to be forwarded
+# rather than attempted (`mkdir: /var/lib/wk: Permission denied` is what
+# attempting it looks like).
 store_is_local() {
     [ -n "${WK_IN_VM:-}" ] && return 0
     [ "$(uname -s)" != Darwin ] && return 0
@@ -51,47 +38,23 @@ store_is_local() {
     [ -d "$WK_STORE" ] && [ -w "$WK_STORE" ]
 }
 
-# This device's own state, on the host, whatever $WK_STORE happens to be.
-#
-# Answers the question this file exists for: where does something live when
-# $WK_STORE is somebody else's path. Two users are that shape: the workspace
-# registry (target-dependent $WK_STORE cannot say which target a workspace is
-# on) and the image store (on a macOS host $WK_STORE is the podman VM's
-# /var/lib/wk, which the Mac cannot create).
-#
-# `wk_state_dir` itself lives in lib/common.sh, not here or in lib/target.sh:
-# a helper reachable only through a higher-sourced file silently disappears
-# for any command that sources a lower one without it -- `wk` sources
-# target.sh without store.sh, so anything defined only here is missing from
-# target_all() on a macOS host, and common.sh is the floor every such file
-# sources.
+# `wk_state_dir` (lib/common.sh) answers where something lives when
+# $WK_STORE is somebody else's path -- the workspace registry and the image
+# store. It lives in common.sh, not here: a helper reachable only through a
+# higher-sourced file disappears for any command that sources a lower one
+# without it, and common.sh is the floor every such file sources.
 
-# ccache ceiling, shared by every workspace.
-#
-# Measured: a full WPE release build plus two JSC release builds came to
-# 364 MB across ~6,200 cached objects -- release objects compress well, far
-# lower than intuition suggests.
-#
-# Debug builds are the real driver: unstripped objects with full DWARF run
-# roughly 8-10x release, so a full debug WebKit build is on the order of
-# 3-4 GB of cache. 40 GB holds well over two full builds of any
-# configuration, with room for several ports side by side, and still leaves
-# most of the 200 GB disk for snapshots and workspaces.
+# ccache ceiling, shared by every workspace. Sized for several full debug
+# builds side by side (the expensive case: unstripped objects with full
+# DWARF), leaving most of the 200 GB disk for snapshots and workspaces.
 WK_CCACHE_MAXSIZE="${WK_CCACHE_MAXSIZE:-40G}"
 
-# The ccache ceiling, written the same way everywhere.
-#
-# ccache's own default is 5 GB, which a couple of WebKit builds blow through,
-# so every cache this repo creates records the real limit in its own config
-# as well as receiving it in the environment -- otherwise `ccache -s` on the
-# machine reports 5 GB and the next reader concludes the cache is
-# misconfigured.
-#
-# One function rather than two spellings of the same policy, which is how a
-# store cache and a remote target's cache would silently drift to different
-# sizes.
-#
-# Writes the value in, never a path out: the caller says where.
+# ccache's own default is 5 GB, which a couple of WebKit builds blow
+# through, so every cache this repo creates records the real limit in its
+# own config as well as the environment -- otherwise `ccache -s` reports
+# 5 GB and looks misconfigured. One function so a store cache and a remote
+# target's cache cannot drift to different sizes. Writes the value in,
+# never a path out: the caller says where.
 ccache_conf_render() { printf 'max_size = %s\n' "$WK_CCACHE_MAXSIZE"; }
 ccache_conf_write() { # <path to ccache.conf>
     [ -f "$1" ] || ccache_conf_render > "$1"
@@ -101,24 +64,18 @@ wk_mirror()   { echo "$WK_STORE/git/WebKit.git"; }
 wk_base_dir() { echo "$WK_STORE/base"; }
 wk_ws_dir()   { echo "$WK_STORE/ws/$1"; }
 
-# Upstreams kept in the single mirror, so a workspace can check out a branch
-# from any of them without another fetch.
-#
-# All HTTPS, including the forks: these are public repositories and fetching
-# is anonymous, so the mirror needs no credential at all. Pushing is a
-# separate concern handled per-workspace by the deploy key, scoped to the
-# fork -- SSH here would make `wk sync` fail on any machine without that key.
-# This list is also what a workspace's remotes are wired from
-# (wk_wiring_script), so it is the one place a project is added.
-#
-# The wiki's own set for a WebKit checkout also has `igalia`
-# (ssh://git@gitlab.igalia.com:4429/...), deliberately absent here: a
-# workspace holds deploy keys for the two forks and no personal key, and the
-# egress allowlist permits igalia.com on 80 and 443 only, not gitlab's ssh
-# port 4429 (container/proxy/wk-proxy.py). A remote that cannot authenticate
-# or connect from where it is written is worse than no remote -- it fails at
-# fetch time, in a workspace, with an ssh error. Add it here the day a
-# workspace has a way to reach it.
+# Upstreams kept in the single mirror, so a workspace can fetch a branch
+# from any of them without a second fetch. All HTTPS, including the forks:
+# fetching is anonymous, so the mirror needs no credential; pushing is
+# separate, per-workspace, via deploy key. This is also what a workspace's
+# remotes are wired from (wk_wiring_script) -- the one place a project is
+# added.
+# The wiki's own WebKit checkout also wires `igalia`
+# (ssh://git@gitlab.igalia.com:4429/...), deliberately absent here: the
+# egress allowlist permits igalia.com on 80/443 only, not gitlab's ssh port
+# 4429 (container/proxy/wk-proxy.py) -- a remote that cannot connect from
+# where it is written fails at fetch time, in a workspace, with an ssh
+# error. Add it here the day a workspace has a way to reach it.
 wk_remotes() {
     cat <<'EOF'
 origin   https://github.com/WebKit/WebKit.git
@@ -128,31 +85,21 @@ forkwpe  https://github.com/justinmichaud/WPEWebKit.git
 EOF
 }
 
-# The repositories a PR branch can live in, by bare name.
-#
-# Derived from wk_remotes rather than listed again: the upstreams this tooling
-# knows are WebKit/WebKit and WebPlatformForEmbedded/WPEWebKit, and a fork of
-# either keeps the repository name. `wk pr <user>:<branch>` tries each in turn,
-# because the branch name alone does not say which project it belongs to and
-# asking is worse than looking.
+# Repositories a PR branch can live in, by bare name. Derived from
+# wk_remotes rather than listed again: `wk pr <user>:<branch>` tries each in
+# turn, because the branch name alone does not say which project it belongs to.
 wk_pr_repos() {
     wk_remotes | awk '{ print $2 }' \
         | sed -E 's#(\.git)?$##; s#.*/##' \
         | awk '!seen[$0]++'
 }
 
-# Forks that workspaces may push to.
-#
-#   <remote>  <owner/repo>  <ssh-host-alias>
-#
-# One deploy key per fork, because GitHub deploy keys are scoped to a single
-# repository and it refuses to accept the same key on a second one. That
-# restriction is the feature: each key can write to exactly one repo, so a
-# compromised workspace can push to these and nowhere else. A personal access
-# token would be one credential for both, but a broader one.
-#
-# Since both forks are on github.com, the keys are selected by ssh host alias
-# (github-webkit, github-wpe) rather than by hostname.
+# Forks that workspaces may push to: <remote> <owner/repo> <ssh-host-alias>.
+# One deploy key per fork -- GitHub scopes a deploy key to a single
+# repository -- so a compromised workspace can push only to these, never as
+# broadly as a personal access token would allow. Both forks are on
+# github.com, so the key is selected by ssh host alias (github-webkit,
+# github-wpe), not by hostname.
 wk_push_forks() {
     cat <<'EOF'
 fork     justinmichaud/WebKit      github-webkit
@@ -160,40 +107,17 @@ forkwpe  justinmichaud/WPEWebKit   github-wpe
 EOF
 }
 
-# The remote wiring every WebKit checkout gets, as a portable `sh` snippet.
-#
-# One authority for three questions:
-#
-#   origin is WebKit/WebKit. Always, on every target. A workspace whose
-#   origin is a machine-local mirror answers `git log origin/main` with
-#   whatever that mirror last fetched, and `git push origin` with something
-#   even worse. Closeness is what a second remote is for; the name `origin`
-#   means upstream.
-#
-#   Pushing to origin fails immediately rather than after an auth round trip.
-#   There is no write access to WebKit/WebKit and never will be.
-#
-#   Every fork in wk_push_forks is present, with an https fetch URL and an
-#   ssh push URL through its own host alias -- one deploy key per fork, the
-#   only way GitHub allows two. Whether the key is *there* is a separate
-#   question, and a switch: see `wk push`.
-#
-# A snippet rather than a shell function because the checkout is very often
-# not on this machine: the base snapshot is here, a remote workspace's
-# checkout is at the far end of an ssh, and a guest's is inside a VM. The
-# words have to travel; the list of forks must not be retyped to make that
-# happen.
-#
+# The remote wiring every WebKit checkout gets, as a portable `sh` snippet
+# (not a shell function: the checkout is often not on this machine -- a
+# base snapshot here, a remote workspace's over ssh, a guest's inside a VM).
+# origin is always WebKit/WebKit, fetch-only, never a machine-local mirror.
+# Every fork in wk_push_forks gets an https fetch URL and an ssh push URL
+# through its own host alias (see `wk push` for whether the key is there).
 #   wk_wiring_script <src> [<extra-remote-name> <extra-remote-url> [<ssh-config>]]
-#
-# The optional extra remote is a local, fast copy of the same history -- the
-# build machine's shared clone, or our own mirror. Fetch-only by nature.
-#
-# The optional ssh config is for a machine where the aliases cannot live in
-# ~/.ssh/config: a shared build box, whose home directory is the user's own
-# and often several machines'. There the checkout carries `core.sshCommand`
-# instead, so the push URLs resolve through a file wk owns and nothing
-# outside the wk root is edited.
+# The optional extra remote is a local, fetch-only copy of the same history.
+# The optional ssh config is for a machine whose aliases cannot live in
+# ~/.ssh/config: the checkout carries `core.sshCommand` instead, pointing
+# at a file wk owns.
 wk_wiring_script() {
     local src="$1" extra_name="${2:-}" extra_url="${3:-}" ssh_config="${4:-}"
     printf 'set -e
@@ -212,13 +136,8 @@ wk_wiring_script() {
         printf 'git remote set-url --push %s git@%s:%s.git
 ' "$remote" "$alias" "$repo"
     done
-    # The other upstreams, fetch-only, from the same list the mirror carries.
-    # `wpe` matters here: without it a workspace cannot `git fetch wpe` at
-    # all, so a WPEWebKit branch cannot be looked at even though `wk pr`
-    # accepts PRs from that project and the mirror carries its objects.
-    #
-    # Pushing to them is refused for exactly the reason origin is: we never
-    # push to an upstream, always to a fork.
+    # The other upstreams (`wpe`), fetch-only: we always push to a fork,
+    # never an upstream.
     _forks=$(wk_push_forks | awk 'NF {printf " %s", $1}')
     wk_remotes | while read -r name url; do
         [ -n "$name" ] || continue
@@ -242,31 +161,16 @@ wk_wiring_script() {
     fi
 }
 
-# The same wiring, as a *check* rather than an assertion.
-#
-# `wk_wiring_script` is the authority on what a checkout's remotes should be.
-# They drift for two reasons: a workspace made before the wiring existed
-# keeps whatever `git clone` left it with -- `origin` pointing at the local
-# mirror it was cloned from, the exact failure the wiring script prevents --
-# and anyone can run `git remote set-url` in a checkout afterwards.
-#
-# The shape this catches, seen on a real build box: `origin` =
-# /home/…/wk/mirror with pushing *enabled* to it, `fork` with an https push
-# URL (so no deploy key can ever be offered, whatever `wk push` says), and no
-# `core.sshCommand`. Nothing else reports any of it.
-#
+# The same wiring, as a *check* rather than an assertion: a workspace made
+# before the wiring existed keeps whatever `git clone` left it with, and
+# anyone can `git remote set-url` afterwards.
 # Prints one `problem: …` line per fault and exits 1 if there were any, so a
-# caller can relay it without parsing. A snippet for the same reason as the
-# wiring: the checkout is usually on another machine.
-#
-# A non-empty second argument skips the checks that are about the
-# *environment* rather than the tree -- whether ssh can resolve the fork's
-# host alias from here. A base snapshot is a template nobody pushes from, and
-# lives in the podman VM, which has no alias config and needs none: the
-# aliases are written into each workspace (container/firstrun.sh) and into a
-# build machine's own ssh config. Asking the environment question of a
-# snapshot means reporting a fault that no re-wiring can ever clear.
-#
+# caller can relay it without parsing.
+# A non-empty second argument skips the checks against the *environment*
+# (whether ssh can resolve the fork's host alias from here): a base
+# snapshot lives in the podman VM, which has no alias config and needs
+# none, since aliases are written into each workspace and build machine,
+# not into a snapshot nobody pushes from.
 #   wk_wiring_check_script <src> [<skip-env>]
 wk_wiring_check_script() {
     local src="$1" skip_env="${2:-}"
@@ -274,9 +178,9 @@ wk_wiring_check_script() {
 ' "$(sh_quote "$src")"
     printf 'bad=0
 '
-    # origin is upstream, fetch-only. Both halves matter: a local path here is
-    # what makes `git log origin/main` answer for a stale mirror, and a
-    # *pushable* origin is a push at the wrong repository waiting to happen.
+    # origin is upstream, fetch-only: a local path here is a stale mirror
+    # `git log origin/main` will silently answer for, and a pushable origin
+    # is a push at the wrong repository waiting to happen.
     printf 'u=$(git remote get-url origin 2>/dev/null || echo "")
 '
     printf 'p=$(git remote get-url --push origin 2>/dev/null || echo "")
@@ -287,8 +191,7 @@ wk_wiring_check_script() {
   *)  echo "problem: origin is $u -- origin must be upstream (WebKit/WebKit); a local copy is what a second remote is for"; bad=1 ;;
 esac
 '
-    # Only when the remote is there: "origin accepts a push ()" about a remote
-    # that does not exist is a second complaint about the first fault.
+    # Only when the remote is there, else it's a second complaint about the first fault.
     printf 'if [ -n "$u" ]; then case "$p" in
   no-push://*) ;;
   *) echo "problem: origin accepts a push ($p) -- there is no write access to upstream, and this is how a push goes to the wrong repository"; bad=1 ;;
@@ -340,11 +243,8 @@ esac
 esac
 fi
 ' "$alias" "$repo" "$remote" "$alias" "$repo"
-        # ...and the alias has to resolve. Either the user's own ssh config
-        # knows it, or the checkout carries a core.sshCommand pointing at a
-        # config that does -- which is the arrangement on a shared machine,
-        # where wk owns a config file under its own root instead of editing
-        # ~/.ssh/config.
+        # ...and the alias has to resolve, either in the user's own ssh
+        # config or via a core.sshCommand pointing at one wk owns.
         [ -z "$skip_env" ] || continue
         printf 'c=$(git config core.sshCommand 2>/dev/null || echo "")
 '
@@ -359,17 +259,9 @@ fi
 fi
 ' "$alias" "$alias" "$alias" "$alias"
     done
-    # Which repository the *branch* points at, which is the same separation
-    # one level up -- and a fault rather than a note, because the rule is
-    # absolute: we never push to origin, always to the fork. A working branch
-    # tracking origin/<x> therefore cannot be pushed by a bare `git push` at
-    # all -- and where origin is a local mirror (the fault above) that
-    # tracking ref names a different repository than it does once the wiring
-    # is correct, so a branch tracks origin/eng/... for a branch that exists
-    # on the fork and nowhere upstream.
-    #
-    # Following an upstream's own branches is the exception -- nobody pushes
-    # those either, so tracking one is not a push waiting to fail.
+    # Which repository the *branch* points at: a working branch tracking
+    # origin/<x> can never be pushed by a bare `git push`. Following an
+    # upstream's own branches is the exception -- nobody pushes those either.
     local keep='""' _u _r _f
     for _u in $(wk_remotes | awk 'NF {print $1}'); do
         case "$_forks " in *" $_u "*) continue ;; esac
@@ -382,13 +274,9 @@ if [ -n "$b" ]; then
     %s) ;;
 ' "$keep"
     # One arm per upstream, naming *that project's* fork: a WPEWebKit branch
-    # belongs to forkwpe, not to fork. Paired by repository name, the same way
-    # wk_pr_repos derives its list, so adding a project to wk_remotes and
-    # wk_push_forks is all it takes.
+    # belongs to forkwpe, not to fork.
     wk_remotes | while read -r _u _url; do
         [ -n "$_u" ] || continue
-        # Upstreams only. A branch tracking its *own* fork is the arrangement
-        # this is checking for, not a fault.
         case "$_forks " in *" $_u "*) continue ;; esac
         _r=$(printf '%s' "$_url" | sed -E 's#(\.git)?$##; s#.*/##')
         _f=$(wk_push_forks | awk -v r="$_r" 'NF && $2 ~ "/" r "$" { print $1; exit }')
@@ -403,20 +291,10 @@ fi
 '
 }
 
-# Point the current branch at the fork it can actually be pushed to.
-#
-# The rule is the one above, one level down: we never push to an upstream, so a
-# working branch tracking origin/<x> or wpe/<x> can never be pushed by a bare
-# `git push`. This is the only part of the wiring that touches a *branch*, which
-# is why it is a separate snippet run only by `wk remotes --fix` rather than by
-# every creation: it is git config (branch.<b>.remote and .merge), not the
-# checkout, but it is still somebody's branch.
-#
-# The fetch is needed and is one ref: `git branch -u` refuses an upstream whose
-# remote-tracking ref it has never seen. A branch that is not on the fork yet
-# gets said so rather than silently left -- pushing it is the answer, and only
-# a person can decide to.
-#
+# Point the current branch at the fork it can actually be pushed to. The
+# only part of the wiring that touches a *branch*, so it runs only by
+# `wk remotes --fix`, not on every creation. `git branch -u` refuses an
+# upstream whose remote-tracking ref it has never seen, hence the fetch.
 #   wk_branch_upstream_fix_script <src>
 wk_branch_upstream_fix_script() {
     local src="$1" _u _url _r _f
@@ -458,14 +336,10 @@ fi
 }
 
 # The ssh aliases that select a deploy key per fork, as an ssh_config body.
-#
-# One key per fork and both forks on github.com, so the key cannot be chosen by
-# hostname -- an alias per fork is the only way ssh will offer the right one.
-# The same three lines are needed in three places (a container's ~/.ssh/config,
-# a build machine's own config file under the remote root, and any future
-# guest), so the list lives here with wk_push_forks rather than being retyped
-# next to each of them.
-#
+# One key per fork and both forks on github.com, so an alias per fork is
+# the only way ssh will offer the right one. Needed in three places (a
+# container's ~/.ssh/config, a build machine's config, any future guest),
+# so it lives here with wk_push_forks rather than being retyped at each.
 #   wk_ssh_alias_blocks <directory holding build_key_<remote>>
 wk_ssh_alias_blocks() {
     local dir="$1"
@@ -483,55 +357,39 @@ EOF
     done
 }
 
-# Which branches the mirror actually carries.
-#
-# WebKit/WebKit has ~920 branches, and mirroring all of them costs tens of
-# gigabytes and a very long first fetch for histories nobody checks out. The
-# mirror exists to make snapshots cheap, and snapshots are built from main.
-#
-# Anything else is still reachable: workspaces can fetch a branch directly from
-# GitHub on demand, which the egress policy permits. Set WK_MIRROR_BRANCHES to
-# a space-separated list to carry more (e.g. a release branch you track).
+# Which branches the mirror actually carries. WebKit/WebKit has ~920
+# branches; mirroring all of them costs tens of gigabytes for histories
+# nobody checks out, so the mirror carries only main -- anything else is
+# still reachable directly from GitHub. Set WK_MIRROR_BRANCHES to carry more.
 wk_mirror_branches() {
     echo "${WK_MIRROR_BRANCHES:-main}"
 }
 
-# What a plain `wk sync` fetches: all of them.
-#
-# Not `origin` by default with a `--all` for the rest: the economy is not worth
-# what it costs. Both upstreams are upstreams *here* (the
-# board images are built from the WPE release branches), and both forks are
-# where this fleet's own work lives -- a fork branch that is in the mirror is a
-# branch `wk pr` can check out into a fresh workspace without going to GitHub at
-# all. A remote that is fetched only when somebody remembers a flag is a remote
+# What a plain `wk sync` fetches: all of them, not `origin` with `--all`
+# for the rest -- both upstreams matter here (board images are built from
+# the WPE release branches) and both forks are where this fleet's own work
+# lives, so a remote fetched only when somebody remembers a flag is one
 # that is missing exactly when it is wanted.
 wk_mirror_default_remotes() { wk_remotes | awk 'NF {printf "%s%s", sep, $1; sep=" "} END {print ""}'; }
 
 # --- PR / pull-request refs, fetched once into the mirror -------------------
-#
 # `wk pr` and `wk new --pr` want a fork's branch, or an upstream's numbered
-# pull request, available to every workspace without a fetch per workspace
-# and per re-run. The mirror already does exactly this for origin/wpe/the two
-# forks (wk_mirror_default_remotes); this is the same idea for the one branch
-# or one pull request a workspace actually wants, fetched under
-# refs/remotes/pr/... so it sits beside the mirror's other remote-tracking
-# refs and is never mistaken for one of the mirror's own branches
-# (refs/heads/main, wk_mirror_branches).
-#
-# A workspace then fetches this one ref from /mirror -- the same local,
-# instant path `wk sync` already gives it for main -- instead of going to
-# GitHub itself. See wk_pr_checkout below for that half.
+# pull request, available to every workspace without a fetch per re-run --
+# the same idea wk_mirror_default_remotes serves for origin/wpe/the forks,
+# for the one ref a workspace actually wants. Fetched under
+# refs/remotes/pr/... so it's never mistaken for one of the mirror's own
+# branches. A workspace then fetches this one ref from /mirror, the same
+# local, instant path `wk sync` gives it for main. See wk_pr_checkout below.
 
 # The path a PR ref lands under, in the mirror and in a workspace's own
 # remote-tracking namespace alike -- one name so mirror_fetch_pr/
 # mirror_fetch_pull and the workspace-side fetch never disagree about it.
-# Neither includes the refs/remotes/pr/ prefix; every caller adds that once.
 wk_pr_refname()   { printf '%s/%s/%s' "$1" "$2" "$3"; }  # <user> <repo> <branch>
 wk_pull_refname() { printf '%s/%s' "$1" "$2"; }          # <remote> <n>
 
-# The fetch itself, under the store lock the way `wk sync` takes it (rule 4,
-# one lock per mutated resource) -- this mutates the same bare mirror, so it
-# serialises against a publish exactly as a second `wk sync` would.
+# Under the store lock the way `wk sync` takes it (rule 4, one lock per
+# mutated resource) -- this mutates the same bare mirror, so it serialises
+# against a publish exactly as a second `wk sync` would.
 _mirror_fetch_do() {  # <src-refspec> <dest-ref> <src-url-or-remote>
     local srcspec="$1" dest="$2" src="$3" mirror
     mirror=$(wk_mirror)
@@ -554,18 +412,14 @@ _mirror_fetch_into() {  # <src-url-or-remote> <src-refspec> <dest-ref>
 }
 
 # mirror_fetch_pr <url> <branch> <refname>
-# Fetches <branch> from a fork's <url> into refs/remotes/pr/<refname> in the
-# mirror. <refname> is the caller's (wk_pr_refname above) so the layout lives
-# in one place rather than being rebuilt at each call site. Fetching the same
-# branch again is a no-op once the mirror already has its head.
+# Fetches <branch> from a fork's <url> into refs/remotes/pr/<refname>.
 mirror_fetch_pr() {  # <url> <branch> <refname>
     _mirror_fetch_into "$1" "refs/heads/$2" "refs/remotes/pr/$3"
 }
 
 # mirror_fetch_pull <remote> <n>
-# Fetches refs/pull/<n>/head from an upstream (origin or wpe, by remote name)
-# into refs/remotes/pr/<remote>/<n> -- no fork to discover first, since
-# GitHub serves every pull request's head under the base repository itself.
+# Fetches refs/pull/<n>/head into refs/remotes/pr/<remote>/<n> -- no fork
+# to discover first, since GitHub serves every PR's head under the base repo.
 mirror_fetch_pull() {  # <remote> <n>
     local remote="$1" n="$2" url
     url=$(wk_remotes | awk -v r="$remote" '$1 == r {print $2; exit}')
@@ -574,20 +428,16 @@ mirror_fetch_pull() {  # <remote> <n>
 }
 
 # --- the spec, parsed once ---------------------------------------------------
-#
 # `wk pr` and `wk new --pr` accept the same spec, parsed here once so the two
 # commands and the tests all agree what it means:
-#
 #   user:branch   a fork's branch, found by asking each of wk_pr_repos in
 #                 turn which one has it
 #   <n>           WebKit/WebKit pull request #n (refs/pull/<n>/head) -- no
 #                 fork discovery, GitHub serves the head under the base repo
 #   wpe:<n>       WPEWebKit's pull request #n, the same way
-#
 # Sets PR_KIND (user|pull) and either PR_USER/PR_BRANCH or PR_REMOTE/PR_N.
 # Not `local` to any function: they are this call's result, read by the
-# caller immediately after, the same idiom wk_wiring_script's callers use for
-# its own multi-value answers.
+# caller immediately after.
 pr_parse_spec() {  # <spec>
     local spec="$1"
     PR_KIND="" PR_USER="" PR_BRANCH="" PR_REMOTE="" PR_N=""
@@ -610,22 +460,13 @@ pr_parse_spec() {  # <spec>
 }
 
 # wk_pr_checkout <name> <spec>
-#
 # Check out a PR head in the workspace <name>: resolve <spec> (pr_parse_spec
-# above), fetch it into the mirror once, and check it out in the workspace
-# from there, falling back to GitHub directly when the mirror is not
-# reachable or the workspace has no /mirror. Shared by `wk pr` and
-# `wk new --pr` so a workspace made with --pr and one made with `wk new` then
-# `wk pr` end up identical -- one implementation, not two call sites that can
-# drift.
-#
-# Assumes what t_exec itself assumes: lib/target.sh is sourced and
-# load_target has already resolved <name>'s target -- true of both callers by
-# the time they reach this, and not restated here.
-#
-# WK_FORCE, read the same way barrier() reads it everywhere else: take the PR
-# head even when a local branch of the same name has commits it does not,
-# discarding them.
+# above), fetch it into the mirror once, and check it out from there,
+# falling back to GitHub directly when the mirror isn't reachable. Shared
+# by `wk pr` and `wk new --pr` so the two never drift into two implementations.
+# Assumes lib/target.sh is sourced and load_target has already resolved
+# <name>'s target. WK_FORCE takes the PR head even when a local branch of
+# the same name has commits it does not, discarding them.
 wk_pr_checkout() {  # <name> <spec>
     local name="$1" spec="$2"
     local src repo url branch remote head_sha local_sha dirty reset ahead
@@ -683,9 +524,8 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         dirty=$(kv_get dirty <<<"$probe")
         remote=$(printf '%s\n' "$probe" | sed -n 's/^remote=//p' | awk -v u="$url" '$2 == u {print $1; exit}')
 
-        # The name a new remote gets. The user's, with the project appended
-        # when it is not the one `origin` is -- one user can have a PR in
-        # both, and two remotes cannot share a name.
+        # The user's name, with the project appended when it is not the one
+        # `origin` is -- two remotes cannot share a name.
         if [ -z "$remote" ]; then
             remote="$PR_USER"
             [ "$repo" = "$(wk_pr_repos | head -1)" ] || remote="$PR_USER-$(printf '%s' "$repo" | tr 'A-Z' 'a-z')"
@@ -734,10 +574,8 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
 
     reset=""
     if [ -n "$local_sha" ] && [ "$local_sha" != "$head_sha" ]; then
-        # Whether it is *your* work at stake is the whole question, so it is
-        # asked of git rather than assumed: commits on the local branch that
-        # the PR head does not have. None of them means the branch is simply
-        # behind, and fast-forwarding it costs nothing.
+        # Commits on the local branch the PR head doesn't have; none means
+        # the branch is simply behind, and fast-forwarding it costs nothing.
         ahead=$(t_exec "$name" bash -c "
             cd $(sh_quote "$src") &&
             git fetch --quiet $(sh_quote "$url") $(sh_quote "$src_ref") 2>/dev/null &&
@@ -773,11 +611,8 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         $fetch_step"
     fi
     if [ -n "$mirror_ok" ]; then
-        # The one line `sync_workspaces` uses to fetch from the mounted
-        # mirror (cmd/sync), narrowed to the single ref this needs: a
-        # workspace with no /mirror, or one where this run's fetch into the
-        # mirror did not happen, falls through to the network path above
-        # unchanged.
+        # A workspace with no /mirror, or one where this run's fetch into
+        # the mirror didn't happen, falls through to the network path above.
         fetch_step="if [ -d /mirror/WebKit.git ] && git -C /mirror/WebKit.git rev-parse --verify --quiet $(sh_quote "$mirror_ref") >/dev/null 2>&1
         then git fetch --quiet /mirror/WebKit.git $(sh_quote "$mirror_ref:refs/remotes/$remote/$branch")
         else $fetch_step
@@ -798,10 +633,9 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
     " || die "could not check out '$branch' in '$name'"
 
     info "'$name' is on $branch ($repo, from $remote)"
-    # --no-pager, and it is not cosmetic: the driver's exec gives the command
-    # a terminal, so `git log` starts a pager and waits for a keystroke that
-    # is never coming -- which looks exactly like a fetch that will not
-    # finish. Measured once, at seven minutes.
+    # --no-pager is not cosmetic: the driver's exec gives the command a
+    # terminal, so `git log` would start a pager and wait for a keystroke
+    # that never comes -- indistinguishable from a fetch that will not finish.
     log  "  $(t_exec "$name" bash -c "cd $(sh_quote "$src") && git --no-pager log --oneline -1" 2>/dev/null | tr -d '\r')"
 }
 
@@ -817,9 +651,8 @@ store_init() {
     ensure_dir "$WK_STORE/cache/buildroot/dl"
     ensure_dir "$WK_STORE/cache/buildroot/ccache"
     ensure_dir "$WK_STORE/cache/bench"
-    # Benchmark results. Created here rather than by `wk bench`, because it is
-    # bind-mounted at container creation and podman refuses to start a
-    # container whose mount source does not exist.
+    # Created here, not by `wk bench`: bind-mounted at container creation,
+    # and podman refuses to start a container whose mount source is missing.
     ensure_dir "$WK_STORE/bench"
     ensure_dir "$WK_STORE/skills"
     ensure_dir "$WK_STORE/secrets" 0700
@@ -828,24 +661,16 @@ store_init() {
 base_path() { echo "$(wk_base_dir)/$1/WebKit"; }
 
 # --- the snapshot completion marker -----------------------------------------
-#
-# `wk sync` publishes by hardlinking the previous snapshot, fetching into it
-# and checking it out -- minutes of work, at the end of which the directory
-# becomes a usable base. Killed anywhere in the middle it leaves a directory
-# newer than every good one, so `current_base` cannot simply be `ls | tail
-# -1`: that pins the rubble to the next `wk new` and hardlinks the next
-# `wk sync` from it.
-#
-# So the recorded sha -- which existed already, as a cache nothing read -- is
-# written last and becomes the publication gate. Present means published;
-# absent means "still being made, or was being made when something killed
-# it", and every reader ignores it. The same pattern as the firstrun marker,
-# and the one the workspace lifecycle uses.
-#
-# It is also the tamper evidence: a by-hand `git fetch` or checkout inside a
-# published snapshot moves HEAD away from the recorded sha, and a snapshot
-# whose tree no longer matches what was published is refused by name rather
-# than silently handed to a workspace.
+# `wk sync` publishes by hardlinking the previous snapshot, fetching into
+# it, and checking it out; killed anywhere in the middle it leaves a
+# directory newer than every good one, so `current_base` cannot simply be
+# `ls | tail -1` -- that pins the rubble to the next `wk new`.
+# The recorded sha is written last and is the publication gate: present
+# means published, absent means still being made or killed mid-make, and
+# every reader ignores an absent one. It is also tamper evidence -- a
+# by-hand fetch or checkout inside a published snapshot moves HEAD away
+# from the recorded sha, and a mismatched snapshot is refused by name
+# rather than silently handed to a workspace.
 base_sha_file() { echo "$(wk_base_dir)/$1/sha"; }
 
 base_complete() { [ -s "$(base_sha_file "$1")" ]; }
@@ -879,10 +704,10 @@ base_verify() {
     }
 }
 
-# The snapshot a new workspace gets: the newest *published* one. Snapshot ids
-# sort lexically because they are UTC timestamps, so the newest is the last --
-# but only complete ones are candidates, which is what makes an interrupted
-# sync invisible to every reader instead of being the freshest thing here.
+# The snapshot a new workspace gets: the newest *published* one. Ids sort
+# lexically since they are UTC timestamps, but only complete ones are
+# candidates -- what makes an interrupted sync invisible rather than the
+# freshest thing here.
 current_base() {
     local d
     for d in $(ls -1 "$(wk_base_dir)" 2>/dev/null | sort -r); do
@@ -893,8 +718,7 @@ current_base() {
     return 1
 }
 
-# Which snapshot a workspace is pinned to. This is the refcount that keeps
-# `wk gc` from deleting a snapshot still in use.
+# The refcount that keeps `wk gc` from deleting a snapshot still in use.
 ws_base_id() {
     local f="$(wk_ws_dir "$1")/base-id"
     [ -f "$f" ] && cat "$f" || return 1
@@ -905,10 +729,9 @@ list_workspaces() {
     ls -1 "$WK_STORE/ws" 2>/dev/null || true
 }
 
-# Workspaces that exist without having recorded which snapshot they pin:
-# creation in flight, or rubble left by one that was killed. A pin that is not
-# written yet is still a reference -- the overlay's lower layer is in use --
-# and it is one nothing can count.
+# Workspaces that exist without having recorded which snapshot they pin
+# (creation in flight, or rubble left by one that was killed) -- a pin not
+# yet written is still a reference, and one nothing can count.
 unpinned_workspaces() {
     local ws
     for ws in $(list_workspaces); do
@@ -916,12 +739,11 @@ unpinned_workspaces() {
     done
 }
 
-# Snapshots with no workspace pinning them. `wk gc` prunes these.
-#
-# Nothing at all while any workspace is unpinned: with a reference that cannot
-# be counted, "unreferenced" is a guess, and acting on it deletes the lower
-# layer of a live overlay. One answer here rather than a guard in `wk gc`, so
-# that `wk ls` cannot report as reclaimable what gc will refuse to touch.
+# Snapshots with no workspace pinning them, which `wk gc` prunes. Nothing
+# at all while any workspace is unpinned: an uncountable reference makes
+# "unreferenced" a guess, and acting on it deletes a live overlay's lower
+# layer. One answer here, not a guard in `wk gc`, so `wk ls` never reports
+# as reclaimable what gc will refuse to touch.
 unreferenced_bases() {
     local base used ws id
     [ -z "$(unpinned_workspaces)" ] || return 0
@@ -931,11 +753,8 @@ unreferenced_bases() {
         used="$used $id"
     done
 
-    # The newest published snapshot is referenced by policy even when no
-    # workspace pins it: it is what the next `wk new` gets, and re-fetching it
-    # costs minutes. Here rather than in `wk gc`: with the exception only over
-    # there, `wk ls` reports as reclaimable exactly the snapshot gc refuses to
-    # remove.
+    # The newest published snapshot is referenced by policy even unpinned:
+    # it is what the next `wk new` gets, and re-fetching it costs minutes.
     local keep; keep=$(current_base 2>/dev/null || true)
 
     for base in $(ls -1 "$(wk_base_dir)" 2>/dev/null); do

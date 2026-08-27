@@ -1,7 +1,16 @@
-JSTests
-Tools
-WebCore
-WebKit
+# Global ignore for the file picker and global search (`space f`, `space /`),
+# gitignore syntax. The checkout is large enough that both are unusable
+# without narrowing them to what a JSC workspace is actually for: the engine
+# and its tests, not the other ports, generated output or test corpora.
+#
+# Negated first: a leading `!` un-ignores something that would otherwise be
+# swept up by a later, broader pattern -- without these four lines the
+# directories the rest of this file exists to keep working in would vanish
+# from the picker along with everything else.
+!JSTests
+!Tools
+!WebCore
+!WebKit
 
 Configurations
 DeveloperTools

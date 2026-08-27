@@ -1,20 +1,18 @@
 # The fleet-request broker, as a systemd --user service.
 #
-# The Linux counterpart of host/macos/broker.sh, and much the smaller of the
-# two for one reason: here the containers and the broker share a machine, so
-# the socket it binds in %t/wk *is* the directory every workspace bind-mounts
-# at /run/wk (targets/container.sh). There is nothing to publish anywhere.
+# The Linux counterpart of host/macos/broker.sh, much the smaller of the two:
+# here the containers and the broker share a machine, so the socket it binds
+# in %t/wk *is* the directory every workspace bind-mounts at /run/wk
+# (targets/container.sh). There is nothing to publish anywhere.
 #
-# Installed the same way and in the same place as the egress proxy
-# (host/linux/sdk.sh), because it is the same kind of thing: a policy engine
-# outside the sandbox, owning the only socket the sandbox can see, needing no
-# privilege at all. Lingering -- enabled by the machine stage -- is what keeps
-# both alive for unattended runs with nobody logged in.
+# Installed the same way as the egress proxy (host/linux/sdk.sh): a policy
+# engine outside the sandbox, owning the only socket the sandbox can see,
+# needing no privilege. Lingering, enabled by the machine stage, keeps both
+# alive for unattended runs with nobody logged in.
 #
-# It is a separate stage rather than a second half of `sdk` so that a machine
-# with no container SDK can still hold the door open: a Linux workstation that
-# only *drives* bench devices for someone else's workspaces is a real
-# configuration, and re-running one stage should not re-clone an SDK.
+# A separate stage, not a second half of `sdk`, so a machine with no
+# container SDK can still hold the door open: driving bench devices for
+# someone else's workspaces is a real configuration.
 
 . "$WK_ROOT/lib/store.sh"
 
@@ -35,24 +33,17 @@ Environment=WK_ROOT=$WK_ROOT
 Environment=WK_STORE=$WK_STORE
 Restart=on-failure
 RestartSec=2
-# %t/wk holds the sockets a workspace can see -- the proxy's and this one --
-# and containers bind-mount that directory. Preserved across restarts for the
-# same reason the proxy preserves it: letting systemd delete it on stop leaves
-# every running workspace holding a mount of a deleted directory, which no
-# amount of restarting fixes.
+# %t/wk holds the sockets a workspace can see, and containers bind-mount
+# that directory: preserved across restarts, or systemd deleting it on stop
+# leaves every running workspace holding a mount of a deleted directory.
 RuntimeDirectory=wk
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 
-# Deliberately NOT sandboxed the way wk-proxy is. The proxy only ever opens
-# sockets, so ProtectSystem=strict costs it nothing; this one runs \`wk boot\`
-# and \`wk pi\`, which read the image store, write request records, and ssh to
-# a board -- it is the thing with the privilege, and pretending otherwise by
-# copying the proxy's hardening would only produce a service that fails in
-# ways that have nothing to do with what it was asked for.
-#
-# What bounds it instead is the vocabulary: it can run seven commands against
-# machines the fleet declares as bench devices, and nothing else.
+# Not sandboxed the way wk-proxy is: the proxy only opens sockets, but this
+# one runs \`wk boot\`/\`wk pi\`, reading the image store and ssh-ing to a
+# board -- it is the thing with the privilege. What bounds it instead is the
+# vocabulary: seven commands against machines the fleet declares as bench devices.
 PrivateTmp=yes
 
 [Install]

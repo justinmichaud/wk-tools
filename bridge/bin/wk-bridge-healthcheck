@@ -5,9 +5,8 @@
 #
 # One rule for anyone editing this file: do **not** write `cmd | grep -q ...`.
 # grep -q exits at the first match, which SIGPIPEs the producer; with pipefail
-# set that turns a successful check into a reported failure, and this exact bug
-# once made the report claim SSH password authentication was enabled when it was
-# not. Capture the value and compare it.
+# set that turns a successful check into a reported failure. Capture the value
+# and compare it.
 set -u
 
 name=unknown
@@ -44,8 +43,8 @@ hdr "Uplink"
 wifi=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2 == "wifi" { print $1; exit }')
 [ -n "$wifi" ] || wifi=wlan0
 # `-o`, not `-br`. BusyBox ip -- which is what Alpine and therefore pmOS ships
-# -- has no brief mode: `ip -4 -br addr` exits 1 with a usage message, so this
-# read back empty and the check reported an uplink with no address on a phone
+# -- has no brief mode: `ip -4 -br addr` exits 1 with a usage message, which
+# would read back empty and report an uplink with no address on a phone
 # holding a perfectly good lease. `-o[neline]` is in BusyBox's own usage string.
 addr=$(ip -4 -o addr show dev "$wifi" 2>/dev/null | awk '{print $4; exit}')
 if [ -n "$addr" ]; then ok "$wifi $addr"; else bad "$wifi has no IPv4 address"; fi
@@ -250,9 +249,9 @@ case "$egress" in
     *) ok "egress: none (nothing behind this bridge reaches the internet)" ;;
 esac
 
-# The two that took a whole afternoon to find, both invisible in every other
-# check: a bridge with no DNS and a bridge at 1970 both look like "no internet"
-# while ping and routing are perfect, and both stop `tailscale up` dead.
+# Both invisible in every other check: a bridge with no DNS and a bridge at
+# 1970 both look like "no internet" while ping and routing are perfect, and
+# both stop `tailscale up` dead.
 hdr "Name resolution and time"
 if [ -f /etc/resolv.conf ]; then
     ns=$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null)

@@ -1,8 +1,7 @@
 # Loading a target driver, and the defaults every driver inherits.
 
-# Commands under cmd/ never talk to podman, tart or ssh directly -- they call
-# the contract below and nothing else, so "add a target" means "add one file
-# under targets/" rather than "audit every command".
+# Commands under cmd/ call only the contract below, never podman, tart or ssh
+# directly, so adding a target means adding one file under targets/.
 
 # Required of a driver:
 #   t_create <name> [base]   bring the environment into existence
@@ -23,12 +22,8 @@
 #   t_sync             refresh the target's own far-side state, if it has any
 #   t_ssh_host <name>  ssh destination, for Zed and the generated alias
 #   t_needs_base       0 if `wk new` must resolve a base snapshot first
-#   t_start <name>       bring a stopped workspace's environment back; says so
-#                        rather than pretending for a target with nothing to
-#                        start (a remote build machine is always reachable)
-#   t_stop <name>        stop a workspace's environment, leaving it on disk;
-#                        refuses and says why for a target with no such notion
-#                        (a remote build machine, a workspace stopping itself)
+#   t_start <name>     bring a stopped workspace's environment back (see below)
+#   t_stop <name>      stop a workspace's environment, leaving it on disk (see below)
 #   t_cores/t_mem_mb   the resources the target actually has
 #   t_load             the load already on the target, for the polite sizing
 #   t_ccache_dir       where ccache keeps its cache inside the target
@@ -39,93 +34,54 @@
 #   t_status_put       write the build status where the target's own side is
 #   t_has_wk / t_wk    run `wk` on the target's own machine, if that is one
 
-# targets/local.sh is the degenerate case: the target is the machine
-# already running the command (see "am I a workspace?" below).
-# t_cores/t_mem_mb differ from lib/resources.sh: a vm target must be sized
-# from the *guest*'s memory, not the host's.
+# targets/local.sh is the degenerate case: the target is the machine already
+# running the command (see "am I a workspace?" below).
 
 t_src()        { echo "/src/WebKit"; }
-
-# `native` unless creation said otherwise; only the container driver can
-# currently differ from the host. Not "what would I build for" -- that
-# question has a second answer once cross builds exist. See lib/arch.sh.
-t_arch()       { echo native; }
+t_arch()       { echo native; }      # only the container driver differs; see lib/arch.sh
 t_tools()      { echo "/opt/wk-tools"; }
-# The bind-mounted store cache in a container; inert on the Apple ports
-# (no ccache). Somebody else's machine answers with its own directory --
-# see targets/remote.sh.
-t_ccache_dir() { echo "/ccache"; }
+t_ccache_dir() { echo "/ccache"; }   # inert on the Apple ports (no ccache)
 t_sync_tools() { :; }
 
-# `wk sync` against a target with far-side state to refresh; everything
-# else keeps its base in this machine's store, where `wk sync` *is* the
-# operation (cmd/sync). Returning 1 says "no far side".
-t_sync()       { return 1; }
+t_sync()       { return 1; }         # refresh far-side state; 1 means "no far side"
+t_prefetch()   { :; }                # ask this target whatever a report will need
 
-# Ask this target whatever a report will need, so every target can be asked
-# at once. Nothing to do for a target that is this machine.
-t_prefetch()   { :; }
-
-# How this target's checkouts are wired, for whoever re-asserts it: three
-# lines, any of which may be empty --
+# t_wiring_args -- how this target's checkouts are wired, for whoever
+# re-asserts it: three lines, any of which may be empty --
 #   <name of the local-copy remote>   (mirror, shared)
 #   <its url, on the target>
 #   <an ssh config the checkout must use, if not ~/.ssh/config>
-# A contract hook, not a table in the caller, since only the driver knows
-# (a shared build box has ssh aliases and history a container has neither).
 t_wiring_args() { printf '\n\n\n'; }
 t_ssh_host()   { echo "wk-$1"; }
 
-# Everything before an editor is pointed at this target over ssh -- an sshd,
-# a key, an alias. Nothing for a target already an ssh destination; the
-# container driver is the one with work to do here.
-t_ssh_prepare() { :; }
+t_ssh_prepare() { :; }   # point an editor at this target over ssh; nothing for one already an ssh destination
 t_needs_base() { return 0; }
 
-# No notion of starting a single workspace by default: a machine this target
-# only *reaches* (remote) is always reachable from here, so there is nothing
-# to bring up. container.sh and vm.sh, which do have something to start,
-# override this; targets/local.sh overrides with the more specific reason a
-# workspace cannot start itself.
+# A machine this target only *reaches* (remote) is always reachable, so
+# there is nothing to start by default; container.sh, vm.sh and
+# targets/local.sh override with something real to do.
 t_start() { info "'$WK_TARGET' has no notion of starting a single workspace -- nothing to bring up for '$1'"; }
 
-# No notion of stopping a single workspace by default: a machine this target
-# only *reaches* (remote) is not this command's to shut down, and a workspace
-# is not its own local's to stop from inside itself (targets/local.sh
-# overrides with the more specific reason). container.sh and vm.sh are the
-# two drivers that do have one and override this. Refuses loudly rather than
-# silently doing nothing, which would read as "stopped" about a workspace
-# left running.
+# Refuses loudly rather than silently doing nothing, which would read as
+# "stopped" about a workspace left running.
 t_stop() { die "the '$WK_TARGET' target has no notion of stopping a single workspace -- '$1' is left running"; }
 t_store_init() { store_init; }
 
-# The workspace user's home directory, as seen from inside it -- needed to
-# name one file from both sides (a detached build's log). In a container
-# that's a host bind mount, making following it free; see t_spawn.
-t_home()       { echo "$HOME"; }
+t_home()       { echo "$HOME"; }   # the workspace user's home dir, as seen from inside it
 
-# t_pull <name> <src-in-target> <dest-on-host> -- copy one file out, byte
-# for byte. The obvious spelling, `t_exec <ws> cat <file>` into a redirect,
-# silently corrupts binary data (measured: 1396 bytes came out as 1399).
-#
-# Right by default for `local`; anything over a network overrides it
-# (`podman cp`, `scp`). `wk profile` copies a recording, exactly the binary
-# the `cat` spelling corrupts.
+# t_pull <name> <src-in-target> <dest-on-host> -- copy one file out, byte for
+# byte. `t_exec <ws> cat <file>` into a redirect silently corrupts binary
+# data; anything over a network overrides this (`podman cp`, `scp`).
 t_pull() {
     local name="$1" src="$2" dest="$3"
     cp -f "$src" "$dest"
 }
 
 # t_pull_dir <name> <src-dir-in-target> <dest-dir-on-host> [--exclude PAT]...
-# The same for a directory, a separate hook rather than a loop over t_pull
-# since a per-file round trip over ssh is minutes of latency for nothing.
-# *Contents* are replaced, not merged, so a re-stage can't leave last
-# build's binaries behind. Excludes reduce a build tree to a *product* tree
-# (Apple's WebKitBuild/<config> is ~39 GB of mostly intermediates); a
-# driver that cannot honour them refuses rather than copying everything.
-# _t_pull_dir_excludes -- the `--exclude PAT` parsing every override needs,
-# in one place, since targets/remote.sh and targets/vm.sh were carrying an
-# identical copy. Leaves _T_PULL_EXCLUDES, ready for `${_T_PULL_EXCLUDES[@]+...}`.
+# A separate hook rather than a loop over t_pull: a per-file round trip over
+# ssh is minutes of latency. *Contents* are replaced, not merged, so a
+# re-stage can't leave last build's binaries behind; a driver that cannot
+# honour an exclude refuses rather than copying everything.
 _t_pull_dir_excludes() {
     _T_PULL_EXCLUDES=()
     while [ $# -gt 0 ]; do
@@ -143,10 +99,8 @@ t_pull_dir() {
     rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} "$src/" "$dest/"
 }
 
-# The two ssh options every driver reaching a real machine wants: never
-# interactive, bounded connect. The rest of each list genuinely differs
-# (guest keepalives, ControlMaster muxing) and stays with the driver.
-# _ssh_opts_base <connect-timeout>
+# _ssh_opts_base <connect-timeout> -- never interactive, bounded connect; the
+# rest of each driver's ssh options genuinely differs and stays with it.
 _ssh_opts_base() {
     printf '%s' "-o BatchMode=yes -o ConnectTimeout=${1:-10}"
 }
@@ -154,21 +108,18 @@ _ssh_opts_base() {
 # t_spawn <name> <log> <pidfile> <cmd...> -- start a command detached from
 # *this* process and return at once; `log`/`pidfile` are paths inside the
 # target. Over ssh, `nohup cmd &` survives the connection closing; under
-# `podman exec` it does not (measured: a `setsid nohup` told to sleep 3 was
-# gone before it wrote anything), so the container driver overrides this.
-# A process nobody forked can't be waited for, so a caller decides
-# "finished" from what it left behind -- why yocto's wrapper prints a marker.
+# `podman exec` it does not, so the container driver overrides this. A
+# process nobody forked can't be waited for, so a caller decides "finished"
+# from what it left behind -- why yocto's wrapper prints a marker.
 t_spawn() {
     local name="$1" log="$2" pidf="$3"; shift 3
     t_exec "$name" bash -lc "setsid nohup $(sh_quote "$@") \
         > $(sh_quote "$log") 2>&1 < /dev/null & echo \$! > $(sh_quote "$pidf")"
 }
 
-# This workspace's checkout branch, or `-` when unknowable without
-# starting something (with several workspaces open, guessing from the name
-# builds the wrong tree). Asked of the target, never a record: the default
-# execs into the driver; targets/container.sh overrides since an overlay's
-# HEAD is a file on the host.
+# This workspace's checkout branch, or `-` when unknowable without starting
+# something. targets/container.sh overrides since an overlay's HEAD is a
+# file on the host.
 t_branch() {
     local out
     # Anything not present and answering is `-`: exec'ing into a container
@@ -182,24 +133,19 @@ t_branch() {
 
 # --- creation's completion marker -------------------------------------------
 # `.wk-ready`, written as the *last* act of creating a workspace, by every
-# driver. Present means creation finished; absent means still going or
-# killed -- promoted to the contract because without it a remote or vm
-# workspace cut mid-clone looked finished, and `wk build` built the rubble.
-# Next to the artifact, never a record on the driving side: the far side for
-# a remote, the container's own home for a container. The deviation is vm --
-# a freshly cloned guest is not running and visible only from this host, so
+# driver: present means creation finished, absent means still going or
+# killed. Next to the artifact, never a record on the driving side. vm is
+# the deviation -- a freshly cloned guest is visible only from this host, so
 # its marker lives in the host-side workspace directory instead.
 WK_READY_MARKER=".wk-ready"
 
-# Asked separately from t_info: the interesting case is a marker present
-# with the environment *not*, a workspace removed by hand (rule 5). Defaults
-# to yes, so a target with no marker mechanism reads as finished.
+# The interesting case t_info alone can't see: a marker present with the
+# environment *not*, a workspace removed by hand (rule 5). Defaults to yes,
+# so a target with no marker mechanism reads as finished.
 t_created() { return 0; }
 
-# Waits until a freshly created workspace is usable. Polls the driver's own
-# lifecycle answer; synchronous-and-total creation answers `present` on the
-# first pass. A driver with something better to say overrides it
-# (targets/container.sh prints the failed firstrun's last output).
+# Waits until a freshly created workspace is usable, polling the driver's
+# own lifecycle answer. A driver with something better to say overrides it.
 t_ready() {
     local name="$1" i=0 max="${WK_READY_TIMEOUT:-300}"
     while [ "$i" -lt "$max" ]; do
@@ -213,65 +159,40 @@ t_ready() {
     done
     return 1
 }
+# t_cores/t_mem_mb differ from lib/resources.sh: a vm target must be sized
+# from the *guest*'s memory, not the host's.
 t_cores()      { envelope_cores; }   # t_cores <name>
 t_mem_mb()     { envelope_mem_mb; }  # t_mem_mb <name>
 
-# Interactive exec: a full-screen UI needs a pty, and ssh doesn't allocate
-# one unless asked. Defaults to the plain exec.
-t_exec_tty()   { t_exec "$@"; }
-
-# lldb options a target needs before it can launch anything. Nothing, for a
-# machine that behaves like one -- targets/container.sh overrides and says why.
-t_lldb_opts()  { :; }               # t_lldb_opts
+t_exec_tty()   { t_exec "$@"; }     # interactive exec: a full-screen UI needs a pty, ssh doesn't allocate one unasked
+t_lldb_opts()  { :; }               # lldb options a target needs before it can launch anything
 
 # Same exec as everywhere except where a build must be serialised: applied
 # to t_exec, the lock would also make `wk run`/`wk status` block for no reason.
 t_exec_build() { t_exec "$@"; }
 
-# Build state, in exactly one place. Content arrives on stdin (write_status,
-# cmd/build) and this decides where it lands: for a target whose $WK_STORE is
-# already this machine's (container, vm, local) that is here, next to the
-# rest of the workspace's bookkeeping -- the default below. A target that is
-# a *machine of its own* overrides it and writes there instead (over ssh),
-# since that machine's own `wk status` (t_has_wk, t_wk) reads it directly and
-# a second copy on the driving side would go stale the moment the far one
-# changes without anybody re-pushing it.
+# Build state, in exactly one place: here, unless the target is a *machine
+# of its own*, which overrides it and writes there instead (over ssh) since
+# a second copy on the driving side would go stale.
 t_status_put() { local n="$1" ws; ws="$(wk_ws_dir "$n")"; cat > "$ws/build.status"; }
 t_has_wk()    { return 1; }         # is there a far side that can answer?
 t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
-# Runs on the far machine and returns immediately: a build must not depend
-# on an ssh session staying up for an hour.
-t_wk_detach() { return 1; }   # t_wk_detach <args...>
+t_wk_detach() { return 1; }         # t_wk_detach <args...> -- runs on the far machine and returns at once
+t_wk_tty()    { t_wk "$@"; }        # t_wk with a terminal, for far-side commands that prompt a human
 
-# t_wk with a terminal, for far-side commands that prompt a human.
-t_wk_tty()    { t_wk "$@"; }
-
-# In whole cores, as `build_jobs polite` subtracts it. Defaults to this
-# machine's own; a driver whose target is another machine answers for that
-# machine instead.
-t_load() { awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0; }
+t_load() { awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0; }   # whole cores; build_jobs polite subtracts it
 
 # Which target a *named* workspace lives on, so `wk build`, `wk pr` and the
-# macOS dispatcher cannot reach three different machines for one name.
+# macOS dispatcher cannot reach three different machines for one name. No
+# registry: every fact is recomputed from evidence -- an explicit WK_TARGET
+# overrides everything; otherwise every target is asked directly (below).
 #
-# No registry: every fact here is recomputed from evidence (CLAUDE.md, "no
-# caching of facts"). An explicit WK_TARGET overrides everything; otherwise
-# every target is asked directly (ws_on_target), and nothing is started here.
-#
-# Whether <name> is a workspace on target <t>, asked of the machine that
-# holds the store. Three tests, because each sees what the others cannot: the
-# workspace directory is evidence only where the store is on this machine
-# (and it alone sees a broken workspace, whose environment is gone); t_info
-# is the driver's own answer from wherever the store really is -- the podman
-# VM on a macOS host, a build box over ssh -- and an off machine answers
-# within its ConnectTimeout rather than hanging, and only a definite state
-# counts ("unreachable" is not evidence the workspace exists); and while
-# `wk new` is still creating it, before a store directory exists, its own
-# status file under this target's store is the only evidence, trusted only
-# while the process writing it is alive (dead, it is an unverifiable claim).
-# lib/store.sh, lib/detach.sh and the driver load in a subshell, so nothing
-# outlives the question.
-ws_on_target() { # <target> <name>
+# ws_on_target <target> <name> -- three tests, because each sees what the
+# others cannot: the workspace directory (only where the store is on this
+# machine), t_info ("unreachable" is not evidence the workspace exists), and,
+# while `wk new` is still creating it, the status file it wrote, trusted only
+# while the process writing it is alive.
+ws_on_target() {
     ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
       command -v detach_alive >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
       load_target "$1" >/dev/null 2>&1 || exit 1
@@ -288,6 +209,16 @@ ws_on_target() { # <target> <name>
 
 ws_exists() { # <name>
     local name="$1" t
+    if [ -n "${WK_TARGET:-}" ]; then
+        ws_on_target "$WK_TARGET" "$name" && return 0
+        # ws_on_target says no for two reasons a caller can't tell apart from
+        # its exit status alone: the target answered and doesn't have it, or
+        # it didn't answer. Only the first is evidence of absence; let the
+        # second through and let ws_state report honestly.
+        ( load_target "$WK_TARGET" >/dev/null 2>&1
+          [ "$(t_info "$name" 2>/dev/null)" = unreachable ] )
+        return $?
+    fi
     for t in $(target_all 2>/dev/null); do
         ws_on_target "$t" "$name" && return 0
     done
@@ -295,64 +226,77 @@ ws_exists() { # <name>
 }
 
 ws_target() { # <name>
-    local name="$1" t
+    local name="$1" t hits=""
     if [ -n "${WK_TARGET:-}" ]; then printf '%s' "$WK_TARGET"; return 0; fi
     for t in $(target_all 2>/dev/null); do
-        if ws_on_target "$t" "$name"; then printf '%s' "$t"; return 0; fi
+        ws_on_target "$t" "$name" && hits="$hits $t"
     done
-    # Nothing here knows this name. On a macOS host that is also true of a
-    # real container workspace whose VM is stopped -- its store is inside the
-    # podman VM -- so this is "not visible from here", not "does not exist";
-    # default_target's "container" answer is exactly right, and the dispatcher
-    # forwards the command into the VM, where the VM's own wk resolves it for
-    # real. Derived fresh every call, not cached.
-    default_target
+    # shellcheck disable=SC2086 -- deliberate word splitting of the collected hits.
+    set -- $hits
+    case "$#" in
+        # Nothing here knows this name. On a macOS host a real container
+        # workspace whose VM is stopped looks the same, so this is "not
+        # visible from here", not "does not exist" -- default_target's
+        # "container" answer forwards the command into the VM to resolve.
+        0) default_target; return 0 ;;
+        1) printf '%s' "$1"; return 0 ;;
+    esac
+    die "workspace '$name' exists on targets:$hits -- this cannot be
+    resolved; remove one, or set WK_TARGET"
+}
+
+# `wk new` writes $WK_STORE/create/<name>.{status,log} as its first act, so a
+# later command can tell a half-made workspace from a missing one. A record
+# speaks for a workspace only while creation is genuinely in flight, checked
+# against the process table, never a file that outlives it.
+gc_creation_records() {
+    local sf n t found
+    [ -d "$(ws_state_dir)" ] || return 0
+    for sf in "$(ws_state_dir)"/*.status; do
+        [ -f "$sf" ] || continue
+        n=$(basename "$sf" .status)
+        detach_alive "$sf" && continue
+        found=""
+        for t in $(target_all 2>/dev/null); do
+            if ( load_target "$t" >/dev/null 2>&1; [ -d "$(wk_ws_dir "$n")" ] ); then
+                found=1; break
+            fi
+        done
+        [ -z "$found" ] || continue
+        info "removing orphaned creation record for '$n' (no live creation, no workspace)"
+        rm -f "$sf" "$(ws_create_log "$n")"
+    done
 }
 
 # --- am I a workspace? -------------------------------------------------------
-# A workspace is a whole machine, and the `wk` inside one has to act on it
-# rather than reach one from outside. Claude only ever runs inside a
-# workspace, so this path has to work for it to build or test anything.
-#
-# Provisioning writes a marker file saying so and naming the checkout
-# (container/firstrun.sh, targets/vm.sh). A file, not an environment
-# variable, since it must be true for everything that reaches in -- an ssh
-# command, a hook, a `bash -c` from an agent -- not only inheriting shells.
-# When absent this machine is a host, and every reader must treat that as
-# the ordinary case, not a broken workspace.
+# A workspace is a whole machine; the `wk` inside one acts on it rather than
+# reaching one from outside. Provisioning writes a marker file saying so and
+# naming the checkout (container/firstrun.sh, targets/vm.sh) -- a file, not
+# an environment variable, since it must be true for an ssh command, a hook
+# or a `bash -c` from an agent, not only an inheriting shell.
 wk_marker() { echo "${WK_MARKER:-$HOME/.wk-workspace}"; }
 
 in_workspace() { [ -f "$(wk_marker)" ]; }
 
-# One `key=value` field from a marker file -- the tolerant reader in
-# lib/common.sh, which the status files use too.
-marker_field() { kv_field "$1" "$2"; }
+marker_field() { kv_field "$1" "$2"; }   # one key=value field from a marker file
 
 wk_marker_field() { marker_field "$(wk_marker)" "$1"; }
 
 # --- am I a machine that *hosts* workspaces? ---------------------------------
-# A shared build box is neither a workstation nor a workspace: it holds
-# several workspaces at once, so the marker above is the wrong shape. This
-# one says "this machine is the far end of a remote target", and names which:
+# A shared build box holds several workspaces at once, so the marker above is
+# the wrong shape. This one says "this machine is the far end of a remote
+# target", and names which:
 #   target=devbox-arm64-2
 #   root=/home/you/wk
-# Written by `wk remote setup`, and what makes `wk` usable *on* the box: a
-# bare `wk ls` there resolves to the same driver, paths and job policy as
-# the workstation driving it, with the ssh step dropped (WK_REMOTE_LOCAL,
-# targets/remote.sh). A file, not an exported variable, for the same reason
-# as the workspace marker: true for `ssh box wk status` and a cron line.
+# Written by `wk remote setup`.
 wk_remote_marker()   { echo "${WK_REMOTE_MARKER:-$HOME/.wk-remote}"; }
 in_remote_host()     { [ -f "$(wk_remote_marker)" ]; }
 wk_remote_field()    { marker_field "$(wk_remote_marker)" "$1"; }
 
-# The workspace this machine *is*, or empty on a host: makes the workspace
-# argument optional inside one (`wk build jsc-release`, claude/CLAUDE.md).
-wk_self() { wk_marker_field name; }
-
+wk_self() { wk_marker_field name; }   # the workspace this machine *is*, or empty on a host
 
 # The target for a workspace ws_target could not find anywhere: `container`
-# on a host, the default and what an unresolved name always means there;
-# `local` inside one, since there's nothing else in there.
+# on a host, `local` inside one, since there's nothing else in there.
 default_target() {
     if in_workspace; then echo local; return 0; fi
     local t; t=$(wk_remote_field target)
@@ -360,27 +304,19 @@ default_target() {
     echo container
 }
 
-# The config to build, run or test when the caller names none. jsc-release
-# is right on a host and in a container, but meaningless in a macOS guest,
-# which can build nothing but the Apple ports -- so a bare `wk run` there
-# would look for a JSCOnly binary that cannot exist. The marker carries the
-# answer, written by whoever wrote it: container/firstrun.sh knows the
-# container builds JSCOnly, targets/vm.sh knows the guest's tree.
+# The config to build, run or test when the caller names none. jsc-release is
+# right on a host and in a container, but meaningless in a macOS guest, which
+# can build nothing but the Apple ports; the marker carries the answer.
 default_config() {
     local c=""
     in_workspace && c=$(wk_marker_field config)
     printf '%s' "${c:-jsc-release}"
 }
 
-# The config this workspace was last *built* with (`config=` in
-# build.status), or empty when it has never been built here.
-
-# What makes `wk test <ws> --layout` usable: the fallback default is
-# jsc-release, which resolves to `--jsc-only`, a port with no
-# WebKitTestRunner or ImageDiff -- the wrong tree for layout tests. The
-# config a person means is the one they just built, and the build says
-# which that was. Evidence, not a preference: an empty answer means
-# "nothing has been built" rather than a guess.
+# The config this workspace was last *built* with, or empty when it has
+# never been built here. Evidence, not a preference: `wk test <ws> --layout`
+# needs the config just built, not the jsc-release default (--jsc-only, the
+# wrong tree for layout tests).
 last_built_config() {
     local name="$1"
     ( command -v wk_ws_dir >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
@@ -391,8 +327,7 @@ last_built_config() {
 # --- generated ssh aliases ---------------------------------------------------
 # Written under ~/.ssh/config.d, not ~/.ssh/config itself, so it can be
 # rewritten freely without touching hand-maintained entries. Rewritten, not
-# appended: a VM's address changes on every boot, and an alias only ever
-# added would point at a stale IP while Zed times out against it.
+# appended: a VM's address changes on every boot.
 
 wk_ssh_conf() { echo "$HOME/.ssh/config.d/wk"; }
 
@@ -411,10 +346,9 @@ ssh_alias_remove() {
 }
 
 # ssh_alias_set <name> <hostname> <user> [identity] [extra-line...]
-# The extra lines are for a target not reached by address at all: a
-# container has no interface and is reached by a ProxyCommand over `podman
-# exec`. Passed in rather than branched on here, since which lines are
-# needed is the driver's knowledge.
+# Extra lines are for a target not reached by address at all -- a container
+# is reached by a ProxyCommand over `podman exec` -- passed in since which
+# lines are needed is the driver's knowledge.
 ssh_alias_set() {
     local name="$1" hostname="$2" user="$3" conf extra
     conf=$(wk_ssh_conf)
@@ -444,16 +378,11 @@ EOF
 
 # --- the zed key --------------------------------------------------------------
 # One key per machine, for reaching a container workspace's sshd over
-# `podman exec` (targets/container.sh).
-
-# Not one of the deploy keys under $WK_STORE/secrets: those are push-only
-# GitHub credentials, read-only to a workspace. This is the opposite
-# direction -- this machine authenticating to its own containers -- so it is
-# machine-local, generated on demand, regenerable at any moment.
-
-# Its own key rather than reusing ~/.ssh/id_ed25519, same reason the vm
-# driver has one: a person's key may be passphrase-protected, held in an
-# agent, or absent, and an editor launch is not the place to discover that.
+# `podman exec`. Not a deploy key ($WK_STORE/secrets are push-only GitHub
+# credentials, read-only to a workspace): this machine authenticates to its
+# own containers, so it is machine-local, generated on demand. Its own key
+# rather than ~/.ssh/id_ed25519, which may be passphrase-protected or held
+# in an agent -- not discoverable from an editor launch.
 zed_key() { echo "$(wk_state_dir)/ssh/zed_ed25519"; }
 
 zed_key_pub() {
@@ -468,16 +397,12 @@ zed_key_pub() {
 }
 
 # Every target this machine could have a workspace on: container and vm
-# unconditionally (this machine, if either driver is usable at all), the
-# build box this machine is the far end of (if any), and every machine
-# configured under targets/hosts/*.conf. Used by commands that report on
-# everything rather than acting on one named workspace.
+# unconditionally, the build box this machine is the far end of (if any), and
+# every machine configured under targets/hosts/*.conf.
 target_all() {
     local d f t seen=" container vm "
-    # The two built-in kinds this machine can hold workspaces of directly,
-    # unconditionally -- no registry says so, the drivers just are (a
-    # missing podman or tart answers every later question about them with
-    # nothing, not with a loud failure; see t_list in each).
+    # A missing podman or tart answers every later question with nothing,
+    # not a loud failure (see t_list in each).
     echo container
     echo vm
 
@@ -487,18 +412,10 @@ target_all() {
     t=$(wk_remote_field target)
     if [ -n "$t" ]; then seen="$seen$t "; echo "$t"; fi
 
-    # Every machine configured, whether or not a workspace is currently
-    # pinned to it -- a machine you set up is a target you have. Two
-    # directories, since a target has two halves: the registry in this
-    # repository (every device gets by pulling) and the machine-local conf
-    # (this device's own view). Both are enumerated.
-
-    # The registry is skipped on a machine that is the far end of a target
-    # (a build box or the podman VM, both pushed the whole repository):
-    # otherwise a delegated `wk ls` there would pay an ssh timeout for every
-    # machine it has no route, key or business reaching. Neither drives
-    # anything -- a build box answers for itself, from the marker -- while a
-    # *peer* workstation does drive things and keeps the whole registry.
+    # Skipped on a machine that is the far end of a target: a delegated `wk
+    # ls` there would otherwise pay an ssh timeout for every machine it has
+    # no route, key or business reaching. A peer workstation, which does
+    # drive things, keeps the whole registry.
     local me=""
     if ! in_remote_host && [ -z "${WK_IN_VM:-}" ]; then
         me=$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')
@@ -508,9 +425,8 @@ target_all() {
                 [ -f "$f" ] || continue
                 t=$(basename "$f" .conf)
                 case "$seen" in *" $t "*) continue ;; esac
-                # ...and never itself: without this, a bare `wk status` on
-                # the workstation would ssh to itself asking what it already
-                # knows, and report itself unreachable with no sshd inside.
+                # ...and never itself: otherwise a bare `wk status` would ssh
+                # to itself and report itself unreachable, with no sshd inside.
                 [ -n "$me" ] && [ "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" = "$me" ] && continue
                 seen="$seen$t "
                 echo "$t"
@@ -520,13 +436,8 @@ target_all() {
 }
 
 # Call <fn> once per configured remote machine -- every target_all entry
-# except container, vm and local, which are this machine already. <fn> gets
-# the target name as $1 plus any extra arguments; its own exit status folds
-# into the worst one seen, for_each_machine's return.
-
-# `wk key register`, `wk push --all` and `wk sudo --all` each walked this
-# list with their own copy of the skip case; one walk means it can only
-# drift in one place.
+# except container, vm and local. <fn> gets the target name as $1 plus any
+# extra arguments; its exit status folds into the worst one seen.
 for_each_machine() {
     local fn="$1"; shift
     local t rc worst=0
@@ -540,24 +451,20 @@ for_each_machine() {
 
 # --- the podman machine (macOS) -----------------------------------------------
 # Every workspace container lives inside one podman machine, so `wk
-# start`/`wk stop` need to run a command inside it from the host, and know
-# its lifecycle state before deciding whether there is anything to do.
+# start`/`wk stop` run a command inside it from the host.
 
-# The machine's lifecycle state, or "absent" if $1 was never created --
 # podman errors on an unknown machine name rather than reporting one, so
-# that has to be read back off the failure.
+# "absent" has to be read back off the failure.
 _machine_state() {
     podman machine inspect "$1" --format '{{.State}}' 2>/dev/null || echo absent
 }
 
 # Run a command inside the podman machine from the host, or in place already
-# inside a workspace (WK_IN_VM) or on Linux, where there is no machine to
-# reach into. Named apart from _vm() (targets/vm.sh's Tart guest) so
-# sourcing both does not clobber either.
-
-# </dev/null is essential, not defensive: a caller feeding this from a
-# `while read` loop over a heredoc has its stdin read by podman-machine-ssh
-# otherwise, and the first iteration swallows every line meant for the rest.
+# inside a workspace (WK_IN_VM) or on Linux. Named apart from _vm()
+# (targets/vm.sh's Tart guest) so sourcing both does not clobber either.
+# </dev/null is essential: a caller feeding this from a `while read` loop
+# over a heredoc otherwise has its stdin read by podman-machine-ssh, and the
+# first iteration swallows every line meant for the rest.
 _in_machine() {
     if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         podman machine ssh "${WK_MACHINE:-wk}" "$@" </dev/null
@@ -569,25 +476,17 @@ _in_machine() {
 # --- named targets -----------------------------------------------------------
 # A target name is either one of the four built-in kinds -- container, vm,
 # remote, local -- or a machine configured under targets/hosts/<name>.conf.
-
-# `remote` is the one kind with several instances: there is exactly one
-# podman, one Tart, one local machine, but a shared build box isn't unique,
-# so the machine's own name is the target (`wk new bug-238 --target
-# devbox-arm64-2`) and its conf says which driver to use and how to reach it.
-
-# One place in this repository, pulled by every device. A target's conf is
-# true of the *machine* regardless of who drives it, and its addressing is
-# accepted as published (CLAUDE.md). No per-device override file (CLAUDE.md,
-# "One path, not two"); a key or secret is genuinely per-device and does not
-# live in a target conf, while the environment is genuinely per-invocation
-# and still wins over one (_target_reset_vars). No new machinery: the
-# registry is committed files, pushed by `wk remote setup`/`t_sync_tools`.
+# `remote` is the one kind with several instances, since a shared build box
+# isn't unique: the machine's own name is the target, and its conf says
+# which driver to use and how to reach it. One conf per machine, pulled by
+# every device (CLAUDE.md, "One path, not two"); a key or secret is
+# per-device and does not live here, while the environment is per-invocation
+# and still wins over one (_target_reset_vars).
 target_registry_dir() { echo "$WK_ROOT/targets/hosts"; }
 target_registry_conf(){ echo "$(target_registry_dir)/$1.conf"; }
 
-# The driver a target name selects. The built-in kinds are their own kind;
-# anything else must have a conf, and one that names no kind falls through
-# to `remote`, the only kind worth naming after a machine.
+# The driver a target name selects. Anything not a built-in kind must have a
+# conf, and one that names no kind falls through to `remote`.
 target_kind() {
     case "$1" in
         container|vm|remote|local) echo "$1"; return 0 ;;
@@ -600,12 +499,11 @@ target_kind() {
     echo "${k:-remote}"
 }
 
-# Per-target driver state, cleared before every load: more than one target
-# can be loaded in a process (`wk status` walks every target), and without
-# this the second remote machine would inherit the first one's host, root
-# and measured capacity. The environment still wins over a conf, so what it
-# supplied is snapshotted once and restored on each load, named here rather
-# than in the driver since the reset must happen *before* the conf is sourced.
+# Per-target driver state, cleared before every load: `wk status` loads more
+# than one target in a process, and without this the second remote machine
+# would inherit the first one's host, root and measured capacity. The
+# environment still wins over a conf, so what it supplied is snapshotted
+# once and restored on each load.
 _target_reset_vars() {
     if [ -z "${_WK_ENV_SEEDED:-}" ]; then
         _WK_ENV_REMOTE_HOST="${WK_REMOTE_HOST:-}"
@@ -632,19 +530,10 @@ _target_reset_vars() {
 #   broken       creation finished and the environment is gone -- something
 #                outside wk removed it (rule 5)
 #   unreachable  the machine that holds it did not answer in time
-
-# Derived on every call from evidence next to the artifacts, stored nowhere.
-# Three pieces, in order: the driver's own answer (t_info), where
-# `creating`/`unreachable` come from; the `base-id` file for a target that
-# pins a base snapshot (the container driver writes it last, so one without
-# it was interrupted); t_created, when the environment is absent but a
-# workspace directory is here (with the marker, something removed a
-# finished environment; without it, this is unfinished-creation rubble).
 #
-# `ws.status` is not evidence and is never believed about a workspace that
-# exists: a claim by the creating process, read only for whether that
-# process is still alive (wait_ready), or, for a marker since emptied,
-# whether it ever said it finished (rule 5).
+# Derived on every call from evidence next to the artifacts, stored nowhere.
+# `ws.status` is a claim by the creating process, never believed about a
+# workspace that exists.
 ws_state() {
     local name="$1" env ws
     env=$(t_info "$name" 2>/dev/null || echo absent)
@@ -674,10 +563,7 @@ ws_state() {
     echo present
 }
 
-# The word `wk ls`/`wk status` print in STATE: the driver's own answer,
-# except a workspace whose lifecycle is not `present` reports that instead
-# -- a container inside a never-finished workspace is not "running".
-ws_display_state() {
+ws_display_state() {   # the driver's own answer, except a workspace whose lifecycle is not `present` reports that instead
     local st; st=$(ws_state "$1")
     case "$st" in
         present) t_info "$1" ;;
@@ -685,22 +571,18 @@ ws_display_state() {
     esac
 }
 
-# What the creating process claimed, and its transcript. A claim, never the
-# record -- see ws_state. Beside the workspace directory, not inside it: a
-# re-run of `wk new` over a half-made workspace *destroys* that directory
+# What the creating process claimed, and its transcript -- a claim, never
+# the record (see ws_state). Beside the workspace directory, not inside it:
+# a re-run of `wk new` over a half-made workspace *destroys* that directory
 # first (rule 3), and the log the driver is writing to must not be the file
-# it deletes -- the fd would survive, pointing at nothing. Removed by `wk
-# rm`, with the workspace they describe.
+# it deletes.
 ws_state_dir()   { echo "$WK_STORE/create"; }
 ws_status_file() { echo "$(ws_state_dir)/$1.status"; }
 ws_create_log()  { echo "$(ws_state_dir)/$1.log"; }
 
-# Where the command that remakes a workspace has to be typed. `wk new` is a
-# workstation command -- a machine that only *hosts* workspaces refuses it
-# (is_lifecycle in `wk`), since creating and destroying workspaces is done
-# from wherever `wk remote setup`/the registry of machines lives, not from
-# the machine being built on. So printing it bare on a build box sends
-# somebody straight to a refusal.
+# `wk new` is a workstation command -- a machine that only *hosts* workspaces
+# refuses it (is_lifecycle in `wk`) -- so printing it bare on a build box
+# sends somebody straight to a refusal.
 ws_remake_hint() {
     if in_remote_host; then
         printf 'from the workstation:  wk new %s --target %s' "$1" "$(wk_remote_field target)"
@@ -710,21 +592,11 @@ ws_remake_hint() {
 }
 
 # --- one gate: wait_ready ----------------------------------------------------
-# Block until this workspace is usable, honest about every other outcome.
-# The one place anything asks "may I act on this yet", so zed, a build and
-# the babysitter cannot each answer it differently:
-#   present      return, immediately in the normal case
-#   creating     wait -- and say what it is waiting for, once
-#   creating,    the driver died with the connection that started it: say so
-#   driver dead  and name the fix (`wk new`, remade from scratch -- rule 3)
-#   broken       refuse, and name the repair
-#   unreachable  refuse, with the timeout that decided it -- never a hang
-#   absent       refuse
-
-# Foreground by design: if this waiter is killed, only the waiting stops --
-# creation is detached and continues, and re-running the same command is the
-# resume. A waiter that detached itself and opened an editor would be
-# opening windows into a session that had gone.
+# Block until this workspace is usable, honest about every other outcome --
+# the one place anything asks "may I act on this yet", so zed, a build and
+# the babysitter cannot each answer it differently. Foreground by design: if
+# this waiter is killed, only the waiting stops -- creation is detached and
+# continues, and re-running the same command resumes.
 wait_ready() {
     local name="$1" timeout="${2:-${WK_READY_WAIT:-1800}}"
     local st sf waited=0 said="" stage
@@ -755,12 +627,9 @@ wait_ready() {
             ;;
         creating)
             if ! detach_alive "$sf"; then
-                # A barrier, not a refusal (lib/common.sh's distinction): this
-                # command *can* proceed. A clone that finished and never got
-                # its marker looks exactly like one cut in the middle, and
-                # only the person looking at it can tell which. --force
-                # returns and acts on the workspace as it is, repeating the
-                # warning when the command ends, as everywhere else.
+                # A barrier, not a refusal (lib/common.sh's distinction):
+                # a clone that finished and never got its marker looks
+                # exactly like one cut in the middle.
                 barrier "'$name' was never finished creating, and nothing is creating it now
     (the process that was is gone, with whatever connection started it).
     Usually there is nothing in one worth keeping, so remake it:
@@ -789,25 +658,12 @@ wait_ready() {
 }
 
 # --- work a lock here cannot see --------------------------------------------
-# A lock (hold_lock, lib/common.sh) is a process on this machine and dies
-# with it -- right for a command that does its work and exits, but covers
-# nothing for work *detached into the workspace*: `wk sysimage build --stage
-# image --detach` starts bitbake through t_spawn and returns, so the lock is
-# gone within the second while the build runs for hours. A `wk build` in the
-# same workspace then takes the workspace lock and puts a second writer into
-# the same checkout, corrupting both.
-
-# Not a longer-lived lock: "is anything running in here" has an answer at
-# the artifact instead -- a detached job writes its pid into the workspace's
-# home directory, and the workspace can be asked whether that pid is alive.
-
-# The whole interface: **a job detached into a workspace writes
-# `$(t_home)/<job>.pid`, and removes nothing on the way out** -- a stale
-# file is expected and costs one liveness check. `image/yocto.sh` writes
-# `yocto-<stage>.pid` through it, and anything added later is serialised
-# against `wk build` for free by doing the same.
-
-# Prints what it found, so a refusal can name it.
+# A lock (hold_lock, lib/common.sh) dies with the process holding it -- right
+# for a command that does its work and exits, but covers nothing for work
+# *detached into the workspace* (`wk sysimage build --stage image --detach`
+# starts bitbake through t_spawn and returns within the second). The
+# interface instead: **a job detached into a workspace writes
+# `$(t_home)/<job>.pid`, and removes nothing on the way out.**
 ws_busy_reason() {
     local name="$1" ws p pid job
     ws=$(wk_ws_dir "$name")
@@ -825,23 +681,12 @@ ws_busy_reason() {
     return 1
 }
 
-# The targets a report covers: `wk ls`/`wk status` must enumerate the same
-# set here and in target_workspaces below (they didn't -- `wk status` walked
-# every target while `wk ls` on macOS forwarded into the podman VM and
-# answered for containers alone). WK_TARGET (may name several) wins; inside
-# a workspace there is exactly one target.
 # --- one round of probes instead of N ----------------------------------------
-# A bare `wk status` walks every target serially, and an ssh machine costs
-# a full connect -- ten seconds (WK_SSH_TIMEOUT) when off -- so four
-# machines, two away, meant twenty seconds before the first row. The
-# waiting now happens once, before the walk: one subshell per target asks
-# its own machine and writes the answer where the serial pass will find it
-# (t_prefetch, _remote_probe_file in targets/remote.sh); the report itself
-# is untouched. This also warms the ssh multiplexing socket (ControlPersist,
-# targets/remote.sh), so a down machine is down *once*, not once per question.
-
-# Best-effort: a prefetch that fails leaves no file, and the walk asks the
-# machine directly.
+# A bare `wk status` walks every target serially, and an ssh machine costs a
+# full connect (WK_SSH_TIMEOUT) when off. One subshell per target asks its
+# own machine and writes the answer where the serial pass will find it
+# (t_prefetch, _remote_probe_file in targets/remote.sh); best-effort, a
+# prefetch that fails leaves no file, and the walk asks the machine directly.
 prefetch_targets() {
     local t
     [ $# -gt 0 ] || return 0
@@ -868,12 +713,9 @@ walk_targets() {
     # WK_NO_DELEGATE: one machine's contribution to somebody else's fleet
     # listing, so it reports what it holds and asks nobody -- without it, a
     # workstation asked by another workstation would ask every machine *it*
-    # knows too, squaring the ssh work over the shared registry.
-
-    # A machine's own target survives it: on a build box the target named
-    # after that machine *is* this machine (WK_REMOTE_LOCAL, set by `wk
-    # remote setup`), and dropping it would drop every workspace it holds.
-    # Decided from the conf, so this costs no ssh.
+    # knows too, squaring the ssh work over the shared registry. A machine's
+    # own target survives it (WK_REMOTE_LOCAL, set by `wk remote setup`),
+    # decided from the conf so this costs no ssh.
     if [ -n "${WK_NO_DELEGATE:-}" ]; then
         local t
         for t in $(target_all); do
@@ -889,12 +731,10 @@ walk_targets() {
     target_all
 }
 
-# Every workspace a loaded target has, from both sides of it. The local
-# store knows what this machine created; the driver knows what actually
-# exists over there. Usually the same set, not always: a remote target's
-# workspaces live on the far machine, so `wk ls` run *on* it has an empty
-# store and a full ws directory. Listing only one side is how a machine
-# reports "no workspaces" while holding six.
+# Every workspace a loaded target has, from both sides: the local store
+# knows what this machine created, the driver knows what actually exists
+# over there -- not always the same set, since a remote target's workspaces
+# live on the far machine.
 target_workspaces() {
     { list_workspaces 2>/dev/null || true
       t_list 2>/dev/null | cut -f1 || true
@@ -904,9 +744,8 @@ target_workspaces() {
 load_target() {
     local t="${1:-container}" kind conf
 
-    # $WK_STORE is target-dependent (vm keeps state under XDG on the host,
-    # container's lives in /var/lib/wk) and drivers set it when sourced.
-    # Reset first so a second load in one process doesn't inherit the first.
+    # $WK_STORE is target-dependent; reset first so a second load in one
+    # process doesn't inherit the first.
     : "${WK_STORE_DEFAULT:=${WK_STORE:-/var/lib/wk}}"
     WK_STORE="$WK_STORE_DEFAULT"
 
@@ -920,21 +759,15 @@ load_target() {
 
     'wk remote setup $t' writes it for you."
 
-    # Set before either file is read, since both are written in terms of the
-    # name. WK_TARGET is the name, WK_TARGET_KIND the driver behind it:
-    # `[ "$TARGET" = remote ]` was true only while one name existed.
+    # Set before either file is read: both are written in terms of the name.
     WK_TARGET="$t"
     WK_TARGET_KIND="$kind"
     export WK_TARGET WK_TARGET_KIND
 
     _target_reset_vars
 
-    # And the *functions*: a definition outlives the load, so the first
-    # driver's override stays live for the second (`wk status` on a build
-    # machine walks container first, and every remote branch is then read
-    # by the container driver's t_branch, answering `-` plausibly and
-    # wrongly). Re-sourcing restores every default; function definitions
-    # only, the running load_target keeps its own body.
+    # And the *functions*: a definition outlives the load, so re-sourcing
+    # restores every default before the driver overrides only its own.
     # shellcheck disable=SC1090
     . "$WK_ROOT/lib/target.sh"
 

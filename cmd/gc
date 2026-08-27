@@ -381,36 +381,12 @@ if [ -d "$WK_STORE/cache/bench" ]; then
 fi
 
 # --- creation bookkeeping with nothing left to describe ------------------------
-# `wk new` writes $WK_STORE/create/<name>.{status,log} so a later command can
-# tell a half-made workspace from a missing one; `wk rm` removes the pair with
-# the workspace. Nothing removes the pair whose workspace and environment are
-# both gone and nothing is creating it any more -- an interrupted `wk rm`, or
-# a driver that died before anything existed. Small, and otherwise sits there
-# forever.
-#
-# No registry: a record speaks for a workspace only while creation is
-# genuinely in flight (the same rule ws_target applies, lib/target.sh) --
-# checked directly against the process table, not a file that outlives it.
-# Once it is dead, only the store answers, asked directly across every
-# target this machine can see (this loop covers this one target's own
-# create/ directory; running gc against every target reaps every one's).
-if [ -d "$(ws_state_dir)" ]; then
-    for _sf in "$(ws_state_dir)"/*.status; do
-        [ -f "$_sf" ] || continue
-        _n=$(basename "$_sf" .status)
-        if detach_alive "$_sf"; then continue; fi
-        _found=""
-        for _t in $(target_all 2>/dev/null); do
-            if ( load_target "$_t" >/dev/null 2>&1; [ -d "$(wk_ws_dir "$_n")" ] ); then
-                _found=1; break
-            fi
-        done
-        [ -z "$_found" ] || continue
-        info "removing orphaned creation record for '$_n' (no live creation, no workspace)"
-        rm -f "$_sf" "$(ws_create_log "$_n")"
-    done
-    unset _sf _n _t _found
-fi
+# `wk rm` removes a creation record with its workspace; this loop covers this
+# one target's own create/ directory (running gc against every target reaps
+# every one's), and is small enough to sit there forever if it never runs.
+# gc_creation_records (lib/target.sh, next to ws_target) is the seam:
+# tests/test_crash_only.py drives it directly against a fake store.
+gc_creation_records
 
 gc_images   # (defined above; the store's images)
 gc_build_outputs  # ...and everywhere else a build can leave bytes

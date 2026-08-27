@@ -3,18 +3,13 @@
 # wk rm <name>... -- destroy one or more workspaces and everything they created
 # wk: where=workspace name=required lifecycle post=ssh-alias-remove group=workspaces
 #
-# This is the guarantee that makes workspaces disposable, so it must be
-# thorough: the container, the copy-on-write layer, the overlay work directory,
-# the home directory and the ssh alias all go. Shared caches (ccache, yocto,
-# buildroot) deliberately survive -- they are the reason the next build is fast.
+# Thorough, since this is the guarantee that makes workspaces disposable: the
+# container, the overlay, the home directory and the ssh alias all go. Shared
+# caches (ccache, yocto, buildroot) survive -- they are why the next build is fast.
 #
-# Every remaining word on the command line is another workspace: `wk`'s own
-# header resolves only the first name into WK_NAME and leaves the rest in
-# argv, so this is where `wk rm a b c` becomes three removals. One
-# confirmation names all of them; each is then destroyed independently -- a
-# refusal on one (a workspace that cannot delete itself, one still creating,
-# a name that does not exist) does not stop the rest, and the exit code is
-# nonzero if any of them failed.
+# `wk`'s header resolves only the first name into WK_NAME, leaving the rest in
+# argv, so `wk rm a b c` becomes three removals: one confirmation for all,
+# each destroyed independently, not stopped by another's refusal.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,19 +25,15 @@ require_name "$NAME"
 NAMES=("$NAME")
 for _a in ${@+"$@"}; do NAMES+=("$_a"); done
 
-# One confirmation for the whole batch, named up front -- not one per name,
-# which is what looping the single-workspace prompt would give. WK_YES=1
-# makes rm_one's own copy of that prompt a no-op once this one is answered.
+# WK_YES=1 makes rm_one's own confirmation a no-op once this one is answered.
 _list=""
 for _n in "${NAMES[@]}"; do _list="$_list '$_n'"; done
 confirm "destroy workspace(s)${_list} and all their changes?" || die "aborted"
 export WK_YES=1
 
 # rm_one <name> -- everything a single `wk rm <name>` does, in a subshell so
-# a refusal (`die`, from a target that cannot destroy itself, or a name that
-# does not exist) ends only this one name's attempt. Each name gets its own
-# target load and its own locks, held only for as long as this subshell runs
-# -- right for names on different targets, and safe when they are not.
+# a refusal ends only this one name's attempt. Each name gets its own target
+# load and its own locks, held only for as long as this subshell runs.
 rm_one() (
     set -euo pipefail
     local NAME="$1" TARGET ws sf clog n rc left _t _sf _pid
@@ -50,47 +41,36 @@ rm_one() (
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
 
-    # Refuse before asking. The driver refuses too -- a workspace cannot delete
-    # the filesystem it is running on -- but prompting for a decision that
-    # cannot be carried out either way is worse than saying so straight away.
+    # Refuse before asking: prompting for a decision that cannot be carried
+    # out either way is worse than saying so straight away.
     if [ "$WK_TARGET_KIND" = local ]; then t_destroy "$NAME"; fi
 
     ws=$(wk_ws_dir "$NAME")
 
-    # The creation attempt's own bookkeeping, which lives beside the workspace
-    # directory rather than in it (lib/target.sh) and so has to be named here: a
-    # `wk rm` that left the status file behind would leave `wk status` reporting a
-    # workspace that no longer exists anywhere.
+    # Beside the workspace directory, not in it (lib/target.sh), so named
+    # here: left behind, `wk status` would report a workspace gone anywhere.
     sf=$(ws_status_file "$NAME")
     clog=$(ws_create_log "$NAME")
 
-    # Before the lock, because the lock is what makes it invisible: a creation in
-    # flight holds this workspace's lock, so waiting for it and then destroying
-    # what it just made would look exactly like a slow `wk rm`. Said here, and then
-    # the wait is a wait somebody asked for.
+    # Before the lock: a creation in flight holds it, so waiting for it and
+    # then destroying what it just made would look exactly like a slow `wk rm`.
     if detach_alive "$sf"; then
         warn "'$NAME' is being created right now (pid $(status_field "$sf" pid), at stage
   '$(status_field "$sf" stage)') -- this will wait for that to finish and then
   destroy it. Ctrl-C now if that is not what you meant."
     fi
 
-    # One lock per mutated resource (rule 4): the workspace being destroyed, and
-    # the store -- `wk gc` must not be counting references while this is removing
-    # one.
+    # The workspace being destroyed, and the store -- `wk gc` must not be
+    # counting references while this is removing one.
     hold_lock "ws-$NAME"
     if t_needs_base; then hold_lock store -s; fi
 
-    # Nothing left but the record: converge on the declared final state rather than
-    # refusing. This is what a `wk rm` killed right after `wk new` took its lock
-    # and before anything existed anywhere leaves behind, and re-running it has
-    # to finish the job.
+    # Nothing left but the record: this is what a `wk rm` killed right after
+    # `wk new` took its lock, before anything existed, leaves behind, and
+    # re-running it has to finish the job.
     if [ ! -d "$ws" ] && [ "$(t_info "$NAME")" = absent ]; then
-        # The record may be on a different target than the one this name
-        # resolved to: an abandoned creation that never got far enough to
-        # leave a store anywhere falls back to the default target
-        # (ws_target, lib/target.sh), which is only a guess once nothing
-        # else answers for the name. Every target's own store is asked
-        # directly, in case the dead record is sitting on one of the others.
+        # ws_target falls back to a guess once nothing else answers for the
+        # name, so every target's own store is asked directly for the record.
         if [ ! -f "$sf" ]; then
             for _t in $(target_all 2>/dev/null); do
                 [ "$_t" = "$TARGET" ] && continue
@@ -119,13 +99,9 @@ rm_one() (
 
     confirm "destroy workspace '$NAME' and all its changes?" || die "aborted"
 
-    # claude remote-control (`wk claude ... --rc`) is a process started
-    # detached *inside* the target, not part of this workspace's own
-    # environment record. For container and vm that is moot -- t_destroy below
-    # tears down the whole container or guest, taking it with it -- but a
-    # remote target's "environment" is only the checkout on a machine that
-    # keeps running, so a live server there would otherwise outlive the
-    # workspace it was named after.
+    # claude remote-control runs detached inside the target; t_destroy takes
+    # it down with a container or guest, but a remote target's checkout keeps
+    # running, so a live server there would otherwise outlive the workspace.
     if [ "$WK_TARGET_KIND" = remote ]; then
         _sf="$(wk_ws_dir "$NAME")/claude-rc.status"
         _pid=$([ -f "$_sf" ] && status_field "$_sf" pid || true)
@@ -136,10 +112,8 @@ rm_one() (
         fi
     fi
 
-    # The artifacts first, the bookkeeping last: destroying the environment
-    # before the checked-what-is-left-below is what makes a re-run converge
-    # rather than repeat -- what actually happened is re-derived from
-    # evidence (t_info, $ws) on every attempt, never assumed from a record.
+    # The artifacts first, the bookkeeping last: what actually happened is
+    # re-derived from evidence (t_info, $ws) on every attempt, never assumed.
     rc=0
     t_destroy "$NAME" || rc=$?
 

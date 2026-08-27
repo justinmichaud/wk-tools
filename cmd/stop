@@ -3,33 +3,15 @@
 # wk stop [<workspace>] [--keep-vm] -- shut down one workspace, or everything
 # wk: where=workspace name=optional forward=no group=hosts needs podman
 #
-# With a workspace named, stops only that workspace's environment -- its
-# container stopped, its macOS guest stopped -- through the driver contract
-# (t_stop), and leaves every other workspace, and the podman machine itself,
-# exactly as they were. Nothing on disk is touched, the same guarantee the
-# bare form makes, narrowed to one workspace. A target with no notion of
-# stopping a single workspace (a shared remote build machine; a workspace
-# asked to stop itself) refuses and says why, rather than silently doing
-# nothing.
+# A named workspace: stops only its container or macOS guest (t_stop); nothing on disk
+# is touched, and a target with no notion of stopping one workspace refuses and says why.
 #
-# `forward=no`: this always runs on the host that holds the environment,
-# never forwarded into the podman VM the way `wk build`/`wk enter` are --
-# stopping the VM's own containers *from* the VM would stop the ssh session
-# forwarding the command mid-word.
+# `forward=no`: runs on the host holding the environment, never forwarded into the podman
+# VM -- stopping its own containers from inside it would kill the ssh session mid-word.
 #
-# With no workspace, stops every workspace container and then the podman
-# machine, which is what actually returns CPU and memory to the host: a
-# stopped container inside a running VM still costs you the VM's whole
-# allocation.
-#
-# Nothing is deleted. The overlay layer, the build tree, the home directory and
-# the container itself all persist -- that is exactly why the overlay is
-# declared with an explicit upperdir rather than a bare :O, which podman would
-# discard on stop.
-#
-# macOS VMs are stopped too, and first: a guest holds its entire allocation
-# whether or not anything is building in it, so it is the largest thing on the
-# machine by some way.
+# No workspace: stops every container, the macOS VMs first (a guest holds its full
+# allocation regardless of what it's building), then the machine, which returns CPU and
+# memory to the host.
 #
 #   wk stop                  macOS VMs, containers, then the machine
 #   wk stop --keep-vm        macOS VMs and containers, leave the machine running
@@ -54,13 +36,8 @@ if [ -n "$NAME" ]; then
     load_target "$TARGET"
     [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
 
-    # claude remote-control (`wk claude ... --rc`) is a process started
-    # detached *inside* the target, separate from the environment t_stop below
-    # acts on. container and vm need nothing here -- t_stop suspends the whole
-    # container or guest, taking a live server with it -- but a remote target
-    # has no notion of stopping a single workspace at all (t_stop refuses, a
-    # few lines down), and its "environment" is a checkout on a machine that
-    # keeps running regardless, so this is the one place that stops it there.
+    # claude remote-control runs detached inside the target; t_stop takes it down with
+    # a container or guest, but a remote target's checkout keeps running, so it is killed here.
     if [ "$WK_TARGET_KIND" = remote ]; then
         _rc_sf="$(wk_ws_dir "$NAME")/claude-rc.status"
         _rc_pid=$([ -f "$_rc_sf" ] && status_field "$_rc_sf" pid || true)
@@ -79,10 +56,7 @@ fi
 KEEP_VM=""
 [ "${1:-}" = --keep-vm ] && KEEP_VM=1
 
-# Deliberately before the podman-machine check: if the machine is already
-# stopped, a running macOS VM is *still* holding memory, and exiting early
-# without touching it would report "nothing to do" while 20 GB stayed spoken
-# for.
+# Before the podman-machine check: a macOS VM holds its memory even with the machine stopped.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     . "$WK_ROOT/targets/vm.sh"
     if _tart_bin >/dev/null 2>&1; then
@@ -100,14 +74,11 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     fi
 fi
 
-# Plain podman, not sudo: workspaces are rootless containers owned by the
-# machine's own user now. `sudo podman` looks at root's storage, which is empty
-# -- so this reported "no running containers" while two were running.
+# Plain podman, not sudo: workspaces are rootless, owned by the machine's own user; `sudo podman` looks at root's (empty) storage.
 running=$(_in_machine 'podman ps --filter "name=^wk-" --format "{{.Names}}"' || true)
 if [ -n "$running" ]; then
     printf '%s\n' "$running" | sed 's/^/  stopping /' >&2
-    # A build mid-flight gets SIGTERM and then SIGKILL. ccache and the overlay
-    # are both crash-safe, so the worst case is recompiling the current file.
+    # A build mid-flight gets SIGTERM then SIGKILL: ccache and the overlay are both crash-safe, so the worst case is recompiling the current file.
     _in_machine 'podman stop --time 30 $(podman ps --filter "name=^wk-" --format "{{.Names}}" | tr "\n" " ") >/dev/null'
     info "stopped $(printf '%s\n' "$running" | wc -l | tr -d ' ') container(s)"
 else

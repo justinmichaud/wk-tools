@@ -1,37 +1,17 @@
-# Boot images: where they live, and what makes one publishable.
-#
-# An image is an artifact keyed by its content, not a cache of a fact, so it
-# belongs in the store alongside the base snapshots and the seeded benchmark
-# payloads (CLAUDE.md, "smallest possible state": "could a read recompute
-# this value, or only re-download/rebuild it?" -- only rebuild).
-#
-#   cache/images/<file>       a fetched base, downloaded once, verified by the
-#                             sha256 the spec pins. Re-downloadable, so a cache
-#                             in the honest sense.
-#   images/<id>/disk.img      the built image
-#   images/<id>/manifest      what it is, written LAST -- this is the gate
+# Boot images: where they live, and what makes one publishable. An image
+# is an artifact keyed by its content, not a cache of a fact, so it
+# belongs in the store alongside the base snapshots (CLAUDE.md,
+# "smallest possible state").
+#   cache/images/<file>   a fetched base, verified by the spec's sha256
+#   images/<id>/disk.img  the built image
+#   images/<id>/manifest  what it is, written LAST: the publication gate --
+#                         a build killed anywhere leaves no manifest, which
+#                         every reader ignores and a re-run remakes (rule 2).
 
-#
-# The manifest being written last is the whole publishing protocol, and it is
-# rule 2 (crash-only) applied here: a build killed at any point leaves a
-# directory with no manifest, which every reader ignores and a re-run destroys
-# and remakes. There is no half-built image to recognise, and therefore no
-# repair path to get wrong -- rule 3, wipe over repair.
-
-# Where images live, and it is not simply $WK_STORE on every machine.
-#
-# $WK_STORE is /var/lib/wk on a macOS host: right inside the podman VM, and a
-# path the Mac itself cannot even create. targets/vm.sh and targets/remote.sh
-# already make this same correction for their own host-side state, with the same
-# reasoning -- "right inside the podman VM and wrong on a macOS workstation" --
-# and an image store is host-side state of exactly that kind. `wk sysimage` is a
-# host command that is never forwarded, so on a Mac it was resolving every path
-# below into a directory that does not exist, and the first thing to notice was
-# an import failing with "mkdir: /var/lib/wk: Permission denied".
-#
-# Deterministic rather than "wherever is writable": a store whose location
-# depends on what happens to exist is a store where yesterday's images become
-# invisible.
+# Where images live: not simply $WK_STORE. On a macOS host that's
+# /var/lib/wk right inside the podman VM, a path the Mac cannot create --
+# the same correction targets/vm.sh and targets/remote.sh make for their
+# own host-side state.
 _image_root() {
     if [ "$(uname -s)" = Darwin ] && [ -z "${WK_IN_VM:-}" ]; then
         wk_state_dir
@@ -39,41 +19,26 @@ _image_root() {
         printf '%s' "$WK_STORE"
     fi
 }
-# Every place a build can leave an image, declared in one list.
-#
-# This exists because there is no image store (`wk help`): output lives
-# wherever the builder that made it put it, so "where are the images" stops
-# being "one directory" and becomes a question with as many answers as there are
-# builders. A list that is *declared* is the only kind `wk gc` can search
-# exhaustively -- a search that guesses is a search that misses the newest
-# builder, and the thing it misses is tens of gigabytes.
-#
-# The rule that goes with it: **a new builder adds a line here in the same
-# change that adds the builder.** `wk selftest` checks that every IMG_BUILDER in
-# image/profiles.sh has one, so a builder without a location is a failure rather
-# than a slow leak.
-#
-# Paths, one per line, and it is not an error for one to be absent -- a machine
-# that has never run a given builder simply has none of its output.
+# Every place a build can leave an image, declared in one list: there is no
+# image store (`wk help`), output lives wherever its builder put it, and a
+# list that is *declared* is the only kind `wk gc` can search exhaustively
+# -- a glob that guesses is a glob that misses the newest builder's
+# multi-gigabyte output. **A new builder adds a line here in the same
+# change that adds the builder**; `wk selftest` checks every IMG_BUILDER in
+# image/profiles.sh has one. Paths, one per line; absent is not an error --
+# a machine that never ran a given builder simply has none of its output.
 image_build_locations() {
-    # Each line is annotated with the builder it belongs to, and `wk selftest`
-    # reads those annotations: a builder in image/profiles.sh with no line here
-    # is a failure, not a slow leak.
-    # builder: buildroot -- one tree per profile, and the whole output/ of each
-    # is the expensive part (tens of GB), with the finished images in
-    # output/images.
+    # builder: buildroot -- one tree per profile; output/ is the expensive
+    # part (tens of GB), with the finished images in output/images.
     printf '%s\n' "$WK_STORE/cache/buildroot"
-    # builder: yocto -- DL_DIR and sstate. The images themselves come out inside
-    # the build workspace, which is the workspace's own disk and is reclaimed by
-    # removing the workspace.
+    # builder: yocto -- DL_DIR and sstate. The images come out inside the
+    # build workspace itself, reclaimed by removing the workspace.
     printf '%s\n' "$WK_STORE/cache/yocto"
-    # builder: fetch -- downloaded bases, keyed by checksum. An input
-    # rather than an output, kept deliberately, and listed so that "everywhere a
-    # build leaves bytes" is one list rather than a memory.
+    # builder: fetch -- downloaded bases, keyed by checksum. An input, kept
+    # deliberately, listed so nothing is a memory instead of this list.
     printf '%s\n' "$(image_cache_dir)"
-    # builder: pmos -- the phone images' build output lives on the pmos build
-    # host, not here; gc_pmos prunes it there. Listed for completeness so that
-    # the builder is accounted for rather than silently absent.
+    # builder: pmos -- lives on the pmos build host, not here; gc_pmos
+    # prunes it there. Listed for completeness.
     # builder: none -- the retiring image store itself, while it still exists.
     printf '%s\n' "$(image_store_dir)"
 }
@@ -85,9 +50,7 @@ image_dir()       { echo "$(image_store_dir)/$1"; }
 image_disk()      { echo "$(image_store_dir)/$1/disk.img"; }
 image_manifest()  { echo "$(image_store_dir)/$1/manifest"; }
 
-# Complete = has a manifest. Nothing else is looked at: a reader that inferred
-# completeness from the presence of disk.img would accept a half-written one.
-image_complete() { [ -f "$(image_manifest "$1")" ]; }
+image_complete() { [ -f "$(image_manifest "$1")" ]; }  # not disk.img: half-written
 
 image_ids() {
     local d id
@@ -97,15 +60,12 @@ image_ids() {
         id=$(basename "$d")
         image_complete "$id" && echo "$id"
     done
-    # The loop's status is the last iteration's test, so without this a store
-    # whose newest directory is rubble makes this function "fail".
-    return 0
+    return 0  # else a store whose newest directory is rubble "fails" this
 }
 
-# Directories with no manifest: rubble from an interrupted build. Named
-# separately from image_ids so `wk sysimage ls` can report them as what they are
-# rather than hiding them, and so a re-build can delete them without a
-# heuristic.
+# Directories with no manifest: rubble from an interrupted build, named
+# separately so `wk sysimage ls` can report rather than hide it, and a
+# re-build can delete it without a heuristic.
 image_rubble() {
     local d id
     [ -d "$(image_store_dir)" ] || return 0
@@ -117,8 +77,8 @@ image_rubble() {
     return 0
 }
 
-# Newest complete image of a profile. Ids carry a UTC timestamp, so they sort
-# lexically into build order -- the same property `current_base` relies on.
+# Newest complete image of a profile; ids sort lexically into build order
+# (UTC timestamps), the same property `current_base` relies on.
 image_latest() {
     local profile="$1" id last=''
     for id in $(image_ids | sort); do
@@ -135,9 +95,8 @@ manifest_get() {
     sed -n "s/^$key=//p" "$f" | head -1
 }
 
-# The image really is what the manifest says. Cheap enough to be worth doing
-# whenever an image is about to be written to a device, and far cheaper than
-# discovering it on the far side of a flash.
+# The image is what the manifest says. Cheap to check before every write,
+# far cheaper than discovering it on the far side of a flash.
 image_verify() {
     local id="$1" want have
     image_complete "$id" || { warn "image '$id' has no manifest -- it is rubble from an interrupted build"; return 1; }
@@ -151,10 +110,8 @@ image_verify() {
     return 1
 }
 
-
-# The byte offset of the image's boot partition, from its own partition table.
-# Factored out because three readers now want it and each one computing it again
-# is three chances to disagree about which partition is the boot one.
+# The byte offset of the boot partition, from its own table. Factored
+# out: three readers want it, each a chance to disagree which is the boot one.
 image_boot_offset() {
     local disk="$1" offset
     offset=$(sfdisk -J "$disk" 2>/dev/null \
@@ -163,14 +120,10 @@ image_boot_offset() {
     echo "$offset"
 }
 
-# What the image's kernel command line says its root filesystem is.
-#
-# Read out of the image's own boot partition with mtools at a byte offset -- no
-# mount, no privilege, the same trick the rest of this file relies on. Ubuntu's
-# raspi images keep cmdline.txt under the os_prefix directory the firmware
-# selects, so both places are tried.
-#
-# Prints the raw `root=` value, or nothing if there is no cmdline to read.
+# What the kernel command line says the root filesystem is: read via
+# mtools at a byte offset, no mount, no privilege. Ubuntu's raspi images
+# keep cmdline.txt under the os_prefix directory the firmware selects, so
+# both places are tried. Prints the raw `root=` value, or nothing.
 image_root_spec() {
     local id="$1" disk offset p
     disk=$(image_disk "$id"); [ -f "$disk" ] || return 0
@@ -182,16 +135,10 @@ image_root_spec() {
     return 0
 }
 
-# Which *kind* of device that root spec names.
-#
-# The kind is what can be checked, not the exact path: a card written in one
-# machine's reader is very often booted in another, so `/dev/mmcblk0` on the
-# writer and on the booter are different facts that happen to share a spelling.
-# What does carry across is "this image expects an SD card" versus "this image
-# expects a USB disk", and that is the mistake worth catching -- the firmware
-# boots the kernel from whatever it was given and the kernel then looks for a
-# root that is not there.
-#
+# Which *kind* of device that root spec names, not the exact path: a card
+# written in one reader is often booted in another, and "SD card" vs "USB
+# disk" is the mistake worth catching, since firmware boots the kernel
+# from whatever it was given and the kernel looks for a root that isn't there.
 #   mmc | usb | nvme  -- a specific kind of device
 #   portable          -- LABEL=/UUID=/PARTUUID=, so any device it is written to
 #   network           -- an NFS root; not a local device at all
@@ -208,8 +155,7 @@ image_root_class() {
     esac
 }
 
-# And the same classification for a device we are about to write.
-device_class() {
+device_class() {  # same classification, for a device about to be written
     case "${1:-}" in
         /dev/mmcblk*) echo mmc ;;
         /dev/sd*)     echo usb ;;
@@ -218,16 +164,12 @@ device_class() {
     esac
 }
 
-# Refuse a write whose image cannot boot from the device it is going to.
-#
-# The failure it prevents is expensive in a particular way: nothing here fails,
-# the write succeeds, and the discovery happens on a headless board that loaded
-# a kernel and then could not find `/`.
-#
+# Refuse a write whose image cannot boot from its device: nothing here
+# fails, the write succeeds, and the discovery happens on a headless board
+# that loaded a kernel and then couldn't find `/`.
 #   image_check_root <id> <device> <what-it-is>
-#
-# `portable`, `network` and `unknown` all pass: the first genuinely works
-# anywhere, and the other two are not this check's business to judge.
+# `portable`, `network` and `unknown` all pass: the first works anywhere,
+# the other two aren't this check's business.
 image_check_root() {
     local id="$1" dev="$2" what="$3" spec class want
     spec=$(image_root_spec "$id")
@@ -257,22 +199,14 @@ image_check_root() {
     anyway (for testing the transfer, which is all it can prove)."
 }
 
-# Refuse a write whose image cannot get as far as its kernel.
-#
-# image_check_root above asks whether the kernel will find its root. This asks
-# the question before it: whether the *firmware* will find the kernel. They fail
-# differently and that is why both exist -- a kernel that cannot find its root
-# panics, and with `panic=10` in these images it reboots, so a board is at worst
-# in a loop that stopping the arm ends. Firmware that cannot find a kernel
-# **halts**: no retry, no fall-through to the next BOOT_ORDER entry, no way back
-# over the wire.
-#
-# That is the difference between an unattended lane and one that needs a person
-# in the room, so it is checked here -- where the whole boot filesystem is
-# sitting in a file and can be read in a second -- rather than discovered on a
-# board.
-#
-#
+# Refuse a write whose image cannot get as far as its kernel. image_check_root
+# above asks whether the kernel will find its root; this asks whether the
+# *firmware* will find the kernel. They fail differently: a kernel that
+# can't find its root panics and (with `panic=10` in these images) reboots,
+# so a board is at worst in a loop that stopping the arm ends. Firmware
+# that can't find a kernel **halts** -- no retry, no fall-through, no way
+# back over the wire -- the difference between an unattended lane and one
+# needing a person in the room, so it's checked here rather than on a board.
 #   image_check_boot_files <id> <machine>
 image_check_boot_files() {
     local id="$1" machine="$2" disk offset dtb work out
@@ -308,12 +242,9 @@ $(printf '%s\n' "$out" | sed 's/^/      /')
     holds."
 }
 
-# The device tree a board asks its firmware for. A fact about the machine, and
-# the one thing image_check_boot_files cannot read out of the image. Read off
-# the machine's own conf (MACH_DTB, boot/machines/*.conf) rather than named
-# here a second time; a machine reaching this call is always one whose boot
-# files matter, so a missing MACH_DTB is a conf bug, not a machine that has
-# none by nature -- it dies rather than silently skipping the check.
+# The device tree a board's firmware wants, the one thing
+# image_check_boot_files can't read from the image. From the machine's own
+# conf (MACH_DTB); missing it is a conf bug, so this dies rather than skip.
 image_dtb_for() {
     . "$WK_ROOT/boot/machines.sh"
     machine_load "$1" 2>/dev/null || die "image_dtb_for: unknown machine '$1'"
@@ -321,11 +252,8 @@ image_dtb_for() {
     printf '%s' "$MACH_DTB"
 }
 
-# Every class image_root_class can return needs a word here. `portable` and
-# `network` were missing, so `wk sysimage write --dry-run` described the commonest
-# root of all -- a LABEL=, which is exactly the kind that works anywhere -- as
-# "an unrecognised kind of device", while the check on the very next line was
-# passing it deliberately.
+# Every class image_root_class returns needs a word here, `portable` and
+# `network` included, or the commonest root (LABEL=) reads "unrecognised".
 image_root_word() {
     case "$1" in
         mmc)      echo "an SD card (/dev/mmcblk*)" ;;
@@ -337,36 +265,19 @@ image_root_word() {
     esac
 }
 
-# One lock per mutated resource (rule 4). The image store is one resource: two
-# concurrent builds would race on the same rubble-cleanup and on the shared
-# base download.
-#
-# The general lock (hold_lock, lib/common.sh) rather than a flock of its own.
-# Two reasons, and the first is not a tidiness argument: macOS ships no flock(1)
-# at all, so the one command in here that a Mac can run -- writing a disk
-# attached to a fleet machine -- would be locking
-# nothing, or dying, depending on what was installed. The second is that a
-# flock is held by the file descriptor and therefore by every process that
-# inherits it, which is the property that made it wrong for workspaces too.
+# One lock per mutated resource (rule 4): two concurrent builds would race
+# on the rubble-cleanup and shared base download. The general lock
+# (hold_lock, lib/common.sh), not a flock: macOS ships no flock(1), so the
+# one Mac-runnable command here would lock nothing or die.
+
 # --- images, where the builders left them ------------------------------------
-#
-# The model (`wk help`): a workspace produces an image, and that is the
-# whole of what an image is. It is not imported, catalogued or given a second
-# name -- the workspace that built it already names it. So "which images are
-# there" is answered by looking, now, at the places builders leave output.
-#
-# Declared per builder rather than guessed, for the same reason
-# image_build_locations is: a glob that is a guess is a glob that misses the
-# newest builder, and what it misses is a multi-gigabyte artifact somebody is
-# looking for.
-#
+# The model (`wk help`): a workspace produces an image, not imported,
+# catalogued, or given a second name -- so "which images are there" is
+# answered by looking, now, at the places builders leave output.
 # One line per image, tab-separated: builder, workspace, path, bytes, mtime.
-#
-# The path is host-visible even though the build ran in a container: a container
-# workspace mounts /src/WebKit as an overlay whose upper layer is
-# ws/<name>/changes (targets/container.sh), and a freshly built image is always
-# a new file, so it is always in that upper layer. Nothing needs to exec into
-# the container to find it.
+# Host-visible even in a container: a container workspace mounts
+# /src/WebKit as an overlay whose upper layer is ws/<name>/changes
+# (targets/container.sh), and a freshly built image is always a new file there.
 image_workspace_scan() {
     local ws name f
 
@@ -376,19 +287,16 @@ image_workspace_scan() {
         [ -d "$ws" ] || continue
         name=$(basename "$ws")
 
-        # builder: yocto -- bitbake writes the wic beside the rootfs tarball, in
-        # the cross-toolchain build tree (yocto_image_dir, image/yocto.sh). The
-        # target directory is globbed rather than derived from the profile, so a
-        # workspace whose profile this checkout no longer defines is still found.
+        # builder: yocto -- bitbake writes the wic beside the rootfs tarball
+        # (yocto_image_dir, image/yocto.sh); globbed, not profile-derived.
         for f in "$ws"/changes/WebKitBuild/CrossToolChains/*/build/image/*.wic.xz; do
             [ -f "$f" ] || continue
             printf 'yocto\t%s\t%s\t%s\t%s\n' "$name" "$f" \
                 "$(file_bytes "$f")" "$(_scan_mtime "$f")"
         done
 
-        # builder: buildroot -- genimage assembles the whole card into
-        # output/images, and the profile names which file is the image
-        # (BR_IMAGE). Globbed for the same reason.
+        # builder: buildroot -- genimage assembles into output/images
+        # (BR_IMAGE names the file). Globbed, same reason.
         for f in "$ws"/changes/WebKitBuild/buildroot/*/output/images/*.img; do
             [ -f "$f" ] || continue
             printf 'buildroot\t%s\t%s\t%s\t%s\n' "$name" "$f" \
@@ -398,8 +306,7 @@ image_workspace_scan() {
     return 0
 }
 
-# ISO-8601 UTC, on both platforms: BSD stat takes -f, GNU stat takes -c.
-_scan_mtime() {
+_scan_mtime() {  # ISO-8601 UTC; BSD stat takes -f, GNU stat takes -c.
     local e
     e=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null) || return 0
     date -u -d "@$e" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
@@ -411,11 +318,9 @@ image_lock() {
     hold_lock image-store -w "${WK_LOCK_WAIT:-300}"
 }
 
-# A fetched base image, downloaded once and pinned by sha256.
-#
-# Resumable, because this is 1.3 GB over the workstation's WiFi and an
-# interrupted download that had to start again would make rule 2 expensive
-# rather than free. The checksum is what makes resuming safe.
+# A fetched base image, downloaded once, pinned by sha256. Resumable: this
+# is gigabytes over WiFi, and restarting from scratch would make rule 2
+# expensive; the checksum makes resuming safe.
 image_fetch_base() {
     local url="$1" sha="$2" dest cache
     cache=$(image_cache_dir); mkdir -p "$cache"

@@ -5,58 +5,22 @@
 #   wk bench mac <workspace> [--plan P] [--config C] [--host H]
 #   wk bench mac <workspace> --status | --reset | --preflight
 #
-# The lane is six wk commands (docs/HANDOFF-mac-perf-mode.md, "The flow"), of
-# which five are automatic and one is a person holding the power button. This
-# script is the thing that runs the five, knows which of the six it is on, and
-# survives the reboot in the middle -- because the reboot is the whole reason
-# the flow was a printed list of commands rather than a command.
+# Runs the five automated steps of the six-step flow
+# (docs/HANDOFF-mac-perf-mode.md, "The flow") and resumes across the reboot
+# in the middle.
 #
-# WHY IT RUNS HERE AND NOT ON THE MAC
+# Refuses to run *on* the Mac it measures: phase 4 reboots that machine, so a
+# driver living there would become state on the machine being measured, the
+# same mistake as giving the benchmark install a checkout. The driver runs
+# elsewhere and reaches in over ssh once per phase.
 #
-# Every phase acts *on* tolken, so the obvious place for the driver is tolken.
-# It cannot live there: phase 4 reboots the machine into a different macOS
-# install, and a driver running in host mode is a process on a volume that is
-# no longer running. It would have to re-establish itself as a launchd job in
-# the other install, in which case the state lives on the machine being
-# measured and a benchmark install grows a scheduler -- which is the same
-# mistake as giving it a checkout.
+# Every phase asserts the mode it needs from /etc/wk-image before acting, and
+# bench mode has its own ssh alias and HostKeyAlias (`tolken-bench`,
+# dotfiles/ssh/config), so a phase aimed at the wrong install fails on the
+# host key instead of running against the wrong computer.
 #
-# So the driver runs on any *other* machine, holds the state, and reaches in
-# over ssh once per phase. The reboot then costs it nothing: the connection was
-# never meant to survive, only the state file was. That is also why this is the
-# one wk verb about the Mac that refuses to run *on* the Mac.
-#
-# WHAT IS AUTOMATED, AND WHAT CANNOT BE
-#
-# Apple Silicon takes its boot volume from a LocalPolicy in the machine's own
-# secure storage, changed only by an authenticated user action -- so choosing
-# the benchmark volume is a person at the keyboard, once per run, and no
-# argument to this script can stand in for them (boot/mac-volume.sh has the
-# long version). Everything either side of that is here, including the two
-# things that were previously left to the operator's memory and are the easiest
-# to get wrong:
-#
-#   * waiting for the right mode. "Is it back?" is not the question -- the
-#     machine answers ssh in *both* modes, and a `wk bench staged` aimed at
-#     host mode is refused, while a `wk build` aimed at bench mode would start
-#     turning the benchmark install into a workstation. So the wait is for a
-#     mode, established from /etc/wk-image, and every phase asserts the mode it
-#     needs before it does anything.
-#
-#   * not confusing the two installs. One address, two macOS installs, two host
-#     keys: see the `tolken-bench` stanza in dotfiles/ssh/config. Bench mode is
-#     reached by its own ssh alias with its own HostKeyAlias, so a phase aimed
-#     at the wrong mode fails on the host key instead of succeeding against the
-#     wrong computer.
-#
-# RESUMABILITY
-#
-# The state file records the phase reached and the boot generation it was
-# reached in, so re-running continues rather than restarting: an interrupted
-# lane is resumed by repeating the command, and a lane whose build is already
-# staged does not rebuild. `--status` reads it without touching the machine and
-# `--reset` forgets it. Nothing here is idempotent by accident -- a phase that
-# would repeat expensive work checks for the work first.
+# The state file records the phase reached; `--status` reads it without
+# touching the machine, `--reset` forgets it.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -64,30 +28,21 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/boot/machines.sh"
 
-# The fleet name of the machine, and the profile its bench install must claim.
-# Both come from boot/machines/mbp.conf rather than being repeated here, so a
-# renamed volume or profile stays a one-line edit in the machine's conf.
-# Defaulting to mbp (not requiring --machine every time) is deliberate, unlike
-# HOST/BENCH_HOST below: there is one real Mac to bench, and benchvm is
-# explicitly the rehearsal you ask for by name.
+# The fleet name of the machine to bench; boot/machines/mbp.conf owns its
+# profile. Defaults to mbp, unlike HOST/BENCH_HOST below: there is one real
+# Mac to bench, and benchvm is the rehearsal you ask for by name.
 MACHINE="${WK_MAC_MACHINE:-mbp}"  # static
 
-# Which shape of bench mode this machine has, read from its own conf rather
-# than decided here -- boot/machines.sh is the registry and duplicating its
-# answer is how the two drift.
+# Which shape of bench mode this machine has, read from its own conf
+# (boot/machines.sh is the registry).
 #
-#   volume  (mbp, driver mac-volume)  a second macOS install on this Mac.
-#           Bench mode is reached over ssh at the same address with a different
-#           host key, hence the tolken-bench alias.
-#   guest   (benchvm, driver mac-guest) a macOS VM standing in for one. Bench
-#           mode is reached *through the host*, because the guest's address is
-#           assigned at boot and only the vm driver knows it -- so commands go
-#           `wk enter <guest> -- ...` from host mode rather than over a second
-#           ssh alias, and the mode is read from `wk boot <machine> --status`
-#           for the same reason.
+#   volume  (mbp, driver mac-volume)  a second macOS install, reached over
+#           ssh at the same address with a different host key.
+#   guest   (benchvm, driver mac-guest) a macOS VM, reached *through the
+#           host* (`wk enter <guest> -- ...`) because its address is
+#           assigned at boot and known only to the vm driver.
 #
-# The guest shape is the rehearsal: it proves every phase except the number,
-# and it needs nobody at the keyboard.
+# The guest shape is the rehearsal: it proves every phase but the number.
 lane_shape() {
     local d
     d=$( . "$WK_ROOT/boot/machines.sh" >/dev/null 2>&1
@@ -102,7 +57,6 @@ lane_shape() {
 }
 SHAPE=""
 
-# The guest's name, for the `wk enter` that reaches it. Same source as above.
 lane_guest() {
     ( . "$WK_ROOT/boot/machines.sh" >/dev/null 2>&1
       machine_load "$MACHINE" >/dev/null 2>&1
@@ -110,27 +64,16 @@ lane_guest() {
       printf '%s' "${MACH_GUEST:-}" )
 }
 
-# ssh destinations. Two, because there are two installs -- see the header.
-# Default to MACHINE's own conf (MACH_SSH / MACH_BENCH_SSH,
-# boot/machines/<machine>.conf) once MACHINE is final (see below, after
-# argument parsing); --host/--bench-host or WK_MAC_SSH/WK_MAC_BENCH_SSH still
-# win outright.
+# ssh destinations, one per install. Default to MACHINE's own conf (MACH_SSH /
+# MACH_BENCH_SSH, boot/machines/<machine>.conf) once MACHINE is final (below,
+# after argument parsing); --host/--bench-host or WK_MAC_SSH/WK_MAC_BENCH_SSH
+# still win outright.
 HOST="${WK_MAC_SSH:-}"
 BENCH_HOST="${WK_MAC_BENCH_SSH:-}"
 
-# Where this repository lives on the Mac -- and there are *two* answers, which
-# is the whole reason this is not one variable.
-#
-# The two installs have different users (`justinmichaud` on the host today,
-# `bench` on the benchmark install -- docs/HANDOFF-reprovision.md), so they have
-# different home directories and therefore different wk-tools paths. Discovering
-# the path in host mode and reusing it in bench mode would have sent every
-# post-reboot phase to `/Users/justinmichaud/Development/wk-tools` on a machine
-# where that user does not exist: `wk bench staged` would have failed as "no
-# such file or directory", after the reboot, with the operator already up.
-#
-# Both discovered rather than assumed, and the bench one only once bench mode is
-# actually up -- there is nothing to ask before then.
+# Where this repository lives on the Mac. Two answers: the host and bench
+# installs have different users (docs/HANDOFF-reprovision.md) and so
+# different home directories, discovered rather than assumed.
 TOOLS="${WK_MAC_TOOLS:-}"
 BENCH_TOOLS="${WK_MAC_BENCH_TOOLS:-}"
 
@@ -141,22 +84,15 @@ PAYLOAD=""
 DRY=""
 WS=""
 
-# The first run after a stage is the slow one, and the reason is recorded in
-# docs/HANDOFF-mac-perf-mode.md: an identical JetStream2.2 run timed out at
-# 900 s and then finished in about five minutes, with a first-launch scan of
-# 1.5 GB of freshly copied binaries the obvious suspect. So the default here is
-# deliberately generous rather than tuned -- a lane that dies on the timeout
-# costs a whole trip to the keyboard, and an over-long timeout costs nothing on
-# a healthy run.
+# Generous, not tuned: docs/HANDOFF-mac-perf-mode.md, "give the first run
+# after a stage a generous --timeout".
 TIMEOUT="${WK_MAC_TIMEOUT:-2700}"
 
-# How long to wait for a person. Long, because the wait is somebody walking to
-# the machine, shutting it down, holding the power button and authenticating --
-# and because the alternative to waiting is making them re-run the command.
+# Long: the wait is somebody walking to the machine, shutting it down, holding
+# the power button and authenticating.
 BOOT_WAIT="${WK_MAC_BOOT_WAIT:-1800}"
 
-# How long to wait for a reboot that needs nobody: back into host mode, which
-# is a plain reboot the machine does by itself.
+# A plain reboot the machine does by itself, back into host mode.
 BACK_WAIT="${WK_MAC_BACK_WAIT:-600}"
 
 usage() {
@@ -183,33 +119,24 @@ EOF
 
 # --- state -------------------------------------------------------------------
 #
-# key=value and nothing else. A `#` line in a manifest heredoc is not a
-# comment, it is prose written into the record where a reader greps for `^key=`
-# and finds nothing -- which is how three lines of explanation ended up inside
-# a real manifest. The explanation belongs in the shell.
+# key=value and nothing else: a script greps this file for `^key=`, so a
+# comment written into it would be silent prose, not a comment.
 
 lane_state_dir() { echo "$(wk_state_dir)/mac-lane"; }
-# Keyed by machine as well as host, and that is not cosmetic: `mbp` and
-# `benchvm` are two different machines sharing one ssh destination, so a single
-# ${HOST}.state made the rehearsal and the real run write the *same* file.
-# Having just finished a benchvm lane, an `mbp` lane would have read
-# `done_through=collect` and skipped build, stage, arm and run -- reporting a
-# complete lane for a benchmark volume it has never touched.
+# Keyed by machine as well as host: mbp and benchvm can share one ssh
+# destination, so keying by host alone would let a finished benchvm lane's
+# state read as a complete mbp lane against a volume it never touched.
 lane_state()     { echo "$(lane_state_dir)/${HOST}-${MACHINE}.state"; }
 
-# `|| true` is load-bearing, not defensive habit. Under `set -o pipefail` a
-# `sed` on a state file that does not exist yet fails the whole pipeline, and
-# `set -e` then kills the script at the *first* read -- silently, since the
-# failure is inside a command substitution being assigned, which is every
-# fresh lane. A missing state file is the normal starting state, so it has to
-# read as empty rather than as an error.
+# `|| true` is load-bearing: under `set -o pipefail`, `sed` on a state file
+# that does not exist yet fails the pipeline, and `set -e` kills the script at
+# the first read of any fresh lane. A missing state file is the normal
+# starting state and must read as empty, not as an error.
 state_get() { sed -n "s/^$1=//p" "$(lane_state)" 2>/dev/null | tail -1 || true; }
 
 state_set() {
-    # A dry run must not move the lane. Without this it recorded `done_through`
-    # as it walked the phases, so the *next* real run skipped build and stage
-    # and went looking for products nobody had staged -- a dry run that changes
-    # what a later real run does is worse than no dry run.
+    # A dry run must not move the lane's recorded progress, or the next real
+    # run would skip phases whose work a dry run never did.
     [ -n "$DRY" ] && return 0
     local f; f="$(lane_state)"
     ensure_dir "$(lane_state_dir)" >/dev/null
@@ -222,26 +149,21 @@ state_set() {
 
 # --- reaching the machine ----------------------------------------------------
 
-# `mac_ssh` (boot/machines.sh) is shared with bench/mac-ab.sh's `mac` -- the
-# two are one lane in two files, and a ConnectTimeout that meant something
-# different in each half was exactly this kind of bug waiting to be measured.
+# Shared with bench/mac-ab.sh's `mac` -- one ssh wrapper for both halves of
+# the lane.
 ssh_to() {
     mac_ssh "$@"
 }
 
-# A wk command over there, in a named mode. The mode is not decoration: it
-# selects the ssh alias, and therefore the host key, so a command that would
-# have run against the wrong install fails to connect instead.
+# A wk command over there, in a named mode: the mode selects the ssh alias
+# and therefore the host key, so a command aimed at the wrong install fails
+# to connect instead of running against the wrong computer.
 rwk() {
     local mode="$1"; shift
     local dest cmd tools
-    # A guest's bench mode is reached *through* host mode, not beside it: the
-    # guest's address is assigned at boot and only the vm driver knows it, so
-    # there is no second ssh alias to aim at. `wk enter <guest> bash -lc ...`
-    # is the form -- `wk enter` execs its argument directly rather than through
-    # a shell (so `cd x && y` fails as "No such file or directory"), and `wk`
-    # is not on the guest's PATH (so a bare `wk` fails as "command not found").
-    # Both established by trying them.
+    # A guest's bench mode is reached *through* host mode (no second ssh
+    # alias). `wk enter` execs its argument directly rather than through a
+    # shell, so a bare `cd x && y` fails, and `wk` is not on the guest's PATH.
     if [ "$mode" = bench ] && [ "$SHAPE" = guest ]; then
         local guest inner
         guest=$(lane_guest)
@@ -262,7 +184,7 @@ rwk() {
         *) die "internal: unknown mode '$mode'" ;;
     esac
     # Bench mode's path cannot be known before bench mode exists, so it is
-    # discovered at first use rather than in the preflight.
+    # discovered at first use, not in the preflight.
     if [ -z "$tools" ]; then
         if [ -n "$DRY" ]; then
             tools="<${mode}-mode wk-tools, discovered at first use>"
@@ -289,12 +211,8 @@ rwk() {
 }
 
 # A raw shell command in bench mode, for the questions that are not wk verbs.
-#
 # rwk always prefixes `./wk`, so `rwk bench sh -c ...` becomes `wk sh -c ...`,
-# which is not a command -- the pre-run screen check silently degraded to its
-# "could not ask" branch because of exactly that. A separate helper rather than
-# a flag on rwk, because the two have different shapes: this one takes a script,
-# not an argument list.
+# not a command; this takes a script rather than an argument list instead.
 rbench_sh() {
     local script="$1" guest
     if [ "$SHAPE" = guest ]; then
@@ -306,18 +224,13 @@ rbench_sh() {
     fi
 }
 
-# Which mode is the machine in *right now*? The marker file is the only
-# answer -- `wk bench staged` refuses without it and is right to, because
-# nothing else distinguishes the two installs from the outside. Prints
-# host | bench | unreachable, and never fails, so callers can branch.
+# Which mode is the machine in *right now*? Prints host | bench | unreachable,
+# and never fails, so callers can branch.
 probe_mode() {
     local out
-    # For a guest, ask its driver rather than sniffing /etc/wk-image over an
-    # ssh alias that does not exist. Note the parse order: the "off" answer is
-    # `benchvm: unreachable over ssh in host mode`, which contains the words
-    # "host mode" -- so bench has to be tested first or a stopped guest reads
-    # as host mode by accident. And for a guest shape, "not in bench mode" *is*
-    # host mode: tolken itself is always there to build and stage on.
+    # For a guest, ask its driver: there is no ssh alias to sniff
+    # /etc/wk-image over. Test bench first -- the "off" answer contains the
+    # words "host mode" and would misread a stopped guest as host mode.
     if [ "$SHAPE" = guest ]; then
         out=$(rwk host boot "$MACHINE" --status 2>&1) || true
         case "$out" in
@@ -335,9 +248,8 @@ probe_mode() {
         esac
         return 0
     fi
-    # Host mode's key did not match or did not answer. In bench mode the
-    # address is the same and only the key differs, so try that identity
-    # before concluding the machine is off.
+    # Host mode's key did not match or did not answer; try the bench identity
+    # at the same address before concluding the machine is off.
     if out=$(ssh_to "$BENCH_HOST" 'sed -n "s/^id=//p" /etc/wk-image 2>/dev/null || true' 2>/dev/null); then
         [ -n "$out" ] && { echo "bench:$out"; return 0; }
         echo bench-unmarked; return 0
@@ -345,10 +257,8 @@ probe_mode() {
     echo unreachable
 }
 
-# The machine's own idea of when it booted, which is what makes "has it
-# rebooted yet" answerable rather than guessed. kern.boottime does for macOS
-# what Linux's random boot_id does, and is a clock reading as well
-# (boot/mac-volume.sh).
+# kern.boottime is what makes "has it rebooted yet" answerable rather than
+# guessed (boot/mac-volume.sh).
 probe_boottime() {
     local dest="${1:-$HOST}"
     ssh_to "$dest" 'sysctl -n kern.boottime' 2>/dev/null | sed -n 's/.*sec = \([0-9]*\).*/\1/p'
@@ -356,10 +266,8 @@ probe_boottime() {
 
 # --- preflight ---------------------------------------------------------------
 #
-# Every one of these was either a documented failure or a refusal already built
-# into `wk bench staged`, and the point of asking now is that the expensive ones
-# are only discoverable *after* the reboot. A lane that is going to fail on a
-# missing python should fail before somebody walks to the machine.
+# These matter now because the expensive failures are only discoverable
+# *after* the reboot.
 
 # $1 is the mode, because the two installs are different machines as far as
 # paths are concerned. Sets TOOLS or BENCH_TOOLS and leaves the other alone.
@@ -372,11 +280,7 @@ discover_tools() {
     esac
     [ -n "$cur" ] && return 0
     for c in Development/wk-tools wk-tools wk/tools Development/wk/tools; do
-        # $HOME stays unexpanded on purpose: it belongs to the remote shell,
-        # and resolving it here would resolve this machine's home -- which is
-        # the same mistake, one level down, as sharing one path between the two
-        # installs. `pwd` on the far side turns whichever spelling matched into
-        # an absolute path, so every later phase quotes one known-good directory.
+        # $HOME stays unexpanded: it belongs to the remote shell, not this one.
         found=$(ssh_to "$dest" "cd \$HOME/$c 2>/dev/null && test -x ./wk && pwd" 2>/dev/null) || continue
         [ -n "$found" ] && break
     done
@@ -423,8 +327,7 @@ preflight() {
     log "  wk-tools: $TOOLS"
 
     # The tree hash, not just the sha: a stale copy of this repository on the
-    # far side fails as `unknown option` from a command that works perfectly
-    # here, which cmd/status exists partly to catch.
+    # far side fails as `unknown option` from a command that works fine here.
     local there here
     there=$(rwk host version --tree 2>/dev/null || true)
     here=$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)
@@ -434,10 +337,9 @@ preflight() {
         log  "  (not fatal: the lane only uses long-standing verbs)"
     fi
 
-    # The volume. `wk boot mbp --status` is the authority and already
-    # distinguishes "mounted" from "mounted and actually a macOS system
-    # volume" -- an empty formatted disk with the right name mounts perfectly
-    # and boots nothing.
+    # `wk boot mbp --status` distinguishes "mounted" from "mounted and
+    # actually a macOS system volume": an empty formatted disk with the right
+    # name mounts perfectly and boots nothing.
     local bootstat rc=0
     bootstat=$(rwk host boot "$MACHINE" --status 2>&1) || rc=$?
     printf '%s\n' "$bootstat" | sed 's/^/    /' >&2
@@ -445,29 +347,17 @@ preflight() {
         warn "  wk boot $MACHINE --status exited $rc"
         fail=1
     fi
-    # Matched on the *positive* signal, not on a list of ways it can be absent:
-    # grepping for "not attached" and friends passes a status of
-    # `benchmark_volume=WK Bench (not attached)` if that exact spelling is not
-    # in the list, which is the failure the preflight exists to prevent.
-    # boot/mac-volume.sh emits `(attached at <path>)` and nothing else means
-    # attached, so a new spelling on the driver's side fails closed instead.
-    # `[[:space:]]*` matters: boot/mac-volume.sh indents these lines by two
-    # spaces under the machine's own heading, so a `^`-anchored match never
-    # fires against real output.
+    # Matched on the positive signal (`(attached at `, the only thing
+    # boot/mac-volume.sh emits for "attached"), not a list of ways it can be
+    # absent -- a new "not attached" spelling would otherwise pass.
     if [ "$SHAPE" = guest ]; then
-        # Nothing to check: the guest either exists and carries a marker or
-        # b_arm refuses, and that refusal is better than a copy of it here.
-        # `--status` above already printed the guest and its state.
         info "preflight: ready (guest rehearsal -- proves every phase but the number)"
         return 0
     fi
     if ! printf '%s\n' "$bootstat" | grep -qE '^[[:space:]]*benchmark_volume=.*\(attached at '; then
-        # "not attached" from the driver covers two different states, because
-        # mac_volume_present means mounted *and* a macOS system volume. Saying
-        # only "not there" about a volume that is sitting mounted in /Volumes is
-        # how somebody goes looking for a disk problem instead of running the
-        # install. An empty 'WK Bench' with no macOS on it yet is exactly that
-        # state.
+        # "not attached" covers both mounted-but-not-yet-macOS and genuinely
+        # absent -- distinguished below so nobody chases a disk problem when
+        # the volume is sitting right there in /Volumes.
         warn "  the benchmark volume is not usable yet: either absent, or present"
         warn "  but not a macOS system volume (an empty one mounts fine and boots nothing)"
         log  "  it is a second macOS install, made *from* that machine, named '$(printf '%s\n' "$bootstat" | sed -n 's/^[[:space:]]*benchmark_volume=\([^(]*\)(.*/\1/p' | sed 's/ *$//')'."
@@ -483,17 +373,13 @@ preflight() {
 
 # --- waiting for a mode ------------------------------------------------------
 #
-# The one place the lane is allowed to block for a long time. It polls a mode
-# rather than reachability, because both installs answer ssh and only one of
-# them is the one that was asked for.
+# The one place the lane blocks for a long time. Polls a mode, not
+# reachability: both installs answer ssh.
 
 wait_for_mode() {
     local want="$1" limit="$2" why="$3"
     local start now mode last=""
-    # The wait is the longest thing the lane does and a dry run must not do it:
-    # `--dry-run` sat here polling for a reboot that was never going to happen,
-    # which looked exactly like a hang and is the opposite of what the flag is
-    # for.
+    # A dry run must not block here waiting for a reboot that never happens.
     if [ -n "$DRY" ]; then
         log "  would wait up to ${limit}s for $want mode ($why)"
         return 0
@@ -518,33 +404,26 @@ wait_for_mode() {
 
 # --- the phases --------------------------------------------------------------
 
-# The build workspace is a macOS guest, and neither `wk build` nor
-# `wk bench stage` will start it for you -- `wk build` refuses outright with
-# "'<ws>' is not running (wk vm start <ws>)", and the stage reaches into it over
-# its own ssh. So starting it is part of both phases rather than an assumption
-# either of them makes, which also makes a *resumed* lane work: a lane picked up
-# at the stage has a stopped build guest, and staging out of a stopped guest is
-# the same failure one phase later.
-#
-# Idempotent by the vm driver's own contract: t_start on a running guest returns
-# its address and succeeds.
+# The build workspace is a macOS guest that neither `wk build` nor
+# `wk bench stage` will start for you (`wk build` refuses outright; the stage
+# reaches into it over its own ssh). Starting it here, in both phases, also
+# makes a resumed lane work: a lane picked up at the stage has a stopped build
+# guest. Idempotent by the vm driver's own contract: starting a running guest
+# just returns its address.
 #
 # Two running macOS VMs is the hard ceiling Virtualization.framework enforces
-# (a third fails with VZErrorDomain code 6), and this lane needs exactly two at
-# its widest -- the build guest and the bench guest, both up during the stage.
-# That is why the build guest is not left running past the collect.
-# Stopping is idempotent and never fatal: this runs on the failure path too,
-# where the interesting error is the one that got us here, not a tidy-up.
+# (a third fails with VZErrorDomain code 6), and this lane needs exactly two
+# at its widest -- the build guest and the bench guest, both up during the
+# stage.
 stop_build_guest() {
     [ -n "$DRY" ] && { log "  would stop the build guest '$WS'"; return 0; }
     info "  stopping the build guest '$WS'"
     rwk host vm stop "$WS" >/dev/null 2>&1 || true
 }
 
-# Registered once the guest has been started, so a lane that dies at any later
-# phase does not leave a macOS VM running on somebody's workstation. wk_atexit
-# is lib/common.sh's single EXIT trap -- a second `trap ... EXIT` here would
-# silently replace whatever it had registered.
+# Registered once the guest has started, so a lane that dies at a later phase
+# does not leave a macOS VM running. wk_atexit is lib/common.sh's single EXIT
+# trap; a second `trap ... EXIT` here would silently replace it.
 _BUILD_GUEST_STARTED=""
 _lane_cleanup() {
     [ -n "$_BUILD_GUEST_STARTED" ] || return 0
@@ -553,12 +432,10 @@ _lane_cleanup() {
 }
 
 ensure_build_guest() {
-    # Both shapes. A "guest only" guard here would confuse the two guests in
-    # play: the *bench* target differs by shape -- a VM for the rehearsal, a
-    # volume for the real thing -- but the *build* always happens in a macOS vm
-    # workspace on tolken, because that is where builds belong and the
-    # benchmark install must never gain a toolchain. So the build guest needs
-    # starting either way.
+    # Needed for both shapes: the *bench* target differs by shape (a VM for
+    # the rehearsal, a volume for the real thing), but the build always
+    # happens in a macOS vm workspace, because the benchmark install must
+    # never gain a toolchain.
     rwk host vm start "$WS" >/dev/null 2>&1 || rwk host vm start "$WS"
     if [ -z "$_BUILD_GUEST_STARTED" ]; then
         _BUILD_GUEST_STARTED=1
@@ -569,34 +446,15 @@ ensure_build_guest() {
 phase_build() {
     info "build: $CONFIG in the macOS guest"
     ensure_build_guest
-    # --detach, because the build outlives this connection by design: a link
-    # that drops during a 40-minute build must not take the build with it, and
-    # the state to poll is on the machine that is doing the work.
-    # Foreground, and --detach only on request. That is the opposite of the
-    # obvious choice, so the reason is worth recording:
-    #
-    # `wk build <vm-workspace> <config> --detach` does not work on a macOS host.
-    # It returns 0, prints a pid, and the pid is gone immediately having built
-    # nothing. The cause is the store: on Darwin `WK_STORE` is `/var/lib/wk` by
-    # design, because that is the path *inside* the podman VM and container
-    # commands are forwarded into it -- but a vm workspace is a Tart guest, so
-    # `wk build` is not forwarded, runs on the host, and `/var/lib/wk` does not
-    # exist there. detach_run's status file cannot be written and the wrapper
-    # dies. `wk status` and `wk logs` still answer, because the vm driver reads
-    # those from the guest, which is what made this look like a working build.
-    #
-    #
-    # Two failure modes, and the second is the dangerous one: polling
-    # `wk status` straight after a detach reads the *previous* build's `ok`, so
-    # the lane reports success in seconds, stages a days-old build, and
-    # publishes a number for a tree nobody just compiled -- with the previous
-    # build's duration printed beside it.
-    #
-    # In the foreground the exit status is the build's own, there is nothing to
-    # poll and nothing stale to believe, and the output streams where it can be
-    # read. The connection has to survive the build, which is what the
-    # ServerAliveInterval on this host's ssh entry is for -- and the lane is
-    # resumable, so a dropped one costs a rebuild rather than the run.
+    # Foreground by default: `wk build <vm-workspace> <config> --detach`
+    # does not work on a macOS host, because WK_STORE is `/var/lib/wk` on
+    # Darwin (the path *inside* the podman VM) but a vm workspace is a Tart
+    # guest running on the host, where that path does not exist --
+    # detach_run's status file cannot be written and the wrapper dies right
+    # after printing a pid, while `wk status`/`wk logs` keep answering from
+    # the guest, masking the failure. Polling `wk status` right after a
+    # detach can also read the *previous* build's `ok`, reporting success
+    # before the new build has even started.
     if [ -n "${WK_MAC_DETACH:-}" ]; then
         local before
         before=$(rwk host status "$WS" 2>&1 || true)
@@ -635,42 +493,24 @@ phase_stage() {
     [ -n "$PAYLOAD" ] && args+=(--payload "$PAYLOAD")
     rwk host "${args[@]}"
 
-    # The build guest has done its job. Stopping it here rather than later is
-    # the difference between a machine with one VM on it and a machine with a
-    # spare macOS guest burning cores next to a benchmark.
-    #
-    # Stopped for both shapes. "The volume shape reboots and takes every
-    # host-side guest with it" is true only if the lane reaches the reboot: one
-    # that dies at the stage leaves `bench-build` running for as long as it
-    # takes a person to notice, because nothing here would.
+    # Stopped here, for both shapes, rather than left for the reboot to clear:
+    # a lane that dies before reaching the reboot would otherwise leave
+    # `bench-build` running until a person notices.
     stop_build_guest
 }
 
 phase_arm() {
     info "arm: recording the intent and printing the ritual"
-    # Prints the ritual and reboots nothing. The intent is recorded over there
-    # because that is where the machine's own boot identity is readable.
     rwk host boot "$MACHINE" || true
 }
 
-# Put the machine where a person can act on it, then tell them what to do --
-# on *this* screen, which is the one they are looking at.
+# Shut down rather than reboot: the startup manager is reached by holding the
+# power button *from off*, and a reboot lands back in whatever the sticky
+# default is -- exactly wrong when the point is to choose.
 #
-# The alternative is to print a ritual into a terminal on the machine that is
-# about to be rebooted out from under it and then wait -- which asks somebody to
-# read instructions on a screen that is going away, and to remember them across
-# a shutdown. Shutting the machine down *first* means the
-# only instruction left is which disk to pick, and it is on the driving machine
-# where it stays readable.
-#
-# Shut down rather than reboot, because the startup manager is reached by
-# holding the power button *from off*. A reboot would land back in whatever the
-# sticky default is, which is exactly the wrong thing when the point is to
-# choose.
-#
-# osascript before sudo: a logged-in user can shut their own Mac down without a
-# password, and the host install has no passwordless sudo. The bench install
-# does, so the sudo path covers the other direction.
+# osascript before sudo: a logged-in user can shut their own Mac down without
+# a password, and the host install has no passwordless sudo. The bench
+# install does, so the sudo path covers the other direction.
 mac_power_off() {
     local mode="$1" dest
     case "$mode" in
@@ -706,8 +546,7 @@ EOF
 
 phase_handoff() {
     [ -n "$DRY" ] && return 0
-    # The whole point of the guest shape: arming it started it, so there is
-    # nobody to interrupt and nothing to say.
+    # Arming the guest started it, so there is nobody to interrupt.
     [ "$SHAPE" = guest ] && return 0
     cat >&2 <<EOF
 
@@ -739,54 +578,31 @@ phase_run() {
     local args=(bench staged --plan "$PLAN" --timeout "$TIMEOUT")
     [ -n "$COUNT" ] && args+=(--count "$COUNT")
 
-    # Nothing else may be running on the machine while it is being measured, and
-    # for the guest shape that is not automatic: the build guest was started for
-    # the build and the stage, and leaving it up means a second macOS VM
-    # competing for the same CPUs *during the measurement*. Nothing reports it;
-    # it is two windows on a screen nobody is watching.
-    #
-    # Not for the volume shape: there the machine reboots into the bench install,
-    # so every guest on the host side is gone by construction.
+    # For the guest shape, nothing else may be running on the machine while it
+    # is measured, and that is not automatic: the build guest is still up from
+    # the stage and would otherwise compete for the same CPUs during the run.
+    # Not needed for the volume shape -- the reboot into the bench install
+    # clears every host-side guest by construction.
     if [ "$SHAPE" = guest ]; then
         info "  stopping the build guest so nothing shares the CPU with the run"
         rwk host vm stop "$WS" >/dev/null 2>&1 || warn "  could not stop '$WS'; the run would share the machine"
     fi
 
     if [ "$SHAPE" = volume ]; then
-        # Quiet the machine first. `wk bench staged` checks quietness and
-        # refuses without it -- it does not do the quieting, and saying so in
-        # its preflight ("'wk quiesce on' first") makes that the caller's job.
+        # `wk bench staged` checks quietness and refuses without it, but does
+        # not do the quieting itself -- that is the caller's job.
         info "  quiescing the bench install"
         rwk bench quiesce on || warn "  quiesce reported a problem; the run will judge it"
     else
-        # The guest needs --force, and the interesting part is what has to be
-        # true before forcing is honest.
-        #
-        # `wk quiesce` cannot run here at all: the bench guest is also a
-        # workspace (`wk new` made it), and quiesce refuses in a workspace --
-        # the only machine in the fleet that is both. And one quiet check cannot
-        # pass in a guest regardless: `softwareupdate --schedule off` reports
-        # "on" afterwards no matter what is written to AutomaticCheckEnabled.
-        # That one really is a guest quirk (docs/HANDOFF-mac-perf-mode.md): it
-        # persists with Setup Assistant dismissed, so it is not a pane holding
-        # the decision open.
-        #
-        # But --force is all-or-nothing: it forces *every* preflight failure,
-        # so using it for the benign one also forces past a real one -- an
-        # unanswered Setup Assistant owning the front window, MiniBrowser never
-        # becoming active, and run-benchmark timing out at exit 124 with only
-        # the update-schedule complaint on screen to explain it.
-        #
-        # So the lane asserts the dangerous condition itself before forcing the
-        # harmless one. `wk bench staged` now has a "the screen is free" check
-        # of its own; this is the same question asked *before* --force can hide
-        # the answer.
-        # Asked through lib/quiet.sh's screen_blocker, the same function
-        # `wk bench staged` uses -- not a second list of apps here. A narrower
-        # copy of this check is what lets `Software Update` through after
-        # `Setup Assistant` is dismissed: the runner fails it correctly and this
-        # forces past it, because "the dangerous condition" is spelled out in
-        # two places and only one of them is right.
+        # `wk quiesce` cannot run in a guest workspace, and one check can
+        # never pass there regardless (docs/HANDOFF-mac-perf-mode.md), so the
+        # guest run always needs --force. But --force forces every preflight
+        # failure, not just the harmless one, so it would also hide a real
+        # one -- an unanswered Setup Assistant, or MiniBrowser never becoming
+        # active, both surfacing only as run-benchmark timing out at exit
+        # 124. So the lane checks the dangerous condition itself first,
+        # through lib/quiet.sh's screen_blocker -- the same check
+        # `wk bench staged` runs, not a second copy of it.
         local front
         front=$(rbench_sh 'cd ~/wk-tools && . lib/common.sh && . lib/quiet.sh && screen_blocker' 2>/dev/null | tr -d "\r") || front="?"
         if [ -n "$front" ] && [ "$front" != "?" ]; then
@@ -812,17 +628,15 @@ phase_run() {
 
 phase_back() {
     if [ "$SHAPE" = guest ]; then
-        # Stopping a guest is a host-mode act, and for a guest leaving the role
-        # *is* leaving the machine -- there is nothing to reboot.
+        # For a guest, leaving the role *is* leaving the machine -- there is
+        # nothing to reboot.
         info "back: stopping the guest; the result stays in it"
         rwk host boot "$MACHINE" --back || true
         return 0
     fi
-    # Not "a plain reboot returns it to host mode" -- that assumption is false
-    # after `startosinstall`, which makes the benchmark volume the *sticky*
-    # default. A reboot from bench mode then lands back in bench mode, and the
-    # lane waits for a host mode that is never coming. Shut down and say which
-    # disk instead: correct whichever way the default happens to point.
+    # A plain reboot does not return this to host mode: `startosinstall` makes
+    # the benchmark volume the *sticky* default, so a reboot from bench mode
+    # lands back in bench mode. Shut down and say which disk instead.
     info "back: shutting down; the result stays on the volume"
     rwk bench boot "$MACHINE" --back >/dev/null 2>&1 || true
     mac_power_off bench
@@ -831,9 +645,8 @@ phase_back() {
 
 phase_collect() {
     if [ "$SHAPE" = guest ]; then
-        # From inside the guest, where the result was written. `--ls` in host
-        # mode looks for a benchmark *volume*, which this Mac has none of, and
-        # says so -- correctly, about a question that does not apply here.
+        # `--ls` in host mode looks for a benchmark *volume*, which this Mac
+        # has none of, so the result is read from inside the guest instead.
         info "collect: listing the result inside the guest, before it is stopped"
         rwk bench bench staged --ls
         return 0
@@ -870,8 +683,7 @@ done
 
 SHAPE=$(lane_shape)
 
-# MACHINE is final now that argument parsing is done -- this is where its
-# MACH_SSH becomes HOST's default, so `--machine benchvm` picks up benchvm's
+# Deferred until MACHINE is final, so `--machine benchvm` picks up benchvm's
 # own conf rather than staying pinned to whatever MACHINE was at startup.
 if [ -z "$HOST" ]; then
     machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk boot --list)"
@@ -879,8 +691,8 @@ if [ -z "$HOST" ]; then
     [ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no MACH_SSH"
 fi
 # BENCH_HOST only exists for the volume shape (a guest's bench mode is reached
-# through the host instead, never over a second ssh alias -- rwk, below), so a
-# guest's empty MACH_BENCH_SSH is not a conf bug and must not die here.
+# through the host instead -- rwk, below), so a guest's empty MACH_BENCH_SSH is
+# not a conf bug and must not die here.
 if [ "$SHAPE" = volume ] && [ -z "$BENCH_HOST" ]; then
     machine_load "$MACHINE" >/dev/null 2>&1
     BENCH_HOST="${MACH_BENCH_SSH:-}"
@@ -890,11 +702,9 @@ fi
 # The Mac cannot drive its own lane: the driver has to outlive a reboot of the
 # machine it is driving. Refused here rather than discovered at phase 4, with
 # the machine already armed.
-# Case-folded, and with `tr` rather than ${v,,} because macOS ships bash 3.2:
-# this machine reports `Tolken` from `hostname -s` while every config here
-# spells it `tolken`, and a case-sensitive comparison would let the guard
-# silently never fire -- worse than not having it, since the refusal it is
-# meant to produce would instead be a reboot killing the driver.
+# Case-folded with `tr`, not ${v,,} (macOS ships bash 3.2): this machine
+# reports `Tolken` from `hostname -s` while config here spells it `tolken`,
+# and a case-sensitive comparison would let the guard silently never fire.
 _lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 if [ "$SHAPE" = volume ] && is_macos && [ "$(_lc "$(hostname -s 2>/dev/null)")" = "$(_lc "$HOST")" ]; then
     die "this lane cannot be driven from the machine it measures -- the reboot
@@ -923,14 +733,10 @@ esac
 #
 # Phases are recorded as they complete and skipped when they already have, so
 # the command is the same whether it is starting a lane or resuming one after
-# the reboot. `done_through` is the last phase that finished; a phase is run
-# when the lane has not got past it.
+# the reboot. `done_through` is the last phase that finished.
 
-# --dry-run is a question about the plan, so it must be answerable on a machine
-# that is not ready to run it -- which is exactly when the plan is worth
-# reading. Before this, --dry-run died in the preflight and printed nothing:
-# the one form of the command that touches nothing was the one form you could
-# not use until everything already worked.
+# --dry-run must be answerable even when preflight fails -- that is exactly
+# when the plan is most worth reading.
 if ! preflight; then
     [ -n "$DRY" ] || die "preflight failed -- nothing has been changed on $HOST"
     warn "preflight failed; showing the plan anyway because this is --dry-run"
@@ -944,18 +750,18 @@ state_set config "$CONFIG"
 past() {
     # Is $1 at or before the recorded high-water mark?
     local p order
-    # The order is the shape's, not a constant, because the guest stages *after*
-    # entering bench mode and the volume stages before. A single hardcoded list
-    # wrong for one shape would place `stage` past `reboot`, so `past stage`
-    # answers true for work that never ran -- a high-water mark only means
-    # anything against the order actually walked.
+    # The order is the shape's, not a constant: the guest stages *after*
+    # entering bench mode, the volume stages before. A high-water mark only
+    # means anything checked against the order actually walked -- a single
+    # hardcoded list wrong for one shape would place `stage` past `reboot`
+    # and answer true for work that never ran.
     if [ "$SHAPE" = guest ]; then order="build arm reboot stage run collect back"
     else                          order="build stage arm reboot run back collect"
     fi
     [ -n "$done_through" ] || return 1
-    # Walking in order, whichever is met first decides it: meeting $1 first
-    # means it sits at or before the mark and is done; meeting the mark first
-    # means the lane stopped short of $1.
+    # Whichever is met first while walking in order decides it: meeting $1
+    # first means it is done; meeting the mark first means the lane stopped
+    # short of it.
     for p in $order; do
         [ "$p" = "$1" ] && return 0
         [ "$p" = "$done_through" ] && return 1
@@ -966,8 +772,7 @@ past() {
 mark() { done_through="$1"; state_set done_through "$1"; state_set "at_$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; }
 
 # Entering bench mode: arm, tell whoever has to act, wait for the mode.
-# Factored out because the two shapes need it at different points in the
-# sequence -- see below.
+# Factored out because the two shapes need it at different points below.
 enter_bench_mode() {
     past reboot && return 0
     past arm || { phase_arm; state_set armed_boottime "$(probe_boottime "$HOST")"; mark arm; }
@@ -987,11 +792,10 @@ enter_bench_mode() {
 past build || { phase_build; mark build; }
 
 if [ "$SHAPE" = guest ]; then
-    # The guest is started *before* the stage, and this is a real difference
-    # rather than a tidier ordering: staging into a guest reaches it over its
-    # own ssh (b_bench_put dies with "'<guest>' is not running"), while staging
-    # onto a volume only needs it mounted, which it already is in host mode.
-    # Same phases, in the order this shape requires.
+    # The guest must be started *before* the stage: staging into it reaches it
+    # over its own ssh (b_bench_put dies with "'<guest>' is not running"),
+    # while staging onto a volume only needs it mounted, already true in host
+    # mode.
     enter_bench_mode
     past stage || { phase_stage; mark stage; }
 else
@@ -1001,18 +805,9 @@ fi
 
 past run || { phase_run; mark run; }
 
-# Collect before or after leaving bench mode, and which one is not a style
-# choice -- it is where the result physically is.
-#
-#   volume  the result is written onto the benchmark volume, which host mode can
-#           still read once the machine has rebooted. Collecting afterwards is
-#           the point: it proves the result survived the way back.
-#   guest   the result is written *inside the guest*, and leaving the role means
-#           stopping the guest. Collecting afterwards asked host mode to read a
-#           benchmark volume this Mac does not have, and got exactly that error.
-#
-# So the guest reads its result while it is still running, and the volume reads
-# its own after the reboot. Same phases, ordered by where the bytes live.
+# Collect before or after leaving bench mode is not a style choice -- it is
+# where the result physically is: on the volume, still readable by host mode
+# after the reboot; inside the guest, gone once it is stopped.
 if [ "$SHAPE" = guest ]; then
     past collect || { phase_collect; mark collect; }
     if ! past back; then

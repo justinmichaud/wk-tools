@@ -15,8 +15,10 @@ else
     _c_dim=''; _c_red=''; _c_yel=''; _c_grn=''; _c_off=''
 fi
 
-log()  { printf '%s\n' "$*" >&2; }
-info() { printf '%s==>%s %s\n' "$_c_grn" "$_c_off" "$*" >&2; }
+# WK_QUIET (the dispatcher's --quiet, like WK_FORCE/--force) drops narration;
+# warn()/die() still print, since those are what a caller needs to see.
+log()  { [ -z "${WK_QUIET:-}" ] && printf '%s\n' "$*" >&2 || true; }
+info() { [ -z "${WK_QUIET:-}" ] && printf '%s==>%s %s\n' "$_c_grn" "$_c_off" "$*" >&2 || true; }
 warn() { printf '%swarning:%s %s\n' "$_c_yel" "$_c_off" "$*" >&2; }
 die()  { printf '%serror:%s %s\n' "$_c_red" "$_c_off" "$*" >&2; exit 1; }
 debug() { [ -n "${WK_DEBUG:-}" ] && printf '%s  %s%s\n' "$_c_dim" "$*" "$_c_off" >&2 || true; }
@@ -130,6 +132,37 @@ human_bytes() {
         if (i > 1 && v < 10) printf "%.1f%s\n", v, u[i]
         else                 printf "%.0f%s\n", v, u[i]
     }'
+}
+
+# json_merge_list <key> <file...> -- print {"<key>": [...]} merged from zero or
+# more files, each holding zero or more JSON documents concatenated with no
+# delimiter (one per process contributing to a listing, the same shape `wk
+# status --records` merges line by line). One merge, shared by `wk ls
+# --json`'s peer-target delegation and the dispatcher's host/container split.
+json_merge_list() { # <key> <file...>
+    local key="$1"; shift
+    require python3 "python3 merges 'wk ls --json'; it ships with macOS and every distribution here"
+    python3 -c '
+import json, sys
+key = sys.argv[1]
+items = []
+for path in sys.argv[2:]:
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError:
+        continue
+    dec = json.JSONDecoder()
+    i, n = 0, len(text)
+    while i < n:
+        while i < n and text[i] in " \t\r\n":
+            i += 1
+        if i >= n:
+            break
+        obj, i = dec.raw_decode(text, i)
+        items.extend(obj.get(key, []))
+print(json.dumps({key: items}))
+' "$key" "$@"
 }
 
 # --- misc --------------------------------------------------------------------

@@ -12,13 +12,11 @@
 BROWSER="${BROWSER:-flatpak-chromium}"   # flatpak-chromium | vivaldi | brave | none
 REMOVE_FIREFOX="${REMOVE_FIREFOX:-yes}"  # yes | no
 # CPU baseline: 2800 @ +50mV. 2900 passes a 10-min stress-ng --verify torture
-# (worst 76.8C, throttled 0x0) and is UNSTABLE in real use: the box hard-locks
-# with NO kernel log, once right after a kernel build and once at near-idle, so
-# 2900 is not a safe 24/7 clock on this chip.
-# Dropped to 2800 for headroom. 3.0GHz is UNSTABLE even at +50mV, and +50mV already
-# pins VDD_CORE at the ~1.0V hardware cap (measured 1.000V under load), so more
-# over_voltage_delta buys nothing. Re-validate any higher clock with a LONG sustained
-# all-core load (a full kernel build), not just a 10-min stress-ng, before trusting it.
+# but hard-locks with no kernel log under real use, so it is not a safe 24/7
+# clock on this chip. 3.0GHz is unstable even at +50mV, and +50mV already pins
+# VDD_CORE at the ~1.0V hardware cap, so more over_voltage_delta buys nothing.
+# Re-validate any higher clock with a LONG sustained all-core load (a full
+# kernel build), not just a short stress-ng run, before trusting it.
 ARM_FREQ="${ARM_FREQ:-2800}"             # 2800 = stable; 2900 hard-locks in real use
 V3D_FREQ="${V3D_FREQ:-1200}"             # 960 stock; 1000 current; 1200 ran earlier — re-test w/ glmark2 before raising
 OVER_VOLTAGE_DELTA="${OVER_VOLTAGE_DELTA:-50000}"  # µV; 50mV = at the ~1.0V core cap; higher adds no real voltage
@@ -82,10 +80,9 @@ log "2  CPU governor = performance"
 sudo tee /etc/systemd/system/cpu-performance.service >/dev/null <<'EOF'
 [Unit]
 Description=Set CPU governor to performance
-# After basic.target (NOT multi-user.target): plymouth-quit-wait can hang on this
-# box, stalling multi-user.target indefinitely, which would leave this oneshot
-# stuck 'waiting' and the governor never pinned. basic.target is reached early and
-# is not gated behind the boot splash. (WantedBy=multi-user.target still pulls it in.)
+# After basic.target, not multi-user.target: a headless boot can stall
+# multi-user.target indefinitely (step 4c), leaving this oneshot stuck and the
+# governor never pinned. WantedBy=multi-user.target still pulls it in.
 After=basic.target
 [Service]
 Type=oneshot
@@ -123,10 +120,9 @@ sudo chmod 755 /usr/local/sbin/rpi5-fan-max
 sudo tee /etc/systemd/system/fan-max.service >/dev/null <<'EOF'
 [Unit]
 Description=Force PWM fan to 100% (pin thermal state to max + full PWM)
-# After basic.target (NOT multi-user.target): plymouth-quit-wait can hang on this
-# box, stalling multi-user.target indefinitely — that left this service stuck
-# 'waiting' so the fan was never pinned to 100% (governor-controlled, near-silent
-# at idle). basic.target is early and not gated behind the boot splash.
+# After basic.target, not multi-user.target: same headless boot-stall as the
+# governor service above (step 4c) would otherwise leave the fan
+# governor-controlled and near-silent at idle instead of pinned to 100%.
 After=basic.target
 [Service]
 Type=oneshot
@@ -403,9 +399,9 @@ log "4c  Boot reliability: bound plymouth-quit-wait (headless must not stall mul
 # plymouth-quit-wait ships TimeoutStartUSec=infinity and is Before=multi-user.target.
 # With a display, gdm starts and plymouth quits at once, so it finishes in <1s. But
 # HEADLESS (no display manager to trigger the quit) it waits FOREVER, hanging
-# multi-user.target -- which strands every 'After=multi-user.target' service (this is
-# the bug that left the fan/governor unset on headless boots). Bound it to 20s so a
-# headless boot always proceeds; a no-op when a monitor is attached.
+# multi-user.target -- which strands every 'After=multi-user.target' service,
+# including the governor and fan units above. Bound it to 20s so a headless
+# boot always proceeds; a no-op when a monitor is attached.
 sudo install -d /etc/systemd/system/plymouth-quit-wait.service.d
 printf '[Service]\nTimeoutStartSec=20s\n' \
   | sudo tee /etc/systemd/system/plymouth-quit-wait.service.d/10-timeout.conf >/dev/null

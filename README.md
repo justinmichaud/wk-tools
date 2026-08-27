@@ -193,6 +193,7 @@ wk pr bug-238 alice:eng/some-branch      # fetched once into the mirror, then in
 wk pr bug-238 1234                       # WebKit PR #1234; wpe:1234 for WPEWebKit
 wk pr rebase                             # inside a workspace: fetch main, rebase onto it
 wk new review-1234 --pr 1234             # a fresh workspace straight onto a PR
+wk pr open bug-238                       # from the host: push the branch, open it with gh
 ```
 
 **Sync (this machine, or everywhere)**

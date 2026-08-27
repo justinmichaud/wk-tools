@@ -56,6 +56,7 @@ if [ "${1:-}" = --probe-store ]; then
     probe_store
     exit 0
 fi
+[ $# -eq 0 ] || die "usage: wk doctor; see wk doctor -h"
 
 missing=0
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$*" >&2; }
@@ -106,7 +107,9 @@ check "tailnet auth key" "wk key tailnet" wk_tailscale_authkey_present
 # never prompts (`wk sudo status` is all `sudo -n`), so doctor stays usable
 # without a terminal.
 section "root access"
-if _sudo=$("$WK_ROOT/cmd/sudo" status --quiet 2>&1); then
+# WK_QUIET, not a literal --quiet: this bypasses the dispatcher, which is
+# what strips the flag into the environment for every other caller.
+if _sudo=$(WK_QUIET=1 "$WK_ROOT/cmd/sudo" status 2>&1); then
     ok "sudo: $_sudo"
 else
     miss "sudo: $_sudo" "wk sudo setup"

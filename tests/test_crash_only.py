@@ -133,23 +133,67 @@ class TestWkRmOfRubble(WkTest):
 
 
 class TestGcReapsDeadCreationRecord(unittest.TestCase):
-    @unittest.skip(
-        "needs seam: cmd/gc's orphaned-creation-record reaping (the "
-        "'create/<name>.status with a dead pid and no workspace anywhere' "
-        "loop, cmd/gc lines ~397-413) is inlined in a script that, on "
-        "macOS, unconditionally pipes its *entire* self into the shared "
-        "production podman VM and runs full store GC there (mirror "
-        "repack, image prune, fstrim) as one atomic `podman machine ssh` "
-        "call (cmd/gc lines ~227-242) -- there is no way to exercise just "
-        "the reaping loop without also running that, against the real "
-        "shared store. Seam wanted: factor the loop into a callable "
-        "function (e.g. a `gc_creation_records` in lib/target.sh, the way "
-        "ws_state already is) that a test can call directly against a "
-        "fake WK_STORE and a stubbed target_all, the way "
-        "test_state.py's TestWsStateWords drives ws_state."
-    )
+    """cmd/gc's orphaned-creation-record reaping is a callable seam now
+    (gc_creation_records, lib/target.sh, next to ws_target/ws_exists), so
+    this drives it directly against a fake WK_STORE and a stubbed
+    target_all/load_target -- the way test_state.py's TestWsStateWords
+    drives ws_state -- rather than the real shared store cmd/gc otherwise
+    unconditionally pipes itself into on macOS (cmd/gc's podman-VM half)."""
+
     def test_gc_reaps_a_dead_creation_record(self):
-        pass
+        with scratch_dir(prefix="wk-test-gc-creation-") as tmp:
+            store = tmp / "store"
+            create = store / "create"
+            create.mkdir(parents=True)
+            (store / "ws").mkdir()
+            script = f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/lib/target.sh"
+. "{REPO}/lib/detach.sh"
+WK_STORE="{store}"; export WK_STORE
+
+# One fake target whose store is this same WK_STORE (load_target is a
+# no-op): enough for gc_creation_records to walk without touching the real
+# container/vm drivers.
+target_all() {{ echo fake; }}
+load_target() {{ :; }}
+
+# dead: a pid nothing answers to, and no workspace directory anywhere -- reaped.
+status_write "$WK_STORE/create/dead.status" state=creating pid=4194304 stage=create
+: > "$WK_STORE/create/dead.log"
+
+# alive: this very process's own pid -- kept, though its workspace directory
+# does not exist yet.
+status_write "$WK_STORE/create/alive.status" state=creating "pid=$$" stage=create
+: > "$WK_STORE/create/alive.log"
+
+# found: a dead pid, but a workspace directory exists on the (fake) target
+# -- kept.
+status_write "$WK_STORE/create/found.status" state=creating pid=4194304 stage=create
+: > "$WK_STORE/create/found.log"
+mkdir -p "$WK_STORE/ws/found"
+
+gc_creation_records
+
+for n in dead alive found; do
+    if [ -f "$WK_STORE/create/$n.status" ]; then echo "$n:kept"; else echo "$n:reaped"; fi
+done
+'''
+            cp = bash(script)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            want = "dead:reaped\nalive:kept\nfound:kept"
+            self.assertEqual(
+                cp.stdout.strip(), want,
+                f"got:\n{cp.stdout}\nwant:\n{want}\nstderr:\n{cp.stderr}",
+            )
+
+            # The log beside a reaped record goes with it; a kept record's
+            # log is untouched.
+            self.assertFalse((create / "dead.log").exists(), "dead.log survived its reaped record")
+            self.assertTrue((create / "alive.log").exists(), "alive.log was removed")
+            self.assertTrue((create / "found.log").exists(), "found.log was removed")
 
 
 class TestBuildLiveOnAStaleLog(unittest.TestCase):

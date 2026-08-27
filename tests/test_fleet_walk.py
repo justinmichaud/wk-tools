@@ -6,22 +6,26 @@ refuses (ssh's own exit 255, standing in for one that never answers) -- so
 `cmd/status` genuinely shells out to the stub rather than to a mocked driver
 function.
 
-Scoped to the *named* form, `wk status <name> --text`: a bare `wk status`
-also walks this host's real bench-device fleet (boot/machines/*.conf, real
-ssh and `tailscale status --json`, cmd/status's `report_fleet_devices`) with
-no env-based way to skip it, and driving that for real from this test hung
-past two minutes in this environment (measured, then killed) -- see the
-skipped test below for the seam that is missing. The named form
-(cmd/status's `collect()`) skips that walk entirely and answers for exactly
-the one target asked about, which is enough to exercise the real ssh
-shell-out and the unreachable-by-name reporting faithfully and fast.
+The named form, `wk status <name> --text` (cmd/status's `collect()`), skips
+the bench-device fleet walk entirely and answers for exactly the one target
+asked about, which is enough to exercise the real ssh shell-out and the
+unreachable-by-name reporting faithfully and fast.
+
+A bare `wk status` also walks this host's bench-device fleet
+(`report_fleet_devices`, cmd/status): WK_MACHINES_DIR (boot/machines.sh,
+read only by `machines_dir`) points that walk at a directory of faked
+`boot/machines/*.conf`-shaped confs instead of the real fleet, and the same
+stub `ssh` answers every board's probe too -- `m_ssh`/`i_ssh`
+(boot/machines.sh) shell out to `ssh` by name, the same as targets/remote.sh
+does. Driving the real fleet for real from a test hung past two minutes in
+this environment (measured, then killed); this is what replaces that.
 
 Run: python3 -m unittest tests.test_fleet_walk -v
 """
 import os
 import unittest
 
-from tests.support import WkTest, rand_suffix, run, stub_path
+from tests.support import REPO, WkTest, bash, rand_suffix, run, scratch_dir, stub_path
 
 
 _ANSWERING_SSH = '''#!/bin/sh
@@ -39,11 +43,21 @@ exit 255
 
 class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
     def test_reachable_machine_renders_its_block(self):
-        with stub_path({"ssh": _ANSWERING_SSH}) as binp:
+        # The stub runs the ssh'd command locally, so `t_info` (targets/
+        # remote.sh) stats a directory on *this* filesystem: WK_REMOTE_ROOT,
+        # pointed at a scratch dir instead of the real $HOME/wk a bare
+        # WK_REMOTE_HOST would default to, with the ready marker every
+        # driver writes as creation's last act (WK_READY_MARKER,
+        # lib/target.sh) already in place -- the answer a real finished
+        # workspace on a real reachable machine would give.
+        with stub_path({"ssh": _ANSWERING_SSH}) as binp, scratch_dir(prefix="wk-test-remote-root-") as root:
             name = f"demo-{rand_suffix()}"
+            (root / "ws" / name).mkdir(parents=True)
+            (root / "ws" / name / ".wk-ready").touch()
             env = {
                 "WK_TARGET": "remote",
                 "WK_REMOTE_HOST": "fake-reachable-machine",
+                "WK_REMOTE_ROOT": str(root),
                 "PATH": f"{binp}:{self._real_path()}",
             }
             cp = run("status", name, "--text", env=env, timeout=30)
@@ -76,60 +90,86 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
         return os.environ.get("PATH", "/usr/bin:/bin")
 
 
-class TestFleetWalkBareFormMultiMachine(unittest.TestCase):
-    @unittest.skip(
-        "needs seam: a bare `wk status --text` (no workspace name) also "
-        "walks this host's real bench-device fleet unconditionally -- "
-        "cmd/status's collect() calls report_fleet_devices, which reads "
-        "boot/machines/*.conf (real files, not registerable from a test "
-        "without editing the repo) and shells out to real `ssh`/`tailscale "
-        "status --json` for rpi3/rpi4/rpi5/mbp/benchvm. There is no "
-        "WK_TARGET-shaped override for that walk the way there is for "
-        "workspace targets, so a bare `wk status` from this test reaches "
-        "real hardware over the real network with no way to fake or skip "
-        "it -- measured hanging past 120s in this environment rather than "
-        "finishing with the expected per-board ssh timeout. A faithful "
-        "test of 'wk status --text renders every faked machine's block in "
-        "one run' needs either an env override for boot/machines' conf "
-        "directory (the same shape target_registry_dir() would need for "
-        "more than one faked *target* machine too -- see "
-        "test_resolution_ambiguous_name_refuses_naming_both below) or a "
-        "documented way to run report_fleet_devices against a fake list."
-    )
+_FAKE_MACH_CONF = '''MACH_SSH={ssh}
+MACH_DRIVER=rpi5-usb
+MACH_DEVICE=/dev/sda
+MACH_ROOT=/dev/nvme0n1p2
+MACH_PROFILE=webkit-2.52-yocto-rpi5-64
+MACH_MAC={mac}
+MACH_BRIDGE=""
+MACH_ROLE=workstation
+MACH_OS=any
+MACH_LOCAL=""
+MACH_VOLUME=""
+MACH_DTB=bcm2712-rpi-5-b.dtb
+MACH_BENCH_SSH=""
+MACH_NET=wifi
+MACH_NOTE="{note}"
+'''
+
+
+class TestFleetWalkBareFormMultiMachine(WkTest):
     def test_bare_status_renders_every_faked_machines_block(self):
-        pass
+        # WK_MACHINES_DIR (boot/machines.sh) fakes the fleet without
+        # touching boot/machines/*.conf; WK_TARGET=remote (with the stub ssh
+        # every boot driver's m_ssh/i_ssh also shells out through, since it
+        # calls `ssh` by name) keeps the *workspace target* walk to one
+        # fast, fake target instead of every real machine in
+        # targets/hosts/*.conf -- the thing that hung past 120s before.
+        with scratch_dir(prefix="wk-test-machines-") as machdir, \
+             stub_path({"ssh": _ANSWERING_SSH}) as binp:
+            # Short: machine_list's listing (boot/machines.sh) is a fixed
+            # `%-8s` column with no separator for a name that fills or
+            # overflows it, so a longer name runs into its own note.
+            suffix = rand_suffix(3)
+            names = [f"f{i}{suffix}" for i in range(2)]
+            for i, n in enumerate(names):
+                (machdir / f"{n}.conf").write_text(
+                    _FAKE_MACH_CONF.format(ssh=n, mac=f"02:00:00:00:00:0{i}", note=f"fake bench board {n}")
+                )
+            env = {
+                "WK_MACHINES_DIR": str(machdir),
+                "WK_TARGET": "remote",
+                "WK_REMOTE_HOST": "fake-reachable-machine",
+                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            }
+            cp = run("status", "--text", env=env, timeout=45)
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+            for n in names:
+                self.assertIn(n, cp.stdout, f"'{n}' missing from a bare 'wk status --text':\n{cp.stdout}")
 
 
 class TestResolution(unittest.TestCase):
-    @unittest.skip(
-        "needs seam: lib/target.sh's ws_target (the only name resolver in "
-        "this tree, README/CLAUDE.md 'no registry') walks target_all() and "
-        "returns the *first* target whose store has the name -- it has no "
-        "ambiguity check at all, so a name that happens to exist on two "
-        "targets is silently resolved to whichever target_all() enumerates "
-        "first, never refused. Confirmed by reading: no caller of ws_target "
-        "compares against a second hit. Seam wanted: either ws_target "
-        "collects every match and refuses by naming all of them, or this is "
-        "not actually a property of the current design and the handoff line "
-        "should be dropped rather than tested."
-    )
     def test_a_name_on_two_targets_refuses_naming_both(self):
-        pass
+        """a workspace name on two targets refuses and names both"""
+        script = f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/target.sh"
+target_all() {{ printf 'alpha\\nbeta\\ngamma\\n'; }}
+ws_on_target() {{ case "$1" in alpha|beta) return 0 ;; esac; return 1; }}
+ws_target demo-ambiguous
+'''
+        cp = bash(script)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("demo-ambiguous", cp.stderr, cp.stderr)
+        self.assertIn("alpha", cp.stderr, cp.stderr)
+        self.assertIn("beta", cp.stderr, cp.stderr)
+        self.assertNotIn("gamma", cp.stderr, cp.stderr)
 
-    @unittest.skip(
-        "needs seam: ws_target's resolution loop (lib/target.sh) never "
-        "calls t_info at all -- it only stats this host's own local record "
-        "of each target (a directory under that target's store, or, before "
-        "the store exists, wk new's own status file) -- so an unreachable "
-        "*target machine* cannot affect resolution one way or the other; "
-        "the loop has nothing that could report it. Only ws_state (called "
-        "*after* a target is already chosen) asks t_info and can answer "
-        "'unreachable'. Seam wanted: either name what 'a target that cannot "
-        "be probed during resolution' refers to if it is not ws_target (a "
-        "different resolver this review missed), or drop the claim."
-    )
-    def test_an_unreachable_target_is_reported_by_name_during_resolution(self):
-        pass
+    def test_a_name_on_one_target_still_resolves(self):
+        """the same collecting loop still resolves an unambiguous name"""
+        script = f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/target.sh"
+target_all() {{ printf 'alpha\\nbeta\\n'; }}
+ws_on_target() {{ [ "$1" = beta ]; }}
+ws_target demo-single
+'''
+        cp = bash(script)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "beta", cp.stdout + cp.stderr)
 
 
 if __name__ == "__main__":

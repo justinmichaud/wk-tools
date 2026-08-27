@@ -25,12 +25,21 @@ Two related features, neither started. Reference: wiki
 
 ## Remaining — fixed core counts, every target
 
-`wk bench` records `cores` as a count and pins nothing. The pin has to exist per
-target because the mechanisms differ and each can silently not-apply:
+`wk bench <ws> <plan> --cores <set>` pins a container run with `taskset -c
+<set>` (cmd/bench's `bench_cores_wrap`, `lib/wkdata.py` `cores-valid` /
+`cores-wrap`), the same mechanism a remote or local Linux target would use if
+`wk bench` grew support for them — the pin is not container-specific.
+`bench_cores_refusal <target> <os>` (cmd/bench, pure and unit-tested) refuses
+--cores where no per-run pin exists: a `vm` workspace target is a macOS guest
+regardless of the driving machine's os, and a `local` target running on
+macOS *is* the machine doing the benchmarking. container, remote, and a
+`local` target on Linux all allow it. The set, not a count, is recorded
+(`cores.set` in env.json, alongside `cores.pinned`), and `wk bench compare`
+warns when two runs' `cores.set` differ, the same way it warns on a runner or
+session-mode mismatch.
 
-- container: podman `--cpuset-cpus` (a real pin) — not used anywhere today;
-- macOS guest: the vCPU count at boot (not a pin — document that honestly);
-- Pi devices: taskset/isolcpus on the device.
-
-Record the *set*, not the count, and make `wk bench compare` warn on a mismatch
-the way it warns on renderer and session-mode mismatches.
+- **Pi devices: taskset/isolcpus on the device, via `wk pi bench`.** Not done
+  here — `wk pi bench` is a separate command (cmd/pi) with its own on-board
+  run path; it needs the same `--cores` flag and the same `cores.set` /
+  `cores.pinned` fields in the env.json it writes, using
+  `lib/wkdata.py cores-valid` / `cores-wrap` rather than a second parser.

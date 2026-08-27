@@ -1,9 +1,8 @@
 # Softnet: the egress boundary for macOS guest VMs.
 #
-# The container workspaces reach the outside through a proxy because they have
-# no network interface at all. A macOS guest cannot be built that way -- it is
-# a whole operating system and needs an interface -- so the boundary is put in
-# front of it instead:
+# Container workspaces reach the outside through a proxy because they have no
+# network interface at all; a macOS guest is a whole operating system and
+# needs one, so the boundary is put in front of it instead:
 #
 #   Softnet     a userspace packet filter that Tart runs as a subprocess on the
 #               HOST, outside the guest. Default-deny, with one address allowed:
@@ -11,15 +10,14 @@
 #   wk-proxy    the same policy engine the containers use, listening on TCP on
 #               the host, reached over that one allowed address.
 #
-# The guest therefore gets the same hostname allowlist as a container, enforced
-# somewhere it cannot reach. This is what `pf` inside the guest could never be:
-# pf is modifiable by anything running as root in the guest, which includes
-# whatever is being sandboxed.
+# The guest gets the same hostname allowlist as a container, enforced
+# somewhere it cannot reach -- what `pf` inside the guest could never be,
+# since pf is modifiable by anything running as root there.
 #
 # --- about the privilege ------------------------------------------------------
-# Softnet needs root, because vmnet does. It is installed SUID root here, once,
-# at setup time -- the same trade the quiesce helper makes: a privilege granted
-# deliberately to one audited path during setup, never one taken in the daily
+# Softnet needs root, because vmnet does. It is installed SUID root here,
+# once, at setup time -- the same trade the quiesce helper makes: a
+# privilege granted deliberately during setup, never taken in the daily
 # path. `wk` itself still never calls sudo.
 
 WK_SOFTNET_VERSION="${WK_SOFTNET_VERSION:-0.23.0}"
@@ -31,10 +29,9 @@ if ! have tart && [ ! -x "$HOME/.local/bin/tart" ]; then
     return 0 2>/dev/null || true
 fi
 
-# `softnet --version` prints "softnet 0.23.0-e5fd48c" -- the release version
-# with the build's commit appended. Comparing the whole string against the
-# release number never matches, so setup re-downloaded ~14 MB on every run
-# while correctly reporting "no changes".
+# `softnet --version` prints "softnet 0.23.0-e5fd48c": the release version
+# with the build's commit appended, so the whole string never matches the
+# release number alone.
 _installed_ver=""
 [ -x "$WK_SOFTNET_BIN" ] && \
     _installed_ver=$("$WK_SOFTNET_BIN" --version 2>/dev/null | awk '{print $NF}' | cut -d- -f1)

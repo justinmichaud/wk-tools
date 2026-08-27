@@ -9,15 +9,19 @@ the CMake ports alike. `cmd/gui:29` states that decision where it is acted on;
 below is what was verified on each platform, and the three image-level
 obstacles that had to be cleared on Linux first.
 
-What is left is one verb, some provisioning, and two processes nobody has
-needed yet.
+What is left is some provisioning and two processes nobody has needed yet.
+
+`wk run <ws> --until-crash [--max N] [--lldb]` repeats the jsc invocation in
+one round trip into the workspace until it exits non-zero (or `--max` is
+reached, default 200), keeps the failing iteration's output under
+`~/until-crash` in the workspace, and reports its exit status, arguments and
+any core file written since that iteration started. `--lldb` runs each
+iteration under the debugger instead: a clean exit continues the loop, and a
+crash leaves the debugger open at the stop rather than exiting with it
+(`container/lldb/until-crash-run-file`).
 
 ## Remaining
 
-- **`wk run <ws> --until-crash [--under-gdb]`** — repeat until non-zero exit,
-  cap the iterations, keep the failing seed and output; under `--under-gdb`,
-  drop into the debugger *at* the crash rather than after it. Nothing of this
-  exists.
 - **The ddebs debug-symbol repository** belongs in the workspace image, not in
   per-session instructions -- but it needs a host (`ddebs.ubuntu.com`) the
   egress proxy does not allow (`container/proxy/wk-proxy.py`'s

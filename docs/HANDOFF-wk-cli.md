@@ -53,13 +53,9 @@ each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] `WK_REMOTE_LOCAL`/root computed from `~/.wk-remote` on the machine
       itself rather than a second conf — confirm `wk ls` on a build box
       resolves with no ssh
-- [ ] a target that cannot be probed during resolution is reported
-      unreachable by name, never silently dropped from the view
 - [ ] a workstation that is down is listed unreachable with its timeout; the
       fleet walk never hangs on it
 - [ ] wk-tools version skew is flagged with both shas named
-- [ ] the same workspace name alive on two machines is reported as a
-      conflict, not listed twice
 - [ ] two workstations reaching one build box see one state; a disagreement
       names both views
 - [ ] the fleet exit code aggregates the worst state found anywhere
@@ -125,9 +121,6 @@ each a `kill -9` mid-command plus a re-run that must converge:
       says so without claiming the work stopped
 - [ ] `wk logs <ws> -f` follows a live build
 - [ ] `wk stop --keep-vm` leaves the podman machine running
-- [ ] `wk gc` prunes a creation record whose workspace and environment are
-      both gone, and keeps one still in flight (only the first half is
-      exercised, planted by hand)
 - [ ] `build_live` (lib/detach.sh): a `state=running` file whose log has not
       moved for `WK_STALL_SECONDS` is not live, so a `kill -9`'d build no
       longer refuses every later benchmark

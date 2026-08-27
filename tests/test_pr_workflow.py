@@ -14,15 +14,55 @@ The end-to-end path -- a real `wk new`, then `wk pr <it> <spec>` against a
 local fork -- is not exercised here; see
 TestPrEndToEnd.test_new_then_pr_against_a_local_fork for why.
 
+'wk pr open' -- the fifth form, which pushes a branch to its fork and opens
+it with `gh pr create` -- is covered further down by TestPrOpenTarget and
+TestPrOpenGhArgs (pr_open_target/pr_open_gh_args, lifted out of cmd/pr the
+same way _lift lifts a function from admin/wk-card-priv in
+tests/test_wifi_seed.py, and run against a real, if local-path, git repo:
+no network and no gh) and by TestPrOpenRefusals (the two refusals that
+happen before either of those ever runs, through the real dispatcher).
+
 Run: python3 -m unittest tests.test_pr_workflow -v
 """
+import os
+import shlex
 import subprocess
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WK, bash, rand_suffix, scratch_dir
+from tests.support import REPO, WK, bash, fake_workspace, rand_suffix, run, scratch_dir, stub_path
 
 PRELUDE = f'set -euo pipefail\ncd "{REPO}"\n. lib/common.sh\n. lib/store.sh\n'
+
+CMD_PR = REPO / "cmd" / "pr"
+
+
+def _lift(path, func):
+    """A function's body, sed'd out of a shell file -- see tests/test_wifi_seed.py's
+    _lift, which this mirrors. pr_open_target/pr_open_gh_args are written as
+    plain functions in cmd/pr precisely so they can be lifted and called
+    directly, against a temporary repo or a stub gh, without running the
+    rest of the file (which needs a real workspace)."""
+    text = subprocess.run(
+        ["sed", "-n", f"/^{func}()/,/^}}/p", str(path)],
+        capture_output=True, text=True,
+    ).stdout
+    assert text.strip(), f"{func} not found in {path}"
+    return text
+
+
+# lib/store.sh's real wk_remotes/wk_push_forks, unmodified: pr_open_target
+# never fetches or pushes over them (it only reads remote *names* it is
+# handed and URLs already configured in the test's own local-path repo), so
+# there is nothing here for a fake to stand in for, unlike TestMirrorFetch's
+# wk_remotes override.
+OPEN_PRELUDE = (
+    f'set -euo pipefail\ncd "{REPO}"\n. lib/common.sh\n. lib/store.sh\n'
+    + _lift(CMD_PR, "pr_open_target")
+    + "\n"
+    + _lift(CMD_PR, "pr_open_gh_args")
+    + "\n"
+)
 
 
 def _git(*args, cwd, check=True):
@@ -149,6 +189,163 @@ git -C "$(wk_mirror)" rev-parse refs/remotes/pr/origin/7
         cp = bash(PRELUDE + 'mirror_fetch_pull nosuchremote 1 2>&1; echo "exit=$?"',
                    env=self._env())
         self.assertIn("no such upstream remote", cp.stdout)
+
+
+class TestPrOpenTarget(unittest.TestCase):
+    """pr_open_target: which project a branch belongs to and what it opens
+    as, read off a real (local-path) git checkout -- no network, no gh."""
+
+    def setUp(self):
+        self._scratch = scratch_dir(prefix="wk-pr-open-test-")
+        self.tmp = self._scratch.__enter__()
+        self.addCleanup(self._scratch.__exit__, None, None, None)
+
+    def _tracked_branch(self, project, remote_name, fork_remote, branch, user="testuser"):
+        """A working checkout with <branch> checked out tracking
+        <remote_name>/main (an 'upstream' repo whose basename is <project>
+        -- 'WebKit' or 'WPEWebKit', the same suffix wk_push_forks matches),
+        plus a <fork_remote> remote pointing at a github fork. Mirrors how
+        `wk pr rebase` leaves a branch tracking origin/main or wpe/main."""
+        upstream = self.tmp / project
+        _make_repo(upstream, "main")
+        work = self.tmp / f"work-{rand_suffix()}"
+        work.mkdir()
+        _git("init", "-q", "-b", "main", cwd=work)
+        _git("remote", "add", remote_name, str(upstream), cwd=work)
+        _git("fetch", "-q", remote_name, cwd=work)
+        _git("checkout", "-q", "-b", branch, f"{remote_name}/main", cwd=work)
+        _git("remote", "add", fork_remote, f"https://github.com/{user}/{project}.git", cwd=work)
+        return work
+
+    def _target(self, src):
+        cp = bash(OPEN_PRELUDE + f'pr_open_target {shlex.quote(str(src))}\n')
+        return cp
+
+    def test_webkit_branch(self):
+        """a branch tracking origin/main opens against WebKit/WebKit, head
+        <fork's github user>:<branch>, pushed to the 'fork' remote"""
+        work = self._tracked_branch("WebKit", "origin", "fork", "eng/my-feature")
+        cp = self._target(work)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(
+            cp.stdout.strip().split("\t"),
+            ["WebKit/WebKit", "testuser:eng/my-feature", "fork", "eng/my-feature"],
+        )
+
+    def test_wpe_branch(self):
+        """a branch tracking wpe/main opens against WPEWebKit's real owner
+        (WebPlatformForEmbedded, not the fork's), pushed to 'forkwpe'"""
+        work = self._tracked_branch("WPEWebKit", "wpe", "forkwpe", "eng/wpe-feature")
+        cp = self._target(work)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(
+            cp.stdout.strip().split("\t"),
+            ["WebPlatformForEmbedded/WPEWebKit", "testuser:eng/wpe-feature", "forkwpe", "eng/wpe-feature"],
+        )
+
+    def test_refuses_on_main(self):
+        """opening 'main' itself as a pull request is refused by name"""
+        work = self.tmp / "on-main"
+        work.mkdir()
+        _git("init", "-q", "-b", "main", cwd=work)
+        cp = self._target(work)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("cannot open 'main'", cp.stderr)
+
+    def test_refuses_detached_head(self):
+        """a detached HEAD has no branch to push, so it is refused by name"""
+        work = self.tmp / "detached"
+        _make_repo(work, "main")
+        _git("checkout", "-q", "--detach", "HEAD", cwd=work)
+        cp = self._target(work)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("detached HEAD", cp.stderr)
+
+    def test_refuses_dirty_tree(self):
+        """an uncommitted change is named before anything is pushed, the
+        same rule the PR-checkout form applies (cmd/pr's own header)"""
+        work = self._tracked_branch("WebKit", "origin", "fork", "eng/dirty")
+        (work / "untracked.txt").write_text("scratch\n")
+        cp = self._target(work)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("uncommitted changes", cp.stderr)
+        self.assertIn("git", cp.stderr)
+
+    def test_refuses_a_branch_with_no_upstream(self):
+        """a fresh local branch with no tracking ref cannot be told apart
+        as WebKit's or WPEWebKit's, and is refused rather than guessed at"""
+        work = self.tmp / "no-upstream"
+        _make_repo(work, "main")
+        _git("checkout", "-q", "-b", "eng/untracked", cwd=work)
+        cp = self._target(work)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("no upstream", cp.stderr)
+
+
+class TestPrOpenGhArgs(unittest.TestCase):
+    """pr_open_gh_args: the exact argv 'gh pr create' gets, one token per
+    line -- what a stub gh actually receives in TestPrOpenRefusals-style use."""
+
+    def _args(self, base, head, *flags):
+        script = OPEN_PRELUDE + 'pr_open_gh_args {} {} {}\n'.format(
+            shlex.quote(base), shlex.quote(head),
+            " ".join(shlex.quote(f) for f in flags),
+        )
+        cp = bash(script)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.splitlines()
+
+    def test_plain(self):
+        """no flags: --repo, --head, --fill, nothing else"""
+        self.assertEqual(
+            self._args("WebKit/WebKit", "alice:eng/x"),
+            ["--repo", "WebKit/WebKit", "--head", "alice:eng/x", "--fill"],
+        )
+
+    def test_draft_and_web_pass_through_in_order(self):
+        self.assertEqual(
+            self._args("WebKit/WebKit", "alice:eng/x", "--draft", "--web"),
+            ["--repo", "WebKit/WebKit", "--head", "alice:eng/x", "--fill", "--draft", "--web"],
+        )
+
+    def test_unknown_flag_is_dropped(self):
+        """anything but --draft/--web is not gh's business and is not passed"""
+        self.assertEqual(
+            self._args("WebKit/WebKit", "alice:eng/x", "--bogus"),
+            ["--repo", "WebKit/WebKit", "--head", "alice:eng/x", "--fill"],
+        )
+
+
+class TestPrOpenRefusals(unittest.TestCase):
+    """'wk pr open', through the real dispatcher: the two refusals that
+    must happen before any git or gh runs. cmd/pr declares 'sub open
+    where=host needs=gh,gh-auth' rather than re-checking either itself
+    (CLAUDE.md: a concern the dispatcher already owns is a bug to re-decide
+    in a command, even when it decides the same) -- so what is under test
+    here is the declaration wired to the framework the rest of `wk` reuses
+    (cmd/push, cmd/key, cmd/bench's own 'sub ... where=host' subverbs)."""
+
+    def test_refuses_inside_a_workspace(self):
+        """where=host + in_workspace is refused by the dispatcher itself,
+        before cmd/pr runs at all -- the same mechanism 'wk push status'
+        and 'wk bench stage' rely on inside a workspace."""
+        with fake_workspace() as ws:
+            cp = ws.run("pr", "open")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("host", cp.stdout)
+
+    def test_refuses_without_gh_login(self):
+        """a stub gh whose 'auth status' fails is refused naming 'gh auth
+        login' -- check_needs('gh-auth'), the same check cmd/key relies on.
+        This fires before cmd/pr looks for a workspace at all, so none of
+        --draft/--web/a real name is needed to reach it."""
+        with stub_path({
+            "gh": '#!/bin/sh\ncase "$1 $2" in\n"auth status") exit 1 ;;\nesac\nexit 0\n',
+        }) as binp:
+            cp = run("pr", "open", "some-workspace",
+                     env={"PATH": f"{binp}:{os.environ['PATH']}"})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("gh auth login", cp.stdout)
 
 
 @unittest.skip(

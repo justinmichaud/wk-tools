@@ -21,6 +21,19 @@ tab = "indent"
 
 [editor]
 true-color = true
+# What most people coming from Zed's tab bar expect: every open file gets a
+# tab, not just the one under the cursor.
+bufferline = "multiple"
+# Relative numbers make `3j`/`5k` legible at a glance -- the usual reason
+# modal-editor users turn this on, and the absolute number of the current
+# line still shows.
+line-number = "relative"
+# A little breathing room above/below the cursor while scrolling through a
+# WebKit-sized file.
+scrolloff = 5
+
+[editor.indent-guides]
+render = true
 
 [editor.whitespace]
 render = "all"
@@ -36,4 +49,3 @@ tabpad = "·"
 [editor.auto-save]
 after-delay.enable = true
 after-delay.timeout = 3000
-

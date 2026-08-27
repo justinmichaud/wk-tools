@@ -172,14 +172,12 @@ else
 fi
 
 # --- profiling tools -----------------------------------------------------------
-# docs/Urgent/HANDOFF-profile.md: nothing installed these, so 'wk profile'
-# refused every native mode by name and the only way through was a
-# hand-installed binary at a host path. heaptrack, valgrind (its massif tool)
-# and sysprof-cli are distro packages; samply ships no .deb, so it is fetched
-# from its own pinned GitHub release and checksummed, the same shape as the
-# helix install below. Wrapped the same way and for the same reason: a
-# profiler is not load-bearing for the workspace the way the shell rc and lldb
-# config are, so its failure is reported and not fatal.
+# heaptrack, valgrind (its massif tool) and sysprof-cli are distro packages;
+# samply ships no .deb, so it is fetched from its own pinned GitHub release
+# and checksummed, the same shape as the helix install below. Wrapped the same
+# way and for the same reason: a profiler is not load-bearing for the
+# workspace the way the shell rc and lldb config are, so its failure is
+# reported and not fatal.
 #
 # This is where it actually has to run: the workspace image is
 # ghcr.io/igalia/wkdev-sdk, pulled pre-built (this repo owns no Containerfile
@@ -267,20 +265,30 @@ log "ulimit -c unlimited added to .bashrc"
 # docs/Urgent/HANDOFF-debug.md.
 
 # --- editors -----------------------------------------------------------------
-# helix is workspace-only now: it needs the checkout's clangd and compile
-# commands, which only exist here.
+# helix and lazygit are workspace-only: helix needs the checkout's clangd and
+# compile commands, which only exist here (container/helix/README.md), and
+# lazygit is meant to be run against the checkout it is sitting in. Neither is
+# installed on the host (host/dotfiles.sh installs Zed there instead) or on a
+# remote/VM target -- see docs/Nice to have/HANDOFF-helix.md for what each of
+# those would need that this container install does not.
 #
 # Wrapped so a failure here cannot cost the workspace anything that matters.
 # An editor is a convenience; the lldb config and the shell rc set up below are
-# not, and under `set -e` a helix tarball that does not unpack the way this
-# expects throws both away.
+# not, and under `set -e` a tarball that does not unpack the way this expects
+# throws both away.
 _install_helix() {
     local ver=25.07 arch hxarch tmp
     arch=$(uname -m)
     case "$arch" in
         aarch64|arm64) hxarch=aarch64 ;;
         x86_64)        hxarch=x86_64 ;;
-        *)             return 0 ;;
+        # armhf and anything else: helix publishes no linux/armhf release
+        # (github.com/helix-editor/helix/releases), and there is nothing to
+        # build it from without a compiler toolchain this container does not
+        # carry. Said out loud rather than left as a quiet no-op -- see
+        # docs/Nice to have/HANDOFF-helix.md.
+        *)             log "helix: no linux/$arch release published upstream (github.com/helix-editor/helix) -- not installed"
+                        return 0 ;;
     esac
 
     tmp=$(mktemp -d)
@@ -299,9 +307,48 @@ _install_helix() {
     rm -rf "$tmp"
 }
 
+# jesseduffield/lazygit. Same release-tarball shape as helix above and the
+# same arch table (armhf gets the same logged skip, not a silent one), but
+# checksummed like the samply install further up: unlike helix's tarball,
+# which only ever unpacks into a directory hx itself reads, this one lands a
+# bare binary straight onto PATH, and a truncated or swapped download would
+# run as-is.
+_install_lazygit() {
+    local ver=0.64.1 arch lgarch sum tmp got
+    arch=$(uname -m)
+    case "$arch" in
+        aarch64|arm64) lgarch=linux_arm64
+                       sum=8b7ca3b344e60340ad1f89f29b9868ee39bcaba5bb92ee818bbe65476bb8b6e7 ;;
+        x86_64)        lgarch=linux_x86_64
+                       sum=f8ea237c41f194cd799b48505518bfdaae4edf5a2ad6bd3d898e939785ee4532 ;;
+        *)             log "lazygit: no linux/$arch release published upstream (github.com/jesseduffield/lazygit) -- not installed"
+                        return 0 ;;
+    esac
+
+    tmp=$(mktemp -d)
+    if curl -fsSL -o "$tmp/lazygit.tar.gz" \
+           "https://github.com/jesseduffield/lazygit/releases/download/v${ver}/lazygit_${ver}_${lgarch}.tar.gz"; then
+        got=$(sha256sum "$tmp/lazygit.tar.gz" | awk '{print $1}')
+        if [ "$got" = "$sum" ] \
+           && tar -xzf "$tmp/lazygit.tar.gz" -C "$tmp" lazygit \
+           && sudo install -m 0755 "$tmp/lazygit" /usr/local/bin/lazygit; then
+            log "lazygit $ver installed (github.com/jesseduffield/lazygit, sha256 verified)"
+        else
+            warn "lazygit $ver download did not verify (expected sha256 $sum) -- not installed"
+        fi
+    else
+        warn "lazygit download failed -- check egress"
+    fi
+    rm -rf "$tmp"
+}
+
 if ! command -v hx >/dev/null 2>&1; then
     log "installing helix"
     _install_helix || warn "helix install failed -- continuing without it"
+fi
+if ! command -v lazygit >/dev/null 2>&1; then
+    log "installing lazygit"
+    _install_lazygit || warn "lazygit install failed -- continuing without it"
 fi
 
 # --- lldb --------------------------------------------------------------------
@@ -323,11 +370,9 @@ fi
 # The `cd` is guarded on an interactive shell, and that is not decoration:
 # bash started by sshd reads ~/.bashrc even non-interactively, so an unguarded
 # `cd` moves the working directory of every `ssh <ws> <command>`, every rsync
-# and every file transfer -- which is a relative path landing in the checkout
-# instead of the home directory. It cost a debugging round when Zed uploaded its
-# server to `~/.zed_server/...` and sftp resolves that against /src/WebKit.
-# (`wk zed` asks sshd for internal-sftp, which runs no shell at all, and this
-# guard is the other half of the same fix.)
+# and every file transfer -- landing a relative path in the checkout instead
+# of the home directory. (`wk zed` asks sshd for internal-sftp, which runs no
+# shell at all, and this guard is the other half of that fix.)
 grep -qF 'wk-tools/shell/bashrc' "$HOME/.bashrc" 2>/dev/null || \
     printf '\n. %s/shell/bashrc\nexport PATH="%s:$HOME/.local/bin:$PATH"\ncase $- in *i*) cd %s ;; esac\n' \
         "$WK_TOOLS" "$WK_TOOLS" "$SRC" >> "$HOME/.bashrc"
@@ -375,9 +420,8 @@ fi
 # .wkdev-init runs this hook and then carries on regardless of how it exited,
 # so a failure part-way through is invisible: the container comes up, the
 # creation reports success, and the workspace is quietly missing whatever came
-# after the failing step. That happened -- a root-owned ~/.config aborted the
-# helix install and cost this workspace its lldb config and its shell rc --
-# and the only honest fix is for something downstream to check.
+# after the failing step. The only honest fix is for something downstream to
+# check.
 #
 # `.wk-ready` is that check, and it is now the same name on every target
 # (lib/target.sh, "creation's completion marker"): the file every driver writes

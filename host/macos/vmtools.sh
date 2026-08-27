@@ -1,9 +1,9 @@
 # Copy wk-tools into the VM and install what depends on it.
 #
-# The VM has no view of the host filesystem by design, so the tooling has to be
-# pushed rather than mounted. rsync over `podman machine ssh` keeps that a
-# single fast step and, crucially, works against the local working tree -- so
-# changes are testable without pushing to GitHub first.
+# The VM has no view of the host filesystem by design, so the tooling is
+# pushed via rsync over `podman machine ssh` instead of mounted -- a single
+# fast step that works against the local working tree, so changes are
+# testable without pushing to GitHub first.
 #
 # Runs after the machine stage. Safe to re-run; rsync only sends differences.
 
@@ -23,11 +23,9 @@ _ssh_port=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.Port}}')
 _ssh_key=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.IdentityPath}}')
 _ssh_user=$(podman machine inspect "$WK_MACHINE" --format '{{.SSHConfig.RemoteUsername}}')
 
-# _unpinned_host_key_opts (lib/reach.sh) is right for this machine too: a
-# podman machine is recreated by ./setup, not upgraded in place (CLAUDE.md,
-# "no in-place upgrades"), so its host key is exactly as disposable as a
-# board's bench image. -p/-i/BatchMode/ConnectTimeout are what remain
-# genuinely this machine's own -- a random port and a generated key,
+# _unpinned_host_key_opts (lib/reach.sh) fits here too: a podman machine is
+# recreated by ./setup, not upgraded in place, so its host key is as
+# disposable as a board's bench image. -p/-i/BatchMode/ConnectTimeout are
 # discovered fresh from `podman machine inspect` every run.
 command -v _unpinned_host_key_opts >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 
@@ -38,11 +36,9 @@ _rsh() {
         "$_ssh_user@localhost" "$@"
 }
 
-# --delete so a file removed here is removed there: a stale command left behind
-# in the VM would shadow the current one and be very confusing to debug.
-#
-# --itemize-changes so this reports honestly: an unconditional "synced" message
-# would make every setup run look like it changed something.
+# --delete so a file removed here is removed there: a stale command left
+# behind in the VM would shadow the current one. --itemize-changes so this
+# reports honestly, rather than "synced" on every run.
 _synced=$(rsync -az --delete --itemize-changes \
     -e "ssh -q -p $_ssh_port -i $_ssh_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
     --exclude '.git/' \
@@ -54,30 +50,20 @@ else
     unchanged "wk-tools in sync"
 fi
 
-# WK_VMTOOLS_ONLY=tools: the push above and nothing else.
-#
-# `wk sync --target container` is the caller, and it wants exactly this one
-# thing -- the copy of wk-tools every container bind-mounts read-only. Until it
-# existed, that copy was refreshed only by `./setup --stage vmtools`, so a
-# command added here was "unknown command" inside every container until somebody
-# remembered to re-run setup. An environment variable rather than an argument
-# because this file is *sourced* by ./setup, and $1 there is setup's own.
+# WK_VMTOOLS_ONLY=tools: the push above and nothing else -- what `wk sync
+# --target container` wants, the copy of wk-tools every container
+# bind-mounts read-only. An env var, not an argument, since this file is
+# *sourced* by ./setup and $1 there is setup's own.
 
-# The egress policy is *part of* the tooling that was just pushed, so it is
-# applied here rather than only by a full `./setup`.
-#
-# Restarted only when the policy itself changed. An unconditional restart would
-# fit the "regenerate, never accumulate" rule, but it also drops every
-# workspace's egress for a moment, and this file is meant to be runnable while a
-# build is fetching something. The per-device part (pi-hosts) is re-read per
-# request and needs no restart at all.
+# The egress policy is part of the tooling just pushed, so it's applied
+# here too. Restarted only when the policy changed: an unconditional
+# restart drops every workspace's egress for a moment, and this file is
+# meant to be runnable while a build is fetching something.
 _proxy_policy_hash() { cksum < "$WK_ROOT/container/proxy/wk-proxy.py" | awk '{print $1}'; }
 
-# Only when it is already running: starting it is the full setup's job (the unit
-# is installed further down), and a `wk sync --target container` on a machine
-# that has never been set up should not report a failure to start something it
-# was not asked to install. Returns non-zero when there was nothing running to
-# reload, which is what the full path branches on.
+# Only when it is already running: starting it is the full setup's job, and
+# `wk sync --target container` on a never-set-up machine should not report a
+# failure to start something it wasn't asked to install.
 _proxy_policy_reload() {
     local want; want=$(_proxy_policy_hash)
     _rsh 'systemctl --user is-active --quiet wk-proxy.service' || return 1
@@ -98,9 +84,9 @@ if [ "${WK_VMTOOLS_ONLY:-}" = tools ]; then
 fi
 
 # --- shared mutable skills ---------------------------------------------------
-# Seeded from the repo once, then left alone. Workspaces share this directory
-# read-write and are expected to edit it, so re-syncing on every setup run would
-# silently destroy their work. `wk skills pull` is how edits come back.
+# Seeded from the repo once, then left alone: workspaces share this
+# directory read-write, so re-syncing on every run would destroy their
+# edits. `wk skills pull` is how edits come back.
 if _rsh 'test -d /var/lib/wk/skills && test -n "$(ls -A /var/lib/wk/skills 2>/dev/null)"'; then
     unchanged "shared skills present (not overwritten)"
     _rsh 'diff -rq /opt/wk-tools/claude/skills /var/lib/wk/skills >/dev/null 2>&1' \
@@ -112,8 +98,8 @@ else
 fi
 
 # --- build key ---------------------------------------------------------------
-# One shared deploy key, used only for pushing to the fork. Generated here so a
-# fresh machine is ready to go; it still has to be registered on GitHub once.
+# One shared deploy key, generated here so a fresh machine is ready to go;
+# it still has to be registered on GitHub once.
 _rsh 'WK_IN_VM=1 /opt/wk-tools/cmd/key ensure' 2>&1 | sed 's/^/  /' || true
 if _rsh 'test -f /var/lib/wk/secrets/build_key.pub'; then
     unchanged "build key present"
@@ -122,22 +108,20 @@ else
 fi
 
 # --- machine configuration is regenerated, never accumulated -----------------
-# Everything below is derived wholly from this repo and reapplied on every run,
-# so a change made by hand inside the VM does not survive `./setup`. That is the
-# point: the VM is meant to be reproducible from the repo, and configuration
-# drift there is invisible and very hard to debug.
+# Everything below is derived wholly from this repo and reapplied on every
+# run, so a change made by hand inside the VM does not survive `./setup`:
+# the VM is reproducible from the repo, and drift there is invisible and
+# hard to debug.
 #
-# What is regenerated: /opt/wk-tools, the SDK checkout and its patches, the
-# egress proxy, the podman network, installed packages.
-#
-# What is NOT touched, because it is data rather than configuration:
+# Regenerated: /opt/wk-tools, the SDK checkout and its patches, the egress
+# proxy, the podman network, installed packages. NOT touched, since it is
+# data rather than configuration:
 #   /var/lib/wk/git      the mirror        /var/lib/wk/ws       workspaces
 #   /var/lib/wk/base     snapshots         /var/lib/wk/cache    ccache et al
 #   /var/lib/wk/skills   mutable skills    /var/lib/wk/secrets  the build key
 
-# Re-applied every run so nothing done by hand in the VM survives, but reported
-# from ansible's own changed-count -- regenerating to an identical result is not
-# a change, and saying it is destroys the signal value of "no changes".
+# Reported from ansible's own changed-count: regenerating to an identical
+# result is not a change, and saying it is destroys the signal of "no changes".
 debug "re-applying machine provisioning"
 scp -q -P "$_ssh_port" -i "$_ssh_key" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -150,10 +134,10 @@ case "$_pb" in
 esac
 
 # --- the SDK -----------------------------------------------------------------
-# Cloned inside the VM, then patched. The patches are what make a sandboxed
-# workspace possible at all: without --additional-flags there is no way to
-# attach the overlay mount, and without a selectable --network the container
-# shares the host namespace and cannot be firewalled.
+# Cloned inside the VM, then patched. The patches make a sandboxed workspace
+# possible at all: without --additional-flags there is no way to attach the
+# overlay mount, and without a selectable --network the container shares
+# the host namespace and cannot be firewalled.
 if _rsh 'test -d /opt/webkit-container-sdk/.git'; then
     unchanged "webkit-container-sdk present"
 else
@@ -163,13 +147,11 @@ else
     changed "cloned webkit-container-sdk"
 fi
 
-# Hard reset before patching. Without this an edit made inside the VM would
-# survive forever: the patcher is idempotent and would see its own markers
-# already present, so it would leave the tampered file exactly as it found it.
-#
-# Because of that reset the patcher always has work to do and always says so.
-# What matters is whether the *result* differs, so hash the patched files either
-# side and report on that; the patcher's own chatter is debug-level.
+# Hard reset before patching: without it an edit made inside the VM would
+# survive forever, since the idempotent patcher sees its own markers already
+# present and leaves a tampered file as found. The reset means the patcher
+# always has work to do, so what's reported is whether the *result* differs,
+# hashed either side; the patcher's own chatter is debug-level.
 debug "resetting and re-patching the SDK"
 _sdk_hash() {
     _rsh 'cat /opt/webkit-container-sdk/scripts/host-only/wkdev-create \
@@ -194,24 +176,19 @@ else
 fi
 
 # --- the egress proxy --------------------------------------------------------
-# The boundary, and the same one Linux uses. A systemd --user service owned by
-# `core`, so nothing in the daily path needs a privilege and nothing inside a
-# workspace can modify it: the workspace sees one unix socket and nothing else.
-#
-# This is the egress policy, in place of an nftables one. The short version:
-# nftables requires
-# rootful podman -- and under rootful podman a container escape is a root
-# escape -- while the proxy needs no privilege at all and expresses the policy
-# in hostnames rather than hand-refreshed CIDR lists.
-#
-# Lingering is already on for `core` in the podman machine, so the service
-# survives with nobody logged in.
+# The boundary, the same one Linux uses: a systemd --user service owned by
+# `core`, so nothing in the daily path needs a privilege and nothing inside
+# a workspace can modify it. In place of nftables, which requires rootful
+# podman -- and under rootful podman a container escape is a root escape --
+# the proxy needs no privilege and expresses policy in hostnames rather
+# than hand-refreshed CIDR lists. Lingering is already on for `core`, so
+# the service survives with nobody logged in.
 debug "installing the egress proxy in the machine"
 
 _rsh 'mkdir -p ~/.config/systemd/user'
 
-# %t expands to the user runtime directory, which is /run/user/501 here -- the
-# machine's `core` is uid 501, not the 1000 the old comments assumed.
+# %t expands to the user runtime directory: /run/user/501, since the
+# machine's `core` is uid 501.
 _unit=$(mktemp)
 cat > "$_unit" <<'UNIT'
 [Unit]
@@ -225,9 +202,8 @@ ExecStart=/usr/bin/python3 /opt/wk-tools/container/proxy/wk-proxy.py
 Environment=WK_STORE=/var/lib/wk
 Restart=on-failure
 RestartSec=2
-# Containers bind-mount %t/wk, so systemd must not delete it on stop: every
-# running workspace would be left holding a mount of a deleted directory, and
-# restarting the proxy would not fix it.
+# Containers bind-mount %t/wk, so systemd must not delete it on stop, or
+# every running workspace is left holding a mount of a deleted directory.
 RuntimeDirectory=wk
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
@@ -264,10 +240,9 @@ if ! _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
 fi
 
 # --- retire the nftables policy ----------------------------------------------
-# Removed rather than left dormant. A workspace with an interface *and* a proxy
-# socket has the union of two policies, and the failure is silent: the packet
-# filter allows a connection the proxy would have refused, and nothing logs a
-# decision that was never asked for.
+# Removed rather than left dormant: a workspace with an interface *and* a
+# proxy socket has the union of two policies, silently -- the packet filter
+# allows a connection the proxy would have refused.
 if _rsh 'sudo nft list table inet wk_egress >/dev/null 2>&1'; then
     _rsh 'sudo nft delete table inet wk_egress 2>/dev/null || true
           sudo rm -f /etc/nftables/wk-egress.nft
