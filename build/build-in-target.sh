@@ -27,23 +27,10 @@ _q() {
 SRC=${WK_SRC:-/src/WebKit}
 cd "$SRC"
 
-jobs=${WK_JOBS:-4}
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/guard.sh"
+jobs=$(guard_jobs "${WK_JOBS:-4}")
 buildsys=${WK_BUILDSYS:-cmake}
 
-# Authoritative clamp: this runs *inside* the target, its own cgroup limit is
-# the real ceiling. No cgroup on macOS; `tart set` fixes memory at boot.
-if [ -r /sys/fs/cgroup/memory.max ]; then
-    limit=$(cat /sys/fs/cgroup/memory.max)
-    if [ "$limit" != max ]; then
-        max_jobs=$(( limit / 1024 / 1024 / ${WK_MB_PER_JOB:-4096} ))
-        [ "$max_jobs" -lt 1 ] && max_jobs=1
-        if [ "$jobs" -gt "$max_jobs" ]; then
-            echo "clamping -j$jobs -> -j$max_jobs (cgroup limit $(( limit / 1024 / 1024 ))MB)" >&2
-            jobs=$max_jobs
-        fi
-    fi
-fi
-nicelevel=${WK_NICE:-10}
 
 cmakeargs=${WK_BUILD_CMAKE:-}
 
@@ -135,33 +122,12 @@ xcode)
     ;;
 esac
 
-# --- the memory watchdog -----------------------------------------------------
-# Pointed at *this* shell's pid, which `exec` below preserves. Budget is
-# jobs x the per-job estimate; an explicit --mem-budget is never raised.
-if [ -n "${WK_MEM_BUDGET_MB:-}" ]; then
-    mem_budget=$WK_MEM_BUDGET_MB
-else
-    mem_budget=$(( jobs * ${WK_MB_PER_JOB:-1536} ))
-    [ "$mem_budget" -lt 8192 ] && mem_budget=8192
-fi
-watchdog="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/mem-watchdog.sh"
-if [ -x "$watchdog" ] && [ -z "${WK_DRY_RUN:-}" ]; then
-    "$watchdog" "$$" "$mem_budget" "${WK_MEM_FLOOR_MB:-2048}" &
-    echo "wk: memory watchdog: budget ${mem_budget}MB, floor ${WK_MEM_FLOOR_MB:-2048}MB, sampled every ${WK_MEM_INTERVAL:-30}s" >&2
-fi
-
-# ionice keeps the build off the desktop's I/O path; choom makes the OOM
-# killer choose the build over the session. Neither exists on macOS.
-pre=""
-command -v ionice >/dev/null 2>&1 && pre="ionice -c3"
-command -v choom  >/dev/null 2>&1 && pre="$pre choom -n 500 --"
-
 # WK_DRY_RUN: print the command, build nothing. Done here, not in cmd/build,
 # since this is the half that resolves ionice/choom/the cgroup clamp.
 if [ -n "${WK_DRY_RUN:-}" ]; then
     printf 'cd %s && ' "$(_q "$SRC")"
-    # shellcheck disable=SC2086 -- $wrapper and $pre are deliberate word lists.
-    set -- $wrapper $pre nice -n "$nicelevel" \
+    # shellcheck disable=SC2086,SC2046 -- $wrapper and the guard prefix are deliberate word lists.
+    set -- $wrapper $(_guard_prefix) \
         Tools/Scripts/build-webkit "${args[@]}" ${@+"$@"}
     for _a in "$@"; do printf '%s ' "$(_q "$_a")"; done
     printf '\n'
@@ -169,6 +135,6 @@ if [ -n "${WK_DRY_RUN:-}" ]; then
 fi
 
 set -x
-# shellcheck disable=SC2086 -- $wrapper and $pre are deliberate lists of bare words.
-exec $wrapper $pre nice -n "$nicelevel" \
-    Tools/Scripts/build-webkit "${args[@]}" ${@+"$@"}
+# The guard (build/guard.sh): memory watchdog on this pid, ionice, nice.
+# shellcheck disable=SC2086 -- $wrapper is a deliberate list of bare words.
+guard_exec "$jobs" -- $wrapper Tools/Scripts/build-webkit "${args[@]}" ${@+"$@"}

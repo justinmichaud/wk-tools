@@ -107,6 +107,8 @@ export_target_resources "$NAME"
 POLITE=""
 [ "$WK_TARGET_KIND" = remote ] && POLITE=1
 JOBS=$(build_jobs "$POLITE")
+build_admit "this test run" "$JOBS"
+build_record "wk test $NAME" "$JOBS" "$(( JOBS * WK_MB_PER_JOB ))" "pid:$$"
 
 # llvmpipe via Mesa's software gallium driver, and the WPE headless backend
 # so no compositor is needed. None of it applies to Apple ports: a macOS

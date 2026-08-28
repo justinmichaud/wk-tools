@@ -164,18 +164,10 @@ EOF
     fi
 
     buildroot_ensure_ws "$ws"
-
-    local log pid
-    log=$(buildroot_log "$ws" image); pid=$(buildroot_pidfile "$ws" image)
-    # Truncated, not unlinked: `tail -f` follows an inode, so deleting the
-    # log leaves an existing follower watching a file nobody writes to.
-    : > "$log"; rm -f "$pid"
+    buildroot_refuse_busy "$ws"
 
     info "building $profile in '$ws'"
-    log  "  log: $log"
-
-    t_spawn "$ws" "$(t_home "$ws")/$(basename "$log")" \
-                  "$(t_home "$ws")/$(basename "$pid")" \
+    _buildroot_run "$ws" image "$detach" "hours" "$jobs" -- \
         "$(t_tools "$ws")/image/buildroot-build.sh" \
             --name "$profile" \
             --tree-url "$BR_TREE_URL" \
@@ -188,12 +180,51 @@ EOF
             ${overlay_arch:+--overlay-arch "$overlay_arch"} \
             ${overlay_wifi:+--overlay-wifi 1} \
             ${BR_ROOTFS_SIZE:+--rootfs-size "$BR_ROOTFS_SIZE"} \
-        || die "could not start the build in '$ws'"
+        || return 1
+    [ -n "$detach" ] || info "built $profile in '$ws'"
+}
+
+# One job per workspace: an image build and a slot build both move the
+# checkout and the tree's output under them. (What the machine as a whole
+# can fit is build_admit's question, lib/resources.sh.) Evidence is the pid
+# a detached stage leaves, asked of the workspace (ws_busy_reason); a dead
+# pid is a finished job, whatever its log says.
+buildroot_refuse_busy() {
+    local ws="$1" busy
+    busy=$(ws_busy_reason "$ws") || return 0
+    [ -n "$busy" ] || return 0
+    die "a build is still running in '$ws': $busy.
+    One job per workspace: both move the checkout and the tree's output.
+    Follow it:  tail -f $(wk_ws_dir "$ws")/home/${busy%% *}.log
+    Stop it:    wk sysimage build $IMG_PROFILE --stop"
+}
+
+# Start a stage's script in the workspace and, unless detached, wait for its
+# completion line. `<stage>` names the log and pid files (buildroot-<stage>.*
+# in the workspace's home); the script ends with "stage '<stage>' done" or it
+# did not finish, whatever its exit status says.
+_buildroot_run() { # <ws> <stage> <detach> <how long> <jobs> -- <script> <args...>
+    local ws="$1" stage="$2" detach="$3" howlong="$4" jobs="$5"; shift 5
+    [ "${1:-}" = -- ] && shift
+    local log pid
+    log=$(buildroot_log "$ws" "$stage"); pid=$(buildroot_pidfile "$ws" "$stage")
+    # Sized against the machine's other builds, and on its books while it
+    # runs (lib/resources.sh): the pid it leaves is the workspace's own.
+    build_admit "the $stage build" "$jobs"
+    build_record "wk sysimage $stage $ws" "$jobs" "$(( jobs * 2048 ))" "ws:$ws:buildroot-$stage.pid"
+    # Truncated, not unlinked: `tail -f` follows an inode, so deleting the
+    # log leaves an existing follower watching a file nobody writes to.
+    : > "$log"; rm -f "$pid"
+    log "  log: $log"
+
+    t_spawn "$ws" "$(t_home "$ws")/$(basename "$log")" \
+                  "$(t_home "$ws")/$(basename "$pid")" "$@" \
+        || die "could not start the $stage build in '$ws'"
 
     local i=0
     while [ ! -s "$pid" ]; do
         i=$((i + 1))
-        [ "$i" -gt 50 ] && die "the build did not start in '$ws' (no pid after 5s)
+        [ "$i" -gt 50 ] && die "the $stage build did not start in '$ws' (no pid after 5s)
 $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
         sleep 0.1
     done
@@ -206,10 +237,90 @@ $(sed 's/^/    /' "$log" 2>/dev/null | tail -5)"
         return 0
     fi
 
-    info "waiting for the build (hours; --detach returns instead)"
-    while kill -0 "$(cat "$pid" 2>/dev/null)" 2>/dev/null; do sleep 10; done
-    grep -q "stage 'image' done" "$log" \
-        || die "the build in '$ws' failed. Last lines:
+    info "waiting for the $stage build ($howlong; --detach returns instead)"
+    # The pid is the workspace's (its own pid namespace); asked of the
+    # workspace, never of this host.
+    while t_exec "$ws" kill -0 "$(cat "$pid" 2>/dev/null)" >/dev/null 2>&1; do sleep 10; done
+    grep -q "stage '$stage' done" "$log" \
+        || die "the $stage build in '$ws' failed. Last lines:
 $(tail -20 "$log" | sed 's/^/    /')"
-    info "built $profile in '$ws'"
+    return 0
+}
+
+# --- slots: one image, several WebKits ------------------------------------------
+# `wk sysimage webkit <profile> --commit <sha> --slot <name>` builds one
+# WebKit commit with the image's own wpewebkit package, into
+# output/wk-slots/<name>/ in the image's workspace (image/buildroot-webkit.sh
+# has the recipe; image_slot_dir, lib/image.sh, the location). A board
+# running the image carries any number of slots beside the WebKit it shipped
+# with, and `wk pi bench --ab` alternates between two of them with no reflash
+# and no reboot.
+buildroot_webkit() {
+    local profile="$1"; shift
+    local detach="" dry="" ws="" commit="" slot=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --detach)    detach=1 ;;
+            --dry-run)   dry=1 ;;
+            --workspace) ws="${2:-}"; shift ;;
+            --commit)    commit="${2:-}"; shift ;;
+            --slot)      slot="${2:-}"; shift ;;
+            *) die "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]; unknown option: $1" ;;
+        esac
+        shift
+    done
+    [ -n "$commit" ] && [ -n "$slot" ] \
+        || die "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]; see wk sysimage -h"
+    image_check_slot_name "$slot"
+    case "$commit" in *[!0-9a-f]*) die "--commit takes a full sha (40 hex digits), got '$commit'" ;; esac
+    [ "${#commit}" -eq 40 ] || die "--commit takes a full sha (40 hex digits), got '$commit'.
+    'git rev-parse' in the mirror or the workspace expands a short one."
+
+    ws="${ws:-buildroot-$profile}"
+    local image slotdir jobs
+    image="$(wk_ws_dir "$ws")/build/buildroot/$profile/output/images/${BR_IMAGE:-sdcard.img}"
+    slotdir=$(image_slot_dir "$profile" "$slot")
+    # WebKit's own build parallelises well and links large: memory-sized at
+    # 2 GB a job, capped where the link steps stop gaining.
+    jobs=$(WK_MB_PER_JOB=2048 WK_MAX_JOBS=64 build_jobs)
+
+    if [ -n "$dry" ]; then
+        cat >&2 <<EOF
+would build a WebKit slot for image $profile (builder: buildroot)
+  commit       $commit
+  slot         $slot -> $slotdir
+  workspace    $ws ($(t_info "$ws" 2>/dev/null || echo absent))
+  image        $([ -f "$image" ] && echo "$image" || echo "NOT BUILT -- the real run refuses here (wk sysimage build $profile)")
+  toolchain    the image's own (output/host/share/buildroot/toolchainfile.cmake),
+               options from the tree's WPEWEBKIT_CONF_OPTS, plus --build-id per slot
+  jobs         -j$jobs (memory-sized at 2048 MB/job)
+  existing     $([ -f "$slotdir/slot.json" ] \
+                    && echo "slot '$slot' holds $(python3 "$WK_ROOT/lib/wkslot.py" get "$slotdir/slot.json" commit | cut -c1-12) -- rebuilt incrementally in the same build directory" \
+                    || echo "none")
+EOF
+        log "dry run -- nothing was built."
+        return 0
+    fi
+
+    [ "$(t_info "$ws")" != absent ] \
+        || die "no workspace '$ws', so there is no image to build against.
+    Build the image first:  wk sysimage build $profile"
+    [ -f "$image" ] \
+        || die "'$ws' has no finished image ($image).
+    A slot is built against the image's toolchain, so the image comes first:
+        wk sysimage build $profile"
+    buildroot_refuse_busy "$ws"
+
+    info "building WebKit $(printf '%s' "$commit" | cut -c1-12) into slot '$slot' of $profile (in '$ws')"
+    _buildroot_run "$ws" "webkit-$slot" "$detach" "tens of minutes" "$jobs" -- \
+        "$(t_tools "$ws")/image/buildroot-webkit.sh" \
+            --name "$profile" --commit "$commit" --slot "$slot" --jobs "$jobs" \
+        || return 1
+    if [ -z "$detach" ]; then
+        [ -f "$slotdir/slot.json" ] || die "the build reported done but left no $slotdir/slot.json"
+        info "slot '$slot' of $profile holds $(printf '%s' "$commit" | cut -c1-12)"
+        log  "  $slotdir"
+        log  "  next:  wk pi deploy $profile <machine> --slot $slot"
+    fi
 }

@@ -5,6 +5,7 @@
 - [ ] rpi3: a slot-aware `wk sysimage write` (today it writes one whole system to one whole device and cannot put a system into a slot without destroying the other) [needs a Pi card in hand]
 - [ ] rpi3: arm `boot/pi-sd.sh` with `root=` plus the bench kernel on the shared boot partition, and its stage-2 revert (initramfs fallback or rescue-side pivot) [needs a Pi card in hand]
 - [ ] rpi3: BusyBox equivalents of the self-return watchdog and self-disarm, for an image with no systemd [needs a Pi card in hand]
+- [ ] rpi4: with the rescue on the stick and the bench system on the SD, booting the SD means disarming the stick, and only the bench system can hand the board back -- the BusyBox self-return above is what makes a first boot of a buildroot image survivable [needs the BusyBox self-return]
 - [ ] rebuild and re-flash rpi3 and rpi4 onto the tailnet layer (rpi4's SD still runs a live 900s self-return watchdog rebooting it every 15 minutes) [needs a Pi card in hand]
 - [ ] verify the rescue marker plus both self-return/self-disarm units end to end on a real board [needs a Pi card in hand]
 - [ ] verify a `--rescue` write without `--grow` leaves the rest of a shared card alone (the rpi3 two-slot case) [needs a Pi card in hand]

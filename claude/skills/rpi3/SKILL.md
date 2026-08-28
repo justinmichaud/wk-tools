@@ -46,7 +46,17 @@ ssh rpi3 'systemctl stop netdata; systemctl start weston; sleep 4; pidof weston-
 ```
 If `/WebKit` isn't mounted: `sudo mkdir -p /WebKit && sudo mount /dev/sda1 /WebKit`.
 
-### Deploying a build (only if you uploaded a fresh archive)
+### Where a wk-deployed WebKit is
+
+`wk pi deploy <image-profile|yocto-workspace> rpi3 --slot <name>` puts a WebKit at
+`/var/wk/slots/<name>/root/` (usr/lib, usr/libexec/wpe-webkit-*, ...) with a
+`slot.json` beside it naming the commit and the build-id; `wk pi bench` runs
+run-benchmark on the workstation and launches the board's own `cog` from that
+slot over ssh, with `LD_LIBRARY_PATH`, `WEBKIT_EXEC_PATH` and
+`WEBKIT_INJECTED_BUNDLE_PATH` pointing into it. Prefer those commands; the
+by-hand paths below are for a board provisioned the older way.
+
+### Deploying a build by hand (only if you uploaded a fresh archive)
 The checkout lives at `/WebKit/WebKit`. If you ever need to (re)create it, the checkout was
 originally cloned as (adjust the branch to the WPE release you want):
 ```

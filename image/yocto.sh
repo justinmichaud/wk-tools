@@ -205,6 +205,11 @@ yocto_spawn() {
     Stop it:    wk sysimage build $IMG_PROFILE --stage $live --stop"
     fi
 
+    # Sized against the machine's other builds and on its books while it
+    # runs (lib/resources.sh): a bitbake run takes the whole envelope.
+    build_admit "the $stage build" "$(build_jobs)"
+    build_record "wk sysimage $stage $ws" "$(envelope_cores)" "$(envelope_mem_mb)" "ws:$ws:yocto-$stage.pid"
+
     # Truncated, not unlinked: `tail -f` follows an inode, so deleting it
     # would leave a follower staring at a file nobody writes to any more.
     : > "$log"
@@ -326,6 +331,7 @@ would build image $IMG_PROFILE (builder: yocto)
   local fixes $([ "${YOC_LOCAL_LAYER:-1}" = 0 ] && echo "none -- the branch's own configuration, unmodified" || echo "image/yocto/meta-wk is added to bblayers (build-time only)")
   tailnet     $([ "${YOC_TAILNET:-1}" = 0 ] && echo "off -- the board is reachable only over whatever LAN it lands on" || echo "tailscale in the image (meta-wk-tailnet); the card carries the key")
   wifi        $(_image_wants_wifi "${IMG_MACHINE:-}" && echo "wk-wifi-join in the image (meta-wk-wifi); the card carries the credential" || echo "not needed -- $IMG_MACHINE has a cable")
+  rescue      wk-card-priv in the image (meta-wk-rescue), so a board's rescue can write its bench medium
   disk free   $(df -h --output=avail "$WK_STORE" 2>/dev/null | tail -1 | tr -d ' ')
   into        $(yocto_image_dir "$YOC_TARGET")/$YOC_IMAGE.wic.xz -- no import; that is
               where 'wk sysimage ls' and 'wk sysimage write --from' read it
@@ -337,7 +343,7 @@ EOF
 yocto_build() {
     local profile="$1"; shift
     local dry="" ws="" stage="" detach="" keep_work="" stop=""
-    local chromium=""
+    local chromium="" commit="" slot=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -356,10 +362,15 @@ yocto_build() {
             # against numbers taken without it in the fleet.
             --no-tailnet)     YOC_TAILNET=0 ;;
             --tailnet)        YOC_TAILNET=1 ;;
+            # The webkit stage as a slot: WebKit's own build-webkit
+            # --cross-target of one commit, packed beside the image
+            # (`wk sysimage webkit`; image_slot_dir, lib/image.sh).
+            --commit)         commit="${2:-}"; shift ;;
+            --slot)           slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
             *) die "unknown option: $1
     'wk sysimage build $profile' takes --dry-run, --workspace, --stage,
     --detach, --stop, --keep-work, --chromium, --no-local-layer and
-    --no-tailnet." ;;
+    --no-tailnet; 'wk sysimage webkit $profile' adds --commit and --slot." ;;
         esac
         shift
     done
@@ -377,6 +388,12 @@ yocto_build() {
     # *depth*, not a pipeline this end has to sequence -- which is what
     # makes `--detach` honest.
     stage="${stage:-image}"
+    if [ -n "$commit$slot" ]; then
+        [ "$stage" = webkit ] || die "--commit/--slot belong to the webkit stage (wk sysimage webkit $profile)"
+        [ -n "$commit" ] && [ -n "$slot" ] || die "a slot needs both --commit <sha> and --slot <name>"
+        case "$commit" in *[!0-9a-f]*) die "--commit takes a full sha (40 hex digits), got '$commit'" ;; esac
+        [ "${#commit}" -eq 40 ] || die "--commit takes a full sha (40 hex digits), got '$commit'"
+    fi
     case "$stage" in
         layers|fetch|image|toolchain|webkit) ;;
         *) die "unknown stage '$stage'. One of, each including the ones above it:
@@ -458,7 +475,8 @@ EOF
         --local-layer "${YOC_LOCAL_LAYER:-1}" \
         --tailnet "${YOC_TAILNET:-1}" \
         --webkit-jobs "$(WK_MB_PER_JOB=2560 build_jobs)" \
-        --sstate-ns "$(printf '%s' "${WK_SDK_IMAGE##*/}" | tr ':/' '--')"
+        --sstate-ns "$(printf '%s' "${WK_SDK_IMAGE##*/}" | tr ':/' '--')" \
+        ${commit:+--commit "$commit"} ${slot:+--slot "$slot" --profile "$profile"}
 
     if [ -n "$detach" ]; then
         info "running detached in '$ws' -- this end can go away"

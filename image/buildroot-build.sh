@@ -167,6 +167,10 @@ make $BR_EXT "$DEFCONFIG" || fail "no such defconfig: $DEFCONFIG
     echo "BR2_DL_DIR=\"$BR2_DL_DIR\""
     echo "BR2_CCACHE=y"
     echo "BR2_CCACHE_DIR=\"$BR2_CCACHE_DIR\""
+    # Every binary carries a build-id: the identifier a WebKit slot is told
+    # apart by in the running process (wk pi bench). The toolchain file
+    # cmake packages read it from is regenerated below when this is new.
+    echo "BR2_TARGET_LDFLAGS=\"-Wl,--build-id\""
     [ -z "$OVERLAY" ]   || echo "BR2_ROOTFS_OVERLAY=\"$OVERLAY\""
 } >> .config
 # shellcheck disable=SC2086
@@ -176,7 +180,31 @@ for v in BR2_DL_DIR BR2_CCACHE_DIR BR2_ROOTFS_OVERLAY; do
     grep -q "^$v=" .config && say "  $(grep "^$v=" .config)"
 done
 
+# The linker flag above reaches cmake packages through the exported
+# toolchain file, written once at toolchain install; a tree built before the
+# flag has one without it, and buildroot's own reinstall rewrites it.
+TCF="$WORKDIR/output/host/share/buildroot/toolchainfile.cmake"
+if [ -f "$TCF" ] && ! grep -q -- '--build-id' "$TCF"; then
+    say "the toolchain file predates BR2_TARGET_LDFLAGS; reinstalling the toolchain to regenerate it"
+    # shellcheck disable=SC2086
+    make $BR_EXT toolchain-reinstall >/dev/null || fail "toolchain-reinstall failed"
+fi
+
+# The image is built from the pinned tarball and nothing else. A slot build
+# (image/buildroot-webkit.sh) leaves a local.mk pointing the wpewebkit
+# package at the workspace checkout instead; here that override is dropped
+# and the package rebuilt from its own source, so the image never ships the
+# last slot built (buildroot's own developer workflow, in reverse).
+if [ -f "$WORKDIR/local.mk" ]; then
+    say "dropping local.mk (a WebKit slot's source override) and rebuilding wpewebkit from the pinned tarball"
+    rm -f "$WORKDIR/local.mk"
+    # shellcheck disable=SC2086
+    make $BR_EXT wpewebkit-dirclean >/dev/null || fail "wpewebkit-dirclean failed"
+fi
+
 # --- the build ---------------------------------------------------------
+# Under the guard every heavy step in a target runs under (build/guard.sh).
+. /opt/wk-tools/build/guard.sh
 # FORCE_UNSAFE_CONFIGURE=1: the workspace user is uid 0 in some configs, and
 # several 2009-era configure scripts refuse to run as root (the wiki recipe
 # carries the same flag). Start time taken here, not at the top: cloning and
@@ -185,7 +213,7 @@ done
 build_start=$(date +%s)
 say "building (this is hours, and the log below is the whole account of it)"
 # shellcheck disable=SC2086
-FORCE_UNSAFE_CONFIGURE=1 make $BR_EXT -j"$JOBS" \
+WK_MB_PER_JOB=2048 guard_run "$JOBS" -- env FORCE_UNSAFE_CONFIGURE=1 make $BR_EXT -j"$JOBS" \
     || fail "buildroot failed. The last lines above are the failing package."
 
 # --- what came out -----------------------------------------------------

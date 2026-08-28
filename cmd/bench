@@ -106,6 +106,9 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
+# The result store, seeded payloads and the variance knobs' record, shared
+# with `wk pi bench`.
+. "$WK_ROOT/lib/bench.sh"
 # A benchmark is legitimately silent for much longer than a build: MotionMark
 # reports once per subtest and a subtest can run for minutes. Raised here,
 # before lib/watchdog.sh is sourced, so its own `:-300`/`:-1800` defaults
@@ -145,13 +148,6 @@ if [ "${1:-}" = --where ]; then
     exit 0
 fi
 
-# Every JSON read or write in this file goes through lib/wkdata.py: inputs
-# arrive as argv or stdin, never spliced into a python -c string, and the
-# axis-mismatch logic and the env.json schema live in one place.
-wkdata() { python3 "$WK_ROOT/lib/wkdata.py" "$@"; }
-
-BENCH_DIR="$WK_STORE/bench"
-SEED_DIR="$WK_STORE/cache/bench"
 
 # bench's paths (/bench, /cache/bench, /src/WebKit) are container mounts, so
 # only container workspaces are supported; refused by name rather than
@@ -302,21 +298,6 @@ bench_padded_path() {
     printf '%s' "$link"
 }
 
-# bench_configuration_args -- into the global array BENCH_CFG_ARGS, the
-# `wkdata env-record` arguments for the `configuration` block. path_len
-# records the pad *requested*, not a resolved path's length: what matters
-# for grouping variance is which axis was varied, not the exact string.
-bench_configuration_args() {
-    BENCH_CFG_ARGS=()
-    [ "${WK_BENCH_ASLR:-}" = off ] && BENCH_CFG_ARGS+=("configuration.aslr=off")
-    local pad="${WK_BENCH_ENV_PAD:-0}"
-    case "$pad" in ''|*[!0-9]*) pad=0 ;; esac
-    [ "$pad" -gt 0 ] && BENCH_CFG_ARGS+=("configuration.env_pad_bytes=$pad")
-    local pl="${WK_BENCH_PATH_PAD:-0}"
-    case "$pl" in ''|*[!0-9]*) pl=0 ;; esac
-    [ "$pl" -gt 0 ] && BENCH_CFG_ARGS+=("configuration.path_len=$pl")
-    return 0
-}
 
 CONFIG="${WK_CONFIG:-wpe-release}"
 # Defaulted from the config's port below: the two ports have different
@@ -357,72 +338,10 @@ cmd_ls() {
 # container's /src/WebKit: `wk bench stage` reads a plan out of a macOS
 # guest, where that path doesn't exist), since a workspace may be testing a
 # change to the plan itself.
-plan_json() {
-    local ws="$1" plan="$2" body seen=0
-    while [ "$seen" -lt 5 ]; do
-        body=$(t_exec "$ws" cat "$(t_src "$ws")/Tools/Scripts/webkitpy/benchmark_runner/data/plans/${plan}.plan" 2>/dev/null) \
-            || die "no such plan: $plan (plans live in Tools/Scripts/webkitpy/benchmark_runner/data/plans)"
-        # A plan file may contain nothing but the name of another plan.
-        case "$(printf '%s' "$body" | head -c 1)" in
-            '{') printf '%s' "$body"; return 0 ;;
-            *)   plan=$(printf '%s' "$body" | tr -d ' \n' | sed 's/\.plan$//'); seen=$((seen + 1)) ;;
-        esac
-    done
-    die "plan $plan indirects too many times"
-}
-
-# Seeded copies are keyed by the exact commit, so a moved upstream branch
-# produces a new directory rather than quietly changing an existing one.
-seed_payload() {
-    local ws="$1" plan="$2" json
-    json=$(plan_json "$ws" "$plan")
-
-    local spec
-    spec=$(printf '%s' "$json" | wkdata plan-spec 2>/dev/null) \
-        || { warn "cannot pre-seed $plan; run-benchmark will fetch it itself"; echo ""; return 0; }
-
-    # shellcheck disable=SC2086
-    set -- $spec
-    local kind="$1" url="$2" ref="$3" subdir="$4"
-    [ "$kind" = git ] || { echo ""; return 0; }
-
-    local sha
-    sha=$(git ls-remote "$url" "$ref" 2>/dev/null | awk '{print $1; exit}')
-    [ -n "$sha" ] || sha="$ref"     # already a commit
-
-    local dest="$SEED_DIR/$plan-${sha:0:12}"
-    if [ -d "$dest/.wk-seeded" ]; then
-        debug "payload cached: $dest"
-        # Repairs a cache that may still carry a .git (dropped below), and
-        # with it the fsmonitor socket that makes it more than a size issue.
-        [ -d "$dest/.git" ] && rm -rf "$dest/.git"
-        echo "$dest"; return 0
-    fi
-
-    info "seeding $plan payload from $url@${sha:0:12}"
-    local tmp; tmp=$(mktemp -d "$SEED_DIR/.tmp-XXXXXX")
-    if ! git clone -q "$url" "$tmp/repo" 2>/dev/null; then
-        rm -rf "$tmp"
-        warn "could not clone $url; run-benchmark will fetch the payload itself"
-        echo ""; return 0
-    fi
-    git -C "$tmp/repo" checkout -q "$sha" 2>/dev/null || git -C "$tmp/repo" checkout -q "$ref"
-
-    rm -rf "$dest"
-    if [ "$subdir" = "." ]; then
-        mv "$tmp/repo" "$dest"
-    else
-        mv "$tmp/repo/$subdir" "$dest"
-    fi
-    rm -rf "$tmp"
-    # No .git in a pinned payload: a clone carries git's runtime state,
-    # including fsmonitor's Unix domain socket, which no copy tool can
-    # reproduce.
-    rm -rf "$dest/.git"
-    mkdir -p "$dest/.wk-seeded"
-    printf 'url=%s\nref=%s\nsha=%s\nsubdir=%s\n' "$url" "$ref" "$sha" "$subdir" > "$dest/.wk-seeded/origin"
-    info "seeded $dest"
-    echo "$dest"
+# lib/bench.sh's plan resolver reads plans through this: the workspace's
+# own checkout, so a seeded payload is the one its run-benchmark names.
+bench_plan_read() { # <path under Tools/Scripts>
+    t_exec "$SEED_WS" cat "$(t_src "$SEED_WS")/Tools/Scripts/$1"
 }
 
 # --- preflight ---------------------------------------------------------------
@@ -734,7 +653,8 @@ cmd_run() {
     # Both host paths under the store; the container sees the same trees at
     # /cache/bench and /bench.
     local seeded seeded_ctr
-    seeded=$(seed_payload "$ws" "$plan")
+    SEED_WS="$ws"
+    seeded=$(seed_payload "$plan")
     seeded_ctr=""
     [ -n "$seeded" ] && seeded_ctr="/cache/bench/$(basename "$seeded")"
 
@@ -1647,9 +1567,7 @@ case "${1:-}" in
              [ -z "${2:-}" ] || die "usage: wk bench seed <workspace> <plan>; unexpected argument: $2; see wk bench -h"
              load_target "$(ws_target "$SEED_WS")"
              [ -n "${WK_NAME:-}" ] || wait_ready "$SEED_WS"
-             SEED_DIR="$WK_STORE/cache/bench"
-             ensure_dir "$SEED_DIR"
-             seed_payload "$SEED_WS" "$1"; exit 0 ;;
+             seed_payload "$1"; exit 0 ;;
     '') die "usage: wk bench <workspace> <plan> [options]; see wk bench -h" ;;
 esac
 

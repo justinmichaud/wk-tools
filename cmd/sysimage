@@ -22,7 +22,17 @@
 #                                --detach, --stop, --keep-work; a pmos profile
 #                                takes --detach and --resume and builds on a
 #                                Linux aarch64 machine over ssh
-#   ls | list                   every image a workspace here has built, and
+#   webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]
+#                                build one WebKit commit into a named slot
+#                                beside the image, the way its builder builds
+#                                WebKit: buildroot's own wpewebkit package, or
+#                                WebKit's build-webkit --cross-target on a
+#                                yocto image's toolchain.
+#                                A board running the image carries any number
+#                                of slots and 'wk pi bench --ab' alternates
+#                                two of them with no reflash and no reboot
+#   ls | list                   every image a workspace here has built, its
+#                                slots, and
 #                                where it is -- there is no store; the
 #                                workspace that built an image is its name
 #                                (wk help)
@@ -58,6 +68,8 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/boot/machines.sh"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/resources.sh"
+
+wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 . "$WK_ROOT/boot/disk.sh"
 . "$WK_ROOT/image/yocto.sh"
 . "$WK_ROOT/image/buildroot.sh"
@@ -348,11 +360,22 @@ cmd_build() {
 # What a workspace's build is doing right now, from the pid the detached build
 # recorded. Evidence, not a claim: `yocto.status` says `state=running` for ever
 # on a detached build, so it is not asked.
-_ws_building() { # <workspace>
-    local pid
-    pid=$(cat "$(wk_ws_dir "$1")/home/yocto-image.pid" 2>/dev/null) || return 1
-    [ -n "$pid" ] || return 1
-    kill -0 "$pid" 2>/dev/null
+# A slot is a builder's concern the way an image is: dispatched on
+# IMG_BUILDER. buildroot builds the image's own wpewebkit package from the
+# commit (image/buildroot-webkit.sh); yocto runs WebKit's own build-webkit
+# --cross-target against the image's toolchain, its `webkit` stage
+# (image/yocto-build.sh). Both land under image_slot_dir (lib/image.sh).
+cmd_webkit() {
+    local profile="${1:-}"
+    [ -n "$profile" ] || die "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]; see wk sysimage -h"
+    image_profile_load "$profile" || die "unknown profile '$profile'.
+    'wk sysimage build --list' has every configuration."
+    shift
+    case "${IMG_BUILDER:-}" in
+        buildroot) load_target "${WK_TARGET:-$(default_target)}"; buildroot_webkit "$profile" "$@"; return $? ;;
+        yocto)     load_target "${WK_TARGET:-$(default_target)}"; yocto_build "$profile" --stage webkit "$@"; return $? ;;
+        *) die "'$profile' is built by ${IMG_BUILDER:-no builder}, and only a buildroot or yocto image takes WebKit slots" ;;
+    esac
 }
 
 # The profile a workspace was made for, derivable from its name
@@ -364,6 +387,15 @@ _ws_profile() {
         buildroot-*) printf '%s' "${1#buildroot-}" ;;
         *) return 1 ;;
     esac
+}
+
+# Either builder's detached stage (yocto-image.pid, buildroot-*.pid), alive in
+# the workspace's own pid namespace: ws_busy_reason (lib/target.sh) asks the
+# workspace, which is the only place the pid means anything.
+_ws_building() { # <workspace>
+    # stdin closed: this runs inside cmd_ls's `while read` loop, and the
+    # podman exec underneath would otherwise eat the remaining rows.
+    ( load_target "$(ws_target "$1" 2>/dev/null)" >/dev/null 2>&1 && ws_busy_reason "$1" >/dev/null ) </dev/null
 }
 
 cmd_ls() {
@@ -389,6 +421,14 @@ cmd_ls() {
         # This path is the image; nothing copied it anywhere.
         printf '    %s\n' "$path"
         _ws_building "$ws" && printf '    %s\n' "a build is running in this workspace -- these bytes may be the previous one"
+        # The image's WebKit slots, from their own manifests (wk sysimage webkit).
+        local sj
+        for sj in $( [ -n "$prof" ] && ( image_profile_load "$prof" >/dev/null 2>&1 && dirname "$(image_slot_dir "$prof" x)" ) )/*/slot.json; do
+            [ -f "$sj" ] || continue
+            printf '    slot %-12s %s  built %s  (%s)\n' \
+                "$(wkslot get "$sj" slot)" "$(wkslot get "$sj" commit | cut -c1-12)" \
+                "$(wkslot get "$sj" built_at)" "$(dirname "$sj")"
+        done
         [ -z "$note" ] || printf '    %s\n' "$note"
     done <<ROWS
 $rows
@@ -893,6 +933,7 @@ cmd_flash() {
 
 case "${1:-}" in
     build) shift; cmd_build "$@" ;;
+    webkit) shift; cmd_webkit "$@" ;;
     ls|list) shift; cmd_ls "$@" ;;
     disks) shift; cmd_disks "$@" ;;
     write) shift; cmd_write "$@" ;;

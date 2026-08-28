@@ -569,8 +569,6 @@ def build_stage(args):
     slot = want_slot(args)
     if slot:
         argv += ["--slot", slot]
-    if args.get("skeleton"):
-        argv += ["--skeleton"]
     return m, argv, f"stage '{ws}' onto {m['name']}"
 
 

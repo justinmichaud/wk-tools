@@ -290,3 +290,9 @@ error: 'wk sync' acts on a host, and this is workspace 'stringimpl238'.
   sdcard, linux-pi, linux-arm32, router, reprovision, sandboxing,
   settings-audit, architecture-review, original-helpers, bench-python,
   bench-unify, mac-perf-mode, Security/tailscale, Nice to have/*.)
+
+- Install dependencies including ccache on remote targets, doctor should confirm everything is configured correctly. Some of these targets will have pre-populated env vars that should not be overwritten.
+
+- Every single wk command must fail if a cli arg is not recognized, or if the subcommand couldn't use it (ex: target)
+
+- wk status should list the base a workspace is based on (2.38, ToT main, etc)

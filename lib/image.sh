@@ -183,3 +183,25 @@ image_fetch_base() {
     Delete it and re-run; if it mismatches again the spec's pin is stale."
     echo "$dest"
 }
+
+# --- WebKit slots ------------------------------------------------------------
+# A slot is one built WebKit beside an image, in the image's workspace, built
+# the way that builder builds WebKit (buildroot: its own package from an
+# override source; yocto: WebKit's build-webkit --cross-target) and deployed
+# to a board by `wk pi deploy`. Where it lives is a fact of the builder, kept
+# here so cmd/pi, cmd/ab and `wk sysimage ls` never spell it twice. The
+# profile is loaded by the caller (IMG_BUILDER is what decides).
+image_slot_dir() { # <profile> <slot> -- host path
+    case "${IMG_BUILDER:-}" in
+        buildroot) echo "$(wk_ws_dir "buildroot-$1")/build/buildroot/$1/output/wk-slots/$2" ;;
+        yocto)     echo "$(wk_ws_dir "yocto-$1")/build/wk-slots/$2" ;;
+        *) return 1 ;;
+    esac
+}
+
+image_check_slot_name() {
+    case "${1:-}" in
+        ''|*[!a-zA-Z0-9_.-]*|-*|.*) die "slot '${1:-}' is not usable: letters, digits, '_', '.' and '-',
+    not starting with '-' or '.'. It names a directory here and on the board." ;;
+    esac
+}

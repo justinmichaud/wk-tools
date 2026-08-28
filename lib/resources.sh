@@ -11,6 +11,9 @@
 #       what a build is actually sized against: set by export_target_resources
 #       for a remote or container target, whose numbers replace this
 #       machine's own -- not a knob most callers set directly.
+#   WK_BUILD_MACHINE                         which machine's builds a record counts
+#                                            against (export_target_resources sets it)
+#   WK_MIN_JOBS                              fewer left beside running builds is a refusal (4)
 
 
 
@@ -128,25 +131,104 @@ export_target_resources() {
     if [ "$WK_TARGET_KIND" = remote ]; then
         WK_AVAIL_MB=$(t_mem_mb "$name"); WK_CGROUP_CORES=$(t_cores "$name")
         WK_LOAD=$(t_load "$name")
-        export WK_AVAIL_MB WK_CGROUP_CORES WK_LOAD
+        WK_BUILD_MACHINE="$WK_TARGET"
+        export WK_AVAIL_MB WK_CGROUP_CORES WK_LOAD WK_BUILD_MACHINE
     else
         WK_CGROUP_MB=$(t_mem_mb "$name"); WK_CGROUP_CORES=$(t_cores "$name")
         export WK_CGROUP_MB WK_CGROUP_CORES
     fi
 }
 
+# --- what is already building on this machine ---------------------------------
+# A build's memory is spoken for before it is used: a link step allocates
+# late, and MemAvailable at the start of a second build says nothing about
+# the first. So every build wk starts leaves a record of its budget while it
+# runs -- lock-shaped (dies with its holder, recomputed from the holder on
+# every read, never a cache of anything) -- and build_jobs sizes the next
+# build against what is left. Two machine-sized builds at once is a host
+# handed to the OOM killer.
+#
+# A record names its holder: `pid:<n>` for a foreground build (the wk
+# process itself), `ws:<name>:<pidfile>` for a job detached into a workspace
+# (its own pid, alive when the workspace says so -- a container pid means
+# nothing on this host). Records are per build machine: a build this host
+# starts on a remote target is that machine's memory, not this one's.
+builds_dir() { echo "$(wk_state_dir)/builds"; }
+build_machine() { printf '%s' "${WK_BUILD_MACHINE:-$(hostname)}"; }
+
+build_record() { # <label> <jobs> <budget-mb> <holder>
+    ensure_dir "$(builds_dir)"
+    printf 'label=%s\nmachine=%s\njobs=%s\nbudget_mb=%s\nholder=%s\nstarted=%s\n' \
+        "$1" "$(build_machine)" "$2" "$3" "$4" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > "$(builds_dir)/$(date +%s)-$$-$RANDOM"
+}
+
+_build_holder_alive() { # <holder>
+    local h="$1" name pidf pid
+    case "$h" in
+        pid:*) kill -0 "${h#pid:}" 2>/dev/null ;;
+        ws:*)  h="${h#ws:}"; name="${h%%:*}"; pidf="${h#*:}"
+               pid=$(tr -dc '0-9' < "$(wk_ws_dir "$name")/home/$pidf" 2>/dev/null) || return 1
+               [ -n "$pid" ] || return 1
+               command -v ws_target >/dev/null 2>&1 || return 1
+               ( load_target "$(ws_target "$name" 2>/dev/null)" >/dev/null 2>&1 \
+                 && t_exec "$name" kill -0 "$pid" ) >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
+# The builds alive on this build machine, one `label<TAB>jobs<TAB>budget_mb`
+# per line; a record whose holder is gone is removed on the way (crash-only:
+# a killed build leaves nothing anyone has to clean up).
+builds_running() {
+    local f label machine jobs budget holder
+    [ -d "$(builds_dir)" ] || return 0
+    for f in "$(builds_dir)"/*; do
+        [ -f "$f" ] || continue
+        label=$(kv_field "$f" label); machine=$(kv_field "$f" machine)
+        jobs=$(kv_field "$f" jobs); budget=$(kv_field "$f" budget_mb); holder=$(kv_field "$f" holder)
+        [ "$machine" = "$(build_machine)" ] || continue
+        if _build_holder_alive "$holder"; then
+            printf '%s\t%s\t%s\n' "$label" "$jobs" "$budget"
+        else
+            rm -f "$f"
+        fi
+    done
+    return 0
+}
+build_reserved_mb()   { builds_running | awk -F'\t' '{ s += $3 } END { print s + 0 }'; }
+build_reserved_jobs() { builds_running | awk -F'\t' '{ s += $2 } END { print s + 0 }'; }
+
+# build_admit <what> <jobs> -- refuse a build the machine cannot fit beside
+# the ones running, naming them. Called after build_jobs, which has already
+# sized <jobs> against what is left; fewer than WK_MIN_JOBS (4) left over is
+# a machine spoken for, and --force builds with that many anyway.
+build_admit() {
+    local what="$1" jobs="$2" running
+    running=$(builds_running)
+    [ -n "$running" ] || return 0
+    [ "$jobs" -ge "${WK_MIN_JOBS:-4}" ] && return 0
+    barrier "$(build_machine)'s memory is spoken for by the build(s) already running:
+$(printf '%s\n' "$running" | awk -F'\t' '{ printf "      %s (%s jobs, %s MB)\n", $1, $2, $3 }')
+    $what would get $jobs job(s) of the $(avail_mem_mb) MB left. Wait for them
+    ('wk status' shows a workspace's build), or --force to build that small."
+}
+
 # --- build parallelism -------------------------------------------------------
-# build_jobs [loadavg-aware]: derived from available memory first (running
-# out of RAM during a link is what hangs a machine), clamped by core count
-# and, on a shared machine, by load average.
+# build_jobs [loadavg-aware]: derived from the memory not already spoken for
+# by a running build (running out of RAM during a link is what hangs a
+# machine), clamped by the cores left and, on a shared machine, by load.
 build_jobs() {
     local polite="${1:-}"
-    local by_mem by_cpu jobs cores
+    local by_mem by_cpu jobs cores avail
 
     # An explicit CPU cap: the container is limited to envelope_cores,
     # fewer than nproc, which would oversubscribe.
-    cores=${WK_CGROUP_CORES:-$(host_cores)}
-    by_mem=$(( $(avail_mem_mb) / WK_MB_PER_JOB ))
+    cores=$(( ${WK_CGROUP_CORES:-$(host_cores)} - $(build_reserved_jobs) ))
+    [ "$cores" -lt 1 ] && cores=1
+    avail=$(( $(avail_mem_mb) - $(build_reserved_mb) ))
+    [ "$avail" -lt 0 ] && avail=0
+    by_mem=$(( avail / WK_MB_PER_JOB ))
     by_cpu=$cores
 
     if [ -n "$polite" ]; then
@@ -182,7 +264,8 @@ explain_jobs() {
     local polite="${1:-}" jobs cores by_mem
     jobs=$(build_jobs "$polite")
     cores=${WK_CGROUP_CORES:-$(host_cores)}  # not the host's, when capped
-    log "resources: ${jobs} jobs (cores=${cores} avail=$(avail_mem_mb)MB @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${WK_LOAD:-0}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
+    local reserved; reserved=$(build_reserved_mb)
+    log "resources: ${jobs} jobs (cores=${cores} avail=$(avail_mem_mb)MB${reserved:+ minus ${reserved}MB other builds} @ ${WK_MB_PER_JOB}MB/job${polite:+, polite, load=${WK_LOAD:-0}}${WK_MAX_JOBS:+, max $WK_MAX_JOBS})"
 
     # Below half the target's own cores is worth a look, unless
     # WK_MAX_JOBS is why -- named by whichever of memory or load binds.

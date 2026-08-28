@@ -105,6 +105,7 @@ DESTRUCTIVE_SITES = {
     ("cmd/remote", 'if confirm "remove the remote root $root ($sz) from $WK_REMOTE_HOST?"; then'),
     ("cmd/remote", 'if confirm "remove $d from $r_host?"; then'),
     ("cmd/remote", 'if confirm "remove the mirror at $M?"; then'),
+    ("cmd/ab", 'confirm "run these ${n} command(s), replacing those slots?" || die "not run"'),
     ("cmd/pi", 'confirm "write this configuration to $HOST\'s EEPROM?" || die "not written"'),
     ("cmd/rm", 'confirm "destroy workspace(s)${_list} and all their changes?" || die "aborted"'),
     ("cmd/rm", 'confirm "destroy workspace \'$NAME\' and all its changes?" || die "aborted"'),

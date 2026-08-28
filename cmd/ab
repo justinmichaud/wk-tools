@@ -1,0 +1,354 @@
+#!/usr/bin/env bash
+#
+# wk ab <pr-spec|sha> [options] -- an interleaved A/B of a pull request on the fleet's boards
+#
+# wk: where=host name=none group=hosts needs ssh,python3
+#
+#   wk ab wpe:1725 --devices rpi3,rpi4          the A/B of WPEWebKit PR 1725 on
+#                                                both boards: two WebKits built
+#                                                against each board's image, both
+#                                                deployed, then alternated
+#   wk ab 1234 ...                               a WebKit/WebKit pull request
+#   wk ab <sha> ...                              a bare commit as the patched side
+#
+#   --devices <a,b>       the fleet devices to measure on (required). A device
+#                         with images of both widths says which as a suffix:
+#                         rpi3-32,rpi4-32,rpi5-64 -- one command, mixed widths
+#   --release <x.y>       which WebKit release's image: 2.38, 2.46, 2.52
+#                         (default: read off the PR's base branch, wpe-2.38 -> 2.38)
+#   --builder <name>      buildroot or yocto, when the release has both
+#   --bits <32|64>        the default word size for devices named without one
+#   --base <sha|ref>      the unpatched side (default: the merge-base of the PR
+#                         head and the image's own branch, CFG_BRANCH)
+#   --plan <name>         the benchmark (default speedometer3); repeatable
+#   --rounds <n>          A/B alternations per plan (default 5)
+#   --count <n>           run-benchmark iterations per run (default: the plan's)
+#   --yes                 run without the prompt (a script, an agent)
+#   --dry-run             print the parameters and the commands, run nothing
+#
+# What it does, in order, and says before it starts: resolves the two commits;
+# builds a WebKit slot for each against every device's image (wk sysimage
+# webkit -- the image is the runtime, built once; two WebKits sit beside it);
+# deploys both slots to each board running that image (wk pi deploy) and
+# alternates them there (wk pi bench --ab), every board at once, each
+# checking every result against the slot's build-id in the running process;
+# and writes one report per board (wk bench report --html). A board not booted into the image is named
+# with the commands that put it there; this command does not write cards.
+#
+# A/A: give the same commit as --base and the spec, and the two slots differ
+# in nothing but their build-ids -- the noise floor of the lane.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/image.sh"
+. "$WK_ROOT/image/profiles.sh"
+. "$WK_ROOT/boot/machines.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/bench.sh"
+
+USAGE="usage: wk ab <pr-spec|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--yes] [--dry-run]; see wk ab -h"
+
+SPEC="${1:-}"; shift 2>/dev/null || true
+[ -n "$SPEC" ] || die "$USAGE"
+case "$SPEC" in -*) die "$USAGE" ;; esac
+
+DEVICES="" RELEASE="" BUILDER="" BITS="" BASE="" ROUNDS=5 COUNT="" DRY="" PLANS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --devices) DEVICES="${2:-}"; shift ;;
+        --release) RELEASE="${2:-}"; shift ;;
+        --builder) BUILDER="${2:-}"; shift ;;
+        --bits)    BITS="${2:-}"; shift ;;
+        --base)    BASE="${2:-}"; shift ;;
+        --plan)    valid_name "${2:-}" || die "--plan '${2:-}' is not a plan name (letters, digits, '.', '_' and '-')"
+                   PLANS+=("$2"); shift ;;
+        --rounds)  ROUNDS="${2:-}"; shift ;;
+        --count)   COUNT="${2:-}"; shift ;;
+        --yes)     WK_YES=1; export WK_YES ;;
+        --dry-run) DRY=1 ;;
+        -*) die "$USAGE; unknown option: $1" ;;
+        *)  die "$USAGE; unexpected argument: $1" ;;
+    esac
+    shift
+done
+[ -n "$DEVICES" ] || die "$USAGE; --devices names the boards (wk boot --list)"
+case "$ROUNDS" in ''|*[!0-9]*) die "--rounds takes a number (got '$ROUNDS')" ;; esac
+[ "$ROUNDS" -ge 1 ] || die "--rounds needs to be at least 1"
+[ -z "$COUNT" ] || case "$COUNT" in *[!0-9]*) die "--count takes a number (got '$COUNT')" ;; esac
+[ "${#PLANS[@]}" -gt 0 ] || PLANS=(speedometer3)
+case "$BITS" in ''|32|64) ;; *) die "--bits takes 32 or 64 (got '$BITS')" ;; esac
+
+MIRROR=$(wk_mirror)
+[ -d "$MIRROR" ] || die "no mirror at $MIRROR; 'wk sync' makes one. Both commits are resolved in it."
+mgit() { git -C "$MIRROR" "$@"; }
+
+# --- the patched side ----------------------------------------------------------
+# A pull request (fetched into the mirror the way `wk pr` does) or a commit.
+HEAD_SHA="" HEAD_DESC="" PR_BASE_BRANCH="" PR_REMOTE_NAME=""
+if [ "${#SPEC}" -eq 40 ] && [ -z "${SPEC//[0-9a-f]/}" ]; then
+    mgit cat-file -e "$SPEC^{commit}" 2>/dev/null \
+        || die "the mirror does not have commit $SPEC ('wk sync' fetches the upstream branches)"
+    HEAD_SHA="$SPEC"; HEAD_DESC="commit"
+else
+    # A pull request spec (wpe:<n>, <n>); anything else pr_parse_spec refuses by name.
+    pr_parse_spec "$SPEC"
+    [ "$PR_KIND" = pull ] || die "'$SPEC' names a fork's branch; an A/B takes a pull request
+    (wpe:<n>, <n>) or a commit sha. 'wk pr' can check the branch out; its
+    head's sha is then the thing to pass here."
+    PR_REMOTE_NAME="$PR_REMOTE"
+    mirror_fetch_pull "$PR_REMOTE" "$PR_N" \
+        || die "could not fetch pull request $PR_N from '$PR_REMOTE' into the mirror"
+    HEAD_SHA=$(mgit rev-parse --verify --quiet "refs/remotes/pr/$(wk_pull_refname "$PR_REMOTE" "$PR_N")^{commit}") \
+        || die "the mirror has no head for pull request $PR_N after fetching it"
+    HEAD_DESC="$SPEC (pull request $PR_N on $PR_REMOTE)"
+fi
+
+# --- which image, per device ---------------------------------------------------
+# The release names the image: derived from the PR's base branch when the
+# spec is a PR and nobody said (wpe-2.38 -> 2.38, webkitglib/2.52 -> 2.52).
+# The branch is asked of GitHub only when there is a PR to ask about; a bare
+# sha has no base branch, so --release is required for one.
+if [ -z "$RELEASE" ]; then
+    [ -n "$PR_REMOTE_NAME" ] || die "--release is required with a bare commit: nothing says which image it is for."
+    url=$(wk_remotes | awk -v r="$PR_REMOTE_NAME" '$1 == r {print $2; exit}')
+    repo=$(printf '%s' "$url" | sed -E 's#\.git$##; s#https://github.com/##')
+    gh_authenticated || die "reading the pull request's base branch needs gh logged in (gh auth login),
+    or say the release yourself: --release 2.38"
+    PR_BASE_BRANCH=$(gh pr view "$PR_N" --repo "$repo" --json baseRefName --jq .baseRefName 2>&1) \
+        || die "could not read pull request $PR_N's base branch from $repo: $PR_BASE_BRANCH
+    Say the release yourself: --release 2.38"
+    RELEASE=$(printf '%s' "$PR_BASE_BRANCH" | sed -nE 's#^(wpe-|webkitglib/)([0-9]+\.[0-9]+)$#\2#p')
+    [ -n "$RELEASE" ] || die "pull request $PR_N targets '$PR_BASE_BRANCH', which names no release.
+    Say which image to measure on: --release 2.38 (wk sysimage build --list)"
+fi
+
+# One profile per device: the configurations this checkout defines that
+# match <project>-<release>-<builder>-<device>-<bits>; ambiguity is refused
+# by name, never guessed.
+declare -a DEV PROFILE MACHINE_OK
+ab_profile_for() { # <device> <bits or empty> -- prints the one profile, or dies naming the choices
+    local dev="$1" bits="$2" c matches="" pattern
+    # Unquoted on purpose: an empty --builder or width is a wildcard here.
+    pattern="*-$RELEASE-${BUILDER:-*}-$dev-${bits:-*}"
+    for c in $(image_config_names); do
+        # shellcheck disable=SC2254
+        case "$c" in
+            $pattern) matches="$matches $c" ;;
+        esac
+    done
+    set -- $matches
+    case $# in
+        1) printf '%s' "$1" ;;
+        0) die "no image configuration for $dev at release $RELEASE${BUILDER:+ ($BUILDER)}${bits:+, $bits-bit}.
+    'wk sysimage build --list' has every configuration this checkout defines." ;;
+        *) die "$dev has more than one image at release $RELEASE:
+$(printf '    %s\n' "$@")
+    Say which: --devices $dev-32 or $dev-64 (and --builder when both builders have one)." ;;
+    esac
+}
+i=0
+for tok in $(printf '%s' "$DEVICES" | tr ',' ' '); do
+    # <device>[-32|-64]: the width belongs to the device, so one run can mix
+    # a 32-bit rpi3 and rpi4 with a 64-bit rpi5.
+    dev="$tok"; bits="$BITS"
+    case "$tok" in
+        *-32) dev="${tok%-32}"; bits=32 ;;
+        *-64) dev="${tok%-64}"; bits=64 ;;
+    esac
+    # Any fleet device `wk boot` can put into a bench system, whatever its
+    # role: the rpi5 is a workstation by role and still measured on a stick.
+    machine_load "$dev" || die "no such fleet device '$dev' (wk boot --list)"
+    DEV[$i]="$dev"; PROFILE[$i]=$(ab_profile_for "$dev" "$bits")
+    # A configuration that declares what it is missing is refused here, in
+    # the first second, not hours in (the same check cmd/sysimage build makes).
+    image_profile_load "${PROFILE[$i]}" >/dev/null 2>&1
+    [ -z "${CFG_NEEDS:-}" ] || die "${PROFILE[$i]} cannot be built yet: $CFG_NEEDS
+    ($(image_config_file "${PROFILE[$i]}"))"
+    i=$((i + 1))
+done
+NDEV=$i
+
+# Every profile at one release shares the branch and remote it tracks;
+# read off the first, checked against the rest.
+image_profile_load "${PROFILE[0]}" >/dev/null 2>&1 || die "profile ${PROFILE[0]} would not load"
+CFG_BRANCH0="$CFG_BRANCH"; CFG_REMOTE0="$CFG_REMOTE"; CFG_PROJECT0="$CFG_PROJECT"
+for ((i = 1; i < NDEV; i++)); do
+    image_profile_load "${PROFILE[$i]}" >/dev/null 2>&1 || die "profile ${PROFILE[$i]} would not load"
+    [ "$CFG_BRANCH" = "$CFG_BRANCH0" ] && [ "$CFG_REMOTE" = "$CFG_REMOTE0" ] \
+        || die "${PROFILE[$i]} tracks $CFG_REMOTE/$CFG_BRANCH while ${PROFILE[0]} tracks $CFG_REMOTE0/$CFG_BRANCH0;
+    one A/B measures one branch. Run them as two."
+done
+[ -n "$CFG_BRANCH0" ] && [ -n "$CFG_REMOTE0" ] \
+    || die "${PROFILE[0]} declares no CFG_BRANCH/CFG_REMOTE, so there is no branch to take a base from"
+
+# --- the unpatched side -----------------------------------------------------------
+# The merge-base of the PR head and the image's own branch, so the two slots
+# differ by the PR's commits and nothing else. The branch is refreshed first:
+# a stale mirror would pick an older base than the PR was made against.
+BRANCH_URL=$(wk_remotes | awk -v r="$CFG_REMOTE0" '$1 == r {print $2; exit}')
+[ -n "$BRANCH_URL" ] || die "no upstream remote '$CFG_REMOTE0' (lib/store.sh wk_remotes) to fetch $CFG_BRANCH0 from"
+_mirror_fetch_into "$BRANCH_URL" "refs/heads/$CFG_BRANCH0" "refs/remotes/$CFG_REMOTE0/$CFG_BRANCH0" \
+    || die "could not refresh $CFG_REMOTE0/$CFG_BRANCH0 in the mirror"
+BRANCH_SHA=$(mgit rev-parse --verify --quiet "refs/remotes/$CFG_REMOTE0/$CFG_BRANCH0^{commit}") \
+    || die "the mirror has no $CFG_REMOTE0/$CFG_BRANCH0 after fetching it"
+BASE_HOW=""
+if [ -n "$BASE" ]; then
+    BASE_SHA=$(mgit rev-parse --verify --quiet "$BASE^{commit}") \
+        || die "--base '$BASE' is not a commit the mirror knows"
+    BASE_HOW="given"
+else
+    BASE_SHA=$(mgit merge-base "$HEAD_SHA" "$BRANCH_SHA") \
+        || die "$HEAD_SHA and $CFG_REMOTE0/$CFG_BRANCH0 share no history; is this PR against that branch?
+    Say the base yourself: --base <sha>"
+    BASE_HOW="merge-base of the head and $CFG_REMOTE0/$CFG_BRANCH0 (guessed)"
+fi
+AHEAD=$(mgit rev-list --count "$BASE_SHA..$HEAD_SHA")
+BEHIND=$(mgit rev-list --count "$HEAD_SHA..$BRANCH_SHA")
+PR_SLOT="pr"
+[ -z "${PR_N:-}" ] || PR_SLOT="pr$PR_N"
+
+# --- evidence, taken now ---------------------------------------------------------
+# What already exists decides what the plan repeats: an image, a slot holding
+# the wanted commit, a board booted into the image, a slot deployed there.
+# Where the builder leaves the image and its slots (image_slot_dir,
+# lib/image.sh); each loads the profile in a subshell, since this file walks
+# several devices' profiles in turn.
+ab_image_path() { # <profile>
+    ( image_profile_load "$1" >/dev/null 2>&1 || exit 1
+      case "${IMG_BUILDER:-}" in
+          buildroot) echo "$(wk_ws_dir "buildroot-$1")/build/buildroot/$1/output/images/${BR_IMAGE:-sdcard.img}" ;;
+          yocto)     echo "$(wk_ws_dir "yocto-$1")/build/CrossToolChains/$YOC_TARGET/build/image/$YOC_IMAGE.wic.xz" ;;
+      esac )
+}
+ab_slot_json() { ( image_profile_load "$1" >/dev/null 2>&1 && echo "$(image_slot_dir "$1" "$2")/slot.json" ); }
+ab_slot_has()  { # <profile> <slot> <sha>
+    local sj; sj=$(ab_slot_json "$1" "$2")
+    [ -f "$sj" ] && [ "$(wkslot get "$sj" commit)" = "$3" ]
+}
+declare -a IMG_OK BOARD_MODE BOARD_SLOTS
+for ((i = 0; i < NDEV; i++)); do
+    image_profile_load "${PROFILE[$i]}" >/dev/null 2>&1
+    case "${IMG_BUILDER:-}" in buildroot|yocto) ;; *) die "${PROFILE[$i]} is built by ${IMG_BUILDER:-nothing}, which has no WebKit slots" ;; esac
+    IMG_OK[$i]=""; [ -f "$(ab_image_path "${PROFILE[$i]}")" ] && IMG_OK[$i]=1
+    machine_load "${DEV[$i]}"
+    b_probe >/dev/null 2>&1 || true
+    BOARD_MODE[$i]="${MODE:-unreachable}"
+    BOARD_SLOTS[$i]=""
+    case "${MODE:-}" in
+        "bench ${PROFILE[$i]}-"*)
+            BOARD_SLOTS[$i]=$(r_ssh "for s in /var/wk/slots/*/slot.json; do [ -f \"\$s\" ] && basename \"\$(dirname \"\$s\")\"; done 2>/dev/null" 2>/dev/null | tr -d '\r' | tr '\n' ' ') ;;
+    esac
+done
+
+# --- the plan ----------------------------------------------------------------------
+sha12() { printf '%s' "$1" | cut -c1-12; }
+subject() { mgit log -1 --format=%s "$1" 2>/dev/null | cut -c1-70; }
+
+log "A/B of $HEAD_DESC on ${DEVICES//,/, }"
+log ""
+log "  patched   $(sha12 "$HEAD_SHA")  $(subject "$HEAD_SHA")"
+log "  base      $(sha12 "$BASE_SHA")  $(subject "$BASE_SHA")"
+log "            $BASE_HOW; the patched side is $AHEAD commit(s) ahead of it"
+[ "$BEHIND" -eq 0 ] || log "            $CFG_REMOTE0/$CFG_BRANCH0 has moved $BEHIND commit(s) past the base since"
+log "  release   $RELEASE (${CFG_PROJECT0:-WebKit} $CFG_REMOTE0/$CFG_BRANCH0)"
+log "  plans     ${PLANS[*]}"
+log "  rounds    $ROUNDS per plan, interleaved A B A B ...${COUNT:+; --count $COUNT iterations per run}"
+log "  slots     base, $PR_SLOT -- one image per board, two WebKits beside it"
+log ""
+for ((i = 0; i < NDEV; i++)); do
+    log "  ${DEV[$i]}: image ${PROFILE[$i]}"
+    log "        image      $([ -n "${IMG_OK[$i]}" ] && echo built || echo 'NOT BUILT')"
+    log "        $(printf 'slot %-7s' base) $(ab_slot_has "${PROFILE[$i]}" base "$BASE_SHA" && echo "holds $(sha12 "$BASE_SHA")" || echo 'to build')"
+    log "        $(printf 'slot %-7s' "$PR_SLOT") $(ab_slot_has "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" && echo "holds $(sha12 "$HEAD_SHA")" || echo 'to build')"
+    log "        board      ${BOARD_MODE[$i]}$(case "${BOARD_MODE[$i]}" in "bench ${PROFILE[$i]}-"*) echo "  (slots there: ${BOARD_SLOTS[$i]:-none})" ;; *) echo "  <-- not booted into ${PROFILE[$i]}" ;; esac)"
+done
+log ""
+log "commands -- the builds in this order, one at a time; then every board's deploy and bench at once:"
+declare -a CMDS
+n=0
+add() { CMDS[$n]="$1"; n=$((n + 1)); log "  $1"; }
+for ((i = 0; i < NDEV; i++)); do
+    [ -n "${IMG_OK[$i]}" ] || add "wk sysimage build ${PROFILE[$i]}"
+done
+for ((i = 0; i < NDEV; i++)); do
+    ab_slot_has "${PROFILE[$i]}" base "$BASE_SHA" \
+        || add "wk sysimage webkit ${PROFILE[$i]} --commit $BASE_SHA --slot base"
+    ab_slot_has "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" \
+        || add "wk sysimage webkit ${PROFILE[$i]} --commit $HEAD_SHA --slot $PR_SLOT"
+done
+for ((i = 0; i < NDEV; i++)); do
+    machine_load "${DEV[$i]}"
+    case "${BOARD_MODE[$i]}" in
+        "bench ${PROFILE[$i]}-"*) ;;
+        *) log "  # ${DEV[$i]} is not booted into ${PROFILE[$i]} -- by hand, before the deploy below:"
+           log "  #   wk sysimage write --from $(ab_image_path "${PROFILE[$i]}") --disk ${DEV[$i]}:<device>"
+           log "  #   wk boot ${DEV[$i]}" ;;
+    esac
+    add "wk pi deploy ${PROFILE[$i]} ${DEV[$i]} --slot base"
+    add "wk pi deploy ${PROFILE[$i]} ${DEV[$i]} --slot $PR_SLOT"
+    for plan in "${PLANS[@]}"; do
+        add "wk pi bench ${DEV[$i]} $plan --ab base,$PR_SLOT --rounds $ROUNDS${COUNT:+ --count $COUNT}"
+    done
+done
+log ""
+log "each 'wk pi bench --ab' checks every result against the slot's build-id in"
+log "the running web process and ends with 'wk bench report' (text, and one"
+log "self-contained html file beside the runs in $BENCH_DIR)."
+
+if [ -n "$DRY" ]; then
+    log ""
+    log "dry run -- nothing was built or run."
+    exit 0
+fi
+log ""
+warn "this replaces slots 'base' and '$PR_SLOT' on the boards named, and moves each"
+warn "image workspace's checkout to the commits above."
+confirm "run these ${n} command(s), replacing those slots?" || die "not run"
+
+# --- run it -------------------------------------------------------------------------
+# A step that fails stops its pipeline where it is; every step is re-runnable
+# and the plan above recomputes what is left.
+run_cmd() { info "\$ $1"; eval "$WK_ROOT/$1" || die "'${1%% *}' failed; the steps above it are done and the plan recomputes what is left: re-run wk ab $SPEC ..."; }
+
+# Builds first, in order and one at a time (README.md); then every board's
+# deploy-and-bench pipeline at once -- boards are independent, and the
+# runs are recorded per board. Each pipeline's output goes to its own log
+# beside the runs, since interleaved boards are unreadable.
+for ((k = 0; k < n; k++)); do
+    case "${CMDS[$k]}" in "wk sysimage "*) run_cmd "${CMDS[$k]}" ;; esac
+done
+for ((i = 0; i < NDEV; i++)); do
+    ab_slot_has "${PROFILE[$i]}" base "$BASE_SHA" && ab_slot_has "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" \
+        || die "${PROFILE[$i]} does not hold both slots after the builds (wk sysimage ls)"
+done
+
+ensure_dir "$BENCH_DIR"
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+declare -a PIDS LOGS
+for ((i = 0; i < NDEV; i++)); do
+    LOGS[$i]="$BENCH_DIR/$STAMP-ab-${DEV[$i]}.log"
+    (
+        for ((k = 0; k < n; k++)); do
+            case "${CMDS[$k]}" in
+                "wk pi deploy "*" ${DEV[$i]} --slot "*|"wk pi bench ${DEV[$i]} "*) run_cmd "${CMDS[$k]}" ;;
+            esac
+        done
+    ) > "${LOGS[$i]}" 2>&1 &
+    PIDS[$i]=$!
+    info "${DEV[$i]}: deploying and benchmarking (log: ${LOGS[$i]})"
+done
+failed=""
+for ((i = 0; i < NDEV; i++)); do
+    if wait "${PIDS[$i]}"; then
+        info "${DEV[$i]}: done"
+    else
+        failed="$failed ${DEV[$i]}"
+        warn "${DEV[$i]}: failed; its log ends:"
+        tail -12 "${LOGS[$i]}" | sed 's/^/    /' >&2
+    fi
+done
+[ -z "$failed" ] || die "A/B incomplete on:$failed. The other boards' runs are recorded; re-run wk ab $SPEC ... for what is left."
+info "A/B complete; the runs and reports are in $BENCH_DIR (wk bench ls)"

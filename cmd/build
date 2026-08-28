@@ -318,6 +318,8 @@ export WK_CCACHE_DIR
   is derived per build from what that machine has free. Delete the line."
 
 JOBS=$(explain_jobs "$POLITE")
+BUDGET_MB=${WK_MEM_BUDGET_MB:-$(( JOBS * ${WK_MB_PER_JOB:-1536} ))}
+[ -n "$DRY" ] || build_admit "this build" "$JOBS"
 
 # Everything above is resolution; everything below changes something. A dry
 # run stops on the line between the two, so it cannot leave a workspace
@@ -338,7 +340,7 @@ if [ -n "$DRY" ]; then
     log "  src:       $(t_src "$NAME")"
     log "  build dir: $(config_build_dir "$(t_src "$NAME")")"
     log "  jobs:      $JOBS (nice $NICE)"
-    log "  memory:    budget ${WK_MEM_BUDGET_MB:-$(( JOBS * ${WK_MB_PER_JOB:-1536} ))}MB, floor ${WK_MEM_FLOOR_MB:-2048}MB, watched every ${WK_MEM_INTERVAL:-30}s"
+    log "  memory:    budget ${BUDGET_MB}MB, floor ${WK_MEM_FLOOR_MB:-2048}MB, watched every ${WK_MEM_INTERVAL:-30}s"
     log "  would run: env ${CFG_ENV[*]} $(t_tools "$NAME")/build/build-in-target.sh $*"
 
     # ...and the commands *that* runs, asked through the target's own exec
@@ -419,6 +421,10 @@ _bit="$(t_tools "$NAME")/build/build-in-target.sh"
 if _cmd=$(t_exec "$NAME" env "${CFG_ENV[@]}" WK_DRY_RUN=1 "$_bit" ${@+"$@"} 2>/dev/null); then
     log "running:   $(printf '%s' "$_cmd" | tr -d '\r')"
 fi
+
+# On the machine's books while it runs (build_record, lib/resources.sh): the
+# next build here is sized against what this one has spoken for.
+build_record "wk build $NAME ($CONFIG)" "$JOBS" "$BUDGET_MB" "pid:$$"
 
 set +e
 # t_exec_build, not t_exec: on a shared machine the build is serialised

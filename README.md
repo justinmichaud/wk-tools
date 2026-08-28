@@ -36,7 +36,14 @@ path where the hardware allows separating them.
 **rescue** — what a board falls back to, and is reached by, whenever its bench
 system is disarmed, unbootable, or was never written. On a workstation the
 rescue is the host install itself; on a bench-device it is a system `wk` owns
-on its own medium.
+on its own medium. A rescue is also the board's own card writer: it carries
+`admin/wk-card-priv` (the yocto `meta-wk-rescue` layer), so
+`wk sysimage write --from <image> --disk <board>:<device>` and `wk boot`
+put a bench system on the board's *other* medium from the rescue itself, and
+an A/B never needs a card carried to a reader. A rescue written from an image
+that predates that layer (both boards' rescues as of 2026-08-28) cannot; it is
+rewritten once, from a reader, and never again. The only card a person
+handles is a board's first rescue.
 
 **arm/disarm** — select, or deselect, what a fleet device boots next
 (`wk boot`). Every armed system disarms and reverts itself after one boot;
@@ -251,10 +258,56 @@ wk boot rpi3                                     # one-shot: arms, reboots, self
 # rpi3-bench -- a fresh join would come up as rpi3-bench-1 and nothing could
 # reach it.
 # Remove the stale node in the admin console first.
-wk pi deploy bug-238 rpi3 --skeleton              # once per board
-wk pi bench rpi3 speedometer3
-wk pi bench rpi3 speedometer3 --ab A,B --rounds 5 # interleaved A/B between two deployed slots
+wk sysimage webkit wpewebkit-2.38-buildroot-rpi3-32 --commit <sha> --slot base --detach
+                                                 # one WebKit built against the image's own toolchain,
+                                                 # into a named slot beside the image (wk sysimage ls)
+wk pi deploy wpewebkit-2.38-buildroot-rpi3-32 rpi3 --slot base   # onto the booted board, verified byte for byte
+wk pi bench rpi3 speedometer3 --slot base
+wk pi bench rpi3 speedometer3 --ab base,pr1725 --rounds 5   # interleaved A/B between two deployed slots
 ```
+
+The image is the runtime and is built once; a *slot* is one WebKit
+(`/var/wk/slots/<name>/` on the board), and a board carries as many as an A/B
+needs, alternated with no reflash and no reboot between them. A slot is built
+by buildroot's own developer workflow -- `WPEWEBKIT_OVERRIDE_SRCDIR` in
+`local.mk`, `make wpewebkit-rebuild`, the files buildroot recorded installing
+-- so it is configured exactly as the image's WebKit was, and the next image
+build drops the override and rebuilds the package from the pinned tarball.
+A yocto image's slot is WebKit's own cross build -- `build-webkit --wpe
+--cross-target=<target>` through `cross-toolchain-helper`, the workspace's
+`webkit` stage -- of the named commit, packed the same way.
+Every binary the image build links carries a build-id (`BR2_TARGET_LDFLAGS`);
+that, and the sha256 of the library the reporting process mapped, is what
+`wk pi bench` checks. `run-benchmark`
+runs on the workstation, out of a `Tools/Scripts` tree exported from the
+mirror, and drives the board's browser over ssh through a reverse tunnel; the
+process that reports each number is checked against the slot's build-id, so a
+result can never be from the wrong WebKit. A yocto workspace's cross build is
+deployed the same way: `wk pi deploy yocto-<profile> rpi4 --slot b`.
+
+**An A/B of a pull request, end to end**
+
+```sh
+wk ab wpe:1725 --devices rpi3,rpi4 --bits 32 --dry-run   # the parameters and every command, nothing run
+wk ab wpe:1725 --devices rpi3-32,rpi4-32,rpi5-64         # confirm, then: both slots built per image, deployed,
+                                                         # every board alternated at once; a device's width is its own
+wk ab wpe:1725 --devices rpi4 --bits 32 --plan jetstream3 --rounds 8 --yes   # unattended
+wk ab <sha> --base <sha> --release 2.38 --devices rpi3   # A/A: two slots of one commit -- the lane's noise floor
+```
+
+The base is guessed as the merge-base of the PR head and the image's own
+branch (`CFG_BRANCH`), the release from the PR's base branch; `--base` and
+`--release` override either. Each `--ab` ends with `wk bench report`, as text
+and as one self-contained html file (histograms, per-subtest Welch/FDR) in the
+result store. A board that is not booted into the image is named with the
+`wk sysimage write` / `wk boot` steps that put it there; `wk ab` never writes a card.
+Every build `wk` starts -- `wk build`, an image, a slot -- is on the machine's
+books while it runs (a budget record that dies with it), and the next build is
+sized against the memory and cores left, refused when fewer than four jobs
+would fit; inside the target each runs under the same guard (`build/guard.sh`:
+cgroup clamp, memory watchdog, nice). Two machine-sized builds at once is what
+hands a host to the OOM killer, so `wk ab` runs its builds in order.
+Benchmarks on different boards run at once.
 
 Or stage a workspace build straight onto bench media without a full image
 rebuild:

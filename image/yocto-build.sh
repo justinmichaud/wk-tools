@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-TARGET=""; IMAGE=""; STAGE=image; JOBS=""; RM_WORK=1; SRC=/src/WebKit
+TARGET=""; IMAGE=""; STAGE=image; JOBS=""; RM_WORK=1; SRC=/src/WebKit; COMMIT=""; SLOT=""; PROFILE=""
 CHROMIUM=0; SSTATE_NS=""
 
 while [ $# -gt 0 ]; do
@@ -22,6 +22,9 @@ while [ $# -gt 0 ]; do
         --local-layer) LOCAL_LAYER="${2:-}"; shift 2 ;;
         --tailnet) TAILNET="${2:-}"; shift 2 ;;
         --webkit-jobs) WEBKIT_JOBS="${2:-}"; shift 2 ;;
+        --commit)  COMMIT="${2:-}"; shift 2 ;;
+        --slot)    SLOT="${2:-}"; shift 2 ;;
+        --profile) PROFILE="${2:-}"; shift 2 ;;
         *) echo "yocto-build.sh: unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -251,6 +254,12 @@ configure_local_conf() {
         # from the card, never from here.
         printf 'IMAGE_INSTALL:append = " wk-wifi-join"\n\n'
 
+        # wk-card-priv (meta-wk-rescue): unconditional too. Any yocto image
+        # may be written as a board's rescue, and a rescue that cannot write
+        # the other medium leaves the A/B to a person with a card reader
+        # (README.md, "rescue").
+        printf 'IMAGE_INSTALL:append = " wk-card-priv"\n\n'
+
         if [ "$CHROMIUM" = 0 ]; then
             printf '# Chromium dropped: about half the build. --chromium puts it back.\n'
             printf 'IMAGE_INSTALL:remove = "chromium-ozone-wayland"\n\n'
@@ -286,7 +295,7 @@ bb() {
     ( set +u
       cd "$WORKDIR/sources/poky" \
       && . ./oe-init-build-env "$WORKDIR/build" >/dev/null \
-      && bitbake "$@" )
+      && guard_run "$JOBS" -- bitbake "$@" )
 }
 
 # One extra layer, `image/yocto/meta-wk`, appended to the generated
@@ -313,11 +322,12 @@ configure_bblayers() {
     fi
     printf '\n%s\n' "$BB_MARKER" >> "$f"
 
-    # Three layers, deliberately not one: meta-wk only changes how the
-    # image is built; meta-wk-tailnet and meta-wk-wifi change what is on
-    # the board, a different promise kept visible as a different line.
+    # Four layers, deliberately not one: meta-wk only changes how the
+    # image is built; meta-wk-tailnet, meta-wk-wifi and meta-wk-rescue
+    # change what is on the board, a different promise kept visible as a
+    # different line.
     local dir layer
-    for dir in meta-wk meta-wk-tailnet meta-wk-wifi; do
+    for dir in meta-wk meta-wk-tailnet meta-wk-wifi meta-wk-rescue; do
         layer=$(cd "$(dirname "$0")/../image/yocto/$dir" && pwd)
         [ -f "$layer/conf/layer.conf" ] || fail "no layer at $layer"
         printf 'BBLAYERS += "%s"\n' "$layer" >> "$f"
@@ -325,10 +335,13 @@ configure_bblayers() {
     done
 }
 
+# Under the guard every heavy step in a target runs under (build/guard.sh):
+# the memory watchdog, ionice, nice.
+. /opt/wk-tools/build/guard.sh
 run_helper() {
     local what="$1"; shift
     say "$what"
-    Tools/Scripts/cross-toolchain-helper --cross-target="$TARGET" "$@" \
+    guard_run "$JOBS" -- Tools/Scripts/cross-toolchain-helper --cross-target="$TARGET" "$@" \
         || fail "$what failed"
 }
 
@@ -422,6 +435,18 @@ case "$STAGE" in
         configure_local_conf
         configure_bblayers
         clear_hosttools
+        # A slot: the checkout moved to one commit first, refused dirty --
+        # a slot is reproducible from its sha alone.
+        if [ -n "$COMMIT" ]; then
+            dirty=$(git -C "$SRC" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+            [ "$dirty" = 0 ] || fail "$SRC has $dirty uncommitted change(s); a slot is built from a
+    commit and nothing else. Commit or discard them in the workspace first."
+            git -C "$SRC" cat-file -e "$COMMIT^{commit}" 2>/dev/null \
+                || git -C "$SRC" fetch --quiet /mirror/WebKit.git "$COMMIT" \
+                || fail "$COMMIT is not in this machine's mirror; 'wk ab' and 'wk pr' fetch a PR head into it first"
+            git -C "$SRC" checkout --detach --quiet "$COMMIT" || fail "could not check out $COMMIT in $SRC"
+            say "source        $SRC @ $(git -C "$SRC" rev-parse --short HEAD) ($(git -C "$SRC" log -1 --format=%s | cut -c1-60))"
+        fi
         say "cross-building WebKit (WPE, Release) for $TARGET"
         # wpe-2.46 defaults both ENABLE_WPE_1_1_API and ENABLE_WPE_PLATFORM
         # on, and CMake refuses the pair. `run-benchmark`'s WPE driver --
@@ -468,9 +493,29 @@ PYEOF
         say "  jobs:         ${WEBKIT_JOBS:-8} (memory-sized; the default -j$(nproc) OOMs on unified sources)"
 
         # shellcheck disable=SC2086
-        Tools/Scripts/build-webkit --wpe --release --cross-target="$TARGET" \
+        WK_MB_PER_JOB=2560 guard_run "${WEBKIT_JOBS:-8}" -- \
+            Tools/Scripts/build-webkit --wpe --release --cross-target="$TARGET" \
             $tgt_args --makeargs="$webkit_makeargs" --cmakeargs="$tgt_cmake $extra" \
             || fail "the cross build of WebKit failed"
+
+        # The slot: bin/ and lib/ of the cross build -- the same bytes
+        # built-product-archive would carry -- beside the image, described
+        # by a manifest (lib/wkslot.py; image_slot_dir, lib/image.sh).
+        if [ -n "$SLOT" ]; then
+            b="$SRC/WebKitBuild/WPE/Release_$TARGET"
+            slotdir="$SRC/WebKitBuild/wk-slots/$SLOT"
+            [ -x "$b/bin/MiniBrowser" ] || fail "the cross build left no $b/bin/MiniBrowser"
+            rm -rf "$slotdir/root"; mkdir -p "$slotdir/root"
+            cp -a "$b/bin" "$b/lib" "$slotdir/root/" || fail "could not copy the build into $slotdir"
+            python3 /opt/wk-tools/lib/wkslot.py manifest "$slotdir/root" "$slotdir/slot.json" \
+                slot="$SLOT" profile="$PROFILE" commit="$COMMIT" target="$TARGET" \
+                browser=minibrowser lib_dir=lib exec_dir=bin bundle_dir=lib \
+                jobs="${WEBKIT_JOBS:-8}" built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                wk_tools="$(git -C /opt/wk-tools rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+                || fail "could not describe the build as a slot (above); a cross build with no
+    build-id note cannot be told apart on the board"
+            say "slot ready: $slotdir ($(du -sh "$slotdir/root" | cut -f1), build-id $(python3 /opt/wk-tools/lib/wkslot.py get "$slotdir/slot.json" build_id))"
+        fi
         ;;
     *)  fail "unknown stage '$STAGE' (layers, fetch, image, toolchain, webkit)" ;;
 esac

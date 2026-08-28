@@ -1,20 +1,14 @@
 """`wk pi`: the bare/`-h`/unknown-subcommand usage page (cmd/pi's
-pi_usage_page, read out of this file's own header comment), the on-board
-bench run's elapsed-seconds report (pi_bench_once's start/waited arithmetic),
-and `wk pi bench --cores` (the same cpu-list flag `wk bench` has, through the
-same parser -- lib/wkdata.py cores-valid/cores-wrap -- applied as a
-taskset -c prefix on the board's run-benchmark command line).
+pi_usage_page, read out of this file's own header comment), `wk pi bench
+--cores` (the same cpu-list flag `wk bench` has, through the same parser --
+lib/wkdata.py cores-valid/cores-wrap -- applied as a taskset -c prefix on the
+browser command the board runs), and the slot-shaped refusals.
 
 Unit tests only -- no board, no ssh, no hardware. Bare `wk pi` and `wk pi
 bogus` are run for real: nothing before the subcommand dispatch in cmd/pi
-touches a board, so both are as safe as any other refusal. pi_bench_once is
+touches a board, so both are as safe as any other refusal. pi_launch_cmd is
 lifted verbatim out of cmd/pi with `sed -n '/^fn()/,/^}/p'`, the idiom
-tests/test_quick.py uses to lift cmd/status's `bump` and
-tests/test_bench_cores.py uses to lift cmd/bench's bench_cores_refusal, with
-every ssh-reaching dependency (m_ssh, detach_remote, detach_wait_remote,
-pi_build_dir, pi_bench_env, pi_bench_record, pi_slot_sha, pi_slot_ws) stubbed
-out so only the real timing and command-building code under test runs
-against real wall-clock time and real string interpolation.
+tests/test_quick.py uses to lift cmd/status's `bump`.
 
 Run: python3 -m unittest tests.test_pi -v
 """
@@ -35,20 +29,6 @@ eval "$body"
 '''
 
 
-# Every dependency pi_bench_once reaches for besides lib/common.sh's own
-# die/warn/info/log/sh_quote, stubbed so a lifted call touches no board.
-# detach_remote's stub records the command line it was asked to run, which
-# is what the --cores test inspects.
-STUBS = '''
-m_ssh() { return 0; }
-pi_build_dir() { printf '/tmp/build'; }
-pi_bench_env() { printf ''; }
-pi_bench_record() { :; }
-pi_slot_sha() { :; }
-pi_slot_ws() { :; }
-'''
-
-
 class TestPiUsagePage(WkTest):
     """Bare `wk pi` and an unknown subcommand both print the whole
     board-lifecycle sequence -- the header comment `wk pi -h` reads through
@@ -62,6 +42,7 @@ class TestPiUsagePage(WkTest):
         "wk pi boot-order",
         "wk boot",
         "wk pi setup",
+        "wk sysimage webkit",
         "wk pi deploy",
         "wk pi bench",
     )
@@ -85,47 +66,11 @@ class TestPiUsagePage(WkTest):
         self.assertEqual(cp.returncode, 1)
 
 
-class TestPiBenchElapsed(WkTest):
-    """pi_bench_once's `waited` is computed from wall-clock time captured
-    before the blocking wait, not after it (or reset by a subshell) --
-    lifted and run against a stubbed detach_wait_remote that sleeps for a
-    known span, so a wrong computation reads back as ~0 instead."""
-
-    def _run(self, sleep_s, extra_stubs=""):
-        script = f'''
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-{lift("pi_bench_once")}
-{STUBS}
-{extra_stubs}
-detach_remote() {{ return 0; }}
-detach_wait_remote() {{ sleep {sleep_s}; printf '0'; return 0; }}
-m_ssh() {{ return 0; }}
-
-machine=fake-machine plan=fake-plan sysid=x kernel=x gov=x throttled=x
-root_dev=x renderer=gl session=drm count="" timeout_s="" cores=""
-
-pi_bench_once a
-'''
-        return bash(script, timeout=30)
-
-    def test_reports_the_real_span_not_zero(self):
-        cp = self._run(2)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        m = None
-        for line in cp.stderr.splitlines():
-            if "result" in line and "after" in line:
-                m = line
-        self.assertIsNotNone(m, cp.stderr)
-        waited = int(m.split("after")[1].strip().rstrip("s"))
-        self.assertGreaterEqual(waited, 1, f"a ~2s run reported {waited}s: {m!r}")
-
-
 class TestPiBenchCores(WkTest):
     """`wk pi bench --cores`: refused for a bad cpu list before any board is
     touched (same parser and same message shape as `wk bench --cores`), and
-    a valid one lands as a literal `taskset -c <set>` prefix on the on-board
-    run-benchmark command line."""
+    a valid one lands as a literal `taskset -c <set>` prefix on the browser
+    command line the wk-board driver runs on the board (pi_launch_cmd)."""
 
     def test_invalid_cores_is_refused_before_the_board_is_touched(self):
         cp = self.run_wk(
@@ -135,44 +80,73 @@ class TestPiBenchCores(WkTest):
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("not a valid Linux cpu list", cp.stdout)
 
-    def test_valid_cores_becomes_a_taskset_prefix_on_the_board(self):
-        capture = self.tmp / "captured-cmd"
+    def _launch(self, cores_wrap):
+        slot = self.tmp / "slot.json"
+        slot.write_text('{"browser": "cog", "lib_dir": "usr/lib", '
+                        '"exec_dir": "usr/libexec/wpe-webkit-1.1", '
+                        '"bundle_dir": "usr/lib/wpe-webkit-1.1/injected-bundle"}')
         script = f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
-{lift("pi_bench_once")}
-{STUBS}
-detach_remote() {{ printf '%s' "$*" > {capture}; return 0; }}
-detach_wait_remote() {{ printf '0'; return 0; }}
-
-machine=fake-machine plan=fake-plan sysid=x kernel=x gov=x throttled=x
-root_dev=x renderer=gl session=drm count="" timeout_s="" cores="0-3"
-
-pi_bench_once a
+wkslot() {{ python3 "{REPO}/lib/wkslot.py" "$@"; }}
+{lift("pi_slot_dir")}
+{lift("pi_launch_cmd")}
+PI_SLOTS=/var/wk/slots
+pi_launch_cmd pr "{slot}" "{cores_wrap}"
 '''
         cp = bash(script, timeout=30)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertTrue(capture.exists(), "detach_remote was never called")
-        self.assertIn("taskset -c 0-3", capture.read_text())
+        return cp.stdout
+
+    def test_valid_cores_becomes_a_taskset_prefix_on_the_board(self):
+        out = self._launch("taskset -c 0-3 ")
+        self.assertIn("taskset -c 0-3 env", out)
+        self.assertIn("LD_LIBRARY_PATH=/var/wk/slots/pr/root/usr/lib", out)
+        self.assertIn("WEBKIT_EXEC_PATH=/var/wk/slots/pr/root/usr/libexec/wpe-webkit-1.1", out)
+        self.assertTrue(out.rstrip().endswith("/usr/bin/cog"), out)
 
     def test_no_cores_means_no_taskset_prefix(self):
-        capture = self.tmp / "captured-cmd"
+        self.assertNotIn("taskset", self._launch(""))
+
+    def test_a_minibrowser_launch_is_posix_sh(self):
+        """The driver runs the launch text through the board's /bin/sh (busybox
+        ash), so it may not use bash-only syntax; dash's parser is the judge."""
+        slot = self.tmp / "slot.json"
+        slot.write_text('{"browser": "minibrowser", "lib_dir": "lib", "exec_dir": "bin", "bundle_dir": "lib"}')
         script = f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
-{lift("pi_bench_once")}
-{STUBS}
-detach_remote() {{ printf '%s' "$*" > {capture}; return 0; }}
-detach_wait_remote() {{ printf '0'; return 0; }}
-
-machine=fake-machine plan=fake-plan sysid=x kernel=x gov=x throttled=x
-root_dev=x renderer=gl session=drm count="" timeout_s="" cores=""
-
-pi_bench_once a
+wkslot() {{ python3 "{REPO}/lib/wkslot.py" "$@"; }}
+{lift("pi_slot_dir")}
+{lift("pi_launch_cmd")}
+PI_SLOTS=/var/wk/slots
+text=$(pi_launch_cmd b "{slot}" "")
+sh=$(command -v dash || command -v sh)
+printf '%s\\n' "$text" | "$sh" -n
 '''
         cp = bash(script, timeout=30)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("taskset", capture.read_text())
+
+
+class TestPiSlotRefusals(WkTest):
+    """The old on-board flags are tombstones naming the replacement, and an
+    A/B of one slot against itself is refused as a repeatability check in
+    disguise -- both before any board is reached."""
+
+    def test_skeleton_is_a_tombstone(self):
+        cp = self.run_wk("pi", "deploy", "some-image", "not-a-real-machine", "--skeleton", timeout=15)
+        self.assertEqual(cp.returncode, 1, cp.stdout)
+        self.assertIn("--slot", cp.stdout)
+
+    def test_ab_of_one_slot_twice_is_refused(self):
+        cp = self.run_wk("pi", "bench", "not-a-real-machine", "speedometer3", "--ab", "base,base", timeout=15)
+        self.assertEqual(cp.returncode, 1, cp.stdout)
+        self.assertIn("two different slots", cp.stdout)
+
+    def test_ab_needs_a_pair(self):
+        cp = self.run_wk("pi", "bench", "not-a-real-machine", "speedometer3", "--ab", "base", timeout=15)
+        self.assertEqual(cp.returncode, 1, cp.stdout)
+        self.assertIn("two slot names", cp.stdout)
 
 
 if __name__ == "__main__":
