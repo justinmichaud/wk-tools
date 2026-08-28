@@ -29,7 +29,7 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/detach.sh"
 # Sourced optionally: the VM's tree is only as new as the last
-# `wk sync --target container`, so a hard source of a new file fails there.
+# `wk sync --tools container`, so a hard source of a new file fails there.
 _source_if_there() { [ -f "$1" ] && . "$1"; return 0; }
 _source_if_there "$WK_ROOT/lib/image.sh"
 _source_if_there "$WK_ROOT/image/profiles.sh"
@@ -157,7 +157,7 @@ if [ -n "$PURGE" ]; then
     $([ "$WK_TARGET_KIND" = vm ] \
         && echo "the golden guest image -- erase that with 'wk vm base --rm'" \
         || echo "that machine's own repository -- 'wk remote rm $TARGET' offers to remove
-    the remote root, and 'wk sync --target $TARGET' refreshes it in place")"
+    the remote root, and 'wk sync --tools $TARGET' refreshes it in place")"
 
     ws=$(list_workspaces | tr '\n' ' '); ws="${ws% }"
     [ -z "$ws" ] || die "workspaces still exist:$ws

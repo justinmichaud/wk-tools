@@ -800,14 +800,14 @@ report_machine() {
         rec_json insync "$([ "$theirs" = "$mine" ] && printf true || printf false)"
         # What to type about it differs per machine:
         #
-        #   the podman VM   a copy this machine rsyncs in (`wk sync --target
+        #   the podman VM   a copy this machine rsyncs in (`wk sync --tools
         #                   container`).
         #   a build box     the same push, by machine name.
         #   a peer          a workstation pulls rather than being pushed to,
         #                   which needs a committed, pushed tree here first.
         if [ "$theirs" != "$mine" ]; then
             if [ -n "${WK_IN_VM:-}" ]; then
-                rec_set fix "wk sync --target container"
+                rec_set fix "wk sync --tools container"
             elif [ -n "${WK_REMOTE_PEER:-}" ]; then
                 if [ -n "$(git -C "$WK_ROOT" status --porcelain 2>/dev/null)" ]; then
                     rec_set fix "commit and push here first -- a peer pulls, and this checkout is dirty"
@@ -815,7 +815,7 @@ report_machine() {
                     rec_set fix "wk sync --tools   (pulls on $label, and says so if it still differs)"
                 fi
             else
-                rec_set fix "wk sync --target $label"
+                rec_set fix "wk sync --tools $label"
             fi
         fi
         rec_emit

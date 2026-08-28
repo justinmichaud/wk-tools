@@ -19,7 +19,8 @@
 #   t_arch <name>      the architecture the target runs natively
 #   t_tools <name>     where wk-tools is inside the target
 #   t_sync_tools <n>   push wk-tools in (no-op when it is bind-mounted)
-#   t_sync             refresh the target's own far-side state, if it has any
+#   t_sync             refresh this target's own furniture: its tooling copy,
+#                      and its mirror and snapshot when it keeps its own
 #   t_ssh_host <name>  ssh destination, for Zed and the generated alias
 #   t_ssh_user <name>  the account inside the workspace an editor logs into
 #   t_ssh_proxy <name> what to run *on this machine* to speak ssh to the
@@ -60,7 +61,8 @@ t_tools()      { echo "/opt/wk-tools"; }
 t_ccache_dir() { echo "/ccache"; }   # inert on the Apple ports (no ccache)
 t_sync_tools() { :; }
 
-t_sync()       { return 1; }         # refresh far-side state; 1 means "no far side"
+t_sync()       { :; }               # bring this target's own furniture up to date: its
+                                    # tooling copy, and its store when it keeps one
 t_prefetch()   { :; }                # ask this target whatever a report will need
 
 # t_wiring_args -- how this target's checkouts are wired, for whoever

@@ -289,9 +289,9 @@ usage() {
   wk <command> --quiet     drop the info/log narration; a result, a warning
                            and an error still print. Every command accepts it
   wk <command> --all       every one of what the command acts on -- every
-                           machine ('wk sync'/'wk push'/'wk sudo'), every line
-                           of the log ('wk logs'); a command's own -h says
-                           what its --all covers
+                           machine ('wk push'/'wk sudo'), every workspace on
+                           every target ('wk sync'), every line of the log
+                           ('wk logs'); a command's own -h says what its --all covers
   WK_DEBUG=1               verbose output
 EOF
         printf '\n  wk help                  README.md: architecture, setup, every workflow by example\n'

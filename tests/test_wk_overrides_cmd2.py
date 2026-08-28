@@ -343,7 +343,7 @@ printf '%s' "$WK_SUDO_TIMEOUT_DESC"
 class TestSyncBranch(unittest.TestCase):
     """WK_BRANCH (cmd/sync -h): publishes a snapshot from this branch
     instead of origin/main. Exercised as a substitution, the same way
-    cmd/sync reads it -- driving a real 'wk sync --machine' would fetch
+    cmd/sync reads it -- driving a real 'wk sync --tools' would fetch
     all of WebKit."""
 
     def test_h_documents_it(self):

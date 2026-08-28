@@ -567,6 +567,24 @@ t_sync_tools() {
     _write_marker "$name" "$ip"
 }
 
+# This target's furniture (`wk sync --tools`): a guest carries its own copy
+# of wk-tools, and there is nothing else -- a macOS guest's "base" is the
+# golden image, which this driver builds rather than snapshots. Only the
+# guests that are up: booting one to refresh a file would be a side effect
+# nobody asked this command for.
+t_sync() {
+    local g rc=0
+    for g in $(target_workspaces); do
+        if [ "$(t_info "$g" 2>/dev/null)" != running ]; then
+            printf '  %-24s %s\n' "$g" "not running -- skipped" >&2
+            continue
+        fi
+        if t_sync_tools "$g"; then printf '  %-24s ok\n' "$g" >&2
+        else rc=1; fi
+    done
+    return "$rc"
+}
+
 t_destroy() {
     local name="$1"
     local v; v=$(_vm "$name")

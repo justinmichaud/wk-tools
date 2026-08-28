@@ -357,7 +357,7 @@ preflight() {
     here=$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)
     if [ -n "$there" ] && [ -n "$here" ] && [ "$there" != "$here" ]; then
         warn "  wk-tools on $HOST is a different tree than this one"
-        log  "  here $here, there $there -- 'wk sync --target' or a git pull over there"
+        log  "  here $here, there $there -- 'wk sync --tools' or a git pull over there"
         log  "  (not fatal: the lane only uses long-standing verbs)"
     fi
 

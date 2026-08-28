@@ -710,28 +710,77 @@ t_wiring_args() {
     fi
 }
 
-# A bare `wk sync` is refused here (is_host_only); this covers what goes
-# stale on the far end instead -- the tooling first, since a stale copy
-# answers a question this side did not ask, then the WebKit objects.
-t_sync() {
-    local ref
-    _remote_probe
+# Why a peer's `git pull` could not reach this machine's tree: the answer is
+# always on this side -- a peer pulls from the shared upstream, so anything
+# this machine hasn't published is invisible to it. Named precisely, because
+# the three cases have three different fixes.
+_peer_why_behind() {
+    local dirty="" ahead="" branch="" up=""
+    git -C "$WK_ROOT" rev-parse --git-dir >/dev/null 2>&1 || {
+        printf 'this copy of wk-tools is not a git checkout, so nothing can pull from it'
+        return 0; }
+    [ -n "$(git -C "$WK_ROOT" status --porcelain 2>/dev/null)" ] && dirty=1
+    branch=$(git -C "$WK_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    up=$(git -C "$WK_ROOT" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+    if [ -n "$up" ]; then
+        ahead=$(git -C "$WK_ROOT" rev-list --count "$up..HEAD" 2>/dev/null || echo 0)
+    fi
+    if [ -n "$dirty" ]; then
+        printf 'this machine has uncommitted changes -- a peer pulls from %s, so commit and push them first' \
+            "${up:-the upstream}"
+    elif [ -n "$up" ] && [ "${ahead:-0}" -gt 0 ]; then
+        printf 'this machine is %s commit(s) ahead of %s -- push them, then re-run' "$ahead" "$up"
+    elif [ -z "$up" ]; then
+        printf "branch '%s' has no upstream here, so there is nothing for a peer to pull from" "${branch:-HEAD}"
+    else
+        printf 'both are at %s, so the difference is untracked or excluded files rather than commits' "$up"
+    fi
+}
 
-    # A peer's store is its own; syncing it runs `wk sync` over there, only
-    # when asked for by name (WK_SYNC_NAMED) -- else `--target all` would
-    # publish snapshots on every machine in the fleet.
+# This target's furniture (`wk sync --tools`): its copy of wk-tools, and the
+# WebKit objects its workspaces clone from. A bare `wk sync` is refused on
+# the machine itself (is_host_only), so this is how either is refreshed.
+t_sync() {
+    local ref rc=0 mine theirs tools
+    _remote_probe
+    tools=$(t_tools "")
+
+    # A peer is a workstation running its own checkout under git: rsyncing
+    # over it would throw away uncommitted work, so it pulls instead
+    # (--ff-only: a merge on somebody else's machine is not this command's to
+    # make). Then checked, because a dirty tree there lets the pull succeed
+    # while converging nothing.
     if _remote_peer; then
-        if [ -z "${WK_SYNC_NAMED:-}" ]; then
-            info "$WK_REMOTE_HOST is a workstation with a store of its own -- skipped"
-            log  "  sync it by name:  wk sync --target $WK_TARGET"
-            return 0
+        _rsh_q "cd $(sh_quote "$tools") && git pull --ff-only" >&2 \
+            || { printf '  %-24s %s\n' "$WK_TARGET" "git pull --ff-only failed there" >&2; return 1; }
+        mine=$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)
+        theirs=$(_rsh_q "$(sh_quote "$tools")/cmd/version --tree" 2>/dev/null || true)
+        if [ -z "$mine" ] || [ "$mine" != "$theirs" ]; then
+            printf '  %-24s %s\n' "$WK_TARGET" "pulled, still DIFFERS ($theirs, this machine has $mine)" >&2
+            printf '  %-24s %s\n' "" "$(_peer_why_behind)" >&2
+            # Nothing more is asked of a copy that is not this one: what a
+            # scope word means is that copy's to decide, and an older one
+            # spells them differently -- which is how a command naming one
+            # machine reaches machines it never named. Its mirror and its
+            # snapshot wait for the pull to converge.
+            return 1
         fi
-        info "running 'wk sync' on $WK_REMOTE_HOST -- its store, its snapshot"
-        t_wk sync
-        return $?
+        printf '  %-24s pulled, in sync\n' "$WK_TARGET" >&2
+
+        # Its mirror and its snapshot are its own: publishing one on somebody
+        # else's workstation happens only when this run named it
+        # (WK_SYNC_NAMED), never as part of a sweep over every target.
+        if [ -z "${WK_SYNC_NAMED:-}" ]; then
+            info "$WK_REMOTE_HOST keeps a store of its own -- its mirror and snapshot untouched"
+            log  "  name it for those:  wk sync --tools $WK_TARGET"
+            return "$rc"
+        fi
+        info "running 'wk sync --tools' on $WK_REMOTE_HOST -- its mirror, its snapshot"
+        WK_NO_DELEGATE=1 t_wk sync --tools || rc=1
+        return "$rc"
     fi
 
-    t_sync_tools ""
+    t_sync_tools "" && printf '  %-24s pushed\n' "$WK_TARGET" >&2
     ref=$(_remote_reference)
     if [ -n "$ref" ]; then
         info "workspaces here clone from $ref, which this machine's admins keep up to date"

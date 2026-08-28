@@ -353,7 +353,7 @@ if [ -n "$DRY" ]; then
     if ! t_exec "$NAME" grep -q WK_DRY_RUN "$_bit" 2>/dev/null; then
         warn "  the wk-tools in '$NAME' predates --dry-run's target half, so the commands"
         log  "  it would run cannot be asked for without risking a real build."
-        log  "  push this tree there first:  wk sync --target $TARGET"
+        log  "  push this tree there first:  wk sync --tools $TARGET"
         exit 0
     fi
     if _cmd=$(t_exec "$NAME" env "${CFG_ENV[@]}" WK_DRY_RUN=1 \

@@ -50,9 +50,9 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 
 - [ ] the refspecs follow the mirror's own layout (origin's branches are its heads; every other upstream is namespaced); a fifth upstream needs no change here beyond `wk_remotes` [needs a test]
 - [ ] bare, inside a workspace: that workspace, no argument needed [needs a workspace]
-- [ ] `--machine` on a Linux workstation does all of it in one place [needs a Linux workstation]
-- [ ] `--all` additionally walks every other machine's own store [needs the fleet]
-- [ ] the dispatcher's forwarding rule for `--machine`/`--all` into the podman VM (it should not forward — the VM can see none of the fleet — while still forwarding a workspace-scoped sync) [needs the podman VM]
+- [ ] `--tools` on a Linux workstation refreshes the tooling copies and publishes a snapshot in one place [needs a Linux workstation]
+- [ ] `--all` fetches in every workspace on every target, and `--tools` refreshes every machine's own tooling and store [needs the fleet]
+- [ ] the dispatcher's forwarding rule for the scope flags into the podman VM (they should not forward — the VM can see none of the fleet — while a bare or workspace-scoped `wk sync` still does, which is what reaches the store in there) [needs the podman VM]
 - [ ] `wk status`'s fix message for a behind peer is "commit and push here first" while dirty, and "`wk sync --tools`" once clean — never a `git pull` that provably cannot converge [needs a behind peer]
 
 ## Everything else still unticked
@@ -69,7 +69,7 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] `wk vm rm` removes `<name>.unfiltered`, so a recreated guest of the same name is not refused by `wk claude` for the previous guest's sins [needs a macOS VM]
 - [ ] `ccache_conf_render` (lib/store.sh) renders the same ceiling for the store and for a remote machine's cache, and neither overwrites a config that is already there [needs a remote target]
 - [ ] `wk gc` prunes an unreferenced snapshot, keeps the newest, trims ccache, removes a stale bench payload seed, and reports the dirs it keeps [needs a workspace]
-- [ ] `wk sync --all` and `WK_MIRROR_BRANCHES` carry the extra branches [needs the fleet]
+- [ ] `wk sync --tools` and `WK_MIRROR_BRANCHES` carry the extra branches [needs the fleet]
 - [ ] `wk pick <ws> <id>@main` resolves the identifier without the network and picks it: the arithmetic agrees with the commit's own trailer, a wrong id is `unresolved` rather than picked, a dirty tree is a barrier, a conflict leaves the sequencer [needs a workspace]
 - [ ] `container/bin/` helpers on PATH in a workspace: `git-clean`, `commit-count`, `git-sync-fork` (refuses when the fork's main is ahead; fast-forwards otherwise; says so when `wk push` is off) [needs a workspace]
 - [ ] the PR workflow, end to end and as one flow: sandboxed agents driving builds while a person pushes, rebases, fetches forks and uploads PRs — `wk push on|off`, `wk remotes --fix`, `wk pr`, `wk pick` and `git-sync-fork` all in the loop, including a PR from an armhf container where `git-webkit` cannot run [needs an armhf container]

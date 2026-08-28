@@ -62,7 +62,7 @@ fi
 _proxy_policy_hash() { cksum < "$WK_ROOT/container/proxy/wk-proxy.py" | awk '{print $1}'; }
 
 # Only when it is already running: starting it is the full setup's job, and
-# `wk sync --target container` on a never-set-up machine should not report a
+# `wk sync --tools container` on a never-set-up machine should not report a
 # failure to start something it wasn't asked to install.
 _proxy_policy_reload() {
     local want; want=$(_proxy_policy_hash)

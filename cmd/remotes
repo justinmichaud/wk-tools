@@ -159,7 +159,7 @@ for TARGET in $_TARGETS; do
             if [ -n "${WK_REMOTE_PEER:-}" ]; then
                 log "  it is a workstation with its own checkout:  git pull there"
             else
-                log "  update it:  wk sync --target $TARGET"
+                log "  update it:  wk sync --tools $TARGET"
             fi
             rc=0
         fi

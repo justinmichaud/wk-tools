@@ -83,7 +83,7 @@ Prompt for the next agent (written 2026-08-27 late; delete when read):
      [bracket] naming what each item waits on; do the unbracketed ones first.
   Rules: sonnet agents on disjoint files, never two on one file; an agent
   never runs `git checkout`, `git restore` or `git stash`; never run
-  `wk selftest` while an agent edits; never `wk sync --machine`, `wk quiesce
+  `wk selftest` while an agent edits; never `wk sync --tools`, `wk quiesce
   on`, `wk stop`, or a card write unprompted; every "done" needs a test that
   ran, every agent report is checked against `git diff`. When you message an
   agent, address the one that owns the file (one message this session went

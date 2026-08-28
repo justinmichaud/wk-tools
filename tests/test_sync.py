@@ -117,12 +117,51 @@ class TestSnapshotCurrent(unittest.TestCase):
         self.assertFalse(self._current("", ""))
 
 
+class TestLocalStoreNamed(unittest.TestCase):
+    """local_store_named <target> is the pure decision behind which half of
+    `wk sync --tools` runs: the tooling copies always, and this machine's own
+    mirror and snapshot only when what was named includes them. A target with
+    a machine of its own keeps its own mirror -- refreshing it is that
+    driver's job (t_sync) -- so `wk sync --tools buildbox4` must not publish a
+    snapshot here. Driven through `. cmd/sync functions`, so no store, no
+    network and no workspace are touched."""
+
+    def _named(self, target):
+        cp = bash(f'. cmd/sync functions\nlocal_store_named "{target}"\n')
+        return cp.returncode == 0
+
+    def test_naming_nothing_includes_this_machines_store(self):
+        self.assertTrue(self._named(""))
+
+    def test_a_local_kind_includes_it(self):
+        # container and vm both keep their workspaces' snapshots in this
+        # machine's store (on macOS, in the podman VM it owns).
+        self.assertTrue(self._named("container"))
+        self.assertTrue(self._named("vm"))
+        self.assertTrue(self._named("local"))
+
+    def test_a_machine_of_its_own_does_not(self):
+        # Every configured machine in the registry: none of them is this
+        # machine's store, so none of them publishes a snapshot here.
+        confs = sorted((REPO / "targets" / "hosts").glob("*.conf"))
+        self.assertTrue(confs, "no machine confs to check")
+        for conf in confs:
+            self.assertFalse(self._named(conf.stem), conf.stem)
+
+    def test_a_name_that_is_no_target_does_not(self):
+        # Nothing here can be its store either; sync_furniture's load_target
+        # is what refuses the name itself, in one place for every command.
+        self.assertFalse(self._named("not-a-target"))
+
+
 class TestSyncScopeDecide(unittest.TestCase):
     """sync_scope_decide <workspace-count> <has-tty 0|1>
     [<pick>] is the pure decision behind cmd/sync's "autodetect, then ask":
-    bare / --machine / --all is parsed above it and --machine/--all never
-    reach this function, but a bare `wk sync` with no workspace named does,
-    and this is the whole of what it decides. Driven the same way as
+    a scope flag is parsed above it and never reaches this function, but a
+    bare `wk sync` with no workspace named does, and this is the whole of
+    what it decides. The menu it describes is the workspaces here, then two
+    more entries: n+1 "all of them here" (--target) and n+2 "this machine's
+    tooling, mirror and snapshot" (--tools). Driven the same way as
     snapshot_current -- `. cmd/sync functions` loads it with no network, no
     store, no workspace and no terminal needed."""
 
@@ -134,7 +173,10 @@ class TestSyncScopeDecide(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stderr)
         return cp.stdout.strip()
 
-    def test_no_workspaces_syncs_the_machine(self):
+    def test_no_workspaces_leaves_only_the_furniture(self):
+        # Nothing to fetch in, so cmd/sync takes this to --tools: the mirror
+        # and the first snapshot are what a machine with no workspaces needs
+        # (`wk new` refuses with "run 'wk sync' first" until one is published).
         self.assertEqual(self._decide(0, 0), "empty")
         self.assertEqual(self._decide(0, 1), "empty")
 
@@ -148,9 +190,16 @@ class TestSyncScopeDecide(unittest.TestCase):
     def test_several_and_a_terminal_asks_before_a_pick_is_given(self):
         self.assertEqual(self._decide(3, 1), "ask")
 
-    def test_picking_the_last_entry_means_all_of_them(self):
-        # n=3: entries 1-3 are workspaces, entry 4 ("all of them ... --machine").
+    def test_picking_the_entry_after_the_workspaces_means_all_of_them(self):
+        # n=3: entries 1-3 are workspaces, entry 4 is "all of them here".
         self.assertEqual(self._decide(3, 1, "4"), "all")
+
+    def test_picking_the_last_entry_means_the_machines_furniture(self):
+        # Entry n+2, the one that reaches the tooling, the mirror and the
+        # snapshot -- the only route to them from a bare `wk sync`, and so
+        # the only route at all on a macOS host, where a bare `wk sync` is
+        # what the dispatcher forwards into the podman VM.
+        self.assertEqual(self._decide(3, 1, "5"), "tools")
 
     def test_picking_a_workspace_number(self):
         self.assertEqual(self._decide(3, 1, "2"), "pick 2")
@@ -164,94 +213,253 @@ class TestSyncScopeDecide(unittest.TestCase):
 
     def test_picking_a_number_outside_the_menu_is_out_of_range(self):
         self.assertEqual(self._decide(3, 1, "0"), "out-of-range")
-        self.assertEqual(self._decide(3, 1, "5"), "out-of-range")
+        self.assertEqual(self._decide(3, 1, "6"), "out-of-range")
 
 
 class TestSyncArgParsing(unittest.TestCase):
-    """The argument-parsing block at the top of cmd/sync (cmd/sync:104-134):
-    what --machine/--all/a workspace name resolve to, and what the old
-    --tools/--target spellings and an unknown flag refuse with. Not a
-    function of its own (sync_scope_decide, above, is the part that is), so
-    lifted by line range rather than by name. Every case here dies (or
-    finishes parsing) before store_init -- lib/common.sh is the only other
-    thing sourced, and it is pure at source time (tests/test_prompts.py
-    relies on the same fact) -- so nothing here touches the network, the
-    store or a workspace."""
+    """The argument-parsing block at the top of cmd/sync: what a workspace
+    name, --target, --all and --tools resolve to, and what the --machine
+    tombstone and an unknown flag refuse with. Not a function of its own
+    (sync_scope_decide, above, is the part that is), so lifted by line range
+    rather than by name. Every case here dies (or finishes parsing) before
+    store_init -- lib/common.sh is the only other thing sourced, and it is
+    pure at source time (tests/test_prompts.py relies on the same fact) -- so
+    nothing here touches the network, the store or a workspace."""
 
-    ARGPARSE = _lift_range(REPO / "cmd" / "sync", r'^SCOPE=""$', r"ask for different things")
+    ARGPARSE = _lift_range(REPO / "cmd" / "sync", r'^USAGE="usage: wk sync', r"scope_set ws")
 
     def _parse(self, *args):
         set_line = "set -- " + " ".join(shlex.quote(a) for a in args) + "\n" if args else "set --\n"
         script = (
             ". lib/common.sh\n" + set_line + self.ARGPARSE
-            + "\nprintf 'SCOPE=%s ONLY=%s\\n' \"$SCOPE\" \"$ONLY\"\n"
+            + "\nprintf 'SCOPE=%s ONLY=%s TARGET=%s\\n' \"$SCOPE\" \"$ONLY\" \"$TARGET\"\n"
         )
         return bash(script)
 
-    def test_bare_is_no_scope_and_no_name(self):
-        cp = self._parse()
+    def _parsed(self, *args):
+        cp = self._parse(*args)
         self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "SCOPE= ONLY=")
+        return cp.stdout.strip()
 
-    def test_machine_sets_scope_machine(self):
-        cp = self._parse("--machine")
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "SCOPE=machine ONLY=")
+    def test_bare_is_no_scope_and_no_name(self):
+        self.assertEqual(self._parsed(), "SCOPE= ONLY= TARGET=")
+
+    def test_a_workspace_name_is_the_ws_scope(self):
+        self.assertEqual(self._parsed("myws"), "SCOPE=ws ONLY=myws TARGET=")
 
     def test_all_sets_scope_all(self):
-        cp = self._parse("--all")
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "SCOPE=all ONLY=")
+        self.assertEqual(self._parsed("--all"), "SCOPE=all ONLY= TARGET=")
 
-    def test_machine_and_all_together_is_last_flag_wins_not_a_refusal(self):
-        # Not documented as either "mutually exclusive" or "composed": the
-        # parsing loop (cmd/sync:107-131) has no conflict check between
-        # --machine and --all, only between a scope and a workspace name
-        # (cmd/sync:133-134) -- so combining the two scope flags silently
-        # takes whichever was seen last, in either order. Recorded here as
-        # the actual current behaviour, not a claim that it is the right one.
-        self.assertEqual(self._parse("--machine", "--all").stdout.strip(), "SCOPE=all ONLY=")
-        self.assertEqual(self._parse("--all", "--machine").stdout.strip(), "SCOPE=machine ONLY=")
+    def test_target_takes_the_next_word(self):
+        self.assertEqual(self._parsed("--target", "moose"), "SCOPE=target ONLY= TARGET=moose")
 
-    def test_a_workspace_name_sets_only(self):
-        cp = self._parse("myws")
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "SCOPE= ONLY=myws")
+    def test_target_takes_an_equals_value_too(self):
+        self.assertEqual(self._parsed("--target=moose"), "SCOPE=target ONLY= TARGET=moose")
+
+    def test_target_with_no_value_is_refused(self):
+        cp = self._parse("--target")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("--target names the target", cp.stderr)
+
+    def test_tools_alone_is_every_target(self):
+        # The target is optional: no name means every copy this machine owns.
+        self.assertEqual(self._parsed("--tools"), "SCOPE=tools ONLY= TARGET=")
+
+    def test_tools_takes_an_optional_target(self):
+        self.assertEqual(self._parsed("--tools", "buildbox4"), "SCOPE=tools ONLY= TARGET=buildbox4")
+        self.assertEqual(self._parsed("--tools=buildbox4"), "SCOPE=tools ONLY= TARGET=buildbox4")
+
+    def test_tools_does_not_eat_a_following_flag_as_its_target(self):
+        # `--tools --all` is two scopes, not a target called "--all": the
+        # optional argument is taken only when the next word is not a flag.
+        cp = self._parse("--tools", "--all")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("ask for different things", cp.stderr)
+
+    def test_two_scopes_are_refused_rather_than_last_one_wins(self):
+        for pair in (("--all", "--tools"), ("--tools", "--all"),
+                     ("--all", "--target", "moose"), ("--target", "moose", "--all")):
+            cp = self._parse(*pair)
+            self.assertNotEqual(cp.returncode, 0, f"{pair} was accepted")
+            self.assertIn("ask for different things -- one at a time", cp.stderr)
 
     def test_a_name_and_a_scope_together_is_refused(self):
-        cp = self._parse("myws", "--machine")
+        cp = self._parse("myws", "--all")
         self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("'myws' and --machine ask for different things", cp.stderr)
+        self.assertIn("ask for different things", cp.stderr)
+        self.assertIn("'myws'", cp.stderr)
 
     def test_two_names_is_refused(self):
         cp = self._parse("a", "b")
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("one workspace at a time (got 'a' and 'b')", cp.stderr)
 
-    def test_unknown_flag_is_refused(self):
+    def test_unknown_flag_is_refused_with_the_usage(self):
         cp = self._parse("--bogus")
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("unknown option: --bogus", cp.stderr)
+        self.assertIn("--tools", cp.stderr)
 
-    def test_old_tools_spelling_is_refused_naming_the_replacement(self):
-        cp = self._parse("--tools")
+    def test_machine_is_a_tombstone_naming_both_replacements(self):
+        # One flag for two unrelated pieces of work is what the scopes
+        # replace, so the old spelling is refused by name rather than aliased
+        # to either of them.
+        cp = self._parse("--machine")
         self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("is now part of a scope, not a flag of its own", cp.stderr)
-        self.assertIn("wk sync --machine", cp.stderr)
+        self.assertIn("'wk sync --machine' is gone", cp.stderr)
         self.assertIn("wk sync --all", cp.stderr)
+        self.assertIn("wk sync --tools", cp.stderr)
 
-    def test_old_target_spelling_is_refused_naming_the_scope_flags(self):
-        cp = self._parse("--target", "foo")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("'wk sync --target foo' is gone: the scope is how far", cp.stderr)
-        self.assertIn("wk sync --machine", cp.stderr)
-        self.assertIn("wk sync --all", cp.stderr)
+
+class TestScopeRouting(unittest.TestCase):
+    """Where each scope's work is actually sent, driven against the two
+    functions that decide it -- sync_target (--target/--all) and
+    sync_furniture (--tools) -- lifted out of cmd/sync and run over stubs.
+
+    load_target is the stub: a real one sources the target's driver, and the
+    driver redefines t_sync/t_wk/target_workspaces over anything defined
+    before it -- so stubbing only those reaches the real machine over ssh
+    instead of the stub. Nothing here touches the network."""
+
+    SYNC_TARGET = _lift_func(REPO / "cmd" / "sync", "sync_target")
+    SYNC_FURNITURE = _lift_func(REPO / "cmd" / "sync", "sync_furniture")
+
+    def _run(self, funcs, stubs, call):
+        return bash(". lib/common.sh\n" + funcs + "\n" + stubs + "\n" + call + "\n")
+
+    PLAIN_STUBS = """
+load_target() { case "$1" in moose) WK_REMOTE_PEER=1 ;; *) WK_REMOTE_PEER="" ;; esac; }
+t_needs_base() { return 1; }
+store_is_local() { return 0; }
+target_workspaces() { echo ws-a; echo ws-b; }
+t_wk() { echo "OVER-THERE: wk $*"; }
+sync_workspaces() { echo "FETCH: $* target=${WK_TARGET:-}"; }
+"""
+
+    def test_a_plain_target_fetches_in_its_workspaces_from_here(self):
+        cp = self._run(self.SYNC_TARGET, self.PLAIN_STUBS, "sync_target buildbox4")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertIn("FETCH: ws-a ws-b", cp.stdout)
+
+    def test_a_plain_targets_fetch_is_pinned_to_that_target(self):
+        # WK_TARGET, so ws_target answers from what is already known here
+        # rather than probing every other target over ssh, once per workspace.
+        cp = self._run(self.SYNC_TARGET, self.PLAIN_STUBS, "sync_target buildbox4")
+        self.assertIn("target=buildbox4", cp.stdout)
+
+    def test_a_peer_is_asked_for_each_workspace_by_name(self):
+        # A peer's workspaces are containers on the peer: their checkouts are
+        # inside them, so nothing here can cd into one. It is asked one
+        # workspace at a time and never with a scope word -- what a scope
+        # means is decided by *that* machine's copy of wk-tools, and an older
+        # one spelling `--all` differently is how a command naming one
+        # machine reached machines it never named.
+        cp = self._run(self.SYNC_TARGET, self.PLAIN_STUBS, "sync_target moose")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertEqual(
+            [l for l in cp.stdout.splitlines() if l.startswith("OVER-THERE:")],
+            ["OVER-THERE: wk sync ws-a", "OVER-THERE: wk sync ws-b"])
+        self.assertNotIn("--all", cp.stdout)
+        self.assertNotIn("--tools", cp.stdout)
+        self.assertNotIn("FETCH:", cp.stdout)
+
+    def test_a_target_whose_records_are_not_readable_here_says_so(self):
+        # The container store on macOS: it is inside the podman VM, so every
+        # workspace would read as "creating" from a base-id not visible here.
+        stubs = """
+load_target() { WK_REMOTE_PEER=""; }
+t_needs_base() { return 0; }
+store_is_local() { return 1; }
+target_workspaces() { echo ws-a; }
+sync_workspaces() { echo "FETCH: $*"; }
+"""
+        cp = self._run(self.SYNC_TARGET, stubs, "sync_target container")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertNotIn("FETCH:", cp.stdout)
+        self.assertIn("podman VM", cp.stderr)
+
+    FURNITURE_STUBS = """
+load_target() { :; }
+walk_targets() { echo container; echo vm; echo buildbox4; }
+t_sync() { echo "furniture: $_t named=${WK_SYNC_NAMED:-no}"; }
+"""
+
+    def test_tools_with_no_target_visits_every_one(self):
+        cp = self._run(self.SYNC_FURNITURE, self.FURNITURE_STUBS, 'sync_furniture ""')
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertEqual(
+            [l for l in cp.stdout.splitlines() if l.startswith("furniture:")],
+            ["furniture: container named=no", "furniture: vm named=no",
+             "furniture: buildbox4 named=no"])
+
+    def test_tools_with_a_target_visits_only_that_one_and_names_it(self):
+        # WK_SYNC_NAMED is the difference a peer reads: a snapshot is
+        # published on somebody else's workstation only when it was named,
+        # never as part of a sweep (targets/remote.sh, t_sync).
+        cp = self._run(self.SYNC_FURNITURE, self.FURNITURE_STUBS, "sync_furniture buildbox4")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertEqual(
+            [l for l in cp.stdout.splitlines() if l.startswith("furniture:")],
+            ["furniture: buildbox4 named=1"])
+
+
+class TestPeerFurnitureVersionGate(unittest.TestCase):
+    """targets/remote.sh's t_sync, the `wk sync --tools <peer>` half: a peer
+    is a workstation under git, so its tooling is pulled rather than pushed,
+    and only once that pull has actually converged is it asked to publish its
+    own snapshot. A copy that still differs is not handed a scope word --
+    what `--tools` means over there is that copy's to decide, and an older
+    one spells it differently, which is how a command naming one machine
+    reaches machines it never named.
+
+    Lifted and stubbed at the ssh boundary (_rsh_q), so no machine is
+    reached: the pull and the version question both stop here."""
+
+    T_SYNC = _lift_func(REPO / "targets" / "remote.sh", "t_sync")
+
+    def _run(self, theirs, named):
+        stubs = f"""
+WK_TARGET=apeer
+WK_REMOTE_HOST=apeer
+{'WK_SYNC_NAMED=1' if named else ''}
+_remote_probe() {{ :; }}
+_remote_peer() {{ return 0; }}
+t_tools() {{ printf /remote/wk-tools; }}
+_peer_why_behind() {{ printf 'stubbed reason'; }}
+_rsh_q() {{ case "$*" in *cmd/version*) printf '%s' {shlex.quote(theirs)} ;; *) return 0 ;; esac; }}
+t_wk() {{ echo "ASKED: wk $*"; }}
+"""
+        return bash(". lib/common.sh\n" + stubs + self.T_SYNC + "\nt_sync\n")
+
+    def _mine(self):
+        cp = subprocess.run([str(REPO / "cmd" / "version"), "--tree"],
+                            cwd=str(REPO), capture_output=True, text=True, timeout=15)
+        return cp.stdout.strip()
+
+    def test_a_copy_that_still_differs_is_asked_for_nothing_more(self):
+        cp = self._run("0000stale0000", named=True)
+        self.assertNotEqual(cp.returncode, 0, "a copy that differs is not a success")
+        self.assertIn("still DIFFERS", cp.stderr)
+        self.assertNotIn("ASKED:", cp.stdout)
+
+    def test_a_converged_copy_named_by_this_run_publishes_its_own_snapshot(self):
+        cp = self._run(self._mine(), named=True)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertIn("ASKED: wk sync --tools", cp.stdout)
+
+    def test_a_converged_copy_not_named_keeps_its_store_untouched(self):
+        # The sweep case (`wk sync --tools` with no target): a snapshot is
+        # never published on somebody else's workstation unasked.
+        cp = self._run(self._mine(), named=False)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertNotIn("ASKED:", cp.stdout)
+        self.assertIn("wk sync --tools apeer", cp.stderr)
 
 
 class TestDispatcherForwardingRuleForSync(unittest.TestCase):
     """The dispatcher's (`wk`) forwarding rule, driven directly against
-    cmd/sync's own declaration (`# wk: flag --machine,--all where=host`,
-    cmd/sync:5): whether a container workspace on a macOS host gets `wk
+    cmd/sync's own declaration (`# wk: flag --target,--all,--tools,--machine
+    where=host`, cmd/sync:5): whether a container workspace on a macOS host gets `wk
     sync ...` forwarded whole into the podman VM turns on two things in
     `wk` -- cmd_where() (wk:164-171, using the flag/sub overrides
     decl_load loaded) and resolve_target() (wk:344-354) -- combined by
@@ -299,14 +507,13 @@ class TestDispatcherForwardingRuleForSync(unittest.TestCase):
     def test_a_named_workspace_is_where_workspace(self):
         self.assertEqual(self._where("myws"), "workspace")
 
-    def test_machine_flag_is_where_host(self):
-        # cmd/sync:5's flag override -- this is what makes wk:707 skip the
-        # VM-forwarding block entirely for --machine, regardless of what
-        # resolve_target would say.
-        self.assertEqual(self._where("--machine"), "host")
-
-    def test_all_flag_is_where_host(self):
-        self.assertEqual(self._where("--all"), "host")
+    def test_every_scope_flag_is_where_host(self):
+        # cmd/sync:5's flag override -- this is what makes the dispatcher skip
+        # the VM-forwarding block entirely for a scope flag, regardless of
+        # what resolve_target would say. --machine is declared with them so
+        # its tombstone refuses here rather than inside the podman VM.
+        for flag in ("--all", "--tools", "--target", "--machine"):
+            self.assertEqual(self._where(flag), "host", flag)
 
     def test_bare_sync_resolves_to_container_the_forwarding_default(self):
         # No name and no --target means resolve_target's fallback
@@ -314,13 +521,19 @@ class TestDispatcherForwardingRuleForSync(unittest.TestCase):
         # above, this is the case that actually gets forwarded into the VM.
         self.assertEqual(self._target(), "container")
 
-    def test_machine_flag_still_resolves_to_container_but_where_makes_it_moot(self):
-        # resolve_target on its own does not know about --machine/--all --
-        # it just sees no name (a flag is not a positional) and defaults to
-        # container. It is cmd_where's "host" (tested above) that actually
-        # stops this from forwarding: wk:707 never reaches wk:721's
-        # resolve_target check at all once `where` is not `workspace`.
-        self.assertEqual(self._target("--machine"), "container")
+    def test_all_still_resolves_to_container_but_where_makes_it_moot(self):
+        # resolve_target on its own does not know about --all -- it just sees
+        # no name (a flag is not a positional) and defaults to container. It
+        # is cmd_where's "host" (tested above) that actually stops this from
+        # forwarding: the dispatcher never reaches its resolve_target check
+        # at all once `where` is not `workspace`.
+        self.assertEqual(self._target("--all"), "container")
+
+    def test_a_named_target_is_what_resolve_target_reports(self):
+        # `--target <t>` is the dispatcher's own spelling for "which target"
+        # (resolve_target, wk:379-388), shared with `wk new --target`: so
+        # `wk sync --target moose` is never mistaken for a container command.
+        self.assertEqual(self._target("--target", "moose"), "moose")
 
     def test_a_named_container_workspace_resolves_to_container(self):
         self.assertEqual(self._target("myws", ws_target_returns="container"), "container")
@@ -354,11 +567,10 @@ class TestSyncRefusedInsideWorkspace(unittest.TestCase):
     def test_bare_sync_is_refused(self):
         self._refused()
 
-    def test_machine_flag_is_refused_the_same_way(self):
-        self._refused("--machine")
-
-    def test_all_flag_is_refused_the_same_way(self):
+    def test_every_scope_flag_is_refused_the_same_way(self):
         self._refused("--all")
+        self._refused("--tools")
+        self._refused("--target", "container")
 
     def test_a_named_workspace_is_refused_the_same_way(self):
         self._refused("someotherws")

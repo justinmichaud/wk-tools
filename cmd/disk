@@ -217,7 +217,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         tmp=$(mktemp)
         # This file, piped in and run by the VM's bash, rather than the copy at
         # /opt/wk-tools/cmd/disk: that copy is only as new as the last
-        # `wk sync --target container`. Only the libraries it sources come
+        # `wk sync --tools container`. Only the libraries it sources come
         # from in there.
         podman machine ssh "$WK_MACHINE" -- \
             "WK_ROOT=/opt/wk-tools WK_STORE=/var/lib/wk bash -s -- --probe-store" \
@@ -226,7 +226,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
             render_probe noted "$tmp"
         else
             unknown "the store inside the VM" \
-                "the VM answered nothing; its tooling may be missing: wk sync --target container"
+                "the VM answered nothing; its tooling may be missing: wk sync --tools container"
         fi
         rm -f "$tmp"
     else

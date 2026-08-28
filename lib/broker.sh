@@ -37,7 +37,7 @@ broker_present() { [ -S "$WK_BROKER_SOCKET" ]; }
 broker_call() {
     local client="$WK_ROOT/container/broker/wk-broker-client.py"
     [ -f "$client" ] || die "this workspace's copy of wk-tools has no broker client
-    ($client). Refresh it:  wk sync --target container   on the workstation."
+    ($client). Refresh it:  wk sync --tools container   on the workstation."
     WK_BROKER_SOCKET="$WK_BROKER_SOCKET" python3 "$client" "$@"
 }
 

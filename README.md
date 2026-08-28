@@ -205,13 +205,19 @@ wk new review-1234 --pr 1234             # a fresh workspace straight onto a PR
 wk pr open bug-238                       # from the host: push the branch, open it with gh
 ```
 
-**Sync (this machine, or everywhere)**
+**Sync (a workspace, a target, or the furniture a machine keeps)**
+
+A workspace goes stale in its own checkout; a machine goes stale in what it
+keeps *for* workspaces -- its copy of wk-tools, its WebKit mirror, and the
+snapshot the next `wk new` clones. The two are asked for separately.
 
 ```sh
 wk sync                                 # one workspace here; asked when there are several
 wk sync bug-238                         # a named one
-wk sync --machine                       # mirror, snapshot, every workspace and wk-tools copy here
-wk sync --all                           # ...and every other machine too
+wk sync --target moose                  # every workspace on that target
+wk sync --all                           # every workspace on every target
+wk sync --tools                         # every machine's wk-tools, mirror and snapshot
+wk sync --tools buildbox4               # just that machine's
 ```
 
 **Profile a run**

@@ -61,18 +61,19 @@ _wk_runtime() { echo "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk"; }
 
 _ctr() { echo "wk-$1"; }
 
-# Pushes wk-tools itself, not the store: on a workstation the mount source is
-# this checkout (nothing to do); on macOS it's a copy inside the podman VM,
-# refreshed by rsync. The mirror/snapshots are a separate, forwarded `wk sync`.
+# This target's furniture (`wk sync --tools`) is the tooling copy alone: on a
+# workstation the mount source is this checkout (nothing to do); on macOS it
+# is a copy inside the podman VM, refreshed by rsync. The mirror and the
+# snapshots are the store's, which `wk sync --tools` publishes itself --
+# here on a workstation, and inside the VM on macOS, where a bare `wk sync`
+# is what reaches them.
 t_sync() {
     if ! is_macos; then
         info "containers here bind-mount this checkout ($WK_ROOT), so the tooling is never stale"
-        log  "  the mirror and snapshots are this machine's store:  wk sync"
         return 0
     fi
     ( WK_VMTOOLS_ONLY=tools . "$WK_ROOT/host/macos/vmtools.sh" ) \
         || die "could not push wk-tools into the podman VM"
-    log "  the mirror and snapshots in there are a plain 'wk sync --machine' away"
 }
 
 # Recorded at creation: the container reports the kernel's (host's)
