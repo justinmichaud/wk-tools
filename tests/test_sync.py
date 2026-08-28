@@ -256,6 +256,16 @@ class TestSyncArgParsing(unittest.TestCase):
     def test_target_takes_an_equals_value_too(self):
         self.assertEqual(self._parsed("--target=moose"), "SCOPE=target ONLY= TARGET=moose")
 
+    def test_an_unknown_target_is_refused_by_name(self):
+        # Not "no workspaces on nosuchthing", and not "1 target(s) did not
+        # take the tooling": the name is checked once, by load_target, which
+        # is the one thing that knows what a target is.
+        for args in (("--target", "nosuchthing"), ("--tools", "nosuchthing"),
+                     ("--target=nosuchthing",)):
+            cp = run("sync", *args)
+            self.assertNotEqual(cp.returncode, 0, f"{args} was accepted")
+            self.assertIn("unknown target 'nosuchthing'", cp.stdout)
+
     def test_target_with_no_value_is_refused(self):
         cp = self._parse("--target")
         self.assertNotEqual(cp.returncode, 0)
@@ -299,6 +309,21 @@ class TestSyncArgParsing(unittest.TestCase):
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("unknown option: --bogus", cp.stderr)
         self.assertIn("--tools", cp.stderr)
+
+    def test_an_empty_equals_value_is_refused_not_read_as_every_target(self):
+        # `--tools` alone means every target; `--tools=` has said there is
+        # one, so an empty one is a mistake rather than a second spelling of
+        # "all of them".
+        cp = self._parse("--tools=")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("--tools= names one target", cp.stderr)
+
+    def test_a_second_target_is_refused_rather_than_overwriting_the_first(self):
+        for pair in (("--target", "moose", "--target", "buildbox4"),
+                     ("--tools=moose", "--tools=buildbox4")):
+            cp = self._parse(*pair)
+            self.assertNotEqual(cp.returncode, 0, f"{pair} was accepted")
+            self.assertIn("one target at a time (got 'moose' and 'buildbox4')", cp.stderr)
 
     def test_machine_is_a_tombstone_naming_both_replacements(self):
         # One flag for two unrelated pieces of work is what the scopes
@@ -528,6 +553,15 @@ class TestDispatcherForwardingRuleForSync(unittest.TestCase):
         # forwarding: the dispatcher never reaches its resolve_target check
         # at all once `where` is not `workspace`.
         self.assertEqual(self._target("--all"), "container")
+
+    def test_the_equals_spelling_is_a_flag_too(self):
+        # `--target=moose` is the same flag as `--target moose`, and the
+        # dispatcher has to see it as one: unrecognised, `where` stays at its
+        # default and a host command is sent to the podman VM, which can see
+        # none of the fleet.
+        self.assertEqual(self._where("--target=moose"), "host")
+        self.assertEqual(self._where("--tools=buildbox4"), "host")
+        self.assertEqual(self._target("--target=moose"), "moose")
 
     def test_a_named_target_is_what_resolve_target_reports(self):
         # `--target <t>` is the dispatcher's own spelling for "which target"

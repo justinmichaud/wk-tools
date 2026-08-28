@@ -168,13 +168,17 @@ EOF
 }
 
 # The value of <key>= from a `flag` line naming a flag that is in <args...>.
+# `--flag=value` counts as `--flag`: a declaration names the flag, and a
+# spelling the flag's own parser accepts must not be invisible here -- an
+# unrecognised `--target=<t>` would leave `where` at its default and send a
+# host command to the podman VM instead.
 flag_override() { # <key> <args...>
     local key="$1" e flags a tok found=""; shift
     while IFS= read -r e; do
         [ -n "$e" ] || continue
         flags=${e%% *}
         for a in ${1+"$@"}; do
-            in_list "$a" "$flags" || continue
+            in_list "${a%%=*}" "$flags" || continue
             for tok in ${e#* }; do
                 case "$tok" in "$key="*) found=${tok#*=} ;; esac
             done
@@ -381,6 +385,10 @@ resolve_target() {
     [ -n "${WK_TARGET:-}" ] && { printf '%s' "$WK_TARGET"; return 0; }
     for a in "$@"; do
         if [ "$prev" = --target ]; then printf '%s' "$a"; return 0; fi
+        # Both spellings, since a command's own parser takes both: a
+        # `--target=<t>` read as no target at all resolves to the default and
+        # sends the command to a machine nobody named.
+        case "$a" in --target=?*) printf '%s' "${a#*=}"; return 0 ;; esac
         prev="$a"
         case "$a" in -*) ;; *) [ -z "$name" ] && name="$a" ;; esac
     done

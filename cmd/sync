@@ -124,6 +124,7 @@ SCOPE=""            # ws | target | all | tools -- what this run brings up to da
 SCOPE_AS=""         # how it was spelled, for a message about two of them
 ONLY="${WK_NAME:-}" # the workspace named, if one was
 TARGET=""           # the target --target or --tools named, if one was
+_v=""               # the value a flag was given, while it is being checked
 
 # One scope per run: two of them are two different pieces of work on two
 # different things, and taking whichever was typed last did neither.
@@ -137,16 +138,30 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --all)  scope_set all --all; shift ;;
         --target|--target=*)
-            case "$1" in --target=*) TARGET="${1#*=}" ;; *) TARGET="${2:-}" ;; esac
-            [ -n "$TARGET" ] || die "--target names the target whose workspaces to fetch in.
+            _v=""
+            case "$1" in --target=*) _v="${1#*=}" ;; *) _v="${2:-}" ;; esac
+            [ -n "$_v" ] || die "--target names the target whose workspaces to fetch in.
     'wk status' names them; 'wk sync --all' is every one of them."
+            [ -z "$TARGET" ] || die "one target at a time (got '$TARGET' and '$_v')"
+            TARGET="$_v"
             case "$1" in --target=*) shift ;; *) shift 2 ;; esac
             scope_set target --target ;;
-        # The target is optional here, so it is the next word only when there
-        # is one and it is not another flag.
+        # The target is optional here -- the next word, when there is one and
+        # it is not another flag. Optional as a word, never as a value: the
+        # `=` spelling has said there is one, so an empty one is a mistake,
+        # not a way to ask for every target.
         --tools|--tools=*)
-            case "$1" in --tools=*) TARGET="${1#*=}"; shift ;;
-                         *) shift; case "${1:-}" in ''|-*) ;; *) TARGET="$1"; shift ;; esac ;;
+            case "$1" in
+                --tools=*)
+                    _v="${1#*=}"
+                    [ -n "$_v" ] || die "--tools= names one target; --tools alone is every one of them."
+                    [ -z "$TARGET" ] || die "one target at a time (got '$TARGET' and '$_v')"
+                    TARGET="$_v"; shift ;;
+                *)  shift
+                    case "${1:-}" in ''|-*) ;;
+                        *) [ -z "$TARGET" ] || die "one target at a time (got '$TARGET' and '$1')"
+                           TARGET="$1"; shift ;;
+                    esac ;;
             esac
             scope_set tools --tools ;;
         # A tombstone: one flag for two unrelated pieces of work is what the
@@ -170,6 +185,16 @@ done
 # it and takes it out), so the scope it implies is settled here rather than
 # in the loop -- and scope_set is what refuses a name and a scope together.
 [ -z "$ONLY" ] || scope_set ws "'$ONLY'"
+
+# A target named on the command line is checked once, here, by the one thing
+# that knows what a target is (load_target, which refuses an unknown one by
+# name and says where its conf would go). Without this the name would reach
+# the work still unchecked, and each place would report it as something else:
+# a target with no workspaces, or a copy that "did not take the tooling".
+# stdout only: the refusal is on stderr, and it is the whole point.
+if [ -n "$TARGET" ]; then
+    ( load_target "$TARGET" >/dev/null ) || exit 1
+fi
 
 # --- autodetect, then ask ----------------------------------------------------
 # On a host: one workspace is unambiguous and used; several is asked, not
@@ -234,7 +259,7 @@ sync_furniture() { # <target>, or empty for every target this machine knows
         # A subshell per target: a driver is a sourced file that sets
         # globals, and letting one target's overrides outlive it corrupts the next.
         (
-            load_target "$_t" >/dev/null 2>&1 || exit 3
+            load_target "$_t" >/dev/null || exit 3
             # A peer keeps a store of its own, and publishing a snapshot on
             # somebody else's workstation is done only when this run named it.
             [ -z "$only" ] || { WK_SYNC_NAMED=1; export WK_SYNC_NAMED; }
@@ -341,11 +366,11 @@ sync_workspaces() {
 sync_target() { # <target>
     local _t="$1" _ws
     if ( load_target "$_t" >/dev/null 2>&1; [ -n "${WK_REMOTE_PEER:-}" ] ); then
-        _ws=$( ( load_target "$_t" >/dev/null 2>&1 || exit 0; target_workspaces ) )
+        _ws=$( ( load_target "$_t" >/dev/null || exit 3; target_workspaces ) )
         [ -n "$_ws" ] || { info "no workspaces on $_t"; return 0; }
         info "$_t holds its own workspaces -- asking it to fetch in each"
         (
-            load_target "$_t" >/dev/null 2>&1 || exit 3
+            load_target "$_t" >/dev/null || exit 3
             for _w in $_ws; do
                 WK_NO_DELEGATE=1 t_wk sync "$_w" \
                     || warn "$_t did not fetch in '$_w' -- see above"
@@ -364,7 +389,7 @@ sync_target() { # <target>
         return 0
     fi
 
-    _ws=$( ( load_target "$_t" >/dev/null 2>&1 || exit 0; target_workspaces ) )
+    _ws=$( ( load_target "$_t" >/dev/null || exit 3; target_workspaces ) )
     [ -n "$_ws" ] || { info "no workspaces on $_t"; return 0; }
     # WK_TARGET: these names came from this target, so ws_target must not go
     # asking every other one where each of them lives -- that is an ssh probe
