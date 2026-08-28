@@ -208,6 +208,16 @@ usage: wk zed <workspace>
 
 
 THis seems like a symptom of not handiling workspaces at a high enough level of abstraction. This should not be bespoke.
+  (agent: it was the resolution, not zed -- every named workspace command was
+  refused for a workspace another workstation owns, and the two commands that
+  worked (`wk ls`, `wk status`) each had a fan-out of their own. Now the
+  remote driver asks a peer's own `wk` what it holds (targets/remote.sh
+  "peers"), and the dispatcher hands a workspace command to the machine that
+  holds it, once, for every command -- cmd/logs' and cmd/build's private
+  copies of that are gone. `wk zed` is declared `here` and builds a route
+  instead: one ssh hop to the peer wrapping its own container transport.
+  tests/test_peer.py; the zed hop is verified end to end but only against a
+  hand-placed copy of this tree, so moose has to pull before it works there.)
 
 - Help options should always list all valid values for params
 

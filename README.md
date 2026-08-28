@@ -72,10 +72,14 @@ Every `wk <cmd> -h` prints a `runs on:` line, and commands fall into three
 groups:
 
 - **The workspace's target.** `build`, `run`, `test`, `claude`, `bench`,
-  `profile`, `status`, `ls`, `sync`, `enter`, `logs`, `gui`, `zed`. On a macOS
-  host, a `container` workspace's command is forwarded into the podman VM over
-  `podman machine ssh`; a `vm` or `remote` workspace's command runs directly
-  from the host.
+  `profile`, `status`, `ls`, `sync`, `enter`, `logs`, `gui`, `zed`. A workspace
+  lives on exactly one machine, and the command goes to that machine: on a
+  macOS host a `container` workspace's command is forwarded into the podman VM
+  over `podman machine ssh`, and a workspace on a machine that runs `wk` for
+  itself — a build box, or a peer workstation — is handed over whole, so that
+  machine's own `wk` resolves the name and does the work. `wk zed` is the one
+  exception, since the editor runs where you typed the command: it asks the
+  machine holding the workspace for a route and opens that from here.
 - **This host's own store or hardware, refused inside a workspace and on a
   build machine.** `remote`, `key`, `push`, `sudo`, `quiesce`, `session`,
   `boot`, `pi`, `sysimage`, `bridge`, `vm`, `find`, `backup`, `start`, `stop`,
@@ -88,7 +92,10 @@ groups:
 
 `wk new` and `wk rm` run on "the workstation that keeps the workspace record"
 — even for a `remote` workspace, because the record of which target a
-workspace belongs to lives here, not on the machine doing the build.
+workspace belongs to lives here, not on the machine doing the build. A peer
+workstation keeps its own records, so it makes and destroys its own
+workspaces: `wk new <name> --target <peer>` and `wk rm` of one of its
+workspaces refuse here and name the command to run there.
 
 A machine is named by its tailnet name and nothing else — no `.local`
 address, no IP, no ssh `ProxyJump` stored anywhere in this repo. `wk ls` and

@@ -7,8 +7,9 @@
 # on (see "declarations" below). This file reads that declaration and does,
 # once for every command, what would otherwise be re-decided in each: resolve
 # the workspace name, refuse a name inside a workspace, wait for a workspace to
-# be ready, decide where the command runs, and forward container work into the
-# podman VM on a macOS host. bash 3.2 throughout: macOS ships nothing newer.
+# be ready, decide where the command runs, forward container work into the
+# podman VM on a macOS host, and hand a command about a workspace another
+# machine owns to that machine. bash 3.2 throughout: macOS ships nothing newer.
 #
 # --- environment protocol -----------------------------------------------------
 # Set here for a forwarded or delegated child and read by cmd/* and lib/*;
@@ -27,6 +28,8 @@
 #                   half of `wk status` need not recompute it
 #   WK_NO_DELEGATE  set by a command already walking the fleet, so a machine
 #                   it asks reports only what it holds and asks nobody
+#   WK_ZED_PUBKEY   the key an editor on the *asking* machine will present,
+#                   for a machine preparing one of its workspaces for it
 #   WK_QUIET        --quiet: drop info/log narration (lib/common.sh)
 #   WK_FORCE        --force: cross a refusal that exists because of a rule
 #                   (lib/common.sh's barrier)
@@ -62,7 +65,12 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 #   lifecycle        creates or destroys the workspace record (new, rm)
 #   readonly [<subverbs>]   changes nothing; never starts the podman machine
 #   broker <subverbs>|*     allowed inside a workspace, through the broker
-#   forward no       a workspace command that runs on the host regardless
+#   forward no       a workspace command that runs on this host rather than
+#                    inside the podman VM; it still goes to the machine that
+#                    holds the workspace, if that is another one
+#   here             a workspace command that runs where the person typed it
+#                    and nowhere else -- it needs this device's editor. Implies
+#                    forward=no
 #   outside          a workspace command refused inside a workspace: it must
 #                    look at the workspace from the host
 #   bare merged      with no workspace named, report on every target here
@@ -78,6 +86,7 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 decl_load() { # <impl>
     D_WHERE=workspace D_NAME=none D_READY=no D_GROUP=other D_LIFECYCLE=""
     D_READONLY="" D_BROKER="" D_FORWARD=yes D_BARE="" D_POST="" D_SUB="" D_FLAG="" D_OUTSIDE="" D_NEEDS=""
+    D_HERE=""
     local line tok
     set -f   # `broker *` is a word, not a glob
     while IFS= read -r line; do
@@ -100,6 +109,7 @@ ${line# flag }" ; continue ;;
                 broker)   D_BROKER=pending ;;
                 needs)    D_NEEDS=pending ;;
                 forward=no) D_FORWARD=no ;;
+                here)     D_HERE=1; D_FORWARD=no ;;
                 outside)  D_OUTSIDE=1 ;;
                 bare=merged) D_BARE=merged ;;
                 post=*)   D_POST=${tok#post=} ;;
@@ -339,10 +349,12 @@ explain_cmd() { # <cmd> <impl>
     case "$D_WHERE" in
         host)  printf "  runs on: this host's own store or hardware; refused inside a workspace and on a build machine\n" ;;
         local) printf '  runs on: this machine, never forwarded\n' ;;
-        *)     if [ -n "$D_LIFECYCLE" ]; then
+        *)     if [ -n "$D_HERE" ]; then
+                   printf '  runs on: the machine you type it on -- it needs this device'"'"'s editor\n'
+               elif [ -n "$D_LIFECYCLE" ]; then
                    printf '  runs on: the workstation that keeps the workspace record\n'
                else
-                   printf "  runs on: the workspace's target (forwarded into the podman VM for a container workspace on macOS)\n"
+                   printf "  runs on: the workspace's target, on the machine holding it (the podman VM for a container workspace on macOS; that machine's own wk when it has one)\n"
                fi ;;
     esac
     grep -q -- '--dry-run' "$impl" 2>/dev/null \
@@ -591,6 +603,49 @@ bare_report() {
     exit "$worst"
 }
 
+# --- handing a command to the machine that holds the workspace ----------------
+#
+# A workspace lives on exactly one machine, and some machines are the only
+# ones that can act on their own: a peer workstation's containers and guests
+# are reachable by no path from here, and a build box drives its own builds
+# better than a laptop over ssh does. The driver says so (t_delegates), the
+# whole command goes over, and the far side resolves the name again from its
+# own evidence -- so no command needs a branch of its own for it.
+#
+# Two kinds of workspace command stay here, both declared: `here` (it needs
+# this device's editor) and `lifecycle` (making and destroying a workspace is
+# the owning machine's act, and `--target` already names that machine).
+delegate_target() { # <args...> -- the machine, or nothing
+    local t
+    t=$(resolve_target "$@" 2>/dev/null) || return 0
+    ( load_target "$t" >/dev/null 2>&1 && t_delegates ) 2>/dev/null || return 0
+    printf '%s' "$t"
+}
+
+# A pty when this end is one, for the same reason forward_to_vm allocates one:
+# `wk enter` and `wk run --lldb` are conversations, and ssh gives a command no
+# terminal unless asked. Both ends checked, so a captured stdout stays clean.
+delegate_run() { # <machine> <cmd> <args...>
+    local t="$1" cmd="$2" rc=0
+    shift 2
+    load_target "$t"
+    case "$(t_far_side)" in
+        answering) ;;
+        unreachable) die "'$cmd' acts on a workspace on $t, and $t did not answer.
+    Nothing here can reach into it: the workspace is that machine's own." ;;
+        *) die "'$cmd' acts on a workspace on $t, which has no wk-tools of its own to
+    run it:  wk remote setup $t" ;;
+    esac
+    # The name this side knows that machine by, and no WK_HOST_SELF: what
+    # comes back is a report about another machine, not about this one, and
+    # `wk status <ws>` would otherwise head its answer "this machine".
+    WK_ROW_LABEL="$t"; export WK_ROW_LABEL
+
+    if [ -t 0 ] && [ -t 1 ]; then t_wk_tty "$cmd" ${@+"$@"}; exit $?; fi
+    t_wk "$cmd" ${@+"$@"} || rc=$?
+    exit "$rc"
+}
+
 forward_to_vm() {
     require podman "podman is required; install the official pkg from podman.io"
     local _self_name; _self_name=$(wk_machine_name)
@@ -673,7 +728,7 @@ forward_to_vm() {
 
 main() {
     [ $# -ge 1 ] || usage
-    local cmd="$1" _a _seen_dashdash="" _rest where name=""; shift
+    local cmd="$1" _a _seen_dashdash="" _rest where name="" delegate="" decl="" slot=""; shift
     case "$cmd" in
         help|-h|--help) help_doc ;;
         setup) exec "$WK_ROOT/setup" "$@" ;;
@@ -721,16 +776,36 @@ main() {
     later 'wk build' finds its target from that store."
     fi
 
+    # How the workspace name arrives, once for the two questions that need it:
+    # which machine this command is about, and which positional to take the
+    # name from further down.
+    if [ "$where" = workspace ]; then decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); fi
+
+    # Whether this command is about a workspace another machine owns, decided
+    # once here so nothing decides it again. Before check_needs, because what
+    # a command needs is needed on the machine that will run it. A command
+    # that takes no name is about this machine whatever its positionals say.
+    if [ "$where" = workspace ] && [ "${decl%@*}" != none ] \
+       && ! in_workspace && [ -z "${WK_IN_VM:-}" ] \
+       && [ -z "$D_HERE" ] && [ -z "$D_LIFECYCLE" ]; then
+        delegate=$(delegate_target "$@")
+    fi
+
     # What the command needs, checked after the refusals about where it may run
     # and before anything starts. On a macOS host a container command is
     # answered in the podman VM, which has its own tools; the check runs there.
     { [ "$where" = workspace ] && is_macos && [ -z "${WK_IN_VM:-}" ] && ! in_workspace \
-        && [ "$D_FORWARD" = yes ] && [ "$(resolve_target "$@")" = container ]; } || check_needs "$cmd" "${1:-}"
+        && [ "$D_FORWARD" = yes ] && [ "$(resolve_target "$@")" = container ]; } \
+        || [ -n "$delegate" ] || check_needs "$cmd" "${1:-}"
 
     [ "$where" = workspace ] || exec "$impl" "$@"
 
+    # The name is resolved, waited for and acted on over there, by the same
+    # dispatcher reading the same declaration -- so nothing below this line
+    # runs twice.
+    [ -z "$delegate" ] || delegate_run "$delegate" "$cmd" "$@"
+
     # --- a workspace command ---------------------------------------------------
-    local decl slot; decl=$(cmd_name "$@"); slot=$(name_slot "$decl")
     if ! in_workspace && [ "${decl%@*}" = required ]; then
         positional "$slot" "$@" >/dev/null || usage_die "$cmd" "$impl"
     fi

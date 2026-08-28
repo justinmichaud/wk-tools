@@ -292,9 +292,67 @@ _remote_root() { _remote_probe; printf '%s' "$WK_REMOTE_ROOT"; }
 
 _remote_ws()   { echo "$(_remote_root)/ws/$1"; }
 
+# --- peers -------------------------------------------------------------------
+# A peer owns its workspaces: they are its containers and its guests, in its
+# own store, and nothing on this side has a path to one. So every question
+# about them is asked of its own `wk`, and every command about one is handed
+# over whole (`wk`'s delegation, which t_delegates below decides).
+
+# Its listing, as "<name>\t<state>" lines. One round trip per process,
+# memoised the way the capacity probe is; `wk ls --json` because a document
+# is the off-the-shelf machine-readable answer and a table is not.
+_peer_fetch() {
+    local json
+    json=$(WK_NO_DELEGATE=1 t_wk ls --json </dev/null 2>/dev/null) || return 1
+    printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+for w in doc.get("workspaces", []):
+    print("%s\t%s" % (w.get("name", ""), w.get("state", "")))
+'
+}
+
+_peer_list() {
+    if [ -z "${_WK_PEER_LISTED:-}" ]; then
+        _WK_PEER_LISTED=1
+        _WK_PEER_ROWS=$(_peer_fetch) || _WK_PEER_ROWS=""
+    fi
+    [ -z "$_WK_PEER_ROWS" ] || printf '%s\n' "$_WK_PEER_ROWS"
+}
+
+# What it takes to reach a workspace the peer owns, from the only machine
+# that can say: which account, which checkout, and what to run *there* to
+# speak ssh to a container that has no address of its own. The same round
+# trip installs that workspace's sshd and authorises this machine's key over
+# there (WK_ZED_PUBKEY), so an editor here needs nothing further.
+_peer_route() { # <name>
+    local name="$1" out
+    [ "${_WK_PEER_ROUTE_NAME:-}" = "$name" ] && return 0
+    out=$(WK_ZED_PUBKEY="$(zed_key_pub)" t_wk zed "$name" --route </dev/null) \
+        || die "$WK_REMOTE_HOST could not open a route into '$name'; what it said is above.
+    A copy of wk-tools that has never heard of 'wk zed --route' says so as a usage
+    error -- that one is fixed by bringing the machine up to date:  wk sync --tools"
+    _WK_PEER_ROUTE_USER=$( printf '%s\n' "$out" | kv_get user )
+    _WK_PEER_ROUTE_SRC=$(  printf '%s\n' "$out" | kv_get src )
+    _WK_PEER_ROUTE_PROXY=$(printf '%s\n' "$out" | kv_get proxy )
+    [ -n "$_WK_PEER_ROUTE_USER" ] && [ -n "$_WK_PEER_ROUTE_SRC" ] \
+        || die "$WK_REMOTE_HOST said nothing an editor can use about '$name'"
+    _WK_PEER_ROUTE_NAME="$name"
+}
+
 # --- contract ----------------------------------------------------------------
 
-t_src()   { echo "$(_remote_ws "$1")/WebKit"; }
+# A peer's checkout is inside the workspace, not under the remote root, so
+# only the peer can say where -- and it says so as part of the route, which
+# `wk zed` has already asked for by the time this is called.
+t_src() {
+    _remote_peer && [ -n "${1:-}" ] \
+        && { _peer_route "$1"; printf '%s' "$_WK_PEER_ROUTE_SRC"; return 0; }
+    echo "$(_remote_ws "$1")/WebKit"
+}
 
 # The remote's own ccache, under the remote root -- not a shared one on the
 # box: a cache you do not administer is one you can poison for other people.
@@ -319,9 +377,31 @@ t_needs_base() { return 1; }
 # The ssh destination already configured, not a generated alias (which could
 # not carry the real entry's ProxyJump). On the machine itself there is no
 # route and never will be -- that would be an ssh loop back to the host you are typing on.
+#
+# A peer's *workspace* is the exception: it is not on the peer's filesystem
+# at all, so it is reached through the alias t_ssh_prepare writes here. The
+# machine itself -- the empty name, which is what `wk zed --tools` asks about
+# -- still answers as itself.
 t_ssh_host() {
     _remote_is_local && return 1
-    _remote_require; echo "$WK_REMOTE_HOST"
+    _remote_require
+    if _remote_peer && [ -n "${1:-}" ]; then echo "wk-$1"; return 0; fi
+    echo "$WK_REMOTE_HOST"
+}
+
+# One hop more than the peer needs itself: its own transport, run over ssh to
+# it, is a complete transport from here -- the container still has no network
+# interface and nothing new listens anywhere.
+t_ssh_prepare() {
+    local name="${1:-}"
+    { _remote_peer && [ -n "$name" ]; } || return 0
+    _peer_route "$name"
+    [ -n "$_WK_PEER_ROUTE_PROXY" ] \
+        || die "'$name' on $WK_REMOTE_HOST is reached at an address on that machine's
+    own network, which is not this one's. Open it from $WK_REMOTE_HOST:
+        ssh $WK_REMOTE_HOST wk zed $name"
+    ssh_alias_set "$name" "wk-$name.$WK_TARGET.invalid" "$_WK_PEER_ROUTE_USER" "$(zed_key)" \
+        "ProxyCommand ssh $WK_REMOTE_HOST $_WK_PEER_ROUTE_PROXY"
 }
 
 t_store_init() {
@@ -330,6 +410,7 @@ t_store_init() {
 }
 
 t_list() {
+    _remote_peer && { _peer_list; return 0; }
     # `|| true`: no ws directory yet is not an error, and pipefail in the
     # caller would fail the whole listing on a non-zero ls.
     { _rsh_q "ls -1 $(sh_quote "$(_remote_root)/ws") 2>/dev/null" 2>/dev/null || true; } \
@@ -348,6 +429,21 @@ t_list() {
 t_info() {
     local ws out
     _remote_probe_try || { echo unreachable; return 0; }
+
+    # A peer's own word for a workspace it owns. Only the four words above
+    # survive the trip: everything else its listing can say (running, exited,
+    # broken) means the same thing from here -- it is there, and the peer is
+    # what reports on it, since every command about it is handed over.
+    if _remote_peer; then
+        out=$(_peer_list | awk -F'\t' -v n="$1" '$1 == n { print $2; exit }')
+        case "$out" in
+            "")                    echo absent ;;
+            creating|unreachable)  echo "$out" ;;
+            *)                     echo present ;;
+        esac
+        return 0
+    fi
+
     ws=$(_remote_ws "$1")
     out=$(_rsh_q "if [ ! -d $(sh_quote "$ws") ]; then echo absent;
                   elif [ -f $(sh_quote "$ws/$WK_READY_MARKER") ]; then echo present;
@@ -503,6 +599,17 @@ t_has_wk() {
     _rsh_q "test -f \$HOME/.wk-remote && test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
 }
 
+# A peer's workspaces are its own and no path here reaches them, answered
+# or not -- so a peer delegates whether or not it is up, and t_far_side (in
+# `wk`) is what turns a peer that is down into an honest refusal rather than
+# a command quietly acting on the wrong thing. A build box delegates once it
+# has a `wk` of its own: the machine doing the building drives the build.
+t_delegates() {
+    _remote_is_local && return 1
+    _remote_peer && return 0
+    t_has_wk
+}
+
 t_far_side() {
     if _remote_is_local; then echo none
     elif ! _remote_probe_try; then echo unreachable
@@ -518,14 +625,8 @@ t_wk() {
     _rsh "cd \$HOME && \
         ${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }\
         ${WK_NO_DELEGATE:+WK_NO_DELEGATE=1 }\
+        ${WK_ZED_PUBKEY:+WK_ZED_PUBKEY=$(sh_quote "${WK_ZED_PUBKEY:-}") }\
         $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@")"
-}
-
-# Detached, so this end can go away: ssh's session ends when its channel
-# closes, and a child still holding the tty or pipe is killed with it.
-t_wk_detach() {
-    _rsh_q "cd \$HOME && nohup $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@") \
-                >/dev/null 2>&1 </dev/null & echo \$!"
 }
 
 # The same, with a pty: `wk sudo setup` over there prompts for a password,

@@ -419,6 +419,11 @@ HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 \
 no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1'"
 }
 
+# The two halves of the editor's route (lib/target.sh): a container has no
+# address, so the whole ssh conversation goes through one `podman exec`.
+t_ssh_user()  { _ctr_user "$1"; }
+t_ssh_proxy() { printf '%s %s' "$WK_ROOT/container/ssh-transport.sh" "$1"; }
+
 # /run/sshd is created here, not at install time: /run is a tmpfs podman
 # remakes on every container start. No `exec`: _hpodman is a shell function.
 t_ssh_exec() {
@@ -487,18 +492,20 @@ t_ssh_prepare() {
         chmod 0600 '$h/.ssh/authorized_keys'" \
         || die "could not prepare the ssh identity in '$name'"
 
+    # This machine's key, or the asking machine's when another workstation is
+    # opening a workspace this one owns (zed_key_pub, lib/target.sh).
     pub=$(zed_key_pub) || die "could not create this machine's zed key"
     if ! _hpodman exec --user "$u" "$c" grep -qsF "$pub" "$h/.ssh/authorized_keys"; then
         printf '%s\n' "$pub" | _hpodman exec -i --user "$u" "$c" \
             /bin/sh -c "cat >> '$h/.ssh/authorized_keys'" \
-            || die "could not authorise this machine's zed key in '$name'"
-        changed "authorised this machine's zed key in '$name'"
+            || die "could not authorise the editor's key in '$name'"
+        changed "authorised the editor's key in '$name'"
     fi
 
     # Rewritten every time: the alias derives from the user and checkout
     # path, both of which can change under it.
     ssh_alias_set "$name" "wk-$name.container.invalid" "$u" "$(zed_key)" \
-        "ProxyCommand $WK_ROOT/container/ssh-transport.sh $name"
+        "ProxyCommand $(t_ssh_proxy "$name")"
 }
 
 # This container cannot start inside a podman machine that is not running,

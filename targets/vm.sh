@@ -226,6 +226,10 @@ t_ssh_host() {
     echo "$WK_VM_USER@$ip"
 }
 
+# A guest is reached at an address, so there is no proxy to run (the default
+# refuses); the account is the one the golden image was provisioned with.
+t_ssh_user() { printf '%s' "$WK_VM_USER"; }
+
 t_create() {
     local name="$1"
     local v; v=$(_vm "$name")

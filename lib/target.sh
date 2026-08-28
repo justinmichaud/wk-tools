@@ -21,6 +21,9 @@
 #   t_sync_tools <n>   push wk-tools in (no-op when it is bind-mounted)
 #   t_sync             refresh the target's own far-side state, if it has any
 #   t_ssh_host <name>  ssh destination, for Zed and the generated alias
+#   t_ssh_user <name>  the account inside the workspace an editor logs into
+#   t_ssh_proxy <name> what to run *on this machine* to speak ssh to the
+#                      workspace, for one with no address to connect to
 #   t_needs_base       0 if `wk new` must resolve a base snapshot first
 #   t_start <name>     bring a stopped workspace's environment back (see below)
 #   t_stop <name>      stop a workspace's environment, leaving it on disk (see below)
@@ -33,6 +36,8 @@
 #   t_exec_build       t_exec, for a build specifically (see below)
 #   t_status_put       write the build status where the target's own side is
 #   t_has_wk / t_wk    run `wk` on the target's own machine, if that is one
+#   t_delegates        must a command about a workspace here run on that
+#                      machine rather than this one? (`wk`, delegate_target)
 
 # targets/local.sh is the degenerate case: the target is the machine already
 # running the command (see "am I a workspace?" below).
@@ -67,6 +72,12 @@ t_wiring_args() { printf '\n\n\n'; }
 t_ssh_host()   { echo "wk-$1"; }
 
 t_ssh_prepare() { :; }   # point an editor at this target over ssh; nothing for one already an ssh destination
+
+# The two halves of an editor's route that only the driver knows. Both refuse
+# rather than guess: a target reached by address has no proxy to run, and one
+# with no ssh account of its own has no editor route at all.
+t_ssh_user()   { return 1; }
+t_ssh_proxy()  { return 1; }
 t_needs_base() { return 0; }
 
 # A machine this target only *reaches* (remote) is always reachable, so
@@ -188,9 +199,13 @@ t_exec_build() { t_exec "$@"; }
 # a second copy on the driving side would go stale.
 t_status_put() { local n="$1" ws; ws="$(wk_ws_dir "$n")"; cat > "$ws/build.status"; }
 t_has_wk()    { return 1; }         # is there a far side that can answer?
+
+# Is this side able to act on a workspace here at all? A target whose
+# workspaces belong to another machine says no, and `wk` hands the whole
+# command over rather than each command deciding for itself.
+t_delegates() { return 1; }
 t_far_side()  { echo none; }        # answering | unreachable | no-wk | none (not a machine of its own)
 t_wk()        { return 1; }         # t_wk <args...>, its exit status is the answer
-t_wk_detach() { return 1; }         # t_wk_detach <args...> -- runs on the far machine and returns at once
 t_wk_tty()    { t_wk "$@"; }        # t_wk with a terminal, for far-side commands that prompt a human
 
 t_load() { awk '{print int($1)}' /proc/loadavg 2>/dev/null || echo 0; }   # whole cores; build_jobs polite subtracts it
@@ -398,7 +413,11 @@ EOF
 # in an agent -- not discoverable from an editor launch.
 zed_key() { echo "$(wk_state_dir)/ssh/zed_ed25519"; }
 
+# The key the editor will present -- which is not this machine's whenever
+# this machine is preparing a workspace for the one that asked (WK_ZED_PUBKEY,
+# set by the remote driver reaching into a peer's workspace).
 zed_key_pub() {
+    [ -z "${WK_ZED_PUBKEY:-}" ] || { printf '%s\n' "$WK_ZED_PUBKEY"; return 0; }
     local k; k=$(zed_key)
     if [ ! -f "$k" ]; then
         ensure_dir "$(dirname "$k")" 0700
@@ -547,7 +566,9 @@ _target_reset_vars() {
     # the previous target's must not survive into this one.
     WK_TARGET_CMAKE=""
     unset _WK_REMOTE_PROBED _WK_REMOTE_HOME _WK_REMOTE_CORES \
-          _WK_REMOTE_LOAD _WK_REMOTE_MEM _WK_REMOTE_REF_PROBED _WK_REMOTE_DOWN
+          _WK_REMOTE_LOAD _WK_REMOTE_MEM _WK_REMOTE_REF_PROBED _WK_REMOTE_DOWN \
+          _WK_PEER_LISTED _WK_PEER_ROWS \
+          _WK_PEER_ROUTE_NAME _WK_PEER_ROUTE_USER _WK_PEER_ROUTE_SRC _WK_PEER_ROUTE_PROXY
 }
 
 # --- what state is this workspace in? ----------------------------------------

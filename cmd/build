@@ -253,9 +253,10 @@ fi
 # A WebKit build is tens of minutes and the connection driving it is not:
 # anything that kills the driver (a timeout, a closed laptop, a dropped ssh)
 # takes the build with it, leaving `build.status` stuck at `running`.
-# Where it detaches *to* needs no special-casing: a container build on a
-# macOS host was already forwarded into the podman VM, so the nohup happens
-# there; a remote target hands the command to that machine's own `wk`.
+# Where it detaches *to* needs no special-casing: this command already runs
+# on the machine that will build -- forwarded into the podman VM, or handed to
+# a build box's own `wk` (the dispatcher's delegation) -- so the nohup happens
+# there and this end is only the caller.
 if [ -n "$DETACH" ]; then
     # _ALL_ARGS still has the workspace name the dispatcher already resolved
     # and dropped ($WK_NAME now, not $1); the recursive `wk build` this
@@ -273,15 +274,11 @@ if [ -n "$DETACH" ]; then
     STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     write_status running
 
-    if t_has_wk && t_wk_detach build ${_det[@]+"${_det[@]}"} >/dev/null 2>&1; then
-        info "building $CONFIG in '$NAME' on $TARGET, detached -- this end can go away"
-    else
-        # No status file passed here: the child rewrites build.status, and
-        # liveness is the log's age (cmd/status), not a pid.
-        _pid=$(detach_run "" "$WS/detached.log" -- \
-            "$WK_ROOT/wk" build ${_det[@]+"${_det[@]}"})
-        info "building $CONFIG in '$NAME', detached as pid $_pid -- this end can go away"
-    fi
+    # No status file passed here: the child rewrites build.status, and
+    # liveness is the log's age (cmd/status), not a pid.
+    _pid=$(detach_run "" "$WS/detached.log" -- \
+        "$WK_ROOT/wk" build ${_det[@]+"${_det[@]}"})
+    info "building $CONFIG in '$NAME', detached as pid $_pid -- this end can go away"
     log "  follow:  wk logs $NAME -f"
     log "  state:   wk status $NAME"
     exit 0

@@ -40,6 +40,7 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] a language server that wants the network from inside a workspace is refused by the allowlist and says so rather than hanging (Zed's ACP registry fetch does this today; nothing has been added for it) [needs a workspace running zed]
 - [ ] `wk new --zed` warns instead of failing when the launch cannot happen (zed missing, or a vm workspace with no route yet) — the workspace is created either way [needs zed and a vm workspace]
 - [ ] `wk rm <ws>` takes the `Host wk-<name>` alias with it, ProxyCommand and all, so a later `ssh wk-<name>` is an unknown host rather than a hang (on a macOS host this removal happens on the host, not forwarded into the podman VM, where nothing reads that entry anyway) [needs a macOS host]
+- [ ] `wk zed <ws>` on a workspace a peer owns: Zed opens the checkout through the peer's own transport, one ssh hop out (only the hop and the URL are verified, against a hand-placed copy of this tree) [needs a peer running this version]
 
 ## The prompt — unverified
 
@@ -81,4 +82,5 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] `wk profile --mode sampling` in a real workspace prints the tier breakdown; `--mode bytecode` leaves exactly one JSCProfile json; `--mode samply` in a container refuses with the host remedy when `perf_event_paranoid` > 1 and records otherwise; `--mode instruments` in a macOS guest records a `.trace`; `--fetch` copies a recording out of a guest byte for byte [needs a container and a macOS VM]
 - [ ] `wk disk` inside a workspace answers the only version of the question available in there; `wk disk` with the podman machine stopped leaves it stopped [needs a workspace]
 - [ ] `wk vm base --rm` deletes the golden base, then asks separately about the pulled OCI image, and existing vm workspaces keep working [needs a macOS VM]
+- [ ] `wk new <name> --target <peer>` and `wk rm` of a peer's workspace refuse here and name the command to run over there — every other workspace command is handed to the peer, so these two are the remaining pair a person has to type on the other machine [needs a peer]
 - [ ] every command under `cmd/` declares itself to the dispatcher: line 3 is a one-line `# wk <name> <args> -- <summary>` synopsis, and a `# wk:` line in the first 15 lines names `where=` (one of `host|local|workspace|dynamic`) and `group=` [needs a test]

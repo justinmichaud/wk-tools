@@ -21,14 +21,6 @@ require_name "$NAME"
 
 load_target "$(ws_target "$NAME")"
 
-# A target that is a machine of its own writes the log there; forward the
-# whole command so ctrl-c out of --follow ends the remote `tail -f` too.
-if t_has_wk; then
-    rc=0
-    t_wk logs "$NAME" ${@+"$@"} || rc=$?
-    exit "$rc"
-fi
-
 LOG="$(wk_ws_dir "$NAME")/build.log"
 [ -f "$LOG" ] || die "no build log for '$NAME' -- has it been built?"
 
