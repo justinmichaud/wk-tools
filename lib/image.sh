@@ -122,8 +122,9 @@ image_root_word() {
 # catalogued, so "which images are there" is answered by looking, now, at
 # the places builders leave output. One line per image, tab-separated:
 # builder, workspace, path, bytes, mtime. Host-visible even in a container:
-# a container workspace mounts /src/WebKit as an overlay whose upper layer
-# is ws/<name>/changes (targets/container.sh), where a built image lands.
+# both builders write under /src/WebKit/WebKitBuild, which is ws/<name>/build
+# on this side (targets/container.sh bind-mounts it there, out of the
+# overlay), so the scan is that directory and nothing else.
 image_workspace_scan() {
     local ws name f
 
@@ -135,7 +136,7 @@ image_workspace_scan() {
 
         # builder: yocto -- bitbake writes the wic beside the rootfs tarball
         # (yocto_image_dir, image/yocto.sh); globbed, not profile-derived.
-        for f in "$ws"/changes/WebKitBuild/CrossToolChains/*/build/image/*.wic.xz; do
+        for f in "$ws"/build/CrossToolChains/*/build/image/*.wic.xz; do
             [ -f "$f" ] || continue
             printf 'yocto\t%s\t%s\t%s\t%s\n' "$name" "$f" \
                 "$(file_bytes "$f")" "$(_scan_mtime "$f")"
@@ -143,7 +144,7 @@ image_workspace_scan() {
 
         # builder: buildroot -- genimage assembles into output/images
         # (BR_IMAGE names the file).
-        for f in "$ws"/changes/WebKitBuild/buildroot/*/output/images/*.img; do
+        for f in "$ws"/build/buildroot/*/output/images/*.img; do
             [ -f "$f" ] || continue
             printf 'buildroot\t%s\t%s\t%s\t%s\n' "$name" "$f" \
                 "$(file_bytes "$f")" "$(_scan_mtime "$f")"

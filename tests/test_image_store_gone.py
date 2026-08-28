@@ -10,7 +10,8 @@ tombstones and in this test; `wk sysimage rm` is a tombstone naming `wk rm`;
 `wk boot`'s default system is read off the device rather than looked up, and
 a named --system is checked against it; `_ws_profile`/`_profile_from_path`
 (cmd/sysimage) derive a profile from both a yocto and a buildroot workspace
-path.
+path; image_workspace_scan (lib/image.sh) finds what each builder leaves in
+a workspace laid out the way targets/container.sh mounts one.
 
 Run: python3 -m unittest tests.test_image_store_gone -v
 """
@@ -269,7 +270,7 @@ class TestProfileFromWorkspacePath(unittest.TestCase):
     def test_profile_from_a_full_yocto_path(self):
         cp = self._run(
             "_profile_from_path",
-            "/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/changes/WebKitBuild/"
+            "/var/lib/wk/ws/yocto-webkit-2.52-yocto-rpi5-64/build/"
             "CrossToolChains/rpi5/build/image/webkit-2.52-yocto-rpi5-64.wic.xz",
         )
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -278,11 +279,67 @@ class TestProfileFromWorkspacePath(unittest.TestCase):
     def test_profile_from_a_full_buildroot_path(self):
         cp = self._run(
             "_profile_from_path",
-            "/var/lib/wk/ws/buildroot-webkit-2.52-buildroot-rpi5-64/changes/WebKitBuild/"
+            "/var/lib/wk/ws/buildroot-webkit-2.52-buildroot-rpi5-64/build/"
             "buildroot/rpi5/output/images/sdcard.img",
         )
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "webkit-2.52-buildroot-rpi5-64")
+
+
+class TestScanFindsWhatTheBuildersLeave(unittest.TestCase):
+    """Both builders write under /src/WebKit/WebKitBuild, which targets/
+    container.sh bind-mounts from ws/<name>/build, so that is where
+    image_workspace_scan (lib/image.sh) looks. A glob naming any other
+    parent matches nothing and `wk sysimage ls` reports no image over one
+    built minutes earlier."""
+
+    def _scan(self, store):
+        return bash(
+            '. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/image.sh"; image_workspace_scan',
+            env={"WK_STORE": str(store)},
+        )
+
+    def _row(self, cp):
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        lines = [l for l in cp.stdout.splitlines() if l.strip()]
+        self.assertEqual(len(lines), 1, cp.stdout)
+        return lines[0].split("\t")
+
+    def test_finds_a_buildroot_image(self):
+        with scratch_dir() as d:
+            ws = "buildroot-wpewebkit-2.38-buildroot-rpi4-32"
+            img = (d / "ws" / ws / "build" / "buildroot"
+                   / "wpewebkit-2.38-buildroot-rpi4-32" / "output" / "images"
+                   / "sdcard.img")
+            img.parent.mkdir(parents=True)
+            img.write_bytes(b"x" * 4096)
+
+            builder, name, path, size, _mtime = self._row(self._scan(d))
+            self.assertEqual(builder, "buildroot")
+            self.assertEqual(name, ws)
+            self.assertEqual(path, str(img))
+            self.assertEqual(size, "4096")
+
+    def test_finds_a_yocto_image(self):
+        with scratch_dir() as d:
+            ws = "yocto-webkit-2.52-yocto-rpi4-64"
+            img = (d / "ws" / ws / "build" / "CrossToolChains"
+                   / "rpi4-64bits-mesa" / "build" / "image"
+                   / "webkit-dev-ci-tools.wic.xz")
+            img.parent.mkdir(parents=True)
+            img.write_bytes(b"x" * 4096)
+
+            builder, name, path, _size, _mtime = self._row(self._scan(d))
+            self.assertEqual(builder, "yocto")
+            self.assertEqual(name, ws)
+            self.assertEqual(path, str(img))
+
+    def test_a_workspace_that_built_nothing_is_not_a_row(self):
+        with scratch_dir() as d:
+            (d / "ws" / "jsc-release" / "build").mkdir(parents=True)
+            cp = self._scan(d)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual(cp.stdout.strip(), "")
 
 
 if __name__ == "__main__":

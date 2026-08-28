@@ -3,7 +3,7 @@ workspace) and image/buildroot-build.sh (runs inside it), the same
 host/worker split image/yocto.sh and image/yocto-build.sh use. See
 docs/HANDOFF-ab-bench.md item 3 for what this exists to close out.
 
-Three things are checked here, matching the three real defects found while
+Four things are checked here, matching the four real defects found while
 writing this lane:
 
   dry run    `wk sysimage build <profile> --dry-run` has to name the actual
@@ -25,6 +25,14 @@ writing this lane:
              sed the way tests/test_yocto_stage.py and tests/test_wifi_seed.py
              lift a function out of a shell file without sourcing the rest
              of it.
+
+  defconfig  a defconfig this repository derives has to agree with the board
+             files it names: board/raspberrypi4's genimage config assembles a
+             boot partition out of start4.elf and fixup4.dat, which only
+             BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4 installs. Selecting the
+             wrong variant costs the whole build -- kconfig takes it, every
+             package compiles, and genimage refuses at the last step over a
+             file rpi-firmware never installed.
 
   libffi fix host-python-2.7's bundled 2013-era libffi cannot assemble
              aarch64/sysv.S, so a buildroot build dies at `sharedmods` on an
@@ -307,6 +315,77 @@ class TestLibffiFix(unittest.TestCase):
             self.assertTrue(EXTERNAL_MK.is_file())
             self.assertIn("BR2_EXTERNAL=/opt/wk-tools/image/buildroot/external",
                            BUILDROOT_BUILD.read_text())
+
+
+class TestDerivedDefconfigs(unittest.TestCase):
+    """The defconfigs this repository derives (image/buildroot/external/
+    configs, whose README carries the derivation line by line). The fork's
+    board/<board> files are not vendored here, so what is checked is the
+    agreement between a defconfig and the board it names -- the part that is
+    decidable from this tree alone."""
+
+    CONFIGS = sorted((EXTERNAL_DIR / "configs").glob("*_defconfig"))
+
+    def _settings(self, path):
+        out = {}
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, value = line.partition("=")
+            out[key] = value
+        return out
+
+    def test_there_is_at_least_one(self):
+        """This file's other tests are a loop over them; an empty directory
+        would pass every one of them without checking anything."""
+        self.assertTrue(self.CONFIGS, EXTERNAL_DIR / "configs")
+
+    def test_the_firmware_variant_matches_the_board(self):
+        """The rpi4 boots start4.elf and fixup4.dat and has no bootcode.bin;
+        every earlier Pi boots the other set. board/<board>'s genimage config
+        names one set or the other, and rpi-firmware installs whichever the
+        variant selects, so a defconfig naming board/raspberrypi4 selects
+        VARIANT_PI4 and one naming any other board does not."""
+        for cfg in self.CONFIGS:
+            with self.subTest(defconfig=cfg.name):
+                settings = self._settings(cfg)
+                board = settings.get("BR2_ROOTFS_POST_IMAGE_SCRIPT", "").strip('"')
+                self.assertTrue(board, "names no post-image script")
+                pi4 = settings.get("BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4") == "y"
+                if "board/raspberrypi4" in board:
+                    self.assertTrue(
+                        pi4,
+                        f"{cfg.name} builds for {board} but does not select "
+                        "BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4, so rpi-firmware "
+                        "installs the pre-4 boot files and genimage dies on a "
+                        "missing rpi-firmware/fixup4.dat",
+                    )
+                else:
+                    self.assertFalse(
+                        pi4,
+                        f"{cfg.name} builds for {board} but selects the rpi4 "
+                        "firmware variant, which installs start4.elf/fixup4.dat "
+                        "and no bootcode.bin",
+                    )
+
+    def test_no_setting_kconfig_would_discard(self):
+        """A line kconfig drops claims something the image does not have.
+        BR2_PACKAGE_COG_PLATFORM_DRM is the one this bit on: it depends on
+        BR2_PACKAGE_WPEBACKEND_FDO, which nothing here selects and which
+        itself needs an EGL-on-wayland stack no 2.38 configuration builds, so
+        the line resolves away and the image keeps wpebackend-rdk's bcm-rpi
+        backend. The README says so; this keeps the line from coming back."""
+        for cfg in self.CONFIGS:
+            with self.subTest(defconfig=cfg.name):
+                settings = self._settings(cfg)
+                if settings.get("BR2_PACKAGE_COG_PLATFORM_DRM") == "y":
+                    self.assertEqual(
+                        settings.get("BR2_PACKAGE_WPEBACKEND_FDO"), "y",
+                        f"{cfg.name} selects COG_PLATFORM_DRM without "
+                        "BR2_PACKAGE_WPEBACKEND_FDO, which kconfig needs before "
+                        "it will keep the platform",
+                    )
 
 
 if __name__ == "__main__":

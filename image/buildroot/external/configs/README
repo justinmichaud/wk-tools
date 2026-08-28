@@ -8,7 +8,8 @@ exists here and nowhere upstream, and the only honest way to have it is to deriv
 it from the two that do exist.
 
 raspberrypi4_wpe_2_38_cog_defconfig is raspberrypi3_wpe_2_38_cog_defconfig with
-six changes, each taken from raspberrypi4_wpe_defconfig rather than invented:
+the changes below. Each board change is taken from raspberrypi4_wpe_defconfig
+rather than invented; the last two are what this repository needs of any image.
 
   BR2_cortex_a53 -> BR2_cortex_a72          the SoC
   DTS bcm2710-rpi-3-b... -> bcm2711-rpi-4-b the board
@@ -16,11 +17,28 @@ six changes, each taken from raspberrypi4_wpe_defconfig rather than invented:
   post-script args                          the rpi3 set carries --rpi-wifi and
                                             --overclock-pi3, which name the wrong
                                             board; the rpi4 set is used instead
-  COG_PLATFORM_DRM instead of the default   cog drives KMS directly on this board
+  RPI_FIRMWARE_VARIANT_PI4                  the rpi4 boots start4.elf and
+                                            fixup4.dat and no bootcode.bin, and
+                                            board/raspberrypi4's genimage config
+                                            names exactly those; the default
+                                            variant installs the pre-4 set, so
+                                            without this the build reaches
+                                            genimage and dies on a missing
+                                            rpi-firmware/fixup4.dat
+  BR2_PACKAGE_WPA_SUPPLICANT*               wifi, see the defconfig
   BR2_TARGET_ROOTFS_EXT2*                   the rpi3 2.38 defconfig emits a
                                             tarball only, which leaves genimage
                                             nothing to assemble into an
                                             sdcard.img
+
+The cog platform is *not* among them. raspberrypi4_wpe_defconfig carries
+BR2_PACKAGE_COG_PLATFORM_DRM=y, but that symbol depends on
+BR2_PACKAGE_WPEBACKEND_FDO, which nothing selects and which itself needs an
+EGL-on-wayland stack (mesa3d, wayland) no 2.38 configuration here builds -- so
+kconfig drops the line, in the rpi4_wpe defconfig as much as in a copy of it.
+Carrying a line kconfig discards would claim a backend the image does not have,
+so it is not carried: this resolves, as the rpi3 does, to wpebackend-rdk's
+bcm-rpi backend on dispmanx.
 
 What is deliberately *not* changed is the kernel: the release-pinned rpi-5.15.y
 with board/raspberrypi/rpi34-linux-5.15.config. That config is named for the rpi3
@@ -30,8 +48,10 @@ release's name. The rpi4_wpe defconfig's own kernel -- a tarball pinned to one
 commit with the in-tree bcm2711 defconfig -- is not release-pinned and would
 break that.
 
-TODO: **this has never been built.** Every line above is derived from a
-defconfig that ships, but the combination has not been compiled, let alone
-booted, and the buildroot builder itself is not written (image/buildroot.sh says
-what blocks it). Validating it needs the board: a wrong kernel config or DTS on
-a board nobody can boot is exactly the failure that looks like dead hardware.
+TODO: **this has never booted.** The combination compiles and genimage
+assembles an sdcard.img out of it, but no board has been asked to start that
+image. Validating it needs the board: a wrong kernel config or DTS on a board
+nobody can boot is exactly the failure that looks like dead hardware. The other
+unmeasured half is the display -- an rpi4's VideoCore VI has no /opt/vc GL
+driver, and this resolves to the backend that wants one -- so a board that boots
+to a shell and shows no page is the expected next question, not a surprise.
