@@ -65,6 +65,33 @@ class TestCompletionScripts(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self._assert_parses([zsh, "-n"], cp.stdout)
 
+    def test_zsh_completion_registers_wk_where_no_rc_ran_compinit(self):
+        """`wk completion zsh` registers `wk` in a zsh whose rc never ran compinit"""
+        zsh = shutil.which("zsh")
+        if not zsh:
+            self.skipTest("zsh not installed")
+        cp = run("completion", "zsh")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+
+        # `zsh -f` is the machine whose rc never ran compinit: no rc file at
+        # all, so the script has to start the completion system itself or
+        # `complete -F` dies in bashcompinit's compdef call. HOME is a scratch
+        # directory because compinit writes a dumpfile into it.
+        tmp = tempfile.mkdtemp(prefix="wk-completion-zsh-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        script = os.path.join(tmp, "completion.zsh")
+        with open(script, "w") as f:
+            f.write(cp.stdout)
+        proc = subprocess.run(
+            [zsh, "-f", "-c", f"source {script}; print -r -- ${{_comps[wk]}}"],
+            env={**os.environ, "HOME": tmp},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(proc.stderr, "", f"the completion script complained:\n{proc.stderr}")
+        self.assertIn("_wk_completion", proc.stdout, "`wk` was left with no completion")
+
     def test_completion_refuses_an_unknown_shell(self):
         """`wk completion` refuses a shell it does not know"""
         cp = run("completion", "fish")
