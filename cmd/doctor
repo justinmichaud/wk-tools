@@ -87,7 +87,10 @@ fi
 check "jq (claude hook)" "./setup --stage tools" have jq
 check "gh"               "install gh, then: gh auth login" have gh
 if have gh; then
-    check "gh authenticated" "gh auth login   (then: wk key register)" gh auth status
+    # gh_authenticated, not `gh auth status`: the latter passes a configured
+    # account whose token has expired, which is a healthy report about a
+    # machine that cannot register a key (lib/common.sh).
+    check "gh authenticated" "gh auth login   (then: wk key register)" gh_authenticated
 fi
 # Checked here rather than only listed under machine-local state below: its
 # absence isn't a backup question, it's what a freshly written card spends

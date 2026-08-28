@@ -2,6 +2,7 @@
 #
 # wk key register|check|show|ensure|tailnet -- the deploy keys workspaces push with
 # wk: where=host name=none group=sources needs gh,gh-auth
+# wk: sub show,ensure,pub,sshtest,fingerprints,tailnet needs=
 #
 # One key per fork, shared by every workspace. GitHub deploy keys are
 # scoped to a single repository and refuses the same key on a second one,
@@ -28,6 +29,12 @@
 #
 # Runs on the host: `gh` and its credentials are here, while the private keys
 # stay in the VM and are never copied out.
+#
+# `register` and `check` are the two that call the GitHub API, so they are the
+# only two that need `gh` and a token that works; the rest is ssh-keygen, a
+# file and an ssh connection, and clearing `needs` for them is what lets
+# `wk key ensure` run over ssh on a build machine with no `gh` on it at all,
+# and `wk key tailnet` store a key on a machine whose gh login has expired.
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,19 +52,34 @@ ACTION="${1:-register}"
 
 # The keys live in the VM. Read the *public* halves out; the private halves are
 # never copied to the host.
+#
+# Decided once, because two things depend on it: whether in_vm crosses into the
+# podman machine at all, and where the tooling sits on the far side -- the VM's
+# read-only mount at /opt/wk-tools, or this checkout when the far side is just a
+# local shell on a Linux workstation.
+if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+    IN_VM_SSH=1
+    IN_VM_ROOT=/opt/wk-tools
+    IN_VM_ENV="WK_IN_VM=1 "
+else
+    IN_VM_SSH=
+    IN_VM_ROOT="$WK_ROOT"
+    IN_VM_ENV=
+fi
+
 in_vm() {
     # </dev/null is essential, not defensive: both podman-machine-ssh and
     # bash -c read stdin, and every caller here sits inside a `while read`
     # loop fed by a heredoc -- without it the first iteration swallows the
     # remaining forks.
-    if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+    if [ -n "$IN_VM_SSH" ]; then
         podman machine ssh "$WK_MACHINE" "$@" </dev/null
     else
         bash -c "$*" </dev/null
     fi
 }
 
-ensure_keys() { in_vm "WK_IN_VM=1 /opt/wk-tools/cmd/key ensure" 2>&1 | sed 's/^/  /'; }
+ensure_keys() { in_vm "$IN_VM_ENV$(sh_quote "$IN_VM_ROOT/cmd/key") ensure" 2>&1 | sed 's/^/  /'; }
 
 # --- one key per machine, not one key everywhere ------------------------------
 # GitHub is happy with several keys on one repository, so every machine
@@ -238,9 +260,6 @@ show)
     ;;
 
 register)
-    require gh "gh is required to register deploy keys -- https://cli.github.com"
-    gh auth status >/dev/null 2>&1 || die "gh is not authenticated -- run: gh auth login"
-
     failed=0
     for machine in $(key_machines); do
         label=$(m_label "$machine")
@@ -329,13 +348,19 @@ check)
 
         # Registered and correctly scoped. Read-only or writable?
         # Match on the base64 body, which is unique and jq-safe.
+        #
+        # `|| ro=""` keeps this a report rather than an assertion: under
+        # `set -o pipefail` a refused API call is the assignment's status and
+        # would end the whole command mid-line, leaving every fork after this
+        # one unreported. An unknown answer about one repository is the fault;
+        # silence about the others is a second, larger one.
         b64=$(printf '%s' "$pub" | awk '{print $2}')
         ro=$(gh api "repos/$repo/keys" </dev/null 2>/dev/null \
-             --jq ".[] | select(.key | contains(\"$b64\")) | .read_only" | head -1)
+             --jq ".[] | select(.key | contains(\"$b64\")) | .read_only" | head -1) || ro=""
         case "$ro" in
             false) echo "ok (write)" ;;
             true)  echo "READ-ONLY -- delete it on GitHub and re-run 'wk key register'"; rc=1 ;;
-            *)     echo "registered, but write access could not be confirmed"; rc=1 ;;
+            *)     echo "registered, but gh could not read $repo's key list, so write access is unconfirmed"; rc=1 ;;
         esac
       done <<EOF
 $(wk_push_forks)

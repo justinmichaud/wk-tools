@@ -65,6 +65,17 @@ require() {
     have "$1" || die "${2:-$1 is required but not installed}"
 }
 
+# Whether gh can reach the API as somebody. `gh auth status` answers a
+# different question: it exits 0 for a *configured* account whose token has
+# since expired or been revoked, saying "invalid" only in prose on stdout.
+# One request at the cheapest authenticated endpoint is what separates the
+# two, so a command that needs the API refuses before it starts rather than
+# part-way through its own report. The dispatcher's `gh-auth` (wk) and
+# `wk doctor` both read this, so the tree has one answer.
+gh_authenticated() {
+    have gh && gh api user >/dev/null 2>&1
+}
+
 # The one ssh connect timeout, read in every ssh wrapper across the tree
 # (boot/machines.sh, lib/reach.sh, lib/target.sh, targets/remote.sh,
 # targets/vm.sh, cmd/find, cmd/status, cmd/sync, host/macos/vmtools.sh,

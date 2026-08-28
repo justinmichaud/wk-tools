@@ -202,6 +202,36 @@ class TestReportWalkerAndStats(WkTest):
             self.assertEqual(doc["config"], "jsc-release")
             self.assertEqual(doc["wall_time_s"], "42")
 
+    def test_env_record_fields_are_read_on_either_side_of_a_flag(self):
+        """`--update` before the fields is how every caller in cmd/bench
+        writes wall_time_s, and argparse fills an nargs='*' positional from
+        one unbroken run of words -- so both orders are read, or the four
+        call sites that spell it the first way write nothing."""
+        with scratch_dir() as tmp:
+            for args in (("--update", "wall_time_s=42"),
+                         ("wall_time_s=42", "--update")):
+                f = tmp / "env.json"
+                f.unlink(missing_ok=True)
+                env_record(f, "plan=jetstream3")
+                env_record(f, *args)
+                doc = json.loads(f.read_text())
+                self.assertEqual(doc["wall_time_s"], "42", args)
+                self.assertEqual(doc["plan"], "jetstream3", args)
+
+    def test_a_subcommand_without_fields_still_refuses_a_stray_word(self):
+        """the leftovers are fields only where the subcommand takes fields;
+        anywhere else they are the typo they look like"""
+        cp = wkdata("get", "/dev/null", "plan", "junk")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("unrecognized arguments: junk", cp.stdout + cp.stderr)
+
+    def test_env_record_refuses_a_field_that_is_not_key_value(self):
+        """a mistyped flag arrives as a leftover, and is refused as one"""
+        with scratch_dir() as tmp:
+            cp = wkdata("env-record", str(tmp / "env.json"), "--nosuch")
+            self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertIn("not a key=value: --nosuch", cp.stdout + cp.stderr)
+
 
 @requires_podman_vm()
 class TestBenchReportIntegration(WkTest):

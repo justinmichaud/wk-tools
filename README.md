@@ -133,8 +133,9 @@ cd ~/Development/wk-tools
 ```sh
 ./setup --stage quiesce        # one sudo prompt; installs the quiesce/session helper
 wk sudo setup                  # closes sudo's 5-minute timestamp and NOPASSWD
-wk key register                # generates a deploy key, prints the URL to add it
-wk push on                     # exposes the key to workspaces
+gh auth login                  # wk key register calls the GitHub API with this
+wk key register                # a deploy key per fork, registered with write access
+wk push on                     # exposes the keys to workspaces
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
 eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```

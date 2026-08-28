@@ -335,12 +335,29 @@ class TestPrOpenRefusals(unittest.TestCase):
         self.assertIn("host", cp.stdout)
 
     def test_refuses_without_gh_login(self):
-        """a stub gh whose 'auth status' fails is refused naming 'gh auth
+        """a stub gh that cannot call the API is refused naming 'gh auth
         login' -- check_needs('gh-auth'), the same check cmd/key relies on.
         This fires before cmd/pr looks for a workspace at all, so none of
         --draft/--web/a real name is needed to reach it."""
         with stub_path({
-            "gh": '#!/bin/sh\ncase "$1 $2" in\n"auth status") exit 1 ;;\nesac\nexit 0\n',
+            "gh": '#!/bin/sh\ncase "$1 $2" in\n"api user") exit 1 ;;\nesac\nexit 0\n',
+        }) as binp:
+            cp = run("pr", "open", "some-workspace",
+                     env={"PATH": f"{binp}:{os.environ['PATH']}"})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("gh auth login", cp.stdout)
+
+    def test_refuses_when_the_stored_token_is_dead(self):
+        """`gh auth status` exits 0 for an account whose token has expired
+        or been revoked -- it answers "is an account configured", not "can
+        this machine call the API" -- so gh_authenticated asks the API
+        instead (lib/common.sh), and the refusal comes before the command
+        starts rather than part-way through its own report."""
+        with stub_path({
+            "gh": '#!/bin/sh\ncase "$1 $2" in\n'
+                  '"auth status") exit 0 ;;\n'
+                  '"api user") echo \'{"message":"Requires authentication"}\'; exit 1 ;;\n'
+                  'esac\nexit 0\n',
         }) as binp:
             cp = run("pr", "open", "some-workspace",
                      env={"PATH": f"{binp}:{os.environ['PATH']}"})

@@ -122,11 +122,17 @@ class TestListingsAgree(WkTest):
         """print the same workspace-name set on"""
         ls_cp = run("ls")
         names_ls = set()
+        # The table, and only the table: `wk ls` ends it with a blank line
+        # and then reports each target's current base and reclaimable
+        # snapshots. Those footnotes go to stderr, which support.run() merges
+        # into stdout by design, so a walk to the end of the output takes
+        # "container:" for a workspace name.
         lines = ls_cp.stdout.splitlines()
         for line in lines[1:] if lines else []:
             fields = line.split()
-            if fields:
-                names_ls.add(fields[0])
+            if not fields:
+                break
+            names_ls.add(fields[0])
 
         status_cp = run("status", "--json")
         try:

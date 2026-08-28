@@ -76,11 +76,13 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 #   bare merged      with no workspace named, report on every target here
 #   post <hook>      zed | ssh-alias-remove, after the forwarded half
 #   needs <a,b>      tools and standing this command cannot start without:
-#                    a command name (gh, tart, nmap...), `gh-auth` (a logged-in
-#                    gh), or `tailnet` (this machine is on the tailnet). Checked
+#                    a command name (gh, tart, nmap...), `gh-auth` (gh's token
+#                    works), or `tailnet` (this machine is on the tailnet). Checked
 #                    before anything runs, so the refusal names the remedy up front
-#   sub <a,b> where=<w> name=<n>[@2]   per-subverb override of where and/or
-#                    name; @2 means the name is the positional after the subverb
+#   sub <a,b> where=<w> name=<n>[@2] needs=<list>   per-subverb override of
+#                    where, name and/or needs; @2 means the name is the
+#                    positional after the subverb, and an empty needs= clears
+#                    the command's list for subverbs that do not use it
 #   flag <--x,--y> where=<w>|name=<n>   per-flag override of where and/or name
 
 decl_load() { # <impl>
@@ -221,9 +223,9 @@ check_needs() { # <cmd> [<subverb>]
     [ -n "$needs" ] || return 0
     for n in $(printf '%s' "$needs" | tr , ' '); do
         case "$n" in
-            gh-auth) command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 \
+            gh-auth) gh_authenticated \
                          || missing="$missing
-    gh-auth    gh is not logged in: gh auth login" ;;
+    gh-auth    gh cannot reach the GitHub API (not logged in, or the token expired): gh auth login" ;;
             tailnet) tailscale status >/dev/null 2>&1 \
                          || missing="$missing
     tailnet    this machine is not on the tailnet: tailscale up" ;;

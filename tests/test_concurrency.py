@@ -93,9 +93,13 @@ echo "took it: $(readlink "{lockdir}/demo-resource@$h.lock")"
 
 class TestReadOnlyCommandsTakeNoLock(WkTest):
     def test_status_and_ls_take_no_lock(self):
+        # --no-fleet because the question here is whether a reporting command
+        # takes a lock, not how fast it is: a bare `wk status` walks the fleet
+        # over ssh, and how long five boards take to not answer is network
+        # weather, not a property of this test. The lock path is the same one.
         with scratch_dir(prefix="wk-test-lock-") as d:
             lockdir = d / "locks"
-            run("status", env={"WK_LOCK_DIR": str(lockdir)}, timeout=60)
+            run("status", "--no-fleet", env={"WK_LOCK_DIR": str(lockdir)}, timeout=60)
             run("ls", env={"WK_LOCK_DIR": str(lockdir)}, timeout=60)
             left = list(lockdir.glob("*")) if lockdir.exists() else []
             self.assertEqual(

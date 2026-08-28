@@ -893,7 +893,19 @@ def main(argv):
     p.add_argument("--text", action="store_true", help="print the text table (default when --html is not given)")
     p.set_defaults(func=cmd_report)
 
-    args = parser.parse_args(argv)
+    # parse_known_args, not parse_args: argparse fills an `nargs="*"`
+    # positional from one unbroken run of words, so `env-record OUT --update
+    # wall_time_s=42` leaves the trailing field over as unrecognized -- and
+    # that is how every caller writing a field after a run spells it
+    # (cmd/bench, four call sites). The leftovers are fields for a subcommand
+    # that takes fields, and a refusal for one that does not; cmd_env_record
+    # refuses anything that is not key=value, so a mistyped flag still stops.
+    args, extra = parser.parse_known_args(argv)
+    if extra:
+        if hasattr(args, "fields"):
+            args.fields = list(args.fields) + extra
+        else:
+            parser.error("unrecognized arguments: %s" % " ".join(extra))
     args.func(args)
     return 0
 

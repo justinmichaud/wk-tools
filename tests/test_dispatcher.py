@@ -4,9 +4,12 @@ phrase of the behaviour it checks.
 
 Run: python3 -m unittest tests.test_dispatcher -v
 """
+import os
 import unittest
 
-from tests.support import REPO, WkTest, fake_workspace, rand_suffix, run
+from tests.support import (
+    REPO, WkTest, fake_workspace, rand_suffix, run, stub_path,
+)
 
 
 class TestHelpAndDeclarations(WkTest):
@@ -308,6 +311,35 @@ class TestFlagNameOverride(WkTest):
         cp = run("profile")
         self.assertEqual(cp.returncode, 2, cp.stdout + cp.stderr)
         self.assertIn("usage: wk profile", cp.stdout + cp.stderr)
+
+
+class TestSubverbNeedsOverride(WkTest):
+    """`sub <verbs> needs=` clears a command's top-level `needs` for the
+    subverbs that do not use the thing. cmd/key declares `needs gh,gh-auth`
+    because `register` and `check` call the GitHub API -- but `ensure` is
+    ssh-keygen and a file, run over ssh on build machines that have no `gh`
+    on them, and `tailnet` stores a credential that never reaches GitHub."""
+
+    # `have gh` passes (the stub is on PATH) so the only thing left to
+    # refuse on is gh-auth: one refusal under test, not two.
+    GH_DEAD = '#!/bin/sh\nexit 1\n'
+
+    def test_the_subverbs_that_call_github_are_refused(self):
+        """`wk key check` with a gh that cannot reach the API is refused"""
+        with stub_path({"gh": self.GH_DEAD}) as binp:
+            cp = run("key", "check",
+                     env={"PATH": f"{binp}:{os.environ['PATH']}"})
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("gh auth login", cp.stdout)
+
+    def test_the_subverbs_that_do_not_are_left_alone(self):
+        """`wk key show` reads the store and never asks GitHub anything, so
+        the same dead gh does not stop it"""
+        with stub_path({"gh": self.GH_DEAD}) as binp:
+            cp = run("key", "show",
+                     env={"PATH": f"{binp}:{os.environ['PATH']}"})
+        self.assertNotIn("gh auth login", cp.stdout)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
 
 
 class TestTopLevelCallOrder(WkTest):

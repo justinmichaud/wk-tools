@@ -1072,6 +1072,14 @@ grep -q 'b_system_kind' "{REPO}/cmd/pi" || bad="$bad wk-pi-bench-does-not-check"
 class TestCeilingsAndConcurrency(WkTest):
     def test_capped_reaches_the_subtree(self):
         """ceiling reaches the whole process group"""
+        # The probe patterns are anchored to the grandchild's whole command
+        # line. `pgrep -f` matches every process's full argv, and this script
+        # is itself argv -- `bash -c "<this text>"` -- so an unanchored
+        # 'sleep 31.5' matches the shell doing the probing, reports a
+        # grandchild that is not there, and then pkills the test runner.
+        # The `foo[.]bar` trick the rest of the tree uses (image/pmos.sh,
+        # cmd/pi) cannot help here: the plain spelling appears in the line
+        # above as well, so only an anchor tells the two apart.
         script = f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
@@ -1079,8 +1087,8 @@ t0=$(date +%s)
 capped 1 bash -c 'sleep 31.5 & wait' >/dev/null 2>&1 || true
 d=$(( $(date +%s) - t0 ))
 [ "$d" -le 4 ] || {{ echo "capped 1 took ${{d}}s"; exit 1; }}
-left=$( (pgrep -f 'sleep 31.5' 2>/dev/null || true) | wc -l | tr -d ' ')
-[ "$left" = 0 ] || {{ pkill -f 'sleep 31.5' 2>/dev/null || true
+left=$( (pgrep -f '^sleep 31\\.5$' 2>/dev/null || true) | wc -l | tr -d ' ')
+[ "$left" = 0 ] || {{ pkill -f '^sleep 31\\.5$' 2>/dev/null || true
     echo "the ceiling killed the child and left $left grandchild(ren) running"; exit 1; }}
 t0=$(date +%s); capped 20 true; d=$(( $(date +%s) - t0 ))
 [ "$d" -le 2 ] || {{ echo "capped 20 true took ${{d}}s"; exit 1; }}
