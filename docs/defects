@@ -1,13 +1,30 @@
-- Confirm new recovery images for rpi3 and rpi4 build and write fine. Both sd card (rpi3) and second usb stick (rpi4) are connected to rpi5, so no intervention is needed. I give you permission to do this.
-  (agent: both images are built for real on moose -- see decision 1. The
-  writes wait on decisions 1 and 2. The first-ever buildroot image,
-  wpewebkit-2.38 rpi3, finished on moose at 20:08: sdcard.img 1.6 GB,
-  `stage 'image' done` after the freshness check. `wk sysimage ls` prints `?`
-  in its machine column -- the profile is not derived from a buildroot
-  workspace path; owed with the image-store removal.)
-- Confirm rpi5 2.54 yocto image works and can be deployed.
-  (agent: built for real on moose, 19:27; the write waits on decisions 1-3)
-- We need to re-provision rpi3 and 4 from scratch and confirm they work.
+Your scope is everything. Keep going until every defect and handoff item is done. You will be running unattended soon, so prioritize user intervention first. Surface decisions that need to be made here in this file at the top.
+
+Use cheaper subagents with smaller models wherever possible.
+
+Issues:
+
+Sysimage list isn't listing yocto images now:
+moose:host ~ ❯ wk sysimage list
+buildroot-wpewebkit-2.38-buildroot-rpi3-32 rpi3       buildroot 1.6G     2026-08-27T21:48:49Z
+    /home/jmichaud/.local/share/wk/ws/buildroot-wpewebkit-2.38-buildroot-rpi3-32/build/buildroot/wpewebkit-2.38-buildroot-rpi3-32/output/images/sdcard.img
+buildroot-wpewebkit-2.38-buildroot-rpi4-32 rpi4       buildroot 1.6G     2026-08-28T13:24:12Z
+    /home/jmichaud/.local/share/wk/ws/buildroot-wpewebkit-2.38-buildroot-rpi4-32/build/buildroot/wpewebkit-2.38-buildroot-rpi4-32/output/images/sdcard.img
+
+2 images, each in the workspace that built it.
+  There is no image store: the workspace is the name (wk help).
+  To write one:  wk sysimage write --from <path above> --disk <machine>:<device>
+                 add --rescue for the system a board falls back to
+moose:host ~ ❯ wk ls
+NAME                 TARGET             STATE      BASE                 ARCH      CHANGES
+buildroot-wpewebkit-2.38-buildroot-rpi3-32 container          running    20260827T180858Z     native        68M
+buildroot-wpewebkit-2.38-buildroot-rpi4-32 container          running    20260827T180858Z     native        68M
+stringimpl238        container          running    20260825T174524Z     native       1.6G
+yocto-webkit-2.52-yocto-rpi3-32 container          running    20260825T174524Z     native        31G
+yocto-webkit-2.52-yocto-rpi4-64 container          running    20260825T174524Z     native        32G
+
+container: current base: 20260827T180858Z
+container: 1 unreferenced snapshot(s) reclaimable with 'wk gc'
 
 - Build the following configs, confirm they work, and are suitable for use in an A/B test:
   - WPE 2.38 X (buildroot) X (rpi3 32-bit, rpi4 32-bit, rpi5 64-bit)
@@ -15,11 +32,6 @@
   - WPE 2.52 X (yocto) X (rpi3 32-bit, rpi4 32-bit, rpi5 64-bit)
 
 Confirm they can run an A/B test. Make the test have the same code on both side, and meausre the varience we can measure reliably. Confirm they connect only through tailscale, and that we can generate subtest results and a histogram. then do handoff-benchmarking-variance.
-
-
-Your scope is everything. Keep going until every defect and handoff item is done. You will be running unattended soon, so prioritize user intervention first. Surface decisions that need to be made here in this file at the top.
-
-Use cheaper subagents with smaller models wherever possible.
 
 Prompt for the next agent (written 2026-08-27 late; delete when read):
 
@@ -98,7 +110,7 @@ A. moose is off the tailnet (last seen this morning; its BMC bridge phone
    delete (decision 9) are there, and the yocto incremental-build proof
    (decision 6) is a rebuild there. Power it on, or say when it will be.
 
-You did something to kill it, you are running on moose!
+You did something to kill it! It is up now
 
 B. rpi4 carries two wk-written media (rescue USB, bench SD). Both join the
    tailnet as `rpi4-bench` (MACH_BENCH_SSH), so the second card's write is
