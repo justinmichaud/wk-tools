@@ -304,6 +304,16 @@ sh_quote() {
     printf '%s' "$out"
 }
 
+# The dispatcher's global flags, as an assignment prefix for the `wk` on the
+# far side of a hop -- the podman VM (forward_to_vm, `wk`) or another
+# machine's own wk-tools (t_wk, targets/remote.sh). A delegated command is
+# the same command, so --force still crosses a barrier over there and --quiet
+# is still quiet. They travel as environment, not as arguments: an older copy
+# over there ignores a variable it does not know and dies on a flag it does not.
+wk_forwarded_env() {
+    printf '%s' "${WK_DEBUG:+WK_DEBUG=1 }${WK_QUIET:+WK_QUIET=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }"
+}
+
 # --- which lldb, decided where it is going to run ------------------------------
 # A shell fragment to put in front of a command run in a workspace, setting
 # $LLDB to a debugger that starts there, or failing with a reason.

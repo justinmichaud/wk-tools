@@ -26,7 +26,14 @@ from tests.support import REPO, WkTest, bash, stub_path
 # Runs locally what `ssh <opts> <host> <command>` would have run over there.
 # Every option is dropped, then the destination, and what is left is the
 # command -- which is how _rsh/_rsh_q/t_wk_tty all spell it.
+#
+# Every WK_* variable is dropped first, because a real ssh carries none of
+# this shell's environment: without that, a fake that runs the command here
+# would let one leak across and prove nothing about what the far side was
+# actually told. What the command string carries in front of `wk` is exactly
+# what arrives.
 _FAKE_SSH = """#!/bin/sh
+for v in $(env | sed -n 's/^\\(WK_[A-Za-z0-9_]*\\)=.*/\\1/p'); do unset "$v"; done
 while [ $# -gt 0 ]; do
     case "$1" in
         -o|-i|-p|-l|-F|-W) shift 2 ;;
@@ -42,7 +49,7 @@ exec /bin/sh -c "$*"
 # one -- and records every invocation, so a test can prove a command was
 # handed over rather than run here.
 _PEER_WK = """#!/bin/sh
-printf '%s\\n' "$* ${{WK_ZED_PUBKEY:+key=$WK_ZED_PUBKEY}}" >> "{log}"
+printf '%s\\n' "$* ${{WK_ZED_PUBKEY:+key=$WK_ZED_PUBKEY}}${{WK_FORCE:+force=1 }}${{WK_QUIET:+quiet=1 }}" >> "{log}"
 case "$1 $2" in
 "ls --json")
     printf '%s\\n' '{listing}'
@@ -204,6 +211,84 @@ class TestPeerDelegation(PeerFixture):
         route = [c for c in self.peer_calls() if c.startswith("zed peerws --route")]
         self.assertEqual(len(route), 1, self.peer_calls())
         self.assertIn(pub.read_text().split()[1], route[0])
+
+
+class TestDelegatedGlobalFlags(PeerFixture):
+    """the dispatcher's global flags cross the hop with the command"""
+
+    def _wk(self, *args):
+        with stub_path({"ssh": _FAKE_SSH}) as binp:
+            env = dict(os.environ)
+            env.update(self.env({"PATH": f"{binp}:{os.environ['PATH']}"}))
+            env.pop("WK_MARKER", None)
+            env.pop("WK_FORCE", None)
+            env.pop("WK_QUIET", None)
+            return subprocess.run(
+                [str(self.root / "wk"), *args],
+                cwd=str(self.root), env=env, timeout=120,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    def _driver(self, script):
+        with stub_path({"ssh": _FAKE_SSH}) as binp:
+            return bash(f'''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target peerbox
+{script}
+''', env=self.env({"PATH": f"{binp}:{os.environ['PATH']}"}), cwd=str(self.root))
+
+    def test_force_reaches_the_peers_wk(self):
+        """`wk <cmd> <ws> --force` is forced over there too: the barrier it
+        crosses is raised on the machine that runs the command"""
+        cp = self._wk("logs", "peerws", "--force")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertTrue(any("force=1" in c for c in self.peer_calls()),
+                        self.peer_calls())
+
+    def test_force_travels_as_environment_not_as_an_argument(self):
+        """an older `wk` over there ignores a variable it does not know and
+        dies on a flag it does not"""
+        self._wk("logs", "peerws", "--force")
+        self.assertFalse(any("--force" in c for c in self.peer_calls()),
+                         self.peer_calls())
+
+    def test_quiet_reaches_the_peers_wk(self):
+        """--quiet is the far side's narration, not this side's"""
+        cp = self._wk("logs", "peerws", "--quiet")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertTrue(any("quiet=1" in c for c in self.peer_calls()),
+                        self.peer_calls())
+
+    def test_nothing_is_forced_when_nothing_asked(self):
+        """the prefix is empty without the flag -- no command is forced by
+        merely being delegated"""
+        cp = self._wk("logs", "peerws")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertFalse(any("force=1" in c for c in self.peer_calls()),
+                         self.peer_calls())
+
+    def test_a_pty_carries_the_same_environment(self):
+        """t_wk_tty differs from t_wk in the transport and nothing else:
+        `wk claude <ws>` is interactive, so the tty path is the one a person
+        meets when they type --force"""
+        cp = self._driver('WK_FORCE=1 t_wk plain peerws\n'
+                          'WK_FORCE=1 t_wk_tty tty peerws')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        calls = self.peer_calls()
+        self.assertTrue(any(c.startswith("plain peerws") and "force=1" in c for c in calls), calls)
+        self.assertTrue(any(c.startswith("tty peerws") and "force=1" in c for c in calls), calls)
+
+    def test_one_implementation_builds_the_forwarded_environment(self):
+        """every hop asks lib/common.sh for it, so a flag added to one is
+        not missing from the other (CLAUDE.md, "one implementation per rule")"""
+        for path in (REPO / "wk", REPO / "targets" / "remote.sh"):
+            self.assertIn("wk_forwarded_env", path.read_text(), path)
+        offenders = subprocess.run(
+            ["grep", "-rln", "--exclude-dir=tests", "--exclude-dir=.git",
+             r"WK_FORCE:+\|WK_QUIET:+\|WK_YES:+\|WK_DEBUG:+", str(REPO)],
+            capture_output=True, text=True).stdout.split()
+        self.assertEqual(offenders, [str(REPO / "lib" / "common.sh")], offenders)
 
 
 if __name__ == "__main__":

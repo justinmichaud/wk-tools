@@ -370,7 +370,7 @@ class TestPrOpenRefusals(unittest.TestCase):
     "against a local fork) needs an isolated WK_STORE, but on this machine "
     "'where=workspace' commands for a container workspace are forwarded "
     "whole into the podman VM (forward_to_vm, wk:522-596) and only a fixed "
-    "list of variables crosses that ssh (WK_IN_VM/WK_DEBUG/WK_YES/WK_FORCE/"
+    "list of variables crosses that ssh (WK_IN_VM/WK_DEBUG/WK_QUIET/WK_YES/WK_FORCE/"
     "WK_EXPECT_TREE/WK_ROW_LABEL/WK_HOST_SELF/WK_CONFIG -- WK_STORE is not "
     "one of them), so there is no way to point the forwarded command at a "
     "scratch mirror without writing PR refs into this machine's real one. "

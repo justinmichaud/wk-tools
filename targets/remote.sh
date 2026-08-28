@@ -618,15 +618,23 @@ t_far_side() {
     fi
 }
 
-# Two variables travel as environment, not arguments: an unknown argument is
-# fatal on an old copy (a peer's own git checkout), an unknown variable is
-# silently ignored.
+# What the far side is asked to run, built in one place so a pty changes the
+# transport and nothing else -- a delegated command that loses --force over
+# the hop is a barrier the user already crossed, refusing again over there.
+# The dispatcher's global flags and the driver's own three travel as
+# environment, not arguments: an unknown argument is fatal on an old copy (a
+# peer's own git checkout), an unknown variable is silently ignored.
+_remote_wk_cmd() {
+    printf 'cd $HOME && %s%s%s%s%s %s' \
+        "$(wk_forwarded_env)" \
+        "${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }" \
+        "${WK_NO_DELEGATE:+WK_NO_DELEGATE=1 }" \
+        "${WK_ZED_PUBKEY:+WK_ZED_PUBKEY=$(sh_quote "${WK_ZED_PUBKEY:-}") }" \
+        "$(sh_quote "$(t_tools '')/wk")" "$(sh_quote "$@")"
+}
+
 t_wk() {
-    _rsh "cd \$HOME && \
-        ${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }\
-        ${WK_NO_DELEGATE:+WK_NO_DELEGATE=1 }\
-        ${WK_ZED_PUBKEY:+WK_ZED_PUBKEY=$(sh_quote "${WK_ZED_PUBKEY:-}") }\
-        $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@")"
+    _rsh "$(_remote_wk_cmd "$@")"
 }
 
 # The same, with a pty: `wk sudo setup` over there prompts for a password,
@@ -637,8 +645,7 @@ t_wk_tty() {
         return $?
     fi
     # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
-    ssh -t $(_ssh_opts) "$WK_REMOTE_HOST" \
-        "cd \$HOME && $(sh_quote "$(t_tools '')/wk") $(sh_quote "$@")"
+    ssh -t $(_ssh_opts) "$WK_REMOTE_HOST" "$(_remote_wk_cmd "$@")"
 }
 
 # A pty, for anything with a full-screen UI: `wk run --lldb` without one is

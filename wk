@@ -692,7 +692,7 @@ forward_to_vm() {
     # -- separates our args from ssh's. WK_IN_VM stops the VM-side wk from
     # trying to forward again if anything is ever misconfigured.
     local _cmd
-    _cmd="WK_IN_VM=1 ${WK_DEBUG:+WK_DEBUG=1 }${WK_YES:+WK_YES=1 }${WK_FORCE:+WK_FORCE=1 }${WK_EXPECT_TREE:+WK_EXPECT_TREE=$(sh_quote "${WK_EXPECT_TREE:-}") }${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }${WK_HOST_SELF:+WK_HOST_SELF=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
+    _cmd="WK_IN_VM=1 $(wk_forwarded_env)${WK_EXPECT_TREE:+WK_EXPECT_TREE=$(sh_quote "${WK_EXPECT_TREE:-}") }${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }${WK_HOST_SELF:+WK_HOST_SELF=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
 
     # A terminal does not survive `podman machine ssh`: it runs ssh without
     # asking for a pty, so the far side sees no tty at all: `host: TTY` out
