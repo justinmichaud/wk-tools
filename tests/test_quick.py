@@ -972,8 +972,8 @@ set -euo pipefail
 . "{REPO}/boot/machines.sh"
 bad=""
 machine_load rpi4 || {{ echo "no rpi4 machine conf"; exit 1; }}
-# rpi4: the bench system on the SD card, the rescue on the stick (boot/machines/rpi4.conf)
-for pair in "/dev/mmcblk0p2 bench" "/dev/sda2 base" " unknown"; do
+# rpi4: the bench system on the USB drive, the rescue on the SD card (boot/machines/rpi4.conf)
+for pair in "/dev/sda2 bench" "/dev/mmcblk0p2 base" " unknown"; do
     set -- $pair
     got=$(b_system_kind "${{2:+$1}}")
     [ "$got" = "${{2:-$1}}" ] || bad="$bad rpi4:${{1:-none}}=$got"

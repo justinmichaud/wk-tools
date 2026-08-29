@@ -41,25 +41,31 @@ done
 
 
 class TestRpi4Arrangement(unittest.TestCase):
-    def test_rpi4_bench_medium_is_the_sd_and_the_rescue_is_the_stick(self):
-        """rpi4.conf: MACH_DEVICE is the SD card, MACH_ROOT is on the USB stick, driver pi-mbr"""
+    def test_rpi4_bench_medium_is_the_usb_drive_and_the_rescue_is_the_sd(self):
+        """rpi4.conf: MACH_DEVICE is the USB drive, MACH_ROOT is on the SD card, driver pi-mbr"""
         cp = bash(LOAD + 'machine_load rpi4; echo "$MACH_DRIVER $MACH_DEVICE $MACH_ROOT"')
-        self.assertEqual(cp.stdout.strip(), "pi-mbr /dev/mmcblk0 /dev/sda2", cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "pi-mbr /dev/sda /dev/mmcblk0p2", cp.stdout + cp.stderr)
 
     def test_media_and_reprovision_name_the_media_from_the_conf(self):
-        """b_media and b_reprovision say 'SD card' for the bench medium and 'USB stick' for the rescue"""
-        cp = bash(LOAD + '''
-machine_load rpi4; load_driver pi-mbr
+        """b_media and b_reprovision name each medium from the conf, whichever way round it is declared"""
+        for conf, bench, rescue in (
+            ("MACH_DEVICE=/dev/sda MACH_ROOT=/dev/mmcblk0p2", "USB stick", "SD card"),
+            ("MACH_DEVICE=/dev/mmcblk0 MACH_ROOT=/dev/sda2", "SD card", "USB stick"),
+        ):
+            with self.subTest(conf=conf):
+                cp = bash(LOAD + f'''
+machine_load rpi4; load_driver pi-mbr; {conf}
 MODE="bench x-1"; b_media; echo
 MODE=""; b_reprovision
 ''')
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        first, rest = cp.stdout.split("\n", 1)
-        self.assertIn("booted from its SD card", first)
-        self.assertIn("the USB stick is the rescue", first)
-        self.assertIn("--disk <reader>:/dev/sda --rescue", rest)
-        self.assertIn("--disk rpi4:/dev/mmcblk0", rest)
-        self.assertNotIn("stick --", rest.split("--rescue")[0], "the rescue line names the stick, the bench line the card")
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                first, rest = cp.stdout.split("\n", 1)
+                self.assertIn(f"booted from its {bench}", first)
+                self.assertIn(f"the {rescue} is the rescue", first)
+                rescue_dev = "/dev/sda" if rescue == "USB stick" else "/dev/mmcblk0"
+                bench_dev = "/dev/mmcblk0" if rescue == "USB stick" else "/dev/sda"
+                self.assertIn(f"--disk <reader>:{rescue_dev} --rescue", rest)
+                self.assertIn(f"--disk rpi4:{bench_dev}", rest)
 
 
 class TestSelfDisarm(unittest.TestCase):
@@ -121,6 +127,81 @@ sed -n 's/^ExecStart=//p' "$seed/systemd/wk-self-disarm.service"
         self.assertTrue(line, "no ExecStart staged")
         self.assertNotRegex(line, r"(?<!\$)\$(?!\$)", f"a bare $ in {line}")
         self.assertIn("$$mp", line)
+
+
+class TestReplacingABoardsOwnRescue(unittest.TestCase):
+    """`wk sysimage write --rescue` onto a board's other medium, from the rescue
+    it replaces: the name is held by the system doing the writing, which is
+    the one case the collision refusal is crossed -- by --force, recorded."""
+
+    def _preflight(self, name, role, img_machine, peers, force=False):
+        lift = f"eval \"$(sed -n '/^_tailnet_name_collides()/,/^}}/p; /^_tailnet_name_preflight()/,/^}}/p' \"{REPO}/cmd/sysimage\")\""
+        env = {"PEERS": peers, "WK_ROOT": str(REPO)}
+        if force:
+            env["WK_FORCE"] = "1"
+        return bash(LOAD + f'''
+{lift}
+wk_tailscale_peers() {{ printf '%s' "$PEERS"; }}
+machine_load rpi4; IMG_MACHINE={img_machine}
+_tailnet_name_preflight {name} {role}
+echo "rc=$?"
+''', env=env)
+
+    PEERS = "rpi4-rescue\t100.1.1.1\tup\n"
+
+    def test_a_rescue_written_from_itself_is_a_barrier(self):
+        """refuses without --force, and the refusal names --force and the admin-console step"""
+        cp = self._preflight("rpi4-rescue", "rescue", "rpi4", self.PEERS)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("--force", cp.stderr)
+        self.assertIn("admin console", cp.stderr)
+        self.assertIn("before", cp.stderr)
+
+    def test_force_crosses_it_and_is_recorded(self):
+        cp = self._preflight("rpi4-rescue", "rescue", "rpi4", self.PEERS, force=True)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("rc=0", cp.stdout)
+        self.assertIn("FORCED", cp.stderr)
+
+    def test_a_bench_name_or_another_boards_name_is_still_refused_outright(self):
+        """the exception is exactly one case: this board, its own rescue name, a rescue write"""
+        for name, role, mach, peers in (
+            ("rpi4-bench", "bench", "rpi4", "rpi4-bench\t100.1.1.2\tup\n"),
+            ("rpi4-rescue", "bench", "rpi4", self.PEERS),
+            ("rpi4-rescue", "rescue", "rpi3", self.PEERS),
+        ):
+            with self.subTest(name=name, role=role, machine=mach):
+                cp = self._preflight(name, role, mach, peers, force=True)
+                self.assertNotEqual(cp.returncode, 0, "crossed a refusal that has no --force:\n" + cp.stdout + cp.stderr)
+                self.assertIn("no --force", cp.stderr)
+
+
+class TestDisarmWithoutARecord(unittest.TestCase):
+    def _disarm(self, arming):
+        lift = f"eval \"$(sed -n '/^cmd_disarm()/,/^}}/p' \"{REPO}/cmd/boot\")\""
+        return bash(f'''
+. "{REPO}/lib/common.sh"
+{lift}
+MACHINE=rpi4 DRY="" BOOT_ARMING={arming}
+read_state() {{ ARMED_IMG=""; SPENT=""; }}
+b_disarm() {{ echo "b_disarm ran"; }}
+b_disarm_note() {{ :; }}
+record_clear() {{ echo "record cleared"; }}
+cmd_disarm 2>&1
+''')
+
+    def test_a_medium_armed_machine_is_disarmed_whoever_armed_it(self):
+        """wk boot <m> --disarm parks the medium even with no arming record: the byte is the arming"""
+        cp = self._disarm("medium")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("b_disarm ran", cp.stdout)
+        self.assertIn("record cleared", cp.stdout)
+
+    def test_a_one_shot_machine_with_no_record_has_nothing_to_disarm(self):
+        cp = self._disarm("one-shot")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("no arming record", cp.stdout)
+        self.assertNotIn("b_disarm ran", cp.stdout)
 
 
 class TestFleetTailnetLine(unittest.TestCase):

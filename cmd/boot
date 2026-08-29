@@ -243,9 +243,13 @@ cmd_back() {
 
 cmd_disarm() {
     read_state
-    [ -n "$ARMED_IMG" ] || { log "$MACHINE has no arming record"; return 0; }
+    # A medium-armed machine's arming is the byte on the medium, whoever wrote
+    # it; the record is not what decides whether it boots the bench system.
+    if [ -z "$ARMED_IMG" ] && [ "${BOOT_ARMING:-one-shot}" != medium ]; then
+        log "$MACHINE has no arming record"; return 0
+    fi
     if [ -n "$DRY" ]; then
-        log "would re-arm $MACHINE with its normal boot order and clear the record"
+        log "would disarm $MACHINE (its normal boot order, or its medium parked) and clear the record"
         return 0
     fi
     # Re-arming with the EEPROM's own order is how a one-shot is cancelled:

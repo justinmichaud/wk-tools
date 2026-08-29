@@ -260,7 +260,9 @@ wk boot rpi4                                     # one-shot: arms, reboots, self
 # WiFi credentials are missing, or when the tailnet already has a node named
 # rpi3-bench -- a fresh join would come up as rpi3-bench-1 and nothing could
 # reach it.
-# Remove the stale node in the admin console first.
+# Remove the stale node in the admin console first -- or, when the node is the
+# board's own rescue being replaced from itself, --force and remove it before
+# the reboot.
 # A board with one medium (the rpi3) keeps both systems on it: the rescue on
 # partitions 1-2, the bench system on 3-4 (`@second`). `wk boot rpi3` selects
 # the second for one boot with an os_prefix line in the rescue's config.txt,

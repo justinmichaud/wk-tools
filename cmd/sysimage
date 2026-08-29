@@ -607,9 +607,13 @@ _tailnet_name_collides() { # <name> -- peer TSV (name<TAB>ip<TAB>state) on stdin
 # A name already on the tailnet blocks the write, before anything is
 # erased: Tailscale silently renames a colliding join to "$name-1", and
 # everything here reaches a board by its tailnet name. Cannot be skipped --
-# a failure to ask is not evidence the name is free.
-_tailnet_name_preflight() { # <name>
-    local name="${1:-}" peers hit=""
+# a failure to ask is not evidence the name is free. The one barrier: a
+# rescue written onto a board's other medium from the rescue it replaces,
+# where the name is held by the very system doing the writing (MACH_* is the
+# card machine, IMG_MACHINE the image's board). --force crosses it and is
+# recorded; the old node still has to go before the new card's first boot.
+_tailnet_name_preflight() { # <name> <bench|rescue>
+    local name="${1:-}" role="${2:-bench}" peers hit=""
     [ -n "$name" ] || return 0
 
     peers=$(wk_tailscale_peers)
@@ -620,7 +624,18 @@ _tailnet_name_preflight() { # <name>
     and everything here reaches a board by its tailnet name."
 
     hit=$(printf '%s\n' "$peers" | _tailnet_name_collides "$name") || hit=""
-    [ -z "$hit" ] || die "'$name' is already on the tailnet (${hit#*:}), online or offline.
+    [ -n "$hit" ] || return 0
+    if [ "$role" = rescue ] && [ "${hit%%:*}" = exact ] \
+       && [ "${IMG_MACHINE:-}" = "${MACH_NAME:-}" ] && [ "$name" = "${MACH_SSH:-}" ]; then
+        barrier "'$name' is $MACH_NAME's running rescue -- the system this card replaces.
+    The card joins under that name only if the old node is gone by its first
+    boot: after this write, remove '$name' from the tailnet admin console
+    (https://login.tailscale.com/admin/machines -> $name -> Remove) before
+    rebooting; a card that boots while the node exists joins renamed '$name-1'
+    and nothing here can find it."
+        return 0
+    fi
+    die "'$name' is already on the tailnet (${hit#*:}), online or offline.
     Joining under it again does not keep the name -- Tailscale renames the
     collision to '$name-1', and everything here reaches a board by its
     tailnet name, so a card that joins renamed is a card nothing here can
@@ -764,7 +779,7 @@ EOF
         DISK_DRY=1
     else
         _tailnet_key_preflight "${IMG_MACHINE:-}" "$role"
-        _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")"
+        _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")" "$role"
         _wifi_creds_preflight "${IMG_MACHINE:-}"
 
         if disk_is_second "$DISK_DEV"; then
@@ -874,6 +889,11 @@ source=$from"
         log "  $DISK_MACHINE is configured to boot from this disk, but writing it"
         log "  did not arm anything. To boot it -- once, reverting by itself:"
         log "      wk boot $DISK_MACHINE"
+    elif [ -n "${MACH_ROOT:-}" ] && [ "$DISK_DEV" = "$(disk_of_part "$MACH_ROOT")" ]; then
+        log "  this is $DISK_MACHINE's rescue medium: it boots whenever ${MACH_DEVICE:-the bench medium} is"
+        log "  disarmed. To boot it now:  wk boot $DISK_MACHINE --disarm   then power-cycle the board"
+        log "  (if this write was forced past the running rescue's name, remove that node"
+        log "  from the admin console between the two)."
     else
         log "  nothing boots this yet. Move it to the board it is for, or point a"
         log "  machine at it; 'wk boot <machine>' is the one-shot."

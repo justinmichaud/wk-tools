@@ -688,7 +688,7 @@ printf 'name=%s ssh=%s role=%s driver=%s\n' \
         )
 
     def test_a_medium_armed_board_gets_its_drivers_self_disarm(self):
-        # rpi4 arms its SD card (pi-mbr): its image flips the card's partition
+        # rpi4 arms its USB drive (pi-mbr): its image flips the drive's partition
         # type on first boot. rpi3 arms its rescue's config.txt (pi-sd): its
         # image puts the rescue's own back.
         cp = self._sh('_self_disarm_for rpi4')
