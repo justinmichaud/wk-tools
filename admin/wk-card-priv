@@ -1153,7 +1153,9 @@ v_second_verify() {
 # a reader).
 _second_with_boot() { # <disk> <function> [args...] -- calls <function> <boot mountpoint> [args...]
     local dev="$1" fn="$2" m; shift 2
-    m=$(findmnt -no TARGET "$(part "$dev" 1)" 2>/dev/null | head -1)
+    # `|| true`: findmnt exits 1 for "not mounted", which under pipefail
+    # would end this helper before the mount below.
+    m=$(findmnt -no TARGET "$(part "$dev" 1)" 2>/dev/null | head -1 || true)
     if [ -n "$m" ]; then
         "$fn" "$m" "$@"
     else

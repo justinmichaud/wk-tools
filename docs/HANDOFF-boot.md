@@ -7,7 +7,6 @@
 - [ ] rpi4: verify `S11wk-self-disarm` parks the card and `S99wk-self-return` reboots an unclaimed board on a real buildroot boot (the yocto unit's `$$`-escaped ExecStart has run only in tests) [needs the card re-written by a helper that stages init.d scripts]
 - [ ] rebuild and re-flash rpi3 onto the tailnet layer [needs a Pi card in hand]
 - [ ] verify the rescue marker plus both self-return/self-disarm units end to end on a real board [needs a Pi card in hand]
-- [ ] verify a `--rescue` write without `--grow` leaves the rest of a shared card alone (the rpi3 two-slot case) [needs a Pi card in hand]
 - [ ] verify a profile's `config.txt.append` reaches the image for every builder (rpi4 clock pinning, rpi5 `os_check=0`) against a real image [needs a Pi card in hand]
 - [ ] verify `kill -9` mid-`wk sysimage build` converges on re-run
 - [ ] verify two `wk sysimage build` at once: the second waits rather than racing the first's cleanup

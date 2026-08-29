@@ -279,11 +279,22 @@ class TestArming(WkTest):
 
     def test_the_verbs_take_the_boot_partition_wherever_it_is(self):
         """mounted already (the rescue running from the disk) or mounted here (a card in a reader)"""
-        text = _lift(CARD_PRIV, "_second_with_boot")
-        self.assertIn("findmnt", text)
-        self.assertIn("with_mount", text)
         for verb in ("v_second_arm", "v_second_disarm", "v_second_state"):
             self.assertIn("_second_with_boot", _lift(CARD_PRIV, verb), f"{verb} does not go through _second_with_boot")
+        # Under the helper's own `set -euo pipefail`, with findmnt saying "not
+        # mounted" (exit 1) the card in a reader is mounted here; with a
+        # mountpoint it is used as is.
+        script = ('set -euo pipefail\n' + _SAY + _lift(CARD_PRIV, "part", "_second_with_boot")
+                  + '\nwith_mount() { echo "with_mount $1 -> $2"; }\nshow() { echo "boot=$1"; }\n'
+                  + '_second_with_boot /dev/sdX show\n')
+        with stub_path({"findmnt": "exit 1"}) as binp:
+            cp = bash(script, env={"PATH": f"{binp}:{os.environ['PATH']}"})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("with_mount /dev/sdX1 -> show", cp.stdout)
+        with stub_path({"findmnt": "echo /run/media/boot"}) as binp:
+            cp = bash(script, env={"PATH": f"{binp}:{os.environ['PATH']}"})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("boot=/run/media/boot", cp.stdout)
 
 
 class TestUnitsForABusyBoxInit(WkTest):
