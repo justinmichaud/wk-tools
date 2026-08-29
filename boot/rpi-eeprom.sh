@@ -163,7 +163,8 @@ eeprom_stage_recovery() {
     # recovery.bin it finds, so it must not be findable before the image and
     # the signature it will look for are both already there. A power cut
     # partway through then leaves a board that boots normally.
-    scp -q -o BatchMode=yes "$work/pieeprom.upd" "$work/pieeprom.sig" "$HOST:$bootfs/" \
+    # shellcheck disable=SC2046
+    scp -q -o BatchMode=yes $(_unpinned_host_key_opts) "$work/pieeprom.upd" "$work/pieeprom.sig" "$(rsh_dest):$bootfs/" \
         || die "could not copy the EEPROM update to $HOST:$bootfs"
 
     for f in pieeprom.upd pieeprom.sig; do

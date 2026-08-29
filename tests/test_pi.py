@@ -151,3 +151,20 @@ class TestPiSlotRefusals(WkTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPiBenchOnceNamesItsOwnSlot(unittest.TestCase):
+    """pi_bench_once's slot.json path is derived from *its* slot argument, not
+    the caller's: `local a="$1" b="$a"` expands $a before the first assignment
+    lands, which is how an --ab run once looked for slot-a.json."""
+
+    def test_json_path_follows_the_argument(self):
+        cp = bash(f'''
+{lift("pi_bench_once")}
+PI_TMP=/t plan=p machine=m slot=a
+# stop at the first thing after the locals that touches the world
+ensure_dir() {{ echo "json=$json"; exit 0; }}
+pi_bench_once pr1725
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("json=/t/slot-pr1725.json", cp.stdout)

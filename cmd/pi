@@ -10,7 +10,7 @@
 #   wk pi setup <ssh-host>                put it on the tailnet: copies pinned
 #                                         tailscale binaries onto a writable
 #                                         partition; no image rebuild
-#   wk pi boot-order <ssh-host> <order>   rpi4/rpi5 firmware boot order;
+#   wk pi boot-order <machine> <order>    rpi4/rpi5 firmware boot order;
 #                                         --revert undoes it, --dry-run previews
 #   wk pi deploy <image-profile> <machine> --slot <name>
 #                                         put a built WebKit on the board as a
@@ -41,7 +41,7 @@
 #   wk sysimage disks <machine>                  find the disk to write it to
 #   wk sysimage write --from <path> \
 #       --disk <machine>:<device>                write it
-#   wk pi boot-order <ssh-host> <usb-first|sd-first|local>   set the boot order
+#   wk pi boot-order <machine> <usb-first|sd-first|local>    set the boot order
 #   wk boot <machine>                            boot it
 #   wk pi setup <ssh-host>                       put it on the tailnet
 #   wk sysimage webkit <profile> --commit <sha> --slot <name>
@@ -96,7 +96,7 @@ pi_usage_page() {
 ACTION="${1:-}"; HOST="${2:-}"
 case "$ACTION" in
     "") pi_usage_page; exit 0 ;;
-    setup|boot-order) [ -n "$HOST" ] || die "usage: wk pi $ACTION <ssh-host>; see wk pi -h" ;;
+    setup|boot-order) [ -n "$HOST" ] || die "usage: wk pi $ACTION <machine|ssh-host>; see wk pi -h" ;;
     # deploy takes a *workspace* and a fleet machine, not an ssh host: it has
     # to reach into the build to make the archive and onto the board to unpack
     # it, and the board is named the way every other fleet verb names one.
@@ -116,7 +116,21 @@ if [ "$ACTION" = setup ] && [ $# -gt 0 ]; then
     esac
 fi
 
-rsh() { ssh -o BatchMode=yes "$HOST" "$@"; }
+# The board, over ssh. A fleet machine -- named as such, or by its rescue's
+# ssh name -- is reached the way every fleet verb reaches it (m_ssh: root,
+# the driving key, an unpinned host key); anything else is an ssh
+# destination as given, which is how `wk pi setup` meets a board that is not
+# in the fleet yet.
+PI_FLEET=""
+case "$ACTION" in
+    setup|boot-order)
+        if machine_by_ssh "$HOST" 2>/dev/null; then PI_FLEET=1; HOST="$MACH_SSH"; fi ;;
+esac
+rsh() {
+    if [ -n "$PI_FLEET" ]; then m_ssh "$@"; else ssh -o BatchMode=yes "$HOST" "$@"; fi
+}
+# The scp destination for the same board (boot/rpi-eeprom.sh stages files).
+rsh_dest() { printf '%s%s' "${PI_FLEET:+root@}" "$HOST"; }
 
 if [ "$ACTION" = flash ]; then
     die "'wk pi flash' is gone -- it and 'wk image flash' were one operation.
@@ -629,7 +643,10 @@ $(sed 's/^/    /' "$PI_TMP/tunnel.log")"
 # reported. Wall-clock silence is watched like a workspace run's
 # (run_watched, lib/watchdog.sh).
 pi_bench_once() {
-    local slot="$1" json="$PI_TMP/slot-$slot.json"
+    # Two statements: in one `local a=.. b=$a`, $a expands before the first
+    # assignment lands, to the caller's slot rather than this run's.
+    local slot="$1"
+    local json="$PI_TMP/slot-$slot.json"
     local id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$machine-$slot"
     local out="$BENCH_DIR/$id"
     ensure_dir "$out/diagnose"
@@ -796,8 +813,8 @@ cmd_boot_order() {
         case "$1" in
             --dry-run)   dry=1 ;;
             --revert)    revert=1 ;;
-            -*) die "usage: wk pi boot-order <ssh-host> <usb-first|sd-first|local> [--revert] [--dry-run]; unknown option: $1; see wk pi -h" ;;
-            *)  die "usage: wk pi boot-order <ssh-host> <usb-first|sd-first|local> [--revert] [--dry-run]; unexpected argument: $1; see wk pi -h" ;;
+            -*) die "usage: wk pi boot-order <machine> <usb-first|sd-first|local> [--revert] [--dry-run]; unknown option: $1; see wk pi -h" ;;
+            *)  die "usage: wk pi boot-order <machine> <usb-first|sd-first|local> [--revert] [--dry-run]; unexpected argument: $1; see wk pi -h" ;;
         esac
         shift
     done
