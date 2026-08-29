@@ -883,10 +883,25 @@ report_fleet_device() {
     rec_set role    "${role:-?}"
     rec_set mode    "no answer within ${cap}s"
     rec_set conf    "boot/machines/$m.conf"
-    rec_opt tailnet "$(reach_tailnet "$m")"
+    rec_opt tailnet "$(fleet_tailnet "$m")"
     rec_opt direct  "$(reach_without_tailnet "$m")"
     rec_emit
     return 0
+}
+
+# A fleet device has a tailnet node per role -- the rescue (MACH_SSH) and the
+# bench system (MACH_BENCH_SSH) -- so the reached line names each, or says
+# which has never joined.
+fleet_tailnet() { # <machine>
+    ( . "$WK_ROOT/boot/machines.sh"
+      machine_load "$1" >/dev/null 2>&1 || exit 0
+      local n a out=""
+      for n in "${MACH_SSH:-$1}" "${MACH_BENCH_SSH:-}"; do
+          [ -n "$n" ] || continue
+          a=$(reach_tailnet "$n")
+          out="${out:+$out; }$n ${a:-not a node}"
+      done
+      printf '%s' "$out" )
 }
 
 _fleet_probe() {
@@ -945,7 +960,7 @@ _fleet_probe() {
         rec_set media   "$media"
         rec_opt armed   "$armed"
         rec_set conf    "boot/machines/$m.conf"
-        rec_opt tailnet "$(reach_tailnet "$m")"
+        rec_opt tailnet "$(fleet_tailnet "$m")"
         rec_opt direct  "$(reach_without_tailnet "$m")"
         rec_opt reprovision "$reprov"
         rec_emit

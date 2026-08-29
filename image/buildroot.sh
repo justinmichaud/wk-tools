@@ -38,9 +38,10 @@
 #               report success too.
 #   init        BusyBox, so no systemd units: install_units reads the init
 #               out of the rootfs and refuses rather than writing units
-#               nothing will start. S99tailscale is the equivalent.
-#               TODO: the BusyBox halves of the self-return watchdog and
-#               self-disarm are owed (docs/HANDOFF-boot.md).
+#               nothing will start. The self-disarm and self-return are init
+#               scripts generated from the board's driver at build time
+#               (image/buildroot/fleet-overlay.sh); S99tailscale is the
+#               tailnet join's.
 #
 # Owed work: docs/HANDOFF-ab-bench.md #3.
 

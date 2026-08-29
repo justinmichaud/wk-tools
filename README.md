@@ -44,7 +44,7 @@ an A/B never needs a card carried to a reader. The two systems are two
 tailnet nodes with two names -- the rescue `<board>-rescue` (`MACH_SSH`), the
 bench system `<board>-bench` (`MACH_BENCH_SSH`) -- since each written card
 joins as its own node and a second join under one name comes up renamed. A rescue written from an image
-that predates that layer (both boards' rescues as of 2026-08-28) cannot; it is
+that predates that layer (the rpi3's) cannot; it is
 rewritten once, from a reader, and never again. The only card a person
 handles is a board's first rescue.
 

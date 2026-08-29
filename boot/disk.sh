@@ -53,6 +53,13 @@ disk_part() {
         *)      echo "$1$2" ;;
     esac
 }
+# The inverse: /dev/sda2 -> /dev/sda, /dev/mmcblk0p2 -> /dev/mmcblk0, /dev/nvme0n1p2 -> /dev/nvme0n1.
+disk_of_part() {
+    case "$1" in
+        *[0-9]p[0-9]*) echo "${1%p[0-9]*}" ;;
+        *)             echo "${1%[0-9]*}" ;;
+    esac
+}
 
 # Split `<machine>:<device>`, tolerating a bare `<machine>`. Sets
 # DISK_MACHINE/DISK_DEV rather than printing them, since a caller capturing

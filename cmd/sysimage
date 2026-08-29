@@ -141,7 +141,7 @@ stage_sysctl() { # <staging dir> <name> <body>
 }
 
 # What an image runs to park its own arming, from the driver of the machine
-# the *image* is for: a board that arms a medium (pi-usb) has one, a board
+# the *image* is for: a board that arms a medium (pi-mbr) has one, a board
 # whose card swap is hands-on has none, and neither is an error.
 #
 # In a subshell, like _tailnet_name_for and for the same reason: MACH_* names
@@ -197,15 +197,16 @@ WantedBy=multi-user.target
 "
     fi
 
-    # A medium-armed machine's image disarms itself: the stick stops being
+    # A medium-armed machine's image disarms itself: the medium stops being
     # bootable the moment the image is up, so every later reboot falls
-    # through to the rescue role (b_self_disarm_sh; boot/pi-usb.sh owns the
-    # filenames). Ordered before sysinit, not at multi-user, to keep the
+    # through to the rescue (b_self_disarm_sh, the machine's driver). `$` is
+    # doubled for systemd, which would otherwise expand the script's own
+    # variables before sh saw them. Ordered before sysinit, not at multi-user, to keep the
     # "image came up and then wedged" window as small as possible;
     # DefaultDependencies=no with After=local-fs.target is safe because a
     # rename on an already-mounted filesystem cannot block on systemd.
     if [ -n "$disarm" ]; then
-        info "staging the self-disarm (the stick stops booting once this image is up)"
+        info "staging the self-disarm (the medium stops booting once this image is up)"
         stage_unit "$seed" wk-self-disarm.service "[Unit]
 Description=Park this image's second-stage firmware so the next boot is the rescue role
 # A rescue is not on the medium this parks, so on one it would disarm somebody
@@ -217,7 +218,7 @@ Before=sysinit.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c '$disarm'
+ExecStart=/bin/sh -c '$(printf '%s' "$disarm" | sed 's/[$]/$$/g')'
 [Install]
 WantedBy=sysinit.target
 "

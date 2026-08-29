@@ -7,6 +7,10 @@
 #
 # Sourced here, guarded, since five callers load this file and not lib/reach.sh.
 command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
+# disk_part (the mmcblk/nvme partition-suffix rule): b_diag and
+# b_device_image below need it and not every caller of this file loads
+# boot/disk.sh on its own.
+command -v disk_part >/dev/null 2>&1 || . "$WK_ROOT/boot/disk.sh"
 
 # The fields a machine sets are documented in README.md ("Add a new fleet
 # device"). MACH_DTB is empty for a machine with no board firmware to ask.
@@ -131,13 +135,12 @@ image_hostname() {
         || printf '%s' "$MACH_NAME"
 }
 
-# Different installs at the same address would trip a man-in-the-middle
-# warning in a shared known_hosts (_unpinned_host_key_opts, shared with m_ssh_opts).
+# Same login rule as m_ssh (m_ssh_opts): root on a bench-device, the
+# caller's own user everywhere else.
 i_ssh() {
     # shellcheck disable=SC2046
     ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" \
-        $(_unpinned_host_key_opts) \
-        "$(id -un)@$(image_addr)" "$@"
+        $(m_ssh_opts) "$(image_addr)" "$@"
 }
 
 # By ssh alias -- host or bench mode, whichever `dest` names. No
@@ -304,7 +307,7 @@ b_boot_id() { r_ssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true; }
 # Read off the boot partition from host mode: the image writes the dump
 # there 75 s in, readable even if the image was never reachable.
 b_diag() {
-    local part="${MACH_DEVICE}1"
+    local part; part=$(disk_part "$MACH_DEVICE" 1)
     # An automounter usually has the partition already; read it where it is,
     # and only mount when nothing else has.
     m_ssh "set -e
@@ -330,7 +333,7 @@ b_reboot() {
 # Read off the FAT boot partition rather than by hashing the device: a
 # booted image writes to its own boot partition, so the bytes stop matching.
 b_device_image() {
-    local part="${MACH_DEVICE}1"
+    local part; part=$(disk_part "$MACH_DEVICE" 1)
     m_ssh "at=\$(findmnt -rno TARGET '$part' | head -1)
         if [ -n \"\$at\" ]; then cat \"\$at/wk-image.id\" 2>/dev/null; exit 0; fi
         sudo mkdir -p /mnt/wk-id

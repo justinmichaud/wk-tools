@@ -163,11 +163,16 @@ reach_enumerate() { # <mac>
 # reach_without_tailnet <machine> -- where it is, when the tailnet does not
 # say: tries the ssh config's answer first, then falls back to the sweep.
 reach_without_tailnet() {
-    local m="$1" ssh_path ts_name mac
+    local m="$1" ssh_path ts_name mac n
 
     # Called from inside the fleet walk, so an unconditional sweep here
-    # would lose the line to its own ceiling.
-    [ -z "$(reach_tailnet "$m")" ] || return 0
+    # would lose the line to its own ceiling. A fleet device is on the
+    # tailnet under its role names (MACH_SSH, MACH_BENCH_SSH), which need
+    # not be the machine name.
+    for n in "$m" $(kv_field "$WK_ROOT/boot/machines/$m.conf" MACH_SSH | tr -d '"'"'"' ') \
+                  $(kv_field "$WK_ROOT/boot/machines/$m.conf" MACH_BENCH_SSH | tr -d '"'"'"' '); do
+        [ -z "$(reach_tailnet "$n")" ] || return 0
+    done
 
     ssh_path=$(reach_ssh "$m") || ssh_path=""
     # `ssh -G` answers with the name itself when no HostName is written down

@@ -41,7 +41,7 @@
 #   wk sysimage disks <machine>                  find the disk to write it to
 #   wk sysimage write --from <path> \
 #       --disk <machine>:<device>                write it
-#   wk pi boot-order <ssh-host> usb-first        set the boot order
+#   wk pi boot-order <ssh-host> <usb-first|sd-first|local>   set the boot order
 #   wk boot <machine>                            boot it
 #   wk pi setup <ssh-host>                       put it on the tailnet
 #   wk sysimage webkit <profile> --commit <sha> --slot <name>
@@ -214,13 +214,13 @@ pi_deploy_slot() { # <slot dir> <machine> <slot>
     size=$(du -sh "$slotdir/root" | cut -f1)
 
     info "deploying slot '$slot' to $machine ($browser, WebKit ${commit:0:12}, $size)"
-    m_ssh "rm -rf $(sh_quote "$part") && mkdir -p $(sh_quote "$part")" >/dev/null 2>&1 \
+    i_ssh "rm -rf $(sh_quote "$part") && mkdir -p $(sh_quote "$part")" >/dev/null 2>&1 \
         || die "cannot create $part on $machine. Is its root filesystem writable?"
     # `tar | ssh tar` rather than scp: the same channel the rest of this repo
     # uses to move bytes onto a board (boot/disk.sh), needing nothing but tar
     # on the far side.
     tar -C "$slotdir" -cf - root slot.json | gzip -1 \
-        | m_ssh "tar -C $(sh_quote "$part") -xzf -" \
+        | i_ssh "tar -C $(sh_quote "$part") -xzf -" \
         || die "could not copy the slot to $machine ($part is left there)"
 
     # Proof, not a claim: every file, against the manifest, with the board's
@@ -229,12 +229,12 @@ pi_deploy_slot() { # <slot dir> <machine> <slot>
     # the lines that are not "OK" come back.
     local bad
     if ! bad=$(wkslot sums "$slotdir/slot.json" --prefix "$part/root" \
-                 | m_ssh 'out=$(sha256sum -c - 2>&1); rc=$?; printf "%s\n" "$out" | grep -v ": OK$"; exit $rc'); then
+                 | i_ssh 'out=$(sha256sum -c - 2>&1); rc=$?; printf "%s\n" "$out" | grep -v ": OK$"; exit $rc'); then
         die "the copy on $machine does not match the slot's manifest:
 $(printf '%s\n' "$bad" | head -5 | sed 's/^/    /')
     Nothing was replaced; $part is left for inspection."
     fi
-    m_ssh "rm -rf $(sh_quote "$dest") && mv $(sh_quote "$part") $(sh_quote "$dest")" \
+    i_ssh "rm -rf $(sh_quote "$dest") && mv $(sh_quote "$part") $(sh_quote "$dest")" \
         || die "could not move $part into place on $machine"
 
     log "deployed to $machine"
@@ -273,10 +273,10 @@ PI_TUNNEL_PID=""
 _pi_tunnel_cleanup() { [ -n "$PI_TUNNEL_PID" ] && kill "$PI_TUNNEL_PID" 2>/dev/null; PI_TUNNEL_PID=""; return 0; }
 
 # The ssh command line the driver and the tunnel use, as one string: the
-# same options m_ssh applies, spelled out because the driver is python.
+# same options i_ssh applies, spelled out because the driver is python.
 pi_ssh_cmd() {
     # shellcheck disable=SC2046
-    printf 'ssh -o BatchMode=yes -o ConnectTimeout=%s %s %s' "$(wk_ssh_timeout)" "$(m_ssh_opts)" "$MACH_SSH"
+    printf 'ssh -o BatchMode=yes -o ConnectTimeout=%s %s %s' "$(wk_ssh_timeout)" "$(m_ssh_opts)" "$(image_addr)"
 }
 
 # A free TCP port here, which is also the port the tunnel listens on there:
@@ -294,9 +294,9 @@ bench_plan_read() { cat "$BENCH_RUNNER/Tools/Scripts/$1"; }
 # that knows whether a panel is attached.
 pi_display() {
     local drm tv
-    drm=$(m_ssh 'grep -l "^connected$" /sys/class/drm/card*-HDMI-*/status 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
+    drm=$(i_ssh 'grep -l "^connected$" /sys/class/drm/card*-HDMI-*/status 2>/dev/null | head -1' 2>/dev/null | tr -d '\r')
     [ -z "$drm" ] || { printf 'drm:%s' "$(basename "$(dirname "$drm")")"; return 0; }
-    tv=$(m_ssh 'tvservice -s 2>/dev/null' 2>/dev/null | tr -d '\r')
+    tv=$(i_ssh 'tvservice -s 2>/dev/null' 2>/dev/null | tr -d '\r')
     case "$tv" in
         *HDMI*|*DVI*) printf 'tvservice:%s' "$(printf '%s' "$tv" | sed 's/^state [^ ]* //')"; return 0 ;;
     esac
@@ -307,7 +307,7 @@ pi_display() {
 # unless told otherwise, and a board that throttles readily makes an unpinned
 # score a temperature reading. Prints the governor in force afterwards.
 pi_pin_governor() {
-    m_ssh 'for p in /sys/devices/system/cpu/cpufreq/policy*; do
+    i_ssh 'for p in /sys/devices/system/cpu/cpufreq/policy*; do
                [ -w "$p/scaling_governor" ] && echo performance > "$p/scaling_governor"
            done 2>/dev/null; cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor 2>/dev/null' \
         2>/dev/null | tr -d '\r' | tail -1
@@ -329,7 +329,7 @@ pi_session_up() { # <builder> <display evidence, or empty>
 # start. The image autostarts a cog of its own showing the board's address;
 # that one is stopped, since two browsers on one GPU is not a measurement.
 pi_session_buildroot() {
-    m_ssh '[ -x /etc/init.d/S90cog ] && /etc/init.d/S90cog stop >/dev/null 2>&1
+    i_ssh '[ -x /etc/init.d/S90cog ] && /etc/init.d/S90cog stop >/dev/null 2>&1
            killall cog WPEWebProcess WPENetworkProcess 2>/dev/null; true' >/dev/null 2>&1 || true
     PI_RENDERER=dispmanx; PI_SESSION=rdk
     log "  session     rdk backend, dispmanx ($([ -n "$1" ] && echo "$1" || echo 'no display evidence'))"
@@ -350,12 +350,12 @@ signal.pause()'
 
 pi_session_yocto() {
     # netdata competes for the CPU being measured.
-    m_ssh 'systemctl stop netdata 2>/dev/null' >/dev/null 2>&1 || true
+    i_ssh 'systemctl stop netdata 2>/dev/null' >/dev/null 2>&1 || true
     if [ -n "$1" ]; then
         # A real panel: weston's own service, DRM backend, GL renderer. The
         # only configuration whose number is comparable with other hardware.
         PI_RENDERER=gl; PI_SESSION=drm
-        m_ssh 'systemctl start --no-block weston' >/dev/null 2>&1 || true
+        i_ssh 'systemctl start --no-block weston' >/dev/null 2>&1 || true
     else
         # "No display" is not "no compositor": weston's RDP backend synthesises
         # a head with no display hardware and no client on the port, so pixman
@@ -363,7 +363,7 @@ pi_session_yocto() {
         # forcing a mode with `video=`, which hangs vc4 in probe.
         PI_RENDERER=pixman; PI_SESSION=headless-rdp
         info "  no display attached: RDP virtual head + pixman (software) compositing"
-        m_ssh 'mkdir -p /etc/wk-bench && [ -f /etc/wk-bench/rdp.key ] || {
+        i_ssh 'mkdir -p /etc/wk-bench && [ -f /etc/wk-bench/rdp.key ] || {
                  openssl req -x509 -newkey rsa:2048 -nodes \
                    -keyout /etc/wk-bench/rdp.key -out /etc/wk-bench/rdp.crt \
                    -days 3650 -subj /CN=wk-bench >/dev/null 2>&1
@@ -371,7 +371,7 @@ pi_session_yocto() {
             || die "could not create the RDP backend's keys on $machine (needs openssl)"
         # desktop-shell, not fullscreen-shell: the latter serves no xdg-shell,
         # and a browser asking for one gets "invalid object" and exits.
-        m_ssh 'pkill -x weston 2>/dev/null; sleep 1
+        i_ssh 'pkill -x weston 2>/dev/null; sleep 1
                mkdir -p /run/user/0 && chmod 700 /run/user/0
                XDG_RUNTIME_DIR=/run/user/0 setsid weston \
                  --backend=rdp-backend.so --renderer=pixman \
@@ -383,23 +383,23 @@ pi_session_yocto() {
 
     local i=0 out=""
     while [ "$i" -lt 20 ]; do
-        out=$(m_ssh 'grep -oE "Output .[a-z0-9-]+. enabled" /tmp/wk-weston.log 2>/dev/null | tail -1;
+        out=$(i_ssh 'grep -oE "Output .[a-z0-9-]+. enabled" /tmp/wk-weston.log 2>/dev/null | tail -1;
                      pidof weston-desktop-shell 2>/dev/null' 2>/dev/null | tr -d '\r' | head -1)
         [ -n "$out" ] && break
         i=$((i + 1)); sleep 2
     done
     [ -n "$out" ] || die "no compositor output on $machine.
-    Check:  ssh $MACH_SSH 'tail -30 /tmp/wk-weston.log; journalctl -u weston -n 20'"
+    Check:  ssh $(image_addr) 'tail -30 /tmp/wk-weston.log; journalctl -u weston -n 20'"
     log "  session     $PI_SESSION, $PI_RENDERER renderer ($out)"
     [ "$PI_RENDERER" = pixman ] && warn "compositing is on the CPU, so this number is not comparable with a
   run on real display hardware. It proves the path, which is what it is for."
 
     # The seat, once, and left running for the whole session: cog aborts at
     # startup with no input seat (assertion: display->seat_default).
-    if ! m_ssh 'pgrep -f wk-bench-seat >/dev/null' 2>/dev/null; then
-        m_ssh "setsid python3 -c $(sh_quote "$PI_SEAT_PY") </dev/null >/tmp/wk-seat.log 2>&1 & sleep 2" >/dev/null 2>&1 || true
+    if ! i_ssh 'pgrep -f wk-bench-seat >/dev/null' 2>/dev/null; then
+        i_ssh "setsid python3 -c $(sh_quote "$PI_SEAT_PY") </dev/null >/tmp/wk-seat.log 2>&1 & sleep 2" >/dev/null 2>&1 || true
     fi
-    m_ssh 'pgrep -f "signal.pause|wk-bench-seat" >/dev/null' 2>/dev/null \
+    i_ssh 'pgrep -f "signal.pause|wk-bench-seat" >/dev/null' 2>/dev/null \
         && log "  input seat  up" \
         || warn "no fake input seat -- cog asserts at startup without one; the run may abort"
 }
@@ -439,7 +439,7 @@ pi_kill_cmd() { # <slot.json>
 pi_bench_record() { # <out dir> <slot> <slot.json>
     local dir="$1" slot="$2" json="$3"
     local karch class software="" software_reason=""
-    karch=$(m_ssh 'uname -m' 2>/dev/null | tr -d '\r')
+    karch=$(i_ssh 'uname -m' 2>/dev/null | tr -d '\r')
     class=$(wkdata bench-class "$plan")
     if [ "$PI_RENDERER" = pixman ]; then
         software=1; software_reason="no display attached; weston rdp + pixman"
@@ -513,8 +513,8 @@ cmd_bench() {
     # measures a desktop with a browser on it, a different thing wearing the
     # same number. The evidence is the image's own marker.
     local sysid probe rootdev kind builder
-    probe=$(m_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') \
-        || die "cannot reach $machine ($MACH_SSH) over ssh."
+    probe=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') \
+        || die "cannot reach $machine's bench system ($(image_addr)) over ssh."
     sysid=$(kv_get id <<<"$probe")
     rootdev=$(kv_get rootdev <<<"$probe")
     builder=$(kv_get builder <<<"$probe")
@@ -555,14 +555,14 @@ cmd_bench() {
     local _s _need="$slot"
     [ -z "$ab" ] || _need="${ab%%,*} ${ab##*,}"
     for _s in $_need; do
-        m_ssh "cat $(sh_quote "$(pi_slot_dir "$_s")/slot.json")" > "$PI_TMP/slot-$_s.json" 2>/dev/null \
+        i_ssh "cat $(sh_quote "$(pi_slot_dir "$_s")/slot.json")" > "$PI_TMP/slot-$_s.json" 2>/dev/null \
             && [ -s "$PI_TMP/slot-$_s.json" ] \
             || die "$machine has no slot '$_s' ($(pi_slot_dir "$_s")).
     The image is the runtime and a slot is what is measured; deploy one:
         wk pi deploy <image-profile|yocto-workspace> $machine --slot $_s"
     done
     if [ -n "$cores" ]; then
-        m_ssh 'command -v taskset >/dev/null' 2>/dev/null \
+        i_ssh 'command -v taskset >/dev/null' 2>/dev/null \
             || die "--cores: the image on $machine has no taskset, so the browser cannot be
     pinned there. That is the image's business (util-linux's schedutils in the
     defconfig), not something to approximate here."
@@ -571,9 +571,9 @@ cmd_bench() {
     # 3. Provenance, gathered before the run rather than reconstructed after.
     # The governor is pinned first: an unpinned score is a temperature reading.
     local kernel gov throttled root_dev
-    kernel=$(m_ssh 'uname -r' 2>/dev/null | tr -d '\r')
+    kernel=$(i_ssh 'uname -r' 2>/dev/null | tr -d '\r')
     gov=$(pi_pin_governor)
-    throttled=$(m_ssh 'vcgencmd get_throttled 2>/dev/null' 2>/dev/null | tr -d '\r')
+    throttled=$(i_ssh 'vcgencmd get_throttled 2>/dev/null' 2>/dev/null | tr -d '\r')
     root_dev="$rootdev"
     log "$machine: $sysid (builder $builder)"
     log "  kernel      $kernel"
@@ -582,7 +582,17 @@ cmd_bench() {
     log "  governor    ${gov:-unknown}$([ "$gov" = performance ] || echo '   <-- not pinned; the score is not a perf result')"
     log "  throttled   ${throttled:-unknown}$(case "$throttled" in ''|throttled=0x0) ;; *) echo '   <-- non-zero: thermally or voltage limited' ;; esac)"
 
-    # 4. The runner here, the payload pinned, the tunnel up.
+    # 4. Claim the board: a run here can run well past IMG_WATCHDOG seconds
+    # (cmd/sysimage), and the image's self-return watchdog reboots the board
+    # out from under anything not holding this marker (the same one `wk boot
+    # --keep` writes, cmd/boot) -- so this run claims it too, or it is a
+    # benchmark the board can rip apart mid-run.
+    i_ssh 'mkdir -p /run && touch /run/wk-keep-running' \
+        || die "could not claim $machine's bench system (mkdir/touch /run/wk-keep-running failed).
+    Without the claim, the image's self-return watchdog reboots the board
+    mid-run; a run that long is wasted rather than measured."
+
+    # 5. The runner here, the payload pinned, the tunnel up.
     bench_runner_tree
     log "  runner      run-benchmark @ ${BENCH_RUNNER_SHA:0:12} ($BENCH_RUNNER)"
     PI_SEEDED=$(seed_payload "$plan")
@@ -598,13 +608,13 @@ cmd_bench() {
 $(sed 's/^/    /' "$PI_TMP/tunnel.log")"
     log "  tunnel      127.0.0.1:$port on $machine -> run-benchmark here"
 
-    # 5. The session, once for every run: bringing it down and up between the
+    # 6. The session, once for every run: bringing it down and up between the
     # halves of an A/B would put a fresh compositor and page cache on one
     # side only.
     info "bringing up the session on $machine"
     pi_session_up "$builder" "$PI_DISPLAY"
 
-    # 6. The run(s). One slot, or two alternated.
+    # 7. The run(s). One slot, or two alternated.
     if [ -n "$ab" ]; then
         pi_bench_ab "$ab" "$rounds"
         return $?
@@ -751,28 +761,28 @@ pi_bench_ab() {
 # that go with it: no lane here boots over the network, and a board carrying
 # either one would spend every boot on a source nothing answers -- benign, but
 # a stale fact that reads as a live one.
-
+#
+# The rule: whichever medium the board's bench system boots from tries
+# first, and the other medium -- the rescue role -- stays behind it. A medium
+# with no bootable filesystem is skipped and the board lands on its rescue
+# image, reachable, with no one in the room; firmware that gets as far as
+# start4.elf and no further **halts** instead, and a halted board needs a
+# person. `usb-first`/`sd-first` name which medium leads; `local` is the
+# revert, network removed and nothing else moved.
 boot_order_without_net() {
     local order="${1#0x}"
     printf '0x%s' "$(printf '%s' "$order" | sed 's/2//g')"
 }
 
-# USB first, then whatever else was there -- the local-boot lane.
-# `0xf412 -> 0xf14`. USB moves to the front because the default order tries
-# the SD card first: an image written to the stick would otherwise never
-# boot, with a board that looks perfectly normal on the wrong root.
-#
-# The SD card staying *behind* USB is the whole safety property: a stick with
-# no bootable filesystem is skipped and the board lands on its rescue image,
-# reachable, with no one in the room -- firmware that gets as far as
-# start4.elf and no further **halts** instead, and a halted board needs a
-# person. Derived from the current order rather than a constant, so an entry
-# this does not know about (6 is NVMe on a Pi 5) keeps it.
-boot_order_usb_first() {
-    local order="${1#0x}"
-    order=$(printf '%s' "$order" | sed 's/2//g')
-    order=$(printf '%s' "$order" | sed 's/4//g')
-    printf '0x%s4' "$order"
+# <order> <nibble>: that nibble moved to the front, network stripped, every
+# other nibble left in place -- `usb-first` is `boot_order_first "$order" 4`,
+# `sd-first` is `boot_order_first "$order" 1`. `0xf412 4 -> 0xf14`. Derived
+# from the current order rather than a constant, so an entry this does not
+# know about (6 is NVMe on a Pi 5) keeps it.
+boot_order_first() {
+    local order="${1#0x}" nibble="$2"
+    order=$(printf '%s' "$order" | sed "s/2//g; s/$nibble//g")
+    printf '0x%s%s' "$order" "$nibble"
 }
 
 # One writer. BOOT_ORDER is firmware state shared by every mode a machine
@@ -785,8 +795,8 @@ cmd_boot_order() {
         case "$1" in
             --dry-run)   dry=1 ;;
             --revert)    revert=1 ;;
-            -*) die "usage: wk pi boot-order <ssh-host> <order> [--revert] [--dry-run]; unknown option: $1; see wk pi -h" ;;
-            *)  die "usage: wk pi boot-order <ssh-host> <order> [--revert] [--dry-run]; unexpected argument: $1; see wk pi -h" ;;
+            -*) die "usage: wk pi boot-order <ssh-host> <usb-first|sd-first|local> [--revert] [--dry-run]; unknown option: $1; see wk pi -h" ;;
+            *)  die "usage: wk pi boot-order <ssh-host> <usb-first|sd-first|local> [--revert] [--dry-run]; unexpected argument: $1; see wk pi -h" ;;
         esac
         shift
     done
@@ -797,9 +807,15 @@ cmd_boot_order() {
         else
             # The order defaults from what the fleet says this machine is,
             # not from a flag the caller has to remember: getting it wrong on
-            # a workstation costs a trip to the device.
+            # a workstation costs a trip to the device. A bench-device's
+            # default follows its bench medium's own transport (MACH_DEVICE,
+            # disk_tran_of_name -- boot/disk.sh): whichever medium the bench
+            # system boots from is the one the firmware should try first.
             if machine_by_ssh "$HOST" && [ "${MACH_ROLE:-workstation}" = bench-device ]; then
-                order_name=usb-first
+                case "$(disk_tran_of_name "${MACH_DEVICE:-}")" in
+                    mmc) order_name=sd-first ;;
+                    *)   order_name=usb-first ;;
+                esac
             else
                 order_name=local
             fi
@@ -807,11 +823,13 @@ cmd_boot_order() {
     fi
 
     case "$order_name" in
-        usb-first|local) ;;
+        usb-first|sd-first|local) ;;
         *) die "no such boot order '$order_name'.
     orders:
-      usb-first      USB, then the SD card -- the local-boot lane, where the
-                     stick carries the system and the card is the rescue role
+      usb-first      the USB stick first, then the SD card -- for a bench
+                     system on the stick, with the card as the rescue role
+      sd-first       the SD card first, then the USB stick -- for a bench
+                     system on the card, with the stick as the rescue role
       local          the local disks only, network removed" ;;
     esac
 
@@ -851,7 +869,8 @@ cmd_boot_order() {
 
     case "$order_name" in
         local)     want=$(boot_order_without_net "$order") ;;
-        usb-first) want=$(boot_order_usb_first "$order") ;;
+        usb-first) want=$(boot_order_first "$order" 4) ;;
+        sd-first)  want=$(boot_order_first "$order" 1) ;;
     esac
     new=$(printf '%s\n' "$stripped" | sed "s|^BOOT_ORDER=.*|BOOT_ORDER=$want|")
 

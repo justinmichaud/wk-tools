@@ -687,7 +687,7 @@ printf 'name=%s ssh=%s role=%s driver=%s\n' \
         )
 
     def test_a_medium_armed_board_gets_its_drivers_self_disarm(self):
-        # rpi4 arms its stick (pi-usb, BOOT_ARMING=medium), so its image parks
+        # rpi4 arms its SD card (pi-mbr, BOOT_ARMING=medium), so its image parks
         # it on first boot; rpi3's card swap is hands-on and parks nothing.
         cp = self._sh('_self_disarm_for rpi4')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)

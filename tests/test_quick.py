@@ -448,7 +448,7 @@ dir_names=$(ls "{REPO}"/boot/machines/*.conf 2>/dev/null | xargs -n1 basename 2>
             self.skipTest("no driver defines b_self_disarm_sh")
         self.assertEqual(bad, [], "; ".join(bad))
 
-    def test_piusb_type_byte_roundtrips(self):
+    def test_pimbr_type_byte_roundtrips(self):
         """one byte of the MBR at offset 450"""
         img = self.tmp / "mbr.img"
         with open(img, "wb") as f:
@@ -461,7 +461,7 @@ dir_names=$(ls "{REPO}"/boot/machines/*.conf 2>/dev/null | xargs -n1 basename 2>
             f.seek(450)
             f.write(bytes([0x0C]))
 
-        cp = bash(f'MACH_DEVICE=/dev/null; . "{REPO}/boot/pi-usb.sh"; echo "$PIUSB_TYPE_OFFSET"')
+        cp = bash(f'MACH_DEVICE=/dev/null; . "{REPO}/boot/pi-mbr.sh"; echo "$PIMBR_TYPE_OFFSET"')
         offset = cp.stdout.strip()
         self.assertEqual(offset, "450", f"offset is {offset}, not 450")
 
@@ -971,7 +971,8 @@ set -euo pipefail
 . "{REPO}/boot/machines.sh"
 bad=""
 machine_load rpi4 || {{ echo "no rpi4 machine conf"; exit 1; }}
-for pair in "/dev/sda2 bench" "/dev/mmcblk0p2 base" " unknown"; do
+# rpi4: the bench system on the SD card, the rescue on the stick (boot/machines/rpi4.conf)
+for pair in "/dev/mmcblk0p2 bench" "/dev/sda2 base" " unknown"; do
     set -- $pair
     got=$(b_system_kind "${{2:+$1}}")
     [ "$got" = "${{2:-$1}}" ] || bad="$bad rpi4:${{1:-none}}=$got"
