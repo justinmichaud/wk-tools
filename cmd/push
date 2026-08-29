@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # wk push on|off|status -- whether a workspace can push to git at all
-# wk: where=host name=none group=sources
+# wk: where=store name=none group=sources
 # wk: readonly status
+# wk: flag --all,--target where=local
 #
 # The rule this implements, from docs/HANDOFF-sandboxing.md: only the person at
 # the keyboard pushes. An agent in a workspace must not be able to publish
@@ -64,18 +65,35 @@ done
 
 # A build machine keeps its own key under its own wk root, so the switch has
 # to be thrown *there*: the machine answers for itself by running this same
-# file, exactly as `wk sudo` does.
+# file, exactly as `wk sudo` does. The fan-out runs on the workstation and
+# nowhere else -- it needs the target confs and the ssh reach to the fleet --
+# which is what the `flag --all,--target where=local` declaration says.
 if [ -n "$TARGET" ]; then
+    _row() { sed "s/^/$(printf '%-22s' "$1")/"; }
+
     _one() {
         local t="$1" rc=0 out
         load_target "$t"
         machine_answers "$t" || return 1
         out=$(t_wk push "$ACTION" 2>&1) || rc=$?
-        printf '%s\n' "$out" | sed "s/^/$(printf '%-22s' "$t")/"
+        printf '%s\n' "$out" | _row "$t"
         return "$rc"
     }
+
+    # This machine holds a store too, and for_each_machine walks only the
+    # others -- so `--all` asks this one through its own `wk`, which is the
+    # hop that reaches the podman VM on a macOS workstation.
+    _here() {
+        local rc=0 out
+        out=$("$WK_ROOT/wk" push "$ACTION" 2>&1) || rc=$?
+        printf '%s\n' "$out" | _row "$(wk_machine_name)"
+        return "$rc"
+    }
+
     if [ "$TARGET" = --all ]; then
-        rc=0; for_each_machine _one || rc=$?
+        rc=0; _here || rc=$?
+        fan=0; for_each_machine _one || fan=$?
+        [ "$fan" -gt "$rc" ] && rc="$fan"
         exit "$rc"
     fi
     _one "$TARGET"
@@ -145,8 +163,14 @@ private_keys_in() {
     done
 }
 
+# The count comes back in MOVED rather than on stdout. Neither errexit nor a
+# `die` crosses a command substitution -- it is a subshell, and the assignment
+# takes its status -- so a store this machine could not even create still
+# reported "push is already OFF" about keys nothing had looked for.
+MOVED=0
 move_keys() {
-    local from="$1" to="$2" f b moved=0
+    local from="$1" to="$2" f b
+    MOVED=0
     ensure_dir "$to" 0700 >/dev/null
     while read -r f; do
         [ -n "$f" ] || continue
@@ -156,16 +180,15 @@ move_keys() {
         # The public half goes with it: ssh will offer a public key it finds
         # beside IdentityFile even without the private half.
         [ -f "$from/$b.pub" ] && mv "$from/$b.pub" "$to/$b.pub"
-        moved=$((moved + 1))
+        MOVED=$((MOVED + 1))
     done <<EOF
 $(private_keys_in "$from")
 EOF
-    echo "$moved"
 }
 
 case "$ACTION" in
 on)
-    n=$(move_keys "$HELD" "$LIVE")
+    move_keys "$HELD" "$LIVE"; n="$MOVED"
     # Idempotent, and it says which of the two it was: a switch that reports
     # "on" whether or not it did anything is a switch you have to verify by
     # hand afterwards.
@@ -183,7 +206,7 @@ on)
     ;;
 
 off)
-    n=$(move_keys "$LIVE" "$HELD")
+    move_keys "$LIVE" "$HELD"; n="$MOVED"
     purge_copies
     if [ "$n" -gt 0 ]; then
         changed "push is OFF -- $n deploy key(s) held in $HELD"

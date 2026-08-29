@@ -12,7 +12,7 @@ import unittest
 
 from tests.support import REPO, WK, WkTest, run
 
-VALID_WHERE = ("host", "local", "workspace", "dynamic")
+VALID_WHERE = ("host", "store", "local", "workspace", "dynamic")
 
 
 class TestDeclarations(WkTest):

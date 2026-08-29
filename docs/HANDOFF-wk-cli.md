@@ -57,10 +57,12 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 
 ## Everything else still unticked
 
+- [ ] audit the name `store`: `$WK_STORE` holds `ws/`, `git/WebKit.git`, `base/`, `secrets/`, `push-keys/`, `cache/`, `bench/`, `skills/`, `vm/`, and only the mirror is WebKit's -- decide what each part is called before a second project needs a name [needs a decision]
 - [ ] `wk backup` → `./setup` round-trip (`docs/HANDOFF-settings-audit.md`) [needs a machine to reprovision]
 - [ ] `wk skills` status/diff/pull/push; pull refuses over uncommitted repo edits [needs a workspace]
 - [ ] the skills are workspace-true: an agent started by `wk claude` in a container and in a macOS guest can follow every skill it can trigger without hitting a host-only instruction [needs a container and a macOS VM]
 - [ ] `wk key register` / `wk key check`, confirmed end to end [needs a workspace]
+- [ ] `wk key` reaches the store through its own `in_vm` (cmd/key) rather than the dispatcher's `where=store`; one hop into the podman VM, not two [needs the podman VM]
 - [ ] `wk enter <ws>` lands in a shell; `wk enter <ws> <cmd>` runs the command [needs a workspace]
 - [ ] `wk status <ws> --wait` blocks while busy and reports once when not, same exit code as a bare `wk status`; `--timeout S` stops waiting and says so without claiming the work stopped [needs a workspace]
 - [ ] `wk logs <ws> -f` follows a live build [needs a workspace]
@@ -83,4 +85,4 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] `wk disk` inside a workspace answers the only version of the question available in there; `wk disk` with the podman machine stopped leaves it stopped [needs a workspace]
 - [ ] `wk vm base --rm` deletes the golden base, then asks separately about the pulled OCI image, and existing vm workspaces keep working [needs a macOS VM]
 - [ ] `wk new <name> --target <peer>` and `wk rm` of a peer's workspace refuse here and name the command to run over there — every other workspace command is handed to the peer, so these two are the remaining pair a person has to type on the other machine [needs a peer]
-- [ ] every command under `cmd/` declares itself to the dispatcher: line 3 is a one-line `# wk <name> <args> -- <summary>` synopsis, and a `# wk:` line in the first 15 lines names `where=` (one of `host|local|workspace|dynamic`) and `group=` [needs a test]
+- [ ] every command under `cmd/` declares itself to the dispatcher: line 3 is a one-line `# wk <name> <args> -- <summary>` synopsis, and a `# wk:` line in the first 15 lines names `where=` (one of `host|store|local|workspace|dynamic`) and `group=` [needs a test]

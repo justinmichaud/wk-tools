@@ -137,13 +137,18 @@ write_file() {
 }
 
 # ensure_dir <path> [mode]
+#
+# Both steps are checked rather than left to errexit: a caller inside `$( )`
+# has none -- bash gives the assignment the substitution's status and carries
+# on -- and "==> create /var/lib/wk/push-keys" after `mkdir: Permission
+# denied` is a claim about a directory that does not exist.
 ensure_dir() {
     local d="$1" mode="${2:-0755}"
     if [ -d "$d" ]; then
         unchanged "dir $d"
     else
-        mkdir -p "$d"
-        chmod "$mode" "$d"
+        mkdir -p "$d" || die "cannot create $d"
+        chmod "$mode" "$d" || die "cannot set mode $mode on $d"
         changed "create $d"
     fi
 }

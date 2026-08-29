@@ -57,8 +57,12 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 # Line 2 of cmd/<name> is its synopsis:   # wk <name> <args> -- <summary>
 # and one or more `# wk:` lines in the first 15 lines declare its shape:
 #
-#   where=host       this workstation's store or hardware; never forwarded,
+#   where=host       this workstation's own hardware; never forwarded,
 #                    refused inside a workspace and on a shared build host
+#   where=store      acts on the store, and runs on the machine that holds it:
+#                    forwarded into the podman VM on a macOS workstation,
+#                    run here on a Linux workstation and on a build machine
+#                    (each holds its own). Refused inside a workspace.
 #   where=local      runs wherever it is invoked; never forwarded
 #   where=workspace  acts on a workspace: the name is resolved here, the
 #                    target decides where it runs
@@ -363,7 +367,8 @@ explain_cmd() { # <cmd> <impl>
         printf '  changes things: yes\n'
     fi
     case "$D_WHERE" in
-        host)  printf "  runs on: this host's own store or hardware; refused inside a workspace and on a build machine\n" ;;
+        host)  printf "  runs on: this host's own hardware; refused inside a workspace and on a build machine\n" ;;
+        store) printf "  runs on: the machine holding the store -- the podman VM on macOS, this machine otherwise; refused inside a workspace\n" ;;
         local) printf '  runs on: this machine, never forwarded\n' ;;
         *)     if [ -n "$D_HERE" ]; then
                    printf '  runs on: the machine you type it on -- it needs this device'"'"'s editor\n'
@@ -775,7 +780,7 @@ main() {
 
     # A host command inside a workspace or on a shared build host acts on a
     # store that is not here.
-    if in_workspace && { [ "$where" = host ] || [ -n "$D_OUTSIDE" ]; } && ! in_list "${1:-}" "$D_BROKER"; then
+    if in_workspace && { [ "$where" = host ] || [ "$where" = store ] || [ -n "$D_OUTSIDE" ]; } && ! in_list "${1:-}" "$D_BROKER"; then
         if [ -n "$D_OUTSIDE" ]; then
             die "'wk $cmd' acts on a host, and this is workspace '$(wk_self)'.
     From the host:  wk $cmd $(wk_self)"
@@ -817,6 +822,16 @@ main() {
     { [ "$where" = workspace ] && is_macos && [ -z "${WK_IN_VM:-}" ] && ! in_workspace \
         && [ "$D_FORWARD" = yes ] && [ "$(resolve_target "$@")" = container ]; } \
         || [ -n "$delegate" ] || check_needs "$cmd" "${1:-}"
+
+    # A store command on a macOS workstation acts on /var/lib/wk inside the
+    # podman VM, which this side can neither create nor read. Forwarded rather
+    # than attempted: attempting it is `mkdir: /var/lib/wk: Permission denied`
+    # followed by a report about a store nobody looked at (lib/store.sh's
+    # store_is_local says the same thing from the other end).
+    if [ "$where" = store ] && [ -z "${WK_IN_VM:-}" ]; then
+        command -v store_is_local >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+        store_is_local || forward_to_vm "$cmd" "$@"
+    fi
 
     [ "$where" = workspace ] || exec "$impl" "$@"
 
