@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# The one-shot revert for a system armed as a board's *second system* (the
+# rpi3: rescue on partitions 1-2 of one card, this system on 3-4; wk-card-priv
+# second-arm). Arming put this system's config.txt in the card's boot
+# partition with an os_prefix line, keeping the rescue's own as
+# config.txt.rescue; putting that back is what makes the next boot the
+# rescue's again. Runs before anything else, so a system that gets no
+# further than init has still handed the board back. On a system with its
+# own medium there is no config.txt.rescue and this does nothing.
+#
+# BusyBox sh, no systemd: the same job the yocto images' units do.
+
+case "$1" in
+    start) ;;
+    *) exit 0 ;;
+esac
+
+# The boot partition is partition 1 of the disk this root is on.
+root=$(awk '$2 == "/" { print $1; exit }' /proc/mounts)
+case "$root" in
+    /dev/root) root=$(sed -n 's/.*[ ]root=\([^ ]*\).*/\1/p' /proc/cmdline | head -1) ;;
+esac
+case "$root" in
+    PARTUUID=*) root=$(readlink -f "/dev/disk/by-partuuid/${root#PARTUUID=}" 2>/dev/null) ;;
+esac
+case "$root" in
+    /dev/mmcblk*p[0-9]*) boot="${root%p[0-9]*}p1" ;;
+    /dev/sd*[0-9])       boot="${root%[0-9]*}1" ;;
+    *) exit 0 ;;
+esac
+[ -b "$boot" ] || exit 0
+
+m=/run/wk-boot
+mkdir -p "$m"
+mount -t vfat "$boot" "$m" 2>/dev/null || exit 0
+if [ -f "$m/config.txt.rescue" ]; then
+    mv "$m/config.txt.rescue" "$m/config.txt" && sync \
+        && echo "wk-disarm: this boot was the one; the rescue's config.txt is back"
+fi
+umount "$m"
+exit 0

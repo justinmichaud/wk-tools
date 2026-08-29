@@ -98,6 +98,11 @@ install -m 0755 \
     "$STAGE/usr/sbin/wk-tailnet-join"
 install -m 0755 "$WK_ROOT/image/buildroot/overlay/etc/init.d/S99tailscale" \
     "$STAGE/etc/init.d/S99tailscale"
+# The one-shot revert a second system runs on its first boot (wk-card-priv
+# second-arm): the BusyBox half of what the yocto images' self-disarm unit
+# does. Rides in this overlay since every fleet image carries it.
+install -m 0755 "$WK_ROOT/image/buildroot/overlay/etc/init.d/S00wk-disarm" \
+    "$STAGE/etc/init.d/S00wk-disarm"
 
 info "overlay ready: $(du -sh "$STAGE" | cut -f1), tailscale $VER ($TS_ARCH)"
 log  "  point the build at it:  BR2_ROOTFS_OVERLAY=\"$STAGE\""

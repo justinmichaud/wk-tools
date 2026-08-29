@@ -26,6 +26,13 @@
 #     swap's, and the kernel command line's root=. On the fleet's Pis the
 #     system disk *is* an SD card or USB stick, so the transport check
 #     alone would happily overwrite the running machine.
+#     The one carve-out is a *second system* on that very disk
+#     (`<device>@second`): a board with one medium (the rpi3) keeps its
+#     rescue on partitions 1-2 and a bench system on 3-4 of the same card.
+#     Under @second every verb addresses partitions 3 and 4 only, the image
+#     is split into them rather than written over the disk, the disk
+#     identity is never touched, and arming is one line in the rescue's
+#     config.txt (os_prefix) that the bench system removes on its first boot.
 #   - A disk with anything mounted from it is refused: a card in use is a
 #     card somebody is using.
 #   - Nothing is read from the environment; sudo's env_reset plus the
@@ -81,8 +88,17 @@ booted_disks() {
 # <device> -- returns the validated device path, or refuses. Ordered
 # cheapest-first, but every check runs before anything is written: this is
 # the whole security argument for the sudoers rule.
-gate() { # <device> [allow-mounted]
+# Which two partitions a verb addresses: the disk's own system (1 and 2), or
+# the second system beside it (3 and 4, `<device>@second`). Set by gate.
+BOOTP=1; ROOTP=2; SECOND=""
+
+gate() { # <device>[@second] [allow-mounted]
     local dev="${1:-}" allow_mounted="${2:-}" type tran name booted mounted
+    BOOTP=1; ROOTP=2; SECOND=""
+    case "$dev" in
+        *@second) dev="${dev%@second}"; SECOND=1; BOOTP=3; ROOTP=4 ;;
+        *@*) deny "'$dev' names a system this helper does not know; only '@second' is one" ;;
+    esac
 
     case "$dev" in
         /dev/*) ;;
@@ -111,10 +127,22 @@ EOF
 
     name=$(basename "$dev")
     booted=$(booted_disks)
+    if [ -n "$SECOND" ]; then
+        # The second system lives beside this machine's own: the disk must be
+        # the one it runs from, and partitions 1-2 (the rescue) are never
+        # addressed under @second.
+        printf '%s\n' "$booted" | grep -qx "$name" \
+            || deny "'$dev@second' is for the disk this machine runs from -- a second system
+    beside its own -- and $dev is not that disk. A disk this machine does not
+    run from takes a whole image: write it without @second."
+        printf '%s' "$dev"
+        return 0
+    fi
     if printf '%s\n' "$booted" | grep -qx "$name"; then
         deny "'$dev' is a disk this machine is running from (/, /boot, swap or
     the kernel's root=). On these boards the system disk is itself an SD card or
-    a USB stick, so being removable is no protection at all."
+    a USB stick, so being removable is no protection at all. A second system
+    beside this one is '$dev@second'."
     fi
 
     # Skipped for exactly one verb -- `unmount`, whose whole purpose is to end
@@ -192,6 +220,10 @@ v_check() {
 # this safe is *where* it can go, which the gate has already settled.
 v_write() {
     local dev; dev=$(gate "${1:-}")
+    if [ -n "$SECOND" ]; then
+        _second_write "$dev"
+        return $?
+    fi
     say "writing to $dev"
     dd of="$dev" bs=4M conv=fsync status=none
     sync
@@ -255,7 +287,7 @@ v_fleet() {
         id=*) ;;
         *) deny "a marker starts with id=" ;;
     esac
-    with_mount "$(part "$dev" 2)" _fleet_edit "$marker" "$key"
+    with_mount "$(part "$dev" "$ROOTP")" _fleet_edit "$marker" "$key"
     say "identity marker and driving key installed on $dev"
 }
 
@@ -299,7 +331,7 @@ _whose_probe() { # <mountpoint>
 # here would go stale the first time somebody swaps a stick.
 v_whose() {
     local dev; dev=$(gate "${1:-}")
-    with_mount -r "$(part "$dev" 2)" _whose_probe
+    with_mount -r "$(part "$dev" "$ROOTP")" _whose_probe
 }
 
 _joins_probe() { # <mountpoint>
@@ -314,7 +346,7 @@ _joins_probe() { # <mountpoint>
 # fleet's credential read and sent here for a disk with nothing to spend it.
 v_joins() {
     local dev; dev=$(gate "${1:-}")
-    with_mount -r "$(part "$dev" 2)" _joins_probe
+    with_mount -r "$(part "$dev" "$ROOTP")" _joins_probe
 }
 
 # tailnet <device> <hostname> <tag>   -- the auth key arrives on stdin.
@@ -331,7 +363,7 @@ v_tailnet() {
     cat > "$tmp"
     grep -q '^tskey-' "$tmp" || { rm -f "$tmp"; deny "that is not a tailscale auth key"; }
     rc=0
-    with_mount "$(part "$dev" 2)" _tailnet_edit "$host" "$tag" "$tmp" || rc=$?
+    with_mount "$(part "$dev" "$ROOTP")" _tailnet_edit "$host" "$tag" "$tmp" || rc=$?
     rm -f "$tmp"
     [ "$rc" -eq 0 ] && say "tailnet identity seeded on $dev (joins as $host, $tag)"
     return "$rc"
@@ -347,7 +379,7 @@ _wifi_joins_probe() { # <mountpoint>
 # at all.
 v_wifi_joins() {
     local dev; dev=$(gate "${1:-}")
-    with_mount -r "$(part "$dev" 2)" _wifi_joins_probe
+    with_mount -r "$(part "$dev" "$ROOTP")" _wifi_joins_probe
 }
 
 # A value that has to sit inside a double-quoted wpa_supplicant string,
@@ -443,7 +475,7 @@ v_wifi_from_host() {
     check_wifi_value "the SSID" "$ssid"
     check_wifi_value "the passphrase" "$psk"
     rc=0
-    with_mount "$(part "$dev" 2)" _wifi_edit "$ssid" "$psk" || rc=$?
+    with_mount "$(part "$dev" "$ROOTP")" _wifi_edit "$ssid" "$psk" || rc=$?
     [ "$rc" -eq 0 ] && say "WiFi credentials seeded on $dev (ssid=$ssid)"
     return "$rc"
 }
@@ -484,11 +516,13 @@ _id_edit() { # <mountpoint> <old> <new>
 v_identity() {
     local dev old new
     dev=$(gate "${1:-}")
+    [ -z "$SECOND" ] || deny "the disk identity belongs to the system this machine runs from;
+    a second system takes its PARTUUIDs from it (retarget) and never changes it"
     check_hex "${2:-}"; check_hex "${3:-}"
     old="$2"; new="$3"
     sfdisk --disk-id "$dev" "0x$new" >/dev/null
-    with_mount "$(part "$dev" 1)" _id_edit "$old" "$new"
-    with_mount "$(part "$dev" 2)" _id_edit "$old" "$new"
+    with_mount "$(part "$dev" "$BOOTP")" _id_edit "$old" "$new"
+    with_mount "$(part "$dev" "$ROOTP")" _id_edit "$old" "$new"
     say "$dev now has disk identity 0x$new"
 }
 
@@ -568,7 +602,7 @@ v_role() {
         bench|rescue) ;;
         *) deny "'$role' is not a role -- it is 'bench' or 'rescue'" ;;
     esac
-    with_mount "$(part "$dev" 2)" _role_edit "$role"
+    with_mount "$(part "$dev" "$ROOTP")" _role_edit "$role"
     say "$dev is a $role system"
 }
 
@@ -674,7 +708,7 @@ _root_spec_probe() { # <mountpoint>
 # what the card boots from is written into the card.
 v_root_spec() {
     local dev; dev=$(gate "${1:-}")
-    with_mount -r "$(part "$dev" 1)" _root_spec_probe
+    with_mount -r "$(part "$dev" "$BOOTP")" _root_spec_probe
 }
 
 _retarget_boot() { # <mountpoint> <partuuid of partition 2>
@@ -738,10 +772,10 @@ v_retarget() {
     case "$sig" in
         ''|*[!0-9a-fA-F]*) deny "'$dev' has no MBR disk signature, so a PARTUUID cannot name its partitions" ;;
     esac
-    root=$(printf '%08x-%02d' "$((0x$sig))" 2)
-    boot=$(printf '%08x-%02d' "$((0x$sig))" 1)
-    with_mount "$(part "$dev" 1)" _retarget_boot "$root"
-    with_mount "$(part "$dev" 2)" _retarget_fstab "$boot" "$root"
+    root=$(printf '%08x-%02d' "$((0x$sig))" "$ROOTP")
+    boot=$(printf '%08x-%02d' "$((0x$sig))" "$BOOTP")
+    with_mount "$(part "$dev" "$BOOTP")" _retarget_boot "$root"
+    with_mount "$(part "$dev" "$ROOTP")" _retarget_fstab "$boot" "$root"
     say "$dev boots by PARTUUID=$root now, whatever device it is in"
 }
 
@@ -772,7 +806,7 @@ v_cmdline_append() {
     case "$add" in
         *$'\n'*) deny "a kernel command line is one line" ;;
     esac
-    with_mount "$(part "$dev" 1)" _cmdline_append_edit "$add"
+    with_mount "$(part "$dev" "$BOOTP")" _cmdline_append_edit "$add"
     say "kernel cmdline on $dev += $add"
 }
 
@@ -806,7 +840,7 @@ v_config_append() {
         *) deny "a config.txt block starts with its own '# --- wk sysimage: <profile> ---' line,
     which is what makes appending it twice a no-op" ;;
     esac
-    with_mount "$(part "$dev" 1)" _config_append_edit "$block" "$marker"
+    with_mount "$(part "$dev" "$BOOTP")" _config_append_edit "$block" "$marker"
     say "config.txt on $dev carries $marker"
 }
 
@@ -823,7 +857,7 @@ v_boot_id() {
     local dev
     dev=$(gate "${1:-}")
     check_name "${2:-}"
-    with_mount "$(part "$dev" 1)" _boot_id_edit "$2"
+    with_mount "$(part "$dev" "$BOOTP")" _boot_id_edit "$2"
     say "$dev's boot partition names this system $2"
 }
 
@@ -938,7 +972,7 @@ v_units() {
     rm -f "$tmp"
     _units_unpacked "$work"
     rc=0
-    with_mount "$(part "$dev" 2)" _units_edit "$work" || rc=$?
+    with_mount "$(part "$dev" "$ROOTP")" _units_edit "$work" || rc=$?
     rm -rf "$work"
     return "$rc"
 }
@@ -960,9 +994,157 @@ v_boot_check() {
     machine. It is boot/check-boot-files.py from wk-tools, installed root-owned
     beside this helper -- root runs it, so it cannot be a path a caller names.
     Remedy, from a terminal on this machine:  ./setup --stage quiesce"
-    with_mount -r "$(part "$dev" 1)" _boot_check_run "$2" || rc=$?
+    with_mount -r "$(part "$dev" "$BOOTP")" _boot_check_run "$2" || rc=$?
     [ "$rc" -eq 0 ] || fail "this card's boot partition is missing files a $2 board's firmware asks for"
     say "boot-check: every file the firmware asks for resolves"
+}
+
+# --- a second system beside this machine's own (@second) ---------------------
+# The image on stdin is a whole card (MBR, boot FAT as partition 1, root as
+# partition 2). It goes into partitions 3 and 4 of the disk this machine runs
+# from: partitions made once, 3 sized to the image's boot partition and 4
+# taking the rest of the disk; then the two partition images are streamed in,
+# each hashed as it passes, and the hashes printed for the read-back check
+# (`verify` under @second re-reads the same two ranges). Python, since this
+# is byte-offset arithmetic on a partition table and a one-pass split of a
+# stream (CLAUDE.md: structured data is not handled in bash).
+_second_write() { # <disk>
+    python3 - "$1" <<'PY'
+import hashlib, json, os, subprocess, sys
+dev = sys.argv[1]
+def part(n): return dev + ("p%d" % n if dev[-1].isdigit() else "%d" % n)
+def say(m): print("wk-card-priv: " + m, flush=True)
+def fail(m): print("wk-card-priv: " + m, file=sys.stderr, flush=True); sys.exit(1)
+
+src = sys.stdin.buffer
+mbr = src.read(512)
+if len(mbr) != 512 or mbr[510:512] != b"\x55\xaa":
+    fail("the image does not start with an MBR")
+parts = []
+for i in range(4):
+    e = mbr[446 + 16 * i: 462 + 16 * i]
+    ptype, start, size = e[4], int.from_bytes(e[8:12], "little"), int.from_bytes(e[12:16], "little")
+    if ptype and size:
+        parts.append((start, size))
+if len(parts) != 2:
+    fail("the image carries %d partitions; a second system is a boot partition and a root" % len(parts))
+(b_start, b_size), (r_start, r_size) = parts
+if b_start >= r_start:
+    fail("the image's partitions are not boot-then-root in disk order")
+
+def table():
+    t = json.loads(subprocess.check_output(["sfdisk", "-J", dev]))["partitiontable"]
+    return {int(p["node"][len(dev):].lstrip("p")): p for p in t["partitions"]}
+have = table()
+if set(have) == {1, 2}:
+    last = have[2]["start"] + have[2]["size"]
+    script = "start=%d, size=%d, type=c\nstart=%d, type=83\n" % (last, b_size, last + b_size)
+    subprocess.run(["sfdisk", "--append", "--no-reread", dev], input=script.encode(), check=True,
+                   stdout=subprocess.DEVNULL)
+    subprocess.run(["partx", "-a", dev], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    have = table()
+    say("partitions 3 and 4 made beside the rescue's 1 and 2")
+if set(have) != {1, 2, 3, 4}:
+    fail("%s has partitions %s; a second system needs exactly 1-4" % (dev, sorted(have)))
+if have[3]["size"] < b_size or have[4]["size"] < r_size:
+    fail("the image's partitions (%d + %d sectors) do not fit partitions 3 and 4 (%d + %d)"
+         % (b_size, r_size, have[3]["size"], have[4]["size"]))
+
+pos = 512
+def copy(n_bytes, out_path, skip_to):
+    """Consume the stream up to byte skip_to, then copy n_bytes into out_path."""
+    global pos
+    while pos < skip_to:
+        chunk = src.read(min(1 << 20, skip_to - pos))
+        if not chunk:
+            fail("the image ended before the partition that goes to %s" % out_path)
+        pos += len(chunk)
+    h = hashlib.sha256(); left = n_bytes
+    with open(out_path, "wb") as out:
+        while left:
+            chunk = src.read(min(4 << 20, left))
+            if not chunk:
+                fail("the image ended inside the partition that goes to %s" % out_path)
+            out.write(chunk); h.update(chunk); left -= len(chunk); pos += len(chunk)
+        out.flush(); os.fsync(out.fileno())
+    return h.hexdigest()
+
+say("writing the image's boot partition to %s" % part(3))
+boot_sha = copy(b_size * 512, part(3), b_start * 512)
+say("writing the image's root partition to %s" % part(4))
+root_sha = copy(r_size * 512, part(4), r_start * 512)
+while src.read(1 << 20):
+    pass    # what follows the root partition in the image is padding
+os.sync()
+print("boot_bytes=%d" % (b_size * 512)); print("boot_sha=%s" % boot_sha)
+print("root_bytes=%d" % (r_size * 512)); print("root_sha=%s" % root_sha)
+say("written")
+PY
+}
+
+# `verify <disk>@second <boot bytes> <boot sha> <root bytes> <root sha>`
+v_second_verify() {
+    local dev got; dev=$(gate "${1:-}"); shift
+    for n in "${1:-}" "${3:-}"; do case "$n" in ''|*[!0-9]*) deny "'$n' is not a byte count" ;; esac; done
+    check_hex "${2:-}"; check_hex "${4:-}"
+    got=$(head -c "$1" "$(part "$dev" 3)" | sha256sum | cut -d' ' -f1)
+    [ "$got" = "$2" ] || fail "partition 3 reads back as $got, not the $2 that was written"
+    got=$(head -c "$3" "$(part "$dev" 4)" | sha256sum | cut -d' ' -f1)
+    [ "$got" = "$4" ] || fail "partition 4 reads back as $got, not the $4 that was written"
+    say "verified: partitions 3 and 4 hold the image's boot and root"
+}
+
+# Arming. The firmware boots the first FAT partition and only that one, so
+# the second system's kernel, device trees, overlays and cmdline are copied
+# from partition 3 into `second/` on the rescue's boot partition and selected
+# with os_prefix. The rescue's config.txt steps aside (config.txt.rescue)
+# for the second system's own plus the one os_prefix line -- for one boot:
+# the second system moves it back on its first boot (S00wk-disarm, the
+# buildroot overlay), and `second-disarm` does the same from the rescue.
+_second_boot_mount() { # <disk> -> where this machine's own boot partition is mounted
+    local m; m=$(findmnt -no TARGET "$(part "$1" 1)" 2>/dev/null | head -1)
+    [ -n "$m" ] || fail "$(part "$1" 1) is not mounted; this machine's own boot partition should be"
+    printf '%s' "$m"
+}
+_second_arm_copy() { # <mountpoint of partition 3> <boot mountpoint>
+    local src="$1" boot="$2"
+    rm -rf "$boot/second.part"; mkdir -p "$boot/second.part"
+    cp -a "$src"/. "$boot/second.part/" || fail "could not copy the second system's boot files"
+    [ -f "$boot/second.part/cmdline.txt" ] || fail "the second system's boot partition has no cmdline.txt"
+    [ -f "$boot/second.part/config.txt" ]  || fail "the second system's boot partition has no config.txt"
+    rm -rf "$boot/second"; mv "$boot/second.part" "$boot/second"
+    [ -f "$boot/config.txt.rescue" ] || cp "$boot/config.txt" "$boot/config.txt.rescue"
+    {
+        cat "$boot/second/config.txt"
+        printf '\n# --- wk armed: the second system, for one boot (wk boot) ---\nos_prefix=second/\n'
+    } > "$boot/config.txt.armed"
+    mv "$boot/config.txt.armed" "$boot/config.txt"
+    sync
+}
+v_second_arm() {
+    local dev boot; dev=$(gate "${1:-}")
+    [ -n "$SECOND" ] || deny "second-arm takes '<disk>@second'"
+    boot=$(_second_boot_mount "$dev")
+    with_mount -r "$(part "$dev" 3)" _second_arm_copy "$boot"
+    say "armed: the second system boots once (os_prefix=second/); the rescue's config.txt is kept as config.txt.rescue"
+}
+v_second_disarm() {
+    local dev boot; dev=$(gate "${1:-}")
+    [ -n "$SECOND" ] || deny "second-disarm takes '<disk>@second'"
+    boot=$(_second_boot_mount "$dev")
+    if [ -f "$boot/config.txt.rescue" ]; then
+        mv "$boot/config.txt.rescue" "$boot/config.txt"; sync
+        say "disarmed: the rescue's config.txt is back"
+    else
+        say "not armed"
+    fi
+}
+v_second_state() {
+    local dev boot; dev=$(gate "${1:-}")
+    [ -n "$SECOND" ] || deny "second-state takes '<disk>@second'"
+    boot=$(_second_boot_mount "$dev")
+    [ -f "$boot/config.txt.rescue" ] && say "armed=yes" || say "armed=no"
+    [ -b "$(part "$dev" 4)" ] && say "present=yes" || say "present=no"
 }
 
 # --- dispatch ----------------------------------------------------------------
@@ -986,7 +1168,10 @@ case "$verb" in
     role)     v_role     "$@" ;;
     grow)     v_grow     "$@" ;;
     unmount)  v_unmount  "$@" ;;
-    verify)   v_verify   "$@" ;;
+    verify)   case "${1:-}" in *@second) v_second_verify "$@" ;; *) v_verify "$@" ;; esac ;;
+    second-arm)    v_second_arm    "$@" ;;
+    second-disarm) v_second_disarm "$@" ;;
+    second-state)  v_second_state  "$@" ;;
     eject)    v_eject    "$@" ;;
     parts)    v_parts    "$@" ;;
     root-spec) v_root_spec "$@" ;;
@@ -996,5 +1181,5 @@ case "$verb" in
     boot-id)  v_boot_id  "$@" ;;
     units)    v_units    "$@" ;;
     boot-check) v_boot_check "$@" ;;
-    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi-host|wifi-from-host|identity|role|grow|unmount|verify|eject|parts|root-spec|retarget|cmdline-append|config-append|boot-id|units|boot-check <device> [...]" ;;
+    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi-host|wifi-from-host|identity|role|grow|unmount|verify|eject|parts|root-spec|retarget|cmdline-append|config-append|boot-id|units|boot-check|second-arm|second-disarm|second-state <device>[@second] [...]" ;;
 esac
