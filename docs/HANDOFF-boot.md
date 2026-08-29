@@ -2,10 +2,9 @@
 
 - [ ] make mutating commands warn or refuse when their target machine is armed
 - [ ] build moose's bench mode (docs/Urgent/HANDOFF-moose-bench.md) [needs moose]
-- [ ] rpi3: a slot-aware `wk sysimage write` (today it writes one whole system to one whole device and cannot put a system into a slot without destroying the other) [needs a Pi card in hand]
-- [ ] rpi3: arm `boot/pi-sd.sh` with `root=` plus the bench kernel on the shared boot partition, and its stage-2 revert (initramfs fallback or rescue-side pivot) [needs a Pi card in hand]
-- [ ] rpi3: BusyBox equivalents of the self-return watchdog and self-disarm, for an image with no systemd [needs a Pi card in hand]
-- [ ] rpi4: verify `S00wk-self-disarm` parks the card and `S01wk-self-return` reboots an unclaimed board on a real buildroot boot (image/buildroot/fleet-overlay.sh; the yocto unit's `$$`-escaped ExecStart has run only in tests) [needs a rebuilt image on the card]
+- [ ] rpi3: a stage-2 revert for a bench kernel that panics before its self-disarm runs (today the os_prefix line stays until `wk boot rpi3 --disarm` from the rescue, which that boot never reaches): `tryboot` if the Pi 3 firmware honours it -- measure with `reboot "0 tryboot"` and a `tryboot.txt` on the board -- else an initramfs that puts config.txt back [needs the rpi3]
+- [ ] rpi3: verify the `@second` write, `wk boot rpi3`, the S11 self-disarm and the S99 self-return end to end on the board [needs the rpi3]
+- [ ] rpi4: verify `S11wk-self-disarm` parks the card and `S99wk-self-return` reboots an unclaimed board on a real buildroot boot (the yocto unit's `$$`-escaped ExecStart has run only in tests) [needs the card re-written by a helper that stages init.d scripts]
 - [ ] rebuild and re-flash rpi3 onto the tailnet layer [needs a Pi card in hand]
 - [ ] verify the rescue marker plus both self-return/self-disarm units end to end on a real board [needs a Pi card in hand]
 - [ ] verify a `--rescue` write without `--grow` leaves the rest of a shared card alone (the rpi3 two-slot case) [needs a Pi card in hand]

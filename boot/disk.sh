@@ -267,6 +267,16 @@ disk_refuse_unless_safe() {
     local dev="$1" out
 
     card_priv_require
+    # A helper from before @second answers `check <disk>@second` for the
+    # whole disk, and its `write` would take the whole disk too -- over the
+    # rescue it may be running from. Asked before anything else.
+    if disk_is_second "$dev"; then
+        card_priv status 2>/dev/null | grep -q 'second=yes' \
+            || die "$MACH_NAME's card helper predates second systems (@second), so it
+    would write the whole disk. Update it first: on a workstation,
+    ./setup --stage quiesce from a terminal there; on a rescue, rebuild the
+    rescue image and write it again."
+    fi
     out=$(card_priv check "$dev" 2>&1) || die "$MACH_NAME will not write $dev:
 $(printf '%s\n' "$out" | sed 's/^/    /')
     Disks there:
@@ -294,7 +304,13 @@ disk_unmount() {
 $(m_ssh "lsblk -lno NAME,MOUNTPOINT $(sh_quote "$dev")" 2>/dev/null | awk 'NF > 1 { print "    /dev/" $1 " at " $2 }')"
 }
 
-disk_write_stream() { # <device>   -- image bytes on stdin
+# A second system beside a rescue (`<device>@second`, admin/wk-card-priv):
+# the image goes into partitions 3 and 4 of a card whose 1 and 2 stay as
+# they are. Every step here passes the spec through and the helper addresses
+# the right partitions; the two steps that differ ask this.
+disk_is_second() { case "$1" in *@second) return 0 ;; *) return 1 ;; esac; }
+
+disk_write_stream() { # <device>   -- image bytes on stdin; the helper's report on stdout
     local dev="$1" remote_zstd=no
     # `< /dev/null`, like every other probe here: ssh forwards its own stdin
     # to the far side, and this one's stdin is the image -- bytes it read to
@@ -315,16 +331,24 @@ disk_write_stream() { # <device>   -- image bytes on stdin
 # machine with no Linux tooling write a card -- every edit the image needs is
 # made afterwards, on the card (admin/wk-card-priv). The stream is metered as
 # it goes past, since the read-back below has to compare the disk against
-# *something* and there is no local copy to re-read.
-#   disk_write_source <device> <reader command> <file to leave "<bytes> <sha>" in>
+# *something* and there is no local copy to re-read. The meta file's first
+# line is "<bytes> <sha>" of the stream; under @second a second line carries
+# what the helper reports it split the stream into -- the two partitions'
+# own sizes and hashes, which is what the read-back compares there.
+#   disk_write_source <device> <reader command> <meta file>
 disk_write_source() {
-    local dev="$1" reader="$2" meta="$3"
+    local dev="$1" reader="$2" meta="$3" report
     disk_would "stream the image onto $dev on $MACH_NAME, and read it back to verify" && return 0
-    eval "$reader" | disk_stream_meter "$meta" | disk_write_stream "$dev" \
+    report=$(eval "$reader" | disk_stream_meter "$meta" | disk_write_stream "$dev" | tr -d '\r') \
         || die "could not write the image onto $dev on $MACH_NAME.
     It was read through:  $reader
-    $dev is $(disk_size "$dev"); an image larger than that runs out of space
+    $dev is $(disk_size "${dev%@second}"); an image larger than that runs out of space
     part-written, and the read that fed it can fail on its own account."
+    printf '%s\n' "$report" | sed 's/^/    /' >&2
+    disk_is_second "$dev" || return 0
+    printf '%s %s %s %s\n' \
+        "$(kv_get boot_bytes <<<"$report")" "$(kv_get boot_sha <<<"$report")" \
+        "$(kv_get root_bytes <<<"$report")" "$(kv_get root_sha <<<"$report")" >> "$meta"
 }
 
 # stdin to stdout unchanged, with the byte count and sha256 of everything that
@@ -352,11 +376,23 @@ with open(sys.argv[1], "w") as fh:
 # verb rather than a second way in, and unconditional over the whole span: a
 # checksum from whatever did the writing only claims the bytes it chose to
 # write arrived, and says nothing about the ones it skipped. The size and
-# hash are the stream's own (disk_stream_meter), there being no local copy.
-disk_verify_stream() { # <device> <bytes> <sha256>
-    local dev="$1" bytes="$2" want="$3" got
+# hash are the stream's own (disk_stream_meter), there being no local copy;
+# under @second they are the two partitions' (disk_write_source's second
+# line), read back from partitions 3 and 4.
+disk_verify_stream() { # <device> <meta file>
+    local dev="$1" meta="$2" bytes want got b_bytes b_sha r_bytes r_sha
     disk_would "read $dev back and compare it with the image streamed to it" && return 0
     info "verifying $dev against the image that was streamed to it"
+    if disk_is_second "$dev"; then
+        read -r b_bytes b_sha r_bytes r_sha <<<"$(sed -n 2p "$meta")"
+        [ -n "$r_sha" ] || die "the write onto $dev did not report what it split the image into,
+    so there is nothing to read the card back against."
+        card_priv verify "$dev" "$b_bytes" "$b_sha" "$r_bytes" "$r_sha" >/dev/null \
+            || die "partitions 3 and 4 of $dev do not read back as the image's boot and root."
+        debug "verified $b_bytes + $r_bytes bytes"
+        return 0
+    fi
+    read -r bytes want < "$meta"
     got=$(card_priv verify "$dev" "$bytes" | tr -d '\r' | tail -1)
     [ -n "$got" ] || die "could not read $dev back on $MACH_NAME"
     [ "$want" = "$got" ] \
@@ -463,16 +499,23 @@ disk_boot_id() { # <device> <id>
 disk_install_units() { # <device> <staging directory>
     local dev="$1" dir="$2" out rc=0
     disk_would "install the fleet units and the profiling knobs into $dev's rootfs" && return 0
-    out=$(tar -cf - -C "$dir" systemd sysctl.d | card_priv units "$dev" 2>&1) || rc=$?
+    out=$(tar -cf - -C "$dir" systemd sysctl.d init.d | card_priv units "$dev" 2>&1) || rc=$?
     [ "$rc" -eq 0 ] || die "could not install the fleet units on $dev:
 $(printf '%s\n' "$out" | sed 's/^/    /')
     The image is written; a run that wedges the board would not hand it back."
     case "$out" in
-        *'no systemd on this disk'*)
-            warn "this image has no systemd, so the self-return watchdog and the self-disarm
-  were NOT installed. The card carries its identity marker and the driving key
-  and nothing else: a run that wedges the board will not hand it back, and on a
-  medium-armed machine the medium stays armed until something disarms it." ;;
+        *'neither systemd nor /etc/init.d'*)
+            warn "this image has neither systemd nor a BusyBox init, so the self-return
+  watchdog and the self-disarm were NOT installed. The card carries its identity
+  marker and the driving key and nothing else: a run that wedges the board will
+  not hand it back, and on a medium-armed machine the medium stays armed until
+  something disarms it." ;;
+        *'no systemd on this disk; nothing installed'*)
+            die "$MACH_NAME's card helper predates BusyBox init scripts, so this image got
+    neither its self-disarm nor its self-return: a board booted into it would not
+    hand itself back. The image is written. Update the helper (on a workstation,
+    ./setup --stage quiesce from a terminal there; on a rescue, rebuild the
+    rescue image) and write the card again." ;;
         *) debug "$out" ;;
     esac
 }
@@ -488,7 +531,7 @@ $(printf '%s\n' "$out" | sed 's/^/    /')
 disk_check_root() { # <device> <what-it-is>
     local dev="$1" what="$2"
     disk_would "check that the system on $dev names a root it can find on $dev" && return 0
-    image_check_root "$(disk_root_spec "$dev")" "$dev" "$what"
+    image_check_root "$(disk_root_spec "$dev")" "${dev%@second}" "$what"
 }
 
 disk_check_boot_files() { # <device> <machine> <dtb>
@@ -514,6 +557,12 @@ $(printf '%s\n' "$out" | sed 's/^/      /')
 # rewrite nothing while reporting success.
 disk_unique_identity() { # <device>
     local dev="$1" spec old new
+    if disk_is_second "$dev"; then
+        # The identity is the disk's, and the disk is the rescue's: the
+        # second system took its PARTUUIDs from it (disk_retarget_root).
+        log "  $dev keeps the rescue disk's identity; the second system names its partitions by it"
+        return 0
+    fi
     disk_would "stamp a unique disk identity on $dev, so two cards written from one image cannot be confused" && return 0
     spec=$(disk_root_spec "$dev")
     case "$spec" in PARTUUID=*) ;; *) return 0 ;; esac

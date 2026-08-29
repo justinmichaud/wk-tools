@@ -255,12 +255,21 @@ wk bench compare <run-a> <run-b>                 # warns if class/runner/host di
 wk sysimage build wpewebkit-2.38-buildroot-rpi3-32 --detach   # hours; poll with wk status
 wk sysimage disks <writer>                       # removable disks on the machine holding the card reader
 wk sysimage write --from <path> --disk <writer>:/dev/sdX
-wk boot rpi3                                     # one-shot: arms, reboots, self-reverts
+wk boot rpi4                                     # one-shot: arms, reboots, self-reverts
 # a write refuses, with no --force, when the tailnet auth key or the board's
 # WiFi credentials are missing, or when the tailnet already has a node named
 # rpi3-bench -- a fresh join would come up as rpi3-bench-1 and nothing could
 # reach it.
 # Remove the stale node in the admin console first.
+# A board with one medium (the rpi3) keeps both systems on it: the rescue on
+# partitions 1-2, the bench system on 3-4 (`@second`). `wk boot rpi3` selects
+# the second for one boot with an os_prefix line in the rescue's config.txt,
+# which the bench system's self-disarm removes as it comes up. Both writes
+# come from a reader the first time, and from the rescue itself after that
+# (--disk rpi3:/dev/mmcblk0@second).
+wk sysimage write --from <rescue .wic.xz> --disk <writer>:/dev/mmcblk0 --rescue --profile webkit-2.52-yocto-rpi3-32
+wk sysimage write --from <sdcard.img> --disk <writer>:/dev/mmcblk0@second --profile wpewebkit-2.38-buildroot-rpi3-32
+wk boot rpi3
 wk sysimage webkit wpewebkit-2.38-buildroot-rpi3-32 --commit <sha> --slot base --detach
                                                  # one WebKit built against the image's own toolchain,
                                                  # into a named slot beside the image (wk sysimage ls)

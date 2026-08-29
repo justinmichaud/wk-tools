@@ -428,7 +428,8 @@ dir_names=$(ls "{REPO}"/boot/machines/*.conf 2>/dev/null | xargs -n1 basename 2>
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 
     def test_self_disarm_sh_is_single_quote_free(self):
-        """contains no single quote"""
+        """contains no single quote and no `%`: systemd's ExecStart parsing
+        would split on the one and expand the other as a specifier"""
         found_any = False
         bad = []
         for d in sorted((REPO / "boot").glob("*.sh")):
@@ -440,8 +441,8 @@ dir_names=$(ls "{REPO}"/boot/machines/*.conf 2>/dev/null | xargs -n1 basename 2>
                 f'MACH_DEVICE=/dev/sda MACH_NAME=selftest; . "{d}"; b_self_disarm_sh'
             )
             out = cp.stdout
-            if "'" in out:
-                bad.append(f"{d.name} emits a single quote: {out}")
+            if "'" in out or "%" in out:
+                bad.append(f"{d.name} emits a single quote or a %: {out}")
             elif not out.strip():
                 bad.append(f"{d.name} emits nothing")
         if not found_any:

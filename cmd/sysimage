@@ -37,7 +37,7 @@
 #                                workspace that built an image is its name
 #                                (wk help)
 #   disks <machine>             removable disks attached to that machine
-#   write --from <path> --disk <machine>:<device>
+#   write --from <path> --disk <machine>:<device>[@second]
 #                                write that image to that disk, and make it a
 #                                fleet system on the card;
 #                                --from takes a path 'wk sysimage ls' printed
@@ -45,7 +45,11 @@
 #                                VM). Never touches a machine's own system
 #                                disk -- only a removable disk plugged into
 #                                it -- and writing it does not make anything
-#                                boot it ('wk boot' does)
+#                                boot it ('wk boot' does).
+#                                <device>@second writes the image into
+#                                partitions 3 and 4 beside a rescue on 1-2
+#                                (a board with one medium, the rpi3), from a
+#                                reader or from that rescue itself
 #       --profile <name>         which configuration this image is, when the
 #                                path does not already say (a yocto path does)
 #       --machine <name>         the fleet machine (boot/machines/<name>.conf)
@@ -157,20 +161,26 @@ _self_disarm_for() { # <machine>
       b_self_disarm_sh ) || true
 }
 
+# A BusyBox init's script for one of those jobs: /etc/init.d/S<nn><name>,
+# run with `start` by rcS, in name order. Gated on the rescue marker like
+# the units are.
+stage_init() { # <staging dir> <name> <body -- runs on start, as root>
+    printf '#!/bin/sh\n# %s -- staged onto the card by wk sysimage write.\ncase "$1" in start) ;; *) exit 0 ;; esac\n[ -f /etc/wk/rescue ] && exit 0\n%s\n' \
+        "$2" "$3" > "$1/init.d/$2"
+}
+
 # Everything a rootfs needs to be a *fleet* system rather than merely a
 # bootable one: no self-return watchdog means a medium-armed stick stays armed
-# forever. Staged at write time, not baked in per builder.
+# forever. Staged at write time, not baked in per builder, and for both inits
+# a fleet image runs: systemd units and BusyBox init.d scripts for the same
+# two jobs, the card helper installing whichever set the image's init reads
+# (disk_install_units).
 #
-# Every unit here goes into every image; the two that hand a machine *back*
+# Everything here goes into every image; the two that hand a machine *back*
 # are gated at runtime on /etc/wk/rescue (a marker `wk sysimage write
 # --rescue` leaves), which is what makes one built artifact serve both roles.
 # Ungated, the watchdog would reboot the helper every IMG_WATCHDOG seconds
 # mid-write, and self-disarm would park a medium the image isn't on.
-#
-# An image with no systemd takes none of them: the card is asked, and the
-# helper installs nothing and says so (disk_install_units).
-# TODO: buildroot/BusyBox-init images need S-scripts instead; until then they
-# get neither watchdog nor self-disarm.
 stage_units() { # <staging dir> <self-disarm command, empty when nothing to park>
     local seed="$1" disarm="${2:-}"
 
@@ -195,6 +205,10 @@ TimeoutStartSec=infinity
 [Install]
 WantedBy=multi-user.target
 "
+    # Last in rcS, so the network and the browser are up when the clock
+    # starts; backgrounded, so init does not wait the watchdog out.
+    stage_init "$seed" S99wk-self-return \
+        "( sleep $IMG_WATCHDOG; [ -f /run/wk-keep-running ] || reboot ) </dev/null >/dev/null 2>&1 &"
     fi
 
     # A medium-armed machine's image disarms itself: the medium stops being
@@ -222,6 +236,9 @@ ExecStart=/bin/sh -c '$(printf '%s' "$disarm" | sed 's/[$]/$$/g')'
 [Install]
 WantedBy=sysinit.target
 "
+        # Right after udev (S10udev) has made the /dev/disk links the
+        # command finds its medium by, and before anything else.
+        stage_init "$seed" S11wk-self-disarm "$disarm"
     fi
 
     # The profiling knobs this image exists for, in the rootfs so
@@ -750,7 +767,11 @@ EOF
         _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")"
         _wifi_creds_preflight "${IMG_MACHINE:-}"
 
-        warn "this ERASES $DISK_DEV on $DISK_MACHINE, whatever is on it now."
+        if disk_is_second "$DISK_DEV"; then
+            warn "this ERASES partitions 3 and 4 of ${DISK_DEV%@second} on $DISK_MACHINE (the rescue on 1-2 stays)."
+        else
+            warn "this ERASES $DISK_DEV on $DISK_MACHINE, whatever is on it now."
+        fi
         confirm "write $from onto $DISK_DEV attached to $DISK_MACHINE?" || die "not written"
     fi
 
@@ -764,12 +785,12 @@ EOF
         read -r bytes sha < "$WRITE_META"
         [ "${bytes:-0}" -gt 0 ] || die "$from read as 0 bytes through: $reader"
     fi
-    _disk_cleanup
 
     # Before anything else touches the card: every step after this reads the
     # partition table the image was supposed to bring, so a bad write shows up
     # as a confusing failure in whichever of them runs first.
-    [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_stream "$DISK_DEV" "$bytes" "$sha"
+    [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_stream "$DISK_DEV" "$WRITE_META"
+    _disk_cleanup
     disk_parts_present "$DISK_DEV"
 
     ID=$(_image_id "${profile:-$base}" "$sha")
@@ -795,7 +816,7 @@ source=$from"
     if [ -n "$fleet_edit" ]; then
         SEED=$(mktemp -d)
         wk_atexit _seed_cleanup
-        mkdir -p "$SEED/systemd" "$SEED/sysctl.d"
+        mkdir -p "$SEED/systemd" "$SEED/sysctl.d" "$SEED/init.d"
         stage_units "$SEED" "$(_self_disarm_for "${IMG_MACHINE:-}")"
         disk_install_units "$DISK_DEV" "$SEED"
         _seed_cleanup
@@ -837,7 +858,7 @@ source=$from"
     fi
     info "$DISK_DEV on $DISK_MACHINE now holds $ID"
 
-    if [ "$DISK_DEV" = "${MACH_DEVICE:-}" ]; then
+    if [ "${DISK_DEV%@second}" = "${MACH_DEVICE:-}" ]; then
         # "Writing did not arm anything" is false of a medium-armed machine
         # unless this makes it true: its arming is the presence of
         # second-stage firmware on the boot partition, which the image being
@@ -902,22 +923,25 @@ cmd_write() {
     machines:
 $(machine_list | sed 's/^/      /')"
 
-    # A rescue leaves the rest of the card alone unless told otherwise: on a
-    # board with one medium holding both systems, growing the rescue to fill
-    # it leaves no room to install a bench system. Explicit --grow still wins.
-    if [ "$role" = rescue ] && [ -z "$grow_set" ]; then grow=0; fi
-
-    [ -n "$from" ] || die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>
+    [ -n "$from" ] || die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second]
     An image is bytes a workspace produced, not an id in a catalogue
     (wk help), so what identifies one is its path.
     'wk sysimage ls' lists every image a workspace here has built, with the
     path to pass to --from."
-    [ -n "$spec" ] || die "usage: wk sysimage write --from $from --disk <machine>:<device>
+    [ -n "$spec" ] || die "usage: wk sysimage write --from $from --disk <machine>:<device>[@second]
     'wk sysimage disks <machine>' lists what is attached where."
 
     # Leave the rest of the card alone by default, so there is room for the
-    # second system that makes the board able to provision itself.
-    [ -n "$grow_set" ] || grow=0
+    # second system that makes the board able to provision itself. The
+    # second system itself is the last thing on the card, so it takes the
+    # rest by default: a bench system's slots are what the space is for.
+    # Explicit --grow / --no-grow still win.
+    if [ -z "$grow_set" ]; then
+        if disk_is_second "${spec#*:}"; then grow=1; else grow=0; fi
+    fi
+    disk_is_second "${spec#*:}" && [ "$role" = rescue ] \
+        && die "a rescue is the system on partitions 1 and 2; '@second' names the bench
+    system beside it. Drop --rescue, or drop @second."
     cmd_write_from "$from" "$spec" "$dry" "$grow" "$profile" "$role" "$mach"
 }
 

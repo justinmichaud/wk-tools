@@ -125,9 +125,8 @@ b_disarm_note() {
 }
 
 # The half that runs *inside* the image on its first boot, before the
-# benchmark starts: as a systemd unit on a yocto image (stage_units,
-# cmd/sysimage) and as a BusyBox init script on a buildroot one
-# (image/buildroot/fleet-overlay.sh), from this one string.
+# benchmark starts: as a systemd unit on a yocto image and as a BusyBox init
+# script on a buildroot one (stage_units, cmd/sysimage), from this one string.
 #
 # POSIX sh against /proc and /sys only -- a BusyBox image has neither findmnt
 # nor lsblk. The disk this runs from is derived at run time: the image is not

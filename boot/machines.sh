@@ -5,11 +5,9 @@
 # stick, moose BMC virtual media, MBP not remotely bootable -- Apple
 # Silicon's boot volume selection is a LocalPolicy in its own secure storage).
 #
-# Sourced here, guarded, since five callers load this file and not lib/reach.sh.
+# Sourced here, guarded, since five callers load this file and not lib/reach.sh;
+# boot/disk.sh likewise, for the drivers that read their medium through it.
 command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
-# disk_part (the mmcblk/nvme partition-suffix rule): b_diag and
-# b_device_image below need it and not every caller of this file loads
-# boot/disk.sh on its own.
 command -v disk_part >/dev/null 2>&1 || . "$WK_ROOT/boot/disk.sh"
 
 # The fields a machine sets are documented in README.md ("Add a new fleet
@@ -135,12 +133,23 @@ image_hostname() {
         || printf '%s' "$MACH_NAME"
 }
 
-# Same login rule as m_ssh (m_ssh_opts): root on a bench-device, the
-# caller's own user everywhere else.
+# Different installs at the same address would trip a man-in-the-middle
+# warning in a shared known_hosts (_unpinned_host_key_opts, shared with
+# m_ssh_opts). The login is m_ssh's: root on a bench-device, whose written
+# systems accept the driving key in root's authorized_keys and have no other
+# user; this user on a workstation.
 i_ssh() {
     # shellcheck disable=SC2046
     ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" \
-        $(m_ssh_opts) "$(image_addr)" "$@"
+        $(m_ssh_opts) $(_unpinned_host_key_opts) \
+        "$(image_addr)" "$@"
+}
+
+# Privileged, on whichever channel answered: root already on a bench-device
+# (m_ssh_opts), so no sudo there -- a BusyBox bench system has none -- and
+# this user's sudo on a workstation.
+r_sudo() { # <command string>
+    if [ "${MACH_ROLE:-}" = bench-device ]; then r_ssh "$@"; else r_ssh "sudo $*"; fi
 }
 
 # By ssh alias -- host or bench mode, whichever `dest` names. No
@@ -304,10 +313,15 @@ b_booted_at() {
 # comparison. Linux only; macOS derives one from kern.boottime instead.
 b_boot_id() { r_ssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true; }
 
+# The bench system's boot partition on MACH_DEVICE: the first one, unless
+# the system shares its medium with the rescue (pi-sd overrides this with
+# the second system's).
+b_boot_part() { disk_part "$MACH_DEVICE" 1; }
+
 # Read off the boot partition from host mode: the image writes the dump
 # there 75 s in, readable even if the image was never reachable.
 b_diag() {
-    local part; part=$(disk_part "$MACH_DEVICE" 1)
+    local part; part=$(b_boot_part)
     # An automounter usually has the partition already; read it where it is,
     # and only mount when nothing else has.
     m_ssh "set -e
@@ -327,13 +341,15 @@ b_diag() {
 b_reboot() {
     # Detached, and after a delay: the reboot kills the ssh session, which
     # would otherwise exit nonzero and, under `set -e`, read as a failure.
-    r_ssh "sudo systemd-run --on-active=3 --unit=wk-boot-reboot /sbin/reboot" >/dev/null
+    # setsid rather than systemd-run, since the system answering may be a
+    # BusyBox one; both inits have setsid and reboot.
+    r_sudo "setsid sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &" >/dev/null
 }
 
 # Read off the FAT boot partition rather than by hashing the device: a
 # booted image writes to its own boot partition, so the bytes stop matching.
 b_device_image() {
-    local part; part=$(disk_part "$MACH_DEVICE" 1)
+    local part; part=$(b_boot_part)
     m_ssh "at=\$(findmnt -rno TARGET '$part' | head -1)
         if [ -n \"\$at\" ]; then cat \"\$at/wk-image.id\" 2>/dev/null; exit 0; fi
         sudo mkdir -p /mnt/wk-id

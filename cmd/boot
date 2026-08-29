@@ -221,7 +221,7 @@ cmd_keep() {
     watchdog to cancel." ;;
     esac
     [ -n "$DRY" ] && { log "would create /run/wk-keep-running on $MACHINE"; return 0; }
-    r_ssh 'sudo touch /run/wk-keep-running'
+    r_sudo 'touch /run/wk-keep-running'
     info "$MACHINE claimed: the self-return watchdog will not reboot it"
     warn "nothing will hand this machine back on its own now -- 'wk boot $MACHINE --back' does"
 }

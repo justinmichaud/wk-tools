@@ -4,7 +4,6 @@ parks that medium and reboots unless claimed -- as systemd units on yocto and
 as BusyBox init scripts on buildroot, from one string."""
 import os
 import re
-import stat
 import subprocess
 import tempfile
 import unittest
@@ -111,8 +110,8 @@ class TestSelfDisarm(unittest.TestCase):
 . "{REPO}/lib/target.sh" 2>/dev/null || true
 wkslot() {{ :; }}
 # the staging half of cmd/sysimage, without the command's dispatch
-eval "$(sed -n '/^stage_unit()/,/^}}/p; /^stage_sysctl()/,/^}}/p; /^stage_units()/,/^}}/p' "{REPO}/cmd/sysimage")"
-seed=$(mktemp -d); mkdir -p "$seed/systemd" "$seed/sysctl.d"; IMG_WATCHDOG=900 IMG_PROFILE=p
+eval "$(sed -n '/^stage_unit()/,/^}}/p; /^stage_sysctl()/,/^}}/p; /^stage_init()/,/^}}/p; /^stage_units()/,/^}}/p' "{REPO}/cmd/sysimage")"
+seed=$(mktemp -d); mkdir -p "$seed/systemd" "$seed/sysctl.d" "$seed/init.d"; IMG_WATCHDOG=900 IMG_PROFILE=p
 machine_load rpi4; load_driver pi-mbr
 stage_units "$seed" "$(b_self_disarm_sh)" >/dev/null 2>&1
 sed -n 's/^ExecStart=//p' "$seed/systemd/wk-self-disarm.service"
@@ -122,54 +121,6 @@ sed -n 's/^ExecStart=//p' "$seed/systemd/wk-self-disarm.service"
         self.assertTrue(line, "no ExecStart staged")
         self.assertNotRegex(line, r"(?<!\$)\$(?!\$)", f"a bare $ in {line}")
         self.assertIn("$$mp", line)
-
-
-class TestFleetOverlay(unittest.TestCase):
-    def _gen(self, profile):
-        d = tempfile.mkdtemp()
-        cp = subprocess.run([str(REPO / "image/buildroot/fleet-overlay.sh"), profile, d + "/stage"],
-                            capture_output=True, text=True)
-        return cp, Path(d, "stage", "etc", "init.d")
-
-    def test_rpi4_image_gets_self_disarm_and_self_return(self):
-        """wpewebkit-2.38-buildroot-rpi4-32: S00wk-self-disarm from pi-mbr, S01wk-self-return at IMG_WATCHDOG"""
-        cp, initd = self._gen("wpewebkit-2.38-buildroot-rpi4-32")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        disarm = initd / "S00wk-self-disarm"
-        ret = initd / "S01wk-self-return"
-        for f in (disarm, ret):
-            self.assertTrue(f.is_file(), f"{f} missing:\n{cp.stderr}")
-            self.assertTrue(f.stat().st_mode & stat.S_IXUSR, f"{f} not executable")
-            self.assertEqual(subprocess.run(["sh", "-n", str(f)]).returncode, 0)
-            self.assertIn("/etc/wk/rescue", f.read_text(), "not gated on the rescue marker")
-        self.assertIn("conv=notrunc", disarm.read_text())
-        self.assertIn("seek=450", disarm.read_text())
-        self.assertIn("sleep 900", ret.read_text())
-        self.assertIn("/run/wk-keep-running", ret.read_text())
-
-    def test_rescue_marker_makes_both_scripts_inert(self):
-        """with /etc/wk/rescue present, start does nothing and touches no disk"""
-        cp, initd = self._gen("wpewebkit-2.38-buildroot-rpi4-32")
-        self.assertEqual(cp.returncode, 0, cp.stderr)
-        for name in ("S00wk-self-disarm", "S01wk-self-return"):
-            text = (initd / name).read_text().replace("/etc/wk/rescue", str(initd / "rescue"))
-            (initd / "rescue").write_text("rescue\n")
-            r = subprocess.run(["sh", "-c", text, "sh", "start"], capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(r.stdout, "", f"{name} did something on a rescue: {r.stdout}")
-
-    def test_a_hands_on_board_gets_no_self_disarm(self):
-        """rpi3 (pi-sd) has no b_self_disarm_sh: only the self-return is generated"""
-        cp, initd = self._gen("wpewebkit-2.38-buildroot-rpi3-32")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertFalse((initd / "S00wk-self-disarm").exists())
-        self.assertTrue((initd / "S01wk-self-return").is_file())
-
-    def test_build_script_stages_the_fleet_overlay(self):
-        """image/buildroot-build.sh adds the fleet overlay to BR2_ROOTFS_OVERLAY for every image"""
-        text = (REPO / "image/buildroot-build.sh").read_text()
-        self.assertIn("fleet-overlay.sh", text)
-        self.assertRegex(text, r'OVERLAY="\$\{OVERLAY:\+\$OVERLAY \}\$FLEET_OVERLAY"')
 
 
 class TestFleetTailnetLine(unittest.TestCase):

@@ -26,13 +26,16 @@
 #     swap's, and the kernel command line's root=. On the fleet's Pis the
 #     system disk *is* an SD card or USB stick, so the transport check
 #     alone would happily overwrite the running machine.
-#     The one carve-out is a *second system* on that very disk
+#     The one carve-out is a *second system* beside a rescue
 #     (`<device>@second`): a board with one medium (the rpi3) keeps its
 #     rescue on partitions 1-2 and a bench system on 3-4 of the same card.
 #     Under @second every verb addresses partitions 3 and 4 only, the image
 #     is split into them rather than written over the disk, the disk
 #     identity is never touched, and arming is one line in the rescue's
 #     config.txt (os_prefix) that the bench system removes on its first boot.
+#     The disk may be the one this machine runs from (the rescue writing
+#     beside itself) or a card in a reader (the first write, from a
+#     workstation); either way partitions 1 and 2 are never addressed.
 #   - A disk with anything mounted from it is refused: a card in use is a
 #     card somebody is using.
 #   - Nothing is read from the environment; sudo's env_reset plus the
@@ -85,16 +88,18 @@ booted_disks() {
     done | sort -u
 }
 
-# <device> -- returns the validated device path, or refuses. Ordered
-# cheapest-first, but every check runs before anything is written: this is
-# the whole security argument for the sudoers rule.
+# <device> -- leaves the validated device path in GATED_DEV, or refuses.
+# Ordered cheapest-first, but every check runs before anything is written:
+# this is the whole security argument for the sudoers rule.
 # Which two partitions a verb addresses: the disk's own system (1 and 2), or
-# the second system beside it (3 and 4, `<device>@second`). Set by gate.
-BOOTP=1; ROOTP=2; SECOND=""
+# the second system beside it (3 and 4, `<device>@second`). Set by gate,
+# in this shell -- which is why gate is called as a statement and never in
+# a command substitution, whose subshell would keep them.
+BOOTP=1; ROOTP=2; SECOND=""; GATED_DEV=""
 
 gate() { # <device>[@second] [allow-mounted]
     local dev="${1:-}" allow_mounted="${2:-}" type tran name booted mounted
-    BOOTP=1; ROOTP=2; SECOND=""
+    BOOTP=1; ROOTP=2; SECOND=""; GATED_DEV=""
     case "$dev" in
         *@second) dev="${dev%@second}"; SECOND=1; BOOTP=3; ROOTP=4 ;;
         *@*) deny "'$dev' names a system this helper does not know; only '@second' is one" ;;
@@ -127,18 +132,7 @@ EOF
 
     name=$(basename "$dev")
     booted=$(booted_disks)
-    if [ -n "$SECOND" ]; then
-        # The second system lives beside this machine's own: the disk must be
-        # the one it runs from, and partitions 1-2 (the rescue) are never
-        # addressed under @second.
-        printf '%s\n' "$booted" | grep -qx "$name" \
-            || deny "'$dev@second' is for the disk this machine runs from -- a second system
-    beside its own -- and $dev is not that disk. A disk this machine does not
-    run from takes a whole image: write it without @second."
-        printf '%s' "$dev"
-        return 0
-    fi
-    if printf '%s\n' "$booted" | grep -qx "$name"; then
+    if [ -z "$SECOND" ] && printf '%s\n' "$booted" | grep -qx "$name"; then
         deny "'$dev' is a disk this machine is running from (/, /boot, swap or
     the kernel's root=). On these boards the system disk is itself an SD card or
     a USB stick, so being removable is no protection at all. A second system
@@ -146,15 +140,23 @@ EOF
     fi
 
     # Skipped for exactly one verb -- `unmount`, whose whole purpose is to end
-    # this state. The two checks above it are the ones that protect the machine
-    # and they are never skipped.
+    # this state. The checks above it are the ones that protect the machine
+    # and they are never skipped. Under @second only the two partitions the
+    # verb addresses are asked about: 1 and 2 may be this machine's running
+    # root and boot, and leaving them alone is what @second means.
     if [ "$allow_mounted" != allow-mounted ]; then
-        mounted=$(lsblk -no MOUNTPOINT "$dev" 2>/dev/null | grep -c . || true)
-        [ "${mounted:-0}" -eq 0 ] || deny "'$dev' has $mounted mounted filesystem(s) on it.
+        if [ -n "$SECOND" ]; then
+            mounted=$(lsblk -no MOUNTPOINT "$(part "$dev" 3)" "$(part "$dev" 4)" 2>/dev/null | grep -c . || true)
+            [ "${mounted:-0}" -eq 0 ] || deny "'$dev@second': partitions 3 and 4 have $mounted mounted filesystem(s).
+    A system in use is a system somebody is using; unmount it first."
+        else
+            mounted=$(lsblk -no MOUNTPOINT "$dev" 2>/dev/null | grep -c . || true)
+            [ "${mounted:-0}" -eq 0 ] || deny "'$dev' has $mounted mounted filesystem(s) on it.
     A card in use is a card somebody is using; unmount it first."
+        fi
     fi
 
-    printf '%s' "$dev"
+    GATED_DEV="$dev"
 }
 
 # A partition of a validated disk: /dev/sda -> /dev/sda1, /dev/mmcblk0 -> p1.
@@ -209,17 +211,19 @@ with_mount() { # [-r] <partition> <function> [args...]
 
 # --- the verbs ---------------------------------------------------------------
 
-v_status() { say "ok"; }
+# What this helper can do, for a driving end that must not assume it: a
+# helper on a board's rescue is the one its image was built with.
+v_status() { say "ok"; say "second=yes"; say "init.d=yes"; }
 
 v_check() {
-    local dev; dev=$(gate "${1:-}")
+    local dev; gate "${1:-}"; dev=$GATED_DEV
     say "$dev may be written: $(lsblk -dno TRAN,SIZE,MODEL "$dev" | tr -s ' ')"
 }
 
 # Image bytes on stdin. Nothing about the image is inspected here -- what makes
 # this safe is *where* it can go, which the gate has already settled.
 v_write() {
-    local dev; dev=$(gate "${1:-}")
+    local dev; gate "${1:-}"; dev=$GATED_DEV
     if [ -n "$SECOND" ]; then
         _second_write "$dev"
         return $?
@@ -275,7 +279,7 @@ _fleet_edit() { # <mountpoint> <marker> <pubkey>
 # checked against a character set before anything decodes them.
 v_fleet() {
     local dev marker key
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     check_b64 "${2:-}"; check_b64 "${3:-}"
     marker=$(printf '%s' "$2" | base64 -d) || deny "marker is not valid base64"
     key=$(printf '%s' "$3" | base64 -d)     || deny "key is not valid base64"
@@ -330,7 +334,7 @@ _whose_probe() { # <mountpoint>
 # written *into* it at write time (/etc/wk-image), and a second copy out
 # here would go stale the first time somebody swaps a stick.
 v_whose() {
-    local dev; dev=$(gate "${1:-}")
+    local dev; gate "${1:-}"; dev=$GATED_DEV
     with_mount -r "$(part "$dev" "$ROOTP")" _whose_probe
 }
 
@@ -345,14 +349,14 @@ _joins_probe() { # <mountpoint>
 # Without this, an image with no wk-tailnet-join would still have the
 # fleet's credential read and sent here for a disk with nothing to spend it.
 v_joins() {
-    local dev; dev=$(gate "${1:-}")
+    local dev; gate "${1:-}"; dev=$GATED_DEV
     with_mount -r "$(part "$dev" "$ROOTP")" _joins_probe
 }
 
 # tailnet <device> <hostname> <tag>   -- the auth key arrives on stdin.
 v_tailnet() {
     local dev host tag tmp rc
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     host="${2:-}"; tag="${3:-}"
     check_name "$host"
     case "$tag" in
@@ -378,7 +382,7 @@ _wifi_joins_probe() { # <mountpoint>
 # answer decides whether the driving end resolves the fleet's WiFi credential
 # at all.
 v_wifi_joins() {
-    local dev; dev=$(gate "${1:-}")
+    local dev; gate "${1:-}"; dev=$GATED_DEV
     with_mount -r "$(part "$dev" "$ROOTP")" _wifi_joins_probe
 }
 
@@ -466,7 +470,7 @@ v_wifi_host() {
 
 v_wifi_from_host() {
     local dev tmp ssid psk rc
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     tmp=$(_host_wifi) \
         || fail "no WiFi credential on this machine (netplan, or the wpa_supplicant conf a card seeded); the write preflight (wifi-host) should have refused before $dev was touched"
     ssid=$(sed -n 's/^ssid=//p' "$tmp" | head -1)
@@ -515,7 +519,7 @@ _id_edit() { # <mountpoint> <old> <new>
 # own, so two cards written from one image cannot be confused for each other.
 v_identity() {
     local dev old new
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     [ -z "$SECOND" ] || deny "the disk identity belongs to the system this machine runs from;
     a second system takes its PARTUUIDs from it (retarget) and never changes it"
     check_hex "${2:-}"; check_hex "${3:-}"
@@ -526,23 +530,31 @@ v_identity() {
     say "$dev now has disk identity 0x$new"
 }
 
-# grow <device> -- the last partition to the end of the disk.
+# grow <device>[@second] -- the root partition to the end of the disk, and
+# its filesystem to the end of the partition. Under @second `write` already
+# made partition 4 reach the end of the disk, so the table step changes
+# nothing and the filesystem step is the one that matters.
 v_grow() {
-    local dev p2; dev=$(gate "${1:-}"); p2=$(part "$dev" 2)
-    printf ', +\n' | sfdisk -N 2 --no-reread --force "$dev" >/dev/null
+    local dev root; gate "${1:-}"; dev=$GATED_DEV; root=$(part "$dev" "$ROOTP")
+    printf ', +\n' | sfdisk -N "$ROOTP" --no-reread --force "$dev" >/dev/null
     partx -u "$dev" 2>/dev/null || partprobe "$dev" 2>/dev/null || true
-    e2fsck -fy "$p2" >/dev/null 2>&1 || true
-    resize2fs "$p2" >/dev/null 2>&1 || fail "could not resize $p2"
-    say "$p2 grown to fill $dev"
+    e2fsck -fy "$root" >/dev/null 2>&1 || true
+    resize2fs "$root" >/dev/null 2>&1 || fail "could not resize $root"
+    say "$root grown to fill $dev"
 }
 
-# unmount <device> -- every filesystem on it, so a card that was auto-mounted
-# can be written. The only verb that may see mounted filesystems, and it still
-# may not touch a disk the machine is running from.
+# unmount <device>[@second] -- every filesystem on it, so a card that was
+# auto-mounted can be written. The only verb that may see mounted
+# filesystems, and it still may not touch a disk the machine is running from.
+# Under @second only partitions 3 and 4 are unmounted: 1 and 2 may be this
+# machine's own root and boot.
 v_unmount() {
     local dev p mp any=0
-    dev=$(gate "${1:-}" allow-mounted)
+    gate "${1:-}" allow-mounted; dev=$GATED_DEV
     for p in $(lsblk -lno NAME "$dev" | tail -n +2); do
+        if [ -n "$SECOND" ]; then
+            case "/dev/$p" in "$(part "$dev" 3)"|"$(part "$dev" 4)") ;; *) continue ;; esac
+        fi
         mp=$(lsblk -no MOUNTPOINT "/dev/$p" 2>/dev/null | head -1)
         [ -n "$mp" ] || continue
         umount "/dev/$p" || fail "could not unmount /dev/$p (was at $mp)"
@@ -596,7 +608,7 @@ _role_edit() { # <mountpoint> <role>
 # create or remove exactly one known path and rewrite one field of another.
 v_role() {
     local dev role
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     role="${2:-}"
     case "$role" in
         bench|rescue) ;;
@@ -611,7 +623,7 @@ v_role() {
 # only thing it can read is a disk the gate already permits.
 v_verify() {
     local dev bytes
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     case "${2:-}" in
         ''|*[!0-9]*) deny "'${2:-}' is not a byte count" ;;
     esac
@@ -620,7 +632,7 @@ v_verify() {
 }
 
 v_eject() {
-    local dev; dev=$(gate "${1:-}")
+    local dev; gate "${1:-}"; dev=$GATED_DEV
     sync; blockdev --flushbufs "$dev" 2>/dev/null || true
     say "$dev flushed"
 }
@@ -679,7 +691,7 @@ print("partitions=%d" % len(table.get("partitions") or []))
 # hashes perfectly against itself and carries no table at all.
 v_parts() {
     local dev out
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     out=$(_table "$dev") || deny "'$dev' has no readable partition table"
     printf '%s\n' "$out"
 }
@@ -707,7 +719,7 @@ _root_spec_probe() { # <mountpoint>
 # read off the card. Read-only, and the answer nothing here keeps a copy of:
 # what the card boots from is written into the card.
 v_root_spec() {
-    local dev; dev=$(gate "${1:-}")
+    local dev; gate "${1:-}"; dev=$GATED_DEV
     with_mount -r "$(part "$dev" "$BOOTP")" _root_spec_probe
 }
 
@@ -766,7 +778,7 @@ if left:
 # (image_root_class, lib/image.sh); this one does it.
 v_retarget() {
     local dev out sig root boot
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     out=$(_table "$dev") || deny "'$dev' has no readable partition table to take a PARTUUID from"
     sig=$(printf '%s\n' "$out" | sed -n 's/^signature=//p')
     case "$sig" in
@@ -799,7 +811,7 @@ _cmdline_append_edit() { # <mountpoint> <text>
 # before anything decodes it. Idempotent by content.
 v_cmdline_append() {
     local dev add
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     check_b64 "${2:-}"
     add=$(printf '%s' "$2" | base64 -d) || deny "the cmdline addition is not valid base64"
     check_text "the cmdline addition" "$add"
@@ -830,7 +842,7 @@ _config_append_edit() { # <mountpoint> <block> <marker line>
 # itself rather than repeated in a second argument that could disagree.
 v_config_append() {
     local dev block marker
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     check_b64 "${2:-}"
     block=$(printf '%s' "$2" | base64 -d) || deny "the config.txt block is not valid base64"
     check_text "the config.txt block" "$block"
@@ -855,7 +867,7 @@ _boot_id_edit() { # <mountpoint> <id>
 # reads it off a disk that is not running, without mounting anything ext4.
 v_boot_id() {
     local dev
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     check_name "${2:-}"
     with_mount "$(part "$dev" "$BOOTP")" _boot_id_edit "$2"
     say "$dev's boot partition names this system $2"
@@ -872,10 +884,10 @@ _units_names() { # <tar file>
     while IFS= read -r name; do
         [ -n "$name" ] || continue
         case "$name" in
-            systemd/|sysctl.d/|./) continue ;;
-            systemd/*.service|sysctl.d/*.conf) ;;
+            systemd/|sysctl.d/|init.d/|./) continue ;;
+            systemd/*.service|sysctl.d/*.conf|init.d/S[0-9][0-9]*) ;;
             *) deny "'$name' is not something this verb may write: a unit archive holds
-    systemd/<name>.service and sysctl.d/<name>.conf, and nothing else" ;;
+    systemd/<name>.service, sysctl.d/<name>.conf and init.d/S<nn><name>, and nothing else" ;;
         esac
         case "${name#*/}" in
             ''|.*|*/*|*[!a-zA-Z0-9@._-]*) deny "'$name' is not a plain file name" ;;
@@ -909,8 +921,24 @@ _units_edit() { # <mountpoint> <staging directory>
     # an image without systemd would take these units without complaint, land
     # them where they never start, and report a watchdog installed on a board
     # that has none.
+    # A BusyBox init runs /etc/init.d/S??* in order and nothing else, so
+    # that image takes the archive's init.d scripts -- the same jobs as the
+    # units, composed by the same caller -- and the units go nowhere.
     if [ ! -e "$m/lib/systemd/systemd" ] && [ ! -e "$m/usr/lib/systemd/systemd" ]; then
-        say "units: no systemd on this disk; nothing installed"
+        if [ ! -d "$m/etc/init.d" ]; then
+            say "units: neither systemd nor /etc/init.d on this disk; nothing installed"
+            return 0
+        fi
+        for f in "$work"/init.d/*; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+            cat "$f" > "$m/etc/init.d/$name"
+            chmod 0755 "$m/etc/init.d/$name"; chown 0:0 "$m/etc/init.d/$name"
+            [ -s "$m/etc/init.d/$name" ] || fail "$name did not land on this disk"
+            n=$((n + 1))
+        done
+        _units_sysctl "$m" "$work"; n=$((n + SYSCTL_N))
+        say "units: no systemd on this disk; installed $n init.d script(s) and sysctl drop-in(s)"
         return 0
     fi
     mkdir -p "$m/etc/systemd/system"
@@ -936,6 +964,15 @@ _units_edit() { # <mountpoint> <staging directory>
             || fail "$name did not land on this disk"
         n=$((n + 1))
     done
+    _units_sysctl "$m" "$work"; n=$((n + SYSCTL_N))
+    say "units: installed $n file(s)"
+}
+
+# The sysctl drop-ins, the same for either init (both read /etc/sysctl.d).
+SYSCTL_N=0
+_units_sysctl() { # <mountpoint> <staging directory>
+    local m="$1" work="$2" f name
+    SYSCTL_N=0
     for f in "$work"/sysctl.d/*; do
         [ -f "$f" ] || continue
         name=$(basename "$f")
@@ -943,21 +980,21 @@ _units_edit() { # <mountpoint> <staging directory>
         cat "$f" > "$m/etc/sysctl.d/$name"
         chmod 0644 "$m/etc/sysctl.d/$name"; chown 0:0 "$m/etc/sysctl.d/$name"
         [ -s "$m/etc/sysctl.d/$name" ] || fail "$name did not land on this disk"
-        n=$((n + 1))
+        SYSCTL_N=$((SYSCTL_N + 1))
     done
-    say "units: installed $n file(s)"
 }
 
-# units <device> -- the systemd units and sysctl drop-ins that make a booted
-# image a *fleet* system (a self-return watchdog, a self-disarm, the
-# profiling knobs), as a tar on stdin: the bodies are composed where the
-# profile's values are, and land here in two fixed directories under /etc.
+# units <device> -- what makes a booted image a *fleet* system (a self-return
+# watchdog, a self-disarm, the profiling knobs), as a tar on stdin: systemd
+# units and init.d scripts for the same jobs, plus sysctl drop-ins, composed
+# where the profile's values are. Which set lands is decided by the init the
+# disk carries, in three fixed directories under /etc.
 # On stdin, not argv, because a unit is a file rather than a word -- and
 # bounded, because stdin from a caller is not a promise about size.
 UNITS_MAX=1048576
 v_units() {
     local dev tmp work rc
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     tmp=$(mktemp /run/wk-card-units.XXXXXX); chmod 0600 "$tmp"
     head -c "$((UNITS_MAX + 1))" > "$tmp"
     if [ "$(stat -c '%s' "$tmp")" -gt "$UNITS_MAX" ]; then
@@ -988,7 +1025,7 @@ _boot_check_run() { # <mountpoint> <dtb>
 # find a kernel **halts**, which costs a trip to the board.
 v_boot_check() {
     local dev rc=0
-    dev=$(gate "${1:-}")
+    gate "${1:-}"; dev=$GATED_DEV
     check_name "${2:-}"
     [ -r "$CHECK_BOOT_FILES" ] || deny "there is no boot-file checker at $CHECK_BOOT_FILES on this
     machine. It is boot/check-boot-files.py from wk-tools, installed root-owned
@@ -1007,16 +1044,18 @@ v_boot_check() {
 # each hashed as it passes, and the hashes printed for the read-back check
 # (`verify` under @second re-reads the same two ranges). Python, since this
 # is byte-offset arithmetic on a partition table and a one-pass split of a
-# stream (CLAUDE.md: structured data is not handled in bash).
-_second_write() { # <disk>
-    python3 - "$1" <<'PY'
+# stream (CLAUDE.md: structured data is not handled in bash). The image is
+# on this helper's stdin, and the program arrives on stdin too, so the image
+# is handed to python on fd 3 before the heredoc takes fd 0.
+_second_write() { # <disk>   -- image bytes on stdin
+    python3 - "$1" 3<&0 <<'PY'
 import hashlib, json, os, subprocess, sys
 dev = sys.argv[1]
 def part(n): return dev + ("p%d" % n if dev[-1].isdigit() else "%d" % n)
 def say(m): print("wk-card-priv: " + m, flush=True)
 def fail(m): print("wk-card-priv: " + m, file=sys.stderr, flush=True); sys.exit(1)
 
-src = sys.stdin.buffer
+src = os.fdopen(3, "rb")
 mbr = src.read(512)
 if len(mbr) != 512 or mbr[510:512] != b"\x55\xaa":
     fail("the image does not start with an MBR")
@@ -1038,6 +1077,11 @@ def table():
 have = table()
 if set(have) == {1, 2}:
     last = have[2]["start"] + have[2]["size"]
+    with open(dev, "rb") as fh:
+        total = os.lseek(fh.fileno(), 0, os.SEEK_END) // 512
+    if last + b_size + r_size > total:
+        fail("the image's partitions (%d + %d sectors) do not fit the %d sectors left on %s after partition 2"
+             % (b_size, r_size, max(total - last, 0), dev))
     script = "start=%d, size=%d, type=c\nstart=%d, type=83\n" % (last, b_size, last + b_size)
     subprocess.run(["sfdisk", "--append", "--no-reread", dev], input=script.encode(), check=True,
                    stdout=subprocess.DEVNULL)
@@ -1084,7 +1128,7 @@ PY
 
 # `verify <disk>@second <boot bytes> <boot sha> <root bytes> <root sha>`
 v_second_verify() {
-    local dev got; dev=$(gate "${1:-}"); shift
+    local dev got; gate "${1:-}"; dev=$GATED_DEV; shift
     for n in "${1:-}" "${3:-}"; do case "$n" in ''|*[!0-9]*) deny "'$n' is not a byte count" ;; esac; done
     check_hex "${2:-}"; check_hex "${4:-}"
     got=$(head -c "$1" "$(part "$dev" 3)" | sha256sum | cut -d' ' -f1)
@@ -1099,19 +1143,35 @@ v_second_verify() {
 # from partition 3 into `second/` on the rescue's boot partition and selected
 # with os_prefix. The rescue's config.txt steps aside (config.txt.rescue)
 # for the second system's own plus the one os_prefix line -- for one boot:
-# the second system moves it back on its first boot (S00wk-disarm, the
-# buildroot overlay), and `second-disarm` does the same from the rescue.
-_second_boot_mount() { # <disk> -> where this machine's own boot partition is mounted
-    local m; m=$(findmnt -no TARGET "$(part "$1" 1)" 2>/dev/null | head -1)
-    [ -n "$m" ] || fail "$(part "$1" 1) is not mounted; this machine's own boot partition should be"
-    printf '%s' "$m"
+# the second system moves it back as the first thing it does (the
+# self-disarm `wk sysimage write` stages into every fleet system, from the
+# board's driver: boot/pi-sd.sh), and `second-disarm` does the same from
+# the rescue.
+
+# The rescue's boot partition, for one edit: where it is already mounted
+# when this machine runs from the disk, mounted here otherwise (a card in
+# a reader).
+_second_with_boot() { # <disk> <function> [args...] -- calls <function> <boot mountpoint> [args...]
+    local dev="$1" fn="$2" m; shift 2
+    m=$(findmnt -no TARGET "$(part "$dev" 1)" 2>/dev/null | head -1)
+    if [ -n "$m" ]; then
+        "$fn" "$m" "$@"
+    else
+        with_mount "$(part "$dev" 1)" "$fn" "$@"
+    fi
 }
-_second_arm_copy() { # <mountpoint of partition 3> <boot mountpoint>
-    local src="$1" boot="$2"
-    rm -rf "$boot/second.part"; mkdir -p "$boot/second.part"
-    cp -a "$src"/. "$boot/second.part/" || fail "could not copy the second system's boot files"
-    [ -f "$boot/second.part/cmdline.txt" ] || fail "the second system's boot partition has no cmdline.txt"
-    [ -f "$boot/second.part/config.txt" ]  || fail "the second system's boot partition has no config.txt"
+_second_stage_copy() { # <mountpoint of partition 3> <staging directory>
+    local src="$1" stage="$2"
+    cp -a "$src"/. "$stage/" || fail "could not read the second system's boot files"
+    [ -f "$stage/cmdline.txt" ] || fail "the second system's boot partition has no cmdline.txt"
+    [ -f "$stage/config.txt" ]  || fail "the second system's boot partition has no config.txt"
+}
+# Plain copies onto the FAT: `cp -a` would try to preserve ownership there
+# and report a failure over a filesystem that has none to preserve.
+_second_arm_install() { # <boot mountpoint> <staging directory>
+    local boot="$1" stage="$2"
+    rm -rf "$boot/second.part"
+    cp -r "$stage" "$boot/second.part" || fail "could not copy the second system's boot files onto the boot partition"
     rm -rf "$boot/second"; mv "$boot/second.part" "$boot/second"
     [ -f "$boot/config.txt.rescue" ] || cp "$boot/config.txt" "$boot/config.txt.rescue"
     {
@@ -1121,17 +1181,8 @@ _second_arm_copy() { # <mountpoint of partition 3> <boot mountpoint>
     mv "$boot/config.txt.armed" "$boot/config.txt"
     sync
 }
-v_second_arm() {
-    local dev boot; dev=$(gate "${1:-}")
-    [ -n "$SECOND" ] || deny "second-arm takes '<disk>@second'"
-    boot=$(_second_boot_mount "$dev")
-    with_mount -r "$(part "$dev" 3)" _second_arm_copy "$boot"
-    say "armed: the second system boots once (os_prefix=second/); the rescue's config.txt is kept as config.txt.rescue"
-}
-v_second_disarm() {
-    local dev boot; dev=$(gate "${1:-}")
-    [ -n "$SECOND" ] || deny "second-disarm takes '<disk>@second'"
-    boot=$(_second_boot_mount "$dev")
+_second_disarm_edit() { # <boot mountpoint>
+    local boot="$1"
     if [ -f "$boot/config.txt.rescue" ]; then
         mv "$boot/config.txt.rescue" "$boot/config.txt"; sync
         say "disarmed: the rescue's config.txt is back"
@@ -1139,11 +1190,28 @@ v_second_disarm() {
         say "not armed"
     fi
 }
+_second_state_edit() { # <boot mountpoint>
+    [ -f "$1/config.txt.rescue" ] && say "armed=yes" || say "armed=no"
+}
+v_second_arm() {
+    local dev stage; gate "${1:-}"; dev=$GATED_DEV
+    [ -n "$SECOND" ] || deny "second-arm takes '<disk>@second'"
+    [ -b "$(part "$dev" 4)" ] || fail "$dev holds no second system (no partition 4); write one first"
+    stage=$(mktemp -d /run/wk-card-second.XXXXXX)
+    with_mount -r "$(part "$dev" 3)" _second_stage_copy "$stage" || { rm -rf "$stage"; exit 1; }
+    _second_with_boot "$dev" _second_arm_install "$stage" || { rm -rf "$stage"; exit 1; }
+    rm -rf "$stage"
+    say "armed: the second system boots once (os_prefix=second/); the rescue's config.txt is kept as config.txt.rescue"
+}
+v_second_disarm() {
+    local dev; gate "${1:-}"; dev=$GATED_DEV
+    [ -n "$SECOND" ] || deny "second-disarm takes '<disk>@second'"
+    _second_with_boot "$dev" _second_disarm_edit
+}
 v_second_state() {
-    local dev boot; dev=$(gate "${1:-}")
+    local dev; gate "${1:-}"; dev=$GATED_DEV
     [ -n "$SECOND" ] || deny "second-state takes '<disk>@second'"
-    boot=$(_second_boot_mount "$dev")
-    [ -f "$boot/config.txt.rescue" ] && say "armed=yes" || say "armed=no"
+    _second_with_boot "$dev" _second_state_edit
     [ -b "$(part "$dev" 4)" ] && say "present=yes" || say "present=no"
 }
 

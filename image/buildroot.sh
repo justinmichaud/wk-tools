@@ -36,12 +36,10 @@
 #               The completion line requires that file's mtime newer than
 #               the run's own start, since a `make` with nothing to do can
 #               report success too.
-#   init        BusyBox, so no systemd units: install_units reads the init
-#               out of the rootfs and refuses rather than writing units
-#               nothing will start. The self-disarm and self-return are init
-#               scripts generated from the board's driver at build time
-#               (image/buildroot/fleet-overlay.sh); S99tailscale is the
-#               tailnet join's.
+#   init        BusyBox, so no systemd units: the card helper reads the init
+#               out of the rootfs and installs the init.d scripts `wk
+#               sysimage write` stages for the same jobs (self-return,
+#               self-disarm) instead. S99tailscale is the join's equivalent.
 #
 # Owed work: docs/HANDOFF-ab-bench.md #3.
 

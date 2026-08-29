@@ -67,7 +67,8 @@ chown() { :; }
 # refuses is admin/wk-card-priv's own contract (tests/test_wifi_seed.py), not
 # what these edits do once it has allowed a disk.
 _MOUNTED = '''
-gate() { printf '%s' "$1"; }
+BOOTP=1; ROOTP=2; SECOND=""
+gate() { GATED_DEV="$1"; }
 part() { printf '%s%s' "$1" "$2"; }
 with_mount() {
     [ "$1" = -r ] && shift
@@ -299,7 +300,7 @@ class TestUnits(CardEditTest):
         (self.root / "lib" / "systemd" / "systemd").write_text("")
         work = self._staged()
         cp = self.run_helper(
-            _lift(CARD_PRIV, "_unit_target", "_units_edit")
+            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
             + f"\n_units_edit \"$ROOTDIR\" {work}\n")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         unit = self.root / "etc" / "systemd" / "system" / "wk-self-return.service"
@@ -320,18 +321,18 @@ class TestUnits(CardEditTest):
         work = self._staged()
         (work / "systemd" / "wk-self-return.service").write_text("[Unit]\n[Service]\n")
         cp = self.run_helper(
-            _lift(CARD_PRIV, "_unit_target", "_units_edit")
+            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
             + f"\n_units_edit \"$ROOTDIR\" {work}\n")
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("WantedBy", cp.stdout + cp.stderr)
 
-    def test_an_image_without_systemd_takes_nothing_and_says_so(self):
+    def test_an_image_without_any_init_takes_nothing_and_says_so(self):
         work = self._staged()
         cp = self.run_helper(
-            _lift(CARD_PRIV, "_unit_target", "_units_edit")
+            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
             + f"\n_units_edit \"$ROOTDIR\" {work}\n")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("no systemd on this disk", cp.stdout)
+        self.assertIn("neither systemd nor /etc/init.d", cp.stdout)
         self.assertFalse((self.root / "etc").exists(), "something was installed anyway")
 
     def _names(self, members):
@@ -556,7 +557,7 @@ echo DONE
         steps = [
             'disk_unmount /dev/sdX',
             'disk_write_source /dev/sdX "cat /dev/null" /dev/null',
-            'disk_verify_stream /dev/sdX 1 deadbeef',
+            'disk_verify_stream /dev/sdX /dev/null',
             'disk_parts_present /dev/sdX',
             'disk_root_spec /dev/sdX',
             'disk_retarget_root /dev/sdX',
@@ -655,7 +656,7 @@ class TestTheWriteStaysAddressedToTheReader(WkTest):
     another machine into this shell sends the rest of the write to the wrong
     board."""
 
-    _LIFTED = _lift(SYSIMAGE, "_self_disarm_for", "stage_unit", "stage_sysctl", "stage_units")
+    _LIFTED = _lift(SYSIMAGE, "_self_disarm_for", "stage_unit", "stage_sysctl", "stage_init", "stage_units")
 
     def _sh(self, body, machine="rpi5"):
         return self.bash(f"""
@@ -670,8 +671,8 @@ machine_load {machine}
 
     def test_staging_the_units_leaves_the_reader_machine_loaded(self):
         seed = self.tmp / "seed"
-        (seed / "systemd").mkdir(parents=True)
-        (seed / "sysctl.d").mkdir(parents=True)
+        for d in ("systemd", "sysctl.d", "init.d"):
+            (seed / d).mkdir(parents=True)
         cp = self._sh(f"""
 IMG_MACHINE=rpi3     # the image is for another board, whose ssh name differs
 stage_units {seed} "$(_self_disarm_for "$IMG_MACHINE")" >/dev/null 2>&1
@@ -687,15 +688,20 @@ printf 'name=%s ssh=%s role=%s driver=%s\n' \
         )
 
     def test_a_medium_armed_board_gets_its_drivers_self_disarm(self):
-        # rpi4 arms its SD card (pi-mbr, BOOT_ARMING=medium), so its image parks
-        # it on first boot; rpi3's card swap is hands-on and parks nothing.
+        # rpi4 arms its SD card (pi-mbr): its image flips the card's partition
+        # type on first boot. rpi3 arms its rescue's config.txt (pi-sd): its
+        # image puts the rescue's own back.
         cp = self._sh('_self_disarm_for rpi4')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("conv=notrunc", cp.stdout, cp.stdout + cp.stderr)
         self.assertNotIn("'", cp.stdout, "a quote here would split systemd's ExecStart")
+        cp = self._sh('_self_disarm_for rpi3')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("config.txt.rescue", cp.stdout, cp.stdout + cp.stderr)
+        self.assertNotIn("'", cp.stdout, "a quote here would split systemd's ExecStart")
 
-    def test_a_hands_on_board_has_nothing_to_park(self):
-        for machine in ("rpi3", "nosuchmachine", ""):
+    def test_an_unknown_board_has_nothing_to_park(self):
+        for machine in ("nosuchmachine", ""):
             with self.subTest(machine=machine):
                 cp = self._sh(f'_self_disarm_for {machine or '""'}')
                 self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -703,12 +709,30 @@ printf 'name=%s ssh=%s role=%s driver=%s\n' \
 
     def test_the_self_disarm_unit_is_skipped_when_there_is_nothing_to_park(self):
         seed = self.tmp / "seed2"
-        (seed / "systemd").mkdir(parents=True)
-        (seed / "sysctl.d").mkdir(parents=True)
-        cp = self._sh(f'stage_units {seed} "" >/dev/null 2>&1; ls {seed}/systemd')
+        for d in ("systemd", "sysctl.d", "init.d"):
+            (seed / d).mkdir(parents=True)
+        cp = self._sh(f'stage_units {seed} "" >/dev/null 2>&1; ls {seed}/systemd {seed}/init.d')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertNotIn("wk-self-disarm.service", cp.stdout, cp.stdout)
+        self.assertNotIn("wk-self-disarm", cp.stdout, cp.stdout)
         self.assertIn("wk-self-return.service", cp.stdout, cp.stdout)
+        self.assertIn("S99wk-self-return", cp.stdout, cp.stdout)
+
+    def test_a_busybox_image_gets_the_same_two_jobs_as_init_scripts(self):
+        seed = self.tmp / "seed3"
+        for d in ("systemd", "sysctl.d", "init.d"):
+            (seed / d).mkdir(parents=True)
+        cp = self._sh(f'stage_units {seed} "$(_self_disarm_for rpi3)" >/dev/null 2>&1; ls {seed}/init.d')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.split(), ["S11wk-self-disarm", "S99wk-self-return"])
+        disarm = (seed / "init.d" / "S11wk-self-disarm").read_text()
+        self.assertTrue(disarm.startswith("#!/bin/sh\n"))
+        self.assertIn("/etc/wk/rescue", disarm, "the script is not gated on the rescue marker")
+        self.assertIn("config.txt.rescue", disarm)
+        ret = (seed / "init.d" / "S99wk-self-return").read_text()
+        self.assertIn("sleep 600", ret)
+        self.assertIn("wk-keep-running", ret)
+        for script in (disarm, ret):
+            self.assertEqual(subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True).returncode, 0)
 
 
 if __name__ == "__main__":

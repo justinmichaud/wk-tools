@@ -131,14 +131,6 @@ if [ "$OVERLAY_WIFI" = 1 ]; then
         || fail "could not assemble the wifi overlay"
     OVERLAY="${OVERLAY:+$OVERLAY }$WIFI_OVERLAY"
 fi
-# Every fleet image hands its board back (self-disarm, self-return); the
-# scripts come from the board's driver, so the profile names the machine.
-FLEET_OVERLAY="$WORKDIR/wk-overlay-fleet"
-say "assembling the fleet overlay"
-/opt/wk-tools/image/buildroot/fleet-overlay.sh "$NAME" "$FLEET_OVERLAY" \
-    || fail "could not assemble the fleet overlay"
-OVERLAY="${OVERLAY:+$OVERLAY }$FLEET_OVERLAY"
-
 # --- the configuration -----------------------------------------------------
 # BR2_EXTERNAL must be passed on every make: buildroot records it in
 # output/.br-external.mk, and a later make without it fails on the recorded path.
