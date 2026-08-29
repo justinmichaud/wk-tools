@@ -381,11 +381,7 @@ fi
 } > "$HOME/.lldbinit"
 
 # --- shell -------------------------------------------------------------------
-# ~/.local/bin as well as the tooling: that is where the Claude installer puts
-# its own launcher (a symlink into ~/.local/share/claude/versions), and without
-# it on PATH `wk claude` -- which runs `bash -lc "exec claude ..."` -- fails
-# with "claude: not found" in a workspace where the CLI is installed and
-# working. The image does not put it there and neither did anything else.
+# PATH comes from shell/bashrc (shell/path.sh), not from a second list here.
 #
 # The `cd` is guarded on an interactive shell, and that is not decoration:
 # bash started by sshd reads ~/.bashrc even non-interactively, so an unguarded
@@ -394,8 +390,8 @@ fi
 # of the home directory. (`wk zed` asks sshd for internal-sftp, which runs no
 # shell at all, and this guard is the other half of that fix.)
 grep -qF 'wk-tools/shell/bashrc' "$HOME/.bashrc" 2>/dev/null || \
-    printf '\n. %s/shell/bashrc\nexport PATH="%s:$HOME/.local/bin:$PATH"\ncase $- in *i*) cd %s ;; esac\n' \
-        "$WK_TOOLS" "$WK_TOOLS" "$SRC" >> "$HOME/.bashrc"
+    printf '\n. %s/shell/bashrc\ncase $- in *i*) cd %s ;; esac\n' \
+        "$WK_TOOLS" "$SRC" >> "$HOME/.bashrc"
 
 # bash reads ~/.bashrc for interactive non-login shells and ~/.bash_profile for
 # login shells, and the image ships neither. Without this, `wk enter` gets the

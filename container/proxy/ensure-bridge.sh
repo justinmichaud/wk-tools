@@ -31,21 +31,13 @@ fi
 
 # The workspace's own tools, on PATH, for every command that comes through here.
 #
-# ~/.local/bin is where the Claude installer puts its launcher and /opt/wk-tools
-# is `wk` itself; a login shell picks both up from ~/.bashrc, and *nothing that
-# is not a login shell does* -- so `wk enter <ws> claude` answered "not found"
-# about a CLI that was installed and working two directories away. Here rather
-# than in the container's environment because this file is the one wrapper every
-# exec path already goes through, and it is read from /opt/wk-tools, so every
-# workspace that already exists gets it without being recreated.
-case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *) PATH="$HOME/.local/bin:$PATH" ;;
-esac
-case ":$PATH:" in
-    *":/opt/wk-tools:"*) ;;
-    *) PATH="/opt/wk-tools:$PATH" ;;
-esac
-export PATH
+# A login shell gets this from ~/.bashrc, and *nothing that is not a login
+# shell does* -- so `wk enter <ws> claude` answered "not found" about a CLI
+# that was installed and working two directories away. Here rather than in the
+# container's environment because this file is the one wrapper every exec path
+# already goes through, and it is read from /opt/wk-tools, so every workspace
+# that already exists gets it without being recreated.
+WK_TOOLS_DIR=/opt/wk-tools
+. "$WK_TOOLS_DIR/shell/path.sh"
 
 exec "$@"

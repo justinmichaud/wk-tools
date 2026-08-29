@@ -37,10 +37,12 @@ _sha256() { $SHA256; }
 # what runs; `lock.mdb` because an LMDB lock file is rewritten by any
 # process that opens the database, even a read, reporting permanent false
 # drift. Sorted under LC_ALL=C so two machines with different locales agree.
+# Symlinks count: bin/wk is one, and it is the name every shell's PATH holds,
+# so a copy that lost it must not hash equal to one that has it.
 tree_hash() {
     # shellcheck disable=SC2086 -- $SHA256 is a deliberate command word list.
     ( cd "$WK_ROOT" && \
-      find . -type f -not -path './.git/*' -not -name '*.pyc' -not -name 'lock.mdb' -print0 \
+      find . \( -type f -o -type l \) -not -path './.git/*' -not -name '*.pyc' -not -name 'lock.mdb' -print0 \
       | LC_ALL=C sort -z \
       | xargs -0 $SHA256 ) | _sha256 | cut -c1-12
 }

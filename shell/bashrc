@@ -365,21 +365,11 @@ export VISUAL="$EDITOR"
 # means suspend or switch to a second terminal instead. See container/helix/README.md.
 command -v lazygit >/dev/null 2>&1 && alias lg=lazygit
 
-# Put `wk` on PATH without disturbing anything already there ($HOME itself
-# deliberately excluded).
-_wk_bin="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)"
-case ":$PATH:" in
-  *":$_wk_bin:"*) : ;;
-  *) [ -n "$_wk_bin" ] && [ -x "$_wk_bin/wk" ] && PATH="$_wk_bin:$PATH" ;;
-esac
-# container/bin's workspace-only helpers (strip-addresses, commit-count, etc.)
-# are scripts rather than verbs so the checkout can see them -- needs PATH.
-case ":$PATH:" in
-  *":$_wk_bin/container/bin:"*) : ;;
-  *) [ -n "$_wk_bin" ] && [ -d "$_wk_bin/container/bin" ] && PATH="$_wk_bin/container/bin:$PATH" ;;
-esac
-unset _wk_bin
-export PATH
+# What goes on PATH is shell/path.sh's decision, not this file's: a container
+# exec reads no rc file and needs the same answer (container/proxy/ensure-bridge.sh).
+WK_TOOLS_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd)"
+[ -z "$WK_TOOLS_DIR" ] || . "$WK_TOOLS_DIR/shell/path.sh"
+unset WK_TOOLS_DIR
 
 # Scroll-back-clearing clear.
 alias clear="clear && printf '\033[3J'"
