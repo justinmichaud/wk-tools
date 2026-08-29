@@ -518,8 +518,8 @@ _from_filter() { # <path> -- prints the command that turns those bytes into an i
 # --force: a card with no tailnet identity is reachable only over whatever
 # LAN it lands on. This preflight decides it; disk_seed_tailnet
 # (boot/disk.sh) assumes it and only writes.
-_tailnet_key_preflight() { # <IMG_MACHINE>
-    local name; name=$(_tailnet_name_for "${1:-}")
+_tailnet_key_preflight() { # <IMG_MACHINE> <role>
+    local name; name=$(_tailnet_name_for "${1:-}" "${2:-bench}")
     [ -n "$name" ] || die "this image joins the tailnet on first boot, and nothing here
     knows what name it should answer to -- the image records no machine, so the
     card would join under the image's own hostname and come up unreachable by
@@ -745,8 +745,8 @@ EOF
         # boot/disk.sh) rather than being described a second time.
         DISK_DRY=1
     else
-        _tailnet_key_preflight "${IMG_MACHINE:-}"
-        _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}")"
+        _tailnet_key_preflight "${IMG_MACHINE:-}" "$role"
+        _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")"
         _wifi_creds_preflight "${IMG_MACHINE:-}"
 
         warn "this ERASES $DISK_DEV on $DISK_MACHINE, whatever is on it now."
@@ -816,7 +816,7 @@ source=$from"
     fi
 
     disk_seed_role "$DISK_DEV" "$role"
-    disk_seed_tailnet "$DISK_DEV" "$(_tailnet_name_for "${IMG_MACHINE:-}")"
+    disk_seed_tailnet "$DISK_DEV" "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")"
     disk_seed_wifi "$DISK_DEV" "${IMG_MACHINE:-}"
 
     # Growing is opt-in: a card grown to fill has no room for a second
@@ -858,12 +858,20 @@ source=$from"
     fi
 }
 
-# The name a system written for a machine joins the tailnet as (MACH_BENCH_SSH,
-# boot/machines.sh), so a workstation's own install keeps its name. In a
-# subshell: the MACH_* of the machine holding the card reader stay loaded.
-_tailnet_name_for() {
+# The name a system written for a machine joins the tailnet as, by role: a
+# bench system as MACH_BENCH_SSH (`<board>-bench`), a rescue as MACH_SSH --
+# the board's host mode, which on a bench device is the rescue itself
+# (`<board>-rescue`), and on a workstation is its own install, which is never
+# written. Two names because each written system joins as its own node, and
+# a second join under an existing name comes up renamed. In a subshell: the
+# MACH_* of the machine holding the card reader stay loaded.
+_tailnet_name_for() { # <machine> <bench|rescue>
     [ -n "${1:-}" ] || return 0
-    ( machine_load "$1" >/dev/null 2>&1 && printf '%s' "${MACH_BENCH_SSH:-}" ) || true
+    ( machine_load "$1" >/dev/null 2>&1 || exit 0
+      case "${2:-bench}" in
+          rescue) printf '%s' "${MACH_SSH:-}" ;;
+          *)      printf '%s' "${MACH_BENCH_SSH:-}" ;;
+      esac ) || true
 }
 
 cmd_write() {

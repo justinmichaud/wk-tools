@@ -417,6 +417,11 @@ yocto_build() {
 
     if [ -n "$dry" ]; then
         yocto_dry_run "$ws" "$stage"
+        [ -z "$slot" ] || {
+            log "  commit      $commit"
+            log "  slot        $slot -> $(image_slot_dir "$profile" "$slot")"
+            log "              WebKit's build-webkit --cross-target of that commit, packed as a slot"
+        }
         return 0
     fi
 

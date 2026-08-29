@@ -13,6 +13,7 @@ parser, standalone and testable) and cmd/sysimage (_wifi_creds_preflight).
 
 Run: python3 -m unittest tests.test_wifi_seed -v
 """
+import os
 import re
 import subprocess
 import tempfile
@@ -121,8 +122,8 @@ class TestWifiHostVerb(unittest.TestCase):
         # printf's FORMAT argument is what interprets \n; ssid/psk arrive as
         # %s substitutions so a value cannot inject a second line.
         stub = (
-            f'_netplan_wifi() {{ tmp=$(mktemp); printf "ssid=%s\\npsk=%s\\n" {ssid!r} {psk!r} > "$tmp"; printf "%s" "$tmp"; }}'
-            if found else '_netplan_wifi() { return 3; }'
+            f'_host_wifi() {{ tmp=$(mktemp); printf "ssid=%s\\npsk=%s\\n" {ssid!r} {psk!r} > "$tmp"; printf "%s" "$tmp"; }}'
+            if found else '_host_wifi() { return 3; }'
         )
         script = f'''
 say() {{ printf 'wk-card-priv: %s\\n' "$*"; }}
@@ -643,3 +644,37 @@ class TestWifiJoinScriptIsLoud(unittest.TestCase):
     def test_service_has_no_condition_that_skips_the_loud_boot(self):  # static
         self.assertNotIn("ConditionPathExists", self.SERVICE.read_text())
 
+
+
+class TestRescueReadsItsOwnCredential(WkTest):
+    """`_wpa_conf_wifi` (admin/wk-card-priv) -- what `wifi-host` and
+    `wifi-from-host` read on a system wk wrote, which has no netplan -- gives
+    back exactly what `_wifi_edit` seeded, so a board's rescue can seed the
+    bench medium beside it with its own WiFi and no reader in the loop."""
+
+    def _read(self, conf):
+        script = f'''
+{_lift(CARD_PRIV, "_wpa_conf_wifi")}
+out=$(_wpa_conf_wifi {str(conf)!r}) || exit $?
+cat "$out"; rm -f "$out"
+'''
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10,
+                              env={**os.environ, "TMPDIR": str(self.tmp)})
+
+    def test_reads_back_what_wifi_edit_wrote(self):
+        with tempfile.TemporaryDirectory() as d:
+            script = f'''
+fail() {{ printf 'wk-card-priv: %s\\n' "$*" >&2; exit 1; }}
+chown() {{ :; }}
+{_lift(CARD_PRIV, "check_wifi_value")}
+{_lift(CARD_PRIV, "_wifi_edit")}
+_wifi_edit {d} 'My Test Net' 'hunter2 pass'
+'''
+            subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, check=True)
+            cp = self._read(Path(d) / "etc/wpa_supplicant/wpa_supplicant-wlan0.conf")
+            self.assertEqual(cp.returncode, 0, cp.stderr)
+            self.assertEqual(cp.stdout, "ssid=My Test Net\npsk=hunter2 pass\n")
+
+    def test_no_credential_is_status_3_like_netplan(self):
+        self.assertEqual(self._read(Path("/dev/null")).returncode, 3)
+        self.assertEqual(self._read(self.tmp / "missing.conf").returncode, 3)

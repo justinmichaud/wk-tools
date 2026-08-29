@@ -40,7 +40,10 @@ on its own medium. A rescue is also the board's own card writer: it carries
 `admin/wk-card-priv` (the yocto `meta-wk-rescue` layer), so
 `wk sysimage write --from <image> --disk <board>:<device>` and `wk boot`
 put a bench system on the board's *other* medium from the rescue itself, and
-an A/B never needs a card carried to a reader. A rescue written from an image
+an A/B never needs a card carried to a reader. The two systems are two
+tailnet nodes with two names -- the rescue `<board>-rescue` (`MACH_SSH`), the
+bench system `<board>-bench` (`MACH_BENCH_SSH`) -- since each written card
+joins as its own node and a second join under one name comes up renamed. A rescue written from an image
 that predates that layer (both boards' rescues as of 2026-08-28) cannot; it is
 rewritten once, from a reader, and never again. The only card a person
 handles is a board's first rescue.

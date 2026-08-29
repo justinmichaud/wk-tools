@@ -371,6 +371,20 @@ check_wifi_value() { # <what> <value>
 # NetworkManager reader, and there is nothing else to read besides.
 # Embedded rather than a sibling file: admin/install.sh installs this helper
 # alone. tests/test_wifi_seed.py lifts the python from here to test it.
+# This machine's own WiFi credential, as a 0600 temp file holding ssid=/psk=,
+# or returns 3. Two kinds of machine hold it two ways: a workstation in its
+# netplan; a system wk wrote (a board's rescue) in the wpa_supplicant conf
+# the card seeded (_wifi_edit's own format, read back the same way), which is
+# what lets a rescue seed the bench medium beside it with no reader in the
+# loop. Whichever this machine has; a machine with neither has no WiFi to give.
+_host_wifi() {
+    if ls /etc/netplan/*.yaml >/dev/null 2>&1; then
+        _netplan_wifi
+    else
+        _wpa_conf_wifi /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+    fi
+}
+
 _netplan_wifi() { # -> a 0600 temp file holding ssid=/psk=, or returns 3
     local tmp; tmp=$(mktemp /run/wk-card-wifi.XXXXXX); chmod 0600 "$tmp"
     if cat /etc/netplan/*.yaml 2>/dev/null | python3 -c '
@@ -393,14 +407,23 @@ sys.exit(3)
     fi
 }
 
-# wifi-host -- read-only: is this machine (the one holding the card reader)
-# on a WiFi network with a credential, and what is it called? No device
-# argument and nothing gated -- it touches no disk, only its own netplan.
-# The PSK is read and discarded immediately; only the SSID is ever said.
-# `wk sysimage write`'s preflight asks this before anything is erased.
+# The first network block's quoted ssid= and psk= out of a wpa_supplicant
+# conf (the shape _wifi_edit writes), the same temp-file contract as
+# _netplan_wifi. sed only: a rescue has no PyYAML.
+_wpa_conf_wifi() { # <conf> -> a 0600 temp file holding ssid=/psk=, or returns 3
+    local ssid psk tmp
+    [ -r "$1" ] || return 3
+    ssid=$(sed -n 's/^[[:space:]]*ssid="\(.*\)"$/\1/p' "$1" | head -1)
+    psk=$(sed -n 's/^[[:space:]]*psk="\(.*\)"$/\1/p' "$1" | head -1)
+    [ -n "$ssid" ] && [ -n "$psk" ] || return 3
+    tmp=$(mktemp "${TMPDIR:-/run}/wk-card-wifi.XXXXXX"); chmod 0600 "$tmp"
+    printf 'ssid=%s\npsk=%s\n' "$ssid" "$psk" > "$tmp"
+    printf '%s' "$tmp"
+}
+
 v_wifi_host() {
     local tmp ssid
-    if tmp=$(_netplan_wifi); then
+    if tmp=$(_host_wifi); then
         ssid=$(sed -n 's/^ssid=//p' "$tmp" | head -1)
         rm -f "$tmp"
         say "wifi-host: yes ssid=$ssid"
@@ -409,15 +432,11 @@ v_wifi_host() {
     fi
 }
 
-# wifi-from-host <device> -- seeds this machine's own WiFi credential
-# (_netplan_wifi) onto partition 2, the same edit the old stdin-fed `wifi`
-# verb made. The PSK never leaves root: it is never an argument, an
-# environment variable, or a line this helper prints.
 v_wifi_from_host() {
     local dev tmp ssid psk rc
     dev=$(gate "${1:-}")
-    tmp=$(_netplan_wifi) \
-        || fail "no WiFi credential in this machine's netplan; the write preflight (wifi-host) should have refused before $dev was touched"
+    tmp=$(_host_wifi) \
+        || fail "no WiFi credential on this machine (netplan, or the wpa_supplicant conf a card seeded); the write preflight (wifi-host) should have refused before $dev was touched"
     ssid=$(sed -n 's/^ssid=//p' "$tmp" | head -1)
     psk=$(sed -n 's/^psk=//p' "$tmp" | head -1)
     rm -f "$tmp"
