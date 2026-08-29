@@ -110,6 +110,11 @@ fi
 # not two").
 _card_target="$_libexec/wk-card-priv"
 _card_source="$WK_ROOT/admin/wk-card-priv"
+# The boot-file checker the helper's `boot-check` runs as root, beside it
+# under the name the helper knows (CHECK_BOOT_FILES), never at a path a
+# caller names.
+_check_target="$_libexec/wk-check-boot-files.py"
+_check_source="$WK_ROOT/boot/check-boot-files.py"
 _card_sudoers=/etc/sudoers.d/zzz-wk-card
 _card_sudoers_old=/etc/sudoers.d/wk-card
 
@@ -121,6 +126,7 @@ elif ! is_linux; then
 else
     _card_needs=0
     if [ ! -f "$_card_target" ] || ! cmp -s "$_card_source" "$_card_target"; then _card_needs=1; fi
+    if [ ! -f "$_check_target" ] || ! cmp -s "$_check_source" "$_check_target"; then _card_needs=1; fi
     _card_owner=$(stat -c '%U' "$_card_target" 2>/dev/null || echo "")
     [ -f "$_card_target" ] && [ "$_card_owner" != root ] && _card_needs=1
 
@@ -143,7 +149,8 @@ else
         info "installing the card helper (requires sudo once)"
         sudo install -d -o root -g root -m 0755 "$_libexec"
         sudo install -o root -m 0755 "$_card_source" "$_card_target"
-        changed "installed $_card_target"
+        sudo install -o root -m 0644 "$_check_source" "$_check_target"
+        changed "installed $_card_target and $_check_target"
 
         _card_tmp="$(mktemp)"
         printf '%s\n' "$(id -un) ALL=(root) NOPASSWD: $_card_target" > "$_card_tmp"

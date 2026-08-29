@@ -3,7 +3,7 @@
 - [ ] make mutating commands warn or refuse when their target machine is armed
 - [ ] build moose's bench mode (docs/Urgent/HANDOFF-moose-bench.md) [needs moose]
 - [ ] rpi3: a stage-2 revert for a bench kernel that panics before its self-disarm runs (today the os_prefix line stays until `wk boot rpi3 --disarm` from the rescue, which that boot never reaches): `tryboot` if the Pi 3 firmware honours it -- measure with `reboot "0 tryboot"` and a `tryboot.txt` on the board -- else an initramfs that puts config.txt back [needs the rpi3]
-- [ ] rpi3: verify the `@second` write, `wk boot rpi3`, the S11 self-disarm and the S99 self-return end to end on the board [needs the rpi3]
+- [ ] rpi3: the bench system's first boot with a network -- `wk boot rpi3`, `rpi3-bench` joins, `wk pi deploy`, `wk ab` (the `@second` write from the rescue, the arming, the S11 self-disarm and the S99 self-return are measured: the board handed itself back to `rpi3-rescue` 15 min after arming, on an image with no wpa_supplicant) [needs the rebuilt `wpewebkit-2.38-buildroot-rpi3-32` image, hours]
 - [ ] rpi4: verify `S11wk-self-disarm` parks the card and `S99wk-self-return` reboots an unclaimed board on a real buildroot boot (the yocto unit's `$$`-escaped ExecStart has run only in tests) [needs the card re-written by a helper that stages init.d scripts]
 - [ ] rebuild and re-flash rpi3 onto the tailnet layer [needs a Pi card in hand]
 - [ ] verify the rescue marker plus both self-return/self-disarm units end to end on a real board [needs a Pi card in hand]

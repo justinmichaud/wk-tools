@@ -16,12 +16,23 @@ RECIPE = LAYER / "recipes-wk/wk-card-priv/wk-card-priv.bb"
 
 
 class TestRescueLayer(unittest.TestCase):
-    def test_recipe_installs_the_repositorys_own_helper(self):
+    def test_recipe_installs_the_repositorys_own_helper_and_checker(self):
+        """admin/wk-card-priv and boot/check-boot-files.py, from the checkout,
+        beside each other under the name the helper's boot-check runs"""
         text = RECIPE.read_text()
-        m = re.search(r'FILESEXTRAPATHS:prepend := "\$\{THISDIR\}/([^:"]+):"', text)
-        self.assertIsNotNone(m, "the recipe must point FILESEXTRAPATHS at the repository's admin/")
-        self.assertTrue((RECIPE.parent / m.group(1) / "wk-card-priv").resolve().samefile(REPO / "admin/wk-card-priv"))
-        self.assertIn('SRC_URI = "file://wk-card-priv"', text)
+        m = re.search(r'FILESEXTRAPATHS:prepend := "((?:\$\{THISDIR\}/[^:"]+:)+)"', text)
+        self.assertIsNotNone(m, "the recipe must point FILESEXTRAPATHS at the repository's own directories")
+        dirs = [RECIPE.parent / d.replace("${THISDIR}/", "") for d in m.group(1).rstrip(":").split(":")]
+        found = {}
+        for name in ("wk-card-priv", "check-boot-files.py"):
+            for d in dirs:
+                if (d / name).is_file():
+                    found[name] = (d / name).resolve()
+        self.assertTrue(found.get("wk-card-priv", REPO).samefile(REPO / "admin/wk-card-priv"))
+        self.assertTrue(found.get("check-boot-files.py", REPO).samefile(REPO / "boot/check-boot-files.py"))
+        self.assertIn('SRC_URI = "file://wk-card-priv file://check-boot-files.py"', text)
+        self.assertIn("${CARD_PRIV_DIR}/wk-check-boot-files.py", text)
+        self.assertIn("CHECK_BOOT_FILES=/usr/local/libexec/wk-check-boot-files.py", (REPO / "admin/wk-card-priv").read_text())
         self.assertFalse((RECIPE.parent / "files").exists(), "no second copy of the helper under files/")
 
     def test_installed_where_the_card_code_looks(self):

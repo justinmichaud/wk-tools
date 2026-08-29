@@ -737,3 +737,33 @@ printf 'name=%s ssh=%s role=%s driver=%s\n' \
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBootCheckThatCannotBeAsked(WkTest):
+    """A writer whose helper has no checker beside it cannot answer the
+    boot-file question. That is the same state as a card written for another
+    machine -- not checked -- and is reported as such, not as missing files
+    (a rescue's helper is its image's, so the remedy there is a rebuild)."""
+
+    def _check(self, helper_out, rc):
+        return bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/boot/machines.sh"
+. "{REPO}/lib/image.sh"
+MACH_NAME=rescue
+DISK_DRY=""
+card_priv() {{ printf '%s\\n' {helper_out!r}; return {rc}; }}
+disk_check_boot_files /dev/sdX@second rpi3 some.dtb && echo CONTINUED
+''')
+
+    def test_no_checker_is_not_checked_and_says_so(self):
+        cp = self._check("wk-card-priv: REFUSED: there is no boot-file checker at /usr/local/libexec/wk-check-boot-files.py on this machine.", 3)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("CONTINUED", cp.stdout)
+        self.assertIn("NOT checked", cp.stderr)
+
+    def test_missing_files_still_refuse(self):
+        cp = self._check("wk-card-priv: this card's boot partition is missing files a some.dtb board's firmware asks for", 1)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertNotIn("CONTINUED", cp.stdout)
+        self.assertIn("missing files", cp.stderr)

@@ -1,4 +1,11 @@
-Defconfigs this repository derives, because the fork does not ship them.
+Defconfigs this repository derives, because the fork does not ship them --
+or ships them short of what a fleet board needs. An external tree's configs
+take precedence over the fork's of the same name (buildroot's %_defconfig rules
+are declared externals-first).
+
+raspberrypi3_wpe_2_38_cog_defconfig is the fork's, plus BR2_PACKAGE_WPA_SUPPLICANT*:
+the fork installs the Pi 3's WiFi firmware and no wpa_supplicant, so its image
+boots with no network on a board that has no cable at the bench.
 
 The WPE buildroot fork release-pins its `cog` defconfigs for the **rpi3 only** --
 raspberrypi3_wpe_{2_22,2_28,2_38,2_42,2_46,2_50}_cog_defconfig -- and its rpi4

@@ -539,6 +539,17 @@ disk_check_boot_files() { # <device> <machine> <dtb>
     disk_would "check that every file a $machine's firmware asks for resolves on $dev" && return 0
     out=$(card_priv boot-check "$dev" "$dtb" 2>&1) || rc=$?
     [ "$rc" -eq 0 ] && { debug "$out"; return 0; }
+    # The question could not be asked, which is not an answer about the card:
+    # the same state as a card written for another machine, and reported the
+    # same way. A rescue's helper is its image's, so the remedy is a rebuild.
+    case "$out" in
+        *'no boot-file checker'*)
+            warn "$dev's boot files were NOT checked: $MACH_NAME's card helper has no boot-file
+  checker beside it. If the firmware cannot find a kernel it halts, and that costs
+  a trip to the board. The checker is installed with the helper (./setup --stage
+  quiesce on a workstation; a rebuilt rescue image carries it)."
+            return 0 ;;
+    esac
     die "$dev is missing files a $machine needs to reach its kernel:
 
 $(printf '%s\n' "$out" | sed 's/^/      /')
@@ -694,6 +705,49 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
         || die "could not seed WiFi credentials onto $dev.
     The image is written; $mach has no cable at the bench, so it would boot with
     no way to reach a network at all."
+}
+
+# A second system's tailnet node survives its rewrite: tailscaled's state on
+# partition 4 is kept aside by the helper before the split and put back after
+# it, so the new system comes up as the node the old one was -- same name,
+# same address, no join, and no collision with its own name. Prints yes or
+# no; read-only on the card, so it runs in a dry run too.
+# A helper from before this verb -- a rescue's is the one its image was built
+# with, and a rescue cannot rewrite its own partitions -- keeps nothing, and
+# says so: the rewrite then joins fresh under the name preflight, the path a
+# first write takes.
+disk_tailnet_save() { # <device>@second
+    local dev="$1" out
+    if ! card_priv status 2>/dev/null | grep -q 'tailnet-keep=yes'; then
+        warn "$MACH_NAME's card helper cannot keep a node's tailnet identity across a rewrite,
+  so the new system joins fresh; a stale node of the same name on the tailnet
+  refuses the write. The helper is the rescue image's: a rebuilt rescue, written
+  from a reader, has the current one."
+        printf no
+        return 0
+    fi
+    out=$(card_priv tailnet-save "$dev" 2>&1) || die "could not look for a tailnet identity on $dev's partition 4:
+$(printf '%s\n' "$out" | sed 's/^/    /')"
+    case "$out" in
+        *kept=yes*)
+            info "keeping the node's tailnet identity aside: the rewritten system comes back as the same node"
+            printf yes ;;
+        *kept=no*)
+            debug "$dev's partition 4 holds no tailnet identity; the new system joins fresh"
+            printf no ;;
+        *) die "$MACH_NAME's card helper did not say whether $dev's partition 4 holds a
+    tailnet identity (it said: ${out:-nothing}). Refusing to guess: a system that
+    joins under a name it already holds comes up renamed and unreachable." ;;
+    esac
+}
+
+disk_tailnet_restore() { # <device>@second
+    local dev="$1"
+    disk_would "put the kept tailnet identity back on $dev's partition 4" && return 0
+    card_priv tailnet-restore "$dev" >/dev/null \
+        || die "could not put the kept tailnet identity back on $dev.
+    The image is written; booted, it would join as a new node under a name the
+    old one still holds, and come up renamed."
 }
 
 # Which role the system on this card plays, stamped onto the card itself --

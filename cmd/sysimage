@@ -752,6 +752,11 @@ $(machine_list | sed 's/^/      /')"
     # and the last question this end can answer about the disk on its own.
     disk_refuse_unless_safe "$DISK_DEV"
 
+    # A second system being rewritten keeps its tailnet node (disk_tailnet_save):
+    # the name it already holds on the tailnet is then its own, not a collision.
+    local kept=no
+    if disk_is_second "$DISK_DEV"; then kept=$(disk_tailnet_save "$DISK_DEV"); fi
+
     if [ -n "$dry" ]; then
         cat >&2 <<EOF
 would write
@@ -779,7 +784,11 @@ EOF
         DISK_DRY=1
     else
         _tailnet_key_preflight "${IMG_MACHINE:-}" "$role"
-        _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")" "$role"
+        if [ "$kept" = yes ]; then
+            log "  '$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")' on the tailnet is this system's own node, kept across the rewrite"
+        else
+            _tailnet_name_preflight "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")" "$role"
+        fi
         _wifi_creds_preflight "${IMG_MACHINE:-}"
 
         if disk_is_second "$DISK_DEV"; then
@@ -807,6 +816,7 @@ EOF
     [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_stream "$DISK_DEV" "$WRITE_META"
     _disk_cleanup
     disk_parts_present "$DISK_DEV"
+    if [ "$kept" = yes ]; then disk_tailnet_restore "$DISK_DEV"; fi
 
     ID=$(_image_id "${profile:-$base}" "$sha")
     marker="id=$ID

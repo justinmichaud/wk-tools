@@ -297,6 +297,64 @@ class TestArming(WkTest):
         self.assertIn("boot=/run/media/boot", cp.stdout)
 
 
+class TestTailnetIdentityAcrossARewrite(WkTest):
+    """A second system's tailscaled state is kept aside before the split and
+    put back after it, so a rewritten bench system is the node it was."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp / "p4"
+        (self.root / "var" / "lib" / "tailscale").mkdir(parents=True)
+        self.stash = self.tmp / "stash"
+
+    def _run(self, call):
+        return bash(_SAY + "TAILNET_STATE=var/lib/tailscale/tailscaled.state\n"
+                    + _lift(CARD_PRIV, "_tailnet_save_edit", "_tailnet_restore_edit") + "\n" + call + "\n")
+
+    def test_the_state_is_kept_and_put_back_root_only(self):
+        (self.root / "var" / "lib" / "tailscale" / "tailscaled.state").write_text("node-key\n")
+        cp = self._run(f'_tailnet_save_edit "{self.root}" "{self.stash}"')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("kept=yes", cp.stdout)
+        self.assertEqual(self.stash.read_text(), "node-key\n")
+        self.assertEqual(self.stash.stat().st_mode & 0o777, 0o600)
+        fresh = self.tmp / "p4-new"; fresh.mkdir()
+        cp = self._run(f'_tailnet_restore_edit "{fresh}" "{self.stash}"')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        state = fresh / "var" / "lib" / "tailscale" / "tailscaled.state"
+        self.assertEqual(state.read_text(), "node-key\n")
+        self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(state.parent.stat().st_mode & 0o777, 0o700)
+        self.assertIn("restored", cp.stdout)
+
+    def test_a_system_with_no_state_keeps_nothing(self):
+        cp = self._run(f'_tailnet_save_edit "{self.root}" "{self.stash}"')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("kept=no", cp.stdout)
+        self.assertFalse(self.stash.exists())
+
+    def test_the_verbs_are_gated_second_only_and_dispatched(self):
+        text = CARD_PRIV.read_text()
+        for verb, fn in (("tailnet-save", "v_tailnet_save"), ("tailnet-restore", "v_tailnet_restore")):
+            body = _lift(CARD_PRIV, fn)
+            self.assertIn('gate "${1:-}"', body)
+            self.assertIn('[ -n "$SECOND" ] || deny', body)
+            self.assertRegex(text, rf"(?m)^\s*{verb}\)\s+{fn}")
+            self.assertIn(verb, re.search(r'usage: wk-card-priv [^"]*', text).group(0))
+
+    def test_the_write_keeps_the_identity_across_the_split(self):
+        """cmd/sysimage: saved before anything is erased, the name preflight
+        stood down when it was, put back once the new partitions are there."""
+        body = re.search(r"(?ms)^cmd_write_from\(\).*?^}", (REPO / "cmd" / "sysimage").read_text()).group(0)
+        save = body.index("disk_tailnet_save")
+        self.assertLess(save, body.index("disk_unmount"), "the identity is saved after the card is touched")
+        self.assertLess(save, body.index("_tailnet_name_preflight"))
+        self.assertIn('if [ "$kept" = yes ]; then', body)
+        restore = body.index("disk_tailnet_restore")
+        self.assertGreater(restore, body.index("disk_parts_present"))
+        self.assertLess(restore, body.index("disk_seed_tailnet"))
+
+
 class TestUnitsForABusyBoxInit(WkTest):
     """`units` installs the archive's init.d scripts on an image with no
     systemd but an /etc/init.d, so a buildroot bench system gets its
@@ -473,6 +531,27 @@ disk_verify_stream /dev/sdX "{meta}"
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("card_priv verify /dev/sdX@second 64 bb 128 cc", cp.stderr)
         self.assertIn("card_priv verify /dev/sdX 100", cp.stderr)
+
+    def test_the_kept_identity_is_reported_and_put_back_only_when_kept(self):
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/boot/machines.sh"
+. "{REPO}/lib/image.sh"
+MACH_NAME=testmach
+DISK_DRY=""
+CAP="tailnet-keep=yes"
+card_priv() {{ echo "card_priv $*" >&2; case "$1" in status) echo "wk-card-priv: ok"; echo "wk-card-priv: $CAP" ;; tailnet-save) echo "wk-card-priv: kept=$KEPT" ;; esac; }}
+KEPT=yes; k=$(disk_tailnet_save /dev/sdX@second); echo "kept=$k"
+KEPT=no;  k=$(disk_tailnet_save /dev/sdX@second); echo "kept=$k"
+disk_tailnet_restore /dev/sdX@second
+CAP="second=yes"; k=$(disk_tailnet_save /dev/sdX@second 2>old.err); echo "old=$k"; grep -c "cannot keep" old.err
+CAP="tailnet-keep=yes"; KEPT=maybe; disk_tailnet_save /dev/sdX@second && echo "guessed"
+''', cwd=str(self.tmp))
+        self.assertNotEqual(cp.returncode, 0, "an answer that is neither yes nor no was accepted")
+        self.assertIn("kept=yes\nkept=no\n", cp.stdout)
+        self.assertIn("old=no\n1\n", cp.stdout, "an old helper is not a loud 'no'")
+        self.assertNotIn("guessed", cp.stdout)
+        self.assertIn("card_priv tailnet-restore /dev/sdX@second", cp.stderr)
 
     def test_a_second_write_that_reported_nothing_cannot_be_verified(self):
         meta = self.tmp / "meta"

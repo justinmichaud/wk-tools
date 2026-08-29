@@ -213,7 +213,7 @@ with_mount() { # [-r] <partition> <function> [args...]
 
 # What this helper can do, for a driving end that must not assume it: a
 # helper on a board's rescue is the one its image was built with.
-v_status() { say "ok"; say "second=yes"; say "init.d=yes"; }
+v_status() { say "ok"; say "second=yes"; say "init.d=yes"; say "tailnet-keep=yes"; }
 
 v_check() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
@@ -650,9 +650,8 @@ v_eject() {
 # The model of what a Pi's firmware asks of a boot tree
 # (boot/check-boot-files.py in wk-tools), installed root-owned beside this
 # helper: root runs it, so it may not be a path a caller names, and there is
-# no second copy of the model here to drift from that one.
-# TODO: admin/install.sh installs this helper alone; until it installs the
-# checker beside it, `boot-check` refuses and says so.
+# no second copy of the model here to drift from that one. admin/install.sh
+# and the meta-wk-rescue recipe install the two together.
 CHECK_BOOT_FILES=/usr/local/libexec/wk-check-boot-files.py
 
 # Text that ends up inside a file on the card, checked against what it is
@@ -1217,6 +1216,52 @@ v_second_state() {
     [ -b "$(part "$dev" 4)" ] && say "present=yes" || say "present=no"
 }
 
+# --- the second system's tailnet identity, across a rewrite ------------------
+# tailscaled's state on partition 4 is the second system's node identity.
+# Kept aside here before the split and put back after it, the rewritten
+# system comes up as the node the old one was -- same name, same address, no
+# join, and no collision with its own name. The stash is root-only under
+# /run: gone at reboot, which is right for something that lives for one
+# command.
+TAILNET_STATE=var/lib/tailscale/tailscaled.state
+_tailnet_stash() { printf '/run/wk-card-tailnet-%s.state' "$(basename "$1")"; }
+_tailnet_save_edit() { # <mountpoint of partition 4> <stash>
+    if [ -f "$1/$TAILNET_STATE" ]; then
+        cp "$1/$TAILNET_STATE" "$2" && chmod 0600 "$2" || fail "could not keep the tailnet state aside"
+        say "kept=yes"
+    else
+        say "kept=no"
+    fi
+}
+_tailnet_restore_edit() { # <mountpoint of partition 4> <stash>
+    mkdir -p "$1/var/lib/tailscale"
+    chmod 0700 "$1/var/lib/tailscale"; chown 0:0 "$1/var/lib/tailscale"
+    cp "$2" "$1/$TAILNET_STATE" && chmod 0600 "$1/$TAILNET_STATE" && chown 0:0 "$1/$TAILNET_STATE" \
+        || fail "could not put the tailnet state back"
+    [ -s "$1/$TAILNET_STATE" ] || fail "the tailnet state did not land"
+    say "restored: the second system comes up as the node it was"
+}
+# tailnet-save <disk>@second -- kept=yes|no. A partition 4 with no filesystem
+# (a write that died in the split) holds nothing to keep.
+v_tailnet_save() {
+    local dev stash p4; gate "${1:-}"; dev=$GATED_DEV
+    [ -n "$SECOND" ] || deny "tailnet-save takes '<disk>@second'"
+    stash=$(_tailnet_stash "$dev"); rm -f "$stash"
+    p4=$(part "$dev" 4)
+    [ -b "$p4" ] && [ "$(blkid -o value -s TYPE "$p4" 2>/dev/null)" = ext4 ] || { say "kept=no"; return 0; }
+    with_mount -r "$p4" _tailnet_save_edit "$stash"
+}
+# tailnet-restore <disk>@second -- what `tailnet-save` kept, onto the
+# rewritten partition 4; the stash is spent.
+v_tailnet_restore() {
+    local dev stash; gate "${1:-}"; dev=$GATED_DEV
+    [ -n "$SECOND" ] || deny "tailnet-restore takes '<disk>@second'"
+    stash=$(_tailnet_stash "$dev")
+    [ -f "$stash" ] || { say "nothing kept"; return 0; }
+    with_mount "$(part "$dev" 4)" _tailnet_restore_edit "$stash"
+    rm -f "$stash"
+}
+
 # --- dispatch ----------------------------------------------------------------
 #
 # One case, one verb, no default that runs anything. An unknown verb is a usage
@@ -1242,6 +1287,8 @@ case "$verb" in
     second-arm)    v_second_arm    "$@" ;;
     second-disarm) v_second_disarm "$@" ;;
     second-state)  v_second_state  "$@" ;;
+    tailnet-save)    v_tailnet_save    "$@" ;;
+    tailnet-restore) v_tailnet_restore "$@" ;;
     eject)    v_eject    "$@" ;;
     parts)    v_parts    "$@" ;;
     root-spec) v_root_spec "$@" ;;
@@ -1251,5 +1298,5 @@ case "$verb" in
     boot-id)  v_boot_id  "$@" ;;
     units)    v_units    "$@" ;;
     boot-check) v_boot_check "$@" ;;
-    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi-host|wifi-from-host|identity|role|grow|unmount|verify|eject|parts|root-spec|retarget|cmdline-append|config-append|boot-id|units|boot-check|second-arm|second-disarm|second-state <device>[@second] [...]" ;;
+    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi-host|wifi-from-host|identity|role|grow|unmount|verify|eject|parts|root-spec|retarget|cmdline-append|config-append|boot-id|units|boot-check|second-arm|second-disarm|second-state|tailnet-save|tailnet-restore <device>[@second] [...]" ;;
 esac

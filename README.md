@@ -268,7 +268,8 @@ wk boot rpi4                                     # one-shot: arms, reboots, self
 # the second for one boot with an os_prefix line in the rescue's config.txt,
 # which the bench system's self-disarm removes as it comes up. Both writes
 # come from a reader the first time, and from the rescue itself after that
-# (--disk rpi3:/dev/mmcblk0@second).
+# (--disk rpi3:/dev/mmcblk0@second). A rewrite keeps the bench system's
+# tailnet node: it comes back as rpi3-bench with no join and no stale node.
 wk sysimage write --from <rescue .wic.xz> --disk <writer>:/dev/mmcblk0 --rescue --profile webkit-2.52-yocto-rpi3-32
 wk sysimage write --from <sdcard.img> --disk <writer>:/dev/mmcblk0@second --profile wpewebkit-2.38-buildroot-rpi3-32
 wk boot rpi3
