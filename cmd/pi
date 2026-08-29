@@ -218,9 +218,10 @@ pi_deploy_slot() { # <slot dir> <machine> <slot>
         || die "cannot create $part on $machine. Is its root filesystem writable?"
     # `tar | ssh tar` rather than scp: the same channel the rest of this repo
     # uses to move bytes onto a board (boot/disk.sh), needing nothing but tar
-    # on the far side.
+    # and gzip on the far side -- as two commands, since a BusyBox tar has
+    # no -z.
     tar -C "$slotdir" -cf - root slot.json | gzip -1 \
-        | i_ssh "tar -C $(sh_quote "$part") -xzf -" \
+        | i_ssh "gzip -dc | tar -C $(sh_quote "$part") -xf -" \
         || die "could not copy the slot to $machine ($part is left there)"
 
     # Proof, not a claim: every file, against the manifest, with the board's

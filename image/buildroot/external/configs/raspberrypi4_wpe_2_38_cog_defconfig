@@ -20,6 +20,9 @@ BR2_LINUX_KERNEL_CUSTOM_REPO_URL="https://github.com/raspberrypi/linux"
 BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="rpi-5.15.y"
 BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
 BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/raspberrypi/rpi34-linux-5.15.config"
+# Plus what a fleet bench system needs to be reached over the tailnet (a TUN
+# device, netfilter), which that config has none of; see the fragment.
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_WK_PATH)/board/linux-fleet.fragment"
 BR2_LINUX_KERNEL_LZ4=y
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="bcm2711-rpi-4-b"
@@ -69,7 +72,12 @@ BR2_PACKAGE_RNG_TOOLS=y
 BR2_PACKAGE_CA_CERTIFICATES=y
 BR2_PACKAGE_ORC=y
 BR2_PACKAGE_SHARED_MIME_INFO=y
-BR2_PACKAGE_DROPBEAR=y
+# OpenSSH, as the yocto rescues run: the fork's dropbear 2019.78 predates
+# ed25519 keys, so a board carrying it refuses the fleet's driving key
+# (root's authorized_keys, installed by wk sysimage write).
+BR2_PACKAGE_OPENSSH=y
+# The netfilter tool tailscaled drives when nftables is not usable.
+BR2_PACKAGE_IPTABLES=y
 BR2_PACKAGE_BROTLI=y
 BR2_PACKAGE_COG=y
 BR2_PACKAGE_COG_USE_SYSTEM_DBUS=y

@@ -239,7 +239,9 @@ for ((i = 0; i < NDEV; i++)); do
     BOARD_SLOTS[$i]=""
     case "${MODE:-}" in
         "bench ${PROFILE[$i]}-"*)
-            BOARD_SLOTS[$i]=$(r_ssh "for s in /var/wk/slots/*/slot.json; do [ -f \"\$s\" ] && basename \"\$(dirname \"\$s\")\"; done 2>/dev/null" 2>/dev/null | tr -d '\r' | tr '\n' ' ') ;;
+            # `; true`: a board with no slots yet ends the loop on a false test,
+            # and that exit status would end this command under set -e.
+            BOARD_SLOTS[$i]=$(r_ssh "for s in /var/wk/slots/*/slot.json; do [ -f \"\$s\" ] && basename \"\$(dirname \"\$s\")\"; done 2>/dev/null; true" 2>/dev/null | tr -d '\r' | tr '\n' ' ') ;;
     esac
 done
 
