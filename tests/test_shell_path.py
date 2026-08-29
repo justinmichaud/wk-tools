@@ -37,6 +37,53 @@ class TestBinDir(WkTest):
         self.assertEqual(os.readlink(link), "../wk")
         self.assertEqual(link.resolve(), (REPO / "wk").resolve())
 
+    def test_an_overlay_root_of_symlinks_stays_its_own_root(self):
+        """a WK_ROOT built out of symlinks to another checkout is still the
+        root that was meant: its own registry answers, not the real fleet's.
+        tests/test_peer.py builds exactly such a root, and resolving `wk`
+        through it would silently ask about this machine's real machines."""
+        root = self.tmp / "overlay"
+        (root / "targets" / "hosts").mkdir(parents=True)
+        for entry in REPO.iterdir():
+            if entry.name in ("targets", ".git", "__pycache__"):
+                continue
+            (root / entry.name).symlink_to(entry)
+        for sh in (REPO / "targets").glob("*.sh"):
+            (root / "targets" / sh.name).symlink_to(sh)
+        (root / "targets" / "hosts" / "overlaybox.conf").write_text(
+            "WK_TARGET_KIND=remote\nWK_REMOTE_HOST=overlaybox\nWK_REMOTE_ROOT=/tmp/x\n")
+
+        env = {"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"}
+        # Known only to the overlay: resolved there, unknown in the real tree.
+        cp = subprocess.run([str(root / "wk"), "push", "status", "--target", "overlaybox"],
+                            cwd="/", env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, timeout=60)
+        self.assertNotIn("unknown target", cp.stdout)
+        # And the real machines are not in this root's registry at all.
+        real = sorted(f.stem for f in (REPO / "targets" / "hosts").glob("*.conf"))
+        cp = subprocess.run([str(root / "wk"), "push", "status", "--target", "nosuchbox"],
+                            cwd="/", env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, timeout=60)
+        self.assertIn("overlaybox", cp.stdout)
+        for n in real:
+            self.assertNotIn(n, cp.stdout, f"the real fleet's {n} leaked into the overlay root")
+
+    def test_the_tree_hash_survives_a_root_of_symlinked_directories(self):
+        """`wk version --tree` hashes a link by its target text, so a link to
+        a directory is not fed to a program that would follow it"""
+        root = self.tmp / "overlay2"
+        root.mkdir()
+        for entry in REPO.iterdir():
+            if entry.name in (".git", "__pycache__"):
+                continue
+            (root / entry.name).symlink_to(entry)
+        cp = subprocess.run([str(root / "wk"), "version", "--tree"], cwd="/",
+                            env={"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"},
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertNotIn("Is a directory", cp.stdout)
+
     def test_wk_finds_its_root_through_the_symlink(self):
         """`wk` invoked as bin/wk resolves WK_ROOT to the checkout, not bin/"""
         cp = subprocess.run(

@@ -21,6 +21,15 @@ REPO = Path(__file__).resolve().parent.parent
 WK = REPO / "wk"
 
 
+def where_values():
+    """The `where=` vocabulary, read from the dispatcher that enforces it
+    (`WK_WHERE_VALUES` in ./wk) rather than copied into a test."""
+    import re
+    m = re.search(r'WK_WHERE_VALUES="([^"]+)"', (REPO / "wk").read_text())
+    assert m, "wk no longer defines WK_WHERE_VALUES"
+    return tuple(m.group(1).split())
+
+
 def _clean_env(extra=None, wk_root=False):
     """A predictable environment: this machine's own, minus anything that
     would make the command under test think it is already a workspace or

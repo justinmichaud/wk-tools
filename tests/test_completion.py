@@ -10,9 +10,9 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.support import REPO, WK, WkTest, run
+from tests.support import REPO, WK, WkTest, run, where_values
 
-VALID_WHERE = ("host", "store", "local", "workspace", "dynamic")
+VALID_WHERE = where_values()
 
 
 class TestDeclarations(WkTest):

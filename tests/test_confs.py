@@ -339,3 +339,30 @@ class TestMachinesSetNet(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnknownTargetRefusal(unittest.TestCase):
+    """A mistyped machine name is answered by the names that exist, not by
+    instructions for provisioning the machine the typo invented."""
+
+    def known(self):
+        return sorted(f.stem for f in (REPO / "targets" / "hosts").glob("*.conf"))
+
+    def test_the_refusal_names_the_machines_that_do_have_a_conf(self):
+        """`--target <typo>` lists the registry rather than only offering to
+        write a conf for the typo"""
+        names = self.known()
+        self.assertTrue(names, "no machine confs to check against")
+        typo = names[0][::-1]
+        cp = run("push", "status", "--target", typo)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn(f"unknown target '{typo}'", cp.stdout)
+        for n in names:
+            self.assertIn(n, cp.stdout, f"{n} is not named in the refusal")
+
+    def test_the_refusal_still_says_how_to_add_a_new_machine(self):
+        """the name may genuinely be a machine that has no conf yet"""
+        cp = run("push", "status", "--target", "a-machine-with-no-conf")
+        self.assertIn("wk remote setup a-machine-with-no-conf", cp.stdout)
+        self.assertIn("WK_REMOTE_HOST", cp.stdout)
+

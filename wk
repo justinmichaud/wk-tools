@@ -36,17 +36,29 @@
 
 set -euo pipefail
 
-# Through the symlink in bin/ as well as directly: bin/wk is the only name
-# shell/path.sh puts on PATH, and $0 there names the link, not this file.
+# The directory this file sits in -- unless that directory is not a checkout,
+# which is what `bin/wk` is: a symlink to `../wk`, and the only name
+# shell/path.sh puts on PATH. Decided by evidence (is the tree there?) rather
+# than by always resolving the link, because a *root* may itself be built out
+# of symlinks to another checkout and still be the root that was meant --
+# tests/test_peer.py's scratch WK_ROOT is exactly that, and resolving through
+# it would silently answer about the real fleet instead of its one fake peer.
 # `readlink` without -f because macOS ships no GNU coreutils.
-_wk_self="${BASH_SOURCE[0]}"
-while [ -L "$_wk_self" ]; do
-    _wk_dir="$(cd "$(dirname "$_wk_self")" && pwd)"
-    _wk_self="$(readlink "$_wk_self")"
-    case "$_wk_self" in /*) ;; *) _wk_self="$_wk_dir/$_wk_self" ;; esac
-done
-WK_ROOT="$(cd "$(dirname "$_wk_self")" && pwd)"
-unset _wk_self _wk_dir
+WK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$WK_ROOT/lib/common.sh" ]; then
+    _wk_self="${BASH_SOURCE[0]}"
+    while [ -L "$_wk_self" ]; do
+        _wk_dir="$(cd "$(dirname "$_wk_self")" && pwd)"
+        _wk_self="$(readlink "$_wk_self")"
+        case "$_wk_self" in /*) ;; *) _wk_self="$_wk_dir/$_wk_self" ;; esac
+    done
+    WK_ROOT="$(cd "$(dirname "$_wk_self")" && pwd)"
+    unset _wk_self _wk_dir
+    [ -f "$WK_ROOT/lib/common.sh" ] || {
+        printf 'error: %s is not inside a wk-tools checkout\n' "${BASH_SOURCE[0]}" >&2
+        exit 1
+    }
+fi
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/target.sh"
 
@@ -100,6 +112,13 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 #   flag <--x,--y> where=<w>|name=<n>   per-flag override of where and/or name
 
 decl_load() { # <impl>
+    # The whole `where=` vocabulary, in one place: this function refuses
+    # anything else and the tests read this line, so adding a value is one
+    # edit rather than three that can disagree (a copy in a test is how
+    # where=store shipped passing one suite and failing another). Inside the
+    # function, not above it, because tests lift this function on its own
+    # (tests/test_sync.py's _lift_func) and it must carry what it reads.
+    local WK_WHERE_VALUES="host store local workspace dynamic"
     D_WHERE=workspace D_NAME=none D_READY=no D_GROUP=other D_LIFECYCLE=""
     D_READONLY="" D_BROKER="" D_FORWARD=yes D_BARE="" D_POST="" D_SUB="" D_FLAG="" D_OUTSIDE="" D_NEEDS=""
     D_HERE=""
@@ -116,7 +135,11 @@ ${line# flag }" ; continue ;;
         esac
         for tok in $line; do
             case "$tok" in
-                where=*)  D_WHERE=${tok#where=} ;;
+                where=*)  D_WHERE=${tok#where=}
+                          case " $WK_WHERE_VALUES " in
+                              *" $D_WHERE "*) ;;
+                              *) die "$(basename "$1"): where=$D_WHERE is not one of ${WK_WHERE_VALUES// /|}" ;;
+                          esac ;;
                 name=*)   D_NAME=${tok#name=} ;;
                 ready=*)  D_READY=${tok#ready=} ;;
                 group=*)  D_GROUP=${tok#group=} ;;

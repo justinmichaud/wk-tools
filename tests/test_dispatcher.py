@@ -8,7 +8,7 @@ import os
 import unittest
 
 from tests.support import (
-    REPO, WkTest, fake_workspace, rand_suffix, run, stub_path,
+    REPO, WkTest, fake_workspace, rand_suffix, run, stub_path, where_values,
 )
 
 
@@ -66,8 +66,8 @@ class TestHelpAndDeclarations(WkTest):
                 bad.append(f"{n}: '# wk:' has no where=")
             if not has_group:
                 bad.append(f"{n}: '# wk:' has no group=")
-            if where_val not in ("", "host", "local", "workspace", "dynamic"):
-                bad.append(f"{n}: where={where_val} is not one of host|local|workspace|dynamic")
+            if where_val not in ("",) + where_values():
+                bad.append(f"{n}: where={where_val} is not one of {'|'.join(where_values())}")
         self.assertEqual(bad, [], f"commands that do not declare themselves: {bad}")
 
     def test_explain_every_command_answers_without_running_anything(self):

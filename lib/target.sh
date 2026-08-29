@@ -533,6 +533,28 @@ _in_machine() {
 target_registry_dir() { echo "$WK_ROOT/targets/hosts"; }
 target_registry_conf(){ echo "$(target_registry_dir)/$1.conf"; }
 
+# The machines the registry already names. Read from the directory at the
+# moment it is asked, so it cannot drift from what is there.
+target_known() {
+    local d f
+    d=$(target_registry_dir)
+    [ -d "$d" ] || return 0
+    for f in "$d"/*.conf; do
+        [ -f "$f" ] || continue
+        basename "$f" .conf
+    done
+}
+
+# One line naming them, or nothing on a machine with no registry. For the
+# refusal below: a mistyped name is answered by the name that exists, not by
+# instructions for adding the machine the typo invented.
+_target_known_line() {
+    local names
+    names=$(target_known | tr '\n' ' ')
+    [ -n "$names" ] || return 0
+    printf '\n    The machines here: %s' "${names% }"
+}
+
 # The driver a target name selects. Anything not a built-in kind must have a
 # conf, and one that names no kind falls through to `remote`.
 target_kind() {
@@ -803,8 +825,10 @@ load_target() {
     WK_STORE="$WK_STORE_DEFAULT"
 
     kind=$(target_kind "$t") || die "unknown target '$t'.
-    The built-in ones are container, vm, remote and local. Anything else is a
-    machine, and needs a conf -- in the registry, so every device gets it:
+    The built-in ones are container, vm, remote and local.$(_target_known_line)
+
+    Anything else is a machine, and needs a conf -- in the registry, so every
+    device gets it:
 
         $(target_registry_conf "$t")
             WK_REMOTE_HOST=$t      # an ssh destination that already works

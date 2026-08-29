@@ -203,13 +203,17 @@ class TestReprovisionLine(unittest.TestCase):
 
 
 class TestPushStatusAll(WkTest):
-    """Defect 5: `wk push status --all` prints one line per configured
-    machine (never nothing while machines exist)."""
+    """Defect 5: `wk push status --all` prints one line per machine (never
+    nothing while machines exist). `--all` means all: this machine holds a
+    store too, and answers for it through its own `wk`."""
+
+    def _this_machine(self):
+        return bash(". lib/common.sh; wk_machine_name", timeout=30).stdout.strip()
 
     def _configured_machines(self):
         """The same list `for_each_machine` (lib/target.sh) walks: every
-        target_all entry except container/vm/local, which are this machine
-        and not a fork of `wk push` at all."""
+        target_all entry except container/vm/local. cmd/push asks this
+        machine separately, so the rows are those plus this one."""
         cp = bash(
             """
             . lib/common.sh
@@ -224,22 +228,21 @@ class TestPushStatusAll(WkTest):
         )
         return [l for l in cp.stdout.splitlines() if l.strip()]
 
-    def test_one_line_per_configured_machine_or_none_configured(self):
-        expected = set(self._configured_machines())
+    def test_one_line_per_machine_including_this_one(self):
+        here = self._this_machine()
+        expected = set(self._configured_machines()) | {here}
         try:
-            cp = self.run_wk("push", "status", "--all", timeout=90)
+            cp = self.run_wk("push", "status", "--all", timeout=180)
         except subprocess.TimeoutExpired:
             self.skipTest("no route to the configured machines from here")
 
         lines = [l for l in cp.stdout.splitlines() if l.strip()]
-        if not expected:
-            self.assertEqual(lines, [])
-            return
         seen = {l.split()[0] for l in lines}
+        self.assertIn(here, seen, "--all skipped the machine it was typed on")
         self.assertEqual(
             seen,
             expected,
-            "wk push status --all must answer for every configured machine, "
+            "wk push status --all must answer for every machine, "
             "not print nothing while machines exist",
         )
         # Exit status is meaningful (cmd/push's own 0/1/4), never silently 0
