@@ -288,6 +288,7 @@ yocto_wait() {
         sleep "${WK_YOCTO_POLL_SECONDS:-30}"
         now=$(date +%s)
         idle=$(log_age "$log" 2>/dev/null) || idle=0
+        # 900, not lib/watchdog.sh's 300 default: see that file's header.
         if [ "$idle" -lt "${WK_STALL_SECONDS:-900}" ]; then
             warned=0
         elif [ "$warned" -eq 0 ]; then
@@ -409,7 +410,7 @@ yocto_build() {
     would report every network failure as a build failure." ;;
     esac
 
-    local kind="${WK_TARGET_KIND:-container}"
+    local kind="$WK_TARGET_KIND"
     [ "$kind" = container ] || die "the Yocto builder needs a container workspace, and this target is '$kind'.
     A remote target is a shared machine -- 100 GB of scratch and days of CPU
     are not ours to take there -- and a macOS VM workspace has no store-backed

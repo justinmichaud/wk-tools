@@ -124,9 +124,13 @@ image_root_word() {
 # builder, workspace, path, bytes, mtime. Host-visible even in a container:
 # both builders write under /src/WebKit/WebKitBuild, which is ws/<name>/build
 # on this side (targets/container.sh bind-mounts it there, out of the
-# overlay), so the scan is that directory and nothing else.
+# overlay), so the scan is that directory and nothing else. A yocto-* or
+# buildroot-* workspace whose glob matches nothing gets a placeholder row
+# (path `-`, size 0, mtime `-`) rather than vanishing: a rebuild clears its
+# image directory for the whole build, and absence would read as "not an
+# image workspace" instead of "rebuilding".
 image_workspace_scan() {
-    local ws name f
+    local ws name f found
 
     [ -d "$WK_STORE/ws" ] || return 0
 
@@ -136,19 +140,29 @@ image_workspace_scan() {
 
         # builder: yocto -- bitbake writes the wic beside the rootfs tarball
         # (yocto_image_dir, image/yocto.sh); globbed, not profile-derived.
+        found=0
         for f in "$ws"/build/CrossToolChains/*/build/image/*.wic.xz; do
             [ -f "$f" ] || continue
+            found=1
             printf 'yocto\t%s\t%s\t%s\t%s\n' "$name" "$f" \
                 "$(file_bytes "$f")" "$(_scan_mtime "$f")"
         done
+        case "$name" in
+            yocto-*) [ "$found" = 1 ] || printf 'yocto\t%s\t-\t0\t-\n' "$name" ;;
+        esac
 
         # builder: buildroot -- genimage assembles into output/images
         # (BR_IMAGE names the file).
+        found=0
         for f in "$ws"/build/buildroot/*/output/images/*.img; do
             [ -f "$f" ] || continue
+            found=1
             printf 'buildroot\t%s\t%s\t%s\t%s\n' "$name" "$f" \
                 "$(file_bytes "$f")" "$(_scan_mtime "$f")"
         done
+        case "$name" in
+            buildroot-*) [ "$found" = 1 ] || printf 'buildroot\t%s\t-\t0\t-\n' "$name" ;;
+        esac
     done
     return 0
 }

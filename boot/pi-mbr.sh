@@ -16,7 +16,8 @@
 #
 # The failure modes, all of which end somewhere reachable:
 #   medium not armed         -> no FAT on it, firmware skips it, the rescue boots
-#   image kernel missing     -> refused before writing (image_check_boot_files)
+#   image kernel missing     -> refused after the write, on the card and before
+#                               anything arms it (disk_check_boot_files)
 #   image cannot find root   -> panic=10, reboot, and it disarmed itself, so the rescue
 #   image hangs after boot   -> the self-return watchdog reboots it, and again the rescue
 

@@ -153,7 +153,7 @@ vantages() {
 # the *vantages* -- which segments there are and who can see them.
 vantage_can_sweep() { # <vantage>
     [ "$1" = local ] && { have nmap; return $?; }
-    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" "$1" \
+    ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" "$1" \
         'PATH=$PATH:/usr/sbin:/sbin; command -v nmap >/dev/null 2>&1' </dev/null >/dev/null 2>&1
 }
 

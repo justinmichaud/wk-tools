@@ -341,6 +341,36 @@ class TestScanFindsWhatTheBuildersLeave(unittest.TestCase):
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertEqual(cp.stdout.strip(), "")
 
+    def test_a_yocto_workspace_mid_rebuild_gets_a_placeholder_row(self):
+        # clear_stale_image_copies (image/yocto-build.sh) deletes build/image
+        # before a rebuild and repopulates it at the end; for the hours in
+        # between the wic glob matches nothing.
+        with scratch_dir() as d:
+            ws = "yocto-webkit-2.52-yocto-rpi3-32"
+            (d / "ws" / ws / "build").mkdir(parents=True)
+            builder, name, path, size, mtime = self._row(self._scan(d))
+            self.assertEqual((builder, name, path, size, mtime),
+                              ("yocto", ws, "-", "0", "-"))
+
+    def test_a_buildroot_workspace_with_no_image_gets_a_placeholder_row(self):
+        with scratch_dir() as d:
+            ws = "buildroot-wpewebkit-2.38-buildroot-rpi4-32"
+            (d / "ws" / ws / "build").mkdir(parents=True)
+            builder, name, path, size, mtime = self._row(self._scan(d))
+            self.assertEqual((builder, name, path, size, mtime),
+                              ("buildroot", ws, "-", "0", "-"))
+
+    def test_a_yocto_workspace_with_an_empty_image_dir_gets_a_placeholder_row(self):
+        # The window clear_stale_image_copies opens: build/image exists
+        # (mkdir'd fresh) but bitbake hasn't written the wic into it yet.
+        with scratch_dir() as d:
+            ws = "yocto-webkit-2.52-yocto-rpi4-64"
+            (d / "ws" / ws / "build" / "CrossToolChains" / "rpi4-64bits-mesa"
+             / "build" / "image").mkdir(parents=True)
+            builder, name, path, size, mtime = self._row(self._scan(d))
+            self.assertEqual((builder, name, path, size, mtime),
+                              ("yocto", ws, "-", "0", "-"))
+
 
 if __name__ == "__main__":
     unittest.main()

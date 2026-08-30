@@ -1,4 +1,9 @@
 {
+  // Restricted Mode off for what `wk zed` opens: Zed lifts it only per
+  // worktree by hand, or by this; its CLI has no flag for it.
+  "session": {
+    "trust_all_projects": true
+  },
   "ssh_connections": [
     {
       "host": "rpi5",

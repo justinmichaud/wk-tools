@@ -62,6 +62,8 @@ _quiesce_on_interrupted() {
 
 case "$ACTION" in
 on)
+    # Never turns the radio (WiFi/Bluetooth) off: the bench is driven over
+    # the tailnet, and a radio toggle drops the driver's own ssh session.
     on_interrupt _quiesce_on_interrupted
     run_priv on
     mkdir -p "$STATE"

@@ -120,10 +120,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # The result store, seeded payloads and the variance knobs' record, shared
 # with `wk pi bench`.
 . "$WK_ROOT/lib/bench.sh"
-# A benchmark is legitimately silent for much longer than a build: MotionMark
-# reports once per subtest and a subtest can run for minutes. Raised here,
-# before lib/watchdog.sh is sourced, so its own `:-300`/`:-1800` defaults
-# find these already set instead of locking in first.
+# Raised before lib/watchdog.sh is sourced: see its header.
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 . "$WK_ROOT/lib/watchdog.sh"

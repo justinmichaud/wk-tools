@@ -24,7 +24,7 @@ sleep 300 & live=$!
 build_record "live build" 20 40000 "pid:$live"
 build_record "dead build" 30 50000 "pid:99999999"
 echo "reserved=$(build_reserved_mb) jobs=$(build_reserved_jobs)"
-echo "records=$(ls "$(builds_dir)" | wc -l)"
+echo "records=$(ls "$(builds_dir)" | wc -l | tr -d ' ')"   # BSD wc pads its count
 echo "next=$(build_jobs)"
 kill $live
 ''')

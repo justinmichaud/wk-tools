@@ -84,6 +84,16 @@ else
     check "cage (benchmark kiosk)"  "./setup --stage tools" have cage
     check "wlr-randr (session off)" "./setup --stage tools" have wlr-randr
 fi
+# Optional: only `wk find` (the LAN sweep for a board with no tailnet name)
+# needs it, and it refuses by name without it (cmd/find). Same note as
+# host/macos/tools.sh's ./setup-time check, just with both platforms' remedy.
+if have nmap; then
+    ok "nmap (wk find)"
+elif is_macos; then
+    unk "nmap absent -- only 'wk find' needs it" "nmap.org, the .dmg"
+else
+    unk "nmap absent -- only 'wk find' needs it" "./setup  (host/linux/apt.txt)"
+fi
 check "jq (claude hook)" "./setup --stage tools" have jq
 check "gh"               "install gh, then: gh auth login" have gh
 if have gh; then

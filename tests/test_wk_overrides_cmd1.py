@@ -9,19 +9,15 @@ lifts _netplan_wifi). Nothing here touches real hardware, a podman VM, or a
 workspace; WK_LOCK_DIR/WK_BENCH_ROOT/WK_IMAGE_MARKER point every test at a
 scratch directory.
 
-Two real bugs turned up while writing these and are fixed alongside the
-docs/tests, not just documented around:
+Two things these tests pin down at the source level:
 
-  - cmd/bench sourced lib/watchdog.sh (which sets WK_STALL_SECONDS=300 and
-    WK_ABORT_SECONDS=1800 if unset) *before* raising them to 900/5400 for a
-    benchmark's longer legitimate silence -- so the raise never took effect
-    the raise now happens before the source.
-  - bench_padded_path's `local dir=X link="$dir/Y"` reads $dir's OLD value
-    (empty) when computing $link, in every bash tested (3.2 and 5.2): a
-    single `local a=.. b=..` expands every RHS before assigning any of
-    them. WK_BENCH_PATH_PAD silently produced a broken path at the
-    filesystem root instead of under the padded directory. Split into two
-    `local` statements.
+  - cmd/bench raises WK_STALL_SECONDS/WK_ABORT_SECONDS to 900/5400 *before*
+    sourcing lib/watchdog.sh (whose own `:-300`/`:-1800` defaults must find
+    these already set, not lock in first).
+  - bench_padded_path uses two separate `local` statements for `dir` and
+    `link`, because a single `local a=.. b=..` expands every RHS before
+    assigning any of them, so `link="$dir/Y"` would read $dir's old value in
+    every bash tested (3.2 and 5.2).
 
 Run: python3 -m unittest tests.test_wk_overrides_cmd1 -v
 """

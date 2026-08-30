@@ -460,14 +460,78 @@ whole container store:
 podman machine rm wk && ./setup && wk sync
 ```
 
+## Hardware
+
+How each fleet device selects the system it boots, derived from
+`boot/machines/<name>.conf` and the driver it names (`MACH_DRIVER`, one
+`boot/<driver>.sh` each). Every board follows the same rules: the rescue is
+written first, with `--rescue`, onto the medium the board falls back to; the
+bench system is written second onto the board's *other* medium (or, with one
+medium, the same card's partitions 3-4); `wk boot <board>` arms it for exactly
+one boot, and the bench system disarms itself as it comes up, so a power cycle
+lands on the rescue. The boards differ in one thing: how that one boot is
+selected, and so in what to do when it does not come back.
+
+**rpi3 -- `pi-sd`, one SD card.** Rescue on partitions 1-2 of `/dev/mmcblk0`
+(root `p2`), bench system on 3-4 (`--disk rpi3:/dev/mmcblk0@second`). A Pi 3
+has no EEPROM and no boot order to set: the firmware boots the card's first
+FAT partition and only that one (the board's one-time USB-boot OTP bit is set
+and cannot be cleared; it changes nothing, since the card is tried first). So
+`wk boot rpi3` copies the bench system's kernel, device trees and cmdline into
+`second/` on the rescue's boot partition and selects them with one
+`os_prefix=second/` line in `config.txt`, keeping the rescue's own as
+`config.txt.rescue`. The bench system's first act is to move that file back;
+`wk boot rpi3 --disarm` from the rescue does the same. If the bench kernel
+panics before it can, every power cycle boots the same `os_prefix` again: pull
+the card, and in a reader rename `config.txt.rescue` back to `config.txt` on
+partition 1 (a revert that needs no hands is owed, docs/HANDOFF-boot.md). This
+board's rescue predates the card-helper layer, so its rewrite is the one card a
+person carries (`wk help lifecycle`, step 3).
+
+**rpi4 -- `pi-mbr`, two media.** Rescue on the SD card (`/dev/mmcblk0`, root
+`p2`), bench system on the USB stick (`/dev/sda`), written from the rescue
+(`--disk rpi4:/dev/sda`). Which medium the firmware tries first is EEPROM
+state, written once by `wk pi boot-order rpi4` -- the default for a
+bench-device whose bench medium is USB is `usb-first`, the stick first and the
+card behind it; `--revert` restores `local` -- and it needs the board running
+and reachable, which is why it is lifecycle step 4, after the rescue's first
+boot. Arming is one byte: the stick's first partition type, `0x0c` (a bootable
+FAT the firmware takes) or `0x83` (Linux, which it steps over to the card).
+`wk boot rpi4` sets it; the bench system's self-disarm clears it as it boots,
+so any later reboot falls through to the rescue. If it goes wrong: pull the
+stick. The rescue needs nothing on it.
+
+**rpi5 -- `rpi5-usb`, a workstation with a bench stick.** The board's own
+install on the NVMe (`/dev/nvme0n1p2`) is never written; the bench system goes
+on `/dev/sda`. Arming is a firmware mailbox one-shot (`set_reboot_order`, order
+`0xf64`: USB, then NVMe, then restart) that the firmware clears after one use,
+so a wedged image or a plain power cycle lands back on the NVMe with nothing to
+undo. The persistent EEPROM `BOOT_ORDER` stays `local`, what `wk pi boot-order
+rpi5` writes for a workstation, and is the only evidence the fallback is in
+place: the mailbox order cannot be read back. No overclock is ever written to
+the EEPROM; its settings are shared by both modes.
+
+**mbp -- `mac-volume`, this Mac.** The bench install is the `WK Bench` APFS
+volume beside the host install. Apple Silicon selects a startup volume only
+through an authenticated action at the machine, so there is nothing to arm
+from software: `wk bench mac-ab` stages a run and reads it back, one action at
+the keyboard per experiment picks the volume, and `wk boot mbp --status`
+reports which side the firmware default is on. `wk sysimage write` refuses
+this machine: nothing here writes a Mac's own disks.
+
+**benchvm -- `mac-guest`.** A Tart guest standing in for a Mac in bench mode:
+`wk boot benchvm` starts the guest, and nothing measured in it is comparable
+with hardware; it rehearses the path.
+
+**moose** has no bench driver yet (docs/Urgent/HANDOFF-moose-bench.md).
+
 ## Lifecycle
 
 Every step from a bare Raspberry Pi to an automated A/B, in order, and what
-each one needs. Two arrangements exist (`wk help hardware`): one medium
-holding both systems (the rpi3: rescue on SD partitions 1-2, bench system on
-3-4, `@second`), and two media (the rpi4: rescue on the SD, bench system on
-the USB stick, one MBR byte arming it). The commands are the same; only the
-`--disk` spelling and the driver differ.
+each one needs. The boards differ only in how the one boot is selected
+(`wk help hardware`: one medium holding both systems on the rpi3, two media
+on the rpi4 and rpi5); the commands are the same, and only the `--disk`
+spelling changes.
 
 **1. Declare the board** -- `boot/machines/<name>.conf` ("Add a new fleet
 device" above): its driver (`pi-sd` for one medium, `pi-mbr` for two), the
@@ -519,7 +583,8 @@ and a rewrite of the `@second` system keeps its tailnet node.
 reboots; `<board>-bench` joins the tailnet; the system disarms itself as it
 comes up and hands the board back to the rescue after `IMG_WATCHDOG` seconds
 unless claimed (`wk boot <board> --keep`). A first boot that never appears is
-read from the rescue once it returns (see "Build interventions").
+read from the rescue once it returns (see "Build interventions"); a board that
+does not return is brought back by hand as `wk help hardware` says for it.
 
 **6. The A/B** -- one command; it builds both WebKits against the image,
 deploys them as slots, alternates them and writes the report:

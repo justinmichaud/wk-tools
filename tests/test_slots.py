@@ -13,8 +13,10 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 
 from tests.support import REPO, WkTest, bash, run
 
@@ -26,8 +28,30 @@ def wkslot(*args, **kw):
     return subprocess.run([sys.executable, str(WKSLOT), *args], capture_output=True, text=True, **kw)
 
 
-def have_gcc():
-    return shutil.which("gcc") is not None
+def linker_takes_build_id():
+    """A build id is what a slot is identified by, so the ELF these tests
+    read back has to carry one this machine's linker can be told to write.
+    GNU ld and lld take -Wl,--build-id; the Apple linker refuses it, so on
+    macOS there is nothing here to link and the tests skip. Probed once, by
+    linking the same trivial shared object the tests do."""
+    if shutil.which("gcc") is None:
+        return False
+    with tempfile.TemporaryDirectory() as d:
+        cp = subprocess.run(
+            ["gcc", "-shared", "-x", "c", "-", "-o", str(Path(d) / "probe.so"),
+             "-Wl,--build-id=none"],
+            input="int wk_probe(void) { return 0; }\n", text=True,
+            capture_output=True)
+    return cp.returncode == 0
+
+
+def have_mirror():
+    """`wk ab` resolves both of its commits in this machine's WebKit mirror
+    (wk_mirror, lib/store.sh) and refuses without one, so a test that gets
+    past the argument checks needs the mirror to be here."""
+    cp = bash('. "$WK_ROOT/lib/common.sh"; . "$WK_ROOT/lib/store.sh"; '
+              '[ -d "$(wk_mirror)" ]')
+    return cp.returncode == 0
 
 
 def make_root(root, build_id=BUILD_ID):
@@ -44,7 +68,8 @@ def make_root(root, build_id=BUILD_ID):
     (lib / "wpe-webkit-1.1" / "injected-bundle" / "libWPEInjectedBundle.so").write_bytes(b"bundle")
 
 
-@unittest.skipUnless(have_gcc(), "needs gcc to link a shared object")
+@unittest.skipUnless(linker_takes_build_id(),
+                     "needs gcc and a linker that takes --build-id (GNU ld/lld)")
 class TestManifest(WkTest):
     def setUp(self):
         super().setUp()
@@ -89,7 +114,8 @@ class TestManifest(WkTest):
         self.assertEqual(expect["build_id"], BUILD_ID)
 
 
-@unittest.skipUnless(have_gcc(), "needs gcc to link a shared object")
+@unittest.skipUnless(linker_takes_build_id(),
+                     "needs gcc and a linker that takes --build-id (GNU ld/lld)")
 class TestManifestRefusesAnUnidentifiedBuild(WkTest):
     def test_no_build_id_note_no_slot(self):
         root = self.tmp / "root"
@@ -259,6 +285,7 @@ class TestAbRefusals(WkTest):
         self.assertEqual(cp.returncode, 1, cp.stdout)
         self.assertIn("--rounds takes a number", cp.stdout)
 
+    @unittest.skipUnless(have_mirror(), "needs this machine's WebKit mirror ('wk sync' makes one)")
     def test_a_device_carries_its_own_width(self):
         """rpi3-32 beside rpi5-64 in one command: the suffix, not --bits,
         decides each device's image, so mixed widths are one run."""

@@ -39,6 +39,15 @@ class TestRescueLayer(unittest.TestCase):
         self.assertIn('CARD_PRIV_DIR = "/usr/local/libexec"', RECIPE.read_text())
         self.assertIn("CARD_PRIV=/usr/local/libexec/wk-card-priv", (REPO / "boot/disk.sh").read_text())
 
+    def test_a_host_install_puts_the_checker_beside_the_helper(self):
+        """admin/install.sh (./setup --stage quiesce on a card machine) installs
+        boot/check-boot-files.py root-owned at the one path the helper's
+        `boot-check` runs (CHECK_BOOT_FILES), never a path a caller names."""
+        text = (REPO / "admin/install.sh").read_text()
+        self.assertIn('_check_target="$_libexec/wk-check-boot-files.py"', text)
+        self.assertIn('_check_source="$WK_ROOT/boot/check-boot-files.py"', text)
+        self.assertIn('_libexec=/usr/local/libexec', text)
+
     def test_layer_is_wired_into_every_yocto_image(self):
         build = (REPO / "image/yocto-build.sh").read_text()
         self.assertIn("meta-wk-rescue", build)

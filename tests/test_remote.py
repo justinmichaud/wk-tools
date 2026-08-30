@@ -11,7 +11,7 @@ Run: python3 -m unittest tests.test_remote -v
 """
 import unittest
 
-from tests.support import REPO, WkTest, bash, requires_machine
+from tests.support import REAL_REGISTRY, REPO, WkTest, bash, requires_machine
 
 
 class TestUnregisteredWorkspaceResolves(WkTest):
@@ -19,14 +19,10 @@ class TestUnregisteredWorkspaceResolves(WkTest):
 
     def test_unregistered_remote_workspace_resolves(self):
         """ws_exists/ws_target find a remote workspace the registry misses"""
-        # A scratch WK_ROOT whose targets/hosts holds only the fake conf, so
-        # the walk cannot reach the real fleet: the real lib/ and target
-        # drivers, symlinked (load_target re-sources both from $WK_ROOT).
-        fake_root = self.tmp / "wk-root"
-        (fake_root / "targets" / "hosts").mkdir(parents=True)
-        (fake_root / "lib").symlink_to(REPO / "lib")
-        for sh in (REPO / "targets").glob("*.sh"):
-            (fake_root / "targets" / sh.name).symlink_to(sh)
+        # A registry holding only the fake conf (WK_TARGET_REGISTRY,
+        # lib/target.sh), so the walk cannot reach the real fleet.
+        registry = self.tmp / "hosts"
+        registry.mkdir()
         root = self.tmp / "root"
         (root / "ws" / "tws").mkdir(parents=True)
         (root / "ws" / "tws" / ".wk-ready").write_text("")
@@ -35,7 +31,7 @@ class TestUnregisteredWorkspaceResolves(WkTest):
         # WK_REMOTE_LOCAL drives the remote driver without ssh; the store is
         # a different directory from the root, so only t_info -- not the
         # host-side directory test -- can find the workspace.
-        (fake_root / "targets" / "hosts" / "fakebox.conf").write_text(
+        (registry / "fakebox.conf").write_text(
             "WK_TARGET_KIND=remote\n"
             "WK_REMOTE_LOCAL=1\n"
             f"WK_REMOTE_ROOT={root}\n"
@@ -50,7 +46,7 @@ t=$(ws_target tws)
 [ "$t" = fakebox ] || { echo "ws_target said '$t'"; exit 1; }
 ! ws_exists not-a-workspace || { echo "ws_exists found a ghost"; exit 1; }
 ''', env={
-            "WK_ROOT": str(fake_root),
+            "WK_TARGET_REGISTRY": str(registry),
             "XDG_STATE_HOME": str(self.tmp / "state"),
         })
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -60,14 +56,13 @@ class TestMachineAnswers(WkTest):
     """a fan-out (`wk push --all`, `wk sudo --all`) tells a machine that is
     down from one with no wk-tools, and lets no ssh error text through"""
 
-    def _fake_root(self, conf):
-        fake_root = self.tmp / "wk-root"
-        (fake_root / "targets" / "hosts").mkdir(parents=True)
-        (fake_root / "lib").symlink_to(REPO / "lib")
-        for sh in (REPO / "targets").glob("*.sh"):
-            (fake_root / "targets" / sh.name).symlink_to(sh)
-        (fake_root / "targets" / "hosts" / "fakebox.conf").write_text(conf)
-        return fake_root
+    def _registry(self, conf):
+        """A registry holding exactly one fake machine (WK_TARGET_REGISTRY,
+        lib/target.sh), so nothing here can reach the real fleet."""
+        registry = self.tmp / "hosts"
+        registry.mkdir(exist_ok=True)
+        (registry / "fakebox.conf").write_text(conf)
+        return registry
 
     def _machine_answers(self, conf):
         return bash('''
@@ -75,7 +70,7 @@ class TestMachineAnswers(WkTest):
 . "$WK_ROOT/lib/target.sh"
 load_target fakebox
 machine_answers fakebox && echo "rc=0" || echo "rc=$?"
-''', env={"WK_ROOT": str(self._fake_root(conf)),
+''', env={"WK_TARGET_REGISTRY": str(self._registry(conf)),
             "XDG_STATE_HOME": str(self.tmp / "state"), "WK_SSH_TIMEOUT": "3"})
 
     def test_an_unreachable_machine_is_reported_as_unreachable(self):
@@ -118,7 +113,7 @@ for f in "$d"/*.conf; do
     n=$(basename "$f" .conf)
     echo "$n:$(target_kind "$n" 2>/dev/null || echo '?')"
 done
-''')
+''', env={"WK_TARGET_REGISTRY": str(REAL_REGISTRY)})
     out = {}
     for line in cp.stdout.splitlines():
         if ":" in line:
@@ -132,7 +127,7 @@ class TestRemoteConfsResolve(WkTest):
         """a machine name is a target"""
         machines = _configured_remote_machines()
         if not machines:
-            self.skipTest(f"no machines configured in {REPO / 'targets' / 'hosts'}")
+            self.skipTest(f"no machines configured in {REAL_REGISTRY}")
         bad = [n for n, k in machines.items() if k in ("", "?")]
         self.assertEqual(bad, [], f"configured but unresolvable: {bad}")
 
@@ -150,7 +145,7 @@ set -euo pipefail
 . "{REPO}/lib/store.sh"
 . "{REPO}/lib/target.sh"
 ( load_target "{name}"; t_info selftest-nonexistent >/dev/null 2>&1 )
-''', timeout=30)
+''', env={"WK_TARGET_REGISTRY": str(REAL_REGISTRY)}, timeout=30)
     return cp
 
 

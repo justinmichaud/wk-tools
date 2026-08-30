@@ -68,9 +68,10 @@ _LISTING = ('{"workspaces": [{"name": "peerws", "target": "container", '
 
 
 class PeerFixture(WkTest):
-    """A WK_ROOT whose registry holds one peer and nothing else, so the walk
-    cannot reach the real fleet, plus a $HOME of its own: `wk zed` writes an
-    ssh alias, and no test may write into the person's real ~/.ssh."""
+    """A WK_ROOT whose registry (WK_TARGET_REGISTRY, lib/target.sh) holds one
+    peer and nothing else, so the walk cannot reach the real fleet, plus a
+    $HOME of its own: `wk zed` writes an ssh alias, and no test may write
+    into the person's real ~/.ssh."""
 
     def setUp(self):
         super().setUp()
@@ -105,6 +106,7 @@ class PeerFixture(WkTest):
         with_ssh = dict(extra or {})
         e = {
             "WK_ROOT": str(self.root),
+            "WK_TARGET_REGISTRY": str(self.root / "targets" / "hosts"),
             "HOME": str(self.home),
             "XDG_STATE_HOME": str(self.tmp / "state"),
             "WK_SSH_TIMEOUT": "5",

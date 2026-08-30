@@ -53,6 +53,10 @@
 # WK_NO_DELEGATE (below, walk_targets): set by one machine answering another
 # workstation's fleet-wide `wk ls`/`wk status`, so it reports only what it
 # holds instead of delegating to every machine *it* knows too.
+# WK_TARGET_REGISTRY (below, target_registry_dir): the directory of machine
+# confs this run reads, default `targets/hosts` -- point it at another one
+# to give a test, or a second checkout, a fleet of its own. An empty
+# directory is a machine that knows only container and vm.
 # WK_TARGET_KIND: set by load_target from the target name; never hand-set.
 
 t_src()        { echo "/src/WebKit"; }
@@ -530,7 +534,7 @@ _in_machine() {
 # every device (CLAUDE.md, "One path, not two"); a key or secret is
 # per-device and does not live here, while the environment is per-invocation
 # and still wins over one (_target_reset_vars).
-target_registry_dir() { echo "$WK_ROOT/targets/hosts"; }
+target_registry_dir() { echo "${WK_TARGET_REGISTRY:-$WK_ROOT/targets/hosts}"; }
 target_registry_conf(){ echo "$(target_registry_dir)/$1.conf"; }
 
 # The machines the registry already names. Read from the directory at the

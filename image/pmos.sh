@@ -49,7 +49,7 @@ pmos_ssh() {
 # before `m_ssh_opts` reads it.
 pmos_ssh_opts() {
     machine_load "$(pmos_host)" >/dev/null 2>&1
-    printf '%s' "-o BatchMode=yes -o ConnectTimeout=${WK_SSH_TIMEOUT:-10} $(m_ssh_opts) \
+    printf '%s' "-o BatchMode=yes -o ConnectTimeout=$(wk_ssh_timeout) $(m_ssh_opts) \
 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 }
 

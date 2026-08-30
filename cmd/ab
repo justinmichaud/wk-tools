@@ -111,23 +111,31 @@ case "$ROUNDS" in ''|*[!0-9]*) die "--rounds takes a number (got '$ROUNDS')" ;; 
 [ "${#PLANS[@]}" -gt 0 ] || PLANS=(speedometer3)
 case "$BITS" in ''|32|64) ;; *) die "--bits takes 32 or 64 (got '$BITS')" ;; esac
 
-MIRROR=$(wk_mirror)
-[ -d "$MIRROR" ] || die "no mirror at $MIRROR; 'wk sync' makes one. Both commits are resolved in it."
-mgit() { git -C "$MIRROR" "$@"; }
-
 # --- the patched side ----------------------------------------------------------
 # A pull request (fetched into the mirror the way `wk pr` does) or a commit.
-HEAD_SHA="" HEAD_DESC="" PR_BASE_BRANCH="" PR_REMOTE_NAME=""
+# Which of the two the spec is settles here, with the rest of the argument
+# checks and before the mirror is required: a malformed spec is refused as
+# the argument error it is, not as a missing mirror.
+HEAD_SHA="" HEAD_DESC="" PR_BASE_BRANCH="" PR_REMOTE_NAME="" SPEC_SHA=""
 if [ "${#SPEC}" -eq 40 ] && [ -z "${SPEC//[0-9a-f]/}" ]; then
-    mgit cat-file -e "$SPEC^{commit}" 2>/dev/null \
-        || die "the mirror does not have commit $SPEC ('wk sync' fetches the upstream branches)"
-    HEAD_SHA="$SPEC"; HEAD_DESC="commit"
+    SPEC_SHA="$SPEC"
 else
     # A pull request spec (wpe:<n>, <n>); anything else pr_parse_spec refuses by name.
     pr_parse_spec "$SPEC"
     [ "$PR_KIND" = pull ] || die "'$SPEC' names a fork's branch; an A/B takes a pull request
     (wpe:<n>, <n>) or a commit sha. 'wk pr' can check the branch out; its
     head's sha is then the thing to pass here."
+fi
+
+MIRROR=$(wk_mirror)
+[ -d "$MIRROR" ] || die "no mirror at $MIRROR; 'wk sync' makes one. Both commits are resolved in it."
+mgit() { git -C "$MIRROR" "$@"; }
+
+if [ -n "$SPEC_SHA" ]; then
+    mgit cat-file -e "$SPEC_SHA^{commit}" 2>/dev/null \
+        || die "the mirror does not have commit $SPEC_SHA ('wk sync' fetches the upstream branches)"
+    HEAD_SHA="$SPEC_SHA"; HEAD_DESC="commit"
+else
     PR_REMOTE_NAME="$PR_REMOTE"
     mirror_fetch_pull "$PR_REMOTE" "$PR_N" \
         || die "could not fetch pull request $PR_N from '$PR_REMOTE' into the mirror"
@@ -267,6 +275,16 @@ ab_slot_has()  { # <profile> <slot> <sha>
     local sj; sj=$(ab_slot_json "$1" "$2")
     [ -f "$sj" ] && [ "$(wkslot get "$sj" commit)" = "$3" ]
 }
+# What device <i>'s board is doing, for the line that names it: the slots it
+# already holds when it is booted into that device's image, and what to do
+# about it when it is not. A function, not a `$(case ...)` inside the string:
+# bash 3.2 does not parse one there.
+_board_mode_note() { # <i>
+    case "${BOARD_MODE[$1]}" in
+        "bench ${PROFILE[$1]}-"*) echo "  (slots there: ${BOARD_SLOTS[$1]:-none})" ;;
+        *)                        echo "  <-- not booted into ${PROFILE[$1]}" ;;
+    esac
+}
 declare -a IMG_OK BOARD_MODE BOARD_SLOTS
 for ((i = 0; i < NDEV; i++)); do
     image_profile_load "${PROFILE[$i]}" >/dev/null 2>&1
@@ -306,7 +324,7 @@ for ((i = 0; i < NDEV; i++)); do
     log "        image      $([ -n "${IMG_OK[$i]}" ] && echo built || echo 'NOT BUILT')"
     log "        $(printf 'slot %-7s' base) $(ab_slot_has "${PROFILE[$i]}" base "$BASE_SHA" && echo "holds $(sha12 "$BASE_SHA")" || echo 'to build')"
     log "        $(printf 'slot %-7s' "$PR_SLOT") $(ab_slot_has "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" && echo "holds $(sha12 "$HEAD_SHA")" || echo 'to build')"
-    log "        board      ${BOARD_MODE[$i]}$(case "${BOARD_MODE[$i]}" in "bench ${PROFILE[$i]}-"*) echo "  (slots there: ${BOARD_SLOTS[$i]:-none})" ;; *) echo "  <-- not booted into ${PROFILE[$i]}" ;; esac)"
+    log "        board      ${BOARD_MODE[$i]}$(_board_mode_note "$i")"
 done
 log ""
 log "commands -- the builds in this order, one at a time; then every board's deploy and bench at once:"

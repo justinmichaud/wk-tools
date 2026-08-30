@@ -13,6 +13,11 @@
 # WK_STALL_SECONDS and WK_HEARTBEAT_SECONDS share a name and a default with
 # lib/detach.sh's remote poll loop -- one value for "silence before warning"
 # and "how often to say still going" everywhere a job is watched.
+#
+# The defaults below are a build's. A benchmark (cmd/bench, cmd/pi) sets
+# WK_STALL_SECONDS/WK_ABORT_SECONDS to 900/5400 before sourcing this file,
+# because a benchmark reports once per subtest rather than streaming compiler
+# output; image/yocto.sh's poll loop reads the same 900 for the same reason.
 WK_POLL_SECONDS="${WK_POLL_SECONDS:-15}"      # how often to check for progress
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-300}"   # silence before warning
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-1800}"  # silence before giving up

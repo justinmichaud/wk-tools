@@ -89,5 +89,61 @@ echo OK
         self.assertIn("transport 'nvme'", out, out)
 
 
+class TestDiskListNamesTheBootedDisk(WkTest):
+    """`disk_list` (boot/disk.sh) asks `disk_image_machine`, which asks
+    `card_priv whose <dev>`, which admin/wk-card-priv's `gate` refuses
+    outright for the disk this machine is running from -- correctly, since
+    `whose` would otherwise mount it. That refusal already says why; the
+    listing reads it rather than asking booted_disks a second time, and
+    prints "this machine's own system (booted)" instead of reading the
+    refusal as an empty answer ("no wk system on it")."""
+
+    _CANDIDATE = "/dev/sdX 64G usb 1 disk Model"
+
+    def _script(self, whose_stdout, whose_stderr, whose_rc):
+        return f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/boot/machines.sh"
+. "{REPO}/boot/disk.sh"
+MACH_NAME=testmach
+m_ssh() {{
+    case "$*" in
+        *"lsblk -dpno"*) printf '%s\\n' {self._CANDIDATE!r} ;;
+        *"lsblk -rno"*)  : ;;
+    esac
+}}
+card_priv() {{
+    case "$1" in
+        status) return 0 ;;
+        whose)
+            printf '%s' {whose_stdout!r}
+            printf '%s' {whose_stderr!r} >&2
+            return {whose_rc} ;;
+    esac
+}}
+disk_list
+'''
+
+    def test_the_booted_disk_says_so_instead_of_no_wk_system(self):
+        refusal = (
+            "wk-card-priv: REFUSED: '/dev/sdX' is a disk this machine is "
+            "running from (/, /boot, swap or\n"
+            "    the kernel's root=). On these boards the system disk is "
+            "itself an SD card or\n"
+            "    a USB stick, so being removable is no protection at all. "
+            "A second system\n"
+            "    beside this one is '/dev/sdX@second'.\n")
+        cp = bash(self._script("", refusal, 3))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("this machine's own system (booted)", cp.stdout, cp.stdout)
+        self.assertNotIn("no wk system on it", cp.stdout, cp.stdout)
+
+    def test_a_disk_with_no_marker_still_says_no_wk_system(self):
+        cp = bash(self._script("marker: none\n", "", 0))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("no wk system on it", cp.stdout, cp.stdout)
+        self.assertNotIn("booted", cp.stdout, cp.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

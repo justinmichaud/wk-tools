@@ -100,6 +100,30 @@ WK_VM_STORE="{tmp}" ws_target {name}
             )
 
 
+class TestTargetAllReadsTheMachineRegistry(WkTest):
+    """`target_all` (lib/target.sh) is container and vm plus one entry per
+    machine conf, read from WK_TARGET_REGISTRY at the moment it is asked --
+    the seam that gives a test, or a second checkout, a fleet of its own
+    instead of this machine's."""
+
+    def test_a_registry_of_one_machine_is_the_whole_fleet(self):
+        """target_all lists container, vm and exactly the confs in WK_TARGET_REGISTRY"""
+        with tempfile.TemporaryDirectory(prefix="wk-registry-") as tmp:
+            name = f"fakebox-{rand_suffix()}"
+            with open(os.path.join(tmp, f"{name}.conf"), "w") as fh:
+                fh.write("WK_TARGET_KIND=remote\nWK_REMOTE_HOST=nonexistent.invalid\n")
+            cp = bash(f"{_SOURCES}\ntarget_all", env={"WK_TARGET_REGISTRY": tmp})
+            self.assertEqual(cp.returncode, 0, cp.stderr)
+            self.assertEqual(cp.stdout.split(), ["container", "vm", name])
+
+    def test_an_empty_registry_is_a_machine_that_knows_no_fleet(self):
+        """an empty WK_TARGET_REGISTRY leaves only the two built-in kinds"""
+        with tempfile.TemporaryDirectory(prefix="wk-registry-") as tmp:
+            cp = bash(f"{_SOURCES}\ntarget_all", env={"WK_TARGET_REGISTRY": tmp})
+            self.assertEqual(cp.returncode, 0, cp.stderr)
+            self.assertEqual(cp.stdout.split(), ["container", "vm"])
+
+
 class TestCompletionListsTheStore(WkTest):
     def test_completion_list_workspaces_lists_fake_store_workspace(self):
         """`wk completion --list-workspaces` lists the fake store's workspace"""

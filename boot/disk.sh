@@ -102,19 +102,57 @@ disk_can_identify() {
 
 # A mount per disk, read-only, on the machine holding it: cached for the
 # process because a listing asks about every disk and a probe is not free.
+# Sets DISK_WHOSE_MACHINE (the machine name, or empty) and DISK_WHOSE_BOOTED
+# (set when the disk is the one this machine is currently running from)
+# rather than printing a result: a caller reading it back via $(...) would
+# run this in a subshell, and a global set there is gone once the subshell
+# exits -- disk_list needs both answers together. Called as a statement,
+# never as $(...), the way admin/wk-card-priv's `gate` sets GATED_DEV for
+# the same reason.
+#
+# The booted case: admin/wk-card-priv's `gate` refuses to mount the disk
+# this machine is running from at all, correctly, and its refusal already
+# names the reason (it names booted_disks' finding) -- so this reads that
+# refusal instead of asking booted_disks again over a second ssh round trip.
 _WK_WHOSE=""
+DISK_WHOSE_MACHINE=""
+DISK_WHOSE_BOOTED=""
 disk_image_machine() { # <device>
     local dev="$1" hit out
+    DISK_WHOSE_MACHINE=""
+    DISK_WHOSE_BOOTED=""
     disk_can_identify || return 1
 
     hit=$(printf '%s\n' "$_WK_WHOSE" | awk -v d="$dev" '$1 == d { print $2; exit }')
-    [ -z "$hit" ] || { [ "$hit" = "-" ] || printf '%s' "$hit"; return 0; }
+    if [ -n "$hit" ]; then
+        case "$hit" in
+            -)      ;;
+            booted) DISK_WHOSE_BOOTED=1 ;;
+            *)      DISK_WHOSE_MACHINE="$hit" ;;
+        esac
+        return 0
+    fi
 
-    out=$(card_priv whose "$dev" </dev/null 2>/dev/null) || out=""
+    # `|| true`, not `|| out=""`: on a refusal the message that matters is
+    # in $out (stderr, merged in above) and a failed command substitution
+    # still assigns it -- only a trailing `|| out=""` would have thrown it
+    # away.
+    out=$(card_priv whose "$dev" </dev/null 2>&1) || true
+    case "$out" in
+        *'is a disk this machine is running from'*) DISK_WHOSE_BOOTED=1 ;;
+    esac
     hit=$(kv_get machine <<<"$out")
-    _WK_WHOSE="$_WK_WHOSE
-$dev ${hit:--}"
-    [ -z "$hit" ] || printf '%s' "$hit"
+    if [ -n "$hit" ]; then
+        _WK_WHOSE="$_WK_WHOSE
+$dev $hit"
+        DISK_WHOSE_MACHINE="$hit"
+    elif [ -n "$DISK_WHOSE_BOOTED" ]; then
+        _WK_WHOSE="$_WK_WHOSE
+$dev booted"
+    else
+        _WK_WHOSE="$_WK_WHOSE
+$dev -"
+    fi
 }
 
 # The transport a declared device name implies. Derived rather than declared:
@@ -147,7 +185,8 @@ disk_resolve_own() {
     if [ "$n" = 1 ]; then printf '%s' "$same"; return 0; fi
 
     for dev in $same; do
-        owner=$(disk_image_machine "$dev" || true)
+        disk_image_machine "$dev" || true
+        owner="$DISK_WHOSE_MACHINE"
         # Another machine's system: definitely not this machine's medium.
         [ -n "$owner" ] && [ "$owner" != "$MACH_NAME" ] && continue
         # This machine's own system named outright ends it -- no need to keep
@@ -185,7 +224,8 @@ disk_for_machine() { # <machine>
     local want="$1" dev
     [ -n "$want" ] || return 1
     for dev in $(disk_candidates | awk '{print $1}'); do
-        [ "$(disk_image_machine "$dev")" = "$want" ] && { printf '%s' "$dev"; return 0; }
+        disk_image_machine "$dev" || true
+        [ "$DISK_WHOSE_MACHINE" = "$want" ] && { printf '%s' "$dev"; return 0; }
     done
     return 1
 }
@@ -203,7 +243,7 @@ disk_contents() {
 }
 
 disk_list() {
-    local line name n=0 contents desc owner tran
+    local line name n=0 contents desc owner tran booted
     contents=$(disk_contents)
 
     while IFS= read -r line; do
@@ -216,7 +256,9 @@ disk_list() {
 
         # `|| true`: an unavailable answer is a line of the listing, not the
         # end of it.
-        owner=$(disk_image_machine "$name" || true)
+        disk_image_machine "$name" || true
+        owner="$DISK_WHOSE_MACHINE"
+        booted="$DISK_WHOSE_BOOTED"
 
         if [ "$name" = "${MACH_DEVICE:-}" ]; then
             printf '    %s   <- %s is configured to boot from this one (wk boot %s)\n' \
@@ -228,6 +270,12 @@ disk_list() {
             printf '        %s  --  holds %s\n' "$desc" \
                 "$([ "$owner" = "$MACH_NAME" ] && printf "this machine's own system" \
                                                || printf "a system for %s" "$owner")"
+        elif [ -n "$booted" ]; then
+            # The helper's `whose` refuses to mount this one -- it is the
+            # disk the machine is running from -- and its refusal is the
+            # strongest evidence there is that this is the machine's own
+            # system, not an empty answer.
+            printf "        %s  --  this machine's own system (booted)\n" "$desc"
         elif disk_can_identify; then
             printf '        %s  --  no wk system on it\n' "$desc"
         else
@@ -310,54 +358,44 @@ $(m_ssh "lsblk -lno NAME,MOUNTPOINT $(sh_quote "$dev")" 2>/dev/null | awk 'NF > 
 # the right partitions; the two steps that differ ask this.
 disk_is_second() { case "$1" in *@second) return 0 ;; *) return 1 ;; esac; }
 
-disk_write_stream() { # <device>   -- image bytes on stdin; the helper's report on stdout
-    local dev="$1" remote_zstd=no
-    # `< /dev/null`, like every other probe here: ssh forwards its own stdin
-    # to the far side, and this one's stdin is the image -- bytes it read to
-    # ask a yes/no question are bytes the write never sees.
-    m_ssh 'command -v zstd >/dev/null' < /dev/null && remote_zstd=yes
-    info "writing to $dev on $MACH_NAME (streamed, zstd=$remote_zstd)"
-    # Decompression runs unprivileged on the far side; only the plain stream
-    # reaches the privileged writer.
-    if [ "$remote_zstd" = yes ] && have zstd; then
-        zstd -3 -c | m_ssh "zstd -dc | sudo -n $CARD_PRIV write $(sh_quote "$dev")"
-    else
-        card_priv write "$dev"
-    fi
+# The card machine decompresses, meters and writes in one pipeline: the image
+# is never decompressed here, so a source that is compressed crosses the
+# network compressed and this machine needs none of the tools its format
+# wants. `exec 3>&1` hands the meter a fd onto the ssh session's stdout,
+# where the helper's own report goes: its two lines are read out of the
+# report by disk_write_source, and the decompressor's stdout stays the
+# writer's stdin.
+disk_write_stream() { # <device> <decompressor>  -- source bytes on stdin; the far side's report on stdout
+    local dev="$1" filter="$2"
+    info "writing to $dev on $MACH_NAME (streamed; decompressed there with $filter)"
+    m_ssh "exec 3>&1; $filter | python3 -c $(sh_quote "$(disk_stream_meter_py)") | sudo -n $CARD_PRIV write $(sh_quote "$dev")"
 }
 
-# The image's own bytes, from wherever the source is onto the card, in one
-# pass: nothing is materialized on this machine, which is what lets a driving
-# machine with no Linux tooling write a card -- every edit the image needs is
-# made afterwards, on the card (admin/wk-card-priv). The stream is metered as
-# it goes past, since the read-back below has to compare the disk against
-# *something* and there is no local copy to re-read. The meta file's first
-# line is "<bytes> <sha>" of the stream; under @second a second line carries
-# what the helper reports it split the stream into -- the two partitions'
-# own sizes and hashes, which is what the read-back compares there.
-#   disk_write_source <device> <reader command> <meta file>
-disk_write_source() {
-    local dev="$1" reader="$2" meta="$3" report
-    disk_would "stream the image onto $dev on $MACH_NAME, and read it back to verify" && return 0
-    report=$(eval "$reader" | disk_stream_meter "$meta" | disk_write_stream "$dev" | tr -d '\r') \
-        || die "could not write the image onto $dev on $MACH_NAME.
-    It was read through:  $reader
-    $dev is $(disk_size "${dev%@second}"); an image larger than that runs out of space
-    part-written, and the read that fed it can fail on its own account."
-    printf '%s\n' "$report" | sed 's/^/    /' >&2
-    disk_is_second "$dev" || return 0
-    printf '%s %s %s %s\n' \
-        "$(kv_get boot_bytes <<<"$report")" "$(kv_get boot_sha <<<"$report")" \
-        "$(kv_get root_bytes <<<"$report")" "$(kv_get root_sha <<<"$report")" >> "$meta"
+# Asked here rather than beside the pipeline below, which runs in a command
+# substitution: a `die` in there would exit that subshell and leave the write
+# to fail a second time, blaming the disk. `< /dev/null`, like every other
+# probe here: ssh forwards its own stdin to the far side, and once the write
+# starts that stdin is the image -- bytes read to ask a yes/no question are
+# bytes the card never sees.
+disk_filter_require() { # <decompressor>
+    local tool="${1%% *}"
+    [ "$1" = cat ] && return 0
+    m_ssh "command -v $(sh_quote "$tool") >/dev/null" < /dev/null && return 0
+    die "$MACH_NAME has no $tool, and the image being sent to it is compressed
+    with it -- the card machine is what decompresses the stream, so this end
+    never has to have the tool for a format it is only passing through.
+    Remedy: install $tool on $MACH_NAME (apt spells xz 'xz-utils')."
 }
 
-# stdin to stdout unchanged, with the byte count and sha256 of everything that
-# went past left in <file>. A filter in the pipeline rather than `tee` into
-# two process substitutions, whose completion this shell cannot wait for: the
-# numbers have to be final by the time the pipeline returns.
-disk_stream_meter() { # <file>
-    python3 -c '
-import hashlib, sys
+# The meter, as it runs on the card machine: stdin to stdout unchanged, with
+# the byte count and sha256 of everything that went past written to fd 3 at
+# EOF. A filter in the pipeline rather than `tee` into a process
+# substitution, whose completion no shell here can wait for: the numbers have
+# to be final by the time the write returns. One write call, so the two lines
+# cannot interleave with the helper's on the fd they share.
+disk_stream_meter_py() {
+    cat <<'PY'
+import hashlib, os, sys
 out, digest, n = sys.stdout.buffer, hashlib.sha256(), 0
 while True:
     chunk = sys.stdin.buffer.read(1 << 20)
@@ -367,18 +405,47 @@ while True:
     digest.update(chunk)
     out.write(chunk)
 out.flush()
-with open(sys.argv[1], "w") as fh:
-    fh.write("%d %s\n" % (n, digest.hexdigest()))
-' "$1"
+os.write(3, ("stream_bytes=%d\nstream_sha=%s\n" % (n, digest.hexdigest())).encode())
+PY
+}
+
+# The image's own bytes, from wherever the source is onto the card, in one
+# pass: nothing is materialized on this machine, which is what lets a driving
+# machine with no Linux tooling write a card -- every edit the image needs is
+# made afterwards, on the card (admin/wk-card-priv). The stream is metered on
+# the card machine as it goes past, since the read-back below has to compare
+# the disk against *something* and there is no local copy to re-read. The
+# meta file's first line is "<bytes> <sha>" of the stream; under @second a
+# second line carries what the helper reports it split the stream into -- the
+# two partitions' own sizes and hashes, which is what the read-back compares
+# there.
+#   disk_write_source <device> <reader command> <decompressor> <meta file>
+disk_write_source() {
+    local dev="$1" reader="$2" filter="$3" meta="$4" report
+    disk_would "stream the image onto $dev on $MACH_NAME, and read it back to verify" && return 0
+    disk_filter_require "$filter"
+    report=$(eval "$reader" | disk_write_stream "$dev" "$filter" | tr -d '\r') \
+        || die "could not write the image onto $dev on $MACH_NAME.
+    It was read through:  $reader
+    $dev is $(disk_size "${dev%@second}"); an image larger than that runs out of space
+    part-written, and the read that fed it can fail on its own account."
+    printf '%s\n' "$report" | sed 's/^/    /' >&2
+    printf '%s %s\n' \
+        "$(kv_get stream_bytes <<<"$report")" "$(kv_get stream_sha <<<"$report")" > "$meta"
+    disk_is_second "$dev" || return 0
+    printf '%s %s %s %s\n' \
+        "$(kv_get boot_bytes <<<"$report")" "$(kv_get boot_sha <<<"$report")" \
+        "$(kv_get root_bytes <<<"$report")" "$(kv_get root_sha <<<"$report")" >> "$meta"
 }
 
 # Read the card back and compare with what was sent -- privileged, hence a
 # verb rather than a second way in, and unconditional over the whole span: a
 # checksum from whatever did the writing only claims the bytes it chose to
-# write arrived, and says nothing about the ones it skipped. The size and
-# hash are the stream's own (disk_stream_meter), there being no local copy;
-# under @second they are the two partitions' (disk_write_source's second
-# line), read back from partitions 3 and 4.
+# write arrived, and says nothing about the ones it skipped. The size and hash
+# are the stream's own, metered on the card machine as it went past
+# (disk_write_source), there being no local copy; under @second they are the
+# two partitions' (disk_write_source's second line), read back from
+# partitions 3 and 4.
 disk_verify_stream() { # <device> <meta file>
     local dev="$1" meta="$2" bytes want got b_bytes b_sha r_bytes r_sha
     disk_would "read $dev back and compare it with the image streamed to it" && return 0
@@ -403,11 +470,9 @@ disk_verify_stream() { # <device> <meta file>
 }
 
 # --- the edits an image needs, made on the card -------------------------------
-# Every one of them used to be made on a local copy of the image before it was
-# streamed, with mtools, debugfs and sfdisk -- tooling a macOS workstation
-# does not have, editing bytes that were then written in place of the image's
-# own. Each is a verb of the card helper now: the bytes written are the
-# image's, and what is edited is the card.
+# Each is a verb of the card helper, applied to the card after the image's own
+# bytes are on it: the driving machine opens no filesystem inside an image and
+# needs no tooling for one.
 
 # A card that took an image has a partition table. One that took a stream
 # with a shell banner ahead of it -- a container exec, an ssh session with
@@ -814,7 +879,12 @@ disk_grow() {
 disk_eject() {
     local dev="$1"
     disk_would "flush and power off $dev" && return 0
-    m_ssh "command -v udisksctl >/dev/null" || return 0
+    m_ssh "command -v udisksctl >/dev/null" || {
+        warn "$MACH_NAME has no udisksctl, so $dev is left powered on. The write is
+  complete and the card is synced -- it is safe to pull. To have the card
+  powered off instead, install udisks2 on $MACH_NAME ('./setup' does, on a wk host)."
+        return 0
+    }
     m_ssh "udisksctl power-off -b $(sh_quote "$dev")" >/dev/null 2>&1 \
         && info "powered off $dev -- safe to remove" \
         || log "  (could not power off $dev; it is synced, so it is safe to pull anyway)"

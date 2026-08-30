@@ -19,9 +19,3 @@ workspace image or the guest.
 - [ ] `claude` on the host: it is there to work on wk-tools itself; WebKit
       work uses the workspace's own copy -- decide whether wk-tools work
       moves into a workspace too, so the host copy goes [decision]
-- [ ] `mesa-utils`, `wayland-utils`, `grim`: verification aids for the bench
-      session; confirm `wk session` refuses without them or drop them
-- [ ] `nmap` on macOS: `wk find` from a Mac needs it and `./setup` neither
-      installs nor checks it; `wk doctor` names it as optional (`wk find`)
-- [ ] every apt.txt entry names the `wk` command that needs it on the host;
-      a test greps that each named command exists

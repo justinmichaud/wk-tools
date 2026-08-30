@@ -142,6 +142,10 @@ EXPECTED_SAFE_RAW_READS = {
         "reads two fields from a heredoc, not a terminal",
     ("cmd/sysimage", 'read -r bytes sha < "$WRITE_META"'):
         "reads the stream meter's byte count and hash from a file, not a terminal",
+    ("boot/disk.sh", 'read -r bytes want < "$meta"'):
+        "reads the same two fields back for the read-back verify, from that file",
+    ("boot/disk.sh", 'read -r b_bytes b_sha r_bytes r_sha <<<"$(sed -n 2p "$meta")"'):
+        "reads the two partitions' sizes and hashes from that file's second line (@second), not a terminal",
 }
 
 

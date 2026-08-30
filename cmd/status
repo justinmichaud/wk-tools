@@ -290,7 +290,7 @@ report_ws() {
         bump 4
         ;;
     unreachable)
-        note_warn "the machine behind '$TARGET' did not answer within ${WK_SSH_TIMEOUT:-10}s"
+        note_warn "the machine behind '$TARGET' did not answer within $(wk_ssh_timeout)s"
         note "this is not 'absent': nothing about the workspace was checked at all,"
         note "and anything below is the last thing this machine wrote about it"
         bump 4

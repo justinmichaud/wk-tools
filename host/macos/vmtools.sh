@@ -31,7 +31,7 @@ command -v _unpinned_host_key_opts >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 
 _rsh() {
     # shellcheck disable=SC2046
-    ssh -o BatchMode=yes -o ConnectTimeout="${WK_SSH_TIMEOUT:-10}" $(_unpinned_host_key_opts) \
+    ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" $(_unpinned_host_key_opts) \
         -p "$_ssh_port" -i "$_ssh_key" \
         "$_ssh_user@localhost" "$@"
 }

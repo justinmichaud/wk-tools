@@ -51,8 +51,8 @@ class TestRemovedOverridesStayRemoved(unittest.TestCase):
 
 class TestSharedTimingDefaultsAgree(unittest.TestCase):
     """CLAUDE.md: 'same name read in several files: one default.' lib/detach.sh
-    and lib/watchdog.sh both read WK_HEARTBEAT_SECONDS and WK_STALL_SECONDS;
-    they used to disagree (60 vs 300, 300 vs 900) and now must not."""
+    and lib/watchdog.sh both read WK_HEARTBEAT_SECONDS and WK_STALL_SECONDS,
+    and must agree on the default."""
 
     def test_stall_and_heartbeat_seconds_share_one_default(self):
         detach = _src("lib", "detach.sh")
@@ -61,6 +61,29 @@ class TestSharedTimingDefaultsAgree(unittest.TestCase):
         self.assertIn("WK_STALL_SECONDS:-300", watchdog)
         self.assertIn("WK_HEARTBEAT_SECONDS:-300", detach)
         self.assertIn("WK_HEARTBEAT_SECONDS:-300", watchdog)
+
+
+class TestSshTimeoutReadInOnePlace(unittest.TestCase):
+    """lib/common.sh's wk_ssh_timeout() is the one place the
+    WK_SSH_TIMEOUT default lives; every caller reads it through that
+    function instead of repeating `${WK_SSH_TIMEOUT:-10}`."""
+
+    def test_no_other_file_reads_the_default_inline(self):
+        owner = REPO / "lib" / "common.sh"
+        offenders = []
+        for top in ("cmd", "lib", "boot", "image", "host", "targets", "bench"):
+            d = REPO / top
+            if not d.is_dir():
+                continue
+            for path in d.rglob("*"):
+                if not path.is_file() or path == owner:
+                    continue
+                if "WK_SSH_TIMEOUT:-" in path.read_text(errors="ignore"):
+                    offenders.append(str(path.relative_to(REPO)))
+        wk = REPO / "wk"
+        if wk.is_file() and "WK_SSH_TIMEOUT:-" in wk.read_text(errors="ignore"):
+            offenders.append("wk")
+        self.assertEqual(offenders, [], f"WK_SSH_TIMEOUT:- read inline outside lib/common.sh: {offenders}")
 
 
 class TestCommonLib(WkTest):

@@ -26,6 +26,15 @@ from tests.support import REPO, WkTest, bash, requires_machine, run
 CARD_PRIV = REPO / "admin" / "wk-card-priv"
 
 
+def have_gnu_stat():
+    """`_wifi_edit` (admin/wk-card-priv) reads a file's mode with GNU
+    `stat -c`, which BSD/macOS stat does not take. The helper only ever runs
+    on the Linux machine holding the card reader, so the lifted copy is
+    tested where that stat is."""
+    return subprocess.run(["stat", "-c", "%a", "/"],
+                          capture_output=True).returncode == 0
+
+
 def _netplan_parser_source():
     """The python `_netplan_wifi` (admin/wk-card-priv) feeds to python3 -c,
     lifted from the helper's text so the exact code that runs as root is
@@ -661,6 +670,8 @@ cat "$out"; rm -f "$out"
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10,
                               env={**os.environ, "TMPDIR": str(self.tmp)})
 
+    @unittest.skipUnless(have_gnu_stat(),
+                         "the helper runs on a Linux card machine (GNU stat)")
     def test_reads_back_what_wifi_edit_wrote(self):
         with tempfile.TemporaryDirectory() as d:
             script = f'''

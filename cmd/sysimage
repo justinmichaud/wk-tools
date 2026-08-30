@@ -93,7 +93,7 @@ fi
 _seed_cleanup() { [ -n "${SEED:-}" ] && rm -rf "$SEED"; SEED=""; return 0; }
 
 # Where the streamed write leaves the byte count and hash of what went past
-# (disk_stream_meter, boot/disk.sh): the image itself is never materialized
+# (disk_write_source, boot/disk.sh): the image itself is never materialized
 # here, but the read-back verify needs something to compare against.
 _disk_cleanup() { [ -n "${WRITE_META:-}" ] && rm -f "$WRITE_META"; WRITE_META=""; return 0; }
 
@@ -128,8 +128,7 @@ driving_key() {
 # The bodies below are composed here, where the profile's values are
 # (IMG_WATCHDOG, the machine's driver, the spec's own append files), and land
 # on the card through a card-helper verb (boot/disk.sh): nothing on this
-# machine opens a filesystem inside an image, so a driving machine needs no
-# mtools, debugfs or sfdisk.
+# machine opens a filesystem inside an image.
 
 # One unit, staged for `disk_install_units`, under the name systemd will know
 # it by. `systemctl enable` never runs against a card, so the unit's own
@@ -434,11 +433,22 @@ cmd_ls() {
             [ -n "$machine" ] || note="this checkout does not define '$prof'"
         fi
 
-        printf '%-40s %-10s %-8s %-8s %s\n' \
-            "$ws" "${machine:-?}" "$builder" "$(human_bytes "$bytes")" "$mtime"
-        # This path is the image; nothing copied it anywhere.
-        printf '    %s\n' "$path"
-        _ws_building "$ws" && printf '    %s\n' "a build is running in this workspace -- these bytes may be the previous one"
+        if [ "$path" = - ]; then
+            # An image workspace with no image: a yocto image stage removes the
+            # last one as it rebuilds, and a workspace that vanishes from the
+            # listing for the hours that takes is a workspace nobody can find.
+            printf '%-40s %-10s %-8s %-8s %s\n' "$ws" "${machine:-?}" "$builder" "-" "-"
+            printf '    %s\n' "no image here yet"
+            _ws_building "$ws" \
+                && printf '    %s\n' "a build is running in this workspace" \
+                || printf "    'wk sysimage build %s' builds one\n" "${prof:-<profile>}"
+        else
+            printf '%-40s %-10s %-8s %-8s %s\n' \
+                "$ws" "${machine:-?}" "$builder" "$(human_bytes "$bytes")" "$mtime"
+            # This path is the image; nothing copied it anywhere.
+            printf '    %s\n' "$path"
+            _ws_building "$ws" && printf '    %s\n' "a build is running in this workspace -- these bytes may be the previous one"
+        fi
         # The image's WebKit slots, from their own manifests (wk sysimage webkit).
         local sj
         for sj in $( [ -n "$prof" ] && ( image_profile_load "$prof" >/dev/null 2>&1 && dirname "$(image_slot_dir "$prof" x)" ) )/*/slot.json; do
@@ -511,7 +521,8 @@ $(machine_list | sed 's/^/      /')"
 
 # The decompressor a path needs, by what it is, or `cat`: a yocto build
 # leaves its image as `<recipe>.wic.xz`, and writing that compressed stream
-# straight to a disk produces a card that is not bootable, silently. Named
+# straight to a disk produces a card that is not bootable, silently. It runs
+# on the card machine, ahead of the writer (disk_write_stream). Named
 # extensions rather than sniffed content -- what the builders here produce
 # is known (yocto: .wic.xz; buildroot: an uncompressed .img) -- and anything
 # unrecognised passes through unchanged, caught by the refusal below.
@@ -655,23 +666,21 @@ _resolve_disk_dev() { # <image machine>
     DISK_DEV="$dev"
 }
 
-_from_reader() { # <spec> -- prints a command that emits the image on stdout
-    local filter
-    filter=$(_from_filter "${1#vm:}")
+# The source's own bytes, untouched: whatever compression they carry crosses
+# the network as it is and is undone on the card machine (disk_write_stream,
+# boot/disk.sh), which is the only machine here that has to own the tool for
+# it -- and moves the image once instead of twice.
+_from_reader() { # <spec> -- prints a command that emits the source bytes on stdout
     case "$1" in
         vm:*) is_macos || die "--from vm:<path> is for reading a container workspace's
     output out of this machine's podman VM, and this is not a macOS host. Give a
     plain path."
-              printf 'podman machine ssh %s -- sudo cat %s | %s' \
-                  "${WK_MACHINE:-wk}" "$(sh_quote "${1#vm:}")" "$filter" ;;
+              printf 'podman machine ssh %s -- sudo cat %s' \
+                  "${WK_MACHINE:-wk}" "$(sh_quote "${1#vm:}")" ;;
         *)    [ -r "$1" ] || die "no image at $1
     An image lives where the workspace that built it put it (wk help). If
     that is inside this machine's podman VM, say so: --from vm:$1"
-              if [ "$filter" = cat ]; then
-                  printf 'cat %s' "$(sh_quote "$1")"
-              else
-                  printf '%s %s' "$filter" "$(sh_quote "$1")"
-              fi ;;
+              printf 'cat %s' "$(sh_quote "$1")" ;;
     esac
 }
 
@@ -684,9 +693,10 @@ _profile_from_path() { # <path>
 
 cmd_write_from() { # <from-spec> <disk-spec> <dry> <grow> <profile> <role> <machine override>
     local from="$1" spec="$2" dry="$3" grow="$4" profile="$5" role="$6" mach="${7:-}"
-    local reader marker base fleet_edit="" bytes="" sha="" cmdline_add="" config_add=""
+    local reader filter marker base fleet_edit="" bytes="" sha="" cmdline_add="" config_add=""
 
     reader=$(_from_reader "$from")
+    filter=$(_from_filter "${from#vm:}")
 
     # Derived before the profile is used for anything, so the machine the
     # image is for -- which decides the tailnet name the card is seeded with --
@@ -804,7 +814,7 @@ EOF
 
     WRITE_META=$(mktemp)
     wk_atexit _disk_cleanup
-    disk_write_source "$DISK_DEV" "$reader" "$WRITE_META"
+    disk_write_source "$DISK_DEV" "$reader" "$filter" "$WRITE_META"
     if [ -z "$DISK_DRY" ]; then
         read -r bytes sha < "$WRITE_META"
         [ "${bytes:-0}" -gt 0 ] || die "$from read as 0 bytes through: $reader"

@@ -1,4 +1,5 @@
-"""The Yocto image stage's completion evidence (image/yocto-build.sh).
+"""The Yocto image stage's completion evidence (image/yocto-build.sh), and
+the driving side's own running/not-running decision (image/yocto.sh).
 
 cross-toolchain-helper's own build_image() treats the mere presence of a file
 at build/image/<recipe>.<ext> as proof the image is current, and returns
@@ -13,13 +14,24 @@ a previous run's copy, and (2) checks the result's mtime against the stage's
 own start time, so a helper that finds another way back to the same shortcut
 fails loudly instead of printing "done" over a stale artifact.
 
-Nothing here builds Yocto or touches a workspace: the two functions are
-lifted out of image/yocto-build.sh with sed (the tests/test_wifi_seed.py
-idiom for calling one function without sourcing a whole script) and driven
-against a scratch directory.
+Nothing in TestVerifyImageFreshness/TestClearStaleImageCopies/
+TestImageStageIsEvidenceBased builds Yocto or touches a workspace: the two
+functions are lifted out of image/yocto-build.sh with sed (the
+tests/test_wifi_seed.py idiom for calling one function without sourcing a
+whole script) and driven against a scratch directory.
+
+YoctoStageTest and YoctoSpawnRefusesASecondBuild cover a related handoff
+item on the driving side, in image/yocto.sh: does `kill -9` mid-`wk sysimage
+build` converge on re-run, and does a second `wk sysimage build` of the same
+profile refuse rather than race the first's cleanup? `yocto_running` is
+documented as reading evidence, not the status file -- driven directly here,
+with `t_exec` stubbed to run its check on this host instead of inside a
+container workspace, against a status file left saying `state=running` and
+a pid that no longer exists (the exact shape a killed driver leaves).
 
 Run: python3 -m unittest tests.test_yocto_stage -v
 """
+import os
 import subprocess
 import time
 import unittest
@@ -28,6 +40,7 @@ from pathlib import Path
 from tests.support import REPO, WkTest, scratch_dir
 
 YOCTO_BUILD = REPO / "image" / "yocto-build.sh"
+DEAD_PID = "99999999"  # a pid essentially guaranteed not to exist
 
 
 def _lift(func):
@@ -83,7 +96,6 @@ class TestVerifyImageFreshness(WkTest):
         with scratch_dir() as d:
             f = d / "webkit-dev-ci-tools.wic.xz"
             f.write_text("fresh")
-            import os
             now = int(time.time())
             os.utime(f, (now, now))
             cp = _run(self.func, "verify_image_freshness", str(d), str(now))
@@ -94,7 +106,6 @@ class TestVerifyImageFreshness(WkTest):
         with scratch_dir() as d:
             f = d / "webkit-dev-ci-tools.wic.xz"
             f.write_text("stale")
-            import os
             yesterday = int(time.time()) - 86400
             os.utime(f, (yesterday, yesterday))
             start = int(time.time())
@@ -190,3 +201,145 @@ class TestImageStageIsEvidenceBased(unittest.TestCase):
             self.assertNotIn(bad, lowered,
                               f"'{bad}' found in the image case arm -- a skip "
                               "branch here reintroduces the moose defect")
+
+
+class YoctoStageTest(WkTest):
+    """Sources lib/common.sh, lib/store.sh (wk_ws_dir) and image/yocto.sh,
+    with `t_exec` stubbed to run its command on this host -- the same
+    'un-managed clobbering' technique test_disk_logic.py uses, standing in
+    for a container workspace's pid namespace without one."""
+
+    PRELUDE = f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/image/yocto.sh"
+t_exec() {{ shift; "$@"; }}
+'''
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.tmp / "store"
+        self.ws = "yoctows"
+        self.home = self.store / "ws" / self.ws / "home"
+        self.home.mkdir(parents=True)
+
+    def _write_status(self, state="running"):
+        (self.store / "ws" / self.ws / "yocto.status").write_text(
+            f"state={state}\nprofile=demo\nid=demo-1\ntarget=rpi3-32\n"
+            f"branch=main\nstage=image\nstarted=2026-01-01T00:00:00Z\n"
+        )
+
+    def _write_pidfile(self, stage, pid):
+        (self.home / f"yocto-{stage}.pid").write_text(f"{pid}\n")
+
+    def _run(self, script):
+        env = dict(os.environ)
+        env["WK_STORE"] = str(self.store)
+        env["WK_ROOT"] = str(REPO)
+        for var in ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND"):
+            env.pop(var, None)
+        return subprocess.run(
+            ["bash", "-c", self.PRELUDE + script],
+            cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,
+        )
+
+    def test_a_dead_pid_after_kill_9_is_not_read_as_running(self):
+        """the exact scenario: killed mid-build, status says running, pid is dead"""
+        self._write_status(state="running")
+        self._write_pidfile("image", DEAD_PID)
+        cp = self._run(f'yocto_running {self.ws} image && echo RUNNING || echo NOT-RUNNING')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "NOT-RUNNING", cp.stdout + cp.stderr)
+
+    def test_a_dead_pid_means_no_stage_is_reported_running_at_all(self):
+        self._write_status(state="running")
+        self._write_pidfile("image", DEAD_PID)
+        cp = self._run(f'yocto_any_running {self.ws} && echo LIVE || echo NONE')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "NONE", cp.stdout + cp.stderr)
+
+    def test_a_genuinely_live_pid_is_still_read_as_running(self):
+        """positive control: yocto_running is not simply hard-wired to say no"""
+        proc = subprocess.Popen(["sleep", "60"])
+        try:
+            self._write_status(state="running")
+            self._write_pidfile("image", proc.pid)
+            cp = self._run(f'yocto_running {self.ws} image && echo RUNNING || echo NOT-RUNNING')
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual(cp.stdout.strip(), "RUNNING", cp.stdout + cp.stderr)
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_dry_run_after_a_kill_9_does_not_claim_a_build_is_running(self):
+        """the CLI end to end: `wk sysimage build <profile> --dry-run` against
+        a workspace left by a killed build prints its plan, not a claim that
+        a build is already running (yocto_build's --dry-run path never even
+        asks -- it is the decision path above that a real re-run relies on)."""
+        self._write_status(state="running")
+        self._write_pidfile("image", DEAD_PID)
+        cp = self._run_wk_sysimage_dry_run()
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("dry run", out, out)
+        self.assertNotIn("already running", out, out)
+
+    def _run_wk_sysimage_dry_run(self):
+        env = dict(os.environ)
+        env["WK_STORE"] = str(self.store)
+        env["WK_TARGET"] = "container"
+        for var in ("WK_NAME", "WK_TARGET_KIND"):
+            env.pop(var, None)
+        return subprocess.run(
+            [str(REPO / "wk"), "sysimage", "build", "webkit-2.52-yocto-rpi3-32",
+             "--workspace", self.ws, "--dry-run"],
+            cwd=str(REPO), env=env, capture_output=True, text=True, timeout=60,
+        )
+
+
+class YoctoSpawnRefusesASecondBuild(WkTest):
+    """Item: two `wk sysimage build` of the same profile at once. Yocto's
+    guard is `yocto_spawn`'s early check (`yocto_any_running`): a live pid
+    for any stage refuses starting a new one, since every stage shares one
+    bitbake build directory."""
+
+    PRELUDE = f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/image/yocto.sh"
+t_exec() {{ shift; "$@"; }}
+IMG_PROFILE=demo-profile
+'''
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.tmp / "store"
+        self.ws = "yoctows"
+        self.home = self.store / "ws" / self.ws / "home"
+        self.home.mkdir(parents=True)
+
+    def test_second_spawn_refuses_and_names_the_live_stage_and_log(self):
+        proc = subprocess.Popen(["sleep", "60"])
+        try:
+            (self.store / "ws" / self.ws / "yocto.status").write_text("state=running\n")
+            (self.home / "yocto-image.pid").write_text(f"{proc.pid}\n")
+            env = dict(os.environ)
+            env["WK_STORE"] = str(self.store)
+            env["WK_ROOT"] = str(REPO)
+            cp = subprocess.run(
+                ["bash", "-c", self.PRELUDE + f'yocto_spawn {self.ws} image'],
+                cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,
+            )
+            out = cp.stdout + cp.stderr
+            self.assertNotEqual(cp.returncode, 0, out)
+            self.assertIn("already running", out, out)
+            self.assertIn("image", out, out)
+            self.assertIn(str(self.home / "yocto-image.log"), out, out)
+            self.assertIn("--stop", out, out)
+        finally:
+            proc.kill()
+            proc.wait()
+
+
+if __name__ == "__main__":
+    unittest.main()

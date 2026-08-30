@@ -71,8 +71,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 # The result store, seeded payloads, the runner tree (lib/bench.sh).
 . "$WK_ROOT/lib/bench.sh"
-# A benchmark is legitimately silent for much longer than a build (cmd/bench
-# sets the same two, for the same reason, before sourcing the watchdog).
+# Raised before lib/watchdog.sh is sourced: see its header.
 WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 . "$WK_ROOT/lib/watchdog.sh"
@@ -873,6 +872,10 @@ boot_order_first() {
 # One writer. BOOT_ORDER is firmware state shared by every mode a machine
 # has, and two commands that could both write it is two places for a wrong
 # value to come from.
+#
+# No overclock is written to the EEPROM here: SDRAM_BANKLOW and BOOT_ORDER
+# are firmware settings shared by both of the board's modes (rescue and
+# bench), so a value set for one is inherited by the other.
 cmd_boot_order() {
     local dry="" revert=""
     local order_name="${ORDER_NAME:-}"
@@ -976,6 +979,13 @@ cmd_boot_order() {
         log "dry run -- the EEPROM was not written."
         return 0
     fi
+
+    # Not for an ad-hoc ssh destination outside the fleet (PI_FLEET unset):
+    # there is no arming record to race, and MACH_NAME here would be
+    # whatever machine_by_ssh's search last tried, not this host.
+    [ -n "$PI_FLEET" ] && machine_armed_barrier "A boot-order write now races the reboot the arming is
+    waiting for: BOOT_ORDER is shared by both of the board's roles, and a write
+    that lands mid-transition can leave the EEPROM aimed at the wrong one."
 
     warn "this writes $HOST's EEPROM. BOOT_ORDER is shared by both of that"
     warn "machine's roles, and a bad value needs physical access to fix."

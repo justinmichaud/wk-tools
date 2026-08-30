@@ -829,6 +829,11 @@ main() {
     done
     set -- ${_rest[@]+"${_rest[@]}"}
 
+    # WK_NAME is this invocation's answer, never an inherited one: a shell
+    # started by an earlier `wk` would otherwise hand every later command
+    # that earlier workspace.
+    unset WK_NAME
+
     where=$(cmd_where "$impl" "$@")
 
     # A host command inside a workspace or on a shared build host acts on a
@@ -839,7 +844,7 @@ main() {
     From the host:  wk $cmd $(wk_self)"
         fi
         die "'wk $cmd' acts on a host, and this is workspace '$(wk_self)'.
-    Run it on the host instead."
+    From the host:  wk $cmd${*:+ $*}"
     fi
     if in_remote_host && [ "$where" = host ]; then
         die "'wk $cmd' acts on a workstation's own store or hardware, and this is

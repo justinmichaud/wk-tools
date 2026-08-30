@@ -155,15 +155,16 @@ _lit_connectors() {
 }
 
 # wlroots is free to drop a device it cannot render for, silently, so this is
-# the only way to know which outputs it actually took.
+# the only way to know which outputs it actually took. Every caller checks
+# `have wayland-info` itself (`on` dies without it, `status` reports
+# "unknown" instead of calling this at all), so an absent binary is never
+# reached here.
 session_outputs() {
-    have wayland-info || return 0
     { WAYLAND_DISPLAY="$SOCKET" wayland-info 2>/dev/null || true; } \
         | sed -n 's/^[[:space:]]*name: \([A-Za-z][A-Za-z0-9]*-[0-9][0-9]*\)$/\1/p'
 }
 
 session_display_mode() {
-    have wayland-info || return 0
     { WAYLAND_DISPLAY="$SOCKET" wayland-info 2>/dev/null || true; } \
         | sed -n 's/.*width: \([0-9]*\) px, height: \([0-9]*\) px, refresh: \([0-9.]*\) Hz.*/\1x\2 @ \3Hz/p' \
         | head -1
@@ -256,6 +257,12 @@ on)
         log  "  benchmark compositor instead of a full desktop"
         exit 0
     fi
+
+    # session_outputs/session_display_mode are how a benchmark session is
+    # told apart from llvmpipe or no session at all; without wayland-info a
+    # started compositor could not be told apart from a broken one, so it is
+    # not started.
+    have wayland-info || die "wayland-info missing -- a session nobody can verify is real is not started; ./setup --stage tools installs wayland-utils"
 
     if [ -z "$BMC" ]; then
         info "starting the benchmark compositor on seat0 (GPU only, BMC excluded)"
@@ -399,16 +406,26 @@ status)
         "$([ "$greeter" = wayland ] || echo '  (mode NOT enforced -- see gdm notes)')"
     [ -n "$seathide" ] && printf 'seat-hide: %s (hidden from seat0)\n' "$seathide"
 
+    # Blank here would read as "no output", which is indistinguishable from
+    # "cannot ask" without wayland-info -- so a missing tool says so instead.
     if [ -S "$SOCKET" ]; then
-        printf 'outputs:   %s\n' "$(session_outputs | tr '\n' ' ')"
+        if have wayland-info; then
+            printf 'outputs:   %s\n' "$(session_outputs | tr '\n' ' ')"
+        else
+            printf 'outputs:   unknown (wayland-utils missing)\n'
+        fi
     fi
 
     # MotionMark scores scale with surface size, so two runs on different
     # display modes are not comparable; cage takes the connector's preferred
     # mode, not always the largest it supports.
     if [ -S "$SOCKET" ]; then
-        mode=$(session_display_mode)
-        [ -n "$mode" ] && printf 'display:   %s\n' "$mode"
+        if have wayland-info; then
+            mode=$(session_display_mode)
+            [ -n "$mode" ] && printf 'display:   %s\n' "$mode"
+        else
+            printf 'display:   unknown (wayland-utils missing)\n'
+        fi
     fi
 
     # Our own compositor is a logind session too, so it matches

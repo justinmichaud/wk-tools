@@ -126,12 +126,15 @@ class TestListingsAgree(WkTest):
         # and then reports each target's current base and reclaimable
         # snapshots. Those footnotes go to stderr, which support.run() merges
         # into stdout by design, so a walk to the end of the output takes
-        # "container:" for a workspace name.
+        # "container:" for a workspace name. An advisory line -- "(no
+        # workspaces ...)" -- is parenthesised and is not a row either.
         lines = ls_cp.stdout.splitlines()
         for line in lines[1:] if lines else []:
             fields = line.split()
             if not fields:
                 break
+            if fields[0].startswith("("):
+                continue
             names_ls.add(fields[0])
 
         status_cp = run("status", "--json")

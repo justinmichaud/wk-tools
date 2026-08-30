@@ -17,6 +17,7 @@ Run: python3 -m unittest tests.test_second_system -v
 import hashlib
 import os
 import re
+import shutil
 import struct
 import subprocess
 import unittest
@@ -122,6 +123,8 @@ esac
         self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
 
 
+@unittest.skipUnless(shutil.which("sfdisk"),
+                     "needs sfdisk (util-linux); the helper runs on a Linux card machine")
 class TestSecondWrite(WkTest):
     """The split: a whole-card image (MBR, boot, root) into partitions 3 and 4
     of a disk that already has 1 and 2, on plain files."""

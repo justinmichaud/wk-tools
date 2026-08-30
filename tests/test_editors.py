@@ -11,7 +11,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, stub_path
+from tests.support import REPO, dispatch_vars, run, stub_path
 
 HELIX_DIR = REPO / "container" / "helix"
 FIRSTRUN = REPO / "container" / "firstrun.sh"
@@ -95,6 +95,13 @@ class TestZedSettingsParses(unittest.TestCase):
         text = ZED_SETTINGS.read_text()
         doc = json.loads(_strip_json_comments(text))
         self.assertIn("lsp", doc)
+
+    def test_zed_opens_projects_trusted(self):
+        """`wk zed` opens a checkout with every feature on: Zed's Restricted
+        Mode is lifted only by a per-worktree click or by this setting, and
+        the CLI has no flag for it."""
+        doc = json.loads(_strip_json_comments(ZED_SETTINGS.read_text()))
+        self.assertIs(doc["session"]["trust_all_projects"], True)
 
     def test_clangd_names_a_compile_commands_dir(self):
         text = ZED_SETTINGS.read_text()
@@ -219,3 +226,21 @@ class TestInstallLazygitArch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestZedInheritsNoDispatcherVariables(unittest.TestCase):
+    """Zed outlives `wk zed` and every terminal it opens inherits its
+    environment; a WK_NAME/WK_TARGET left in it makes every later `wk` about
+    that one workspace on that one machine (wk_exec_clean, lib/common.sh)."""
+
+    def test_wk_zed_tools_starts_zed_without_wk_variables(self):
+        with stub_path({"zed": 'env > "$ZED_ENV_LOG"\n'}) as binp:
+            log = binp / "zed.env"
+            cp = run("zed", "--tools", env={
+                "PATH": f"{binp}:/usr/bin:/bin",
+                "ZED_ENV_LOG": str(log),
+                "WK_NAME": "leaked-ws", "WK_TARGET": "leaked-target", "WK_TARGET_KIND": "remote",
+            })
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+            env = dict(l.split("=", 1) for l in log.read_text().splitlines() if "=" in l)
+        leaked = sorted(k for k in dispatch_vars() if k in env)
+        self.assertEqual(leaked, [], f"zed inherited {leaked}")

@@ -824,6 +824,8 @@ while [ $# -gt 0 ]; do
         --plan)     PLAN="${2:-}"; shift 2 ;;
         --config)   CONFIG="${2:-}"; shift 2 ;;
         --rounds)   ROUNDS="${2:-}"; shift 2 ;;
+        # The first Speedometer iteration is never trimmed from a result: it
+        # is a real iteration, and dropping it would bias the comparison.
         --count)    COUNT="${2:-}"; shift 2 ;;
         --timeout)  TIMEOUT="${2:-}"; shift 2 ;;
         --settle)   SETTLE="${2:-}"; shift 2 ;;

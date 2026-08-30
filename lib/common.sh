@@ -84,6 +84,23 @@ gh_authenticated() {
 # one of those files used before this existed.
 wk_ssh_timeout() { printf '%s' "${WK_SSH_TIMEOUT:-10}"; }
 
+# The variables the dispatcher exports for the one command it is running
+# (`wk`: WK_NAME, WK_FORCE, WK_QUIET, WK_ROW_LABEL; lib/target.sh: WK_TARGET,
+# WK_TARGET_KIND; this file: WK_ROOT). They describe this invocation and
+# nothing later: a long-lived program a command starts -- an editor whose
+# terminals outlive the command -- must not inherit them, or every `wk` typed
+# in it is silently about that one workspace on that one machine.
+# tests/support.py reads this list to scrub the environment a test runs in.
+WK_DISPATCH_VARS="WK_NAME WK_TARGET WK_TARGET_KIND WK_ROOT WK_FORCE WK_QUIET WK_ROW_LABEL WK_HOST_SELF WK_IN_VM"
+
+# wk_exec_clean <command...> -- exec it with none of WK_DISPATCH_VARS set.
+wk_exec_clean() {
+    local v unset_args=""
+    for v in $WK_DISPATCH_VARS; do unset_args="$unset_args -u $v"; done
+    # shellcheck disable=SC2086 -- one -u per variable, deliberately split.
+    exec env $unset_args "$@"
+}
+
 # --- idempotent file operations ----------------------------------------------
 
 # link_config <source-in-repo> <destination>

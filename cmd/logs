@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# wk logs <workspace> [--follow] -- the build log, with the noise stripped
+# wk logs <workspace> [--follow] -- the build or image-stage log, with the noise stripped
 # wk: where=workspace name=required group=workspaces readonly
 #
 # ninja writes progress with carriage returns; this normalises that and shows
@@ -21,8 +21,27 @@ require_name "$NAME"
 
 load_target "$(ws_target "$NAME")"
 
-LOG="$(wk_ws_dir "$NAME")/build.log"
-[ -f "$LOG" ] || die "no build log for '$NAME' -- has it been built?"
+WSDIR="$(wk_ws_dir "$NAME")"
+LOG="$WSDIR/build.log"
+_shown=""
+if [ ! -f "$LOG" ]; then
+    # An image workspace has no build.log: its stages log to
+    # home/<kind>-<stage>.log instead (yocto_log in image/yocto.sh,
+    # buildroot_log in image/buildroot.sh) -- not sourced here just for the
+    # path, since that glob is the whole contract those two functions keep.
+    # The newest one is whichever stage is running or ran last.
+    shopt -s nullglob
+    _stage_logs=("$WSDIR"/home/yocto-*.log "$WSDIR"/home/buildroot-*.log)
+    shopt -u nullglob
+    if [ "${#_stage_logs[@]}" -gt 0 ]; then
+        LOG=$(ls -1t "${_stage_logs[@]}" | head -1)
+        _shown="$LOG"
+    else
+        die "no build log and no image-stage log for '$NAME' -- has it been
+    built? ('wk build', 'wk sysimage build')"
+    fi
+fi
+[ -z "$_shown" ] || info "showing $_shown"
 
 case "${1:-}" in
 --follow|-f) exec tail -f "$LOG" ;;

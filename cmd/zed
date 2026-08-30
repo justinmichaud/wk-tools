@@ -51,6 +51,10 @@ while [ $# -gt 0 ]; do
 done
 
 # emit <url> -- hands it to Zed, or with --url prints it: one place for both.
+# Zed outlives this command and every terminal it opens inherits its
+# environment, so it gets none of the dispatcher's variables (wk_exec_clean):
+# a `wk` typed in a Zed terminal is about what it names, not about the
+# workspace this command opened.
 emit() {
     local url="$1"
     if [ -n "$URL_ONLY" ]; then
@@ -58,7 +62,7 @@ emit() {
         log "  zed '$url'"
         exit 0
     fi
-    exec "$Z" "$url"
+    wk_exec_clean "$Z" "$url"
 }
 
 [ -z "$ROUTE" ] || [ -z "$TOOLS" ] \
@@ -82,7 +86,7 @@ if [ -n "$TOOLS" ]; then
             log "  already local -- open it directly:  zed $WK_ROOT"
             exit 0
         fi
-        exec "$Z" "$WK_ROOT"
+        wk_exec_clean "$Z" "$WK_ROOT"
     fi
 
     # A machine is tested for first (`target_kind` reads its conf file);

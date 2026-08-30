@@ -5,7 +5,6 @@ work lives in the other `docs/HANDOFF-*.md`.
 
 - [ ] run the card edits against a real card on rpi5: `retarget`, `cmdline-append`, `config-append`, `boot-id`, `units`, `boot-check`, `parts`, `root-spec` — every one is written and none has met a reader [needs a card in rpi5]
 - [ ] boot a board off a card those verbs wrote: the units start, the root resolves by PARTUUID, `wk-image.id` names the system [needs a Pi card in hand]
-- [ ] install `boot/check-boot-files.py` beside the card helper as `/usr/local/libexec/wk-check-boot-files.py`, root-owned, in `admin/install.sh` — `boot-check` refuses without it, and root may not run a path a caller names [code]
 - [ ] `wk sysimage write` seeding the tailnet key onto a card, and the board then joining the tailnet on first boot [needs a Pi card in hand]
 - [ ] once two boards have joined the tailnet by image, delete in this order — build, write, boot, confirm the board answers to its own tailnet name, then remove: `image_addr`'s MAC→ARP→mDNS ladder, `MACH_MAC`, `.local` HostNames, the `10.99.1.10` stanza, the `ProxyJump` [waits on the two items above]
 - [ ] the `HostKeyAlias`/`accept-new` bridge stanzas become dead config once both boards are on the tailnet (Tailscale SSH needs no host-key acceptance) [waits on the item above]

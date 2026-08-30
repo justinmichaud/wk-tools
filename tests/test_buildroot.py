@@ -3,8 +3,8 @@ workspace) and image/buildroot-build.sh (runs inside it), the same
 host/worker split image/yocto.sh and image/yocto-build.sh use. See
 docs/HANDOFF-ab-bench.md item 3 for what this exists to close out.
 
-Four things are checked here, matching the four real defects found while
-writing this lane:
+Four things are checked by the classes down to TestDerivedDefconfigs,
+matching the four real defects found while writing this lane:
 
   dry run    `wk sysimage build <profile> --dry-run` has to name the actual
              workspace, defconfig and cache paths -- not a host path that
@@ -47,8 +47,20 @@ writing this lane:
              appends the upstream fix (buildroot 2021.02 -> 2021.08, applied
              to host-python) makes.
 
+BuildrootBusyTest and BuildrootRefuseBusyRefusesASecondBuild cover two more
+handoff items, on the driving side (image/buildroot.sh): does `kill -9`
+mid-`wk sysimage build` converge on re-run, and does a second `wk sysimage
+build` of the same profile refuse rather than race the first's cleanup?
+Buildroot has no status file of its own -- busy-ness is decided entirely by
+`ws_busy_reason` (lib/target.sh), which checks every `*.pid` file under the
+workspace's home directory with `kill -0` run inside the workspace. Driven
+directly here, with `t_exec` stubbed to run on this host, against a pid
+file naming a pid that no longer exists (the exact shape a killed driver
+leaves) and, separately, against a genuinely live one.
+
 Run: python3 -m unittest tests.test_buildroot -v
 """
+import os
 import subprocess
 import tempfile
 import time
@@ -61,6 +73,7 @@ BUILDROOT_SH = REPO / "image" / "buildroot.sh"
 BUILDROOT_BUILD = REPO / "image" / "buildroot-build.sh"
 EXTERNAL_DIR = REPO / "image" / "buildroot" / "external"
 EXTERNAL_MK = EXTERNAL_DIR / "external.mk"
+DEAD_PID = "99999999"  # a pid essentially guaranteed not to exist
 
 PROFILES = [
     "wpewebkit-2.38-buildroot-rpi3-32",
@@ -186,7 +199,6 @@ class TestVerifyImageFreshness(WkTest):
         # >=, not >: a build fast enough to land in the same second as the
         # recorded start must not be reported as stale.
         with scratch_dir() as d:
-            import os
             img = d / "sdcard.img"
             img.write_text("fresh")
             now = int(time.time())
@@ -198,7 +210,6 @@ class TestVerifyImageFreshness(WkTest):
         """the defect this exists to catch: a `make` that decided there was
         nothing to do, and an sdcard.img left over from a previous run."""
         with scratch_dir() as d:
-            import os
             img = d / "sdcard.img"
             img.write_text("stale")
             yesterday = int(time.time()) - 86400
@@ -386,6 +397,140 @@ class TestDerivedDefconfigs(unittest.TestCase):
                         "BR2_PACKAGE_WPEBACKEND_FDO, which kconfig needs before "
                         "it will keep the platform",
                     )
+
+
+# --------------------------------------------------------------------------- #
+# kill -9 convergence, and a second build at once -- image/buildroot.sh's
+# own busy check (ws_busy_reason, lib/target.sh), not the freshness check
+# above (that guards a single build's own completion; this guards two
+# builds of the same workspace overlapping).
+# --------------------------------------------------------------------------- #
+
+class BuildrootBusyTest(WkTest):
+    PRELUDE = f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/lib/target.sh"
+. "{REPO}/image/buildroot.sh"
+t_exec() {{ shift; "$@"; }}
+IMG_PROFILE=demo-profile
+'''
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.tmp / "store"
+        self.ws = "buildrootws"
+        self.home = self.store / "ws" / self.ws / "home"
+        self.home.mkdir(parents=True)
+
+    def _write_pidfile(self, stage, pid):
+        (self.home / f"buildroot-{stage}.pid").write_text(f"{pid}\n")
+
+    def _run(self, script):
+        env = dict(os.environ)
+        env["WK_STORE"] = str(self.store)
+        env["WK_ROOT"] = str(REPO)
+        for var in ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND"):
+            env.pop(var, None)
+        return subprocess.run(
+            ["bash", "-c", self.PRELUDE + script],
+            cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,
+        )
+
+    def test_a_dead_pid_after_kill_9_is_not_read_as_busy(self):
+        """the exact scenario: a killed build leaves a pid file naming a
+        pid that no longer exists -- ws_busy_reason must not read that as
+        a build still running, or a re-run would refuse forever"""
+        self._write_pidfile("image", DEAD_PID)
+        cp = self._run(f'ws_busy_reason {self.ws} >/dev/null && echo BUSY || echo IDLE')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "IDLE", cp.stdout + cp.stderr)
+
+    def test_buildroot_refuse_busy_lets_a_re_run_through(self):
+        """the actual guard buildroot_build calls before starting: a dead
+        pid must not refuse the re-run"""
+        self._write_pidfile("image", DEAD_PID)
+        cp = self._run(f'buildroot_refuse_busy {self.ws} && echo OK')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "OK", cp.stdout + cp.stderr)
+
+    def test_a_genuinely_live_pid_is_still_read_as_busy(self):
+        """positive control"""
+        proc = subprocess.Popen(["sleep", "60"])
+        try:
+            self._write_pidfile("image", proc.pid)
+            cp = self._run(f'ws_busy_reason {self.ws} >/dev/null && echo BUSY || echo IDLE')
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual(cp.stdout.strip(), "BUSY", cp.stdout + cp.stderr)
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_dry_run_after_a_kill_9_does_not_claim_a_build_is_running(self):
+        """`wk sysimage build <buildroot profile> --dry-run` against a
+        workspace a killed build left behind prints its plan, not a claim
+        that a build is already running"""
+        self._write_pidfile("image", DEAD_PID)
+        env = dict(os.environ)
+        env["WK_STORE"] = str(self.store)
+        env["WK_TARGET"] = "container"
+        for var in ("WK_NAME", "WK_TARGET_KIND"):
+            env.pop(var, None)
+        cp = subprocess.run(
+            [str(REPO / "wk"), "sysimage", "build", "wpewebkit-2.46-buildroot-rpi3-32",
+             "--workspace", self.ws, "--dry-run"],
+            cwd=str(REPO), env=env, capture_output=True, text=True, timeout=60,
+        )
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("dry run", out, out)
+        self.assertNotIn("already running", out, out)
+        self.assertNotIn("still running", out, out)
+
+
+class BuildrootRefuseBusyRefusesASecondBuild(WkTest):
+    """Two `wk sysimage build` of the same buildroot profile at once:
+    `buildroot_refuse_busy` is the one guard -- no lock, unlike yocto's
+    `hold_lock` -- and the design it implements is a refusal, not a wait
+    (README 'Build interventions': the checkout and the tree's output are
+    both single-writer per workspace)."""
+
+    PRELUDE = f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/lib/target.sh"
+. "{REPO}/image/buildroot.sh"
+t_exec() {{ shift; "$@"; }}
+IMG_PROFILE=demo-profile
+'''
+
+    def setUp(self):
+        super().setUp()
+        self.store = self.tmp / "store"
+        self.ws = "buildrootws"
+        self.home = self.store / "ws" / self.ws / "home"
+        self.home.mkdir(parents=True)
+
+    def test_refuses_and_names_the_live_job_and_its_log(self):
+        proc = subprocess.Popen(["sleep", "60"])
+        try:
+            (self.home / "buildroot-image.pid").write_text(f"{proc.pid}\n")
+            env = dict(os.environ)
+            env["WK_STORE"] = str(self.store)
+            env["WK_ROOT"] = str(REPO)
+            cp = subprocess.run(
+                ["bash", "-c", self.PRELUDE + f'buildroot_refuse_busy {self.ws}'],
+                cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30,
+            )
+            out = cp.stdout + cp.stderr
+            self.assertNotEqual(cp.returncode, 0, out)
+            self.assertIn("still running", out, out)
+            self.assertIn("buildroot-image", out, out)
+            self.assertIn(str(self.home / "buildroot-image.log"), out, out)
+            self.assertIn("--stop", out, out)
+        finally:
+            proc.kill()
+            proc.wait()
 
 
 if __name__ == "__main__":

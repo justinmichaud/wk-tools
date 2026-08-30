@@ -5,6 +5,7 @@ a bare Pi to an automated A/B, so it has to name every command on that path.
 
 Run: python3 -m unittest tests.test_help_topics -v
 """
+import re
 import unittest
 
 from tests.support import REPO, run
@@ -47,3 +48,22 @@ class TestHelpTopics(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHardwareSection(unittest.TestCase):
+    """`wk help hardware` is derived from boot/machines/*.conf and the drivers
+    they name, so it names every device and every driver -- a conf added
+    without a paragraph there fails here."""
+
+    def test_names_every_fleet_device_and_its_driver(self):
+        out = run("help", "hardware").stdout
+        self.assertTrue(out.startswith("## Hardware"), out[:200])
+        confs = sorted((REPO / "boot" / "machines").glob("*.conf"))
+        self.assertTrue(confs)
+        for conf in confs:
+            name = conf.stem
+            driver = re.search(r"^MACH_DRIVER=(\S+)", conf.read_text(), re.M).group(1)
+            with self.subTest(machine=name):
+                self.assertIn(f"**{name}", out, f"{name} has no paragraph in the hardware section")
+                self.assertIn(f"`{driver}`", out, f"{name}'s driver {driver} is not named")
+

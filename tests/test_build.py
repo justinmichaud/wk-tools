@@ -9,8 +9,11 @@ calls into lib/resources.sh / build/configs.sh cover the logic without it.
 
 Run: python3 -m unittest tests.test_build -v
 """
+import shutil
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 from tests.support import REPO, WkTest, bash, fake_workspace, run
 
@@ -75,15 +78,17 @@ class TestTargetBuildArgsDefaults(unittest.TestCase):
     def test_load_target_reads_WK_BUILD_ARGS_from_conf(self):
         """load_target sources a target's WK_BUILD_ARGS the same way as WK_TARGET_CMAKE"""
         name = "wk-test-build-args-probe"
-        conf = REPO / "targets" / "hosts" / f"{name}.conf"
-        self.assertFalse(conf.exists(), f"{conf} already exists -- not touching it")
-        conf.write_text(
+        # A registry of this one machine (WK_TARGET_REGISTRY, lib/target.sh):
+        # the conf load_target reads is the behaviour under test, and the real
+        # targets/hosts is left alone.
+        registry = Path(tempfile.mkdtemp(prefix="wk-test-registry-"))
+        self.addCleanup(shutil.rmtree, registry, True)
+        (registry / f"{name}.conf").write_text(
             'WK_TARGET_KIND=remote\n'
             'WK_REMOTE_HOST=nonexistent.invalid\n'
             'WK_BUILD_ARGS="--no-fatal-warnings --extra-flag"\n'
         )
-        try:
-            cp = bash(f'''
+        cp = bash(f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/resources.sh"
@@ -91,9 +96,7 @@ set -euo pipefail
 . "{REPO}/lib/target.sh"
 load_target "{name}"
 echo "WK_BUILD_ARGS=[$WK_BUILD_ARGS]"
-''')
-        finally:
-            conf.unlink(missing_ok=True)
+''', env={"WK_TARGET_REGISTRY": str(registry)})
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("WK_BUILD_ARGS=[--no-fatal-warnings --extra-flag]", cp.stdout)
 

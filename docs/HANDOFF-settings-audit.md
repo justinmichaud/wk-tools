@@ -2,10 +2,7 @@
 
 `wk backup` writes live settings into `host/linux/config.dconf` and `host/macos/defaults.conf`; this audits whether what's tracked is still deliberate.
 
-- [ ] run `wk backup`, then `git diff` it
-- [ ] apply `cmd/backup`'s junk filters, drop noise silently; fix the filter if it misses something
-- [ ] ask about everything left, in one batch: keep or drop [decision]
-- [ ] write the kept set back, run `./setup` (or the stage), confirm the round trip, commit only after
+- [ ] run `wk backup`, then `git diff` it; apply `cmd/backup`'s junk filters and fix the filter if it misses something; ask about everything left, keep or drop; write the kept set back and confirm the `./setup` round trip (macOS: `wk backup` on tolken reports no settings changed since the last backup, nothing to review) [needs a Linux workstation]
 - [ ] write a short summary: what is persisted and why, one line each
 - [ ] verify the dconf filters strip the known junk (weather location, WiFi UUIDs, GTK last-folder, Ptyxis UUIDs/timestamps)
 - [ ] audit `apt.txt` for packages that crept in without a deliberate decision

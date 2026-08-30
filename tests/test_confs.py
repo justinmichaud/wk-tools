@@ -14,7 +14,7 @@ import re
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, run
+from tests.support import REAL_REGISTRY, REPO, run
 
 # --- the four registries ------------------------------------------------------
 
@@ -346,7 +346,7 @@ class TestUnknownTargetRefusal(unittest.TestCase):
     instructions for provisioning the machine the typo invented."""
 
     def known(self):
-        return sorted(f.stem for f in (REPO / "targets" / "hosts").glob("*.conf"))
+        return sorted(f.stem for f in REAL_REGISTRY.glob("*.conf"))
 
     def test_the_refusal_names_the_machines_that_do_have_a_conf(self):
         """`--target <typo>` lists the registry rather than only offering to
@@ -354,7 +354,11 @@ class TestUnknownTargetRefusal(unittest.TestCase):
         names = self.known()
         self.assertTrue(names, "no machine confs to check against")
         typo = names[0][::-1]
-        cp = run("push", "status", "--target", typo)
+        # The real registry: what the refusal has to name is the machines
+        # this repo ships, and the suite is otherwise pointed at an empty one
+        # (tests.support.NO_REGISTRY).
+        cp = run("push", "status", "--target", typo,
+                 env={"WK_TARGET_REGISTRY": str(REAL_REGISTRY)})
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn(f"unknown target '{typo}'", cp.stdout)
         for n in names:

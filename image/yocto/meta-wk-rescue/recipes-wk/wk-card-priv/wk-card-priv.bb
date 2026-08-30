@@ -18,10 +18,10 @@ S = "${WORKDIR}"
 CARD_PRIV_DIR = "/usr/local/libexec"
 
 # Every external command the helper runs (grep it: findmnt, lsblk, sfdisk,
-# partx, blkid, resize2fs, e2fsck, mtools, python3, base64, sha256sum, tar, dd).
+# partx, blkid, resize2fs, e2fsck, python3, base64, sha256sum, tar, dd).
 RDEPENDS:${PN} += "bash coreutils tar python3-core \
     util-linux-findmnt util-linux-lsblk util-linux-sfdisk util-linux-partx util-linux-blkid \
-    e2fsprogs-resize2fs e2fsprogs-e2fsck mtools"
+    e2fsprogs-resize2fs e2fsprogs-e2fsck"
 
 do_install() {
     install -d ${D}${CARD_PRIV_DIR}

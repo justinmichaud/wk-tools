@@ -21,6 +21,8 @@
 #   WK_REMOTE_LOCAL=1              # this *is* the machine; run without ssh
 #   WK_REMOTE_PEER=1               # a workstation of its own, not a build box
 #   WK_REMOTE_TOOLS=Development/…  # its wk-tools, if not $root/tools
+#   WK_TARGET_WPE=1                # this machine builds WPE; also install
+#                                   # Tools/wpe's dependencies, not just gtk's
 #
 # --- peers -------------------------------------------------------------------
 #

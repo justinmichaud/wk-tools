@@ -7,6 +7,7 @@ podman machine is `running` (see requires_podman_vm below); nothing extra
 to pass. Every test that touches real state cleans up after itself.
 """
 
+import atexit
 import contextlib
 import os
 import random
@@ -20,6 +21,40 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 WK = REPO / "wk"
 
+# The suite is fleet-blind: every run()/bash() below points WK_TARGET_REGISTRY
+# (lib/target.sh) at this empty directory, so target_all knows only container
+# and vm and no test ever ssh's to one of the maintainer's real machines or
+# finds a workspace that happens to live there. A test that wants a fleet
+# passes its own directory -- fake machine confs of its own, or REAL_REGISTRY
+# when it is deliberately auditing the machines this repo ships.
+NO_REGISTRY = tempfile.mkdtemp(prefix="wk-test-no-registry-")
+REAL_REGISTRY = REPO / "targets" / "hosts"
+atexit.register(shutil.rmtree, NO_REGISTRY, True)
+
+
+def dispatch_vars():
+    """The variables the dispatcher exports for the one command it runs, read
+    from the file that defines them (`WK_DISPATCH_VARS` in lib/common.sh)
+    rather than copied into a test -- the same way where_values() reads
+    WK_WHERE_VALUES out of `wk`."""
+    import re
+    m = re.search(r'WK_DISPATCH_VARS="([^"]+)"',
+                  (REPO / "lib" / "common.sh").read_text())
+    assert m, "lib/common.sh no longer defines WK_DISPATCH_VARS"
+    return tuple(m.group(1).split())
+
+
+DISPATCH_VARS = dispatch_vars()
+
+# A shell started from `wk zed`/`wk enter` inherits those variables and keeps
+# them, so a test that inherits one is a test about whatever that person last
+# worked on. They go at import as well as in _clean_env below: _clean_env is
+# the door most tests use, and this is what the ones that build an environment
+# out of os.environ themselves get. A test that wants one sets it through
+# `env=`, which still wins.
+for _leaked in DISPATCH_VARS:
+    os.environ.pop(_leaked, None)
+
 
 def where_values():
     """The `where=` vocabulary, read from the dispatcher that enforces it
@@ -31,9 +66,12 @@ def where_values():
 
 
 def _clean_env(extra=None, wk_root=False):
-    """A predictable environment: this machine's own, minus anything that
+    """A predictable environment: this machine's own, minus the dispatcher's
+    per-invocation variables (DISPATCH_VARS above) and anything else that
     would make the command under test think it is already a workspace or
-    already pointed at a scratch store, plus whatever the caller adds.
+    already pointed at a scratch store, and with an empty machine registry
+    (NO_REGISTRY above) so nothing reaches the real fleet, plus whatever the
+    caller adds -- including a WK_TARGET_REGISTRY of its own.
 
     wk_root=True also sets WK_ROOT: every sourced lib in this tree that
     needs it (image/profiles.sh, boot/machines.sh, ...) gets it for free
@@ -42,9 +80,12 @@ def _clean_env(extra=None, wk_root=False):
     of cmd/selftest's lifted checks do) needs it set explicitly.
     """
     env = dict(os.environ)
+    for var in DISPATCH_VARS:
+        env.pop(var, None)
     env.pop("WK_MARKER", None)
     env.pop("XDG_STATE_HOME", None)
     env.pop("WK_STORE", None)
+    env["WK_TARGET_REGISTRY"] = NO_REGISTRY
     if wk_root:
         env["WK_ROOT"] = str(REPO)
     if extra:

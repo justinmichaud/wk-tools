@@ -8,7 +8,8 @@ import os
 import unittest
 
 from tests.support import (
-    REPO, WkTest, fake_workspace, rand_suffix, run, stub_path, where_values,
+    REAL_REGISTRY, REPO, WkTest, fake_workspace, rand_suffix, run, stub_path,
+    where_values,
 )
 
 
@@ -101,7 +102,11 @@ class TestHelpAndDeclarations(WkTest):
 
     def test_unknown_target_names_the_conf_to_write(self):
         """an unconfigured name is refused, and the error prints the conf to write"""
-        cp = run("ls", env={"WK_TARGET": "nosuchtarget-selftest"})
+        # The real registry: the message names the conf to write in it, and
+        # that path is what this checks (the suite is otherwise pointed at an
+        # empty one -- tests.support.NO_REGISTRY).
+        cp = run("ls", env={"WK_TARGET": "nosuchtarget-selftest",
+                            "WK_TARGET_REGISTRY": str(REAL_REGISTRY)})
         self.assertNotEqual(cp.returncode, 0, "an unknown target was accepted")
         self.assertIn(
             "targets/hosts/nosuchtarget-selftest.conf", cp.stdout + cp.stderr
@@ -132,6 +137,16 @@ class TestWorkspaceRefusals(WkTest):
                     cp.stdout + cp.stderr,
                     f"'wk {c}' refused for some other reason: {cp.stdout + cp.stderr}",
                 )
+
+    def test_a_host_refusal_names_the_invocation_for_outside(self):
+        """the refusal prints the exact command to type on the host, arguments and all"""
+        with fake_workspace() as ws:
+            cp = ws.run("pi", "boot-order", "rpi4", "--dry-run")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("From the host:  wk pi boot-order rpi4 --dry-run", cp.stdout + cp.stderr)
+        with fake_workspace() as ws:
+            cp = ws.run("gc")
+        self.assertIn("From the host:  wk gc", cp.stdout + cp.stderr)
 
     def test_bridge_is_host_only_and_ls_starts_nothing(self):
         """is refused inside a workspace and on a shared build machine"""

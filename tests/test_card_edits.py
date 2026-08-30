@@ -14,8 +14,10 @@ machine is not root and holds no card. The gate, the dispatcher and what is
 
 Run: python3 -m unittest tests.test_card_edits -v
 """
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -512,27 +514,158 @@ class TestNothingIsEditedOnTheDrivingMachine(unittest.TestCase):
         self.assertNotIn("WRITE_TMP", code, "the local scratch copy is back")
 
 
-class TestStreamMeter(WkTest):
-    """The stream is metered as it goes past, since the read-back verify has
-    no local copy to compare against (disk_stream_meter, boot/disk.sh)."""
+class TestFarSideStreamMeter(WkTest):
+    """The stream is metered on the card machine, after the decompressor and
+    ahead of the privileged writer (disk_stream_meter_py, boot/disk.sh): the
+    read-back verify has no local copy to compare against, and this end never
+    sees the decompressed bytes at all. Its report goes to fd 3, which the
+    far-side pipeline points at the ssh session's stdout."""
 
     def _meter(self, payload):
-        meta = self.tmp / "meta"
         out = self.tmp / "out"
+        report = self.tmp / "report"
         cp = bash(
             f'. "{REPO}/lib/common.sh"\n. "{REPO}/boot/disk.sh"\n'
-            f'printf %s {payload!r} | disk_stream_meter {meta} > {out}\n')
-        return cp, meta, out
+            f'printf %s {payload!r} | python3 -c "$(disk_stream_meter_py)" '
+            f'3>{report} > {out}\n')
+        return cp, report, out
 
     def test_the_bytes_pass_through_unchanged_and_are_counted_and_hashed(self):
-        import hashlib
         payload = "the image's own bytes"
-        cp, meta, out = self._meter(payload)
+        cp, report, out = self._meter(payload)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(out.read_text(), payload)
-        bytes_, sha = meta.read_text().split()
-        self.assertEqual(int(bytes_), len(payload))
-        self.assertEqual(sha, hashlib.sha256(payload.encode()).hexdigest())
+        fields = dict(
+            line.split("=", 1) for line in report.read_text().splitlines())
+        self.assertEqual(int(fields["stream_bytes"]), len(payload))
+        self.assertEqual(fields["stream_sha"],
+                         hashlib.sha256(payload.encode()).hexdigest())
+
+
+class TestTheCardMachineDecompresses(WkTest):
+    """`--from` hands the source's own bytes to the card machine, which
+    decompresses, meters and writes them in one pipeline: the image crosses
+    the network once, in the shape it was built in."""
+
+    # A card machine that answers for real: `m_ssh` runs the command it is
+    # given, `sudo` drops its -n, and the helper swallows the image and
+    # reports as the real one does.
+    _PRIV = '''#!/bin/sh
+cat >/dev/null
+echo "wk-card-priv: written"
+'''
+    _SUDO = '''#!/bin/sh
+[ "$1" = -n ] && shift
+exec "$@"
+'''
+
+    def _write(self, payload, filter_="cat", reader=None):
+        src = self.tmp / "image"
+        src.write_bytes(payload)
+        meta = self.tmp / "meta"
+        with stub_path({"sudo": self._SUDO, "wk-card-priv": self._PRIV}) as binp:
+            cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/boot/disk.sh"
+MACH_NAME=testmach
+DISK_DRY=""
+CARD_PRIV={binp}/wk-card-priv
+m_ssh() {{ bash -c "$*"; }}
+disk_write_source /dev/sdX {reader or f"cat {src}"!r} {filter_!r} {meta}
+''', env={"PATH": f"{binp}:{os.environ['PATH']}"})
+        return cp, meta
+
+    def test_the_meta_file_carries_what_the_far_side_metered(self):
+        payload = b"a disk image, near enough\n" * 100
+        cp, meta = self._write(payload)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(
+            meta.read_text().splitlines()[0],
+            f"{len(payload)} {hashlib.sha256(payload).hexdigest()}",
+            cp.stdout + cp.stderr)
+        self.assertIn("wk-card-priv: written", cp.stderr,
+                      "the helper's own report is no longer shown")
+
+    def test_a_compressed_source_is_decompressed_on_the_card_machine(self):
+        payload = b"the bytes the card gets\n" * 50
+        xz = shutil.which("xz")
+        if not xz:
+            self.skipTest("no xz on this machine to make a compressed source with")
+        src = self.tmp / "image.xz"
+        src.write_bytes(subprocess.run([xz, "-c"], input=payload,
+                                       capture_output=True).stdout)
+        cp, meta = self._write(b"", filter_="xz -dc", reader=f"cat {src}")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        # What was metered is the decompressed image, not the .xz that crossed.
+        self.assertEqual(
+            meta.read_text().splitlines()[0],
+            f"{len(payload)} {hashlib.sha256(payload).hexdigest()}",
+            cp.stdout + cp.stderr)
+        self.assertIn("decompressed there with xz -dc", cp.stderr)
+
+    def test_a_decompressor_the_card_machine_lacks_is_refused_by_name(self):
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/boot/disk.sh"
+MACH_NAME=testmach
+DISK_DRY=""
+m_ssh() {{ case "$*" in *"command -v"*) return 1 ;; esac; echo "wrote it anyway"; }}
+disk_write_source /dev/sdX "cat /dev/null" "xz -dc" {self.tmp}/meta
+''')
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("wrote it anyway", cp.stdout,
+                         "the write went ahead without the decompressor")
+        self.assertIn("testmach has no xz", cp.stderr)
+        self.assertIn("install xz on testmach", cp.stderr)
+
+    def test_nothing_on_this_machine_decompresses_the_source(self):
+        reader = _lift(SYSIMAGE, "_from_reader")
+        for tool in ("xz -dc", "zstd -dc", "gzip -dc"):
+            self.assertNotIn(tool, reader,
+                             f"_from_reader still decompresses with {tool} here")
+        self.assertIn('disk_write_source "$DISK_DEV" "$reader" "$filter"',
+                      SYSIMAGE.read_text(),
+                      "the decompressor is no longer handed to the card machine")
+
+
+class TestEjectWithoutUdisks(WkTest):
+    """udisksctl is what powers a written card off; a machine without it is
+    said so, not silently skipped -- the write is complete either way."""
+
+    def test_a_machine_without_udisksctl_is_named_along_with_the_package(self):
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/boot/disk.sh"
+MACH_NAME=testmach
+DISK_DRY=""
+m_ssh() {{ case "$*" in *udisksctl*) return 1 ;; esac; }}
+disk_eject /dev/sdX
+echo "RC=$?"
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("RC=0", cp.stdout, "a missing udisksctl failed the write")
+        self.assertIn("testmach has no udisksctl", cp.stderr)
+        self.assertIn("safe to pull", cp.stderr)
+        self.assertIn("udisks2", cp.stderr, "the package to install is not named")
+
+
+class TestListingAWorkspaceMidRebuild(WkTest):
+    """A yocto image stage removes the last image as it rebuilds, so an image
+    workspace with no image is normal for hours. It keeps its row in `wk
+    sysimage ls` (image_workspace_scan's `-` path), which says what is
+    missing and how to get one."""
+
+    def test_a_workspace_with_no_image_still_has_a_row(self):
+        store = self.tmp / "store"
+        ws = "yocto-webkit-2.52-yocto-rpi3-32"
+        (store / "ws" / ws / "build").mkdir(parents=True)
+        cp = self.run_wk("sysimage", "ls", env={"WK_STORE": str(store)})
+        out = cp.stdout
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn(ws, out, out)
+        self.assertIn("no image here yet", out, out)
+        self.assertIn("'wk sysimage build webkit-2.52-yocto-rpi3-32' builds one", out, out)
+        self.assertNotIn("no workspace here has built an image", out, out)
 
 
 class TestDryRunIsTheSameSteps(WkTest):
@@ -556,7 +689,7 @@ echo DONE
     def test_every_card_step_is_suppressed_and_reports_itself(self):
         steps = [
             'disk_unmount /dev/sdX',
-            'disk_write_source /dev/sdX "cat /dev/null" /dev/null',
+            'disk_write_source /dev/sdX "cat /dev/null" cat /dev/null',
             'disk_verify_stream /dev/sdX /dev/null',
             'disk_parts_present /dev/sdX',
             'disk_root_spec /dev/sdX',
