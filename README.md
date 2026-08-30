@@ -432,8 +432,154 @@ whole container store:
 podman machine rm wk && ./setup && wk sync
 ```
 
+## Lifecycle
+
+Every step from a bare Raspberry Pi to an automated A/B, in order, and what
+each one needs. Two arrangements exist (`wk help hardware`): one medium
+holding both systems (the rpi3: rescue on SD partitions 1-2, bench system on
+3-4, `@second`), and two media (the rpi4: rescue on the SD, bench system on
+the USB stick, one MBR byte arming it). The commands are the same; only the
+`--disk` spelling and the driver differ.
+
+**1. Declare the board** -- `boot/machines/<name>.conf` ("Add a new fleet
+device" above): its driver (`pi-sd` for one medium, `pi-mbr` for two), the
+bench medium (`MACH_DEVICE`), the rescue's root partition (`MACH_ROOT`), its
+two tailnet names, `MACH_NET`, `MACH_DTB`. Commit it.
+
+**2. Build the two images** -- the rescue (a yocto profile, `webkit-2.52-yocto-<board>`)
+and the bench system (the profile under test, e.g. `wpewebkit-2.38-buildroot-<board>-32`),
+each in its own workspace, hours each, one at a time:
+
+```sh
+wk sysimage build webkit-2.52-yocto-rpi3-32 --detach
+wk sysimage build wpewebkit-2.38-buildroot-rpi3-32 --detach
+wk sysimage ls                                    # both, with the paths --from takes
+```
+
+**3. Write the first card from a reader** -- the only card a person handles.
+The machine holding the reader (rpi5 here) needs the card helper installed
+(`./setup --stage quiesce` there, one sudo prompt) and must be on the WiFi
+the board will use, since the card takes that credential. The tailnet must
+not already have a node of the name the card will join under (a stale
+`<board>-rescue` from an earlier card is removed in the admin console; the
+write refuses the collision, with no `--force`).
+
+```sh
+wk sysimage disks rpi5                            # which /dev the card is
+# one medium: the rescue, leaving the rest of the card, then the bench system beside it
+wk sysimage write --from <rescue.wic.xz> --disk rpi5:/dev/mmcblk0 --rescue --profile webkit-2.52-yocto-rpi3-32
+wk sysimage write --from <sdcard.img>    --disk rpi5:/dev/mmcblk0@second --profile wpewebkit-2.38-buildroot-rpi3-32
+# two media: the rescue onto the SD; the stick is written later, from the rescue
+wk sysimage write --from <rescue.wic.xz> --disk rpi5:/dev/mmcblk0 --rescue --profile webkit-2.52-yocto-rpi4-64
+```
+
+**4. Boot the rescue** -- carry the card to the board, pull any older medium
+that would boot first, power on. `<board>-rescue` joins the tailnet by itself;
+`wk boot <board> --status` reports it as the base image.
+
+```sh
+wk pi boot-order rpi4                             # two media only: the bench medium first, the rescue behind it
+wk sysimage write --from <sdcard.img> --disk rpi4:/dev/sda --profile wpewebkit-2.38-buildroot-rpi4-32
+                                                  # two media: the bench system onto the stick, from the rescue
+```
+
+From here on no card is carried: every later write of the bench system is
+made from the rescue (`--disk rpi3:/dev/mmcblk0@second`, `--disk rpi4:/dev/sda`),
+and a rewrite of the `@second` system keeps its tailnet node.
+
+**5. Boot the bench system once** -- `wk boot <board>` arms it for one boot and
+reboots; `<board>-bench` joins the tailnet; the system disarms itself as it
+comes up and hands the board back to the rescue after `IMG_WATCHDOG` seconds
+unless claimed (`wk boot <board> --keep`). A first boot that never appears is
+read from the rescue once it returns (see "Build interventions").
+
+**6. The A/B** -- one command; it builds both WebKits against the image,
+deploys them as slots, alternates them and writes the report:
+
+```sh
+wk ab wpe:1725 --devices rpi3 --bits 32 --dry-run   # every step it will take, nothing run
+wk ab wpe:1725 --devices rpi3 --bits 32 --yes
+```
+
+**Manual A/B, and a custom buildroot configuration**
+
+`wk ab` is these commands in order; run them by hand to vary any one of them
+-- a different plan, a hand-picked pair of commits, or an image built from
+your own buildroot configuration:
+
+```sh
+wk sysimage webkit <profile> --commit <base-sha> --slot base --detach      # one WebKit build at a time
+wk sysimage webkit <profile> --commit <patched-sha> --slot pr --detach
+wk sysimage ls                                                             # both slots listed under the image
+wk boot rpi3 && wk boot rpi3 --keep                                        # bench mode, claimed
+wk pi deploy <profile> rpi3 --slot base                                    # verified byte for byte on the board
+wk pi deploy <profile> rpi3 --slot pr
+wk pi bench rpi3 speedometer3 --ab base,pr --rounds 5                      # interleaved; ends with wk bench report
+wk bench report <run-a> <run-b> --html                                     # any two recorded runs
+```
+
+A buildroot configuration of your own is an external defconfig:
+`image/buildroot/external/configs/<name>_defconfig`, which buildroot resolves
+before the fork's own of the same name (that directory's README lists what
+each one changes and why). A profile names it in `image/configs/<profile>.conf`
+(`BR_DEFCONFIG`, with `BR_EXTERNAL=1`); kernel settings go in
+`image/buildroot/external/board/*.fragment`, named from the defconfig by
+`BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES`. A fleet bench image needs, beyond
+what the fork's cog defconfigs carry: `wpa_supplicant` (a board with no cable),
+OpenSSH (dropbear 2019.78 refuses ed25519, the driving key), and a kernel with
+TUN and netfilter (or tailscaled cannot create `tailscale0`). The two 2.38
+defconfigs there carry all three; copy them when deriving a new one.
+
+**Build interventions**
+
+`wk sysimage build <profile>` is re-runnable: with the workspace's tree
+intact it rebuilds what changed and repacks the image in minutes. Two things
+cost more than they look:
+
+- **A rebuild after slot builds rebuilds WPE from the tarball** -- hours.
+  `wk sysimage webkit` leaves buildroot's `local.mk` pointing wpewebkit at the
+  slot's source, and the image stage drops it and `wpewebkit-dirclean`s, so the
+  image never carries a slot's WebKit. Change defconfigs before the slots, or
+  budget the hours.
+- **Deselecting a package does not remove its files.** Buildroot's incremental
+  build leaves a deselected package's files in `output/target` and in the
+  staging sysroot -- switching dropbear to OpenSSH left `S50dropbear` beside
+  `S50sshd`, and dropbear would have taken port 22 first; a library the next
+  package wants to install over an old copy fails the build outright. A
+  from-scratch build (`wk rm` the workspace, build again) is clean; to avoid
+  the hours, remove exactly the files buildroot
+  recorded installing for that package (`output/build/<pkg>-<version>/
+  .files-list.txt` for the target, `.files-list-staging.txt` for staging,
+  one `pkg,./path` per line), then re-run the image stage:
+
+  ```sh
+  wk enter buildroot-<profile> -- sh -c 'cd /src/WebKit/WebKitBuild/buildroot/<profile>/output &&
+      cut -d, -f2 build/<pkg>-*/.files-list.txt         | while read -r f; do rm -f "target/$f";  done &&
+      cut -d, -f2 build/<pkg>-*/.files-list-staging.txt | while read -r f; do rm -f "staging/$f"; done'
+  wk sysimage build <profile> --detach
+  ```
+
+  A package that was *built against* the removed one keeps linking its
+  libraries, and the next package to link them fails with undefined
+  references. Find them with the toolchain's readelf over `output/staging`
+  and `output/target` (`NEEDED` entries naming the gone libraries), and
+  rebuild exactly those: `make <pkg>-dirclean` in the buildroot tree inside
+  the workspace, then the image stage again.
+
+Reading a bench system that never appeared: once the self-return has handed
+the board back, the rescue can mount the bench partition read-only and its
+logs are there -- `/var/log`, and tailscaled's own under
+`/var/lib/tailscale/tailscaled.log*.txt` (a `1970` clock in them is normal
+before ntp).
+
+```sh
+wk boot rpi3 --diag                                       # a yocto bench system's own boot account
+ssh root@rpi3-rescue 'mount -o ro /dev/mmcblk0p4 /mnt && ls /mnt/var/log; umount /mnt'
+```
+
 ## Where the rest is
 
-`wk help` prints this file; `wk <command> -h` prints what any single command
-does, what it acts on, and whether it changes anything. CLAUDE.md is for
-anyone editing this repository itself.
+`wk help` prints this file, `wk help <topic>` one section of it (`wk help
+lifecycle`, `wk help hardware`); `wk <command> -h` prints what any single
+command does, what it acts on, and whether it changes anything. CLAUDE.md is
+for anyone editing this repository itself.

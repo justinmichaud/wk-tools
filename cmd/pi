@@ -343,11 +343,35 @@ pi_session_up() { # <builder> <display evidence, or empty>
 # The RPi backend: the browser draws through dispmanx, with no compositor to
 # start. The image autostarts a cog of its own showing the board's address;
 # that one is stopped, since two browsers on one GPU is not a measurement.
+# A buildroot image: the RPi backend -- the browser draws through dispmanx
+# (wpebackend-rdk), with no compositor to start. The image autostarts a cog of
+# its own showing the board's address; that one is stopped, since two browsers
+# on one GPU is not a measurement.
 pi_session_buildroot() {
     i_ssh '[ -x /etc/init.d/S90cog ] && /etc/init.d/S90cog stop >/dev/null 2>&1
            killall cog WPEWebProcess WPENetworkProcess 2>/dev/null; true' >/dev/null 2>&1 || true
     PI_RENDERER=dispmanx; PI_SESSION=rdk
     log "  session     rdk backend, dispmanx ($([ -n "$1" ] && echo "$1" || echo 'no display evidence'))"
+}
+
+# The compositor is up when it reports an output and its shell is running;
+# both images' sessions end here.
+pi_session_wait_compositor() {
+    local i=0 out=""
+    while [ "$i" -lt 20 ]; do
+        # `|| true`: the remote ends on pidof, which exits 1 while the shell is
+        # still coming up -- under pipefail that would end this command.
+        out=$(i_ssh 'grep -oiE "Output .[a-z0-9-]+. enabled" /tmp/wk-weston.log 2>/dev/null | tail -1;
+                     pidof weston-desktop-shell 2>/dev/null' 2>/dev/null | tr -d '\r' | head -1 || true)
+        [ -n "$out" ] && break
+        i=$((i + 1)); sleep 2
+    done
+    [ -n "$out" ] || die "no compositor output on $machine.
+    Check:  ssh $(image_addr) 'tail -30 /tmp/wk-weston.log'"
+    log "  session     $PI_SESSION, $PI_RENDERER renderer ($out)"
+    [ "$PI_RENDERER" = pixman ] && warn "compositing is on the CPU, so this number is not comparable with a
+  run on real display hardware. It proves the path, which is what it is for."
+    return 0
 }
 
 # A yocto image: weston on the panel when there is one, weston's RDP virtual
@@ -396,18 +420,7 @@ pi_session_yocto() {
                  </dev/null >/tmp/wk-weston.log 2>&1 & sleep 6' >/dev/null 2>&1 || true
     fi
 
-    local i=0 out=""
-    while [ "$i" -lt 20 ]; do
-        out=$(i_ssh 'grep -oE "Output .[a-z0-9-]+. enabled" /tmp/wk-weston.log 2>/dev/null | tail -1;
-                     pidof weston-desktop-shell 2>/dev/null' 2>/dev/null | tr -d '\r' | head -1)
-        [ -n "$out" ] && break
-        i=$((i + 1)); sleep 2
-    done
-    [ -n "$out" ] || die "no compositor output on $machine.
-    Check:  ssh $(image_addr) 'tail -30 /tmp/wk-weston.log; journalctl -u weston -n 20'"
-    log "  session     $PI_SESSION, $PI_RENDERER renderer ($out)"
-    [ "$PI_RENDERER" = pixman ] && warn "compositing is on the CPU, so this number is not comparable with a
-  run on real display hardware. It proves the path, which is what it is for."
+    pi_session_wait_compositor
 
     # The seat, once, and left running for the whole session: cog aborts at
     # startup with no input seat (assertion: display->seat_default).
@@ -588,7 +601,10 @@ cmd_bench() {
     local kernel gov throttled root_dev
     kernel=$(i_ssh 'uname -r' 2>/dev/null | tr -d '\r')
     gov=$(pi_pin_governor)
-    throttled=$(i_ssh 'vcgencmd get_throttled 2>/dev/null' 2>/dev/null | tr -d '\r')
+    # The firmware's throttle flags, from the kernel's sysfs rather than
+    # vcgencmd: the same bits, and no rpi-userland on the board needed.
+    throttled=$(i_ssh 'cat /sys/devices/platform/soc/soc:firmware/get_throttled 2>/dev/null || true' 2>/dev/null | tr -d '\r ')
+    [ -z "$throttled" ] || throttled="throttled=0x$throttled"
     root_dev="$rootdev"
     log "$machine: $sysid (builder $builder)"
     log "  kernel      $kernel"

@@ -34,6 +34,11 @@ _progress_line() {
           | grep -oE '\[[0-9]+/[0-9]+\]' | tail -1)
     [ -n "$out" ] && { printf '%s' "$out"; return 0; }
 
+    # run-benchmark (wk pi bench, wk bench): "Start the iteration 2 of 4".
+    out=$(tail -c "$tail_bytes" "$1" 2>/dev/null | tr '\r' '\n' \
+          | grep -oE 'Start the iteration [0-9]+ of [0-9]+' | tail -1)
+    [ -n "$out" ] && { printf 'iteration %s/%s' "$(printf '%s' "$out" | awk '{print $4}')" "$(printf '%s' "$out" | awk '{print $6}')"; return 0; }
+
     out=$(tail -c "$tail_bytes" "$1" 2>/dev/null | tr '\r' '\n' \
           | grep -oE '^(CompileC|CompileSwiftSources|SwiftCompile|SwiftDriver|Ld|Libtool|CodeSign|ScanDependencies|ProcessInfoPlistFile|GenerateDSYMFile) [^ ]+' \
           | tail -1)

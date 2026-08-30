@@ -55,6 +55,11 @@ _pimbr_word() {
 }
 pimbr_rescue_disk() { disk_of_part "$MACH_ROOT"; }
 
+# The bench system's boot partition is on the medium as the board has it now,
+# not as the conf names it: an empty enclosure enumerating first makes the
+# stick sdb, and wk-image.id is read from wherever the marker says it is.
+b_boot_part() { disk_part "$(pimbr_dev)" 1; }
+
 _pimbr_type() {
     m_ssh "sudo dd if=$(pimbr_dev) bs=1 skip=$PIMBR_TYPE_OFFSET count=1 status=none | od -An -tx1" \
         2>/dev/null | tr -d ' \r\n'

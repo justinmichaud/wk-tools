@@ -235,3 +235,21 @@ reach_without_tailnet rpi4
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBootPartFollowsTheMedium(unittest.TestCase):
+    """b_boot_part reads wk-image.id from the medium the board resolves
+    (pimbr_dev), not MACH_DEVICE's name: with another USB disk enumerating
+    first, the stick is sdb."""
+
+    def test_boot_part_uses_the_resolved_disk(self):
+        cp = bash(f'''
+set -eu
+. "{REPO}/lib/common.sh"
+. "{REPO}/boot/machines.sh"
+machine_load rpi4
+load_driver pi-mbr
+disk_own_or_declared() {{ printf /dev/sdb; }}
+b_boot_part
+''')
+        self.assertEqual(cp.stdout.strip(), "/dev/sdb1", cp.stdout + cp.stderr)

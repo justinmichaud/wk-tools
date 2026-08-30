@@ -373,8 +373,38 @@ dump_declarations() {
 # --- help ---------------------------------------------------------------------
 #
 # README.md is the one document: architecture, setup, every workflow by example.
-help_doc() {
+# `wk help <topic>` prints the sections whose heading names the topic (a `##`
+# section, or a `**bold**` workflow title), so `wk help lifecycle` is the
+# lifecycle section and nothing else; an unknown topic lists what there is.
+help_doc() { # [topic]
     local f="$WK_ROOT/README.md"
+    if [ -n "${1:-}" ]; then
+        python3 - "$f" "$1" <<'PY' || exit 1
+import re, sys
+text, topic = open(sys.argv[1]).read(), sys.argv[2].lower()
+# Two levels: a `## section` runs to the next `##`; a `**workflow**` title
+# inside one runs to the next title of either kind.
+heading = re.compile(r"^(## .+|\*\*[^*]+\*\*)$", re.M)
+marks = [(m.start(), m.group(0)) for m in heading.finditer(text)]
+out, names = [], []
+for i, (start, head) in enumerate(marks):
+    level = 2 if head.startswith("##") else 3
+    name = head.strip("#* ")
+    names.append(name)
+    end = len(text)
+    for later, _ in [(s, h) for s, h in marks[i + 1:] if level == 3 or h.startswith("##")]:
+        end = later
+        break
+    if topic in name.lower():
+        out.append(text[start:end].rstrip() + "\n")
+if not out:
+    sys.stderr.write("error: no help topic matches '%s'. Topics (wk help <word>):\n" % sys.argv[2])
+    for n in names: sys.stderr.write("    %s\n" % n)
+    sys.exit(1)
+sys.stdout.write("\n".join(out))
+PY
+        exit 0
+    fi
     if [ -t 1 ] && command -v less >/dev/null 2>&1; then less "$f"; else cat "$f"; fi
     exit 0
 }
@@ -778,7 +808,7 @@ main() {
     [ $# -ge 1 ] || usage
     local cmd="$1" _a _seen_dashdash="" _rest where name="" delegate="" decl="" slot=""; shift
     case "$cmd" in
-        help|-h|--help) help_doc ;;
+        help|-h|--help) help_doc "${1:-}" ;;
         setup) exec "$WK_ROOT/setup" "$@" ;;
         image) die "'wk image' is renamed: wk sysimage" ;;
         --declarations) dump_declarations; exit 0 ;;
