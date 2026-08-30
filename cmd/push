@@ -31,6 +31,13 @@
 # `wk claude` turns it off before handing over control, which is the case the
 # switch exists for; see the note there about when it turns it back on.
 #
+#   --target <machine>   throw the switch on that fleet machine's own store
+#                        instead of this one's (a build machine keeps its own
+#                        key under its own wk root)
+#   --all                throw it everywhere: this machine and every other one
+#                        (wk boot --list names them); a machine that does not
+#                        answer is skipped, not fatal
+#
 #   0  push is on (status), or the action succeeded
 #   1  push is off (status), or the action failed
 #   4  there are no deploy keys on this machine at all
@@ -186,8 +193,27 @@ $(private_keys_in "$from")
 EOF
 }
 
+# The workspaces here in which a claude process is running -- asked of the
+# machine, not of a record: a session started by hand from `wk enter` counts
+# the same as one `wk claude` started. Exposing the keys while one runs would
+# put them in that session's mount, so `on` is refused until it ends.
+agent_sessions() {
+    local line ws
+    while IFS=$(printf '\t') read -r ws _; do
+        [ -n "$ws" ] || continue
+        t_exec "$ws" pgrep -x claude >/dev/null 2>&1 && printf '%s\n' "$ws"
+    done <<EOF
+$(t_list 2>/dev/null)
+EOF
+    return 0
+}
+
 case "$ACTION" in
 on)
+    busy=$(agent_sessions)
+    [ -z "$busy" ] || die "push stays OFF: an agent session (a claude process) is running in
+    $(printf '%s' "$busy" | tr '\n' ' ')-- the keys would appear in its mount, and nothing an agent
+    runs may push. End that session, then:  wk push on"
     move_keys "$HELD" "$LIVE"; n="$MOVED"
     # Idempotent, and it says which of the two it was: a switch that reports
     # "on" whether or not it did anything is a switch you have to verify by

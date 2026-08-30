@@ -209,9 +209,38 @@ if [ "$WK_TARGET_KIND" = remote ]; then
     info "using $CLAUDE_BIN on $TARGET, in auto mode (this machine is not a sandbox)"
 fi
 
+# --- nothing an agent runs can publish ----------------------------------------
+# The deploy keys are held back for the whole session (`wk push`, which moves
+# them out of the mount rather than setting a flag an agent could clear) --
+# before `wk verify`, which measures their absence. Off is also the safe
+# crash/kill direction. A build box keeps its own keys, so the switch is
+# thrown there; a GitHub credential in the account the agent would run as on
+# that box is a refusal, not a barrier: nothing in a session may post as the
+# person.
+PUSH_WAS_ON=""
+PUSH_TARGET=""
+case "$WK_TARGET_KIND" in
+    container) ;;
+    remote) PUSH_TARGET="$TARGET" ;;
+esac
+if [ "$WK_TARGET_KIND" = container ] || [ "$WK_TARGET_KIND" = remote ]; then
+    if "$WK_ROOT/wk" push status ${PUSH_TARGET:+--target "$PUSH_TARGET"} >/dev/null 2>&1; then
+        PUSH_WAS_ON=1
+        warn "git push is ON -- turning it off while Claude runs in '$NAME'"
+        "$WK_ROOT/wk" push off ${PUSH_TARGET:+--target "$PUSH_TARGET"} >/dev/null 2>&1 \
+            || die "refusing to run: could not hold back the push keys ('wk push status${PUSH_TARGET:+ --target $PUSH_TARGET}')"
+    fi
+fi
+if [ "$WK_TARGET_KIND" = remote ] \
+   && t_exec "$NAME" sh -c 'test -e "$HOME/.config/gh/hosts.yml" || { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }' 2>/dev/null; then
+    die "'$TARGET' holds a GitHub credential in the account Claude would run as
+    (~/.config/gh/hosts.yml, or gh is logged in there), and nothing an agent runs
+    may post as you. Remedy, on $TARGET:  gh auth logout"
+fi
+
 if [ "$WK_TARGET_KIND" = container ]; then
-    # `wk verify` measures container properties from inside; if any regressed,
-    # the right response is to stop, not proceed anyway.
+    # `wk verify` measures container properties from inside -- including that
+    # the keys are gone -- and if any regressed, the right response is to stop.
     "$WK_ROOT/cmd/verify" "$NAME" \
         || barrier "the sandbox around '$NAME' is not intact (see above), and relaxed
     permissions are only defensible while it is."
@@ -254,15 +283,12 @@ if [ -n "$RC" ]; then
         exit 0
     fi
 
-    # A background server left running unattended is exactly the case `git
-    # push` is held back for below; a detached session never reaches that
-    # block itself, so this makes the same call up front, with no restore --
-    # there is no foreground moment here to notice it and turn push back on.
-    if [ "$WK_TARGET_KIND" = container ] && "$WK_ROOT/wk" push status >/dev/null 2>&1; then
-        warn "git push is ON -- turning it off before starting remote-control in '$NAME'
-    (it stays off; 'wk push on' when you want it back)"
-        "$WK_ROOT/wk" push off >/dev/null 2>&1 \
-            || die "refusing to start: could not hold back the push keys ('wk push status')"
+    # A background server left running unattended: the keys held back above
+    # stay held back -- there is no foreground moment here to notice a session
+    # ending and turn push back on.
+    if [ -n "$PUSH_WAS_ON" ]; then
+        log "  git push stays off ('wk push on' when you want it back)"
+        PUSH_WAS_ON=""
     fi
 
     # remote-control refuses outright without the workspace's trust dialog
@@ -282,31 +308,14 @@ if [ -n "$RC" ]; then
     exit 0
 fi
 
-# --- git push: off while an agent has the keyboard ---------------------------
-# The one thing a disposable workspace cannot contain is a push -- it leaves
-# the blast radius by definition. So the deploy keys are held back for the
-# duration (`wk push`, which moves them out of the mount rather than setting
-# a flag an agent could clear).
-#
-# Turned back on only for an interactive session, where somebody is there to
-# notice: a headless run re-enters this command every few minutes via the
-# babysitter's fix loop, and leaving push on between attempts would be the
-# switch flapping open unattended. Off is also the safe crash/kill direction.
-#
-# Container only: the deploy keys live in the podman VM's store and mount
-# only into containers. A macOS guest has none to hold back.
-PUSH_WAS_ON=""
-if [ "$WK_TARGET_KIND" = container ] && "$WK_ROOT/wk" push status >/dev/null 2>&1; then
-    PUSH_WAS_ON=1
-    warn "git push is ON -- turning it off while Claude runs in '$NAME'"
-    "$WK_ROOT/wk" push off >/dev/null 2>&1 \
-        || die "refusing to run: could not hold back the push keys ('wk push status')"
-fi
-
+# --- git push: back on only when a person is there to notice -----------------
+# A headless run re-enters this command every few minutes via the babysitter's
+# fix loop, and leaving push on between attempts would be the switch flapping
+# open unattended.
 restore_push() {
     [ -n "$PUSH_WAS_ON" ] || return 0
     if [ -t 0 ] && [ -t 1 ]; then
-        "$WK_ROOT/wk" push on >/dev/null 2>&1 \
+        "$WK_ROOT/wk" push on ${PUSH_TARGET:+--target "$PUSH_TARGET"} >/dev/null 2>&1 \
             && info "git push turned back on" \
             || warn "could not turn git push back on -- 'wk push on'"
     else

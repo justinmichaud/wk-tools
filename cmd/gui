@@ -12,7 +12,8 @@
 # not: ssh allocates one only when asked.
 #
 #   [<url>]                page to load (default: about:blank)
-#   --config <config>      build config to run (default: per-host/workspace)
+#   --config <config>      build config to run (default: per-host/workspace);
+#                          `wk build --list` lists every name
 #   --wpe, --gtk, --mac    shorthand for --config wpe-release / gtk-release / mac-release
 #   --no-fullscreen        skip the port's fullscreen flag (WPE: --fullscreen,
 #                          GTK: --full-screen; the Apple port has neither)

@@ -195,7 +195,7 @@ unset _wk_hb_dir _wk_f
 # --- 5b. Prompt --------------------------------------------------------------
 # Shows which machine, what it currently *is* (workstation / bench system /
 # shared build box / workspace), where you are, and what git thinks -- none of
-# it is in zsh's default prompt, and each has been gotten wrong at a terminal.
+# it is in zsh's default prompt, and mixing any of them up costs real time.
 #
 # Runs before every command, so: nothing that forks unless it must
 # (machine/role/workspace read once at source time; git branch from

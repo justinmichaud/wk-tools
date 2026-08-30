@@ -29,6 +29,7 @@ fi
 [ -d "$SHARED" ] || { ensure_dir "$SHARED"; cp -a "$REPO/." "$SHARED/" 2>/dev/null || true; }
 
 ACTION="${1:-status}"
+[ $# -le 1 ] || die "usage: wk skills status|diff|pull|push; see wk skills -h"
 
 case "$ACTION" in
 status)

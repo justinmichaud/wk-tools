@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# wk run <workspace> [config] -- run jsc from a workspace build
+# wk run <workspace> [options] [-- jsc-args] -- run jsc from a workspace build
 # wk: where=workspace name=required ready=yes group=workspaces
 #
 # Runs the jsc binary a build produced, from the workspace's own build tree on
 # its target, so the shell you are in never needs the build's paths or env.
 # Everything after `--` goes to jsc verbatim.
 #
-#   --config <config>   the build config to run (default: default_config)
+#   --config <config>   the build config to run (default: default_config;
+#                       wk build --list prints every name)
 #   --lldb              run jsc under lldb instead of directly; under
 #                       --until-crash, each iteration runs under lldb instead,
 #                       and a crash leaves you at its prompt rather than lldb

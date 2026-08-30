@@ -107,9 +107,24 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     # --- egress, measured -----------------------------------------------------
     # Allowed: the API the agent needs. Denied: a host off the list, and the
     # local network. Direct: with the proxy bypassed there must be no path at all.
-    code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
+    code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://github.com/ 2>/dev/null")
     [ "$code" = 200 ] && pass "github reachable through the proxy (HTTP $code)" \
                       || fail "github unreachable through the proxy (got '${code:-nothing}')"
+
+    # --- nothing in here can publish ------------------------------------------
+    # An agent's blast radius ends at the workspace only if nothing inside it
+    # can push or post: GitHub's API is refused by the proxy (DENIED_HOSTS,
+    # container/proxy/wk-proxy.py), the deploy keys are behind the mount while
+    # `wk push` is off, and no gh token sits in the home or the environment.
+    code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
+    [ "$code" = 403 ] && pass "api.github.com is refused (HTTP 403): gh has nothing to talk to" \
+                      || fail "api.github.com answered '${code:-nothing}', not a refusal -- gh could post from in here"
+    keys=$(inside "ls /secrets/build_key_* 2>/dev/null | grep -vc '\\.pub\$'")
+    [ "${keys:-0}" = 0 ] && pass "no deploy key in the mount (git push is off)" \
+                          || fail "$keys deploy key(s) at /secrets -- git push is ON:  wk push off"
+    ghcred=$(inside "test -e ~/.config/gh/hosts.yml && echo ~/.config/gh/hosts.yml; env | grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=' | cut -d= -f1")
+    [ -z "$ghcred" ] && pass "no GitHub credential inside (gh has nothing to post with)" \
+                     || fail "GitHub credential inside the workspace: $ghcred -- remove it (rm ~/.config/gh/hosts.yml; unset the token) before an agent runs"
 
     denied=$(inside "curl -sS -m 15 -o /dev/null https://example.com/ 2>&1")
     if printf '%s' "$denied" | grep -qi '403'; then

@@ -368,10 +368,9 @@ yocto_build() {
             # (`wk sysimage webkit`; image_slot_dir, lib/image.sh).
             --commit)         commit="${2:-}"; shift ;;
             --slot)           slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
-            *) die "unknown option: $1
-    'wk sysimage build $profile' takes --dry-run, --workspace, --stage,
-    --detach, --stop, --keep-work, --chromium, --no-local-layer and
-    --no-tailnet; 'wk sysimage webkit $profile' adds --commit and --slot." ;;
+            *) die "usage: wk sysimage build $profile [--dry-run|--workspace <name>|--stage <name>|
+    --detach|--stop|--keep-work|--chromium|--no-local-layer|--no-tailnet]; unknown option: $1
+    'wk sysimage webkit $profile' adds --commit and --slot." ;;
         esac
         shift
     done

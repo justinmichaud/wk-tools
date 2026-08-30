@@ -44,6 +44,8 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 _ALL_ARGS=("$@")
 
 if [ "${1:-}" = --list ]; then
+    [ $# -eq 1 ] || die "usage: wk build --list; see wk build -h
+    unexpected argument: $2"
     log "available configs:"
     config_list | sed 's/^/  /'
     exit 0
@@ -143,6 +145,10 @@ EXTRA_ENV=""; _NL='
 '   # newline-separated, since an environment value may contain spaces
 while [ $# -gt 0 ]; do
     case "$1" in
+        # Also checked before and right after <config> (above); repeated here
+        # so a --dry-run that lands anywhere else in the line is still honoured
+        # instead of falling through to _PASS and running for real.
+        --dry-run)   DRY=1; shift ;;
         --detach)    DETACH=1; shift ;;
         --no-defaults) NO_DEFAULTS=1; shift ;;
         --babysit)   BABYSIT="${WK_BABYSIT_MODEL:-haiku}"; shift ;;

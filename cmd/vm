@@ -50,6 +50,19 @@ _write_alias() {
 
 SUB="${1:-ls}"; shift || true
 
+# Every lifecycle subverb but `base` takes exactly one positional (the guest
+# name), and that positional is never a flag -- a name starting with '-' is a
+# mistyped flag, not a name (require_name would refuse it too, but not with a
+# usage line). Checked once here rather than left for each arm to read $1 and
+# silently drop whatever came after it, or hand a stray flag to require_name.
+case "$SUB" in
+    ls)   [ $# -eq 0 ] || die "usage: wk vm ls; see wk vm -h" ;;
+    base) [ $# -le 1 ] || die "usage: wk vm base [--refresh|--rebuild|--rm]; see wk vm -h" ;;
+    new|start|stop|ip|enter|sync|rm)
+          [ $# -eq 1 ] && [ "${1#-}" = "$1" ] \
+              || die "usage: wk vm $SUB <name>; see wk vm -h" ;;
+esac
+
 case "$SUB" in
 ls)
     printf '%-20s %s\n' NAME STATE

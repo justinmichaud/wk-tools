@@ -39,8 +39,19 @@ import sys
 import time
 
 # --- policy ------------------------------------------------------------------
-# Suffix matches: "github.com" matches github.com and api.github.com, but not
-# evilgithub.com -- the match is on a dot boundary.
+# Checked before the allowlist, on the same dot-boundary suffix match: a
+# workspace fetches from github.com and nothing more. Its API is what `gh`
+# (and anything else that can post, comment or upload as a person) talks to,
+# and no agent in a workspace may publish -- the push keys are held back the
+# same way (cmd/push). `wk verify` measures this refusal.
+DENIED_HOSTS = {
+    "api.github.com": "GitHub's API is refused: nothing in a workspace may post as a person",
+    "uploads.github.com": "GitHub's upload API is refused: nothing in a workspace may publish",
+}
+
+# Suffix matches: "github.com" matches github.com and codeload.github.com, but
+# not evilgithub.com -- the match is on a dot boundary. (api.github.com is
+# taken out first, above.)
 ALLOWED_HOSTS = {
     # Anthropic: the API, the console, and the CLI's own installer.
     "anthropic.com": (80, 443),
@@ -303,6 +314,9 @@ class Policy:
         if addr is not None:
             return (host in self._pi_hosts() and port == 22), "pi test device"
 
+        for name, why in DENIED_HOSTS.items():
+            if host == name or host.endswith("." + name):
+                return False, why
         for suffix, ports in ALLOWED_HOSTS.items():
             if host == suffix or host.endswith("." + suffix):
                 if port in (ports if isinstance(ports, tuple) else (ports,)):

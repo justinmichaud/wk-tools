@@ -375,6 +375,35 @@ _hpodman() {
     fi
 }
 
+# The wkdev SDK's own repository, read here and by `wk status`'s upstream
+# check below -- not this machine's derived builder images
+# (localhost/wk-yocto-host, localhost/wk-buildroot-host), which are never
+# published anywhere to compare against.
+WK_SDK_REPO="ghcr.io/igalia/wkdev-sdk"
+
+# The SDK image a workspace here actually runs, and when it was pulled --
+# podman's own record, not a guessed default (nothing in this tree names one;
+# wkdev-create's own default is baked into the SDK checkout). Empty when
+# nothing under this repository has ever been pulled onto this machine.
+t_sdk_local() {
+    local img created
+    img=$(_hpodman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
+          | grep "^$WK_SDK_REPO:" | head -1) || img=""
+    [ -n "$img" ] || return 1
+    created=$(_hpodman image inspect "$img" --format '{{.Created}}' 2>/dev/null | cut -c1-10)
+    printf 'image=%s\ncreated=%s\n' "$img" "$created"
+}
+
+# Every tag the registry publishes for it, unauthenticated: `podman search
+# --list-tags` needs no credential for a public image and is already the one
+# registry client every container-target machine has (no skopeo dependency to
+# add). Callers cap this themselves (WK_FLEET_TIMEOUT) -- a slow or silent
+# registry is not this function's problem to time out.
+t_sdk_upstream() {
+    _hpodman search --list-tags "$WK_SDK_REPO" --limit 100 2>/dev/null \
+        | awk 'NR > 1 {print $2}'
+}
+
 # Asked of the container, not assumed: WKDEV_CONTAINER_USER is the invoking
 # user, wrong on macOS (the container was created inside the podman VM as
 # `core`). Its working directory (home) is the one place both hosts agree.

@@ -23,9 +23,12 @@
 # the log say where it got to. Incompatible with --pr, which needs the
 # workspace to be ready first.
 #
-#   --target <target>   which target to create it on (default: container)
-#   --base <id>          which base snapshot to build from (default: current)
-#   --arch <arch>        the architecture the workspace itself runs (container only)
+#   --target <target>   container, vm, or a machine named in
+#                        targets/hosts/<name>.conf (default: container)
+#   --base <id>          which base snapshot to build from -- an id 'wk sync'
+#                        published, under $WK_STORE/base (default: current)
+#   --arch <arch>        native|armhf -- the architecture the workspace
+#                        itself runs (container only; default: native)
 #   --zed                open the checkout in Zed once it is ready
 #   --no-wait            return once creation has started, without waiting for it
 #   --pr <spec>          check it out onto a PR head once ready -- the same
@@ -80,7 +83,8 @@ while [ $# -gt 0 ]; do
     architecture, executed natively. A sysroot cross build stays in a native
     workspace and is a property of the build, so it will be 'wk build
     --sysroot', not 'wk new --sysroot'." ;;
-        *) die "unknown option: $1" ;;
+        *) die "usage: wk new <name> [--target <target>] [--base <id>] [--arch <arch>]
+    [--zed] [--no-wait] [--pr <spec>]; unknown option: $1; see wk new -h" ;;
     esac
 done
 

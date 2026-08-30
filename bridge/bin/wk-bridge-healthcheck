@@ -57,12 +57,10 @@ if ip -o link show "$iface" >/dev/null 2>&1; then
     ok "$iface $(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4; exit}')"
     if [ "$(cat "/sys/class/net/$iface/carrier" 2>/dev/null)" = 1 ]; then
         ok "cable connected"
-        # The USB bus speed behind it, because a segment can be perfectly up and
-        # forty times too slow. On a PinePhone the dock's NIC can fall to the
-        # companion OHCI controller (12 Mbit/s against EHCI's 480) after the pmOS
-        # initramfs flips the phy to peripheral mid-boot; host mode is *correct*
-        # in that state, the link says 100 Mb/s, and nothing else here notices.
-        # wk-bridge-usb-host recovers it; this is what makes it visible.
+        # The USB bus speed behind it: a segment can be perfectly up and forty
+        # times too slow if the NIC fell to the companion OHCI controller.
+        # wk-bridge-usb-host documents the trap and recovers it; this is what
+        # makes the fault visible.
         nicdev=$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null)
         nicspeed=$(cat "${nicdev%/*}/speed" 2>/dev/null)
         case "$nicspeed" in
@@ -164,18 +162,13 @@ note "typec data_role: $(cat /sys/class/typec/port0/data_role 2>/dev/null)"
 
 # The lease file shows *who took which address*, and the failure it exists to
 # make visible is a different device holding the address you meant -- which is
-# what an infinite lease on a one-address pool guarantees if the cable is in the
-# wrong socket.
+# what an infinite lease on a one-address pool guarantees if the cable is in
+# the wrong socket.
 #
-# What it is not is evidence about the present. Leases on these segments are
-# `infinite`, so a client
-# that already has one re-uses it after a carrier drop by ARP alone and never
-# sends another request -- which means an empty lease file with a perfectly
-# working segment is a real and benign state: reflash the phone, and the board
-# behind it keeps its address without ever telling the new dnsmasq about it.
-# Reserved addresses are pinned by MAC (`dhcp-host`), so nothing is lost even
-# when it does ask again. So this reports, and the reachability check below is
-# the one that can fail.
+# It is not evidence about the present: these leases never expire, so a client
+# that already has one re-uses it via ARP after a carrier drop and never asks
+# again. Reserved addresses are pinned by MAC (`dhcp-host`), so nothing is lost
+# either way. The reachability check below is what can actually fail.
 if [ -s "$leasefile" ]; then
     ok "DHCP leases:"
     sed 's/^/          /' "$leasefile"
@@ -325,10 +318,8 @@ if [ "${nonzram:-0}" -eq 0 ]; then ok "swap is zram only"; else bad "swap on a n
 
 if [ "$camera" != off ]; then
     hdr "Camera"
-    # The kill switch is the access control and it is hardware: switched off,
-    # the sensor is electrically disconnected, so there is no capture device and
-    # the service cannot come up. That is a *note*, not a failure -- off is a
-    # legitimate state and the whole reason the switch exists.
+    # Off is electrically disconnected (hardware kill switch), so no software
+    # fault can bring the capture device up -- a legitimate state, not a failure.
     if [ -e /dev/video0 ]; then
         if rc-service wk-bridge-camera status >/dev/null 2>&1; then
             ok "streaming (see 'wk bridge status' for the URL)"

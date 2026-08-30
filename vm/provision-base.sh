@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 #
-# Runs once, inside the golden base VM, over ssh from targets/vm.sh. Paid here
-# exactly once so every workspace inherits it for free via `tart clone` (APFS
-# copy-on-write): Xcode's first-launch components, the WebKit clone, the
-# Claude CLI.
+# Runs once, over ssh from targets/vm.sh, inside the golden base VM; every
+# workspace inherits the result for free via `tart clone` (APFS copy-on-write).
 #
 # bash 3.2: the macOS system bash, and there is no other one here.
 
@@ -17,10 +15,9 @@ WK_TOOLS_DIR="$HOME/wk-tools"
 say() { printf '==> %s\n' "$*" >&2; }
 
 # --- Xcode -------------------------------------------------------------------
-# The image ships Xcode but not always an accepted licence or first-launch
-# components; both fail the build far downstream with an unrelated error.
-# sed (not `| head -1`) avoids SIGPIPEing xcodebuild, which would fail the
-# pipeline even on success.
+# Xcode without an accepted licence or first-launch components fails the
+# build far downstream with an unrelated error. sed (not `| head -1`) avoids
+# SIGPIPEing xcodebuild, which fails the pipeline even on success.
 _xcode=$(xcodebuild -version 2>/dev/null | sed -n 1p) || true
 [ -n "$_xcode" ] || {
     echo "error: no usable Xcode in this image" >&2
@@ -33,8 +30,7 @@ sudo xcodebuild -runFirstLaunch >/dev/null 2>&1 || true
 # --- claim the whole disk ------------------------------------------------------
 # Growing the virtual disk doesn't grow the guest's APFS container; without a
 # resize the build dies with "No space left" while the host sees free space.
-# 60G is the floor below which a Release build (tens of GB on a ~19G checkout)
-# is not worth starting.
+# 60G is the floor: a Release build needs tens of GB on top of the ~19G checkout.
 NEED_FREE_GB=60
 
 _free_gb() { df -g /System/Volumes/Data | awk 'NR==2 {print $4}'; }
@@ -114,8 +110,7 @@ else
 fi
 
 # Same Claude config entries container/firstrun.sh links in a container;
-# without them the guest runs a skip-permissions agent with no CLAUDE.md,
-# settings or skills.
+# missing them means a skip-permissions agent with no CLAUDE.md, settings or skills.
 #
 # Skills are a read-only symlink here, not a mutable volume: `wk build`
 # re-rsyncs with --delete, so an in-guest skill edit should fail to write
@@ -137,9 +132,8 @@ fi
 # fails -- push over HTTPS or from the host instead.
 #
 # No default address: Tart's stock gateway (192.168.64.1) is wrong for guests
-# on WK_VM_SUBNET (192.168.2.x), and a wrong guess fails silently
-# (indistinguishable from Softnet denying traffic), so an unset
-# WK_VM_PROXY_ADDR is a hard stop.
+# on WK_VM_SUBNET (192.168.2.x), and a wrong guess fails silently, indistinguishable
+# from Softnet denying traffic -- so an unset WK_VM_PROXY_ADDR is a hard stop.
 if [ -z "${WK_VM_PROXY_ADDR:-}" ]; then
     echo "provision-base: WK_VM_PROXY_ADDR was not passed in; refusing to guess" >&2
     echo "  (the guest would silently get an unreachable proxy and no egress)" >&2

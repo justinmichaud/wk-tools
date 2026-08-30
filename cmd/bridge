@@ -986,9 +986,9 @@ cmd_provision() {
             --rebuild)  rebuild=1; shift ;;
             --no-write) no_write=1; shift ;;
             --dry-run)  dry=1; shift ;;
-            *) die "unknown option: $1
-    wk bridge provision <name> [--at <host>] [--disk <machine>:<dev>]
-                               [--image <path>] [--rebuild] [--no-write] [--dry-run]" ;;
+            *) die "usage: wk bridge provision <name> [--at <host>] [--disk <machine>:<dev>]
+                               [--image <path>] [--rebuild] [--no-write] [--dry-run]
+    unknown option: $1" ;;
         esac
     done
     [ -z "$rebuild" ] || [ -z "$image" ] \
@@ -1198,8 +1198,8 @@ cmd_setup() {
             --dry-run) dry=1 ;;
             --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift ;;
             --no-tailnet) BR_NO_TAILNET=1 ;;
-            *) die "unknown option: $1
-    wk bridge setup <name> [--at <host>] [--no-tailnet] [--dry-run]" ;;
+            *) die "usage: wk bridge setup <name> [--at <host>] [--no-tailnet] [--dry-run]
+    unknown option: $1" ;;
         esac
         shift
     done
@@ -1369,8 +1369,8 @@ cmd_tailnet() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
-            *) die "unknown option: $1
-    wk bridge tailnet <name> [--at <host>]" ;;
+            *) die "usage: wk bridge tailnet <name> [--at <host>]
+    unknown option: $1" ;;
         esac
     done
     resolve_priv
@@ -1387,7 +1387,8 @@ cmd_status() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
-            *) die "unknown option: $1" ;;
+            *) die "usage: wk bridge status <name> [--at <host>]
+    unknown option: $1" ;;
         esac
     done
     resolve_priv
@@ -1406,7 +1407,8 @@ cmd_rm() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
-            *) die "unknown option: $1" ;;
+            *) die "usage: wk bridge rm <name> [--at <host>]
+    unknown option: $1" ;;
         esac
     done
     resolve_priv
@@ -1475,12 +1477,19 @@ EOF
 ACTION="${1:-}"; shift || true
 case "$ACTION" in
     ls)
+        [ $# -eq 0 ] || die "usage: wk bridge ls
+    unexpected argument: $1"
         cmd_ls
         ;;
     setup|status|rm|provision|tailnet)
-        NAME="${1:-}"; shift || true
+        NAME="${1:-}"
+        case "$NAME" in
+            -*) die "usage: wk bridge $ACTION <name> [flags]; see wk bridge -h
+    unexpected argument: $NAME" ;;
+        esac
         [ -n "$NAME" ] || die "usage: wk bridge $ACTION <name>
     Declared bridges:$(bridge_names | sed 's/^/ /' | tr -d '\n')"
+        shift || true
         load_bridge "$NAME"
         cmd_"$ACTION" "$@"
         ;;

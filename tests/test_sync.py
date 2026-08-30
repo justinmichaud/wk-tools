@@ -14,6 +14,7 @@ Run: python3 -m unittest tests.test_sync -v
 import shlex
 import subprocess
 import unittest
+from pathlib import Path
 
 from tests.support import REPO, bash, fake_workspace, run
 
@@ -580,41 +581,105 @@ class TestDispatcherForwardingRuleForSync(unittest.TestCase):
         self.assertEqual(self._target("myws", ws_target_returns="vm"), "vm")
 
 
-class TestSyncRefusedInsideWorkspace(unittest.TestCase):
-    """`wk sync` is refused unconditionally from inside a workspace: cmd/sync
-    declares `outside` (cmd/sync:4), and the dispatcher's own refusal
-    (`in_workspace && { ... || -n "$D_OUTSIDE"; }`, wk ~678-687) fires
-    before cmd/sync's argument parsing ever runs -- so this holds the same
-    way for a bare `wk sync`, every scope flag, and a named workspace.
-    Real `./wk sync` invocations (not lifted) are safe here: every case
-    below dies in the dispatcher itself, before store_init, the mirror, or
-    any workspace is touched -- verified by hand (see the module-level
-    note) before this class was written."""
+class TestSyncInsideWorkspace(unittest.TestCase):
+    """Inside a workspace `wk sync` has exactly one meaning: fetch in this
+    workspace, from the mirror bind-mounted read-only at /mirror/WebKit.git
+    (defect: "wk sync should work inside a sandbox too"). cmd/sync no longer
+    declares `outside`; --target/--all/--tools/--machine are refused before
+    this file even starts by the dispatcher's own `flag ... where=host`
+    override (wk's in_workspace-and-where=host refusal), and cmd/sync
+    refuses a name that is not this workspace's own the same way. A bare
+    `wk sync` is the one shape that reaches all the way to a real fetch."""
 
     def _refused(self, *args):
         with fake_workspace() as ws:
             cp = ws.run("sync", *args)
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("'wk sync' acts on a host, and this is workspace 'selftest-ws'", cp.stdout)
-        self.assertIn("From the host:  wk sync selftest-ws", cp.stdout)
+        self.assertNotEqual(cp.returncode, 0, f"'wk sync {' '.join(args)}' was accepted inside a workspace")
+        self.assertIn("'wk sync", cp.stdout)
+        self.assertIn("acts on a host, and this is workspace 'selftest-ws'", cp.stdout)
+        self.assertIn(f"From the host:  wk sync {' '.join(args)}", cp.stdout)
 
-    def test_bare_sync_is_refused(self):
-        self._refused()
-
-    def test_every_scope_flag_is_refused_the_same_way(self):
+    def test_the_scope_flags_are_refused_naming_the_host_invocation(self):
         self._refused("--all")
         self._refused("--tools")
         self._refused("--target", "container")
 
-    def test_a_named_workspace_is_refused_the_same_way(self):
+    def test_a_different_workspaces_name_is_refused_the_same_way(self):
         self._refused("someotherws")
 
-    def test_an_unknown_flag_is_refused_by_the_dispatcher_first(self):
-        # cmd/sync would itself refuse --bogus (TestSyncArgParsing above),
-        # but the dispatcher's in-workspace refusal fires first -- cmd/sync
-        # never even starts, so it is the host-command message that shows,
-        # not "unknown option".
-        self._refused("--bogus")
+    def test_an_unrecognised_flag_is_refused_as_unknown_not_as_host_only(self):
+        # Not one of the scope flags the dispatcher intercepts -- cmd/sync's
+        # own parser is what refuses this one, same as outside a workspace.
+        with fake_workspace() as ws:
+            cp = ws.run("sync", "--bogus")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("unknown option: --bogus", cp.stdout)
+        self.assertNotIn("acts on a host", cp.stdout)
+
+    def _bare_repo_with_a_commit(self, tmp_path):
+        """A bare repo standing in for the mirror, with one commit on main --
+        real git, no network. Returns (path, sha-of-main)."""
+        bare = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "--quiet", "--bare", "-b", "main", str(bare)],
+                        check=True, capture_output=True)
+        seed = tmp_path / "seed"
+        subprocess.run(["git", "clone", "--quiet", str(bare), str(seed)],
+                        check=True, capture_output=True)
+        (seed / "file.txt").write_text("hello\n")
+        subprocess.run(["git", "-C", str(seed), "add", "file.txt"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(seed), "-c", "user.email=t@t.example", "-c", "user.name=t",
+             "commit", "-q", "-m", "seed"],
+            check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "main"], check=True, capture_output=True)
+        sha = subprocess.run(["git", "-C", str(seed), "rev-parse", "main"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        return bare, sha
+
+    def test_bare_sync_fetches_in_this_workspaces_own_checkout(self):
+        # No real /mirror/WebKit.git on the machine running this test, so
+        # the fetch takes sync_workspaces' other branch -- the workspace's
+        # own "origin" remote, over what would be the egress-proxy path on
+        # a real workspace. That branch is exercised for real here; the
+        # /mirror branch is the same function, gated on a path this test
+        # cannot fake without root, so it is verified by reading (the
+        # command line names $(t_src) and /mirror/WebKit.git literally,
+        # cmd/sync's sync_workspaces) rather than by running it.
+        with fake_workspace() as ws:
+            bare, sha = self._bare_repo_with_a_commit(ws.tmp)
+            src = ws.ws_dir / "WebKit"
+            subprocess.run(["git", "init", "--quiet", "-b", "main", str(src)],
+                            check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(src), "remote", "add", "origin", str(bare)],
+                            check=True, capture_output=True)
+
+            cp = ws.run("sync")
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+            self.assertIn("selftest-ws", cp.stdout)
+
+            got = subprocess.run(["git", "-C", str(src), "rev-parse", "refs/remotes/origin/main"],
+                                  capture_output=True, text=True)
+            self.assertEqual(got.returncode, 0, got.stderr)
+            self.assertEqual(got.stdout.strip(), sha)
+
+    def test_bare_sync_does_not_touch_this_machines_own_store(self):
+        # store_init preps *this machine's* mirror/base/ws/cache dirs -- a
+        # host concept a workspace has no business touching (and, run for
+        # real, would try to create /var/lib/wk on whatever machine runs
+        # the test). Guarded by `in_workspace || store_init`; this asserts
+        # the guard by checking the fetch still succeeds with no real
+        # mirror and no WK_STORE override, which only holds if store_init's
+        # ensure_dir calls are not the thing that would have failed first.
+        with fake_workspace() as ws:
+            bare, _ = self._bare_repo_with_a_commit(ws.tmp)
+            src = ws.ws_dir / "WebKit"
+            subprocess.run(["git", "init", "--quiet", "-b", "main", str(src)],
+                            check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(src), "remote", "add", "origin", str(bare)],
+                            check=True, capture_output=True)
+            cp = ws.run("sync")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertNotIn("Permission denied", cp.stdout)
 
 
 if __name__ == "__main__":

@@ -63,7 +63,9 @@ git_dirty() {
 }
 
 case "${1:-}" in
---tree) tree_hash ;;
+--tree)
+    [ $# -eq 1 ] || die "usage: wk version [--tree]; see wk version -h"
+    tree_hash ;;
 '')
     printf 'sha=%s\n'   "$(git_sha)"
     printf 'dirty=%s\n' "$(git_dirty)"

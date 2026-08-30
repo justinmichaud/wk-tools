@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 #
 # wk sync [<workspace>|--all|--tools] -- bring WebKit and the tooling up to date
-# wk: where=workspace name=optional outside group=sources needs git,rsync
+# wk: where=workspace name=optional group=sources needs git,rsync
 # wk: flag --target,--all,--tools,--machine where=host
 #
 # Safe to run at any time, including while workspaces are building. Running
 # workspaces stay pinned to the snapshot they were created from and are never
 # touched; only workspaces created after this runs pick up the new one.
 #
-#   wk sync                    one workspace on this machine (asked, when several)
+#   wk sync                    one workspace on this machine (asked, when several);
+#                              inside a workspace: that workspace, from its mirror
 #   wk sync <workspace>        that one
 #   wk sync --target <target>  every workspace on that target
 #   wk sync --all              every workspace on every target
@@ -32,6 +33,13 @@
 # for separately, and either is narrowed to one target the same way
 # (`wk status` names the targets). A target with a machine of its own keeps
 # its own furniture: that is one call into its driver (t_sync).
+#
+# Inside a workspace only the first of those exists to ask for: the
+# checkout's own fetch, from the mirror bind-mounted read-only at
+# /mirror/WebKit.git. --target/--all/--tools name a machine's furniture, and
+# a name that is not this workspace's own names a different workspace --
+# both are outside what a workspace can see, and are refused with the
+# invocation to type on the host instead.
 
 set -euo pipefail
 WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -133,6 +141,26 @@ scope_set() { # <scope> <as-typed>
     $USAGE"
     SCOPE="$1"; SCOPE_AS="$2"
 }
+
+# Inside a workspace, --target/--all/--tools/--machine never reach here: the
+# `flag ... where=host` declaration above sends them into the dispatcher's
+# own "acts on a host" refusal before this file starts, and mentioning this
+# workspace's own name is refused by the dispatcher's generic name check
+# (name=optional, "there is no workspace argument in here"). What is left
+# unrefused is a name that is a *different* workspace -- outside what a
+# workspace can see the same way those flags are, so it is refused the same
+# way, in the words the dispatcher's own refusal uses. This must run before
+# the loop below: $ONLY already holds this workspace's own name (from
+# WK_NAME, set for every in-workspace invocation whether or not one was
+# typed), and a second name arriving as a positional would otherwise trip
+# the "one workspace at a time" refusal instead of naming the host.
+if in_workspace && [ -n "${1:-}" ]; then
+    case "$1" in
+        -*|"$(wk_self)") ;;
+        *) die "'wk sync $1' acts on a host, and this is workspace '$(wk_self)'.
+    From the host:  wk sync $1" ;;
+    esac
+fi
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -405,7 +433,10 @@ sync_target() { # <target>
 # three scopes do.
 case "$SCOPE" in
     ws)
-        store_init
+        # store_init preps this *machine's* store (mirror, base, ws dirs);
+        # inside a workspace there is no such store to prep -- the fetch
+        # below reads the checkout and the mirror bind-mount directly.
+        in_workspace || store_init
         sync_workspaces "$ONLY"
         log "'git rebase origin/main' in the workspace moves onto what it just fetched."
         exit 0 ;;

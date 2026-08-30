@@ -147,9 +147,8 @@ while :; do
     # Downstream leg: checked but never escalated on -- losing it is a dock or
     # cable fault, and rebooting the phone over it would take out the uplink
     # that is the only way to be told about any of this. Run every pass, not
-    # only when the interface is missing: a NIC fallen to the companion
-    # full-speed controller is present and in host mode, merely forty times
-    # too slow, which is invisible to every other check here.
+    # only when the interface is missing, since wk-bridge-usb-host's companion-
+    # controller trap (see there) leaves it present but forty times too slow.
     /usr/local/sbin/wk-bridge-usb-host 2>/dev/null || true
 
     if [ ! -e "/sys/class/net/$iface" ]; then

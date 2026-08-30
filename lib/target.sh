@@ -862,3 +862,55 @@ load_target() {
     # shellcheck disable=SC1090
     . "$WK_ROOT/targets/$kind.sh"
 }
+
+# --- the upstream line a workspace tracks -------------------------------------
+# The upstream line an image workspace (`yocto-<profile>`/`buildroot-<profile>`,
+# cmd/sysimage's `_ws_profile`) is built from, straight from the profile's own
+# conf -- CFG_RELEASE (image/configs/<profile>.conf) -- whatever the checkout
+# inside happens to say. Not sourced through image/profiles.sh: every conf is a
+# flat list of VAR=value lines with nothing else to evaluate, and reading the
+# one line wanted costs nothing a `.` of the whole profile machinery would not.
+ws_image_base() { # <ws>
+    local profile
+    case "$1" in
+        yocto-*)     profile="${1#yocto-}" ;;
+        buildroot-*) profile="${1#buildroot-}" ;;
+        *) return 1 ;;
+    esac
+    awk -F= '/^CFG_RELEASE=/ { print $2; found=1 } END { exit !found }' \
+        "$WK_ROOT/image/configs/$profile.conf" 2>/dev/null
+}
+
+# The upstream WebKit line a checkout's HEAD descends from -- `main`, or a
+# release like `2.52` -- in WebKit's own vocabulary, printed as `?` when
+# neither answer is confident. Run with $PWD inside the checkout: the tracked
+# upstream of HEAD's branch when that names main or a release branch
+# (`wpe/webkitglib/2.52` -> `2.52`); otherwise the nearest of those two kinds
+# of ref that contains HEAD (detached, untracked, or tracking a personal fork
+# branch that names neither) -- measured at under 0.1s against a real,
+# heavily-forked checkout (moose:stringimpl238), so run rather than guessed.
+# Shipped into a workspace's shell with `declare -f` (cmd/status, cmd/ls), so
+# the probe there runs this body and not a copy.
+ws_upstream_line() {
+    _u=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || _u=''
+    _b=''
+    if [ -n "$_u" ]; then
+        _br=${_u#*/}
+        case "$_br" in
+            main) _b=main ;;
+            webkitglib/*) _b=${_br#webkitglib/} ;;
+        esac
+    fi
+    if [ -z "$_b" ]; then
+        _rel=$(git for-each-ref --format='%(refname)' \
+                --contains HEAD 'refs/remotes/*/webkitglib/*' 2>/dev/null \
+                | sed 's#.*/webkitglib/##' | sort -t. -k1,1n -k2,2n | tail -1)
+        if [ -n "$_rel" ]; then
+            _b=$_rel
+        elif git for-each-ref --format='%(refname)' \
+                --contains HEAD 'refs/remotes/*/main' 2>/dev/null | grep -q .; then
+            _b=main
+        fi
+    fi
+    printf '%s' "${_b:-?}"
+}

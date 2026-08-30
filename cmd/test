@@ -15,7 +15,8 @@
 # without llvmpipe the runner fails to start or silently produces garbage.
 # On Linux with a real seat, pass --gpu to use the real device.
 #
-#   --config <config>   the build config to test (default: last built, or default_config)
+#   --config <config>   the build config to test (default: last built, or
+#                        default_config); `wk build --list` lists every name
 #   --layout             run the layout-test suite instead of the JSC suite
 #   --gpu                use the real GPU for layout tests (Linux only)
 #   --lldb [web|ui]      debug one layout test: "web" (default) attaches to the

@@ -73,9 +73,9 @@ list_flags() {
 }
 
 case "${1:-}" in
-    --list-workspaces) list_workspaces_local; exit 0 ;;
+    --list-workspaces) [ $# -eq 1 ] || usage; list_workspaces_local; exit 0 ;;
     --flags)
-        [ $# -ge 2 ] || usage
+        [ $# -eq 2 ] || usage
         list_flags "$2"
         exit 0 ;;
 esac
@@ -84,6 +84,7 @@ case "${1:-}" in
     bash|zsh) ;;
     *) usage ;;
 esac
+[ $# -eq 1 ] || usage
 SHELL_NAME="$1"
 
 # `wk` here is `${COMP_WORDS[0]}` -- whatever the user actually typed -- not

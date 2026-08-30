@@ -3,6 +3,7 @@
 # wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
 # wk: where=workspace name=optional ready=yes group=sources
 # wk: sub open where=host needs=gh,gh-auth
+# wk: sub rebase name=optional@2
 #
 #   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
 #   wk pr 1234                                 # WebKit/WebKit pull request #1234

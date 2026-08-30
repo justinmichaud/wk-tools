@@ -127,7 +127,7 @@ class TestWorkspaceRefusals(WkTest):
 
     def test_host_only_commands_refuse_inside_a_workspace(self):
         """host-only commands refuse inside a workspace"""
-        for c in ("sync", "gc", "vm", "pi", "session", "quiesce"):
+        for c in ("gc", "vm", "pi", "session", "quiesce"):
             with self.subTest(cmd=c):
                 with fake_workspace() as ws:
                     cp = ws.run(c)

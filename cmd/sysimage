@@ -18,10 +18,16 @@
 # machine needs no tooling that can read a Linux filesystem.
 #
 #   build <profile> [--dry-run]  build from the spec in this repo. A yocto
-#                                profile also takes --workspace, --stage,
-#                                --detach, --stop, --keep-work; a pmos profile
+#                                profile also takes --workspace, --detach,
+#                                --stop, --keep-work, --chromium,
+#                                --local-layer|--no-local-layer,
+#                                --tailnet|--no-tailnet and
+#                                --stage <layers|fetch|image|toolchain|webkit>
+#                                (default image); a buildroot profile takes
+#                                --workspace, --detach, --stop; a pmos profile
 #                                takes --detach and --resume and builds on a
-#                                Linux aarch64 machine over ssh
+#                                Linux aarch64 machine over ssh; the fetch
+#                                builder takes only --dry-run
 #   webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]
 #                                build one WebKit commit into a named slot
 #                                beside the image, the way its builder builds
@@ -62,6 +68,8 @@
 #                                leave it at its built size
 #   rm <name>                   tombstone -- the image lives in the workspace
 #                                that built it; 'wk rm <workspace>' removes it
+#   flash <machine>              tombstone -- named the wrong thing twice over;
+#                                see 'wk sysimage disks' / 'write' / 'wk boot'
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -416,6 +424,8 @@ _ws_building() { # <workspace>
 }
 
 cmd_ls() {
+    [ $# -eq 0 ] || die "usage: wk sysimage ls|list; unexpected argument: $1"
+
     local n=0 builder ws path bytes mtime prof machine note
     local rows; rows=$(image_workspace_scan)
 
@@ -494,6 +504,10 @@ cmd_disks() {
     [ -n "$machine" ] || die "usage: wk sysimage disks <machine>
     machines:
 $(machine_list | sed 's/^/      /')"
+    case "$machine" in
+        -*) die "usage: wk sysimage disks <machine>; unknown option: $machine" ;;
+    esac
+    [ $# -le 1 ] || die "usage: wk sysimage disks <machine>; unexpected argument: $2"
     machine_load "$machine" || die "unknown machine '$machine'"
     m_reachable || die "$machine is not reachable over ssh"
     log "removable disks attached to $machine:"
@@ -948,8 +962,11 @@ cmd_write() {
             --dry-run) dry=1; shift ;;
             --grow)    grow=1; grow_set=1; shift ;;
             --no-grow) grow=0; grow_set=1; shift ;;
-            -*) die "unknown option: $1" ;;
-            *)  die "unexpected argument: $1
+            -*) die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second]
+    [--profile <name>] [--machine <name>] [--rescue] [--grow|--no-grow] [--dry-run]
+    unknown option: $1" ;;
+            *)  die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second]
+    unexpected argument: $1
     An image is bytes a workspace produced, not an id in a catalogue
     (wk help), so what identifies one is its path -- pass it to --from.
     'wk sysimage ls' lists every image a workspace here has built, with the

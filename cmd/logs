@@ -43,6 +43,7 @@ if [ ! -f "$LOG" ]; then
 fi
 [ -z "$_shown" ] || info "showing $_shown"
 
+[ $# -le 1 ] || die "usage: wk logs [<workspace>] [--follow|-f|--all|-a]; see wk logs -h"
 case "${1:-}" in
 --follow|-f) exec tail -f "$LOG" ;;
 --all|-a)    exec tr '\r' '\n' < "$LOG" ;;

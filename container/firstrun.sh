@@ -75,16 +75,11 @@ Host *
 
 PROXYEOF
 
-# The key is *pointed at*, never copied.
-#
-# Two reasons, and the second is the one that matters. A copy goes stale: the
-# day a key is rotated, every existing workspace goes on offering the dead one.
-# And a copy cannot be taken back -- /secrets is mounted read-only for the
-# container's life, so the host can add and remove keys there and this
-# workspace sees it immediately, which is exactly what makes `wk push off` a
-# switch rather than a suggestion. A copy in here would be a second key nobody
-# can reach. (The Claude credentials are already linked for the first reason;
-# this is the same pattern with a second reason behind it.)
+# The key is *pointed at*, never copied: a copy goes stale on rotation (every
+# existing workspace keeps offering the dead key), and cannot be taken back --
+# /secrets is mounted read-only for the container's life, so removing a key
+# there is instantly what makes `wk push off` a switch, not a suggestion.
+# (Same pattern as the Claude credentials link above.)
 #
 # ssh follows the symlink and checks the *target's* permissions, which are 0600
 # in the store; a dangling link is simply "no key", which is the off position.
@@ -128,10 +123,9 @@ fi
 
 # --- claude ------------------------------------------------------------------
 # Installed by its own installer, to its own standard location
-# (~/.local/bin/claude -> ~/.local/share/claude/versions/N). Nothing is copied
-# to a path of our choosing: Claude Code manages that versions directory and
-# self-updates into it, so a binary parked somewhere else could never update
-# itself and would silently drift out of date.
+# (~/.local/bin/claude -> ~/.local/share/claude/versions/N): Claude Code
+# self-updates into that directory, so a binary parked elsewhere would
+# silently drift out of date.
 #
 # claude.ai resolves inside Anthropic's published range, which the egress
 # policy already allows, so the workspace can fetch this itself.
@@ -154,12 +148,9 @@ for f in settings.json hooks CLAUDE.md; do
     ln -sfn "$WK_TOOLS/claude/$f" "$HOME/.claude/$f"
 done
 
-# Skills are different: workspaces are expected to improve them as they learn,
-# so all workspaces share one *mutable* directory on a volume rather than each
-# getting a private read-only copy. An edit made in one workspace is
-# immediately visible to the others, and survives the workspace being deleted.
-# `wk skills` diffs it against the repo so those edits can be reviewed and
-# committed rather than quietly accumulating.
+# Skills are different: all workspaces share one *mutable* directory on a
+# volume, so an edit in one is visible to the others and survives that
+# workspace being deleted. `wk skills` diffs it against the repo for review.
 ln -sfn /skills "$HOME/.claude/skills"
 
 # Credentials live on a shared volume so one `claude login` serves every
@@ -181,12 +172,11 @@ fi
 #
 # This is where it actually has to run: the workspace image is
 # ghcr.io/igalia/wkdev-sdk, pulled pre-built (this repo owns no Containerfile
-# for it, only sdk-patches/apply.sh, which patches the SDK's *scripts*, not
-# its filesystem). The two Containerfiles this repo does own
-# (container/buildroot, container/yocto) build separate cross-compile hosts
-# that 'wk profile' never runs against; they carry the same install for
-# parity, in case that changes, but this firstrun hook is the path that
-# actually reaches a `wk build`/`wk profile` workspace today.
+# for it, only sdk-patches/apply.sh, which patches the SDK's *scripts*, not its
+# filesystem). container/buildroot and container/yocto carry the same install
+# for parity, but build separate cross-compile hosts that 'wk profile' never
+# runs against -- this firstrun hook is the only path that reaches a real
+# `wk build`/`wk profile` workspace today.
 _install_profilers() {
     if sudo apt-get update -qq >/dev/null 2>&1 \
        && sudo apt-get install -y --no-install-recommends heaptrack valgrind sysprof >/dev/null 2>&1; then
@@ -214,10 +204,9 @@ _install_profilers() {
     if curl -fsSL -o "$tmp/samply.tar.xz" \
            "https://github.com/mstange/samply/releases/download/samply-v${ver}/samply-${sarch}.tar.xz"; then
         got=$(sha256sum "$tmp/samply.tar.xz" | awk '{print $1}')
-        # The tarball is not flat -- it unpacks to samply-<target>/samply
-        # beside its README/LICENSE/RELEASES files, one top-level directory
-        # per target triple, confirmed by listing the archive rather than
-        # assumed.
+        # The tarball is not flat -- it unpacks to samply-<target>/samply beside
+        # its README/LICENSE/RELEASES files, one top-level dir per target
+        # triple, confirmed by listing the archive rather than assumed.
         if [ "$got" = "$sum" ] \
            && tar -xJf "$tmp/samply.tar.xz" -C "$tmp" \
            && sudo install -m 0755 "$tmp/samply-${sarch}/samply" /usr/local/bin/samply; then
@@ -303,10 +292,8 @@ _install_helix() {
         aarch64|arm64) hxarch=aarch64 ;;
         x86_64)        hxarch=x86_64 ;;
         # armhf and anything else: helix publishes no linux/armhf release
-        # (github.com/helix-editor/helix/releases), and there is nothing to
-        # build it from without a compiler toolchain this container does not
-        # carry. Said out loud rather than left as a quiet no-op -- see
-        # docs/Nice to have/HANDOFF-helix.md.
+        # (github.com/helix-editor/helix/releases) and there is no toolchain
+        # here to build one -- see docs/Nice to have/HANDOFF-helix.md.
         *)             log "helix: no linux/$arch release published upstream (github.com/helix-editor/helix) -- not installed"
                         return 0 ;;
     esac
@@ -431,26 +418,21 @@ else
          will not find this workspace. Recreate with a current wk."
 fi
 
-# Creation's completion marker, and the last thing this hook does.
+# Creation's completion marker: the same name every target uses last
+# (lib/target.sh, "creation's completion marker"). What `wk new` waits for,
+# what stops `wk build` starting on a half-initialised checkout, and what
+# tells a workspace whose container was removed by hand apart from one that
+# never finished being made -- readable straight from the host's view of this
+# home directory, no `wk enter` required.
 #
-# .wkdev-init runs this hook and then carries on regardless of how it exited,
-# so a failure part-way through is invisible: the container comes up, the
-# creation reports success, and the workspace is quietly missing whatever came
-# after the failing step. The only honest fix is for something downstream to
-# check.
+# .wkdev-init carries on regardless of how this hook exited, so a failure
+# part-way through is invisible unless something downstream checks: the
+# container comes up and the workspace is quietly missing whatever came after
+# the failing step.
 #
-# `.wk-ready` is that check, and it is now the same name on every target
-# (lib/target.sh, "creation's completion marker"): the file every driver writes
-# last, next to the workspace rather than on whichever machine drove the
-# creation. It is what `wk new` waits for, what stops `wk build` starting on a
-# half-initialised checkout, and what tells a workspace whose container was
-# removed by hand apart from one that never finished being made. This home
-# directory is a directory on the host, so the host reads it without entering
-# anything.
-#
-# Written here rather than by the driver because this is genuinely the last
-# act of creating a container workspace -- the driver's part ended when
-# wkdev-create returned, minutes before the workspace was usable.
+# Written here, not by the driver, because this is the last act of creating a
+# container workspace -- the driver's part ended when wkdev-create returned,
+# minutes before the workspace was usable.
 : > "$HOME/.wk-ready"
 
 log "workspace ${WK_WORKSPACE:-?} ready"

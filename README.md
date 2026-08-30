@@ -219,7 +219,9 @@ wk pr open bug-238                       # from the host: push the branch, open 
 
 A workspace goes stale in its own checkout; a machine goes stale in what it
 keeps *for* workspaces -- its copy of wk-tools, its WebKit mirror, and the
-snapshot the next `wk new` clones. The two are asked for separately.
+snapshot the next `wk new` clones. The two are asked for separately. Inside a
+workspace a bare `wk sync` fetches in it, from that machine's mirror; every
+other scope is a machine's furniture and is run from the host.
 
 ```sh
 wk sync                                 # one workspace here; asked when there are several
@@ -431,6 +433,14 @@ wk claude bug-238 --rc                   # a Remote Control server the Claude ap
 
 A `remote` target has no sandbox to verify; `wk claude` there stops at a
 barrier that only an explicit `--force` crosses.
+
+Nothing an agent runs can publish, on any target: the deploy keys are held
+back for the session (`wk push off`, before the sandbox is verified; `wk push
+on` is refused while a claude process runs in any workspace), the egress proxy
+refuses GitHub's API (`api.github.com`, so `gh` has nothing to talk to), and
+`wk verify` fails on a deploy key in the mount or a GitHub credential inside a
+workspace. On a build box, a `gh` login in the account the agent would run as
+is a refusal with no `--force`. Only the person at the keyboard pushes.
 
 **Housekeeping**
 

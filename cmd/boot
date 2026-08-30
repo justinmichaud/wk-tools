@@ -37,7 +37,10 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # parser.
 . "$WK_ROOT/lib/broker.sh"
 
-[ "${1:-}" = --list ] && { machine_list; exit 0; }
+if [ "${1:-}" = --list ]; then
+    [ $# -eq 1 ] || die "usage: wk boot --list; see wk boot -h"
+    machine_list; exit 0
+fi
 
 MACHINE="${1:-}"; shift 2>/dev/null || true
 [ -n "$MACHINE" ] || die "usage: wk boot <machine> [options]; see wk boot -h"
@@ -55,7 +58,10 @@ while [ $# -gt 0 ]; do
         --system)  IMAGE="${2:-}"; shift ;;
         --image)   die "renamed: --system <id> (a bootable artifact is a system, never bare
     'image' -- wk help images)" ;;
-        *) die "unknown option: $1" ;;
+        -*) die "usage: wk boot <machine> [--status|--diag|--keep|--back|--disarm|--system <id>|--dry-run]; see wk boot -h
+    unknown option: $1" ;;
+        *)  die "usage: wk boot <machine> [--status|--diag|--keep|--back|--disarm|--system <id>|--dry-run]; see wk boot -h
+    unexpected argument: $1" ;;
     esac
     shift
 done
@@ -266,6 +272,7 @@ cmd_disarm() {
     record_clear
     info "$MACHINE disarmed; its next reboot is a normal one"
     command -v b_disarm_note >/dev/null 2>&1 && b_disarm_note
+    return 0
 }
 
 cmd_arm() {

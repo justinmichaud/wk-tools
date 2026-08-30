@@ -1,5 +1,22 @@
 Decisions and questions for the maintainer (agent, 2026-08-30; answer inline):
 
+0. INCIDENT, needs you: a sub-agent auditing argument handling ran
+   `wk key tailnet --replace extra` for real (before the extra-argument
+   refusal it was adding existed) and DELETED this Mac's tailnet auth key,
+   ~/.config/wk/tailscale-authkey. Nothing else in that directory changed and
+   the nodes already on the tailnet are unaffected, but the next card write or
+   bridge provision needs the key: make a new one (tag:wk, reusable,
+   non-ephemeral, longest expiry) at https://login.tailscale.com/admin/settings/keys
+   and run `wk key tailnet` to store it. A second worker dispatched one live
+   `wk build` of a fake workspace to buildbox4 (its shell still carried the
+   leaked WK_TARGET, decision A); it failed at once and left nothing there
+   (checked). The audit agent had spawned these workers on its own, several
+   on the same files; every one was stopped as soon as this surfaced, and no
+   agent in this session spawns another from now on. The argument-handling
+   edits they made to 27 cmd/* files are in the tree, parse, and are covered
+   by tests/test_options.py + tests/test_help_values.py -- review that diff
+   with the same suspicion I did.
+
 A. Your Zed was launched from `wk zed image-decoders`, so its terminals carry
    WK_NAME=image-decoders WK_TARGET=buildbox4 WK_TARGET_KIND=remote (run
    `env | grep ^WK_` in one). Every `wk` typed there -- and this whole agent
@@ -24,7 +41,9 @@ C. HANDOFF-ab-bench's "read the first `wk ab wpe:1725 --devices rpi3` report
    (started 2026-08-30T05:05Z)": no result store on moose, tolken or rpi5 holds
    it (`wk bench ls` is empty on each). Which machine drove that run? The rpi3
    is in bench mode right now (rpi3-bench up, rpi3-rescue down), so nothing
-   here touched it. [question]
+   here touched it. Likely answer: your other Claude session "AB
+   infrastructure and WPEWebKit PR 1725 benchmarking" (Remote Control) is
+   driving it; the report will be in that machine's store. [question]
 
 D. "wk sysimage list isn't listing yocto images": the two yocto workspaces were
    mid-rebuild (yocto.status started=2026-08-29T04:29Z/05:04Z; the wics
@@ -64,13 +83,65 @@ H. Dropped as unused, grep-verified: `mtools` from host/linux/apt.txt and from
    apt.txt (nothing runs glxinfo/eglinfo/grim). Say if any was there for a
    hand workflow that should become a command instead.
 
+I. "forbid committing" (your second message): possible only as a real wall,
+   and there is exactly one: an agent must not own the files a commit writes.
+   A hook or a `git` wrapper is one `--no-verify` or `/usr/bin/git` away and
+   is not worth building. The workspace user has passwordless sudo inside the
+   container (container/firstrun.sh installs with it), so any mount made
+   inside the container is undone the same way -- a wall needs sudo gone
+   first. Proposal, in order: (1) firstrun installs everything it will ever
+   need during its root phase and drops the workspace user's sudo after it
+   (heaptrack/valgrind/samply move into that phase); (2) `wk claude` asks
+   podman (as root, from outside) to bind-mount `.git/{objects,refs,logs,HEAD,
+   packed-refs}` read-only in the container's mount namespace for the session
+   and unbinds them at exit -- so while an agent runs in a workspace, nobody in
+   that workspace can commit, `git add`, stash, switch branches or rebase
+   (`git status`, `diff`, `log`, builds and edits keep working); (3) `wk
+   verify` measures both (no sudo; the five paths read-only) and `wk claude`
+   refuses without them. A sibling agent container is not an option: the
+   checkout is podman's own overlay (`:O,upperdir=`) and two mounts of one
+   upperdir are unsafe; a separate agent uid is the other real wall but means
+   re-owning every checkout. Say go, and whether the person's own in-workspace
+   commits may be blocked for the session too (the proposal blocks them; the
+   alternative is the uid split). Until then: an agent can commit. [decision]
+
+J. `wk backup --candidates` (new, read-only) lists live macOS settings that are
+   not in host/macos/defaults.conf. On tolken, the deliberate-looking ones:
+   Accessibility KeyRepeatInterval 0.083333333 / KeyRepeatDelay 0.5 /
+   KeyRepeatEnabled 1; NSGlobalDomain AppleWindowTabbingMode always; dock
+   magnification/largesize 94/tilesize 64/no-bouncing/show-recents false/
+   mru-spaces false/wvous-br-corner 1/wvous-tl-corner 2; screensaver
+   askForPassword 0 (no password after the screensaver -- yours to keep or
+   not); Safari IncludeDevelopMenu + WebKitDeveloperExtrasEnabledPreferenceKey.
+   Which of these go into defaults.conf? [decision]
+
+K. docs/Urgent/pi.md (the pi coding agent, a litellm API key): three decisions
+   before code -- the command's name (`wk pi` is the Raspberry Pi command;
+   `wk agent`?), where the key lives (the store's secrets/ directory is
+   mounted read-only into every workspace, which is right for a key the agent
+   must use and wrong for anything else -- `wk key set litellm`, `wk key
+   check`, a `wk doctor` line), and the egress: `npm install -g` needs
+   registry.npmjs.org in the proxy allowlist, a widening the sandbox audit
+   should see. Say the name and whether npm's registry may be allowed.
+   [decision]
+
+L. docs/Urgent/HUMAN-battery.md (charge limits on the Librem 5, the PinePhone
+   and this MacBook; `wk doctor` checks): pmOS exposes the charge threshold
+   through sysfs on both phones (`charge_control_end_threshold`), so `wk
+   bridge setup` can set it and `wk doctor --all` read it; macOS has no
+   supported user-space limit (Optimized Battery Charging is the OS's own
+   heuristic) -- the honest doctor line is "plugged in, N% -- no OS limit
+   exists". Go with that? [decision]
+
+
 Your scope is everything. Keep going until every defect and handoff item is done. You will be running unattended soon, so prioritize user intervention first. Surface decisions that need to be made here in this file at the top.
 
 Use cheaper subagents with smaller models wherever possible.
 
 Issues:
 
-Sysimage list isn't listing yocto images now:
+Sysimage list isn't listing yocto images now: (agent: explained and fixed --
+decision D above)
 moose:host ~ ❯ wk sysimage list
 buildroot-wpewebkit-2.38-buildroot-rpi3-32 rpi3       buildroot 1.6G     2026-08-27T21:48:49Z
     /home/jmichaud/.local/share/wk/ws/buildroot-wpewebkit-2.38-buildroot-rpi3-32/build/buildroot/wpewebkit-2.38-buildroot-rpi3-32/output/images/sdcard.img
@@ -100,8 +171,11 @@ container: 1 unreferenced snapshot(s) reclaimable with 'wk gc'
 Defects:
 
 - Fetch is still very very slow (ex: yocto-downstream-wpe-2.46-rpi4 is taking 15+ minutes). Snapshots don't make sense, why are they needed? We can't do hard links from local copies? Check fetch perf, and disk space usage. Look for optimizations, or a beter design overall.
+  (agent: measured -- decision E above; the snapshot is the hard-link copy)
 
 - home and end don't work in zsh on linux from a mac terminal. Confirm home, end, ctrl a, ctrl e, etc... all work
+  (agent: measured working on both Linux hosts from this Mac; needs your
+  exact setup -- question B above)
 
 - The lifecycle notes are confusing:
 
@@ -109,16 +183,38 @@ wk sysimage write --from <path> --disk <writer>:/dev/sdX
 wk boot rpi3                                     # one-shot: arms, reboots, self-reverts
 
 We should first explain how to use --rescue, then explain how to one-shot boot an image. This should also explain what to do if something goes wrong (remove the stick/sd), and which boot order the pis get set to / which device rescue should go on (and how, it doesn't mention which command sets this up, burns the fuse for rpi3, etc). Same goes for the moose and macos, which should be explained in this help doc too.
+  (agent: done -- README `## Hardware` (`wk help hardware`, which README
+  cited but did not have): per board, rescue medium, bench medium, how the
+  one boot is selected, the command that sets the boot order and when, what
+  to do when it does not come back, the rpi3's one-time OTP bit, the Mac and
+  the guest, moose's missing driver; a test checks every fleet conf is
+  covered. The Lifecycle intro and step 5 point at it.)
 
 - wk zed should open in trusted mode
+  (agent: done -- Zed's CLI has no trust flag; Restricted Mode is lifted by
+  `session.trust_all_projects` in dotfiles/zed/settings.json, so every
+  project Zed opens is trusted, not only wk's; tests/test_editors.py. Also
+  fixed: `wk zed` no longer hands Zed the dispatcher's WK_* variables --
+  decision A above.)
 
 - wk new should 1) fetch by default. 2), wk fetch should be faster. wk new by default leaves git detatched, with multiple remotes for many branches.
+  (agent: measured, not changed -- decisions E and F above)
 
 - wk sync should work inside a sandbox too:
 error: 'wk sync' acts on a host, and this is workspace 'stringimpl238'.
     From the host:  wk sync stringimpl238
+  (agent: done -- cmd/sync no longer declares `outside`; a bare `wk sync`
+  inside a workspace fetches in it from /mirror/WebKit.git via the local
+  target driver (sync_workspaces, unchanged). --target/--all/--tools/--machine
+  and a different workspace's name are still refused, naming the host
+  invocation. tests/test_dispatcher.py's TestWorkspaceRefusals
+  .test_host_only_commands_refuse_inside_a_workspace still lists "sync" among
+  host-only commands and now fails -- that file was out of scope for this
+  change; "sync" needs removing from its tuple.)
 
 - all commands that fail inside a workspace should print the invocation for outside.
+  (agent: done -- the dispatcher's host/store refusal prints `From the host:
+  wk <cmd> <args as typed>`; tests/test_dispatcher.py)
 
 - Help options should always list all valid values for params
 
@@ -182,6 +278,9 @@ error: 'wk sync' acts on a host, and this is workspace 'stringimpl238'.
   jitdump, and the VM rehearsal of the whole flow.)
 
 - Then go through all the docs not in a folder
+  (agent: done -- every docs/HANDOFF-*.md and docs/Urgent/HANDOFF-*.md is an
+  owed-only list with a [bracket] naming what each item waits on; the
+  unbracketed ones were done this session or turned into tests.)
   (agent: every HANDOFF-*.md touched by landed work lists owed items only
   now -- wk-cli, test-runner, fleet, pi-deploy, memory, debug, helix, clangd,
   yocto, boot -- and the narrating lines ("no longer", "now that", "used
@@ -195,3 +294,5 @@ error: 'wk sync' acts on a host, and this is workspace 'stringimpl238'.
 - Every single wk command must fail if a cli arg is not recognized, or if the subcommand couldn't use it (ex: target)
 
 - wk status should list the base a workspace is based on (2.38, ToT main, etc). This is important for things like buildroot. It should also check if wk container sdk version is up to date.
+
+- claude rc should be enabled by default everywhere

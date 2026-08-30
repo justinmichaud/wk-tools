@@ -33,7 +33,8 @@ NAME="${WK_NAME:-}"
 
 # --- one workspace ------------------------------------------------------------
 if [ -n "$NAME" ]; then
-    [ $# -eq 0 ] || die "'wk start $NAME' takes no options"
+    [ $# -eq 0 ] || die "usage: wk start [<workspace>]; see wk start -h
+    'wk start $NAME' takes no options"
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
     [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
@@ -42,6 +43,9 @@ if [ -n "$NAME" ]; then
 fi
 
 # --- everything ----------------------------------------------------------------
+[ $# -eq 0 ] || die "usage: wk start [<workspace>]; see wk start -h
+    unexpected argument: $1"
+
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     state=$(_machine_state "$WK_MACHINE")
     [ "$state" = absent ] && die "no machine '$WK_MACHINE' -- run ./setup"

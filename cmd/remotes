@@ -52,8 +52,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --fix) FIX=1; shift ;;
         --continued) CONTINUED=1; shift ;;
-        -*) die "unknown option: $1" ;;
-        *)  die "unexpected argument: $1" ;;
+        -*) die "usage: wk remotes [<workspace>] [--fix]; unknown option: $1; see wk remotes -h" ;;
+        *)  die "usage: wk remotes [<workspace>] [--fix]; unexpected argument: $1; see wk remotes -h" ;;
     esac
 done
 NAME="${WK_NAME:-}"

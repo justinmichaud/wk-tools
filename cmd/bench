@@ -8,6 +8,8 @@
 # wk: sub ls,compare,report name=none
 # wk: sub seed name=required@2
 #
+# <plan> is Tools/Scripts/run-benchmark's own name (--list-plans lists them).
+#
 #   wk bench <workspace> <plan> [--config C] [--count N] [--subtests "A B"]
 #                                [--software] [--force] [--browser-args "..."]
 #                                [--cores <set>]
@@ -34,12 +36,15 @@
 #                                          driven from another machine: build,
 #                                          stage, arm, wait for the one step a
 #                                          person has to do, run, come back
+#   wk bench mac-volume [options]          make or manage this Mac's benchmark
+#                                          install, run on the Mac itself; see
+#                                          wk bench mac-volume -h
 #   wk bench mac-ab <ws> [--rounds N]      an interleaved A/B on the Mac's
 #                                          benchmark install, with nobody in the
 #                                          room: plant a job, reboot, read it
 #                                          back. --preflight/--status/--collect
 #   wk bench ab-summary --runs <tsv>       the A/B's own verdict, per arm
-#   wk bench report <task> [--html]        the task's A/B: one Score+Time per
+#   wk bench report <task> [--html] [--text]  the task's A/B: one Score+Time per
 #                                          subtest table, Welch/FDR, histograms
 #                                          and variance per device and plan,
 #                                          out of the rounds recorded so far --
@@ -61,7 +66,8 @@
 #
 #   --config decides the runner: a browser port (wpe-release, gtk-release) runs
 #   the plan in MiniBrowser, a JSCOnly port (jsc-release) runs it in the jsc
-#   shell. The plan decides whether a GPU is required at all.
+#   shell. The plan decides whether a GPU is required at all. `wk build --list`
+#   prints every config name.
 #
 #   WK_BENCH_ASLR=off          disable ASLR for the run (Linux; setarch -R)
 #   WK_BENCH_ENV_PAD=<bytes>   export a dummy env var of this size first
@@ -237,6 +243,7 @@ bench_class() {
 # shell command as text.
 bench_aslr_wrap() {
     [ "${WK_BENCH_ASLR:-}" = off ] && printf 'setarch $(uname -m) -R -- '
+    return 0
 }
 
 # --cores: taskset -c <set>, not podman --cpuset-cpus -- one pin that works
@@ -266,6 +273,7 @@ bench_cores_refusal() {
 # needs no shell quoting here.
 bench_cores_wrap() {
     [ -n "$CORES" ] && wkdata cores-wrap "$CORES"
+    return 0
 }
 
 # bench_env_pad_prelude -- a shell fragment exporting a dummy variable of

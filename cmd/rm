@@ -23,7 +23,17 @@ NAME="${WK_NAME:-}"
 require_name "$NAME"
 
 NAMES=("$NAME")
-for _a in ${@+"$@"}; do NAMES+=("$_a"); done
+# Validated up front, before the confirmation prompt below: an unrecognised
+# flag (e.g. a typo'd `--force`) is not a workspace name either, and asking
+# "destroy '--bogus'?" is a worse refusal than saying so straight away. A
+# leading '-' gets the usage line -- a typo'd flag, not just a bad name.
+for _a in ${@+"$@"}; do
+    case "$_a" in
+        -*) die "usage: wk rm <name>...; unknown option: $_a; see wk rm -h" ;;
+    esac
+    require_name "$_a"
+    NAMES+=("$_a")
+done
 
 # WK_YES=1 makes rm_one's own confirmation a no-op once this one is answered.
 _list=""

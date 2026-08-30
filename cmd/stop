@@ -31,7 +31,8 @@ NAME="${WK_NAME:-}"
 
 # --- one workspace ------------------------------------------------------------
 if [ -n "$NAME" ]; then
-    [ $# -eq 0 ] || die "'wk stop $NAME' takes no options -- --keep-vm only applies to a bare 'wk stop'"
+    [ $# -eq 0 ] || die "usage: wk stop [<workspace>] [--keep-vm]; see wk stop -h
+    'wk stop $NAME' takes no options -- --keep-vm only applies to a bare 'wk stop'"
     TARGET="$(ws_target "$NAME")"
     load_target "$TARGET"
     [ "$(t_info "$NAME")" != absent ] || die "no such workspace: $NAME"
@@ -54,7 +55,14 @@ fi
 
 # --- everything ----------------------------------------------------------------
 KEEP_VM=""
-[ "${1:-}" = --keep-vm ] && KEEP_VM=1
+case "${1:-}" in
+    --keep-vm) KEEP_VM=1; shift ;;
+    "") ;;
+    *) die "usage: wk stop [<workspace>] [--keep-vm]; see wk stop -h
+    unexpected argument: $1" ;;
+esac
+[ $# -eq 0 ] || die "usage: wk stop [<workspace>] [--keep-vm]; see wk stop -h
+    unexpected argument: $1"
 
 # Before the podman-machine check: a macOS VM holds its memory even with the machine stopped.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then

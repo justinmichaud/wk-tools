@@ -641,13 +641,22 @@ bare_report() {
     if [ "$cmd" = ls ]; then
         for _a in ${@+"$@"}; do [ "$_a" = --json ] && _ls_json=1; done
     fi
-    _ls_local="" _ls_vm=""
+    _ls_local="" _ls_vm="" _ls_empty=""
 
     if [ -n "$hosts" ]; then
         rc=0
         if [ -n "$_ls_json" ]; then
             _ls_local=$(mktemp)
             WK_TARGET="${hosts# }" "$impl" ${@+"$@"} > "$_ls_local" || rc=$?
+        elif [ "$cmd" = ls ] && machine_running; then
+            # The VM's half follows, so this half must not call the whole
+            # listing empty; whether it printed a row (anything past the
+            # header) is what the second half is told (cmd/ls).
+            _ls_local=$(mktemp)
+            WK_TARGET="${hosts# }" "$impl" --more-follows ${@+"$@"} > "$_ls_local" || rc=$?
+            cat "$_ls_local"
+            [ "$(wc -l < "$_ls_local")" -gt 1 ] || _ls_empty=--empty-so-far
+            rm -f "$_ls_local"; _ls_local=""
         else
             WK_TARGET="${hosts# }" "$impl" ${@+"$@"} || rc=$?
         fi
@@ -663,7 +672,7 @@ bare_report() {
                 _ls_vm=$(mktemp)
                 ( WK_ROW_LABEL="$_self"; forward_to_vm "$cmd" --continued ${@+"$@"} ) > "$_ls_vm" || rc=$?
             else
-                ( WK_ROW_LABEL="$_self"; forward_to_vm "$cmd" --continued ${@+"$@"} ) || rc=$?
+                ( WK_ROW_LABEL="$_self"; forward_to_vm "$cmd" --continued ${_ls_empty:+"$_ls_empty"} ${@+"$@"} ) || rc=$?
             fi
         else
             ( WK_ROW_LABEL="$_self"; forward_to_vm "$cmd" ${@+"$@"} ) || rc=$?

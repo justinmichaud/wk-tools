@@ -222,6 +222,9 @@ report_ws() {
     # else, a dirty tree, drift from upstream. A wrong `origin` is worth a
     # line here too: it's how a push goes somewhere nobody intended.
     if [ "$st" = present ]; then
+        # ws_upstream_line (lib/target.sh) goes along as text, so one round
+        # trip carries origin/dirty/drift and the base together.
+        _ulfn=$(declare -f ws_upstream_line)
         _probe=$(t_exec "$ws" sh -c "cd $(sh_quote "$(t_src "$ws")") 2>/dev/null || exit 0
             printf 'origin=%s\n' \"\$(git config --get remote.origin.url 2>/dev/null)\"
             printf 'dirty=%s\n' \"\$(git status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')\"
@@ -230,7 +233,9 @@ report_ws() {
             _u=\$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || _u=origin/main
             printf 'upstream=%s\n' \"\$_u\"
             set -- \$(git rev-list --left-right --count \"\$_u...HEAD\" 2>/dev/null)
-            printf 'behind=%s\nahead=%s\n' \"\${1:-}\" \"\${2:-}\"" 2>/dev/null | tr -d '\r') || _probe=""
+            printf 'behind=%s\nahead=%s\n' \"\${1:-}\" \"\${2:-}\"
+            $_ulfn
+            printf 'wsbase=%s\n' \"\$(ws_upstream_line)\"" 2>/dev/null | tr -d '\r') || _probe=""
 
         _origin=$(kv_get origin <<<"$_probe")
         case "$_origin" in
@@ -247,17 +252,27 @@ report_ws() {
         done
     fi
 
+    # The upstream line: an image workspace's profile overrides whatever the
+    # checkout says (ws_image_base); everything else is what the probe above
+    # derived from HEAD, when it ran at all.
+    _wsbase=$(ws_image_base "$ws" 2>/dev/null) || _wsbase=""
+    if [ -z "$_wsbase" ] && [ "$st" = present ]; then
+        _wsbase=$(kv_get wsbase <<<"${_probe:-}")
+        [ "$_wsbase" != "?" ] || _wsbase=""
+    fi
+    rec_opt base "$_wsbase"
+
     # Which snapshot this workspace is standing on: why `wk sync` did not
     # change anything underneath it -- the lower layer is pinned at creation.
-    _base=$(ws_base_id "$ws" 2>/dev/null) || _base=""
-    if [ -n "$_base" ]; then
-        rec_set base "$_base"
+    _snap=$(ws_base_id "$ws" 2>/dev/null) || _snap=""
+    if [ -n "$_snap" ]; then
+        rec_set snap "$_snap"
         _cur=$(current_base 2>/dev/null) || _cur=""
-        if [ -n "$_cur" ] && [ "$_cur" != "$_base" ]; then
+        if [ -n "$_cur" ] && [ "$_cur" != "$_snap" ]; then
             # Counted rather than dated: the timestamp is in the id already.
             _newer=$( { ls -1 "$(wk_base_dir)" 2>/dev/null || true; } \
-                      | awk -v b="$_base" '$0 > b' | wc -l | tr -d ' ')
-            rec_set base_behind "$_newer"
+                      | awk -v b="$_snap" '$0 > b' | wc -l | tr -d ' ')
+            rec_set snap_behind "$_newer"
         fi
     fi
 
@@ -445,6 +460,58 @@ delegate() {
     return "$rc"
 }
 
+# The container SDK image: what a workspace here actually runs (podman's own
+# record, targets/container.sh's t_sdk_local) against the newest tag the
+# registry publishes (t_sdk_upstream), so a stale SDK reads the same as a
+# stale wk-tools copy does above -- a fact, not a guess, capped like every
+# other network probe here so a silent registry never hangs `wk status`.
+# A no-op wherever the container driver was never loaded (t_sdk_local absent):
+# only the health owner calls this, and only when that is the container
+# target does the function exist to find.
+report_sdk_image() {
+    local m="$1" info img tag pulled cap out newest
+    command -v t_sdk_local >/dev/null 2>&1 || return 0
+    info=$(t_sdk_local 2>/dev/null) || return 0
+    img=$(kv_get image <<<"$info")
+    [ -n "$img" ] || return 0
+    tag="${img##*:}"
+    pulled=$(kv_get created <<<"$info")
+
+    cap="${WK_FLEET_TIMEOUT:-4}"
+    out=$(capped "$cap" t_sdk_upstream 2>/dev/null) || true
+
+    rec_start sdk
+    rec_set machine "$m"
+    rec_set tag     "$tag"
+    rec_opt pulled  "$pulled"
+    if [ -z "$out" ]; then
+        rec_set unknown "registry did not answer within ${cap}s"
+    else
+        newest=$(printf '%s\n' "$out" | python3 -c '
+import re, sys
+local = sys.argv[1]
+tags = [t.strip() for t in sys.stdin if t.strip()]
+pat = re.compile(r"^(.+)-v(\d+)-[0-9a-f]+$")
+m = pat.match(local)
+if m:
+    prefix, best_v, best_tag = m.group(1), int(m.group(2)), local
+    for t in tags:
+        mm = pat.match(t)
+        if mm and mm.group(1) == prefix and int(mm.group(2)) > best_v:
+            best_tag, best_v = t, int(mm.group(2))
+    print(best_tag)
+elif local in tags:
+    print(local)
+' "$tag")
+        if [ -n "$newest" ]; then
+            rec_set upstream "$newest"
+        else
+            rec_set unknown "registry has no tag matching $tag"
+        fi
+    fi
+    rec_emit
+}
+
 # --- what a machine is, apart from the workspaces on it -----------------------
 # disk, egress, locks, push, capacity, quiesce, bench: each answers a
 # question otherwise asked only after something has gone wrong. All local to
@@ -477,6 +544,9 @@ report_health() {
         [ "$n" = 0 ] || note "wk gc would reclaim $n snapshot(s)"
         rec_emit
     fi
+
+    # --- the container SDK image: the one container workspaces run on
+    report_sdk_image "$m"
 
     # --- the request broker: the one door out of the sandbox
     # Whether the door is *open* is the socket; what's *in flight* is

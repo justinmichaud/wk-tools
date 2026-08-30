@@ -112,7 +112,7 @@ buildroot_build() {
             --keep-work|--no-import|--no-tailnet|--tailnet) ;;
             --workspace) ws="${2:-}"; shift ;;
             --stage)     shift ;;
-            *) die "unknown option: $1" ;;
+            *) die "usage: wk sysimage build $profile [--dry-run|--workspace <name>|--detach|--stop]; unknown option: $1" ;;
         esac
         shift
     done

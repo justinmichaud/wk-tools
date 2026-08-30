@@ -45,7 +45,8 @@ while [ $# -gt 0 ]; do
     usage: wk zed <workspace>        the checkout
            wk zed --tools [<machine>|<workspace>]
            wk zed --url <workspace>  print the route instead of opening it" ;;
-        *) [ -z "$NAME" ] || die "one name at a time (got '$NAME' and '$1')"
+        *) [ -z "$NAME" ] || die "one name at a time (got '$NAME' and '$1')
+    usage: wk zed <workspace>; see wk zed -h"
            NAME="$1"; shift ;;
     esac
 done

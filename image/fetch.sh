@@ -15,8 +15,7 @@ fetch_build() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --dry-run) dry=1 ;;
-            *) die "unknown option: $1
-    The fetch builder takes --dry-run." ;;
+            *) die "usage: wk sysimage build $profile [--dry-run]; unknown option: $1" ;;
         esac
         shift
     done

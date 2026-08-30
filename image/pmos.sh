@@ -453,8 +453,7 @@ pmos_build() {
             --dry-run) dry=1 ;;
             --detach)  detach=1 ;;
             --resume)  resume=1 ;;
-            *) die "unknown option: $1
-    The pmos builder takes --dry-run, --detach and --resume." ;;
+            *) die "usage: wk sysimage build $profile [--dry-run|--detach|--resume]; unknown option: $1" ;;
         esac
         shift
     done

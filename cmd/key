@@ -19,7 +19,18 @@
 #   wk key check      verify each key authenticates with write access
 #   wk key show       print the public keys
 #   wk key ensure     create missing keys without registering them
-#   wk key tailnet    the fleet's tailnet auth key: report it, or ask for it
+#   wk key tailnet [--replace]   the fleet's tailnet auth key: report it, ask
+#                     for it, or (--replace) rotate it
+#
+# Three more, addressed to one fork rather than every one of them, meant for
+# another machine or `wk status` to call rather than to type by hand:
+#
+#   wk key pub <fork>        print that fork's public key
+#   wk key sshtest <fork>    does that fork's key authenticate, and as what
+#   wk key fingerprints      every key here, its fingerprint and its state
+#
+# <fork> is one of wk_push_forks' short names (lib/store.sh) -- 'wk key show'
+# prints each fork's full repository alongside its key.
 #
 # The tailnet key is the odd one here and belongs anyway: not a deploy key,
 # never reaching GitHub, but a credential this repository must never
@@ -138,6 +149,7 @@ priv_of()     { in_vm "for d in secrets push-keys; do \
 
 # --- ensure runs inside the VM, where the secrets are ------------------------
 if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
     ensure_dir "$WK_STORE/secrets" 0700
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
@@ -164,6 +176,7 @@ case "$ACTION" in
 # The fleet's tailnet auth key. Host-local, and deliberately not in the VM with
 # the deploy keys: the machine that writes a card is the machine that needs it.
 tailnet)
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
     _tspath=$(wk_tailscale_authkey_path)
     case "${2:-}" in
         --replace)
@@ -208,6 +221,7 @@ tailnet)
 pub)
     remote="${2:-}"
     [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
     out=$(pub_of "$remote")
     [ -n "$out" ] || exit 1
     printf '%s\n' "$out"
@@ -219,6 +233,7 @@ pub)
 sshtest)
     remote="${2:-}"
     [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
     priv=$(priv_of "$remote")
     [ -n "$priv" ] || { echo "no key"; exit 1; }
     case "$priv" in */push-keys/*) echo "push is off"; exit 3 ;; esac
@@ -237,6 +252,7 @@ sshtest)
 # where" is a question about the fleet, and reading a fingerprint off a screen
 # beats reading a public key off one.
 fingerprints)
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         pub=$(pub_of "$remote")
@@ -253,6 +269,7 @@ fingerprints)
     ;;
 
 show)
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         printf '# %s\n%s\n' "$repo" "$(pub_of "$remote")"
@@ -260,6 +277,7 @@ show)
     ;;
 
 register)
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
     failed=0
     for machine in $(key_machines); do
         label=$(m_label "$machine")
@@ -308,6 +326,7 @@ EOF
     ;;
 
 check)
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
     # Two questions, two sources.
     #
     # ssh answers "is this key registered and scoped to the right repo?" -- a

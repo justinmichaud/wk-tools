@@ -57,7 +57,10 @@ class TestPiUsagePage(WkTest):
         bare = self.run_wk("pi")
         bogus = self.run_wk("pi", "bogus")
         self.assertEqual(bogus.returncode, 1, bogus.stdout)
-        self.assertEqual(bare.stdout, bogus.stdout)
+        # The unknown verb is named ahead of the same page a bare `wk pi` prints.
+        self.assertTrue(bogus.stdout.startswith("usage:"), bogus.stdout[:120])
+        self.assertIn("unknown verb: bogus", bogus.stdout)
+        self.assertTrue(bogus.stdout.endswith(bare.stdout), "the usage page differs")
 
     def test_no_board_is_contacted_before_a_subcommand_is_chosen(self):
         """Safe to run for real: ssh only starts after cmd/pi's dispatch

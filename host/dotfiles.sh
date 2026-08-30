@@ -137,8 +137,8 @@ _rc_line=". \"$WK_ROOT/shell/bashrc\""
 for _rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile"; do
     [ -f "$_rc" ] || touch "$_rc"
 
-    # Drop stale references to a moved wk-tools/bashrc and to the
-    # webkit-container-sdk host registration (the SDK now runs inside the VM).
+    # Drop stale references to a moved wk-tools/bashrc and to
+    # register-sdk-on-host.sh: the SDK runs in the VM, not the host.
     if grep -qE 'wk-tools/bashrc|register-sdk-on-host\.sh' "$_rc"; then
         _tmp="$(mktemp)"
         # || true: an all-stale file makes grep match nothing and exit 1,

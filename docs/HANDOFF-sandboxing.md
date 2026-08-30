@@ -3,7 +3,7 @@
 Not yet run, on either platform. Scheduled last because everything else built changes the attack surface.
 
 - [ ] re-attempt the incident list against the current tree: work overwritten, unauthorized GitHub posting/replying, ssh-key search on the host, a suid binary built to bypass auto mode, a sudo timestamp seat searched for [decision]
-- [ ] add a way to fully disable `git commit` inside a container [decision]
+- [ ] add a way to fully disable `git commit` inside a container: drop the workspace user's in-container sudo after firstrun, then `wk claude` binds `.git/{objects,refs,logs,HEAD,packed-refs}` read-only for the session and `wk verify` measures both [decision: docs/defects I]
 - [ ] audit the egress allowlist's general-purpose browsing set and CDNs against `BLOCKED_NETS` and the `pi-hosts` exemption (`container/proxy/wk-proxy.py`) [decision]
 - [ ] audit `apt` access to the Ubuntu archive and `ddebs.ubuntu.com` from inside a workspace [decision]
 - [ ] audit the fleet-request broker (`container/broker/wk-broker.py`): argument validation, whether `WK_FORCE` can be set from a request, the `keep` verb, the per-machine lock, and the macOS `ssh -R` forward [decision]

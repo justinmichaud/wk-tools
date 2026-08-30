@@ -11,9 +11,10 @@
 #   wk ab 1234 ...                               a WebKit/WebKit pull request
 #   wk ab <sha> ...                              a bare commit as the patched side
 #
-#   --devices <a,b>       the fleet devices to measure on (required). A device
-#                         with images of both widths says which as a suffix:
-#                         rpi3-32,rpi4-32,rpi5-64 -- one command, mixed widths
+#   --devices <a,b>       the fleet devices to measure on (required; a name
+#                         from wk boot --list). A device with images of both
+#                         widths says which as a suffix: rpi3-32,rpi4-32,
+#                         rpi5-64 -- one command, mixed widths
 #   --release <x.y>       which WebKit release's image: 2.38, 2.46, 2.52
 #                         (default: read off the PR's base branch, wpe-2.38 -> 2.38)
 #   --builder <name>      buildroot or yocto, when the release has both

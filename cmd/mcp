@@ -236,6 +236,9 @@ def respond(rid, result=None, error=None):
 
 
 def main():
+    if len(sys.argv) > 1:
+        sys.stderr.write("usage: wk mcp; no arguments -- it speaks JSON-RPC over stdio\n")
+        sys.exit(1)
     for line in sys.stdin:
         line = line.strip()
         if not line:

@@ -8,7 +8,11 @@
 #   NAME      the workspace
 #   TARGET    where it lives (container, vm, or a machine)
 #   STATE     the environment's own word: running, exited, present, creating
-#   BASE      the snapshot its checkout is pinned to (`wk help`)
+#   BASE      the upstream WebKit line it is built from: main, or a release
+#             like 2.52 -- an image workspace's own profile for `yocto-*`/
+#             `buildroot-*`, otherwise HEAD's upstream (`?` when neither is
+#             known; `wk status` has the full derivation and its cost)
+#   SNAP      the snapshot its checkout is pinned to (`wk help`)
 #   ARCH      what it builds natively; blank when that is the host's own
 #   CHANGES   disk its own writes take -- the overlay layer, which grows
 #             without bound between `wk gc` runs and is invisible to podman
@@ -23,20 +27,47 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/target.sh"
 
 # Every target, from the same walk `wk status` uses (walk_targets, then
-# target_workspaces per target). BASE and CHANGES are overlay concepts,
+# target_workspaces per target). SNAP and CHANGES are overlay concepts,
 # meaningful only for the container target; `wk vm ls` lists a macOS VM's
 # equivalents. ARCH is the one property invisible from inside a workspace:
 # the kernel is the host's, so an armhf container reports aarch64 from uname.
 
-# --continued: the second half of a listing assembled from two machines. On
-# a macOS host `wk ls` walks the host-side targets here and forwards the
-# container half into the podman VM; two header rows in one table isn't one.
+# The upstream WebKit line a checkout's HEAD descends from, for everything
+# that is not an image workspace (ws_upstream_line, lib/target.sh, run in
+# the workspace: `wk ls` has nothing else to exec into it for).
+ws_git_base() { # <ws>
+    case "$(t_info "$1")" in
+        absent|creating|broken|unreachable) return 0 ;;
+    esac
+    t_exec "$1" sh -c "cd $(sh_quote "$(t_src "$1")") 2>/dev/null || exit 0
+        $(declare -f ws_upstream_line)
+        ws_upstream_line" 2>/dev/null | tr -d '\r'
+}
+
+ws_base() { # <ws>
+    local b
+    b=$(ws_image_base "$1" 2>/dev/null) || b=""
+    [ -n "$b" ] || b=$(ws_git_base "$1" 2>/dev/null) || b=""
+    printf '%s' "${b:-?}"
+}
+
+# A listing assembled from two machines -- on a macOS host `wk ls` walks the
+# host-side targets here and the dispatcher forwards the container half into
+# the podman VM -- is one table: the first half prints the header and, told
+# that more follows (--more-follows), never calls the listing empty; the
+# second (--continued) prints rows only, and the "no workspaces" note only
+# when the first half found none either (--empty-so-far). Both flags are the
+# dispatcher's (`wk`, bare_report), not a person's.
 CONTINUED=""
+MORE_FOLLOWS=""
+EMPTY_SO_FAR=""
 JSON=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --continued) CONTINUED=1; shift ;;
-        --json)      JSON=1; shift ;;
+        --continued)    CONTINUED=1; shift ;;
+        --more-follows) MORE_FOLLOWS=1; shift ;;
+        --empty-so-far) EMPTY_SO_FAR=1; shift ;;
+        --json)         JSON=1; shift ;;
         *) die "usage: wk ls [--json]; see wk ls -h" ;;
     esac
 done
@@ -57,7 +88,8 @@ LABEL="${WK_ROW_LABEL:-}"
 _col() { if [ -z "$LABEL" ] || [ "$1" = "$LABEL" ]; then printf '%s' "$1"; else printf '%s:%s' "$LABEL" "$1"; fi; }
 
 if [ -z "$CONTINUED" ] && [ -z "$JSON" ]; then
-    printf '%-20s %-18s %-10s %-20s %-8s %8s\n' NAME TARGET STATE BASE ARCH CHANGES
+    printf '%-20s %-18s %-10s %-8s %-20s %-8s %8s\n' \
+        NAME TARGET STATE BASE SNAP ARCH CHANGES
 fi
 
 found=0
@@ -86,19 +118,20 @@ for TARGET in $TARGETS; do
     for ws in $(target_workspaces); do
         found=1
         state=$(ws_display_state "$ws")
-        base=$(ws_base_id "$ws" 2>/dev/null || echo '-')
+        base=$(ws_base "$ws")
+        snap=$(ws_base_id "$ws" 2>/dev/null || echo '-')
         size=$(du -sh "$(wk_ws_dir "$ws")/changes" 2>/dev/null | cut -f1 || echo -)
         if [ -n "$JSON" ]; then
             python3 -c '
 import json, sys
 print(json.dumps({"workspaces": [{
     "name": sys.argv[1], "target": sys.argv[2], "state": sys.argv[3],
-    "base": sys.argv[4], "arch": sys.argv[5], "changes": sys.argv[6],
-}]}))' "$ws" "$(_col "$TARGET")" "$state" "$base" "$(t_arch "$ws")" "$size" >> "$JSON_DOCS"
+    "base": sys.argv[4], "snap": sys.argv[5], "arch": sys.argv[6], "changes": sys.argv[7],
+}]}))' "$ws" "$(_col "$TARGET")" "$state" "$base" "$snap" "$(t_arch "$ws")" "$size" >> "$JSON_DOCS"
             continue
         fi
-        printf '%-20s %-18s %-10s %-20s %-8s %8s\n' \
-            "$ws" "$(_col "$TARGET")" "$state" "$base" "$(t_arch "$ws")" "$size"
+        printf '%-20s %-18s %-10s %-8s %-20s %-8s %8s\n' \
+            "$ws" "$(_col "$TARGET")" "$state" "$base" "$snap" "$(t_arch "$ws")" "$size"
     done
 done
 
@@ -109,7 +142,7 @@ if [ -n "$JSON" ]; then
     exit 0
 fi
 
-if [ "$found" -ne 1 ] && [ -z "$CONTINUED" ]; then
+if [ "$found" -ne 1 ] && [ -z "$MORE_FOLLOWS" ] && { [ -z "$CONTINUED" ] || [ -n "$EMPTY_SO_FAR" ]; }; then
     if in_remote_host; then
         log "(no workspaces here -- from the workstation: wk new <name> --target $(wk_remote_field target))"
     else

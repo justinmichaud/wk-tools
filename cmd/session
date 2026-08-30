@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# wk session on [--bmc] | gdm [--bmc] | off | status -- a real graphical session for benchmark runs, or a real desktop, on real hardware
+# wk session on [--bmc|--mirror] | gdm [--bmc|--mirror] | off | status -- a real graphical session for benchmark runs, or a real desktop, on real hardware
 #
 # wk: where=host name=none group=hosts needs quiesce-helper
 # wk: sub status needs=
@@ -14,6 +14,7 @@
 #                logged in, or if the wanted mode is already running.
 #                Unattended (nobody logged in) it stops the display manager
 #                and starts cage; that is the only case needing privilege.
+#                --mirror is an accepted synonym for --bmc.
 #   gdm [--bmc]  a real, loggable-into desktop instead of a kiosk, for
 #                debugging that needs more than one window.
 #   off          the opposite of `on`/`gdm`: outputs modeset off (the CRTC
@@ -61,6 +62,12 @@ while [ $# -gt 0 ]; do
         *) die "usage: wk session on [--bmc] | gdm [--bmc] | off | status -- a real graphical session for benchmark runs, or a real desktop, on real hardware.; see wk session -h" ;;
     esac
 done
+# --bmc/--mirror only chooses a chip for 'on'/'gdm'; 'off' and 'status' have
+# no such choice to make, so accepting the flag there and quietly doing
+# nothing with it would hide a typo'd invocation instead of refusing it.
+case "$ACTION" in
+    off|status) [ -z "$BMC" ] || die "usage: wk session on [--bmc] | gdm [--bmc] | off | status; --bmc/--mirror only applies to 'on'/'gdm'; see wk session -h" ;;
+esac
 
 RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/display"
 SOCKET="$RUNTIME/wayland-0"

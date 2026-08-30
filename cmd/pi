@@ -10,7 +10,8 @@
 #   wk pi setup <ssh-host>                put it on the tailnet: copies pinned
 #                                         tailscale binaries onto a writable
 #                                         partition; no image rebuild
-#   wk pi boot-order <machine> <order>    rpi4/rpi5 firmware boot order;
+#   wk pi boot-order <machine> <usb-first|sd-first|local>
+#                                         rpi4/rpi5 firmware boot order;
 #                                         --revert undoes it, --dry-run previews
 #   wk pi deploy <image-profile> <machine> --slot <name>
 #                                         put a built WebKit on the board as a
@@ -103,14 +104,19 @@ pi_usage_page() {
 ACTION="${1:-}"; HOST="${2:-}"
 case "$ACTION" in
     "") pi_usage_page; exit 0 ;;
-    setup|boot-order) [ -n "$HOST" ] || die "usage: wk pi $ACTION <machine|ssh-host>; see wk pi -h" ;;
+    setup|boot-order)
+        case "$HOST" in
+            ""|-*) die "usage: wk pi $ACTION <machine|ssh-host>; see wk pi -h" ;;
+        esac ;;
     # deploy takes a *workspace* and a fleet machine, not an ssh host: it has
     # to reach into the build to make the archive and onto the board to unpack
     # it, and the board is named the way every other fleet verb names one.
     deploy|bench) : ;;
     # Kept only to say where it went; see below.
     flash) : ;;
-    *) pi_usage_page >&2; exit 1 ;;
+    *) log "usage: wk pi setup|boot-order|deploy|bench ...; see wk pi -h"
+       log "unknown verb: $ACTION"
+       pi_usage_page >&2; exit 1 ;;
 esac
 shift 2 2>/dev/null || true
 

@@ -38,7 +38,8 @@
 #   --mode <m>        sampling (default) | bytecode | samply | instruments |
 #                     heaptrack | massif | native  (native = instruments on the
 #                     Apple ports, samply everywhere else)
-#   --config <c>      which build to profile (default: the workspace's own)
+#   --config <c>      which build to profile (default: the workspace's own);
+#                     `wk build --list` lists every name
 #   --browser [url]   profile MiniBrowser on that page instead of the jsc shell
 #   --process <p>     which of MiniBrowser's processes: ui | web (default) |
 #                     network | gpu. On the Apple ports the browser is profiled

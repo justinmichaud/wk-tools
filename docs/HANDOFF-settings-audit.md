@@ -2,10 +2,6 @@
 
 `wk backup` writes live settings into `host/linux/config.dconf` and `host/macos/defaults.conf`; this audits whether what's tracked is still deliberate.
 
-- [ ] run `wk backup`, then `git diff` it; apply `cmd/backup`'s junk filters and fix the filter if it misses something; ask about everything left, keep or drop; write the kept set back and confirm the `./setup` round trip (macOS: `wk backup` on tolken reports no settings changed since the last backup, nothing to review) [needs a Linux workstation]
-- [ ] write a short summary: what is persisted and why, one line each
-- [ ] verify the dconf filters strip the known junk (weather location, WiFi UUIDs, GTK last-folder, Ptyxis UUIDs/timestamps)
-- [ ] audit `apt.txt` for packages that crept in without a deliberate decision
-- [ ] enumerate `defaults read` across macOS's ~574 domains, filter window-position/transient state, surface non-default candidates missing from `host/macos/defaults.conf`
-- [ ] audit the rest of `host/macos/`: `symbolichotkeys.plist`, `softnet.sh`, `vmtools.sh`, `mcp.sh`, `tools.sh`, `playbook.yaml`
-- [ ] confirm `wk backup` killed mid-write leaves repo files whole or unchanged (cmp-guarded), never truncated
+- [ ] run `wk backup` on a configured Linux workstation, then `git diff` it; ask about everything the filter leaves that config.dconf's header marks `why: unknown`, keep or drop, and write the kept set back [needs a Linux workstation]
+- [ ] decide the `why: unknown` entries config.dconf's header lists (deja-dup's prompt-check, the app-folders/notifications auto-discovered entries, every remembered window/column/sidebar geometry group, apps/update-manager, com/mattjakeman/ExtensionManager, com/ubuntu/update-notifier, org/gnome/Disks, org/gnome/software) -- keep with a real why, or drop and extend `dconf_filter` [needs a maintainer decision, not a Linux workstation]
+- [ ] review `wk backup --candidates`' output on tolken and decide which macOS domains/keys to add to `host/macos/defaults.conf` -- appearance (none clearly non-default), keyboard (com.apple.Accessibility KeyRepeatInterval, at the fastest setting), dock (magnification/largesize/tilesize, no-bouncing, show-recents, mru-spaces, the hot-corner wvous-* keys), screensaver (askForPassword) all look deliberate but nothing here should be added without confirming with the maintainer [needs a maintainer decision]

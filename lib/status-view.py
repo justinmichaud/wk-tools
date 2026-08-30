@@ -58,7 +58,7 @@ class Merger:
         if name not in self.index:
             m = {"name": name, "self": False, "methods": [], "facts": [], "raw": [],
                  "disk": [], "services": [], "locks": [], "switches": [],
-                 "capacity": [], "bench": []}
+                 "capacity": [], "bench": [], "sdk": []}
             self.index[name] = m
             self.doc["machines"].append(m)
         return self.index[name]
@@ -134,6 +134,10 @@ class Merger:
             # One record per task shown: every running one, else the newest.
             name = r.get("machine", "?")
             self.machine(name)["bench"].append(r)
+            return name
+        elif kind == "sdk":
+            name = r.get("machine", "?")
+            self.machine(name)["sdk"].append(r)
             return name
         elif kind == "fleet":
             self.doc["fleet"].append(r)
@@ -267,9 +271,10 @@ ANSI = {
     "head": "\033[1;36m",
 }
 
-# Six columns: what a person actually needs before touching a workspace --
-# including whether there is work in it (`work`) that exists nowhere else.
-COLUMNS = ("workspace", "state", "branch", "work", "snap", "build")
+# Seven columns: what a person actually needs before touching a workspace --
+# including whether there is work in it (`work`) that exists nowhere else,
+# and which upstream line it is on (`base`: main, or a release like 2.52).
+COLUMNS = ("workspace", "state", "branch", "base", "work", "snap", "build")
 
 
 def ws_work(ws):
@@ -318,7 +323,7 @@ def ws_snap(ws):
     A workspace is pinned to the snapshot it was made on, and `wk sync` cannot
     change that -- which is the honest answer to "I synced and nothing moved".
     """
-    n = ws.get("base_behind")
+    n = ws.get("snap_behind")
     return "-%s" % n if n else ""
 
 
@@ -328,6 +333,7 @@ def ws_cells(ws):
         ws.get("name", "?"),
         ws.get("state", "?"),
         ws_branch(ws),
+        ws.get("base") or "?",
         ws_work(ws),
         ws_snap(ws),
         sub_text(subs[0]) if subs else "",
@@ -338,9 +344,9 @@ def ws_hues(ws):
     subs = ws.get("subs") or []
     return {
         1: severity(ws.get("state")),
-        3: ws_work_hue(ws),
-        4: "busy" if ws.get("base_behind") else "",
-        5: severity(subs[0].get("state")) if subs else "",
+        4: ws_work_hue(ws),
+        5: "busy" if ws.get("snap_behind") else "",
+        6: severity(subs[0].get("state")) if subs else "",
     }
 
 
@@ -374,6 +380,29 @@ def load_hue(load, cores):
     if not cores:
         return ""
     return "bad" if load > cores else "busy" if load > cores / 2.0 else "good"
+
+
+def sdk_verdict(s):
+    """current / behind (<upstream tag>) / unknown -- <why>, and its hue.
+
+    cmd/status's report_sdk_image already decided which one, from the local
+    pull and an unauthenticated registry query capped like any other network
+    probe -- this only picks the words and the colour for them.
+    """
+    upstream = s.get("upstream")
+    if upstream:
+        if upstream == s.get("tag"):
+            return "current", "good"
+        return "behind (%s)" % upstream, "busy"
+    return "unknown -- %s" % (s.get("unknown") or "registry did not answer"), ""
+
+
+def sdk_line(s, colour):
+    return "%s pulled %s; upstream %s" % (
+        s.get("tag") or "?",
+        s.get("pulled") or "?",
+        paint(*sdk_verdict(s), colour),
+    )
 
 
 def where_word(obj):
@@ -526,7 +555,7 @@ def render_machine_block(m, colour, widths=None):
 
     # What the machine is, apart from the workspaces on it. Every line is a
     # thing that breaks a build or costs work.
-    if any(m.get(k) for k in ("disk", "services", "switches", "capacity", "locks")) or m.get("bench"):
+    if any(m.get(k) for k in ("disk", "sdk", "services", "switches", "capacity", "locks")) or m.get("bench"):
         out.append("")
     for d in m.get("disk") or []:
         tail = ""
@@ -538,6 +567,8 @@ def render_machine_block(m, colour, widths=None):
               "%s used   %s free of %s%s"
               % (paint((d.get("used_pct", "?") or "?") + "%", disk_hue(d.get("used_pct")), colour),
                  gb(d.get("free_mb")), gb(d.get("total_mb")), tail))
+    for s in m.get("sdk") or []:
+        wr.kv("sdk image", sdk_line(s, colour))
     for sv in m.get("services") or []:
         wr.kv(sv.get("name", "?"), paint(sv.get("state", "?"), severity(sv.get("state")), colour))
         if sv.get("fix"):
@@ -1056,6 +1087,13 @@ function diskHue(p) { const n = parseInt(p,10); return isNaN(n) ? "" : n >= 90 ?
 function loadHue(l, c) { l = parseFloat(l); c = parseInt(c,10);
   return (isNaN(l) || !c) ? "" : l > c ? "bad" : l > c/2 ? "busy" : "good"; }
 const where = o => (o.where || "").replace("in the ","").replace("the ","");
+// Same verdict as lib/status-view.py's sdk_verdict/sdk_line -- one wording,
+// used by both the terminal and the page.
+function sdkVerdict(s) {
+  if (s.upstream) return s.upstream === s.tag ? chip("current", "good") : chip(`behind (${s.upstream})`, "busy");
+  return chip(`unknown -- ${s.unknown || "registry did not answer"}`, "");
+}
+function sdkLine(s) { return `${ESC(s.tag || "?")} pulled ${ESC(s.pulled || "?")}; upstream ${sdkVerdict(s)}`; }
 function meter(pct, hue) {
   const p = Math.max(0, Math.min(100, pct));
   return `<div class="meter ${hue}"><i style="width:${p}%"></i></div>`;
@@ -1095,6 +1133,8 @@ function tiles(m) {
       `<b class="${hue}">${ESC(c.load || "?")}</b> of ${ESC(c.cores)} cores
        <span class="sub">${free}</span>`, meter(pct, hue)));
   }
+  for (const s of m.sdk || [])
+    t.push(tile("sdk image", sdkLine(s)));
   for (const sv of m.services || [])
     t.push(tile(sv.name, chip(sv.state) + (sv.fix ? ` <code class="fix">${ESC(sv.fix)}</code>` : "")));
   for (const sw of m.switches || [])
@@ -1178,7 +1218,7 @@ function render(doc) {
     for (const g of m.methods) {
       if (!g.workspaces.length) continue;
       parts.push(`<div class="method"><h3>${ESC(g.name)}</h3><table>
-        <tr><th>workspace</th><th>state</th><th>branch</th><th>work</th><th>snap</th><th>build</th></tr>`);
+        <tr><th>workspace</th><th>state</th><th>branch</th><th>base</th><th>work</th><th>snap</th><th>build</th></tr>`);
       for (const w of g.workspaces) {
         const subs = w.subs || [];
         const work = [];
@@ -1197,13 +1237,14 @@ function render(doc) {
           <td class="name">${ESC(w.name)}</td>
           <td>${chip(w.state)}</td>
           <td title="${ESC(w.branch || "")}">${ESC(branch)}</td>
+          <td>${ESC(w.base || "?")}</td>
           <td class="${work.length ? "busy" : "idle"}">${ESC(workTxt)}</td>
-          <td class="${w.base_behind ? "busy" : "idle"}" title="${ESC(w.base || "")}">${w.base_behind ? "-" + ESC(w.base_behind) : ""}</td>
+          <td class="${w.snap_behind ? "busy" : "idle"}" title="${ESC(w.snap || "")}">${w.snap_behind ? "-" + ESC(w.snap_behind) : ""}</td>
           <td class="${subs[0] ? sev(subs[0].state) : ""}">${subs[0] ? ESC(subText(subs[0])) : ""}</td></tr>`);
         for (const x of subs.slice(1))
-          parts.push(`<tr class="sub"><td colspan="5"></td><td class="${sev(x.state)}">${ESC(subText(x))}</td></tr>`);
+          parts.push(`<tr class="sub"><td colspan="6"></td><td class="${sev(x.state)}">${ESC(subText(x))}</td></tr>`);
         for (const n of (w.notes || []))
-          parts.push(`<tr class="note"><td colspan="6" class="wide"><div class="note ${n.level === "warn" ? "warn" : ""}">${ESC(n.text)}</div></td></tr>`);
+          parts.push(`<tr class="note"><td colspan="7" class="wide"><div class="note ${n.level === "warn" ? "warn" : ""}">${ESC(n.text)}</div></td></tr>`);
       }
       parts.push(`</table></div>`);
     }
