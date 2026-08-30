@@ -246,8 +246,18 @@ wk session on
 wk bench bug-238 speedometer3
 wk bench bug-238 motionmark1.3.1 --count 5
 wk bench bug-238 jetstream3 --cores 0-3             # pinned with taskset; recorded and compared
-wk bench compare <run-a> <run-b>                 # warns if class/runner/host differ
+wk bench ls                                      # every task, with each run's directory
+wk bench compare <run-a> <run-b>                 # two run directories; warns if class/runner/host differ
 ```
+
+Every benchmarking command is one *task*, named for the moment it was
+requested and what it measures, under `$WK_STORE/bench/<task>/`: `task.json`
+(the request and every command it ran), `runs/<run>/` (one directory per run:
+`env.json`, `result.json`, `run.log`, the board's `browser.log` and
+`board.log`), the command's logs and its reports. `wk bench ls` lists tasks
+and their runs' directories; nothing about a task's state is stored -- planned,
+ended, usable and complete are recomputed from the runs, and "running" is the
+task's lock.
 
 **Put a build on a fleet device and bench it there**
 
@@ -278,7 +288,8 @@ wk sysimage webkit wpewebkit-2.38-buildroot-rpi3-32 --commit <sha> --slot base -
                                                  # into a named slot beside the image (wk sysimage ls)
 wk pi deploy wpewebkit-2.38-buildroot-rpi3-32 rpi3 --slot base   # onto the booted board, verified byte for byte
 wk pi bench rpi3 speedometer3 --slot base
-wk pi bench rpi3 speedometer3 --ab base,pr1725 --rounds 5   # interleaved A/B between two deployed slots
+wk pi bench rpi3 speedometer3 --ab base,pr1725 --rounds 5   # interleaved A/B between two deployed slots:
+                                                 # its own task, reported at the end
 ```
 
 The image is the runtime and is built once; a *slot* is one WebKit
@@ -297,7 +308,10 @@ that, and the sha256 of the library the reporting process mapped, is what
 runs on the workstation, out of a `Tools/Scripts` tree exported from the
 mirror, and drives the board's browser over ssh through a reverse tunnel; the
 process that reports each number is checked against the slot's build-id, so a
-result can never be from the wrong WebKit. A yocto workspace's cross build is
+result can never be from the wrong WebKit. Every run's evidence lands on the
+workstation, in the task's directory -- the browser's own log is moved off
+the board after each run, the board's system log tail copied beside it -- so
+the board keeps nothing. A yocto workspace's cross build is
 deployed the same way: `wk pi deploy yocto-<profile> rpi4 --slot b`.
 
 **An A/B of a pull request, end to end**
@@ -307,15 +321,29 @@ wk ab wpe:1725 --devices rpi3,rpi4 --bits 32 --dry-run   # the parameters and ev
 wk ab wpe:1725 --devices rpi3-32,rpi4-32,rpi5-64         # confirm, then: both slots built per image, deployed,
                                                          # every board alternated at once; a device's width is its own
 wk ab wpe:1725 --devices rpi4 --bits 32 --plan jetstream3 --rounds 8 --yes   # unattended
+wk ab wpe:1725 --devices rpi3,rpi4 --bits 32 --plan speedometer2.1 --count 1 --timeout 1200 --yes --detach
+                                                         # confirmed here, run by a process this end cannot kill
 wk ab <sha> --base <sha> --release 2.38 --devices rpi3   # A/A: two slots of one commit -- the lane's noise floor
+wk status                                                # the running task: which run it is on, runs ended
+wk bench ls                                              # every task, its state, each run's directory
+wk bench report 20260830T140000Z-wpe-pr1725 --html      # the rounds so far, paired; says whether it is complete
 ```
 
 The base is guessed as the merge-base of the PR head and the image's own
 branch (`CFG_BRANCH`), the release from the PR's base branch; `--base` and
-`--release` override either. Each `--ab` ends with `wk bench report`, as text
-and as one self-contained html file (histograms, per-subtest Welch/FDR) in the
-result store. A board that is not booted into the image is named with the
-`wk sysimage write` / `wk boot` steps that put it there; `wk ab` never writes a card.
+`--release` override either. Every invocation is one task
+(`<stamp>-wpe-pr1725`, or `<stamp>-<sha12>` for a commit): its `task.json`
+records the request and every command, each board's pipeline logs to
+`<board>.log` beside it, and `wk bench report <task>` pairs the rounds each
+run recorded (a round counts only when both arms produced a result: a crash
+correlates with the heavier binary under a memory ceiling, so the surviving
+arm is the one that would bias the answer), reports what is there while the
+task runs, and writes one `report-<board>-<plan>.html` (histograms,
+per-subtest Welch/FDR) per board and plan into the task when asked. A board
+that is not booted into the image is named with the `wk sysimage write` /
+`wk boot` steps that put it there; `wk ab` never writes a card.
+`--timeout` is the seconds one run-benchmark iteration may take; a plan's own
+figure (Speedometer: 600) is too short for an rpi3.
 Every build `wk` starts -- `wk build`, an image, a slot -- is on the machine's
 books while it runs (a budget record that dies with it), and the next build is
 sized against the memory and cores left, refused when fewer than four jobs
@@ -514,8 +542,9 @@ wk sysimage ls                                                             # bot
 wk boot rpi3 && wk boot rpi3 --keep                                        # bench mode, claimed
 wk pi deploy <profile> rpi3 --slot base                                    # verified byte for byte on the board
 wk pi deploy <profile> rpi3 --slot pr
-wk pi bench rpi3 speedometer3 --ab base,pr --rounds 5                      # interleaved; ends with wk bench report
-wk bench report <run-a> <run-b> --html                                     # any two recorded runs
+wk pi bench rpi3 speedometer3 --ab base,pr --rounds 5                      # interleaved; its own task, reported at the end
+wk bench report <task> --html                                              # that task, again, any time
+wk bench report <run-a> <run-b> --html out.html                            # any two recorded runs (wk bench ls)
 ```
 
 A buildroot configuration of your own is an external defconfig:

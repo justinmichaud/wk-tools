@@ -786,6 +786,21 @@ hold_lock() {
 # anything that has finished mutating but has work left to do.
 release_locks() { _lock_release_all; }
 
+# Reading a lock without taking it, for a reporting command: the pid its
+# holder wrote (empty for no lock, or one nothing wk wrote), and whether that
+# holder is alive. A lock is not state -- it dies with its holder -- so a
+# dead holder's lock reads as no lock here, exactly as the next taker treats it.
+lock_holder_pid() { # <lock file>
+    local line
+    line=$(readlink "$1" 2>/dev/null || cat "$1/payload" 2>/dev/null || true)
+    printf '%s' "$line" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p'
+}
+lock_alive() { # <resource>
+    local pid
+    pid=$(lock_holder_pid "$(_lock_path "$1")")
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
 # with_lock <resource> [-w seconds] [-s] -- cmd...
 # The scoped form: takes the lock, runs the command, drops it, for a
 # critical section smaller than the command containing it.

@@ -7,6 +7,53 @@ wkslot() { python3 "$WK_ROOT/lib/wkslot.py" "$@"; }
 
 BENCH_DIR="$WK_STORE/bench"
 SEED_DIR="$WK_STORE/cache/bench"
+
+# --- tasks ------------------------------------------------------------------------
+# A task is what one benchmarking command produced, and the unit `wk bench
+# ls`, `wk bench report` and `wk status` speak in: $BENCH_DIR/<task>/ holds
+# task.json (the request), runs/<run>/ (one directory per run), the command's
+# logs and its reports. Its name is the moment it was requested and what it
+# measures: <stamp>-wpe-pr1725, <stamp>-<sha12>, <stamp>-rpi3-base-vs-pr1725.
+# The command that creates a task holds its lock (bench-task-<name>) for as
+# long as it works on it; a live lock is what "running" means everywhere a
+# task is reported, and nothing else is stored about its progress
+# (lib/wkdata.py, task_state).
+bench_task_dir() { printf '%s/%s' "$BENCH_DIR" "$1"; }
+bench_task_stamp() { date -u +%Y%m%dT%H%M%SZ; }
+
+# bench_task_new <name> <task-write fields...> -- creates the task and takes
+# its lock; the caller keeps the lock by staying alive.
+bench_task_new() {
+    local name="$1"; shift
+    valid_name "$name" || die "'$name' is not a task name (letters, digits, '.', '_' and '-')"
+    local dir; dir=$(bench_task_dir "$name")
+    [ ! -e "$dir" ] || die "task $name already exists ($dir); a task is one request, made once"
+    hold_lock "bench-task-$name" -w 5 || die "task $name is being created by another command"
+    ensure_dir "$dir/runs" >/dev/null
+    wkdata task-write "$dir" task="$name" requested="$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$@" \
+        || die "could not write $dir/task.json"
+}
+
+# bench_task_attach <name> -- an existing task another command created and
+# holds the lock of (`wk ab` handing its task to `wk pi bench`); refused
+# when there is no such task, so a typo cannot file runs into a fresh
+# directory nothing describes.
+bench_task_attach() {
+    local dir; dir=$(bench_task_dir "$1")
+    [ -f "$dir/task.json" ] || die "no such task '$1' ($dir has no task.json); 'wk bench ls' lists the tasks"
+}
+
+# The tasks whose lock is held right now, comma-separated: what --running
+# hands to lib/wkdata.py so state is decided from the lock and nothing else.
+bench_running_tasks() {
+    local d out=""
+    for d in "$BENCH_DIR"/*/task.json; do
+        [ -f "$d" ] || continue
+        d=$(basename "$(dirname "$d")")
+        lock_alive "bench-task-$d" && out="${out:+$out,}$d"
+    done
+    printf '%s' "$out"
+}
 # Exported Tools/Scripts trees, keyed by the WebKit commit they came from:
 # artifacts, re-exportable from the mirror, never edited in place.
 RUNNER_DIR="$WK_STORE/cache/bench-runner"

@@ -21,7 +21,7 @@ import statistics
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, requires_podman_vm, run, scratch_dir
+from tests.support import REPO, WkTest, bench_ls_runs, requires_podman_vm, run, scratch_dir
 
 WKDATA = REPO / "lib" / "wkdata.py"
 
@@ -294,11 +294,10 @@ class TestBenchReportIntegration(WkTest):
         self.assertEqual(run_b.returncode, 0, f"second run failed: {run_b.stdout}")
         bench_s = time.time() - t0
 
-        # The run id is the last "recorded" / "results:" path component `wk
-        # bench` printed; cmd/bench also accepts a bare run id off `wk bench
-        # ls`, which is more robust to exactly how the id is formatted.
+        # Each `wk bench` invocation is a task of one run; `wk bench ls`
+        # prints every run's directory, which is what report takes.
         ls = run("bench", "ls")
-        run_ids = [line.split()[0] for line in ls.stdout.splitlines() if line.strip()]
+        run_ids = bench_ls_runs(ls.stdout)
         self.assertGreaterEqual(len(run_ids), 2, f"'wk bench ls' does not show two runs: {ls.stdout}")
         a_id, b_id = run_ids[-2], run_ids[-1]
 

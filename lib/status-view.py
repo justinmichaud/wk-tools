@@ -58,7 +58,7 @@ class Merger:
         if name not in self.index:
             m = {"name": name, "self": False, "methods": [], "facts": [], "raw": [],
                  "disk": [], "services": [], "locks": [], "switches": [],
-                 "capacity": [], "bench": None}
+                 "capacity": [], "bench": []}
             self.index[name] = m
             self.doc["machines"].append(m)
         return self.index[name]
@@ -131,8 +131,9 @@ class Merger:
             m["capacity"].append(r)
             return name
         elif kind == "bench":
+            # One record per task shown: every running one, else the newest.
             name = r.get("machine", "?")
-            self.machine(name)["bench"] = r
+            self.machine(name)["bench"].append(r)
             return name
         elif kind == "fleet":
             self.doc["fleet"].append(r)
@@ -198,7 +199,7 @@ def read_doc(path):
 # 20s". The page is handed these four lists rather than carrying a second copy
 # (page(), below): one shared vocabulary, so a state cannot be coloured in the
 # terminal and plain on the page.
-GOOD = ("ok", "present", "running", "host mode", "up", "bench", "open")
+GOOD = ("ok", "present", "running", "host mode", "up", "bench", "open", "complete")
 BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held",
         # A board that fell back to its base image is not a bench system, and
         # reading it as one is how an unarmed board came to be benchmarked; a
@@ -207,6 +208,8 @@ BUSY = ("creating", "starting", "building", "fixing", "no", "empty", "held",
         "base", "role")
 BAD = (
     "unhealthy",
+    # A benchmark task that stopped before every planned run ended.
+    "incomplete",
     "failed",
     "oom",
     "stalled",
@@ -570,10 +573,11 @@ def render_machine_block(m, colour, widths=None):
                  paint("held" if lk.get("alive") else "stale",
                        "busy" if lk.get("alive") else "bad", colour),
                  paint("pid %s  %s" % (lk.get("pid", "?"), lk.get("cmd", "")), "dim", colour)))
-    b = m.get("bench")
-    if b:
-        wr.kv("bench", "%s  %s" % (b.get("run", "?"),
-                                    paint(b.get("state", "?"), severity(b.get("state")), colour)))
+    for b in m.get("bench") or []:
+        wr.kv("bench", "%s  %s  %s" % (b.get("task", "?"),
+                                        paint(b.get("state", "?"), severity(b.get("state")), colour),
+                                        paint(b.get("summary", ""), "dim", colour)))
+        wr.kv("", "%s" % paint("%s  %s" % (b.get("subject", ""), b.get("path", "")), "dim", colour))
 
     # A machine that could not answer in records: its own listing, as it
     # sent it, rather than nothing.
@@ -1103,8 +1107,8 @@ function tiles(m) {
     t.push(tile("lock · " + ESC(lk.resource),
       chip(lk.alive ? "held" : "stale", lk.alive ? "busy" : "bad") +
       ` <span class="sub">pid ${ESC(lk.pid || "?")} ${ESC(lk.cmd || "")}</span>`));
-  if (m.bench)
-    t.push(tile("bench", chip(m.bench.state) + ` <span class="sub">${ESC(m.bench.run)}</span>`));
+  for (const b of (m.bench || []))
+    t.push(tile("bench", chip(b.state) + ` <span class="sub">${ESC(b.task)} — ${ESC(b.summary || "")}</span>`));
   return t.length ? `<div class="tiles">${t.join("")}</div>` : "";
 }
 

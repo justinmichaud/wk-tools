@@ -91,6 +91,18 @@ def bash(script, env=None, timeout=60, cwd=None):
     )
 
 
+def bench_ls_runs(stdout):
+    """The run directories `wk bench ls` printed, oldest first: the indented
+    lines under each task whose first word is a path containing /runs/. What
+    a test hands to `wk bench report <run-a> <run-b>`."""
+    out = []
+    for line in stdout.splitlines():
+        words = line.split()
+        if words and "/runs/" in words[0]:
+            out.append(words[0])
+    return out
+
+
 def rand_suffix(n=6):
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 

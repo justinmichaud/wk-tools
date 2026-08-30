@@ -23,8 +23,25 @@
 #   --plan <name>         the benchmark (default speedometer3); repeatable
 #   --rounds <n>          A/B alternations per plan (default 5)
 #   --count <n>           run-benchmark iterations per run (default: the plan's)
+#   --timeout <s>         seconds one iteration may take before the run is
+#                         given up (default: the plan's own; Speedometer's 600
+#                         is too short for an rpi3)
 #   --yes                 run without the prompt (a script, an agent)
 #   --dry-run             print the parameters and the commands, run nothing
+#   --detach              confirm, create the task, then hand the work to a
+#                         process that outlives this one; follow it with
+#                         wk status and wk bench report <task>
+#   --task <name>         an existing task to work in -- what --detach hands
+#                         its child; every other invocation is a new task
+#
+# Every invocation is one *task*, named for the moment it was requested and
+# what it measures (20260830T140000Z-wpe-pr1725, or <stamp>-<sha12> for a
+# commit): $WK_STORE/bench/<task>/ holds task.json (this request, every
+# command it ran), one directory per run under runs/, a log per board and the
+# reports. `wk bench ls` lists tasks and their runs' directories, `wk status`
+# reports a running one, `wk bench report <task>` reports whatever rounds are
+# recorded so far and says whether the task is complete. The boards keep
+# nothing: every run's evidence lands here.
 #
 # What it does, in order, and says before it starts: resolves the two commits;
 # builds a WebKit slot for each against every device's image (wk sysimage
@@ -32,8 +49,9 @@
 # deploys both slots to each board running that image (wk pi deploy) and
 # alternates them there (wk pi bench --ab), every board at once, each
 # checking every result against the slot's build-id in the running process;
-# and writes one report per board (wk bench report --html). A board not booted into the image is named
-# with the commands that put it there; this command does not write cards.
+# and reports the task (wk bench report <task> --html). A board not booted
+# into the image is named with the commands that put it there; this command
+# does not write cards.
 #
 # A/A: give the same commit as --base and the spec, and the two slots differ
 # in nothing but their build-ids -- the noise floor of the lane.
@@ -48,14 +66,20 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/boot/machines.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/bench.sh"
+. "$WK_ROOT/lib/detach.sh"
 
-USAGE="usage: wk ab <pr-spec|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--yes] [--dry-run]; see wk ab -h"
+USAGE="usage: wk ab <pr-spec|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--yes] [--dry-run] [--detach]; see wk ab -h"
+
+# The moment of the request names the task; taken before anything else.
+STAMP=$(bench_task_stamp)
+# Kept whole for --detach, which re-runs this command minus itself.
+ORIG_ARGS=("$@")
 
 SPEC="${1:-}"; shift 2>/dev/null || true
 [ -n "$SPEC" ] || die "$USAGE"
 case "$SPEC" in -*) die "$USAGE" ;; esac
 
-DEVICES="" RELEASE="" BUILDER="" BITS="" BASE="" ROUNDS=5 COUNT="" DRY="" PLANS=()
+DEVICES="" RELEASE="" BUILDER="" BITS="" BASE="" ROUNDS=5 COUNT="" TIMEOUT="" DRY="" DETACH="" TASK="" PLANS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --devices) DEVICES="${2:-}"; shift ;;
@@ -67,8 +91,11 @@ while [ $# -gt 0 ]; do
                    PLANS+=("$2"); shift ;;
         --rounds)  ROUNDS="${2:-}"; shift ;;
         --count)   COUNT="${2:-}"; shift ;;
+        --timeout) TIMEOUT="${2:-}"; shift ;;
+        --task)    TASK="${2:-}"; shift ;;
         --yes)     WK_YES=1; export WK_YES ;;
         --dry-run) DRY=1 ;;
+        --detach)  DETACH=1 ;;
         -*) die "$USAGE; unknown option: $1" ;;
         *)  die "$USAGE; unexpected argument: $1" ;;
     esac
@@ -78,6 +105,9 @@ done
 case "$ROUNDS" in ''|*[!0-9]*) die "--rounds takes a number (got '$ROUNDS')" ;; esac
 [ "$ROUNDS" -ge 1 ] || die "--rounds needs to be at least 1"
 [ -z "$COUNT" ] || case "$COUNT" in *[!0-9]*) die "--count takes a number (got '$COUNT')" ;; esac
+[ -z "$TIMEOUT" ] || case "$TIMEOUT" in *[!0-9]*) die "--timeout takes seconds (got '$TIMEOUT')" ;; esac
+[ -z "$DETACH" ] || [ -z "$DRY" ] || die "--detach and --dry-run: a dry run has nothing to detach"
+[ -z "$TASK" ] || bench_task_attach "$TASK"
 [ "${#PLANS[@]}" -gt 0 ] || PLANS=(speedometer3)
 case "$BITS" in ''|32|64) ;; *) die "--bits takes 32 or 64 (got '$BITS')" ;; esac
 
@@ -209,6 +239,15 @@ AHEAD=$(mgit rev-list --count "$BASE_SHA..$HEAD_SHA")
 BEHIND=$(mgit rev-list --count "$HEAD_SHA..$BRANCH_SHA")
 PR_SLOT="pr"
 [ -z "${PR_N:-}" ] || PR_SLOT="pr$PR_N"
+# The task: when it was asked for, and what it measures.
+if [ -n "$TASK" ]; then
+    :
+elif [ -n "${PR_N:-}" ]; then
+    TASK="$STAMP-$PR_REMOTE_NAME-pr$PR_N"
+else
+    TASK="$STAMP-$(printf '%s' "$HEAD_SHA" | cut -c1-12)"
+fi
+TASK_DIR=$(bench_task_dir "$TASK")
 
 # --- evidence, taken now ---------------------------------------------------------
 # What already exists decides what the plan repeats: an image, a slot holding
@@ -259,6 +298,8 @@ log "  release   $RELEASE (${CFG_PROJECT0:-WebKit} $CFG_REMOTE0/$CFG_BRANCH0)"
 log "  plans     ${PLANS[*]}"
 log "  rounds    $ROUNDS per plan, interleaved A B A B ...${COUNT:+; --count $COUNT iterations per run}"
 log "  slots     base, $PR_SLOT -- one image per board, two WebKits beside it"
+log "  task      $TASK"
+log "            $TASK_DIR$([ -n "$DRY" ] && [ ! -d "$TASK_DIR" ] && echo '  (not created: dry run)')"
 log ""
 for ((i = 0; i < NDEV; i++)); do
     log "  ${DEV[$i]}: image ${PROFILE[$i]}"
@@ -292,13 +333,14 @@ for ((i = 0; i < NDEV; i++)); do
     add "wk pi deploy ${PROFILE[$i]} ${DEV[$i]} --slot base"
     add "wk pi deploy ${PROFILE[$i]} ${DEV[$i]} --slot $PR_SLOT"
     for plan in "${PLANS[@]}"; do
-        add "wk pi bench ${DEV[$i]} $plan --ab base,$PR_SLOT --rounds $ROUNDS${COUNT:+ --count $COUNT}"
+        add "wk pi bench ${DEV[$i]} $plan --ab base,$PR_SLOT --rounds $ROUNDS${COUNT:+ --count $COUNT}${TIMEOUT:+ --timeout $TIMEOUT} --task $TASK"
     done
 done
+add "wk bench report $TASK --html --text"
 log ""
 log "each 'wk pi bench --ab' checks every result against the slot's build-id in"
-log "the running web process and ends with 'wk bench report' (text, and one"
-log "self-contained html file beside the runs in $BENCH_DIR)."
+log "the running web process; the report pairs the rounds and writes one"
+log "self-contained html file per board and plan into the task."
 
 if [ -n "$DRY" ]; then
     log ""
@@ -310,28 +352,65 @@ warn "this replaces slots 'base' and '$PR_SLOT' on the boards named, and moves e
 warn "image workspace's checkout to the commits above."
 confirm "run these ${n} command(s), replacing those slots?" || die "not run"
 
+# --- the task -----------------------------------------------------------------------
+# Created (and its lock taken) before any work; a --task given is the task a
+# --detach parent created a moment ago, and this process takes over its lock.
+if [ -d "$TASK_DIR" ]; then
+    hold_lock "bench-task-$TASK" -w 30 || die "task $TASK is held by another process"
+else
+    task_fields=(subject.kind="$([ -n "${PR_N:-}" ] && echo pull || echo commit)" subject.spec="$SPEC"
+                 subject.remote="$PR_REMOTE_NAME" subject.number="${PR_N:-}"
+                 subject.head="$HEAD_SHA" subject.base="$BASE_SHA" subject.base_how="$BASE_HOW"
+                 subject.release="$RELEASE" subject.branch="$CFG_REMOTE0/$CFG_BRANCH0"
+                 plans="$(IFS=,; printf '%s' "${PLANS[*]}")" rounds="$ROUNDS" count="$COUNT" timeout="$TIMEOUT"
+                 slots="base,$PR_SLOT" argv="wk ab $SPEC ${ORIG_ARGS[*]:1}")
+    devs=""
+    for ((i = 0; i < NDEV; i++)); do devs="${devs:+$devs,}${DEV[$i]}=${PROFILE[$i]}"; done
+    cmd_args=()
+    for ((k = 0; k < n; k++)); do cmd_args+=(--command "${CMDS[$k]}"); done
+    bench_task_new "$TASK" "${task_fields[@]}" devices="$devs" "${cmd_args[@]}"
+fi
+info "task $TASK  ($TASK_DIR)"
+
+# --detach: the same command, minus --detach and with the task it made, in a
+# process nothing this end does can kill (detach_run, lib/detach.sh). The
+# child takes the lock as this one exits.
+if [ -n "$DETACH" ]; then
+    det=()
+    for a in "${ORIG_ARGS[@]:1}"; do [ "$a" = --detach ] || det+=("$a"); done
+    status_write "$TASK_DIR/status" state=starting "stage=detaching"
+    pid=$(detach_run "" "$TASK_DIR/ab.log" -- "$WK_ROOT/wk" ab "$SPEC" "${det[@]}" --yes --task "$TASK")
+    info "detached as pid $pid -- this end can go away"
+    log "  follow:  tail -f $TASK_DIR/ab.log"
+    log "  state:   wk status;  wk bench ls"
+    log "  report:  wk bench report $TASK   (partial while it runs)"
+    exit 0
+fi
+
 # --- run it -------------------------------------------------------------------------
 # A step that fails stops its pipeline where it is; every step is re-runnable
-# and the plan above recomputes what is left.
+# and the plan above recomputes what is left. The stage file is a hint for
+# `wk status` while nothing has run yet (the runs are the evidence after).
 run_cmd() { info "\$ $1"; eval "$WK_ROOT/$1" || die "'${1%% *}' failed; the steps above it are done and the plan recomputes what is left: re-run wk ab $SPEC ..."; }
+task_stage() { status_write "$TASK_DIR/status" state=running "stage=$1"; }
+task_stage "starting"
 
 # Builds first, in order and one at a time (README.md); then every board's
 # deploy-and-bench pipeline at once -- boards are independent, and the
 # runs are recorded per board. Each pipeline's output goes to its own log
 # beside the runs, since interleaved boards are unreadable.
 for ((k = 0; k < n; k++)); do
-    case "${CMDS[$k]}" in "wk sysimage "*) run_cmd "${CMDS[$k]}" ;; esac
+    case "${CMDS[$k]}" in "wk sysimage "*) task_stage "${CMDS[$k]}"; run_cmd "${CMDS[$k]}" ;; esac
 done
 for ((i = 0; i < NDEV; i++)); do
     ab_slot_has "${PROFILE[$i]}" base "$BASE_SHA" && ab_slot_has "${PROFILE[$i]}" "$PR_SLOT" "$HEAD_SHA" \
         || die "${PROFILE[$i]} does not hold both slots after the builds (wk sysimage ls)"
 done
 
-ensure_dir "$BENCH_DIR"
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+task_stage "deploying and benchmarking on ${DEVICES//,/, }"
 declare -a PIDS LOGS
 for ((i = 0; i < NDEV; i++)); do
-    LOGS[$i]="$BENCH_DIR/$STAMP-ab-${DEV[$i]}.log"
+    LOGS[$i]="$TASK_DIR/${DEV[$i]}.log"
     (
         for ((k = 0; k < n; k++)); do
             case "${CMDS[$k]}" in
@@ -352,5 +431,11 @@ for ((i = 0; i < NDEV; i++)); do
         tail -12 "${LOGS[$i]}" | sed 's/^/    /' >&2
     fi
 done
-[ -z "$failed" ] || die "A/B incomplete on:$failed. The other boards' runs are recorded; re-run wk ab $SPEC ... for what is left."
-info "A/B complete; the runs and reports are in $BENCH_DIR (wk bench ls)"
+task_stage "reporting"
+"$WK_ROOT/wk" bench report "$TASK" --html --text || warn "the report did not complete; the runs are recorded:  wk bench report $TASK"
+if [ -n "$failed" ]; then
+    status_write "$TASK_DIR/status" state=failed "stage=incomplete on:$failed"
+    die "A/B incomplete on:$failed. Every run that finished is in $TASK_DIR (wk bench ls); re-run wk ab $SPEC ... for what is left."
+fi
+status_write "$TASK_DIR/status" state=done "stage=complete"
+info "A/B complete: $TASK_DIR  (wk bench ls; wk bench report $TASK)"

@@ -58,29 +58,6 @@ def cmd_get(args):
     print(value if value is not None else args.default)
 
 
-# --- ls-summary ----------------------------------------------------------------
-# One line of `wk bench ls`: the axes a saved run was taken on. Left to raise
-# on a malformed env.json -- a run whose own record does not parse is not one
-# `wk bench ls` can summarize, and printing a wrong answer would be worse.
-def cmd_ls_summary(args):
-    m = json.load(open(args.file))
-    axes = m.get("runner", "browser")
-    if m.get("arch", "native") != "native":
-        axes += "/" + m["arch"]
-    if m.get("bench_host", "container") != "container":
-        axes += "/" + m["bench_host"]
-    print(
-        "%-14s %-12s %-12s %s%s"
-        % (
-            m.get("plan", "?"),
-            m.get("config", "?"),
-            axes,
-            (m.get("webkit_sha") or "?")[:10],
-            "  [FORCED]" if m.get("forced") else "",
-        )
-    )
-
-
 # --- bench-class ---------------------------------------------------------------
 # What a plan measures: cpu-class (JetStream and the other JS benchmarks) needs
 # no GPU or compositor; everything else is gpu-class by default, deliberately
@@ -563,18 +540,12 @@ def _sd(vals):
     return (sum((v - m) ** 2 for v in vals) / (n - 1)) ** 0.5
 
 
-# A side of a comparison: a comma-separated list of result.json paths, the
-# same shape `wk bench compare`'s aspec/bspec already use for an interleaved
-# arm of several runs. env.json is read from the same directory, empty where
-# missing so an older run reads as "unknown" rather than refusing the report.
-def _side_runs(spec):
-    runs = []
-    for p in spec.split(","):
-        p = p.strip()
-        if not p:
-            continue
-        runs.append((p, _load(p), _load(os.path.join(os.path.dirname(p), "env.json"))))
-    return runs
+# A side of a comparison: result.json paths, one per run -- an interleaved
+# arm of several runs pooled into the same subtest arrays. env.json is read
+# from the same directory, empty where missing so an older run reads as
+# "unknown" rather than refusing the report.
+def _side_runs(paths):
+    return [(p, _load(p), _load(os.path.join(os.path.dirname(p), "env.json"))) for p in paths]
 
 
 def _config_key(env):
@@ -587,8 +558,8 @@ def _config_label(key):
     return ", ".join("%s=%s" % (k, v) for k, v in key)
 
 
-def _build_report(a_spec, b_spec):
-    a_runs, b_runs = _side_runs(a_spec), _side_runs(b_spec)
+def _build_report(a_paths, b_paths, header=()):
+    a_runs, b_runs = _side_runs(a_paths), _side_runs(b_paths)
     if not a_runs:
         sys.exit("report: no result files for A")
     if not b_runs:
@@ -659,7 +630,7 @@ def _build_report(a_spec, b_spec):
             "a_n": len(a_vals), "b_n": len(b_vals), "flagged": asd > 0 and bsd > asd * 1.2,
         })
 
-    return {"rows": rows, "axis_lines": axis_lines, "variance": variance}
+    return {"rows": rows, "axis_lines": axis_lines, "variance": variance, "header": list(header)}
 
 
 def _row_primary(row):
@@ -720,7 +691,10 @@ def _svg_histogram(name, a_vals, b_vals, width=420, height=140, buckets=12):
 
 
 def _render_text(report):
-    out = ["axis check:"]
+    out = list(report.get("header", []))
+    if out:
+        out.append("")
+    out.append("axis check:")
     out += ["  " + l for l in report["axis_lines"]] or ["  (no warnings)"]
     out.append("")
     header = "%-28s %-6s %14s %14s %10s %9s %5s" % ("subtest", "metric", "A mean+-sd", "B mean+-sd", "delta %", "p", "sig")
@@ -796,6 +770,9 @@ def _render_html(report, title="wk bench report"):
     if not var_rows:
         var_rows.append('<tr><td colspan="4">A and B share no configuration group</td></tr>')
 
+    header_html = "".join("<li>%s</li>" % _xml_escape(l) for l in report.get("header", []))
+    if header_html:
+        header_html = "<ul>%s</ul>" % header_html
     return """<!doctype html>
 <html><head><meta charset="utf-8"><title>%s</title>
 <style>
@@ -810,6 +787,7 @@ def _render_html(report, title="wk bench report"):
   ul { margin: 0.5em 0; }
 </style></head><body>
 <h1>%s</h1>
+%s
 <h2>axis check</h2>
 <ul>%s</ul>
 <h2>subtests</h2>
@@ -823,13 +801,22 @@ def _render_html(report, title="wk bench report"):
 <tbody>%s</tbody></table>
 </body></html>
 """ % (
-        _xml_escape(title), _xml_escape(title), axis_html,
+        _xml_escape(title), _xml_escape(title), header_html, axis_html,
         "".join(rows_html), "".join(hist_html), "".join(var_rows),
     )
 
 
+def _split_paths(spec):
+    return [p.strip() for p in spec.split(",") if p.strip()]
+
+
 def cmd_report(args):
-    report = _build_report(args.a, args.b)
+    a, b = _split_paths(args.a), _split_paths(args.b)
+    if not a:
+        sys.exit("report: no result files for A")
+    if not b:
+        sys.exit("report: no result files for B")
+    report = _build_report(a, b)
     want_text = args.text or not args.html
     if args.html:
         with open(args.html, "w") as f:
@@ -837,6 +824,292 @@ def cmd_report(args):
         print("wrote %s" % args.html)
     if want_text:
         sys.stdout.write(_render_text(report))
+
+
+
+# --- tasks ---------------------------------------------------------------------
+# A task is what one benchmarking command produced: `wk ab` (an A/B of a pull
+# request or a commit over boards and plans), `wk pi bench` (one slot, or two
+# alternated), `wk bench <ws> <plan>` (one run in a container). Its directory
+# under the store is named for the moment it was requested and the thing it
+# measures -- <stamp>-wpe-pr1725, <stamp>-<sha12>, <stamp>-rpi3-base-vs-pr1725
+# -- and holds task.json (the request), runs/<run>/ (the evidence, one
+# directory per run: env.json, result.json, run.log, verify.jsonl,
+# browser.log, board.log), the command's own logs and the reports. Nothing
+# about a task's state is stored: planned, ended, usable and complete are
+# recomputed from task.json and the runs on every read, and "running" is the
+# task's lock, which the caller checks and passes in (--running).
+#
+# A run's state, from its files: `ok` has a result.json; `failed` has none but
+# its env.json carries wall_time_s, which is written when run-benchmark
+# returns; `running` has neither -- it is either running now or its driver
+# died (the task's lock tells which).
+
+def _list_field(value):
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def cmd_task_write(args):
+    doc = {"commands": list(args.commands)}
+    for field in args.fields:
+        key, sep, value = field.partition("=")
+        if not sep:
+            sys.exit("task-write: not a key=value: %s" % field)
+        if key == "devices":
+            # rpi3=<profile>,rpi4=<profile>: the device and the image it is measured on.
+            devs = []
+            for item in _list_field(value):
+                dev, _, profile = item.partition("=")
+                devs.append({"device": dev, "profile": profile})
+            doc["devices"] = devs
+        elif key in ("plans", "slots"):
+            doc[key] = _list_field(value)
+        elif key == "rounds":
+            doc[key] = int(value)
+        else:
+            _set_nested(doc, key, value)
+    for key in ("task", "requested", "devices", "plans", "slots", "rounds"):
+        if key not in doc:
+            sys.exit("task-write: %s is required" % key)
+    if not doc["devices"] or not doc["plans"] or not doc["slots"]:
+        sys.exit("task-write: devices, plans and slots each need at least one entry")
+    os.makedirs(os.path.join(args.dir, "runs"), exist_ok=True)
+    out = os.path.join(args.dir, "task.json")
+    tmp = out + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, out)
+
+
+def _task_doc(taskdir):
+    doc = _load(os.path.join(taskdir, "task.json"))
+    if not doc:
+        sys.exit("%s is not a task: no task.json (wk bench ls lists the tasks)" % taskdir)
+    return doc
+
+
+def _run_state(rundir, env):
+    result = os.path.join(rundir, "result.json")
+    if os.path.isfile(result) and os.path.getsize(result) > 0:
+        return "ok"
+    if "wall_time_s" in env:
+        return "failed"
+    return "running"
+
+
+def _task_runs(taskdir):
+    runs = []
+    root = os.path.join(taskdir, "runs")
+    if not os.path.isdir(root):
+        return runs
+    for name in sorted(os.listdir(root)):
+        rundir = os.path.join(root, name)
+        env = _load(os.path.join(rundir, "env.json"))
+        if not env:
+            continue
+        runs.append({"id": name, "dir": rundir, "env": env, "state": _run_state(rundir, env)})
+    return runs
+
+
+def _kv_file(path):
+    out = {}
+    try:
+        for line in open(path):
+            k, sep, v = line.rstrip("\n").partition("=")
+            if sep:
+                out[k] = v
+    except OSError:
+        pass
+    return out
+
+
+def _subject_line(doc):
+    subj = doc.get("subject", {})
+    kind = subj.get("kind", "")
+    devices = ", ".join(d["device"] for d in doc.get("devices", []))
+    plans = ", ".join(doc.get("plans", []))
+    slots = doc.get("slots", [])
+    if kind in ("pull", "commit"):
+        what = "A/B %s: %s vs base %s" % (subj.get("spec", "?"), (subj.get("head") or "?")[:10], (subj.get("base") or "?")[:10])
+    elif kind == "workspace":
+        what = "%s %s" % (subj.get("spec", "?"), doc["devices"][0].get("profile", ""))
+    elif len(slots) == 2:
+        what = "%s vs %s" % (slots[0], slots[1])
+    else:
+        what = "slot %s" % "/".join(slots)
+    parts = [what]
+    if kind != "workspace":
+        parts.append(devices)
+    parts.append(plans)
+    rounds = doc.get("rounds", 1)
+    if len(slots) == 2 or rounds > 1:
+        parts.append("%d round%s" % (rounds, "" if rounds == 1 else "s"))
+    return " · ".join(p for p in parts if p)
+
+
+# Every round of every device x plan, paired by the ab.round each run
+# recorded: {(device, plan): {round: {arm: run}}}. A single-slot task has no
+# arms and pairs into nothing.
+def _task_rounds(doc, runs):
+    out = {}
+    for d in doc.get("devices", []):
+        for plan in doc.get("plans", []):
+            out[(d["device"], plan)] = {}
+    for r in runs:
+        env = r["env"]
+        key = (env.get("machine") or env.get("workspace") or "?", env.get("plan", "?"))
+        ab = env.get("ab") or {}
+        if "round" not in ab or "arm" not in ab:
+            continue
+        out.setdefault(key, {}).setdefault(int(ab["round"]), {})[ab["arm"]] = r
+    return out
+
+
+def task_state(taskdir, running):
+    doc = _task_doc(taskdir)
+    runs = _task_runs(taskdir)
+    slots = doc.get("slots", [])
+    planned = len(doc.get("devices", [])) * len(doc.get("plans", [])) * doc.get("rounds", 1) * len(slots)
+    ok = [r for r in runs if r["state"] == "ok"]
+    failed = [r for r in runs if r["state"] == "failed"]
+    live = [r for r in runs if r["state"] == "running"]
+    ended = len(ok) + len(failed)
+    if running:
+        state = "running"
+    elif ended >= planned:
+        state = "complete"
+    else:
+        state = "incomplete"
+    usable = 0
+    for arms in _task_rounds(doc, runs).values():
+        for byarm in arms.values():
+            if len(slots) == 2 and all(byarm.get(a, {}).get("state") == "ok" for a in ("a", "b")):
+                usable += 1
+    status = _kv_file(os.path.join(taskdir, "status"))
+    current = live[0] if (running and live) else None
+    summary = "%d/%d runs ended, %d ok, %d failed" % (ended, planned, len(ok), len(failed))
+    if len(slots) == 2:
+        summary += ", %d round%s usable" % (usable, "" if usable == 1 else "s")
+    if current:
+        env = current["env"]
+        summary += "; now %s %s %s" % (env.get("plan", "?"), env.get("machine", "?"), env.get("build_slot", "?"))
+        progress = _progress_line(os.path.join(current["dir"], "run.log"))
+        if progress:
+            summary += " (%s)" % progress
+    elif running and status.get("stage"):
+        summary += "; " + status["stage"]
+    elif state == "incomplete" and live:
+        summary += "; %d run(s) died with their driver" % len(live)
+    return {"doc": doc, "runs": runs, "state": state, "planned": planned, "ended": ended,
+            "ok": len(ok), "failed": len(failed), "usable": usable, "current": current,
+            "stage": status.get("stage", ""), "summary": summary}
+
+
+# The same line lib/watchdog.sh's progress reader derives from run-benchmark's
+# log: the iteration it is on.
+def _progress_line(log):
+    try:
+        text = open(log, errors="replace").read()
+    except OSError:
+        return ""
+    m = None
+    for m in re.finditer(r"Start the iteration (\d+) of (\d+)", text):
+        pass
+    return "iteration %s/%s" % (m.group(1), m.group(2)) if m else ""
+
+
+def cmd_task_status(args):
+    st = task_state(args.dir, args.running)
+    for key in ("state", "planned", "ended", "ok", "failed", "usable", "summary"):
+        print("%s=%s" % (key, st[key]))
+    print("subject=%s" % _subject_line(st["doc"]))
+    print("current=%s" % (st["current"]["id"] if st["current"] else ""))
+
+
+# `wk bench ls`: every task in the store, newest last, with its runs' paths
+# and each run's axes and state.
+def cmd_ls(args):
+    running = set(_list_field(args.running or ""))
+    tasks = sorted(d for d in os.listdir(args.bench_dir)
+                   if os.path.isfile(os.path.join(args.bench_dir, d, "task.json")))
+    if not tasks:
+        print("(no tasks yet)")
+        return
+    for name in tasks:
+        taskdir = os.path.join(args.bench_dir, name)
+        st = task_state(taskdir, name in running)
+        print("%s  %s" % (name, _subject_line(st["doc"])))
+        print("    %s  %s" % (st["state"], st["summary"]))
+        print("    %s" % taskdir)
+        for r in st["runs"]:
+            m = r["env"]
+            axes = m.get("runner", "browser")
+            if m.get("arch", "native") != "native":
+                axes += "/" + m["arch"]
+            if m.get("bench_host", "container") != "container":
+                axes += "/" + m["bench_host"]
+            print("      %s  %s %s %s %s %s%s" % (
+                r["dir"], m.get("plan", "?"), m.get("config", "?"), axes,
+                (m.get("webkit_sha") or "?")[:10], r["state"],
+                "  [FORCED]" if m.get("forced") else ""))
+
+
+# `wk bench report <task>`: one comparison per device x plan out of the
+# rounds recorded so far -- partial data is reported as partial, with the
+# rounds that are missing named -- and the task's state, so a report read
+# mid-run says so.
+def cmd_task_report(args):
+    taskdir = args.dir.rstrip("/")
+    st = task_state(taskdir, args.running)
+    doc = st["doc"]
+    slots = doc.get("slots", [])
+    name = doc.get("task", os.path.basename(taskdir))
+    lines = ["task      %s" % name,
+             "measures  %s" % _subject_line(doc),
+             "state     %s -- %s" % (st["state"], st["summary"]),
+             "data      %s" % taskdir]
+    print("\n".join(lines))
+    if len(slots) != 2:
+        print("\nnot an A/B (one slot): nothing to compare. Runs:")
+        for r in st["runs"]:
+            print("  %s  %s" % (r["state"], r["dir"]))
+        return
+    rounds = _task_rounds(doc, st["runs"])
+    want_text = args.text or not args.html
+    for (device, plan), byround in sorted(rounds.items()):
+        a_paths, b_paths, dropped = [], [], []
+        for rnd in sorted(byround):
+            arms = byround[rnd]
+            if all(arms.get(x, {}).get("state") == "ok" for x in ("a", "b")):
+                a_paths.append(os.path.join(arms["a"]["dir"], "result.json"))
+                b_paths.append(os.path.join(arms["b"]["dir"], "result.json"))
+            else:
+                why = ", ".join("%s: %s" % (slots[0] if x == "a" else slots[1],
+                                            arms[x]["state"] if x in arms else "not run")
+                                for x in ("a", "b") if arms.get(x, {}).get("state") != "ok")
+                dropped.append("round %d (%s)" % (rnd, why))
+        header = ["%s on %s" % (plan, device),
+                  "A = slot %s, B = slot %s" % (slots[0], slots[1]),
+                  "rounds: %d usable of %d attempted (%d planned)%s" % (
+                      len(a_paths), len(byround), doc.get("rounds", 1),
+                      ("; dropped " + ", ".join(dropped)) if dropped else "")]
+        # The rounds line is the completeness answer and prints whatever
+        # the output mode; the tables are the text mode's.
+        print("\n" + "=" * 72)
+        print("\n".join(header))
+        if not a_paths:
+            print("no round has both arms yet; nothing to compare")
+            continue
+        report = _build_report(a_paths, b_paths, header=lines + [""] + header)
+        if args.html:
+            out = os.path.join(taskdir, "report-%s-%s.html" % (device, plan))
+            with open(out, "w") as f:
+                f.write(_render_html(report, title="%s: %s on %s" % (name, plan, device)))
+            print("wrote %s" % out)
+        if want_text:
+            print()
+            sys.stdout.write(_render_text({**report, "header": []}))
 
 
 def main(argv):
@@ -849,9 +1122,28 @@ def main(argv):
     p.add_argument("--default", default="")
     p.set_defaults(func=cmd_get)
 
-    p = sub.add_parser("ls-summary", help="one `wk bench ls` line for a saved run's env.json")
-    p.add_argument("file")
-    p.set_defaults(func=cmd_ls_summary)
+    p = sub.add_parser("ls", help="every task in the store, with its runs' paths and states")
+    p.add_argument("bench_dir")
+    p.add_argument("--running", help="comma-separated task names whose lock is held")
+    p.set_defaults(func=cmd_ls)
+
+    p = sub.add_parser("task-write", help="write a task's task.json")
+    p.add_argument("dir")
+    p.add_argument("fields", nargs="*", metavar="key=value")
+    p.add_argument("--command", dest="commands", action="append", default=[], metavar="CMD")
+    p.set_defaults(func=cmd_task_write)
+
+    p = sub.add_parser("task-status", help="a task's state, recomputed from its runs, as key=value lines")
+    p.add_argument("dir")
+    p.add_argument("--running", action="store_true", help="the task's lock is held")
+    p.set_defaults(func=cmd_task_status)
+
+    p = sub.add_parser("task-report", help="a report per device x plan out of the rounds a task has so far")
+    p.add_argument("dir")
+    p.add_argument("--running", action="store_true", help="the task's lock is held")
+    p.add_argument("--html", action="store_true", help="also write report-<device>-<plan>.html into the task")
+    p.add_argument("--text", action="store_true", help="print the text tables (default when --html is not given)")
+    p.set_defaults(func=cmd_task_report)
 
     p = sub.add_parser("cores-valid", help="exit 0 if <set> is a valid taskset -c cpu list, 1 otherwise")
     p.add_argument("set")

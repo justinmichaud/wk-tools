@@ -537,7 +537,7 @@ report_health() {
     for f in "$(wk_lock_dir)"/*.lock; do
         [ -e "$f" ] || continue
         line=$(readlink "$f" 2>/dev/null || cat "$f/payload" 2>/dev/null || true)
-        pid=$(printf '%s' "$line" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p')
+        pid=$(lock_holder_pid "$f")
         cmd=$(printf '%s' "$line" | sed -n 's/.*cmd=\(.*\)$/\1/p')
         at=$(printf '%s' "$line" | sed -n 's/.*at=\([^ ]*\).*/\1/p')
         rec_start lock
@@ -623,27 +623,34 @@ report_health() {
         fi
     fi
 
-    # --- the newest benchmark run, and whether it finished
+    # --- benchmark tasks: every one running now, else the newest, with its
+    # state recomputed from its runs (lib/wkdata.py task-status) and
+    # "running" decided by its lock (lock_alive) -- nothing is read from a
+    # record of progress.
     if [ -d "$WK_STORE/bench" ]; then
-        local newest
-        newest=$( { ls -1 "$WK_STORE/bench" 2>/dev/null || true; } | sort | tail -1)
-        if [ -n "$newest" ]; then
+        local t running="" shown="" newest=""
+        for t in "$WK_STORE/bench"/*/task.json; do
+            [ -f "$t" ] || continue
+            t=$(basename "$(dirname "$t")")
+            newest="$t"
+            lock_alive "bench-task-$t" && running="$running $t"
+        done
+        [ -n "$running" ] && shown="$running" || shown="$newest"
+        for t in $shown; do
+            local alive=() st
+            case " $running " in *" $t "*) alive=(--running) ;; esac
+            st=$(python3 "$WK_ROOT/lib/wkdata.py" task-status "$WK_STORE/bench/$t" ${alive[@]+"${alive[@]}"} 2>/dev/null) || continue
             rec_start bench
             rec_set machine "$m"
-            rec_set run     "$newest"
-            # env.json is written when a run starts, result.json when it
-            # produces a number: the first without the second means it is
-            # either running now or died -- a machine not to touch.
-            if [ -f "$WK_STORE/bench/$newest/result.json" ]; then
-                rec_set state "finished"
-            elif [ -f "$WK_STORE/bench/$newest/env.json" ]; then
-                rec_set state "no result"
-                note_warn "the newest run has no result.json -- it is either running now or it died"
-            else
-                rec_set state "empty"
-            fi
+            rec_set task    "$t"
+            rec_set path    "$WK_STORE/bench/$t"
+            rec_set state   "$(kv_get state <<<"$st")"
+            rec_set summary "$(kv_get summary <<<"$st")"
+            rec_set subject "$(kv_get subject <<<"$st")"
+            [ "$(kv_get state <<<"$st")" != incomplete ] \
+                || note_warn "task $t stopped before every planned run ended -- wk bench report $t says what is there"
             rec_emit
-        fi
+        done
     fi
     return 0
 }

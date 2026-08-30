@@ -50,8 +50,8 @@ PY=/usr/bin/python3
 labels=$(awk -F'\t' '{print $2}' "$RUNS" | awk '!seen[$0]++')
 [ -n "$labels" ] || die "no arms in $RUNS"
 
-arm_paths() {  # $1 = label -> comma-separated result.json paths
-    awk -F'\t' -v l="$1" '$2==l {printf "%s%s/results/%s/result.json", sep, r, $4; sep=","}' \
+arm_paths() {  # $1 = label -> comma-separated run directories
+    awk -F'\t' -v l="$1" '$2==l {printf "%s%s/results/%s", sep, r, $4; sep=","}' \
         r="$ROOT" "$RUNS"
 }
 

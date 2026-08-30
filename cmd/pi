@@ -21,7 +21,9 @@
 #       [--slot NAME] [--count N] [--timeout S]
 #                                         system; refuses the rescue and a
 #                                         missing display without --force;
-#                                         --count N is iterations per run.
+#                                         --count N is iterations per run,
+#                                         --timeout S the seconds one iteration
+#                                         may take (default: the plan's own).
 #                                         run-benchmark runs here and drives
 #                                         the board's browser over ssh; the
 #                                         process that reports is checked
@@ -29,7 +31,13 @@
 #       [--cores <set>]                   pin the browser: taskset -c <set>,
 #                                         same syntax as wk bench
 #       --ab A,B [--rounds N]             interleaved A/B between two deployed
-#                                         slots, compared with wk bench report
+#                                         slots, reported with wk bench report
+#       --task <name>                     file the runs into an existing task
+#                                         (wk ab's); without it this command
+#                                         is its own task
+#                                         Every run lands on this machine, in
+#                                         the task's directory (wk bench ls);
+#                                         the board keeps nothing of it
 #
 #   WK_PI_TAG=<tag>                       the tailscale tag 'wk pi setup'
 #                                         advertises when it brings a board up
@@ -467,6 +475,10 @@ pi_kill_cmd() { # <slot.json>
 pi_bench_record() { # <out dir> <slot> <slot.json>
     local dir="$1" slot="$2" json="$3"
     local karch class software="" software_reason=""
+    # Which task this run belongs to and, in an A/B, which round and arm:
+    # what `wk bench report <task>` pairs the runs by.
+    local -a task_args=("task=$PI_TASK")
+    [ -z "$PI_AB_ROUND" ] || task_args+=("ab.round=$PI_AB_ROUND" "ab.arm=$PI_AB_ARM" "ab.slot_a=$PI_AB_A" "ab.slot_b=$PI_AB_B")
     karch=$(i_ssh 'uname -m' 2>/dev/null | tr -d '\r')
     class=$(wkdata bench-class "$plan")
     if [ "$PI_RENDERER" = pixman ]; then
@@ -486,18 +498,25 @@ pi_bench_record() { # <out dir> <slot> <slot.json>
         host.kernel="$kernel" host.kernel_arch="$karch" host.governor="$gov" \
         host.throttled="$throttled" host.root_device="$root_dev" \
         cores.set="$cores" \
+        "${task_args[@]}" \
         ${BENCH_CFG_ARGS[@]+"${BENCH_CFG_ARGS[@]}"} \
         --bool forced="${WK_FORCE:-}" --bool software="$software" --bool cores.pinned="$cores"
 }
 
+PI_TASK=""; PI_TASK_OWNED=""
+PI_AB_ROUND=""; PI_AB_ARM=""; PI_AB_A=""; PI_AB_B=""
 cmd_bench() {
     local machine="${1:-}" plan="${2:-}"; shift $(( $# < 2 ? $# : 2 ))
-    local count="" timeout_s="" slot=a ab="" rounds=3 cores=""
-    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B [--rounds N]] [--count N] [--timeout S] [--cores <set>]; see wk pi -h"
+    local count="" timeout_s="" slot=a ab="" rounds=3 cores="" task=""
+    # The request's moment names the task this command becomes, when it is
+    # its own: taken now, before any board is probed.
+    local stamp; stamp=$(bench_task_stamp)
+    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B [--rounds N]] [--count N] [--timeout S] [--cores <set>] [--task NAME]; see wk pi -h"
     while [ $# -gt 0 ]; do
         case "$1" in
             --count)   count="${2:-}"; shift ;;
             --timeout) timeout_s="${2:-}"; shift ;;
+            --task)    task="${2:-}"; shift ;;
             --slot)    slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
             # Same cpu-list syntax as `wk bench --cores`, through the same
             # parser (lib/wkdata.py); applied to the board's browser.
@@ -530,6 +549,13 @@ cmd_bench() {
     [ -z "$cores" ] || wkdata cores-valid "$cores" \
         || die "--cores '$cores' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)"
     case "$rounds" in ''|*[!0-9]*) die "--rounds takes a number (got '$rounds')" ;; esac
+    [ -z "$timeout_s" ] || case "$timeout_s" in *[!0-9]*) die "--timeout takes seconds (got '$timeout_s')" ;; esac
+    # An existing task is checked before any board is touched: a typo here
+    # must not file an hour of runs somewhere nothing describes.
+    if [ -n "$task" ]; then
+        bench_task_attach "$task"
+        PI_TASK="$task"
+    fi
 
     machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
     # One run at a time per board: two would share the browser, the GPU and
@@ -645,13 +671,36 @@ $(sed 's/^/    /' "$PI_TMP/tunnel.log")"
     info "bringing up the session on $machine"
     pi_session_up "$builder" "$PI_DISPLAY"
 
-    # 7. The run(s). One slot, or two alternated.
+    # 7. The task the runs are filed into: wk ab's when given, else this
+    # command's own, named for the request and what it measures. Created
+    # here, once the slots are known to exist, so a refusal above leaves no
+    # empty task behind.
+    if [ -z "$PI_TASK" ]; then
+        local profile; profile=$(wkslot get "$PI_TMP/slot-${_need%% *}.json" profile)
+        if [ -n "$ab" ]; then
+            PI_TASK="$stamp-$machine-${ab%%,*}-vs-${ab##*,}"
+            bench_task_new "$PI_TASK" subject.kind=slots subject.spec="$ab" \
+                devices="$machine=$profile" plans="$plan" rounds="$rounds" slots="${ab%%,*},${ab##*,}" \
+                count="$count" timeout="$timeout_s" \
+                --command "wk pi bench $machine $plan --ab $ab --rounds $rounds${count:+ --count $count}${timeout_s:+ --timeout $timeout_s}"
+        else
+            PI_TASK="$stamp-$machine-$slot"
+            bench_task_new "$PI_TASK" subject.kind=slots subject.spec="$slot" \
+                devices="$machine=$profile" plans="$plan" rounds=1 slots="$slot" \
+                count="$count" timeout="$timeout_s" \
+                --command "wk pi bench $machine $plan --slot $slot${count:+ --count $count}${timeout_s:+ --timeout $timeout_s}"
+        fi
+        PI_TASK_OWNED=1
+    fi
+    log "  task        $PI_TASK ($(bench_task_dir "$PI_TASK"))"
+
+    # 8. The run(s). One slot, or two alternated.
     if [ -n "$ab" ]; then
         pi_bench_ab "$ab" "$rounds"
         return $?
     fi
     pi_bench_once "$slot" || die "benchmark failed on $machine"
-    cat "$BENCH_DIR/$PI_LAST_RUN/result.json"
+    cat "$PI_LAST_RUN/result.json"
 }
 
 # One run, from a named slot, recorded. run-benchmark does the run; the
@@ -664,7 +713,7 @@ pi_bench_once() {
     local slot="$1"
     local json="$PI_TMP/slot-$slot.json"
     local id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$machine-$slot"
-    local out="$BENCH_DIR/$id"
+    local out="$(bench_task_dir "$PI_TASK")/runs/$id"
     ensure_dir "$out/diagnose"
     local cores_wrap=""
     [ -z "$cores" ] || cores_wrap=$(wkdata cores-wrap "$cores")
@@ -694,6 +743,15 @@ pi_bench_once() {
         bash -c "cd $(sh_quote "$BENCH_RUNNER") && exec python3 Tools/Scripts/run-benchmark $args"
     local rc=$?
     set -e
+    # Whatever run-benchmark left behind on the board ends here, not at the
+    # next run's prepare_env: a browser that outlives a timed-out run is a
+    # second browser on the GPU and in the 623 MB. Then the board's side of
+    # the evidence comes over: the browser's own output (moved -- the board
+    # keeps nothing of a run) and the tail of its system log (the OOM killer
+    # reports there), both beside result.json.
+    i_ssh "$(pi_kill_cmd "$json")" >/dev/null 2>&1 || true
+    i_ssh 'cat /tmp/wk-browser.log 2>/dev/null; rm -f /tmp/wk-browser.log' > "$out/browser.log" 2>/dev/null || true
+    i_ssh 'tail -n 300 /tmp/messages 2>/dev/null' > "$out/board.log" 2>/dev/null || true
     wkdata env-record "$out/env.json" --update wall_time_s="$(( $(date +%s) - wall_start ))"
 
     # The check the driver made of the process that reported: recorded either
@@ -706,13 +764,13 @@ pi_bench_once() {
         warn "run-benchmark exited $rc from slot '$slot'$([ -s "$out/result.json" ] || printf ' with no result')"
         first_error "$out/run.log" | sed 's/^/  /' >&2 || true
         log "  full log: $out/run.log"
-        PI_LAST_RUN="$id"
+        PI_LAST_RUN="$out"
         return 1
     fi
-    PI_LAST_RUN="$id"
+    PI_LAST_RUN="$out"
     log "  verified    the reporting WPEWebProcess ran slot '$slot' ($verified check(s), build-id $(wkslot get "$json" build_id | cut -c1-12))"
     tr '\r' '\n' < "$out/run.log" | grep -iE '^(Score|Total|.*Score:)' | tail -3 | sed 's/^/  /' >&2 || true
-    log "  recorded    $id"
+    log "  recorded    $out"
     return 0
 }
 
@@ -721,10 +779,12 @@ pi_bench_once() {
 # throttling, SD card cache state); running all of A then all of B would put
 # the drift entirely on B, indistinguishable from an effect of the change.
 #
-# Each half is recorded as its own run, so the output is 2N runs in the store
-# and the statistics are `wk bench report`'s job: compare-results already
-# does Welch with FDR correction across subtests, and reimplementing that
-# here would be a second, worse copy.
+# Each half is recorded as its own run, tagged with its round and arm, and
+# the comparison is `wk bench report <task>`'s job: it pairs the rounds, keeps
+# only those where both arms produced a result -- a round where one arm
+# crashed and the other did not is not half a data point, since a crash
+# correlates with the heavier binary under a memory ceiling -- and does the
+# statistics once, for a finished task and a half-done one alike.
 pi_bench_ab() {
     local spec="$1" n="$2" a b i
     a="${spec%%,*}"; b="${spec##*,}"
@@ -733,28 +793,24 @@ pi_bench_ab() {
     log "interleaving $n round(s) of $a vs $b -- $((n * 2)) runs"
     log "  alternated rather than blocked, so thermal drift lands on both arms"
 
-    # Only *paired* rounds are compared: a round where one arm crashed and the
-    # other did not is not half a data point -- a crash usually correlates
-    # with the heavier binary under a memory ceiling, so the surviving arm is
-    # exactly the one that would bias the answer. Dropped, not deleted: both
-    # records stay in the store as evidence for investigating the crash.
-    local a_runs="" b_runs="" ra rb kept=0 lost=0
+    PI_AB_A="$a"; PI_AB_B="$b"
+    local ra rb kept=0 lost=0
     i=1
     while [ "$i" -le "$n" ]; do
         log ""
         log "round $i/$n -- slot $a"
         ra=""; rb=""
-        if pi_bench_once "$a"; then ra="$PI_LAST_RUN"; fi
+        PI_AB_ROUND="$i"; PI_AB_ARM=a
+        if pi_bench_once "$a"; then ra=1; fi
         log "round $i/$n -- slot $b"
-        if pi_bench_once "$b"; then rb="$PI_LAST_RUN"; fi
+        PI_AB_ARM=b
+        if pi_bench_once "$b"; then rb=1; fi
 
         if [ -n "$ra" ] && [ -n "$rb" ]; then
-            a_runs="${a_runs:+$a_runs,}$ra"
-            b_runs="${b_runs:+$b_runs,}$rb"
             kept=$((kept + 1))
         else
             lost=$((lost + 1))
-            warn "round $i produced ${ra:+a }${rb:+b }only -- dropped from the comparison"
+            warn "round $i produced ${ra:+$a }${rb:+$b }only -- the report drops it"
             # A transient OOM is real and recoverable, so carrying on is still
             # right; stopping after three losses keeps a quietly-failing board
             # from burning every remaining round unseen.
@@ -762,24 +818,19 @@ pi_bench_ab() {
         fi
         i=$((i + 1))
     done
+    PI_AB_ROUND=""; PI_AB_ARM=""
 
     log ""
-    log "$kept round(s) usable, $lost dropped"
-    [ "$kept" -ge 1 ] || die "no round produced both halves; nothing to compare.
-    The individual runs that did finish are in the store ('wk bench ls')."
-
-    # The comparison itself is compare-results' job and nobody else's --
-    # WebKit's own tool, the one every other WebKit result is judged by.
-    log ""
-    log "comparing: $kept run(s) per arm, merged"
-    log "  a = slot $a   b = slot $b"
-    # Text here, and the same report as one self-contained html file beside
-    # the runs -- histograms and per-subtest tables are read later, not in a
-    # terminal scrollback.
-    local html="$BENCH_DIR/$(date -u +%Y%m%dT%H%M%SZ)-ab-$plan-$machine-$a-vs-$b.html"
-    "$WK_ROOT/wk" bench report "$a_runs" "$b_runs" --text --html "$html" \
-        || warn "the report did not complete; the runs are recorded and can be
-  compared by hand:  wk bench report $a_runs $b_runs --text"
+    log "$kept round(s) usable, $lost dropped; the runs are in $(bench_task_dir "$PI_TASK")/runs"
+    # The task's creator reports it: this command when the task is its own,
+    # `wk ab` (which may have other boards still running) when it is not.
+    if [ -n "$PI_TASK_OWNED" ]; then
+        "$WK_ROOT/wk" bench report "$PI_TASK" --html --text \
+            || warn "the report did not complete; the runs are recorded:  wk bench report $PI_TASK"
+    else
+        log "  report:  wk bench report $PI_TASK"
+    fi
+    [ "$kept" -ge 1 ] || die "no round produced both halves on $machine; nothing to compare."
 }
 
 # --- wk pi boot-order ----------------------------------------------------------

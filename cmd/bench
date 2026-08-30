@@ -39,14 +39,25 @@
 #                                          room: plant a job, reboot, read it
 #                                          back. --preflight/--status/--collect
 #   wk bench ab-summary --runs <tsv>       the A/B's own verdict, per arm
-#   wk bench report <run-a> <run-b>        Score+Time per subtest, Welch/FDR,
-#       [--html out.html] [--text]        histograms, variance by
-#                                          configuration -- text (default) or
-#                                          one self-contained html file
+#   wk bench report <task> [--html]        the task's A/B: one Score+Time per
+#                                          subtest table, Welch/FDR, histograms
+#                                          and variance per device and plan,
+#                                          out of the rounds recorded so far --
+#                                          a task still running is reported as
+#                                          partial and says what is missing;
+#                                          --html writes report-<device>-<plan>.html
+#                                          into the task's directory
+#   wk bench report <run-a> <run-b>        the same report for any two runs
+#       [--html out.html] [--text]        (either side may be comma-separated
+#                                          run directories, pooled)
 #   wk bench compare <run-a> <run-b> [ws]  `wk bench report` in text mode; the
 #                                          third argument is accepted and
-#                                          ignored (a or b may be comma-separated)
-#   wk bench ls                            saved runs
+#                                          ignored
+#   wk bench ls                            every task -- one per wk ab, wk pi
+#                                          bench or wk bench invocation, named
+#                                          for when it was requested and what
+#                                          it measures -- with its state and
+#                                          each run's directory
 #
 #   --config decides the runner: a browser port (wpe-release, gtk-release) runs
 #   the plan in MiniBrowser, a JSCOnly port (jsc-release) runs it in the jsc
@@ -318,19 +329,12 @@ BROWSER_ARGS=""
 # the default and, on macOS, the only option.
 CORES=""
 
-# --- saved runs --------------------------------------------------------------
+# --- saved tasks and their runs -----------------------------------------------
+# Everything but "which tasks are running" is read off the store by
+# lib/wkdata.py; running is the task's lock, checked here (lock_alive).
 cmd_ls() {
-    [ -d "$BENCH_DIR" ] || { log "(no runs yet)"; return 0; }
-    local d
-    for d in $(ls -1 "$BENCH_DIR" 2>/dev/null | sort); do
-        local meta="$BENCH_DIR/$d/env.json"
-        printf '%-40s' "$d"
-        if [ -f "$meta" ]; then
-            wkdata ls-summary "$meta"
-        else
-            echo
-        fi
-    done
+    [ -d "$BENCH_DIR" ] || { log "(no tasks yet)"; return 0; }
+    wkdata ls "$BENCH_DIR" --running "$(bench_running_tasks)"
 }
 
 # --- the payload -------------------------------------------------------------
@@ -509,7 +513,7 @@ preflight() {
 #
 # run_jsc <workspace> <plan> <out-dir> <run-id> <payload-host> <payload-in-target> <src>
 run_jsc() {
-    local ws="$1" plan="$2" out="$3" id="$4" payload="$5" payload_ctr="$6" src="$7"
+    local ws="$1" plan="$2" out="$3" payload="$4" payload_ctr="$5" src="$6"
 
     [ -n "$payload" ] || die "$plan has no seeded payload, and the jsc runner has
     nothing to run without one. 'wk bench seed $ws $plan' fetches it; a plan
@@ -658,8 +662,16 @@ cmd_run() {
     seeded_ctr=""
     [ -n "$seeded" ] && seeded_ctr="/cache/bench/$(basename "$seeded")"
 
+    # One task per invocation, one run in it; the container sees the store
+    # at /bench, so the run's store-relative path is what run-benchmark is
+    # told to write to.
     local id="$(date -u +%Y%m%dT%H%M%SZ)-$plan-$ws"
-    local out="$BENCH_DIR/$id"
+    local task="$(bench_task_stamp)-$ws"
+    bench_task_new "$task" subject.kind=workspace subject.spec="$ws" \
+        devices="container=$CONFIG" plans="$plan" rounds=1 slots="$ws" count="$COUNT" \
+        --command "wk bench $ws $plan --config $CONFIG${COUNT:+ --count $COUNT}"
+    local rel="$task/runs/$id"
+    local out="$BENCH_DIR/$rel"
     ensure_dir "$out"
 
     local sha; sha=$(t_exec "$ws" git -C /src/WebKit rev-parse HEAD 2>/dev/null | tr -d '\r\n')
@@ -683,7 +695,7 @@ cmd_run() {
     # so this is the host's answer.
     bench_configuration_args
     wkdata env-record "$out/env.json" \
-        plan="$plan" workspace="$ws" config="$CONFIG" browser="$BROWSER" \
+        plan="$plan" workspace="$ws" config="$CONFIG" browser="$BROWSER" task="$task" \
         webkit_sha="$sha" count="$COUNT" local_copy="$seeded" \
         software_reason="$SOFTWARE_REASON" \
         class="$class" runner="$runner" arch="$arch" bench_host="$BENCH_HOST" \
@@ -704,7 +716,7 @@ cmd_run() {
     # The jsc runner writes its own result.json and reports for itself.
     if [ "$runner" = jsc ]; then
         set +e
-        run_jsc "$ws" "$plan" "$out" "$id" "$seeded" "$seeded_ctr" /src/WebKit
+        run_jsc "$ws" "$plan" "$out" "$seeded" "$seeded_ctr" /src/WebKit
         local jrc=$?
         set -e
         wkdata env-record "$out/env.json" --update wall_time_s="$(( $(date +%s) - wall_start ))"
@@ -714,7 +726,7 @@ cmd_run() {
         tr '\r' '\n' < "$out/run-1.log" | grep -iE '^(Score|Total|.*Score:)' \
             | tail -5 | sed 's/^/  /' >&2 || true
         log ""
-        log "  compare with:  wk bench report <other-run> $id"
+        log "  compare with:  wk bench report <other-run> $out"
         return 0
     fi
 
@@ -749,7 +761,7 @@ cmd_run() {
     fi
 
     local args="--plan $plan --browser $BROWSER --build-directory $run_build_dir"
-    args="$args --output-file /bench/$id/result.json --no-adjust-unit --show-iteration-values"
+    args="$args --output-file /bench/$rel/result.json --no-adjust-unit --show-iteration-values"
     [ -n "$COUNT" ] && args="$args --count $COUNT"
     [ -n "$seeded_ctr" ] && args="$args --local-copy $seeded_ctr"
     [ -n "$SUBTESTS" ] && args="$args --subtests $SUBTESTS"
@@ -764,7 +776,7 @@ cmd_run() {
     set +e
     run_watched "$out/run.log" -- \
         t_exec "$ws" bash -lc "cd /src/WebKit && ${pad_prelude} \
-            WK_BENCH_RUN=$id $run_env ${cores_wrap}${aslr}Tools/Scripts/run-benchmark $args"
+            $run_env ${cores_wrap}${aslr}Tools/Scripts/run-benchmark $args"
     local rc=$?
     set -e
 
@@ -781,30 +793,26 @@ cmd_run() {
     # Surfaces the score line out of run-benchmark's own summary table.
     tr '\r' '\n' < "$out/run.log" | grep -iE '^(Score|Total|.*Score:)' | tail -5 | sed 's/^/  /' >&2 || true
     log ""
-    log "  compare with:  wk bench report <other-run> $id"
+    log "  compare with:  wk bench report <other-run> $out"
 }
 
 # --- comparison --------------------------------------------------------------
-# `wkdata.py report` does the statistics; this only resolves run ids to
-# result.json files and refuses a comparison naming nothing. Either side may
-# be a comma-separated list of runs -- an interleaved A/B (`wk pi bench --ab`)
-# produces exactly that shape, N runs per arm, pooled into the same subtest
-# arrays. Resolution is per element: a name in the store, or a path.
-# rewrite=1 maps a store path to /bench, where a workspace would see it;
-# every caller below passes rewrite=0, since `wk bench report` always reads
-# local JSON directly. One path per line, never space-joined: the benchmark
-# volume is named `WK Bench` by default, so a result path on it contains
-# spaces and cannot be word-split back apart.
+# `wkdata.py report` does the statistics; this only resolves run directories
+# to result.json files and refuses a comparison naming nothing. Either side
+# may be a comma-separated list of runs, pooled into the same subtest arrays.
+# A run is a directory: the path `wk bench ls` prints, or that path relative
+# to the store (<task>/runs/<run>). One path per line, never space-joined:
+# the benchmark volume is named `WK Bench` by default, so a result path on
+# it contains spaces and cannot be word-split back apart.
 _compare_files() {
-    local spec="$1" which="$2" rewrite="${3:-1}" n=0 one f
+    local spec="$1" which="$2" n=0 one d
     local IFS=,
     for one in $spec; do
         [ -n "$one" ] || continue
-        f="$BENCH_DIR/$one/result.json"
-        [ -f "$f" ] || f="$one"
-        [ -f "$f" ] || die "no such run in $which: $one"
-        [ "$rewrite" = 1 ] && f="${f/#$BENCH_DIR//bench}"
-        printf '%s\n' "$f"
+        d="$one"
+        [ -d "$d" ] || d="$BENCH_DIR/$one"
+        [ -f "$d/result.json" ] || die "no such run in $which: $one (a run directory, from 'wk bench ls')"
+        printf '%s\n' "$d/result.json"
         n=$((n + 1))
     done
     [ "$n" -gt 0 ] || die "no runs given for $which"
@@ -823,40 +831,60 @@ $2
 EOF
 }
 
-# wk bench report <run-a> <run-b> [--html out.html] [--text] -- resolves run
-# ids or paths to result.json files (aspec/bspec, same comma-separated shape
-# as elsewhere in this file) and hands them to `wkdata.py report`, which
-# does the statistics, reading results directly from a container's store or
-# a macOS staged tree, no workspace needed. `wk bench compare` is the same
-# call, in text mode.
+# wk bench report <task> [--html] [--text]
+# wk bench report <run-a> <run-b> [--html out.html] [--text]
+# One argument is a task: `wkdata.py task-report` pairs its rounds by the
+# round and arm each run recorded, reports what is there, and says whether
+# the task is running (its lock), complete or stopped short. Two are run
+# directories (aspec/bspec, comma-separated to pool), handed to `wkdata.py
+# report`. Both read results directly from the store or a macOS staged tree,
+# no workspace needed; `wk bench compare` is the two-run call in text mode.
+_REPORT_USAGE="usage: wk bench report <task> [--html] [--text]
+       wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h"
 cmd_report() {
     local aspec="" bspec="" html="" text=""
     local positional=()
     while [ $# -gt 0 ]; do
         case "$1" in
-            --html) html="${2:-}"; shift 2 ;;
+            # `--html out.html` names a file in the two-run form; a bare
+            # `--html` is the task form's, whose files are named for it.
+            --html) case "${2:-}" in *.html) html="$2"; shift 2 ;; *) html=1; shift ;; esac ;;
             --text) text=1; shift ;;
-            -*) die "usage: wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h" ;;
+            -*) die "$_REPORT_USAGE" ;;
             # A third bare word is `wk bench compare`'s <ws> -- accepted here
             # (this function backs both) and ignored below; a fourth is not.
             *) positional+=("$1"); shift ;;
         esac
     done
-    [ ${#positional[@]} -le 3 ] \
-        || die "usage: wk bench report <run-a> <run-b> [--html out.html] [--text]; unexpected argument: ${positional[3]}"
-    aspec="${positional[0]:-}"; bspec="${positional[1]:-}"
-    [ -n "$aspec" ] && [ -n "$bspec" ] || die "usage: wk bench report <run-a> <run-b> [--html out.html] [--text]"
+    [ ${#positional[@]} -le 3 ] || die "$_REPORT_USAGE; unexpected argument: ${positional[3]}"
+    [ ${#positional[@]} -ge 1 ] || die "$_REPORT_USAGE"
+
+    if [ ${#positional[@]} -eq 1 ]; then
+        local task="${positional[0]}" dir running=()
+        dir=$(bench_task_dir "$task")
+        [ -f "$dir/task.json" ] \
+            || die "no such task '$task' ($dir has no task.json). 'wk bench ls' lists the tasks;
+    two run directories compare any two runs."
+        [ "$html" != 1 ] && [ -n "$html" ] \
+            && die "a task's html reports are named for it (report-<device>-<plan>.html, in $dir); --html takes no file here"
+        lock_alive "bench-task-$task" && running=(--running)
+        wkdata task-report "$dir" ${running[@]+"${running[@]}"} ${html:+--html} ${text:+--text}
+        return
+    fi
+    aspec="${positional[0]}"; bspec="${positional[1]:-}"
+    [ -n "$bspec" ] || die "$_REPORT_USAGE"
+    [ "$html" != 1 ] || die "the two-run form writes where it is told: --html out.html"
 
     local ca_s cb_s ca cb
-    ca_s=$(_compare_files "$aspec" "-a" 0); cb_s=$(_compare_files "$bspec" "-b" 0)
+    ca_s=$(_compare_files "$aspec" "-a"); cb_s=$(_compare_files "$bspec" "-b")
     _lines_into ca "$ca_s"; _lines_into cb "$cb_s"
 
     # A single-iteration run has no variance, so its p-values are all "-".
     # Said here rather than left to be noticed in the table.
-    local a="${aspec%%,*}" b="${bspec%%,*}" r
-    for r in "$a" "$b"; do
-        if [ "$(wkdata get "$BENCH_DIR/$r/env.json" count 2>/dev/null)" = 1 ]; then
-            warn "run '$r' has count=1: no p-value can be computed"
+    local r
+    for r in "${ca[0]}" "${cb[0]}"; do
+        if [ "$(wkdata get "$(dirname "$r")/env.json" count 2>/dev/null)" = 1 ]; then
+            warn "run '$(basename "$(dirname "$r")")' has count=1: no p-value can be computed"
             log  "  re-run with --count 2 or more for a comparison with statistics"
         fi
     done
@@ -1526,8 +1554,7 @@ case "${1:-}" in
     ls)      shift; cmd_ls; exit 0 ;;
     compare) shift; [ $# -ge 2 ] || die "usage: wk bench compare <run-a> <run-b> [ws]; see wk bench -h"
              cmd_compare "$@"; exit 0 ;;
-    report)  shift; [ $# -ge 2 ] || die "usage: wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h"
-             cmd_report "$@"; exit 0 ;;
+    report)  shift; cmd_report "$@"; exit 0 ;;
     staged)  shift; cmd_staged "$@"; exit 0 ;;
     # The whole macOS lane, not one step of it: build, stage, arm, wait for
     # the person at the startup manager, run, come back, read the result.

@@ -252,3 +252,42 @@ class TestPushStatusAll(WkTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBenchTaskLine(unittest.TestCase):
+    """A benchmark task is one `bench` record per task shown (cmd/status
+    report_health): the task's name, its state coloured by the shared
+    vocabulary, and the summary recomputed from its runs -- every running
+    task, else the newest -- in text and json alike."""
+
+    def _records(self):
+        return [
+            machine_rec("moose", host_self=True),
+            {"kind": "bench", "machine": "moose", "task": "20260830T120000Z-wpe-pr1725",
+             "path": "/store/bench/20260830T120000Z-wpe-pr1725", "state": "running",
+             "summary": "3/10 runs ended, 3 ok, 0 failed, 1 round usable; now speedometer2.1 rpi3 pr1725",
+             "subject": "A/B wpe:1725: afa2ed9e70 vs base 04abe09851 · rpi3 · speedometer2.1 · 5 rounds"},
+            {"kind": "bench", "machine": "moose", "task": "20260830T130000Z-rpi4-base-vs-pr1725",
+             "path": "/store/bench/20260830T130000Z-rpi4-base-vs-pr1725", "state": "incomplete",
+             "summary": "2/6 runs ended, 1 ok, 1 failed, 0 rounds usable",
+             "subject": "base vs pr1725 · rpi4 · speedometer2.1 · 3 rounds"},
+        ]
+
+    def test_text_names_every_task_with_state_and_summary(self):
+        cp = render(self._records(), "text")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertIn("20260830T120000Z-wpe-pr1725", cp.stdout)
+        self.assertIn("running", cp.stdout)
+        self.assertIn("now speedometer2.1 rpi3 pr1725", cp.stdout)
+        self.assertIn("20260830T130000Z-rpi4-base-vs-pr1725", cp.stdout)
+        self.assertIn("incomplete", cp.stdout)
+        self.assertIn("/store/bench/20260830T120000Z-wpe-pr1725", cp.stdout)
+
+    def test_json_carries_both_records(self):
+        cp = render(self._records(), "json")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        doc = json.loads(cp.stdout)
+        machines = doc["machines"] if isinstance(doc, dict) else doc
+        found = json.dumps(machines)
+        self.assertIn("20260830T120000Z-wpe-pr1725", found)
+        self.assertIn("20260830T130000Z-rpi4-base-vs-pr1725", found)

@@ -29,6 +29,7 @@ import unittest
 
 from tests.support import (
     WkTest,
+    bench_ls_runs,
     podman_vm_ssh,
     rand_suffix,
     requires_podman_vm,
@@ -111,9 +112,11 @@ class TestBenchContainerRun(WkTest):
                 timings[f"run{i}"] = time.time() - t0
 
                 ls = run("bench", "ls", timeout=30)
-                ids = [line.split()[0] for line in ls.stdout.splitlines() if line.strip()]
+                ids = bench_ls_runs(ls.stdout)
                 self.assertTrue(ids, f"'wk bench ls' is empty after run {i}:\n{ls.stdout}")
-                run_ids.append(ids[-1])
+                # Store-relative (<task>/runs/<run>): the same id whether the
+                # store is the host's or the podman VM's.
+                run_ids.append(ids[-1].split("/bench/", 1)[1])
             a_id, b_id = run_ids
             self.assertNotEqual(a_id, b_id, f"the two bench runs recorded the same id: {ls.stdout}")
 
