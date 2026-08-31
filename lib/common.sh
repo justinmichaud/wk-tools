@@ -479,6 +479,66 @@ wk_tailscale_authkey_present() {
     wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)" >/dev/null
 }
 
+# --- the tailnet's control plane -----------------------------------------------
+# The other tailscale credential this machine may hold, and the opposite of
+# the one above in every way that matters: an API access token administers
+# the tailnet, so it lives *here only* and is never seeded onto a card (the
+# rejection above exists to keep it off them). One power is wanted of it --
+# retiring a node the fleet owns, so reprovisioning a board whose card lost
+# its identity does not stop at a person with a browser (lib/tailnet.py).
+#
+# Optional: a workstation that never writes cards needs none, and `wk doctor`
+# reports it re-authable rather than missing.
+wk_tailscale_api_path() { printf '%s' "${WK_TS_API_SECRET:-$HOME/.config/wk/tailscale-api-key}"; }
+
+# The mirror of wk_tailscale_key_reject: here an *auth* key is the wrong one.
+wk_tailscale_api_reject() { # <key>
+    case "${1:-}" in
+        tskey-api-?*) return 0 ;;
+        tskey-auth-*)
+            printf '%s' "that is a node auth key (tskey-auth-...), not an API access token.
+    An auth key enrolls a node and can do nothing else; retiring a node is an
+    administrative act on the tailnet." ;;
+        tskey-client-*|tskey-oauth-*)
+            printf '%s' "that is an OAuth client secret, not an API access token. It mints
+    tokens rather than being one; this asks for the token (tskey-api-...)." ;;
+        "") printf '%s' "there is nothing there." ;;
+        *)  printf '%s' "that is not a tailscale API access token (they start 'tskey-api-')." ;;
+    esac
+    return 1
+}
+
+# No prompting, no side effects -- safe for `wk doctor`, same rule as the
+# auth key's. Presence is not usability: whether the tailnet still accepts it
+# is a request, which only the commands that need it (and `wk doctor`) make.
+wk_tailscale_api_present() {
+    local p; p=$(wk_tailscale_api_path)
+    [ -s "$p" ] || return 1
+    wk_tailscale_api_reject "$(head -1 "$p" 2>/dev/null)" >/dev/null
+}
+
+wk_tailscale_api_key() {
+    local path; path=$(wk_tailscale_api_path)
+    local p why
+    p=$(prompt_secret "$path" \
+        "A tailscale API access token -- it stays on this machine and is never written to a card" \
+        "https://login.tailscale.com/admin/settings/keys") || return 1
+    if why=$(wk_tailscale_api_reject "$(head -1 "$p" 2>/dev/null)"); then
+        printf '%s' "$p"; return 0
+    fi
+    warn "$p is not usable: $why"
+    warn "  Leaving it in place rather than deleting it -- check it and re-run."
+    return 1
+}
+
+# Retire a node the fleet owns, by name. The caller has already established
+# that the name is this fleet's (boot/machines/*.conf); lib/tailnet.py adds
+# the rest of the gate -- an exact match, and never a node that is online.
+wk_tailnet_retire() { # <name>
+    WK_TS_API_SECRET_FILE="$(wk_tailscale_api_path)" \
+        python3 "$WK_ROOT/lib/tailnet.py" retire "$1"
+}
+
 wk_tailscale_authkey() {
     local path="${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"
     local p why

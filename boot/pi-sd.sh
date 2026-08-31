@@ -132,7 +132,7 @@ b_boot_part() { disk_part "$MACH_DEVICE" 3; }
 
 # The wk-managed media, in one line, for the fleet block in `wk status`.
 b_media() {
-    printf 'SD card %s holds both systems: rescue on p1-p2, bench system on p3-p4 (wk boot %s arms it for one boot)' \
+    printf 'SD card %s holds every system: rescue on p1-p2, bench system(s) beside it -- p3-p4, or pairs 5-6 and 7-8 in an extended p3 (wk boot %s --system <id> arms one for one boot)' \
         "$MACH_DEVICE" "$MACH_NAME"
 }
 
@@ -154,7 +154,10 @@ wk sysimage build $MACH_PROFILE
 wk sysimage write --from <path> --disk <reader>:$MACH_DEVICE --rescue --profile $MACH_PROFILE
     no --grow: the rest of the card is where the bench system goes
 wk sysimage write --from <path> --disk <reader>:$MACH_DEVICE@second --profile <bench profile>
-    the bench system, into partitions 3 and 4 beside the rescue
+    the first bench system beside the rescue
+wk sysimage write --from <path> --disk <reader>:$MACH_DEVICE@third --profile <bench profile>
+    optional: a second bench system (the shared layout holds two), for an
+    A/B across images; 'wk boot $MACH_NAME --system <id>' picks one
     then carry the card to $MACH_NAME and power it on
 wk boot $MACH_NAME
 REPROV

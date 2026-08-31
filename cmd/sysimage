@@ -679,15 +679,34 @@ _tailnet_name_preflight() { # <name> <bench|rescue>
     and nothing here can find it."
         return 0
     fi
-    die "'$name' is already on the tailnet (${hit#*:}), online or offline.
+    # The name is one this fleet declares (it was derived from the machine's
+    # own conf, _tailnet_name_for), and a node holding it that this board is
+    # not running is a leftover of the card being replaced. Retiring it is
+    # this command's to do: the alternative is a person at the admin console
+    # in the middle of a lane whose whole point is that it repeats. Narrow by
+    # construction -- lib/tailnet.py matches the name exactly and refuses a
+    # node that is online, which is a live board rather than a leftover.
+    local out
+    if ! wk_tailscale_api_present; then
+        die "'$name' is already on the tailnet (${hit#*:}), online or offline.
     Joining under it again does not keep the name -- Tailscale renames the
     collision to '$name-1', and everything here reaches a board by its
-    tailnet name, so a card that joins renamed is a card nothing here can
-    find. There is no --force past this.
-    Remedy: remove the stale node from the tailnet admin console
-    (https://login.tailscale.com/admin/machines -> $name -> Remove; there is
-    no API credential in this repo, so it is a hand step), or give this board
-    a different name in boot/machines/<name>.conf (MACH_SSH)."
+    tailnet name, so a card that joins renamed is a card nothing here can find.
+    This machine holds no tailnet API token, so it cannot retire the stale node
+    itself:  wk key tailnet-api
+    Then re-run this write. (By hand instead: remove '$name' at
+    https://login.tailscale.com/admin/machines -- but that is a step this lane
+    exists not to need.)"
+    fi
+    if disk_would "retire the stale tailnet node '$name' so this card can join under it"; then
+        return 0
+    fi
+    info "'$name' is held by a node this board is not running; retiring it so the card can join under it"
+    out=$(wk_tailnet_retire "$name" 2>&1) || die "could not retire the stale tailnet node '$name':
+$(printf '%s\n' "$out" | sed 's/^/    /')
+    Nothing was written. A node that is online is a running board, not a
+    leftover -- check what is answering to that name before writing this card."
+    log "  $(printf '%s' "$out" | sed 's/^/  /')"
 }
 
 _resolve_disk_dev() { # <image machine>

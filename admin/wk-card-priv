@@ -106,7 +106,9 @@ BOOTP=1; ROOTP=2; SECOND=""; SLOT=0; PFX=""; GATED_DEV=""
 # it from the first system's role instead (_second_write).
 _slot_resolve() { # <disk>
     local p3type
-    p3type=$(sfdisk --part-type "$1" 3 2>/dev/null || true)
+    # tr: sfdisk prints the type indented (" 5"), and a case pattern does
+    # not trim.
+    p3type=$(sfdisk --part-type "$1" 3 2>/dev/null | tr -d '[:space:]' || true)
     case "$p3type" in
         5|f|0x5|0xf|05|0f)
             BOOTP=$((3 + 2 * SLOT)); ROOTP=$((4 + 2 * SLOT)) ;;
@@ -1355,13 +1357,23 @@ v_second_state() {
 # /run: gone at reboot, which is right for something that lives for one
 # command.
 TAILNET_STATE=var/lib/tailscale/tailscaled.state
+# Keyed by the medium, not by the pair: a board's *bench role* is one tailnet
+# node, and the systems beside the rescue take turns being it. Two identities
+# would collide on one name the moment the second system joined.
 _tailnet_stash() { printf '/run/wk-card-tailnet-%s.state' "$(basename "$1")"; }
-_tailnet_save_edit() { # <mountpoint of partition 4> <stash>
+
+# Every partition on this medium that could hold a bench system's root, the
+# addressed one first: a system written beside one that already holds the
+# board's identity adopts it rather than joining under a name that is taken.
+_tailnet_roots() { # <disk>
+    local p
+    printf '%s\n' "$ROOTP"
+    for p in 4 6 8; do [ "$p" = "$ROOTP" ] || printf '%s\n' "$p"; done
+}
+_tailnet_save_edit() { # <mountpoint of a bench root> <stash>
     if [ -f "$1/$TAILNET_STATE" ]; then
         cp "$1/$TAILNET_STATE" "$2" && chmod 0600 "$2" || fail "could not keep the tailnet state aside"
         say "kept=yes"
-    else
-        say "kept=no"
     fi
 }
 _tailnet_restore_edit() { # <mountpoint of partition 4> <stash>
@@ -1375,19 +1387,27 @@ _tailnet_restore_edit() { # <mountpoint of partition 4> <stash>
 # tailnet-save <disk>@second -- kept=yes|no. A partition 4 with no filesystem
 # (a write that died in the split) holds nothing to keep.
 v_tailnet_save() {
-    local dev stash root; gate "${1:-}"; dev=$GATED_DEV
+    local dev stash p root; gate "${1:-}"; dev=$GATED_DEV
     [ -n "$SECOND" ] || deny "tailnet-save takes '<disk>@second' or '<disk>@third'"
-    stash=$(_tailnet_stash "$dev$PFX"); rm -f "$stash"
-    root=$(part "$dev" "$ROOTP")
-    [ -b "$root" ] && [ "$(blkid -o value -s TYPE "$root" 2>/dev/null)" = ext4 ] || { say "kept=no"; return 0; }
-    with_mount -r "$root" _tailnet_save_edit "$stash"
+    stash=$(_tailnet_stash "$dev"); rm -f "$stash"
+    for p in $(_tailnet_roots "$dev"); do
+        root=$(part "$dev" "$p")
+        [ -b "$root" ] || continue
+        [ "$(blkid -o value -s TYPE "$root" 2>/dev/null)" = ext4 ] || continue
+        with_mount -r "$root" _tailnet_save_edit "$stash"
+        if [ -f "$stash" ]; then
+            [ "$p" = "$ROOTP" ] || say "adopted=$p"
+            return 0
+        fi
+    done
+    say "kept=no"
 }
 # tailnet-restore <disk>@second -- what `tailnet-save` kept, onto the
 # rewritten partition 4; the stash is spent.
 v_tailnet_restore() {
     local dev stash; gate "${1:-}"; dev=$GATED_DEV
     [ -n "$SECOND" ] || deny "tailnet-restore takes '<disk>@second' or '<disk>@third'"
-    stash=$(_tailnet_stash "$dev$PFX")
+    stash=$(_tailnet_stash "$dev")
     [ -f "$stash" ] || { say "nothing kept"; return 0; }
     with_mount "$(part "$dev" "$ROOTP")" _tailnet_restore_edit "$stash"
     rm -f "$stash"

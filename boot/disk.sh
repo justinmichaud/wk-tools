@@ -802,10 +802,16 @@ disk_tailnet_save() { # <device>@second
 $(printf '%s\n' "$out" | sed 's/^/    /')"
     case "$out" in
         *kept=yes*)
-            info "keeping the node's tailnet identity aside: the rewritten system comes back as the same node"
+            case "$out" in
+                *adopted=*)
+                    info "taking the board's bench tailnet identity from the system beside this one:
+  the two bench systems take turns being one node, so the new one is reachable
+  under the name the board's bench role already holds" ;;
+                *) info "keeping the node's tailnet identity aside: the rewritten system comes back as the same node" ;;
+            esac
             printf yes ;;
         *kept=no*)
-            debug "$dev's partition 4 holds no tailnet identity; the new system joins fresh"
+            debug "$dev holds no bench tailnet identity yet; the new system joins fresh"
             printf no ;;
         *) die "$MACH_NAME's card helper did not say whether $dev's partition 4 holds a
     tailnet identity (it said: ${out:-nothing}). Refusing to guess: a system that

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# wk key register|check|show|ensure|tailnet -- the deploy keys workspaces push with
+# wk key register|check|show|ensure|tailnet|tailnet-api -- the deploy keys workspaces push with
 # wk: where=host name=none group=sources needs gh,gh-auth
-# wk: sub show,ensure,pub,sshtest,fingerprints,tailnet needs=
+# wk: sub show,ensure,pub,sshtest,fingerprints,tailnet,tailnet-api needs=
 #
 # One key per fork, shared by every workspace. GitHub deploy keys are
 # scoped to a single repository and refuses the same key on a second one,
@@ -19,6 +19,10 @@
 #   wk key check      verify each key authenticates with write access
 #   wk key show       print the public keys
 #   wk key ensure     create missing keys without registering them
+#   wk key tailnet-api [--replace]
+#                               the tailnet API access token this machine
+#                               administers with: retiring a fleet node whose
+#                               name a new card needs. Never written to a card.
 #   wk key tailnet [--replace]   the fleet's tailnet auth key: report it, ask
 #                     for it, or (--replace) rotate it
 #
@@ -149,7 +153,7 @@ priv_of()     { in_vm "for d in secrets push-keys; do \
 
 # --- ensure runs inside the VM, where the secrets are ------------------------
 if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
-    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
     ensure_dir "$WK_STORE/secrets" 0700
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
@@ -173,10 +177,57 @@ if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
 fi
 
 case "$ACTION" in
+# The tailnet API access token: what retires a fleet node whose name a new
+# card needs, so a reprovision does not stop at a person with a browser. Host
+# -local like the auth key, and unlike it never seeded onto a card -- it
+# administers the whole tailnet, which is why wk_tailscale_key_reject refuses
+# it wherever an auth key is wanted.
+tailnet-api)
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    _tsapi=$(wk_tailscale_api_path)
+    case "${2:-}" in
+        --replace)
+            wk_tailscale_api_present \
+                || die "there is no tailnet API token here to replace ($_tsapi).
+    'wk key tailnet-api' asks for one."
+            rm -f "$_tsapi"
+            info "removed the old token; nothing on the tailnet is affected"
+            ;;
+        "") ;;
+        *) die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h" ;;
+    esac
+
+    if wk_tailscale_api_present; then
+        info "tailnet API token: present ($_tsapi)"
+        log  "  starts $(head -c 10 "$_tsapi")…, mode $(stat -c '%a' "$_tsapi" 2>/dev/null || stat -f '%Lp' "$_tsapi" 2>/dev/null)"
+        # Presence is not usability, and this command is the one place a
+        # person is looking at the credential: ask the tailnet.
+        if _out=$(WK_TS_API_SECRET_FILE="$_tsapi" python3 "$WK_ROOT/lib/tailnet.py" check 2>&1); then
+            log  "  $_out"
+        else
+            warn "  $_out"
+            log  "  'wk key tailnet-api --replace' rotates it"
+            exit 1
+        fi
+        log  "  'wk key tailnet-api --replace' rotates it"
+        exit 0
+    fi
+
+    if wk_tailscale_api_key >/dev/null; then
+        info "stored -- a write that needs a stale fleet node retired can now do it itself"
+        exit 0
+    fi
+    die "no tailnet API token, so retiring a stale fleet node is a person's job at
+    https://login.tailscale.com/admin/machines -- a hand step in the middle of a
+    lane built to be repeatable (CLAUDE.md, 'Cattle, not pets').
+    Make one (tag:wk devices scope is enough):
+        https://login.tailscale.com/admin/settings/keys"
+    ;;
+
 # The fleet's tailnet auth key. Host-local, and deliberately not in the VM with
 # the deploy keys: the machine that writes a card is the machine that needs it.
 tailnet)
-    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
     _tspath=$(wk_tailscale_authkey_path)
     case "${2:-}" in
         --replace)
@@ -191,7 +242,7 @@ tailnet)
             log  "  a tagged node does not key-expire, so rotating this costs nothing"
             ;;
         "") ;;
-        *) die "usage: wk key register|check|show|ensure|tailnet; see wk key -h" ;;
+        *) die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h" ;;
     esac
 
     if wk_tailscale_authkey_present; then
@@ -231,8 +282,8 @@ tailnet)
 # `show` is the human version.
 pub)
     remote="${2:-}"
-    [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
-    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
     out=$(pub_of "$remote")
     [ -n "$out" ] || exit 1
     printf '%s\n' "$out"
@@ -243,8 +294,8 @@ pub)
 # machine with the key can offer it.
 sshtest)
     remote="${2:-}"
-    [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
-    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
     priv=$(priv_of "$remote")
     [ -n "$priv" ] || { echo "no key"; exit 1; }
     case "$priv" in */push-keys/*) echo "push is off"; exit 3 ;; esac
@@ -263,7 +314,7 @@ sshtest)
 # where" is a question about the fleet, and reading a fingerprint off a screen
 # beats reading a public key off one.
 fingerprints)
-    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         pub=$(pub_of "$remote")
@@ -280,7 +331,7 @@ fingerprints)
     ;;
 
 show)
-    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         printf '# %s\n%s\n' "$repo" "$(pub_of "$remote")"
@@ -288,7 +339,7 @@ show)
     ;;
 
 register)
-    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
     failed=0
     for machine in $(key_machines); do
         label=$(m_label "$machine")
@@ -337,7 +388,7 @@ EOF
     ;;
 
 check)
-    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
     # Two questions, two sources.
     #
     # ssh answers "is this key registered and scoped to the right repo?" -- a
@@ -400,6 +451,6 @@ EOF
     ;;
 
 *)
-    die "usage: wk key register|check|show|ensure|tailnet; see wk key -h"
+    die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
     ;;
 esac

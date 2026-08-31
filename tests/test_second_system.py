@@ -250,6 +250,20 @@ class TestSecondWrite(WkTest):
         self.assertIn("replacing the layout", cp.stdout)
         self.assertEqual(sorted(_sfdisk_json(disk)), [1, 2, 3, 5, 6, 7, 8])
 
+    def test_slot_resolve_reads_the_extended_layout_off_the_table(self):
+        """the real sfdisk output (' 5', indented) against a real table:
+        @second resolves to 5-6 and @third to 7-8 once partition 3 is
+        extended, and to 3-4 / a refusal before."""
+        disk, img = self._disk(size_mb=2048), self._image()
+        script_pre = _SAY + _lift(CARD_PRIV, "_slot_resolve")
+        cp = bash(script_pre + f'\nSLOT=1; _slot_resolve "{disk}"; echo "$BOOTP $ROOTP"\n')
+        self.assertEqual(cp.stdout.strip().splitlines()[-1], "3 4", cp.stdout + cp.stderr)
+        self.assertEqual(self._write(disk, img, shape="shared", slot=1).returncode, 0)
+        for slot, want in ((1, "5 6"), (2, "7 8")):
+            cp = bash(script_pre + f'\nSLOT={slot}; _slot_resolve "{disk}"; echo "$BOOTP $ROOTP"\n')
+            self.assertEqual(cp.stdout.strip().splitlines()[-1], want,
+                             f"slot {slot}: " + cp.stdout + cp.stderr)
+
     def test_a_dedicated_medium_refuses_a_third(self):
         disk, img = self._disk(), self._image()
         cp = self._write(disk, img, shape="dedicated", slot=2)
@@ -408,10 +422,44 @@ class TestTailnetIdentityAcrossARewrite(WkTest):
         self.assertIn("restored", cp.stdout)
 
     def test_a_system_with_no_state_keeps_nothing(self):
+        """the per-candidate edit is silent and writes nothing when a root
+        carries no identity; whether the *medium* holds one is the verb's
+        answer, over the candidates below."""
         cp = self._run(f'_tailnet_save_edit "{self.root}" "{self.stash}"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("kept=no", cp.stdout)
+        self.assertNotIn("kept=yes", cp.stdout)
         self.assertFalse(self.stash.exists())
+
+    def test_the_addressed_root_is_tried_before_the_others(self):
+        """A board's bench role is one tailnet node and its systems take
+        turns being it, so a system written beside one that already holds the
+        identity adopts it rather than joining under a name that is taken.
+        The addressed pair still wins when it has its own."""
+        def roots(rootp):
+            cp = bash(_SAY + f"ROOTP={rootp}\n"
+                      + _lift(CARD_PRIV, "_tailnet_roots") + '\n_tailnet_roots /dev/x\n')
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            return cp.stdout.split()
+        self.assertEqual(roots(8), ["8", "4", "6"])
+        self.assertEqual(roots(6), ["6", "4", "8"])
+        self.assertEqual(roots(4), ["4", "6", "8"])
+
+    def test_the_stash_is_per_medium_not_per_pair(self):
+        """two stash names would be two identities, and the second system to
+        join would collide with the first on one name."""
+        cp = bash(_SAY + _lift(CARD_PRIV, "_tailnet_stash")
+                  + '\n_tailnet_stash /dev/mmcblk0; echo; _tailnet_stash /dev/mmcblk0\n')
+        a, b = cp.stdout.split()
+        self.assertEqual(a, b)
+        body = _lift(CARD_PRIV, "v_tailnet_save") + _lift(CARD_PRIV, "v_tailnet_restore")
+        self.assertNotIn('_tailnet_stash "$dev$PFX"', body,
+                         "the stash is keyed per pair again; the two bench systems would want two nodes")
+
+    def test_the_save_verb_reports_an_adoption(self):
+        body = _lift(CARD_PRIV, "v_tailnet_save")
+        self.assertIn('say "adopted=$p"', body)
+        self.assertIn('[ "$p" = "$ROOTP" ]', body,
+                      "an adoption is only reported when the identity came from another pair")
 
     def test_the_verbs_are_gated_second_only_and_dispatched(self):
         text = CARD_PRIV.read_text()

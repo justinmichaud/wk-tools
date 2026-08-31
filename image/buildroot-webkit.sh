@@ -116,8 +116,12 @@ EOF
 build_start=$(date +%s)
 say "building (make wpewebkit-rebuild; the output below is the whole account of it)"
 # shellcheck disable=SC2086
-WK_MB_PER_JOB=2048 guard_run "$JOBS" -- env FORCE_UNSAFE_CONFIGURE=1 BR2_JLEVEL="$JOBS" \
-    make -C "$WORKDIR" $BR_EXT wpewebkit-rebuild \
+# BR2_JLEVEL on make's command line, not in the environment: it is a kconfig
+# symbol buildroot reads from .config, and an environment value loses to that
+# include. It is what buildroot's ninja packages (wpewebkit) size themselves
+# by, and its default is nproc+1 -- five times the guard's 2 GB/job budget.
+WK_MB_PER_JOB=2048 guard_run "$JOBS" -- env FORCE_UNSAFE_CONFIGURE=1 \
+    make -C "$WORKDIR" $BR_EXT BR2_JLEVEL="$JOBS" wpewebkit-rebuild \
     || fail "the WebKit build failed. The last lines above are the failing step."
 say "built in $(( ($(date +%s) - build_start) / 60 )) min"
 say "finalising the root filesystem (strip, development files) the way an image build does"

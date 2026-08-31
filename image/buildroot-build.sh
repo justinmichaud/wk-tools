@@ -110,6 +110,23 @@ if [ -n "$TREE_COMMIT" ]; then
     say "pinned at $(git -C "$WORKDIR" rev-parse --short HEAD)"
 fi
 
+# --- this repository's corrections to the vendor tree ----------------------
+# The fork pins package versions it never built (wpebackend-fdo 1.14 is a
+# meson project; the fork's package still calls cmake), so the pinned tree
+# takes this repository's patches: input, not hand-edit -- a fresh clone
+# converges to the same tree. Idempotent: an applied patch is skipped.
+for p in /opt/wk-tools/image/buildroot/tree-patches/*.patch; do
+    [ -e "$p" ] || continue
+    if git -C "$WORKDIR" apply --reverse --check "$p" 2>/dev/null; then
+        say "tree patch already applied: $(basename "$p")"
+    else
+        git -C "$WORKDIR" apply "$p" \
+            || fail "tree patch does not apply: $(basename "$p")
+    The pin moved out from under it (BR_TREE_COMMIT); rederive the patch."
+        say "tree patch applied: $(basename "$p")"
+    fi
+done
+
 cd "$WORKDIR"
 
 # --- the overlay -----------------------------------------------------------
@@ -166,6 +183,11 @@ make $BR_EXT "$DEFCONFIG" || fail "no such defconfig: $DEFCONFIG
     echo "BR2_DL_DIR=\"$BR2_DL_DIR\""
     echo "BR2_CCACHE=y"
     echo "BR2_CCACHE_DIR=\"$BR2_CCACHE_DIR\""
+    # The memory-sized job count, in .config where buildroot's ninja packages
+    # actually read it (BR2_JLEVEL; its default is nproc+1, five times what
+    # the guard budgets at 2 GB/job -- wpewebkit's build was the casualty).
+    # An environment BR2_JLEVEL is inert: kconfig symbols come from .config.
+    echo "BR2_JLEVEL=$JOBS"
     # Every binary carries a build-id: the identifier a WebKit slot is told
     # apart by in the running process (wk pi bench). The toolchain file
     # cmake packages read it from is regenerated below when this is new.
@@ -212,7 +234,11 @@ fi
 build_start=$(date +%s)
 say "building (this is hours, and the log below is the whole account of it)"
 # shellcheck disable=SC2086
-WK_MB_PER_JOB=2048 guard_run "$JOBS" -- env FORCE_UNSAFE_CONFIGURE=1 make $BR_EXT -j"$JOBS" \
+# BR2_JLEVEL too, not just make's -j: buildroot's ninja-built packages
+# (wpewebkit among them) take their parallelism from BR2_JLEVEL, and its
+# default is nproc+1 -- five times the memory the guard budgeted for
+# (buildroot-webkit.sh passes it for the same reason).
+WK_MB_PER_JOB=2048 guard_run "$JOBS" -- env FORCE_UNSAFE_CONFIGURE=1 BR2_JLEVEL="$JOBS" make $BR_EXT -j"$JOBS" \
     || fail "buildroot failed. The last lines above are the failing package."
 
 # --- what came out -----------------------------------------------------

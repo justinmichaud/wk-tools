@@ -117,6 +117,14 @@ fi
 # to join the tailnet -- `wk sysimage write` refuses without it. Never
 # prompts (wk_tailscale_authkey_present, lib/common.sh).
 check "tailnet auth key" "wk key tailnet" wk_tailscale_authkey_present
+# Optional, and reported as such: only a write whose name is held by a stale
+# fleet node needs it. Presence only -- a doctor run must not spend a request
+# on every invocation; `wk key tailnet-api` asks the tailnet.
+if wk_tailscale_api_present; then
+    ok "tailnet API token (retires a stale fleet node)"
+else
+    unk "no tailnet API token -- a write whose name a stale fleet node holds stops without it" "wk key tailnet-api"
+fi
 
 # --- root costs a password ------------------------------------------------------
 # Reported on every run rather than remembered anywhere: a site sudoers
@@ -208,6 +216,11 @@ local_state "$WK_STORE/secrets/claude-credentials.json" re-authable "claude logi
 # re-authable, not backed-up: a new tagged key from the admin console is as
 # good as the old one, and a tagged node never key-expires.
 local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "wk key tailnet asks for one (tag:wk, reusable, not ephemeral, longest expiry); joined nodes are unaffected"
+# The tailnet API token (wk_tailscale_api_path, lib/common.sh): what retires
+# a stale fleet node so a reprovision does not stop at a person with a
+# browser. re-authable, and never written to a card -- it administers the
+# whole tailnet, which is the one power a board on a shelf must not hold.
+local_state "${WK_TS_API_SECRET:-$HOME/.config/wk/tailscale-api-key}" re-authable "wk key tailnet-api asks for one; only this machine holds it, and only writes that must retire a stale node need it"
 # What the request broker did, on this machine, for workspaces that could
 # not do it themselves. Regenerable: a machine's state is always read back
 # from the machine, so losing the directory costs the words, not a fact.
