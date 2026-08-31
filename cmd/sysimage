@@ -806,10 +806,21 @@ $(machine_list | sed 's/^/      /')"
     # and the last question this end can answer about the disk on its own.
     disk_refuse_unless_safe "$DISK_DEV"
 
-    # A second system being rewritten keeps its tailnet node (disk_tailnet_save):
-    # the name it already holds on the tailnet is then its own, not a collision.
+    # A bench system being rewritten keeps its tailnet node
+    # (disk_tailnet_save): the name it already holds on the tailnet is then
+    # its own, not a collision -- and the board remembers the identity on its
+    # rescue, so a *fresh* medium rejoins as that node too. This is what keeps
+    # writing a card from needing something that can retire the leftover.
+    # Every bench write, not only a second system: a dedicated bench medium
+    # (the rpi4's stick) is rewritten whole, and its node is no less the
+    # board's for that. Never for a rescue -- a rescue's own identity is on
+    # the medium being replaced, and the barrier below is where that is
+    # decided.
     local kept=no
-    if disk_is_second "$DISK_DEV"; then kept=$(disk_tailnet_save "$DISK_DEV"); fi
+    if [ "$role" != rescue ] && [ -n "$fleet_edit" ] \
+       && { disk_is_second "$DISK_DEV" || [ "${DISK_DEV%@*}" = "${MACH_DEVICE:-}" ]; }; then
+        kept=$(disk_tailnet_save "$DISK_DEV")
+    fi
 
     if [ -n "$dry" ]; then
         cat >&2 <<EOF

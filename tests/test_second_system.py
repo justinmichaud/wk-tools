@@ -461,14 +461,49 @@ class TestTailnetIdentityAcrossARewrite(WkTest):
         self.assertIn('[ "$p" = "$ROOTP" ]', body,
                       "an adoption is only reported when the identity came from another pair")
 
-    def test_the_verbs_are_gated_second_only_and_dispatched(self):
+    def test_the_board_remembers_its_bench_node_off_the_bench_medium(self):
+        """A fresh bench card must rejoin as the node it was, or writing one
+        needs something with the power to retire the leftover. So the identity
+        is kept on the rescue's own root -- the filesystem a bench rewrite
+        never touches -- not in /run for the length of one command."""
+        stash = _lift(CARD_PRIV, "_tailnet_stash")
+        self.assertNotIn("/run/", stash, "the identity is forgotten at the next reboot")
+        self.assertIn("TAILNET_KEEP_DIR", stash)
+        save = _lift(CARD_PRIV, "v_tailnet_save")
+        self.assertIn("adopted=remembered", save,
+                      "a medium with no live identity does not fall back on what the board remembers")
+        restore = _lift(CARD_PRIV, "v_tailnet_restore")
+        self.assertNotIn('rm -f "$stash"', restore,
+                         "the remembered identity is spent by one restore; the next fresh card collides")
+
+    def test_a_live_identity_refreshes_what_the_board_remembers(self):
+        """the remembered copy must never become the older of two identities."""
+        save = _lift(CARD_PRIV, "v_tailnet_save")
+        self.assertIn('mv -f "$stash.new" "$stash"', save)
+
+    def test_the_verbs_are_gated_and_dispatched(self):
+        """Gated like every other verb -- the gate is what refuses a disk this
+        machine runs from -- but not @second-only: a dedicated bench medium is
+        rewritten whole, and the node it holds is the board's bench node
+        exactly as a second system's is."""
         text = CARD_PRIV.read_text()
         for verb, fn in (("tailnet-save", "v_tailnet_save"), ("tailnet-restore", "v_tailnet_restore")):
             body = _lift(CARD_PRIV, fn)
             self.assertIn('gate "${1:-}"', body)
-            self.assertIn('[ -n "$SECOND" ] || deny', body)
             self.assertRegex(text, rf"(?m)^\s*{verb}\)\s+{fn}")
             self.assertIn(verb, re.search(r'usage: wk-card-priv [^"]*', text).group(0))
+
+    def test_a_whole_bench_medium_keeps_its_node_too(self):
+        """cmd/sysimage runs the save for any bench write onto a board's own
+        bench medium, not only a second system -- and never for a rescue,
+        whose identity is on the medium being replaced."""
+        body = re.search(r"(?ms)^cmd_write_from\(\).*?^}", (REPO / "cmd" / "sysimage").read_text()).group(0)
+        save = re.search(r'kept=\$\(disk_tailnet_save.*', body).group(0)
+        self.assertIn("disk_tailnet_save", save)
+        guard = body[body.index("local kept=no"):body.index("kept=$(disk_tailnet_save")]
+        self.assertIn('"$role" != rescue', guard)
+        self.assertIn('MACH_DEVICE', guard,
+                      "a whole-disk bench write onto the board's own medium must keep its node")
 
     def test_the_write_keeps_the_identity_across_the_split(self):
         """cmd/sysimage: saved before anything is erased, the name preflight

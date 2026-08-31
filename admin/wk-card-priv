@@ -1360,7 +1360,16 @@ TAILNET_STATE=var/lib/tailscale/tailscaled.state
 # Keyed by the medium, not by the pair: a board's *bench role* is one tailnet
 # node, and the systems beside the rescue take turns being it. Two identities
 # would collide on one name the moment the second system joined.
-_tailnet_stash() { printf '/run/wk-card-tailnet-%s.state' "$(basename "$1")"; }
+#
+# And kept where the board keeps things -- the rescue's own root, which is the
+# one filesystem a bench rewrite never touches -- rather than in /run for the
+# length of one command. That is what makes a *fresh* bench card rejoin as the
+# node it was instead of colliding with it: the identity outlives the medium
+# it was last on, so nothing has to retire a leftover and no credential that
+# can administer the tailnet is needed to write a card. It is a node key at
+# rest on a filesystem that already holds one, so it costs no new exposure.
+TAILNET_KEEP_DIR=/var/lib/wk/tailnet
+_tailnet_stash() { printf '%s/%s.state' "$TAILNET_KEEP_DIR" "$(basename "$1")"; }
 
 # Every partition on this medium that could hold a bench system's root, the
 # addressed one first: a system written beside one that already holds the
@@ -1386,31 +1395,50 @@ _tailnet_restore_edit() { # <mountpoint of partition 4> <stash>
 }
 # tailnet-save <disk>@second -- kept=yes|no. A partition 4 with no filesystem
 # (a write that died in the split) holds nothing to keep.
+# Three places the board's bench identity can be, in decreasing immediacy:
+# the pair being rewritten, another bench pair on the same medium, and what
+# this board remembered the last time it had one. The remembered copy is
+# refreshed from a live one whenever there is a live one, so it cannot drift
+# into being the *older* of two identities.
 v_tailnet_save() {
     local dev stash p root; gate "${1:-}"; dev=$GATED_DEV
-    [ -n "$SECOND" ] || deny "tailnet-save takes '<disk>@second' or '<disk>@third'"
-    stash=$(_tailnet_stash "$dev"); rm -f "$stash"
+    # Whole-disk too: a dedicated bench medium is rewritten whole, and the
+    # node it holds is the board's bench node exactly as a second system's is.
+    # The gate has already refused a disk this machine runs from.
+    mkdir -p "$TAILNET_KEEP_DIR" && chmod 0700 "$TAILNET_KEEP_DIR" && chown 0:0 "$TAILNET_KEEP_DIR" \
+        || fail "could not make $TAILNET_KEEP_DIR, where this board remembers its bench node"
+    stash=$(_tailnet_stash "$dev")
     for p in $(_tailnet_roots "$dev"); do
         root=$(part "$dev" "$p")
         [ -b "$root" ] || continue
         [ "$(blkid -o value -s TYPE "$root" 2>/dev/null)" = ext4 ] || continue
-        with_mount -r "$root" _tailnet_save_edit "$stash"
-        if [ -f "$stash" ]; then
+        with_mount -r "$root" _tailnet_save_edit "$stash.new"
+        if [ -f "$stash.new" ]; then
+            mv -f "$stash.new" "$stash"
             [ "$p" = "$ROOTP" ] || say "adopted=$p"
             return 0
         fi
     done
+    # Nothing live anywhere on the medium: the remembered copy is the board's
+    # identity, and a card written from it rejoins as the node it was.
+    if [ -f "$stash" ]; then
+        say "kept=yes"
+        say "adopted=remembered"
+        return 0
+    fi
     say "kept=no"
 }
 # tailnet-restore <disk>@second -- what `tailnet-save` kept, onto the
 # rewritten partition 4; the stash is spent.
 v_tailnet_restore() {
     local dev stash; gate "${1:-}"; dev=$GATED_DEV
-    [ -n "$SECOND" ] || deny "tailnet-restore takes '<disk>@second' or '<disk>@third'"
+
     stash=$(_tailnet_stash "$dev")
     [ -f "$stash" ] || { say "nothing kept"; return 0; }
     with_mount "$(part "$dev" "$ROOTP")" _tailnet_restore_edit "$stash"
-    rm -f "$stash"
+    # The stash is not spent: it is what this board remembers its bench node
+    # to be, and the next card written for it -- a fresh one included -- takes
+    # the same identity rather than colliding with it.
 }
 
 # --- dispatch ----------------------------------------------------------------

@@ -803,6 +803,10 @@ $(printf '%s\n' "$out" | sed 's/^/    /')"
     case "$out" in
         *kept=yes*)
             case "$out" in
+                *adopted=remembered*)
+                    info "this board remembers its bench tailnet node, so the card written now
+  rejoins as that node rather than colliding with it -- nothing has to retire
+  a leftover, and no credential that can administer the tailnet is needed" ;;
                 *adopted=*)
                     info "taking the board's bench tailnet identity from the system beside this one:
   the two bench systems take turns being one node, so the new one is reachable
