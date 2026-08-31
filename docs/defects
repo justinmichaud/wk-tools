@@ -1,5 +1,25 @@
 Decisions and questions for the maintainer (agent, 2026-08-30; answer inline):
 
+0. INCIDENT, needs you: a sub-agent auditing argument handling ran
+   `wk key tailnet --replace extra` for real (before the extra-argument
+   refusal it was adding existed) and DELETED this Mac's tailnet auth key,
+   ~/.config/wk/tailscale-authkey. Nothing else in that directory changed and
+   the nodes already on the tailnet are unaffected, but the next card write or
+   bridge provision needs the key: make a new one (tag:wk, reusable,
+   non-ephemeral, longest expiry) at https://login.tailscale.com/admin/settings/keys
+   and run `wk key tailnet` to store it. A second worker dispatched one live
+   `wk build` of a fake workspace to buildbox4 (its shell still carried the
+   leaked WK_TARGET, decision A); it failed at once and left nothing there
+   (checked). The audit agent had spawned these workers on its own, several
+   on the same files; every one was stopped as soon as this surfaced, and no
+   agent in this session spawns another from now on. The argument-handling
+   edits they made to 27 cmd/* files are in the tree, parse, and are covered
+   by tests/test_options.py + tests/test_help_values.py -- review that diff
+   with the same suspicion I did.
+
+Done. Confirm wk key tailnet checks that the key has the right scope, is not too broad, etc...
+
+
 B. Home/End in zsh: measured on moose and buildbox4 over ssh from this Mac
    (TERM=xterm-256color): both ^[OH/^[OF (terminfo, /etc/zsh/zshrc) and
    ^[[H/^[[F (shell/bashrc) are bound, ctrl-a/ctrl-e too. Inside a container
@@ -7,6 +27,22 @@ B. Home/End in zsh: measured on moose and buildbox4 over ssh from this Mac
    and a non-interactive `wk enter -- cmd` arrives with TERM=dumb. Where does
    it fail for you -- a host shell, `wk enter`, Zed's terminal? In that shell:
    `echo $TERM; bindkey | grep -E "OH|\[H"; cat -v` then press Home. [question]
+
+Open zed. ssh moose: works
+
+moose:host ~ ❯ echo $TERM; bindkey | grep -E "OH|\[H"; cat -v
+xterm-256color
+"^[H" run-help
+"^[OH" beginning-of-line
+"^[[H" beginning-of-line
+^C
+
+Open zed on tolken. Does not work:
+tolken:host ~/Development/wk-tools main* ❯ echo $TERM; bindkey | grep -E "OH|\[H"; cat -v
+xterm-256color
+"^[H" run-help
+^C
+
 
 D. "wk sysimage list isn't listing yocto images": the two yocto workspaces were
    mid-rebuild (yocto.status started=2026-08-29T04:29Z/05:04Z; the wics
@@ -31,57 +67,22 @@ G. moose's ~/Development/wk-tools has uncommitted edits (bench/mac-ab-summary.sh
    that are not in this tree. Nothing here touched them and `wk sync --tools`
    was not run (it would overwrite them). Yours to commit or discard. [decision]
 
-H. Dropped as unused, grep-verified: `mtools` from host/linux/apt.txt and from
-   the rescue recipe's RDEPENDS (nothing runs mcopy/mdir/mtype/debugfs any more;
-   every image edit is a card-helper verb); `mesa-utils` and `grim` from
-   apt.txt (nothing runs glxinfo/eglinfo/grim). Say if any was there for a
-   hand workflow that should become a command instead.
-
-I. "forbid committing" (your second message): possible only as a real wall,
-   and there is exactly one: an agent must not own the files a commit writes.
-   A hook or a `git` wrapper is one `--no-verify` or `/usr/bin/git` away and
-   is not worth building. The workspace user has passwordless sudo inside the
-   container (container/firstrun.sh installs with it), so any mount made
-   inside the container is undone the same way -- a wall needs sudo gone
-   first. Proposal, in order: (1) firstrun installs everything it will ever
-   need during its root phase and drops the workspace user's sudo after it
-   (heaptrack/valgrind/samply move into that phase); (2) `wk claude` asks
-   podman (as root, from outside) to bind-mount `.git/{objects,refs,logs,HEAD,
-   packed-refs}` read-only in the container's mount namespace for the session
-   and unbinds them at exit -- so while an agent runs in a workspace, nobody in
-   that workspace can commit, `git add`, stash, switch branches or rebase
-   (`git status`, `diff`, `log`, builds and edits keep working); (3) `wk
-   verify` measures both (no sudo; the five paths read-only) and `wk claude`
-   refuses without them. A sibling agent container is not an option: the
-   checkout is podman's own overlay (`:O,upperdir=`) and two mounts of one
-   upperdir are unsafe; a separate agent uid is the other real wall but means
-   re-owning every checkout. Say go, and whether the person's own in-workspace
-   commits may be blocked for the session too (the proposal blocks them; the
-   alternative is the uid split). Until then: an agent can commit. [decision]
-
-   DONE (2026-08-30, maintainer said go): the wall is bwrap, not a sudo drop --
-   the container has no SYS_ADMIN, so nothing inside can mount or lift a
-   read-only bind, sudo or not (the "drop sudo first" plan misjudged that).
-   `wk claude` runs a container agent under `bwrap --dev-bind / / --ro-bind-try
-   .git/{objects,refs,logs,HEAD,packed-refs} ...`: commit/add/stash/branch/
-   rebase fail; build, edit, git status/diff/log work; unmount, shadow-mount
-   and nested-namespace escapes all denied (measured). One switch with push --
-   `wk push on` turns both measures off, refused while a claude session runs,
-   `wk push on --force` overrides; a running agent keeps its wall until it
-   exits, and a human `wk enter` shell is never walled. `wk verify` proves the
-   recipe blocks a commit in the container; tests/test_commit_wall.py.
-   The person's own in-workspace commits are NOT blocked (they use an
-   unwrapped shell), so the uid split was not needed.
-
 J. `wk backup --candidates` (new, read-only) lists live macOS settings that are
    not in host/macos/defaults.conf. On tolken, the deliberate-looking ones:
+
+    NO:
+   
    Accessibility KeyRepeatInterval 0.083333333 / KeyRepeatDelay 0.5 /
-   KeyRepeatEnabled 1; NSGlobalDomain AppleWindowTabbingMode always; dock
-   magnification/largesize 94/tilesize 64/no-bouncing/show-recents false/
+   KeyRepeatEnabled 1;
+
+   YES:
+   NSGlobalDomain AppleWindowTabbingMode always; YES
+   dock
+   show-recents false/
    mru-spaces false/wvous-br-corner 1/wvous-tl-corner 2; screensaver
-   askForPassword 0 (no password after the screensaver -- yours to keep or
-   not); Safari IncludeDevelopMenu + WebKitDeveloperExtrasEnabledPreferenceKey.
-   Which of these go into defaults.conf? [decision]
+   askForPassword 0
+   Safari IncludeDevelopMenu + WebKitDeveloperExtrasEnabledPreferenceKey.
+
 
 M. Loose ends of this run: the model budget for sub-agents ran out mid-way
    ("session limit"), so two tasks stopped early and stay owed -- the ccache/
@@ -92,6 +93,8 @@ M. Loose ends of this run: the model budget for sub-agents ran out mid-way
    host podman connection but not inside the wk machine's rootless view --
    yours; `wk rm br-rescue2` or `podman rm` it by hand if it is done.
 
+   you can do that
+
 K. docs/Urgent/pi.md (the pi coding agent, a litellm API key): three decisions
    before code -- the command's name (`wk pi` is the Raspberry Pi command;
    `wk agent`?), where the key lives (the store's secrets/ directory is
@@ -100,7 +103,8 @@ K. docs/Urgent/pi.md (the pi coding agent, a litellm API key): three decisions
    check`, a `wk doctor` line), and the egress: `npm install -g` needs
    registry.npmjs.org in the proxy allowlist, a widening the sandbox audit
    should see. Say the name and whether npm's registry may be allowed.
-   [decision]
+
+  yes. Make an ai subcommand for claude and pi.
 
 L. docs/Urgent/HUMAN-battery.md (charge limits on the Librem 5, the PinePhone
    and this MacBook; `wk doctor` checks): pmOS exposes the charge threshold
@@ -108,7 +112,9 @@ L. docs/Urgent/HUMAN-battery.md (charge limits on the Librem 5, the PinePhone
    bridge setup` can set it and `wk doctor --all` read it; macOS has no
    supported user-space limit (Optimized Battery Charging is the OS's own
    heuristic) -- the honest doctor line is "plugged in, N% -- no OS limit
-   exists". Go with that? [decision]
+   exists". Go with that?
+
+   yes
 
 
 Your scope is everything. Keep going until every defect and handoff item is done. You will be running unattended soon, so prioritize user intervention first. Surface decisions that need to be made here in this file at the top.
