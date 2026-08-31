@@ -35,6 +35,47 @@ machine_list() {
     done
 }
 
+# The other fleet devices that share this one's way onto the network, and how
+# many of them are quiet right now. A board is unreachable for two very
+# different reasons -- the board, or the thing that carries it -- and when
+# every device on one network goes silent at once the second is overwhelmingly
+# the likely one. `wk boot --status` already says this for a board behind a
+# bridge; a board on wifi has exactly the same failure and had no such line,
+# which is how an access point going down reads as a dead board (measured
+# 2026-08-31: three boards, one of them untouched for hours, all quiet at
+# once).
+#
+# Evidence from the tailnet's own view of its peers, never a record, and a
+# subshell because machine_load overwrites the caller's MACH_* as it walks.
+# Prints "<quiet> <total>"; a machine with no siblings prints "0 0" and the
+# caller says nothing.
+machine_quiet_siblings() { # <this machine> <net> <bridge>
+    local me="$1" net="$2" bridge="$3"
+    (
+        local peers quiet=0 total=0 f n name up
+        peers=$(wk_tailscale_peers 2>/dev/null) || peers=""
+        [ -n "$peers" ] || { printf '0 0'; exit 0; }
+        for f in "$(machines_dir)"/*.conf; do
+            [ -f "$f" ] || continue
+            n=$(basename "$f" .conf)
+            [ "$n" != "$me" ] || continue
+            machine_load "$n" 2>/dev/null || continue
+            [ "${MACH_NET:-}" = "$net" ] || continue
+            [ "${MACH_BRIDGE:-}" = "$bridge" ] || continue
+            total=$((total + 1))
+            up=""
+            for name in "${MACH_SSH:-}" "${MACH_BENCH_SSH:-}"; do
+                [ -n "$name" ] || continue
+                printf '%s\n' "$peers" \
+                    | awk -F'\t' -v n="$name" '$1 == n && $3 == "up" { found = 1 } END { exit !found }' \
+                    && up=1
+            done
+            [ -n "$up" ] || quiet=$((quiet + 1))
+        done
+        printf '%s %s' "$quiet" "$total"
+    )
+}
+
 # Tab-separated fields, not prose, for anything that has to *decide*
 # (container/broker/wk-broker.py refuses non-bench-device).
 machine_declare() {

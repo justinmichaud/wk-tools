@@ -27,6 +27,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/image.sh"
 . "$WK_ROOT/image/profiles.sh"
+. "$WK_ROOT/lib/reach.sh"
 . "$WK_ROOT/boot/machines.sh"
 . "$WK_ROOT/lib/target.sh"
 
@@ -163,6 +164,16 @@ cmd_status() {
             else
                 log "  no arming record could be read either, so this is a plain outage"
                 log "  or the machine is in a bench system that answers somewhere else."
+                # The same reasoning the bridge line above makes, for a board
+                # whose network is not a bridge: if every fleet device sharing
+                # this one's way onto the network is quiet too, the network is
+                # the suspect and the board is not.
+                _quiet=$(machine_quiet_siblings "$MACHINE" "${MACH_NET:-}" "${MACH_BRIDGE:-}")
+                if [ "${_quiet% *}" -gt 0 ] && [ "${_quiet% *}" = "${_quiet#* }" ]; then
+                    log "  but every other ${MACH_NET:-fleet} device is quiet as well (${_quiet#* } of ${_quiet#* }),"
+                    log "  so rule the network out before the board -- one of them may be a"
+                    log "  machine nobody has touched, which no board fault explains."
+                fi
             fi
             return 3 ;;
         bench*)
