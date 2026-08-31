@@ -5,7 +5,11 @@
 #
 # A build box belongs to everyone who logs into it, so **this never needs
 # root and never asks for it**, and everything it leaves behind is under
-# $HOME and reversible. After `setup`, a shell there has zsh, `wk` on PATH,
+# $HOME and reversible. What it cannot install it names: every prerequisite is
+# probed first (remote/deps.sh, remote/probe.sh) and whatever is missing comes
+# back as one root command to run there or to hand to that machine's
+# administrators. A missing *required* tool stops this before it changes
+# anything; a missing ccache is reported and provisioning goes on. After `setup`, a shell there has zsh, `wk` on PATH,
 # and a target resolving to the same workspaces, paths and job policy as the
 # workstation driving it -- with the ssh step dropped. It asks, with the
 # size, before removing anything it finds (an old wk-tools clone, a
@@ -146,30 +150,45 @@ load_target "$TARGET"
     || die "'$TARGET' is a $WK_TARGET_KIND target -- there is nothing to provision"
 
 # --- probe -------------------------------------------------------------------
+# remote/probe.sh, fed over ssh behind remote/deps.sh so the far side needs no
+# wk-tools of its own -- this must answer about a machine that has never been
+# provisioned. The tool list lives in deps.sh and nowhere else, so this command,
+# provisioning and `wk doctor --all` cannot disagree about what a build machine
+# needs (`wk remote -h`).
 info "probing $WK_REMOTE_HOST"
-PROBE=$(_rsh_q '
-    hostname
-    . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}"
-    uname -m; nproc
-    awk "/^MemTotal:/ {print int(\$2/1024)}" /proc/meminfo
-    command -v zsh || echo -
-    command -v ccache || echo -
-    df -Pk "$HOME" | awk "NR==2 {print int(\$4/1024/1024)}"
-') || die "cannot reach $WK_REMOTE_HOST"
+. "$WK_ROOT/remote/deps.sh"
+PROBE=$(wk_remote_probe) || die "cannot reach $WK_REMOTE_HOST"
+_p() { printf '%s\n' "$PROBE" | sed -n "s|^$1=||p" | tail -1; }
 
-r_host=$(printf '%s\n' "$PROBE" | sed -n 1p)
-r_os=$(printf   '%s\n' "$PROBE" | sed -n 2p)
-r_arch=$(printf '%s\n' "$PROBE" | sed -n 3p)
-r_cores=$(printf '%s\n' "$PROBE" | sed -n 4p)
-r_mem=$(printf  '%s\n' "$PROBE" | sed -n 5p)
-r_zsh=$(printf  '%s\n' "$PROBE" | sed -n 6p)
-r_ccache=$(printf '%s\n' "$PROBE" | sed -n 7p)
-r_freegb=$(printf '%s\n' "$PROBE" | sed -n 8p)
+r_host=$(_p host)
+r_os=$(_p os)
+r_arch=$(_p arch)
+r_cores=$(_p cores)
+r_mem=$(_rsh_q 'awk "/^MemTotal:/ {print int(\$2/1024)}" /proc/meminfo' 2>/dev/null || echo 1024)
+r_freegb=$(_rsh_q 'df -Pk "$HOME" | awk "NR==2 {print int(\$4/1024/1024)}"' 2>/dev/null || echo '?')
 
 log "  $r_host: $r_os, $r_arch, $r_cores cores, $((r_mem / 1024)) GB, ${r_freegb} GB free in \$HOME"
 log "  root: $(_remote_root)   jobs: derived per build from what is free"
-[ "$r_zsh" = - ]    && warn "no zsh (needs root to install; bash stays)"    || log "  zsh: $r_zsh"
-[ "$r_ccache" = - ] && warn "no ccache (every build starts cold)"           || log "  ccache: $r_ccache"
+
+# Every prerequisite, and -- once, at the end -- the single root command that
+# installs whatever is missing. Provisioning itself never takes root
+# (remote/provision.sh), so naming the command is the whole of the help there
+# is to give; a `required` one still stops this before it changes anything.
+_dep_stop=""
+while IFS="$(printf '\t')" read -r state what remedy; do
+    [ -n "$state" ] || continue
+    case "$state" in
+        ok)       log "  $what" ;;
+        required) warn "$what"; _dep_stop=1 ;;
+        wanted)   warn "$what" ;;
+        note)     log  "  $what"; [ -z "$remedy" ] || log "      $remedy" ;;
+    esac
+done <<FINDINGS
+$(wk_remote_findings "$PROBE")
+FINDINGS
+[ -z "$_dep_stop" ] || die "$WK_REMOTE_HOST is missing something a build cannot start without.
+    Run the root command above (or send it to the machine's administrators),
+    then re-run 'wk remote setup $TARGET'. Nothing has been changed there."
 # No flock(1) check: the build lock is lib/lockrun.sh in the wk-tools this
 # command is about to push, and needs nothing installed.
 

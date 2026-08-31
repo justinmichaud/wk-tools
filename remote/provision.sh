@@ -66,6 +66,47 @@ write_file "$ROOT/ssh/config" 0600 <<EOF
 $(WK_ROOT="$TOOLS" bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_ssh_alias_blocks "$2"' _ "$TOOLS" "$ROOT/secrets")
 EOF
 
+# --- git: identity, and how fast git is here ---------------------------------
+# An include, so the identity is declared once for every machine (dotfiles/
+# gitconfig) rather than copied per box -- and so the settings that decide
+# whether `git status` in a WebKit checkout answers in milliseconds
+# (fsmonitor, untrackedCache, manyFiles) reach a build box too. An editor
+# driving this machine over ssh asks git that question on every keystroke.
+#
+# --replace-all, so a re-run after the checkout moves does not leave the old
+# path behind: git reads every include.path it finds.
+git config --global --replace-all include.path "$TOOLS/dotfiles/gitconfig"
+changed "gitconfig includes $TOOLS/dotfiles/gitconfig"
+[ -f "$HOME/.gitignore" ] || printf '.DS_Store\n.cache\ncompile_commands.json\n' > "$HOME/.gitignore"
+
+# The include is not the last word: git takes a key's last value, so a [user]
+# section below it in ~/.gitconfig wins and every commit from this box carries
+# it -- silently, until the commit is pushed. One of these machines had
+# `user.name = no`, an answer to a prompt long ago.
+#
+# So the shadowing value in *this account's* ~/.gitconfig is removed and the
+# include allowed to answer. Only that file: a value from /etc/gitconfig belongs
+# to the machine and is reported instead.
+for _id in name email; do
+    _want=$(git config --file "$TOOLS/dotfiles/gitconfig" --get "user.$_id" || true)
+    [ -n "$_want" ] || continue
+    _have=$(git config --get "user.$_id" || true)
+    if [ "$_have" = "$_want" ]; then
+        unchanged "git user.$_id ($_want)"
+        continue
+    fi
+    git config --global --unset-all "user.$_id" 2>/dev/null || true
+    _now=$(git config --get "user.$_id" || true)
+    if [ "$_now" = "$_want" ]; then
+        changed "git user.$_id was '${_have:-unset}' here, shadowing the repo's '$_want' -- removed"
+    else
+        warn "git user.$_id here is '${_now:-unset}', not the repo's '$_want'
+  it comes from outside this account's ~/.gitconfig:
+      git config --show-origin --get user.$_id"
+    fi
+done
+unset _id _want _have _now
+
 # --- shell -------------------------------------------------------------------
 # `chsh` wants a password and is often refused under LDAP; on these boxes
 # $HOME (and its login shell) is shared between machines. shell/bashrc execs

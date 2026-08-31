@@ -115,3 +115,66 @@ in_vm "echo ran-here"
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheTailnetKeyScope(WkTest):
+    """wk_tailscale_key_reject (lib/common.sh): tailscale spells three very
+    different powers with one prefix. An auth key enrolls a node; an API access
+    token administers the tailnet; an OAuth client secret mints tokens of its
+    own. All three start `tskey-`, and this key is copied onto every card
+    written from here -- so only the narrow one is accepted, and the properties
+    that cannot be read from a key are reported as unverified rather than
+    claimed."""
+
+    def _reject(self, key):
+        cp = self.bash(f'. "{REPO}/lib/common.sh"\n'
+                       f'if why=$(wk_tailscale_key_reject {key!r}); then echo ACCEPTED\n'
+                       f'else printf "REJECTED: %s\\n" "$why"; fi\n')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout
+
+    def test_an_auth_key_is_accepted(self):
+        self.assertIn("ACCEPTED", self._reject("tskey-auth-k123CNTRL-abcdef"))
+
+    def test_an_api_access_token_is_refused_as_too_broad(self):
+        out = self._reject("tskey-api-k123CNTRL-abcdef")
+        self.assertIn("REJECTED", out)
+        self.assertIn("API access token", out)
+        self.assertIn("administers", out)
+
+    def test_an_oauth_client_secret_is_refused_as_too_broad(self):
+        for key in ("tskey-client-k123-abc", "tskey-oauth-k123-abc"):
+            with self.subTest(key=key):
+                out = self._reject(key)
+                self.assertIn("REJECTED", out)
+                self.assertIn("OAuth client secret", out)
+
+    def test_a_tskey_that_is_none_of_them_is_refused_by_shape(self):
+        out = self._reject("tskey-something-else")
+        self.assertIn("REJECTED", out)
+        self.assertIn("tskey-auth-", out)
+
+    def test_nothing_and_nonsense_are_refused(self):
+        self.assertIn("REJECTED", self._reject(""))
+        self.assertIn("REJECTED", self._reject("hunter2"))
+
+    def test_the_presence_check_uses_the_same_rule(self):
+        """`wk doctor`'s read-only probe and the prompt cannot disagree about
+        what a usable key is -- one function answers for both."""
+        for key, present in (("tskey-auth-k1-abc", True),
+                             ("tskey-api-k1-abc", False),
+                             ("nonsense", False)):
+            path = self.tmp / f"key-{present}-{key[:10]}"
+            path.write_text(key + "\n")
+            cp = self.bash(f'. "{REPO}/lib/common.sh"\n'
+                           f'wk_tailscale_authkey_present && echo YES || echo NO\n',
+                           env={"WK_TS_AUTHKEY": str(path)})
+            with self.subTest(key=key):
+                self.assertIn("YES" if present else "NO", cp.stdout)
+
+    def test_the_card_helper_refuses_the_broad_ones_too(self):
+        """The rule lives where the privilege is as well: admin/wk-card-priv
+        writes what it is handed onto a card that leaves the building."""
+        text = (REPO / "admin" / "wk-card-priv").read_text()
+        self.assertIn("'^tskey-auth-'", text,
+                      "the card helper still accepts any tskey- value")

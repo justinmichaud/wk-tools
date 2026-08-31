@@ -537,7 +537,7 @@ class TestTailnetKeyPreflight(WkTest):
     def test_refuses_with_no_machine_name_and_names_the_remedy(self):
         """an unresolved machine name refuses, and names --machine as the remedy"""
         key = self.tmp / "authkey"
-        key.write_text("tskey-abc123\n")
+        key.write_text("tskey-auth-abc123-secret\n")
         cp = _tailnet_key_preflight("", str(key))
         self.assertNotEqual(cp.returncode, 0, "wrote nothing, but did not refuse")
         self.assertIn("--machine", cp.stdout + cp.stderr)
@@ -551,7 +551,7 @@ class TestTailnetKeyPreflight(WkTest):
     def test_wk_force_does_not_cross_the_missing_machine_name_refusal(self):
         """WK_FORCE=1 changes nothing -- there is no --force past this"""
         key = self.tmp / "authkey2"
-        key.write_text("tskey-abc123\n")
+        key.write_text("tskey-auth-abc123-secret\n")
         cp = _tailnet_key_preflight("", str(key), force=True)
         self.assertNotEqual(cp.returncode, 0, "WK_FORCE=1 let an unresolved machine name through")
 
@@ -563,7 +563,7 @@ class TestTailnetKeyPreflight(WkTest):
     def test_passes_with_a_resolved_machine_and_a_present_key(self):
         """a real machine name and a present key pass, with nothing left to refuse"""
         key = self.tmp / "authkey3"
-        key.write_text("tskey-abc123\n")
+        key.write_text("tskey-auth-abc123-secret\n")
         cp = _tailnet_key_preflight("rpi3", str(key))
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
 

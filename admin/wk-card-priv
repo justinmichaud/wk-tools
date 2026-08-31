@@ -390,7 +390,12 @@ v_tailnet() {
     esac
     tmp=$(mktemp /run/wk-card-key.XXXXXX); chmod 0600 "$tmp"
     cat > "$tmp"
-    grep -q '^tskey-' "$tmp" || { rm -f "$tmp"; deny "that is not a tailscale auth key"; }
+    # tskey-auth-, not tskey-: an API access token and an OAuth client secret
+    # share the prefix and administer the tailnet, and this writes what it is
+    # given onto a card that leaves the building (wk_tailscale_key_reject,
+    # lib/common.sh, refuses the same three shapes on the way in).
+    grep -q '^tskey-auth-' "$tmp" \
+        || { rm -f "$tmp"; deny "that is not a tailscale auth key (they start 'tskey-auth-')"; }
     rc=0
     with_mount "$(part "$dev" "$ROOTP")" _tailnet_edit "$host" "$tag" "$tmp" || rc=$?
     rm -f "$tmp"

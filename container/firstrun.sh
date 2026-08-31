@@ -40,9 +40,18 @@ else
     log "no fleet-request broker at /run/wk/broker.sock -- no bench device from here"
 fi
 
-# --- identity ----------------------------------------------------------------
-git config --global user.name  "Justin Michaud"
-git config --global user.email "jmichaud@igalia.com"
+# --- identity, and how fast git is in here -----------------------------------
+# An include of the repo's own gitconfig, not a copy of two values: the identity
+# is declared in one file for every machine, and the same include brings the
+# settings that decide whether `git status` in a WebKit checkout takes
+# milliseconds or seconds (fsmonitor, untrackedCache, manyFiles) -- which is
+# what an editor's git panel asks on every keystroke.
+#
+# /opt/wk-tools is mounted read-only and is only read here.
+git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
+# The file the include's core.excludesFile points at; git ignores a missing one
+# silently, which is a setting that looks applied and is not.
+[ -f "$HOME/.gitignore" ] || printf '.DS_Store\n.cache\ncompile_commands.json\n' > "$HOME/.gitignore"
 git config --global --add safe.directory "$SRC"
 
 # The forks, read from the mounted tooling at use time rather than from an

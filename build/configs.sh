@@ -117,11 +117,7 @@ config_load() {
         jsc-debug)
             CFG_PORT="--jsc-only"; CFG_TYPE=Debug
             CFG_ARGS="--debug"
-            # Both against the defaults above: libbacktrace is worth its
-            # dependency in a debug build, where a readable stack is the point,
-            # and ALT_ENTRY's extra offline-asm entry points make crash
-            # backtraces through generated code readable.
-            CFG_CMAKE="-DUSE_LIBBACKTRACE=ON -DENABLE_OFFLINE_ASM_ALT_ENTRY=1"
+            CFG_CMAKE="-DENABLE_OFFLINE_ASM_ALT_ENTRY=1"
             ;;
         jsc-release)
             CFG_PORT="--jsc-only"; CFG_TYPE=Release

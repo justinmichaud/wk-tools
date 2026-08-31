@@ -196,7 +196,18 @@ tailnet)
 
     if wk_tailscale_authkey_present; then
         info "tailnet auth key: present ($_tspath)"
-        log  "  starts $(head -c 11 "$_tspath")…, mode $(stat -c '%a' "$_tspath" 2>/dev/null || stat -f '%Lp' "$_tspath" 2>/dev/null)"
+        log  "  starts $(head -c 16 "$_tspath")…, mode $(stat -c '%a' "$_tspath" 2>/dev/null || stat -f '%Lp' "$_tspath" 2>/dev/null)"
+        # Split deliberately into what this can prove and what it cannot: the
+        # scope is readable from the key, and every other property of it lives
+        # in the admin console behind a credential this machine must not hold
+        # (wk_tailscale_key_reject, lib/common.sh). Saying "checked" about the
+        # second group would be a claim with no evidence under it.
+        log  "  checked here: it is an auth key (tskey-auth-), so it can enroll a"
+        log  "                node and nothing else -- not an API token or an OAuth"
+        log  "                client secret, either of which could administer the tailnet"
+        log  "  NOT checkable from the key, and worth a look in the console:"
+        log  "                tagged tag:wk, reusable, NOT ephemeral, longest expiry"
+        log  "                https://login.tailscale.com/admin/settings/keys"
         log  "  'wk key tailnet --replace' rotates it"
         exit 0
     fi

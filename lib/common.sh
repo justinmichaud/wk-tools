@@ -458,7 +458,7 @@ wk_tailscale_key_reject() { # <key>
     the ACLs and mint further keys -- and this one is copied onto every card
     written from here. An auth key can only enroll a node." ;;
         tskey-client-*|tskey-oauth-*)
-            printf '%s' "that is an OAuth client secret (${1%%%%-*}-...), not an auth key.
+            printf '%s' "that is an OAuth client secret, not an auth key.
     It mints auth keys and API tokens of its own, so a board holding it holds
     everything they can do. An auth key can only enroll a node." ;;
         tskey-*)

@@ -362,15 +362,21 @@ unset _WK_INTERACTIVE
 # nothing else -- build configuration, job counts and toolchain paths belong to
 # `wk` and to the workspace, not to every interactive shell on the host.
 
-if command -v hx >/dev/null 2>&1; then
-  EDITOR=hx
-elif command -v vim >/dev/null 2>&1; then
-  EDITOR=vim
-else
-  EDITOR=vi
+# A machine that already exports one keeps it: on a shared build box this rc is
+# sourced into somebody's existing login environment, and overwriting what their
+# own profile set is not this file's business. Only the default is ours.
+if [ -z "${EDITOR:-}" ]; then
+  if command -v hx >/dev/null 2>&1; then
+    EDITOR=hx
+  elif command -v vim >/dev/null 2>&1; then
+    EDITOR=vim
+  else
+    EDITOR=vi
+  fi
 fi
 export EDITOR
-export VISUAL="$EDITOR"
+: "${VISUAL:=$EDITOR}"
+export VISUAL
 
 # lazygit sits beside helix (container/firstrun.sh) with no home inside it:
 # helix's `:sh`/`:!` capture output rather than attaching a terminal, so `lg`

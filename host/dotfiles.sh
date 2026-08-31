@@ -122,6 +122,37 @@ else
     changed "gitconfig includes $WK_ROOT/dotfiles/gitconfig"
 fi
 
+# An include is not the last word: git takes a key's *last* value, so a [user]
+# section written into ~/.gitconfig after the include wins over it, and every
+# commit from then on carries whatever that says. It is invisible until a commit
+# is already made and pushed, so the identity is checked against the file that
+# declares it and the override is removed rather than reported.
+#
+# The repo's value is the identity; a machine that wants another one changes
+# dotfiles/gitconfig, where every machine sees it.
+for _id in name email; do
+    _want=$(git config --file "$WK_ROOT/dotfiles/gitconfig" --get "user.$_id" || true)
+    [ -n "$_want" ] || continue
+    _have=$(git config --get "user.$_id" || true)
+    if [ "$_have" = "$_want" ]; then
+        unchanged "git user.$_id ($_want)"
+    elif [ -z "$_have" ]; then
+        # The include is in place and yet nothing resolves: a broken include path.
+        warn "git user.$_id resolves to nothing although the include is in place"
+        log  "  check:  git config --show-origin --get user.$_id"
+    else
+        git config --global --unset-all "user.$_id" 2>/dev/null || true
+        _now=$(git config --get "user.$_id" || true)
+        if [ "$_now" = "$_want" ]; then
+            changed "git user.$_id was '$_have' in ~/.gitconfig, shadowing the repo's '$_want' -- removed"
+        else
+            warn "git user.$_id is '$_now', not the repo's '$_want'"
+            log  "  something outside ~/.gitconfig sets it:  git config --show-origin --get user.$_id"
+        fi
+    fi
+done
+unset _id _want _have _now
+
 # The global gitignore referenced by dotfiles/gitconfig.
 write_file "$HOME/.gitignore" 0644 <<'EOF'
 .DS_Store

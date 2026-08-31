@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# wk doctor -- what is provisioned on this machine, and what is still missing
+# wk doctor [--all] -- what is provisioned on this machine, and what is still missing
 # wk: where=local name=none readonly group=hosts
 #
 # The reinstall companion: `./setup` is the automated path, but several pieces
@@ -12,6 +12,12 @@
 # Read-only by design: it never starts the podman machine, never boots a
 # guest, and never prompts. State it cannot see without starting something is
 # reported as '??' with the command that would reveal it.
+#
+#   --all   also ask every configured build machine (targets/hosts/*.conf) what
+#           it has: the tools a build needs there, the identity a commit made
+#           there would carry, and any build variable that machine's own
+#           profile sets. Read-only, over ssh, and it starts nothing; a machine
+#           that does not answer is reported as unreachable, never as broken.
 #
 #   0  everything checkable is provisioned
 #   1  something is missing (the lines say what and how)
@@ -53,7 +59,11 @@ if [ "${1:-}" = --probe-store ]; then
     probe_store
     exit 0
 fi
-[ $# -eq 0 ] || die "usage: wk doctor; see wk doctor -h"
+ALL=""
+case "${1:-}" in
+    --all) ALL=1; shift ;;
+esac
+[ $# -eq 0 ] || die "usage: wk doctor [--all]; see wk doctor -h"
 
 missing=0
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$*" >&2; }
@@ -129,6 +139,28 @@ check "~/.claude/CLAUDE.md is the HOST briefing" "./setup --stage claude" \
     link_ok "$HOME/.claude/CLAUDE.md" "$WK_ROOT/claude/CLAUDE-host.md"
 check "shell rc sources shell/bashrc" "./setup --stage dotfiles" \
     sh -c "grep -q 'wk-tools/shell/bashrc' '$HOME/.zshrc' 2>/dev/null || grep -q 'wk-tools/shell/bashrc' '$HOME/.bashrc' 2>/dev/null"
+
+# The identity every commit from this machine carries, and its speed settings
+# (fsmonitor, untrackedCache, manyFiles -- what makes `git status` in a WebKit
+# checkout, and Zed's git panel over ssh, answer at all). Both come from
+# dotfiles/gitconfig, so both are checked against that file rather than against
+# a literal here. The failure worth catching is not an absent include but a
+# [user] section written *after* it in ~/.gitconfig: git takes a key's last
+# value, so it silently wins, and the first sign of it is a pushed commit with
+# the wrong author.
+git_identity_ok() { # <name|email>
+    [ "$(git config --get "user.$1" 2>/dev/null)" \
+      = "$(git config --file "$WK_ROOT/dotfiles/gitconfig" --get "user.$1" 2>/dev/null)" ]
+}
+git_speed_ok() {
+    [ "$(git config --get core.fsmonitor 2>/dev/null)" = true ] \
+        && [ "$(git config --get feature.manyFiles 2>/dev/null)" = true ]
+}
+if have git; then
+    check "git user.name is the repo's"  "./setup --stage dotfiles" git_identity_ok name
+    check "git user.email is the repo's" "./setup --stage dotfiles" git_identity_ok email
+    check "git speed settings (fsmonitor, manyFiles)" "./setup --stage dotfiles" git_speed_ok
+fi
 
 # --- machine-local state: declared, never hidden ---------------------------------
 # The cattle-not-pets rule (CLAUDE.md): everything a rebuilt machine cannot
@@ -279,6 +311,37 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     else
         unk "tart not installed" "README.md, Setup -- only needed for Apple-port builds"
     fi
+fi
+
+# --- the build machines (--all) ------------------------------------------------
+# Read-only and over ssh: remote/probe.sh behind remote/deps.sh, exactly as `wk
+# remote setup` sends it, so the two cannot disagree about what a build machine
+# needs. Nothing is provisioned, started or asked for here.
+if [ -n "$ALL" ]; then
+    . "$WK_ROOT/lib/target.sh"
+    . "$WK_ROOT/remote/deps.sh"
+    for _t in $(target_all); do
+        [ "$_t" = container ] && continue
+        ( load_target "$_t" >/dev/null 2>&1 && [ "$WK_TARGET_KIND" = remote ] ) || continue
+        section "build machine: $_t"
+        _probe=$( ( load_target "$_t" >/dev/null 2>&1; wk_remote_probe ) 2>/dev/null ) || _probe=""
+        if [ -z "$_probe" ]; then
+            unk "$_t did not answer" "ssh $_t true  -- then re-run; nothing was changed"
+            continue
+        fi
+        while IFS="$(printf '\t')" read -r _state _what _remedy; do
+            [ -n "$_state" ] || continue
+            case "$_state" in
+                ok)       ok "$_what" ;;
+                required) miss "$_what" "${_remedy:-see 'wk remote setup $_t'}" ;;
+                wanted)   miss "$_what" "${_remedy:-see 'wk remote setup $_t'}" ;;
+                note)     unk "$_what" "${_remedy:-}" ;;
+            esac
+        done <<FINDINGS
+$(wk_remote_findings "$_probe")
+FINDINGS
+    done
+    unset _t _probe _state _what _remedy
 fi
 
 # --- verdict -----------------------------------------------------------------------

@@ -1,191 +1,217 @@
-Decisions and questions for the maintainer (agent, 2026-08-30; answer inline):
+Defects and decisions. Newest decisions at the top; answer inline.
 
-0. INCIDENT, needs you: a sub-agent auditing argument handling ran
-   `wk key tailnet --replace extra` for real (before the extra-argument
-   refusal it was adding existed) and DELETED this Mac's tailnet auth key,
-   ~/.config/wk/tailscale-authkey. Nothing else in that directory changed and
-   the nodes already on the tailnet are unaffected, but the next card write or
-   bridge provision needs the key: make a new one (tag:wk, reusable,
-   non-ephemeral, longest expiry) at https://login.tailscale.com/admin/settings/keys
-   and run `wk key tailnet` to store it. A second worker dispatched one live
-   `wk build` of a fake workspace to buildbox4 (its shell still carried the
-   leaked WK_TARGET, decision A); it failed at once and left nothing there
-   (checked). The audit agent had spawned these workers on its own, several
-   on the same files; every one was stopped as soon as this surfaced, and no
-   agent in this session spawns another from now on. The argument-handling
-   edits they made to 27 cmd/* files are in the tree, parse, and are covered
-   by tests/test_options.py + tests/test_help_values.py -- review that diff
-   with the same suspicion I did.
+================================================================================
+NEEDS YOU
+================================================================================
 
-Done. Confirm wk key tailnet checks that the key has the right scope, is not too broad, etc...
+1. buildbox4 has no libc++, so the `-stdlib=libc++` flags you asked for cannot
+   go in. Measured: `clang++ -stdlib=libc++` there cannot find <string>, and
+   `gtk-release` builds fine against the system libstdc++ (it did, in 3m00s,
+   while this was being written). The generic half of your flag list is now the
+   default for every CMake config (build/configs.sh, _CFG_DEFAULT_ARGS /
+   _CFG_DEFAULT_CMAKE); the libc++ half is not applied anywhere, and
+   targets/hosts/buildbox4.conf records why.
 
+   To have it: `sudo apt-get install -y libc++-19-dev libc++abi-19-dev` on
+   buildbox4 (theirs to run, or ask), then say so and it goes in the conf.
+   Or was that flag list copied from a different machine? [decision]
 
-B. Home/End in zsh: measured on moose and buildbox4 over ssh from this Mac
-   (TERM=xterm-256color): both ^[OH/^[OF (terminfo, /etc/zsh/zshrc) and
-   ^[[H/^[[F (shell/bashrc) are bound, ctrl-a/ctrl-e too. Inside a container
-   workspace there is no zsh at all (the SDK image has none; the shell is bash)
-   and a non-interactive `wk enter -- cmd` arrives with TERM=dumb. Where does
-   it fail for you -- a host shell, `wk enter`, Zed's terminal? In that shell:
-   `echo $TERM; bindkey | grep -E "OH|\[H"; cat -v` then press Home. [question]
+2. The new default flags are verified as far as `cmake` -- the whole set
+   configures cleanly on buildbox4 for GTK with clang 19, in a scratch build
+   directory that was then removed. A compile-and-link verification is owed and
+   was not started: buildbox4's load average is 142, `wk build` derives 1 job
+   from that, and `-DUSE_LIBBACKTRACE=OFF` (previously ON there) invalidates
+   the whole tree -- a full rebuild at -j1 in your workspace. Say when the box
+   is quiet, or when to just do it anyway. [decision]
 
-Open zed. ssh moose: works
+3. "Never rsync wk tools, always use git" is decided (git push, refuse when
+   dirty) and NOT yet implemented. Before it lands, one consequence to confirm:
+   there are three rsyncs of the tree, not one --
 
-moose:host ~ ❯ echo $TERM; bindkey | grep -E "OH|\[H"; cat -v
-xterm-256color
-"^[H" run-help
-"^[OH" beginning-of-line
-"^[[H" beginning-of-line
-^C
+       targets/remote.sh   -> a build box      ($ROOT/tools)
+       targets/vm.sh       -> a tart guest
+       host/macos/vmtools.sh -> the podman VM  (/opt/wk-tools)
 
-Open zed on tolken. Does not work:
-tolken:host ~/Development/wk-tools main* ❯ echo $TERM; bindkey | grep -E "OH|\[H"; cat -v
-xterm-256color
-"^[H" run-help
-^C
+   The third is what every container workspace mounts and what `wk pr`, `wk
+   build` and friends run when they forward into the VM. Refusing to sync a
+   dirty tree there means no container command can be tested against an
+   uncommitted wk-tools edit at all -- and this agent cannot commit. Does the
+   rule cover the podman VM too, or only the machines across ssh? [decision]
 
+4. G, still open from the last run: moose's ~/Development/wk-tools has
+   uncommitted edits (bench/mac-ab-summary.sh, cmd/bench, cmd/pi, cmd/status,
+   lib/bench.sh, lib/common.sh, lib/wkdata.py) that are not in this tree.
+   Nothing here has touched them and `wk sync --tools` has not been run. Yours
+   to commit or discard. [decision]
 
-D. "wk sysimage list isn't listing yocto images": the two yocto workspaces were
-   mid-rebuild (yocto.status started=2026-08-29T04:29Z/05:04Z; the wics
-   appeared 04:37Z/05:13Z); a yocto image stage deletes build/image first, so
-   the workspace vanished from the listing for the whole build. Fixed: a
-   yocto-*/buildroot-* workspace with no image is listed as "no image here yet"
-   with whether a build is running (lib/image.sh, cmd/sysimage, tests).
+5. `MACH_` is being renamed (it collides with macOS's own "mach"). Proposed
+   `NODE_`: boot/machines/<name>.conf becomes NODE_SSH, NODE_DEVICE, NODE_LOCAL,
+   and machine_load/machine_list keep their names. It is one sed over ~700
+   occurrences in 35 files -- and it is being held for two reasons, not one: the
+   word is yours to pick, and a rename that size would collide with moose's
+   uncommitted edits to cmd/status, cmd/pi and lib/common.sh (item 4). Resolve 4
+   first, then say the word. [decision]
 
-in-progress images should be listed as such too.
+6. The tart guest password becomes `1` as asked, which means provisioning
+   actually changes the account password (the Cirrus images ship admin/admin
+   and `sysadminctl` needs the current one). Confirm the guest account is
+   throwaway in the sense that matters: nothing on the tailnet trusts it, and
+   `wk rm` destroys it. [decision -- proceeding on yes unless you say otherwise]
 
-F. "wk new leaves git detached, with multiple remotes": the four remotes
-   (origin, wpe, fork, forkwpe) are the PR workflow's wiring (lib/store.sh,
-   deliberate). Whether a plain `wk new` lands on a detached HEAD needs a
-   fresh workspace to measure and this Mac has no mirror (13 GB into the podman
-   VM); the moose workspaces were all made with a branch. May the agent run
-   `wk sync` + `wk new` here, or one `wk new` on moose? [decision]
+7. `wk key tailnet` now refuses an API access token and an OAuth client secret
+   by name (both start `tskey-`, both administer the whole tailnet, and this
+   key is copied onto every card written from here). What it cannot check from
+   a key -- tagged, reusable, not ephemeral, expiry -- it reports as unverified
+   with the console link, because answering those needs an API token, which is
+   the credential it just refused to hold. Nothing further is checkable without
+   holding one. Good enough, or do you want a read-only API token stored for
+   it? [decision]
 
-   yes
+================================================================================
+DONE THIS RUN
+================================================================================
 
-G. moose's ~/Development/wk-tools has uncommitted edits (bench/mac-ab-summary.sh,
-   cmd/bench, cmd/pi, cmd/status, lib/bench.sh, lib/common.sh, lib/wkdata.py)
-   that are not in this tree. Nothing here touched them and `wk sync --tools`
-   was not run (it would overwrite them). Yours to commit or discard. [decision]
+- Home/End in zsh (B). Measured cause: shell/bashrc bound the keys and *then*
+  ran `bindkey -e`, which links a fresh emacs keymap over `main` and discards
+  whatever was bound into the previous one. Machine-dependent, which is why it
+  worked on moose: zsh starts in viins when $EDITOR contains "vi", so a host
+  without helix lost the bindings and a host with it kept them. The keymap is
+  now chosen above the bindings, and ^[OH / ^[OF (application cursor mode,
+  which zle's own smkx asks the terminal for) are bound as well.
+  tests/test_shell_keys.py.
 
-J. `wk backup --candidates` (new, read-only) lists live macOS settings that are
-   not in host/macos/defaults.conf. On tolken, the deliberate-looking ones:
+- `wk sysimage ls` carries a STATE column: building | ready | none, from the
+  workspace's own live answer. An image being built is the one most likely
+  being looked for and `-` in the size column was not an answer.
+  tests/test_card_edits.py.
 
-    NO:
-   
-   Accessibility KeyRepeatInterval 0.083333333 / KeyRepeatDelay 0.5 /
-   KeyRepeatEnabled 1;
+- Default CMake flags for every config, and per-machine flags per config
+  (`WK_TARGET_CMAKE_<config>`, `WK_BUILD_ARGS_<config>` in a machine's conf).
+  Each config now states only what differs from the default. tests/test_build.py.
 
-   YES:
-   NSGlobalDomain AppleWindowTabbingMode always; YES
-   dock
-   show-recents false/
-   mru-spaces false/wvous-br-corner 1/wvous-tl-corner 2; screensaver
-   askForPassword 0
-   Safari IncludeDevelopMenu + WebKitDeveloperExtrasEnabledPreferenceKey.
+- `wk pr <ref>` no longer refuses a pull request as a missing workspace. The
+  declaration gained `takes=<n>`: how many positionals belong to the command
+  after the name, so a lone one is the command's. An audit test holds every
+  command with an optional name to it.
 
+- On a shared build box the *directory* now names the workspace: `cd
+  ~/wk/ws/<name> && wk build gtk-release` works, as it does inside a container
+  workspace. There is no workspace marker on those machines -- several live
+  side by side under one root -- which is why the in-workspace interface only
+  ever worked in a container. tests/test_dispatcher.py.
 
-M. Loose ends of this run: the model budget for sub-agents ran out mid-way
-   ("session limit"), so two tasks stopped early and stay owed -- the ccache/
-   dependencies-on-remote-targets item below (nothing was changed), and
-   HANDOFF-wk-cli's remaining [needs a test] items (two of its six landed:
-   tests/test_owed_cli_color.py, tests/test_owed_cli_exit_code.py). Also
-   found: a container `wk-br-rescue2` (Exited, 6 days) visible on this Mac's
-   host podman connection but not inside the wk machine's rootless view --
-   yours; `wk rm br-rescue2` or `podman rm` it by hand if it is done.
+- git identity and speed settings reach every machine, from the one file that
+  declares them (dotfiles/gitconfig) rather than a copy per machine:
+  container/firstrun.sh and remote/provision.sh include it, `./setup` removes a
+  [user] section that shadows it (git takes a key's *last* value, so an include
+  loses to anything written after it), and `wk doctor` checks all three.
+  Found by it: devbox-arm64-2 has `user.name = no` and `user.email = no`, so
+  every commit made there is authored by "no <no>"; buildbox4 has no identity
+  at all, so a commit there is refused after the work. Both fixed by re-running
+  `wk remote setup <target>`.
 
-   you can do that
+- `wk doctor --all` asks every build machine what it has, read-only over ssh:
+  the tools a build needs, the identity a commit there would carry, and any
+  build variable that machine's own profile sets. One list of prerequisites
+  (remote/deps.sh) answers for `wk remote setup`, provisioning and doctor, and
+  whatever is missing comes back as one exact root command -- provisioning
+  still never takes root. tests/test_remote_deps.py.
+  Found by it: buildbox4 has no ccache, so every build there starts cold.
 
-K. docs/Urgent/pi.md (the pi coding agent, a litellm API key): three decisions
-   before code -- the command's name (`wk pi` is the Raspberry Pi command;
-   `wk agent`?), where the key lives (the store's secrets/ directory is
-   mounted read-only into every workspace, which is right for a key the agent
-   must use and wrong for anything else -- `wk key set litellm`, `wk key
-   check`, a `wk doctor` line), and the egress: `npm install -g` needs
-   registry.npmjs.org in the proxy allowlist, a widening the sandbox audit
-   should see. Say the name and whether npm's registry may be allowed.
+- A machine's own environment is no longer overwritten: shell/bashrc keeps a
+  pre-set $EDITOR/$VISUAL, and `wk doctor --all` prints any CC/CXX/CCACHE_DIR
+  a build box's profile exports, saying plainly that wk's build sets its own
+  and ignores it.
 
-  yes. Make an ai subcommand for claude and pi.
+- The approved macOS settings from J are in host/macos/defaults.conf
+  (AppleWindowTabbingMode, dock show-recents/mru-spaces, the two hot corners,
+  screensaver askForPassword, Safari's Develop menu). The Dock is restarted
+  when one of its keys changes -- it reads its preferences once, at launch, so
+  a written key nothing restarts is a setting that is in the file and not on
+  the screen. The Accessibility key-repeat values are left out, as you said.
 
-L. docs/Urgent/HUMAN-battery.md (charge limits on the Librem 5, the PinePhone
-   and this MacBook; `wk doctor` checks): pmOS exposes the charge threshold
-   through sysfs on both phones (`charge_control_end_threshold`), so `wk
-   bridge setup` can set it and `wk doctor --all` read it; macOS has no
-   supported user-space limit (Optimized Battery Charging is the OS's own
-   heuristic) -- the honest doctor line is "plugged in, N% -- no OS limit
-   exists". Go with that?
+- `wk key tailnet` and admin/wk-card-priv both refuse anything but
+  `tskey-auth-`. tests/test_key.py.
 
-   yes
+- Zed opens every project trusted already (`session.trust_all_projects`,
+  dotfiles/zed/settings.json) -- both defect entries asking for it are the
+  same one, and it was already true.
 
+- tests/test_dispatcher.py's top-level-call-order audit was blind to a
+  function whose opening brace carries an argument comment (`f() { # <arg>`),
+  this tree's house style -- so it reported two false positives in cmd/pi and
+  would have missed a real one anywhere else.
 
-Your scope is everything. Keep going until every defect and handoff item is done. You will be running unattended soon, so prioritize user intervention first. Surface decisions that need to be made here in this file at the top.
+================================================================================
+OWED, WITH THE DECISION ALREADY MADE
+================================================================================
 
-Use cheaper subagents with smaller models wherever possible.
+- Never rsync wk-tools: git push, refuse when dirty (decision 3 above narrows
+  what it covers). All three rsyncs, and the remote copy becomes a real
+  checkout -- which also gives `wk status` a way to say "the tools over there
+  are old" instead of printing `?`. Measured: buildbox4's copy has no
+  `ws_upstream_line` at all, which is exactly why `wk status image-decoders`
+  reports BASE=`?` -- the column works, the tooling over there is months old.
 
-Issues:
+- `wk ai claude` / `wk ai pi`, with `wk claude` left as a tombstone naming its
+  replacement. The litellm key as `wk key set litellm` into the store's
+  read-only-mounted secrets/, a `wk doctor` line, and registry.npmjs.org added
+  to the proxy allowlist for `npm install -g` (docs/Urgent/pi.md).
 
-- Install dependencies including ccache on remote targets, doctor should confirm everything is configured correctly. Some of these targets will have pre-populated env vars that should not be overwritten.
+- Battery (L): `charge_control_end_threshold` set by `wk bridge setup` on both
+  phones and read by `wk doctor --all`; on macOS the honest line, "plugged in,
+  N% -- no OS limit exists".
 
-- Every single wk command must fail if a cli arg is not recognized, or if the subcommand couldn't use it (ex: target)
+- `wk claude --rc` enabled by default everywhere: started when a workspace is
+  created and when one starts, reported rather than silently skipped when it
+  cannot.
 
-- wk status should list the base a workspace is based on (2.38, ToT main, etc). This is important for things like buildroot. It should also check if wk container sdk version is up to date.
+- `wk rm br-rescue2` (or `podman rm`) -- the Exited container on this Mac's
+  host podman connection. You said to go ahead; not done yet.
 
-- claude rc should be enabled by default everywhere
+================================================================================
+STILL OPEN
+================================================================================
 
-- Never rsync wk tools, always use git whenever possible.
+- tart guests: mention the default password when entering, provisioning,
+  starting or launching Zed; change it to `1` (decision 6). `wk zed mya` opens
+  a guest terminal with no `wk` on PATH -- the PATH line is only in .zprofile
+  (a login shell) and Zed's terminal is not one; the guest should get
+  shell/bashrc like every other machine, which is also where PATH is decided.
 
-- in-workspace commands still aren't working: buildbox4:shared ~ ❯ wk pr justinmichaud:eng/non-cocoa-fuzz-OOB-read-with-BMP-RLE-absolute-runs
-warning: no such workspace: justinmichaud:eng/non-cocoa-fuzz-OOB-read-with-BMP-RLE-absolute-runs -- 'wk ls' lists them
-usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>
-       wk pr -h for the rest
+- New tart guests must land on an empty desktop with no Software Update prompt:
+  vm/provision-base.sh already clicks through Setup Assistant, and the update
+  nag is not covered (com.apple.SoftwareUpdate AutomaticCheckEnabled /
+  AutomaticDownload, `softwareupdate --schedule off`). A helper should then
+  *confirm* that state rather than assume it.
 
-- Check git configuration (author, email) in doctor, fix automatically.
+- `wk status` should also say whether the container SDK image is up to date,
+  and BASE should stop reading `?` (see the tools-sync item above).
 
-- Confirm layout tests can run on headless host or with real gpu
+- Confirm layout tests can run headless and with a real GPU.
 
-- test build on buildbox4 and set default cmake args: --no-fatal-warnings, -DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++
+- Confirm ccache still caches across a change of -j. (Nothing in the flags wk
+  sets varies with the job count -- CCACHE_* is fixed and -j reaches ninja, not
+  the compiler line -- but that is an argument, not a measurement.)
 
-- confirm ccache can still cache after changing -j
+- The lifecycle notes in README.md read as one sequence when they are two
+  unrelated commands:
 
-- there should also be a config for default flags on all bulids per configuration. per-machine flags should be set per config too.
+      wk sysimage write --from <path> --disk <writer>:/dev/sdX
+      wk boot rpi3                                 # one-shot: arms, reboots, self-reverts
 
-- zed remote git changes are very slow. Confirm that all machines get a faster git config symlinked.
+- Help must list every valid value for a parameter (build configs, image
+  profiles, machine names). tests/test_help_values.py covers part of it.
 
-- the MACH prefix is confusing, since macos uses mach too.
+- `wk new` should fetch by default; `wk fetch` should be faster; a plain `wk
+  new` leaves git detached with several remotes. You approved one `wk sync` +
+  `wk new` here or one `wk new` on moose to measure it (F).
 
-- tart vm guests should mention default password when entering, provisioning, starting, or launching zed. The default password should be changed to 1.
+- Finish the audit of the shape `wk zed <workspace>` had -- an argument a
+  command re-decides for itself and then mishandles. The workspace name is the
+  dispatcher's alone now, and `takes=` closed the case where a command's own
+  positional was read as one; configs, flags, paths and subverbs are still
+  parsed command by command.
 
-- zed should launch trusted by default.
-
-- After this:
-
-tolken:host ~ ❯ wk new mya --target vm
-tolken:host ~ ❯ wk start mya           
-==> booting wk-mya (log: /Users/justinmichaud/.local/state/wk/vm/mya.run.log)
-==> egress proxy on 192.168.2.1:3128
-192.168.2.6
-tolken:host ~ ❯ wk zed mya
-
-admin@Manageds-Virtual-Machine WebKit % wk
-zsh: command not found: wk
-
-- new tart vm workspaces do not skip auto update prompt: they should get logged in to an empty desktop by default always, and a helper should confirm this state.
-
-- wk image list should list images that are in-progress too, and mention this state.
-
-- Audit every command for breakage of the shape `wk zed <workspace>` had: an
-  argument the command re-decides for itself and then mishandles. The workspace
-  name is now the dispatcher's alone; the other arguments -- configs, flags,
-  paths, subverbs -- are still parsed command by command.
-
-- The lifecycle notes are confusing:
-
-wk sysimage write --from <path> --disk <writer>:/dev/sdX
-wk boot rpi3                                     # one-shot: arms, reboots, self-reverts
-
-- wk zed should open in trusted mode: `session.trust_all_projects` in dotfiles/zed/settings.json, so every
-  project Zed opens is trusted
-
-- wk new should 1) fetch by default. 2), wk fetch should be faster. wk new by default leaves git detatched, with multiple remotes for many branches.
-  (agent: measured, not changed -- decisions E and F above)
-
-- Help options should always list all valid values for params (eg: bulid configurations)
+- HANDOFF-wk-cli's remaining [needs a test] items: four of six are still owed
+  (tests/test_owed_cli_color.py and tests/test_owed_cli_exit_code.py landed).
