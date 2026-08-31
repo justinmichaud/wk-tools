@@ -15,7 +15,9 @@ import subprocess
 import sys
 import tempfile
 import types
+import os
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from tests.support import REPO, WkTest, bash, run
@@ -177,6 +179,19 @@ class TestBoardDriver(unittest.TestCase):
                        "lib_sha256": "ab" * 32, "build_id": BUILD_ID}
         self.good = {"pids": "1", "exe": self.expect["exe"], "lib_inode": "4711",
                      "mapped": self.expect["lib"], "other_webkit": "", "lib_sha256": "ab" * 32}
+
+    def test_every_launch_ends_the_old_browser_and_starts_cold(self):
+        """prepare_env runs before each launch: the kill, then the cache
+        reset -- a second launch at a cached URL never starts the benchmark
+        (bench/wk_board_driver.py, prepare_env)."""
+        env = {"WK_BOARD_SSH": "ssh board", "WK_BOARD_LAUNCH": "cog", "WK_BOARD_KILL": "killall cog",
+               "WK_BOARD_RESET": "rm -rf /root/.cache/WebKitCache", "WK_BOARD_URL": "127.0.0.1:1"}
+        with unittest.mock.patch.dict(os.environ, env):
+            drv = self.d.WkBoardDriver([])
+        ran = []
+        drv._remote = lambda text, check=True, capture=False: ran.append((text, check)) or ""
+        drv.prepare_env(None)
+        self.assertEqual(ran, [("killall cog", False), ("rm -rf /root/.cache/WebKitCache", True)])
 
     def test_url_keeps_path_and_query_and_swaps_host(self):
         url = self.d.rewrite_url("http://127.0.0.1:41235/Speedometer/index.html?startAutomatically=true", "127.0.0.1:5000")

@@ -142,6 +142,36 @@ class TestReportWalkerAndStats(WkTest):
             self.assertIn("TodoMVC-JS", cp.stdout)
             self.assertIn("Time", cp.stdout)
 
+    def test_report_reads_speedometer2_board_results(self):
+        """the shape `wk pi bench` records from the webserver patch's POST:
+        the total Score at the suite root, descriptor lists (metrics.Time ==
+        ["Total"]) in the middle, and the numbers three levels down under
+        Sync/Async -- every level with numbers becomes a row, named by its
+        path, and the descriptor levels do not."""
+        def doc(base):
+            return {"debugOutput": [None], "Speedometer-2": {
+                "metrics": {"Score": {"current": [[base, base + 1.0, base + 0.5]]},
+                            "Time": ["Total", "Geometric"]},
+                "tests": {"VanillaJS-TodoMVC": {
+                    "metrics": {"Time": ["Total"]},
+                    "tests": {"Adding100Items": {
+                        "metrics": {"Time": ["Total"]},
+                        "tests": {
+                            "Sync": {"metrics": {"Time": {"current": [[base * 10, base * 10 + 2]]}}},
+                            "Async": {"metrics": {"Time": {"current": [[base, base + 1]]}}},
+                        }}}}}}}
+        with scratch_dir() as tmp:
+            a, b = self._write_pair(tmp, doc(11.0), doc(10.5))
+            cp = wkdata("report", str(a), str(b), "--text")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertIn("Speedometer-2", cp.stdout)
+            self.assertIn("VanillaJS-TodoMVC/Adding100Items/Sync", cp.stdout)
+            self.assertIn("VanillaJS-TodoMVC/Adding100Items/Async", cp.stdout)
+            # The descriptor-only middle levels hold no numbers and are not rows.
+            for line in cp.stdout.splitlines():
+                self.assertFalse(line.startswith("VanillaJS-TodoMVC ") or line.startswith("VanillaJS-TodoMVC/Adding100Items "),
+                                 f"a descriptor-only level became a row: {line}")
+
     def test_variance_by_configuration_groups_matching_tuples(self):
         """Two runs sharing a `configuration` tuple land in one variance
         group; the group's line names the axes and both sides' spread."""

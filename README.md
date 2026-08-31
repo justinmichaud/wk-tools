@@ -310,7 +310,10 @@ that, and the sha256 of the library the reporting process mapped, is what
 runs on the workstation, out of a `Tools/Scripts` tree exported from the
 mirror, and drives the board's browser over ssh through a reverse tunnel; the
 process that reports each number is checked against the slot's build-id, so a
-result can never be from the wrong WebKit. Every run's evidence lands on the
+result can never be from the wrong WebKit. Every launch starts from a cold
+browser cache on the board (a cached load of the benchmark's URL never starts
+the benchmark on the rpi3 image; run-benchmark's own drivers give every launch
+a fresh profile for the same reason). Every run's evidence lands on the
 workstation, in the task's directory -- the browser's own log is moved off
 the board after each run, the board's system log tail copied beside it -- so
 the board keeps nothing. A yocto workspace's cross build is
@@ -506,18 +509,22 @@ partition 1 (a revert that needs no hands is owed, docs/HANDOFF-boot.md). This
 board's rescue predates the card-helper layer, so its rewrite is the one card a
 person carries (`wk help lifecycle`, step 3).
 
-**rpi4 -- `pi-mbr`, two media.** Rescue on the SD card (`/dev/mmcblk0`, root
-`p2`), bench system on the USB stick (`/dev/sda`), written from the rescue
-(`--disk rpi4:/dev/sda`). Which medium the firmware tries first is EEPROM
-state, written once by `wk pi boot-order rpi4` -- the default for a
-bench-device whose bench medium is USB is `usb-first`, the stick first and the
-card behind it; `--revert` restores `local` -- and it needs the board running
-and reachable, which is why it is lifecycle step 4, after the rescue's first
-boot. Arming is one byte: the stick's first partition type, `0x0c` (a bootable
-FAT the firmware takes) or `0x83` (Linux, which it steps over to the card).
-`wk boot rpi4` sets it; the bench system's self-disarm clears it as it boots,
-so any later reboot falls through to the rescue. If it goes wrong: pull the
-stick. The rescue needs nothing on it.
+**rpi4 -- `pi-tryboot`, two media, one boot authority.** Rescue on the SD card
+(`/dev/mmcblk0`, root `p2`), bench system's root on the USB stick (`/dev/sda`),
+written from the rescue (`--disk rpi4:/dev/sda`). The bootloader refuses to
+USB-MSD-boot the stick there (measured: armed, complete files, enumerates in
+1.5 s under Linux -- skipped on either bus, warm or cold), so the boot is
+split: `wk boot rpi4` stages the bench system's kernel, device tree and
+cmdline out of the stick's own boot partition into `second/` on the SD's boot
+partition plus a `tryboot.txt`, and reboots with the firmware's tryboot
+one-shot (`systemctl reboot "0 tryboot"`). The firmware reads `tryboot.txt`
+exactly once and clears the flag itself, so a panic (`panic=10` is staged
+into the cmdline), a watchdog return or any reboot lands on the rescue with
+nothing to put back -- there is no self-disarm to stage. The kernel then
+mounts the stick by PARTUUID; the stick stays the measured medium. The EEPROM
+order for this driver is `sd-first` (`wk pi boot-order rpi4`): the firmware
+never boots the bench medium at all. If it goes wrong: any power cycle boots
+the rescue.
 
 **rpi5 -- `rpi5-usb`, a workstation with a bench stick.** The board's own
 install on the NVMe (`/dev/nvme0n1p2`) is never written; the bench system goes

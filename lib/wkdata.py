@@ -495,36 +495,52 @@ def _first_current(node):
     return None
 
 
-# The one result walker: {subtest: {"Score": [floats], "Time": [floats]}} for
-# every named test directly under a suite's "tests" mapping -- the
-# granularity compare-results' --breakdown reports at. Handles a browser run
-# through run-benchmark, a jsc-shell log merged by merge-jsc-logs above, and
-# an on-board `wk pi bench` result: whatever produced the JSON, this is the
-# only place that reads it apart.
+# The one result walker: {name: {"Score": [floats], "Time": [floats]}} for
+# every node that actually holds numbers, wherever it sits. The shapes it has
+# to read disagree about depth: a jsc-shell merged log and run-benchmark's
+# JetStream output keep numbers one "tests" level down; Speedometer-2's
+# on-board result keeps only the total at the suite root and the numbers
+# three levels down (<suite>/<test>/Sync|Async), with bare descriptor lists
+# (metrics.Time == ["Total"]) at the levels between. So: recurse through
+# every "tests" mapping, record a node only where a metric has a "current"
+# array, and name it by its path below the suite -- the suite root's own
+# numbers (a benchmark's total) keep the suite's name. Whatever produced the
+# JSON, this is the only place that reads it apart.
 def _subtest_metrics(doc):
     out = {}
-    if not isinstance(doc, dict):
-        return out
-    for suite in doc.values():
-        if not isinstance(suite, dict):
-            continue
-        tests = suite.get("tests")
-        if not isinstance(tests, dict):
-            continue
-        for name, node in tests.items():
-            if not isinstance(node, dict):
-                continue
-            metrics = node.get("metrics")
-            if not isinstance(metrics, dict):
-                continue
-            entry = {}
+
+    def metric_vals(metrics):
+        entry = {}
+        if isinstance(metrics, dict):
             for key in ("Score", "Time"):
                 if key in metrics:
                     vals = _flatten(_first_current(metrics[key]))
                     if vals:
                         entry[key] = vals
+        return entry
+
+    def walk(name, node):
+        if not isinstance(node, dict):
+            return
+        entry = metric_vals(node.get("metrics"))
+        if entry:
+            out[name] = entry
+        tests = node.get("tests")
+        if isinstance(tests, dict):
+            for child, cnode in tests.items():
+                walk("%s/%s" % (name, child) if name else str(child), cnode)
+
+    if isinstance(doc, dict):
+        for suite, node in doc.items():
+            if not isinstance(node, dict):
+                continue
+            entry = metric_vals(node.get("metrics"))
             if entry:
-                out[name] = entry
+                out[str(suite)] = entry
+            tests = node.get("tests")
+            if isinstance(tests, dict):
+                for child, cnode in tests.items():
+                    walk(str(child), cnode)
     return out
 
 

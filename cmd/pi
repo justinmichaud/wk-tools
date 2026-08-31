@@ -474,6 +474,14 @@ pi_kill_cmd() { # <slot.json>
     esac
 }
 
+# What a first launch finds: no disk cache. Both browsers keep WebKit's
+# network cache under the user's cache directory (cog: WebKitCache and
+# CacheStorage in g_get_user_cache_dir(); MiniBrowser: the same, under wpe/).
+# The browser runs as root on every image here, so the directory is root's.
+pi_reset_cmd() {
+    printf 'd="${XDG_CACHE_HOME:-$HOME/.cache}"; rm -rf "$d/WebKitCache" "$d/CacheStorage" "$d/wpe/WebKitCache" "$d/wpe/CacheStorage"'
+}
+
 # Save the run where `wk bench compare` will find it: same directory shape
 # and same three axes as every other run (BENCH_DIR, lib/bench.sh), so the
 # records are interchangeable: env.json, result.json, run.log.
@@ -742,6 +750,7 @@ pi_bench_once() {
         env WK_BOARD_SSH="$(pi_ssh_cmd)" \
             WK_BOARD_LAUNCH="$(pi_launch_cmd "$slot" "$json" "$cores_wrap")" \
             WK_BOARD_KILL="$(pi_kill_cmd "$json")" \
+            WK_BOARD_RESET="$(pi_reset_cmd)" \
             WK_BOARD_URL="127.0.0.1:$port" \
             WK_BOARD_EXPECT="$(wkslot expect "$json" "$(pi_slot_dir "$slot")/root")" \
             WK_BOARD_EVIDENCE="$out/verify.jsonl" \
@@ -902,14 +911,20 @@ cmd_boot_order() {
             # The order defaults from what the fleet says this machine is,
             # not from a flag the caller has to remember: getting it wrong on
             # a workstation costs a trip to the device. A bench-device's
-            # default follows its bench medium's own transport (MACH_DEVICE,
-            # disk_tran_of_name -- boot/disk.sh): whichever medium the bench
-            # system boots from is the one the firmware should try first.
+            # default follows the medium the firmware actually boots for it:
+            # the bench medium's own transport (MACH_DEVICE,
+            # disk_tran_of_name -- boot/disk.sh) -- except under pi-tryboot,
+            # where the firmware never boots the bench medium at all and the
+            # rescue's SD is the boot authority for both roles.
             if machine_by_ssh "$HOST" && [ "${MACH_ROLE:-workstation}" = bench-device ]; then
-                case "$(disk_tran_of_name "${MACH_DEVICE:-}")" in
-                    mmc) order_name=sd-first ;;
-                    *)   order_name=usb-first ;;
-                esac
+                if [ "${MACH_DRIVER:-}" = pi-tryboot ]; then
+                    order_name=sd-first
+                else
+                    case "$(disk_tran_of_name "${MACH_DEVICE:-}")" in
+                        mmc) order_name=sd-first ;;
+                        *)   order_name=usb-first ;;
+                    esac
+                fi
             else
                 order_name=local
             fi

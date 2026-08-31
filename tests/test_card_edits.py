@@ -821,13 +821,13 @@ printf 'name=%s ssh=%s role=%s driver=%s\n' \
         )
 
     def test_a_medium_armed_board_gets_its_drivers_self_disarm(self):
-        # rpi4 arms its USB drive (pi-mbr): its image flips the drive's partition
-        # type on first boot. rpi3 arms its rescue's config.txt (pi-sd): its
-        # image puts the rescue's own back.
+        # rpi3 arms its rescue's config.txt (pi-sd): its image puts the
+        # rescue's own back. rpi4 arms through the firmware's tryboot flag
+        # (pi-tryboot), which the firmware clears itself, so its image has
+        # nothing to park and no disarm is staged.
         cp = self._sh('_self_disarm_for rpi4')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("conv=notrunc", cp.stdout, cp.stdout + cp.stderr)
-        self.assertNotIn("'", cp.stdout, "a quote here would split systemd's ExecStart")
+        self.assertEqual(cp.stdout.strip(), "", "pi-tryboot has nothing to park:\n" + cp.stdout)
         cp = self._sh('_self_disarm_for rpi3')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("config.txt.rescue", cp.stdout, cp.stdout + cp.stderr)

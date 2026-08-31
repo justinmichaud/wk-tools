@@ -42,9 +42,12 @@ done
 
 class TestRpi4Arrangement(unittest.TestCase):
     def test_rpi4_bench_medium_is_the_usb_drive_and_the_rescue_is_the_sd(self):
-        """rpi4.conf: MACH_DEVICE is the USB drive, MACH_ROOT is on the SD card, driver pi-mbr"""
+        """rpi4.conf: MACH_DEVICE is the USB drive, MACH_ROOT is on the SD
+        card. The driver is pi-tryboot (tests/test_pi_tryboot.py): the
+        bootloader will not MSD-boot the drive there, so pi-mbr's arrangement
+        is exercised here with the conf's media and the driver loaded directly."""
         cp = bash(LOAD + 'machine_load rpi4; echo "$MACH_DRIVER $MACH_DEVICE $MACH_ROOT"')
-        self.assertEqual(cp.stdout.strip(), "pi-mbr /dev/sda /dev/mmcblk0p2", cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "pi-tryboot /dev/sda /dev/mmcblk0p2", cp.stdout + cp.stderr)
 
     def test_media_and_reprovision_name_the_media_from_the_conf(self):
         """b_media and b_reprovision name each medium from the conf, whichever way round it is declared"""

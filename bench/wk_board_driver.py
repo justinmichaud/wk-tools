@@ -19,6 +19,8 @@
 #   WK_BOARD_LAUNCH   remote shell text that starts the browser; the URL is
 #                     appended as one quoted argument
 #   WK_BOARD_KILL     remote shell text that ends every browser process
+#   WK_BOARD_RESET    remote shell text that leaves the browser's on-disk state
+#                     as a first launch finds it, run before every launch
 #   WK_BOARD_URL      host:port the board reaches the server at (the tunnel)
 #   WK_BOARD_EXPECT   JSON: {"process", "exe", "lib", "lib_sha256",
 #                     "build_id"} -- what the process producing a result
@@ -66,6 +68,7 @@ class WkBoardDriver(BrowserDriver):
         self._ssh = shlex.split(_need('WK_BOARD_SSH'))
         self._launch = _need('WK_BOARD_LAUNCH')
         self._kill = _need('WK_BOARD_KILL')
+        self._reset = _need('WK_BOARD_RESET')
         self._url = _need('WK_BOARD_URL')
         expect = os.environ.get('WK_BOARD_EXPECT', '')
         self._expect = json.loads(expect) if expect else None
@@ -77,8 +80,14 @@ class WkBoardDriver(BrowserDriver):
 
     def prepare_env(self, config):
         # A browser left over from a run that died is a second browser
-        # fetching the same URL; ended before this one starts.
+        # fetching the same URL; ended before this one starts. Then a cold
+        # cache: a second launch at a URL the browser has cached loads the
+        # page from disk and the benchmark never starts (measured on the rpi3
+        # 2.38 image, every launch after the first of a session), and a warm
+        # cache is a different measurement in any case -- run-benchmark's
+        # own drivers give every launch a fresh profile for the same reason.
         self._remote(self._kill, check=False)
+        self._remote(self._reset)
 
     def restore_env(self):
         pass
