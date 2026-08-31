@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# wk key register|check|show|ensure|tailnet|tailnet-api -- the deploy keys workspaces push with
+# wk key register|check|show|ensure|claude|tailnet|tailnet-api -- the credentials a workspace needs
 # wk: where=host name=none group=sources needs gh,gh-auth
-# wk: sub show,ensure,pub,sshtest,fingerprints,tailnet,tailnet-api needs=
+# wk: sub show,ensure,pub,sshtest,fingerprints,claude,tailnet,tailnet-api needs=
 #
 # One key per fork, shared by every workspace. GitHub deploy keys are
 # scoped to a single repository and refuses the same key on a second one,
@@ -19,6 +19,11 @@
 #   wk key check      verify each key authenticates with write access
 #   wk key show       print the public keys
 #   wk key ensure     create missing keys without registering them
+#   wk key claude [--replace]
+#                     the Claude Code token every workspace this machine makes
+#                     starts authenticated with. `claude setup-token` prints
+#                     one; this stores it, and each target driver hands it to
+#                     the workspaces it brings up
 #   wk key tailnet-api [--replace]
 #                               the tailnet API access token this machine
 #                               administers with: retiring a fleet node whose
@@ -153,7 +158,7 @@ priv_of()     { in_vm "for d in secrets push-keys; do \
 
 # --- ensure runs inside the VM, where the secrets are ------------------------
 if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
-    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
     ensure_dir "$WK_STORE/secrets" 0700
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
@@ -177,13 +182,65 @@ if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
 fi
 
 case "$ACTION" in
+# The agent's own credential. Not a deploy key and never reaching GitHub, but
+# the same shape of problem the tailnet key has: something this repository must
+# never contain, kept per machine, asked for here rather than as a surprise
+# prompt from whatever needed it first.
+#
+# In the store rather than host-local, unlike the tailnet keys, because the
+# consumers are the workspaces: a container reads it live through the read-only
+# /secrets mount, and a guest or a build box is handed a copy when its
+# workspace comes up. Nothing here, or anywhere else, ever prints it.
+claude)
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
+    case "${2:-}" in
+        --replace)
+            [ -n "$(wk_agent_token)" ] \
+                || die "there is no Claude token here to replace ($(wk_agent_token_path)).
+    'wk key claude' asks for one."
+            # Cleared before asking, so a replace that is then abandoned leaves
+            # nothing behind claiming to be current.
+            wk_agent_token_clear
+            info "removed the old token -- revoke it too if it is still live"
+            ;;
+        "") ;;
+        *) die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h" ;;
+    esac
+
+    if [ -n "$(wk_agent_token)" ]; then
+        info "claude token: present ($(wk_agent_token_path))"
+        log  "  every workspace this machine makes starts authenticated with it:"
+        log  "    a container reads it live from the read-only /secrets mount"
+        log  "    a macOS guest and a build box are handed a copy at start"
+        log  "  whether it still works is not checkable from here -- only Claude"
+        log  "  can say, and asking would spend a request. A workspace reporting"
+        log  "  'Not logged in' is the evidence that it does not."
+        log  "  'wk key claude --replace' rotates it"
+        exit 0
+    fi
+
+    _tok=$(prompt_secret_value \
+        "a Claude Code token, so a workspace starts authenticated instead of asking for /login" \
+        "run 'claude setup-token' here and paste what it prints") || _tok=""
+    [ -n "$_tok" ] || die "no Claude token stored, so a new workspace will ask you to run /login
+    inside it. To store one:  claude setup-token   then  wk key claude"
+
+    # Down a pipe, never as an argument: an argument is in `ps` for everyone on
+    # the machine for as long as the command runs.
+    printf '%s\n' "$_tok" | wk_agent_token_store \
+        || die "could not write $(wk_agent_token_path)"
+    unset _tok
+    info "stored -- every workspace made from now on starts authenticated"
+    log  "  the ones that already exist pick it up on their next 'wk start'"
+    ;;
+
 # The tailnet API access token: what retires a fleet node whose name a new
 # card needs, so a reprovision does not stop at a person with a browser. Host
 # -local like the auth key, and unlike it never seeded onto a card -- it
 # administers the whole tailnet, which is why wk_tailscale_key_reject refuses
 # it wherever an auth key is wanted.
 tailnet-api)
-    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
     _tsapi=$(wk_tailscale_api_path)
     case "${2:-}" in
         --replace)
@@ -194,7 +251,7 @@ tailnet-api)
             info "removed the old token; nothing on the tailnet is affected"
             ;;
         "") ;;
-        *) die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h" ;;
+        *) die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h" ;;
     esac
 
     if wk_tailscale_api_present; then
@@ -227,7 +284,7 @@ tailnet-api)
 # The fleet's tailnet auth key. Host-local, and deliberately not in the VM with
 # the deploy keys: the machine that writes a card is the machine that needs it.
 tailnet)
-    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
     _tspath=$(wk_tailscale_authkey_path)
     case "${2:-}" in
         --replace)
@@ -242,7 +299,7 @@ tailnet)
             log  "  a tagged node does not key-expire, so rotating this costs nothing"
             ;;
         "") ;;
-        *) die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h" ;;
+        *) die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h" ;;
     esac
 
     if wk_tailscale_authkey_present; then
@@ -282,8 +339,8 @@ tailnet)
 # `show` is the human version.
 pub)
     remote="${2:-}"
-    [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
-    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
     out=$(pub_of "$remote")
     [ -n "$out" ] || exit 1
     printf '%s\n' "$out"
@@ -294,8 +351,8 @@ pub)
 # machine with the key can offer it.
 sshtest)
     remote="${2:-}"
-    [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
-    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -n "$remote" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
+    [ -z "${3:-}" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
     priv=$(priv_of "$remote")
     [ -n "$priv" ] || { echo "no key"; exit 1; }
     case "$priv" in */push-keys/*) echo "push is off"; exit 3 ;; esac
@@ -314,7 +371,7 @@ sshtest)
 # where" is a question about the fleet, and reading a fingerprint off a screen
 # beats reading a public key off one.
 fingerprints)
-    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         pub=$(pub_of "$remote")
@@ -331,7 +388,7 @@ fingerprints)
     ;;
 
 show)
-    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         printf '# %s\n%s\n' "$repo" "$(pub_of "$remote")"
@@ -339,7 +396,7 @@ show)
     ;;
 
 register)
-    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
     failed=0
     for machine in $(key_machines); do
         label=$(m_label "$machine")
@@ -388,7 +445,7 @@ EOF
     ;;
 
 check)
-    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    [ -z "${2:-}" ] || die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
     # Two questions, two sources.
     #
     # ssh answers "is this key registered and scoped to the right repo?" -- a
@@ -451,6 +508,6 @@ EOF
     ;;
 
 *)
-    die "usage: wk key register|check|show|ensure|tailnet|tailnet-api; see wk key -h"
+    die "usage: wk key register|check|show|ensure|claude|tailnet|tailnet-api; see wk key -h"
     ;;
 esac

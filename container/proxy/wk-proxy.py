@@ -238,6 +238,52 @@ ALLOWED_HOSTS = {
     # decided before the fetch -- and the Yocto source mirror does not carry it,
     # which is why the fetch has to go upstream at all.
     "tailscale.com": (443,),
+
+    # --- ordinary development ------------------------------------------------
+    # NOTE FOR THE SANDBOX AUDIT (docs/HANDOFF-sandboxing.md): a real widening,
+    # and the widest in *kind* on this list. A package registry serves whatever
+    # a project's manifest names, so this is arbitrary third-party code chosen
+    # by a file in the checkout -- broader than the source mirrors above, which
+    # serve one distribution's own declared sources. It is deliberate: a
+    # workspace that cannot install a package is not a development machine, and
+    # every name here was measured as a refusal in a real session rather than
+    # guessed at. BLOCKED_NETS below is unchanged, so none of them can become a
+    # route onto the LAN or the tailnet, which is the property that matters.
+    "registry.npmjs.org": (443,),      # npm, and `npm install -g` for an agent
+    "formulae.brew.sh": (443,),        # Homebrew's formula index
+    "ghcr.io": (443,),                 # Homebrew bottles (their blobs are on
+                                       # githubusercontent, already allowed)
+    "crates.io": (443,),               # cargo, and static. for the tarballs
+    "rust-lang.org": (443,),           # static. -- rustup's toolchains
+    "rustup.rs": (443,),               # sh. -- the rustup installer
+
+    # --- macOS guests --------------------------------------------------------
+    # Explicit hostnames, never the `apple.com` suffix: the refusals a guest
+    # actually produces are dominated by iCloud, Siri, Spotlight, ads, news and
+    # weather, and none of that is development. These are the two things that
+    # are.
+    #
+    # Software update, for Xcode and its command line tools. Allowing the
+    # catalog does not make an in-place upgrade the way to fix a guest -- a
+    # guest that is wrong is rebuilt from the image WK_VM_IMAGE names
+    # (CLAUDE.md) -- it means `xcode-select --install` and Xcode's own first
+    # launch can complete instead of hanging on a host they cannot reach.
+    "developer.apple.com": (443,),     # and download. -- Xcode + CLT
+    "swscan.apple.com": (443,),        # the softwareupdate catalog
+    "swcdn.apple.com": (443,),         # its payloads
+    "updates.cdn-apple.com": (443,),   # and theirs
+    "mesu.apple.com": (443,),          # device support packages
+    "gdmf.apple.com": (443,),          # what updates are offered at all
+    "gdmf-ados.apple.com": (443,),
+    # Certificate validation. Gatekeeper checks notarization before it will run
+    # anything downloaded, and a check it cannot make is a binary that will not
+    # launch. Port 80 as well as 443 throughout: OCSP and CRL are http by
+    # design, and verified by signature rather than by transport.
+    "valid.apple.com": (80, 443),      # notarization
+    "ocsp.apple.com": (80, 443),
+    "ocsp2.apple.com": (80, 443),
+    "crl.apple.com": (80, 443),
+    "pki.goog": (80, 443),             # i. -- Google Trust Services CRL/OCSP
 }
 
 # Addresses that are never permitted as a *destination*, whatever resolved to

@@ -392,6 +392,29 @@ unset WK_TOOLS_DIR
 # Scroll-back-clearing clear.
 alias clear="clear && printf '\033[3J'"
 
+# --- 6b. The agent's credential ----------------------------------------------
+# A workspace the host has given a Claude token starts already authenticated:
+# no /login, no browser, and no login Keychain -- which a macOS guest reached
+# over ssh, or through an editor's remote server, does not have unlocked
+# anyway. `wk key claude` stores the token; each target driver puts it here,
+# and this is its only reader.
+#
+# The file holds the raw token and nothing else, so a container can make it a
+# symlink onto the read-only /secrets mount and pick up a rotation without
+# being rebuilt. A dangling symlink is simply "no token", and so is no file:
+# a workspace without one asks the person to /login, which still works.
+#
+# Read without forking, since this runs in every shell.
+if [ -r "$HOME/.wk-agent-token" ]; then
+  while IFS= read -r _wk_tok; do
+    case $_wk_tok in
+      "" | \#*) ;;
+      *) CLAUDE_CODE_OAUTH_TOKEN="$_wk_tok"; export CLAUDE_CODE_OAUTH_TOKEN; break ;;
+    esac
+  done < "$HOME/.wk-agent-token"
+  unset _wk_tok
+fi
+
 # --- 7. Completion -----------------------------------------------------------
 # After PATH (section 6) so `command -v wk` sees it; interactive only, like
 # history/prompt above (re-checked since section 5b already unset $_WK_INTERACTIVE).

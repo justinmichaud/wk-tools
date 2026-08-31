@@ -146,6 +146,8 @@ wk sudo setup                  # closes sudo's 5-minute timestamp and NOPASSWD
 gh auth login                  # wk key register calls the GitHub API with this
 wk key register                # a deploy key per fork, registered with write access
 wk push on                     # exposes the keys to workspaces
+claude setup-token             # then paste it into the next line
+wk key claude                  # every workspace this machine makes starts authenticated
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
 eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```
@@ -480,6 +482,16 @@ wk ai claude bug-238 --rc                   # a Remote Control server the Claude
 
 A `remote` target has no sandbox to verify; `wk ai claude` there stops at a
 barrier that only an explicit `--force` crosses.
+
+A workspace starts already authenticated, so nothing has to answer `/login` in
+it -- which a macOS guest reached through an editor's remote server cannot do
+anyway, having no unlocked login Keychain. One token per machine, stored by
+`wk key claude` (from `claude setup-token`) and read by `shell/bashrc` into
+`CLAUDE_CODE_OAUTH_TOKEN`. Each target hands it over differently: a container
+symlinks the read-only `/secrets` mount, so rotating the token reaches every
+container at once; a macOS guest and a build box are given a copy when the
+workspace comes up, and lose it the same way when `wk key claude --replace`
+withdraws one. Without a token a workspace simply asks for `/login` as before.
 
 Nothing an agent runs can publish or commit, on any target. Publishing: the
 deploy keys are held back for the session (`wk push off`, before the sandbox is

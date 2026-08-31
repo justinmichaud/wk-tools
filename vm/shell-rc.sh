@@ -29,16 +29,37 @@ TOOLS="${1:-${WK_TOOLS_DIR:-$HOME/wk-tools}}"
     exit 1
 }
 
+# Two lines, and they come from different places on purpose. The shared rc
+# lives in the guest's own copy of wk-tools, which only a build refreshes.
+# ~/.wk-egress is written by the host on every start (_set_guest_egress,
+# targets/vm.sh) and absent on a guest that needs no proxy, so a guest is never
+# left without egress waiting for a build to bring it a newer rc.
 line=". \"$TOOLS/shell/bashrc\""
+egress='if [ -r "$HOME/.wk-egress" ]; then . "$HOME/.wk-egress"; fi'
+
+add() { # <rc> <line> <what it is>
+    grep -qF "$2" "$1" 2>/dev/null && return 0
+    printf '\n# wk-tools: %s\n%s\n' "$3" "$2" >> "$1"
+}
+
 for rc in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.bashrc"; do
     [ -f "$rc" ] || : > "$rc"
-    # The stanza this replaces, from a guest provisioned before shell/bashrc
-    # was wired in here. Left behind it would put ~/.local/bin on PATH twice.
-    if grep -q 'wk-tools: PATH' "$rc" 2>/dev/null; then
+    # Stanzas a guest provisioned before this file existed still carries, both
+    # of them now owned by something else. The PATH one would put
+    # ~/.local/bin on PATH twice (shell/path.sh). The egress one holds the
+    # proxy address baked in at provisioning time -- a second copy of a fact
+    # the host now writes into ~/.wk-egress on every start, and one that goes
+    # stale the moment the address changes.
+    if grep -q -e 'wk-tools: PATH' -e 'wk-tools: egress goes through' "$rc" 2>/dev/null; then
         tmp=$(mktemp)
-        grep -v -e 'wk-tools: PATH' -e 'export PATH="$HOME/.local/bin:$PATH"' "$rc" > "$tmp" || true
+        grep -v -e 'wk-tools: PATH' -e 'export PATH="$HOME/.local/bin:$PATH"' \
+                -e 'wk-tools: egress goes through' \
+                -e '^export http_proxy=' -e '^export https_proxy=' \
+                -e '^export HTTP_PROXY=' -e '^export HTTPS_PROXY=' \
+                -e '^export no_proxy=' -e '^export NO_PROXY=' \
+                "$rc" > "$tmp" || true
         mv "$tmp" "$rc"
     fi
-    grep -qF "$TOOLS/shell/bashrc" "$rc" 2>/dev/null && continue
-    printf '\n# wk-tools shared shell configuration\n%s\n' "$line" >> "$rc"
+    add "$rc" "$line"   "shared shell configuration"
+    add "$rc" "$egress" "this machine's egress proxy, when it has one"
 done

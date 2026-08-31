@@ -389,13 +389,16 @@ confirm() {
 # not get taken. Same discipline as confirm(): no terminal, fail loudly
 # rather than block. Read with `read -rs` (no echo), never logged or passed
 # as an argument, written 0600 through a umask so it is never world-readable.
-prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optional URL
-    local path="$1" what="$2" url="${3:-}" val=""
-
-    [ -s "$path" ] && { printf '%s' "$path"; return 0; }
+#
+# The asking is separated from the storing because not every secret lands in a
+# file this process can write: on a macOS workstation the store is inside the
+# podman VM. The prompt stays one implementation either way -- a second one
+# could word the warning differently, or forget `-s`.
+prompt_secret_value() {  # $1 = human description, $2 = optional URL or command
+    local what="$1" url="${2:-}" val=""
 
     if [ ! -t 0 ]; then
-        warn "$what is needed and $path does not exist."
+        warn "$what is needed and is not stored yet."
         warn "  No terminal, so it cannot be asked for here. Re-run interactively."
         return 1
     fi
@@ -403,12 +406,21 @@ prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optiona
     printf '\n' >&2
     info "$what is needed, and this repository must not contain it."
     [ -n "$url" ] && log "  get one here: $url" >&2
-    log "  it is stored at $path (mode 0600) and asked for only once" >&2
+    log "  it is stored 0600 and asked for only once" >&2
     printf '  paste it (input hidden, empty to skip): ' >&2
     read -rs val || return 1
     printf '\n' >&2
 
     [ -n "$val" ] || { warn "nothing entered; skipping"; return 1; }
+    printf '%s' "$val"
+}
+
+prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optional URL
+    local path="$1" what="$2" url="${3:-}" val=""
+
+    [ -s "$path" ] && { printf '%s' "$path"; return 0; }
+
+    val=$(prompt_secret_value "$what" "$url") || return 1
 
     mkdir -p "$(dirname "$path")" || return 1
     ( umask 077; printf '%s\n' "$val" > "$path" ) || return 1

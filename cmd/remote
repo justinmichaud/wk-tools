@@ -233,6 +233,26 @@ _rsh_q "env WK_ROOT=$(sh_quote "$(t_tools '')") WK_CLAUDE_REMOTE=1 bash -c '
     . \"\$WK_ROOT/claude/install.sh\"
 '" && changed "linked ~/.claude on $r_host (settings-host.json + Bash(wk *))"
 
+# The agent's credential, so a workspace here starts authenticated instead of
+# asking for /login (`wk key claude` stores it; shell/bashrc reads it). A copy,
+# because a build machine can mount nothing of ours -- so it is refreshed on
+# every setup, and *removed* when there is no token: this machine is shared,
+# and a token left behind after it was withdrawn here is the one state that
+# would matter.
+#
+# Down the ssh channel, never in the command: an argument is in `ps` on a
+# machine other people are logged into.
+_agent_tok=$(wk_agent_token)
+if [ -n "$_agent_tok" ]; then
+    printf '%s\n' "$_agent_tok" \
+        | _rsh_q 'umask 077 && cat > "$HOME/.wk-agent-token"' \
+        && changed "wrote the Claude token to ~/.wk-agent-token on $r_host (0600)"
+else
+    _rsh_q 'rm -f "$HOME/.wk-agent-token"' >/dev/null 2>&1 || true
+    info "no Claude token here, so none was placed on $r_host ('wk key claude' stores one)"
+fi
+unset _agent_tok
+
 # --- root on a machine you share ---------------------------------------------
 # A barrier, not a prompt: `--force` proceeds with the warning repeated at
 # the end, and `wk doctor`/`wk sudo status --all` keep saying so.

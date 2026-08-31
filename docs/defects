@@ -105,6 +105,75 @@ NEEDS YOU
 DONE THIS RUN
 ================================================================================
 
+- A workspace starts already authenticated, on every target. One token per
+  machine: `claude setup-token`, then `wk key claude` stores it at
+  $WK_STORE/secrets/claude-token (0600, taken on stdin so it is never in `ps`,
+  never printed anywhere). shell/bashrc is the only reader, exporting
+  CLAUDE_CODE_OAUTH_TOKEN, so a person typing `claude` in an editor pane gets
+  it and not only `wk ai claude`. Each target hands it over the way it already
+  hands over the proxy:
+      container   a symlink onto the read-only /secrets mount, made whether or
+                  not a token exists yet -- so storing one later reaches every
+                  container with no rebuild, and withdrawing one reaches them
+                  the same way
+      macOS guest a copy written by the host on every start, removed again when
+                  the store has no token
+      build box   a copy written by `wk remote setup`, removed the same way --
+                  it is a machine other people are on, so a token left behind
+                  after it was withdrawn here is the state that would matter
+  `wk doctor` reports it and README's setup lists it. tests/test_agent_token.py
+  (18, no real token anywhere in them).
+
+  Caught while wiring it, and worth knowing: the token resolves against
+  $WK_STORE_DEFAULT, not $WK_STORE. targets/vm.sh points $WK_STORE at its own
+  state directory, so `wk vm start` would have looked in a directory `wk key
+  claude` never writes to and found nothing, silently. Two tests hold it.
+
+- The old shared credentials file is gone with it (container/firstrun.sh,
+  cmd/doctor): it was Linux-only -- Darwin keeps those in a login Keychain that
+  an ssh session or an editor's remote server never unlocks -- and it needed a
+  `claude login` from inside a workspace to exist at all, so it could never be
+  the answer for a guest or a build box. Two ways to authenticate is one too
+  many. Nothing was stranded: $WK_STORE/secrets was empty here. Say the word if
+  you would rather keep it; it is a few lines back.
+
+- The egress allowlist covers ordinary development (container/proxy/wk-proxy.py):
+  npm, Homebrew, crates/rustup, Apple's developer and software-update hosts
+  (so `xcode-select --install` and Xcode's first launch complete), and
+  certificate validation -- valid/ocsp/crl.apple.com and i.pki.goog, without
+  which Gatekeeper will not launch anything downloaded. Apple is named host by
+  host, never by suffix: the refusals a guest produces are mostly iCloud, Siri,
+  Spotlight, ads and news, and none of that is development. Declared for the
+  sandbox audit in the file, BLOCKED_NETS unchanged. tests/test_egress.py.
+  Verified from a guest: npmjs/brew/developer.apple/crates/rustup all answer,
+  gsa.apple.com still refused.
+
+- A guest's egress reaches every shell, not login shells alone. ~/.wk-egress is
+  written by the host on every start (_set_guest_egress, targets/vm.sh, which
+  now writes both halves -- the system proxy and the shell variables) and
+  sourced by all four rc files (vm/shell-rc.sh). vm/provision-base.sh writes
+  nothing about the proxy any more: the address is the host's own on the guest
+  bridge and changes, so no image may carry a copy, and a guest that baked one
+  in has it stripped on the next start. Deliberately NOT in shell/bashrc --
+  that file lives in the guest's own copy of wk-tools, which only a build
+  refreshes, and a guest must not be without egress until someone builds in it.
+  tests/test_egress.py. Verified in the guest: an editor pane fetched
+  https://webkit.org/ (200) where it previously reached nothing.
+
+- `wk vm start` against an already-running guest restarts the host egress proxy
+  if it is not listening. It is the guest's only route out, so a proxy that
+  died left the guest with no egress and no way back short of a reboot; every
+  other fact that branch converges was already written on every start.
+
+- A guest's clock is set from this host on every start (targets/vm.sh,
+  _set_guest_clock), and before the base is provisioned -- where a stale clock
+  would fail provisioning's first HTTPS clone and then seal that date into
+  every clone made from it. Idempotent by measurement: a guest within
+  WK_VM_CLOCK_SKEW (30s) costs one ssh and no sudo. It runs before
+  _set_guest_proxy, because everything reached through the proxy speaks TLS.
+  tests/test_vm_clock.py drives the guest half against a fake date and sudo.
+  `wk vm start mya` reported `mya's clock was 958989s out; set from this host`.
+
 - Home/End in zsh (B). Measured cause: shell/bashrc bound the keys and *then*
   ran `bindkey -e`, which links a fresh emacs keymap over `main` and discards
   whatever was bound into the previous one. Machine-dependent, which is why it

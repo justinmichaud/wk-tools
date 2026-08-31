@@ -36,7 +36,7 @@ probe_store() {
     [ -d "$WK_STORE/git/WebKit.git" ] && echo mirror=ok || echo mirror=no
     [ -n "$(ls -1 "$WK_STORE/base" 2>/dev/null)" ] && echo base=ok || echo base=no
     [ -f "$WK_STORE/secrets/build_key_fork" ] && echo key=ok || echo key=no
-    [ -f "$WK_STORE/secrets/claude-credentials.json" ] && echo creds=ok || echo creds=no
+    [ -f "$WK_STORE/secrets/claude-token" ] && echo creds=ok || echo creds=no
     [ -n "$(ls -1 "$WK_STORE/skills" 2>/dev/null)" ] && echo skills=ok || echo skills=no
     # The socket is accepted as proof too: systemctl --user over a bare ssh
     # session can fail to find the user bus even when the service is fine.
@@ -211,7 +211,7 @@ local_state() { # <path> <kind> <how to get it back>
 # longer exists, and a rerun is a different measurement.
 local_state "$WK_STORE/bench"                      backed-up   "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement"
 local_state "$WK_STORE/secrets"                    regenerable "wk key register makes new deploy keys (revoke the old ones on GitHub)"
-local_state "$WK_STORE/secrets/claude-credentials.json" re-authable "claude login in one workspace re-seeds it"
+local_state "$WK_STORE/secrets/claude-token" re-authable "claude setup-token, then wk key claude; every workspace this machine makes starts authenticated with it"
 # The fleet's one tailscale auth key (wk_tailscale_authkey, lib/common.sh).
 # re-authable, not backed-up: a new tagged key from the admin console is as
 # good as the old one, and a tagged node never key-expires.
@@ -251,8 +251,9 @@ report_store() { # <probe output>
     [ "$(v mirror)" = ok ] && ok "WebKit mirror"          || miss "WebKit mirror" "wk sync"
     [ "$(v base)" = ok ]   && ok "base snapshot"          || miss "base snapshot" "wk sync"
     [ "$(v key)" = ok ]    && ok "fork push key"          || miss "fork push key" "wk key register  (needs gh auth)"
-    [ "$(v creds)" = ok ]  && ok "shared claude credentials" \
-                           || miss "shared claude credentials" "run 'claude login' once inside a workspace"
+    [ "$(v creds)" = ok ]  && ok "claude token (every workspace starts authenticated)" \
+                           || miss "claude token (every workspace starts authenticated)" \
+                                   "claude setup-token, then: wk key claude"
     [ "$(v skills)" = ok ] && ok "shared skills seeded"   || miss "shared skills seeded" "wk skills push"
     [ "$(v proxy)" = ok ]  && ok "egress proxy running"   || miss "egress proxy running" "./setup --stage sdk, then systemctl --user status wk-proxy"
     [ "$(v pihosts)" = ok ] && ok "pi-hosts populated"    || miss "pi-hosts populated" "wk pi setup rpi5 / rpi4  (skip if no Pi devices)"
@@ -366,5 +367,5 @@ fi
 warn "$missing item(s) missing -- each line above names its fix; the order that"
 log  "works from bare metal: ./setup -> the interactive stages it lists ->"
 log  "gh auth login -> wk key register -> wk sync -> (optional) wk pi setup,"
-log  "wk vm base -> claude login in the first workspace. See README.md."
+log  "wk vm base -> claude setup-token and wk key claude. See README.md."
 exit 1

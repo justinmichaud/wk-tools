@@ -162,14 +162,20 @@ done
 # workspace being deleted. `wk skills` diffs it against the repo for review.
 ln -sfn /skills "$HOME/.claude/skills"
 
-# Credentials live on a shared volume so one `claude login` serves every
-# workspace. They cannot come from the host: Claude Code keeps them in the
-# macOS Keychain on Darwin and in this file on Linux.
-if [ -f /secrets/claude-credentials.json ]; then
-    ln -sfn /secrets/claude-credentials.json "$HOME/.claude/.credentials.json"
-else
-    log "no shared Claude credentials yet -- run 'claude login' once; it will persist"
-fi
+# The agent's credential: one token in the store, serving every workspace on
+# this machine, read by shell/bashrc into CLAUDE_CODE_OAUTH_TOKEN. A symlink
+# onto the read-only /secrets mount rather than a copy, and made whether or not
+# there is a token yet: a dangling link is "no token", and the day `wk key
+# claude` stores one every container already points at it. Nothing here has to
+# be rebuilt to rotate it.
+#
+# One mechanism for all three targets, which a credentials file could not be:
+# it is Linux-only (Darwin keeps those in a login Keychain that an ssh session
+# never unlocks), and it needs a `claude login` from inside a workspace to
+# exist at all.
+ln -sfn /secrets/claude-token "$HOME/.wk-agent-token"
+[ -e /secrets/claude-token ] \
+    || log "no Claude token yet -- 'wk key claude' on the host stores one for every workspace"
 
 # --- profiling tools -----------------------------------------------------------
 # heaptrack, valgrind (its massif tool) and sysprof-cli are distro packages;

@@ -766,3 +766,66 @@ unreferenced_bases() {
         echo "$base"
     done
 }
+
+# --- the agent's own credential ----------------------------------------------
+# One token, in the store, for every workspace on this machine. A container
+# reads it live through the read-only /secrets mount, so rotating it takes
+# effect in every container at once; a macOS guest and a shared build box are
+# handed a copy when their workspace comes up, since neither can mount it.
+#
+# It is a credential, not a fact about the machine, so a stored copy is the
+# point rather than a smell -- the same trade `wk key tailnet` and the deploy
+# keys make. `wk key claude` is what puts it here.
+#
+# $WK_STORE_DEFAULT, not $WK_STORE: there is one token per *machine*, and a
+# loaded target driver may have pointed $WK_STORE at its own state (targets/
+# vm.sh does, at the host's XDG state directory). Reading it from there would
+# look in a directory `wk key claude` never writes to and find nothing, in the
+# one command -- `wk vm start` -- that most needs to find it. load_target
+# records the machine's own store in WK_STORE_DEFAULT before overriding.
+_wk_agent_store()          { printf '%s' "${WK_STORE_DEFAULT:-$WK_STORE}"; }
+wk_agent_token_path()      { printf '%s/secrets/claude-token' "$(_wk_agent_store)"; }
+# store_is_local asks about $WK_STORE, so ask it about the right one.
+_wk_agent_store_is_local() ( WK_STORE=$(_wk_agent_store); store_is_local )
+
+# The token itself, or nothing. Reading it is not the same as finding it: on a
+# macOS workstation the store is inside the podman VM, a path this host cannot
+# read at all, so the read is forwarded there. Absent is not an error -- a
+# workspace with no token asks the person to run /login, which still works.
+wk_agent_token() {
+    local p; p=$(wk_agent_token_path)
+    if _wk_agent_store_is_local; then
+        [ -r "$p" ] && sed -n '1p' "$p" 2>/dev/null
+    else
+        podman machine ssh "${WK_MACHINE:-wk}" -- \
+            "sed -n 1p $(sh_quote "$p") 2>/dev/null" </dev/null 2>/dev/null
+    fi
+    return 0
+}
+
+# Store it, reading the value from stdin so it is never an argument -- an
+# argument is visible in `ps` to everyone on the machine. Same two cases as
+# the read: here, or forwarded into the VM that holds the store.
+wk_agent_token_store() {
+    local p; p=$(wk_agent_token_path)
+    if _wk_agent_store_is_local; then
+        mkdir -p "$(dirname "$p")" || return 1
+        ( umask 077; cat > "$p" ) || return 1
+        chmod 0600 "$p" 2>/dev/null || true
+    else
+        podman machine ssh "${WK_MACHINE:-wk}" -- \
+            "mkdir -p $(sh_quote "$(dirname "$p")") && umask 077 && cat > $(sh_quote "$p") && chmod 0600 $(sh_quote "$p")" \
+            || return 1
+    fi
+}
+
+# Withdraw it. Every workspace loses it on its next start -- a container
+# immediately, since its link points at this file.
+wk_agent_token_clear() {
+    local p; p=$(wk_agent_token_path)
+    if _wk_agent_store_is_local; then
+        rm -f "$p"
+    else
+        podman machine ssh "${WK_MACHINE:-wk}" -- "rm -f $(sh_quote "$p")" </dev/null
+    fi
+}

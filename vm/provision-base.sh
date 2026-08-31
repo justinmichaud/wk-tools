@@ -127,32 +127,14 @@ else
 fi
 
 # --- egress ---------------------------------------------------------------
-# The guest's only route out is the host proxy; Softnet denies everything else.
-# ssh doesn't honour http_proxy, so `git push` over ssh from inside a guest
-# fails -- push over HTTPS or from the host instead.
+# Nothing about the proxy is written here. The base boots without Softnet, on
+# the open vmnet, so it has no proxy to name; a clone does, and the address is
+# the host's own on the guest bridge, which changes -- so the host writes it
+# into every guest on every start (_set_guest_egress, targets/vm.sh) rather
+# than an image carrying a copy that goes stale.
 #
-# No default address: Tart's stock gateway (192.168.64.1) is wrong for guests
-# on WK_VM_SUBNET (192.168.2.x), and a wrong guess fails silently, indistinguishable
-# from Softnet denying traffic -- so an unset WK_VM_PROXY_ADDR is a hard stop.
-if [ -z "${WK_VM_PROXY_ADDR:-}" ]; then
-    echo "provision-base: WK_VM_PROXY_ADDR was not passed in; refusing to guess" >&2
-    echo "  (the guest would silently get an unreachable proxy and no egress)" >&2
-    exit 1
-fi
-WK_PROXY="${WK_VM_PROXY_ADDR}:${WK_VM_PROXY_PORT:-3128}"
-for _f in "$HOME/.zprofile" "$HOME/.bash_profile"; do
-    if ! grep -q 'wk-tools: egress' "$_f" 2>/dev/null; then
-        cat >> "$_f" <<EOF
-# wk-tools: egress goes through the proxy on the host; Softnet denies the rest.
-export http_proxy=http://$WK_PROXY
-export https_proxy=http://$WK_PROXY
-export HTTP_PROXY=http://$WK_PROXY
-export HTTPS_PROXY=http://$WK_PROXY
-export no_proxy=localhost,127.0.0.1,::1
-export NO_PROXY=localhost,127.0.0.1,::1
-EOF
-    fi
-done
+# ssh doesn't honour http_proxy either way, so `git push` over ssh from inside
+# a guest fails -- push over HTTPS or from the host instead.
 
 # The account's password. Two facts: what the pulled image ships with (Cirrus
 # Labs: admin/admin) and what this guest is meant to have. Both arrive from
@@ -271,14 +253,10 @@ bash "$WK_TOOLS_DIR/vm/shell-rc.sh" "$WK_TOOLS_DIR"
 # into Tools/Scripts/libraries/autoinstalled on first use; warming it here puts
 # it in the golden image, free for every workspace via the APFS clone.
 #
-# Proxy vars are explicitly cleared: unlike a workspace, the base boots without
-# Softnet, on the open 192.168.64.x vmnet -- the Softnet-gateway proxy block
-# written above is for clones and points nowhere reachable from inside the base.
 # Best-effort: a base that skips this just pays the download later, per workspace.
 if [ -d "$SRC/Tools/Scripts" ]; then
     say "warming webkitpy's autoinstalled packages"
-    ( cd "$SRC" && env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
-        Tools/Scripts/run-webkit-tests --help >/dev/null 2>&1 ) || \
+    ( cd "$SRC" && Tools/Scripts/run-webkit-tests --help >/dev/null 2>&1 ) || \
         echo "warning: could not warm webkitpy's autoinstall; workspaces will do it themselves" >&2
     if [ -d "$SRC/Tools/Scripts/libraries/autoinstalled" ]; then
         say "autoinstalled: $(du -sh "$SRC/Tools/Scripts/libraries/autoinstalled" | cut -f1)"

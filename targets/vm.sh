@@ -40,6 +40,8 @@
 #   WK_VM_BASE_PREBUILD       config pre-built into the base; empty disables it
 #   WK_VM_DISK_GB              the sparse disk ceiling every guest is cloned with
 #   WK_VM_DISPLAY               the guest's minimum window content size
+#   WK_VM_CLOCK_SKEW            seconds of clock error tolerated before a start
+#                               resets the guest's clock from this host
 #   WK_VM_SHARE                proceed past the memory-budget refusal anyway
 #   WK_VM_UNFILTERED            boot with no Softnet egress filter (see above)
 #   WK_HOST_FREE_MIN_GB/_WARN_GB   host disk headroom the sparse guest disk needs
@@ -122,6 +124,12 @@ WK_VM_BASE_PREBUILD="${WK_VM_BASE_PREBUILD:-mac-release}"
 # and the clones are copy-on-write, so an unused gigabyte costs nothing here
 # and instead risks overcommitting the *host*, which _check_host_disk is for.
 WK_VM_DISK_GB="${WK_VM_DISK_GB:-320}"
+
+# How far the guest's clock may be out before a start resets it (_set_guest_clock).
+# Not zero: the reading is taken over ssh, so a sub-second round trip is built
+# into every comparison and disciplining to it would rewrite the clock on every
+# start for no gain. What this is guarding against is days, not seconds.
+WK_VM_CLOCK_SKEW="${WK_VM_CLOCK_SKEW:-30}"
 
 # Guest display size, in points (tart defaults the unit to "pt"). Deliberately
 # SMALLER than the host desktop: Tart pins the window's *minimum* content
@@ -297,11 +305,18 @@ t_start() {
     [ "$(_vm_state "$v")" != absent ] || die "no such workspace: $name"
     if [ "$(_vm_state "$v")" = running ]; then
         ip=$(_ip "$name")
+        # The proxy is the guest's only route out and it outlives no crash of
+        # its own: a start against a running guest converges it too, or a
+        # guest whose proxy died has no egress and no way back short of a
+        # reboot. Idempotent -- _start_host_proxy asks the socket first.
+        _start_host_proxy || true
         _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
         _write_shell_rc "$name" "$ip" || warn "could not wire $name's shell; 'wk' will not be on PATH in there"
         _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
-        _set_guest_proxy "$name" "$ip" || warn "could not set the guest's system proxy; the browser in $name will reach nothing"
+        _set_guest_clock "$name" "$ip" || warn "could not set $name's clock; TLS in there will fail as CERT_NOT_YET_VALID"
+        _set_guest_egress "$name" "$ip" || warn "could not set $name's egress; nothing in there will reach the outside"
         _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
+        _write_agent_token "$name" "$ip" || warn "could not write the agent token into $name; Claude in there will ask you to /login"
         _settle_desktop "$name" "$ip" || warn "could not settle $name's desktop; 'wk vm check $name' says what is in front of the window"
         echo "$ip"
         return 0
@@ -317,8 +332,10 @@ t_start() {
     _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
     _write_shell_rc "$name" "$ip" || warn "could not wire $name's shell; 'wk' will not be on PATH in there"
     _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
-    _set_guest_proxy "$name" "$ip" || warn "could not set the guest's system proxy; the browser in $name will reach nothing"
+    _set_guest_clock "$name" "$ip" || warn "could not set $name's clock; TLS in there will fail as CERT_NOT_YET_VALID"
+    _set_guest_egress "$name" "$ip" || warn "could not set $name's egress; nothing in there will reach the outside"
     _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
+    _write_agent_token "$name" "$ip" || warn "could not write the agent token into $name; Claude in there will ask you to /login"
     _settle_desktop "$name" "$ip" || warn "could not settle $name's desktop; 'wk vm check $name' says what is in front of the window"
     echo "$ip"
 }
@@ -529,22 +546,77 @@ _write_claude_config() {
         done"
 }
 
-# The guest's *system* proxy, not the environment variables provisioning
-# writes into ~/.zprofile: WebKit's network process does not read
-# http_proxy/https_proxy, so MiniBrowser loading https://webkit.org/ gives a
-# blank window while curl to the same host goes straight through. Set from
-# the host at start since the address (_proxy_addr) can change. Best effort,
-# like the marker: it warns rather than errors, since the failure is
-# otherwise silent.
-_set_guest_proxy() {
+# The agent's credential, written from this host whenever the workspace comes
+# up. A guest cannot reach the store -- it is inside the podman VM, and the
+# guest's whole filesystem boundary is that it mounts nothing of ours -- so a
+# copy is the only way, unlike a container, which symlinks the live mount.
+#
+# Rewritten every start rather than provisioned once, so `wk key claude`
+# rotating the token converges here too, and removed when there is none: a
+# guest holding a token the host has withdrawn is the one state this must not
+# leave behind. 0600, and never echoed.
+_write_agent_token() { # <name> <ip>
+    local name="$1" ip="$2" tok
+    tok=$(wk_agent_token)
+    if [ -z "$tok" ]; then
+        _ssh "$2" 'rm -f "$HOME/.wk-agent-token"'
+        return 0
+    fi
+    _ssh "$2" "umask 077 && printf '%s\n' $(sh_quote "$tok") > \$HOME/.wk-agent-token" \
+        || return 1
+    debug "wrote the agent token into $name"
+}
+
+# Everything in the guest that names the egress proxy, written from this host
+# on every start -- the address is the host's own on the guest bridge
+# (_proxy_addr) and can change, so nothing may bake it into an image. Two
+# halves, and a guest needs both:
+#
+#   the system proxy   WebKit's network process does not read
+#                      http_proxy/https_proxy, so MiniBrowser loading
+#                      https://webkit.org/ gives a blank window while curl to
+#                      the same host goes straight through.
+#   ~/.wk-egress       http_proxy/https_proxy, for every shell that reads an
+#                      rc -- vm/shell-rc.sh sources it from all four. A
+#                      profile alone would reach only *login* shells, and an
+#                      editor's terminal pane is not one: a pane with no proxy
+#                      has no egress at all, and reports it as every host in
+#                      the world being unreachable.
+#
+# The variable names are spelled here rather than in shell/bashrc, and the
+# whole file is written from this side: that rc lives in the guest's own copy
+# of wk-tools, which only a build refreshes, and a guest must not be without
+# egress until someone builds in it. targets/container.sh names the same six
+# for the same reason -- each target delivers its own.
+#
+# Best effort, like the marker: it warns rather than errors, since the failure
+# is otherwise silent.
+_set_guest_egress() {
     local name="$1" ip="$2" addr=""
     [ -n "${WK_VM_UNFILTERED:-}" ] || addr=$(_proxy_addr)
-    debug "guest system proxy in $name: ${addr:-off}"
+    debug "guest egress in $name: ${addr:-off}"
 
     _ssh "$ip" "bash -s" <<EOF
 set -u
 addr='$addr'
 port='$WK_VM_PROXY_PORT'
+
+# The shell half first, so a guest whose network service cannot be identified
+# below still gets a working proxy in its shells.
+if [ -z "\$addr" ]; then
+    rm -f "\$HOME/.wk-egress"
+else
+    cat > "\$HOME/.wk-egress" <<WKEGRESS
+# wk: written by targets/vm.sh on every start; sourced by every shell
+# (vm/shell-rc.sh). Softnet denies everything but this address.
+export http_proxy=http://\$addr:\$port
+export https_proxy=http://\$addr:\$port
+export HTTP_PROXY=http://\$addr:\$port
+export HTTPS_PROXY=http://\$addr:\$port
+export no_proxy=localhost,127.0.0.1,::1
+export NO_PROXY=localhost,127.0.0.1,::1
+WKEGRESS
+fi
 
 # The service to configure is the one carrying the default route, not a name
 # hardcoded here: the Cirrus Labs image ships several, and which one is real
@@ -576,6 +648,42 @@ sudo -n networksetup -setwebproxy "\$svc" "\$addr" "\$port" &&
 sudo -n networksetup -setsecurewebproxy "\$svc" "\$addr" "\$port" &&
 sudo -n networksetup -setproxybypassdomains "\$svc" localhost 127.0.0.1
 EOF
+}
+
+# The guest's clock, set from this host on every start.
+#
+# A guest cannot keep its own time, and the boundary is why. `tart clone` hands
+# a clone the golden base's clock rather than the host's, and nothing inside
+# can correct it: Softnet allows exactly one address, and NTP is UDP, which an
+# HTTP CONNECT proxy cannot carry. So a guest's clock is the date its base was
+# sealed, further behind with every day that base ages.
+#
+# What that looks like from inside is not a clock. Every TLS handshake to a
+# certificate issued after that date fails to verify -- Claude Code reports
+# `Failed to connect to platform.claude.com: CERT_NOT_YET_VALID` -- so a stale
+# guest presents as one service after another being unreachable, and reads like
+# an egress refusal that widening the allowlist would fix. It is not one.
+#
+# This host is the only time source the guest can reach, so this host sets it.
+# Idempotent by measurement, like the system proxy above: a guest already
+# within WK_VM_CLOCK_SKEW seconds costs one ssh and no sudo.
+_set_guest_clock() { # <name> <ip>
+    local name="$1" ip="$2" skew
+    # The guest decides whether to write, so an in-time guest needs no sudo and
+    # prints nothing. `date -u MMDDhhmmCCYY.ss` is BSD date's set form; the
+    # value is UTC on both sides, so neither end's timezone enters into it.
+    skew=$(_ssh "$ip" "env WK_NOW_EPOCH=$(date -u +%s) WK_NOW_SET=$(date -u +%m%d%H%M%Y.%S) \
+                           WK_SKEW=$(sh_quote "$WK_VM_CLOCK_SKEW") bash -s" <<'EOF'
+set -u
+skew=$(( WK_NOW_EPOCH - $(date -u +%s) ))
+[ "$skew" -ge 0 ] || skew=$(( - skew ))
+[ "$skew" -gt "$WK_SKEW" ] || exit 0
+sudo -n date -u "$WK_NOW_SET" >/dev/null || exit 1
+echo "$skew"
+EOF
+    ) || return 1
+    [ -n "$skew" ] || return 0
+    info "$name's clock was ${skew}s out; set from this host"
 }
 
 # WebKit's lldb helpers, wired up the same way container/firstrun.sh wires
@@ -999,6 +1107,17 @@ _provision_base() {
         _wait_ssh "$ip" || die "ssh key was installed but ssh still refuses; see $runlog"
     fi
 
+    # Before anything here speaks TLS. A pulled image arrives with the clock it
+    # was built with, and provisioning's very first act is an HTTPS clone --
+    # which a stale clock fails as a certificate that is not yet valid, naming
+    # the certificate rather than the clock. A refusal, not a warning: every
+    # workspace is a clone of what this builds, and a base sealed at the wrong
+    # date hands that date to all of them (_set_guest_clock).
+    _set_guest_clock "$WK_VM_BASE" "$ip" \
+        || die "could not set the clock in '$WK_VM_BASE'. Passwordless sudo is what it
+    needs, and the base is built from the image WK_VM_IMAGE names -- check that
+    image rather than patching the guest:  ssh into it and run  sudo -n true"
+
     # Seed the checkout from a clone on the host, if there is one: `git
     # clone --local` hardlinks rather than copies, so it costs almost
     # nothing. Best-effort: any failure falls back to cloning from GitHub.
@@ -1020,11 +1139,10 @@ _provision_base() {
     info "provisioning the base VM (Xcode licence, WebKit checkout, Claude CLI)"
     # The whole tree: provision-base.sh links ~/.claude out of it too.
     _push_tools "$WK_VM_BASE" "$ip"
-    # _proxy_addr, not $WK_VM_PROXY_ADDR: the variable is normally *unset*, so
-    # passing it raw sends provision-base.sh to Tart's hardcoded default of
-    # 192.168.64.1, where nothing listens.
+    # No proxy address: the base boots unfiltered and provisioning names no
+    # proxy. A clone's is written at start, by _set_guest_egress.
     vm_login_note
-    _ssh "$ip" "env WK_VM_PROXY_ADDR=$(sh_quote "$(_proxy_addr)") WK_VM_PROXY_PORT=$(sh_quote "$WK_VM_PROXY_PORT") WK_VM_DISPLAY=$(sh_quote "$WK_VM_DISPLAY") WK_VM_USER=$(sh_quote "$WK_VM_USER") WK_VM_PASSWORD=$(sh_quote "$WK_VM_PASSWORD") WK_VM_IMAGE_PASSWORD=$(sh_quote "$WK_VM_IMAGE_PASSWORD") bash $(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
+    _ssh "$ip" "env WK_VM_DISPLAY=$(sh_quote "$WK_VM_DISPLAY") WK_VM_USER=$(sh_quote "$WK_VM_USER") WK_VM_PASSWORD=$(sh_quote "$WK_VM_PASSWORD") WK_VM_IMAGE_PASSWORD=$(sh_quote "$WK_VM_IMAGE_PASSWORD") bash $(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
         || die "base provisioning failed"
 
     _prebuild_base "$ip"
