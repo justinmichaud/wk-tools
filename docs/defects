@@ -58,7 +58,16 @@ NEEDS YOU
    throwaway in the sense that matters: nothing on the tailnet trusts it, and
    `wk rm` destroys it. [decision -- proceeding on yes unless you say otherwise]
 
-7. `wk key tailnet` now refuses an API access token and an OAuth client secret
+7. jsc-debug lost `-DUSE_LIBBACKTRACE=ON` in commit 027607f, which was not
+   made from here, while its own one-line description still said
+   "libbacktrace" -- so the config and the listing disagreed. The listing now
+   matches the code (jsc-debug: "JSCOnly, Debug, assertions on"), on the rule
+   that the machine wins. gtk-debug still asks for libbacktrace. If jsc-debug
+   is meant to have it, putting the flag back is one word; if the removal was
+   because the library is not on every machine, then gtk-debug's copy should go
+   the same way. Which? [decision]
+
+8. `wk key tailnet` now refuses an API access token and an OAuth client secret
    by name (both start `tskey-`, both administer the whole tailnet, and this
    key is copied onto every card written from here). What it cannot check from
    a key -- tagged, reusable, not ephemeral, expiry -- it reports as unverified
@@ -66,6 +75,31 @@ NEEDS YOU
    the credential it just refused to hold. Nothing further is checkable without
    holding one. Good enough, or do you want a read-only API token stored for
    it? [decision]
+
+9. Your guest `mya` is stopped, and I stopped it. Measuring the desktop
+   question above needed running vm/desktop.sh against a live guest, and its
+   first version killed Setup Assistant -- which on macOS *is* the login-time
+   agent, not a window on top of a session, so the guest fell back to the login
+   window. Clearing the screen lock from there needs a logged-in session
+   (`sysadminctl` answers `MKBDeviceSetGracePeriod error -8` without one), so
+   the way back is a restart -- and `wk vm start mya` now refuses, correctly,
+   because the podman machine holds the whole memory envelope:
+
+       podman machine stop wk && wk vm start mya
+
+   The corrected script kills nothing, and `wk vm check` names a restart as the
+   remedy for a panel already on screen. Nothing in the guest was lost; it is a
+   clone. [needs you: one command, or `wk rm mya` if it was a scratch guest]
+
+10. Another session was editing this tree at the same time as this run --
+    build/configs.sh, build/build-in-target.sh, cmd/gui, cmd/run, cmd/profile,
+    cmd/bench, adding CFG_SCRIPT/WK_BUILD_SCRIPT for `build-jsc`. Two of those
+    files are ones this run also changed (build/configs.sh above all), and one
+    full `wk selftest` came back with 13 build-test failures purely from files
+    moving underneath it -- the same suite passes now. Nothing here was
+    reverted, and the two sets of edits coexist in the file, but this is exactly
+    the hazard CLAUDE.md names: if that work is still in flight, re-run
+    `wk selftest --quick` before believing any earlier failure count.
 
 ================================================================================
 DONE THIS RUN
@@ -137,6 +171,60 @@ DONE THIS RUN
   dotfiles/zed/settings.json) -- both defect entries asking for it are the
   same one, and it was already true.
 
+- `wk <cmd> -h` prints a closed set of values by running the one list that
+  defines it: the declaration gained `values=<flag>`, and `wk build -h`, `wk
+  boot -h` and `wk sysimage -h` now end with today's configs, fleet machines
+  and image profiles. Nothing is copied into a header, so nothing can go stale.
+  `wk sysimage build --list` becomes `wk sysimage --list` -- one spelling.
+  tests/test_help_values.py.
+
+- The lifecycle notes in README.md are four numbered steps, and the third one
+  is stated as what it is: a hand moving a card from the reader to the board.
+  The example no longer writes a card for the rpi3 and then arms the rpi4.
+
+- `wk claude` is now `wk ai claude`, with `wk claude` a tombstone naming its
+  replacement. One command for every coding agent: the agent is the first word,
+  everything around it (which workspace, the sandbox check, the commit wall,
+  the push switch, remote control) is shared, and `wk ai pi` refuses by name
+  with what it still needs rather than pretending to exist.
+
+- Claude remote control is on by default: `wk new` starts it in the workspace
+  it just made and `wk start` starts it in every container it brings back up,
+  both through `wk ai claude --rc` and neither able to fail because of it.
+  WK_NO_CLAUDE_RC=1 turns it off -- one variable, since both call the same
+  command. The wiring is tested (tests/test_claude_rc.py); a live check needs a
+  container and a Claude CLI in it, and is owed.
+
+- A macOS guest lands on an empty desktop, and something now *checks*: `wk vm
+  check <name>` (read-only) reports the console session, the screen lock, the
+  screen saver, display sleep, Setup Assistant's panes, the Software Update
+  offer, and whatever is modal on screen right now -- each with its remedy.
+  vm/desktop-probe.sh reads, vm/desktop.sh writes, and nothing else does either.
+
+  Two root causes, both measured on the live guest rather than reasoned about:
+    * `defaults -currentHost` writes per *hardware UUID*, and `tart clone` gives
+      the clone a new one -- so every ByHost setting the golden base holds (the
+      screen saver among them) does not apply to any guest cloned from it. Those
+      are now written on every `wk vm start`, by the same one script the base
+      runs. `wk vm check mya` reported the saver armed; after the fix, off.
+    * Setup Assistant's `DidSee*` list had grown: two panes on this macOS were
+      unset, and one was on the desktop of a running guest.
+  The Software Update offer (a modal panel on the desktop) is turned off too.
+
+- The guest gets the same shell rc as every other machine, from .zshrc as well
+  as the profiles -- which is the actual reason `wk zed mya` opened a terminal
+  with no `wk` on PATH: a profile is read by a *login* shell and an editor's
+  terminal pane is not one, so PATH written only into .zprofile was missing in
+  the one place a person types.
+
+- The guest's login is one fact in one place (targets/vm.sh: WK_VM_USER,
+  WK_VM_PASSWORD=1, WK_VM_IMAGE_PASSWORD=admin -- the image's, used once to
+  change it), printed by vm_login_note at each of the four moments a person is
+  about to look at the guest's window: provisioning it, starting it, entering
+  it, opening Zed on it. The screen lock is left alone unless the password authenticates
+  first: `sysadminctl -screenLock` takes the account's current password, and
+  offering it a wrong one was observed to leave the lock armed.
+
 - tests/test_dispatcher.py's top-level-call-order audit was blind to a
   function whose opening brace carries an argument comment (`f() { # <arg>`),
   this tree's house style -- so it reported two false positives in cmd/pi and
@@ -153,18 +241,14 @@ OWED, WITH THE DECISION ALREADY MADE
   `ws_upstream_line` at all, which is exactly why `wk status image-decoders`
   reports BASE=`?` -- the column works, the tooling over there is months old.
 
-- `wk ai claude` / `wk ai pi`, with `wk claude` left as a tombstone naming its
-  replacement. The litellm key as `wk key set litellm` into the store's
-  read-only-mounted secrets/, a `wk doctor` line, and registry.npmjs.org added
-  to the proxy allowlist for `npm install -g` (docs/Urgent/pi.md).
+- The pi agent itself (docs/Urgent/pi.md): the litellm key as `wk key set
+  litellm` into the store's read-only-mounted secrets/, a `wk doctor` line, and
+  registry.npmjs.org added to the proxy allowlist for `npm install -g`.
+  `wk ai pi` refuses by name today, saying what it needs.
 
 - Battery (L): `charge_control_end_threshold` set by `wk bridge setup` on both
   phones and read by `wk doctor --all`; on macOS the honest line, "plugged in,
   N% -- no OS limit exists".
-
-- `wk claude --rc` enabled by default everywhere: started when a workspace is
-  created and when one starts, reported rather than silently skipped when it
-  cannot.
 
 - `wk rm br-rescue2` (or `podman rm`) -- the Exited container on this Mac's
   host podman connection. You said to go ahead; not done yet.
@@ -173,17 +257,9 @@ OWED, WITH THE DECISION ALREADY MADE
 STILL OPEN
 ================================================================================
 
-- tart guests: mention the default password when entering, provisioning,
-  starting or launching Zed; change it to `1` (decision 6). `wk zed mya` opens
-  a guest terminal with no `wk` on PATH -- the PATH line is only in .zprofile
-  (a login shell) and Zed's terminal is not one; the guest should get
-  shell/bashrc like every other machine, which is also where PATH is decided.
-
-- New tart guests must land on an empty desktop with no Software Update prompt:
-  vm/provision-base.sh already clicks through Setup Assistant, and the update
-  nag is not covered (com.apple.SoftwareUpdate AutomaticCheckEnabled /
-  AutomaticDownload, `softwareupdate --schedule off`). A helper should then
-  *confirm* that state rather than assume it.
+- Live check owed: claude remote control actually coming up in a container that
+  `wk new` just made, and in one `wk start` brought back. Neither is exercisable
+  from a test (both need a real container with a Claude CLI in it).
 
 - `wk status` should also say whether the container SDK image is up to date,
   and BASE should stop reading `?` (see the tools-sync item above).
@@ -194,14 +270,9 @@ STILL OPEN
   sets varies with the job count -- CCACHE_* is fixed and -j reaches ninja, not
   the compiler line -- but that is an argument, not a measurement.)
 
-- The lifecycle notes in README.md read as one sequence when they are two
-  unrelated commands:
-
-      wk sysimage write --from <path> --disk <writer>:/dev/sdX
-      wk boot rpi3                                 # one-shot: arms, reboots, self-reverts
-
-- Help must list every valid value for a parameter (build configs, image
-  profiles, machine names). tests/test_help_values.py covers part of it.
+- Help lists every valid value for the three sets that live in one list
+  (configs, machines, profiles). Still owed: the sets that live in prose --
+  `wk bench <plan>`, `wk profile`'s profiler names, `wk pi`'s subverbs.
 
 - `wk new` should fetch by default; `wk fetch` should be faster; a plain `wk
   new` leaves git detached with several remotes. You approved one `wk sync` +

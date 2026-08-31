@@ -2,8 +2,8 @@
 #
 # wk sysimage <sub> [args] -- build and manage bootable systems
 #
-# wk: where=host name=none group=hosts
-# wk: readonly ls,disks
+# wk: where=host name=none values=--list group=hosts
+# wk: readonly ls,disks,--list
 #
 # An image is a whole machine, built from a spec in this repo, that a machine
 # can be put into for one boot and taken out of again. It exists because four
@@ -340,16 +340,8 @@ cmd_build() {
     local profile="${1:-}"
     [ -n "$profile" ] || die "usage: wk sysimage <sub> [args]; see wk sysimage -h"
 
-    # Every configuration there is, not what has been built: `wk sysimage ls`
-    # answers that -- an image is bytes in a workspace, not a row in a
-    # catalogue, so a configuration can be buildable and never yet built.
-    if [ "$profile" = --list ]; then
-        image_profile_list
-        exit 0
-    fi
-
     image_profile_load "$profile" || die "unknown profile '$profile'.
-    'wk sysimage build --list' has every configuration; 'wk sysimage ls' has
+    'wk sysimage --list' has every configuration; 'wk sysimage ls' has
     every image a workspace here has already built."
     shift
 
@@ -398,7 +390,7 @@ cmd_webkit() {
     local profile="${1:-}"
     [ -n "$profile" ] || die "usage: wk sysimage webkit <profile> --commit <sha> --slot <name> [--detach] [--dry-run]; see wk sysimage -h"
     image_profile_load "$profile" || die "unknown profile '$profile'.
-    'wk sysimage build --list' has every configuration."
+    'wk sysimage --list' has every configuration."
     shift
     case "${IMG_BUILDER:-}" in
         buildroot) load_target "${WK_TARGET:-$(default_target)}"; buildroot_webkit "$profile" "$@"; return $? ;;
@@ -1060,6 +1052,13 @@ cmd_flash() {
 
 
 case "${1:-}" in
+    # Every configuration there is -- not what has been built, which is `ls`:
+    # an image is bytes in a workspace, so a configuration can be buildable
+    # and never yet built. At the top level rather than under `build`, because
+    # `wk sysimage -h` prints it from here (values=--list, `wk`'s declaration)
+    # and one spelling is all there is room for.
+    --list) [ -z "${2:-}" ] || die "usage: wk sysimage --list; unexpected argument: $2"
+            image_profile_list; exit 0 ;;
     build) shift; cmd_build "$@" ;;
     webkit) shift; cmd_webkit "$@" ;;
     ls|list) shift; cmd_ls "$@" ;;

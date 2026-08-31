@@ -83,7 +83,7 @@ only one there is. `wk build --list` shows the configs, and a bare `wk run` or
 not have to be told it is an Apple port every time.
 
 Commands that act on the *host* — `wk new`, `wk rm`, `wk sync`, `wk gc`,
-`wk session`, `wk quiesce`, `wk verify`, `wk claude` — refuse in here and say
+`wk session`, `wk quiesce`, `wk verify`, `wk ai claude` — refuse in here and say
 so. That is not something to work around: nothing in a workspace can create or
 destroy a workspace, and `wk verify` measures the boundary from the outside as
 well as the inside, so a result from in here would mean nothing.
@@ -122,7 +122,7 @@ fork needs no credential at all.
 
 **Pushing is a switch, and it is normally off while you are running.** The
 deploy keys are held outside the workspace (`wk push`, on the host) and
-`wk claude` turns the switch off before handing over control, so a push is
+`wk ai claude` turns the switch off before handing over control, so a push is
 refused at the door — `no such identity` from ssh means exactly that, not a
 broken setup. Do not try to work around it: publishing is the one thing a
 disposable workspace is not allowed to do on its own. Say what you would have

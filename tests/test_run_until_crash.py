@@ -7,6 +7,9 @@ Nothing here builds or runs real WebKit: a FakeWorkspace stands in for a
 checkout, and a planted shell script at the path `config_jsc_path` resolves
 for jsc-release stands in for the jsc binary (targets/local.sh makes
 WK_TARGET=local inside a fake workspace, so `t_exec` runs it right here).
+Where that path is, is asked of build/configs.sh rather than spelled again
+here: jsc-release is the JSCOnly port on Linux and an Apple Xcode build on
+macOS, and they lay their products out differently.
 
 Run: python3 -m unittest tests.test_run_until_crash -v
 """
@@ -17,19 +20,33 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, fake_workspace
+from tests.support import REPO, WkTest, bash, fake_workspace
+
+
+def _jsc_layout(src):
+    """Where jsc-release puts its binary and its libraries under `src`, from
+    build/configs.sh itself -- the same two functions `wk run` calls."""
+    cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load jsc-release "$(uname -s | grep -q Darwin && echo macos || echo linux)"
+config_jsc_path {src}
+config_run_dir {src}
+''')
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    jsc, run_dir = cp.stdout.split()
+    return Path(jsc), Path(run_dir)
 
 
 def _plant_fake_jsc(ws, script_body):
-    """The path config_jsc_path/config_run_dir resolve for jsc-release,
-    relative to the FakeWorkspace's checkout (build/configs.sh:
-    config_build_dir's cmake:--jsc-only case)."""
+    """A fake jsc at the path config_jsc_path resolves for jsc-release,
+    relative to the FakeWorkspace's checkout."""
     src = ws.ws_dir / "WebKit"
-    bindir = src / "WebKitBuild" / "JSCOnly" / "Release" / "bin"
-    libdir = src / "WebKitBuild" / "JSCOnly" / "Release" / "lib"
-    bindir.mkdir(parents=True, exist_ok=True)
-    libdir.mkdir(parents=True, exist_ok=True)
-    jsc = bindir / "jsc"
+    jsc, run_dir = _jsc_layout(src)
+    jsc.parent.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
     jsc.write_text(script_body)
     jsc.chmod(0o755)
     return jsc

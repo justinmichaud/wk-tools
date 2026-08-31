@@ -16,7 +16,7 @@
 #
 #   --gpu   fail if there is no hardware-accelerated GPU (informational otherwise)
 #
-# `wk claude` runs this before handing over control, because relaxed permissions
+# `wk ai claude` runs this before handing over control, because relaxed permissions
 # are only defensible while these hold.
 
 set -euo pipefail
@@ -51,15 +51,15 @@ if [ "$WK_TARGET_KIND" = remote ]; then
     die "'wk verify' proves a sandbox holds, and a remote target has none:
     a plain checkout on a shared machine, no container, no firewall, no
     disposable layer. There is nothing here to measure and nothing it
-    promised. 'wk claude' refuses on this target for the same reason."
+    promised. 'wk ai claude' refuses on this target for the same reason."
 fi
 
 # The vm target's boundary is Softnet on the host, not any property below.
-# TODO: measure the guest's egress from inside it; `wk claude` carries the
+# TODO: measure the guest's egress from inside it; `wk ai claude` carries the
 # vm-side checks for now.
 if [ "$WK_TARGET_KIND" = vm ]; then
     warn "vm workspaces have no in-guest checks yet: the egress filter is Softnet
-  on the host (checked by wk claude); only the GPU probe runs here."
+  on the host (checked by wk ai claude); only the GPU probe runs here."
 fi
 
 fails=0
@@ -164,11 +164,11 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     [ "$fails" -eq 0 ] && pass "no host home, runtime directory or D-Bus socket" || true
 
     # --- the commit wall works here ------------------------------------------
-    # `wk claude` runs the agent under bwrap with the checkout's .git commit
+    # `wk ai claude` runs the agent under bwrap with the checkout's .git commit
     # parts read-only (WK_COMMIT_WALL_PATHS, lib/common.sh); this proves, in
     # this container, that the recipe blocks a commit and leaves an ordinary
     # write alone, against a throwaway repo in /tmp -- never the real checkout.
-    # No bwrap here means `wk claude` refuses, so the sandbox is not whole.
+    # No bwrap here means `wk ai claude` refuses, so the sandbox is not whole.
     if inside "command -v bwrap >/dev/null 2>&1 && echo WKBWRAP" | grep -q WKBWRAP; then
         probe=$(inside 'set -e
             D=$(mktemp -d /tmp/wk-wall.XXXXXX); cd "$D"
@@ -188,7 +188,7 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
             fail "commit wall did NOT block a commit under bwrap: '$(printf '%s' "$probe" | tr '\n' ' ')'"
         fi
     else
-        fail "no bwrap in the workspace -- 'wk claude' cannot wall off commits and refuses to start"
+        fail "no bwrap in the workspace -- 'wk ai claude' cannot wall off commits and refuses to start"
     fi
 
 

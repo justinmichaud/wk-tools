@@ -75,32 +75,36 @@ def parse(sample):
 
 
 class TestRemoteProbeParseLinux(unittest.TestCase):
-    def test_parses_cores_load_mem_ionice_from_proc(self):
+    def test_parses_cores_load_mem_ionice_os_from_proc(self):
         """cores, load and MemAvailable come out of /proc/loadavg and
-        /proc/meminfo, and ionice is reported yes when present"""
+        /proc/meminfo, ionice is reported yes when present, and the platform
+        the sample's `uname -s` named comes back out as t_os's answer"""
         cp = parse(LINUX_SAMPLE)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        cores, load, mem, ionice = cp.stdout.splitlines()
+        cores, load, mem, ionice, os = cp.stdout.splitlines()
         self.assertEqual(cores, "8")
         self.assertEqual(load, "0")  # int(0.52)
         self.assertEqual(mem, "20000")  # int(20480000 / 1024)
         self.assertEqual(ionice, "yes")
+        self.assertEqual(os, "linux")
 
 
 class TestRemoteProbeParseDarwin(unittest.TestCase):
-    def test_parses_cores_load_mem_ionice_from_sysctl_vm_stat(self):
+    def test_parses_cores_load_mem_ionice_os_from_sysctl_vm_stat(self):
         """cores, load and free memory come out of `sysctl -n hw.ncpu`,
-        `sysctl -n vm.loadavg` and `vm_stat`, and ionice is reported no --
-        util-linux has no Darwin equivalent"""
+        `sysctl -n vm.loadavg` and `vm_stat`, ionice is reported no --
+        util-linux has no Darwin equivalent -- and the platform is macos,
+        which is what decides the build system a config uses there"""
         cp = parse(DARWIN_SAMPLE)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        cores, load, mem, ionice = cp.stdout.splitlines()
+        cores, load, mem, ionice, os = cp.stdout.splitlines()
         self.assertEqual(cores, "10")
         self.assertEqual(load, "1")  # int(1.23), the 2nd field of "{ ... }"
         # (123456 free + 345678 inactive + 45678 speculative) pages * 16384
         # bytes/page, in MB.
         self.assertEqual(mem, "8043")
         self.assertEqual(ionice, "no")
+        self.assertEqual(os, "macos")
 
     def test_missing_page_size_yields_no_mem_answer_not_a_crash(self):
         """a vm_stat excerpt with no page-size header parses cores/load/ionice
@@ -116,11 +120,12 @@ no
 """
         cp = parse(sample)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        cores, load, mem, ionice = cp.stdout.splitlines()
+        cores, load, mem, ionice, os = cp.stdout.splitlines()
         self.assertEqual(cores, "4")
         self.assertEqual(load, "0")
         self.assertEqual(mem, "0")
         self.assertEqual(ionice, "no")
+        self.assertEqual(os, "macos")
 
 
 class TestRemoteProbeParseRobustness(unittest.TestCase):
@@ -130,8 +135,9 @@ class TestRemoteProbeParseRobustness(unittest.TestCase):
         ionice answer that came before it"""
         cp = parse(LINUX_SAMPLE + "\n")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        *_, ionice = cp.stdout.splitlines()
+        *_, ionice, os = cp.stdout.splitlines()
         self.assertEqual(ionice, "yes")
+        self.assertEqual(os, "linux")
 
 
 if __name__ == "__main__":

@@ -143,4 +143,9 @@ fi
 host=$(t_ssh_host "$NAME") || die "'$NAME' is not running, so there is no route to it.
     A macOS guest needs booting first:  wk vm start $NAME"
 
+# A guest is the one workspace kind with a window of its own, and the editor
+# opening it is often the moment something on that screen asks to be logged
+# into. vm_login_note (targets/vm.sh) is the one place that password is stated.
+[ "$WK_TARGET_KIND" != vm ] || vm_login_note
+
 emit "ssh://$host$(t_src "$NAME")"

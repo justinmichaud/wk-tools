@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk build <workspace> <config> -- build WebKit or JSC
-# wk: where=workspace name=required ready=yes group=workspaces
+# wk: where=workspace name=required values=--list ready=yes group=workspaces
 # wk: flag --list where=local
 #
 # The job count is derived from memory actually available right now, and the
@@ -60,11 +60,22 @@ DRY=""
 # resolves $WK_NAME and drops it on a host, so what's left is the config
 # either way -- except in here, where a second word is a mistaken name.
 NAME="${WK_NAME:-}"
+require_name "$NAME"
+
+# Before any config_load below, and this is the order, not a preference: on
+# macOS a config does not choose its own build system, so the target has to be
+# known first (t_os, lib/target.sh).
+TARGET="$(ws_target "$NAME")"
+load_target "$TARGET"
+
 if in_workspace; then
     # A name *and* a config, where the first word is not this workspace's own
     # name, is the host form typed in the wrong place: read literally it would
     # build this workspace and report the second word as an unknown config.
-    if [ -n "${2:-}" ] && config_load "${2:-}" 2>/dev/null; then
+    # A subshell: this only asks whether the word names a config at all, and
+    # config_load refuses an Apple config on a Linux target outright -- which
+    # is right for a build and wrong for a question.
+    if [ -n "${2:-}" ] && ( config_load "${2:-}" "$(t_os)" ) >/dev/null 2>&1; then
         die "no such workspace: ${1:-} -- this is workspace '$NAME', so the
     form in here is 'wk build ${2:-}' with no name"
     fi
@@ -74,17 +85,13 @@ shift 1 2>/dev/null || true
 
 [ "${1:-}" = --dry-run ] && { DRY=1; shift; }
 
-require_name "$NAME"
 [ -n "$CONFIG" ] || {
     if in_workspace; then log "usage: wk build <config>"
     else log "usage: wk build <workspace> <config>"; fi
     config_list | sed 's/^/  /'; exit 2
 }
 
-config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
-
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
+config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
 
 # This target's own default build flags (targets/hosts/<name>.conf; captured
 # now, ahead of the flag parsing below, since --no-defaults must override it).
@@ -210,14 +217,14 @@ set -- ${_PASS[@]+"${_PASS[@]}"}
 
 # --babysit: hand the whole thing to a detached loop (build/babysit.sh) that
 # rebuilds after every fix a sandboxed Claude makes, and exit. Refused where
-# `wk claude` would refuse (the fixer runs through it), and from inside a
+# `wk ai claude` would refuse (the fixer runs through it), and from inside a
 # workspace, which has no host store or second sandbox.
 if [ -n "$BABYSIT" ]; then
     in_workspace && die "--babysit runs on the host: it re-runs 'wk build' and starts
     Claude in the workspace, neither of which works from in here"
     case "$WK_TARGET_KIND" in
         remote) die "refusing to babysit on a remote target: the fixer is Claude, and
-    a shared machine has no sandbox to run it in (the same rule as 'wk claude')" ;;
+    a shared machine has no sandbox to run it in (the same rule as 'wk ai claude')" ;;
         local)  die "already inside a workspace -- run the build and claude directly" ;;
     esac
 

@@ -67,6 +67,19 @@ else
     info "no stopped containers"
 fi
 
+# Remote control in every container that just came back up, so a workspace is
+# reachable from the phone after a reboot without anybody having remembered to
+# ask. Through `wk ai claude --rc`, the one implementation, and never fatal:
+# `wk start` is about the machine, and one workspace whose agent will not start
+# is not a failure to start the machine. WK_NO_CLAUDE_RC=1 turns it off.
+if [ -n "$stopped" ] && [ -z "${WK_NO_CLAUDE_RC:-}" ]; then
+    printf '%s\n' "$stopped" | sed 's/^wk-//' | while read -r _ws; do
+        [ -n "$_ws" ] || continue
+        "$WK_ROOT/wk" ai claude "$_ws" --rc >/dev/null 2>&1 \
+            || warn "claude remote control did not start in '$_ws' -- 'wk ai claude $_ws --rc' says why"
+    done
+fi
+
 # macOS VMs are not started here: they compete with the podman machine for
 # memory, so bringing both up unattended causes swapping. List them instead.
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then

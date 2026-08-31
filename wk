@@ -107,6 +107,12 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 #                    look at the workspace from the host
 #   bare merged      with no workspace named, report on every target here
 #   post <hook>      zed | ssh-alias-remove, after the forwarded half
+#   values=<flag>    a closed set this command accepts lives in one list in the
+#                    code, and `wk <cmd> -h` prints it by running `wk <cmd>
+#                    <flag>` -- so the help cannot fall out of step with the
+#                    list, which is what a set enumerated in a header's prose
+#                    always eventually does. One flag, read-only and instant:
+#                    `values=--list`.
 #   needs <a,b>      tools and standing this command cannot start without:
 #                    a command name (gh, tart, nmap...), `gh-auth` (gh's token
 #                    works), or `tailnet` (this machine is on the tailnet). Checked
@@ -127,7 +133,7 @@ decl_load() { # <impl>
     local WK_WHERE_VALUES="host store local workspace dynamic"
     D_WHERE=workspace D_NAME=none D_READY=no D_GROUP=other D_LIFECYCLE=""
     D_READONLY="" D_BROKER="" D_FORWARD=yes D_BARE="" D_POST="" D_SUB="" D_FLAG="" D_OUTSIDE="" D_NEEDS=""
-    D_HERE="" D_TAKES=0
+    D_HERE="" D_TAKES=0 D_VALUES=""
     local line tok
     set -f   # `broker *` is a word, not a glob
     while IFS= read -r line; do
@@ -154,6 +160,7 @@ ${line# flag }" ; continue ;;
                 readonly) D_READONLY=yes ;;
                 broker)   D_BROKER=pending ;;
                 needs)    D_NEEDS=pending ;;
+                values=*) D_VALUES=${tok#values=} ;;
                 forward=no) D_FORWARD=no ;;
                 here)     D_HERE=1; D_FORWARD=no ;;
                 outside)  D_OUTSIDE=1 ;;
@@ -498,6 +505,12 @@ explain_cmd() { # <cmd> <impl>
          /^# wk [a-z]/ && !seen { next }
          /^#/  { sub(/^# ?/, ""); if ($0 == "" && !seen) next; seen = 1; print "  " $0; next }
          { exit }' "$impl"
+    # The closed set, from the one list that defines it (values=<flag>) rather
+    # than from prose here that would go stale the first time the list grows.
+    if [ -n "$D_VALUES" ]; then
+        printf '\nvalid values (wk %s %s):\n' "$cmd" "$D_VALUES"
+        "$impl" "$D_VALUES" 2>&1 | sed 's/^/  /'
+    fi
     exit 0
 }
 
@@ -886,6 +899,8 @@ main() {
         help|-h|--help) help_doc "${1:-}" ;;
         setup) exec "$WK_ROOT/setup" "$@" ;;
         image) die "'wk image' is renamed: wk sysimage" ;;
+        claude) die "'wk claude' is renamed: wk ai claude${1:+ $1}
+    One command for every coding agent (wk ai -h)." ;;
         --declarations) dump_declarations; exit 0 ;;
     esac
     local impl="$WK_ROOT/cmd/$cmd"

@@ -597,7 +597,7 @@ cmd_run() {
         [ -z "$cores_refusal" ] || die "--cores: $cores_refusal"
     fi
 
-    config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
+    config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
 
     # class, runner and arch (see header) are derived here, never taken as
     # flags: a flag for any of them would let the record disagree with what
@@ -998,7 +998,7 @@ cmd_stage() {
     wait_ready "$ws"
 
     [ -n "$config" ] || config="${WK_CONFIG:-$(default_config)}"
-    config_load "$config" || die "unknown config '$config' (wk build --list)"
+    config_load "$config" "$(t_os)" || die "unknown config '$config' (wk build --list)"
 
     local src build_dir
     src=$(t_src "$ws")

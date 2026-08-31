@@ -123,7 +123,12 @@ esac
 require_name "$NAME"
 
 [ -n "$CONFIG" ] || CONFIG=$(default_config)
-config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
+# The target first: on macOS a config does not choose its own build system, so
+# config_load needs the platform it will be built on (t_os, lib/target.sh).
+TARGET="$(ws_target "$NAME")"
+load_target "$TARGET"
+
+config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
 
 # `native` is a question about the platform, not a mode of its own: xctrace is
 # already there on the Apple ports, so asking for a Rust toolchain instead
@@ -143,9 +148,6 @@ esac
     die "--process only makes sense with --browser: it names which of
     MiniBrowser's own processes (ui, web, network, gpu) to point the profiler
     at, and without --browser there is no MiniBrowser to name one of."
-
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
 
 SRC=$(t_src "$NAME")
 VAR=$(config_run_var)

@@ -73,13 +73,19 @@ if [ -z "$CONFIG" ]; then
     fi
 fi
 
-config_load "$CONFIG" || die "unknown config '$CONFIG' (wk build --list)"
+# The target first: on macOS a config does not choose its own build system, so
+# config_load needs the platform it will be built on (t_os, lib/target.sh).
+TARGET="$(ws_target "$NAME")"
+load_target "$TARGET"
 
-# A JSCOnly build has no layout tests -- no driver to run a page in, no
+config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG' (wk build --list)"
+
+# A JSC-only build has no layout tests -- no driver to run a page in, no
 # ImageDiff to compare one with -- and saying so beats run-webkit-tests
-# discovering it.
-if [ "$SUITE" = layout ] && [ "$CFG_PORT" = --jsc-only ]; then
-    die "'$CONFIG' is a JSCOnly build, which has no layout tests -- no
+# discovering it. Asked of the config, not of CFG_PORT: on macOS a jsc-*
+# config is an Apple-port build with no port flag at all (build/configs.sh).
+if [ "$SUITE" = layout ] && config_jsc_only; then
+    die "'$CONFIG' builds JavaScriptCore alone, which has no layout tests -- no
     WebKitTestRunner and no ImageDiff are built by it. Name a full-port config
     that has been built in '$NAME':
         wk test $NAME --layout --config gtk-release-asan
@@ -87,8 +93,6 @@ if [ "$SUITE" = layout ] && [ "$CFG_PORT" = --jsc-only ]; then
     the configs.)"
 fi
 
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
 # ready=yes already waited for present; this just reads state for --dry-run.
 if [ -n "$DRY" ]; then
     WS_STATE=$(ws_state "$NAME")

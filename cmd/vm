@@ -16,6 +16,8 @@
 #   start <name>              boot it, write its ssh alias (wk-<name>)
 #   stop <name>               shut it down
 #   ip <name>                 its current address
+#   check <name>              is it on an empty desktop, with nothing modal in
+#                             front of the window? Read-only
 #   enter <name>              interactive shell
 #   sync <name>               push this working tree of wk-tools into it
 #   rm <name>                 destroy it and forget the target
@@ -58,7 +60,7 @@ SUB="${1:-ls}"; shift || true
 case "$SUB" in
     ls)   [ $# -eq 0 ] || die "usage: wk vm ls; see wk vm -h" ;;
     base) [ $# -le 1 ] || die "usage: wk vm base [--refresh|--rebuild|--rm]; see wk vm -h" ;;
-    new|start|stop|ip|enter|sync|rm)
+    new|start|stop|ip|enter|sync|rm|check)
           [ $# -eq 1 ] && [ "${1#-}" = "$1" ] \
               || die "usage: wk vm $SUB <name>; see wk vm -h" ;;
 esac
@@ -75,6 +77,38 @@ new)
     t_create "$NAME"
     info "created; start it with: wk vm start $NAME"
     ;;
+check)
+    # Read-only, and it starts nothing: a stopped guest has no desktop to be
+    # wrong about, and booting one to look would change the thing being asked
+    # about. Every wrong answer is a property of the golden base, so the remedy
+    # is a base that carries it -- not a patch to the running guest.
+    NAME="${1:-}"; require_name "$NAME"
+    _probe=$(vm_desktop_probe "$NAME" 2>/dev/null) || _probe=""
+    [ -n "$_probe" ] || die "'$NAME' did not answer. It has to be running and reachable
+    for this: 'wk vm start $NAME', then try again ('wk vm ls' has its state)."
+    _bad=0
+    while IFS="$(printf '\t')" read -r _state _what _remedy; do
+        [ -n "$_state" ] || continue
+        case "$_state" in
+            ok)    printf '  \033[32mok\033[0m    %s\n' "$_what" >&2 ;;
+            wrong) printf '  \033[31m--\033[0m    %s\n' "$_what" >&2
+                   [ -z "$_remedy" ] || printf '        -> %s\n' "$_remedy" >&2
+                   _bad=$((_bad + 1)) ;;
+            note)  printf '  \033[33m??\033[0m    %s\n' "$_what" >&2
+                   [ -z "$_remedy" ] || printf '        %s\n' "$_remedy" >&2 ;;
+        esac
+    done <<FINDINGS
+$(vm_desktop_findings "$_probe")
+FINDINGS
+    echo >&2
+    if [ "$_bad" -eq 0 ]; then
+        info "'$NAME' is on an empty desktop -- nothing in front of the window"
+        exit 0
+    fi
+    warn "$_bad thing(s) can cover '$NAME's window, and a covered window is a
+  throttled window: a benchmark in there measures something else."
+    exit 1
+    ;;
 start)
     NAME="${1:-}"; require_name "$NAME"
     ip=$(t_start "$NAME")
@@ -82,6 +116,8 @@ start)
     info "$NAME is up at $ip"
     log  "  wk build $NAME mac-release"
     log  "  zed ssh://wk-$NAME$(t_src "$NAME")"
+    log  "  wk vm check $NAME       is its desktop clear of anything modal?"
+    vm_login_note
     ;;
 stop)
     NAME="${1:-}"; require_name "$NAME"
@@ -93,6 +129,11 @@ ip)
     ;;
 enter)
     NAME="${1:-}"; require_name "$NAME"
+    # Before the shell, not after: this exec's away and never comes back, and
+    # the note is for the guest's *window* -- an Xcode prompt, an installer,
+    # the screen -- which is exactly what someone entering a guest is about to
+    # be looking at.
+    vm_login_note
     t_enter "$NAME"
     ;;
 sync)

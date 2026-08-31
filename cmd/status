@@ -185,7 +185,7 @@ report() {
     return 0
 }
 
-# Claude Code remote-control (`wk claude <ws> --rc`), if this workspace has
+# Claude Code remote-control (`wk ai claude <ws> --rc`), if this workspace has
 # ever had one: its own status file (lib/detach.sh: pid=, state=, updated=).
 # The pid names a process `t_spawn` started *inside* the target, so
 # liveness is asked through `t_exec`, never a local `kill -0`.

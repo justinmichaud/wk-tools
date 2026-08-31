@@ -21,7 +21,7 @@
 # path. `wk` itself still never calls sudo.
 
 # WK_SOFTNET_VERSION pins the release this stage installs; WK_SOFTNET_BIN
-# overrides the install path. cmd/claude, cmd/doctor, setup and targets/vm.sh
+# overrides the install path. cmd/ai, cmd/doctor, setup and targets/vm.sh
 # all read WK_SOFTNET_BIN the same way, with the same default, to find the
 # binary this stage installed -- one path, read consistently rather than
 # passed around.

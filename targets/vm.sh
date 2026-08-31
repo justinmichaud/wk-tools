@@ -32,6 +32,9 @@
 #                            point WK_VM_BASE/WK_VM_STORE at a fake one)
 #   WK_VM_MAX                running-guest ceiling (Apple permits 2 per host)
 #   WK_VM_USER                the account every guest is provisioned with
+#   WK_VM_PASSWORD             that account's password *after* provisioning
+#   WK_VM_IMAGE_PASSWORD       the one the pulled image ships with, used once
+#                              to change it
 #   WK_VM_CPUS/WK_VM_MEM_MB    a workspace guest's allocation (default: the envelope)
 #   WK_VM_BASE_CPUS/_MEM_MB    the golden base's allocation (default: the same envelope)
 #   WK_VM_BASE_PREBUILD       config pre-built into the base; empty disables it
@@ -48,6 +51,27 @@ WK_VM_IMAGE="${WK_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-xcode:26.5}"
 WK_VM_BASE="${WK_VM_BASE:-wk-base}"
 WK_VM_MAX="${WK_VM_MAX:-2}"
 WK_VM_USER="${WK_VM_USER:-admin}"
+
+# The guest's login, and it is deliberately trivial. Nothing trusts this
+# account: the guest holds no credential of yours (the push keys stay in the
+# store, `wk ai claude` runs against a checkout and nothing else), it is
+# Softnet-filtered down to one reachable address, and `wk rm` destroys it. What
+# the password actually costs is typing: it is asked for at the guest's own
+# window -- a screen unlock, an Xcode prompt, an installer -- while everything
+# wk does arrives over ssh with a key.
+#
+# Two names because they are two different facts: the image ships one
+# (admin/admin, Cirrus Labs) and provisioning changes it to the other, once.
+WK_VM_PASSWORD="${WK_VM_PASSWORD:-1}"
+WK_VM_IMAGE_PASSWORD="${WK_VM_IMAGE_PASSWORD:-admin}"
+
+# Said wherever a person is about to look at a guest's window -- provisioning
+# it, starting it, entering it, opening an editor on it. One function, so the
+# four places cannot disagree with each other or with what provisioning set.
+vm_login_note() {
+    log "  the guest's own window logs in as $WK_VM_USER / $WK_VM_PASSWORD"
+    log "  (wk itself uses an ssh key; this is for a prompt on the screen)"
+}
 
 # The egress boundary for guests: the proxy listens on the host's address on
 # the guest-facing bridge, the one address Softnet lets the guest reach. NOT
@@ -230,6 +254,8 @@ t_ssh_host() {
 # refuses); the account is the one the golden image was provisioned with.
 t_ssh_user() { printf '%s' "$WK_VM_USER"; }
 
+t_os() { echo macos; }
+
 t_create() {
     local name="$1"
     local v; v=$(_vm "$name")
@@ -272,9 +298,11 @@ t_start() {
     if [ "$(_vm_state "$v")" = running ]; then
         ip=$(_ip "$name")
         _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
+        _write_shell_rc "$name" "$ip" || warn "could not wire $name's shell; 'wk' will not be on PATH in there"
         _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
         _set_guest_proxy "$name" "$ip" || warn "could not set the guest's system proxy; the browser in $name will reach nothing"
         _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
+        _settle_desktop "$name" "$ip" || warn "could not settle $name's desktop; 'wk vm check $name' says what is in front of the window"
         echo "$ip"
         return 0
     fi
@@ -287,10 +315,25 @@ t_start() {
     # report that because one ssh failed is the wrong trade.
     ip=$(_boot "$v" 180)
     _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
+    _write_shell_rc "$name" "$ip" || warn "could not wire $name's shell; 'wk' will not be on PATH in there"
     _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
     _set_guest_proxy "$name" "$ip" || warn "could not set the guest's system proxy; the browser in $name will reach nothing"
     _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
+    _settle_desktop "$name" "$ip" || warn "could not settle $name's desktop; 'wk vm check $name' says what is in front of the window"
     echo "$ip"
+}
+
+# On every start, not only in the golden base: `defaults -currentHost` writes
+# per hardware UUID and `tart clone` gives the clone a new one, so a screen
+# saver the base turned off is armed again in every guest cloned from it
+# (measured with `wk vm check`). Setup Assistant's panes come back per clone
+# for the same reason -- macOS counts a clone as a new install.
+#
+# vm/desktop.sh over stdin, the same file vm/provision-base.sh runs: one
+# implementation, and it needs no wk-tools inside the guest to have been synced.
+_settle_desktop() { # <name> <ip>
+    _ssh "$2" "env WK_VM_PASSWORD=$(sh_quote "$WK_VM_PASSWORD") bash -s" \
+        < "$WK_ROOT/vm/desktop.sh" >/dev/null 2>&1
 }
 
 # The tart flags that confine a guest's egress: --net-softnet-block=0.0.0.0/0
@@ -381,7 +424,7 @@ _boot() {
         local sflags
         sflags=$(_softnet_flags)
 
-        # Recorded so `wk claude` can tell how this guest was *booted*.
+        # Recorded so `wk ai claude` can tell how this guest was *booted*.
         if [ -z "$sflags" ]; then
             : > "$WK_VM_DIR/${v#wk-}.unfiltered"
         else
@@ -474,7 +517,7 @@ _write_marker() {
 }
 
 # The agent's own configuration. Provisioning links these
-# (vm/provision-base.sh); without it `wk claude` starts an agent that was
+# (vm/provision-base.sh); without it `wk ai claude` starts an agent that was
 # never told it is in a workspace. Symlinks rather than copies: `wk build`
 # re-rsyncs $HOME/wk-tools with --delete on every run, so a copy goes stale.
 _write_claude_config() {
@@ -548,6 +591,16 @@ _write_lldbinit() {
     } | _ssh "$ip" "cat > \$HOME/.lldbinit"
 }
 
+# The guest's shells, pointed at the shared rc -- which is where `wk` gets onto
+# PATH (shell/path.sh), so `wk build` typed inside a guest resolves at all.
+# Written on every start, like the marker and .lldbinit, and from the same file
+# vm/provision-base.sh runs (vm/shell-rc.sh): one implementation, and a guest
+# cloned from a base that predates it converges here rather than needing the
+# base rebuilt.
+_write_shell_rc() { # <name> <ip>
+    _ssh "$2" "bash -s $(sh_quote "$(t_tools "$1")")" < "$WK_ROOT/vm/shell-rc.sh"
+}
+
 # rsync rather than a mount: no --dir is ever passed to `tart run`, since a
 # shared directory is the host-filesystem hole this target exists not to
 # have. Shared with _prebuild_base and _provision_base, into a *running*
@@ -603,7 +656,7 @@ t_destroy() {
     [ -d "$ws" ] && { rm -rf "$ws"; info "removed $ws"; }
     rm -f "$WK_VM_DIR/$name.run.log"
     # The unfiltered marker too, or it would falsely refuse the next guest
-    # of the same name (`wk claude` refuses on it, cmd/claude).
+    # of the same name (`wk ai claude` refuses on it, cmd/ai).
     rm -f "$WK_VM_DIR/$name.unfiltered"
 }
 
@@ -970,7 +1023,8 @@ _provision_base() {
     # _proxy_addr, not $WK_VM_PROXY_ADDR: the variable is normally *unset*, so
     # passing it raw sends provision-base.sh to Tart's hardcoded default of
     # 192.168.64.1, where nothing listens.
-    _ssh "$ip" "env WK_VM_PROXY_ADDR=$(sh_quote "$(_proxy_addr)") WK_VM_PROXY_PORT=$(sh_quote "$WK_VM_PROXY_PORT") WK_VM_DISPLAY=$(sh_quote "$WK_VM_DISPLAY") bash $(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
+    vm_login_note
+    _ssh "$ip" "env WK_VM_PROXY_ADDR=$(sh_quote "$(_proxy_addr)") WK_VM_PROXY_PORT=$(sh_quote "$WK_VM_PROXY_PORT") WK_VM_DISPLAY=$(sh_quote "$WK_VM_DISPLAY") WK_VM_USER=$(sh_quote "$WK_VM_USER") WK_VM_PASSWORD=$(sh_quote "$WK_VM_PASSWORD") WK_VM_IMAGE_PASSWORD=$(sh_quote "$WK_VM_IMAGE_PASSWORD") bash $(t_tools "$WK_VM_BASE")/vm/provision-base.sh" \
         || die "base provisioning failed"
 
     _prebuild_base "$ip"
@@ -980,4 +1034,77 @@ _provision_base() {
     # Last: until this exists the guest is rubble that the next run destroys.
     _base_mark_ready
     changed "golden base VM '$WK_VM_BASE' is ready"
+}
+
+# --- is this guest on an empty desktop? --------------------------------------
+# What vm/desktop-probe.sh found, turned into findings -- one per line,
+# tab-separated `<state> <what> <remedy>`, state one of ok | wrong | note. The
+# same shape remote/deps.sh's wk_remote_findings uses, so `wk vm check` and `wk
+# doctor --all` read alike and neither re-decides what counts as wrong.
+#
+# Everything here is provisioned into the golden base
+# (vm/provision-base.sh), so the remedy for most of it is a base that carries
+# it -- `wk vm base --rebuild` -- never a patch applied to the running guest
+# (CLAUDE.md, "No in-place upgrades").
+vm_desktop_findings() { # <probe output>
+    local probe="$1" v
+    _f() { printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}"; }
+    _v() { printf '%s\n' "$probe" | sed -n "s|^$1=||p" | tail -1; }
+    local rebuild="wk vm base --rebuild, then re-create this guest"
+
+    local restart="wk vm stop <name> && wk vm start <name>"
+    v=$(_v console_user)
+    case "$v" in
+        root|""|"?") _f wrong "nobody is logged in at the window (console user '$v') -- there is no desktop to draw on" \
+                              "$restart  (auto-login logs it back in; the account is a base setting)" ;;
+        *)           _f ok "logged in at the window as $v" ;;
+    esac
+
+    case "$(_v screenlock)" in
+        off)     _f ok "screen lock off" ;;
+        on)      _f wrong "the screen lock is on, so this guest comes up asking for a password" \
+                          "$rebuild  -- vm/desktop.sh leaves the lock alone unless the
+        account's password is the one wk set, and will not guess at it" ;;
+        *)       _f note "screen lock could not be read (sysadminctl needs passwordless sudo in there)" ;;
+    esac
+
+    [ "$(_v idletime)" = 0 ] \
+        && _f ok "screen saver off" \
+        || _f wrong "the screen saver is armed (idleTime=$(_v idletime)), and it occludes the window it covers" "$rebuild"
+
+    [ "$(_v displaysleep)" = 0 ] \
+        && _f ok "display sleep off" \
+        || _f wrong "the display sleeps after $(_v displaysleep) minutes" "$rebuild"
+
+    v=$(_v setupassistant_pending)
+    [ -z "$v" ] \
+        && _f ok "Setup Assistant already clicked through" \
+        || _f wrong "Setup Assistant will put a modal pane on the desktop:$v" "$rebuild"
+
+    case "$(_v update_check):$(_v update_download)" in
+        0:0) _f ok "Software Update offers off" ;;
+        *)   _f wrong "Software Update will offer an upgrade on the desktop (check=$(_v update_check), download=$(_v update_download)) -- a guest is a clone of a pinned image and upgrading it means nothing" "$rebuild" ;;
+    esac
+
+    v=$(_v panels)
+    [ -z "$v" ] \
+        && _f ok "nothing modal on screen now" \
+        || _f wrong "something is on the desktop right now: $v" \
+                    "$restart  -- the settings above stop the next one, and killing this
+        one would take the desktop session with it (vm/desktop.sh)"
+
+    _f note "the guest's own window logs in as $(_v user) / $WK_VM_PASSWORD" \
+            "wk itself uses an ssh key; this is for a prompt on the screen"
+
+    unset -f _f _v
+    return 0
+}
+
+# The probe, run in a guest. One implementation, so every caller sends the same
+# evidence-gatherer. `_ssh_in`, not t_exec: this must answer about a guest whose
+# wk-tools copy is older than this file.
+vm_desktop_probe() { # <name>
+    local ip; ip=$(_ip "$1") || return 1
+    [ -n "$ip" ] || return 1
+    _ssh "$ip" 'bash -s' < "$WK_ROOT/vm/desktop-probe.sh"
 }

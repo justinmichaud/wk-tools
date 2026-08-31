@@ -36,6 +36,7 @@ KNOWN_OFFENDERS = {
     ("lib/store.sh", "store_is_local"),
     ("cmd/sync", "snapshot_current"),
     ("cmd/doctor", "podman_machine_running"),
+    ("cmd/doctor", "git_speed_ok"),
     # Not predicates -- called for effect, in a context (a plain statement,
     # or inside `$(...)`, which set -e treats as a simple command) where an
     # empty/false condition makes the function itself "fail" and can end its

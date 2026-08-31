@@ -273,6 +273,19 @@ if [ -n "$PR_SPEC" ]; then
     wk_pr_checkout "$NAME" "$PR_SPEC"
 fi
 
+# Remote control, so the workspace is reachable from the phone without anybody
+# having remembered to ask for it. Through `wk ai claude --rc`, which is the one
+# implementation -- not a second copy of rc_start here.
+#
+# Never fatal: the workspace exists and `wk new` has already said so, and an
+# agent that cannot start must not turn a successful creation into a failed
+# command. A shared build machine is skipped by that command's own barrier.
+if [ -z "${WK_NO_CLAUDE_RC:-}" ] && [ "$WK_TARGET_KIND" != remote ]; then
+    "$WK_ROOT/wk" ai claude "$NAME" --rc \
+        || warn "'$NAME' is there; starting claude remote control in it is what failed
+  (above). 'wk ai claude $NAME --rc' retries; WK_NO_CLAUDE_RC=1 stops trying."
+fi
+
 # An armhf workspace is software-rendering (no NVIDIA userspace for it): fine
 # for JSC and CPU-class benchmarks, not a measurement for MotionMark.
 if ! arch_is_native "$ARCH"; then
@@ -293,14 +306,14 @@ remote)
     _host=$(t_ssh_host "$NAME" 2>/dev/null) \
         && log "  wk zed $NAME            the checkout, in Zed (ssh://$_host$(t_src "$NAME"))"
     log ""
-    log "  no sandbox on a shared machine, so 'wk claude' and 'wk verify' refuse."
+    log "  no sandbox on a shared machine, so 'wk ai claude' and 'wk verify' refuse."
     ;;
 *)
     # `wk zed`, not a url: a container has no address until its ProxyCommand
     # alias is written on first use.
     log "  wk enter $NAME          shell"
     log "  wk build $NAME <config> build"
-    log "  wk claude $NAME         sandboxed agent"
+    log "  wk ai claude $NAME      sandboxed agent (remote control is already up)"
     log "  wk zed $NAME            the checkout, in Zed"
     ;;
 esac

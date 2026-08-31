@@ -5,9 +5,9 @@
 # runs inside and only carries it out.
 #
 # Environment supplied by cmd/build: WK_JOBS, WK_NICE, WK_BUILD_ARGS,
-# WK_BUILD_CMAKE, WK_BUILDSYS, WK_SRC, plus the ccache/cross-build caches,
-# WK_ARCH* for a non-native workspace, WEBKIT_OUTPUTDIR/WK_DERIVED_DATA for
-# the Apple configs.
+# WK_BUILD_CMAKE, WK_BUILDSYS, WK_BUILD_SCRIPT, WK_SRC, plus the
+# ccache/cross-build caches, WK_ARCH* for a non-native workspace,
+# WEBKIT_OUTPUTDIR/WK_DERIVED_DATA for the Apple configs.
 #
 # Runs on both a Fedora container and a macOS guest: bash 3.2 (macOS still
 # ships it, and "${arr[@]}" for an empty array errors under `set -u`, hence
@@ -31,6 +31,9 @@ cd "$SRC"
 jobs=$(guard_jobs "${WK_JOBS:-4}")
 buildsys=${WK_BUILDSYS:-cmake}
 
+# Which Tools/Scripts entry point (build/configs.sh, CFG_SCRIPT). build-jsc for
+# the Apple port's JavaScriptCore, build-webkit for everything else.
+script=${WK_BUILD_SCRIPT:-Tools/Scripts/build-webkit}
 
 cmakeargs=${WK_BUILD_CMAKE:-}
 
@@ -62,28 +65,41 @@ args+=(${WK_BUILD_ARGS:-})
 # --makeargs, defaulting to its own core count.
 case "$buildsys" in
 xcode)
-    args+=(-jobs "$jobs")
+    # One list of xcodebuild settings, however it has to be delivered below.
+    xc=(-jobs "$jobs")
 
     # WEBKIT_OUTPUTDIR alone disagrees with webkitdirs by one directory
     # level; WK_CONFIGURATION_BUILD_DIR is WebKit's own hook for pinning it.
     # SHARED_PRECOMPS_DIR has to be repeated by hand, or all four Apple
     # configs share one precompiled-header directory.
     if [ -n "${WEBKIT_OUTPUTDIR:-}" ]; then
-        args+=("WK_CONFIGURATION_BUILD_DIR=$WEBKIT_OUTPUTDIR")
-        args+=("SHARED_PRECOMPS_DIR=$WEBKIT_OUTPUTDIR/PrecompiledHeaders")
+        xc+=("WK_CONFIGURATION_BUILD_DIR=$WEBKIT_OUTPUTDIR")
+        xc+=("SHARED_PRECOMPS_DIR=$WEBKIT_OUTPUTDIR/PrecompiledHeaders")
     fi
 
     # NOT -derivedDataPath: build-webkit's second xcodebuild call
     # (build-imagediff, `-project` with no `-scheme`) refuses it outright.
     if [ -n "${WK_DERIVED_DATA:-}" ]; then
-        args+=("COMPILATION_CACHE_CAS_PATH=$WK_DERIVED_DATA/CompilationCache.noindex")
-        args+=("MODULE_CACHE_DIR=$WK_DERIVED_DATA/ModuleCache.noindex")
+        xc+=("COMPILATION_CACHE_CAS_PATH=$WK_DERIVED_DATA/CompilationCache.noindex")
+        xc+=("MODULE_CACHE_DIR=$WK_DERIVED_DATA/ModuleCache.noindex")
     fi
 
     # The escape hatch for debugging Swift types: with caching on (the
     # default), debug info is only as durable as the CAS. Costs a full
     # rebuild to switch; C++ debugging is unaffected either way.
-    [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && args+=("COMPILATION_CACHE_ENABLE_CACHING=NO")
+    [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && xc+=("COMPILATION_CACHE_ENABLE_CACHING=NO")
+
+    # The one place the two scripts genuinely differ, and it is forced: an
+    # unrecognised argument to build-webkit goes on to xcodebuild, while
+    # build-jsc appends it to a `make` command line, where -jobs is make's own
+    # flag and a setting is a make variable. `ARGS=` is the project Makefile's
+    # declared hole for xcodebuild settings (Makefile.shared: XCODE_OPTIONS =
+    # $(ARGS)), and it is expanded unquoted there, so this joins on spaces --
+    # a checkout path containing a space is not buildable either way.
+    case "$script" in
+        */build-jsc) args+=("ARGS=${xc[*]}") ;;
+        *)           args+=("${xc[@]}") ;;
+    esac
     ;;
 *)
     # build-webkit removes CMakeCache.txt itself on an ordinary -D change.
@@ -128,7 +144,7 @@ if [ -n "${WK_DRY_RUN:-}" ]; then
     printf 'cd %s && ' "$(_q "$SRC")"
     # shellcheck disable=SC2086,SC2046 -- $wrapper and the guard prefix are deliberate word lists.
     set -- $wrapper $(_guard_prefix) \
-        Tools/Scripts/build-webkit "${args[@]}" ${@+"$@"}
+        "$script" "${args[@]}" ${@+"$@"}
     for _a in "$@"; do printf '%s ' "$(_q "$_a")"; done
     printf '\n'
     exit 0
@@ -137,4 +153,4 @@ fi
 set -x
 # The guard (build/guard.sh): memory watchdog on this pid, ionice, nice.
 # shellcheck disable=SC2086 -- $wrapper is a deliberate list of bare words.
-guard_exec "$jobs" -- $wrapper Tools/Scripts/build-webkit "${args[@]}" ${@+"$@"}
+guard_exec "$jobs" -- $wrapper "$script" "${args[@]}" ${@+"$@"}

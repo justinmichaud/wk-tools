@@ -8,7 +8,7 @@
 # everything a human should read afterwards goes to babysit.report; and its
 # current state goes to babysit.status, which `wk status` renders.
 #
-# The agent runs through `wk claude` -- never claude directly -- so every fix
+# The agent runs through `wk ai claude` -- never claude directly -- so every fix
 # attempt passes the same sandbox verification an interactive session does,
 # and refuses the same targets. The babysitter itself edits nothing: the model
 # does, inside the workspace, or nobody does.
@@ -134,7 +134,11 @@ Log tail:
 $TAIL"
 
     FIX_RC=0
-    FIX_OUT=$("$WK_ROOT/cmd/claude" "$NAME" --model "$MODEL" -p "$PROMPT" </dev/null 2>>"$WS/babysit.log") || FIX_RC=$?
+    # WK_NAME, not a positional: cmd/ai reads the workspace from the
+    # environment the dispatcher sets (this runs detached, with no dispatcher
+    # above it), and everything in its argv after the agent word belongs to the
+    # agent -- a name passed there would reach `claude` as a stray argument.
+    FIX_OUT=$(WK_NAME="$NAME" "$WK_ROOT/cmd/ai" claude --model "$MODEL" -p "$PROMPT" </dev/null 2>>"$WS/babysit.log") || FIX_RC=$?
     note "fix attempt $ATTEMPT (exit $FIX_RC)" "$FIX_OUT"
 
     # The agent failing to *run* is not a failed fix, it is the loop's own

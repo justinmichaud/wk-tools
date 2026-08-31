@@ -1,6 +1,6 @@
 """The commit wall: while an agent holds a container workspace, nothing it runs
 can write git history into the checkout the person will push -- the write-side
-twin of `wk push` (only the person commits). `wk claude` runs the agent under
+twin of `wk push` (only the person commits). `wk ai claude` runs the agent under
 bwrap with the checkout's .git commit-parts read-only (commit_wall_prefix,
 lib/common.sh); a human `wk enter` shell is not wrapped and commits normally.
 
@@ -18,7 +18,7 @@ from pathlib import Path
 from tests.support import REPO, bash, podman_vm_ssh, requires_podman_vm
 
 COMMON = (REPO / "lib" / "common.sh").read_text()
-CLAUDE = (REPO / "cmd" / "claude").read_text()
+CLAUDE = (REPO / "cmd" / "ai").read_text()
 PUSH = (REPO / "cmd" / "push").read_text()
 VERIFY = (REPO / "cmd" / "verify").read_text()
 

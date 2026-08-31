@@ -274,8 +274,8 @@ class TestUnknownFlagRefused(WkTest):
 class TestSecondHalfUnknownFlagRefused(WkTest):
     """The second half of the option-consistency audit (docs/defects):
     status, bench, pr, run, gc, pick, session, quiesce, test, enter, zed,
-    gui, profile, claude. Each refuses an unknown flag with 'usage:', or --
-    run, enter, claude -- documents a deliberate passthrough to what it runs
+    gui, profile, ai. Each refuses an unknown flag with 'usage:', or --
+    run, enter, ai -- documents a deliberate passthrough to what it runs
     instead (confirmed by a doc-text test, not a refusal one)."""
 
     def test_status_unknown_flag(self):
@@ -413,7 +413,7 @@ class TestSecondHalfUnknownFlagRefused(WkTest):
         self.assertIn("usage:", cp.stdout)
 
     def test_claude_passthrough_is_documented(self):
-        text = (REPO / "cmd" / "claude").read_text()
+        text = (REPO / "cmd" / "ai").read_text()
         self.assertIn("everything after it is Claude's, verbatim", text)
 
 

@@ -272,7 +272,7 @@ load_target peerbox
 
     def test_a_pty_carries_the_same_environment(self):
         """t_wk_tty differs from t_wk in the transport and nothing else:
-        `wk claude <ws>` is interactive, so the tty path is the one a person
+        `wk ai claude <ws>` is interactive, so the tty path is the one a person
         meets when they type --force"""
         cp = self._driver('WK_FORCE=1 t_wk plain peerws\n'
                           'WK_FORCE=1 t_wk_tty tty peerws')

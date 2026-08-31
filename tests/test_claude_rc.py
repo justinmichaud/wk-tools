@@ -1,12 +1,12 @@
-"""`wk claude <ws> --rc`: Claude Code Remote Control, started detached inside
+"""`wk ai claude <ws> --rc`: Claude Code Remote Control, started detached inside
 a workspace and tracked through lib/detach.sh's status-file schema. Each
 docstring is the phrase of the behaviour it checks.
 
-cmd/claude refuses a `local` target outright ("already inside workspace"),
+cmd/ai refuses a `local` target outright ("already inside workspace"),
 which is what a FakeWorkspace's marker trick simulates -- so, per the task
 brief, the real driver call (container/vm/remote) is not exercisable here.
-Instead this sources cmd/claude's own rc_* functions in library mode
-(`WK_CLAUDE_LIB=1 . cmd/claude`, mirrored by the guard cmd/claude defines
+Instead this sources cmd/ai's own rc_* functions in library mode
+(`WK_CLAUDE_LIB=1 . cmd/ai`, mirrored by the guard cmd/ai defines
 just for this) with fakes for t_exec/t_spawn/t_home/t_src standing in for a
 real target: a fake `t_spawn` backgrounds the command for real (no `setsid`,
 which this Mac does not have -- ssh's own nohup-survives-disconnect property
@@ -22,15 +22,15 @@ import unittest
 from tests.support import REPO, WkTest, bash, run, temp_store
 
 
-# The library-mode probe: sources cmd/claude for its rc_* functions only
-# (WK_CLAUDE_LIB=1, the guard cmd/claude defines for exactly this), then
+# The library-mode probe: sources cmd/ai for its rc_* functions only
+# (WK_CLAUDE_LIB=1, the guard cmd/ai defines for exactly this), then
 # fakes the driver contract those functions call through, then drives
 # rc_start/rc_stop/rc_alive directly and prints markers this test greps.
 _PROBE = r'''
 set -euo pipefail
 export WK_ROOT="__REPO__"
 export WK_CLAUDE_LIB=1
-. "__REPO__/cmd/claude"
+. "__REPO__/cmd/ai"
 
 WS="probe-ws"
 mkdir -p "$(wk_ws_dir "$WS")"
@@ -111,16 +111,16 @@ def _section(stdout, mark, next_mark=None):
 
 class TestClaudeRcHelp(WkTest):
     def test_help_mentions_rc_and_stop(self):
-        """`wk claude -h` documents --rc and --rc --stop"""
-        cp = run("claude", "-h")
+        """`wk ai claude -h` documents --rc and --rc --stop"""
+        cp = run("ai", "-h")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("--rc", cp.stdout)
         self.assertIn("--stop", cp.stdout)
         self.assertIn("remote-control", cp.stdout.lower())
 
     def test_wk_root_line_is_static_not_hardcoded(self):  # static
-        """cmd/claude's WK_ROOT line respects a pre-set WK_ROOT, like lib/common.sh's own"""
-        text = (REPO / "cmd" / "claude").read_text()
+        """cmd/ai's WK_ROOT line respects a pre-set WK_ROOT, like lib/common.sh's own"""
+        text = (REPO / "cmd" / "ai").read_text()
         self.assertIn('WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"', text)
 
 
@@ -167,3 +167,59 @@ class TestClaudeRcLifecycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRemoteControlIsOnByDefault(WkTest):
+    """A workspace is reachable from the phone without anybody having
+    remembered to ask: `wk new` starts remote control in the workspace it just
+    made, and `wk start` starts it in every container it brings back up. Both
+    call `wk ai claude --rc` -- the one implementation -- and neither may fail
+    because of it.
+
+    What is checked here is the wiring, statically: exercising it needs a real
+    container (a workspace, a running podman machine and a Claude CLI in it),
+    which tests/support cannot conjure. The live check is owed -- docs/defects.
+    """
+
+    NEW = (REPO / "cmd" / "new").read_text()
+    START = (REPO / "cmd" / "start").read_text()
+
+    def test_new_starts_it_through_the_one_command(self):
+        self.assertIn('ai claude "$NAME" --rc', self.NEW,
+                      "wk new no longer starts remote control")
+        self.assertNotIn("rc_status_file", self.NEW,
+                         "wk new reaches into the rc_* functions instead of "
+                         "calling `wk ai claude --rc`")
+
+    def test_start_starts_it_for_every_container_it_brings_back(self):
+        self.assertIn('ai claude "$_ws" --rc', self.START,
+                      "wk start no longer starts remote control")
+
+    def test_both_honour_one_switch(self):
+        for name, text in (("new", self.NEW), ("start", self.START)):
+            with self.subTest(cmd=name):
+                self.assertIn("WK_NO_CLAUDE_RC", text,
+                              f"wk {name} has no way to turn it off")
+
+    def test_neither_can_fail_because_of_it(self):
+        """A workspace that exists must not be reported as a failed creation,
+        and one agent that will not start is not a machine that will not start.
+
+        The invocation -- the line that ends in a continuation, not the prose
+        around it -- is followed by `|| warn`, never `|| die`."""
+        for name, text, call in (("new", self.NEW, 'ai claude "$NAME" --rc'),
+                                 ("start", self.START, 'ai claude "$_ws" --rc')):
+            lines = text.splitlines()
+            idx = [i for i, l in enumerate(lines) if call in l and not l.strip().startswith("#")]
+            self.assertEqual(len(idx), 1, f"wk {name}: {len(idx)} invocations, expected 1")
+            tail = "\n".join(lines[idx[0]:idx[0] + 2])
+            with self.subTest(cmd=name):
+                self.assertIn("|| warn", tail,
+                              f"wk {name} does not warn when the agent will not start")
+                self.assertNotIn("|| die", tail,
+                                 f"wk {name} dies when the agent will not start")
+
+    def test_a_shared_build_machine_is_skipped(self):
+        """`wk ai claude` on a remote target is a barrier -- a prompt about a
+        machine with no sandbox -- so `wk new` must not walk into it unattended."""
+        self.assertIn('"$WK_TARGET_KIND" != remote', self.NEW)

@@ -65,7 +65,18 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-config_load "$CONFIG" || die "unknown config '$CONFIG'"
+# The target first: on macOS a config does not choose its own build system, so
+# config_load needs the platform it will be built on (t_os, lib/target.sh).
+TARGET="$(ws_target "$NAME")"
+load_target "$TARGET"
+
+config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG'"
+
+# Asked before the port, because a macOS jsc-* config is an Apple-port build
+# with no port flag (build/configs.sh) and would otherwise read as mac-*.
+config_jsc_only && \
+    die "'$CONFIG' builds JavaScriptCore alone -- there is no browser in it.
+    Use a wpe-*, gtk-* or mac-* config."
 
 # The Apple MiniBrowser has no fullscreen switch: the window is resized by hand, or the guest's whole display is, with WK_VM_DISPLAY.
 case "$CFG_BUILDSYS:$CFG_PORT" in
@@ -79,9 +90,6 @@ esac
 # about:blank by default: a real page would be guessing which one, and one
 # outside the proxy allowlist fails like a broken browser.
 [ -n "$URL" ] || URL="about:blank"
-
-TARGET="$(ws_target "$NAME")"
-load_target "$TARGET"
 
 # A container workspace on macOS has no display and never can: the podman
 # machine is a Linux VM with no GPU or Wayland socket to draw into.

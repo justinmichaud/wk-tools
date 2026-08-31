@@ -9,6 +9,7 @@ calls into lib/resources.sh / build/configs.sh cover the logic without it.
 
 Run: python3 -m unittest tests.test_build -v
 """
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -52,11 +53,17 @@ class TestDryRunRunningLine(WkTest):
             lines = [l for l in cp.stdout.splitlines() if "running:" in l]
             self.assertEqual(len(lines), 1, cp.stdout)
             # One line, pastable: it names the checkout and the actual
-            # build-webkit invocation, not the internal env/build-in-target.sh
-            # plumbing above it.
+            # Tools/Scripts invocation, not the internal env/build-in-target.sh
+            # plumbing above it. Which script, and whether there is a port
+            # flag, is the platform's answer -- a fake workspace is the `local`
+            # target, so it is this machine's (see TestMacJscUsesXcode).
             self.assertIn("cd ", lines[0])
-            self.assertIn("build-webkit", lines[0])
-            self.assertIn("--jsc-only", lines[0])
+            if platform.system() == "Darwin":
+                self.assertIn("build-jsc", lines[0])
+                self.assertNotIn("--jsc-only", lines[0])
+            else:
+                self.assertIn("build-webkit", lines[0])
+                self.assertIn("--jsc-only", lines[0])
 
     def test_no_defaults_flag_is_consumed_not_passed_through(self):
         """--no-defaults is recognised, not forwarded to build-webkit"""
@@ -107,7 +114,7 @@ set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load jsc-release
+config_load jsc-release linux
 WK_TARGET_BUILD_ARGS="--no-fatal-warnings" config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_ARGS=*) echo "$e" ;; esac; done
 ''')
@@ -122,7 +129,7 @@ set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load jsc-release
+config_load jsc-release linux
 config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_ARGS=*) echo "$e" ;; esac; done
 ''')
@@ -215,13 +222,13 @@ class TestAllConfigDefaults(unittest.TestCase):
     after and win, and the Xcode configs get neither -- xcodebuild takes no -D
     flags."""
 
-    def _flags(self, config):
+    def _flags(self, config, os="linux"):
         cp = bash(f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load {config}
+config_load {config} {os}
 echo "ARGS=$CFG_ARGS"
 echo "CMAKE=$CFG_CMAKE"
 ''')
@@ -229,6 +236,8 @@ echo "CMAKE=$CFG_CMAKE"
         out = dict(l.split("=", 1) for l in cp.stdout.strip().splitlines())
         return out["ARGS"], out["CMAKE"]
 
+    # Which build system a config uses is a property of the *platform* as well
+    # as the config, so each list carries the one it is that on.
     CMAKE_CONFIGS = ("jsc-debug", "jsc-release", "jsc-release-asan",
                      "gtk-debug", "gtk-release", "gtk-release-asan",
                      "wpe-release")
@@ -248,15 +257,15 @@ echo "CMAKE=$CFG_CMAKE"
         """build-webkit's Apple path has no --no-fatal-warnings and xcodebuild
         ignores -D, so a default reaching them would be a broken build."""
         for config in self.XCODE_CONFIGS:
-            args, cmake = self._flags(config)
+            args, cmake = self._flags(config, "macos")
             with self.subTest(config=config):
                 self.assertNotIn("--no-fatal-warnings", args)
                 self.assertEqual(cmake, "")
 
     def test_a_config_overrides_a_default_by_stating_the_opposite(self):
         """cmake takes the last repeated -D, so a config's own flag wins:
-        jsc-debug wants libbacktrace where the default turns it off."""
-        _, cmake = self._flags("jsc-debug")
+        gtk-debug wants libbacktrace where the default turns it off."""
+        _, cmake = self._flags("gtk-debug")
         self.assertLess(cmake.index("-DUSE_LIBBACKTRACE=OFF"),
                         cmake.index("-DUSE_LIBBACKTRACE=ON"),
                         "the config's flag does not come last, so the default wins")
@@ -274,18 +283,119 @@ echo "CMAKE=$CFG_CMAKE"
                                      f"{config} states {flag} as well as the default")
 
 
+class TestMacJscUsesXcode(unittest.TestCase):
+    """build/configs.sh: on macOS a config does not choose its own build
+    system. Xcode is the only one there -- build-webkit's CMake path needs a
+    Swift-capable generator -- so the three jsc-* configs build the Apple
+    port's JavaScriptCore through Tools/Scripts/build-jsc, and the Apple
+    configs are refused anywhere else."""
+
+    JSC_CONFIGS = ("jsc-debug", "jsc-release", "jsc-release-asan")
+
+    def _load(self, config, os):
+        return bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load {config} {os}
+echo "BUILDSYS=$CFG_BUILDSYS"
+echo "SCRIPT=$CFG_SCRIPT"
+echo "PORT=$CFG_PORT"
+echo "CC=$CFG_CC"
+echo "ARGS=$CFG_ARGS"
+echo "DIR=$(config_build_dir /src/WebKit)"
+config_jsc_only && echo "JSCONLY=1" || echo "JSCONLY="
+echo "WEB=$(config_web_process_name)"
+''')
+
+    def _fields(self, config, os):
+        cp = self._load(config, os)
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        return dict(l.split("=", 1) for l in cp.stdout.strip().splitlines())
+
+    def test_macos_jsc_configs_build_with_xcode(self):
+        for config in self.JSC_CONFIGS:
+            f = self._fields(config, "macos")
+            with self.subTest(config=config):
+                self.assertEqual(f["BUILDSYS"], "xcode")
+                self.assertEqual(f["SCRIPT"], "Tools/Scripts/build-jsc")
+                # No --jsc-only: it would send build-jsc down the CMake path
+                # that has no working generator in a macOS guest.
+                self.assertEqual(f["PORT"], "")
+                # Xcode's toolchain is the only one; CC=clang would override it.
+                self.assertEqual(f["CC"], "")
+
+    def test_linux_jsc_configs_still_build_the_jsconly_port(self):
+        for config in self.JSC_CONFIGS:
+            f = self._fields(config, "linux")
+            with self.subTest(config=config):
+                self.assertEqual(f["BUILDSYS"], "cmake")
+                self.assertEqual(f["SCRIPT"], "Tools/Scripts/build-webkit")
+                self.assertEqual(f["PORT"], "--jsc-only")
+
+    def test_macos_jsc_shares_the_apple_products_directory(self):
+        """Same configuration as mac-debug, built to a smaller depth -- so the
+        same tree, not a second one built with the same settings."""
+        self.assertEqual(self._fields("jsc-debug", "macos")["DIR"],
+                         self._fields("mac-debug", "macos")["DIR"])
+        self.assertEqual(self._fields("jsc-release", "macos")["DIR"],
+                         self._fields("mac-release", "macos")["DIR"])
+
+    def test_macos_jsc_asan_gets_a_tree_of_its_own(self):
+        """build-jsc takes ASAN=YES where build-webkit takes --asan;
+        config_build_dir reads both, or an instrumented build lands half on top
+        of an uninstrumented one."""
+        asan = self._fields("jsc-release-asan", "macos")
+        self.assertNotEqual(self._fields("jsc-release", "macos")["DIR"], asan["DIR"])
+        self.assertTrue(asan["DIR"].endswith("-asan"), asan["DIR"])
+        self.assertIn("ASAN=YES", asan["ARGS"])
+
+    def test_a_jsc_config_names_no_web_process_on_either_platform(self):
+        """config_jsc_only: nothing in a JSC-only build serves a page, and a
+        name here does not fail, it makes a debugger wait forever."""
+        for os in ("linux", "macos"):
+            for config in self.JSC_CONFIGS:
+                f = self._fields(config, os)
+                with self.subTest(config=config, os=os):
+                    self.assertEqual(f["JSCONLY"], "1")
+                    self.assertEqual(f["WEB"], "")
+
+    def test_an_apple_config_is_refused_off_macos(self):
+        """xcodebuild is not on a Linux build box, and saying so beats a
+        `command not found` from inside a perl script."""
+        for config in ("mac-debug", "mac-release", "mac-release-asan",
+                       "ios-sim-release"):
+            cp = self._load(config, "linux")
+            with self.subTest(config=config):
+                self.assertNotEqual(cp.returncode, 0)
+                self.assertIn("Xcode", cp.stdout + cp.stderr)
+
+    def test_the_platform_is_required(self):
+        """A config_load with no platform is a caller that has not loaded its
+        target yet -- refused, rather than silently answered for Linux."""
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load jsc-debug
+''')
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("load_target", cp.stdout + cp.stderr)
+
+
 class TestPerConfigMachineFlags(unittest.TestCase):
     """config_target_var (build/configs.sh): a machine may carry flags for one
     config, beside the machine-wide pair, for a quirk that would be wrong on
     that machine's other configs. Narrowest last, so it wins."""
 
-    def _flags(self, config, env):
+    def _flags(self, config, env, os="linux"):
         cp = bash(f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load {config}
+config_load {config} {os}
 config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do
     case "$e" in WK_BUILD_CMAKE=*) echo "$e" ;; WK_BUILD_ARGS=*) echo "$e" ;; esac

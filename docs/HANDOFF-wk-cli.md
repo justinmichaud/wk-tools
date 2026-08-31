@@ -13,7 +13,7 @@ General `wk` mechanics not tied to one board, bridge or bench lane.
 
 Each a `kill -9` mid-command plus a re-run that must converge:
 
-- [ ] `wk sync`, `wk new --target vm`, `wk new --target <remote>` (mid-clone / ssh cut), `wk rm` (each target), `wk build`, `wk test`, `wk gc`, `wk vm base`/`--refresh` (host-side kill), `wk vm start`/`stop`, `wk remote setup`, `wk remote rm`, `wk key register`, `wk skills pull/push`, `wk claude` [needs every target]
+- [ ] `wk sync`, `wk new --target vm`, `wk new --target <remote>` (mid-clone / ssh cut), `wk rm` (each target), `wk build`, `wk test`, `wk gc`, `wk vm base`/`--refresh` (host-side kill), `wk vm start`/`stop`, `wk remote setup`, `wk remote rm`, `wk key register`, `wk skills pull/push`, `wk ai claude` [needs every target]
 - [ ] two `wk sync` at once: the second waits or refuses, naming the first [needs two concurrent runs]
 - [ ] two `wk build` on one workspace serialise on every target (only exercised on one target so far); `wk vm base --refresh` while one runs is refused [needs every target]
 - [ ] two `wk vm start` do not corrupt `~/.ssh/config.d/wk` [needs a macOS VM]
@@ -60,7 +60,7 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] audit the name `store`: `$WK_STORE` holds `ws/`, `git/WebKit.git`, `base/`, `secrets/`, `push-keys/`, `cache/`, `bench/`, `skills/`, `vm/`, and only the mirror is WebKit's -- decide what each part is called before a second project needs a name [needs a decision]
 - [ ] `wk backup` → `./setup` round-trip (`docs/HANDOFF-settings-audit.md`) [needs a machine to reprovision]
 - [ ] `wk skills` status/diff/pull/push; pull refuses over uncommitted repo edits [needs a workspace]
-- [ ] the skills are workspace-true: an agent started by `wk claude` in a container and in a macOS guest can follow every skill it can trigger without hitting a host-only instruction [needs a container and a macOS VM]
+- [ ] the skills are workspace-true: an agent started by `wk ai claude` in a container and in a macOS guest can follow every skill it can trigger without hitting a host-only instruction [needs a container and a macOS VM]
 - [ ] `wk key register` / `wk key check`, confirmed end to end [needs a workspace]
 - [ ] `wk key` reaches the store through its own `in_vm` (cmd/key) rather than the dispatcher's `where=store`; one hop into the podman VM, not two [needs the podman VM]
 - [ ] `wk enter <ws>` lands in a shell; `wk enter <ws> <cmd>` runs the command [needs a workspace]
@@ -68,7 +68,7 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] `wk logs <ws> -f` follows a live build [needs a workspace]
 - [ ] `wk stop --keep-vm` leaves the podman machine running [needs the podman VM]
 - [ ] `build_live` (lib/detach.sh): a `state=running` file whose log has not moved for `WK_STALL_SECONDS` is not live, so a `kill -9`'d build no longer refuses every later benchmark [needs a workspace]
-- [ ] `wk vm rm` removes `<name>.unfiltered`, so a recreated guest of the same name is not refused by `wk claude` for the previous guest's sins [needs a macOS VM]
+- [ ] `wk vm rm` removes `<name>.unfiltered`, so a recreated guest of the same name is not refused by `wk ai claude` for the previous guest's sins [needs a macOS VM]
 - [ ] `ccache_conf_render` (lib/store.sh) renders the same ceiling for the store and for a remote machine's cache, and neither overwrites a config that is already there [needs a remote target]
 - [ ] `wk gc` prunes an unreferenced snapshot, keeps the newest, trims ccache, removes a stale bench payload seed, and reports the dirs it keeps [needs a workspace]
 - [ ] `wk sync --tools` and `WK_MIRROR_BRANCHES` carry the extra branches [needs the fleet]

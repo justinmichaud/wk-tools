@@ -17,6 +17,10 @@
 # different about it; re-stating a default is how the two copies drift apart.
 #   t_src <name>       where the WebKit checkout is *inside* the target
 #   t_arch <name>      the architecture the target runs natively
+#   t_os               the platform a build in this target runs on -- `linux`
+#                      or `macos`. It decides the build system a config uses
+#                      (build/configs.sh: Xcode is the only one on macOS), so
+#                      load_target must run before config_load
 #   t_tools <name>     where wk-tools is inside the target
 #   t_sync_tools <n>   push wk-tools in (no-op when it is bind-mounted)
 #   t_sync             refresh this target's own furniture: its tooling copy,
@@ -61,6 +65,7 @@
 
 t_src()        { echo "/src/WebKit"; }
 t_arch()       { echo native; }      # only the container driver differs; see lib/arch.sh
+t_os()         { echo linux; }       # the platform a build here runs on: linux | macos
 t_tools()      { echo "/opt/wk-tools"; }
 t_ccache_dir() { echo "/ccache"; }   # inert on the Apple ports (no ccache)
 t_sync_tools() { :; }
@@ -594,7 +599,8 @@ _target_reset_vars() {
     # the previous target's must not survive into this one.
     WK_TARGET_CMAKE=""
     unset _WK_REMOTE_PROBED _WK_REMOTE_HOME _WK_REMOTE_CORES \
-          _WK_REMOTE_LOAD _WK_REMOTE_MEM _WK_REMOTE_REF_PROBED _WK_REMOTE_DOWN \
+          _WK_REMOTE_LOAD _WK_REMOTE_MEM _WK_REMOTE_IONICE _WK_REMOTE_OS \
+          _WK_REMOTE_REF_PROBED _WK_REMOTE_DOWN \
           _WK_PEER_LISTED _WK_PEER_ROWS \
           _WK_PEER_ROUTE_NAME _WK_PEER_ROUTE_USER _WK_PEER_ROUTE_SRC _WK_PEER_ROUTE_PROXY
 }

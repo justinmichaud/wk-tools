@@ -7,7 +7,7 @@
 # container feature does: ask it to look at a bug, and it creates a named
 # workspace and works inside it.
 #
-# Two properties matter more than features here, because unlike `wk claude`
+# Two properties matter more than features here, because unlike `wk ai claude`
 # this process runs on the *host*, outside the sandbox:
 #
 #   Only the driver contract is exposed. There is no generic exec tool, no

@@ -28,7 +28,7 @@
 # than a claim -- the same rule the rest of the workspace state follows
 # (README.md).
 #
-# `wk claude` turns it off before handing over control, which is the case the
+# `wk ai claude` turns it off before handing over control, which is the case the
 # switch exists for; see the note there about when it turns it back on.
 #
 #   --target <machine>   throw the switch on that fleet machine's own store
@@ -195,13 +195,13 @@ EOF
 
 # The workspaces here in which a claude process is running -- asked of the
 # machine, not of a record: a session started by hand from `wk enter` counts
-# the same as one `wk claude` started. Exposing the keys while one runs would
+# the same as one `wk ai claude` started. Exposing the keys while one runs would
 # put them in that session's mount, so `on` is refused until it ends.
 # A running agent is one whose executable resolves under the Claude install
 # (`~/.local/share/claude/versions/...`, firstrun.sh), read from /proc inside
 # the workspace -- evidence, not a name match: the process is called `claude`,
 # `node` or a version string depending on how it was launched, but its exe
-# path is not. Scoped to inside the container, so `cmd/claude` on the host and
+# path is not. Scoped to inside the container, so `cmd/ai` on the host and
 # a human's `git` never register.
 agent_sessions() {
     local ws
@@ -238,7 +238,7 @@ on)
         info "push is already ON"
     fi
     log "  every workspace can push to the forks now, including any agent in one."
-    log "  'wk push off' when you are done; 'wk claude' turns it off by itself."
+    log "  'wk push off' when you are done; 'wk ai claude' turns it off by itself."
     # The switch is one of two things a push needs; whether GitHub has this
     # machine's key, it can't see, so this names the command rather than
     # pretending to know.

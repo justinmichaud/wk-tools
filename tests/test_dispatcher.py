@@ -233,9 +233,25 @@ class TestUnknownWorkspaceName(WkTest):
     # which is why `start`/`stop` (needs podman) and `bench` (needs a plan) are
     # exercised through the declaration check below rather than by running.
     COMMANDS = (
-        "build", "claude", "enter", "gui", "logs", "pick", "pr", "profile",
+        "build", "enter", "gui", "logs", "pick", "pr", "profile",
         "remotes", "run", "status", "sync", "test", "verify", "zed",
     )
+
+    def test_a_name_at_another_slot_is_refused_the_same_way(self):
+        """`wk ai claude <name>` -- the name is the second positional
+        (name=required@2), and an unknown one is still the dispatcher's to
+        refuse, with the synopsis."""
+        name = "nosuchws-" + rand_suffix()
+        # WK_TARGET, so the refusal is this machine's rather than the podman
+        # VM's: an unknown name resolves to the container target, and a macOS
+        # host forwards a container command into the VM, whose own dispatcher
+        # would answer instead -- from whatever copy of wk-tools was last
+        # pushed in there.
+        cp = run("ai", "claude", name, env={"WK_TARGET": "vm"})
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 2, out)
+        self.assertIn(f"no such workspace: {name}", out)
+        self.assertIn("usage: wk ai", out)
 
     def test_every_command_refuses_a_name_no_workspace_answers_to(self):
         """an unknown workspace name is refused, with the synopsis, exit 2"""

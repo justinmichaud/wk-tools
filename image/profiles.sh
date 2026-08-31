@@ -133,7 +133,7 @@ image_profile_load() {
         downstream-yocto-wpe-2.48-rpi3-64 -> the rpi3 is 32-bit here
         downstream-yocto-wpe-2.48-rpi5    -> webkit-2.52-yocto-rpi5-64
 
-    'wk sysimage build --list' has all of them."
+    'wk sysimage --list' has all of them."
         ;;
     # Tombstone: refused by name, rather than failing as "unknown profile".
     perf-linux-rpi3|perf-linux-rpi4|perf-linux-rpi5)

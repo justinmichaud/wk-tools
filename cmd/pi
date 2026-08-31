@@ -227,7 +227,7 @@ cmd_deploy() {
     machine is about to leave it -- the build would be on the disk nobody boots."
 
     ( image_profile_load "$profile" >/dev/null 2>&1 ) \
-        || die "'$profile' is not an image profile ('wk sysimage build --list' has them all)."
+        || die "'$profile' is not an image profile ('wk sysimage --list' has them all)."
     image_profile_load "$profile" >/dev/null 2>&1
     local slotdir
     slotdir=$(image_slot_dir "$profile" "$slot") \

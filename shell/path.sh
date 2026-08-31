@@ -11,7 +11,7 @@
 # a root on PATH turns every top-level directory name -- claude, build, image,
 # shell, docs -- into a command that fails that way, shadowing the real one.
 # bin/ holds the one entry point, `wk`. (bash skips directories in its own PATH
-# search, which is why `wk claude`, which runs `bash -lc`, never saw this.)
+# search, which is why `wk ai claude`, which runs `bash -lc`, never saw this.)
 #
 # ~/.local/bin is where the Claude installer puts its launcher (a symlink into
 # ~/.local/share/claude/versions); nothing else on these machines puts it on

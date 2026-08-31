@@ -26,6 +26,10 @@ t_src()   { echo "$_local_src"; }
 # The kernel is the host's, so an armhf container reports aarch64 from uname.
 t_arch()  { echo "${_local_arch:-native}"; }
 
+# The one thing uname *can* answer for from in here: a Fedora container says
+# Linux, a macOS guest says Darwin, and each is the truth about the workspace.
+t_os()    { wk_os; }
+
 t_tools() { echo "$WK_ROOT"; }
 
 t_list()  { printf '%s\trunning\n' "$_local_name"; }

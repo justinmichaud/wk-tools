@@ -106,7 +106,7 @@ if command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/bin/claude" ]; then
 else
     say "installing the Claude CLI"
     curl -fsSL https://claude.ai/install.sh | bash || \
-        echo "warning: Claude CLI install failed; 'wk claude' will not work here" >&2
+        echo "warning: Claude CLI install failed; 'wk ai claude' will not work here" >&2
 fi
 
 # Same Claude config entries container/firstrun.sh links in a container;
@@ -154,10 +154,30 @@ EOF
     fi
 done
 
-# Cirrus Labs images ship admin/admin; sysadminctl needs it to change the lock
-# setting below. Not a secret worth protecting: the guest holds no credentials,
-# is Softnet-filtered, and is destroyed with `wk rm`.
-WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"
+# The account's password. Two facts: what the pulled image ships with (Cirrus
+# Labs: admin/admin) and what this guest is meant to have. Both arrive from
+# targets/vm.sh, which is where they are declared and explained; the defaults
+# here only cover running this script by hand.
+WK_VM_USER="${WK_VM_USER:-admin}"
+WK_VM_IMAGE_PASSWORD="${WK_VM_IMAGE_PASSWORD:-admin}"
+WK_VM_PASSWORD="${WK_VM_PASSWORD:-1}"
+
+# Changed once, here, so everything after this -- the screen-lock call below,
+# an Xcode prompt at the window, `wk vm enter`'s note -- means one password.
+# Skipped when it already is that: sysadminctl needs the *current* one, so a
+# re-provision must not offer the image's.
+if [ "$WK_VM_PASSWORD" != "$WK_VM_IMAGE_PASSWORD" ]; then
+    if dscl . -authonly "$WK_VM_USER" "$WK_VM_PASSWORD" >/dev/null 2>&1; then
+        say "password already set"
+    elif sudo -n sysadminctl -resetPasswordFor "$WK_VM_USER" \
+             -newPassword "$WK_VM_PASSWORD" -adminUser "$WK_VM_USER" \
+             -adminPassword "$WK_VM_IMAGE_PASSWORD" >/dev/null 2>&1; then
+        say "password set for $WK_VM_USER"
+    else
+        echo "warning: could not change $WK_VM_USER's password; it is still the image's" >&2
+        WK_VM_PASSWORD="$WK_VM_IMAGE_PASSWORD"
+    fi
+fi
 
 # WK_VM_DISPLAY ("1920x1080") is passed in so the guest and `tart set --display` cannot disagree.
 WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
@@ -166,35 +186,15 @@ WK_VM_DISPLAY_H="${WK_VM_DISPLAY#*x}"
 
 # --- the screen ------------------------------------------------------------
 # A macOS guest is the only workspace kind with a real GPU and a window meant
-# to be looked at, so it must come up on a usable desktop, not a password prompt.
+# to be looked at, so it must come up on a usable desktop, not a password
+# prompt and not behind a modal panel.
 #
-# Three separate mechanisms hide the desktop; disabling any two is not enough:
-#
-#   1. the screen saver   -- idleTime
-#   2. display sleep      -- pmset (not sufficient alone)
-#   3. the screen *lock*  -- sysadminctl, independent of the other two, and the
-#      one that actually blocks login
-sudo -n sysadminctl -screenLock off -password "$WK_VM_PASSWORD" 2>/dev/null ||     echo "warning: could not turn off the screen lock; the guest may come up locked" >&2
-
-# 4. Setup Assistant's post-login panes (Siri, appearance, analytics) run on
-#    every clone -- each clone is a new install by macOS's own reckoning, even
-#    though auto-login and .AppleSetupDone are already satisfied.
-#
-#    Modal in front of the desktop: occludes any drawing window, which throttles
-#    its timers -- a benchmark measuring the wrong thing rather than failing.
-#    Each `DidSee*` key below is what the assistant sets when clicked through.
-for _k in DidSeeCloudSetup DidSeeSiriSetup DidSeeAppearanceSetup           DidSeePrivacy DidSeeTrueTone DidSeeAccessibility DidSeeSyncSetup; do
-    defaults write com.apple.SetupAssistant "$_k" -bool true
-done
-defaults write com.apple.SetupAssistant LastSeenCloudProductVersion "$(sw_vers -productVersion)"
-defaults write com.apple.SetupAssistant LastSeenBuddyBuildVersion "$(sw_vers -buildVersion)"
-# And the one already on screen, if this is a re-provision.
-pkill -f 'Setup Assistant' 2>/dev/null || true
-
-defaults -currentHost write com.apple.screensaver idleTime -int 0
-defaults write com.apple.screensaver askForPassword -int 0
-defaults write com.apple.screensaver askForPasswordDelay -int 0
-sudo -n pmset -a displaysleep 0 sleep 0 disablesleep 1 2>/dev/null || true
+# vm/desktop.sh, which t_start runs again on every guest boot -- not a copy of
+# it here. The base cannot settle this on its own: `defaults -currentHost`
+# writes per hardware UUID and `tart clone` gives the clone a new one, so the
+# screen-saver setting the base holds does not apply to anything cloned from it
+# (measured with `wk vm check`). One file, two callers.
+WK_VM_PASSWORD="$WK_VM_PASSWORD" bash "$WK_TOOLS_DIR/vm/desktop.sh"
 
 # pmset alone doesn't keep the display awake; hold a power assertion for the guest's life.
 sudo -n tee /Library/LaunchDaemons/org.wk.nosleep.plist >/dev/null <<'PLIST'
@@ -259,19 +259,12 @@ cat > "$HOME/Library/LaunchAgents/org.wk.display.plist" <<PLIST
 </dict></plist>
 PLIST
 
-# ~/.local/bin isn't on default macOS PATH; `wk build` uses a login shell so this file is read.
-if ! grep -q 'wk-tools: PATH' "$HOME/.zprofile" 2>/dev/null; then
-    cat >> "$HOME/.zprofile" <<'EOF'
-# wk-tools: PATH
-export PATH="$HOME/.local/bin:$PATH"
-EOF
-fi
-if ! grep -q 'wk-tools: PATH' "$HOME/.bash_profile" 2>/dev/null; then
-    cat >> "$HOME/.bash_profile" <<'EOF'
-# wk-tools: PATH
-export PATH="$HOME/.local/bin:$PATH"
-EOF
-fi
+# --- the shell ---------------------------------------------------------------
+# The same rc every other machine in the fleet reads (shell/bashrc), wired in by
+# vm/shell-rc.sh -- which targets/vm.sh also runs on every start, so a guest
+# cloned before this existed converges too. One script, so the base and the
+# clones cannot end up with different shells.
+bash "$WK_TOOLS_DIR/vm/shell-rc.sh" "$WK_TOOLS_DIR"
 
 # --- webkitpy's autoinstalled packages ----------------------------------------
 # run-webkit-tests downloads webkitpy's PyPI dependencies (11 MB, measured)

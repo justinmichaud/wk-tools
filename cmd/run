@@ -51,10 +51,12 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-config_load "$CONFIG" || die "unknown config '$CONFIG'"
-
+# The target first: on macOS a config does not choose its own build system, so
+# config_load needs the platform it will be built on (t_os, lib/target.sh).
 TARGET="$(ws_target "$NAME")"
 load_target "$TARGET"
+
+config_load "$CONFIG" "$(t_os)" || die "unknown config '$CONFIG'"
 
 # Layout comes from build/configs.sh: four ports lay trees out four ways and
 # the Apple build resolves frameworks rather than shared libraries.

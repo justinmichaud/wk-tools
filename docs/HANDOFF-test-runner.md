@@ -2,7 +2,7 @@
 
 `wk selftest` runs the stdlib unittest suite under `tests/`; below is the behaviour that has no test yet, most of it writable with a stub/fake target driver and no hardware.
 
-- [ ] test: one kill-point test class per command for crash-only convergence: `wk build --babysit`, `wk test`, `wk bench` (seed and run), `wk vm base`/`--refresh`, `wk vm start`/`stop`/`start`, `wk remote setup`/`rm`, `wk pi setup`, `wk key register`, `wk skills pull`/`push`, `wk backup`, `./setup`, `wk quiesce on`/`off`, `wk session`, `wk claude`
+- [ ] test: one kill-point test class per command for crash-only convergence: `wk build --babysit`, `wk test`, `wk bench` (seed and run), `wk vm base`/`--refresh`, `wk vm start`/`stop`/`start`, `wk remote setup`/`rm`, `wk pi setup`, `wk key register`, `wk skills pull`/`push`, `wk backup`, `./setup`, `wk quiesce on`/`off`, `wk session`, `wk ai claude`
 - [ ] test: two `wk build` on one workspace serialize on the workspace lock
 - [ ] test: `wk vm base --refresh` is refused while one is already running
 - [ ] test: two `wk vm start` do not corrupt `~/.ssh/config.d/wk`
@@ -28,6 +28,7 @@
 - [ ] test: a macOS guest reaches PyPI through the proxy (catches: a raw unset proxy-address variable resolving to a hardcoded dead IP) [needs the macOS guest]
 - [ ] test: a macOS guest's `~/.zprofile` carries the `wk-tools: egress` block (catches: provisioning silently not having run) [needs the macOS guest]
 - [ ] test: `mac-release-asan` and `mac-release` resolve to different build dirs (catches: Xcode toggling ASan without changing the path, so two builds share one tree) [needs the macOS guest]
+- [ ] test: `jsc-release-asan` in a macOS guest builds an instrumented `jsc` (catches: `ASAN=YES` reaching build-jsc's Makefile passthrough but not `set-webkit-configuration --asan`, so the build is clean and the path says `-asan`) [needs the macOS guest]
 - [ ] test: the guest desktop is visible after a reboot (catches: screen saver, display sleep, and screen lock each needing to be disabled — any two isn't enough) [needs the macOS guest]
 - [ ] test: `WK_TARGET=vm wk gc` runs at all (catches: `cmd/gc` sourcing a driver without `lib/target.sh`)
 - [ ] test: a container workspace's `Host wk-<name>` alias is a ProxyCommand, not a hostname (catches: a fictional `HostName localhost` pointing zed at the host's own filesystem)

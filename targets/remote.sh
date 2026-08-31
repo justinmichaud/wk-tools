@@ -2,7 +2,7 @@
 #
 # No containers: these are other people's build machines. A workspace is a
 # plain checkout under your own home directory -- isolation is gone as a
-# result, so `wk claude` and `wk verify` refuse to run against a remote target.
+# result, so `wk ai claude` and `wk verify` refuse to run against a remote target.
 #
 # Every build is sized from the *remote* machine's load and free memory,
 # niced to the floor, and serialised against other wk builds by the same user.
@@ -149,7 +149,9 @@ _remote_probe_cmd() {
 # No ssh involved, so a captured sample exercises exactly what a live probe
 # parses. `sysctl -n vm.loadavg`'s second field is the load average where
 # /proc/loadavg has it first; `vm_stat` reports pages where /proc/meminfo
-# has MemAvailable in kB directly.
+# has MemAvailable in kB directly. `uname -s` is reported on as well as
+# branched on: it is what t_os answers with, and a build box's platform
+# decides the build system a config uses (build/configs.sh).
 _remote_probe_parse() {
     local uname cores section=head load_raw="" mem_raw="" ionice=no line
     { read -r uname; read -r cores; } || return 1
@@ -184,7 +186,10 @@ _remote_probe_parse() {
             END { if (ps) printf "%d\n", (free + inactive + spec) * ps / 1024 / 1024 }')
     fi
 
-    printf '%s\n%s\n%s\n%s\n' "${cores:-1}" "${load:-0}" "${mem:-0}" "$ionice"
+    local os=linux
+    [ "$uname" = Darwin ] && os=macos
+
+    printf '%s\n%s\n%s\n%s\n%s\n' "${cores:-1}" "${load:-0}" "${mem:-0}" "$ionice" "$os"
 }
 
 # A file, not a variable: the prefetch (prefetch_targets, lib/target.sh)
@@ -230,6 +235,7 @@ _remote_probe_try() {
     _WK_REMOTE_LOAD=$(printf '%s\n' "$parsed" | sed -n 2p)
     _WK_REMOTE_MEM=$(printf '%s\n' "$parsed" | sed -n 3p)
     _WK_REMOTE_IONICE=$(printf '%s\n' "$parsed" | sed -n 4p)
+    _WK_REMOTE_OS=$(printf '%s\n' "$parsed" | sed -n 5p)
 
     [ -n "$WK_REMOTE_ROOT" ] || WK_REMOTE_ROOT="$_WK_REMOTE_HOME/wk"
     _WK_REMOTE_PROBED=1
@@ -814,5 +820,6 @@ t_destroy() {
 # calculation needs the far end's numbers, not this one's.
 
 t_cores()  { _remote_probe; echo "${_WK_REMOTE_CORES:-1}"; }
+t_os()     { _remote_probe; echo "${_WK_REMOTE_OS:-linux}"; }
 t_load()   { _remote_probe; echo "${_WK_REMOTE_LOAD:-0}"; }
 t_mem_mb() { _remote_probe; echo "${_WK_REMOTE_MEM:-1024}"; }

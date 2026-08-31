@@ -2,7 +2,7 @@
 #
 # wk boot <machine> [options] -- put a machine into bench mode for one boot, then back
 #
-# wk: where=host name=none group=hosts broker *
+# wk: where=host name=none values=--list group=hosts broker *
 # wk: readonly --status,--diag
 #
 #   wk boot <machine> [--system <id>] [--dry-run]  arm the one-shot and reboot

@@ -29,7 +29,14 @@ class TestDeclarations(WkTest):
             name, where, dname, group, syn = fields
             seen[name] = (where, dname, group, syn)
             self.assertIn(where, VALID_WHERE, f"{name}: where={where!r} is not one of {VALID_WHERE}")
-            self.assertIn(dname, ("required", "optional", "none"), f"{name}: name={dname!r}")
+            # `required@2` is the same declaration with the name at another
+            # positional (`wk ai claude <ws>`); the slot is a suffix, not a
+            # fourth kind.
+            self.assertIn(dname.split("@")[0], ("required", "optional", "none"),
+                          f"{name}: name={dname!r}")
+            if "@" in dname:
+                self.assertTrue(dname.split("@")[1].isdigit(),
+                                f"{name}: name={dname!r} has no positional after the @")
             self.assertTrue(syn.startswith(name), f"{name}: synopsis {syn!r} does not start with the command name")
 
         on_disk = {

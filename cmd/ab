@@ -161,7 +161,7 @@ if [ -z "$RELEASE" ]; then
     Say the release yourself: --release 2.38"
     RELEASE=$(printf '%s' "$PR_BASE_BRANCH" | sed -nE 's#^(wpe-|webkitglib/)([0-9]+\.[0-9]+)$#\2#p')
     [ -n "$RELEASE" ] || die "pull request $PR_N targets '$PR_BASE_BRANCH', which names no release.
-    Say which image to measure on: --release 2.38 (wk sysimage build --list)"
+    Say which image to measure on: --release 2.38 (wk sysimage --list)"
 fi
 
 # One profile per device: the configurations this checkout defines that
@@ -182,7 +182,7 @@ ab_profile_for() { # <device> <bits or empty> -- prints the one profile, or dies
     case $# in
         1) printf '%s' "$1" ;;
         0) die "no image configuration for $dev at release $RELEASE${BUILDER:+ ($BUILDER)}${bits:+, $bits-bit}.
-    'wk sysimage build --list' has every configuration this checkout defines." ;;
+    'wk sysimage --list' has every configuration this checkout defines." ;;
         *) die "$dev has more than one image at release $RELEASE:
 $(printf '    %s\n' "$@")
     Say which: --devices $dev-32 or $dev-64 (and --builder when both builders have one)." ;;

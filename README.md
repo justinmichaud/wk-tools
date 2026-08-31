@@ -191,8 +191,16 @@ wk rm    bug-238 other-ws               # reclaims everything each created
 wk new mac-rel --target vm              # builds the golden base the first time (hours, once)
 wk vm start mac-rel
 wk build mac-rel mac-release
+wk build mac-rel jsc-debug              # JavaScriptCore alone, still Xcode
 wk vm stop mac-rel
 ```
+
+Xcode is the only build system in a guest -- build-webkit's CMake path wants a
+generator that supports Swift -- so there is no JSCOnly port there and the
+`jsc-*` configs mean the Apple port's JavaScriptCore instead, built with
+`Tools/Scripts/build-jsc` into the same `WebKitBuild/<Configuration>` tree as
+the `mac-*` config of the same configuration. The reverse is refused: a
+`mac-*` config on a Linux target says so rather than running xcodebuild.
 
 **A shared build machine**
 
@@ -263,11 +271,31 @@ task's lock.
 
 **Put a build on a fleet device and bench it there**
 
+Four steps, and the third one is a hand: a card is written in a reader on one
+machine and booted in a board on another, so nothing in this sequence follows
+from the line above it automatically.
+
 ```sh
-wk sysimage build wpewebkit-2.38-buildroot-rpi3-32 --detach   # hours; poll with wk status
-wk sysimage disks <writer>                       # removable disks on the machine holding the card reader
+# 1. build the system. Hours; --detach returns at once, poll with wk status.
+wk sysimage build wpewebkit-2.38-buildroot-rpi3-32 --detach
+
+# 2. write it onto a card. <writer> is the machine holding the card reader --
+#    usually not the board -- and only a removable disk plugged into it is ever
+#    writable, never that machine's own system disk.
+wk sysimage disks <writer>
 wk sysimage write --from <path> --disk <writer>:/dev/sdX
-wk boot rpi4                                     # one-shot: arms, reboots, self-reverts
+
+# 3. move the card from the reader to the board. Nothing above does this and
+#    nothing below checks it.
+
+# 4. arm the board for one boot into that system. It reboots itself, comes up
+#    as the bench system, and that system removes the selection as it starts --
+#    so the boot after it is the rescue again, whatever happened in between.
+#    Writing a card does not make anything boot it; this is what does.
+wk boot rpi3
+```
+
+```sh
 # a write refuses, with no --force, when the tailnet auth key or the board's
 # WiFi credentials are missing, or when the tailnet already has a node named
 # rpi3-bench -- a fresh join would come up as rpi3-bench-1 and nothing could
@@ -441,16 +469,16 @@ wk quiesce off
 wk session off
 ```
 
-**`wk claude` in a workspace**
+**`wk ai claude` in a workspace**
 
 ```sh
-wk claude bug-238                # verifies the sandbox first, refuses to start if it fails
-wk claude bug-238 -r             # resume
-wk claude bug-238 --continue
-wk claude bug-238 --rc                   # a Remote Control server the Claude app attaches to; --rc --stop ends it
+wk ai claude bug-238                # verifies the sandbox first, refuses to start if it fails
+wk ai claude bug-238 -r             # resume
+wk ai claude bug-238 --continue
+wk ai claude bug-238 --rc                   # a Remote Control server the Claude app attaches to; --rc --stop ends it
 ```
 
-A `remote` target has no sandbox to verify; `wk claude` there stops at a
+A `remote` target has no sandbox to verify; `wk ai claude` there stops at a
 barrier that only an explicit `--force` crosses.
 
 Nothing an agent runs can publish or commit, on any target. Publishing: the
@@ -458,7 +486,7 @@ deploy keys are held back for the session (`wk push off`, before the sandbox is
 verified), the egress proxy refuses GitHub's API (`api.github.com`, so `gh` has
 nothing to talk to), and `wk verify` fails on a deploy key in the mount or a
 GitHub credential inside a workspace; on a build box a `gh` login in the agent's
-account is a refusal. Committing: a container `wk claude` session runs the agent
+account is a refusal. Committing: a container `wk ai claude` session runs the agent
 under bwrap with the checkout's `.git` commit-parts (`objects`, `refs`, `logs`,
 `HEAD`, `packed-refs`) read-only, so a commit, a stage, a stash, a branch move
 or a rebase fails while a build, an edit, `git status`/`diff`/`log` all work --

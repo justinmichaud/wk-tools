@@ -114,15 +114,19 @@ _wk_completion() {
     esac
 
     case "$dname" in
-        required|optional)
-            # Only while no positional has been typed yet.
-            local i seen=0
+        required*|optional*)
+            # Which positional the name is: the first, or the @N of the
+            # declaration (`wk ai claude <ws>` is name=required@2). Workspaces
+            # are offered only at that one -- before it another word belongs
+            # there, after it every word is the command's own.
+            local i typed=0 slot=1
+            case "$dname" in *@*) slot=${dname#*@} ;; esac
             i=2
             while [ "$i" -lt "$COMP_CWORD" ]; do
-                case "${COMP_WORDS[$i]}" in -*) ;; *) seen=1 ;; esac
+                case "${COMP_WORDS[$i]}" in -*) ;; *) typed=$((typed + 1)) ;; esac
                 i=$((i + 1))
             done
-            if [ "$seen" -eq 0 ]; then
+            if [ "$typed" -eq $((slot - 1)) ]; then
                 ws=$("$bin" completion --list-workspaces 2>/dev/null)
                 COMPREPLY=( $(compgen -W "$ws" -- "$cur") )
             fi

@@ -1,6 +1,6 @@
 """Nothing an agent runs can publish: the egress proxy refuses GitHub's API,
 `wk verify` measures that no deploy key and no GitHub credential are inside a
-workspace, `wk claude` holds push back before it verifies (and refuses a build
+workspace, `wk ai claude` holds push back before it verifies (and refuses a build
 box that holds a gh login), and `wk push on` is refused while a claude process
 runs in any workspace. The person at the keyboard is the only publisher.
 
@@ -16,7 +16,7 @@ from tests.support import REPO, bash
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
 VERIFY = (REPO / "cmd" / "verify").read_text()
-CLAUDE = (REPO / "cmd" / "claude").read_text()
+CLAUDE = (REPO / "cmd" / "ai").read_text()
 PUSH = (REPO / "cmd" / "push").read_text()
 
 
@@ -76,7 +76,7 @@ class TestClaudeHoldsPushBackBeforeVerifying(unittest.TestCase):
         self.assertIn("gh auth logout", CLAUDE)
 
     def test_remote_control_never_turns_push_back_on(self):
-        rc = CLAUDE[CLAUDE.index("# --- wk claude <ws> --rc"):CLAUDE.index("# --- git push: back on")]
+        rc = CLAUDE[CLAUDE.index("# --- wk ai claude <ws> --rc"):CLAUDE.index("# --- git push: back on")]
         self.assertNotIn('"$WK_ROOT/wk" push on', rc, "remote-control must leave push off")
 
 

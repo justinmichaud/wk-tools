@@ -29,13 +29,13 @@ from tests.support import REPO, WkTest, bash, fake_workspace
 # --------------------------------------------------------------------------- #
 
 class TestJscConfigsUseCcache(WkTest):
-    def _wk_use_ccache(self, config):
+    def _wk_use_ccache(self, config, os="linux"):
         cp = bash(f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load {config}
+config_load {config} {os}
 config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_USE_CCACHE=*) echo "$e" ;; esac; done
 ''')

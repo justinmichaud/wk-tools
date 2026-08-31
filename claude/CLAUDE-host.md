@@ -1,7 +1,7 @@
 # Working environment
 
 This is a **host machine**, not a workspace. Claude normally runs *inside* a
-wk workspace (`wk claude <name>`), where the sandbox permits relaxed
+wk workspace (`wk ai claude <name>`), where the sandbox permits relaxed
 permissions; a session here runs with normal prompts and none of that
 protection.
 

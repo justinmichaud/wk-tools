@@ -1,25 +1,43 @@
-# Named build configurations. One place; a config sets:
+# Named build configurations. One place; `config_load <name> <os>` sets:
 #
 #   CFG_PORT      the WebKit port  (jsc-only, gtk, wpe, or empty for Apple)
 #   CFG_TYPE      Debug | Release
-#   CFG_ARGS      extra arguments to Tools/Scripts/build-webkit
+#   CFG_ARGS      extra arguments to CFG_SCRIPT
 #   CFG_CMAKE     extra -D flags
+#   CFG_CC/CXX    compiler
+#   CFG_BUILDSYS  cmake | xcode
+#   CFG_SCRIPT    the Tools/Scripts entry point that drives the build
+#   CFG_JSC_ONLY  set when the config builds JavaScriptCore and nothing else
 #
 # Every CMake config also starts with the flags in _CFG_DEFAULT_ARGS and
 # _CFG_DEFAULT_CMAKE below, and a machine may add its own on top -- see
 # config_target_var for the per-config half of that.
-#   CFG_CC/CXX    compiler
-#   CFG_BUILDSYS  cmake | xcode
 #
 # CFG_BUILDSYS matters: CMake ports take -jN via --makeargs, but xcodebuild
 # wants -jobs N and ignores --makeargs -- get it wrong and the build runs at
 # xcodebuild's own core-count default. clang, not GCC: GCC fails on aarch64
 # in JSObject::crashDueToEmptyValueAtValidOffset. Apple configs leave CC/CXX
 # unset -- Xcode's toolchain is the only option on macOS.
+#
+# --- <os>, and why a config cannot pick its own build system ------------------
+# `linux` or `macos`, and it is the *target's* (t_os, lib/target.sh), not this
+# machine's -- so load_target runs before config_load, everywhere.
+#
+# On macOS, Xcode is the only build system: build-webkit's CMake path needs a
+# generator that supports Swift, and the only two that do are Ninja and Xcode's
+# own. So the JSCOnly port cannot be built in a macOS guest, and the three
+# jsc-* configs mean the Apple port's JavaScriptCore there instead --
+# Tools/Scripts/build-jsc, which is Xcode's "Everything up to JavaScriptCore"
+# scheme: bmalloc, WTF and JavaScriptCore, no WebCore and no WebKit. Same
+# products directory as mac-debug/mac-release of the same configuration,
+# because it is the same configuration, built to a smaller depth.
 
+# What each config means on Linux. `wk build --list` names no workspace, so it
+# cannot know the platform: the three jsc-* lines say JSCOnly, and the note
+# under them is how a reader learns what they mean in a macOS guest.
 config_list() {
     cat <<'EOF'
-jsc-debug          JSCOnly, Debug, assertions on, libbacktrace
+jsc-debug          JSCOnly, Debug, assertions on
 jsc-release        JSCOnly, Release, the default for benchmarking
 jsc-release-asan   JSCOnly, Release + AddressSanitizer
 gtk-debug          GTK port, Debug, developer mode
@@ -30,6 +48,9 @@ mac-debug          macOS (Apple port), Debug, Xcode
 mac-release        macOS (Apple port), Release, Xcode
 mac-release-asan   macOS (Apple port), Release + AddressSanitizer
 ios-sim-release    iOS Simulator, Release, Xcode
+
+In a macOS workspace the three jsc-* configs build the Apple port's
+JavaScriptCore with Xcode instead: there is no JSCOnly port there.
 EOF
 }
 
@@ -56,7 +77,11 @@ config_cmake_summary() {
 config_build_dir() {
     local root="${1:-/src/WebKit}"
     local variant=""
-    case "$CFG_BUILDSYS:$CFG_ARGS" in xcode:*--asan*) variant="-asan" ;; esac
+    # Both spellings of "instrumented": build-webkit takes --asan, build-jsc
+    # takes ASAN=YES (config_load). Either one is a separate tree.
+    case "$CFG_BUILDSYS:$CFG_ARGS" in
+        xcode:*--asan*|xcode:*ASAN=YES*) variant="-asan" ;;
+    esac
     case "$CFG_BUILDSYS:$CFG_PORT" in
         xcode:--ios-simulator) echo "$root/WebKitBuild/$CFG_TYPE-iphonesimulator$variant" ;;
         xcode:--ios-device)    echo "$root/WebKitBuild/$CFG_TYPE-iphoneos$variant" ;;
@@ -82,7 +107,7 @@ _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DCMAKE_CXX_FLAGS_RELWITHDEBINFO=\"-O3
 # One place for the flags that are not a property of any one config but of how
 # this repository builds WebKit at all. A config's own CFG_ARGS/CFG_CMAKE is
 # appended *after* these, so a config that wants the opposite states it and
-# wins -- cmake takes the last repeated -D, and jsc-debug's
+# wins -- cmake takes the last repeated -D, and gtk-debug's
 # USE_LIBBACKTRACE=ON is exactly that case.
 #
 #   --no-fatal-warnings   every config here builds with DEVELOPER_MODE=ON,
@@ -107,27 +132,68 @@ _CFG_DEFAULT_CMAKE='-DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF 
 # no WPE or GTK build ever turns fission on by itself.
 _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DDEBUG_FISSION=ON"
 
-config_load() {
+# What a jsc-* config is on macOS, stated once for the three of them: the
+# Apple port (no port flag -- --jsc-only would send build-jsc down the CMake
+# path), built by the scheme that stops at JavaScriptCore, with Xcode's own
+# toolchain (a CC= here would override it).
+_cfg_apple_jsc() {
+    CFG_BUILDSYS=xcode
+    CFG_SCRIPT=Tools/Scripts/build-jsc
+    CFG_CC=""; CFG_CXX=""
+}
+
+config_load() { # <name> <os: linux|macos>
     CFG_NAME="$1"
+    CFG_OS="${2:-}"
+    [ -n "$CFG_OS" ] || die "config_load '$1': no platform given. It is the
+    target's t_os, so load_target has to run first -- on macOS a config does
+    not choose its own build system (build/configs.sh)."
     CFG_PORT=""; CFG_TYPE=""; CFG_ARGS=""; CFG_CMAKE=""
     CFG_BUILDSYS=cmake
+    CFG_SCRIPT=Tools/Scripts/build-webkit
+    CFG_JSC_ONLY=""
     CFG_CC="$WK_CC"; CFG_CXX="$WK_CXX"
 
     case "$1" in
+        # --- JavaScriptCore alone ---------------------------------------------
+        # Two readings, one meaning: the JSCOnly CMake port where there is one,
+        # and Xcode's "Everything up to JavaScriptCore" on macOS, where there
+        # is not. The CMake -D flags have no Xcode counterpart and are simply
+        # absent there -- WK_BUILD_CMAKE reaches no xcodebuild.
         jsc-debug)
-            CFG_PORT="--jsc-only"; CFG_TYPE=Debug
+            CFG_TYPE=Debug; CFG_JSC_ONLY=1
             CFG_ARGS="--debug"
-            CFG_CMAKE="-DENABLE_OFFLINE_ASM_ALT_ENTRY=1"
+            if [ "$CFG_OS" = macos ]; then
+                _cfg_apple_jsc
+            else
+                CFG_PORT="--jsc-only"
+                CFG_CMAKE="-DENABLE_OFFLINE_ASM_ALT_ENTRY=1"
+            fi
             ;;
         jsc-release)
-            CFG_PORT="--jsc-only"; CFG_TYPE=Release
+            CFG_TYPE=Release; CFG_JSC_ONLY=1
             CFG_ARGS="--release"
-            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DENABLE_OFFLINE_ASM_ALT_ENTRY=0"
+            if [ "$CFG_OS" = macos ]; then
+                _cfg_apple_jsc
+            else
+                CFG_PORT="--jsc-only"
+                CFG_CMAKE="$_CFG_RELWITHDEBINFO -DENABLE_OFFLINE_ASM_ALT_ENTRY=0"
+            fi
             ;;
         jsc-release-asan)
-            CFG_PORT="--jsc-only"; CFG_TYPE=Release
-            CFG_ARGS="--release --asan"
-            CFG_CMAKE="$_CFG_RELWITHDEBINFO"
+            CFG_TYPE=Release; CFG_JSC_ONLY=1
+            if [ "$CFG_OS" = macos ]; then
+                _cfg_apple_jsc
+                # ASAN=YES, not --asan: build-jsc has no --asan of its own, and
+                # what it does have is a passthrough to the project Makefile,
+                # which turns ASAN=YES into set-webkit-configuration --asan
+                # (Makefile.shared). config_build_dir reads it the same way.
+                CFG_ARGS="--release ASAN=YES"
+            else
+                CFG_PORT="--jsc-only"
+                CFG_ARGS="--release --asan"
+                CFG_CMAKE="$_CFG_RELWITHDEBINFO"
+            fi
             ;;
         gtk-debug)
             CFG_PORT="--gtk"; CFG_TYPE=Debug
@@ -152,6 +218,7 @@ config_load() {
         # --- Apple ports ------------------------------------------------------
         # No port flag: build-webkit defaults to Apple Cocoa on Darwin and
         # there is no --mac to pass. Empty CFG_PORT is the port selection.
+        # Refused off macOS below, where there is no Xcode to run them with.
         mac-debug)
             CFG_TYPE=Debug; CFG_BUILDSYS=xcode
             CFG_ARGS="--debug"
@@ -176,6 +243,15 @@ config_load() {
             return 1
             ;;
     esac
+
+    # An Xcode config on a machine with no Xcode. Stated here rather than left
+    # to xcodebuild's own "command not found" forty lines into a perl script,
+    # and named as the platform mismatch it is.
+    if [ "$CFG_BUILDSYS" = xcode ] && [ "$CFG_OS" != macos ]; then
+        die "'$1' is an Apple-port config and builds with Xcode, which this
+    workspace has no way to run (it is $CFG_OS). The configs that build here
+    are the CMake ports:  wk build --list"
+    fi
 
     # The all-config defaults go in front of what the config asked for, so the
     # config's own flags are the ones that win where the two disagree.
@@ -258,6 +334,7 @@ config_build_env() {
         "WK_NICE=$nice"
         "WK_SRC=$src"
         "WK_BUILDSYS=$CFG_BUILDSYS"
+        "WK_BUILD_SCRIPT=$CFG_SCRIPT"
         # WK_TARGET_BUILD_ARGS is targets/hosts/<name>.conf's WK_BUILD_ARGS,
         # named differently so folding it in doesn't overwrite these flags.
         "WK_BUILD_ARGS=$CFG_PORT $CFG_ARGS${WK_TARGET_BUILD_ARGS:+ $WK_TARGET_BUILD_ARGS}${cfgargs:+ $cfgargs}"
@@ -374,9 +451,16 @@ config_browser_env() {
     esac
 }
 
+# A JSC-only config builds no browser, no web process and no test runner --
+# neither the JSCOnly CMake port nor Xcode's "Everything up to JavaScriptCore"
+# has one. The four name functions below answer nothing for them rather than
+# naming a binary that was never built.
+config_jsc_only() { [ -n "${CFG_JSC_ONLY:-}" ]; }
+
 # What the web process is called, for `lldb --attach-name ... --waitfor`. A
 # wrong name here does not fail, it *waits*, reading as a hung debugger.
 config_web_process_name() {
+    config_jsc_only && { echo ""; return 0; }
     case "$CFG_BUILDSYS:$CFG_PORT" in
         xcode:*)     echo "com.apple.WebKit.WebContent.Development" ;;
         cmake:--wpe) echo "WPEWebProcess" ;;
@@ -389,6 +473,7 @@ config_web_process_name() {
 # and the same use: naming a process to attach to. CMake ports only --
 # Source/WebKit/Platform{WPE,GTK}.cmake:17-18.
 config_network_process_name() {
+    config_jsc_only && { echo ""; return 0; }
     case "$CFG_BUILDSYS:$CFG_PORT" in
         cmake:--wpe) echo "WPENetworkProcess" ;;
         cmake:--gtk) echo "WebKitNetworkProcess" ;;
@@ -397,6 +482,7 @@ config_network_process_name() {
 }
 
 config_gpu_process_name() {
+    config_jsc_only && { echo ""; return 0; }
     case "$CFG_BUILDSYS:$CFG_PORT" in
         cmake:--wpe) echo "WPEGPUProcess" ;;
         cmake:--gtk) echo "WebKitGPUProcess" ;;
@@ -407,6 +493,7 @@ config_gpu_process_name() {
 # The layout-test driver, for the same attach: its stdin/stdout are the test
 # protocol, which `--wrapper 'lldb'` would otherwise interrupt.
 config_test_runner_name() {
+    config_jsc_only && { echo ""; return 0; }
     case "$CFG_BUILDSYS:$CFG_PORT" in
         xcode:*)                 echo "WebKitTestRunner" ;;
         cmake:--wpe|cmake:--gtk) echo "WebKitTestRunner" ;;
