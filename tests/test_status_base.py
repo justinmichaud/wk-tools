@@ -3,14 +3,14 @@ regression tests for the maintainer's defect (docs/defects: "wk status
 should list the base a workspace is based on ... It should also check if wk
 container sdk version is up to date"):
 
-  (a) `ws_upstream_line` (cmd/status): the upstream WebKit line a checkout's
+  (a) `ws_upstream_line` (lib/target.sh): the upstream WebKit line a checkout's
       HEAD descends from -- a branch tracking origin/main, one tracking a
       release branch through a fork remote, and a detached HEAD with nothing
       to go on -- against real, disposable git repos. `wk ls`'s `ws_git_base`
       and cmd/status's own probe lift this exact function rather than
       copying it (see the comment on it in cmd/status), so testing it here
       covers both.
-  (b) `ws_image_base` (cmd/status, lifted by cmd/ls): an image workspace's
+  (b) `ws_image_base` (lib/target.sh): an image workspace's
       own base, read from the real `image/configs/*.conf` this checkout
       ships -- so the test tracks the file rather than a copied constant.
   (c) `report_sdk_image` (cmd/status): "unknown -- registry did not answer"
@@ -55,7 +55,7 @@ def _lift(name, path=REPO / "lib" / "target.sh"):
 
 UPSTREAM_LINE = _lift("ws_upstream_line")
 IMAGE_BASE = _lift("ws_image_base")
-SDK_IMAGE = _lift("report_sdk_image")
+SDK_IMAGE = _lift("report_sdk_image", STATUS)
 
 
 def _git(repo, *args):

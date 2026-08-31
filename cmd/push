@@ -197,11 +197,23 @@ EOF
 # machine, not of a record: a session started by hand from `wk enter` counts
 # the same as one `wk claude` started. Exposing the keys while one runs would
 # put them in that session's mount, so `on` is refused until it ends.
+# A running agent is one whose executable resolves under the Claude install
+# (`~/.local/share/claude/versions/...`, firstrun.sh), read from /proc inside
+# the workspace -- evidence, not a name match: the process is called `claude`,
+# `node` or a version string depending on how it was launched, but its exe
+# path is not. Scoped to inside the container, so `cmd/claude` on the host and
+# a human's `git` never register.
 agent_sessions() {
-    local line ws
+    local ws
     while IFS=$(printf '\t') read -r ws _; do
         [ -n "$ws" ] || continue
-        t_exec "$ws" pgrep -x claude >/dev/null 2>&1 && printf '%s\n' "$ws"
+        t_exec "$ws" sh -c '
+            for e in /proc/[0-9]*/exe; do
+                case "$(readlink "$e" 2>/dev/null)" in
+                    */claude/versions/*|*/.local/bin/claude) exit 0 ;;
+                esac
+            done
+            exit 1' >/dev/null 2>&1 && printf '%s\n' "$ws"
     done <<EOF
 $(t_list 2>/dev/null)
 EOF
@@ -211,9 +223,11 @@ EOF
 case "$ACTION" in
 on)
     busy=$(agent_sessions)
-    [ -z "$busy" ] || die "push stays OFF: an agent session (a claude process) is running in
-    $(printf '%s' "$busy" | tr '\n' ' ')-- the keys would appear in its mount, and nothing an agent
-    runs may push. End that session, then:  wk push on"
+    if [ -n "$busy" ]; then
+        barrier "an agent session (a claude process) is running in $(printf '%s' "$busy" | tr '\n' ' ')-- exposing
+    the keys puts them in its mount, and its commit wall stays until it exits.
+    End that session first, or force this."
+    fi
     move_keys "$HELD" "$LIVE"; n="$MOVED"
     # Idempotent, and it says which of the two it was: a switch that reports
     # "on" whether or not it did anything is a switch you have to verify by

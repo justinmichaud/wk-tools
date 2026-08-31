@@ -612,6 +612,39 @@ barrier() {
     return 0
 }
 
+# --- the commit wall ---------------------------------------------------------
+# "Only the person at the keyboard commits", the write-side twin of `wk push`:
+# while an agent holds a workspace, nothing it runs can write git history into
+# the checkout the person will push. The parts of `.git` a commit, a stage, a
+# stash, a branch move or a rebase must write, bound read-only -- everything
+# else (the index is left writable, so does `git status`; the working tree;
+# the build) untouched.
+WK_COMMIT_WALL_PATHS="objects refs logs HEAD packed-refs index.lock ORIG_HEAD"
+
+# The bwrap prefix that runs a command with those paths read-only, inside the
+# workspace. bwrap needs no capability the sandbox lacks (measured: it works
+# with an empty capability set), runs the command as the workspace user, and
+# the read-only binds it makes cannot be unmounted, remounted, shadowed by a
+# bind on top, or escaped through a nested user namespace by the command or
+# anything it spawns (all measured in tests/test_commit_wall.py). A human
+# `wk enter` shell is not wrapped, so it commits normally. `--ro-bind-try`
+# skips a path a fresh checkout has not created yet (packed-refs, an unheld
+# index.lock): a ref that is not packed cannot be written through a file that
+# is not there. This only composes the string; the caller confirms bwrap is
+# present in the workspace (it is in the SDK image) and refuses if it is not,
+# rather than running an agent with no wall.
+# The checkout is always /src/WebKit inside a container (t_src, the only
+# target this wall is used on), so the paths are fixed and space-free and go
+# in unquoted -- which lets the whole prefix embed cleanly in the `bash -lc`
+# exec line and in a test's `$W`.
+commit_wall_prefix() { # <checkout-dir> -- prints the bwrap argv prefix
+    local src="$1" p ro=""
+    for p in $WK_COMMIT_WALL_PATHS; do
+        ro="$ro --ro-bind-try $src/.git/$p $src/.git/$p"
+    done
+    printf 'bwrap --dev-bind / /%s --' "$ro"
+}
+
 # --- locks --------------------------------------------------------------------
 # Rule 4: one lock per mutated resource, dies with its holder. A symlink
 # whose target string names the holder, not `flock` (its fd is inherited by

@@ -434,13 +434,21 @@ wk claude bug-238 --rc                   # a Remote Control server the Claude ap
 A `remote` target has no sandbox to verify; `wk claude` there stops at a
 barrier that only an explicit `--force` crosses.
 
-Nothing an agent runs can publish, on any target: the deploy keys are held
-back for the session (`wk push off`, before the sandbox is verified; `wk push
-on` is refused while a claude process runs in any workspace), the egress proxy
-refuses GitHub's API (`api.github.com`, so `gh` has nothing to talk to), and
-`wk verify` fails on a deploy key in the mount or a GitHub credential inside a
-workspace. On a build box, a `gh` login in the account the agent would run as
-is a refusal with no `--force`. Only the person at the keyboard pushes.
+Nothing an agent runs can publish or commit, on any target. Publishing: the
+deploy keys are held back for the session (`wk push off`, before the sandbox is
+verified), the egress proxy refuses GitHub's API (`api.github.com`, so `gh` has
+nothing to talk to), and `wk verify` fails on a deploy key in the mount or a
+GitHub credential inside a workspace; on a build box a `gh` login in the agent's
+account is a refusal. Committing: a container `wk claude` session runs the agent
+under bwrap with the checkout's `.git` commit-parts (`objects`, `refs`, `logs`,
+`HEAD`, `packed-refs`) read-only, so a commit, a stage, a stash, a branch move
+or a rebase fails while a build, an edit, `git status`/`diff`/`log` all work --
+the read-only binds cannot be unmounted, shadowed or escaped from inside, and
+`wk verify` proves the recipe blocks a commit in that very container. Both
+measures are the one switch: `wk push on` turns them off (refused while a claude
+session runs -- `wk push on --force` overrides, though a running agent keeps its
+wall until it exits; a human `wk enter` shell is never walled). Only the person
+at the keyboard pushes or commits.
 
 **Housekeeping**
 

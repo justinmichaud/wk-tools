@@ -117,11 +117,16 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     # container/proxy/wk-proxy.py), the deploy keys are behind the mount while
     # `wk push` is off, and no gh token sits in the home or the environment.
     code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
-    [ "$code" = 403 ] && pass "api.github.com is refused (HTTP 403): gh has nothing to talk to" \
-                      || fail "api.github.com answered '${code:-nothing}', not a refusal -- gh could post from in here"
-    keys=$(inside "ls /secrets/build_key_* 2>/dev/null | grep -vc '\\.pub\$'")
-    [ "${keys:-0}" = 0 ] && pass "no deploy key in the mount (git push is off)" \
-                          || fail "$keys deploy key(s) at /secrets -- git push is ON:  wk push off"
+    case "${code:-000}" in
+        2*|3*) fail "api.github.com answered HTTP $code -- it is reachable, gh could post from in here" ;;
+        *)     pass "api.github.com is refused (proxy closed the connect, code ${code:-000}): gh has nothing to talk to" ;;
+    esac
+    keys=$(inside "ls /secrets/build_key_* 2>/dev/null | grep -v '\\.pub\$'")
+    if [ -z "$keys" ]; then
+        pass "no deploy key in the mount (git push is off)"
+    else
+        fail "$(printf '%s' "$keys" | grep -c .) deploy key(s) at /secrets -- git push is ON:  wk push off"
+    fi
     ghcred=$(inside "test -e ~/.config/gh/hosts.yml && echo ~/.config/gh/hosts.yml; env | grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=' | cut -d= -f1")
     [ -z "$ghcred" ] && pass "no GitHub credential inside (gh has nothing to post with)" \
                      || fail "GitHub credential inside the workspace: $ghcred -- remove it (rm ~/.config/gh/hosts.yml; unset the token) before an agent runs"
@@ -157,6 +162,35 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
         fi
     done
     [ "$fails" -eq 0 ] && pass "no host home, runtime directory or D-Bus socket" || true
+
+    # --- the commit wall works here ------------------------------------------
+    # `wk claude` runs the agent under bwrap with the checkout's .git commit
+    # parts read-only (WK_COMMIT_WALL_PATHS, lib/common.sh); this proves, in
+    # this container, that the recipe blocks a commit and leaves an ordinary
+    # write alone, against a throwaway repo in /tmp -- never the real checkout.
+    # No bwrap here means `wk claude` refuses, so the sandbox is not whole.
+    if inside "command -v bwrap >/dev/null 2>&1 && echo WKBWRAP" | grep -q WKBWRAP; then
+        probe=$(inside 'set -e
+            D=$(mktemp -d /tmp/wk-wall.XXXXXX); cd "$D"
+            git init -q; git config user.email a@b; git config user.name a
+            echo hi > f; git add f; git commit -qm one >/dev/null
+            ro=""; for p in '"$WK_COMMIT_WALL_PATHS"'; do ro="$ro --ro-bind-try $D/.git/$p $D/.git/$p"; done
+            W="bwrap --dev-bind / / $ro --"
+            echo two >> f
+            $W sh -c "git add f && git commit -qm two" >/dev/null 2>&1 && echo COMMITTED || echo BLOCKED
+            $W sh -c "echo three >> f" >/dev/null 2>&1 && echo WROTE || echo NOWRITE
+            rm -rf "$D"')
+        if printf '%s' "$probe" | grep -q BLOCKED; then
+            printf '%s' "$probe" | grep -q WROTE \
+                && pass "commit wall blocks a commit; an ordinary write still works (bwrap)" \
+                || fail "commit wall blocks an ordinary write too -- too much"
+        else
+            fail "commit wall did NOT block a commit under bwrap: '$(printf '%s' "$probe" | tr '\n' ' ')'"
+        fi
+    else
+        fail "no bwrap in the workspace -- 'wk claude' cannot wall off commits and refuses to start"
+    fi
+
 
     # --- the tooling tree is read-only ---------------------------------------
     probe_write=$(inside "touch /opt/wk-tools/.wk-write-probe 2>&1")

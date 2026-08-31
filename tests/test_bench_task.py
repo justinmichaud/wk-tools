@@ -201,7 +201,11 @@ class TestThroughWk(WkTest):
             d = make_task(bench)
             add_run(d, "base", 1, "a", "ok", (100.0, 101.0, 99.0))
             add_run(d, "pr1725", 1, "b", "ok", (95.0, 96.0, 94.0))
-            env = {"WK_STORE": store["WK_STORE"], "WK_LOCK_DIR": str(store["path"] / "locks")}
+            # WK_IN_VM: on a macOS host the dispatcher would otherwise hand
+            # `wk bench ls` to the podman VM, where this scratch store's path
+            # names nothing; the store here is the test's own.
+            env = {"WK_STORE": store["WK_STORE"], "WK_LOCK_DIR": str(store["path"] / "locks"),
+                   "WK_IN_VM": "1"}
             ls = run("bench", "ls", env=env, timeout=60)
             self.assertEqual(ls.returncode, 0, ls.stdout)
             self.assertIn(TASK, ls.stdout)

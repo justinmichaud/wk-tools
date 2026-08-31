@@ -48,9 +48,10 @@ class TestProxyRefusesGitHubsApi(unittest.TestCase):
 class TestVerifyMeasuresThatNothingCanPublish(unittest.TestCase):
     def test_reachability_is_probed_on_github_com_not_its_api(self):
         self.assertIn("https://github.com/", VERIFY)
-        probe = re.search(r"curl [^\n]*https://api\.github\.com/[^\n]*\n\s*\[ \"\$code\" = (\d+) \]", VERIFY)
-        self.assertIsNotNone(probe, "api.github.com is not probed for a refusal")
-        self.assertEqual(probe.group(1), "403", "api.github.com must be expected to be refused")
+        self.assertRegex(VERIFY, r"curl [^\n]*https://api\.github\.com/")
+        # a 2xx/3xx reaching the API is the failure; a closed connect (000/403)
+        # is the refusal working.
+        self.assertRegex(VERIFY, r"2\*\|3\*\) fail")
 
     def test_deploy_keys_and_gh_credentials_fail_the_sandbox(self):
         self.assertIn("/secrets/build_key_", VERIFY)
@@ -81,6 +82,9 @@ class TestClaudeHoldsPushBackBeforeVerifying(unittest.TestCase):
 
 class TestPushOnRefusesWhileAnAgentRuns(unittest.TestCase):
     def _sessions(self, t_list_out, running):
+        # agent_sessions now probes with `t_exec "$ws" sh -c '...'`; the stub
+        # answers by workspace name ($1), standing in for "a claude exe is
+        # running in that container".
         return bash(f'''
 . "{REPO}/lib/common.sh"
 t_list() {{ printf '%b' "{t_list_out}"; }}
@@ -99,9 +103,11 @@ agent_sessions
         self.assertEqual(cp.stdout.strip(), "")
 
     def test_on_asks_before_moving_a_key(self):
-        on = PUSH[PUSH.index("\non)\n"):]
+        on = PUSH[PUSH.index("\non)\n"):PUSH.index("\noff)\n")]
         self.assertLess(on.index("agent_sessions"), on.index('move_keys "$HELD" "$LIVE"'))
-        self.assertIn("push stays OFF", on)
+        # a forceable barrier, not an unconditional die: `wk push on --force`
+        # crosses it while a session runs.
+        self.assertIn("barrier ", on)
 
 
 def _lift(func):

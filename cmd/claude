@@ -304,6 +304,11 @@ if [ -n "$RC" ]; then
         "$WK_ROOT/wk" claude "$NAME" || true
     fi
 
+    if [ "$WK_TARGET_KIND" = container ]; then
+        t_exec "$NAME" command -v bwrap >/dev/null 2>&1 \
+            || die "the commit wall needs bwrap in the workspace image, and '$NAME' has none
+    (see 'wk claude $NAME' without --rc for the remedy)."
+    fi
     rc_start "$NAME" "$CLAUDE_BIN"
     exit 0
 fi
@@ -324,6 +329,23 @@ restore_push() {
 }
 wk_atexit restore_push
 
+# The commit wall: a container agent session cannot write git history into the
+# checkout (commit_wall_prefix, lib/common.sh) -- the write-side twin of the
+# push keys held back above, and turned off the same way (`wk push on`, which
+# is refused while a session runs unless forced). A macOS guest has no bind to
+# hang it on and a remote has no sandbox at all, so the wall is the container's;
+# there, bwrap must be present or the session refuses rather than run unwalled.
+WALL=""
+if [ "$WK_TARGET_KIND" = container ]; then
+    t_exec "$NAME" command -v bwrap >/dev/null 2>&1 \
+        || die "the commit wall needs bwrap in the workspace image, and '$NAME' has none.
+    Rebuild the workspace from a current base ('wk rm $NAME' then 'wk new'), or
+    install bwrap in the image; nothing an agent runs may write git history
+    while the sandbox cannot stop it."
+    WALL="$(commit_wall_prefix "$(t_src "$NAME")") "
+    info "git commits are walled off for this session (bwrap; 'wk push on' lifts it for the next)"
+fi
+
 info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boundary)"
 
 # Headless when there's no terminal: the babysitter's fix loop runs this
@@ -332,9 +354,9 @@ info "starting Claude in '$NAME' (permissions relaxed; the workspace is the boun
 rc=0
 if [ -t 0 ] && [ -t 1 ]; then
     t_exec_tty "$NAME" env WK_WORKSPACE="$NAME" \
-        bash -lc "cd $(t_src "$NAME") && exec $(sh_quote "$CLAUDE_BIN") $(sh_quote "${CLAUDE_MODE[@]}") $(sh_quote "$@")" || rc=$?
+        bash -lc "cd $(t_src "$NAME") && exec ${WALL}$(sh_quote "$CLAUDE_BIN") $(sh_quote "${CLAUDE_MODE[@]}") $(sh_quote "$@")" || rc=$?
 else
     t_exec "$NAME" env WK_WORKSPACE="$NAME" \
-        bash -lc "cd $(t_src "$NAME") && exec $(sh_quote "$CLAUDE_BIN") $(sh_quote "${CLAUDE_MODE[@]}") $(sh_quote "$@")" || rc=$?
+        bash -lc "cd $(t_src "$NAME") && exec ${WALL}$(sh_quote "$CLAUDE_BIN") $(sh_quote "${CLAUDE_MODE[@]}") $(sh_quote "$@")" || rc=$?
 fi
 exit "$rc"

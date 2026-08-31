@@ -1,34 +1,5 @@
 Decisions and questions for the maintainer (agent, 2026-08-30; answer inline):
 
-0. INCIDENT, needs you: a sub-agent auditing argument handling ran
-   `wk key tailnet --replace extra` for real (before the extra-argument
-   refusal it was adding existed) and DELETED this Mac's tailnet auth key,
-   ~/.config/wk/tailscale-authkey. Nothing else in that directory changed and
-   the nodes already on the tailnet are unaffected, but the next card write or
-   bridge provision needs the key: make a new one (tag:wk, reusable,
-   non-ephemeral, longest expiry) at https://login.tailscale.com/admin/settings/keys
-   and run `wk key tailnet` to store it. A second worker dispatched one live
-   `wk build` of a fake workspace to buildbox4 (its shell still carried the
-   leaked WK_TARGET, decision A); it failed at once and left nothing there
-   (checked). The audit agent had spawned these workers on its own, several
-   on the same files; every one was stopped as soon as this surfaced, and no
-   agent in this session spawns another from now on. The argument-handling
-   edits they made to 27 cmd/* files are in the tree, parse, and are covered
-   by tests/test_options.py + tests/test_help_values.py -- review that diff
-   with the same suspicion I did.
-
-A. Your Zed was launched from `wk zed image-decoders`, so its terminals carry
-   WK_NAME=image-decoders WK_TARGET=buildbox4 WK_TARGET_KIND=remote (run
-   `env | grep ^WK_` in one). Every `wk` typed there -- and this whole agent
-   session, and the test suite -- was silently about that one workspace on
-   buildbox4: a bare `wk status` delegated itself to buildbox4 and reported the
-   Pis "unreachable / not on the tailnet" while they were up, `wk sync <x>`
-   said "one workspace at a time (got 'image-decoders' and 'x')", and 45 tests
-   failed. Fixed at the source (`wk zed` now starts Zed with none of the
-   dispatcher's variables: wk_exec_clean, lib/common.sh) and in the suite
-   (tests/support.py scrubs them). Until you restart Zed from a clean shell,
-   `unset WK_NAME WK_TARGET WK_TARGET_KIND` in each of its terminals.
-
 B. Home/End in zsh: measured on moose and buildbox4 over ssh from this Mac
    (TERM=xterm-256color): both ^[OH/^[OF (terminfo, /etc/zsh/zshrc) and
    ^[[H/^[[F (shell/bashrc) are bound, ctrl-a/ctrl-e too. Inside a container
@@ -37,14 +8,6 @@ B. Home/End in zsh: measured on moose and buildbox4 over ssh from this Mac
    it fail for you -- a host shell, `wk enter`, Zed's terminal? In that shell:
    `echo $TERM; bindkey | grep -E "OH|\[H"; cat -v` then press Home. [question]
 
-C. HANDOFF-ab-bench's "read the first `wk ab wpe:1725 --devices rpi3` report
-   (started 2026-08-30T05:05Z)": no result store on moose, tolken or rpi5 holds
-   it (`wk bench ls` is empty on each). Which machine drove that run? The rpi3
-   is in bench mode right now (rpi3-bench up, rpi3-rescue down), so nothing
-   here touched it. Likely answer: your other Claude session "AB
-   infrastructure and WPEWebKit PR 1725 benchmarking" (Remote Control) is
-   driving it; the report will be in that machine's store. [question]
-
 D. "wk sysimage list isn't listing yocto images": the two yocto workspaces were
    mid-rebuild (yocto.status started=2026-08-29T04:29Z/05:04Z; the wics
    appeared 04:37Z/05:13Z); a yocto image stage deletes build/image first, so
@@ -52,18 +15,7 @@ D. "wk sysimage list isn't listing yocto images": the two yocto workspaces were
    yocto-*/buildroot-* workspace with no image is listed as "no image here yet"
    with whether a build is running (lib/image.sh, cmd/sysimage, tests).
 
-E. "Fetch is very very slow (yocto-downstream-wpe-2.46-rpi4, 15+ min)": measured
-   on moose -- a workspace's `git fetch` from /mirror is 0.19s, the mirror is
-   11 packs / 13 GB (plus one 211 MB tmp_pack from an interrupted fetch, `git
-   gc` territory), a snapshot is `cp -al` (hardlinks) of the previous one. The
-   snapshot *is* the hard-link copy you describe; it exists because a
-   workspace's tree is the lower layer of a live overlay mount, and the kernel
-   forbids changing that layer, so the mirror is the only thing ever fetched
-   into and each workspace pins one immutable snapshot. What took 15 minutes is
-   therefore network: `wk sync --tools` fetching the mirror from GitHub, or
-   bitbake's `--runall=fetch` of a 2.46 downstream's sources through the
-   proxy (DL_DIR is shared, so only the first build of a release pays it).
-   Which command, and its log, was the 15 minutes? [question]
+in-progress images should be listed as such too.
 
 F. "wk new leaves git detached, with multiple remotes": the four remotes
    (origin, wpe, fork, forkwpe) are the PR workflow's wiring (lib/store.sh,
@@ -71,6 +23,8 @@ F. "wk new leaves git detached, with multiple remotes": the four remotes
    fresh workspace to measure and this Mac has no mirror (13 GB into the podman
    VM); the moose workspaces were all made with a branch. May the agent run
    `wk sync` + `wk new` here, or one `wk new` on moose? [decision]
+
+   yes
 
 G. moose's ~/Development/wk-tools has uncommitted edits (bench/mac-ab-summary.sh,
    cmd/bench, cmd/pi, cmd/status, lib/bench.sh, lib/common.sh, lib/wkdata.py)
@@ -105,6 +59,20 @@ I. "forbid committing" (your second message): possible only as a real wall,
    commits may be blocked for the session too (the proposal blocks them; the
    alternative is the uid split). Until then: an agent can commit. [decision]
 
+   DONE (2026-08-30, maintainer said go): the wall is bwrap, not a sudo drop --
+   the container has no SYS_ADMIN, so nothing inside can mount or lift a
+   read-only bind, sudo or not (the "drop sudo first" plan misjudged that).
+   `wk claude` runs a container agent under `bwrap --dev-bind / / --ro-bind-try
+   .git/{objects,refs,logs,HEAD,packed-refs} ...`: commit/add/stash/branch/
+   rebase fail; build, edit, git status/diff/log work; unmount, shadow-mount
+   and nested-namespace escapes all denied (measured). One switch with push --
+   `wk push on` turns both measures off, refused while a claude session runs,
+   `wk push on --force` overrides; a running agent keeps its wall until it
+   exits, and a human `wk enter` shell is never walled. `wk verify` proves the
+   recipe blocks a commit in the container; tests/test_commit_wall.py.
+   The person's own in-workspace commits are NOT blocked (they use an
+   unwrapped shell), so the uid split was not needed.
+
 J. `wk backup --candidates` (new, read-only) lists live macOS settings that are
    not in host/macos/defaults.conf. On tolken, the deliberate-looking ones:
    Accessibility KeyRepeatInterval 0.083333333 / KeyRepeatDelay 0.5 /
@@ -114,6 +82,15 @@ J. `wk backup --candidates` (new, read-only) lists live macOS settings that are
    askForPassword 0 (no password after the screensaver -- yours to keep or
    not); Safari IncludeDevelopMenu + WebKitDeveloperExtrasEnabledPreferenceKey.
    Which of these go into defaults.conf? [decision]
+
+M. Loose ends of this run: the model budget for sub-agents ran out mid-way
+   ("session limit"), so two tasks stopped early and stay owed -- the ccache/
+   dependencies-on-remote-targets item below (nothing was changed), and
+   HANDOFF-wk-cli's remaining [needs a test] items (two of its six landed:
+   tests/test_owed_cli_color.py, tests/test_owed_cli_exit_code.py). Also
+   found: a container `wk-br-rescue2` (Exited, 6 days) visible on this Mac's
+   host podman connection but not inside the wk machine's rootless view --
+   yours; `wk rm br-rescue2` or `podman rm` it by hand if it is done.
 
 K. docs/Urgent/pi.md (the pi coding agent, a litellm API key): three decisions
    before code -- the command's name (`wk pi` is the Raspberry Pi command;
@@ -296,3 +273,5 @@ error: 'wk sync' acts on a host, and this is workspace 'stringimpl238'.
 - wk status should list the base a workspace is based on (2.38, ToT main, etc). This is important for things like buildroot. It should also check if wk container sdk version is up to date.
 
 - claude rc should be enabled by default everywhere
+
+- Never rsync wk tools, always use git whenever possible.
