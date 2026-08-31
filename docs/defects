@@ -281,3 +281,8 @@ error: 'wk sync' acts on a host, and this is workspace 'stringimpl238'.
 - claude rc should be enabled by default everywhere
 
 - Never rsync wk tools, always use git whenever possible.
+
+- in-workspace commands still aren't working: buildbox4:shared ~ ❯ wk pr justinmichaud:eng/non-cocoa-fuzz-OOB-read-with-BMP-RLE-absolute-runs
+warning: no such workspace: justinmichaud:eng/non-cocoa-fuzz-OOB-read-with-BMP-RLE-absolute-runs -- 'wk ls' lists them
+usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>
+       wk pr -h for the rest
