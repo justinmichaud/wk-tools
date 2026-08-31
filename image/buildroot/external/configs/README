@@ -57,18 +57,20 @@ Carrying a line kconfig discards would claim a backend the image does not have,
 so it is not carried: this resolves, as the rpi3 does, to wpebackend-rdk's
 bcm-rpi backend on dispmanx.
 
-What is deliberately *not* changed is the kernel: the release-pinned rpi-5.15.y
-with board/raspberrypi/rpi34-linux-5.15.config. That config is named for the rpi3
-*and* the rpi4 and exists in the fork's tree, so keeping it is what makes this
-still a 2.38 configuration rather than a different distribution wearing the
-release's name. The rpi4_wpe defconfig's own kernel -- a tarball pinned to one
-commit with the in-tree bcm2711 defconfig -- is not release-pinned and would
-break that.
+The kernel *tree* is not changed: the release-pinned rpi-5.15.y, which is what
+keeps this a 2.38 configuration rather than a different distribution wearing
+the release's name. The kernel *config* is: the fork's
+board/raspberrypi/rpi34-linux-5.15.config is named for the rpi3 and the rpi4
+but is a Pi 2/3 config in truth -- measured on an rpi4 (rev 1.5) over the
+tryboot lane 2026-08-31, it hangs before init, and it lacks the 2711's SD
+controller (MMC_SDHCI_IPROC), PCIe root (PCIE_BRCMSTB), XHCI, LPAE and
+HIGHMEM, so it could mount no root there even if it ran. The rpi4 defconfig
+uses the pinned tree's own in-tree bcm2711 defconfig instead (what RPi OS
+ships as kernel7l), with the same fleet fragment on top.
 
-TODO: **this has never booted.** The combination compiles and genimage
-assembles an sdcard.img out of it, but no board has been asked to start that
-image. Validating it needs the board: a wrong kernel config or DTS on a board
-nobody can boot is exactly the failure that looks like dead hardware. The other
-unmeasured half is the display -- an rpi4's VideoCore VI has no /opt/vc GL
-driver, and this resolves to the backend that wants one -- so a board that boots
-to a shell and shows no page is the expected next question, not a surprise.
+TODO: **a full bench run on this image is unmeasured.** The tryboot lane and
+the rescue's kernel are proven on the board; the first boot of this image's
+own kernel, and the display half -- an rpi4's VideoCore VI has no /opt/vc GL
+driver, and this resolves to the backend that wants one -- are not. A board
+that boots to a shell and shows no page is the expected next question, not a
+surprise.

@@ -1,7 +1,7 @@
 # Kernel config fragment for every fleet buildroot image, appended to the
 # fork's board config (BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES): what a bench
-# system needs to be reached over the tailnet, which the fork's minimal
-# rpi34-linux-5.15.config has none of. tailscaled needs a TUN device for
+# system needs to be reached over the tailnet, which neither the fork's
+# minimal rpi34-linux-5.15.config nor the tree's bcm2711 defconfig has. tailscaled needs a TUN device for
 # tailscale0 and netfilter for its routing marks; nftables is what it drives
 # by default, the legacy iptables set is what BR2_PACKAGE_IPTABLES gives it
 # when nftables is not usable.
@@ -30,3 +30,10 @@ CONFIG_IP_NF_FILTER=y
 CONFIG_IP_NF_NAT=y
 CONFIG_IP_NF_MANGLE=y
 CONFIG_IP_NF_TARGET_MASQUERADE=y
+
+# No gcc plugins: the tree's bcm2711 defconfig enables them (the
+# arm_ssp_per_task stack-protector plugin), and building a plugin needs the
+# host compiler's own gmp headers, which buildroot's gcc 9.2 host toolchain
+# does not ship -- the kernel build dies at scripts/gcc-plugins. The regular
+# strong stack protector stays on; only the per-task variant needs the plugin.
+# CONFIG_GCC_PLUGINS is not set

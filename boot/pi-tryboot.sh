@@ -84,7 +84,15 @@ cp \"\$boot/start4.elf\" \"\$boot/fixup4.dat\" \"\$boot/second.new/\"
 cp \"\$src/$2\" \"\$boot/second.new/\"
 [ -d \"\$src/overlays\" ] && cp -r \"\$src/overlays\" \"\$boot/second.new/overlays\"
 sed $(sh_quote "$TRYBOOT_CMDLINE_SED") \"\$src/cmdline.txt\" > \"\$boot/second.new/cmdline.txt\"
-{ sed '/^os_prefix=/d' \"\$src/config.txt\"; echo 'os_prefix=second/'; } > \"\$boot/tryboot.txt.new\"
+# arm_64bit, stated explicitly from the kernel's own magic (zImage:
+# 0x016f2818 at offset 36; ARM64 Image: 'ARM\x64' at 56): the SD's modern
+# firmware defaults to 64-bit, and a config.txt that only says kernel=zImage
+# -- the fork's do -- makes it jump into a 32-bit zImage as if it were an
+# arm64 Image: a silent hang before any kernel code, no diag, no watchdog.
+bits=''
+case \"\$(od -An -tx4 -j36 -N4 \"\$src/\$kernel\" | tr -d ' ')\" in (016f2818) bits=0 ;; esac
+[ -n \"\$bits\" ] || case \"\$(od -An -tx4 -j56 -N4 \"\$src/\$kernel\" | tr -d ' ')\" in (644d5241) bits=1 ;; esac
+{ sed '/^os_prefix=/d; /^arm_64bit=/d' \"\$src/config.txt\"; echo 'os_prefix=second/'; [ -n \"\$bits\" ] && echo \"arm_64bit=\$bits\"; true; } > \"\$boot/tryboot.txt.new\"
 umount \"\$src\"; rmdir \"\$src\"
 mv \"\$boot/second.new\" \"\$boot/second\"
 mv \"\$boot/tryboot.txt.new\" \"\$boot/tryboot.txt\"

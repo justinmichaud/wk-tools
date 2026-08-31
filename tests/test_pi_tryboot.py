@@ -78,6 +78,12 @@ class TestStaging(unittest.TestCase):
         # A config.txt that already carries an os_prefix is stripped first:
         # two os_prefix lines would select nothing predictable.
         self.assertIn("/^os_prefix=/d", s)
+        # The kernel's bitness is stated, read off its own magic: the SD's
+        # modern firmware defaults to 64-bit and would jump into a 32-bit
+        # zImage as an arm64 Image -- a silent hang before any kernel code.
+        self.assertIn("016f2818", s)
+        self.assertIn("644d5241", s)
+        self.assertIn("arm_64bit=", s)
         cp = subprocess.run(["sh", "-n"], input=s, capture_output=True, text=True)
         self.assertEqual(cp.returncode, 0, cp.stderr)
 

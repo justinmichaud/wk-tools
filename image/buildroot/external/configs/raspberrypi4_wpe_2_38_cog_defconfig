@@ -18,8 +18,15 @@ BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_GIT=y
 BR2_LINUX_KERNEL_CUSTOM_REPO_URL="https://github.com/raspberrypi/linux"
 BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="rpi-5.15.y"
-BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
-BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="board/raspberrypi/rpi34-linux-5.15.config"
+# The tree's own 32-bit Pi 4 config (what RPi OS ships as kernel7l), not the
+# fork's rpi34-linux-5.15.config: that one is a Pi 2/3 config in truth --
+# measured on hardware 2026-08-31, it hangs a Pi 4 before init, and it lacks
+# the 2711's SD controller (MMC_SDHCI_IPROC), PCIe root (PCIE_BRCMSTB, where
+# the USB controller lives), XHCI, LPAE and HIGHMEM, so it could mount no
+# root on this board even if it ran. The kernel *tree* stays the
+# release-pinned rpi-5.15.y above; only the config is the board's.
+BR2_LINUX_KERNEL_USE_DEFCONFIG=y
+BR2_LINUX_KERNEL_DEFCONFIG="bcm2711"
 # Plus what a fleet bench system needs to be reached over the tailnet (a TUN
 # device, netfilter), which that config has none of; see the fragment.
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_WK_PATH)/board/linux-fleet.fragment"
