@@ -123,155 +123,6 @@ Use cheaper subagents with smaller models wherever possible.
 
 Issues:
 
-Sysimage list isn't listing yocto images now: (agent: explained and fixed --
-decision D above)
-moose:host ~ ❯ wk sysimage list
-buildroot-wpewebkit-2.38-buildroot-rpi3-32 rpi3       buildroot 1.6G     2026-08-27T21:48:49Z
-    /home/jmichaud/.local/share/wk/ws/buildroot-wpewebkit-2.38-buildroot-rpi3-32/build/buildroot/wpewebkit-2.38-buildroot-rpi3-32/output/images/sdcard.img
-buildroot-wpewebkit-2.38-buildroot-rpi4-32 rpi4       buildroot 1.6G     2026-08-28T13:24:12Z
-    /home/jmichaud/.local/share/wk/ws/buildroot-wpewebkit-2.38-buildroot-rpi4-32/build/buildroot/wpewebkit-2.38-buildroot-rpi4-32/output/images/sdcard.img
-
-2 images, each in the workspace that built it.
-  There is no image store: the workspace is the name (wk help).
-  To write one:  wk sysimage write --from <path above> --disk <machine>:<device>
-                 add --rescue for the system a board falls back to
-moose:host ~ ❯ wk ls
-NAME                 TARGET             STATE      BASE                 ARCH      CHANGES
-buildroot-wpewebkit-2.38-buildroot-rpi3-32 container          running    20260827T180858Z     native        68M
-buildroot-wpewebkit-2.38-buildroot-rpi4-32 container          running    20260827T180858Z     native        68M
-stringimpl238        container          running    20260825T174524Z     native       1.6G
-yocto-webkit-2.52-yocto-rpi3-32 container          running    20260825T174524Z     native        31G
-yocto-webkit-2.52-yocto-rpi4-64 container          running    20260825T174524Z     native        32G
-
-container: current base: 20260827T180858Z
-container: 1 unreferenced snapshot(s) reclaimable with 'wk gc'
-
-- Audit every command for breakage of the shape `wk zed <workspace>` had: an
-  argument the command re-decides for itself and then mishandles. The workspace
-  name is now the dispatcher's alone; the other arguments -- configs, flags,
-  paths, subverbs -- are still parsed command by command.
-
-Defects:
-
-- Fetch is still very very slow (ex: yocto-downstream-wpe-2.46-rpi4 is taking 15+ minutes). Snapshots don't make sense, why are they needed? We can't do hard links from local copies? Check fetch perf, and disk space usage. Look for optimizations, or a beter design overall.
-  (agent: measured -- decision E above; the snapshot is the hard-link copy)
-
-- home and end don't work in zsh on linux from a mac terminal. Confirm home, end, ctrl a, ctrl e, etc... all work
-  (agent: measured working on both Linux hosts from this Mac; needs your
-  exact setup -- question B above)
-
-- The lifecycle notes are confusing:
-
-wk sysimage write --from <path> --disk <writer>:/dev/sdX
-wk boot rpi3                                     # one-shot: arms, reboots, self-reverts
-
-We should first explain how to use --rescue, then explain how to one-shot boot an image. This should also explain what to do if something goes wrong (remove the stick/sd), and which boot order the pis get set to / which device rescue should go on (and how, it doesn't mention which command sets this up, burns the fuse for rpi3, etc). Same goes for the moose and macos, which should be explained in this help doc too.
-  (agent: done -- README `## Hardware` (`wk help hardware`, which README
-  cited but did not have): per board, rescue medium, bench medium, how the
-  one boot is selected, the command that sets the boot order and when, what
-  to do when it does not come back, the rpi3's one-time OTP bit, the Mac and
-  the guest, moose's missing driver; a test checks every fleet conf is
-  covered. The Lifecycle intro and step 5 point at it.)
-
-- wk zed should open in trusted mode
-  (agent: done -- Zed's CLI has no trust flag; Restricted Mode is lifted by
-  `session.trust_all_projects` in dotfiles/zed/settings.json, so every
-  project Zed opens is trusted, not only wk's; tests/test_editors.py. Also
-  fixed: `wk zed` no longer hands Zed the dispatcher's WK_* variables --
-  decision A above.)
-
-- wk new should 1) fetch by default. 2), wk fetch should be faster. wk new by default leaves git detatched, with multiple remotes for many branches.
-  (agent: measured, not changed -- decisions E and F above)
-
-- wk sync should work inside a sandbox too:
-error: 'wk sync' acts on a host, and this is workspace 'stringimpl238'.
-    From the host:  wk sync stringimpl238
-  (agent: done -- cmd/sync no longer declares `outside`; a bare `wk sync`
-  inside a workspace fetches in it from /mirror/WebKit.git via the local
-  target driver (sync_workspaces, unchanged). --target/--all/--tools/--machine
-  and a different workspace's name are still refused, naming the host
-  invocation. tests/test_dispatcher.py's TestWorkspaceRefusals
-  .test_host_only_commands_refuse_inside_a_workspace still lists "sync" among
-  host-only commands and now fails -- that file was out of scope for this
-  change; "sync" needs removing from its tuple.)
-
-- all commands that fail inside a workspace should print the invocation for outside.
-  (agent: done -- the dispatcher's host/store refusal prints `From the host:
-  wk <cmd> <args as typed>`; tests/test_dispatcher.py)
-
-- Help options should always list all valid values for params
-
-- Audit what tools are needed on the host macOS and Linux systems; keep the
-  host minimal and use containers / VMs where reasonable. (agent: the
-  inventory is done -- every host tool classified; what must stay is the
-  runtime (podman, tart+softnet), the proxy/broker pythons, tailscale, the
-  display/GPU stack of a bench box, the card machine's media tools and the
-  developer's identities (gh, zed). Dropped now: host ccache (the workspace
-  image has its own). The decisions and the rest are docs/HANDOFF-host-tools.md.)
-
-- wk status should load local data quickly first and fill the rest later.
-  (agent: the streaming render is in; a bare `wk status` also hung forever --
-  a job returning non-zero left no `.rc` marker -- fixed in lib/par.sh,
-  tests/test_par.py; 10.5s end to end now)
-
-- Audit every subcommand for option consistency: a missing --quiet, --target,
-  --all or --force where a sibling command has one; a parameter silently
-  ignored instead of refused; one section of a command getting a feature a
-  neighbouring section does not. Known leftovers from the 2026-08-26 pass:
-  --quiet is parsed locally by ~11 commands instead of once in the
-  dispatcher, the way --force is; wk ls and wk find have no --json, though
-  wk status does; --all means "every machine" in wk sync and "every item"
-  elsewhere -- one meaning, or two words; --count appears in bench, pick, pr,
-  pi, status and sync with no confirmed single semantics.
-  (agent: measured -- only cmd/sudo parses a wk --quiet; the other hits are
-  git/systemctl flags. --count is a wk flag only in bench and pi; the rest are
-  `git rev-list --count`. Being moved into the dispatcher / audited.)
-  (agent: done -- --quiet is stripped once by the dispatcher into WK_QUIET and
-  honoured by log/info in lib/common.sh; `wk ls --json`, `wk find --json`;
-  one meaning of --all documented in `wk help`; unknown flags refused in
-  sudo/ls/find/sync/push/doctor/remote/logs/verify; tests/test_options.py.
-  Second pass: status, bench, pr, gc, quiesce, test, gui, profile refuse
-  unknown flags and extra positionals with `usage:`; cmd/gc parsed only $1
-  before. run/enter/claude pass through by documented contract. --count is
-  "iterations per run" in bench and pi. Owed: none.)
-
-- High-level docs: an architecture overview and every supported workflow by
-  example, very short. README.md now has a first version of this; the item
-  stays until it is accepted as done.
-
-- Mass deletion of low-level comments and docs that serve no value. Comment
-  density is still ~37% of shell lines; lib/target.sh is 43%.
-  (agent: 42% -> 32% of shell lines across the tree, code verified unchanged
-  file by file against HEAD; lib/target.sh 51% -> 37%, cmd/status 27%,
-  cmd/bench 33%, cmd/* else 27-34%, targets/ 26-30%, bench/ 25-29%, lib/
-  <30%, image/boot 27-30%. Still above 40%, all provisioning/board scripts
-  one agent judged load-bearing: remote/provision.sh, vm/provision-base.sh,
-  container/firstrun.sh, shell/bashrc, image/buildroot-build.sh,
-  boot/mac-guest.sh, host/dotfiles.sh, host/macos/sharing.sh, bridge/bin/*,
-  the two yocto join scripts. A second opinion on those is owed.)
-
-- docs/Urgent/HUMAN-benchmark-start.md and docs/Urgent/HUMAN-Benchmarking variance.md
-  (agent: done so far -- one result schema with a configuration tuple, `wk
-  bench report` HTML/histograms/score+time/variance-by-configuration, the
-  noise knobs (ASLR, env pad, path pad, shared cache) in every lane; the
-  image/bench-mode unification is planned in docs/HANDOFF-bench-unify.md.
-  Still owed from the notes: Mac bench-mode checks in `wk doctor` (screen
-  state in quiesce, SIP on host / off on bench volume, single manual step),
-  the 8-hour autonomous run driver, one run per side under samply with
-  jitdump, and the VM rehearsal of the whole flow.)
-
-- Then go through all the docs not in a folder
-  (agent: done -- every docs/HANDOFF-*.md and docs/Urgent/HANDOFF-*.md is an
-  owed-only list with a [bracket] naming what each item waits on; the
-  unbracketed ones were done this session or turned into tests.)
-  (agent: every HANDOFF-*.md touched by landed work lists owed items only
-  now -- wk-cli, test-runner, fleet, pi-deploy, memory, debug, helix, clangd,
-  yocto, boot -- and the narrating lines ("no longer", "now that", "used
-  to") are rewritten present-tense. Not yet re-read end to end: bmc, ab-bench,
-  sdcard, linux-pi, linux-arm32, router, reprovision, sandboxing,
-  settings-audit, architecture-review, original-helpers, bench-python,
-  bench-unify, mac-perf-mode, Security/tailscale, Nice to have/*.)
-
 - Install dependencies including ccache on remote targets, doctor should confirm everything is configured correctly. Some of these targets will have pre-populated env vars that should not be overwritten.
 
 - Every single wk command must fail if a cli arg is not recognized, or if the subcommand couldn't use it (ex: target)
@@ -286,3 +137,55 @@ error: 'wk sync' acts on a host, and this is workspace 'stringimpl238'.
 warning: no such workspace: justinmichaud:eng/non-cocoa-fuzz-OOB-read-with-BMP-RLE-absolute-runs -- 'wk ls' lists them
 usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>
        wk pr -h for the rest
+
+- Check git configuration (author, email) in doctor, fix automatically.
+
+- Confirm layout tests can run on headless host or with real gpu
+
+- test build on buildbox4 and set default cmake args: --no-fatal-warnings, -DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++
+
+- confirm ccache can still cache after changing -j
+
+- there should also be a config for default flags on all bulids per configuration. per-machine flags should be set per config too.
+
+- zed remote git changes are very slow. Confirm that all machines get a faster git config symlinked.
+
+- the MACH prefix is confusing, since macos uses mach too.
+
+- tart vm guests should mention default password when entering, provisioning, starting, or launching zed. The default password should be changed to 1.
+
+- zed should launch trusted by default.
+
+- After this:
+
+tolken:host ~ ❯ wk new mya --target vm
+tolken:host ~ ❯ wk start mya           
+==> booting wk-mya (log: /Users/justinmichaud/.local/state/wk/vm/mya.run.log)
+==> egress proxy on 192.168.2.1:3128
+192.168.2.6
+tolken:host ~ ❯ wk zed mya
+
+admin@Manageds-Virtual-Machine WebKit % wk
+zsh: command not found: wk
+
+- new tart vm workspaces do not skip auto update prompt: they should get logged in to an empty desktop by default always, and a helper should confirm this state.
+
+- wk image list should list images that are in-progress too, and mention this state.
+
+- Audit every command for breakage of the shape `wk zed <workspace>` had: an
+  argument the command re-decides for itself and then mishandles. The workspace
+  name is now the dispatcher's alone; the other arguments -- configs, flags,
+  paths, subverbs -- are still parsed command by command.
+
+- The lifecycle notes are confusing:
+
+wk sysimage write --from <path> --disk <writer>:/dev/sdX
+wk boot rpi3                                     # one-shot: arms, reboots, self-reverts
+
+- wk zed should open in trusted mode: `session.trust_all_projects` in dotfiles/zed/settings.json, so every
+  project Zed opens is trusted
+
+- wk new should 1) fetch by default. 2), wk fetch should be faster. wk new by default leaves git detatched, with multiple remotes for many branches.
+  (agent: measured, not changed -- decisions E and F above)
+
+- Help options should always list all valid values for params (eg: bulid configurations)
