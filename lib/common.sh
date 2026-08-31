@@ -434,30 +434,63 @@ prompt_secret() {  # $1 = path to store at, $2 = human description, $3 = optiona
 # tailnet` must not disagree about where it lives.
 wk_tailscale_authkey_path() { printf '%s' "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"; }
 
+# Why this value is not the credential wk wants, or nothing when it is.
+#
+# The prefix is the whole of what can be checked here, and it is worth checking
+# because tailscale spells three very different powers the same way. An auth key
+# enrolls a node and can do nothing else; an API access token administers the
+# tailnet; an OAuth client secret mints tokens of its own. All three start
+# `tskey-`, all three would satisfy a `tskey-*` test, and the two broad ones
+# would then be seeded onto every card this fleet writes -- a board on a shelf
+# holding a credential that can delete the tailnet.
+#
+# What cannot be read from the key: whether it is tagged, reusable, ephemeral,
+# or when it expires. Those live in the admin console and answering them needs
+# an API token, which is precisely the credential this refuses to hold. So they
+# are stated where the key is asked for and reported as unverified, never
+# claimed.
+wk_tailscale_key_reject() { # <key>
+    case "${1:-}" in
+        tskey-auth-?*) return 0 ;;
+        tskey-api-*)
+            printf '%s' "that is an API access token (tskey-api-...), not an auth key.
+    It administers the whole tailnet -- it can add and delete devices, rewrite
+    the ACLs and mint further keys -- and this one is copied onto every card
+    written from here. An auth key can only enroll a node." ;;
+        tskey-client-*|tskey-oauth-*)
+            printf '%s' "that is an OAuth client secret (${1%%%%-*}-...), not an auth key.
+    It mints auth keys and API tokens of its own, so a board holding it holds
+    everything they can do. An auth key can only enroll a node." ;;
+        tskey-*)
+            printf '%s' "that starts 'tskey-' but is not an auth key: an auth key is
+    'tskey-auth-<id>-<secret>'." ;;
+        "") printf '%s' "there is nothing there." ;;
+        *)  printf '%s' "that does not look like a tailscale key at all (they start 'tskey-auth-')." ;;
+    esac
+    return 1
+}
+
 # No prompting, no side effects -- safe for `wk doctor`: a read-only report
 # must never be the thing that asks for a credential. Shape checked, not
 # just presence, since an empty file would otherwise read as "provisioned".
 wk_tailscale_authkey_present() {
     local p; p=$(wk_tailscale_authkey_path)
     [ -s "$p" ] || return 1
-    case "$(head -1 "$p" 2>/dev/null)" in
-        tskey-*) return 0 ;;
-        *) return 1 ;;
-    esac
+    wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)" >/dev/null
 }
 
 wk_tailscale_authkey() {
     local path="${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}"
-    local p
+    local p why
     p=$(prompt_secret "$path" \
         "A tailscale auth key -- tagged tag:wk, reusable, NOT ephemeral, longest expiry" \
         "https://login.tailscale.com/admin/settings/keys") || return 1
-    case "$(head -1 "$p" 2>/dev/null)" in
-        tskey-*) printf '%s' "$p"; return 0 ;;
-        *) warn "$p does not look like a tailscale auth key (expected it to start 'tskey-')."
-           warn "  Leaving it in place rather than deleting it -- check it and re-run."
-           return 1 ;;
-    esac
+    if why=$(wk_tailscale_key_reject "$(head -1 "$p" 2>/dev/null)"); then
+        printf '%s' "$p"; return 0
+    fi
+    warn "$p is not usable: $why"
+    warn "  Leaving it in place rather than deleting it -- check it and re-run."
+    return 1
 }
 
 # --- at exit ------------------------------------------------------------------

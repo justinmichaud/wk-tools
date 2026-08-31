@@ -127,7 +127,10 @@ config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_ARGS=*) echo "$e" ;; esac; done
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "WK_BUILD_ARGS=--jsc-only --release")
+        # The config's port and type, plus the all-config defaults
+        # (_CFG_DEFAULT_ARGS, build/configs.sh) -- and nothing from a machine.
+        self.assertEqual(cp.stdout.strip(),
+                         "WK_BUILD_ARGS=--jsc-only --no-fatal-warnings --release")
 
 
 class TestLowParallelismWarning(unittest.TestCase):
@@ -203,3 +206,109 @@ build_jobs polite
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAllConfigDefaults(unittest.TestCase):
+    """_CFG_DEFAULT_ARGS / _CFG_DEFAULT_CMAKE (build/configs.sh): the flags
+    that are a property of how this repository builds WebKit rather than of any
+    one config. Every CMake config starts with them, its own flags are appended
+    after and win, and the Xcode configs get neither -- xcodebuild takes no -D
+    flags."""
+
+    def _flags(self, config):
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load {config}
+echo "ARGS=$CFG_ARGS"
+echo "CMAKE=$CFG_CMAKE"
+''')
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        out = dict(l.split("=", 1) for l in cp.stdout.strip().splitlines())
+        return out["ARGS"], out["CMAKE"]
+
+    CMAKE_CONFIGS = ("jsc-debug", "jsc-release", "jsc-release-asan",
+                     "gtk-debug", "gtk-release", "gtk-release-asan",
+                     "wpe-release")
+    XCODE_CONFIGS = ("mac-debug", "mac-release", "mac-release-asan",
+                     "ios-sim-release")
+
+    def test_every_cmake_config_starts_with_them(self):
+        for config in self.CMAKE_CONFIGS:
+            args, cmake = self._flags(config)
+            with self.subTest(config=config):
+                self.assertTrue(args.startswith("--no-fatal-warnings "), args)
+                for flag in ("-DDEVELOPER_MODE=ON", "-DUSE_VULKAN=OFF",
+                             "-DENABLE_THUNDER=OFF", "-DUSE_LIBBACKTRACE=OFF"):
+                    self.assertIn(flag, cmake, f"{config}: {flag} missing")
+
+    def test_no_xcode_config_gets_them(self):
+        """build-webkit's Apple path has no --no-fatal-warnings and xcodebuild
+        ignores -D, so a default reaching them would be a broken build."""
+        for config in self.XCODE_CONFIGS:
+            args, cmake = self._flags(config)
+            with self.subTest(config=config):
+                self.assertNotIn("--no-fatal-warnings", args)
+                self.assertEqual(cmake, "")
+
+    def test_a_config_overrides_a_default_by_stating_the_opposite(self):
+        """cmake takes the last repeated -D, so a config's own flag wins:
+        jsc-debug wants libbacktrace where the default turns it off."""
+        _, cmake = self._flags("jsc-debug")
+        self.assertLess(cmake.index("-DUSE_LIBBACKTRACE=OFF"),
+                        cmake.index("-DUSE_LIBBACKTRACE=ON"),
+                        "the config's flag does not come last, so the default wins")
+
+    def test_no_config_repeats_a_default_it_agrees_with(self):
+        """A config states only what differs: a second copy of a default is a
+        line somebody has to keep in step with the default forever."""
+        for config in self.CMAKE_CONFIGS:
+            args, cmake = self._flags(config)
+            with self.subTest(config=config):
+                self.assertEqual(args.count("--no-fatal-warnings"), 1, args)
+                for flag in ("-DDEVELOPER_MODE=ON", "-DUSE_VULKAN=OFF",
+                             "-DENABLE_THUNDER=OFF"):
+                    self.assertEqual(cmake.count(flag), 1,
+                                     f"{config} states {flag} as well as the default")
+
+
+class TestPerConfigMachineFlags(unittest.TestCase):
+    """config_target_var (build/configs.sh): a machine may carry flags for one
+    config, beside the machine-wide pair, for a quirk that would be wrong on
+    that machine's other configs. Narrowest last, so it wins."""
+
+    def _flags(self, config, env):
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load {config}
+config_build_env /src/WebKit 4 10 native
+for e in "${{CFG_ENV[@]}}"; do
+    case "$e" in WK_BUILD_CMAKE=*) echo "$e" ;; WK_BUILD_ARGS=*) echo "$e" ;; esac
+done
+''', env=env)
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        return cp.stdout
+
+    def test_a_machines_flags_for_one_config_reach_that_config(self):
+        out = self._flags("wpe-release", {
+            "WK_TARGET_CMAKE": "-DMACHINEWIDE=1",
+            "WK_TARGET_CMAKE_wpe_release": "-DONECONFIG=1",
+            "WK_BUILD_ARGS_wpe_release": "--one-config",
+        })
+        self.assertIn("-DONECONFIG=1", out)
+        self.assertIn("--one-config", out)
+        self.assertLess(out.index("-DMACHINEWIDE=1"), out.index("-DONECONFIG=1"),
+                        "the per-config flag does not come last, so it cannot win")
+
+    def test_another_config_on_the_same_machine_does_not_get_them(self):
+        out = self._flags("jsc-release", {
+            "WK_TARGET_CMAKE_wpe_release": "-DONECONFIG=1",
+            "WK_BUILD_ARGS_wpe_release": "--one-config",
+        })
+        self.assertNotIn("-DONECONFIG=1", out)
+        self.assertNotIn("--one-config", out)

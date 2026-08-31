@@ -46,8 +46,14 @@ apply_default() {
         *)      die "defaults.conf: unknown type '$type' for $domain $key" ;;
     esac
     changed "default $domain $key = $value (was ${current:-unset})"
+    # The Dock reads its preferences once, at launch: a written key that nothing
+    # restarts is a setting that is in the file and not on the screen, which
+    # reads as "./setup did not work".
+    [ "$domain" = com.apple.dock ] && _dock_changed=1
+    return 0
 }
 
+_dock_changed=""
 if [ -f "$_defaults_conf" ]; then
     while read -r domain key type value; do
         case "$domain" in ''|'#'*) continue ;; esac
@@ -81,7 +87,11 @@ if [ "$WK_CHANGES" -gt 0 ]; then
         /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u \
             >/dev/null 2>&1 || warn "could not reload shortcuts; log out to apply"
     fi
+    if [ -n "$_dock_changed" ]; then
+        killall Dock 2>/dev/null && changed "restarted the Dock" \
+            || warn "could not restart the Dock; log out to apply its settings"
+    fi
     log "note: some settings apply only to newly launched apps"
 fi
 
-unset _defaults_conf _hotkeys_plist _tmp _hotkeys_changed
+unset _defaults_conf _hotkeys_plist _tmp _hotkeys_changed _dock_changed

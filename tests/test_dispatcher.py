@@ -5,6 +5,7 @@ phrase of the behaviour it checks.
 Run: python3 -m unittest tests.test_dispatcher -v
 """
 import os
+import subprocess
 import unittest
 
 from tests.support import (
@@ -373,13 +374,15 @@ class TestTopLevelCallOrder(WkTest):
                 continue
             lines = f.read_text(errors="replace").splitlines()
             # A function body in this tree opens with `name() {` in column 0
-            # and closes with `}` in column 0; anything between the two is
-            # resolved when that function is called, not where it is written.
+            # -- optionally with an argument comment after the brace, which is
+            # this tree's house style -- and closes with `}` in column 0;
+            # anything between the two is resolved when that function is
+            # called, not where it is written.
             defined = {}
             body_of = [None] * len(lines)
             cur = None
             for i, line in enumerate(lines):
-                m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\s*$", line)
+                m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\s*(#.*)?$", line)
                 if m and cur is None:
                     cur = m.group(1)
                     defined.setdefault(cur, i)
@@ -396,3 +399,141 @@ class TestTopLevelCallOrder(WkTest):
                 if fn in defined and defined[fn] > i:
                     bad.append(f"{f.name}:{i + 1}: calls {fn}(), defined at line {defined[fn] + 1}")
         self.assertEqual(bad, [], "functions called before they are defined: " + "; ".join(bad))
+
+
+class TestWhereTheNameSitsInArgv(WkTest):
+    """`takes=<n>` (the declaration) and argv_name (the dispatcher): a command
+    whose own positional follows the workspace name -- `wk pr [<workspace>]
+    <ref>` -- has a lone positional read as *its* argument, not as a workspace
+    name. Without it a pull request was refused as a workspace typo:
+
+        wk pr justinmichaud:eng/some-branch
+        warning: no such workspace: justinmichaud:eng/some-branch
+    """
+
+    FUNCS = ("decl_load", "in_list", "sub_override", "flag_override",
+             "cmd_name", "cmd_takes", "name_slot", "positional",
+             "positional_count", "argv_name", "resolve_target")
+
+    def _name(self, cmd, *args):
+        import shlex
+        lifted = "\n".join(
+            subprocess.run(["sed", "-n", f"/^{f}() {{/,/^}}/p", str(REPO / "wk")],
+                           capture_output=True, text=True).stdout
+            for f in self.FUNCS)
+        quoted = " ".join(shlex.quote(a) for a in args)
+        cp = self.bash(
+            f'. "{REPO}/lib/common.sh"\n{lifted}\n'
+            f'decl_load "{REPO}/cmd/{cmd}"\n'
+            f'decl=$(cmd_name {quoted}); slot=$(name_slot "$decl"); takes=$(cmd_takes {quoted})\n'
+            # `none` is decided by the caller (resolve_target, main), the same
+            # way the dispatcher does it -- argv_name only answers "which
+            # positional".
+            f'if [ "${{decl%%@*}}" = none ]; then echo NONE\n'
+            f'else argv_name "$slot" "$takes" {quoted} || echo NONE; fi\n')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.strip()
+
+    def test_a_lone_ref_is_the_commands_own_argument(self):
+        self.assertEqual(self._name("pr", "justinmichaud:eng/some-branch"), "NONE")
+        self.assertEqual(self._name("pr", "1234"), "NONE")
+
+    def test_a_workspace_in_front_of_the_ref_is_the_name(self):
+        self.assertEqual(self._name("pr", "myws", "1234"), "myws")
+
+    def test_a_subverb_that_takes_nothing_keeps_its_name_slot(self):
+        """`wk pr rebase [<ws>]` -- the name is the second positional, and a
+        bare `wk pr rebase` has none (sub rebase name=optional@2 takes=0)."""
+        self.assertEqual(self._name("pr", "rebase"), "NONE")
+        self.assertEqual(self._name("pr", "rebase", "myws"), "myws")
+
+    def test_a_command_with_no_takes_still_claims_its_first_positional(self):
+        """The default is takes=0: `wk stop <typo>` must still be refused as a
+        workspace name, not passed through as an argument -- once upon a time
+        that stopped every workspace on the machine."""
+        self.assertEqual(self._name("stop", "typo"), "typo")
+        self.assertEqual(self._name("build", "myws", "jsc-release"), "myws")
+
+    def test_a_command_that_takes_no_name_has_none_in_its_argv(self):
+        """name=none means the positionals are all the command's: `wk sysimage
+        write` is a subverb, never a workspace."""
+        self.assertEqual(self._name("sysimage", "write"), "NONE")
+
+    def test_takes_is_declared_wherever_a_positional_follows_an_optional_name(self):
+        """A command with an *optional* name and a positional of its own after
+        it must declare takes=, or that positional is read as a workspace name
+        and refused as a typo. name=required is a different shape: from a host
+        the name really is the first positional, and the `[<workspace>]` in
+        those synopses means "omitted inside a workspace" (`wk pick <commit>`)."""
+        import re
+        bad = []
+        for f in sorted((REPO / "cmd").iterdir()):
+            if not (f.is_file() and os.access(f, os.X_OK)):
+                continue
+            head = "\n".join(f.read_text(errors="replace").splitlines()[:15])
+            if "name=optional" not in head:
+                continue
+            syn = re.search(r"^# wk \S+ (.*?) -- ", head, re.M)
+            if not syn or "[<workspace>]" not in syn.group(1):
+                continue
+            after = syn.group(1).split("[<workspace>]", 1)[1].strip()
+            # An optional flag is not a positional: `[--fix]`, `[--keep-vm]`.
+            after = after.lstrip("[")
+            if not after or after.startswith("-"):
+                continue
+            if "takes=" not in head:
+                bad.append(f"{f.name}: '{syn.group(1)}' takes an argument after "
+                           f"the workspace but declares no takes=")
+        self.assertEqual(bad, [], "; ".join(bad))
+
+
+class TestTheDirectoryNamesTheWorkspaceOnABuildBox(WkTest):
+    """cwd_workspace (the dispatcher): a shared build machine holds several
+    workspaces side by side under one root and has no workspace marker to be
+    inside of, so the directory is what says which one is meant. Without it
+    the in-workspace interface -- `wk build <config>`, no name -- worked in a
+    container workspace and nowhere else."""
+
+    FUNC = "cwd_workspace"
+
+    def _name(self, marker_root, cwd, remote=True):
+        lifted = subprocess.run(
+            ["sed", "-n", f"/^{self.FUNC}() {{/,/^}}/p", str(REPO / "wk")],
+            capture_output=True, text=True).stdout
+        assert lifted.strip(), "cwd_workspace() is gone from the dispatcher"
+        stubs = (f'in_remote_host() {{ {"return 0" if remote else "return 1"}; }}\n'
+                 f'wk_remote_field() {{ printf %s {marker_root!r}; }}\n')
+        cp = self.bash(f'. "{REPO}/lib/common.sh"\n{stubs}{lifted}\n'
+                       f'cd {cwd!r} || exit 3\n'
+                       f'cwd_workspace || echo NONE\n')
+        self.assertIn(cp.returncode, (0,), cp.stdout + cp.stderr)
+        return cp.stdout.strip()
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.tmp / "wk"
+        (self.root / "ws" / "image-decoders" / "WebKit" / "Source").mkdir(parents=True)
+        (self.root / "cache").mkdir()
+
+    def test_standing_in_a_workspace_names_it(self):
+        self.assertEqual(
+            self._name(str(self.root), str(self.root / "ws" / "image-decoders")),
+            "image-decoders")
+
+    def test_standing_deep_inside_one_names_it_too(self):
+        self.assertEqual(
+            self._name(str(self.root),
+                       str(self.root / "ws" / "image-decoders" / "WebKit" / "Source")),
+            "image-decoders")
+
+    def test_standing_elsewhere_under_the_root_names_nothing(self):
+        self.assertEqual(self._name(str(self.root), str(self.root / "cache")), "NONE")
+        self.assertEqual(self._name(str(self.root), str(self.root)), "NONE")
+
+    def test_a_machine_that_is_not_a_build_box_is_never_asked(self):
+        """A workstation's own directories are not workspaces; the marker is
+        what makes the question meaningful at all."""
+        self.assertEqual(
+            self._name(str(self.root), str(self.root / "ws" / "image-decoders"),
+                       remote=False),
+            "NONE")

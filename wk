@@ -86,6 +86,12 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 #                    one means: all of them, or none. Either way a name that no
 #                    workspace answers to is refused here, so no command has to
 #                    decide what a name it does not recognise meant.
+#   takes=<n>        how many positionals of the command's own follow the name.
+#                    Default 0: the name is simply the positional at its slot.
+#                    With takes=1 -- `wk pr [<workspace>] <ref>` -- a lone
+#                    positional is the command's, not a name, and only a second
+#                    one makes the first the workspace. Without it the ref was
+#                    read as a workspace name and refused as a typo.
 #   ready=yes        wait for the workspace to finish creating first
 #   group=<g>        which block of `wk help` lists it
 #   lifecycle        creates or destroys the workspace record (new, rm)
@@ -121,7 +127,7 @@ decl_load() { # <impl>
     local WK_WHERE_VALUES="host store local workspace dynamic"
     D_WHERE=workspace D_NAME=none D_READY=no D_GROUP=other D_LIFECYCLE=""
     D_READONLY="" D_BROKER="" D_FORWARD=yes D_BARE="" D_POST="" D_SUB="" D_FLAG="" D_OUTSIDE="" D_NEEDS=""
-    D_HERE=""
+    D_HERE="" D_TAKES=0
     local line tok
     set -f   # `broker *` is a word, not a glob
     while IFS= read -r line; do
@@ -141,6 +147,7 @@ ${line# flag }" ; continue ;;
                               *) die "$(basename "$1"): where=$D_WHERE is not one of ${WK_WHERE_VALUES// /|}" ;;
                           esac ;;
                 name=*)   D_NAME=${tok#name=} ;;
+                takes=*)  D_TAKES=${tok#takes=} ;;
                 ready=*)  D_READY=${tok#ready=} ;;
                 group=*)  D_GROUP=${tok#group=} ;;
                 lifecycle) D_LIFECYCLE=1 ;;
@@ -234,6 +241,14 @@ cmd_name() { # <args...>
     printf '%s' "$n"
 }
 
+# How many positionals the command itself takes after the name, after the
+# sub/flag overrides -- the other half of where the name sits.
+cmd_takes() { # <args...>
+    local n
+    n=$(flag_override takes ${1+"$@"}) || n=$(sub_override takes "${1:-}") || n="$D_TAKES"
+    printf '%s' "$n"
+}
+
 # Where this invocation runs, after the sub/flag overrides.
 cmd_where() { # <impl> <args...>
     local impl="$1" w; shift
@@ -292,6 +307,50 @@ positional() { # <n> <args...>
         case "$a" in -*) ;; *) i=$((i + 1)); [ "$i" -eq "$n" ] && { printf '%s' "$a"; return 0; } ;; esac
     done
     return 1
+}
+
+# How many positionals there are, so a command's own arguments can be told
+# apart from a workspace name that may or may not be in front of them.
+positional_count() { # <args...>
+    local a i=0
+    for a in ${1+"$@"}; do
+        case "$a" in -*) ;; *) i=$((i + 1)) ;; esac
+    done
+    printf '%s' "$i"
+}
+
+# The workspace name in this argv, or nothing. The positional at the name's
+# slot -- but only when the command's own positionals (`takes`) are all still
+# there after it, so `wk pr <ref>` is a ref and `wk pr <ws> <ref>` is both.
+#
+# One function, because three questions need exactly this answer and a fourth
+# copy of it is how `wk pr` came to refuse a pull request as a missing
+# workspace: which machine the command is about (resolve_target), whether a
+# required name is missing, and which positional to lift out of argv.
+argv_name() { # <slot> <takes> <args...>
+    local slot="$1" takes="$2"; shift 2
+    [ "$(positional_count ${1+"$@"})" -ge "$((slot + takes))" ] || return 1
+    positional "$slot" ${1+"$@"}
+}
+
+# The workspace whose tree the person is standing in, or nothing.
+#
+# On a shared build machine there is no workspace *marker* to be inside of --
+# several workspaces live side by side under one root, and the marker is what a
+# container or a guest has -- so the directory is what says which one is meant.
+# `cd $ROOT/ws/<name> && wk build gtk-release` then behaves exactly as the same
+# command does inside a container workspace, which is what the in-workspace
+# interface promises (`wk help design`). An explicit name in argv still wins.
+cwd_workspace() {
+    in_remote_host || return 1
+    local root name
+    root=$(wk_remote_field root) || return 1
+    [ -n "$root" ] || return 1
+    case "$PWD/" in "$root"/ws/?*) ;; *) return 1 ;; esac
+    name=${PWD#"$root"/ws/}
+    name=${name%%/*}
+    [ -n "$name" ] || return 1
+    printf '%s' "$name"
 }
 
 # ARGS = <args...> without the <n>th positional.
@@ -449,7 +508,7 @@ explain_cmd() { # <cmd> <impl>
 # `--target` on the command line (how `wk new` chooses), then the registry --
 # a file test per target, no ssh, nothing started.
 resolve_target() {
-    local prev='' a name=''
+    local prev='' a name='' decl slot takes
     [ -n "${WK_TARGET:-}" ] && { printf '%s' "$WK_TARGET"; return 0; }
     for a in "$@"; do
         if [ "$prev" = --target ]; then printf '%s' "$a"; return 0; fi
@@ -458,9 +517,16 @@ resolve_target() {
         # sends the command to a machine nobody named.
         case "$a" in --target=?*) printf '%s' "${a#*=}"; return 0 ;; esac
         prev="$a"
-        case "$a" in -*) ;; *) [ -z "$name" ] && name="$a" ;; esac
     done
-    if [ -n "$name" ]; then ws_target "$name"; return 0; fi
+    # Which positional is the name is the declaration's answer (argv_name), not
+    # "the first one that is not a flag": a command declaring name=none has no
+    # workspace in its argv at all, and one declaring takes=<n> has its own
+    # arguments there instead.
+    decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); takes=$(cmd_takes "$@")
+    if [ "${decl%@*}" != none ]; then
+        name=$(argv_name "$slot" "$takes" "$@") || name=$(cwd_workspace) || name=""
+        [ -z "$name" ] || { ws_target "$name"; return 0; }
+    fi
     printf '%s' container
 }
 
@@ -815,7 +881,7 @@ forward_to_vm() {
 
 main() {
     [ $# -ge 1 ] || usage
-    local cmd="$1" _a _seen_dashdash="" _rest where name="" delegate="" decl="" slot=""; shift
+    local cmd="$1" _a _seen_dashdash="" _rest where name="" delegate="" decl="" slot="" takes=0; shift
     case "$cmd" in
         help|-h|--help) help_doc "${1:-}" ;;
         setup) exec "$WK_ROOT/setup" "$@" ;;
@@ -871,7 +937,9 @@ main() {
     # How the workspace name arrives, once for the two questions that need it:
     # which machine this command is about, and which positional to take the
     # name from further down.
-    if [ "$where" = workspace ]; then decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); fi
+    if [ "$where" = workspace ]; then
+        decl=$(cmd_name "$@"); slot=$(name_slot "$decl"); takes=$(cmd_takes "$@")
+    fi
 
     # Whether this command is about a workspace another machine owns, decided
     # once here so nothing decides it again. Before check_needs, because what
@@ -909,12 +977,13 @@ main() {
 
     # --- a workspace command ---------------------------------------------------
     if ! in_workspace && [ "${decl%@*}" = required ]; then
-        positional "$slot" "$@" >/dev/null || usage_die "$cmd" "$impl"
+        argv_name "$slot" "$takes" "$@" >/dev/null || cwd_workspace >/dev/null \
+            || usage_die "$cmd" "$impl"
     fi
     if in_workspace; then
         : "${WK_TARGET:=local}"; export WK_TARGET
         name=$(wk_self)
-        if [ "${decl%@*}" != none ] && [ "$(positional "$slot" "$@" || true)" = "$name" ]; then
+        if [ "${decl%@*}" != none ] && [ "$(argv_name "$slot" "$takes" "$@" || true)" = "$name" ]; then
             die "this is workspace '$name', and there is no workspace argument in here --
     every command acts on this one. Drop the name: wk $cmd"
         fi
@@ -955,9 +1024,13 @@ main() {
     case "${decl%@*}" in
         required|optional)
             if [ -z "$name" ]; then
-                _a=$(positional "$slot" "$@" || true)
+                _a=$(argv_name "$slot" "$takes" "$@" || true)
                 if [ -n "$_a" ]; then
                     name="$_a"; without_positional "$slot" "$@"; set -- ${ARGS[@]+"${ARGS[@]}"}
+                else
+                    # Nothing in argv: the directory, on a machine where that
+                    # is what "this workspace" means (cwd_workspace).
+                    name=$(cwd_workspace || true)
                 fi
             fi ;;
     esac

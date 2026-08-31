@@ -430,12 +430,26 @@ _ws_building() { # <workspace>
 cmd_ls() {
     [ $# -eq 0 ] || die "usage: wk sysimage ls|list; unexpected argument: $1"
 
-    local n=0 builder ws path bytes mtime prof machine note
+    local n=0 builder ws path bytes mtime prof machine note state
     local rows; rows=$(image_workspace_scan)
 
     while IFS="$(printf '\t')" read -r builder ws path bytes mtime; do
         [ -n "${builder:-}" ] || continue
         n=$((n + 1))
+        # On the first row, not before the loop: with nothing to list the
+        # answer is the paragraph below, and a header over an empty table reads
+        # as a listing that failed.
+        [ "$n" -eq 1 ] && printf '%-40s %-10s %-8s %-9s %-8s %s\n' \
+            WORKSPACE MACHINE BUILDER STATE SIZE BUILT
+
+        # The state is a column, not a footnote: an image being built right now
+        # is the one a person is most likely to be looking for, and reading it
+        # off the size column ("-") is guessing. `building` is the workspace's
+        # own live answer (_ws_building), so it is never a stale record.
+        if _ws_building "$ws"; then state=building
+        elif [ "$path" = - ];  then state=none
+        else                        state=ready
+        fi
 
         prof=$(_ws_profile "$ws" || printf '')
         machine=""; note=""
@@ -451,17 +465,18 @@ cmd_ls() {
             # An image workspace with no image: a yocto image stage removes the
             # last one as it rebuilds, and a workspace that vanishes from the
             # listing for the hours that takes is a workspace nobody can find.
-            printf '%-40s %-10s %-8s %-8s %s\n' "$ws" "${machine:-?}" "$builder" "-" "-"
+            printf '%-40s %-10s %-8s %-9s %-8s %s\n' \
+                "$ws" "${machine:-?}" "$builder" "$state" "-" "-"
             printf '    %s\n' "no image here yet"
-            _ws_building "$ws" \
-                && printf '    %s\n' "a build is running in this workspace" \
+            [ "$state" = building ] \
+                && printf "    a build is running here -- 'wk logs %s' follows it\n" "$ws" \
                 || printf "    'wk sysimage build %s' builds one\n" "${prof:-<profile>}"
         else
-            printf '%-40s %-10s %-8s %-8s %s\n' \
-                "$ws" "${machine:-?}" "$builder" "$(human_bytes "$bytes")" "$mtime"
+            printf '%-40s %-10s %-8s %-9s %-8s %s\n' \
+                "$ws" "${machine:-?}" "$builder" "$state" "$(human_bytes "$bytes")" "$mtime"
             # This path is the image; nothing copied it anywhere.
             printf '    %s\n' "$path"
-            _ws_building "$ws" && printf '    %s\n' "a build is running in this workspace -- these bytes may be the previous one"
+            [ "$state" = building ] && printf "    a build is running here -- these bytes are the previous image; 'wk logs %s' follows it\n" "$ws"
         fi
         # The image's WebKit slots, from their own manifests (wk sysimage webkit).
         local sj

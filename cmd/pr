@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
-# wk: where=workspace name=optional ready=yes group=sources
+# wk: where=workspace name=optional takes=1 ready=yes group=sources
 # wk: sub open where=host needs=gh,gh-auth
-# wk: sub rebase name=optional@2
+# wk: sub rebase name=optional@2 takes=0
 #
 #   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
 #   wk pr 1234                                 # WebKit/WebKit pull request #1234
@@ -188,8 +188,15 @@ pr_open_target $(sh_quote "$SRC")"
     exit 0
 fi
 
-[ -n "$NAME" ] && [ -n "$SPEC" ] \
+[ -n "$SPEC" ] \
     || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]', or 'wk pr open <ws> [--draft] [--web]' (from the host); see wk pr -h"
+# The ref is a ref, never a workspace name (takes=1, the declaration above), so
+# what is missing here is the workspace -- said as that, rather than as a
+# refusal of the ref.
+[ -n "$NAME" ] \
+    || die "'wk pr $SPEC' does not say which workspace to check it out into.
+    Name one:        wk pr <workspace> $SPEC   ('wk ls' lists them)
+    or run it in one: wk pr $SPEC"
 [ -z "${2:-}" ] \
     || die "usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>; unexpected argument: $2; see wk pr -h"
 shift $#

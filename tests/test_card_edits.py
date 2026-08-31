@@ -900,3 +900,71 @@ disk_check_boot_files /dev/sdX@second rpi3 some.dtb && echo CONTINUED
         self.assertNotEqual(cp.returncode, 0)
         self.assertNotIn("CONTINUED", cp.stdout)
         self.assertIn("missing files", cp.stderr)
+
+
+class TestListingSaysWhichImagesAreInProgress(WkTest):
+    """`wk sysimage ls` carries the state in a column: an image being built
+    right now is the one most likely being looked for, and `-` in the size
+    column is not an answer. `building` is the workspace's own live answer
+    (_ws_building), never a record."""
+
+    def test_a_running_build_is_stated_on_the_row(self):
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/image.sh"
+{_lift(REPO / "cmd" / "sysimage", "_ws_profile")}
+{_lift(REPO / "cmd" / "sysimage", "cmd_ls")}
+image_workspace_scan() {{ printf 'yocto\\tyocto-p\\t-\\t0\\t-\\n'; }}
+_ws_building() {{ return 0; }}
+cmd_ls
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        row = [l for l in cp.stdout.splitlines() if l.startswith("yocto-p")]
+        self.assertTrue(row, cp.stdout)
+        self.assertIn("building", row[0], row[0])
+        self.assertIn("STATE", cp.stdout, "the listing has no state column")
+        self.assertIn("wk logs yocto-p", cp.stdout, cp.stdout)
+
+    def test_an_image_present_while_a_build_runs_says_both(self):
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/image.sh"
+{_lift(REPO / "cmd" / "sysimage", "_ws_profile")}
+{_lift(REPO / "cmd" / "sysimage", "cmd_ls")}
+image_workspace_scan() {{ printf 'yocto\\tyocto-p\\t/img/a.wic.xz\\t1024\\t2026-08-30\\n'; }}
+_ws_building() {{ return 0; }}
+cmd_ls
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        row = [l for l in cp.stdout.splitlines() if l.startswith("yocto-p")]
+        self.assertIn("building", row[0], row[0])
+        self.assertIn("previous image", cp.stdout, cp.stdout)
+
+    def test_a_finished_image_is_ready_and_an_empty_workspace_is_none(self):
+        for path, want in (("/img/a.wic.xz", "ready"), ("-", "none")):
+            cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/image.sh"
+{_lift(REPO / "cmd" / "sysimage", "_ws_profile")}
+{_lift(REPO / "cmd" / "sysimage", "cmd_ls")}
+image_workspace_scan() {{ printf 'yocto\\tyocto-p\\t{path}\\t1024\\t2026-08-30\\n'; }}
+_ws_building() {{ return 1; }}
+cmd_ls
+''')
+            with self.subTest(path=path):
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                row = [l for l in cp.stdout.splitlines() if l.startswith("yocto-p")]
+                self.assertIn(want, row[0], row[0])
+
+    def test_nothing_to_list_prints_no_header(self):
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/image.sh"
+{_lift(REPO / "cmd" / "sysimage", "_ws_profile")}
+{_lift(REPO / "cmd" / "sysimage", "cmd_ls")}
+image_workspace_scan() {{ :; }}
+cmd_ls
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("STATE", cp.stdout, "a header over an empty table")
+        self.assertIn("no workspace here has built an image", cp.stdout + cp.stderr)

@@ -499,7 +499,12 @@ class TestDispatcherForwardingRuleForSync(unittest.TestCase):
 
     FUNCS = "\n".join(
         _lift_func(REPO / "wk", f)
-        for f in ("decl_load", "in_list", "sub_override", "flag_override", "cmd_where", "resolve_target")
+        # resolve_target asks the declaration where the name sits rather than
+        # taking the first positional, so its helpers come with it.
+        for f in ("decl_load", "in_list", "sub_override", "flag_override",
+                  "cmd_where", "cmd_name", "cmd_takes", "name_slot",
+                  "positional", "positional_count", "argv_name",
+                  "resolve_target")
     )
 
     def _where(self, *args):
@@ -518,9 +523,12 @@ class TestDispatcherForwardingRuleForSync(unittest.TestCase):
         stub = ""
         if ws_target_returns is not None:
             stub = f'ws_target() {{ printf %s {shlex.quote(ws_target_returns)}; }}\n'
+        # decl_load first, as the dispatcher does: resolve_target asks the
+        # declaration where the workspace name sits.
         script = (
             ". lib/common.sh\n" + stub + self.FUNCS
-            + "\nresolve_target " + " ".join(shlex.quote(a) for a in args) + "\n"
+            + "\ndecl_load cmd/sync\nresolve_target "
+            + " ".join(shlex.quote(a) for a in args) + "\n"
         )
         cp = bash(script)
         self.assertEqual(cp.returncode, 0, cp.stderr)

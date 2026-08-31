@@ -4,6 +4,10 @@
 #   CFG_TYPE      Debug | Release
 #   CFG_ARGS      extra arguments to Tools/Scripts/build-webkit
 #   CFG_CMAKE     extra -D flags
+#
+# Every CMake config also starts with the flags in _CFG_DEFAULT_ARGS and
+# _CFG_DEFAULT_CMAKE below, and a machine may add its own on top -- see
+# config_target_var for the per-config half of that.
 #   CFG_CC/CXX    compiler
 #   CFG_BUILDSYS  cmake | xcode
 #
@@ -74,12 +78,37 @@ _CFG_RELWITHDEBINFO='-DCMAKE_BUILD_TYPE=RelWithDebInfo'
 _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DCMAKE_C_FLAGS_RELWITHDEBINFO=\"-O3 -g -DNDEBUG\""
 _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DCMAKE_CXX_FLAGS_RELWITHDEBINFO=\"-O3 -g -DNDEBUG\""
 
+# --- what every CMake config starts with -------------------------------------
+# One place for the flags that are not a property of any one config but of how
+# this repository builds WebKit at all. A config's own CFG_ARGS/CFG_CMAKE is
+# appended *after* these, so a config that wants the opposite states it and
+# wins -- cmake takes the last repeated -D, and jsc-debug's
+# USE_LIBBACKTRACE=ON is exactly that case.
+#
+#   --no-fatal-warnings   every config here builds with DEVELOPER_MODE=ON,
+#                         which makes a compiler warning stop the build. A
+#                         warning in WebKit's tree from a newer clang than the
+#                         one it was written against is nobody's fault and not
+#                         ours to fix on the way to a measurement.
+#   USE_LIBBACKTRACE=OFF  the library is not on every machine, and its absence
+#                         is a configure failure rather than a missing feature.
+#   DEVELOPER_MODE=ON     the assertions, test targets and tools every workflow
+#                         in this repo uses.
+#   USE_VULKAN=OFF        }  neither is built or measured here, and both pull
+#   ENABLE_THUNDER=OFF    }  in dependencies a build machine may not have.
+#
+# CMake ports only: xcodebuild takes no -D flags, and build-webkit's Apple path
+# does not offer --no-fatal-warnings.
+_CFG_DEFAULT_ARGS='--no-fatal-warnings'
+_CFG_DEFAULT_CMAKE='-DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF'
+
 # DEBUG_FISSION is stated rather than left to its default: WebKitCommon.cmake
 # computes that default before Options${PORT} sets ENABLE_DEVELOPER_MODE, so
 # no WPE or GTK build ever turns fission on by itself.
 _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DDEBUG_FISSION=ON"
 
 config_load() {
+    CFG_NAME="$1"
     CFG_PORT=""; CFG_TYPE=""; CFG_ARGS=""; CFG_CMAKE=""
     CFG_BUILDSYS=cmake
     CFG_CC="$WK_CC"; CFG_CXX="$WK_CXX"
@@ -87,40 +116,42 @@ config_load() {
     case "$1" in
         jsc-debug)
             CFG_PORT="--jsc-only"; CFG_TYPE=Debug
-            CFG_ARGS="--debug --no-fatal-warnings"
-            # ALT_ENTRY on in debug: the extra offline-asm entry points make
-            # crash backtraces through generated code readable.
-            CFG_CMAKE="-DUSE_LIBBACKTRACE=ON -DDEVELOPER_MODE=ON -DENABLE_OFFLINE_ASM_ALT_ENTRY=1"
+            CFG_ARGS="--debug"
+            # Both against the defaults above: libbacktrace is worth its
+            # dependency in a debug build, where a readable stack is the point,
+            # and ALT_ENTRY's extra offline-asm entry points make crash
+            # backtraces through generated code readable.
+            CFG_CMAKE="-DUSE_LIBBACKTRACE=ON -DENABLE_OFFLINE_ASM_ALT_ENTRY=1"
             ;;
         jsc-release)
             CFG_PORT="--jsc-only"; CFG_TYPE=Release
             CFG_ARGS="--release"
-            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DENABLE_OFFLINE_ASM_ALT_ENTRY=0"
+            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DENABLE_OFFLINE_ASM_ALT_ENTRY=0"
             ;;
         jsc-release-asan)
             CFG_PORT="--jsc-only"; CFG_TYPE=Release
             CFG_ARGS="--release --asan"
-            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DDEVELOPER_MODE=ON -DUSE_LIBBACKTRACE=OFF"
+            CFG_CMAKE="$_CFG_RELWITHDEBINFO"
             ;;
         gtk-debug)
             CFG_PORT="--gtk"; CFG_TYPE=Debug
-            CFG_ARGS="--debug --no-fatal-warnings"
-            CFG_CMAKE="-DUSE_LIBBACKTRACE=ON -DDEVELOPER_MODE=ON"
+            CFG_ARGS="--debug"
+            CFG_CMAKE="-DUSE_LIBBACKTRACE=ON"
             ;;
         gtk-release)
             CFG_PORT="--gtk"; CFG_TYPE=Release
             CFG_ARGS="--release"
-            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DDEVELOPER_MODE=ON"
+            CFG_CMAKE="$_CFG_RELWITHDEBINFO"
             ;;
         gtk-release-asan)
             CFG_PORT="--gtk"; CFG_TYPE=Release
-            CFG_ARGS="--release --asan --no-fatal-warnings"
-            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DDEVELOPER_MODE=ON -DUSE_LIBBACKTRACE=OFF -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF"
+            CFG_ARGS="--release --asan"
+            CFG_CMAKE="$_CFG_RELWITHDEBINFO"
             ;;
         wpe-release)
             CFG_PORT="--wpe"; CFG_TYPE=Release
-            CFG_ARGS="--release --no-fatal-warnings"
-            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DDEVELOPER_MODE=ON -DENABLE_WPE_PLATFORM=ON -DENABLE_THUNDER=OFF"
+            CFG_ARGS="--release"
+            CFG_CMAKE="$_CFG_RELWITHDEBINFO -DENABLE_WPE_PLATFORM=ON"
             ;;
         # --- Apple ports ------------------------------------------------------
         # No port flag: build-webkit defaults to Apple Cocoa on Darwin and
@@ -150,6 +181,13 @@ config_load() {
             ;;
     esac
 
+    # The all-config defaults go in front of what the config asked for, so the
+    # config's own flags are the ones that win where the two disagree.
+    if [ "$CFG_BUILDSYS" = cmake ]; then
+        CFG_ARGS="$_CFG_DEFAULT_ARGS${CFG_ARGS:+ $CFG_ARGS}"
+        CFG_CMAKE="$_CFG_DEFAULT_CMAKE${CFG_CMAKE:+ $CFG_CMAKE}"
+    fi
+
     # Decided here so the job count, the watchdog's budget and the value
     # carried into the target all agree; an explicit WK_MB_PER_JOB wins.
     [ -n "${WK_MB_PER_JOB_EXPLICIT:-}" ] || WK_MB_PER_JOB=$(config_mb_per_job)
@@ -170,6 +208,20 @@ config_mb_per_job() {
     esac
 }
 
+# A machine's flags for *one* config: targets/hosts/<name>.conf may set
+# WK_TARGET_CMAKE_<config> or WK_BUILD_ARGS_<config> beside the machine-wide
+# pair, with the config's dashes written as underscores --
+# WK_TARGET_CMAKE_wpe_release. For a quirk that is a property of one config on
+# one machine, where the machine-wide variable would reach builds it is wrong
+# for. Empty when the conf says nothing, which is the normal case.
+#
+# ${!name} rather than eval: bash 3.2 has indirect expansion and it cannot run
+# what a conf file's value happens to look like.
+config_target_var() { # <variable stem>
+    local n="$1_$(printf '%s' "${CFG_NAME:-}" | tr -- - _)"
+    printf '%s' "${!n:-}"
+}
+
 config_build_env() {
     local src="$1" jobs="$2" nice="$3" arch="${4:-native}"
 
@@ -183,12 +235,17 @@ config_build_env() {
         out=$(config_build_dir "$src")
     fi
 
-    # Appended in order (architecture, machine conf, `wk build --cmake`), so
-    # each wins where it overlaps -- cmake takes the last repeated -D.
+    # Appended in order (architecture, machine conf, that machine's flags for
+    # *this* config, `wk build --cmake`), so each wins where it overlaps --
+    # cmake takes the last repeated -D. Narrowest last, so a machine's
+    # per-config flag beats its machine-wide one.
     local cmakeargs="$CFG_CMAKE"
     local archcmake; archcmake=$(arch_cmake "$arch" "$CFG_PORT")
     [ -n "$archcmake" ] && cmakeargs="$cmakeargs $archcmake"
     [ -n "${WK_TARGET_CMAKE:-}" ] && cmakeargs="$cmakeargs $WK_TARGET_CMAKE"
+    local cfgcmake; cfgcmake=$(config_target_var WK_TARGET_CMAKE)
+    [ -n "$cfgcmake" ] && cmakeargs="$cmakeargs $cfgcmake"
+    local cfgargs; cfgargs=$(config_target_var WK_BUILD_ARGS)
     [ -n "${WK_EXTRA_CMAKE:-}" ] && cmakeargs="$cmakeargs $WK_EXTRA_CMAKE"
 
     # /ccache is the container's bind-mounted store cache; see t_ccache_dir
@@ -207,7 +264,7 @@ config_build_env() {
         "WK_BUILDSYS=$CFG_BUILDSYS"
         # WK_TARGET_BUILD_ARGS is targets/hosts/<name>.conf's WK_BUILD_ARGS,
         # named differently so folding it in doesn't overwrite these flags.
-        "WK_BUILD_ARGS=$CFG_PORT $CFG_ARGS${WK_TARGET_BUILD_ARGS:+ $WK_TARGET_BUILD_ARGS}"
+        "WK_BUILD_ARGS=$CFG_PORT $CFG_ARGS${WK_TARGET_BUILD_ARGS:+ $WK_TARGET_BUILD_ARGS}${cfgargs:+ $cfgargs}"
         "WK_BUILD_CMAKE=$cmakeargs"
         "WK_BUILD_DIR=$(config_build_dir "$src")"
         "WK_MB_PER_JOB=$WK_MB_PER_JOB"

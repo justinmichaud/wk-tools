@@ -125,16 +125,35 @@ if [ -n "$ZSH_VERSION" ]; then
   #     unsetopt INC_APPEND_HISTORY_TIME; setopt SHARE_HISTORY
   unsetopt SHARE_HISTORY
 
+  # --- 3b. Keymap and keys ---------------------------------------------------
+  # The keymap is chosen *before* any key is bound, and nothing after this
+  # chooses again: `bindkey -e` links a fresh emacs keymap over `main`, so a
+  # binding made while `main` was viins is discarded by it. That is machine-
+  # dependent -- zsh picks vi mode when $EDITOR/$VISUAL contains "vi", so a
+  # host without helix starts in viins and a host with it starts in emacs --
+  # which is how Home worked on one machine and not the next. WK_ZSH_VI=1
+  # asks for vi mode; then the bindings below land in viins instead.
+  if [ -z "${WK_ZSH_VI:-}" ]; then bindkey -e; else bindkey -v; fi
+
   # Bound explicitly rather than left to zle's terminfo defaults: the TERM
   # fallback above covers "no entry"; this covers "entry present but wrong"
   # (e.g. `kbs` still ^H while kitty sends ^?).
+  #
+  # Home and End arrive in two encodings and both are bound, because which one
+  # a terminal sends is not ours to choose: zle turns on application cursor
+  # mode (terminfo `smkx`) for the duration of a prompt, and a terminal in that
+  # mode sends ^[OH / ^[OF where it otherwise sends ^[[H / ^[[F.
   bindkey "^?"    backward-delete-char  # Backspace
   bindkey "^H"    backward-delete-char  # Backspace, terminals/ttys still on kbs=^H
   bindkey "^[[3~" delete-char           # Delete
   bindkey "^[[H"  beginning-of-line     # Home
+  bindkey "^[OH"  beginning-of-line     # Home, application cursor mode
   bindkey "^[[1~" beginning-of-line     # Home, older xterm encoding
+  bindkey "^[[7~" beginning-of-line     # Home, rxvt encoding
   bindkey "^[[F"  end-of-line           # End
+  bindkey "^[OF"  end-of-line           # End, application cursor mode
   bindkey "^[[4~" end-of-line           # End, older xterm encoding
+  bindkey "^[[8~" end-of-line           # End, rxvt encoding
 
 fi
 
@@ -228,13 +247,6 @@ _wk_ps_build=""
   _wk_ps_build="${XDG_STATE_HOME:-$HOME/.local/state}/wk/ws/$_wk_ps_ws/build.status"
 
 if [ -n "$ZSH_VERSION" ]; then
-  # zsh picks vi mode when $EDITOR/$VISUAL contains "vi" -- so the keymap
-  # depends on which editor happens to be installed (helix absent -> EDITOR=vim
-  # -> viins, where ^A/^E self-insert instead of moving the cursor, rather than
-  # the emacs bindings a machine with helix gets). Stated here so it isn't
-  # silently machine-dependent; WK_ZSH_VI=1 forces vi mode.
-  if [ -z "${WK_ZSH_VI:-}" ]; then bindkey -e; else bindkey -v; fi
-
   setopt PROMPT_SUBST
   # zstat, so the index size below costs no process. Must survive being absent too.
   zmodload zsh/stat 2>/dev/null || true
