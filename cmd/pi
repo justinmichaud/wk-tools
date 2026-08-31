@@ -33,6 +33,14 @@
 #                                         same syntax as wk bench
 #       --ab A,B [--rounds N]             interleaved A/B between two deployed
 #                                         slots, reported with wk bench report
+#       --ab-systems A,B [--rounds N]     interleaved A/B between two *system
+#                                         images* on the bench medium
+#                                         (wk sysimage write ...@second/@third):
+#                                         each leg boots its system, verifies
+#                                         the running marker is that system --
+#                                         never the rescue, never the other
+#                                         leg -- and measures the --slot NAME
+#                                         both carry
 #       --task <name>                     file the runs into an existing task
 #                                         (wk ab's); without it this command
 #                                         is its own task
@@ -486,10 +494,14 @@ pi_launch_cmd() { # <slot> <slot.json> <cores wrap>
     env=$(wkslot env "$json" "$root" | tr '\n' ' ')
     browser=$(wkslot get "$json" browser)
     # Under a compositor the browser needs weston's own environment, read out
-    # of the running compositor rather than assumed. POSIX sh, not bash: the
-    # driver runs this through the board's /bin/sh, busybox ash included.
+    # of the running compositor rather than assumed, and the backend named
+    # explicitly: the 2.38 buildroot image cannot not build wpebackend-rdk
+    # (the fork force-selects it) and rdk's cmake claims the
+    # libWPEBackend-default.so symlink, so the default would be the stub.
+    # POSIX sh, not bash: the driver runs this through the board's /bin/sh,
+    # busybox ash included.
     [ "${PI_SESSION:-rdk}" = rdk ] \
-        || wenv='eval "$(strings /proc/$(pidof weston-desktop-shell)/environ | grep -E "^(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)=")" && export XDG_RUNTIME_DIR WAYLAND_DISPLAY && '
+        || wenv='eval "$(strings /proc/$(pidof weston-desktop-shell)/environ | grep -E "^(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)=")" && export XDG_RUNTIME_DIR WAYLAND_DISPLAY && export WPE_BACKEND_LIBRARY=libWPEBackend-fdo-1.0.so && '
     case "$browser" in
         cog)
             printf 'cd /tmp && %sexec %senv %s /usr/bin/cog' "$wenv" "$cores" "$env" ;;
@@ -553,70 +565,18 @@ pi_bench_record() { # <out dir> <slot> <slot.json>
         --bool forced="${WK_FORCE:-}" --bool software="$software" --bool cores.pinned="$cores"
 }
 
-PI_TASK=""; PI_TASK_OWNED=""
-PI_AB_ROUND=""; PI_AB_ARM=""; PI_AB_A=""; PI_AB_B=""
-cmd_bench() {
-    local machine="${1:-}" plan="${2:-}"; shift $(( $# < 2 ? $# : 2 ))
-    local count="" timeout_s="" slot=a ab="" rounds=3 cores="" task=""
-    # The request's moment names the task this command becomes, when it is
-    # its own: taken now, before any board is probed.
-    local stamp; stamp=$(bench_task_stamp)
-    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B [--rounds N]] [--count N] [--timeout S] [--cores <set>] [--task NAME]; see wk pi -h"
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --count)   count="${2:-}"; shift ;;
-            --timeout) timeout_s="${2:-}"; shift ;;
-            --task)    task="${2:-}"; shift ;;
-            --slot)    slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
-            # Same cpu-list syntax as `wk bench --cores`, through the same
-            # parser (lib/wkdata.py); applied to the board's browser.
-            --cores)   cores="${2:-}"; shift ;;
-            # Two slots, alternated. See pi_bench_ab. Validated here so a
-            # malformed pair is refused as one, not as a missing slot.
-            --ab)      ab="${2:-}"
-                       case "$ab" in
-                           *,*) ;;
-                           *) die "$usage; --ab takes two slot names separated by a comma, e.g. --ab base,pr" ;;
-                       esac
-                       image_check_slot_name "${ab%%,*}"; image_check_slot_name "${ab##*,}"
-                       [ "${ab%%,*}" != "${ab##*,}" ] \
-                           || die "$usage; --ab needs two different slots (got '${ab%%,*}' twice).
-    Two runs from one slot measure the same binary twice, which is a
-    repeatability check rather than an A/B -- '--count N' is the way to ask for
-    that."
-                       shift ;;
-            --rounds)  rounds="${2:-}"; shift ;;
-            --keep-session) die "'--keep-session' is gone: nothing is torn down between runs any more" ;;
-            -*) die "$usage; unknown option: $1" ;;
-            *)  die "$usage; unexpected argument: $1" ;;
-        esac
-        shift
-    done
-    [ -n "$machine" ] && [ -n "$plan" ] || die "$usage"
-    # A plan name is a file name in the runner tree, and lands on command
-    # lines this command builds; refused before either.
-    valid_name "$plan" || die "'$plan' is not a plan name (letters, digits, '.', '_' and '-')"
-    [ -z "$cores" ] || wkdata cores-valid "$cores" \
-        || die "--cores '$cores' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)"
-    case "$rounds" in ''|*[!0-9]*) die "--rounds takes a number (got '$rounds')" ;; esac
-    [ -z "$timeout_s" ] || case "$timeout_s" in *[!0-9]*) die "--timeout takes seconds (got '$timeout_s')" ;; esac
-    # An existing task is checked before any board is touched: a typo here
-    # must not file an hour of runs somewhere nothing describes.
-    if [ -n "$task" ]; then
-        bench_task_attach "$task"
-        PI_TASK="$task"
-    fi
 
-    machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
-    # One run at a time per board: two would share the browser, the GPU and
-    # the tunnel port, reading like a stuck benchmark rather than two of them.
-    hold_lock "pi-bench-$machine" -w 5 \
-        || die "a benchmark is already running against $machine from this machine."
-
+# Everything a booted bench system needs before a run, and the provenance
+# read off it: bench mode proven from the marker and the root device, the
+# display barrier, the slots fetched and checked, the governor pinned, the
+# board claimed. One implementation for the one-boot path and for every leg
+# of a system A/B, which re-runs it after each boot. Fills cmd_bench's
+# sysid/probe/rootdev/kind/builder and kernel/gov/throttled/root_dev through
+# bash dynamic scoping.
+pi_leg_prepare() { # <expected system id, or empty>
     # 1. Bench mode or nothing: a run on a machine that never left host mode
     # measures a desktop with a browser on it, a different thing wearing the
     # same number. The evidence is the image's own marker.
-    local sysid probe rootdev kind builder
     probe=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') \
         || die "cannot reach $machine's bench system ($(image_addr)) over ssh."
     sysid=$(kv_get id <<<"$probe")
@@ -638,6 +598,12 @@ cmd_bench() {
     Arm a bench system and boot it:  wk boot $machine --system <id>"
     fi
     [ "$kind" != unknown ] || warn "cannot tell which medium $machine booted from (root: ${rootdev:-unknown}); check 'wk boot $machine --status'"
+
+    # The leg's proof, when a leg is what this is: the system that answered
+    # is the one the leg is for, said by its own marker -- never the arming
+    # record. A wrong leg is refused, not recorded.
+    [ -z "${1:-}" ] || [ "$sysid" = "$1" ] || die "$machine answered as system '$sysid', not the '$1' this leg is for.
+    Nothing was measured; 'wk boot $machine --status' says what it is running."
 
     # 1b. A display, before anything is changed on the board: no display is a
     # refusal, not a fallback -- compositing on the CPU puts the CPU under test
@@ -674,7 +640,6 @@ cmd_bench() {
 
     # 3. Provenance, gathered before the run rather than reconstructed after.
     # The governor is pinned first: an unpinned score is a temperature reading.
-    local kernel gov throttled root_dev
     kernel=$(i_ssh 'uname -r' 2>/dev/null | tr -d '\r')
     gov=$(pi_pin_governor)
     # The firmware's throttle flags, from the kernel's sysfs rather than
@@ -699,11 +664,12 @@ cmd_bench() {
     Without the claim, the image's self-return watchdog reboots the board
     mid-run; a run that long is wasted rather than measured."
 
-    # 5. The runner here, the payload pinned, the tunnel up.
-    bench_runner_tree
-    log "  runner      run-benchmark @ ${BENCH_RUNNER_SHA:0:12} ($BENCH_RUNNER)"
-    PI_SEEDED=$(seed_payload "$plan")
-    local port; port=$(pi_free_port)
+}
+
+# The reverse tunnel, (re)opened: a system A/B's reboot severs the previous
+# leg's, so every leg opens its own onto the same port.
+pi_tunnel_up() {
+    _pi_tunnel_cleanup
     # shellcheck disable=SC2046
     $(pi_ssh_cmd) -o ExitOnForwardFailure=yes -N \
         -R "127.0.0.1:$port:127.0.0.1:$port" </dev/null >"$PI_TMP/tunnel.log" 2>&1 &
@@ -714,7 +680,221 @@ cmd_bench() {
         || die "could not open the reverse tunnel to $machine (port $port):
 $(sed 's/^/    /' "$PI_TMP/tunnel.log")"
     log "  tunnel      127.0.0.1:$port on $machine -> run-benchmark here"
+}
 
+# Put the board into the named system and prove it, from wherever it is: a
+# board in another bench system goes back to the rescue first, and the
+# arming is `wk boot --system`, the same one-shot a hand-driven boot uses.
+# Every transition is verified against the marker the running system itself
+# serves; the record of intent is never what a leg trusts. Soft-fails (the
+# round is dropped) rather than dying: a boot that timed out may recover by
+# the next round's arming.
+pi_system_boot() { # <system id>
+    local want="$1" out id deadline
+    out=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') || out=""
+    id=$(kv_get id <<<"$out")
+    if [ "$id" = "$want" ] && [ "$(b_system_kind "$(kv_get rootdev <<<"$out")")" = bench ]; then
+        i_ssh 'mkdir -p /run && touch /run/wk-keep-running' >/dev/null 2>&1 || true
+        return 0
+    fi
+    if [ -n "$id" ] && [ "$(b_system_kind "$(kv_get rootdev <<<"$out")")" = bench ]; then
+        info "$machine: leaving $id for the rescue"
+        "$WK_ROOT/wk" boot "$machine" --back >/dev/null 2>&1 || true
+    fi
+    deadline=$(( $(date +%s) + 300 ))
+    until m_ssh true >/dev/null 2>&1; do
+        [ "$(date +%s)" -lt "$deadline" ] \
+            || { warn "$machine's rescue did not answer within 300s; the leg is lost"; return 1; }
+        sleep 10
+    done
+    info "$machine: arming and booting system $want"
+    "$WK_ROOT/wk" boot "$machine" --system "$want" >/dev/null \
+        || { warn "could not arm $want on $machine; the leg is lost"; return 1; }
+    deadline=$(( $(date +%s) + 420 ))
+    while :; do
+        out=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') || out=""
+        id=$(kv_get id <<<"$out")
+        if [ "$id" = "$want" ] && [ "$(b_system_kind "$(kv_get rootdev <<<"$out")")" = bench ]; then
+            break
+        fi
+        [ "$(date +%s)" -lt "$deadline" ] \
+            || { warn "$machine did not come up as $want within 420s${id:+ (it answers as $id)}; the leg is lost"; return 1; }
+        sleep 12
+    done
+    # Claimed the moment it is proven: the image's self-return watchdog is
+    # already counting.
+    i_ssh 'mkdir -p /run && touch /run/wk-keep-running' >/dev/null 2>&1 \
+        || { warn "could not claim $machine after booting $want; the leg is lost"; return 1; }
+    info "$machine is running $want (verified from its own marker)"
+}
+
+# One leg of a system A/B: boot it, prove it, prepare it, measure the named
+# slot inside it once. The session is per boot by construction -- both arms
+# get a fresh compositor and a cold page cache alike.
+pi_system_leg() { # <system id>
+    pi_system_boot "$1" || return 1
+    pi_tunnel_up
+    pi_leg_prepare "$1"
+    info "bringing up the session on $machine"
+    pi_session_up "$PI_DISPLAY"
+    pi_bench_once "$slot"
+}
+
+# Interleaved A/B across *system images* resident on the bench medium
+# (`wk sysimage write ...@second/@third`): A B A B, a boot per leg, each leg
+# verified to be the system it claims before anything is measured. What is
+# measured inside each system is the slot both carry under one name
+# (--slot); the report pairs rounds exactly like the slot A/B's.
+pi_bench_ab_systems() { # <sysA,sysB> <rounds>
+    local a b n i ra rb kept=0 lost=0
+    a="${1%%,*}"; b="${1##*,}"; n="$2"
+    [ "$n" -ge 1 ] || die "--rounds needs to be at least 1"
+
+    bench_runner_tree
+    log "  runner      run-benchmark @ ${BENCH_RUNNER_SHA:0:12} ($BENCH_RUNNER)"
+    PI_SEEDED=$(seed_payload "$plan")
+    pi_tmp
+    port=$(pi_free_port)
+
+    if [ -z "$PI_TASK" ]; then
+        PI_TASK="$stamp-$machine-systems"
+        bench_task_new "$PI_TASK" subject.kind=systems subject.spec="$a,$b" \
+            devices="$machine" plans="$plan" rounds="$n" slots="$slot" \
+            count="$count" timeout="$timeout_s" \
+            --command "wk pi bench $machine $plan --ab-systems $a,$b --slot $slot --rounds $n${count:+ --count $count}${timeout_s:+ --timeout $timeout_s}"
+        PI_TASK_OWNED=1
+    fi
+    log "  task        $PI_TASK ($(bench_task_dir "$PI_TASK"))"
+    log "interleaving $n round(s), a boot per leg -- $((n * 2)) boots and runs"
+    log "  A: $a"
+    log "  B: $b"
+
+    PI_AB_A="$a"; PI_AB_B="$b"
+    i=1
+    while [ "$i" -le "$n" ]; do
+        log ""
+        log "round $i/$n -- system $a"
+        ra=""; rb=""
+        PI_AB_ROUND="$i"; PI_AB_ARM=a
+        if pi_system_leg "$a"; then ra=1; fi
+        log "round $i/$n -- system $b"
+        PI_AB_ARM=b
+        if pi_system_leg "$b"; then rb=1; fi
+
+        if [ -n "$ra" ] && [ -n "$rb" ]; then
+            kept=$((kept + 1))
+        else
+            lost=$((lost + 1))
+            warn "round $i produced ${ra:+A }${rb:+B }only -- the report drops it"
+            [ "$lost" -lt 3 ] || { warn "three rounds lost; stopping early"; break; }
+        fi
+        i=$((i + 1))
+    done
+    PI_AB_ROUND=""; PI_AB_ARM=""
+
+    log ""
+    log "$kept round(s) usable, $lost dropped; the runs are in $(bench_task_dir "$PI_TASK")/runs"
+    if [ -n "$PI_TASK_OWNED" ]; then
+        "$WK_ROOT/wk" bench report "$PI_TASK" --html --text \
+            || warn "the report did not complete; the runs are recorded:  wk bench report $PI_TASK"
+    else
+        log "  report:  wk bench report $PI_TASK"
+    fi
+    [ "$kept" -ge 1 ] || die "no round produced both halves on $machine; nothing to compare."
+}
+
+PI_TASK=""; PI_TASK_OWNED=""
+PI_AB_ROUND=""; PI_AB_ARM=""; PI_AB_A=""; PI_AB_B=""
+cmd_bench() {
+    local machine="${1:-}" plan="${2:-}"; shift $(( $# < 2 ? $# : 2 ))
+    local count="" timeout_s="" slot=a ab="" ab_systems="" rounds=3 cores="" task=""
+    # The request's moment names the task this command becomes, when it is
+    # its own: taken now, before any board is probed.
+    local stamp; stamp=$(bench_task_stamp)
+    local usage="usage: wk pi bench <machine> <plan> [--slot NAME | --ab A,B | --ab-systems A,B] [--rounds N] [--count N] [--timeout S] [--cores <set>] [--task NAME]; see wk pi -h"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --count)   count="${2:-}"; shift ;;
+            --timeout) timeout_s="${2:-}"; shift ;;
+            --task)    task="${2:-}"; shift ;;
+            --slot)    slot="${2:-}"; image_check_slot_name "$slot"; shift ;;
+            # Same cpu-list syntax as `wk bench --cores`, through the same
+            # parser (lib/wkdata.py); applied to the board's browser.
+            --cores)   cores="${2:-}"; shift ;;
+            # Two slots, alternated. See pi_bench_ab. Validated here so a
+            # malformed pair is refused as one, not as a missing slot.
+            --ab)      ab="${2:-}"
+                       case "$ab" in
+                           *,*) ;;
+                           *) die "$usage; --ab takes two slot names separated by a comma, e.g. --ab base,pr" ;;
+                       esac
+                       image_check_slot_name "${ab%%,*}"; image_check_slot_name "${ab##*,}"
+                       [ "${ab%%,*}" != "${ab##*,}" ] \
+                           || die "$usage; --ab needs two different slots (got '${ab%%,*}' twice).
+    Two runs from one slot measure the same binary twice, which is a
+    repeatability check rather than an A/B -- '--count N' is the way to ask for
+    that."
+                       shift ;;
+            # Two *system images*, alternated with a boot per leg; the ids
+            # are what `wk boot <machine> --system` takes. See
+            # pi_bench_ab_systems.
+            --ab-systems) ab_systems="${2:-}"
+                       case "$ab_systems" in
+                           *,*) ;;
+                           *) die "$usage; --ab-systems takes two system ids separated by a comma" ;;
+                       esac
+                       [ "${ab_systems%%,*}" != "${ab_systems##*,}" ] \
+                           || die "$usage; --ab-systems needs two different systems (got '${ab_systems%%,*}' twice)."
+                       shift ;;
+            --rounds)  rounds="${2:-}"; shift ;;
+            --keep-session) die "'--keep-session' is gone: nothing is torn down between runs any more" ;;
+            -*) die "$usage; unknown option: $1" ;;
+            *)  die "$usage; unexpected argument: $1" ;;
+        esac
+        shift
+    done
+    [ -n "$machine" ] && [ -n "$plan" ] || die "$usage"
+    [ -z "$ab" ] || [ -z "$ab_systems" ] || die "$usage; --ab compares two slots in one
+    booted system, --ab-systems two systems -- they are different comparisons; pick one."
+    # A plan name is a file name in the runner tree, and lands on command
+    # lines this command builds; refused before either.
+    valid_name "$plan" || die "'$plan' is not a plan name (letters, digits, '.', '_' and '-')"
+    [ -z "$cores" ] || wkdata cores-valid "$cores" \
+        || die "--cores '$cores' is not a valid Linux cpu list (e.g. 0-3, 2,3, 0-1,4, 7)"
+    case "$rounds" in ''|*[!0-9]*) die "--rounds takes a number (got '$rounds')" ;; esac
+    [ -z "$timeout_s" ] || case "$timeout_s" in *[!0-9]*) die "--timeout takes seconds (got '$timeout_s')" ;; esac
+    # An existing task is checked before any board is touched: a typo here
+    # must not file an hour of runs somewhere nothing describes.
+    if [ -n "$task" ]; then
+        bench_task_attach "$task"
+        PI_TASK="$task"
+    fi
+
+    machine_load "$machine" || die "no such machine '$machine' (boot/machines.sh)"
+    # One run at a time per board: two would share the browser, the GPU and
+    # the tunnel port, reading like a stuck benchmark rather than two of them.
+    hold_lock "pi-bench-$machine" -w 5 \
+        || die "a benchmark is already running against $machine from this machine."
+
+    # Locals the leg preflight fills (bash dynamic scoping): the run recorder
+    # reads them per run, and a leg of a system A/B refills them per boot.
+    local sysid probe rootdev kind builder
+    local kernel gov throttled root_dev
+    local port
+
+    if [ -n "$ab_systems" ]; then
+        pi_bench_ab_systems "$ab_systems" "$rounds"
+        return $?
+    fi
+
+    pi_leg_prepare ""
+
+    # 5. The runner here, the payload pinned, the tunnel up.
+    bench_runner_tree
+    log "  runner      run-benchmark @ ${BENCH_RUNNER_SHA:0:12} ($BENCH_RUNNER)"
+    PI_SEEDED=$(seed_payload "$plan")
+    port=$(pi_free_port)
+    pi_tunnel_up
     # 6. The session, once for every run: bringing it down and up between the
     # halves of an A/B would put a fresh compositor and page cache on one
     # side only.
@@ -726,7 +906,8 @@ $(sed 's/^/    /' "$PI_TMP/tunnel.log")"
     # here, once the slots are known to exist, so a refusal above leaves no
     # empty task behind.
     if [ -z "$PI_TASK" ]; then
-        local profile; profile=$(wkslot get "$PI_TMP/slot-${_need%% *}.json" profile)
+        local _first="$slot"; [ -z "$ab" ] || _first="${ab%%,*}"
+        local profile; profile=$(wkslot get "$PI_TMP/slot-$_first.json" profile)
         if [ -n "$ab" ]; then
             PI_TASK="$stamp-$machine-${ab%%,*}-vs-${ab##*,}"
             bench_task_new "$PI_TASK" subject.kind=slots subject.spec="$ab" \

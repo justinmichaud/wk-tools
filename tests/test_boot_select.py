@@ -51,7 +51,7 @@ echo "$B_SYSTEM_PARTS"
         """B_SYSTEM_PARTS is a scalar a fleet walk carries from one driver to
         the next, so every medium-bearing driver states its own (the
         BOOT_ORDER_* convention)."""
-        for driver, want in (("pi-tryboot", '"1 3"'), ("pi-sd", '"3"'),
+        for driver, want in (("pi-tryboot", '"1 3"'), ("pi-sd", '"3 5 7"'),
                              ("pi-mbr", '"1"'), ("rpi5-usb", '"1"')):
             text = (REPO / "boot" / f"{driver}.sh").read_text()
             self.assertIn(f"B_SYSTEM_PARTS={want}", text,

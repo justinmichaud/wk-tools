@@ -92,17 +92,40 @@ booted_disks() {
 # Ordered cheapest-first, but every check runs before anything is written:
 # this is the whole security argument for the sudoers rule.
 # Which two partitions a verb addresses: the disk's own system (1 and 2), or
-# the second system beside it (3 and 4, `<device>@second`). Set by gate,
-# in this shell -- which is why gate is called as a statement and never in
-# a command substitution, whose subshell would keep them.
-BOOTP=1; ROOTP=2; SECOND=""; GATED_DEV=""
+# a system beside it (`<device>@second`, `<device>@third`). Two shapes exist
+# physically and the partition table says which this medium has
+# (_slot_resolve): a card shared with a rescue carries its bench systems as
+# logical pairs 5-6 and 7-8 inside an extended partition 3; a dedicated
+# bench medium carries its second system as primaries 3-4 and has no third.
+# Set by gate, in this shell -- which is why gate is called as a statement
+# and never in a command substitution, whose subshell would keep them.
+BOOTP=1; ROOTP=2; SECOND=""; SLOT=0; PFX=""; GATED_DEV=""
 
-gate() { # <device>[@second] [allow-mounted]
+# The addressed pair, from the table that exists: reading verbs act on what
+# is there. `write` is the one verb that changes the shape, and it re-derives
+# it from the first system's role instead (_second_write).
+_slot_resolve() { # <disk>
+    local p3type
+    p3type=$(sfdisk --part-type "$1" 3 2>/dev/null || true)
+    case "$p3type" in
+        5|f|0x5|0xf|05|0f)
+            BOOTP=$((3 + 2 * SLOT)); ROOTP=$((4 + 2 * SLOT)) ;;
+        *)
+            [ "$SLOT" -eq 1 ] || deny "'$1' carries its second system on primary partitions 3-4,
+    which leaves no room for a third. The shared layout (an extended partition
+    holding two systems) is made by a fresh '@second' write on a medium whose
+    first system is a rescue."
+            BOOTP=3; ROOTP=4 ;;
+    esac
+}
+
+gate() { # <device>[@second|@third] [allow-mounted]
     local dev="${1:-}" allow_mounted="${2:-}" type tran name booted mounted
-    BOOTP=1; ROOTP=2; SECOND=""; GATED_DEV=""
+    BOOTP=1; ROOTP=2; SECOND=""; SLOT=0; PFX=""; GATED_DEV=""
     case "$dev" in
-        *@second) dev="${dev%@second}"; SECOND=1; BOOTP=3; ROOTP=4 ;;
-        *@*) deny "'$dev' names a system this helper does not know; only '@second' is one" ;;
+        *@second) dev="${dev%@second}"; SECOND=1; SLOT=1; PFX=second ;;
+        *@third)  dev="${dev%@third}";  SECOND=1; SLOT=2; PFX=third ;;
+        *@*) deny "'$dev' names a system this helper does not know; '@second' and '@third' are the two" ;;
     esac
 
     case "$dev" in
@@ -139,15 +162,17 @@ EOF
     beside this one is '$dev@second'."
     fi
 
+    [ -z "$SECOND" ] || _slot_resolve "$dev"
+
     # Skipped for exactly one verb -- `unmount`, whose whole purpose is to end
     # this state. The checks above it are the ones that protect the machine
-    # and they are never skipped. Under @second only the two partitions the
-    # verb addresses are asked about: 1 and 2 may be this machine's running
-    # root and boot, and leaving them alone is what @second means.
+    # and they are never skipped. Under @second/@third only the two partitions
+    # the verb addresses are asked about: 1 and 2 may be this machine's
+    # running root and boot, and leaving them alone is what the address means.
     if [ "$allow_mounted" != allow-mounted ]; then
         if [ -n "$SECOND" ]; then
-            mounted=$(lsblk -no MOUNTPOINT "$(part "$dev" 3)" "$(part "$dev" 4)" 2>/dev/null | grep -c . || true)
-            [ "${mounted:-0}" -eq 0 ] || deny "'$dev@second': partitions 3 and 4 have $mounted mounted filesystem(s).
+            mounted=$(lsblk -no MOUNTPOINT "$(part "$dev" "$BOOTP")" "$(part "$dev" "$ROOTP")" 2>/dev/null | grep -c . || true)
+            [ "${mounted:-0}" -eq 0 ] || deny "'$dev@$PFX': partitions $BOOTP and $ROOTP have $mounted mounted filesystem(s).
     A system in use is a system somebody is using; unmount it first."
         else
             mounted=$(lsblk -no MOUNTPOINT "$dev" 2>/dev/null | grep -c . || true)
@@ -213,7 +238,7 @@ with_mount() { # [-r] <partition> <function> [args...]
 
 # What this helper can do, for a driving end that must not assume it: a
 # helper on a board's rescue is the one its image was built with.
-v_status() { say "ok"; say "second=yes"; say "init.d=yes"; say "tailnet-keep=yes"; }
+v_status() { say "ok"; say "second=yes"; say "third=yes"; say "init.d=yes"; say "tailnet-keep=yes"; }
 
 v_check() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
@@ -536,7 +561,9 @@ v_identity() {
 # nothing and the filesystem step is the one that matters.
 v_grow() {
     local dev root; gate "${1:-}"; dev=$GATED_DEV; root=$(part "$dev" "$ROOTP")
-    printf ', +\n' | sfdisk -N "$ROOTP" --no-reread --force "$dev" >/dev/null
+    # A logical pair (the shared layout) is already its zone's full size, and
+    # 'grow to the end of the disk' would eat the system beside it.
+    [ "$ROOTP" -gt 4 ] || printf ', +\n' | sfdisk -N "$ROOTP" --no-reread --force "$dev" >/dev/null
     partx -u "$dev" 2>/dev/null || partprobe "$dev" 2>/dev/null || true
     e2fsck -fy "$root" >/dev/null 2>&1 || true
     resize2fs "$root" >/dev/null 2>&1 || fail "could not resize $root"
@@ -553,7 +580,7 @@ v_unmount() {
     gate "${1:-}" allow-mounted; dev=$GATED_DEV
     for p in $(lsblk -lno NAME "$dev" | tail -n +2); do
         if [ -n "$SECOND" ]; then
-            case "/dev/$p" in "$(part "$dev" 3)"|"$(part "$dev" 4)") ;; *) continue ;; esac
+            case "/dev/$p" in "$(part "$dev" "$BOOTP")"|"$(part "$dev" "$ROOTP")") ;; *) continue ;; esac
         fi
         mp=$(lsblk -no MOUNTPOINT "/dev/$p" 2>/dev/null | head -1)
         [ -n "$mp" ] || continue
@@ -1035,21 +1062,40 @@ v_boot_check() {
     say "boot-check: every file the firmware asks for resolves"
 }
 
-# --- a second system beside this machine's own (@second) ---------------------
+# --- a system beside this machine's own (@second, @third) --------------------
 # The image on stdin is a whole card (MBR, boot FAT as partition 1, root as
-# partition 2). It goes into partitions 3 and 4 of the disk this machine runs
-# from: partitions made once, 3 sized to the image's boot partition and 4
-# taking the rest of the disk; then the two partition images are streamed in,
+# partition 2). Where it lands depends on the medium's shape, decided by the
+# first system's role: a *rescue* shares its medium with two bench systems --
+# an extended partition 3 whose geometry is a pure function of the disk size
+# (two logical pairs, 5-6 and 7-8, each a 256 MiB boot and half the remaining
+# space), so every write converges on the same table and rewriting one system
+# leaves the other's bytes alone. A *dedicated* bench medium (its first
+# system is not a rescue) carries one system beside the first as primaries
+# 3-4, sized to the image. Then the two partition images are streamed in,
 # each hashed as it passes, and the hashes printed for the read-back check
-# (`verify` under @second re-reads the same two ranges). Python, since this
-# is byte-offset arithmetic on a partition table and a one-pass split of a
-# stream (CLAUDE.md: structured data is not handled in bash). The image is
-# on this helper's stdin, and the program arrives on stdin too, so the image
-# is handed to python on fd 3 before the heredoc takes fd 0.
+# (`verify` re-reads the same two ranges). Python, since this is byte-offset
+# arithmetic on a partition table and a one-pass split of a stream
+# (CLAUDE.md: structured data is not handled in bash). The image is on this
+# helper's stdin, and the program arrives on stdin too, so the image is
+# handed to python on fd 3 before the heredoc takes fd 0.
+
+# The shape fact, read off the first system's root: where it is already
+# mounted when this machine runs from the disk, mounted briefly otherwise (a
+# card in a reader). A partition with nothing mountable is not a rescue.
+_rescue_marker_probe() { [ -f "$1/etc/wk/rescue" ]; }
+_first_is_rescue() { # <disk>
+    local p2 m; p2=$(part "$1" 2)
+    m=$(findmnt -no TARGET "$p2" 2>/dev/null | head -1 || true)
+    if [ -n "$m" ]; then _rescue_marker_probe "$m"
+    else with_mount -r "$p2" _rescue_marker_probe 2>/dev/null; fi
+}
+
 _second_write() { # <disk>   -- image bytes on stdin
-    python3 - "$1" 3<&0 <<'PY'
+    local shape=dedicated
+    if _first_is_rescue "$1"; then shape=shared; fi
+    python3 - "$1" "$SLOT" "$shape" 3<&0 <<'PY'
 import hashlib, json, os, subprocess, sys
-dev = sys.argv[1]
+dev, slot, shape = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 def part(n): return dev + ("p%d" % n if dev[-1].isdigit() else "%d" % n)
 def say(m): print("wk-card-priv: " + m, flush=True)
 def fail(m): print("wk-card-priv: " + m, file=sys.stderr, flush=True); sys.exit(1)
@@ -1065,7 +1111,7 @@ for i in range(4):
     if ptype and size:
         parts.append((start, size))
 if len(parts) != 2:
-    fail("the image carries %d partitions; a second system is a boot partition and a root" % len(parts))
+    fail("the image carries %d partitions; a system is a boot partition and a root" % len(parts))
 (b_start, b_size), (r_start, r_size) = parts
 if b_start >= r_start:
     fail("the image's partitions are not boot-then-root in disk order")
@@ -1073,25 +1119,87 @@ if b_start >= r_start:
 def table():
     t = json.loads(subprocess.check_output(["sfdisk", "-J", dev]))["partitiontable"]
     return {int(p["node"][len(dev):].lstrip("p")): p for p in t["partitions"]}
-have = table()
-if set(have) == {1, 2}:
-    last = have[2]["start"] + have[2]["size"]
+def disk_sectors():
     with open(dev, "rb") as fh:
-        total = os.lseek(fh.fileno(), 0, os.SEEK_END) // 512
-    if last + b_size + r_size > total:
-        fail("the image's partitions (%d + %d sectors) do not fit the %d sectors left on %s after partition 2"
-             % (b_size, r_size, max(total - last, 0), dev))
-    script = "start=%d, size=%d, type=c\nstart=%d, type=83\n" % (last, b_size, last + b_size)
-    subprocess.run(["sfdisk", "--append", "--no-reread", dev], input=script.encode(), check=True,
-                   stdout=subprocess.DEVNULL)
-    subprocess.run(["partx", "-a", dev], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    have = table()
-    say("partitions 3 and 4 made beside the rescue's 1 and 2")
-if set(have) != {1, 2, 3, 4}:
-    fail("%s has partitions %s; a second system needs exactly 1-4" % (dev, sorted(have)))
-if have[3]["size"] < b_size or have[4]["size"] < r_size:
-    fail("the image's partitions (%d + %d sectors) do not fit partitions 3 and 4 (%d + %d)"
-         % (b_size, r_size, have[3]["size"], have[4]["size"]))
+        return os.lseek(fh.fileno(), 0, os.SEEK_END) // 512
+def reread():
+    subprocess.run(["partx", "-d", "--nr", "3:8", dev], check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["partx", "-a", dev], check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+have = table()
+total = disk_sectors()
+ALIGN = 2048
+def up(s): return (s + ALIGN - 1) // ALIGN * ALIGN
+
+if shape == "shared":
+    # The deterministic shared layout, from the disk size alone.
+    if 1 not in have or 2 not in have:
+        fail("%s has partitions %s; a shared medium starts with its rescue on 1-2" % (dev, sorted(have)))
+    BOOT_SECT = 256 * 2048        # 256 MiB per system's boot partition
+    ext_start = up(have[2]["start"] + have[2]["size"])
+    half = (total - ext_start) // 2
+    want = {3: {"start": ext_start, "size": total - ext_start, "type": "5"}}
+    zones = {}
+    for s in (1, 2):
+        z0 = ext_start + (s - 1) * half
+        zend = z0 + half if s == 1 else total
+        bs = z0 + ALIGN
+        rs = bs + BOOT_SECT + ALIGN
+        want[3 + 2 * s] = {"start": bs, "size": BOOT_SECT, "type": "c"}
+        want[4 + 2 * s] = {"start": rs, "size": zend - rs, "type": "83"}
+        zones[s] = (bs, rs)
+    def matches():
+        for n, w in want.items():
+            p = have.get(n)
+            if not p or p["start"] != w["start"] or p["size"] != w["size"]:
+                return False
+        return True
+    if not matches():
+        old = [n for n in (3, 4, 5, 6, 7, 8) if n in have]
+        if old:
+            say("replacing the layout of partitions %s; the systems there are gone" %
+                ",".join(str(n) for n in old))
+        lines = ["label: dos"]
+        for n in (1, 2):
+            p = have[n]
+            lines.append("start=%d, size=%d, type=%s%s"
+                         % (p["start"], p["size"], p.get("type", "83"),
+                            ", bootable" if p.get("bootable") else ""))
+        lines.append("start=%d, size=%d, type=5" % (want[3]["start"], want[3]["size"]))
+        for n in (5, 6, 7, 8):
+            lines.append("start=%d, size=%d, type=%s" % (want[n]["start"], want[n]["size"], want[n]["type"]))
+        script = "\n".join(lines) + "\n"
+        subprocess.run(["sfdisk", "--no-reread", "--force", dev], input=script.encode(),
+                       check=True, stdout=subprocess.DEVNULL)
+        reread()
+        have = table()
+        say("shared layout made: rescue on 1-2, systems on 5-6 and 7-8 inside extended 3")
+    bootp, rootp = 3 + 2 * slot, 4 + 2 * slot
+else:
+    # A dedicated bench medium: one system beside the first, primaries 3-4
+    # sized to the image, made once.
+    if slot != 1:
+        fail("a dedicated bench medium carries one system beside its first; there is no @third here")
+    if set(have) == {1, 2}:
+        last = have[2]["start"] + have[2]["size"]
+        if last + b_size + r_size > total:
+            fail("the image's partitions (%d + %d sectors) do not fit the %d sectors left on %s after partition 2"
+                 % (b_size, r_size, max(total - last, 0), dev))
+        script = "start=%d, size=%d, type=c\nstart=%d, type=83\n" % (last, b_size, last + b_size)
+        subprocess.run(["sfdisk", "--append", "--no-reread", dev], input=script.encode(), check=True,
+                       stdout=subprocess.DEVNULL)
+        reread()
+        have = table()
+        say("partitions 3 and 4 made beside 1 and 2")
+    if not {1, 2, 3, 4} <= set(have):
+        fail("%s has partitions %s; a second system needs 1-4" % (dev, sorted(have)))
+    bootp, rootp = 3, 4
+
+if have[bootp]["size"] < b_size or have[rootp]["size"] < r_size:
+    fail("the image's partitions (%d + %d sectors) do not fit partitions %d and %d (%d + %d)"
+         % (b_size, r_size, bootp, rootp, have[bootp]["size"], have[rootp]["size"]))
 
 pos = 512
 def copy(n_bytes, out_path, skip_to):
@@ -1112,10 +1220,10 @@ def copy(n_bytes, out_path, skip_to):
         out.flush(); os.fsync(out.fileno())
     return h.hexdigest()
 
-say("writing the image's boot partition to %s" % part(3))
-boot_sha = copy(b_size * 512, part(3), b_start * 512)
-say("writing the image's root partition to %s" % part(4))
-root_sha = copy(r_size * 512, part(4), r_start * 512)
+say("writing the image's boot partition to %s" % part(bootp))
+boot_sha = copy(b_size * 512, part(bootp), b_start * 512)
+say("writing the image's root partition to %s" % part(rootp))
+root_sha = copy(r_size * 512, part(rootp), r_start * 512)
 while src.read(1 << 20):
     pass    # what follows the root partition in the image is padding
 os.sync()
@@ -1125,27 +1233,27 @@ say("written")
 PY
 }
 
-# `verify <disk>@second <boot bytes> <boot sha> <root bytes> <root sha>`
+# `verify <disk>@second|@third <boot bytes> <boot sha> <root bytes> <root sha>`
 v_second_verify() {
     local dev got; gate "${1:-}"; dev=$GATED_DEV; shift
     for n in "${1:-}" "${3:-}"; do case "$n" in ''|*[!0-9]*) deny "'$n' is not a byte count" ;; esac; done
     check_hex "${2:-}"; check_hex "${4:-}"
-    got=$(head -c "$1" "$(part "$dev" 3)" | sha256sum | cut -d' ' -f1)
-    [ "$got" = "$2" ] || fail "partition 3 reads back as $got, not the $2 that was written"
-    got=$(head -c "$3" "$(part "$dev" 4)" | sha256sum | cut -d' ' -f1)
-    [ "$got" = "$4" ] || fail "partition 4 reads back as $got, not the $4 that was written"
-    say "verified: partitions 3 and 4 hold the image's boot and root"
+    got=$(head -c "$1" "$(part "$dev" "$BOOTP")" | sha256sum | cut -d' ' -f1)
+    [ "$got" = "$2" ] || fail "partition $BOOTP reads back as $got, not the $2 that was written"
+    got=$(head -c "$3" "$(part "$dev" "$ROOTP")" | sha256sum | cut -d' ' -f1)
+    [ "$got" = "$4" ] || fail "partition $ROOTP reads back as $got, not the $4 that was written"
+    say "verified: partitions $BOOTP and $ROOTP hold the image's boot and root"
 }
 
 # Arming. The firmware boots the first FAT partition and only that one, so
-# the second system's kernel, device trees, overlays and cmdline are copied
-# from partition 3 into `second/` on the rescue's boot partition and selected
+# the addressed system's kernel, device trees, overlays and cmdline are
+# copied from its own boot partition into a prefix directory on the rescue's
+# boot partition (`second/` for @second, `third/` for @third) and selected
 # with os_prefix. The rescue's config.txt steps aside (config.txt.rescue)
-# for the second system's own plus the one os_prefix line -- for one boot:
-# the second system moves it back as the first thing it does (the
-# self-disarm `wk sysimage write` stages into every fleet system, from the
-# board's driver: boot/pi-sd.sh), and `second-disarm` does the same from
-# the rescue.
+# for the system's own plus the one os_prefix line -- for one boot: the
+# system moves it back as the first thing it does (the self-disarm
+# `wk sysimage write` stages into every fleet system, from the board's
+# driver: boot/pi-sd.sh), and `second-disarm` does the same from the rescue.
 
 # The rescue's boot partition, for one edit: where it is already mounted
 # when this machine runs from the disk, mounted here otherwise (a card in
@@ -1161,23 +1269,25 @@ _second_with_boot() { # <disk> <function> [args...] -- calls <function> <boot mo
         with_mount "$(part "$dev" 1)" "$fn" "$@"
     fi
 }
-_second_stage_copy() { # <mountpoint of partition 3> <staging directory>
+_second_stage_copy() { # <mountpoint of the system's boot partition> <staging directory>
     local src="$1" stage="$2"
-    cp -a "$src"/. "$stage/" || fail "could not read the second system's boot files"
-    [ -f "$stage/cmdline.txt" ] || fail "the second system's boot partition has no cmdline.txt"
-    [ -f "$stage/config.txt" ]  || fail "the second system's boot partition has no config.txt"
+    cp -a "$src"/. "$stage/" || fail "could not read the system's boot files"
+    [ -f "$stage/cmdline.txt" ] || fail "the system's boot partition has no cmdline.txt"
+    [ -f "$stage/config.txt" ]  || fail "the system's boot partition has no config.txt"
 }
 # Plain copies onto the FAT: `cp -a` would try to preserve ownership there
 # and report a failure over a filesystem that has none to preserve.
-_second_arm_install() { # <boot mountpoint> <staging directory>
-    local boot="$1" stage="$2"
-    rm -rf "$boot/second.part"
-    cp -r "$stage" "$boot/second.part" || fail "could not copy the second system's boot files onto the boot partition"
-    rm -rf "$boot/second"; mv "$boot/second.part" "$boot/second"
+# Both prefix directories go before the new one lands: a stale second/ next
+# to an armed third/ is inert, but a card should read as what it is.
+_second_arm_install() { # <boot mountpoint> <staging directory> <prefix>
+    local boot="$1" stage="$2" pfx="$3"
+    rm -rf "$boot/$pfx.part"
+    cp -r "$stage" "$boot/$pfx.part" || fail "could not copy the system's boot files onto the boot partition"
+    rm -rf "$boot/second" "$boot/third"; mv "$boot/$pfx.part" "$boot/$pfx"
     [ -f "$boot/config.txt.rescue" ] || cp "$boot/config.txt" "$boot/config.txt.rescue"
     {
-        cat "$boot/second/config.txt"
-        printf '\n# --- wk armed: the second system, for one boot (wk boot) ---\nos_prefix=second/\n'
+        cat "$boot/$pfx/config.txt"
+        printf '\n# --- wk armed: the %s system, for one boot (wk boot) ---\nos_prefix=%s/\n' "$pfx" "$pfx"
     } > "$boot/config.txt.armed"
     mv "$boot/config.txt.armed" "$boot/config.txt"
     sync
@@ -1191,29 +1301,45 @@ _second_disarm_edit() { # <boot mountpoint>
         say "not armed"
     fi
 }
+# armed=yes|no is whether the rescue's config.txt has stepped aside;
+# armed_prefix says for which system, read from the os_prefix actually in
+# force -- two systems can be present and only the config decides which
+# one the next boot is.
 _second_state_edit() { # <boot mountpoint>
-    [ -f "$1/config.txt.rescue" ] && say "armed=yes" || say "armed=no"
+    if [ -f "$1/config.txt.rescue" ]; then
+        say "armed=yes"
+        say "armed_prefix=$(sed -n 's|^os_prefix=\(.*\)/$|\1|p' "$1/config.txt" | tail -1)"
+    else
+        say "armed=no"
+    fi
+}
+# A pair of partitions holds a system when its root carries a filesystem:
+# under the shared layout the partitions exist from the day the card is laid
+# out, so existence alone says nothing.
+_slot_present() { # <disk>
+    [ -b "$(part "$1" "$ROOTP")" ] \
+        && [ "$(blkid -o value -s TYPE "$(part "$1" "$ROOTP")" 2>/dev/null)" = ext4 ]
 }
 v_second_arm() {
     local dev stage; gate "${1:-}"; dev=$GATED_DEV
-    [ -n "$SECOND" ] || deny "second-arm takes '<disk>@second'"
-    [ -b "$(part "$dev" 4)" ] || fail "$dev holds no second system (no partition 4); write one first"
+    [ -n "$SECOND" ] || deny "second-arm takes '<disk>@second' or '<disk>@third'"
+    _slot_present "$dev" || fail "$dev@$PFX holds no system (partition $ROOTP is absent or empty); write one first"
     stage=$(mktemp -d /run/wk-card-second.XXXXXX)
-    with_mount -r "$(part "$dev" 3)" _second_stage_copy "$stage" || { rm -rf "$stage"; exit 1; }
-    _second_with_boot "$dev" _second_arm_install "$stage" || { rm -rf "$stage"; exit 1; }
+    with_mount -r "$(part "$dev" "$BOOTP")" _second_stage_copy "$stage" || { rm -rf "$stage"; exit 1; }
+    _second_with_boot "$dev" _second_arm_install "$stage" "$PFX" || { rm -rf "$stage"; exit 1; }
     rm -rf "$stage"
-    say "armed: the second system boots once (os_prefix=second/); the rescue's config.txt is kept as config.txt.rescue"
+    say "armed: the $PFX system boots once (os_prefix=$PFX/); the rescue's config.txt is kept as config.txt.rescue"
 }
 v_second_disarm() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
-    [ -n "$SECOND" ] || deny "second-disarm takes '<disk>@second'"
+    [ -n "$SECOND" ] || deny "second-disarm takes '<disk>@second' or '<disk>@third'"
     _second_with_boot "$dev" _second_disarm_edit
 }
 v_second_state() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
-    [ -n "$SECOND" ] || deny "second-state takes '<disk>@second'"
+    [ -n "$SECOND" ] || deny "second-state takes '<disk>@second' or '<disk>@third'"
     _second_with_boot "$dev" _second_state_edit
-    [ -b "$(part "$dev" 4)" ] && say "present=yes" || say "present=no"
+    _slot_present "$dev" && say "present=yes" || say "present=no"
 }
 
 # --- the second system's tailnet identity, across a rewrite ------------------
@@ -1244,21 +1370,21 @@ _tailnet_restore_edit() { # <mountpoint of partition 4> <stash>
 # tailnet-save <disk>@second -- kept=yes|no. A partition 4 with no filesystem
 # (a write that died in the split) holds nothing to keep.
 v_tailnet_save() {
-    local dev stash p4; gate "${1:-}"; dev=$GATED_DEV
-    [ -n "$SECOND" ] || deny "tailnet-save takes '<disk>@second'"
-    stash=$(_tailnet_stash "$dev"); rm -f "$stash"
-    p4=$(part "$dev" 4)
-    [ -b "$p4" ] && [ "$(blkid -o value -s TYPE "$p4" 2>/dev/null)" = ext4 ] || { say "kept=no"; return 0; }
-    with_mount -r "$p4" _tailnet_save_edit "$stash"
+    local dev stash root; gate "${1:-}"; dev=$GATED_DEV
+    [ -n "$SECOND" ] || deny "tailnet-save takes '<disk>@second' or '<disk>@third'"
+    stash=$(_tailnet_stash "$dev$PFX"); rm -f "$stash"
+    root=$(part "$dev" "$ROOTP")
+    [ -b "$root" ] && [ "$(blkid -o value -s TYPE "$root" 2>/dev/null)" = ext4 ] || { say "kept=no"; return 0; }
+    with_mount -r "$root" _tailnet_save_edit "$stash"
 }
 # tailnet-restore <disk>@second -- what `tailnet-save` kept, onto the
 # rewritten partition 4; the stash is spent.
 v_tailnet_restore() {
     local dev stash; gate "${1:-}"; dev=$GATED_DEV
-    [ -n "$SECOND" ] || deny "tailnet-restore takes '<disk>@second'"
-    stash=$(_tailnet_stash "$dev")
+    [ -n "$SECOND" ] || deny "tailnet-restore takes '<disk>@second' or '<disk>@third'"
+    stash=$(_tailnet_stash "$dev$PFX")
     [ -f "$stash" ] || { say "nothing kept"; return 0; }
-    with_mount "$(part "$dev" 4)" _tailnet_restore_edit "$stash"
+    with_mount "$(part "$dev" "$ROOTP")" _tailnet_restore_edit "$stash"
     rm -f "$stash"
 }
 

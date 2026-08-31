@@ -32,44 +32,62 @@ BOOT_ARMING=medium
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
 
-# The card, as the helper addresses the bench system on it.
-pisd_second() { printf '%s@second' "$MACH_DEVICE"; }
+# The bench systems' candidate boot partitions, both layouts in one list: the
+# one-system layout keeps its pair on primaries 3-4, the shared layout (two
+# systems in an extended partition 3) puts pairs at 5-6 and 7-8. A partition
+# that is absent -- or is the extended container, which mounts as nothing --
+# is skipped by the enumeration, so the list needs no layout probe.
+B_SYSTEM_PARTS="3 5 7"
 
-# One bench system, on partitions 3-4 beside the rescue: partition 1 is the
-# rescue's and never a candidate, so the enumeration (b_systems) reads only
-# the third.
-B_SYSTEM_PARTS="3"
-
-# The one place the rescue is asked about the arming: armed=yes|no from
-# whether its config.txt has stepped aside, present=yes|no from whether a
-# fourth partition exists at all.
-pisd_state() {
-    card_priv second-state "$(pisd_second)" 2>/dev/null | tr -d '\r'
+# The helper's name for the system holding a given boot partition: the first
+# pair (3-4 or 5-6, by layout) is '@second', the shared layout's other pair
+# (7-8) is '@third'.
+pisd_addr() { # <boot partition>
+    case "$1" in
+        *[!0-9]3|*[!0-9]5) printf '%s@second' "$MACH_DEVICE" ;;
+        *[!0-9]7)          printf '%s@third'  "$MACH_DEVICE" ;;
+        *) die "'$1' is not a bench system's boot partition on $MACH_DEVICE" ;;
+    esac
 }
 
+# The one place the rescue is asked about the arming: armed=yes|no from
+# whether its config.txt has stepped aside, armed_prefix for which system,
+# present=yes|no from whether the addressed pair holds a filesystem.
+pisd_state() { # <address>
+    card_priv second-state "$1" 2>/dev/null | tr -d '\r'
+}
+
+# Arms the *selected* system (ARM_SYS_PART, machine_select_system): staging
+# replaces whatever prefix was armed before, and the rescue's own config.txt
+# is kept aside by the first arming whichever system that was.
 b_arm() {
-    local state
-    state=$(pisd_state) || die "could not read $MACH_DEVICE's arming on $MACH_NAME.
+    local addr state
+    [ -n "${ARM_SYS_PART:-}" ] \
+        || die "b_arm needs the selected boot partition (machine_select_system, cmd/boot)"
+    addr=$(pisd_addr "$ARM_SYS_PART")
+    state=$(pisd_state "$addr") || die "could not read $MACH_DEVICE's arming on $MACH_NAME.
     Arming this board is an edit of its rescue's boot partition, made by the
     card helper on the rescue, so the rescue has to be up and carry the helper."
     case "$state" in
         *present=yes*) ;;
-        *) die "$MACH_DEVICE on $MACH_NAME holds no bench system beside the rescue.
-    Write one first:  wk sysimage write --from <path> --disk <reader>:$MACH_DEVICE@second" ;;
+        *) die "$MACH_DEVICE on $MACH_NAME holds no bench system at ${addr##*/}.
+    Write one first:  wk sysimage write --from <path> --disk <reader>:$addr" ;;
     esac
     case "$state" in
-        *armed=yes*) debug "$MACH_NAME is already armed"; return 0 ;;
+        *"armed_prefix=${addr##*@}"*) debug "$MACH_NAME is already armed for ${addr##*@}"; return 0 ;;
     esac
-    card_priv second-arm "$(pisd_second)" >/dev/null \
-        || die "could not arm the bench system on $MACH_NAME"
+    card_priv second-arm "$addr" >/dev/null \
+        || die "could not arm the ${addr##*@} system on $MACH_NAME"
 }
 
-# Safe at any time, including a board not armed -- the common case.
+# Safe at any time, including a board not armed -- the common case. The
+# disarm puts the rescue's config.txt back whichever system was armed, so
+# any present system's address serves.
 b_disarm() {
     local state
-    state=$(pisd_state) || return 0
+    state=$(pisd_state "$MACH_DEVICE@second") || return 0
     case "$state" in *armed=yes*) ;; *) return 0 ;; esac
-    card_priv second-disarm "$(pisd_second)" >/dev/null \
+    card_priv second-disarm "$MACH_DEVICE@second" >/dev/null \
         || die "could not disarm the bench system on $MACH_NAME"
 }
 
@@ -99,16 +117,17 @@ sync; umount \"\$m\"; fi; rmdir \"\$m\""
 # Evidence from the card, not the record: is the rescue's config.txt stepped
 # aside, and is there a bench system to step aside for.
 b_evidence() {
-    local state
-    state=$(pisd_state) || { echo "arming=unreadable (the rescue did not answer)"; return 0; }
-    printf 'lane=one SD card, rescue on partitions 1-2, bench system on 3-4 (os_prefix arming)\n'
-    printf '%s\n' "$state" | sed -n 's/^wk-card-priv: \(armed=.*\)$/\1/p; s/^wk-card-priv: \(present=.*\)$/bench_system=\1/p' \
-        | sed 's/bench_system=present=/bench_system_present=/'
+    local state systems
+    state=$(pisd_state "$MACH_DEVICE@second") || { echo "arming=unreadable (the rescue did not answer)"; return 0; }
+    printf 'lane=one SD card, rescue on partitions 1-2, bench system(s) beside it (os_prefix arming)\n'
+    printf '%s\n' "$state" | sed -n 's/^wk-card-priv: \(armed=.*\)$/\1/p'
+    systems=$(b_systems 2>/dev/null) || systems=""
+    [ -z "$systems" ] || printf '%s\n' "$systems" | awk '{ printf "system=%s (on %s)\n", $2, $1 }'
     return 0
 }
 
-# The bench system's boot partition is the third on the card; its identity
-# (wk-image.id) and diagnostics are read there.
+# The first bench pair's boot partition on the one-system layout; reading
+# verbs go through the enumeration (b_systems), which covers both layouts.
 b_boot_part() { disk_part "$MACH_DEVICE" 3; }
 
 # The wk-managed media, in one line, for the fleet block in `wk status`.

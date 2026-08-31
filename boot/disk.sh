@@ -324,6 +324,12 @@ disk_refuse_unless_safe() {
     would write the whole disk. Update it first: on a workstation,
     ./setup --stage quiesce from a terminal there; on a rescue, rebuild the
     rescue image and write it again."
+        case "$dev" in (*@third)
+            card_priv status 2>/dev/null | grep -q 'third=yes' \
+                || die "$MACH_NAME's card helper predates third systems (@third).
+    Update it first: on a workstation, ./setup --stage quiesce from a terminal
+    there; on a rescue, rebuild the rescue image and write it again." ;;
+        esac
     fi
     out=$(card_priv check "$dev" 2>&1) || die "$MACH_NAME will not write $dev:
 $(printf '%s\n' "$out" | sed 's/^/    /')
@@ -352,11 +358,12 @@ disk_unmount() {
 $(m_ssh "lsblk -lno NAME,MOUNTPOINT $(sh_quote "$dev")" 2>/dev/null | awk 'NF > 1 { print "    /dev/" $1 " at " $2 }')"
 }
 
-# A second system beside a rescue (`<device>@second`, admin/wk-card-priv):
-# the image goes into partitions 3 and 4 of a card whose 1 and 2 stay as
-# they are. Every step here passes the spec through and the helper addresses
-# the right partitions; the two steps that differ ask this.
-disk_is_second() { case "$1" in *@second) return 0 ;; *) return 1 ;; esac; }
+# A system beside the first (`<device>@second`, `<device>@third`,
+# admin/wk-card-priv): the image goes into that system's own partition pair
+# and the rest of the card stays as it is -- which pair is the helper's to
+# resolve from the card's shape. Every step here passes the spec through;
+# the steps that differ ask this.
+disk_is_second() { case "$1" in *@second|*@third) return 0 ;; *) return 1 ;; esac; }
 
 # The card machine decompresses, meters and writes in one pipeline: the image
 # is never decompressed here, so a source that is compressed crosses the
@@ -427,7 +434,7 @@ disk_write_source() {
     report=$(eval "$reader" | disk_write_stream "$dev" "$filter" | tr -d '\r') \
         || die "could not write the image onto $dev on $MACH_NAME.
     It was read through:  $reader
-    $dev is $(disk_size "${dev%@second}"); an image larger than that runs out of space
+    $dev is $(disk_size "${dev%@*}"); an image larger than that runs out of space
     part-written, and the read that fed it can fail on its own account."
     printf '%s\n' "$report" | sed 's/^/    /' >&2
     printf '%s %s\n' \
@@ -455,7 +462,7 @@ disk_verify_stream() { # <device> <meta file>
         [ -n "$r_sha" ] || die "the write onto $dev did not report what it split the image into,
     so there is nothing to read the card back against."
         card_priv verify "$dev" "$b_bytes" "$b_sha" "$r_bytes" "$r_sha" >/dev/null \
-            || die "partitions 3 and 4 of $dev do not read back as the image's boot and root."
+            || die "$dev does not read back as the image's boot and root."
         debug "verified $b_bytes + $r_bytes bytes"
         return 0
     fi

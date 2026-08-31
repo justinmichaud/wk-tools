@@ -1,6 +1,10 @@
 # HANDOFF — the boot substrate: what is left
 
 - [ ] build moose's bench mode (docs/Urgent/HANDOFF-moose-bench.md) [needs moose]
+- [ ] prove the shared-card two-system layout end to end on the rpi3: rebuild the rescue image (it carries the @third-capable admin/wk-card-priv), reflash the rescue partitions from a reader, write @second (2.38) and @third (2.52), arm each by id, run `wk pi bench rpi3 <plan> --ab-systems <a>,<b>` [needs a Pi card in hand for the rescue half; the bench halves are remote]
+- [ ] prove @second on the rpi4's stick (a dedicated medium: primaries 3-4, tryboot staging from the selected pair) with a second image written beside the first [needs the rpi4]
+- [ ] rpi5: system selection between two stick pairs. The pairs exist today (`--disk rpi5:/dev/sda@second`); the selection design is the firmware's own A/B -- a static `autoboot.txt` on stick partition 1 (`[all] boot_partition=1`, `[tryboot] boot_partition=3`) so arming pair 2 is the same `reboot "0 tryboot"` one-shot pi-tryboot uses, firmware-reverting, nothing to put back -- rpi5-usb.sh gains B_SYSTEM_PARTS="1 3" and the tryboot-carrying reboot [needs the rpi5]
+- [ ] rebuild the fleet rescue images so their card helper carries @third and the shared layout (the helper is baked in at image build; until then a @third write against an old rescue is refused with the remedy) [hours per image; the rpi3 rescue reflash above consumes one]
 - [ ] rpi3: a stage-2 revert for a bench kernel that panics before its self-disarm runs (today the os_prefix line stays until `wk boot rpi3 --disarm` from the rescue, which that boot never reaches): `tryboot` if the Pi 3 firmware honours it -- measure with `reboot "0 tryboot"` and a `tryboot.txt` on the board -- else an initramfs that puts config.txt back [needs the rpi3]
 - [ ] rpi4: verify `S11wk-self-disarm` parks the card and `S99wk-self-return` reboots an unclaimed board on a real buildroot boot (the yocto unit's `$$`-escaped ExecStart has run only in tests) [needs the card re-written by a helper that stages init.d scripts]
 - [ ] rebuild and re-flash rpi3 onto the tailnet layer [needs a Pi card in hand]

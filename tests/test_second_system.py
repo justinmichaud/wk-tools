@@ -46,7 +46,7 @@ say()  { printf 'wk-card-priv: %s\\n' "$*"; }
 deny() { printf 'wk-card-priv: REFUSED: %s\\n' "$*" >&2; exit 3; }
 fail() { printf 'wk-card-priv: %s\\n' "$*" >&2; exit 1; }
 chown() { :; }
-BOOTP=1; ROOTP=2; SECOND=""
+BOOTP=1; ROOTP=2; SECOND=""; SLOT=1; PFX=second
 '''
 
 
@@ -92,7 +92,7 @@ esac
 '''
         with stub_path({"lsblk": lsblk}) as binp:
             return bash(
-                _SAY + _lift(CARD_PRIV, "part", "gate")
+                _SAY + _lift(CARD_PRIV, "part", "_slot_resolve", "gate")
                 + f'\nbooted_disks() {{ printf "%s\\n" "{booted}"; }}\n'
                 + f'gate "{spec}" && printf "dev=%s bootp=%s rootp=%s second=%s\\n" "$GATED_DEV" "$BOOTP" "$ROOTP" "$SECOND"\n',
                 env={"PATH": f"{binp}:{os.environ['PATH']}"},
@@ -118,9 +118,17 @@ esac
         self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
         self.assertIn("partitions 3 and 4", cp.stderr)
 
-    def test_only_second_is_a_system_name(self):
+    def test_third_needs_the_shared_layout(self):
+        """@third on a medium whose partitions 3-4 are primaries (or absent)
+        is refused with the remedy; the shared layout is a write's to make."""
         cp = self._gate(f"{self.dev}@third", booted="")
         self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+        self.assertIn("shared layout", cp.stderr)
+
+    def test_only_second_and_third_are_system_names(self):
+        cp = self._gate(f"{self.dev}@fourth", booted="")
+        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+        self.assertIn("@second", cp.stderr)
 
 
 @unittest.skipUnless(shutil.which("sfdisk"),
@@ -150,9 +158,11 @@ class TestSecondWrite(WkTest):
                        text=True, check=True, capture_output=True)
         return disk
 
-    def _write(self, disk, img):
+    def _write(self, disk, img, shape="dedicated", slot=1):
+        rc = "1" if shape == "dedicated" else "0"
         return bash(_SAY + _lift(CARD_PRIV, "_second_write")
-                    + f'\n_second_write "{disk}" < "{img}"\n')
+                    + f'\nSLOT={slot}\n_first_is_rescue() {{ return {rc}; }}\n'
+                    + f'_second_write "{disk}" < "{img}"\n')
 
     def test_the_image_is_split_into_partitions_3_and_4(self):
         disk, img = self._disk(), self._image()
@@ -194,6 +204,57 @@ class TestSecondWrite(WkTest):
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("carries 1 partition", cp.stderr)
         self.assertEqual(sorted(_sfdisk_json(disk)), [1, 2], "the disk's table was touched")
+
+    def test_shared_layout_holds_two_systems_deterministically(self):
+        """A medium whose first system is a rescue: the write lays out an
+        extended partition 3 with logical pairs 5-6 and 7-8 whose geometry is
+        a function of the disk size alone, so any write order converges on
+        the same table and each system's bytes live in its own pair."""
+        disk, img = self._disk(size_mb=2048), self._image()
+        cp = self._write(disk, img, shape="shared", slot=1)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        table = _sfdisk_json(disk)
+        self.assertEqual(sorted(table), [1, 2, 3, 5, 6, 7, 8])
+        total, ext_start = 2048 * 2048, 30720
+        half = (total - ext_start) // 2
+        boot_sect = 256 * 2048
+        self.assertEqual(table[3]["start"], ext_start)
+        self.assertEqual(table[3]["start"] + table[3]["size"], total)
+        for slot, z0, zend in ((1, ext_start, ext_start + half), (2, ext_start + half, total)):
+            b, r = 3 + 2 * slot, 4 + 2 * slot
+            self.assertEqual(table[b]["start"], z0 + 2048, f"slot {slot} boot start")
+            self.assertEqual(table[b]["size"], boot_sect, f"slot {slot} boot size")
+            self.assertEqual(table[r]["start"], z0 + 2048 + boot_sect + 2048, f"slot {slot} root start")
+            self.assertEqual(table[r]["start"] + table[r]["size"], zend, f"slot {slot} root end")
+        self.assertEqual(Path(str(disk) + "5").read_bytes(), self.BOOT)
+        self.assertEqual(Path(str(disk) + "6").read_bytes(), self.ROOT)
+
+        # The other slot lands in its own pair and leaves this one alone.
+        cp = self._write(disk, img, shape="shared", slot=2)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("replacing the layout", cp.stdout, "a matching table was rebuilt anyway")
+        self.assertEqual(Path(str(disk) + "7").read_bytes(), self.BOOT)
+        self.assertEqual(Path(str(disk) + "8").read_bytes(), self.ROOT)
+        self.assertEqual(Path(str(disk) + "5").read_bytes(), self.BOOT, "slot 1's boot was disturbed")
+        self.assertEqual(_sfdisk_json(disk)[5]["start"], ext_start + 2048)
+
+    def test_shared_layout_replaces_the_one_system_primaries(self):
+        """the migration: a card with the old primary 3-4 pair beside its
+        rescue is relaid; the write says what it destroyed."""
+        disk, img = self._disk(size_mb=2048), self._image()
+        subprocess.run(["sfdisk", "-q", "--append", "--no-reread", str(disk)],
+                       input="start=30720, size=4096, type=c\nstart=34816, size=8192, type=83\n",
+                       text=True, check=True, capture_output=True)
+        cp = self._write(disk, img, shape="shared", slot=1)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("replacing the layout", cp.stdout)
+        self.assertEqual(sorted(_sfdisk_json(disk)), [1, 2, 3, 5, 6, 7, 8])
+
+    def test_a_dedicated_medium_refuses_a_third(self):
+        disk, img = self._disk(), self._image()
+        cp = self._write(disk, img, shape="dedicated", slot=2)
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("no @third here", cp.stderr)
 
     def test_the_read_back_compares_both_partitions(self):
         disk, img = self._disk(), self._image()
@@ -239,9 +300,9 @@ class TestArming(WkTest):
         (self.second / "overlays").mkdir()
         (self.second / "overlays" / "x.dtbo").write_bytes(b"dtbo")
 
-    def _arm(self):
+    def _arm(self, pfx="second"):
         return bash(_SAY + _lift(CARD_PRIV, "_second_stage_copy", "_second_arm_install")
-                    + f'\n_second_stage_copy "{self.second}" "{self.stage}" && _second_arm_install "{self.boot}" "{self.stage}"\n')
+                    + f'\n_second_stage_copy "{self.second}" "{self.stage}" && _second_arm_install "{self.boot}" "{self.stage}" "{pfx}"\n')
 
     def test_arming_selects_the_second_system_for_one_boot(self):
         cp = self._arm()
@@ -253,6 +314,22 @@ class TestArming(WkTest):
         self.assertEqual((self.boot / "second" / "cmdline.txt").read_text(), "root=PARTUUID=aa-04 rootwait\n")
         self.assertEqual((self.boot / "second" / "overlays" / "x.dtbo").read_bytes(), b"dtbo")
         self.assertFalse((self.boot / "second.part").exists())
+
+    def test_arming_the_third_system_uses_its_own_prefix(self):
+        """third/ lands, os_prefix says third/, and a stale second/ from an
+        earlier arming is gone -- a card reads as what it is."""
+        self.assertEqual(self._arm("second").returncode, 0)
+        (self.boot / "config.txt.rescue").rename(self.boot / "config.txt")  # disarm by hand
+        cp = self._arm("third")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        config = (self.boot / "config.txt").read_text()
+        self.assertRegex(config, r"(?m)^os_prefix=third/$")
+        self.assertTrue((self.boot / "third" / "cmdline.txt").exists())
+        self.assertFalse((self.boot / "second").exists(), "a stale second/ was left beside the armed third/")
+        state = _SAY + _lift(CARD_PRIV, "_second_state_edit") + f'\n_second_state_edit "{self.boot}"\n'
+        out = bash(state).stdout
+        self.assertIn("armed=yes", out)
+        self.assertIn("armed_prefix=third", out)
 
     def test_arming_twice_keeps_the_rescues_own_config(self):
         self.assertEqual(self._arm().returncode, 0)
@@ -444,17 +521,46 @@ load_driver pi-sd
     def test_arm_and_disarm_go_through_the_helper_on_the_rescue(self):
         cp = self._load('''
 card_priv() { echo "card_priv $*" >&2; case "$1" in second-state) echo "wk-card-priv: armed=no"; echo "wk-card-priv: present=yes" ;; esac; }
-b_arm
+ARM_SYS_PART=/dev/mmcblk0p3 b_arm
 b_disarm
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("card_priv second-arm /dev/mmcblk0@second", cp.stderr)
         self.assertNotIn("second-disarm", cp.stderr, "b_disarm disarmed a board that was not armed")
 
+    def test_arm_selects_the_named_system(self):
+        """the shared layout's pairs map to the helper's addresses: 5-6 is
+        @second, 7-8 is @third; an arm with no selection is refused."""
+        cp = self._load('''
+card_priv() { echo "card_priv $*" >&2; case "$1" in second-state) echo "wk-card-priv: armed=no"; echo "wk-card-priv: present=yes" ;; esac; }
+ARM_SYS_PART=/dev/mmcblk0p7 b_arm
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("card_priv second-arm /dev/mmcblk0@third", cp.stderr)
+        cp = self._load("b_arm")
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("machine_select_system", cp.stderr)
+
+    def test_arm_skips_only_when_armed_for_the_same_system(self):
+        """armed for the other system is not armed for this one: the arm
+        re-stages rather than trusting a yes."""
+        cp = self._load('''
+card_priv() { echo "card_priv $*" >&2; case "$1" in second-state) echo "wk-card-priv: armed=yes"; echo "wk-card-priv: armed_prefix=third"; echo "wk-card-priv: present=yes" ;; esac; }
+ARM_SYS_PART=/dev/mmcblk0p5 b_arm
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("card_priv second-arm /dev/mmcblk0@second", cp.stderr)
+        cp = self._load('''
+card_priv() { echo "card_priv $*" >&2; case "$1" in second-state) echo "wk-card-priv: armed=yes"; echo "wk-card-priv: armed_prefix=second"; echo "wk-card-priv: present=yes" ;; esac; }
+ARM_SYS_PART=/dev/mmcblk0p5 b_arm
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("card_priv second-arm", cp.stderr, "armed for this system already; the arm should be a no-op")
+
     def test_arm_refuses_a_card_with_no_second_system(self):
         cp = self._load('''
 card_priv() { case "$1" in second-state) echo "wk-card-priv: armed=no"; echo "wk-card-priv: present=no" ;; *) echo "card_priv $*" >&2 ;; esac; }
-b_arm
+ARM_SYS_PART=/dev/mmcblk0p3 b_arm
 ''')
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("@second", cp.stderr)
@@ -484,10 +590,11 @@ b_disarm
     def test_evidence_comes_from_the_card_not_the_record(self):
         cp = self._load('''
 card_priv() { echo "wk-card-priv: armed=yes"; echo "wk-card-priv: present=yes"; }
+b_systems() { printf "%s\\n" "/dev/mmcblk0p5 img-a"; }
 b_evidence
 ''')
         self.assertIn("armed=yes", cp.stdout)
-        self.assertIn("bench_system_present=yes", cp.stdout)
+        self.assertIn("system=img-a (on /dev/mmcblk0p5)", cp.stdout)
 
     def test_reprovisioning_writes_both_systems_from_a_reader(self):
         cp = self._load("b_reprovision")

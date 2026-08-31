@@ -334,6 +334,22 @@ wk bench ls                                              # every task, its state
 wk bench report 20260830T140000Z-wpe-pr1725 --html      # the rounds so far, paired; says whether it is complete
 ```
 
+**An A/B of two system images** -- two releases, two library stacks, both
+resident on the bench medium, a boot per leg:
+
+```sh
+# both systems onto the one card (rpi3: @second and @third; from the rescue)
+wk sysimage write --from <2.38 sdcard.img> --disk rpi3:/dev/mmcblk0@second --profile wpewebkit-2.38-buildroot-rpi3-32
+wk sysimage write --from <2.52 wic.xz>     --disk rpi3:/dev/mmcblk0@third  --profile webkit-2.52-yocto-rpi3-32
+# a slot of the same name deployed into each (boot one, deploy, boot the other, deploy)
+wk boot rpi3 --system <2.38 id>   # then: wk pi deploy wpewebkit-2.38-buildroot-rpi3-32 rpi3 --slot base
+wk boot rpi3 --system <2.52 id>   # then: wk pi deploy webkit-2.52-yocto-rpi3-32 rpi3 --slot base
+# the A/B: A B A B, one boot per leg; every leg is verified from the running
+# system's own marker -- the rescue or the wrong leg is refused, not recorded
+wk pi bench rpi3 speedometer3 --ab-systems <2.38 id>,<2.52 id> --slot base --rounds 5
+wk bench report <task> --html                            # paired like any A/B; each run records system= and its proof
+```
+
 The base is guessed as the merge-base of the PR head and the image's own
 branch (`CFG_BRANCH`), the release from the PR's base branch; `--base` and
 `--release` override either. Every invocation is one task
@@ -498,16 +514,27 @@ selected, and so in what to do when it does not come back.
 has no EEPROM and no boot order to set: the firmware boots the card's first
 FAT partition and only that one (the board's one-time USB-boot OTP bit is set
 and cannot be cleared; it changes nothing, since the card is tried first). So
-`wk boot rpi3` copies the bench system's kernel, device trees and cmdline into
-`second/` on the rescue's boot partition and selects them with one
-`os_prefix=second/` line in `config.txt`, keeping the rescue's own as
-`config.txt.rescue`. The bench system's first act is to move that file back;
-`wk boot rpi3 --disarm` from the rescue does the same. If the bench kernel
-panics before it can, every power cycle boots the same `os_prefix` again: pull
-the card, and in a reader rename `config.txt.rescue` back to `config.txt` on
-partition 1 (a revert that needs no hands is owed, docs/HANDOFF-boot.md). This
-board's rescue predates the card-helper layer, so its rewrite is the one card a
-person carries (`wk help lifecycle`, step 3).
+`wk boot rpi3` copies the selected bench system's kernel, device trees and
+cmdline into a prefix directory on the rescue's boot partition (`second/` or
+`third/`) and selects it with one `os_prefix=` line in `config.txt`, keeping
+the rescue's own as `config.txt.rescue`. The bench system's first act is to
+move that file back; `wk boot rpi3 --disarm` from the rescue does the same.
+If the bench kernel panics before it can, every power cycle boots the same
+`os_prefix` again: pull the card, and in a reader rename `config.txt.rescue`
+back to `config.txt` on partition 1 (a revert that needs no hands is owed,
+docs/HANDOFF-boot.md). This board's rescue predates the card-helper layer, so
+its rewrite is the one card a person carries (`wk help lifecycle`, step 3).
+
+A card shared with a rescue carries *two* bench systems: an extended
+partition 3 holds logical pairs 5-6 (`@second`) and 7-8 (`@third`), each a
+256 MiB boot partition and half the card's remaining space, a geometry the
+card helper derives from the disk size alone so every write converges on the
+same table (admin/wk-card-priv). Two releases with two library stacks sit
+side by side -- `wk sysimage write ...@second` and `...@third` -- and
+`wk boot rpi3 --system <id>` arms the one it names; with two present and no
+`--system`, the arming refuses to guess. A card still on the one-system
+layout (primaries 3-4) keeps working; the first `@second` write onto a
+rescue-bearing card lays the extended layout down and says what it replaced.
 
 **rpi4 -- `pi-tryboot`, two media, one boot authority.** Rescue on the SD card
 (`/dev/mmcblk0`, root `p2`), bench system's root on the USB stick (`/dev/sda`),

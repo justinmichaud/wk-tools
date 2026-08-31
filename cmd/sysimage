@@ -43,7 +43,7 @@
 #                                workspace that built an image is its name
 #                                (wk help)
 #   disks <machine>             removable disks attached to that machine
-#   write --from <path> --disk <machine>:<device>[@second]
+#   write --from <path> --disk <machine>:<device>[@second|@third]
 #                                write that image to that disk, and make it a
 #                                fleet system on the card;
 #                                --from takes a path 'wk sysimage ls' printed
@@ -52,10 +52,14 @@
 #                                disk -- only a removable disk plugged into
 #                                it -- and writing it does not make anything
 #                                boot it ('wk boot' does).
-#                                <device>@second writes the image into
-#                                partitions 3 and 4 beside a rescue on 1-2
-#                                (a board with one medium, the rpi3), from a
-#                                reader or from that rescue itself
+#                                <device>@second / <device>@third write the
+#                                image in beside the system on partitions 1-2,
+#                                from a reader or from that system itself. A
+#                                medium shared with a rescue (the rpi3's card)
+#                                carries two such systems; a dedicated bench
+#                                medium (the rpi4's stick) carries one
+#                                (@second). The card helper resolves which
+#                                partitions each name is.
 #       --profile <name>         which configuration this image is, when the
 #                                path does not already say (a yocto path does)
 #       --machine <name>         the fleet machine (boot/machines/<name>.conf)
@@ -816,7 +820,7 @@ EOF
         _wifi_creds_preflight "${IMG_MACHINE:-}"
 
         if disk_is_second "$DISK_DEV"; then
-            warn "this ERASES partitions 3 and 4 of ${DISK_DEV%@second} on $DISK_MACHINE (the rescue on 1-2 stays)."
+            warn "this ERASES the ${DISK_DEV##*@} system on ${DISK_DEV%@*} on $DISK_MACHINE (the system on partitions 1-2 stays)."
         else
             warn "this ERASES $DISK_DEV on $DISK_MACHINE, whatever is on it now."
         fi
@@ -907,7 +911,7 @@ source=$from"
     fi
     info "$DISK_DEV on $DISK_MACHINE now holds $ID"
 
-    if [ "${DISK_DEV%@second}" = "${MACH_DEVICE:-}" ]; then
+    if [ "${DISK_DEV%@*}" = "${MACH_DEVICE:-}" ]; then
         # "Writing did not arm anything" is false of a medium-armed machine
         # unless this makes it true: its arming is the presence of
         # second-stage firmware on the boot partition, which the image being
@@ -962,10 +966,10 @@ cmd_write() {
             --dry-run) dry=1; shift ;;
             --grow)    grow=1; grow_set=1; shift ;;
             --no-grow) grow=0; grow_set=1; shift ;;
-            -*) die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second]
+            -*) die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second|@third]
     [--profile <name>] [--machine <name>] [--rescue] [--grow|--no-grow] [--dry-run]
     unknown option: $1" ;;
-            *)  die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second]
+            *)  die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second|@third]
     unexpected argument: $1
     An image is bytes a workspace produced, not an id in a catalogue
     (wk help), so what identifies one is its path -- pass it to --from.
@@ -980,12 +984,12 @@ cmd_write() {
     machines:
 $(machine_list | sed 's/^/      /')"
 
-    [ -n "$from" ] || die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second]
+    [ -n "$from" ] || die "usage: wk sysimage write --from <path|vm:path> --disk <machine>:<device>[@second|@third]
     An image is bytes a workspace produced, not an id in a catalogue
     (wk help), so what identifies one is its path.
     'wk sysimage ls' lists every image a workspace here has built, with the
     path to pass to --from."
-    [ -n "$spec" ] || die "usage: wk sysimage write --from $from --disk <machine>:<device>[@second]
+    [ -n "$spec" ] || die "usage: wk sysimage write --from $from --disk <machine>:<device>[@second|@third]
     'wk sysimage disks <machine>' lists what is attached where."
 
     # Leave the rest of the card alone by default, so there is room for the
@@ -997,8 +1001,8 @@ $(machine_list | sed 's/^/      /')"
         if disk_is_second "${spec#*:}"; then grow=1; else grow=0; fi
     fi
     disk_is_second "${spec#*:}" && [ "$role" = rescue ] \
-        && die "a rescue is the system on partitions 1 and 2; '@second' names the bench
-    system beside it. Drop --rescue, or drop @second."
+        && die "a rescue is the system on partitions 1 and 2; '@second' and '@third'
+    name the bench systems beside it. Drop --rescue, or drop the @-suffix."
     cmd_write_from "$from" "$spec" "$dry" "$grow" "$profile" "$role" "$mach"
 }
 

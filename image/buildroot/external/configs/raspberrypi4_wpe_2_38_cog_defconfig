@@ -69,12 +69,18 @@ BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_FAAD=y
 BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_FDK_AAC=y
 BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_HLS=y
 BR2_PACKAGE_GST1_PLUGINS_BAD_PLUGIN_OPUS=y
-BR2_PACKAGE_GST_OMX=y
 BR2_PACKAGE_BITSTREAM_VERA=y
 BR2_PACKAGE_RPI_BT_FIRMWARE=y
 BR2_PACKAGE_RPI_FIRMWARE=y
 BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI4=y
-BR2_PACKAGE_RPI_FIRMWARE_INSTALL_VCDBG=y
+# No gst-omx and no vcdbg: each drags in rpi-userland, whose libEGL.so and
+# libGLESv2.so are real files in /usr/lib that collide with mesa's symlinks
+# (the build dies at mesa's staging install), and the firmware media/GL
+# services they exist for are not there on a Pi 4 under KMS anyway.
+# wpewebkit still force-selects wpebackend-rdk (the fork's Config.in), but
+# with rpi-userland gone every rdk display backend is unselectable and it
+# builds as a stub; the bench launch pins WPE_BACKEND_LIBRARY to fdo, since
+# rdk's cmake still claims the libWPEBackend-default.so symlink.
 BR2_PACKAGE_RPI_WIFI_FIRMWARE=y
 # wpa_supplicant, so this board can bring up WiFi from a credential seeded
 # onto the card (wk-wifi-join, image/buildroot/wifi-overlay.sh) -- this board
