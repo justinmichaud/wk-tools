@@ -48,14 +48,23 @@ rather than invented; the last two are what this repository needs of any image.
                                             nothing to assemble into an
                                             sdcard.img
 
-The cog platform is *not* among them. raspberrypi4_wpe_defconfig carries
-BR2_PACKAGE_COG_PLATFORM_DRM=y, but that symbol depends on
-BR2_PACKAGE_WPEBACKEND_FDO, which nothing selects and which itself needs an
-EGL-on-wayland stack (mesa3d, wayland) no 2.38 configuration here builds -- so
-kconfig drops the line, in the rpi4_wpe defconfig as much as in a copy of it.
-Carrying a line kconfig discards would claim a backend the image does not have,
-so it is not carried: this resolves, as the rpi3 does, to wpebackend-rdk's
-bcm-rpi backend on dispmanx.
+The graphics stack is where the rpi4 must differ from the rpi3, not merely
+may: the Pi 4's VideoCore VI runs no Khronos vchiq service (no /opt/vc GL),
+so wpebackend-rdk's bcm-rpi backend on dispmanx -- the rpi3's stack -- can
+never render on it. Measured 2026-08-31 on the board: every WPEWebProcess
+dies at startup registering its vchiq service ("failed to add service --
+already in use"), on a native 5.15 32-bit kernel and a 6.6 arm64 one alike,
+while the identical stack renders on the rpi3. The fork's own answer for the
+rpi4 is KMS: its rpi4 defconfigs carry mesa (v3d/vc4) and weston, and the
+selectable cog platform at 2.38 in this tree is the wayland one
+(BR2_PACKAGE_COG_PLATFORM_FDO on BR2_PACKAGE_WPEBACKEND_FDO; the DRM platform
+depends on a BR2_PACKAGE_HAS_LIBGBM machinery this 2020.02 base does not
+have, so kconfig drops it). Hence the block in the defconfig: wpebackend-fdo,
+cog's wayland platform, mesa's v3d GL, weston on DRM, the vc4-kms-v3d
+overlay via the post-image script, and python3 for the uinput seat shim
+`wk pi bench` starts (the same one the yocto images use). wpebackend-rdk is
+explicitly off: one backend per image, and the one that cannot work here
+would otherwise still be the one libwpe dlopens as default.
 
 The kernel *tree* is not changed: the release-pinned rpi-5.15.y, which is what
 keeps this a 2.38 configuration rather than a different distribution wearing
@@ -66,11 +75,14 @@ tryboot lane 2026-08-31, it hangs before init, and it lacks the 2711's SD
 controller (MMC_SDHCI_IPROC), PCIe root (PCIE_BRCMSTB), XHCI, LPAE and
 HIGHMEM, so it could mount no root there even if it ran. The rpi4 defconfig
 uses the pinned tree's own in-tree bcm2711 defconfig instead (what RPi OS
-ships as kernel7l), with the same fleet fragment on top.
+ships as kernel7l), with the same fleet fragment on top, compressed gzip:
+the LZ4 zImage of this same tree and config hangs the board before the
+console is up, while RPi OS's gzip kernel7l build of the same config
+(5.15.84) boots it in 90 s over the same tryboot staging -- measured
+2026-08-31, and compression is the one variable between the two.
 
-TODO: **a full bench run on this image is unmeasured.** The tryboot lane and
-the rescue's kernel are proven on the board; the first boot of this image's
-own kernel, and the display half -- an rpi4's VideoCore VI has no /opt/vc GL
-driver, and this resolves to the backend that wants one -- are not. A board
-that boots to a shell and shows no page is the expected next question, not a
-surprise.
+TODO: **a full bench run on this image is unmeasured.** The tryboot lane, the
+32-bit kernel path (RPi OS's gzip build) and the compat of the userland with
+this board are proven; this image's own gzip kernel and the weston/mesa
+session are built to the measured constraints above but have not yet drawn a
+frame on the board.

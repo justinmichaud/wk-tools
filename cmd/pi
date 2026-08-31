@@ -341,28 +341,42 @@ pi_pin_governor() {
         2>/dev/null | tr -d '\r' | tail -1
 }
 
-# The session a browser needs, by the builder of the running image (the
-# marker's own word for it). Sets PI_RENDERER and PI_SESSION.
+# The session a browser needs, decided by what the image carries rather than
+# who built it: an image with weston gets a compositor session (yocto's
+# systemd images and the rpi4's BusyBox 2.38 image alike -- the Pi 4 has no
+# firmware GL, so its 2.38 browser renders through wayland+mesa); one without
+# renders through dispmanx (wpebackend-rdk) with no compositor to start.
+# Sets PI_RENDERER and PI_SESSION.
 PI_RENDERER=""; PI_SESSION=""
-pi_session_up() { # <builder> <display evidence, or empty>
-    case "$1" in
-        buildroot) pi_session_buildroot "$2" ;;
-        yocto)     pi_session_yocto "$2" ;;
-        *) die "the image on $machine says builder='$1', and this command knows how to
-    bring up a session on a yocto or a buildroot image only." ;;
-    esac
+pi_session_up() { # <display evidence, or empty>
+    if i_ssh 'command -v weston >/dev/null' >/dev/null 2>&1; then
+        pi_session_weston "$1"
+    else
+        pi_session_rdk "$1"
+    fi
 }
 
-# The RPi backend: the browser draws through dispmanx, with no compositor to
-# start. The image autostarts a cog of its own showing the board's address;
-# that one is stopped, since two browsers on one GPU is not a measurement.
-# A buildroot image: the RPi backend -- the browser draws through dispmanx
-# (wpebackend-rdk), with no compositor to start. The image autostarts a cog of
-# its own showing the board's address; that one is stopped, since two browsers
-# on one GPU is not a measurement.
-pi_session_buildroot() {
+# Whatever browser the image left running is *verified dead*, not just sent a
+# signal: a web process holds a vchiq service (rdk) or the GPU (weston), a
+# browser mid crash-storm shrugs off TERM, and a survivor makes every later
+# web process die at startup with "failed to add service - already in use"
+# (measured on the rpi4, 2026-08-31). Two browsers on one GPU is not a
+# measurement either.
+pi_browsers_dead() {
     i_ssh '[ -x /etc/init.d/S90cog ] && /etc/init.d/S90cog stop >/dev/null 2>&1
-           killall cog WPEWebProcess WPENetworkProcess 2>/dev/null; true' >/dev/null 2>&1 || true
+           killall cog MiniBrowser WPEWebProcess WPENetworkProcess 2>/dev/null
+           n=0; while [ "$n" -lt 5 ] && pidof cog MiniBrowser WPEWebProcess WPENetworkProcess >/dev/null 2>&1; do sleep 1; n=$((n+1)); done
+           if pidof cog MiniBrowser WPEWebProcess WPENetworkProcess >/dev/null 2>&1; then
+               killall -9 cog MiniBrowser WPEWebProcess WPENetworkProcess 2>/dev/null; sleep 1
+           fi
+           ! pidof cog MiniBrowser WPEWebProcess WPENetworkProcess >/dev/null 2>&1' >/dev/null 2>&1 \
+        || die "the image's own browser on $machine would not die, even to SIGKILL;
+    a survivor holds the GPU and the vchiq service the run needs."
+}
+
+# No compositor to start: the browser draws through dispmanx (wpebackend-rdk).
+pi_session_rdk() {
+    pi_browsers_dead
     PI_RENDERER=dispmanx; PI_SESSION=rdk
     log "  session     rdk backend, dispmanx ($([ -n "$1" ] && echo "$1" || echo 'no display evidence'))"
 }
@@ -400,14 +414,32 @@ os.write(fd,struct.pack("=80s4HI256i",b"wk-bench-seat",3,1,1,1,0,*([0]*256)))
 fcntl.ioctl(fd,IOC(0,U,1,0),0)
 signal.pause()'
 
-pi_session_yocto() {
-    # netdata competes for the CPU being measured.
+pi_session_weston() {
+    pi_browsers_dead
+    # netdata competes for the CPU being measured (the systemd images run it;
+    # on a BusyBox image there is no systemctl and nothing to stop).
     i_ssh 'systemctl stop netdata 2>/dev/null' >/dev/null 2>&1 || true
     if [ -n "$1" ]; then
-        # A real panel: weston's own service, DRM backend, GL renderer. The
-        # only configuration whose number is comparable with other hardware.
+        # A real panel: weston on DRM, GL renderer. The only configuration
+        # whose number is comparable with other hardware. systemd images
+        # carry a weston unit; a BusyBox image starts the same weston
+        # directly.
         PI_RENDERER=gl; PI_SESSION=drm
-        i_ssh 'systemctl start --no-block weston' >/dev/null 2>&1 || true
+        if i_ssh 'command -v systemctl >/dev/null' >/dev/null 2>&1; then
+            i_ssh 'systemctl start --no-block weston' >/dev/null 2>&1 || true
+        else
+            i_ssh 'pkill -x weston 2>/dev/null; sleep 1
+                   mkdir -p /run/user/0 && chmod 700 /run/user/0
+                   XDG_RUNTIME_DIR=/run/user/0 setsid weston \
+                     --backend=drm-backend.so --socket=wk-bench \
+                     </dev/null >/tmp/wk-weston.log 2>&1 & sleep 4' >/dev/null 2>&1 || true
+        fi
+    elif ! i_ssh 'command -v systemctl >/dev/null' >/dev/null 2>&1; then
+        # The RDP virtual head below is the systemd images' (their weston
+        # carries the backend); this BusyBox weston has no RDP head to
+        # synthesise, so "no display" stays a refusal even under --force.
+        die "$machine reports no attached display, and this image's weston has no
+    RDP virtual head to synthesise one. Attach a panel."
     else
         # "No display" is not "no compositor": weston's RDP backend synthesises
         # a head with no display hardware and no client on the port, so pixman
@@ -449,28 +481,33 @@ pi_session_yocto() {
 # appends the URL), from the slot's own manifest: which browser, and the
 # environment that makes it run the slot's WebKit rather than the image's.
 pi_launch_cmd() { # <slot> <slot.json> <cores wrap>
-    local slot="$1" json="$2" cores="$3" root env browser
+    local slot="$1" json="$2" cores="$3" root env browser wenv=""
     root="$(pi_slot_dir "$slot")/root"
     env=$(wkslot env "$json" "$root" | tr '\n' ' ')
     browser=$(wkslot get "$json" browser)
+    # Under a compositor the browser needs weston's own environment, read out
+    # of the running compositor rather than assumed. POSIX sh, not bash: the
+    # driver runs this through the board's /bin/sh, busybox ash included.
+    [ "${PI_SESSION:-rdk}" = rdk ] \
+        || wenv='eval "$(strings /proc/$(pidof weston-desktop-shell)/environ | grep -E "^(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)=")" && export XDG_RUNTIME_DIR WAYLAND_DISPLAY && '
     case "$browser" in
         cog)
-            printf 'cd /tmp && exec %senv %s /usr/bin/cog' "$cores" "$env" ;;
+            printf 'cd /tmp && %sexec %senv %s /usr/bin/cog' "$wenv" "$cores" "$env" ;;
         minibrowser)
-            # weston's own environment, read out of the running compositor
-            # rather than assumed.
-            # POSIX sh, not bash: the driver runs this through the board's
-            # /bin/sh, which is busybox ash on every image here.
-            printf 'cd /tmp && eval "$(strings /proc/$(pidof weston-desktop-shell)/environ | grep -E "^(XDG_RUNTIME_DIR|WAYLAND_DISPLAY)=")" && export XDG_RUNTIME_DIR WAYLAND_DISPLAY && exec %senv %s %s/bin/MiniBrowser' \
-                "$cores" "$env" "$root" ;;
+            printf 'cd /tmp && %sexec %senv %s %s/bin/MiniBrowser' \
+                "$wenv" "$cores" "$env" "$root" ;;
         *) die "slot '$slot' names browser '$browser', which this command cannot launch" ;;
     esac
 }
 
+# TERM first, then KILL after a beat: the driver has already read its
+# evidence off /proc by the time this runs, and a browser that survives TERM
+# (mid crash-storm it does) still holds the vchiq service the next launch
+# needs.
 pi_kill_cmd() { # <slot.json>
     case "$(wkslot get "$1" browser)" in
-        cog)         printf 'killall cog WPEWebProcess WPENetworkProcess 2>/dev/null; true' ;;
-        minibrowser) printf 'killall MiniBrowser WPEWebProcess WPENetworkProcess 2>/dev/null; true' ;;
+        cog)         printf 'killall cog WPEWebProcess WPENetworkProcess 2>/dev/null; sleep 1; killall -9 cog WPEWebProcess WPENetworkProcess 2>/dev/null; true' ;;
+        minibrowser) printf 'killall MiniBrowser WPEWebProcess WPENetworkProcess 2>/dev/null; sleep 1; killall -9 MiniBrowser WPEWebProcess WPENetworkProcess 2>/dev/null; true' ;;
     esac
 }
 
@@ -682,7 +719,7 @@ $(sed 's/^/    /' "$PI_TMP/tunnel.log")"
     # halves of an A/B would put a fresh compositor and page cache on one
     # side only.
     info "bringing up the session on $machine"
-    pi_session_up "$builder" "$PI_DISPLAY"
+    pi_session_up "$PI_DISPLAY"
 
     # 7. The task the runs are filed into: wk ab's when given, else this
     # command's own, named for the request and what it measures. Created

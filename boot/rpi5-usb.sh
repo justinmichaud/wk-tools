@@ -11,6 +11,9 @@ BOOT_ARMING=one-shot   # the intent lives in the machine's own firmware, not a s
 BOOT_ORDER_IMAGE=0xf64     # USB -> NVMe -> restart
 BOOT_ORDER_NORMAL=0xf461   # the EEPROM's own order: SD -> NVMe -> USB -> restart
 
+# One system on the medium: partition 1 is the only candidate (b_systems).
+B_SYSTEM_PARTS="1"
+
 # Re-arming with the EEPROM's current order is a safe no-op that still
 # proves the mailbox call works -- also how arming is *cancelled*.
 b_arm() {

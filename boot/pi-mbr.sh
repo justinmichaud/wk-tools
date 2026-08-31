@@ -27,6 +27,9 @@ BOOT_ARMING=medium
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
 
+# One system on the medium: partition 1 is the only candidate (b_systems).
+B_SYSTEM_PARTS="1"
+
 # MBR partition table: offset 446, 16-byte entries, type byte fifth (450).
 PIMBR_PART_SUFFIX=1
 PIMBR_TYPE_OFFSET=450

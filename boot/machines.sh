@@ -318,13 +318,74 @@ b_boot_id() { r_ssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true; }
 # the second system's).
 b_boot_part() { disk_part "$MACH_DEVICE" 1; }
 
-# Read off the boot partition from host mode: the image writes the dump
-# there 75 s in, readable even if the image was never reachable.
+# Which partitions of MACH_DEVICE can hold a system's boot files: the first,
+# unless the driver says otherwise (pi-sd: the bench system is on 3-4 beside
+# the rescue; pi-tryboot: 1-2 and, when written, a second system on 3-4).
+B_SYSTEM_PARTS="1"
+
+# Partition <n> of the bench medium, as the enumeration below addresses it.
+# One hook so a driver that *resolves* its medium instead of declaring it
+# (pi-mbr) overrides the device half once, not the enumeration.
+b_system_part() { disk_part "$MACH_DEVICE" "$1"; }
+
+# The systems the bench medium holds, one `<boot partition> <image id>` line
+# each, read off every candidate partition. A partition that is absent or
+# carries no wk-image.id is not a system and not an error; an unreachable
+# machine is (nothing here can tell what the medium holds).
+b_systems() {
+    local p part id
+    for p in $B_SYSTEM_PARTS; do
+        part=$(b_system_part "$p")
+        id=$(b_device_image "$part") || return 1
+        [ -n "$id" ] && printf '%s %s\n' "$part" "$id"
+    done
+    return 0
+}
+
+# Which system an arming boots, from evidence: the one named, or the only
+# one there is. Prints its `<boot partition> <image id>` line; every refusal
+# names the remedy. One selector for every arming (cmd/boot), so a medium
+# that grows a second system changes no command.
+machine_select_system() { # <requested id, or empty for the sole system>
+    local want="$1" systems count
+    systems=$(b_systems) \
+        || die "could not read $MACH_DEVICE on $MACH_NAME to see what it holds"
+    count=$(printf '%s' "$systems" | grep -c . || true)
+    if [ "$count" -eq 0 ]; then
+        die "$MACH_DEVICE on $MACH_NAME holds no wk system yet.
+    Write one first:  wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE
+    ('wk sysimage ls' lists what a workspace here has built)"
+    fi
+    if [ -z "$want" ]; then
+        [ "$count" -eq 1 ] || die "$MACH_DEVICE on $MACH_NAME holds $count systems:
+$(printf '%s\n' "$systems" | awk '{ printf "        %s  (on %s)\n", $2, $1 }')
+    Name the one to boot:  wk boot $MACH_NAME --system <id>"
+        printf '%s\n' "$systems"
+        return 0
+    fi
+    local line
+    line=$(printf '%s\n' "$systems" | awk -v id="$want" '$2 == id { print; exit }')
+    [ -n "$line" ] || die "$MACH_DEVICE on $MACH_NAME holds:
+$(printf '%s\n' "$systems" | awk '{ printf "        %s  (on %s)\n", $2, $1 }')
+    not '$want'. Write it first:  wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE
+    (a medium already holding a system takes a second one at ...:$MACH_DEVICE@second)"
+    printf '%s\n' "$line"
+}
+
+# Read off each system's boot partition from host mode: the image writes the
+# dump there 75 s in, readable even if the image was never reachable. Every
+# system the medium holds is read -- after a failed boot of the second
+# system, the first one's dump is the stale one.
 b_diag() {
-    local part; part=$(b_boot_part)
-    # An automounter usually has the partition already; read it where it is,
-    # and only mount when nothing else has.
-    m_ssh "set -e
+    local systems line part id
+    systems=$(b_systems) || die "cannot read $MACH_DEVICE on $MACH_NAME"
+    [ -n "$systems" ] || { echo "($MACH_DEVICE holds no wk system, so there is no dump to read)"; return 0; }
+    while read -r part id; do
+        [ -n "$part" ] || continue
+        printf '== %s (%s) ==\n' "$id" "$part"
+        # An automounter usually has the partition already; read it where it
+        # is, and only mount when nothing else has.
+        m_ssh "set -e
         at=\$(findmnt -rno TARGET '$part' | head -1)
         if [ -n \"\$at\" ]; then
             cat \"\$at/wk-diag.txt\" 2>/dev/null \
@@ -336,6 +397,9 @@ b_diag() {
         cat /mnt/wk-diag/wk-diag.txt 2>/dev/null \
             || echo '(no wk-diag.txt -- the image did not get that far)'
         sudo umount /mnt/wk-diag"
+    done <<EOF
+$systems
+EOF
 }
 
 b_reboot() {
@@ -348,12 +412,15 @@ b_reboot() {
 
 # Read off the FAT boot partition rather than by hashing the device: a
 # booted image writes to its own boot partition, so the bytes stop matching.
-b_device_image() {
-    local part; part=$(b_boot_part)
-    m_ssh "at=\$(findmnt -rno TARGET '$part' | head -1)
+# Fails only when the machine cannot be asked; a partition with no system on
+# it (or none at all) answers with nothing, which is a different fact.
+b_device_image() { # [boot partition; default: b_boot_part]
+    local part out; part=${1:-$(b_boot_part)}
+    out=$(m_ssh "at=\$(findmnt -rno TARGET '$part' | head -1)
         if [ -n \"\$at\" ]; then cat \"\$at/wk-image.id\" 2>/dev/null; exit 0; fi
         sudo mkdir -p /mnt/wk-id
         sudo mount -o ro '$part' /mnt/wk-id 2>/dev/null || exit 0
         cat /mnt/wk-id/wk-image.id 2>/dev/null
-        sudo umount /mnt/wk-id" 2>/dev/null | tr -d '\r\n ' || true
+        sudo umount /mnt/wk-id" 2>/dev/null) || return 1
+    printf '%s' "$out" | tr -d '\r\n '
 }

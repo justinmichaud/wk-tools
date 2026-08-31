@@ -13,7 +13,10 @@ BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
 BR2_TARGET_GENERIC_ROOT_PASSWD="root"
 BR2_ROOTFS_POST_BUILD_SCRIPT="board/raspberrypi4/post-build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="board/raspberrypi4/post-image.sh"
-BR2_ROOTFS_POST_SCRIPT_ARGS="--tvmode-720 --gpu_mem_1024=256 --silent"
+# KMS graphics (the overlay the fork's post-image script writes as
+# vc4-kms-v3d-pi4), and only the 76 MB of GPU memory a KMS system needs: the
+# firmware composits nothing here, the kernel's vc4/v3d do.
+BR2_ROOTFS_POST_SCRIPT_ARGS="--tvmode-720 --gpu_mem_1024=76 --add-vc4-kms-v3d-overlay --silent"
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_CUSTOM_GIT=y
 BR2_LINUX_KERNEL_CUSTOM_REPO_URL="https://github.com/raspberrypi/linux"
@@ -30,7 +33,11 @@ BR2_LINUX_KERNEL_DEFCONFIG="bcm2711"
 # Plus what a fleet bench system needs to be reached over the tailnet (a TUN
 # device, netfilter), which that config has none of; see the fragment.
 BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_WK_PATH)/board/linux-fleet.fragment"
-BR2_LINUX_KERNEL_LZ4=y
+# Gzip (the default), not LZ4: the LZ4 zImage of this same tree and config
+# hangs this board before the console is up, while RPi OS's gzip build of
+# the same config (kernel7l, 5.15.84) boots it in 90 s -- measured
+# 2026-08-31, both via the same tryboot staging. Compression is the one
+# variable left between the two.
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="bcm2711-rpi-4-b"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
@@ -88,8 +95,29 @@ BR2_PACKAGE_IPTABLES=y
 BR2_PACKAGE_BROTLI=y
 BR2_PACKAGE_COG=y
 BR2_PACKAGE_COG_USE_SYSTEM_DBUS=y
-BR2_PACKAGE_COG_AUTOSTART=y
+# No autostarted browser: the Pi 4 renders through one compositor session
+# that `wk pi bench` owns, and a boot-time cog would hold the GPU beside it.
 BR2_PACKAGE_XKEYBOARD_CONFIG=y
+# The Pi 4 has no firmware GL -- the VideoCore VI runs no Khronos vchiq
+# service, so wpebackend-rdk's dispmanx backend can never render here
+# (measured 2026-08-31: every WPEWebProcess dies registering its service,
+# on 5.15 and 6.6 kernels alike, while the same stack renders on the rpi3's
+# VideoCore IV). The browser stack is the one the fork's own rpi4 defconfigs
+# use: cog's wayland platform on weston's DRM backend, GL from mesa's v3d.
+BR2_PACKAGE_WPEBACKEND_FDO=y
+# BR2_PACKAGE_WPEBACKEND_RDK is not set
+BR2_PACKAGE_COG_PLATFORM_FDO=y
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_KMSRO=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_V3D=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_VC4=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_WESTON=y
+BR2_PACKAGE_WESTON_DEFAULT_DRM=y
+# The input seat cog asserts on at startup is a uinput device made by the
+# same python shim the yocto images use (PI_SEAT_PY, cmd/pi).
+BR2_PACKAGE_PYTHON3=y
 BR2_PACKAGE_LIBMANETTE=y
 BR2_PACKAGE_WPEWEBKIT2_38=y
 BR2_PACKAGE_HOST_DOSFSTOOLS=y

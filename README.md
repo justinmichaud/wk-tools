@@ -526,6 +526,15 @@ order for this driver is `sd-first` (`wk pi boot-order rpi4`): the firmware
 never boots the bench medium at all. If it goes wrong: any power cycle boots
 the rescue.
 
+The stick can hold a second bench system on partitions 3-4 (`--disk
+rpi4:/dev/sda@second`, the same shape as the rpi3's card): two releases with
+two library stacks resident side by side, so an A/B across *images* is an
+arming choice rather than a rewrite. `wk boot rpi4` with one system on the
+stick arms it; with two it refuses to guess, and `wk boot rpi4 --system <id>`
+names the one to stage -- its kernel, its cmdline, its root PARTUUID all come
+from the named system's own partitions. WebKit slots still deploy into
+whichever system is booted (`wk pi deploy`), unchanged.
+
 **rpi5 -- `rpi5-usb`, a workstation with a bench stick.** The board's own
 install on the NVMe (`/dev/nvme0n1p2`) is never written; the bench system goes
 on `/dev/sda`. Arming is a firmware mailbox one-shot (`set_reboot_order`, order

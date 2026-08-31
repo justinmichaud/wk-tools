@@ -133,6 +133,31 @@ b_evidence
         self.assertIn("tryboot_staged=unreadable", cp.stdout)
         self.assertIn("bench root on /dev/sda", cp.stdout)
 
+    def test_arm_stages_from_the_selected_system(self):
+        """a medium holding two systems arms the one cmd/boot selected
+        (ARM_SYS_PART, machine_select_system); an arm with no selection is
+        refused loudly rather than guessing partition 1."""
+        cp = bash(LOAD + '''
+m_ssh() { echo "m_ssh: $*" >&2; }
+ARM_SYS_PART=/dev/sda3 b_arm
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("mount -o ro '/dev/sda3'", cp.stderr)
+        cp = bash(LOAD + 'm_ssh() { :; }; b_arm')
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("machine_select_system", cp.stderr)
+
+    def test_evidence_lists_the_systems_the_medium_holds(self):
+        """which ids an arming can name is evidence, printed one per line."""
+        cp = bash(LOAD + '''
+m_ssh() { echo yes; }
+b_systems() { printf "%s\\n%s\\n" "/dev/sda1 alpha-1" "/dev/sda3 beta-2"; }
+b_evidence
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("system=alpha-1 (on /dev/sda1)", cp.stdout)
+        self.assertIn("system=beta-2 (on /dev/sda3)", cp.stdout)
+
     def test_reprovision_puts_the_sd_first(self):
         """the SD is the boot authority for both roles here, so the recipe
         orders it first and never asks the firmware to boot the bench medium."""

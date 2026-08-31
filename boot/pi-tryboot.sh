@@ -46,6 +46,15 @@ BOOT_ORDER_NORMAL=""
 # (wk-image.id) and diagnostics; only the *reading* of the kernel moved.
 # b_boot_part's default (partition 1 of MACH_DEVICE) is already that.
 
+# The medium can hold a second system on partitions 3-4 (`wk sysimage write
+# --disk <machine>:$MACH_DEVICE@second`, the same shape as the rpi3's card):
+# two releases with two library stacks, resident side by side, so an A/B
+# across *images* is an arming choice rather than a rewrite. Arming stages
+# from the selected system's own boot partition -- its kernel, its cmdline,
+# its root PARTUUID -- so which system boots is decided entirely by
+# `wk boot <machine> --system <id>`.
+B_SYSTEM_PARTS="1 3"
+
 # Appends panic=10 to a staged cmdline that sets no panic of its own: without
 # it a panicking kernel hangs instead of rebooting, and the hang is the one
 # failure tryboot's firmware revert cannot see past.
@@ -104,8 +113,14 @@ sync"
 # and every other reboot stay plain, which on this driver *is* the disarm.
 TRYBOOT_ARMED=""
 
+# Stages from the *selected* system's boot partition: cmd/boot's arming sets
+# ARM_SYS_PART from machine_select_system, so a medium holding two systems
+# arms the one that was named. Required rather than defaulted -- an arm that
+# guessed the partition could boot the system beside the one recorded.
 b_arm() {
-    m_ssh "$(tryboot_stage_sh "$(disk_part "$MACH_DEVICE" 1)" "$MACH_DTB")" \
+    [ -n "${ARM_SYS_PART:-}" ] \
+        || die "b_arm needs the selected boot partition (machine_select_system, cmd/boot)"
+    m_ssh "$(tryboot_stage_sh "$ARM_SYS_PART" "$MACH_DTB")" \
         || die "could not stage the tryboot files on $MACH_NAME's rescue.
     Arming copies the bench system's kernel out of $MACH_DEVICE's boot
     partition onto the SD, so the rescue has to be up and the medium readable."
@@ -139,17 +154,20 @@ b_reboot() {
 
 # Evidence from the SD, not a record: whether the staging is in place. The
 # flag itself is write-only and spent by any boot, so it is never evidence.
+# The systems the medium holds are evidence too: which ids an arming can name.
 b_evidence() {
     printf 'lane=kernel from the SD via tryboot (one boot, firmware-reverting); bench root on %s\n' "$MACH_DEVICE"
-    local staged
+    local staged systems
     staged=$(m_ssh "boot=\$($_tryboot_bootfs_sh) && [ -f \"\$boot/tryboot.txt\" ] && [ -d \"\$boot/second\" ] && echo yes || echo no" \
         2>/dev/null | tr -d '\r') || staged=""
     printf 'tryboot_staged=%s\n' "${staged:-unreadable}"
+    systems=$(b_systems 2>/dev/null) || systems=""
+    [ -z "$systems" ] || printf '%s\n' "$systems" | awk '{ printf "system=%s (on %s)\n", $2, $1 }'
 }
 
 # The wk-managed media, in one line, for the fleet block in `wk status`.
 b_media() {
-    printf '%s holds the bench system (root; its kernel is tryboot-staged onto the SD, which also carries the rescue)' \
+    printf '%s holds the bench system(s): root on 1-2 and, when written, a second on 3-4; the armed kernel is tryboot-staged onto the SD, which also carries the rescue' \
         "$MACH_DEVICE"
 }
 
@@ -166,6 +184,9 @@ wk pi boot-order $MACH_NAME sd-first
     the SD first: the bench medium is mounted by the kernel, never firmware-booted
 wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE --profile <bench profile>
     the bench system's root medium, written from the rescue
+wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE@second --profile <bench profile>
+    optional: a second system beside the first (partitions 3-4), for an
+    A/B across images; 'wk boot $MACH_NAME --system <id>' picks one
 wk boot $MACH_NAME
     one shot; the firmware reverts by itself
 REPROV

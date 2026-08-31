@@ -35,6 +35,11 @@ BOOT_ORDER_NORMAL=""
 # The card, as the helper addresses the bench system on it.
 pisd_second() { printf '%s@second' "$MACH_DEVICE"; }
 
+# One bench system, on partitions 3-4 beside the rescue: partition 1 is the
+# rescue's and never a candidate, so the enumeration (b_systems) reads only
+# the third.
+B_SYSTEM_PARTS="3"
+
 # The one place the rescue is asked about the arming: armed=yes|no from
 # whether its config.txt has stepped aside, present=yes|no from whether a
 # fourth partition exists at all.

@@ -306,29 +306,26 @@ cmd_arm() {
     guest)
         [ -n "$IMAGE" ] || IMAGE="${MACH_GUEST:-}"
         [ -n "$IMAGE" ] || die "$MACHINE has no guest configured (MACH_GUEST)" ;;
-    # The default system is whatever the device already holds, read off its
-    # boot partition (b_device_image). Naming one is a check against the
-    # device, never a second way to choose it.
+    # The system is one the device actually holds, or the boot falls through
+    # to host mode and looks like a firmware failure: --system is matched
+    # against the medium's own enumeration (b_systems), and with no --system
+    # the sole system is taken -- a medium holding two refuses to guess.
+    # The selection carries the system's boot partition, which is what a
+    # driver whose medium holds two systems arms from (ARM_SYS_PART,
+    # boot/pi-tryboot.sh). Asked by name rather than by hash -- see
+    # b_device_image() for why bit comparison is the wrong question once an
+    # image has booted once.
     *)
-        [ -n "$IMAGE" ] || IMAGE=$(b_device_image) \
-            || die "could not read $MACH_DEVICE on $MACHINE to see what it holds"
-        [ -n "$IMAGE" ] || die "$MACH_DEVICE on $MACHINE holds no wk system yet.
-    Write one first:  wk sysimage write --from <path> --disk $MACHINE:$MACH_DEVICE
-    ('wk sysimage ls' lists what a workspace here has built)" ;;
+        local sel
+        sel=$(machine_select_system "$IMAGE")
+        ARM_SYS_PART=${sel%% *}
+        IMAGE=${sel##* } ;;
     esac
 
-    # A one-shot boots a local device, so the system has to actually be on it
-    # or the boot falls through to host mode and looks like a firmware
-    # failure. Asked by name rather than by hash -- see b_device_image() for
-    # why bit comparison is the wrong question once an image has booted once.
     # The watchdog value (for the "hands it back in Ns" line below) comes
     # from the profile this machine's conf names (MACH_PROFILE, IMG_WATCHDOG).
     ARM_WATCHDOG=""
     case "${BOOT_ARMING:-one-shot}" in one-shot|medium)
-        local on_device
-        on_device=$(b_device_image)
-        [ "$on_device" = "$IMAGE" ] || die "$MACH_DEVICE on $MACHINE holds ${on_device:-no wk system}, not $IMAGE.
-    Write it first:  wk sysimage write --from <path> --disk $MACHINE:$MACH_DEVICE"
         image_profile_load "$MACH_PROFILE" >/dev/null 2>&1 && ARM_WATCHDOG="$IMG_WATCHDOG"
     ;; esac
 
