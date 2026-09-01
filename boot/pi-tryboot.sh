@@ -35,6 +35,14 @@
 
 BOOT_ARMING=medium
 
+# Whether this board can be armed while it is running a *bench* system.
+#
+# Yes, here: staging is files copied onto the SD boot partition as root over
+# ssh, which either system can do -- no privileged helper, nothing that only a
+# rescue carries. So a leg switch is one reboot rather than two, and it does not
+# depend on a rescue this board may not be able to reach at all.
+B_ARM_FROM_BENCH=yes
+
 # Unused: the boot order here is permanent, not per-boot. The SD card is the
 # boot authority, so the right EEPROM order for this driver is sd-first
 # (`wk pi boot-order`); usb-first merely wastes the discovery window on a
@@ -80,7 +88,7 @@ _tryboot_sd_sh() {
     printf '%s' "wk_sd_own=; \
 wk_sd_boot() { \
 wk_sd_m=\$(grep -m1 \"^$part \" /proc/mounts | cut -d\" \" -f2); \
-if [ -z \"\$wk_sd_m\" ]; then wk_sd_m=\$(mktemp -d); mount -t vfat $part \"\$wk_sd_m\" || return 1; wk_sd_own=1; fi; \
+if [ -z \"\$wk_sd_m\" ]; then wk_sd_m=\$(mktemp -d); mount -t vfat \${1:-} $part \"\$wk_sd_m\" || return 1; wk_sd_own=1; fi; \
 echo \"\$wk_sd_m\"; }; \
 wk_sd_drop() { if [ -n \"\$wk_sd_own\" ]; then sync; umount \"\$wk_sd_m\"; rmdir \"\$wk_sd_m\"; wk_sd_own=; fi; }; "
 }
@@ -238,11 +246,33 @@ b_reboot() {
 # The systems the medium holds are evidence too: which ids an arming can name.
 b_evidence() {
     printf 'lane=kernel from the SD via tryboot (one boot, firmware-reverting); bench root on %s\n' "$MACH_DEVICE"
-    local staged systems
+    local staged systems source
     staged=$(r_ssh "$(_tryboot_sd_sh)
-        boot=\$(wk_sd_boot) || exit 0
+        boot=\$(wk_sd_boot \"-o ro\") || exit 0
         if [ -f \"\$boot/tryboot.txt\" ] && [ -d \"\$boot/second\" ]; then echo yes; else echo no; fi
         wk_sd_drop" 2>/dev/null | tr -d '\r' | head -1) || staged=""
+
+    # Which config the running boot came from, and not which one was staged.
+    # `wk boot --status` used to answer "bench mode, system X", which is true
+    # and says nothing about *how* the board got there -- so a board reading
+    # tryboot.txt on a plain reboot (this firmware does not consume the flag)
+    # looked exactly like a board that had been armed for it. Hours went into
+    # that. The running root= against the two cmdlines on the SD tells them
+    # apart in one read, so the status says it.
+    source=$(r_ssh "$(_tryboot_sd_sh)
+        r=\$(sed -n \"s/.*root=\\([^ ]*\\).*/\\1/p\" /proc/cmdline)
+        boot=\$(wk_sd_boot \"-o ro\") || { echo unknown; exit 0; }
+        sd=\$(sed -n \"s/.*root=\\([^ ]*\\).*/\\1/p\" \"\$boot/cmdline.txt\" 2>/dev/null)
+        st=\$(sed -n \"s/.*root=\\([^ ]*\\).*/\\1/p\" \"\$boot/second/cmdline.txt\" 2>/dev/null)
+        if [ -n \"\$st\" ] && [ \"\$r\" = \"\$st\" ]; then echo staging
+        elif [ -n \"\$sd\" ] && [ \"\$r\" = \"\$sd\" ]; then echo sd-config
+        else echo unknown; fi
+        wk_sd_drop" 2>/dev/null | tr -d '\r' | head -1) || source=""
+    case "${source:-}" in
+        staging)   printf 'boot_source=the tryboot staging on the SD (second/), so this boot spent an arming -- or read it again because the firmware did not consume the flag\n' ;;
+        sd-config) printf 'boot_source=the SD config.txt, the plain path\n' ;;
+        *)         printf 'boot_source=unreadable\n' ;;
+    esac
     printf 'tryboot_staged=%s\n' "${staged:-unreadable}"
     systems=$(b_systems 2>/dev/null) || systems=""
     [ -z "$systems" ] || printf '%s\n' "$systems" | awk '{ printf "system=%s (on %s)\n", $2, $1 }'

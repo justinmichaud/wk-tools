@@ -306,9 +306,10 @@ cmd_arm() {
             # exactly what makes the rescue unreachable. An A/B leg switch is
             # this case, every time. The other models arm a register the
             # running system cannot read back, so they keep the refusal.
-            [ "${BOOT_ARMING:-one-shot}" = medium ] \
+            [ "${B_ARM_FROM_BENCH:-no}" = yes ] \
                 || die "$MACHINE is already in bench mode (system ${MODE#bench }).
-    'wk boot $MACHINE --back' returns it first." ;;
+    Arming it is an edit only its rescue can make, so it goes back first:
+        wk boot $MACHINE --back" ;;
         # `base*` is deliberately not refused here: a board on its base image is
         # the normal state to arm *from*, and matching it against `bench*`
         # refuses an unarmed board with "already in bench mode".

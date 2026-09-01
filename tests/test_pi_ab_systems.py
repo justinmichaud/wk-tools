@@ -139,6 +139,35 @@ pi_system_boot {want}
                          "the second attempt did not happen:\n" + log)
         self.assertIn("wk-keep-running", log)
 
+    def test_a_board_that_will_not_arm_from_bench_goes_back_first(self):
+        """Some boards can only be armed from their rescue: the arming is an
+        edit their privileged card helper makes, and only a rescue carries it
+        (pi-sd). `wk boot --system` refuses, so the leg goes back and the next
+        pass arms from the rescue -- neither command having to know which board
+        it is."""
+        q = self.tmp / "probes"
+        clock = self.tmp / "clock"
+        # A stub wk that refuses --system while the board is in a bench system,
+        # the way cmd/boot does, and accepts it once --back has been asked for.
+        (self.tmp / "wk").write_text(
+            "#!/bin/sh\n"
+            'echo "wk $*" >> "$WK_LOG"\n'
+            'case "$*" in\n'
+            '  *--system*) [ -f "$WK_LOG.back" ] || exit 1 ;;\n'
+            '  *--back*) : > "$WK_LOG.back" ;;\n'
+            "esac\nexit 0\n")
+        (self.tmp / "wk").chmod(0o755)
+        cp, log = self._boot([
+            "id=sys-b;rootdev=/dev/mmcblk0p8",
+            "id=sys-b;rootdev=/dev/mmcblk0p8",
+            "id=sys-a;rootdev=/dev/mmcblk0p6",
+        ])
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("wk boot rpi3 --back", log, "it never went back:\n" + log)
+        self.assertLess(log.index("--back"), log.rindex("--system"),
+                        "it did not arm after going back:\n" + log)
+        self.assertIn("wk-keep-running", log)
+
     def test_a_board_that_never_lands_loses_the_leg_after_the_last_try(self):
         """...and it is bounded: a board that will not take the arming loses
         the leg rather than the run."""

@@ -176,6 +176,45 @@ b_evidence
         self.assertIn("tryboot_staged=unreadable", cp.stdout)
         self.assertIn("bench root on /dev/sda", cp.stdout)
 
+    def test_the_evidence_says_which_config_the_running_boot_came_from(self):
+        """`--status` answering "bench mode, system X" is true and says nothing
+        about *how* the board got there. This firmware does not consume the
+        tryboot flag, so a plain reboot reading tryboot.txt again looks
+        identical to an arming that was asked for -- the difference is the
+        running root= against the two cmdlines on the SD, which is one read."""
+        cp = bash(LOAD + """
+r_ssh() { echo staging; }
+b_systems() { :; }
+b_evidence
+r_ssh() { echo sd-config; }
+b_evidence
+r_ssh() { return 1; }
+b_evidence
+""")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("boot_source=the tryboot staging", cp.stdout)
+        self.assertIn("did not consume the flag", cp.stdout,
+                      "the staging case does not say what it can mean")
+        self.assertIn("boot_source=the SD config.txt", cp.stdout)
+        self.assertIn("boot_source=unreadable", cp.stdout)
+
+    def test_the_reporting_path_mounts_read_only(self):
+        """b_evidence answers a question, so the mounts it makes are read-only:
+        mounting a FAT read-write and unmounting it rewrites the dirty flag on a
+        card somebody only asked about (the same rule as second-state)."""
+        cp = bash(LOAD + """
+r_ssh() { printf '%s' "$*" >> "$OUT"; echo unknown; }
+b_systems() { :; }
+OUT=$(mktemp); export OUT
+b_evidence >/dev/null
+cat "$OUT"
+""")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn('wk_sd_boot "-o ro"', cp.stdout,
+                      "a reporting path mounts the card read-write")
+        self.assertNotIn("wk_sd_boot)", cp.stdout.replace('wk_sd_boot "-o ro")', ""),
+                         "one of the reads mounts read-write")
+
     def test_no_board_level_step_names_the_rescue_channel(self):
         """The class of bug that cost 2026-09-01: every one of this driver's
         steps acts on the *board* -- the SD's staging, the EEPROM, the reboot --

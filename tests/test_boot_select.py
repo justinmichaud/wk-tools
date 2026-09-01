@@ -129,16 +129,13 @@ class TestDiag(unittest.TestCase):
         the stale one -- an unlabeled dump misleads."""
         cp = bash(LOAD + '''
 b_systems() { printf "%s\\n%s\\n" "/dev/sda1 alpha-1" "/dev/sda3 beta-2"; }
-m_ssh() { echo "(dump)"; }
+r_sudo() { echo "(dump)"; }
+m_ssh() { echo "b_diag must not address the rescue alone" >&2; return 1; }
 b_diag
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("== alpha-1 (/dev/sda1) ==", cp.stdout)
         self.assertIn("== beta-2 (/dev/sda3) ==", cp.stdout)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestNoDriverReachesOnlyTheRescue(unittest.TestCase):
@@ -158,6 +155,12 @@ class TestNoDriverReachesOnlyTheRescue(unittest.TestCase):
     """
 
     DRIVERS = sorted((REPO / "boot").glob("pi-*.sh")) + [REPO / "boot" / "rpi5-usb.sh"]
+
+    # boot/machines.sh defines m_ssh and legitimately uses it for the things
+    # that really are the rescue's: the arming *record*, which lives on the host
+    # install's root, and the probe that decides which channel answered.
+    LIBRARY_ALLOWED = ("m_ssh()", "m_ssh_opts", "m_reachable", "record_write",
+                       "record_read", "record_clear", "b_probe", "r_ssh")
 
     def test_there_are_drivers_to_check(self):
         self.assertGreaterEqual(len(self.DRIVERS), 3, self.DRIVERS)
@@ -192,3 +195,21 @@ class TestNoDriverReachesOnlyTheRescue(unittest.TestCase):
             with self.subTest(fn=fn):
                 self.assertIn("MODE_CHANNEL" if fn == "rsh_dest()" else "r_ssh", body,
                               f"{fn} does not follow the channel that answered")
+
+    def test_the_shared_library_reads_a_medium_over_the_channel_that_answered(self):
+        """The same rule one level down. `b_device_image` and `b_diag` read the
+        *medium*, and both are needed while a board answers as its bench system:
+        `wk boot --system <id>` resolves an id through the first, which failed
+        with "could not read <device> to see what it holds" at exactly the
+        moment an A/B leg switch needed it (rpi3, 2026-09-01)."""
+        text = (REPO / "boot" / "machines.sh").read_text()
+        for fn in ("b_device_image()", "b_diag()"):
+            body = text[text.index(fn):]
+            body = body[:body.index("\n}\n")]
+            with self.subTest(fn=fn):
+                self.assertNotIn("m_ssh", body, f"{fn} reaches only the rescue")
+                self.assertIn("r_sudo", body, f"{fn} does not use the answered channel")
+
+
+if __name__ == "__main__":
+    unittest.main()

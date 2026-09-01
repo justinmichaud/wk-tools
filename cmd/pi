@@ -760,8 +760,27 @@ pi_system_boot() { # <system id>
         [ -z "$id" ] || info "$machine answers as ${id}${kind:+ ($kind)}, not $want"
 
         info "$machine: arming and booting system $want (attempt $try of $PI_SYSTEM_TRIES)"
-        "$WK_ROOT/wk" boot "$machine" --system "$want" >/dev/null 2>&1 \
-            || { warn "could not arm $want on $machine (attempt $try)"; sleep 15; continue; }
+        if ! "$WK_ROOT/wk" boot "$machine" --system "$want" >/dev/null 2>&1; then
+            # Some boards can only be armed from their rescue -- the arming is an
+            # edit their privileged card helper makes, and only a rescue carries
+            # it (B_ARM_FROM_BENCH, the driver's own fact). `wk boot` refuses and
+            # says so; going back is the answer, and the next pass arms from
+            # there. Convergence, rather than either command having to know
+            # which board it is talking to.
+            if [ "$kind" = bench ]; then
+                info "$machine: it will not arm from a bench system; going back to its rescue"
+                "$WK_ROOT/wk" boot "$machine" --back >/dev/null 2>&1 || true
+                deadline=$(( $(date +%s) + 420 ))
+                until m_ssh true >/dev/null 2>&1; do
+                    [ "$(date +%s)" -lt "$deadline" ] || break
+                    sleep 12
+                done
+            else
+                warn "could not arm $want on $machine (attempt $try)"
+                sleep 15
+            fi
+            continue
+        fi
 
         # Wait for *a* system to answer, not for a chosen one: which it is, is
         # the next pass's question.

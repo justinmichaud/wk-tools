@@ -441,18 +441,21 @@ b_diag() {
         printf '== %s (%s) ==\n' "$id" "$part"
         # An automounter usually has the partition already; read it where it
         # is, and only mount when nothing else has.
-        m_ssh "set -e
-        at=\$(findmnt -rno TARGET '$part' | head -1)
+        # Over the channel that answered, like the enumeration above it: the
+        # dump is on the medium, and the board asking for it is often the one
+        # whose bench system booted instead of the rescue.
+        r_sudo "set -e
+        at=\$(awk -v p='$part' '\$1 == p { print \$2; exit }' /proc/mounts)
         if [ -n \"\$at\" ]; then
             cat \"\$at/wk-diag.txt\" 2>/dev/null \
                 || echo '(no wk-diag.txt -- the image did not get that far)'
             exit 0
         fi
-        sudo mkdir -p /mnt/wk-diag
-        sudo mount -o ro '$part' /mnt/wk-diag || { echo 'cannot mount $part' >&2; exit 1; }
+        mkdir -p /mnt/wk-diag
+        mount -o ro '$part' /mnt/wk-diag || { echo 'cannot mount $part' >&2; exit 1; }
         cat /mnt/wk-diag/wk-diag.txt 2>/dev/null \
             || echo '(no wk-diag.txt -- the image did not get that far)'
-        sudo umount /mnt/wk-diag"
+        umount /mnt/wk-diag"
     done <<EOF
 $systems
 EOF
@@ -470,13 +473,25 @@ b_reboot() {
 # booted image writes to its own boot partition, so the bytes stop matching.
 # Fails only when the machine cannot be asked; a partition with no system on
 # it (or none at all) answers with nothing, which is a different fact.
+# Which system a boot partition holds, read off the medium.
+#
+# Over `r_sudo`, the channel the machine answered on, because this is a fact
+# about the *medium* and every caller needs it while the board is in whatever
+# state it is in: `wk boot --system <id>` resolves an id through here, and a
+# board with an arming in force answers as its bench system -- which is exactly
+# when the next system has to be named (an A/B leg switch). Addressed to the
+# rescue alone, the enumeration failed with "could not read <device> to see what
+# it holds" the moment it was needed most.
+#
+# /proc/mounts and not findmnt: a BusyBox bench system may carry neither
+# findmnt nor sudo, and r_sudo is already root there.
 b_device_image() { # [boot partition; default: b_boot_part]
     local part out; part=${1:-$(b_boot_part)}
-    out=$(m_ssh "at=\$(findmnt -rno TARGET '$part' | head -1)
+    out=$(r_sudo "at=\$(awk -v p='$part' '\$1 == p { print \$2; exit }' /proc/mounts)
         if [ -n \"\$at\" ]; then cat \"\$at/wk-image.id\" 2>/dev/null; exit 0; fi
-        sudo mkdir -p /mnt/wk-id
-        sudo mount -o ro '$part' /mnt/wk-id 2>/dev/null || exit 0
+        mkdir -p /mnt/wk-id
+        mount -o ro '$part' /mnt/wk-id 2>/dev/null || exit 0
         cat /mnt/wk-id/wk-image.id 2>/dev/null
-        sudo umount /mnt/wk-id" 2>/dev/null) || return 1
+        umount /mnt/wk-id" 2>/dev/null) || return 1
     printf '%s' "$out" | tr -d '\r\n '
 }

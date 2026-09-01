@@ -28,6 +28,16 @@
 #   rescue unreachable                 -> nothing to arm from; `wk boot` says so
 BOOT_ARMING=medium
 
+# Whether this board can be armed while it is running a *bench* system.
+#
+# No, here: the arming is an edit to the rescue's boot partition made by the
+# privileged card helper (`second-arm`), and the helper is installed on rescues
+# only -- a bench system has neither it nor the sudoers rule that runs it. So a
+# leg switch on this board does go back to the rescue first, and that is a
+# property of where the privilege lives rather than an assumption about which
+# system answers.
+B_ARM_FROM_BENCH=no
+
 # Unused: nothing here is a per-boot firmware order.
 BOOT_ORDER_IMAGE=""
 BOOT_ORDER_NORMAL=""
