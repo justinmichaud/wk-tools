@@ -361,3 +361,9 @@ STILL OPEN
 - tart password is still set as admin, not 1.
 
 - wk * commands still ask for workspace name inside tart vm. It seems like the abstraction to check if you are in a workspace or not is not working correctly.
+
+- Over time, tart guests run out of memory. zsh shells are not cleaned up
+
+- tart guest is still showing software update screen; why, and why is the helper not warning us about this like I asked?
+
+- git fetch origin in a tart guest is very slow. Each time I report a bug, it only gets fixed in one place. Check everywhere this time, test everywhere.

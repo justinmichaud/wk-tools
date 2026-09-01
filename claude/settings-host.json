@@ -13,6 +13,7 @@
       "/private/tmp"
     ]
   },
+  "model": "opus[1m]",
   "hooks": {
     "PreToolUse": [
       {
@@ -33,6 +34,5 @@
   "autoCompactEnabled": false,
   "precomputeCompactionEnabled": false,
   "remoteControlAtStartup": true,
-  "agentPushNotifEnabled": true,
-  "model": "opus"
+  "agentPushNotifEnabled": true
 }
