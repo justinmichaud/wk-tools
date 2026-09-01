@@ -436,11 +436,18 @@ pi_session_weston() {
         if i_ssh 'command -v systemctl >/dev/null' >/dev/null 2>&1; then
             i_ssh 'systemctl start --no-block weston' >/dev/null 2>&1 || true
         else
+            # --tty: weston's DRM backend takes the display away from
+            # whatever owns it, so it wants a seat -- logind's, or a VT it is
+            # told to claim. A BusyBox image has no logind, and a command
+            # arriving over ssh has no controlling terminal, so weston refuses
+            # ("drm backend should be run using weston-launch, or your system
+            # should provide the logind D-Bus API") and the run dies at the
+            # compositor. Naming the VT is what makes it start here.
             i_ssh 'pkill -x weston 2>/dev/null; sleep 1
                    mkdir -p /run/user/0 && chmod 700 /run/user/0
                    XDG_RUNTIME_DIR=/run/user/0 setsid weston \
-                     --backend=drm-backend.so --socket=wk-bench \
-                     </dev/null >/tmp/wk-weston.log 2>&1 & sleep 4' >/dev/null 2>&1 || true
+                     --backend=drm-backend.so --tty=1 --socket=wk-bench \
+                     </dev/null >/tmp/wk-weston.log 2>&1 & sleep 5' >/dev/null 2>&1 || true
         fi
     elif ! i_ssh 'command -v systemctl >/dev/null' >/dev/null 2>&1; then
         # The RDP virtual head below is the systemd images' (their weston

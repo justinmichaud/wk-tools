@@ -184,7 +184,14 @@ class TestConfFieldSets(unittest.TestCase):
         # group: image_config_list (image/profiles.sh) treats its mere
         # presence as "not buildable yet", so it is set only on the configs
         # that need something the others in the same group already have.
-        optional = {"CFG_NEEDS"}
+        # BR_KERNEL_*: a profile whose board will not boot the kernel its
+        # tree builds declares one instead (image/buildroot/kernel-pin.sh).
+        # That is a fact about one board, the way CFG_NEEDS is a fact about
+        # one configuration -- the other configs in the group are not missing
+        # anything, and setting the fields empty on all of them would claim
+        # they had a kernel question to answer.
+        optional = {"CFG_NEEDS", "BR_KERNEL_DEB_URL", "BR_KERNEL_DEB_SHA256",
+                    "BR_KERNEL_RELEASE"}
 
         by_builder = {}
         for p in files:

@@ -143,6 +143,10 @@ buildroot_build() {
     dl="$WK_STORE/cache/buildroot/dl"
     cc="$WK_STORE/cache/buildroot/ccache"
 
+    local kernel_says="built from the tree by buildroot"
+    [ -z "${BR_KERNEL_DEB_URL:-}" ] \
+        || kernel_says="${BR_KERNEL_RELEASE:-?}, pinned (${BR_KERNEL_DEB_URL##*/})"
+
     if [ -n "$dry" ]; then
         cat >&2 <<EOF
 would build image $profile (builder: buildroot)
@@ -154,12 +158,34 @@ would build image $profile (builder: buildroot)
   jobs         -j$jobs (memory-sized at 2048 MB/job)
   overlay      ${overlay_arch:-none -- this image would join no tailnet}
   wifi overlay $([ -n "$overlay_wifi" ] && echo "wk-wifi-join (image/buildroot/wifi-overlay.sh); the card carries the credential" || echo "none -- ${IMG_MACHINE:-this board} has a cable")
+  kernel       $kernel_says
   DL_DIR       $dl ($(du -sh "$dl" 2>/dev/null | cut -f1 || echo "not created yet")) -- BR2_DL_DIR in the container
   CCACHE_DIR   $cc ($(du -sh "$cc" 2>/dev/null | cut -f1 || echo "not created yet")) -- BR2_CCACHE_DIR in the container
   output       in the workspace, under output/images (there is no store)
 EOF
         log "dry run -- nothing was built."
         return 0
+    fi
+
+    # A pinned kernel is fetched here, on the machine with the network and the
+    # one content-addressed artifact cache (image_fetch_base), and handed to
+    # the build through the download cache both sides already share -- rather
+    # than a second downloader inside the workspace, behind the egress
+    # allowlist, fetching the same bytes again.
+    local kernel_deb=""
+    if [ -n "${BR_KERNEL_DEB_URL:-}" ]; then
+        [ -n "${BR_KERNEL_DEB_SHA256:-}" ] && [ -n "${BR_KERNEL_RELEASE:-}" ] \
+            || die "$profile pins a kernel but not its sha256 and release
+    (BR_KERNEL_DEB_SHA256, BR_KERNEL_RELEASE): a kernel by URL alone is not pinned."
+        local fetched prepared
+        fetched=$(image_fetch_base "$BR_KERNEL_DEB_URL" "$BR_KERNEL_DEB_SHA256") || return 1
+        ensure_dir "$dl"
+        # Prepared here rather than in the build: this machine has depmod and
+        # the build image does not (image/buildroot/kernel-pin.sh says why).
+        prepared=$("$WK_ROOT/image/buildroot/kernel-pin.sh" \
+                       "$fetched" "$BR_KERNEL_RELEASE" "$dl") \
+            || die "could not prepare the pinned kernel $BR_KERNEL_RELEASE"
+        kernel_deb="/cache/buildroot/dl/$(basename "$prepared")"
     fi
 
     buildroot_ensure_ws "$ws"
@@ -179,6 +205,8 @@ EOF
             ${overlay_arch:+--overlay-arch "$overlay_arch"} \
             ${overlay_wifi:+--overlay-wifi 1} \
             ${BR_ROOTFS_SIZE:+--rootfs-size "$BR_ROOTFS_SIZE"} \
+            ${kernel_deb:+--kernel-tar "$kernel_deb"} \
+            ${BR_KERNEL_RELEASE:+--kernel-release "$BR_KERNEL_RELEASE"} \
         || return 1
     [ -n "$detach" ] || info "built $profile in '$ws'"
 }

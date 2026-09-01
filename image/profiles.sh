@@ -89,6 +89,9 @@ image_profile_load() {
     CFG_PROJECT=""; CFG_RELEASE=""; CFG_BRANCH=""; CFG_REMOTE=""; CFG_NEEDS=""
     BR_TREE_URL=""; BR_TREE_BRANCH=""; BR_TREE_COMMIT=""; BR_DEFCONFIG=""
     BR_OVERLAY_TAILSCALE=""; BR_EXTERNAL=""; BR_IMAGE=""
+    # A kernel this profile declares instead of building: the package, its
+    # hash and the release inside it (image/buildroot/kernel-pin.sh).
+    BR_KERNEL_DEB_URL=""; BR_KERNEL_DEB_SHA256=""; BR_KERNEL_RELEASE=""
     FET_URL=""; FET_SHA256=""; FET_XZ=""; FET_NOTE=""; FET_DEVICE=""
     PMO_DEVICE=""; PMO_UI=""; PMO_CHANNEL=""; PMO_PMB_VERSION=""
     PMO_USER=""; PMO_PASSWORD=""; PMO_PACKAGES=""; PMO_EXTRA_SPACE=""
