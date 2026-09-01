@@ -355,3 +355,9 @@ STILL OPEN
 
 - HANDOFF-wk-cli's remaining [needs a test] items: four of six are still owed
   (tests/test_owed_cli_color.py and tests/test_owed_cli_exit_code.py landed).
+
+- start zed in trusted mode
+
+- tart password is still set as admin, not 1.
+
+- wk * commands still ask for workspace name inside tart vm. It seems like the abstraction to check if you are in a workspace or not is not working correctly.
