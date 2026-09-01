@@ -688,6 +688,12 @@ v_eject() {
 # and the meta-wk-rescue recipe install the two together.
 CHECK_BOOT_FILES=/usr/local/libexec/wk-check-boot-files.py
 
+# This helper's own file, for the one verb that copies it onto a rescue
+# (rescue-helper). $0 and not a written-down path: root runs this from the
+# absolute path its sudoers rule names, so $0 *is* the installed copy, and a
+# second spelling of it could name a file this one is not.
+SELF="$0"
+
 # Text that ends up inside a file on the card, checked against what it is
 # allowed to be rather than escaped -- the same rule as check_name. Printable
 # ASCII and whitespace only: anything else in a config.txt is not a config.txt.
@@ -775,16 +781,26 @@ with open(path, "w") as fh:
 _retarget_fstab() { # <mountpoint> <partuuid of partition 1> <partuuid of partition 2>
     local m="$1" boot="$2" root="$3" f="$1/etc/fstab"
     [ -f "$f" ] || { say "no /etc/fstab on this disk"; return 0; }
-    # The root line is usually /dev/root, which the kernel fills in and which
-    # is right already; it is the /boot line that names a card. Read back in
-    # the same pass: a line left naming a device by path is a /boot that
-    # mounts somebody else's disk.
+    # Two ways a line can name the wrong partition, and both are rewritten: a
+    # device path (/dev/mmcblk0p1, which follows the reader rather than the
+    # card) and a **PARTUUID of another disk identifier** -- which is what an
+    # fstab already retargeted once carries after anything rewrites the card's
+    # MBR. Only the first was handled here, and its read-back looked only for
+    # /dev paths, so a card whose identifier had moved was reported retargeted
+    # while its /boot line still named the old one: the root mounts, /boot does
+    # not, local-fs.target fails, and every network unit ordered after it never
+    # starts. A board that boots and goes quiet (rpi3, 2026-09-01).
+    #
+    # Read back in the same pass, and now the check is "does every line name
+    # *this* card": anything else is a mount that finds another disk or none.
     python3 -c '
 import sys
 path, boot, root = sys.argv[1], sys.argv[2], sys.argv[3]
+def names_a_partition(f):
+    return f.startswith("/dev/") or f.startswith("PARTUUID=")
 def retarget(line):
     fields = line.split()
-    if not fields or line.lstrip().startswith("#") or not fields[0].startswith("/dev/"):
+    if not fields or line.lstrip().startswith("#") or not names_a_partition(fields[0]):
         return line
     want = boot if fields[0].endswith("1") else root if fields[0].endswith("2") else ""
     return line.replace(fields[0], want, 1) if want else line
@@ -793,12 +809,15 @@ with open(path, "w") as fh:
     fh.write("".join(lines))
 left = [l.split()[0] for l in lines
         if l.split() and not l.lstrip().startswith("#")
-        and l.split()[0].startswith("/dev/")
-        and (l.split()[0].endswith("1") or l.split()[0].endswith("2"))]
+        and names_a_partition(l.split()[0])
+        and l.split()[0] not in (boot, root)]
 if left:
-    sys.exit("still by device path: " + ", ".join(left))
+    sys.exit("still names another disk: " + ", ".join(left))
 ' "$f" "PARTUUID=$boot" "PARTUUID=$root" \
-        || fail "/etc/fstab on this disk still names a partition by device path"
+        || fail "/etc/fstab on this disk still names a partition that is not this card's.
+    Every line has to name PARTUUID=$boot or PARTUUID=$root; a line naming
+    anything else mounts another disk, or nothing, and takes local-fs.target
+    down with it."
 }
 
 # retarget <device> -- make the card name its own partitions by PARTUUID, so
@@ -918,9 +937,10 @@ _units_names() { # <tar file>
         [ -n "$name" ] || continue
         case "$name" in
             systemd/|sysctl.d/|init.d/|./) continue ;;
-            systemd/*.service|sysctl.d/*.conf|init.d/S[0-9][0-9]*) ;;
+            systemd/*.service|systemd/*.timer|sysctl.d/*.conf|init.d/S[0-9][0-9]*) ;;
             *) deny "'$name' is not something this verb may write: a unit archive holds
-    systemd/<name>.service, sysctl.d/<name>.conf and init.d/S<nn><name>, and nothing else" ;;
+    systemd/<name>.service, systemd/<name>.timer, sysctl.d/<name>.conf and
+    init.d/S<nn><name>, and nothing else" ;;
         esac
         case "${name#*/}" in
             ''|.*|*/*|*[!a-zA-Z0-9@._-]*) deny "'$name' is not a plain file name" ;;
@@ -982,6 +1002,17 @@ _units_edit() { # <mountpoint> <staging directory>
         # WantedBy= is what decides where it is symlinked -- the same fact
         # systemd would read, rather than a second one passed beside it.
         target=$(_unit_target "$f")
+        # A service a *timer* starts declares no WantedBy=, and must not: the
+        # timer is what schedules it, and symlinking the service into a target
+        # as well would run it once at boot too. So no target is an error only
+        # when no timer in this same archive names it.
+        if [ -z "$target" ] && [ -f "$work/systemd/${name%.service}.timer" ]; then
+            cat "$f" > "$m/etc/systemd/system/$name"
+            chmod 0644 "$m/etc/systemd/system/$name"; chown 0:0 "$m/etc/systemd/system/$name"
+            [ -s "$m/etc/systemd/system/$name" ] || fail "$name did not land on this disk"
+            n=$((n + 1))
+            continue
+        fi
         case "$target" in
             *.target) ;;
             *) fail "$name declares no WantedBy= target, so nothing would ever start it" ;;
@@ -1045,6 +1076,63 @@ v_units() {
     with_mount "$(part "$dev" "$ROOTP")" _units_edit "$work" || rc=$?
     rm -rf "$work"
     return "$rc"
+}
+
+# rescue-helper <device> -- put this machine's card helper and boot-file
+# checker onto the rescue being written, so the board that boots it can write
+# its own bench media with the same code that just wrote its rescue.
+#
+# Nothing executable arrives from the caller: the bytes copied are the ones
+# root already runs here, which `./setup --stage quiesce` keeps equal to the
+# checkout (admin/install.sh). So a board's helper is reproducible from the
+# repo plus one write, and a fix to it reaches the fleet without an image
+# rebuild -- which is what a baked-in copy costs.
+#
+# The privilege is the write's own: this verb writes into the rootfs of a card
+# whose every byte the same command just streamed, including the copy the
+# image baked in. It grants nothing on *this* machine.
+_rescue_helper_install() { # <mountpoint>
+    local m="$1" d="$m/usr/local/libexec"
+    mkdir -p "$d" || fail "could not make $d on this disk"
+    cat "$SELF" > "$d/wk-card-priv" || fail "the card helper did not land on this disk"
+    cat "$CHECK_BOOT_FILES" > "$d/wk-check-boot-files.py" \
+        || fail "the boot-file checker did not land on this disk"
+    chmod 0755 "$d/wk-card-priv" "$d/wk-check-boot-files.py"
+    chown 0:0 "$d/wk-card-priv" "$d/wk-check-boot-files.py"
+    [ -s "$d/wk-card-priv" ] && [ -s "$d/wk-check-boot-files.py" ] \
+        || fail "a helper file landed empty on this disk"
+    say "helper: this machine's card helper and boot-file checker are on the rescue"
+}
+v_rescue_helper() {
+    local dev; gate "${1:-}"; dev=$GATED_DEV
+    [ -z "$SECOND" ] \
+        || deny "rescue-helper addresses the system on partitions 1 and 2; '@second' and
+    '@third' are bench systems, which never write a card"
+    [ -r "$SELF" ] || fail "this helper cannot read its own file at $SELF"
+    [ -r "$CHECK_BOOT_FILES" ] || deny "there is no boot-file checker at $CHECK_BOOT_FILES on
+    this machine, so a rescue written from here would carry none either.
+    Remedy, from a terminal on this machine:  ./setup --stage quiesce"
+    with_mount "$(part "$dev" "$ROOTP")" _rescue_helper_install
+}
+
+# diag <device> -- the system's own account of its last boot, off the boot
+# partition where the image writes it ~90 s in (wk-diag.txt: its marker, the
+# root and boot filesystems it found, rfkill, addresses, routes, and the
+# network units' journal).
+#
+# It exists to be read when the system never became reachable, and until now
+# the only reader was the board itself (b_diag, over ssh) -- which is the one
+# thing an unreachable system cannot offer. With the card in a reader this is
+# the path. Read-only, one fixed filename, bounded: nothing a caller names.
+DIAG_MAX=65536
+_diag_probe() { # <mountpoint>
+    [ -f "$1/wk-diag.txt" ] \
+        || { say "no wk-diag.txt on this boot partition -- the image did not get that far"; return 0; }
+    head -c "$DIAG_MAX" "$1/wk-diag.txt"
+}
+v_diag() {
+    local dev; gate "${1:-}"; dev=$GATED_DEV
+    with_mount -r "$(part "$dev" "$BOOTP")" _diag_probe
 }
 
 _boot_check_run() { # <mountpoint> <dtb>
@@ -1126,6 +1214,12 @@ if b_start >= r_start:
 def table():
     t = json.loads(subprocess.check_output(["sfdisk", "-J", dev]))["partitiontable"]
     return {int(p["node"][len(dev):].lstrip("p")): p for p in t["partitions"]}
+def disk_id():
+    t = json.loads(subprocess.check_output(["sfdisk", "-J", dev]))["partitiontable"]
+    i = str(t.get("id", ""))
+    if not i:
+        fail("%s has no MBR disk identifier, so its partitions cannot be named by PARTUUID" % dev)
+    return i
 def disk_sectors():
     with open(dev, "rb") as fh:
         return os.lseek(fh.fileno(), 0, os.SEEK_END) // 512
@@ -1168,7 +1262,14 @@ if shape == "shared":
         if old:
             say("replacing the layout of partitions %s; the systems there are gone" %
                 ",".join(str(n) for n in old))
-        lines = ["label: dos"]
+        # The disk identifier is carried over rather than left to sfdisk, which
+        # generates a fresh random one for a script that does not name it. Every
+        # PARTUUID on the card is <disk id>-<nn>, and the *rescue* on partitions
+        # 1-2 names its own root that way in cmdline.txt and fstab -- a system
+        # this write does not touch and would not retarget. A new identifier
+        # here boots the board to a kernel that cannot find any root, and the
+        # only way back is a reader (2026-09-01: it cost the rpi3 a day).
+        lines = ["label: dos", "label-id: %s" % disk_id()]
         for n in (1, 2):
             p = have[n]
             lines.append("start=%d, size=%d, type=%s%s"
@@ -1265,7 +1366,13 @@ v_second_verify() {
 # The rescue's boot partition, for one edit: where it is already mounted
 # when this machine runs from the disk, mounted here otherwise (a card in
 # a reader).
-_second_with_boot() { # <disk> <function> [args...] -- calls <function> <boot mountpoint> [args...]
+# `-r` for a verb that only reads: a reporting verb mounts read-only, because
+# mounting a FAT read-write and unmounting it rewrites the volume's dirty flag
+# and its FSInfo sector -- a write, on a card somebody asked a question about
+# (CLAUDE.md: read-only is read-only).
+_second_with_boot() { # [-r] <disk> <function> [args...] -- calls <function> <boot mountpoint> [args...]
+    local ro=""
+    [ "${1:-}" = -r ] && { ro=-r; shift; }
     local dev="$1" fn="$2" m; shift 2
     # `|| true`: findmnt exits 1 for "not mounted", which under pipefail
     # would end this helper before the mount below.
@@ -1273,7 +1380,8 @@ _second_with_boot() { # <disk> <function> [args...] -- calls <function> <boot mo
     if [ -n "$m" ]; then
         "$fn" "$m" "$@"
     else
-        with_mount "$(part "$dev" 1)" "$fn" "$@"
+        # shellcheck disable=SC2086
+        with_mount $ro "$(part "$dev" 1)" "$fn" "$@"
     fi
 }
 _second_stage_copy() { # <mountpoint of the system's boot partition> <staging directory>
@@ -1292,9 +1400,17 @@ _second_arm_install() { # <boot mountpoint> <staging directory> <prefix>
     cp -r "$stage" "$boot/$pfx.part" || fail "could not copy the system's boot files onto the boot partition"
     rm -rf "$boot/second" "$boot/third"; mv "$boot/$pfx.part" "$boot/$pfx"
     [ -f "$boot/config.txt.rescue" ] || cp "$boot/config.txt" "$boot/config.txt.rescue"
+    # The prefix leads the file, ahead of every line the armed system's own
+    # config.txt carries. The firmware resolves a filename when it reads the
+    # directive asking for one, so a prefix set after a `dtoverlay=` line
+    # never reaches that overlay's .dtbo; and a prefix appended at the end
+    # lands inside whichever conditional section the image closes with, where
+    # a filter can drop it outright. Either way the board boots the armed
+    # kernel and loses that system's display stack. The image's own os_prefix
+    # goes: two of them select nothing predictable.
     {
-        cat "$boot/$pfx/config.txt"
-        printf '\n# --- wk armed: the %s system, for one boot (wk boot) ---\nos_prefix=%s/\n' "$pfx" "$pfx"
+        printf '# --- wk armed: the %s system, for one boot (wk boot) ---\nos_prefix=%s/\n\n' "$pfx" "$pfx"
+        sed '/^os_prefix=/d' "$boot/$pfx/config.txt"
     } > "$boot/config.txt.armed"
     mv "$boot/config.txt.armed" "$boot/config.txt"
     sync
@@ -1345,7 +1461,7 @@ v_second_disarm() {
 v_second_state() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
     [ -n "$SECOND" ] || deny "second-state takes '<disk>@second' or '<disk>@third'"
-    _second_with_boot "$dev" _second_state_edit
+    _second_with_boot -r "$dev" _second_state_edit
     _slot_present "$dev" && say "present=yes" || say "present=no"
 }
 
@@ -1466,6 +1582,8 @@ case "$verb" in
     second-arm)    v_second_arm    "$@" ;;
     second-disarm) v_second_disarm "$@" ;;
     second-state)  v_second_state  "$@" ;;
+    rescue-helper) v_rescue_helper "$@" ;;
+    diag)     v_diag     "$@" ;;
     tailnet-save)    v_tailnet_save    "$@" ;;
     tailnet-restore) v_tailnet_restore "$@" ;;
     eject)    v_eject    "$@" ;;
@@ -1477,5 +1595,5 @@ case "$verb" in
     boot-id)  v_boot_id  "$@" ;;
     units)    v_units    "$@" ;;
     boot-check) v_boot_check "$@" ;;
-    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi-host|wifi-from-host|identity|role|grow|unmount|verify|eject|parts|root-spec|retarget|cmdline-append|config-append|boot-id|units|boot-check|second-arm|second-disarm|second-state|tailnet-save|tailnet-restore <device>[@second] [...]" ;;
+    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi-host|wifi-from-host|identity|role|grow|unmount|verify|eject|parts|root-spec|retarget|cmdline-append|config-append|boot-id|units|boot-check|second-arm|second-disarm|second-state|rescue-helper|diag|tailnet-save|tailnet-restore <device>[@second] [...]" ;;
 esac

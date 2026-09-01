@@ -405,6 +405,55 @@ class TestDerivedDefconfigs(unittest.TestCase):
 # above (that guards a single build's own completion; this guards two
 # builds of the same workspace overlapping).
 # --------------------------------------------------------------------------- #
+    def test_every_derived_defconfig_can_be_reached(self):
+        """The four things a fleet bench system needs and the fork's cog
+        defconfigs have none of. An image without them builds, boots, and is
+        unreachable -- no tailscale0 without TUN, no WiFi without
+        wpa_supplicant on a board with no cable, and dropbear 2019.78 refuses
+        the ed25519 driving key -- which is a board trip to find out. The
+        README derives them; this is what keeps a new release's defconfig from
+        being the fork's copied straight in."""
+        for cfg in self.CONFIGS:
+            with self.subTest(defconfig=cfg.name):
+                settings = self._settings(cfg)
+                self.assertEqual(
+                    settings.get("BR2_PACKAGE_WPA_SUPPLICANT"), "y",
+                    f"{cfg.name} has no wpa_supplicant: a board with no cable "
+                    "at the bench cannot bring up the WiFi its card is seeded for")
+                self.assertEqual(
+                    settings.get("BR2_PACKAGE_OPENSSH"), "y",
+                    f"{cfg.name} does not select OpenSSH; the fork's dropbear "
+                    "2019.78 predates ed25519 and refuses the driving key")
+                self.assertNotIn(
+                    "BR2_PACKAGE_DROPBEAR", settings,
+                    f"{cfg.name} keeps dropbear beside OpenSSH: one ssh server")
+                self.assertEqual(
+                    settings.get("BR2_PACKAGE_IPTABLES"), "y",
+                    f"{cfg.name} has no iptables, which tailscaled drives when "
+                    "nftables is not usable")
+                frag = settings.get("BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES", "").strip('"')
+                self.assertIn(
+                    "linux-fleet.fragment", frag,
+                    f"{cfg.name} builds a kernel without the fleet fragment, so "
+                    "it has no TUN device and tailscaled cannot create tailscale0")
+                name = frag.replace("$(BR2_EXTERNAL_WK_PATH)/", "")
+                self.assertTrue((EXTERNAL_DIR / name).is_file(),
+                                f"{cfg.name} names a fragment that is not here: {frag}")
+
+    def test_a_release_pinned_defconfig_pins_exactly_one_release(self):
+        """The WPE package version is the whole point of a release-pinned
+        defconfig, and two of them would let kconfig pick."""
+        for cfg in self.CONFIGS:
+            with self.subTest(defconfig=cfg.name):
+                pinned = [k for k, v in self._settings(cfg).items()
+                          if k.startswith("BR2_PACKAGE_WPEWEBKIT2_") and v == "y"]
+                self.assertEqual(len(pinned), 1, f"{cfg.name} pins {pinned}")
+                # ...and it is the release the file's own name claims.
+                release = cfg.name.split("_wpe_")[1].rsplit("_cog", 1)[0]
+                self.assertEqual(pinned[0], f"BR2_PACKAGE_WPEWEBKIT{release.upper()}",
+                                 f"{cfg.name} is named for {release} and pins {pinned[0]}")
+
+
 
 class BuildrootBusyTest(WkTest):
     PRELUDE = f'''
@@ -531,6 +580,7 @@ IMG_PROFILE=demo-profile
         finally:
             proc.kill()
             proc.wait()
+
 
 
 if __name__ == "__main__":

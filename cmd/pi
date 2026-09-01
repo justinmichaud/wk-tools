@@ -10,6 +10,10 @@
 #   wk pi setup <ssh-host>                put it on the tailnet: copies pinned
 #                                         tailscale binaries onto a writable
 #                                         partition; no image rebuild
+#   wk pi helper <machine>                install this checkout's card helper on
+#                                         the board's rescue, so it writes its
+#                                         own bench media with this code; the
+#                                         copy an image baked in goes stale
 #   wk pi boot-order <machine> <usb-first|sd-first|local>
 #                                         rpi4/rpi5 firmware boot order;
 #                                         --revert undoes it, --dry-run previews
@@ -112,7 +116,7 @@ pi_usage_page() {
 ACTION="${1:-}"; HOST="${2:-}"
 case "$ACTION" in
     "") pi_usage_page; exit 0 ;;
-    setup|boot-order)
+    setup|boot-order|helper)
         case "$HOST" in
             ""|-*) die "usage: wk pi $ACTION <machine|ssh-host>; see wk pi -h" ;;
         esac ;;
@@ -122,7 +126,7 @@ case "$ACTION" in
     deploy|bench) : ;;
     # Kept only to say where it went; see below.
     flash) : ;;
-    *) log "usage: wk pi setup|boot-order|deploy|bench ...; see wk pi -h"
+    *) log "usage: wk pi setup|helper|boot-order|deploy|bench ...; see wk pi -h"
        log "unknown verb: $ACTION"
        pi_usage_page >&2; exit 1 ;;
 esac
@@ -144,14 +148,37 @@ fi
 # in the fleet yet.
 PI_FLEET=""
 case "$ACTION" in
-    setup|boot-order)
+    setup|boot-order|helper)
         if machine_by_ssh "$HOST" 2>/dev/null; then PI_FLEET=1; HOST="$MACH_SSH"; fi ;;
 esac
+# A fleet board is reached over whichever channel answered, not its rescue's
+# alone: the EEPROM and the boot order belong to the *board*, and a board whose
+# medium the firmware prefers answers as its bench system -- which is exactly
+# the state a boot order has to be changed from (rpi4, 2026-09-01). `r_ssh` is
+# the one implementation of that choice (boot/machines.sh); `b_probe` is what
+# sets the channel, run once per invocation.
+PI_PROBED=""
 rsh() {
-    if [ -n "$PI_FLEET" ]; then m_ssh "$@"; else ssh -o BatchMode=yes "$HOST" "$@"; fi
+    if [ -n "$PI_FLEET" ]; then
+        [ -n "$PI_PROBED" ] || { b_probe >/dev/null 2>&1 || true; PI_PROBED=1; }
+        r_ssh "$@"
+    else
+        ssh -o BatchMode=yes "$HOST" "$@"
+    fi
 }
 # The scp destination for the same board (boot/rpi-eeprom.sh stages files).
-rsh_dest() { printf '%s%s' "${PI_FLEET:+root@}" "$HOST"; }
+# The scp destination for the same board, over the same channel `rsh` chose:
+# `$HOST` is the *rescue's* name, so on a board answering as its bench system a
+# copy addressed to it goes nowhere (rpi4, 2026-09-01 -- the EEPROM diff was
+# computed over one channel and the file copied over another).
+rsh_dest() {
+    if [ -z "$PI_FLEET" ]; then printf '%s' "$HOST"; return 0; fi
+    [ -n "$PI_PROBED" ] || { b_probe >/dev/null 2>&1 || true; PI_PROBED=1; }
+    case "${MODE_CHANNEL:-host}" in
+        bench) printf 'root@%s' "$(image_addr)" ;;
+        *)     printf 'root@%s' "$MACH_SSH" ;;
+    esac
+}
 
 if [ "$ACTION" = flash ]; then
     die "'wk pi flash' is gone -- it and 'wk image flash' were one operation.
@@ -696,43 +723,58 @@ $(sed 's/^/    /' "$PI_TMP/tunnel.log")"
 # serves; the record of intent is never what a leg trusts. Soft-fails (the
 # round is dropped) rather than dying: a boot that timed out may recover by
 # the next round's arming.
+# Put the board into one named system, by converging on it rather than by
+# expecting a particular thing to answer.
+#
+# The earlier shape asked the board to return to its *rescue* first and waited
+# 300 s for that rescue to appear. Every way a board can surprise you ends there
+# as "the leg is lost": a medium the firmware prefers, an arming still in force,
+# a slow boot, a node that rejoins under a different name. None of those means
+# the board is broken, and none of them is a reason to drop a round.
+#
+# So: arm the system wanted -- which a medium-armed board takes where it stands,
+# no trip through the rescue -- reboot, then ask *whoever answers* what it is,
+# on either channel. If it is not the system wanted, arm again. Bounded, and
+# every step is derived from evidence at the moment it is read (CLAUDE.md), so a
+# re-run converges instead of failing on a stale expectation.
+PI_SYSTEM_TRIES=3
 pi_system_boot() { # <system id>
-    local want="$1" out id deadline
-    out=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') || out=""
-    id=$(kv_get id <<<"$out")
-    if [ "$id" = "$want" ] && [ "$(b_system_kind "$(kv_get rootdev <<<"$out")")" = bench ]; then
-        i_ssh 'mkdir -p /run && touch /run/wk-keep-running' >/dev/null 2>&1 || true
-        return 0
-    fi
-    if [ -n "$id" ] && [ "$(b_system_kind "$(kv_get rootdev <<<"$out")")" = bench ]; then
-        info "$machine: leaving $id for the rescue"
-        "$WK_ROOT/wk" boot "$machine" --back >/dev/null 2>&1 || true
-    fi
-    deadline=$(( $(date +%s) + 300 ))
-    until m_ssh true >/dev/null 2>&1; do
-        [ "$(date +%s)" -lt "$deadline" ] \
-            || { warn "$machine's rescue did not answer within 300s; the leg is lost"; return 1; }
-        sleep 10
-    done
-    info "$machine: arming and booting system $want"
-    "$WK_ROOT/wk" boot "$machine" --system "$want" >/dev/null \
-        || { warn "could not arm $want on $machine; the leg is lost"; return 1; }
-    deadline=$(( $(date +%s) + 420 ))
-    while :; do
+    local want="$1" try=0 out id kind deadline
+
+    while [ "$try" -lt "$PI_SYSTEM_TRIES" ]; do
+        try=$((try + 1))
+
+        # Evidence first, every time round: the board may already be there --
+        # on the first pass, or because the arming just took.
         out=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') || out=""
         id=$(kv_get id <<<"$out")
-        if [ "$id" = "$want" ] && [ "$(b_system_kind "$(kv_get rootdev <<<"$out")")" = bench ]; then
-            break
+        kind=$(b_system_kind "$(kv_get rootdev <<<"$out")")
+        if [ "$id" = "$want" ] && [ "$kind" = bench ]; then
+            # Claimed the moment it is proven: the image's self-return watchdog
+            # is already counting.
+            i_ssh 'mkdir -p /run && touch /run/wk-keep-running' >/dev/null 2>&1 \
+                || { warn "could not claim $machine after booting $want; the leg is lost"; return 1; }
+            info "$machine is running $want (verified from its own marker)"
+            return 0
         fi
-        [ "$(date +%s)" -lt "$deadline" ] \
-            || { warn "$machine did not come up as $want within 420s${id:+ (it answers as $id)}; the leg is lost"; return 1; }
-        sleep 12
+        [ -z "$id" ] || info "$machine answers as ${id}${kind:+ ($kind)}, not $want"
+
+        info "$machine: arming and booting system $want (attempt $try of $PI_SYSTEM_TRIES)"
+        "$WK_ROOT/wk" boot "$machine" --system "$want" >/dev/null 2>&1 \
+            || { warn "could not arm $want on $machine (attempt $try)"; sleep 15; continue; }
+
+        # Wait for *a* system to answer, not for a chosen one: which it is, is
+        # the next pass's question.
+        deadline=$(( $(date +%s) + 420 ))
+        until out=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') && [ -n "$(kv_get id <<<"$out")" ]; do
+            if m_ssh true >/dev/null 2>&1; then break; fi
+            [ "$(date +%s)" -lt "$deadline" ] || break
+            sleep 12
+        done
     done
-    # Claimed the moment it is proven: the image's self-return watchdog is
-    # already counting.
-    i_ssh 'mkdir -p /run && touch /run/wk-keep-running' >/dev/null 2>&1 \
-        || { warn "could not claim $machine after booting $want; the leg is lost"; return 1; }
-    info "$machine is running $want (verified from its own marker)"
+
+    warn "$machine would not come up as $want in $PI_SYSTEM_TRIES attempts; the leg is lost"
+    return 1
 }
 
 # One leg of a system A/B: boot it, prove it, prepare it, measure the named
@@ -1322,6 +1364,62 @@ fi
 
 if [ "$ACTION" = bench ]; then
     cmd_bench "$HOST" "$@"
+    exit 0
+fi
+
+# --- wk pi helper --------------------------------------------------------------
+#
+#   wk pi helper <machine>
+#
+# A board's *rescue* writes that board's bench media, and the privileged half
+# of writing a card is admin/wk-card-priv. A rescue image bakes a copy in at
+# build time, so every fix to the helper would otherwise cost an image rebuild
+# and a card carried to a reader -- and in the meantime the board runs code
+# nothing in this repo can account for. This installs the checkout's own copy,
+# root-owned beside the boot-file checker it runs, and proves it answers.
+#
+# The same two files admin/install.sh puts on a machine with a reader, by the
+# same rule: copied to a root-owned path, never linked into a checkout. No
+# sudo is involved -- a bench-device is driven as root already (m_ssh_opts).
+cmd_helper() {
+    local src="$WK_ROOT/admin/wk-card-priv" check="$WK_ROOT/boot/check-boot-files.py"
+    [ $# -eq 0 ] || die "usage: wk pi helper <machine>; unexpected argument: $1; see wk pi -h"
+    [ -n "$PI_FLEET" ] || die "usage: wk pi helper <machine>: '$HOST' is not a fleet machine.
+    The helper goes on a board this repo drives, named as 'wk boot --list' names it."
+    [ -r "$src" ] && [ -r "$check" ] || die "this checkout is missing $src or $check"
+
+    rsh "install -d -o root -g root -m 0755 ${CARD_PRIV%/*}" \
+        || die "could not make ${CARD_PRIV%/*} on $HOST"
+    # cat over the same channel everything else here uses, into `.part` and
+    # renamed: a copy that stops halfway is never the helper, and the file is
+    # one root executes.
+    rsh "cat > $CARD_PRIV.part" < "$src" \
+        || die "could not copy the card helper onto $HOST"
+    rsh "cat > $CARD_CHECKER.part" < "$check" \
+        || die "could not copy the boot-file checker onto $HOST"
+    rsh "set -e
+         chmod 0755 $CARD_PRIV.part $CARD_CHECKER.part
+         chown 0:0 $CARD_PRIV.part $CARD_CHECKER.part
+         mv -f $CARD_PRIV.part $CARD_PRIV
+         mv -f $CARD_CHECKER.part $CARD_CHECKER
+         sync" || die "could not install the card helper on $HOST"
+
+    # Evidence, not the record: the copy that is there answers, and it is the
+    # one this checkout holds.
+    local there here
+    there=$(rsh "sha256sum $CARD_PRIV" | cut -d" " -f1) || there=""
+    here=$(sha256sum "$src" | cut -d" " -f1)
+    [ "$there" = "$here" ] || die "the card helper on $HOST is not the one this checkout holds
+    (there ${there:-unreadable}, here $here)"
+    card_priv status >/dev/null 2>&1 \
+        || die "the card helper is installed on $HOST but does not answer 'status'.
+    A rescue that cannot run it cannot write this board's bench media."
+    info "$HOST runs this checkout's card helper (${here:0:12})"
+    log  "  it writes this board's bench media:  wk sysimage write --disk $MACH_NAME:$MACH_DEVICE@second ..."
+}
+
+if [ "$ACTION" = helper ]; then
+    cmd_helper "$@"
     exit 0
 fi
 

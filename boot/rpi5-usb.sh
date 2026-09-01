@@ -18,7 +18,7 @@ B_SYSTEM_PARTS="1"
 # proves the mailbox call works -- also how arming is *cancelled*.
 b_arm() {
     local order="$1" reply word2
-    reply=$(m_ssh "sudo vcmailbox 0x0003808b 4 4 $order") \
+    reply=$(r_sudo "vcmailbox 0x0003808b 4 4 $order") \
         || die "the firmware mailbox call failed on $MACH_NAME"
 
     # 0x80000000 in the second word means success; checked rather than
@@ -33,7 +33,7 @@ b_arm() {
 # Write-only from userspace (no get_reboot_order tag), so the persistent
 # BOOT_ORDER is the only evidence the fallback is still in place.
 b_evidence() {
-    m_ssh "rpi-eeprom-config 2>/dev/null | sed -n 's/^BOOT_ORDER=/eeprom_boot_order=/p'" || true
+    r_ssh "rpi-eeprom-config 2>/dev/null | sed -n 's/^BOOT_ORDER=/eeprom_boot_order=/p'" || true
 }
 
 # The wk-managed media, one line, for `wk status`'s fleet block.

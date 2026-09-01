@@ -562,8 +562,24 @@ move that file back; `wk boot rpi3 --disarm` from the rescue does the same.
 If the bench kernel panics before it can, every power cycle boots the same
 `os_prefix` again: pull the card, and in a reader rename `config.txt.rescue`
 back to `config.txt` on partition 1 (a revert that needs no hands is owed,
-docs/HANDOFF-boot.md). This board's rescue predates the card-helper layer, so
-its rewrite is the one card a person carries (`wk help lifecycle`, step 3).
+docs/HANDOFF-boot.md).
+
+The armed `config.txt` is the bench system's own with the `os_prefix` line
+written **first**, ahead of everything the image carries. The firmware
+resolves a filename when it reads the directive asking for one, so a prefix
+declared after a `dtoverlay=` line never reaches that overlay's `.dtbo`, and
+one appended at the end lands inside whichever conditional section the image
+closes with, where a filter can drop it outright. Both boot the armed kernel
+and lose that system's display stack -- the same rule, and the same fix, in
+`boot/pi-tryboot.sh`'s staging.
+
+The privileged half of writing this card is the card helper, and a board's
+rescue carries a copy so it can write its own bench media. A rescue image
+bakes one in at build time, which would make every fix to the helper cost an
+image rebuild and a card carried to a reader; `wk pi helper rpi3` installs
+this checkout's instead, root-owned, and proves it answers. So a board's
+helper is reproducible from the repo plus one command, and `wk sysimage write
+--rescue` puts the same pair on any rescue it writes.
 
 A card shared with a rescue carries *two* bench systems: an extended
 partition 3 holds logical pairs 5-6 (`@second`) and 7-8 (`@third`), each a
@@ -671,10 +687,16 @@ that would boot first, power on. `<board>-rescue` joins the tailnet by itself;
 `wk boot <board> --status` reports it as the base image.
 
 ```sh
+wk pi helper rpi3                                 # the card helper this checkout holds, on the rescue
 wk pi boot-order rpi4                             # two media only: the bench medium first, the rescue behind it
 wk sysimage write --from <sdcard.img> --disk rpi4:/dev/sda --profile wpewebkit-2.38-buildroot-rpi4-32
                                                   # two media: the bench system onto the stick, from the rescue
 ```
+
+`wk pi helper` is what makes the next step possible on a rescue built before
+the helper it needs: the rescue writes this board's bench media, and the copy
+its image baked in is as old as the image. A rescue this checkout writes gets
+the same pair already.
 
 From here on no card is carried: every later write of the bench system is
 made from the rescue (`--disk rpi3:/dev/mmcblk0@second`, `--disk rpi4:/dev/sda`),
@@ -683,7 +705,12 @@ and a rewrite of the `@second` system keeps its tailnet node.
 **5. Boot the bench system once** -- `wk boot <board>` arms it for one boot and
 reboots; `<board>-bench` joins the tailnet; the system disarms itself as it
 comes up and hands the board back to the rescue after `IMG_WATCHDOG` seconds
-unless claimed (`wk boot <board> --keep`). A first boot that never appears is
+unless claimed (`wk boot <board> --keep`). That wait is a systemd *timer* on a
+systemd image (`OnBootSec`, firing a service that returns at once) and a
+backgrounded subshell in `S99wk-self-return` on a BusyBox one -- never a unit
+that sleeps in its own `ExecStart`, which is not *active* until it returns and
+so leaves `multi-user.target` inactive for the whole watchdog, on every boot,
+with nothing bounding the start job. A first boot that never appears is
 read from the rescue once it returns (see "Build interventions"); a board that
 does not return is brought back by hand as `wk help hardware` says for it.
 

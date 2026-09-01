@@ -38,6 +38,8 @@ NEW_VERBS = {
     "boot-id": "v_boot_id",
     "units": "v_units",
     "boot-check": "v_boot_check",
+    "rescue-helper": "v_rescue_helper",
+    "diag": "v_diag",
 }
 
 
@@ -151,6 +153,35 @@ class TestRetarget(CardEditTest):
         self.assertIn("proc\t/proc", fstab, fstab)
         # A comment is prose, not a mount.
         self.assertIn("# a comment naming /dev/mmcblk0p1", fstab, fstab)
+
+    def test_an_fstab_already_retargeted_to_another_disk_id_is_rewritten(self):
+        """The case that cost rpi3 a day. Anything that rewrites the card's MBR
+        gives it a new disk identifier, and an fstab retargeted by an earlier
+        write then carries PARTUUIDs of the *old* one. Those name no partition
+        on this card: the root still mounts (the kernel gets it from cmdline)
+        but /boot does not, local-fs.target fails, and every network unit
+        ordered after it never starts -- a board that boots and goes quiet.
+
+        The old code rewrote only fields starting with /dev/, and its read-back
+        looked only for those, so it reported the card retargeted."""
+        (self.boot / "cmdline.txt").write_text("root=PARTUUID=953569f6-02 rootwait\n")
+        (self.root / "etc").mkdir()
+        (self.root / "etc" / "fstab").write_text(
+            "PARTUUID=953569f6-02\t/\text4\tdefaults\t0\t1\n"
+            "PARTUUID=953569f6-01\t/boot\tvfat\tdefaults\t0\t2\n"
+            "proc\t/proc\tproc\tdefaults\t0\t0\n")
+        with stub_path({"sfdisk": _SFDISK}) as binp:
+            cp = self.run_helper(
+                _lift(CARD_PRIV, "_table", "_boot_file", "_retarget_boot",
+                      "_retarget_fstab", "v_retarget") + "\nv_retarget /dev/sdX\n",
+                path=binp)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        fstab = (self.root / "etc" / "fstab").read_text()
+        self.assertIn("PARTUUID=1c9dabbc-01\t/boot", fstab, fstab)
+        self.assertIn("PARTUUID=1c9dabbc-02\t/", fstab, fstab)
+        self.assertNotIn("953569f6", fstab, "the old disk identifier survived:\n" + fstab)
+        self.assertIn("proc\t/proc", fstab, "a line naming no partition was touched")
+        self.assertIn("root=PARTUUID=1c9dabbc-02", (self.boot / "cmdline.txt").read_text())
 
     def test_a_disk_with_no_partition_table_is_refused(self):
         self._write_card()
@@ -315,6 +346,51 @@ class TestUnits(CardEditTest):
         self.assertEqual((self.root / "etc" / "sysctl.d" / "90-wk-perf.conf").read_text(),
                          "kernel.perf_event_paranoid = -1\n")
         self.assertIn("installed 2 file(s)", cp.stdout)
+
+    def test_a_timer_and_the_service_it_starts_both_land(self):
+        """The self-return watchdog is a timer plus a service that returns at
+        once. The timer is wanted by timers.target; the service must NOT be
+        wanted by anything -- a WantedBy= as well would run it at boot, which
+        reboots the board the moment it comes up -- so no target is accepted
+        for a service whose timer is in the same archive."""
+        (self.root / "lib" / "systemd").mkdir(parents=True)
+        (self.root / "lib" / "systemd" / "systemd").write_text("")
+        work = self._staged()
+        (work / "systemd" / "wk-self-return.timer").write_text(
+            "[Unit]\nDescription=x\n[Timer]\nOnBootSec=900\n"
+            "[Install]\nWantedBy=timers.target\n")
+        (work / "systemd" / "wk-self-return.service").write_text(
+            "[Unit]\nDescription=x\n[Service]\nType=oneshot\nExecStart=/bin/true\n")
+        cp = self.run_helper(
+            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
+            + f"\n_units_edit \"$ROOTDIR\" {work}\n")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        sysd = self.root / "etc" / "systemd" / "system"
+        self.assertTrue((sysd / "wk-self-return.timer").is_file())
+        self.assertTrue((sysd / "wk-self-return.service").is_file())
+        self.assertTrue((sysd / "timers.target.wants" / "wk-self-return.timer").is_symlink(),
+                        "the timer is not wanted by timers.target")
+        self.assertFalse((sysd / "multi-user.target.wants" / "wk-self-return.service").exists(),
+                         "the timer's service is ALSO started at boot, which reboots the board")
+
+    def test_a_timer_is_a_member_the_archive_may_carry(self):
+        cp = self._names(["systemd/wk-self-return.timer",
+                          "systemd/wk-self-return.service"])
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+
+    def test_a_service_with_no_wantedby_and_no_timer_is_still_refused(self):
+        """the carve-out is only for a service a timer in the same archive
+        starts; without one, nothing would ever run it."""
+        (self.root / "lib" / "systemd").mkdir(parents=True)
+        (self.root / "lib" / "systemd" / "systemd").write_text("")
+        work = self._staged()
+        (work / "systemd" / "wk-orphan.service").write_text(
+            "[Unit]\n[Service]\nExecStart=/bin/true\n")
+        cp = self.run_helper(
+            _lift(CARD_PRIV, "_unit_target", "_units_sysctl", "_units_edit")
+            + f"\n_units_edit \"$ROOTDIR\" {work}\n")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("WantedBy", cp.stdout + cp.stderr)
 
     def test_a_unit_with_no_wantedby_is_refused(self):
         """a unit nothing would ever start is a watchdog that is not there"""
@@ -821,13 +897,15 @@ printf 'name=%s ssh=%s role=%s driver=%s\n' \
         )
 
     def test_a_medium_armed_board_gets_its_drivers_self_disarm(self):
-        # rpi3 arms its rescue's config.txt (pi-sd): its image puts the
-        # rescue's own back. rpi4 arms through the firmware's tryboot flag
-        # (pi-tryboot), which the firmware clears itself, so its image has
-        # nothing to park and no disarm is staged.
+        # Both boards park their own arming, each the thing its driver armed:
+        # rpi3 puts the rescue's config.txt back (pi-sd), rpi4 removes the
+        # tryboot staging from the SD (pi-tryboot) -- that board does not
+        # consume the flag, so the staging is spent by the boot that used it or
+        # the board never leaves its bench system.
         cp = self._sh('_self_disarm_for rpi4')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.strip(), "", "pi-tryboot has nothing to park:\n" + cp.stdout)
+        self.assertIn("tryboot.txt", cp.stdout, cp.stdout + cp.stderr)
+        self.assertNotIn("'", cp.stdout, "a quote here would split systemd's ExecStart")
         cp = self._sh('_self_disarm_for rpi3')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("config.txt.rescue", cp.stdout, cp.stdout + cp.stderr)
@@ -849,6 +927,47 @@ printf 'name=%s ssh=%s role=%s driver=%s\n' \
         self.assertNotIn("wk-self-disarm", cp.stdout, cp.stdout)
         self.assertIn("wk-self-return.service", cp.stdout, cp.stdout)
         self.assertIn("S99wk-self-return", cp.stdout, cp.stdout)
+
+    def test_the_watchdog_is_a_timer_that_blocks_no_target(self):
+        """A Type=oneshot that sleeps is not active until it returns, so it
+        holds a start job -- and multi-user.target, which wants it, stays
+        inactive for the whole watchdog on every boot. Measured on the rpi4
+        (2026-09-01): 15 minutes of every boot with multi-user.target inactive
+        and the start job under TimeoutStartSec=infinity. The wait belongs to a
+        timer."""
+        seed = self.tmp / "seed-timer"
+        for d in ("systemd", "sysctl.d", "init.d"):
+            (seed / d).mkdir(parents=True)
+        cp = self._sh(f'stage_units {seed} "" >/dev/null 2>&1; ls {seed}/systemd')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("wk-self-return.timer", cp.stdout, cp.stdout)
+
+        timer = (seed / "systemd" / "wk-self-return.timer").read_text()
+        self.assertIn("OnBootSec=", timer)
+        self.assertIn("WantedBy=timers.target", timer)
+        self.assertIn("/etc/wk/rescue", timer, "the timer is not gated on the rescue marker")
+
+        svc = (seed / "systemd" / "wk-self-return.service").read_text()
+        self.assertNotIn("sleep", svc, "the service still waits inside its own ExecStart")
+        self.assertNotIn("TimeoutStartSec", svc, "a service that returns at once needs no start timeout")
+        self.assertNotIn("[Install]", svc,
+                         "the timer's service is also wanted by a target, so it runs at "
+                         "boot and reboots the board immediately")
+        self.assertNotIn("multi-user.target", svc)
+        self.assertIn("wk-keep-running", svc)
+        self.assertIn("/etc/wk/rescue", svc, "the service is not gated on the rescue marker")
+
+    def test_no_watchdog_seconds_stages_neither_half(self):
+        """a timer with no OnBootSec fires at once and reboots the board, so a
+        profile that names no watchdog gets no timer at all -- and is warned
+        about, not silently left without one."""
+        seed = self.tmp / "seed-nowd"
+        for d in ("systemd", "sysctl.d", "init.d"):
+            (seed / d).mkdir(parents=True)
+        cp = self._sh(f'IMG_WATCHDOG=""; stage_units {seed} "" 2>&1; ls {seed}/systemd {seed}/init.d')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("wk-self-return", cp.stdout, cp.stdout)
+        self.assertIn("will not hand its machine back", cp.stdout)
 
     def test_a_busybox_image_gets_the_same_two_jobs_as_init_scripts(self):
         seed = self.tmp / "seed3"
@@ -968,3 +1087,91 @@ cmd_ls
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertNotIn("STATE", cp.stdout, "a header over an empty table")
         self.assertIn("no workspace here has built an image", cp.stdout + cp.stderr)
+
+class TestDiag(CardEditTest):
+    """`diag` reads a system's own account of its last boot off its boot
+    partition. It exists for the system that never became reachable, which is
+    the one that cannot be asked over ssh -- so with the card in a reader this
+    is the only path to it (rpi3, 2026-09-01: booted, never appeared, and the
+    account it had written could not be read)."""
+
+    def _run(self):
+        return self.run_helper(_lift(CARD_PRIV, "_diag_probe", "v_diag")
+                               + "\nDIAG_MAX=65536\nv_diag /dev/sdX\n")
+
+    def test_it_prints_the_account_the_image_wrote(self):
+        (self.boot / "wk-diag.txt").write_text("id=some-image\nwlan0: no carrier\n")
+        cp = self._run()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("wlan0: no carrier", cp.stdout)
+
+    def test_an_image_that_never_got_that_far_says_so(self):
+        cp = self._run()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("did not get that far", cp.stdout)
+
+    def test_it_is_bounded(self):
+        (self.boot / "wk-diag.txt").write_text("x" * 200000)
+        cp = self._run()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertLessEqual(len(cp.stdout), 65536 + 200, "a card can hand back any amount of text")
+
+
+class TestRescueHelper(CardEditTest):
+    """`rescue-helper` copies the writing machine's own card helper onto the
+    rescue it is writing, so a board writes its bench media with this
+    checkout's code rather than whatever its image baked in."""
+
+    def _run(self, extra=""):
+        script = (_lift(CARD_PRIV, "_rescue_helper_install", "v_rescue_helper")
+                  + f'\nSELF={self.tmp / "helper"!s}\n'
+                  + f'CHECK_BOOT_FILES={self.tmp / "checker.py"!s}\n'
+                  + extra + '\nv_rescue_helper /dev/sdX\n')
+        return self.run_helper(script)
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "helper").write_text("#!/bin/bash\n# the helper\n")
+        (self.tmp / "checker.py").write_text("#!/usr/bin/env python3\n")
+
+    def test_both_files_land_root_owned_and_executable(self):
+        cp = self._run()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        d = self.root / "usr" / "local" / "libexec"
+        self.assertEqual((d / "wk-card-priv").read_text(), "#!/bin/bash\n# the helper\n")
+        self.assertTrue((d / "wk-check-boot-files.py").exists())
+        for f in (d / "wk-card-priv", d / "wk-check-boot-files.py"):
+            self.assertTrue(os.access(f, os.X_OK), f"{f.name} is not executable")
+        self.assertIn("helper:", cp.stdout)
+
+    def test_a_bench_pair_is_refused(self):
+        """a bench system never writes a card, so it never takes the helper --
+        and @second names partitions this verb does not address."""
+        cp = self._run(extra="SECOND=1")
+        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+        self.assertIn("partitions 1 and 2", cp.stderr)
+
+    def test_no_checker_on_this_machine_is_a_refusal_with_a_remedy(self):
+        (self.tmp / "checker.py").unlink()
+        cp = self._run()
+        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+        self.assertIn("--stage quiesce", cp.stderr)
+        self.assertFalse((self.root / "usr").exists(), "nothing is written on a refusal")
+
+
+class TestRescueHelperIsWiredIntoARescueWrite(unittest.TestCase):
+    def test_only_a_rescue_takes_it(self):
+        """cmd/sysimage calls it for role=rescue and nothing else: a bench
+        system has no card to write."""
+        text = SYSIMAGE.read_text()
+        self.assertIn('[ "$role" != rescue ] || disk_install_rescue_helper', text)
+        self.assertIn("disk_install_rescue_helper()", DISK_SH.read_text())
+
+    def test_an_older_helper_on_the_reader_is_told_apart_from_a_refusal(self):
+        """a reader whose checkout predates the verb gets the one-line remedy,
+        not 'could not'."""
+        text = DISK_SH.read_text()
+        block = text[text.index("disk_install_rescue_helper()"):]
+        block = block[:block.index("\n}\n")]
+        self.assertIn("usage: wk-card-priv", block)
+        self.assertIn("--stage quiesce", block)

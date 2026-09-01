@@ -175,7 +175,8 @@ eeprom_stage_recovery() {
     was not copied, so the board still boots as it did."
     done
 
-    scp -q -o BatchMode=yes "$dir/recovery.bin" "$HOST:$bootfs/" \
+    # shellcheck disable=SC2046
+    scp -q -o BatchMode=yes $(_unpinned_host_key_opts) "$dir/recovery.bin" "$(rsh_dest):$bootfs/" \
         || die "could not copy recovery.bin to $HOST:$bootfs"
     rsh 'sync'
     rm -rf "$work"

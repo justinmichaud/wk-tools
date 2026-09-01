@@ -65,7 +65,7 @@ pimbr_rescue_disk() { disk_of_part "$MACH_ROOT"; }
 b_boot_part() { disk_part "$(pimbr_dev)" 1; }
 
 _pimbr_type() {
-    m_ssh "sudo dd if=$(pimbr_dev) bs=1 skip=$PIMBR_TYPE_OFFSET count=1 status=none | od -An -tx1" \
+    r_sudo "dd if=$(pimbr_dev) bs=1 skip=$PIMBR_TYPE_OFFSET count=1 status=none | od -An -tx1" \
         2>/dev/null | tr -d ' \r\n'
 }
 
@@ -74,7 +74,7 @@ _pimbr_type() {
 # silent no-op write looks exactly like one that worked.
 _pimbr_set_type() {
     local hex="$1" got
-    m_ssh "printf '\\$(printf '%03o' 0x$hex)' \
+    r_sudo "printf '\\$(printf '%03o' 0x$hex)' \
         | sudo dd of=$(pimbr_dev) bs=1 seek=$PIMBR_TYPE_OFFSET count=1 conv=notrunc status=none \
         && sync" || return 1
     got=$(_pimbr_type)
@@ -152,7 +152,7 @@ printf \"\\$(printf '%03o' 0x$PIMBR_TYPE_DISARMED)\" \
 # The boot order proves the fall-through is still in place; the medium's
 # state is the arming.
 b_evidence() {
-    m_ssh "$EEPROM_CONFIG_CMD" \
+    r_ssh "$EEPROM_CONFIG_CMD" \
         | sed -n 's/^BOOT_ORDER=/eeprom_boot_order=/p' || true
 
     # Captured first, then judged: `$(cmd || echo unreadable)` *appends* the

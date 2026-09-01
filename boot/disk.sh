@@ -16,6 +16,10 @@
 # through, which is how the image reaches `write` and the tailscale auth key
 # reaches `tailnet` without touching a command line.
 CARD_PRIV=/usr/local/libexec/wk-card-priv
+# The model of a Pi's boot tree the helper runs as root (boot/check-boot-files.py,
+# installed beside it under the name the helper knows). Named here because the
+# two are installed as a pair and `wk pi helper` puts that pair on a board.
+CARD_CHECKER=/usr/local/libexec/wk-check-boot-files.py
 
 card_priv() { # <verb> [args...]
     m_ssh "sudo -n $CARD_PRIV $(sh_quote "$@")"
@@ -553,6 +557,32 @@ disk_config_append() { # <device> <block>
         || die "could not append the firmware block to $dev's config.txt.
     The image is written; the board would come up at whatever clock it felt
     like, and nothing later would say so."
+}
+
+# The card helper, onto a rescue: the board that boots it writes its own bench
+# media, and the code it does that with should be this checkout's, not whatever
+# the image baked in months ago. Copied by the helper from its own installed
+# file, so the bytes are the ones the machine holding the reader just ran.
+#
+# A refusal is fatal: a rescue that cannot write a card cannot do the one job
+# that makes it a rescue, and finding that out later costs a trip to the board.
+disk_install_rescue_helper() { # <device>
+    local dev="$1" out rc=0
+    disk_would "put this machine's card helper on $dev's rescue" && return 0
+    out=$(card_priv rescue-helper "$dev" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && { log "  $(printf '%s' "$out" | sed -n 's/^wk-card-priv: helper: //p')"; return 0; }
+    case "$out" in
+        *'usage: wk-card-priv'*)
+            die "$MACH_NAME's card helper is older than this checkout: it has no
+    'rescue-helper' verb, so the rescue being written would carry the helper its
+    image was built with, and a fix made here would never reach the board.
+    The image is written; the helper is not.
+    Remedy, from a terminal on $MACH_NAME (its sudo asks for a password, which
+    is why this end cannot do it): update its wk-tools checkout, then
+        ./setup --stage quiesce" ;;
+    esac
+    die "could not put the card helper on $dev's rescue:
+$out"
 }
 
 # Which system this card holds, on the boot partition, where `wk boot` reads

@@ -7,7 +7,9 @@ Everything here runs against the sourced driver with its remote halves
 stubbed -- no board. The end-to-end proof is a real `wk boot rpi4`.
 """
 import os
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -40,12 +42,50 @@ class TestArrangement(unittest.TestCase):
                          "pi-tryboot /dev/sda /dev/mmcblk0p2 bcm2711-rpi-4-b.dtb",
                          cp.stdout + cp.stderr)
 
-    def test_no_self_disarm(self):
-        """tryboot's flag is cleared by the firmware, so there is nothing for
-        the image to park: the driver defines no b_self_disarm_sh, and
-        `wk sysimage write` stages no disarm unit for this machine."""
-        cp = bash(LOAD + 'command -v b_self_disarm_sh || echo none')
-        self.assertEqual(cp.stdout.strip(), "none", cp.stdout + cp.stderr)
+    def test_the_boot_that_spends_the_staging_removes_it(self):
+        """This board does not consume the tryboot flag: measured 2026-09-01, a
+        plain reboot and a cold power cycle both read tryboot.txt again and came
+        back as the bench system, /proc/cmdline carrying second/cmdline.txt own
+        panic=10 while the SD config.txt held no os_prefix. So the boot that
+        spends the staging is what removes it, or the board can never leave the
+        bench system -- and b_disarm cannot help, being addressed to a rescue
+        this same staging stops it from booting."""
+        cp = bash(LOAD + "b_self_disarm_sh")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        out = cp.stdout
+        self.assertIn("/dev/mmcblk0p1", out, "the SD boot partition, derived from MACH_ROOT")
+        self.assertIn("tryboot.txt", out)
+        self.assertIn("second", out)
+        self.assertNotIn("'", out, "a single quote breaks the systemd ExecStart it is spliced into")
+        self.assertNotIn("%", out, "systemd expands % before it parses quotes")
+        self.assertEqual(
+            subprocess.run(["sh", "-n"], input=out, capture_output=True, text=True).returncode,
+            0, "the staged script is not POSIX sh")
+
+    def test_the_disarm_runs_over_the_channel_that_answered(self):
+        """While the staging is in force the board answers as its *bench*
+        system, so a disarm addressed only to the rescue never runs. r_ssh is
+        the one implementation of whichever channel answered."""
+        # b_disarm silences its own channel, so the stubs record to files.
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        stubs = "\n".join([
+            'r_ssh() { printf "%s" "$*" > ' + str(d / "r_ssh") + '; }',
+            'm_ssh() { : > ' + str(d / "m_ssh") + '; return 1; }',
+            "b_disarm",
+        ])
+        cp = bash(LOAD + stubs + "\n")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue((d / "r_ssh").is_file(), "b_disarm did not go through r_ssh")
+        self.assertFalse((d / "m_ssh").exists(), "b_disarm still addresses the rescue directly")
+        sent = (d / "r_ssh").read_text()
+        self.assertIn("tryboot.txt", sent)
+        self.assertIn("/dev/mmcblk0p1", sent,
+                      "the SD boot partition is named, for a mount from the bench side")
+        self.assertEqual(
+            subprocess.run(["sh", "-n"], input=sent, capture_output=True, text=True).returncode,
+            0, "the disarm script is not POSIX sh")
 
     def test_identity_still_reads_off_the_bench_medium(self):
         """wk-image.id and wk-diag.txt live on the medium's own boot
@@ -122,28 +162,42 @@ TRYBOOT_ARMED=""; MODE="bench x-1"; b_reboot
         self.assertNotIn("tryboot", plain)
 
     def test_evidence_reads_the_staging_not_a_record(self):
-        cp = bash(LOAD + '''
-m_ssh() { echo yes; }
+        """...and over r_ssh, the channel the board answered on: a board whose
+        medium the firmware prefers answers as its bench system, which is
+        exactly when `wk boot --status` is asked what is staged."""
+        cp = bash(LOAD + """
+r_ssh() { echo yes; }
 b_evidence
-m_ssh() { return 1; }
+r_ssh() { return 1; }
 b_evidence
-''')
+""")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("tryboot_staged=yes", cp.stdout)
         self.assertIn("tryboot_staged=unreadable", cp.stdout)
         self.assertIn("bench root on /dev/sda", cp.stdout)
+
+    def test_no_board_level_step_names_the_rescue_channel(self):
+        """The class of bug that cost 2026-09-01: every one of this driver's
+        steps acts on the *board* -- the SD's staging, the EEPROM, the reboot --
+        and each one is needed precisely when the board is answering as its
+        bench system rather than its rescue. `m_ssh` is the rescue's channel;
+        anything here that names it is a step that cannot run when it matters."""
+        text = (REPO / "boot" / "pi-tryboot.sh").read_text()
+        offenders = [l.strip() for l in text.splitlines()
+                     if "m_ssh" in l and not l.lstrip().startswith("#")]
+        self.assertEqual(offenders, [], "these reach only the rescue:\n" + "\n".join(offenders))
 
     def test_arm_stages_from_the_selected_system(self):
         """a medium holding two systems arms the one cmd/boot selected
         (ARM_SYS_PART, machine_select_system); an arm with no selection is
         refused loudly rather than guessing partition 1."""
         cp = bash(LOAD + '''
-m_ssh() { echo "m_ssh: $*" >&2; }
+r_ssh() { echo "r_ssh: $*" >&2; }
 ARM_SYS_PART=/dev/sda3 b_arm
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("mount -o ro '/dev/sda3'", cp.stderr)
-        cp = bash(LOAD + 'm_ssh() { :; }; b_arm')
+        cp = bash(LOAD + 'r_ssh() { :; }; b_arm')
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("machine_select_system", cp.stderr)
 
@@ -166,6 +220,121 @@ b_evidence
         self.assertIn("wk pi boot-order rpi4 sd-first", cp.stdout)
         self.assertIn("--disk <reader>:/dev/mmcblk0 --rescue", cp.stdout)
         self.assertIn("--disk rpi4:/dev/sda", cp.stdout)
+
+
+class TestStagingRuns(unittest.TestCase):
+    """The staging script executed for real against a fixture boot partition.
+
+    Only `mount`, `umount` and `sync` are shimmed (they need root, and this
+    does not) and `_tryboot_bootfs_sh` points at a directory standing in for
+    the SD's FAT; everything else is the script the rescue runs.
+    """
+
+    ZIMAGE_MAGIC = (36, bytes((0x18, 0x28, 0x6F, 0x01)))
+    ARM64_MAGIC = (56, b"ARM\x64")
+
+    def write_kernel(self, path, magic):
+        off, word = magic
+        blob = bytearray(1024)
+        blob[off:off + 4] = word
+        path.write_bytes(bytes(blob))
+
+    def stage(self, config, kernels):
+        """Run the staging over a fixture; return (completed process, sd dir)."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        medium, sd, shim = tmp / "medium", tmp / "sd", tmp / "bin"
+        for d in (medium, sd, shim):
+            d.mkdir()
+        (medium / "config.txt").write_text(config)
+        (medium / "cmdline.txt").write_text("root=PARTUUID=aa-02 rootwait\n")
+        (medium / "bcm2711-rpi-4-b.dtb").write_bytes(b"dtb")
+        (medium / "overlays").mkdir()
+        (medium / "overlays" / "vc4-kms-v3d.dtbo").write_bytes(b"ovl")
+        for name, magic in kernels.items():
+            self.write_kernel(medium / name, magic)
+        for f in ("start4.elf", "fixup4.dat"):
+            (sd / f).write_bytes(b"fw")
+        # `mount` hands the script the fixture; `umount` empties it again so
+        # the script's own rmdir succeeds.
+        (shim / "mount").write_text(
+            '#!/bin/sh\nfor a in "$@"; do t=$a; done\ncp -a "%s"/. "$t"\n' % medium)
+        (shim / "umount").write_text(
+            '#!/bin/sh\nfor a in "$@"; do t=$a; done\nfind "$t" -mindepth 1 -delete\n')
+        (shim / "sync").write_text("#!/bin/sh\nexit 0\n")
+        for f in shim.iterdir():
+            f.chmod(0o755)
+        # The SD's boot filesystem is named from the conf on a real board; here
+        # the one emitter that names it is replaced by one naming the fixture.
+        cp = bash(LOAD + (
+            '_tryboot_sd_sh() { printf %%s "wk_sd_boot() { echo %s; }; wk_sd_drop() { :; }; "; }\n'
+            "PATH=%s:$PATH\n"
+            'tryboot_stage_sh /dev/sda1 "$MACH_DTB" | sh\n') % (sd, shim))
+        return cp, sd
+
+    def test_a_kernel_line_names_the_kernel_and_states_32_bit(self):
+        """the fork's images say `kernel=zImage`: that file is staged, and
+        arm_64bit=0 is written from its own magic (the SD's firmware would
+        otherwise jump into a zImage as if it were an arm64 Image)."""
+        cp, sd = self.stage("kernel=zImage\ndtparam=audio=on\n",
+                            {"zImage": self.ZIMAGE_MAGIC})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        for f in ("zImage", "bcm2711-rpi-4-b.dtb", "start4.elf", "fixup4.dat"):
+            self.assertTrue((sd / "second" / f).exists(), f"{f} was not staged")
+        self.assertTrue((sd / "second" / "overlays" / "vc4-kms-v3d.dtbo").exists())
+        txt = (sd / "tryboot.txt").read_text()
+        self.assertIn("os_prefix=second/", txt)
+        self.assertIn("arm_64bit=0", txt)
+        self.assertIn("panic=10", (sd / "second" / "cmdline.txt").read_text())
+
+    def test_the_prefix_leads_the_staged_config(self):
+        """os_prefix comes before any line the image carries: the firmware
+        resolves each filename as it reads the directive asking for it, so a
+        prefix set after `dtoverlay=` never reaches that overlay's .dtbo."""
+        cp, sd = self.stage("dtoverlay=vc4-kms-v3d\n[pi4]\ndtparam=audio=on\n",
+                            {"kernel8.img": self.ARM64_MAGIC})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        lines = [l for l in (sd / "tryboot.txt").read_text().splitlines() if l.strip()]
+        self.assertEqual(lines[0], "os_prefix=second/")
+        self.assertLess(lines.index("arm_64bit=1"), lines.index("dtoverlay=vc4-kms-v3d"))
+        # ...and it is not left inside the image's own conditional section.
+        self.assertLess(lines.index("os_prefix=second/"),
+                        next(i for i, l in enumerate(lines) if l.startswith("[")))
+
+    def test_a_kernel_of_neither_bitness_states_none(self):
+        """a kernel whose magic says nothing leaves arm_64bit to the firmware
+        rather than guessing it; the staging still completes."""
+        cp, sd = self.stage("kernel=zImage\n", {"zImage": (0, b"\x00\x00\x00\x00")})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("arm_64bit", (sd / "tryboot.txt").read_text())
+        self.assertTrue((sd / "second" / "zImage").exists())
+
+    def test_no_kernel_line_resolves_the_one_default_name_there_is(self):
+        """the yocto images ship a bare config.txt beside one kernel8.img --
+        the firmware resolves the name from its defaults, and so does this."""
+        cp, sd = self.stage('#kernel=""\ndtoverlay=vc4-kms-v3d\n',
+                            {"kernel8.img": self.ARM64_MAGIC})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue((sd / "second" / "kernel8.img").exists())
+        self.assertIn("arm_64bit=1", (sd / "tryboot.txt").read_text())
+
+    def test_two_default_names_and_no_kernel_line_refuses(self):
+        """which of several the firmware picks follows from arm_64bit and the
+        board; staging another would boot a kernel nobody asked for."""
+        cp, sd = self.stage("dtparam=audio=on\n",
+                            {"kernel8.img": self.ARM64_MAGIC,
+                             "kernel7l.img": self.ZIMAGE_MAGIC})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("kernel8.img", cp.stderr)
+        self.assertIn("kernel7l.img", cp.stderr)
+        self.assertIn("config.txt.append", cp.stderr)
+        self.assertFalse((sd / "second").exists(), "nothing is staged on a refusal")
+
+    def test_no_kernel_at_all_refuses(self):
+        cp, sd = self.stage("dtparam=audio=on\n", {})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("holds none of", cp.stderr)
+        self.assertFalse((sd / "second").exists())
 
 
 if __name__ == "__main__":

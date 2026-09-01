@@ -139,3 +139,56 @@ b_diag
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNoDriverReachesOnlyTheRescue(unittest.TestCase):
+    """The bug class that cost 2026-09-01, closed across every driver at once.
+
+    A boot driver's steps act on the *board* -- the arming on its medium, its
+    EEPROM, its reboot, its evidence -- and each is needed exactly when the
+    board is answering as a bench system rather than as its rescue: a medium
+    the firmware prefers, an arming that has to be undone, a leg switch. `m_ssh`
+    is the rescue's channel alone. `r_ssh`/`r_sudo` are the one implementation
+    of "the channel this machine answered on" (boot/machines.sh), so a driver
+    that names m_ssh has a step that cannot run when it is needed.
+
+    Four instances of this were live in one afternoon: pi-tryboot's staging,
+    reboot, evidence and disarm; three more in pi-mbr and rpi5-usb; and the
+    same shape again in record_clear and in cmd/pi's rsh/rsh_dest.
+    """
+
+    DRIVERS = sorted((REPO / "boot").glob("pi-*.sh")) + [REPO / "boot" / "rpi5-usb.sh"]
+
+    def test_there_are_drivers_to_check(self):
+        self.assertGreaterEqual(len(self.DRIVERS), 3, self.DRIVERS)
+
+    def test_no_driver_names_the_rescue_only_channel(self):
+        for path in self.DRIVERS:
+            with self.subTest(driver=path.name):
+                bad = [f"{n}: {l.strip()}"
+                       for n, l in enumerate(path.read_text().splitlines(), 1)
+                       if "m_ssh" in l and not l.lstrip().startswith("#")]
+                self.assertEqual(bad, [], f"{path.name} reaches only the rescue:\n"
+                                          + "\n".join(bad))
+
+    def test_the_record_is_cleared_only_where_it_lives(self):
+        """record_clear touches the host install's root, so on a board
+        answering as its bench system there is nothing to clear -- and saying
+        so beats failing the disarm that is trying to get the board back."""
+        text = (REPO / "boot" / "machines.sh").read_text()
+        body = text[text.index("record_clear()"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("MODE_CHANNEL", body,
+                      "record_clear does not ask which channel answered")
+
+    def test_wk_pi_reaches_a_board_over_the_channel_that_answered(self):
+        """`wk pi`'s own transport, both halves: the command channel and the
+        scp destination. They disagreed once -- the EEPROM diff was read over
+        one and the file copied over the other, which failed the write."""
+        text = (REPO / "cmd" / "pi").read_text()
+        for fn in ("rsh()", "rsh_dest()"):
+            body = text[text.index(fn):]
+            body = body[:body.index("\n}\n")]
+            with self.subTest(fn=fn):
+                self.assertIn("MODE_CHANNEL" if fn == "rsh_dest()" else "r_ssh", body,
+                              f"{fn} does not follow the channel that answered")

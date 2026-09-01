@@ -195,26 +195,43 @@ stage_init() { # <staging dir> <name> <body -- runs on start, as root>
 stage_units() { # <staging dir> <self-disarm command, empty when nothing to park>
     local seed="$1" disarm="${2:-}"
 
-    # TimeoutStartSec=infinity is load-bearing: systemd's default 90 s start
-    # timeout kills a Type=oneshot that sleeps longer than that before it can
-    # ever fire.
-    # Skipped rather than written empty when a profile names no watchdog: the
-    # unit would be `sleep ` with no argument, which fails on every boot and
-    # looks in the journal exactly like a watchdog that ran.
+    # A timer and a service that returns at once, rather than one unit that
+    # sleeps: the wait belongs to systemd, which has a thing for waiting.
+    #
+    # A `Type=oneshot` whose ExecStart sleeps is not *active* until it returns,
+    # so it holds a `start running` job for the whole watchdog -- and
+    # `multi-user.target`, which wants it, stays inactive with a `start
+    # waiting` job for those seconds, on every boot of every bench system.
+    # Measured on the rpi4 2026-09-01: 15 minutes of a boot with
+    # multi-user.target inactive, systemd-update-utmp-runlevel.service queued
+    # behind it, and the start job under `TimeoutStartSec=infinity`, so nothing
+    # bounded it. Reboots issued into that window are how a board goes away and
+    # does not come back.
+    #
+    # Skipped rather than written empty when a profile names no watchdog: a
+    # timer with no OnBootSec would fire immediately and reboot the board.
     if [ -z "${IMG_WATCHDOG:-}" ]; then
         warn "$IMG_PROFILE sets no IMG_WATCHDOG, so this image will not hand its machine back"
     else
-    stage_unit "$seed" wk-self-return.service "[Unit]
+    stage_unit "$seed" wk-self-return.timer "[Unit]
 Description=Hand the machine back to host mode unless claimed
 # Inert on a rescue system, which is what this would be handing the machine
 # back *to*. The marker is written by 'wk sysimage write --rescue'.
 ConditionPathExists=!/etc/wk/rescue
+[Timer]
+OnBootSec=$IMG_WATCHDOG
+AccuracySec=1s
+[Install]
+WantedBy=timers.target
+"
+    # No [Install]: the timer starts this, and a WantedBy= as well would run it
+    # once at boot -- which would reboot the board the moment it came up.
+    stage_unit "$seed" wk-self-return.service "[Unit]
+Description=Hand the machine back to host mode unless claimed
+ConditionPathExists=!/etc/wk/rescue
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'sleep $IMG_WATCHDOG; [ -f /run/wk-keep-running ] || systemctl reboot'
-TimeoutStartSec=infinity
-[Install]
-WantedBy=multi-user.target
+ExecStart=/bin/sh -c '[ -f /run/wk-keep-running ] || systemctl reboot'
 "
     # Last in rcS, so the network and the browser are up when the clock
     # starts; backgrounded, so init does not wait the watchdog out.
@@ -928,6 +945,9 @@ source=$from"
     fi
 
     disk_seed_role "$DISK_DEV" "$role"
+    # A rescue writes cards, so it carries the helper that does it. Only a
+    # rescue: a bench system never writes a medium.
+    [ "$role" != rescue ] || disk_install_rescue_helper "$DISK_DEV"
     disk_seed_tailnet "$DISK_DEV" "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")"
     disk_seed_wifi "$DISK_DEV" "${IMG_MACHINE:-}"
 

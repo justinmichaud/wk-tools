@@ -69,6 +69,13 @@ def _sfdisk_json(path):
     return {int(p["node"][len(str(path)):]): p for p in table["partitions"]}
 
 
+def _sfdisk_id(path):
+    """The MBR disk identifier, which is the first half of every PARTUUID on it."""
+    import json
+    out = subprocess.run(["sfdisk", "-J", str(path)], capture_output=True, text=True, check=True).stdout
+    return json.loads(out)["partitiontable"]["id"]
+
+
 class TestGateUnderSecond(WkTest):
     """The gate's @second carve-out: partitions 3 and 4 of a disk that may be
     the one this machine runs from, or a card in a reader."""
@@ -238,6 +245,34 @@ class TestSecondWrite(WkTest):
         self.assertEqual(Path(str(disk) + "5").read_bytes(), self.BOOT, "slot 1's boot was disturbed")
         self.assertEqual(_sfdisk_json(disk)[5]["start"], ext_start + 2048)
 
+    def test_the_migration_keeps_the_disks_identifier(self):
+        """Every PARTUUID on a card is `<disk id>-<nn>`, and the rescue on
+        partitions 1-2 names its own root that way -- in a cmdline.txt and an
+        fstab this write never touches and never retargets. sfdisk invents a
+        fresh identifier for any script that does not name one, so a migration
+        that let it would leave the rescue naming a root that no longer exists:
+        the board boots to a kernel that can mount nothing, and only a card
+        reader gets it back."""
+        disk, img = self._disk(size_mb=2048), self._image()
+        before = _sfdisk_id(disk)
+        self.assertTrue(before, "the fixture disk has no identifier to keep")
+        cp = self._write(disk, img, shape="shared", slot=1)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("shared layout made", cp.stdout)
+        self.assertEqual(_sfdisk_id(disk), before,
+                         "the migration changed the disk identifier, so every "
+                         "PARTUUID on the card moved -- the rescue's included")
+        # ...and the same when it is replacing an older primary 3-4 pair.
+        disk2 = self._disk(size_mb=2048)
+        subprocess.run(["sfdisk", "-q", "--append", "--no-reread", str(disk2)],
+                       input="start=30720, size=4096, type=c\nstart=34816, size=8192, type=83\n",
+                       text=True, check=True, capture_output=True)
+        before2 = _sfdisk_id(disk2)
+        cp = self._write(disk2, img, shape="shared", slot=1)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("replacing the layout", cp.stdout)
+        self.assertEqual(_sfdisk_id(disk2), before2)
+
     def test_shared_layout_replaces_the_one_system_primaries(self):
         """the migration: a card with the old primary 3-4 pair beside its
         rescue is relaid; the write says what it destroyed."""
@@ -328,6 +363,50 @@ class TestArming(WkTest):
         self.assertEqual((self.boot / "second" / "cmdline.txt").read_text(), "root=PARTUUID=aa-04 rootwait\n")
         self.assertEqual((self.boot / "second" / "overlays" / "x.dtbo").read_bytes(), b"dtbo")
         self.assertFalse((self.boot / "second.part").exists())
+
+    def test_reading_the_state_mounts_read_only(self):
+        """`second-state` answers a question and writes nothing. Mounting a FAT
+        read-write and unmounting it rewrites the dirty flag and the FSInfo
+        sector, which is a write to a card somebody only asked about; arming
+        and disarming do edit it, so they mount read-write."""
+        script = _SAY + _lift(CARD_PRIV, "_second_with_boot") + """
+part() { printf '%s%s' "$1" "$2"; }
+findmnt() { return 1; }
+with_mount() { printf 'with_mount %s\\n' "$*"; }
+_second_state_edit() { :; }
+_second_arm_install() { :; }
+_second_disarm_edit() { :; }
+_second_with_boot -r /dev/sdX _second_state_edit
+_second_with_boot /dev/sdX _second_disarm_edit
+"""
+        cp = bash(script)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        lines = cp.stdout.strip().splitlines()
+        self.assertEqual(lines[0], "with_mount -r /dev/sdX1 _second_state_edit", cp.stdout)
+        self.assertEqual(lines[1], "with_mount /dev/sdX1 _second_disarm_edit", cp.stdout)
+
+    def test_the_state_verb_asks_for_read_only(self):
+        """the dispatch half of the rule above: v_second_state is the only one
+        of the three that passes -r."""
+        text = CARD_PRIV.read_text()
+        self.assertIn('_second_with_boot -r "$dev" _second_state_edit', text)
+        self.assertNotIn('_second_with_boot -r "$dev" _second_arm_install', text)
+
+    def test_the_prefix_leads_the_armed_config(self):
+        """os_prefix comes before the armed system's own lines, and outside any
+        conditional section it carries: the firmware resolves each filename as
+        it reads the directive asking for it, and a filter can drop a prefix
+        that lands inside a section. Its own os_prefix does not survive."""
+        (self.second / "config.txt").write_text(
+            "os_prefix=stale/\ndtoverlay=vc4-fkms-v3d\n[pi3]\ndtparam=audio=on\n")
+        cp = self._arm()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        lines = [l for l in (self.boot / "config.txt").read_text().splitlines() if l.strip()]
+        self.assertEqual(lines[1], "os_prefix=second/", lines)
+        self.assertLess(lines.index("os_prefix=second/"), lines.index("dtoverlay=vc4-fkms-v3d"))
+        self.assertLess(lines.index("os_prefix=second/"),
+                        next(i for i, l in enumerate(lines) if l.startswith("[")))
+        self.assertNotIn("os_prefix=stale/", lines)
 
     def test_arming_the_third_system_uses_its_own_prefix(self):
         """third/ lands, os_prefix says third/, and a stale second/ from an

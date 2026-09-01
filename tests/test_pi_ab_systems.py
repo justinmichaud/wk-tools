@@ -52,6 +52,10 @@ b_system_kind() {{
 '''
 
 
+PI_SYSTEM_TRIES = int(
+    re.search(r"^PI_SYSTEM_TRIES=(\d+)", (REPO / "cmd" / "pi").read_text(), re.M).group(1))
+
+
 class TestSystemBoot(unittest.TestCase):
     """pi_system_boot against a scripted board: the probe answers are a
     queue in a file (the function reads them from subshells, so a variable
@@ -73,6 +77,7 @@ class TestSystemBoot(unittest.TestCase):
         clock.write_text("1000")
         script = PRELUDE + f'''
 WK_ROOT="{self.tmp}"
+PI_SYSTEM_TRIES={PI_SYSTEM_TRIES}
 WK_LOG="{self.tmp}/wk.log"; export WK_LOG
 CLK="{clock}"
 date() {{ cat "$CLK"; }}
@@ -101,16 +106,47 @@ pi_system_boot {want}
         self.assertIn("wk-keep-running", log, "the leg did not claim the board")
         self.assertNotIn("wk boot", log, "a boot happened for a system already up")
 
-    def test_the_other_leg_goes_back_then_arms_by_id(self):
+    def test_the_other_leg_is_armed_where_it_stands(self):
+        """A leg switch does not route through the rescue. The arming is a file
+        on the medium, so it is taken where the board stands and the next
+        reboot reads it -- one boot instead of two, and no wait on a rescue
+        that an arming still in force can stop from ever appearing (rpi4,
+        2026-09-01: every leg switch lost its leg to that wait)."""
         cp, log = self._boot([
             "id=sys-b;rootdev=/dev/mmcblk0p8",   # what answers first: the other leg
             "id=sys-a;rootdev=/dev/mmcblk0p6",   # what answers after the arming
         ])
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("wk boot rpi3 --back", log)
+        self.assertNotIn("--back", log, "the leg switch went via the rescue")
         self.assertIn("wk boot rpi3 --system sys-a", log)
-        self.assertLess(log.index("--back"), log.index("--system"), "armed before leaving the other system")
         self.assertIn("wk-keep-running", log)
+
+    def test_a_board_that_comes_up_wrong_is_armed_again(self):
+        """Convergence, which is what stops a round being dropped for a reason
+        that is not about the code under test: the board comes up as the other
+        leg twice and is re-armed each time, then lands and is claimed."""
+        # Two probes per pass: the one that decides, and the one that sees the
+        # board answer again after the reboot.
+        cp, log = self._boot([
+            "id=sys-b;rootdev=/dev/mmcblk0p8",
+            "id=sys-b;rootdev=/dev/mmcblk0p8",
+            "id=sys-b;rootdev=/dev/mmcblk0p8",
+            "id=sys-b;rootdev=/dev/mmcblk0p8",
+            "id=sys-a;rootdev=/dev/mmcblk0p6",
+        ])
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(log.count("wk boot rpi3 --system sys-a"), 2,
+                         "the second attempt did not happen:\n" + log)
+        self.assertIn("wk-keep-running", log)
+
+    def test_a_board_that_never_lands_loses_the_leg_after_the_last_try(self):
+        """...and it is bounded: a board that will not take the arming loses
+        the leg rather than the run."""
+        cp, log = self._boot(["id=sys-b;rootdev=/dev/mmcblk0p8"])
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("the leg is lost", cp.stdout + cp.stderr)
+        self.assertEqual(log.count("wk boot rpi3 --system sys-a"), PI_SYSTEM_TRIES,
+                         "it did not try PI_SYSTEM_TRIES times:\n" + log)
 
     def test_the_rescue_is_not_sent_back_before_arming(self):
         """host mode (the rescue answering as base) is the state to arm

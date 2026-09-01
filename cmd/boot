@@ -298,7 +298,16 @@ cmd_arm() {
             # a stopped guest is what the rehearsal looks like between runs.
             [ "${BOOT_ARMING:-}" = guest ] || die "$MACHINE is not reachable over ssh in host mode.
     Arming is an ssh command, so there is nothing to arm from here." ;;
-        bench*) die "$MACHINE is already in bench mode (system ${MODE#bench }).
+        bench*)
+            # A board whose arming *is* a file on its medium can be re-armed
+            # where it stands: the next reboot reads that file, so routing
+            # through the rescue only adds a boot that can go wrong -- and a
+            # medium the firmware prefers, or an arming still in force, is
+            # exactly what makes the rescue unreachable. An A/B leg switch is
+            # this case, every time. The other models arm a register the
+            # running system cannot read back, so they keep the refusal.
+            [ "${BOOT_ARMING:-one-shot}" = medium ] \
+                || die "$MACHINE is already in bench mode (system ${MODE#bench }).
     'wk boot $MACHINE --back' returns it first." ;;
         # `base*` is deliberately not refused here: a board on its base image is
         # the normal state to arm *from*, and matching it against `bench*`

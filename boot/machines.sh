@@ -209,6 +209,12 @@ MACH_RECORD=/var/lib/wk/boot-armed
 # Stamped with its own boot id: "has this arming been spent" is then a
 # comparison of two values from one kernel, not two machines' wall clocks.
 record_write() {
+    # The same guard record_read and record_clear carry: the record lives on the
+    # *host* install's root, so a board armed from its bench system has nowhere
+    # to put one. Not an error -- for a medium-armed board the arming itself is
+    # on the medium and `wk boot --status` reads it there (b_evidence), which is
+    # evidence rather than a record and is what decides the next boot anyway.
+    [ "${MODE_CHANNEL:-host}" = host ] || { debug "$MACH_NAME answered as its bench system; the arming is on its medium and no record is written"; return 0; }
     m_ssh "sudo mkdir -p $(dirname $MACH_RECORD) && sudo tee $MACH_RECORD >/dev/null <<EOF
 image=$1
 profile=$2
@@ -226,7 +232,16 @@ record_read() {
     [ "${MODE_CHANNEL:-host}" = host ] || return 0
     m_ssh "sudo cat $MACH_RECORD 2>/dev/null" || true
 }
-record_clear() { m_ssh "sudo rm -f $MACH_RECORD"; }
+# The same guard record_read carries, and for the same reason: the record lives
+# on the *host* install's root, so on a machine answering as its bench system
+# there is nothing here to clear. Silence rather than failure -- a medium-armed
+# board answers as its bench system precisely when its arming is what needs
+# disarming (pi-tryboot, 2026-09-01), and the record's own spent-ness is
+# computed from boot ids, so an uncleared one misleads nobody.
+record_clear() {
+    [ "${MODE_CHANNEL:-host}" = host ] || { debug "$MACH_NAME answered as its bench system; its arming record is on the host install and stays"; return 0; }
+    m_ssh "sudo rm -f $MACH_RECORD"
+}
 
 # Refuse to mutate a machine between `wk boot` and the reboot it asked for:
 # in that window the filesystem answering ssh is not the one about to run,

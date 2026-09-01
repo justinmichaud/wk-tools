@@ -17,6 +17,13 @@ carries the same four):
                                             tailscaled cannot create tailscale0
   BR2_PACKAGE_IPTABLES                      tailscaled's netfilter tool
 
+raspberrypi3_wpe_2_46_cog_defconfig is the fork's 2.46 with those same four, and
+nothing else: against the 2.38 file above it differs only in what the release
+itself brings -- BR2_PACKAGE_WPEWEBKIT2_46, the gcc 11 the fork pairs with it
+(2.38 takes gcc 9), and WPEWEBKIT_USE_LIBWEBRTC=n. That is what makes a
+2.38-against-2.46 A/B a release comparison rather than a comparison of two
+configurations: `diff` the two files and the whole difference is the release.
+
 The WPE buildroot fork release-pins its `cog` defconfigs for the **rpi3 only** --
 raspberrypi3_wpe_{2_22,2_28,2_38,2_42,2_46,2_50}_cog_defconfig -- and its rpi4
 defconfigs (raspberrypi4_wpe_defconfig and the _ml_/_weston_/_wst_ variants) pin

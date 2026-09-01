@@ -171,3 +171,65 @@ pi_bench_once pr1725
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("json=/t/slot-pr1725.json", cp.stdout)
+
+
+class TestPiHelper(WkTest):
+    """`wk pi helper` installs this checkout's card helper on a board's rescue,
+    so a fix to the helper reaches the fleet without an image rebuild. Run with
+    `rsh` replaced by a local shell -- no board -- and the two files land in a
+    temp directory standing in for /usr/local/libexec."""
+
+    def _run(self, extra=""):
+        there = self.tmp / "libexec"
+        prelude = (
+            "set -euo pipefail\n"
+            f"WK_ROOT={REPO}\n"
+            f"CARD_PRIV={there}/wk-card-priv\n"
+            f"CARD_CHECKER={there}/wk-check-boot-files.py\n"
+            "HOST=rpi3-rescue; MACH_NAME=rpi3; MACH_DEVICE=/dev/mmcblk0; PI_FLEET=1\n"
+            "die() { printf 'error: %s\\n' \"$*\" >&2; exit 1; }\n"
+            "info() { printf '%s\\n' \"$*\"; }\n"
+            "log()  { printf '%s\\n' \"$*\"; }\n"
+            # `card_priv` is boot/disk.sh's one way to run the helper over
+            # there; only root can answer `status`, and a board is driven as
+            # root, so this stands in for that.
+            "card_priv() { [ \"$1\" = status ]; }\n"
+            # The board, as a local shell: what the board would do as root,
+            # done here without it.
+            "rsh() {\n"
+            "    local c=\"$*\"\n"
+            "    c=\"${c//sudo -n /}\"\n"
+            "    c=\"${c//install -d -o root -g root -m 0755/mkdir -p}\"\n"
+            "    c=\"${c//chown 0:0/true}\"\n"
+            "    bash -c \"$c\"\n"
+            "}\n"
+            + extra + "\n")
+        return bash(prelude + lift("cmd_helper") + "\ncmd_helper\n"), there
+
+    def test_both_files_land_and_match_this_checkout(self):
+        cp, there = self._run()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual((there / "wk-card-priv").read_bytes(),
+                         (REPO / "admin" / "wk-card-priv").read_bytes())
+        self.assertEqual((there / "wk-check-boot-files.py").read_bytes(),
+                         (REPO / "boot" / "check-boot-files.py").read_bytes())
+        self.assertFalse(list(there.glob("*.part")), "a .part was left behind")
+        self.assertIn("card helper", cp.stdout)
+
+    def test_a_non_fleet_host_is_refused(self):
+        """the helper goes on a board this repo drives, named as the fleet
+        names it -- not at an arbitrary ssh destination."""
+        cp, _ = self._run(extra="PI_FLEET=''")
+        self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
+        self.assertIn("not a fleet machine", cp.stderr)
+
+    def test_a_helper_that_does_not_answer_is_a_failure(self):
+        """installed is not working: the copy has to answer `status`, or a
+        rescue that cannot write a card reports success anyway."""
+        cp, _ = self._run(extra='card_priv() { return 1; }')
+        self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
+        self.assertIn("does not answer", cp.stderr)
+
+    def test_the_usage_page_names_it(self):
+        cp = bash(f'"{REPO}/wk" pi')
+        self.assertIn("wk pi helper <machine>", cp.stdout)
