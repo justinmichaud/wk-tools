@@ -183,6 +183,30 @@ class TestRetarget(CardEditTest):
         self.assertIn("proc\t/proc", fstab, "a line naming no partition was touched")
         self.assertIn("root=PARTUUID=1c9dabbc-02", (self.boot / "cmdline.txt").read_text())
 
+    def test_dev_root_is_left_alone(self):
+        """`/dev/root` is the kernel filling in what root= named, so it follows
+        the card by itself. It names no partition number, which is why the
+        rewrite keys on the trailing digit -- broaden the check without keeping
+        that and a line which was always correct is reported as naming another
+        disk, and the repair refuses to run (measured against rpi3's card,
+        2026-09-01)."""
+        (self.boot / "cmdline.txt").write_text("root=PARTUUID=953569f6-02 rootwait\n")
+        (self.root / "etc").mkdir()
+        (self.root / "etc" / "fstab").write_text(
+            "/dev/root\t/\text4\tdefaults\t0\t1\n"
+            "PARTUUID=953569f6-01\t/boot\tvfat\tdefaults\t0\t2\n")
+        with stub_path({"sfdisk": _SFDISK}) as binp:
+            cp = self.run_helper(
+                _lift(CARD_PRIV, "_table", "_boot_file", "_retarget_boot",
+                      "_retarget_fstab", "v_retarget") + "\nv_retarget /dev/sdX\n",
+                path=binp)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        fstab = (self.root / "etc" / "fstab").read_text()
+        self.assertIn("/dev/root\t/", fstab, "the kernel's own placeholder was rewritten")
+        self.assertIn("PARTUUID=1c9dabbc-01\t/boot", fstab, fstab)
+        # ...and it says what it moved, rather than only that it finished.
+        self.assertIn("fstab: PARTUUID=953569f6-01 -> PARTUUID=1c9dabbc-01", cp.stdout, cp.stdout)
+
     def test_a_disk_with_no_partition_table_is_refused(self):
         self._write_card()
         with stub_path({"sfdisk": _SFDISK_NO_TABLE}) as binp:

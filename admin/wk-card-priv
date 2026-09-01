@@ -796,21 +796,31 @@ _retarget_fstab() { # <mountpoint> <partuuid of partition 1> <partuuid of partit
     python3 -c '
 import sys
 path, boot, root = sys.argv[1], sys.argv[2], sys.argv[3]
-def names_a_partition(f):
-    return f.startswith("/dev/") or f.startswith("PARTUUID=")
+def numbered(f):
+    # A field naming *a partition of this card*: a device path or a PARTUUID
+    # whose last character is the partition number. `/dev/root` is neither --
+    # the kernel fills it in from root=, so it follows the card by itself and
+    # is left alone. That distinction is why the original code keyed on the
+    # trailing digit; broadening the check without keeping it flags a line that
+    # was always correct.
+    return (f.startswith("/dev/") or f.startswith("PARTUUID=")) and f[-1:] in ("1", "2")
 def retarget(line):
     fields = line.split()
-    if not fields or line.lstrip().startswith("#") or not names_a_partition(fields[0]):
+    if not fields or line.lstrip().startswith("#") or not numbered(fields[0]):
         return line
-    want = boot if fields[0].endswith("1") else root if fields[0].endswith("2") else ""
-    return line.replace(fields[0], want, 1) if want else line
-lines = [retarget(l) for l in open(path, errors="replace").read().splitlines(True)]
+    return line.replace(fields[0], boot if fields[0].endswith("1") else root, 1)
+src = open(path, errors="replace").read().splitlines(True)
+lines = [retarget(l) for l in src]
 with open(path, "w") as fh:
     fh.write("".join(lines))
+# What moved, line by line: a command that rewrites the mounts on a card says
+# what it rewrote, rather than only that it finished.
+for was, now in zip(src, lines):
+    if was != now:
+        print("fstab: %s -> %s" % (was.split()[0], now.split()[0]))
 left = [l.split()[0] for l in lines
         if l.split() and not l.lstrip().startswith("#")
-        and names_a_partition(l.split()[0])
-        and l.split()[0] not in (boot, root)]
+        and numbered(l.split()[0]) and l.split()[0] not in (boot, root)]
 if left:
     sys.exit("still names another disk: " + ", ".join(left))
 ' "$f" "PARTUUID=$boot" "PARTUUID=$root" \
