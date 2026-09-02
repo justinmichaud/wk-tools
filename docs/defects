@@ -367,3 +367,5 @@ STILL OPEN
 - tart guest is still showing software update screen; why, and why is the helper not warning us about this like I asked?
 
 - git fetch origin in a tart guest is very slow. Each time I report a bug, it only gets fixed in one place. Check everywhere this time, test everywhere.
+
+- Claude is still invoking builds directly and killing remote machines instead of using wk. How can we forbid claude from running ninja, cmake, etc?
