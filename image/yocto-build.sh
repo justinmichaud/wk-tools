@@ -8,6 +8,7 @@ set -euo pipefail
 
 TARGET=""; IMAGE=""; STAGE=image; JOBS=""; RM_WORK=1; SRC=/src/WebKit; COMMIT=""; SLOT=""; PROFILE=""
 CHROMIUM=0; SSTATE_NS=""
+PORT_TARGET_FROM=""; PORT_MACHINE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -19,6 +20,8 @@ while [ $# -gt 0 ]; do
         --src)     SRC="${2:-}"; shift 2 ;;
         --chromium) CHROMIUM="${2:-}"; shift 2 ;;
         --sstate-ns) SSTATE_NS="${2:-}"; shift 2 ;;
+        --port-target-from) PORT_TARGET_FROM="${2:-}"; shift 2 ;;
+        --port-machine)     PORT_MACHINE="${2:-}"; shift 2 ;;
         --local-layer) LOCAL_LAYER="${2:-}"; shift 2 ;;
         --tailnet) TAILNET="${2:-}"; shift 2 ;;
         --webkit-jobs) WEBKIT_JOBS="${2:-}"; shift 2 ;;
@@ -76,14 +79,25 @@ export GIT_CONFIG_KEY_1=index.skipHash  GIT_CONFIG_VALUE_1=false
 # `--really-refresh` rather than a read-tree: it rewrites the index without
 # touching what is staged in it, so a workspace with work in progress keeps it.
 # Idempotent, and cheap even on WebKit's 65 MB index.
-git -C "$SRC" update-index --really-refresh >/dev/null 2>&1 \
-    || warn "could not rewrite $SRC's git index; a toolchain that reads it with
-  libgit2 may refuse it (rust-native's do_install is the one that does)"
+# The status is ignored, and deliberately: `--really-refresh` returns non-zero
+# whenever a path differs from the index -- which is normal in a checkout with
+# local work, and certain here because the target port below modifies
+# targets.conf. The index is rewritten either way, which is the whole point;
+# treating that status as failure is what broke the first run of this.
+git -C "$SRC" update-index --really-refresh >/dev/null 2>&1 || true
 
 # bitbake filters the environment, so DL_DIR/SSTATE_DIR (set by
 # targets/container.sh to the store-backed cache mount) must be named here
 # or they are dropped and the cache meant to survive `wk rm` is never written.
-export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS:-} DL_DIR SSTATE_DIR"
+#
+# The GIT_CONFIG_* pin above needs naming for the same reason, and it is not
+# cosmetic: a task that runs git without it writes an index with a null
+# checksum (dotfiles/gitconfig's index.skipHash), and the next recipe whose
+# cargo walks up to /src/WebKit/.git to fingerprint its own sources refuses it
+# -- "invalid data in index - calculated checksum does not match expected",
+# which is librsvg's do_compile on 2026-09-02. Pinning it for this script alone
+# fixed the index once and left every task free to spoil it again.
+export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS:-} DL_DIR SSTATE_DIR GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1"
 
 # A UTF-8 locale, or poky's sanity check stops the build; C.UTF-8 is the
 # fallback always present on a glibc system.
@@ -190,6 +204,27 @@ say "DL_DIR        $DL_DIR"
 say "SSTATE_DIR    $SSTATE_DIR"
 say "locale        $LANG"
 say "toolchain     gcc $(gcc -dumpversion 2>/dev/null || echo '?'), python $(python3 -c 'import platform; print(platform.python_version())' 2>/dev/null || echo '?')"
+
+# A cross-target this branch does not have, derived from one it does -- before
+# the check below, which is what would otherwise refuse. Only when the profile
+# names what to derive it from: WebKit gained its rpi5 target after the 2.4x
+# releases branched, while the layers those branches pin already support the
+# machine, so the gap is WebKit's own glue and nothing deeper
+# (image/configs/wpewebkit-2.46-yocto-rpi5-64.conf states the case).
+#
+# Said on every run, never quietly: a checkout that had a target ported into it
+# is not the branch as published, and upstreaming the section is still the fix.
+if [ -n "${PORT_TARGET_FROM:-}" ] && [ -z "${PORT_MACHINE:-}" ]; then
+    fail "this profile names a target to derive [$TARGET] from but no YOC_MACHINE for
+    it to select, so the derived local.conf would name the wrong machine."
+fi
+if [ -n "${PORT_TARGET_FROM:-}" ]; then
+    say "porting       [$TARGET] from [$PORT_TARGET_FROM] (MACHINE=$PORT_MACHINE) -- this branch has no such section"
+    python3 /opt/wk-tools/image/yocto/port-target.py \
+        --yocto-dir "$SRC/Tools/yocto" --target "$TARGET" \
+        --from-target "$PORT_TARGET_FROM" --machine "$PORT_MACHINE" \
+        || fail "could not port [$TARGET] into this checkout"
+fi
 
 # Checked before anything is created: cheaper than finding out after a
 # 20-minute layer sync.

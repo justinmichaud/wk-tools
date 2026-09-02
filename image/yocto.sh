@@ -163,6 +163,14 @@ yocto_target_note() { # <workspace>
 # been told to read yet, for a fix the caller can see from this message.
 yocto_check_target() {
     local ws="$1" conf=/src/WebKit/Tools/yocto/targets.conf have
+    # A profile that declares a port has no section *yet*: the build writes one
+    # into the checkout before configuring, and its own --print-available-targets
+    # check is what then refuses if the port did not take. Refusing here would
+    # refuse the very case the port exists for.
+    if [ -n "${YOC_PORT_TARGET_FROM:-}" ]; then
+        info "$YOC_BRANCH has no [$YOC_TARGET]; the build derives one from [$YOC_PORT_TARGET_FROM]"
+        return 0
+    fi
     have=$(t_exec "$ws" bash -c "grep -c '^\[$YOC_TARGET\]' $conf 2>/dev/null || echo 0" \
         2>/dev/null | tr -d '\r' | tail -1)
     # Only a count is an answer. `!= 0` read *anything* unexpected -- a failed
@@ -512,6 +520,8 @@ EOF
     yocto_spawn "$ws" "$stage" \
         --target "$YOC_TARGET" --image "$YOC_IMAGE" --stage "$stage" \
         --jobs "$(envelope_cores)" --rm-work "${YOC_RM_WORK:-0}" \
+        ${YOC_PORT_TARGET_FROM:+--port-target-from "$YOC_PORT_TARGET_FROM"} \
+        ${YOC_MACHINE:+--port-machine "$YOC_MACHINE"} \
         --chromium "$chromium" \
         --local-layer "${YOC_LOCAL_LAYER:-1}" \
         --tailnet "${YOC_TAILNET:-1}" \
