@@ -190,8 +190,17 @@ class TestConfFieldSets(unittest.TestCase):
         # one configuration -- the other configs in the group are not missing
         # anything, and setting the fields empty on all of them would claim
         # they had a kernel question to answer.
+        # YOC_PORT_TARGET_FROM/YOC_MACHINE: a profile whose branch has no
+        # section for its cross-target derives one (image/yocto/port-target.py).
+        # YOC_MULTILIB/YOC_MULTILIB_TUNE: a profile whose userspace width is
+        # not its machine's builds that width as a multilib variant. Both are
+        # facts about one configuration, like CFG_NEEDS -- a branch that has
+        # the section, or an image at the machine's own width, is not missing
+        # anything, and setting them empty everywhere would claim otherwise.
         optional = {"CFG_NEEDS", "BR_KERNEL_DEB_URL", "BR_KERNEL_DEB_SHA256",
-                    "BR_KERNEL_RELEASE"}
+                    "BR_KERNEL_RELEASE",
+                    "YOC_PORT_TARGET_FROM", "YOC_MACHINE",
+                    "YOC_MULTILIB", "YOC_MULTILIB_TUNE"}
 
         by_builder = {}
         for p in files:

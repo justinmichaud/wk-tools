@@ -32,6 +32,8 @@ def main():
     ap.add_argument("--target", required=True, help="the cross-target to add")
     ap.add_argument("--from-target", required=True, help="the one to derive it from")
     ap.add_argument("--machine", required=True, help="the yocto MACHINE the new target selects")
+    ap.add_argument("--image", help="the image recipe the new target builds, when it is not "
+                                    "the one the derived-from target builds (a multilib variant)")
     args = ap.parse_args()
 
     conf_path = os.path.join(args.yocto_dir, "targets.conf")
@@ -70,12 +72,18 @@ def main():
         fh.write(swapped)
 
     # The section: that target's, pointing at the local.conf just written.
-    cp[args.target] = dict(src, conf_local_path=new_local)
+    section = dict(src, conf_local_path=new_local)
+    # A multilib target builds a differently-named image recipe out of the same
+    # layers, and the helper reads which one from here.
+    if args.image:
+        section["image_basename"] = args.image
+    cp[args.target] = section
     with open(conf_path, "w") as fh:
         cp.write(fh)
 
-    print("ported [%s] from [%s]: MACHINE=%s, %s"
-          % (args.target, args.from_target, args.machine, new_local))
+    print("ported [%s] from [%s]: MACHINE=%s, %s%s"
+          % (args.target, args.from_target, args.machine, new_local,
+             ", image %s" % args.image if args.image else ""))
     return 0
 
 

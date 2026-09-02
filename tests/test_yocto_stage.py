@@ -152,6 +152,80 @@ class TestClearStaleImageCopies(WkTest):
             self.assertFalse(target.exists())
 
 
+class TestRefreshGitIndex(WkTest):
+    """refresh_git_index <dir>: leave an index libgit2 can open.
+
+    dotfiles/gitconfig sets index.skipHash, which writes the trailing
+    checksum as nulls.  git reads that back; the libgit2 in a cross-built
+    rust does not, and cargo walks up from the sources it fingerprints into
+    whichever repo encloses bitbake's TMPDIR -- the checkout, or the helper's
+    own workdir.  So both indexes are rewritten with a real checksum.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.func = _lift("refresh_git_index")
+
+    @staticmethod
+    def _trailer_is_real(index):
+        data = index.read_bytes()
+        import hashlib
+        return data[-20:] == hashlib.sha1(data[:-20]).digest()
+
+    def _repo(self, d):
+        env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null",
+                   GIT_CONFIG_SYSTEM="/dev/null")
+        run = lambda *a: subprocess.run(["git", "-C", str(d), *a],
+                                        capture_output=True, env=env, check=True)
+        run("init", "-q")
+        run("config", "index.skipHash", "true")
+        run("config", "user.email", "t@example.com")
+        run("config", "user.name", "t")
+        (d / "a").write_text("a")
+        run("add", "a")
+        return d / ".git" / "index"
+
+    def test_a_null_checksum_index_is_rewritten_with_a_real_one(self):
+        with scratch_dir() as d:
+            index = self._repo(d)
+            self.assertEqual(index.read_bytes()[-20:], b"\x00" * 20,
+                             "the fixture did not produce a skipHash index")
+            cp = _run(self.func, "refresh_git_index", str(d))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertTrue(self._trailer_is_real(index),
+                            "libgit2 still cannot open this index")
+
+    def test_what_is_staged_survives_the_rewrite(self):
+        with scratch_dir() as d:
+            self._repo(d)
+            _run(self.func, "refresh_git_index", str(d))
+            out = subprocess.run(["git", "-C", str(d), "diff", "--cached",
+                                  "--name-only"], capture_output=True,
+                                 text=True).stdout
+            self.assertEqual(out.split(), ["a"], out)
+
+    def test_the_repo_keeps_a_readable_index_for_the_next_writer(self):
+        # cross-toolchain-helper runs git in this repo again, in an
+        # environment this build does not govern, between the rewrite and
+        # the bitbake that reads it. The pin has to survive that.
+        with scratch_dir() as d:
+            index = self._repo(d)
+            _run(self.func, "refresh_git_index", str(d))
+            env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null",
+                       GIT_CONFIG_SYSTEM="/dev/null")
+            (d / "b").write_text("b")
+            subprocess.run(["git", "-C", str(d), "add", "b"],
+                           capture_output=True, env=env, check=True)
+            self.assertTrue(self._trailer_is_real(index),
+                            "a later git write brought the null checksum back")
+
+    def test_a_directory_that_is_not_a_repo_is_a_noop(self):
+        with scratch_dir() as d:
+            cp = _run(self.func, "refresh_git_index", str(d))
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertFalse((d / ".git").exists())
+
+
 class TestImageStageIsEvidenceBased(unittest.TestCase):
     """Static: the image stage clears the helper's shortcut and checks its
     result before ever printing 'done', and the fix does not grow a second

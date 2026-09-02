@@ -7,6 +7,7 @@
 set -euo pipefail
 
 TARGET=""; IMAGE=""; STAGE=image; JOBS=""; RM_WORK=1; SRC=/src/WebKit; COMMIT=""; SLOT=""; PROFILE=""
+MULTILIB=""; MULTILIB_TUNE=""
 CHROMIUM=0; SSTATE_NS=""
 PORT_TARGET_FROM=""; PORT_MACHINE=""
 
@@ -21,6 +22,8 @@ while [ $# -gt 0 ]; do
         --chromium) CHROMIUM="${2:-}"; shift 2 ;;
         --sstate-ns) SSTATE_NS="${2:-}"; shift 2 ;;
         --port-target-from) PORT_TARGET_FROM="${2:-}"; shift 2 ;;
+        --multilib)      MULTILIB="${2:-}"; shift 2 ;;
+        --multilib-tune) MULTILIB_TUNE="${2:-}"; shift 2 ;;
         --port-machine)     PORT_MACHINE="${2:-}"; shift 2 ;;
         --local-layer) LOCAL_LAYER="${2:-}"; shift 2 ;;
         --tailnet) TAILNET="${2:-}"; shift 2 ;;
@@ -71,20 +74,31 @@ export GIT_CONFIG_COUNT=2
 export GIT_CONFIG_KEY_0=index.version   GIT_CONFIG_VALUE_0=2
 export GIT_CONFIG_KEY_1=index.skipHash  GIT_CONFIG_VALUE_1=false
 
-# The pin above only governs indexes *this* build writes, and cargo reads the
-# one the checkout arrived with -- written when the workspace was made, under
-# the same settings, with a null trailing checksum that libgit2 refuses. So the
-# checkout's index is rewritten once, here, with a real one.
+# The pin above governs indexes written by git in *this* environment, and cargo
+# reads whichever index is already on disk. Two of them are in the path it walks
+# up: the checkout's, written when the workspace was made, and the helper's own
+# workdir repo, written by its `git init`. Both are rewritten below, and the
+# pin is written into each repo's own config as well -- because
+# `cross-toolchain-helper` re-initialises its workdir inside every action it
+# performs, so it runs git in there again, in an environment this script does
+# not govern, between the rewrite and the bitbake that reads the result.
+# Repo-local config governs whoever runs git there next. It costs those two
+# repos the checksum-free index write, and both are a disposable workspace's
+# build tree rather than anybody's own checkout.
 #
 # `--really-refresh` rather than a read-tree: it rewrites the index without
 # touching what is staged in it, so a workspace with work in progress keeps it.
-# Idempotent, and cheap even on WebKit's 65 MB index.
-# The status is ignored, and deliberately: `--really-refresh` returns non-zero
-# whenever a path differs from the index -- which is normal in a checkout with
-# local work, and certain here because the target port below modifies
-# targets.conf. The index is rewritten either way, which is the whole point;
-# treating that status as failure is what broke the first run of this.
-git -C "$SRC" update-index --really-refresh >/dev/null 2>&1 || true
+# Its status is ignored -- it reports non-zero whenever a path differs from the
+# index, which is normal in a checkout with local work and certain here, since
+# the target port below modifies targets.conf. The index is rewritten either
+# way, which is the whole point.
+refresh_git_index() { # <dir> -- leave an index libgit2 can open, and keep it so
+    [ -e "$1/.git" ] || return 0
+    git -C "$1" config index.skipHash false >/dev/null 2>&1 || true
+    git -C "$1" config index.version 2     >/dev/null 2>&1 || true
+    git -C "$1" update-index --really-refresh >/dev/null 2>&1 || true
+}
+refresh_git_index "$SRC"
 
 # bitbake filters the environment, so DL_DIR/SSTATE_DIR (set by
 # targets/container.sh to the store-backed cache mount) must be named here
@@ -195,6 +209,8 @@ cd "$SRC"
 
 say "target        $TARGET"
 say "image recipe  ${IMAGE:-<from targets.conf>}"
+[ -z "${MULTILIB:-}" ] || \
+    say "multilib      $MULTILIB at $MULTILIB_TUNE -- the userspace width, not the machine's"
 say "stage         $STAGE"
 say "chromium      $([ "$CHROMIUM" = 0 ] && echo 'dropped (about half the build; --chromium puts it back)' || echo 'in the image (--chromium)')"
 say "branch        $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?') at $(git rev-parse --short HEAD 2>/dev/null || echo '?')"
@@ -218,11 +234,19 @@ if [ -n "${PORT_TARGET_FROM:-}" ] && [ -z "${PORT_MACHINE:-}" ]; then
     fail "this profile names a target to derive [$TARGET] from but no YOC_MACHINE for
     it to select, so the derived local.conf would name the wrong machine."
 fi
+# A multilib variant with no tune would take the machine's own -- the 64-bit
+# one -- and build a "32-bit" image that is nothing of the kind.
+if [ -n "${MULTILIB:-}" ] && [ -z "${MULTILIB_TUNE:-}" ]; then
+    fail "this profile asks for the '$MULTILIB' multilib but names no
+    YOC_MULTILIB_TUNE for it, so the variant would inherit the machine's own
+    width and the image would not be the width it is named for."
+fi
 if [ -n "${PORT_TARGET_FROM:-}" ]; then
     say "porting       [$TARGET] from [$PORT_TARGET_FROM] (MACHINE=$PORT_MACHINE) -- this branch has no such section"
     python3 /opt/wk-tools/image/yocto/port-target.py \
         --yocto-dir "$SRC/Tools/yocto" --target "$TARGET" \
         --from-target "$PORT_TARGET_FROM" --machine "$PORT_MACHINE" \
+        ${IMAGE:+--image "$IMAGE"} \
         || fail "could not port [$TARGET] into this checkout"
 fi
 
@@ -242,18 +266,21 @@ $(Tools/Scripts/cross-toolchain-helper --print-available-targets --log-level qui
 init_workdir() {
     if [ -f "$WORKDIR/.target-info-version" ] && [ -f "$CONF" ]; then
         say "layers already synced at $WORKDIR"
-        return 0
-    fi
-    say "syncing Yocto layers (repo sync -- this is the network-bound part)"
-    # `repo` fetches the tool itself and git-repo's own bootstrap, so this
-    # step needs egress the build stage does not.
-    Tools/Scripts/cross-toolchain-helper --cross-target="$TARGET" \
-        --bitbake-dev-shell < /dev/null > /dev/null \
-        || fail "the layer sync failed. It is almost always egress: 'repo'
+    else
+        say "syncing Yocto layers (repo sync -- this is the network-bound part)"
+        # `repo` fetches the tool itself and git-repo's own bootstrap, so this
+        # step needs egress the build stage does not.
+        Tools/Scripts/cross-toolchain-helper --cross-target="$TARGET" \
+            --bitbake-dev-shell < /dev/null > /dev/null \
+            || fail "the layer sync failed. It is almost always egress: 'repo'
     fetches from git.yoctoproject.org, github.com and gerrit.googlesource.com,
     and a workspace reaches all three only through the proxy allowlist
     (container/proxy/wk-proxy.py). Its log names what was refused."
-    [ -f "$CONF" ] || fail "the layer sync reported success but wrote no $CONF"
+        [ -f "$CONF" ] || fail "the layer sync reported success but wrote no $CONF"
+    fi
+    # bitbake's TMPDIR sits inside this repo, so cargo fingerprinting any
+    # rust source under it walks up to this index (see refresh_git_index).
+    refresh_git_index "$WORKDIR"
 }
 
 # Appended, never rewritten, last -- bitbake takes the last assignment.
@@ -275,6 +302,19 @@ configure_local_conf() {
 
         printf 'DL_DIR = "%s"\n' "$DL_DIR"
         printf 'SSTATE_DIR = "%s"\n\n' "$SSTATE_DIR"
+
+        # poky's own multilib, for a profile whose userspace width is not the
+        # machine's. The machine stays as it is -- so the kernel, the device
+        # tree and the firmware are the ones that machine always builds -- and
+        # every recipe gains a variant at the tune below. meta-wk-multilib
+        # (configure_bblayers) is what points the image's install list at
+        # those variants.
+        if [ -n "${MULTILIB:-}" ]; then
+            printf 'require conf/multilib.conf\n'
+            printf 'MULTILIBS = "multilib:%s"\n' "$MULTILIB"
+            printf 'DEFAULTTUNE:virtclass-multilib-%s = "%s"\n\n' \
+                "$MULTILIB" "$MULTILIB_TUNE"
+        fi
 
         printf 'BB_NUMBER_THREADS = "%s"\n' "$BB_THREADS"
         printf 'PARALLEL_MAKE = "-j %s"\n' "$PAR_MAKE"
@@ -393,8 +433,12 @@ configure_bblayers() {
     # image is built; meta-wk-tailnet, meta-wk-wifi and meta-wk-rescue
     # change what is on the board, a different promise kept visible as a
     # different line.
-    local dir layer
-    for dir in meta-wk meta-wk-tailnet meta-wk-wifi meta-wk-rescue; do
+    # meta-wk-multilib joins them only for a profile that asks for a
+    # multilib variant: without one it has nothing to do, and an image built
+    # without it is untouched by it.
+    local dir layer layers="meta-wk meta-wk-tailnet meta-wk-wifi meta-wk-rescue"
+    [ -z "${MULTILIB:-}" ] || layers="$layers meta-wk-multilib"
+    for dir in $layers; do
         layer=$(cd "$(dirname "$0")/../image/yocto/$dir" && pwd)
         [ -f "$layer/conf/layer.conf" ] || fail "no layer at $layer"
         printf 'BBLAYERS += "%s"\n' "$layer" >> "$f"
@@ -505,7 +549,15 @@ case "$STAGE" in
         # A slot: the checkout moved to one commit first, refused dirty --
         # a slot is reproducible from its sha alone.
         if [ -n "$COMMIT" ]; then
-            dirty=$(git -C "$SRC" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+            # The files a ported cross-target writes are excluded by name:
+            # porting one modifies targets.conf and adds a local.conf beside
+            # the branch's own (port-target.py), so a ported target's
+            # workspace is dirty by construction. Everything else still
+            # counts -- a slot is reproducible from its sha alone.
+            dirty=$(git -C "$SRC" status --porcelain -- . \
+                ':(exclude)Tools/yocto/targets.conf' \
+                ':(exclude)Tools/yocto/*/local-*.conf' \
+                2>/dev/null | wc -l | tr -d ' ')
             [ "$dirty" = 0 ] || fail "$SRC has $dirty uncommitted change(s); a slot is built from a
     commit and nothing else. Commit or discard them in the workspace first."
             git -C "$SRC" cat-file -e "$COMMIT^{commit}" 2>/dev/null \

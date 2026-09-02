@@ -199,12 +199,45 @@ builds_running() {
 build_reserved_mb()   { builds_running | awk -F'\t' '{ s += $3 } END { print s + 0 }'; }
 build_reserved_jobs() { builds_running | awk -F'\t' '{ s += $2 } END { print s + 0 }'; }
 
-# build_admit <what> <jobs> -- refuse a build the machine cannot fit beside
-# the ones running, naming them. Called after build_jobs, which has already
-# sized <jobs> against what is left; fewer than WK_MIN_JOBS (4) left over is
-# a machine spoken for, and --force builds with that many anyway.
+# --- disk headroom -----------------------------------------------------------
+# A build that fills the filesystem does not fail cleanly: bitbake halts hours
+# in, a container's overlay ENOSPCs mid-link, and the host loses the room its
+# own GUI needs. So a build asks before it starts rather than leaving a person
+# to read `wk disk` first, and the refusal names the reclaim.
+#
+# WK_BUILD_DISK_GB is what an ordinary build needs free -- a WebKit build tree
+# plus the room ccache grows into. A builder that unpacks a whole distribution
+# declares its own figure (image/yocto.sh).
+WK_BUILD_DISK_GB="${WK_BUILD_DISK_GB:-25}"
+
+# The filesystem that fills is the one under the store: every workspace
+# overlay, build tree and cache lives there.
+store_free_gb() {
+    df -B1G --output=avail "${WK_STORE:-$HOME}" 2>/dev/null | tail -1 | tr -dc '0-9'
+}
+
+# disk_admit <what> [need-gb] -- refuse a build the disk cannot take.
+disk_admit() {
+    local what="$1" need="${2:-$WK_BUILD_DISK_GB}" free
+    free=$(store_free_gb)
+    # No answer from df is not evidence of a full disk.
+    [ -n "$free" ] || return 0
+    [ "$free" -ge "$need" ] && return 0
+    barrier "${free} GB free on ${WK_STORE:-$HOME}'s filesystem; $what wants about ${need} GB.
+    It would halt part-built rather than fill the disk. 'wk gc' reclaims what
+    nothing references, 'wk gc --purge-builds' the build trees images come out
+    of, and 'wk disk' says where the rest went."
+}
+
+# build_admit <what> <jobs> [disk-gb] -- refuse a build the machine cannot fit
+# beside the ones running, naming them. Called after build_jobs, which has
+# already sized <jobs> against what is left; fewer than WK_MIN_JOBS (4) left
+# over is a machine spoken for, and --force builds with that many anyway.
+#
+# The disk is asked about on the way through, so no build path can forget it.
 build_admit() {
     local what="$1" jobs="$2" running
+    disk_admit "$what" "${3:-}"
     running=$(builds_running)
     [ -n "$running" ] || return 0
     [ "$jobs" -ge "${WK_MIN_JOBS:-4}" ] && return 0

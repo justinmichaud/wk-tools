@@ -480,17 +480,11 @@ yocto_build() {
     # Free space, before anything is created: TMPDIR lands in the workspace's
     # overlay, on the store's filesystem, and the thresholds below are
     # measured, not estimated.
-    local avail_gb need_gb=120
+    local need_gb=120
     [ "$chromium" = 1 ] || need_gb=60
     [ "${YOC_RM_WORK:-0}" = 1 ] || need_gb=$((need_gb + 60))
-    avail_gb=$(df -B1G --output=avail "$WK_STORE" 2>/dev/null | tail -1 | tr -dc '0-9')
-    if [ -n "$avail_gb" ] && [ "$avail_gb" -lt "$need_gb" ]; then
-        warn "${avail_gb} GB free on $WK_STORE's filesystem; this build wants about ${need_gb} GB
-  (TMPDIR${YOC_RM_WORK:+ with rm_work on}, plus the sstate and download caches). It will halt
-  rather than fill the disk -- BB_DISKMON_DIRS is set for that -- but it will
-  halt hours in. 'wk gc' first, or free space."
-        barrier "not started: ${avail_gb} GB free, about ${need_gb} GB needed"
-    fi
+    disk_admit "this image build (TMPDIR${YOC_RM_WORK:+ with rm_work on}, plus the sstate
+    and download caches)" "$need_gb"
 
     yocto_ensure_ws "$ws" "$YOC_BRANCH"
 
@@ -522,6 +516,8 @@ EOF
         --jobs "$(envelope_cores)" --rm-work "${YOC_RM_WORK:-0}" \
         ${YOC_PORT_TARGET_FROM:+--port-target-from "$YOC_PORT_TARGET_FROM"} \
         ${YOC_MACHINE:+--port-machine "$YOC_MACHINE"} \
+        ${YOC_MULTILIB:+--multilib "$YOC_MULTILIB"} \
+        ${YOC_MULTILIB_TUNE:+--multilib-tune "$YOC_MULTILIB_TUNE"} \
         --chromium "$chromium" \
         --local-layer "${YOC_LOCAL_LAYER:-1}" \
         --tailnet "${YOC_TAILNET:-1}" \

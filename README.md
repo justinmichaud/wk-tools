@@ -772,6 +772,18 @@ OpenSSH (dropbear 2019.78 refuses ed25519, the driving key), and a kernel with
 TUN and netfilter (or tailscaled cannot create `tailscale0`). The two 2.38
 defconfigs there carry all three; copy them when deriving a new one.
 
+A yocto profile whose userspace is not the machine's width sets `YOC_MULTILIB`
+(the variant, `lib32`) and `YOC_MULTILIB_TUNE` (the tune it builds at), and
+names the variant's image recipe in `YOC_IMAGE` (`lib32-webkit-dev-ci-tools`).
+The machine is left alone, so the kernel, the device tree and the firmware are
+the ones that machine always builds, and poky's own multilib gives every recipe
+a variant at that tune; `meta-wk-multilib` maps the image's install list onto
+them, since `MLPREFIX` is set for a multilib image but nothing rewrites
+`IMAGE_INSTALL`. `wpewebkit-2.46-yocto-rpi5-32` is one: a 32-bit userspace on
+the Pi 5, whose Cortex-A76 implements AArch32 at EL0 while no 32-bit kernel for
+the machine exists. `WK_MULTILIB_KEEP` names any package that must stay at the
+machine's width; it is empty until a `bitbake -n` says otherwise.
+
 **Build interventions**
 
 `wk sysimage build <profile>` is re-runnable: with the workspace's tree

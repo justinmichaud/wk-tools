@@ -57,5 +57,47 @@ kill $live
         self.assertIn("reserved=0", cp.stdout)
 
 
+class TestDiskAdmit(WkTest):
+    """disk_admit (lib/resources.sh): a build refuses before it starts when
+    the store's filesystem cannot take it, so nobody has to read `wk disk`
+    first. build_admit asks on the way through, which is what puts the check
+    on every build path -- `wk build`, `wk test`, and both image builders."""
+
+    def _bash(self, script, free_gb):
+        env = {"XDG_STATE_HOME": str(self.tmp / "state"),
+               "WK_AVAIL_MB": "100000", "WK_CGROUP_CORES": "64",
+               "WK_BUILD_MACHINE": "testbox", "FREE_GB": str(free_gb)}
+        # store_free_gb is what df answers; stubbed so the test does not
+        # depend on the machine it runs on.
+        pre = (f'set -euo pipefail\n. "{REPO}/lib/common.sh"\n'
+               f'. "{REPO}/lib/resources.sh"\n'
+               'store_free_gb() { printf "%s" "$FREE_GB"; }\n')
+        return bash(pre + script, env=env, timeout=60)
+
+    def test_it_refuses_when_the_disk_cannot_take_the_build(self):
+        cp = self._bash('( disk_admit "this image build" 60 ) && echo admitted || echo refused', 40)
+        self.assertIn("refused", cp.stdout)
+        self.assertIn("40 GB free", cp.stdout + cp.stderr)
+        self.assertIn("wk gc", cp.stdout + cp.stderr, "the refusal names the reclaim")
+        self.assertNotIn("admitted", cp.stdout)
+
+    def test_it_admits_when_there_is_room(self):
+        cp = self._bash('disk_admit "this image build" 60 && echo admitted', 61)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("admitted", cp.stdout)
+
+    def test_no_answer_from_df_is_not_read_as_a_full_disk(self):
+        cp = self._bash('disk_admit "this build" 60 && echo admitted', "")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("admitted", cp.stdout)
+
+    def test_every_build_path_asks_because_build_admit_does(self):
+        # No running builds at all: the memory half returns early, and the
+        # disk half must still have been asked.
+        cp = self._bash('( build_admit "this build" 64 60 ) && echo admitted || echo refused', 10)
+        self.assertIn("refused", cp.stdout)
+        self.assertIn("10 GB free", cp.stdout + cp.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

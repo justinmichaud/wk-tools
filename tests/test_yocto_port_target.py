@@ -42,11 +42,35 @@ class PortTest(unittest.TestCase):
         (self.tmp / "rpi" / "local-rpi4-64bits-mesa.conf").write_text(LOCAL)
 
     def port(self, target="rpi5-64bits-mesa", frm="rpi4-64bits-mesa",
-             machine="raspberrypi5"):
+             machine="raspberrypi5", image=None):
         return subprocess.run(
             ["python3", str(PORT), "--yocto-dir", str(self.tmp), "--target", target,
-             "--from-target", frm, "--machine", machine],
+             "--from-target", frm, "--machine", machine]
+            + (["--image", image] if image else []),
             capture_output=True, text=True)
+
+    def test_a_multilib_target_names_its_own_image_recipe(self):
+        # A multilib variant builds a differently-named image recipe out of
+        # the same layers, and the helper reads which one from this section.
+        cp = self.port(target="rpi5-32bits-mesa", image="lib32-webkit-dev-ci-tools")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        conf = configparser.ConfigParser()
+        conf.read(self.tmp / "targets.conf")
+        new = conf["rpi5-32bits-mesa"]
+        self.assertEqual(new["image_basename"], "lib32-webkit-dev-ci-tools")
+        # Everything else still comes from the target it was derived from.
+        for k in ("repo_manifest_path", "conf_bblayers_path", "image_types",
+                  "patch_file_path"):
+            self.assertEqual(new[k], conf["rpi4-64bits-mesa"][k], k)
+        self.assertIn("image lib32-webkit-dev-ci-tools", cp.stdout)
+
+    def test_without_the_flag_the_image_is_the_derived_from_one(self):
+        cp = self.port()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        conf = configparser.ConfigParser()
+        conf.read(self.tmp / "targets.conf")
+        self.assertEqual(conf["rpi5-64bits-mesa"]["image_basename"],
+                         "webkit-dev-ci-tools")
 
     def test_the_section_and_its_local_conf_are_derived(self):
         cp = self.port()

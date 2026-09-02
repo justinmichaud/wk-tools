@@ -24,6 +24,12 @@
 #   YOC_IMAGE        the bitbake image recipe (targets.conf's image_basename)
 #   YOC_RM_WORK      1 to inherit rm_work (disk space; image/yocto.sh)
 #   YOC_CHROMIUM     1 to leave Chromium in the image, 0 to drop it
+#   YOC_PORT_TARGET_FROM  a target this branch does have, to derive YOC_TARGET
+#                    from when the branch has no such section (port-target.py)
+#   YOC_MACHINE      the yocto MACHINE that derived target selects
+#   YOC_MULTILIB     a multilib variant to build the userspace as ('lib32'),
+#                    leaving the machine -- and so the kernel -- alone
+#   YOC_MULTILIB_TUNE  the tune that variant builds at
 # Identity is stamped per disk at write time: two cards from one image share
 # an MBR signature, so `root=LABEL=` would resolve to whichever disk the
 # firmware enumerated first. `disk_unique_identity` (boot/disk.sh) fixes it.
@@ -86,6 +92,8 @@ image_profile_load() {
     IMG_MACHINE=""; IMG_ARCH=""; IMG_HOSTNAME=""; IMG_WATCHDOG=""
     YOC_BRANCH=""; YOC_TARGET=""; YOC_IMAGE=""; YOC_RM_WORK=""
     YOC_CHROMIUM=1; YOC_REMOTE=origin; YOC_LOCAL_LAYER=1
+    YOC_PORT_TARGET_FROM=""; YOC_MACHINE=""
+    YOC_MULTILIB=""; YOC_MULTILIB_TUNE=""
     CFG_PROJECT=""; CFG_RELEASE=""; CFG_BRANCH=""; CFG_REMOTE=""; CFG_NEEDS=""
     BR_TREE_URL=""; BR_TREE_BRANCH=""; BR_TREE_COMMIT=""; BR_DEFCONFIG=""
     BR_OVERLAY_TAILSCALE=""; BR_EXTERNAL=""; BR_IMAGE=""
