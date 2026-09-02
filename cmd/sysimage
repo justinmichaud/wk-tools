@@ -180,6 +180,23 @@ stage_init() { # <staging dir> <name> <body -- runs on start, as root>
         "$2" "$3" > "$1/init.d/$2"
 }
 
+# Does the machine this image is *for* choose between two systems on one medium
+# with the firmware's own selector? Only then does its medium get an
+# autoboot.txt, because on a board that selects some other way the same file
+# changes which system a flag boots (boot/rpi5-usb.sh states why).
+#
+# In a subshell, like _self_disarm_for and for the same reason: MACH_* names the
+# machine holding the medium being written, and loading another one here sends
+# the rest of the write to the wrong board.
+_medium_autoboot_for() { # <machine>
+    [ -n "${1:-}" ] || return 1
+    ( machine_load "$1" >/dev/null 2>&1 || exit 1
+      [ -n "${MACH_DRIVER:-}" ] || exit 1
+      load_driver "$MACH_DRIVER" >/dev/null 2>&1 || exit 1
+      command -v b_medium_selects_by_partition >/dev/null 2>&1 || exit 1
+      b_medium_selects_by_partition )
+}
+
 # Everything a rootfs needs to be a *fleet* system rather than merely a
 # bootable one: no self-return watchdog means a medium-armed stick stays armed
 # forever. Staged at write time, not baked in per builder, and for both inits
@@ -945,9 +962,16 @@ source=$from"
     fi
 
     disk_seed_role "$DISK_DEV" "$role"
-    # A rescue writes cards, so it carries the helper that does it. Only a
-    # rescue: a bench system never writes a medium.
-    [ "$role" != rescue ] || disk_install_rescue_helper "$DISK_DEV"
+    # Every system carries the helper: a rescue writes bench media with it, and
+    # a bench system arms the next one with it where the arming is an edit to
+    # the card (pi-sd). One less reason for a lane to need two boots per leg.
+    disk_install_helper "$DISK_DEV"
+
+    # ...and a medium whose two systems the *firmware* chooses between gets the
+    # selector that lets it, written when the second pair is made.
+    if disk_is_second "${spec#*:}" && _medium_autoboot_for "${IMG_MACHINE:-}"; then
+        disk_install_autoboot "$DISK_DEV"
+    fi
     disk_seed_tailnet "$DISK_DEV" "$(_tailnet_name_for "${IMG_MACHINE:-}" "$role")"
     disk_seed_wifi "$DISK_DEV" "${IMG_MACHINE:-}"
 

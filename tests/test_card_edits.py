@@ -38,7 +38,7 @@ NEW_VERBS = {
     "boot-id": "v_boot_id",
     "units": "v_units",
     "boot-check": "v_boot_check",
-    "rescue-helper": "v_rescue_helper",
+    "helper": "v_helper",
     "diag": "v_diag",
 }
 
@@ -1142,15 +1142,16 @@ class TestDiag(CardEditTest):
 
 
 class TestRescueHelper(CardEditTest):
-    """`rescue-helper` copies the writing machine's own card helper onto the
-    rescue it is writing, so a board writes its bench media with this
-    checkout's code rather than whatever its image baked in."""
+    """`helper` copies the writing machine's own card helper onto the system it
+    is writing -- every system, rescue or bench. A rescue writes bench media
+    with it; a bench system arms its sibling with it where the arming is an edit
+    to the card (pi-sd), which is a boot per A/B leg saved."""
 
     def _run(self, extra=""):
-        script = (_lift(CARD_PRIV, "_rescue_helper_install", "v_rescue_helper")
+        script = (_lift(CARD_PRIV, "_helper_install", "v_helper")
                   + f'\nSELF={self.tmp / "helper"!s}\n'
                   + f'CHECK_BOOT_FILES={self.tmp / "checker.py"!s}\n'
-                  + extra + '\nv_rescue_helper /dev/sdX\n')
+                  + extra + '\nv_helper /dev/sdX\n')
         return self.run_helper(script)
 
     def setUp(self):
@@ -1168,12 +1169,14 @@ class TestRescueHelper(CardEditTest):
             self.assertTrue(os.access(f, os.X_OK), f"{f.name} is not executable")
         self.assertIn("helper:", cp.stdout)
 
-    def test_a_bench_pair_is_refused(self):
-        """a bench system never writes a card, so it never takes the helper --
-        and @second names partitions this verb does not address."""
+    def test_a_bench_pair_takes_it_too(self):
+        """The case that used to be refused. A bench system arms its sibling
+        where the arming is an edit to the card, so it needs the helper; the
+        gate already lets a system address its sibling pair, which is what the
+        write that puts it there just did."""
         cp = self._run(extra="SECOND=1")
-        self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
-        self.assertIn("partitions 1 and 2", cp.stderr)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue((self.root / "usr" / "local" / "libexec" / "wk-card-priv").is_file())
 
     def test_no_checker_on_this_machine_is_a_refusal_with_a_remedy(self):
         (self.tmp / "checker.py").unlink()
@@ -1184,18 +1187,20 @@ class TestRescueHelper(CardEditTest):
 
 
 class TestRescueHelperIsWiredIntoARescueWrite(unittest.TestCase):
-    def test_only_a_rescue_takes_it(self):
-        """cmd/sysimage calls it for role=rescue and nothing else: a bench
-        system has no card to write."""
+    def test_every_system_a_write_makes_takes_it(self):
+        """cmd/sysimage installs it unconditionally: a rescue writes bench media
+        with it, a bench system arms its sibling with it."""
         text = SYSIMAGE.read_text()
-        self.assertIn('[ "$role" != rescue ] || disk_install_rescue_helper', text)
-        self.assertIn("disk_install_rescue_helper()", DISK_SH.read_text())
+        self.assertIn("disk_install_helper \"$DISK_DEV\"", text)
+        self.assertNotIn('[ "$role" != rescue ] || disk_install', text,
+                         "the helper is installed on every system a write makes")
+        self.assertIn("disk_install_helper()", DISK_SH.read_text())
 
     def test_an_older_helper_on_the_reader_is_told_apart_from_a_refusal(self):
         """a reader whose checkout predates the verb gets the one-line remedy,
         not 'could not'."""
         text = DISK_SH.read_text()
-        block = text[text.index("disk_install_rescue_helper()"):]
+        block = text[text.index("disk_install_helper()"):]
         block = block[:block.index("\n}\n")]
         self.assertIn("usage: wk-card-priv", block)
         self.assertIn("--stage quiesce", block)

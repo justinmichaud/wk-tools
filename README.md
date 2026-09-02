@@ -573,13 +573,17 @@ closes with, where a filter can drop it outright. Both boot the armed kernel
 and lose that system's display stack -- the same rule, and the same fix, in
 `boot/pi-tryboot.sh`'s staging.
 
-The privileged half of writing this card is the card helper, and a board's
-rescue carries a copy so it can write its own bench media. A rescue image
-bakes one in at build time, which would make every fix to the helper cost an
-image rebuild and a card carried to a reader; `wk pi helper rpi3` installs
-this checkout's instead, root-owned, and proves it answers. So a board's
-helper is reproducible from the repo plus one command, and `wk sysimage write
---rescue` puts the same pair on any rescue it writes.
+The privileged half of editing this card is the card helper, and **every**
+system a write makes carries a copy: the rescue writes bench media with it, and
+a bench system arms its sibling with it -- which is what lets an A/B leg switch
+here cost one boot instead of two, since the arming is an edit to the card
+rather than a firmware flag. An image bakes a copy in at build time, which
+would make every fix to the helper cost an image rebuild and a card carried to
+a reader; `wk pi helper <board>` installs this checkout's onto a running system
+instead, root-owned, and proves it answers, while `wk sysimage write` puts the
+same pair on every system it writes. A system written before that was true has
+no helper: its arming says so, and the leg switch answers by going back to the
+rescue and arming from there.
 
 A card shared with a rescue carries *two* bench systems: an extended
 partition 3 holds logical pairs 5-6 (`@second`) and 7-8 (`@third`), each a
@@ -687,7 +691,7 @@ that would boot first, power on. `<board>-rescue` joins the tailnet by itself;
 `wk boot <board> --status` reports it as the base image.
 
 ```sh
-wk pi helper rpi3                                 # the card helper this checkout holds, on the rescue
+wk pi helper rpi3                                 # the card helper this checkout holds, onto the running system
 wk pi boot-order rpi4                             # two media only: the bench medium first, the rescue behind it
 wk sysimage write --from <sdcard.img> --disk rpi4:/dev/sda --profile wpewebkit-2.38-buildroot-rpi4-32
                                                   # two media: the bench system onto the stick, from the rescue

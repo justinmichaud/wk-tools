@@ -168,6 +168,22 @@ pi_system_boot {want}
                         "it did not arm after going back:\n" + log)
         self.assertIn("wk-keep-running", log)
 
+    def test_a_board_between_systems_is_waited_for_not_counted(self):
+        """A probe that answers nothing means the board is rebooting, which is
+        not a failed attempt. Counting it spends the whole budget in seconds on
+        a boot that was in progress -- which is what dropped rounds 3 to 5 of
+        rpi3's first real A/B (2026-09-01)."""
+        cp, log = self._boot([
+            ";",                                  # nothing answers: mid-reboot
+            ";",
+            "id=sys-a;rootdev=/dev/mmcblk0p6",    # ...and then it is there
+        ], m_ssh_rc=1)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("not answering yet", cp.stdout + cp.stderr)
+        self.assertNotIn("--system", log,
+                         "it armed a board that was simply still booting:\n" + log)
+        self.assertIn("wk-keep-running", log)
+
     def test_a_board_that_never_lands_loses_the_leg_after_the_last_try(self):
         """...and it is bounded: a board that will not take the arming loses
         the leg rather than the run."""

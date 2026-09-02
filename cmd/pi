@@ -11,9 +11,9 @@
 #                                         tailscale binaries onto a writable
 #                                         partition; no image rebuild
 #   wk pi helper <machine>                install this checkout's card helper on
-#                                         the board's rescue, so it writes its
-#                                         own bench media with this code; the
-#                                         copy an image baked in goes stale
+#                                         whichever system the board answers on,
+#                                         so it makes card edits with this code;
+#                                         the copy an image baked in goes stale
 #   wk pi boot-order <machine> <usb-first|sd-first|local>
 #                                         rpi4/rpi5 firmware boot order;
 #                                         --revert undoes it, --dry-run previews
@@ -746,7 +746,23 @@ pi_system_boot() { # <system id>
 
         # Evidence first, every time round: the board may already be there --
         # on the first pass, or because the arming just took.
+        #
+        # Nothing answering is not an answer. A board between systems says
+        # exactly that, and spending an attempt on it burns the budget in
+        # seconds without learning anything (rpi3, 2026-09-01: rounds 3 to 5
+        # went in under a minute that way). So wait for it to answer -- either
+        # channel, whichever it comes back on -- and only then decide.
         out=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') || out=""
+        if [ -z "$(kv_get id <<<"$out")" ] && ! m_ssh true >/dev/null 2>&1; then
+            info "$machine is not answering yet; waiting for it before deciding"
+            deadline=$(( $(date +%s) + 420 ))
+            while [ "$(date +%s)" -lt "$deadline" ]; do
+                sleep 12
+                out=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') || out=""
+                [ -n "$(kv_get id <<<"$out")" ] && break
+                m_ssh true >/dev/null 2>&1 && break
+            done
+        fi
         id=$(kv_get id <<<"$out")
         kind=$(b_system_kind "$(kv_get rootdev <<<"$out")")
         if [ "$id" = "$want" ] && [ "$kind" = bench ]; then
@@ -1433,8 +1449,13 @@ cmd_helper() {
     card_priv status >/dev/null 2>&1 \
         || die "the card helper is installed on $HOST but does not answer 'status'.
     A rescue that cannot run it cannot write this board's bench media."
-    info "$HOST runs this checkout's card helper (${here:0:12})"
-    log  "  it writes this board's bench media:  wk sysimage write --disk $MACH_NAME:$MACH_DEVICE@second ..."
+    # Named for the system that answered, not for $HOST -- which is the
+    # *rescue's* ssh name and stays that whichever system the board is running.
+    # Saying "rpi3-rescue runs this helper" while installing onto a bench system
+    # is a report about the wrong machine.
+    info "$MACH_NAME's $(case "${MODE_CHANNEL:-host}" in bench) echo "bench system" ;; *) echo rescue ;; esac) runs this checkout's card helper (${here:0:12})"
+    log  "  it makes this board's card edits:  wk sysimage write --disk $MACH_NAME:$MACH_DEVICE@second ...,"
+    log  "  and 'wk boot $MACH_NAME --system <id>' arms one where the board stands"
 }
 
 if [ "$ACTION" = helper ]; then

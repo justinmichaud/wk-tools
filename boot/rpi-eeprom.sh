@@ -96,10 +96,25 @@ $(printf '%s\n' "$compat" | sed 's/^/      /')
 # of the job that was never the problem.
 eeprom_read_config() {
     local out
-    out=$(rsh 'vcgencmd bootloader_config 2>/dev/null || sudo vcgencmd bootloader_config' | tr -d '\r')
-    [ -n "$out" ] || die "could not read $HOST's bootloader configuration.
-    'vcgencmd bootloader_config' returned nothing, which on a Pi 4 means either
-    the VideoCore tools are missing or this user cannot reach /dev/vcio."
+    # r_sudo, not `vcgencmd || sudo vcgencmd`: a bench-device is driven as root
+    # already and a BusyBox bench system has no sudo at all, so the second half
+    # of that pair reported `sh: sudo: not found` where the first half had
+    # simply found no vcgencmd (rpi4, 2026-09-01). One way to be privileged.
+    out=$(r_sudo "vcgencmd bootloader_config" 2>/dev/null | tr -d '\r')
+    if [ -z "$out" ]; then
+        # Absent tooling and an unreadable /dev/vcio are different problems with
+        # different remedies, so they are not reported as one guess.
+        if ! r_ssh "command -v vcgencmd >/dev/null 2>&1"; then
+            die "$MACH_NAME is running a system with no vcgencmd, so its EEPROM cannot be
+    read from here at all -- the buildroot bench images carry no VideoCore
+    tools. Its *rescue* does: boot that and re-run.
+        wk boot $MACH_NAME --back
+    If the firmware keeps landing on the bench medium instead (which is the
+    very thing a boot order change fixes), take that medium out for one boot."
+        fi
+        die "could not read $MACH_NAME's bootloader configuration: vcgencmd is there but
+    'bootloader_config' returned nothing, so this user cannot reach /dev/vcio."
+    fi
     printf '%s\n' "$out"
 }
 
@@ -129,8 +144,8 @@ eeprom_bootfs() {
 eeprom_clear_staged() {
     local bootfs
     bootfs=$(eeprom_bootfs 2>/dev/null) || return 0
-    rsh "sudo rm -f '$bootfs/pieeprom.upd' '$bootfs/pieeprom.sig' \
-                    '$bootfs/recovery.bin' '$bootfs'/RECOVERY.0* '$bootfs'/recovery.0* && sync" \
+    r_sudo "rm -f '$bootfs/pieeprom.upd' '$bootfs/pieeprom.sig' \
+                  '$bootfs/recovery.bin' '$bootfs'/RECOVERY.0* '$bootfs'/recovery.0* && sync" \
         >/dev/null 2>&1 || return 0
 }
 

@@ -42,6 +42,29 @@ class TestArrangement(unittest.TestCase):
                          "pi-tryboot /dev/sda /dev/mmcblk0p2 bcm2711-rpi-4-b.dtb",
                          cp.stdout + cp.stderr)
 
+    def test_an_arming_reboot_refuses_where_the_flag_cannot_be_passed(self):
+        """The staging is files, which any system can write; the *flag* rides
+        the reboot syscall and systemd is what passes it here. On a userspace
+        without systemd -- a BusyBox bench image -- the old code staged the
+        arming and then quietly did not reboot, which reads as "the board came
+        up as the wrong system" and cost every B leg of an rpi4 A/B
+        (2026-09-02). It refuses and names the remedy instead."""
+        cp = bash(LOAD + """
+r_sudo() { echo "r_sudo MUST NOT be reached" >&2; }
+r_ssh() { return 1; }   # no systemd on the system that answered
+TRYBOOT_ARMED=1; b_reboot
+""")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("no systemd", cp.stderr)
+        self.assertIn("--back", cp.stderr, "the refusal does not name the remedy")
+        self.assertNotIn("MUST NOT", cp.stderr, "it rebooted anyway")
+
+    def test_this_board_is_armed_from_its_rescue(self):
+        """...which is why B_ARM_FROM_BENCH is no here: the rescue is the one
+        system on this board that always carries systemd."""
+        cp = bash(LOAD + 'echo "${B_ARM_FROM_BENCH:-unset}"')
+        self.assertEqual(cp.stdout.strip(), "no", cp.stdout + cp.stderr)
+
     def test_the_boot_that_spends_the_staging_removes_it(self):
         """This board does not consume the tryboot flag: measured 2026-09-01, a
         plain reboot and a cold power cycle both read tryboot.txt again and came
@@ -148,6 +171,7 @@ class TestReboot(unittest.TestCase):
         cp = bash(LOAD + '''
 m_ssh() { echo "m_ssh: $*" >&2; }
 r_sudo() { echo "r_sudo: $*" >&2; }
+r_ssh() { return 0; }   # the answering system carries systemd
 TRYBOOT_ARMED=1; b_reboot
 TRYBOOT_ARMED=""; MODE="bench x-1"; b_reboot
 ''')
@@ -188,15 +212,20 @@ b_systems() { :; }
 b_evidence
 r_ssh() { echo sd-config; }
 b_evidence
+r_ssh() { echo unknown; }
+b_evidence
 r_ssh() { return 1; }
 b_evidence
 """)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("boot_source=the tryboot staging", cp.stdout)
-        self.assertIn("did not consume the flag", cp.stdout,
-                      "the staging case does not say what it can mean")
+        self.assertIn("boot_source=the tryboot staging now on the SD", cp.stdout)
         self.assertIn("boot_source=the SD config.txt", cp.stdout)
-        self.assertIn("boot_source=unreadable", cp.stdout)
+        # "Neither" is the diagnosis, not a probe fault: the board is running a
+        # staging that has since been replaced. Reporting it as unreadable is
+        # what hid an arming that staged correctly and never rebooted.
+        self.assertIn("came from an earlier staging", cp.stdout)
+        self.assertIn("did not reboot", cp.stdout)
+        self.assertIn("boot_source=unreadable (the board did not answer", cp.stdout)
 
     def test_the_reporting_path_mounts_read_only(self):
         """b_evidence answers a question, so the mounts it makes are read-only:

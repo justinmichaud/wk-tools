@@ -137,6 +137,27 @@ yocto_ensure_ws() {
 
 # Does the branch have a section for the target this profile names?
 #
+# What a dry run can honestly say about the cross-target. The check below needs
+# the branch checked out, which a dry run has usually not done yet -- so it says
+# which of the two it is rather than printing the target and letting the reader
+# assume it was verified.
+yocto_target_note() { # <workspace>
+    local ws="$1" have
+    [ "$(t_info "$ws")" = absent ] && {
+        printf '%s' "  (not verified: '$ws' does not exist yet, so this branch's
+               Tools/yocto/targets.conf has not been read; the build refuses if
+               it has no [$YOC_TARGET] section)"
+        return 0
+    }
+    have=$(t_exec "$ws" bash -c "grep -c '^\\[$YOC_TARGET\\]' /src/WebKit/Tools/yocto/targets.conf 2>/dev/null || echo 0" \
+        2>/dev/null | tr -d '\r' | tail -1)
+    case "$have" in
+        ''|*[!0-9]*) printf '%s' "  (not verified: could not read the branch's targets.conf)" ;;
+        0)           printf '%s' "  ** $YOC_BRANCH has no [$YOC_TARGET] section: this build would refuse **" ;;
+        *)           printf '%s' "  (verified on $YOC_BRANCH)" ;;
+    esac
+}
+
 # Asked here rather than left to bitbake: the failure is otherwise a
 # config-parse error inside a spawned build whose log the caller has not
 # been told to read yet, for a fix the caller can see from this message.
@@ -144,7 +165,18 @@ yocto_check_target() {
     local ws="$1" conf=/src/WebKit/Tools/yocto/targets.conf have
     have=$(t_exec "$ws" bash -c "grep -c '^\[$YOC_TARGET\]' $conf 2>/dev/null || echo 0" \
         2>/dev/null | tr -d '\r' | tail -1)
-    [ "${have:-0}" != 0 ] && return 0
+    # Only a count is an answer. `!= 0` read *anything* unexpected -- a failed
+    # t_exec, a container that is not up, one line of noise -- as "the section
+    # is there", which is the answer that costs hours (2026-09-01: a dry run
+    # reported a target fine on a branch that has never had it).
+    case "$have" in
+        ''|*[!0-9]*)
+            die "could not read $conf in '$ws', so whether $YOC_BRANCH has a
+    [$YOC_TARGET] section is unknown -- and a build configured from a section
+    that is not there fails inside bitbake, hours later. Check the workspace is
+    up:  wk status $ws" ;;
+    esac
+    [ "$have" != 0 ] && return 0
 
     die "$YOC_BRANCH has no [$YOC_TARGET] section in Tools/yocto/targets.conf,
     so there is nothing for bitbake to configure from.
@@ -319,7 +351,7 @@ yocto_dry_run() {
 would build image $IMG_PROFILE (builder: yocto)
   for machine $IMG_MACHINE ($IMG_ARCH)
   branch      $YOC_BRANCH  (from the '${YOC_REMOTE:-origin}' remote)
-  cross-target $YOC_TARGET
+  cross-target $YOC_TARGET$(yocto_target_note "$ws")
   recipe      $YOC_IMAGE
   stage       $stage (it includes the ones before it)
   workspace   $ws ($at)

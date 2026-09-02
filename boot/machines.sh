@@ -189,8 +189,11 @@ i_ssh() {
 # Privileged, on whichever channel answered: root already on a bench-device
 # (m_ssh_opts), so no sudo there -- a BusyBox bench system has none -- and
 # this user's sudo on a workstation.
+# `sudo -n` and never a bare `sudo`: every channel here is a BatchMode ssh with
+# no terminal, so a sudo that decides to prompt cannot be answered -- it hangs
+# or fails with a password prompt nobody sees. Failing fast says which.
 r_sudo() { # <command string>
-    if [ "${MACH_ROLE:-}" = bench-device ]; then r_ssh "$@"; else r_ssh "sudo $*"; fi
+    if [ "${MACH_ROLE:-}" = bench-device ]; then r_ssh "$@"; else r_ssh "sudo -n $*"; fi
 }
 
 # By ssh alias -- host or bench mode, whichever `dest` names. No
@@ -459,6 +462,25 @@ b_diag() {
     done <<EOF
 $systems
 EOF
+}
+
+# The reboot that carries the firmware's tryboot flag, for the drivers whose
+# one-shot *is* that flag (pi-tryboot's staged prefix, rpi5's autoboot.txt
+# boot_partition). One implementation: the flag rides the reboot syscall and
+# systemd is the only userspace here that passes it, so the refusal when it
+# cannot -- a BusyBox bench system has neither systemctl nor /run/systemd --
+# belongs beside the call rather than in each driver (measured on the rpi4,
+# 2026-09-02: staged perfectly, never rebooted, every leg lost).
+#
+# Detached and after a delay, like every reboot here: it kills the ssh session
+# that asked for it.
+b_reboot_tryboot() {
+    r_ssh "command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd ]" >/dev/null 2>&1 \
+        || die "$MACH_NAME answered on a system with no systemd, which cannot pass the
+    tryboot flag to the reboot it rides on (only 'systemctl reboot' with
+    /run/systemd/reboot-param does). Arm from a system that can:
+        wk boot $MACH_NAME --back"
+    r_sudo "setsid sh -c 'sleep 3; printf \"0 tryboot\" > /run/systemd/reboot-param && systemctl reboot' </dev/null >/dev/null 2>&1 &" >/dev/null
 }
 
 b_reboot() {

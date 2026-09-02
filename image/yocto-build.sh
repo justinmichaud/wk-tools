@@ -48,6 +48,38 @@ unset CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH \
       OBJCPLUS_INCLUDE_PATH PKG_CONFIG_PATH PKG_CONFIG_LIBDIR \
       LD_LIBRARY_PATH LD_PRELOAD 2>/dev/null || true
 
+# The same concern one layer up: a git index this build writes is read by the
+# toolchains it builds, and those pin their own libgit2.
+#
+# dotfiles/gitconfig turns on `feature.manyFiles` and `index.skipHash` -- worth
+# having on a checkout the size of WebKit's, and both change the *format* of
+# every index git writes: manyFiles implies index version 4, skipHash leaves the
+# trailing checksum null. `cross-toolchain-helper` does a `git init` in its
+# workdir, and cargo walks up from the rust sources it is fingerprinting, finds
+# that index and cannot open it -- rust-native 1.75.0's do_install fails with
+# "failed to open git index", which is where the 2.42/2.46/2.48 branches die.
+# 2.52 pins a newer rust whose libgit2 copes, which is why only the older
+# releases show it.
+#
+# GIT_CONFIG_* rather than editing the gitconfig: these win over every config
+# file, apply only to this build, and leave a developer's own checkout as fast
+# as it was.
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=index.version   GIT_CONFIG_VALUE_0=2
+export GIT_CONFIG_KEY_1=index.skipHash  GIT_CONFIG_VALUE_1=false
+
+# The pin above only governs indexes *this* build writes, and cargo reads the
+# one the checkout arrived with -- written when the workspace was made, under
+# the same settings, with a null trailing checksum that libgit2 refuses. So the
+# checkout's index is rewritten once, here, with a real one.
+#
+# `--really-refresh` rather than a read-tree: it rewrites the index without
+# touching what is staged in it, so a workspace with work in progress keeps it.
+# Idempotent, and cheap even on WebKit's 65 MB index.
+git -C "$SRC" update-index --really-refresh >/dev/null 2>&1 \
+    || warn "could not rewrite $SRC's git index; a toolchain that reads it with
+  libgit2 may refuse it (rust-native's do_install is the one that does)"
+
 # bitbake filters the environment, so DL_DIR/SSTATE_DIR (set by
 # targets/container.sh to the store-backed cache mount) must be named here
 # or they are dropped and the cache meant to survive `wk rm` is never written.

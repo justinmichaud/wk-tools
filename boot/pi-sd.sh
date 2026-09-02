@@ -30,13 +30,17 @@ BOOT_ARMING=medium
 
 # Whether this board can be armed while it is running a *bench* system.
 #
-# No, here: the arming is an edit to the rescue's boot partition made by the
-# privileged card helper (`second-arm`), and the helper is installed on rescues
-# only -- a bench system has neither it nor the sudoers rule that runs it. So a
-# leg switch on this board does go back to the rescue first, and that is a
-# property of where the privilege lives rather than an assumption about which
-# system answers.
-B_ARM_FROM_BENCH=no
+# Yes -- the arming is an edit to the boot partition made by the privileged card
+# helper (`second-arm`), and every system a write makes now carries that helper
+# (disk_install_helper), so a bench system can arm its sibling where it stands:
+# one boot per A/B leg instead of two. The reboot needs nothing special here,
+# unlike pi-tryboot's flag.
+#
+# A system written *before* the helper reached bench systems has none, and there
+# the arming fails and says so -- which the leg switch answers by going back to
+# the rescue and arming from there (pi_system_boot, cmd/pi). So a card from
+# either era works, and the newer one is a boot per leg cheaper.
+B_ARM_FROM_BENCH=yes
 
 # Unused: nothing here is a per-boot firmware order.
 BOOT_ORDER_IMAGE=""

@@ -940,6 +940,26 @@ def _kv_file(path):
     return out
 
 
+def _task_arms(doc):
+    """The two things a task compares, and what to call them.
+
+    A slot A/B has two slots; a *systems* A/B has one slot in two system
+    images, and the arms are the systems (`--ab-systems`, cmd/pi). Counting
+    slots answered the first and silently refused the second -- "not an A/B
+    (one slot): nothing to compare" over runs that had both arms recorded and
+    were perfectly comparable, and a planned-run count half what it should be.
+    Every run already carries which arm it is (env ab.arm) and which system it
+    ran in (env system), so this only has to name them.
+    """
+    subj = doc.get("subject", {})
+    slots = doc.get("slots", [])
+    if subj.get("kind") == "systems":
+        spec = [x for x in subj.get("spec", "").split(",") if x]
+        if len(spec) == 2:
+            return spec, "system"
+    return slots, "slot"
+
+
 def _subject_line(doc):
     subj = doc.get("subject", {})
     kind = subj.get("kind", "")
@@ -950,6 +970,9 @@ def _subject_line(doc):
         what = "A/B %s: %s vs base %s" % (subj.get("spec", "?"), (subj.get("head") or "?")[:10], (subj.get("base") or "?")[:10])
     elif kind == "workspace":
         what = "%s %s" % (subj.get("spec", "?"), doc["devices"][0].get("profile", ""))
+    elif kind == "systems":
+        arms, _ = _task_arms(doc)
+        what = "%s vs %s" % (arms[0], arms[1]) if len(arms) == 2 else "systems"
     elif len(slots) == 2:
         what = "%s vs %s" % (slots[0], slots[1])
     else:
@@ -985,8 +1008,8 @@ def _task_rounds(doc, runs):
 def task_state(taskdir, running):
     doc = _task_doc(taskdir)
     runs = _task_runs(taskdir)
-    slots = doc.get("slots", [])
-    planned = len(doc.get("devices", [])) * len(doc.get("plans", [])) * doc.get("rounds", 1) * len(slots)
+    arm_names, _ = _task_arms(doc)
+    planned = len(doc.get("devices", [])) * len(doc.get("plans", [])) * doc.get("rounds", 1) * len(arm_names)
     ok = [r for r in runs if r["state"] == "ok"]
     failed = [r for r in runs if r["state"] == "failed"]
     live = [r for r in runs if r["state"] == "running"]
@@ -998,14 +1021,14 @@ def task_state(taskdir, running):
     else:
         state = "incomplete"
     usable = 0
-    for arms in _task_rounds(doc, runs).values():
-        for byarm in arms.values():
-            if len(slots) == 2 and all(byarm.get(a, {}).get("state") == "ok" for a in ("a", "b")):
+    for byround in _task_rounds(doc, runs).values():
+        for byarm in byround.values():
+            if len(arm_names) == 2 and all(byarm.get(a, {}).get("state") == "ok" for a in ("a", "b")):
                 usable += 1
     status = _kv_file(os.path.join(taskdir, "status"))
     current = live[0] if (running and live) else None
     summary = "%d/%d runs ended, %d ok, %d failed" % (ended, planned, len(ok), len(failed))
-    if len(slots) == 2:
+    if len(arm_names) == 2:
         summary += ", %d round%s usable" % (usable, "" if usable == 1 else "s")
     if current:
         env = current["env"]
@@ -1079,15 +1102,15 @@ def cmd_task_report(args):
     taskdir = args.dir.rstrip("/")
     st = task_state(taskdir, args.running)
     doc = st["doc"]
-    slots = doc.get("slots", [])
+    arm_names, arm_kind = _task_arms(doc)
     name = doc.get("task", os.path.basename(taskdir))
     lines = ["task      %s" % name,
              "measures  %s" % _subject_line(doc),
              "state     %s -- %s" % (st["state"], st["summary"]),
              "data      %s" % taskdir]
     print("\n".join(lines))
-    if len(slots) != 2:
-        print("\nnot an A/B (one slot): nothing to compare. Runs:")
+    if len(arm_names) != 2:
+        print("\nnot an A/B (one arm): nothing to compare. Runs:")
         for r in st["runs"]:
             print("  %s  %s" % (r["state"], r["dir"]))
         return
@@ -1101,12 +1124,12 @@ def cmd_task_report(args):
                 a_paths.append(os.path.join(arms["a"]["dir"], "result.json"))
                 b_paths.append(os.path.join(arms["b"]["dir"], "result.json"))
             else:
-                why = ", ".join("%s: %s" % (slots[0] if x == "a" else slots[1],
+                why = ", ".join("%s: %s" % (arm_names[0] if x == "a" else arm_names[1],
                                             arms[x]["state"] if x in arms else "not run")
                                 for x in ("a", "b") if arms.get(x, {}).get("state") != "ok")
                 dropped.append("round %d (%s)" % (rnd, why))
         header = ["%s on %s" % (plan, device),
-                  "A = slot %s, B = slot %s" % (slots[0], slots[1]),
+                  "A = %s %s, B = %s %s" % (arm_kind, arm_names[0], arm_kind, arm_names[1]),
                   "rounds: %d usable of %d attempted (%d planned)%s" % (
                       len(a_paths), len(byround), doc.get("rounds", 1),
                       ("; dropped " + ", ".join(dropped)) if dropped else "")]

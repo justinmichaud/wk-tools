@@ -178,6 +178,12 @@ cmd_status() {
             return 3 ;;
         bench*)
             log "$MACHINE: bench mode -- system ${MODE#bench } (booted $BOOTED)"
+            # The evidence belongs here most of all: which system is running is
+            # not how it got here, and a lane whose one-shot is not consumed
+            # looks identical to one that was armed for this. Reading that
+            # difference off the medium took hours on 2026-09-01 because the
+            # mode was all this said.
+            b_evidence 2>/dev/null | sed 's/^/  /' || true
             log "  a plain reboot returns it to host mode: wk boot $MACHINE --back"
             return 0 ;;
         base*)
@@ -185,6 +191,7 @@ cmd_status() {
             # another system be written, never to be measured. Nothing is
             # wrong here.
             log "$MACHINE: base image -- system ${MODE#base } on $MACH_ROOT (booted $BOOTED)"
+            b_evidence 2>/dev/null | sed 's/^/  /' || true
             log "  this is the fallback helper, not a bench system. To measure something,"
             log "  arm a system on $MACH_DEVICE:  wk boot $MACHINE --system <id>"
             return 0 ;;

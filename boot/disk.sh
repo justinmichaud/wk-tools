@@ -21,8 +21,14 @@ CARD_PRIV=/usr/local/libexec/wk-card-priv
 # two are installed as a pair and `wk pi helper` puts that pair on a board.
 CARD_CHECKER=/usr/local/libexec/wk-check-boot-files.py
 
+# Through `r_sudo`: the channel the machine answered on, privileged the one way
+# this repo has of being privileged there. It named the *rescue's* channel and
+# prefixed `sudo` unconditionally, which is two assumptions -- that a card edit
+# is only ever made from a rescue, and that whatever answers has sudo. A bench
+# system arming its sibling breaks the first; a BusyBox bench system, driven as
+# root and carrying no sudo at all, breaks the second.
 card_priv() { # <verb> [args...]
-    m_ssh "sudo -n $CARD_PRIV $(sh_quote "$@")"
+    r_sudo "$CARD_PRIV $(sh_quote "$@")"
 }
 
 # `wk sysimage write --dry-run` runs the same sequence of steps as the write
@@ -559,29 +565,52 @@ disk_config_append() { # <device> <block>
     like, and nothing later would say so."
 }
 
-# The card helper, onto a rescue: the board that boots it writes its own bench
-# media, and the code it does that with should be this checkout's, not whatever
-# the image baked in months ago. Copied by the helper from its own installed
-# file, so the bytes are the ones the machine holding the reader just ran.
+# The card helper, onto every system a write makes -- rescue and bench alike.
+# The code a board makes card edits with should be this checkout's, not whatever
+# its image baked in months ago. Copied by the helper from its own installed
+# file, so the bytes are the ones the machine doing the writing just ran.
 #
-# A refusal is fatal: a rescue that cannot write a card cannot do the one job
-# that makes it a rescue, and finding that out later costs a trip to the board.
-disk_install_rescue_helper() { # <device>
+# Bench systems too, because a board whose arming *is* an edit to the card
+# (pi-sd) can then arm the next system where it stands: one boot per A/B leg
+# instead of two. It grants nothing new -- the gate already lets a system
+# address its sibling pair, which is what the write itself just did.
+#
+# A refusal is fatal: a system that cannot make the edits its lane needs fails
+# later, on a board, for a reason nothing there explains.
+disk_install_helper() { # <device>
     local dev="$1" out rc=0
-    disk_would "put this machine's card helper on $dev's rescue" && return 0
-    out=$(card_priv rescue-helper "$dev" 2>&1) || rc=$?
+    disk_would "put this machine's card helper on $dev" && return 0
+    out=$(card_priv helper "$dev" 2>&1) || rc=$?
     [ "$rc" -eq 0 ] && { log "  $(printf '%s' "$out" | sed -n 's/^wk-card-priv: helper: //p')"; return 0; }
     case "$out" in
         *'usage: wk-card-priv'*)
             die "$MACH_NAME's card helper is older than this checkout: it has no
-    'rescue-helper' verb, so the rescue being written would carry the helper its
-    image was built with, and a fix made here would never reach the board.
+    'helper' verb, so the system being written would carry whatever its image
+    was built with, and a fix made here would never reach the board.
     The image is written; the helper is not.
     Remedy, from a terminal on $MACH_NAME (its sudo asks for a password, which
     is why this end cannot do it): update its wk-tools checkout, then
         ./setup --stage quiesce" ;;
     esac
-    die "could not put the card helper on $dev's rescue:
+    die "could not put the card helper on $dev:
+$out"
+}
+
+# The firmware's own selector, onto a medium that now holds two systems: without
+# it the tryboot flag is ignored and the first pair boots, which is the wrong
+# system with nothing to say so. Fatal, for that reason.
+disk_install_autoboot() { # <device>
+    local dev="$1" out rc=0
+    disk_would "write the firmware's two-system selector (autoboot.txt) onto $dev" && return 0
+    out=$(card_priv autoboot "$dev" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && { debug "$out"; return 0; }
+    case "$out" in
+        *'usage: wk-card-priv'*)
+            die "$MACH_NAME's card helper is older than this checkout: it has no 'autoboot'
+    verb, so this medium would hold two systems with no way for the firmware to
+    choose the second. Update its checkout, then:  ./setup --stage quiesce" ;;
+    esac
+    die "could not write the two-system selector onto $dev:
 $out"
 }
 

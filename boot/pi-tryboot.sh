@@ -37,11 +37,20 @@ BOOT_ARMING=medium
 
 # Whether this board can be armed while it is running a *bench* system.
 #
-# Yes, here: staging is files copied onto the SD boot partition as root over
-# ssh, which either system can do -- no privileged helper, nothing that only a
-# rescue carries. So a leg switch is one reboot rather than two, and it does not
-# depend on a rescue this board may not be able to reach at all.
-B_ARM_FROM_BENCH=yes
+# No -- and the reason is the half of arming that is not the staging. The
+# staging is files copied onto the SD as root, which either system can do. The
+# *flag* is not: it rides the reboot syscall, and the only userspace here that
+# passes it is systemd (`/run/systemd/reboot-param` + `systemctl reboot`). A
+# BusyBox bench system has neither, so an arming made from one stages perfectly
+# and then does not reboot -- measured on the rpi4 2026-09-02: three attempts a
+# round, each staging the right kernel and cmdline, the board still running the
+# system the *previous* leg armed, and every B leg lost.
+#
+# Deciding it per running system rather than per board would be more precise
+# (the yocto bench system does carry systemd) and is a branch that would then
+# be exercised only half the time. The rescue always carries it, so arming goes
+# there: one extra boot per leg, and it is the same answer every time.
+B_ARM_FROM_BENCH=no
 
 # Unused: the boot order here is permanent, not per-boot. The SD card is the
 # boot authority, so the right EEPROM order for this driver is sd-first
@@ -235,7 +244,7 @@ b_disarm_note() {
 # reboots plain: with no flag the firmware reads the rescue's config.txt.
 b_reboot() {
     if [ -n "$TRYBOOT_ARMED" ]; then
-        r_sudo "setsid sh -c 'sleep 3; printf \"0 tryboot\" > /run/systemd/reboot-param && systemctl reboot' </dev/null >/dev/null 2>&1 &" >/dev/null
+        b_reboot_tryboot
     else
         r_sudo "setsid sh -c 'sleep 3; reboot' </dev/null >/dev/null 2>&1 &" >/dev/null
     fi
@@ -259,19 +268,33 @@ b_evidence() {
     # looked exactly like a board that had been armed for it. Hours went into
     # that. The running root= against the two cmdlines on the SD tells them
     # apart in one read, so the status says it.
+    # `tr` and `grep`, not a sed expression: the backslashes in a sed script
+    # have to survive this string, the ssh command line and the remote shell,
+    # and getting that wrong is what made this read `unreadable` on the first
+    # board it ran against. Splitting on spaces needs no escapes at all.
     source=$(r_ssh "$(_tryboot_sd_sh)
-        r=\$(sed -n \"s/.*root=\\([^ ]*\\).*/\\1/p\" /proc/cmdline)
+        wk_root_of() { tr \" \" \"\\n\" < \"\$1\" | grep \"^root=\" | head -1; }
+        r=\$(wk_root_of /proc/cmdline)
         boot=\$(wk_sd_boot \"-o ro\") || { echo unknown; exit 0; }
-        sd=\$(sed -n \"s/.*root=\\([^ ]*\\).*/\\1/p\" \"\$boot/cmdline.txt\" 2>/dev/null)
-        st=\$(sed -n \"s/.*root=\\([^ ]*\\).*/\\1/p\" \"\$boot/second/cmdline.txt\" 2>/dev/null)
+        sd=\$(wk_root_of \"\$boot/cmdline.txt\" 2>/dev/null)
+        st=\$(wk_root_of \"\$boot/second/cmdline.txt\" 2>/dev/null)
         if [ -n \"\$st\" ] && [ \"\$r\" = \"\$st\" ]; then echo staging
         elif [ -n \"\$sd\" ] && [ \"\$r\" = \"\$sd\" ]; then echo sd-config
         else echo unknown; fi
         wk_sd_drop" 2>/dev/null | tr -d '\r' | head -1) || source=""
+    # Four answers, and the third is the one worth having. "Neither" means the
+    # running cmdline is not the SD's *and* not what is staged now: the board is
+    # running a staging that has since been replaced -- an arming that staged
+    # correctly and never rebooted, or a flag the firmware did not consume.
+    # Reported as "unreadable" it looks like a probe fault; it is the diagnosis.
     case "${source:-}" in
-        staging)   printf 'boot_source=the tryboot staging on the SD (second/), so this boot spent an arming -- or read it again because the firmware did not consume the flag\n' ;;
+        staging)   printf 'boot_source=the tryboot staging now on the SD (second/), so this boot spent this arming\n' ;;
         sd-config) printf 'boot_source=the SD config.txt, the plain path\n' ;;
-        *)         printf 'boot_source=unreadable\n' ;;
+        unknown)   printf 'boot_source=neither the SD config.txt nor the staging now on the SD -- this
+  boot came from an earlier staging, so the last arming either did not reboot
+  the board or the firmware did not consume its flag. What is staged now is
+  what the next boot would use, not what is running.\n' ;;
+        *)         printf 'boot_source=unreadable (the board did not answer the probe)\n' ;;
     esac
     printf 'tryboot_staged=%s\n' "${staged:-unreadable}"
     systems=$(b_systems 2>/dev/null) || systems=""
