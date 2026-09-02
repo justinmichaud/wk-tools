@@ -375,3 +375,6 @@ STILL OPEN
 - the whole tart workflow has bugs everywhere. Why is none of this being tested? Pushing in tart vms does not work at all.
 
 - Claude is still invoking builds directly and killing remote machines instead of using wk. How can we forbid claude from running ninja, cmake, etc?
+
+- wk scp subcommand needed
+- wk enter takes way too long
