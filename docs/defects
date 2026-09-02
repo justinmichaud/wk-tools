@@ -368,4 +368,10 @@ STILL OPEN
 
 - git fetch origin in a tart guest is very slow. Each time I report a bug, it only gets fixed in one place. Check everywhere this time, test everywhere.
 
+- wk push on starts podman machine, even when working with tart
+
+- containers do not have webkit pr credentials. We should copy these.
+
+- the whole tart workflow has bugs everywhere. Why is none of this being tested? Pushing in tart vms does not work at all.
+
 - Claude is still invoking builds directly and killing remote machines instead of using wk. How can we forbid claude from running ninja, cmake, etc?
