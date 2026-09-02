@@ -181,18 +181,22 @@ yocto_check_target() {
     die "$YOC_BRANCH has no [$YOC_TARGET] section in Tools/yocto/targets.conf,
     so there is nothing for bitbake to configure from.
 
-    Everything else that target needs is already on the branch -- its
-    local.conf (Tools/yocto/rpi/local-$YOC_TARGET.conf) and its MACHINE in the
-    pinned meta-raspberrypi. Only the stanza tying them together is missing.
-    Add it upstream, beside [rpi4-64bits-mesa]:
+    Two files are missing on a branch that predates the target, not one: the
+    section, and the local.conf it points at (Tools/yocto/rpi/local-$YOC_TARGET.conf
+    -- absent on wpe-2.46, webkitglib/2.46 and webkitglib/2.48; measured
+    2026-09-02). What is *not* missing is the machine: the meta-raspberrypi
+    revision these manifests pin already carries its conf/machine entry, so this
+    is WebKit's own glue and nothing deeper.
 
-        [$YOC_TARGET]
-        repo_manifest_path = rpi/manifest.xml
-        conf_bblayers_path = rpi/bblayers.conf
-        conf_local_path = rpi/local-$YOC_TARGET.conf
-        image_basename = $YOC_IMAGE
-        image_types = tar.xz wic.xz
-        patch_file_path = meta-openembedded_and_meta-webkit.patch
+    Two ways on, and the first is the real one:
+
+      - add the section and its local.conf upstream, beside the target it
+        would be derived from;
+      - or have the profile declare what to derive them from, and this build
+        writes both into the checkout every run and says that it did:
+            YOC_PORT_TARGET_FROM=<a target this branch does have>
+            YOC_MACHINE=<the yocto MACHINE the new target selects>
+        (image/configs/wpewebkit-2.46-yocto-rpi5-64.conf is the worked example.)
 
     The sections that do exist here are:
 $(t_exec "$ws" bash -c "sed -n 's/^\[\(.*\)\]/      \1/p' $conf" 2>/dev/null | tr -d '\r')"

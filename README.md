@@ -632,6 +632,22 @@ rpi5` writes for a workstation, and is the only evidence the fallback is in
 place: the mailbox order cannot be read back. No overclock is ever written to
 the EEPROM; its settings are shared by both modes.
 
+That stick holds *two* systems when a second is written to it
+(`--disk rpi5:/dev/sda@second`, primaries 3-4, the same shape as the rpi4's),
+and which pair a boot lands on is the firmware's own A/B rather than anything
+put back afterwards: a static `autoboot.txt` on the stick's first boot
+partition says `boot_partition=1` under `[all]` and `boot_partition=3` under
+`[tryboot]`, so the second pair is one `reboot "0 tryboot"` away and every
+other boot lands on the first. Two one-shots, both firmware-reverting, so
+`wk boot rpi5 --system <id>` and `wk pi bench rpi5 --ab-systems A,B` work here
+with nothing on the medium changing between legs. The file is written when the
+second pair is made, never at arm time -- it does not vary -- and an arming for
+the second pair refuses if it is absent, because the flag would otherwise be
+ignored and the *first* pair would boot: the wrong system, with nothing to say
+so. Only a board whose driver selects this way gets the file: the rpi4's stick
+is a two-pair medium too, and an `autoboot.txt` there would make its tryboot
+flag boot the stick rather than the kernel staged on its SD.
+
 **mbp -- `mac-volume`, this Mac.** The bench install is the `WK Bench` APFS
 volume beside the host install. Apple Silicon selects a startup volume only
 through an authenticated action at the machine, so there is nothing to arm
