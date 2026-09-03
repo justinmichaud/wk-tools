@@ -1,4 +1,10 @@
-Defects and decisions. Newest decisions at the top; answer inline.
+Everything is answered inline.
+
+Focus on macOS development first, then on the other defects.
+
+Use subagents wherever possible to reduce cost and preserve your context window.
+
+Remember the goal: everything should be reproducable. It should be easy to reset the dev environment to a known good state. Each workflow should be tested, because we keep getting bugs that are fixed on one workflow/driver reproduce on another. Generalize fully each defect. Prefer good architure that makes bugs impossible over fiddly hacks, and use 3rd-party tools / libraries whenever you can. Whenever it is possible to upstream something, call it out.
 
 ================================================================================
 NEEDS YOU
@@ -126,11 +132,15 @@ The previous decision invalidates this.
    uncommitted edits to cmd/status, cmd/pi and lib/common.sh (item 6). Resolve 6
    first, then say the word. [decision]
 
+   Do it now.
+
 9. The tart guest password becomes `1` as asked, which means provisioning
    actually changes the account password (the Cirrus images ship admin/admin
    and `sysadminctl` needs the current one). Confirm the guest account is
    throwaway in the sense that matters: nothing on the tailnet trusts it, and
    `wk rm` destroys it. [decision -- proceeding on yes unless you say otherwise]
+
+   Yes and record this fact in the documentation (not in handoffs). Every singe machine and workspace is disposable in this sense, except remote machines (not managed by me), and workspaces with uncommitted/unpushed changes.
 
 10. jsc-debug lost `-DUSE_LIBBACKTRACE=ON` in commit 027607f, which was not
    made from here, while its own one-line description still said
@@ -141,6 +151,8 @@ The previous decision invalidates this.
    because the library is not on every machine, then gtk-debug's copy should go
    the same way. Which? [decision]
 
+   libbactrace should be on for every machine we setup, but off for remote targets by default.
+
 11. `wk key tailnet` now refuses an API access token and an OAuth client secret
    by name (both start `tskey-`, both administer the whole tailnet, and this
    key is copied onto every card written from here). What it cannot check from
@@ -150,274 +162,7 @@ The previous decision invalidates this.
    holding one. Good enough, or do you want a read-only API token stored for
    it? [decision]
 
-================================================================================
-DONE THIS RUN
-================================================================================
-
-- `wk scp` copies one file or one directory in or out of a workspace, on every
-  target: `wk scp <ws> :Tools/foo.js ./foo.js` out, the operands the other way
-  round in, `-r` for a directory. The workspace name is the dispatcher's
-  (`name=required takes=2`), so inside one it is `wk scp :foo.js .`. Declared
-  `here`, because one side of the copy is the typing machine's filesystem and
-  the podman VM mounts nothing of it -- forwarded, that side would silently
-  mean a path in the VM. The bytes go through the contract's copy hooks
-  (t_pull/t_pull_dir plus the new t_push/t_push_dir) and never through t_exec,
-  which is not a byte pipe; t_path_kind is the third new hook, so a directory
-  onto a file, a file onto a directory and a directory without `-r` are refused
-  before anything moves (tests/test_scp.py, 27).
-
-- SECURITY, closed: `wk ai <agent>` turns push off on every target, a macOS
-  guest included -- it named `container` and `remote` only, so an agent in a
-  guest ran while the guest held a copy of a deploy key. There is now one
-  unconditional call (`push_hold_back`, in cmd/ai's library block beside
-  `restore_push`), and the only thing that still differs by target is which
-  store holds the keys: a build box's own, everything else this machine's.
-  Driven per target with a recording `wk` (tests/test_agent_push_switch.py, 11).
-
-- `wk remote setup` wrote the agent credential with `printf | _rsh_q`, and
-  `_rsh_q` is `ssh -n`: the file landed EMPTY on the build box while the command
-  reported it had written it. It goes through `_rsh`, the one wrapper with a
-  stdin, and the block is now a loop over `wk_agent_secrets` -- every named
-  secret, written when present and removed when absent. Driven against a fake
-  ssh that records how many bytes of stdin the far side was given
-  (tests/test_agent_token.py).
-
-- A macOS guest gets every named secret, not the claude token alone
-  (targets/vm.sh's `_write_agent_secrets`, replacing `_write_agent_token`), on
-  stdin rather than quoted into the ssh command line -- an argument is in `ps`
-  inside the guest. Both t_start arms call it, and each absent row is removed.
-
-- `wk doctor` reports one machine-local line per row of `wk_agent_secrets`,
-  `re-authable`, remedy `wk key set <name>`. An absent optional credential is
-  `??`, never `--`: the store section's `creds` line counted a workspace that
-  merely has to log in as a broken machine, and it was a second report of the
-  same file.
-
-- container/firstrun.sh calls `wk_ssh_alias_blocks '~/.ssh' id_` instead of
-  writing its own copy of the fork alias blocks. One implementation for all
-  three readers; tests/test_push_vm.py asserts the call and lifts it out to run
-  it, rather than holding two texts byte-identical.
-
-- The `wk_agent_token*` synonyms are gone from lib/store.sh: the claude row is
-  reached by name like every other. `_wk_agent_store` went with them --
-  `wk_machine_store` was the same expression under another name.
-
-- Pushing works in a tart guest. A guest mounts nothing of ours, so it holds a
-  copy of each deploy key, written from the host on every `wk vm start` and
-  taken away again whenever the store has none -- the arrangement the agent
-  token already had, generalised (targets/vm.sh's `_write_deploy_keys`, one
-  function called from both t_start arms). With it goes the `github-webkit` /
-  `github-wpe` alias config a container gets, from the one function that prints
-  it (`wk_ssh_alias_blocks`, lib/store.sh), plus the piece a guest needs and a
-  container does not: a `ProxyCommand` through the egress proxy, because Softnet
-  allows exactly one address and ssh to `github.com:22` has no other route.
-  Measured as far as a fake guest: tests/test_push_vm.py (26).
-
-- `wk push on|off` now converges every running guest on this host after moving
-  the keys, so the switch reaches a guest without restarting it, and `wk push
-  status` reports what each guest actually holds. `on`/`off`/`status` are
-  declared where=local (this host is the machine that drives its guests; inside
-  the podman machine there are none) and the store half is one hop back through
-  the dispatcher with `--store` -- the only forward in the tree.
-
-- A workspace starts already authenticated, on every target. One token per
-  machine: `claude setup-token`, then `wk key set claude` stores it at
-  $WK_STORE/secrets/claude-token (0600, taken on stdin so it is never in `ps`,
-  never printed anywhere). shell/bashrc is the only reader, exporting
-  CLAUDE_CODE_OAUTH_TOKEN, so a person typing `claude` in an editor pane gets
-  it and not only `wk ai claude`. Each target hands it over the way it already
-  hands over the proxy:
-      container   a symlink onto the read-only /secrets mount, made whether or
-                  not a token exists yet -- so storing one later reaches every
-                  container with no rebuild, and withdrawing one reaches them
-                  the same way
-      macOS guest a copy written by the host on every start, removed again when
-                  the store has no token
-      build box   a copy written by `wk remote setup`, removed the same way --
-                  it is a machine other people are on, so a token left behind
-                  after it was withdrawn here is the state that would matter
-  `wk doctor` reports it and README's setup lists it. tests/test_agent_token.py
-  (18, no real token anywhere in them).
-
-  Caught while wiring it, and worth knowing: the token resolves against
-  $WK_STORE_DEFAULT, not $WK_STORE. targets/vm.sh points $WK_STORE at its own
-  state directory, so `wk vm start` would have looked in a directory `wk key
-  claude` never writes to and found nothing, silently. Two tests hold it.
-
-- The old shared credentials file is gone with it (container/firstrun.sh,
-  cmd/doctor): it was Linux-only -- Darwin keeps those in a login Keychain that
-  an ssh session or an editor's remote server never unlocks -- and it needed a
-  `claude login` from inside a workspace to exist at all, so it could never be
-  the answer for a guest or a build box. Two ways to authenticate is one too
-  many. Nothing was stranded: $WK_STORE/secrets was empty here. Say the word if
-  you would rather keep it; it is a few lines back.
-
-- The egress allowlist covers ordinary development (container/proxy/wk-proxy.py):
-  npm, Homebrew, crates/rustup, Apple's developer and software-update hosts
-  (so `xcode-select --install` and Xcode's first launch complete), and
-  certificate validation -- valid/ocsp/crl.apple.com and i.pki.goog, without
-  which Gatekeeper will not launch anything downloaded. Apple is named host by
-  host, never by suffix: the refusals a guest produces are mostly iCloud, Siri,
-  Spotlight, ads and news, and none of that is development. Declared for the
-  sandbox audit in the file, BLOCKED_NETS unchanged. tests/test_egress.py.
-  Verified from a guest: npmjs/brew/developer.apple/crates/rustup all answer,
-  gsa.apple.com still refused.
-
-- A guest's egress reaches every shell, not login shells alone. ~/.wk-egress is
-  written by the host on every start (_set_guest_egress, targets/vm.sh, which
-  now writes both halves -- the system proxy and the shell variables) and
-  sourced by all four rc files (vm/shell-rc.sh). vm/provision-base.sh writes
-  nothing about the proxy any more: the address is the host's own on the guest
-  bridge and changes, so no image may carry a copy, and a guest that baked one
-  in has it stripped on the next start. Deliberately NOT in shell/bashrc --
-  that file lives in the guest's own copy of wk-tools, which only a build
-  refreshes, and a guest must not be without egress until someone builds in it.
-  tests/test_egress.py. Verified in the guest: an editor pane fetched
-  https://webkit.org/ (200) where it previously reached nothing.
-
-- `wk vm start` against an already-running guest restarts the host egress proxy
-  if it is not listening. It is the guest's only route out, so a proxy that
-  died left the guest with no egress and no way back short of a reboot; every
-  other fact that branch converges was already written on every start.
-
-- A guest's clock is set from this host on every start (targets/vm.sh,
-  _set_guest_clock), and before the base is provisioned -- where a stale clock
-  would fail provisioning's first HTTPS clone and then seal that date into
-  every clone made from it. Idempotent by measurement: a guest within
-  WK_VM_CLOCK_SKEW (30s) costs one ssh and no sudo. It runs before
-  _set_guest_proxy, because everything reached through the proxy speaks TLS.
-  tests/test_vm_clock.py drives the guest half against a fake date and sudo.
-  `wk vm start mya` reported `mya's clock was 958989s out; set from this host`.
-
-- Home/End in zsh (B). Measured cause: shell/bashrc bound the keys and *then*
-  ran `bindkey -e`, which links a fresh emacs keymap over `main` and discards
-  whatever was bound into the previous one. Machine-dependent, which is why it
-  worked on moose: zsh starts in viins when $EDITOR contains "vi", so a host
-  without helix lost the bindings and a host with it kept them. The keymap is
-  now chosen above the bindings, and ^[OH / ^[OF (application cursor mode,
-  which zle's own smkx asks the terminal for) are bound as well.
-  tests/test_shell_keys.py.
-
-- `wk sysimage ls` carries a STATE column: building | ready | none, from the
-  workspace's own live answer. An image being built is the one most likely
-  being looked for and `-` in the size column was not an answer.
-  tests/test_card_edits.py.
-
-- Default CMake flags for every config, and per-machine flags per config
-  (`WK_TARGET_CMAKE_<config>`, `WK_BUILD_ARGS_<config>` in a machine's conf).
-  Each config now states only what differs from the default. tests/test_build.py.
-
-- `wk pr <ref>` no longer refuses a pull request as a missing workspace. The
-  declaration gained `takes=<n>`: how many positionals belong to the command
-  after the name, so a lone one is the command's. An audit test holds every
-  command with an optional name to it.
-
-- On a shared build box the *directory* now names the workspace: `cd
-  ~/wk/ws/<name> && wk build gtk-release` works, as it does inside a container
-  workspace. There is no workspace marker on those machines -- several live
-  side by side under one root -- which is why the in-workspace interface only
-  ever worked in a container. tests/test_dispatcher.py.
-
-- git identity and speed settings reach every machine, from the one file that
-  declares them (dotfiles/gitconfig) rather than a copy per machine:
-  container/firstrun.sh and remote/provision.sh include it, `./setup` removes a
-  [user] section that shadows it (git takes a key's *last* value, so an include
-  loses to anything written after it), and `wk doctor` checks all three.
-  Found by it: devbox-arm64-2 has `user.name = no` and `user.email = no`, so
-  every commit made there is authored by "no <no>"; buildbox4 has no identity
-  at all, so a commit there is refused after the work. Both fixed by re-running
-  `wk remote setup <target>`.
-
-- `wk doctor --all` asks every build machine what it has, read-only over ssh:
-  the tools a build needs, the identity a commit there would carry, and any
-  build variable that machine's own profile sets. One list of prerequisites
-  (remote/deps.sh) answers for `wk remote setup`, provisioning and doctor, and
-  whatever is missing comes back as one exact root command -- provisioning
-  still never takes root. tests/test_remote_deps.py.
-  Found by it: buildbox4 has no ccache, so every build there starts cold.
-
-- A machine's own environment is no longer overwritten: shell/bashrc keeps a
-  pre-set $EDITOR/$VISUAL, and `wk doctor --all` prints any CC/CXX/CCACHE_DIR
-  a build box's profile exports, saying plainly that wk's build sets its own
-  and ignores it.
-
-- The approved macOS settings from J are in host/macos/defaults.conf
-  (AppleWindowTabbingMode, dock show-recents/mru-spaces, the two hot corners,
-  screensaver askForPassword, Safari's Develop menu). The Dock is restarted
-  when one of its keys changes -- it reads its preferences once, at launch, so
-  a written key nothing restarts is a setting that is in the file and not on
-  the screen. The Accessibility key-repeat values are left out, as you said.
-
-- `wk key tailnet` and admin/wk-card-priv both refuse anything but
-  `tskey-auth-`. tests/test_key.py.
-
-- Zed opens every project trusted already (`session.trust_all_projects`,
-  dotfiles/zed/settings.json) -- both defect entries asking for it are the
-  same one, and it was already true.
-
-- `wk <cmd> -h` prints a closed set of values by running the one list that
-  defines it: the declaration gained `values=<flag>`, and `wk build -h`, `wk
-  boot -h` and `wk sysimage -h` now end with today's configs, fleet machines
-  and image profiles. Nothing is copied into a header, so nothing can go stale.
-  `wk sysimage build --list` becomes `wk sysimage --list` -- one spelling.
-  tests/test_help_values.py.
-
-- The lifecycle notes in README.md are four numbered steps, and the third one
-  is stated as what it is: a hand moving a card from the reader to the board.
-  The example no longer writes a card for the rpi3 and then arms the rpi4.
-
-- `wk claude` is now `wk ai claude`, with `wk claude` a tombstone naming its
-  replacement. One command for every coding agent: the agent is the first word,
-  everything around it (which workspace, the sandbox check, the commit wall,
-  the push switch, remote control) is shared, and `wk ai pi` refuses by name
-  with what it still needs rather than pretending to exist.
-
-- Claude remote control is on by default: `wk new` starts it in the workspace
-  it just made and `wk start` starts it in every container it brings back up,
-  both through `wk ai claude --rc` and neither able to fail because of it.
-  WK_NO_CLAUDE_RC=1 turns it off -- one variable, since both call the same
-  command. The wiring is tested (tests/test_claude_rc.py); the live check is
-  in STILL OPEN below.
-
-- A macOS guest lands on an empty desktop, and something now *checks*: `wk vm
-  check <name>` (read-only) reports the console session, the screen lock, the
-  screen saver, display sleep, Setup Assistant's panes, the Software Update
-  offer, and whatever is modal on screen right now -- each with its remedy.
-  vm/desktop-probe.sh reads, vm/desktop.sh writes, and nothing else does either.
-
-  Two root causes, both measured on the live guest rather than reasoned about:
-    * `defaults -currentHost` writes per *hardware UUID*, and `tart clone` gives
-      the clone a new one -- so every ByHost setting the golden base holds (the
-      screen saver among them) does not apply to any guest cloned from it. Those
-      are now written on every `wk vm start`, by the same one script the base
-      runs. `wk vm check mya` reported the saver armed; after the fix, off.
-    * Setup Assistant's `DidSee*` list had grown: two panes on this macOS were
-      unset, and one was on the desktop of a running guest.
-  The Software Update offer (a modal panel on the desktop) is turned off too.
-
-- The guest gets the same shell rc as every other machine, from .zshrc as well
-  as the profiles -- which is the actual reason `wk zed mya` opened a terminal
-  with no `wk` on PATH: a profile is read by a *login* shell and an editor's
-  terminal pane is not one, so PATH written only into .zprofile was missing in
-  the one place a person types.
-
-- The guest's login is one fact in one place (targets/vm.sh: WK_VM_USER,
-  WK_VM_PASSWORD=1, WK_VM_IMAGE_PASSWORD=admin -- the image's, used once to
-  change it), printed by vm_login_note at each of the four moments a person is
-  about to look at the guest's window: provisioning it, starting it, entering
-  it, opening Zed on it. The screen lock is left alone unless the password authenticates
-  first: `sysadminctl -screenLock` takes the account's current password, and
-  offering it a wrong one was observed to leave the lock armed.
-
-- tests/test_dispatcher.py's top-level-call-order audit was blind to a
-  function whose opening brace carries an argument comment (`f() { # <arg>`),
-  this tree's house style -- so it reported two false positives in cmd/pi and
-  would have missed a real one anywhere else.
-
-- Another session edited build/configs.sh, build/build-in-target.sh, cmd/gui,
-  cmd/run, cmd/profile and cmd/bench concurrently with this run
-  (CFG_SCRIPT/WK_BUILD_SCRIPT for `build-jsc`); both sets of edits coexist, and
-  `wk selftest --quick` now passes clean.
+   Good enough.
 
 ================================================================================
 OWED, WITH THE DECISION ALREADY MADE
@@ -447,6 +192,8 @@ STILL OPEN
   helper), and until then `wk sync --tools devbox-arm64-2` reports the mirror
   as failed, as it did.
 
+  It should be able to reach github, it has worked in the past. There are ongoing issues with github at the moment.
+
 - Live check owed on a real tart guest: `wk push on`, then a `git push fork` in
   the guest actually reaching GitHub through the ProxyCommand, and `wk push off`
   taking the key back out of it. Everything about it is measured against a fake
@@ -465,6 +212,8 @@ STILL OPEN
   sets varies with the job count -- CCACHE_* is fixed and -j reaches ninja, not
   the compiler line -- but that is an argument, not a measurement.)
 
+A previous agent made this claim FYI
+
 - `wk sync <ws>` on a build machine still fetches its four remotes over the
   network, though that machine keeps a bare mirror of its own beside the
   workspace (targets/remote.sh, `_remote_mirror_update`). The fetch already
@@ -474,6 +223,8 @@ STILL OPEN
   would silently stop carrying the forks' branches. Carrying
   wk_mirror_default_remotes into that mirror is the fix, and it costs disk
   on every build box.
+
+It doesn't cost disk space, it saves it, no?
 
 - Live measurement owed on a real tart guest: `wk vm check <name>` now reports
   what is resident in there -- shells, an editor remote server that outlives its
