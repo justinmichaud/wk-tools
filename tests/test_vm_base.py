@@ -62,7 +62,8 @@ class TestThePrebuildCannotUnmakeTheBase(WkTest):
 
     def test_a_prebuild_that_cannot_start_warns_and_succeeds(self):
         """The realistic failure: the tooling push into the base fails, and
-        with it the build. It used to `die` -- two steps before the marker."""
+        with it the build. A warm build tree is an optimisation, so the base is
+        still sealed and the marker still written."""
         cp, _ = self._drive('''
 _vm_get()     { echo 8; }
 build_jobs()  { echo 2; }
@@ -120,6 +121,76 @@ _base_mark_ready
 ''')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("prebuild=mac-release", marker.read_text())
+
+    def test_a_build_that_ran_and_failed_warns_and_succeeds(self):
+        """The arm that costs the most to reach for real: an hour of building
+        that ends non-zero. The base is sealed anyway -- the alternative is
+        hours of provisioning thrown away over a warm build tree."""
+        cp, _ = self._drive('''
+_vm_get()             { echo 8; }
+build_jobs()          { echo 2; }
+_push_tools()         { :; }
+config_build_env()    { CFG_ENV=(X=1); }
+detach_remote()       { :; }
+detach_wait_remote()  { echo 1; }
+scp()                 { :; }
+_prebuild_base 10.0.0.1 && echo "returned 0" || echo "returned $?"
+echo "prebuilt=${_base_prebuilt:-none}"
+''')
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("returned 0", cp.stdout, out)
+        self.assertIn("prebuilt=none", cp.stdout, out)
+        self.assertIn("base prebuild FAILED", out)
+        self.assertIn("base-build.log", out)
+
+    def test_a_failed_build_shows_the_first_error_when_that_is_loadable(self):
+        """first_error is in lib/watchdog.sh, which not every caller of this
+        driver has sourced -- so the report is the compiler's first line when
+        it is there and the warning alone when it is not, never a
+        `command not found` in place of the failure."""
+        common = '''
+_vm_get()             { echo 8; }
+build_jobs()          { echo 2; }
+_push_tools()         { :; }
+config_build_env()    { CFG_ENV=(X=1); }
+detach_remote()       { :; }
+detach_wait_remote()  { echo 1; }
+scp()                 { :; }
+'''
+        cp, _ = self._drive(common + '''
+first_error() { echo "error: no member named foo"; }
+_prebuild_base 10.0.0.1
+''')
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("no member named foo", out)
+
+        cp, _ = self._drive(common + '_prebuild_base 10.0.0.1\n')
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("base prebuild FAILED", out)
+        self.assertNotIn("command not found", out)
+
+    def test_the_prebuild_can_be_turned_off_and_nothing_is_asked_of_the_guest(self):
+        """WK_VM_BASE_PREBUILD empty: the base is provisioned and sealed with
+        a cold tree, and nothing reaches the guest at all.
+
+        Emptied after the driver loaded, because the driver's own default
+        (`${WK_VM_BASE_PREBUILD:-mac-release}`) fills an empty value back in
+        -- so this drives the arm, not the way a person would reach it."""
+        cp, _ = self._drive('''
+WK_VM_BASE_PREBUILD=""
+_push_tools() { echo "REACHED THE GUEST"; }
+_prebuild_base 10.0.0.1 && echo "returned 0" || echo "returned $?"
+echo "prebuilt=${_base_prebuilt:-none}"
+''')
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("returned 0", cp.stdout, out)
+        self.assertIn("prebuilt=none", cp.stdout, out)
+        self.assertIn("base prebuild disabled", out)
+        self.assertNotIn("REACHED THE GUEST", cp.stdout)
 
     def test_provisioning_stops_and_marks_the_base_unconditionally(self):
         """Source-level, because the steps between are hours of real work: the
@@ -195,13 +266,14 @@ class TestTheConfigIsCheckedBeforeTheHours(WkTest):
 
 class TestThePasswordIsProvedNotAssumed(WkTest):
     """vm/provision-base.sh's `_set_password`, lifted and run against stubs.
-    `sysadminctl` is the tool that lied; `dscl . -authonly` is the proof."""
+    `sysadminctl`'s exit status decides nothing; `dscl . -authonly` is the
+    proof, taken before and after."""
 
     def _run(self, dscl_before, dscl_after, sysadminctl_rc=0):
         """<dscl_before>/<dscl_after>: whether the wanted password
         authenticates before and after the change is attempted. A stub `dscl`
-        that answers differently on its second call is exactly the case that
-        was mis-read as success."""
+        that answers differently on its second call is the case a reading of
+        `sysadminctl`'s exit status alone gets wrong."""
         lifted = subprocess.run(
             ["sed", "-n", "/^_set_password()/,/^}/p", str(PROVISION)],
             capture_output=True, text=True).stdout
@@ -254,6 +326,32 @@ echo "password=$WK_VM_PASSWORD"
         out = self._run(dscl_before=True, dscl_after=True)
         self.assertIn("password already set", out, out)
         self.assertIn("password=1", out, out)
+
+    def test_an_image_whose_password_is_already_the_wanted_one_is_left_alone(self):
+        """The first line, and the only arm that touches nothing: when the two
+        are the same string there is no change to make, and attempting one
+        would need a current password that is also the new one."""
+        calls = self.tmp / "calls"
+        logger = f'#!/bin/sh\necho "$0 $*" >> {str(calls)!r}\n'
+        lifted = subprocess.run(
+            ["sed", "-n", "/^_set_password()/,/^}/p", str(PROVISION)],
+            capture_output=True, text=True).stdout
+        with stub_path({"dscl": logger, "sysadminctl": logger}) as binp:
+            cp = bash(f'''
+set -euo pipefail
+say() {{ printf '==> %s\\n' "$*" >&2; }}
+WK_VM_USER=admin
+WK_VM_IMAGE_PASSWORD=1
+WK_VM_PASSWORD=1
+{lifted}
+_set_password
+echo "password=$WK_VM_PASSWORD"
+''', env={"PATH": f"{binp}:{os.environ['PATH']}"})
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("password=1", out)
+        self.assertFalse(calls.exists(),
+                         f"the guest was asked something: {calls.read_text() if calls.exists() else ''}")
 
     def test_the_account_changes_its_own_password(self):
         """No sudo and no -adminUser: the reset form needs an admin
@@ -357,10 +455,10 @@ class TestTheGuestCarriesAMirror(unittest.TestCase):
         per-workspace cost of both is what copy-on-write makes it."""
         self.assertIn("git clone --quiet --shared", PROVISION.read_text())
 
-    def test_nothing_is_seeded_from_the_host_any_more(self):
-        """One path to a checkout: the mirror. The rsync'd bare seed was a
-        second one, taken only when a host happened to have a checkout at a
-        path nothing else in this repo knows about."""
+    def test_nothing_is_seeded_from_the_host(self):
+        """One path to a checkout: the mirror. A seed rsynced off the host is a
+        second one, taken only when a host happens to have a checkout at a path
+        nothing else in this repo knows about."""
         for path in (PROVISION, VM):
             with self.subTest(file=path.name):
                 self.assertNotIn("wk-seed", path.read_text())

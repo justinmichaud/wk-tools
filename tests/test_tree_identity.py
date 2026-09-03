@@ -2,13 +2,11 @@
 peer branch of t_sync, lib/tools.sh's tools_committed): the commit, plus
 `+dirty` for a *tracked* modification -- never a hash of file contents.
 
-The defect this replaces (docs/defects, measured): `wk sync --tools moose`
-reported "still DIFFERS" with both checkouts at the same clean commit,
-because the old tree hash hashed every working-tree file including
-gitignored ones -- a macOS checkout's .DS_Store and Zed prompt cache had no
-Linux counterpart. Two checkouts of one commit that differ only in
-untracked or ignored files must read identical; a checkout that differs by
-a tracked edit must not.
+Two checkouts of one commit that differ only in untracked or ignored files
+read identical -- a macOS checkout's .DS_Store and Zed prompt cache have no
+Linux counterpart, and a comparison that hashes working-tree files reports
+two clean checkouts of the same commit as different. A checkout that differs
+by a *tracked* edit reads as `+dirty`.
 
 Run: python3 -m unittest tests.test_tree_identity -v
 """
@@ -186,11 +184,11 @@ class TestUntrackedNonIgnoredFileIsNotDirty(TwoClonesCase):
 
 
 class TestNoTreeHashMachinery(unittest.TestCase):
-    """The bug this replaces was a hash of file contents, patched one
-    ignored filename at a time (docs/defects). The fix deletes the
-    mechanism rather than growing the exclusion list, so its names -- the
-    function, the flag, the kv field, the variable that names the far
-    side's expected tree hash -- must not survive anywhere in the tree."""
+    """Identity is the commit, and there is no second answer anywhere: a
+    hash of file contents needs an exclusion list that grows one ignored
+    filename at a time. So its names -- the function, the flag, the kv field,
+    the variable naming the far side's expected tree hash -- appear nowhere in
+    the tree."""
 
     DIRS = ["cmd", "lib", "targets", "bench", "host"]
 

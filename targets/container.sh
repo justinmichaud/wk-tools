@@ -329,7 +329,7 @@ t_home() { echo "/home/$WKDEV_CONTAINER_USER"; }
 # This machine's own mirror, bind-mounted read-only in t_create: a fetch in a
 # container reads it directly and touches no network. Read-only, so the fetch
 # *into* it is this machine's (`wk sync --tools`, mirror_fetch_pr).
-t_mirror_dir() { echo "/mirror/WebKit.git"; }
+t_mirror_dir() { mirror_in_container; }
 
 # `podman cp`, not the generic `t_exec ... cat`: wkdev-enter is an
 # interactive-shell wrapper, not a byte pipe (a 1396-byte file arrived as

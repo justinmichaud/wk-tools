@@ -11,15 +11,13 @@
 #                     $WK_STORE/secrets, so `wk key set` and `wk push` write
 #                     the keys with no VM running and every container reads
 #                     the same bytes live; and the agent-writable directory at
-#                     $WK_STORE/agent-rw, which holds one thing -- the
-#                     claude.ai login credential the Claude CLI rewrites in
-#                     place when it spends the refresh token in it
-#                     (wk_agent_rw_dir, lib/store.sh). That last one is the
-#                     only read-write mount in the design, and its whole
-#                     contents are a credential the workspaces are meant to
-#                     rotate. Any other mount -- /Users above all -- is host
-#                     filesystem access a workspace must not have, and is the
-#                     recreate condition below.
+#                     $WK_STORE/agent-rw, the only read-write mount in the
+#                     design, holding one thing -- the claude.ai login
+#                     credential the Claude CLI rotates in place
+#                     (wk_agent_rw_dir, lib/store.sh; README.md, "wk key set").
+#                     Any other mount -- /Users above all -- is host filesystem
+#                     access a workspace must not have, and is the recreate
+#                     condition below.
 #
 #   rootful           the machine's podman service runs as root, which is the
 #                     socket `podman -c wk` on this host connects to. A
@@ -103,16 +101,24 @@ _cfg="$HOME/.config/containers/podman/machine/applehv/$WK_MACHINE.json"
 # would ask podman for exactly the same modes again and loop.
 _mount_state() {
     python3 - "$_cfg" "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount" <<'PY'
-import json, sys
+import json, os, sys
+
+# Both sides through realpath, because the two spellings of one directory are
+# not the same string: a symlinked WK_ROOT, macOS's /var -> /private/var, a
+# trailing slash. A comparison by string reads `differs` on a machine this run
+# has just created with these very paths, and `differs` is the verdict that
+# destroys a store.
+def key(source, target):
+    return "%s:%s" % (os.path.realpath(source), target.rstrip("/") or "/")
 
 cfg = sys.argv[1]
 want = {}
 for spec in sys.argv[2:]:
     source, target, mode = spec.rsplit(":", 2)
-    want["%s:%s" % (source, target)] = mode == "ro"
+    want[key(source, target)] = mode == "ro"
 try:
     mounts = json.load(open(cfg))["Mounts"]
-    have = {"%s:%s" % (m["Source"], m["Target"]): bool(m.get("ReadOnly"))
+    have = {key(m["Source"], m["Target"]): bool(m.get("ReadOnly"))
             for m in mounts}
 except Exception:
     print("unknown")
@@ -124,8 +130,16 @@ elif have != want:
     print("notro")
 else:
     print("ok")
-for pair in sorted(have):
-    print(pair, "ro" if have[pair] else "rw")
+
+# The rows are the machine's own spelling, not the canonical one: a person
+# reading a refusal is looking for what is in the config file. The canonical
+# form is what the verdict above was decided on, and it appears beside the raw
+# one only where the two differ.
+for m in sorted(mounts, key=lambda m: (m["Source"], m["Target"])):
+    raw = "%s:%s" % (m["Source"], m["Target"])
+    canon = key(m["Source"], m["Target"])
+    print(raw if canon == raw else "%s (%s)" % (raw, canon),
+          "ro" if m.get("ReadOnly") else "rw")
 PY
 }
 
@@ -173,8 +187,25 @@ _mount_rows() { printf '%s\n' "$_mounts" | tail -n +2 | sed '/^[[:space:]]*$/d';
 # recreate, and that decision is the caller's below -- a mount that is there but
 # read-write, or a config this cannot read, is refused instead: recreating would
 # ask podman for exactly the same thing again and destroy a store for nothing.
-_check_mounts() {
+#
+# <after-init> is set on the call that follows this run's own `podman machine
+# init`. A `differs` there is not the user's machine being wrong -- the init
+# was handed these exact triples a moment ago -- so it is this file and podman
+# disagreeing about how a path is spelled, and advising `./setup` would send
+# the next run round the same destroy-and-recreate loop for ever.
+_check_mounts() { # [after-init]
     _read_mounts
+    if [ "$_verdict" = differs ] && [ -n "${1:-}" ]; then
+        die "internal error: podman machine '$WK_MACHINE' was just created with
+$(printf '    asks %s\n    asks %s\n    asks %s' \
+        "$_secrets_mount" "$_tools_mount" "$_agent_rw_mount")
+    and reads back as
+$(_mount_rows | sed 's/^/    has  /')
+    The two spellings above are the same directories written differently, and
+    this file compares them by their real paths. Do NOT re-run ./setup: it
+    would destroy and recreate the machine to reach exactly this state again.
+    Fix the comparison in _mount_state (host/macos/machine.sh)."
+    fi
     case "$_verdict" in
         ok) unchanged "machine mounts exactly this checkout and the secrets directory read-only, and the agent credential directory read-write (verified)" ;;
         notro)
@@ -235,6 +266,16 @@ if podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
 fi
 
 if ! podman machine inspect "$WK_MACHINE" >/dev/null 2>&1; then
+    # A dry run reports and stops here too: creating the machine downloads an
+    # image and takes a disk, and `./setup --dry-run` says what would change.
+    if [ -n "${WK_DRY_RUN:-}" ]; then
+        warn "dry run: podman machine '$WK_MACHINE' would be created (${_cores} cpus,
+    ${_mem} MiB, ${_disk} GiB) with these mounts and no others:"
+        log  "    $_secrets_mount"
+        log  "    $_tools_mount"
+        log  "    $_agent_rw_mount"
+        return 0 2>/dev/null || exit 0
+    fi
     info "creating podman machine '$WK_MACHINE' (${_cores} cpus, ${_mem} MiB, ${_disk} GiB)"
     log  "this downloads a Fedora CoreOS image and takes a few minutes"
 
@@ -262,7 +303,7 @@ fi
 # write to what it does see. This is the single most important invariant in the
 # design, so it is checked on every setup run rather than trusted from creation
 # time -- including straight after an init, whose own flags it holds to.
-_check_mounts
+_check_mounts after-init
 
 # --- resources ---------------------------------------------------------------
 # Re-apply the envelope if the host changed (or the machine predates this

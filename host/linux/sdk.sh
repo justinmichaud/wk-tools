@@ -16,6 +16,8 @@
 # Neither job needs root, except once to create /opt/webkit-container-sdk.
 
 . "$WK_ROOT/lib/store.sh"
+# The three unit bodies and the one installer, shared with host/macos/vmtools.sh.
+. "$WK_ROOT/host/units.sh"
 
 # Not /opt: an unprivileged checkout is one the user can reset, inspect and
 # re-clone without asking anyone. The path only has to agree with targets/
@@ -49,47 +51,9 @@ fi
 # anything inside a workspace: the workspace sees one unix socket and nothing
 # else. Lingering (enabled by the machine stage) keeps it alive for unattended
 # runs with nobody logged in.
-_unit_dir="$HOME/.config/systemd/user"
-ensure_dir "$_unit_dir"
-
-_unit_new=$(mktemp)
-cat > "$_unit_new" <<EOF
-[Unit]
-Description=wk workspace egress proxy
-Documentation=file://$WK_ROOT/container/proxy/wk-proxy.py
-
-[Service]
-Type=notify
-NotifyAccess=all
-ExecStart=/usr/bin/python3 $WK_ROOT/container/proxy/wk-proxy.py
-Environment=WK_STORE=$WK_STORE
-Restart=on-failure
-RestartSec=2
-# %t/wk holds the one socket a workspace can see. Preserved across restarts
-# because containers bind-mount that directory: letting systemd delete it on
-# stop would leave every running workspace holding a mount of a deleted
-# directory, and no amount of restarting the proxy would fix it.
-RuntimeDirectory=wk
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=yes
-# The proxy is the boundary; it must not be able to write anywhere interesting.
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=read-only
-
-[Install]
-WantedBy=default.target
-EOF
-
-if cmp -s "$_unit_new" "$_unit_dir/wk-proxy.service"; then
-    unchanged "wk-proxy.service"
-    rm -f "$_unit_new"
-else
-    install -m 0644 "$_unit_new" "$_unit_dir/wk-proxy.service"
-    rm -f "$_unit_new"
-    systemctl --user daemon-reload
-    changed "installed wk-proxy.service"
-fi
+# This machine is the one that runs the workspaces, so the units name this
+# checkout and this store, and `sh -c` is how a command reaches it.
+unit_install wk-proxy.service "$WK_ROOT" "$WK_STORE" sh -c
 
 # Restart only when the policy itself changed. Restarting unconditionally would
 # match the "configuration is regenerated, never accumulated" rule -- but it also
@@ -125,41 +89,7 @@ fi
 # lib/store.sh); this only makes sure it is there to be filled. It starts empty
 # and stays empty across a restart, which is the safe direction: the switch has
 # to be thrown again and `wk push status` says so.
-_unit_new=$(mktemp)
-cat > "$_unit_new" <<EOF
-[Unit]
-Description=wk deploy-key ssh-agent (outside every workspace)
-Documentation=file://$WK_ROOT/cmd/push
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/ssh-agent -D -a %t/wk/ssh-agent.sock
-Restart=on-failure
-RestartSec=2
-# The same directory wk-proxy.service owns, preserved for the same reason:
-# containers bind-mount it.
-RuntimeDirectory=wk
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=yes
-# ssh-agent refuses to bind a path that already exists, and one left by a
-# previous run has nothing behind it.
-ExecStartPre=/usr/bin/rm -f %t/wk/ssh-agent.sock
-ProtectSystem=strict
-ProtectHome=read-only
-
-[Install]
-WantedBy=default.target
-EOF
-
-if cmp -s "$_unit_new" "$_unit_dir/wk-ssh-agent.service"; then
-    unchanged "wk-ssh-agent.service"
-    rm -f "$_unit_new"
-else
-    install -m 0644 "$_unit_new" "$_unit_dir/wk-ssh-agent.service"
-    rm -f "$_unit_new"
-    systemctl --user daemon-reload
-    changed "installed wk-ssh-agent.service"
-fi
+unit_install wk-ssh-agent.service "$WK_ROOT" "$WK_STORE" sh -c
 
 if systemctl --user is-active --quiet wk-ssh-agent.service; then
     unchanged "wk-ssh-agent running"
@@ -176,39 +106,7 @@ fi
 # works in a workspace that never holds it (container/proxy/github-inject.py).
 # Its socket is under the store and *not* in %t/wk: a workspace must reach it
 # through the egress policy, not around it.
-_unit_new=$(mktemp)
-cat > "$_unit_new" <<EOF
-[Unit]
-Description=wk GitHub API credential injector
-Documentation=file://$WK_ROOT/container/proxy/github-inject.py
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 $WK_ROOT/container/proxy/github-inject.py
-Environment=WK_STORE=$WK_STORE
-Restart=on-failure
-RestartSec=2
-# It publishes its CA certificate into %t/wk, which every container mounts.
-RuntimeDirectory=wk
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=$WK_STORE
-
-[Install]
-WantedBy=default.target
-EOF
-
-if cmp -s "$_unit_new" "$_unit_dir/wk-github-inject.service"; then
-    unchanged "wk-github-inject.service"
-    rm -f "$_unit_new"
-else
-    install -m 0644 "$_unit_new" "$_unit_dir/wk-github-inject.service"
-    rm -f "$_unit_new"
-    systemctl --user daemon-reload
-    changed "installed wk-github-inject.service"
-fi
+unit_install wk-github-inject.service "$WK_ROOT" "$WK_STORE" sh -c
 
 # Restarted only when the program changed, for the reason the proxy's own stamp
 # gives: it runs straight off this checkout.
@@ -231,4 +129,4 @@ else
     fi
 fi
 
-unset SDK _before _unit_dir _unit_new _policy_stamp _policy_hash _inject_stamp _inject_hash
+unset SDK _before _policy_stamp _policy_hash _inject_stamp _inject_hash

@@ -42,13 +42,17 @@ FAKE_PODMAN = r'''#!/bin/sh
 printf '%s\n' "$*" >> "$WK_TEST_PODMAN_LOG"
 case "$1 $2" in
 "machine list")
-    echo '[]' ;;
+    # Other machines this host has, for the retire-them-first step; none by
+    # default, which is what a host set up by ./setup looks like.
+    echo "${WK_TEST_MACHINE_LIST:-[]}" ;;
 "machine inspect")
     [ -f "$WK_TEST_VM/exists" ] || exit 1
     case "$*" in
     *"{{.State}}"*)           cat "$WK_TEST_VM/state" ;;
-    *"{{.Resources.CPUs}}"*)  echo 999 ;;
-    *"{{.Resources.Memory}}"*) echo 999 ;;
+    # What the machine currently has, which the resources step compares the
+    # envelope against; a value nothing matches by default.
+    *"{{.Resources.CPUs}}"*)   echo "${WK_TEST_CPUS:-999}" ;;
+    *"{{.Resources.Memory}}"*) echo "${WK_TEST_MEM:-999}" ;;
     *) echo '{}' ;;
     esac ;;
 "machine init")
@@ -116,7 +120,7 @@ class _Stage(WkTest):
                 (str(REPO), "/opt/wk-tools", True),
                 (str(self.agent_rw), "/var/lib/wk/agent-rw", False))
 
-    def run_stage(self, env=None):
+    def run_stage(self, env=None, podman=None):
         script = f'''
 set -euo pipefail
 WK_ROOT={REPO}
@@ -144,7 +148,7 @@ is_macos() {{ return 0; }}
         })
         if env:
             e.update(env)
-        with stub_path({"podman": FAKE_PODMAN}) as binp:
+        with stub_path({"podman": podman or FAKE_PODMAN}) as binp:
             e["PATH"] = f"{binp}:{os.environ['PATH']}"
             cp = subprocess.run(["bash", "-c", script], cwd=str(REPO), env=e,
                                 capture_output=True, text=True, timeout=120)
@@ -183,9 +187,9 @@ class TestInitAsksForExactlyThreeMountsOnlyOneWritable(_Stage):
         self.assertIn(f"{self.agent_rw}:/var/lib/wk/agent-rw:rw", argv)
 
     def test_no_empty_volume_hands_back_podmans_defaults(self):
-        """An empty --volume was how the mount list was emptied; with three
-        wanted mounts it would be a fourth, and podman's own /Users default is
-        what an argv that names none falls back to."""
+        """An empty --volume is a fourth mount, not an empty list, and an
+        argv that names no --volume at all gets podman's own defaults --
+        /Users first."""
         self.run_stage()
         self.assertNotIn('--volume  ', self.init_argv() + " ")
         self.assertNotIn("/Users:/Users", self.init_argv())
@@ -216,8 +220,8 @@ class TestAMachineWithTheWantedMountsIsLeftAlone(_Stage):
 
 
 class TestAMachineWithAnyOtherMountSetIsRecreated(_Stage):
-    """The recreate condition: no mounts at all (a machine made the old way),
-    or a mount this design does not want."""
+    """The recreate condition: no mounts at all, or any set other than the
+    three this design wants."""
 
     CASES = {
         "none": [],
@@ -227,8 +231,8 @@ class TestAMachineWithAnyOtherMountSetIsRecreated(_Stage):
 
     def setUp(self):
         super().setUp()
-        # The wanted set minus the writable one: a machine made before the
-        # agent credential directory existed, which is the case this converges.
+        # The wanted set minus the writable one: a machine that cannot rotate
+        # the agent credential, and has no mount to add it through.
         self.CASES = dict(self.CASES)
         self.CASES["no agent-rw"] = list(self.want()[:2])
 
@@ -311,6 +315,219 @@ class TestAMachineWithAnyOtherMountSetIsRecreated(_Stage):
         self.assertEqual(["stop", "rm", "init"], verbs, self.podman)
 
 
+# A `podman` whose `machine init` records each mount source the way the kernel
+# spells it rather than the way it was handed it -- which is what any
+# canonicalising path handling does, and what macOS's own /var -> /private/var
+# symlink does to every path under /var. $WK_TEST_CANON says how: `real`
+# resolves the source, `slash` puts a trailing slash on the target.
+FAKE_PODMAN_CANON = FAKE_PODMAN.replace(
+    'spec = argv[i + 1].split(":")',
+    'spec = argv[i + 1].split(":")\n'
+    '        import os\n'
+    '        how = os.environ.get("WK_TEST_CANON", "")\n'
+    '        if how == "real":\n'
+    '            spec[0] = os.path.realpath(spec[0])\n'
+    '        if how == "slash":\n'
+    '            spec[1] = spec[1] + "/"')
+
+# A `podman` that quietly adds a mount of its own to whatever it was asked
+# for: the only way this stage can read `differs` about a machine it has just
+# created with the right triples.
+FAKE_PODMAN_ADDS_A_MOUNT = FAKE_PODMAN.replace(
+    'json.dump({"Name": "wk", "Mounts": mounts}, open(cfg, "w"))',
+    'mounts.append({"Type": "virtiofs", "Source": "/Users",\n'
+    '               "Target": "/Users", "ReadOnly": False})\n'
+    'json.dump({"Name": "wk", "Mounts": mounts}, open(cfg, "w"))')
+
+
+class TestTwoSpellingsOfOnePathAreOneMount(_Stage):
+    """The verdict is `differs` for a machine whose mount *set* is not this
+    design's, and `differs` is what destroys a store. A machine created by this
+    very run reads back with whatever spelling podman recorded -- a resolved
+    symlink, macOS's /var -> /private/var, a trailing slash -- so a comparison
+    by string reports a fresh machine as wrong and `_check_mounts` then advises
+    `./setup`, which destroys and recreates it into exactly the same state.
+    That is a loop, and it eats a store each time round."""
+
+    def run_canon(self, how, podman=None, env=None):
+        e = {"WK_TEST_CANON": how}
+        e.update(env or {})
+        # The stub is chosen per-test; _Stage.run_stage installs FAKE_PODMAN,
+        # so this replaces it for the run.
+        import subprocess as sp
+        script = f'''
+set -euo pipefail
+WK_ROOT={self.wk_root}
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+is_macos() {{ return 0; }}
+. "{REPO}/host/macos/machine.sh"
+'''
+        base = dict(os.environ)
+        for var in ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND", "WK_MARKER",
+                    "WK_YES", "WK_STORE", "WK_IN_VM", "WK_DRY_RUN"):
+            base.pop(var, None)
+        base.update({
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "WK_HOST_SECRETS": str(self.secrets),
+            "WK_STORE": "/var/lib/wk",
+            "WK_TEST_VM": str(self.vm),
+            "WK_TEST_CFG": str(self.cfg),
+            "WK_TEST_PODMAN_LOG": str(self.log),
+            "WK_DEBUG": "1",
+        })
+        base.update(e)
+        with stub_path({"podman": podman or FAKE_PODMAN_CANON}) as binp:
+            base["PATH"] = f"{binp}:{os.environ['PATH']}"
+            cp = sp.run(["bash", "-c", script], cwd=str(REPO), env=base,
+                        capture_output=True, text=True, timeout=120)
+        self.podman = self.log.read_text()
+        return cp
+
+    @property
+    def wk_root(self):
+        return getattr(self, "_wk_root", REPO)
+
+    def test_a_symlinked_checkout_reads_ok_rather_than_differing(self):
+        """`WK_ROOT` is wherever this checkout is reached from, and a person
+        whose work tree is behind a symlink is not a person with a wrong
+        machine."""
+        link = self.tmp / "wk-tools-link"
+        link.symlink_to(REPO)
+        self._wk_root = link
+        cp = self.run_canon("real")
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("read-write (verified)", out)
+        self.assertNotIn("does not have this design's mounts", out)
+        self.assertNotIn("machine rm", self.podman, self.podman)
+
+    def test_a_trailing_slash_on_a_target_reads_ok_too(self):
+        cp = self.run_canon("slash")
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("read-write (verified)", out)
+        self.assertNotIn("machine rm", self.podman, self.podman)
+
+    def test_the_rows_are_still_the_machines_own_spelling(self):
+        """A person reading a refusal is looking for what is in the config
+        file, so the canonical form is only ever shown beside the raw one."""
+        self.exists()
+        write_cfg(self.cfg, [("/Users", "/Users", False)])
+        cp = self.run_stage()
+        self.assertIn("has /Users:/Users rw", cp.stdout + cp.stderr)
+
+
+class TestAFreshMachineThatStillDiffersIsAnInternalError(_Stage):
+    """The other half of the same hazard. If a machine created by this run
+    still reads back as a different set, the remedy is not `./setup`: the init
+    was handed these exact triples a moment ago, so re-running would destroy
+    and recreate it to reach the same place. It is this file's comparison that
+    is wrong, and the refusal has to say so and stop."""
+
+    def test_it_dies_naming_both_spellings_and_never_advises_a_re_run(self):
+        cp = self.run_stage(env={"WK_YES": "1"},
+                            podman=FAKE_PODMAN_ADDS_A_MOUNT)
+        out = cp.stdout + cp.stderr
+        self.assertNotEqual(cp.returncode, 0, out)
+        self.assertIn("internal error", out)
+        self.assertIn("was just created", out)
+        # Both spellings: what it asked for and what it reads back.
+        self.assertIn("asks %s" % self.agent_rw, out)
+        self.assertIn("has  /Users:/Users", out)
+        self.assertNotIn("Recreate it with:  ./setup", out)
+        self.assertIn("Do NOT re-run ./setup", out)
+
+    def test_the_ordinary_differs_still_names_the_remedy(self):
+        """Nothing above may be bought by an existing machine's refusal losing
+        the one thing that fixes it."""
+        self.exists()
+        write_cfg(self.cfg, [("/Users", "/Users", False)])
+        cp = self.run_stage()
+        out = cp.stdout + cp.stderr
+        self.assertIn("does not have this design's mounts", out)
+        self.assertNotIn("internal error", out)
+
+
+class TestADryRunTouchesNoDirectory(_Stage):
+    """`./setup --dry-run` reports what would change. The two mount-source
+    directories were made before anything checked for a dry run, so a report
+    created them."""
+
+    def test_neither_source_directory_is_created(self):
+        cp = self.run_stage(env={"WK_DRY_RUN": "1", "WK_YES": "1"})
+        out = cp.stdout + cp.stderr
+        for d in (self.secrets, self.agent_rw):
+            with self.subTest(dir=d.name):
+                self.assertFalse(d.exists(), f"{d} was created by a dry run:\n{out}")
+                self.assertIn("would create %s" % d, out)
+
+    def test_no_machine_is_created_either(self):
+        cp = self.run_stage(env={"WK_DRY_RUN": "1", "WK_YES": "1"})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("machine init", self.podman, self.podman)
+        self.assertIn("would be created", cp.stdout + cp.stderr)
+
+    def test_a_real_run_still_makes_them(self):
+        cp = self.run_stage()
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        for d in (self.secrets, self.agent_rw):
+            self.assertTrue(d.is_dir())
+
+
+class TestThePrivateModeIsAssertedEveryRun(WkTest):
+    """`ensure_dir <dir> 0700` chmod'ed only on the run that created the
+    directory, so one that already existed as 0755 -- made by an older wk, by
+    `mkdir -p` in a shell, or by a umask -- stayed readable by every other
+    account on the machine, for ever: the next run reported it unchanged.
+
+    These are the directories holding the private deploy keys, the GitHub API
+    token and the claude.ai login."""
+
+    def ensure(self, d, mode="0700", env=None):
+        return self.bash(f'. "$WK_ROOT/lib/common.sh"; ensure_dir "{d}" {mode}',
+                         env=env)
+
+    def test_an_existing_world_readable_directory_is_made_private(self):
+        d = self.tmp / "push-keys"
+        d.mkdir(mode=0o755)
+        os.chmod(d, 0o755)
+        cp = self.ensure(d)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(0o700, d.stat().st_mode & 0o777)
+
+    def test_a_new_one_is_private_from_the_start(self):
+        d = self.tmp / "fresh"
+        cp = self.ensure(d)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(0o700, d.stat().st_mode & 0o777)
+
+    def test_a_caller_that_names_no_mode_leaves_an_existing_one_alone(self):
+        """The assertion is the caller's, not this function's: `ensure_dir
+        <dir>` only asks for the directory, and a store shared by a group or a
+        home directory is not this call's to narrow."""
+        d = self.tmp / "shared"
+        d.mkdir(mode=0o775)
+        os.chmod(d, 0o775)
+        cp = self.bash(f'. "$WK_ROOT/lib/common.sh"; ensure_dir "{d}"')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(0o775, d.stat().st_mode & 0o777)
+
+    def test_a_dry_run_changes_neither_the_directory_nor_its_mode(self):
+        d = self.tmp / "existing"
+        d.mkdir(mode=0o755)
+        os.chmod(d, 0o755)
+        gone = self.tmp / "not-there"
+        cp = self.ensure(d, env={"WK_DRY_RUN": "1"})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(0o755, d.stat().st_mode & 0o777)
+        cp = self.ensure(gone, env={"WK_DRY_RUN": "1"})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertFalse(gone.exists())
+        self.assertIn("would create", cp.stdout + cp.stderr)
+
+
 class TestTheRightSetMountedTheWrongWayFailsLoudly(_Stage):
     """The mode of each mount is asked for at init; a podman that takes the
     option and drops it would leave a workspace able to rewrite this checkout
@@ -362,11 +579,11 @@ class TestAConfigItCannotReadIsRefused(_Stage):
 
 @requires_podman_vm()
 class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
-    """The live half: what the two mounts are for is that the VM and every
-    container can read them. Fails with the remedy on a machine made before
-    this design, which is what ./setup then fixes."""
+    """The live half: what the three mounts are for is that the VM and every
+    container can reach them. Fails with the remedy on a machine mounting
+    anything else, which is what ./setup then fixes."""
 
-    REMEDY = "run ./setup (it recreates the machine with the two mounts)"
+    REMEDY = "run ./setup (it recreates the machine with the three mounts)"
 
     def test_the_checkout_is_executable_at_opt_wk_tools(self):
         cp = podman_vm_ssh("test -x /opt/wk-tools/wk && echo yes")
@@ -404,7 +621,7 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
                       f"the machine cannot write /var/lib/wk/agent-rw: "
                       f"{cp.stdout}{cp.stderr}. {self.REMEDY}")
 
-    def test_the_two_read_only_mounts_are_read_only_in_the_vm(self):
+    def test_the_read_only_mounts_are_read_only_in_the_vm(self):
         """`--volume src:target:ro` is what host/macos/machine.sh asks for, and
         whether this podman honours the option is answerable only here: the
         kernel's own view of the mount, read without writing to it."""
@@ -451,6 +668,105 @@ class TestTheMountsAreThereOnThisMachine(unittest.TestCase):
                       f"a container cannot write and rename inside /agent-rw, so the "
                       f"Claude login credential cannot be rotated from a workspace: "
                       f"{cp.stdout}{cp.stderr}. {self.REMEDY}")
+
+
+class TestOtherMachinesAreRetiredFirst(_Stage):
+    """applehv runs one VM at a time, so a leftover machine does not merely
+    waste disk -- it stops the wk machine starting at all, with an error that
+    names neither machine. Removing one loses only that machine's own images
+    (machine storage is per-machine), so it is offered rather than done."""
+
+    OTHERS = '[{"Name":"podman-machine-default"},{"Name":"wk*"}]'
+
+    def _run(self, env=None):
+        self.exists()
+        write_cfg(self.cfg, list(self.want()))
+        e = {"WK_TEST_MACHINE_LIST": self.OTHERS}
+        e.update(env or {})
+        return self.run_stage(e)
+
+    def test_it_names_the_machine_that_is_in_the_way(self):
+        cp = self._run()
+        self.assertIn("obsolete podman machine 'podman-machine-default'",
+                      cp.stdout + cp.stderr)
+
+    def test_the_wk_machine_itself_is_never_one_of_them(self):
+        """podman marks the default with a trailing `*`; stripping it is what
+        keeps this from offering to delete the machine it is setting up."""
+        cp = self._run()
+        self.assertNotIn("obsolete podman machine 'wk'", cp.stdout + cp.stderr)
+        self.assertNotIn("machine rm -f wk\n", self.podman)
+
+    def test_yes_stops_it_and_removes_it(self):
+        cp = self._run(env={"WK_YES": "1"})
+        out = cp.stdout + cp.stderr
+        self.assertIn("machine stop podman-machine-default", self.podman, out)
+        self.assertIn("machine rm -f podman-machine-default", self.podman, out)
+        self.assertIn("removed podman machine 'podman-machine-default'", out)
+
+    def test_declining_keeps_it_and_says_what_that_costs(self):
+        """No terminal is a decline (lib/common.sh), which is the routine case
+        for a scripted run: nothing is destroyed without an answer."""
+        cp = self._run()
+        out = cp.stdout + cp.stderr
+        self.assertIn("keeping 'podman-machine-default'", out)
+        self.assertIn("will fail to start", out)
+        self.assertNotIn("machine rm -f podman-machine-default", self.podman)
+
+
+class TestTheResourceEnvelopeIsReapplied(_Stage):
+    """`podman machine set` needs the machine stopped, so re-applying the
+    envelope is three steps or none -- and the envelope is recomputed from
+    this host every run, since the host it was last applied on may not be
+    this one."""
+
+    def _envelope(self):
+        cp = subprocess.run(
+            ["bash", "-c", f'. "{REPO}/lib/common.sh"; . "{REPO}/lib/resources.sh"; '
+                           'printf "%s %s" "$(envelope_cores)" "$(envelope_mem_mb)"'],
+            cwd=str(REPO), capture_output=True, text=True, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.split()
+
+    def _run(self, cpus=None, mem=None, running=False):
+        self.exists()
+        if running:
+            (self.vm / "state").write_text("running\n")
+        write_cfg(self.cfg, list(self.want()))
+        env = {}
+        if cpus is not None:
+            env["WK_TEST_CPUS"], env["WK_TEST_MEM"] = cpus, mem
+        return self.run_stage(env)
+
+    def test_a_machine_already_at_the_envelope_is_left_alone(self):
+        cores, mem = self._envelope()
+        cp = self._run(cpus=cores, mem=mem)
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn(f"machine resources ({cores} cpus, {mem} MiB)", out)
+        self.assertNotIn("machine set", self.podman, self.podman)
+
+    def test_a_machine_that_differs_is_re_sized_and_says_what_it_kept_back(self):
+        cores, mem = self._envelope()
+        cp = self._run()
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn(f"machine set wk --cpus {cores} --memory {mem}", self.podman)
+        self.assertIn(f"machine resources -> {cores} cpus, {mem} MiB", out)
+        self.assertIn("host keeps", out)
+
+    def test_a_stopped_machine_is_not_started_to_re_size_it(self):
+        self._run()
+        verbs = [l for l in self.podman.splitlines() if l.startswith("machine start")]
+        self.assertEqual([], verbs, self.podman)
+
+    def test_a_running_one_is_stopped_first_and_started_again(self):
+        """Left stopped, a re-run of ./setup would have turned off a machine
+        somebody was building in."""
+        self._run(running=True)
+        order = [l.split()[1] for l in self.podman.splitlines()
+                 if l.startswith("machine ") and l.split()[1] in ("stop", "set", "start")]
+        self.assertEqual(["stop", "set", "start"], order, self.podman)
 
 
 class TestReportLossesStripsTheContainerPrefix(unittest.TestCase):

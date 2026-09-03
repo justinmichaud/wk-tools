@@ -131,6 +131,67 @@ class TestKeyMaterial(_Block):
         self.assertNotIn("$(t_src", block)
 
 
+class TestTheKeyScanRunsForReal(WkTest):
+    """The command the block hands `inside`, run against a real directory tree
+    shaped like a workspace -- because what it does *not* walk is the point,
+    and a table of canned answers cannot show that.
+
+    A guest's checkout is inside its home (t_src is /Users/<user>/WebKit), and
+    WebKit ships PEM fixtures, so a recursive grep of home fails every guest
+    and walks gigabytes doing it."""
+
+    PEM = "-----BEGIN OPENSSH PRIVATE KEY-----\nnot a real key\n"
+
+    def scan(self):
+        """The one command cmd/verify runs, lifted rather than retyped."""
+        i = VERIFY.index("material=$(inside \"")
+        j = VERIFY.index('")\n', i)
+        cmd = VERIFY[i + len('material=$(inside "'):j]
+        return cmd.replace('\\$', '$')
+
+    def home(self):
+        h = self.tmp / "home"
+        (h / "WebKit" / "Source" / "WebKit" / "test").mkdir(parents=True)
+        (h / "WebKit" / "Source" / "WebKit" / "test" / "cert.pem").write_text(self.PEM)
+        (h / ".ssh").mkdir()
+        return h
+
+    def run_scan(self, home):
+        cp = self.bash("HOME=%s\n%s" % (home, self.scan()))
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.strip()
+
+    def test_a_pem_in_the_checkout_is_not_reported(self):
+        home = self.home()
+        self.assertEqual("", self.run_scan(home),
+                         "the scan walked the checkout, so every guest fails it")
+
+    def test_a_key_in_dot_ssh_is_reported(self):
+        home = self.home()
+        (home / ".ssh" / "id_fork").write_text(self.PEM)
+        self.assertIn("id_fork", self.run_scan(home))
+
+    def test_a_key_dropped_at_the_top_of_home_is_reported(self):
+        home = self.home()
+        (home / "leaked_key").write_text(self.PEM)
+        self.assertIn("leaked_key", self.run_scan(home))
+
+    def test_a_credential_file_under_dot_claude_is_reported(self):
+        home = self.home()
+        (home / ".claude" / "deep").mkdir(parents=True)
+        (home / ".claude" / "deep" / "k").write_text(self.PEM)
+        self.assertIn("k", self.run_scan(home))
+
+    def test_it_never_names_the_checkout_and_so_needs_no_exclusion(self):
+        """Excluding t_src by name would be a second place the checkout's path
+        is decided; not recursing into home is the same guarantee with nothing
+        to keep in step."""
+        block = _Block.block(self)
+        self.assertNotIn("$(t_src", block)
+        self.assertNotIn("t_mirror_dir", block)
+        self.assertNotIn(r"grep -rl 'PRIVATE KEY' \$HOME ", block)
+
+
 class TestTheAgent(_Block):
     def test_an_identity_reaching_the_workspace_while_push_is_off_fails(self):
         out = self.run_block(push_on=False, answers={"ssh-add -l": "1"})

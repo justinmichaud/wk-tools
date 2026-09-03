@@ -16,8 +16,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import (REPO, WkTest, bash, fake_workspace, podman_vm_ssh,
-                           requires_podman_vm, run)
+from tests.support import (REAL_REGISTRY, REPO, WkTest, bash, fake_workspace,
+                           podman_vm_ssh, requires_podman_vm, run)
 
 
 class TestHelpAndList(WkTest):
@@ -397,6 +397,22 @@ config_load jsc-debug linux
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("load_target", cp.stdout + cp.stderr)
 
+    def test_an_unknown_kind_stops_the_load_rather_than_emptying_the_flag(self):
+        """A die inside a command substitution kills only the subshell, so the
+        answer is set in a variable: an unknown kind must not leave the build
+        configuring with an empty -DUSE_LIBBACKTRACE=."""
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load jsc-release linux bogus
+echo "SURVIVED $CFG_CMAKE"
+''')
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("SURVIVED", cp.stdout)
+        self.assertIn("unknown target kind 'bogus'", cp.stderr)
+
     def test_the_kind_falls_back_to_WK_TARGET_KIND(self):
         """The third argument is optional once load_target has run: every
         real caller (cmd/build and its siblings) omits it and relies on the
@@ -484,6 +500,30 @@ echo "$CFG_CMAKE"
         cmake = self._cmake("jsc-release", env={"WK_TARGET_LIBCXX": "0"})
         self.assertNotIn("-stdlib=libc++", cmake)
 
+    def test_present_with_WK_TARGET_LIBCXX_1(self):
+        """The value is read, not compared against 0: every conf in
+        targets/hosts carries the field, and `1` has to mean what it says."""
+        self.assertIn("-stdlib=libc++",
+                      self._cmake("jsc-release", env={"WK_TARGET_LIBCXX": "1"}))
+
+    def test_anything_else_is_refused_and_names_the_conf(self):
+        """A typo in a conf would otherwise be indistinguishable from `1`, and
+        the build it produces differs from every other machine's."""
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load jsc-release linux container
+echo SURVIVED
+''', env={"WK_TARGET_LIBCXX": "yes", "WK_TARGET": "moose"})
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("SURVIVED", cp.stdout)
+        self.assertIn("WK_TARGET_LIBCXX='yes'", cp.stderr)
+        # The conf the target registry in force actually names -- the suite
+        # points that at a scratch directory, so the file, not a fixed path.
+        self.assertIn("moose.conf", cp.stderr)
+
     def test_absent_for_apple_configs(self):
         """xcodebuild takes no -D flags at all (test_no_xcode_config_gets_them
         already covers this in general); restated here against the specific
@@ -510,6 +550,52 @@ for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_CMAKE=*) echo "$e" ;; esac;
                          f"the two CMAKE_CXX_FLAGS did not merge into one: {cp.stdout}")
         self.assertIn("-stdlib=libc++", cp.stdout)
         self.assertIn("-Wno-invalid-constexpr", cp.stdout)
+
+
+class TestARealHostConfReachesTheBuildFlags(unittest.TestCase):
+    """The two machine-decided defaults, read the way a build reads them: a
+    conf in targets/hosts, loaded by load_target, then config_load. The
+    per-config tests above set the variables directly; this is the path that
+    proves a conf's field actually arrives -- buildbox4 is the machine whose
+    fields differ from every other's."""
+
+    def _cmake(self, target, config="jsc-release"):
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/resources.sh"
+. "{REPO}/lib/store.sh"
+. "{REPO}/lib/target.sh"
+load_target {target} >/dev/null 2>&1
+. "{REPO}/build/configs.sh"
+config_load {config} "$(t_os)"
+echo "KIND=$CFG_KIND"
+echo "CMAKE=$CFG_CMAKE"
+''', env={"WK_TARGET_REGISTRY": str(REAL_REGISTRY)})
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        out = dict(l.split("=", 1) for l in cp.stdout.strip().splitlines()
+                   if l.startswith(("KIND=", "CMAKE=")))
+        return out["KIND"], out["CMAKE"]
+
+    def test_buildbox4s_conf_turns_libcxx_off_and_libbacktrace_with_it(self):
+        """Both come from that machine being a `remote` target with no libc++
+        package (measured there, and its conf says so)."""
+        kind, cmake = self._cmake("buildbox4")
+        self.assertEqual("remote", kind)
+        self.assertNotIn("-stdlib=libc++", cmake)
+        self.assertIn("-DUSE_LIBBACKTRACE=OFF", cmake)
+
+    def test_a_machine_whose_conf_says_1_gets_libcxx(self):
+        """The other side of the same field, from a conf that ships here."""
+        _kind, cmake = self._cmake("devbox-arm64-2")
+        self.assertIn("-stdlib=libc++", cmake)
+
+    def test_every_host_conf_carries_a_value_the_loader_accepts(self):
+        """A conf with a typo in the field would only be found by building on
+        that machine."""
+        for conf in sorted(REAL_REGISTRY.glob("*.conf")):
+            with self.subTest(machine=conf.stem):
+                self._cmake(conf.stem)
 
 
 class TestSdkImageCarriesLibbacktrace(unittest.TestCase):

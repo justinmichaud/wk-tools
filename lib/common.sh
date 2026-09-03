@@ -159,15 +159,36 @@ write_file() {
 # has none -- bash gives the assignment the substitution's status and carries
 # on -- and "==> create /var/lib/wk/push-keys" after `mkdir: Permission
 # denied` is a claim about a directory that does not exist.
+#
+# A caller that names a mode is *asserting* it, on every run and not only at
+# creation: `ensure_dir <dir> 0700` is how the directories holding the private
+# deploy keys, the API token and the claude.ai login are made private, and a
+# mode applied only on the run that created the directory leaves an existing
+# 0755 one readable by every other account on the machine for ever -- because
+# the next run reports it unchanged. A caller that names none is only asking
+# for the directory to exist, and an existing one's mode is its own business
+# (a store shared by a group, $HOME).
+#
+# WK_DRY_RUN (./setup --dry-run) reports and mutates nothing: neither the
+# directory nor its mode.
 ensure_dir() {
-    local d="$1" mode="${2:-0755}"
+    local d="$1" mode="${2:-}"
+    if [ -n "${WK_DRY_RUN:-}" ]; then
+        if [ -d "$d" ]; then
+            unchanged "dir $d"
+        else
+            log "dry run: would create $d (${mode:-0755})"
+        fi
+        return 0
+    fi
     if [ -d "$d" ]; then
         unchanged "dir $d"
     else
         mkdir -p "$d" || die "cannot create $d"
-        chmod "$mode" "$d" || die "cannot set mode $mode on $d"
+        chmod "${mode:-0755}" "$d" || die "cannot set mode ${mode:-0755} on $d"
         changed "create $d"
     fi
+    [ -z "$mode" ] || chmod "$mode" "$d" || die "cannot set mode $mode on $d"
 }
 
 # --- sizes -------------------------------------------------------------------

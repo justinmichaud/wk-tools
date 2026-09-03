@@ -7,7 +7,19 @@
 
 set -euo pipefail
 
-PIDFILE=/tmp/.wk-bridge.pid
+# Errexit is right for this file -- it wraps every `wk run` and `wk build`, and
+# a bridge that half-started must not look like one that started. But two of
+# the steps below are conveniences, not the boundary, and both write into the
+# temp directory: a full or read-only /tmp would abort every exec in the
+# workspace over a pidfile. Those two report and carry on (`warn`); everything
+# else still ends the run.
+warn() { printf 'wk: %s\n' "$*" >&2; }
+
+# ${TMPDIR:-/tmp} and not /tmp: one container has one TMPDIR, so this is the
+# same path on every exec through this wrapper, and a test can point it at a
+# directory it can make unwritable.
+WK_TMP="${TMPDIR:-/tmp}"
+PIDFILE="$WK_TMP/.wk-bridge.pid"
 BRIDGE=/opt/wk-tools/container/proxy/bridge.py
 
 # The PID alone is not proof: PIDs are recycled, and a match on an unrelated
@@ -19,8 +31,12 @@ bridge_alive() {
 }
 
 if ! bridge_alive; then
-    setsid python3 "$BRIDGE" >/tmp/.wk-bridge.log 2>&1 &
-    echo $! > "$PIDFILE"
+    setsid python3 "$BRIDGE" >"$WK_TMP/.wk-bridge.log" 2>&1 &
+    # The pid is how the *next* exec recognises this bridge; a bridge whose pid
+    # could not be recorded still serves this one, and the next exec starts
+    # another rather than leaving the workspace with no egress.
+    echo $! > "$PIDFILE" || warn "could not write $PIDFILE ($WK_TMP full?);
+    the next command in this workspace will start a second bridge"
     # The bridge binds before serving; a short wait avoids a spurious first
     # failure for whatever is about to use it.
     # WK_PROXY_PORT overrides the port to probe; bridge.py (started above)
@@ -47,15 +63,26 @@ fi
 # variables replace the trust store outright, so a bundle holding one
 # certificate would fail every other HTTPS request in the workspace.
 WK_CA_SRC=/run/wk/wk-github-ca.pem
-WK_CA_BUNDLE=/tmp/.wk-ca-bundle.pem
+WK_CA_BUNDLE="$WK_TMP/.wk-ca-bundle.pem"
 if [ -r "$WK_CA_SRC" ]; then
     if [ ! -s "$WK_CA_BUNDLE" ] || [ "$WK_CA_SRC" -nt "$WK_CA_BUNDLE" ]; then
-        cat /etc/ssl/certs/ca-certificates.crt "$WK_CA_SRC" > "$WK_CA_BUNDLE.$$" \
-            && mv "$WK_CA_BUNDLE.$$" "$WK_CA_BUNDLE"
+        if ! { cat /etc/ssl/certs/ca-certificates.crt "$WK_CA_SRC" > "$WK_CA_BUNDLE.$$" \
+               && mv "$WK_CA_BUNDLE.$$" "$WK_CA_BUNDLE"; }; then
+            # The half-written one goes: left behind, it accumulates one file
+            # per exec in the directory that was already full.
+            rm -f "$WK_CA_BUNDLE.$$"
+            warn "could not build $WK_CA_BUNDLE ($WK_TMP full?);
+    api.github.com will fail to verify in this workspace"
+        fi
     fi
-    export REQUESTS_CA_BUNDLE="$WK_CA_BUNDLE"
-    export CURL_CA_BUNDLE="$WK_CA_BUNDLE"
-    export GIT_SSL_CAINFO="$WK_CA_BUNDLE"
+    # Only a bundle that exists: these three replace the trust store outright,
+    # so naming a file that is not there fails every HTTPS request rather than
+    # the one this is for.
+    if [ -s "$WK_CA_BUNDLE" ]; then
+        export REQUESTS_CA_BUNDLE="$WK_CA_BUNDLE"
+        export CURL_CA_BUNDLE="$WK_CA_BUNDLE"
+        export GIT_SSL_CAINFO="$WK_CA_BUNDLE"
+    fi
 fi
 
 # What `git-webkit pr` authenticates with (webkitcorepy reads these two; the

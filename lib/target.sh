@@ -76,6 +76,13 @@ t_ccache_dir() { echo "/ccache"; }   # inert on the Apple ports (no ccache)
 # No mirror by default: a target that has one names it, and a fetch in a
 # target that does not names the upstreams instead (ws_fetch_script, cmd/sync).
 t_mirror_dir() { echo ""; }          # t_mirror_dir <name>
+
+# The two mirrors a workspace can be looking at, spelled once each. Two
+# drivers answer for each of them -- the one that *makes* the mirror, and
+# targets/local.sh, which answers from inside a workspace of that kind -- and a
+# second spelling is a fetch that silently goes to the network instead.
+mirror_in_container()    { echo "/mirror/WebKit.git"; }   # the host's, bind-mounted read-only
+mirror_beside_checkout() { echo "$1.git"; }               # <checkout>: a guest's own
 t_sync_tools() { :; }
 
 t_sync()       { :; }               # bring this target's own furniture up to date: its

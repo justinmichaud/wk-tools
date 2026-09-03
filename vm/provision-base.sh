@@ -136,9 +136,9 @@ fi
 # Same Claude config entries container/firstrun.sh links in a container;
 # missing them means a skip-permissions agent with no CLAUDE.md, settings or skills.
 #
-# Skills are a read-only symlink here, not a mutable volume: `wk build`
-# re-rsyncs with --delete, so an in-guest skill edit should fail to write
-# rather than silently vanish on the next sync.
+# Skills are a read-only symlink here, not a mutable volume: every start
+# resets ~/wk-tools to this tree's commit (tools_push), so an in-guest skill
+# edit should fail to write rather than silently vanish on the next start.
 if [ -d "$WK_TOOLS_DIR/claude" ]; then
     mkdir -p "$HOME/.claude"
     ln -sfn "$WK_TOOLS_DIR/claude/settings.json" "$HOME/.claude/settings.json"
@@ -149,6 +149,11 @@ if [ -d "$WK_TOOLS_DIR/claude" ]; then
 else
     echo "warning: $WK_TOOLS_DIR/claude missing; ~/.claude not configured" >&2
 fi
+# The same include every other machine gets (container/firstrun.sh,
+# remote/provision.sh, host/dotfiles.sh): the author identity and the git
+# settings wk relies on come from dotfiles/gitconfig, never from a hand edit.
+git config --global --replace-all include.path "$WK_TOOLS_DIR/dotfiles/gitconfig"
+say "git identity and settings included from $WK_TOOLS_DIR/dotfiles/gitconfig"
 
 # --- egress ---------------------------------------------------------------
 # Nothing about the proxy is written here. The base boots without Softnet, on

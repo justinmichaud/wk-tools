@@ -335,7 +335,7 @@ class TestPiSetupTailscaled(WkTest):
     (docs/defects). Run with `rsh` replaced by a local shell -- no board --
     and $DEST a temp directory standing in for the board's writable prefix."""
 
-    def _run(self, tailscaled_body, wait_seconds=0):
+    def _run(self, tailscaled_body, wait_seconds=0, writable=True):
         dest = self.tmp / "board"
         (dest / "tailscale-state").mkdir(parents=True)
         stub = dest / "tailscaled"
@@ -351,7 +351,15 @@ rsh() {{ bash -c "$*"; }}
 {lift("pi_setup_start_tailscaled")}
 pi_setup_start_tailscaled "{dest}" "--fake-flags"
 '''
-        return bash(script, timeout=15), dest
+        if writable:
+            return bash(script, timeout=15), dest
+        # A board whose writable prefix is not, which is the failure the
+        # install step reports. Put back before teardown removes the tree.
+        dest.chmod(0o555)
+        try:
+            return bash(script, timeout=15), dest
+        finally:
+            dest.chmod(0o755)
 
     def test_a_launch_that_never_creates_the_socket_dies_with_the_log_tail(self):
         cp, dest = self._run(
@@ -364,6 +372,16 @@ pi_setup_start_tailscaled "{dest}" "--fake-flags"
                       "the failed launch's own log is not in the die message")
         self.assertTrue((dest / "tailscale-state" / "tailscaled.log").exists(),
                         "the launcher's log is not written under $DEST")
+
+    def test_a_prefix_it_cannot_write_is_reported_at_the_install_step(self):
+        """The launcher cannot even be laid down, and `set -u` in the remote
+        script is what turns that into a non-zero exit rather than a script
+        that runs on to launch nothing. Reported here, by name, instead of
+        fifteen seconds later as a socket that never appeared."""
+        cp, _dest = self._run("#!/bin/sh\nexit 0\n", writable=False)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("could not install or start tailscaled on fakepi", cp.stderr)
+        self.assertNotIn("did not create", cp.stderr)
 
     def test_the_launcher_script_writes_its_log_under_dest_not_var_log(self):
         launch_sh = (

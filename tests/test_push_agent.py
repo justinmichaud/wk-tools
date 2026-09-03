@@ -1,10 +1,9 @@
 """The deploy keys live in an ssh-agent outside every workspace.
 
-`wk push` used to move key files between a mounted directory and an unmounted
-one. It now loads and empties an ssh-agent on the machine that runs the
-workspaces, and the private halves never leave this machine at all. The
-properties that matter, and that this file measures against a real
-`ssh-agent`:
+`wk push` loads and empties an ssh-agent on the machine that runs the
+workspaces; the private halves never leave this machine, and nothing moves on
+disk in either direction. The properties that matter, and that this file
+measures against a real `ssh-agent`:
 
   * the key bytes go in on STDIN -- never an argument (`ps` shows those to
     everyone on the machine) and never a file on the far side
@@ -208,6 +207,49 @@ class TestTheApiToken(_Agent):
         self.assertFalse(pat.exists())
 
 
+class TestAPathWithASpaceInIt(_Agent):
+    """Every one of these paths becomes part of a shell command line on the
+    machine that holds the workspaces, and a path is not a shell word: the
+    store root is `$WK_STORE` and a person's home directory can have a space
+    in it. Unquoted, `cat > $2` writes two files and `rm -f $2` removes the
+    wrong one -- and the wrong one here is a credential."""
+
+    def setUp(self):
+        super().setUp()
+        self.spaced = self.tmp / "a dir with spaces"
+        self.spaced.mkdir()
+        (self.held / "github-pat").write_text("ghp-not-a-real-token\n")
+
+    def test_the_token_round_trips_through_a_path_with_a_space(self):
+        pat = self.spaced / "push-github-pat"
+        cp = self.sh(f'push_agent_pat_write _fake_exec "{pat}"')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual("ghp-not-a-real-token\n", pat.read_text())
+        self.assertEqual([pat.name], [p.name for p in self.spaced.iterdir()],
+                         "the unquoted path made more than one file")
+
+        cp = self.sh(f'if push_agent_pat_present _fake_exec "{pat}"; '
+                     f'then echo present; else echo absent; fi')
+        self.assertIn("present", cp.stdout, cp.stdout + cp.stderr)
+
+        cp = self.sh(f'push_agent_pat_clear _fake_exec "{pat}"')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertFalse(pat.exists())
+
+    def test_the_resolved_path_is_what_the_store_says_and_carries_no_quotes(self):
+        """It reaches `wk push status` and `wk verify` as user-facing text, so
+        a shell word with its own quote characters in it is printed at a
+        person -- and the far side's quoting is push_agent_pat_*'s job."""
+        store = self.spaced / "store"
+        cp = bash('. "$WK_ROOT/lib/common.sh"\n. "$WK_ROOT/lib/store.sh"\n'
+                  'printf "[%s]\\n" "$(push_agent_machine_pat)"',
+                  env={**self.env(), "WK_STORE": str(store), "WK_PUSH_PAT_FILE": ""})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(f"[{store}/push-github-pat]", cp.stdout.strip())
+        self.assertNotIn('"', cp.stdout)
+        self.assertNotIn("$", cp.stdout)
+
+
 class TestTheSwitchEndToEnd(_Agent):
     """`wk push on|off|status` against the same real agent."""
 
@@ -239,8 +281,8 @@ class TestTheSwitchEndToEnd(_Agent):
         self.assertFalse((self.tmp / "pat").exists())
 
     def test_the_private_halves_never_move(self):
-        """The old switch moved files; this one must not, or a crash between
-        the two positions could leave a key in the mounted directory."""
+        """Nothing moves on disk: a switch that moved files could be killed
+        between the two positions and leave a key in the mounted directory."""
         before = sorted(p.name for p in self.held.iterdir())
         self.wk("push", "on")
         self.wk("push", "off")
@@ -272,6 +314,73 @@ class TestTheSwitchEndToEnd(_Agent):
         self.assertLess(body.index("push_agent_clear"), body.index("push_agent_list"))
 
 
+class TestAMachineWithNoAgentSaysSoRatherThanHeldBack(_Agent):
+    """A build box is a plain checkout with no container around it, so it names
+    no ssh-agent socket and `remote/provision.sh` points its `core.sshCommand`
+    straight at the private half. The key in `push-keys` is therefore *live*
+    there whatever any switch says -- and `status` reported it as "held back",
+    which is what `wk push off --all` then aggregated into a fleet reported as
+    off while that box could still push.
+
+    Installing an agent there is owed work (docs/HANDOFF-sandboxing.md); until
+    it lands, saying so is the honest report."""
+
+    MACHINE = "wk-test-buildbox"
+
+    def env(self, extra=None):
+        """A machine that *is* a build box: a `remote` target of its own, which
+        names no t_agent_sock (lib/target.sh's default is `return 1`), and a
+        `.wk-remote` marker saying so -- which is what remote/provision.sh
+        leaves behind and what makes `default_target` that target here."""
+        registry = self.tmp / "registry"
+        registry.mkdir(exist_ok=True)
+        (registry / f"{self.MACHINE}.conf").write_text(
+            "WK_TARGET_KIND=remote\n"
+            "WK_REMOTE_HOST=nonexistent.invalid\n"
+            f"WK_REMOTE_ROOT={self.tmp}\n")
+        marker = self.tmp / "wk-remote"
+        marker.write_text(f"target={self.MACHINE}\nroot={self.tmp}\n")
+        return super().env({"WK_TARGET_REGISTRY": str(registry),
+                            "WK_REMOTE_MARKER": str(marker),
+                            **(extra or {})})
+
+    def test_status_says_the_switch_does_not_exist_and_the_key_is_live(self):
+        cp = self.run_wk("push", "status", env=self.env())
+        out = cp.stdout
+        self.assertIn("always live", out)
+        self.assertNotIn("held back (", out)
+        self.assertIn("no ssh-agent socket", out)
+        self.assertIn("HANDOFF-sandboxing.md", out)
+
+    def test_that_position_is_on_so_a_fleet_is_not_reported_as_off(self):
+        """cmd/ai reads `push_switch status || return 0` as a closed switch, so
+        exit 1 here is the sentence "nothing can push" about a machine that
+        can."""
+        cp = self.run_wk("push", "status", env=self.env())
+        self.assertEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("cannot be switched off", cp.stdout)
+
+    def test_off_refuses_here_rather_than_claiming_to_have_thrown_it(self):
+        cp = self.run_wk("push", "off", env=self.env())
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("no ssh-agent socket", cp.stdout)
+        self.assertIn("HANDOFF-sandboxing.md", cp.stdout)
+        self.assertNotIn("push is OFF", cp.stdout)
+
+    def test_on_refuses_here_too(self):
+        cp = self.run_wk("push", "on", env=self.env())
+        self.assertNotEqual(0, cp.returncode, cp.stdout)
+        self.assertIn("no ssh-agent socket", cp.stdout)
+
+    def test_a_machine_that_does_have_one_still_says_held_back(self):
+        """The container target names a socket, so nothing above changes the
+        report on the machine the switch actually works on."""
+        cp = self.run_wk("push", "status", env=super().env())
+        self.assertIn("held back", cp.stdout)
+        self.assertNotIn("always live", cp.stdout)
+        self.assertEqual(1, cp.returncode, cp.stdout)
+
+
 class TestTheConfigEveryWorkspaceIncludes(_Agent):
     def test_on_and_off_both_write_it(self):
         """A workspace that cannot resolve the fork alias fails with a hostname
@@ -300,9 +409,9 @@ class TestTheConfigEveryWorkspaceIncludes(_Agent):
 
 
 class TestTheSourceHasNoMoveLeft(unittest.TestCase):
-    def test_move_keys_and_the_copy_walk_are_gone(self):
-        """Not merely unused: a second way to expose a key is a second thing to
-        get wrong, and `wk verify` no longer measures a key in the mount."""
+    def test_the_switch_names_no_file_move(self):
+        """A second way to expose a key is a second thing to get wrong, so the
+        switch has exactly one: the agent's contents."""
         src = (REPO / "cmd" / "push").read_text()
         for gone in ("move_keys", "purge_copies", "unreachable_copies", "$MOVED"):
             with self.subTest(gone=gone):
@@ -323,11 +432,16 @@ class TestTheSourceHasNoMoveLeft(unittest.TestCase):
         self.assertIn("NO", cp.stdout)
 
     def test_both_hosts_install_the_agent_unit(self):
+        """One body, installed by both (tests/test_host_units.py holds the
+        installer itself); what matters here is that the unit each host puts
+        on its machine runs an ssh-agent on the socket every container
+        bind-mounts."""
         for f in ("host/macos/vmtools.sh", "host/linux/sdk.sh"):
             with self.subTest(host=f):
-                text = (REPO / f).read_text()
-                self.assertIn("wk-ssh-agent.service", text)
-                self.assertIn("ssh-agent -D -a %t/wk/ssh-agent.sock", text)
+                self.assertIn("unit_install wk-ssh-agent.service ",
+                              (REPO / f).read_text())
+        body = (REPO / "host" / "units" / "wk-ssh-agent.service").read_text()
+        self.assertIn("ssh-agent -D -a %t/wk/ssh-agent.sock", body)
 
 
 def _machine(cmd, timeout=60):

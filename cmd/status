@@ -626,12 +626,13 @@ report_health() {
         rec_emit
     done
 
-    # --- the push switch, in words
-    # What this machine *holds*, from its own directories and only from here.
-    # Which position the switch is in is what the ssh-agent holds and whether
-    # the injector has the token (cmd/push), and neither is a file: asking
-    # would mean a hop into the machine on every `wk status`, so this reports
-    # the credentials and names the command that reports the switch.
+    # --- the credentials a push would need, in words
+    # Not the switch: what this machine *holds*, read from its own directories
+    # and nothing else. The switch's position is what the ssh-agent holds and
+    # whether the injector has the token (cmd/push), and neither is a file --
+    # asking would be a hop into the machine on every `wk status` -- so the row
+    # is named for what it measures and points at the command that answers the
+    # other question.
     if [ -z "${WK_IN_VM:-}" ]; then
         local keys=0 absent=0 r
         for r in $(wk_push_forks | awk 'NF {print $1}'); do
@@ -641,7 +642,7 @@ report_health() {
         if [ "$((keys + absent))" -gt 0 ]; then
             rec_start switch
             rec_set machine "$m"
-            rec_set name    "push"
+            rec_set name    "push credentials"
             if   [ "$keys" -gt 0 ] && [ "$absent" = 0 ]; then rec_set state "keys held"
             elif [ "$keys" -gt 0 ]; then rec_set state "some keys held"
             else rec_set state "no keys"; fi

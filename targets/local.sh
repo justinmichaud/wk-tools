@@ -33,15 +33,15 @@ t_os()    { wk_os; }
 t_tools() { echo "$WK_ROOT"; }
 
 # The mirror a fetch in here reads. It is a different object in the two kinds
-# of workspace this driver runs in, and each names the path its own driver
-# does: a container has the host's mirror bind-mounted read-only at /mirror
-# (targets/container.sh), a macOS guest carries its own beside the checkout,
-# inherited from the golden base (targets/vm.sh). `uname` is the evidence, the
-# same thing t_os answers from -- there is nothing else in here that knows.
+# of workspace this driver runs in, and neither path is spelled here: both come
+# from the one place that names them (lib/target.sh), which is also where the
+# container and vm drivers get them. `uname` is the evidence for which of the
+# two this is, the same thing t_os answers from -- there is nothing else in
+# here that knows.
 t_mirror_dir() {
     case "$(wk_os)" in
-        macos) echo "$_local_src.git" ;;
-        *)     echo "/mirror/WebKit.git" ;;
+        macos) mirror_beside_checkout "$_local_src" ;;
+        *)     mirror_in_container ;;
     esac
 }
 

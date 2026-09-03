@@ -96,8 +96,8 @@ class TestTheKeysAreReadFromHere(_KeyRun):
         self.assertIn("ssh-ed25519", cp.stdout)
 
     def test_fingerprints_say_whether_this_machine_holds_a_private_half(self):
-        """Where the private half is is no longer the switch: it is always in
-        the directory nothing mounts, and whether it is loaded is `wk push`."""
+        """Where the private half is is not the switch: it is always in the
+        directory nothing mounts, and whether it is loaded is `wk push`."""
         _cp, _secrets = self.key("ensure")
         held = self.tmp / "push-keys"
         (held / "build_key_forkwpe").unlink()

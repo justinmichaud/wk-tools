@@ -56,6 +56,22 @@ probe_store() {
     # stands, the only place the answer means anything.
     [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/broker.sock" ] \
         && echo broker=ok || echo broker=no
+    # The identity a commit made *here* would carry, and the settings that
+    # make `git status` in a WebKit checkout answer at all -- checked on this
+    # machine too, not only on the host that typed the command: on macOS this
+    # probe runs inside the podman VM (a separate account from the Mac's own
+    # ~/.gitconfig), which nothing today points at dotfiles/gitconfig. Same
+    # field names remote/probe.sh uses, so report_store's reader (below) is
+    # the one comparison every git.* blob in this file goes through. Emitted
+    # only when git is present, so an absent git.name= line (not merely an
+    # empty one) is how the reader tells "not installed" from "installed but
+    # unset".
+    if command -v git >/dev/null 2>&1; then
+        printf 'git.name=%s\n' "$(git config --get user.name 2>/dev/null || true)"
+        printf 'git.email=%s\n' "$(git config --get user.email 2>/dev/null || true)"
+        printf 'git.fsmonitor=%s\n' "$(git config --get core.fsmonitor 2>/dev/null || true)"
+        printf 'git.manyfiles=%s\n' "$(git config --get feature.manyFiles 2>/dev/null || true)"
+    fi
 }
 if [ "${1:-}" = --probe-store ]; then
     probe_store
@@ -210,6 +226,50 @@ if have git; then
     check "git speed settings (fsmonitor, manyFiles)" "./setup --stage dotfiles" git_speed_ok
 fi
 
+# The same identity/speed judgement as git_identity_ok/git_speed_ok above,
+# against a git.* blob probed from somewhere else -- the container target's
+# own machine (probe_store, above) and a running tart guest (below) both feed
+# it, so name/email/fsmonitor/manyFiles is decided once and cannot answer the
+# two differently. remote/deps.sh's wk_remote_findings makes the same
+# judgement for a shared build box, from its own probe (remote/probe.sh);
+# that probe and this one use the same git.* field names on purpose, but the
+# two comparisons are not merged into one function -- a build box's findings
+# are interleaved with its tool/package findings (one probe, one blob, one
+# reader), which nothing here needs.
+#
+# Findings, not printed rows: <state>\t<what>\t<remedy>, state one of
+# ok|wrong|note -- vm_base_findings/wk_remote_findings's own convention, so
+# every caller's ok()/miss()/unk() stays the one place deciding how a row
+# prints. `note` covers "git is not installed there": a doctor probe run
+# from outside has no standing to demand a shared machine install a tool wk
+# did not ask for, so this is reported, not counted as missing.
+git_config_findings() { # <label> <blob> <remedy>
+    local label="$1" blob="$2" remedy="$3" want have v
+    if ! printf '%s\n' "$blob" | grep -q '^git\.name='; then
+        printf 'note\t%s: git not installed there\t\n' "$label"
+        return 0
+    fi
+    for v in name email; do
+        want=$(git config --file "$WK_ROOT/dotfiles/gitconfig" --get "user.$v" 2>/dev/null || true)
+        have=$(kv_get "git.$v" <<<"$blob")
+        if [ -n "$want" ] && [ "$have" = "$want" ]; then
+            printf 'ok\t%s: git user.%s = %s\t\n' "$label" "$v" "$have"
+        elif [ -z "$have" ]; then
+            printf 'wrong\t%s: git user.%s is not set there\t%s\n' "$label" "$v" "$remedy"
+        else
+            printf "wrong\t%s: git user.%s there is '%s', not this repo's '%s'\t%s\n" \
+                "$label" "$v" "$have" "$want" "$remedy"
+        fi
+    done
+    if [ "$(kv_get git.fsmonitor <<<"$blob")" = true ] \
+       && [ "$(kv_get git.manyfiles <<<"$blob")" = true ]; then
+        printf 'ok\t%s: git speed settings (fsmonitor, manyFiles)\t\n' "$label"
+    else
+        printf 'wrong\t%s: git speed settings (fsmonitor, manyFiles)\t%s\n' "$label" "$remedy"
+    fi
+    return 0
+}
+
 # --- machine-local state: declared, never hidden ---------------------------------
 # The cattle-not-pets rule (CLAUDE.md): everything a rebuilt machine cannot
 # get from this repo is *declared here*, with how to get it back. Three
@@ -299,8 +359,8 @@ unset -f local_state
 # --- the store: mirror, snapshots, keys -------------------------------------------
 # Probed over one `podman machine ssh` on macOS -- and only if the machine is
 # already running, because doctor never starts anything.
-report_store() { # <probe output>
-    local out="$1" v
+report_store() { # <probe output> [container-machine git remedy]
+    local out="$1" gitremedy="${2:-}" v _gs _gw _gr
     v() { printf '%s' "$out" | sed -n "s/^$1=//p"; }
     [ "$(v mirror)" = ok ] && ok "WebKit mirror"          || miss "WebKit mirror" "wk sync"
     [ "$(v base)" = ok ]   && ok "base snapshot"          || miss "base snapshot" "wk sync"
@@ -322,6 +382,23 @@ report_store() { # <probe output>
     [ "$(v broker)" = ok ]  && ok "fleet-request broker reachable from workspaces" \
                            || miss "fleet-request broker reachable from workspaces" \
                                    "./setup --stage broker  (macOS: it also publishes the socket into the VM)"
+    # Only when the probe came from a genuinely different machine: on Linux
+    # this same probe runs locally, and its git.* fields are the exact fact
+    # the "config" section above already checked (git_identity_ok/
+    # git_speed_ok) -- printing it a second time here would be the same
+    # measurement read twice, not a second target.
+    if [ -n "$gitremedy" ]; then
+        while IFS="$(printf '\t')" read -r _gs _gw _gr; do
+            [ -n "$_gs" ] || continue
+            case "$_gs" in
+                ok)    ok "$_gw" ;;
+                wrong) miss "$_gw" "$_gr" ;;
+                note)  unk "$_gw" "$_gr" ;;
+            esac
+        done <<GITFINDINGS
+$(git_config_findings "container machine" "$out" "$gitremedy")
+GITFINDINGS
+    fi
 }
 
 section "workspaces store"
@@ -335,7 +412,8 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         out=$(podman machine ssh "$WK_MACHINE" -- \
             "WK_STORE=/var/lib/wk bash /opt/wk-tools/cmd/doctor --probe-store" 2>/dev/null || true)
         if [ -n "$out" ]; then
-            report_store "$out"
+            report_store "$out" \
+                "podman machine ssh $WK_MACHINE -- git config --global include.path /opt/wk-tools/dotfiles/gitconfig"
         else
             unk "store inside the VM" "/opt/wk-tools missing in the VM? run ./setup --stage sdk"
         fi
@@ -365,6 +443,41 @@ if is_linux; then
         *) miss "render group configured" "./setup --stage tools, then log out and in" ;;
     esac
 fi
+
+# Every currently-running tart guest's git.* fields, in the findings format
+# git_config_findings emits -- called with lib/target.sh and targets/vm.sh
+# already loaded (load_target vm), the same way vm_base_findings is. Reached
+# through t_exec, the same per-target exec `wk vm ls`/`wk enter` use, not an
+# ssh wrapper of doctor's own; a stopped guest is not reachable without
+# starting it, which doctor never does, so it is skipped rather than
+# reported unreachable, and one that does not answer over an established
+# exec is a `note`, not a `wrong` -- the same distinction remote/probe.sh's
+# reader draws for an unresponsive build box.
+#
+# A guest is a clone of the golden base, and vm/provision-base.sh puts the
+# include there; a guest without it was cloned from a base provisioned before
+# that, so the remedy is a refreshed base and a fresh clone, not a hand edit.
+VM_GIT_PROBE='command -v git >/dev/null 2>&1 || exit 0
+printf "git.name=%s\n" "$(git config --get user.name 2>/dev/null || true)"
+printf "git.email=%s\n" "$(git config --get user.email 2>/dev/null || true)"
+printf "git.fsmonitor=%s\n" "$(git config --get core.fsmonitor 2>/dev/null || true)"
+printf "git.manyfiles=%s\n" "$(git config --get feature.manyFiles 2>/dev/null || true)"'
+vm_guest_git_findings() {
+    local g state remedy blob
+    for g in $(target_workspaces 2>/dev/null); do
+        [ -n "$g" ] || continue
+        state=$(t_info "$g" 2>/dev/null || true)
+        [ "$state" = running ] || continue
+        remedy="wk vm base --refresh, then wk rm $g and wk new (a guest is a clone of the base)"
+        blob=$(t_exec "$g" sh -c "$VM_GIT_PROBE" 2>/dev/null) || blob=""
+        if [ -z "$blob" ]; then
+            printf 'note\t%s (tart guest): git config did not answer\t%s\n' "$g" "wk vm check $g"
+            continue
+        fi
+        git_config_findings "$g (tart guest)" "$blob" "$remedy"
+    done
+    return 0
+}
 
 # --- macOS VM target ---------------------------------------------------------------
 if is_macos && [ -z "${WK_IN_VM:-}" ]; then
@@ -403,6 +516,25 @@ $_base
 FINDINGS
         fi
         unset _base _state _what _remedy
+
+        # Running guests, git identity and speed settings: same reach
+        # (t_exec, through load_target vm) and the same subshell isolation
+        # as the golden base above, one call for every guest rather than a
+        # subshell per guest.
+        _gfindings=$( ( . "$WK_ROOT/lib/target.sh"
+                         load_target vm >/dev/null 2>&1
+                         vm_guest_git_findings ) 2>/dev/null ) || _gfindings=""
+        while IFS="$(printf '\t')" read -r _gstate _gwhat _gremedy; do
+            [ -n "$_gstate" ] || continue
+            case "$_gstate" in
+                ok)    ok "$_gwhat" ;;
+                wrong) miss "$_gwhat" "${_gremedy:-wk vm ls}" ;;
+                note)  unk "$_gwhat" "${_gremedy:-}" ;;
+            esac
+        done <<GFINDINGS
+$_gfindings
+GFINDINGS
+        unset _gfindings _gstate _gwhat _gremedy
     else
         unk "tart not installed" "README.md, Setup -- only needed for Apple-port builds"
     fi

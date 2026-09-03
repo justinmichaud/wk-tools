@@ -45,6 +45,22 @@ class TestHelpTopics(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("Provision a bridge phone", cp.stdout)
 
+    def test_the_credential_commands_have_a_section_of_their_own(self):
+        """The design of `wk key` and `wk push` is a section a person looks up
+        by the command's name, not prose inside the agent workflow: `wk help
+        push` and `wk help key` have to answer."""
+        for topic, must in (
+                ("push", ("wk push status", "ssh-agent", "github-inject")),
+                ("key", ("wk key set claude", "CLAUDE_CODE_OAUTH_TOKEN",
+                         "claude-login"))):
+            with self.subTest(topic=topic):
+                cp = run("help", topic)
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                for phrase in must:
+                    self.assertIn(phrase, cp.stdout)
+                # The section, not the whole document.
+                self.assertNotIn("## Architecture", cp.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

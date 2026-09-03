@@ -391,11 +391,10 @@ set|claude)
                 log  "  prints the file to write when a workspace has none."
                 ;;
             claude-login)
-                log  "    every container on this machine reads and rewrites this one"
-                log  "    file, because the CLI spends the refresh token in it and"
-                log  "    writes the rotated one back -- so one shared file, not a copy"
-                log  "    each. A macOS guest gets a copy, which is a second holder:"
-                log  "    a refresh there invalidates this one."
+                log  "    one shared file, not a copy each: every container on this"
+                log  "    machine reads and rewrites it. A macOS guest gets a copy,"
+                log  "    which is a second holder -- a refresh there invalidates this"
+                log  "    one."
                 ;;
         esac
         log  "  'wk key set $_name --replace' rotates it"
@@ -585,8 +584,8 @@ fingerprints)
         pub=$(pub_of "$remote")
         [ -n "$pub" ] || { printf '%-9s %-50s %s\n' "$remote" "-" "no key"; continue; }
         fp=$(printf '%s\n' "$pub" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
-        # Where the private half *is* is no longer the switch -- it is always
-        # in the one directory nothing mounts -- so what this can say is
+        # A private half is always in the one directory nothing mounts, so
+        # where it is says nothing about the switch: what this reports is
         # whether this machine holds one at all. Whether it is loaded into the
         # agent, and so whether a push works, is `wk push status`.
         priv=$(priv_of "$remote")

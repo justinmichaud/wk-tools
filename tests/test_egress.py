@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from tests.support import assert_guest_start_converges, REPO, WkTest
@@ -69,8 +70,11 @@ class FakeWriter:
 
 
 def _reader(data=b"", eof=True):
+    """A StreamReader already holding `data`. Built inside the running loop:
+    StreamReader binds the current event loop at construction."""
     r = asyncio.StreamReader()
-    r.feed_data(data)
+    if data:
+        r.feed_data(data)
     if eof:
         r.feed_eof()
     return r
@@ -216,8 +220,12 @@ class TestTheRouteAndTheCheckReadOneSpelling(unittest.TestCase):
 
         proxy.open_upstream = fake_open_upstream
         cwriter = FakeWriter()
-        asyncio.run(proxy.handle(
-            _reader(b"CONNECT %s HTTP/1.1\r\n\r\n" % target.encode()), cwriter))
+
+        async def drive():
+            await proxy.handle(
+                _reader(b"CONNECT %s HTTP/1.1\r\n\r\n" % target.encode()), cwriter)
+
+        asyncio.run(drive())
         return seen, bytes(cwriter.data)
 
     def test_every_spelling_of_the_api_reaches_the_injector(self):
@@ -341,6 +349,123 @@ class TestTheInjectorsRule(unittest.TestCase):
             self.assertIn("CA:FALSE", out)
 
 
+class TestTheInjectorSendsItsOwnHost(unittest.TestCase):
+    """The forwarded connection is a TLS session pinned to api.github.com and
+    carrying the real token. GitHub's front end routes on the Host header, so a
+    client-chosen one is a way to spend that token against a name the allowlist
+    refuses -- `Host: uploads.github.com` above all, which DENIED_HOSTS exists
+    to keep out."""
+
+    def setUp(self):
+        self.m = _load(INJECT, "wkinject")
+
+    def test_a_foreign_host_is_replaced_by_the_one_this_is_pinned_to(self):
+        out = self.m.rewrite_head(
+            b"POST /repos/x/y/releases HTTP/1.1\r\n"
+            b"Host: uploads.github.com\r\n"
+            b"Content-Length: 0", "ghp-x")
+        self.assertIn(b"Host: api.github.com\r\n", out)
+        self.assertNotIn(b"uploads.github.com", out)
+        self.assertEqual(1, out.count(b"Host:"))
+
+    def test_a_request_with_no_host_at_all_still_gets_one(self):
+        out = self.m.rewrite_head(b"GET /user HTTP/1.1", "ghp-x")
+        self.assertIn(b"Host: api.github.com\r\n", out)
+
+    def test_the_host_it_sends_is_the_host_it_verified(self):
+        self.assertIn(b"Host: " + self.m.INJECT_HOST.encode(),
+                      self.m.rewrite_head(b"GET / HTTP/1.1\r\nHost: evil.example", ""))
+
+
+class TestTheInjectorReadsOneRequestAndNoMore(WkTest):
+    """Everything past the first request head is relayed by nothing: a second
+    request on the same connection is a head this program never rewrote, so it
+    would reach GitHub carrying the client's own Authorization. And a header
+    line ended by a bare LF is one line to this program's `\r\n` split and two
+    to GitHub's parser -- the same smuggle, inside the first head."""
+
+    def _drive(self, client_bytes, upstream_reply=b"HTTP/1.1 204 No Content\r\n\r\n"):
+        """Injector.handle against a fake upstream: returns what the client
+        was sent and every byte that reached api.github.com."""
+        m = _load(INJECT, "wkinject")
+        pat = self.tmp / "pat"
+        pat.write_text("ghp-not-a-real-token\n")
+        inj = m.Injector(str(pat), None)
+        uwriter = FakeWriter()
+        cwriter = FakeWriter()
+        opened = []
+
+        async def fake_open_connection(host, port, **kw):
+            opened.append((host, port))
+            return _reader(upstream_reply), uwriter
+
+        async def drive():
+            await inj.handle(_reader(client_bytes), cwriter)
+
+        # patch.object, so the real `asyncio.open_connection` is restored even
+        # though this module and the injector share one `asyncio`: assigning it
+        # back by name after patching would store the fake for ever, and the
+        # next test in the process to open a connection would get it.
+        with unittest.mock.patch.object(asyncio, "open_connection",
+                                        fake_open_connection):
+            asyncio.run(drive())
+        return bytes(cwriter.data), bytes(uwriter.data), opened
+
+    def test_a_pipelined_second_request_never_reaches_github(self):
+        client, upstream, opened = self._drive(
+            b"POST /user HTTP/1.1\r\nHost: api.github.com\r\n"
+            b"Content-Length: 2\r\n\r\nhi"
+            b"GET /user HTTP/1.1\r\nHost: api.github.com\r\n"
+            b"Authorization: token ghp-the-workspaces-own\r\n\r\n")
+        self.assertEqual([("api.github.com", 443)], opened)
+        self.assertEqual(1, upstream.count(b"HTTP/1.1"), upstream)
+        self.assertNotIn(b"ghp-the-workspaces-own", upstream)
+        self.assertTrue(upstream.endswith(b"\r\n\r\nhi"), upstream)
+        self.assertIn(b"Content-Length: 2\r\n", upstream)
+
+    def test_the_declared_body_does_reach_it(self):
+        """The truncation is at the declared length, not at zero: a real
+        `git-webkit pr` is a POST with a JSON body."""
+        _, upstream, _ = self._drive(
+            b"POST /repos/x/y/pulls HTTP/1.1\r\nHost: api.github.com\r\n"
+            b'Content-Length: 11\r\n\r\n{"a":"bcd"}')
+        self.assertTrue(upstream.endswith(b'{"a":"bcd"}'), upstream)
+        self.assertIn(b"Content-Length: 11\r\n", upstream)
+
+    def test_a_bare_lf_header_is_refused_and_nothing_is_forwarded(self):
+        client, upstream, opened = self._drive(
+            b"GET /x HTTP/1.1\nAuthorization: token ghp-the-workspaces-own\r\n\r\n")
+        self.assertEqual([], opened, upstream)
+        self.assertEqual(b"", upstream)
+        self.assertIn(b"400 Bad Request", client)
+        self.assertIn(b"bare LF", client)
+
+    def test_a_chunked_body_is_refused_rather_than_guessed_at(self):
+        client, upstream, opened = self._drive(
+            b"POST /user HTTP/1.1\r\nHost: api.github.com\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            b"2\r\nhi\r\n0\r\n\r\n")
+        self.assertEqual([], opened, upstream)
+        self.assertIn(b"411 Length Required", client)
+
+    def test_two_content_lengths_are_refused(self):
+        client, _, opened = self._drive(
+            b"POST /user HTTP/1.1\r\nHost: api.github.com\r\n"
+            b"Content-Length: 2\r\nContent-Length: 40\r\n\r\nhi")
+        self.assertEqual([], opened)
+        self.assertIn(b"400 Bad Request", client)
+
+    def test_the_clients_own_framing_headers_never_go_on(self):
+        """This program states the length of what it actually relayed; the
+        client's Content-Length and Transfer-Encoding are dropped, so nothing
+        downstream can read a different end-of-request than this one did."""
+        _, upstream, _ = self._drive(
+            b"POST /user HTTP/1.1\r\nHost: api.github.com\r\n"
+            b"Content-Length: 2\r\n\r\nhi")
+        self.assertEqual(1, upstream.count(b"Content-Length:"), upstream)
+        self.assertNotIn(b"Transfer-Encoding", upstream)
+
+
 class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
     """Both targets set the same two variables and the same CA bundle, from the
     one wrapper each of them already goes through."""
@@ -352,6 +477,99 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         for var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"):
             with self.subTest(var=var):
                 self.assertIn(var, text)
+
+    def test_a_full_temp_directory_still_runs_the_command(self):
+        """ensure-bridge.sh wraps every `wk run` and `wk build`, and under
+        `set -euo pipefail` the pidfile write and the CA-bundle build abort the
+        whole exec when the temp directory cannot be written -- so a workspace
+        whose /tmp filled up could run nothing at all, and each attempt left
+        another `.wk-ca-bundle.pem.$$` behind in the directory that was full.
+
+        The three paths that exist only in a container (/opt/wk-tools, /run/wk,
+        the system CA bundle) are pointed at a scratch tree; every line under
+        test is the file's own.
+        """
+        import os
+        import stat
+        import tempfile
+        d = Path(tempfile.mkdtemp(prefix="wk-test-ro-tmp-"))
+        try:
+            tools = d / "wk-tools"
+            (tools / "shell").mkdir(parents=True)
+            (tools / "container" / "proxy").mkdir(parents=True)
+            (tools / "shell" / "path.sh").write_text(":\n")
+            (tools / "container" / "proxy" / "bridge.py").write_text(
+                "import time; time.sleep(30)\n")
+            runwk = d / "run-wk"
+            runwk.mkdir()
+            (runwk / "wk-github-ca.pem").write_text(
+                "-----BEGIN CERTIFICATE-----\nnot a real one\n")
+            sysca = d / "ca-certificates.crt"
+            sysca.write_text("-----BEGIN CERTIFICATE-----\nsystem\n")
+
+            script = d / "ensure-bridge.sh"
+            script.write_text(
+                (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
+                .replace("/opt/wk-tools", str(tools))
+                .replace("/run/wk/wk-github-ca.pem", str(runwk / "wk-github-ca.pem"))
+                .replace("/etc/ssl/certs/ca-certificates.crt", str(sysca)))
+
+            ro = d / "ro"
+            ro.mkdir()
+            os.chmod(ro, stat.S_IRUSR | stat.S_IXUSR)
+            cp = subprocess.run(
+                ["bash", str(script), "sh", "-c", "echo the-command-ran"],
+                env={**os.environ, "TMPDIR": str(ro)},
+                capture_output=True, text=True, timeout=60)
+            os.chmod(ro, 0o755)
+            left = sorted(p.name for p in ro.iterdir())
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertIn("the-command-ran", cp.stdout)
+        self.assertIn("wk:", cp.stderr, "it failed silently rather than saying so")
+        self.assertEqual([], left,
+                         "a half-written temp file was left in the full directory")
+
+    def test_a_writable_temp_directory_still_builds_the_bundle(self):
+        """The other side of the same branch: nothing above may be bought by
+        the bundle no longer being built where it can be."""
+        import os
+        import tempfile
+        d = Path(tempfile.mkdtemp(prefix="wk-test-rw-tmp-"))
+        try:
+            tools = d / "wk-tools"
+            (tools / "shell").mkdir(parents=True)
+            (tools / "container" / "proxy").mkdir(parents=True)
+            (tools / "shell" / "path.sh").write_text(":\n")
+            (tools / "container" / "proxy" / "bridge.py").write_text(
+                "import time; time.sleep(30)\n")
+            runwk = d / "run-wk"
+            runwk.mkdir()
+            (runwk / "wk-github-ca.pem").write_text("THE-INJECTORS-CA\n")
+            sysca = d / "ca-certificates.crt"
+            sysca.write_text("THE-SYSTEM-STORE\n")
+            script = d / "ensure-bridge.sh"
+            script.write_text(
+                (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
+                .replace("/opt/wk-tools", str(tools))
+                .replace("/run/wk/wk-github-ca.pem", str(runwk / "wk-github-ca.pem"))
+                .replace("/etc/ssl/certs/ca-certificates.crt", str(sysca)))
+            rw = d / "rw"
+            rw.mkdir()
+            cp = subprocess.run(
+                ["bash", str(script), "sh", "-c", 'echo "$CURL_CA_BUNDLE"'],
+                env={**os.environ, "TMPDIR": str(rw)},
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+            bundle = rw / ".wk-ca-bundle.pem"
+            self.assertEqual(str(bundle), cp.stdout.strip(), cp.stdout)
+            self.assertEqual("THE-SYSTEM-STORE\nTHE-INJECTORS-CA\n",
+                             bundle.read_text())
+            self.assertEqual([], sorted(rw.glob(".wk-ca-bundle.pem.*")))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_the_bundle_is_the_systems_plus_the_ca(self):
         """Those variables replace the trust store outright, so a bundle

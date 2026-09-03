@@ -299,6 +299,17 @@ hash and reports the machine as provisioned from this tree or as predating it,
 with `wk remote setup <target>` as the remedy. Read-only, over ssh, and it
 changes nothing on the machine.
 
+`wk doctor` checks git's author identity and speed settings
+(`core.fsmonitor`, `feature.manyFiles`) against `dotfiles/gitconfig` -- the
+one place this repo declares them -- everywhere it reaches, not only on this
+host: the container target's own machine (the podman VM on macOS, this host
+on Linux), every currently-running tart guest, and (`--all`) every build
+box. Each unset or diverging value is named with the command that installs
+the include there (`container/firstrun.sh` for a workspace,
+`remote/provision.sh` for a build box, `wk enter <name> -- git config
+--global include.path ...` by hand for a tart guest, since nothing provisions
+one yet); a machine that does not answer is unreachable, never broken.
+
 **Someone else's PR, a PR by number, a rebase**
 
 ```sh

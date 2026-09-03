@@ -10,306 +10,118 @@ Remember the goal: everything should be reproducable. It should be easy to reset
 NEEDS YOU
 ================================================================================
 
-1. Claude remote control cannot run on the credential every workspace gets.
-   Measured live in a fresh container (`wk new wk-livecheck`, 2026-09-02):
-   `claude remote-control` exits at once with "Remote Control requires a
-   full-scope login token. Long-lived tokens (from `claude setup-token` or
-   CLAUDE_CODE_OAUTH_TOKEN) are limited to inference-only for security reasons.
-   Run `claude auth login`". So the one-token-per-machine design (`wk key set
-   claude`) and remote-control-on-by-default (`wk new`, `wk start`) contradict
-   each other, and every `wk new` has been printing a warning. Three shapes:
-   (a) turn remote control off by default and keep the token -- one line,
-   `wk ai claude <ws> --rc` stays for a workspace where you ran `claude auth
-   login` once by hand; (b) deliver a full-scope login (the ~/.claude
-   credentials file `claude auth login` writes, Linux containers only -- it is
-   the shared credentials file removed this run) beside the token, for remote
-   control alone; (c) both. (a) is honest today; (b) widens what an agent holds
-   to a credential that can post as you. `wk ai claude --rc` now reports the
-   refusal with the log's last line instead of "running". [decision]
+1. A tart guest is a second holder of the claude.ai login. The Claude CLI
+   rotates the refresh token on every refresh (measured in the CLI: the new
+   refreshToken replaces the stored one under a compare-and-swap, and a
+   superseded one is answered invalid_grant and blanked). Every container on
+   a machine therefore shares ONE writable file (~/.config/wk/agent-rw,
+   mounted rw) and the CLI's own .storage-write lock serialises them. A
+   guest mounts nothing of the host, so `wk vm start` writes it a COPY and
+   warns: a refresh in that guest invalidates the file every container
+   shares, and vice versa. Shapes: (a) accept it -- use claude in a guest or
+   in containers, not both at once; (b) pass the agent-rw directory into the
+   guest with `tart run --dir` (the guest then mounts one host directory,
+   which targets/vm.sh today forbids by design); (c) a per-guest login
+   (`claude auth login` inside the guest, no copy). [decision]
 
-Do B. Agents should be able to interact with anthropic just fine.
+2. With push on, the api.github.com injector authenticates whatever the
+   workspace sends (Host is forced to api.github.com, Authorization is
+   replaced, one request per connection), so a workspace can use the whole
+   API as your account, not only open a pull request. Restricting method or
+   path (e.g. GET anywhere, POST only to /repos/*/pulls) is a policy table in
+   container/proxy/github-inject.py. Restrict, or leave whole-API while push
+   is on? [decision]
 
-   
-
-2. Containers hold no GitHub credential, by design: `wk pr` runs on the host,
-   the egress proxy refuses api.github.com and uploads.github.com, and the
-   sandbox's premise is that nothing in a workspace can post as you. You asked
-   for the WebKit PR credentials to be copied in. That is the one credential the
-   sandbox exists to withhold: with it, an agent's `gh pr create` or `git-webkit
-   pr` publishes under your name. Two honest shapes: (a) keep `wk pr` on the host
-   and add whatever step is actually missing in the workspace -- name the step
-   you hit; or (b) a scoped, read-only token delivered like the deploy keys
-   (present while push is on, withdrawn while an agent runs), with the proxy
-   allowing api.github.com for GET only -- days of work, and it widens the
-   sandbox. Nothing is done until you choose. [decision]
-
-Inside a container, I should be able to push and do git-webkit pr. This should be able to be toggled off, and it should be disabled automatically whenever claude runs. I should be able to run wk ai claude/pi inside the container, and it should verify this fact.
-
-The credentials must be moved outside the container, otherwise the agent can still find them.
-
-The proxy should be widened, we can focus just on the credentials.
-
-This should work on macOS vms too.
-   
-
-3. `wk push on|off` starts the podman machine even when the work is entirely
-   about a tart guest, and there is no honest way around it today: measured with
-   a stub `podman` on PATH, `on` and `off` reach `podman machine start` (the
-   dispatcher's one forward) and `status` does not (its readonly declaration).
-   `off` would not need the store at all -- removing a guest's copy is a `rm` in
-   the guest -- but `on` cannot be done without it, because the key bytes exist
-   nowhere else on this machine. So the start is now stated rather than
-   silent ("the deploy keys live in the podman machine's store, so this reaches
-   into it").
-
-   The one real fix: make the macOS host's own secrets directory the store the
-   podman machine *mounts*, instead of keys living inside the machine's disk.
-   Then `wk push`, `wk key set` and every guest's key and token need no running
-   VM at all, and the three `podman machine ssh` hops in lib/store.sh go.
-   Assessment of cost: it is a `./setup`-time change to how the machine is
-   created (`podman machine init --volume`), so it lands only on a machine that
-   is recreated -- which is the "no in-place upgrades" rule working as intended,
-   but it means one deliberate recreate of the `wk` machine, and the secrets in
-   the current machine's /var/lib/wk have to be re-registered (`wk key
-   register`, `wk key set claude`) rather than migrated, since nothing here
-   copies a credential between stores. Everything else about the store stays
-   where it is. Say the word and it goes in `./setup`. [decision]
-
-   This should go in setup, and setup should tear down any secrets already on the machine or from a previous version of wk. Not in-place: destroy and re-create.
-
-4. buildbox4 has no libc++, so the `-stdlib=libc++` flags you asked for cannot
-   go in. Measured: `clang++ -stdlib=libc++` there cannot find <string>, and
-   `gtk-release` builds fine against the system libstdc++ (it did, in 3m00s,
-   while this was being written). The generic half of your flag list is now the
-   default for every CMake config (build/configs.sh, _CFG_DEFAULT_ARGS /
-   _CFG_DEFAULT_CMAKE); the libc++ half is not applied anywhere, and
-   targets/hosts/buildbox4.conf records why.
-
-   To have it: `sudo apt-get install -y libc++-19-dev libc++abi-19-dev` on
-   buildbox4 (theirs to run, or ask), then say so and it goes in the conf.
-   Or was that flag list copied from a different machine? [decision]
-
-   This was already decided on, clang was using gcc's libc. gtk-release takes 40min to build, so I question your results.
-
-5. The new default flags are verified as far as `cmake` -- the whole set
-   configures cleanly on buildbox4 for GTK with clang 19, in a scratch build
-   directory that was then removed. A compile-and-link verification is owed and
-   was not started: buildbox4's load average is 142, `wk build` derives 1 job
-   from that, and `-DUSE_LIBBACKTRACE=OFF` (previously ON there) invalidates
-   the whole tree -- a full rebuild at -j1 in your workspace. Say when the box
-   is quiet, or when to just do it anyway. [decision]
-
-Keep the flags. This command is known-working: CMAKE_BUILD_PARALLEL_LEVEL=40 CC=clang-19 CXX=clang++-19 nice ./Tools/Scripts/build-webkit --release --gtk --asan --export-compile-commands --cmakeargs="-DCMAKE_BUILD_TYPE=RelWithDebInfo -DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF -DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ " --no-fatal-warnings --makeargs="-j40"
-
-6. "Never rsync wk tools, always use git" now holds for the two machines reached
-   over ssh: a build box ($ROOT/tools) and a tart guest (~/wk-tools) each carry
-   a git checkout at this tree's HEAD (lib/tools.sh, on every `wk vm start`, `wk
-   sync --tools`, `wk remote setup`, and before `wk build`/`wk test` on a vm
-   target), and the push refuses while this tree is dirty. One consequence: `wk
-   build <guest>` on a vm target refuses while wk-tools has uncommitted edits,
-   naming the commit as the remedy. The third copy, host/macos/vmtools.sh ->
-   the podman VM (/opt/wk-tools), is still rsync: it is what every container
-   workspace mounts and what `wk pr`, `wk build` and friends run when they
-   forward into the VM, so refusing a dirty tree there means no container
-   command can be tested against an uncommitted wk-tools edit at all -- and an
-   agent cannot commit. Does the rule cover the podman VM too? [decision]
-
-The previous decision invalidates this.
-
-7. moose's ~/Development/wk-tools has uncommitted edits
-   (bench/mac-ab-summary.sh, cmd/bench, cmd/pi, cmd/status, lib/bench.sh,
-   lib/common.sh, lib/wkdata.py) that are not in this tree. Nothing here has
-   touched them and `wk sync --tools` has not been run. Yours to commit or
-   discard. [decision]
-
-   Done
-
-8. `MACH_` is being renamed (it collides with macOS's own "mach"). Proposed
-   `NODE_`: boot/machines/<name>.conf becomes NODE_SSH, NODE_DEVICE, NODE_LOCAL,
-   and machine_load/machine_list keep their names. It is one sed over ~700
-   occurrences in 35 files -- and it is being held for two reasons, not one: the
-   word is yours to pick, and a rename that size would collide with moose's
-   uncommitted edits to cmd/status, cmd/pi and lib/common.sh (item 6). Resolve 6
-   first, then say the word. [decision]
-
-   Do it now.
-
-9. The tart guest password becomes `1` as asked, which means provisioning
-   actually changes the account password (the Cirrus images ship admin/admin
-   and `sysadminctl` needs the current one). Confirm the guest account is
-   throwaway in the sense that matters: nothing on the tailnet trusts it, and
-   `wk rm` destroys it. [decision -- proceeding on yes unless you say otherwise]
-
-   Yes and record this fact in the documentation (not in handoffs). Every singe machine and workspace is disposable in this sense, except remote machines (not managed by me), and workspaces with uncommitted/unpushed changes.
-
-10. jsc-debug lost `-DUSE_LIBBACKTRACE=ON` in commit 027607f, which was not
-   made from here, while its own one-line description still said
-   "libbacktrace" -- so the config and the listing disagreed. The listing now
-   matches the code (jsc-debug: "JSCOnly, Debug, assertions on"), on the rule
-   that the machine wins. gtk-debug still asks for libbacktrace. If jsc-debug
-   is meant to have it, putting the flag back is one word; if the removal was
-   because the library is not on every machine, then gtk-debug's copy should go
-   the same way. Which? [decision]
-
-   libbactrace should be on for every machine we setup, but off for remote targets by default.
-
-11. `wk key tailnet` now refuses an API access token and an OAuth client secret
-   by name (both start `tskey-`, both administer the whole tailnet, and this
-   key is copied onto every card written from here). What it cannot check from
-   a key -- tagged, reusable, not ephemeral, expiry -- it reports as unverified
-   with the console link, because answering those needs an API token, which is
-   the credential it just refused to hold. Nothing further is checkable without
-   holding one. Good enough, or do you want a read-only API token stored for
-   it? [decision]
-
-   Good enough.
+3. buildbox4 has no libc++ (measured 2026-09-03: clang++ and clang++-19 are
+   the same Debian clang 19.1.7 binary; `-stdlib=libc++` cannot find
+   <string>; dpkg lists libstdc++-14-dev only). The libc++ flags are the
+   default for every Linux clang config and `WK_TARGET_LIBCXX=0` in
+   targets/hosts/buildbox4.conf turns them off there, with that reason. Your
+   reference command uses them, so it was run somewhere else or before the
+   package went away. `sudo apt-get install -y libc++-19-dev libc++abi-19-dev`
+   there, then delete the line. Also measured there: gtk-release took 25m42s
+   (build.status in your image-decoders workspace, -j64, no ccache), not
+   3m00s and not 40m. [decision]
 
 ================================================================================
 OWED, WITH THE DECISION ALREADY MADE
 ================================================================================
 
-- `wk rm br-rescue2` (or `podman rm`) -- the Exited container on this Mac's
-  host podman connection. You said to go ahead; not done yet.
+- The podman machine recreate (yours: the classifier refuses it from an
+  agent). `./setup --stage machine --dry-run` reports what goes: the test
+  leftover wk-test-isvvgw, 14G mirror, 21G base snapshots, 26G cache, an
+  empty bench. Before destroying, the current machine holds the only copy of
+  the two deploy keys; either re-register them (`wk key register`, then add
+  the new public keys to the forks on GitHub) or carry them across by hand
+  first:
+      podman machine ssh wk -- tar -C /var/lib/wk -cf - secrets \
+        | tar -C ~/.config/wk -xf -      # then move build_key_* (private
+                                          # halves) into ~/.config/wk/push-keys
+  Then:
+      claude auth login          # if not already
+      wk key set claude-login
+      wk key set github-pat
+      WK_YES=1 ./setup           # destroys and recreates wk with three mounts
+      wk sync
+      env -u WK_NAME -u WK_TARGET -u WK_TARGET_KIND python3 -m unittest \
+        tests.test_machine_mounts tests.test_push_agent tests.test_build
+  The two unverified assumptions those tests settle: applehv honours `:ro`
+  on a `--volume`, and a container's own uid can write+rename inside the
+  agent-rw virtiofs mount. If the second fails, `wk_agent_rw_dir` gets a
+  VM-local answer plus a seed step; nothing downstream changes.
 
-- Run `wk vm base --rebuild` (hours): the golden base on this machine predates
-  its own provisioning inputs, so every guest cloned from it still carries the
-  image's admin password rather than the one wk sets, and the wk-tools a build
-  happened to leave in it. `wk vm ls` says so under BASE, `wk new --target vm`
-  warns before cloning it, and `wk doctor` reports it -- each naming this same
-  rebuild. Nothing in a guest is wrong that the rebuild does not fix.
+- Live check after the recreate: `wk new <ws>`; `wk push on`;
+  `podman machine ssh wk -- 'SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/wk/ssh-agent.sock ssh-add -l'`;
+  in the workspace `git push --dry-run fork HEAD` and
+  `curl -sS -o /dev/null -w '%{http_code}\n' https://api.github.com/user`
+  (200); `wk verify <ws>`; `wk push off`; the curl again (401);
+  `wk verify <ws>`; `wk ai claude <ws> --rc` starts and survives 60s.
+  A workspace created before this change keeps its old ~/.ssh/config; one
+  `wk rm`/`wk new` converges it.
+
+- `wk rm br-rescue2` (or `podman rm`) -- the Exited container on this Mac's
+  host podman connection. Refused from an agent.
+
+- `wk vm base --rebuild` (hours). The failure at its end is fixed
+  (config_load now gets the platform; a prebuild failure can no longer unmake
+  a provisioned base; the password change is verified by `dscl -authonly`,
+  not by sysadminctl's exit status). Owed live on a real guest: the rebuild
+  itself, the guest mirror's first fetch (targets/vm.sh puts a bare mirror
+  carrying all four remotes in the base; a workspace is a --shared clone of
+  it), the password actually becoming `1`, and the gitconfig include that
+  provisioning now installs.
 
 ================================================================================
 STILL OPEN
 ================================================================================
 
-- Measured live on this Mac (2026-09-02): `wk sync --tools` refuses the dirty
-  tree for buildbox4 and devbox-arm64-2 (the rule, working); moose refuses the
-  pull because of its own uncommitted edits (NEEDS YOU 6); and the mirror
-  update on devbox-arm64-2 fails with `could not read Username for
-  'https://github.com'` -- that box cannot reach GitHub over https without
-  credentials, so its per-machine mirror never refreshes. Not wk's to fix by
-  itself: the box needs a route to github.com (a proxy, or a credential
-  helper), and until then `wk sync --tools devbox-arm64-2` reports the mirror
-  as failed, as it did.
+- The `remote` target has no ssh-agent, so `wk push` on a build box reports
+  "always live, no switch on this machine" (remote/provision.sh points
+  core.sshCommand at the private half). Installing wk-ssh-agent.service there
+  through host/units.sh is the owed work (docs/HANDOFF-sandboxing.md).
 
-  It should be able to reach github, it has worked in the past. There are ongoing issues with github at the moment.
+- devbox-arm64-2's mirror update fails with `could not read Username for
+  'https://github.com'`. Retry when GitHub is healthy; if it persists, the
+  box has lost its route or credential helper.
 
-- Live check owed on a real tart guest: `wk push on`, then a `git push fork` in
-  the guest actually reaching GitHub through the ProxyCommand, and `wk push off`
-  taking the key back out of it. Everything about it is measured against a fake
-  guest (a scratch directory a stub ssh runs the real remote commands against),
-  which cannot prove that macOS's `nc -X connect` and wk-proxy agree about
-  CONNECT to port 22, or that the guest's own account can read the key.
-
-- BASE still reads `?` for a workspace on buildbox4: that machine's tooling
-  predates `ws_upstream_line` and answers the delegated listing itself, so it
-  reads correctly only once `wk sync --tools buildbox4` puts this tree's
-  commit there -- which needs a committed tree.
+- BASE still reads `?` for a workspace on buildbox4 until
+  `wk sync --tools buildbox4` puts this tree's commit there (needs a
+  committed tree, which you now have).
 
 - Confirm layout tests can run headless and with a real GPU.
 
-- Confirm ccache still caches across a change of -j. (Nothing in the flags wk
-  sets varies with the job count -- CCACHE_* is fixed and -j reaches ninja, not
-  the compiler line -- but that is an argument, not a measurement.)
+- Confirm ccache still caches across a change of -j (an argument, not a
+  measurement: nothing wk passes the compiler varies with the job count).
 
-A previous agent made this claim FYI
+- Live measurement owed on a real tart guest: `wk vm check <name>`'s resident
+  shells / editor server report, and which Software Update key a tahoe guest
+  obeys (TODO in vm/desktop.sh).
 
-- `wk sync <ws>` on a build machine still fetches its four remotes over the
-  network, though that machine keeps a bare mirror of its own beside the
-  workspace (targets/remote.sh, `_remote_mirror_update`). The fetch already
-  prefers a local copy when the checkout has one in reach, so this is one
-  argument -- the path from `t_wiring_args` -- away; what stops it is that
-  the build machine's mirror carries only origin's `main`, so taking it
-  would silently stop carrying the forks' branches. Carrying
-  wk_mirror_default_remotes into that mirror is the fix, and it costs disk
-  on every build box.
+- Guest egress from inside a guest is unmeasured (TODO in cmd/verify); the
+  credential and GPU checks run there now.
 
-It doesn't cost disk space, it saves it, no?
-
-- Live measurement owed on a real tart guest: `wk vm check <name>` now reports
-  what is resident in there -- shells, an editor remote server that outlives its
-  window, agents, the memory macOS itself says is free, and swap -- against
-  thresholds (WK_VM_SHELLS_WARN, WK_VM_MEM_FREE_WARN_PCT, WK_VM_SWAP_WARN_MB).
-  Nothing wk runs in a guest can leave a shell behind (t_exec is one `bash -lc`,
-  t_exec_tty and t_enter exec an ssh that ends with the connection, and this
-  driver's ssh sets no ControlPersist master), so the report names the editor's
-  remote server as the thing that keeps them: that has to be confirmed on the
-  guest that ran out, not against the captured `ps` sample the arithmetic is
-  tested on.
-
-- Live measurement owed on a real tahoe guest: which Software Update key the
-  offer actually obeys -- see the TODO in vm/desktop.sh.
-
-- wk vm base --rebuild fails:
-...
-✅ Installation complete!
-
-==> Claude config linked from /Users/admin/wk-tools/claude
-==> password set for admin
-warning: the screen lock is left as it is: admin's password here is not the
-  one this run was given, so offering it to sysadminctl would be a guess.
-  'wk vm check <name>' reports the lock; a rebuilt base sets the password.
-==> desktop settled
-==> warming webkitpy's autoinstalled packages
-==> autoinstalled: 7.6M
-==> base provisioning complete
-error: config_load 'mac-release': no platform given. It is the
-    target's t_os, so load_target has to run first -- on macOS a config does
-    not choose its own build system (build/configs.sh).
-
-- git fetch origin in a tart guest is very slow. Each time I report a bug to you, it only gets fixed in one place. Check everywhere this time, test everywhere.
-
-- wk pi setup rpi5 should refuse to run if pi5 is already claiming workstation role.
-
-It also seems like it doesn't bail on error:
-
-wk pi setup rpi5
-==> probing rpi5
-  arch=aarch64 kernel=7.0.6-1-numa -> tailscale_1.102.2_arm64
-  writable prefix: /tmp
-  /dev/net/tun present -> kernel networking
-==> installing tailscale 1.102.2 on rpi5
-/tmp/tailscale-up.sh: 6: cannot create /var/log/tailscaled.log: Permission denied
-==> bringing the node up as tag:wk
-failed to connect to local tailscaled (which appears to be running as tailscaled, pid 1368). Got error: Failed to connect to local Tailscale daemon for /localapi/v0/status; not running? Error: dial unix /tmp/tailscale-state/tailscaled.sock: connect: no such file or directory
-error: tailscale up failed on rpi5 (exit 1).
-    A key that is single-use, untagged, or expired fails exactly here; the node
-    is left with tailscaled running and no identity, and re-running this is safe.
-
-Check every script. Confirm they all handle errors correctly.
-
-- Go through each script and remove parts that are dead. Every extra branch that is untested or not regularly used is problematic. No hacks, no spaghetti. Remove comments that are verbose or not relevant. Unless a comment is extremely useful, verified, and cannot be expressed by making the code or architecture more clear, remove it. Prefer restructuring code over comments.
-
-
-- sync is still broken:
-
-tolken:host ~/Development/wk-tools main ❯ wk sync --tools moose
-Updating 2f9963c..3c92e8d
-Fast-forward
- docs/defects | 21 +++++++++++++++++++++
- 1 file changed, 21 insertions(+)
-From github.com:justinmichaud/wk-tools
-   2f9963c..3c92e8d  main       -> origin/main
-  moose                    pulled, still DIFFERS (5c96554a49c4, this machine has 2def6b7eba77)
-                           both are at origin/main, so the difference is untracked or excluded files rather than commits
-==> 'wk status' compares every copy against this one
-warning: 1 target(s) did not take the tooling -- see above
-tolken:host ~/Development/wk-tools main exit 1 ❯ git status
-On branch main
-Your branch is up to date with 'origin/main'.
-
-nothing to commit, working tree clean
-tolken:host ~/Development/wk-tools main ❯ git log
-commit 3c92e8d680b6e60a3a8dc9f0953cd487f138dab8 (HEAD -> main, origin/main, origin/HEAD)
-
-moose:host ~/Development/wk-tools main ❯ git status
-On branch main
-Your branch is up to date with 'origin/main'.
-
-nothing to commit, working tree clean
-moose:host ~/Development/wk-tools main ❯ git pull
-Already up to date.
-moose:host ~/Development/wk-tools main ❯ git log
-commit 3c92e8d680b6e60a3a8dc9f0953cd487f138dab8 (HEAD -> main, origin/main, origin/HEAD)
-
-Fix that, but also diagnose why your testing didn't catch this. It feels like I have to carefully inspect everything because you only do the bare minimum.
+- The comment pass: dead functions, dated narration and the two design-laden
+  handoffs are gone, but shell comment density is still ~35% across the
+  densest 25 files (boot/pi-tryboot.sh 54%, container/firstrun.sh 43%,
+  cmd/sync 40%). Most of what remains is failure-mode and contract prose;
+  say whether that density is acceptable or name the ceiling.

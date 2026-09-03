@@ -1,0 +1,29 @@
+[Unit]
+Description=wk workspace egress proxy
+Documentation=file://@WK_ROOT@/container/proxy/wk-proxy.py
+# The executable may be on a mount (the podman machine's virtiofs mount of this
+# checkout), so systemd waits for it: started before the mount is up it fails
+# as "no such file", which reads as a broken proxy rather than a race.
+RequiresMountsFor=@WK_ROOT@
+
+[Service]
+Type=notify
+NotifyAccess=all
+ExecStart=/usr/bin/python3 @WK_ROOT@/container/proxy/wk-proxy.py
+Environment=WK_STORE=@WK_STORE@
+Restart=on-failure
+RestartSec=2
+# %t/wk holds the one socket a workspace can see. Preserved across restarts
+# because containers bind-mount that directory: letting systemd delete it on
+# stop would leave every running workspace holding a mount of a deleted
+# directory, and no amount of restarting the proxy would fix it.
+RuntimeDirectory=wk
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+# The proxy is the boundary; it must not be able to write anywhere interesting.
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

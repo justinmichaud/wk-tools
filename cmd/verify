@@ -217,13 +217,19 @@ PUSH_ON=0
 "$WK_ROOT/wk" push status >/dev/null 2>&1 && PUSH_ON=1
 [ "$PUSH_ON" = 1 ] && note "the host says push is ON" || note "the host says push is OFF"
 
-# Not the checkout: WebKit ships PEM test fixtures of its own, so a recursive
-# grep there reports the upstream tree rather than this boundary. Home,
-# /secrets and the socket directory are where a key delivered or copied by
-# anything here would land.
-material=$(inside "grep -rl 'PRIVATE KEY' \$HOME /secrets /run/wk 2>/dev/null | head -5")
+# Never the checkout, and that is why home is not walked as a whole: WebKit
+# ships PEM test fixtures of its own, and on a guest the checkout is *inside*
+# $HOME (t_src is /Users/<user>/WebKit), so a recursive grep of home reports
+# the upstream tree -- and walks gigabytes of it -- on every guest. So the
+# places a key delivered or copied by anything in here would actually land are
+# named instead: the two directories ssh and the agent read, both mounts, and
+# the top of home itself, which is not recursive and therefore does not descend
+# into the checkout or the mirror.
+material=$(inside "{ grep -rl 'PRIVATE KEY' \$HOME/.ssh \$HOME/.claude /secrets /run/wk;
+                     grep -l  'PRIVATE KEY' \$HOME/* ; } 2>/dev/null | head -5")
 if [ -z "$material" ]; then
-    pass "no private key material in the workspace (home, /secrets, /run/wk)"
+    pass "no private key material in the workspace (~/.ssh, ~/.claude, the top of
+        home, /secrets, /run/wk)"
 else
     fail "private key material inside the workspace: $(printf '%s' "$material" | tr '\n' ' ')"
 fi

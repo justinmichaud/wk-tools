@@ -2,11 +2,12 @@
 
 A fetch in a workspace is either local -- against a bare mirror that already
 carries every upstream -- or four fetches of four upstreams over that
-workspace's egress. Which one it is used to be decided by testing for one
-container's bind mount, `/mirror/WebKit.git`, spelled into five commands: so a
-guest, whose mirror cannot be that path (macOS's system volume is read-only and
-nothing of the host's is mounted in there), took the network arm everywhere and
-paid ~1,500 remote heads' worth of negotiation per fetch.
+workspace's egress. Which one it is depends on where that target's mirror is,
+and a container's bind mount `/mirror/WebKit.git` is the answer for exactly one
+of the four: a guest's mirror cannot be that path (macOS's system volume is
+read-only and nothing of the host's is mounted in there), so a command that
+spells it takes the network arm in there and pays ~1,500 remote heads' worth of
+negotiation per fetch.
 
 So each driver names its own mirror once and every command asks the driver.
 This holds each of the four to naming one, holds the path in a guest to being
@@ -287,9 +288,9 @@ class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
 
 
 class TestTheCommandsAskTheDriver(unittest.TestCase):
-    """The defect this file exists for: one mirror path spelled into five
-    places, fixed in one of them. Every command that fetches in a workspace
-    reads t_mirror_dir; only the drivers name a path."""
+    """Every command that fetches in a workspace reads t_mirror_dir; only the
+    drivers name a path. One path spelled into several commands is fixed in
+    one of them and wrong in the rest."""
 
     ASKS = ("cmd/sync", "cmd/new", "cmd/pr", "cmd/build", "build/babysit.sh",
             "lib/store.sh")
@@ -317,6 +318,25 @@ class TestTheCommandsAskTheDriver(unittest.TestCase):
                               f"{rel} no longer needs its named exception -- drop it from the list")
                 self.assertIn("no t_mirror_dir to ask", text,
                               f"{rel} spells the mirror literal with no comment explaining why")
+
+    def test_each_mirror_path_is_spelled_in_exactly_one_place(self):
+        """A driver *answers* for a mirror; it does not spell one. Two of the
+        four share each answer -- the driver that makes the mirror, and
+        targets/local.sh answering from inside a workspace of that kind -- so
+        both paths live in lib/target.sh and every driver calls them."""
+        target_sh = (REPO / "lib" / "target.sh").read_text()
+        for func in ("mirror_in_container", "mirror_beside_checkout"):
+            with self.subTest(func=func):
+                self.assertRegex(target_sh, rf"(?m)^{func}\(\)\s*\{{")
+        for rel in ("targets/local.sh", "targets/container.sh"):
+            with self.subTest(file=rel):
+                self.assertNotIn("/mirror/WebKit.git", (REPO / rel).read_text(),
+                                 f"{rel} spells the container mirror instead of asking")
+                self.assertIn("mirror_in_container", (REPO / rel).read_text())
+        for rel in ("targets/local.sh", "targets/vm.sh"):
+            with self.subTest(file=rel):
+                self.assertIn("mirror_beside_checkout", (REPO / rel).read_text(),
+                              f"{rel} derives the guest mirror itself")
 
     def test_only_a_driver_names_a_path(self):
         named = sorted(

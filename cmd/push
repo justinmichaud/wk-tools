@@ -166,14 +166,23 @@ agent_holds() { # <fork>
     printf '%s\n' "$AGENT_KEYS" | awk '{print $2}' | grep -qxF "$fp"
 }
 
-# The evidence, per fork: loaded | held | absent. `loaded` is the agent's own
-# answer, not a record of having loaded it -- an agent restarted since is
+# The evidence, per fork: loaded | held | live | absent. `loaded` is the agent's
+# own answer, not a record of having loaded it -- an agent restarted since is
 # empty, and reporting the switch as on would hand a workspace a push that
 # fails at the door.
+#
+# `live` is a key on a machine with no agent socket, which is not the same
+# thing as `held`: on a build box there is no container around the checkout, so
+# remote/provision.sh points its `core.sshCommand` at an ssh config naming the
+# private half directly. The key is in HELD there too, and it pushes anyway --
+# so calling it held back would report a switch that machine does not have.
 where() {
     local r="$1"
     agent_holds "$r" && { echo loaded; return 0; }
-    [ -f "$HELD/build_key_$r" ] && { echo held; return 0; }
+    if [ -f "$HELD/build_key_$r" ]; then
+        [ -n "$WS_SOCK" ] && echo held || echo live
+        return 0
+    fi
     echo absent
 }
 
@@ -327,11 +336,12 @@ off)
     ;;
 
 status)
-    loaded=0; held=0; absent=0
+    loaded=0; held=0; live=0; absent=0
     for r in $(forks); do
         case "$(where "$r")" in
             loaded) loaded=$((loaded + 1)); printf '%-10s %s\n' "$r" "push allowed (in the agent)" ;;
             held)   held=$((held + 1));     printf '%-10s %s\n' "$r" "held back ($HELD)" ;;
+            live)   live=$((live + 1));     printf '%-10s %s\n' "$r" "always live ($HELD) -- no switch on this machine" ;;
             absent) absent=$((absent + 1)); printf '%-10s %s\n' "$r" "no key ('wk key register')" ;;
         esac
     done
@@ -355,12 +365,25 @@ status)
     fi
 
     if [ -z "$WS_SOCK" ]; then
-        log "  '$WK_TARGET' workspaces name no agent socket, so nothing here can push"
+        warn "'$WK_TARGET' workspaces name no ssh-agent socket, so there is no switch
+    on this machine: a checkout here is a plain one with no container around it
+    and its core.sshCommand names the private half directly
+    (remote/provision.sh). The key above is live whatever the switch says
+    anywhere else, and 'wk push on|off' here refuses rather than pretending.
+    Installing wk-ssh-agent.service here is owed work (docs/HANDOFF-sandboxing.md)."
     elif [ "$held" -gt 0 ] || [ "$loaded" -gt 0 ]; then
         push_agent_ensure push_agent_exec "$MACHINE_SOCK" \
             || log "  no ssh-agent answers at $MACHINE_SOCK ('./setup' installs it there)"
     fi
 
+    # A live key is push being on, and it is the position `wk push off --all`
+    # must not be allowed to report as off: nothing on this machine can close
+    # it, so a 0 here would tell cmd/ai's `push_switch status || return 0` that
+    # the fleet is shut when one box is not.
+    if [ "$live" -gt 0 ]; then
+        info "push is ON here and cannot be switched off -- $live key(s) are live"
+        return 0
+    fi
     if [ "$loaded" -gt 0 ]; then
         info "push is ON"
         return 0

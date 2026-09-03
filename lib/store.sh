@@ -423,9 +423,15 @@ wk_push_key() { # <fork>
 # One reader for everything in the secrets directory -- deploy keys and agent
 # credentials alike. Absent is not an error, and every caller reports its own
 # absence in its own words.
+#
+# Through lib/secretfile.py, which is where the rule "this is a file, and it is
+# ours" lives for every reader and writer of one of these paths: `agent-rw` is
+# mounted read-write into every container and is a sibling of the directory
+# holding the private deploy keys and the API token, so a link planted in the
+# writable one would otherwise turn this read into a read of a credential that
+# publishes. The file that refuses says the whole of why.
 _wk_secret_read() { # <path>
-    [ -r "$1" ] && cat "$1"
-    return 0
+    python3 "$WK_ROOT/lib/secretfile.py" read "$1"
 }
 
 # --- the switch: two credentials, neither ever inside a workspace ------------
@@ -471,13 +477,17 @@ push_agent_machine_sock() {
 # containers bind-mount, and $WK_STORE itself is not mounted anywhere (only
 # named subdirectories of it are, targets/container.sh).
 #
-# WK_PUSH_PAT_FILE: the same, for the api half.
+# A resolved path, unlike the socket above: $WK_STORE is already that machine's
+# spelling of the store here (targets/container.sh sets it to /var/lib/wk), so
+# there is nothing for the far side to expand -- and an unresolved shell word
+# would reach `wk push status` and `wk verify` as user-facing text with its own
+# quotes in it. The quoting for the far side is push_agent_pat_*'s, which is
+# the one place these paths become part of a command line.
+#
+# WK_PUSH_PAT_FILE: tests point this at a file of their own, as
+# WK_PUSH_AGENT_SOCK does for the ssh half.
 push_agent_machine_pat() {
-    if [ -n "${WK_PUSH_PAT_FILE:-}" ]; then
-        printf '%s' "$WK_PUSH_PAT_FILE"
-    else
-        printf '%s' '"${WK_STORE:-/var/lib/wk}"/push-github-pat'
-    fi
+    printf '%s' "${WK_PUSH_PAT_FILE:-${WK_STORE:-/var/lib/wk}/push-github-pat}"
 }
 
 # The machine holding this machine's workspaces, as something to run a command
@@ -562,18 +572,18 @@ wk_github_user() { wk_push_forks | awk 'NF {print $2; exit}' | cut -d/ -f1; }
 push_agent_pat_write() { # <execfn> <path>
     local pat; pat=$(wk_github_pat)
     [ -n "$pat" ] || return 1
-    printf '%s\n' "$pat" | "$1" "umask 077 && cat > $2"
+    printf '%s\n' "$pat" | "$1" "umask 077 && cat > $(sh_quote "$2")"
 }
 
 push_agent_pat_clear() { # <execfn> <path>
-    "$1" "rm -f $2" </dev/null
+    "$1" "rm -f $(sh_quote "$2")" </dev/null
 }
 
 # Whether that file is there, asked of the machine: `wk push status`'s evidence
 # for the api half, the way `ssh-add -l` is its evidence for the ssh half.
 push_agent_pat_present() { # <execfn> <path>
     local out
-    out=$("$1" "test -s $2 && echo yes" </dev/null 2>/dev/null) || out=""
+    out=$("$1" "test -s $(sh_quote "$2") && echo yes" </dev/null 2>/dev/null) || out=""
     [ "$out" = yes ]
 }
 
@@ -1148,23 +1158,10 @@ claude-login  .credentials.json   .claude/.credentials.json   -                 
 EOF
 }
 
-# The one directory on this machine a *workspace* may write, and the only
-# reason there is one: a claude.ai login credential holds a refresh token,
-# and the Claude CLI spends it and writes the rotated one back over the same
-# file (measured in the CLI itself: the refresh response's refreshToken
-# replaces the stored one, and a superseded one is answered `invalid_grant`
-# and blanked on disk). So every holder on this machine has to be looking at
-# one set of bytes -- a copy per workspace would be a copy that the first
-# refresh anywhere kills.
-#
-# Beside the secrets directory and never inside it, the same shape
-# wk_push_held_dir has and for the mirror-image reason: that one is mounted
-# read-only into every workspace and must stay unwritable.
-#
-# The Claude CLI's store directory, handed to it as CLAUDE_SECURESTORAGE_CONFIG_DIR
-# (shell/bashrc), which is also where it puts the `.storage-write` lock it
-# takes around a refresh -- so pointing every container at this one directory
-# is what makes concurrent refreshes serialize rather than race.
+# The one directory a workspace may write: the Claude CLI rotates the refresh
+# token in its credentials file, so every holder on a machine must share one
+# set of bytes and one `.storage-write` lock (README, "wk key set"). It sits
+# beside the read-only secrets directory, never inside it.
 wk_agent_rw_dir() { printf '%s/agent-rw' "$(dirname "$(wk_secrets_dir)")"; }
 
 wk_agent_secret_names() { wk_agent_secrets | awk 'NF { print $1 }'; }
@@ -1217,7 +1214,7 @@ wk_agent_secret_bytes() { # <name>
 # credential into a variable to look at its length.
 wk_agent_secret_present() { # <name>
     local p; p=$(wk_agent_secret_path "$1") || return 1
-    [ -s "$p" ]
+    python3 "$WK_ROOT/lib/secretfile.py" present "$p"
 }
 
 # Store it, reading the value from stdin so it is never an argument -- an
@@ -1225,8 +1222,7 @@ wk_agent_secret_present() { # <name>
 wk_agent_secret_store() { # <name>
     local p; p=$(wk_agent_secret_path "$1") || return 1
     ensure_dir "$(dirname "$p")" 0700
-    ( umask 077; cat > "$p" ) || return 1
-    chmod 0600 "$p" 2>/dev/null || true
+    python3 "$WK_ROOT/lib/secretfile.py" write "$p"
 }
 
 # Withdraw it. Every workspace loses it on its next start -- a container

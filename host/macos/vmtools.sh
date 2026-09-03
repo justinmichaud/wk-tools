@@ -12,6 +12,8 @@
 # For $WK_STORE and wk_secrets_dir: the two ends of the secrets mount this
 # verifies below, from the one file that answers where each of them is.
 . "$WK_ROOT/lib/store.sh"
+# The three unit bodies and the one installer, shared with host/linux/sdk.sh.
+. "$WK_ROOT/host/units.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
@@ -46,41 +48,49 @@ _rsh() {
 # Every step below names a path in one of them, and so does every container
 # this machine will ever create. A machine missing one fails one step at a
 # time, each with a different message; this fails once and names the remedy.
-if _rsh 'test -x /opt/wk-tools/wk'; then
-    unchanged "this checkout is mounted at /opt/wk-tools"
-else
-    die "/opt/wk-tools/wk is not executable inside '$WK_MACHINE', so nothing in
+#
+# From inside, and not from the config file host/macos/machine.sh reads: what
+# is asked for at creation and what the machine actually has are two different
+# questions, and only the second one is answerable here. A function so a test
+# can drive each verdict against a fake _rsh (tests/test_vmtools_mounts.py).
+_verify_mounts() {
+    if _rsh 'test -x /opt/wk-tools/wk'; then
+        unchanged "this checkout is mounted at /opt/wk-tools"
+    else
+        die "/opt/wk-tools/wk is not executable inside '$WK_MACHINE', so nothing in
     there can run this tooling. The machine mounts this checkout there when it
     is created:  ./setup --stage machine"
-fi
+    fi
 
-# The mount, not the directory: an empty directory of the VM's own at the same
-# path would leave `wk key set` writing on this host and every container
-# reading nothing.
-if _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/secrets")" >/dev/null 2>&1; then
-    unchanged "the secrets directory is mounted at $WK_STORE/secrets"
-else
-    die "$WK_STORE/secrets is not a mount inside '$WK_MACHINE', so the keys this
+    # The mount, not the directory: an empty directory of the VM's own at the
+    # same path would leave `wk key set` writing on this host and every
+    # container reading nothing.
+    if _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/secrets")" >/dev/null 2>&1; then
+        unchanged "the secrets directory is mounted at $WK_STORE/secrets"
+    else
+        die "$WK_STORE/secrets is not a mount inside '$WK_MACHINE', so the keys this
     host holds ($(wk_secrets_dir)) reach no workspace. The machine mounts them
     there when it is created:  ./setup --stage machine"
-fi
+    fi
 
-# The one writable mount: the Claude CLI rewrites the login credential in place
-# when it spends the refresh token, so a read-only mount here logs every
-# workspace out the first time one refreshes. Writability is checked from
-# inside, where the mode actually applies.
-if ! _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/agent-rw")" >/dev/null 2>&1; then
-    die "$WK_STORE/agent-rw is not a mount inside '$WK_MACHINE', so the claude.ai
+    # The one writable mount: the Claude CLI rewrites the login credential in
+    # place when it spends the refresh token, so a read-only mount here logs
+    # every workspace out the first time one refreshes. Writability is asked of
+    # the kernel over there, where the mode actually applies.
+    if ! _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/agent-rw")" >/dev/null 2>&1; then
+        die "$WK_STORE/agent-rw is not a mount inside '$WK_MACHINE', so the claude.ai
     login this host holds ($(wk_agent_rw_dir)) reaches no workspace. The machine
     mounts it there when it is created:  ./setup --stage machine"
-elif _rsh "test -w $(sh_quote "$WK_STORE/agent-rw")"; then
-    unchanged "the agent-writable directory is mounted read-write at $WK_STORE/agent-rw"
-else
-    die "$WK_STORE/agent-rw is mounted read-only inside '$WK_MACHINE'. The Claude
+    elif _rsh "test -w $(sh_quote "$WK_STORE/agent-rw")"; then
+        unchanged "the agent-writable directory is mounted read-write at $WK_STORE/agent-rw"
+    else
+        die "$WK_STORE/agent-rw is mounted read-only inside '$WK_MACHINE'. The Claude
     CLI rewrites the login credential in place, so a workspace would be logged
     out the first time it refreshes. The machine mounts it read-write when it
     is created:  ./setup --stage machine"
-fi
+    fi
+}
+_verify_mounts
 
 # The proxy runs the policy file straight off the mount, so an edit here is
 # live in the VM the moment it is saved -- but only for a proxy that restarts
@@ -208,62 +218,12 @@ fi
 # the service survives with nobody logged in.
 debug "installing the egress proxy in the machine"
 
-_rsh 'mkdir -p ~/.config/systemd/user'
-
-# %t expands to the user runtime directory: /run/user/501, since the
-# machine's `core` is uid 501.
-_unit=$(mktemp)
-cat > "$_unit" <<'UNIT'
-[Unit]
-Description=wk workspace egress proxy
-Documentation=file:///opt/wk-tools/container/proxy/wk-proxy.py
-
-[Unit]
-# The executable is on a mount, so systemd must wait for it: without this the
-# service starts before virtiofs is up and fails as "no such file", which reads
-# as a broken proxy rather than a race.
-RequiresMountsFor=/opt/wk-tools
-
-[Service]
-Type=notify
-NotifyAccess=all
-ExecStart=/usr/bin/python3 /opt/wk-tools/container/proxy/wk-proxy.py
-Environment=WK_STORE=/var/lib/wk
-Restart=on-failure
-RestartSec=2
-# Containers bind-mount %t/wk, so systemd must not delete it on stop, or
-# every running workspace is left holding a mount of a deleted directory.
-RuntimeDirectory=wk
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome=read-only
-
-[Install]
-WantedBy=default.target
-UNIT
-
-# One installer for every unit this machine gets: copy beside the live one,
-# compare, and reload only when the result differs -- so a re-run of ./setup
-# reports no change and does not restart a service a build is depending on.
-_install_unit() { # <unit name> <local file>
-    local name="$1" file="$2"
-    scp -q -P "$_ssh_port" -i "$_ssh_key" \
-        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        "$file" "$_ssh_user@localhost:/home/core/.config/systemd/user/$name.new"
-    rm -f "$file"
-    if _rsh "cmp -s ~/.config/systemd/user/$name.new ~/.config/systemd/user/$name"; then
-        _rsh "rm -f ~/.config/systemd/user/$name.new"
-        unchanged "$name"
-        return 0
-    fi
-    _rsh "mv ~/.config/systemd/user/$name.new ~/.config/systemd/user/$name &&
-          systemctl --user daemon-reload"
-    changed "installed $name in the machine"
-}
-
-_install_unit wk-proxy.service "$_unit"
+# The machine spells this checkout /opt/wk-tools (its virtiofs mount of it) and
+# its store /var/lib/wk, and _rsh is how a command reaches it -- the three
+# arguments host/units.sh needs. %t in a unit body expands to the user runtime
+# directory over there: /run/user/501, since the machine's `core` is uid 501.
+_unit_root=/opt/wk-tools
+unit_install wk-proxy.service "$_unit_root" /var/lib/wk _rsh
 
 _proxy_policy_reload || true
 if ! _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
@@ -286,32 +246,7 @@ fi
 # empty and stays empty across a restart, which is the safe direction: the
 # switch has to be thrown again, and `wk push status` says so rather than
 # claiming a key that is gone.
-_unit=$(mktemp)
-cat > "$_unit" <<'UNIT'
-[Unit]
-Description=wk deploy-key ssh-agent (outside every workspace)
-Documentation=file:///opt/wk-tools/cmd/push
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/ssh-agent -D -a %t/wk/ssh-agent.sock
-Restart=on-failure
-RestartSec=2
-# The same directory wk-proxy.service owns, and containers bind-mount it, so
-# systemd must not delete it on stop.
-RuntimeDirectory=wk
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=yes
-# ssh-agent refuses to bind a path that already exists, and one left by a
-# previous run has nothing behind it.
-ExecStartPre=/usr/bin/rm -f %t/wk/ssh-agent.sock
-ProtectSystem=strict
-ProtectHome=read-only
-
-[Install]
-WantedBy=default.target
-UNIT
-_install_unit wk-ssh-agent.service "$_unit"
+unit_install wk-ssh-agent.service "$_unit_root" /var/lib/wk _rsh
 
 if ! _rsh 'systemctl --user is-active --quiet wk-ssh-agent.service'; then
     _rsh 'systemctl --user enable --now wk-ssh-agent.service' >/dev/null 2>&1 \
@@ -326,35 +261,7 @@ fi
 # a workspace that never holds the token (container/proxy/github-inject.py).
 # Its socket is under the store and *not* in %t/wk: a workspace must reach it
 # through the egress policy, not around it.
-_unit=$(mktemp)
-cat > "$_unit" <<'UNIT'
-[Unit]
-Description=wk GitHub API credential injector
-Documentation=file:///opt/wk-tools/container/proxy/github-inject.py
-
-[Unit]
-# The executable is on a mount, so systemd must wait for it, exactly as
-# wk-proxy.service does.
-RequiresMountsFor=/opt/wk-tools
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /opt/wk-tools/container/proxy/github-inject.py
-Environment=WK_STORE=/var/lib/wk
-Restart=on-failure
-RestartSec=2
-# It publishes its CA certificate into %t/wk, which every container mounts.
-RuntimeDirectory=wk
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/var/lib/wk
-
-[Install]
-WantedBy=default.target
-UNIT
-_install_unit wk-github-inject.service "$_unit"
+unit_install wk-github-inject.service "$_unit_root" /var/lib/wk _rsh
 
 # Restarted on a policy change for the same reason wk-proxy is: the program
 # runs straight off the mount, so an edit here is only live for a service that
@@ -376,4 +283,5 @@ else
     fi
 fi
 
-unset _ssh_port _ssh_key _ssh_user _unit
+unset _ssh_port _ssh_key _ssh_user _unit_root
+unset -f _verify_mounts

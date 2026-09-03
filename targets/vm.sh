@@ -126,7 +126,7 @@ _base_mem_mb() { echo "${WK_VM_BASE_MEM_MB:-$(envelope_mem_mb)}"; }
 # What the base is built with before it is sealed; every workspace inherits
 # the result. Empty disables it -- the base is then source-only and the first
 # build in each workspace is a cold one.
-WK_VM_BASE_PREBUILD="${WK_VM_BASE_PREBUILD:-mac-release}"
+WK_VM_BASE_PREBUILD="${WK_VM_BASE_PREBUILD-mac-release}"
 
 # Disk, and this one is not optional: the prepared image's stock 140 GB does
 # not fit even one build. A ceiling, not an allocation: the disk is sparse
@@ -253,7 +253,7 @@ t_tools() { echo "/Users/$WK_VM_USER/wk-tools"; }
 # objects are not held twice either. Nothing of the host's is mounted in a
 # guest, which is why a guest cannot read the mirror `wk sync --tools` keeps
 # out here. Refreshed by t_sync, from GitHub, in the guest.
-t_mirror_dir() { echo "$(t_src "$1").git"; }
+t_mirror_dir() { mirror_beside_checkout "$(t_src "$1")"; }
 
 # `wk new` resolves a base *snapshot*; there are none here, since cloning
 # the golden VM directly is the checkout.
@@ -594,12 +594,24 @@ _start_host_agent() {
 
 _forward_status() { echo "$WK_VM_DIR/$1.agent-forward"; }
 
+# One forward per guest, and the guest's own lock around every start and stop
+# of it (hold_lock, lib/common.sh -- the one lock this tree has). Start is a
+# read of the status file, a socket removed in the guest, a process detached
+# and the file written, and two of those runs interleaved do real damage: the
+# second `rm -f`s the socket the first bound, so the first's `ssh -R` is left
+# with nothing behind it, and the second's own failure path then removes the
+# *first's* status file -- after which `wk push off` cannot find the forward to
+# stop it. `wk push on|off` and `wk vm start` all reach here.
+_agent_forward_start() { # <name> <ip>
+    with_lock "vm-agent-forward-$1" -- _agent_forward_start_locked "$@"
+}
+
 # Detached with a status file, the way everything long-lived on this host is
 # recorded (detach_run, lib/detach.sh): a pid for liveness, no daemon, and the
 # process table is the fact. sshd will not bind a socket path that already
 # exists, so the stale one goes first -- a guest forwarded before this host
 # restarted still has the file and nothing behind it.
-_agent_forward_start() { # <name> <ip>
+_agent_forward_start_locked() { # <name> <ip>
     local name="$1" ip="$2" sf log pid
     command -v detach_run >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     sf=$(_forward_status "$name")
@@ -614,11 +626,18 @@ _agent_forward_start() { # <name> <ip>
     # what would hand a guest a socket with nothing behind it.
     sleep 0.5
     detach_alive "$sf" && return 0
-    rm -f "$sf"
+    # This run's own record and no other's: whoever wrote a different pid here
+    # is a live forward, and removing its file is what leaves `wk push off`
+    # unable to stop it.
+    [ "$(status_field "$sf" pid)" = "$pid" ] && rm -f "$sf"
     return 1
 }
 
 _agent_forward_stop() { # <name>
+    with_lock "vm-agent-forward-$1" -- _agent_forward_stop_locked "$1"
+}
+
+_agent_forward_stop_locked() { # <name>
     local sf pid
     command -v detach_alive >/dev/null 2>&1 || . "$WK_ROOT/lib/detach.sh"
     sf=$(_forward_status "$1")
@@ -775,7 +794,7 @@ _write_marker() {
     _ssh "$ip" "printf '%s\n' \
         '# wk: this machine IS a workspace. Written by targets/vm.sh.' \
         $(sh_quote "name=$name") $(sh_quote "src=$(t_src "$name")") \
-        $(sh_quote "config=${WK_VM_BASE_PREBUILD:-mac-release}") \
+        $(sh_quote "config=${WK_VM_BASE_PREBUILD-mac-release}") \
         > \$HOME/.wk-workspace"
 }
 
@@ -813,10 +832,15 @@ _write_claude_config() {
 # guest has a directory in it. It is also the one delivery here that makes a
 # *second holder* of one credential -- see the warning below.
 _write_agent_secrets() { # <name> <ip>
-    local name="$1" ip="$2" sname sfile shome svar skind val n=0
+    local name="$1" ip="$2" sname sfile shome svar skind val here n=0
     while read -r sname sfile shome svar skind; do
         [ -n "$sname" ] || continue
-        if ! wk_agent_secret_present "$sname"; then
+        here=0; wk_agent_secret_present "$sname" || here=$?
+        # 1 is "there is none"; anything above it is lib/secretfile.py refusing
+        # what is at that path, and it has already said why. Nothing is copied
+        # into a guest on a refusal -- that copy is the whole exposure.
+        [ "$here" -lt 2 ] || return 1
+        if [ "$here" -ne 0 ]; then
             # </dev/null: this loop's stdin is the table below, and _ssh is a
             # plain ssh, which would drink it.
             _ssh "$ip" "rm -f \$HOME/$(sh_quote "$shome")" </dev/null || return 1
@@ -829,9 +853,12 @@ _write_agent_secrets() { # <name> <ip>
             warn "'$name' holds its own copy of the $sname credential: a refresh in
     there invalidates the copy every container here shares. Use one or the
     other for remote control, not both ('wk key set $sname --replace' after)."
-            wk_agent_secret_bytes "$sname" \
+            # pipefail, so a reader that refused the path is this delivery
+            # failing rather than an empty file arriving in the guest.
+            ( set -o pipefail
+              wk_agent_secret_bytes "$sname" \
                 | _ssh "$ip" "mkdir -p \$HOME/$(sh_quote "$(dirname "$shome")") \
-                              && umask 077 && cat > \$HOME/$(sh_quote "$shome")" || return 1
+                              && umask 077 && cat > \$HOME/$(sh_quote "$shome")" ) || return 1
         else
             val=$(wk_agent_secret "$sname")
             printf '%s\n' "$val" \
@@ -1016,7 +1043,7 @@ _set_guest_egress() {
 set -u
 addr='$addr'
 port='$WK_VM_PROXY_PORT'
-ghuser='$(wk_github_user)'
+ghuser=$(sh_quote "$(wk_github_user)")
 cat > /tmp/.wk-github-ca.new <<'WKCA'
 $ca
 WKCA

@@ -331,8 +331,7 @@ class TestSyncWorkspacesUsesTheScript(unittest.TestCase):
     """cmd/sync's sync_workspaces is what `wk sync <ws>` and `wk new` both
     reach; this is the wiring between it and ws_fetch_script -- the checkout
     the driver names, and the mirror the driver names (t_mirror_dir), which is
-    a different path for each kind of workspace and used to be a container's
-    bind mount for all of them."""
+    a different path for each kind of workspace."""
 
     def _driven(self, mirror):
         """sync_workspaces, run for a workspace whose target answers <mirror>.
@@ -389,6 +388,70 @@ sync_workspaces one
         script, out = self._driven("")
         self.assertNotIn("[ -d", script)
         self.assertIn("get-url 'origin'", script)
+
+
+class TestWhatSyncWorkspacesReports(unittest.TestCase):
+    """One line per workspace, and every one of them derived from what the
+    fetch actually did: `wk sync --all` is often the only thing anybody reads
+    about a machine's workspaces, and a run that reports success for a
+    workspace nothing reached is worse than one that fails."""
+
+    LIFTED = subprocess.run(
+        ["sed", "-n", "/^sync_workspaces()/,/^}/p", str(REPO / "cmd" / "sync")],
+        capture_output=True, text=True).stdout
+
+    def _run(self, scope="all", state="present", exec_body='echo from=mirror',
+             names="one", load=":"):
+        cp = bash(SYNC_FUNCS + self.LIFTED + f'''
+SCOPE={scope}
+ONLY=one
+load_target()  {{ {load}; }}
+ws_target()    {{ echo container; }}
+ws_state()     {{ echo {state}; }}
+t_src()        {{ echo /src/WebKit; }}
+t_mirror_dir() {{ echo /mirror/WebKit.git; }}
+t_exec()       {{ {exec_body}; }}
+sync_workspaces {names} && echo "rc=0" || echo "rc=$?"
+''')
+        return cp, cp.stdout + cp.stderr
+
+    def test_a_fetch_that_used_no_mirror_says_so_and_says_what_fixes_it(self):
+        """The network arm is four fetches of four upstreams; it works, and a
+        person is owed the reason it happened -- a guest cloned from a base
+        built before its mirror existed is the case."""
+        cp, out = self._run(exec_body="echo from=remotes")
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("ok  (over the network: no mirror in this workspace", out)
+        self.assertIn("rc=0", cp.stdout)
+
+    def test_a_workspace_that_is_not_there_is_skipped_by_name(self):
+        cp, out = self._run(scope="all", state="stopped")
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("stopped -- skipped", out)
+
+    def test_the_one_named_being_absent_is_a_refusal_not_a_skip(self):
+        """`wk sync <ws>` asked for exactly that workspace: reporting a clean
+        run over nothing is the report this refuses to make."""
+        cp, out = self._run(scope="ws", state="absent")
+        self.assertNotEqual(cp.returncode, 0, out)
+        self.assertIn("workspace 'one' is not there to fetch in", out)
+
+    def test_a_fetch_that_failed_is_counted_and_the_sweep_goes_on(self):
+        """One unreachable workspace must not end a sync that has more to do,
+        and it must not pass either."""
+        cp, out = self._run(exec_body="return 1")
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("FAILED (continuing)", out)
+        self.assertIn("1 workspace(s) did not fetch", out)
+        self.assertIn("rc=0", cp.stdout)
+
+    def test_a_driver_that_will_not_load_is_counted_too(self):
+        """A workspace whose target this machine cannot load is not reached
+        and not skipped: it is one that did not fetch, and the sweep says so
+        at the end rather than passing in silence."""
+        cp, out = self._run(load="return 1")
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("1 workspace(s) did not fetch", out)
 
 
 class TestNewFetchFrom(unittest.TestCase):

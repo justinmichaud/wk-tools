@@ -794,13 +794,10 @@ _retarget_fstab() { # <mountpoint> <partuuid of partition 1> <partuuid of partit
     [ -f "$f" ] || { say "no /etc/fstab on this disk"; return 0; }
     # Two ways a line can name the wrong partition, and both are rewritten: a
     # device path (/dev/mmcblk0p1, which follows the reader rather than the
-    # card) and a **PARTUUID of another disk identifier** -- which is what an
-    # fstab already retargeted once carries after anything rewrites the card's
-    # MBR. Handling only the first, with a read-back that only looks for /dev
-    # paths, reports a card retargeted while its /boot line still names the
-    # old one: the root mounts, /boot does not, local-fs.target fails, and
-    # every network unit ordered after it never starts -- a board that boots
-    # and goes quiet.
+    # card) and a PARTUUID of another disk -- what an fstab retargeted once
+    # carries after anything rewrites the card's MBR. A /boot line left naming
+    # the old one fails local-fs.target and every network unit ordered after
+    # it: the board boots and goes quiet.
     #
     # Read back in the same pass, and the check is "does every line name
     # *this* card": anything else is a mount that finds another disk or none.

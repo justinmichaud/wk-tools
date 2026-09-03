@@ -3,6 +3,7 @@ that it never reports a move it did not make.
 
 Run: python3 -m unittest tests.test_push_switch -v
 """
+import json
 import os
 import subprocess
 import unittest
@@ -99,19 +100,19 @@ class TestNoFalseClaim(WkTest):
         self.assertNotIn("==> create", cp.stderr)
         self.assertFalse(d.exists())
 
-    def test_nothing_moves_between_the_two_directories_any_more(self):
-        """The switch is what an ssh-agent holds, so the file walk that used to
-        move keys is gone rather than unused: two positions on disk means a
-        crash between them, and a key in the mounted directory is the position
-        this command exists to prevent."""
+    def test_nothing_moves_between_the_two_directories(self):
+        """The switch is what an ssh-agent holds, and there is no file walk
+        beside it: two positions on disk means a crash between them, and a key
+        in the mounted directory is the position this command exists to
+        prevent."""
         src = (REPO / "cmd" / "push").read_text()
         for gone in ("move_keys", "MOVED", "STUCK", "purge_copies"):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, src)
 
     def test_on_without_an_agent_fails_and_claims_nothing(self):
-        """The failure the old `mv` had, in its new shape: there is nowhere to
-        put the keys, so `on` must not report a switch it did not throw."""
+        """With no agent answering there is nowhere to put the keys, so `on`
+        must not report a switch it did not throw."""
         secrets = self.tmp / "secrets"
         held = self.tmp / "push-keys"
         held.mkdir(parents=True)
@@ -144,3 +145,83 @@ class TestStatusIsReadOnly(WkTest):
         """`wk push status` changes nothing, so a stopped podman machine is
         reported rather than started"""
         self.assertIn("# wk: readonly status", (REPO / "cmd" / "push").read_text())
+
+
+class TestTheStatusRowIsCredentialsNotThePosition(WkTest):
+    """`wk status` reads this machine's own directories; only `wk push status`
+    asks the agent and the injector. So the row is named for what it measures
+    -- a key on disk is not a thrown switch -- and it names the command that
+    answers the other question.
+
+    report_health (cmd/status) is lifted and run against a scratch store, with
+    the record helpers lifted from the same file rather than restated: nothing
+    here starts a machine or reads this device's real keys."""
+
+    HARNESS = '''
+set -uo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/resources.sh"
+eval "$(sed -n "/^_jesc() {/,/^note_warn()/p" "$WK_ROOT/cmd/status")"
+report_sdk_image() { :; }
+eval "$(sed -n "/^report_health() {/,/^}$/p" "$WK_ROOT/cmd/status")"
+exec 3>&1
+report_health testmachine
+'''
+
+    def _rows(self, keys=(), pat=False, env=None):
+        secrets = self.tmp / "secrets"
+        held = self.tmp / "push-keys"
+        for d in (secrets, held, self.tmp / "store"):
+            d.mkdir(parents=True, exist_ok=True)
+        for k in keys:
+            (held / f"build_key_{k}").write_text("not-a-key\n")
+        if pat:
+            (held / "github-pat").write_text("ghp_notatoken\n")
+        e = {"WK_STORE": str(self.tmp / "store"), "WK_HOST_SECRETS": str(secrets)}
+        e.update(env or {})
+        cp = bash(self.HARNESS, env=e)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return [json.loads(l) for l in cp.stdout.splitlines() if l.startswith("{")]
+
+    def _row(self, **kw):
+        rows = [r for r in self._rows(**kw) if r.get("kind") == "switch"]
+        self.assertEqual(1, len(rows), rows)
+        return rows[0]
+
+    def test_the_row_is_named_for_the_credentials_it_read(self):
+        row = self._row(keys=("fork", "forkwpe"))
+        self.assertEqual("push credentials", row["name"])
+        self.assertIn("'wk push status' says whether they are loaded", row["detail"])
+
+    def test_it_never_reports_a_switch_position(self):
+        """`on`/`off` is what `wk push status` answers, from the agent. A row
+        saying either from a file on disk would be a claim nothing measured."""
+        for keys in ((), ("fork",), ("fork", "forkwpe")):
+            with self.subTest(keys=keys):
+                self.assertNotIn(self._row(keys=keys)["state"], ("on", "off"))
+
+    def test_every_key_held(self):
+        self.assertEqual("keys held", self._row(keys=("fork", "forkwpe"))["state"])
+
+    def test_some_of_them(self):
+        row = self._row(keys=("fork",))
+        self.assertEqual("some keys held", row["state"])
+        self.assertIn("1 deploy key(s), 1 absent", row["detail"])
+
+    def test_none_of_them(self):
+        row = self._row()
+        self.assertEqual("no keys", row["state"])
+        self.assertIn("0 deploy key(s), 2 absent", row["detail"])
+
+    def test_the_api_token_is_reported_beside_them(self):
+        self.assertIn("no API token", self._row(keys=("fork",))["detail"])
+        self.assertIn("an API token", self._row(pat=True)["detail"])
+
+    def test_the_podman_vm_reports_no_row_at_all(self):
+        """The keys are the host's; the VM mounts only the public halves, so a
+        row from in there could only ever say `no keys` about a machine that
+        holds two."""
+        rows = [r for r in self._rows(keys=("fork", "forkwpe"), env={"WK_IN_VM": "1"})
+                if r.get("kind") == "switch"]
+        self.assertEqual([], rows)

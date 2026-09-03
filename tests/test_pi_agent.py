@@ -286,7 +286,10 @@ class TestWkKeySet(WkTest):
         self.assertIn('printf \'%s\\n\' "$_val" | wk_agent_secret_store "$_name"', KEY)
         self.assertNotIn("--token", KEY)
         self.assertNotIn('wk_agent_secret_store "$_name" "$_val"', KEY)
-        self.assertIn("( umask 077; cat > \"$p\" )", STORE)
+        # The writer is lib/secretfile.py, which takes the value on stdin and
+        # is handed only the path (it refuses a path that is not a plain file
+        # of this user's; see the file).
+        self.assertIn('secretfile.py" write "$p"', STORE)
 
 
 class TestAContainerLinksEveryName(WkTest):

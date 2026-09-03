@@ -1,0 +1,22 @@
+[Unit]
+Description=wk GitHub API credential injector
+Documentation=file://@WK_ROOT@/container/proxy/github-inject.py
+# On a mount, and waited for, for the reason wk-proxy.service gives.
+RequiresMountsFor=@WK_ROOT@
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 @WK_ROOT@/container/proxy/github-inject.py
+Environment=WK_STORE=@WK_STORE@
+Restart=on-failure
+RestartSec=2
+# It publishes its CA certificate into %t/wk, which every container mounts.
+RuntimeDirectory=wk
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@WK_STORE@
+
+[Install]
+WantedBy=default.target

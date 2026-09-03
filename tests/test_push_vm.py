@@ -30,7 +30,8 @@ import signal
 import subprocess
 import unittest
 
-from tests.support import assert_guest_start_converges, REPO, WkTest, bash, stub_path
+from tests.support import (assert_guest_start_converges, func_body, REPO,
+                           WkTest, bash, stub_path)
 
 TOUCHED = (
     "cmd/push", "lib/store.sh", "targets/vm.sh",
@@ -543,6 +544,104 @@ class TestTheGuestHalfOfTheSwitch(WkTest):
         for writer in ("cat >", "rm -f", "umask", "tart run", "t_start",
                        "push_agent_load", "detach_run"):
             self.assertNotIn(writer, state, f"{writer!r} in vm_push_keys_state")
+
+
+class TestTwoStartsOfOneForwardDoNotFightOverIt(WkTest):
+    """`wk push on`, `wk vm start` and a second `wk push on` all reach
+    _agent_forward_start, and two of them interleaved used to do real damage:
+    both passed the liveness check, the second removed the socket the first had
+    bound (leaving the first's `ssh -R` with nothing behind it), and the
+    second's failure path then removed the *first's* status file -- after which
+    `wk push off` had no pid to kill and the guest kept reaching the agent.
+
+    The lock is the guest's own (hold_lock, lib/common.sh)."""
+
+    # A forward that binds and stays up, so the first start is live while the
+    # second runs. Every invocation is logged, which is how "the second was a
+    # no-op" is measured.
+    FAKE_SSH_FORWARD = (
+        "printf '%s\\n' \"$*\" >> \"$WK_TEST_SSH_LOG\"\n"
+        "case \" $* \" in\n"
+        "    *\" -N \"*) exec sleep 30 ;;\n"
+        "esac\n"
+        "[ -t 0 ] || cat >/dev/null\n"
+        "exit 0\n"
+    )
+
+    DRIVER = (
+        '. "$WK_ROOT/lib/common.sh"\n'
+        '. "$WK_ROOT/lib/store.sh"\n'
+        '. "$WK_ROOT/lib/target.sh"\n'
+        'load_target vm >/dev/null 2>&1\n'
+    )
+
+    def _driver(self, body, vmstore):
+        (self.tmp / "ssh.log").write_text("")
+        with stub_path({"ssh": self.FAKE_SSH_FORWARD, "tart": FAKE_TART}) as binp:
+            env = {
+                "PATH": f"{binp}:{os.environ['PATH']}",
+                "WK_TEST_SSH_LOG": str(self.tmp / "ssh.log"),
+                "WK_VM_STORE": str(vmstore),
+                "WK_LOCK_DIR": str(self.tmp / "locks"),
+                "XDG_STATE_HOME": str(self.tmp / "state"),
+                "WK_STORE": str(self.tmp / "store"),
+                "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets"),
+            }
+            return bash(self.DRIVER + body, env=env, timeout=120)
+
+    def test_a_second_start_while_one_is_alive_is_a_no_op(self):
+        home, vmstore = _guest(self.tmp)
+        sf = vmstore / "vm" / "demo.agent-forward"
+        self.addCleanup(_kill_pidfile, sf)
+        cp = self._driver(
+            "_agent_forward_start demo 1.2.3.4 &\n"
+            "_agent_forward_start demo 1.2.3.4 &\n"
+            "wait\n", vmstore)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue(sf.exists(),
+                        "the second start deleted the first's status file")
+        log = (self.tmp / "ssh.log").read_text()
+        self.assertEqual(1, len([l for l in log.splitlines() if " -N " in l]),
+                         "two forwards were started for one guest:\n" + log)
+
+    def test_a_failed_start_removes_only_its_own_record(self):
+        """The failure path's `rm -f`: with an overlapping run's pid in the
+        file, removing it is what leaves `wk push off` nothing to stop."""
+        home, vmstore = _guest(self.tmp)
+        sf = vmstore / "vm" / "demo.agent-forward"
+        cp = self._driver(
+            '. "$WK_ROOT/lib/detach.sh"\n'
+            'mkdir -p "$WK_VM_DIR"\n'
+            "detach_run() { echo 999001; }\n"
+            "status_write() { printf 'state=running\\npid=999002\\n' > \"$1\"; }\n"
+            "_agent_forward_start demo 1.2.3.4 && echo UNEXPECTED-OK\n", vmstore)
+        self.assertNotIn("UNEXPECTED-OK", cp.stdout, cp.stdout + cp.stderr)
+        self.assertTrue(sf.exists(),
+                        "it removed a status file another run had written")
+        self.assertIn("pid=999002", sf.read_text())
+
+    def test_its_own_record_is_still_cleaned_up(self):
+        """The other side of the same rule: a forward this run started and that
+        died leaves nothing behind for `wk push status` to believe."""
+        home, vmstore = _guest(self.tmp)
+        sf = vmstore / "vm" / "demo.agent-forward"
+        cp = self._driver(
+            '. "$WK_ROOT/lib/detach.sh"\n'
+            'mkdir -p "$WK_VM_DIR"\n'
+            "detach_run() { echo 999001; }\n"
+            "status_write() { printf 'state=running\\npid=999001\\n' > \"$1\"; }\n"
+            "_agent_forward_start demo 1.2.3.4 && echo UNEXPECTED-OK\n", vmstore)
+        self.assertNotIn("UNEXPECTED-OK", cp.stdout, cp.stdout + cp.stderr)
+        self.assertFalse(sf.exists(), cp.stdout + cp.stderr)
+
+    def test_both_ends_of_the_switch_take_the_same_lock(self):
+        """A stop that runs while a start is mid-flight would kill a pid the
+        start is about to overwrite; one resource, both callers."""
+        vm = (REPO / "targets" / "vm.sh").read_text()
+        for fn in ("_agent_forward_start", "_agent_forward_stop"):
+            with self.subTest(fn=fn):
+                self.assertIn('with_lock "vm-agent-forward-$1" -- %s_locked' % fn,
+                              func_body(vm, fn))
 
 
 class TestTheGuestGetsTheInjectorsCa(WkTest):

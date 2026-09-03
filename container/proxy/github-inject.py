@@ -211,7 +211,11 @@ def ensure_certs(d, ca_out):
     The chain is leaf-then-CA in one file: a client that trusts the CA still
     needs to be sent it, and sending it costs nothing.
     """
-    os.makedirs(d, mode=0o700, exist_ok=True)
+    # `mode=` applies only to a directory this call creates, so an existing one
+    # keeps whatever mode it had -- and this directory holds the leaf key that
+    # impersonates api.github.com to everything that trusts the CA.
+    os.makedirs(d, exist_ok=True)
+    os.chmod(d, 0o700)
     ca_key = os.path.join(d, "ca.key")
     ca_crt = os.path.join(d, "ca.crt")
     leaf_key = os.path.join(d, "leaf.key")

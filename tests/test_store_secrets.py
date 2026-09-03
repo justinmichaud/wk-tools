@@ -1,11 +1,10 @@
 """The secrets directory is this device's own, and nothing crosses into the
 podman machine to reach it.
 
-`wk key set`, `wk key ensure` and `wk push` used to be answered inside the
-podman VM, because that is where /var/lib/wk/secrets was: storing a token or
-throwing the push switch meant starting a virtual machine first. The directory
-is now this host's (wk_secrets_dir, lib/store.sh) and the machine mounts it
-read-only, so every one of those runs here.
+The directory is this host's (wk_secrets_dir, lib/store.sh) and the machine
+mounts it read-only, so `wk key set`, `wk key ensure` and `wk push` are all
+answered here: storing a token or throwing the push switch needs no virtual
+machine running.
 
 That is testable as an absence, which is what this file is: `podman` on PATH
 leaves a witness file behind and then fails. Every command below has to
@@ -200,6 +199,128 @@ class TestThePushSwitchRunsHere(_Here):
         self.assertEqual(cp.returncode, 4, cp.stdout)
         self.assert_no_podman(cp)
         self.assertIn("no deploy keys", cp.stdout)
+
+
+class TestNothingButAFileIsReadOrWrittenThroughAgentRw(_Here):
+    """`~/.config/wk/agent-rw` is mounted read-write into every container --
+    the Claude CLI rotates the claude.ai login in place and every holder has to
+    be looking at one set of bytes -- and it is a sibling of `push-keys`, which
+    holds the private deploy keys and the GitHub token and is mounted nowhere.
+
+    So a workspace can plant a link in the one directory it can write:
+
+        ln -sfn ../push-keys/github-pat /agent-rw/.credentials.json
+
+    and every host-side read of that name becomes a read of the token (`wk vm
+    start` copies what it reads into a guest) and every host-side write becomes
+    a write through the link, so `wk key set claude-login` would overwrite it.
+    A hard link does the same without being a symlink.
+
+    Every reader and writer goes through lib/secretfile.py, and this is that
+    rule measured at each of them."""
+
+    NAME = "claude-login"
+    REAL = "not-a-real-credential-just-this-tests-bytes"
+
+    def setUp(self):
+        super().setUp()
+        self.agent_rw = self.secrets.parent / "agent-rw"
+        self.agent_rw.mkdir(parents=True)
+        self.held = self.secrets.parent / "push-keys"
+        self.held.mkdir(parents=True)
+        self.token = self.held / "github-pat"
+        self.token.write_text(self.REAL + "\n")
+        self.cred = self.agent_rw / ".credentials.json"
+
+    def path(self):
+        cp = self.sh(f'wk_agent_secret_path {self.NAME}')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout.strip()
+
+    def entry_points(self):
+        """One shell line per reader and writer of one of these paths, each
+        run on its own so a refusal in one cannot be mistaken for another's."""
+        return {
+            "wk_agent_secret_bytes":
+                f'wk_agent_secret_bytes {self.NAME}',
+            "wk_agent_secret":
+                f'wk_agent_secret {self.NAME}',
+            "wk_agent_secret_present":
+                f'wk_agent_secret_present {self.NAME}',
+            "wk_agent_secret_store":
+                f'printf "%s\\n" replacement | wk_agent_secret_store {self.NAME}',
+        }
+
+    def test_the_row_really_does_live_in_the_writable_directory(self):
+        """Otherwise everything below is testing the wrong path."""
+        self.assertEqual(str(self.cred), self.path())
+
+    def test_a_symlink_out_of_it_is_refused_by_every_entry_point(self):
+        self.cred.symlink_to(self.token)
+        for name, script in self.entry_points().items():
+            with self.subTest(entry=name):
+                cp = self.sh(script)
+                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertNotIn(self.REAL, cp.stdout + cp.stderr)
+                self.assertIn("not a file", cp.stderr)
+                self.assertIn(str(self.cred), cp.stderr)
+        self.assertEqual(self.REAL + "\n", self.token.read_text(),
+                         "the write went through the link to the token")
+
+    def test_an_absolute_symlink_is_refused_the_same_way(self):
+        self.cred.symlink_to(str(self.token))
+        cp = self.sh(self.entry_points()["wk_agent_secret_bytes"])
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertNotIn(self.REAL, cp.stdout)
+
+    def test_a_hard_link_to_the_token_is_refused_by_every_entry_point(self):
+        """O_NOFOLLOW cannot see this one: it is the same inode under a second
+        name, and only st_nlink says so."""
+        import os
+        os.link(self.token, self.cred)
+        for name, script in self.entry_points().items():
+            with self.subTest(entry=name):
+                cp = self.sh(script)
+                self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertNotIn(self.REAL, cp.stdout + cp.stderr)
+                self.assertIn("hard links", cp.stderr)
+        self.assertEqual(self.REAL + "\n", self.token.read_text())
+
+    def test_a_directory_in_its_place_is_refused(self):
+        self.cred.mkdir()
+        cp = self.sh(self.entry_points()["wk_agent_secret_present"])
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("not a regular file", cp.stderr)
+
+    def test_a_plain_file_reads_writes_and_reports_present(self):
+        """The refusal is about what a workspace could put there, and the
+        ordinary path is untouched: the credential still round-trips."""
+        doc = "{-a-: 1}"
+        cp = self.sh(f'printf "%s" "{doc}" | wk_agent_secret_store {self.NAME}\n'
+                     f'if wk_agent_secret_present {self.NAME}; then echo present; fi\n'
+                     f'printf "bytes=[%s]\\n" "$(wk_agent_secret_bytes {self.NAME})"')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("present", cp.stdout)
+        self.assertIn(f"bytes=[{doc}]", cp.stdout)
+        self.assertEqual(0o600, self.cred.stat().st_mode & 0o777)
+
+    def test_a_missing_one_is_absent_and_not_a_refusal(self):
+        cp = self.sh(f'if wk_agent_secret_present {self.NAME}; then echo yes; else echo no; fi\n'
+                     f'printf "bytes=[%s]\\n" "$(wk_agent_secret_bytes {self.NAME})"')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("no", cp.stdout)
+        self.assertIn("bytes=[]", cp.stdout)
+
+    def test_the_guest_copy_is_refused_rather_than_carried_in(self):
+        """targets/vm.sh copies a file row into a guest, which is the one
+        delivery that makes a second holder of it -- so a refused path must
+        stop the start, not arrive in there as an empty file."""
+        vm = (REPO / "targets" / "vm.sh").read_text()
+        body = vm[vm.index("_write_agent_secrets() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("wk_agent_secret_present", body)
+        self.assertIn("set -o pipefail", body)
+        self.assertIn('[ "$here" -lt 2 ] || return 1', body)
 
 
 class TestNoForwardingIsLeftInTheSource(unittest.TestCase):

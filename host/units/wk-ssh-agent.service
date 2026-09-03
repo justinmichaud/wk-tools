@@ -1,0 +1,22 @@
+[Unit]
+Description=wk deploy-key ssh-agent (outside every workspace)
+Documentation=file://@WK_ROOT@/cmd/push
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh-agent -D -a %t/wk/ssh-agent.sock
+Restart=on-failure
+RestartSec=2
+# The same directory wk-proxy.service owns, preserved for the same reason:
+# containers bind-mount it.
+RuntimeDirectory=wk
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+# ssh-agent refuses to bind a path that already exists, and one left by a
+# previous run has nothing behind it.
+ExecStartPre=/usr/bin/rm -f %t/wk/ssh-agent.sock
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target
