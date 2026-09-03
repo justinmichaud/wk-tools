@@ -186,7 +186,12 @@ class TestPiHelper(WkTest):
             f"WK_ROOT={REPO}\n"
             f"CARD_PRIV={there}/wk-card-priv\n"
             f"CARD_CHECKER={there}/wk-check-boot-files.py\n"
+            # A bench-device, which is what this verb installs onto: it writes
+            # root-owned paths over a channel that is root only there. An
+            # unset role means workstation (boot/machines.sh), and the verb
+            # refuses that by naming the step at the machine's own keyboard.
             "HOST=rpi3-rescue; MACH_NAME=rpi3; MACH_DEVICE=/dev/mmcblk0; PI_FLEET=1\n"
+            "MACH_ROLE=bench-device\n"
             "die() { printf 'error: %s\\n' \"$*\" >&2; exit 1; }\n"
             "info() { printf '%s\\n' \"$*\"; }\n"
             "log()  { printf '%s\\n' \"$*\"; }\n"
@@ -222,6 +227,17 @@ class TestPiHelper(WkTest):
         cp, _ = self._run(extra="PI_FLEET=''")
         self.assertEqual(cp.returncode, 1, cp.stdout + cp.stderr)
         self.assertIn("not a fleet machine", cp.stderr)
+
+    def test_a_workstation_is_refused_and_names_the_step_at_its_keyboard(self):
+        """A workstation that holds a card reader needs the helper too, but
+        writing /usr/local/libexec there needs a root it is not driven as, and
+        wk takes no passwordless sudo on one. So the verb refuses and names
+        the one command that can be answered at that machine."""
+        cp, _ = self._run(extra="MACH_ROLE=workstation")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("is a workstation", cp.stderr)
+        self.assertIn("./setup --stage quiesce", cp.stderr,
+                      "the refusal does not name its remedy")
 
     def test_a_helper_that_does_not_answer_is_a_failure(self):
         """installed is not working: the copy has to answer `status`, or a

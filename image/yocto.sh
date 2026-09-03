@@ -480,11 +480,25 @@ yocto_build() {
     # Free space, before anything is created: TMPDIR lands in the workspace's
     # overlay, on the store's filesystem, and the thresholds below are
     # measured, not estimated.
-    local need_gb=120
-    [ "$chromium" = 1 ] || need_gb=60
-    [ "${YOC_RM_WORK:-0}" = 1 ] || need_gb=$((need_gb + 60))
-    disk_admit "this image build (TMPDIR${YOC_RM_WORK:+ with rm_work on}, plus the sstate
-    and download caches)" "$need_gb"
+    #
+    # Per stage, because they are not the same size: bitbaking a whole
+    # distribution unpacks and builds every recipe in it, while the webkit
+    # stage is one cmake/ninja tree against a toolchain that is already there
+    # -- an ordinary build's figure (WK_BUILD_DISK_GB), and charging it the
+    # image's would refuse a slot build on a disk that can hold several.
+    local need_gb what
+    case "$stage" in
+        webkit)
+            need_gb="$WK_BUILD_DISK_GB"
+            what="this WebKit cross build" ;;
+        *)
+            need_gb=120
+            [ "$chromium" = 1 ] || need_gb=60
+            [ "${YOC_RM_WORK:-0}" = 1 ] || need_gb=$((need_gb + 60))
+            what="this image build (TMPDIR${YOC_RM_WORK:+ with rm_work on}, plus the sstate
+    and download caches)" ;;
+    esac
+    disk_admit "$what" "$need_gb"
 
     yocto_ensure_ws "$ws" "$YOC_BRANCH"
 

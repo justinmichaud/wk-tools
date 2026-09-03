@@ -741,7 +741,10 @@ PI_SYSTEM_TRIES=3
 pi_system_boot() { # <system id>
     local want="$1" try=0 out id kind deadline
 
-    while [ "$try" -lt "$PI_SYSTEM_TRIES" ]; do
+    # `-le`, not `-lt`: the passes are one more than the armings, because a
+    # pass arms and the *next* one reads what answered. Bounded at
+    # PI_SYSTEM_TRIES armings either way; see the break below.
+    while [ "$try" -le "$PI_SYSTEM_TRIES" ]; do
         try=$((try + 1))
 
         # Evidence first, every time round: the board may already be there --
@@ -774,6 +777,13 @@ pi_system_boot() { # <system id>
             return 0
         fi
         [ -z "$id" ] || info "$machine answers as ${id}${kind:+ ($kind)}, not $want"
+
+        # The last pass reads the last arming's result and then stops: N
+        # armings, N+1 looks. Without it the board is declared lost at the
+        # moment it comes up correctly -- which is every leg switch on a lane
+        # whose arming needs the trip through the rescue, since discovering
+        # that costs two passes and the third is the one that works.
+        [ "$try" -le "$PI_SYSTEM_TRIES" ] || break
 
         info "$machine: arming and booting system $want (attempt $try of $PI_SYSTEM_TRIES)"
         if ! "$WK_ROOT/wk" boot "$machine" --system "$want" >/dev/null 2>&1; then
@@ -1422,6 +1432,22 @@ cmd_helper() {
     [ -n "$PI_FLEET" ] || die "usage: wk pi helper <machine>: '$HOST' is not a fleet machine.
     The helper goes on a board this repo drives, named as 'wk boot --list' names it."
     [ -r "$src" ] && [ -r "$check" ] || die "this checkout is missing $src or $check"
+
+    # A bench-device is driven as root, so this writes root-owned paths over
+    # the same channel as everything else. A workstation is not: it is driven
+    # as a person, and `wk` never takes a passwordless sudo on one beyond the
+    # two privileged helpers themselves (CLAUDE.md). So the install there is a
+    # step at that machine's own keyboard, and this says so rather than dying
+    # on a chmod that was never going to be permitted.
+    [ "${MACH_ROLE:-}" = bench-device ] || die "$HOST is a workstation, so this cannot install
+    the helper on it: writing /usr/local/libexec needs a root it is not driven
+    as, and wk takes no passwordless sudo on a workstation. Install it there,
+    where the one password prompt can be answered:
+
+      ssh $HOST 'cd ~/Development/wk-tools && ./setup --stage quiesce'
+
+    That machine's checkout is what gets installed, so sync it first if the
+    fix you want is not in it yet."
 
     rsh "install -d -o root -g root -m 0755 ${CARD_PRIV%/*}" \
         || die "could not make ${CARD_PRIV%/*} on $HOST"

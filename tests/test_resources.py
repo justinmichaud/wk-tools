@@ -91,6 +91,14 @@ class TestDiskAdmit(WkTest):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("admitted", cp.stdout)
 
+    def test_a_slot_build_is_not_charged_the_whole_image_s_figure(self):
+        # image/yocto.sh sizes per stage: the webkit stage is one cmake tree
+        # against a toolchain already on disk, not a whole distribution. A
+        # disk that can hold several slot builds must not refuse one.
+        cp = self._bash('disk_admit "this WebKit cross build" "$WK_BUILD_DISK_GB" && echo admitted', 30)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("admitted", cp.stdout)
+
     def test_every_build_path_asks_because_build_admit_does(self):
         # No running builds at all: the memory half returns early, and the
         # disk half must still have been asked.

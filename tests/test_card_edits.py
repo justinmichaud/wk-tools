@@ -513,6 +513,34 @@ class TestBootCheck(CardEditTest):
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("kernel", cp.stdout + cp.stderr)
 
+    def test_a_pi5_boot_tree_passes_with_its_own_kernel_name(self):
+        # meta-raspberrypi's raspberrypi5.conf sets SDIMG_KERNELIMAGE to
+        # kernel_2712.img, so a correct Pi 5 image carries that name and none
+        # of the Pi 4's. The checker must not refuse the whole board.
+        (self.boot / "config.txt").write_text("arm_64bit=1\n")
+        for name in ("start4.elf", "fixup4.dat", "kernel_2712.img",
+                     "bcm2712-rpi-5-b.dtb"):
+            (self.boot / name).write_text("firmware")
+        cp = self.run_helper(
+            f'CHECK_BOOT_FILES={REPO / "boot" / "check-boot-files.py"}\n'
+            + _lift(CARD_PRIV, "check_name", "_boot_check_run", "v_boot_check")
+            + "\nv_boot_check /dev/sdX bcm2712-rpi-5-b.dtb\n")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("every file the firmware asks for resolves", cp.stdout)
+
+    def test_a_pi5_tree_with_no_kernel_at_all_is_still_refused(self):
+        # The positive control: widening the list must not stop it catching
+        # a boot partition with no kernel on it.
+        (self.boot / "config.txt").write_text("arm_64bit=1\n")
+        for name in ("start4.elf", "fixup4.dat", "bcm2712-rpi-5-b.dtb"):
+            (self.boot / name).write_text("firmware")
+        cp = self.run_helper(
+            f'CHECK_BOOT_FILES={REPO / "boot" / "check-boot-files.py"}\n'
+            + _lift(CARD_PRIV, "check_name", "_boot_check_run", "v_boot_check")
+            + "\nv_boot_check /dev/sdX bcm2712-rpi-5-b.dtb\n")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("kernel", cp.stdout + cp.stderr)
+
     def test_a_missing_checker_refuses_loudly_and_names_the_remedy(self):
         """root runs the checker, so it is a fixed path -- absent, the verb refuses"""
         self._boot_tree()

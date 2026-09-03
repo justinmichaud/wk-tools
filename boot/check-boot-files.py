@@ -105,8 +105,13 @@ def wanted_files(config, model_dtb):
         # pick" -- guessing the second wrongly costs a refused write, while the
         # failure being guarded against is *no kernel at all*, which this still
         # catches.
+        # kernel_2712.img is the Pi 5's: meta-raspberrypi's raspberrypi5.conf
+        # sets SDIMG_KERNELIMAGE to it, so a correct Pi 5 image carries that
+        # name and none of the others, and leaving it out refuses every image
+        # for the board.
         kernels = [prefix + k for k in
-                   ("kernel8.img", "kernel7l.img", "kernel7.img", "kernel.img")]
+                   ("kernel8.img", "kernel_2712.img",
+                    "kernel7l.img", "kernel7.img", "kernel.img")]
 
     files = [
         ("second-stage firmware", ["start4.elf"]),

@@ -193,6 +193,43 @@ pi_system_boot {want}
         self.assertEqual(log.count("wk boot rpi3 --system sys-a"), PI_SYSTEM_TRIES,
                          "it did not try PI_SYSTEM_TRIES times:\n" + log)
 
+    def test_the_last_arming_is_read_before_the_leg_is_given_up(self):
+        """The passes are one more than the armings: a board that comes up
+        correctly on the final arming has won its leg, and reporting it lost
+        discards a measurement that happened.
+
+        This is the rpi3's every leg switch (2026-09-03): the first arming is
+        accepted where the board stands but does not hold, the second is
+        refused, the trip through the rescue makes the third work -- and with
+        no pass left to look, the leg was lost while the board sat in exactly
+        the system asked for."""
+        (self.tmp / "wk").write_text(
+            "#!/bin/sh\n"
+            'echo "wk $*" >> "$WK_LOG"\n'
+            'case "$*" in\n'
+            '  *--system*)\n'
+            '     n=$(( $(cat "$WK_LOG.n" 2>/dev/null || echo 0) + 1 ))\n'
+            '     echo $n > "$WK_LOG.n"\n'
+            '     # 1st accepted (does not hold), 2nd refused, later fine.\n'
+            '     [ "$n" = 2 ] && exit 1\n'
+            '     ;;\n'
+            '  *--back*) : > "$WK_LOG.back" ;;\n'
+            "esac\nexit 0\n")
+        (self.tmp / "wk").chmod(0o755)
+        cp, log = self._boot([
+            "id=sys-b;rootdev=/dev/mmcblk0p8",     # decides: arm #1
+            "id=sys-b;rootdev=/dev/mmcblk0p8",     # did not hold: arm #2, refused -> --back
+            "id=rescue-img;rootdev=/dev/mmcblk0p2",  # on the rescue: arm #3, works
+            "id=sys-a;rootdev=/dev/mmcblk0p6",     # the pass that reads arm #3
+        ])
+        self.assertEqual(cp.returncode, 0,
+                         "the leg was given up without reading the last arming:\n"
+                         + cp.stdout + cp.stderr)
+        self.assertNotIn("the leg is lost", cp.stdout + cp.stderr)
+        self.assertLessEqual(log.count("wk boot rpi3 --system sys-a"), PI_SYSTEM_TRIES,
+                             "the armings are still bounded at PI_SYSTEM_TRIES:\n" + log)
+        self.assertIn("wk-keep-running", log)
+
     def test_the_rescue_is_not_sent_back_before_arming(self):
         """host mode (the rescue answering as base) is the state to arm
         *from*: no --back, straight to the arming."""
