@@ -25,7 +25,7 @@ import re
 import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, run, scratch_dir
+from tests.support import REPO, WkTest, bash, fake_workspace, run, scratch_dir
 
 BENCH = REPO / "cmd" / "bench"
 BRIDGE = REPO / "cmd" / "bridge"
@@ -354,6 +354,43 @@ class TestBuildBabysitDefaults(WkTest):
         self.assertEqual(override.stdout.strip(), "9")
 
 
+class TestBuildMemInterval(WkTest):
+    """WK_MEM_INTERVAL: how often the memory watchdog samples (default 30s,
+    documented in `wk build -h`). No flag of its own -- read directly at
+    the one place that actually sleeps on it, build/mem-watchdog.sh."""
+
+    def test_watchdog_interval_default_and_override(self):
+        expr = _extract_expr(
+            REPO / "build" / "mem-watchdog.sh", r'INTERVAL="\$\{WK_MEM_INTERVAL:-30\}"',
+        )
+        default = bash(f'{expr}\necho "$INTERVAL"')
+        override = bash(f'{expr}\necho "$INTERVAL"', env={"WK_MEM_INTERVAL": "5"})
+        self.assertEqual(default.stdout.strip(), "30")
+        self.assertEqual(override.stdout.strip(), "5")
+
+
+class TestRemoteMaxJobsTombstone(WkTest):
+    """WK_REMOTE_MAX_JOBS: a name no conf sets any more -- the job count is
+    always derived per build from what the target has free
+    (export_target_resources, lib/resources.sh). Set anyway (a leftover
+    conf line), cmd/build warns and names the fix rather than silently
+    reading it -- CLAUDE.md's tombstone shape, a name the tooling still
+    refuses, naming its replacement."""
+
+    def test_set_in_the_environment_warns_and_names_the_remedy(self):
+        with fake_workspace() as ws:
+            cp = ws.run("build", "jsc-release", "--dry-run", env={"WK_REMOTE_MAX_JOBS": "8"})
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+            self.assertIn("WK_REMOTE_MAX_JOBS is set", cp.stdout)
+            self.assertIn("ignored", cp.stdout)
+
+    def test_unset_prints_nothing_about_it(self):
+        with fake_workspace() as ws:
+            cp = ws.run("build", "jsc-release", "--dry-run")
+            self.assertEqual(cp.returncode, 0, cp.stdout)
+            self.assertNotIn("WK_REMOTE_MAX_JOBS", cp.stdout)
+
+
 class TestBenchBrowserRemoved(WkTest):
     """WK_BENCH_BROWSER was a second implementation of --browser (same
     knob, two ways); removed rather than documented, per CLAUDE.md's "one
@@ -385,7 +422,10 @@ class TestHeaderDocumentsTheKnobsThisModuleTests(unittest.TestCase):
 
     def test_build_header_names_its_tunables(self):
         cp = run("build", "-h")
-        for name in ("WK_BABYSIT_MODEL", "WK_BABYSIT_ATTEMPTS", "WK_BUILD_LOCK_WAIT"):
+        for name in (
+            "WK_BABYSIT_MODEL", "WK_BABYSIT_ATTEMPTS", "WK_BUILD_LOCK_WAIT",
+            "WK_MEM_INTERVAL",
+        ):
             self.assertIn(name, cp.stdout, f"{name} missing from `wk build -h`")
 
     def test_bridge_header_names_its_tunable(self):

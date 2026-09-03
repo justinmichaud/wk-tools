@@ -27,6 +27,7 @@
 #                               (default 5)
 #   WK_BUILD_LOCK_WAIT=<s>      how long a build waits for another build on
 #                               the same workspace before giving up (default 3600)
+#   WK_MEM_INTERVAL=<s>         how often the memory watchdog samples (default 30)
 
 set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -326,6 +327,10 @@ export WK_TARGET_BUILD_ARGS
 WK_CCACHE_DIR=$(t_ccache_dir "$NAME")
 export WK_CCACHE_DIR
 
+# Tombstone: an older targets/hosts/<name>.conf could pin a remote's job
+# count; every build now derives it instead (export_target_resources,
+# lib/resources.sh), so a conf that still sets WK_REMOTE_MAX_JOBS is named
+# and told to delete the line, rather than silently doing nothing.
 [ -z "${WK_REMOTE_MAX_JOBS:-}" ] || \
     warn "WK_REMOTE_MAX_JOBS is set in $TARGET's conf and is ignored: the job count
   is derived per build from what that machine has free. Delete the line."

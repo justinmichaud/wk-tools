@@ -18,7 +18,7 @@ import os
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest
+from tests.support import REPO, WkTest, assert_guest_start_converges
 
 
 def _src(*parts):
@@ -129,14 +129,14 @@ class TestStartSetsTheClock(unittest.TestCase):
     build sets it before provisioning speaks HTTPS."""
 
     def test_both_t_start_branches_set_the_clock(self):
-        vm = _src("targets", "vm.sh")
-        self.assertEqual(2, vm.count('_set_guest_clock "$name" "$ip"'), vm.count('_set_guest_clock "$name" "$ip"'))
+        """One `_converge_guest`, called from both t_start arms."""
+        assert_guest_start_converges(self, '_set_guest_clock "$name" "$ip"')
 
     def test_the_clock_is_set_before_the_proxy(self):
         """Order matters: everything reached through the proxy speaks TLS."""
         vm = _src("targets", "vm.sh").splitlines()
         for i, line in enumerate(vm):
-            if '_set_guest_proxy "$name" "$ip"' in line:
+            if '_set_guest_egress "$name" "$ip"' in line:
                 self.assertIn("_set_guest_clock", vm[i - 1], f"line {i + 1}")
 
     def test_the_base_build_sets_the_clock_before_provisioning(self):

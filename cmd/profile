@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # wk profile [<workspace>] [flags] [file.js] -- profile a jsc or browser run
-# wk: where=workspace name=required ready=yes group=workspaces
-# wk: flag --list name=none
+# wk: where=workspace name=required values=--list ready=yes group=workspaces
+# wk: flag --list where=local name=none
 #
 # Where the time went -- with the env-var wall for each profiler written down
 # once, here, instead of in three wiki pages and two skills.
@@ -35,9 +35,9 @@
 # that's `wk bench`. Artifacts stay in the workspace; `--fetch` copies them
 # out through t_pull, since `t_exec <ws> cat` silently corrupts a binary.
 #
-#   --mode <m>        sampling (default) | bytecode | samply | instruments |
-#                     heaptrack | massif | native  (native = instruments on the
-#                     Apple ports, samply everywhere else)
+#   --mode <m>        which profiler runs (default sampling); native picks
+#                     instruments on the Apple ports and samply everywhere
+#                     else; `wk profile --list` lists the rest
 #   --config <c>      which build to profile (default: the workspace's own);
 #                     `wk build --list` lists every name
 #   --browser [url]   profile MiniBrowser on that page instead of the jsc shell
@@ -417,7 +417,8 @@ if [ -z "$ATTACH" ] && [ -n "${BIN:-}" ]; then
 fi
 
 if [ -n "$NEEDS" ] && [ -z "$DRY" ]; then
-    t_exec "$NAME" command -v "$NEEDS" >/dev/null 2>&1 || die "$NEEDS is not installed in '$NAME'.
+    # `command` is a builtin and t_exec is an exec, not a shell: ask through sh.
+    t_exec "$NAME" sh -c "command -v $(sh_quote "$NEEDS") >/dev/null 2>&1" || die "$NEEDS is not installed in '$NAME'.
     It is provisioning, not a per-run step -- see the provisioning half of
     docs/Urgent/HANDOFF-profile.md. Until that lands:
         wk enter $NAME     and install it there, or

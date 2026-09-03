@@ -3,7 +3,7 @@
 # wk bridge <sub> [<name>] [flags] -- provision a phone as a tailnet bridge
 #
 # wk: where=host name=none group=hosts
-# wk: readonly ls,status
+# wk: readonly ls,status,battery
 #
 # A bridge is a phone with two legs: WiFi to the house, USB-C Ethernet to a
 # segment with no other way onto the tailnet -- a BMC's management port, or a
@@ -13,12 +13,15 @@
 # once-per-phone job (wk help).
 #
 #   ls                        every declared bridge, and what it answers to
+#                             (--names: just the names, unprobed -- for scripts)
 #   provision <name>          the whole path: image, card, phone, role,
 #                             tailnet policy, health check
 #   setup <name>              the ssh half of provision; idempotent -- re-run
 #                             after any change to the conf or the provisioner
 #   tailnet <name>            just the tailnet join and policy print
 #   status <name>             what the role reports right now
+#   battery <name>            percent, charging state and the charge-limit
+#                             node's threshold, read straight from sysfs
 #   rm <name>                 remove everything setup left on the phone and
 #                             drop the node from the tailnet; leaves the OS
 #
@@ -90,7 +93,7 @@ load_bridge() {
     BR_DEVICE=""; BR_SSH=""; BR_HOSTNAME=""; BR_TAG=""; BR_SEGMENT=""
     BR_ROUTER=""; BR_IF=""; BR_POOL=""; BR_LEASES=""; BR_EGRESS=""
     BR_CAMERA=""; BR_REACHED_BY=""; BR_NOTE=""; BR_LAN_MAC=""; BR_CARD=""
-    BR_USER=""
+    BR_USER=""; BR_BATTERY=""; BR_BATTERY_LIMIT=""
     # shellcheck disable=SC1090
     . "$conf"
     BR_CONF="$conf"
@@ -109,6 +112,11 @@ load_bridge() {
     # by address, and an address carries no ssh_config `User` line the way the
     # declared hostnames do.
     : "${BR_USER:=user}"
+    # The one constant docs/Urgent/HUMAN-battery.md asked for: 80% unless a
+    # host conf overrides it. BR_BATTERY stays empty by default -- the node is
+    # autodetected on the phone (bridge/provision.sh); it is only ever set
+    # when a device exposes more than one charge_control_end_threshold.
+    : "${BR_BATTERY_LIMIT:=80}"
 
     bridge_device_load "$BR_DEVICE" \
         || die "$conf names device '$BR_DEVICE', which bridge/devices.sh has never heard of.
@@ -457,6 +465,14 @@ _ls_probe() { # <destination> -> up | key-changed | unreachable
 
 cmd_ls() {
     local name any=""
+    # --names: every declared bridge, one per line, nothing probed -- the
+    # machine-readable half, for `wk doctor --all` to iterate without
+    # re-deriving bridge_registry_dir/bridge_conf_dir's local-overrides-repo
+    # merge itself.
+    if [ "${1:-}" = --names ]; then
+        bridge_names
+        return 0
+    fi
     printf '%-28s %-10s %-16s %-12s %s\n' NAME DEVICE SEGMENT STATE NOTE
     for name in $(bridge_names); do
         any=1
@@ -1210,6 +1226,7 @@ cmd_setup() {
     log  "  tailnet:  $BR_HOSTNAME, $BR_TAG, advertising $BR_SEGMENT"
     log  "  egress:   $BR_EGRESS$([ "$BR_EGRESS" = nat ] && printf ' (the segment can reach the internet)' || printf ' (the segment reaches nothing but the tailnet)')"
     log  "  camera:   $BR_CAMERA"
+    log  "  battery:  cap ${BR_BATTERY_LIMIT}%${BR_BATTERY:+, node $BR_BATTERY}"
 
     if [ -n "$dry" ]; then
         log ""
@@ -1309,6 +1326,8 @@ cmd_setup() {
         BR_EGRESS=$(sh_quote "$BR_EGRESS") \
         BR_CAMERA=$(sh_quote "$BR_CAMERA") \
         BR_LAN_MAC=$(sh_quote "$BR_LAN_MAC") \
+        BR_BATTERY=$(sh_quote "$BR_BATTERY") \
+        BR_BATTERY_LIMIT=$(sh_quote "$BR_BATTERY_LIMIT") \
         BR_NO_TAILNET=$(sh_quote "${BR_NO_TAILNET:-}") \
         sh /usr/local/lib/wk-bridge/provision.sh" \
         || die "provisioning failed on $BR_SSH -- nothing here changed"
@@ -1398,6 +1417,46 @@ cmd_status() {
     rsh "$PRIV /usr/local/sbin/wk-bridge-healthcheck"
 }
 
+# --- battery -------------------------------------------------------------------
+# Read-only (rule 6, CLAUDE.md): no root bootstrap, nothing written, just
+# what /etc/wk-bridge-battery.conf and sysfs say right now. `wk doctor --all`
+# is the machine reader of this; key=value, one per line, so it never has to
+# parse prose.
+cmd_battery() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --at) BR_AT="${2:-}"; [ -n "$BR_AT" ] || die "--at needs a host or address"; shift 2 ;;
+            *) die "usage: wk bridge battery <name> [--at <host>]
+    unknown option: $1" ;;
+        esac
+    done
+    resolve_ssh || die "cannot reach $BR_NAME.
+    'wk bridge status $BR_NAME' has the full diagnosis."
+    rsh 'sh -s' <<'EOF'
+set -u
+conf=/etc/wk-bridge-battery.conf
+node=""; limit=""
+if [ -f "$conf" ]; then
+    node=$(sed -n 's/^node=//p' "$conf")
+    limit=$(sed -n 's/^limit=//p' "$conf")
+fi
+pct=""; state=""
+for d in /sys/class/power_supply/*/capacity; do
+    [ -f "$d" ] || continue
+    pct=$(cat "$d" 2>/dev/null)
+    state=$(cat "$(dirname "$d")/status" 2>/dev/null)
+    break
+done
+cur=""
+[ -n "$node" ] && [ -f "$node/charge_control_end_threshold" ] \
+    && cur=$(cat "$node/charge_control_end_threshold" 2>/dev/null)
+printf 'percent=%s\n' "${pct:-?}"
+printf 'status=%s\n'  "${state:-?}"
+printf 'limit=%s\n'   "${limit:-?}"
+printf 'current=%s\n' "${cur:-?}"
+EOF
+}
+
 # --- rm ----------------------------------------------------------------------
 # Undoes the role, not the phone. Everything this removes was written by
 # provision.sh; nothing that came with the image is touched, so what is left
@@ -1413,10 +1472,10 @@ cmd_rm() {
     done
     resolve_priv
     log "this removes the bridge role from $BR_SSH:"
-    log "  services       wk-bridge-{dhcp,nftables,netwatch,watchdog,usb-host,camera}"
-    log "  configuration  /etc/wk-bridge.conf, /etc/dnsmasq.d/wk-bridge.conf,"
-    log "                 /etc/nftables.d/wk-bridge.nft, the udev rule, the NM"
-    log "                 connection, the chrony and sshd drop-ins"
+    log "  services       wk-bridge-{dhcp,nftables,netwatch,watchdog,usb-host,camera,battery}"
+    log "  configuration  /etc/wk-bridge.conf, /etc/wk-bridge-battery.conf,"
+    log "                 /etc/dnsmasq.d/wk-bridge.conf, /etc/nftables.d/wk-bridge.nft,"
+    log "                 the udev rule, the NM connection, the chrony and sshd drop-ins"
     log "  tailnet        the node logs out, so it stops advertising $BR_SEGMENT"
     log "it leaves postmarketOS, the packages, and your ssh keys alone."
     confirm "remove the bridge role from $BR_SSH?" || die "aborted -- nothing was changed"
@@ -1426,7 +1485,7 @@ cmd_rm() {
     # daemon is reloaded, so a run that dies partway leaves ssh working.
     rsh "$PRIV sh -s" <<'EOF' || die "deprovisioning did not complete -- re-run it, or see what is left with 'wk bridge status'"
 set -u
-for s in wk-bridge-camera wk-bridge-netwatch wk-bridge-watchdog wk-bridge-dhcp wk-bridge-nftables wk-bridge-usb-host; do
+for s in wk-bridge-camera wk-bridge-netwatch wk-bridge-watchdog wk-bridge-dhcp wk-bridge-nftables wk-bridge-usb-host wk-bridge-battery; do
     [ -x "/etc/init.d/$s" ] || continue
     rc-service "$s" stop >/dev/null 2>&1 || true
     rc-update del "$s" default >/dev/null 2>&1 || true
@@ -1435,6 +1494,7 @@ for s in wk-bridge-camera wk-bridge-netwatch wk-bridge-watchdog wk-bridge-dhcp w
 done
 nft delete table inet wkbridge 2>/dev/null || true
 rm -f /etc/wk-bridge.conf \
+      /etc/wk-bridge-battery.conf \
       /etc/dnsmasq.d/wk-bridge.conf \
       /etc/nftables.d/wk-bridge.nft \
       /etc/udev/rules.d/70-wk-bridge-net.rules \
@@ -1477,11 +1537,14 @@ EOF
 ACTION="${1:-}"; shift || true
 case "$ACTION" in
     ls)
-        [ $# -eq 0 ] || die "usage: wk bridge ls
-    unexpected argument: $1"
-        cmd_ls
+        case "${1:-}" in
+            ""|--names) ;;
+            *) die "usage: wk bridge ls [--names]
+    unexpected argument: $1" ;;
+        esac
+        cmd_ls "$@"
         ;;
-    setup|status|rm|provision|tailnet)
+    setup|status|battery|rm|provision|tailnet)
         NAME="${1:-}"
         case "$NAME" in
             -*) die "usage: wk bridge $ACTION <name> [flags]; see wk bridge -h

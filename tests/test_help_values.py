@@ -20,7 +20,7 @@ Run: python3 -m unittest tests.test_help_values -v
 import subprocess
 import unittest
 
-from tests.support import REPO
+from tests.support import REPO, bash, scratch_dir, temp_store
 
 # {cmd: {flag_or_positional_name: [valid, values, ...]}}
 # Only sets that are genuinely closed -- read directly out of each command's
@@ -47,6 +47,8 @@ DECLARED_VALUES = {
     "build": "--list",
     "boot": "--list",
     "sysimage": "--list",
+    "profile": "--list",
+    "pi": "--list",
 }
 
 
@@ -104,6 +106,62 @@ class TestHelpListsClosedSetValues(unittest.TestCase):
                         self.assertIn(v, text,
                                       f"wk {cmd} -h does not mention '{v}' "
                                       f"(a valid value for {param})")
+
+
+class TestBenchListPlans(unittest.TestCase):
+    """`wk bench --list` (docs/defects): the plan set is not a list in this
+    repo -- it lives in the WebKit tree -- so it is not a DECLARED_VALUES
+    entry above: running it for real asks podman about this machine's store
+    (`where=store`), which the tests must never do, unlike build/boot/
+    sysimage's --list, answered entirely out of this repo with `where=host`
+    or `where=local`. Its declaration is checked directly, and its read of
+    the store against a fake mirror this test builds -- the one read `wk
+    bench --list` forwards to the podman VM for on a macOS host, and this
+    suite never exercises through the podman machine itself."""
+
+    def test_declares_values_readonly_and_store(self):
+        head = "\n".join((REPO / "cmd" / "bench").read_text().splitlines()[:15])
+        self.assertIn("values=--list", head,
+                       "cmd/bench no longer declares its plan list")
+        self.assertIn("flag --list where=store", head,
+                       "cmd/bench --list no longer reads the store")
+        self.assertIn("readonly --list", head,
+                       "cmd/bench --list is not read-only, so it could start the podman VM")
+
+    def test_help_ends_with_the_plans_or_the_one_honest_line(self):
+        text = help_text("bench")
+        self.assertIn("valid values (wk bench --list):", text,
+                       "wk bench -h does not print its plan list")
+        tail = text.split("valid values (wk bench --list):", 1)[1].strip()
+        self.assertTrue(tail, "wk bench -h prints nothing after its value-list header")
+        # Either real plan names (this host has a readable mirror) or the
+        # one line naming where the list actually lives (it does not, here).
+        self.assertTrue("no mirror at" in tail or tail.split(),
+                         f"wk bench -h's plan list is empty: {tail!r}")
+
+    def test_lists_plan_names_from_a_fake_mirror(self):
+        with scratch_dir("wk-test-bench-src-") as src, temp_store() as store:
+            plans = src / "Tools/Scripts/webkitpy/benchmark_runner/data/plans"
+            plans.mkdir(parents=True)
+            (plans / "speedometer3.1.plan").write_text("{}")
+            (plans / "jetstream2.2.plan").write_text("{}")
+            subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+            subprocess.run(["git", "-C", str(src), "config", "user.email", "t@example.com"], check=True)
+            subprocess.run(["git", "-C", str(src), "config", "user.name", "test"], check=True)
+            subprocess.run(["git", "-C", str(src), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "plans"], check=True)
+
+            mirror = store["path"] / "git" / "WebKit.git"
+            mirror.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "clone", "-q", "--bare", str(src), str(mirror)], check=True)
+
+            cp = bash(
+                ". lib/common.sh; . lib/store.sh; . lib/bench.sh; bench_plan_list",
+                env={"WK_STORE": store["WK_STORE"]},
+            )
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            self.assertEqual(sorted(cp.stdout.split()),
+                              ["jetstream2.2", "speedometer3.1"])
 
 
 if __name__ == "__main__":

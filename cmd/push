@@ -3,7 +3,9 @@
 # wk push on|off|status -- whether a workspace can push to git at all
 # wk: where=store name=none group=sources
 # wk: readonly status
+# wk: sub on,off,status where=local
 # wk: flag --all,--target where=local
+# wk: flag --store where=store
 #
 # The rule this implements, from docs/HANDOFF-sandboxing.md: only the person at
 # the keyboard pushes. An agent in a workspace must not be able to publish
@@ -28,6 +30,22 @@
 # than a claim -- the same rule the rest of the workspace state follows
 # (README.md).
 #
+# A macOS guest mounts nothing of ours, so for a guest "where the key is" means
+# the copy in it (targets/vm.sh writes one on every start). That makes the
+# switch two halves on two machines:
+#
+#   the store    the keys move. On a macOS workstation the store is inside the
+#                podman machine, so this half is handed back to the dispatcher
+#                with `--store` and forwarded there -- `wk`'s own forward, the
+#                only one there is.
+#   the guests   every running guest is converged, here, after the keys have
+#                moved. This host is the machine that drives its guests; inside
+#                the podman machine there are none.
+#
+# Which is why `on`/`off`/`status` are declared where=local and `--store`
+# where=store. A container needs no second half: it reads the keys live
+# through the read-only mount, so moving them is the whole of it.
+#
 # `wk ai claude` turns it off before handing over control, which is the case the
 # switch exists for; see the note there about when it turns it back on.
 #
@@ -37,6 +55,11 @@
 #   --all                throw it everywhere: this machine and every other one
 #                        (wk boot --list names them); a machine that does not
 #                        answer is skipped, not fatal
+#   --store              move the keys and nothing else -- the half that has to
+#                        run on the machine holding them. This is the hop the
+#                        two lines above and a plain `wk push on` make into the
+#                        podman machine; it is not a second way to throw the
+#                        switch, since it leaves this host's guests alone.
 #
 #   0  push is on (status), or the action succeeded
 #   1  push is off (status), or the action failed
@@ -48,24 +71,32 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
+# Refused inside a workspace, but *not* on a build machine: the switch acts
+# on the machine that holds the key, and on a shared box that is the box.
+#
+# Before load_target, and that order is load-bearing: `on`/`off`/`status` are
+# declared where=local (this host drives its own guests), so the dispatcher no
+# longer refuses them and this is the whole of the rule -- while
+# `default_target` in a workspace is `local`, a target with no store, whose
+# load would exit before the refusal was ever printed.
+in_workspace && die "'wk push' moves the deploy keys, and this is workspace '$(wk_self)'.
+    The keys are on the host and a workspace cannot reach them -- which is what
+    makes the switch a switch. Run it on the host."
+
 # $WK_STORE is target-dependent: /var/lib/wk in the podman VM, the remote
 # root on a build machine. Loading the target this machine *is* puts the
 # keys where this machine actually keeps them.
 load_target "$(default_target)" 2>/dev/null || true
 
-# Refused inside a workspace, but *not* on a build machine: the switch acts
-# on the machine that holds the key, and on a shared box that is the box.
-in_workspace && die "'wk push' moves the deploy keys, and this is workspace '$(wk_self)'.
-    The keys are on the host and a workspace cannot reach them -- which is what
-    makes the switch a switch. Run it on the host."
-
 ACTION=status
 TARGET=""
+STORE_ONLY=""
 while [ $# -gt 0 ]; do
     case "$1" in
         on|off|status) ACTION="$1"; shift ;;
         --target) TARGET="${2:-}"; [ -n "$TARGET" ] || die "--target needs a name"; shift 2 ;;
         --all) TARGET=--all; shift ;;
+        --store) STORE_ONLY=1; shift ;;
         *) die "usage: wk push on|off|status; see wk push -h" ;;
     esac
 done
@@ -174,23 +205,30 @@ private_keys_in() {
 # `die` crosses a command substitution -- it is a subshell, and the assignment
 # takes its status -- so a store this machine could not even create still
 # reported "push is already OFF" about keys nothing had looked for.
+#
+# STUCK counts the keys that did not move. A key still in the `on` position
+# after `wk push off` is the switch not having been thrown, so it is a failing
+# status and not a warning in passing.
 MOVED=0
+STUCK=0
 move_keys() {
     local from="$1" to="$2" f b
     MOVED=0
+    STUCK=0
     ensure_dir "$to" 0700 >/dev/null
     while read -r f; do
         [ -n "$f" ] || continue
         b=$(basename "$f")
-        mv "$f" "$to/$b"
+        mv "$f" "$to/$b" || { warn "could not move $b out of $from"; STUCK=$((STUCK + 1)); continue; }
         chmod 0600 "$to/$b"
         # The public half goes with it: ssh will offer a public key it finds
         # beside IdentityFile even without the private half.
-        [ -f "$from/$b.pub" ] && mv "$from/$b.pub" "$to/$b.pub"
+        [ -f "$from/$b.pub" ] && { mv "$from/$b.pub" "$to/$b.pub" || warn "could not move $b.pub out of $from"; }
         MOVED=$((MOVED + 1))
     done <<EOF
 $(private_keys_in "$from")
 EOF
+    [ "$STUCK" -eq 0 ]
 }
 
 # The workspaces here in which a claude process is running -- asked of the
@@ -220,7 +258,25 @@ EOF
     return 0
 }
 
-case "$ACTION" in
+# The store half: the keys move where they live. On a macOS workstation that is
+# inside the podman machine, so this hands the same command back to the
+# dispatcher with `--store` and lets it forward -- one forward in the tree, and
+# the readonly declaration keeps `status` from starting the machine to read it.
+store_half() {
+    if [ -n "$STORE_ONLY" ] && ! store_is_local; then
+        die "'wk push --store' moves the keys where they are, and this machine's store
+    ($WK_STORE) cannot be read from here. Without --store, 'wk push $ACTION'
+    reaches into the machine that holds it."
+    fi
+    if [ -z "$STORE_ONLY" ] && ! store_is_local; then
+        info "the deploy keys live in the podman machine's store, so this reaches into it"
+        log  "  it is started if it is stopped; 'wk push status' reads without starting it"
+        local rc=0
+        "$WK_ROOT/wk" push "$ACTION" --store || rc=$?
+        return "$rc"
+    fi
+
+    case "$ACTION" in
 on)
     busy=$(agent_sessions)
     if [ -n "$busy" ]; then
@@ -228,7 +284,12 @@ on)
     the keys puts them in its mount, and its commit wall stays until it exits.
     End that session first, or force this."
     fi
-    move_keys "$HELD" "$LIVE"; n="$MOVED"
+    moved_ok=0; move_keys "$HELD" "$LIVE" || moved_ok=1; n="$MOVED"
+    if [ "$moved_ok" -ne 0 ]; then
+        warn "$STUCK deploy key(s) did not move out of $HELD, so push is not fully on"
+        log  "  check the permissions on $HELD and $LIVE, then 'wk push on' again"
+        return 1
+    fi
     # Idempotent, and it says which of the two it was: a switch that reports
     # "on" whether or not it did anything is a switch you have to verify by
     # hand afterwards.
@@ -246,8 +307,13 @@ on)
     ;;
 
 off)
-    move_keys "$LIVE" "$HELD"; n="$MOVED"
+    moved_ok=0; move_keys "$LIVE" "$HELD" || moved_ok=1; n="$MOVED"
     purge_copies
+    if [ "$moved_ok" -ne 0 ]; then
+        warn "$STUCK deploy key(s) are still in $LIVE, exposed to every workspace"
+        log  "  push is NOT off; check the permissions on $LIVE and $HELD, then 'wk push off' again"
+        return 1
+    fi
     if [ "$n" -gt 0 ]; then
         changed "push is OFF -- $n deploy key(s) held in $HELD"
     else
@@ -286,17 +352,103 @@ status)
 
     if [ "$live" -gt 0 ]; then
         info "push is ON"
-        exit 0
+        return 0
     fi
     if [ "$held" -gt 0 ]; then
         info "push is OFF -- 'wk push on' to allow it"
-        exit 1
+        return 1
     fi
     warn "there are no deploy keys here at all -- 'wk key register' makes them"
-    exit 4
+    return 4
     ;;
 
 *)
     die "usage: wk push on|off|status; see wk push -h"
     ;;
+    esac
+}
+
+# --- the guests on this host -------------------------------------------------
+# A container reads the keys live through its read-only mount, so the store
+# half above is the whole switch for one. A macOS guest mounts nothing of ours
+# and holds a copy (targets/vm.sh's _write_deploy_keys), so the switch is
+# thrown in the guest too -- and only this host can do that: `tart` is macOS
+# only, and inside the podman machine, where the store half runs, there are no
+# guests at all.
+#
+# The driver goes in a subshell because it points $WK_STORE at its own state
+# directory, which nothing after this may inherit.
+_in_vm_driver() { # <function to call in the vm driver>
+    is_macos || return 0
+    ( load_target vm >/dev/null 2>&1 && "$1" )
+}
+
+# The guest half's own status, folded into this command's at the end. A guest
+# whose ssh failed during `wk push off` has moved keys in the store and an
+# unchanged copy in the guest -- exit 0 there is the report cmd/ai's
+# `push_switch status || return 0` reads as a closed switch.
+GUEST_RC=0
+GUEST_LIVE=0
+
+converge_guests() {
+    _in_vm_driver vm_push_keys_converge && return 0
+    GUEST_RC=1
+    warn "the guest(s) named above were not converged and may still hold a deploy key;
+    'wk push $ACTION' again once each one answers"
+}
+
+# One row per guest, from the guest. A stopped guest cannot be read and is not
+# started to find out: it is converged by `wk vm start` before anything in it
+# can run, which is what the row says.
+guest_rows() {
+    local rows g state forks
+    rows=$(_in_vm_driver vm_push_keys_state) || return 0
+    [ -n "$rows" ] || return 0
+    while IFS="$(printf '\t')" read -r g state forks; do
+        [ -n "$g" ] || continue
+        if [ "$state" != running ]; then
+            printf 'guest %-10s %s\n' "$g" "$state -- not read; 'wk vm start $g' converges it"
+        elif [ -n "$forks" ]; then
+            GUEST_LIVE=1
+            printf 'guest %-10s %s\n' "$g" "holds $forks"
+        else
+            printf 'guest %-10s %s\n' "$g" "no key -- a push from in there is refused"
+        fi
+    done <<EOF
+$rows
+EOF
+}
+
+STORE_RC=0
+store_half || STORE_RC=$?
+
+# `--store` is the store half by name, so it stops here: the guests belong to
+# the host that made this hop, not to the machine holding the keys.
+[ -z "$STORE_ONLY" ] || exit "$STORE_RC"
+
+case "$ACTION" in
+    on|off) converge_guests ;;
+    status) guest_rows ;;
 esac
+
+# The switch is ON when *anything* can push, and a running guest holding its
+# own copy can -- whatever the store says. Reporting the store's half as the
+# whole is what would hand an agent a guest that can still push.
+if [ "$ACTION" = status ] && [ "$GUEST_LIVE" -eq 1 ] && [ "$STORE_RC" -ne 0 ]; then
+    info "push is ON -- a running guest above still holds a key ('wk push off')"
+    STORE_RC=0
+fi
+
+# A bare `wk push` names no subverb, so the `sub` declaration above does not
+# apply to it and where=store does: it is answered on the machine holding the
+# keys, which on a macOS workstation is the podman machine -- where there are no
+# guests to see. Say so rather than reporting half the switch as the whole of it.
+[ -z "${WK_IN_VM:-}" ] \
+    || log "  the host's macOS guests are not reachable from in here; 'wk push $ACTION' on the host reaches them"
+
+# Both halves, so a guest that did not answer is a failure and not a warning
+# in passing.
+if [ "$GUEST_RC" -gt "$STORE_RC" ]; then
+    exit "$GUEST_RC"
+fi
+exit "$STORE_RC"

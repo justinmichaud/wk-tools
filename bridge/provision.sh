@@ -28,6 +28,9 @@
 #   BR_EGRESS     none | nat -- whether the segment may reach the internet
 #   BR_CAMERA     off | http -- stream the camera over the tailnet
 #   BR_LAN_MAC    the USB Ethernet adapter's MAC; autodetected when empty
+#   BR_BATTERY    the power_supply node exposing charge_control_end_threshold;
+#                 autodetected when empty (bridge/hosts/<name>.conf)
+#   BR_BATTERY_LIMIT  the charge cap, in percent (cmd/bridge defaults it to 80)
 #   BR_AUTHKEY    a tagged tailscale auth key, only when the node needs one
 set -eu
 
@@ -35,6 +38,7 @@ set -eu
 : "${BR_HOSTNAME:?BR_HOSTNAME is not set}"
 : "${BR_SEGMENT:?BR_SEGMENT is not set}"
 : "${BR_ROUTER:?BR_ROUTER is not set}"
+: "${BR_BATTERY_LIMIT:?BR_BATTERY_LIMIT is not set (run this through 'wk bridge setup')}"
 BR_DEVICE="${BR_DEVICE:-unknown}"
 BR_TAG="${BR_TAG:-tag:bridge}"
 BR_IF="${BR_IF:-lan0}"
@@ -43,6 +47,7 @@ BR_LEASES="${BR_LEASES:-}"
 BR_EGRESS="${BR_EGRESS:-none}"
 BR_CAMERA="${BR_CAMERA:-off}"
 BR_LAN_MAC="${BR_LAN_MAC:-}"
+BR_BATTERY="${BR_BATTERY:-}"
 
 # Everything except joining the tailnet: that needs a credential a person
 # fetches, and `--advertise-tags` can only be set at login, so it is
@@ -708,7 +713,58 @@ else
     info "capture device and the service idles."
 fi
 
-# --- 17. tailscale -----------------------------------------------------------
+# --- 17. battery charge limit -------------------------------------------------
+# A phone left on a charger at 100% every day swells its cell over months;
+# there is no kill switch for this the way there is for the radios, so
+# capping the charge in software is the one thing worth doing. One code path
+# for both phones: charge_control_end_threshold is a standard Linux
+# power_supply attribute, so the node exposing it is found by globbing for
+# the attribute itself rather than naming a chip (axp20x, bq2589x, ...) --
+# BR_BATTERY pins a specific node only if a phone ever exposes more than one.
+#
+# The threshold does not survive a reboot on its own (the driver resets it to
+# the hardware default at every power-on), so a service applies it again at
+# every boot -- the same shape as wk-bridge-usb-host, which re-asserts a
+# setting the kernel also does not remember.
+step "Battery charge limit (${BR_BATTERY_LIMIT}%)"
+BATT_NODE=""
+if [ -n "$BR_BATTERY" ]; then
+    [ -f "/sys/class/power_supply/$BR_BATTERY/charge_control_end_threshold" ] \
+        && BATT_NODE="/sys/class/power_supply/$BR_BATTERY"
+else
+    for f in /sys/class/power_supply/*/charge_control_end_threshold; do
+        [ -f "$f" ] || continue
+        BATT_NODE=$(dirname "$f")
+        break
+    done
+fi
+
+if [ -z "$BATT_NODE" ]; then
+    warn "no power_supply node here exposes charge_control_end_threshold --"
+    warn "  this kernel/driver has no charge limit to set. (BR_BATTERY in the"
+    warn "  conf pins a specific node if this device ever exposes more than one.)"
+else
+    write_file /etc/wk-bridge-battery.conf <<EOF
+# Written by bridge/provision.sh; applied at every boot by the
+# wk-bridge-battery service, since the threshold itself does not survive one.
+node=$BATT_NODE
+limit=$BR_BATTERY_LIMIT
+EOF
+    install_service wk-bridge-battery
+    enable_svc wk-bridge-battery
+    /usr/local/sbin/wk-bridge-battery || true
+
+    # Verified by reading the node back, not assumed from the write's exit
+    # status: a sysfs write can succeed against a value the driver clamps.
+    cur=$(cat "$BATT_NODE/charge_control_end_threshold" 2>/dev/null || echo '?')
+    if [ "$cur" = "$BR_BATTERY_LIMIT" ]; then
+        info "$BATT_NODE now caps at ${cur}%"
+    else
+        warn "$BATT_NODE reads ${cur}%, not ${BR_BATTERY_LIMIT}% -- the write did not take"
+    fi
+fi
+
+# --- 18. tailscale -----------------------------------------------------------
 step "Tailscale"
 TS_SVC=$(svc tailscale tailscaled) || die "the tailscale package has no init script here"
 enable_svc "$TS_SVC"
@@ -789,12 +845,12 @@ else
     warn "  Re-run 'wk bridge setup $BR_NAME' with a tagged key ($BR_TAG) to join."
 fi
 
-# --- 18. start everything ----------------------------------------------------
+# --- 19. start everything ----------------------------------------------------
 # Dependency cache rebuilt first: a service OpenRC cannot see in its tree
 # starts neither now nor at the next boot.
 step "Services"
 refresh_deptree
-for s in wk-bridge-nftables wk-bridge-usb-host wk-bridge-dhcp wk-bridge-netwatch wk-bridge-watchdog wk-bridge-camera; do
+for s in wk-bridge-nftables wk-bridge-usb-host wk-bridge-dhcp wk-bridge-netwatch wk-bridge-watchdog wk-bridge-camera wk-bridge-battery; do
     [ -x "/etc/init.d/$s" ] || continue
     if rc-service "$s" status >/dev/null 2>&1; then
         # Restart what this run may have rewritten, so re-provisioning takes

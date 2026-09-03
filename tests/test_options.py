@@ -412,9 +412,15 @@ class TestSecondHalfUnknownFlagRefused(WkTest):
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("usage:", cp.stdout)
 
-    def test_claude_passthrough_is_documented(self):
+    def test_ai_passthrough_is_documented(self):
+        """`wk ai <agent> <ws> ...` hands the rest of argv to the agent, and
+        the header says so for both agents rather than for Claude alone -- with
+        the two words that are wk's own named, since they never reach it."""
         text = (REPO / "cmd" / "ai").read_text()
-        self.assertIn("everything after it is Claude's, verbatim", text)
+        self.assertIn("everything after it is the agent's, verbatim", text)
+        header = text.split("\nset -euo pipefail", 1)[0]
+        for wks_own in ("--rc", "--stop"):
+            self.assertIn(wks_own, header)
 
 
 class TestThirdHalfUnknownFlagRefused(WkTest):

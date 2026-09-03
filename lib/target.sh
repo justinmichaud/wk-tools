@@ -133,6 +133,34 @@ t_pull_dir() {
     rsync -a --delete ${_T_PULL_EXCLUDES[@]+"${_T_PULL_EXCLUDES[@]}"} "$src/" "$dest/"
 }
 
+# t_push <name> <src-on-host> <dest-in-target> -- one file in, byte for byte:
+# the other half of t_pull, and a hook for the same reason. `t_exec <ws> "cat
+# > <file>"` corrupts binary data on the way in as surely as `cat <file>`
+# does on the way out, so anything over a network overrides this too.
+t_push() {
+    local name="$1" src="$2" dest="$3"
+    cp -f "$src" "$dest"
+}
+
+# t_push_dir <name> <src-dir-on-host> <dest-dir-in-target> -- a directory in,
+# in one transfer rather than a t_push per file. *Contents* are replaced, not
+# merged: the destination ends up a copy of the source, with nothing of an
+# earlier copy left in it. No exclude list, because nothing asks for one.
+t_push_dir() {
+    local name="$1" src="$2" dest="$3"
+    mkdir -p "$dest"
+    rsync -a --delete "$src/" "$dest/"
+}
+
+# t_path_kind <name> <path-in-target> -- `dir`, `file` or `absent`. What lets
+# a copy refuse before it moves any bytes (`wk scp`: a directory onto a file,
+# a directory without -r), in one word each driver can answer over whatever
+# it already talks to the target with. Here the target is this filesystem.
+t_path_kind() {
+    local name="$1" p="$2"
+    if [ -d "$p" ]; then echo dir; elif [ -e "$p" ]; then echo file; else echo absent; fi
+}
+
 # _ssh_opts_base <connect-timeout> -- never interactive, bounded connect; the
 # rest of each driver's ssh options genuinely differs and stays with it.
 _ssh_opts_base() {
@@ -246,32 +274,99 @@ ws_on_target() {
       [ -f "$sf" ] && detach_alive "$sf" )
 }
 
-ws_exists() { # <name>
-    local name="$1" t
-    if [ -n "${WK_TARGET:-}" ]; then
-        ws_on_target "$WK_TARGET" "$name" && return 0
-        # ws_on_target says no for two reasons a caller can't tell apart from
-        # its exit status alone: the target answered and doesn't have it, or
-        # it didn't answer. Only the first is evidence of absence; let the
-        # second through and let ws_state report honestly.
-        ( load_target "$WK_TARGET" >/dev/null 2>&1
-          [ "$(t_info "$name" 2>/dev/null)" = unreachable ] )
-        return $?
+# machine_silent <target> -- 0 when the machine itself never answered, which
+# is why `ws_on_target` said no. The machine and not the name: whether ssh got
+# an answer is a property of the machine, and asking it about a name again
+# costs a second round trip -- a whole `wk ls` for a peer -- to learn what the
+# connection already said. Reads t_far_side, the one place a driver says how
+# its far side is doing, the same as machine_answers below.
+machine_silent() { # <target>
+    ( load_target "$1" >/dev/null 2>&1; [ "$(t_far_side)" = unreachable ] )
+}
+
+# _ws_ask <target> <name> -- one machine's answer, on fd 3, as one word:
+# `here`, `absent`, or `silent`. Silence is the third answer because it is a
+# third thing: a machine that is off must not make a workspace on it read as
+# deleted, and a walk that quietly dropped it would say "no such workspace"
+# about one that is there.
+_ws_ask() {
+    if ws_on_target "$1" "$2"; then printf 'here\n'   >&3
+    elif machine_silent "$1"; then  printf 'silent\n' >&3
+    else                            printf 'absent\n' >&3
     fi
-    for t in $(target_all 2>/dev/null); do
-        ws_on_target "$t" "$name" && return 0
+}
+
+# ws_locate <name> -- every target that answers for <name>, one per line, and
+# nothing when none does. The one walk behind both questions a caller has:
+# does this name exist (any line) and where does it live (the single line).
+#
+# Two stages, because the two cost different things. The environments on this
+# machine answer from a local process (target_here); a machine of its own
+# answers over ssh, and is asked only when nothing here does -- so `wk enter`
+# on a container workspace never waits on the fleet at all. What this makes
+# true, and is the rule: **this machine's own environments answer first, and
+# their answer is final.** A name a container here and a machine over there
+# both hold is the one here; `--target` names the other.
+#
+# The machines are then asked all at once (lib/par.sh), not one connect after
+# another: the round costs the slowest machine rather than the sum, and each
+# ssh is bounded by its own ConnectTimeout (wk_ssh_timeout) as it always was.
+ws_locate() { # <name>
+    local name="$1" t hits="" machines="" silent=""
+    for t in $(target_here); do
+        ws_on_target "$t" "$name" && hits="$hits $t"
     done
-    return 1
+    if [ -n "$hits" ]; then printf '%s\n' $hits; return 0; fi
+
+    machines=$(target_machines)
+    [ -n "$machines" ] || return 0
+
+    command -v par_run >/dev/null 2>&1 || . "$WK_ROOT/lib/par.sh"
+    wk_atexit par_cleanup
+    par_begin
+    for t in $machines; do par_run "$t" _ws_ask "$t" "$name"; done
+    par_wait
+    for t in $machines; do
+        case "$(par_record "$t" | sed -n 1p)" in
+            here)   hits="$hits $t" ;;
+            absent) ;;
+            *)      silent="$silent $t" ;;
+        esac
+    done
+    par_end
+
+    # Named, not counted: an answer a machine is missing from is a partial
+    # one, and only the person can say whether that matters here.
+    [ -z "$silent" ] || warn "could not ask$silent over ssh ($(wk_ssh_timeout)s) --
+    off, or not on the tailnet; what is there is not in this answer"
+
+    # shellcheck disable=SC2086 -- deliberate word splitting of the collected hits.
+    [ -z "$hits" ] || printf '%s\n' $hits
+    return 0
+}
+
+# ws_exists_on <target> <name> -- 0 when that one target has it. Its own
+# answer is not enough: `ws_on_target` says no both when the target answered
+# and hasn't got it and when it didn't answer, and only the first is evidence
+# of absence. The second is let through, and ws_state reports honestly. The
+# target's own word for it, not machine_silent's: a guest that is up and not
+# answering is this target's "unreachable" and no machine's silence.
+ws_exists_on() { # <target> <name>
+    ws_on_target "$1" "$2" && return 0
+    ( load_target "$1" >/dev/null 2>&1
+      [ "$(t_info "$2" 2>/dev/null)" = unreachable ] )
+}
+
+ws_exists() { # <name>
+    [ -z "${WK_TARGET:-}" ] || { ws_exists_on "$WK_TARGET" "$1"; return $?; }
+    [ -n "$(ws_locate "$1")" ]
 }
 
 ws_target() { # <name>
-    local name="$1" t hits=""
+    local name="$1"
     if [ -n "${WK_TARGET:-}" ]; then printf '%s' "$WK_TARGET"; return 0; fi
-    for t in $(target_all 2>/dev/null); do
-        ws_on_target "$t" "$name" && hits="$hits $t"
-    done
-    # shellcheck disable=SC2086 -- deliberate word splitting of the collected hits.
-    set -- $hits
+    # shellcheck disable=SC2046 -- deliberate word splitting of the answering targets.
+    set -- $(ws_locate "$name")
     case "$#" in
         # Nothing here knows this name. On a macOS host a real container
         # workspace whose VM is stopped looks the same, so this is "not
@@ -280,7 +375,7 @@ ws_target() { # <name>
         0) default_target; return 0 ;;
         1) printf '%s' "$1"; return 0 ;;
     esac
-    die "workspace '$name' exists on targets:$hits -- this cannot be
+    die "workspace '$name' exists on targets: $* -- this cannot be
     resolved; remove one, or set WK_TARGET"
 }
 
@@ -476,6 +571,32 @@ target_all() {
             done
         done
     fi
+}
+
+# target_all, split by what asking one costs. `target_here` is the
+# environments on *this* machine -- container, vm, and the build box's own
+# target when this is the box (WK_REMOTE_LOCAL, decided from the conf, so the
+# split itself costs no ssh). `target_machines` is the rest: a machine of its
+# own, which answers over ssh or not at all. Every walk that treats the two
+# differently -- ws_locate's two stages, walk_targets' WK_NO_DELEGATE
+# listing -- reads the split from here rather than re-deciding it.
+target_is_here() { # <target>
+    case "$(target_kind "$1" 2>/dev/null || echo unknown)" in
+        remote) ( load_target "$1" >/dev/null 2>&1; [ -n "${WK_REMOTE_LOCAL:-}" ] ) ;;
+        *) return 0 ;;
+    esac
+}
+
+target_here() {
+    local t
+    for t in $(target_all); do target_is_here "$t" && printf '%s\n' "$t"; done
+    return 0
+}
+
+target_machines() {
+    local t
+    for t in $(target_all); do target_is_here "$t" || printf '%s\n' "$t"; done
+    return 0
 }
 
 # Call <fn> once per configured remote machine -- every target_all entry
@@ -799,19 +920,9 @@ walk_targets() {
     # listing, so it reports what it holds and asks nobody -- without it, a
     # workstation asked by another workstation would ask every machine *it*
     # knows too, squaring the ssh work over the shared registry. A machine's
-    # own target survives it (WK_REMOTE_LOCAL, set by `wk remote setup`),
-    # decided from the conf so this costs no ssh.
-    if [ -n "${WK_NO_DELEGATE:-}" ]; then
-        local t
-        for t in $(target_all); do
-            case "$(target_kind "$t")" in
-                remote) ( load_target "$t" >/dev/null 2>&1
-                          [ -n "${WK_REMOTE_LOCAL:-}" ] ) || continue ;;
-            esac
-            printf '%s\n' "$t"
-        done
-        return 0
-    fi
+    # own target survives it (target_here, which is exactly "what this machine
+    # holds itself" -- decided from the conf, so this costs no ssh).
+    if [ -n "${WK_NO_DELEGATE:-}" ]; then target_here; return 0; fi
 
     target_all
 }

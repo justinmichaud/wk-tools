@@ -61,6 +61,17 @@ git config --global --add safe.directory "$SRC"
 # log(), warn() and a shell mode of their own.
 _forks() { bash -c '. "$1/lib/store.sh"; wk_push_forks' _ "$WK_TOOLS" 2>/dev/null; }
 
+# The ssh aliases those forks need, from the same mounted tooling and for the
+# same reason: `wk_ssh_alias_blocks` is the one implementation of that config,
+# read here, by a build machine (remote/provision.sh) and by a macOS guest
+# (targets/vm.sh). A container names its identities `~/.ssh/id_<remote>`
+# (symlinks onto /secrets, below) and passes no ProxyCommand -- the catch-all
+# `Host *` block already carries one, and ssh takes the first value it sees.
+_alias_blocks() {
+    bash -c '. "$1/lib/store.sh"; wk_ssh_alias_blocks "$2" id_' \
+        _ "$WK_TOOLS" '~/.ssh' 2>/dev/null
+}
+
 # One deploy key per fork. Both forks are on github.com, so the key is selected
 # by ssh host alias rather than hostname -- that is the only way to use two
 # different keys against the same host.
@@ -84,11 +95,25 @@ Host *
 
 PROXYEOF
 
-# The key is *pointed at*, never copied: a copy goes stale on rotation (every
-# existing workspace keeps offering the dead key), and cannot be taken back --
-# /secrets is mounted read-only for the container's life, so removing a key
-# there is instantly what makes `wk push off` a switch, not a suggestion.
-# (Same pattern as the Claude credentials link above.)
+# Captured first, not appended straight through: the mounted tooling is read
+# under `2>/dev/null`, so a store that cannot be read emits nothing and would
+# leave a config with no fork Host block while the id_ symlinks below are made
+# anyway -- a workspace whose push fails against a name ssh never heard of.
+_blocks=$(mktemp)
+_alias_blocks > "$_blocks" || true
+if [ -s "$_blocks" ]; then
+    cat "$_blocks" >> "$HOME/.ssh/config"
+else
+    warn "no fork ssh aliases came back from $WK_TOOLS/lib/store.sh, so ~/.ssh/config
+             names no fork host and a push from here cannot resolve one"
+fi
+rm -f "$_blocks"
+
+# The key those blocks name is *pointed at*, never copied: a copy goes stale on
+# rotation (every existing workspace keeps offering the dead key), and cannot be
+# taken back -- /secrets is mounted read-only for the container's life, so
+# removing a key there is instantly what makes `wk push off` a switch, not a
+# suggestion. (Same pattern as the Claude credentials link above.)
 #
 # ssh follows the symlink and checks the *target's* permissions, which are 0600
 # in the store; a dangling link is simply "no key", which is the off position.
@@ -97,14 +122,6 @@ while read -r _remote _repo _alias; do
     [ -n "$_remote" ] || continue
 
     ln -sfn "/secrets/build_key_${_remote}" "$HOME/.ssh/id_${_remote}"
-    cat >> "$HOME/.ssh/config" <<EOF
-Host ${_alias}
-    HostName github.com
-    User git
-    IdentityFile ~/.ssh/id_${_remote}
-    IdentitiesOnly yes
-    StrictHostKeyChecking accept-new
-EOF
     if [ -e "$HOME/.ssh/id_${_remote}" ]; then
         _have_key=1
         log "deploy key linked for $_repo (push via $_alias)"
@@ -162,20 +179,30 @@ done
 # workspace being deleted. `wk skills` diffs it against the repo for review.
 ln -sfn /skills "$HOME/.claude/skills"
 
-# The agent's credential: one token in the store, serving every workspace on
-# this machine, read by shell/bashrc into CLAUDE_CODE_OAUTH_TOKEN. A symlink
-# onto the read-only /secrets mount rather than a copy, and made whether or not
-# there is a token yet: a dangling link is "no token", and the day `wk key
-# claude` stores one every container already points at it. Nothing here has to
-# be rebuilt to rotate it.
+# The agents' credentials: one secret per name in the store, serving every
+# workspace on this machine, each read by shell/bashrc into the variable its
+# agent expects. Symlinks onto the read-only /secrets mount rather than copies,
+# and made whether or not the secret exists yet: a dangling link is "not set",
+# and the day `wk key set <name>` stores one every container already points at
+# it. Nothing here has to be rebuilt to rotate one.
 #
 # One mechanism for all three targets, which a credentials file could not be:
 # it is Linux-only (Darwin keeps those in a login Keychain that an ssh session
 # never unlocks), and it needs a `claude login` from inside a workspace to
 # exist at all.
-ln -sfn /secrets/claude-token "$HOME/.wk-agent-token"
-[ -e /secrets/claude-token ] \
-    || log "no Claude token yet -- 'wk key claude' on the host stores one for every workspace"
+#
+# The rows come from lib/store.sh's wk_agent_secrets, the same way the forks
+# above come from wk_push_forks: one table, so a name added there reaches every
+# workspace without this file being touched.
+_agent_secrets() { bash -c '. "$1/lib/store.sh"; wk_agent_secrets' _ "$WK_TOOLS" 2>/dev/null; }
+while read -r _sname _sfile _shome _svar; do
+    [ -n "$_sname" ] || continue
+    ln -sfn "/secrets/$_sfile" "$HOME/$_shome"
+    [ -e "$HOME/$_shome" ] \
+        || log "no $_sname credential yet -- 'wk key set $_sname' on the host stores one ($_svar)"
+done <<EOF
+$(_agent_secrets)
+EOF
 
 # --- profiling tools -----------------------------------------------------------
 # heaptrack, valgrind (its massif tool) and sysprof-cli are distro packages;

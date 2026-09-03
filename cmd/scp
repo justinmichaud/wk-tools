@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+#
+# wk scp [<workspace>] [-r] <src> <dst> -- copy a file or directory in or out of a workspace
+# wk: where=workspace name=required takes=2 here group=workspaces
+#
+#   wk scp bug-238 :Tools/foo.js ./foo.js      # out of the workspace
+#   wk scp bug-238 ./foo.js :Tools/foo.js      # into it
+#   wk scp :WebKitBuild/build.log ~/log        # inside a workspace: no name
+#
+#   -r   the source may be a directory. The destination becomes a copy of it --
+#        contents replaced, not merged -- so one that already exists is refused
+#        unless --force.
+
+set -euo pipefail
+WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+
+# The dispatcher's own shape for a bad invocation (usage_die in `wk`), so both
+# routes into it -- a missing operand it catches, a malformed one this does --
+# read the same.
+_usage() { # <why>
+    warn "$1"
+    log "usage: wk scp [<workspace>] [-r] <src> <dst>"
+    log "       wk scp -h for the rest"
+    exit 2
+}
+
+NAME="${WK_NAME:-}"
+require_name "$NAME"
+
+RECURSE=""
+OPERANDS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -r) RECURSE=1; shift ;;
+        -*) _usage "unknown option: $1" ;;
+        *)  OPERANDS+=("$1"); shift ;;
+    esac
+done
+[ "${#OPERANDS[@]}" -eq 2 ] \
+    || _usage "needs exactly two paths, a source and a destination"
+
+SRC="${OPERANDS[0]}"
+DST="${OPERANDS[1]}"
+
+# Which side is the workspace's, decided once.
+_is_ws_side() { case "$1" in :?*) return 0 ;; esac; return 1; }
+
+if _is_ws_side "$SRC" && _is_ws_side "$DST"; then
+    _usage "both paths are in the workspace -- exactly one side carries the ':'"
+fi
+if ! _is_ws_side "$SRC" && ! _is_ws_side "$DST"; then
+    _usage "neither path is in the workspace -- mark that side with a leading ':', as in :Tools/foo.js"
+fi
+
+load_target "$(ws_target "$NAME")"
+
+# `:<path>`, resolved: relative to the checkout (t_src), or taken as it is
+# when it is already absolute.
+_ws_path() { # <:path>
+    local p="${1#:}"
+    case "$p" in
+        /*) printf '%s' "$p" ;;
+        *)  printf '%s/%s' "$(t_src "$NAME")" "$p" ;;
+    esac
+}
+
+# What a path is, in one word, on this side and on the workspace's -- the two
+# are different machines, so each is asked its own way (t_path_kind for the
+# workspace, this filesystem for here).
+_kind_here() { # <path>
+    if [ -d "$1" ]; then echo dir; elif [ -e "$1" ]; then echo file; else echo absent; fi
+}
+_kind_in_ws() { # <path>
+    t_path_kind "$NAME" "$1" || true
+}
+
+# A probe that answered nothing is not evidence of an absent path.
+_kind_or_die() { # <kind> <what>
+    case "$1" in dir|file|absent) return 0 ;; esac
+    die "could not tell what $2 is: workspace '$NAME' did not answer.
+    'wk status $NAME' says whether it is up."
+}
+
+# The direction, and with it everything that differs between the two: which
+# side each path names, which transport moves the bytes, and how each is
+# spelled in a message.
+if _is_ws_side "$SRC"; then
+    SRC_PATH=$(_ws_path "$SRC"); SRC_PFX="$NAME:"
+    DST_PATH="$DST";             DST_PFX=""
+    _kind_src()  { _kind_in_ws "$1"; }
+    _kind_dst()  { _kind_here "$1"; }
+    _copy_file() { t_pull "$NAME" "$SRC_PATH" "$DST_PATH"; }
+    _copy_dir()  { t_pull_dir "$NAME" "$SRC_PATH" "$DST_PATH"; }
+else
+    SRC_PATH="$SRC";             SRC_PFX=""
+    DST_PATH=$(_ws_path "$DST"); DST_PFX="$NAME:"
+    _kind_src()  { _kind_here "$1"; }
+    _kind_dst()  { _kind_in_ws "$1"; }
+    _copy_file() { t_push "$NAME" "$SRC_PATH" "$DST_PATH"; }
+    _copy_dir()  { t_push_dir "$NAME" "$SRC_PATH" "$DST_PATH"; }
+fi
+
+SRC_KIND=$(_kind_src "$SRC_PATH")
+_kind_or_die "$SRC_KIND" "$SRC_PFX$SRC_PATH"
+[ "$SRC_KIND" != absent ] || die "no such file or directory: $SRC_PFX$SRC_PATH"
+
+DST_KIND=$(_kind_dst "$DST_PATH")
+_kind_or_die "$DST_KIND" "$DST_PFX$DST_PATH"
+# An existing directory receives the copy under the source's own name, as cp
+# and scp do -- so `wk scp <ws> :Tools/foo.js .` lands ./foo.js and nothing
+# addresses a whole directory by accident. From here on the destination names
+# the copy itself.
+if [ "$DST_KIND" = dir ]; then
+    DST_PATH="$DST_PATH/$(basename "$SRC_PATH")"
+    DST_KIND=$(_kind_dst "$DST_PATH")
+    _kind_or_die "$DST_KIND" "$DST_PFX$DST_PATH"
+fi
+
+if [ "$SRC_KIND" = dir ]; then
+    [ -n "$RECURSE" ] || die "$SRC_PFX$SRC_PATH is a directory -- 'wk scp -r' copies one"
+    case "$DST_KIND" in
+        file) die "$DST_PFX$DST_PATH is a file, and a directory cannot replace it.
+    Name a path for the copy, or remove that file first." ;;
+        dir)  barrier "$DST_PFX$DST_PATH already exists, and -r replaces a directory's
+    whole contents rather than merging into it" ;;
+    esac
+    _copy_dir || die "copying $SRC_PFX$SRC_PATH to $DST_PFX$DST_PATH failed"
+else
+    [ "$DST_KIND" != dir ] || die "$DST_PFX$DST_PATH is a directory, and a file cannot replace it.
+    Name a path for the copy, or remove that directory first."
+    _copy_file || die "copying $SRC_PFX$SRC_PATH to $DST_PFX$DST_PATH failed"
+fi
+
+info "copied $SRC_PFX$SRC_PATH to $DST_PFX$DST_PATH"

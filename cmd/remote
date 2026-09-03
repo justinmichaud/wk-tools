@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # wk remote setup|rm <target> -- provision or deprovision a shared build machine
-# wk: where=host name=none group=hosts needs ssh,rsync
+# wk: where=host name=none group=hosts needs ssh,git
 #
 # A build box belongs to everyone who logs into it, so **this never needs
 # root and never asks for it**, and everything it leaves behind is under
@@ -216,12 +216,21 @@ if printf '%s\n' "$MOTD" | grep -qiE 'home *(dir|directory)?.*shared'; then
 fi
 
 # --- provision ---------------------------------------------------------------
+# A checkout of this tree's HEAD over there, not a file copy: everything
+# below runs out of it, and `wk status` compares the two by sha. Refused
+# while this tree is dirty -- there is no commit to give the machine.
 info "pushing wk-tools to $(t_tools '')"
-t_sync_tools ""
+t_sync_tools "" || die "nothing was changed on $r_host: it has no wk-tools to provision from"
 
+# WK_REMOTE_INPUTS: the hash of what provisions this machine
+# (remote_provision_inputs_hash, targets/remote.sh), recorded in the marker over
+# there so `wk doctor --all` can say afterwards whether the machine still
+# matches this tree -- computed on this side, so the two ends cannot hash
+# differently.
 _rsh_q "env WK_REMOTE_TARGET=$(sh_quote "$TARGET") \
           WK_REMOTE_ROOT=$(sh_quote "$(_remote_root)") \
           WK_REMOTE_REFERENCE=$(sh_quote "$REF") \
+          WK_REMOTE_INPUTS=$(sh_quote "$(remote_provision_inputs_hash)") \
           bash $(sh_quote "$(t_tools '')/remote/provision.sh")"
 
 # The same install claude/install.sh does on this workstation, run over
@@ -233,25 +242,40 @@ _rsh_q "env WK_ROOT=$(sh_quote "$(t_tools '')") WK_CLAUDE_REMOTE=1 bash -c '
     . \"\$WK_ROOT/claude/install.sh\"
 '" && changed "linked ~/.claude on $r_host (settings-host.json + Bash(wk *))"
 
-# The agent's credential, so a workspace here starts authenticated instead of
-# asking for /login (`wk key claude` stores it; shell/bashrc reads it). A copy,
-# because a build machine can mount nothing of ours -- so it is refreshed on
-# every setup, and *removed* when there is no token: this machine is shared,
-# and a token left behind after it was withdrawn here is the one state that
-# would matter.
+# The agents' credentials, so a workspace here starts authenticated instead of
+# asking for /login (`wk key set <name>` stores one; shell/bashrc reads them).
+# Copies, because a build machine can mount nothing of ours -- so they are
+# refreshed on every setup, and each one is *removed* when the store has none:
+# this machine is shared, and a credential left behind after it was withdrawn
+# here is the one state that would matter.
 #
-# Down the ssh channel, never in the command: an argument is in `ps` on a
+# One row per named secret (wk_agent_secrets, lib/store.sh), the same table
+# container/firstrun.sh links and targets/vm.sh copies, so a name added there
+# reaches a build box with nothing to change here.
+#
+# `_rsh`, not `_rsh_q`: the value goes down the ssh channel and `_rsh_q` is
+# `ssh -n`, which would give the far side /dev/null and write an empty file.
+# On stdin and never in the command, because an argument is in `ps` on a
 # machine other people are logged into.
-_agent_tok=$(wk_agent_token)
-if [ -n "$_agent_tok" ]; then
-    printf '%s\n' "$_agent_tok" \
-        | _rsh_q 'umask 077 && cat > "$HOME/.wk-agent-token"' \
-        && changed "wrote the Claude token to ~/.wk-agent-token on $r_host (0600)"
-else
-    _rsh_q 'rm -f "$HOME/.wk-agent-token"' >/dev/null 2>&1 || true
-    info "no Claude token here, so none was placed on $r_host ('wk key claude' stores one)"
-fi
-unset _agent_tok
+while read -r _sname _ _shome _; do
+    [ -n "$_sname" ] || continue
+    _sval=$(wk_agent_secret "$_sname")
+    if [ -n "$_sval" ]; then
+        if printf '%s\n' "$_sval" | _rsh "umask 077 && cat > \$HOME/$(sh_quote "$_shome")"; then
+            changed "wrote the $_sname credential to ~/$_shome on $r_host (0600)"
+        else
+            warn "could not write the $_sname credential to ~/$_shome on $r_host"
+        fi
+    else
+        # `_rsh_q` here: this one has nothing to stream, and the loop's own
+        # stdin is the table below, which a plain ssh would drink.
+        _rsh_q "rm -f \$HOME/$(sh_quote "$_shome")" >/dev/null 2>&1 || true
+        info "no $_sname credential here, so none was placed on $r_host ('wk key set $_sname' stores one)"
+    fi
+done <<EOF
+$(wk_agent_secrets)
+EOF
+unset _sname _shome _sval
 
 # --- root on a machine you share ---------------------------------------------
 # A barrier, not a prompt: `--force` proceeds with the warning repeated at

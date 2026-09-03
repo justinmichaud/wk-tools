@@ -11,9 +11,29 @@
     "additionalDirectories": [
       "/tmp",
       "/private/tmp"
+    ],
+    "deny": [
+      "Bash(ninja *)",
+      "Bash(*/ninja *)",
+      "Bash(cmake *)",
+      "Bash(*/cmake *)",
+      "Bash(make *)",
+      "Bash(*/make *)",
+      "Bash(xcodebuild *)",
+      "Bash(*/xcodebuild *)",
+      "Bash(build-webkit *)",
+      "Bash(*/build-webkit *)",
+      "Bash(build-jsc *)",
+      "Bash(*/build-jsc *)",
+      "Bash(run-javascriptcore-tests *)",
+      "Bash(*/run-javascriptcore-tests *)",
+      "Bash(run-webkit-tests *)",
+      "Bash(*/run-webkit-tests *)",
+      "Bash(run-benchmark *)",
+      "Bash(*/run-benchmark *)"
     ]
   },
-  "model": "opus[1m]",
+  "model": "claude-fable-5-1[1m]",
   "hooks": {
     "PreToolUse": [
       {

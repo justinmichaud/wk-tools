@@ -339,11 +339,22 @@ fi
 # The ssh aliases that select a deploy key per fork, as an ssh_config body.
 # One key per fork and both forks on github.com, so an alias per fork is
 # the only way ssh will offer the right one. Needed in three places (a
-# container's ~/.ssh/config, a build machine's config, any future guest),
-# so it lives here with wk_push_forks rather than being retyped at each.
-#   wk_ssh_alias_blocks <directory holding build_key_<remote>>
+# container's ~/.ssh/config, a build machine's config, a macOS guest's), so
+# it lives here with wk_push_forks rather than being retyped at each.
+#
+#   wk_ssh_alias_blocks <dir> [<identity prefix>] [<ProxyCommand>]
+#
+# The identity is <dir>/<prefix><remote>. The prefix is the store's own
+# `build_key_` by default, because a machine that reads the keys where they
+# live names them that; a workspace that holds copies or links instead names
+# them `id_<remote>` in its own ~/.ssh.
+#
+# The ProxyCommand is for a machine whose only route to github.com is an HTTP
+# CONNECT proxy. A container leaves it empty: its catch-all `Host *` block
+# already carries one, and ssh takes the first value it sees for a keyword. A
+# macOS guest has no such block and takes it per alias.
 wk_ssh_alias_blocks() {
-    local dir="$1"
+    local dir="$1" prefix="${2:-build_key_}" proxy="${3:-}"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         cat <<EOF
@@ -351,11 +362,61 @@ wk_ssh_alias_blocks() {
 Host $alias
     HostName github.com
     User git
-    IdentityFile $dir/build_key_$remote
+    IdentityFile $dir/$prefix$remote
     IdentitiesOnly yes
     StrictHostKeyChecking accept-new
 EOF
+        [ -z "$proxy" ] || printf '    ProxyCommand %s\n' "$proxy"
     done
+}
+
+# --- delivering a deploy key to a target that cannot mount the store ---------
+# The switch `wk push` throws is *where the key is*, and for a container that
+# is the whole of it: secrets/ is a read-only mount and the workspace only
+# links into it, so moving the key moves it for every container at once. A
+# macOS guest mounts nothing of ours, so it holds a copy, written from the
+# host on every start and taken away again the same way -- the arrangement
+# the agent credentials below already have, for the same reason.
+
+# The store belonging to this *machine*, which is where both the deploy keys
+# and the agent credentials below live. A loaded target driver may have pointed
+# $WK_STORE at its own state (targets/vm.sh does, at the host's XDG state
+# directory), and they are not there: they are where `wk key register` and `wk
+# key set` put them. load_target records the machine's own store in
+# WK_STORE_DEFAULT before overriding.
+wk_machine_store() { printf '%s' "${WK_STORE_DEFAULT:-$WK_STORE}"; }
+
+# Is that store on this machine? store_is_local asks about $WK_STORE, so ask
+# it about the right one. Both halves of the store's secrets ask this, so the
+# forwarding decision is made in one place.
+wk_push_store_local() ( WK_STORE=$(wk_machine_store); store_is_local )
+
+# One fork's private key, or nothing at all. Three different things read as
+# nothing -- push is off, no key was ever registered, or the store is not
+# readable from here (a stopped podman machine) -- and a guest must not hold
+# a key in any of them, so they are not told apart here. Which one it was is
+# `wk push status`'s question.
+#
+# On a macOS workstation the keys are inside the podman machine, a path this
+# host cannot read at all, so the read is forwarded there. Never logged and
+# never an argument: the caller streams it on stdin.
+wk_push_key() { # <fork>
+    _wk_secret_read "$(wk_machine_store)/secrets/build_key_$1"
+}
+
+# One reader for everything under the machine store's secrets/ -- deploy keys
+# and agent credentials alike. On a macOS workstation the store is inside the
+# podman machine, a path this host cannot read at all, so the read is
+# forwarded there; absent is not an error, and every caller reports its own
+# absence in its own words.
+_wk_secret_read() { # <path>
+    if wk_push_store_local; then
+        [ -r "$1" ] && cat "$1"
+    else
+        podman machine ssh "${WK_MACHINE:-wk}" -- \
+            "cat $(sh_quote "$1") 2>/dev/null" </dev/null 2>/dev/null
+    fi
+    return 0
 }
 
 # Which branches the mirror actually carries. WebKit/WebKit has ~920
@@ -767,48 +828,69 @@ unreferenced_bases() {
     done
 }
 
-# --- the agent's own credential ----------------------------------------------
-# One token, in the store, for every workspace on this machine. A container
-# reads it live through the read-only /secrets mount, so rotating it takes
-# effect in every container at once; a macOS guest and a shared build box are
-# handed a copy when their workspace comes up, since neither can mount it.
+# --- the agents' credentials --------------------------------------------------
+# One secret per name per machine, in the store, serving every workspace on this
+# machine. A container reads them live through the read-only /secrets mount, so
+# rotating one takes effect in every container at once; a macOS guest and a
+# shared build box are handed a copy when their workspace comes up, since
+# neither can mount it.
 #
-# It is a credential, not a fact about the machine, so a stored copy is the
+# They are credentials, not facts about the machine, so a stored copy is the
 # point rather than a smell -- the same trade `wk key tailnet` and the deploy
-# keys make. `wk key claude` is what puts it here.
+# keys make. `wk key set <name>` is what puts one here.
 #
-# $WK_STORE_DEFAULT, not $WK_STORE: there is one token per *machine*, and a
-# loaded target driver may have pointed $WK_STORE at its own state (targets/
-# vm.sh does, at the host's XDG state directory). Reading it from there would
-# look in a directory `wk key claude` never writes to and find nothing, in the
-# one command -- `wk vm start` -- that most needs to find it. load_target
-# records the machine's own store in WK_STORE_DEFAULT before overriding.
-_wk_agent_store()          { printf '%s' "${WK_STORE_DEFAULT:-$WK_STORE}"; }
-wk_agent_token_path()      { printf '%s/secrets/claude-token' "$(_wk_agent_store)"; }
-# store_is_local asks about $WK_STORE, so ask it about the right one.
-_wk_agent_store_is_local() ( WK_STORE=$(_wk_agent_store); store_is_local )
+# The names are a closed set because each one is delivered and read *by name*:
+# container/firstrun.sh links every row into the workspace, shell/bashrc exports
+# each into the variable its agent reads, and cmd/key asks for it with wording
+# of its own. A row with no reader in those files is a secret nothing can use,
+# which is why this table is the one authority and tests/test_pi_agent.py binds
+# the readers back to it.
+#
+#   <name> <file under secrets/> <file in the workspace's home> <the variable>
+wk_agent_secrets() {
+    cat <<'EOF'
+claude   claude-token  .wk-agent-token  CLAUDE_CODE_OAUTH_TOKEN
+litellm  litellm-key   .wk-litellm-key  LITELLM_API_KEY
+EOF
+}
 
-# The token itself, or nothing. Reading it is not the same as finding it: on a
-# macOS workstation the store is inside the podman VM, a path this host cannot
-# read at all, so the read is forwarded there. Absent is not an error -- a
-# workspace with no token asks the person to run /login, which still works.
-wk_agent_token() {
-    local p; p=$(wk_agent_token_path)
-    if _wk_agent_store_is_local; then
-        [ -r "$p" ] && sed -n '1p' "$p" 2>/dev/null
-    else
-        podman machine ssh "${WK_MACHINE:-wk}" -- \
-            "sed -n 1p $(sh_quote "$p") 2>/dev/null" </dev/null 2>/dev/null
-    fi
-    return 0
+wk_agent_secret_names() { wk_agent_secrets | awk 'NF { print $1 }'; }
+
+# One field of one row, or nothing at all for a name that is not in the table.
+# `wk key set` refuses on the empty answer rather than each caller re-deciding
+# what the valid names are.
+wk_agent_secret_field() { # <name> <column>
+    wk_agent_secrets | awk -v n="$1" -v c="$2" '$1 == n { print $c; exit }'
+}
+wk_agent_secret_known() { [ -n "$(wk_agent_secret_field "$1" 1)" ]; }
+
+# wk_machine_store, not $WK_STORE: there is one set of these per *machine*, and
+# a loaded target driver may have pointed $WK_STORE at its own state (targets/
+# vm.sh does, at the host's XDG state directory). Reading them from there would
+# look in a directory `wk key set` never writes to and find nothing, in the one
+# command -- `wk vm start` -- that most needs to find them.
+wk_agent_secret_path() { # <name>
+    local f; f=$(wk_agent_secret_field "$1" 2)
+    [ -n "$f" ] || return 1
+    printf '%s/secrets/%s' "$(wk_machine_store)" "$f"
+}
+
+# The secret itself, or nothing -- its first line, since a credential is one
+# line and a trailing newline in the file is not part of it. Absent is not an
+# error: a workspace with no Claude token asks the person to /login, which
+# still works, and one with no LiteLLM key has an agent that cannot reach that
+# endpoint.
+wk_agent_secret() { # <name>
+    local p; p=$(wk_agent_secret_path "$1") || return 0
+    _wk_secret_read "$p" | sed -n '1p'
 }
 
 # Store it, reading the value from stdin so it is never an argument -- an
 # argument is visible in `ps` to everyone on the machine. Same two cases as
 # the read: here, or forwarded into the VM that holds the store.
-wk_agent_token_store() {
-    local p; p=$(wk_agent_token_path)
-    if _wk_agent_store_is_local; then
+wk_agent_secret_store() { # <name>
+    local p; p=$(wk_agent_secret_path "$1") || return 1
+    if wk_push_store_local; then
         mkdir -p "$(dirname "$p")" || return 1
         ( umask 077; cat > "$p" ) || return 1
         chmod 0600 "$p" 2>/dev/null || true
@@ -821,9 +903,9 @@ wk_agent_token_store() {
 
 # Withdraw it. Every workspace loses it on its next start -- a container
 # immediately, since its link points at this file.
-wk_agent_token_clear() {
-    local p; p=$(wk_agent_token_path)
-    if _wk_agent_store_is_local; then
+wk_agent_secret_clear() { # <name>
+    local p; p=$(wk_agent_secret_path "$1") || return 1
+    if wk_push_store_local; then
         rm -f "$p"
     else
         podman machine ssh "${WK_MACHINE:-wk}" -- "rm -f $(sh_quote "$p")" </dev/null

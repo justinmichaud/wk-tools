@@ -2,55 +2,13 @@
 #
 # wk pi <verb> <args> -- Raspberry Pi test boards: get one on the tailnet, then run WebKit on it
 #
-# wk: where=host name=none group=hosts broker deploy,bench needs ssh,python3
+# wk: where=host name=none group=hosts broker deploy,bench needs ssh,python3 values=--list
+# wk: flag --list where=local name=none
 #
 # A board runs a bench system on removable media; its own workstation install
-# is never touched. `wk help` has the per-board arrangement.
-#
-#   wk pi setup <ssh-host>                put it on the tailnet: copies pinned
-#                                         tailscale binaries onto a writable
-#                                         partition; no image rebuild
-#   wk pi helper <machine>                install this checkout's card helper on
-#                                         whichever system the board answers on,
-#                                         so it makes card edits with this code;
-#                                         the copy an image baked in goes stale
-#   wk pi boot-order <machine> <usb-first|sd-first|local>
-#                                         rpi4/rpi5 firmware boot order;
-#                                         --revert undoes it, --dry-run previews
-#   wk pi deploy <image-profile> <machine> --slot <name>
-#                                         put a built WebKit on the board as a
-#                                         slot (the profile's slot from 'wk
-#                                         sysimage webkit', buildroot or yocto);
-#                                         verified byte for byte on the board
-#   wk pi bench <machine> <plan>          run a benchmark on a booted bench
-#       [--slot NAME] [--count N] [--timeout S]
-#                                         system; refuses the rescue and a
-#                                         missing display without --force;
-#                                         --count N is iterations per run,
-#                                         --timeout S the seconds one iteration
-#                                         may take (default: the plan's own).
-#                                         run-benchmark runs here and drives
-#                                         the board's browser over ssh; the
-#                                         process that reports is checked
-#                                         against the slot's build-id
-#       [--cores <set>]                   pin the browser: taskset -c <set>,
-#                                         same syntax as wk bench
-#       --ab A,B [--rounds N]             interleaved A/B between two deployed
-#                                         slots, reported with wk bench report
-#       --ab-systems A,B [--rounds N]     interleaved A/B between two *system
-#                                         images* on the bench medium
-#                                         (wk sysimage write ...@second/@third):
-#                                         each leg boots its system, verifies
-#                                         the running marker is that system --
-#                                         never the rescue, never the other
-#                                         leg -- and measures the --slot NAME
-#                                         both carry
-#       --task <name>                     file the runs into an existing task
-#                                         (wk ab's); without it this command
-#                                         is its own task
-#                                         Every run lands on this machine, in
-#                                         the task's directory (wk bench ls);
-#                                         the board keeps nothing of it
+# is never touched. `wk help` has the per-board arrangement; `wk pi --list`
+# (below, and at the end of this text) has every verb and a one-line summary;
+# a bad invocation of any of them prints that verb's own flags in full.
 #
 #   WK_PI_TAG=<tag>                       the tailscale tag 'wk pi setup'
 #                                         advertises when it brings a board up
@@ -89,6 +47,28 @@ WK_STALL_SECONDS="${WK_STALL_SECONDS:-900}"
 WK_ABORT_SECONDS="${WK_ABORT_SECONDS:-5400}"
 . "$WK_ROOT/lib/watchdog.sh"
 
+# The verb table, in exactly one place: `wk pi --list` below prints it
+# verbatim, the dispatch `case` a few lines down is checked against its names
+# (tests/test_pi.py parses both), and so is the `broker deploy,bench` list in
+# this file's own declaration. `flash` is not in it -- it is a tombstone (see
+# below), not a live verb.
+pi_verbs() {
+    printf '%-10s  %s\n' setup      "put a board on the tailnet (pinned tailscale binaries, no image rebuild)"
+    printf '%-10s  %s\n' helper     "install this checkout's card helper on the board"
+    printf '%-10s  %s\n' boot-order "set rpi4/rpi5 firmware boot order (--revert, --dry-run)"
+    printf '%-10s  %s\n' deploy     "put a built WebKit on the board as a slot"
+    printf '%-10s  %s\n' bench      "run a benchmark on a booted bench system"
+}
+
+# Read-only and instant: no board is reached, nothing above this line but
+# lib/common.sh's `die` is needed.
+if [ "${1:-}" = --list ]; then
+    [ $# -eq 1 ] || die "usage: wk pi --list; see wk pi -h
+    unexpected argument: $2"
+    pi_verbs
+    exit 0
+fi
+
 # The tailscale release, from the one file that declares it -- the same one the
 # Yocto layer's recipe requires (image/yocto/meta-wk-tailnet). Two copies of a
 # version is a board running a different tailscale from the image beside it, and
@@ -111,9 +91,17 @@ pi_usage_page() {
          /^# wk [a-z]/ && !seen { next }
          /^#/  { sub(/^# ?/, ""); if ($0 == "" && !seen) next; seen = 1; print; next }
          { exit }' "$0"
+    # The same "valid values" block explain_cmd (wk's -h) appends from
+    # values=--list -- bare and unknown-verb never reach the dispatcher, so
+    # this is the one other place that has to print it.
+    printf '\nvalid values (wk pi --list):\n'
+    pi_verbs | sed 's/^/  /'
 }
 
 ACTION="${1:-}"; HOST="${2:-}"
+# The arms below name the same five verbs as pi_verbs, plus the `flash`
+# tombstone (dies with its replacement, just below); tests/test_pi.py checks
+# both directions.
 case "$ACTION" in
     "") pi_usage_page; exit 0 ;;
     setup|boot-order|helper)
@@ -126,7 +114,7 @@ case "$ACTION" in
     deploy|bench) : ;;
     # Kept only to say where it went; see below.
     flash) : ;;
-    *) log "usage: wk pi setup|helper|boot-order|deploy|bench ...; see wk pi -h"
+    *) log "usage: wk pi <verb> ...; wk pi --list lists them; see wk pi -h"
        log "unknown verb: $ACTION"
        pi_usage_page >&2; exit 1 ;;
 esac
@@ -314,6 +302,8 @@ $(printf '%s\n' "$bad" | head -5 | sed 's/^/    /')
 #
 # Run a browser benchmark against a booted bench system and bring the
 # number back, with the refusals and provenance that make it defensible.
+# --count N is iterations per run, --timeout S the seconds one iteration may
+# take (default: the plan's own).
 #
 # **The harness is WebKit's own `run-benchmark`, run here, driving the
 # board's browser over ssh.** Benchmarks keep their score in the DOM, so a

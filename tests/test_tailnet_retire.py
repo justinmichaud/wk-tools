@@ -176,7 +176,7 @@ class TestWiring(unittest.TestCase):
 
     def test_doctor_declares_it_machine_local(self):
         text = (REPO / "cmd" / "doctor").read_text()
-        self.assertIn("tailscale-api-key", text)
+        self.assertIn("$(wk_tailscale_api_path)", text)  # one path, lib/common.sh's
         self.assertIn("re-authable", text)
 
 

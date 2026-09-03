@@ -18,7 +18,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest
+from tests.support import assert_guest_start_converges, REPO, WkTest
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
 RC = REPO / "shell" / "bashrc"
@@ -256,9 +256,11 @@ class TestNothingBakesTheAddressIn(unittest.TestCase):
         self.assertNotIn("WK_VM_PROXY_ADDR", text)
 
     def test_the_start_path_writes_the_egress_file(self):
-        vm = (REPO / "targets" / "vm.sh").read_text()
-        self.assertIn(".wk-egress", vm)
-        self.assertEqual(2, vm.count('_set_guest_egress "$name" "$ip"'))
+        """One `_converge_guest`, called from both t_start arms: a guest that
+        was already running gets its egress written exactly like one this
+        start booted."""
+        self.assertIn(".wk-egress", (REPO / "targets" / "vm.sh").read_text())
+        assert_guest_start_converges(self, '_set_guest_egress "$name" "$ip"')
 
 
 if __name__ == "__main__":

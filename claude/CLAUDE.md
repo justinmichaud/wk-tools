@@ -40,6 +40,13 @@ Use `wk` rather than invoking build scripts directly — it derives the job coun
 from available memory and runs the build at a nice level that keeps the host
 usable. A raw `ninja -j$(nproc)` can hang the machine.
 
+That is a wall, not advice: every build tool it wraps
+(`container/bin/wk-build-wall`, first on PATH) refuses to run for you and
+names the remedy. Reach them through `wk build`, `wk test`, `wk bench` and
+`wk run` instead; a person's shell in `wk enter` gets the real tool. Do not
+route around it — the job count and the nice level are what keep a shared
+build machine alive.
+
 ```
 wk build <config>     # jsc-release, gtk-debug, wpe-release, mac-release, ...
 wk run -- <args>      # run jsc from the current build
@@ -103,9 +110,12 @@ the host, outside the guest — denies everything except the address of that sam
 proxy. You cannot turn it off from in here, which is the point.
 
 If a fetch fails in either kind of workspace, that is the boundary working.
-Find another way rather than trying to route around it. One thing genuinely
-does not work in a macOS workspace: ssh does not go through an HTTP proxy, so
-push over HTTPS rather than ssh.
+Find another way rather than trying to route around it. ssh reaches
+`github.com:22` through that same proxy in both kinds — the fork remotes' host
+aliases (`github-webkit`, `github-wpe`) each carry a `ProxyCommand` — so a push
+over ssh is wired the same way in a macOS workspace as in a container, whenever
+the switch below is on; a live check on a real guest is still owed
+(docs/defects).
 
 The Pis (`rpi4`, `rpi5`) are reachable over SSH for performance testing and
 deploying builds.
@@ -121,8 +131,10 @@ Reads are anonymous over HTTPS and always work: fetching `origin` or either
 fork needs no credential at all.
 
 **Pushing is a switch, and it is normally off while you are running.** The
-deploy keys are held outside the workspace (`wk push`, on the host) and
-`wk ai claude` turns the switch off before handing over control, so a push is
+switch is *where the key is*, and it is thrown on the host (`wk push`): a
+container reads the keys through a read-only mount, and a macOS workspace is
+handed a copy that is taken away again the moment the switch goes off. Either
+way `wk ai claude` turns it off before handing over control, so a push is
 refused at the door — `no such identity` from ssh means exactly that, not a
 broken setup. Do not try to work around it: publishing is the one thing a
 disposable workspace is not allowed to do on its own. Say what you would have

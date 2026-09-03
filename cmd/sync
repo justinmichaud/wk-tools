@@ -23,9 +23,14 @@
 #                              publish, the checkout/reset/clean, and each
 #                              workspace's fetch
 #
-#   WK_BRANCH=<branch>         the snapshot publishes this branch instead of
-#                              origin/main (a release branch); every workspace
-#                              made from it starts there
+#   WK_BRANCH=<branch>         the snapshot publishes this remote-tracking
+#                              branch instead of origin/main (a release
+#                              branch: origin/safari-7620-branch, wpe/wpe-2.46).
+#                              A snapshot is checked out on a local branch of
+#                              that name, tracking it, so every workspace made
+#                              from it starts on a branch with an upstream --
+#                              which is what `git status`, `git pull` and
+#                              `wk pr rebase` in there all need to name.
 #
 # Two things go stale, for different reasons and at different rates: a
 # workspace's checkout, which only its own fetch moves, and the furniture its
@@ -115,10 +120,112 @@ local_store_named() {
     return 1
 }
 
-# tests/test_sync.py sources this file to exercise the helpers above without
-# running a real sync: `bash -c '. cmd/sync functions'`. `wk` always execs
-# this file as its own process, never sources it, so a real invocation can
-# never take this arm.
+# snapshot_checkout <tree> <branch> -- put a published snapshot's checkout on
+# a local branch of <branch>'s own name, tracking it. A workspace is an
+# overlay of this checkout, so whatever HEAD says here is what `git status`
+# says in there: detached, that is "HEAD detached at <sha>" with no upstream
+# for `git pull`, `git rebase @{u}` or `wk pr` to name.
+#
+# The start point is the full remote-tracking ref, and `-B` resets the branch
+# rather than switching to it: the branch `git clone` leaves behind otherwise
+# keeps the sha it was cloned at, and every later snapshot is hardlinked from
+# that one, so "later" is the age of the store.
+#
+# Prints why on failure and nothing at all when it worked (base_verify's
+# shape, lib/store.sh), so the caller can relay it without parsing.
+snapshot_checkout() { # <tree> <branch>
+    local tree="$1" branch="$2" ref upstream local_branch
+    ref=$(git -C "$tree" rev-parse --symbolic-full-name "$branch" 2>/dev/null || true)
+    case "$ref" in
+        refs/remotes/*/*) ;;
+        *)  printf "'%s' is not a branch this mirror carries.
+    A snapshot is published from a remote-tracking branch, spelled
+    <remote>/<branch>:  origin/main (the default), wpe/wpe-2.46.
+    Only %s of origin is in the mirror at all -- WK_MIRROR_BRANCHES=<branch>
+    carries another one in.\n" "$branch" "$(wk_mirror_branches)"
+            return 1 ;;
+    esac
+    upstream=${ref#refs/remotes/}      # origin/main
+    local_branch=${upstream#*/}        # main
+    git -C "$tree" checkout --quiet -B "$local_branch" "$ref" \
+        || { printf "could not check %s out as branch %s\n" "$upstream" "$local_branch"; return 1; }
+    git -C "$tree" branch --quiet --set-upstream-to "$upstream" "$local_branch" \
+        || { printf "branch %s does not track %s\n" "$local_branch" "$upstream"; return 1; }
+}
+
+# The refspecs a workspace fetches with, mirroring the mirror's own layout:
+# origin's branches are the mirror's own heads and every other upstream is
+# namespaced, which is what the fetch wiring further down puts there.
+mirror_refspecs() {
+    local r out="+refs/heads/*:refs/remotes/origin/*"
+    for r in $(wk_mirror_default_remotes); do
+        [ "$r" = origin ] && continue
+        out="$out +refs/remotes/$r/*:refs/remotes/$r/*"
+    done
+    printf '%s' "$out"
+}
+
+# The same refs, asked of one upstream itself, for a checkout with no mirror
+# in reach: a remote's branches live under its own refs/heads there, so the
+# namespacing is this side's. origin is narrowed to the branches the mirror
+# carries (wk_mirror_branches) -- WebKit/WebKit has ~920, and a fetch of all
+# of them writes a remote-tracking ref per branch for histories nothing in a
+# workspace builds from.
+net_refspecs() { # <remote>
+    local b out=""
+    if [ "$1" = origin ]; then
+        for b in $(wk_mirror_branches); do
+            out="$out +refs/heads/$b:refs/remotes/origin/$b"
+        done
+    else
+        out=" +refs/heads/*:refs/remotes/$1/*"
+    fi
+    printf '%s' "${out# }"
+}
+
+# ws_fetch_script <src> <mirror> -- the fetch a workspace's own checkout
+# does, as a portable `sh` snippet (the checkout is on the far side of a
+# container exec or an ssh, so this is generated here and run there).
+#
+# The mirror when the machine keeps one and it is mounted in there
+# (a container's /mirror): one local fetch, carrying every remote the mirror
+# carries in the layout it keeps them in. Otherwise the upstreams
+# themselves, one fetch each, over the slow egress-proxy path -- and only
+# the remotes the checkout actually has: one made before `wpe` was wired in
+# has no such remote, and naming it would fail the whole fetch over one that
+# was never there.
+#
+# --no-tags on both: a fetch that follows tags re-negotiates every tag the
+# source has for refs nothing here builds from (measured against a
+# 5,000-tag stand-in for the mirror: a fresh workspace's first fetch 0.97s
+# -> 0.23s, a repeat 0.33s -> 0.25s). The tags a checkout was cloned with
+# stay; `git fetch --tags` in the workspace asks for newer ones.
+#
+# Prints `from=mirror` or `from=remotes` for the caller to report.
+ws_fetch_script() { # <src> <mirror-dir>
+    local src="$1" mirror="$2" r
+    # The refspecs below are `*` globs git reads, and the checkout they run
+    # in is a working tree: no pathname expansion, so `sh` cannot turn one
+    # into a filename that happens to be there.
+    printf 'set -f\n'
+    printf 'cd %s || exit 1\n' "$(sh_quote "$src")"
+    printf 'if [ -d %s ]; then\n' "$(sh_quote "$mirror")"
+    printf '    git fetch --no-tags --prune --quiet %s %s || exit 1\n' \
+        "$(sh_quote "$mirror")" "$(mirror_refspecs)"
+    printf '    echo from=mirror\n    exit 0\nfi\n'
+    printf 'rc=0\n'
+    for r in $(wk_mirror_default_remotes); do
+        printf 'if git remote get-url %s >/dev/null 2>&1; then\n' "$(sh_quote "$r")"
+        printf '    git fetch --no-tags --prune --quiet %s %s || rc=1\nfi\n' \
+            "$(sh_quote "$r")" "$(net_refspecs "$r")"
+    done
+    printf 'echo from=remotes\nexit $rc\n'
+}
+
+# tests/test_sync.py and tests/test_new_fetch.py source this file to exercise
+# the helpers above without running a real sync: `bash -c '. cmd/sync
+# functions'`. `wk` always execs this file as its own process, never sources
+# it, so a real invocation can never take this arm.
 if (return 0 2>/dev/null); then
     [ "${1:-}" = functions ] && return 0
 fi
@@ -269,13 +376,16 @@ if [ -z "$SCOPE" ] && [ -z "$ONLY" ]; then
 fi
 
 # The furniture a machine keeps for its workspaces rather than in them: its
-# copy of this repo (rsynced into the podman VM, onto a build box, or its own
-# git checkout on a peer), and -- for a target whose store is on a machine of
-# its own -- that machine's mirror and snapshot. A stale copy of the tooling
-# fails as "unknown option" from a command that works fine where it was
-# typed; `wk status` says which copies are behind, and this is what fixes
-# them. One call per target, into the driver that knows what its far side
-# keeps (t_sync); this machine's own store is the half below.
+# copy of this repo (a checkout of this tree's commit on a machine across ssh,
+# a file copy in the podman VM, its own checkout on a peer), and -- for a
+# target whose store is on a machine of its own -- that machine's mirror and
+# snapshot. A stale copy of the tooling fails as "unknown option" from a
+# command that works fine where it was typed; `wk status` says which copies
+# are behind, and this is what fixes them. A machine across ssh is given a
+# commit and nothing else, so an uncommitted tree here is refused by name
+# rather than copied (tools_push, lib/tools.sh). One call per target, into
+# the driver that knows what its far side keeps (t_sync); this machine's own
+# store is the half below.
 #
 # walk_targets, not target_all: on a machine answering another machine's
 # --tools (WK_NO_DELEGATE) it refreshes what it holds and asks nobody, so a
@@ -302,23 +412,11 @@ sync_furniture() { # <target>, or empty for every target this machine knows
     return 0
 }
 
-# The refspecs a workspace fetches with, mirroring the mirror's own layout
-# (origin under refs/heads, everything else namespaced -- see above).
-mirror_refspecs() {
-    local r out="+refs/heads/*:refs/remotes/origin/*"
-    for r in $(wk_mirror_default_remotes); do
-        [ "$r" = origin ] && continue
-        out="$out +refs/remotes/$r/*:refs/remotes/$r/*"
-    done
-    printf '%s' "$out"
-}
-
 # sync_workspaces <workspace...> -- fetch in each, one subshell and one
 # driver per workspace, since a list can span targets.
 sync_workspaces() {
-    local ws st n=0 bad=0 rc out specs
+    local ws st n=0 bad=0 rc out
     local -a names=()
-    specs=$(mirror_refspecs)
     for ws in "$@"; do names+=("$ws"); done
     [ "${#names[@]}" -gt 0 ] || return 0
 
@@ -334,24 +432,15 @@ sync_workspaces() {
             fi
             printf '  %-24s ' "$ws" >&2
 
-            # /mirror when present, else the workspace's own remotes over the
-            # slow egress-proxy path. Only the remotes it actually has: one
-            # made before `wpe` was wired in has no such remote, and naming
-            # it would fail the whole fetch over one that was never there.
+            # /mirror is where a container's copy of the mirror is mounted;
+            # ws_fetch_script (above) decides from inside the checkout
+            # whether it is there. This is the one implementation of a
+            # workspace's fetch: `wk new` reaches it by running
+            # `wk sync <name>` at creation rather than fetching itself.
             stage_begin
-            out=$(t_exec "$ws" sh -c "cd $(sh_quote "$(t_src "$ws")") || exit 1
-                    if [ -d /mirror/WebKit.git ]; then
-                        git fetch --prune --quiet /mirror/WebKit.git $specs || exit 1
-                        echo from=mirror
-                        exit 0
-                    fi
-                    rc=0
-                    for r in $(wk_mirror_default_remotes); do
-                        git remote get-url \"\$r\" >/dev/null 2>&1 || continue
-                        git fetch --prune --quiet \"\$r\" || rc=1
-                    done
-                    echo from=remotes
-                    exit \$rc" 2>/dev/null) && rc=0 || rc=$?
+            out=$(t_exec "$ws" sh -c \
+                    "$(ws_fetch_script "$(t_src "$ws")" /mirror/WebKit.git)" \
+                    2>/dev/null) && rc=0 || rc=$?
             stage_end "workspace fetch $ws"
             if [ "$rc" = 0 ]; then
                 case "$out" in
@@ -457,9 +546,12 @@ esac
 # The far side first: on a Mac this machine's own store is not this machine's
 # to publish (below), but every tooling copy is, so --tools always
 # accomplishes the part it can before saying where the rest lives.
-sync_furniture "$TARGET" || true
+# Its verdict is this command's: a summary that names a target which did not
+# take the tooling is a failure, however much of the rest succeeds below.
+FURNITURE_RC=0
+sync_furniture "$TARGET" || FURNITURE_RC=1
 
-local_store_named "$TARGET" || exit 0
+local_store_named "$TARGET" || exit "$FURNITURE_RC"
 
 # On macOS $WK_STORE is /var/lib/wk *inside the podman VM*, unreadable from
 # out here. Said rather than attempted: a bare permission error would name no
@@ -470,7 +562,7 @@ if ! store_is_local; then
     info "the mirror and the snapshot are in the podman VM, not out here"
     log  "  the tooling copies above are done. For the rest:"
     log  "      wk sync    forwards into the VM, and offers them there"
-    exit 0
+    exit "$FURNITURE_RC"
 fi
 
 store_init
@@ -511,6 +603,12 @@ wk_remotes | while read -r name url; do
     # refs/heads, ignores refs/remotes); every other upstream is namespaced.
     # Only wk_mirror_branches are carried: every branch would cost tens of
     # gigabytes for histories nobody checks out.
+    # Tags are not needed to build a snapshot and would undo the branch-list
+    # saving below -- and a fetch follows every tag reachable from what it
+    # brings unless told not to, which is how a mirror carrying one branch
+    # ends up carrying every tag any of these four upstreams has.
+    git -C "$MIRROR" config "remote.$name.tagOpt" --no-tags
+
     if [ "$name" = origin ]; then
         git -C "$MIRROR" config --unset-all "remote.$name.fetch" 2>/dev/null || true
         for _b in $(wk_mirror_branches); do
@@ -524,12 +622,9 @@ wk_remotes | while read -r name url; do
 done
 
 # A bare mirror has no HEAD by default, and `git clone` then warns "remote
-# HEAD refers to nonexistent ref, unable to checkout". Harmless here, since
-# the snapshot is detached to an explicit branch below.
+# HEAD refers to nonexistent ref, unable to checkout"; it is also the branch
+# the snapshot's clone starts on.
 git -C "$MIRROR" symbolic-ref HEAD "refs/heads/$(wk_mirror_branches | awk '{print $1}')" 2>/dev/null || true
-
-# Tags are not needed to build a snapshot and would undo the branch-list saving above.
-git -C "$MIRROR" config remote.origin.tagOpt --no-tags
 
 _to_fetch=$(wk_mirror_default_remotes)
 info "fetching $_to_fetch (origin: $(wk_mirror_branches))"
@@ -621,8 +716,10 @@ fi
 info "wiring snapshot remotes for workspace use"
 sh -c "$(wk_wiring_script "$NEW_TREE")"
 
-info "checking out $BRANCH"
-git -C "$NEW_TREE" checkout --quiet --detach "$BRANCH"
+# ...and onto a branch: the checkout every workspace made from this snapshot
+# inherits (snapshot_checkout, above).
+_why=$(snapshot_checkout "$NEW_TREE" "$BRANCH") || { rm -rf "$NEW_DIR"; die "$_why"; }
+info "checked out on branch $(git -C "$NEW_TREE" symbolic-ref --short HEAD) (tracking $BRANCH)"
 # A snapshot must be pristine: a stray file left in the lower layer appears
 # in every workspace built from it and cannot be deleted from any of them.
 git -C "$NEW_TREE" reset --hard --quiet
@@ -646,3 +743,4 @@ info "published base $NEW_ID ($(cut -c1-10 < "$NEW_DIR/sha"))"
 # overlays pinned to the snapshot they were created from, which never moves.
 # So nothing about them changed just now, and they fetch on their own scope.
 log "the workspaces here fetch with 'wk sync --target $(default_target)'."
+exit "$FURNITURE_RC"

@@ -45,8 +45,29 @@ printf 'setupassistant_pending=%s\n' "${_pending# }"
 
 # The Software Update offer, which arrives as a modal panel on the desktop. A
 # guest is a clone of a pinned image; upgrading it is meaningless.
+#
+# Two domains, because they are two different facts (vm/desktop.sh says which
+# key is for what). The per-user domain is what System Settings shows a person;
+# /Library/Preferences is the one softwareupdated acts on, and it is root's --
+# so a guest can perfectly well read 0 in the first and 1 in the second, and
+# only the second puts a panel on the desktop. Both are reported raw: `?` is
+# "no such key here", which is not the same as off, and the report says so.
 printf 'update_check=%s\n' "$(defaults read com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null || echo '?')"
 printf 'update_download=%s\n' "$(defaults read com.apple.SoftwareUpdate AutomaticDownload 2>/dev/null || echo '?')"
+printf 'update_check_system=%s\n' "$(defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticCheckEnabled 2>/dev/null || echo '?')"
+printf 'update_autoinstall_system=%s\n' "$(defaults read /Library/Preferences/com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates 2>/dev/null || echo '?')"
+
+# The scheduled check as softwareupdate itself reports it: "Automatic check is
+# on" / "off", no domain and no root needed, and the one reading that cannot
+# disagree with itself across macOS versions.
+printf 'update_schedule=%s\n' "$(softwareupdate --schedule 2>/dev/null \
+    | sed -n 's/.*[Aa]utomatic check is *\([a-z]*\).*/\1/p' | tail -1)"
+
+# Setup Assistant's "what is new in macOS" pane, which is a Software Update
+# screen by another name: Buddy shows it when these do not already name the
+# running system, and a clone is a new install by macOS's own reckoning.
+printf 'setupassistant_seen_product=%s\n' "$(defaults read com.apple.SetupAssistant LastSeenCloudProductVersion 2>/dev/null || echo '?')"
+printf 'os_product=%s\n' "$(sw_vers -productVersion 2>/dev/null || echo '?')"
 
 # A panel actually on screen right now, which is the fact the settings above
 # only predict. Named processes rather than a window list: there is no

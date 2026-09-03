@@ -500,7 +500,8 @@ wk_tailscale_authkey_present() {
 # its identity does not stop at a person with a browser (lib/tailnet.py).
 #
 # Optional: a workstation that never writes cards needs none, and `wk doctor`
-# reports it re-authable rather than missing.
+# reports it re-authable rather than missing. WK_TS_API_SECRET names another
+# file to keep it in.
 wk_tailscale_api_path() { printf '%s' "${WK_TS_API_SECRET:-$HOME/.config/wk/tailscale-api-key}"; }
 
 # The mirror of wk_tailscale_key_reject: here an *auth* key is the wrong one.

@@ -37,6 +37,12 @@ ensure_dir "$ROOT"
 ensure_dir "$ROOT/ws"
 ensure_dir "$ROOT/cache/ccache"
 
+# inputs= is what provisioned this machine: the hash of remote/provision.sh and
+# remote/deps.sh, computed on the driving side and handed over
+# (remote_provision_inputs_hash, targets/remote.sh) so both ends cannot hash
+# differently. A record of what produced this state, not a verdict about it:
+# `wk doctor --all` recomputes the hash and compares, which is how a machine
+# provisioned before a change to either file says so instead of looking current.
 write_file "$HOME/.wk-remote" 0644 <<EOF
 # wk: this machine hosts wk remote workspaces. Written by remote/provision.sh.
 #
@@ -46,6 +52,7 @@ write_file "$HOME/.wk-remote" 0644 <<EOF
 # on a workstation.
 target=$TARGET
 root=$ROOT
+inputs=${WK_REMOTE_INPUTS:-}
 EOF
 
 # No second conf: targets/remote.sh recomputes WK_TARGET_KIND, WK_REMOTE_LOCAL

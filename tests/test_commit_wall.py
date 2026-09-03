@@ -48,7 +48,7 @@ class TestWiring(unittest.TestCase):
 
     def test_claude_wraps_the_agent_exec_with_the_wall(self):
         self.assertIn("WALL=\"$(commit_wall_prefix", CLAUDE)
-        self.assertIn("exec ${WALL}$(sh_quote \"$CLAUDE_BIN\")", CLAUDE)
+        self.assertIn("exec ${WALL}$(sh_quote \"$AGENT_BIN\")", CLAUDE)
 
     def test_push_on_is_a_forceable_barrier_while_a_session_runs(self):
         seg = PUSH.split("\non)\n", 1)[1]
@@ -119,3 +119,28 @@ class TestTheWallHolds(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBuiltinsAreAskedThroughAShell(unittest.TestCase):
+    """t_exec hands argv to an exec, not a shell, so a shell builtin such as
+    `command -v` cannot be the program: measured live, the bare form failed
+    in every container and remote control never started. cmd/ai asks through
+    one helper that wraps it in `sh -c`, and nothing under cmd/ or lib/ uses
+    the bare form (`test` is a real program in every image and is fine)."""
+
+    def test_cmd_ai_asks_for_bwrap_through_one_helper(self):
+        text = (REPO / "cmd" / "ai").read_text()
+        self.assertEqual(1, text.count("wall_available() {"))
+        self.assertEqual(2, text.count('wall_available "$NAME"'))
+        self.assertIn("""t_exec "$1" sh -c 'command -v bwrap""", text)
+
+    def test_no_bare_builtin_reaches_t_exec(self):
+        import re
+        bad = re.compile(r't_exec "\$[A-Za-z_]+" (command|type|alias|cd|builtin|source) ')
+        for d in ("cmd", "lib", "targets"):
+            for f in sorted((REPO / d).iterdir()):
+                if not f.is_file() or f.suffix in (".py", ".pyc"):
+                    continue
+                for n, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
+                    with self.subTest(file=f.name, line=n):
+                        self.assertIsNone(bad.search(line), line.strip())

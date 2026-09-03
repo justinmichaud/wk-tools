@@ -393,12 +393,12 @@ report_one() {
     case "$state" in
     running)
         [ -f "$logf" ] && note "alive: $(_progress_line "$logf" || echo 'running') (last output ${age}s ago)"
-        [ "$worst" -lt 2 ] && worst=2
+        bump 2
         ;;
     failed)
         note_warn "exit $rc"
         while IFS= read -r _l; do note "  $_l"; done < <(first_error "$logf" 2>/dev/null || true)
-        [ "$worst" -lt 1 ] && worst=1
+        bump 1
         ;;
     stalled)
         if [ -n "$age" ]; then
@@ -411,7 +411,7 @@ report_one() {
         else
             note_warn "killed after no output; see $logf"
         fi
-        worst=3
+        bump 3
         ;;
     # The memory watchdog's verdict, distinct from a build that merely
     # failed: the fix is a job count or a per-job working set, not the code.
@@ -419,7 +419,7 @@ report_one() {
         note_warn "killed for memory${peak:+ (peak ${peak}MB)}; see $logf"
         _lim=$(grep -a 'wk: MEMORY LIMIT' "$logf" 2>/dev/null | tail -1 | sed 's/^wk: //') || true
         [ -z "${_lim:-}" ] || note "  $_lim"
-        worst=3
+        bump 3
         ;;
     esac
 }
@@ -841,8 +841,19 @@ bump() {
 # What a *machine* is, as opposed to what a workspace is doing: which
 # wk-tools it runs (a stale copy fails as `unknown option`), and which push
 # keys it holds (one machine per key is the design).
+#
+# Two abbreviated commits, one a prefix of the other or not: `git rev-parse
+# --short` picks its own length per repository, so two copies of the same
+# commit can spell it with a different number of digits.
+sha_matches() { # <a> <b>
+    [ -n "$1" ] && [ -n "$2" ] || return 1
+    case "$1" in "$2"*) return 0 ;; esac
+    case "$2" in "$1"*) return 0 ;; esac
+    return 1
+}
+
 report_machine() {
-    local label="$1" ver keys mine theirs sha dirty note
+    local label="$1" ver keys expect theirs sha dirty insync note
 
     if [ "$WK_TARGET_KIND" = remote ] && t_has_wk; then
         ver=$(  { t_wk version          2>/dev/null || true; } | tr -d '\r' )
@@ -861,11 +872,26 @@ report_machine() {
         theirs=$(kv_get tree <<<"$ver")
         sha=$(kv_get sha <<<"$ver")
         dirty=$(kv_get dirty <<<"$ver")
-        # Compared against the machine that *pushes* the tooling -- the
-        # workstation -- since the podman VM's copy is rsynced from there
-        # and would otherwise report "in sync" against its own stale tree.
-        # WK_EXPECT_TREE is how the workstation says what it has.
-        mine="${WK_EXPECT_TREE:-$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)}"
+        # Always compared against the machine the tooling comes *from* -- this
+        # workstation -- and what the two are compared *by* is what the copy
+        # over there is:
+        #
+        #   a checkout      its commit, which is the whole point of putting a
+        #                   commit there (tools_push, lib/tools.sh): the tree
+        #                   hash counts ignored machine-local files (a
+        #                   .DS_Store, a __pycache__) that a checkout
+        #                   legitimately does not have, so it would report
+        #                   DIFFERS forever.
+        #   a file copy     its tree hash -- `sha` is `-`, since a copy has no
+        #                   commit. WK_EXPECT_TREE is how the workstation
+        #                   tells the podman VM what it has.
+        if [ -n "$sha" ] && [ "$sha" != - ]; then
+            expect=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || true)
+            if sha_matches "$sha" "$expect"; then insync=true; else insync=false; fi
+        else
+            expect="${WK_EXPECT_TREE:-$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)}"
+            if [ "$theirs" = "$expect" ]; then insync=true; else insync=false; fi
+        fi
         rec_start fact
         rec_set machine "${_group_machine:-$(this_machine)}"
         rec_set type    wk-tools
@@ -873,8 +899,8 @@ report_machine() {
         rec_set sha     "$sha"
         rec_json dirty  "$([ "$dirty" = yes ] && printf true || printf false)"
         rec_set tree    "$theirs"
-        rec_set expect  "$mine"
-        rec_json insync "$([ "$theirs" = "$mine" ] && printf true || printf false)"
+        rec_set expect  "$expect"
+        rec_json insync "$insync"
         # What to type about it differs per machine:
         #
         #   the podman VM   a copy this machine rsyncs in (`wk sync --tools
@@ -882,7 +908,7 @@ report_machine() {
         #   a build box     the same push, by machine name.
         #   a peer          a workstation pulls rather than being pushed to,
         #                   which needs a committed, pushed tree here first.
-        if [ "$theirs" != "$mine" ]; then
+        if [ "$insync" != true ]; then
             if [ -n "${WK_IN_VM:-}" ]; then
                 rec_set fix "wk sync --tools container"
             elif [ -n "${WK_REMOTE_PEER:-}" ]; then

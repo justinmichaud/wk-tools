@@ -66,6 +66,8 @@ device_class() {  # same classification, for a device about to be written
 # (disk_root_spec, boot/disk.sh), read after every edit that could change it.
 #   image_check_root <root-spec> <device> <what-it-is>
 # `portable`, `network` and `unknown` all pass: the first works anywhere.
+# WK_ANY_ROOT=1 downgrades the refusal to a warning, for proving a transfer
+# worked on a card that was never going to boot from it anyway.
 image_check_root() {
     local spec="$1" dev="$2" what="$3" class want
     class=$(image_root_class "$spec")

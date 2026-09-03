@@ -11,15 +11,17 @@
 # goes through the ordinary commands, because `wk new <name> --target vm`
 # registers the target and they resolve it from there.
 #
-#   ls                        list guests and their state
+#   ls                        list guests and their state, and whether the
+#                             golden base still matches its provisioning inputs
 #   new <name>                create a guest, cloned from the golden base
 #   start <name>              boot it, write its ssh alias (wk-<name>)
 #   stop <name>               shut it down
 #   ip <name>                 its current address
 #   check <name>              is it on an empty desktop, with nothing modal in
-#                             front of the window? Read-only
+#                             front of the window, nothing piling up in it, and
+#                             is its base still current? Read-only
 #   enter <name>              interactive shell
-#   sync <name>               push this working tree of wk-tools into it
+#   sync <name>               put this checkout's HEAD commit of wk-tools in it
 #   rm <name>                 destroy it and forget the target
 #
 # `wk vm base` is the exception that is not lifecycle-per-workspace: the golden
@@ -71,6 +73,14 @@ ls)
     # t_list is tab-separated so it stays machine-readable; the columns are a
     # presentation concern and belong here, not in the driver.
     t_list 2>/dev/null | awk -F'\t' '{printf "%-20s %s\n", $1, $2}' || true
+    # The base every guest above is a clone of, because a listing is where its
+    # state is asked for and every guest's contents are that base's. Recomputed
+    # here on every read (vm_base_findings), never remembered, and rendered by
+    # the one renderer `wk vm check` and `wk vm start` use.
+    printf '\n%-20s %s\n' BASE "$WK_VM_BASE -- every guest above is a clone of it"
+    vm_render_findings <<FINDINGS || true
+$(vm_base_findings)
+FINDINGS
     ;;
 new)
     NAME="${1:-}"; require_name "$NAME"
@@ -80,33 +90,43 @@ new)
 check)
     # Read-only, and it starts nothing: a stopped guest has no desktop to be
     # wrong about, and booting one to look would change the thing being asked
-    # about. Every wrong answer is a property of the golden base, so the remedy
-    # is a base that carries it -- not a patch to the running guest.
+    # about. Three reports, one renderer: the base this guest was cloned from,
+    # what is in front of its window, and what is resident in it. A desktop
+    # answer is a property of the base, so its remedy is a base that carries the
+    # setting -- never a patch to the running guest (CLAUDE.md, "No in-place
+    # upgrades"); what is resident is this guest's own and dies with a restart.
     NAME="${1:-}"; require_name "$NAME"
     _probe=$(vm_desktop_probe "$NAME" 2>/dev/null) || _probe=""
     [ -n "$_probe" ] || die "'$NAME' did not answer. It has to be running and reachable
     for this: 'wk vm start $NAME', then try again ('wk vm ls' has its state)."
+    _load=$(vm_load_probe "$NAME" 2>/dev/null) || _load=""
     _bad=0
-    while IFS="$(printf '\t')" read -r _state _what _remedy; do
-        [ -n "$_state" ] || continue
-        case "$_state" in
-            ok)    printf '  \033[32mok\033[0m    %s\n' "$_what" >&2 ;;
-            wrong) printf '  \033[31m--\033[0m    %s\n' "$_what" >&2
-                   [ -z "$_remedy" ] || printf '        -> %s\n' "$_remedy" >&2
-                   _bad=$((_bad + 1)) ;;
-            note)  printf '  \033[33m??\033[0m    %s\n' "$_what" >&2
-                   [ -z "$_remedy" ] || printf '        %s\n' "$_remedy" >&2 ;;
-        esac
-    done <<FINDINGS
+
+    # The base first: it is the cause of most of what the desktop report finds,
+    # and of the one thing no start can converge -- the account's password.
+    vm_render_findings <<FINDINGS || _bad=$?
+$(vm_base_findings)
+FINDINGS
+    vm_render_findings <<FINDINGS || _bad=$((_bad + $?))
 $(vm_desktop_findings "$_probe")
 FINDINGS
+    if [ -n "$_load" ]; then
+        vm_render_findings <<FINDINGS || _bad=$((_bad + $?))
+$(vm_load_findings "$_load")
+FINDINGS
+    else
+        warn "'$NAME' did not answer the load probe, so what is resident in there is unknown"
+    fi
+
     echo >&2
     if [ "$_bad" -eq 0 ]; then
-        info "'$NAME' is on an empty desktop -- nothing in front of the window"
+        info "'$NAME' is on an empty desktop, nothing in front of the window, and
+  nothing piling up in it"
         exit 0
     fi
-    warn "$_bad thing(s) can cover '$NAME's window, and a covered window is a
-  throttled window: a benchmark in there measures something else."
+    warn "$_bad thing(s) are wrong with '$NAME': a covered window is a throttled
+  window, so a benchmark in there measures something else, and a guest out of
+  memory pages instead of building. Each line above names its remedy."
     exit 1
     ;;
 start)
@@ -116,7 +136,6 @@ start)
     info "$NAME is up at $ip"
     log  "  wk build $NAME mac-release"
     log  "  zed ssh://wk-$NAME$(t_src "$NAME")"
-    log  "  wk vm check $NAME       is its desktop clear of anything modal?"
     vm_login_note
     ;;
 stop)
@@ -137,9 +156,9 @@ enter)
     t_enter "$NAME"
     ;;
 sync)
-    # Push the current working tree of wk-tools into a running guest. The same
-    # thing `wk build` does first, exposed on its own for when you are editing
-    # this repo and want the change in the guest without starting a build.
+    # Put this tree's HEAD commit of wk-tools into a running guest (lib/tools.sh
+    # refuses while the tree is dirty). The same thing `wk build` does first,
+    # exposed on its own for a change that is wanted in the guest before a build.
     NAME="${1:-}"; require_name "$NAME"
     t_sync_tools "$NAME"
     info "synced wk-tools into $NAME"

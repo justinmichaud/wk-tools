@@ -5,8 +5,10 @@
 # runs inside and only carries it out.
 #
 # Environment supplied by cmd/build: WK_JOBS, WK_NICE, WK_BUILD_ARGS,
-# WK_BUILD_CMAKE, WK_BUILDSYS, WK_BUILD_SCRIPT, WK_SRC, plus the
-# ccache/cross-build caches, WK_ARCH* for a non-native workspace,
+# WK_BUILD_CMAKE, WK_BUILDSYS, WK_BUILD_SCRIPT, WK_SRC, WK_BUILD_DIR (the
+# config's own build directory, config_build_dir in build/configs.sh),
+# WK_ARCH plus WK_ARCH_WRAPPER/WK_ARCH_CFLAGS/WK_ARCH_LDFLAGS for a
+# non-native workspace, WK_NO_COMPILATION_CACHE for the Apple ports,
 # WEBKIT_OUTPUTDIR/WK_DERIVED_DATA for the Apple configs.
 #
 # Runs on both a Fedora container and a macOS guest: bash 3.2 (macOS still
@@ -15,6 +17,10 @@
 # choom) is assumed present.
 
 set -euo pipefail
+
+# This is wk's own build: the build wall (container/bin/wk-build-wall) lets
+# ninja/cmake/make through for it and refuses them to an agent's shell.
+export WK_BUILD=1
 
 # ${var@Q} needs bash 4.4; this file has to parse under macOS's bash 3.2.
 _q() {
@@ -84,9 +90,10 @@ xcode)
         xc+=("MODULE_CACHE_DIR=$WK_DERIVED_DATA/ModuleCache.noindex")
     fi
 
-    # The escape hatch for debugging Swift types: with caching on (the
-    # default), debug info is only as durable as the CAS. Costs a full
-    # rebuild to switch; C++ debugging is unaffected either way.
+    # WK_NO_COMPILATION_CACHE=1 is the escape hatch for debugging Swift
+    # types: with caching on (the default), debug info is only as durable as
+    # the CAS. Costs a full rebuild to switch; C++ debugging is unaffected
+    # either way.
     [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && xc+=("COMPILATION_CACHE_ENABLE_CACHING=NO")
 
     # The one place the two scripts genuinely differ, and it is forced: an

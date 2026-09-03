@@ -3,14 +3,14 @@
 # wk version [--tree] -- which wk-tools this machine is running
 # wk: where=local name=none readonly group=hosts
 #
-# Every machine in the fleet runs an rsynced *copy* of this repository,
-# which goes stale silently and fails in confusing ways.
+# Every machine in the fleet runs its own copy of this repository: a git
+# checkout on a build box or a macOS guest (lib/tools.sh puts a commit there),
+# a file copy inside the podman VM. Either goes stale silently.
 #
 # Two identifiers, since neither is enough on its own:
 #
-#   sha     the git commit -- only the workstation has one (copies are
-#           rsynced with --exclude .git), so this is `-` elsewhere and says
-#           nothing about uncommitted edits by itself.
+#   sha     the git commit -- `-` where the copy is not a checkout (the
+#           podman VM), and silent about uncommitted edits by itself.
 #   tree    a hash of the file contents, computed identically everywhere.
 #           Answers "is that machine running what I am", uncommitted work included.
 #

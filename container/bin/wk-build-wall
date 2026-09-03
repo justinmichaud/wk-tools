@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# wk-build-wall: this line is how _real below recognises another copy of this
+# file. Keep it within the first few lines and do not reword the prefix.
+#
+# The build wall. The tools named in WALL_NAMES below refuse to run for an
+# agent and run normally for a person. One file, invoked under each wrapped
+# name through a symlink beside it.
+#
+# What it covers, exactly: a **bare name** resolved on PATH, in every shell
+# that sources shell/path.sh -- which is every workspace shell and this
+# workstation's own shells too, since shell/bashrc reads the same file. It puts
+# container/bin ahead of /usr/bin, so `ninja` reaches this before the real one.
+#
+# What it does not cover: a **path form**. `Tools/Scripts/build-webkit` and
+# `./configure`-style invocations name a file directly and never consult PATH,
+# so no shim can stand in front of them. Those are covered by the `Bash(*/<name> *)`
+# deny rules in claude/settings.json and claude/settings-host.json, and by
+# nothing else -- which is why the skills route through `wk build` / `wk test`
+# rather than teaching the path spelling.
+#
+# Why a shim and not a permission rule alone: `wk ai claude` relaxes the
+# agent's own permissions, because the workspace is the blast radius -- so the
+# rule has to live where the privilege is, and hold for every target, every
+# shell kind and every agent. `wk build` derives the job count from available
+# memory and runs the build at a nice level that keeps the machine usable; a
+# hand-rolled `ninja -j$(nproc)` ignores all of that and has taken shared build
+# boxes down.
+#
+# Who is asking, from evidence the caller did not write:
+#
+#   CLAUDECODE=1    Claude Code exports it into every shell it runs
+#   WK_AGENT=<name> exported by `wk ai <agent>` (cmd/ai), so the next agent is
+#                   walled by the line that names it and nothing else
+#   WK_BUILD=1      wk's own build (build/build-in-target.sh): the real cmake
+#                   and ninja are reached through there, which is what the
+#                   refusal below sends the caller back to
+#
+# A person in `wk enter` has none of them and gets the real tool, found further
+# along PATH. Nothing here is a defence against a caller who scrubs its own
+# environment; it is the wall the ordinary path meets.
+
+set -u
+
+# The wrapped names, in one place. The symlinks beside this file are the same
+# set, and tests/test_build_wall.py reads this line to check that they are.
+WALL_NAMES="ninja cmake make xcodebuild build-webkit build-jsc run-javascriptcore-tests run-webkit-tests run-benchmark"
+
+self=${0##*/}
+WALL=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)/wk-build-wall
+# A failed `cd` leaves WALL as `/wk-build-wall`, which matches nothing and
+# turns the skip below into a self-exec loop. Refuse instead.
+[ -x "$WALL" ] || {
+    printf '%s: cannot locate the wall beside %s -- refusing rather than guessing\n' \
+        "$self" "$0" >&2
+    exit 1
+}
+
+case " $WALL_NAMES " in
+    *" $self "*) ;;
+    *) printf '%s: nothing calls this by its own name -- it runs as one of: %s\n' \
+           "$self" "$WALL_NAMES" >&2
+       exit 1 ;;
+esac
+
+if [ -z "${WK_BUILD:-}" ] && { [ -n "${CLAUDECODE:-}" ] || [ -n "${WK_AGENT:-}" ]; }; then
+    printf '%s: refused. An agent does not drive a build or a test run directly:\n' "$self" >&2
+    printf '  wk carries the job count and the nice level this machine needs, and a raw\n' >&2
+    printf '  %s has taken shared build machines down.\n' "$self" >&2
+    printf 'Use instead:  wk build <config> | wk test <args> | wk bench <plan> | wk run -- <args>\n' >&2
+    exit 1
+fi
+
+# Is this candidate a wall too? `-ef` recognises only *this* copy, and there
+# are routinely two wk-tools trees on PATH -- a person's clone and the one
+# `wk` pushed -- whose walls then exec each other until the process table
+# gives out (measured). Any wall is skipped, whichever tree it came from.
+_is_wall() { # <path>
+    local t
+    t=$(readlink "$1" 2>/dev/null) && [ "${t##*/}" = wk-build-wall ] && return 0
+    head -n 5 "$1" 2>/dev/null | grep -q '^# wk-build-wall:'
+}
+
+# The real tool: the next executable of this name along PATH that is not a
+# wall.
+_real() {
+    local oldifs=$IFS d cand
+    IFS=:
+    set -- $PATH
+    IFS=$oldifs
+    for d in "$@"; do
+        # An empty PATH entry means the current directory. This decides which
+        # binary runs, so whatever happens to sit in $PWD is not a candidate.
+        [ -n "$d" ] || continue
+        cand=$d/$self
+        [ -x "$cand" ] && [ ! -d "$cand" ] || continue
+        [ "$cand" -ef "$WALL" ] && continue
+        _is_wall "$cand" && continue
+        printf '%s' "$cand"
+        return 0
+    done
+    return 1
+}
+
+real=$(_real) || {
+    printf '%s: not on PATH (only the wall at %s answers to that name)\n' "$self" "$WALL" >&2
+    exit 127
+}
+
+exec "$real" "$@"

@@ -15,9 +15,13 @@
 #
 #   --all   also ask every configured build machine (targets/hosts/*.conf) what
 #           it has: the tools a build needs there, the identity a commit made
-#           there would carry, and any build variable that machine's own
-#           profile sets. Read-only, over ssh, and it starts nothing; a machine
+#           there would carry, any build variable that machine's own profile
+#           sets, and whether what provisioned it is still what this tree says.
+#           Read-only, over ssh, and it starts nothing; a machine
 #           that does not answer is reported as unreachable, never as broken.
+#           Also reads every bridge phone's battery charge cap (`wk bridge
+#           battery`, over ssh) and, on a Mac with a battery, the honest
+#           `pmset -g batt` line -- macOS has no settable limit to check.
 #
 #   0  everything checkable is provisioned
 #   1  something is missing (the lines say what and how)
@@ -36,7 +40,6 @@ probe_store() {
     [ -d "$WK_STORE/git/WebKit.git" ] && echo mirror=ok || echo mirror=no
     [ -n "$(ls -1 "$WK_STORE/base" 2>/dev/null)" ] && echo base=ok || echo base=no
     [ -f "$WK_STORE/secrets/build_key_fork" ] && echo key=ok || echo key=no
-    [ -f "$WK_STORE/secrets/claude-token" ] && echo creds=ok || echo creds=no
     [ -n "$(ls -1 "$WK_STORE/skills" 2>/dev/null)" ] && echo skills=ok || echo skills=no
     # The socket is accepted as proof too: systemctl --user over a bare ssh
     # session can fail to find the user bus even when the service is fine.
@@ -77,6 +80,44 @@ check() { # check <description> <fix> <command...>
 }
 
 link_ok() { [ -L "$1" ] && [ "$(readlink "$1")" = "$2" ]; }
+
+# The verdict for one bridge phone's battery cap, from `wk bridge battery
+# <name>`'s key=value lines (percent=, status=, limit=, current=). Its own
+# function, not inlined in the --all loop below, so
+# tests/test_battery.py can lift it alone and check ok/mismatch without a
+# phone: "ok\t<line>" or "miss\t<line>\t<remedy>", one tab-separated record.
+battery_verdict() { # <name> <key=value blob>
+    local name="$1" blob="$2" pct st limit cur
+    pct=$(kv_get percent <<<"$blob")
+    st=$(kv_get status <<<"$blob")
+    limit=$(kv_get limit <<<"$blob")
+    cur=$(kv_get current <<<"$blob")
+    if [ -n "$cur" ] && [ "$cur" != '?' ] && [ "$cur" = "$limit" ]; then
+        printf 'ok\t%s: %s%% %s, capped at %s%%\n' "$name" "${pct:-?}" "${st:-?}" "$cur"
+    else
+        printf 'miss\t%s: %s%% %s, cap reads %s (want %s)\t%s\n' \
+            "$name" "${pct:-?}" "${st:-?}" "${cur:-?}" "${limit:-?}" "wk bridge setup $name"
+    fi
+}
+
+# This Mac's own battery, from a `pmset -g batt` capture. macOS has no CLI
+# knob for its own optimized charging, so the honest report is the raw
+# percent and plug state and nothing more -- never a fabricated "ok"/"--".
+# Fails (nothing printed) when the second line is absent: a desktop Mac's
+# `pmset -g batt` is one line ("Now drawing from ..."), no battery entry.
+mac_battery_line() { # <pmset -g batt output>
+    local out="$1" head batt pct plug
+    head=$(printf '%s\n' "$out" | sed -n '1p')
+    batt=$(printf '%s\n' "$out" | sed -n '2p')
+    [ -n "$batt" ] || return 1
+    pct=$(printf '%s' "$batt" | sed -n 's/.*[[:space:]]\([0-9]\{1,3\}\)%;.*/\1/p')
+    [ -n "$pct" ] || return 1
+    case "$head" in
+        *"'AC Power'"*) plug="plugged in" ;;
+        *)              plug="on battery" ;;
+    esac
+    printf '%s, %s%% -- no OS limit exists' "$plug" "$pct"
+}
 
 info "wk doctor on $(wk_os) ($(hostname))"
 
@@ -211,7 +252,15 @@ local_state() { # <path> <kind> <how to get it back>
 # longer exists, and a rerun is a different measurement.
 local_state "$WK_STORE/bench"                      backed-up   "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement"
 local_state "$WK_STORE/secrets"                    regenerable "wk key register makes new deploy keys (revoke the old ones on GitHub)"
-local_state "$WK_STORE/secrets/claude-token" re-authable "claude setup-token, then wk key claude; every workspace this machine makes starts authenticated with it"
+# One line per row of wk_agent_secrets (lib/store.sh): the credential each
+# agent reads, one per name per machine. re-authable -- a fresh token from the
+# provider is as good as the old one -- and absent is `??`, not a fault: an
+# agent with no credential asks the person to log in, which still works.
+for _sname in $(wk_agent_secret_names); do
+    local_state "$(wk_agent_secret_path "$_sname")" re-authable \
+        "wk key set $_sname stores one; every workspace this machine makes starts authenticated with it"
+done
+unset _sname
 # The fleet's one tailscale auth key (wk_tailscale_authkey, lib/common.sh).
 # re-authable, not backed-up: a new tagged key from the admin console is as
 # good as the old one, and a tagged node never key-expires.
@@ -220,7 +269,7 @@ local_state "${WK_TS_AUTHKEY:-$HOME/.config/wk/tailscale-authkey}" re-authable "
 # a stale fleet node so a reprovision does not stop at a person with a
 # browser. re-authable, and never written to a card -- it administers the
 # whole tailnet, which is the one power a board on a shelf must not hold.
-local_state "${WK_TS_API_SECRET:-$HOME/.config/wk/tailscale-api-key}" re-authable "wk key tailnet-api asks for one; only this machine holds it, and only writes that must retire a stale node need it"
+local_state "$(wk_tailscale_api_path)" re-authable "wk key tailnet-api asks for one; only this machine holds it, and only writes that must retire a stale node need it"
 # What the request broker did, on this machine, for workspaces that could
 # not do it themselves. Regenerable: a machine's state is always read back
 # from the machine, so losing the directory costs the words, not a fact.
@@ -242,7 +291,7 @@ if [ "$(wk_os)" = linux ]; then
 fi
 unset -f local_state
 
-# --- the store: mirror, snapshots, keys, credentials -----------------------------
+# --- the store: mirror, snapshots, keys -------------------------------------------
 # Probed over one `podman machine ssh` on macOS -- and only if the machine is
 # already running, because doctor never starts anything.
 report_store() { # <probe output>
@@ -251,9 +300,10 @@ report_store() { # <probe output>
     [ "$(v mirror)" = ok ] && ok "WebKit mirror"          || miss "WebKit mirror" "wk sync"
     [ "$(v base)" = ok ]   && ok "base snapshot"          || miss "base snapshot" "wk sync"
     [ "$(v key)" = ok ]    && ok "fork push key"          || miss "fork push key" "wk key register  (needs gh auth)"
-    [ "$(v creds)" = ok ]  && ok "claude token (every workspace starts authenticated)" \
-                           || miss "claude token (every workspace starts authenticated)" \
-                                   "claude setup-token, then: wk key claude"
+    # The agents' credentials are not here: they are one machine-local line
+    # each in the section above, which probes this same store. Absent, one is
+    # `??` and not a fault -- unlike everything in this list, a workspace
+    # without one still works, and `miss` would count it as broken.
     [ "$(v skills)" = ok ] && ok "shared skills seeded"   || miss "shared skills seeded" "wk skills push"
     [ "$(v proxy)" = ok ]  && ok "egress proxy running"   || miss "egress proxy running" "./setup --stage sdk, then systemctl --user status wk-proxy"
     [ "$(v pihosts)" = ok ] && ok "pi-hosts populated"    || miss "pi-hosts populated" "wk pi setup rpi5 / rpi4  (skip if no Pi devices)"
@@ -316,12 +366,33 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
         else
             miss "softnet installed SUID root" "./setup --stage softnet  (interactive sudo)"
         fi
-        tart_bin=$(command -v tart 2>/dev/null || echo "$HOME/.local/bin/tart")
-        if "$tart_bin" list 2>/dev/null | grep -q "wk-base"; then
-            ok "golden base VM 'wk-base'"
+        # Asked of the driver, not of `tart list`: whether there is a base, and
+        # whether it still matches the scripts that provision one, is one
+        # question with one answer (vm_base_findings, targets/vm.sh) -- a base
+        # that exists but predates its own inputs hands every guest cloned from
+        # it whatever has changed since, the account's password included.
+        #
+        # In a subshell, like the build machines below: sourcing the vm driver
+        # re-points WK_STORE at this machine's own state directory, which is not
+        # what the sections above mean by the store.
+        _base=$( ( . "$WK_ROOT/lib/target.sh"
+                   load_target vm >/dev/null 2>&1
+                   vm_base_findings ) 2>/dev/null ) || _base=""
+        if [ -z "$_base" ]; then
+            unk "golden base VM: the vm driver did not answer" "wk vm ls"
         else
-            miss "golden base VM 'wk-base'" "wk vm base  (hours: image pull + prebuild)"
+            while IFS="$(printf '\t')" read -r _state _what _remedy; do
+                [ -n "$_state" ] || continue
+                case "$_state" in
+                    ok)    ok "$_what" ;;
+                    wrong) miss "$_what" "${_remedy:-wk vm ls}" ;;
+                    note)  unk "$_what" "${_remedy:-}" ;;
+                esac
+            done <<FINDINGS
+$_base
+FINDINGS
         fi
+        unset _base _state _what _remedy
     else
         unk "tart not installed" "README.md, Setup -- only needed for Apple-port builds"
     fi
@@ -354,8 +425,56 @@ if [ -n "$ALL" ]; then
         done <<FINDINGS
 $(wk_remote_findings "$_probe")
 FINDINGS
+        # And whether what provisioned the machine is still what this tree says
+        # (remote_provision_stale, targets/remote.sh): the probe above reads the
+        # tools a build needs, which a machine can have while its wk-side
+        # provisioning -- the marker, the ssh config, the git identity -- came
+        # from an older remote/provision.sh. Recomputed here, one ssh, read-only.
+        if _why=$( ( load_target "$_t" >/dev/null 2>&1; remote_provision_stale ) 2>/dev/null ); then
+            miss "provisioning on $_t predates its inputs: $_why" "wk remote setup $_t"
+        else
+            ok "provisioned from this tree's remote/provision.sh + remote/deps.sh"
+        fi
     done
-    unset _t _probe _state _what _remedy
+    unset _t _probe _state _what _remedy _why
+fi
+
+# --- battery (--all) -----------------------------------------------------------
+# docs/Urgent/HUMAN-battery.md: the one software knob against a phone or
+# laptop swelling its cell on a charger for months. `wk bridge setup` writes
+# charge_control_end_threshold on the two bridge phones (bridge/provision.sh);
+# this reads it back over ssh, read-only, through the same `wk bridge`
+# subcommands `wk bridge status` uses. macOS has no equivalent to set, so its
+# line is the honest number and nothing pretended.
+if [ -n "$ALL" ]; then
+    section "battery"
+    if _names=$("$WK_ROOT/cmd/bridge" ls --names 2>/dev/null) && [ -n "$_names" ]; then
+        while IFS= read -r _bn; do
+            [ -n "$_bn" ] || continue
+            _blob=$("$WK_ROOT/cmd/bridge" battery "$_bn" 2>/dev/null) || _blob=""
+            if [ -z "$_blob" ]; then
+                unk "$_bn: did not answer" "wk bridge status $_bn"
+                continue
+            fi
+            while IFS="$(printf '\t')" read -r _verdict _line _remedy; do
+                [ -n "$_verdict" ] || continue
+                case "$_verdict" in
+                    ok)   ok "$_line" ;;
+                    miss) miss "$_line" "$_remedy" ;;
+                esac
+            done <<VERDICT
+$(battery_verdict "$_bn" "$_blob")
+VERDICT
+        done <<BRIDGES
+$_names
+BRIDGES
+    fi
+    unset _bn _blob _names _verdict _line _remedy
+
+    if is_macos && _pm=$(pmset -g batt 2>/dev/null) && _macline=$(mac_battery_line "$_pm"); then
+        unk "this Mac: $_macline" "docs/Urgent/HUMAN-battery.md -- no OS knob exists yet"
+    fi
+    unset _pm _macline
 fi
 
 # --- verdict -----------------------------------------------------------------------
@@ -367,5 +486,5 @@ fi
 warn "$missing item(s) missing -- each line above names its fix; the order that"
 log  "works from bare metal: ./setup -> the interactive stages it lists ->"
 log  "gh auth login -> wk key register -> wk sync -> (optional) wk pi setup,"
-log  "wk vm base -> claude setup-token and wk key claude. See README.md."
+log  "wk vm base -> claude setup-token and wk key set claude. See README.md."
 exit 1

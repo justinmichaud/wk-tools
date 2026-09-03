@@ -28,7 +28,6 @@ WK_SANDBOX=rootless-proxy
 # No sudo anywhere in the daily path, which is what keeps this usable by an
 # unattended agent.
 _sdk() { "$@"; }
-_podman() { podman "$@"; }
 
 # keep-id maps the invoking user through unchanged: no id derivation, no
 # mismatch between checkout/caches/home.
@@ -84,7 +83,7 @@ t_arch() {
 }
 
 t_list() {
-    _podman ps -a --filter 'name=^wk-' --format '{{.Names}}\t{{.Status}}' 2>/dev/null \
+    _hpodman ps -a --filter 'name=^wk-' --format '{{.Names}}\t{{.Status}}' 2>/dev/null \
         | sed 's/^wk-//'
 }
 
@@ -96,8 +95,7 @@ t_created() {
     [ -f "$h/$WK_READY_MARKER" ] || [ -f "$h/.wk-firstrun-complete" ]
 }
 
-# Existing vs. running needs the marker: creation is asynchronous. `_hpodman`,
-# not `_podman`: `wk stop` runs directly on a macOS host with `forward=no`.
+# Existing vs. running needs the marker: creation is asynchronous.
 t_info() {
     local c st
     c=$(_ctr "$1")
@@ -171,7 +169,7 @@ t_create() {
     base=$(base_path "$base_id")
 
     [ -d "$base" ] || die "base snapshot $base_id not found; run 'wk sync' first"
-    _podman container exists "$c" 2>/dev/null && die "workspace '$name' already exists"
+    _hpodman container exists "$c" 2>/dev/null && die "workspace '$name' already exists"
 
     ensure_dir "$ws"
     ensure_dir "$ws/changes"
@@ -278,12 +276,12 @@ t_ready() {
     while [ "$i" -lt "${WK_READY_TIMEOUT:-300}" ]; do
         t_created "$name" && return 0
         # No process left to write the marker if the container is gone.
-        _podman container exists "$c" >/dev/null 2>&1 || break
+        _hpodman container exists "$c" >/dev/null 2>&1 || break
         sleep 1; i=$((i + 1))
     done
 
     warn "initialisation did not complete; last output from the container:"
-    _podman logs "$c" 2>&1 | grep -vE "^\\s*$" | tail -8 | sed "s/^/    /" >&2 || true
+    _hpodman logs "$c" 2>&1 | grep -vE "^\\s*$" | tail -8 | sed "s/^/    /" >&2 || true
     return 1
 }
 
@@ -320,7 +318,7 @@ t_home() { echo "/home/$WKDEV_CONTAINER_USER"; }
 # 1399 bytes over it, and xz refused it).
 t_pull() {
     local name="$1" src="$2" dest="$3"
-    _podman cp "$(_ctr "$name"):$src" "$dest"
+    _hpodman cp "$(_ctr "$name"):$src" "$dest"
 }
 
 # One `podman cp`: the generic rsync implementation needs rsync inside the
@@ -332,7 +330,39 @@ t_pull_dir() {
     [ $# -eq 0 ] || die "t_pull_dir: the container driver cannot exclude paths ($*).
     Copy the whole tree, or make the selection inside the workspace first."
     rm -rf "$dest"; mkdir -p "$dest"
-    _podman cp "$(_ctr "$name"):$src/." "$dest"
+    _hpodman cp "$(_ctr "$name"):$src/." "$dest"
+}
+
+# The same `podman cp`, the other way. Its --archive default chowns what
+# arrives to the container's own user, so a file pushed in is writable by
+# whoever works in there.
+t_push() {
+    local name="$1" src="$2" dest="$3"
+    _hpodman cp "$src" "$(_ctr "$name"):$dest"
+}
+
+# One `podman cp` again, so this needs no rsync inside the container. The
+# emptying is a container exec because it happens on that side, and as the
+# container's user so the directory it recreates is not root's.
+t_push_dir() {
+    local name="$1" src="$2" dest="$3" u
+    u=$(_ctr_user "$name") \
+        || die "workspace '$name' has no container to reach (podman does not know it)"
+    _hpodman exec --user "$u" "$(_ctr "$name")" /bin/sh -c \
+        "rm -rf $(sh_quote "$dest") && mkdir -p $(sh_quote "$dest")"
+    _hpodman cp "$src/." "$(_ctr "$name"):$dest"
+}
+
+# `podman exec`, not t_exec: one `test` needs no bridge and no login shell,
+# and wkdev-enter is not reachable from a macOS host at all.
+t_path_kind() {
+    local name="$1" p="$2" u
+    u=$(_ctr_user "$name") \
+        || die "workspace '$name' has no container to reach (podman does not know it)"
+    _hpodman exec --user "$u" "$(_ctr "$name")" /bin/sh -c \
+        "if [ -d $(sh_quote "$p") ]; then echo dir
+         elif [ -e $(sh_quote "$p") ]; then echo file
+         else echo absent; fi" 2>/dev/null | tr -d '\r'
 }
 
 # podman's own detached exec: `setsid nohup` (lib/target.sh) does not
@@ -343,7 +373,7 @@ t_spawn() {
     local name="$1" log="$2" pidf="$3"; shift 3
     local c u; c=$(_ctr "$name"); u="$WKDEV_CONTAINER_USER"
     # $$ is written before exec so the recorded pid is the command's own.
-    _podman exec -d --user "$u" "$c" \
+    _hpodman exec -d --user "$u" "$c" \
         /opt/wk-tools/container/proxy/ensure-bridge.sh \
         /usr/bin/env "USER=$u" "HOME=/home/$u" bash --login -c \
         "echo \$\$ > $(sh_quote "$pidf"); exec $(sh_quote "$@") > $(sh_quote "$log") 2>&1 < /dev/null" \
@@ -354,7 +384,7 @@ t_enter() {
     local name="$1"
     local c; c=$(_ctr "$name")
     # Interactive shells do not go through t_exec, so start the bridge first.
-    _podman exec -d "$c" /opt/wk-tools/container/proxy/ensure-bridge.sh true 2>/dev/null || true
+    _hpodman exec -d "$c" /opt/wk-tools/container/proxy/ensure-bridge.sh true 2>/dev/null || true
     _sdk "$WK_SDK/scripts/host-only/wkdev-enter" --name "$c"
 }
 
@@ -364,9 +394,12 @@ t_enter() {
 # `ssh` to reach. `podman exec` substitutes: sshd's inetd mode (`-i`) makes
 # one exec a complete transport (`ProxyCommand container/ssh-transport.sh <name>`).
 
-# How the host reaches podman: local inside the VM and on Linux; from macOS,
-# the rootless connection named explicitly, since podman's default here is
-# the rootful one (`wk-root`).
+# How this machine reaches podman, and the only way anything here does: local
+# inside the VM and on Linux; from macOS, the rootless connection named
+# explicitly, since podman's default there is the rootful one (`wk-root`). A
+# second, bare wrapper would work everywhere the daemon is local and reach the
+# wrong podman from a macOS host -- the one command a person types outside the
+# VM (`wk scp`, `wk stop`) is exactly where that shows up.
 _hpodman() {
     if [ -n "${WK_IN_VM:-}" ] || ! is_macos; then
         podman "$@"
@@ -586,8 +619,8 @@ t_destroy() {
     c=$(_ctr "$name")
     ws=$(wk_ws_dir "$name")
 
-    if _podman container exists "$c" 2>/dev/null; then
-        _podman rm -f "$c" >/dev/null
+    if _hpodman container exists "$c" 2>/dev/null; then
+        _hpodman rm -f "$c" >/dev/null
         info "removed container $c"
     fi
 

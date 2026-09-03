@@ -11,6 +11,10 @@
 
 set -euo pipefail
 
+# This is wk's own build: the build wall (container/bin/wk-build-wall) lets
+# ninja/cmake/make through for it and refuses them to an agent's shell.
+export WK_BUILD=1
+
 SRC=/src/WebKit
 TREE_URL=""; TREE_BRANCH=""; TREE_COMMIT=""; DEFCONFIG=""; EXTERNAL=0
 IMAGE=""; JOBS=""; OVERLAY_ARCH=""; OVERLAY_WIFI=0; NAME=""; ROOTFS_SIZE=""

@@ -12,9 +12,10 @@ tests/test_quick.py uses to lift cmd/status's `bump`.
 
 Run: python3 -m unittest tests.test_pi -v
 """
+import re
 import unittest
 
-from tests.support import REPO, WkTest, bash
+from tests.support import REPO, WkTest, bash, run
 
 CMD_PI = REPO / "cmd" / "pi"
 
@@ -152,6 +153,55 @@ class TestPiSlotRefusals(WkTest):
         self.assertIn("two slot names", cp.stdout)
 
 
+class TestPiVerbList(unittest.TestCase):
+    """`wk pi --list` (docs/defects, "help lists every valid value"): pi_verbs
+    is the one place the verb set lives, so the dispatch `case` naming the
+    same verbs and the `broker deploy,bench` declaration restricting which of
+    them a workspace may reach are both checked against it -- a verb added to
+    one and not the other is exactly the drift this closes."""
+
+    def _case_verbs(self):
+        """The verbs `case "$ACTION" in ... esac` accepts: only the arms at
+        this case's own indent (4 spaces) -- the nested `case "$HOST" in`
+        inside setup|boot-order|helper is indented further and never matched.
+        `""` (bare) and `*` (unknown verb) are not verbs."""
+        text = CMD_PI.read_text()
+        m = re.search(r'case "\$ACTION" in\n(.*?)\nesac\n', text, re.S)
+        self.assertIsNotNone(m, "cmd/pi's ACTION case is not shaped as expected")
+        arms = re.findall(r'^ {4}([^\s)]+)\)', m.group(1), re.M)
+        verbs = set()
+        for arm in arms:
+            verbs.update(arm.split("|"))
+        return verbs - {'""', "*"}
+
+    def _list_verbs(self):
+        cp = run("pi", "--list")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        verbs = [line.split()[0] for line in cp.stdout.splitlines() if line.strip()]
+        self.assertTrue(verbs, "wk pi --list printed nothing")
+        return set(verbs)
+
+    def test_every_case_verb_is_listed_and_vice_versa(self):
+        # 'flash' is a tombstone: the case still recognises the name so it
+        # can die with its replacement (see cmd/pi), but it does nothing any
+        # more, so it is deliberately not one of pi_verbs' live verbs.
+        case_verbs = self._case_verbs() - {"flash"}
+        list_verbs = self._list_verbs()
+        self.assertEqual(case_verbs, list_verbs,
+                          "wk pi --list and the dispatch case disagree on the verb set")
+
+    def test_broker_verbs_are_a_subset_of_the_list(self):
+        """`broker deploy,bench` (cmd/pi's declaration) is the subset of
+        verbs a workspace may reach through; every one of them must be a
+        real verb."""
+        head = "\n".join(CMD_PI.read_text().splitlines()[:15])
+        m = re.search(r"broker ([\w,-]+)", head)
+        self.assertIsNotNone(m, "cmd/pi no longer declares a broker list")
+        broker_verbs = set(m.group(1).split(","))
+        self.assertTrue(broker_verbs.issubset(self._list_verbs()),
+                         f"broker names a verb wk pi --list does not: {broker_verbs}")
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -248,4 +298,5 @@ class TestPiHelper(WkTest):
 
     def test_the_usage_page_names_it(self):
         cp = bash(f'"{REPO}/wk" pi')
-        self.assertIn("wk pi helper <machine>", cp.stdout)
+        self.assertIn("helper", cp.stdout)
+        self.assertIn("card helper on the board", cp.stdout)

@@ -83,8 +83,9 @@ fi
 # from wk_wiring_script (lib/store.sh). Run in a subshell because those files
 # define their own log()/warn(); must not clash with this script's.
 #
-# A guest has no deploy key, so a push from here fails at the door rather than
-# silently succeeding -- see `wk push`.
+# The base carries no deploy key and no ssh alias config: both are per guest and
+# arrive on every start (targets/vm.sh's _write_deploy_keys), so a key sealed in
+# here would be one `wk push off` could never take back out.
 _wiring=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_wiring_script "$2"' \
               _ "$WK_TOOLS_DIR" "$SRC" 2>/dev/null) \
     && sh -c "$_wiring" \

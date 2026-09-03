@@ -80,7 +80,7 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     # A rootful container would mean a container escape is a root escape.
     # Captured rather than piped into `grep -q`: under `set -o pipefail` a
     # `grep -q` that exits early makes the whole pipeline report failure.
-    rootless=$(_podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || echo unknown)
+    rootless=$(_hpodman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || echo unknown)
     if [ "$rootless" = true ]; then
         pass "podman is rootless"
     else

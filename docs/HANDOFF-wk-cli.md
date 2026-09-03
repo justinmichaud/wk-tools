@@ -9,6 +9,16 @@ General `wk` mechanics not tied to one board, bridge or bench lane.
 - [ ] `wk` auto-starts the podman machine even when a macOS VM is already running, and both do not fit in 32 GB [needs a Mac with 32 GB RAM]
 - [ ] Ctrl-C does not always interrupt a running `wk` command [needs a running wk command to interrupt]
 
+## Arguments still parsed command by command
+
+The audit is tests/test_owed_dispatch_audit.py; each line is one of its
+`expectedFailure`s.
+
+- [ ] the build config: a positional in cmd/build, `--config` in cmd/bench, cmd/gui, cmd/profile, cmd/run and cmd/test, each defaulting from WK_CONFIG in its own words [tests/test_owed_dispatch_audit.py]
+- [ ] the subverb, in 15 commands (ai, bench, bridge, completion, key, pi, pr, push, quiesce, remote, session, skills, sudo, sysimage, vm): the dispatcher reads `${1:-}` for a `sub` override and leaves it in argv, so each writes its own refusal for an unknown verb [tests/test_owed_dispatch_audit.py]
+- [ ] `--target` for the workspace target, in cmd/new and cmd/sync (`wk push --target` and `wk sudo --target` name a machine, which is a different argument) [tests/test_owed_dispatch_audit.py]
+- [ ] paths: not audited [needs the audit]
+
 ## Concurrency and crash-only convergence — unverified
 
 Each a `kill -9` mid-command plus a re-run that must converge:
@@ -23,7 +33,6 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 
 ## Listing (`wk status`/`wk ls`) — unverified
 
-- [ ] `NO_COLOR` and a redirected stdout both drop the colour from the table [needs a test]
 - [ ] the health block is empty and silent on a machine that has none of its lines (no store, no proxy unit, no locks) [needs a bare machine]
 - [ ] a workspace whose exec fails (stopped container, guest not booted) shows the row without the extra fields, rather than an error [needs a workspace]
 - [ ] a machine on older wk-tools answering a delegated `wk status` by its own (possibly wrong) rules — the fleet block flags version skew but not that the *answers* can differ [needs two machines at different versions]
@@ -31,7 +40,6 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] a workstation that is down is listed unreachable with its timeout; the fleet walk never hangs on it [needs an unreachable machine]
 - [ ] wk-tools version skew is flagged with both shas named [needs two machines at different versions]
 - [ ] two workstations reaching one build box see one state; a disagreement names both views [needs two workstations and a shared remote]
-- [ ] the fleet exit code aggregates the worst state found anywhere [needs a test]
 - [ ] shared-home remotes (devbox-arm64-2/armhf-2): provisioning the second does not clobber the first's identity; each resolves its own target by hostname; `wk remote rm` of one leaves the other working [needs two shared-home remotes]
 - [ ] builds from two shared-home remotes never collide in checkout or lock (keyed per machine, derived not configured) [needs two shared-home remotes]
 
@@ -48,7 +56,6 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 
 ## `wk sync` — unverified
 
-- [ ] the refspecs follow the mirror's own layout (origin's branches are its heads; every other upstream is namespaced); a fifth upstream needs no change here beyond `wk_remotes` [needs a test]
 - [ ] bare, inside a workspace: that workspace, no argument needed [needs a workspace]
 - [ ] `--tools` on a Linux workstation refreshes the tooling copies and publishes a snapshot in one place [needs a Linux workstation]
 - [ ] `--all` fetches in every workspace on every target, and `--tools` refreshes every machine's own tooling and store [needs the fleet]
@@ -79,10 +86,8 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 - [ ] `wk doctor` on a freshly set-up machine reports everything ok, and each `--` line's printed fix actually clears that line when run [needs a freshly set-up machine]
 - [ ] `wk build --detach` on a remote target: the pre-written `state=running` can reach the far machine before its log is truncated, so a stale log from a previous run can read as stalled for one poll [needs a remote target]
 - [ ] `wk ls` inside a workspace prints `?`/`-` for BASE/CHANGES instead of a not-applicable marker [needs a workspace]
-- [ ] every command's `--help` prints the actual command line it would run and the configurations it accepts [needs a test]
-- [ ] every `WK_*` override read with a default (71 of them) is either documented where the user meets it and exercised by a check, or removed [needs a test]
+- [ ] `wk build -h` previews the exact command line (`--dry-run`) and lists every config (`values=--list`); `wk run -h` and `wk gui -h` have neither; `wk bench -h` and `wk profile -h` declare `values=--list` for benchmark plans and profiler modes, not for the build configs their own `--config` flag takes; `wk test -h` previews the run but declares no `values=` [tests/test_owed_cli_help.py]
 - [ ] `wk profile --mode sampling` in a real workspace prints the tier breakdown; `--mode bytecode` leaves exactly one JSCProfile json; `--mode samply` in a container refuses with the host remedy when `perf_event_paranoid` > 1 and records otherwise; `--mode instruments` in a macOS guest records a `.trace`; `--fetch` copies a recording out of a guest byte for byte [needs a container and a macOS VM]
 - [ ] `wk disk` inside a workspace answers the only version of the question available in there; `wk disk` with the podman machine stopped leaves it stopped [needs a workspace]
 - [ ] `wk vm base --rm` deletes the golden base, then asks separately about the pulled OCI image, and existing vm workspaces keep working [needs a macOS VM]
 - [ ] `wk new <name> --target <peer>` and `wk rm` of a peer's workspace refuse here and name the command to run over there — every other workspace command is handed to the peer, so these two are the remaining pair a person has to type on the other machine [needs a peer]
-- [ ] every command under `cmd/` declares itself to the dispatcher: line 3 is a one-line `# wk <name> <args> -- <summary>` synopsis, and a `# wk:` line in the first 15 lines names `where=` (one of `host|store|local|workspace|dynamic`) and `group=` [needs a test]

@@ -37,15 +37,141 @@
 #   WK_NEW_TIMEOUT=<s>   how long this end waits for the driver before giving
 #                        up (default 3600); the driver itself is unaffected
 #                        and 'wk status <name>' still finds it when it ends
+#
+# Creation fetches: a workspace is an overlay of a snapshot, and the mirror
+# beside that snapshot is the freshest WebKit this machine has, so the driver
+# fetches from it once and fast-forwards the checkout onto it -- a local fetch
+# of a handful of refs. It never fetches over the network and never refreshes
+# the mirror itself: that is a fetch of WebKit from GitHub and a new snapshot
+# (`wk sync --tools`), minutes of work nobody asked for by typing `wk new`.
+# A workspace with no mirror in reach (a guest) is told what would move it.
 
 set -euo pipefail
-WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/resources.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/arch.sh"
 . "$WK_ROOT/lib/detach.sh"
+
+# --- what the checkout is, once the environment is there ---------------------
+
+# new_fetch_from <probe> -- where a fresh workspace's checkout can be brought
+# up to date from, given what the probe below answered from inside it. The
+# question is asked of the workspace rather than decided from its target: the
+# mirror is bind-mounted into a container and into nothing else, and a guest
+# that has not been started yet answers nothing at all.
+#   mirror       the machine's mirror is mounted in there -- a local fetch
+#   network      no mirror in reach; `wk sync` would go to GitHub, which
+#                creation does not wait on
+#   unreachable  nothing answered, so there is nothing to fetch in yet
+new_fetch_from() {
+    case "$1" in
+        yes) printf 'mirror\n' ;;
+        no)  printf 'network\n' ;;
+        *)   printf 'unreachable\n' ;;
+    esac
+}
+
+# new_checkout_script <src> -- where the checkout ended up, and the one thing
+# creation does to it: fast-forward the branch it is on onto what the fetch
+# just brought in. A portable `sh` snippet, because the checkout is on the far
+# side of a container exec or an ssh. A fast-forward, never a reset: nothing
+# here may discard a commit, and a workspace this command has only just made
+# has none of anyone's to fast-forward over.
+# Prints `<key>=<value>` lines for the caller to report:
+#   branch=    the branch HEAD is on        detached=  the sha, when it is on none
+#   upstream=  what that branch tracks      behind=    commits it was behind
+#   moved=     how far it fast-forwarded, or `refused` when it cannot
+#   head=      the sha it ended on
+new_checkout_script() { # <src>
+    printf 'cd %s || exit 2\n' "$(sh_quote "$1")"
+    cat <<'EOF'
+b=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+if [ -z "$b" ]; then
+    echo "detached=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    exit 0
+fi
+echo "branch=$b"
+u=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
+[ -n "$u" ] || exit 0
+echo "upstream=$u"
+behind=$(git rev-list --count "$b..$u" 2>/dev/null || echo 0)
+echo "behind=$behind"
+if [ "$behind" != 0 ]; then
+    if git merge --ff-only --quiet "$u" 2>/dev/null; then
+        echo "moved=$behind"
+    else
+        echo "moved=refused"
+    fi
+fi
+echo "head=$(git rev-parse --short HEAD)"
+EOF
+}
+
+# new_freshen <name> -- creation's fetch, and the report of where the
+# checkout ended up. Never fatal: the workspace exists by the time this runs,
+# and a fetch that could not happen must not turn a made workspace into a
+# failed command -- every arm below names what would move it instead.
+#
+# The fetch itself is `wk sync <name>`: that command is the one
+# implementation of a workspace's fetch (cmd/sync's sync_workspaces), and it
+# is only asked for when the probe says the mirror is in there, so creation
+# never waits on GitHub.
+new_freshen() { # <name>
+    local name="$1" probe out b u moved head detached
+    # A subshell: t_exec dies when there is nothing to run in (a guest that
+    # is not started), and `die` from a function would end this driver.
+    probe=$( ( t_exec "$name" sh -c '[ -d /mirror/WebKit.git ] && echo yes || echo no' ) \
+                 2>/dev/null | tr -d '\r' | tail -1 )
+    case "$(new_fetch_from "$probe")" in
+    mirror)
+        "$WK_ROOT/wk" sync "$name" \
+            || warn "'$name' is there; fetching in it is what failed (above).
+    'wk sync $name' retries; the checkout is at the snapshot it was made from." ;;
+    network)
+        info "no mirror in reach of '$name', so its checkout is as old as what it was made from"
+        log  "  wk sync $name    fetches it over the network" ;;
+    unreachable)
+        info "nothing to run in '$name' yet, so its checkout was not fetched in"
+        log  "  wk sync $name    once it is up"
+        return 0 ;;
+    esac
+
+    out=$( ( t_exec "$name" sh -c "$(new_checkout_script "$(t_src "$name")")" ) \
+               2>/dev/null | tr -d '\r' )
+    detached=$(kv_get detached <<<"$out")
+    if [ -n "$detached" ]; then
+        warn "'$name' is not on a branch (detached at $detached), so 'git status',
+    'git pull' and 'wk pr rebase' in there have no upstream to name. A
+    snapshot is published on the branch it was taken from, and this one was
+    not:  wk sync --tools    publishes one that is, for the next workspace.
+    In this one:  git checkout main"
+        return 0
+    fi
+    b=$(kv_get branch <<<"$out")
+    [ -n "$b" ] || { warn "could not read the checkout in '$name' to say where it is
+    ('wk enter $name', then 'git status' in there)"; return 0; }
+    u=$(kv_get upstream <<<"$out")
+    [ -n "$u" ] || { warn "'$name' is on '$b', which tracks nothing -- 'git pull' and
+    'wk pr' have no upstream to name:  wk remotes $name --fix"; return 0; }
+    head=$(kv_get head <<<"$out"); moved=$(kv_get moved <<<"$out")
+    case "$moved" in
+        refused) warn "'$b' in '$name' and $u have diverged, so the checkout is left where
+    it is:  git rebase $u   in the workspace" ;;
+        "")      info "'$name' is on $b at $head, up to date with $u" ;;
+        *)       info "'$name' is on $b at $head, $moved commit(s) on from its snapshot ($u)" ;;
+    esac
+}
+
+# tests/test_new_fetch.py sources this file to exercise the functions
+# above without creating anything: `bash -c '. cmd/new functions'`. `wk`
+# always execs this file as its own process, never sources it, so a real
+# invocation can never take this arm.
+if (return 0 2>/dev/null); then
+    [ "${1:-}" = functions ] && return 0
+fi
 
 # Inside a workspace this resolves to local, whose driver refuses to create --
 # so `wk new` there stops with "a workspace cannot create a workspace".
@@ -206,6 +332,13 @@ if [ -n "$DETACHED" ]; then
     start, and something above went wrong before the end of it.
     Nothing here is worth repairing:  wk new $NAME    (destroys it and retries)"
 
+    # A workspace is as old as the snapshot it overlays; the mirror beside
+    # that snapshot is younger whenever a publish was interrupted, a `wk pr`
+    # fetched into it, or --base named an older one. So the checkout is
+    # fetched in and moved onto it here, at creation, from the mirror only.
+    stage fetch
+    new_freshen "$NAME"
+
     # The ssh alias, last: it points at something that has to exist first. None
     # for a container -- `wk zed` writes that alias where the editor runs.
     stage register
@@ -280,10 +413,14 @@ fi
 # Never fatal: the workspace exists and `wk new` has already said so, and an
 # agent that cannot start must not turn a successful creation into a failed
 # command. A shared build machine is skipped by that command's own barrier.
+RC_UP=""
 if [ -z "${WK_NO_CLAUDE_RC:-}" ] && [ "$WK_TARGET_KIND" != remote ]; then
-    "$WK_ROOT/wk" ai claude "$NAME" --rc \
-        || warn "'$NAME' is there; starting claude remote control in it is what failed
+    if "$WK_ROOT/wk" ai claude "$NAME" --rc; then
+        RC_UP=1
+    else
+        warn "'$NAME' is there; starting claude remote control in it is what failed
   (above). 'wk ai claude $NAME --rc' retries; WK_NO_CLAUDE_RC=1 stops trying."
+    fi
 fi
 
 # An armhf workspace is software-rendering (no NVIDIA userspace for it): fine
@@ -313,7 +450,7 @@ remote)
     # alias is written on first use.
     log "  wk enter $NAME          shell"
     log "  wk build $NAME <config> build"
-    log "  wk ai claude $NAME      sandboxed agent (remote control is already up)"
+    log "  wk ai claude $NAME      sandboxed agent${RC_UP:+ (remote control is already up)}"
     log "  wk zed $NAME            the checkout, in Zed"
     ;;
 esac

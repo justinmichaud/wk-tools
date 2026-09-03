@@ -42,6 +42,11 @@
 #   WK_VM_DISPLAY               the guest's minimum window content size
 #   WK_VM_CLOCK_SKEW            seconds of clock error tolerated before a start
 #                               resets the guest's clock from this host
+#   WK_VM_SHELLS_WARN           shells left in a guest before `wk vm check`
+#                               calls it an accumulation
+#   WK_VM_MEM_FREE_WARN_PCT     memory left in a guest, as macOS's own free
+#                               percentage, before `wk vm check` calls it low
+#   WK_VM_SWAP_WARN_MB          swap used in a guest before it is reported
 #   WK_VM_SHARE                proceed past the memory-budget refusal anyway
 #   WK_VM_UNFILTERED            boot with no Softnet egress filter (see above)
 #   WK_HOST_FREE_MIN_GB/_WARN_GB   host disk headroom the sparse guest disk needs
@@ -73,6 +78,9 @@ WK_VM_IMAGE_PASSWORD="${WK_VM_IMAGE_PASSWORD:-admin}"
 vm_login_note() {
     log "  the guest's own window logs in as $WK_VM_USER / $WK_VM_PASSWORD"
     log "  (wk itself uses an ssh key; this is for a prompt on the screen)"
+    log "  wk vm check <name>   what is in front of that window, whether that"
+    log "                       password is still what the base gave it, and what"
+    log "                       is piling up in there"
 }
 
 # The egress boundary for guests: the proxy listens on the host's address on
@@ -109,6 +117,8 @@ esac
 # `wk stop` load it only to stop a guest); guarded, like targets/local.sh
 # already does it, since sourcing twice is safe.
 command -v envelope_mem_mb >/dev/null 2>&1 || . "$WK_ROOT/lib/resources.sh"
+# WK_VM_BASE_CPUS / WK_VM_BASE_MEM_MB: what the golden base is provisioned
+# with; default the whole envelope, since the base builds WebKit once.
 WK_VM_BASE_CPUS="${WK_VM_BASE_CPUS:-}"
 WK_VM_BASE_MEM_MB="${WK_VM_BASE_MEM_MB:-}"
 _base_cpus()   { echo "${WK_VM_BASE_CPUS:-$(envelope_cores)}"; }
@@ -131,6 +141,20 @@ WK_VM_DISK_GB="${WK_VM_DISK_GB:-320}"
 # start for no gain. What this is guarding against is days, not seconds.
 WK_VM_CLOCK_SKEW="${WK_VM_CLOCK_SKEW:-30}"
 
+# What `wk vm check` calls an accumulation, and what it calls low. A guest is
+# long-lived and holds its whole allocation whether or not it is busy
+# (_check_memory_budget), so what a build in there eventually runs out of is
+# whatever else stayed resident. Thresholds rather than a bare listing: a
+# report that never says "this is too many" leaves the reading to be judged by
+# whoever is already stuck.
+#
+# Twelve shells: an editor with a few terminal panes, an agent and two ssh
+# sessions all at once, measured as nothing wrong. macOS itself acts on the
+# free percentage memory_pressure reports, and below 15% it is paging.
+WK_VM_SHELLS_WARN="${WK_VM_SHELLS_WARN:-12}"
+WK_VM_MEM_FREE_WARN_PCT="${WK_VM_MEM_FREE_WARN_PCT:-15}"
+WK_VM_SWAP_WARN_MB="${WK_VM_SWAP_WARN_MB:-1024}"
+
 # Guest display size, in points (tart defaults the unit to "pt"). Deliberately
 # SMALLER than the host desktop: Tart pins the window's *minimum* content
 # size to this resolution, and AppKit drops fullScreenPrimary once minSize
@@ -139,7 +163,8 @@ WK_VM_CLOCK_SKEW="${WK_VM_CLOCK_SKEW:-30}"
 WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
 
 # Host space to remain for a sparse guest disk to grow into, or a build
-# fails as an I/O error inside the guest, naming nothing real.
+# fails as an I/O error inside the guest, naming nothing real: warn under
+# WK_HOST_FREE_WARN_GB, refuse under WK_HOST_FREE_MIN_GB.
 WK_HOST_FREE_WARN_GB="${WK_HOST_FREE_WARN_GB:-80}"
 WK_HOST_FREE_MIN_GB="${WK_HOST_FREE_MIN_GB:-25}"
 
@@ -265,12 +290,26 @@ t_ssh_user() { printf '%s' "$WK_VM_USER"; }
 t_os() { echo macos; }
 
 t_create() {
-    local name="$1"
+    local name="$1" why
     local v; v=$(_vm "$name")
 
     [ "$(_vm_state "$v")" = absent ] || die "workspace '$name' already exists"
 
     _ensure_base
+
+    # A warning and not a refusal: a clone of a base built from older inputs is
+    # still a usable workspace, and the rebuild costs hours -- so the choice is
+    # the person's, made with the cost and the consequence in front of them.
+    # Everything the base carries and this tree has since changed is inherited
+    # by this clone, the account's password included (vm/provision-base.sh);
+    # t_start converges what it can, and a password is not one of them.
+    if why=$(vm_base_stale); then
+        warn "'$WK_VM_BASE' predates its own provisioning inputs: $why.
+  '$name' is a clone of it, so it carries what that base was built with -- the
+  image's password if the change came later, and the desktop settings of the day
+  it was sealed. 'wk vm check $name' says which of them are still wrong.
+      wk vm base --rebuild     hours; existing guests are unaffected"
+    fi
 
     # Not fatal -- the guest limit applies to running VMs, not created ones.
     local running; running=$(_running_count)
@@ -298,6 +337,28 @@ t_create() {
     : > "$(wk_ws_dir "$name")/$WK_READY_MARKER"
 }
 
+# Everything a start puts into a guest, in one place. t_start has two arms --
+# a guest that is already running, and one this start booted -- and a step
+# delivered on only one of them is half a delivery, so both call this.
+#
+# Best-effort line by line: a guest that came up is up, and refusing to report
+# that because one ssh failed is the wrong trade.
+_converge_guest() { # <name> <ip>
+    local name="$1" ip="$2"
+    _push_tools "$name" "$ip" || warn "wk-tools in $name is not this tree's commit; 'wk sync --tools' puts it there once it is committed"
+    _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
+    _write_shell_rc "$name" "$ip" || warn "could not wire $name's shell; 'wk' will not be on PATH in there"
+    _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
+    _set_guest_clock "$name" "$ip" || warn "could not set $name's clock; TLS in there will fail as CERT_NOT_YET_VALID"
+    _set_guest_egress "$name" "$ip" || warn "could not set $name's egress; nothing in there will reach the outside"
+    _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
+    _write_agent_secrets "$name" "$ip" || warn "could not write the agent credentials into $name; an agent in there will ask you to log in"
+    _write_deploy_keys "$name" "$ip" || warn "could not write $name's ssh config and deploy keys; a push from in there is refused ('wk push status')"
+    _settle_desktop "$name" "$ip" || warn "could not settle $name's desktop; 'wk vm check $name' says what is in front of the window"
+    # After the settle, or it reports the state the settle was fixing.
+    _report_desktop "$name"
+}
+
 t_start() {
     local name="$1" ip
     local v; v=$(_vm "$name")
@@ -310,14 +371,7 @@ t_start() {
         # guest whose proxy died has no egress and no way back short of a
         # reboot. Idempotent -- _start_host_proxy asks the socket first.
         _start_host_proxy || true
-        _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
-        _write_shell_rc "$name" "$ip" || warn "could not wire $name's shell; 'wk' will not be on PATH in there"
-        _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
-        _set_guest_clock "$name" "$ip" || warn "could not set $name's clock; TLS in there will fail as CERT_NOT_YET_VALID"
-        _set_guest_egress "$name" "$ip" || warn "could not set $name's egress; nothing in there will reach the outside"
-        _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
-        _write_agent_token "$name" "$ip" || warn "could not write the agent token into $name; Claude in there will ask you to /login"
-        _settle_desktop "$name" "$ip" || warn "could not settle $name's desktop; 'wk vm check $name' says what is in front of the window"
+        _converge_guest "$name" "$ip"
         echo "$ip"
         return 0
     fi
@@ -326,17 +380,8 @@ t_start() {
     _check_memory_budget "$name" "$(t_mem_mb "$name")"
     _check_host_disk
 
-    # Best-effort marker below: a guest that came up is up, and refusing to
-    # report that because one ssh failed is the wrong trade.
     ip=$(_boot "$v" 180)
-    _write_marker "$name" "$ip" || debug "could not write the workspace marker in $name"
-    _write_shell_rc "$name" "$ip" || warn "could not wire $name's shell; 'wk' will not be on PATH in there"
-    _write_lldbinit "$name" "$ip" || debug "could not write .lldbinit in $name"
-    _set_guest_clock "$name" "$ip" || warn "could not set $name's clock; TLS in there will fail as CERT_NOT_YET_VALID"
-    _set_guest_egress "$name" "$ip" || warn "could not set $name's egress; nothing in there will reach the outside"
-    _write_claude_config "$name" "$ip" || warn "could not link ~/.claude in $name; an agent in there would have no instructions"
-    _write_agent_token "$name" "$ip" || warn "could not write the agent token into $name; Claude in there will ask you to /login"
-    _settle_desktop "$name" "$ip" || warn "could not settle $name's desktop; 'wk vm check $name' says what is in front of the window"
+    _converge_guest "$name" "$ip"
     echo "$ip"
 }
 
@@ -348,9 +393,33 @@ t_start() {
 #
 # vm/desktop.sh over stdin, the same file vm/provision-base.sh runs: one
 # implementation, and it needs no wk-tools inside the guest to have been synced.
+# The password goes down the stream as the script's own first line, never in
+# the ssh command: an argument is in `ps` on both machines, and this one
+# unlocks the guest's screen.
 _settle_desktop() { # <name> <ip>
-    _ssh "$2" "env WK_VM_PASSWORD=$(sh_quote "$WK_VM_PASSWORD") bash -s" \
-        < "$WK_ROOT/vm/desktop.sh" >/dev/null 2>&1
+    {
+        printf 'WK_VM_PASSWORD=%s\n' "$(sh_quote "$WK_VM_PASSWORD")"
+        cat "$WK_ROOT/vm/desktop.sh"
+    } | _ssh "$2" "bash -s" >/dev/null 2>&1
+}
+
+# The settle above changes things and says nothing; this is the measurement of
+# what it left, printed where the person will see it. `wk vm start` is the
+# moment for it -- they are about to look at that window, exactly like
+# vm_login_note -- and it is the same probe, the same findings and the same
+# renderer `wk vm check` uses, so a start and a check cannot disagree.
+#
+# On stderr, since t_start's stdout is the guest's address, and best-effort:
+# a guest that came up is up, and a probe that did not answer is not a reason
+# to fail the start.
+_report_desktop() { # <name>
+    local probe
+    probe=$(vm_desktop_probe "$1" 2>/dev/null) || return 0
+    [ -n "$probe" ] || return 0
+    log "  the guest's desktop, as it is now ('wk vm check $1' asks again):"
+    vm_render_findings <<FINDINGS || true
+$(vm_desktop_findings "$probe")
+FINDINGS
 }
 
 # The tart flags that confine a guest's egress: --net-softnet-block=0.0.0.0/0
@@ -505,6 +574,33 @@ t_pull_dir() {
         "$WK_VM_USER@$ip:$src/" "$dest/"
 }
 
+# The same scp and the same rsync, the other way: one file in, and a tree in
+# one transfer. `t_exec <ws> "cat > file"` is no more a byte pipe inbound
+# than outbound -- the login shell is in the way either way.
+t_push() {
+    local name="$1" src="$2" dest="$3"
+    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    scp -q $(_ssh_opts) "$src" "$WK_VM_USER@$ip:$dest"
+}
+
+t_push_dir() {
+    local name="$1" src="$2" dest="$3"
+    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/"
+}
+
+# One `test` over this driver's own ssh. Stdin from /dev/null: this runs
+# inside a command substitution that inherits it, and ssh would drink it.
+t_path_kind() {
+    local name="$1" p="$2"
+    local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
+    _ssh "$ip" "if [ -d $(sh_quote "$p") ]; then echo dir
+         elif [ -e $(sh_quote "$p") ]; then echo file
+         else echo absent; fi" 2>/dev/null < /dev/null | tr -d '\r'
+}
+
 t_exec_tty() {
     local name="$1"; shift
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
@@ -535,8 +631,8 @@ _write_marker() {
 
 # The agent's own configuration. Provisioning links these
 # (vm/provision-base.sh); without it `wk ai claude` starts an agent that was
-# never told it is in a workspace. Symlinks rather than copies: `wk build`
-# re-rsyncs $HOME/wk-tools with --delete on every run, so a copy goes stale.
+# never told it is in a workspace. Symlinks rather than copies: every start
+# resets $HOME/wk-tools to this tree's commit (_push_tools), so a copy goes stale.
 _write_claude_config() {
     local name="$1" ip="$2" tools; tools=$(t_tools "$name")
     _ssh "$ip" "[ -d $(sh_quote "$tools/claude") ] || exit 1
@@ -546,25 +642,154 @@ _write_claude_config() {
         done"
 }
 
-# The agent's credential, written from this host whenever the workspace comes
+# The agents' credentials, written from this host whenever the workspace comes
 # up. A guest cannot reach the store -- it is inside the podman VM, and the
 # guest's whole filesystem boundary is that it mounts nothing of ours -- so a
 # copy is the only way, unlike a container, which symlinks the live mount.
 #
-# Rewritten every start rather than provisioned once, so `wk key claude`
-# rotating the token converges here too, and removed when there is none: a
-# guest holding a token the host has withdrawn is the one state this must not
-# leave behind. 0600, and never echoed.
-_write_agent_token() { # <name> <ip>
-    local name="$1" ip="$2" tok
-    tok=$(wk_agent_token)
-    if [ -z "$tok" ]; then
-        _ssh "$2" 'rm -f "$HOME/.wk-agent-token"'
-        return 0
+# One row per named secret (wk_agent_secrets, lib/store.sh), the same table
+# container/firstrun.sh links and cmd/remote copies to a build box: a name
+# added there reaches a guest with nothing to change here.
+#
+# Rewritten every start rather than provisioned once, so `wk key set <name>`
+# rotating one converges here too, and each is removed when the store has
+# none: a guest holding a credential the host has withdrawn is the one state
+# this must not leave behind, so the removal is unconditional rather than an
+# else. 0600, on stdin -- an argument is in `ps` inside the guest -- and never
+# echoed.
+_write_agent_secrets() { # <name> <ip>
+    local name="$1" ip="$2" sname sfile shome svar val n=0
+    while read -r sname sfile shome svar; do
+        [ -n "$sname" ] || continue
+        val=$(wk_agent_secret "$sname")
+        if [ -z "$val" ]; then
+            # </dev/null: this loop's stdin is the table below, and _ssh is a
+            # plain ssh, which would drink it.
+            _ssh "$ip" "rm -f \$HOME/$(sh_quote "$shome")" </dev/null || return 1
+            continue
+        fi
+        printf '%s\n' "$val" \
+            | _ssh "$ip" "umask 077 && cat > \$HOME/$(sh_quote "$shome")" || return 1
+        n=$((n + 1))
+    done <<EOF
+$(wk_agent_secrets)
+EOF
+    debug "agent credentials in $name: $n"
+}
+
+# The ProxyCommand a guest's ssh needs to reach github.com at all. Softnet
+# allows exactly one address -- the host's own on the guest bridge, where
+# wk-proxy listens -- so a direct TCP connection to port 22 is dropped, and
+# the proxy is an HTTP CONNECT one. github.com:22 is in its allowlist
+# (container/proxy/wk-proxy.py); nothing else here is.
+#
+# macOS's own nc speaks CONNECT with `-X connect`, and there is no other nc in
+# a Cirrus Labs image. Absolute path: ssh runs this through /bin/sh with the
+# guest's own environment, not the login PATH.
+_ssh_proxy_command() {
+    printf '/usr/bin/nc -X connect -x %s:%s %%h %%p' "$(_proxy_addr)" "$WK_VM_PROXY_PORT"
+}
+
+# The deploy keys, and the ssh config that picks one per fork -- written from
+# this host whenever the workspace comes up, the same arrangement and for the
+# same reason as the agent token above: a guest mounts nothing of ours, so a
+# copy is the only way.
+#
+# Written every start rather than provisioned once, so `wk push on` reaches a
+# running guest, and *removed* whenever the store has no key -- push is off,
+# none was ever registered, or the store cannot be read from here at all. A
+# guest holding a key the host has withdrawn is the one state this must not
+# leave behind, so the removal is unconditional rather than an else.
+#
+# The config goes in whether or not there is a key behind it: an IdentityFile
+# pointing at nothing is the off position and says so as `no such identity`,
+# exactly like a container's dangling symlink into /secrets. So the two halves
+# never have to agree about anything.
+_write_deploy_keys() { # <name> <ip>
+    local name="$1" ip="$2" remote repo alias key idf n=0 total=0
+
+    if ! wk_push_store_local && ! _podman_running; then
+        warn "the podman machine holds the deploy keys and is not running, so '$name'
+  is given none. 'wk start' then 'wk vm start $name' to hand them over."
     fi
-    _ssh "$2" "umask 077 && printf '%s\n' $(sh_quote "$tok") > \$HOME/.wk-agent-token" \
-        || return 1
-    debug "wrote the agent token into $name"
+
+    _ssh "$ip" "umask 077 && mkdir -p \$HOME/.ssh && cat > \$HOME/.ssh/config" <<EOF || return 1
+# wk: written by targets/vm.sh on every start. Whether the keys these name are
+# here at all is 'wk push'.
+$(wk_ssh_alias_blocks '~/.ssh' id_ "$(_ssh_proxy_command)")
+EOF
+
+    while read -r remote repo alias; do
+        [ -n "$remote" ] || continue
+        total=$((total + 1))
+        key=$(wk_push_key "$remote")
+        # sh_quote, like every other command string this file sends: the fork
+        # name lands in a shell over there, and $HOME is expanded there too.
+        idf="\$HOME/.ssh/id_$(sh_quote "$remote")"
+        if [ -n "$key" ]; then
+            # chmod as well as umask: umask decides the mode of a file the
+            # write *creates*, and an id_ file already there at 0644 keeps it.
+            printf '%s\n' "$key" \
+                | _ssh "$ip" "umask 077 && cat > $idf && chmod 600 $idf" || return 1
+            n=$((n + 1))
+        else
+            # </dev/null: ssh drinks stdin, and stdin here is the fork list.
+            _ssh "$ip" "rm -f $idf" </dev/null || return 1
+        fi
+    done <<EOF
+$(wk_push_forks)
+EOF
+    debug "deploy keys in $name: $n of $total"
+}
+
+# `wk push on|off` after the keys have moved in the store: a guest holds a
+# copy, so the switch has to be thrown in the guest too, and this host is the
+# machine that drives its guests (cmd/push).
+#
+# Only the running ones. Booting a guest to take a key out of it is a side
+# effect nobody asked this command for, and a stopped guest is converged by
+# t_start before anything in it can run.
+vm_push_keys_converge() {
+    local g ip rc=0
+    for g in $(target_workspaces); do
+        [ "$(t_info "$g" 2>/dev/null)" = running ] || continue
+        if ! ip=$(_ip "$g"); then
+            printf '  %-24s running, no address yet -- not converged\n' "$g" >&2
+            rc=1; continue
+        fi
+        if _write_deploy_keys "$g" "$ip" >/dev/null; then
+            printf '  %-24s %s\n' "$g" "the guest's copy now matches the store" >&2
+        else
+            printf '  %-24s FAILED -- it may still hold a key\n' "$g" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+# What the guests actually hold, for `wk push status`: one tab-separated
+# `<guest> <state> <forks with a key>` row each, asked of the guest rather
+# than of a record. Read-only -- nothing is started, and a stopped guest is
+# reported as unread rather than guessed at.
+vm_push_keys_state() {
+    local g ip state forks held r
+    for g in $(target_workspaces); do
+        state=$(t_info "$g" 2>/dev/null) || state=unknown
+        if [ "$state" != running ] || ! ip=$(_ip "$g"); then
+            printf '%s\t%s\t\n' "$g" "${state:-unknown}"
+            continue
+        fi
+        # What is in there, intersected with the forks this switch knows: an
+        # account's own id_ed25519 is a private key, but it is not a fork's
+        # deploy key and naming it here would report a push wk cannot make.
+        held=$(_ssh "$ip" 'ls "$HOME"/.ssh/id_* 2>/dev/null' \
+                   </dev/null 2>/dev/null | tr -d '\r' | sed 's|.*/id_||' | tr '\n' ' ')
+        forks=""
+        for r in $(wk_push_forks | awk 'NF {print $1}'); do
+            case " $held " in *" $r "*) forks="$forks$r " ;; esac
+        done
+        printf '%s\t%s\t%s\n' "$g" "running" "${forks% }"
+    done
 }
 
 # Everything in the guest that names the egress proxy, written from this host
@@ -709,22 +934,26 @@ _write_shell_rc() { # <name> <ip>
     _ssh "$2" "bash -s $(sh_quote "$(t_tools "$1")")" < "$WK_ROOT/vm/shell-rc.sh"
 }
 
-# rsync rather than a mount: no --dir is ever passed to `tart run`, since a
-# shared directory is the host-filesystem hole this target exists not to
-# have. Shared with _prebuild_base and _provision_base, into a *running*
-# golden base.
+command -v tools_push >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
+
+# A checkout of this tree's HEAD, pushed as a git bundle (tools_push,
+# lib/tools.sh) rather than mounted: no --dir is ever passed to `tart run`,
+# since a shared directory is the host-filesystem hole this target exists not
+# to have. A guest holds a commit that exists, which is what `wk status`
+# compares by sha; an uncommitted tree here is refused, not copied. Shared
+# with _prebuild_base and _provision_base, into a *running* golden base.
 _push_tools() {
     local name="$1" ip="$2"
-    rsync -az --delete --exclude '.git/' \
-        -e "ssh $(_ssh_opts)" \
-        "$WK_ROOT/" "$WK_VM_USER@$ip:$(t_tools "$name")/"
+    # The transport tools_push runs its one command over, passed as a command
+    # *prefix* rather than a wrapper function: the address is an argument, so
+    # nothing here leaves a global function behind holding a stale `ip`.
+    tools_push "$(t_tools "$name")" _ssh "$ip"
 }
 
 t_sync_tools() {
     local name="$1"
     local ip; ip=$(_ip "$name") || die "'$name' is not running (wk vm start $name)"
-    debug "syncing wk-tools -> $name"
-    _push_tools "$name" "$ip"
+    _push_tools "$name" "$ip" || return 1
     _write_marker "$name" "$ip"
 }
 
@@ -791,7 +1020,8 @@ _prebuild_base() {
     log  "  This is the slow one and it happens once. Every workspace cloned"
     log  "  from this base inherits the build tree and the compilation cache."
 
-    _push_tools "$WK_VM_BASE" "$ip"
+    _push_tools "$WK_VM_BASE" "$ip" \
+        || die "the base cannot be pre-built without wk-tools in it (see above)"
 
     config_build_env "$(t_src "$WK_VM_BASE")" "$jobs" 10
     local cmd
@@ -1016,13 +1246,81 @@ _base_marker() { echo "$WK_VM_DIR/base.ready"; }
 
 _base_ready() { _base_exists && [ -f "$(_base_marker)" ]; }
 
+# The inputs that produced this base, as one hash: the three scripts
+# provisioning runs inside it, the image it is cloned from, the account, and
+# whether the password change applies at all. Never the password itself: a
+# 16-character digest over public files plus a trivial password is a password a
+# reader of the marker could recover, and the value needs no record here anyway
+# -- vm/desktop.sh authenticates it in the guest on every start and `wk vm
+# check` reports a guest whose password is not the one this run expects.
+#
+# A record of what produced an artifact, not a cached verdict (CLAUDE.md, "No
+# stored copy of a recomputable fact"): nothing reads this to decide the base is
+# current. vm_base_stale recomputes the hash on every read and compares, so a
+# script edited here makes every base built before it read stale immediately.
+#
+# python3 rather than shasum: it is present on every host and image here, and
+# hashing is the whole of what this needs from it.
+_base_inputs_hash() {
+    {
+        cat "$WK_ROOT/vm/provision-base.sh" "$WK_ROOT/vm/desktop.sh" \
+            "$WK_ROOT/vm/shell-rc.sh"
+        printf 'image=%s\nuser=%s\npassword_change=%s\n' \
+            "$WK_VM_IMAGE" "$WK_VM_USER" \
+            "$([ "$WK_VM_PASSWORD" = "$WK_VM_IMAGE_PASSWORD" ] && echo no || echo yes)"
+    } | python3 -c 'import hashlib,sys
+print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
+}
+
+# Why the base does not match the inputs that would produce it now, or nothing
+# when it does: prints the reason and succeeds when it is stale, so a caller
+# reads `if why=$(vm_base_stale); then`. Read-only, recomputed every time, and
+# it never rebuilds anything -- the rebuild is hours and is the person's to run.
+vm_base_stale() {
+    local rec
+    rec=$(marker_field "$(_base_marker)" inputs)
+    if [ -z "$rec" ]; then
+        echo "provisioned before this record existed"
+        return 0
+    fi
+    [ "$rec" = "$(_base_inputs_hash)" ] && return 1
+    echo "vm/provision-base.sh, vm/desktop.sh, vm/shell-rc.sh, WK_VM_IMAGE, WK_VM_USER or the password change has changed since it was built"
+    return 0
+}
+
+# The base, in the `<state> <what> <remedy>` shape vm_desktop_findings and
+# remote/deps.sh's wk_remote_findings use, so `wk vm ls`, `wk vm check` and `wk
+# doctor` all report it through their own renderer and none of them re-decides
+# what counts as wrong.
+vm_base_findings() {
+    local why
+    _f() { printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}"; }
+
+    if ! _base_exists; then
+        _f wrong "no golden base VM '$WK_VM_BASE' -- there is nothing for a guest to be cloned from" \
+                 "wk vm base   (hours: the image pull, Xcode, a checkout, a prebuild)"
+    elif [ ! -f "$(_base_marker)" ]; then
+        _f wrong "'$WK_VM_BASE' exists but provisioning never finished in it" \
+                 "wk vm base --refresh   (re-runs provisioning; nothing is re-downloaded)"
+    elif why=$(vm_base_stale); then
+        _f wrong "'$WK_VM_BASE' predates its own provisioning inputs: $why -- every guest cloned from it carries what that base was built with, the account's password included" \
+                 "wk vm base --rebuild   (hours; existing guests are unaffected)"
+    else
+        _f ok "golden base '$WK_VM_BASE' matches its provisioning inputs"
+    fi
+
+    unset -f _f
+    return 0
+}
+
 _base_mark_ready() {
     ensure_dir "$WK_VM_DIR" 0700 >/dev/null
     printf 'image=%s
 prebuild=%s
+inputs=%s
 finished=%s
 ' \
-        "$WK_VM_IMAGE" "${WK_VM_BASE_PREBUILD:-none}" \
+        "$WK_VM_IMAGE" "${WK_VM_BASE_PREBUILD:-none}" "$(_base_inputs_hash)" \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$(_base_marker)"
 }
 
@@ -1137,8 +1435,9 @@ _provision_base() {
     fi
 
     info "provisioning the base VM (Xcode licence, WebKit checkout, Claude CLI)"
-    # The whole tree: provision-base.sh links ~/.claude out of it too.
-    _push_tools "$WK_VM_BASE" "$ip"
+    # The whole checkout: provision-base.sh links ~/.claude out of it too.
+    _push_tools "$WK_VM_BASE" "$ip" \
+        || die "the base cannot be provisioned without wk-tools in it (see above)"
     # No proxy address: the base boots unfiltered and provisioning names no
     # proxy. A clone's is written at start, by _set_guest_egress.
     vm_login_note
@@ -1159,6 +1458,9 @@ _provision_base() {
 # tab-separated `<state> <what> <remedy>`, state one of ok | wrong | note. The
 # same shape remote/deps.sh's wk_remote_findings uses, so `wk vm check` and `wk
 # doctor --all` read alike and neither re-decides what counts as wrong.
+#
+# One line per finding, remedy included: every renderer reads these a line at a
+# time, so a remedy wrapped across two lines loses its second half.
 #
 # Everything here is provisioned into the golden base
 # (vm/provision-base.sh), so the remedy for most of it is a base that carries
@@ -1181,8 +1483,7 @@ vm_desktop_findings() { # <probe output>
     case "$(_v screenlock)" in
         off)     _f ok "screen lock off" ;;
         on)      _f wrong "the screen lock is on, so this guest comes up asking for a password" \
-                          "$rebuild  -- vm/desktop.sh leaves the lock alone unless the
-        account's password is the one wk set, and will not guess at it" ;;
+                          "$rebuild  -- vm/desktop.sh leaves the lock alone unless the account's password is the one wk set, and will not guess at it" ;;
         *)       _f note "screen lock could not be read (sysadminctl needs passwordless sudo in there)" ;;
     esac
 
@@ -1199,20 +1500,60 @@ vm_desktop_findings() { # <probe output>
         && _f ok "Setup Assistant already clicked through" \
         || _f wrong "Setup Assistant will put a modal pane on the desktop:$v" "$rebuild"
 
-    case "$(_v update_check):$(_v update_download)" in
-        0:0) _f ok "Software Update offers off" ;;
-        *)   _f wrong "Software Update will offer an upgrade on the desktop (check=$(_v update_check), download=$(_v update_download)) -- a guest is a clone of a pinned image and upgrading it means nothing" "$rebuild" ;;
+    # The offer that puts a panel on the desktop is the *system* one: the
+    # per-user domain is what System Settings shows, and softwareupdated acts on
+    # /Library/Preferences. `?` there is "no such key", which is not off, so it
+    # is reported as unsettled rather than as fine. An empty reading is a third
+    # thing again -- the guest answered with an older probe than this report --
+    # and is a note, since nothing about the guest has been established.
+    case "$(_v update_check_system)" in
+        0)  _f ok "Software Update checks off where softwareupdated reads them (/Library/Preferences)" ;;
+        "") _f note "the guest did not answer about Software Update, so what it will offer on that desktop is unknown" \
+                    "$restart  -- a start re-runs this probe" ;;
+        *)  _f wrong "Software Update will offer an upgrade on the desktop (system AutomaticCheckEnabled=$(_v update_check_system)) -- a guest is a clone of a pinned image and upgrading it means nothing" "$rebuild" ;;
     esac
+
+    case "$(_v update_schedule)" in
+        off) _f ok "the scheduled update check is off" ;;
+        "")  _f note "softwareupdate did not report its schedule in there, so whether the check comes back on its own is unknown" \
+                     "$restart  -- a start re-runs this probe" ;;
+        *)   _f wrong "the scheduled update check is $(_v update_schedule) in there, so the offer comes back on its own" "$rebuild" ;;
+    esac
+
+    case "$(_v update_check):$(_v update_download)" in
+        0:0) _f ok "Software Update offers off in the login account too" ;;
+        *)   _f note "the account's own Software Update settings read check=$(_v update_check), download=$(_v update_download) -- what System Settings shows at that window, not what softwareupdated obeys" "$rebuild" ;;
+    esac
+
+    case "$(_v update_autoinstall_system)" in
+        0)  _f ok "macOS updates will not install themselves" ;;
+        "") ;;   # the note above already says this guest answered nothing here
+        *)  _f wrong "macOS updates are set to install themselves in there (AutomaticallyInstallMacOSUpdates=$(_v update_autoinstall_system)), which reboots the guest -- mid-build, if that is when one lands" "$rebuild" ;;
+    esac
+
+    # Setup Assistant's "what is new in macOS" pane is a Software Update screen
+    # by another name, and it is the one a clone gets: Buddy shows it whenever
+    # these keys do not already name the running system.
+    v=$(_v os_product)
+    if [ -z "$v" ] || [ "$v" = '?' ]; then
+        _f note "the guest did not say which macOS it runs, so Setup Assistant's 'what is new in macOS' pane cannot be judged from here" \
+                "$restart  -- a start re-runs this probe"
+    elif [ "$(_v setupassistant_seen_product)" = "$v" ]; then
+        _f ok "Setup Assistant has already seen macOS $v"
+    else
+        _f wrong "Setup Assistant will show its 'what is new in macOS' pane (it last saw $(_v setupassistant_seen_product), this guest runs $v)" "$rebuild"
+    fi
 
     v=$(_v panels)
     [ -z "$v" ] \
         && _f ok "nothing modal on screen now" \
         || _f wrong "something is on the desktop right now: $v" \
-                    "$restart  -- the settings above stop the next one, and killing this
-        one would take the desktop session with it (vm/desktop.sh)"
+                    "$restart  -- the settings above stop the next one, and killing this one would take the desktop session with it (vm/desktop.sh)"
 
-    _f note "the guest's own window logs in as $(_v user) / $WK_VM_PASSWORD" \
-            "wk itself uses an ssh key; this is for a prompt on the screen"
+    # The account, not its password: these findings are printed on every `wk vm
+    # start`, and vm_login_note is the one place the password is stated.
+    _f note "the guest's own window logs in as $(_v user)" \
+            "wk itself uses an ssh key; 'wk vm start' and 'wk vm enter' state that account's password"
 
     unset -f _f _v
     return 0
@@ -1225,4 +1566,144 @@ vm_desktop_probe() { # <name>
     local ip; ip=$(_ip "$1") || return 1
     [ -n "$ip" ] || return 1
     _ssh "$ip" 'bash -s' < "$WK_ROOT/vm/desktop-probe.sh"
+}
+
+# One renderer for every findings stream here -- the desktop, the base, what is
+# resident in a guest -- so `wk vm start` and `wk vm check` cannot describe the
+# same guest in two voices. Findings on stdin; the count of `wrong` ones is the
+# exit status, which is what `wk vm check` exits with.
+#
+# On stderr: a report is not output anything pipes, and t_start's stdout is the
+# guest's address.
+vm_render_findings() {
+    local state what remedy bad=0
+    while IFS="$(printf '\t')" read -r state what remedy; do
+        [ -n "$state" ] || continue
+        case "$state" in
+            ok)    printf '  \033[32mok\033[0m    %s\n' "$what" >&2 ;;
+            wrong) printf '  \033[31m--\033[0m    %s\n' "$what" >&2
+                   [ -z "$remedy" ] || printf '        -> %s\n' "$remedy" >&2
+                   bad=$((bad + 1)) ;;
+            note)  printf '  \033[33m??\033[0m    %s\n' "$what" >&2
+                   [ -z "$remedy" ] || printf '        %s\n' "$remedy" >&2 ;;
+        esac
+    done
+    return "$bad"
+}
+
+# --- what is resident in this guest? -----------------------------------------
+# A guest is long-lived and holds its whole memory allocation whether or not it
+# is busy, so what a build in there eventually runs out of is whatever else
+# stayed resident. Nothing wk runs in a guest outlives its ssh session -- t_exec
+# is one `bash -lc`, t_exec_tty and t_enter exec an `ssh -t` that ends with the
+# connection, and this driver's _ssh_opts sets no ControlPersist, so no
+# multiplexed master lingers to hold a session open. What accumulates is
+# therefore something that keeps its own process: an editor's remote server
+# (Zed's outlives the window, and each terminal pane in it is another shell), an
+# agent, or a detached build.
+#
+# vm/load-probe.sh gathers the raw readings; the arithmetic is here, where a
+# test can drive it against a captured sample.
+vm_load_probe() { # <name>
+    local ip; ip=$(_ip "$1") || return 1
+    [ -n "$ip" ] || return 1
+    _ssh "$ip" 'bash -s' < "$WK_ROOT/vm/load-probe.sh"
+}
+
+# Findings in the same `<state> <what> <remedy>` shape as the rest. python3
+# because grouping a few hundred `proc=` rows by executable and summing their
+# RSS is exactly the arithmetic bash must not be doing (CLAUDE.md).
+vm_load_findings() { # <probe output>
+    printf '%s\n' "$1" | python3 -c '
+import re, sys
+
+shells_warn, free_warn, swap_warn = (int(a) for a in sys.argv[1:4])
+
+procs, vals = [], {}
+for line in sys.stdin.read().splitlines():
+    key, _, val = line.partition("=")
+    if key == "proc":
+        rss, _, comm = val.strip().partition(" ")
+        if rss.isdigit():
+            procs.append((int(rss), comm.strip()))
+    elif key:
+        vals[key] = val.strip()
+
+def out(state, what, remedy=""):
+    print("\t".join((state, what, remedy)))
+
+def mb(kb):
+    return int(kb / 1024)
+
+# The families that accumulate, each matched on the executable itself so an
+# argument mentioning "zed" is not counted as one.
+FAMILIES = (
+    ("shell", r"(^|/)(-?zsh|bash|sh|dash|tcsh|fish|login)$"),
+    ("editor remote server", r"(zed-remote-server|\.zed_server/|\.vscode-server/)"),
+    ("agent", r"(^|/)claude$|/claude/versions/"),
+    ("ssh session", r"(^|/)sshd(-session)?$"),
+)
+
+groups = {}
+for rss, comm in procs:
+    for fam, pat in FAMILIES:
+        if re.search(pat, comm):
+            n, kb = groups.get(fam, (0, 0))
+            groups[fam] = (n + 1, kb + rss)
+            break
+
+def named(fam):
+    n, kb = groups.get(fam, (0, 0))
+    return n, kb
+
+shells, shell_kb = named("shell")
+if shells > shells_warn:
+    # In the order in which one holds the others open: an editor remote server
+    # keeps a shell per pane, an agent keeps its own, an ssh session is one
+    # shell and goes when it ends. Every family present is named -- a report
+    # that picks the largest count would name sshd and leave the cause out.
+    holders = ["%d %s process(es)" % (groups[f][0], f)
+               for f in ("editor remote server", "agent", "ssh session")
+               if f in groups]
+    why = (" -- alongside " + ", ".join(holders)) if holders else ""
+    out("wrong",
+        "%d shells are resident in there, holding %d MB%s" % (shells, mb(shell_kb), why),
+        "wk vm stop <name> && wk vm start <name> takes them all with it; closing the "
+        "editor window does not, since its remote server outlives it")
+else:
+    out("ok", "%d shells resident (%d MB)" % (shells, mb(shell_kb)))
+
+n, kb = named("editor remote server")
+if n:
+    out("note",
+        "an editor remote server is running in there: %d process(es), %d MB" % (n, mb(kb)),
+        "it outlives the editor window, and every terminal pane in it leaves a "
+        "shell behind; a guest restart is what clears both")
+n, kb = named("agent")
+if n:
+    out("note", "%d agent process(es) in there, %d MB" % (n, mb(kb)),
+        "each `wk ai claude` session in a guest is one of these")
+
+free = vals.get("mem_free_pct", "")
+total = vals.get("mem_total_mb", "?")
+if not free.isdigit():
+    out("note", "memory pressure could not be read in there (memory_pressure said nothing)")
+elif int(free) < free_warn:
+    top = ", ".join("%s (%d MB)" % (c.rsplit("/", 1)[-1], mb(r))
+                    for r, c in sorted(procs, reverse=True)[:3])
+    out("wrong",
+        "%s%% of the %s MB in that guest is free, and macOS calls that pressure: "
+        "the biggest resident processes are %s" % (free, total, top),
+        "wk vm stop <name> && wk vm start <name>; a build in there is otherwise "
+        "paging, and every number it produces is about the paging")
+else:
+    out("ok", "%s%% of the %s MB in that guest is free" % (free, total))
+
+# sysctl vm.swapusage, raw: "total = 2048.00M  used = 512.25M  free = ...".
+m = re.search(r"used = ([0-9.]+)M", vals.get("swapusage", ""))
+if m and float(m.group(1)) > swap_warn:
+    out("note", "the guest is using %d MB of swap" % float(m.group(1)),
+        "it holds a fixed allocation, so this is the guest paging inside itself: "
+        "a build here is slower than its numbers say")
+' "$WK_VM_SHELLS_WARN" "$WK_VM_MEM_FREE_WARN_PCT" "$WK_VM_SWAP_WARN_MB"
 }

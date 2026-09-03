@@ -392,28 +392,36 @@ unset WK_TOOLS_DIR
 # Scroll-back-clearing clear.
 alias clear="clear && printf '\033[3J'"
 
-# --- 6b. The agent's credential ----------------------------------------------
-# A workspace the host has given a Claude token starts already authenticated:
-# no /login, no browser, and no login Keychain -- which a macOS guest reached
-# over ssh, or through an editor's remote server, does not have unlocked
-# anyway. `wk key claude` stores the token; each target driver puts it here,
-# and this is its only reader.
+# --- 6b. The agents' credentials ---------------------------------------------
+# A workspace the host has given a credential starts able to use it: no /login,
+# no browser, and no login Keychain -- which a macOS guest reached over ssh, or
+# through an editor's remote server, does not have unlocked anyway. `wk key set
+# <name>` stores one; each target driver puts it here, and this is its only
+# reader.
 #
-# The file holds the raw token and nothing else, so a container can make it a
-# symlink onto the read-only /secrets mount and pick up a rotation without
-# being rebuilt. A dangling symlink is simply "no token", and so is no file:
-# a workspace without one asks the person to /login, which still works.
+# Each file holds the raw value and nothing else, so a container can make it a
+# symlink onto the read-only /secrets mount and pick up a rotation without being
+# rebuilt. A dangling symlink is simply "not set", and so is no file: a
+# workspace without the Claude token asks the person to /login, which still
+# works, and one without the LiteLLM key has a pi that cannot reach that
+# endpoint.
 #
-# Read without forking, since this runs in every shell.
-if [ -r "$HOME/.wk-agent-token" ]; then
-  while IFS= read -r _wk_tok; do
-    case $_wk_tok in
+# The pairs are spelled out here rather than read from wk_agent_secrets
+# (lib/store.sh): this rc is sourced by every shell on every machine in the
+# fleet, including ones with no store to read and no wk library sourced, and it
+# forks nothing -- tests/test_pi_agent.py holds the two lists to each other.
+for _wk_sec in .wk-agent-token:CLAUDE_CODE_OAUTH_TOKEN .wk-litellm-key:LITELLM_API_KEY; do
+  _wk_sec_file="$HOME/${_wk_sec%%:*}"
+  _wk_sec_var="${_wk_sec#*:}"
+  [ -r "$_wk_sec_file" ] || continue
+  while IFS= read -r _wk_sec_val; do
+    case $_wk_sec_val in
       "" | \#*) ;;
-      *) CLAUDE_CODE_OAUTH_TOKEN="$_wk_tok"; export CLAUDE_CODE_OAUTH_TOKEN; break ;;
+      *) export "$_wk_sec_var=$_wk_sec_val"; break ;;
     esac
-  done < "$HOME/.wk-agent-token"
-  unset _wk_tok
-fi
+  done < "$_wk_sec_file"
+done
+unset _wk_sec _wk_sec_file _wk_sec_var _wk_sec_val
 
 # --- 7. Completion -----------------------------------------------------------
 # After PATH (section 6) so `command -v wk` sees it; interactive only, like

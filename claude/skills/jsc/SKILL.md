@@ -132,7 +132,20 @@ Use the `/build-webkit` skill. It handles platform detection (macOS vs Linux), A
 
 ## Testing
 
-All `Tools/Scripts/*` commands run from `$WEBKIT_ROOT`.
+**Inside a wk workspace (`~/.wk-workspace` exists), tests go through `wk test`, not
+through a `Tools/Scripts` path.** `wk test <args>` carries the worker count and the
+nice level the machine needs, exactly as `wk build` does for a build; `wk status`
+and `wk logs` report it. `container/bin/wk-build-wall` refuses the wrapped runners
+called by bare name, and the `Bash(*/<name> *)` deny rules refuse the path form —
+so a `Tools/Scripts/run-javascriptcore-tests` typed in a workspace is a refusal,
+not a test run.
+
+```bash
+wk test <args>                             # the suite, with this machine's limits
+```
+
+Outside a workspace — a host checkout a person drives — all `Tools/Scripts/*`
+commands run from `$WEBKIT_ROOT`:
 
 ```bash
 Tools/Scripts/run-javascriptcore-tests     # full suite

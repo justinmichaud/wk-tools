@@ -93,7 +93,29 @@ class TestNoFalseClaim(WkTest):
         about a store nothing looked at"""
         src = (REPO / "cmd" / "push").read_text()
         self.assertNotIn("n=$(move_keys", src)
-        self.assertIn('move_keys "$LIVE" "$HELD"; n="$MOVED"', src)
+        self.assertIn('move_keys "$LIVE" "$HELD" || moved_ok=1; n="$MOVED"', src)
+
+    def test_a_key_that_did_not_move_is_a_failing_status(self):
+        """`store_half || STORE_RC=$?` disables errexit inside the function,
+        so a failed `mv` counted as a move and `wk push off` exited 0 with the
+        key still exposed. A read-only secrets/ is that failure, made on
+        purpose: the key stays, and the command says so and fails."""
+        store = self.tmp / "store"
+        live = store / "secrets"
+        live.mkdir(parents=True)
+        key = live / "build_key_fork"
+        key.write_text("placeholder-not-a-key\n")
+        key.chmod(0o600)
+        os.chmod(live, 0o500)                       # no rename out of it
+        self.addCleanup(os.chmod, live, 0o700)
+
+        cp = self.run_wk("push", "off", env={"WK_STORE": str(store),
+                                             "WK_VM_STORE": str(self.tmp / "vmstore")})
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("could not move", cp.stdout)
+        self.assertIn("still in", cp.stdout)
+        self.assertTrue(key.exists(), "reported a move it did not make")
+        self.assertNotIn("push is OFF", cp.stdout)
 
     def test_the_subshell_trap_is_real(self):
         """the mechanism the two above defend against: bash applies neither

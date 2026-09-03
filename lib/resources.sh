@@ -4,7 +4,7 @@
 # Every WK_* name below is overridable, documented here once rather than at
 # each read:
 #   WK_RESERVE_CORES/WK_RESERVE_MB           held back from a GUI host (below)
-#   WK_HEADLESS_RESERVE_CORES/_MB            held back from a headless one
+#   WK_HEADLESS_RESERVE_CORES/WK_HEADLESS_RESERVE_MB  held back from a headless one
 #   WK_MB_PER_JOB                            working-set estimate per compile job
 #   WK_MAX_JOBS                              a hard cap on parallelism, policy not capacity
 #   WK_AVAIL_MB/WK_CGROUP_MB/WK_CGROUP_CORES/WK_LOAD

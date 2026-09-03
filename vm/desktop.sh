@@ -79,14 +79,58 @@ defaults write com.apple.SetupAssistant LastSeenBuddyBuildVersion "$(sw_vers -bu
 # --- 5. Software Update ------------------------------------------------------
 # A guest is a disposable clone of a pinned image (WK_VM_IMAGE): upgrading it is
 # meaningless, and rebuilding the base is how it changes (CLAUDE.md, "No
-# in-place upgrades"). macOS offers the upgrade on the desktop anyway.
+# in-place upgrades"). macOS offers the upgrade on the desktop anyway, and the
+# offer is a window in front of the one being measured.
+#
+# The domain matters more than the key list. `com.apple.SoftwareUpdate` in the
+# *user* domain is what System Settings shows a person; the settings
+# softwareupdated actually acts on live in
+# /Library/Preferences/com.apple.SoftwareUpdate, which is root's -- so the
+# per-user writes below are the visible half and the sudo ones are the
+# effective half. Both, because a guest is looked at as well as measured.
+#
+# Key by key, and which macOS each is for:
+#   AutomaticCheckEnabled              10.8+  check for updates at all. Off here
+#                                             stops the "an update is available"
+#                                             notification, which is the panel.
+#   AutomaticDownload                  10.8+  download them in the background;
+#                                             tens of GB of a guest's sparse disk.
+#   AutomaticallyInstallMacOSUpdates    10.14+ install a *macOS* update by
+#                                             itself, which reboots the guest --
+#                                             mid-build, if that is when it lands.
+#   CriticalUpdateInstall               10.8+  security responses (XProtect,
+#                                             MRT). Off for the same reason: a
+#                                             guest is replaced, not patched.
+#   ConfigDataInstall                   10.8+  the data files those come with.
+#   com.apple.commerce AutoUpdate      10.11+ the App Store's own auto-update,
+#                                             a separate domain and a separate
+#                                             notification.
+#   softwareupdate --schedule off      10.4+  the scheduled check itself, and
+#                                             the only one of these that reads
+#                                             back as a single yes/no
+#                                             (`softwareupdate --schedule`) --
+#                                             which is what vm/desktop-probe.sh
+#                                             asks, since it needs no domain.
+#
+# TODO: measure on a running tahoe (macOS 26) guest which of these the offer
+# actually obeys -- `wk vm start` prints vm/desktop-probe.sh's raw readings
+# (update_check_system, update_autoinstall_system, update_schedule,
+# setupassistant_seen_product) after settling, so the next start on a real guest
+# is the measurement. Nothing here can be verified from a host: no guest runs.
+# Apple gave the major-upgrade *deferral* to MDM only (10.15+), so if the offer
+# survives all of the above, the answer will be a base built from an image that
+# has no newer major to offer, not another key.
 defaults write com.apple.SoftwareUpdate AutomaticCheckEnabled -bool false
 defaults write com.apple.SoftwareUpdate AutomaticDownload -bool false
 defaults write com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates -bool false
 defaults write com.apple.SoftwareUpdate CriticalUpdateInstall -bool false
+defaults write com.apple.SoftwareUpdate ConfigDataInstall -bool false
 defaults write com.apple.commerce AutoUpdate -bool false
-sudo -n defaults write /Library/Preferences/com.apple.SoftwareUpdate \
-    AutomaticCheckEnabled -bool false 2>/dev/null || true
+for _k in AutomaticCheckEnabled AutomaticDownload \
+          AutomaticallyInstallMacOSUpdates CriticalUpdateInstall ConfigDataInstall; do
+    sudo -n defaults write /Library/Preferences/com.apple.SoftwareUpdate \
+        "$_k" -bool false 2>/dev/null || true
+done
 sudo -n softwareupdate --schedule off >/dev/null 2>&1 || true
 
 _say "desktop settled"

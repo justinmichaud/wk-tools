@@ -3,12 +3,8 @@ name: build-webkit
 description: Use when building JavaScriptCore, WebKit, or any WebKit subproject. Handles platform detection, ASan configuration checks, correct working directory, and build commands.
 user-invocable: true
 allowed-tools:
-  - Bash(make release:*)
-  - Bash(make debug:*)
-  - Bash(make clean:*)
   - Bash(set-webkit-configuration:*)
   - Bash(Tools/Scripts/set-webkit-configuration:*)
-  - Bash(Tools/Scripts/build-webkit:*)
   - Bash(pwd:*)
   - Bash(cat:*)
   - Bash(ls:*)
@@ -27,8 +23,9 @@ allowed-tools:
 
 ## First branch: are you inside a wk workspace?
 
-`pwd` answers it — a Linux workspace holds the checkout at `/src/WebKit`, a macOS
-guest at `/Users/admin/WebKit`, and `~/.wk-workspace` exists in both.
+`~/.wk-workspace` answers it, and it is the authority: the checkout sits at
+`/src/WebKit` in a Linux workspace and `/Users/admin/WebKit` in a macOS guest,
+but a workspace on a shared build box is at neither path, so `pwd` is not the test.
 
 **Inside a workspace, the build is one command and none of the tuning below is
 yours to do:**
@@ -49,6 +46,16 @@ a nice level that keeps the host usable, watches for OOM (`build=oom` in
 fault), and passes the right arch flags in a 32-bit workspace. Do not hand-roll
 a `build-webkit` invocation in here: a raw `ninja -j$(nproc)` can hang the
 machine, and every number below about `-j` is the host's problem, not yours.
+
+It is enforced, not advised. `container/bin/wk-build-wall` lists the tools it
+wraps; each of them refuses for an agent and names the remedy. That wall covers
+a **bare name** on PATH; the path spelling (`Tools/Scripts/build-webkit …`,
+`make release …`) is refused by the `Bash(*/<name> *)` deny rules in
+`claude/settings.json` instead. Either way, in a workspace the answer is
+`wk build` / `wk test` / `wk bench` / `wk run`.
+
+Everything below this line is a person's reference for a machine that is **not**
+a workspace. Do not type it in one.
 
 **Outside a workspace — a host workstation with a checkout — the rest of this
 file applies.** Every command runs from `$WEBKIT_ROOT`, the repository root;

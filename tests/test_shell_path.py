@@ -124,6 +124,41 @@ class TestPath(WkTest):
         entries = cp.stdout.split(":")
         self.assertEqual(entries.count(str(REPO / "bin")), 1, cp.stdout)
 
+    def test_an_inherited_entry_is_moved_to_the_front(self):
+        """The wall only works while container/bin is *ahead* of /usr/bin. An
+        entry already anywhere on PATH used to be left where it was, so a
+        shell that inherited it behind /usr/bin reached the real ninja and
+        said nothing about it."""
+        binp = str(REPO / "container" / "bin")
+        cp = subprocess.run(
+            ["bash", "-c", f'. "{REPO}/shell/bashrc" && printf %s "$PATH"'],
+            cwd=str(REPO),
+            env={"HOME": self.home, "PATH": f"/usr/bin:{binp}:/bin"},
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
+        )
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        entries = cp.stdout.split(":")
+        self.assertEqual(1, entries.count(binp), cp.stdout)
+        self.assertLess(entries.index(binp), entries.index("/usr/bin"), cp.stdout)
+
+    def test_the_wall_answers_from_an_inherited_path(self):
+        """The same property said as the thing it protects: which `ninja` a
+        shell resolves."""
+        cp = subprocess.run(
+            ["bash", "-c", f'. "{REPO}/shell/bashrc" && command -v ninja'],
+            cwd=str(REPO),
+            env={"HOME": self.home,
+                 "PATH": f"/usr/bin:{REPO / 'container' / 'bin'}:/bin"},
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
+        )
+        self.assertEqual(str(REPO / "container" / "bin" / "ninja"),
+                         cp.stdout.strip().splitlines()[-1], cp.stdout)
+
+    def test_the_rest_of_the_path_keeps_its_order(self):
+        """Only the entry being added moves; nothing else is reshuffled."""
+        got = path_from(REPO / "shell" / "bashrc", self.home)
+        self.assertLess(got.index("/usr/bin"), got.index("/bin"), got)
+
     def test_local_bin_absent_is_not_added(self):
         """a machine with no ~/.local/bin gets no phantom entry"""
         shutil.rmtree(os.path.join(self.home, ".local"))

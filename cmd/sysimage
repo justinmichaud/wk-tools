@@ -124,9 +124,10 @@ _image_id() { # <name> <sha256 of the written bytes, empty before the write>
     fi
 }
 
-# The public key the image will accept. Reaching the board over Tailscale SSH
-# needs no key at all, so a working session is not evidence the image has the
-# right one -- it has to be named here.
+# The public key the image will accept (WK_IMAGE_KEY, default
+# ~/.ssh/id_ed25519.pub). Reaching the board over Tailscale SSH needs no
+# key at all, so a working session is not evidence the image has the right
+# one -- it has to be named here.
 driving_key() {
     local k="${WK_IMAGE_KEY:-$HOME/.ssh/id_ed25519.pub}"
     [ -r "$k" ] || die "no public key at $k
@@ -718,11 +719,12 @@ _tailnet_name_preflight() { # <name> <bench|rescue>
     Joining under it again does not keep the name -- Tailscale renames the
     collision to '$name-1', and everything here reaches a board by its
     tailnet name, so a card that joins renamed is a card nothing here can find.
-    This machine holds no tailnet API token, so it cannot retire the stale node
-    itself:  wk key tailnet-api
-    Then re-run this write. (By hand instead: remove '$name' at
-    https://login.tailscale.com/admin/machines -- but that is a step this lane
-    exists not to need.)"
+    There is no --force: the one exception is a board's own rescue replacing
+    itself, and this write is not that. Two remedies:
+      wk key tailnet-api    store a token, and this command retires the stale
+                            node itself on the re-run
+      the admin console     remove '$name' by hand at
+                            https://login.tailscale.com/admin/machines"
     fi
     if disk_would "retire the stale tailnet node '$name' so this card can join under it"; then
         return 0
@@ -911,7 +913,8 @@ EOF
 
     # Before anything else touches the card: every step after this reads the
     # partition table the image was supposed to bring, so a bad write shows up
-    # as a confusing failure in whichever of them runs first.
+    # as a confusing failure in whichever of them runs first. WK_NO_VERIFY=1
+    # skips the read-back, for a device the verify path cannot stream from.
     [ -n "${WK_NO_VERIFY:-}" ] || disk_verify_stream "$DISK_DEV" "$WRITE_META"
     _disk_cleanup
     disk_parts_present "$DISK_DEV"

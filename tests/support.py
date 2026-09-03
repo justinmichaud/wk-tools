@@ -11,6 +11,7 @@ import atexit
 import contextlib
 import os
 import random
+import re
 import shutil
 import string
 import subprocess
@@ -171,6 +172,30 @@ def shell_files():
         if first.startswith(b"#!") and (b"bash" in first or b"/sh" in first):
             out.append(p)
     return out
+
+
+def assert_guest_start_converges(case, step):
+    """`targets/vm.sh` converges a guest through one function, `_converge_guest`,
+    called from both t_start arms -- the guest that was already running and the
+    one this start booted. A step delivered on only one arm is half a delivery,
+    so the property is now "the step is in that function once, and both arms
+    call it" rather than "the call appears twice in the file"."""
+    vm = (REPO / "targets" / "vm.sh").read_text()
+    body = func_body(vm, "_converge_guest")
+    case.assertEqual(1, body.count(step),
+                     f"_converge_guest does not run {step!r} exactly once")
+    arms = func_body(vm, "t_start")
+    case.assertEqual(2, arms.count('_converge_guest "$name" "$ip"'),
+                     "t_start no longer calls _converge_guest from both arms")
+
+
+def func_body(text, name):
+    """One shell function's body. The house style (`name() {` opening a line,
+    a closing `}` alone on a line) is what makes this exact; an argument
+    comment after the brace is part of the style and allowed."""
+    m = re.search(r"^%s\(\) \{[^\n]*$(.*?)^\}$" % re.escape(name), text, re.M | re.S)
+    assert m, f"no {name}() in the text given"
+    return m.group(1)
 
 
 class FakeWorkspace:

@@ -545,6 +545,35 @@ t_pull_dir() {
         "$WK_REMOTE_HOST:$src/" "$dest/"
 }
 
+# The same scp and rsync inbound. On the machine itself there is nothing to
+# connect to, so both are the plain local copy -- the same split every other
+# function here makes.
+t_push() {
+    local name="$1" src="$2" dest="$3"
+    if _remote_is_local; then cp -f "$src" "$dest"; return; fi
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    scp -q $(_ssh_opts) "$src" "$WK_REMOTE_HOST:$dest"
+}
+
+t_push_dir() {
+    local name="$1" src="$2" dest="$3"
+    if _remote_is_local; then
+        mkdir -p "$dest"
+        rsync -a --delete "$src/" "$dest/"; return
+    fi
+    # shellcheck disable=SC2046 -- deliberate word splitting of the option list.
+    rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_REMOTE_HOST:$dest/"
+}
+
+# `_rsh_q`, not `_rsh`: this is a question, and it runs inside a command
+# substitution whose stdin ssh would otherwise drink.
+t_path_kind() {
+    local name="$1" p="$2"
+    _rsh_q "if [ -d $(sh_quote "$p") ]; then echo dir
+         elif [ -e $(sh_quote "$p") ]; then echo file
+         else echo absent; fi" 2>/dev/null | tr -d '\r'
+}
+
 # Only the build is serialised: locking t_exec instead would block every
 # one-line probe behind an hour-long build. The lock is taken on the machine
 # that builds, by lib/lockrun.sh -- not here, since a detached build
@@ -605,6 +634,44 @@ t_has_wk() {
         return $?
     fi
     _rsh_q "test -f \$HOME/.wk-remote && test -x $(sh_quote "$(t_tools '')/wk")" 2>/dev/null
+}
+
+# --- was this machine provisioned from what this tree now says? --------------
+# The same question `wk vm ls` asks about the golden base, and the same answer
+# shape: `wk remote setup` records the hash of the inputs that provisioned the
+# machine in ~/.wk-remote (remote/provision.sh writes the marker, cmd/remote
+# hands it the value), and this recomputes the hash now and compares. A record
+# of what produced an artifact, never a cached verdict -- nothing here reads the
+# marker to decide the machine is current.
+#
+# Computed on this side only, so the two ends cannot hash differently: a build
+# box is provisioned from the checkout this command pushes, so the inputs are
+# always this tree's files.
+remote_provision_inputs_hash() {
+    cat "$WK_ROOT/remote/provision.sh" "$WK_ROOT/remote/deps.sh" \
+        | python3 -c 'import hashlib,sys
+print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
+}
+
+# Why the machine's provisioning does not match those inputs, or nothing when it
+# does: prints the reason and succeeds when it is stale, so a caller reads
+# `if why=$(remote_provision_stale); then`. Read-only -- one ssh through this
+# driver's own question form, no lock, and nothing provisioned or started.
+remote_provision_stale() {
+    local marker rec
+    marker=$(_rsh_q "cat \"\$HOME/.wk-remote\" 2>/dev/null" 2>/dev/null) || true
+    if [ -z "$marker" ]; then
+        echo "no ~/.wk-remote there, so nothing has provisioned it"
+        return 0
+    fi
+    rec=$(printf '%s\n' "$marker" | kv_get inputs)
+    if [ -z "$rec" ]; then
+        echo "provisioned before this record existed"
+        return 0
+    fi
+    [ "$rec" = "$(remote_provision_inputs_hash)" ] && return 1
+    echo "remote/provision.sh or remote/deps.sh has changed since it ran"
+    return 0
 }
 
 # A peer's workspaces are its own and no path here reaches them, answered
@@ -678,12 +745,18 @@ t_enter() {
         "cd $(sh_quote "$(t_src "$1")") && exec \$SHELL -l"
 }
 
-# .git excluded because the remote copy is a deployment, not a checkout to work in.
+command -v tools_push >/dev/null 2>&1 || . "$WK_ROOT/lib/tools.sh"
+
+# The copy over there is a checkout of this tree's HEAD, pushed as a git
+# bundle over this driver's own ssh (tools_push, lib/tools.sh): a machine
+# holds a commit that exists, which is what `wk status` compares by sha. An
+# uncommitted tree is refused there, not copied.
 t_sync_tools() {
     local name="$1" dest
     dest=$(t_tools "$name")
 
-    # A peer keeps its own copy under git: --delete would throw away its uncommitted work.
+    # A peer keeps its own checkout, with its own uncommitted work in it: it
+    # pulls (t_sync), and nothing here writes over that.
     if _remote_peer; then
         debug "not pushing wk-tools to $WK_REMOTE_HOST: it is a workstation with its own checkout"
         return 0
@@ -694,12 +767,7 @@ t_sync_tools() {
         return 0
     fi
 
-    debug "syncing wk-tools -> $WK_REMOTE_HOST"
-    # rsync makes no missing parent; a fresh machine gets here before t_create's mkdir has run.
-    _rsh_q "mkdir -p $(sh_quote "$dest")"
-    rsync -az --delete --exclude '.git/' \
-        -e "ssh $(_ssh_opts)" \
-        "$WK_ROOT/" "$WK_REMOTE_HOST:$dest/"
+    tools_push "$dest" _rsh
 }
 
 # See t_wiring_args (lib/target.sh): the shared WebKit or our mirror, plus
@@ -795,15 +863,20 @@ t_sync() {
         return "$rc"
     fi
 
-    t_sync_tools "" && printf '  %-24s pushed\n' "$WK_TARGET" >&2
+    # A refused or failed push is this command's verdict, and the mirror is
+    # still fetched: the two are separate furniture, and the tooling refusal
+    # (an uncommitted tree here) is fixed here rather than over there.
+    if t_sync_tools ""; then printf '  %-24s pushed %s\n' "$WK_TARGET" "$(tools_head)" >&2
+    else rc=1; fi
     ref=$(_remote_reference)
     if [ -n "$ref" ]; then
         info "workspaces here clone from $ref, which this machine's admins keep up to date"
         log  "  nothing of ours to fetch: no mirror is kept on $WK_REMOTE_HOST"
-        return 0
+        return "$rc"
     fi
     _remote_mirror_update "$(_remote_root)"
     changed "the WebKit mirror on $WK_REMOTE_HOST is up to date"
+    return "$rc"
 }
 
 t_destroy() {

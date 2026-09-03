@@ -7,7 +7,8 @@ Run: python3 -m unittest tests.test_container_workspace -v
 import time
 import unittest
 
-from tests.support import WkTest, rand_suffix, requires_podman_vm, run
+from tests.support import (REPO, WkTest, rand_suffix, requires_podman_vm, run,
+                           shell_files)
 
 
 @requires_podman_vm()
@@ -61,6 +62,24 @@ class TestContainerWorkspaceLifecycle(WkTest):
 
         total_s = time.time() - t0
         print(f"[timing] wk new: {created_s:.1f}s, total lifecycle: {total_s:.1f}s")
+
+
+class TestOnePodmanWrapper(unittest.TestCase):
+    """`_hpodman` is how this driver reaches podman, everywhere. A second,
+    bare wrapper works wherever the daemon is local and reaches the *rootful*
+    podman from a macOS host -- and the commands a person types outside the VM
+    (`wk scp`, `wk stop`) are exactly where that shows up."""
+
+    def test_the_bare_wrapper_is_gone(self):
+        text = (REPO / "targets" / "container.sh").read_text()
+        self.assertNotIn("_podman() {", text)
+        self.assertIn("_hpodman() {", text)
+
+    def test_nothing_in_the_tree_still_calls_it(self):
+        for f in shell_files():
+            with self.subTest(script=str(f.relative_to(REPO))):
+                for line in f.read_text().splitlines():
+                    self.assertNotRegex(line, r"(?<![_A-Za-z])_podman ")
 
 
 if __name__ == "__main__":

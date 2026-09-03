@@ -61,14 +61,21 @@ class TestVerifyMeasuresThatNothingCanPublish(unittest.TestCase):
 
 
 class TestClaudeHoldsPushBackBeforeVerifying(unittest.TestCase):
+    """The switch itself -- that it is thrown for every target, and what it
+    records -- is tests/test_agent_push_switch.py's subject, driven rather than
+    read. What is held here is the *order*: the keys are gone before anything
+    measures the mount or hands over control."""
+
     def test_push_off_precedes_wk_verify(self):
-        off = CLAUDE.index('"$WK_ROOT/wk" push off')
-        verify = CLAUDE.index('"$WK_ROOT/cmd/verify" "$NAME"')
+        off = CLAUDE.index('push_hold_back "$NAME"')
+        verify = CLAUDE.index('WK_NAME="$NAME" "$WK_ROOT/cmd/verify"')
         self.assertLess(off, verify, "the keys must be gone before wk verify measures the mount")
 
     def test_the_switch_is_thrown_on_a_build_box_too(self):
-        self.assertIn('push off ${PUSH_TARGET:+--target "$PUSH_TARGET"}', CLAUDE)
-        self.assertIn('push on ${PUSH_TARGET:+--target "$PUSH_TARGET"}', CLAUDE)
+        """A build box keeps its own keys under its own wk root, so every
+        `wk push` this command makes carries the target when there is one."""
+        self.assertIn('push "$1" ${PUSH_TARGET:+--target "$PUSH_TARGET"}', CLAUDE)
+        self.assertIn('[ "$WK_TARGET_KIND" != remote ] || PUSH_TARGET="$TARGET"', CLAUDE)
 
     def test_a_gh_login_on_a_build_box_is_a_refusal_not_a_barrier(self):
         m = re.search(r'\[ "\$WK_TARGET_KIND" = remote \][^\n]*\n[^\n]*gh auth status[^\n]*\n\s*die ', CLAUDE)
@@ -76,8 +83,13 @@ class TestClaudeHoldsPushBackBeforeVerifying(unittest.TestCase):
         self.assertIn("gh auth logout", CLAUDE)
 
     def test_remote_control_never_turns_push_back_on(self):
-        rc = CLAUDE[CLAUDE.index("# --- wk ai claude <ws> --rc"):CLAUDE.index("# --- git push: back on")]
-        self.assertNotIn('"$WK_ROOT/wk" push on', rc, "remote-control must leave push off")
+        """A background server left running unattended: there is no foreground
+        moment to notice a session ending, so the keys stay held back and
+        `restore_push` is never armed for it."""
+        rc = CLAUDE[CLAUDE.index("# --- wk ai claude <ws> --rc"):
+                    CLAUDE.index("wk_atexit restore_push")]
+        self.assertNotIn("push_switch on", rc, "remote-control must leave push off")
+        self.assertIn('PUSH_WAS_ON=""', rc, "remote-control must disarm restore_push")
 
 
 class TestPushOnRefusesWhileAnAgentRuns(unittest.TestCase):

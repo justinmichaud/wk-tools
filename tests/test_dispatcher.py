@@ -253,14 +253,39 @@ class TestUnknownWorkspaceName(WkTest):
         self.assertIn(f"no such workspace: {name}", out)
         self.assertIn("usage: wk ai", out)
 
+    @staticmethod
+    def _takes(cmd):
+        """The command's own `takes=<n>` (default 0), read the same way the
+        dispatcher's decl_load does: from the first non-sub, non-flag
+        `# wk:` line in the header."""
+        import re
+
+        head = (REPO / "cmd" / cmd).read_text(errors="replace").splitlines()[:15]
+        for line in head:
+            if not line.startswith("# wk:"):
+                continue
+            rest = line[len("# wk:"):].strip()
+            if rest.startswith("sub ") or rest.startswith("flag "):
+                continue
+            m = re.search(r"takes=(\d+)", rest)
+            return int(m.group(1)) if m else 0
+        return 0
+
     def test_every_command_refuses_a_name_no_workspace_answers_to(self):
         """an unknown workspace name is refused, with the synopsis, exit 2"""
+        # A command with `takes=1` -- `wk pr [<workspace>] <ref>` -- reads a
+        # lone positional as its own argument, not a name (see `wk` lines
+        # 89-94): `wk pr <unknown>` alone is "which workspace", not a name
+        # refusal. Give it a second positional so the first really is read
+        # as the name.
         name = "nosuchws-" + rand_suffix()
         for c in self.COMMANDS:
             with self.subTest(cmd=c):
-                cp = run(c, name)
+                takes = self._takes(c)
+                extra = tuple(f"arg{i}" for i in range(takes))
+                cp = run(c, name, *extra)
                 out = cp.stdout + cp.stderr
-                self.assertEqual(cp.returncode, 2, f"'wk {c} {name}' exited {cp.returncode}:\n{out}")
+                self.assertEqual(cp.returncode, 2, f"'wk {c} {name} {' '.join(extra)}' exited {cp.returncode}:\n{out}")
                 self.assertIn(f"no such workspace: {name}", out)
                 self.assertIn(f"usage: wk {c}", out, f"the refusal does not print the synopsis:\n{out}")
 
@@ -553,3 +578,68 @@ class TestTheDirectoryNamesTheWorkspaceOnABuildBox(WkTest):
             self._name(str(self.root), str(self.root / "ws" / "image-decoders"),
                        remote=False),
             "NONE")
+
+
+class TestHelpNamesEveryWhereOverride(WkTest):
+    """`wk <cmd> -h`'s `runs on:` line is the top-level `where=`, which is the
+    wrong answer for most invocations of a command whose subverbs or flags
+    override it: `wk push` declares `where=store`, and `on`/`off`/`status`
+    run here. So every override is named under it, in the prose of the one
+    table both lines come from (`where_prose` in the dispatcher)."""
+
+    @staticmethod
+    def _overrides(path):
+        """Every `sub`/`flag ... where=<w>` line of a command's header, as
+        (verbs, where) -- read the way decl_load reads them."""
+        out = []
+        for line in path.read_text(errors="replace").splitlines()[:15]:
+            if not line.startswith("# wk:"):
+                continue
+            rest = line[len("# wk:"):]
+            if not (rest.startswith(" sub ") or rest.startswith(" flag ")):
+                continue
+            fields = rest.split(None, 1)[1].split()
+            where = [t[len("where="):] for t in fields[1:] if t.startswith("where=")]
+            if where:
+                out.append((fields[0], where[0]))
+        return out
+
+    def _prose(self, where):
+        """The dispatcher's own words for one `where=` value, lifted from
+        `wk` rather than retyped here -- the point of the change is that
+        there is one table, and a copy in a test is a second one."""
+        lifted = subprocess.run(
+            ["sed", "-n", "/^where_prose() {/,/^}/p", str(REPO / "wk")],
+            capture_output=True, text=True).stdout
+        self.assertTrue(lifted.strip(), "where_prose() is gone from the dispatcher")
+        cp = self.bash(f'D_HERE="" D_LIFECYCLE=""\n{lifted}\nwhere_prose {where}\n')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return cp.stdout
+
+    def test_every_override_is_named_with_its_where(self):
+        """each overriding subverb and flag, with where it runs"""
+        checked = 0
+        for f in sorted((REPO / "cmd").iterdir()):
+            if not (f.is_file() and os.access(f, os.X_OK)):
+                continue
+            overrides = self._overrides(f)
+            if not overrides:
+                continue
+            text = run(f.name, "-h").stdout
+            for verbs, where in overrides:
+                expected = f"    {verbs.replace(',', ', ')}: {self._prose(where)}"
+                with self.subTest(cmd=f.name, verbs=verbs):
+                    self.assertIn(expected, text.splitlines(),
+                                  f"'wk {f.name} -h' does not say where '{verbs}' runs:\n{text}")
+                checked += 1
+        # The commands that have one today: push, bench, sync, build, pi,
+        # profile, pr. A run that checked nothing would pass silently.
+        self.assertGreater(checked, 5, "no where= override was checked at all")
+
+    def test_the_top_level_answer_is_still_there(self):
+        """the command's own `where=` line comes first, then the overrides"""
+        lines = run("push", "-h").stdout.splitlines()
+        top = [i for i, l in enumerate(lines) if l.startswith("  runs on: ")]
+        self.assertEqual(len(top), 1, lines)
+        self.assertIn(self._prose("store"), lines[top[0]])
+        self.assertTrue(lines[top[0] + 1].startswith("    on, off, status: "), lines)

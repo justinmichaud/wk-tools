@@ -164,9 +164,17 @@ class TestSysimageRmIsATombstone(WkTest):
 # one script by a string only it contains, and hand back a canned id: this is
 # the same "answer the identifiable call, succeed silently otherwise" shape
 # tests/test_disk_logic.py uses for a stubbed sfdisk.
+#
+# rpi5-usb enumerates two candidate partitions (sda1, sda3: an A/B pair --
+# boot/rpi5-usb.sh), but a board with one system written holds it only on
+# the first; the second is bare, and b_device_image's real mount there fails
+# and answers with nothing, the same as no system at all. Answering with the
+# id on *both* would be a medium someone wrote the same image to twice, not
+# the fresh single-system board this fixture models, so only sda1 answers.
 _SSH_STUB = '''#!/bin/sh
 case "$*" in
-  *wk-image.id*) echo "{fake_id}" ;;
+  *sda1*wk-image.id*) echo "{fake_id}" ;;
+  *wk-image.id*) : ;;
   *) : ;;
 esac
 '''

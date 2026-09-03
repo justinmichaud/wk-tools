@@ -17,6 +17,7 @@ long-running remote-control server.
 
 Run: python3 -m unittest tests.test_claude_rc -v
 """
+import tempfile
 import unittest
 
 from tests.support import REPO, WkTest, bash, run, temp_store
@@ -206,15 +207,15 @@ class TestRemoteControlIsOnByDefault(WkTest):
         and one agent that will not start is not a machine that will not start.
 
         The invocation -- the line that ends in a continuation, not the prose
-        around it -- is followed by `|| warn`, never `|| die`."""
+        around it -- is followed by a warning, never a `die`."""
         for name, text, call in (("new", self.NEW, 'ai claude "$NAME" --rc'),
                                  ("start", self.START, 'ai claude "$_ws" --rc')):
             lines = text.splitlines()
             idx = [i for i, l in enumerate(lines) if call in l and not l.strip().startswith("#")]
             self.assertEqual(len(idx), 1, f"wk {name}: {len(idx)} invocations, expected 1")
-            tail = "\n".join(lines[idx[0]:idx[0] + 2])
+            tail = "\n".join(lines[idx[0]:idx[0] + 5])
             with self.subTest(cmd=name):
-                self.assertIn("|| warn", tail,
+                self.assertRegex(tail, r'\bwarn "',
                               f"wk {name} does not warn when the agent will not start")
                 self.assertNotIn("|| die", tail,
                                  f"wk {name} dies when the agent will not start")
@@ -223,3 +224,59 @@ class TestRemoteControlIsOnByDefault(WkTest):
         """`wk ai claude` on a remote target is a barrier -- a prompt about a
         machine with no sandbox -- so `wk new` must not walk into it unattended."""
         self.assertIn('"$WK_TARGET_KIND" != remote', self.NEW)
+
+
+_PROBE_DIES_AT_ONCE = r'''
+set -euo pipefail
+export WK_ROOT="__REPO__"
+export WK_CLAUDE_LIB=1
+. "__REPO__/cmd/ai"
+
+WS="probe-ws-dies"
+mkdir -p "$(wk_ws_dir "$WS")"
+TMP_HOME=$(mktemp -d); TMP_SRC=$(mktemp -d)
+t_exec()  { local name="$1"; shift; "$@"; }
+t_home()  { printf '%s' "$TMP_HOME"; }
+t_src()   { printf '%s' "$TMP_SRC"; }
+t_spawn() {
+    local name="$1" log="$2" pidf="$3"; shift 3
+    "$@" > "$log" 2>&1 < /dev/null &
+    printf '%s' "$!" > "$pidf"
+}
+FAKE_CLAUDE="$TMP_HOME/claude"
+cat > "$FAKE_CLAUDE" <<'EOS'
+#!/bin/sh
+echo "Error: Remote Control requires a full-scope login token." >&2
+exit 1
+EOS
+chmod +x "$FAKE_CLAUDE"
+# A subshell: die exits the shell it runs in, and the probe has more to say.
+if ( rc_start "$WS" "$FAKE_CLAUDE" ) 2>"$TMP_HOME/err"; then echo "MARK:started"; else echo "MARK:refused"; fi
+echo "MARK:err"; cat "$TMP_HOME/err"
+echo "MARK:status"; cat "$(rc_status_file "$WS")"
+'''
+
+
+class TestAServerThatExitsAtOnceIsNotReportedRunning(unittest.TestCase):
+    """rc_start reads the pid the target wrote and then waits for evidence
+    that the process is still there; one that exits within its first
+    seconds (a credential remote control refuses -- measured live with a
+    `claude setup-token` token -- or a binary that cannot start) is reported
+    with its log's last lines, and the record says stopped."""
+
+    @classmethod
+    def setUpClass(cls):
+        env = {"WK_STORE": tempfile.mkdtemp(prefix="wk-rc-dies-")}
+        cls.cp = bash(_PROBE_DIES_AT_ONCE.replace("__REPO__", str(REPO)), env=env, timeout=60)
+
+    def test_it_refuses_rather_than_claiming_running(self):
+        self.assertIn("MARK:refused", self.cp.stdout, self.cp.stdout + self.cp.stderr)
+
+    def test_the_logs_last_line_is_in_the_message(self):
+        self.assertIn("exited at once", self.cp.stdout)
+        self.assertIn("full-scope login token", self.cp.stdout)
+
+    def test_the_record_says_stopped(self):
+        status = self.cp.stdout.split("MARK:status", 1)[1]
+        self.assertIn("state=stopped", status)
+        self.assertNotIn("pid=", status)

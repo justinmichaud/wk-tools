@@ -55,7 +55,12 @@ nothing here is a persistent switch.
 **bridge** — a phone with two network legs (house WiFi, USB-C Ethernet to an
 isolated segment) that routes that segment onto the tailnet, so a bench device
 or a BMC behind it is reachable without the house network reaching either.
-Provisioned with `wk bridge`.
+Provisioned with `wk bridge`. `wk bridge setup` also caps how far it charges
+(`charge_control_end_threshold`, 80% by default, `BR_BATTERY_LIMIT` in the
+host conf to change it) so a phone left on a charger for months does not
+swell its cell; `wk doctor --all` reads the cap back on both phones, and
+prints the honest "no OS limit exists" for this machine's own battery, since
+macOS has no CLI knob for its optimized charging.
 
 **store** — `$WK_STORE`, the one place on a machine for artifacts kept by
 reference count or content key, never by hand: base snapshots, seeded
@@ -147,7 +152,8 @@ gh auth login                  # wk key register calls the GitHub API with this
 wk key register                # a deploy key per fork, registered with write access
 wk push on                     # exposes the keys to workspaces
 claude setup-token             # then paste it into the next line
-wk key claude                  # every workspace this machine makes starts authenticated
+wk key set claude              # every workspace this machine makes starts authenticated
+wk key set litellm             # the API key `wk ai pi` reaches your endpoint with
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
 eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```
@@ -186,6 +192,24 @@ wk start bug-238
 wk rm    bug-238 other-ws               # reclaims everything each created
 ```
 
+**Moving a file in or out**
+
+```sh
+wk scp bug-238 :Tools/foo.js ./foo.js       # out -- `:<path>` is in the checkout
+wk scp bug-238 ./patch.diff :patch.diff     # in
+wk scp bug-238 -r :WebKitBuild/logs ~/logs  # a directory, into ~/logs/logs
+wk scp :build.log ~/build.log               # inside a workspace, like every other command
+```
+
+Exactly one side carries the `:`; the other is a path on the machine you type
+it on, which is where `wk scp` runs, whatever holds the workspace -- the podman
+VM mounts nothing of this machine's, so a forwarded copy would land in the VM
+instead. The bytes go through the target's own transport (`podman cp` for a
+container, scp and rsync for a guest or a build machine), and a destination
+that is an existing directory receives the copy under the source's own name, as
+`cp` and `scp` do. A directory onto a file, a file onto a directory, and a
+directory without `-r` are refused rather than guessed at.
+
 **macOS VM workspace, for the Apple ports**
 
 ```sh
@@ -204,6 +228,31 @@ generator that supports Swift -- so there is no JSCOnly port there and the
 the `mac-*` config of the same configuration. The reverse is refused: a
 `mac-*` config on a Linux target says so rather than running xcodebuild.
 
+Every guest is an APFS clone of one golden base, so **what the base carries is
+what every guest carries**: Xcode, a checkout, a warm build tree, the desktop
+settled onto an empty screen, and the account's password changed from the
+image's. The base is made by scripts in this tree, and editing one of them does
+not change a base already built -- so the base records the hash of the inputs
+that produced it, and every read recomputes that hash and compares. `wk vm ls`
+prints the verdict under `BASE`, `wk new --target vm` warns before cloning a
+base that predates its inputs, and `wk doctor` says the same on the way past;
+each of them names `wk vm base --rebuild`, which is hours and is yours to run.
+Until it is run, a clone carries what that base was built with -- the image's
+password if the change came later, and the settings of the day it was sealed.
+
+`wk vm start` settles a guest's desktop on every boot (a clone gets a new
+hardware UUID, so anything `defaults -currentHost` holds does not survive
+cloning) and then **prints what it actually found**: who is logged in at the
+window, the screen lock, the screen saver, display sleep, Setup Assistant's
+panes, the Software Update offer, and anything modal on screen right now.
+`wk vm check <name>` asks again on demand, read-only, and adds what is resident
+in the guest -- the shells, the editor remote server that outlives its window,
+the agents, the memory left -- because a guest holds its whole allocation
+whether or not it is busy, and a long-lived one runs out of memory because
+something stayed. An occluded window is a throttled window: a benchmark in
+there measures something else rather than failing, so this is a report worth
+reading before a measurement.
+
 **A shared build machine**
 
 ```sh
@@ -212,8 +261,17 @@ wk remote setup buildbox4               # probes it over ssh, writes targets/hos
                                         # WK_BUILD_ARGS= in that conf is appended to every build there
 wk new big-build --target buildbox4
 wk build big-build jsc-release          # sized from that machine's live load
+wk doctor --all                         # what every build box has, and whether what
+                                        # provisioned it is still what this tree says
 wk remote rm buildbox4                  # undo it; git rm the conf to forget it for good
 ```
+
+A build box is provisioned once and used for months, so it records the same
+thing the golden base does: `wk remote setup` writes the hash of what
+provisioned it into `~/.wk-remote` there, and `wk doctor --all` recomputes that
+hash and reports the machine as provisioned from this tree or as predating it,
+with `wk remote setup <target>` as the remedy. Read-only, over ssh, and it
+changes nothing on the machine.
 
 **Someone else's PR, a PR by number, a rebase**
 
@@ -225,6 +283,31 @@ wk new review-1234 --pr 1234             # a fresh workspace straight onto a PR
 wk pr open bug-238                       # from the host: push the branch, open it with gh
 ```
 
+**What a fresh workspace's checkout is**
+
+The base snapshot is published on the branch it was taken from (`origin/main`,
+or `WK_BRANCH`), so `wk new` leaves the checkout **on branch `main`, tracking
+`origin/main`** -- `git status` says "On branch main", and `git pull`,
+`git rebase @{u}` and `wk pr rebase` all have an upstream to name. Creation
+also **fetches**: once, from the machine's own WebKit mirror, then a
+fast-forward onto it -- a local read of a handful of refs, never the network,
+and never a refresh of the mirror itself (that is `wk sync --tools`, minutes).
+A workspace with no mirror in reach -- a macOS guest -- is told to `wk sync`
+it instead.
+
+Four remotes are wired into every checkout, always the same four, by the one
+authority every target wires from (`wk remotes <ws>` checks them, `--fix`
+re-asserts them):
+
+- `origin` -- WebKit/WebKit, the upstream everything rebases onto. Fetch only:
+  its push URL is `no-push://`, because nobody here has write access to it.
+- `wpe` -- WebPlatformForEmbedded/WPEWebKit, whose release branches the board
+  images are built from. Fetch only, for the same reason.
+- `fork` -- your own fork of WebKit: what a branch is pushed to and what
+  `wk pr open` opens a PR from. Pushes over ssh with a per-fork deploy key
+  (`wk push on`).
+- `forkwpe` -- your own fork of WPEWebKit, the same, for that project.
+
 **Sync (a workspace, a target, or the furniture a machine keeps)**
 
 A workspace goes stale in its own checkout; a machine goes stale in what it
@@ -232,6 +315,30 @@ keeps *for* workspaces -- its copy of wk-tools, its WebKit mirror, and the
 snapshot the next `wk new` clones. The two are asked for separately. Inside a
 workspace a bare `wk sync` fetches in it, from that machine's mirror; every
 other scope is a machine's furniture and is run from the host.
+
+A workspace's fetch takes everything from that mirror in one local read when
+the mirror is mounted in it (a container's `/mirror`), and asks the upstreams
+themselves only when it is not. Either way it fetches the refs the mirror
+carries -- `main` of `origin`, every branch of the other three -- and no tags:
+following tags re-negotiates tens of thousands of refs nothing here builds
+from, and `git fetch --tags` in the workspace asks for them when they are
+wanted.
+
+The tooling reaches a machine across ssh -- a build box, a macOS guest -- as
+git and never as a file copy: this tree's HEAD goes over as a git bundle, and
+the copy there is a real checkout reset hard to that commit. So a machine holds
+a commit that exists, `wk status` compares the two by sha, and an **uncommitted
+tree here is refused** with nothing sent -- commit it and re-run. It converges
+from anything already over there (no checkout, an older file copy, another
+commit, a dirty tree), a killed push included: the first push over a directory
+that is not already a checkout replaces it whole, ignored files included, since
+loose files cannot be reconciled with a commit; every push after that is into a
+checkout, and leaves that machine's ignored files -- its build directory, its
+own conf -- alone. A guest takes the same checkout on every `wk vm start`, with
+its marker and its egress; there a dirty tree warns rather than failing the
+start. Two copies are not this: the podman VM's `/opt/wk-tools`, which this
+machine copies in, and a peer workstation's own checkout, which pulls rather
+than being written over.
 
 ```sh
 wk sync                                 # one workspace here; asked when there are several
@@ -471,27 +578,51 @@ wk quiesce off
 wk session off
 ```
 
-**`wk ai claude` in a workspace**
+**`wk ai <agent>` in a workspace**
 
 ```sh
 wk ai claude bug-238                # verifies the sandbox first, refuses to start if it fails
 wk ai claude bug-238 -r             # resume
 wk ai claude bug-238 --continue
 wk ai claude bug-238 --rc                   # a Remote Control server the Claude app attaches to; --rc --stop ends it
+wk ai pi bug-238                    # the pi coding agent, installed from npm on first use
 ```
 
 A `remote` target has no sandbox to verify; `wk ai claude` there stops at a
 barrier that only an explicit `--force` crosses.
 
+Two agents, one command: the workspace, the sandbox check, the push switch and
+the commit wall below are the same for both, and only `--rc` is Claude Code's
+alone. `wk ai pi` installs `@earendil-works/pi-coding-agent` into the
+workspace's own `~/.local` on first use (`npm install -g --ignore-scripts`,
+which needs node >= 22.19.0 in there and refuses with the remedy without it),
+and reaches a model through an OpenAI-compatible endpoint: `wk key set litellm`
+stores the API key for every workspace this machine makes, and pi's own
+`~/.pi/agent/models.json` names the endpoint URL and the models it serves --
+`wk ai pi` prints the file to write when a workspace has none.
+
 A workspace starts already authenticated, so nothing has to answer `/login` in
 it -- which a macOS guest reached through an editor's remote server cannot do
 anyway, having no unlocked login Keychain. One token per machine, stored by
-`wk key claude` (from `claude setup-token`) and read by `shell/bashrc` into
+`wk key set claude` (from `claude setup-token`) and read by `shell/bashrc` into
 `CLAUDE_CODE_OAUTH_TOKEN`. Each target hands it over differently: a container
 symlinks the read-only `/secrets` mount, so rotating the token reaches every
 container at once; a macOS guest and a build box are given a copy when the
-workspace comes up, and lose it the same way when `wk key claude --replace`
+workspace comes up, and lose it the same way when `wk key set claude --replace`
 withdraws one. Without a token a workspace simply asks for `/login` as before.
+
+The deploy keys reach a workspace the same two ways, and `wk push` is the one
+switch over both. A container links the read-only `/secrets` mount, so moving
+the keys in the store is the whole of it. A macOS guest mounts nothing of ours,
+so the host writes it a copy on every `wk vm start` -- the private key on
+stdin, never an argument, at 0600 -- alongside the same `github-webkit` /
+`github-wpe` alias blocks a container gets, whose `ProxyCommand` is how ssh
+reaches `github.com:22` past Softnet at all. `wk push on|off` then converges
+every running guest on this host after moving the keys, and `wk push status`
+reports what each one actually holds; a guest that is stopped is converged when
+it next starts, before anything in it can run. On a macOS workstation `on` and
+`off` start the podman machine and say why -- the key bytes exist only in its
+store -- while `status` reads without starting anything.
 
 Nothing an agent runs can publish or commit, on any target. Publishing: the
 deploy keys are held back for the session (`wk push off`, before the sandbox is
@@ -508,6 +639,19 @@ measures are the one switch: `wk push on` turns them off (refused while a claude
 session runs -- `wk push on --force` overrides, though a running agent keeps its
 wall until it exits; a human `wk enter` shell is never walled). Only the person
 at the keyboard pushes or commits.
+
+Nothing an agent runs drives a build directly either. `container/bin/wk-build-wall`
+lists the tools it wraps and sits on PATH under each of their names, ahead of the
+real ones, in every shell that sources `shell/path.sh` -- which is every workspace
+shell *and* this workstation's own, since `shell/bashrc` reads the same file. It
+refuses, naming `wk build` / `wk test` / `wk bench` / `wk run`, whenever the caller
+is an agent (`CLAUDECODE=1` from Claude Code, or `WK_AGENT` from `wk ai <agent>`);
+it execs the real tool for anyone else, and for wk's own build (`WK_BUILD=1`),
+which is where the job count and the nice level a shared build machine needs come
+from. It covers a **bare name** and only that: `Tools/Scripts/build-webkit` names
+a file and never consults PATH, so the path form is covered by the
+`Bash(*/<name> *)` deny rules in `claude/settings.json` and
+`claude/settings-host.json` and by nothing else.
 
 **Housekeeping**
 

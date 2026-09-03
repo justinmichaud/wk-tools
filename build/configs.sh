@@ -308,9 +308,10 @@ config_build_env() {
     fi
 
     # Appended in order (architecture, machine conf, that machine's flags for
-    # *this* config, `wk build --cmake`), so each wins where it overlaps --
-    # cmake takes the last repeated -D. Narrowest last, so a machine's
-    # per-config flag beats its machine-wide one.
+    # *this* config, `wk build --cmake`, which arrives here as WK_EXTRA_CMAKE
+    # -- cmd/build's own name for it, exported ahead of this call), so each
+    # wins where it overlaps -- cmake takes the last repeated -D. Narrowest
+    # last, so a machine's per-config flag beats its machine-wide one.
     local cmakeargs="$CFG_CMAKE"
     local archcmake; archcmake=$(arch_cmake "$arch" "$CFG_PORT")
     [ -n "$archcmake" ] && cmakeargs="$cmakeargs $archcmake"
@@ -320,9 +321,12 @@ config_build_env() {
     local cfgargs; cfgargs=$(config_target_var WK_BUILD_ARGS)
     [ -n "${WK_EXTRA_CMAKE:-}" ] && cmakeargs="$cmakeargs $WK_EXTRA_CMAKE"
 
-    # /ccache is the container's bind-mounted store cache; see t_ccache_dir
-    # for other targets. Sloppiness desensitises __TIMESTAMP__ and the glib
-    # ports' regenerated BuildRevision.h.
+    # WK_CCACHE_DIR: set by cmd/build (t_ccache_dir) before this runs; the
+    # /ccache default only matters to a caller that skips that step
+    # (targets/vm.sh's base-image prebuild), and there it agrees with
+    # t_ccache_dir's own container answer. See t_ccache_dir for other
+    # targets. Sloppiness desensitises __TIMESTAMP__ and the glib ports'
+    # regenerated BuildRevision.h.
     CFG_ENV=(
         "CCACHE_DIR=${WK_CCACHE_DIR:-/ccache}"
         "CCACHE_BASEDIR=$src"
@@ -367,6 +371,8 @@ config_build_env() {
         CFG_ENV+=("WEBKIT_OUTPUTDIR=$out" "WK_DERIVED_DATA=$src/WebKitBuild/DerivedData")
     fi
     # Carried through only when set: empty isn't unset for build-in-target.sh.
+    # WK_MEM_BUDGET_MB/WK_MEM_FLOOR_MB come from --mem-budget/--mem-floor;
+    # WK_MEM_INTERVAL (default 30s, wk build -h) has no flag of its own.
     [ -n "${WK_MEM_BUDGET_MB:-}" ] && CFG_ENV+=("WK_MEM_BUDGET_MB=$WK_MEM_BUDGET_MB")
     [ -n "${WK_MEM_FLOOR_MB:-}" ]  && CFG_ENV+=("WK_MEM_FLOOR_MB=$WK_MEM_FLOOR_MB")
     [ -n "${WK_MEM_INTERVAL:-}" ]  && CFG_ENV+=("WK_MEM_INTERVAL=$WK_MEM_INTERVAL")
@@ -375,8 +381,10 @@ config_build_env() {
     [ -n "${WK_NO_COMPILATION_CACHE:-}" ] && CFG_ENV+=("WK_NO_COMPILATION_CACHE=1")
 
     # `wk build … --env CC=gcc-14`, last: `env` applies left to right, so
-    # this overrides the config's own. Newline-, not space-separated: an
-    # environment value may legitimately contain a space (CFLAGS).
+    # this overrides the config's own. Arrives here as WK_EXTRA_ENV --
+    # cmd/build's own name for it, exported ahead of this call. Newline-,
+    # not space-separated: an environment value may legitimately contain a
+    # space (CFLAGS).
     if [ -n "${WK_EXTRA_ENV:-}" ]; then
         while IFS= read -r _e; do
             [ -n "$_e" ] || continue

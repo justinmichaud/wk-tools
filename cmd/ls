@@ -25,6 +25,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
+. "$WK_ROOT/lib/par.sh"
 
 # Every target, from the same walk `wk status` uses (walk_targets, then
 # target_workspaces per target). SNAP and CHANGES are overlay concepts,
@@ -92,48 +93,73 @@ if [ -z "$CONTINUED" ] && [ -z "$JSON" ]; then
         NAME TARGET STATE BASE SNAP ARCH CHANGES
 fi
 
-found=0
-TARGETS=$(walk_targets)
-# One round of probes for every machine at once, rather than one ten-second
-# connect after another as the walk reaches them (prefetch_targets, lib/target.sh).
-# shellcheck disable=SC2086 -- deliberate word splitting of the target list.
-prefetch_targets $TARGETS
-wk_atexit prefetch_done
-for TARGET in $TARGETS; do
+# One workspace's row, written to fd 3 -- a table line, or the one-workspace
+# JSON document json_merge_list reads back. Every field is measured here, and
+# two of them cost real time (ws_base runs git inside the workspace, `du`
+# walks the overlay), which is why this is a job of its own.
+ws_row() { # <target> <ws>
+    local TARGET="$1" ws="$2" state base snap size
+    state=$(ws_display_state "$ws")
+    base=$(ws_base "$ws")
+    snap=$(ws_base_id "$ws" 2>/dev/null || echo '-')
+    size=$(du -sh "$(wk_ws_dir "$ws")/changes" 2>/dev/null | cut -f1 || echo -)
+    if [ -n "$JSON" ]; then
+        python3 -c '
+import json, sys
+print(json.dumps({"workspaces": [{
+    "name": sys.argv[1], "target": sys.argv[2], "state": sys.argv[3],
+    "base": sys.argv[4], "snap": sys.argv[5], "arch": sys.argv[6], "changes": sys.argv[7],
+}]}))' "$ws" "$(_col "$TARGET")" "$state" "$base" "$snap" "$(t_arch "$ws")" "$size" >&3
+        return 0
+    fi
+    printf '%-20s %-18s %-10s %-8s %-20s %-8s %8s\n' \
+        "$ws" "$(_col "$TARGET")" "$state" "$base" "$snap" "$(t_arch "$ws")" "$size" >&3
+}
+
+# One target's rows, written to fd 3. Run as a par_run job (lib/par.sh), so it
+# is a subshell: the driver it loads, the batch it opens for its own
+# workspaces, and the facts it measures are all its own.
+target_rows() { # <target>
+    local TARGET="$1" ws list
     load_target "$TARGET"
 
     # A machine of its own answers for itself, exactly as in `wk status`: the
     # workspaces are over there, and so is every fact about them.
     if t_has_wk; then
-        rc=0
         if [ -n "$JSON" ]; then
-            WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued --json >> "$JSON_DOCS" || rc=$?
+            WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued --json >&3
         else
-            WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued || rc=$?
+            WK_ROW_LABEL="$TARGET" WK_NO_DELEGATE=1 t_wk ls --continued >&3
         fi
-        [ "$rc" -eq 0 ] && found=1
-        continue
+        return $?
     fi
 
-    for ws in $(target_workspaces); do
-        found=1
-        state=$(ws_display_state "$ws")
-        base=$(ws_base "$ws")
-        snap=$(ws_base_id "$ws" 2>/dev/null || echo '-')
-        size=$(du -sh "$(wk_ws_dir "$ws")/changes" 2>/dev/null | cut -f1 || echo -)
-        if [ -n "$JSON" ]; then
-            python3 -c '
-import json, sys
-print(json.dumps({"workspaces": [{
-    "name": sys.argv[1], "target": sys.argv[2], "state": sys.argv[3],
-    "base": sys.argv[4], "snap": sys.argv[5], "arch": sys.argv[6], "changes": sys.argv[7],
-}]}))' "$ws" "$(_col "$TARGET")" "$state" "$base" "$snap" "$(t_arch "$ws")" "$size" >> "$JSON_DOCS"
-            continue
-        fi
-        printf '%-20s %-18s %-10s %-8s %-20s %-8s %8s\n' \
-            "$ws" "$(_col "$TARGET")" "$state" "$base" "$snap" "$(t_arch "$ws")" "$size"
-    done
+    list=$(target_workspaces)
+    [ -n "$list" ] || return 0
+    par_begin
+    for ws in $list; do par_run "$ws" ws_row "$TARGET" "$ws"; done
+    par_wait
+    for ws in $list; do par_record "$ws" >&3; done
+    par_end
+}
+
+found=0
+TARGETS=$(walk_targets)
+# Every target at once, not one ten-second connect after another as the walk
+# reaches them: a machine that will not answer costs this listing its own
+# timeout instead of everybody's. Rows are read back in walk order, so the
+# listing never reshuffles (lib/par.sh).
+wk_atexit par_cleanup
+par_begin
+for TARGET in $TARGETS; do par_run "$TARGET" target_rows "$TARGET"; done
+par_wait
+for TARGET in $TARGETS; do
+    rows=$(par_record "$TARGET")
+    [ -n "$rows" ] || continue
+    found=1
+    if [ -n "$JSON" ]; then printf '%s\n' "$rows" >> "$JSON_DOCS"; else printf '%s\n' "$rows"; fi
 done
+par_end
 
 # One document, nothing else on stdout: the advisory text below has no
 # place in a document a caller is about to parse.

@@ -77,6 +77,29 @@ plan_json() { # <plan>
     die "plan $plan indirects too many times"
 }
 
+# `wk bench --list` runs before any workspace exists to read a plan from, so
+# it cannot go through bench_plan_read (a workspace's checkout) or
+# bench_runner_tree (which exports a whole Tools/Scripts tree for a run --
+# more than listing names needs). It reads the machine's own WebKit mirror
+# instead -- one git ls-tree, read-only and instant, no export, no checkout.
+# Prints one plan name per line and returns 0 when the mirror can answer;
+# when it cannot (no mirror synced on this machine yet), prints the one
+# place the list does live and returns 1 so the caller still has something
+# to show.
+bench_plan_list() {
+    local mirror ref
+    mirror=$(wk_mirror)
+    ref="${WK_BENCH_RUNNER_REF:-refs/heads/main}"
+    if [ ! -d "$mirror" ] || ! git -C "$mirror" rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
+        printf "no mirror at %s to read plans from; 'wk sync' fetches one, or read\n" "$mirror"
+        printf "them from a workspace's own checkout: Tools/Scripts/run-benchmark --list-plans\n"
+        return 1
+    fi
+    git -C "$mirror" ls-tree --name-only "$ref" \
+            Tools/Scripts/webkitpy/benchmark_runner/data/plans/ 2>/dev/null \
+        | sed -n 's#.*/\([^/]*\)\.plan$#\1#p' | sort
+}
+
 # Seeded copies are keyed by the exact commit, so a moved upstream branch
 # produces a new directory rather than quietly changing an existing one.
 # Prints the seeded directory, or nothing when the plan has no fetchable

@@ -2,13 +2,16 @@
 #
 # wk bench <workspace> <plan> [options] -- run a benchmark and keep the result defensible
 #
-# wk: where=workspace name=required ready=yes group=workspaces needs python3
+# wk: where=workspace name=required values=--list ready=yes group=workspaces needs python3
 # wk: sub stage,staged,mac,mac-volume,mac-ab,ab-summary,compare,report where=host
 # wk: sub seed where=dynamic
 # wk: sub ls,compare,report name=none
 # wk: sub seed name=required@2
+# wk: flag --list where=store name=none
+# wk: readonly --list
 #
-# <plan> is Tools/Scripts/run-benchmark's own name (--list-plans lists them).
+# <plan> is Tools/Scripts/run-benchmark's own name; `wk bench --list` reads
+# them off the machine's WebKit mirror, no workspace needed.
 #
 #   wk bench <workspace> <plan> [--config C] [--count N] [--subtests "A B"]
 #                                [--software] [--force] [--browser-args "..."]
@@ -63,6 +66,13 @@
 #                                          for when it was requested and what
 #                                          it measures -- with its state and
 #                                          each run's directory
+#   wk bench --list                        the plans in this machine's WebKit
+#                                          mirror -- no workspace, never starts
+#                                          the podman machine; it says which and
+#                                          how to fix it, instead of the list,
+#                                          when there is no mirror to read or
+#                                          the podman machine that would answer
+#                                          it is stopped
 #
 #   --config decides the runner: a browser port (wpe-release, gtk-release) runs
 #   the plan in MiniBrowser, a JSCOnly port (jsc-release) runs it in the jsc
@@ -1556,6 +1566,8 @@ mac_aslr_probe() {
 
 # --- dispatch ----------------------------------------------------------------
 case "${1:-}" in
+    --list)  [ $# -eq 1 ] || die "usage: wk bench --list; see wk bench -h"
+             bench_plan_list || exit 1; exit 0 ;;
     ls)      shift; cmd_ls; exit 0 ;;
     compare) shift; [ $# -ge 2 ] || die "usage: wk bench compare <run-a> <run-b> [ws]; see wk bench -h"
              cmd_compare "$@"; exit 0 ;;
