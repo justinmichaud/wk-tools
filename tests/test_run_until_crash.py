@@ -31,7 +31,7 @@ set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load jsc-release "$(uname -s | grep -q Darwin && echo macos || echo linux)"
+config_load jsc-release "$(uname -s | grep -q Darwin && echo macos || echo linux)" local
 config_jsc_path {src}
 config_run_dir {src}
 ''')

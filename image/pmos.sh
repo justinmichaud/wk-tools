@@ -34,8 +34,8 @@ pmos_rc()        { echo "$(pmos_root)/out/$1/build.rc"; }
 # smaller claim than fleet membership.
 pmos_ssh() {
     local h; h=$(pmos_host)
-    if machine_load "$h" 2>/dev/null && [ -n "${MACH_SSH:-}" ]; then
-        printf '%s' "$MACH_SSH"
+    if machine_load "$h" 2>/dev/null && [ -n "${NODE_SSH:-}" ]; then
+        printf '%s' "$NODE_SSH"
     else
         printf '%s' "$h"
     fi
@@ -45,7 +45,7 @@ pmos_ssh() {
 # the build host is on WiFi and roams, and ConnectTimeout only covers the
 # handshake -- a connection that stalls *after* connecting hangs until TCP
 # gives up, silently, unless the keepalive probes kill it first.
-# `machine_load` runs here, not inside `pmos_ssh`, so MACH_ROLE is set
+# `machine_load` runs here, not inside `pmos_ssh`, so NODE_ROLE is set
 # before `m_ssh_opts` reads it.
 pmos_ssh_opts() {
     machine_load "$(pmos_host)" >/dev/null 2>&1

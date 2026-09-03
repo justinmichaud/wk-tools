@@ -84,9 +84,10 @@ class TestDeclaration(WkTest):
 
     def test_it_runs_where_it_was_typed(self):
         """`here`, and it has to be: one side of the copy is this machine's
-        filesystem. Forwarded into the podman VM (which mounts nothing of this
-        machine's) or delegated to a build machine, that side would silently
-        mean a path over there."""
+        filesystem. Forwarded into the podman VM (which mounts only this
+        checkout and the two store directories, never where files are kept) or
+        delegated to a build machine, that side would silently mean a path over
+        there."""
         decl = [l for l in (REPO / "cmd" / "scp").read_text().splitlines()[:15]
                 if l.startswith("# wk:")]
         self.assertEqual(len(decl), 1, decl)

@@ -17,6 +17,8 @@
 #   WK_REMOTE_HOST=devbox-arm64-2  # ssh destination; defaults to the target name
 #   WK_REMOTE_ROOT=/home/you/wk    # defaults to ~/wk on the box
 #   WK_TARGET_CMAKE=-DFOO=ON       # extra CMake flags for builds on this machine
+#   WK_TARGET_LIBCXX=0             # 0 where the machine has no libc++; 1 or
+#                                   # unset builds with -stdlib=libc++
 #   WK_REMOTE_REFERENCE=/var/...   # a shared checkout to clone from; see below
 #   WK_REMOTE_LOCAL=1              # this *is* the machine; run without ssh
 #   WK_REMOTE_PEER=1               # a workstation of its own, not a build box
@@ -275,22 +277,26 @@ _remote_reference() {
 }
 
 # The mirror this driver keeps when the machine has no shared repository:
-# `t_create` clones from it, `t_sync` refreshes it. Only main is mirrored
-# (wk_mirror_branches); gc.auto is off since workspaces borrow its objects
-# through --shared, which a repack underneath a live clone would break.
+# `t_create` clones from it, `t_sync` refreshes it. What it carries, and how
+# it is wired, is mirror_refresh_script's (lib/store.sh) -- every mirror in
+# the fleet is made by that one snippet, so a workspace here fetches from the
+# same layout a container's mirror has, forks included. Carrying them costs
+# nothing next to holding them per workspace: every checkout on the box is a
+# `--shared` clone of this repository (t_create).
 _remote_mirror_update() {
     local root="$1"
     info "updating the WebKit mirror on $WK_REMOTE_HOST (first run clones it)"
+    command -v mirror_refresh_script >/dev/null 2>&1 || . "$WK_ROOT/lib/store.sh"
+    # One `mirror-fetch <remote> ok|FAILED` line per upstream comes back on
+    # stdout; relayed as the report, since an unreachable fork is not a
+    # failure of the mirror (mirror_refresh_script).
     _rsh_q "set -e
         mkdir -p $(sh_quote "$root/ws") $(sh_quote "$root/cache/ccache")
-        M=$(sh_quote "$root/mirror")
-        if [ ! -d \"\$M\" ]; then
-            git init --bare -q \"\$M\"
-            git -C \"\$M\" config gc.auto 0
-            git -C \"\$M\" remote add origin https://github.com/WebKit/WebKit.git
-            git -C \"\$M\" config --add remote.origin.fetch '+refs/heads/main:refs/heads/main'
-        fi
-        git -C \"\$M\" fetch --prune -q origin" \
+        $(mirror_refresh_script "$(t_mirror_dir)")" \
+        | while read -r _tag _name _state; do
+              [ "$_tag" = mirror-fetch ] || continue
+              printf '  %-8s %s\n' "$_name" "$_state" >&2
+          done \
         || die "could not update the WebKit mirror on $WK_REMOTE_HOST"
 }
 
@@ -365,6 +371,12 @@ t_src() {
 # The remote's own ccache, under the remote root -- not a shared one on the
 # box: a cache you do not administer is one you can poison for other people.
 t_ccache_dir() { echo "$(_remote_root)/cache/ccache"; }
+
+# The bare mirror this driver keeps on the box, under the remote root: every
+# workspace there is a `--shared` clone of it (t_create), so it holds the
+# objects once for all of them, and a fetch in one of them is local.
+# _remote_mirror_update is what puts it there and keeps it current.
+t_mirror_dir() { echo "$(_remote_root)/mirror"; }
 
 _remote_home() { _remote_probe; printf '%s' "$_WK_REMOTE_HOME"; }
 
@@ -789,7 +801,7 @@ t_wiring_args() {
     if [ -n "$ref" ]; then
         printf 'shared\n%s\n%s\n' "$ref" "$root/ssh/config"
     else
-        printf 'mirror\n%s\n%s\n' "$root/mirror" "$root/ssh/config"
+        printf 'mirror\n%s\n%s\n' "$(t_mirror_dir)" "$root/ssh/config"
     fi
 }
 
@@ -802,7 +814,7 @@ _peer_why_behind() {
     git -C "$WK_ROOT" rev-parse --git-dir >/dev/null 2>&1 || {
         printf 'this copy of wk-tools is not a git checkout, so nothing can pull from it'
         return 0; }
-    [ -n "$(git -C "$WK_ROOT" status --porcelain 2>/dev/null)" ] && dirty=1
+    [ -n "$(git -C "$WK_ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ] && dirty=1
     branch=$(git -C "$WK_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     up=$(git -C "$WK_ROOT" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
     if [ -n "$up" ]; then
@@ -815,8 +827,6 @@ _peer_why_behind() {
         printf 'this machine is %s commit(s) ahead of %s -- push them, then re-run' "$ahead" "$up"
     elif [ -z "$up" ]; then
         printf "branch '%s' has no upstream here, so there is nothing for a peer to pull from" "${branch:-HEAD}"
-    else
-        printf 'both are at %s, so the difference is untracked or excluded files rather than commits' "$up"
     fi
 }
 
@@ -824,7 +834,7 @@ _peer_why_behind() {
 # WebKit objects its workspaces clone from. A bare `wk sync` is refused on
 # the machine itself (is_host_only), so this is how either is refreshed.
 t_sync() {
-    local ref rc=0 mine theirs tools
+    local ref rc=0 mine_ver theirs_ver mine_sha mine_dirty theirs_sha theirs_dirty tools
     _remote_probe
     tools=$(t_tools "")
 
@@ -836,10 +846,16 @@ t_sync() {
     if _remote_peer; then
         _rsh_q "cd $(sh_quote "$tools") && git pull --ff-only" >&2 \
             || { printf '  %-24s %s\n' "$WK_TARGET" "git pull --ff-only failed there" >&2; return 1; }
-        mine=$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)
-        theirs=$(_rsh_q "$(sh_quote "$tools")/cmd/version --tree" 2>/dev/null || true)
-        if [ -z "$mine" ] || [ "$mine" != "$theirs" ]; then
-            printf '  %-24s %s\n' "$WK_TARGET" "pulled, still DIFFERS ($theirs, this machine has $mine)" >&2
+        mine_ver=$("$WK_ROOT/cmd/version" 2>/dev/null || true)
+        theirs_ver=$(_rsh_q "$(sh_quote "$tools")/cmd/version" 2>/dev/null || true)
+        mine_sha=$(kv_get sha <<<"$mine_ver");     mine_dirty=$(kv_get dirty <<<"$mine_ver")
+        theirs_sha=$(kv_get sha <<<"$theirs_ver"); theirs_dirty=$(kv_get dirty <<<"$theirs_ver")
+        # Identity is the commit plus dirtiness of tracked files, compared as
+        # a pair: an untracked .DS_Store or __pycache__ never makes this
+        # differ, a tracked edit on either side does.
+        if [ -z "$mine_sha" ] || [ "$mine_sha" != "$theirs_sha" ] \
+            || [ "$mine_dirty" != "$theirs_dirty" ]; then
+            printf '  %-24s %s\n' "$WK_TARGET" "pulled, still DIFFERS ($(printf '%s' "$theirs_sha" | cut -c1-12)$([ "$theirs_dirty" = yes ] && printf '+dirty'), this machine has $(printf '%s' "$mine_sha" | cut -c1-12)$([ "$mine_dirty" = yes ] && printf '+dirty'))" >&2
             printf '  %-24s %s\n' "" "$(_peer_why_behind)" >&2
             # Nothing more is asked of a copy that is not this one: what a
             # scope word means is that copy's to decide, and an older one

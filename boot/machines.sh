@@ -11,8 +11,8 @@ command -v reach_tailnet >/dev/null 2>&1 || . "$WK_ROOT/lib/reach.sh"
 command -v disk_part >/dev/null 2>&1 || . "$WK_ROOT/boot/disk.sh"
 
 # The fields a machine sets are documented in README.md ("Add a new fleet
-# device"). MACH_DTB is empty for a machine with no board firmware to ask.
-# MACH_BENCH_SSH is the tailnet name of the system `wk sysimage write` puts on
+# device"). NODE_DTB is empty for a machine with no board firmware to ask.
+# NODE_BENCH_SSH is the tailnet name of the system `wk sysimage write` puts on
 # this machine's medium -- what the card is seeded to join as (`<name>-bench`)
 # and the ssh destination the bench lanes reach it at -- so a workstation
 # (rpi5, tolken) keeps its own name in both roles.
@@ -31,7 +31,7 @@ machine_list() {
         [ -f "$f" ] || continue
         n=$(basename "$f" .conf)
         machine_load "$n" 2>/dev/null || continue
-        printf '%-8s%s\n' "$n" "$MACH_NOTE"
+        printf '%-8s%s\n' "$n" "$NODE_NOTE"
     done
 }
 
@@ -40,13 +40,11 @@ machine_list() {
 # different reasons -- the board, or the thing that carries it -- and when
 # every device on one network goes silent at once the second is overwhelmingly
 # the likely one. `wk boot --status` already says this for a board behind a
-# bridge; a board on wifi has exactly the same failure and had no such line,
-# which is how an access point going down reads as a dead board (measured
-# 2026-08-31: three boards, one of them untouched for hours, all quiet at
-# once).
+# bridge; a board on wifi has exactly the same failure and needs the same
+# line, or an access point going down reads as a dead board.
 #
 # Evidence from the tailnet's own view of its peers, never a record, and a
-# subshell because machine_load overwrites the caller's MACH_* as it walks.
+# subshell because machine_load overwrites the caller's NODE_* as it walks.
 # Prints "<quiet> <total>"; a machine with no siblings prints "0 0" and the
 # caller says nothing.
 machine_quiet_siblings() { # <this machine> <net> <bridge>
@@ -60,11 +58,11 @@ machine_quiet_siblings() { # <this machine> <net> <bridge>
             n=$(basename "$f" .conf)
             [ "$n" != "$me" ] || continue
             machine_load "$n" 2>/dev/null || continue
-            [ "${MACH_NET:-}" = "$net" ] || continue
-            [ "${MACH_BRIDGE:-}" = "$bridge" ] || continue
+            [ "${NODE_NET:-}" = "$net" ] || continue
+            [ "${NODE_BRIDGE:-}" = "$bridge" ] || continue
             total=$((total + 1))
             up=""
-            for name in "${MACH_SSH:-}" "${MACH_BENCH_SSH:-}"; do
+            for name in "${NODE_SSH:-}" "${NODE_BENCH_SSH:-}"; do
                 [ -n "$name" ] || continue
                 printf '%s\n' "$peers" \
                     | awk -F'\t' -v n="$name" '$1 == n && $3 == "up" { found = 1 } END { exit !found }' \
@@ -85,7 +83,7 @@ machine_declare() {
         n=$(basename "$f" .conf)
         machine_load "$n" 2>/dev/null || continue
         printf '%s\t%s\t%s\t%s\t%s\n' \
-            "$n" "${MACH_ROLE:-workstation}" "${MACH_OS:-any}" "${MACH_PROFILE:-}" "$MACH_NOTE"
+            "$n" "${NODE_ROLE:-workstation}" "${NODE_OS:-any}" "${NODE_PROFILE:-}" "$NODE_NOTE"
     done
 }
 
@@ -93,18 +91,18 @@ machine_load() {
     local f
     f="$(machines_dir)/$1.conf"
     [ -f "$f" ] || return 1
-    MACH_NAME="$1"
+    NODE_NAME="$1"
     # So a second load in one process cannot inherit the first machine's
     # answers (same rule as image_profile_load).
-    MACH_SSH=""; MACH_DRIVER=""; MACH_DEVICE=""; MACH_ROOT=""; MACH_PROFILE=""
-    MACH_NOTE=""; MACH_MAC=""; MACH_LOCAL=""; MACH_VOLUME=""; MACH_DTB=""
-    MACH_BENCH_SSH=""; MACH_NET=""
-    MACH_BRIDGE=""  # declared, not discovered: readable when unreachable
-    MACH_ROLE=workstation
-    MACH_OS=any  # or an OS name for a machine that answers only for itself
+    NODE_SSH=""; NODE_DRIVER=""; NODE_DEVICE=""; NODE_ROOT=""; NODE_PROFILE=""
+    NODE_NOTE=""; NODE_MAC=""; NODE_LOCAL=""; NODE_VOLUME=""; NODE_DTB=""
+    NODE_BENCH_SSH=""; NODE_NET=""
+    NODE_BRIDGE=""  # declared, not discovered: readable when unreachable
+    NODE_ROLE=workstation
+    NODE_OS=any  # or an OS name for a machine that answers only for itself
     # shellcheck disable=SC1090
     . "$f"
-    [ -n "$MACH_DRIVER" ] && [ -n "$MACH_NOTE" ] || return 1
+    [ -n "$NODE_DRIVER" ] && [ -n "$NODE_NOTE" ] || return 1
 }
 
 # The reverse lookup: an ssh destination -> the machine it reaches. The ssh
@@ -115,7 +113,7 @@ machine_by_ssh() {
     machine_load "$want" 2>/dev/null && return 0
     for m in $(machine_list | awk '{print $1}'); do
         machine_load "$m" || continue
-        [ "$MACH_SSH" = "$want" ] && return 0
+        [ "$NODE_SSH" = "$want" ] && return 0
     done
     return 1
 }
@@ -129,23 +127,23 @@ load_driver() {
 
 # BatchMode so an unreachable machine fails immediately instead of prompting
 # into a script; ConnectTimeout because every fleet probe is bounded.
-# MACH_LOCAL (the MBP: reached by rebooting this shell out from under itself)
+# NODE_LOCAL (the MBP: reached by rebooting this shell out from under itself)
 # runs locally so every driver shares one spelling.
 m_ssh() {
-    if [ -n "${MACH_LOCAL:-}" ]; then
+    if [ -n "${NODE_LOCAL:-}" ]; then
         bash -c "$*"
         return $?
     fi
     # shellcheck disable=SC2086
     ssh -o BatchMode=yes -o ConnectTimeout="$(wk_ssh_timeout)" \
-        $(m_ssh_opts) "$MACH_SSH" "$@"
+        $(m_ssh_opts) "$NODE_SSH" "$@"
 }
 
-# -l root: the driving key is in root's authorized_keys. Keyed on MACH_ROLE:
+# -l root: the driving key is in root's authorized_keys. Keyed on NODE_ROLE:
 # a bench-device's system is replaced on demand and boots with its own
 # fresh host key each time (_unpinned_host_key_opts, shared with i_ssh).
 m_ssh_opts() {
-    [ "${MACH_ROLE:-}" = bench-device ] || return 0
+    [ "${NODE_ROLE:-}" = bench-device ] || return 0
     printf '%s' "-l root $(_unpinned_host_key_opts)"
 }
 
@@ -158,20 +156,15 @@ image_addr() {
     local a=''
     [ -n "${WK_IMAGE_HOST:-}" ] && { printf '%s' "$WK_IMAGE_HOST"; return 0; }
 
-    # MACH_BENCH_SSH is the name the card was seeded to join under
+    # NODE_BENCH_SSH is the name the card was seeded to join under
     # (_tailnet_name_for); empty on a machine whose bench system shares its name.
-    a=$(reach_tailnet "${MACH_BENCH_SSH:-${MACH_SSH:-$MACH_NAME}}" 2>/dev/null | awk '{print $1}')
+    a=$(reach_tailnet "${NODE_BENCH_SSH:-${NODE_SSH:-$NODE_NAME}}" 2>/dev/null | awk '{print $1}')
     [ -n "$a" ] && { printf '%s' "$a"; return 0; }
 
-    [ -n "${MACH_MAC:-}" ] || { printf '%s' "${MACH_SSH:-$MACH_NAME}"; return 0; }
-    a=$(reach_enumerate "$MACH_MAC" 2>/dev/null | awk '{print $1}')
+    [ -n "${NODE_MAC:-}" ] || { printf '%s' "${NODE_SSH:-$NODE_NAME}"; return 0; }
+    a=$(reach_enumerate "$NODE_MAC" 2>/dev/null | awk '{print $1}')
     # A failed sweep still returns the name, to fail resolving it honestly.
-    printf '%s' "${a:-${MACH_SSH:-$MACH_NAME}}"
-}
-
-image_hostname() {
-    image_profile_load "$MACH_PROFILE" >/dev/null 2>&1 && printf '%s' "$IMG_HOSTNAME" \
-        || printf '%s' "$MACH_NAME"
+    printf '%s' "${a:-${NODE_SSH:-$NODE_NAME}}"
 }
 
 # Different installs at the same address would trip a man-in-the-middle
@@ -193,7 +186,7 @@ i_ssh() {
 # no terminal, so a sudo that decides to prompt cannot be answered -- it hangs
 # or fails with a password prompt nobody sees. Failing fast says which.
 r_sudo() { # <command string>
-    if [ "${MACH_ROLE:-}" = bench-device ]; then r_ssh "$@"; else r_ssh "sudo -n $*"; fi
+    if [ "${NODE_ROLE:-}" = bench-device ]; then r_ssh "$@"; else r_ssh "sudo -n $*"; fi
 }
 
 # By ssh alias -- host or bench mode, whichever `dest` names. No
@@ -207,7 +200,7 @@ mac_ssh() {
 # No probe can derive `wk boot`'s *intent* half: once armed, the firmware
 # register and running system look unchanged. So arming leaves one record of
 # intent on the machine it describes, not a second copy on the workstation.
-MACH_RECORD=/var/lib/wk/boot-armed
+NODE_RECORD=/var/lib/wk/boot-armed
 
 # Stamped with its own boot id: "has this arming been spent" is then a
 # comparison of two values from one kernel, not two machines' wall clocks.
@@ -217,8 +210,8 @@ record_write() {
     # to put one. Not an error -- for a medium-armed board the arming itself is
     # on the medium and `wk boot --status` reads it there (b_evidence), which is
     # evidence rather than a record and is what decides the next boot anyway.
-    [ "${MODE_CHANNEL:-host}" = host ] || { debug "$MACH_NAME answered as its bench system; the arming is on its medium and no record is written"; return 0; }
-    m_ssh "sudo mkdir -p $(dirname $MACH_RECORD) && sudo tee $MACH_RECORD >/dev/null <<EOF
+    [ "${MODE_CHANNEL:-host}" = host ] || { debug "$NODE_NAME answered as its bench system; the arming is on its medium and no record is written"; return 0; }
+    m_ssh "sudo mkdir -p $(dirname $NODE_RECORD) && sudo tee $NODE_RECORD >/dev/null <<EOF
 image=$1
 profile=$2
 device=$3
@@ -233,17 +226,17 @@ EOF"
 # system does not mount. Returns nothing rather than a lying "no record".
 record_read() {
     [ "${MODE_CHANNEL:-host}" = host ] || return 0
-    m_ssh "sudo cat $MACH_RECORD 2>/dev/null" || true
+    m_ssh "sudo cat $NODE_RECORD 2>/dev/null" || true
 }
 # The same guard record_read carries, and for the same reason: the record lives
 # on the *host* install's root, so on a machine answering as its bench system
 # there is nothing here to clear. Silence rather than failure -- a medium-armed
 # board answers as its bench system precisely when its arming is what needs
-# disarming (pi-tryboot, 2026-09-01), and the record's own spent-ness is
-# computed from boot ids, so an uncleared one misleads nobody.
+# disarming (pi-tryboot), and the record's own spent-ness is computed from
+# boot ids, so an uncleared one misleads nobody.
 record_clear() {
-    [ "${MODE_CHANNEL:-host}" = host ] || { debug "$MACH_NAME answered as its bench system; its arming record is on the host install and stays"; return 0; }
-    m_ssh "sudo rm -f $MACH_RECORD"
+    [ "${MODE_CHANNEL:-host}" = host ] || { debug "$NODE_NAME answered as its bench system; its arming record is on the host install and stays"; return 0; }
+    m_ssh "sudo rm -f $NODE_RECORD"
 }
 
 # Refuse to mutate a machine between `wk boot` and the reboot it asked for:
@@ -264,10 +257,10 @@ machine_armed_barrier() { # <what this command would do>
     if [ -n "$armed_boot" ] && [ -n "$now_boot" ] && [ "$armed_boot" != "$now_boot" ]; then
         return 0    # spent: the machine has rebooted since it was armed
     fi
-    barrier "$MACH_NAME is armed for system '$img' and has not rebooted yet.
+    barrier "$NODE_NAME is armed for system '$img' and has not rebooted yet.
     $what
-    Disarm it first:   wk boot $MACH_NAME --disarm
-    Or see the state:  wk boot $MACH_NAME --status"
+    Disarm it first:   wk boot $NODE_NAME --disarm
+    Or see the state:  wk boot $NODE_NAME --status"
 }
 
 # --- shared driver parts -----------------------------------------------------
@@ -297,13 +290,13 @@ EOS
 )
 
 # base | bench | unknown, from the device the running root is on -- not from
-# /etc/wk-image alone, since every image carries that marker. MACH_ROOT is
+# /etc/wk-image alone, since every image carries that marker. NODE_ROOT is
 # tested first: on a one-medium board (rpi3) both patterns match.
 b_system_kind() { # <root device>
     local rd="${1:-}"
     [ -n "$rd" ] || { printf 'unknown'; return 0; }
-    case "$rd" in "${MACH_ROOT:-@none@}"*) printf 'base'; return 0 ;; esac
-    case "$rd" in "${MACH_DEVICE:-@none@}"*) printf 'bench'; return 0 ;; esac
+    case "$rd" in "${NODE_ROOT:-@none@}"*) printf 'base'; return 0 ;; esac
+    case "$rd" in "${NODE_DEVICE:-@none@}"*) printf 'bench'; return 0 ;; esac
     printf 'unknown'
 }
 
@@ -339,14 +332,14 @@ b_probe() {
     return 0
 }
 
-# Mac drivers override this: a MACH_LOCAL machine answers only for itself.
+# Mac drivers override this: a NODE_LOCAL machine answers only for itself.
 b_probeable() { :; }
 
 # One line: the wk-managed media on this machine and what is on it now.
 # Every driver overrides this; this default exists so one without one still answers.
 b_media() {
-    [ -n "${MACH_DEVICE:-}" ] || { printf 'no wk-managed media declared'; return 0; }
-    printf 'media %s (this driver says nothing more about it)' "$MACH_DEVICE"
+    [ -n "${NODE_DEVICE:-}" ] || { printf 'no wk-managed media declared'; return 0; }
+    printf 'media %s (this driver says nothing more about it)' "$NODE_DEVICE"
 }
 
 # ssh over whichever channel answered.
@@ -372,12 +365,12 @@ b_booted_at() {
 # comparison. Linux only; macOS derives one from kern.boottime instead.
 b_boot_id() { r_ssh 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true; }
 
-# The bench system's boot partition on MACH_DEVICE: the first one, unless
+# The bench system's boot partition on NODE_DEVICE: the first one, unless
 # the system shares its medium with the rescue (pi-sd overrides this with
 # the second system's).
-b_boot_part() { disk_part "$MACH_DEVICE" 1; }
+b_boot_part() { disk_part "$NODE_DEVICE" 1; }
 
-# Which partitions of MACH_DEVICE can hold a system's boot files: the first,
+# Which partitions of NODE_DEVICE can hold a system's boot files: the first,
 # unless the driver says otherwise (pi-sd: the bench system is on 3-4 beside
 # the rescue; pi-tryboot: 1-2 and, when written, a second system on 3-4).
 B_SYSTEM_PARTS="1"
@@ -385,7 +378,7 @@ B_SYSTEM_PARTS="1"
 # Partition <n> of the bench medium, as the enumeration below addresses it.
 # One hook so a driver that *resolves* its medium instead of declaring it
 # (pi-mbr) overrides the device half once, not the enumeration.
-b_system_part() { disk_part "$MACH_DEVICE" "$1"; }
+b_system_part() { disk_part "$NODE_DEVICE" "$1"; }
 
 # The systems the bench medium holds, one `<boot partition> <image id>` line
 # each, read off every candidate partition. A partition that is absent or
@@ -408,26 +401,26 @@ b_systems() {
 machine_select_system() { # <requested id, or empty for the sole system>
     local want="$1" systems count
     systems=$(b_systems) \
-        || die "could not read $MACH_DEVICE on $MACH_NAME to see what it holds"
+        || die "could not read $NODE_DEVICE on $NODE_NAME to see what it holds"
     count=$(printf '%s' "$systems" | grep -c . || true)
     if [ "$count" -eq 0 ]; then
-        die "$MACH_DEVICE on $MACH_NAME holds no wk system yet.
-    Write one first:  wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE
+        die "$NODE_DEVICE on $NODE_NAME holds no wk system yet.
+    Write one first:  wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE
     ('wk sysimage ls' lists what a workspace here has built)"
     fi
     if [ -z "$want" ]; then
-        [ "$count" -eq 1 ] || die "$MACH_DEVICE on $MACH_NAME holds $count systems:
+        [ "$count" -eq 1 ] || die "$NODE_DEVICE on $NODE_NAME holds $count systems:
 $(printf '%s\n' "$systems" | awk '{ printf "        %s  (on %s)\n", $2, $1 }')
-    Name the one to boot:  wk boot $MACH_NAME --system <id>"
+    Name the one to boot:  wk boot $NODE_NAME --system <id>"
         printf '%s\n' "$systems"
         return 0
     fi
     local line
     line=$(printf '%s\n' "$systems" | awk -v id="$want" '$2 == id { print; exit }')
-    [ -n "$line" ] || die "$MACH_DEVICE on $MACH_NAME holds:
+    [ -n "$line" ] || die "$NODE_DEVICE on $NODE_NAME holds:
 $(printf '%s\n' "$systems" | awk '{ printf "        %s  (on %s)\n", $2, $1 }')
-    not '$want'. Write it first:  wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE
-    (a medium already holding a system takes a second one at ...:$MACH_DEVICE@second)"
+    not '$want'. Write it first:  wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE
+    (a medium already holding a system takes a second one at ...:$NODE_DEVICE@second)"
     printf '%s\n' "$line"
 }
 
@@ -437,8 +430,8 @@ $(printf '%s\n' "$systems" | awk '{ printf "        %s  (on %s)\n", $2, $1 }')
 # system, the first one's dump is the stale one.
 b_diag() {
     local systems line part id
-    systems=$(b_systems) || die "cannot read $MACH_DEVICE on $MACH_NAME"
-    [ -n "$systems" ] || { echo "($MACH_DEVICE holds no wk system, so there is no dump to read)"; return 0; }
+    systems=$(b_systems) || die "cannot read $NODE_DEVICE on $NODE_NAME"
+    [ -n "$systems" ] || { echo "($NODE_DEVICE holds no wk system, so there is no dump to read)"; return 0; }
     while read -r part id; do
         [ -n "$part" ] || continue
         printf '== %s (%s) ==\n' "$id" "$part"
@@ -469,17 +462,17 @@ EOF
 # boot_partition). One implementation: the flag rides the reboot syscall and
 # systemd is the only userspace here that passes it, so the refusal when it
 # cannot -- a BusyBox bench system has neither systemctl nor /run/systemd --
-# belongs beside the call rather than in each driver (measured on the rpi4,
-# 2026-09-02: staged perfectly, never rebooted, every leg lost).
+# belongs beside the call rather than in each driver: staged perfectly but
+# never rebooted loses every leg, silently, without it.
 #
 # Detached and after a delay, like every reboot here: it kills the ssh session
 # that asked for it.
 b_reboot_tryboot() {
     r_ssh "command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd ]" >/dev/null 2>&1 \
-        || die "$MACH_NAME answered on a system with no systemd, which cannot pass the
+        || die "$NODE_NAME answered on a system with no systemd, which cannot pass the
     tryboot flag to the reboot it rides on (only 'systemctl reboot' with
     /run/systemd/reboot-param does). Arm from a system that can:
-        wk boot $MACH_NAME --back"
+        wk boot $NODE_NAME --back"
     r_sudo "setsid sh -c 'sleep 3; printf \"0 tryboot\" > /run/systemd/reboot-param && systemctl reboot' </dev/null >/dev/null 2>&1 &" >/dev/null
 }
 

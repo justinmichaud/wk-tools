@@ -5,11 +5,11 @@
 # armed, correct files, enumerates in 1.5 s under Linux -- skipped on either
 # bus, warm or cold). The kernel has no such problem, so the two jobs are
 # split: the *firmware* loads the kernel from the rescue's SD card, which it
-# provably boots, and the *kernel* mounts the bench root on MACH_DEVICE by
+# provably boots, and the *kernel* mounts the bench root on NODE_DEVICE by
 # PARTUUID. The bench medium stays the measured system's storage; only the
 # few MB the firmware reads leave it.
 #
-# Arming stages those files -- the bench system's kernel, MACH_DTB, overlays
+# Arming stages those files -- the bench system's kernel, NODE_DTB, overlays
 # and cmdline into `second/` on the SD's boot partition, and `tryboot.txt`
 # (its config.txt plus one `os_prefix=second/` line) beside the rescue's
 # untouched config.txt -- and the one shot is the reboot itself:
@@ -41,10 +41,10 @@ BOOT_ARMING=medium
 # staging is files copied onto the SD as root, which either system can do. The
 # *flag* is not: it rides the reboot syscall, and the only userspace here that
 # passes it is systemd (`/run/systemd/reboot-param` + `systemctl reboot`). A
-# BusyBox bench system has neither, so an arming made from one stages perfectly
-# and then does not reboot -- measured on the rpi4 2026-09-02: three attempts a
-# round, each staging the right kernel and cmdline, the board still running the
-# system the *previous* leg armed, and every B leg lost.
+# BusyBox bench system has neither, so an arming made from one stages
+# perfectly and then does not reboot: every leg still stages the right kernel
+# and cmdline, the board still runs whatever system the *previous* leg
+# armed, and the leg that was supposed to run is lost.
 #
 # Deciding it per running system rather than per board would be more precise
 # (the yocto bench system does carry systemd) and is a branch that would then
@@ -61,10 +61,10 @@ BOOT_ORDER_NORMAL=""
 
 # The bench medium's own boot partition still holds the system's identity
 # (wk-image.id) and diagnostics; only the *reading* of the kernel moved.
-# b_boot_part's default (partition 1 of MACH_DEVICE) is already that.
+# b_boot_part's default (partition 1 of NODE_DEVICE) is already that.
 
 # The medium can hold a second system on partitions 3-4 (`wk sysimage write
-# --disk <machine>:$MACH_DEVICE@second`, the same shape as the rpi3's card):
+# --disk <machine>:$NODE_DEVICE@second`, the same shape as the rpi3's card):
 # two releases with two library stacks, resident side by side, so an A/B
 # across *images* is an arming choice rather than a rewrite. Arming stages
 # from the selected system's own boot partition -- its kernel, its cmdline,
@@ -93,7 +93,7 @@ TRYBOOT_CMDLINE_SED='/ panic=[0-9]/!s/[[:space:]]*$/ panic=10/'
 # systemd puts inside an `ExecStart=/bin/sh -c '...'`. wk selftest asserts both.
 _tryboot_sd_sh() {
     local part
-    part=$(disk_part "$(disk_of_part "$MACH_ROOT")" 1)
+    part=$(disk_part "$(disk_of_part "$NODE_ROOT")" 1)
     printf '%s' "wk_sd_own=; \
 wk_sd_boot() { \
 wk_sd_m=\$(grep -m1 \"^$part \" /proc/mounts | cut -d\" \" -f2); \
@@ -171,20 +171,20 @@ wk_sd_drop"
 }
 
 # The half that runs *inside* the bench system, first thing after its root is
-# up. It exists because this board does not consume the tryboot flag: measured
-# 2026-09-01, a plain reboot and a cold power cycle both read `tryboot.txt`
-# again and came back as the bench system, with `/proc/cmdline` carrying
-# `second/cmdline.txt`s own `panic=10` and the SD `config.txt` holding no
-# `os_prefix`. So "one boot" has to be made true by the boot that spends it:
-# the staging goes away as the system it selected comes up, and every later
-# reboot reads config.txt and lands on the rescue.
+# up. It exists because this board does not consume the tryboot flag: a plain
+# reboot and a cold power cycle both read `tryboot.txt` again and come back as
+# the bench system, with `/proc/cmdline` carrying `second/cmdline.txt`s own
+# `panic=10` and the SD `config.txt` holding no `os_prefix`. So "one boot" has
+# to be made true by the boot that spends it: the staging goes away as the
+# system it selected comes up, and every later reboot reads config.txt and
+# lands on the rescue.
 #
 # Without this the board cannot leave the bench system at all -- and `b_disarm`
 # cannot help, because it is addressed to a rescue that this same staging
 # stops the board from ever booting.
 #
 # The SD's boot partition is partition 1 of the disk the *rescue* root is on
-# (MACH_ROOT), which is a fact this machine's conf already states.
+# (NODE_ROOT), which is a fact this machine's conf already states.
 # **No single quote and no `%` may appear in what this returns** --
 # interpolated into a systemd `ExecStart=/bin/sh -c '...'`, for the reasons
 # boot/pi-sd.sh's copy states. wk selftest asserts both.
@@ -207,9 +207,9 @@ TRYBOOT_ARMED=""
 b_arm() {
     [ -n "${ARM_SYS_PART:-}" ] \
         || die "b_arm needs the selected boot partition (machine_select_system, cmd/boot)"
-    r_ssh "$(tryboot_stage_sh "$ARM_SYS_PART" "$MACH_DTB")" \
-        || die "could not stage the tryboot files on $MACH_NAME.
-    Arming copies the selected system's kernel out of $MACH_DEVICE's boot
+    r_ssh "$(tryboot_stage_sh "$ARM_SYS_PART" "$NODE_DTB")" \
+        || die "could not stage the tryboot files on $NODE_NAME.
+    Arming copies the selected system's kernel out of $NODE_DEVICE's boot
     partition onto the SD, so the board has to answer -- as its rescue or as a
     bench system, either will do -- and both media have to be readable there."
     TRYBOOT_ARMED=1
@@ -254,7 +254,7 @@ b_reboot() {
 # flag itself is write-only and spent by any boot, so it is never evidence.
 # The systems the medium holds are evidence too: which ids an arming can name.
 b_evidence() {
-    printf 'lane=kernel from the SD via tryboot (one boot, firmware-reverting); bench root on %s\n' "$MACH_DEVICE"
+    printf 'lane=kernel from the SD via tryboot (one boot, firmware-reverting); bench root on %s\n' "$NODE_DEVICE"
     local staged systems source
     staged=$(r_ssh "$(_tryboot_sd_sh)
         boot=\$(wk_sd_boot \"-o ro\") || exit 0
@@ -262,16 +262,15 @@ b_evidence() {
         wk_sd_drop" 2>/dev/null | tr -d '\r' | head -1) || staged=""
 
     # Which config the running boot came from, and not which one was staged.
-    # `wk boot --status` used to answer "bench mode, system X", which is true
-    # and says nothing about *how* the board got there -- so a board reading
-    # tryboot.txt on a plain reboot (this firmware does not consume the flag)
-    # looked exactly like a board that had been armed for it. Hours went into
-    # that. The running root= against the two cmdlines on the SD tells them
-    # apart in one read, so the status says it.
+    # Answering only "bench mode, system X" is true and says nothing about
+    # *how* the board got there -- so a board reading tryboot.txt on a plain
+    # reboot (this firmware does not consume the flag) looks exactly like a
+    # board that had been armed for it. The running root= against the two
+    # cmdlines on the SD tells them apart in one read, so the status says it.
     # `tr` and `grep`, not a sed expression: the backslashes in a sed script
-    # have to survive this string, the ssh command line and the remote shell,
-    # and getting that wrong is what made this read `unreadable` on the first
-    # board it ran against. Splitting on spaces needs no escapes at all.
+    # have to survive this string, the ssh command line and the remote shell
+    # all at once, and getting any one wrong reads back `unreadable`.
+    # Splitting on spaces needs no escapes at all.
     source=$(r_ssh "$(_tryboot_sd_sh)
         wk_root_of() { tr \" \" \"\\n\" < \"\$1\" | grep \"^root=\" | head -1; }
         r=\$(wk_root_of /proc/cmdline)
@@ -304,7 +303,7 @@ b_evidence() {
 # The wk-managed media, in one line, for the fleet block in `wk status`.
 b_media() {
     printf '%s holds the bench system(s): root on 1-2 and, when written, a second on 3-4; the armed kernel is tryboot-staged onto the SD, which also carries the rescue' \
-        "$MACH_DEVICE"
+        "$NODE_DEVICE"
 }
 
 # How this board is made from nothing, derived from its conf. sd-first: the
@@ -312,18 +311,18 @@ b_media() {
 # firmware-booted at all.
 b_reprovision() {
     cat <<REPROV
-wk sysimage build $MACH_PROFILE
+wk sysimage build $NODE_PROFILE
     in a workspace; hours
-wk sysimage write --from <path> --disk <reader>:$(disk_of_part "$MACH_ROOT") --rescue --profile $MACH_PROFILE
+wk sysimage write --from <path> --disk <reader>:$(disk_of_part "$NODE_ROOT") --rescue --profile $NODE_PROFILE
     the SD card -- the system this board falls back to, and the firmware's boot medium
-wk pi boot-order $MACH_NAME sd-first
+wk pi boot-order $NODE_NAME sd-first
     the SD first: the bench medium is mounted by the kernel, never firmware-booted
-wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE --profile <bench profile>
+wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE --profile <bench profile>
     the bench system's root medium, written from the rescue
-wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE@second --profile <bench profile>
+wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE@second --profile <bench profile>
     optional: a second system beside the first (partitions 3-4), for an
-    A/B across images; 'wk boot $MACH_NAME --system <id>' picks one
-wk boot $MACH_NAME
+    A/B across images; 'wk boot $NODE_NAME --system <id>' picks one
+wk boot $NODE_NAME
     one shot; the firmware reverts by itself
 REPROV
 }

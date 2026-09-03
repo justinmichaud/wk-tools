@@ -2,10 +2,15 @@
 # Provisioning for the wk podman machine, run by podman after first boot.
 #
 # Scope is deliberately narrow: only OS-level state that has no dependency on
-# wk-tools itself. Anything that needs the repo -- the egress proxy, the
-# workspace tooling -- is installed afterwards by host/macos/vmtools.sh, which
-# copies the *local* working tree into the VM. Cloning from GitHub here would
-# mean nothing could be tested until it was pushed.
+# wk-tools itself. The repo is not copied in at all -- the machine mounts this
+# checkout read-only at /opt/wk-tools (host/macos/machine.sh), so the VM runs
+# the working tree and nothing has to be pushed to GitHub to be testable --
+# and what needs the repo (the egress proxy, the SDK) is installed around that
+# mount afterwards by host/macos/vmtools.sh.
+#
+# Nothing here touches /opt/wk-tools or {{ wk_root }}/secrets: both are mounts,
+# and a task that chowns or creates one either fails against a read-only
+# filesystem or writes into this host's own directories.
 #
 # Recovering from `podman machine rm` is still one `./setup`.
 
@@ -17,10 +22,10 @@
 
   tasks:
     - name: Create the workspace storage tree
-      # Everything lives on the VM's native filesystem. Hardlinks between base
+      # Every directory here is on the VM's native filesystem, and none of them
+      # is one of the machine's three host mounts. Hardlinks between base
       # snapshots only work within one filesystem, and compiling over virtiofs
-      # would dominate build time -- neither is possible on a host mount, and
-      # this machine deliberately has none.
+      # would dominate build time -- so nothing a build touches may be a mount.
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -38,7 +43,6 @@
         - "{{ wk_root }}/cache/buildroot/dl"
         - "{{ wk_root }}/cache/buildroot/ccache"
         - "{{ wk_root }}/tools"
-        - /opt/wk-tools
 
     - name: Create the Pi allowlist file
       # Read back by ./setup when it regenerates the firewall, so the test
@@ -67,23 +71,6 @@
         modification_time: preserve
         access_time: preserve
 
-    - name: Lock down the secrets directory
-      # Holds the build deploy key and the shared Claude credentials.
-      ansible.builtin.file:
-        path: "{{ wk_root }}/secrets"
-        state: directory
-        owner: core
-        group: core
-        mode: "0700"
-
-    - name: Let core own the tooling directory
-      ansible.builtin.file:
-        path: /opt/wk-tools
-        state: directory
-        owner: core
-        group: core
-        mode: "0755"
-
     - name: Layer the two packages the base image lacks
       # The machine image is Fedora CoreOS: an ostree-based immutable OS, so
       # there is no dnf and packages are layered with rpm-ostree. Layering
@@ -111,34 +98,6 @@
       failed_when:
         - pkgs.rc != 0
         - "'already requested' not in (pkgs.stderr | default(''))"
-
-    - name: Create the workspace bridge network
-      # VESTIGIAL: this bridge belongs to a rootful-podman + nftables model
-      # that targets/container.sh's WK_SANDBOX comment rules out in favour of
-      # `--network none` plus the user proxy. Left in
-      # place because removing it is only testable on the macOS host -- take
-      # it out there, together with the nftables task below, and prove the
-      # round trip with `podman machine rm` + `./setup`.
-      ansible.builtin.command:
-        cmd: >
-          podman network create
-          --interface-name wk0
-          --subnet 10.89.7.0/24
-          --gateway 10.89.7.1
-          wk
-      register: netcreate
-      changed_when: netcreate.rc == 0
-      failed_when:
-        - netcreate.rc != 0
-        - "'already used' not in (netcreate.stderr | default(''))"
-
-    - name: Enable nftables at boot
-      # VESTIGIAL: see the bridge task above -- the egress policy is the user
-      # proxy, and nothing writes an nftables ruleset.
-      ansible.builtin.systemd_service:
-        name: nftables
-        enabled: true
-      failed_when: false
 
     - name: Layer Tailscale
       # Runs on the VM, not inside a workspace. That is deliberate: a workspace

@@ -167,10 +167,10 @@ reach_without_tailnet() {
 
     # Called from inside the fleet walk, so an unconditional sweep here
     # would lose the line to its own ceiling. A fleet device is on the
-    # tailnet under its role names (MACH_SSH, MACH_BENCH_SSH), which need
+    # tailnet under its role names (NODE_SSH, NODE_BENCH_SSH), which need
     # not be the machine name.
-    for n in "$m" $(kv_field "$WK_ROOT/boot/machines/$m.conf" MACH_SSH | tr -d '"'"'"' ') \
-                  $(kv_field "$WK_ROOT/boot/machines/$m.conf" MACH_BENCH_SSH | tr -d '"'"'"' '); do
+    for n in "$m" $(kv_field "$WK_ROOT/boot/machines/$m.conf" NODE_SSH | tr -d '"'"'"' ') \
+                  $(kv_field "$WK_ROOT/boot/machines/$m.conf" NODE_BENCH_SSH | tr -d '"'"'"' '); do
         [ -z "$(reach_tailnet "$n")" ] || return 0
     done
 
@@ -183,7 +183,7 @@ reach_without_tailnet() {
         return 0
     fi
 
-    mac=$(kv_field "$WK_ROOT/boot/machines/$m.conf" MACH_MAC | tr -d '"'"'"' ')
+    mac=$(kv_field "$WK_ROOT/boot/machines/$m.conf" NODE_MAC | tr -d '"'"'"' ')
     [ -n "$mac" ] || return 0  # the one thing a board keeps across every image
 
     reach_enumerate "$mac" && return 0  # an unfinished sweep beats reporting absence

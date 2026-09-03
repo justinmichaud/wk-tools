@@ -208,12 +208,12 @@ if [ -n "$KERNEL_STAGE" ]; then
     POST_IMAGE_ORIG=$(sed -n 's/^BR2_ROOTFS_POST_IMAGE_SCRIPT="\(.*\)"$/\1/p' .config | tail -1)
     # The device tree this board's firmware asks for, taken from the
     # configuration that already names it rather than repeated here.
-    MACH_DTB_NAME=$(sed -n 's/^BR2_LINUX_KERNEL_INTREE_DTS_NAME="\(.*\)"$/\1/p' .config | tail -1).dtb
-    [ "$MACH_DTB_NAME" != ".dtb" ] \
+    NODE_DTB_NAME=$(sed -n 's/^BR2_LINUX_KERNEL_INTREE_DTS_NAME="\(.*\)"$/\1/p' .config | tail -1).dtb
+    [ "$NODE_DTB_NAME" != ".dtb" ] \
         || fail "$DEFCONFIG names no BR2_LINUX_KERNEL_INTREE_DTS_NAME, so there is no
     device tree name to install the pinned kernel's copy of."
-    [ -f "$KERNEL_STAGE/dtb/$MACH_DTB_NAME" ] \
-        || fail "the pinned kernel carries no $MACH_DTB_NAME"
+    [ -f "$KERNEL_STAGE/dtb/$NODE_DTB_NAME" ] \
+        || fail "the pinned kernel carries no $NODE_DTB_NAME"
     WK_POST_IMAGE="$WORKDIR/wk-kernel-post-image.sh"
     cat > "$WK_POST_IMAGE" <<POSTIMG
 #!/bin/sh
@@ -222,7 +222,7 @@ if [ -n "$KERNEL_STAGE" ]; then
 set -e
 b="\$1"
 cp "$KERNEL_STAGE/boot/zImage" "\$b/zImage"
-cp "$KERNEL_STAGE/dtb/$MACH_DTB_NAME" "\$b/"
+cp "$KERNEL_STAGE/dtb/$NODE_DTB_NAME" "\$b/"
 mkdir -p "\$b/rpi-firmware/overlays"
 cp -f "$KERNEL_STAGE/dtb/overlays/"*.dtbo "\$b/rpi-firmware/overlays/"
 echo "wk: installed the pinned kernel $KERNEL_RELEASE and its device trees into \$b"

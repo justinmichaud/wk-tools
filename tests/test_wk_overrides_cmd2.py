@@ -70,7 +70,7 @@ class TestDispatcherProtocolDocumented(unittest.TestCase):
         header = "\n".join(WK.read_text().splitlines()[:40])
         names = [
             "WK_NAME", "WK_IN_VM", "WK_ROW_LABEL", "WK_HOST_SELF",
-            "WK_EXPECT_TREE", "WK_NO_DELEGATE", "WK_QUIET", "WK_FORCE",
+            "WK_NO_DELEGATE", "WK_QUIET", "WK_FORCE",
             "WK_TARGET", "WK_CONFIG",
         ]
         missing = [n for n in names if n not in header]

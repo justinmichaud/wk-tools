@@ -623,21 +623,11 @@ def render_machine_block(m, colour, widths=None):
     for f in m["facts"]:
         if f.get("type") == "wk-tools":
             what = "wk-tools" + (" (%s)" % f["copy"] if f.get("copy") else "")
-            # The tree hash is the answer; the commit is context, shown only
-            # when there is one. Every rsynced copy reports `-` for it (copied
-            # with `--exclude .git`), so showing it unconditionally would be a
-            # column of dashes sitting between the label and the thing the
-            # reader came for.
             verdict = (paint("in sync", "good", colour) if f.get("insync")
                        else paint("DIFFERS from the workstation (%s)" % f.get("expect", "?"),
                                   "bad", colour))
-            extra = ""
-            if f.get("sha") and f["sha"] != "-":
-                extra = paint("  at %s%s" % (f["sha"], "+dirty" if f.get("dirty") else ""),
-                              "dim", colour)
-            elif f.get("dirty"):
-                extra = paint("  +dirty", "dim", colour)
-            wr.kv(what, "%s  %s%s" % (f.get("tree", "?"), verdict, extra))
+            ident = (f.get("sha") or "?") + ("+dirty" if f.get("dirty") else "")
+            wr.kv(what, "%s  %s" % (paint(ident, "dim", colour), verdict))
             # The command, not "push it there": which one it is depends on
             # what kind of copy this is, and none of the three is guessable.
             if f.get("fix"):
@@ -1252,7 +1242,7 @@ function render(doc) {
       if (f.type === "wk-tools") {
         const what = "wk-tools" + (f.copy ? ` (${f.copy})` : "");
         const ver = (f.sha || "-") + (f.dirty ? "+dirty" : "");
-        return `<div>${ESC(what)} ${ESC(ver)} ${ESC(f.tree)} ` + (f.insync
+        return `<div>${ESC(what)} ${ESC(ver)} ` + (f.insync
           ? chip("in sync", "good")
           : chip("differs from the workstation (" + (f.expect || "?") + ")", "bad")
             + (f.fix ? ` <code class="fix">${ESC(f.fix)}</code>` : "")) + `</div>`;

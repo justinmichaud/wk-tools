@@ -109,8 +109,10 @@ refresh_git_index "$SRC"
 # checksum (dotfiles/gitconfig's index.skipHash), and the next recipe whose
 # cargo walks up to /src/WebKit/.git to fingerprint its own sources refuses it
 # -- "invalid data in index - calculated checksum does not match expected",
-# which is librsvg's do_compile on 2026-09-02. Pinning it for this script alone
-# fixed the index once and left every task free to spoil it again.
+# which is librsvg's do_compile. Pinning it for this script alone is not
+# enough: every other task still runs git unpinned and is free to spoil the
+# index again, so the pin has to reach every task through bitbake's own
+# passthrough.
 export BB_ENV_PASSTHROUGH_ADDITIONS="${BB_ENV_PASSTHROUGH_ADDITIONS:-} DL_DIR SSTATE_DIR GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1"
 
 # A UTF-8 locale, or poky's sanity check stops the build; C.UTF-8 is the
@@ -560,6 +562,11 @@ case "$STAGE" in
                 2>/dev/null | wc -l | tr -d ' ')
             [ "$dirty" = 0 ] || fail "$SRC has $dirty uncommitted change(s); a slot is built from a
     commit and nothing else. Commit or discard them in the workspace first."
+            # t_spawn (targets/container.sh) execs this directly with no
+            # WK_ROOT and no lib/target.sh sourced, so there is no t_mirror_dir to ask;
+            # it always runs already inside a container, at the fixed bind
+            # mount that driver names (t_mirror_dir there,
+            # tests/test_mirror_path.py's named exception).
             git -C "$SRC" cat-file -e "$COMMIT^{commit}" 2>/dev/null \
                 || git -C "$SRC" fetch --quiet /mirror/WebKit.git "$COMMIT" \
                 || fail "$COMMIT is not in this machine's mirror; 'wk ab' and 'wk pr' fetch a PR head into it first"

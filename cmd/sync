@@ -40,11 +40,11 @@
 # its own furniture: that is one call into its driver (t_sync).
 #
 # Inside a workspace only the first of those exists to ask for: the
-# checkout's own fetch, from the mirror bind-mounted read-only at
-# /mirror/WebKit.git. --target/--all/--tools name a machine's furniture, and
-# a name that is not this workspace's own names a different workspace --
-# both are outside what a workspace can see, and are refused with the
-# invocation to type on the host instead.
+# checkout's own fetch, from the mirror that workspace reads (t_mirror_dir).
+# --target/--all/--tools name a machine's furniture, and a name that is not
+# this workspace's own names a different workspace -- both are outside what a
+# workspace can see, and are refused with the invocation to type on the host
+# instead.
 
 set -euo pipefail
 WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -187,13 +187,16 @@ net_refspecs() { # <remote>
 # does, as a portable `sh` snippet (the checkout is on the far side of a
 # container exec or an ssh, so this is generated here and run there).
 #
-# The mirror when the machine keeps one and it is mounted in there
-# (a container's /mirror): one local fetch, carrying every remote the mirror
-# carries in the layout it keeps them in. Otherwise the upstreams
-# themselves, one fetch each, over the slow egress-proxy path -- and only
-# the remotes the checkout actually has: one made before `wpe` was wired in
-# has no such remote, and naming it would fail the whole fetch over one that
-# was never there.
+# The mirror the target names (t_mirror_dir) when it names one: one local
+# fetch, carrying every remote the mirror carries in the layout it keeps them
+# in. Otherwise the upstreams themselves, one fetch each, over the slow
+# egress-proxy path -- and only the remotes the checkout actually has: one
+# made before `wpe` was wired in has no such remote, and naming it would fail
+# the whole fetch over one that was never there.
+#
+# The `[ -d ]` test is not the same question as "does this target have a
+# mirror": a guest cloned from a base built before its mirror existed carries
+# no mirror at the path its driver names, and must still fetch.
 #
 # --no-tags on both: a fetch that follows tags re-negotiates every tag the
 # source has for refs nothing here builds from (measured against a
@@ -209,10 +212,12 @@ ws_fetch_script() { # <src> <mirror-dir>
     # into a filename that happens to be there.
     printf 'set -f\n'
     printf 'cd %s || exit 1\n' "$(sh_quote "$src")"
-    printf 'if [ -d %s ]; then\n' "$(sh_quote "$mirror")"
-    printf '    git fetch --no-tags --prune --quiet %s %s || exit 1\n' \
-        "$(sh_quote "$mirror")" "$(mirror_refspecs)"
-    printf '    echo from=mirror\n    exit 0\nfi\n'
+    if [ -n "$mirror" ]; then
+        printf 'if [ -d %s ]; then\n' "$(sh_quote "$mirror")"
+        printf '    git fetch --no-tags --prune --quiet %s %s || exit 1\n' \
+            "$(sh_quote "$mirror")" "$(mirror_refspecs)"
+        printf '    echo from=mirror\n    exit 0\nfi\n'
+    fi
     printf 'rc=0\n'
     for r in $(wk_mirror_default_remotes); do
         printf 'if git remote get-url %s >/dev/null 2>&1; then\n' "$(sh_quote "$r")"
@@ -432,20 +437,21 @@ sync_workspaces() {
             fi
             printf '  %-24s ' "$ws" >&2
 
-            # /mirror is where a container's copy of the mirror is mounted;
-            # ws_fetch_script (above) decides from inside the checkout
-            # whether it is there. This is the one implementation of a
-            # workspace's fetch: `wk new` reaches it by running
-            # `wk sync <name>` at creation rather than fetching itself.
+            # The mirror this workspace's target names (t_mirror_dir) --
+            # bind-mounted for a container, in the guest for a macOS one, on
+            # the box for a build machine's; ws_fetch_script (above) decides
+            # from inside the checkout whether it is really there. This is the
+            # one implementation of a workspace's fetch: `wk new` reaches it by
+            # running `wk sync <name>` at creation rather than fetching itself.
             stage_begin
             out=$(t_exec "$ws" sh -c \
-                    "$(ws_fetch_script "$(t_src "$ws")" /mirror/WebKit.git)" \
+                    "$(ws_fetch_script "$(t_src "$ws")" "$(t_mirror_dir "$ws")")" \
                     2>/dev/null) && rc=0 || rc=$?
             stage_end "workspace fetch $ws"
             if [ "$rc" = 0 ]; then
                 case "$out" in
                     *from=mirror*)  echo "ok  (from the mirror)" >&2 ;;
-                    *)              echo "ok  (over the network: this workspace has no /mirror -- remake it to get one)" >&2 ;;
+                    *)              echo "ok  (over the network: no mirror in this workspace -- remake it to get one)" >&2 ;;
                 esac
                 exit 0
             fi
@@ -584,68 +590,31 @@ if [ -d "$MIRROR" ]; then
     unchanged "mirror exists"
 else
     info "creating bare mirror (first run: this clones all of WebKit)"
-    git init --bare "$MIRROR"
-    # Repacking mid-fetch would rewrite packs that snapshots share inodes
-    # with. GC runs only from `wk gc`, and only when no workspace is running.
-    git -C "$MIRROR" config gc.auto 0
 fi
 
-wk_remotes | while read -r name url; do
-    [ -n "$name" ] || continue
-    if git -C "$MIRROR" remote get-url "$name" >/dev/null 2>&1; then
-        git -C "$MIRROR" remote set-url "$name" "$url"
-    else
-        git -C "$MIRROR" remote add "$name" "$url"
-        info "added remote $name"
-    fi
+info "fetching $(wk_mirror_default_remotes) (origin: $(wk_mirror_branches))"
 
-    # origin's branches become the mirror's OWN heads (git clone copies
-    # refs/heads, ignores refs/remotes); every other upstream is namespaced.
-    # Only wk_mirror_branches are carried: every branch would cost tens of
-    # gigabytes for histories nobody checks out.
-    # Tags are not needed to build a snapshot and would undo the branch-list
-    # saving below -- and a fetch follows every tag reachable from what it
-    # brings unless told not to, which is how a mirror carrying one branch
-    # ends up carrying every tag any of these four upstreams has.
-    git -C "$MIRROR" config "remote.$name.tagOpt" --no-tags
-
-    if [ "$name" = origin ]; then
-        git -C "$MIRROR" config --unset-all "remote.$name.fetch" 2>/dev/null || true
-        for _b in $(wk_mirror_branches); do
-            git -C "$MIRROR" config --add "remote.$name.fetch" \
-                "+refs/heads/$_b:refs/heads/$_b"
-        done
-    else
-        git -C "$MIRROR" config --replace-all "remote.$name.fetch" \
-            "+refs/heads/*:refs/remotes/$name/*"
-    fi
-done
-
-# A bare mirror has no HEAD by default, and `git clone` then warns "remote
-# HEAD refers to nonexistent ref, unable to checkout"; it is also the branch
-# the snapshot's clone starts on.
-git -C "$MIRROR" symbolic-ref HEAD "refs/heads/$(wk_mirror_branches | awk '{print $1}')" 2>/dev/null || true
-
-_to_fetch=$(wk_mirror_default_remotes)
-info "fetching $_to_fetch (origin: $(wk_mirror_branches))"
-
-# Fetch each remote separately rather than `remote update`: one unreachable
-# fork would otherwise abort the whole sync and leave no new snapshot.
-# --prune keeps deleted upstream branches from accumulating forever.
-for name in $_to_fetch; do
-    printf '  %-8s ' "$name" >&2
-    stage_begin
-    if git -C "$MIRROR" fetch --prune --quiet "$name" 2>/dev/null; then
-        stage_end "mirror fetch $name"
-        echo "ok" >&2
-    else
-        stage_end "mirror fetch $name"
-        echo "FAILED (continuing)" >&2
-    fi
-done
+# mirror_refresh_script (lib/store.sh) is the one implementation: the mirror
+# in a macOS guest and the one on a build box are made, wired and fetched by
+# the same snippet, so a workspace fetching from any of them finds the layout
+# every other one has. It prints one `mirror-fetch <remote> ok|FAILED` line
+# per upstream as it goes and survives an unreachable one; a mirror that could
+# not be made at all is what the refs/heads/main check below names.
+stage_begin
+{ sh -c "$(mirror_refresh_script "$MIRROR")" 2>/dev/null \
+      || warn "the mirror refresh did not finish"; } \
+    | while read -r _tag _name _state; do
+          [ "$_tag" = mirror-fetch ] || continue
+          case "$_state" in
+              ok) printf '  %-8s ok\n' "$_name" >&2 ;;
+              *)  printf '  %-8s FAILED (continuing)\n' "$_name" >&2 ;;
+          esac
+      done
+stage_end "mirror fetch"
 
 # origin is the only remote a snapshot actually needs; checked as
-# refs/heads/main because of the refspec asymmetry above.
+# refs/heads/main because origin's branches are the mirror's own heads
+# (mirror_refresh_script, lib/store.sh).
 git -C "$MIRROR" rev-parse --verify --quiet refs/heads/main >/dev/null \
     || die "main was not fetched into the mirror; cannot publish a snapshot"
 _mirror_main_sha=$(git -C "$MIRROR" rev-parse refs/heads/main)

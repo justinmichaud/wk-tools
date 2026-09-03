@@ -98,12 +98,12 @@ image_check_root() {
 }
 
 # The device tree a board's firmware wants, from the machine's own conf
-# (MACH_DTB); missing it is a conf bug, so this dies rather than skip.
+# (NODE_DTB); missing it is a conf bug, so this dies rather than skip.
 image_dtb_for() {
     . "$WK_ROOT/boot/machines.sh"
     machine_load "$1" 2>/dev/null || die "image_dtb_for: unknown machine '$1'"
-    [ -n "$MACH_DTB" ] || die "image_dtb_for: '$1' (boot/machines/$1.conf) sets no MACH_DTB"
-    printf '%s' "$MACH_DTB"
+    [ -n "$NODE_DTB" ] || die "image_dtb_for: '$1' (boot/machines/$1.conf) sets no NODE_DTB"
+    printf '%s' "$NODE_DTB"
 }
 
 # Every class image_root_class returns needs a word here, `portable` and

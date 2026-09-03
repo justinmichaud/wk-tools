@@ -41,8 +41,8 @@ on its own medium. A rescue is also the board's own card writer: it carries
 `wk sysimage write --from <image> --disk <board>:<device>` and `wk boot`
 put a bench system on the board's *other* medium from the rescue itself, and
 an A/B never needs a card carried to a reader. The two systems are two
-tailnet nodes with two names -- the rescue `<board>-rescue` (`MACH_SSH`), the
-bench system `<board>-bench` (`MACH_BENCH_SSH`) -- since each written card
+tailnet nodes with two names -- the rescue `<board>-rescue` (`NODE_SSH`), the
+bench system `<board>-bench` (`NODE_BENCH_SSH`) -- since each written card
 joins as its own node and a second join under one name comes up renamed. A rescue written from an image
 that predates that layer (the rpi3's) cannot; it is
 rewritten once, from a reader, and never again. The only card a person
@@ -64,11 +64,13 @@ macOS has no CLI knob for its optimized charging.
 
 **store** — `$WK_STORE`, the one place on a machine for artifacts kept by
 reference count or content key, never by hand: base snapshots, seeded
-benchmark payloads, bench results, credentials. On macOS it is two halves —
-the podman VM's copy and this device's own — because a Mac cannot write
-`/var/lib/wk`. A built system image is deliberately *not* in it: it is an
-artifact the workspace that built it already names, so a second, catalogued
-copy would be one fact kept twice.
+benchmark payloads, bench results. On macOS it is the podman VM's
+`/var/lib/wk`, because a Mac cannot write that path itself, and this device
+keeps its own half beside it (logs, remote build status, and the credentials
+every workspace needs, which the VM mounts read-only rather than holding).
+A built system image is deliberately *not* in it: it is an artifact the
+workspace that built it already names, so a second, catalogued copy would be
+one fact kept twice.
 
 **the state rules** — every mutating command keeps the smallest possible
 state (a fact is recomputed from evidence at read time, never cached, except
@@ -143,6 +145,7 @@ Steps:
 git clone https://github.com/justinmichaud/wk-tools ~/Development/wk-tools
 cd ~/Development/wk-tools
 ./setup                        # idempotent; a second run in a row prints no changes
+./setup --dry-run              # what it would change, having changed nothing
 ```
 
 ```sh
@@ -150,15 +153,18 @@ cd ~/Development/wk-tools
 wk sudo setup                  # closes sudo's 5-minute timestamp and NOPASSWD
 gh auth login                  # wk key register calls the GitHub API with this
 wk key register                # a deploy key per fork, registered with write access
-wk push on                     # exposes the keys to workspaces
+wk key set github-pat          # the token 'git-webkit pr' opens a pull request with
+wk push on                     # loads the keys into the agent and hands the token to the injector
 claude setup-token             # then paste it into the next line
 wk key set claude              # every workspace this machine makes starts authenticated
+claude auth login              # then the next line reads what it stored -- nothing to paste
+wk key set claude-login        # the account login; Claude Code Remote Control needs it
 wk key set litellm             # the API key `wk ai pi` reaches your endpoint with
 wk sync                        # clones WebKit into the mirror, publishes a snapshot
 eval "$(wk completion bash)"   # shell/bashrc does this for you; zsh: wk completion zsh
 ```
 
-Boards that reach the bench over WiFi (`MACH_NET=wifi`) take their credential
+Boards that reach the bench over WiFi (`NODE_NET=wifi`) take their credential
 from the WiFi connection of the machine holding the card reader, read by the
 privileged card helper at write time -- there is no hand-made credential file;
 `wk sysimage write` refuses when that machine is not on WiFi.
@@ -203,8 +209,9 @@ wk scp :build.log ~/build.log               # inside a workspace, like every oth
 
 Exactly one side carries the `:`; the other is a path on the machine you type
 it on, which is where `wk scp` runs, whatever holds the workspace -- the podman
-VM mounts nothing of this machine's, so a forwarded copy would land in the VM
-instead. The bytes go through the target's own transport (`podman cp` for a
+VM mounts three directories of this machine's and none is where you
+keep files, so a forwarded copy would land in the VM instead. The bytes go
+through the target's own transport (`podman cp` for a
 container, scp and rsync for a guest or a build machine), and a destination
 that is an existing directory receives the copy under the source's own name, as
 `cp` and `scp` do. A directory onto a file, a file onto a directory, and a
@@ -231,14 +238,24 @@ the `mac-*` config of the same configuration. The reverse is refused: a
 Every guest is an APFS clone of one golden base, so **what the base carries is
 what every guest carries**: Xcode, a checkout, a warm build tree, the desktop
 settled onto an empty screen, and the account's password changed from the
-image's. The base is made by scripts in this tree, and editing one of them does
-not change a base already built -- so the base records the hash of the inputs
-that produced it, and every read recomputes that hash and compares. `wk vm ls`
-prints the verdict under `BASE`, `wk new --target vm` warns before cloning a
-base that predates its inputs, and `wk doctor` says the same on the way past;
-each of them names `wk vm base --rebuild`, which is hours and is yours to run.
-Until it is run, a clone carries what that base was built with -- the image's
-password if the change came later, and the settings of the day it was sealed.
+image's to `1`. The base is made by scripts in this tree, and editing one of
+them does not change a base already built -- so the base records the hash of
+the inputs that produced it, and every read recomputes that hash and compares.
+`wk vm ls` prints the verdict under `BASE`, `wk new --target vm` warns before
+cloning a base that predates its inputs, and `wk doctor` says the same on the
+way past; each of them names `wk vm base --rebuild`, which is hours and is
+yours to run. Until it is run, a clone carries what that base was built with
+-- the image's password if the change came later, and the settings of the day
+it was sealed.
+
+Nothing on the tailnet trusts that account, and the same is true of every
+workspace and machine this tool provisions: `wk rm` destroys a workspace
+whole, guest included, and each comes back from this repo plus its declared
+inputs, never patched in place. The guest password is `1` for the same reason
+-- it is not a secret. The exceptions are a `remote` target this repo did not
+provision -- a peer workstation, a build box someone else administers --
+whose account belongs to its owner, and a workspace `wk status` shows
+carrying uncommitted or unpushed changes, which is real work, not disposable.
 
 `wk vm start` settles a guest's desktop on every boot (a clone gets a new
 hardware UUID, so anything `defaults -currentHost` holds does not survive
@@ -266,6 +283,15 @@ wk doctor --all                         # what every build box has, and whether 
 wk remote rm buildbox4                  # undo it; git rm the conf to forget it for good
 ```
 
+Two build defaults are the machine's, not the config's. `USE_LIBBACKTRACE` is
+`ON` in a container, a guest or on this workstation -- this repo makes those
+and puts the library in them -- and `OFF` on a `remote` target, which is
+someone else's machine, where an absent package is a configure failure rather
+than a missing feature. And every Linux CMake config builds with
+`-stdlib=libc++` unless the machine's conf sets `WK_TARGET_LIBCXX=0`
+(buildbox4's does: measured there, no libc++ package). `1` and an unset field
+both mean libc++; any other value is refused, naming the conf.
+
 A build box is provisioned once and used for months, so it records the same
 thing the golden base does: `wk remote setup` writes the hash of what
 provisioned it into `~/.wk-remote` there, and `wk doctor --all` recomputes that
@@ -289,11 +315,13 @@ The base snapshot is published on the branch it was taken from (`origin/main`,
 or `WK_BRANCH`), so `wk new` leaves the checkout **on branch `main`, tracking
 `origin/main`** -- `git status` says "On branch main", and `git pull`,
 `git rebase @{u}` and `wk pr rebase` all have an upstream to name. Creation
-also **fetches**: once, from the machine's own WebKit mirror, then a
+also **fetches**: once, from the mirror its target names, then a
 fast-forward onto it -- a local read of a handful of refs, never the network,
 and never a refresh of the mirror itself (that is `wk sync --tools`, minutes).
-A workspace with no mirror in reach -- a macOS guest -- is told to `wk sync`
-it instead.
+Every target's driver names one -- a container's is this machine's own, a
+guest's lives in its golden base, beside the checkout -- but creation asks
+the workspace rather than assuming: a guest cloned from a base built before
+its mirror existed answers with none, and is told to `wk sync` it instead.
 
 Four remotes are wired into every checkout, always the same four, by the one
 authority every target wires from (`wk remotes <ws>` checks them, `--fix`
@@ -305,7 +333,9 @@ re-asserts them):
   images are built from. Fetch only, for the same reason.
 - `fork` -- your own fork of WebKit: what a branch is pushed to and what
   `wk pr open` opens a PR from. Pushes over ssh with a per-fork deploy key
-  (`wk push on`).
+  held in an ssh-agent outside the workspace (`wk push on`); `git-webkit pr`
+  inside one reaches GitHub's API through the credential injector, holding a
+  placeholder rather than the token.
 - `forkwpe` -- your own fork of WPEWebKit, the same, for that project.
 
 **Sync (a workspace, a target, or the furniture a machine keeps)**
@@ -317,8 +347,10 @@ workspace a bare `wk sync` fetches in it, from that machine's mirror; every
 other scope is a machine's furniture and is run from the host.
 
 A workspace's fetch takes everything from that mirror in one local read when
-the mirror is mounted in it (a container's `/mirror`), and asks the upstreams
-themselves only when it is not. Either way it fetches the refs the mirror
+the mirror the target names (`t_mirror_dir`) is actually there -- a
+container's own, bind-mounted at `/mirror`; a guest's or a build machine's
+own copy -- and asks the upstreams themselves only when it is not. Either
+way it fetches the refs the mirror
 carries -- `main` of `origin`, every branch of the other three -- and no tags:
 following tags re-negotiates tens of thousands of refs nothing here builds
 from, and `git fetch --tags` in the workspace asks for them when they are
@@ -336,9 +368,19 @@ loose files cannot be reconciled with a commit; every push after that is into a
 checkout, and leaves that machine's ignored files -- its build directory, its
 own conf -- alone. A guest takes the same checkout on every `wk vm start`, with
 its marker and its egress; there a dirty tree warns rather than failing the
-start. Two copies are not this: the podman VM's `/opt/wk-tools`, which this
-machine copies in, and a peer workstation's own checkout, which pulls rather
-than being written over.
+start. Two things are not this: a peer workstation's own checkout, which pulls
+rather than being written over, and the podman VM's `/opt/wk-tools`, which is
+nothing of its own -- the machine mounts this checkout there read-only, so a
+container runs the tree you are editing and `wk sync --tools container` has
+nothing to copy and says so. Moving or renaming this checkout therefore breaks
+the machine until `./setup` recreates it around the new path.
+
+That mount carries the tree and nothing else. The VM's own furniture -- the
+egress proxy and the GitHub injector as systemd units, the shared skills
+directory, the machine's packages -- is *installed*, by
+`./setup --stage vmtools`, so an edited `container/proxy/wk-proxy.py` or
+`container/proxy/github-inject.py` is live in the VM only after that stage
+runs.
 
 ```sh
 wk sync                                 # one workspace here; asked when there are several
@@ -532,20 +574,20 @@ wk bench mac-ab mac-rel                          # stages, plants a launch agent
 Write `boot/machines/<name>.conf`:
 
 ```sh
-MACH_SSH=<name>               # tailnet name, once provisioned
-MACH_DRIVER=<driver>          # boot/<driver>.sh -- which mechanism arms it
-MACH_DEVICE=<device>          # the block device an image is written to
-MACH_ROOT=<device>            # its host mode's root device -- never written to
-MACH_PROFILE=<profile>        # its default system profile ('wk sysimage -h')
-MACH_MAC=<aa:bb:cc:dd:ee:ff>  # its NIC's address, for 'wk find' pre-tailnet
-MACH_BRIDGE=<bridge-name>     # only if it sits behind a tailnet bridge
-MACH_ROLE=workstation|bench-device
-MACH_OS=any
-MACH_NET=wifi|ethernet        # how the board reaches the network at the bench
-MACH_DTB=<file.dtb>           # the device tree a Pi image boots with; empty otherwise
-MACH_BENCH_SSH=<name>-bench   # what a system wk writes for it joins the tailnet as;
-                              # the machine's own install keeps MACH_SSH
-MACH_NOTE="one line, for the listing"
+NODE_SSH=<name>               # tailnet name, once provisioned
+NODE_DRIVER=<driver>          # boot/<driver>.sh -- which mechanism arms it
+NODE_DEVICE=<device>          # the block device an image is written to
+NODE_ROOT=<device>            # its host mode's root device -- never written to
+NODE_PROFILE=<profile>        # its default system profile ('wk sysimage -h')
+NODE_MAC=<aa:bb:cc:dd:ee:ff>  # its NIC's address, for 'wk find' pre-tailnet
+NODE_BRIDGE=<bridge-name>     # only if it sits behind a tailnet bridge
+NODE_ROLE=workstation|bench-device
+NODE_OS=any
+NODE_NET=wifi|ethernet        # how the board reaches the network at the bench
+NODE_DTB=<file.dtb>           # the device tree a Pi image boots with; empty otherwise
+NODE_BENCH_SSH=<name>-bench   # what a system wk writes for it joins the tailnet as;
+                              # the machine's own install keeps NODE_SSH
+NODE_NOTE="one line, for the listing"
 ```
 
 ```sh
@@ -601,35 +643,111 @@ stores the API key for every workspace this machine makes, and pi's own
 `~/.pi/agent/models.json` names the endpoint URL and the models it serves --
 `wk ai pi` prints the file to write when a workspace has none.
 
+**`wk key set`: what a workspace is already logged in to**
+
 A workspace starts already authenticated, so nothing has to answer `/login` in
 it -- which a macOS guest reached through an editor's remote server cannot do
 anyway, having no unlocked login Keychain. One token per machine, stored by
 `wk key set claude` (from `claude setup-token`) and read by `shell/bashrc` into
-`CLAUDE_CODE_OAUTH_TOKEN`. Each target hands it over differently: a container
+`CLAUDE_CODE_OAUTH_TOKEN`. It is kept on the machine you typed that on
+(`~/.config/wk/secrets`, which the podman VM mounts read-only), so storing one
+needs no VM running. Each target hands it over differently: a container
 symlinks the read-only `/secrets` mount, so rotating the token reaches every
 container at once; a macOS guest and a build box are given a copy when the
 workspace comes up, and lose it the same way when `wk key set claude --replace`
 withdraws one. Without a token a workspace simply asks for `/login` as before.
 
-The deploy keys reach a workspace the same two ways, and `wk push` is the one
-switch over both. A container links the read-only `/secrets` mount, so moving
-the keys in the store is the whole of it. A macOS guest mounts nothing of ours,
-so the host writes it a copy on every `wk vm start` -- the private key on
-stdin, never an argument, at 0600 -- alongside the same `github-webkit` /
-`github-wpe` alias blocks a container gets, whose `ProxyCommand` is how ssh
-reaches `github.com:22` past Softnet at all. `wk push on|off` then converges
-every running guest on this host after moving the keys, and `wk push status`
-reports what each one actually holds; a guest that is stopped is converged when
-it next starts, before anything in it can run. On a macOS workstation `on` and
-`off` start the podman machine and say why -- the key bytes exist only in its
-store -- while `status` reads without starting anything.
+**The account login, which `--rc` needs.** That token is inference-only, and
+Remote Control says so and exits: *"Remote Control requires a full-scope login
+token. Long-lived tokens (from `claude setup-token` or CLAUDE_CODE_OAUTH_TOKEN)
+are limited to inference-only."* So `wk key set claude-login` stores the
+credential `claude auth login` left on this machine -- read out of the login
+Keychain on macOS, out of `~/.claude/.credentials.json` on Linux, never pasted
+and never printed, and refused unless it really is a login with the
+`user:profile` scope. It is an *account* credential: an agent holding it can
+act as you, which is the trade `--rc` is.
+
+It is delivered differently from the token because it is not a value: the
+Claude CLI spends the refresh token in it and writes the rotated one back over
+the same file, so every holder on a machine has to be looking at one set of
+bytes. That is `~/.config/wk/agent-rw`, the one directory the podman VM mounts
+read-write and every container bind-mounts (`/agent-rw`) -- a host directory
+rather than a copy inside the VM because then `wk key set claude-login` writes
+the very file the containers read, with nothing to go stale. `shell/bashrc`
+points the CLI at the directory (`CLAUDE_SECURESTORAGE_CONFIG_DIR`) rather than
+linking the file into `~/.claude`, since the CLI writes through a temp file and
+a rename, which would replace a symlink with a private copy on the first
+refresh; pointing every container at one directory also puts them all on the
+CLI's own `.storage-write` lock, so concurrent refreshes serialize.
+
+A macOS guest can be handed nothing but a copy, and that copy is a second
+holder: a refresh in there rotates the token and invalidates the one every
+container shares. `wk vm start` says so each time it writes one. A shared build
+box gets no login at all -- an account credential on a machine other people are
+root on is theirs -- so an agent there has the inference-only token and no
+remote control.
+
+**`wk push`: pushing and opening a pull request without holding the credentials**
+
+A `git push` needs a deploy key and `git-webkit pr` needs a GitHub API
+token, and neither is inside a workspace at all -- not even while push is on.
+`wk push` is the one switch over both, and it is a switch over *where the
+credential is*, not a flag anything reads.
+
+The private key halves live in `~/.config/wk/push-keys`, which nothing mounts
+anywhere; only the public halves are in `~/.config/wk/secrets`, and a public
+key is not a credential. `wk push on` loads the private halves into an
+`ssh-agent` on the machine that runs the workspaces -- `wk-ssh-agent.service`,
+whose socket is in the one directory every container bind-mounts
+(`/run/wk/ssh-agent.sock`) -- with `ssh-add` reading the key on stdin, so the
+bytes are never an argument and never a file on that machine. A workspace's
+ssh config names the public half and that socket (`IdentityAgent`,
+`IdentitiesOnly`), so ssh can *sign* with a key it can never obtain: an agent
+has no protocol for handing a private half back. `wk push off` is `ssh-add -D`.
+`wk push status` asks the agent what it holds (`ssh-add -l`) rather than
+reading a record of it.
+
+The API token is `wk key set github-pat`, kept beside the private halves and
+handed by `wk push on` to `wk-github-inject.service`, the one thing in this
+design that terminates TLS: `api.github.com` is allowed by the egress proxy and
+its CONNECT goes to the injector, which replaces the `Authorization` header
+with the real token and forwards the request. The workspace holds
+`GITHUB_COM_USERNAME` and the literal placeholder `GITHUB_COM_TOKEN=wk-injects-this`,
+plus the injector's CA certificate (`/run/wk/wk-github-ca.pem`, added to the
+system bundle -- never replacing it). With push off the injector has no token
+and forwards the call unauthenticated, so GitHub answers 401 for anything
+needing an account and 200 for anything public: the switch withholds a
+credential, it does not pretend the API is unreachable. `uploads.github.com`
+stays refused outright.
+
+The per-fork alias blocks are in `/secrets/ssh_config`, which every container
+`Include`s and `wk push on|off` regenerates -- so a rotated key, an added fork
+or the switch itself reaches every workspace that already exists at once,
+with nothing recreated.
+
+A macOS guest cannot see a unix socket across the hypervisor, so its half is an
+`ssh-agent` on the host and one `ssh -N -R` per running guest, held open only
+while push is on and ended by `wk push off` or `wk vm stop`. The guest is
+written its ssh config and the *public* halves on every `wk vm start` --
+never a private one -- with the same `github-webkit` / `github-wpe` aliases a
+container gets, whose `ProxyCommand` is how ssh reaches `github.com:22` past
+Softnet at all. `wk push status` reports what each guest can actually reach; a
+stopped guest is converged when it next starts, before anything in it can run.
+
+Nothing moves on disk in either direction, so there is no half-thrown position
+to crash into: a killed `wk push on` re-run converges. The credentials are this
+device's, so `wk key set` and `wk key register` need no VM; reaching the agent
+and the injector inside the podman machine is one `podman machine ssh`, and
+`wk push status` never starts it.
 
 Nothing an agent runs can publish or commit, on any target. Publishing: the
-deploy keys are held back for the session (`wk push off`, before the sandbox is
-verified), the egress proxy refuses GitHub's API (`api.github.com`, so `gh` has
-nothing to talk to), and `wk verify` fails on a deploy key in the mount or a
-GitHub credential inside a workspace; on a build box a `gh` login in the agent's
-account is a refusal. Committing: a container `wk ai claude` session runs the agent
+deploy keys are out of the agent and the API token is gone for the session
+(`wk push off`, before the sandbox is verified), and `wk verify` measures all
+of it from inside the workspace -- no private key material in the home,
+`/secrets` or `/run/wk`; the agent socket holding nothing; an authenticated
+`api.github.com/user` answering 401; `GITHUB_COM_TOKEN` being the placeholder;
+`gh` not logged in. On a build box a `gh` login in the agent's account is a
+refusal. Committing: a container `wk ai claude` session runs the agent
 under bwrap with the checkout's `.git` commit-parts (`objects`, `refs`, `logs`,
 `HEAD`, `packed-refs`) read-only, so a commit, a stage, a stash, a branch move
 or a rebase fails while a build, an edit, `git status`/`diff`/`log` all work --
@@ -675,16 +793,27 @@ Every machine this repo knows is itself in the repo (`targets/hosts/*.conf`,
 `boot/machines/*.conf`), so a fresh clone already knows the whole fleet.
 Nothing else is machine-specific except what `wk backup` captures, and keys
 and secrets, which never live in git. Last resort, discarding a macOS host's
-whole container store:
+whole container store -- the mirror, the snapshots, the workspaces and every
+bench run in the VM, but not this host's keys:
 
 ```sh
 podman machine rm wk && ./setup && wk sync
 ```
 
+`./setup` does the same by itself, prompting first, whenever the machine's
+mounts are not the three it must have -- this checkout at `/opt/wk-tools` and
+`~/.config/wk/secrets` read-only, and `~/.config/wk/agent-rw` read-write: a
+mount is settable only at creation, so a machine made any other way is
+destroyed and made again rather than patched. That third one is the only
+writable mount in the design and holds one thing, the Claude login credential
+the CLI rotates in place; a machine that has the right three mounted the wrong
+way round is refused instead, since recreating it would ask podman for the same
+modes again and loop.
+
 ## Hardware
 
 How each fleet device selects the system it boots, derived from
-`boot/machines/<name>.conf` and the driver it names (`MACH_DRIVER`, one
+`boot/machines/<name>.conf` and the driver it names (`NODE_DRIVER`, one
 `boot/<driver>.sh` each). Every board follows the same rules: the rescue is
 written first, with `--rescue`, onto the medium the board falls back to; the
 bench system is written second onto the board's *other* medium (or, with one
@@ -816,8 +945,8 @@ spelling changes.
 
 **1. Declare the board** -- `boot/machines/<name>.conf` ("Add a new fleet
 device" above): its driver (`pi-sd` for one medium, `pi-mbr` for two), the
-bench medium (`MACH_DEVICE`), the rescue's root partition (`MACH_ROOT`), its
-two tailnet names, `MACH_NET`, `MACH_DTB`. Commit it.
+bench medium (`NODE_DEVICE`), the rescue's root partition (`NODE_ROOT`), its
+two tailnet names, `NODE_NET`, `NODE_DTB`. Commit it.
 
 **2. Build the two images** -- the rescue (a yocto profile, `webkit-2.52-yocto-<board>`)
 and the bench system (the profile under test, e.g. `wpewebkit-2.38-buildroot-<board>-32`),

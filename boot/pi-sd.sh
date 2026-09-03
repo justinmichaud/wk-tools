@@ -3,7 +3,7 @@
 # admin/wk-card-priv). The rpi3's Ethernet is a USB device, so a bench root on
 # a stick would share a bus with the traffic the benchmark generates; one card
 # it is, and the two systems are told apart by partition (b_system_kind:
-# MACH_ROOT is the rescue's root, anything else on MACH_DEVICE is the bench).
+# NODE_ROOT is the rescue's root, anything else on NODE_DEVICE is the bench).
 #
 # The firmware boots the first FAT partition and only that one, so arming is
 # an edit of the rescue's boot partition: the bench system's kernel, device
@@ -58,9 +58,9 @@ B_SYSTEM_PARTS="3 5 7"
 # (7-8) is '@third'.
 pisd_addr() { # <boot partition>
     case "$1" in
-        *[!0-9]3|*[!0-9]5) printf '%s@second' "$MACH_DEVICE" ;;
-        *[!0-9]7)          printf '%s@third'  "$MACH_DEVICE" ;;
-        *) die "'$1' is not a bench system's boot partition on $MACH_DEVICE" ;;
+        *[!0-9]3|*[!0-9]5) printf '%s@second' "$NODE_DEVICE" ;;
+        *[!0-9]7)          printf '%s@third'  "$NODE_DEVICE" ;;
+        *) die "'$1' is not a bench system's boot partition on $NODE_DEVICE" ;;
     esac
 }
 
@@ -79,19 +79,19 @@ b_arm() {
     [ -n "${ARM_SYS_PART:-}" ] \
         || die "b_arm needs the selected boot partition (machine_select_system, cmd/boot)"
     addr=$(pisd_addr "$ARM_SYS_PART")
-    state=$(pisd_state "$addr") || die "could not read $MACH_DEVICE's arming on $MACH_NAME.
+    state=$(pisd_state "$addr") || die "could not read $NODE_DEVICE's arming on $NODE_NAME.
     Arming this board is an edit of its rescue's boot partition, made by the
     card helper on the rescue, so the rescue has to be up and carry the helper."
     case "$state" in
         *present=yes*) ;;
-        *) die "$MACH_DEVICE on $MACH_NAME holds no bench system at ${addr##*/}.
+        *) die "$NODE_DEVICE on $NODE_NAME holds no bench system at ${addr##*/}.
     Write one first:  wk sysimage write --from <path> --disk <reader>:$addr" ;;
     esac
     case "$state" in
-        *"armed_prefix=${addr##*@}"*) debug "$MACH_NAME is already armed for ${addr##*@}"; return 0 ;;
+        *"armed_prefix=${addr##*@}"*) debug "$NODE_NAME is already armed for ${addr##*@}"; return 0 ;;
     esac
     card_priv second-arm "$addr" >/dev/null \
-        || die "could not arm the ${addr##*@} system on $MACH_NAME"
+        || die "could not arm the ${addr##*@} system on $NODE_NAME"
 }
 
 # Safe at any time, including a board not armed -- the common case. The
@@ -99,15 +99,15 @@ b_arm() {
 # any present system's address serves.
 b_disarm() {
     local state
-    state=$(pisd_state "$MACH_DEVICE@second") || return 0
+    state=$(pisd_state "$NODE_DEVICE@second") || return 0
     case "$state" in *armed=yes*) ;; *) return 0 ;; esac
-    card_priv second-disarm "$MACH_DEVICE@second" >/dev/null \
-        || die "could not disarm the bench system on $MACH_NAME"
+    card_priv second-disarm "$NODE_DEVICE@second" >/dev/null \
+        || die "could not disarm the bench system on $NODE_NAME"
 }
 
 b_disarm_note() {
-    log "  the rescue's config.txt is back on $MACH_DEVICE, so the firmware boots the"
-    log "  rescue's kernel again. 'wk boot $MACH_NAME' arms the bench system once more."
+    log "  the rescue's config.txt is back on $NODE_DEVICE, so the firmware boots the"
+    log "  rescue's kernel again. 'wk boot $NODE_NAME' arms the bench system once more."
 }
 
 # The half that runs *inside* the bench system, first thing after its root is
@@ -132,7 +132,7 @@ sync; umount \"\$m\"; fi; rmdir \"\$m\""
 # aside, and is there a bench system to step aside for.
 b_evidence() {
     local state systems
-    state=$(pisd_state "$MACH_DEVICE@second") || { echo "arming=unreadable (the rescue did not answer)"; return 0; }
+    state=$(pisd_state "$NODE_DEVICE@second") || { echo "arming=unreadable (the rescue did not answer)"; return 0; }
     printf 'lane=one SD card, rescue on partitions 1-2, bench system(s) beside it (os_prefix arming)\n'
     printf '%s\n' "$state" | sed -n 's/^wk-card-priv: \(armed=.*\)$/\1/p'
     systems=$(b_systems 2>/dev/null) || systems=""
@@ -142,12 +142,12 @@ b_evidence() {
 
 # The first bench pair's boot partition on the one-system layout; reading
 # verbs go through the enumeration (b_systems), which covers both layouts.
-b_boot_part() { disk_part "$MACH_DEVICE" 3; }
+b_boot_part() { disk_part "$NODE_DEVICE" 3; }
 
 # The wk-managed media, in one line, for the fleet block in `wk status`.
 b_media() {
     printf 'SD card %s holds every system: rescue on p1-p2, bench system(s) beside it -- p3-p4, or pairs 5-6 and 7-8 in an extended p3 (wk boot %s --system <id> arms one for one boot)' \
-        "$MACH_DEVICE" "$MACH_NAME"
+        "$NODE_DEVICE" "$NODE_NAME"
 }
 
 # How this board is made from nothing, derived rather than written down.
@@ -160,19 +160,19 @@ b_media() {
 # growing: what is left of the card is where the bench system goes. Both writes
 # can be made from a reader on any machine with the card helper; once the
 # rescue is on the board, every later bench write is made from the rescue
-# itself (`--disk $MACH_NAME:$MACH_DEVICE@second`).
+# itself (`--disk $NODE_NAME:$NODE_DEVICE@second`).
 b_reprovision() {
     cat <<REPROV
-wk sysimage build $MACH_PROFILE
+wk sysimage build $NODE_PROFILE
     in a workspace; hours
-wk sysimage write --from <path> --disk <reader>:$MACH_DEVICE --rescue --profile $MACH_PROFILE
+wk sysimage write --from <path> --disk <reader>:$NODE_DEVICE --rescue --profile $NODE_PROFILE
     no --grow: the rest of the card is where the bench system goes
-wk sysimage write --from <path> --disk <reader>:$MACH_DEVICE@second --profile <bench profile>
+wk sysimage write --from <path> --disk <reader>:$NODE_DEVICE@second --profile <bench profile>
     the first bench system beside the rescue
-wk sysimage write --from <path> --disk <reader>:$MACH_DEVICE@third --profile <bench profile>
+wk sysimage write --from <path> --disk <reader>:$NODE_DEVICE@third --profile <bench profile>
     optional: a second bench system (the shared layout holds two), for an
-    A/B across images; 'wk boot $MACH_NAME --system <id>' picks one
-    then carry the card to $MACH_NAME and power it on
-wk boot $MACH_NAME
+    A/B across images; 'wk boot $NODE_NAME --system <id>' picks one
+    then carry the card to $NODE_NAME and power it on
+wk boot $NODE_NAME
 REPROV
 }

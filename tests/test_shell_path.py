@@ -68,22 +68,6 @@ class TestBinDir(WkTest):
         for n in real:
             self.assertNotIn(n, cp.stdout, f"the real fleet's {n} leaked into the overlay root")
 
-    def test_the_tree_hash_survives_a_root_of_symlinked_directories(self):
-        """`wk version --tree` hashes a link by its target text, so a link to
-        a directory is not fed to a program that would follow it"""
-        root = self.tmp / "overlay2"
-        root.mkdir()
-        for entry in REPO.iterdir():
-            if entry.name in (".git", "__pycache__"):
-                continue
-            (root / entry.name).symlink_to(entry)
-        cp = subprocess.run([str(root / "wk"), "version", "--tree"], cwd="/",
-                            env={"HOME": str(self.tmp), "PATH": "/usr/bin:/bin"},
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, timeout=60)
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertNotIn("Is a directory", cp.stdout)
-
     def test_wk_finds_its_root_through_the_symlink(self):
         """`wk` invoked as bin/wk resolves WK_ROOT to the checkout, not bin/"""
         cp = subprocess.run(

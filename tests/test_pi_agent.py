@@ -19,6 +19,7 @@ Run: python3 -m unittest tests.test_pi_agent -v
 import shutil
 import subprocess
 import unittest
+from pathlib import Path
 
 from tests.support import REPO, WkTest, bash, run
 
@@ -36,17 +37,30 @@ TOUCHED = ("cmd/ai", "cmd/key", "lib/store.sh", "container/firstrun.sh",
 
 def secret_table():
     """wk_agent_secrets, read out of the file that declares it: (name, store
-    file, home file, variable) per row. Every test below compares a reader
-    against this rather than against a second copy of the list."""
+    file, home file, variable, kind) per row. Every test below compares a
+    reader against this rather than against a second copy of the list."""
     body = STORE.split("wk_agent_secrets() {", 1)[1]
     body = body.split("<<'EOF'\n", 1)[1].split("EOF\n", 1)[0]
     rows = [tuple(l.split()) for l in body.splitlines() if l.strip()]
-    assert rows and all(len(r) == 4 for r in rows), rows
+    assert rows and all(len(r) == 5 for r in rows), rows
+    assert all(r[4] in ("value", "file") for r in rows), rows
     return rows
 
 
 TABLE = secret_table()
 NAMES = [r[0] for r in TABLE]
+
+# The two kinds are delivered and read differently, so most readers below are
+# about one of them: a value row is a line an agent reads out of a variable, a
+# file row is a document its own tool rewrites in place.
+VALUE_ROWS = [r for r in TABLE if r[4] == "value"]
+FILE_ROWS = [r for r in TABLE if r[4] == "file"]
+
+
+def store_path(store, row):
+    """Where a row's bytes live under a scratch store: the read-only secrets
+    directory for a value, the one writable directory for a file."""
+    return store / ("agent-rw" if row[4] == "file" else "secrets") / row[1]
 
 
 class TestScriptsParse(unittest.TestCase):
@@ -64,13 +78,20 @@ class TestScriptsParse(unittest.TestCase):
 
 class TestTheTable(unittest.TestCase):
     def test_it_names_both_agents_credentials(self):
-        self.assertEqual(["claude", "litellm"], NAMES)
+        self.assertEqual(["claude", "litellm", "claude-login"], NAMES)
 
     def test_claude_keeps_the_file_it_already_has(self):
         """Rotating nothing: a store made before the table existed holds
         secrets/claude-token, and every container already links to that name."""
         self.assertEqual(("claude", "claude-token", ".wk-agent-token",
-                          "CLAUDE_CODE_OAUTH_TOKEN"), TABLE[0])
+                          "CLAUDE_CODE_OAUTH_TOKEN", "value"), TABLE[0])
+
+    def test_a_file_row_names_no_variable(self):
+        """Nothing exports one: the Claude CLI is pointed at the directory the
+        file is in, and shell/bashrc has no line for it."""
+        for row in FILE_ROWS:
+            with self.subTest(name=row[0]):
+                self.assertEqual("-", row[3])
 
 
 class TestTheStoreIsByName(WkTest):
@@ -80,6 +101,7 @@ class TestTheStoreIsByName(WkTest):
     def _store(self):
         d = self.tmp / "store"
         (d / "secrets").mkdir(parents=True)
+        (d / "agent-rw").mkdir(parents=True)
         return d
 
     def _sh(self, script, store):
@@ -92,11 +114,14 @@ WK_STORE={store}
 ''')
 
     def test_each_name_has_its_own_file_in_the_store(self):
+        """And which of the two directories is the row's kind: the read-only
+        secrets mount for a value, the writable one for a file the agent's own
+        tool rewrites."""
         store = self._store()
-        for name, file_, _home, _var in TABLE:
-            with self.subTest(name=name):
-                cp = self._sh(f'wk_agent_secret_path {name}', store)
-                self.assertEqual(f"{store}/secrets/{file_}", cp.stdout.strip(),
+        for row in TABLE:
+            with self.subTest(name=row[0]):
+                cp = self._sh(f'wk_agent_secret_path {row[0]}', store)
+                self.assertEqual(str(store_path(store, row)), cp.stdout.strip(),
                                  cp.stderr)
 
     def test_an_unknown_name_has_no_path_and_is_not_invented(self):
@@ -107,15 +132,50 @@ WK_STORE={store}
 
     def test_stored_then_read_back_per_name(self):
         store = self._store()
-        for name, file_, _home, _var in TABLE:
+        for row in TABLE:
+            name = row[0]
+            reader = "wk_agent_secret_bytes" if row[4] == "file" else "wk_agent_secret"
             with self.subTest(name=name):
                 cp = self._sh(
                     f'printf "%s\\n" {name}-{PLACEHOLDER} | wk_agent_secret_store {name}\n'
-                    f'printf "[%s]\\n" "$(wk_agent_secret {name})"', store)
+                    f'printf "[%s]\\n" "$({reader} {name})"', store)
                 self.assertIn(f"[{name}-{PLACEHOLDER}]", cp.stdout,
                               cp.stdout + cp.stderr)
-                mode = (store / "secrets" / file_).stat().st_mode & 0o777
+                mode = store_path(store, row).stat().st_mode & 0o777
                 self.assertEqual(0o600, mode, oct(mode))
+
+    def test_presence_is_one_question_for_both_kinds(self):
+        """Every gate asks "can this workspace authenticate?", and asks it the
+        same way whichever kind the row is."""
+        store = self._store()
+        for row in TABLE:
+            with self.subTest(name=row[0]):
+                cp = self._sh(
+                    f'if wk_agent_secret_present {row[0]}; then echo yes; else echo no; fi\n'
+                    f'printf "%s\\n" x | wk_agent_secret_store {row[0]}\n'
+                    f'if wk_agent_secret_present {row[0]}; then echo yes; else echo no; fi',
+                    store)
+                self.assertEqual(["no", "yes"], cp.stdout.split(), cp.stderr)
+
+    def test_a_file_row_is_read_whole_and_not_by_its_first_line(self):
+        """A credentials file is a document its tool parses. Truncating it to
+        the first line would hand a workspace half a JSON object."""
+        store = self._store()
+        row = FILE_ROWS[0]
+        cp = self._sh(
+            f'printf "one\\ntwo\\n" | wk_agent_secret_store {row[0]}\n'
+            f'printf "bytes=[%s]\\n" "$(wk_agent_secret_bytes {row[0]})"', store)
+        self.assertIn("bytes=[one\ntwo]", cp.stdout, cp.stdout + cp.stderr)
+
+    def test_the_writable_directory_is_beside_the_secrets_one_never_inside(self):
+        """The secrets directory is mounted read-only into every workspace and
+        has to stay unwritable; this one is the single thing a workspace may
+        write, so it is a sibling -- the same shape wk_push_held_dir has."""
+        cp = self._sh('printf "%s %s\\n" "$(wk_secrets_dir)" "$(wk_agent_rw_dir)"',
+                      self._store())
+        secrets, rw = cp.stdout.split()
+        self.assertNotIn(secrets + "/", rw + "/")
+        self.assertEqual(str(Path(secrets).parent), str(Path(rw).parent))
 
     def test_absent_reads_as_nothing_and_is_not_an_error(self):
         cp = self._sh('printf "[%s]\\n" "$(wk_agent_secret litellm)"; echo "rc=$?"',
@@ -130,6 +190,7 @@ WK_STORE={store}
             f'printf "%s\\n" b-{PLACEHOLDER} | wk_agent_secret_store litellm\n'
             'wk_agent_secret_clear litellm\n'
             'printf "claude=[%s] litellm=[%s]\\n" "$(wk_agent_secret claude)" "$(wk_agent_secret litellm)"',
+
             store)
         self.assertIn(f"claude=[a-{PLACEHOLDER}] litellm=[]", cp.stdout,
                       cp.stdout + cp.stderr)
@@ -137,7 +198,12 @@ WK_STORE={store}
     def test_a_driver_moving_wk_store_does_not_move_them(self):
         """There is one set per *machine*. targets/vm.sh points $WK_STORE at
         its own state directory, so resolving a secret against $WK_STORE would
-        send `wk vm start` looking somewhere `wk key set` never writes."""
+        send `wk vm start` looking somewhere `wk key set` never writes.
+
+        Two spellings of one directory (wk_secrets_dir, lib/store.sh): on a
+        macOS host it is this device's own path (WK_HOST_SECRETS), never
+        $WK_STORE; where the store is this machine's own it is the store
+        recorded before the override."""
         cp = bash('''
 . "$WK_ROOT/lib/common.sh"
 WK_STORE=/the/machine/store
@@ -145,8 +211,8 @@ WK_STORE=/the/machine/store
 WK_STORE_DEFAULT=/the/machine/store
 WK_STORE=/some/drivers/own/state
 printf "path=%s\\n" "$(wk_agent_secret_path litellm)"
-''')
-        self.assertIn("path=/the/machine/store/secrets/litellm-key",
+''', env={"WK_HOST_SECRETS": "/this/device/secrets"})
+        self.assertIn("path=/this/device/secrets/litellm-key",
                       cp.stdout, cp.stdout + cp.stderr)
 
 
@@ -157,10 +223,12 @@ class TestWkKeySet(WkTest):
     def _store(self, **secrets):
         d = self.tmp / "store"
         (d / "secrets").mkdir(parents=True)
+        (d / "agent-rw").mkdir(parents=True)
+        rows = dict((r[0], r) for r in TABLE)
         for name, value in secrets.items():
-            f = dict((r[0], r[1]) for r in TABLE)[name]
-            (d / "secrets" / f).write_text(value + "\n")
-            (d / "secrets" / f).chmod(0o600)
+            f = store_path(d, rows[name])
+            f.write_text(value + "\n")
+            f.chmod(0o600)
         return d
 
     def _key(self, *args, store=None):
@@ -244,7 +312,7 @@ HOME={home}
 {block}
 ''')
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        for name, file_, home_file, var in TABLE:
+        for name, file_, home_file, var, _kind in VALUE_ROWS:
             with self.subTest(name=name):
                 link = home / home_file
                 self.assertTrue(link.is_symlink(), f"{home_file} is not a link")
@@ -252,6 +320,28 @@ HOME={home}
                 # And it says so, since the store has none of them yet.
                 self.assertIn(f"wk key set {name}", cp.stdout)
                 self.assertIn(var, cp.stdout)
+
+    def test_a_file_row_is_not_linked_at_all(self):
+        """The Claude CLI writes its credentials file through a temp file and a
+        rename, which replaces a symlink with a regular file the first time it
+        refreshes -- so the container would stop sharing the one file every
+        other container is refreshing. It reads the mounted directory instead
+        (shell/bashrc)."""
+        home = self.tmp / "home-file-row"
+        home.mkdir()
+        block = FIRSTRUN.split("_agent_secrets() {", 1)[1]
+        block = "_agent_secrets() {" + block.split("\nEOF\n", 1)[0] + "\nEOF\n"
+        cp = bash(f'''
+log() {{ printf '%s\\n' "$*"; }}
+WK_TOOLS="$WK_ROOT"
+HOME={home}
+{block}
+''')
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        for row in FILE_ROWS:
+            with self.subTest(name=row[0]):
+                self.assertFalse((home / row[2]).exists(), row[2])
+                self.assertFalse((home / row[2]).is_symlink(), row[2])
 
 
 class TestTheShellExportsEveryName(WkTest):
@@ -269,13 +359,13 @@ class TestTheShellExportsEveryName(WkTest):
     def _home(self, values=None):
         h = self.tmp / "home"
         h.mkdir(exist_ok=True)
-        for name, _file, home_file, _var in TABLE:
+        for name, _file, home_file, _var, _kind in VALUE_ROWS:
             if values and name in values:
                 (h / home_file).write_text(values[name] + "\n")
         return h
 
     def _values(self, shell, args, home):
-        script = "; ".join(f'echo "{var}=${var}"' for *_r, var in TABLE)
+        script = "; ".join(f'echo "{r[3]}=${r[3]}"' for r in VALUE_ROWS)
         cp = subprocess.run(
             [shell, *args, f'. "{RC}"; {script}'],
             cwd=str(REPO),
@@ -286,18 +376,18 @@ class TestTheShellExportsEveryName(WkTest):
         out = {}
         for line in cp.stdout.splitlines():
             k, _, v = line.partition("=")
-            if k in [r[3] for r in TABLE]:
+            if k in [r[3] for r in VALUE_ROWS]:
                 out[k] = v
         return out
 
     def test_every_shell_exports_every_one(self):
-        want = {name: f"{name}-{PLACEHOLDER}" for name in NAMES}
+        want = {r[0]: f"{r[0]}-{PLACEHOLDER}" for r in VALUE_ROWS}
         home = self._home(want)
         for what, (shell, args) in self.SHELLS.items():
             if not shutil.which(shell):
                 continue
             got = self._values(shell, args, home)
-            for name, _file, _home_file, var in TABLE:
+            for name, _file, _home_file, var, _kind in VALUE_ROWS:
                 with self.subTest(shell=what, name=name):
                     self.assertEqual(want[name], got.get(var))
 
@@ -327,7 +417,7 @@ class TestTheShellExportsEveryName(WkTest):
         text = RC.read_text()
         line = [l for l in text.splitlines() if l.startswith("for _wk_sec in ")][0]
         pairs = line.split(" in ", 1)[1].rstrip("; do").split()
-        self.assertEqual([f"{r[2]}:{r[3]}" for r in TABLE], pairs)
+        self.assertEqual([f"{r[2]}:{r[3]}" for r in VALUE_ROWS], pairs)
 
     def test_reading_them_does_not_fork(self):
         text = RC.read_text()
@@ -508,10 +598,10 @@ class TestDoctorReportsEveryName(WkTest):
         self.assertIn("wk_agent_secret_names", self.DOCTOR)
         self.assertIn('local_state "$(wk_agent_secret_path "$_sname")" re-authable',
                       self.DOCTOR)
-        for name, sfile, _shome, _var in TABLE:
-            with self.subTest(name=name):
-                self.assertNotIn(sfile, self.DOCTOR,
-                                 f"cmd/doctor names the {name} row itself")
+        for row in TABLE:
+            with self.subTest(name=row[0]):
+                self.assertNotIn(row[1], self.DOCTOR,
+                                 f"cmd/doctor names the {row[0]} row itself")
 
     def test_it_prints_one_line_per_name_and_none_of_them_as_missing(self):
         """Driven: the real `local_state` and the real loop, against a scratch
@@ -521,8 +611,9 @@ class TestDoctorReportsEveryName(WkTest):
         the plain one."""
         store = self.tmp / "store"
         (store / "secrets").mkdir(parents=True)
+        (store / "agent-rw").mkdir(parents=True)
         first = TABLE[0]
-        (store / "secrets" / first[1]).write_text(PLACEHOLDER + "\n")
+        store_path(store, first).write_text(PLACEHOLDER + "\n")
 
         text = self.DOCTOR
         fn = text[text.index("local_state() { # <path> <kind> <how to get it back>"):]
@@ -545,9 +636,10 @@ printf 'missing=%s\\n' "$missing"
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         out = cp.stdout + cp.stderr
         self.assertIn("missing=0", out, out)
-        for name, sfile, _shome, _var in TABLE:
+        for row in TABLE:
+            name, sfile = row[0], row[1]
             with self.subTest(name=name):
-                line = [l for l in out.splitlines() if sfile in l]
+                line = [l for l in out.splitlines() if f"/{sfile} " in l + " "]
                 self.assertEqual(1, len(line), out)
                 self.assertIn("re-authable", line[0])
                 self.assertIn(f"wk key set {name}", line[0])

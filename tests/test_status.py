@@ -151,7 +151,7 @@ class TestReprovisionLine(unittest.TestCase):
         self.assertIn("wk boot rpi3", out)
 
     def test_a_device_missing_mach_profile_renders_the_missing_field_not_a_guess(self):
-        """A conf with no MACH_PROFILE has nothing to compose a command
+        """A conf with no NODE_PROFILE has nothing to compose a command
         from (cmd/status's _fleet_probe guards this before ever calling a
         driver's b_reprovision); the record says which field is missing and
         the renderer must show exactly that, never a made-up profile name."""
@@ -162,13 +162,13 @@ class TestReprovisionLine(unittest.TestCase):
                 "role": "bench-device",
                 "mode": "unreachable",
                 "media": "unknown",
-                "reprovision": "missing MACH_PROFILE in boot/machines/newdevice.conf"
+                "reprovision": "missing NODE_PROFILE in boot/machines/newdevice.conf"
                 " -- nothing to compose a recipe from",
             },
             {"kind": "exit", "code": 0},
         ]
         out = render(recs, "text").stdout
-        self.assertIn("missing MACH_PROFILE in boot/machines/newdevice.conf", out)
+        self.assertIn("missing NODE_PROFILE in boot/machines/newdevice.conf", out)
         # Nothing invented in its place: no 'wk sysimage build' line for a
         # profile that was never named.
         self.assertNotIn("wk sysimage build newdevice", out)

@@ -25,6 +25,7 @@
 # attempt, the watchdog is armed before the first run, and the hand-back
 # runs from a trap so it fires on the error path too.
 
+set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 # Set by the LaunchAgent plist `wk bench mac-ab` writes (bench/mac-ab.sh),
@@ -47,17 +48,26 @@ exec >>"$LOG" 2>&1
 
 say() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-state_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -1; }
+# `|| true`: a missing $STATE (nothing written yet) makes `sed` exit nonzero,
+# and under pipefail that would be the whole function's exit status -- fatal,
+# under `set -e`, to every bare `x=$(state_get ...)` call site.
+state_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -1 || true; }
 state_set() {
     local k="$1" v="$2" tmp
     tmp="$STATE.tmp.$$"
-    { grep -v "^$k=" "$STATE" 2>/dev/null; printf '%s=%s\n' "$k" "$v"; } > "$tmp" \
+    # `|| true`: a first call, before $STATE exists, makes `grep` exit
+    # nonzero -- fatal here under `set -e`, mid-group, before `printf` ever runs.
+    { grep -v "^$k=" "$STATE" 2>/dev/null || true; printf '%s=%s\n' "$k" "$v"; } > "$tmp" \
         && mv "$tmp" "$STATE"
     sync 2>/dev/null || true  # the next thing this has to survive is an ungraceful reboot
 }
 
+# `|| true`: every caller relies on an absent field reading back empty
+# (`x=$(jf name); x="${x:-default}"`), and the python side already signals
+# that with `sys.exit(1)` -- which `set -e` would otherwise treat as fatal at
+# every one of those call sites.
 jf() {  # a field out of the job, by python because the job is json
-    /usr/bin/python3 - "$JOB" "$1" <<'PY' 2>/dev/null
+    /usr/bin/python3 - "$JOB" "$1" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -258,12 +268,12 @@ sleep "$SETTLE"
 # `patch` writes into, is created by the per-user bootstrap, which at login
 # has not necessarily happened yet.
 for _t in 1 2 3 4 5 6 7 8 9 10 11 12; do
-    _tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)
+    _tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || true
     [ -n "$_tmp" ] && [ -d "$_tmp" ] && [ -w "$_tmp" ] && break
     say "waiting for the per-user temp directory (${_tmp:-unset})"
     sleep 5
 done
-_tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)
+_tmp=$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null) || true
 if [ -n "$_tmp" ] && [ -w "$_tmp" ]; then
     say "temp: $_tmp"
 else
@@ -328,7 +338,7 @@ sudo -n defaults write /Library/Preferences/com.apple.SoftwareUpdate \
 # individual arm rather than aborting the job.
 msu_stamp() {
     /usr/bin/plutil -p /Library/Preferences/com.apple.SoftwareUpdate.plist 2>/dev/null \
-        | grep -E '"Last[A-Za-z]*Date"' | sort | tr -d ' \n'
+        | grep -E '"Last[A-Za-z]*Date"' | sort | tr -d ' \n' || true
 }
 say "  scan stamp before the job: $(msu_stamp)"
 
@@ -343,7 +353,7 @@ say "quiescing"
 RUNS="$WK_AB_ROOT/ab/$(state_get job_stamp)"
 [ -n "$(state_get job_stamp)" ] || RUNS="$WK_AB_ROOT/ab/unstamped"
 mkdir -p "$RUNS" 2>/dev/null
-newest_result() { ls -1 "$WK_AB_ROOT/results" 2>/dev/null | sort | tail -1; }
+newest_result() { ls -1 "$WK_AB_ROOT/results" 2>/dev/null | sort | tail -1 || true; }
 
 # --- the A/B -----------------------------------------------------------------
 #
@@ -434,10 +444,10 @@ trap - EXIT INT TERM
 # anything on disk, compared against the group booted now.
 booted_is_default() {
     local nv grp
-    nv=$(python3 "$TOOLS/lib/wkmac.py" boot-volume 2>/dev/null)
+    nv=$(python3 "$TOOLS/lib/wkmac.py" boot-volume 2>/dev/null) || true
     nv="${nv##*:}"
     [ -n "$nv" ] || return 1
-    grp=$(python3 "$TOOLS/lib/wkmac.py" volume-group / 2>/dev/null | tr -d ' \r')
+    grp=$(python3 "$TOOLS/lib/wkmac.py" volume-group / 2>/dev/null | tr -d ' \r') || true
     [ -n "$grp" ] || return 1
     [ "$nv" = "$grp" ]
 }

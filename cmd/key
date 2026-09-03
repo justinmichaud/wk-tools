@@ -24,9 +24,19 @@
 #                     machine makes: `claude` is the Claude Code token a
 #                     workspace starts authenticated with (`claude setup-token`
 #                     prints one), `litellm` is the API key `wk ai pi` reaches
-#                     your LiteLLM endpoint with. The names are
+#                     your LiteLLM endpoint with, and `claude-login` is the
+#                     claude.ai account credential `claude auth login` leaves
+#                     on this machine -- read from where the Claude CLI put it,
+#                     never pasted, and what Claude Code Remote Control
+#                     (`wk ai claude <ws> --rc`) refuses to start without,
+#                     the token above being inference-only. The names are
 #                     wk_agent_secrets (lib/store.sh); each target driver hands
-#                     what it holds to the workspaces it brings up
+#                     what it holds to the workspaces it brings up.
+#                     `github-pat` is the one name that is not in that table
+#                     and never enters a workspace: it is what `git-webkit pr`
+#                     opens a pull request with, held beside the deploy keys
+#                     and read only by the credential injector on the machine
+#                     ('wk push' hands it over and takes it away)
 #   wk key claude [--replace]
 #                     `wk key set claude`, the same arm and the same store --
 #                     the spelling `wk doctor` prints as its remedy
@@ -53,8 +63,10 @@
 # whatever needs it, since for a card write that need appears only after
 # the card has already been erased.
 #
-# Runs on the host: `gh` and its credentials are here, while the private keys
-# stay in the VM and are never copied out.
+# Runs on the machine that holds the keys, which is this one: the secrets
+# directory is this device's (wk_secrets_dir, lib/store.sh), and on macOS the
+# podman machine reads it as a mount rather than holding a copy -- so every
+# subverb here is ssh-keygen, a file and `gh`, with no VM in the path.
 #
 # `register` and `check` are the two that call the GitHub API, so they are the
 # only two that need `gh` and a token that works; the rest is ssh-keygen, a
@@ -68,48 +80,18 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 
-# The store this machine keeps its own keys in: /var/lib/wk inside the podman
+# The store this machine keeps its own state in: /var/lib/wk inside the podman
 # VM, the remote root on a build machine. The driver is what knows, so ask it
 # rather than letting the default answer for a machine it is wrong about.
 load_target "$(default_target)" 2>/dev/null || true
 
-WK_MACHINE="${WK_MACHINE:-wk}"
 ACTION="${1:-register}"
 
 # One usage line for every refusal in here: a subverb added to the case below
 # and forgotten in fifteen literal strings is a command that misreports itself.
 USAGE="usage: wk key register|check|show|ensure|set|claude|tailnet|tailnet-api; see wk key -h"
 
-# The keys live in the VM. Read the *public* halves out; the private halves are
-# never copied to the host.
-#
-# Decided once, because two things depend on it: whether in_vm crosses into the
-# podman machine at all, and where the tooling sits on the far side -- the VM's
-# read-only mount at /opt/wk-tools, or this checkout when the far side is just a
-# local shell on a Linux workstation.
-if is_macos && [ -z "${WK_IN_VM:-}" ]; then
-    IN_VM_SSH=1
-    IN_VM_ROOT=/opt/wk-tools
-    IN_VM_ENV="WK_IN_VM=1 "
-else
-    IN_VM_SSH=
-    IN_VM_ROOT="$WK_ROOT"
-    IN_VM_ENV=
-fi
-
-in_vm() {
-    # </dev/null is essential, not defensive: both podman-machine-ssh and
-    # bash -c read stdin, and every caller here sits inside a `while read`
-    # loop fed by a heredoc -- without it the first iteration swallows the
-    # remaining forks.
-    if [ -n "$IN_VM_SSH" ]; then
-        podman machine ssh "$WK_MACHINE" "$@" </dev/null
-    else
-        bash -c "$*" </dev/null
-    fi
-}
-
-ensure_keys() { in_vm "$IN_VM_ENV$(sh_quote "$IN_VM_ROOT/cmd/key") ensure" 2>&1 | sed 's/^/  /'; }
+ensure_keys() { "$0" ensure 2>&1 | sed 's/^/  /'; }
 
 # --- one key per machine, not one key everywhere ------------------------------
 # GitHub is happy with several keys on one repository, so every machine
@@ -153,32 +135,109 @@ m_sshtest() {
     { ( load_target "$1"; t_wk key sshtest "$2" ) 2>/dev/null || true; } | tr -d '\r'
     return 0
 }
-# `wk push off` moves only the *private* half out of the mounted directory,
-# so this normally finds the public half where it always was; the second
-# path is for a key generated while push was off.
-pub_of()      { in_vm "cat $WK_STORE/secrets/build_key_$1.pub 2>/dev/null \
-                       || cat $WK_STORE/push-keys/build_key_$1.pub 2>/dev/null" | tr -d '\r'; }
+# The two halves live in two directories, always and whichever way the switch
+# is set: the public one where every workspace reads it (wk_secrets_dir, a
+# read-only mount in there) and the private one where nothing mounts it at all
+# (wk_push_held_dir). One place each, so neither of these has a second path
+# that would only ever run when the first was wrong.
+pub_of() { # <fork>
+    cat "$(wk_secrets_dir)/build_key_$1.pub" 2>/dev/null
+    return 0
+}
 
-# Where the private half is right now, or empty when there is none. `wk key
-# check` needs it to authenticate, and needs to say *why* when it cannot.
-priv_of()     { in_vm "for d in secrets push-keys; do \
-                          p=$WK_STORE/\$d/build_key_$1; \
-                          [ -f \"\$p\" ] && { echo \"\$p\"; break; }; \
-                       done" | tr -d '\r'; }
+# Where the private half is, or empty when there is none. `wk key check` needs
+# it to authenticate, and needs to say *why* when it cannot.
+priv_of() { # <fork>
+    [ -f "$(wk_push_held_dir)/build_key_$1" ] \
+        && printf '%s\n' "$(wk_push_held_dir)/build_key_$1"
+    return 0
+}
 
-# --- ensure runs inside the VM, where the secrets are ------------------------
-if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
+# --- the claude.ai login credential, captured rather than pasted -------------
+# `claude auth login` leaves the account credential where the Claude CLI keeps
+# it, and that is platform-specific: on macOS a login-Keychain item whose
+# service name the CLI builds as "Claude Code-credentials", on Linux the file
+# ${CLAUDE_CONFIG_DIR:-~/.claude}/.credentials.json. Read from there rather
+# than pasted, because it is a JSON document nobody should be handling by
+# hand -- and never through an argument, which `ps` shows to everyone here.
+#
+# On macOS, CLAUDE_CONFIG_DIR set changes the Keychain service name the CLI
+# uses -- it appends a hash of the directory -- so the item the read below
+# would find is not the one it wrote. Refused rather than guessed at, and
+# before the read rather than inside it: a `die` in a command substitution
+# ends only the subshell, and the caller would carry on with an empty answer.
+# On Linux the same variable names the directory the file is in, and the read
+# follows it, so there is nothing to refuse.
+_claude_login_refuse_relocated_store() {
+    is_macos || return 0
+    [ -z "${CLAUDE_CONFIG_DIR:-}" ] \
+        || die "CLAUDE_CONFIG_DIR is set here ($CLAUDE_CONFIG_DIR), and the Claude CLI
+    then keeps its login under a Keychain item named for that directory, not
+    the default one this reads. Run this in a shell without it set."
+}
+
+# Nothing at all when there is no login here, and that is not an error: the
+# caller says what to do about it, in its own words. Same contract as
+# _wk_secret_read (lib/store.sh).
+_claude_login_read() {
+    # `|| true` on both: "there is no such item" is how each of these says
+    # there is no login here, and under `set -e` that status would end the
+    # command before it could say so in words.
+    if is_macos; then
+        security find-generic-password -a "$USER" -w -s "Claude Code-credentials" 2>/dev/null || true
+    else
+        cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json" 2>/dev/null || true
+    fi
+}
+
+# Is it the credential remote control needs? One line back: `ok:<scopes>` or
+# `bad:<why>`. The shape is the CLI's own (its stored object is
+# claudeAiOauth: {accessToken, refreshToken, expiresAt, scopes, ...}), and the
+# two things worth checking are the two that decide whether an agent can use
+# it: a refreshToken, which a `claude setup-token` token has none of, and the
+# user:profile scope, which is what remote control refuses a token for
+# lacking. Reads stdin; prints no part of the credential.
+#
+# `python3 -c`, not a heredoc: a heredoc *is* python's stdin, and the
+# credential piped in would never reach it.
+_claude_login_check() {
+    python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception as e:
+    print("bad:not JSON at all (%s)" % e.__class__.__name__); raise SystemExit(0)
+o = d.get("claudeAiOauth") if isinstance(d, dict) else None
+if not isinstance(o, dict):
+    print("bad:no claudeAiOauth object -- not a claude.ai login credential")
+    raise SystemExit(0)
+if not isinstance(o.get("accessToken"), str) or not o["accessToken"]:
+    print("bad:no accessToken"); raise SystemExit(0)
+if not isinstance(o.get("refreshToken"), str) or not o["refreshToken"]:
+    print("bad:no refreshToken -- an inference-only token, not a login")
+    raise SystemExit(0)
+scopes = o.get("scopes")
+if not isinstance(scopes, list) or "user:profile" not in scopes:
+    print("bad:scopes are %s -- remote control needs user:profile" % (scopes,))
+    raise SystemExit(0)
+print("ok:" + " ".join(str(s) for s in scopes))
+'
+}
+
+# --- ensure runs where the secrets are, which is this machine ----------------
+if [ "$ACTION" = ensure ]; then
     [ -z "${2:-}" ] || die "$USAGE"
-    ensure_dir "$WK_STORE/secrets" 0700
+    ensure_dir "$(wk_secrets_dir)" 0700
+    ensure_dir "$(wk_push_held_dir)" 0700
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
-        key="$WK_STORE/secrets/build_key_$remote"
-        # A key held back by `wk push off` is still this machine's key, in
-        # $WK_STORE/push-keys. Generating a second one here would register a
-        # new deploy key and leave the switch pointing at a dead one.
-        if [ -f "$WK_STORE/push-keys/build_key_$remote" ]; then
-            unchanged "key for $repo (held back -- 'wk push on' to expose it)"
-        elif [ -f "$key" ]; then
+        # The private half is generated where it lives for good, in the
+        # directory nothing mounts; only the public half is copied to the one
+        # every workspace reads, because that is what its ssh config names
+        # (wk_ssh_alias_blocks) and what `wk key register` sends to GitHub.
+        key="$(wk_push_held_dir)/build_key_$remote"
+        pub="$(wk_secrets_dir)/build_key_$remote.pub"
+        if [ -f "$key" ]; then
             unchanged "key for $repo"
         else
             # No passphrase: used unattended by agents, and a passphrase stored
@@ -186,6 +245,12 @@ if [ "$ACTION" = ensure ] && { ! is_macos || [ -n "${WK_IN_VM:-}" ]; }; then
             ssh-keygen -t ed25519 -N '' -C "wk deploy key for $repo" -f "$key" >/dev/null
             chmod 0600 "$key"
             changed "generated key for $repo"
+        fi
+        # Re-asserted rather than written once: this is the copy a workspace
+        # reads, and a machine whose secrets directory was recreated would
+        # otherwise name an identity that is not there.
+        if [ -f "$key.pub" ] && ! cmp -s "$key.pub" "$pub"; then
+            install -m 0644 "$key.pub" "$pub"
         fi
     done
     exit 0
@@ -198,10 +263,10 @@ case "$ACTION" in
 # machine, asked for here rather than as a surprise prompt from whatever needed
 # it first.
 #
-# In the store rather than host-local, unlike the tailnet keys, because the
-# consumers are the workspaces: a container reads it live through the read-only
-# /secrets mount, and a guest or a build box is handed a copy when its
-# workspace comes up. Nothing here, or anywhere else, ever prints one.
+# In the secrets directory beside the deploy keys, because the consumers are
+# the workspaces: a container reads it live through the read-only /secrets
+# mount, and a guest or a build box is handed a copy when its workspace comes
+# up. Nothing here, or anywhere else, ever prints one.
 #
 # `wk key claude` is this arm with the name filled in, not a second one: one
 # store, one prompt, one refusal list, whichever way it is spelled.
@@ -209,16 +274,65 @@ set|claude)
     if [ "$ACTION" = set ]; then
         _name="${2:-}"; _flag="${3:-}"; _tail="${4:-}"
         [ -n "$_name" ] || die "usage: wk key set <name> [--replace]
-    names: $(wk_agent_secret_names | tr '\n' ' ')"
+    names: $(wk_agent_secret_names | tr '\n' ' ')github-pat"
     else
         _name=claude; _flag="${2:-}"; _tail="${3:-}"
     fi
     [ -z "$_tail" ] || die "$USAGE"
+
+    # The GitHub API token, and deliberately *not* a row in wk_agent_secrets:
+    # every row in that table is delivered into the workspace, and this one must
+    # never be. It lives in wk_push_held_dir beside the private key halves,
+    # which nothing mounts anywhere, and the only thing that ever reads it is
+    # the credential injector on the machine that runs the workspaces
+    # (container/proxy/github-inject.py). `wk push on|off` is what hands it
+    # over and takes it away, the same switch as the keys.
+    if [ "$_name" = github-pat ]; then
+        case "$_flag" in
+            --replace)
+                [ -n "$(wk_github_pat)" ] \
+                    || die "there is no GitHub token here to replace ($(wk_github_pat_path)).
+    'wk key set github-pat' asks for one."
+                rm -f "$(wk_github_pat_path)"
+                info "removed the old token -- revoke it on GitHub too if it is still live"
+                ;;
+            "") ;;
+            *) die "$USAGE" ;;
+        esac
+
+        if [ -n "$(wk_github_pat)" ]; then
+            info "github-pat: present ($(wk_github_pat_path))"
+            log  "  'wk push on' hands it to the injector; 'wk push off' takes it away"
+            log  "  no workspace ever holds it: the injector puts it in the Authorization"
+            log  "  header, and the workspace sends a placeholder ('wk verify' measures that)"
+            log  "  whether GitHub still accepts it is not checkable without spending a"
+            log  "  request; 'git-webkit pr' answering 401 is the evidence that it does not"
+            log  "  'wk key set github-pat --replace' rotates it"
+            exit 0
+        fi
+
+        _val=$(prompt_secret_value \
+            "a GitHub personal access token, so 'git-webkit pr' in a workspace can open a pull request" \
+            "github.com/settings/tokens: a classic token with the 'repo' scope, or a fine-grained one with Contents and Pull requests on $(wk_push_forks | awk 'NF {printf "%s ", $2}')") || _val=""
+        [ -n "$_val" ] || die "nothing stored, so 'git-webkit pr' in a workspace gets 401.
+    To store one:  wk key set github-pat"
+
+        ensure_dir "$(wk_push_held_dir)" 0700
+        # Down a pipe into a file this shell creates under umask 077, never as
+        # an argument: an argument is in `ps` for everyone on the machine.
+        ( umask 077; printf '%s\n' "$_val" > "$(wk_github_pat_path)" ) \
+            || die "could not write $(wk_github_pat_path)"
+        unset _val
+        info "stored -- 'wk push on' hands it to the injector, and no workspace holds it"
+        exit 0
+    fi
+
     wk_agent_secret_known "$_name" \
         || die "there is no agent credential called '$_name'.
-    This checkout knows: $(wk_agent_secret_names | tr '\n' ' ')
-    Each is a row in wk_agent_secrets (lib/store.sh), which is also what
-    delivers it to a workspace and names the variable its agent reads."
+    This checkout knows: $(wk_agent_secret_names | tr '\n' ' ')github-pat
+    Each but the last is a row in wk_agent_secrets (lib/store.sh), which is
+    also what delivers it to a workspace and names the variable its agent
+    reads; github-pat is the one that never enters a workspace at all."
 
     # What the person is being asked for, and how a person gets one. Per name,
     # because that is the whole of what differs: the store, the mode, the
@@ -232,11 +346,15 @@ set|claude)
             _what="your LiteLLM API key, so 'wk ai pi' in a workspace can reach that endpoint"
             _how="a virtual key from your own LiteLLM deployment (its web UI, or POST /key/generate)"
             ;;
+        claude-login)
+            _what="your claude.ai login credential, so remote control works in a workspace"
+            _how="run 'claude auth login' here; this reads what it stored, nothing is pasted"
+            ;;
     esac
 
     case "$_flag" in
         --replace)
-            [ -n "$(wk_agent_secret "$_name")" ] \
+            wk_agent_secret_present "$_name" \
                 || die "there is no $_name credential here to replace ($(wk_agent_secret_path "$_name")).
     'wk key set $_name' asks for one."
             # Cleared before asking, so a replace that is then abandoned leaves
@@ -248,9 +366,14 @@ set|claude)
         *) die "$USAGE" ;;
     esac
 
-    if [ -n "$(wk_agent_secret "$_name")" ]; then
+    if wk_agent_secret_present "$_name"; then
         info "$_name: present ($(wk_agent_secret_path "$_name"))"
-        log  "  every workspace this machine makes gets it as \$$(wk_agent_secret_field "$_name" 4)"
+        if [ "$(wk_agent_secret_kind "$_name")" = file ]; then
+            log  "  $(wk_agent_secret_bytes "$_name" | _claude_login_check \
+                      | sed 's/^ok:/scopes: /; s/^bad:/UNUSABLE: /')"
+        else
+            log  "  every workspace this machine makes gets it as \$$(wk_agent_secret_field "$_name" 4)"
+        fi
         case "$_name" in
             claude)
                 log  "    a container reads it live from the read-only /secrets mount"
@@ -267,22 +390,56 @@ set|claude)
                 log  "  place and the URL and model list are in that file. 'wk ai pi'"
                 log  "  prints the file to write when a workspace has none."
                 ;;
+            claude-login)
+                log  "    every container on this machine reads and rewrites this one"
+                log  "    file, because the CLI spends the refresh token in it and"
+                log  "    writes the rotated one back -- so one shared file, not a copy"
+                log  "    each. A macOS guest gets a copy, which is a second holder:"
+                log  "    a refresh there invalidates this one."
+                ;;
         esac
         log  "  'wk key set $_name --replace' rotates it"
         exit 0
     fi
 
-    _val=$(prompt_secret_value "$_what" "$_how") || _val=""
-    [ -n "$_val" ] || die "nothing stored for '$_name', so no workspace has it.
+    # A value row is pasted; a file row is read out of where its own tool keeps
+    # it (_claude_login_read above) and checked before it is believed. Both go
+    # to the store down a pipe, never as an argument: an argument is in `ps`
+    # for everyone on the machine for as long as the command runs. The file row
+    # goes in byte for byte -- its tool parses the document, and a newline this
+    # added would be a newline in it.
+    if [ "$(wk_agent_secret_kind "$_name")" = file ]; then
+        _claude_login_refuse_relocated_store
+        _val=$(_claude_login_read)
+        [ -n "$_val" ] || die "there is no claude.ai login on this machine to read.
+    $_how
+    Then:  wk key set $_name"
+        _verdict=$(printf '%s' "$_val" | _claude_login_check)
+        case "$_verdict" in
+            ok:*) ;;
+            *) unset _val
+               die "what this machine holds is not a login credential an agent can spend:
+    ${_verdict#bad:}
+    Remote control refuses anything but a full-scope login, so nothing was
+    stored. $_how" ;;
+        esac
+        printf '%s' "$_val" | wk_agent_secret_store "$_name" \
+            || die "could not write $(wk_agent_secret_path "$_name")"
+        unset _val
+        info "stored -- scopes: ${_verdict#ok:}"
+        log  "  every workspace this machine makes can use it; the ones that"
+        log  "  already exist pick it up on their next 'wk start'"
+        unset _verdict
+    else
+        _val=$(prompt_secret_value "$_what" "$_how") || _val=""
+        [ -n "$_val" ] || die "nothing stored for '$_name', so no workspace has it.
     To store one:  wk key set $_name"
-
-    # Down a pipe, never as an argument: an argument is in `ps` for everyone on
-    # the machine for as long as the command runs.
-    printf '%s\n' "$_val" | wk_agent_secret_store "$_name" \
-        || die "could not write $(wk_agent_secret_path "$_name")"
-    unset _val
-    info "stored -- every workspace made from now on has \$$(wk_agent_secret_field "$_name" 4)"
-    log  "  the ones that already exist pick it up on their next 'wk start'"
+        printf '%s\n' "$_val" | wk_agent_secret_store "$_name" \
+            || die "could not write $(wk_agent_secret_path "$_name")"
+        unset _val
+        info "stored -- every workspace made from now on has \$$(wk_agent_secret_field "$_name" 4)"
+        log  "  the ones that already exist pick it up on their next 'wk start'"
+    fi
     ;;
 
 # The tailnet API access token: what retires a fleet node whose name a new
@@ -407,9 +564,9 @@ sshtest)
     priv=$(priv_of "$remote")
     [ -n "$priv" ] || { echo "no key"; exit 1; }
     case "$priv" in */push-keys/*) echo "push is off"; exit 3 ;; esac
-    in_vm "ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes \
-              -o BatchMode=yes -i $(sh_quote "$priv") \
-              -T git@github.com 2>&1 </dev/null || true"
+    ssh -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes \
+        -o BatchMode=yes -i "$priv" \
+        -T git@github.com 2>&1 </dev/null || true
     ;;
 
 # The keys this machine holds, one per line, with the fingerprint that
@@ -428,12 +585,13 @@ fingerprints)
         pub=$(pub_of "$remote")
         [ -n "$pub" ] || { printf '%-9s %-50s %s\n' "$remote" "-" "no key"; continue; }
         fp=$(printf '%s\n' "$pub" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+        # Where the private half *is* is no longer the switch -- it is always
+        # in the one directory nothing mounts -- so what this can say is
+        # whether this machine holds one at all. Whether it is loaded into the
+        # agent, and so whether a push works, is `wk push status`.
         priv=$(priv_of "$remote")
-        case "$priv" in
-            '')             state="no private half" ;;
-            */push-keys/*)  state="held back (wk push on)" ;;
-            *)              state="push allowed" ;;
-        esac
+        [ -n "$priv" ] && state="private half here ('wk push status')" \
+                       || state="no private half"
         printf '%-9s %-50s %s\n' "$remote" "${fp:-unreadable}" "$state"
     done
     ;;

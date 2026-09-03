@@ -54,84 +54,44 @@ git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
 [ -f "$HOME/.gitignore" ] || printf '.DS_Store\n.cache\ncompile_commands.json\n' > "$HOME/.gitignore"
 git config --global --add safe.directory "$SRC"
 
-# The forks, read from the mounted tooling at use time rather than from an
-# environment variable frozen into the container at creation: `wk_push_forks`
-# in lib/store.sh is the one list, and a workspace created last month must see
-# today's answer. In a subshell, because those files are `wk`'s and define
-# log(), warn() and a shell mode of their own.
-_forks() { bash -c '. "$1/lib/store.sh"; wk_push_forks' _ "$WK_TOOLS" 2>/dev/null; }
-
-# The ssh aliases those forks need, from the same mounted tooling and for the
-# same reason: `wk_ssh_alias_blocks` is the one implementation of that config,
-# read here, by a build machine (remote/provision.sh) and by a macOS guest
-# (targets/vm.sh). A container names its identities `~/.ssh/id_<remote>`
-# (symlinks onto /secrets, below) and passes no ProxyCommand -- the catch-all
-# `Host *` block already carries one, and ssh takes the first value it sees.
-_alias_blocks() {
-    bash -c '. "$1/lib/store.sh"; wk_ssh_alias_blocks "$2" id_' \
-        _ "$WK_TOOLS" '~/.ssh' 2>/dev/null
-}
-
-# One deploy key per fork. Both forks are on github.com, so the key is selected
-# by ssh host alias rather than hostname -- that is the only way to use two
-# different keys against the same host.
+# ssh: two lines and nothing else, because no credential of any kind is on
+# this side of the boundary. The per-fork aliases are in /secrets/ssh_config,
+# written by `wk push on|off` (push_agent_ssh_config_write, lib/store.sh) --
+# an include rather than a copy so a rotated key, an added fork or the switch
+# itself reaches every workspace that already exists at once, with nothing
+# recreated. Each alias names a *public* half and an ssh-agent socket; the
+# private halves are on the machine outside this container, in an agent that
+# cannot hand one back.
 #
 # Reads are anonymous over HTTPS and need no credential; these are push-only.
 install -d -m 0700 "$HOME/.ssh"
-: > "$HOME/.ssh/config"
-chmod 0600 "$HOME/.ssh/config"
 
 # ssh has no network to reach: the workspace has no interface at all, so every
 # connection goes through the egress proxy's unix socket. Written first and for
 # every host, because ssh takes the first value it sees for each keyword and the
-# per-fork blocks below deliberately do not set ProxyCommand. %h expands to the
-# resolved HostName, so an alias still arrives at the proxy as github.com -- and
-# the proxy refuses anything not in its allowlist, which makes this a path
+# included per-fork blocks deliberately do not set ProxyCommand. %h expands to
+# the resolved HostName, so an alias still arrives at the proxy as github.com --
+# and the proxy refuses anything not in its allowlist, which makes this a path
 # rather than a permission. It also covers the Pi test devices, which are
 # reachable by address and nothing else.
-cat >> "$HOME/.ssh/config" <<'PROXYEOF'
+#
+# ssh ignores an Include whose file is absent, so a machine where the switch
+# has never been thrown resolves no fork host; the check below says so and
+# names the remedy rather than leaving that to a push's own error.
+cat > "$HOME/.ssh/config" <<'PROXYEOF'
 Host *
     ProxyCommand /opt/wk-tools/container/proxy/ssh-proxy.py %h %p
 
+Include /secrets/ssh_config
 PROXYEOF
+chmod 0600 "$HOME/.ssh/config"
 
-# Captured first, not appended straight through: the mounted tooling is read
-# under `2>/dev/null`, so a store that cannot be read emits nothing and would
-# leave a config with no fork Host block while the id_ symlinks below are made
-# anyway -- a workspace whose push fails against a name ssh never heard of.
-_blocks=$(mktemp)
-_alias_blocks > "$_blocks" || true
-if [ -s "$_blocks" ]; then
-    cat "$_blocks" >> "$HOME/.ssh/config"
+if [ -s /secrets/ssh_config ]; then
+    log "ssh: fork aliases from /secrets/ssh_config; keys are in an agent outside this workspace"
 else
-    warn "no fork ssh aliases came back from $WK_TOOLS/lib/store.sh, so ~/.ssh/config
-             names no fork host and a push from here cannot resolve one"
+    log "no /secrets/ssh_config, so ~/.ssh/config names no fork host and a push"
+    log "         from here cannot resolve one -- 'wk push on' (or 'off') writes it"
 fi
-rm -f "$_blocks"
-
-# The key those blocks name is *pointed at*, never copied: a copy goes stale on
-# rotation (every existing workspace keeps offering the dead key), and cannot be
-# taken back -- /secrets is mounted read-only for the container's life, so
-# removing a key there is instantly what makes `wk push off` a switch, not a
-# suggestion. (Same pattern as the Claude credentials link above.)
-#
-# ssh follows the symlink and checks the *target's* permissions, which are 0600
-# in the store; a dangling link is simply "no key", which is the off position.
-_have_key=0
-while read -r _remote _repo _alias; do
-    [ -n "$_remote" ] || continue
-
-    ln -sfn "/secrets/build_key_${_remote}" "$HOME/.ssh/id_${_remote}"
-    if [ -e "$HOME/.ssh/id_${_remote}" ]; then
-        _have_key=1
-        log "deploy key linked for $_repo (push via $_alias)"
-    else
-        log "no key for $_repo right now -- pushes there will be refused ('wk push status')"
-    fi
-done <<EOF
-$(_forks)
-EOF
-[ "$_have_key" = 1 ] || log "         'wk push on' exposes them; 'wk key register' creates them"
 
 # Remotes. The snapshot already carries these, but it was published at some
 # point in the past and lives in a read-only lower layer, so they are
@@ -186,23 +146,37 @@ ln -sfn /skills "$HOME/.claude/skills"
 # and the day `wk key set <name>` stores one every container already points at
 # it. Nothing here has to be rebuilt to rotate one.
 #
-# One mechanism for all three targets, which a credentials file could not be:
-# it is Linux-only (Darwin keeps those in a login Keychain that an ssh session
-# never unlocks), and it needs a `claude login` from inside a workspace to
-# exist at all.
+# Value rows only. A file row (the claude.ai login) is a file its own tool
+# rewrites in place, so it is not linked at all: it lives in the writable
+# /agent-rw mount that every container on this machine shares, and shell/bashrc
+# points the Claude CLI at that directory. A symlink there would be replaced by
+# a regular file the first time the CLI refreshed -- it writes through a temp
+# file and a rename -- leaving the container with a private copy that the next
+# rotation anywhere would kill.
 #
 # The rows come from lib/store.sh's wk_agent_secrets, the same way the forks
 # above come from wk_push_forks: one table, so a name added there reaches every
 # workspace without this file being touched.
 _agent_secrets() { bash -c '. "$1/lib/store.sh"; wk_agent_secrets' _ "$WK_TOOLS" 2>/dev/null; }
-while read -r _sname _sfile _shome _svar; do
+while read -r _sname _sfile _shome _svar _skind; do
     [ -n "$_sname" ] || continue
+    if [ "$_skind" = file ]; then
+        [ -s "/agent-rw/$_sfile" ] \
+            || log "no $_sname credential yet -- 'wk key set $_sname' on the host stores one"
+        continue
+    fi
     ln -sfn "/secrets/$_sfile" "$HOME/$_shome"
     [ -e "$HOME/$_shome" ] \
         || log "no $_sname credential yet -- 'wk key set $_sname' on the host stores one ($_svar)"
 done <<EOF
 $(_agent_secrets)
 EOF
+
+# The mount itself, reported rather than assumed: without it there is no
+# credential store for the file rows to be in and no shared file for the CLI
+# to rotate. A container made before the mount existed is what this catches.
+[ -d /agent-rw ] \
+    || log "no /agent-rw mount -- this container predates it; 'wk rm' and 'wk new' remake it"
 
 # --- profiling tools -----------------------------------------------------------
 # heaptrack, valgrind (its massif tool) and sysprof-cli are distro packages;

@@ -1,4 +1,4 @@
-# Named build configurations. One place; `config_load <name> <os>` sets:
+# Named build configurations. One place; `config_load <name> <os> <kind>` sets:
 #
 #   CFG_PORT      the WebKit port  (jsc-only, gtk, wpe, or empty for Apple)
 #   CFG_TYPE      Debug | Release
@@ -10,8 +10,14 @@
 #   CFG_JSC_ONLY  set when the config builds JavaScriptCore and nothing else
 #
 # Every CMake config also starts with the flags in _CFG_DEFAULT_ARGS and
-# _CFG_DEFAULT_CMAKE below, and a machine may add its own on top -- see
-# config_target_var for the per-config half of that.
+# _CFG_DEFAULT_CMAKE below, plus USE_LIBBACKTRACE (derived from <kind>) and
+# the libc++ flags (unless the target's conf says WK_TARGET_LIBCXX=0), and a
+# machine may add its own on top -- see config_target_var for the per-config
+# half of that.
+#
+# <kind> is WK_TARGET_KIND (lib/target.sh, set by load_target) when the third
+# argument is omitted -- every caller but a test can leave it out once
+# load_target has run.
 #
 # CFG_BUILDSYS matters: CMake ports take -jN via --makeargs, but xcodebuild
 # wants -jobs N and ignores --makeargs -- get it wrong and the build runs at
@@ -62,6 +68,9 @@ WK_CXX="${WK_CXX:-clang++}"
 
 # Loaded on demand: not every caller of this file has sourced lib/arch.sh.
 command -v arch_canon >/dev/null 2>&1 || . "$WK_ROOT/lib/arch.sh"
+# Same, for the one thing a refusal here needs from it: the path of the conf
+# file that carries a machine's build fields (_cfg_libcxx below).
+command -v target_registry_conf >/dev/null 2>&1 || . "$WK_ROOT/lib/target.sh"
 
 # Where a config's build tree lands, one directory per port. The `-asan`
 # suffix is ours: without it mac-release and mac-release-asan share one
@@ -107,25 +116,69 @@ _CFG_RELWITHDEBINFO="$_CFG_RELWITHDEBINFO -DCMAKE_CXX_FLAGS_RELWITHDEBINFO=\"-O3
 # One place for the flags that are not a property of any one config but of how
 # this repository builds WebKit at all. A config's own CFG_ARGS/CFG_CMAKE is
 # appended *after* these, so a config that wants the opposite states it and
-# wins -- cmake takes the last repeated -D, and gtk-debug's
-# USE_LIBBACKTRACE=ON is exactly that case.
+# wins -- cmake takes the last repeated -D.
 #
 #   --no-fatal-warnings   every config here builds with DEVELOPER_MODE=ON,
 #                         which makes a compiler warning stop the build. A
 #                         warning in WebKit's tree from a newer clang than the
 #                         one it was written against is nobody's fault and not
 #                         ours to fix on the way to a measurement.
-#   USE_LIBBACKTRACE=OFF  the library is not on every machine, and its absence
-#                         is a configure failure rather than a missing feature.
 #   DEVELOPER_MODE=ON     the assertions, test targets and tools every workflow
 #                         in this repo uses.
 #   USE_VULKAN=OFF        }  neither is built or measured here, and both pull
 #   ENABLE_THUNDER=OFF    }  in dependencies a build machine may not have.
 #
+# USE_LIBBACKTRACE is not here: it is derived from the target's kind
+# (_cfg_use_libbacktrace below), not fixed for every config.
+#
 # CMake ports only: xcodebuild takes no -D flags, and build-webkit's Apple path
 # does not offer --no-fatal-warnings.
 _CFG_DEFAULT_ARGS='--no-fatal-warnings'
-_CFG_DEFAULT_CMAKE='-DUSE_LIBBACKTRACE=OFF -DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF'
+_CFG_DEFAULT_CMAKE='-DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF'
+
+# Whether the machine that builds a config actually has libbacktrace: the
+# sandboxes and guests this repo creates always carry it, but a remote target
+# is someone else's machine, and finding it absent partway through a build is
+# a configure failure, not a missing feature (measured on buildbox4: no
+# libbacktrace package, and the configure step fails without USE_LIBBACKTRACE
+# turned off there).
+#
+# Answers in a variable rather than on stdout: an unknown kind dies, and a die
+# inside a command substitution kills only the subshell -- the build would go
+# on with an empty -DUSE_LIBBACKTRACE=.
+_cfg_use_libbacktrace() { # <kind: container|vm|local|remote> -> _CFG_LIBBACKTRACE
+    case "$1" in
+        container|vm|local) _CFG_LIBBACKTRACE=ON ;;
+        remote)             _CFG_LIBBACKTRACE=OFF ;;
+        *) die "config_load: unknown target kind '$1'" ;;
+    esac
+}
+
+# libc++ over the system libstdc++, the default for every Linux CMake config
+# built with clang. CMAKE_CXX_FLAGS is not folded into _CFG_DEFAULT_CMAKE:
+# cmake's own -D takes the last repeated value, so a host that sets its own
+# CMAKE_CXX_FLAGS (WK_TARGET_CMAKE, e.g. -Wno-invalid-constexpr on buildbox4)
+# would silently drop this one -- config_build_env's _config_merge_cxx_flags
+# merges every CMAKE_CXX_FLAGS= it sees into one instead. The three linker
+# variables are separate cmake variables (cmake keeps them apart, and the
+# driver needs -stdlib=libc++ at link time too), and no host conf sets them,
+# so they need no such merge.
+_CFG_LIBCXX_CMAKE='-DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++'
+
+# Whether those flags go on, from the target's WK_TARGET_LIBCXX: `1` on, `0`
+# off, unset on -- every machine this repo knows has libc++ except the one
+# whose conf says so. The value is read rather than compared against 0, so a
+# typo in a conf (`WK_TARGET_LIBCXX=yes`) is named instead of silently meaning
+# the default. In a variable for the same reason as _cfg_use_libbacktrace.
+_cfg_libcxx() { # <WK_TARGET_LIBCXX> -> _CFG_LIBCXX
+    case "$1" in
+        1|"") _CFG_LIBCXX=ON ;;
+        0)    _CFG_LIBCXX=OFF ;;
+        *)    die "WK_TARGET_LIBCXX='$1' in $(target_registry_conf "${WK_TARGET:-<target>}")
+    is neither 1 nor 0. It says whether that machine has libc++:
+    1 (or unset) to build with -stdlib=libc++, 0 to leave it out." ;;
+    esac
+}
 
 # DEBUG_FISSION is stated rather than left to its default: WebKitCommon.cmake
 # computes that default before Options${PORT} sets ENABLE_DEVELOPER_MODE, so
@@ -142,12 +195,17 @@ _cfg_apple_jsc() {
     CFG_CC=""; CFG_CXX=""
 }
 
-config_load() { # <name> <os: linux|macos>
+config_load() { # <name> <os: linux|macos> [kind: container|vm|local|remote]
     CFG_NAME="$1"
     CFG_OS="${2:-}"
     [ -n "$CFG_OS" ] || die "config_load '$1': no platform given. It is the
     target's t_os, so load_target has to run first -- on macOS a config does
     not choose its own build system (build/configs.sh)."
+    # Falls back to WK_TARGET_KIND (load_target, lib/target.sh): every caller
+    # but a test leaves the third argument out once load_target has run.
+    CFG_KIND="${3:-${WK_TARGET_KIND:-}}"
+    [ -n "$CFG_KIND" ] || die "config_load '$1': no target kind given. It is
+    WK_TARGET_KIND, so load_target has to run first (build/configs.sh)."
     CFG_PORT=""; CFG_TYPE=""; CFG_ARGS=""; CFG_CMAKE=""
     CFG_BUILDSYS=cmake
     CFG_SCRIPT=Tools/Scripts/build-webkit
@@ -198,7 +256,6 @@ config_load() { # <name> <os: linux|macos>
         gtk-debug)
             CFG_PORT="--gtk"; CFG_TYPE=Debug
             CFG_ARGS="--debug"
-            CFG_CMAKE="-DUSE_LIBBACKTRACE=ON"
             ;;
         gtk-release)
             CFG_PORT="--gtk"; CFG_TYPE=Release
@@ -257,7 +314,11 @@ config_load() { # <name> <os: linux|macos>
     # config's own flags are the ones that win where the two disagree.
     if [ "$CFG_BUILDSYS" = cmake ]; then
         CFG_ARGS="$_CFG_DEFAULT_ARGS${CFG_ARGS:+ $CFG_ARGS}"
-        CFG_CMAKE="$_CFG_DEFAULT_CMAKE${CFG_CMAKE:+ $CFG_CMAKE}"
+        _cfg_use_libbacktrace "$CFG_KIND"
+        _cfg_libcxx "${WK_TARGET_LIBCXX:-}"
+        local _cfg_def="$_CFG_DEFAULT_CMAKE -DUSE_LIBBACKTRACE=$_CFG_LIBBACKTRACE"
+        [ "$_CFG_LIBCXX" = OFF ] || _cfg_def="$_cfg_def $_CFG_LIBCXX_CMAKE"
+        CFG_CMAKE="$_cfg_def${CFG_CMAKE:+ $CFG_CMAKE}"
     fi
 
     # Decided here so the job count, the watchdog's budget and the value
@@ -294,6 +355,39 @@ config_target_var() { # <variable stem>
     printf '%s' "${!n:-}"
 }
 
+# Re-adds quotes around a -D flag's value if it has embedded spaces (the
+# RelWithDebInfo flags, _CFG_RELWITHDEBINFO above) -- the pairing helper for
+# the eval/set-based split in _config_merge_cxx_flags below, which strips
+# them getting there.
+_config_requote() { # <one -D flag, quotes already stripped>
+    case "$1" in
+        *' '*) printf '%s="%s"' "${1%%=*}" "${1#*=}" ;;
+        *)     printf '%s' "$1" ;;
+    esac
+}
+
+# Every -DCMAKE_CXX_FLAGS= a config's flags carry (the libc++ default,
+# _CFG_LIBCXX_CMAKE, plus a target's own WK_TARGET_CMAKE -- buildbox4's
+# -Wno-invalid-constexpr is exactly this) collapse into one, kept last so it
+# is the value cmake actually uses: -D takes the last repeated flag, and a
+# host that states its own -DCMAKE_CXX_FLAGS= is stating what to *add* to the
+# build, not what replaces every other one.
+_config_merge_cxx_flags() { # <cmake flags string>
+    # Strings, not arrays: bash 3.2 (macOS's own) errors on "${arr[@]}" for
+    # an empty array under `set -u`, and this runs on the host driving the
+    # build, which may be a macOS workstation (build-in-target.sh).
+    local a cxx="" out=""
+    eval "set -- $1"
+    for a in "$@"; do
+        case "$a" in
+            -DCMAKE_CXX_FLAGS=*) cxx="$cxx${cxx:+ }${a#-DCMAKE_CXX_FLAGS=}" ;;
+            *) out="$out${out:+ }$(_config_requote "$a")" ;;
+        esac
+    done
+    [ -z "$cxx" ] || out="$out${out:+ }-DCMAKE_CXX_FLAGS=\"$cxx\""
+    printf '%s' "$out"
+}
+
 config_build_env() {
     local src="$1" jobs="$2" nice="$3" arch="${4:-native}"
 
@@ -320,6 +414,7 @@ config_build_env() {
     [ -n "$cfgcmake" ] && cmakeargs="$cmakeargs $cfgcmake"
     local cfgargs; cfgargs=$(config_target_var WK_BUILD_ARGS)
     [ -n "${WK_EXTRA_CMAKE:-}" ] && cmakeargs="$cmakeargs $WK_EXTRA_CMAKE"
+    cmakeargs="$(_config_merge_cxx_flags "$cmakeargs")"
 
     # WK_CCACHE_DIR: set by cmd/build (t_ccache_dir) before this runs; the
     # /ccache default only matters to a caller that skips that step

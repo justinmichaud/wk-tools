@@ -26,9 +26,12 @@ CIDR lists it replaces -- GitHub's, Fastly's (PyPI) and Anthropic's published
 ranges all had to be refreshed by hand, and `resolved_hosts` existed only
 because some names have no stable range at all.
 
-TLS is tunnelled, never terminated: CONNECT gets a byte pipe and this process
-sees only the hostname the client asked for. There is no interception and no
-certificate to trust.
+TLS is tunnelled, never terminated, with exactly one exception: CONNECT gets a
+byte pipe and this process sees only the hostname the client asked for. The
+exception is api.github.com (INJECTED_HOSTS below), whose CONNECT is handed to
+the credential injector so that a workspace can open a pull request without
+holding the token that does it -- one host, named here, and the reason is in
+container/proxy/github-inject.py.
 """
 
 import asyncio
@@ -40,14 +43,38 @@ import time
 
 # --- policy ------------------------------------------------------------------
 # Checked before the allowlist, on the same dot-boundary suffix match: a
-# workspace fetches from github.com and nothing more. Its API is what `gh`
-# (and anything else that can post, comment or upload as a person) talks to,
-# and no agent in a workspace may publish -- the push keys are held back the
-# same way (cmd/push). `wk verify` measures this refusal.
+# workspace fetches from github.com and nothing more. `gh` -- and anything else
+# that can post, comment or upload as a person -- has nothing to talk to.
 DENIED_HOSTS = {
-    "api.github.com": "GitHub's API is refused: nothing in a workspace may post as a person",
     "uploads.github.com": "GitHub's upload API is refused: nothing in a workspace may publish",
 }
+
+# The one host whose TLS is not tunnelled. `git-webkit pr` has to reach GitHub's
+# API, and the credential that lets it must not be inside the workspace -- so
+# this CONNECT goes to the injector's unix socket instead of to a byte pipe, and
+# the injector puts the real token in the Authorization header
+# (container/proxy/github-inject.py). The workspace holds a placeholder.
+#
+# An exact match, and checked before the suffix scan below, because `github.com`
+# would otherwise match this name and hand it a plain tunnel on ports 22 and 80
+# as well. Only 443 exists here: there is nothing to inject into an ssh session
+# or a cleartext request, and a tunnel on either would be a way around this.
+#
+# NOTE FOR THE SANDBOX AUDIT (docs/HANDOFF-sandboxing.md): a workspace can now
+# reach GitHub's API, which it could not before. What it cannot do is
+# authenticate: with `wk push off` -- which `wk ai claude` sets before an agent
+# starts -- the injector has no token and answers 401. `wk verify` measures
+# both halves.
+INJECTED_HOSTS = {
+    "api.github.com": 443,
+}
+
+# Where the injector listens. Under the store root and never under
+# $XDG_RUNTIME_DIR/wk, which is the directory every container bind-mounts: a
+# workspace must reach the injector through this policy and not around it.
+INJECT_SOCKET = os.environ.get(
+    "WK_INJECT_SOCK",
+    os.path.join(os.environ.get("WK_STORE", "/var/lib/wk"), "github-inject.sock"))
 
 # Suffix matches: "github.com" matches github.com and codeload.github.com, but
 # not evilgithub.com -- the match is on a dot boundary. (api.github.com is
@@ -360,6 +387,12 @@ class Policy:
         if addr is not None:
             return (host in self._pi_hosts() and port == 22), "pi test device"
 
+        if host in INJECTED_HOSTS:
+            if port == INJECTED_HOSTS[host]:
+                return True, "credential injector"
+            return False, "only port %d of %s is allowed, and only through the injector" % (
+                INJECTED_HOSTS[host], host)
+
         for name, why in DENIED_HOSTS.items():
             if host == name or host.endswith("." + name):
                 return False, why
@@ -413,6 +446,12 @@ class Proxy:
         allowlist is by name, but the danger is by address, and one name can
         resolve to many.
         """
+        # The injected host never leaves this machine from here: the injector
+        # opens its own verified connection to GitHub, so there is no address
+        # to check and nothing to resolve.
+        if INJECTED_HOSTS.get(host) == port:
+            return await asyncio.open_unix_connection(INJECT_SOCKET)
+
         loop = asyncio.get_running_loop()
         infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
 
@@ -612,6 +651,7 @@ async def main():
         raise SystemExit("no listener configured (WK_PROXY_UNIX=0 and no WK_PROXY_TCP)")
 
     log(f"allowlist: {', '.join(sorted(ALLOWED_HOSTS))} (+ pi-hosts from {store})")
+    log(f"injected: {', '.join(sorted(INJECTED_HOSTS))} via {INJECT_SOCKET}")
     sd_notify("READY=1")
 
     await asyncio.gather(*(s.serve_forever() for s in servers))

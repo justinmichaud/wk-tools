@@ -21,7 +21,7 @@
 # Two arms with the same staged id is not a mistake -- it is the A/A control:
 # the noise floor a real A/B needs to be read against (below).
 
-set -uo pipefail
+set -euo pipefail
 WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/common.sh"
 
@@ -57,11 +57,12 @@ arm_paths() {  # $1 = label -> comma-separated run directories
 
 emit() {
     printf '%s\n' "$*"
-    [ -n "$OUT" ] && printf '%s\n' "$*" >> "$OUT"
+    [ -n "$OUT" ] || return 0
+    printf '%s\n' "$*" >> "$OUT" || die "cannot write to $OUT"
     return 0
 }
 
-[ -n "$OUT" ] && : > "$OUT"
+[ -n "$OUT" ] && { : > "$OUT" || die "cannot write to $OUT"; }
 
 emit "A/B summary -- $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 emit "run map: $RUNS"

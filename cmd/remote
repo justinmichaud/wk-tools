@@ -257,8 +257,15 @@ _rsh_q "env WK_ROOT=$(sh_quote "$(t_tools '')") WK_CLAUDE_REMOTE=1 bash -c '
 # `ssh -n`, which would give the far side /dev/null and write an empty file.
 # On stdin and never in the command, because an argument is in `ps` on a
 # machine other people are logged into.
-while read -r _sname _ _shome _; do
+#
+# Value rows only. A file row is the claude.ai account login, and this is a
+# machine other people are root on: an account credential there is theirs,
+# and its refresh token would rotate out from under every other holder as
+# well. An agent on a build box has the inference-only token and no remote
+# control, which is the trade `wk ai claude` already warns about there.
+while read -r _sname _ _shome _ _skind; do
     [ -n "$_sname" ] || continue
+    [ "$_skind" = value ] || continue
     _sval=$(wk_agent_secret "$_sname")
     if [ -n "$_sval" ]; then
         if printf '%s\n' "$_sval" | _rsh "umask 077 && cat > \$HOME/$(sh_quote "$_shome")"; then
@@ -275,7 +282,7 @@ while read -r _sname _ _shome _; do
 done <<EOF
 $(wk_agent_secrets)
 EOF
-unset _sname _shome _sval
+unset _sname _shome _sval _skind
 
 # --- root on a machine you share ---------------------------------------------
 # A barrier, not a prompt: `--force` proceeds with the warning repeated at
@@ -303,7 +310,7 @@ if [ -t 0 ] && [ -t 1 ]; then
     dep_src="$REF"
     if [ -z "$dep_src" ]; then
         _remote_mirror_update "$(_remote_root)"
-        dep_src="$(_remote_root)/mirror"
+        dep_src="$(t_mirror_dir)"
     fi
     dep_dirs="Tools/gtk"
     [ -n "${WK_TARGET_WPE:-}" ] && dep_dirs="$dep_dirs Tools/wpe"
@@ -347,7 +354,7 @@ done
 
 # Our own mirror, once the machine's own repository has made it redundant.
 if [ -n "$REF" ]; then
-    M="$(_remote_root)/mirror"
+    M="$(t_mirror_dir)"
     if _rsh_q "test -d $(sh_quote "$M")" 2>/dev/null; then
         sz=$(_rsh_q "du -sh $(sh_quote "$M") 2>/dev/null | cut -f1" || echo '?')
         log "  $M ($sz) -- redundant now that $REF is used instead"

@@ -5,8 +5,9 @@
     derived from $0 would source nothing and die immediately)
   - sources the rest of the tree (lib/image.sh, image/profiles.sh,
     boot/machines.sh, image/pmos.sh) optionally, through `_source_if_there`,
-    not a hard `.` -- the container half's copy of the tree is only as new
-    as the last `wk sync --tools container`
+    not a hard `.` -- WK_ROOT may be a caller-supplied checkout (the same
+    pre-set-$WK_ROOT case above), where one of these libraries may not
+    exist yet
 
 Driven as `bash -s <cmd/gc`, the same way the container half invokes it, with
 WK_STORE/XDG_STATE_HOME/WK_TARGET_REGISTRY pointed at scratch and WK_MACHINE

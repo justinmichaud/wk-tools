@@ -97,10 +97,10 @@ fi
 
 machine_load "$MACHINE" || die "unknown machine '$MACHINE' (wk boot --list)"
 
-# Probing a MACH_LOCAL machine from the wrong host reads the *driving*
+# Probing a NODE_LOCAL machine from the wrong host reads the *driving*
 # machine's marker and answers confidently about the wrong computer -- the
-# class of bug MACH_OS exists to stop.
-case "$MACH_OS" in
+# class of bug NODE_OS exists to stop.
+case "$NODE_OS" in
     any) ;;
     macos) is_macos || die "$MACHINE is driven from a macOS host only (os=macos in
     boot/machines/$MACHINE.conf) -- run this over there." ;;
@@ -108,7 +108,7 @@ case "$MACH_OS" in
     boot/machines/$MACHINE.conf) -- run this over there." ;;
 esac
 
-load_driver "$MACH_DRIVER"
+load_driver "$NODE_DRIVER"
 
 # --- reading the transition --------------------------------------------------
 # Three sources, in decreasing authority: the machine's own identity marker,
@@ -153,14 +153,14 @@ cmd_status() {
             b_evidence 2>/dev/null | sed 's/^/  /' || true
             if [ -n "$ARMED_IMG" ]; then
                 log "  the record says it was armed for system $ARMED_IMG"
-            elif [ -n "${MACH_BRIDGE:-}" ]; then
+            elif [ -n "${NODE_BRIDGE:-}" ]; then
                 # Not a plain outage until the segment is ruled out: this board
                 # is reached across a phone's USB ethernet, and when that
                 # adapter is absent every board on the cable goes silent at
                 # once, which looks exactly like a dead board and is not one.
                 log "  no arming record could be read either -- but this machine is behind"
-                log "  $MACH_BRIDGE, so rule the segment out before the board:"
-                log "      wk bridge status $MACH_BRIDGE"
+                log "  $NODE_BRIDGE, so rule the segment out before the board:"
+                log "      wk bridge status $NODE_BRIDGE"
             else
                 log "  no arming record could be read either, so this is a plain outage"
                 log "  or the machine is in a bench system that answers somewhere else."
@@ -168,9 +168,9 @@ cmd_status() {
                 # whose network is not a bridge: if every fleet device sharing
                 # this one's way onto the network is quiet too, the network is
                 # the suspect and the board is not.
-                _quiet=$(machine_quiet_siblings "$MACHINE" "${MACH_NET:-}" "${MACH_BRIDGE:-}")
+                _quiet=$(machine_quiet_siblings "$MACHINE" "${NODE_NET:-}" "${NODE_BRIDGE:-}")
                 if [ "${_quiet% *}" -gt 0 ] && [ "${_quiet% *}" = "${_quiet#* }" ]; then
-                    log "  but every other ${MACH_NET:-fleet} device is quiet as well (${_quiet#* } of ${_quiet#* }),"
+                    log "  but every other ${NODE_NET:-fleet} device is quiet as well (${_quiet#* } of ${_quiet#* }),"
                     log "  so rule the network out before the board -- one of them may be a"
                     log "  machine nobody has touched, which no board fault explains."
                 fi
@@ -180,9 +180,8 @@ cmd_status() {
             log "$MACHINE: bench mode -- system ${MODE#bench } (booted $BOOTED)"
             # The evidence belongs here most of all: which system is running is
             # not how it got here, and a lane whose one-shot is not consumed
-            # looks identical to one that was armed for this. Reading that
-            # difference off the medium took hours on 2026-09-01 because the
-            # mode was all this said.
+            # looks identical to one that was armed for this. The mode alone
+            # cannot tell them apart; reading the difference off the medium can.
             b_evidence 2>/dev/null | sed 's/^/  /' || true
             log "  a plain reboot returns it to host mode: wk boot $MACHINE --back"
             return 0 ;;
@@ -190,16 +189,16 @@ cmd_status() {
             # The resilient fallback whose job is to be reachable and let
             # another system be written, never to be measured. Nothing is
             # wrong here.
-            log "$MACHINE: base image -- system ${MODE#base } on $MACH_ROOT (booted $BOOTED)"
+            log "$MACHINE: base image -- system ${MODE#base } on $NODE_ROOT (booted $BOOTED)"
             b_evidence 2>/dev/null | sed 's/^/  /' || true
             log "  this is the fallback helper, not a bench system. To measure something,"
-            log "  arm a system on $MACH_DEVICE:  wk boot $MACHINE --system <id>"
+            log "  arm a system on $NODE_DEVICE:  wk boot $MACHINE --system <id>"
             return 0 ;;
     esac
 
     # Role and mode are different facts: role says what the machine *is*,
     # mode says what it is running right now.
-    log "$MACHINE: ${MACH_ROLE:-workstation}, host mode (booted $BOOTED)"
+    log "$MACHINE: ${NODE_ROLE:-workstation}, host mode (booted $BOOTED)"
     b_evidence | sed 's/^/  /'
 
     [ -n "$ARMED_IMG" ] || return 0
@@ -329,11 +328,11 @@ cmd_arm() {
     # guest's name (`wk vm ls`).
     case "${BOOT_ARMING:-one-shot}" in
     hands-on)
-        [ -n "$IMAGE" ] || IMAGE="${MACH_VOLUME:-}"
-        [ -n "$IMAGE" ] || die "$MACHINE has no benchmark volume configured (MACH_VOLUME)" ;;
+        [ -n "$IMAGE" ] || IMAGE="${NODE_VOLUME:-}"
+        [ -n "$IMAGE" ] || die "$MACHINE has no benchmark volume configured (NODE_VOLUME)" ;;
     guest)
-        [ -n "$IMAGE" ] || IMAGE="${MACH_GUEST:-}"
-        [ -n "$IMAGE" ] || die "$MACHINE has no guest configured (MACH_GUEST)" ;;
+        [ -n "$IMAGE" ] || IMAGE="${NODE_GUEST:-}"
+        [ -n "$IMAGE" ] || die "$MACHINE has no guest configured (NODE_GUEST)" ;;
     # The system is one the device actually holds, or the boot falls through
     # to host mode and looks like a firmware failure: --system is matched
     # against the medium's own enumeration (b_systems), and with no --system
@@ -351,10 +350,10 @@ cmd_arm() {
     esac
 
     # The watchdog value (for the "hands it back in Ns" line below) comes
-    # from the profile this machine's conf names (MACH_PROFILE, IMG_WATCHDOG).
+    # from the profile this machine's conf names (NODE_PROFILE, IMG_WATCHDOG).
     ARM_WATCHDOG=""
     case "${BOOT_ARMING:-one-shot}" in one-shot|medium)
-        image_profile_load "$MACH_PROFILE" >/dev/null 2>&1 && ARM_WATCHDOG="$IMG_WATCHDOG"
+        image_profile_load "$NODE_PROFILE" >/dev/null 2>&1 && ARM_WATCHDOG="$IMG_WATCHDOG"
     ;; esac
 
     if [ -n "$DRY" ]; then
@@ -374,18 +373,18 @@ EOF
 would arm $MACHINE
   volume       $IMAGE $(mac_volume_present 2>/dev/null && echo "(attached)" || echo "(NOT attached -- arming would refuse)")
   boot order   nothing in firmware; the selection is a person's, twice
-  record       $MACH_RECORD
+  record       $NODE_RECORD
   then         print the ritual and stop. Nothing reboots this machine: the
                mode it is going to is chosen at the startup manager.
 EOF
         else
             cat >&2 <<EOF
 would arm $MACHINE
-  system       $IMAGE (verified present on $MACH_DEVICE)
+  system       $IMAGE (verified present on $NODE_DEVICE)
   boot order   $([ "${BOOT_ARMING:-one-shot}" = medium ] \
-                  && echo "untouched; the arming is $MACH_DEVICE's own boot partition" \
+                  && echo "untouched; the arming is $NODE_DEVICE's own boot partition" \
                   || echo "$BOOT_ORDER_IMAGE (one-shot; the normal order $BOOT_ORDER_NORMAL is untouched)")
-  record       $MACH_RECORD on $MACHINE
+  record       $NODE_RECORD on $MACHINE
   then         reboot, and the image's watchdog returns it in
                ${ARM_WATCHDOG:-?}s unless claimed
 EOF
@@ -404,7 +403,7 @@ EOF
         # person cannot, so recording an intent the checks then refuse would
         # leave the machine "armed" for a volume that is not even attached.
         b_arm
-        record_write "$IMAGE" "$MACH_PROFILE" "${MACH_VOLUME:-}" ""
+        record_write "$IMAGE" "$NODE_PROFILE" "${NODE_VOLUME:-}" ""
         info "$MACHINE is armed on paper: the record says the next mode is bench ('$IMAGE')"
         log  "  it is still in host mode until somebody boots it -- 'wk boot $MACHINE --status'"
         log  "  says so, and 'wk boot $MACHINE --disarm' forgets the intent."
@@ -424,13 +423,13 @@ EOF
     fi
     if [ "${BOOT_ARMING:-one-shot}" = one-shot ]; then
         # One record of intent, on the machine, next to the boot mechanism.
-        record_write "$IMAGE" "$MACH_PROFILE" "$MACH_DEVICE" "$BOOT_ORDER_IMAGE"
+        record_write "$IMAGE" "$NODE_PROFILE" "$NODE_DEVICE" "$BOOT_ORDER_IMAGE"
         b_arm "$BOOT_ORDER_IMAGE"
     elif [ "${BOOT_ARMING:-one-shot}" = medium ]; then
         # Here the record is a claim with evidence behind it: the driver's
         # b_evidence reads the stick and says armed or disarmed, so a record
         # that disagrees with the medium is visibly wrong rather than believed.
-        record_write "$IMAGE" "$MACH_PROFILE" "$MACH_DEVICE" ""
+        record_write "$IMAGE" "$NODE_PROFILE" "$NODE_DEVICE" ""
         b_arm
     fi
     b_reboot

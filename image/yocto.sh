@@ -173,10 +173,10 @@ yocto_check_target() {
     fi
     have=$(t_exec "$ws" bash -c "grep -c '^\[$YOC_TARGET\]' $conf 2>/dev/null || echo 0" \
         2>/dev/null | tr -d '\r' | tail -1)
-    # Only a count is an answer. `!= 0` read *anything* unexpected -- a failed
+    # Only a count is an answer. `!= 0` reads *anything* unexpected -- a failed
     # t_exec, a container that is not up, one line of noise -- as "the section
-    # is there", which is the answer that costs hours (2026-09-01: a dry run
-    # reported a target fine on a branch that has never had it).
+    # is there", which costs hours: a dry run reporting a target fine on a
+    # branch that has never had it.
     case "$have" in
         ''|*[!0-9]*)
             die "could not read $conf in '$ws', so whether $YOC_BRANCH has a
@@ -191,8 +191,8 @@ yocto_check_target() {
 
     Two files are missing on a branch that predates the target, not one: the
     section, and the local.conf it points at (Tools/yocto/rpi/local-$YOC_TARGET.conf
-    -- absent on wpe-2.46, webkitglib/2.46 and webkitglib/2.48; measured
-    2026-09-02). What is *not* missing is the machine: the meta-raspberrypi
+    -- absent on wpe-2.46, webkitglib/2.46 and webkitglib/2.48). What is
+    *not* missing is the machine: the meta-raspberrypi
     revision these manifests pin already carries its conf/machine entry, so this
     is WebKit's own glue and nothing deeper.
 

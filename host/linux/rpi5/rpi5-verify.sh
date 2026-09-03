@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # rpi5-verify.sh — confirm tuning took effect. Run with: sudo bash rpi5-verify.sh
+set -euo pipefail
 echo "-- CPU max freq (expect ~2900000) --"
 cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq
 echo "-- governor (expect performance) --"
@@ -12,8 +13,8 @@ else
 fi
 echo "   EEPROM : SDRAM_BANKLOW=$(rpi-eeprom-config 2>/dev/null | sed -n 's/^SDRAM_BANKLOW=//p' | grep . || echo 'bootloader-default(1 on 2712)')"
 echo "   args   : $(grep -oE 'numa[_a-z]*=[^ ]+' /proc/cmdline | tr '\n' ' ')"
-nodes=$(numactl --hardware 2>/dev/null | grep -c '^node[[:space:]][0-9]* cpus')
-dmesg 2>/dev/null | grep -iE "policy overridden to 'interleave" | sed 's/^/   dmesg  : /'
+nodes=$(numactl --hardware 2>/dev/null | grep -c '^node[[:space:]][0-9]* cpus') || true
+dmesg 2>/dev/null | grep -iE "policy overridden to 'interleave" | sed 's/^/   dmesg  : /' || true
 if [ "${nodes:-0}" -gt 1 ] && grep -q 'numa_policy=interleave' /proc/cmdline; then
   echo "   RESULT : NUMA ON — $nodes nodes, interleave policy active ✅"
 else

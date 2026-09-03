@@ -61,13 +61,13 @@ def run_wk_split(*args, env=None, timeout=30):
 class TestQuietFlag(WkTest):
     def test_dispatcher_strips_quiet_before_the_command_sees_it(self):
         """`wk version --quiet` still prints its result"""
-        # cmd/version's own case statement dies on any argument other than
-        # --tree or none -- so this only succeeds if the dispatcher removed
-        # --quiet before exec'ing cmd/version, the same way it removes --force.
+        # cmd/version's own case statement dies on any argument -- so this
+        # only succeeds if the dispatcher removed --quiet before exec'ing
+        # cmd/version, the same way it removes --force.
         cp = run("version", "--quiet")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("sha=", cp.stdout)
-        self.assertIn("root=", cp.stdout)
+        self.assertIn("dirty=", cp.stdout)
 
     def test_quiet_suppresses_info_and_log_but_not_warn(self):
         """WK_QUIET drops log()/info(); warn() still prints"""

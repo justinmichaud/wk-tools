@@ -37,7 +37,7 @@ class TestArrangement(unittest.TestCase):
     def test_rpi4_names_the_driver_and_keeps_its_media(self):
         """rpi4.conf: driver pi-tryboot, bench root on the USB drive, rescue
         root on the SD -- the media did not move, only how one boot is chosen."""
-        cp = bash(LOAD + 'echo "$MACH_DRIVER $MACH_DEVICE $MACH_ROOT $MACH_DTB"')
+        cp = bash(LOAD + 'echo "$NODE_DRIVER $NODE_DEVICE $NODE_ROOT $NODE_DTB"')
         self.assertEqual(cp.stdout.strip(),
                          "pi-tryboot /dev/sda /dev/mmcblk0p2 bcm2711-rpi-4-b.dtb",
                          cp.stdout + cp.stderr)
@@ -76,7 +76,7 @@ TRYBOOT_ARMED=1; b_reboot
         cp = bash(LOAD + "b_self_disarm_sh")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         out = cp.stdout
-        self.assertIn("/dev/mmcblk0p1", out, "the SD boot partition, derived from MACH_ROOT")
+        self.assertIn("/dev/mmcblk0p1", out, "the SD boot partition, derived from NODE_ROOT")
         self.assertIn("tryboot.txt", out)
         self.assertIn("second", out)
         self.assertNotIn("'", out, "a single quote breaks the systemd ExecStart it is spliced into")
@@ -123,7 +123,7 @@ class TestStaging(unittest.TestCase):
         read-only, stages kernel+dtb+overlays+cmdline into second.new, writes
         tryboot.txt from the medium's config.txt plus one os_prefix line, and
         renames both into place last (a kill mid-arm leaves the old staging whole)."""
-        cp = bash(LOAD + 'tryboot_stage_sh "$(disk_part "$MACH_DEVICE" 1)" "$MACH_DTB"')
+        cp = bash(LOAD + 'tryboot_stage_sh "$(disk_part "$NODE_DEVICE" 1)" "$NODE_DTB"')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         s = cp.stdout
         # The OS files come from the mounted medium; the firmware pair from
@@ -337,7 +337,7 @@ class TestStagingRuns(unittest.TestCase):
         cp = bash(LOAD + (
             '_tryboot_sd_sh() { printf %%s "wk_sd_boot() { echo %s; }; wk_sd_drop() { :; }; "; }\n'
             "PATH=%s:$PATH\n"
-            'tryboot_stage_sh /dev/sda1 "$MACH_DTB" | sh\n') % (sd, shim))
+            'tryboot_stage_sh /dev/sda1 "$NODE_DTB" | sh\n') % (sd, shim))
         return cp, sd
 
     def test_a_kernel_line_names_the_kernel_and_states_32_bit(self):

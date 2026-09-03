@@ -39,8 +39,8 @@ PRELUDE = f'''
 set -uo pipefail
 . "{REPO}/lib/common.sh"
 machine=rpi3
-MACH_ROOT=/dev/mmcblk0p2
-MACH_DEVICE=/dev/mmcblk0
+NODE_ROOT=/dev/mmcblk0p2
+NODE_DEVICE=/dev/mmcblk0
 _b_probe_sh='probe'
 b_system_kind() {{
     case "$1" in

@@ -60,17 +60,26 @@ EOF
 # --- the push keys, and how ssh finds them -----------------------------------
 # ~/.ssh/config is often shared over NFS with several machines, so ssh is
 # pointed at the key per checkout (`core.sshCommand`) instead. `wk key ensure`
-# generates the key; `wk push` moves it between secrets/ and push-keys/.
+# generates it, into `push-keys` beside the secrets directory: that is where a
+# private half lives on every machine (wk_push_held_dir, lib/store.sh).
+#
+# The private half itself, and no agent -- unlike a container or a guest, which
+# name a public half and an ssh-agent socket. This is a plain checkout on a
+# shared machine with no container around it, so an agent here would keep the
+# key from nothing: the key file and the process that would use it are in one
+# filesystem. `wk ai claude` refuses this target for the same reason
+# (cmd/verify), and `wk push` on this machine says so rather than throwing a
+# switch it cannot throw (docs/HANDOFF-sandboxing.md).
 ensure_dir "$ROOT/secrets" 0700
+ensure_dir "$ROOT/push-keys" 0700
 write_file "$ROOT/ssh/config" 0600 <<EOF
 # Written by remote/provision.sh. One ssh alias per fork, because GitHub takes
 # one deploy key per repository and both forks live on github.com -- so the key
 # is selected by alias, never by hostname.
 #
 # A checkout points at this file with core.sshCommand; nothing outside the wk
-# root is touched. A missing key file is simply "no identity", which is what
-# 'wk push off' leaves behind.
-$(WK_ROOT="$TOOLS" bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_ssh_alias_blocks "$2"' _ "$TOOLS" "$ROOT/secrets")
+# root is touched. A missing key file is simply "no identity".
+$(WK_ROOT="$TOOLS" bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; wk_ssh_alias_blocks "$2"' _ "$TOOLS" "$ROOT/push-keys")
 EOF
 
 # --- git: identity, and how fast git is here ---------------------------------

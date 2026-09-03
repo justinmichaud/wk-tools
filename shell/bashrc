@@ -423,6 +423,23 @@ for _wk_sec in .wk-agent-token:CLAUDE_CODE_OAUTH_TOKEN .wk-litellm-key:LITELLM_A
 done
 unset _wk_sec _wk_sec_file _wk_sec_var _wk_sec_val
 
+# The claude.ai login credential is not a value: it is a file the Claude CLI
+# rewrites in place, spending the refresh token in it and storing the rotated
+# one back. So it is not exported -- the CLI is pointed at the directory
+# holding it, which on this machine is one directory shared by every container
+# (wk_agent_rw_dir, lib/store.sh) mounted here. One directory, so the CLI's own
+# `.storage-write` lock serializes the refreshes and every holder ends up on
+# the same bytes; and the directory, not a symlink into it, because the CLI
+# writes through a temp file and a rename, which replaces a symlink with a
+# regular file the first time it refreshes.
+#
+# Set only where a mount put one: this rc is read on every machine in the
+# fleet, and naming a directory on a workstation would send the person's own
+# `claude` looking for a Keychain item under a name nothing wrote.
+if [ -d /agent-rw ]; then
+  export CLAUDE_SECURESTORAGE_CONFIG_DIR=/agent-rw
+fi
+
 # --- 7. Completion -----------------------------------------------------------
 # After PATH (section 6) so `command -v wk` sees it; interactive only, like
 # history/prompt above (re-checked since section 5b already unset $_WK_INTERACTIVE).

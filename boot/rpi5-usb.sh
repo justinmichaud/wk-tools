@@ -61,7 +61,7 @@ b_arm() {
     esac
 
     reply=$(r_sudo "vcmailbox 0x0003808b 4 4 $order") \
-        || die "the firmware mailbox call failed on $MACH_NAME"
+        || die "the firmware mailbox call failed on $NODE_NAME"
 
     # 0x80000000 in the second word means success; checked rather than
     # assumed, since a silent no-op call looks like one that worked.
@@ -79,19 +79,19 @@ b_arm() {
 rpi5_check_autoboot() {
     local out
     out=$(r_sudo "m=\$(mktemp -d)
-        p=\$(awk -v d=$(sh_quote "$(disk_part "$MACH_DEVICE" 1)") '\$1 == d { print \$2; exit }' /proc/mounts)
+        p=\$(awk -v d=$(sh_quote "$(disk_part "$NODE_DEVICE" 1)") '\$1 == d { print \$2; exit }' /proc/mounts)
         own=
-        if [ -z \"\$p\" ]; then mount -t vfat -o ro $(sh_quote "$(disk_part "$MACH_DEVICE" 1)") \"\$m\" 2>/dev/null || exit 0; p=\$m; own=1; fi
+        if [ -z \"\$p\" ]; then mount -t vfat -o ro $(sh_quote "$(disk_part "$NODE_DEVICE" 1)") \"\$m\" 2>/dev/null || exit 0; p=\$m; own=1; fi
         grep -c 'boot_partition=3' \"\$p/$RPI5_AUTOBOOT\" 2>/dev/null || echo 0
         [ -n \"\$own\" ] && umount \"\$m\"; rmdir \"\$m\" 2>/dev/null; true" \
         2>/dev/null | tr -d '\r' | head -1)
     case "$out" in
-        ''|0) die "$MACH_DEVICE on $MACH_NAME has no [tryboot] boot_partition=3 in its
+        ''|0) die "$NODE_DEVICE on $NODE_NAME has no [tryboot] boot_partition=3 in its
     $RPI5_AUTOBOOT, so the firmware has no way to boot the second pair: the flag
     would be ignored and pair 1 would boot instead -- the wrong system, with
     nothing to say so. The file is written when the second pair is made, so
     rewrite it:
-        wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE@second" ;;
+        wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE@second" ;;
     esac
 }
 
@@ -118,14 +118,14 @@ b_media() {
         bench*) printf 'booted from its USB stick (system %s); NVMe untouched' "${MODE#bench }"; return 0 ;;
         # Not expected (reads as host mode); answered, not "unreachable".
         base*)  printf 'booted %s -- a wk system on the medium that is never armed (%s)' \
-                    "${MACH_ROOT:-its base medium}" "${MODE#base }"; return 0 ;;
+                    "${NODE_ROOT:-its base medium}" "${MODE#base }"; return 0 ;;
         host)   ;;
-        *)      printf 'USB stick %s: state unknown (board unreachable)' "$MACH_DEVICE"; return 0 ;;
+        *)      printf 'USB stick %s: state unknown (board unreachable)' "$NODE_DEVICE"; return 0 ;;
     esac
     id=$(b_device_image 2>/dev/null || true)
     order=$(b_evidence 2>/dev/null | kv_get eeprom_boot_order)
     printf 'USB stick %s holds %s; NVMe workstation untouched%s' \
-        "$MACH_DEVICE" "${id:-no wk system (wk sysimage write puts one there)}" \
+        "$NODE_DEVICE" "${id:-no wk system (wk sysimage write puts one there)}" \
         "${order:+ (eeprom $order)}"
 }
 
@@ -133,14 +133,14 @@ b_media() {
 # never touched (`wk help`), and is the one medium this must never name.
 b_reprovision() {
     cat <<REPROV
-wk sysimage build $MACH_PROFILE
+wk sysimage build $NODE_PROFILE
     in a workspace; hours
-wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE
-wk sysimage write --from <path> --disk $MACH_NAME:$MACH_DEVICE@second
+wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE
+wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE@second
     optional: a second system beside the first, for an A/B across two images.
     Making it also writes the firmware's selector (autoboot.txt) onto the
-    medium, which is what lets 'wk boot $MACH_NAME --system <id>' choose
-wk boot $MACH_NAME
+    medium, which is what lets 'wk boot $NODE_NAME --system <id>' choose
+wk boot $NODE_NAME
     one shot; it reverts by itself
 REPROV
 }

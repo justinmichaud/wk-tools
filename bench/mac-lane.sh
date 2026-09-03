@@ -69,7 +69,7 @@ MACHINE="${WK_MAC_MACHINE:-mbp}"  # static
 lane_shape() {
     local d
     d=$( . "$WK_ROOT/boot/machines.sh" >/dev/null 2>&1
-         machine_load "$MACHINE" >/dev/null 2>&1 && printf '%s' "${MACH_DRIVER:-}" )
+         machine_load "$MACHINE" >/dev/null 2>&1 && printf '%s' "${NODE_DRIVER:-}" )
     case "$d" in
         mac-guest)  echo guest ;;
         mac-volume) echo volume ;;
@@ -84,11 +84,11 @@ lane_guest() {
     ( . "$WK_ROOT/boot/machines.sh" >/dev/null 2>&1
       machine_load "$MACHINE" >/dev/null 2>&1
       . "$WK_ROOT/boot/mac-guest.sh" >/dev/null 2>&1
-      printf '%s' "${MACH_GUEST:-}" )
+      printf '%s' "${NODE_GUEST:-}" )
 }
 
-# ssh destinations, one per install. Default to MACHINE's own conf (MACH_SSH /
-# MACH_BENCH_SSH, boot/machines/<machine>.conf) once MACHINE is final (below,
+# ssh destinations, one per install. Default to MACHINE's own conf (NODE_SSH /
+# NODE_BENCH_SSH, boot/machines/<machine>.conf) once MACHINE is final (below,
 # after argument parsing); --host/--bench-host or WK_MAC_SSH/WK_MAC_BENCH_SSH
 # still win outright.
 HOST="${WK_MAC_SSH:-}"
@@ -126,7 +126,7 @@ usage() {
   <workspace>         the macOS workspace whose build is measured
   --plan <name>       which benchmark (default: speedometer3.0)
   --config <name>     which build (default: mac-release)
-  --host <dest>       ssh destination for host mode (default: the machine's MACH_SSH)
+  --host <dest>       ssh destination for host mode (default: the machine's NODE_SSH)
   --count <n>         iterations, passed to the runner
   --payload <dir>     a pinned benchmark checkout, passed to the stage
   --timeout <s>       how long one iteration may take
@@ -191,7 +191,7 @@ rwk() {
     if [ "$mode" = bench ] && [ "$SHAPE" = guest ]; then
         local guest inner
         guest=$(lane_guest)
-        [ -n "$guest" ] || die "$MACHINE names no guest (MACH_GUEST)"
+        [ -n "$guest" ] || die "$MACHINE names no guest (NODE_GUEST)"
         [ -n "$TOOLS" ] || [ -n "$DRY" ] || discover_tools host \
             || die "no wk-tools on $HOST to reach the guest through"
         inner="cd ~/wk-tools && ./wk"
@@ -350,13 +350,16 @@ preflight() {
     fi
     log "  wk-tools: $TOOLS"
 
-    # The tree hash, not just the sha: a stale copy of this repository on the
-    # far side fails as `unknown option` from a command that works fine here.
-    local there here
-    there=$(rwk host version --tree 2>/dev/null || true)
-    here=$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)
+    # The commit, not just the presence of a checkout: a stale copy of this
+    # repository on the far side fails as `unknown option` from a command
+    # that works fine here.
+    local there_ver here_ver there here
+    there_ver=$(rwk host version 2>/dev/null || true)
+    here_ver=$("$WK_ROOT/cmd/version" 2>/dev/null || true)
+    there=$(kv_get sha <<<"$there_ver")$([ "$(kv_get dirty <<<"$there_ver")" = yes ] && printf '+dirty')
+    here=$(kv_get sha <<<"$here_ver")$([ "$(kv_get dirty <<<"$here_ver")" = yes ] && printf '+dirty')
     if [ -n "$there" ] && [ -n "$here" ] && [ "$there" != "$here" ]; then
-        warn "  wk-tools on $HOST is a different tree than this one"
+        warn "  wk-tools on $HOST is a different commit than this one"
         log  "  here $here, there $there -- 'wk sync --tools' or a git pull over there"
         log  "  (not fatal: the lane only uses long-standing verbs)"
     fi
@@ -549,7 +552,7 @@ mac_power_off() {
 say_which_disk() {
     local want="$1" disk
     case "$want" in
-        bench) disk="$(printf '%s' "${MACH_VOLUME_NAME:-WK Bench}")" ;;
+        bench) disk="$(printf '%s' "${NODE_VOLUME_NAME:-WK Bench}")" ;;
         host)  disk="Macintosh HD" ;;
     esac
     cat >&2 <<EOF
@@ -711,16 +714,16 @@ SHAPE=$(lane_shape)
 # own conf rather than staying pinned to whatever MACHINE was at startup.
 if [ -z "$HOST" ]; then
     machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk boot --list)"
-    HOST="${MACH_SSH:-}"
-    [ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no MACH_SSH"
+    HOST="${NODE_SSH:-}"
+    [ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_SSH"
 fi
 # BENCH_HOST only exists for the volume shape (a guest's bench mode is reached
-# through the host instead -- rwk, below), so a guest's empty MACH_BENCH_SSH is
+# through the host instead -- rwk, below), so a guest's empty NODE_BENCH_SSH is
 # not a conf bug and must not die here.
 if [ "$SHAPE" = volume ] && [ -z "$BENCH_HOST" ]; then
     machine_load "$MACHINE" >/dev/null 2>&1
-    BENCH_HOST="${MACH_BENCH_SSH:-}"
-    [ -n "$BENCH_HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no MACH_BENCH_SSH -- needed to reach its bench-mode install"
+    BENCH_HOST="${NODE_BENCH_SSH:-}"
+    [ -n "$BENCH_HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_BENCH_SSH -- needed to reach its bench-mode install"
 fi
 
 # The Mac cannot drive its own lane: the driver has to outlive a reboot of the

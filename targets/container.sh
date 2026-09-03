@@ -54,25 +54,35 @@ fi
 # than the whole runtime directory -- which would hand over the D-Bus socket too.
 _wk_runtime() { echo "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk"; }
 
-# In the VM the tooling is rsynced to /opt/wk-tools; on a workstation it is
-# the checkout this script came from.
+# The ssh-agent holding the deploy keys is wk-ssh-agent.service on this
+# machine, and its socket is in that same directory -- so it arrives in every
+# container that already exists through the mount below, with nothing to
+# recreate. The private halves are never on this side of it (push_agent_load,
+# lib/store.sh).
+t_agent_sock() { echo /run/wk/ssh-agent.sock; }
+
+# In the VM the tooling is this checkout, mounted at /opt/wk-tools by the
+# machine itself (host/macos/machine.sh); on a workstation it is the checkout
+# this script came from. Either way a container bind-mounts what is there.
 [ -n "${WK_IN_VM:-}" ] && WK_TOOLS_SRC=/opt/wk-tools
 
 _ctr() { echo "wk-$1"; }
 
-# This target's furniture (`wk sync --tools`) is the tooling copy alone: on a
-# workstation the mount source is this checkout (nothing to do); on macOS it
-# is a copy inside the podman VM, refreshed by rsync. The mirror and the
-# snapshots are the store's, which `wk sync --tools` publishes itself --
-# here on a workstation, and inside the VM on macOS, where a bare `wk sync`
-# is what reaches them.
+# This target's furniture (`wk sync --tools`) is the tooling, and there is
+# nothing to copy: a container bind-mounts this checkout, on a workstation
+# directly and on macOS through the podman machine's own mount of it
+# (host/macos/machine.sh). The mirror and the snapshots are the store's, which
+# `wk sync --tools` publishes itself -- here on a workstation, and inside the
+# VM on macOS, where a bare `wk sync` is what reaches them.
+#
+# The message names the one thing the mount does not carry, because this is
+# where someone looks for it: the VM's units, skills and packages are
+# installed, not mounted.
 t_sync() {
-    if ! is_macos; then
-        info "containers here bind-mount this checkout ($WK_ROOT), so the tooling is never stale"
-        return 0
-    fi
-    ( WK_VMTOOLS_ONLY=tools . "$WK_ROOT/host/macos/vmtools.sh" ) \
-        || die "could not push wk-tools into the podman VM"
+    info "nothing to copy: a container bind-mounts this checkout ($WK_ROOT) at
+  /opt/wk-tools, so the tooling in one is never stale. What the VM has
+  installed rather than mounted -- the proxy and injector units, the skills,
+  its packages -- comes from:  ./setup --stage vmtools"
 }
 
 # Recorded at creation: the container reports the kernel's (host's)
@@ -147,7 +157,9 @@ _sandbox_flags() {
     arch_has_gpu "$arch" && gpu=$(gpu_flags)
 
     # Mounting the directory, not the socket: the compositor's socket comes
-    # and goes with `wk session` without recreating containers.
+    # and goes with `wk session` without recreating containers -- and so does
+    # the ssh-agent's (t_agent_sock above), which is what lets `wk push on`
+    # reach a workspace made before the agent existed.
     printf '%s' "--volume $rt:/run/wk
          --env WK_PROXY_SOCKET=/run/wk/proxy.sock
          --env http_proxy=http://127.0.0.1:3128
@@ -215,6 +227,7 @@ t_create() {
          --volume $WK_STORE/bench:/bench
          --volume $WK_STORE/skills:/skills
          --volume $WK_STORE/secrets:/secrets:ro
+         --volume $WK_STORE/agent-rw:/agent-rw
          --memory $(envelope_mem_mb)m
          --cpus $(envelope_cores)
          --env CCACHE_DIR=/ccache
@@ -312,6 +325,11 @@ t_lldb_opts() {
 # Bind-mounted from `home/` in t_create, so naming it here lets the host
 # follow a detached build's log with a plain `tail -f`.
 t_home() { echo "/home/$WKDEV_CONTAINER_USER"; }
+
+# This machine's own mirror, bind-mounted read-only in t_create: a fetch in a
+# container reads it directly and touches no network. Read-only, so the fetch
+# *into* it is this machine's (`wk sync --tools`, mirror_fetch_pr).
+t_mirror_dir() { echo "/mirror/WebKit.git"; }
 
 # `podman cp`, not the generic `t_exec ... cat`: wkdev-enter is an
 # interactive-shell wrapper, not a byte pipe (a 1396-byte file arrived as

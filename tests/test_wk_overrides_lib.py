@@ -365,10 +365,10 @@ class TestBootMachines(WkTest):
 . "$WK_ROOT/lib/reach.sh"
 . "$WK_ROOT/boot/machines.sh"
 WK_IMAGE_HOST=192.0.2.5
-MACH_NAME=testmach
-MACH_SSH=""
-MACH_BENCH_SSH=""
-MACH_MAC=""
+NODE_NAME=testmach
+NODE_SSH=""
+NODE_BENCH_SSH=""
+NODE_MAC=""
 [ "$(image_addr)" = 192.0.2.5 ] || { echo "got $(image_addr)"; exit 1; }
 echo PASS
 ''')
@@ -381,7 +381,7 @@ class TestBootMacGuest(WkTest):
             '''
 . "$WK_ROOT/lib/common.sh"
 . "$WK_ROOT/boot/mac-guest.sh"
-[ "$MACH_GUEST" = my-custom-guest ] || { echo "got $MACH_GUEST"; exit 1; }
+[ "$NODE_GUEST" = my-custom-guest ] || { echo "got $NODE_GUEST"; exit 1; }
 echo PASS
 ''',
             env={"WK_BENCH_GUEST": "my-custom-guest"},

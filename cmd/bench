@@ -978,7 +978,7 @@ cmd_stage() {
     # property of the machine's boot arrangement, not this runner's opinion.
     . "$WK_ROOT/boot/machines.sh"
     machine_load "$machine" || die "unknown machine '$machine' (wk boot --list)"
-    load_driver "$MACH_DRIVER"
+    load_driver "$NODE_DRIVER"
     command -v b_bench_root >/dev/null 2>&1 \
         || die "$machine has no place to stage a build onto from here.
     Its other role is reached over the network rather than mounted, so the
@@ -1033,7 +1033,7 @@ cmd_stage() {
         hands-on) arm_hint="wk boot $machine        arm it; it prints the ritual (you pick the disk)"
                   run_hint="wk bench staged${plan:+ --plan $plan}       once it has booted, over there" ;;
         guest)    arm_hint="wk boot $machine        start the guest -- for a guest that *is* the transition"
-                  run_hint="wk enter ${MACH_GUEST:-<guest>} -- wk bench staged${plan:+ --plan $plan}" ;;
+                  run_hint="wk enter ${NODE_GUEST:-<guest>} -- wk bench staged${plan:+ --plan $plan}" ;;
         *)        arm_hint="wk boot $machine        arm the one-shot and reboot into it"
                   run_hint="wk bench staged${plan:+ --plan $plan}       on the machine, once it is up" ;;
     esac
@@ -1043,13 +1043,13 @@ cmd_stage() {
         log  "  from:   '$ws' ($t), $config at ${sha:0:12}"
         log  "          $build_dir"
         log  "          $src/Tools"
-        log  "  to:     $dest   (on $machine${MACH_VOLUME:+, $MACH_VOLUME})"
+        log  "  to:     $dest   (on $machine${NODE_VOLUME:+, $NODE_VOLUME})"
         [ -n "$payload" ] && log "  payload: $payload -- copied in, so the run needs no network"
         log  "  then:   $arm_hint"
         return 0
     fi
 
-    info "staging $config from '$ws' onto $machine${MACH_VOLUME:+ ($MACH_VOLUME)}"
+    info "staging $config from '$ws' onto $machine${NODE_VOLUME:+ ($NODE_VOLUME)}"
 
     # Where the tree is assembled: the destination itself for a mounted
     # disk, or a directory here that is then delivered and removed.
@@ -1087,6 +1087,9 @@ cmd_stage() {
 
     # Written last, the publishing protocol every store in this repo uses
     # (lib/image.sh, lib/store.sh): until it exists this directory is rubble.
+    local tools_ver wk_tools=unknown
+    tools_ver=$("$WK_ROOT/cmd/version" 2>/dev/null || true)
+    [ -z "$tools_ver" ] || wk_tools=$(kv_get sha <<<"$tools_ver")$([ "$(kv_get dirty <<<"$tools_ver")" = yes ] && printf '+dirty')
     cat > "$assemble/stage.json" <<EOF
 {
   "staged_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -1098,8 +1101,8 @@ cmd_stage() {
   "plan": "${plan:-}",
   "payload_pinned": $([ -n "$payload" ] && echo true || echo false),
   "machine": "$machine",
-  "volume": "${MACH_VOLUME:-}",
-  "wk_tools": "$("$WK_ROOT/cmd/version" --tree 2>/dev/null || echo unknown)",
+  "volume": "${NODE_VOLUME:-}",
+  "wk_tools": "$wk_tools",
   "bench_host": "image"
 }
 EOF
@@ -1119,8 +1122,8 @@ EOF
         rm -rf "$assemble"
     fi
 
-    info "staged: $dest${MACH_VOLUME:+ on $MACH_VOLUME}"
-    [ -n "$deliver" ] || log "  $(du -sh "$dest" 2>/dev/null | cut -f1) on $MACH_VOLUME"
+    info "staged: $dest${NODE_VOLUME:+ on $NODE_VOLUME}"
+    [ -n "$deliver" ] || log "  $(du -sh "$dest" 2>/dev/null | cut -f1) on $NODE_VOLUME"
     log  ""
     log  "  next:"
     log  "    $arm_hint"
@@ -1189,7 +1192,7 @@ staged_root() {
         return 1
     fi
     machine_load "$WK_BENCH_MACHINE" || return 1
-    load_driver "$MACH_DRIVER"
+    load_driver "$NODE_DRIVER"
     command -v b_bench_root >/dev/null 2>&1 || return 1
     b_bench_root
 }

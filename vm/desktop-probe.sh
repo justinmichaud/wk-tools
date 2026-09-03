@@ -13,6 +13,8 @@
 # Self-contained: it sources nothing, so it answers about a guest provisioned by
 # an older base too.
 
+set -euo pipefail
+
 # Who owns the console is who is logged in at the window. Empty or `root` means
 # the login window, i.e. nobody -- and a guest at a login window has no desktop
 # for anything to draw on.
@@ -20,7 +22,7 @@ printf 'console_user=%s\n' "$(stat -f%Su /dev/console 2>/dev/null || echo '?')"
 
 # The screen lock, which is the one that actually blocks. Independent of the
 # screen saver and of display sleep, and settable only through sysadminctl.
-_lock=$(sudo -n sysadminctl -screenLock status 2>&1 | tr -d '\r' | tail -1)
+_lock=$(sudo -n sysadminctl -screenLock status 2>&1 | tr -d '\r' | tail -1) || true
 case "$_lock" in
     *"screenLock is off"*|*"is off"*) printf 'screenlock=off\n' ;;
     *"screenLock delay"*|*"is on"*)   printf 'screenlock=on\n' ;;

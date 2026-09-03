@@ -7,9 +7,12 @@
 
 set -euo pipefail
 
-MARKER="$HOME/.wk-provisioned"
 SRC="$HOME/WebKit"
-# The tree targets/vm.sh rsyncs in (t_tools).
+# The guest's bare mirror. Handed over by targets/vm.sh, which is the one
+# place its path is decided (t_mirror_dir) -- a default here would be a second
+# copy of it, free to drift.
+MIRROR="${WK_VM_MIRROR:?WK_VM_MIRROR must name the guest mirror; this script is run by targets/vm.sh}"
+# The tree targets/vm.sh pushes in as a git bundle (t_tools, tools_push).
 WK_TOOLS_DIR="$HOME/wk-tools"
 
 say() { printf '==> %s\n' "$*" >&2; }
@@ -58,30 +61,50 @@ fi
 sudo pmset -a disablesleep 1 >/dev/null 2>&1 || true
 sudo systemsetup -setcomputersleep Never >/dev/null 2>&1 || true
 
-# --- the checkout ------------------------------------------------------------
-# Single branch (~920 total in WebKit; the rest cost tens of GB nobody checks
-# out) -- a workspace that needs one fetches it on demand.
+# --- the mirror, and the checkout out of it ----------------------------------
+# The guest holds one bare mirror and the checkout borrows its objects
+# (`--shared`), so the history is stored once. Every workspace is a `tart
+# clone` of this base, so both are inherited through APFS copy-on-write and
+# cost a workspace nothing -- and a fetch in a workspace is then a local one
+# against a mirror that already carries the forks, instead of four fetches of
+# four upstreams through the guest's egress proxy.
+#
+# mirror_refresh_script (lib/store.sh) is what makes and wires it, the same
+# snippet every other mirror in the fleet is made by, so a `wk sync` in here
+# finds the layout it expects. Run in a separate bash because those files
+# define their own log()/warn(); they must not clash with this script's.
+say "refreshing the WebKit mirror at $MIRROR (the first one clones all of WebKit)"
+_refresh=$(bash -c '. "$1/lib/common.sh"; . "$1/lib/store.sh"; mirror_refresh_script "$2"' \
+               _ "$WK_TOOLS_DIR" "$MIRROR") \
+    || { echo "error: could not build the mirror refresh script" >&2; exit 1; }
+sh -c "$_refresh" 2>&1 | sed 's/^/    /' >&2 \
+    || { echo "error: the mirror at $MIRROR could not be made (above)" >&2; exit 1; }
+
+# The mirror is what the checkout is made from, so a mirror without origin's
+# main is the end of provisioning rather than a `git clone` error naming a
+# path. Every fetch in here goes through the guest's egress, unfiltered during
+# provisioning -- so this is a real network fault, not the allowlist.
+git -C "$MIRROR" rev-parse --verify --quiet refs/heads/main >/dev/null || {
+    echo "error: the mirror at $MIRROR has no origin/main, so there is nothing" >&2
+    echo "       to check out. The fetch above says which upstream failed." >&2
+    exit 1
+}
+
+# Single branch of the mirror's own heads (origin's ~920 cost tens of GB in
+# working trees nobody checks out) -- a workspace that needs another fetches
+# it on demand, from the mirror.
 if [ -d "$SRC/.git" ]; then
-    say "WebKit checkout present, fetching"
-    git -C "$SRC" fetch --quiet origin main || true
-    git -C "$SRC" reset --hard --quiet origin/main || true
-elif [ -d /tmp/wk-seed.git ]; then
-    # Local clone from the host's rsync'd bare seed hardlinks and finishes in
-    # seconds; origin is then re-pointed at GitHub so the result matches a fresh clone.
-    say "cloning WebKit from the host-provided seed"
-    git clone --quiet --branch main /tmp/wk-seed.git "$SRC"
-    git -C "$SRC" remote set-url origin https://github.com/WebKit/WebKit.git
-    git -C "$SRC" fetch --quiet origin main || true
-    git -C "$SRC" reset --hard --quiet origin/main || true
-    rm -rf /tmp/wk-seed.git
+    say "WebKit checkout present, fast-forwarding it from the mirror"
+    git -C "$SRC" fetch --quiet --no-tags --prune "$MIRROR" \
+        '+refs/heads/main:refs/remotes/origin/main' || true
+    git -C "$SRC" reset --hard --quiet refs/remotes/origin/main || true
 else
-    say "cloning WebKit (main only) -- this is the slow step, and it happens once"
-    git clone --quiet --single-branch --branch main \
-        https://github.com/WebKit/WebKit.git "$SRC"
+    say "cloning WebKit from the mirror"
+    git clone --quiet --shared --branch main "$MIRROR" "$SRC"
 fi
 # origin is WebKit/WebKit; forks are wired the same way every checkout gets,
-# from wk_wiring_script (lib/store.sh). Run in a subshell because those files
-# define their own log()/warn(); must not clash with this script's.
+# from wk_wiring_script (lib/store.sh), in a separate bash for the reason the
+# mirror refresh above is.
 #
 # The base carries no deploy key and no ssh alias config: both are per guest and
 # arrive on every start (targets/vm.sh's _write_deploy_keys), so a key sealed in
@@ -147,20 +170,34 @@ WK_VM_PASSWORD="${WK_VM_PASSWORD:-1}"
 
 # Changed once, here, so everything after this -- the screen-lock call below,
 # an Xcode prompt at the window, `wk vm enter`'s note -- means one password.
-# Skipped when it already is that: sysadminctl needs the *current* one, so a
-# re-provision must not offer the image's.
-if [ "$WK_VM_PASSWORD" != "$WK_VM_IMAGE_PASSWORD" ]; then
+# Skipped when it already is that: the change needs the *current* password, so
+# a re-provision must not offer the image's.
+#
+# `dscl . -authonly` decides, before and after, and sysadminctl's exit status
+# decides nothing: it exited 0 while leaving the password as the image's, which
+# is why every later step -- vm/desktop.sh's screen lock first -- reported a
+# password that was not the one this run was given. The self-change form (no
+# sudo, no -adminUser) is what the account itself can do, and it is the account
+# this runs as.
+#
+# On downgrade WK_VM_PASSWORD becomes what the account actually has, so
+# vm/desktop.sh below is handed the truth rather than the intent.
+_set_password() {
+    [ "$WK_VM_PASSWORD" != "$WK_VM_IMAGE_PASSWORD" ] || return 0
     if dscl . -authonly "$WK_VM_USER" "$WK_VM_PASSWORD" >/dev/null 2>&1; then
         say "password already set"
-    elif sudo -n sysadminctl -resetPasswordFor "$WK_VM_USER" \
-             -newPassword "$WK_VM_PASSWORD" -adminUser "$WK_VM_USER" \
-             -adminPassword "$WK_VM_IMAGE_PASSWORD" >/dev/null 2>&1; then
+        return 0
+    fi
+    sysadminctl -oldPassword "$WK_VM_IMAGE_PASSWORD" \
+                -newPassword "$WK_VM_PASSWORD" >/dev/null 2>&1 || true
+    if dscl . -authonly "$WK_VM_USER" "$WK_VM_PASSWORD" >/dev/null 2>&1; then
         say "password set for $WK_VM_USER"
     else
         echo "warning: could not change $WK_VM_USER's password; it is still the image's" >&2
         WK_VM_PASSWORD="$WK_VM_IMAGE_PASSWORD"
     fi
-fi
+}
+_set_password
 
 # WK_VM_DISPLAY ("1920x1080") is passed in so the guest and `tart set --display` cannot disagree.
 WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
@@ -268,5 +305,4 @@ fi
 # ccache: no Homebrew or signed installer here, and Xcode only uses it via
 # WK_USE_CCACHE=YES finding one on PATH. A mac build is always a real build.
 
-date -u +%Y-%m-%dT%H:%M:%SZ > "$MARKER"
 say "base provisioning complete"

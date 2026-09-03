@@ -179,21 +179,21 @@ case "$*" in
 esac
 '''
 
-_FAKE_MACH_CONF = '''MACH_SSH={ssh}
-MACH_DRIVER=rpi5-usb
-MACH_DEVICE=/dev/sda
-MACH_ROOT=/dev/nvme0n1p2
-MACH_PROFILE=webkit-2.52-yocto-rpi5-64
-MACH_MAC=02:00:00:00:00:01
-MACH_BRIDGE=""
-MACH_ROLE=workstation
-MACH_OS=any
-MACH_LOCAL=""
-MACH_VOLUME=""
-MACH_DTB=bcm2712-rpi-5-b.dtb
-MACH_BENCH_SSH=""
-MACH_NET=wifi
-MACH_NOTE="fake bench board"
+_FAKE_NODE_CONF = '''NODE_SSH={ssh}
+NODE_DRIVER=rpi5-usb
+NODE_DEVICE=/dev/sda
+NODE_ROOT=/dev/nvme0n1p2
+NODE_PROFILE=webkit-2.52-yocto-rpi5-64
+NODE_MAC=02:00:00:00:00:01
+NODE_BRIDGE=""
+NODE_ROLE=workstation
+NODE_OS=any
+NODE_LOCAL=""
+NODE_VOLUME=""
+NODE_DTB=bcm2712-rpi-5-b.dtb
+NODE_BENCH_SSH=""
+NODE_NET=wifi
+NODE_NOTE="fake bench board"
 '''
 
 
@@ -213,7 +213,7 @@ class TestBootArmDefaultsToDeviceImage(WkTest):
         with scratch_dir(prefix="wk-test-machines-") as machdir, \
              stub_path({"ssh": _SSH_STUB.format(fake_id=fake_id)}) as binp:
             name = f"fakerpi5{rand_suffix(3)}"
-            (machdir / f"{name}.conf").write_text(_FAKE_MACH_CONF.format(ssh=name))
+            (machdir / f"{name}.conf").write_text(_FAKE_NODE_CONF.format(ssh=name))
             cp = run("boot", name, "--dry-run", env=self._env(machdir, binp), timeout=30)
             self.assertEqual(cp.returncode, 0, cp.stdout)
             self.assertIn(fake_id, cp.stdout, cp.stdout)
@@ -225,7 +225,7 @@ class TestBootArmDefaultsToDeviceImage(WkTest):
         with scratch_dir(prefix="wk-test-machines-") as machdir, \
              stub_path({"ssh": _SSH_STUB.format(fake_id=fake_id)}) as binp:
             name = f"fakerpi5{rand_suffix(3)}"
-            (machdir / f"{name}.conf").write_text(_FAKE_MACH_CONF.format(ssh=name))
+            (machdir / f"{name}.conf").write_text(_FAKE_NODE_CONF.format(ssh=name))
             cp = run("boot", name, "--system", wanted, "--dry-run",
                       env=self._env(machdir, binp), timeout=30)
             self.assertNotEqual(cp.returncode, 0, cp.stdout)

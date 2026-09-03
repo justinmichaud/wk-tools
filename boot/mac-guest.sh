@@ -11,7 +11,7 @@
 
 BOOT_ARMING=guest
 
-# MACH_GUEST is a workspace name; t_start/t_stop/_ip map it to the tart VM
+# NODE_GUEST is a workspace name; t_start/t_stop/_ip map it to the tart VM
 # themselves, but _vm_state wants the already-mapped name from _vm(). Passing
 # the unmapped name silently answers "absent" -- easy to miss since the
 # workspace is itself "wk-bench", so "wk-wk-bench" looks plausible too.
@@ -22,7 +22,7 @@ BOOT_ORDER_NORMAL=""
 # WK_BENCH_GUEST overrides which vm workspace stands in for this machine, so
 # two rehearsals (or a rehearsal and a test) can run against different
 # guests without colliding.
-MACH_GUEST="${WK_BENCH_GUEST:-wk-bench}"
+NODE_GUEST="${WK_BENCH_GUEST:-wk-bench}"
 
 # Matches the path `wk bench staged` expects in bench mode -- a rehearsal on a
 # different path would rehearse a different thing. Created on first delivery;
@@ -31,7 +31,7 @@ BENCH_GUEST_ROOT=/var/wk
 
 # `|| true` / `return 0` throughout: a guest that is off is a normal state, not a failure.
 _guest_ip() {
-    ( load_target vm >/dev/null 2>&1; _ip "$MACH_GUEST" 2>/dev/null ) || return 1
+    ( load_target vm >/dev/null 2>&1; _ip "$NODE_GUEST" 2>/dev/null ) || return 1
 }
 
 # A guest's address is not in any ssh config and changes with every boot, so
@@ -70,32 +70,32 @@ b_boot_id() { _guest_boot_sec; }
 
 b_evidence() {
     local st
-    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$MACH_GUEST")" 2>/dev/null || echo unknown )
-    echo "guest=$MACH_GUEST (${st:-unknown})"
+    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$NODE_GUEST")" 2>/dev/null || echo unknown )
+    echo "guest=$NODE_GUEST (${st:-unknown})"
     m_ssh 'echo "marker=$(sed -n "s/^id=//p" /etc/wk-image 2>/dev/null)"' 2>/dev/null | tr -d '\r' || true
     return 0
 }
 
 b_arm() {
     local st
-    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$MACH_GUEST")" 2>/dev/null )
-    [ "$st" = absent ] && die "there is no guest '$MACH_GUEST'.
+    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$NODE_GUEST")" 2>/dev/null )
+    [ "$st" = absent ] && die "there is no guest '$NODE_GUEST'.
     Make one from the golden base and mark it as a benchmark install:
-        wk vm new $MACH_GUEST
+        wk vm new $NODE_GUEST
         (then write /etc/wk-image in it: id=, profile=)"
     if [ "$st" != running ]; then
-        info "starting guest '$MACH_GUEST'"
-        ( load_target vm >/dev/null 2>&1; t_start "$MACH_GUEST" >/dev/null )
+        info "starting guest '$NODE_GUEST'"
+        ( load_target vm >/dev/null 2>&1; t_start "$NODE_GUEST" >/dev/null )
     fi
     m_ssh 'test -f /etc/wk-image' 2>/dev/null \
-        || die "'$MACH_GUEST' is running but carries no /etc/wk-image, so it is a
+        || die "'$NODE_GUEST' is running but carries no /etc/wk-image, so it is a
     workstation guest and not a benchmark install. A run in it would be refused
     by 'wk bench staged', which is the correct answer -- mark it first."
 }
 
 b_reboot() {
-    ( load_target vm >/dev/null 2>&1; t_stop "$MACH_GUEST" >/dev/null )
-    info "stopped '$MACH_GUEST' -- for a guest, leaving the role is leaving the machine"
+    ( load_target vm >/dev/null 2>&1; t_stop "$NODE_GUEST" >/dev/null )
+    info "stopped '$NODE_GUEST' -- for a guest, leaving the role is leaving the machine"
 }
 
 b_diag() { m_ssh 'cat /var/log/wk-diag.txt 2>/dev/null || echo "(no diag on the guest)"'; }
@@ -109,7 +109,7 @@ b_bench_local() { return 1; }
 # One file, for the manifest that publishes a delivery (cmd/bench, cmd_stage).
 b_bench_put_file() {
     local src="$1" dest="$2" ip
-    ip=$(_guest_ip) || die "'$MACH_GUEST' is not running"
+    ip=$(_guest_ip) || die "'$NODE_GUEST' is not running"
     ( load_target vm >/dev/null 2>&1
       # shellcheck disable=SC2046 -- deliberate word splitting of the options.
       scp -q $(_ssh_opts) "$src" "$WK_VM_USER@$ip:$dest" )
@@ -117,9 +117,9 @@ b_bench_put_file() {
 
 b_bench_put() {
     local src="$1" dest="$2" ip
-    ip=$(_guest_ip) || die "'$MACH_GUEST' is not running"
+    ip=$(_guest_ip) || die "'$NODE_GUEST' is not running"
     m_ssh "sudo mkdir -p $(sh_quote "$dest") && sudo chown -R \$(id -un) $(sh_quote "$BENCH_GUEST_ROOT")" \
-        || die "could not make $dest in '$MACH_GUEST'"
+        || die "could not make $dest in '$NODE_GUEST'"
     ( load_target vm >/dev/null 2>&1
       # shellcheck disable=SC2046 -- deliberate word splitting of the options.
       rsync -a --delete -e "ssh $(_ssh_opts)" "$src/" "$WK_VM_USER@$ip:$dest/" )
@@ -134,11 +134,11 @@ b_probeable() { is_macos && ( load_target vm >/dev/null 2>&1; _tart_bin >/dev/nu
 b_media() {
     local st
     if ! is_macos || ! command -v tart >/dev/null 2>&1; then
-        printf 'a Tart guest, %s (managed on the macOS host)' "$MACH_GUEST"
+        printf 'a Tart guest, %s (managed on the macOS host)' "$NODE_GUEST"
         return 0
     fi
-    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$MACH_GUEST")" 2>/dev/null || echo absent )
-    printf 'a Tart guest, %s (%s); no physical media' "$MACH_GUEST" "${st:-unknown}"
+    st=$( load_target vm >/dev/null 2>&1; _vm_state "$(_vm "$NODE_GUEST")" 2>/dev/null || echo absent )
+    printf 'a Tart guest, %s (%s); no physical media' "$NODE_GUEST" "${st:-unknown}"
 }
 
 # No medium to carry: cloned from the golden base and thrown away.
@@ -146,7 +146,7 @@ b_reprovision() {
     cat <<REPROV
 wk vm base
     the golden guest every vm workspace is cloned from
-wk vm new $MACH_NAME
-wk bench stage <ws> --to $MACH_NAME
+wk vm new $NODE_NAME
+wk bench stage <ws> --to $NODE_NAME
 REPROV
 }

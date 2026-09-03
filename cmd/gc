@@ -28,8 +28,9 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/lib/target.sh"
 . "$WK_ROOT/lib/detach.sh"
-# Sourced optionally: the VM's tree is only as new as the last
-# `wk sync --tools container`, so a hard source of a new file fails there.
+# Sourced optionally: WK_ROOT may be a caller-supplied checkout (the
+# pre-set-$WK_ROOT comment above), where one of these libraries may not
+# exist yet, so a hard source of a new file fails there.
 _source_if_there() { [ -f "$1" ] && . "$1"; return 0; }
 _source_if_there "$WK_ROOT/lib/image.sh"
 _source_if_there "$WK_ROOT/image/profiles.sh"
@@ -114,6 +115,23 @@ gc_build_outputs() {
     return 0
 }
 
+# --- final report --------------------------------------------------------------
+# One line, from one place, on every path that ends here reporting success:
+# a podman machine that is not running still only skips its own half, not
+# this report, or a caller watching for "gc complete" sees that skip as a
+# hang instead of what it is.
+gc_report_complete() {
+    info "gc complete"
+    df -h "$WK_STORE" 2>/dev/null | tail -1 || true
+
+    # What gc deliberately does not prune, so growth is visible rather than silent.
+    for d in bench cache/bench cache/bench-runner cache/images cache/yocto/sstate cache/yocto/downloads \
+             cache/yocto/buildtools cache/buildroot; do
+        [ -d "$WK_STORE/$d" ] || continue
+        du -sh "$WK_STORE/$d" 2>/dev/null | awk -v d="$d" '{printf "  %-8s %s (kept; prune by hand if needed)\n", $1, d}' >&2
+    done
+}
+
 # --- a macOS host: do this machine's half, hand the rest to the VM -----------
 # Placed before the store work below: on a Mac $WK_STORE is the VM's
 # /var/lib/wk, meaningless out here. The VM's exit status is this one's.
@@ -141,6 +159,7 @@ if is_macos && [ -z "${WK_IN_VM:-}" ]; then
     warn "the podman machine is not running, so the container store was not touched"
     log  "  'wk start', then 'wk gc' again -- that half is the mirror, the snapshots"
     log  "  and every workspace's overlay, and it is the largest of them"
+    gc_report_complete
     exit 0
 fi
 
@@ -297,12 +316,4 @@ if [ -n "${WK_IN_VM:-}" ] || is_linux; then
     fi
 fi
 
-info "gc complete"
-df -h "$WK_STORE" 2>/dev/null | tail -1 || true
-
-# What gc deliberately does not prune, so growth is visible rather than silent.
-for d in bench cache/bench cache/bench-runner cache/images cache/yocto/sstate cache/yocto/downloads \
-         cache/yocto/buildtools cache/buildroot; do
-    [ -d "$WK_STORE/$d" ] || continue
-    du -sh "$WK_STORE/$d" 2>/dev/null | awk -v d="$d" '{printf "  %-8s %s (kept; prune by hand if needed)\n", $1, d}' >&2
-done
+gc_report_complete

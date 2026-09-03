@@ -4,7 +4,7 @@
 # selection goes through a LocalPolicy in the machine's own secure storage,
 # changed only by an authenticated user action (docs/HANDOFF-boot.md, tier
 # 2). So `wk sysimage write` must never be pointed at this machine, arming
-# is a person, and the machine drives itself (MACH_LOCAL, boot/machines.sh),
+# is a person, and the machine drives itself (NODE_LOCAL, boot/machines.sh),
 # since the shell arming the transition is about to be rebooted out from
 # under itself.
 #
@@ -17,7 +17,7 @@ BOOT_ORDER_NORMAL=""
 
 # --- where the other role lives ----------------------------------------------
 # By volume name: `disk5s2` changes with the port, the name doesn't.
-mac_volume_path() { printf '/Volumes/%s' "$MACH_VOLUME"; }
+mac_volume_path() { printf '/Volumes/%s' "$NODE_VOLUME"; }
 
 # Mounted *and* a macOS system volume: an empty formatted disk with the
 # right name mounts perfectly and boots nothing.
@@ -65,8 +65,8 @@ b_evidence() {
     # Accurate only on this Mac: elsewhere `df /` reports the driving
     # machine's own root volume as if it were this Mac's.
     if ! is_macos; then
-        echo "booted_volume=unknown (this is not that Mac; MACH_LOCAL machines answer only for themselves)"
-        echo "benchmark_volume=$MACH_VOLUME (cannot be seen from here)"
+        echo "booted_volume=unknown (this is not that Mac; NODE_LOCAL machines answer only for themselves)"
+        echo "benchmark_volume=$NODE_VOLUME (cannot be seen from here)"
         return 0
     fi
 
@@ -74,9 +74,9 @@ b_evidence() {
     [ -n "$root" ] || root=$(df / | awk 'NR==2 {print $1}')
     echo "booted_volume=$root"
     if mac_volume_present; then
-        echo "benchmark_volume=$MACH_VOLUME (attached at $(mac_volume_path))"
+        echo "benchmark_volume=$NODE_VOLUME (attached at $(mac_volume_path))"
     else
-        echo "benchmark_volume=$MACH_VOLUME (not attached)"
+        echo "benchmark_volume=$NODE_VOLUME (not attached)"
     fi
     echo "firmware_default=$(mac_firmware_default)"
 }
@@ -99,7 +99,7 @@ mac_firmware_default() {
     bench_grp=""
     mac_volume_present && bench_grp=$(mac_volume_group "$(mac_volume_path)")
     if [ -n "$bench_grp" ] && [ "$grp" = "$bench_grp" ]; then
-        printf "%s ('%s' -- a plain reboot is expected to enter bench mode)" "$grp" "$MACH_VOLUME"
+        printf "%s ('%s' -- a plain reboot is expected to enter bench mode)" "$grp" "$NODE_VOLUME"
     elif [ -n "$host_grp" ] && [ "$grp" = "$host_grp" ]; then
         printf '%s (the host install -- a plain reboot stays in host mode)' "$grp"
     else
@@ -112,11 +112,11 @@ mac_firmware_default() {
 # (docs/HANDOFF-sandboxing.md), so the machine's record and the user's are
 # the same one -- kept on the *normal* role's disk, since the benchmark
 # volume has its own home directory and cannot see this one.
-MACH_RECORD="$(wk_state_dir)/boot-armed"
+NODE_RECORD="$(wk_state_dir)/boot-armed"
 
 record_write() {
-    mkdir -p "$(dirname "$MACH_RECORD")"
-    cat > "$MACH_RECORD" <<EOF
+    mkdir -p "$(dirname "$NODE_RECORD")"
+    cat > "$NODE_RECORD" <<EOF
 image=$1
 profile=$2
 device=$3
@@ -129,21 +129,21 @@ EOF
 
 record_read() {
     [ "${MODE_CHANNEL:-host}" = host ] || return 0
-    cat "$MACH_RECORD" 2>/dev/null || true
+    cat "$NODE_RECORD" 2>/dev/null || true
 }
 
-record_clear() { rm -f "$MACH_RECORD"; }
+record_clear() { rm -f "$NODE_RECORD"; }
 
 # --- arming -------------------------------------------------------------------
 # Everything checkable, then the ritual. NEEDS A VOLUME to have ever succeeded.
 b_arm() {
-    mac_volume_present || die "'$MACH_VOLUME' is not attached, or is not a macOS system volume.
+    mac_volume_present || die "'$NODE_VOLUME' is not attached, or is not a macOS system volume.
     What has to exist is a full macOS *install* on another volume, personalised
     for this Mac -- an image copied onto a disk will not boot (the boot policy
     lives in this machine's secure storage). Install it from Recovery or with
-    the macOS installer app, name the volume '$MACH_VOLUME', and see
+    the macOS installer app, name the volume '$NODE_VOLUME', and see
     docs/HANDOFF-mac-perf-mode.md for what to turn off on it.
-    A different name:  WK_BENCH_VOLUME='...' wk boot $MACH_NAME"
+    A different name:  WK_BENCH_VOLUME='...' wk boot $NODE_NAME"
 
     cat >&2 <<EOF
 
@@ -151,11 +151,11 @@ b_arm() {
 
     the one-shot way (preferred)
       shut down, then hold the power button until "Loading startup options",
-      pick "$MACH_VOLUME", and press Return. This boots it *once* and leaves
+      pick "$NODE_VOLUME", and press Return. This boots it *once* and leaves
       the default alone, which is what makes the way back a plain reboot.
 
     the sticky way
-      System Settings -> General -> Startup Disk -> "$MACH_VOLUME" -> Restart.
+      System Settings -> General -> Startup Disk -> "$NODE_VOLUME" -> Restart.
       This changes the default, so the machine keeps booting the benchmark
       volume until the pane is used again. Only worth it for a long session.
 
@@ -175,9 +175,9 @@ b_disarm_note() {
 # mounted -- the Pi images' offline channel, reached the other way around.
 b_diag() {
     local v; v=$(mac_volume_path)
-    mac_volume_present || die "'$MACH_VOLUME' is not attached, so there is nothing to read."
+    mac_volume_present || die "'$NODE_VOLUME' is not attached, so there is nothing to read."
     cat "$v/var/log/wk-diag.txt" 2>/dev/null \
-        || echo "(no var/log/wk-diag.txt on '$MACH_VOLUME' -- it has not been provisioned, or has never booted)"
+        || echo "(no var/log/wk-diag.txt on '$NODE_VOLUME' -- it has not been provisioned, or has never booted)"
 }
 
 # A plain reboot lands in the *default* startup disk -- the internal
@@ -198,7 +198,7 @@ b_reboot() {
 # outside it as `private/var`, so the same bytes are `/var/wk` to the booted
 # bench install and `/Volumes/<name> - Data/private/var/wk` here.
 mac_volume_data_path() {
-    local d="/Volumes/$MACH_VOLUME - Data"
+    local d="/Volumes/$NODE_VOLUME - Data"
     [ -d "$d" ] && { printf '%s' "$d"; return 0; }
     # No data volume: the system volume is the only place there is; its
     # writability is the caller's to report.
@@ -214,20 +214,20 @@ b_bench_root() {
     esac
 }
 
-# A MACH_LOCAL machine answers only for itself: probed elsewhere, it reports
+# A NODE_LOCAL machine answers only for itself: probed elsewhere, it reports
 # a confident wrong answer.
 b_probeable() { is_macos; }
 
 # The wk-managed media, one line, for `wk status`'s fleet block.
 b_media() {
     if ! is_macos; then
-        printf "bench volume '%s' (visible only on that Mac)" "$MACH_VOLUME"
+        printf "bench volume '%s' (visible only on that Mac)" "$NODE_VOLUME"
         return 0
     fi
     if mac_volume_present; then
-        printf "bench volume '%s' attached at %s" "$MACH_VOLUME" "$(mac_volume_path)"
+        printf "bench volume '%s' attached at %s" "$NODE_VOLUME" "$(mac_volume_path)"
     else
-        printf "bench volume '%s' MISSING -- docs/HANDOFF-mac-perf-mode.md creates it" "$MACH_VOLUME"
+        printf "bench volume '%s' MISSING -- docs/HANDOFF-mac-perf-mode.md creates it" "$NODE_VOLUME"
     fi
 }
 

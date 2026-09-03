@@ -627,23 +627,27 @@ report_health() {
     done
 
     # --- the push switch, in words
-    if [ -d "$WK_STORE" ]; then
-        local live=0 held=0 absent=0 r
+    # What this machine *holds*, from its own directories and only from here.
+    # Which position the switch is in is what the ssh-agent holds and whether
+    # the injector has the token (cmd/push), and neither is a file: asking
+    # would mean a hop into the machine on every `wk status`, so this reports
+    # the credentials and names the command that reports the switch.
+    if [ -z "${WK_IN_VM:-}" ]; then
+        local keys=0 absent=0 r
         for r in $(wk_push_forks | awk 'NF {print $1}'); do
-            if   [ -f "$WK_STORE/secrets/build_key_$r" ]; then live=$((live + 1))
-            elif [ -f "$WK_STORE/push-keys/build_key_$r" ]; then held=$((held + 1))
+            if [ -f "$(wk_push_held_dir)/build_key_$r" ]; then keys=$((keys + 1))
             else absent=$((absent + 1)); fi
         done
-        if [ "$((live + held + absent))" -gt 0 ]; then
+        if [ "$((keys + absent))" -gt 0 ]; then
             rec_start switch
             rec_set machine "$m"
             rec_set name    "push"
-            rec_opt where   "$([ -z "${WK_IN_VM:-}" ] || printf 'in the podman VM')"
-            if   [ "$live" -gt 0 ] && [ "$held" = 0 ]; then rec_set state "on"
-            elif [ "$live" = 0 ] && [ "$held" -gt 0 ]; then rec_set state "off"
-            elif [ "$live" -gt 0 ]; then rec_set state "partly on"
+            if   [ "$keys" -gt 0 ] && [ "$absent" = 0 ]; then rec_set state "keys held"
+            elif [ "$keys" -gt 0 ]; then rec_set state "some keys held"
             else rec_set state "no keys"; fi
-            rec_set detail "$live live, $held held back, $absent absent"
+            rec_set detail "$keys deploy key(s), $absent absent, $(
+                [ -n "$(wk_github_pat)" ] && echo "an API token" || echo "no API token"
+            ) -- 'wk push status' says whether they are loaded"
             rec_emit
         fi
     fi
@@ -727,8 +731,7 @@ report_health() {
 
 _tooling_said=""
 report_self() {
-    local ver sha dirty tree
-    [ -z "${WK_EXPECT_TREE:-}" ] || return 0
+    local ver sha dirty
     # Not twice: on Linux the container target *is* this machine and
     # report_machine already said it; on macOS no walk produces this line.
     [ -z "$_tooling_said" ] || return 0
@@ -736,13 +739,11 @@ report_self() {
     ver=$("$WK_ROOT/cmd/version" 2>/dev/null) || return 0
     sha=$(kv_get sha <<<"$ver")
     dirty=$(kv_get dirty <<<"$ver")
-    tree=$(kv_get tree <<<"$ver")
     rec_start fact
     rec_set machine "$(this_machine)"
     rec_set type    wk-tools
     rec_set sha     "$sha"
     rec_json dirty  "$([ "$dirty" = yes ] && printf true || printf false)"
-    rec_set tree    "$tree"
     rec_json insync true
     rec_emit
 }
@@ -853,7 +854,7 @@ sha_matches() { # <a> <b>
 }
 
 report_machine() {
-    local label="$1" ver keys expect theirs sha dirty insync note
+    local label="$1" ver keys expect sha dirty insync note
 
     if [ "$WK_TARGET_KIND" = remote ] && t_has_wk; then
         ver=$(  { t_wk version          2>/dev/null || true; } | tr -d '\r' )
@@ -869,48 +870,32 @@ report_machine() {
     fi
 
     if [ -n "$ver" ]; then
-        theirs=$(kv_get tree <<<"$ver")
         sha=$(kv_get sha <<<"$ver")
         dirty=$(kv_get dirty <<<"$ver")
         # Always compared against the machine the tooling comes *from* -- this
-        # workstation -- and what the two are compared *by* is what the copy
-        # over there is:
-        #
-        #   a checkout      its commit, which is the whole point of putting a
-        #                   commit there (tools_push, lib/tools.sh): the tree
-        #                   hash counts ignored machine-local files (a
-        #                   .DS_Store, a __pycache__) that a checkout
-        #                   legitimately does not have, so it would report
-        #                   DIFFERS forever.
-        #   a file copy     its tree hash -- `sha` is `-`, since a copy has no
-        #                   commit. WK_EXPECT_TREE is how the workstation
-        #                   tells the podman VM what it has.
-        if [ -n "$sha" ] && [ "$sha" != - ]; then
-            expect=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || true)
-            if sha_matches "$sha" "$expect"; then insync=true; else insync=false; fi
-        else
-            expect="${WK_EXPECT_TREE:-$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)}"
-            if [ "$theirs" = "$expect" ]; then insync=true; else insync=false; fi
-        fi
+        # workstation -- and always by commit: every copy of this tree is a
+        # checkout (tools_push, lib/tools.sh) or, in the podman VM, this very
+        # checkout mounted at /opt/wk-tools. A `-` sha is neither, and differs.
+        expect=$(git -C "$WK_ROOT" rev-parse --short HEAD 2>/dev/null || true)
+        if sha_matches "$sha" "$expect"; then insync=true; else insync=false; fi
         rec_start fact
         rec_set machine "${_group_machine:-$(this_machine)}"
         rec_set type    wk-tools
-        rec_opt copy    "$([ -z "${WK_IN_VM:-}" ] || printf 'in the podman VM')"
+        rec_opt copy    "$([ -z "${WK_IN_VM:-}" ] || printf 'mounted in the podman VM')"
         rec_set sha     "$sha"
         rec_json dirty  "$([ "$dirty" = yes ] && printf true || printf false)"
-        rec_set tree    "$theirs"
         rec_set expect  "$expect"
         rec_json insync "$insync"
         # What to type about it differs per machine:
         #
-        #   the podman VM   a copy this machine rsyncs in (`wk sync --tools
-        #                   container`).
-        #   a build box     the same push, by machine name.
+        #   the podman VM   the mount is this checkout, so a machine that
+        #                   disagrees was made without it (host/macos/machine.sh).
+        #   a build box     a push, by machine name.
         #   a peer          a workstation pulls rather than being pushed to,
         #                   which needs a committed, pushed tree here first.
         if [ "$insync" != true ]; then
             if [ -n "${WK_IN_VM:-}" ]; then
-                rec_set fix "wk sync --tools container"
+                rec_set fix "./setup   (recreates the machine with this checkout mounted at /opt/wk-tools)"
             elif [ -n "${WK_REMOTE_PEER:-}" ]; then
                 if [ -n "$(git -C "$WK_ROOT" status --porcelain 2>/dev/null)" ]; then
                     rec_set fix "commit and push here first -- a peer pulls, and this checkout is dirty"
@@ -979,7 +964,7 @@ report_fleet_device() {
     # not in the fleet at all. Its role is declared rather than probed, so
     # the column that doesn't depend on the machine answering still doesn't.
     role=$( . "$WK_ROOT/boot/machines.sh"
-            machine_load "$m" >/dev/null 2>&1 && printf '%s' "${MACH_ROLE:-workstation}"
+            machine_load "$m" >/dev/null 2>&1 && printf '%s' "${NODE_ROLE:-workstation}"
             true )
     rec_start fleet
     rec_set machine "$m"
@@ -992,14 +977,14 @@ report_fleet_device() {
     return 0
 }
 
-# A fleet device has a tailnet node per role -- the rescue (MACH_SSH) and the
-# bench system (MACH_BENCH_SSH) -- so the reached line names each, or says
+# A fleet device has a tailnet node per role -- the rescue (NODE_SSH) and the
+# bench system (NODE_BENCH_SSH) -- so the reached line names each, or says
 # which has never joined.
 fleet_tailnet() { # <machine>
     ( . "$WK_ROOT/boot/machines.sh"
       machine_load "$1" >/dev/null 2>&1 || exit 0
       local n a out=""
-      for n in "${MACH_SSH:-$1}" "${MACH_BENCH_SSH:-}"; do
+      for n in "${NODE_SSH:-$1}" "${NODE_BENCH_SSH:-}"; do
           [ -n "$n" ] || continue
           a=$(reach_tailnet "$n")
           out="${out:+$out; }$n ${a:-not a node}"
@@ -1016,8 +1001,8 @@ _fleet_probe() {
         . "$WK_ROOT/image/profiles.sh"
         . "$WK_ROOT/boot/machines.sh"
         machine_load "$m" || exit 0
-        load_driver "$MACH_DRIVER" 2>/dev/null || exit 0
-        role="${MACH_ROLE:-workstation}"
+        load_driver "$NODE_DRIVER" 2>/dev/null || exit 0
+        role="${NODE_ROLE:-workstation}"
         if b_probeable 2>/dev/null; then
             b_probe 2>/dev/null
             case "${MODE:-unreachable}" in
@@ -1031,8 +1016,8 @@ _fleet_probe() {
                 # a next command: unreachable can mean the board is off, or
                 # the whole segment behind the bridge is down.
                 *)       mode="unreachable"
-                         [ -z "${MACH_BRIDGE:-}" ] \
-                             || mode="unreachable via $MACH_BRIDGE" ;;
+                         [ -z "${NODE_BRIDGE:-}" ] \
+                             || mode="unreachable via $NODE_BRIDGE" ;;
             esac
             # A record of intent on a machine still in host mode is the one
             # transition worth shouting about here.
@@ -1048,11 +1033,11 @@ _fleet_probe() {
         fi
         media=$(b_media 2>/dev/null || printf 'unknown')
         # How this machine is made again from nothing, asked of its driver
-        # (b_reprovision). Every current recipe opens on MACH_PROFILE, so a
+        # (b_reprovision). Every current recipe opens on NODE_PROFILE, so a
         # conf missing it names the field instead of calling into a driver
         # that would print around the hole.
-        if [ -z "${MACH_PROFILE:-}" ]; then
-            reprov="missing MACH_PROFILE in boot/machines/$m.conf -- nothing to compose a recipe from"
+        if [ -z "${NODE_PROFILE:-}" ]; then
+            reprov="missing NODE_PROFILE in boot/machines/$m.conf -- nothing to compose a recipe from"
         else
             reprov=$(b_reprovision 2>/dev/null || true)
         fi

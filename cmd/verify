@@ -54,12 +54,15 @@ if [ "$WK_TARGET_KIND" = remote ]; then
     promised. 'wk ai claude' refuses on this target for the same reason."
 fi
 
-# The vm target's boundary is Softnet on the host, not any property below.
-# TODO: measure the guest's egress from inside it; `wk ai claude` carries the
-# vm-side checks for now.
+# The vm target's egress boundary is Softnet on the host rather than any
+# container property, so the block guarded by $WK_SANDBOX below does not apply
+# to a guest. The credential checks do, and are measured the same way in both:
+# from inside, over t_exec.
+# TODO: measure the guest's *egress* from inside it; `wk ai claude` carries the
+# vm-side network checks for now.
 if [ "$WK_TARGET_KIND" = vm ]; then
-    warn "vm workspaces have no in-guest checks yet: the egress filter is Softnet
-  on the host (checked by wk ai claude); only the GPU probe runs here."
+    warn "a guest's egress filter is Softnet on the host (checked by wk ai claude);
+  what runs here is the credential and GPU checks, not the network ones."
 fi
 
 fails=0
@@ -110,26 +113,6 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
     code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://github.com/ 2>/dev/null")
     [ "$code" = 200 ] && pass "github reachable through the proxy (HTTP $code)" \
                       || fail "github unreachable through the proxy (got '${code:-nothing}')"
-
-    # --- nothing in here can publish ------------------------------------------
-    # An agent's blast radius ends at the workspace only if nothing inside it
-    # can push or post: GitHub's API is refused by the proxy (DENIED_HOSTS,
-    # container/proxy/wk-proxy.py), the deploy keys are behind the mount while
-    # `wk push` is off, and no gh token sits in the home or the environment.
-    code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
-    case "${code:-000}" in
-        2*|3*) fail "api.github.com answered HTTP $code -- it is reachable, gh could post from in here" ;;
-        *)     pass "api.github.com is refused (proxy closed the connect, code ${code:-000}): gh has nothing to talk to" ;;
-    esac
-    keys=$(inside "ls /secrets/build_key_* 2>/dev/null | grep -v '\\.pub\$'")
-    if [ -z "$keys" ]; then
-        pass "no deploy key in the mount (git push is off)"
-    else
-        fail "$(printf '%s' "$keys" | grep -c .) deploy key(s) at /secrets -- git push is ON:  wk push off"
-    fi
-    ghcred=$(inside "test -e ~/.config/gh/hosts.yml && echo ~/.config/gh/hosts.yml; env | grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=' | cut -d= -f1")
-    [ -z "$ghcred" ] && pass "no GitHub credential inside (gh has nothing to post with)" \
-                     || fail "GitHub credential inside the workspace: $ghcred -- remove it (rm ~/.config/gh/hosts.yml; unset the token) before an agent runs"
 
     denied=$(inside "curl -sS -m 15 -o /dev/null https://example.com/ 2>&1")
     if printf '%s' "$denied" | grep -qi '403'; then
@@ -201,6 +184,122 @@ if [ "${WK_SANDBOX:-}" = rootless-proxy ]; then
         fail "/opt/wk-tools is writable from inside the workspace"
     fi
 fi
+
+# --- what an agent in here can spend -----------------------------------------
+# Informational, and deliberately not a `fail`: this reports the blast radius
+# rather than the boundary. A workspace with the claude.ai login can act as
+# the account -- that is what remote control needs and what an agent in here
+# is being handed. Presence only: whether it still works is Anthropic's to
+# say, and asking would spend a request.
+if wk_agent_secret_present claude-login; then
+    note "this workspace has your claude.ai login (account scope, not just inference)"
+else
+    note "no claude.ai login here -- 'wk key set claude-login' stores one, and"
+    note "remote control refuses to start without it"
+fi
+
+# --- the two credentials, and that neither one is in here ---------------------
+# An agent's blast radius ends at the workspace only if nothing inside it can
+# publish. Two things could: an ssh key that pushes, and a GitHub API token
+# that posts. Neither is a file in here at all -- the keys are in an ssh-agent
+# outside the workspace (push_agent_*, lib/store.sh) and the token is in the
+# injector (container/proxy/github-inject.py) -- so what is measured is that no
+# key material is present, that the switch is where the host says it is, and
+# that the workspace holds the placeholder rather than a token.
+#
+# Both targets. A container reaches the agent through a bind-mounted socket and
+# a guest through an `ssh -R` forward, but every probe below is the same
+# command run inside by t_exec.
+
+# The host's own answer, once. Both positions are correct states -- what would
+# be wrong is the workspace disagreeing with the host about which one it is in.
+PUSH_ON=0
+"$WK_ROOT/wk" push status >/dev/null 2>&1 && PUSH_ON=1
+[ "$PUSH_ON" = 1 ] && note "the host says push is ON" || note "the host says push is OFF"
+
+# Not the checkout: WebKit ships PEM test fixtures of its own, so a recursive
+# grep there reports the upstream tree rather than this boundary. Home,
+# /secrets and the socket directory are where a key delivered or copied by
+# anything here would land.
+material=$(inside "grep -rl 'PRIVATE KEY' \$HOME /secrets /run/wk 2>/dev/null | head -5")
+if [ -z "$material" ]; then
+    pass "no private key material in the workspace (home, /secrets, /run/wk)"
+else
+    fail "private key material inside the workspace: $(printf '%s' "$material" | tr '\n' ' ')"
+fi
+
+# The agent, asked from inside. The socket is there whichever way the switch is
+# set -- the service owns it -- so what it *holds* is the question, and
+# `ssh-add -l` is how a workspace would find out too.
+agent_sock=$(t_agent_sock 2>/dev/null) || agent_sock=""
+if [ -z "$agent_sock" ]; then
+    fail "the '$TARGET' target names no ssh-agent socket (t_agent_sock), so a push
+        from in here would use a credential wk does not control"
+else
+    # `command -v` first, for the reason the interface probe above gives: a
+    # missing tool would answer "no identities" and fail in the direction that
+    # looks fine.
+    ident=$(inside "command -v ssh-add >/dev/null 2>&1 \
+        && (SSH_AUTH_SOCK=$agent_sock ssh-add -l 2>/dev/null | grep -c . || true) \
+        || echo MISSING")
+    if [ "$ident" = MISSING ]; then
+        fail "no ssh-add in the workspace, so what the agent holds cannot be measured
+        from in here -- and a push from in here would not work either"
+    elif [ "$PUSH_ON" = 1 ]; then
+        [ "$ident" -gt 0 ] \
+            && pass "$ident deploy key(s) reach this workspace through $agent_sock, and push is on" \
+            || fail "push is ON but no identity reaches $agent_sock in here"
+    else
+        [ "$ident" = 0 ] \
+            && pass "no identity reaches this workspace ($agent_sock is empty): a push is refused" \
+            || fail "push is off, yet $ident identity/identities reach this workspace:  wk push off"
+    fi
+fi
+
+# The API. Reaching it is the new state and is not itself a fault: the injector
+# strips whatever the workspace sent, so an unauthenticated call is answered by
+# GitHub exactly as it would be from anywhere.
+code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com/ 2>/dev/null")
+[ "$code" = 200 ] \
+    && pass "api.github.com reachable through the injector (HTTP $code)" \
+    || fail "api.github.com answered '${code:-nothing}' -- the injector is not in the path
+        (systemctl --user status wk-github-inject; the CA is /run/wk/wk-github-ca.pem)"
+
+# And the switch, measured on an endpoint that needs an account.
+code=$(inside "curl -sS -m 20 -o /dev/null -w '%{http_code}' -H 'Authorization: Basic d2s6d2s=' https://api.github.com/user 2>/dev/null")
+if [ "$PUSH_ON" = 1 ]; then
+    [ "$code" = 200 ] \
+        && pass "an authenticated API call succeeds (HTTP $code), and push is on" \
+        || fail "push is ON but api.github.com/user answered '${code:-nothing}' -- 'wk key set github-pat'"
+else
+    [ "$code" = 401 ] \
+        && pass "an authenticated API call is refused (HTTP 401): nothing in here can post" \
+        || fail "push is off, yet api.github.com/user answered '${code:-nothing}' -- expected 401"
+fi
+
+# The placeholder, never its value: printing what the workspace holds would
+# print a token on the one run where this check matters.
+tok=$(inside 'printf %s "${GITHUB_COM_TOKEN:-}"')
+case "$tok" in
+    wk-injects-this) pass "GITHUB_COM_TOKEN in the workspace is the placeholder" ;;
+    "")              fail "GITHUB_COM_TOKEN is unset in here, so 'git-webkit pr' has nothing to send
+        ('wk push on' or 'wk push off' writes /secrets/github-user, which sets it)" ;;
+    *)               fail "GITHUB_COM_TOKEN in the workspace is not the placeholder -- something
+        put a real credential in here; find it and remove it" ;;
+esac
+
+ghcred=$(inside "test -e ~/.config/gh/hosts.yml && echo ~/.config/gh/hosts.yml; env | grep -E '^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN)=' | cut -d= -f1")
+[ -z "$ghcred" ] && pass "no gh credential inside (gh has nothing to post with)" \
+                 || fail "GitHub credential inside the workspace: $ghcred -- remove it (rm ~/.config/gh/hosts.yml; unset the token) before an agent runs"
+
+# `gh` authenticates with a token of its own and would bypass the injector
+# entirely, so it must not be logged in -- whether or not it is installed.
+ghauth=$(inside "command -v gh >/dev/null 2>&1 && (gh auth status >/dev/null 2>&1 && echo AUTHED || echo REFUSED) || echo ABSENT")
+case "$ghauth" in
+    ABSENT)  pass "gh is not installed in the workspace" ;;
+    REFUSED) pass "gh is installed but not authenticated: it can post nothing" ;;
+    *)       fail "gh IS authenticated inside the workspace -- it bypasses the injector:  gh auth logout" ;;
+esac
 
 # --- GPU ---------------------------------------------------------------------
 # Informational unless --gpu (the benchmark runner's flag: a Speedometer or

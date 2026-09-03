@@ -28,8 +28,6 @@
 #                   records should claim, when it is not the one asked
 #   WK_HOST_SELF    set alongside WK_ROW_LABEL: this row is *this* machine,
 #                   not one being asked about (bare_report, forward_to_vm)
-#   WK_EXPECT_TREE  the tree hash bare_report already computed, so the VM
-#                   half of `wk status` need not recompute it
 #   WK_NO_DELEGATE  set by a command already walking the fleet, so a machine
 #                   it asks reports only what it holds and asks nobody
 #   WK_ZED_PUBKEY   the key an editor on the *asking* machine will present,
@@ -723,13 +721,11 @@ bare_report() {
         _host_pid=""
 
         if machine_running; then
-            ( WK_EXPECT_TREE=$("$WK_ROOT/cmd/version" --tree 2>/dev/null || true)
-              export WK_EXPECT_TREE
-              WK_ROW_LABEL="$_self" WK_HOST_SELF=1
+            ( WK_ROW_LABEL="$_self" WK_HOST_SELF=1
               # --no-devices, not --no-fleet: the boards are reached over ssh
               # from out here and the VM can see none of them, but the machine
-              # facts that *are* in there -- the wk-tools every container mounts,
-              # the keys in that store -- are worth having.
+              # facts that *are* in there -- the wk-tools every container
+              # mounts, that machine's containers -- are worth having.
               forward_to_vm "$cmd" --records --no-devices ${@+"$@"} ) \
                 > "$_recs_vm" </dev/null &
             _vm_pid=$!
@@ -890,7 +886,7 @@ forward_to_vm() {
     # -- separates our args from ssh's. WK_IN_VM stops the VM-side wk from
     # trying to forward again if anything is ever misconfigured.
     local _cmd
-    _cmd="WK_IN_VM=1 $(wk_forwarded_env)${WK_EXPECT_TREE:+WK_EXPECT_TREE=$(sh_quote "${WK_EXPECT_TREE:-}") }${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }${WK_HOST_SELF:+WK_HOST_SELF=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
+    _cmd="WK_IN_VM=1 $(wk_forwarded_env)${WK_ROW_LABEL:+WK_ROW_LABEL=$(sh_quote "${WK_ROW_LABEL:-}") }${WK_HOST_SELF:+WK_HOST_SELF=1 }${WK_CONFIG:+WK_CONFIG=$(sh_quote "${WK_CONFIG:-}") }/opt/wk-tools/wk $(sh_quote "$@")"
 
     # A terminal does not survive `podman machine ssh`: it runs ssh without
     # asking for a pty, so the far side sees no tty at all: `host: TTY` out

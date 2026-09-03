@@ -160,15 +160,15 @@ stage_sysctl() { # <staging dir> <name> <body>
 # the *image* is for: a board that arms a medium (pi-mbr) has one, a board
 # whose card swap is hands-on has none, and neither is an error.
 #
-# In a subshell, like _tailnet_name_for and for the same reason: MACH_* names
+# In a subshell, like _tailnet_name_for and for the same reason: NODE_* names
 # the machine holding the card reader, which is what every card edit is
 # addressed to, and loading another machine here sends the rest of the write
 # to the wrong board.
 _self_disarm_for() { # <machine>
     [ -n "${1:-}" ] || return 0
     ( machine_load "$1" >/dev/null 2>&1 || exit 0
-      [ -n "${MACH_DRIVER:-}" ] || exit 0
-      load_driver "$MACH_DRIVER" >/dev/null 2>&1 || exit 0
+      [ -n "${NODE_DRIVER:-}" ] || exit 0
+      load_driver "$NODE_DRIVER" >/dev/null 2>&1 || exit 0
       command -v b_self_disarm_sh >/dev/null 2>&1 || exit 0
       b_self_disarm_sh ) || true
 }
@@ -186,14 +186,14 @@ stage_init() { # <staging dir> <name> <body -- runs on start, as root>
 # autoboot.txt, because on a board that selects some other way the same file
 # changes which system a flag boots (boot/rpi5-usb.sh states why).
 #
-# In a subshell, like _self_disarm_for and for the same reason: MACH_* names the
+# In a subshell, like _self_disarm_for and for the same reason: NODE_* names the
 # machine holding the medium being written, and loading another one here sends
 # the rest of the write to the wrong board.
 _medium_autoboot_for() { # <machine>
     [ -n "${1:-}" ] || return 1
     ( machine_load "$1" >/dev/null 2>&1 || exit 1
-      [ -n "${MACH_DRIVER:-}" ] || exit 1
-      load_driver "$MACH_DRIVER" >/dev/null 2>&1 || exit 1
+      [ -n "${NODE_DRIVER:-}" ] || exit 1
+      load_driver "$NODE_DRIVER" >/dev/null 2>&1 || exit 1
       command -v b_medium_selects_by_partition >/dev/null 2>&1 || exit 1
       b_medium_selects_by_partition )
 }
@@ -220,11 +220,11 @@ stage_units() { # <staging dir> <self-disarm command, empty when nothing to park
     # so it holds a `start running` job for the whole watchdog -- and
     # `multi-user.target`, which wants it, stays inactive with a `start
     # waiting` job for those seconds, on every boot of every bench system.
-    # Measured on the rpi4 2026-09-01: 15 minutes of a boot with
-    # multi-user.target inactive, systemd-update-utmp-runlevel.service queued
-    # behind it, and the start job under `TimeoutStartSec=infinity`, so nothing
-    # bounded it. Reboots issued into that window are how a board goes away and
-    # does not come back.
+    # A sleeping `Type=oneshot` can leave multi-user.target inactive for the
+    # whole sleep, with systemd-update-utmp-runlevel.service queued behind it
+    # and the start job under `TimeoutStartSec=infinity`, so nothing bounds
+    # it. Reboots issued into that window are how a board goes away and does
+    # not come back.
     #
     # Skipped rather than written empty when a profile names no watchdog: a
     # timer with no OnBootSec would fire immediately and reboot the board.
@@ -655,7 +655,7 @@ $(printf '%s\n' "$out" | sed 's/^/    /')
 _tailnet_name_collides() { # <name> -- peer TSV (name<TAB>ip<TAB>state) on stdin
     local name="${1:-}"
     [ -n "$name" ] || return 1
-    # Names this checks against are hostnames (MACH_SSH), always plain --
+    # Names this checks against are hostnames (NODE_SSH), always plain --
     # checked against what they are allowed to be, per admin/wk-card-priv's
     # own rule, rather than escaped into an awk regex.
     case "$name" in
@@ -680,7 +680,7 @@ _tailnet_name_collides() { # <name> -- peer TSV (name<TAB>ip<TAB>state) on stdin
 # everything here reaches a board by its tailnet name. Cannot be skipped --
 # a failure to ask is not evidence the name is free. The one barrier: a
 # rescue written onto a board's other medium from the rescue it replaces,
-# where the name is held by the very system doing the writing (MACH_* is the
+# where the name is held by the very system doing the writing (NODE_* is the
 # card machine, IMG_MACHINE the image's board). --force crosses it and is
 # recorded; the old node still has to go before the new card's first boot.
 _tailnet_name_preflight() { # <name> <bench|rescue>
@@ -697,8 +697,8 @@ _tailnet_name_preflight() { # <name> <bench|rescue>
     hit=$(printf '%s\n' "$peers" | _tailnet_name_collides "$name") || hit=""
     [ -n "$hit" ] || return 0
     if [ "$role" = rescue ] && [ "${hit%%:*}" = exact ] \
-       && [ "${IMG_MACHINE:-}" = "${MACH_NAME:-}" ] && [ "$name" = "${MACH_SSH:-}" ]; then
-        barrier "'$name' is $MACH_NAME's running rescue -- the system this card replaces.
+       && [ "${IMG_MACHINE:-}" = "${NODE_NAME:-}" ] && [ "$name" = "${NODE_SSH:-}" ]; then
+        barrier "'$name' is $NODE_NAME's running rescue -- the system this card replaces.
     The card joins under that name only if the old node is gone by its first
     boot: after this write, remove '$name' from the tailnet admin console
     (https://login.tailscale.com/admin/machines -> $name -> Remove) before
@@ -854,7 +854,7 @@ $(machine_list | sed 's/^/      /')"
     # decided.
     local kept=no
     if [ "$role" != rescue ] && [ -n "$fleet_edit" ] \
-       && { disk_is_second "$DISK_DEV" || [ "${DISK_DEV%@*}" = "${MACH_DEVICE:-}" ]; }; then
+       && { disk_is_second "$DISK_DEV" || [ "${DISK_DEV%@*}" = "${NODE_DEVICE:-}" ]; }; then
         kept=$(disk_tailnet_save "$DISK_DEV")
     fi
 
@@ -878,7 +878,7 @@ would write
                        || printf 'NO -- %s is not on WiFi; the real write refuses here (no --force)' "$DISK_MACHINE"; } \
                 || printf 'not needed -- this board has a cable')
 EOF
-        [ "$DISK_DEV" = "${MACH_DEVICE:-}" ] && log "  note      $DISK_MACHINE is configured to boot from this disk (wk boot $DISK_MACHINE)"
+        [ "$DISK_DEV" = "${NODE_DEVICE:-}" ] && log "  note      $DISK_MACHINE is configured to boot from this disk (wk boot $DISK_MACHINE)"
         log "then, in order:"
         # The steps report themselves from here down (disk_would,
         # boot/disk.sh) rather than being described a second time.
@@ -995,14 +995,14 @@ source=$from"
     fi
     info "$DISK_DEV on $DISK_MACHINE now holds $ID"
 
-    if [ "${DISK_DEV%@*}" = "${MACH_DEVICE:-}" ]; then
+    if [ "${DISK_DEV%@*}" = "${NODE_DEVICE:-}" ]; then
         # "Writing did not arm anything" is false of a medium-armed machine
         # unless this makes it true: its arming is the presence of
         # second-stage firmware on the boot partition, which the image being
         # written brings its own copy of. Left alone, the board would boot
         # the new image on its next reboot with nobody having asked -- the
         # surprise `wk boot` exists to make deliberate.
-        if load_driver "${MACH_DRIVER:-}" 2>/dev/null \
+        if load_driver "${NODE_DRIVER:-}" 2>/dev/null \
            && [ "${BOOT_ARMING:-one-shot}" = medium ] \
            && command -v b_disarm >/dev/null 2>&1; then
             b_disarm
@@ -1011,8 +1011,8 @@ source=$from"
         log "  $DISK_MACHINE is configured to boot from this disk, but writing it"
         log "  did not arm anything. To boot it -- once, reverting by itself:"
         log "      wk boot $DISK_MACHINE"
-    elif [ -n "${MACH_ROOT:-}" ] && [ "$DISK_DEV" = "$(disk_of_part "$MACH_ROOT")" ]; then
-        log "  this is $DISK_MACHINE's rescue medium: it boots whenever ${MACH_DEVICE:-the bench medium} is"
+    elif [ -n "${NODE_ROOT:-}" ] && [ "$DISK_DEV" = "$(disk_of_part "$NODE_ROOT")" ]; then
+        log "  this is $DISK_MACHINE's rescue medium: it boots whenever ${NODE_DEVICE:-the bench medium} is"
         log "  disarmed. To boot it now:  wk boot $DISK_MACHINE --disarm   then power-cycle the board"
         log "  (if this write was forced past the running rescue's name, remove that node"
         log "  from the admin console between the two)."
@@ -1023,18 +1023,18 @@ source=$from"
 }
 
 # The name a system written for a machine joins the tailnet as, by role: a
-# bench system as MACH_BENCH_SSH (`<board>-bench`), a rescue as MACH_SSH --
+# bench system as NODE_BENCH_SSH (`<board>-bench`), a rescue as NODE_SSH --
 # the board's host mode, which on a bench device is the rescue itself
 # (`<board>-rescue`), and on a workstation is its own install, which is never
 # written. Two names because each written system joins as its own node, and
 # a second join under an existing name comes up renamed. In a subshell: the
-# MACH_* of the machine holding the card reader stay loaded.
+# NODE_* of the machine holding the card reader stay loaded.
 _tailnet_name_for() { # <machine> <bench|rescue>
     [ -n "${1:-}" ] || return 0
     ( machine_load "$1" >/dev/null 2>&1 || exit 0
       case "${2:-bench}" in
-          rescue) printf '%s' "${MACH_SSH:-}" ;;
-          *)      printf '%s' "${MACH_BENCH_SSH:-}" ;;
+          rescue) printf '%s' "${NODE_SSH:-}" ;;
+          *)      printf '%s' "${NODE_BENCH_SSH:-}" ;;
       esac ) || true
 }
 

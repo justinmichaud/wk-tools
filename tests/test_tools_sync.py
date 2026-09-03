@@ -171,12 +171,16 @@ class TestRefusal(ToolsPushCase):
         self.assertEqual(self.far_head(), "")
         self.assertFalse(self.far.exists(), "something was sent anyway")
 
-    def test_an_untracked_file_here_is_refused_too(self):
+    def test_an_untracked_non_ignored_file_here_is_not_a_dirty_tree(self):
+        # Dirtiness is tracked-only: a new file not yet `git add`-ed is not
+        # a change to this repository any more than an ignored one is --
+        # neither has a commit for a machine to be given.
         (self.src / "new.sh").write_text("not added yet\n")
         cp = self.push()
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("uncommitted changes", cp.stderr)
-        self.assertFalse(self.far.exists())
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(self.far_head(), self.sha)
+        self.assertFalse((self.far / "new.sh").exists(),
+                         "an untracked file was sent as if it were part of the tree")
 
     def test_an_ignored_file_here_is_not_a_dirty_tree(self):
         (self.src / "ignored-here").write_text("machine-local\n")
@@ -437,10 +441,9 @@ class TestGuestStartConverges(unittest.TestCase):
 
 
 class TestStatusToolsRow(unittest.TestCase):
-    """cmd/status's wk-tools row for a machine across ssh: what the two
-    copies are compared *by* is what the copy over there is. A checkout
-    answers with a commit and is compared by commit; a file copy answers `-`
-    and has only its tree hash.
+    """cmd/status's wk-tools row for a machine across ssh: every copy is
+    compared by commit -- a checkout's own, or, in the podman VM, this very
+    checkout mounted in. A `-` sha is neither, and is never in sync.
 
     report_machine is lifted with its one helper and driven against a stubbed
     `t_wk version`, so no machine is reached and no record writer is faked
@@ -495,36 +498,31 @@ _group_machine=fakebox
         return out
 
     def test_a_checkout_at_this_trees_commit_reads_in_sync(self):
-        row = self.row(f"sha={self.full}\ndirty=no\ntree=ffff\n")
+        row = self.row(f"sha={self.full}\ndirty=no\n")
         self.assertEqual(row["sha"], self.full)
         self.assertEqual(row["expect"], self.short)
         self.assertEqual(row["insync"], "true")
         self.assertNotIn("fix", row)
 
     def test_a_checkout_at_another_commit_differs_and_names_the_push(self):
-        row = self.row("sha=0000000\ndirty=no\ntree=ffff\n")
+        row = self.row("sha=0000000\ndirty=no\n")
         self.assertEqual(row["sha"], "0000000")
         self.assertEqual(row["expect"], self.short)
         self.assertEqual(row["insync"], "false")
         self.assertEqual(row["fix"], "wk sync --tools fakebox")
 
     def test_a_dirty_checkout_over_there_is_reported_as_dirty(self):
-        row = self.row(f"sha={self.short}\ndirty=yes\ntree=ffff\n")
+        row = self.row(f"sha={self.short}\ndirty=yes\n")
         self.assertEqual(row["dirty"], "true")
         self.assertEqual(row["insync"], "true")
 
-    def test_a_copy_with_no_commit_is_still_compared_by_tree_hash(self):
-        row = self.row("sha=-\ndirty=unknown\ntree=abc123\n",
-                       extra="WK_EXPECT_TREE=abc123\nWK_IN_VM=1\n")
-        self.assertEqual(row["tree"], "abc123")
-        self.assertEqual(row["expect"], "abc123")
-        self.assertEqual(row["insync"], "true")
-
-    def test_a_copy_with_no_commit_and_another_tree_hash_differs(self):
-        row = self.row("sha=-\ndirty=unknown\ntree=abc123\n",
-                       extra="WK_EXPECT_TREE=999999\nWK_IN_VM=1\n")
+    def test_a_copy_with_no_commit_is_never_in_sync(self):
+        # A `-` sha is neither a checkout nor the podman VM's mount of this
+        # one: it is always DIFFERS, whatever files happen to be there.
+        row = self.row("sha=-\ndirty=unknown\n", extra="WK_IN_VM=1\n")
         self.assertEqual(row["insync"], "false")
-        self.assertEqual(row["fix"], "wk sync --tools container")
+        self.assertEqual(row["fix"],
+                         "./setup   (recreates the machine with this checkout mounted at /opt/wk-tools)")
 
     def test_reporting_reaches_no_machine_and_syncs_nothing(self):
         """Read-only: the row is built from a question (`wk version` over

@@ -130,15 +130,19 @@ over ssh through a deploy key scoped to that one repository.
 Reads are anonymous over HTTPS and always work: fetching `origin` or either
 fork needs no credential at all.
 
-**Pushing is a switch, and it is normally off while you are running.** The
-switch is *where the key is*, and it is thrown on the host (`wk push`): a
-container reads the keys through a read-only mount, and a macOS workspace is
-handed a copy that is taken away again the moment the switch goes off. Either
-way `wk ai claude` turns it off before handing over control, so a push is
-refused at the door — `no such identity` from ssh means exactly that, not a
-broken setup. Do not try to work around it: publishing is the one thing a
+**Pushing is a switch, and it is normally off while you are running.** No
+credential that publishes is in this workspace at all. The deploy keys are in
+an `ssh-agent` outside it and only its socket crosses in, so ssh here can sign
+with a key it cannot read; the GitHub API token is in a proxy that puts it in
+the `Authorization` header, so `GITHUB_COM_TOKEN` in here is the literal
+placeholder `wk-injects-this` and not a secret. The switch is thrown on the
+host (`wk push`), and `wk ai claude` turns it off before handing over control:
+a push is then refused at the door — `Permission denied (publickey)` from ssh
+means exactly that, not a broken setup — and an API call that needs an account
+answers `401`. Do not try to work around it: publishing is the one thing a
 disposable workspace is not allowed to do on its own. Say what you would have
-pushed and let the person at the keyboard run `wk push on`.
+pushed and let the person at the keyboard run `wk push on`, which is also what
+makes `git-webkit pr` work from in here.
 
 Never use `git push --force` against a shared branch, and never commit unless
 asked.

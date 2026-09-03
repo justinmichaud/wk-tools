@@ -1,8 +1,11 @@
-"""Nothing an agent runs can publish: the egress proxy refuses GitHub's API,
-`wk verify` measures that no deploy key and no GitHub credential are inside a
-workspace, `wk ai claude` holds push back before it verifies (and refuses a build
-box that holds a gh login), and `wk push on` is refused while a claude process
-runs in any workspace. The person at the keyboard is the only publisher.
+"""Nothing an agent runs can publish. The proxy now *allows* api.github.com and
+hands it to the credential injector, so the refusal has moved: the token the
+injector would add is not there while push is off, the deploy keys are in an
+ssh-agent nothing in a workspace can take a key out of, `wk verify` measures
+both from inside, `wk ai claude` holds push back before it verifies (and
+refuses a build box that holds a gh login), and `wk push on` is refused while a
+claude process runs in any workspace. The person at the keyboard is the only
+publisher.
 
 Run: python3 -m unittest tests.test_no_publish -v
 """
@@ -28,13 +31,33 @@ def _policy():
 
 
 class TestProxyRefusesGitHubsApi(unittest.TestCase):
-    def test_api_and_uploads_are_refused_with_the_reason(self):
+    def test_uploads_is_still_refused_with_the_reason(self):
+        """The upload API publishes release assets and has no injector: it is
+        the one GitHub host that stayed on the denied list."""
         p = _policy()
-        for host in ("api.github.com", "uploads.github.com"):
+        ok, why = p.host_allowed("uploads.github.com", 443)
+        self.assertFalse(ok)
+        self.assertIn("refused", why)
+
+    def test_the_api_is_allowed_only_on_443_and_only_through_the_injector(self):
+        """A tunnel on 22 or 80 would be a way around the injector, and the
+        generic `github.com` suffix would grant both if this were not an exact
+        match checked before it."""
+        p = _policy()
+        ok, why = p.host_allowed("api.github.com", 443)
+        self.assertTrue(ok, why)
+        self.assertIn("injector", why)
+        for port in (22, 80):
+            with self.subTest(port=port):
+                ok, why = p.host_allowed("api.github.com", port)
+                self.assertFalse(ok, why)
+
+    def test_a_lookalike_is_not_the_injected_host(self):
+        p = _policy()
+        for host in ("evilapi.github.com.attacker.net", "api.github.com.attacker.net"):
             with self.subTest(host=host):
-                ok, why = p.host_allowed(host, 443)
-                self.assertFalse(ok)
-                self.assertIn("refused", why)
+                ok, _ = p.host_allowed(host, 443)
+                self.assertFalse(ok, host)
 
     def test_github_itself_and_codeload_stay_allowed(self):
         p = _policy()
@@ -46,18 +69,24 @@ class TestProxyRefusesGitHubsApi(unittest.TestCase):
 
 
 class TestVerifyMeasuresThatNothingCanPublish(unittest.TestCase):
-    def test_reachability_is_probed_on_github_com_not_its_api(self):
+    def test_both_sides_of_the_api_are_measured(self):
+        """Reaching api.github.com is the new state and not a fault; what is
+        measured is that an *authenticated* call is refused while push is off
+        and succeeds while it is on."""
         self.assertIn("https://github.com/", VERIFY)
-        self.assertRegex(VERIFY, r"curl [^\n]*https://api\.github\.com/")
-        # a 2xx/3xx reaching the API is the failure; a closed connect (000/403)
-        # is the refusal working.
-        self.assertRegex(VERIFY, r"2\*\|3\*\) fail")
+        self.assertRegex(VERIFY, r"curl [^\n]*https://api\.github\.com/ ")
+        self.assertIn("https://api.github.com/user", VERIFY)
+        self.assertIn("401", VERIFY)
 
-    def test_deploy_keys_and_gh_credentials_fail_the_sandbox(self):
-        self.assertIn("/secrets/build_key_", VERIFY)
-        self.assertIn("git push is ON", VERIFY)
+    def test_the_old_claim_that_the_api_is_refused_is_gone(self):
+        self.assertNotIn("api.github.com is refused", VERIFY)
+
+    def test_key_material_and_gh_credentials_fail_the_sandbox(self):
+        self.assertIn("PRIVATE KEY", VERIFY)
+        self.assertIn("ssh-add -l", VERIFY)
         self.assertIn("~/.config/gh/hosts.yml", VERIFY)
         self.assertIn("GH_TOKEN|GITHUB_TOKEN", VERIFY)
+        self.assertIn("wk-injects-this", VERIFY)
 
 
 class TestClaudeHoldsPushBackBeforeVerifying(unittest.TestCase):
@@ -114,9 +143,9 @@ agent_sessions
         cp = self._sessions("a\\tUp 2 hours\\n", "none")
         self.assertEqual(cp.stdout.strip(), "")
 
-    def test_on_asks_before_moving_a_key(self):
+    def test_on_asks_before_loading_the_agent(self):
         on = PUSH[PUSH.index("\non)\n"):PUSH.index("\noff)\n")]
-        self.assertLess(on.index("agent_sessions"), on.index('move_keys "$HELD" "$LIVE"'))
+        self.assertLess(on.index("agent_sessions"), on.index("push_agent_load"))
         # a forceable barrier, not an unconditional die: `wk push on --force`
         # crosses it while a session runs.
         self.assertIn("barrier ", on)

@@ -458,7 +458,7 @@ t_wk() {{ echo "ASKED: wk $*"; }}
         return bash(". lib/common.sh\n" + stubs + self.T_SYNC + "\nt_sync\n")
 
     def _mine(self):
-        cp = subprocess.run([str(REPO / "cmd" / "version"), "--tree"],
+        cp = subprocess.run([str(REPO / "cmd" / "version")],
                             cwd=str(REPO), capture_output=True, text=True, timeout=15)
         return cp.stdout.strip()
 

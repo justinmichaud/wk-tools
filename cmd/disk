@@ -120,8 +120,11 @@ probe_store() {
         printf '%s\t%s\t%s\n' "$(_kb "$d")" "workspace $id" "wk rm $id"
     done
 
+    # No secrets/ row: a few kilobytes of keys, and on macOS that path is a
+    # mount of the host's own directory rather than disk in this store
+    # (wk_secrets_dir, lib/store.sh).
     for d in cache/ccache cache/bench cache/images cache/yocto cache/buildroot \
-             images bench secrets skills tools; do
+             images bench skills tools; do
         [ -d "$WK_STORE/$d" ] || continue
         printf '%s\t%s\t%s\n' "$(_kb "$WK_STORE/$d")" "$d" ""
     done

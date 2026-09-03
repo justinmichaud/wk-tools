@@ -19,8 +19,26 @@ Run: python3 -m unittest tests.test_claude_rc -v
 """
 import tempfile
 import unittest
+from pathlib import Path
 
 from tests.support import REPO, WkTest, bash, run, temp_store
+
+# What rc_start requires before it will spawn anything: the claude.ai login
+# credential, in this machine's writable agent directory (wk_agent_rw_dir,
+# lib/store.sh -- a sibling of the secrets directory, so WK_HOST_SECRETS
+# places both). Deliberately nothing like a real one.
+FAKE_LOGIN = '{"claudeAiOauth":{"accessToken":"x","refreshToken":"y","scopes":["user:profile"]}}'
+
+
+def credential_env(tmp, login=True):
+    """A scratch secrets/agent-rw pair for a probe, with or without a login."""
+    secrets = Path(tmp) / "secrets"
+    rw = Path(tmp) / "agent-rw"
+    secrets.mkdir(parents=True, exist_ok=True)
+    rw.mkdir(parents=True, exist_ok=True)
+    if login:
+        (rw / ".credentials.json").write_text(FAKE_LOGIN)
+    return {"WK_HOST_SECRETS": str(secrets)}
 
 
 # The library-mode probe: sources cmd/ai for its rc_* functions only
@@ -130,6 +148,7 @@ class TestClaudeRcLifecycle(unittest.TestCase):
         self._store = temp_store()
         store = self._store.__enter__()
         self.env = {"WK_STORE": store["path"].as_posix()}
+        self.env.update(credential_env(store["path"]))
         self.addCleanup(self._store.__exit__, None, None, None)
 
     def _run_probe(self):
@@ -266,7 +285,9 @@ class TestAServerThatExitsAtOnceIsNotReportedRunning(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        env = {"WK_STORE": tempfile.mkdtemp(prefix="wk-rc-dies-")}
+        tmp = tempfile.mkdtemp(prefix="wk-rc-dies-")
+        env = {"WK_STORE": tmp}
+        env.update(credential_env(tmp))
         cls.cp = bash(_PROBE_DIES_AT_ONCE.replace("__REPO__", str(REPO)), env=env, timeout=60)
 
     def test_it_refuses_rather_than_claiming_running(self):
@@ -280,3 +301,70 @@ class TestAServerThatExitsAtOnceIsNotReportedRunning(unittest.TestCase):
         status = self.cp.stdout.split("MARK:status", 1)[1]
         self.assertIn("state=stopped", status)
         self.assertNotIn("pid=", status)
+
+
+# The same library-mode shape as the probe above, with the one thing rc_start
+# checks before it spawns taken away. A fake `claude` that would have started
+# happily, so a "refused" here is the gate and nothing else.
+_PROBE_NO_CREDENTIAL = r'''
+set -euo pipefail
+export WK_ROOT="__REPO__"
+export WK_CLAUDE_LIB=1
+. "__REPO__/cmd/ai"
+
+WS="probe-ws-nocred"
+mkdir -p "$(wk_ws_dir "$WS")"
+TMP_HOME=$(mktemp -d); TMP_SRC=$(mktemp -d)
+t_exec()  { local name="$1"; shift; "$@"; }
+t_home()  { printf '%s' "$TMP_HOME"; }
+t_src()   { printf '%s' "$TMP_SRC"; }
+t_spawn() {
+    local name="$1" log="$2" pidf="$3"; shift 3
+    echo "SPAWNED" >> "$TMP_HOME/spawned"
+    "$@" > "$log" 2>&1 < /dev/null &
+    printf '%s' "$!" > "$pidf"
+}
+FAKE_CLAUDE="$TMP_HOME/claude"
+printf '#!/bin/sh\nsleep 20\n' > "$FAKE_CLAUDE"
+chmod +x "$FAKE_CLAUDE"
+if ( rc_start "$WS" "$FAKE_CLAUDE" ) 2>"$TMP_HOME/err"; then echo "MARK:started"; else echo "MARK:refused"; fi
+echo "MARK:err"; cat "$TMP_HOME/err"
+echo "MARK:spawned"; cat "$TMP_HOME/spawned" 2>/dev/null || true
+echo "MARK:status"; cat "$(rc_status_file "$WS")" 2>/dev/null || echo "(no status file)"
+kill "$(cat "$TMP_HOME/claude-remote-control.pid" 2>/dev/null)" 2>/dev/null || true
+'''
+
+
+class TestRemoteControlRefusesWithoutTheLoginCredential(unittest.TestCase):
+    """Remote control needs the claude.ai account login: measured in the CLI,
+    a long-lived `claude setup-token` token is inference-only and refused for
+    lacking the user:profile scope. Without one, rc_start refuses *before* it
+    spawns -- otherwise the answer is a server that starts, prints that
+    refusal and dies, reported three lines deep in a log."""
+
+    @classmethod
+    def setUpClass(cls):
+        tmp = tempfile.mkdtemp(prefix="wk-rc-nocred-")
+        env = {"WK_STORE": tmp}
+        env.update(credential_env(tmp, login=False))
+        cls.cp = bash(_PROBE_NO_CREDENTIAL.replace("__REPO__", str(REPO)),
+                      env=env, timeout=60)
+
+    def test_it_refuses(self):
+        self.assertIn("MARK:refused", self.cp.stdout, self.cp.stdout + self.cp.stderr)
+
+    def test_it_names_the_remedy(self):
+        err = _section(self.cp.stdout, "err")
+        self.assertIn("wk key set claude-login", err, err)
+        self.assertIn("claude auth login", err, err)
+
+    def test_nothing_was_spawned(self):
+        """Before the spawn, not after: a server started and killed by its own
+        credential check is a running process, a pid file and a log to read."""
+        self.assertEqual("", _section(self.cp.stdout, "spawned").strip(),
+                         self.cp.stdout)
+
+    def test_it_says_the_inference_token_is_not_a_substitute(self):
+        """`wk key set claude` stores one, and it is the obvious wrong guess."""
+        err = _section(self.cp.stdout, "err")
+        self.assertIn("setup-token", err, err)

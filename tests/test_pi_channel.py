@@ -60,21 +60,21 @@ boot_order_first "{order}" "{nibble}"
         self.assertIn("6", out.lstrip("0x"))
 
 
-_FAKE_MACH_CONF = '''MACH_SSH={ssh}
-MACH_DRIVER=pi-mbr
-MACH_DEVICE={device}
-MACH_ROOT=/dev/sda2
-MACH_PROFILE=webkit-2.52-buildroot-rpi4
-MACH_MAC=02:00:00:00:00:09
-MACH_BRIDGE=""
-MACH_ROLE={role}
-MACH_OS=any
-MACH_LOCAL=""
-MACH_VOLUME=""
-MACH_DTB=""
-MACH_BENCH_SSH="{ssh}-bench"
-MACH_NET=ethernet
-MACH_NOTE="fake board for test_pi_channel"
+_FAKE_NODE_CONF = '''NODE_SSH={ssh}
+NODE_DRIVER=pi-mbr
+NODE_DEVICE={device}
+NODE_ROOT=/dev/sda2
+NODE_PROFILE=webkit-2.52-buildroot-rpi4
+NODE_MAC=02:00:00:00:00:09
+NODE_BRIDGE=""
+NODE_ROLE={role}
+NODE_OS=any
+NODE_LOCAL=""
+NODE_VOLUME=""
+NODE_DTB=""
+NODE_BENCH_SSH="{ssh}-bench"
+NODE_NET=ethernet
+NODE_NOTE="fake board for test_pi_channel"
 '''
 
 # Stands in for a live board: `wk pi boot-order`'s rsh/ssh calls all run
@@ -100,7 +100,7 @@ printf 'BOOT_ORDER=0xf421\\n'
 class TestBootOrderDefault(WkTest):
     """The default order `wk pi boot-order` picks when none is named on the
     command line: a bench-device's default follows its bench medium's own
-    transport (MACH_DEVICE), a workstation's is always `local`."""
+    transport (NODE_DEVICE), a workstation's is always `local`."""
 
     def _default_order_name(self, role, device):
         with scratch_dir(prefix="wk-test-pi-machines-") as machdir, \
@@ -111,7 +111,7 @@ class TestBootOrderDefault(WkTest):
              }) as binp:
             host = f"fakepi{rand_suffix(4)}"
             (machdir / f"{host}.conf").write_text(
-                _FAKE_MACH_CONF.format(ssh=host, device=device, role=role)
+                _FAKE_NODE_CONF.format(ssh=host, device=device, role=role)
             )
             env = {
                 "WK_MACHINES_DIR": str(machdir),
@@ -143,7 +143,7 @@ class TestBootOrderDefault(WkTest):
              stub_path({"ssh": _ANSWERING_SSH}) as binp:
             host = f"fakepi{rand_suffix(4)}"
             (machdir / f"{host}.conf").write_text(
-                _FAKE_MACH_CONF.format(ssh=host, device="/dev/sda", role="bench-device")
+                _FAKE_NODE_CONF.format(ssh=host, device="/dev/sda", role="bench-device")
             )
             env = {
                 "WK_MACHINES_DIR": str(machdir),
@@ -178,11 +178,11 @@ class TestISshLoginRule(WkTest):
 . "$WK_ROOT/lib/reach.sh"
 . "$WK_ROOT/boot/machines.sh"
 WK_IMAGE_HOST=192.0.2.9
-MACH_NAME=testmach
-MACH_SSH=""
-MACH_BENCH_SSH=""
-MACH_MAC=""
-MACH_ROLE={role}
+NODE_NAME=testmach
+NODE_SSH=""
+NODE_BENCH_SSH=""
+NODE_MAC=""
+NODE_ROLE={role}
 i_ssh true
 ''',
                 env={"PATH": f"{binp}:{self._real_path()}"},
@@ -221,7 +221,7 @@ BENCH_CHANNEL_FUNCTIONS = (
 
 class TestBenchFunctionsUseTheBenchChannel(unittest.TestCase):
     """`wk pi deploy` and `wk pi bench` act on the bench system, not the
-    rescue/host install `m_ssh`/`$MACH_SSH` name on a bench-device -- so
+    rescue/host install `m_ssh`/`$NODE_SSH` name on a bench-device -- so
     none of the functions that carry either verb's work may spell either
     one out. A regression here is a board silently benched on its rescue
     system again."""
@@ -244,8 +244,8 @@ class TestBenchFunctionsUseTheBenchChannel(unittest.TestCase):
                 f"{fn} still calls m_ssh (the rescue/host channel):\n{body}",
             )
             self.assertNotIn(
-                "$MACH_SSH", body,
-                f"{fn} still names $MACH_SSH (the rescue/host ssh alias):\n{body}",
+                "$NODE_SSH", body,
+                f"{fn} still names $NODE_SSH (the rescue/host ssh alias):\n{body}",
             )
 
 

@@ -36,6 +36,10 @@ set -euo pipefail
 export WK_BUILD=1
 
 SRC=/src/WebKit
+# t_spawn (targets/container.sh) execs this directly with no WK_ROOT and no
+# lib/target.sh sourced, so there is no t_mirror_dir to ask; it always runs
+# already inside a container, at the fixed bind mount that driver names
+# (t_mirror_dir there, tests/test_mirror_path.py's named exception).
 MIRROR=/mirror/WebKit.git
 NAME=""; COMMIT=""; SLOT=""; JOBS=""
 

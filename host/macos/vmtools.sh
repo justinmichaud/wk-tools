@@ -1,11 +1,17 @@
-# Copy wk-tools into the VM and install what depends on it.
+# Install what depends on wk-tools inside the VM.
 #
-# The VM has no view of the host filesystem by design, so the tooling is
-# pushed via rsync over `podman machine ssh` instead of mounted -- a single
-# fast step that works against the local working tree, so changes are
-# testable without pushing to GitHub first.
+# The tooling itself is not copied: the machine mounts this checkout read-only
+# at /opt/wk-tools (host/macos/machine.sh), so the VM runs the working tree and
+# an edit here is testable in a workspace with no step in between. What is left
+# is everything that has to be *installed* around it -- the egress proxy, the
+# SDK, the machine's own packages -- and the three mounts are verified first,
+# since every one of those steps names a path in one of them.
 #
-# Runs after the machine stage. Safe to re-run; rsync only sends differences.
+# Runs after the machine stage. Safe to re-run.
+
+# For $WK_STORE and wk_secrets_dir: the two ends of the secrets mount this
+# verifies below, from the one file that answers where each of them is.
+. "$WK_ROOT/lib/store.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"
 
@@ -36,34 +42,56 @@ _rsh() {
         "$_ssh_user@localhost" "$@"
 }
 
-# --delete so a file removed here is removed there: a stale command left
-# behind in the VM would shadow the current one. --itemize-changes so this
-# reports honestly, rather than "synced" on every run.
-_synced=$(rsync -az --delete --itemize-changes \
-    -e "ssh -q -p $_ssh_port -i $_ssh_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
-    --exclude '.git/' \
-    "$WK_ROOT/" "$_ssh_user@localhost:/opt/wk-tools/" | grep -c . || true)
-
-if [ "${_synced:-0}" -gt 0 ]; then
-    changed "synced $_synced file(s) to /opt/wk-tools"
+# --- the three mounts, from inside -------------------------------------------
+# Every step below names a path in one of them, and so does every container
+# this machine will ever create. A machine missing one fails one step at a
+# time, each with a different message; this fails once and names the remedy.
+if _rsh 'test -x /opt/wk-tools/wk'; then
+    unchanged "this checkout is mounted at /opt/wk-tools"
 else
-    unchanged "wk-tools in sync"
+    die "/opt/wk-tools/wk is not executable inside '$WK_MACHINE', so nothing in
+    there can run this tooling. The machine mounts this checkout there when it
+    is created:  ./setup --stage machine"
 fi
 
-# WK_VMTOOLS_ONLY=tools: the push above and nothing else -- what `wk sync
-# --target container` wants, the copy of wk-tools every container
-# bind-mounts read-only. An env var, not an argument, since this file is
-# *sourced* by ./setup and $1 there is setup's own.
+# The mount, not the directory: an empty directory of the VM's own at the same
+# path would leave `wk key set` writing on this host and every container
+# reading nothing.
+if _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/secrets")" >/dev/null 2>&1; then
+    unchanged "the secrets directory is mounted at $WK_STORE/secrets"
+else
+    die "$WK_STORE/secrets is not a mount inside '$WK_MACHINE', so the keys this
+    host holds ($(wk_secrets_dir)) reach no workspace. The machine mounts them
+    there when it is created:  ./setup --stage machine"
+fi
 
-# The egress policy is part of the tooling just pushed, so it's applied
-# here too. Restarted only when the policy changed: an unconditional
-# restart drops every workspace's egress for a moment, and this file is
-# meant to be runnable while a build is fetching something.
+# The one writable mount: the Claude CLI rewrites the login credential in place
+# when it spends the refresh token, so a read-only mount here logs every
+# workspace out the first time one refreshes. Writability is checked from
+# inside, where the mode actually applies.
+if ! _rsh "findmnt -no TARGET $(sh_quote "$WK_STORE/agent-rw")" >/dev/null 2>&1; then
+    die "$WK_STORE/agent-rw is not a mount inside '$WK_MACHINE', so the claude.ai
+    login this host holds ($(wk_agent_rw_dir)) reaches no workspace. The machine
+    mounts it there when it is created:  ./setup --stage machine"
+elif _rsh "test -w $(sh_quote "$WK_STORE/agent-rw")"; then
+    unchanged "the agent-writable directory is mounted read-write at $WK_STORE/agent-rw"
+else
+    die "$WK_STORE/agent-rw is mounted read-only inside '$WK_MACHINE'. The Claude
+    CLI rewrites the login credential in place, so a workspace would be logged
+    out the first time it refreshes. The machine mounts it read-write when it
+    is created:  ./setup --stage machine"
+fi
+
+# The proxy runs the policy file straight off the mount, so an edit here is
+# live in the VM the moment it is saved -- but only for a proxy that restarts
+# to read it. Restarted only when the policy changed: an unconditional restart
+# drops every workspace's egress for a moment, and this file is meant to be
+# runnable while a build is fetching something.
 _proxy_policy_hash() { cksum < "$WK_ROOT/container/proxy/wk-proxy.py" | awk '{print $1}'; }
 
-# Only when it is already running: starting it is the full setup's job, and
-# `wk sync --tools container` on a never-set-up machine should not report a
-# failure to start something it wasn't asked to install.
+# Only when it is already running: starting it is the install step further
+# down, and a never-set-up machine should not report a failure to start
+# something nothing has installed yet.
 _proxy_policy_reload() {
     local want; want=$(_proxy_policy_hash)
     _rsh 'systemctl --user is-active --quiet wk-proxy.service' || return 1
@@ -74,15 +102,6 @@ _proxy_policy_reload() {
     _rsh "systemctl --user restart wk-proxy.service && echo $want > /var/lib/wk/.proxy-policy"
     changed "restarted wk-proxy (policy changed)"
 }
-
-# WK_VMTOOLS_ONLY=tools stops here (see the comment above this file's rsync).
-if [ "${WK_VMTOOLS_ONLY:-}" = tools ]; then
-    # A pushed policy that is not the running one is the same bug as a pushed
-    # `wk` that no container can see: it is silent, and it shows up as a fetch
-    # being refused for a name the allowlist plainly contains.
-    _proxy_policy_reload || true
-    return 0 2>/dev/null || exit 0
-fi
 
 # --- shared mutable skills ---------------------------------------------------
 # Seeded from the repo once, then left alone: workspaces share this
@@ -99,10 +118,11 @@ else
 fi
 
 # --- build key ---------------------------------------------------------------
-# One shared deploy key, generated here so a fresh machine is ready to go;
-# it still has to be registered on GitHub once.
-_rsh 'WK_IN_VM=1 /opt/wk-tools/cmd/key ensure' 2>&1 | sed 's/^/  /' || true
-if _rsh 'test -f /var/lib/wk/secrets/build_key.pub'; then
+# One deploy key per fork, generated here so a fresh machine is ready to go; it
+# still has to be registered on GitHub once (`wk key register`). Run on this
+# host, where the keys live: the VM only reads them.
+"$WK_ROOT/cmd/key" ensure 2>&1 | sed 's/^/  /' || true
+if [ -f "$(wk_secrets_dir)/build_key_fork.pub" ]; then
     unchanged "build key present"
 else
     warn "no build key; workspaces will not be able to push"
@@ -114,12 +134,14 @@ fi
 # the VM is reproducible from the repo, and drift there is invisible and
 # hard to debug.
 #
-# Regenerated: /opt/wk-tools, the SDK checkout and its patches, the egress
-# proxy, the podman network, installed packages. NOT touched, since it is
-# data rather than configuration:
+# Regenerated: the SDK checkout and its patches, the egress proxy, the
+# machine's own layered packages. NOT touched, since it is data rather than
+# configuration:
 #   /var/lib/wk/git      the mirror        /var/lib/wk/ws       workspaces
 #   /var/lib/wk/base     snapshots         /var/lib/wk/cache    ccache et al
-#   /var/lib/wk/skills   mutable skills    /var/lib/wk/secrets  the build key
+#   /var/lib/wk/skills   mutable skills
+# /opt/wk-tools and /var/lib/wk/secrets are neither: they are this host's own
+# directories, mounted read-only.
 
 # Reported from ansible's own changed-count: regenerating to an identical
 # result is not a change, and saying it is destroys the signal of "no changes".
@@ -196,6 +218,12 @@ cat > "$_unit" <<'UNIT'
 Description=wk workspace egress proxy
 Documentation=file:///opt/wk-tools/container/proxy/wk-proxy.py
 
+[Unit]
+# The executable is on a mount, so systemd must wait for it: without this the
+# service starts before virtiofs is up and fails as "no such file", which reads
+# as a broken proxy rather than a race.
+RequiresMountsFor=/opt/wk-tools
+
 [Service]
 Type=notify
 NotifyAccess=all
@@ -216,19 +244,26 @@ ProtectHome=read-only
 WantedBy=default.target
 UNIT
 
-scp -q -P "$_ssh_port" -i "$_ssh_key" \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    "$_unit" "$_ssh_user@localhost:/home/core/.config/systemd/user/wk-proxy.service.new"
-rm -f "$_unit"
+# One installer for every unit this machine gets: copy beside the live one,
+# compare, and reload only when the result differs -- so a re-run of ./setup
+# reports no change and does not restart a service a build is depending on.
+_install_unit() { # <unit name> <local file>
+    local name="$1" file="$2"
+    scp -q -P "$_ssh_port" -i "$_ssh_key" \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        "$file" "$_ssh_user@localhost:/home/core/.config/systemd/user/$name.new"
+    rm -f "$file"
+    if _rsh "cmp -s ~/.config/systemd/user/$name.new ~/.config/systemd/user/$name"; then
+        _rsh "rm -f ~/.config/systemd/user/$name.new"
+        unchanged "$name"
+        return 0
+    fi
+    _rsh "mv ~/.config/systemd/user/$name.new ~/.config/systemd/user/$name &&
+          systemctl --user daemon-reload"
+    changed "installed $name in the machine"
+}
 
-if _rsh 'cmp -s ~/.config/systemd/user/wk-proxy.service.new ~/.config/systemd/user/wk-proxy.service'; then
-    _rsh 'rm -f ~/.config/systemd/user/wk-proxy.service.new'
-    unchanged "wk-proxy.service"
-else
-    _rsh 'mv ~/.config/systemd/user/wk-proxy.service.new ~/.config/systemd/user/wk-proxy.service &&
-          systemctl --user daemon-reload'
-    changed "installed wk-proxy.service in the machine"
-fi
+_install_unit wk-proxy.service "$_unit"
 
 _proxy_policy_reload || true
 if ! _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
@@ -240,17 +275,105 @@ if ! _rsh 'systemctl --user is-active --quiet wk-proxy.service'; then
     fi
 fi
 
-# --- retire the nftables policy ----------------------------------------------
-# Removed rather than left dormant: a workspace with an interface *and* a
-# proxy socket has the union of two policies, silently -- the packet filter
-# allows a connection the proxy would have refused.
-if _rsh 'sudo nft list table inet wk_egress >/dev/null 2>&1'; then
-    _rsh 'sudo nft delete table inet wk_egress 2>/dev/null || true
-          sudo rm -f /etc/nftables/wk-egress.nft
-          sudo sed -i "/wk-egress.nft/d" /etc/sysconfig/nftables.conf 2>/dev/null || true'
-    changed "removed the old nftables egress policy (the proxy is the boundary now)"
-else
-    unchanged "no nftables egress policy (the proxy is the boundary)"
+# --- the deploy keys' ssh-agent ----------------------------------------------
+# The one thing on this machine that holds a private deploy key. Its socket is
+# in %t/wk, the directory every container bind-mounts at /run/wk, so a
+# workspace can *use* a key it can never read -- an agent has no protocol for
+# handing one back. `wk push on|off` is what loads and empties it
+# (push_agent_*, lib/store.sh); this only makes sure it is there to be filled.
+#
+# -D keeps it in the foreground so systemd's pid is the agent's. It starts
+# empty and stays empty across a restart, which is the safe direction: the
+# switch has to be thrown again, and `wk push status` says so rather than
+# claiming a key that is gone.
+_unit=$(mktemp)
+cat > "$_unit" <<'UNIT'
+[Unit]
+Description=wk deploy-key ssh-agent (outside every workspace)
+Documentation=file:///opt/wk-tools/cmd/push
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh-agent -D -a %t/wk/ssh-agent.sock
+Restart=on-failure
+RestartSec=2
+# The same directory wk-proxy.service owns, and containers bind-mount it, so
+# systemd must not delete it on stop.
+RuntimeDirectory=wk
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+# ssh-agent refuses to bind a path that already exists, and one left by a
+# previous run has nothing behind it.
+ExecStartPre=/usr/bin/rm -f %t/wk/ssh-agent.sock
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target
+UNIT
+_install_unit wk-ssh-agent.service "$_unit"
+
+if ! _rsh 'systemctl --user is-active --quiet wk-ssh-agent.service'; then
+    _rsh 'systemctl --user enable --now wk-ssh-agent.service' >/dev/null 2>&1 \
+        || warn "could not start wk-ssh-agent.service -- no workspace here can push"
+    _rsh 'systemctl --user is-active --quiet wk-ssh-agent.service' \
+        && changed "started wk-ssh-agent.service in the machine"
 fi
 
-unset _ssh_port _ssh_key _ssh_user _unit _policy_hash
+# --- the GitHub API credential injector --------------------------------------
+# The other half of the same switch: it terminates TLS for api.github.com and
+# puts the real token in the Authorization header, so `git-webkit pr` works in
+# a workspace that never holds the token (container/proxy/github-inject.py).
+# Its socket is under the store and *not* in %t/wk: a workspace must reach it
+# through the egress policy, not around it.
+_unit=$(mktemp)
+cat > "$_unit" <<'UNIT'
+[Unit]
+Description=wk GitHub API credential injector
+Documentation=file:///opt/wk-tools/container/proxy/github-inject.py
+
+[Unit]
+# The executable is on a mount, so systemd must wait for it, exactly as
+# wk-proxy.service does.
+RequiresMountsFor=/opt/wk-tools
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/wk-tools/container/proxy/github-inject.py
+Environment=WK_STORE=/var/lib/wk
+Restart=on-failure
+RestartSec=2
+# It publishes its CA certificate into %t/wk, which every container mounts.
+RuntimeDirectory=wk
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/wk
+
+[Install]
+WantedBy=default.target
+UNIT
+_install_unit wk-github-inject.service "$_unit"
+
+# Restarted on a policy change for the same reason wk-proxy is: the program
+# runs straight off the mount, so an edit here is only live for a service that
+# re-execs to read it.
+_inject_hash() { cksum < "$WK_ROOT/container/proxy/github-inject.py" | awk '{print $1}'; }
+if _rsh 'systemctl --user is-active --quiet wk-github-inject.service'; then
+    if [ "$(_rsh 'cat /var/lib/wk/.inject-policy 2>/dev/null' || true)" = "$(_inject_hash)" ]; then
+        unchanged "wk-github-inject running"
+    else
+        _rsh "systemctl --user restart wk-github-inject.service && echo $(_inject_hash) > /var/lib/wk/.inject-policy"
+        changed "restarted wk-github-inject (program changed)"
+    fi
+else
+    _rsh 'systemctl --user enable --now wk-github-inject.service' >/dev/null 2>&1 \
+        || warn "could not start wk-github-inject.service -- 'git-webkit pr' in a workspace will fail"
+    if _rsh 'systemctl --user is-active --quiet wk-github-inject.service'; then
+        _rsh "echo $(_inject_hash) > /var/lib/wk/.inject-policy"
+        changed "started wk-github-inject.service in the machine"
+    fi
+fi
+
+unset _ssh_port _ssh_key _ssh_user _unit

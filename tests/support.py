@@ -32,6 +32,13 @@ NO_REGISTRY = tempfile.mkdtemp(prefix="wk-test-no-registry-")
 REAL_REGISTRY = REPO / "targets" / "hosts"
 atexit.register(shutil.rmtree, NO_REGISTRY, True)
 
+# Same reasoning, for wk_secrets_dir (lib/store.sh): on a macOS host it reads
+# WK_HOST_SECRETS rather than $WK_STORE, so without a default of its own a
+# test would read and write the real ~/.config/wk/secrets. A test that wants
+# a populated store passes its own directory.
+NO_SECRETS = tempfile.mkdtemp(prefix="wk-test-no-secrets-")
+atexit.register(shutil.rmtree, NO_SECRETS, True)
+
 
 def dispatch_vars():
     """The variables the dispatcher exports for the one command it runs, read
@@ -71,8 +78,10 @@ def _clean_env(extra=None, wk_root=False):
     per-invocation variables (DISPATCH_VARS above) and anything else that
     would make the command under test think it is already a workspace or
     already pointed at a scratch store, and with an empty machine registry
-    (NO_REGISTRY above) so nothing reaches the real fleet, plus whatever the
-    caller adds -- including a WK_TARGET_REGISTRY of its own.
+    (NO_REGISTRY above) so nothing reaches the real fleet and a scratch
+    secrets directory (NO_SECRETS above) so nothing reads or writes the real
+    ~/.config/wk/secrets, plus whatever the caller adds -- including a
+    WK_TARGET_REGISTRY or WK_HOST_SECRETS of its own.
 
     wk_root=True also sets WK_ROOT: every sourced lib in this tree that
     needs it (image/profiles.sh, boot/machines.sh, ...) gets it for free
@@ -87,6 +96,7 @@ def _clean_env(extra=None, wk_root=False):
     env.pop("XDG_STATE_HOME", None)
     env.pop("WK_STORE", None)
     env["WK_TARGET_REGISTRY"] = NO_REGISTRY
+    env["WK_HOST_SECRETS"] = NO_SECRETS
     if wk_root:
         env["WK_ROOT"] = str(REPO)
     if extra:

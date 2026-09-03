@@ -42,18 +42,18 @@ done
 
 class TestRpi4Arrangement(unittest.TestCase):
     def test_rpi4_bench_medium_is_the_usb_drive_and_the_rescue_is_the_sd(self):
-        """rpi4.conf: MACH_DEVICE is the USB drive, MACH_ROOT is on the SD
+        """rpi4.conf: NODE_DEVICE is the USB drive, NODE_ROOT is on the SD
         card. The driver is pi-tryboot (tests/test_pi_tryboot.py): the
         bootloader will not MSD-boot the drive there, so pi-mbr's arrangement
         is exercised here with the conf's media and the driver loaded directly."""
-        cp = bash(LOAD + 'machine_load rpi4; echo "$MACH_DRIVER $MACH_DEVICE $MACH_ROOT"')
+        cp = bash(LOAD + 'machine_load rpi4; echo "$NODE_DRIVER $NODE_DEVICE $NODE_ROOT"')
         self.assertEqual(cp.stdout.strip(), "pi-tryboot /dev/sda /dev/mmcblk0p2", cp.stdout + cp.stderr)
 
     def test_media_and_reprovision_name_the_media_from_the_conf(self):
         """b_media and b_reprovision name each medium from the conf, whichever way round it is declared"""
         for conf, bench, rescue in (
-            ("MACH_DEVICE=/dev/sda MACH_ROOT=/dev/mmcblk0p2", "USB stick", "SD card"),
-            ("MACH_DEVICE=/dev/mmcblk0 MACH_ROOT=/dev/sda2", "SD card", "USB stick"),
+            ("NODE_DEVICE=/dev/sda NODE_ROOT=/dev/mmcblk0p2", "USB stick", "SD card"),
+            ("NODE_DEVICE=/dev/mmcblk0 NODE_ROOT=/dev/sda2", "SD card", "USB stick"),
         ):
             with self.subTest(conf=conf):
                 cp = bash(LOAD + f'''
@@ -231,7 +231,7 @@ fleet_tailnet rpi5
         self.assertEqual(lines[1], "rpi5 not a node; rpi5-bench not a node")
 
     def test_without_tailscale_says_nothing_for_a_board_on_the_tailnet_by_role_name(self):
-        """reach_without_tailnet is silent when MACH_SSH or MACH_BENCH_SSH is a node"""
+        """reach_without_tailnet is silent when NODE_SSH or NODE_BENCH_SSH is a node"""
         for peers in ("rpi4-rescue\t100.1.1.1\tup\n", "rpi4-bench\t100.1.1.2\tup\n"):
             cp = bash(f'''
 . "{REPO}/lib/common.sh"; . "{REPO}/lib/reach.sh"
@@ -248,7 +248,7 @@ if __name__ == "__main__":
 
 class TestBootPartFollowsTheMedium(unittest.TestCase):
     """b_boot_part reads wk-image.id from the medium the board resolves
-    (pimbr_dev), not MACH_DEVICE's name: with another USB disk enumerating
+    (pimbr_dev), not NODE_DEVICE's name: with another USB disk enumerating
     first, the stick is sdb."""
 
     def test_boot_part_uses_the_resolved_disk(self):

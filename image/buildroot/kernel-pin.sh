@@ -19,7 +19,7 @@
 # images run BusyBox modprobe against modules.dep; leaving the modules as
 # .ko.xz -- or decompressing them while modules.dep still names the .xz
 # paths -- leaves every module unloadable, wifi first among them, which is
-# the whole tailnet (measured on the rpi4, 2026-08-31).
+# the whole tailnet.
 
 set -euo pipefail
 

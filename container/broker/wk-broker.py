@@ -41,14 +41,14 @@ the workspace's would be the weaker one.
 The narrowing it adds on top, which is what makes it a boundary rather than a
 relay:
 
-  1. Only a machine the fleet declares `MACH_ROLE=bench-device` may be named.
+  1. Only a machine the fleet declares `NODE_ROLE=bench-device` may be named.
      `wk boot rpi5` is a perfectly reasonable thing for a person at a keyboard
      to type -- the rpi5 is a workstation that can also be booted into a bench
      system. Through this socket it is refused, because a workspace being able
      to reboot a workstation is the escape this whole arrangement exists to
      prevent.
 
-  2. Only a machine this host can actually drive (MACH_OS), only a system that
+  2. Only a machine this host can actually drive (NODE_OS), only a system that
      `wk boot` finds verified present on the device's own boot partition (it
      reads the id `b_device_image` puts there, not a catalogue), only a plan
      in ALLOWED_PLANS below, and only a name that is a name (no path
@@ -327,7 +327,7 @@ def want_bench_device(args):
             sorted(k for k, v in machines.items() if v["role"] == "bench-device")
         ) or "(none)"
         raise Refused(
-            f"'{name}' is declared MACH_ROLE={m['role']}, not bench-device. This broker "
+            f"'{name}' is declared NODE_ROLE={m['role']}, not bench-device. This broker "
             f"acts on bench devices only: a workspace that can reboot a workstation is "
             f"the sandbox escape it exists to prevent.",
             f"bench devices here: {benches}. To act on '{name}', run 'wk boot {name}' "
@@ -335,7 +335,7 @@ def want_bench_device(args):
         )
     if m["os"] not in ("any", host_os()):
         raise Refused(
-            f"'{name}' is driven from a {m['os']} host only (MACH_OS in "
+            f"'{name}' is driven from a {m['os']} host only (NODE_OS in "
             f"boot/machines/{name}.conf), and this broker runs on {host_os()}",
             f"run the request against the broker on the {m['os']} workstation",
         )
@@ -654,7 +654,7 @@ class Broker:
             for n, r in zip(names, where)
         }
         refused = {
-            k: f"MACH_ROLE={v['role']}"
+            k: f"NODE_ROLE={v['role']}"
             for k, v in sorted(machines.items())
             if v["role"] != "bench-device"
         }

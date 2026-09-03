@@ -240,8 +240,8 @@ class TestPiHelper(WkTest):
             # root-owned paths over a channel that is root only there. An
             # unset role means workstation (boot/machines.sh), and the verb
             # refuses that by naming the step at the machine's own keyboard.
-            "HOST=rpi3-rescue; MACH_NAME=rpi3; MACH_DEVICE=/dev/mmcblk0; PI_FLEET=1\n"
-            "MACH_ROLE=bench-device\n"
+            "HOST=rpi3-rescue; NODE_NAME=rpi3; NODE_DEVICE=/dev/mmcblk0; PI_FLEET=1\n"
+            "NODE_ROLE=bench-device\n"
             "die() { printf 'error: %s\\n' \"$*\" >&2; exit 1; }\n"
             "info() { printf '%s\\n' \"$*\"; }\n"
             "log()  { printf '%s\\n' \"$*\"; }\n"
@@ -259,7 +259,8 @@ class TestPiHelper(WkTest):
             "    bash -c \"$c\"\n"
             "}\n"
             + extra + "\n")
-        return bash(prelude + lift("cmd_helper") + "\ncmd_helper\n"), there
+        return bash(prelude + lift("refuse_workstation") + lift("cmd_helper")
+                    + "\ncmd_helper\n"), there
 
     def test_both_files_land_and_match_this_checkout(self):
         cp, there = self._run()
@@ -283,7 +284,7 @@ class TestPiHelper(WkTest):
         writing /usr/local/libexec there needs a root it is not driven as, and
         wk takes no passwordless sudo on one. So the verb refuses and names
         the one command that can be answered at that machine."""
-        cp, _ = self._run(extra="MACH_ROLE=workstation")
+        cp, _ = self._run(extra="NODE_ROLE=workstation")
         self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("is a workstation", cp.stderr)
         self.assertIn("./setup --stage quiesce", cp.stderr,
@@ -300,3 +301,78 @@ class TestPiHelper(WkTest):
         cp = bash(f'"{REPO}/wk" pi')
         self.assertIn("helper", cp.stdout)
         self.assertIn("card helper on the board", cp.stdout)
+
+
+class TestPiSetupWorkstationRefusal(WkTest):
+    """`wk pi setup` refuses a known workstation before touching a board, the
+    same gate `wk pi helper` has (TestPiHelper above): boot/machines/rpi5.conf
+    pins NODE_ROLE=workstation, and machine_by_ssh needs no network to see
+    it, so this runs the real dispatcher against the real conf."""
+
+    def test_a_workstation_conf_is_refused_and_names_the_remedy(self):
+        cp = self.run_wk("pi", "setup", "rpi5", timeout=15)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("is a workstation", cp.stdout)
+        self.assertIn("./setup --stage quiesce", cp.stdout,
+                      "the refusal does not name its remedy")
+
+    def test_a_non_fleet_host_is_not_refused_this_way(self):
+        """An ad-hoc board that has never joined the fleet has no role yet --
+        that is exactly the case this verb exists for, so it must not be
+        mistaken for a workstation. It gets past the refusal and fails later,
+        trying to reach a host that does not exist."""
+        cp = self.run_wk("pi", "setup", "not-a-real-host", timeout=15)
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertNotIn("is a workstation", cp.stdout)
+
+
+class TestPiSetupTailscaled(WkTest):
+    """pi_setup_start_tailscaled writes the board's launcher script and waits,
+    bounded, for tailscaled to create its socket. rpi5 hit exactly the bug
+    this closes: the launcher's redirect target (`/var/log/tailscaled.log`)
+    does not exist on that board, so a silently-backgrounded launch left
+    `tailscale up` failing against a socket that was never coming
+    (docs/defects). Run with `rsh` replaced by a local shell -- no board --
+    and $DEST a temp directory standing in for the board's writable prefix."""
+
+    def _run(self, tailscaled_body, wait_seconds=0):
+        dest = self.tmp / "board"
+        (dest / "tailscale-state").mkdir(parents=True)
+        stub = dest / "tailscaled"
+        stub.write_text(tailscaled_body)
+        stub.chmod(0o755)
+
+        script = f'''
+set -euo pipefail
+HOST=fakepi
+TAILSCALED_WAIT_SECONDS={wait_seconds}
+die() {{ printf 'error: %s\\n' "$*" >&2; exit 1; }}
+rsh() {{ bash -c "$*"; }}
+{lift("pi_setup_start_tailscaled")}
+pi_setup_start_tailscaled "{dest}" "--fake-flags"
+'''
+        return bash(script, timeout=15), dest
+
+    def test_a_launch_that_never_creates_the_socket_dies_with_the_log_tail(self):
+        cp, dest = self._run(
+            "#!/bin/sh\necho fake tailscaled: refusing on purpose >&2\nexit 1\n"
+        )
+        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("did not create", cp.stderr)
+        self.assertIn(str(dest / "tailscale-state" / "tailscaled.sock"), cp.stderr)
+        self.assertIn("fake tailscaled: refusing on purpose", cp.stderr,
+                      "the failed launch's own log is not in the die message")
+        self.assertTrue((dest / "tailscale-state" / "tailscaled.log").exists(),
+                        "the launcher's log is not written under $DEST")
+
+    def test_the_launcher_script_writes_its_log_under_dest_not_var_log(self):
+        launch_sh = (
+            "#!/bin/sh\n"
+            'python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX); '
+            's.bind(sys.argv[1])" "$(dirname "$0")/tailscale-state/tailscaled.sock"\n'
+        )
+        cp, dest = self._run(launch_sh, wait_seconds=5)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        launcher = (dest / "tailscale-up.sh").read_text()
+        self.assertIn("$DEST/tailscale-state/tailscaled.log", launcher)
+        self.assertNotIn("/var/log", launcher)

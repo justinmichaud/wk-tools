@@ -59,10 +59,11 @@ WK_ROOT="${WK_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 # new_fetch_from <probe> -- where a fresh workspace's checkout can be brought
 # up to date from, given what the probe below answered from inside it. The
-# question is asked of the workspace rather than decided from its target: the
-# mirror is bind-mounted into a container and into nothing else, and a guest
-# that has not been started yet answers nothing at all.
-#   mirror       the machine's mirror is mounted in there -- a local fetch
+# question is asked of the workspace rather than decided from its target: a
+# target naming a mirror (t_mirror_dir) is not the same as one being there --
+# a guest cloned from a base built before its mirror existed has none, and a
+# guest that has not been started yet answers nothing at all.
+#   mirror       the mirror is in there -- a local fetch
 #   network      no mirror in reach; `wk sync` would go to GitHub, which
 #                creation does not wait on
 #   unreachable  nothing answered, so there is nothing to fetch in yet
@@ -120,10 +121,13 @@ EOF
 # is only asked for when the probe says the mirror is in there, so creation
 # never waits on GitHub.
 new_freshen() { # <name>
-    local name="$1" probe out b u moved head detached
+    local name="$1" probe out b u moved head detached mirror
+    mirror=$(t_mirror_dir "$name")
     # A subshell: t_exec dies when there is nothing to run in (a guest that
     # is not started), and `die` from a function would end this driver.
-    probe=$( ( t_exec "$name" sh -c '[ -d /mirror/WebKit.git ] && echo yes || echo no' ) \
+    probe=$( ( t_exec "$name" sh -c \
+                   "[ -n $(sh_quote "$mirror") ] && [ -d $(sh_quote "$mirror") ] \
+                    && echo yes || echo no" ) \
                  2>/dev/null | tr -d '\r' | tail -1 )
     case "$(new_fetch_from "$probe")" in
     mirror)

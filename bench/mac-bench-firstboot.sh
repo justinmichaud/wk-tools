@@ -21,7 +21,7 @@
 # instead, written by `wk bench mac-volume --build-pkg`. The env vars exist
 # so this script is runnable by hand, off the daemon, for debugging.
 
-set -uo pipefail
+set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 PAYLOAD=/usr/local/share/wk-bench
@@ -43,7 +43,7 @@ say() { echo "[wk-bench] $*"; }
 # the branch that *creates* the account: a re-run over an existing account
 # sets PW="" and skips autologin.
 if [ -r "$PAYLOAD/password" ]; then
-    PW=$(cat "$PAYLOAD/password")
+    PW=$(cat "$PAYLOAD/password") || PW=""
 else
     PW="${WK_BENCH_PASSWORD:-benchbench}"
     say "no password in the payload; using the constant default"
@@ -108,7 +108,7 @@ if [ -n "$PW" ]; then
         say "  from this install is suspect until this line reads 'verified'."
     fi
 
-    home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')  # reset to match: macOS recreates an empty one at next login
+    home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}') || home=""  # reset to match: macOS recreates an empty one at next login
     if [ -n "$home" ] && [ -d "$home/Library/Keychains" ]; then
         rm -rf "$home/Library/Keychains" \
             && say "reset $BENCH_USER's login keychain (it drifts from the account password" \
@@ -162,11 +162,12 @@ else
 fi
 
 if [ -f "$PAYLOAD/authorized_keys" ]; then
-    home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+    home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}') || home=""
     if [ -n "$home" ] && [ -d "$home" ]; then
-        install -d -m 0700 -o "$BENCH_USER" "$home/.ssh"
-        install -m 0600 -o "$BENCH_USER" "$PAYLOAD/authorized_keys" "$home/.ssh/authorized_keys"
-        say "authorized_keys installed for $BENCH_USER"
+        install -d -m 0700 -o "$BENCH_USER" "$home/.ssh" \
+            && install -m 0600 -o "$BENCH_USER" "$PAYLOAD/authorized_keys" "$home/.ssh/authorized_keys" \
+            && say "authorized_keys installed for $BENCH_USER" \
+            || say "WARNING: could not install authorized_keys for $BENCH_USER"
     else
         say "WARNING: no home directory for $BENCH_USER yet; authorized_keys not installed"
     fi
@@ -180,7 +181,7 @@ fi
 # Store build, which is sandboxed and needs a session. Failure is reported,
 # not fatal.
 TS_CLI=/Applications/Tailscale.app/Contents/MacOS/Tailscale
-TS_PKG=$(ls "$PAYLOAD"/Tailscale-*macos.pkg 2>/dev/null | head -1)
+TS_PKG=$(ls "$PAYLOAD"/Tailscale-*macos.pkg 2>/dev/null | head -1) || TS_PKG=""
 
 if [ -r "$PAYLOAD/tailscale-authkey" ] && [ -n "$TS_PKG" ]; then
     say "installing Tailscale (standalone/macsys) from $(basename "$TS_PKG")"
@@ -197,7 +198,7 @@ if [ -r "$PAYLOAD/tailscale-authkey" ] && [ -n "$TS_PKG" ]; then
             "$TS_CLI" up --auth-key "file:$PAYLOAD/tailscale-authkey" \
                 --advertise-tags=tag:wk \
                 --hostname tolken-bench --accept-dns=false >/dev/null 2>&1 || true
-            ts_ip=$("$TS_CLI" ip -4 2>/dev/null | head -1)  # the property, not the exit status
+            ts_ip=$("$TS_CLI" ip -4 2>/dev/null | head -1) || ts_ip=""  # the property, not the exit status
             if [ -n "$ts_ip" ]; then
                 say "tailscale: up as tolken-bench at $ts_ip"
                 say "  this install is now reachable by name across a reboot, which is"
@@ -233,7 +234,7 @@ if [ -r "$PAYLOAD/wifi.conf" ]; then
     . "$PAYLOAD/wifi.conf"
     if [ -n "${WIFI_SSID:-}" ]; then
         dev=$(networksetup -listallhardwareports 2>/dev/null \
-                | awk '/Hardware Port: Wi-Fi/{getline; print $2; exit}')
+                | awk '/Hardware Port: Wi-Fi/{getline; print $2; exit}') || dev=""
         dev="${dev:-en0}"
         networksetup -setairportpower "$dev" on >/dev/null 2>&1 || true
         networksetup -setairportnetwork "$dev" "$WIFI_SSID" "${WIFI_PSK:-}" >/dev/null 2>&1 || true
@@ -304,10 +305,10 @@ fi
 # the thing that needs provisioning first. wk-tools only -- a WebKit
 # checkout here would make this a second workstation.
 if [ -d "$PAYLOAD/wk-tools" ]; then
-    home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+    home=$(dscl . -read "/Users/$BENCH_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}') || home=""
     if [ -n "$home" ] && [ -d "$home" ]; then
-        install -d -o "$BENCH_USER" "$home/Development"
-        /usr/bin/rsync -a --delete "$PAYLOAD/wk-tools/" "$home/Development/wk-tools/" \
+        install -d -o "$BENCH_USER" "$home/Development" \
+            && /usr/bin/rsync -a --delete "$PAYLOAD/wk-tools/" "$home/Development/wk-tools/" \
             && chown -R "$BENCH_USER" "$home/Development/wk-tools" \
             && say "wk-tools placed at $home/Development/wk-tools" \
             || say "WARNING: could not place wk-tools"
@@ -328,7 +329,7 @@ fi
 # would kill this script before the `rm -f` below executes, leaving the
 # files in place and every reboot silently re-running provisioning.
 say "removing the first-boot daemon"
-rm -f "$DAEMON" "$SELF"
+rm -f "$DAEMON" "$SELF" || true
 if [ -f "$DAEMON" ]; then
     say "WARNING: $DAEMON is still there -- provisioning will run again next boot"
 else

@@ -25,7 +25,7 @@ def _is_macos():
 @unittest.skipUnless(_is_macos(), "wk bench mac and a plain sysimage write are macOS-only paths")
 class TestBenchMacDryRunOnAFreshLane(WkTest):
     """benchvm (boot/machines/benchvm.conf, driver mac-guest) has no
-    MACH_SSH of its own -- its bench mode is reached through a host, so
+    NODE_SSH of its own -- its bench mode is reached through a host, so
     --host stands in for one here. `ssh` is stubbed to refuse everything
     (an always-unreachable host), which fails preflight; --dry-run must
     show the plan anyway rather than dying, and must not touch the lane's

@@ -90,21 +90,21 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
         return os.environ.get("PATH", "/usr/bin:/bin")
 
 
-_FAKE_MACH_CONF = '''MACH_SSH={ssh}
-MACH_DRIVER=rpi5-usb
-MACH_DEVICE=/dev/sda
-MACH_ROOT=/dev/nvme0n1p2
-MACH_PROFILE=webkit-2.52-yocto-rpi5-64
-MACH_MAC={mac}
-MACH_BRIDGE=""
-MACH_ROLE=workstation
-MACH_OS=any
-MACH_LOCAL=""
-MACH_VOLUME=""
-MACH_DTB=bcm2712-rpi-5-b.dtb
-MACH_BENCH_SSH=""
-MACH_NET=wifi
-MACH_NOTE="{note}"
+_FAKE_NODE_CONF = '''NODE_SSH={ssh}
+NODE_DRIVER=rpi5-usb
+NODE_DEVICE=/dev/sda
+NODE_ROOT=/dev/nvme0n1p2
+NODE_PROFILE=webkit-2.52-yocto-rpi5-64
+NODE_MAC={mac}
+NODE_BRIDGE=""
+NODE_ROLE=workstation
+NODE_OS=any
+NODE_LOCAL=""
+NODE_VOLUME=""
+NODE_DTB=bcm2712-rpi-5-b.dtb
+NODE_BENCH_SSH=""
+NODE_NET=wifi
+NODE_NOTE="{note}"
 '''
 
 
@@ -125,7 +125,7 @@ class TestFleetWalkBareFormMultiMachine(WkTest):
             names = [f"f{i}{suffix}" for i in range(2)]
             for i, n in enumerate(names):
                 (machdir / f"{n}.conf").write_text(
-                    _FAKE_MACH_CONF.format(ssh=n, mac=f"02:00:00:00:00:0{i}", note=f"fake bench board {n}")
+                    _FAKE_NODE_CONF.format(ssh=n, mac=f"02:00:00:00:00:0{i}", note=f"fake bench board {n}")
                 )
             env = {
                 "WK_MACHINES_DIR": str(machdir),

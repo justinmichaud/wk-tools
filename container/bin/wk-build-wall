@@ -39,16 +39,18 @@
 # along PATH. Nothing here is a defence against a caller who scrubs its own
 # environment; it is the wall the ordinary path meets.
 
-set -u
+set -euo pipefail
 
 # The wrapped names, in one place. The symlinks beside this file are the same
 # set, and tests/test_build_wall.py reads this line to check that they are.
 WALL_NAMES="ninja cmake make xcodebuild build-webkit build-jsc run-javascriptcore-tests run-webkit-tests run-benchmark"
 
 self=${0##*/}
-WALL=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)/wk-build-wall
+WALL=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)/wk-build-wall || :
 # A failed `cd` leaves WALL as `/wk-build-wall`, which matches nothing and
-# turns the skip below into a self-exec loop. Refuse instead.
+# turns the skip below into a self-exec loop. Refuse instead. (Under `set -e`
+# a bare failed substitution here would abort before that refusal ran; `|| :`
+# lets the fallback value form so the check below is what reports it.)
 [ -x "$WALL" ] || {
     printf '%s: cannot locate the wall beside %s -- refusing rather than guessing\n' \
         "$self" "$0" >&2

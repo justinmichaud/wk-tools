@@ -419,16 +419,16 @@ for f in "{REPO}"/boot/machines/*.conf; do
     [ -f "$f" ] || {{ echo "no machine confs at all"; exit 1; }}
     n=$(basename "$f" .conf)
     ( machine_load "$n" || exit 1
-      [ -n "$MACH_DRIVER" ] || {{ echo "  $n: no MACH_DRIVER"; exit 1; }}
-      [ -f "{REPO}/boot/$MACH_DRIVER.sh" ] || {{ echo "  $n: driver missing"; exit 1; }}
-      case "$MACH_ROLE" in workstation|bench-device) ;; *) echo "  $n: bad role"; exit 1 ;; esac
-      case "$MACH_OS" in any|macos|linux) ;; *) echo "  $n: bad os"; exit 1 ;; esac
-      [ -n "$MACH_PROFILE" ] || {{ echo "  $n: no MACH_PROFILE"; exit 1; }}
-      if [ "$MACH_OS" != macos ]; then
-          ( image_profile_load "$MACH_PROFILE" ) >/dev/null 2>&1 \\
-              || {{ echo "  $n: MACH_PROFILE '$MACH_PROFILE' does not resolve"; exit 1; }}
+      [ -n "$NODE_DRIVER" ] || {{ echo "  $n: no NODE_DRIVER"; exit 1; }}
+      [ -f "{REPO}/boot/$NODE_DRIVER.sh" ] || {{ echo "  $n: driver missing"; exit 1; }}
+      case "$NODE_ROLE" in workstation|bench-device) ;; *) echo "  $n: bad role"; exit 1 ;; esac
+      case "$NODE_OS" in any|macos|linux) ;; *) echo "  $n: bad os"; exit 1 ;; esac
+      [ -n "$NODE_PROFILE" ] || {{ echo "  $n: no NODE_PROFILE"; exit 1; }}
+      if [ "$NODE_OS" != macos ]; then
+          ( image_profile_load "$NODE_PROFILE" ) >/dev/null 2>&1 \\
+              || {{ echo "  $n: NODE_PROFILE '$NODE_PROFILE' does not resolve"; exit 1; }}
       fi
-      [ -n "$MACH_NOTE" ] || {{ echo "  $n: no MACH_NOTE"; exit 1; }}
+      [ -n "$NODE_NOTE" ] || {{ echo "  $n: no NODE_NOTE"; exit 1; }}
     ) || bad="$bad $n"
 done
 [ -z "$bad" ] || {{ echo "machine confs that do not stand alone:$bad"; exit 1; }}
@@ -450,7 +450,7 @@ dir_names=$(ls "{REPO}"/boot/machines/*.conf 2>/dev/null | xargs -n1 basename 2>
                 continue
             found_any = True
             cp = bash(
-                f'MACH_DEVICE=/dev/sda MACH_NAME=selftest; . "{d}"; b_self_disarm_sh'
+                f'NODE_DEVICE=/dev/sda NODE_NAME=selftest; . "{d}"; b_self_disarm_sh'
             )
             out = cp.stdout
             if "'" in out or "%" in out:
@@ -474,7 +474,7 @@ dir_names=$(ls "{REPO}"/boot/machines/*.conf 2>/dev/null | xargs -n1 basename 2>
             f.seek(450)
             f.write(bytes([0x0C]))
 
-        cp = bash(f'MACH_DEVICE=/dev/null; . "{REPO}/boot/pi-mbr.sh"; echo "$PIMBR_TYPE_OFFSET"')
+        cp = bash(f'NODE_DEVICE=/dev/null; . "{REPO}/boot/pi-mbr.sh"; echo "$PIMBR_TYPE_OFFSET"')
         offset = cp.stdout.strip()
         self.assertEqual(offset, "450", f"offset is {offset}, not 450")
 

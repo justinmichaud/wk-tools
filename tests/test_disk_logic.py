@@ -13,7 +13,7 @@ from tests.support import REPO, WkTest, bash
 
 
 class TestImageWantsWifi(WkTest):
-    """`_image_wants_wifi` asks the machine registry (MACH_NET=wifi|ethernet,
+    """`_image_wants_wifi` asks the machine registry (NODE_NET=wifi|ethernet,
     boot/machines/<name>.conf) rather than guessing from the name -- stub
     `machine_load` itself, the seam the function already calls through, the
     same technique test_state.py's TestWsStateWords uses for `t_info`."""
@@ -25,8 +25,8 @@ class TestImageWantsWifi(WkTest):
 . "{REPO}/boot/disk.sh"
 machine_load() {{
     case "$1" in
-        wifimach) MACH_NET=wifi; return 0 ;;
-        ethmach)  MACH_NET=ethernet; return 0 ;;
+        wifimach) NODE_NET=wifi; return 0 ;;
+        ethmach)  NODE_NET=ethernet; return 0 ;;
         *) return 1 ;;
     esac
 }}
@@ -63,7 +63,7 @@ class TestDiskRefuseUnlessSafe(WkTest):
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
 . "{REPO}/boot/disk.sh"
-MACH_LOCAL=1 MACH_NAME=testmach MACH_SSH=testmach
+NODE_LOCAL=1 NODE_NAME=testmach NODE_SSH=testmach
 card_priv() {{
     [ "$1" = status ] && return 0
     printf '%s\\n' {check_output!r}
@@ -105,7 +105,7 @@ class TestDiskListNamesTheBootedDisk(WkTest):
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
 . "{REPO}/boot/disk.sh"
-MACH_NAME=testmach
+NODE_NAME=testmach
 m_ssh() {{
     case "$*" in
         *"lsblk -dpno"*) printf '%s\\n' {self._CANDIDATE!r} ;;

@@ -7,7 +7,7 @@
 # The work happens on the machine, over ssh, through one privileged helper
 # (`admin/wk-card-priv`, invoked as `sudo -n`) -- the only way in, since a
 # BatchMode ssh has no terminal for sudo to prompt on. Requires
-# machine_load() to have run, so MACH_SSH/MACH_ROOT/MACH_DEVICE are set.
+# machine_load() to have run, so NODE_SSH/NODE_ROOT/NODE_DEVICE are set.
 
 # --- the privileged half ------------------------------------------------------
 # One spelling for every privileged step: `sudo -n`, a fixed path, a fixed
@@ -47,11 +47,11 @@ disk_would() { # <what this step would do>
 # inside "rpi5 will not write /dev/mmcblk0" and names no remedy.
 card_priv_require() {
     card_priv status >/dev/null 2>&1 && return 0
-    die "$MACH_NAME cannot write a disk: its card helper is missing, or its
+    die "$NODE_NAME cannot write a disk: its card helper is missing, or its
     sudoers rule is not in force. Everything privileged here goes through it and
     there is deliberately no second way in.
     What fails:  sudo -n $CARD_PRIV status
-    The remedy, from a terminal on $MACH_NAME:  ./setup --stage quiesce"
+    The remedy, from a terminal on $NODE_NAME:  ./setup --stage quiesce"
 }
 
 # The partition device for a disk, which is not a suffix you can assume:
@@ -177,7 +177,7 @@ disk_tran_of_name() {
 }
 
 # The machine's own medium, resolved from the machine rather than trusted
-# from its conf: `MACH_DEVICE` is a kernel name, and on a board that doubles
+# from its conf: `NODE_DEVICE` is a kernel name, and on a board that doubles
 # as the fleet's card reader another board's stick can take that name --
 # the arming path would then write a partition type byte straight to it.
 # Exclusion, not recognition: start with disks of the expected transport,
@@ -186,7 +186,7 @@ disk_tran_of_name() {
 # rather than picks.
 disk_resolve_own() {
     local want same n dev owner left=""
-    want=$(disk_tran_of_name "${MACH_DEVICE:-}")
+    want=$(disk_tran_of_name "${NODE_DEVICE:-}")
     [ -n "$want" ] || return 1
 
     same=$(disk_candidates | awk -v t="$want" '$3 == t { print $1 }')
@@ -198,10 +198,10 @@ disk_resolve_own() {
         disk_image_machine "$dev" || true
         owner="$DISK_WHOSE_MACHINE"
         # Another machine's system: definitely not this machine's medium.
-        [ -n "$owner" ] && [ "$owner" != "$MACH_NAME" ] && continue
+        [ -n "$owner" ] && [ "$owner" != "$NODE_NAME" ] && continue
         # This machine's own system named outright ends it -- no need to keep
         # looking, and it is the strongest evidence available.
-        [ "$owner" = "$MACH_NAME" ] && { printf '%s' "$dev"; return 0; }
+        [ "$owner" = "$NODE_NAME" ] && { printf '%s' "$dev"; return 0; }
         left="$left $dev"
     done
 
@@ -216,12 +216,12 @@ disk_own_or_declared() {
     local got
     got=$(disk_resolve_own 2>/dev/null) || got=""
     if [ -z "$got" ]; then
-        debug "could not resolve $MACH_NAME's own medium from the machine; using ${MACH_DEVICE:-none} as declared"
-        printf '%s' "${MACH_DEVICE:-}"
+        debug "could not resolve $NODE_NAME's own medium from the machine; using ${NODE_DEVICE:-none} as declared"
+        printf '%s' "${NODE_DEVICE:-}"
         return 0
     fi
-    if [ "$got" != "${MACH_DEVICE:-}" ]; then
-        warn "$MACH_NAME's conf says $MACH_DEVICE, but its own medium is $got right now.
+    if [ "$got" != "${NODE_DEVICE:-}" ]; then
+        warn "$NODE_NAME's conf says $NODE_DEVICE, but its own medium is $got right now.
   Kernel names move; this is using $got, which is what the machine says."
     fi
     printf '%s' "$got"
@@ -270,15 +270,15 @@ disk_list() {
         owner="$DISK_WHOSE_MACHINE"
         booted="$DISK_WHOSE_BOOTED"
 
-        if [ "$name" = "${MACH_DEVICE:-}" ]; then
+        if [ "$name" = "${NODE_DEVICE:-}" ]; then
             printf '    %s   <- %s is configured to boot from this one (wk boot %s)\n' \
-                "$line" "$MACH_NAME" "$MACH_NAME"
+                "$line" "$NODE_NAME" "$NODE_NAME"
         else
             printf '    %s\n' "$line"
         fi
         if [ -n "$owner" ]; then
             printf '        %s  --  holds %s\n' "$desc" \
-                "$([ "$owner" = "$MACH_NAME" ] && printf "this machine's own system" \
+                "$([ "$owner" = "$NODE_NAME" ] && printf "this machine's own system" \
                                                || printf "a system for %s" "$owner")"
         elif [ -n "$booted" ]; then
             # The helper's `whose` refuses to mount this one -- it is the
@@ -294,23 +294,23 @@ disk_list() {
     done <<EOF
 $(disk_candidates)
 EOF
-    [ "$n" -gt 0 ] || printf '    (none -- no removable disk is attached to %s)\n' "$MACH_NAME"
+    [ "$n" -gt 0 ] || printf '    (none -- no removable disk is attached to %s)\n' "$NODE_NAME"
 
     disk_can_identify || {
-        warn "cannot tell which system is on any of these: $MACH_NAME's card helper is
+        warn "cannot tell which system is on any of these: $NODE_NAME's card helper is
   older than this checkout and has no 'whose' verb. The disks are listed by what
   their filesystems are labelled, which is not the same question.
-  Remedy, from a terminal on $MACH_NAME:  ./setup --stage quiesce"
+  Remedy, from a terminal on $NODE_NAME:  ./setup --stage quiesce"
     }
 
     # The machine wins when the record and it disagree (CLAUDE.md). `sd*`
     # names are enumeration order, and this board doubles as the fleet's
     # card reader, so other boards' media sit beside its own.
     local mine
-    mine=$(disk_for_machine "$MACH_NAME" 2>/dev/null) || mine=""
-    if [ -n "${MACH_DEVICE:-}" ] && [ -n "$mine" ] && [ "$mine" != "$MACH_DEVICE" ]; then
-        warn "$MACH_NAME's conf says it boots $MACH_DEVICE, but the disk holding
-  $MACH_NAME's own system is $mine. Kernel names are assigned in enumeration
+    mine=$(disk_for_machine "$NODE_NAME" 2>/dev/null) || mine=""
+    if [ -n "${NODE_DEVICE:-}" ] && [ -n "$mine" ] && [ "$mine" != "$NODE_DEVICE" ]; then
+        warn "$NODE_NAME's conf says it boots $NODE_DEVICE, but the disk holding
+  $NODE_NAME's own system is $mine. Kernel names are assigned in enumeration
   order and these have moved. Trust the marker, not the name."
     fi
 }
@@ -330,18 +330,18 @@ disk_refuse_unless_safe() {
     # rescue it may be running from. Asked before anything else.
     if disk_is_second "$dev"; then
         card_priv status 2>/dev/null | grep -q 'second=yes' \
-            || die "$MACH_NAME's card helper predates second systems (@second), so it
+            || die "$NODE_NAME's card helper predates second systems (@second), so it
     would write the whole disk. Update it first: on a workstation,
     ./setup --stage quiesce from a terminal there; on a rescue, rebuild the
     rescue image and write it again."
         case "$dev" in (*@third)
             card_priv status 2>/dev/null | grep -q 'third=yes' \
-                || die "$MACH_NAME's card helper predates third systems (@third).
+                || die "$NODE_NAME's card helper predates third systems (@third).
     Update it first: on a workstation, ./setup --stage quiesce from a terminal
     there; on a rescue, rebuild the rescue image and write it again." ;;
         esac
     fi
-    out=$(card_priv check "$dev" 2>&1) || die "$MACH_NAME will not write $dev:
+    out=$(card_priv check "$dev" 2>&1) || die "$NODE_NAME will not write $dev:
 $(printf '%s\n' "$out" | sed 's/^/    /')
     Disks there:
 $(disk_list)"
@@ -359,11 +359,11 @@ disk_size() { # <device>
 # reason to send someone back to a hand-typed umount.
 disk_unmount() {
     local dev="$1"
-    disk_would "unmount whatever is mounted from $dev on $MACH_NAME" && return 0
+    disk_would "unmount whatever is mounted from $dev on $NODE_NAME" && return 0
     # Through the helper, like every other privileged step: it still refuses
     # a disk this machine is running from.
     card_priv unmount "$dev" >/dev/null \
-        || die "could not unmount what is on $dev on $MACH_NAME.
+        || die "could not unmount what is on $dev on $NODE_NAME.
     Something is using it:
 $(m_ssh "lsblk -lno NAME,MOUNTPOINT $(sh_quote "$dev")" 2>/dev/null | awk 'NF > 1 { print "    /dev/" $1 " at " $2 }')"
 }
@@ -384,7 +384,7 @@ disk_is_second() { case "$1" in *@second|*@third) return 0 ;; *) return 1 ;; esa
 # writer's stdin.
 disk_write_stream() { # <device> <decompressor>  -- source bytes on stdin; the far side's report on stdout
     local dev="$1" filter="$2"
-    info "writing to $dev on $MACH_NAME (streamed; decompressed there with $filter)"
+    info "writing to $dev on $NODE_NAME (streamed; decompressed there with $filter)"
     m_ssh "exec 3>&1; $filter | python3 -c $(sh_quote "$(disk_stream_meter_py)") | sudo -n $CARD_PRIV write $(sh_quote "$dev")"
 }
 
@@ -398,10 +398,10 @@ disk_filter_require() { # <decompressor>
     local tool="${1%% *}"
     [ "$1" = cat ] && return 0
     m_ssh "command -v $(sh_quote "$tool") >/dev/null" < /dev/null && return 0
-    die "$MACH_NAME has no $tool, and the image being sent to it is compressed
+    die "$NODE_NAME has no $tool, and the image being sent to it is compressed
     with it -- the card machine is what decompresses the stream, so this end
     never has to have the tool for a format it is only passing through.
-    Remedy: install $tool on $MACH_NAME (apt spells xz 'xz-utils')."
+    Remedy: install $tool on $NODE_NAME (apt spells xz 'xz-utils')."
 }
 
 # The meter, as it runs on the card machine: stdin to stdout unchanged, with
@@ -439,10 +439,10 @@ PY
 #   disk_write_source <device> <reader command> <decompressor> <meta file>
 disk_write_source() {
     local dev="$1" reader="$2" filter="$3" meta="$4" report
-    disk_would "stream the image onto $dev on $MACH_NAME, and read it back to verify" && return 0
+    disk_would "stream the image onto $dev on $NODE_NAME, and read it back to verify" && return 0
     disk_filter_require "$filter"
     report=$(eval "$reader" | disk_write_stream "$dev" "$filter" | tr -d '\r') \
-        || die "could not write the image onto $dev on $MACH_NAME.
+        || die "could not write the image onto $dev on $NODE_NAME.
     It was read through:  $reader
     $dev is $(disk_size "${dev%@*}"); an image larger than that runs out of space
     part-written, and the read that fed it can fail on its own account."
@@ -478,7 +478,7 @@ disk_verify_stream() { # <device> <meta file>
     fi
     read -r bytes want < "$meta"
     got=$(card_priv verify "$dev" "$bytes" | tr -d '\r' | tail -1)
-    [ -n "$got" ] || die "could not read $dev back on $MACH_NAME"
+    [ -n "$got" ] || die "could not read $dev back on $NODE_NAME"
     [ "$want" = "$got" ] \
         || die "$dev does not match the image that was streamed to it
     image: $want
@@ -584,11 +584,11 @@ disk_install_helper() { # <device>
     [ "$rc" -eq 0 ] && { log "  $(printf '%s' "$out" | sed -n 's/^wk-card-priv: helper: //p')"; return 0; }
     case "$out" in
         *'usage: wk-card-priv'*)
-            die "$MACH_NAME's card helper is older than this checkout: it has no
+            die "$NODE_NAME's card helper is older than this checkout: it has no
     'helper' verb, so the system being written would carry whatever its image
     was built with, and a fix made here would never reach the board.
     The image is written; the helper is not.
-    Remedy, from a terminal on $MACH_NAME (its sudo asks for a password, which
+    Remedy, from a terminal on $NODE_NAME (its sudo asks for a password, which
     is why this end cannot do it): update its wk-tools checkout, then
         ./setup --stage quiesce" ;;
     esac
@@ -606,7 +606,7 @@ disk_install_autoboot() { # <device>
     [ "$rc" -eq 0 ] && { debug "$out"; return 0; }
     case "$out" in
         *'usage: wk-card-priv'*)
-            die "$MACH_NAME's card helper is older than this checkout: it has no 'autoboot'
+            die "$NODE_NAME's card helper is older than this checkout: it has no 'autoboot'
     verb, so this medium would hold two systems with no way for the firmware to
     choose the second. Update its checkout, then:  ./setup --stage quiesce" ;;
     esac
@@ -642,7 +642,7 @@ $(printf '%s\n' "$out" | sed 's/^/    /')
   not hand it back, and on a medium-armed machine the medium stays armed until
   something disarms it." ;;
         *'no systemd on this disk; nothing installed'*)
-            die "$MACH_NAME's card helper predates BusyBox init scripts, so this image got
+            die "$NODE_NAME's card helper predates BusyBox init scripts, so this image got
     neither its self-disarm nor its self-return: a board booted into it would not
     hand itself back. The image is written. Update the helper (on a workstation,
     ./setup --stage quiesce from a terminal there; on a rescue, rebuild the
@@ -675,7 +675,7 @@ disk_check_boot_files() { # <device> <machine> <dtb>
     # same way. A rescue's helper is its image's, so the remedy is a rebuild.
     case "$out" in
         *'no boot-file checker'*)
-            warn "$dev's boot files were NOT checked: $MACH_NAME's card helper has no boot-file
+            warn "$dev's boot files were NOT checked: $NODE_NAME's card helper has no boot-file
   checker beside it. If the firmware cannot find a kernel it halts, and that costs
   a trip to the board. The checker is installed with the helper (./setup --stage
   quiesce on a workstation; a rebuilt rescue image carries it)."
@@ -774,7 +774,7 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
         *'tailnet-join: no'*)
             debug "$dev carries no wk-tailnet-join, so there is nothing to seed"
             return 0 ;;
-        *) die "$MACH_NAME's card helper did not say whether $dev joins the tailnet
+        *) die "$NODE_NAME's card helper did not say whether $dev joins the tailnet
     (it said: ${joins:-nothing}). Refusing to guess, for the same reason." ;;
     esac
 
@@ -794,13 +794,13 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
 }
 
 # Does this board's rescue/bench system bring up WiFi? A hardware fact, so
-# a declared field (MACH_NET=wifi|ethernet, boot/machines.sh), not computed.
-# Loaded in a subshell: machine_load sets MACH_* directly, and every caller
+# a declared field (NODE_NET=wifi|ethernet, boot/machines.sh), not computed.
+# Loaded in a subshell: machine_load sets NODE_* directly, and every caller
 # here already has its own machine loaded (DISK_MACHINE) -- loading a second
 # one in place would clobber it.
 _image_wants_wifi() { # <IMG_MACHINE, which is boot/machines/<name>.conf's name>
     [ -n "${1:-}" ] || return 1
-    ( machine_load "$1" >/dev/null 2>&1 && [ "${MACH_NET:-}" = wifi ] )
+    ( machine_load "$1" >/dev/null 2>&1 && [ "${NODE_NET:-}" = wifi ] )
 }
 
 # Unlike disk_seed_tailnet this is a barrier, not a warning: rpi3/rpi4/rpi5
@@ -812,7 +812,7 @@ _image_wants_wifi() { # <IMG_MACHINE, which is boot/machines/<name>.conf's name>
 # before anything is erased; this assumes that already passed.
 disk_seed_wifi() { # <device> <IMG_MACHINE>
     local dev="$1" mach="$2" joins
-    disk_would "seed $MACH_NAME's own WiFi credential on $dev, for a board with no cable" && return 0
+    disk_would "seed $NODE_NAME's own WiFi credential on $dev, for a board with no cable" && return 0
 
     _image_wants_wifi "$mach" || { debug "$mach has a cable, or is not one of this fleet's boards; nothing to seed"; return 0; }
 
@@ -827,11 +827,11 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
         *'wifi-join: no'*)
             debug "$dev carries no wk-wifi-join, so there is nothing to seed"
             return 0 ;;
-        *) die "$MACH_NAME's card helper did not say whether $dev brings up WiFi
+        *) die "$NODE_NAME's card helper did not say whether $dev brings up WiFi
     (it said: ${joins:-nothing}). Refusing to guess, for the same reason." ;;
     esac
 
-    info "seeding $MACH_NAME's own WiFi credential onto $dev"
+    info "seeding $NODE_NAME's own WiFi credential onto $dev"
     card_priv wifi-from-host "$dev" >/dev/null \
         || die "could not seed WiFi credentials onto $dev.
     The image is written; $mach has no cable at the bench, so it would boot with
@@ -850,7 +850,7 @@ $(printf '%s\n' "$joins" | sed 's/^/    /')
 disk_tailnet_save() { # <device>@second
     local dev="$1" out
     if ! card_priv status 2>/dev/null | grep -q 'tailnet-keep=yes'; then
-        warn "$MACH_NAME's card helper cannot keep a node's tailnet identity across a rewrite,
+        warn "$NODE_NAME's card helper cannot keep a node's tailnet identity across a rewrite,
   so the new system joins fresh; a stale node of the same name on the tailnet
   refuses the write. The helper is the rescue image's: a rebuilt rescue, written
   from a reader, has the current one."
@@ -876,7 +876,7 @@ $(printf '%s\n' "$out" | sed 's/^/    /')"
         *kept=no*)
             debug "$dev holds no bench tailnet identity yet; the new system joins fresh"
             printf no ;;
-        *) die "$MACH_NAME's card helper did not say whether $dev's partition 4 holds a
+        *) die "$NODE_NAME's card helper did not say whether $dev's partition 4 holds a
     tailnet identity (it said: ${out:-nothing}). Refusing to guess: a system that
     joins under a name it already holds comes up renamed and unreachable." ;;
     esac
@@ -924,11 +924,11 @@ disk_seed_role() { # <device> <bench|rescue>
     # one-line remedy -- so it is worth telling apart from a refusal.
     case "$out" in
         *'usage: wk-card-priv'*)
-            die "$MACH_NAME's card helper is older than this checkout: it has no 'role'
+            die "$NODE_NAME's card helper is older than this checkout: it has no 'role'
     verb, so the rescue marker cannot be written and this card would boot
     carrying a live self-return watchdog.
     The image is written; the role is not set.
-    Remedy, from a terminal on $MACH_NAME (its sudo asks for a password, which
+    Remedy, from a terminal on $NODE_NAME (its sudo asks for a password, which
     is why this end cannot do it): update its wk-tools checkout, then
         ./setup --stage quiesce" ;;
     esac
@@ -956,9 +956,9 @@ disk_eject() {
     local dev="$1"
     disk_would "flush and power off $dev" && return 0
     m_ssh "command -v udisksctl >/dev/null" || {
-        warn "$MACH_NAME has no udisksctl, so $dev is left powered on. The write is
+        warn "$NODE_NAME has no udisksctl, so $dev is left powered on. The write is
   complete and the card is synced -- it is safe to pull. To have the card
-  powered off instead, install udisks2 on $MACH_NAME ('./setup' does, on a wk host)."
+  powered off instead, install udisks2 on $NODE_NAME ('./setup' does, on a wk host)."
         return 0
     }
     m_ssh "udisksctl power-off -b $(sh_quote "$dev")" >/dev/null 2>&1 \

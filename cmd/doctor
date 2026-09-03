@@ -39,7 +39,6 @@ WK_MACHINE="${WK_MACHINE:-wk}"
 probe_store() {
     [ -d "$WK_STORE/git/WebKit.git" ] && echo mirror=ok || echo mirror=no
     [ -n "$(ls -1 "$WK_STORE/base" 2>/dev/null)" ] && echo base=ok || echo base=no
-    [ -f "$WK_STORE/secrets/build_key_fork" ] && echo key=ok || echo key=no
     [ -n "$(ls -1 "$WK_STORE/skills" 2>/dev/null)" ] && echo skills=ok || echo skills=no
     # The socket is accepted as proof too: systemctl --user over a bare ssh
     # session can fail to find the user bus even when the service is fine.
@@ -251,7 +250,13 @@ local_state() { # <path> <kind> <how to get it back>
 # rebuildable artifact: a number came off a machine in a state that no
 # longer exists, and a rerun is a different measurement.
 local_state "$WK_STORE/bench"                      backed-up   "benchmark runs and their provenance -- not regenerable at any price; a rerun is a different measurement"
-local_state "$WK_STORE/secrets"                    regenerable "wk key register makes new deploy keys (revoke the old ones on GitHub)"
+# This device's credentials directory (wk_secrets_dir, lib/store.sh): on macOS
+# it is here and mounted into the podman machine, so it is read and reported
+# without one.
+local_state "$(wk_secrets_dir)"                    regenerable "wk key register makes new deploy keys (revoke the old ones on GitHub)"
+# Beside it and mounted nowhere: every private key half and the GitHub API
+# token, which is what makes `wk push` a switch a workspace cannot reach.
+local_state "$(wk_push_held_dir)"                  regenerable "wk key register makes new deploy keys; wk key set github-pat stores a new token (revoke the old ones on GitHub)"
 # One line per row of wk_agent_secrets (lib/store.sh): the credential each
 # agent reads, one per name per machine. re-authable -- a fresh token from the
 # provider is as good as the old one -- and absent is `??`, not a fault: an
@@ -281,10 +286,10 @@ local_state "$HOME/.ssh/config.d/local"            backed-up   "hand-written ssh
 # whatever key it finds.
 local_state "$(wk_state_dir)/ssh/zed_ed25519"      regenerable "wk zed makes a new one and re-authorises it in the workspace"
 if [ "$(wk_os)" = linux ]; then
-    # "This machine is rpi5" is read off the registry (MACH_SSH,
+    # "This machine is rpi5" is read off the registry (NODE_SSH,
     # boot/machines/rpi5.conf) rather than a second "rpi5" literal here.
     . "$WK_ROOT/boot/machines.sh"
-    if machine_load rpi5 2>/dev/null && [ "$(wk_machine_name)" = "$MACH_SSH" ]; then
+    if machine_load rpi5 2>/dev/null && [ "$(wk_machine_name)" = "$NODE_SSH" ]; then
         local_state "$WK_ROOT/host/linux/rpi5/rpi5.conf" backed-up "site WiFi identity (gitignored: repo is public); rpi5.conf.example documents the shape"
     fi
     local_state /var/lib/tailscale                 re-authable "tailscale up re-authenticates; the node name survives via the admin console"
@@ -299,7 +304,12 @@ report_store() { # <probe output>
     v() { printf '%s' "$out" | sed -n "s/^$1=//p"; }
     [ "$(v mirror)" = ok ] && ok "WebKit mirror"          || miss "WebKit mirror" "wk sync"
     [ "$(v base)" = ok ]   && ok "base snapshot"          || miss "base snapshot" "wk sync"
-    [ "$(v key)" = ok ]    && ok "fork push key"          || miss "fork push key" "wk key register  (needs gh auth)"
+    # Read here, not in the probe: the deploy keys are this machine's own
+    # (wk_secrets_dir, lib/store.sh), which on macOS is the host directory the
+    # podman machine mounts -- so the answer is the same either side and the
+    # nearer side is the one that cannot be wrong about it.
+    [ -f "$(wk_push_held_dir)/build_key_fork" ] \
+        && ok "fork push key" || miss "fork push key" "wk key register  (needs gh auth)"
     # The agents' credentials are not here: they are one machine-local line
     # each in the section above, which probes this same store. Absent, one is
     # `??` and not a fault -- unlike everything in this list, a workspace

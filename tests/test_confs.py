@@ -113,7 +113,7 @@ class TestConfFieldSets(unittest.TestCase):
     does not know."""
 
     def test_boot_machines_field_set(self):
-        known = loader_fields((REPO / "boot" / "machines.sh", "MACH_"))
+        known = loader_fields((REPO / "boot" / "machines.sh", "NODE_"))
         files = conf_files("boot/machines")
         self.assertTrue(files, "no boot/machines/*.conf found")
         sets = {p.name: assigned_fields(p) for p in files}
@@ -316,7 +316,7 @@ class TestNoHardcodedMachineCaseArms(unittest.TestCase):
 class TestPiConfsSetDtb(unittest.TestCase):
     """A Pi's firmware halts, not panics, if it cannot find its device tree
     (image_check_boot_files, lib/image.sh) -- so image_dtb_for refuses to
-    guess one, and every Pi conf has to set MACH_DTB for real."""
+    guess one, and every Pi conf has to set NODE_DTB for real."""
 
     PI_NAMES = {"rpi3", "rpi4", "rpi5"}
 
@@ -327,15 +327,15 @@ class TestPiConfsSetDtb(unittest.TestCase):
             with self.subTest(machine=path.stem):
                 fields = {}
                 for line in path.read_text().splitlines():
-                    m = re.match(r'^MACH_DTB=(.*)$', line)
+                    m = re.match(r'^NODE_DTB=(.*)$', line)
                     if m:
-                        fields["MACH_DTB"] = m.group(1).strip().strip('"')
-                self.assertIn("MACH_DTB", fields, f"{path.name} sets no MACH_DTB")
-                self.assertTrue(fields["MACH_DTB"], f"{path.name} sets MACH_DTB to an empty value")
+                        fields["NODE_DTB"] = m.group(1).strip().strip('"')
+                self.assertIn("NODE_DTB", fields, f"{path.name} sets no NODE_DTB")
+                self.assertTrue(fields["NODE_DTB"], f"{path.name} sets NODE_DTB to an empty value")
 
 
 class TestMachinesSetNet(unittest.TestCase):
-    """_image_wants_wifi (boot/disk.sh) keys on MACH_NET rather than a case
+    """_image_wants_wifi (boot/disk.sh) keys on NODE_NET rather than a case
     arm naming machines, so every boot/machines conf has to set it to one of
     the two words that function checks against."""
 
@@ -344,12 +344,12 @@ class TestMachinesSetNet(unittest.TestCase):
             with self.subTest(machine=path.stem):
                 value = None
                 for line in path.read_text().splitlines():
-                    m = re.match(r'^MACH_NET=(.*)$', line)
+                    m = re.match(r'^NODE_NET=(.*)$', line)
                     if m:
                         value = m.group(1).strip().strip('"')
                 self.assertIn(
                     value, ("wifi", "ethernet"),
-                    f"{path.name} sets MACH_NET to {value!r}, not 'wifi' or 'ethernet'",
+                    f"{path.name} sets NODE_NET to {value!r}, not 'wifi' or 'ethernet'",
                 )
 
 

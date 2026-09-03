@@ -792,7 +792,7 @@ phone_usb_note() {
             printf 'nothing on %s'"'"'s USB looks like a phone at all, which points at the
     cable rather than at the card -- a charge-only cable is the most common
     cause of this exact symptom. Jumpdrive would also have drawn a splash
-    listing the storage sizes; a blank screen means the card did not boot.' "$MACH_NAME"
+    listing the storage sizes; a blank screen means the card did not boot.' "$NODE_NAME"
             ;;
     esac
 }
@@ -825,7 +825,7 @@ EOF
     for i in $(seq 0 $((n - 1))); do
         dev="${devs[$i]}"; size="${sizes[$i]}"
         head=$(device_head_sha "$dev" || true)
-        [ -n "$head" ] || die "could not read the first $(human_bytes "$CARD_HEAD_BYTES") of $dev on $MACH_NAME.
+        [ -n "$head" ] || die "could not read the first $(human_bytes "$CARD_HEAD_BYTES") of $dev on $NODE_NAME.
     It is listed as a disk but does not deliver that much when read -- a card
     that has been pulled since the listing, or a LUN the phone is advertising
     without backing. Telling the card from the eMMC is decided by reading both,
@@ -848,7 +848,7 @@ EOF
 $(printf '%s\n' "$candidates" | sed 's/^/      /')
     The card was written and read back minutes ago, so one of these should have
     matched it byte for byte. That it did not means these are not the disks this
-    was looking for -- something else was plugged into $MACH_NAME, or the phone
+    was looking for -- something else was plugged into $NODE_NAME, or the phone
     is exporting something other than its storage. Nothing was written."
 
     if [ -z "$emmc" ] && [ "$n" = 1 ]; then
@@ -863,12 +863,12 @@ $(printf '%s\n' "$candidates" | sed 's/^/      /')
         "") die "every one of the $n disks that appeared matches the Jumpdrive image.
     Two disks carrying the same image is ambiguous, and not something to resolve
     by picking one -- so nothing was written.
-    'wk sysimage disks $MACH_NAME' is what this was looking at."
+    'wk sysimage disks $NODE_NAME' is what this was looking at."
             ;;
         *" "*) die "the phone exported more than one disk that is not the Jumpdrive card:
       $emmc
     The eMMC is meant to be the only one left after the card is eliminated, so a
-    second candidate means something else is attached to $MACH_NAME that was not
+    second candidate means something else is attached to $NODE_NAME that was not
     there when the baseline was taken. Unplug it and re-run; nothing was
     written."
             ;;
@@ -887,7 +887,7 @@ $(printf '%s\n' "$candidates" | sed 's/^/      /')
     disk reports its own model as '$model'. Two independent signals disagreeing
     about the same disk is not something to resolve by preferring one of them,
     least of all for a write that erases it. Nothing was written.
-    'wk sysimage disks $MACH_NAME' shows what is attached."
+    'wk sysimage disks $NODE_NAME' shows what is attached."
             ;;
     esac
 

@@ -329,14 +329,16 @@ class TestNetRefspecs(unittest.TestCase):
 
 class TestSyncWorkspacesUsesTheScript(unittest.TestCase):
     """cmd/sync's sync_workspaces is what `wk sync <ws>` and `wk new` both
-    reach; this is the wiring between it and ws_fetch_script -- /mirror, the
-    path a container's copy of the mirror is mounted at, and the checkout the
-    driver names."""
+    reach; this is the wiring between it and ws_fetch_script -- the checkout
+    the driver names, and the mirror the driver names (t_mirror_dir), which is
+    a different path for each kind of workspace and used to be a container's
+    bind mount for all of them."""
 
-    def test_it_hands_the_script_the_container_mirror_and_the_checkout(self):
-        # sync_workspaces itself lives below the `functions` seam (it drives
-        # a target, and reads the scope a real run parsed), so it is lifted
-        # the way tests/test_sync.py lifts sync_target.
+    def _driven(self, mirror):
+        """sync_workspaces, run for a workspace whose target answers <mirror>.
+        It lives below the `functions` seam (it drives a target, and reads the
+        scope a real run parsed), so it is lifted the way tests/test_sync.py
+        lifts sync_target."""
         lifted = subprocess.run(
             ["sed", "-n", "/^sync_workspaces()/,/^}/p", str(REPO / "cmd" / "sync")],
             capture_output=True, text=True).stdout
@@ -348,20 +350,45 @@ class TestSyncWorkspacesUsesTheScript(unittest.TestCase):
             # own report and discards its stderr.
             cp = bash(SYNC_FUNCS + lifted + f'''
 SCOPE=ws
-load_target() {{ :; }}
-ws_target() {{ echo container; }}
-ws_state()  {{ echo present; }}
-t_src()     {{ echo /src/WebKit; }}
-t_exec()    {{ shift 3; printf '%s\\n' "$1" > {str(seen)!r}; echo from=mirror; }}
+load_target()  {{ :; }}
+ws_target()    {{ echo container; }}
+ws_state()     {{ echo present; }}
+t_src()        {{ echo /src/WebKit; }}
+t_mirror_dir() {{ printf '%s' {mirror!r}; }}
+t_exec()       {{ shift 3; printf '%s\\n' "$1" > {str(seen)!r}; echo from=mirror; }}
 sync_workspaces one
 ''')
             out = cp.stdout + cp.stderr
             self.assertEqual(cp.returncode, 0, out)
-            script = seen.read_text()
-        self.assertIn("cd '/src/WebKit'", script)
-        self.assertIn("[ -d '/mirror/WebKit.git' ]", script)
-        self.assertIn("--no-tags", script)
-        self.assertIn("ok  (from the mirror)", out)
+            return seen.read_text(), out
+
+    def test_it_hands_the_script_the_mirror_the_driver_names(self):
+        """Every kind of workspace, by the path its own driver answers with
+        (tests/test_mirror_path.py holds those): the fetch is against that
+        path, and no upstream is named at all when it is there -- the four
+        network fetches are what a guest was paying before."""
+        for mirror in ("/mirror/WebKit.git",              # container
+                       "/Users/admin/WebKit.git",         # macOS guest
+                       "/home/you/wk/mirror"):            # build machine
+            with self.subTest(mirror=mirror):
+                script, out = self._driven(mirror)
+                self.assertIn("cd '/src/WebKit'", script)
+                self.assertIn(f"[ -d '{mirror}' ]", script)
+                self.assertIn(f"git fetch --no-tags --prune --quiet '{mirror}'", script)
+                self.assertIn("ok  (from the mirror)", out)
+                # The mirror carries every upstream, so its arm ends the
+                # fetch: nothing reaches github.com, by name or by URL.
+                before = script.split("echo from=mirror")[0]
+                for remote in ("origin", "wpe", "fork", "forkwpe", "github.com"):
+                    self.assertNotIn(f"get-url '{remote}'", before)
+                    self.assertNotIn("github.com", script)
+
+    def test_a_target_with_no_mirror_gets_no_mirror_arm(self):
+        """The default is no mirror (lib/target.sh), and a `[ -d '' ]` test
+        against it would read as a mirror that is merely absent."""
+        script, out = self._driven("")
+        self.assertNotIn("[ -d", script)
+        self.assertIn("get-url 'origin'", script)
 
 
 class TestNewFetchFrom(unittest.TestCase):
@@ -451,6 +478,7 @@ class TestNewFreshen(WorkspaceFixture):
         (`wk sync <name>`) is observed rather than run."""
         pre = NEW_FUNCS + f'''
 t_src() {{ echo {str(self.ws)!r}; }}
+t_mirror_dir() {{ echo /mirror/WebKit.git; }}
 t_exec() {{
     shift
     case "$*" in

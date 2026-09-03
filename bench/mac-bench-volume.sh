@@ -30,7 +30,7 @@
 #
 # Environment overrides:
 #   WK_BENCH_VOLUME    the APFS volume's name (default: WK Bench; also read by
-#                       bench/mac-ab.sh and boot/machines/mbp.conf's MACH_VOLUME --
+#                       bench/mac-ab.sh and boot/machines/mbp.conf's NODE_VOLUME --
 #                       one name, keep them in agreement)
 #   WK_BENCH_NEED_GB    headroom the host install must keep free, in GiB
 #                       (default: 120)

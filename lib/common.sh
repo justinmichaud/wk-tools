@@ -774,6 +774,20 @@ commit_wall_prefix() { # <checkout-dir> -- prints the bwrap argv prefix
 # common.sh is the floor.
 wk_state_dir() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/wk"; }
 
+# The one directory on this device holding the credentials every workspace
+# here needs -- the deploy keys and the agents' tokens. On a macOS
+# workstation it is mounted into the podman machine at /var/lib/wk/secrets
+# (host/macos/machine.sh), so `wk key set` and `wk push` write it with no VM
+# running and a container reads the same bytes live. Beside the tailnet keys,
+# which are host-local for the same reason and were here first.
+#
+# WK_HOST_SECRETS: tests point this at a scratch directory, so a test never
+# reads or moves this machine's own keys.
+#
+# Here rather than in lib/store.sh: the mount source is a property of the
+# device, and common.sh is the floor every file sources.
+wk_host_secrets() { echo "${WK_HOST_SECRETS:-${XDG_CONFIG_HOME:-$HOME/.config}/wk/secrets}"; }
+
 # WK_LOCK_DIR: tests/test_concurrency.py, tests/test_pr_workflow.py and
 # tests/test_quick.py all point this at a scratch directory, so a test never
 # takes a lock that could collide with a real `wk` command running here.

@@ -22,10 +22,19 @@ def decl(name):
 
 
 class TestWhere(WkTest):
-    def test_push_acts_on_the_store_not_the_host(self):
-        """`wk push` declares where=store: the keys are in the store, which on
-        a macOS workstation is inside the podman VM"""
-        self.assertEqual(decl("push")[1], "store")
+    def test_push_runs_on_the_machine_that_holds_the_keys(self):
+        """`wk push` declares where=local: the keys are this device's own
+        (wk_secrets_dir), and on macOS the podman machine reads them as a
+        mount -- so nothing is forwarded and nothing has to be running"""
+        self.assertEqual(decl("push")[1], "local")
+
+    def test_nothing_forwards_it_into_the_podman_machine(self):
+        """the hop is gone, not merely unused: no `--store` flag, no second
+        `wk push` invocation of its own, no `podman machine ssh`"""
+        src = (REPO / "cmd" / "push").read_text()
+        for gone in ("--store", "store_half", "podman machine ssh"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, src)
 
     def _as_build_machine(self):
         """The environment of a shared build machine: the ~/.wk-remote marker
@@ -57,10 +66,13 @@ class TestWhere(WkTest):
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("workspace", cp.stdout)
 
-    def test_the_fan_out_flags_stay_on_this_machine(self):
-        """--all/--target are declared where=local: the fan-out needs the
-        target confs and ssh reach, which the podman VM has neither of"""
-        self.assertIn("flag --all,--target where=local", (REPO / "cmd" / "push").read_text())
+    def test_the_fan_out_needs_no_flag_override(self):
+        """--all/--target need the target confs and ssh reach to the fleet, and
+        get them for free now that the whole command runs here: a `flag ...
+        where=local` override would be a second copy of that decision"""
+        src = (REPO / "cmd" / "push").read_text()
+        self.assertNotIn("flag --all,--target", src)
+        self.assertIn("# wk: where=local", src)
 
 
 class TestAllCoversThisMachine(WkTest):
@@ -87,35 +99,37 @@ class TestNoFalseClaim(WkTest):
         self.assertNotIn("==> create", cp.stderr)
         self.assertFalse(d.exists())
 
-    def test_move_keys_count_survives_a_store_it_cannot_create(self):
-        """a `die` inside `n=$(...)` exits only the subshell, so the count
-        comes back in MOVED and `wk push off` cannot report 'already OFF'
-        about a store nothing looked at"""
+    def test_nothing_moves_between_the_two_directories_any_more(self):
+        """The switch is what an ssh-agent holds, so the file walk that used to
+        move keys is gone rather than unused: two positions on disk means a
+        crash between them, and a key in the mounted directory is the position
+        this command exists to prevent."""
         src = (REPO / "cmd" / "push").read_text()
-        self.assertNotIn("n=$(move_keys", src)
-        self.assertIn('move_keys "$LIVE" "$HELD" || moved_ok=1; n="$MOVED"', src)
+        for gone in ("move_keys", "MOVED", "STUCK", "purge_copies"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, src)
 
-    def test_a_key_that_did_not_move_is_a_failing_status(self):
-        """`store_half || STORE_RC=$?` disables errexit inside the function,
-        so a failed `mv` counted as a move and `wk push off` exited 0 with the
-        key still exposed. A read-only secrets/ is that failure, made on
-        purpose: the key stays, and the command says so and fails."""
-        store = self.tmp / "store"
-        live = store / "secrets"
-        live.mkdir(parents=True)
-        key = live / "build_key_fork"
-        key.write_text("placeholder-not-a-key\n")
-        key.chmod(0o600)
-        os.chmod(live, 0o500)                       # no rename out of it
-        self.addCleanup(os.chmod, live, 0o700)
+    def test_on_without_an_agent_fails_and_claims_nothing(self):
+        """The failure the old `mv` had, in its new shape: there is nowhere to
+        put the keys, so `on` must not report a switch it did not throw."""
+        secrets = self.tmp / "secrets"
+        held = self.tmp / "push-keys"
+        held.mkdir(parents=True)
+        secrets.mkdir(parents=True)
+        (held / "build_key_fork").write_text("placeholder-not-a-key\n")
 
-        cp = self.run_wk("push", "off", env={"WK_STORE": str(store),
-                                             "WK_VM_STORE": str(self.tmp / "vmstore")})
+        cp = self.run_wk("push", "on", env={
+            "WK_STORE": str(self.tmp / "store"),
+            "WK_HOST_SECRETS": str(secrets),
+            "WK_PUSH_AGENT_SOCK": str(self.tmp / "no-agent.sock"),
+            "WK_PUSH_PAT_FILE": str(self.tmp / "pat"),
+            "WK_MACHINE": "wk-no-such-machine",
+        })
         self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("could not move", cp.stdout)
-        self.assertIn("still in", cp.stdout)
-        self.assertTrue(key.exists(), "reported a move it did not make")
-        self.assertNotIn("push is OFF", cp.stdout)
+        self.assertIn("no ssh-agent answers", cp.stdout)
+        self.assertNotIn("push is ON", cp.stdout)
+        self.assertTrue((held / "build_key_fork").exists(),
+                        "a private half left the directory nothing mounts")
 
     def test_the_subshell_trap_is_real(self):
         """the mechanism the two above defend against: bash applies neither

@@ -15,6 +15,8 @@
 # Self-contained: it sources nothing, so it answers about a guest provisioned by
 # an older base too. bash 3.2, the macOS system bash.
 
+set -euo pipefail
+
 printf 'mem_total_mb=%s\n' "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1048576 ))"
 
 # macOS's own verdict on its memory, not one computed from page counts here:

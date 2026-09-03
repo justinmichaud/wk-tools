@@ -11,7 +11,8 @@ Run: python3 -m unittest tests.test_remote -v
 """
 import unittest
 
-from tests.support import REAL_REGISTRY, REPO, WkTest, bash, requires_machine
+from tests.support import (REAL_REGISTRY, REPO, WkTest, bash, func_body,
+                           requires_machine)
 
 
 class TestUnregisteredWorkspaceResolves(WkTest):
@@ -169,6 +170,71 @@ class TestRemoteReachable(WkTest):
         """`wk status`/`wk ls` list what is on a configured machine"""
         cp = _t_info_reaches("moose")
         self.assertEqual(cp.returncode, 0, f"moose: {cp.stdout + cp.stderr}")
+
+
+class TestTheMirrorOnTheBox(WkTest):
+    """the mirror this driver keeps on a build box is made by the one snippet
+    every other mirror in the fleet is made by (mirror_refresh_script)"""
+
+    def setUp(self):
+        super().setUp()
+        # A build box driven without ssh (WK_REMOTE_LOCAL, targets/remote.sh).
+        self.registry = self.tmp / "hosts"
+        self.registry.mkdir()
+        (self.registry / "fakebox.conf").write_text(
+            "WK_TARGET_KIND=remote\n"
+            "WK_REMOTE_LOCAL=1\n"
+            f"WK_REMOTE_ROOT={self.tmp / 'wk'}\n"
+            f"WK_REMOTE_STORE={self.tmp / 'store'}\n"
+        )
+
+    def _script(self):
+        """The shell _remote_mirror_update sends, with the ssh wrapper
+        replaced by a recorder: the driver is real, only the far side is not."""
+        seen = self.tmp / "sent"
+        cp = bash(f'''
+set -euo pipefail
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/resources.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target fakebox >/dev/null 2>&1
+_rsh_q() {{ printf '%s\\n' "$*" > {str(seen)!r}; }}
+_remote_mirror_update "$(_remote_root)" >/dev/null 2>&1
+''', env={"WK_TARGET_REGISTRY": str(self.registry),
+          "XDG_STATE_HOME": str(self.tmp / "state")})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        return seen.read_text()
+
+    def test_it_carries_every_default_remote_with_no_tags(self):
+        """It carried origin's main alone, so a workspace on the box could not
+        take a fork's branch from it and fetched all four upstreams over the
+        network instead. Carrying them saves disk rather than costing it:
+        every checkout on the box is a `--shared` clone of this one repository."""
+        script = self._script()
+        for remote in ("origin", "wpe", "fork", "forkwpe"):
+            with self.subTest(remote=remote):
+                self.assertIn(f"config remote.{remote}.tagOpt --no-tags", script)
+        self.assertIn("for r in origin wpe fork forkwpe; do", script)
+        self.assertIn('fetch --prune -q "$r"', script)
+        self.assertIn("+refs/heads/main:refs/heads/main", script)
+        self.assertIn("+refs/heads/*:refs/remotes/fork/*", script)
+        self.assertIn("gc.auto 0", script)
+
+    def test_it_names_no_url_of_its_own(self):
+        """A second spelling of an upstream's URL is a mirror that carries
+        something else than wk_remotes says (lib/store.sh)."""
+        text = (REPO / "targets" / "remote.sh").read_text()
+        body = func_body(text, "_remote_mirror_update")
+        self.assertNotIn("github.com", body, body)
+        self.assertIn("mirror_refresh_script", body)
+
+    def test_the_workspace_wiring_names_the_same_mirror(self):
+        """t_wiring_args tells a checkout on the box where the local copy is;
+        naming it twice is how the two drift apart."""
+        body = func_body((REPO / "targets" / "remote.sh").read_text(), "t_wiring_args")
+        self.assertIn("t_mirror_dir", body)
+        self.assertNotIn("/mirror'", body)
 
 
 if __name__ == "__main__":

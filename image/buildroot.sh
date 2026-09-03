@@ -49,7 +49,6 @@
 # newer host ahead of that repin, not for routine use.
 BUILDROOT_BASE_IMAGE="${WK_BUILDROOT_BASE:-docker.io/library/ubuntu:22.04}"
 
-buildroot_workdir()  { echo "/src/WebKit/WebKitBuild/buildroot/$1"; }
 buildroot_log()      { echo "$(wk_ws_dir "$1")/home/buildroot-$2.log"; }
 buildroot_pidfile()  { echo "$(wk_ws_dir "$1")/home/buildroot-$2.pid"; }
 

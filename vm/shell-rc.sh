@@ -7,9 +7,10 @@
 #
 # Two callers because the two need different things and this is one answer to
 # both: the base bakes it in for every clone, and the per-start run converges a
-# guest that was cloned before this file existed -- the rc it points at lives
-# in $HOME/wk-tools, which `wk build` re-rsyncs anyway, so there is nothing
-# here a clone could have got permanently wrong.
+# clone whose links point at nothing -- the rc it points at lives in
+# $HOME/wk-tools, which every start resets to this tree's commit (tools_push,
+# lib/tools.sh), so there is nothing here a clone could have got permanently
+# wrong.
 #
 # The rc itself (shell/bashrc -> shell/path.sh) is where PATH is decided:
 # ~/.local/bin for the Claude launcher, bin/ for `wk`. Without it `wk build`
@@ -37,6 +38,17 @@ TOOLS="${1:-${WK_TOOLS_DIR:-$HOME/wk-tools}}"
 line=". \"$TOOLS/shell/bashrc\""
 egress='if [ -r "$HOME/.wk-egress" ]; then . "$HOME/.wk-egress"; fi'
 
+# The claude.ai login credential the host writes into ~/.claude on every start
+# (_write_agent_secrets, targets/vm.sh), made the one the Claude CLI reads.
+# This is a Mac, so the CLI's first choice is a login Keychain item -- which no
+# ssh session and no editor's remote server has unlocked, and which a `claude`
+# run in here could have written a stale copy into. Naming the store directory
+# also names the Keychain item: the CLI appends a hash of this directory to the
+# item's service name, so the lookup misses and the file is what is used.
+# Here rather than in the shared rc: that one is read on every machine in the
+# fleet, including the workstation whose real Keychain item must keep working.
+claudecred='export CLAUDE_SECURESTORAGE_CONFIG_DIR="$HOME/.claude"'
+
 add() { # <rc> <line> <what it is>
     grep -qF "$2" "$1" 2>/dev/null && return 0
     printf '\n# wk-tools: %s\n%s\n' "$3" "$2" >> "$1"
@@ -62,4 +74,5 @@ for rc in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.bashrc"
     fi
     add "$rc" "$line"   "shared shell configuration"
     add "$rc" "$egress" "this machine's egress proxy, when it has one"
+    add "$rc" "$claudecred" "the Claude credential the host writes here, not a Keychain"
 done

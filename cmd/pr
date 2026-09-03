@@ -14,8 +14,9 @@
 # <user>:<branch> is a fork's branch; since the branch alone does not say which project it is
 # from, both are tried, and a branch existing in both is refused by name rather than guessed at.
 # A bare number is a WebKit/WebKit pull request, `wpe:<number>` a WPEWebKit one. Either way it is
-# fetched once into this machine's mirror ('wk sync' keeps it under refs/remotes/pr/...; no
-# /mirror falls back to GitHub directly) and the workspace fetches that ref from there. The remote
+# fetched once into this machine's mirror ('wk sync' keeps it under refs/remotes/pr/...) and the
+# workspace fetches that ref from there; a workspace whose mirror is not this machine's -- a guest,
+# a build box -- fetches the one ref from GitHub itself. The remote
 # is added if missing and the branch checked out tracking it -- no confirmation, except for your
 # own work: uncommitted changes are named before anything moves, and a local branch with commits
 # the PR head lacks is never overwritten, only named. `--force` takes the remote version instead.
@@ -117,12 +118,13 @@ if [ "$SPEC" = rebase ]; then
     load_target "$(ws_target "$NAME")"
     SRC=$(t_src "$NAME")
 
+    MIRROR=$(t_mirror_dir "$NAME")
     info "fetching in '$NAME' from the mirror, then rebasing onto origin/main"
     if t_exec "$NAME" bash -c "
         set -e
         cd $(sh_quote "$SRC")
-        if [ -d /mirror/WebKit.git ]; then
-            git fetch --prune --quiet /mirror/WebKit.git '+refs/heads/*:refs/remotes/origin/*'
+        if [ -n $(sh_quote "$MIRROR") ] && [ -d $(sh_quote "$MIRROR") ]; then
+            git fetch --prune --quiet $(sh_quote "$MIRROR") '+refs/heads/*:refs/remotes/origin/*'
         else
             git fetch --prune --quiet origin
         fi

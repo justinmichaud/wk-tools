@@ -1,120 +1,128 @@
-"""cmd/key: which machine runs the step that makes the keys, and where the
-tooling it runs lives.
+"""cmd/key: the keys are this machine's own, and every subverb acts here.
 
-The private halves never leave the store, and on macOS that store is inside
-the podman machine -- so `wk key register` reaches its ensure step through
-`podman machine ssh`, and the tooling it names on the far side is
-/opt/wk-tools, the VM's read-only mount of this repo. On a Linux workstation
-there is no VM: in_vm is a local shell and the tooling is this checkout.
+The secrets directory is this device's (wk_secrets_dir, lib/store.sh); on macOS
+the podman machine reads it as a read-only mount rather than holding it, so
+`wk key ensure`, `wk key pub` and `wk key fingerprints` are ssh-keygen and a
+file on this side, with no `podman machine ssh` in the path and nothing that
+has to be running.
 
-Both facts come from one decision (IN_VM_SSH / IN_VM_ROOT) so that the arm
-in_vm takes and the path ensure_keys names cannot disagree -- naming
-/opt/wk-tools while running locally is a `wk key register` that dies with
-"No such file or directory" on every Linux workstation.
+Run: python3 -m unittest tests.test_key -v
 """
 
-import re
+import os
+import subprocess
 import unittest
 
-from tests.support import REPO, WkTest, bash, stub_path
+from tests.support import REPO, WkTest, stub_path
 
 KEY = REPO / "cmd" / "key"
 
-
-def _lift_block():
-    """The `if is_macos ... fi` that decides IN_VM_SSH/IN_VM_ROOT/IN_VM_ENV,
-    plus in_vm() and ensure_keys(), sliced out of cmd/key so the test runs
-    the code that ships rather than a copy of it."""
-    lines = KEY.read_text().splitlines()
-    start = next(i for i, l in enumerate(lines)
-                 if l.startswith('if is_macos && [ -z "${WK_IN_VM:-}" ]; then'))
-    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "fi")
-    decision = "\n".join(lines[start:end + 1])
-
-    s = next(i for i, l in enumerate(lines) if l.startswith("in_vm() {"))
-    e = next(i for i in range(s, len(lines)) if lines[i] == "}")
-    in_vm = "\n".join(lines[s:e + 1])
-
-    m = re.search(r"^ensure_keys\(\).*$", KEY.read_text(), re.M)
-    assert m, "ensure_keys() not found in cmd/key"
-    return decision, in_vm, m.group(0)
+# A `podman` that fails loudly if anything calls it: what this file is mostly
+# about is that nothing does.
+PODMAN_TRAP = '#!/bin/sh\necho "podman was called" >&2\nexit 1\n'
 
 
-DECISION, IN_VM, ENSURE_KEYS = _lift_block()
+class _KeyRun(WkTest):
+    """cmd/key against a scratch secrets directory, with the trap on PATH."""
 
-PRELUDE = f"""
-set -euo pipefail
-. "{REPO}/lib/common.sh"
-WK_ROOT=/checkout
-WK_MACHINE=testvm
-is_macos() {{ [ "$FAKE_OS" = macos ]; }}
-{DECISION}
-"""
+    def key(self, *args, env=None):
+        secrets = self.tmp / "secrets"
+        e = {"WK_HOST_SECRETS": str(secrets),
+             "WK_STORE": str(self.tmp / "store")}
+        if env:
+            e.update(env)
+        with stub_path({"podman": PODMAN_TRAP}) as binp:
+            e["PATH"] = f"{binp}:/usr/bin:/bin:/usr/sbin:/sbin"
+            cp = subprocess.run([str(KEY), *args], cwd=str(REPO), env={**self._base_env(), **e},
+                                capture_output=True, text=True, timeout=120)
+        return cp, secrets
+
+    def _base_env(self):
+        env = dict(os.environ)
+        for var in ("WK_NAME", "WK_TARGET", "WK_TARGET_KIND", "WK_MARKER",
+                    "WK_STORE", "WK_IN_VM"):
+            env.pop(var, None)
+        env["WK_TARGET_REGISTRY"] = str(self.tmp / "no-registry")
+        (self.tmp / "no-registry").mkdir(exist_ok=True)
+        return env
 
 
-class TestEnsureRunsWhereTheKeysAre(WkTest):
-    """ensure_keys asks in_vm to run cmd/key ensure; the path it names has to
-    be the path on whichever side in_vm lands on."""
-
-    # in_vm is replaced by a printer: what is under test is the command
-    # ensure_keys composes, not the transport that carries it.
-    SCRIPT = PRELUDE + f"""
-in_vm() {{ printf '%s\\n' "$*"; }}
-{ENSURE_KEYS}
-ensure_keys
-"""
-
-    def test_on_a_linux_workstation_it_names_this_checkout(self):
-        """no VM, so the far side is this shell and /opt/wk-tools is not there"""
-        cp = bash(self.SCRIPT, env={"FAKE_OS": "linux"})
+class TestEnsureRunsHere(_KeyRun):
+    def test_the_two_halves_go_to_the_two_directories(self):
+        """The private half is generated where it lives for good -- the
+        directory nothing mounts -- and only the public one is copied to the
+        directory every workspace reads."""
+        cp, secrets = self.key("ensure")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("'/checkout/cmd/key' ensure", cp.stdout)
-        self.assertNotIn("/opt/wk-tools", cp.stdout)
-        self.assertNotIn("WK_IN_VM=1", cp.stdout)
-
-    def test_on_macos_it_names_the_mount_inside_the_vm(self):
-        """the store is in the podman machine, and so is the tooling"""
-        cp = bash(self.SCRIPT, env={"FAKE_OS": "macos"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("WK_IN_VM=1 '/opt/wk-tools/cmd/key' ensure", cp.stdout)
-
-    def test_inside_the_vm_it_is_local_again(self):
-        """already in the VM (WK_IN_VM=1), so there is nothing to ssh into"""
-        cp = bash(self.SCRIPT, env={"FAKE_OS": "macos", "WK_IN_VM": "1"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("'/checkout/cmd/key' ensure", cp.stdout)
-        self.assertNotIn("/opt/wk-tools", cp.stdout)
-
-
-class TestInVmTakesTheMatchingArm(WkTest):
-    """The real in_vm, with a `podman` on PATH that fails if it is called:
-    the arm in_vm takes has to match the root ensure_keys names, or one of
-    the two is talking about a machine the other is not."""
-
-    PODMAN_TRAP = '#!/bin/sh\necho "podman was called" >&2\nexit 1\n'
-
-    SCRIPT = PRELUDE + f"""
-{IN_VM}
-in_vm "echo ran-here"
-"""
-
-    def test_linux_runs_it_locally(self):
-        with stub_path({"podman": self.PODMAN_TRAP}) as binp:
-            cp = bash(self.SCRIPT,
-                      env={"FAKE_OS": "linux", "PATH": f"{binp}:/usr/bin:/bin"})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("ran-here", cp.stdout)
         self.assertNotIn("podman was called", cp.stderr)
+        held = self.tmp / "push-keys"
+        for fork in ("fork", "forkwpe"):
+            with self.subTest(fork=fork):
+                self.assertTrue((held / f"build_key_{fork}").exists(), cp.stderr)
+                self.assertTrue((secrets / f"build_key_{fork}.pub").exists())
+                self.assertFalse((secrets / f"build_key_{fork}").exists(),
+                                 "a private half is in the directory every workspace mounts")
 
-    def test_macos_goes_through_the_podman_machine(self):
-        with stub_path({"podman": self.PODMAN_TRAP}) as binp:
-            cp = bash(self.SCRIPT,
-                      env={"FAKE_OS": "macos", "PATH": f"{binp}:/usr/bin:/bin"})
-        self.assertIn("podman was called", cp.stderr)
+    def test_the_directory_it_makes_is_not_readable_by_anyone_else(self):
+        _cp, secrets = self.key("ensure")
+        held = self.tmp / "push-keys"
+        self.assertEqual(0o700, secrets.stat().st_mode & 0o777)
+        self.assertEqual(0o700, held.stat().st_mode & 0o777)
+        self.assertEqual(0o600, (held / "build_key_fork").stat().st_mode & 0o777)
+
+    def test_a_second_run_generates_nothing_new(self):
+        _cp, _secrets = self.key("ensure")
+        held = self.tmp / "push-keys"
+        before = (held / "build_key_fork").read_bytes()
+        cp, _ = self.key("ensure")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(before, (held / "build_key_fork").read_bytes())
+
+    def test_the_public_half_is_re_asserted_from_the_private_one(self):
+        """A secrets directory recreated without it would leave every
+        workspace's ssh config naming an identity that is not there."""
+        _cp, secrets = self.key("ensure")
+        (secrets / "build_key_fork.pub").unlink()
+        cp, _ = self.key("ensure")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue((secrets / "build_key_fork.pub").exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestTheKeysAreReadFromHere(_KeyRun):
+    def test_pub_reads_the_public_half_where_every_workspace_reads_it(self):
+        _cp, _secrets = self.key("ensure")
+        cp, _ = self.key("pub", "fork")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("ssh-ed25519", cp.stdout)
+
+    def test_fingerprints_say_whether_this_machine_holds_a_private_half(self):
+        """Where the private half is is no longer the switch: it is always in
+        the directory nothing mounts, and whether it is loaded is `wk push`."""
+        _cp, _secrets = self.key("ensure")
+        held = self.tmp / "push-keys"
+        (held / "build_key_forkwpe").unlink()
+        cp, _ = self.key("fingerprints")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertRegex(cp.stdout, r"fork\s+SHA256:\S+\s+private half here")
+        self.assertRegex(cp.stdout, r"forkwpe\s+SHA256:\S+\s+no private half")
+
+    def test_nothing_here_reaches_the_podman_machine(self):
+        """the hop is gone, not merely unused"""
+        text = KEY.read_text()
+        for gone in ("podman machine ssh", "IN_VM_SSH", "in_vm "):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, text)
+
+
+class TestEnsureIsOneImplementation(WkTest):
+    def test_register_ensures_through_this_same_file(self):
+        """`wk key register` walks the machines and asks each to make its
+        missing keys; for this one that is this file's own `ensure` arm, not a
+        second copy of ssh-keygen"""
+        text = KEY.read_text()
+        self.assertIn('ensure_keys() { "$0" ensure', text)
+        self.assertIn("ssh-keygen -t ed25519", text)
+        self.assertEqual(1, text.count("ssh-keygen -t ed25519"))
 
 
 class TestTheTailnetKeyScope(WkTest):
@@ -178,3 +186,7 @@ class TestTheTailnetKeyScope(WkTest):
         text = (REPO / "admin" / "wk-card-priv").read_text()
         self.assertIn("'^tskey-auth-'", text,
                       "the card helper still accepts any tskey- value")
+
+
+if __name__ == "__main__":
+    unittest.main()

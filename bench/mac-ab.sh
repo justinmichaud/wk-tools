@@ -43,7 +43,7 @@ WK_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$WK_ROOT/lib/store.sh"
 . "$WK_ROOT/boot/machines.sh"
 
-# Defaults to MACHINE's own conf (MACH_SSH, boot/machines/<machine>.conf) once
+# Defaults to MACHINE's own conf (NODE_SSH, boot/machines/<machine>.conf) once
 # MACHINE is final, after argument parsing; --host or WK_MAC_SSH win outright.
 HOST="${WK_MAC_SSH:-}"
 MACHINE="${WK_MAC_MACHINE:-mbp}"  # static
@@ -157,7 +157,7 @@ put_tree() {
 BROOT=""
 bench_root() {
     [ -n "$BROOT" ] && { printf '%s' "$BROOT"; return 0; }
-    BROOT=$(mac_sh "cd $(sh_quote "$(host_tools)") && . lib/common.sh && . boot/machines.sh && machine_load $(sh_quote "$MACHINE") && load_driver \"\$MACH_DRIVER\" && b_bench_root" 2>/dev/null | tr -d '\r' | tail -1)
+    BROOT=$(mac_sh "cd $(sh_quote "$(host_tools)") && . lib/common.sh && . boot/machines.sh && machine_load $(sh_quote "$MACHINE") && load_driver \"\$NODE_DRIVER\" && b_bench_root" 2>/dev/null | tr -d '\r' | tail -1)
     # Empty is the normal state to hit in bench mode, not just when the
     # volume is truly absent: there the same volume is `/`, and the driver
     # correctly answers "not attached" -- so every verb here is a host-mode
@@ -861,8 +861,8 @@ done
 # own conf rather than staying pinned to whatever MACHINE was at startup.
 if [ -z "$HOST" ]; then
     machine_load "$MACHINE" >/dev/null 2>&1 || die "no such machine: $MACHINE (wk boot --list)"
-    HOST="${MACH_SSH:-}"
-    [ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no MACH_SSH"
+    HOST="${NODE_SSH:-}"
+    [ -n "$HOST" ] || die "$MACHINE (boot/machines/$MACHINE.conf) sets no NODE_SSH"
 fi
 
 # The driver cannot live on the machine it reboots (same guard as

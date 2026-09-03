@@ -62,7 +62,7 @@ if [ -n "$BRANCH" ]; then
     info "checking out '$BRANCH'"
     if ! t_exec "$NAME" bash -c "cd $(sh_quote "$(t_src "$NAME")") && {
             git checkout -q $(sh_quote "$BRANCH") 2>/dev/null ||
-            { git fetch -q origin $(sh_quote "$BRANCH") &&
+            { $(origin_branch_fetch_step "$BRANCH" "$(t_mirror_dir "$NAME")") &&
               git checkout -q $(sh_quote "$BRANCH"); }; }"; then
         bs_status error
         note "gave up before building" "could not check out branch '$BRANCH'"

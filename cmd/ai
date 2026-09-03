@@ -37,6 +37,11 @@
 # trust dialog -- remote-control refuses without it, and this runs
 # 'wk ai claude <ws>' for you when the workspace has no trust record yet.
 #
+# It also needs the claude.ai account login, not the token below: measured, it
+# answers a `claude setup-token` credential with "Remote Control requires a
+# full-scope login token ... limited to inference-only". `wk key set
+# claude-login` stores one, and rc_start refuses before spawning without it.
+#
 # The agents this knows, and what each one costs to add:
 #
 #   claude   Claude Code. Installed by container/firstrun.sh, authenticated
@@ -75,16 +80,17 @@ AGENT="${1:-}"
 # they win over lib/target.sh's own, make that hermetic (tests/test_claude_rc.py).
 
 # --- nothing an agent runs can publish ---------------------------------------
-# The deploy keys are held back for the whole session -- `wk push`, which moves
-# them out of the store rather than setting a flag an agent could clear. Off is
-# also the safe crash/kill direction.
+# The deploy keys and the API token are held back for the whole session -- `wk
+# push`, which empties the ssh-agent and removes the injector's token file
+# rather than setting a flag an agent could clear. Off is also the safe
+# crash/kill direction.
 #
-# One shape for every target, because every target can push: a container links
-# the live /secrets mount, a macOS guest holds a copy the host wrote on start
-# (targets/vm.sh's _write_deploy_keys), a build box keeps its own keys. `wk
-# push off` converges all three -- including a running guest, without
-# restarting it -- so the switch is thrown once, here, and no target kind is
-# named. The one thing that differs is *which* store holds the keys, which is
+# One shape for every target, because every target can push: a container reads
+# the agent through a bind-mounted socket, a macOS guest through an `ssh -R`
+# the host holds open (targets/vm.sh), a build box keeps its own keys. `wk push
+# off` converges all three -- including a running guest, without restarting it
+# -- so the switch is thrown once, here, and no target kind is named. The one
+# thing that differs is *which* machine holds the credentials, which is
 # PUSH_TARGET below.
 PUSH_WAS_ON=""
 PUSH_TARGET=""
@@ -101,7 +107,43 @@ wall_available() { # <name>
     t_exec "$1" sh -c 'command -v bwrap >/dev/null 2>&1'
 }
 
+# Inside a workspace there is no switch to throw: `wk push` is refused in here,
+# and the credentials it withholds are on the host by construction. So what
+# runs instead is the *measurement* -- the same two facts `wk verify` takes
+# from the outside, taken from in here, where they are the ones that decide
+# what an agent can actually do.
+#
+# This exists because the alternative is silent: `wk push status` in a
+# workspace exits non-zero with a refusal, and push_switch below reads any
+# non-zero as "push is off". A session that starts with a working push is the
+# failure this whole arrangement exists to prevent, so this is a refusal rather
+# than a warning -- and an agent could not fix it from in here anyway.
+push_measure_here() {
+    local alias sock ident code
+    # Asked of ssh itself, against the alias a push would actually use: the
+    # config is an Include of /secrets/ssh_config and re-deriving the path here
+    # would be a second answer that could disagree with the first.
+    alias=$(wk_push_forks | awk 'NF {print $3; exit}')
+    sock=$(ssh -G "$alias" 2>/dev/null | awk '$1 == "identityagent" {print $2; exit}') || sock=""
+    if [ -n "$sock" ]; then
+        ident=$(SSH_AUTH_SOCK="$sock" ssh-add -l 2>/dev/null | grep -c .) || ident=0
+        [ "$ident" = 0 ] || die "refusing to run: $ident deploy key(s) reach this workspace through
+    $sock, so an agent in here could push. The switch is the host's:  wk push off"
+    fi
+
+    code=$(curl -sS -m 20 -o /dev/null -w '%{http_code}' \
+               -H 'Authorization: Basic d2s6d2s=' \
+               https://api.github.com/user 2>/dev/null) || code=""
+    [ "$code" = 401 ] || die "refusing to run: an authenticated GitHub API call from this workspace
+    answered '${code:-nothing}' where it must answer 401, so an agent in here
+    could post. The switch is the host's:  wk push off"
+
+    info "measured in here: the agent holds nothing and the API refuses -- an agent
+  in this workspace can publish neither a push nor a comment"
+}
+
 push_hold_back() { # <name>
+    if in_workspace; then push_measure_here; return 0; fi
     push_switch status || return 0
     PUSH_WAS_ON=1
     warn "git push is ON -- turning it off while the agent runs in '$1'"
@@ -156,6 +198,18 @@ rc_start() {
         info "'$name' claude remote-control already running, $(rc_minutes "$name") minutes, log at $(status_field "$sf" log)"
         return 0
     fi
+
+    # Before the spawn, because the spawn's own answer to this is to start,
+    # print "Remote Control requires a full-scope login token" and exit --
+    # which the evidence check below would then report as a server that died,
+    # with the reason three lines deep in a log. The inference-only token
+    # (`wk key set claude`) is not a substitute: remote control refuses it by
+    # scope, measured.
+    wk_agent_secret_present claude-login \
+        || die "'$name' has no claude.ai login credential, and remote control refuses
+    anything less -- a 'claude setup-token' token is inference-only.
+    On this machine:  claude auth login   (once, if you have not)
+                      wk key set claude-login"
 
     log=$(rc_log "$name"); pidf=$(rc_pidfile "$name")
     t_exec "$name" mkdir -p "$(t_home "$name")" >/dev/null 2>&1 || true

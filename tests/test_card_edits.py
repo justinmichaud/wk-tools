@@ -695,7 +695,7 @@ exec "$@"
             cp = bash(f'''
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/disk.sh"
-MACH_NAME=testmach
+NODE_NAME=testmach
 DISK_DRY=""
 CARD_PRIV={binp}/wk-card-priv
 m_ssh() {{ bash -c "$*"; }}
@@ -735,7 +735,7 @@ disk_write_source /dev/sdX {reader or f"cat {src}"!r} {filter_!r} {meta}
         cp = bash(f'''
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/disk.sh"
-MACH_NAME=testmach
+NODE_NAME=testmach
 DISK_DRY=""
 m_ssh() {{ case "$*" in *"command -v"*) return 1 ;; esac; echo "wrote it anyway"; }}
 disk_write_source /dev/sdX "cat /dev/null" "xz -dc" {self.tmp}/meta
@@ -764,7 +764,7 @@ class TestEjectWithoutUdisks(WkTest):
         cp = bash(f'''
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/disk.sh"
-MACH_NAME=testmach
+NODE_NAME=testmach
 DISK_DRY=""
 m_ssh() {{ case "$*" in *udisksctl*) return 1 ;; esac; }}
 disk_eject /dev/sdX
@@ -806,7 +806,7 @@ class TestDryRunIsTheSameSteps(WkTest):
 . "{REPO}/boot/machines.sh"
 . "{REPO}/lib/image.sh"
 . "{REPO}/boot/disk.sh"
-MACH_NAME=testmach
+NODE_NAME=testmach
 DISK_DRY={dry!r}
 card_priv() {{ echo "card_priv should not have run: $*" >&2; exit 9; }}
 m_ssh() {{ echo "m_ssh should not have run: $*" >&2; exit 9; }}
@@ -913,7 +913,7 @@ class TestTheWriteStaysAddressedToTheReader(WkTest):
     """A card is written by the machine holding the reader, for whatever board
     the image is for -- rarely the same machine. Composing the units needs the
     *image* machine's driver (its self-disarm), so that lookup happens in a
-    subshell: MACH_* is what every card edit is addressed to, and loading
+    subshell: NODE_* is what every card edit is addressed to, and loading
     another machine into this shell sends the rest of the write to the wrong
     board."""
 
@@ -938,7 +938,7 @@ machine_load {machine}
 IMG_MACHINE=rpi3     # the image is for another board, whose ssh name differs
 stage_units {seed} "$(_self_disarm_for "$IMG_MACHINE")" >/dev/null 2>&1
 printf 'name=%s ssh=%s role=%s driver=%s\n' \
-    "$MACH_NAME" "$MACH_SSH" "$MACH_ROLE" "$MACH_DRIVER"
+    "$NODE_NAME" "$NODE_SSH" "$NODE_ROLE" "$NODE_DRIVER"
 """)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(
@@ -1054,7 +1054,7 @@ class TestBootCheckThatCannotBeAsked(WkTest):
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
 . "{REPO}/lib/image.sh"
-MACH_NAME=rescue
+NODE_NAME=rescue
 DISK_DRY=""
 card_priv() {{ printf '%s\\n' {helper_out!r}; return {rc}; }}
 disk_check_boot_files /dev/sdX@second rpi3 some.dtb && echo CONTINUED

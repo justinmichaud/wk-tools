@@ -338,23 +338,26 @@ fi
 
 # The ssh aliases that select a deploy key per fork, as an ssh_config body.
 # One key per fork and both forks on github.com, so an alias per fork is
-# the only way ssh will offer the right one. Needed in three places (a
-# container's ~/.ssh/config, a build machine's config, a macOS guest's), so
-# it lives here with wk_push_forks rather than being retyped at each.
+# the only way ssh will offer the right one. Needed in three places (the
+# config every container includes, a build machine's config, a macOS guest's),
+# so it lives here with wk_push_forks rather than being retyped at each.
 #
-#   wk_ssh_alias_blocks <dir> [<identity prefix>] [<ProxyCommand>]
+#   wk_ssh_alias_blocks <dir> <prefix> <suffix> <agent-sock> [<ProxyCommand>]
 #
-# The identity is <dir>/<prefix><remote>. The prefix is the store's own
-# `build_key_` by default, because a machine that reads the keys where they
-# live names them that; a workspace that holds copies or links instead names
-# them `id_<remote>` in its own ~/.ssh.
+# The identity is <dir>/<prefix><remote><suffix>. With an agent socket that is
+# the *public* half and the private one is never on this side of the boundary
+# at all: ssh offers the public key, `IdentitiesOnly` keeps it to that one, and
+# the agent outside the workspace makes the signature (push_agent_load below).
+# Without one -- a shared build box, a plain checkout with no container and so
+# nothing to keep a key away from -- it is the private half and there is no
+# IdentityAgent line.
 #
 # The ProxyCommand is for a machine whose only route to github.com is an HTTP
 # CONNECT proxy. A container leaves it empty: its catch-all `Host *` block
 # already carries one, and ssh takes the first value it sees for a keyword. A
 # macOS guest has no such block and takes it per alias.
 wk_ssh_alias_blocks() {
-    local dir="$1" prefix="${2:-build_key_}" proxy="${3:-}"
+    local dir="$1" prefix="${2:-build_key_}" suffix="${3:-}" agent="${4:-}" proxy="${5:-}"
     wk_push_forks | while read -r remote repo alias; do
         [ -n "$remote" ] || continue
         cat <<EOF
@@ -362,10 +365,11 @@ wk_ssh_alias_blocks() {
 Host $alias
     HostName github.com
     User git
-    IdentityFile $dir/$prefix$remote
+    IdentityFile $dir/$prefix$remote$suffix
     IdentitiesOnly yes
     StrictHostKeyChecking accept-new
 EOF
+        [ -z "$agent" ] || printf '    IdentityAgent %s\n' "$agent"
         [ -z "$proxy" ] || printf '    ProxyCommand %s\n' "$proxy"
     done
 }
@@ -378,45 +382,232 @@ EOF
 # host on every start and taken away again the same way -- the arrangement
 # the agent credentials below already have, for the same reason.
 
-# The store belonging to this *machine*, which is where both the deploy keys
-# and the agent credentials below live. A loaded target driver may have pointed
+# The store belonging to this *machine*, which is where the mirror, the
+# snapshots and the workspaces live. A loaded target driver may have pointed
 # $WK_STORE at its own state (targets/vm.sh does, at the host's XDG state
-# directory), and they are not there: they are where `wk key register` and `wk
-# key set` put them. load_target records the machine's own store in
-# WK_STORE_DEFAULT before overriding.
+# directory); load_target records the machine's own store in WK_STORE_DEFAULT
+# before overriding.
 wk_machine_store() { printf '%s' "${WK_STORE_DEFAULT:-$WK_STORE}"; }
 
-# Is that store on this machine? store_is_local asks about $WK_STORE, so ask
-# it about the right one. Both halves of the store's secrets ask this, so the
-# forwarding decision is made in one place.
-wk_push_store_local() ( WK_STORE=$(wk_machine_store); store_is_local )
-
-# One fork's private key, or nothing at all. Three different things read as
-# nothing -- push is off, no key was ever registered, or the store is not
-# readable from here (a stopped podman machine) -- and a guest must not hold
-# a key in any of them, so they are not told apart here. Which one it was is
-# `wk push status`'s question.
-#
-# On a macOS workstation the keys are inside the podman machine, a path this
-# host cannot read at all, so the read is forwarded there. Never logged and
-# never an argument: the caller streams it on stdin.
-wk_push_key() { # <fork>
-    _wk_secret_read "$(wk_machine_store)/secrets/build_key_$1"
+# The one directory this machine's credentials live in -- deploy keys and
+# agent tokens alike -- in the spelling that reads them from *here*. Two
+# spellings, one set of bytes: on a macOS workstation they are on the host
+# and mounted into the podman machine at $WK_STORE/secrets
+# (host/macos/machine.sh), so out here the host path is the only readable one
+# and in there the store path is; on a Linux workstation and a build machine
+# the store is this machine's own and the two are the same path.
+wk_secrets_dir() {
+    if is_macos && [ -z "${WK_IN_VM:-}" ]; then
+        wk_host_secrets
+    else
+        printf '%s/secrets' "$(wk_machine_store)"
+    fi
 }
 
-# One reader for everything under the machine store's secrets/ -- deploy keys
-# and agent credentials alike. On a macOS workstation the store is inside the
-# podman machine, a path this host cannot read at all, so the read is
-# forwarded there; absent is not an error, and every caller reports its own
+# Where every private half lives, always: beside the secrets directory and
+# never inside it, since that one is mounted into every workspace. Nothing
+# mounts this one anywhere, so no workspace can read a key byte whichever way
+# the switch is set -- what `wk push` moves is the agent's contents, not a file
+# (push_agent_load below). The public halves stay in the secrets directory,
+# where `wk key show` and every workspace's ssh config find them.
+wk_push_held_dir() { printf '%s/push-keys' "$(dirname "$(wk_secrets_dir)")"; }
+
+# One fork's private key, or nothing at all when none was ever registered.
+# Read only by push_agent_load, which streams it into `ssh-add -` on the
+# machine holding the agent: never logged, never an argument, and never
+# written to a file on any machine but this one.
+wk_push_key() { # <fork>
+    _wk_secret_read "$(wk_push_held_dir)/build_key_$1"
+}
+
+# One reader for everything in the secrets directory -- deploy keys and agent
+# credentials alike. Absent is not an error, and every caller reports its own
 # absence in its own words.
 _wk_secret_read() { # <path>
-    if wk_push_store_local; then
-        [ -r "$1" ] && cat "$1"
-    else
-        podman machine ssh "${WK_MACHINE:-wk}" -- \
-            "cat $(sh_quote "$1") 2>/dev/null" </dev/null 2>/dev/null
-    fi
+    [ -r "$1" ] && cat "$1"
     return 0
+}
+
+# --- the switch: two credentials, neither ever inside a workspace ------------
+# `wk push on|off` throws one switch over both things a publish needs, and
+# neither of them is a file a workspace can reach:
+#
+#   ssh    an ssh-agent on the machine that runs the workspaces holds the
+#          private halves. A container gets one unix socket (t_agent_sock,
+#          targets/container.sh) and a guest gets that socket forwarded; the
+#          key bytes stay in wk_push_held_dir on this machine.
+#   api    the injector that terminates TLS for api.github.com
+#          (container/proxy/github-inject.py) reads the token from a file on
+#          that same machine and puts it in the Authorization header. The
+#          workspace holds a placeholder.
+#
+# Every function below takes an *exec function* -- a command that runs one
+# shell command line on the machine holding the agent, with stdin passed
+# through -- and a path as that machine spells it. Three machines, one
+# implementation: the podman machine or this Linux workstation
+# (push_agent_exec), and a macOS guest's host (targets/vm.sh's `_ssh`).
+#
+# There is no state file anywhere in this: `ssh-add -l` against the socket is
+# the evidence, and it is all any reader consults.
+
+# The socket the machine that runs the containers keeps its agent on: `%t/wk`
+# in wk-ssh-agent.service (host/macos/vmtools.sh, host/linux/sdk.sh), which is
+# the same directory every container bind-mounts at /run/wk. A shell word for
+# the far side to expand rather than a resolved path: this host is not that
+# machine, and /run/user/501 does not exist on macOS.
+#
+# WK_PUSH_AGENT_SOCK: tests point this at an ssh-agent of their own, so every
+# arm of `wk push` is reachable from the suite without the machine's own agent.
+push_agent_machine_sock() {
+    if [ -n "${WK_PUSH_AGENT_SOCK:-}" ]; then
+        printf '%s' "$WK_PUSH_AGENT_SOCK"
+    else
+        printf '%s' '${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/ssh-agent.sock'
+    fi
+}
+
+# The file the injector reads the token from, on that same machine. Under the
+# store root and not under $XDG_RUNTIME_DIR/wk: that directory is the one
+# containers bind-mount, and $WK_STORE itself is not mounted anywhere (only
+# named subdirectories of it are, targets/container.sh).
+#
+# WK_PUSH_PAT_FILE: the same, for the api half.
+push_agent_machine_pat() {
+    if [ -n "${WK_PUSH_PAT_FILE:-}" ]; then
+        printf '%s' "$WK_PUSH_PAT_FILE"
+    else
+        printf '%s' '"${WK_STORE:-/var/lib/wk}"/push-github-pat'
+    fi
+}
+
+# The machine holding this machine's workspaces, as something to run a command
+# on. On a Linux workstation and a build box that is this machine; on macOS it
+# is the podman machine, where the containers, their /run/wk mount, the agent
+# and the injector all are.
+push_agent_exec() { # <shell command line>
+    if store_is_local; then
+        sh -c "$1"
+    else
+        podman machine ssh "${WK_MACHINE:-wk}" -- "$1"
+    fi
+}
+
+# Is there an agent listening there at all? `ssh-add -l` exits 1 for "the agent
+# has no identities" and 2 for "could not open a connection to your
+# authentication agent" -- the difference between the switch being off and
+# there being no switch, which is the one thing a caller must not conflate.
+push_agent_ensure() { # <execfn> <sock>
+    local rc
+    rc=$("$1" "SSH_AUTH_SOCK=$2 ssh-add -l >/dev/null 2>&1; echo \$?" \
+             </dev/null 2>/dev/null | tr -dc '0-9')
+    [ "$rc" = 0 ] || [ "$rc" = 1 ]
+}
+
+# What the agent holds, one `ssh-add -l` line each: a fingerprint and the
+# key's own comment, which is what `wk key ensure` wrote (`wk deploy key for
+# <repo>`). Public information -- an agent has no way to hand back a private
+# half, which is the whole reason the keys are in one.
+push_agent_list() { # <execfn> <sock>
+    local out
+    out=$("$1" "SSH_AUTH_SOCK=$2 ssh-add -l 2>/dev/null" </dev/null 2>/dev/null) || out=""
+    printf '%s' "$out" | tr -d '\r' | grep -v 'has no identities' || true
+}
+
+# Load every private half this machine holds, one `<fork> loaded|no-key|FAILED`
+# line each. `ssh-add -` reads the key from stdin: the bytes are never an
+# argument (`ps` shows those to everyone on the machine) and never land in a
+# file on the far side, which is the property that makes this different from
+# copying a key in.
+push_agent_load() { # <execfn> <sock>
+    local execfn="$1" sock="$2" remote key
+    for remote in $(wk_push_forks | awk 'NF {print $1}'); do
+        key=$(wk_push_key "$remote")
+        if [ -z "$key" ]; then
+            printf '%s no-key\n' "$remote"
+            continue
+        fi
+        # The trailing newline the command substitution stripped: ssh-add
+        # refuses a key that does not end in one.
+        if printf '%s\n' "$key" \
+            | "$execfn" "SSH_AUTH_SOCK=$sock ssh-add - >/dev/null 2>&1"; then
+            printf '%s loaded\n' "$remote"
+        else
+            printf '%s FAILED\n' "$remote"
+        fi
+    done
+}
+
+# The off position for the ssh half. `ssh-add -D` drops every identity at
+# once, including one added by hand: an agent this switch cannot empty is an
+# agent a workspace can still push with.
+push_agent_clear() { # <execfn> <sock>
+    "$1" "SSH_AUTH_SOCK=$2 ssh-add -D >/dev/null 2>&1" </dev/null
+}
+
+# The token `wk key set github-pat` holds, in the same never-mounted directory
+# as the private key halves and for the same reason: a credential that can
+# publish must not be inside anything an agent runs in.
+wk_github_pat_path() { printf '%s/github-pat' "$(wk_push_held_dir)"; }
+wk_github_pat() { _wk_secret_read "$(wk_github_pat_path)" | sed -n '1p'; }
+
+# The account the injector authenticates as, from the fork this machine pushes
+# to (wk_push_forks) rather than a second thing to store: the token is that
+# account's, so a username kept separately could only ever disagree with it.
+wk_github_user() { wk_push_forks | awk 'NF {print $2; exit}' | cut -d/ -f1; }
+
+# The api half of the switch: the token goes to the file the injector reads,
+# 0600 and on stdin, or the file is removed. Removed rather than emptied --
+# the injector answers 401 on a file that is not there, which is the same
+# refusal GitHub would give and needs no second state to mean "off".
+push_agent_pat_write() { # <execfn> <path>
+    local pat; pat=$(wk_github_pat)
+    [ -n "$pat" ] || return 1
+    printf '%s\n' "$pat" | "$1" "umask 077 && cat > $2"
+}
+
+push_agent_pat_clear() { # <execfn> <path>
+    "$1" "rm -f $2" </dev/null
+}
+
+# Whether that file is there, asked of the machine: `wk push status`'s evidence
+# for the api half, the way `ssh-add -l` is its evidence for the ssh half.
+push_agent_pat_present() { # <execfn> <path>
+    local out
+    out=$("$1" "test -s $2 && echo yes" </dev/null 2>/dev/null) || out=""
+    [ "$out" = yes ]
+}
+
+# What a workspace needs in order to *use* the switch, as opposed to what the
+# switch withholds: the ssh config every container includes (`Include
+# /secrets/ssh_config`, container/firstrun.sh) and the GitHub account name the
+# injector authenticates as. Neither is a credential -- one names public halves
+# and a socket, the other is a username -- so both are written whichever
+# position the switch is in.
+#
+# Regenerated by `wk push on|off` rather than at container creation, so a
+# rotated key, an added fork or a changed account reaches every workspace that
+# already exists at once. <dir> is the secrets directory as *this* machine
+# spells it (wk_secrets_dir); the paths inside the file are the container's
+# spelling of the same bytes, /secrets.
+push_agent_publish_config() { # <dir> <agent-sock>
+    local dir="$1" sock="$2"
+    ensure_dir "$dir" 0700 >/dev/null
+    { printf '%s\n' "# wk: written by 'wk push on|off' (push_agent_publish_config," \
+                    "# lib/store.sh). One alias per fork, because GitHub takes one deploy" \
+                    "# key per repository and both forks live on github.com. The identity is" \
+                    "# a public half; the private one is in an ssh-agent outside this" \
+                    "# workspace, and whether it is loaded there is what 'wk push' switches."
+      wk_ssh_alias_blocks /secrets build_key_ .pub "$sock"
+    } > "$dir/ssh_config.new" || return 1
+    chmod 0644 "$dir/ssh_config.new"
+    mv "$dir/ssh_config.new" "$dir/ssh_config"
+
+    # Read by container/proxy/ensure-bridge.sh into $GITHUB_COM_USERNAME. A
+    # file rather than a `bash -c` into lib/store.sh, because that wrapper runs
+    # on every single command a workspace executes.
+    printf '%s\n' "$(wk_github_user)" > "$dir/github-user.new" || return 1
+    chmod 0644 "$dir/github-user.new"
+    mv "$dir/github-user.new" "$dir/github-user"
 }
 
 # Which branches the mirror actually carries. WebKit/WebKit has ~920
@@ -434,13 +625,97 @@ wk_mirror_branches() {
 # that is missing exactly when it is wanted.
 wk_mirror_default_remotes() { wk_remotes | awk 'NF {printf "%s%s", sep, $1; sep=" "} END {print ""}'; }
 
+# --- refreshing a mirror, wherever it is ------------------------------------
+# Every mirror in the fleet is made and fetched by this one snippet: the one
+# beside the snapshot here (`wk sync --tools`), the one on a build box
+# (targets/remote.sh) and the one in a macOS guest (vm/provision-base.sh,
+# t_sync). Emitted as portable `sh` rather than run, because two of the three
+# are on the far side of an ssh -- and because a workspace fetching from one
+# of them must find the layout every other one has (mirror_refspecs, cmd/sync):
+# origin's branches as the mirror's OWN refs/heads, every other upstream
+# namespaced under refs/remotes/<remote>/.
+#
+# --no-tags: a fetch follows every tag reachable from what it brings unless
+# told not to, which is how a mirror carrying one branch ends up carrying
+# every tag four upstreams have.
+# gc.auto 0: workspaces borrow this repository's objects through `--shared`
+# clones and hardlinked snapshots, and a repack underneath one breaks it.
+#
+# One `mirror-fetch <remote> ok|FAILED` line per upstream, and it exits 0 even
+# when one failed: an unreachable fork must not abort the sync that has the
+# other three remotes -- and a snapshot -- still to do. The caller decides
+# what a missing branch means (cmd/sync refuses to publish a snapshot
+# without origin's main).
+mirror_refresh_script() { # <mirror-dir>
+    local name url b
+    printf 'set -e\nM=%s\n' "$(sh_quote "$1")"
+    printf 'if [ ! -d "$M" ]; then\n'
+    printf '    git init --bare -q "$M"\n'
+    printf '    git -C "$M" config gc.auto 0\n'
+    printf 'fi\n'
+    wk_remotes | while read -r name url; do
+        [ -n "$name" ] || continue
+        printf 'git -C "$M" remote set-url %s %s 2>/dev/null || git -C "$M" remote add %s %s\n' \
+            "$name" "$(sh_quote "$url")" "$name" "$(sh_quote "$url")"
+        printf 'git -C "$M" config remote.%s.tagOpt --no-tags\n' "$name"
+        if [ "$name" = origin ]; then
+            printf 'git -C "$M" config --unset-all remote.origin.fetch 2>/dev/null || true\n'
+            for b in $(wk_mirror_branches); do
+                printf 'git -C "$M" config --add remote.origin.fetch %s\n' \
+                    "$(sh_quote "+refs/heads/$b:refs/heads/$b")"
+            done
+        else
+            printf 'git -C "$M" config --replace-all remote.%s.fetch %s\n' \
+                "$name" "$(sh_quote "+refs/heads/*:refs/remotes/$name/*")"
+        fi
+    done
+    # A bare repository has no HEAD by default, and `git clone` of one warns
+    # "remote HEAD refers to nonexistent ref, unable to checkout".
+    printf 'git -C "$M" symbolic-ref HEAD %s\n' \
+        "$(sh_quote "refs/heads/$(wk_mirror_branches | awk '{print $1}')")"
+    # One fetch per remote rather than `remote update`, so one unreachable
+    # upstream leaves the others fetched. --prune, or a branch deleted
+    # upstream stays here forever.
+    printf 'for r in %s; do\n' "$(wk_mirror_default_remotes)"
+    printf '    if git -C "$M" fetch --prune -q "$r" 2>/dev/null; then\n'
+    printf '        echo "mirror-fetch $r ok"\n'
+    printf '    else echo "mirror-fetch $r FAILED"\n    fi\n'
+    printf 'done\n'
+}
+
+# `git fetch origin <branch>` in a checkout, mirror first: a branch the
+# target's mirror already carries costs no network at all, and one it does not
+# (any of WebKit/WebKit's other ~920) is asked of origin. <mirror> empty is a
+# target with no mirror (t_mirror_dir), which asks origin for everything.
+#
+# The mirror's own refs/heads are origin's branches -- that asymmetry is the
+# mirror's layout (mirror_refresh_script above), not this caller's -- so what
+# it carries is what `refs/heads/<branch>` answers.
+origin_branch_fetch_step() { # <branch> <mirror-dir>
+    local branch="$1" mirror="$2"
+    local net; net="git fetch -q origin $(sh_quote "$branch")"
+    if [ -z "$mirror" ]; then
+        printf '%s' "$net"
+        return 0
+    fi
+    printf 'if [ -d %s ] && git -C %s rev-parse --verify --quiet %s >/dev/null 2>&1
+        then git fetch -q %s %s
+        else %s
+        fi' \
+        "$(sh_quote "$mirror")" "$(sh_quote "$mirror")" \
+        "$(sh_quote "refs/heads/$branch")" \
+        "$(sh_quote "$mirror")" \
+        "$(sh_quote "+refs/heads/$branch:refs/remotes/origin/$branch")" \
+        "$net"
+}
+
 # --- PR / pull-request refs, fetched once into the mirror -------------------
 # `wk pr` and `wk new --pr` want a fork's branch, or an upstream's numbered
 # pull request, available to every workspace without a fetch per re-run --
 # the same idea wk_mirror_default_remotes serves for origin/wpe/the forks,
 # for the one ref a workspace actually wants. Fetched under
 # refs/remotes/pr/... so it's never mistaken for one of the mirror's own
-# branches. A workspace then fetches this one ref from /mirror, the same
+# branches. A workspace then fetches this one ref from the mirror, the same
 # local, instant path `wk sync` gives it for main. See wk_pr_checkout below.
 
 # The path a PR ref lands under, in the mirror and in a workspace's own
@@ -532,14 +807,18 @@ pr_parse_spec() {  # <spec>
 wk_pr_checkout() {  # <name> <spec>
     local name="$1" spec="$2"
     local src repo url branch remote head_sha local_sha dirty reset ahead
-    local probe found n mirror_ok mirror_ref add_remote="" src_ref net_refspec fetch_step
+    local probe found n mirror_ok mirror_dir mirror_ref add_remote="" src_ref net_refspec fetch_step
 
     pr_parse_spec "$spec"
     src=$(t_src "$name")
-    # Where the workspace fetches from is a property of its target: a container
-    # reads this machine's mirror (bind-mounted as /mirror), so the branch is
-    # fetched into the mirror once and every workspace takes it from there; a
-    # vm or remote workspace has no path to that mirror and fetches from GitHub.
+    mirror_dir=$(t_mirror_dir "$name")
+    # Whether this run can put the PR ref where the workspace will read it,
+    # which is not the same as the target having a mirror (t_mirror_dir): a
+    # container's is this machine's own, so one fetch serves every container
+    # here, while a guest's and a build box's are on the far side, where this
+    # end cannot fetch into them -- and each of those mirrors serves one
+    # workspace anyway, so a ref in it would buy nothing over the one fetch of
+    # one ref the checkout does below.
     mirror_ok=""
     [ "${WK_TARGET_KIND:-}" = container ] && store_is_local && mirror_ok=1
 
@@ -673,10 +952,11 @@ $(printf '%s\n' "$found" | sed 's/^/    /')
         $fetch_step"
     fi
     if [ -n "$mirror_ok" ]; then
-        # A workspace with no /mirror, or one where this run's fetch into
-        # the mirror didn't happen, falls through to the network path above.
-        fetch_step="if [ -d /mirror/WebKit.git ] && git -C /mirror/WebKit.git rev-parse --verify --quiet $(sh_quote "$mirror_ref") >/dev/null 2>&1
-        then git fetch --quiet /mirror/WebKit.git $(sh_quote "$mirror_ref:refs/remotes/$remote/$branch")
+        # A workspace whose mirror is not mounted after all, or one where this
+        # run's fetch into it didn't happen, falls through to the network path
+        # above.
+        fetch_step="if [ -d $(sh_quote "$mirror_dir") ] && git -C $(sh_quote "$mirror_dir") rev-parse --verify --quiet $(sh_quote "$mirror_ref") >/dev/null 2>&1
+        then git fetch --quiet $(sh_quote "$mirror_dir") $(sh_quote "$mirror_ref:refs/remotes/$remote/$branch")
         else $fetch_step
         fi"
     fi
@@ -717,7 +997,12 @@ store_init() {
     # and podman refuses to start a container whose mount source is missing.
     ensure_dir "$WK_STORE/bench"
     ensure_dir "$WK_STORE/skills"
-    ensure_dir "$WK_STORE/secrets" 0700
+    # This machine's own credentials on a Linux workstation; inside the podman
+    # machine both paths are the host's directories, mounted (wk_secrets_dir,
+    # wk_agent_rw_dir). The writable one is bind-mounted at container creation
+    # too, so it is here for the same reason bench/ is.
+    ensure_dir "$(wk_secrets_dir)" 0700
+    ensure_dir "$(wk_agent_rw_dir)" 0700
 }
 
 base_path() { echo "$(wk_base_dir)/$1/WebKit"; }
@@ -829,30 +1114,58 @@ unreferenced_bases() {
 }
 
 # --- the agents' credentials --------------------------------------------------
-# One secret per name per machine, in the store, serving every workspace on this
-# machine. A container reads them live through the read-only /secrets mount, so
-# rotating one takes effect in every container at once; a macOS guest and a
-# shared build box are handed a copy when their workspace comes up, since
-# neither can mount it.
+# One secret per name per machine, serving every workspace here. A container
+# reads them live through a mount, so rotating one takes effect in every
+# container at once; a macOS guest and a shared build box are handed a copy
+# when their workspace comes up, since neither can mount anything of ours.
 #
 # They are credentials, not facts about the machine, so a stored copy is the
 # point rather than a smell -- the same trade `wk key tailnet` and the deploy
 # keys make. `wk key set <name>` is what puts one here.
 #
 # The names are a closed set because each one is delivered and read *by name*:
-# container/firstrun.sh links every row into the workspace, shell/bashrc exports
-# each into the variable its agent reads, and cmd/key asks for it with wording
-# of its own. A row with no reader in those files is a secret nothing can use,
-# which is why this table is the one authority and tests/test_pi_agent.py binds
-# the readers back to it.
+# container/firstrun.sh links every value row into the workspace, shell/bashrc
+# exports each into the variable its agent reads, and cmd/key asks for it with
+# wording of its own. A row with no reader in those files is a secret nothing
+# can use, which is why this table is the one authority and
+# tests/test_pi_agent.py binds the readers back to it.
 #
-#   <name> <file under secrets/> <file in the workspace's home> <the variable>
+# Two kinds, because one credential is not a value an agent reads out of the
+# environment:
+#
+#   value  one line, in the read-only secrets directory, exported by
+#          shell/bashrc into the named variable.
+#   file   a file the agent's own tool *rewrites in place*, in the writable
+#          directory (wk_agent_rw_dir below); the variable column is `-`,
+#          since nothing exports it. See the Claude login credential there.
+#
+#   <name> <file in its directory> <file in the workspace's home> <the variable> <kind>
 wk_agent_secrets() {
     cat <<'EOF'
-claude   claude-token  .wk-agent-token  CLAUDE_CODE_OAUTH_TOKEN
-litellm  litellm-key   .wk-litellm-key  LITELLM_API_KEY
+claude        claude-token        .wk-agent-token             CLAUDE_CODE_OAUTH_TOKEN  value
+litellm       litellm-key         .wk-litellm-key             LITELLM_API_KEY          value
+claude-login  .credentials.json   .claude/.credentials.json   -                        file
 EOF
 }
+
+# The one directory on this machine a *workspace* may write, and the only
+# reason there is one: a claude.ai login credential holds a refresh token,
+# and the Claude CLI spends it and writes the rotated one back over the same
+# file (measured in the CLI itself: the refresh response's refreshToken
+# replaces the stored one, and a superseded one is answered `invalid_grant`
+# and blanked on disk). So every holder on this machine has to be looking at
+# one set of bytes -- a copy per workspace would be a copy that the first
+# refresh anywhere kills.
+#
+# Beside the secrets directory and never inside it, the same shape
+# wk_push_held_dir has and for the mirror-image reason: that one is mounted
+# read-only into every workspace and must stay unwritable.
+#
+# The Claude CLI's store directory, handed to it as CLAUDE_SECURESTORAGE_CONFIG_DIR
+# (shell/bashrc), which is also where it puts the `.storage-write` lock it
+# takes around a refresh -- so pointing every container at this one directory
+# is what makes concurrent refreshes serialize rather than race.
+wk_agent_rw_dir() { printf '%s/agent-rw' "$(dirname "$(wk_secrets_dir)")"; }
 
 wk_agent_secret_names() { wk_agent_secrets | awk 'NF { print $1 }'; }
 
@@ -863,51 +1176,62 @@ wk_agent_secret_field() { # <name> <column>
     wk_agent_secrets | awk -v n="$1" -v c="$2" '$1 == n { print $c; exit }'
 }
 wk_agent_secret_known() { [ -n "$(wk_agent_secret_field "$1" 1)" ]; }
+wk_agent_secret_kind() { wk_agent_secret_field "$1" 5; }
 
-# wk_machine_store, not $WK_STORE: there is one set of these per *machine*, and
-# a loaded target driver may have pointed $WK_STORE at its own state (targets/
-# vm.sh does, at the host's XDG state directory). Reading them from there would
-# look in a directory `wk key set` never writes to and find nothing, in the one
-# command -- `wk vm start` -- that most needs to find them.
+# wk_secrets_dir and wk_agent_rw_dir, not $WK_STORE: there is one set of these
+# per *machine*, and a loaded target driver may have pointed $WK_STORE at its
+# own state (targets/vm.sh does, at the host's XDG state directory). Reading
+# them from there would look in a directory `wk key set` never writes to and
+# find nothing, in the one command -- `wk vm start` -- that most needs to find
+# them. Which of the two directories is the row's kind, and nothing else.
 wk_agent_secret_path() { # <name>
     local f; f=$(wk_agent_secret_field "$1" 2)
     [ -n "$f" ] || return 1
-    printf '%s/secrets/%s' "$(wk_machine_store)" "$f"
+    if [ "$(wk_agent_secret_kind "$1")" = file ]; then
+        printf '%s/%s' "$(wk_agent_rw_dir)" "$f"
+    else
+        printf '%s/%s' "$(wk_secrets_dir)" "$f"
+    fi
 }
 
-# The secret itself, or nothing -- its first line, since a credential is one
-# line and a trailing newline in the file is not part of it. Absent is not an
-# error: a workspace with no Claude token asks the person to /login, which
+# The secret itself, or nothing -- its first line, since a value credential is
+# one line and a trailing newline in the file is not part of it. Absent is not
+# an error: a workspace with no Claude token asks the person to /login, which
 # still works, and one with no LiteLLM key has an agent that cannot reach that
-# endpoint.
+# endpoint. A file row is not a value and is read with wk_agent_secret_bytes.
 wk_agent_secret() { # <name>
     local p; p=$(wk_agent_secret_path "$1") || return 0
     _wk_secret_read "$p" | sed -n '1p'
 }
 
+# Every byte of it, for a file row: a credentials file is a document its tool
+# parses, not a line something exports, and truncating it to the first line
+# would hand a workspace half a JSON object.
+wk_agent_secret_bytes() { # <name>
+    local p; p=$(wk_agent_secret_path "$1") || return 0
+    _wk_secret_read "$p"
+}
+
+# Is there one at all, either kind -- the question every gate actually asks
+# ("can this workspace authenticate?"), answered without reading the
+# credential into a variable to look at its length.
+wk_agent_secret_present() { # <name>
+    local p; p=$(wk_agent_secret_path "$1") || return 1
+    [ -s "$p" ]
+}
+
 # Store it, reading the value from stdin so it is never an argument -- an
-# argument is visible in `ps` to everyone on the machine. Same two cases as
-# the read: here, or forwarded into the VM that holds the store.
+# argument is visible in `ps` to everyone on the machine.
 wk_agent_secret_store() { # <name>
     local p; p=$(wk_agent_secret_path "$1") || return 1
-    if wk_push_store_local; then
-        mkdir -p "$(dirname "$p")" || return 1
-        ( umask 077; cat > "$p" ) || return 1
-        chmod 0600 "$p" 2>/dev/null || true
-    else
-        podman machine ssh "${WK_MACHINE:-wk}" -- \
-            "mkdir -p $(sh_quote "$(dirname "$p")") && umask 077 && cat > $(sh_quote "$p") && chmod 0600 $(sh_quote "$p")" \
-            || return 1
-    fi
+    ensure_dir "$(dirname "$p")" 0700
+    ( umask 077; cat > "$p" ) || return 1
+    chmod 0600 "$p" 2>/dev/null || true
 }
 
 # Withdraw it. Every workspace loses it on its next start -- a container
-# immediately, since its link points at this file.
+# immediately, since its link or its mount points at this file.
 wk_agent_secret_clear() { # <name>
     local p; p=$(wk_agent_secret_path "$1") || return 1
-    if wk_push_store_local; then
-        rm -f "$p"
-    else
-        podman machine ssh "${WK_MACHINE:-wk}" -- "rm -f $(sh_quote "$p")" </dev/null
-    fi
+    rm -f "$p"
 }

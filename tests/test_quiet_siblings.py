@@ -34,13 +34,13 @@ class TestQuietSiblings(unittest.TestCase):
 
     def _machine(self, name, net="wifi", bridge="", bench=True):
         (self.dir / f"{name}.conf").write_text(
-            f'MACH_SSH="{name}-rescue"\n'
-            + (f'MACH_BENCH_SSH="{name}-bench"\n' if bench else "")
-            + f'MACH_NET={net}\nMACH_BRIDGE="{bridge}"\n'
-            'MACH_DRIVER=pi-sd\nMACH_DEVICE=/dev/mmcblk0\nMACH_ROOT=/dev/mmcblk0p2\n'
+            f'NODE_SSH="{name}-rescue"\n'
+            + (f'NODE_BENCH_SSH="{name}-bench"\n' if bench else "")
+            + f'NODE_NET={net}\nNODE_BRIDGE="{bridge}"\n'
+            'NODE_DRIVER=pi-sd\nNODE_DEVICE=/dev/mmcblk0\nNODE_ROOT=/dev/mmcblk0p2\n'
             # machine_load requires a note; without one the conf is refused
             # and the walk silently finds no siblings at all.
-            f'MACH_NOTE="{name}, a test fixture"\n'
+            f'NODE_NOTE="{name}, a test fixture"\n'
         )
 
     def _run(self, me, net, bridge, peers):
@@ -108,7 +108,7 @@ machine_quiet_siblings rpi4 wifi ""
         self.assertEqual(cp.stdout.strip(), "0 0", cp.stdout + cp.stderr)
 
     def test_the_caller_does_not_lose_its_own_machine(self):
-        """machine_load overwrites MACH_* as it walks, so the helper runs in a
+        """machine_load overwrites NODE_* as it walks, so the helper runs in a
         subshell; a caller that lost its own values would then report about
         the wrong board."""
         self._machine("rpi3")
@@ -118,9 +118,9 @@ set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
 wk_tailscale_peers() {{ printf 'rpi3-rescue\\t100.0.0.1\\tdown\\n'; }}
-MACH_SSH=rpi4-rescue
+NODE_SSH=rpi4-rescue
 machine_quiet_siblings rpi4 wifi "" >/dev/null
-echo "$MACH_SSH"
+echo "$NODE_SSH"
 ''', env={"WK_MACHINES_DIR": str(self.dir)})
         self.assertEqual(cp.stdout.strip(), "rpi4-rescue", cp.stdout + cp.stderr)
 

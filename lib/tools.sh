@@ -43,8 +43,9 @@ tools_head() {
     git -C "$WK_ROOT" rev-parse HEAD 2>/dev/null || return 1
 }
 
-# Uncommitted or untracked-but-not-ignored changes; ignored files are not
-# changes to this repository (a .DS_Store, a __pycache__, a per-machine conf).
+# Tracked changes only, staged or not; untracked files -- ignored or not
+# (a .DS_Store, a __pycache__, a per-machine conf, a new file not yet added)
+# -- are not changes to this repository.
 tools_committed() {
     local st
     if ! git -C "$WK_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
@@ -54,7 +55,7 @@ tools_committed() {
     Run wk from a clone:  git clone https://github.com/justinmichaud/wk-tools"
         return 1
     fi
-    st=$(git -C "$WK_ROOT" status --porcelain 2>/dev/null) || st=""
+    st=$(git -C "$WK_ROOT" status --porcelain --untracked-files=no 2>/dev/null) || st=""
     [ -n "$st" ] || return 0
     warn "wk-tools here has uncommitted changes, so there is no commit to put on a machine.
     A machine is given a commit and nothing else -- that is what lets

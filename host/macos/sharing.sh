@@ -6,7 +6,7 @@
 # machine-local state in `wk doctor`'s ledger, decided per machine by a
 # person -- `wk bench mac --preflight` prints the key to paste instead.
 
-# No machine name to look MACH_ROLE up with, so: does this host workspaces?
+# No machine name to look NODE_ROLE up with, so: does this host workspaces?
 # Always yes on macOS -- the only reason to run ./setup on a Mac is to build on it.
 _want_remote_login=1
 

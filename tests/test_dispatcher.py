@@ -638,8 +638,8 @@ class TestHelpNamesEveryWhereOverride(WkTest):
 
     def test_the_top_level_answer_is_still_there(self):
         """the command's own `where=` line comes first, then the overrides"""
-        lines = run("push", "-h").stdout.splitlines()
+        lines = run("bench", "-h").stdout.splitlines()
         top = [i for i, l in enumerate(lines) if l.startswith("  runs on: ")]
         self.assertEqual(len(top), 1, lines)
-        self.assertIn(self._prose("store"), lines[top[0]])
-        self.assertTrue(lines[top[0] + 1].startswith("    on, off, status: "), lines)
+        self.assertIn(self._prose("workspace"), lines[top[0]])
+        self.assertTrue(lines[top[0] + 1].startswith("    stage, staged, mac, "), lines)

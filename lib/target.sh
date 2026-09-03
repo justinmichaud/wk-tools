@@ -35,6 +35,10 @@
 #   t_cores/t_mem_mb   the resources the target actually has
 #   t_load             the load already on the target, for the polite sizing
 #   t_ccache_dir       where ccache keeps its cache inside the target
+#   t_mirror_dir <n>   the bare WebKit mirror a checkout *inside* this target
+#                      fetches from, as a path in the target. Empty means the
+#                      target has none, and every fetch in it goes to the
+#                      upstreams themselves
 #   t_store_init       create the host-side directories this target needs
 #   t_created <name>   is creation's completion marker there? (see .wk-ready)
 #   t_ready            block until a new workspace finished initialising
@@ -68,6 +72,10 @@ t_arch()       { echo native; }      # only the container driver differs; see li
 t_os()         { echo linux; }       # the platform a build here runs on: linux | macos
 t_tools()      { echo "/opt/wk-tools"; }
 t_ccache_dir() { echo "/ccache"; }   # inert on the Apple ports (no ccache)
+
+# No mirror by default: a target that has one names it, and a fetch in a
+# target that does not names the upstreams instead (ws_fetch_script, cmd/sync).
+t_mirror_dir() { echo ""; }          # t_mirror_dir <name>
 t_sync_tools() { :; }
 
 t_sync()       { :; }               # bring this target's own furniture up to date: its
@@ -89,6 +97,14 @@ t_ssh_prepare() { :; }   # point an editor at this target over ssh; nothing for 
 # with no ssh account of its own has no editor route at all.
 t_ssh_user()   { return 1; }
 t_ssh_proxy()  { return 1; }
+
+# The ssh-agent socket as a workspace on this target sees it. The deploy keys
+# are loaded into an agent *outside* the workspace and only this socket crosses
+# in (push_agent_load, lib/store.sh), so a target that names one can push and
+# holds no key bytes. Refuses rather than guessing: a target with no agent has
+# no push at all, and `wk push` says which it is.
+t_agent_sock() { return 1; }
+
 t_needs_base() { return 0; }
 
 # A machine this target only *reaches* (remote) is always reachable, so
@@ -719,6 +735,7 @@ _target_reset_vars() {
     # Per-machine CMake defaults come from the conf about to be sourced, so
     # the previous target's must not survive into this one.
     WK_TARGET_CMAKE=""
+    WK_TARGET_LIBCXX=""
     unset _WK_REMOTE_PROBED _WK_REMOTE_HOME _WK_REMOTE_CORES \
           _WK_REMOTE_LOAD _WK_REMOTE_MEM _WK_REMOTE_IONICE _WK_REMOTE_OS \
           _WK_REMOTE_REF_PROBED _WK_REMOTE_DOWN \

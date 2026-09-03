@@ -581,7 +581,7 @@ class TestTailnetIdentityAcrossARewrite(WkTest):
         self.assertIn("disk_tailnet_save", save)
         guard = body[body.index("local kept=no"):body.index("kept=$(disk_tailnet_save")]
         self.assertIn('"$role" != rescue', guard)
-        self.assertIn('MACH_DEVICE', guard,
+        self.assertIn('NODE_DEVICE', guard,
                       "a whole-disk bench write onto the board's own medium must keep its node")
 
     def test_the_write_keeps_the_identity_across_the_split(self):
@@ -773,7 +773,7 @@ class TestDiskLayerUnderSecond(WkTest):
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
 . "{REPO}/lib/image.sh"
-MACH_NAME=testmach
+NODE_NAME=testmach
 DISK_DRY={dry!r}
 card_priv() {{ echo "card_priv should not have run: $*" >&2; exit 9; }}
 m_ssh() {{ echo "m_ssh should not have run: $*" >&2; exit 9; }}
@@ -794,7 +794,7 @@ echo DONE
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
 . "{REPO}/lib/image.sh"
-MACH_NAME=testmach
+NODE_NAME=testmach
 DISK_DRY=""
 card_priv() {{ echo "card_priv $*" >&2; echo aaaa; }}
 disk_verify_stream /dev/sdX@second "{meta}"
@@ -809,7 +809,7 @@ disk_verify_stream /dev/sdX "{meta}"
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
 . "{REPO}/lib/image.sh"
-MACH_NAME=testmach
+NODE_NAME=testmach
 DISK_DRY=""
 CAP="tailnet-keep=yes"
 card_priv() {{ echo "card_priv $*" >&2; case "$1" in status) echo "wk-card-priv: ok"; echo "wk-card-priv: $CAP" ;; tailnet-save) echo "wk-card-priv: kept=$KEPT" ;; esac; }}
@@ -832,7 +832,7 @@ CAP="tailnet-keep=yes"; KEPT=maybe; disk_tailnet_save /dev/sdX@second && echo "g
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
 . "{REPO}/lib/image.sh"
-MACH_NAME=testmach
+NODE_NAME=testmach
 DISK_DRY=""
 card_priv() {{ echo "card_priv $*"; }}
 disk_verify_stream /dev/sdX@second "{meta}"

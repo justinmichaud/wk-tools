@@ -16,7 +16,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, bash, fake_workspace, run
+from tests.support import (REPO, WkTest, bash, fake_workspace, podman_vm_ssh,
+                           requires_podman_vm, run)
 
 
 class TestHelpAndList(WkTest):
@@ -114,7 +115,7 @@ set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load jsc-release linux
+config_load jsc-release linux container
 WK_TARGET_BUILD_ARGS="--no-fatal-warnings" config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_ARGS=*) echo "$e" ;; esac; done
 ''')
@@ -129,7 +130,7 @@ set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load jsc-release linux
+config_load jsc-release linux container
 config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_ARGS=*) echo "$e" ;; esac; done
 ''')
@@ -222,13 +223,13 @@ class TestAllConfigDefaults(unittest.TestCase):
     after and win, and the Xcode configs get neither -- xcodebuild takes no -D
     flags."""
 
-    def _flags(self, config, os="linux"):
+    def _flags(self, config, os="linux", kind="container"):
         cp = bash(f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load {config} {os}
+config_load {config} {os} {kind}
 echo "ARGS=$CFG_ARGS"
 echo "CMAKE=$CFG_CMAKE"
 ''')
@@ -244,14 +245,22 @@ echo "CMAKE=$CFG_CMAKE"
     XCODE_CONFIGS = ("mac-debug", "mac-release", "mac-release-asan",
                      "ios-sim-release")
 
+    # USE_LIBBACKTRACE is derived from the target kind (_cfg_use_libbacktrace,
+    # build/configs.sh), not fixed for every config -- so this parametrises by
+    # kind as well as config.
+    KINDS = {"container": "ON", "vm": "ON", "local": "ON", "remote": "OFF"}
+
     def test_every_cmake_config_starts_with_them(self):
         for config in self.CMAKE_CONFIGS:
-            args, cmake = self._flags(config)
-            with self.subTest(config=config):
-                self.assertTrue(args.startswith("--no-fatal-warnings "), args)
-                for flag in ("-DDEVELOPER_MODE=ON", "-DUSE_VULKAN=OFF",
-                             "-DENABLE_THUNDER=OFF", "-DUSE_LIBBACKTRACE=OFF"):
-                    self.assertIn(flag, cmake, f"{config}: {flag} missing")
+            for kind, want_bt in self.KINDS.items():
+                args, cmake = self._flags(config, kind=kind)
+                with self.subTest(config=config, kind=kind):
+                    self.assertTrue(args.startswith("--no-fatal-warnings "), args)
+                    for flag in ("-DDEVELOPER_MODE=ON", "-DUSE_VULKAN=OFF",
+                                 "-DENABLE_THUNDER=OFF"):
+                        self.assertIn(flag, cmake, f"{config}/{kind}: {flag} missing")
+                    self.assertIn(f"-DUSE_LIBBACKTRACE={want_bt}", cmake,
+                                 f"{config}/{kind}: USE_LIBBACKTRACE should be {want_bt}")
 
     def test_no_xcode_config_gets_them(self):
         """build-webkit's Apple path has no --no-fatal-warnings and xcodebuild
@@ -262,14 +271,6 @@ echo "CMAKE=$CFG_CMAKE"
                 self.assertNotIn("--no-fatal-warnings", args)
                 self.assertEqual(cmake, "")
 
-    def test_a_config_overrides_a_default_by_stating_the_opposite(self):
-        """cmake takes the last repeated -D, so a config's own flag wins:
-        gtk-debug wants libbacktrace where the default turns it off."""
-        _, cmake = self._flags("gtk-debug")
-        self.assertLess(cmake.index("-DUSE_LIBBACKTRACE=OFF"),
-                        cmake.index("-DUSE_LIBBACKTRACE=ON"),
-                        "the config's flag does not come last, so the default wins")
-
     def test_no_config_repeats_a_default_it_agrees_with(self):
         """A config states only what differs: a second copy of a default is a
         line somebody has to keep in step with the default forever."""
@@ -278,7 +279,7 @@ echo "CMAKE=$CFG_CMAKE"
             with self.subTest(config=config):
                 self.assertEqual(args.count("--no-fatal-warnings"), 1, args)
                 for flag in ("-DDEVELOPER_MODE=ON", "-DUSE_VULKAN=OFF",
-                             "-DENABLE_THUNDER=OFF"):
+                             "-DENABLE_THUNDER=OFF", "-DUSE_LIBBACKTRACE="):
                     self.assertEqual(cmake.count(flag), 1,
                                      f"{config} states {flag} as well as the default")
 
@@ -292,13 +293,13 @@ class TestMacJscUsesXcode(unittest.TestCase):
 
     JSC_CONFIGS = ("jsc-debug", "jsc-release", "jsc-release-asan")
 
-    def _load(self, config, os):
+    def _load(self, config, os, kind="container"):
         return bash(f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load {config} {os}
+config_load {config} {os} {kind}
 echo "BUILDSYS=$CFG_BUILDSYS"
 echo "SCRIPT=$CFG_SCRIPT"
 echo "PORT=$CFG_PORT"
@@ -383,19 +384,48 @@ config_load jsc-debug
         self.assertNotEqual(cp.returncode, 0)
         self.assertIn("load_target", cp.stdout + cp.stderr)
 
+    def test_the_kind_is_required(self):
+        """A config_load with no kind and no WK_TARGET_KIND in the environment
+        is the same caller-hasn't-loaded-its-target mistake, one argument
+        later -- refused rather than silently answered for one kind."""
+        cp = bash(f'''
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load jsc-debug linux
+''')
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("load_target", cp.stdout + cp.stderr)
+
+    def test_the_kind_falls_back_to_WK_TARGET_KIND(self):
+        """The third argument is optional once load_target has run: every
+        real caller (cmd/build and its siblings) omits it and relies on the
+        WK_TARGET_KIND load_target already exported."""
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+export WK_TARGET_KIND=remote
+config_load jsc-release linux
+echo "$CFG_CMAKE"
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("-DUSE_LIBBACKTRACE=OFF", cp.stdout)
+
 
 class TestPerConfigMachineFlags(unittest.TestCase):
     """config_target_var (build/configs.sh): a machine may carry flags for one
     config, beside the machine-wide pair, for a quirk that would be wrong on
     that machine's other configs. Narrowest last, so it wins."""
 
-    def _flags(self, config, env, os="linux"):
+    def _flags(self, config, env, os="linux", kind="container"):
         cp = bash(f'''
 set -euo pipefail
 . "{REPO}/lib/common.sh"
 . "{REPO}/lib/arch.sh"
 . "{REPO}/build/configs.sh"
-config_load {config} {os}
+config_load {config} {os} {kind}
 config_build_env /src/WebKit 4 10 native
 for e in "${{CFG_ENV[@]}}"; do
     case "$e" in WK_BUILD_CMAKE=*) echo "$e" ;; WK_BUILD_ARGS=*) echo "$e" ;; esac
@@ -422,3 +452,88 @@ done
         })
         self.assertNotIn("-DONECONFIG=1", out)
         self.assertNotIn("--one-config", out)
+
+
+class TestLibcxxDefault(unittest.TestCase):
+    """The four -stdlib=libc++ flags (build/configs.sh, _CFG_LIBCXX_CMAKE):
+    the default for every Linux CMake config built with clang, switched off
+    per machine by WK_TARGET_LIBCXX=0 (targets/hosts/<name>.conf --
+    buildbox4.conf does, measured there: no libc++ package installed)."""
+
+    def _cmake(self, config, os="linux", kind="container", env=None):
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load {config} {os} {kind}
+echo "$CFG_CMAKE"
+''', env=env)
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        return cp.stdout.strip()
+
+    def test_present_by_default_for_a_linux_clang_config(self):
+        cmake = self._cmake("jsc-release")
+        for flag in ("-DCMAKE_CXX_FLAGS=-stdlib=libc++",
+                     "-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++",
+                     "-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++",
+                     "-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++"):
+            self.assertIn(flag, cmake)
+
+    def test_absent_with_WK_TARGET_LIBCXX_0(self):
+        cmake = self._cmake("jsc-release", env={"WK_TARGET_LIBCXX": "0"})
+        self.assertNotIn("-stdlib=libc++", cmake)
+
+    def test_absent_for_apple_configs(self):
+        """xcodebuild takes no -D flags at all (test_no_xcode_config_gets_them
+        already covers this in general); restated here against the specific
+        flag this policy adds, so a future refactor cannot reintroduce it."""
+        cmake = self._cmake("mac-release", os="macos", kind="vm")
+        self.assertEqual(cmake, "")
+
+    def test_the_cxx_flags_merge_keeps_both_values(self):
+        """buildbox4's own -DCMAKE_CXX_FLAGS=-Wno-invalid-constexpr
+        (WK_TARGET_CMAKE) must not silently drop the libc++ default under
+        cmake's last-D-wins rule -- config_build_env's
+        _config_merge_cxx_flags folds the two into one flag instead."""
+        cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/lib/arch.sh"
+. "{REPO}/build/configs.sh"
+config_load jsc-release linux remote
+WK_TARGET_CMAKE="-DCMAKE_CXX_FLAGS=-Wno-invalid-constexpr" config_build_env /src/WebKit 4 10 native
+for e in "${{CFG_ENV[@]}}"; do case "$e" in WK_BUILD_CMAKE=*) echo "$e" ;; esac; done
+''')
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.count("-DCMAKE_CXX_FLAGS="), 1,
+                         f"the two CMAKE_CXX_FLAGS did not merge into one: {cp.stdout}")
+        self.assertIn("-stdlib=libc++", cp.stdout)
+        self.assertIn("-Wno-invalid-constexpr", cp.stdout)
+
+
+class TestSdkImageCarriesLibbacktrace(unittest.TestCase):
+    """USE_LIBBACKTRACE=ON is the container/vm/local default (_cfg_use_
+    libbacktrace, build/configs.sh) on the assumption that the external
+    wkdev SDK image (targets/container.sh, WK_SDK_REPO) carries the library --
+    not recorded anywhere in this repo, so checked directly against whatever
+    image is already pulled onto the podman VM this repo drives. Read-only:
+    it inspects an already-pulled image, it never creates a workspace."""
+
+    @requires_podman_vm()
+    def test_sdk_image_has_libbacktrace(self):
+        img_cp = podman_vm_ssh(
+            "podman images --format '{{.Repository}}:{{.Tag}}' "
+            "| grep '^ghcr.io/igalia/wkdev-sdk:' | head -1"
+        )
+        img = img_cp.stdout.strip()
+        if not img:
+            self.skipTest("no ghcr.io/igalia/wkdev-sdk image pulled on the podman VM")
+        cp = podman_vm_ssh(
+            f"podman run --rm {img} sh -c "
+            "'pkg-config --exists libbacktrace || test -f /usr/include/backtrace.h'"
+        )
+        self.assertEqual(cp.returncode, 0,
+            f"the wkdev SDK image ({img}) carries no libbacktrace -- "
+            f"USE_LIBBACKTRACE=ON (build/configs.sh, container/vm/local kinds) "
+            f"would fail to configure: {cp.stdout}{cp.stderr}")

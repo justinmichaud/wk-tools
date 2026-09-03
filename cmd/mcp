@@ -205,7 +205,8 @@ def call_tool(name, args):
             raise ValueError("command must be a non-empty string")
         # The command is passed as a single argument to the workspace's own
         # shell, inside the container. It cannot reach the host: `wk` execs
-        # podman, and the workspace has no host mounts.
+        # podman, and a container bind-mounts this checkout and the secrets
+        # dir read-only, nothing else of the host's.
         rc, out = run_wk(["enter", ws, "bash", "-lc", cmd], timeout=3600)
         tail = "\n".join(out.splitlines()[-200:])
         return tail if rc == 0 else f"exit {rc}:\n{tail}"

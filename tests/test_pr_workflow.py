@@ -365,13 +365,148 @@ class TestPrOpenRefusals(unittest.TestCase):
         self.assertIn("gh auth login", cp.stdout)
 
 
+class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
+    """`git-webkit pr` inside a workspace is the one thing that has to reach
+    GitHub's API, and it authenticates with GITHUB_COM_USERNAME/GITHUB_COM_TOKEN
+    from its environment (webkitcorepy; the keyring is unusable in a container).
+    A token in the environment is one the agent in that workspace can read, so
+    the workspace holds a placeholder and the injector outside it puts the real
+    token in the Authorization header.
+
+    This drives the whole mechanism for real -- a TLS handshake against the
+    injector's own leaf certificate, a requests-shaped request head over the
+    wire, and a fake upstream that reports what arrived -- with no network and
+    no GitHub. INJECT_HOST/INJECT_PORT are pointed at that upstream, which is
+    the one thing a local run cannot do by configuration.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        import shutil
+        if not shutil.which("openssl"):
+            raise unittest.SkipTest("needs the openssl CLI")
+        path = REPO / "container" / "proxy" / "github-inject.py"
+        spec = importlib.util.spec_from_file_location("wkinject_e2e", str(path))
+        cls.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.m)
+
+    def _run(self, token):
+        """Returns (what the upstream received, what the client got back)."""
+        import asyncio
+        import ssl
+        import tempfile
+        import unittest.mock
+
+        m = self.m
+        d = Path(tempfile.mkdtemp(prefix="wk-test-inject-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        chain = m.ensure_certs(str(d / "certs"), str(d / "ca.pem"))
+        pat = d / "pat"
+        if token:
+            pat.write_text(token + "\n")
+
+        seen = {}
+
+        async def upstream(reader, writer):
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                head += chunk
+            seen["head"] = head
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                         b"Connection: close\r\n\r\nok")
+            await writer.drain()
+            writer.close()
+
+        async def main():
+            up_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            up_ctx.load_cert_chain(chain, str(d / "certs" / "leaf.key"))
+            up = await asyncio.start_server(upstream, host="127.0.0.1", port=0,
+                                            ssl=up_ctx)
+            port = up.sockets[0].getsockname()[1]
+
+            # The upstream leg of the injector verifies against the system
+            # trust store, which cannot know about a certificate made two
+            # lines ago; pointing it at this CA keeps the leg verified -- and
+            # the name it verifies stays api.github.com, which is why the
+            # connection is redirected by address below rather than by name.
+            client_ctx = ssl.create_default_context(cafile=str(d / "ca.pem"))
+            m.INJECT_PORT = port
+            injector = m.Injector(str(pat), client_ctx)
+
+            srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            srv_ctx.load_cert_chain(chain, str(d / "certs" / "leaf.key"))
+            sock = str(d / "inject.sock")
+            server = await asyncio.start_unix_server(injector.handle, path=sock,
+                                                     ssl=srv_ctx)
+
+            # The workspace's side: it trusts the CA (REQUESTS_CA_BUNDLE,
+            # container/proxy/ensure-bridge.sh) and sends the placeholder.
+            ws_ctx = ssl.create_default_context(cafile=str(d / "ca.pem"))
+            reader, writer = await asyncio.open_unix_connection(
+                sock, ssl=ws_ctx, server_hostname="api.github.com")
+            writer.write(
+                b"GET /user HTTP/1.1\r\n"
+                b"Host: api.github.com\r\n"
+                b"User-Agent: python-requests/2.31.0\r\n"
+                b"Accept: application/vnd.github.v3+json\r\n"
+                b"Authorization: Basic d2s6d2staW5qZWN0cy10aGlz\r\n"
+                b"Connection: keep-alive\r\n\r\n")
+            await writer.drain()
+            body = await asyncio.wait_for(reader.read(4096), 10)
+            writer.close()
+            server.close()
+            up.close()
+            return body
+
+        # The injector connects to api.github.com by name, because that is the
+        # only host it ever talks to; the fake upstream is on loopback. Sending
+        # the connection there by address keeps the certificate name -- and so
+        # the verification -- exactly as it is in production.
+        real_open = asyncio.open_connection
+
+        async def to_loopback(host, port, **kw):
+            return await real_open("127.0.0.1", port, **kw)
+
+        with unittest.mock.patch.object(asyncio, "open_connection", to_loopback):
+            got = asyncio.run(asyncio.wait_for(main(), 30))
+        return seen.get("head", b""), got
+
+    def test_the_real_token_arrives_and_the_placeholder_never_does(self):
+        head, got = self._run("ghp-not-a-real-token")
+        self.assertIn(b"Authorization: Bearer ghp-not-a-real-token", head)
+        self.assertNotIn(b"Basic", head)
+        self.assertNotIn(b"wk-injects-this", head)
+        self.assertIn(b"200 OK", got)
+        # The request itself is otherwise untouched.
+        self.assertIn(b"GET /user HTTP/1.1", head)
+        self.assertIn(b"Accept: application/vnd.github.v3+json", head)
+
+    def test_with_the_switch_off_the_call_goes_unauthenticated(self):
+        """`wk push off` removes the token file, so GitHub answers for itself:
+        401 on an endpoint that needs an account. Nothing is fabricated here,
+        and nothing the workspace sent is forwarded."""
+        head, got = self._run("")
+        self.assertNotIn(b"Authorization", head)
+        self.assertNotIn(b"wk-injects-this", head)
+        self.assertIn(b"GET /user HTTP/1.1", head)
+        self.assertIn(b"200 OK", got)
+
+    def test_the_workspace_is_told_to_send_that_placeholder(self):
+        text = (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
+        self.assertIn("export GITHUB_COM_TOKEN=wk-injects-this", text)
+
+
 @unittest.skip(
     "a real end-to-end run ('wk new wk-test-<rnd>' then 'wk pr <it> <spec>' "
     "against a local fork) needs an isolated WK_STORE, but on this machine "
     "'where=workspace' commands for a container workspace are forwarded "
     "whole into the podman VM (forward_to_vm, wk:522-596) and only a fixed "
     "list of variables crosses that ssh (WK_IN_VM/WK_DEBUG/WK_QUIET/WK_YES/WK_FORCE/"
-    "WK_EXPECT_TREE/WK_ROW_LABEL/WK_HOST_SELF/WK_CONFIG -- WK_STORE is not "
+    "WK_ROW_LABEL/WK_HOST_SELF/WK_CONFIG -- WK_STORE is not "
     "one of them), so there is no way to point the forwarded command at a "
     "scratch mirror without writing PR refs into this machine's real one. "
     "TestPrParseSpec and TestMirrorFetch above cover the same code with a "

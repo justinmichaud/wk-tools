@@ -1,7 +1,9 @@
-"""The agent's own credential: one token per machine, in the store, reaching
-every workspace this machine makes.
+"""The agent's own credential: one token per machine, in this device's secrets
+directory, reaching every workspace this machine makes.
 
-`wk key set claude` stores it at $WK_STORE/secrets/claude-token. Each target driver
+`wk key set claude` stores it at <wk_secrets_dir>/claude-token -- on macOS a
+directory on the host, which the podman machine mounts read-only at
+$WK_STORE/secrets, so storing one needs no VM. Each target driver
 puts it where the workspace can read it, and `shell/bashrc` is the only reader,
 exporting CLAUDE_CODE_OAUTH_TOKEN so a workspace starts authenticated instead
 of asking for /login -- which on a macOS guest cannot be answered at all
@@ -27,7 +29,7 @@ from pathlib import Path
 
 from tests.support import func_body
 from tests.support import assert_guest_start_converges, REPO, WkTest, bash, stub_path
-from tests.test_pi_agent import TABLE
+from tests.test_pi_agent import FILE_ROWS, TABLE, VALUE_ROWS, store_path
 
 RC = REPO / "shell" / "bashrc"
 VAR = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -143,12 +145,17 @@ class TestTheStoreIsTheOnePlace(WkTest):
         return d
 
     def _sh(self, script, store):
+        """The secrets directory is this device's own (wk_secrets_dir), which
+        on macOS is not under $WK_STORE at all -- so a test that must not
+        touch the real one points WK_HOST_SECRETS at its scratch copy. The two
+        spellings are one directory, so pointing both at it is what a real
+        machine looks like."""
         return bash(f'''
 . "$WK_ROOT/lib/common.sh"
 WK_STORE={store}
 . "$WK_ROOT/lib/store.sh"
 {script}
-''')
+''', env={"WK_HOST_SECRETS": str(store / "secrets")})
 
     def test_absent_reads_as_nothing_and_is_not_an_error(self):
         cp = self._sh('printf "[%s]\\n" "$(wk_agent_secret claude)"; echo "rc=$?"', self._store())
@@ -173,21 +180,33 @@ WK_STORE={store}
         """There is one token per *machine*. targets/vm.sh points $WK_STORE at
         its own state directory, so resolving the token against $WK_STORE would
         send `wk vm start` looking somewhere `wk key set claude` never writes --
-        and find nothing, silently, in the command that most needs it."""
-        cp = bash('''
+        and find nothing, silently, in the command that most needs it.
+
+        Two spellings of one directory, and neither follows a driver: on a
+        macOS host it is this device's own path, and where the store is this
+        machine's own it is the store recorded before the override."""
+        for extra, want in (
+            ('WK_HOST_SECRETS=/this/device/secrets\n',
+             "path=/this/device/secrets/claude-token"),
+            ('WK_IN_VM=1\n', "path=/the/machine/store/secrets/claude-token"),
+        ):
+            with self.subTest(want=want):
+                cp = bash('''
 . "$WK_ROOT/lib/common.sh"
 WK_STORE=/the/machine/store
+''' + extra + '''
 . "$WK_ROOT/lib/store.sh"
 # What load_target records before a driver overrides $WK_STORE.
 WK_STORE_DEFAULT=/the/machine/store
 WK_STORE=/some/drivers/own/state
 printf "path=%s\\n" "$(wk_agent_secret_path claude)"
 ''')
-        self.assertIn("path=/the/machine/store/secrets/claude-token",
-                      cp.stdout, cp.stdout + cp.stderr)
+                self.assertIn(want, cp.stdout, cp.stdout + cp.stderr)
 
     def test_the_vm_driver_itself_still_finds_it(self):
-        """The same thing through the real driver rather than a stand-in."""
+        """The same thing through the real driver rather than a stand-in: the
+        driver moves $WK_STORE to its own state directory and the credential
+        is still read from this device's."""
         cp = bash('''
 . "$WK_ROOT/lib/common.sh"
 WK_STORE=/the/machine/store
@@ -196,9 +215,9 @@ WK_STORE_DEFAULT=/the/machine/store
 WK_VM_STORE=/some/vm/state
 . "$WK_ROOT/targets/vm.sh"
 printf "store=%s path=%s\\n" "$WK_STORE" "$(wk_agent_secret_path claude)"
-''')
+''', env={"WK_HOST_SECRETS": "/this/device/secrets"})
         self.assertIn("store=/some/vm/state", cp.stdout, cp.stdout + cp.stderr)
-        self.assertIn("path=/the/machine/store/secrets/claude-token",
+        self.assertIn("path=/this/device/secrets/claude-token",
                       cp.stdout, cp.stdout + cp.stderr)
 
     def test_clearing_withdraws_it(self):
@@ -233,18 +252,27 @@ class TestEveryTargetDeliversIt(unittest.TestCase):
         assert_guest_start_converges(self, '_write_agent_secrets "$name" "$ip"')
         self.assertIn("umask 077", (REPO / "targets" / "vm.sh").read_text())
 
-    def test_one_reader_serves_every_secret_in_the_store(self):
-        """A deploy key and an agent credential are the same read -- a file
-        under the machine store's secrets/, here or through the podman machine
-        that holds it. Two copies of it drift in the case that is hardest to
-        test: the forwarded one."""
+    def test_one_reader_serves_every_secret_here(self):
+        """A deploy key and an agent credential are the same read -- a file in
+        this machine's secrets directory -- through one reader, and nothing
+        crosses into the podman machine to read or write one. The one hop left
+        in the file is push_agent_exec, which drives the machine's ssh-agent
+        and injector, never a secret file."""
         text = (REPO / "lib" / "store.sh").read_text()
         self.assertEqual(1, text.count("_wk_secret_read() {"))
+        for fn in ("_wk_secret_read", "wk_agent_secret_store",
+                   "wk_agent_secret_clear", "wk_push_key"):
+            with self.subTest(no_hop_in=fn):
+                self.assertNotIn("podman machine ssh", func_body(text, fn))
+        self.assertEqual(1, text.count("podman machine ssh"))
+        self.assertIn("podman machine ssh", func_body(text, "push_agent_exec"))
         for caller in ("wk_push_key", "wk_agent_secret"):
             with self.subTest(caller=caller):
-                body = func_body(text, caller)
-                self.assertIn("_wk_secret_read", body)
-                self.assertNotIn("podman machine ssh", body)
+                self.assertIn("_wk_secret_read", func_body(text, caller))
+        for caller, where in (("wk_push_key", "wk_push_held_dir"),
+                              ("wk_agent_secret_path", "wk_secrets_dir")):
+            with self.subTest(dir_of=caller):
+                self.assertIn(where, func_body(text, caller))
 
     def test_every_writer_loops_the_one_table(self):
         """A name added to wk_agent_secrets reaches all three targets with
@@ -332,10 +360,11 @@ class _Delivery(WkTest):
     def _store(self, values=()):
         d = self.tmp / "store"
         (d / "secrets").mkdir(parents=True, exist_ok=True)
-        for name, sfile, _shome, _var in TABLE:
-            p = d / "secrets" / sfile
-            if name in values:
-                p.write_text(f"{PLACEHOLDER}-{name}\n")
+        (d / "agent-rw").mkdir(parents=True, exist_ok=True)
+        for row in TABLE:
+            p = store_path(d, row)
+            if row[0] in values:
+                p.write_text(f"{PLACEHOLDER}-{row[0]}\n")
                 p.chmod(0o600)
             elif p.exists():
                 p.unlink()
@@ -348,6 +377,9 @@ class _Delivery(WkTest):
             "WK_TEST_GUEST": str(home),
             "WK_TEST_SSH_LOG": str(self.log),
             "WK_STORE": str(store),
+            # The credentials are this device's own directory, not the
+            # store's, and a test must not read or write the real one.
+            "WK_HOST_SECRETS": str(store / "secrets"),
             "XDG_STATE_HOME": str(self.tmp / "state"),
         }
         if extra:
@@ -380,7 +412,7 @@ _write_agent_secrets demo 1.2.3.4
         home = self._home()
         cp = self._write(self._store(values=[n for n, *_ in TABLE]), home)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for name, _sfile, shome, _var in TABLE:
+        for name, _sfile, shome, _var, _kind in TABLE:
             with self.subTest(name=name):
                 self.assertEqual((home / shome).read_text(),
                                  f"{PLACEHOLDER}-{name}\n")
@@ -395,11 +427,12 @@ _write_agent_secrets demo 1.2.3.4
         """The one state this must not leave behind: a guest holding a
         credential the host has taken away."""
         home = self._home()
-        for _name, _sfile, shome, _var in TABLE:
+        for _name, _sfile, shome, _var, _kind in TABLE:
+            (home / shome).parent.mkdir(parents=True, exist_ok=True)
             (home / shome).write_text("stale\n")
         cp = self._write(self._store(), home)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for _name, _sfile, shome, _var in TABLE:
+        for _name, _sfile, shome, _var, _kind in TABLE:
             self.assertFalse((home / shome).exists(), shome)
 
     def test_one_absent_row_does_not_cost_the_next_one(self):
@@ -433,7 +466,7 @@ class TestABuildBoxGetsThemAtSetup(_Delivery):
     @classmethod
     def setUpClass(cls):
         text = (REPO / "cmd" / "remote").read_text()
-        start = text.index("while read -r _sname _ _shome _; do")
+        start = text.index("while read -r _sname _ _shome _ _skind; do")
         end = text.index("unset _sname _shome _sval")
         cls.BLOCK = text[start:end]
 
@@ -458,7 +491,7 @@ r_host=fakebox
         home = self._home()
         cp = self._setup(self._store(values=[n for n, *_ in TABLE]), home)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for name, _sfile, shome, _var in TABLE:
+        for name, _sfile, shome, _var, _kind in VALUE_ROWS:
             with self.subTest(name=name):
                 self.assertEqual((home / shome).read_text(),
                                  f"{PLACEHOLDER}-{name}\n",
@@ -469,7 +502,7 @@ r_host=fakebox
         result: every write hands the machine bytes."""
         self._setup(self._store(values=[n for n, *_ in TABLE]), self._home())
         writes = [l for l in self._ssh_lines() if "cat >" in l]
-        self.assertEqual(len(TABLE), len(writes), self.log.read_text())
+        self.assertEqual(len(VALUE_ROWS), len(writes), self.log.read_text())
         for l in writes:
             self.assertNotIn("stdin=0", l, l)
 
@@ -483,11 +516,11 @@ r_host=fakebox
         """It is a machine other people are on, so a credential left behind
         after it was withdrawn here is the state that would matter."""
         home = self._home()
-        for _name, _sfile, shome, _var in TABLE:
+        for _name, _sfile, shome, _var, _kind in VALUE_ROWS:
             (home / shome).write_text("stale\n")
         cp = self._setup(self._store(), home)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for _name, _sfile, shome, _var in TABLE:
+        for _name, _sfile, shome, _var, _kind in VALUE_ROWS:
             self.assertFalse((home / shome).exists(), shome)
 
     def test_one_absent_row_does_not_cost_the_next_one(self):
@@ -495,16 +528,178 @@ r_host=fakebox
         does not: the loop's stdin is the table, and a plain ssh would drink
         the rest of it."""
         home = self._home()
-        last = TABLE[-1]
+        last = VALUE_ROWS[-1]
         self._setup(self._store(values=[last[0]]), home)
         self.assertEqual((home / last[2]).read_text(),
                          f"{PLACEHOLDER}-{last[0]}\n")
-        self.assertEqual(len(TABLE), len(self._ssh_lines()), self.log.read_text())
+        self.assertEqual(len(VALUE_ROWS), len(self._ssh_lines()),
+                         self.log.read_text())
+
+    def test_the_account_login_never_reaches_a_shared_machine(self):
+        """A file row is the claude.ai account login, and a build box is a
+        machine other people are root on: an account credential there is
+        theirs, and its refresh token would rotate out from under every other
+        holder as well. Not delivered, and not even mentioned in the ssh."""
+        home = self._home()
+        self._setup(self._store(values=[n for n, *_ in TABLE]), home)
+        log = self.log.read_text()
+        for row in FILE_ROWS:
+            with self.subTest(name=row[0]):
+                self.assertFalse((home / row[2]).exists(), row[2])
+                self.assertNotIn(row[1], log, log)
 
     def test_the_value_is_never_an_argument(self):
         self._setup(self._store(values=[n for n, *_ in TABLE]), self._home())
         text = self.log.read_text()
         self.assertNotIn(PLACEHOLDER, text, text)
+
+
+# --- the file row: one shared file, and the copies that are not shared -------
+# The claude.ai login is not a value an agent reads out of a variable: it is a
+# document the Claude CLI *rewrites*, spending the refresh token in it and
+# storing the rotated one back. So the delivery is a directory, not a link --
+# and a guest, which can be handed nothing but a copy, is a second holder.
+
+# A credential-shaped document, and deliberately nothing like a real one. Two
+# lines, so a reader that took only the first would be caught.
+FAKE_LOGIN = ('{"claudeAiOauth":{"accessToken":"' + PLACEHOLDER + '",\n'
+              '"refreshToken":"' + PLACEHOLDER + '","scopes":["user:profile"]}}')
+
+
+class TestAGuestGetsTheFileRowToo(_Delivery):
+    """targets/vm.sh's _write_agent_secrets, file arm: every byte, 0600, on
+    stdin, into a path with a directory in it."""
+
+    def _store_with_login(self):
+        d = self._store()
+        for row in FILE_ROWS:
+            store_path(d, row).write_text(FAKE_LOGIN)
+            store_path(d, row).chmod(0o600)
+        return d
+
+    def _write(self, store, home):
+        with stub_path({"ssh": FAKE_SSH, "tart": FAKE_TART}) as binp:
+            env = self._env(store, home,
+                            {"PATH": f"{binp}:{os.environ['PATH']}",
+                             "WK_VM_STORE": str(self.tmp / "vmstore")})
+            return bash('''
+. "$WK_ROOT/lib/common.sh"
+. "$WK_ROOT/lib/store.sh"
+. "$WK_ROOT/lib/target.sh"
+load_target vm >/dev/null 2>&1
+_write_agent_secrets demo 1.2.3.4
+''', env=env)
+
+    def test_the_whole_document_arrives_not_its_first_line(self):
+        home = self._home()
+        cp = self._write(self._store_with_login(), home)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        for row in FILE_ROWS:
+            with self.subTest(name=row[0]):
+                self.assertEqual(FAKE_LOGIN, (home / row[2]).read_text())
+
+    def test_the_directory_in_its_path_is_made(self):
+        """~/.claude/.credentials.json: the write would fail on a guest that
+        has never run `claude`, and the report would say it succeeded."""
+        home = self._home()
+        self._write(self._store_with_login(), home)
+        for row in FILE_ROWS:
+            with self.subTest(name=row[0]):
+                self.assertTrue((home / row[2]).parent.is_dir(), row[2])
+
+    def test_it_is_unreadable_to_anyone_else_in_the_guest(self):
+        home = self._home()
+        self._write(self._store_with_login(), home)
+        for row in FILE_ROWS:
+            with self.subTest(name=row[0]):
+                mode = (home / row[2]).stat().st_mode & 0o777
+                self.assertEqual(0o600, mode, oct(mode))
+
+    def test_the_document_is_never_an_argument(self):
+        """It goes down the ssh channel. An argument would be in `ps` inside
+        the guest and in what a --debug run prints."""
+        self._write(self._store_with_login(), self._home())
+        log = self.log.read_text()
+        self.assertNotIn(PLACEHOLDER, log, log)
+        self.assertNotIn("claudeAiOauth", log, log)
+
+    def test_a_store_with_none_takes_the_guests_copy_away(self):
+        """A guest holding a login the host has withdrawn is a second holder
+        nothing can revoke."""
+        home = self._home()
+        for row in FILE_ROWS:
+            (home / row[2]).parent.mkdir(parents=True, exist_ok=True)
+            (home / row[2]).write_text("stale\n")
+        cp = self._write(self._store(), home)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        for row in FILE_ROWS:
+            self.assertFalse((home / row[2]).exists(), row[2])
+
+    def test_the_second_holder_is_said_out_loud(self):
+        """A refresh in the guest rotates the token and invalidates the copy
+        every container here shares -- so it is warned about at the moment the
+        second holder is made, not left to be discovered."""
+        cp = self._write(self._store_with_login(), self._home())
+        out = cp.stdout + cp.stderr
+        self.assertIn("holds its own copy", out, out)
+        self.assertIn("invalidates", out, out)
+
+    def test_the_guest_reads_the_file_and_not_a_keychain(self):
+        """A Mac's Claude CLI prefers a login-Keychain item, which no ssh
+        session has unlocked. Naming the credential store directory also names
+        that item -- the CLI appends a hash of the directory to the item's
+        service name -- so the lookup misses and the file is what is used.
+
+        In the guest's own rc and not the shared one: that is read on the
+        workstation too, whose real Keychain item must keep working."""
+        rc = (REPO / "vm" / "shell-rc.sh").read_text()
+        self.assertIn('CLAUDE_SECURESTORAGE_CONFIG_DIR="$HOME/.claude"', rc)
+        self.assertNotIn("CLAUDE_SECURESTORAGE_CONFIG_DIR",
+                         (REPO / "shell" / "bashrc").read_text().split(
+                             "if [ -d /agent-rw ]")[0])
+
+
+class TestAContainerSharesOneWritableFile(unittest.TestCase):
+    """Every container on this machine reads and writes one file, because the
+    CLI rotates the refresh token in it: a copy each would be a copy the first
+    refresh anywhere kills. So the delivery is a read-write mount of one
+    directory, and the CLI is pointed at the directory rather than linked to
+    the file -- it writes through a temp file and a rename, which would replace
+    a symlink with a regular private copy."""
+
+    CONTAINER = (REPO / "targets" / "container.sh").read_text()
+    RC = (REPO / "shell" / "bashrc").read_text()
+    MACHINE = (REPO / "host" / "macos" / "machine.sh").read_text()
+
+    def test_the_container_gets_the_directory_read_write(self):
+        self.assertIn("--volume $WK_STORE/agent-rw:/agent-rw", self.CONTAINER)
+        # And the read-only one it sits beside is still read-only.
+        self.assertIn("--volume $WK_STORE/secrets:/secrets:ro", self.CONTAINER)
+
+    def test_the_shell_points_the_cli_at_it_rather_than_exporting_anything(self):
+        block = self.RC[self.RC.index("# --- 6b. The agents' credentials"):
+                        self.RC.index("# --- 7. Completion")]
+        self.assertIn("export CLAUDE_SECURESTORAGE_CONFIG_DIR=/agent-rw", block)
+        # Only where a mount put one: this rc is read on every machine in the
+        # fleet, and a workstation must not acquire it.
+        self.assertIn("if [ -d /agent-rw ]", block)
+
+    def test_no_row_of_the_table_is_named_in_either(self):
+        for name, text in (("targets/container.sh", self.CONTAINER),
+                           ("shell/bashrc", self.RC)):
+            with self.subTest(script=name):
+                self.assertNotIn("claude-credentials", text)
+
+    def test_the_machine_mounts_that_directory_and_only_that_one_writable(self):
+        """The one read-write mount in the design, whose whole contents are a
+        credential the workspaces are meant to rotate."""
+        self.assertIn('_agent_rw_mount="$(wk_agent_rw_dir):$WK_STORE/agent-rw:rw"',
+                      self.MACHINE)
+        for mount in ('_secrets_mount="$(wk_secrets_dir):$WK_STORE/secrets:ro"',
+                      '_tools_mount="$WK_ROOT:/opt/wk-tools:ro"'):
+            with self.subTest(mount=mount):
+                self.assertIn(mount, self.MACHINE)
+        self.assertEqual(1, self.MACHINE.count(":rw\""), self.MACHINE)
 
 
 if __name__ == "__main__":

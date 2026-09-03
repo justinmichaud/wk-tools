@@ -785,13 +785,13 @@ _retarget_fstab() { # <mountpoint> <partuuid of partition 1> <partuuid of partit
     # device path (/dev/mmcblk0p1, which follows the reader rather than the
     # card) and a **PARTUUID of another disk identifier** -- which is what an
     # fstab already retargeted once carries after anything rewrites the card's
-    # MBR. Only the first was handled here, and its read-back looked only for
-    # /dev paths, so a card whose identifier had moved was reported retargeted
-    # while its /boot line still named the old one: the root mounts, /boot does
-    # not, local-fs.target fails, and every network unit ordered after it never
-    # starts. A board that boots and goes quiet (rpi3, 2026-09-01).
+    # MBR. Handling only the first, with a read-back that only looks for /dev
+    # paths, reports a card retargeted while its /boot line still names the
+    # old one: the root mounts, /boot does not, local-fs.target fails, and
+    # every network unit ordered after it never starts -- a board that boots
+    # and goes quiet.
     #
-    # Read back in the same pass, and now the check is "does every line name
+    # Read back in the same pass, and the check is "does every line name
     # *this* card": anything else is a mount that finds another disk or none.
     python3 -c '
 import sys
@@ -1304,7 +1304,7 @@ if shape == "shared":
         # 1-2 names its own root that way in cmdline.txt and fstab -- a system
         # this write does not touch and would not retarget. A new identifier
         # here boots the board to a kernel that cannot find any root, and the
-        # only way back is a reader (2026-09-01: it cost the rpi3 a day).
+        # only way back is a reader.
         lines = ["label: dos", "label-id: %s" % disk_id()]
         for n in (1, 2):
             p = have[n]

@@ -133,9 +133,6 @@ class TestExprOverrideMechanism(WkTest):
     def test_wk_softnet_version(self):
         self._assert_overridable(HOST_MACOS / "softnet.sh", "WK_SOFTNET_VERSION", "9.9.9")
 
-    def test_wk_vmtools_only(self):
-        self._assert_overridable(HOST_MACOS / "vmtools.sh", "WK_VMTOOLS_ONLY", "tools")
-
     def test_wk_gpu_probe_bin(self):
         self._assert_overridable(CONTAINER / "gpu" / "gpu-probe.sh", "WK_GPU_PROBE_BIN", "/tmp/wk-selftest-probe")
 
@@ -221,17 +218,17 @@ class TestMacLaneOverrides(WkTest):
         conf_dir = self.tmp / "machines"
         conf_dir.mkdir()
         (conf_dir / "faketest.conf").write_text(
-            f'MACH_SSH={FAKE_SSH}\nMACH_DRIVER=mac-volume\nMACH_NOTE="wk-selftest fake machine"\n'
+            f'NODE_SSH={FAKE_SSH}\nNODE_DRIVER=mac-volume\nNODE_NOTE="wk-selftest fake machine"\n'
         )
         env = {"WK_MACHINES_DIR": str(conf_dir), "WK_MAC_MACHINE": "faketest"}
 
         cp = self._run("--status", env=env)
-        self.assertNotEqual(cp.returncode, 0, "no WK_MAC_BENCH_SSH and no MACH_BENCH_SSH still ran")
-        self.assertIn("sets no MACH_BENCH_SSH", cp.stdout + cp.stderr)
+        self.assertNotEqual(cp.returncode, 0, "no WK_MAC_BENCH_SSH and no NODE_BENCH_SSH still ran")
+        self.assertIn("sets no NODE_BENCH_SSH", cp.stdout + cp.stderr)
 
         cp2 = self._run("--status", env={**env, "WK_MAC_BENCH_SSH": FAKE_BENCH_SSH})
         self.assertEqual(cp2.returncode, 0, cp2.stdout + cp2.stderr)
-        self.assertNotIn("sets no MACH_BENCH_SSH", cp2.stdout + cp2.stderr)
+        self.assertNotIn("sets no NODE_BENCH_SSH", cp2.stdout + cp2.stderr)
 
     def _dry_run_transcript(self, extra_env):
         env = {
@@ -350,6 +347,14 @@ class TestQuiescePrivSessionVars(WkTest):
             "WK_SESSION_USER": "wk-selftest-hostile-value",
         })
         self.assertNotEqual(cp.returncode, 0, "no conf file, yet session_user still returned a user")
+
+
+class TestRemovedOverridesStayRemoved(unittest.TestCase):
+    """Source-level regression guards: an override removed because nothing
+    used it should not silently come back."""
+
+    def test_wk_vmtools_only_removed(self):
+        self.assertNotIn("WK_VMTOOLS_ONLY", (HOST_MACOS / "vmtools.sh").read_text())
 
 
 if __name__ == "__main__":

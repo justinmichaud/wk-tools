@@ -5,8 +5,11 @@
 # instability) and cycle ALL cpu methods (incl. NEON) for 10 min.
 # If this fails: add `over_voltage_delta=25000` (then 50000) to config.txt [pi5].
 # Run AFTER reboot:  sudo bash ~/rpi5-tune/rpi5-stress.sh
-set -u
-command -v stress-ng >/dev/null || { echo "installing stress-ng..."; apt-get install -y stress-ng >/dev/null 2>&1; }
+set -euo pipefail
+command -v stress-ng >/dev/null || {
+  echo "installing stress-ng..."
+  apt-get install -y stress-ng >/dev/null 2>&1 || { echo "ERROR: could not install stress-ng" >&2; exit 1; }
+}
 
 # vcgencmd (temp/clock/throttle) needs /dev/vcio, which is root-only. Without sudo
 # it returns nothing, temp/throttle monitoring is blank, and an empty $t makes
@@ -25,13 +28,14 @@ stress-ng --cpu 4 --cpu-method all --verify --timeout 600s --metrics-brief 2>"$E
 SPID=$!
 worst=0; bad=0
 while kill -0 $SPID 2>/dev/null; do
-  t=$(vcgencmd measure_temp 2>/dev/null | grep -oE '[0-9.]+'); thr=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)
+  t=$(vcgencmd measure_temp 2>/dev/null | grep -oE '[0-9.]+') || true
+  thr=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2) || true
   [ -n "$t" ] && awk "BEGIN{exit !($t>$worst)}" && worst=$t   # guard: empty $t (no sudo) must not crash awk
   [ -n "$thr" ] && [ "$thr" != "0x0" ] && { bad=1; echo "  !! throttled=$thr at ${t}C"; }
   printf "  temp=%sC  throttled=%s  clock=%sMHz\n" "$t" "$thr" "$(vcgencmd measure_clock arm|cut -d= -f2|awk '{printf "%.0f",$1/1e6}')"
   sleep 20
 done
-wait $SPID; RC=$?
+if wait "$SPID"; then RC=0; else RC=$?; fi
 echo "-------------------------------------------------------------"
 echo "stress-ng exit: $RC   (0 = no crashes AND no --verify mismatches)"
 echo "worst temp: ${worst}C   (keep <80C for long-term reliability)"

@@ -32,7 +32,7 @@ class TestMachineArmedBarrier(WkTest):
         return f'''
 . "{REPO}/lib/common.sh"
 . "{REPO}/boot/machines.sh"
-MACH_NAME=testmach
+NODE_NAME=testmach
 b_probe() {{ MODE={self._sq(mode)}; }}
 record_read() {{ printf '%s\\n' {self._sq(record_text)}; }}
 b_boot_id() {{ printf '%s' {self._sq(boot_id)}; }}

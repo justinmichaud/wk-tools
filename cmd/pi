@@ -137,14 +137,14 @@ fi
 PI_FLEET=""
 case "$ACTION" in
     setup|boot-order|helper)
-        if machine_by_ssh "$HOST" 2>/dev/null; then PI_FLEET=1; HOST="$MACH_SSH"; fi ;;
+        if machine_by_ssh "$HOST" 2>/dev/null; then PI_FLEET=1; HOST="$NODE_SSH"; fi ;;
 esac
 # A fleet board is reached over whichever channel answered, not its rescue's
 # alone: the EEPROM and the boot order belong to the *board*, and a board whose
 # medium the firmware prefers answers as its bench system -- which is exactly
-# the state a boot order has to be changed from (rpi4, 2026-09-01). `r_ssh` is
-# the one implementation of that choice (boot/machines.sh); `b_probe` is what
-# sets the channel, run once per invocation.
+# the state a boot order has to be changed from. `r_ssh` is the one
+# implementation of that choice (boot/machines.sh); `b_probe` is what sets
+# the channel, run once per invocation.
 PI_PROBED=""
 rsh() {
     if [ -n "$PI_FLEET" ]; then
@@ -157,14 +157,14 @@ rsh() {
 # The scp destination for the same board (boot/rpi-eeprom.sh stages files).
 # The scp destination for the same board, over the same channel `rsh` chose:
 # `$HOST` is the *rescue's* name, so on a board answering as its bench system a
-# copy addressed to it goes nowhere (rpi4, 2026-09-01 -- the EEPROM diff was
-# computed over one channel and the file copied over another).
+# copy addressed to it goes nowhere -- the EEPROM diff computed over one
+# channel has to land over that same channel, not the rescue's.
 rsh_dest() {
     if [ -z "$PI_FLEET" ]; then printf '%s' "$HOST"; return 0; fi
     [ -n "$PI_PROBED" ] || { b_probe >/dev/null 2>&1 || true; PI_PROBED=1; }
     case "${MODE_CHANNEL:-host}" in
         bench) printf 'root@%s' "$(image_addr)" ;;
-        *)     printf 'root@%s' "$MACH_SSH" ;;
+        *)     printf 'root@%s' "$NODE_SSH" ;;
     esac
 }
 
@@ -384,9 +384,8 @@ pi_session_up() { # <display evidence, or empty>
 # Whatever browser the image left running is *verified dead*, not just sent a
 # signal: a web process holds a vchiq service (rdk) or the GPU (weston), a
 # browser mid crash-storm shrugs off TERM, and a survivor makes every later
-# web process die at startup with "failed to add service - already in use"
-# (measured on the rpi4, 2026-08-31). Two browsers on one GPU is not a
-# measurement either.
+# web process die at startup with "failed to add service - already in use".
+# Two browsers on one GPU is not a measurement either.
 pi_browsers_dead() {
     i_ssh '[ -x /etc/init.d/S90cog ] && /etc/init.d/S90cog stop >/dev/null 2>&1
            killall cog MiniBrowser WPEWebProcess WPENetworkProcess 2>/dev/null
@@ -742,8 +741,7 @@ pi_system_boot() { # <system id>
         #
         # Nothing answering is not an answer. A board between systems says
         # exactly that, and spending an attempt on it burns the budget in
-        # seconds without learning anything (rpi3, 2026-09-01: rounds 3 to 5
-        # went in under a minute that way). So wait for it to answer -- either
+        # seconds without learning anything. So wait for it to answer -- either
         # channel, whichever it comes back on -- and only then decide.
         out=$(i_ssh "$_b_probe_sh" 2>/dev/null | tr -d '\r') || out=""
         if [ -z "$(kv_get id <<<"$out")" ] && ! m_ssh true >/dev/null 2>&1; then
@@ -1214,15 +1212,15 @@ cmd_boot_order() {
             # not from a flag the caller has to remember: getting it wrong on
             # a workstation costs a trip to the device. A bench-device's
             # default follows the medium the firmware actually boots for it:
-            # the bench medium's own transport (MACH_DEVICE,
+            # the bench medium's own transport (NODE_DEVICE,
             # disk_tran_of_name -- boot/disk.sh) -- except under pi-tryboot,
             # where the firmware never boots the bench medium at all and the
             # rescue's SD is the boot authority for both roles.
-            if machine_by_ssh "$HOST" && [ "${MACH_ROLE:-workstation}" = bench-device ]; then
-                if [ "${MACH_DRIVER:-}" = pi-tryboot ]; then
+            if machine_by_ssh "$HOST" && [ "${NODE_ROLE:-workstation}" = bench-device ]; then
+                if [ "${NODE_DRIVER:-}" = pi-tryboot ]; then
                     order_name=sd-first
                 else
-                    case "$(disk_tran_of_name "${MACH_DEVICE:-}")" in
+                    case "$(disk_tran_of_name "${NODE_DEVICE:-}")" in
                         mmc) order_name=sd-first ;;
                         *)   order_name=usb-first ;;
                     esac
@@ -1304,7 +1302,7 @@ cmd_boot_order() {
     fi
 
     # Not for an ad-hoc ssh destination outside the fleet (PI_FLEET unset):
-    # there is no arming record to race, and MACH_NAME here would be
+    # there is no arming record to race, and NODE_NAME here would be
     # whatever machine_by_ssh's search last tried, not this host.
     [ -n "$PI_FLEET" ] && machine_armed_barrier "A boot-order write now races the reboot the arming is
     waiting for: BOOT_ORDER is shared by both of the board's roles, and a write
@@ -1402,6 +1400,25 @@ if [ "$ACTION" = bench ]; then
     exit 0
 fi
 
+# A bench-device is driven as root, so a write onto one goes over the same
+# channel as everything else here. A workstation is not: it is driven as a
+# person, and `wk` never takes a passwordless sudo on one beyond the two
+# privileged helpers themselves (CLAUDE.md). `wk pi helper` and `wk pi setup`
+# both write board-only state this way, so both refuse a known workstation
+# through this one gate rather than each dying on a write that was never
+# going to be permitted.
+refuse_workstation() { # <what this verb cannot do there, e.g. "install the helper on it">
+    [ "${NODE_ROLE:-}" = bench-device ] || die "$HOST is a workstation, so this cannot $1:
+    that needs a root it is not driven as, and wk takes no passwordless sudo
+    on a workstation beyond the two privileged helpers (CLAUDE.md). Do it
+    there instead, where the one password prompt can be answered:
+
+      ssh $HOST 'cd ~/Development/wk-tools && ./setup --stage quiesce'
+
+    That machine's checkout is what gets installed, so sync it first if the
+    fix you want is not in it yet."
+}
+
 # --- wk pi helper --------------------------------------------------------------
 #
 #   wk pi helper <machine>
@@ -1423,21 +1440,7 @@ cmd_helper() {
     The helper goes on a board this repo drives, named as 'wk boot --list' names it."
     [ -r "$src" ] && [ -r "$check" ] || die "this checkout is missing $src or $check"
 
-    # A bench-device is driven as root, so this writes root-owned paths over
-    # the same channel as everything else. A workstation is not: it is driven
-    # as a person, and `wk` never takes a passwordless sudo on one beyond the
-    # two privileged helpers themselves (CLAUDE.md). So the install there is a
-    # step at that machine's own keyboard, and this says so rather than dying
-    # on a chmod that was never going to be permitted.
-    [ "${MACH_ROLE:-}" = bench-device ] || die "$HOST is a workstation, so this cannot install
-    the helper on it: writing /usr/local/libexec needs a root it is not driven
-    as, and wk takes no passwordless sudo on a workstation. Install it there,
-    where the one password prompt can be answered:
-
-      ssh $HOST 'cd ~/Development/wk-tools && ./setup --stage quiesce'
-
-    That machine's checkout is what gets installed, so sync it first if the
-    fix you want is not in it yet."
+    refuse_workstation "install the helper on it"
 
     rsh "install -d -o root -g root -m 0755 ${CARD_PRIV%/*}" \
         || die "could not make ${CARD_PRIV%/*} on $HOST"
@@ -1469,9 +1472,9 @@ cmd_helper() {
     # *rescue's* ssh name and stays that whichever system the board is running.
     # Saying "rpi3-rescue runs this helper" while installing onto a bench system
     # is a report about the wrong machine.
-    info "$MACH_NAME's $(case "${MODE_CHANNEL:-host}" in bench) echo "bench system" ;; *) echo rescue ;; esac) runs this checkout's card helper (${here:0:12})"
-    log  "  it makes this board's card edits:  wk sysimage write --disk $MACH_NAME:$MACH_DEVICE@second ...,"
-    log  "  and 'wk boot $MACH_NAME --system <id>' arms one where the board stands"
+    info "$NODE_NAME's $(case "${MODE_CHANNEL:-host}" in bench) echo "bench system" ;; *) echo rescue ;; esac) runs this checkout's card helper (${here:0:12})"
+    log  "  it makes this board's card edits:  wk sysimage write --disk $NODE_NAME:$NODE_DEVICE@second ...,"
+    log  "  and 'wk boot $NODE_NAME --system <id>' arms one where the board stands"
 }
 
 if [ "$ACTION" = helper ]; then
@@ -1488,6 +1491,12 @@ if [ "$ACTION" = boot-order ]; then
     cmd_boot_order "$@"
     exit 0
 fi
+
+# Only `setup` reaches here -- deploy/bench/helper/boot-order all exit above.
+# A workstation's role is known as soon as machine_by_ssh matched it, above;
+# an ad-hoc host outside the fleet (PI_FLEET unset) has none yet, which is
+# exactly the board this verb exists to bring up, so it is not refused here.
+[ -z "$PI_FLEET" ] || refuse_workstation "put it on the tailnet this way"
 
 info "probing $HOST"
 ARCH=$(rsh 'uname -m') || die "cannot ssh to $HOST"
@@ -1561,18 +1570,51 @@ rsh "set -e
 FLAGS="--state=$DEST/tailscale-state/tailscaled.state --socket=$DEST/tailscale-state/tailscaled.sock"
 [ "$TS_MODE" = userspace ] && FLAGS="$FLAGS --tun=userspace-networking"
 
-rsh "cat > '$DEST/tailscale-up.sh' <<'EOF'
-#!/bin/sh
-# Installed by wk pi setup. Starts tailscaled with state on a writable
-# partition so nothing in the read-only rootfs has to change.
-DEST=$DEST
-[ -S \"\$DEST/tailscale-state/tailscaled.sock\" ] && exit 0
-\"\$DEST/tailscaled\" $FLAGS >/var/log/tailscaled.log 2>&1 &
-EOF
-chmod +x '$DEST/tailscale-up.sh'
-'$DEST/tailscale-up.sh'"
+# A function of its own so a test can drive it with a fake rsh the way
+# cmd_helper's test does (tests/test_pi.py), rather than only through a full
+# `wk pi setup` run against a real board.
+pi_setup_start_tailscaled() { # <dest> <flags>
+    local dest="$1" flags="$2" waited=0
+    local wait_s="${TAILSCALED_WAIT_SECONDS:-15}"
+    local sock="$dest/tailscale-state/tailscaled.sock"
+    local log="$dest/tailscale-state/tailscaled.log"
 
-sleep 2
+    # A real heredoc into 'sh -s', the tree's remote-script convention
+    # (targets/vm.sh:824, cmd/bridge:1435): `set -u` first, so a broken write
+    # below fails loudly rather than silently continuing. tailscale-up.sh's
+    # own log goes under $dest too, not /var/log -- /var/log is frequently
+    # read-only on these images, which is what made a failed launch invisible
+    # before (the redirect failed, silently, on a line backgrounded with `&`).
+    # The nested heredoc is quoted so the *remote* shell resolves its \$DEST
+    # at run time, not this one.
+    rsh "sh -s" <<REMOTE || die "could not install or start tailscaled on $HOST"
+set -u
+cat > '$dest/tailscale-up.sh' <<'INNER'
+#!/bin/sh
+# Installed by wk pi setup. Starts tailscaled with state and its own log
+# under \$DEST, the writable prefix this board actually has.
+DEST=$dest
+[ -S "\$DEST/tailscale-state/tailscaled.sock" ] && exit 0
+"\$DEST/tailscaled" $flags >"\$DEST/tailscale-state/tailscaled.log" 2>&1 &
+INNER
+chmod +x '$dest/tailscale-up.sh'
+'$dest/tailscale-up.sh'
+REMOTE
+
+    # Bounded, not a blind sleep: a launch that never creates the socket is
+    # reported with its own log and a remedy, not left for `tailscale up` to
+    # fail against opaquely a few lines down.
+    while ! rsh "test -S '$sock'"; do
+        waited=$((waited + 1))
+        [ "$waited" -le "$wait_s" ] || die "tailscaled did not create $sock on $HOST within ${wait_s}s.
+    Its log:
+$(rsh "tail -n 20 '$log'" 2>/dev/null || echo '    (unreadable)')
+
+    Check that $dest is actually writable there, then re-run 'wk pi setup $HOST'."
+        sleep 1
+    done
+}
+pi_setup_start_tailscaled "$DEST" "$FLAGS"
 
 # Only prompt for an auth key when the node actually needs one: a re-run
 # against a device already on the tailnet is routine, and prompts are for

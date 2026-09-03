@@ -117,4 +117,118 @@ else
     fi
 fi
 
-unset SDK _before _unit_dir _unit_new _policy_stamp _policy_hash
+# --- the deploy keys' ssh-agent ----------------------------------------------
+# The one process on this machine that holds a private deploy key. Its socket
+# is in %t/wk, the directory every container bind-mounts at /run/wk, so a
+# workspace can *use* a key it can never read -- an agent has no protocol for
+# handing one back. `wk push on|off` loads and empties it (push_agent_*,
+# lib/store.sh); this only makes sure it is there to be filled. It starts empty
+# and stays empty across a restart, which is the safe direction: the switch has
+# to be thrown again and `wk push status` says so.
+_unit_new=$(mktemp)
+cat > "$_unit_new" <<EOF
+[Unit]
+Description=wk deploy-key ssh-agent (outside every workspace)
+Documentation=file://$WK_ROOT/cmd/push
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh-agent -D -a %t/wk/ssh-agent.sock
+Restart=on-failure
+RestartSec=2
+# The same directory wk-proxy.service owns, preserved for the same reason:
+# containers bind-mount it.
+RuntimeDirectory=wk
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+# ssh-agent refuses to bind a path that already exists, and one left by a
+# previous run has nothing behind it.
+ExecStartPre=/usr/bin/rm -f %t/wk/ssh-agent.sock
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target
+EOF
+
+if cmp -s "$_unit_new" "$_unit_dir/wk-ssh-agent.service"; then
+    unchanged "wk-ssh-agent.service"
+    rm -f "$_unit_new"
+else
+    install -m 0644 "$_unit_new" "$_unit_dir/wk-ssh-agent.service"
+    rm -f "$_unit_new"
+    systemctl --user daemon-reload
+    changed "installed wk-ssh-agent.service"
+fi
+
+if systemctl --user is-active --quiet wk-ssh-agent.service; then
+    unchanged "wk-ssh-agent running"
+else
+    systemctl --user enable --now wk-ssh-agent.service >/dev/null 2>&1 \
+        || warn "could not start wk-ssh-agent.service -- no workspace here can push"
+    systemctl --user is-active --quiet wk-ssh-agent.service \
+        && changed "started wk-ssh-agent.service"
+fi
+
+# --- the GitHub API credential injector --------------------------------------
+# The other half of the same switch: it terminates TLS for api.github.com and
+# replaces the Authorization header with the real token, so `git-webkit pr`
+# works in a workspace that never holds it (container/proxy/github-inject.py).
+# Its socket is under the store and *not* in %t/wk: a workspace must reach it
+# through the egress policy, not around it.
+_unit_new=$(mktemp)
+cat > "$_unit_new" <<EOF
+[Unit]
+Description=wk GitHub API credential injector
+Documentation=file://$WK_ROOT/container/proxy/github-inject.py
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 $WK_ROOT/container/proxy/github-inject.py
+Environment=WK_STORE=$WK_STORE
+Restart=on-failure
+RestartSec=2
+# It publishes its CA certificate into %t/wk, which every container mounts.
+RuntimeDirectory=wk
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$WK_STORE
+
+[Install]
+WantedBy=default.target
+EOF
+
+if cmp -s "$_unit_new" "$_unit_dir/wk-github-inject.service"; then
+    unchanged "wk-github-inject.service"
+    rm -f "$_unit_new"
+else
+    install -m 0644 "$_unit_new" "$_unit_dir/wk-github-inject.service"
+    rm -f "$_unit_new"
+    systemctl --user daemon-reload
+    changed "installed wk-github-inject.service"
+fi
+
+# Restarted only when the program changed, for the reason the proxy's own stamp
+# gives: it runs straight off this checkout.
+_inject_stamp="$WK_STORE/.inject-policy"
+_inject_hash=$(cksum < "$WK_ROOT/container/proxy/github-inject.py" | awk '{print $1}')
+if systemctl --user is-active --quiet wk-github-inject.service; then
+    if [ "$(cat "$_inject_stamp" 2>/dev/null)" = "$_inject_hash" ]; then
+        unchanged "wk-github-inject running"
+    else
+        systemctl --user restart wk-github-inject.service
+        printf '%s\n' "$_inject_hash" > "$_inject_stamp"
+        changed "restarted wk-github-inject (program changed)"
+    fi
+else
+    systemctl --user enable --now wk-github-inject.service >/dev/null 2>&1 \
+        || warn "could not start wk-github-inject.service -- 'git-webkit pr' in a workspace will fail"
+    if systemctl --user is-active --quiet wk-github-inject.service; then
+        printf '%s\n' "$_inject_hash" > "$_inject_stamp"
+        changed "started wk-github-inject.service"
+    fi
+fi
+
+unset SDK _before _unit_dir _unit_new _policy_stamp _policy_hash _inject_stamp _inject_hash

@@ -139,7 +139,9 @@ fi
 _missing_keys=""
 while read -r _remote _repo _alias; do
     [ -n "$_remote" ] || continue
-    [ -f "$WK_STORE/secrets/build_key_$_remote" ] || _missing_keys="$_missing_keys $_repo"
+    # The private half, in the directory nothing mounts (wk_push_held_dir):
+    # a public half in secrets/ is not a key this machine can push with.
+    [ -f "$(wk_push_held_dir)/build_key_$_remote" ] || _missing_keys="$_missing_keys $_repo"
 done <<EOF
 $(wk_push_forks)
 EOF
