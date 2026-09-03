@@ -24,38 +24,33 @@ a `report-<board>-speedometer2.1.html` beside the runs.
 
 Both systems are on the stick (`/dev/sda`: `sda1/2` =
 `wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1`, `sda3/4` =
-`wpewebkit-2.46-yocto-rpi5-32-64f773b84146`), and both images are built and
-`ready` in their workspaces.
+`wpewebkit-2.46-yocto-rpi5-32-64f773b84146`), both read off the medium by
+`wk boot rpi5 --system <id>`, and the stick's `autoboot.txt` carries
+`[all] boot_partition=1` and `[tryboot] boot_partition=3`, so either pair can
+be armed. The 64-bit slot is built (`base`, build-id 2f19338d).
 
-- [ ] rpi5's installed card helper is a loose copy: this tree's
-      `admin/wk-card-priv` was scp'd into that machine's checkout and
-      installed from there, so the checkout is dirty and its next `git pull`
-      reverts the helper without saying so. Commit this tree and pull it
-      there [no hardware needed]
-- [ ] confirm the stick's `autoboot.txt` carries `[tryboot] boot_partition=3`.
-      Nothing has ever read it — the write that made the second pair should
-      have put it there, and an arming for pair 3 refuses without it:
-      `wk boot rpi5 --system wpewebkit-2.46-yocto-rpi5-32-64f773b84146 --dry-run`
-      answers [no hardware needed]
-- [ ] build the two slots, one at a time, from the tip both images were built
-      from (`6977eef7cd9ab01506bf0ff131dc169e8cfac601`):
-      `wk sysimage webkit wpewebkit-2.46-yocto-rpi5-64 --commit 6977eef7cd9ab01506bf0ff131dc169e8cfac601 --slot base --detach`
-      and the same for `wpewebkit-2.46-yocto-rpi5-32`. Each wants ~20 GB and
-      `disk_admit` refuses below `WK_BUILD_DISK_GB` [no hardware needed]
+- [ ] rpi5's card helper was installed from that machine's own checkout after
+      the tree was synced there; keep it in step with this one, since
+      `wk sysimage write` and every medium read now need `boot-read`
+      [no hardware needed]
+- [ ] finish the 32-bit slot build, then confirm from the workspace -- not the
+      board -- that it is actually 32-bit: `file` on
+      `WebKitBuild/wk-slots/base/root/bin/MiniBrowser` must say `ELF 32-bit`
+      `ARM`, and `slot.json`'s `target` must say `rpi5-32bits-mesa`. The 64-bit
+      slot reads `ELF 64-bit ARM aarch64`. The slot is `build-webkit
+      --cross-target` against the image's toolchain, and the image's *userspace*
+      being lib32 does not by itself make the slot 32-bit: if it comes out
+      aarch64 the comparison measures nothing and the multilib has to reach the
+      slot build [no hardware needed]
 - [ ] then, per system: `wk boot rpi5 --system <id>`, `wk boot rpi5 --keep`,
       `wk pi deploy wpewebkit-2.46-yocto-rpi5-<width> rpi5 --slot base`, and
       finally
       `wk pi bench rpi5 speedometer2.1 --ab-systems <64-id>,<32-id> --slot base --rounds 5`
       [needs the rpi5 free of its own workstation session]
-- [ ] the 32-bit arm is a multilib image: 64-bit kernel, device tree and
-      firmware exactly as the rpi5-64 profile builds them, userspace at
-      `armv7vethf-neon-vfpv4`. Confirm on the booted board that the browser
-      under test is 32-bit (`file` on the slot's MiniBrowser, or
-      `/proc/<pid>/exe`) before believing a width comparison
-      [needs the board booted into the 32-bit system]
-- [ ] `b_medium_read`'s workstation half is proven by its unit tests and by
-      the addressing it emits, not yet against a real medium. `wk boot rpi5
-      --status` once the helper is installed is that evidence [needs the rpi5]
+- [ ] confirm on the booted board that the process under test is the 32-bit one
+      (`/proc/<pid>/exe` of the running WPEWebProcess), which the file check
+      above cannot answer: the board could still load a 64-bit browser from the
+      image rather than the slot [needs the board booted into the 32-bit system]
 
 ## Constraints that bound all of the above
 

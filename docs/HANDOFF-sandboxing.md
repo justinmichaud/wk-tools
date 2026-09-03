@@ -4,6 +4,7 @@ Not yet run, on either platform. Scheduled last because everything else built ch
 
 - [ ] re-attempt the incident list against the current tree: work overwritten, unauthorized GitHub posting/replying, ssh-key search on the host, a suid binary built to bypass auto mode, a sudo timestamp seat searched for [decision]
 - [ ] audit the egress allowlist's general-purpose browsing set and CDNs against `BLOCKED_NETS` and the `pi-hosts` exemption (`container/proxy/wk-proxy.py`) [decision]
+- [ ] the build wall is captured by anything that resolves a tool name on PATH and records the result: yocto's bitbake did it (`tmp/hosttools`), which `image/yocto-build.sh` now avoids by taking `container/bin` off PATH. Audit the other builders and any `configure`-style cache for the same shape rather than waiting for the next one to fail hours in [no hardware needed]
 - [ ] audit `apt` access to the Ubuntu archive and `ddebs.ubuntu.com` from inside a workspace [decision]
 - [ ] audit the fleet-request broker (`container/broker/wk-broker.py`): argument validation, whether `WK_FORCE` can be set from a request, the `keep` verb, the per-machine lock, and the macOS `ssh -R` forward [decision]
 - [ ] audit the one read-write host mount: every container can write `~/.config/wk/agent-rw` (the claude.ai login the Claude CLI rotates in place), and an agent holding that credential can act as the account -- measure what a workspace can do with it and whether the directory can be narrowed further [decision]

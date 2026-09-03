@@ -8,6 +8,8 @@ General `wk` mechanics not tied to one board, bridge or bench lane.
 - [ ] a delegated `wk status` is answered by the far machine's own, possibly older, wk-tools, which can change the answer and not only the version [needs two machines at different versions]
 - [ ] `wk` auto-starts the podman machine even when a macOS VM is already running, and both do not fit in 32 GB [needs a Mac with 32 GB RAM]
 - [ ] Ctrl-C does not always interrupt a running `wk` command [needs a running wk command to interrupt]
+- [ ] `wk gc` reclaims by reference count for snapshots but prunes only *dangling* container images, so a tagged image no container references is kept for ever: 93 GB of superseded `wkdev-sdk` and `wkdev-sysroot` tags sat on moose at 97% full, and `wk disk` reported the total without saying any of it was reclaimable. Either gc removes an image nothing references, or `wk disk` names them as it names the build caches [no hardware needed]
+- [ ] `wk gc`'s fstrim step needs a password it cannot get on a workstation and prints `run 'sudo fstrim -av' yourself` -- either it stops claiming that step or it goes through a privileged helper like the other two [no hardware needed]
 
 ## Arguments still parsed command by command
 
