@@ -240,7 +240,24 @@ It doesn't cost disk space, it saves it, no?
 - Live measurement owed on a real tahoe guest: which Software Update key the
   offer actually obeys -- see the TODO in vm/desktop.sh.
 
-- git fetch origin in a tart guest is very slow. Each time I report a bug, it only gets fixed in one place. Check everywhere this time, test everywhere.
+- wk vm base --rebuild fails:
+...
+✅ Installation complete!
+
+==> Claude config linked from /Users/admin/wk-tools/claude
+==> password set for admin
+warning: the screen lock is left as it is: admin's password here is not the
+  one this run was given, so offering it to sysadminctl would be a guess.
+  'wk vm check <name>' reports the lock; a rebuilt base sets the password.
+==> desktop settled
+==> warming webkitpy's autoinstalled packages
+==> autoinstalled: 7.6M
+==> base provisioning complete
+error: config_load 'mac-release': no platform given. It is the
+    target's t_os, so load_target has to run first -- on macOS a config does
+    not choose its own build system (build/configs.sh).
+
+- git fetch origin in a tart guest is very slow. Each time I report a bug to you, it only gets fixed in one place. Check everywhere this time, test everywhere.
 
 - wk pi setup rpi5 should refuse to run if pi5 is already claiming workstation role.
 
