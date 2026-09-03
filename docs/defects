@@ -24,6 +24,8 @@ NEEDS YOU
    which targets/vm.sh today forbids by design); (c) a per-guest login
    (`claude auth login` inside the guest, no copy). [decision]
 
+   do c then
+
 2. With push on, the api.github.com injector authenticates whatever the
    workspace sends (Host is forced to api.github.com, Authorization is
    replaced, one request per connection), so a workspace can use the whole
@@ -31,6 +33,8 @@ NEEDS YOU
    path (e.g. GET anywhere, POST only to /repos/*/pulls) is a policy table in
    container/proxy/github-inject.py. Restrict, or leave whole-API while push
    is on? [decision]
+
+   restrict it to only things that git-webkit needs
 
 3. buildbox4 has no libc++ (measured 2026-09-03: clang++ and clang++-19 are
    the same Debian clang 19.1.7 binary; `-stdlib=libc++` cannot find
@@ -42,6 +46,8 @@ NEEDS YOU
    there, then delete the line. Also measured there: gtk-release took 25m42s
    (build.status in your image-decoders workspace, -j64, no ccache), not
    3m00s and not 40m. [decision]
+
+   As long as a fresh build completes this is fine.
 
 ================================================================================
 OWED, WITH THE DECISION ALREADY MADE
@@ -70,6 +76,17 @@ OWED, WITH THE DECISION ALREADY MADE
   agent-rw virtiofs mount. If the second fails, `wk_agent_rw_dir` gets a
   VM-local answer plus a seed step; nothing downstream changes.
 
+Done. One issue:
+
+==> stage: vmtools
+error: /opt/wk-tools/wk is not executable inside 'wk', so nothing in
+    there can run this tooling. The machine mounts this checkout there when it
+    is created:  ./setup --stage machine
+warning: stage 'vmtools' failed (exit 1) -- continuing with the remaining stages
+
+tolken:host ~/Development/wk-tools main* ❯ wk sync
+bash: line 1: /opt/wk-tools/wk: No such file or directory
+
 - Live check after the recreate: `wk new <ws>`; `wk push on`;
   `podman machine ssh wk -- 'SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/wk/ssh-agent.sock ssh-add -l'`;
   in the workspace `git push --dry-run fork HEAD` and
@@ -78,9 +95,6 @@ OWED, WITH THE DECISION ALREADY MADE
   `wk verify <ws>`; `wk ai claude <ws> --rc` starts and survives 60s.
   A workspace created before this change keeps its old ~/.ssh/config; one
   `wk rm`/`wk new` converges it.
-
-- `wk rm br-rescue2` (or `podman rm`) -- the Exited container on this Mac's
-  host podman connection. Refused from an agent.
 
 - `wk vm base --rebuild` (hours). The failure at its end is fixed
   (config_load now gets the platform; a prebuild failure can no longer unmake
