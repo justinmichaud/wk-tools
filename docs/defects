@@ -241,3 +241,24 @@ It doesn't cost disk space, it saves it, no?
   offer actually obeys -- see the TODO in vm/desktop.sh.
 
 - git fetch origin in a tart guest is very slow. Each time I report a bug, it only gets fixed in one place. Check everywhere this time, test everywhere.
+
+- wk pi setup rpi5 should refuse to run if pi5 is already claiming workstation role.
+
+It also seems like it doesn't bail on error:
+
+wk pi setup rpi5
+==> probing rpi5
+  arch=aarch64 kernel=7.0.6-1-numa -> tailscale_1.102.2_arm64
+  writable prefix: /tmp
+  /dev/net/tun present -> kernel networking
+==> installing tailscale 1.102.2 on rpi5
+/tmp/tailscale-up.sh: 6: cannot create /var/log/tailscaled.log: Permission denied
+==> bringing the node up as tag:wk
+failed to connect to local tailscaled (which appears to be running as tailscaled, pid 1368). Got error: Failed to connect to local Tailscale daemon for /localapi/v0/status; not running? Error: dial unix /tmp/tailscale-state/tailscaled.sock: connect: no such file or directory
+error: tailscale up failed on rpi5 (exit 1).
+    A key that is single-use, untagged, or expired fails exactly here; the node
+    is left with tailscaled running and no identity, and re-running this is safe.
+
+Check every script. Confirm they all handle errors correctly.
+
+- Go through each script and remove parts that are dead. Every extra branch that is untested or not regularly used is problematic. No hacks, no spaghetti. Remove comments that are verbose or not relevant. Unless a comment is extremely useful, verified, and cannot be expressed by making the code or architecture more clear, remove it. Prefer restructuring code over comments.
