@@ -11,6 +11,7 @@ Run: python3 -m unittest tests.test_profile_debug -v
 """
 
 import os
+import platform
 import subprocess
 import tempfile
 import unittest
@@ -153,6 +154,10 @@ class ProfileBrowserProcessTest(unittest.TestCase):
             self.assertNotIn("WPENetworkProcess", cp.stdout, cp.stdout)
             self.assertNotIn("WPEGPUProcess", cp.stdout, cp.stdout)
 
+    # A mac-* config on a Linux workspace is refused before any command line
+    # is composed, so there is no Apple browser path to assert about here.
+    @unittest.skipUnless(platform.system() == "Darwin",
+                         "a mac-* config is refused off an Apple host")
     def test_apple_port_browser_path_is_unchanged(self):
         """mac-* --browser still profiles MiniBrowser directly, exactly as before"""
         with fake_workspace() as ws:

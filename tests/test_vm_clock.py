@@ -33,8 +33,11 @@ if [ "$1" = "-u" ] && [ "$2" = "+%s" ]; then echo "$FAKE_GUEST_EPOCH"; exit 0; f
 exec /bin/date "$@"
 """
 
+# `printf`, not `echo`: the first argument is `-n`, which /bin/sh's echo eats
+# as its own no-newline flag -- so the log lost the very token the assertions
+# below look for, and every test here failed against correct code.
 FAKE_SUDO = """#!/bin/sh
-echo "$@" >> "$SUDO_LOG"
+printf '%s\\n' "$*" >> "$SUDO_LOG"
 exit ${SUDO_RC:-0}
 """
 

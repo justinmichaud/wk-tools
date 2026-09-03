@@ -525,6 +525,11 @@ class TestTheStoreHalfAndTheGuestHalf(WkTest):
         self.assertLess(body.index('[ -z "$STORE_ONLY" ] || exit "$STORE_RC"'),
                         body.index("converge_guests"))
 
+    # The refusal exists because the store's other half is a podman machine:
+    # where the store is local -- every Linux host -- `--store` is readable
+    # here and running it is correct, so there is nothing to refuse.
+    @unittest.skipUnless(os.uname().sysname == "Darwin",
+                         "the store half is a hop only where the store lives in the podman VM")
     def test_store_only_refuses_rather_than_hopping_again(self):
         """The dispatcher forwards `--store` to the machine that holds the
         keys. If it ever did not, hopping again would be an endless loop, so

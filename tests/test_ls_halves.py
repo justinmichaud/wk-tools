@@ -16,13 +16,21 @@ from tests.test_options import run_impl
 class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
     def _ls(self, *flags):
         with temp_store() as store:
-            # A podman-free PATH: the container target lists real containers
-            # through podman, and this table must be empty by construction.
+            # The container target lists real containers through podman, and
+            # this table must be empty by construction. Trimming PATH does not
+            # do that -- podman lives in /usr/bin on a Linux host, so the real
+            # workspaces came back and every assertion here read the machine it
+            # ran on. A stub that lists nothing is the empty table, wherever
+            # podman is installed.
+            binp = store["path"] / "bin"
+            binp.mkdir(parents=True, exist_ok=True)
+            (binp / "podman").write_text("#!/bin/sh\nexit 0\n")
+            (binp / "podman").chmod(0o755)
             return run_impl("ls", *flags, env={
                 "WK_STORE": store["WK_STORE"],
                 "XDG_STATE_HOME": str(store["path"] / "state"),
                 "WK_TARGET": "container",
-                "PATH": "/usr/bin:/bin",
+                "PATH": f"{binp}:/usr/bin:/bin",
             })
 
     def test_the_first_half_never_prints_the_note(self):

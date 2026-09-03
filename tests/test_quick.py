@@ -10,6 +10,7 @@ Run: python3 -m unittest tests.test_quick -v
 """
 import json
 import os
+import platform
 import re
 import subprocess
 import unittest
@@ -286,8 +287,14 @@ true
 # --------------------------------------------------------------------------- #
 
 class TestResolveWithoutABuild(WkTest):
-    def test_wk_profile_composes_the_right_environment(self):
-        """\\`wk profile\\` composes the right environment for each port"""
+    # The Apple-port half of this: a `mac-*` config on a Linux workspace is
+    # refused before any environment is composed (cmd/build's own classifier),
+    # so there is nothing to assert about DYLD_FRAMEWORK_PATH or xctrace here.
+    # Skipped by name rather than asserted-around, the way `wk vm`'s tests are.
+    @unittest.skipUnless(platform.system() == "Darwin",
+                         "a mac-* config is refused off an Apple host")
+    def test_wk_profile_composes_the_apple_port_environment(self):
+        """\\`wk profile\\` composes the right environment for the Apple port"""
         with fake_workspace() as ws:
             bad = []
             cp = ws.run("profile", "--config", "mac-release", "--dry-run", "bench.js")
@@ -297,17 +304,22 @@ class TestResolveWithoutABuild(WkTest):
             if not re.search(r"/jsc.* --sample.* .?bench\.js", cp.stdout):
                 bad.append("flags-after-script")
 
+            cp = ws.run("profile", "--config", "mac-release", "--mode", "native", "--dry-run", "bench.js")
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            if "xctrace record" not in cp.stdout:
+                bad.append("native-is-not-xctrace")
+            self.assertEqual(bad, [], f"wk profile resolved wrongly: {bad}")
+
+    def test_wk_profile_composes_the_right_environment(self):
+        """\\`wk profile\\` composes the right environment for each port"""
+        with fake_workspace() as ws:
+            bad = []
             cp = ws.run("profile", "--config", "wpe-release", "--mode", "native", "--dry-run", "bench.js")
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             if "LD_LIBRARY_PATH" not in cp.stdout:
                 bad.append("no-ld-library-path")
             if "samply record" not in cp.stdout:
                 bad.append("native-is-not-samply")
-
-            cp = ws.run("profile", "--config", "mac-release", "--mode", "native", "--dry-run", "bench.js")
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            if "xctrace record" not in cp.stdout:
-                bad.append("native-is-not-xctrace")
 
             for m in ("sampling", "bytecode", "samply", "instruments", "heaptrack", "massif"):
                 cp = ws.run("profile", "--mode", m, "--dry-run", "bench.js")

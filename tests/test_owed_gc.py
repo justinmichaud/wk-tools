@@ -16,6 +16,7 @@ support.py rule -- no test here reaches a real podman machine or the fleet).
 
 Run: python3 -m unittest tests.test_owed_gc -v
 """
+import pathlib
 import unittest
 
 from tests.support import REPO, WkTest, bash, rand_suffix, scratch_dir
@@ -29,24 +30,36 @@ class TestGcHonoursAPresetWkRoot(WkTest):
         header comment names; only WK_ROOT (not $0) may be trusted to find
         lib/common.sh and the rest of the tree."""
         with scratch_dir() as store, scratch_dir() as state, scratch_dir() as reg:
+            # WK_STORE, not WK_VM_STORE: gc reads the former, so naming only
+            # the latter pointed this at the real store and the test reclaimed
+            # the machine's own ccache. A stubbed podman keeps it off the real
+            # container store for the same reason (this module's own rule: no
+            # test here reaches a real podman machine or the fleet).
+            binp = pathlib.Path(state) / "bin"
+            binp.mkdir(parents=True, exist_ok=True)
+            (binp / "podman").write_text("#!/bin/sh\nexit 1\n")
+            (binp / "podman").chmod(0o755)
             cp = self.bash(
                 'exec bash -s -- < "$GC"',
                 env={
                     "WK_ROOT": str(REPO),
                     "WK_TARGET": "vm",
+                    "WK_STORE": str(store),
                     "WK_VM_STORE": str(store),
                     "XDG_STATE_HOME": str(state),
                     "WK_TARGET_REGISTRY": str(reg),
                     "WK_MACHINE": f"wk-test-no-such-machine-{rand_suffix()}",
+                    "PATH": f"{binp}:/usr/bin:/bin",
                     "GC": str(GC),
                 },
             )
         out = cp.stdout + cp.stderr
         self.assertEqual(cp.returncode, 0, out)
-        # Evidence it ran as the real script (sourced lib/common.sh etc.,
-        # reached the podman-machine check) rather than dying on `dirname
-        # bash` finding no lib/ to source at all.
-        self.assertIn("podman machine is not running", out, out)
+        # Evidence it ran as the real script -- sourced lib/common.sh and the
+        # rest and reached its own end -- rather than dying on `dirname bash`
+        # finding no lib/ to source at all. Not the podman-machine line: that
+        # is only reached where a podman machine is the store's other half.
+        self.assertIn("gc complete", out, out)
 
 
 class TestGcSourcesTheTreeOptionally(WkTest):

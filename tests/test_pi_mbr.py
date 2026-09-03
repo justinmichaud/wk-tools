@@ -100,7 +100,13 @@ class TestSelfDisarm(unittest.TestCase):
             img.write_bytes(b"\0" * 512)
             # The script names /dev/<disk>; re-point /dev via PATH-free text substitution
             # of the two absolute paths it uses, which is what makes it testable at all.
-            fake = s.replace("/dev/", f"{d}/dev/").replace("/proc/self/mountinfo", f"{d}/mountinfo").replace("/sys/dev/block/", f"{d}/block/")
+            # Longest first: "/sys/dev/block/" contains "/dev/", so replacing
+            # "/dev/" ahead of it rewrites the middle of that path and the
+            # later replacement then matches nothing -- the script read the
+            # host's real /sys and exited without writing a byte.
+            fake = (s.replace("/sys/dev/block/", f"{d}/block/")
+                     .replace("/proc/self/mountinfo", f"{d}/mountinfo")
+                     .replace("/dev/", f"{d}/dev/"))
             Path(d, "dev").mkdir()
             os.symlink(img, Path(d, "dev", "fakedisk"))
             Path(d, "block").mkdir()

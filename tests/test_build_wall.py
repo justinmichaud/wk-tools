@@ -70,8 +70,27 @@ class WallTest(WkTest):
             )
             p.chmod(0o755)
 
+    def bare_bin(self):
+        """A PATH directory holding what the wall itself runs and no build
+        tool at all.
+
+        `/usr/bin` cannot stand in for this: a host with ninja or cmake
+        installed has one *on* PATH, so a test asserting "no real tool
+        anywhere" found the host's and read exit 1 instead of 127. Only the
+        four the wall needs are linked in -- `env` resolves bash through
+        PATH, and the wall calls dirname, grep and readlink.
+        """
+        d = self.tmp / "bare-bin"
+        if not d.exists():
+            d.mkdir()
+            for tool in ("bash", "sh", "dirname", "grep", "readlink"):
+                src = shutil.which(tool)
+                if src:
+                    (d / tool).symlink_to(src)
+        return d
+
     def call(self, name, *args, env=None, fake=True):
-        path = f"{BIN}:{self.fake}:/usr/bin:/bin" if fake else f"{BIN}:/usr/bin:/bin"
+        path = f"{BIN}:{self.fake}:/usr/bin:/bin" if fake else f"{BIN}:{self.bare_bin()}"
         e = {"HOME": str(self.tmp), "PATH": path, "TERM": "dumb"}
         if env:
             e.update(env)
@@ -224,7 +243,7 @@ class TestTwoWallsDoNotExecEachOther(WallTest):
 
     def test_two_walls_and_no_real_tool_say_so_rather_than_looping(self):
         other = self._second_tree()
-        cp = self._call("ninja", f"{BIN}:{other}:/usr/bin:/bin")
+        cp = self._call("ninja", f"{BIN}:{other}:{self.bare_bin()}")
         self.assertEqual(127, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("not on PATH", cp.stderr)
 
