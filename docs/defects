@@ -262,3 +262,37 @@ error: tailscale up failed on rpi5 (exit 1).
 Check every script. Confirm they all handle errors correctly.
 
 - Go through each script and remove parts that are dead. Every extra branch that is untested or not regularly used is problematic. No hacks, no spaghetti. Remove comments that are verbose or not relevant. Unless a comment is extremely useful, verified, and cannot be expressed by making the code or architecture more clear, remove it. Prefer restructuring code over comments.
+
+
+- sync is still broken:
+
+tolken:host ~/Development/wk-tools main ❯ wk sync --tools moose
+Updating 2f9963c..3c92e8d
+Fast-forward
+ docs/defects | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+From github.com:justinmichaud/wk-tools
+   2f9963c..3c92e8d  main       -> origin/main
+  moose                    pulled, still DIFFERS (5c96554a49c4, this machine has 2def6b7eba77)
+                           both are at origin/main, so the difference is untracked or excluded files rather than commits
+==> 'wk status' compares every copy against this one
+warning: 1 target(s) did not take the tooling -- see above
+tolken:host ~/Development/wk-tools main exit 1 ❯ git status
+On branch main
+Your branch is up to date with 'origin/main'.
+
+nothing to commit, working tree clean
+tolken:host ~/Development/wk-tools main ❯ git log
+commit 3c92e8d680b6e60a3a8dc9f0953cd487f138dab8 (HEAD -> main, origin/main, origin/HEAD)
+
+moose:host ~/Development/wk-tools main ❯ git status
+On branch main
+Your branch is up to date with 'origin/main'.
+
+nothing to commit, working tree clean
+moose:host ~/Development/wk-tools main ❯ git pull
+Already up to date.
+moose:host ~/Development/wk-tools main ❯ git log
+commit 3c92e8d680b6e60a3a8dc9f0953cd487f138dab8 (HEAD -> main, origin/main, origin/HEAD)
+
+Fix that, but also diagnose why your testing didn't catch this. It feels like I have to carefully inspect everything because you only do the bare minimum.
