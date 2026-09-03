@@ -11,6 +11,7 @@ all and reports it as every host in the world being unreachable.
 
 Run: python3 -m unittest tests.test_egress -v
 """
+import asyncio
 import importlib.util
 import shutil
 import subprocess
@@ -41,6 +42,38 @@ def _load(path, name):
 
 def _policy():
     return _load(PROXY, "wkproxy").Policy(tempfile.mkdtemp(prefix="wk-test-store-"))
+
+
+class FakeWriter:
+    """An asyncio StreamWriter as far as either program uses one: it is
+    written to, drained and closed, and the test reads back every byte."""
+
+    def __init__(self):
+        self.data = bytearray()
+        self.closed = False
+
+    def write(self, b):
+        self.data += b
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def is_closing(self):
+        return self.closed
+
+    async def wait_closed(self):
+        pass
+
+
+def _reader(data=b"", eof=True):
+    r = asyncio.StreamReader()
+    r.feed_data(data)
+    if eof:
+        r.feed_eof()
+    return r
 
 
 class TestDevelopmentAllowlist(unittest.TestCase):
@@ -161,6 +194,54 @@ class TestTheApiGoesToTheInjector(unittest.TestCase):
 
     def test_the_widening_is_declared_for_the_audit(self):
         self.assertIn("SANDBOX AUDIT", PROXY.read_text())
+
+
+class TestTheRouteAndTheCheckReadOneSpelling(unittest.TestCase):
+    """A host name is case-insensitive and may carry a trailing dot, so one
+    name has several spellings. The allowlist normalised and the route did
+    not, so `CONNECT API.GITHUB.COM:443` passed the check as the injected host
+    and then got a plain tunnel to GitHub -- the credential injector out of the
+    path, and TLS the workspace terminates itself."""
+
+    def _routed(self, target):
+        """Where `handle` sent this CONNECT: the host and port open_upstream
+        was asked for, with the real allowlist in front of it."""
+        m = _load(PROXY, "wkproxy")
+        proxy = m.Proxy(m.Policy(tempfile.mkdtemp(prefix="wk-test-store-")))
+        seen = []
+
+        async def fake_open_upstream(host, port):
+            seen.append((host, port))
+            return _reader(), FakeWriter()
+
+        proxy.open_upstream = fake_open_upstream
+        cwriter = FakeWriter()
+        asyncio.run(proxy.handle(
+            _reader(b"CONNECT %s HTTP/1.1\r\n\r\n" % target.encode()), cwriter))
+        return seen, bytes(cwriter.data)
+
+    def test_every_spelling_of_the_api_reaches_the_injector(self):
+        for target in ("api.github.com:443", "API.GITHUB.COM:443",
+                       "api.github.com.:443", "Api.GitHub.Com.:443"):
+            with self.subTest(target=target):
+                seen, out = self._routed(target)
+                self.assertEqual([("api.github.com", 443)], seen, out)
+                self.assertIn(b"200 Connection established", out)
+
+    def test_the_injector_branch_matches_that_one_spelling(self):
+        """open_upstream routes on an exact dict lookup, so the normalisation
+        has to have happened before it -- this is the assertion that the two
+        cannot drift apart again."""
+        m = _load(PROXY, "wkproxy")
+        for spelled in ("API.GITHUB.COM", "api.github.com."):
+            with self.subTest(spelled=spelled):
+                self.assertNotIn(spelled, m.INJECTED_HOSTS)
+                self.assertEqual("api.github.com", m.normalize_host(spelled))
+
+    def test_a_shouted_denied_host_is_still_denied(self):
+        seen, out = self._routed("UPLOADS.GITHUB.COM:443")
+        self.assertEqual([], seen, out)
+        self.assertIn(b"403 Forbidden", out)
 
 
 class TestTheInjectorsRule(unittest.TestCase):

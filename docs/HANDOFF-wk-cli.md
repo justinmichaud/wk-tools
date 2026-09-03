@@ -64,7 +64,7 @@ Each a `kill -9` mid-command plus a re-run that must converge:
 
 ## Everything else still unticked
 
-- [ ] audit the name `store`: `$WK_STORE` holds `ws/`, `git/WebKit.git`, `base/`, `secrets/`, `push-keys/`, `cache/`, `bench/`, `skills/`, `vm/`, and only the mirror is WebKit's -- decide what each part is called before a second project needs a name [needs a decision]
+- [ ] audit the name `store`: `$WK_STORE` holds `ws/`, `git/WebKit.git`, `base/`, `cache/`, `bench/`, `skills/`, `vm/`, with `secrets/`, `push-keys/` and `agent-rw/` beside it (`~/.config/wk` on a macOS host, the store itself elsewhere), and only the mirror is WebKit's -- decide what each part is called before a second project needs a name [needs a decision]
 - [ ] `wk backup` → `./setup` round-trip (`docs/HANDOFF-settings-audit.md`) [needs a machine to reprovision]
 - [ ] `wk skills` status/diff/pull/push; pull refuses over uncommitted repo edits [needs a workspace]
 - [ ] the skills are workspace-true: an agent started by `wk ai claude` in a container and in a macOS guest can follow every skill it can trigger without hitting a host-only instruction [needs a container and a macOS VM]

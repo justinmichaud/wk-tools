@@ -174,9 +174,9 @@ WK_VM_PASSWORD="${WK_VM_PASSWORD:-1}"
 # a re-provision must not offer the image's.
 #
 # `dscl . -authonly` decides, before and after, and sysadminctl's exit status
-# decides nothing: it exited 0 while leaving the password as the image's, which
-# is why every later step -- vm/desktop.sh's screen lock first -- reported a
-# password that was not the one this run was given. The self-change form (no
+# decides nothing: it exits 0 while leaving the password as the image's, and
+# every later step -- vm/desktop.sh's screen lock first -- would then be
+# working with a password the account does not have. The self-change form (no
 # sudo, no -adminUser) is what the account itself can do, and it is the account
 # this runs as.
 #

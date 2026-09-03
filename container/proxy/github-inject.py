@@ -73,7 +73,7 @@ def log(msg):
     print("[wk-github-inject] %s" % msg, file=sys.stderr, flush=True)
 
 
-def rewrite_head(head, token):
+def rewrite_head(head, token, length=0):
     """The whole of the injection: one request head in, one out.
 
     Whatever the workspace sent as Authorization is dropped -- it is a
@@ -91,6 +91,11 @@ def rewrite_head(head, token):
     token, so a client-chosen Host is a way to spend that token against another
     name behind GitHub's front end.
 
+    Content-Length is this program's own too, and `length` is the number of
+    body bytes it actually relays: the client's framing headers are dropped
+    (DROP) so that GitHub and this program cannot disagree about where the
+    request ends, which is the disagreement a smuggled second request needs.
+
     A function rather than inline code because it is the part with a rule in
     it, and the rule is testable without a socket (tests/test_egress.py).
     """
@@ -105,6 +110,7 @@ def rewrite_head(head, token):
         out.append(line)
     if token:
         out.append(b"Authorization: Bearer " + token.encode("latin-1"))
+    out.append(b"Content-Length: %d" % length)
     out.append(b"Connection: close")
     return b"\r\n".join(out) + b"\r\n\r\n"
 
@@ -314,11 +320,6 @@ class Injector:
                 await self.refuse(cwriter, *refusal)
                 return
 
-            token = read_token(self.pat_path)
-            new_head = rewrite_head(head, token)
-            first = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
-            log("%s %s" % ("inject" if token else "unauthenticated", first))
-
             # Exactly the declared body and no byte more. What follows it on
             # this connection is a second request head, and the second head is
             # one nothing here rewrote -- so it is not relayed and the client
@@ -330,6 +331,11 @@ class Injector:
                 if not chunk:
                     break
                 body += chunk
+
+            token = read_token(self.pat_path)
+            new_head = rewrite_head(head, token, len(body))
+            first = head.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+            log("%s %s" % ("inject" if token else "unauthenticated", first))
 
             ureader, uwriter = await asyncio.open_connection(
                 INJECT_HOST, INJECT_PORT, ssl=self.client_ctx,

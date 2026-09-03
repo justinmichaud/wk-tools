@@ -1,16 +1,12 @@
-"""A static audit owed by docs/HANDOFF-test-runner.md: "a trailing
-`[ -n "$x" ] && ...` as a function's last statement under `set -e` (catches:
-the function's exit status becoming 1 and killing an unguarded caller)".
+"""Static audits over the tree's shell: three shapes that are invisible in
+review and fatal at run time, each pinned to what the tree looks like today so
+a *new* one fails here rather than shipping quietly.
 
-Every command file here runs under `set -euo pipefail`. A function whose
-*last* statement is an unguarded `&&` chain returns the left side's failure
-as its own exit status; called as a plain statement (not inside `if`/`||`),
-that kills the whole script. Some of the tree's `&&`-terminated functions are
-deliberate predicates (their return value *is* the answer, e.g.
-`store_is_local`) -- this audit cannot tell those apart from a real bug, so
-it does not classify, only counts and names what it finds, the same way
-docs/HANDOFF-test-runner.md asks: assert the current count so a *new* one
-introduced later is caught, without fixing the ones already here.
+The first: every command file runs under `set -euo pipefail`, and a function
+whose *last* statement is an unguarded `&&` chain returns the left side's
+failure as its own exit status -- called as a plain statement (not inside
+`if`/`||`), that kills the whole script. A function whose return value is the
+answer is exempt and is named below; anything else ends in `return 0`.
 
 Functions are found the way every `_lift`-style helper in this suite already
 assumes shell code here is written -- `name() {` alone on a line, closing
@@ -29,7 +25,7 @@ FUNC_RE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{\s*$')
 # Predicates whose return value is the point, not commands whose failure
 # would surprise a caller under `set -e`; a function that ends in an `&&`
 # chain and is not a predicate gets `return 0` instead of a place here.
-KNOWN_OFFENDERS = {
+DELIBERATE_PREDICATES = {
     ("lib/common.sh", "gh_authenticated"),
     ("lib/resources.sh", "is_headless"),
     ("lib/target.sh", "ws_on_target"),
@@ -37,11 +33,6 @@ KNOWN_OFFENDERS = {
     ("cmd/sync", "snapshot_current"),
     ("cmd/doctor", "podman_machine_running"),
     ("cmd/doctor", "git_speed_ok"),
-    # Not predicates -- called for effect, in a context (a plain statement,
-    # or inside `$(...)`, which set -e treats as a simple command) where an
-    # empty/false condition makes the function itself "fail" and can end its
-    # caller's script. These are the ones a fix belongs to; this audit only
-    # counts them.
 }
 
 
@@ -104,14 +95,16 @@ def find_offenders():
 
 
 class TestTrailingAndChainAudit(unittest.TestCase):
-    def test_the_known_offenders_are_exactly_what_is_here_today(self):
+    def test_the_only_trailing_and_chains_are_the_deliberate_predicates(self):
         offenders = find_offenders()
         found = {(rel, name) for rel, name, _ in offenders}
         self.assertEqual(
-            found, KNOWN_OFFENDERS,
-            f"the trailing-&&-chain audit found a different set than expected "
-            f"(new: {found - KNOWN_OFFENDERS}, gone: {KNOWN_OFFENDERS - found}); "
-            f"a new one is owed work, a gone one should be dropped from KNOWN_OFFENDERS -- "
+            found, DELIBERATE_PREDICATES,
+            f"the trailing-&&-chain audit found a different set than the "
+            f"deliberate predicates (new: {found - DELIBERATE_PREDICATES}; "
+            f"gone, so drop it from DELIBERATE_PREDICATES: "
+            f"{DELIBERATE_PREDICATES - found}). A new one either ends in "
+            f"`return 0` or belongs in DELIBERATE_PREDICATES -- "
             f"full detail: {offenders}",
         )
 
@@ -181,14 +174,13 @@ def find_remote_script_heredocs():
 
 
 class TestRemoteScriptHeredocsSetDashU(unittest.TestCase):
-    """The tree's remote-script convention (targets/vm.sh:824,901;
-    cmd/bridge:1435,1486; cmd/pi's pi_setup_start_tailscaled): a heredoc body
-    executed by a remote `bash -s`/`sh -s` opens with `set -u` (or `set -e`),
-    so a bad substitution or an unset variable fails loudly instead of a
-    silently-backgrounded launch failing opaquely three commands later
-    (docs/defects, the tailscaled-on-rpi5 bug this closes). Pinned the same
-    way the audits above are: every heredoc found today must comply, so a
-    *new* one that skips it fails here rather than shipping quietly."""
+    """The tree's remote-script convention: a heredoc body executed by a
+    remote `bash -s`/`sh -s` opens with `set -u` (or `set -e`), so a bad
+    substitution or an unset variable fails loudly instead of a
+    silently-backgrounded launch failing opaquely three commands later.
+    Pinned the same way the audits above are: every heredoc found today must
+    comply, so a *new* one that skips it fails here rather than shipping
+    quietly."""
 
     def test_every_remote_script_heredoc_opens_with_set_dash_u_or_e(self):
         found = find_remote_script_heredocs()
@@ -233,9 +225,9 @@ DELIBERATE_EXCLUSIONS = {
         "header describes, so it deliberately keeps `set -uo pipefail`",
 }
 
-# Owed, not deliberate: nothing here has decided these are right, only that
-# they are today's reality. Named so a *new* script that skips `set -euo
-# pipefail` is caught immediately instead of joining this list unnoticed.
+# Empty: every candidate script sets it. The set stays so a script that stops
+# setting it names itself here rather than passing unnoticed -- and a genuinely
+# exempt one belongs in DELIBERATE_EXCLUSIONS above, with its reason.
 NOT_YET_COMPLIANT = set()
 
 

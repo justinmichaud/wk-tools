@@ -1580,13 +1580,13 @@ pi_setup_start_tailscaled() { # <dest> <flags>
     local log="$dest/tailscale-state/tailscaled.log"
 
     # A real heredoc into 'sh -s', the tree's remote-script convention
-    # (targets/vm.sh:824, cmd/bridge:1435): `set -u` first, so a broken write
-    # below fails loudly rather than silently continuing. tailscale-up.sh's
-    # own log goes under $dest too, not /var/log -- /var/log is frequently
-    # read-only on these images, which is what made a failed launch invisible
-    # before (the redirect failed, silently, on a line backgrounded with `&`).
-    # The nested heredoc is quoted so the *remote* shell resolves its \$DEST
-    # at run time, not this one.
+    # (tests/test_owed_static_audits.py holds every one of them to it): `set
+    # -u` first, so a broken write below fails loudly rather than silently
+    # continuing. tailscale-up.sh's own log goes under $dest too, not
+    # /var/log, which is read-only on many of these images -- a failed launch
+    # on a line backgrounded with `&` is otherwise invisible. The nested
+    # heredoc is quoted so the *remote* shell resolves its \$DEST at run time,
+    # not this one.
     rsh "sh -s" <<REMOTE || die "could not install or start tailscaled on $HOST"
 set -u
 cat > '$dest/tailscale-up.sh' <<'INNER'

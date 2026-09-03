@@ -338,6 +338,19 @@ def log(msg):
     print(f"[wk-proxy] {msg}", file=sys.stderr, flush=True)
 
 
+def normalize_host(host):
+    """The one spelling every decision and every route is taken on.
+
+    A name is case-insensitive and may be written fully qualified with a
+    trailing dot, so `API.GITHUB.COM` and `api.github.com.` are the same host
+    to DNS and to the server -- but not to a dict lookup. `handle` normalises
+    once, before the allowlist check and before the route, because the two
+    reading different spellings is what let `CONNECT API.GITHUB.COM:443` pass
+    the allowlist as the injected host and then get a plain tunnel.
+    """
+    return host.lower().rstrip(".")
+
+
 class Policy:
     """Hostname and address policy, reloaded from the store on every request.
 
@@ -377,7 +390,7 @@ class Policy:
         node, so allowing the range would hand a workspace every machine the
         workstation can reach.
         """
-        host = host.lower().rstrip(".")
+        host = normalize_host(host)
 
         try:
             addr = ipaddress.ip_address(host)
@@ -408,7 +421,7 @@ class Policy:
         refuses. The block exists to stop an allowlisted *name* resolving onto
         the tailnet, not to unlist the device itself -- so a destination that
         is the allowlisted address must skip the address check."""
-        return host.lower().rstrip(".") in self._pi_hosts()
+        return normalize_host(host) in self._pi_hosts()
 
     def address_allowed(self, addr):
         ip = ipaddress.ip_address(addr)
@@ -539,6 +552,10 @@ class Proxy:
                 else:
                     port = int(port_s)
                 headers = f"{method} {path} {parts[2]}\r\n".encode("latin-1")
+
+            # Once, and before both the check and the route: open_upstream's
+            # injector branch is an exact match on this name.
+            host = normalize_host(host)
 
             allowed, why = self.policy.host_allowed(host, port)
             if not allowed:
