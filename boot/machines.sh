@@ -189,6 +189,50 @@ r_sudo() { # <command string>
     if [ "${NODE_ROLE:-}" = bench-device ]; then r_ssh "$@"; else r_ssh "sudo -n $*"; fi
 }
 
+# Read one of the fixed files a wk system leaves on a boot partition of this
+# machine's medium. One implementation, because there are three readers --
+# the system id (b_device_image), the boot dump (b_diag) and the firmware's
+# pair selector (rpi5_check_autoboot) -- differing only in the filename.
+#
+# The privilege differs by role, and only by role, for the same reason r_sudo
+# above it does:
+#
+#   bench-device  already root, and its medium is often the very disk the
+#                 board runs from -- which the card helper refuses by design.
+#                 So it mounts and reads directly.
+#   workstation   r_sudo is `sudo -n`, and the only thing that runs there
+#                 without a password is the card helper (CLAUDE.md). A plain
+#                 `mount` answers "interactive authentication is required",
+#                 which every reader above saw as an empty medium.
+#
+# Prints nothing when the file is absent: a partition holding no system is not
+# an error. Returns non-zero only when the medium could not be read at all.
+b_medium_read() { # <boot partition> <fixed file name>
+    local part="$1" name="$2"
+    if [ "${NODE_ROLE:-}" = bench-device ]; then
+        # An automounter usually has the partition already; read it where it
+        # is, and only mount when nothing else has. /proc/mounts and not
+        # findmnt: a BusyBox bench system carries neither findmnt nor sudo.
+        r_sudo "at=\$(awk -v p='$part' '\$1 == p { print \$2; exit }' /proc/mounts)
+            if [ -n \"\$at\" ]; then cat \"\$at/$name\" 2>/dev/null; exit 0; fi
+            mkdir -p /mnt/wk-read
+            mount -o ro '$part' /mnt/wk-read 2>/dev/null || exit 0
+            cat /mnt/wk-read/$name 2>/dev/null
+            umount /mnt/wk-read" 2>/dev/null || return 1
+        return 0
+    fi
+    card_priv boot-read "$(disk_of_part "$part")" "$(disk_partno "$part")" "$name" && return 0
+    # Not fatal here: `wk status` reads a medium too and a reporting command
+    # never dies. The remedy goes to stderr, which status discards and every
+    # other caller shows.
+    warn "$NODE_NAME could not read $name off $part.
+    Its card helper is older than this verb, or its sudoers rule is not in
+    force; a workstation has no second way to reach the medium.
+    What fails:  sudo -n $CARD_PRIV boot-read ...
+    The remedy, from a terminal on $NODE_NAME:  ./setup --stage quiesce"
+    return 1
+}
+
 # By ssh alias -- host or bench mode, whichever `dest` names. No
 # unpinned-host-key handling: stable macOS installs, not a regenerating board.
 mac_ssh() {
@@ -432,26 +476,17 @@ b_diag() {
     local systems line part id
     systems=$(b_systems) || die "cannot read $NODE_DEVICE on $NODE_NAME"
     [ -n "$systems" ] || { echo "($NODE_DEVICE holds no wk system, so there is no dump to read)"; return 0; }
+    local dump
     while read -r part id; do
         [ -n "$part" ] || continue
         printf '== %s (%s) ==\n' "$id" "$part"
-        # An automounter usually has the partition already; read it where it
-        # is, and only mount when nothing else has.
-        # Over the channel that answered, like the enumeration above it: the
-        # dump is on the medium, and the board asking for it is often the one
-        # whose bench system booted instead of the rescue.
-        r_sudo "set -e
-        at=\$(awk -v p='$part' '\$1 == p { print \$2; exit }' /proc/mounts)
-        if [ -n \"\$at\" ]; then
-            cat \"\$at/wk-diag.txt\" 2>/dev/null \
-                || echo '(no wk-diag.txt -- the image did not get that far)'
-            exit 0
+        if ! dump=$(b_medium_read "$part" wk-diag.txt); then
+            echo "(cannot read $part)"
+        elif [ -z "$dump" ]; then
+            echo "(no wk-diag.txt -- the image did not get that far)"
+        else
+            printf '%s\n' "$dump"
         fi
-        mkdir -p /mnt/wk-diag
-        mount -o ro '$part' /mnt/wk-diag || { echo 'cannot mount $part' >&2; exit 1; }
-        cat /mnt/wk-diag/wk-diag.txt 2>/dev/null \
-            || echo '(no wk-diag.txt -- the image did not get that far)'
-        umount /mnt/wk-diag"
     done <<EOF
 $systems
 EOF
@@ -498,15 +533,9 @@ b_reboot() {
 # rescue alone, the enumeration failed with "could not read <device> to see what
 # it holds" the moment it was needed most.
 #
-# /proc/mounts and not findmnt: a BusyBox bench system may carry neither
-# findmnt nor sudo, and r_sudo is already root there.
 b_device_image() { # [boot partition; default: b_boot_part]
-    local part out; part=${1:-$(b_boot_part)}
-    out=$(r_sudo "at=\$(awk -v p='$part' '\$1 == p { print \$2; exit }' /proc/mounts)
-        if [ -n \"\$at\" ]; then cat \"\$at/wk-image.id\" 2>/dev/null; exit 0; fi
-        mkdir -p /mnt/wk-id
-        mount -o ro '$part' /mnt/wk-id 2>/dev/null || exit 0
-        cat /mnt/wk-id/wk-image.id 2>/dev/null
-        umount /mnt/wk-id" 2>/dev/null) || return 1
+    local part out
+    part=${1:-$(b_boot_part)}
+    out=$(b_medium_read "$part" wk-image.id) || return 1
     printf '%s' "$out" | tr -d '\r\n '
 }

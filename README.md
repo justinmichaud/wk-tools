@@ -921,6 +921,19 @@ so. Only a board whose driver selects this way gets the file: the rpi4's stick
 is a two-pair medium too, and an `autoboot.txt` there would make its tryboot
 flag boot the stick rather than the kernel staged on its SD.
 
+*Reading* that medium goes through the card helper too, and only here. Every
+question `wk` asks of a medium it is not booted from -- which system a pair
+holds (`wk-image.id`), that system's account of its last boot (`wk-diag.txt`),
+the firmware's pair selector (`autoboot.txt`) -- is one read of one fixed file
+off a boot partition, `b_medium_read` in `boot/machines.sh`. On a
+**bench-device** that is a plain mount: it is driven as root, and its medium is
+often the very disk it is running from, which the card helper refuses by
+design. On a **workstation** the only thing that runs without a password is the
+helper (`admin/wk-card-priv`), so the read is its `boot-read` verb -- read-only,
+a three-filename allowlist, a partition number rather than a path, and bounded.
+A workstation without the helper cannot read its medium at all: it says so and
+names `./setup --stage quiesce`, rather than reporting an empty stick.
+
 **mbp -- `mac-volume`, this Mac.** The bench install is the `WK Bench` APFS
 volume beside the host install. Apple Silicon selects a startup volume only
 through an authenticated action at the machine, so there is nothing to arm

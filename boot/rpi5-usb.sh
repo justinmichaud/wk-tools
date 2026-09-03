@@ -78,21 +78,20 @@ b_arm() {
 # one outcome an A/B must never produce.
 rpi5_check_autoboot() {
     local out
-    out=$(r_sudo "m=\$(mktemp -d)
-        p=\$(awk -v d=$(sh_quote "$(disk_part "$NODE_DEVICE" 1)") '\$1 == d { print \$2; exit }' /proc/mounts)
-        own=
-        if [ -z \"\$p\" ]; then mount -t vfat -o ro $(sh_quote "$(disk_part "$NODE_DEVICE" 1)") \"\$m\" 2>/dev/null || exit 0; p=\$m; own=1; fi
-        grep -c 'boot_partition=3' \"\$p/$RPI5_AUTOBOOT\" 2>/dev/null || echo 0
-        [ -n \"\$own\" ] && umount \"\$m\"; rmdir \"\$m\" 2>/dev/null; true" \
-        2>/dev/null | tr -d '\r' | head -1)
+    # Through b_medium_read (boot/machines.sh), like every other read of a
+    # medium: this board is a workstation, where only the card helper runs
+    # privileged, and a bare `sudo -n mount` here came back empty -- read as
+    # "no autoboot.txt", which refused to arm pair 3 and blamed the medium.
+    out=$(b_medium_read "$(disk_part "$NODE_DEVICE" 1)" "$RPI5_AUTOBOOT") || out=""
     case "$out" in
-        ''|0) die "$NODE_DEVICE on $NODE_NAME has no [tryboot] boot_partition=3 in its
+        *boot_partition=3*) return 0 ;;
+    esac
+    die "$NODE_DEVICE on $NODE_NAME has no [tryboot] boot_partition=3 in its
     $RPI5_AUTOBOOT, so the firmware has no way to boot the second pair: the flag
     would be ignored and pair 1 would boot instead -- the wrong system, with
     nothing to say so. The file is written when the second pair is made, so
     rewrite it:
-        wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE@second" ;;
-    esac
+        wk sysimage write --from <path> --disk $NODE_NAME:$NODE_DEVICE@second"
 }
 
 # Only an arming for the second pair carries the flag; every other reboot is

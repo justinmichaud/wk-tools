@@ -11,6 +11,7 @@ holding two systems.
 Run: python3 -m unittest tests.test_boot_select -v
 """
 import os
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -221,18 +222,30 @@ class TestNoDriverReachesOnlyTheRescue(unittest.TestCase):
                               f"{fn} does not follow the channel that answered")
 
     def test_the_shared_library_reads_a_medium_over_the_channel_that_answered(self):
-        """The same rule one level down. `b_device_image` and `b_diag` read the
-        *medium*, and both are needed while a board answers as its bench system:
-        `wk boot --system <id>` resolves an id through the first, which failed
-        with "could not read <device> to see what it holds" at exactly the
-        moment an A/B leg switch needed it (rpi3, 2026-09-01)."""
+        """The same rule one level down. `b_device_image`, `b_diag` and rpi5's
+        autoboot check read the *medium*, and all three are needed while a
+        board answers as its bench system: `wk boot --system <id>` resolves an
+        id through the first, which failed with "could not read <device> to see
+        what it holds" at exactly the moment an A/B leg switch needed it
+        (rpi3, 2026-09-01). They share one reader, so the rule is stated once
+        against `b_medium_read` and the callers are held to using it."""
         text = (REPO / "boot" / "machines.sh").read_text()
-        for fn in ("b_device_image()", "b_diag()"):
-            body = text[text.index(fn):]
-            body = body[:body.index("\n}\n")]
+        body = text[text.index("b_medium_read()"):]
+        body = body[:body.index("\n}\n")]
+        self.assertNotIn("m_ssh", body, "b_medium_read reaches only the rescue")
+        self.assertIn("r_sudo", body, "b_medium_read does not use the answered channel")
+
+        for path, fn in (("boot/machines.sh", "b_device_image()"),
+                         ("boot/machines.sh", "b_diag()"),
+                         ("boot/rpi5-usb.sh", "rpi5_check_autoboot()")):
+            src = (REPO / path).read_text()
+            caller = src[src.index(fn):]
+            caller = caller[:caller.index("\n}\n")]
             with self.subTest(fn=fn):
-                self.assertNotIn("m_ssh", body, f"{fn} reaches only the rescue")
-                self.assertIn("r_sudo", body, f"{fn} does not use the answered channel")
+                self.assertIn("b_medium_read", caller,
+                              f"{fn} reads the medium itself instead of through the one reader")
+                self.assertNotIn("mount ", caller,
+                                 f"{fn} mounts the medium itself; only b_medium_read does")
 
 
 if __name__ == "__main__":
@@ -309,3 +322,96 @@ b_reboot
         line = [l for l in (REPO / "cmd" / "sysimage").read_text().splitlines()
                 if "_medium_autoboot_for" in l and "disk_is_second" in l]
         self.assertTrue(line, "the write does not gate the selector on both facts")
+
+
+class TestMediumRead(unittest.TestCase):
+    """b_medium_read is the one reader of a fixed file on a boot partition of
+    the medium, and which privilege it uses is the machine's role and nothing
+    else. A workstation runs only the card helper without a password
+    (CLAUDE.md), so a bare `sudo -n mount` there answered "interactive
+    authentication is required" -- and `wk boot rpi5 --system <id>` reported
+    "holds no wk system yet" about a stick provably holding two
+    (rpi5, 2026-09-03)."""
+
+    def test_a_bench_device_mounts_the_medium_itself(self):
+        """Its medium is often the very disk it runs from, which the card
+        helper refuses by design -- so this half can never go through it."""
+        cp = bash(LOAD + """
+NODE_ROLE=bench-device
+r_sudo() { echo "r_sudo: $*"; }
+card_priv() { echo "card_priv MUST NOT be reached on a bench-device" >&2; exit 1; }
+b_medium_read /dev/mmcblk0p1 wk-image.id
+""")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("/dev/mmcblk0p1", cp.stdout)
+        self.assertIn("wk-image.id", cp.stdout)
+
+    def test_a_workstation_goes_through_the_card_helper(self):
+        cp = bash(LOAD + """
+NODE_ROLE=workstation
+r_sudo() { echo "r_sudo MUST NOT mount on a workstation: $*" >&2; exit 1; }
+card_priv() { echo "card_priv $*"; }
+b_medium_read /dev/sda3 wk-image.id
+""")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual(cp.stdout.strip(), "card_priv boot-read /dev/sda 3 wk-image.id")
+
+    def test_the_partition_number_survives_both_device_spellings(self):
+        """The helper takes a number, never a path, so the driving end has to
+        split one -- and /dev/sda3 and /dev/mmcblk0p12 split differently."""
+        cp = bash(LOAD + """
+NODE_ROLE=workstation
+card_priv() { echo "$2 $3"; }
+b_medium_read /dev/sda3 wk-image.id
+b_medium_read /dev/mmcblk0p12 wk-diag.txt
+""")
+        self.assertEqual(cp.stdout.split(),
+                         ["/dev/sda", "3", "/dev/mmcblk0", "12"], cp.stdout + cp.stderr)
+
+    def test_a_helper_that_cannot_answer_names_the_remedy_and_does_not_die(self):
+        """`wk status` reads a medium too, and a reporting command never dies
+        on what it is reporting."""
+        cp = bash(LOAD + """
+NODE_ROLE=workstation
+card_priv() { return 1; }
+b_medium_read /dev/sda1 wk-image.id || echo "returned nonzero"
+echo "still running"
+""")
+        self.assertIn("returned nonzero", cp.stdout, cp.stdout + cp.stderr)
+        self.assertIn("still running", cp.stdout, "a failed read killed the caller")
+        self.assertIn("./setup --stage quiesce", cp.stderr, "the refusal names no remedy")
+
+
+class TestEveryMachineConfLoads(unittest.TestCase):
+    """A conf `machine_load` cannot load is a machine that silently leaves the
+    fleet: `machine_list` skips it, `wk boot <name>` fails and nothing says
+    why. rpi4's conf spelled three of its fields MACH_* instead of NODE_*, so
+    the board was unreachable by name and every test here that loads it failed
+    on the load rather than on what it was testing (2026-09-03)."""
+
+    CONFS = sorted((REPO / "boot" / "machines").glob("*.conf"))
+
+    def test_there_are_confs_to_check(self):
+        self.assertTrue(self.CONFS, "no machine confs found")
+
+    def test_every_conf_loads(self):
+        for conf in self.CONFS:
+            with self.subTest(machine=conf.stem):
+                cp = bash(f'''
+set -euo pipefail
+. "{REPO}/lib/common.sh"
+. "{REPO}/boot/machines.sh"
+machine_load {conf.stem}
+''')
+                self.assertEqual(cp.returncode, 0,
+                                 f"machine_load {conf.stem} failed: {cp.stdout}{cp.stderr}")
+
+    def test_no_conf_invents_a_field_prefix(self):
+        """One prefix, NODE_. The loader defaults every field it knows before
+        sourcing a conf, so a misspelled field is not an error -- it reads as
+        one that was simply never set."""
+        for conf in self.CONFS:
+            with self.subTest(machine=conf.stem):
+                stray = [l for l in conf.read_text().splitlines()
+                         if re.match(r"[A-Z][A-Z0-9_]*=", l) and not l.startswith("NODE_")]
+                self.assertEqual(stray, [], f"{conf.name} assigns fields outside NODE_")

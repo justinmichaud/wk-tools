@@ -157,23 +157,26 @@ class TestSysimageRmIsATombstone(WkTest):
 
 
 # A stub ssh that never executes the remote script it is handed -- for
-# 'wk boot's b_device_image (boot/machines.sh), which mounts the boot
-# partition for real on a machine that has one; here there is no such device,
-# so any attempt to actually run that script (mount, findmnt) would just fail
+# 'wk boot's b_medium_read (boot/machines.sh), which on a workstation asks the
+# card helper to read `wk-image.id` off a boot partition of the medium. There
+# is no such device here, so letting the real call through would only fail
 # differently on whatever this test happens to run on. Instead: recognise the
-# one script by a string only it contains, and hand back a canned id: this is
-# the same "answer the identifiable call, succeed silently otherwise" shape
+# one call by the arguments only it carries, and hand back a canned id -- the
+# same "answer the identifiable call, succeed silently otherwise" shape
 # tests/test_disk_logic.py uses for a stubbed sfdisk.
 #
-# rpi5-usb enumerates two candidate partitions (sda1, sda3: an A/B pair --
-# boot/rpi5-usb.sh), but a board with one system written holds it only on
-# the first; the second is bare, and b_device_image's real mount there fails
-# and answers with nothing, the same as no system at all. Answering with the
-# id on *both* would be a medium someone wrote the same image to twice, not
-# the fresh single-system board this fixture models, so only sda1 answers.
+# The helper is addressed by a partition *number*, so the call reads
+# `boot-read '/dev/sda' '1'` rather than naming /dev/sda1.
+#
+# rpi5-usb enumerates two candidate partitions (1 and 3: an A/B pair --
+# boot/rpi5-usb.sh), but a board with one system written holds it only on the
+# first; the second is bare and answers with nothing, the same as no system at
+# all. Answering with the id on *both* would be a medium someone wrote the
+# same image to twice, not the fresh single-system board this fixture models,
+# so only partition 1 answers.
 _SSH_STUB = '''#!/bin/sh
 case "$*" in
-  *sda1*wk-image.id*) echo "{fake_id}" ;;
+  *boot-read*"'/dev/sda' '1'"*wk-image.id*) echo "{fake_id}" ;;
   *wk-image.id*) : ;;
   *) : ;;
 esac

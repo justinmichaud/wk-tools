@@ -70,6 +70,14 @@ disk_of_part() {
         *)             echo "${1%[0-9]*}" ;;
     esac
 }
+# The other half: /dev/sda2 -> 2, /dev/mmcblk0p12 -> 12. What the card helper
+# is addressed by, since it takes a partition number and never a path.
+disk_partno() {
+    case "$1" in
+        *[0-9]p[0-9]*) echo "${1##*p}" ;;
+        *)             echo "${1##*[!0-9]}" ;;
+    esac
+}
 
 # Split `<machine>:<device>`, tolerating a bare `<machine>`. Sets
 # DISK_MACHINE/DISK_DEV rather than printing them, since a caller capturing

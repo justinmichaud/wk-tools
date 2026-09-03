@@ -39,7 +39,7 @@ NEW_VERBS = {
     "units": "v_units",
     "boot-check": "v_boot_check",
     "helper": "v_helper",
-    "diag": "v_diag",
+    "boot-read": "v_boot_read",
 }
 
 
@@ -1140,33 +1140,68 @@ cmd_ls
         self.assertNotIn("STATE", cp.stdout, "a header over an empty table")
         self.assertIn("no workspace here has built an image", cp.stdout + cp.stderr)
 
-class TestDiag(CardEditTest):
-    """`diag` reads a system's own account of its last boot off its boot
-    partition. It exists for the system that never became reachable, which is
-    the one that cannot be asked over ssh -- so with the card in a reader this
-    is the only path to it (rpi3, 2026-09-01: booted, never appeared, and the
-    account it had written could not be read)."""
+class TestBootRead(CardEditTest):
+    """`boot-read` is how a **workstation** reads its medium at all. The machine
+    holding the card runs nothing privileged but this helper, so a plain
+    `sudo -n mount` there answers "interactive authentication is required" and
+    every reader above it -- the system id, the boot dump, rpi5's pair selector
+    -- saw an empty medium rather than a refusal (rpi5, 2026-09-03).
 
-    def _run(self):
-        return self.run_helper(_lift(CARD_PRIV, "_diag_probe", "v_diag")
-                               + "\nDIAG_MAX=65536\nv_diag /dev/sdX\n")
+    Its whole surface is the allowlist: three fixed filenames, a partition
+    number, read-only, bounded."""
 
-    def test_it_prints_the_account_the_image_wrote(self):
+    def _run(self, partition="1", name="wk-diag.txt"):
+        return self.run_helper(
+            _lift(CARD_PRIV, "check_partno", "_boot_read_probe", "v_boot_read")
+            + "\nBOOT_READ_MAX=65536\n"
+            + f"v_boot_read /dev/sdX '{partition}' '{name}'\n")
+
+    def test_it_prints_the_file_the_image_wrote(self):
         (self.boot / "wk-diag.txt").write_text("id=some-image\nwlan0: no carrier\n")
         cp = self._run()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("wlan0: no carrier", cp.stdout)
 
-    def test_an_image_that_never_got_that_far_says_so(self):
+    def test_the_system_id_is_read_the_same_way(self):
+        """One verb for all three files: b_device_image's read is this one."""
+        (self.boot / "wk-image.id").write_text("wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1\n")
+        cp = self._run(name="wk-image.id")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertIn("wpewebkit-2.46-yocto-rpi5-64-9ee1cf59c4d1", cp.stdout)
+
+    def test_an_absent_file_is_nothing_and_not_an_error(self):
+        """A partition holding no system is a different fact from a medium that
+        cannot be read, and only the second is an error: b_systems counts the
+        first as 'not a system' and walks on."""
         cp = self._run()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("did not get that far", cp.stdout)
+        self.assertEqual(cp.stdout.strip(), "")
+
+    def test_a_filename_off_the_allowlist_is_refused(self):
+        (self.boot / "wk-image.id").write_text("x\n")
+        for name in ("../../etc/shadow", "id_rsa", "wk-image.id.bak", ""):
+            with self.subTest(name=name):
+                cp = self._run(name=name)
+                self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+                self.assertIn("REFUSED", cp.stderr)
+
+    def test_a_partition_that_is_not_a_partition_number_is_refused(self):
+        for p in ("0", "17", "1x", "-1", "1 ; rm -rf /", ""):
+            with self.subTest(partition=p):
+                cp = self._run(partition=p)
+                self.assertEqual(cp.returncode, 3, cp.stdout + cp.stderr)
+                self.assertIn("REFUSED", cp.stderr)
 
     def test_it_is_bounded(self):
         (self.boot / "wk-diag.txt").write_text("x" * 200000)
         cp = self._run()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertLessEqual(len(cp.stdout), 65536 + 200, "a card can hand back any amount of text")
+
+    def test_it_mounts_read_only(self):
+        body = re.search(r"(?ms)^v_boot_read\(\) \{.*?^\}", CARD_PRIV.read_text())
+        self.assertIsNotNone(body, "v_boot_read is not defined")
+        self.assertIn("with_mount -r", body.group(0), "a read verb mounts the medium writable")
 
 
 class TestRescueHelper(CardEditTest):

@@ -166,9 +166,11 @@ EOF
 
     [ -z "$SECOND" ] || _slot_resolve "$dev"
 
-    # Skipped for exactly one verb -- `unmount`, whose whole purpose is to end
-    # this state. The checks above it are the ones that protect the machine
-    # and they are never skipped. Under @second/@third only the two partitions
+    # Skipped for two verbs: `unmount`, whose whole purpose is to end this
+    # state, and `boot-read`, which only ever mounts a second, read-only copy
+    # and would otherwise refuse a card an automounter got to first. The
+    # checks above it are the ones that protect the machine and they are
+    # never skipped. Under @second/@third only the two partitions
     # the verb addresses are asked about: 1 and 2 may be this machine's
     # running root and boot, and leaving them alone is what the address means.
     if [ "$allow_mounted" != allow-mounted ]; then
@@ -211,6 +213,15 @@ check_hex() {
         ''|*[!0-9a-fA-F]*) deny "'${1:-}' is not hex" ;;
     esac
 }
+# A partition number, so `part` is never handed something that is not one.
+# Bounded at 16: past that is no layout anything here writes.
+check_partno() {
+    case "${1:-}" in
+        ''|*[!0-9]*) deny "'${1:-}' is not a partition number" ;;
+    esac
+    [ "$1" -ge 1 ] && [ "$1" -le 16 ] \
+        || deny "'$1' is not a partition number this helper addresses (1-16)"
+}
 
 # A scratch mountpoint of this helper's own making. The caller never names a
 # path: "mount this device at that path" is a different and much larger grant
@@ -240,7 +251,7 @@ with_mount() { # [-r] <partition> <function> [args...]
 
 # What this helper can do, for a driving end that must not assume it: a
 # helper on a board's rescue is the one its image was built with.
-v_status() { say "ok"; say "second=yes"; say "third=yes"; say "init.d=yes"; say "tailnet-keep=yes"; }
+v_status() { say "ok"; say "second=yes"; say "third=yes"; say "init.d=yes"; say "tailnet-keep=yes"; say "boot-read=yes"; }
 
 v_check() {
     local dev; gate "${1:-}"; dev=$GATED_DEV
@@ -1151,24 +1162,38 @@ v_autoboot() {
     with_mount "$(part "$dev" 1)" _autoboot_write
 }
 
-# diag <device> -- the system's own account of its last boot, off the boot
-# partition where the image writes it ~90 s in (wk-diag.txt: its marker, the
-# root and boot filesystems it found, rfkill, addresses, routes, and the
-# network units' journal).
+# boot-read <device> <partition> <file> -- one of the fixed files a wk system
+# leaves on its boot partition, read off the medium.
 #
-# It exists to be read when the system never became reachable, and until now
-# the only reader was the board itself (b_diag, over ssh) -- which is the one
-# thing an unreachable system cannot offer. With the card in a reader this is
-# the path. Read-only, one fixed filename, bounded: nothing a caller names.
-DIAG_MAX=65536
-_diag_probe() { # <mountpoint>
-    [ -f "$1/wk-diag.txt" ] \
-        || { say "no wk-diag.txt on this boot partition -- the image did not get that far"; return 0; }
-    head -c "$DIAG_MAX" "$1/wk-diag.txt"
+# Why this is privileged at all: on a **workstation** the medium hangs off a
+# machine whose only password-free root is this helper, so a plain `mount`
+# over `sudo -n` answers "interactive authentication is required" and the
+# reader sees an empty card rather than a refusal. A bench-device is driven
+# as root and reads its medium directly, so nothing there comes through here.
+#
+# The grant is the smallest that answers the question: read-only, a fixed
+# filename allowlist, a bounded number of bytes, and a partition *number*
+# rather than a path -- so no argument reaches a command line and nothing a
+# caller names decides what is opened. An absent file prints nothing and
+# succeeds: a partition holding no system is a different fact from a medium
+# that cannot be read, and only the second is an error.
+BOOT_READ_MAX=65536
+_boot_read_probe() { # <mountpoint> <file>
+    [ -f "$1/$2" ] || return 0
+    head -c "$BOOT_READ_MAX" "$1/$2"
 }
-v_diag() {
-    local dev; gate "${1:-}"; dev=$GATED_DEV
-    with_mount -r "$(part "$dev" "$BOOTP")" _diag_probe
+v_boot_read() {
+    local dev; gate "${1:-}" allow-mounted; dev=$GATED_DEV
+    check_partno "${2:-}"
+    # The allowlist is this verb's whole surface. wk-image.id names the system
+    # (b_device_image), wk-diag.txt is that system's own account of its last
+    # boot (b_diag), autoboot.txt is the firmware's pair selector (rpi5-usb).
+    case "${3:-}" in
+        wk-image.id|wk-diag.txt|autoboot.txt) ;;
+        *) deny "'${3:-}' is not a file this helper reads off a boot partition
+    (wk-image.id, wk-diag.txt, autoboot.txt)" ;;
+    esac
+    with_mount -r "$(part "$dev" "$2")" _boot_read_probe "$3"
 }
 
 _boot_check_run() { # <mountpoint> <dtb>
@@ -1619,7 +1644,7 @@ case "$verb" in
     second-disarm) v_second_disarm "$@" ;;
     second-state)  v_second_state  "$@" ;;
     helper)   v_helper   "$@" ;;
-    diag)     v_diag     "$@" ;;
+    boot-read) v_boot_read "$@" ;;
     autoboot) v_autoboot "$@" ;;
     tailnet-save)    v_tailnet_save    "$@" ;;
     tailnet-restore) v_tailnet_restore "$@" ;;
@@ -1632,5 +1657,5 @@ case "$verb" in
     boot-id)  v_boot_id  "$@" ;;
     units)    v_units    "$@" ;;
     boot-check) v_boot_check "$@" ;;
-    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi-host|wifi-from-host|identity|role|grow|unmount|verify|eject|parts|root-spec|retarget|cmdline-append|config-append|boot-id|units|boot-check|second-arm|second-disarm|second-state|helper|diag|autoboot|tailnet-save|tailnet-restore <device>[@second] [...]" ;;
+    *) fail "usage: wk-card-priv status|check|write|fleet|joins|whose|tailnet|wifi-joins|wifi-host|wifi-from-host|identity|role|grow|unmount|verify|eject|parts|root-spec|retarget|cmdline-append|config-append|boot-id|units|boot-check|second-arm|second-disarm|second-state|helper|boot-read|autoboot|tailnet-save|tailnet-restore <device>[@second] [...]" ;;
 esac
