@@ -6,6 +6,36 @@
 
 set -euo pipefail
 
+# This is wk's own build: the build wall (container/bin/wk-build-wall) lets
+# ninja/cmake/make through for it and refuses them to an agent's shell.
+export WK_BUILD=1
+
+# ...and the wall comes off PATH altogether here, which WK_BUILD alone cannot
+# achieve. bitbake does not run a task with our PATH: it resolves each name in
+# HOSTTOOLS once, symlinks what it found into tmp/hosttools, and runs every
+# task with that directory as the whole PATH. container/bin sits ahead of
+# /usr/bin (shell/path.sh), so what gets captured is the wall -- and it is then
+# the only `make` a task can see, leaving the wall no real tool to hand off to.
+# Measured: gcc-cross-canadian's do_compile died in oe_runmake, first with the
+# wall failing to locate itself and then with "not on PATH". Removing the
+# directory is what makes hosttools link the real tools; nothing else does.
+# Both trees, since a person's clone and the one `wk` pushed are routinely
+# both on PATH. None of container/bin's other helpers is used by this build.
+_strip_wall_from_path() {
+    local out="" d oldifs=$IFS
+    IFS=:
+    set -- $PATH
+    IFS=$oldifs
+    for d in "$@"; do
+        [ -n "$d" ] || continue
+        case "$d" in */container/bin) continue ;; esac
+        out="${out:+$out:}$d"
+    done
+    printf '%s' "$out"
+}
+PATH=$(_strip_wall_from_path)
+export PATH
+
 TARGET=""; IMAGE=""; STAGE=image; JOBS=""; RM_WORK=1; SRC=/src/WebKit; COMMIT=""; SLOT=""; PROFILE=""
 MULTILIB=""; MULTILIB_TUNE=""
 CHROMIUM=0; SSTATE_NS=""

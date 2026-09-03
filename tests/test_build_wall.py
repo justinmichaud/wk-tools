@@ -179,6 +179,45 @@ class TestWkOwnBuildPassesThrough(WallTest):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("REAL cmake", cp.stdout)
 
+    def test_every_builder_declares_itself(self):
+        """One rule, and every builder is held to it: an agent's CLAUDECODE
+        reaches all of them, so each has to say it is wk's own build. The
+        yocto one did not, and its slot build was refused (2026-09-03)."""
+        for rel in ("build/build-in-target.sh", "image/buildroot-build.sh",
+                    "image/buildroot-webkit.sh", "image/yocto-build.sh"):
+            with self.subTest(builder=rel):
+                self.assertIn("export WK_BUILD=1", (REPO / rel).read_text(),
+                              f"{rel} does not declare itself to the wall")
+
+
+class TestBitbakeGetsTheRealTools(WkTest):
+    """bitbake runs no task with our PATH: it resolves each HOSTTOOLS name once,
+    symlinks it into tmp/hosttools and makes that directory the whole PATH. So a
+    wall captured there is the only `make` a task can see and has nothing to
+    hand off to -- WK_BUILD cannot help, because the passthrough needs a real
+    tool further along a PATH that no longer has one. gcc-cross-canadian's
+    do_compile died on exactly this (2026-09-03)."""
+
+    def test_the_yocto_build_takes_the_wall_off_path(self):
+        text = (REPO / "image" / "yocto-build.sh").read_text()
+        self.assertIn("_strip_wall_from_path", text,
+                      "the yocto build leaves container/bin on PATH, so "
+                      "tmp/hosttools captures the wall")
+
+    def test_it_strips_the_wall_and_keeps_everything_else(self):
+        """Both trees -- a person's clone and the one `wk` pushed are routinely
+        both on PATH -- and nothing else touched."""
+        fn = re.search(r"(?ms)^_strip_wall_from_path\(\) \{.*?^\}",
+                       (REPO / "image" / "yocto-build.sh").read_text())
+        self.assertIsNotNone(fn, "_strip_wall_from_path is not defined")
+        cp = subprocess.run(
+            ["bash", "-c", fn.group(0) + "\n_strip_wall_from_path"],
+            env={"PATH": "/home/me/wk-tools/container/bin:/usr/local/bin:"
+                         "/opt/wk-tools/container/bin:/usr/bin:/bin"},
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual("/usr/local/bin:/usr/bin:/bin", cp.stdout)
+
 
 class TestOneFileUnderEveryName(WallTest):
     def test_the_names_and_the_symlinks_are_the_same_set(self):
@@ -277,23 +316,40 @@ class TestTheCandidateSearchIsStrict(WallTest):
         self.assertIn("REAL ninja", cp.stdout)
         self.assertNotIn("CWD ninja", cp.stdout)
 
-    def test_a_wall_with_no_wall_beside_it_refuses(self):
-        """WALL is the wall's own path, and every skip below rests on it. A
-        `cd` that fails leaves it naming a file that does not exist, which
-        matches nothing -- so the wall would exec itself for ever. It refuses
-        instead."""
-        lone = self.tmp / "lone"
-        lone.mkdir()
-        c = lone / "ninja"
-        c.write_bytes(WALL.read_bytes())     # a wall with no sibling of its own
-        c.chmod(0o755)
-        cp = subprocess.run(
-            [str(c)], cwd=str(self.tmp),
-            env={"HOME": str(self.tmp), "TERM": "dumb",
-                 "PATH": f"{self.fake}:/usr/bin:/bin"},
+    def _linked_away(self):
+        """A symlink to the wall in a directory of its own, the way bitbake
+        builds tmp/hosttools: it resolves each tool name on PATH and captures
+        the wall, since container/bin sits ahead of /usr/bin."""
+        away = self.tmp / "hosttools"
+        away.mkdir()
+        (away / "ninja").symlink_to(BIN / "ninja")
+        return away / "ninja"
+
+    def _run_away(self, link, *args, env=None):
+        e = {"HOME": str(self.tmp), "TERM": "dumb",
+             "PATH": f"{self.fake}:/usr/bin:/bin"}
+        if env:
+            e.update(env)
+        return subprocess.run(
+            [str(link), *args], cwd=str(self.tmp), env=e,
             capture_output=True, text=True, timeout=60)
+
+    def test_a_wall_reached_through_a_symlink_elsewhere_finds_itself(self):
+        """Looking *beside* $0 for a sibling named wk-build-wall found nothing
+        in tmp/hosttools, so the wall refused itself and an rpi5 slot build died
+        in gcc-cross-canadian's do_compile (2026-09-03). It follows $0 to the
+        file it really is instead."""
+        cp = self._run_away(self._linked_away(), "-j4")
+        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+        self.assertNotIn("cannot locate the wall", cp.stderr)
+        self.assertIn("ninja -j4", self.ran(), "it never reached the real tool")
+
+    def test_finding_itself_is_not_a_way_around_it(self):
+        """The same symlink, for an agent: resolving $0 fixes where the wall
+        looks for itself and changes nothing about who it refuses."""
+        cp = self._run_away(self._linked_away(), "-j64", env={"CLAUDECODE": "1"})
         self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
-        self.assertIn("cannot locate the wall", cp.stderr)
+        self.assertIn("refused", cp.stderr)
         self.assertEqual("", self.ran(), "it ran the real tool anyway")
 
 

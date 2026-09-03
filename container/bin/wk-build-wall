@@ -46,13 +46,36 @@ set -euo pipefail
 WALL_NAMES="ninja cmake make xcodebuild build-webkit build-jsc run-javascriptcore-tests run-webkit-tests run-benchmark"
 
 self=${0##*/}
-WALL=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)/wk-build-wall || :
-# A failed `cd` leaves WALL as `/wk-build-wall`, which matches nothing and
-# turns the skip below into a self-exec loop. Refuse instead. (Under `set -e`
-# a bare failed substitution here would abort before that refusal ran; `|| :`
-# lets the fallback value form so the check below is what reports it.)
+
+# This file's own path, found by following $0 to the file it really is rather
+# than by looking beside it for a sibling named wk-build-wall. A symlink to the
+# wall can be made anywhere, and one routinely is: bitbake builds a yocto
+# build's tmp/hosttools by resolving each tool name on PATH, so it captures the
+# wall -- and a wall invoked as tmp/hosttools/make has no sibling there to find.
+# Measured: an rpi5 slot build died in gcc-cross-canadian's do_compile.
+#
+# Not `readlink -f`: macOS's readlink has no -f, and this file runs in the
+# workstation's own shells too (shell/bashrc).
+_resolve_self() {
+    local p="$0" t n=0 d
+    while [ -L "$p" ] && [ "$n" -lt 40 ]; do
+        t=$(readlink "$p") || break
+        case "$t" in
+            /*) p=$t ;;
+            *)  p=$(dirname -- "$p")/$t ;;
+        esac
+        n=$((n + 1))
+    done
+    d=$(CDPATH= cd -- "$(dirname -- "$p")" 2>/dev/null && pwd) || return 1
+    printf '%s/%s' "$d" "${p##*/}"
+}
+WALL=$(_resolve_self) || :
+# Every skip below rests on WALL naming this file. Unresolvable, it matches
+# nothing and the skip turns into a self-exec loop. Refuse instead. (Under
+# `set -e` a bare failed substitution here would abort before that refusal ran;
+# `|| :` lets the empty value form so the check below is what reports it.)
 [ -x "$WALL" ] || {
-    printf '%s: cannot locate the wall beside %s -- refusing rather than guessing\n' \
+    printf '%s: cannot locate the wall behind %s -- refusing rather than guessing\n' \
         "$self" "$0" >&2
     exit 1
 }
