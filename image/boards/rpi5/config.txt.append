@@ -5,16 +5,20 @@
 # the profile.
 
 [all]
-# Pi 5 firmware rejects a kernel that lacks Ubuntu's trailer and marks the boot
-# 'bad'. Anything built here is "locally built" by that test, so every image for
-# this board needs its own copy -- the workstation's config.txt does nothing for
-# an image booting from its own firmware partition.
+# The firmware's OS-compatibility check refuses an OS it judges too old for the
+# board and moves to the next boot device, which on this one is the NVMe
+# workstation -- so a bench image that fails it looks like an arming that did
+# nothing. Every image built here fails it, because none of them is a
+# Raspberry Pi OS release the check knows.
 #
-# Per profile, this was carried by exactly one of the six rpi5 profiles. The
-# other five produced images that could not boot, silently and identically:
-# armed, no kernel, no userspace, no diagnostic, and a board that had to be
-# power-cycled because the watchdog it never reached is what hands it back
-# (wpewebkit-2.46-yocto-rpi5-64, 2026-09-04).
+# It is a barrier crossed deliberately, not a fix: on this board the check was
+# also right, and forcing past it is what turned a fall-through into a kernel
+# panic (image/boards/rpi5/local.conf.append names the fault). Nothing else in
+# the lane reports the firmware's own judgement, so what this buys is a boot
+# that gets far enough to say why it failed.
+#
+# The workstation's config.txt does nothing for an image booting from its own
+# firmware partition, so every image for this board needs its own copy.
 os_check=0
 
 # The overclock deliberately does NOT live here, and must never be written to

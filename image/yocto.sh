@@ -488,6 +488,7 @@ EOF
         --jobs "$(envelope_cores)" --rm-work "${YOC_RM_WORK:-0}" \
         ${YOC_PORT_TARGET_FROM:+--port-target-from "$YOC_PORT_TARGET_FROM"} \
         ${YOC_MACHINE:+--port-machine "$YOC_MACHINE"} \
+        ${IMG_MACHINE:+--board "$IMG_MACHINE"} \
         ${YOC_MULTILIB:+--multilib "$YOC_MULTILIB"} \
         ${YOC_MULTILIB_TUNE:+--multilib-tune "$YOC_MULTILIB_TUNE"} \
         --chromium "$chromium" \

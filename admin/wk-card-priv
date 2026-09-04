@@ -991,11 +991,17 @@ v_autoboot() {
 }
 
 # boot-read <device> <partition> <file> -- one of the fixed files a wk system
-# leaves on its boot partition. Privileged because on a workstation the only
-# password-free root is this helper, so a plain `mount` over `sudo -n` answers
-# "interactive authentication is required" and the reader sees an empty card.
+# leaves on its boot partition, plus the two the *firmware* and the kernel read
+# there. Privileged because on a workstation the only password-free root is this
+# helper, so a plain `mount` over `sudo -n` answers "interactive authentication
+# is required" and the reader sees an empty card.
 # Read-only, a fixed filename allowlist, a bounded number of bytes, and a
 # partition number rather than a path. An absent file prints nothing.
+#
+# config.txt and cmdline.txt are on the list because a write's own appends land
+# there (disk_config_append, disk_cmdline_append) and nothing else could read
+# them back: whether `os_check=0` had reached an rpi5 card was a hypothesis for
+# two boots that this verb answers in one line (2026-09-04).
 BOOT_READ_MAX=65536
 _boot_read_probe() { # <mountpoint> <file>
     [ -f "$1/$2" ] || return 0
@@ -1020,9 +1026,9 @@ v_boot_read() {
     check_partno "${2:-}"
     # The allowlist is this verb's whole surface.
     case "${3:-}" in
-        wk-image.id|wk-diag.txt|autoboot.txt) ;;
+        wk-image.id|wk-diag.txt|autoboot.txt|config.txt|cmdline.txt) ;;
         *) deny "'${3:-}' is not a file this helper reads off a boot partition
-    (wk-image.id, wk-diag.txt, autoboot.txt)" ;;
+    (wk-image.id, wk-diag.txt, autoboot.txt, config.txt, cmdline.txt)" ;;
     esac
     at=$(_boot_read_at "$(part "$dev" "$2")")
     if [ -n "$at" ]; then

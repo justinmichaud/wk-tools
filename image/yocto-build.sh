@@ -35,7 +35,7 @@ export PATH
 TARGET=""; IMAGE=""; STAGE=image; JOBS=""; RM_WORK=1; SRC=/src/WebKit; COMMIT=""; SLOT=""; PROFILE=""
 MULTILIB=""; MULTILIB_TUNE=""
 CHROMIUM=0; SSTATE_NS=""
-PORT_TARGET_FROM=""; PORT_MACHINE=""
+PORT_TARGET_FROM=""; PORT_MACHINE=""; BOARD=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -51,6 +51,7 @@ while [ $# -gt 0 ]; do
         --multilib)      MULTILIB="${2:-}"; shift 2 ;;
         --multilib-tune) MULTILIB_TUNE="${2:-}"; shift 2 ;;
         --port-machine)     PORT_MACHINE="${2:-}"; shift 2 ;;
+        --board)            BOARD="${2:-}"; shift 2 ;;
         --local-layer) LOCAL_LAYER="${2:-}"; shift 2 ;;
         --tailnet) TAILNET="${2:-}"; shift 2 ;;
         --webkit-jobs) WEBKIT_JOBS="${2:-}"; shift 2 ;;
@@ -371,6 +372,16 @@ configure_local_conf() {
             # costs the unpacked source tree a devshell wants, hence a knob.
             printf 'INHERIT += "rm_work"\n'
             printf 'RM_WORK_EXCLUDE += "%s"\n\n' "${IMAGE:-webkit-dev-ci-tools}"
+        fi
+
+        # Last, and keyed on the board rather than the profile: what a board's
+        # own silicon needs of every image built for it, the build-time sibling
+        # of image/boards/<board>/config.txt.append. A new profile for a board
+        # already known is right without being told.
+        _board_conf="$(dirname "$0")/../image/boards/${BOARD:-}/local.conf.append"
+        if [ -n "${BOARD:-}" ] && [ -f "$_board_conf" ]; then
+            printf '\n# --- image/boards/%s/local.conf.append ---\n' "$BOARD"
+            cat "$_board_conf"
         fi
     } >> "$CONF"
 }

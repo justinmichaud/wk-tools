@@ -1177,6 +1177,18 @@ class TestBootRead(CardEditTest):
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertEqual(cp.stdout.strip(), "")
 
+    def test_the_firmware_and_kernel_inputs_are_readable(self):
+        """A write's own appends land in these two, and nothing else could
+        read them back: whether `os_check=0` had reached an rpi5 card was a
+        hypothesis for two boots this answers in one line (2026-09-04)."""
+        for name, text in (("config.txt", "[all]\nos_check=0\n"),
+                           ("cmdline.txt", "root=PARTUUID=987478fd-02 rootwait\n")):
+            with self.subTest(name=name):
+                (self.boot / name).write_text(text)
+                cp = self._run(name=name)
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertIn(text.splitlines()[-1], cp.stdout)
+
     def test_a_filename_off_the_allowlist_is_refused(self):
         (self.boot / "wk-image.id").write_text("x\n")
         for name in ("../../etc/shadow", "id_rsa", "wk-image.id.bak", ""):
